@@ -21,7 +21,14 @@
 #      byte (`0x01 EXTENDED_IS_STATIC` inside the ROW table),
 #   9. FAILs CLOSED on a NEW unclassified source flag (a hand-maintained allow-list
 #      would silently exempt it from "must be documented"),
-#  10. FAILs CLOSED when a flag table drifts out from under a recognizable heading.
+#  10. FAILs CLOSED when a flag table drifts out from under a recognizable heading,
+#  11. RESOLVES the row-flag source across its two legal homes — the constants in the
+#      PRE-SPLIT `mod.rs` still PASS (the guard looks in both, #1116/#3631),
+#  12. FAILs CLOSED on the #3631 regression itself: a candidate that is PRESENT but
+#      declares NONE of the row flags (the campsite split moved them out from under the
+#      guard, which then reported drift against an EMPTY subject set), and
+#  13. FAILs CLOSED when the row-flag source resolves to a file holding almost none of
+#      its subject (per-source floor — the cell source alone must not carry a pass).
 # Hermetic: copies the repo's relevant files into a temp dir and mutates the COPY;
 # no cargo, network, or datasets. bash 3.2 compatible.
 set -euo pipefail
@@ -38,7 +45,11 @@ SKILL_DIR_REL=".claude/skills/sstable-parsing"
 DECODER_DIR_REL="cqlite-core/src/storage/sstable/reader/parsing/row_decoder"
 SKILL_MD="$SKILL_DIR_REL/SKILL.md"
 REF_MD="$SKILL_DIR_REL/cassandra5-format-reference.md"
-ROW_RS="$DECODER_DIR_REL/mod.rs"
+# The row + extended flag constants' CURRENT home (they left `mod.rs` in the #3631
+# campsite split, which is what broke the guard). `MOD_RS` is their PRE-SPLIT home and is
+# used by assertion 11 to prove the guard still resolves them there.
+ROW_RS="$DECODER_DIR_REL/row_flags.rs"
+MOD_RS="$DECODER_DIR_REL/mod.rs"
 CELL_RS="$DECODER_DIR_REL/cell_value.rs"
 
 # 1. The real repo must pass.
@@ -75,6 +86,10 @@ restore() {
   cp "$REPO_ROOT/$REF_MD" "$sandbox/$REF_MD"
   cp "$REPO_ROOT/$ROW_RS" "$sandbox/$ROW_RS"
   cp "$REPO_ROOT/$CELL_RS" "$sandbox/$CELL_RS"
+  # Assertions 11 and 12 plant a `mod.rs` (the constants' pre-split home); the pristine
+  # sandbox has none, so leaving one behind would silently change every later case's
+  # subject set.
+  rm -f "$sandbox/$MOD_RS"
 }
 
 # Portable in-place sed (GNU sed needs no arg; BSD/macOS sed needs an empty one).
@@ -119,18 +134,31 @@ sed_i '/`ROW_HAS_COMPLEX_DELETION`/d' "$sandbox/$REF_MD"
 expect_fail_with "silently-dropped flag row is caught" \
   'documented in NONE of the skill flag tables'
 
-# 5. FAIL-CLOSED when the decoder source moved (a source split must not yield a
-#    vacuous PASS against a stale table).
-mv "$sandbox/$ROW_RS" "$tmp/mod.rs.away"
+# 5. FAIL-CLOSED when the row-flag decoder source is GONE (a source split must not
+#    yield a vacuous PASS against a stale table). No candidate is present at all here.
+mv "$sandbox/$ROW_RS" "$tmp/row_flags.rs.away"
 out="$(bash "$GUARD" "$sandbox" 2>&1 || true)"
 if bash "$GUARD" "$sandbox" >/dev/null 2>&1; then
-  echo "FAIL: guard PASSED vacuously with the decoder source missing"
+  echo "FAIL: guard PASSED vacuously with the row-flag decoder source missing"
+  exit 1
+fi
+grep -q 'row-flag decoder source not found' <<<"$out" || {
+  echo "FAIL: missing decoder source failed, but not via the fail-closed path"; echo "$out"; exit 1; }
+echo "OK: missing row-flag decoder source FAILs closed"
+mv "$tmp/row_flags.rs.away" "$sandbox/$ROW_RS"
+restore
+
+# 5b. FAIL-CLOSED when the CELL decoder source is gone (its own fail-closed path).
+mv "$sandbox/$CELL_RS" "$tmp/cell_value.rs.away"
+out="$(bash "$GUARD" "$sandbox" 2>&1 || true)"
+if bash "$GUARD" "$sandbox" >/dev/null 2>&1; then
+  echo "FAIL: guard PASSED vacuously with the cell decoder source missing"
   exit 1
 fi
 grep -q 'decoder source not found' <<<"$out" || {
-  echo "FAIL: missing decoder source failed, but not via the fail-closed path"; echo "$out"; exit 1; }
-echo "OK: missing decoder source FAILs closed"
-mv "$tmp/mod.rs.away" "$sandbox/$ROW_RS"
+  echo "FAIL: missing cell source failed, but not via the fail-closed path"; echo "$out"; exit 1; }
+echo "OK: missing cell decoder source FAILs closed"
+mv "$tmp/cell_value.rs.away" "$sandbox/$CELL_RS"
 restore
 
 # 6. FAIL-CLOSED when the flag table is reformatted away entirely.
@@ -174,4 +202,44 @@ sed_i 's/^\*\*Cell Flags\*\*.*/**Assorted bits**/' "$sandbox/$REF_MD"
 expect_fail_with "a flag table under an unrecognized heading FAILs closed" \
   'UNRECOGNIZED section heading'
 
-echo "PASS: test_check_skill_flag_tables.sh — all 10 assertions hold"
+# 11. The row-flag source is RESOLVED across its two legal homes, not hard-coded. Put
+#     the constants back in their PRE-SPLIT home (`mod.rs`) and delete `row_flags.rs`:
+#     the guard must still PASS. Hard-coding either path alone fails one of these two
+#     layouts, and hard-coding the STALE one is the #3631 failure this replaces.
+mv "$sandbox/$ROW_RS" "$sandbox/$MOD_RS"
+if ! bash "$GUARD" "$sandbox" >/dev/null 2>&1; then
+  echo "FAIL: the guard does not resolve the row flags in their pre-split home (mod.rs) — it is still effectively hard-coded"
+  bash "$GUARD" "$sandbox" || true
+  exit 1
+fi
+echo "OK: row flags in the pre-split mod.rs still resolve"
+restore
+
+# 12. THE #3631 REGRESSION ITSELF. A candidate is PRESENT but declares NONE of the row
+#     flags, because a campsite split moved them to a file this check does not know
+#     about. Before the fix the guard read that file, harvested nothing from it, and
+#     reported drift against an EMPTY subject set; a differently-shaped guard could just
+#     as easily have PASSED over it. It must fail NAMING the resolution.
+printf 'const MAX_SOMETHING: usize = 10;\n' >"$sandbox/$MOD_RS"
+mv "$sandbox/$ROW_RS" "$tmp/row_flags.rs.hidden"
+out="$(bash "$GUARD" "$sandbox" 2>&1 || true)"
+if bash "$GUARD" "$sandbox" >/dev/null 2>&1; then
+  echo "FAIL: guard PASSED with the row flags moved out from under every candidate"
+  exit 1
+fi
+grep -q 'row-flag decoder source not found' <<<"$out" || {
+  echo "FAIL: a flag-less candidate tripped the guard, but not via the resolution path"; echo "$out"; exit 1; }
+grep -q 'refusing to pass vacuously' <<<"$out" || {
+  echo "FAIL: the resolution failure does not say it is refusing to pass vacuously"; echo "$out"; exit 1; }
+mv "$tmp/row_flags.rs.hidden" "$sandbox/$ROW_RS"
+echo "OK: row flags moved out from under every candidate FAILs closed (the #3631 shape)"
+restore
+
+# 13. Per-source floor: a row-flag source holding almost none of its subject must FAIL.
+#     The COMBINED floor cannot be relied on for this — the cell source contributes 5
+#     flags on its own, so a nearly-empty row source can hide behind a lower bar.
+grep -v 'ROW_HAS_' "$sandbox/$ROW_RS" >"$tmp/row_flags.trimmed" && mv "$tmp/row_flags.trimmed" "$sandbox/$ROW_RS"
+expect_fail_with "a row-flag source holding almost none of its subject FAILs the per-source floor" \
+  'row/extended flag constant'
+
+echo "PASS: test_check_skill_flag_tables.sh — all 13 assertions hold"
