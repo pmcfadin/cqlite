@@ -1,6 +1,11 @@
-//! Issue #3935 — the WHOLE-COLLECTION write path and the PER-ELEMENT write path
-//! must lay a `set<time>` / `map<time,…>` down in the SAME on-disk element
-//! order, and that order must be `TimeType`'s `ComparisonType.BYTE_ORDER`.
+//! Issue #3935 — every writer path that lays a `set<time>` / `map<time,…>` down
+//! must use the SAME on-disk element order, and that order must be `TimeType`'s
+//! `ComparisonType.BYTE_ORDER`.
+//!
+//! Four write surfaces are covered here: the NON-FROZEN whole-collection and
+//! per-element paths, the FROZEN whole-value path (`serialize_value`), and a
+//! `set<time>`/`map<time,text>` FIELD OF A FROZEN UDT — the last of which is
+//! ordered by a SECOND, independent comparator in `data_writer/udt_canon`.
 //!
 //! # The defect
 //!
@@ -19,6 +24,14 @@
 //!
 //! They agree for every value in `time`'s valid range and invert for an
 //! out-of-range NEGATIVE nanos. This file pins the agreement.
+//!
+//! A SECOND, independently-written comparator had the SAME defect:
+//! `data_writer/udt_canon`'s `classify_comparator` put `TimeType` in its
+//! `SignedInt` family beside `TimestampType`. It orders a frozen `SetType`'s
+//! elements / a `MapType`'s keys from the DECLARED MARSHAL while canonicalizing
+//! a UDT value, and for a collection field of a frozen UDT nothing re-sorts
+//! afterwards — see the comment block above the `udt_nested_*` cases for the
+//! chain and for why a TOP-LEVEL `frozen<set<time>>` masked it.
 //!
 //! # Format authority — never a CQLite `file:line` (#3041)
 //!
@@ -69,8 +82,8 @@
 //! BINARY-PROTOCOL write that bypasses the CQL string path, which no committed
 //! generator script does. Generating such a fixture is a corpus task, not a
 //! blocker on the rule: the rule is fully determined by the pinned source above,
-//! and this file asserts CQLite's two write paths against THAT rule rather than
-//! against each other alone.
+//! and this file asserts each of CQLite's write surfaces against THAT rule
+//! rather than against each other alone.
 //!
 //! Companion coverage, co-required and neither sufficient alone:
 //! * `collection_order::tests::{time_negative_nanos_sorts_above_every_non_negative,
@@ -84,18 +97,35 @@
 //!
 //! # RED-verified (measured, not asserted)
 //!
-//! With the `time` arm reverted to `x.cmp(y)` and the rest of this file
-//! unchanged, MEASURED in this lane: **3 of 5 FAIL, 2 pass.**
+//! There are TWO independent writer-side sorted-collection comparators, and each
+//! was reverted separately with the rest of the tree unchanged. MEASURED in this
+//! lane over the 10 cases of this file:
 //!
-//! * FAIL — `whole_collection_set_matches_byte_order`,
+//! * `collection_order`'s `time` arm reverted to `x.cmp(y)` — **5 FAIL, 5 pass**:
+//!   FAIL `whole_collection_set_matches_byte_order`,
 //!   `whole_collection_map_matches_byte_order` (the negative nanos lands FIRST
-//!   instead of LAST) and `both_write_paths_agree_on_element_order`.
-//! * PASS — `per_element_path_matches_byte_order`, because that path never
-//!   consulted `compare_collection_elements`; its passing under BOTH
-//!   implementations IS the pre-existing divergence this issue is about, and it
-//!   is what makes the agreement case above non-vacuous.
-//! * PASS — `in_range_only_collection_order_is_unmoved`, by construction: it is
-//!   the COMPATIBILITY pin, and a compatibility pin that reddened under the old
+//!   instead of LAST), `both_write_paths_agree_on_element_order`, and the two
+//!   FROZEN cases `frozen_set_matches_byte_order` /
+//!   `frozen_map_matches_byte_order`. The two `udt_nested_*` cases stay GREEN,
+//!   because that path does not consult this comparator.
+//! * `udt_canon::classify_comparator` reverted to classifying `TimeType` as
+//!   `SignedInt` — **2 FAIL, 8 pass**: FAIL exactly
+//!   `udt_nested_set_matches_byte_order` and `udt_nested_map_matches_byte_order`,
+//!   whose emitted on-disk order was the SIGNED sequence
+//!   `[-1000000000, 9000000000, 43200000000000, 86399999999999]`. Nothing else
+//!   moved, INCLUDING the frozen cases — a top-level `frozen<set<time>>` is
+//!   re-sorted by `encoding.rs`, which is what MASKED this second defect.
+//!
+//! The two reverts fail DISJOINT case sets, so neither comparator's coverage is
+//! standing in for the other's.
+//!
+//! * PASS under both — `per_element_path_matches_byte_order`, because that path
+//!   never consulted either comparator; its passing under BOTH implementations
+//!   IS the pre-existing divergence this issue is about, and it is what makes
+//!   the agreement case non-vacuous.
+//! * PASS under both — `in_range_only_collection_order_is_unmoved` and
+//!   `udt_nested_in_range_order_is_unmoved`, by construction: they are the
+//!   COMPATIBILITY pins, and a compatibility pin that reddened under the old
 //!   comparator would be asserting the opposite of its own claim.
 //!
 //! A green ordering test that has never been shown to red proves nothing; so
@@ -130,7 +160,7 @@ use cqlite_core::storage::sstable::reader::SSTableReader;
 use cqlite_core::storage::write_engine::{
     CellOperation, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
 };
-use cqlite_core::types::Value;
+use cqlite_core::types::{UdtField, UdtValue, Value};
 use cqlite_core::Config;
 use tempfile::TempDir;
 
@@ -138,7 +168,50 @@ const KS: &str = "issue_3935_ks";
 const TBL: &str = "times";
 const SET_COL: &str = "tset";
 const MAP_COL: &str = "tmap";
+/// FROZEN (single-cell) collection columns. A frozen collection is NOT a complex
+/// column (`schema_helpers::is_complex_column` returns false for `frozen<...>`),
+/// so its whole value is serialized by `encoding.rs`'s `serialize_value` —
+/// the SECOND caller the `collection_order` module doc names, and the one the
+/// non-frozen cases above do not reach.
+const FROZEN_SET_COL: &str = "fset";
+const FROZEN_MAP_COL: &str = "fmap";
+/// A `frozen<udt>` column whose single declared field is a `set<time>` /
+/// `map<time,text>`. This is the reachable surface of the SECOND writer-side
+/// sorted-collection comparator, `udt_canon::compare_for_marshal` (see the
+/// module comment on the UDT cases below).
+const UDT_SET_COL: &str = "uset";
+const UDT_MAP_COL: &str = "umap";
+const UDT_SET_TYPE: &str = "tset_udt";
+const UDT_MAP_TYPE: &str = "tmap_udt";
+const UDT_SET_FIELD: &str = "slots";
+const UDT_MAP_FIELD: &str = "labels";
 const TS: i64 = 1_700_000_000_000_000;
+
+const MARSHAL: &str = "org.apache.cassandra.db.marshal.";
+
+/// Lowercase hex of an ASCII string — the encoding Cassandra's `UserType(...)`
+/// marshal uses for the type name and each field name. Hand-rolled so this
+/// target needs no `hex` dev-dependency.
+fn hex_ascii(s: &str) -> String {
+    s.bytes().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The full `FrozenType(UserType(...))` marshal for a one-field UDT.
+///
+/// Spelled out as a marshal string rather than the CQL short form `frozen<t>`
+/// ON PURPOSE: `udt_canon::canonicalize_udt_value` gates on the declared type
+/// mentioning `UserType(` (a bare `frozen<t>` needs a `UdtRegistry` the write
+/// engine is not given here), and the marshal is what a real SerializationHeader
+/// carries anyway. `FrozenType(...)` also keeps the column a SIMPLE cell, which
+/// is what routes it through the canonicalizer.
+fn frozen_udt_marshal(type_name: &str, field_name: &str, field_marshal: &str) -> String {
+    format!(
+        "{MARSHAL}FrozenType({MARSHAL}UserType({KS},{},{}:{}))",
+        hex_ascii(type_name),
+        hex_ascii(field_name),
+        field_marshal
+    )
+}
 
 // ===========================================================================
 // The four `time` values, and the ORDER THE RULE PUTS THEM IN.
@@ -228,6 +301,24 @@ fn schema() -> TableSchema {
             col("id", "int"),
             col(SET_COL, "set<time>"),
             col(MAP_COL, "map<time, text>"),
+            col(FROZEN_SET_COL, "frozen<set<time>>"),
+            col(FROZEN_MAP_COL, "frozen<map<time, text>>"),
+            col(
+                UDT_SET_COL,
+                &frozen_udt_marshal(
+                    UDT_SET_TYPE,
+                    UDT_SET_FIELD,
+                    &format!("{MARSHAL}SetType({MARSHAL}TimeType)"),
+                ),
+            ),
+            col(
+                UDT_MAP_COL,
+                &frozen_udt_marshal(
+                    UDT_MAP_TYPE,
+                    UDT_MAP_FIELD,
+                    &format!("{MARSHAL}MapType({MARSHAL}TimeType,{MARSHAL}UTF8Type)"),
+                ),
+            ),
         ],
         comments: HashMap::new(),
         dropped_columns: HashMap::new(),
@@ -573,4 +664,296 @@ fn in_range_only_collection_order_is_unmoved() {
          the BYTE_ORDER comparator and the removed signed one"
     );
     assert_eq!(decoded_order(&data_db, SET_COL, in_range.len()), numeric);
+}
+
+// ===========================================================================
+// FROZEN (single-cell) collections — the SECOND caller of the one comparator.
+//
+// `collection_order`'s module doc claims `compare_collection_elements` is the
+// SINGLE shared comparator for BOTH the non-frozen complex-cell path
+// (`complex.rs`) AND the frozen `serialize_value` path (`encoding.rs`). The
+// cases above exercise only the first. These exercise the second, so the claim
+// is covered rather than asserted.
+//
+// A frozen collection is one simple cell whose whole value is the collection's
+// wire form, so there are no cell paths to order: `encoding.rs`'s `Value::Set`
+// / `Value::Map` arms sort the elements/entries themselves before serializing.
+// ===========================================================================
+
+/// FROZEN whole-value path: ONE `Write` of a `frozen<set<time>>` /
+/// `frozen<map<time,text>>` column, which `serialize_value` orders via
+/// `compare_collection_elements`.
+///
+/// The SET case passes a bare `Value::Set` and the MAP case a
+/// `Value::Frozen(Value::Map(..))`, covering both spellings a frozen literal
+/// arrives in (`serialize_value_into`'s `Value::Frozen` arm unwraps to the same
+/// `Value::Map` arm).
+fn frozen_ops(column: &str, values: &[i64]) -> Vec<CellOperation> {
+    let value = if column == FROZEN_MAP_COL {
+        Value::Frozen(Box::new(Value::Map(
+            values
+                .iter()
+                .map(|&n| (Value::Time(n), Value::text(format!("v{n}"))))
+                .collect(),
+        )))
+    } else {
+        Value::Set(values.iter().map(|&n| Value::Time(n)).collect())
+    };
+    vec![CellOperation::Write {
+        column: column.to_string(),
+        value,
+    }]
+}
+
+/// FROZEN-UDT path: ONE `Write` of a `frozen<udt>` whose single declared field
+/// is a `set<time>` / `map<time,text>`.
+///
+/// This is the surface that reaches `udt_canon` — see
+/// `udt_nested_set_matches_byte_order` for why nothing re-sorts afterwards.
+fn udt_ops(column: &str, values: &[i64]) -> Vec<CellOperation> {
+    let (type_name, field_name, field_value) = if column == UDT_MAP_COL {
+        (
+            UDT_MAP_TYPE,
+            UDT_MAP_FIELD,
+            Value::Map(
+                values
+                    .iter()
+                    .map(|&n| (Value::Time(n), Value::text(format!("v{n}"))))
+                    .collect(),
+            ),
+        )
+    } else {
+        (
+            UDT_SET_TYPE,
+            UDT_SET_FIELD,
+            Value::Set(values.iter().map(|&n| Value::Time(n)).collect()),
+        )
+    };
+    vec![CellOperation::Write {
+        column: column.to_string(),
+        value: Value::Frozen(Box::new(Value::Udt(Box::new(UdtValue {
+            keyspace: KS.to_string(),
+            type_name: type_name.to_string(),
+            fields: vec![UdtField {
+                name: field_name.to_string(),
+                value: Some(field_value),
+            }],
+        })))),
+    }]
+}
+
+// ===========================================================================
+// LEG 1b (PRIMARY, for the frozen shapes) — parse the collection's own wire
+// block out of the raw `Data.db`.
+//
+// A frozen collection (whether a top-level cell or a UDT field) is serialized
+// as `[4-byte BE count]` followed by, per element, `[4-byte BE length][bytes]`
+// (and, for a map, the value's own length-prefixed bytes after each key). So
+// the element sequence is readable STRUCTURALLY from the file, with no reader,
+// no comparator and no decode path — the #3042 requirement — and reading it
+// this way also proves the located 8-byte patterns really are collection
+// ELEMENTS rather than a coincidental byte run somewhere else in the file.
+// ===========================================================================
+
+/// The `time` elements/keys of the single frozen collection block of `count`
+/// entries in `data_db`, in wire order.
+///
+/// Every candidate offset whose 4-byte BE word equals `count` is parsed
+/// strictly; a candidate that does not parse as `count` length-8 entries is
+/// rejected. EXACTLY ONE candidate must parse — asserted, not assumed, so an
+/// ambiguous file fails loudly instead of silently taking a first match.
+fn frozen_block_order(data_db: &Path, count: usize, is_map: bool) -> Vec<i64> {
+    let bytes = std::fs::read(data_db).unwrap_or_else(|e| panic!("read {data_db:?}: {e}"));
+    let be32 = |at: usize| -> Option<i64> {
+        let w: [u8; 4] = bytes.get(at..at + 4)?.try_into().ok()?;
+        Some(i32::from_be_bytes(w) as i64)
+    };
+    let mut parses: Vec<(usize, Vec<i64>)> = Vec::new();
+    for start in 0..bytes.len() {
+        if be32(start) != Some(count as i64) {
+            continue;
+        }
+        let mut at = start + 4;
+        let mut nanos: Vec<i64> = Vec::with_capacity(count);
+        for _ in 0..count {
+            // Key/element: must be a length-8 `time`.
+            if be32(at) != Some(8) {
+                break;
+            }
+            let Some(raw) = bytes.get(at + 4..at + 12) else {
+                break;
+            };
+            let Ok(word) = <[u8; 8]>::try_from(raw) else {
+                break;
+            };
+            nanos.push(i64::from_be_bytes(word));
+            at += 12;
+            if is_map {
+                // Map value: `v<nanos>` ASCII text, length-prefixed.
+                let Some(len) = be32(at) else { break };
+                if !(1..=64).contains(&len) {
+                    break;
+                }
+                let len = len as usize;
+                let Some(val) = bytes.get(at + 4..at + 4 + len) else {
+                    break;
+                };
+                if !val.iter().all(|b| b.is_ascii_graphic()) {
+                    break;
+                }
+                at += 4 + len;
+            }
+        }
+        if nanos.len() == count {
+            parses.push((start, nanos));
+        }
+    }
+    assert_eq!(
+        parses.len(),
+        1,
+        "expected EXACTLY ONE parsable {}-entry frozen collection block in \
+         {data_db:?} (a zero or ambiguous parse makes the order unreadable, \
+         never a pass); found {:?}",
+        count,
+        parses.iter().map(|(o, n)| (o, n)).collect::<Vec<_>>()
+    );
+    parses.remove(0).1
+}
+
+/// FROZEN `frozen<set<time>>` — the frozen `serialize_value` caller of
+/// `compare_collection_elements` (issue #3935, rust-reviewer gap I1).
+#[test]
+fn frozen_set_matches_byte_order() {
+    assert_serialized_forms();
+    let (_temp, data_db) = write_one(frozen_ops(FROZEN_SET_COL, &INSERTION_ORDER));
+    assert_eq!(
+        on_disk_order(&data_db, &INSERTION_ORDER),
+        EXPECTED.to_vec(),
+        "frozen<set<time>>: `serialize_value`'s Value::Set arm must order \
+         elements by TimeType BYTE_ORDER (TimeType.java:48). Signed order would \
+         be {OLD_SIGNED_ORDER:?}"
+    );
+    // Independent structural read of the collection's own wire block.
+    assert_eq!(
+        frozen_block_order(&data_db, EXPECTED.len(), false),
+        EXPECTED.to_vec(),
+        "frozen<set<time>>: the serialized [count][len][elem].. block must \
+         carry the elements in BYTE_ORDER"
+    );
+}
+
+/// FROZEN `frozen<map<time,text>>`, whose ordering value is the KEY. Passed as
+/// `Value::Frozen(Value::Map(..))` so the `Value::Frozen` unwrap arm is covered
+/// too.
+#[test]
+fn frozen_map_matches_byte_order() {
+    assert_serialized_forms();
+    let (_temp, data_db) = write_one(frozen_ops(FROZEN_MAP_COL, &INSERTION_ORDER));
+    assert_eq!(
+        on_disk_order(&data_db, &INSERTION_ORDER),
+        EXPECTED.to_vec(),
+        "frozen<map<time,text>>: keys must be emitted in TimeType BYTE_ORDER. \
+         Signed order would be {OLD_SIGNED_ORDER:?}"
+    );
+    assert_eq!(
+        frozen_block_order(&data_db, EXPECTED.len(), true),
+        EXPECTED.to_vec()
+    );
+}
+
+// ===========================================================================
+// THE SECOND WRITER-SIDE SORTED-COLLECTION COMPARATOR (rust-reviewer B1).
+//
+// `data_writer/udt_canon` carries its OWN comparator, driven by the declared
+// MARSHAL rather than by the `Value` variant: `classify_comparator` +
+// `compare_for_marshal`, used by `sort_sorted_collection` to order a frozen
+// `SetType`'s elements / a `MapType`'s keys while canonicalizing a UDT value
+// against its declared type. It classified `TimeType` as `SignedInt` alongside
+// `TimestampType` — the SAME defect #3935 fixed in `collection_order`.
+//
+// WHY IT REACHES DISK (the part that makes it a defect and not a dead branch):
+//
+//   * a `frozen<udt>` column is a SIMPLE cell (`is_complex_column` is false for
+//     `FrozenType(...)`), so `complex.rs` calls `canonicalize_udt_value` and
+//     then serializes the returned value;
+//   * `serialize_value` routes `Value::Udt` to `TypeSerializer::serialize_udt`,
+//     which serializes each field with `serialize_typed_value` ->
+//     `serialize_set` / `serialize_map` -> `serialize_collection_elements`, a
+//     bare `for elem in elements` with NO sort;
+//   * so for a UDT FIELD, `sort_sorted_collection`'s order is the on-disk order.
+//
+// A TOP-LEVEL `frozen<set<time>>` MASKS this, because `encoding.rs`'s
+// `Value::Set` arm re-sorts with `compare_collection_elements` — which is why
+// `frozen_set_matches_byte_order` above passed both before and after the
+// `udt_canon` fix, and why this case is the one that pins it.
+// ===========================================================================
+
+/// A `set<time>` field of a frozen UDT must be emitted in `TimeType`'s
+/// BYTE_ORDER — the `udt_canon` comparator's own fix (rust-reviewer B1).
+#[test]
+fn udt_nested_set_matches_byte_order() {
+    assert_serialized_forms();
+    let (_temp, data_db) = write_one(udt_ops(UDT_SET_COL, &INSERTION_ORDER));
+    let raw = on_disk_order(&data_db, &INSERTION_ORDER);
+    assert_eq!(
+        raw,
+        EXPECTED.to_vec(),
+        "frozen<udt> field set<time>: `udt_canon::sort_sorted_collection` is \
+         the ONLY sort on this path (serialize_collection_elements does not \
+         re-sort), so it must order by TimeType BYTE_ORDER (TimeType.java:48). \
+         Signed order would be {OLD_SIGNED_ORDER:?}"
+    );
+    assert_ne!(
+        raw,
+        OLD_SIGNED_ORDER.to_vec(),
+        "negative control: the emitted order must not be the signed one"
+    );
+    assert_eq!(
+        frozen_block_order(&data_db, EXPECTED.len(), false),
+        EXPECTED.to_vec(),
+        "the UDT field's serialized [count][len][elem].. block must carry the \
+         elements in BYTE_ORDER"
+    );
+}
+
+/// Same for a `map<time,text>` field of a frozen UDT, whose ordering value is
+/// the KEY (`sort_sorted_collection` keyed on the entry key).
+#[test]
+fn udt_nested_map_matches_byte_order() {
+    assert_serialized_forms();
+    let (_temp, data_db) = write_one(udt_ops(UDT_MAP_COL, &INSERTION_ORDER));
+    assert_eq!(
+        on_disk_order(&data_db, &INSERTION_ORDER),
+        EXPECTED.to_vec(),
+        "frozen<udt> field map<time,text>: keys must be emitted in TimeType \
+         BYTE_ORDER. Signed order would be {OLD_SIGNED_ORDER:?}"
+    );
+    assert_eq!(
+        frozen_block_order(&data_db, EXPECTED.len(), true),
+        EXPECTED.to_vec()
+    );
+}
+
+/// COMPATIBILITY PIN for the `udt_canon` comparator: with the out-of-range
+/// negative removed, a UDT-nested `set<time>` is emitted in numeric order —
+/// identical under BOTH the corrected BYTE_ORDER classification and the removed
+/// `SignedInt` one. So that fix moved no in-range on-disk ordering either.
+#[test]
+fn udt_nested_in_range_order_is_unmoved() {
+    assert_serialized_forms();
+    let in_range = [T_MID, T_MAX, T_LOW];
+    for &n in &in_range {
+        assert_eq!(n.to_be_bytes()[0], 0x00);
+    }
+    let mut numeric = in_range.to_vec();
+    numeric.sort_unstable();
+
+    let (_temp, data_db) = write_one(udt_ops(UDT_SET_COL, &in_range));
+    assert_eq!(
+        on_disk_order(&data_db, &in_range),
+        numeric,
+        "an all-in-range UDT-nested set<time> must be emitted in numeric order \
+         under BOTH classifications"
+    );
+    assert_eq!(frozen_block_order(&data_db, in_range.len(), false), numeric);
 }
