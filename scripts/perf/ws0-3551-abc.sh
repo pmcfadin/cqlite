@@ -557,5 +557,10 @@ for ((r = 1; r <= ROUNDS; r++)); do
 done
 
 echo
+# The printed command's --arms is DERIVED from the arm set actually measured, never a literal.
+# It was a literal `A,B,C0,C` and arm D's arrival silently made the instruction WRONG: following
+# it excluded every D session, i.e. dropped the one arm the confound-breaking phase existed for
+# (roborev, #3551 round 2). A printed command gets run verbatim.
+_arms_csv=$(IFS=,; echo "${ARMS[*]}")
 echo "all rounds complete. aggregate with:"
-echo "  python3 $HERE/ws0_abc_aggregate.py --root $OUT --arms A,B,C0,C --baseline A"
+echo "  python3 $HERE/ws0_abc_aggregate.py --root $OUT --arms $_arms_csv --baseline ${ARMS[0]}"

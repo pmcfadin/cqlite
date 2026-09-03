@@ -31,6 +31,18 @@ import pathlib
 import statistics
 import sys
 
+# The COVERAGE rule is IMPORTED from the committed judge, never restated here. A second copy of
+# `MAX_SAMPLE_GAP_S` is a second thing to keep true, and this tool's whole claim is that its
+# pairs are clean by the IN-RUN GATE's definition — which is only true if it uses the gate's own
+# numbers. `scripts/perf` is resolved from this file's location so the import cannot silently
+# bind to some other checkout.
+_PERF = pathlib.Path(__file__).resolve().parents[3] / "scripts" / "perf"
+if not (_PERF / "ws0_quiescence.py").is_file():
+    raise SystemExit(f"REFUSED: cannot locate ws0_quiescence.py under {_PERF}; the coverage rule "
+                     "is imported from the committed judge and is not restated here")
+sys.path.insert(0, str(_PERF))
+from ws0_quiescence import MAX_SAMPLE_GAP_S, SAMPLER_CADENCE_S  # noqa: E402
+
 SCAN = "bare_scan"
 
 
@@ -71,12 +83,49 @@ def session(d: pathlib.Path) -> dict:
             "scan": warm[SCAN], "flight": warm[flight[0]]}
 
 
-def clean(sess: dict, rows: list[dict]) -> tuple[bool, int, int]:
+def _iso(ts: str) -> float:
+    """Seconds-resolution epoch from the sampler's `%Y-%m-%dT%H:%M:%SZ`."""
+    import calendar
+    import time
+    return calendar.timegm(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ"))
+
+
+def coverage_gap(sess: dict, win: list[dict]) -> float | None:
+    """Largest UNOBSERVED stretch inside the session window, boundaries included.
+
+    Same shape as the judge's own coverage check: the gap from window start to the first
+    sample, every gap between consecutive samples, and the gap from the last sample to window
+    end. Returns None when it cannot be computed at all.
+    """
+    if not win:
+        return None
+    lo, hi = _iso(sess["started"]), _iso(sess["ended"])
+    inst = sorted(_iso(r["ts"]) for r in win)
+    gaps = [inst[0] - lo]
+    gaps += [inst[i + 1] - inst[i] for i in range(len(inst) - 1)]
+    gaps.append(hi - inst[-1])
+    return max(gaps)
+
+
+def clean(sess: dict, rows: list[dict]) -> tuple[str, int, int, float | None]:
+    """Three-valued: `clean` / `contaminated` / `undercovered`.
+
+    A NON-EMPTY sample set is NOT coverage, and treating it as coverage was a real defect in
+    this tool's first version (roborev, #3551 round 2): one zero-census sample anywhere in a
+    window made the session `clean`, so a mostly UNOBSERVED session could enter the medians as
+    clean. That is the same "a positive verdict requires an affirmative measurement" rule this
+    file's docstring already claimed to follow — implemented for the empty case and not for the
+    undercovered one, which is the harder half. The bound is the JUDGE's own MAX_SAMPLE_GAP_S,
+    imported rather than restated.
+    """
     win = [r for r in rows if sess["started"] <= r["ts"] <= sess["ended"]]
     comp = sum(1 for r in win if r.get("competing_count"))
-    # NO SAMPLE COVERING THE WINDOW IS **NOT** CLEAN. An unobserved window is could-not-measure,
-    # and a positive verdict may not be derived from an absent signal.
-    return (bool(win) and comp == 0), comp, len(win)
+    gap = coverage_gap(sess, win)
+    if comp:
+        return "contaminated", comp, len(win), gap
+    if gap is None or gap > MAX_SAMPLE_GAP_S:
+        return "undercovered", comp, len(win), gap
+    return "clean", comp, len(win), gap
 
 
 def main(argv=None) -> int:
@@ -106,7 +155,8 @@ def main(argv=None) -> int:
             s = session(d)
             total += 1
             s["set"] = label
-            s["clean"], s["comp"], s["nsamp"] = clean(s, rows)
+            s["state"], s["comp"], s["nsamp"], s["gap"] = clean(s, rows)
+            s["clean"] = s["state"] == "clean"
             grid.setdefault((label, s["round"]), {})[s["arm"]] = s
 
     pairs: dict[str, list[dict]] = {}
@@ -132,9 +182,14 @@ def main(argv=None) -> int:
             pairs.setdefault(arm, []).append(rec)
 
     out = []
-    nclean = sum(1 for g in grid.values() for s in g.values() if s["clean"])
+    states = [s["state"] for g in grid.values() for s in g.values()]
+    nclean = states.count("clean")
     out.append(f"Sessions examined: {total} across {len(sets)} set(s); "
-               f"**{nclean} ran under a zero census**.")
+               f"**{nclean} clean**, {states.count('contaminated')} contaminated, "
+               f"{states.count('undercovered')} UNDERCOVERED (an unobserved window is "
+               f"could-not-measure, never clean: the bound is the judge's own "
+               f"MAX_SAMPLE_GAP_S = {MAX_SAMPLE_GAP_S:.0f}s at a {SAMPLER_CADENCE_S:.0f}s "
+               f"cadence).")
     out.append("")
     out.append(f"A pair is (baseline `{args.baseline}`, treatment) inside ONE round, with BOTH "
                "sessions clean. Method §3b step 4 differences within a round, so such a pair is "

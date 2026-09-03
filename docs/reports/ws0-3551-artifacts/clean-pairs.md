@@ -1,4 +1,4 @@
-Sessions examined: 42 across 3 set(s); **31 ran under a zero census**.
+Sessions examined: 42 across 3 set(s); **31 clean**, 11 contaminated, 0 UNDERCOVERED (an unobserved window is could-not-measure, never clean: the bound is the judge's own MAX_SAMPLE_GAP_S = 30s at a 10s cadence).
 
 A pair is (baseline `A`, treatment) inside ONE round, with BOTH sessions clean. Method §3b step 4 differences within a round, so such a pair is valid regardless of any other round or arm.
 

@@ -39,7 +39,30 @@ import json
 import pathlib
 import sys
 
+# The coverage bound is IMPORTED from the committed judge, not restated (roborev #3551 round 2).
+_PERF = pathlib.Path(__file__).resolve().parents[3] / "scripts" / "perf"
+if not (_PERF / "ws0_quiescence.py").is_file():
+    raise SystemExit(f"REFUSED: cannot locate ws0_quiescence.py under {_PERF}")
+sys.path.insert(0, str(_PERF))
+from ws0_quiescence import MAX_SAMPLE_GAP_S  # noqa: E402
+
 PINS = (2, 3, 10, 11)
+
+
+def _iso(ts: str) -> float:
+    import calendar
+    import time
+    return calendar.timegm(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ"))
+
+
+def largest_gap(lo: str, hi: str, win: list[dict]) -> float | None:
+    """Largest UNOBSERVED stretch in [lo, hi], boundaries included; None if incomputable."""
+    if not win:
+        return None
+    a, b = _iso(lo), _iso(hi)
+    inst = sorted(_iso(r["ts"]) for r in win)
+    gaps = [inst[0] - a] + [inst[i + 1] - inst[i] for i in range(len(inst) - 1)] + [b - inst[-1]]
+    return max(gaps)
 
 
 def load_series(path: pathlib.Path) -> list[dict]:
@@ -107,19 +130,27 @@ def main(argv=None) -> int:
                 busies.append(sum(vals) / len(vals))
         busies.sort()
         med = f"{busies[len(busies)//2]:.1f}%" if busies else "NOT MEASURED"
-        if not win:
-            verdict = "NOT MEASURED (no sample covers this window)"
-        elif comp:
+        gap = largest_gap(lo, hi, win)
+        if comp:
             verdict = f"**CONTAMINATED** ({comp} of {len(win)})"
             dirty_sessions.append(name)
+        elif gap is None:
+            verdict = "NOT MEASURED (no sample covers this window)"
+            dirty_sessions.append(name)
+        elif gap > MAX_SAMPLE_GAP_S:
+            # A NON-EMPTY sample set is not COVERAGE. Judged by the same bound the in-run gate
+            # uses, imported rather than restated.
+            verdict = f"**UNDERCOVERED** (largest unobserved stretch {gap:.0f}s > {MAX_SAMPLE_GAP_S:.0f}s)"
+            dirty_sessions.append(name)
         else:
-            verdict = "clean (census 0)"
+            verdict = f"clean (census 0, max gap {gap:.0f}s)"
         out.append(f"| `{name}` | {rec['arm']} | {rec['round']} | {rec['position_in_round']} | "
                    f"{lo} → {hi} | {len(win)} | {comp} | {verdict} | {med} |")
 
     out.append("")
     if dirty_sessions:
-        out.append(f"**{len(dirty_sessions)} of {len(sessions)} session(s) CONTAMINATED**: "
+        out.append(f"**{len(dirty_sessions)} of {len(sessions)} session(s) NOT USABLE** "
+                   "(contaminated, undercovered, or unobserved): "
                    + ", ".join(f"`{s}`" for s in dirty_sessions))
     else:
         out.append(f"**All {len(sessions)} sessions clean** — every in-window sample recorded "
