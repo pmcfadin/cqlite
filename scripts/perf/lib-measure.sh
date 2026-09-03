@@ -92,11 +92,6 @@ WS0_MEASURE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ---------------------------------------------------------------------------
 measure_scan() {
   local temp="$1" rep="$2" tag="scan-$temp-$rep"
-  # THE COUNTING DOMAIN IS THIS LEG'S OWN CPUs (#3551). The bare scan always runs on
-  # `$SERVER_CPUS` — that is what makes it a pin-identical drift control across arms that differ
-  # only in the FLIGHT pin — so this is the value it has always had; it is stated here rather
-  # than assumed because the flight leg now sets a different one.
-  PERF_COUNT_CPUS="$SERVER_CPUS"
   drop_caches_if_cold "$temp"
 
   # --- untimed PREWARM (warm arm only) -----------------------------------------
@@ -163,6 +158,15 @@ measure_scan() {
   fi
   printf '%s\n' "$prewarm_status" > "$OUT_DIR/$tag.prewarm.status"
 
+  # THE COUNTING DOMAIN, SET IMMEDIATELY BEFORE THE WINDOW (#3551). The bare scan always runs
+  # on `$SERVER_CPUS` — that is what makes it a pin-identical drift control across arms that
+  # differ only in the FLIGHT pin — so this is the value it has always had. It is assigned HERE,
+  # on the line before the wrapper call rather than once at the top of the function, because the
+  # wrapper VALIDATES the pairing (counted list vs the `taskset -c` list of the command it
+  # brackets) against the pins this session verified: the assignment and the thing it must agree
+  # with are then one line apart and cannot drift. There is no default in the wrapper — an unset
+  # value is a named refusal, not an inherited `$SERVER_CPUS`.
+  PERF_COUNT_CPUS="$SERVER_CPUS"
   # Setup-only leg: the corpus open + schema ingest, under its OWN perf window,
   # so its cycles can be SUBTRACTED from the full run (spec R2).
   perf_stat_c "$OUT_DIR/perf-$tag-setup.csv" \
@@ -171,6 +175,7 @@ measure_scan() {
     > "$OUT_DIR/$tag-setup.json" 2> "$OUT_DIR/$tag-setup.err"
 
   drop_caches_if_cold "$temp"
+  PERF_COUNT_CPUS="$SERVER_CPUS"
   perf_stat_c "$OUT_DIR/perf-$tag.csv" \
     taskset -c "$SERVER_CPUS" "$BIN/ws0-scan-bench" \
       --corpus "$CORPUS" --passes "$SCAN_PASSES" \
@@ -190,13 +195,6 @@ measure_flight() {
   stop_server
   require_port_free "before $tag"
   drop_caches_if_cold "$temp"
-  # THE COUNTING DOMAIN IS WHERE THIS SERVER ACTUALLY RUNS (#3551). `perf stat -C` counts the
-  # SERVER's CPUs while the load generator runs on the client set, so with a flight pin that
-  # differs from `$SERVER_CPUS` the old domain would have collected cycles from cores that served
-  # nothing and divided them by this rep's rows. Equal to `$SERVER_CPUS` whenever the flight pin
-  # is defaulted, so the argv is unchanged for every pre-#3551 invocation.
-  PERF_COUNT_CPUS="$FLIGHT_SERVER_CPUS"
-
   # `LD_PRELOAD` IS ALWAYS SET, AND ON THE SYSTEM ARM IT IS SET TO EMPTY (#3551).
   #
   # Two facts in one line. On the jemalloc arm it preloads the resolved library into the SERVER
@@ -297,6 +295,16 @@ measure_flight() {
   fi
   printf '%s\n' "$prewarm_status" > "$OUT_DIR/$tag.prewarm.status"
 
+  # THE COUNTING DOMAIN IS WHERE THIS SERVER ACTUALLY RUNS (#3551), assigned on the line before
+  # the window for the reason `measure_scan` states. `perf stat -C` counts the SERVER's CPUs
+  # while this window brackets the LOAD GENERATOR on the client set — deliberately, so the
+  # client's own cost stays outside the counted domain — so the counted list and the argv's
+  # `taskset -c` list MUST differ here, and the wrapper's pairing table has an entry for exactly
+  # that. With a flight pin that differed from `$SERVER_CPUS` the OLD domain would have counted
+  # cores that served nothing and divided their idle by this rep's rows: fewer cycles for the
+  # same rows, i.e. a fabricated win. Equal to `$SERVER_CPUS` whenever the flight pin is
+  # defaulted, so the argv is unchanged for every pre-#3551 invocation.
+  PERF_COUNT_CPUS="$FLIGHT_SERVER_CPUS"
   perf_stat_c "$OUT_DIR/perf-$tag.csv" \
     taskset -c "$CLIENT_CPUS" "$BIN/flight-loadgen" \
       --endpoint "$FLIGHT_ENDPOINT" --ticket-template "$TICKET_TEMPLATE" \

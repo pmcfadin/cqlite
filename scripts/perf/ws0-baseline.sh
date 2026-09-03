@@ -818,6 +818,35 @@ verify_flight_arm_pin || exit 2
 # invocation can ever see it unset. With the flight pin at its default the value is identical in
 # both arms and every argv is byte-for-byte what it is today.
 PERF_COUNT_CPUS="$SERVER_CPUS"
+# ...AND THE COUNTING DOMAIN IS CHECKED AGAINST A CLOSED SET, NOT LEFT TO CONVENTION (#3551).
+#
+# `perf stat -C <list>` counting a list the measured work did not run on is a FABRICATED number
+# IN THE FLATTERING DIRECTION: pin the Flight server to `2,3` while counting `2,10` and the
+# window collects cpu10's IDLE and misses cpu3's WORK entirely, so the same rows cost fewer
+# cycles and the arm looks like a large win. Nothing in the output would say so. Getting that
+# right by convention is exactly what this rig refuses to rely on, so the wrapper VALIDATES its
+# own counting domain against the two pairings this session actually verified — and refuses
+# anything else, naming both lists.
+#
+# The table is `<counted>|<affinity of the process inside the perf window>`, one per line, and
+# it is DERIVED from the verified lists rather than written out, so it cannot describe a pin
+# nobody checked. Exactly two entries are legitimate, and the second one is why a simple
+# "counted == taskset list" rule would be WRONG:
+#
+#   * BARE SCAN — the window brackets `ws0-scan-bench` on the server set and counts the server
+#     set: the measured process runs on the counted CPUs.
+#   * FLIGHT — the window brackets the LOAD GENERATOR on the CLIENT set while counting the
+#     SERVER's CPUs, deliberately (that is the whole design: the client's cost must stay outside
+#     the counted domain). So here the counted list and the argv's `taskset -c` list MUST
+#     differ, and requiring them equal would red every correct Flight rep.
+#
+# With the flight pin at its default the two entries collapse to the pre-#3551 behaviour.
+# ONE LINE, with the separator spelled `$'\n'`, deliberately: a continuation line whose first
+# token is a bare `"$VAR"` is classified a POSSIBLE perf invocation by `lib-perf-lint.sh`'s
+# fail-closed layer 1 (an unresolvable command word could be anything, including perf), so the
+# two-line form FAILED the rig's own startup lint — measured, at this very line. Same trap
+# `lib-measure.sh` records for its prewarm call.
+WS0_PERF_COUNT_PAIRINGS="$SERVER_CPUS|$SERVER_CPUS"$'\n'"$FLIGHT_SERVER_CPUS|$CLIENT_CPUS"
 
 # ---------------------------------------------------------------------------
 # Server lifecycle — ONLY the process THIS script started (issue #3096 review)
@@ -1362,6 +1391,67 @@ perf_stat_c() {
       exit 2
     done
   done
+  # --- THE COUNTING DOMAIN, VALIDATED HERE (#3551) ------------------------------------------
+  # After the option allowlist above, so an argv-guard case still gets the argv diagnostic, and
+  # BEFORE the sampler starts, so `perf record` inherits a domain that has been checked (that is
+  # the answer to "does the --profile-out path need the same treatment": it reads the SAME
+  # variable and is started below this point, so one validation covers both invocations).
+  #
+  # `${VAR:-}` here is NOT a permissive default: an empty value is REFUSED two lines down. It
+  # exists so an unset variable produces this NAMED diagnostic instead of bash's
+  # unbound-variable error, and there is deliberately no fall-back to `$SERVER_CPUS` — a silent
+  # default is precisely how this defect would survive its own fix.
+  local _counted="${PERF_COUNT_CPUS:-}" _pairings="${WS0_PERF_COUNT_PAIRINGS:-}"
+  local _aff="" _want_c=0 _tok _pair
+  if [[ -z "$_counted" ]]; then
+    echo "FATAL: perf_stat_c was called with no counting domain (\$PERF_COUNT_CPUS is empty or" >&2
+    echo "       unset). Each measurement leg sets it to the CPUs ITS OWN server runs on" >&2
+    echo "       immediately before this call; there is no default, because counting the wrong" >&2
+    echo "       CPUs fabricates a number in the flattering direction rather than failing" >&2
+    echo "       (#3551)." >&2
+    exit 2
+  fi
+  if [[ -z "$_pairings" ]]; then
+    echo "FATAL: perf_stat_c has no verified counting-domain table (\$WS0_PERF_COUNT_PAIRINGS is" >&2
+    echo "       empty or unset), so '$_counted' cannot be checked against the pins this session" >&2
+    echo "       VERIFIED. The driver derives that table from the verified lists before the first" >&2
+    echo "       rep. Refused rather than assumed: an unchecked domain is the defect (#3551)." >&2
+    exit 2
+  fi
+  # The affinity of the process this window brackets, read out of THIS call's argv — never from a
+  # global, because the pairing being checked is between the counted list and what is about to
+  # RUN. Bash has already done word-splitting and quote removal, so the spelling problem a
+  # source scan would have does not exist here.
+  for _tok in "$@"; do
+    if [[ "$_want_c" == "2" ]]; then _aff="$_tok"; break; fi
+    if [[ "$_want_c" == "1" && "$_tok" == "-c" ]]; then _want_c=2; continue; fi
+    case "$_tok" in */taskset|taskset) _want_c=1 ;; esac
+  done
+  if [[ -z "$_aff" ]]; then
+    echo "FATAL: perf_stat_c cannot tell WHERE the command it is about to measure will run: its" >&2
+    echo "       argv carries no 'taskset -c <list>'. The counting domain ('$_counted') is" >&2
+    echo "       therefore unverifiable against it, and an unverifiable pairing is refused" >&2
+    echo "       rather than assumed correct (#3551). Every leg in this rig pins its command." >&2
+    echo "       The argument list was: $*" >&2
+    exit 2
+  fi
+  local _ok=0
+  while IFS= read -r _pair; do
+    [[ -n "$_pair" ]] || continue
+    [[ "$_pair" == "$_counted|$_aff" ]] && { _ok=1; break; }
+  done <<<"$_pairings"
+  if [[ "$_ok" != "1" ]]; then
+    echo "FATAL: perf stat would COUNT cpus '$_counted' while the command it brackets is pinned" >&2  # perf-lint-allow: a diagnostic STRING
+    echo "       to '$_aff', and that pairing is not one this session verified." >&2
+    echo "       The verified pairings (<counted>|<measured-process affinity>) are:" >&2
+    printf '         %s\n' $_pairings >&2
+    echo "       This is the #3551 defect and it fails CLOSED because it CANNOT be seen in the" >&2
+    echo "       output: counting a list the work did not run on collects the other CPUs' IDLE" >&2
+    echo "       and misses the work entirely, so the same rows cost FEWER cycles and the arm" >&2
+    echo "       reads as a large win. Fix the leg that set \$PERF_COUNT_CPUS, not this check." >&2
+    exit 2
+  fi
+
   # THE SAMPLING SESSION BRACKETS EXACTLY THIS WINDOW (#3248 AC1). Started here rather than in
   # the measurement legs because this function already IS the timed window: any other insertion
   # point would need to guess the window's duration, and a guess either truncates the profile or
