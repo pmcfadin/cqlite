@@ -58,7 +58,7 @@ impl V5CompressedLegacyParser {
     /// * `extent` — can more bytes still arrive? The parse cannot know, so the
     ///   caller states it (see [`BufferExtent`]'s contract, which forbids a
     ///   default).
-    /// * `bounded` — was this walk asked to stop SHORT of the extent? A #954
+    /// * `bounded` — was this CALL asked to stop SHORT of the extent? A #954
     ///   clustering-slice walk (`row_body_window`) stops its row loop at
     ///   `body_end`, mid-partition by construction, and the outer partition loop
     ///   then re-enters here at bytes that were never claimed to begin a
@@ -66,11 +66,25 @@ impl V5CompressedLegacyParser {
     ///   bytes at `offset` to that promise, so only there is an undecodable
     ///   header proof of corruption.
     ///
-    /// Every production caller that passes a `row_body_window` today also passes
-    /// [`BufferExtent::Window`] (`big_promoted.rs`, `bti_point.rs`), so `bounded`
-    /// changes nothing for them; it is what keeps the `Complete`-plus-window
-    /// combination — which nothing forbids, and which
-    /// `regression_1741c_tests.rs` uses — from being refused on correct input.
+    /// `bounded` is `row_body_window.is_some()` for the WHOLE call, and that
+    /// coarseness is deliberate rather than an oversight. The narrower
+    /// `row_body_window.is_some() && partition_index == 0` — which reads as the
+    /// exact property, since the window is applied only at partition 0 — was
+    /// tried and MEASURED to red
+    /// `regression_1741c_tests::range_tombstone_before_slice_is_shadowed_on_windowed_read`:
+    /// `partition_index` is incremented at the END of the windowed partition's
+    /// arm, so at the very offset `body_end` left behind it already reads `1`,
+    /// and the refusal fires on correct input (observed:
+    /// `only 1 byte(s) remain … (partition=1)`, the byte being that partition's
+    /// own `END_OF_PARTITION` marker). So the honest statement of what this flag
+    /// means is: once a window has truncated this call's progress, NO later
+    /// offset in the call is attributable, and tolerance is the conservative
+    /// answer for all of them. The cost is real and is stated rather than
+    /// hidden — partitions 1..n of a windowed call do not get the refusal — and
+    /// it is bounded by the fact that every production caller passing a
+    /// `row_body_window` today also passes [`BufferExtent::Window`]
+    /// (`big_promoted.rs`, `bti_point.rs`), so `refuse` is already `false` for
+    /// them on the extent alone.
     pub(super) fn block_partition_header(
         &self,
         data: &[u8],

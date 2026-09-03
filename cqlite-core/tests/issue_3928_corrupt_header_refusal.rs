@@ -201,6 +201,15 @@ fn why(e: cqlite_core::Error) -> String {
     e.to_string()
 }
 
+/// A WARN-level subscriber writing into `sink`, for `tracing::subscriber::set_default`.
+fn warn_subscriber(sink: &LogSink) -> impl tracing::Subscriber + Send + Sync {
+    tracing_subscriber::fmt()
+        .with_writer(sink.clone())
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .finish()
+}
+
 /// A control-leg surface's own partition-key multiset. An empty multiset for a
 /// surface that REFUSED the control leg, which `assert_control_is_healthy`
 /// already panics on — this only keeps the rendering total.
@@ -486,17 +495,54 @@ async fn every_proven_complete_surface_refuses_a_malformed_partition_header() {
     // So this case also requires the resync itself not to have happened — which
     // pre-fix it demonstrably did, twice, and which no surface in this set may do,
     // since every one of them walks a full extent.
+    // I1: a bare `!logs.contains(..)` cannot tell "the resync did not happen"
+    // from "the capture is broken" — and post-fix the mutated leg is expected to
+    // warn little or nothing, so an EMPTY buffer would satisfy it. A
+    // `multi_thread` flavour, a subscriber change or a `warn!`→`debug!` move
+    // would all make it pass vacuously.
+    //
+    // So the absence is asserted only alongside a POSITIVE CONTROL that differs
+    // in exactly ONE property: the SAME corrupt bytes, through the SAME parse, on
+    // a `BufferExtent::Window` instead of `Complete`. The tolerant path is
+    // load-bearing there (a header may straddle the chunk tail), so it MUST still
+    // resync and MUST still log — which proves the sink captures, the needle is
+    // current, and the discriminator is the extent and nothing else.
+    //
+    // This is stronger than borrowing a neighbouring subsystem's WARN (the #2302
+    // detour, which is what the sibling `issue_3782_corrupt_row_refusal.rs` case
+    // uses): that would prove the capture works while saying nothing about which
+    // arm produced it.
+    let mutated_section = fixture::stitched_data_section(&staged.mutated_dir);
+    let reader = open_reader(&staged.mutated_dir).await;
+
+    let window_sink = LogSink::default();
+    let window_result = {
+        let _dispatch = tracing::subscriber::set_default(warn_subscriber(&window_sink));
+        window_walk(spec, &schema, &reader, &mutated_section)
+    };
+    let window_logs = window_sink.text();
+    let observed: Vec<&str> = RESYNC_WARNS
+        .iter()
+        .copied()
+        .filter(|n| window_logs.contains(n))
+        .collect();
+    assert!(
+        !observed.is_empty(),
+        "positive control FAILED: the SAME corrupt bytes on a `BufferExtent::Window` must \
+         still take the tolerant resync and LOG it, or the absence assertion below proves \
+         nothing about the arm. Expected one of {RESYNC_WARNS:?}; the Window walk answered \
+         {} and captured:\n{window_logs}",
+        window_result
+            .as_ref()
+            .map_or_else(|e| format!("Err({e})"), |k| format!("Ok({} keys)", k.len()))
+    );
+
     let sink = LogSink::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(sink.clone())
-        .with_max_level(tracing::Level::WARN)
-        .with_ansi(false)
-        .finish();
     // A THREAD-LOCAL dispatcher (`set_default`), never a global one: sibling cases
     // in this target walk the whole corpus on other threads and a global sink
     // would mix their WARNs in.
     let mutated = {
-        let _dispatch = tracing::subscriber::set_default(subscriber);
+        let _dispatch = tracing::subscriber::set_default(warn_subscriber(&sink));
         observe(&staged.mutated_dir, &schema).await
     };
     let logs = sink.text();
@@ -506,7 +552,8 @@ async fn every_proven_complete_surface_refuses_a_malformed_partition_header() {
             "AC1: a full-extent walk RESYNCHRONISED past the corrupt header — it logged \
              {needle:?} and skipped a byte, which both drops this partition and can invent \
              another out of misaligned bytes. On a proven-complete buffer that arm must \
-             REFUSE. Captured WARN output was:\n{logs}"
+             REFUSE. (The capture is proved live by the Window positive control above, \
+             which observed {observed:?}.) Captured WARN output was:\n{logs}"
         );
     }
 
@@ -1183,4 +1230,34 @@ async fn the_sliding_driver_refuses_a_final_chunk_header_truncated_past_its_leng
             u16::from_be_bytes([dec[hdr], dec[hdr + 1]])
         );
     }
+}
+
+/// The block-emit walk over `buf` declared a chunk-covering WINDOW — the
+/// tolerant extent, where a header may legitimately straddle the tail.
+///
+/// Used as the POSITIVE CONTROL for the resync-WARN absence assertions: it
+/// differs from `block_walk` in exactly one argument, so a resync it logs and
+/// `block_walk` does not is attributable to the extent alone.
+fn window_walk(
+    spec: &FixtureSpec,
+    schema: &TableSchema,
+    reader: &SSTableReader,
+    buf: &[u8],
+) -> Result<Vec<Vec<u8>>, String> {
+    use cqlite_core::storage::sstable::reader::BufferExtent;
+    let mut keys: Vec<Vec<u8>> = Vec::new();
+    framing_parser(spec)
+        .parse_block_emit_windowed(
+            buf,
+            BufferExtent::Window,
+            Some(schema),
+            reader,
+            None,
+            |(_t, k, _r)| {
+                keys.push(k.as_bytes().to_vec());
+                Ok(std::ops::ControlFlow::Continue(()))
+            },
+        )
+        .map_err(why)
+        .map(|()| keys)
 }
