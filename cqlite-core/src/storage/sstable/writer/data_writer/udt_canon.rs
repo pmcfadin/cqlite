@@ -25,6 +25,7 @@
 //! Part of the `data_writer` responsibility split (issue #1118). `use super::*`
 //! provides the crate imports and sibling helpers.
 
+use super::marshal_comparator::{comparator_supported_for, compare_for_marshal};
 use super::*;
 use crate::types::{UdtField, UdtValue};
 use std::borrow::Cow;
@@ -217,7 +218,7 @@ fn validate_primitive_leaf(ty: &str, value: &Value) -> Result<()> {
 /// `org.apache.cassandra.db.marshal.<Name>` with NO parenthesized arguments
 /// (i.e. a primitive). A parameterized marshal (`ListType(...)`, `UserType(...)`,
 /// etc.) returns `None` — those are structural types handled by the recursion.
-fn primitive_marshal_name(ty: &str) -> Option<&str> {
+pub(super) fn primitive_marshal_name(ty: &str) -> Option<&str> {
     let ty = ty.trim();
     let rest = ty.strip_prefix(MARSHAL_PREFIX)?;
     if rest.is_empty() || rest.contains('(') || rest.contains(')') {
@@ -394,131 +395,6 @@ where
     Ok(Value::from_sorted(
         keyed.into_iter().map(|(_, item)| item).collect(),
     ))
-}
-
-/// Comparator family for a frozen sorted-collection key/element marshal.
-enum CompareKind {
-    /// Compare by the UNSIGNED order of the serialized wire bytes. Correct for
-    /// byte-ordered Cassandra `AbstractType`s (UTF8Type/AsciiType/BytesType,
-    /// InetAddressType, SimpleDateType — whose epoch is shifted so byte order is
-    /// value order — BooleanType) AND for composite frozen UDT/tuple/collection
-    /// elements (Cassandra orders those by their serialized bytes here too).
-    UnsignedBytes,
-    /// Compare as a SIGNED numeric of the given width: Int32Type→i32, LongType/
-    /// CounterColumnType/TimestampType→i64, ByteType→i8, ShortType→i16.
-    /// Unsigned big-endian byte order disagrees with the Cassandra comparator for
-    /// these (e.g. `-1` = 0xFFFFFFFF would sort AFTER `0`), so they are compared on
-    /// the decoded signed value.
-    ///
-    /// `TimeType` is deliberately NOT in this family — see the arms below.
-    SignedInt,
-}
-
-/// Classify the comparator for a key/element marshal `ty`. A non-primitive marshal
-/// (UDT/tuple/list/set/map element of a sorted collection) is byte-ordered. A
-/// primitive marshal maps to its AbstractType comparator family; a primitive whose
-/// comparator we cannot implement confidently returns `None` (caller fails closed).
-fn classify_comparator(ty: &str) -> Option<CompareKind> {
-    let Some(name) = primitive_marshal_name(ty) else {
-        // Composite frozen element (UDT/tuple/collection): byte-ordered.
-        return Some(CompareKind::UnsignedBytes);
-    };
-    match name {
-        // Signed integers — Cassandra compares the decoded signed value.
-        //
-        // `TimestampType` belongs here and `TimeType` does NOT: authority, pinned
-        // `cassandra-5.0.8`, `db/marshal/TimestampType.java:56`
-        // `super(ComparisonType.CUSTOM)`, whose `compareCustom` (`:69-71`) is
-        // exactly `return LongType.compareLongs(...)` — SIGNED. Conflating the two
-        // temporal types was issue #3935.
-        "Int32Type" | "LongType" | "ByteType" | "ShortType" | "CounterColumnType"
-        | "TimestampType" => Some(CompareKind::SignedInt),
-        // Byte-ordered AbstractTypes: unsigned serialized-byte order == comparator.
-        // SimpleDateType is byte-ordered (epoch shifted by 2^31 at serialization).
-        //
-        // `TimeType` is BYTE_ORDER, not signed (issue #3935). Authority, pinned
-        // `cassandra-5.0.8`: `db/marshal/TimeType.java:48`
-        // `private TimeType() {super(ComparisonType.BYTE_ORDER);}`, i.e.
-        // `ByteBufferUtil.compareUnsigned` over the serialized 8-byte big-endian
-        // nanos-since-midnight long. Cassandra ACCEPTS, stores and BYTE_ORDERs an
-        // out-of-range (negative) binary `time`, whose leading byte >= `0x80` then
-        // sorts ABOVE every in-range value — so range validation would not make the
-        // signed and byte orders agree. That argument, with its `TimeSerializer`
-        // citations, is written out ONCE, in
-        // `types::comparator::custom::compare_time`; do not restate it here.
-        //
-        // The two orders coincide for every NON-NEGATIVE `i64`, so no in-range
-        // on-disk ordering moved. This comparator is the ONLY sort for a UDT's
-        // `SetType`/`MapType` field: `serialization/types.rs`
-        // `serialize_collection_elements` does not re-sort.
-        "UTF8Type" | "AsciiType" | "BytesType" | "InetAddressType" | "BooleanType"
-        | "SimpleDateType" | "TimeType" => Some(CompareKind::UnsignedBytes),
-        // FAIL-CLOSED (no-heuristics, issue #28; tracked for #1254): types whose
-        // Cassandra comparator is non-trivial and NOT plain unsigned-byte order:
-        //   UUIDType/TimeUUIDType/LexicalUUIDType — version- and time-field-aware,
-        //     not raw byte order;
-        //   IntegerType (varint) / DecimalType — sign+magnitude/scale aware;
-        //   FloatType/DoubleType — total-order with NaN/sign handling;
-        //   DurationType — not a sortable AbstractType.
-        _ => None,
-    }
-}
-
-/// Ensure the comparator for `ty` can be applied to `value` (fail-closed up front).
-fn comparator_supported_for(ty: &str, value: &Value) -> Result<()> {
-    match classify_comparator(ty) {
-        Some(CompareKind::UnsignedBytes) => Ok(()),
-        Some(CompareKind::SignedInt) => {
-            // Confirm the live value is one of the signed-int variants we decode.
-            signed_value(value).map(|_| ())
-        }
-        None => Err(unsupported_comparator_err(ty)),
-    }
-}
-
-fn unsupported_comparator_err(ty: &str) -> Error {
-    Error::InvalidInput(format!(
-        "frozen sorted-collection key/element type '{ty}' has no comparator implemented in the \
-         canonicalizer; ordering it by raw serialized bytes could produce NON-Cassandra bytes, so \
-         it is rejected rather than guessed (no-heuristics, issue #28; tracked for follow-up #1254)"
-    ))
-}
-
-/// Decode the SIGNED i128 value of a signed-integer `Value`, or an error if the
-/// variant is not one of the signed-int variants (Integer/BigInt/Counter/Timestamp/
-/// TinyInt/SmallInt). Widening to `i128` makes all four widths comparable in one
-/// ordering.
-///
-/// `Value::Time` is deliberately ABSENT (issue #3935): `TimeType` is
-/// `ComparisonType.BYTE_ORDER`, so a `time` element/key is compared by its
-/// serialized bytes via [`CompareKind::UnsignedBytes`] and never decoded here.
-fn signed_value(value: &Value) -> Result<i128> {
-    match value {
-        Value::Integer(n) => Ok(*n as i128),
-        Value::BigInt(n) | Value::Counter(n) | Value::Timestamp(n) => Ok(*n as i128),
-        Value::TinyInt(n) => Ok(*n as i128),
-        Value::SmallInt(n) => Ok(*n as i128),
-        other => Err(Error::InvalidInput(format!(
-            "expected a signed-integer value for a signed-comparator key/element type, got {other:?}"
-        ))),
-    }
-}
-
-/// Compare two key/element values for the marshal `ty`, given each value and its
-/// precomputed serialized bytes. SIGNED-int marshals compare the decoded signed
-/// values; byte-ordered marshals compare the unsigned serialized bytes.
-fn compare_for_marshal(
-    ty: &str,
-    a_val: &Value,
-    a_bytes: &[u8],
-    b_val: &Value,
-    b_bytes: &[u8],
-) -> Result<Ordering> {
-    match classify_comparator(ty) {
-        Some(CompareKind::UnsignedBytes) => Ok(a_bytes.cmp(b_bytes)),
-        Some(CompareKind::SignedInt) => Ok(signed_value(a_val)?.cmp(&signed_value(b_val)?)),
-        None => Err(unsupported_comparator_err(ty)),
-    }
 }
 
 /// Maps the sorted item vector back to the right `Value` collection variant so
