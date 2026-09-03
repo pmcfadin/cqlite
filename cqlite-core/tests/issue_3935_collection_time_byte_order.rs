@@ -66,14 +66,12 @@
 //!
 //! # WHY THERE IS NO CASSANDRA FIXTURE FOR THIS CASE — stated precisely
 //!
-//! Not because Cassandra rejects an out-of-range `time`: **it does not.**
-//! `TimeType` has no `validate` override and
-//! `src/java/org/apache/cassandra/serializers/TimeSerializer.java:71-75`
-//! `validate` checks the SIZE ONLY (`if (accessor.size(value) != 8) throw ...`).
-//! The range check `result < 0 || result >= TimeUnit.DAYS.toNanos(1)` lives ONLY
-//! in `timeStringToLong` (`TimeSerializer.java:50`), the CQL string-literal /
-//! JSON path. An 8-byte BINARY out-of-range `time` therefore passes Cassandra's
-//! validation, is stored, and is ordered BYTE_ORDER.
+//! Not because Cassandra rejects an out-of-range `time`: **it does not.** It
+//! accepts, stores and BYTE_ORDERs an 8-byte binary out-of-range `time`. That
+//! argument and its `TimeSerializer` citations are written out ONCE, in
+//! `types::comparator::custom::compare_time` (`# CANONICAL STATEMENT`), and are
+//! deliberately not restated here — one paragraph to correct on a future re-pin
+//! instead of four.
 //!
 //! The actual reasons are: (a) the committed corpus contains no such value —
 //! `test-data/datasets/sstables/test_comparator_order/` (issue #3790) holds only

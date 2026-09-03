@@ -8,10 +8,21 @@
 //! from this path's raw-byte fast path, on the argument that the comparator should
 //! agree with "the writer". **Both changes were wrong and were reverted.** The
 //! argument verified the wrong writer: `Value::PartialOrd` is signed, but it does
-//! NOT determine on-disk collection order — `data_writer/complex.rs` re-sorts every
-//! non-list collection's cell paths through `schema_helpers::compare_cell_paths`
-//! (`a.cmp(b)`, unsigned) immediately before writing, overriding whatever order the
-//! memtable produced. So a signed read path REORDERS what the writer correctly wrote.
+//! NOT determine on-disk collection order. **PRECISELY WHICH WRITER SORTS WHERE**
+//! (an earlier revision of this paragraph said `complex.rs` re-sorts EVERY non-list
+//! collection's cell paths, which is FALSE — only ONE of its two paths does):
+//!
+//! * PER-ELEMENT — `write_complex_column_per_element` sorts the supplied cells with
+//!   `schema_helpers::compare_cell_paths` (`a.cmp(b)`, unsigned) immediately before
+//!   writing, overriding whatever order the caller produced.
+//! * WHOLE-COLUMN — `write_complex_column` does NOT re-sort cell paths; it orders the
+//!   `Value`'s elements with `collection_order::compare_collection_elements` and emits
+//!   the cell paths in THAT order. Which is why a signed `time` arm there wrote a
+//!   non-Cassandra order for years (issue #3935) with no `compare_cell_paths` pass to
+//!   catch it.
+//!
+//! Either way the on-disk order is unsigned/BYTE_ORDER, so a signed read path
+//! REORDERS what the writer correctly wrote.
 //!
 //! The authority (never CQLite's own behaviour, #3041) — pinned `cassandra-5.0.8`,
 //! `src/java/org/apache/cassandra/db/marshal/TimeType.java`:
@@ -23,13 +34,11 @@
 //! **CORRECTED BY #3935 (measured against the pinned tag).** An earlier revision of
 //! this comment said "Cassandra's `TimeSerializer` validates
 //! `0..=86_399_999_999_999`, so no Cassandra-written SSTable can contain a negative
-//! `time`". That is FALSE: `TimeType` declares no `validate` override and
-//! `src/java/org/apache/cassandra/serializers/TimeSerializer.java:71-75` `validate`
-//! checks the SIZE ONLY (`if (accessor.size(value) != 8) throw ...`). The range check
-//! `result < 0 || result >= TimeUnit.DAYS.toNanos(1)` lives ONLY in
-//! `timeStringToLong` (`TimeSerializer.java:50`), the CQL string-literal / JSON path.
-//! So an 8-byte BINARY out-of-range `time` passes Cassandra's validation, is stored,
-//! and is ordered `BYTE_ORDER`.
+//! `time`". That is FALSE: Cassandra ACCEPTS, stores and `BYTE_ORDER`s an 8-byte
+//! binary out-of-range `time`. The argument and its `TimeSerializer` citations are
+//! written out ONCE, in `types::comparator::custom::compare_time` (`# CANONICAL
+//! STATEMENT`); it is deliberately not restated here, so a future re-pin has one
+//! paragraph to correct rather than four.
 //!
 //! The real reasons no fixture covers it: the committed golden
 //! (`issue_3790_collection_order_cassandra_golden.rs`) holds only in-range values,

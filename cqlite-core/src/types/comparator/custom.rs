@@ -85,22 +85,45 @@ fn compare_inet(left: &Value, right: &Value) -> Result<Ordering> {
 /// with Cassandra for all inputs.
 ///
 /// SCOPED CLAIM — this comparator, not the whole system (roborev jobs 45/70).
-/// Other sites order `time` too, and TWO REMAIN SIGNED: `Value::PartialOrd`
-/// (`types.rs`) and `write_engine::mutation::compare_values` (which decides
-/// `ClusteringKey` placement). Both are tracked by **#3920**.
+/// Other sites order `time` too. What #3935 closed is the COLLECTION-ORDER write
+/// sites, which now agree with this comparator for ALL inputs:
+///   * the whole-collection AND frozen writer,
+///     `data_writer/collection_order::compare_collection_elements` — called both
+///     by `write_set_complex_cells`/`write_map_complex_cells` (which then emit
+///     cell paths in that order with no re-sort) and by `encoding.rs`'s frozen
+///     `serialize_value` — corrected from signed to `to_be_bytes()`;
+///   * the frozen sorted-collection canonicalizer,
+///     `data_writer/udt_canon::classify_comparator`, which orders a UDT's
+///     `SetType` element / `MapType` key field and had the SAME defect
+///     independently (`serialize_collection_elements` does not re-sort, so its
+///     order is the on-disk order for a UDT field);
+///   * the per-element writer, `schema_helpers::compare_cell_paths`, already
+///     unsigned raw bytes.
 ///
-/// The site that REACHES DISK is now unsigned and agrees with this comparator:
-/// #3935 corrected the whole-collection writer
-/// (`data_writer/collection_order::compare_collection_elements`, used by
-/// `write_set_complex_cells`/`write_map_complex_cells`, which then emit cell
-/// paths in that order with no re-sort) from signed to `to_be_bytes()`. The
-/// per-element writer (`compare_cell_paths`) was already unsigned. So both write
-/// paths and this read comparator agree for ALL inputs.
+/// TWO SITES REMAIN SIGNED, and the DISK-REACHING SET IS NOT CLOSED:
+///   * `Value::PartialOrd` (`types.rs`);
+///   * `write_engine::mutation::compare_values`, whose `Time` arm is `a.cmp(b)`.
+///     Both `ClusteringKey::compare` and `ClusteringKey`'s `Ord` call it, and
+///     `write_engine::merge` sorts merged rows with `ClusteringKey::compare`
+///     under the comment "Sort merged rows by clustering key for output order" —
+///     i.e. it decides the PHYSICAL ROW ORDER written to `Data.db`. So a signed
+///     `time` comparison DOES still reach disk, for a `time` CLUSTERING COLUMN.
+///     An earlier revision of this comment said "the site that REACHES DISK is
+///     now unsigned"; that was FALSE, and the corrected statement is the scoped
+///     one above.
+/// Both are tracked by **#3920**.
 ///
 /// The remaining signed sites agree with this one for every value in `time`'s
 /// valid range and DISAGREE for an out-of-range negative nanos. **A READ CAN
 /// OBSERVE THAT** — an earlier revision of this comment claimed it could not,
 /// which was wrong.
+///
+/// # CANONICAL STATEMENT: range validation would *not* close the class
+///
+/// This is the ONE place this argument is written out; the other `time`-ordering
+/// sites (`data_writer/collection_order`, `data_writer/udt_canon`, and the
+/// `issue_3935_*` / `issue_3790_*` test targets) point HERE rather than restating
+/// it, so a future re-pin has one paragraph to correct instead of four.
 ///
 /// RANGE VALIDATION WOULD *NOT* CLOSE THE CLASS — an earlier revision of this
 /// comment called it "the fix that would make all the sites agree trivially",

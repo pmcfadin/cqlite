@@ -440,14 +440,17 @@ fn classify_comparator(ty: &str) -> Option<CompareKind> {
         // `cassandra-5.0.8`: `db/marshal/TimeType.java:48`
         // `private TimeType() {super(ComparisonType.BYTE_ORDER);}`, i.e.
         // `ByteBufferUtil.compareUnsigned` over the serialized 8-byte big-endian
-        // nanos-since-midnight long. `TimeType` declares no `validate` override and
-        // `serializers/TimeSerializer.java:71-75` `validate` checks the SIZE ONLY
-        // (`accessor.size(value) != 8`) — the range check lives only in
-        // `timeStringToLong` (`:50`), the CQL string-literal/JSON path — so an
-        // 8-byte BINARY out-of-range (negative) `time` is accepted, stored, and
-        // ordered BYTE_ORDER, which sorts its `0xFF` leading byte ABOVE every
-        // in-range value. Over `time`'s valid range every value is non-negative, so
-        // byte and signed order coincide and no in-range on-disk ordering moved.
+        // nanos-since-midnight long. Cassandra ACCEPTS, stores and BYTE_ORDERs an
+        // out-of-range (negative) binary `time`, whose leading byte >= `0x80` then
+        // sorts ABOVE every in-range value — so range validation would not make the
+        // signed and byte orders agree. That argument, with its `TimeSerializer`
+        // citations, is written out ONCE, in
+        // `types::comparator::custom::compare_time`; do not restate it here.
+        //
+        // The two orders coincide for every NON-NEGATIVE `i64`, so no in-range
+        // on-disk ordering moved. This comparator is the ONLY sort for a UDT's
+        // `SetType`/`MapType` field: `serialization/types.rs`
+        // `serialize_collection_elements` does not re-sort.
         "UTF8Type" | "AsciiType" | "BytesType" | "InetAddressType" | "BooleanType"
         | "SimpleDateType" | "TimeType" => Some(CompareKind::UnsignedBytes),
         // FAIL-CLOSED (no-heuristics, issue #28; tracked for #1254): types whose

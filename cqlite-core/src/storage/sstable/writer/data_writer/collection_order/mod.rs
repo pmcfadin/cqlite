@@ -21,10 +21,13 @@
 //! types whose comparator is unsigned-lexicographic.
 //!
 //! Issue #3935 corrected the `time` arm from signed to `TimeType`'s
-//! `ComparisonType.BYTE_ORDER`. That moves emitted bytes ONLY for an
-//! out-of-range NEGATIVE nanos (outside `0..=86_399_999_999_999`), where the two
-//! orders diverge; every in-range `time` collection is byte-identical before and
-//! after, because over that range byte, unsigned and signed order coincide.
+//! `ComparisonType.BYTE_ORDER`. The two orders coincide for EVERY NON-NEGATIVE
+//! `i64` — a `0x00`-`0x7F` sign byte makes unsigned byte order and signed
+//! numeric order the same order — so they diverge ONLY when a NEGATIVE nanos is
+//! present, and only that case moves emitted bytes. That covers strictly more
+//! than `time`'s valid range `0..=86_399_999_999_999`: an out-of-range POSITIVE
+//! nanos is unmoved too. Every in-range `time` collection is byte-identical
+//! before and after.
 
 use super::*;
 use std::cmp::Ordering;
@@ -84,19 +87,18 @@ pub(crate) fn compare_collection_elements(a: &Value, b: &Value) -> Ordering {
         // `ByteBufferUtil.compareUnsigned` over the serialized 8-byte
         // big-endian nanos-since-midnight long. Authority, pinned
         // `cassandra-5.0.8`: `db/marshal/TimeType.java:48`
-        // `private TimeType() {super(ComparisonType.BYTE_ORDER);}`. `TimeType`
-        // has no `validate` override, and `serializers/TimeSerializer.java:71-75`
-        // `validate` checks the SIZE ONLY (`accessor.size(value) != 8`) — the
-        // range check lives only in `timeStringToLong` (`:50`), the CQL
-        // string-literal/JSON path — so an 8-byte binary out-of-range `time`
-        // passes Cassandra's validation, is stored, and is ordered BYTE_ORDER.
+        // `private TimeType() {super(ComparisonType.BYTE_ORDER);}`.
         //
-        // Over `time`'s valid range (`0..=86_399_999_999_999`) every value is
-        // non-negative, so byte order, unsigned order and signed numeric order
-        // COINCIDE and no in-range on-disk ordering moves. They diverge only for
-        // an out-of-range NEGATIVE nanos, whose sign bit makes the leading byte
-        // `0xFF`: BYTE_ORDER sorts it ABOVE every non-negative value, where
-        // `i64::cmp` sorted it below (issue #3935).
+        // An out-of-range (negative) binary `time` is a value Cassandra ACCEPTS
+        // and orders BYTE_ORDER — range validation would not make the two orders
+        // agree. That argument, with its `TimeSerializer` citations, is written
+        // out ONCE, in `types::comparator::custom::compare_time`; do not restate
+        // it here.
+        //
+        // The two orders coincide for every NON-NEGATIVE `i64` and diverge only
+        // for a NEGATIVE nanos, whose sign bit makes the leading byte >= `0x80`:
+        // BYTE_ORDER sorts it ABOVE every non-negative value, where `i64::cmp`
+        // sorted it below (issue #3935). So no in-range on-disk ordering moves.
         //
         // Comparing `to_be_bytes()` is the serialized form verbatim, which makes
         // this whole-collection path agree with BOTH of the sites it must:
@@ -160,8 +162,18 @@ pub(crate) fn compare_collection_elements(a: &Value, b: &Value) -> Ordering {
         //     serializes `Value::Boolean` canonically, so the divergence needs a
         //     non-canonical serialized boolean to observe; that is out of scope
         //     for issue #3935 and is stated rather than left implicit.
-        //   * `inet` (InetAddressType): BYTE_ORDER — IPv4 (4 bytes) sorts before
-        //     any IPv6 (16 bytes) by length-then-byte, matching Cassandra.
+        //   * `inet` (InetAddressType): BYTE_ORDER, i.e.
+        //     `ByteBufferUtil.compareUnsigned`, which is LEXICOGRAPHIC over the
+        //     common prefix with LENGTH only as a tiebreak WHEN one operand is a
+        //     prefix of the other — NOT length-first. Rust's `<[u8] as Ord>::cmp`
+        //     is exactly that, so the byte fallback matches Cassandra including
+        //     the mixed-family case. NOTE the consequence, since an earlier
+        //     revision of this audit claimed "IPv4 sorts before any IPv6 by
+        //     length-then-byte" and that is FALSE: `::1`
+        //     (`00..01`, 16 bytes) sorts BEFORE `9.0.0.1` (`09 00 00 01`,
+        //     4 bytes), because the first byte already settles it. A
+        //     `set<inet>` mixing families falsifies the length-first reading.
+        //     `types::comparator::custom::compare_inet` states the same rule.
         //   * `date` (SimpleDateType): stored as an UNSIGNED 32-bit day count
         //     offset by 2^31, compared `ByteBufferUtil.compareUnsigned`, i.e.
         //     unsigned big-endian bytes — exactly raw-byte order.

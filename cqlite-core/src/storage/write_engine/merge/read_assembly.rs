@@ -407,9 +407,19 @@ fn key_is_opaque_composite(cmp: &ComparatorType) -> bool {
 /// actually diverged (roborev job 67):
 ///   * `inet` (`InetAddressType`): raw address bytes — `9.0.0.1` = `[9,0,0,1]`
 ///     precedes `10.0.0.1`, the REVERSE of string order: a real misordering.
-///   * `time` (`TimeType`): big-endian nanos-of-day, always non-negative, so byte
-///     order == numeric; and `fmt_time` zero-pads, so over the VALID range string
-///     order EQUALS it — the old comparator was already right (no counterexample).
+///   * `time` (`TimeType`): big-endian nanos-of-day. NOT "always non-negative" —
+///     an earlier revision of this comment said so, and #3935 refuted it against
+///     the pinned tag: `TimeType` has no `validate` override and Cassandra
+///     accepts, stores and `BYTE_ORDER`s an out-of-range NEGATIVE binary `time`
+///     (canonical statement: `types::comparator::custom::compare_time`). The
+///     CONCLUSION here is unaffected in both directions, which is why this is a
+///     comment fix and not a behaviour change: `TimeType` is `BYTE_ORDER`, this
+///     path orders by the raw `cell_path` bytes, and that is Cassandra's order
+///     for EVERY 8-byte value including a negative one. What the refuted premise
+///     did affect is the parenthetical claim about the OLD formatted-string
+///     comparator: over the valid range `fmt_time`'s zero-padding made string
+///     order equal byte order (so no counterexample there), but a negative nanos
+///     is outside that argument entirely.
 ///
 /// Branches on the DECLARED type only (no-heuristics, issue #28); recurses through
 /// `Frozen` defensively though neither inet nor time is ever frozen here.
