@@ -5393,7 +5393,7 @@ else
     SCC_STUB_STATE="$scc_state_w" SCC_STUB_LOG="$scc_log_fresh" --fix-sccache-cap)
   scc_sl_fresh=$(scc_slice "$scc_out_fresh")
   if out_has "$scc_sl_fresh" -E '\[warn\].*sccache-cap: SCOPED-NON-LOGIN' \
-     && [ "$(scc_warns "$scc_sl_fresh")" = 0 ]; then
+     && [ "$(scc_warns "$scc_sl_fresh")" = 1 ] && [ "$(scc_oks "$scc_sl_fresh")" = 0 ]; then
     ok "sccache-cap: a fresh box with NO server reaches the BEST state (SCOPED-NON-LOGIN with all links measured) — the section starts the server under the persisted value instead of learning nothing"
   else
     bad "sccache-cap: a fresh box with no running server did not reach the best state (roborev finding 2)"
@@ -5434,7 +5434,7 @@ else
     SCC_STUB_USED=null SCC_STUB_LOG="$scc_log_empty" --fix-sccache-cap)
   scc_sl_empty=$(scc_slice "$scc_out_empty")
   if out_has "$scc_sl_empty" -E '\[warn\].*sccache-cap: SCOPED-NON-LOGIN' \
-     && [ "$(scc_warns "$scc_sl_empty")" = 0 ] \
+     && [ "$(scc_warns "$scc_sl_empty")" = 1 ] && [ "$(scc_oks "$scc_sl_empty")" = 0 ] \
      && ! out_has "$scc_sl_empty" 'THIS RUN STARTED' \
      && ! grep -q -- '--start-server' "$scc_log_empty"; then
     ok "sccache-cap: a RUNNING server with an empty cache (cache_size null) is read as an ALREADY-RUNNING server — no start, no UNMEASURED"

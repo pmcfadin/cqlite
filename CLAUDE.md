@@ -949,9 +949,18 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   cleared by raising the cap and a full, thrashing cache reads `ok`. Measured trap: `30G` is 30 GiB
   but **`30GiB` and `30GB` are SILENTLY DISCARDED** to the 10 GiB default and a bare integer means
   BYTES, with no diagnostic anywhere — `bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap`
-  persists the value and VERIFIES it by correlating the `/etc/environment` line, the value a fresh
+  persists the value and MEASURES four links: the `/etc/environment` line, the value a fresh
   non-login PAM session sees, that value in BYTES (asked of an ISOLATED sccache, never
-  reimplemented) and the BYTES the running server enforces (only VERIFIED is an `[ok]`).
+  reimplemented) and the BYTES the running server enforces. **Its strongest verdict is
+  `SCOPED-NON-LOGIN`, and NO state of that section is an `[ok]` (#3727 roborev round 426)** — so
+  `--strict` does not go green on it, on any box, while #3946 is open. That is deliberate: all
+  four links are measured in ONE launch context, and an `[ok]` there certified the cap a GATE
+  gets from a measurement that never looked at a login shell. Measured, same box and same tree:
+  a detached gate reported `sccache-cap=32212254720` while a lane-shell `--lite` reported
+  `53687091200`. Per #3414's rule a partial result is UNKNOWN, never an `[ok]`; reusing
+  `NOT-SYSTEM-WIDE` was rejected (it asserts a MEASURED file-vs-session disagreement, which here
+  was measured to be ABSENT) and so was `UNMEASURED` (every link WAS read — reporting less than
+  was measured is a wrong ANSWER that sends an operator hunting a broken probe).
   **And every one of those sccache calls is made by the DROPPED-PRIVILEGE session, because
   bootstrap's documented invocation is `sudo bash scripts/bootstrap-agent-machine.sh` while the
   binary it resolves is `<the invoking account's home>/.cargo/bin/sccache` (#3727, roborev job
@@ -966,9 +975,13 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   third. `agent-gate.sh` is NOT exposed: `_gate_sccache_bin` reads the running process's OWN
   `$HOME`, so the binary is always in the same account's home as the process running it, and
   nothing runs the gate as root (`systemd-run --user`, `bash scripts/agent-gate.sh`).
-  **Declared residual:** a LOGIN shell can see a different value (on this fleet `/etc/profile.d`
-  runs after `pam_env` — #3727's own root cause) and that context is no longer measured, so the
-  verdict is scoped to the non-login session in its own scope note.
+  **Declared residual, and it is now IN THE TOKEN rather than only in a scope note a grep for
+  the verdict never sees:** a LOGIN shell can see a different value (on this fleet
+  `/etc/profile.d` runs after `pam_env` — #3727's own root cause), that context is not measured,
+  and no disagreement between the two is detected — so the cap a gate actually gets is NOT
+  established by this section at all. The verdict line says exactly that beside the four
+  measured facts. Closing it means measuring the launch contexts, which is **#3946**; until then
+  the per-run authority is the gate's own `accelerators: … sccache-cap=<bytes>` token.
 
 ## Core Commands
 

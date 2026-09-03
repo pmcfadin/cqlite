@@ -119,8 +119,16 @@ later client can change it. Measured: with a server up, `--show-stats` reports t
   carries `sccache-cap=<bytes>` read from the **running server**, and why
   `bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap` correlates the `/etc/environment`
   line, the value a fresh **non-login PAM session** sees, what sccache makes of that value in
-  **bytes** (its own isolated oracle), and the **bytes the running server enforces**, before it will
-  say `sccache-cap: VERIFIED`. `--fix-sccache-cap` never rewrites an existing value; a box
+  **bytes** (its own isolated oracle), and the **bytes the running server enforces**. With all four
+  measured and agreeing it reports `sccache-cap: SCOPED-NON-LOGIN` — its **strongest** verdict, a
+  `[warn]`, and **never an `[ok]`** (#3727 roborev round 426), because all four were measured in
+  ONE launch context: a **login** shell additionally runs `/etc/profile.d` and can export a
+  different value, no disagreement between the two is detected, and so **the cap a gate actually
+  gets is not established**. Measured, same box and same tree: a detached gate reported
+  `sccache-cap=32212254720` while a lane-shell `--lite` reported `53687091200` — an `[ok]` there
+  would certify one cap while a real gate ran against another. Consequence to know before you run
+  it: **`--strict` does not go green on this section on any box** until **#3946** measures the
+  launch contexts. `--fix-sccache-cap` never rewrites an existing value; a box
   deliberately running a different cap keeps it. Before writing, it resolves **its own** fleet
   literal through that oracle and refuses to persist anything that resolves to sccache's default —
   a shape test cannot do that job, because a 21-digit value passes every shape rule and measures as
@@ -161,8 +169,10 @@ Both tokens report **measured bytes**, and nothing else. There is deliberately *
 classifier**: the 7-state suffix (`pinned`/`default`/`inherited`/`stale`/`invalid`/`invalid-stale`/
 `unattributed`), the value-grammar map that computed it, the probed default and the four
 remediation `WARN`s were **removed** by lead ruling `req-3727-w4` — reporting stays, interpreting
-goes. Read the number, and read `sccache-cap: VERIFIED` from
-`bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap` for the correlation.
+goes. Read the number, and read `sccache-cap: SCOPED-NON-LOGIN` from
+`bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap` for the correlation — remembering
+that it is a `[warn]` scoped to one launch context and not a certification of the cap this gate
+will get (#3946).
 
 - `sccache-cap=<bytes>` — the cap the **running server** enforces, in bytes.
 - `sccache-cap=unmeasured(<why>)` — **no cap may be claimed.** The two attribution causes are the
