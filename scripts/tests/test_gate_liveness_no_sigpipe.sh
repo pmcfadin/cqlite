@@ -131,7 +131,14 @@ print_scope() {
   for f in "${UNGUARDED[@]}"; do printf '           - %s\n' "$f"; done
   printf '           The sibling issue #3969 records MEASURED live instances of this family in\n'
   printf '           OTHER scripts (a broken pipe turning the NEXT assertion into a bogus FAIL),\n'
-  printf '           so the unguarded set is emphatically NOT just those two.\n'
+  printf '           so the unguarded set is emphatically NOT just those two. VERIFIED INSTANCE:\n'
+  printf '           #3969 instance 3 failed at scripts/flow/drive-issue-state.sh:587, and THIS\n'
+  printf '           RULE FLAGS THAT LINE -- 4 sites in that one file, line 587 among them. So the\n'
+  printf '           broad rule is known to catch a construct that produced a real field failure,\n'
+  printf '           which is stronger evidence than any synthetic case in this suite. That file is\n'
+  printf '           NOT guarded here: extending the subject set is #3992, and note #3969 may fix\n'
+  printf '           its family at the REPORTER instead, since its early-closing reader is a tr\n'
+  printf '           shim installed on purpose -- nothing to convert to a herestring.\n'
   printf '==== END DECLARED SCOPE ====\n\n'
 }
 
