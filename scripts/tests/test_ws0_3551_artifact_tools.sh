@@ -525,3 +525,65 @@ if [ "$rc" -eq 0 ] && grep -qF '**0 clean**' "$RUNOUT" && grep -qF '1 UNDERCOVER
 else
   fail "5. clean-pairs must refuse a gap of ${OVER}s (rc=$rc, out: $(head -1 "$RUNOUT"))"
 fi
+
+# --- Case 6: the IMPORT itself must REFUSE, not fall back to a private constant ---------
+# Both tools resolve the judge RELATIVE TO THEIR OWN LOCATION (`parents[3]/scripts/perf`), so
+# a copy of the artifacts directory taken out of the checkout has no judge to import. The only
+# two acceptable behaviours are "import it" and "REFUSE, naming what is missing"; a private
+# fallback constant would be a second copy of the gate's bound, silently disagreeing with the
+# gate exactly when the checkout layout changed.
+#
+# THE ARTIFACT IS SUBSTITUTED, never a test-only environment seam: a seam is one more thing a
+# real invoker can set. Two scratch trees identical but for ONE property — whether
+# `scripts/perf/ws0_quiescence.py` exists beside the copied `docs/reports/...` subtree.
+scratch_tree() {
+  local root="$1" with_judge="$2" sub
+  sub="$root/docs/reports/ws0-3551-artifacts"
+  mkdir -p "$sub"
+  cp "$PAIRS_TOOL" "$CENSUS_TOOL" "$sub/"
+  if [ "$with_judge" = with-judge ]; then
+    mkdir -p "$root/scripts/perf"
+    cp "$JUDGE" "$root/scripts/perf/"
+  fi
+}
+SCR_NO="$TMP/scratch-no-judge"; SCR_YES="$TMP/scratch-with-judge"
+scratch_tree "$SCR_NO" without-judge
+scratch_tree "$SCR_YES" with-judge
+# The plant is ASSERTED TO HAVE TAKEN in both directions. A `cp` that silently did nothing, or
+# a scratch that accidentally inherited a judge, would make one of these arms prove nothing.
+if [ ! -e "$SCR_NO/scripts/perf/ws0_quiescence.py" ] \
+  && [ -f "$SCR_YES/scripts/perf/ws0_quiescence.py" ] \
+  && [ -f "$SCR_NO/docs/reports/ws0-3551-artifacts/clean-pairs.py" ]; then
+  pass "6. plant took: two scratch trees differing in exactly one property (the judge's presence)"
+else
+  fail "6. PLANT DID NOT TAKE: the scratch trees must differ only in scripts/perf/ws0_quiescence.py"
+fi
+for tool in clean-pairs.py window-census.py; do
+  python3 "$SCR_NO/docs/reports/ws0-3551-artifacts/$tool" --help >"$RUNOUT" 2>&1
+  rc=$?
+  if [ "$rc" -ne 0 ] && grep -qF 'REFUSED: cannot locate ws0_quiescence.py' "$RUNOUT" \
+    && grep -qF "$SCR_NO/scripts/perf" "$RUNOUT"; then
+    pass "6. $tool REFUSES with the judge absent, NAMING it and the path it looked in (rc=$rc)"
+  else
+    fail "6. $tool must refuse a missing judge by name, never fall back (rc=$rc, out: $(tailout))"
+  fi
+done
+# THE CONTROL, differing in that one property: with the judge beside it the SAME copy runs and
+# produces its table. Without this arm the refusals above would be satisfied by a tool that
+# cannot run from a copy at all.
+python3 "$SCR_YES/docs/reports/ws0-3551-artifacts/window-census.py" \
+  --root "$COV" --timeseries "$TS_OK" >"$RUNOUT" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ] && grep -qF 'All 2 sessions clean' "$RUNOUT"; then
+  pass "6. CONTROL: the same window-census.py copy with the judge present runs and reports clean"
+else
+  fail "6. the with-judge scratch copy must run (rc=$rc, out: $(tailout))"
+fi
+python3 "$SCR_YES/docs/reports/ws0-3551-artifacts/clean-pairs.py" \
+  --timeseries "$TS_OK" --set "set1=$COV" >"$RUNOUT" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ] && grep -qF '**2 clean**' "$RUNOUT"; then
+  pass "6. CONTROL: the same clean-pairs.py copy with the judge present runs and counts 2 clean"
+else
+  fail "6. the with-judge scratch copy of clean-pairs.py must run (rc=$rc, out: $(tailout))"
+fi
