@@ -387,9 +387,21 @@ exempt:
       gate. Its PR run remains a real, strict signal (CQLITE_REQUIRE_FIXTURES=1,
       panic-instead-of-skip) that an author should read.
       THE THREE DECLARED HALVES BELOW MAP TO THE THREE LEGS, and #3725 is what made
-      the cql-type one true. core-tests (`--features cli-helpers`) executes the
-      compression leg's targets and the tombstone leg's; compaction-byte-parity
-      names the tombstone leg's issue_1019. The cql-type leg was the gap this issue
+      the cql-type one true. CORRECTED by this issue's own C audit (F7): an earlier
+      draft of this paragraph said core-tests executes "the compression leg's targets
+      and the tombstone leg's". That is FALSE for 6 of the tombstone leg's 9 targets.
+      issue_1010/1011/1013 carry `#![cfg(feature = "delta-scan")]` and
+      issue_1012/1014/1015 `#![cfg(all(feature = "delta-scan", feature =
+      "write-support"))]`, so at `cli-helpers` all six compile to ZERO tests and
+      core-tests executes NONE of them. What core-tests does execute from that leg is
+      the other 3: issue_1019 and issue_1021 (gated on `write-support`, which is in
+      `default`) and the ungated sstable_parity_repaired_metadata_test --
+      compaction-byte-parity additionally names issue_1019. THE SIX ARE COVERED BY
+      feature-iso-delta-scan, the same component this issue added for the cql-type
+      leg, so the structured halves declared below are correct and it was this PROSE
+      that mis-attributed them. That is the #3493 shape reproduced INSIDE the field
+      built to stop it, and it is why the `merge_gating_half:` list is
+      machine-checked while this sentence can only be reviewed. The cql-type leg was the gap this issue
       was filed on: at `cli-helpers`, issue_1007_complex_type_parity's crate-level
       `#![cfg(feature = "delta-scan")]` compiles it to ZERO tests, so its 6 cases
       ran in no merge-gating lane at all. feature-iso-delta-scan now EXECUTES those

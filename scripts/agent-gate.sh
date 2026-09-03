@@ -647,9 +647,12 @@
 #                      (compile-only), while feature-iso-delta-scan EXECUTES — it drops
 #                      `--no-run` and additionally names the cqlite-core integration
 #                      targets DERIVED from their crate-root
-#                      `#![cfg(... feature = "delta-scan" ...)]` attributes (13 today,
-#                      incl. issue_1007_complex_type_parity), under the zero-tests
-#                      guards and, on the FULL gate only, CQLITE_REQUIRE_FIXTURES=1.
+#                      `#![cfg(... feature = "delta-scan" ...)]` attributes -- a DERIVED
+#                      population of 13, of which it NAMES and executes 12 (incl.
+#                      issue_1007_complex_type_parity); the 13th, issue_1704, is a
+#                      declared gap on unmet required-features (observability-testing) --
+#                      under the zero-tests guards and, on the FULL gate only,
+#                      CQLITE_REQUIRE_FIXTURES=1.
 #                      Isolation is unchanged: delta-scan WITHOUT parquet, never both.
 #                      clippy enables parquet AND delta-scan together, which is the
 #                      shape that MASKS cross-feature coupling; these two lanes are
@@ -7090,8 +7093,10 @@ _census_kind() {
     # feature-iso-delta-scan EXECUTES since #3725 -- it has NO `--no-run` pass, so cargo
     # emits `Running`/`test result:` and NEVER an `Executable ` line. It kept the
     # `compile` kind it carried while the lane WAS compile-only, so the census measured
-    # ZERO and read VACUOUS on a lane that had just executed 3346 lib + 72 integration
-    # tests -- the one failure mode this block's header warns about. Its parquet sibling
+    # ZERO and read VACUOUS on a lane that had just executed 3406 tests -- 3334 lib
+    # (3346 run, 12 ignored) + 72 integration -- the one failure mode this header warns
+    # about. Those figures are cargo's own, measured at this lane's feature set; if you
+    # quote a count here, quote which of run/passed it is, because they differ by 12. Its parquet sibling
     # is still `--lib --no-run` and stays `compile`; the two are no longer symmetric.
     feature-iso-delta-scan)                                            printf 'libtest' ;;
     feature-iso-parquet|minimal-build)                                 printf 'compile' ;;
@@ -15377,9 +15382,12 @@ EOF
 }
 
 # run_feature_iso <feature>: ONE isolation lane, parameterized by the feature under
-# test (issue #1699). Two dispatch arms consume it — feature-iso-parquet and
-# feature-iso-delta-scan — so the rationale lives once, here, and the two lanes can
-# never drift apart.
+# test (issue #1699). ONE dispatch arm consumes it today — feature-iso-parquet (:20460).
+# Its former second consumer, feature-iso-delta-scan, has its OWN executing
+# implementation since #3725 (run_feature_iso_delta_scan), so THE TWO LANES ARE
+# DELIBERATELY ASYMMETRIC: this one is compile-only, that one EXECUTES. Do not
+# "restore" the symmetry by routing delta-scan back through here — the asymmetry IS
+# the #3725 fix, and this script's own header declares it.
 #
 # WHY these lanes exist: run_clippy's cqlite-core arm enables legacy-heuristics,
 # parquet AND delta-scan together with ~30 more features. That combined shape is
@@ -15420,9 +15428,12 @@ EOF
 # gated out at this feature set) surfaces as a DEAD-CODE WARNING, and a lane without
 # -D warnings demotes that to a line nobody reads.
 #
-# `--no-run` rather than executing keeps the cost proportionate to the purpose: the
-# question is "does it still compile in isolation", not "do the tests pass" (core-tests
-# owns that, at the default feature set).
+# `--no-run` rather than executing keeps the cost proportionate to the purpose FOR THIS
+# LANE: the question here is "does parquet still compile in isolation", not "do the
+# tests pass" (core-tests owns that, at the default feature set). That trade-off was
+# re-decided for delta-scan and NOT for parquet — #3725 measured a real coverage hole
+# behind the compile-only posture there (13 crate-level-gated targets executing in no
+# merge-gating lane) and its lane now executes; parquet's equivalent census is #3373's.
 #
 # No opt-out env var: a committed feature is never legitimately absent.
 # _deny_warnings — run a cargo invocation with `-D warnings` ACTUALLY in effect.
@@ -15932,69 +15943,6 @@ EOF
   done <<EOF
 $_un_list
 EOF
-  # Which derived targets honour the strict-fixture flag at all. DERIVED, and it matters:
-  # a target outside the anti-vacuity mechanism can return successfully with its corpus
-  # absent, so the strict posture cannot be claimed for it. (MEASURED before the fix:
-  # scan_delta_parity_test PASSED against an EMPTY corpus and FAILED against a real one —
-  # the exact shape a fixture-blind target hides.)
-  #
-  # THE ACCEPTED VARIABLE IS EXACTLY THE ONE THIS LANE EXPORTS, and that coupling is the
-  # point (roborev round 2, R2-F2). An earlier cut accepted EITHER
-  # CQLITE_REQUIRE_FIXTURES or CQLITE_PARITY_REQUIRE_DATASETS while strict mode exports
-  # only the former — so a target honouring the parity variable ALONE would have been
-  # classified strict-aware and still skip-passed, the "silently accepts" shape this whole
-  # lane exists to remove. Widening the export to both was the alternative and was
-  # rejected: it makes two variables load-bearing where one suffices. Latent when found
-  # (measured: 0 of the 12 invoked targets reference the parity variable, all 12 reference
-  # CQLITE_REQUIRE_FIXTURES), so this changes nothing today and closes the future hole.
-  # If the export below ever changes, change this pattern in the same edit — they are one
-  # fact written twice and must not drift.
-  # AN EXECUTABLE LOOKUP, NOT A MENTION (roborev round 3, R3-F1). This matched the BARE
-  # identifier, so a target could satisfy it from a comment or a panic string while omitting
-  # the lookup entirely — classified strict-aware, still skip-passing. The pattern now
-  # requires the `env::var`/`var_os` CALL applied to the literal, which a comment or a
-  # message does not produce. TRI-STATE, like every grep in this lane: rc 0 = matched,
-  # rc 1 = no match, rc >= 2 = the scan FAILED and that is a FAIL, never "no match" — a
-  # three-valued signal read two-valued always picks the permissive answer.
-  #
-  # A BEHAVIOURAL PROBE WAS SPECIFIED AND REJECTED, and the reason is recorded so nobody
-  # rebuilds it: run each target under strict against an EMPTY corpus and, by outcome alone,
-  # fixture-AWARE fails while both fixture-BLIND (the defect) and fixture-FREE (legitimate)
-  # PASS. Separating those two requires knowing whether the target reads a corpus at all —
-  # a structural question — so the probe is circular. A "compared N rows" signal would break
-  # the tie, but no uniform one exists across these targets, and scan_delta_parity_test's own
-  # fixture-free `suppression_rule_requires_equal_writetimes_or_refuses` proves fixture-free
-  # tests live INSIDE otherwise fixture-dependent targets, so per-target granularity does not
-  # save it either. Shipping it would be a guard with a documented blind spot that READS as
-  # behavioural proof — the shape #3229 and #3400 both descoped.
-  #
-  # THE POPULATION WAS VERIFIED BEHAVIOURALLY ONCE, as evidence rather than as mechanism:
-  # every one of the 12 derived targets FAILS under CQLITE_REQUIRE_FIXTURES=1 against an
-  # empty datasets root — 71 of the 72 integration tests fail, the single pass being the
-  # fixture-free synthetic case named above.
-  # TWO NARROWINGS ON TOP OF THE R3-F1 PATTERN, each MEASURED against the real population
-  # before it was applied (all 12 targets still match, so neither is a false-red risk):
-  #
-  #   1. A WORD BOUNDARY before `var`. `(env::var|var)\(` also matched any call whose name
-  #      merely ENDS in `var` — `my_read_var("CQLITE_REQUIRE_FIXTURES")` satisfied it — so a
-  #      helper that names the variable while doing nothing with it counted as a lookup.
-  #      Measured: old pattern ACCEPTED that shape, this one rejects it. The bare-`var` arm
-  #      is kept because `use std::env::var;` then `var("…")` is a legitimate direct lookup.
-  #   2. `//`-COMMENT TAILS ARE STRIPPED FIRST. Otherwise a commented-out lookup — e.g.
-  #      `// this used to call std::env::var("CQLITE_REQUIRE_FIXTURES")` — satisfied the
-  #      check, which is the very shape R3-F1 was filed about, surviving in the one form the
-  #      new pattern could not see. Measured: accepted before, rejected now.
-  #
-  # A lookup quoted inside a Rust STRING needs escaped quotes (`\"CQLITE_…\"`) and so cannot
-  # match a pattern that requires a bare `"` — verified, not assumed, so the panic-message
-  # half of R3-F1 is closed by the grammar rather than by a second scan.
-  #
-  # NO PIPE INTO `grep -q`, deliberately. Under `set -o pipefail` an early-exiting `grep -q`
-  # SIGPIPEs its upstream and the PIPELINE reports 141 — which this code reads as ">= 2", a
-  # scan failure — so a healthy match would intermittently FAIL the lane. That is the #3380
-  # class, and section 19 of test_agent_gate_summary.sh lints this function for exactly it.
-  # The stripped copy goes to a file and `grep -c` consumes it whole: an AFFIRMATIVE count,
-  # which is what a permissive branch must key on.
   # THE PER-TARGET FIXTURE-AWARENESS CHECK IS DESCOPED — LEAD RULING on #3725 (COORD-3725-08).
   #
   # It used to scan each derived target's source for an executable `env::var` lookup of
@@ -19974,7 +19922,7 @@ run_file_size
 #     data — issue #1978), feature-iso-parquet (still `cargo test --lib --no-run`,
 #     compile-only — nothing executes, so no fixture can be consumed; its sibling
 #     feature-iso-delta-scan is NO LONGER in this list — #3725 widened it to EXECUTE
-#     13 dataset-consuming parity targets, so it IS in DATASET_COMPONENTS), and format-compat. format-compat is excluded (#1175
+#     12 dataset-consuming parity targets of a derived population of 13, so it IS in DATASET_COMPONENTS), and format-compat. format-compat is excluded (#1175
 #     finding 1): its sole target (cargo test -p format-compatibility-tests,
 #     tests/format-compatibility) is pure in-memory byte-level format-compliance
 #     assertions with hardcoded vectors — it reads no CQLITE_DATASETS_ROOT and no

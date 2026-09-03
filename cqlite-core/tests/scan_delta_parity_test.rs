@@ -759,11 +759,17 @@ fn assert_writetime(context: &str, actual_micros: i64, expected_micros: i64) {
     );
 }
 
-// FILE-SIZE NOTE (#1135, campsite rule): this file is 1755 lines, over the 1500-line test
-// threshold, and #3725 grew it by 40 to fix the oracle defect below. Splitting it — the
-// JSONL parsing half (~450 lines) is the obvious seam — is #1135's scope, not a parity
-// fix's, so that round of the gate ran with CQLITE_ALLOW_FILE_GROWTH=1 as the file-size
-// component's own remedy text instructs. Do not add to it without splitting.
+// FILE-SIZE NOTE (#1135, campsite rule): MEASURED at HEAD this file is 2085 lines against
+// a 1500-line test threshold — 585 over. #3725 grew it from origin/main's 1715, i.e. by
+// 370 lines, NOT the 40 an earlier draft of this note claimed: the figure was written when
+// only the oracle fix was in, and three later rounds (the fixture-posture cases, the
+// three-valued parse_cell, the suppression-rule assertions) each added to it without the
+// note being re-measured. Splitting it — the JSONL parsing half (~450 lines) is the
+// obvious seam — is #1135's scope, not a parity fix's, so the gate of record for #3725
+// runs with CQLITE_ALLOW_FILE_GROWTH=1, which is the file-size component's own documented
+// remedy. That is the THIRD consecutive override on this file and the split is now
+// genuinely owed; #1135 owns it. Do not add to it without splitting, and if you must,
+// RE-MEASURE this note in the same edit rather than carrying the number forward.
 
 /// Assert optional expiry times match, honouring Cassandra's per-cell SUPPRESSION rule.
 ///

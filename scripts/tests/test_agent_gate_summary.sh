@@ -3542,8 +3542,13 @@ fi
 
 
 # The two targets that used to IGNORE the strict flag must keep honouring it (roborev round
-# 1, finding 1). Source facts, and cheap: the lane's own guard fails closed if either
-# regresses, but a named assert here says WHICH file and WHY, and reds in the fast loop.
+# 1, finding 1). Source facts, and cheap -- and since the per-target awareness scan was
+# DESCOPED (COORD-3725-08) THIS ASSERT IS THE ONLY MECHANICAL CHECK ON THAT PROPERTY. The
+# lane exports CQLITE_REQUIRE_FIXTURES=1 but computes NO per-target verdict, so a target
+# that stopped honouring the flag would still run N>0 tests and satisfy every guard the
+# lane has -- there is no "fails closed if either regresses" behind this. It is a TWO-FILE
+# source check, not a population-wide one; #3789 owns declared per-target posture. What it
+# buys is naming WHICH file and WHY, and redding in the fast loop.
 for sf_ in scan_delta_parity_test issue_1008_counter_final_value_parity; do
   sf_path_="$SCRIPT_DIR/../../cqlite-core/tests/$sf_.rs"
   if [ ! -r "$sf_path_" ]; then
