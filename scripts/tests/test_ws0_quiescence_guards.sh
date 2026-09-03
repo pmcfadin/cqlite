@@ -606,6 +606,15 @@ if [ "$rc" -ne 0 ] && grep -q 'QUIESCENCE_SAMPLER_CADENCE_INVALID' <<<"$out"; th
 else
   fail "--cadence 0 must be refused (rc=$rc): $(head -1 <<<"$out")"
 fi
+# A negative --samples is a usage error, not "run forever": 0 is the documented unbounded value,
+# so a negative one is a caller who meant something else.
+out="$(python3 "$Q" sample-loop --out "$TMP/outside/n.jsonl" --samples -1 --cadence 0.05 \
+        --proc-root "$PROC_QUIET" 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'QUIESCENCE_SAMPLER_SAMPLES_INVALID' <<<"$out"; then
+  pass "a negative --samples is REFUSED (0 is the documented unbounded value)"
+else
+  fail "--samples -1 must be refused (rc=$rc): $(head -1 <<<"$out")"
+fi
 # ...and the DEFAULT cadence is the module's own constant, not a second literal.
 if python3 - "$Q" <<'PYCAD'
 import ast, sys
@@ -654,7 +663,7 @@ fi
 # doing its job on its own author, and it is why the rule is "derive by running": a source count
 # is an estimate, and an estimate in a floor is either decorative (too low) or a false failure
 # (too high).
-MIN_CHECKS=38
+MIN_CHECKS=39
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
