@@ -493,7 +493,7 @@
 #                      $TMPDIR, every driver call through ws0_driver_run.
 #                      Also runs scripts/tests/test_ws0_abc_driver_guards.sh (#3551) —
 #                      the INTERLEAVED A/B/C SET's own guards, the subject neither file
-#                      above can answer: is a directory of ws0-baseline.sh sessions ONE
+#                      above can answer: is a directory of WS0 measurement sessions ONE
 #                      PAIRED EXPERIMENT? Three roborev findings, one family (an artifact
 #                      ADOPTED without its provenance established). ws0-3551-abc.sh's
 #                      RESUME is deliberate and stays, so it is CHECKED: a run
@@ -516,9 +516,10 @@
 #                      to have TAKEN, because a sed that matched nothing leaves a RED arm
 #                      identical to its control. Hermetic: synthetic session dirs,
 #                      identity and binary fixtures under $TMPDIR, plus a recording STUB
-#                      ws0-baseline.sh beside the scratch copy, so the real driver is
-#                      never reached — asserted from the stub's own log (a positive
-#                      control proves the harness CAN see an invocation) and the shims.
+#                      standing in for the measurement driver beside the scratch copy,
+#                      so the real driver is never reached — asserted from the stub's
+#                      own log (a positive control proves the harness CAN see an
+#                      invocation) and from lib-ws0-hermetic.sh's shims.
 #                      Also runs scripts/tests/test_ws0_perf_invocation_lint.sh (#3272
 #                      item 10) — the THIRD structural guard, split out of the file above
 #                      under the campsite rule (it reached 1607 lines against the ~1500
@@ -16979,7 +16980,7 @@ run_tooling_tests() {
 
   # ws0 INTERLEAVED A/B/C GUARDS (#3551) — its own file because the two suites above are
   # about ONE SESSION (which CPUs, which program, what differs between the two arms of
-  # it) and this is about a SET of sessions: is a directory of `ws0-baseline.sh` runs one
+  # it) and this is about a SET of sessions: is a directory of WS0 measurement runs one
   # PAIRED EXPERIMENT? `ws0-3551-abc.sh`'s resume is deliberate (a shared box, and a set
   # that starts over loses its window), so it is CHECKED rather than removed: a run
   # FINGERPRINT — the corpus path AND its recorded Data.db sha256 + row count, the
@@ -17001,11 +17002,18 @@ run_tooling_tests() {
   # of the driver — those three are its definition of an arm, not flags) and the plant is
   # asserted to have TAKEN, since a `sed` that stopped matching leaves a RED arm identical
   # to its control. Hermetic: synthetic session dirs, corpus identity and binary fixtures
-  # under $TMPDIR, plus a recording STUB `ws0-baseline.sh` beside the scratch copy so
-  # `$HERE/ws0-baseline.sh` never resolves to the real one — and hermeticity is asserted
+  # under $TMPDIR, plus a recording STUB beside the scratch copy so the `$HERE/`-relative
+  # driver path never resolves to the real measurement driver — and hermeticity is asserted
   # AFFIRMATIVELY, from the stub's own log (one positive control proves the harness can
   # SEE an invocation) and from lib-ws0-hermetic.sh's shims. No cargo, perf, sudo,
   # taskset, root, corpus binaries, server or network.
+  # NOTE: the WS0 measurement driver's FILENAME is deliberately not written anywhere in
+  # this file. `test_ws0_hermeticity.sh`'s completeness census is CONTENT-based over every
+  # tracked file, so a prose mention here would report scripts/agent-gate.sh UNCOVERED and
+  # need the WHOLE GATE exempted from that lint — a real coverage reduction (a future gate
+  # component that genuinely invoked the driver would then go unflagged) bought for a
+  # comment. MEASURED: it reported exactly that, uncovered=1, the moment this comment first
+  # named it.
   echo ">>> [$name] bash scripts/tests/test_ws0_abc_driver_guards.sh"
   if ! bash "$REPO_ROOT/scripts/tests/test_ws0_abc_driver_guards.sh" >>"$log" 2>&1; then
     status=FAIL
