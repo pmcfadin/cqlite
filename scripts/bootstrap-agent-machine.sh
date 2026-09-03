@@ -316,11 +316,24 @@ fi
 # The same rule for the #3733 pair, resolved here rather than inline for the same reason:
 # flag ORDER must not change the outcome, and an explicit --fix beside an explicit --skip
 # is a usage error, never a silent resolution.
+SKIP_CLAUDE_AUTH_OVERRIDDEN=""
 if [ "$FIX_CLAUDE_AUTH" = 1 ] && [ "$SKIP_CLAUDE_AUTH" = 1 ]; then
   if [ "$SKIP_CLAUDE_AUTH_HOW" = "--skip-claude-auth" ]; then
     echo "bootstrap: --skip-claude-auth and --fix-claude-auth are contradictory (try --help)" >&2
     exit 2
   fi
+  # THE OVERRIDE IS RECORDED, NOT SILENT (#3733). The pair is decided BOTH ways above and
+  # that stays: two EXPLICIT opposite intents are a usage error, while the ENV spelling is
+  # the WEAKER signal and loses to an explicit `--fix-claude-auth` (a harness exporting the
+  # opt-out on a fixed command line must not be able to neuter a caller's explicit repair).
+  # What was wrong is that the losing intent was never mentioned: the operator opted out via
+  # the environment, asked for a repair, and got one with nothing saying which of their two
+  # intents was honoured. That is the same "a requested action's fate is unstated" shape as
+  # the missing-capability-script case in section 5c, one branch over — so it is REPORTED.
+  # Reported from section 5c rather than here because `info()` is not defined yet at this
+  # point in the file, and because that is where a reader is looking when they wonder why
+  # the section ran at all.
+  SKIP_CLAUDE_AUTH_OVERRIDDEN="$SKIP_CLAUDE_AUTH_HOW"
   SKIP_CLAUDE_AUTH=0; SKIP_CLAUDE_AUTH_HOW=""
 fi
 
@@ -3183,6 +3196,12 @@ fi
 # WHY THIS IS NOT INLINE: bootstrap is already 3000+ lines, and the logic is worth testing
 # on its own — the same argument that put the perf checks in scripts/perf-capability.sh.
 hdr "Claude credential reachability (issue #3733)"
+# WHICH OF TWO CONTRADICTORY INTENTS LOST, said out loud (see the resolution beside the flag
+# parsing). Only the ENV opt-out can reach here: an explicit `--skip-claude-auth` beside
+# `--fix-claude-auth` already exited 2 as a usage error.
+if [ -n "${SKIP_CLAUDE_AUTH_OVERRIDDEN:-}" ]; then
+  info "claude-auth-repair: $SKIP_CLAUDE_AUTH_OVERRIDDEN was OVERRIDDEN by the explicit --fix-claude-auth — the env opt-out is the weaker signal, so this section RAN and the repair was attempted. Drop --fix-claude-auth to honour the opt-out instead"
+fi
 CLAUDE_AUTH_LIB="$REPO_ROOT/scripts/claude-auth-capability.sh"
 # INITIALISE BEFORE THE GUARDS, never after: the gate below is read as
 # ${CLAUDE_AUTH_SECTION_OK:-0}, so an INHERITED CLAUDE_AUTH_SECTION_OK=1 must not be able

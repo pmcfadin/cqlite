@@ -3066,7 +3066,7 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # one.
 # THE FIGURE IS MEASURED, NOT COUNTED BY EYE, AND IT IS RE-MEASURED WHENEVER IT MOVES:
 # forcing the tmux block's `command -v tmux` test to `true` in a throwaway `git worktree`
-# reports 170 always-run (169/1/1 while section 43 was still red). The value in this file is the authority — a figure quoted in a commit
+# reports 170/0/1. The value in this file is the authority — a figure quoted in a commit
 # message is a snapshot of the run that produced it and does not follow later edits.
 CASE_FLOOR=170
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
