@@ -323,10 +323,19 @@ fn concurrent_misses_single_flight_one_parse_per_generation() {
     drop(temp);
 }
 
-/// **Fix C — cancel granularity inside the parse.** Cancelling DURING a large
-/// `Index.db` parse must abort promptly with `WarmError::Cancelled`, not run the
-/// whole O(entries) parse to completion. A single big generation (150k
-/// partitions) keeps that parse the dominant cost of the open being aborted.
+/// **Fix C — cancel granularity at the parse.** A cancel that becomes visible AT
+/// THE ENTRY to a large `Index.db` open+parse must abort promptly with
+/// `WarmError::Cancelled`, not run the whole O(entries) parse to completion. A
+/// single big generation (150k partitions) keeps that parse the dominant cost of
+/// the open being aborted.
+///
+/// The name says `at_entry`, not `during`, and that is deliberate (issue #3940):
+/// the cancel lands immediately BEFORE the entry loop, so what this test
+/// discriminates is the parse's cancel AWARENESS, not its poll STRIDE. A name is
+/// a claim about behaviour (the #3641 ruling), and the predecessor's name —
+/// `cancel_during_large_index_parse_aborts_promptly` — would now overstate it.
+/// The stride's own coverage lives beside the loop in cqlite-core and is named
+/// at the assertion site.
 ///
 /// Positioning is STRUCTURAL, not calibrated (issue #3940). The cancel is
 /// tripped by the OPENING thread itself, from the pre-parse barrier inside the
@@ -362,7 +371,7 @@ fn concurrent_misses_single_flight_one_parse_per_generation() {
 /// `ensure_materialized_cancel_mid_parse_aborts_promptly`
 /// (`cqlite-core/src/storage/sstable/index_reader/lazy.rs`).
 #[test]
-fn cancel_during_large_index_parse_aborts_promptly() {
+fn cancel_at_large_index_parse_entry_aborts_promptly() {
     let schema = simple_schema();
     let (_temp, table_dir) = build_big_single_gen(&schema, 150_000);
 
@@ -441,9 +450,9 @@ fn cancel_during_large_index_parse_aborts_promptly() {
     // mid-loop landing is precisely that test's value) and is tracked as issue #3982.
     assert!(
         matches!(res, Err(WarmError::Cancelled)),
-        "a cancel tripped on the opening thread immediately before a large \
+        "a cancel tripped on the opening thread AT THE ENTRY to a large \
          Index.db open+parse must abort with Cancelled, got {:?} (issue #2383 \
-         fix C; positioning per issue #3940)",
+         fix C; structural positioning + name per issue #3940)",
         res.map(|w| (w.outcome, w.readers.len()))
     );
 }
