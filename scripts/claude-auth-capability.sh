@@ -1833,6 +1833,27 @@ claude_auth_emit_tmux() {
   return 0
 }
 
+# claude_auth_refuse_args <why>: one refusal path for every usage error, status 2.
+#
+# STATUS 2 BECAUSE THE CONTRACT ALREADY PROMISES 2 — the usage text says "For the three
+# report modes the ONLY non-zero status is a usage error (2)". This honours a promise that
+# was already made and was not kept for arguments AFTER a recognised mode; no doc changes.
+#
+# IT CANNOT COLLIDE WITH THE REPORT MODES' DELIBERATE `return 0`, and that matters: those
+# return 0 so no exit status can become the certification #3733 removed. A refusal happens
+# BEFORE anything is printed, so there is no run in which a PRINTED REPORT carries a
+# non-zero status — a usage error is not a verdict about the box.
+#
+# THE VALUE GOES THROUGH `claude_auth_redact`, which here flattens control characters and
+# truncates (the secret pattern is still empty this early). An argument is operator-supplied
+# text on its way to stderr, and one containing a newline could otherwise forge an extra
+# line of output. Same rule as every other rendered value in this file.
+claude_auth_refuse_args() {
+  printf 'claude-auth-capability: %s\n' "$(claude_auth_redact "$1")" >&2
+  claude_auth_usage >&2
+  return 2
+}
+
 claude_auth_main() {
   local show=0 rc=0
   case "${1:-}" in
@@ -1841,13 +1862,32 @@ claude_auth_main() {
     # keeping it would be a place for a verdict to grow back, and it made the usage text
     # claim a non-zero status no input can produce. A refused test-only seam still PRINTS
     # its UNMEASURED line, so even that is a report.
+    # EVERY ARM VALIDATES ITS ARGUMENT COUNT BEFORE IT DOES ANYTHING (#3733 F2). An unknown
+    # FIRST argument was already refused; everything AFTER a recognised mode was silently
+    # IGNORED — so `--auth --typo` ran the REAL, BILLED `claude -p` probe while the operator
+    # believed they had typed something else. That is a silent spend plus a report they will
+    # misread as being about the flag they meant, and the check has to come before the probe
+    # rather than after it.
     --auth)
+      if [ "$#" -gt 2 ]; then
+        claude_auth_refuse_args "--auth takes at most one option (--show-probe-output), got $# arguments"; return 2
+      fi
+      if [ "$#" -eq 2 ] && [ "$2" != --show-probe-output ]; then
+        claude_auth_refuse_args "--auth: unrecognised option '$2' — the only one is --show-probe-output"; return 2
+      fi
       [ "${2:-}" = --show-probe-output ] && show=1
       claude_auth_emit_auth "$show"
       claude_auth_emit_scope_note
       return 0 ;;
-    --tmux-env)     claude_auth_emit_tmux; claude_auth_emit_scope_note; return 0 ;;
+    --tmux-env)
+      if [ "$#" -ne 1 ]; then
+        claude_auth_refuse_args "--tmux-env takes no options, got $(($# - 1)) extra argument(s) starting at '${2:-}'"; return 2
+      fi
+      claude_auth_emit_tmux; claude_auth_emit_scope_note; return 0 ;;
     --report)
+      if [ "$#" -ne 1 ]; then
+        claude_auth_refuse_args "--report takes no options, got $(($# - 1)) extra argument(s) starting at '${2:-}'"; return 2
+      fi
       claude_auth_emit_auth 0
       claude_auth_emit_tmux
       claude_auth_emit_scope_note
@@ -1855,9 +1895,21 @@ claude_auth_main() {
     # THE ONE ENTRY POINT WHOSE STATUS IS STILL MEANINGFUL: seeding is an ACTION, and an
     # action that did not happen is a failure worth returning. The re-report that follows
     # it cannot change the status — it is a report.
-    --fix-tmux-env) claude_auth_fix_tmux_env || rc=1; claude_auth_emit_tmux; claude_auth_emit_scope_note; return $rc ;;
-    -h|--help|'')   claude_auth_usage ;;
-    *) printf 'claude-auth-capability: unknown arg: %s\n' "$1" >&2; claude_auth_usage >&2; return 2 ;;
+    --fix-tmux-env)
+      if [ "$#" -ne 1 ]; then
+        claude_auth_refuse_args "--fix-tmux-env takes no options, got $(($# - 1)) extra argument(s) starting at '${2:-}'"; return 2
+      fi
+      claude_auth_fix_tmux_env || rc=1; claude_auth_emit_tmux; claude_auth_emit_scope_note; return $rc ;;
+    -h|--help|'')
+      # `$#` is 0 for a bare invocation, so this fires only for `--help <something>`.
+      if [ "$#" -gt 1 ]; then
+        claude_auth_refuse_args "--help takes no options, got $(($# - 1)) extra argument(s) starting at '${2:-}'"; return 2
+      fi
+      claude_auth_usage ;;
+    # ROUTED THROUGH THE SAME REFUSAL as the arms above, which is not only tidiness: this arm
+    # printed `$1` VERBATIM, so an argument carrying a newline could forge an extra line of
+    # output. The shared path flattens control characters at the one emit boundary.
+    *) claude_auth_refuse_args "unrecognised argument '$1'"; return 2 ;;
   esac
 }
 

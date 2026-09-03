@@ -2591,6 +2591,72 @@ else
 fi
 
 # =====================================================================================
+# 41. AN UNKNOWN OR EXTRA ARGUMENT IS REFUSED, NOT IGNORED (#3733 F2).
+#     `--auth --typo` silently ran the REAL, BILLED `claude -p` probe while the operator
+#     believed they had typed something else — a silent spend plus a report they will misread
+#     as being about the flag they meant. An unknown FIRST argument was already refused; what
+#     was ignored was everything AFTER a recognised mode.
+#     THE STATUS IS 2 BECAUSE THE CONTRACT ALREADY PROMISES 2, verified rather than invented:
+#     the usage text says "For the three report modes the ONLY non-zero status is a usage
+#     error (2)". So this honours a promise that was already made and not kept, and the
+#     contract text needs no change.
+#     IT CANNOT COLLIDE WITH THE REPORT MODES' DELIBERATE `return 0`: the refusal happens
+#     BEFORE any report is printed, so there is no run in which a printed report carries a
+#     non-zero status. That `return 0` exists so no exit status can become the certification
+#     #3733 removed, and a usage error is not a verdict about the box.
+# =====================================================================================
+# EVERY MODE, TABLE-DRIVEN, so a mode added later without a length check is visible as a
+# missing row rather than as silence. `probe-must-not-run` is the point of the case: the
+# `claude` stub here RECORDS being invoked, and a refusal must leave that record empty.
+d41=$(mkshim "$tmp/s41")
+cat >"$d41/claude" <<EOF
+#!/usr/bin/env bash
+printf 'invoked\n' >>"$d41/claude-invocations.log"
+printf '%s\n' '$SENTINEL'
+EOF
+chmod +x "$d41/claude"
+plant_tmux "$d41" complete
+a41_bad=''
+for a41_case in \
+  '--auth --typo' \
+  '--auth --show-probe-output extra' \
+  '--tmux-env extra' \
+  '--report extra' \
+  '--fix-tmux-env extra' \
+  '--help extra'
+do
+  # shellcheck disable=SC2086  # deliberate word-split: the case IS an argument vector
+  run_cap "$d41" "$ef2" -- $a41_case
+  [ "$rc" = 2 ] || a41_bad="${a41_bad:+$a41_bad; }[$a41_case]=rc$rc"
+done
+if [ -z "$a41_bad" ]; then
+  ok "argument validation: every unknown or extra argument is refused with status 2"
+else
+  bad "argument validation: these invocations were not refused with 2: $a41_bad"
+fi
+# THE BILLED PROBE MUST NOT HAVE RUN. This is the cost the finding is about, and a status
+# assertion alone would not see it: a refusal that still probed would pass the check above.
+if [ ! -f "$d41/claude-invocations.log" ]; then
+  ok "argument validation: no refused invocation ran the real (billed) claude probe"
+else
+  bad "argument validation: a refused invocation still ran the claude probe $(grep -c . "$d41/claude-invocations.log") time(s) — the operator is billed for a command they mistyped"
+fi
+# AND THE VALID FORMS MUST STILL WORK — a refusal that rejected the documented spellings
+# would be the guard that reds on correct input.
+run_cap "$d41" "$ef2" -- --auth --show-probe-output
+if [ "$rc" = 0 ] && grep -q '^claude-auth: ' <<<"$out"; then
+  ok "argument validation: the documented '--auth --show-probe-output' form still runs and exits 0"
+else
+  bad "argument validation: the valid --show-probe-output form was refused (rc=$rc): $out"
+fi
+run_cap "$d41" "$ef2" -- --help
+if [ "$rc" = 0 ] && grep -q 'usage:' <<<"$out"; then
+  ok "argument validation: bare --help still works and exits 0"
+else
+  bad "argument validation: --help regressed (rc=$rc)"
+fi
+
+# =====================================================================================
 # 37. ROOT MUST CREATE EVERYTHING IT OWNS **BEFORE** IT TRANSFERS THE DIRECTORY (#3733,
 #     was LIMITATION 4 of 5, now FIXED).
 #     WHY THIS ONE IS NOT COVERED BY THE "IT IS ONLY A REPORT" RULING. The other four
@@ -2881,8 +2947,9 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # a host without `uname` is a named refusal at startup, because that host would take the
 # non-Linux branch in every case. Raised 91 -> 122 by round 4 (the digest identity of a
 # delivered credential, the sudo-posture cases, and the bounding class), 122 -> 124 by
-# round 5's two probe-working-directory interrupt cases, and 124 -> 159 by #3733's
-# DEMOTION, the handover fix, the two repair-status fixes and the bounded report read.
+# round 5's two probe-working-directory interrupt cases, and 124 -> 163 by #3733's
+# DEMOTION, the handover fix, the two repair-status fixes, the bounded report read and the
+# argument validation.
 # Sections 34-36 (the
 # no-certification invariant, the alternate-credential observation, the
 # limitation-findability guard and the live/FIXED split), section 37 (the handover ordering,
@@ -2891,13 +2958,14 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # pin, the marker-scanner positive control, section 39 (a PARTIAL repair must not report
 # success, and a COMPLETE one must still exit 0), and the assertions that changed subject
 # where a verdict became an observation, and section 40 (the pane report is read ONCE, under
-# the bound — the fifo-substitution BLOCKER). 162 cases run, and the real-tmux isolation case
-# (3 assertions) is still the only legitimately skippable one.
+# the bound — the fifo-substitution BLOCKER) and section 41 (unknown/extra arguments are
+# refused with status 2 and never reach the billed probe). 166 cases run, and the real-tmux
+# isolation case (3 assertions) is still the only legitimately skippable one.
 # THE FIGURE IS MEASURED, NOT COUNTED BY EYE, AND IT IS RE-MEASURED WHENEVER IT MOVES:
 # forcing the tmux block's `command -v tmux` test to `true` in a throwaway `git worktree`
-# reports 159/0/1. The value in this file is the authority — a figure quoted in a commit
+# reports 163/0/1. The value in this file is the authority — a figure quoted in a commit
 # message is a snapshot of the run that produced it and does not follow later edits.
-CASE_FLOOR=159
+CASE_FLOOR=163
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1
