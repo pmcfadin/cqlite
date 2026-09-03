@@ -75,6 +75,42 @@
 //! INCIDENTALLY: the header arm resynchronised and #3782's ROW arm then refused
 //! the garbage it landed on. That is why the BIG case asserts the ABSENCE of the
 //! resync WARN as well as the refusal — see its own comment.
+//!
+//! # Fix round 1 — a TRUNCATED header, and two more swallows
+//!
+//! A flipped byte and a truncated file are different corruption classes and
+//! reach different classifier arms, so review found two more swallows that the
+//! byte-flip cases above cannot see. Both were measured on a prefix of this same
+//! Cassandra-written section, cut inside the LAST partition's header:
+//!
+//! * **the two stitched walks DISAGREED.** With one header byte surviving, the
+//!   block walk answered `Ok` with **99** of 100 partition keys while the
+//!   cell-metadata walk answered `Err("Unexpected end at partition key
+//!   length")` — on the same bytes. `data_access/mod.rs:249` and `:288` hand
+//!   both walks the SAME stitched `Complete` buffer, so that is `SELECT *`
+//!   answering `Ok` and `SELECT *, WRITETIME(c)` answering `Err` over one file.
+//! * **the sliding drivers reported a truncated header as CLEAN COMPLETION.**
+//!   `PartitionHeaderReadiness::Incomplete` at the final chunk became
+//!   `DriverHeader::Done` for every cause, so a header declaring a 16-byte key
+//!   with only 10 bytes present answered `Done` and dropped the partition.
+//!
+//! Both are pinned by `both_stitched_walks_agree_and_refuse_a_truncated_final_header`
+//! and `the_sliding_driver_refuses_a_final_chunk_header_truncated_past_its_length`.
+//!
+//! # DECLARED RESIDUAL — the partition-key LENGTH model (#3999)
+//!
+//! Every refusal here that rests on a declared key length says what **CQLite
+//! READ**, never what Cassandra declared, and carries a `#3999` note. Cassandra
+//! writes that length as an unsigned 2-byte big-endian value with NO flags byte
+//! (`SortedTablePartitionWriter.start` →
+//! `ByteBufferUtil.writeWithShortLength`); CQLite reads byte 0 as flags and byte
+//! 1 as a one-byte length, so the models agree only for keys under 256 bytes.
+//! For a longer key CQLite reads a length of `0` and these arms would refuse a
+//! legitimate table. Correcting the model is a different family needing a
+//! 256-byte-key fixture the corpus does not have — **#3999**. The refusal stays
+//! (loud beats silent, which is this issue's whole subject) and names the issue.
+//! No corpus table has a key that long, which is why the negative control below
+//! is green.
 #![cfg(all(
     feature = "state_machine",
     feature = "cli-helpers",
@@ -756,12 +792,18 @@ async fn bti_scan_refuses_a_partition_header_cassandra_itself_rejects() {
 /// # AC3, measured rather than argued (2026-09-03, `CQLITE_DATASETS_ROOT=/data/datasets`)
 ///
 /// Counters were planted at every tolerance site — the three ROW arms and the
-/// five HEADER arms — and the whole corpus was walked on `iterate_all_partitions`,
+/// six HEADER arms — and the whole corpus was walked on `iterate_all_partitions`,
 /// `get_all_entries` and both `*_for_compaction` surfaces, on the PRE-fix tree
 /// and on the POST-fix tree. **The two runs are identical:** 126 tables / 148
 /// SSTables / 71313 emitted elements, **542** mid-stream row tolerations (all on
 /// the streaming compaction driver, all at `at_final_chunk == false`), **0**
 /// firings at ANY header arm in either direction, and **0** errors.
+///
+/// RE-TAKEN after fix round 1 added two more refusing arms (the drivers'
+/// truncated-`Incomplete` refusal and the block walk's sub-two-byte tail): the
+/// same figures again, to the unit — 542, and 0 at all six header sites. So
+/// neither new arm fires on well-formed input, and the row arm's count has not
+/// moved across either round.
 ///
 /// So the header-arm refusal costs nothing on well-formed input, and the row
 /// arm's toleration count did not move — which is AC3's property. The
