@@ -13,9 +13,11 @@ use super::*;
 // L1: a declared gap retires itself once the divergence is gone
 // =======================================================================
 
-/// The one declared gap this lane scopes to a UDT FIELD, with its own divergence:
+/// The gap this lane scoped to a UDT FIELD until #3631, with its own divergence:
 /// the golden decodes the nested `frozen<address>` and the egress renders the raw
-/// bytes as a CQL blob literal.
+/// bytes as a CQL blob literal. SYNTHETIC since #3631 — the egress decodes that
+/// field now, no case declares this gap, and these cases exercise the staleness
+/// machinery that retired it.
 const HOME_GAP: [(&str, Divergence); 1] = [("e.home", Divergence::NestedFrozenUdtRendersAsBlobHex)];
 
 /// The `udt_nested` golden's `e` value: `home` DECODED, as `sstabledump` writes it.
@@ -39,9 +41,10 @@ fn employee_cli(id: Value, home: Value) -> Vec<Row> {
     ])]
 }
 
-/// The blob-hex spelling CQLite renders `e.home` as — the nested UDT's serialized
-/// bytes, which is the SHAPE the gap declares (the exact bytes are not what the gap
-/// is keyed on; see `Divergence::NestedFrozenUdtRendersAsBlobHex`).
+/// The blob-hex spelling CQLite rendered `e.home` as BEFORE #3631 — the nested
+/// UDT's serialized bytes, which is the SHAPE the gap declares (the exact bytes are
+/// not what the gap is keyed on; see `Divergence::NestedFrozenUdtRendersAsBlobHex`).
+/// A synthetic value from #3631 on: the egress decodes that field now.
 const HOME_AS_BLOB_HEX: &str =
     "0x0000000a31204e617679205761790000000941726c696e67746f6e000000053232323031";
 
@@ -151,7 +154,8 @@ fn one_diverging_row_keeps_a_skip_applied() {
 /// diverge forever — the finding's own shape, one level down.
 ///
 /// The DDL is the real `udt_nested` shape (`test-data/schemas/*.cql`), whose
-/// `e.home` gap is one of this lane's declared CSV exclusions.
+/// `e.home` gap was one of this lane's declared CSV exclusions until #3631 retired
+/// it — by this very rule, on the real corpus.
 #[test]
 fn a_csv_skip_on_a_nested_container_retires_when_it_decodes_and_agrees() {
     let schema = schema_of(NESTED_UDT_DDL, "t");
