@@ -1,6 +1,9 @@
 //! Issue #3935 — the LAST TWO `time` ordering sites: `Value::PartialOrd` and the
-//! write engine's `compare_values`, the second of which decides the PHYSICAL ROW
-//! ORDER written to `Data.db` for a `time` CLUSTERING COLUMN.
+//! write engine's `compare_values`, the second of which is the comparator that
+//! WOULD decide the physical row order written to `Data.db` for a `time`
+//! CLUSTERING COLUMN. See `# WHAT compare_values GOVERNS TODAY` below before
+//! reading that as a disk-reaching claim: the write path REFUSES a `time`
+//! clustering column today, so the refusal precedes any ordering effect.
 //!
 //! # The defect
 //!
@@ -15,13 +18,42 @@
 //! * `write_engine::clustering_order::compare_values`'s `Time` arm, reached by BOTH
 //!   `ClusteringKey::compare` (schema-aware) and `ClusteringKey`'s `Ord` (the
 //!   memtable `BTreeMap` key order). `write_engine::merge` then sorts merged
-//!   rows with `ClusteringKey::compare` "for output order", so this one decides
-//!   the physical row order in the emitted `Data.db`.
+//!   rows with `ClusteringKey::compare` "for output order", so this one is what
+//!   WOULD decide the physical row order in the emitted `Data.db` for such a
+//!   column (see the TODAY section below).
 //!
 //! The split is the harm, and a PARTIAL fix would have DEEPENED it, so #3935
 //! swept the class. This file pins the two sites this round changed, plus the
-//! asymmetry that must NOT be "unified" away, plus the disk-reaching
-//! consequence at the write surface.
+//! asymmetry that must NOT be "unified" away, plus the write surface's
+//! DECLARED GAP.
+//!
+//! # WHAT `compare_values` GOVERNS TODAY
+//!
+//! An earlier revision of this header asserted flatly that `compare_values`
+//! "decides the PHYSICAL ROW ORDER written to `Data.db` for a `time` CLUSTERING
+//! COLUMN". That is FALSE TODAY, and this file's own
+//! `a_time_clustering_column_is_refused_by_the_write_path_declared_gap` is what
+//! falsifies it: `data_writer/encoding::serialize_value_for_clustering` has no
+//! `Custom` arm, so `(Value::Time(_), ComparatorType::Custom("time"))` reaches
+//! its `_ =>` fail-closed refusal ("Type mismatch or unsupported clustering
+//! type"). CQLite cannot WRITE a `time` clustering column at all, so the
+//! refusal precedes any ordering effect and no `time` clustering row order
+//! reaches disk from CQLite today. A false claim standing beside its own
+//! falsifying test is the defect class that produced #3935 in the first place,
+//! so it is stated here rather than left for the next reader to trip over.
+//!
+//! What `compare_values` DOES govern today, and what it would govern later:
+//!
+//! * TODAY — the memtable `BTreeMap` key order, via `ClusteringKey`'s `Ord`
+//!   (that is in-memory placement, not bytes on disk); and
+//! * TODAY — the compaction/flush MERGE order, via `write_engine::merge`'s
+//!   `ClusteringKey::compare` sort "for output order", for every clustering
+//!   type the serializer DOES support;
+//! * LATER — the physical row order in the emitted `Data.db` for a `time`
+//!   clustering column, once `serialize_value_for_clustering` grows the
+//!   `Custom("time")` arm. The comparator half is already correct (the
+//!   declared-gap case corroborates the order the merge WOULD emit), so only
+//!   the serializer is missing.
 //!
 //! Range validation was considered and REFUSED (issue #3935, lead ruling): if
 //! stock Cassandra can write a value, CQLite must read it, and Cassandra's own
@@ -57,6 +89,20 @@
 //! CONTROL: every case asserts the two candidate sequences differ, so a green
 //! result provably discriminates the two implementations rather than being
 //! satisfiable by any total order.
+//!
+//! # Gate
+//!
+//! `#![cfg(feature = "write-support")]` is REQUIRED, not a narrowing:
+//! `storage::write_engine` itself is `#[cfg(feature = "write-support")]`, so an
+//! ungated target breaks a `--no-default-features --all-targets` build (measured:
+//! `E0432 unresolved import cqlite_core::storage::write_engine`). `write-support`
+//! is a DEFAULT feature, so this target still EXECUTES in the gate of record's
+//! `core-tests` (`cargo test -p cqlite-core --features cli-helpers`, which keeps
+//! defaults) rather than joining the compiles-everywhere / executes-nowhere set
+//! (#3522). Stated as a `#![cfg]` and NOT as `required-features` in `Cargo.toml`,
+//! matching the companion `issue_3935_collection_time_byte_order.rs`.
+
+#![cfg(feature = "write-support")]
 
 use std::collections::HashMap;
 
