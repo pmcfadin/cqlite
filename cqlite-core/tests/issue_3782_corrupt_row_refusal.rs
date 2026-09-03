@@ -7,7 +7,7 @@
 //! `SlidingPartitionPolicy::on_data_row` returned `Option<usize>`, collapsing
 //! every decode error into "the row did not parse". The driver then treated that
 //! as end-of-partition. Measured on a REAL Cassandra fixture with ONE byte of a
-//! `text` clustering value flipped (see `support/corrupt_clustering_fixture.rs`):
+//! `text` clustering value flipped (see `support/corrupt_byte_fixture.rs`):
 //!
 //! | surface                                  | control | before the fix |
 //! |------------------------------------------|---------|----------------|
@@ -94,7 +94,7 @@ use cqlite_core::Database;
 
 #[path = "support/datasets_root.rs"]
 mod datasets_root;
-#[path = "support/corrupt_clustering_fixture.rs"]
+#[path = "support/corrupt_byte_fixture.rs"]
 mod fixture;
 #[path = "support/multiset.rs"]
 mod multiset;

@@ -92,7 +92,7 @@ use cqlite_core::ingestion::{ingest, IngestionConfig};
 use cqlite_core::query::result::QueryRow;
 use cqlite_core::Config;
 
-#[path = "../support/corrupt_clustering_fixture.rs"]
+#[path = "../support/corrupt_byte_fixture.rs"]
 mod fixture;
 #[path = "../support/multiset.rs"]
 mod multiset;

@@ -362,7 +362,7 @@ required-features = ["observability-testing", "delta-scan", "lz4"]
 # and all three gates are load-bearing: `cli-helpers` (which implies
 # `state_machine`) for the `ingestion`/`Database` surface the lanes drive, and
 # `lz4` because EVERY fixture they read is an LZ4-compressed Cassandra 5.0
-# SSTable — `support/corrupt_clustering_fixture.rs` asserts the algorithm before
+# SSTable — `support/corrupt_byte_fixture.rs` asserts the algorithm before
 # mutating, and without the feature `Compressor::decompress` answers
 # `Err("LZ4 compression not available")`. Declaring only the first two let
 # `cargo test -p cqlite-core --no-default-features --features cli-helpers` RUN
