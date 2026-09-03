@@ -1,10 +1,10 @@
 //! Core data types for CQLite
 
 pub mod comparator;
+pub mod empty_value;
 // `impl PartialOrd for Value` only — PRIVATE on purpose: a trait impl applies
 // crate-wide regardless of module visibility, so this adds no public surface.
 mod value_ord;
-pub mod empty_value;
 
 #[cfg(test)]
 mod comparator_test;
