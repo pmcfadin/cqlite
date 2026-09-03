@@ -206,7 +206,19 @@ Figures below are refreshed from the committed artifacts; the tables in
 See [`clean-pairs.md`](ws0-3551-artifacts/clean-pairs.md), produced by
 [`clean-pairs.py`](ws0-3551-artifacts/clean-pairs.py).
 
-<!-- CLEAN-PAIRS-TABLE -->
+**31 of 42 sessions across three sets ran under a zero census.** Every direction count is
+unanimous and every pair's own control is an order of magnitude below its treatment.
+
+| arm | clean pairs | median Δcycles/row | median Δrows/s | direction (rows/s) | worst pair-control | median IPC |
+|---|--:|--:|--:|--:|--:|--:|
+| **B** `2,3` glibc | 6 | +17.85% | **−19.25%** | 0/6 up | 1.92% | 1.3903 |
+| **C0** `2,3` arena=2 | 4 | +22.11% | **−22.71%** | 0/4 up | 1.80% | 1.3590 |
+| **D** `2,10` jemalloc | 3 | −21.71% | **+29.21%** | 3/3 up | 0.70% | 1.5581 |
+| **C** `2,3` jemalloc | 6 | −42.37% | **+61.17%** | 6/6 up | 2.41% | 2.1206 |
+
+`worst pair-control` is the largest bare-scan disagreement inside any counted pair — identical
+code on identical CPUs, so it is that pair's own drift bound. Nothing here is closer to its
+control than 8x.
 
 ### 5b. Set-level corroboration
 
@@ -216,17 +228,108 @@ See [`clean-pairs.md`](ws0-3551-artifacts/clean-pairs.md), produced by
 contaminated; their set-level medians are reported for corroboration and their per-session
 verdicts are in the adjacent `window-census.md`.
 
-<!-- SET-TABLES -->
+Set-level medians, three independent sets, Layer 2 (rows/s, paired vs A):
+
+| arm | set 1 (12/12 clean) | set 2 (6/15 clean) | set 3 (12/15 clean) | pooled clean pairs |
+|---|--:|--:|--:|--:|
+| B | −14.16% | −18.48% | −20.01% | −19.25% |
+| C0 | −22.29% | −24.60% | −19.93% | −22.71% |
+| C | +64.07% | +61.28% | +57.44% | +61.17% |
+| D | (not in set) | +29.21% | +30.31% | +29.21% |
+
+Cross-arm control movement on cycles/row: **1.12%** (set 1), **0.63%** (set 2), **1.21%**
+(set 3). The four estimates of each arm agree far more closely than any of them approaches zero,
+and set 1 — which is fully clean and contains no arm D — reproduces the same three signs and
+roughly the same magnitudes as the two partly-contaminated sets. Admission triple identical at
+**4 / derived / 2** in all 42 sessions.
 
 ### 5c. What the numbers say
 
-<!-- INTERPRETATION -->
+**1. The SMT-contention hypothesis is falsified in its stated direction.** #3551 proposed that
+co-locating the `spawn_blocking` encode thread and the gRPC framing thread on one physical core's
+two hyperthreads was *costing* throughput. Measured, separating them onto two physical cores
+costs **−19.25% rows/s** and **+17.85% cycles/row**, 0 of 6 clean pairs positive. The inherited
+#3096 pinning is not a confound to be removed; it is a **locality benefit**.
+
+That is consistent with #3248's own §3 result — the Flight arm touches **5.19x the bytes for
+1.22x the accesses**, which is a locality finding — and with the mechanism: the encode thread
+hands buffers to the framing thread, so on one core the handoff is L1/L2-local and splitting them
+across cores turns it into cross-core coherence traffic. `cycles/row` rising while rows/s falls is
+the signature of the same work costing more, not of less work being done.
+
+**2. F1's arena mechanism is falsified in its stated direction, which is exactly what it was
+pre-registered to test.** F1 reasoned that *more* arenas meant more cross-arena lock traffic, so
+capping should help. Capping to 2 measures **−22.71% rows/s** (0 of 4 pairs positive) — worse than
+the uncapped two-core arm — with IPC falling to 1.3590. Fewer arenas is worse, so the cost is
+arena *contention relieved by having enough of them*, not allocation spread across too many.
+F1-AC2 said a null result would be *"a passing outcome to be reported as such"*; this is stronger
+than null and in the opposite direction.
+
+**3. The allocator is the lever, and it is worth +29% on its own.** At a FIXED pin — arm D, the
+`2,10` sibling pin the rig has always used — jemalloc alone measures **+29.21% rows/s** and
+**−21.71% cycles/row**, 3 of 3 pairs positive with a worst pair-control of 0.70%. No pin change,
+no code change, no dependency: one `LD_PRELOAD` on the server process.
+
+**4. The real mechanism is an INTERACTION, and it flips sign.** This is the finding arm D was
+added to expose, and it is not visible in any single comparison:
+
+| pin change `2,10` → `2,3` | under glibc | under jemalloc |
+|---|--:|--:|
+| Δrows/s | **−19.25%** (B vs A) | **+24.74%** (C vs D) |
+
+The second physical core is not unusable — it is unusable **while glibc's malloc serializes
+access to it**. Under glibc, adding a core loses 19%; under jemalloc, the same change gains 25%.
+An interaction of ~44 percentage points that reverses direction cannot be read off either main
+effect, which is why arm C alone (+61%) would have been attributable to whichever variable the
+reader preferred.
+
+This also supplies a mechanism for #3248's unexplained **+49% allocator term** under Flight, and
+it is consistent with that report's other unexplained figure: the *same shared code* costing
++21.5% more under Flight is what allocator-lock stall inside shared call paths would look like.
+
+**5. IPC is the corroborating signal, and it moves as the mechanism predicts.** 1.4645 (A) →
+1.3903 (B, more stall from cross-core traffic) → 1.3590 (C0, more stall again from a tighter
+arena cap) → 1.5581 (D, less stall) → 2.1206 (C, least stall). IPC was the *tightest* quantity
+#3248 recorded (spreads 0.31%–1.72%), so a move from 1.46 to 2.12 is far outside drift.
+
+**What was verified, not assumed, about the biggest number.** Arm C's flight leg is faster than
+the bare scan (ratio 0.82x), which is legitimate — the server is multithreaded across two CPUs
+while `execute_streaming` is essentially single-threaded — but it is also what a short payload
+looks like. So: arm C completed **5 full scans of exactly 4,000,000 rows** (the pinned corpus
+count) per rep against 3 for arm A, the rig's own `rows_per_scan_observed ==
+rows_per_scan_expected` check passed on every rep of every session, and the jemalloc mapping was
+verified per rep from both `/proc/<pid>/environ` and `/proc/<pid>/maps`.
 
 ---
 
 ## 6. Against the pre-registered kill criterion
 
-<!-- KILL-CRITERION -->
+> *"If B and C combined move served throughput < 3%, record the result and CLOSE — no tuning
+> spiral. If either moves >= 3%, file the production change as its own priced issue."*
+
+**Cleared decisively, and the criterion's own wording does not fit what was measured — so both
+halves are reported rather than the nearest branch being chosen.**
+
+* **B moves −19.25%**: ≥ 3% in magnitude, in the *losing* direction. There is no production
+  change to file for arm B; the finding is that the current pinning is already the better of the
+  two and should not be changed. The criterion did not anticipate a treatment that clears the
+  threshold downward.
+* **C moves +61.17% and D moves +29.21%**: ≥ 3% in the winning direction, so the second branch
+  applies and a production issue **is** owed.
+
+The follow-up is filed at **Backlog**, not Ready, carrying this measurement. Two reasons, both
+external to this lane: F1 already routes an allocator change as **design-driven / OpenSpec**
+because *"it adds a dependency … and affects every binding and downstream embedder, which is a
+product decision and not a tuning knob"*; and the 2026-09-01 product-first ruling reserves Ready
+for release-milestoned work. Promoting it is the lead's call, not this worker's.
+
+**What the follow-up should carry, because the attribution matters to its scope:** the win is
+available WITHOUT any pin change (arm D, +29.21%), and roughly doubles if the pin is changed TOO
+(arm C, +61.17%) — but the pin change is actively harmful on its own. So "adopt jemalloc" and
+"adopt jemalloc and re-pin" are both live options with different sizes, and "re-pin" alone is
+refuted. A linked-jemalloc build (`tikv-jemallocator` behind a non-default feature) would also
+need measuring in its own right: everything here is an `LD_PRELOAD`, which keeps one binary
+across arms but is not how a shipped artifact would be built.
 
 ---
 
@@ -305,13 +408,97 @@ baseline does bound foreign load; the tool now says which of those it is.
 
 ## 8. Measured on, stated as measured
 
-<!-- PROVENANCE -->
+**Host.** `ip-172-31-7-163` — the same box #3096 and #3248 measured on, which is what makes
+their figures comparable at all (#3552 ran on `ip-172-31-6-169` and correctly declined to compare
+absolutes). Intel Xeon Platinum 8488C, 1 socket / 8 physical cores / 16 threads; physical core *k*
+has siblings `{k, k+8}`, read from `thread_siblings_list` and recorded per session
+(`cpu2=(2 10) cpu3=(3 11)`).
+
+**Shared with nine other delivery lanes**, which is the single biggest fact about this
+measurement and the reason for §5a's method.
+
+**Corpus.** `/data/ws0-3096`, generated by `ws0-corpus-gen`: 4,000,000 rows / 40,000 partitions,
+12 cells/row, `Data.db` 2,774,760,422 B, sha256
+`4a903f6fa27c04dbf87a44fddf78615aed73fcd379ecaee6669f6b0d9bbae269` — byte-equal to the canonical
+pin in `tools/ws0-corpus-gen/src/measurement_corpus.rs`, re-hashed from disk at every measurement
+boundary, so no session is stamped `NOT A WS0 BASELINE`.
+
+**Binaries.** ONE frozen set measured by every arm, `--bin-dir /data/ws0-3551/bins`:
+
+```
+fff86410764fe463d7f829522c29bc51  cqlite-flight
+628f9bf9638dfaec2ca9b519503e0499  flight-loadgen
+bf1595e042867ba4f8a9c20b907fe415  ws0-scan-bench
+```
+
+`mold 2.30.0`, `rustc 1.97.1 (8bab26f4f 2026-07-14)`, verified by `readelf -p .comment`. Built
+under `env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u RUSTDOCFLAGS` — **necessary, not
+decorative**: this fleet exports `RUSTFLAGS=-D warnings` in every lane session, cargo prefers
+`RUSTFLAGS` over `[target.*] rustflags`, and the managed `cqlite-mold` block is therefore silently
+dropped (#3740). The first build of this set had no mold in `.comment`; the rebuild did.
+
+**Environment, as measured** (recorded per session, ambient separated from injected):
+
+```
+ambient : LD_PRELOAD=<unset>; LD_LIBRARY_PATH=<unset>; RUSTFLAGS=-D warnings;
+          CARGO_ENCODED_RUSTFLAGS=<unset>; MALLOC_VARS=<none>
+injected: flight server process ONLY — LD_PRELOAD=<libjemalloc.so.2> (arm C, D) /
+          MALLOC_ARENA_MAX=2 (arm C0); bare scan: NOTHING, asserted per rep
+```
+
+The ambient `RUSTFLAGS` is recorded for completeness and is **inert here**: `--bin-dir` implies
+`--no-build`, so no compilation happens during a measurement session and the binaries' own
+provenance is the `.comment` above.
+
+**Sets were measured from a DETACHED worktree** at a pinned sha, so a teammate's commits to the
+live tree could not disturb a run in flight, and so the rig's binary-staleness guard stayed
+satisfied for the whole set.
 
 ---
 
 ## 9. Residuals
 
-<!-- RESIDUALS -->
+1. **No session carries an IN-RUN quiescence verdict.** `--quiescence-timeseries` refuses a
+   contaminated session and leaves a non-empty `--out` the driver can never retry into, so one
+   peer gate strands a round permanently. The sets were run without it — recorded honestly by the
+   rig as `quiescence: NOT VERIFIED` — and judged post hoc by `window-census.py` from the same
+   committed census. That is a real weakening: nothing *stopped* a contaminated session being
+   measured. It is why the per-session verdicts must be read first, and why §5a counts only pairs
+   whose both sessions were clean.
+
+2. **`competing_count == 0` does not bound total foreign load** (D3, above). The clean pairs are
+   clean by the in-run gate's own definition and no stronger.
+
+3. **Nothing verifies the recorded arm ordering** — the driver claims the order it executed, and
+   no artifact-side check establishes that a recorded order is method §3b step 2's rotation.
+   #3287/#3299 own that.
+
+4. **Arm D rests on 3 clean pairs, B and C on 6, C0 on 4.** Fewer pairs than a quiet box would
+   have given. The three set-level medians corroborate each arm independently, but the pooled
+   figure is not a substitute for a fully clean five-arm set, and no confidence interval is
+   claimed from 3–6 pairs.
+
+5. **`MALLOC_ARENA_MAX` was measured at 2 only.** F1-AC2 asked for 1, 2, 4 and default. 2 was
+   chosen because the server's affinity mask is 2 CPUs; 1 and 4 are unmeasured, so "capping
+   arenas does not help" is established at 2 and inferred elsewhere.
+
+6. **`LD_PRELOAD` is not how a shipped artifact would be built.** It keeps one binary across all
+   arms, which is the whole reason it was chosen (#3248's withdrawn machine-code claim), but a
+   linked `#[global_allocator]` build could differ and is unmeasured.
+
+7. **The corpus is CQLite-written and CQLite-read — a PERFORMANCE FIXTURE only** (#3042), never a
+   correctness oracle. Nothing here says anything about output correctness.
+
+8. **The rig's binary-staleness guard reds on correct input, and its printed remedy is a no-op.**
+   It compares binary mtime against the HEAD *commit* time, which is unsatisfiable for a branch
+   whose HEAD advances with non-Rust commits. `cargo clean -p` + rebuild finished in 1.01s without
+   relinking, and removing `target/release/<bin>` restored it at the *original* mtime, because
+   that path is a hardlink to `target/release/deps/<bin>-<hash>`. Only removing the deps artifact
+   forces a real link step (76s). The relinked binaries were **byte-identical** (md5s above,
+   reproduced three times), so the staleness was purely an mtime artifact. Recorded rather than
+   filed: it fails closed and cost ~10 minutes, which does not meet the bar for a tooling issue
+   under the 2026-09-01 ruling. The cheap fix, if wanted, is to compare against the last commit
+   touching a **compiled input** rather than against HEAD.
 
 ---
 
