@@ -935,9 +935,12 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         f"allocator    : flight server ran under {pinning_verification['flight_allocator']}"
         f" (library: {pinning_verification['flight_allocator_lib']})",
         f"  arena      : {pinning_verification['flight_malloc_arena_max']}",
+        f"  evidence   : {pinning_verification['flight_allocator_verification']}",
+        # THE ENVIRONMENT, immediately after the allocator lines it explains and before the
+        # counters: `env injected` is WHERE the allocator above came from, and `env ambient` is
+        # the fact a reproduction has to compare (ws0-3552 §4).
         f"env ambient  : {env_ambient}",
         f"env injected : {env_injected}",
-        f"  evidence   : {pinning_verification['flight_allocator_verification']}",
         f"counters     : perf stat -C {server_cpus} (bare scan) /"
         f" -C {flight_server_cpus} (Flight)  [CPU-WIDE; no -p anywhere]"
         f"   events: {','.join(events)}",
