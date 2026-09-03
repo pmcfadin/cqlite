@@ -246,6 +246,41 @@ def _matched_tail(element: str, limit: int = 200) -> str:
     return "..." + element[-limit:]
 
 
+def _element_names_script(element: str, needle: str) -> bool:
+    """Does ONE argv element name the script `needle` as a path a launcher would execute?
+
+    BASENAME EQUALITY ALONE IS NOT ENOUGH, AND MEASURING IT IS HOW THAT WAS FOUND. `os.path`
+    splits at the last `/` and knows nothing about shell grammar, so BOTH of these have the
+    basename `agent-gate.sh`:
+
+        --flag=/path/agent-gate.sh                        (an option VALUE, executing nothing)
+        source /x/snap.sh && bash /y/agent-gate.sh        (a `-c` SCRIPT TEXT)
+
+    The second is the exact family this fix exists to close -- an agent tool-call shell whose
+    `-c` text merely MENTIONS the gate -- so it would have walked straight back in one layer
+    down. Hence three structural guards, each keyed on a property a plain executed path cannot
+    have:
+
+      * a leading `-` means an OPTION, and an option cannot be the thing being executed;
+      * an `=` means an option value or a `VAR=/path` assignment, neither of which executes;
+      * WHITESPACE means several words in one argv element, which is the signature of a script
+        text (`-c "..."`), never of a single path a launcher exec'd.
+
+    DECLARED RESIDUAL, in the false-NEGATIVE direction, which is the direction that matters
+    because an uncounted competitor can certify a contaminated box: an executed path CONTAINING
+    WHITESPACE is not recognised. Accepted knowingly -- no fleet lane path contains whitespace
+    (`/data/lanes/lane-<issue>/scripts/agent-gate.sh`), and the alternative admits every `-c`
+    script text that happens to END at the needle, i.e. the measured false-refusal family. If a
+    checkout path ever gains a space, this rule needs the shell-grammar model it deliberately
+    avoids, not a wider match.
+    """
+    if not element or element.startswith("-") or "=" in element:
+        return False
+    if any(ch.isspace() for ch in element):
+        return False
+    return os.path.basename(element) == needle
+
+
 def _cmdline_elements(cmdline_bytes: bytes) -> List[str]:
     """The argv of a process, as ELEMENTS. /proc/<pid>/cmdline is NUL-separated."""
     return [part.decode("utf-8", "replace")
@@ -322,7 +357,7 @@ def census(self_pid: Optional[int] = None, proc_root: str = "/proc") -> List[Dic
         else:
             for needle in COMPETING_CMDLINE:
                 for index, element in enumerate(elements):
-                    if os.path.basename(element) == needle:
+                    if _element_names_script(element, needle):
                         why = f"argv={needle}"
                         # THE MATCHED ELEMENT IS RECORDED, so the verdict is SELF-EVIDENCING.
                         # See `_matched_tail`: the pre-fix record could not show why it fired.
