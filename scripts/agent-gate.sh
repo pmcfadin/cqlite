@@ -5564,6 +5564,19 @@ _component_set_probe_inner() {
   if [ "$_cs_complete" = yes ]; then
     _CS_SHA="$remote_sha"
     _CS_BASE_OBJ=reused
+    # WHAT THIS FAST PATH RELIES ON, AND WHAT IT DOES NOT (#3749 owner ruling; the full argument,
+    # including the three REJECTED alternatives, is at the `src_note` object-provenance block in
+    # `_component_set_line`). It reads the baseline's committed manifest out of THIS LANE'S SHARED
+    # object store instead of transferring it: every lane on a box is a worktree of one `.git`, and
+    # an ordinary git read verifies the pack CRC and the zlib stream — enough to catch ACCIDENTAL
+    # damage — but does NOT rehash content against the requested object id. DELIBERATE forgery by a
+    # same-host peer is INVOKER-CLASS and OUT OF MODEL (#3312 triage rule: a peer able to plant
+    # objects can equally edit this script). ACCIDENTAL corruption is in model, and its control is
+    # NOT here: it is the periodic full `git fsck` sweep in
+    # `scripts/check-object-store-integrity.sh`, run at bootstrap and on the worker supervisor's
+    # throttled cadence. The emitted `component-set:` line DECLARES this boundary on every
+    # BASELINE-BEARING arm (the `src_note` suffix); the UNMEASURED arms have no baseline to name
+    # and so do not carry it, which is CLAUDE.md's scoping of the same sentence.
     # THE SCRATCH REPOSITORY IS KEPT EVEN HERE (roborev job 285, High — and a decision the lead
     # made explicitly). It used to be dropped, because "nothing was fetched, so nothing needs an
     # isolated store" — and that left the ancestry walk running in the LIVE repository, where
@@ -5976,36 +5989,65 @@ _component_set_line() {
     declaration) src_note=" — baseline read via the TEXTUAL FALLBACK: $_CS_MANIFEST_REL is VERIFIED ABSENT at that sha (#3544 transitional; the declaration is parsed as TEXT, never executed)" ;;
   esac
   # THE OBJECT STORE IS TRUSTED, NOT VERIFIED — AND THAT IS DECLARED IN THE LINE (roborev job 311,
-  # High; lead ruling on REQ-3544-OBJTRUST, option A; owned by #3746).
+  # High; lead ruling on REQ-3544-OBJTRUST, option A; RESOLVED by #3749).
   #
   # Git does not rehash a packed object against the id it was asked for on an ordinary read, and on
   # this fleet EVERY LANE ON A BOX IS A WORKTREE OF ONE SHARED `.git` (measured:
-  # `/data/lanes/repo/.git/objects` for lane-3544, lane-3473 and lane-3629 alike). So a peer lane
-  # that plants a forged pack/index can make a canonical sha resolve to different content — a
-  # shortened manifest, and a false PASS. Under the triage rule that is a NON-INVOKER route, hence
-  # a defect and not an out-of-model bypass.
+  # `/data/lanes/repo/.git/objects` for lane-3544, lane-3473 and lane-3629 alike). What an ordinary
+  # read DOES check is the pack CRC and the zlib stream, which catch ACCIDENTAL damage — bit rot, a
+  # truncated or torn pack write — but NOT a whole object whose content fails to hash to its own
+  # name. So a planted pack/index could make a canonical sha resolve to different content: a
+  # shortened manifest, and a false PASS.
   #
-  # WHY IT IS DECLARED RATHER THAN CLOSED HERE, which is a ruling and not a shrug. The recorded
-  # "a third finding here should REMOVE the reuse optimisation" ruling assumes removal CLOSES the
-  # exposure, and it does not: the ancestry walk and the provenance leg read HEAD's COMMITTED
-  # content, which has no source other than this store — the working tree cannot substitute,
-  # because `UNCOMMITTED` exists precisely to compare against what is committed. So removing the
-  # fast path leaves a forged HEAD object still able to turn `UNCOMMITTED` (fatal) into `DECLARED`
-  # (non-fatal), while charging every `--lite` round for it: measured 2026-08-31, 3.41 s / 93 MB
-  # full and 3.58 s / 45 MB at `--depth=1` (shallow is NOT cheaper — it still ships the tip's whole
-  # tree). A permanent tax for a half-closure is the guard people learn to waive.
+  # THE THREAT MODEL, AND A RULING THAT OVERTURNED WHAT THIS COMMENT USED TO SAY (#3749, owner
+  # ruling 2026-09-01). This block previously read that a peer lane planting objects "is a
+  # NON-INVOKER route, hence a defect and not an out-of-model bypass". THAT IS OVERTURNED, and the
+  # reversal is recorded here rather than quietly edited so it reads as a decision and not as
+  # drift. DELIBERATE forgery by a same-host peer is INVOKER-CLASS and OUT OF MODEL: CLAUDE.md's
+  # #3312 triage rule is explicit that "same-host actors able to write these scripts or roborev's
+  # database are invoker-class, not third parties" — and a peer that wants a false PASS can simply
+  # EDIT THIS FILE, which is cheaper than forging pack data and is not defended against by anything
+  # inside this process. No check inside a process defends against a party that controls the
+  # process; pretending otherwise is the false-assurance shape #3312 exists to remove.
+  #
+  # WHAT IS IN MODEL IS ACCIDENTAL CORRUPTION, AND ITS CONTROL IS A PERIODIC SWEEP, NAMED HERE SO
+  # THE POINTER SURVIVES: `scripts/check-object-store-integrity.sh` rehashes the whole shared store
+  # with a full `git fsck` (NOT `--connectivity-only`, which does not rehash content and could not
+  # detect this), reporting VERIFIED / CORRUPT / UNMEASURED. It runs at machine onboarding
+  # (`scripts/bootstrap-agent-machine.sh` section 5d) and on the worker supervisor's throttled
+  # per-iteration cadence (`scripts/local/worker-supervisor.sh`, default every 6h; a CORRUPT verdict
+  # stops that supervisor loudly rather than letting a worker certify against a damaged store).
+  # THAT IS PERIODIC, NOT PER-READ — which is exactly why the emitted clause still says TRUSTED,
+  # not verified. Do not inflate it.
+  #
+  # THREE ALTERNATIVES WERE CONSIDERED AND REJECTED BY THAT RULING. Recorded so they are not
+  # re-derived a fourth time:
+  #   * PER-LANE FULL CLONES — a permanent multi-GB, multi-minute tax on every lane for a threat
+  #     that is out of model.
+  #   * PER-READ REHASHING of the consumed objects — the FOURTH carve into this one pre-flight, and
+  #     a permanent cost on every `--lite` round.
+  #   * REMOVING THE REUSE OPTIMISATION — and this one is worth keeping the original argument for,
+  #     because it is still correct and still load-bearing: the recorded "a third finding here
+  #     should REMOVE the reuse optimisation" ruling assumes removal CLOSES the exposure, and it
+  #     does not. The ancestry walk and the provenance leg read HEAD's COMMITTED content, which has
+  #     no source other than this store — the working tree cannot substitute, because `UNCOMMITTED`
+  #     exists precisely to compare against what is committed. So removing the fast path leaves a
+  #     forged HEAD object still able to turn `UNCOMMITTED` (fatal) into `DECLARED` (non-fatal),
+  #     while charging every `--lite` round for it: measured 2026-08-31, 3.41 s / 93 MB full and
+  #     3.58 s / 45 MB at `--depth=1` (shallow is NOT cheaper — it still ships the tip's whole
+  #     tree). A permanent tax for a HALF-closure is the guard people learn to waive.
   #
   # So the line says what it depends on. A check that claims nothing false is worth more than one
   # claiming a closure it does not deliver — the same move the roborev waiver's threat model makes
   # where a dependency cannot be removed. It is FOLDED INTO `src_note` deliberately: that suffix is
   # already the uniform "this line ends by naming its baseline source", eleven printf arms consume
-  # it, and appending an twelfth-argument clause to each would be one fact written eleven times.
+  # it, and appending a twelfth-argument clause to each would be one fact written eleven times.
   case "${src_note:+set}" in
     set)
       case "$_CS_BASE_OBJ" in
-        reused)  src_note="$src_note; objects: baseline REUSED from this lane's SHARED store — store TRUSTED, not verified (#3746)" ;;
-        fetched) src_note="$src_note; objects: baseline FETCHED from the canonical remote, HEAD's own from this lane's SHARED store — store TRUSTED, not verified (#3746)" ;;
-        *)       src_note="$src_note; objects: provenance NOT RECORDED — treat the store as TRUSTED, not verified (#3746)" ;;
+        reused)  src_note="$src_note; objects: baseline REUSED from this lane's SHARED store — store TRUSTED, not verified (#3749)" ;;
+        fetched) src_note="$src_note; objects: baseline FETCHED from the canonical remote, HEAD's own from this lane's SHARED store — store TRUSTED, not verified (#3749)" ;;
+        *)       src_note="$src_note; objects: provenance NOT RECORDED — treat the store as TRUSTED, not verified (#3749)" ;;
       esac ;;
   esac
   case "$verdict" in
@@ -16661,6 +16703,15 @@ run_pub_surface() {
 # peer's artifacts are never answered as ours. Includes the /proc starttime parser tested
 # differentially against awk over every live pid. Hermetic; one bounded nested
 # `--only file-size` for wiring evidence (cannot select tooling-tests, so no recursion).
+# Also runs scripts/tests/test_gate_component_verdict.sh (#3750), the non-vacuity proof
+# for the split of COMPLETION from VERDICT: 106 cases (per-section floors) over
+# scripts/gate-component-verdict.sh
+# and the two DOCUMENTED text-completion grammars. Pins the case the lead named — a
+# COMPLETED `--only` run whose component SKIPped is NOT a pass, because a SKIP means the
+# check never ran — that a status token which merely STARTS WITH `PASS` is not one, that
+# the verdict is never DERIVED from the run's terminal token in either direction, and that
+# the gate-of-record grammar keeps REFUSING `PARTIAL` while the `--only` grammar terminates
+# on it without readmitting the #3041 `INCOMPLETE` sentinel. Hermetic: temp dirs only.
 # Also runs scripts/tests/test_gate_detached.sh (#3473), which pins BOTH the cgroup
 # mechanism (a `KillMode=control-group` teardown kills work that used setsid+nohup, while
 # the same work in its own cgroup survives — demonstrated on a cgroup the test creates and
@@ -18082,6 +18133,22 @@ run_tooling_tests() {
     return 0
   fi
 
+  # the #3750 split of COMPLETION from VERDICT: scripts/gate-component-verdict.sh plus
+  # the two DOCUMENTED text-completion grammars it sits beside. Pins the case the lead
+  # named — a COMPLETED `--only` run whose component SKIPped is NOT a pass — and that the
+  # gate-of-record grammar keeps REFUSING `PARTIAL`. No cargo, no datasets, no network.
+  echo ">>> [$name] bash scripts/tests/test_gate_component_verdict.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_gate_component_verdict.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (completion-vs-verdict split #3750); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   # detached-gate launcher + the cgroup mechanism it rests on (#3473). Internally
   # SKIP-aware for hosts with no working `systemd-run --user`.
   echo ">>> [$name] bash scripts/tests/test_gate_detached.sh"
@@ -18340,6 +18407,22 @@ run_tooling_tests() {
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
     echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # shared-object-store sweep guard (#3749): ABOVE the python3 gate on purpose. This suite
+  # needs nothing beyond bash + git, and folding a never-SKIPping suite into a SKIP-aware
+  # block would be a coverage hole wearing a SKIP's clothes (#3522's ruling). A failure
+  # here FAILs the component, mirroring the two guards above.
+  echo ">>> [$name] bash scripts/tests/test_check_object_store_integrity.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_check_object_store_integrity.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (object-store integrity sweep #3749); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
     return 0
   fi
 

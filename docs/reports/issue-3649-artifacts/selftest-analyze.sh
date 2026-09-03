@@ -1,0 +1,6323 @@
+#!/usr/bin/env bash
+#
+# selftest-analyze.sh -- deterministic tests for analyze-ab.py (issue #3649).
+#
+# The analyzer's statistics and its verdict rule are the reviewable core of this
+# artifact set, and they are tested here against SYNTHETIC JSONL fixtures
+# constructed in a scratch directory -- never against a live run, and never
+# against wall-clock timing (this repository lints wall-clock threshold asserts
+# out of the correctness test path, #2642). Every case is reproducible on a
+# laptop in seconds, so there is no excuse for publishing a figure from this
+# harness without running it first.
+#
+# It prints a case count and a CASE FLOOR. A green tally over a silently
+# shrunken suite is a known defect class in this repository (a span-replacing
+# edit deleted four cases from another suite and it reported "failed: 0" at 102
+# instead of 105 for a whole round), so a suite that has lost cases reds here.
+#
+# Usage: bash selftest-analyze.sh          (needs python3 only)
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ANALYZER="$HERE/analyze-ab.py"
+DRIVER="$HERE/ab-throughput.sh"
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+PASSED=0
+FAILED=0
+CASE_FLOOR=612
+
+ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
+bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
+
+expect() { # <description> <condition-already-evaluated:0|1>
+  if [ "$2" -eq 0 ]; then ok "$1"; else bad "$1"; fi
+}
+
+# ---------------------------------------------------------------------------
+# Fixture generator: a manifest plus one single-record JSONL per (arm, replicate)
+# ---------------------------------------------------------------------------
+cat > "$TMP/mkfixture.py" <<'PYEOF'
+import hashlib
+import json
+import os
+import sys
+
+STEP = "flight-loadgen.step/v1"
+
+
+def step_record(round_label, rate, duration=60.0, requests_ok=5):
+    # Latency is made a plausible function of the rate so the two arms differ in
+    # the latency block too; nothing in the verdict rule reads it.
+    per_request_ms = (duration * 1000.0) / requests_ok
+    return {
+        "schema": STEP,
+        "round": round_label,
+        "endpoint": "http://127.0.0.1:8815",
+        "ts_unix_ms": 1780000000000,
+        "seed": 42,
+        "step": 0,
+        "target_concurrency": 1,
+        "shape": "full",
+        "duration_s": duration,
+        "requests_ok": requests_ok,
+        "requests_unavailable": 0,
+        "requests_error": 0,
+        "error_codes": {},
+        "qps": requests_ok / duration,
+        "rows_per_s": rate,
+        "bytes_per_s": rate * 200.0,
+        "rows_total": int(rate * duration),
+        "bytes_total": int(rate * duration * 200),
+        "latency_ms": {
+            "p50": per_request_ms,
+            "p95": per_request_ms * 1.10,
+            "p99": per_request_ms * 1.20,
+            "max": per_request_ms * 1.35,
+            "samples": requests_ok,
+        },
+    }
+
+
+def main():
+    outdir = sys.argv[1]
+    requested = int(sys.argv[2])
+    spec = sys.argv[3]  # "base:head,base:head,..." one entry per replicate
+    # Optional 4th arg: the concurrency ramp. Default "1" (single-stream). For a
+    # multi-step ramp the spec's rate is the PEAK and it sits at the top step,
+    # with lower steps scaled down -- so the peak-selection logic is exercised
+    # rather than trivially satisfied by a one-element ladder.
+    ramp = sys.argv[4] if len(sys.argv) > 4 else "1"
+    steps = [int(v) for v in ramp.split(",")]
+    os.makedirs(outdir, exist_ok=True)
+    runs = []
+    for index, entry in enumerate(spec.split(","), start=1):
+        base_rate, head_rate = (float(v) for v in entry.split(":"))
+        for arm, rate in (("base", base_rate), ("head", head_rate)):
+            name = "%s-r%02d.jsonl" % (arm, index)
+            scale = [0.55, 0.78, 0.91, 1.0]
+            with open(os.path.join(outdir, name), "w", encoding="utf-8") as handle:
+                for position, concurrency in enumerate(steps):
+                    factor = 1.0 if len(steps) == 1 else scale[min(position, len(scale) - 1)]
+                    if position == len(steps) - 1:
+                        factor = 1.0
+                    record = step_record("%s-r%02d" % (arm, index), rate * factor)
+                    record["step"] = position
+                    record["target_concurrency"] = concurrency
+                    handle.write(json.dumps(record))
+                    handle.write("\n")
+            # Counterbalanced by replicate parity, exactly as the driver does:
+            # base first on odd replicates, head first on even ones.
+            if index % 2 == 1:
+                position = 1 if arm == "base" else 2
+            else:
+                position = 2 if arm == "base" else 1
+            runs.append({
+                "arm": arm,
+                "replicate": index,
+                "file": name,
+                "temperature": "warm",
+                "admission_observed": "16",
+                "admission_source": "flag",
+                "batch_size_observed": "8192",
+                "max_batch_bytes_observed": "4194304",
+                "wait_timeout_ms_observed": "30000",
+                "position_in_pair": position,
+                "loadgen_commit": "2" * 40,
+            })
+    manifest = {
+        "schema": "ab-3649.manifest/v1",
+        "driver_version": "selftest-fixture",
+        "generated_utc": "2026-09-01T00:00:00Z",
+        "replicates_requested": requested,
+        "arms": {
+            # The HEAD arm must be the #2820 commit: the analyzer now enforces
+            # what its docstring always claimed, so a placeholder sha is a
+            # session measuring something else.
+            "base": {"commit": "674cffa9da917a3a1ee3146d4a4ae718f58612d7",
+                     "ref": "cfa93fe99^"},
+            "head": {"commit": "cfa93fe99a51be2b132a5d0fb57c75f3c3555731",
+                     "ref": "cfa93fe99"},
+        },
+        "loadgen": {"commit": "2" * 40, "ref": "cfa93fe99"},
+        "workload": {
+            "shape": "full",
+            "profile": "narrow",
+            # The analyzer validates the recorded ticket through the DRIVER'S
+            # validator, so a fixture must carry one that is actually a
+            # full-ring scan -- `shape: full` is a noun standing in for the
+            # adjective and no longer suffices.
+            "ticket_content": {
+                "version": 2, "keyspace": "ks", "table": "tbl",
+                "ddl": "CREATE TABLE ks.tbl (a int PRIMARY KEY)",
+                "snapshot": None, "token_start": None, "token_end": None,
+                "wraparound": False, "columns": None, "predicates": [],
+                "filter": None, "aggregation": None, "limit": None,
+            },
+            "step_duration": "60s",
+            "step_duration_seconds": 60.0,
+            "ramp": ramp,
+            "prewarm": True,
+            "server_cpus": "0,2",
+            # A requested pin the analyzer will only accept as VERIFIED.
+            "affinity_state": "VERIFIED",
+            "client_cpus": "1,3",
+            "temperature": "warm",
+            "merge_path": "merge",
+            # Only the NON-overridable one is here. The three per-arm
+            # overridable options left `workload` in round 18: populated from
+            # the GLOBAL options, they could disagree with what the servers were
+            # launched with, and they already live per-arm in
+            # `expected_server_config`. A fixture carrying fields the driver no
+            # longer emits describes a manifest shape that does not exist.
+            "max_concurrent_scans": 16,
+        },
+        "corpus": {
+            "path": "/data/ab-3649/corpus/sstables",
+            "data_db_bytes": 681574400,
+            "data_db_files": 3,
+            "min_bytes_required": 268435456,
+            "min_sstables_required": 2,
+            "compressed": True,
+            "compression": "LZ4",
+            "compression_detail": "3 served SSTable(s), all LZ4Compressor",
+            "storage": "LOCAL",
+            "storage_detail": "nvme0n1 Amazon EC2 NVMe Instance Storage",
+            "rows_declared": 3999890,
+        },
+        "host": {
+            "instance_type": "i4i.xlarge",
+            "process_cpus": 4,
+            "hardware_cpus": 4,
+            "hardware_cpus_detail": "0-3",
+            "loadavg1": "0.05",
+            "load_limit": "2.00",
+            "contention": "QUIET",
+            "kernel": "selftest",
+        },
+        "runs": runs,
+    }
+    # The canonical digest is COMPUTED from the fixture's own ticket, not
+    # written as a constant: a hardcoded digest would drift the moment the
+    # fixture ticket changed, and the case would then be testing the constant.
+    manifest["workload"]["ticket_canonical_sha256"] = hashlib.sha256(
+        json.dumps(manifest["workload"]["ticket_content"], sort_keys=True,
+                   separators=(",", ":")).encode("utf-8")).hexdigest()
+    with open(os.path.join(outdir, "manifest.json"), "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=1, sort_keys=True)
+        handle.write("\n")
+
+
+main()
+PYEOF
+
+mkfixture() { python3 "$TMP/mkfixture.py" "$@"; }
+
+# Sha padding, so the arm cases read as shas rather than as string arithmetic.
+# THE REAL OBJECT IDS. The fixtures used to be `cfa93fe98…`/`cfa93fe99…`, which
+# passed BECAUSE the check was a prefix test -- so the cases meant to prove the
+# arm gate instantiated the defect they were testing for, exactly as the
+# 512-zero-byte CompressionInfo.db did for compression. A fixture that satisfies
+# a weaker check than the one shipped proves nothing about the shipped check.
+PIN_HEAD="cfa93fe99a51be2b132a5d0fb57c75f3c3555731"
+PIN_BASE="674cffa9da917a3a1ee3146d4a4ae718f58612d7"
+ZEROS31="0000000000000000000000000000000"
+ONES31="1111111111111111111111111111111"
+
+# A CompressionInfo.db header, written from the definitive guide's layout
+# (appendix-g-compression-chunk-formats.md 34-70; authority
+# CompressionMetadata.java at cassandra-5.0.8). Used both to make the e2e corpus
+# honest and to drive the parser through every state.
+mkcompressioninfo() { # <path> <compressor-name> [chunk-length] [max-compressed] [chunk-count]
+  python3 - "$1" "$2" "${3:-16384}" "${4:-2147483647}" "${5:-3}" <<'PYINNER'
+import sys
+
+path, name, chunk_length, max_compressed, chunk_count = sys.argv[1:6]
+chunk_length, max_compressed = int(chunk_length), int(max_compressed)
+chunk_count = int(chunk_count)
+encoded = name.encode("utf-8")
+blob = len(encoded).to_bytes(2, "big") + encoded
+blob += (0).to_bytes(4, "big")                      # option count
+blob += chunk_length.to_bytes(4, "big")
+blob += max_compressed.to_bytes(4, "big")
+blob += (150000000).to_bytes(8, "big")              # data length, uncompressed
+blob += chunk_count.to_bytes(4, "big")
+blob += b"".join((i * 4096).to_bytes(8, "big") for i in range(chunk_count))
+with open(path, "wb") as handle:
+    handle.write(blob)
+PYINNER
+}
+
+RC=0
+run_analyzer() { # <dir> [extra args...]   -- the single-stream section
+  local dir="$1"; shift
+  set +e
+  python3 "$ANALYZER" --single-stream "$dir/manifest.json" "$@" \
+    > "$TMP/out.txt" 2> "$TMP/err.txt"
+  RC=$?
+  set -e
+}
+
+run_util() { # <dir> [extra args...]   -- the utilization section
+  local dir="$1"; shift
+  set +e
+  python3 "$ANALYZER" --utilization "$dir/manifest.json" "$@" \
+    > "$TMP/out.txt" 2> "$TMP/err.txt"
+  RC=$?
+  set -e
+}
+
+run_both() { # <single-stream-dir> <utilization-dir>
+  set +e
+  python3 "$ANALYZER" --single-stream "$1/manifest.json" --utilization "$2/manifest.json" \
+    > "$TMP/out.txt" 2> "$TMP/err.txt"
+  RC=$?
+  set -e
+}
+
+anchored() { # every line of both streams carries the prefix
+  local file
+  for file in "$TMP/out.txt" "$TMP/err.txt"; do
+    if [ -s "$file" ] && grep -qv '^AB-3649: ' "$file"; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+# `verdict <quantity> <TOKEN>`: one line per section, the quantity in a fixed
+# position, so a two-section report still has exactly one verdict per quantity.
+verdict_token() { # [quantity]
+  sed -n "s/^AB-3649: verdict ${1:-[a-z-]*} \([A-Z][A-Z-]*\)\$/\1/p" "$TMP/out.txt"
+}
+
+check_verdict() { # <description> <expected-token> <expected-exit> [quantity]
+  local desc="$1" want="$2" want_rc="$3" quantity="${4:-}"
+  local got
+  got="$(verdict_token "$quantity")"
+  local lines
+  lines="$(printf '%s\n' "$got" | grep -c . || true)"
+  if [ "$lines" != "1" ]; then
+    bad "$desc (expected exactly one verdict line, got $lines)"
+    return
+  fi
+  if [ "$got" != "$want" ]; then
+    bad "$desc (verdict $got, expected $want)"
+    return
+  fi
+  if [ "$RC" != "$want_rc" ]; then
+    bad "$desc (exit $RC, expected $want_rc)"
+    return
+  fi
+  if ! anchored; then
+    bad "$desc (an output line does not carry the AB-3649 anchor)"
+    return
+  fi
+  ok "$desc -> $want (exit $RC)"
+}
+
+check_remedy_shared() { # <description>
+  local line missing
+  line="$(grep '^AB-3649: verdict-detail single-stream ADMISSION-REMEDY ' "$TMP/out.txt" || true)"
+  missing=''
+  case "$line" in *"ONLY while the rig is live"*) ;; *) missing="$missing time-window" ;; esac
+  case "$line" in *"server.log"*)                 ;; *) missing="$missing log-path" ;; esac
+  case "$line" in *"lost with the instance"*)     ;; *) missing="$missing logs-die-with-rig" ;; esac
+  case "$line" in *"not evidence the arms disagreed"*) ;; *) missing="$missing honest-scope" ;; esac
+  if [ -z "$missing" ]; then
+    ok "$1"
+  else
+    bad "$1 -- the remedy line has lost:$missing"
+  fi
+}
+
+check_cause() { # <description> <expected-cause>
+  if grep -qE "^AB-3649: cause [a-z-]+ $2\$" "$TMP/err.txt"; then
+    ok "$1 -> cause $2"
+  else
+    bad "$1 (no 'AB-3649: cause <quantity> $2' line; stderr: $(head -2 "$TMP/err.txt" | tr '\n' ' '))"
+  fi
+}
+
+echo "==== analyze-ab.py self-test (issue #3649) ===="
+echo
+
+# ---------------------------------------------------------------------------
+echo "-- the four measured verdicts --"
+
+# 1. A clean, clearly-positive effect whose interval sits inside 1.10-1.25.
+mkfixture "$TMP/meets" 6 "100000:116000,100000:117000,100000:117000,100000:118000,100000:118000,100000:119000"
+run_analyzer "$TMP/meets"
+check_verdict "clean positive effect, tight interval inside the band" MEETS-TARGET 0
+
+# 2. THE CASE THIS WHOLE FILE EXISTS FOR. A large point-estimate difference with
+#    heavily overlapping dispersion, in the spirit of the rejected proxy bench
+#    (base 78.6 ms [69.5, 88.4] vs head 66.5 ms [54.5, 83.2]) -- expressed here
+#    as throughput, since rows/s is what the served path reports. The point
+#    estimate lands at ~1.16x, INSIDE the target band, and it must still NOT
+#    become MEETS-TARGET: the interval is [0.97, 1.40] and covers both no-effect
+#    and the band.
+mkfixture "$TMP/inconclusive" 6 \
+  "12723:10814.55,12723:12086.85,12723:13995.3,12723:15013.14,12723:18448.35,12723:20611.26"
+run_analyzer "$TMP/inconclusive"
+check_verdict "large point difference, overlapping dispersion" INCONCLUSIVE 6
+if grep -q '^AB-3649: test ci-contains-1.0 yes$' "$TMP/out.txt"; then
+  ok "the inconclusive case reports that its interval covers 1.0"
+else
+  bad "the inconclusive case did not report ci-contains-1.0"
+fi
+if grep -qE '^AB-3649: ratio single-stream point 1\.1[0-9]+ ' "$TMP/out.txt"; then
+  ok "a point estimate sitting INSIDE the target band still does not earn a verdict"
+else
+  bad "the inconclusive fixture no longer has a point estimate inside the band, so it is no longer testing the case it exists for"
+fi
+
+# 3. A real, MEASURED no-effect: ratio ~1.0 with a tight interval. This is a
+#    different fact from inconclusive and must not collapse onto it -- the
+#    interval rules the target band out even though it straddles 1.0.
+mkfixture "$TMP/noeffect" 6 \
+  "100000:99900,100000:100000,100000:100100,100000:100200,100000:99950,100000:100050"
+run_analyzer "$TMP/noeffect"
+check_verdict "measured no effect, tight interval around 1.0" BELOW-TARGET 4
+if grep -q '^AB-3649: test ci-contains-1.0 yes$' "$TMP/out.txt" \
+   && grep -q '^AB-3649: test ci-entirely-below-band yes$' "$TMP/out.txt"; then
+  ok "the no-effect case is distinguished from the inconclusive one by its own test lines"
+else
+  bad "the no-effect case did not report both covering 1.0 and excluding the band"
+fi
+
+# 4. The 1.5-1.9 region. It must render against the 1.10-1.25 BAND, with the
+#    ceiling merely named. There is no verdict token that endorses the ceiling.
+mkfixture "$TMP/ceiling" 6 \
+  "100000:169000,100000:170000,100000:170000,100000:171000,100000:171000,100000:172000"
+run_analyzer "$TMP/ceiling"
+check_verdict "a ratio in the 1.5-1.9 region" ABOVE-TARGET 5
+if grep -q '^AB-3649: target profile narrow band \[1.10, 1.25\] source ' "$TMP/out.txt"; then
+  ok "the 1.5-1.9 case is still rendered against the 1.10-1.25 band"
+else
+  bad "the 1.5-1.9 case did not print the 1.10-1.25 band"
+fi
+if grep -q '^AB-3649: ceiling 1.5-1.9x is a rig-narrow UTILIZATION ceiling' "$TMP/out.txt"; then
+  ok "the ceiling is named on the run that lands in it"
+else
+  bad "the ceiling was not named"
+fi
+if grep -qE 'MEETS-CEILING|CEILING-MET|MEETS-UTILIZATION' "$TMP/out.txt"; then
+  bad "the output invented a ceiling-endorsing token"
+else
+  ok "no ceiling-endorsing verdict token exists in the output"
+fi
+
+# The wide profile has its own band and the same rule -- and the band comes from
+# what the SESSION declared, so this fixture declares `wide` rather than the
+# analyzer being told to score it that way. That inversion is round 17 finding 1:
+# `--profile wide` on the analyzer used to re-score the same data against a
+# different band, which is a verdict that is a function of a flag.
+mkfixture "$TMP/wideprof" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/wideprof/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["workload"]["profile"] = "wide"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/wideprof"
+check_verdict "a session that DECLARED wide is scored against the 1.05-1.10 band" ABOVE-TARGET 5
+# The flag may CONFIRM the declaration...
+run_analyzer "$TMP/wideprof" --profile wide
+check_verdict "an assertion agreeing with the declaration is accepted" ABOVE-TARGET 5
+# ...and may never overrule it, which is the whole finding.
+run_analyzer "$TMP/wideprof" --profile narrow
+check_verdict "an assertion disagreeing with the declaration" UNMEASURED 7 single-stream
+check_cause "an analysis flag cannot re-score a session against another band" profile-assertion-mismatch
+# A session that declared nothing cannot be scored at all -- no default.
+mkfixture "$TMP/noprof" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/noprof/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+del manifest["workload"]["profile"]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/noprof"
+check_verdict "a session that declared no profile" UNMEASURED 7 single-stream
+check_cause "a session that declared no profile" profile-unrecorded
+# ...and the flag cannot supply what the session did not declare, either.
+run_analyzer "$TMP/noprof" --profile narrow
+check_cause "an analysis flag cannot supply a profile the session never declared" profile-unrecorded
+
+echo
+echo "-- every input the analyzer cannot measure, cause by cause --"
+
+# 5. Malformed JSONL.
+mkfixture "$TMP/malformed" 6 "100000:110000,100000:110000,100000:110000,100000:110000,100000:110000,100000:110000"
+printf '{"schema": "flight-loadgen.step/v1", NOT JSON\n' > "$TMP/malformed/head-r03.jsonl"
+run_analyzer "$TMP/malformed"
+check_verdict "a malformed JSONL record" UNMEASURED 7
+check_cause "malformed JSONL" run-file-not-jsonl
+
+# 6. A missing run file the manifest still declares.
+mkfixture "$TMP/missing" 6 "100000:110000,100000:110000,100000:110000,100000:110000,100000:110000,100000:110000"
+rm -f "$TMP/missing/base-r02.jsonl"
+run_analyzer "$TMP/missing"
+check_verdict "a declared run file that is not on disk" UNMEASURED 7
+check_cause "missing run file" run-file-unreadable
+
+# 7. An empty run file (the shape a killed loadgen leaves).
+mkfixture "$TMP/empty" 6 "100000:110000,100000:110000,100000:110000,100000:110000,100000:110000,100000:110000"
+: > "$TMP/empty/head-r01.jsonl"
+run_analyzer "$TMP/empty"
+check_verdict "an empty run file" UNMEASURED 7
+check_cause "empty run file" run-file-empty
+
+# 8. An unpaired replicate: interleaving is the whole design, so a lone arm is
+#    not analysable.
+mkfixture "$TMP/unpaired" 6 "100000:110000,100000:110000,100000:110000,100000:110000,100000:110000,100000:110000"
+python3 - "$TMP/unpaired/manifest.json" <<'PYEOF'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["runs"] = [r for r in manifest["runs"] if not (r["arm"] == "head" and r["replicate"] == 4)]
+manifest["replicates_requested"] = 6
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYEOF
+run_analyzer "$TMP/unpaired"
+check_verdict "a replicate present for one arm only" UNMEASURED 7
+check_cause "unpaired replicate" unpaired-replicates
+
+# 9. Fewer completed pairs than the session requested -- the shortfall reaches
+#    the analyzer as an explicit manifest fact, never as an absence.
+mkfixture "$TMP/short" 8 "100000:117000,100000:117000,100000:118000,100000:118000"
+run_analyzer "$TMP/short"
+check_verdict "fewer completed pairs than requested" UNMEASURED 7
+check_cause "replicate shortfall" replicate-set-mismatch
+
+# 10. Too few pairs to bootstrap at all.
+mkfixture "$TMP/tiny" 2 "100000:117000,100000:118000"
+run_analyzer "$TMP/tiny"
+check_verdict "a pair count below the bootstrap floor" UNMEASURED 7
+check_cause "insufficient pairs" insufficient-pairs
+
+# 11. A replicate that recorded a request error is not a throughput measurement.
+mkfixture "$TMP/errors" 6 "100000:110000,100000:110000,100000:110000,100000:110000,100000:110000,100000:110000"
+python3 - "$TMP/errors/head-r02.jsonl" <<'PYEOF'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    record = json.loads(handle.read())
+record["requests_error"] = 1
+record["error_codes"] = {"Internal": 1}
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(record) + "\n")
+PYEOF
+run_analyzer "$TMP/errors"
+check_verdict "a replicate carrying a request error" UNMEASURED 7
+check_cause "request error in a replicate" run-errors
+
+# 12. Admission shedding changes what was measured (#2420).
+mkfixture "$TMP/shed" 6 "100000:110000,100000:110000,100000:110000,100000:110000,100000:110000,100000:110000"
+python3 - "$TMP/shed/base-r05.jsonl" <<'PYEOF'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    record = json.loads(handle.read())
+record["requests_unavailable"] = 3
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(record) + "\n")
+PYEOF
+run_analyzer "$TMP/shed"
+check_verdict "a replicate that was admission-shed" UNMEASURED 7
+check_cause "admission shed in a replicate" run-shed
+
+# 13. A zero-row scan: green by omission is the failure this repository refuses.
+mkfixture "$TMP/zerorows" 6 "100000:110000,100000:110000,100000:110000,100000:110000,100000:110000,100000:110000"
+python3 - "$TMP/zerorows/head-r06.jsonl" <<'PYEOF'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    record = json.loads(handle.read())
+record["rows_per_s"] = 0.0
+record["rows_total"] = 0
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(record) + "\n")
+PYEOF
+run_analyzer "$TMP/zerorows"
+check_verdict "a replicate that returned no rows" UNMEASURED 7
+check_cause "zero-row replicate" run-degenerate
+
+# 14. A multi-step ramp is not this design.
+mkfixture "$TMP/multistep" 6 "100000:110000,100000:110000,100000:110000,100000:110000,100000:110000,100000:110000"
+cat "$TMP/multistep/base-r01.jsonl" "$TMP/multistep/base-r01.jsonl" > "$TMP/multistep/tmp.jsonl"
+mv "$TMP/multistep/tmp.jsonl" "$TMP/multistep/base-r01.jsonl"
+run_analyzer "$TMP/multistep"
+check_verdict "a run file holding more than one step record" UNMEASURED 7
+check_cause "multi-step run file" run-record-count
+
+# 15/16/17. Manifest-level refusals.
+mkdir -p "$TMP/nomanifest"
+run_analyzer "$TMP/nomanifest"
+check_verdict "an absent manifest" UNMEASURED 7
+check_cause "absent manifest" manifest-unreadable
+
+mkdir -p "$TMP/badmanifest"
+printf 'this is not json\n' > "$TMP/badmanifest/manifest.json"
+run_analyzer "$TMP/badmanifest"
+check_verdict "a manifest that is not JSON" UNMEASURED 7
+check_cause "manifest that is not JSON" manifest-not-json
+
+mkfixture "$TMP/wrongschema" 6 "100000:110000,100000:110000,100000:110000,100000:110000,100000:110000,100000:110000"
+python3 - "$TMP/wrongschema/manifest.json" <<'PYEOF'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["schema"] = "ab-3649.manifest/v0"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYEOF
+run_analyzer "$TMP/wrongschema"
+check_verdict "a manifest carrying an unknown schema tag" UNMEASURED 7
+check_cause "unknown manifest schema" manifest-schema
+
+echo
+echo "-- determinism, anchoring, and the structural property of the source --"
+
+# 18. Same input twice -> byte-identical output on both streams.
+run_analyzer "$TMP/meets"
+cp "$TMP/out.txt" "$TMP/out.first"
+cp "$TMP/err.txt" "$TMP/err.first"
+run_analyzer "$TMP/meets"
+if cmp -s "$TMP/out.first" "$TMP/out.txt" && cmp -s "$TMP/err.first" "$TMP/err.txt"; then
+  ok "two runs over one input produce byte-identical output"
+else
+  bad "the analyzer is not deterministic over a fixed input"
+fi
+
+# 19. A usage error is anchored too -- argparse would not be.
+set +e
+python3 "$ANALYZER" --no-such-flag > "$TMP/out.txt" 2> "$TMP/err.txt"
+RC=$?
+set -e
+if [ "$RC" = "3" ] && anchored && [ -s "$TMP/err.txt" ]; then
+  ok "an unrecognised flag exits 3 with every line anchored"
+else
+  bad "an unrecognised flag did not exit 3 with anchored output (exit $RC)"
+fi
+
+set +e
+python3 "$ANALYZER" --help > "$TMP/out.txt" 2> "$TMP/err.txt"
+RC=$?
+set -e
+if [ "$RC" = "3" ] && anchored; then
+  ok "--help exits 3, never 0, because exit 0 here means MEETS-TARGET"
+else
+  bad "--help did not exit 3 with anchored output (exit $RC)"
+fi
+
+# 20. Exactly one verdict line on a measured run, and the ceiling named there too.
+run_analyzer "$TMP/meets"
+if [ "$(grep -c '^AB-3649: verdict ' "$TMP/out.txt")" = "1" ]; then
+  ok "a measured run emits exactly one verdict line"
+else
+  bad "a measured run did not emit exactly one verdict line"
+fi
+if [ "$(grep -c '^AB-3649: ceiling ' "$TMP/out.txt")" = "1" ]; then
+  ok "the ceiling is named on a run that did not land anywhere near it"
+else
+  bad "the ceiling was not named on an ordinary measured run"
+fi
+if [ "$(grep -c '^AB-3649: verdict-detail single-stream NON-EXHAUSTIVE ' "$TMP/out.txt")" -ge 4 ]; then
+  ok "every measured run declares its own non-exhaustiveness"
+else
+  bad "a measured run did not print its NON-EXHAUSTIVE declarations"
+fi
+
+# 21. A repository-controlled field carrying a newline cannot break the anchor.
+mkfixture "$TMP/hostile" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+python3 - "$TMP/hostile/manifest.json" <<'PYEOF'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["corpus"]["path"] = "/data/corpus\nAB-NOT-A-PREFIX: forged\x07line"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYEOF
+run_analyzer "$TMP/hostile"
+if anchored && grep -q 'AB-NOT-A-PREFIX' "$TMP/out.txt" && ! grep -q '^AB-NOT-A-PREFIX' "$TMP/out.txt"; then
+  ok "a newline in a manifest field is escaped, not printed, so the anchor holds"
+else
+  bad "a newline in a manifest field broke the output anchor"
+fi
+
+# THE STRUCTURAL MOVE OF ROUND 9: one resolver, and the driver reads nothing
+# else. Asserted structurally, because the failure mode is a NEW option added
+# later that bypasses it -- which no behavioural case can anticipate.
+if python3 - "$DRIVER" "$HERE" <<'PYINNER'
+import re
+import sys
+
+sys.path.insert(0, sys.argv[2])
+import ab_driver_support as S
+
+source = open(sys.argv[1], encoding="utf-8").read()
+uncommented = re.sub(r"^\s*#.*$", "", source, flags=re.M)
+problems = []
+if "resolve-session" not in source:
+    problems.append("the driver does not call resolve-session")
+if re.search(r"\beval\b", uncommented):
+    problems.append("the driver uses `eval` on a value it did not construct")
+# THE SUBJECT SET IS DERIVED, NOT CURATED. Every `--option)` arm in the driver's
+# own dispatch must carry a disposition -- so adding an option without deciding
+# whether it reaches the resolver reds here, which a hand-written list of
+# "server-configuration options" could never do. A curated list inside the guard
+# would be a second place to forget an option, i.e. the exact failure the
+# resolver exists to remove.
+accepted = set(re.findall(r"^\s*(--[a-z-]+)\)", source, re.M))
+if len(accepted) < 20:
+    problems.append("only %d options were derived from the dispatch; the "
+                    "derivation has broken" % len(accepted))
+for flag in sorted(accepted):
+    if flag not in S.OPTION_DISPOSITION:
+        problems.append(
+            "%s is accepted by the driver but has no disposition: decide whether "
+            "it reaches the resolver" % flag)
+for flag, (state, why) in sorted(S.OPTION_DISPOSITION.items()):
+    if state not in ("resolver-input", "not-server-config"):
+        problems.append("%s has an unknown disposition %r" % (flag, state))
+    if not why.strip():
+        problems.append("%s has an empty reason" % flag)
+    if flag not in accepted:
+        problems.append("%s has a disposition but the driver does not accept it" % flag)
+    if (state == "resolver-input") != (flag in S.RESOLVER_INPUTS):
+        problems.append(
+            "%s is dispositioned %r but %s in RESOLVER_INPUTS"
+            % (flag, state, "IS" if flag in S.RESOLVER_INPUTS else "is NOT"))
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "every option the driver accepts is dispositioned, and the resolver is its only configuration producer"
+else
+  bad "the session configuration has more than one producer (see stderr above)"
+fi
+
+# 22. THE STRUCTURAL PROPERTY. The static text of the shipped scripts carries
+#     none of the reserved gate/review marker strings, so no run of them can be
+#     pasted or grepped as a certification. The needles are split so this guard
+#     cannot match its own source line.
+NEEDLES=("PA""SS" "RE""SULT:" "AGENT-""GATE" "ROB""OREV" "PRE""MERGE")
+structural_bad=0
+for target in "$ANALYZER" "$DRIVER" "$HERE/ab_common.py" "$HERE/ab_input.py" \
+              "$HERE/ab_stats.py" "$HERE/ab_driver_support.py"; do
+  [ -f "$target" ] || continue
+  for needle in "${NEEDLES[@]}"; do
+    if grep -q -- "$needle" "$target"; then
+      bad "reserved marker '$needle' appears in $(basename "$target")"
+      structural_bad=1
+    fi
+  done
+done
+if [ "$structural_bad" -eq 0 ]; then
+  ok "no reserved gate/review marker appears in the static text of the shipped scripts"
+fi
+
+# 23. Both shipped scripts parse.
+if python3 -m py_compile "$ANALYZER" 2>/dev/null; then
+  ok "analyze-ab.py compiles"
+else
+  bad "analyze-ab.py does not compile"
+fi
+if [ -f "$DRIVER" ] && bash -n "$DRIVER"; then
+  ok "ab-throughput.sh parses"
+else
+  bad "ab-throughput.sh is absent or does not parse"
+fi
+if python3 -m py_compile "$HERE/ab_driver_support.py" 2>/dev/null; then
+  ok "ab_driver_support.py compiles"
+else
+  bad "ab_driver_support.py does not compile"
+fi
+# A comment asserting a mechanism that does not exist is the decay this repo
+# lints for: the driver's helpers are a FILE now, so nothing may claim they are
+# read out of the script by a sed extraction.
+if grep -q 'sed' "$DRIVER" && grep -qi 'extract' "$DRIVER"; then
+  bad "the driver still claims its helpers are extracted by sed"
+else
+  ok "the driver makes no claim about a sed extraction of its helpers"
+fi
+
+echo
+echo "-- the DRIVER's record validator, which nothing used to execute --"
+
+# This is the section whose absence let a 110-case green suite coexist with a
+# driver that hard-coded ONE step record while advertising --ramp. run_one needs
+# a rig; its validator does not, and it now lives in an executable file.
+SUPPORT="$HERE/ab_driver_support.py"
+
+mkstep() { # <out> <round> <concurrency> [rate] [shed] [duration]
+  python3 - "$1" "$2" "$3" "${4:-100000}" "${5:-0}" "${6:-60}" <<'PYINNER'
+import json
+import sys
+
+path, label, concurrency, rate, shed, duration = sys.argv[1:7]
+rate, duration = float(rate), float(duration)
+record = {
+    "schema": "flight-loadgen.step/v1",
+    "round": label,
+    "endpoint": "http://127.0.0.1:8815",
+    "ts_unix_ms": 1780000000000,
+    "seed": 42,
+    "step": 0,
+    "target_concurrency": int(concurrency),
+    "shape": "full",
+    "duration_s": duration,
+    "requests_ok": 5,
+    "requests_unavailable": int(shed),
+    "requests_error": 0,
+    "error_codes": {},
+    "qps": 5 / duration,
+    "rows_per_s": rate,
+    "bytes_per_s": rate * 200.0,
+    "rows_total": int(rate * duration),
+    "bytes_total": int(rate * duration * 200),
+    "latency_ms": {"p50": 1.0, "p95": 1.1, "p99": 1.2, "max": 1.3, "samples": 5},
+}
+with open(path, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(record) + "\n")
+PYINNER
+}
+
+run_support() { # <args...>
+  set +e
+  python3 "$SUPPORT" "$@" > "$TMP/out.txt" 2> "$TMP/err.txt"
+  RC=$?
+  set -e
+}
+
+check_support() { # <description> <expected-exit> [expected-cause]
+  local desc="$1" want_rc="$2" want_cause="${3:-}"
+  if [ "$RC" != "$want_rc" ]; then
+    bad "$desc (exit $RC, expected $want_rc)"
+    return
+  fi
+  if ! anchored; then
+    bad "$desc (an output line does not carry the AB-3649 anchor)"
+    return
+  fi
+  if [ -n "$want_cause" ] && ! grep -q "^AB-3649: cause $want_cause\$" "$TMP/err.txt"; then
+    bad "$desc (cause '$want_cause' absent; stderr: $(head -2 "$TMP/err.txt" | tr '\n' ' '))"
+    return
+  fi
+  ok "$desc -> exit $RC${want_cause:+ cause $want_cause}"
+}
+
+# THE CASE THAT WOULD HAVE CAUGHT IT: a four-step replicate against a four-step
+# ramp. The old validator refused this, so every --ramp 1,2,4,8 session died
+# after two release builds and a full measurement pass.
+rm -f "$TMP/ramp.jsonl"
+for c in 1 2 4 8; do mkstep "$TMP/ramp.jsonl" base-r01 "$c"; done
+run_support validate-replicate "$TMP/ramp.jsonl" base-r01 1,2,4,8 full 60s
+check_support "a four-step replicate against a four-step ramp" 0
+if [ "$(grep -c '^AB-3649: run base-r01 step ' "$TMP/out.txt")" = "4" ]; then
+  ok "every step of a ramp replicate is reported, not just the first"
+else
+  bad "the validator did not report every step of a ramp replicate"
+fi
+
+rm -f "$TMP/one.jsonl"; mkstep "$TMP/one.jsonl" base-r01 1
+run_support validate-replicate "$TMP/one.jsonl" base-r01 1 full 60s
+check_support "a one-step replicate against a --ramp 1 session" 0
+
+run_support validate-replicate "$TMP/one.jsonl" base-r01 1,2,4,8 full 60s
+check_support "one record where the ramp declares four" 1 replicate-invalid
+run_support validate-replicate "$TMP/ramp.jsonl" base-r01 1 full 60s
+check_support "four records where the ramp declares one" 1 replicate-invalid
+
+run_support validate-replicate "$TMP/ramp.jsonl" head-r01 1,2,4,8 full 60s
+check_support "a replicate whose round label names the other arm" 1 replicate-invalid
+
+rm -f "$TMP/wrongc.jsonl"
+for c in 1 2 4 16; do mkstep "$TMP/wrongc.jsonl" base-r01 "$c"; done
+run_support validate-replicate "$TMP/wrongc.jsonl" base-r01 1,2,4,8 full 60s
+check_support "a step whose concurrency is not the declared one" 1 replicate-invalid
+
+rm -f "$TMP/shed1.jsonl"; mkstep "$TMP/shed1.jsonl" base-r01 1 100000 4
+run_support validate-replicate "$TMP/shed1.jsonl" base-r01 1 full 60s
+check_support "a shed at single-stream concurrency is fatal to the driver" 1 replicate-invalid
+
+# On a ramp the analyzer EXCLUDES shed steps, so the driver must not contradict
+# it by dying -- it says so loudly instead.
+rm -f "$TMP/shedr.jsonl"
+mkstep "$TMP/shedr.jsonl" base-r01 1
+mkstep "$TMP/shedr.jsonl" base-r01 2
+mkstep "$TMP/shedr.jsonl" base-r01 4
+mkstep "$TMP/shedr.jsonl" base-r01 8 100000 6
+run_support validate-replicate "$TMP/shedr.jsonl" base-r01 1,2,4,8 full 60s
+check_support "a shed ramp step is reported, not fatal, so the two agree" 0
+if grep -q '^AB-3649: run base-r01 step 3 concurrency 8 SHED requests-unavailable 6' "$TMP/out.txt"; then
+  ok "the driver names the shed step and says the analyzer will exclude it"
+else
+  bad "the driver did not name the shed step"
+fi
+
+rm -f "$TMP/inf.jsonl"
+python3 - "$TMP/inf.jsonl" <<'PYINNER'
+import json
+import sys
+
+record = {
+    "schema": "flight-loadgen.step/v1", "round": "base-r01", "target_concurrency": 1,
+    "duration_s": 60.0, "requests_ok": 5, "requests_unavailable": 0,
+    "requests_error": 0, "rows_per_s": float("inf"), "rows_total": 1,
+    "latency_ms": {"p50": 1.0},
+}
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(record) + "\n")
+PYINNER
+run_support validate-replicate "$TMP/inf.jsonl" base-r01 1 full 60s
+check_support "a non-finite rate refused by the driver too" 1 replicate-invalid
+
+# The duration grammar MIRRORS flight-loadgen's (tools/flight-loadgen/src/ramp.rs:224).
+# A stricter grammar refuses work that has already been done; a looser one makes
+# the docstring's "field for field" claim false. Both directions are pinned.
+for good_dur in "60 60.0" "60s 60.0" "500ms 0.5" "2m 120.0" "0.5 0.5" "1e18 1e+18"; do
+  set -- $good_dur
+  run_support parse-duration "$1"
+  if [ "$RC" = "0" ] && [ "$(cat "$TMP/out.txt")" = "$2" ]; then
+    ok "the duration grammar accepts '$1' as flight-loadgen does"
+  else
+    bad "the duration grammar refused '$1', which flight-loadgen accepts (got '$(cat "$TMP/out.txt")')"
+  fi
+done
+for bad_dur in "0" "-5s" "nope" "nan" "inf" "1e30" "1e308m" "-1"; do
+  run_support parse-duration "$bad_dur"
+  if [ "$RC" = "1" ] && anchored; then
+    ok "the duration grammar refuses '$bad_dur' as flight-loadgen does"
+  else
+    bad "the duration grammar accepted '$bad_dur' (exit $RC)"
+  fi
+done
+
+# A ticket that narrows the scan cannot receive a full-scan verdict.
+printf '{"version":2,"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)","limit":null,"predicates":[],"filter":null,"aggregation":null,"columns":null,"token_start":null,"token_end":null,"wraparound":false}\n' > "$TMP/tk-full.json"
+run_support validate-ticket "$TMP/tk-full.json"
+check_support "a full-ring, unprojected, unfiltered ticket" 0
+# THE VALIDATOR MUST NOT BE STRICTER THAN THE SERVER. Read from
+# cqlite-flight/src/ticket.rs rather than assumed:
+#   * `wraparound` is retained for wire compatibility and NOT CONSULTED since
+#     #3634 (ticket.rs:244-255), so refusing a ticket for setting it would reject
+#     a template the server accepts;
+#   * EQUAL endpoints derive `start >= end`, giving `token > start OR token <= end`
+#     -- every token, the full ring expressed as a Cassandra wraparound range;
+#   * an EXPLICIT (i64::MIN, i64::MAX] is half-open and therefore drops the token
+#     equal to i64::MIN, which is a real token (#3633). Not the full ring.
+printf '{"version":2,"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)","wraparound":true}\n' > "$TMP/tk-wrap.json"
+run_support validate-ticket "$TMP/tk-wrap.json"
+check_support "a ticket setting the ignored wraparound flag" 0
+printf '{"version":2,"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)","token_start":5,"token_end":5}\n' > "$TMP/tk-eq.json"
+run_support validate-ticket "$TMP/tk-eq.json"
+check_support "a ticket whose equal token endpoints ARE the whole ring" 0
+# `pathsafe::validate_snapshot` REJECTS an empty name, so accepting one here
+# burned both builds before the load generator refused it -- the same rig
+# economics as the relative work directory. Sixth validator-versus-consumer.
+printf '{"version":2,"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)","snapshot":""}\n' > "$TMP/tk-emptysnap.json"
+run_support validate-ticket "$TMP/tk-emptysnap.json"
+check_support "a ticket with an empty snapshot name, which the server rejects" 1 ticket-identifier-invalid
+printf '{"version":2,"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)","snapshot":"snap-1_a"}\n' > "$TMP/tk-snap.json"
+run_support validate-ticket "$TMP/tk-snap.json"
+check_support "a ticket with a valid snapshot name" 0
+# EACH NARROWING IS WELL-FORMED, so this loop tests the FULL-RING half and not
+# the schema half. The `filter` entry was written in round 13 as
+# `{"Compare": {...}}` -- serde's EXTERNALLY tagged spelling -- from a guess at
+# the representation rather than a reading of it; `PredicateExpr` is
+# `#[serde(tag = "type")]`, so the real shape is `{"type": "Compare", ...}`.
+# Round 14's recursive mirror caught that fixture, which is the same lesson as
+# the finding it was added for: read the deserialiser, do not infer it. Three of these used to be malformed (`"filter":"x>1"`,
+# `"aggregation":"count"`, a predicate with no `column`), which the four-field
+# validator could not see -- so they were refused for the RIGHT VERDICT with the
+# WRONG REASON, and the loop silently proved less than it claimed.
+for narrowing in '"limit":100' '"predicates":[{"column":"a","op":"Equal","value":1}]' '"filter":{"type":"Compare","column":"a","op":"Gt","value":1}' '"aggregation":{"aggregates":[]}' '"columns":["a"]' '"token_start":42' '"token_end":42' '"token_start":-9223372036854775808,"token_end":9223372036854775807'; do
+  printf '{"version":2,"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)",%s}\n' "$narrowing" > "$TMP/tk-bad.json"
+  run_support validate-ticket "$TMP/tk-bad.json"
+  if [ "$RC" = "1" ] && grep -q '^AB-3649: cause ticket-not-full-ring$' "$TMP/err.txt"; then
+    ok "a ticket with ${narrowing:0:44} is refused as not a full-ring scan"
+  else
+    bad "a ticket with ${narrowing:0:44} was accepted as a full scan (exit $RC)"
+  fi
+done
+
+# Requested pinning and EFFECTIVE pinning are different facts.
+MY_CPUS="$(awk '/^Cpus_allowed_list:/ {print $2}' /proc/$$/status 2>/dev/null || true)"
+if [ -n "$MY_CPUS" ]; then
+  run_support check-affinity "$$" "$MY_CPUS"
+  if [ "$RC" = "0" ] && [ "$(cat "$TMP/out.txt")" = "VERIFIED" ]; then
+    ok "check-affinity verifies a process against its real allowed CPU set"
+  else
+    bad "check-affinity did not verify a correct pin (exit $RC, '$(cat "$TMP/out.txt")')"
+  fi
+  run_support check-affinity "$$" "999"
+  if [ "$RC" = "1" ] && grep -q '^AB-3649: cause affinity-mismatch$' "$TMP/err.txt"; then
+    ok "check-affinity refuses a pin the process does not actually have"
+  else
+    bad "check-affinity accepted a pin the process does not have (exit $RC)"
+  fi
+else
+  ok "check-affinity skipped: this platform exposes no Cpus_allowed_list (declared, not assumed)"
+fi
+
+# The startup sweep reads every echoed field, not only the resolved one.
+printf '%s\n' '2026-09-01T10:00:00Z  INFO cqlite_flight: cqlite-flight starting listen=127.0.0.1:8815 batch_size=8192 max_batch_bytes=4194304 max_inflight_egress_bytes=12582912 max_concurrent_scans=16 max_concurrent_scans_source=flag available_parallelism=4 admission_wait_timeout_ms=30000 max_concurrent_streams=100' > "$TMP/startup-full.log"
+sweep_bad=''
+for probe in "batch-size 8192" "max-batch-bytes 4194304" "wait-timeout-ms 30000"; do
+  set -- $probe
+  [ "$(python3 "$SUPPORT" parse-startup "$TMP/startup-full.log" "$1")" = "$2" ] || sweep_bad="$sweep_bad $1"
+done
+if [ "$(python3 "$SUPPORT" parse-startup "$TMP/startup-full.log" scans)" != "16" ]; then
+  sweep_bad="$sweep_bad scans-adjacency"
+fi
+if [ -z "$sweep_bad" ]; then
+  ok "every echoed server field is read back from the real startup line, and max_concurrent_streams beside it is not mistaken for max_concurrent_scans"
+else
+  bad "the startup sweep could not read:$sweep_bad"
+fi
+
+# FINDING 2: the constructed argv must name each option EXACTLY ONCE. The
+# project's Clap command does not enable self-overrides, so a duplicate is a
+# parse failure -- and this is checkable WITHOUT the binary, which is what makes
+# it worth having, because no stub reproduces Clap.
+argv_dupe_bad=''
+for extra in "" "--max-batch-bytes 1" "--batch-size 1" "--admission-wait-timeout-ms 5000"; do
+  set +e
+  argv="$(python3 "$SUPPORT" server-argv /b/cqlite-flight /d 127.0.0.1:0 8192 4194304 30000 16 "$extra" 2>/dev/null)"
+  argv_rc=$?
+  set -e
+  if [ "$argv_rc" != "0" ]; then
+    argv_dupe_bad="$argv_dupe_bad [extra='$extra' refused]"
+    continue
+  fi
+  dupes="$(printf '%s\n' "$argv" | grep '^--' | sort | uniq -d)"
+  [ -z "$dupes" ] || argv_dupe_bad="$argv_dupe_bad [extra='$extra' dupes=$(printf '%s' "$dupes" | tr '\n' ',')]"
+done
+if [ -z "$argv_dupe_bad" ]; then
+  ok "the constructed server argv names every option exactly once, whatever the per-arm extras"
+else
+  bad "the constructed argv repeats an option, which the real Clap rejects:$argv_dupe_bad"
+fi
+run_support server-argv /b/cqlite-flight /d 127.0.0.1:0 8192 4194304 30000 16 "--nope 1"
+check_support "an unrecognised per-arm option, which could only be appended" 1 server-extra-unrecognised
+run_support server-argv /b/cqlite-flight /d 127.0.0.1:0 8192 4194304 30000 16 "--max-batch-bytes"
+check_support "a per-arm option with no value" 1 server-extra-unrecognised
+# FINDING 3 (round 9): `--max-concurrent-scans` was declared per-arm overridable
+# and validated globally, so any effective override failed at run time. Rejected
+# rather than threaded through, because two arms admitted at different
+# concurrencies shed at different ramp steps and the analyzer already refuses the
+# resulting mismatched ladders -- a per-arm ceiling cannot produce a comparable
+# measurement, so there is nothing to thread.
+run_support server-argv /b/cqlite-flight /d 127.0.0.1:0 8192 4194304 30000 16 "--max-concurrent-scans 4"
+check_support "a per-arm admission ceiling, which cannot be comparable" 1 server-extra-unrecognised
+
+# FINDING 1: the server must not inherit this shell's environment. Structural,
+# because the failure is a variable that is ABSENT here and present on a rig.
+if python3 - "$DRIVER" <<'PYINNER'
+import re
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+block = re.search(r"local -a server_env=\((.*?)\n  \)", source, re.S)
+problems = []
+if not block:
+    problems.append("no server_env allowlist found")
+else:
+    body = block.group(1)
+    if "env -i" not in body:
+        problems.append("the server environment is not built with `env -i`")
+    if "RUST_LOG=info" not in body:
+        problems.append("RUST_LOG is not pinned to an INFO-capable filter")
+    # Every admitted entry must be an explicit assignment, never a bare
+    # pass-through of whatever the caller had.
+    for name in re.findall(r'"([A-Z_]+)=', body):
+        if name.startswith("CQLITE_") and name != "CQLITE_FLIGHT_MERGE_PATH":
+            problems.append("unpinned CQLite variable admitted: %s" % name)
+if re.search(r'server_env\+=\(\s*"?\$\{?[A-Za-z_]', source):
+    problems.append("the allowlist is extended with an unquoted caller value")
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "the server is launched under `env -i` with a named allowlist and a pinned RUST_LOG"
+else
+  bad "the server would inherit this shell's environment (see stderr above)"
+fi
+
+# THE WITHIN-PAIR ORDER RULE, EXECUTED. This is the one driver decision whose
+# failure mode is a confident wrong answer rather than an error: if base always
+# ran first, a drift inside a pair would land on the head arm every time and bias
+# every ratio in one direction, with every statistical test still passing. It
+# lives in the helper precisely so it can be run here.
+order_bad=''
+for probe in "1 base head" "2 head base" "3 base head" "4 head base" "7 base head"; do
+  set -- $probe
+  [ "$(python3 "$SUPPORT" pair-order "$1")" = "$2 $3" ] || order_bad="$order_bad rep$1"
+done
+if [ -z "$order_bad" ]; then
+  ok "the within-pair order alternates with replicate parity"
+else
+  bad "the within-pair order rule is wrong for:$order_bad"
+fi
+# ...and the property that matters is the BALANCE it produces over a session.
+balance_report="$(
+  base_first=0; head_first=0
+  for r in $(seq 1 8); do
+    case "$(python3 "$SUPPORT" pair-order "$r")" in
+      base*) base_first=$((base_first + 1)) ;;
+      *)     head_first=$((head_first + 1)) ;;
+    esac
+  done
+  echo "$base_first $head_first"
+)"
+if [ "$balance_report" = "4 4" ]; then
+  ok "over an even replicate count the two orderings run exactly as often"
+else
+  bad "eight replicates did not balance the two orderings ($balance_report)"
+fi
+run_support pair-order 0
+check_support "pair-order refuses a non-positive replicate" 2
+
+for bad_ramp in "1,abc" "1,²" "2" "4,2" "1,1" "0"; do
+  run_support validate-ramp "$bad_ramp"
+  if [ "$RC" = "1" ] && anchored; then
+    ok "the ramp validator refuses '$bad_ramp'"
+  else
+    bad "the ramp validator accepted '$bad_ramp' (exit $RC)"
+  fi
+done
+run_support validate-ramp "1,2,4,8"
+if [ "$RC" = "0" ] && [ "$(cat "$TMP/out.txt")" = "8 utilization" ]; then
+  ok "a valid ramp yields its top step and the section that can consume it"
+else
+  bad "the ramp validator did not report top and section for a valid ramp"
+fi
+run_support validate-ramp "1"
+if [ "$RC" = "0" ] && [ "$(cat "$TMP/out.txt")" = "1 single-stream" ]; then
+  ok "--ramp 1 maps to the single-stream section"
+else
+  bad "--ramp 1 did not map to the single-stream section"
+fi
+
+printf '%s\n' '2026-09-01T10:00:00Z  INFO cqlite_flight: cqlite-flight starting listen=127.0.0.1:8815 batch_size=8192 max_batch_bytes=4194304 max_inflight_egress_bytes=12582912 max_concurrent_scans=16 max_concurrent_scans_source=flag available_parallelism=4 admission_wait_timeout_ms=30000 max_concurrent_streams=100' > "$TMP/startup.log"
+if [ "$(python3 "$SUPPORT" parse-startup "$TMP/startup.log" scans)" = "16" ] \
+   && [ "$(python3 "$SUPPORT" parse-startup "$TMP/startup.log" source)" = "flag" ]; then
+  ok "the startup parser reads the ceiling and its provenance from a real line"
+else
+  bad "the startup parser did not read the plain-format startup line"
+fi
+printf '%s\n' '{"fields":{"max_concurrent_scans":8,"max_concurrent_scans_source":"derived"},"message":"cqlite-flight starting"}' > "$TMP/startup.json"
+if [ "$(python3 "$SUPPORT" parse-startup "$TMP/startup.json" scans)" = "8" ] \
+   && [ "$(python3 "$SUPPORT" parse-startup "$TMP/startup.json" source)" = "derived" ]; then
+  ok "the startup parser also reads a JSON-formatted startup line"
+else
+  bad "the startup parser did not read a JSON startup line"
+fi
+if [ "$(python3 "$SUPPORT" parse-startup /nonexistent scans)" = "NOT-OBSERVED" ] \
+   && [ "$(printf 'nothing here\n' > "$TMP/quiet.log"; python3 "$SUPPORT" parse-startup "$TMP/quiet.log" scans)" = "NOT-OBSERVED" ]; then
+  ok "an unreadable or silent server log yields NOT-OBSERVED, never a value"
+else
+  bad "the startup parser invented a value it could not read"
+fi
+
+echo
+echo "-- the UTILIZATION quantity: a direction, never an attainment --"
+
+# The ramp fixtures put the peak at the top of the ladder, so peak SELECTION is
+# exercised rather than trivially satisfied by a one-element ladder.
+RAMP='1,2,4,8'
+
+mkfixture "$TMP/util-rise" 6 \
+  "100000:132000,100000:134000,100000:134000,100000:136000,100000:136000,100000:138000" "$RAMP"
+run_util "$TMP/util-rise"
+check_verdict "utilization throughput that rose measurably" RISES 0 utilization
+if grep -q '^AB-3649: pair 1 ladder-compared 1,2,4,8 base-peak-at-concurrency 8 head-peak-at-concurrency 8$' "$TMP/out.txt"; then
+  ok "the utilization section reports the ladder compared and where each peak fell"
+else
+  bad "the utilization section did not report the ladder and peak concurrency"
+fi
+if grep -q '^AB-3649: excluded-steps 0 RECOGNISED$' "$TMP/out.txt"; then
+  ok "a clean ramp reports 0 RECOGNISED exclusions, never a bare 0"
+else
+  bad "a clean ramp did not print an affirmative zero-exclusion line"
+fi
+
+mkfixture "$TMP/util-fall" 6 \
+  "100000:88000,100000:87000,100000:87000,100000:86000,100000:86000,100000:85000" "$RAMP"
+run_util "$TMP/util-fall"
+check_verdict "utilization throughput that fell measurably" FALLS 4 utilization
+
+mkfixture "$TMP/util-flat" 6 \
+  "100000:85000,100000:99000,100000:118000,100000:132000,100000:92000,100000:145000" "$RAMP"
+run_util "$TMP/util-flat"
+check_verdict "utilization throughput with no established direction" INCONCLUSIVE 6 utilization
+
+# THE STRUCTURAL SEPARATION. The 1.5-1.9x ceiling is not a target, so the
+# utilization section must be incapable of emitting a band verdict, and the
+# single-stream section incapable of emitting a direction verdict.
+run_util "$TMP/util-rise"
+if grep -qE '^AB-3649: verdict utilization (MEETS-TARGET|ABOVE-TARGET|BELOW-TARGET)$' "$TMP/out.txt"; then
+  bad "the utilization section emitted a target-band verdict token"
+else
+  ok "the utilization section cannot emit a target-band verdict token"
+fi
+if grep -q '^AB-3649: target NONE-BY-DESIGN ' "$TMP/out.txt"; then
+  ok "the utilization section states that no band or ceiling reaches its rule"
+else
+  bad "the utilization section did not declare its rule threshold-free"
+fi
+if grep -q '^AB-3649: ceiling 1.5-1.9x is a rig-narrow UTILIZATION ceiling' "$TMP/out.txt"; then
+  ok "the ceiling is NAMED in the utilization section"
+else
+  bad "the utilization section did not name the ceiling"
+fi
+if grep -qE 'MEETS-CEILING|CEILING-MET|REACHES-CEILING|ceiling-attained' "$TMP/out.txt"; then
+  bad "the utilization output invented a ceiling-attainment token"
+else
+  ok "no ceiling-attainment token exists anywhere in the utilization output"
+fi
+run_analyzer "$TMP/meets"
+if grep -qE '^AB-3649: verdict single-stream (RISES|FALLS)$' "$TMP/out.txt"; then
+  bad "the single-stream section emitted a direction verdict token"
+else
+  ok "the single-stream section cannot emit a direction verdict token"
+fi
+
+# A manifest handed to the wrong section is a real mistake and gets its own cause.
+run_util "$TMP/meets"
+check_verdict "a --ramp 1 manifest supplied as the utilization section" UNMEASURED 7 utilization
+check_cause "ramp-1 manifest in the utilization section" mode-manifest-mismatch
+run_analyzer "$TMP/util-rise"
+check_verdict "a ramp manifest supplied as the single-stream section" UNMEASURED 7 single-stream
+check_cause "ramp manifest in the single-stream section" mode-manifest-mismatch
+
+echo
+echo "-- admission control (#2420) cannot be silently averaged into a throughput --"
+
+shed_step() { # <dir> <arm> <replicate> <0-based-step> <count>
+  python3 - "$1/$2-r$(printf '%02d' "$3").jsonl" "$4" "$5" <<'PYINNER'
+import json
+import sys
+
+path, step, count = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+with open(path, encoding="utf-8") as handle:
+    records = [json.loads(line) for line in handle if line.strip()]
+records[step]["requests_unavailable"] = count
+with open(path, "w", encoding="utf-8") as handle:
+    for record in records:
+        handle.write(json.dumps(record) + "\n")
+PYINNER
+}
+
+# Shed the top step on BOTH arms of every replicate: the ladder stays matched,
+# the shed steps are excluded, and each exclusion is named.
+mkfixture "$TMP/util-shed" 6 \
+  "100000:132000,100000:134000,100000:134000,100000:136000,100000:136000,100000:138000" "$RAMP"
+for r in 1 2 3 4 5 6; do
+  shed_step "$TMP/util-shed" base "$r" 3 7
+  shed_step "$TMP/util-shed" head "$r" 3 7
+done
+run_util "$TMP/util-shed"
+check_verdict "a ramp whose top step was admission-shed on both arms" RISES 0 utilization
+if grep -q '^AB-3649: excluded-step replicate 1 arm base concurrency 8 requests-unavailable 7 reason admission-shed-2420$' "$TMP/out.txt"; then
+  ok "each admission-shed step is excluded and reported as an explicit fact"
+else
+  bad "an admission-shed step was not reported as an explicit exclusion"
+fi
+if grep -q '^AB-3649: excluded-steps 12 RECOGNISED$' "$TMP/out.txt"; then
+  ok "the exclusion count is reported, so a silently shrunken ladder is visible"
+else
+  bad "the exclusion count was not reported"
+fi
+if grep -q '^AB-3649: pair 1 ladder-compared 1,2,4 base-peak-at-concurrency 4 ' "$TMP/out.txt"; then
+  ok "the peak is taken over the SURVIVING ladder, not the declared one"
+else
+  bad "the peak was not taken over the surviving ladder"
+fi
+
+# Shed a DIFFERENT step on each arm: the ladders no longer match, so a peak
+# taken over them is not a ratio.
+mkfixture "$TMP/util-asym" 6 \
+  "100000:132000,100000:134000,100000:134000,100000:136000,100000:136000,100000:138000" "$RAMP"
+for r in 1 2 3 4 5 6; do
+  shed_step "$TMP/util-asym" base "$r" 3 7
+done
+run_util "$TMP/util-asym"
+check_verdict "arms whose surviving ladders differ" UNMEASURED 7 utilization
+check_cause "mismatched surviving ladders" ramp-steps-not-comparable
+
+# ROUND 22 FINDING 1: DIFFERENT REPLICATES SHEDDING DIFFERENT STEPS. Each pair's
+# ladders match, so the per-pair check is satisfied -- and the pairs' ladders
+# differ from EACH OTHER, so the bootstrap used to combine peaks taken over
+# different concurrency sets. An aggregate of those estimates no single
+# quantity: the interval would be a confidence interval for nothing in
+# particular, and nothing in the number says so.
+mkfixture "$TMP/util-crosspair" 6 \
+  "100000:132000,100000:134000,100000:134000,100000:136000,100000:136000,100000:138000" "$RAMP"
+# Replicates 1-3 shed the top step on BOTH arms; 4-6 keep it. Every pair is
+# internally consistent; the SET of surviving ladders across pairs is not.
+for r in 1 2 3; do
+  shed_step "$TMP/util-crosspair" base "$r" 3 7
+  shed_step "$TMP/util-crosspair" head "$r" 3 7
+done
+run_util "$TMP/util-crosspair"
+check_verdict "replicates that shed DIFFERENT steps from each other" RISES 0 utilization
+if grep -q '^AB-3649: verdict-detail utilization ESTIMAND the peak is taken over the concurrency ladder shared by EVERY replicate' "$TMP/out.txt"; then
+  ok "the shared ladder is stated as the estimand rather than left implicit"
+else
+  bad "the estimand was not stated, so two different quantities look identical"
+fi
+if grep -q '^AB-3649: verdict-detail utilization ESTIMAND at least one replicate shed a step the others kept' "$TMP/out.txt"; then
+  ok "the report says the peaks were RECOMPUTED, not merely which ladder was used"
+else
+  bad "the recomputation was not disclosed"
+fi
+# ...and when no replicate sheds, the estimand line still states the ladder but
+# must NOT claim a recomputation that did not happen.
+run_util "$TMP/util"
+if grep -q 'ESTIMAND at least one replicate shed a step' "$TMP/out.txt"; then
+  bad "an unrestricted session claimed a recomputation that did not happen"
+else
+  ok "an unrestricted session does not claim a recomputation"
+fi
+
+# Every step shed: the run measured the admission ceiling and nothing else.
+mkfixture "$TMP/util-allshed" 6 \
+  "100000:132000,100000:134000,100000:134000,100000:136000,100000:136000,100000:138000" "$RAMP"
+for r in 1 2 3 4 5 6; do
+  for step in 0 1 2 3; do
+    shed_step "$TMP/util-allshed" base "$r" "$step" 3
+    shed_step "$TMP/util-allshed" head "$r" "$step" 3
+  done
+done
+run_util "$TMP/util-allshed"
+check_verdict "a ramp in which every step was shed" UNMEASURED 7 utilization
+check_cause "a fully shed ramp" ramp-fully-shed
+
+# At single-stream concurrency a shed can only mean something is badly wrong, so
+# there it is a refusal rather than an exclusion.
+run_analyzer "$TMP/shed"
+check_verdict "a shed at single-stream concurrency" UNMEASURED 7 single-stream
+check_cause "shed at concurrency 1" run-shed
+
+# The arms must have been served under the SAME admission ceiling.
+mkfixture "$TMP/adm-mismatch" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+python3 - "$TMP/adm-mismatch/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    if entry["arm"] == "head":
+        entry["admission_observed"] = "8"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/adm-mismatch"
+check_verdict "arms served under different admission ceilings" UNMEASURED 7 single-stream
+check_cause "differing admission ceilings" admission-mismatch
+
+# An unobservable ceiling is disclosed, not assumed to agree.
+mkfixture "$TMP/adm-unobs" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+python3 - "$TMP/adm-unobs/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    entry["admission_observed"] = "NOT-OBSERVED"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+# REVISED RULING (round 10): a session where NOTHING was observed has no evidence
+# about the configuration it ran under, so it is UNMEASURED rather than a
+# decisive verdict behind a disclosure. Partial stays disclosed -- there the
+# observed runs constrain the unobserved ones.
+run_analyzer "$TMP/adm-unobs"
+check_verdict "a session where no startup line was read at all" UNMEASURED 7 single-stream
+check_cause "no startup line observed anywhere" startup-unobserved
+
+
+echo
+echo "-- nothing non-finite may reach a verdict rule --"
+
+poison() { # <dir> <arm> <replicate> <field> <python-literal>
+  python3 - "$1/$2-r$(printf '%02d' "$3").jsonl" "$4" "$5" <<'PYINNER'
+import json
+import sys
+
+path, field, literal = sys.argv[1], sys.argv[2], sys.argv[3]
+value = {"inf": float("inf"), "-inf": float("-inf"), "nan": float("nan")}.get(literal)
+if value is None:
+    value = float(literal)
+with open(path, encoding="utf-8") as handle:
+    records = [json.loads(line) for line in handle if line.strip()]
+# Preserve the field's JSON type: poisoning an integer field with a float would
+# trip the shape check instead of the property under test.
+existing = records[0].get(field)
+if isinstance(existing, int) and not isinstance(existing, bool) and value == value \
+        and value not in (float("inf"), float("-inf")):
+    value = int(value)
+records[0][field] = value
+with open(path, "w", encoding="utf-8") as handle:
+    for record in records:
+        handle.write(json.dumps(record) + "\n")
+PYINNER
+}
+
+for poison_value in inf nan; do
+  mkfixture "$TMP/nf-$poison_value" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+  poison "$TMP/nf-$poison_value" head 3 rows_per_s "$poison_value"
+  run_analyzer "$TMP/nf-$poison_value"
+  check_verdict "a rows_per_s of $poison_value" UNMEASURED 7 single-stream
+  check_cause "rows_per_s of $poison_value" run-non-finite
+done
+
+# `inf > 0` is TRUE, which is how this used to reach the rule. Pin the predicate
+# itself, since it is the one line the whole guard rests on.
+if python3 - "$HERE" <<'PYINNER'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import ab_stats as S
+
+bad = [float("inf"), float("-inf"), float("nan"), 0.0, -1.0]
+good = [1e-300, 1.0, 1e300]
+raise SystemExit(
+    0 if all(not S.is_usable_ratio(v) for v in bad)
+    and all(S.is_usable_ratio(v) for v in good) else 1
+)
+PYINNER
+then
+  ok "is_usable_ratio rejects inf, -inf, NaN, zero and negative, and accepts finite positives"
+else
+  bad "is_usable_ratio does not gate the values that reach the verdict rule"
+fi
+
+# A ratio can be non-finite from two FINITE, internally consistent operands.
+mkfixture "$TMP/nf-ratio" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+python3 - "$TMP/nf-ratio" <<'PYINNER'
+import json
+import os
+import sys
+
+root = sys.argv[1]
+# Both records stay finite AND internally consistent (rows_per_s x duration_s ==
+# rows_total, duration inside the declared band), yet head/base overflows.
+for name, rate, duration, rows in (
+    ("base-r01.jsonl", 1.0 / 240.0, 240.0, 1),
+    ("head-r01.jsonl", 2.9e306, 60.0, int(2.9e306 * 60.0)),
+):
+    path = os.path.join(root, name)
+    with open(path, encoding="utf-8") as handle:
+        record = json.loads(handle.read())
+    record["rows_per_s"] = rate
+    record["duration_s"] = duration
+    record["rows_total"] = rows
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
+PYINNER
+run_analyzer "$TMP/nf-ratio"
+check_verdict "a ratio that overflows from two finite operands" UNMEASURED 7 single-stream
+check_cause "an overflowing ratio" ratio-non-finite
+
+echo
+echo "-- an n=3 bootstrap is the observed RANGE, not an interval --"
+
+# At n=3 the all-minimum resample has probability 1/27 = 3.7%, which exceeds the
+# 2.5% tail, so the bounds ARE (min, max). The refusal is an affirmative
+# measurement of that -- it compares the interval the bootstrap actually
+# returned -- so it keeps working if someone changes n, the tail or the floor.
+mkfixture "$TMP/degen3" 3 "100000:116000,100000:118000,100000:120000"
+run_analyzer "$TMP/degen3" --min-pairs 3
+check_verdict "three pairs, where the bootstrap contributes nothing" UNMEASURED 7 single-stream
+check_cause "an n=3 bootstrap" bootstrap-degenerate
+
+# Identical ratios are degenerate at ANY n: a zero-width interval lands inside
+# whatever band contains the point.
+mkfixture "$TMP/degen-flat" 6 "100000:117000,100000:117000,100000:117000,100000:117000,100000:117000,100000:117000"
+run_analyzer "$TMP/degen-flat"
+check_verdict "six identical pairs, giving a zero-width interval" UNMEASURED 7 single-stream
+check_cause "a zero-width interval" bootstrap-degenerate
+
+# The floor moved to 5, so the old default of 3 is now refused before any
+# statistics are computed.
+mkfixture "$TMP/four" 4 "100000:117000,100000:117000,100000:118000,100000:118000"
+run_analyzer "$TMP/four"
+check_verdict "four pairs against the new floor of five" UNMEASURED 7 single-stream
+check_cause "four pairs" insufficient-pairs
+
+# ...and five NON-identical pairs is a real interval again.
+mkfixture "$TMP/five" 5 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000"
+run_analyzer "$TMP/five"
+check_verdict "five distinct pairs" MEETS-TARGET 0 single-stream
+
+echo
+echo "-- declared versus observed, applied to the step records themselves --"
+
+mkfixture "$TMP/rec" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+poison "$TMP/rec" head 2 target_concurrency 32
+run_analyzer "$TMP/rec"
+check_verdict "a record whose concurrency is not the declared one" UNMEASURED 7 single-stream
+check_cause "a concurrency the manifest does not declare" ramp-order-mismatch
+
+mkfixture "$TMP/rec2" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+poison "$TMP/rec2" base 4 duration_s 1.5
+run_analyzer "$TMP/rec2"
+check_verdict "a 1.5-second record under a declared 60-second step" UNMEASURED 7 single-stream
+check_cause "a step duration nothing like the declared one" step-duration-mismatch
+
+mkfixture "$TMP/rec3" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+poison "$TMP/rec3" head 5 rows_total 12
+run_analyzer "$TMP/rec3"
+check_verdict "a record whose rows_total contradicts its own rate" UNMEASURED 7 single-stream
+check_cause "an internally inconsistent record" record-internally-inconsistent
+
+mkfixture "$TMP/rec4" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+python3 - "$TMP/rec4/head-r02.jsonl" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    record = json.loads(handle.read())
+record["round"] = "base-r02"
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(record) + "\n")
+PYINNER
+run_analyzer "$TMP/rec4"
+check_verdict "a file filed under the arm its own round label denies" UNMEASURED 7 single-stream
+check_cause "a mislabelled replicate file" round-label-mismatch
+
+echo
+echo "-- nothing escapes as an unanchored traceback --"
+
+# Each of these used to raise out of run_section: exit 1, an unprefixed
+# traceback, and a section with NO verdict line -- worse than a wrong verdict,
+# because nothing downstream can even detect it.
+mkfixture "$TMP/tb1" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+python3 - "$TMP/tb1/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["arms"]["base"] = "commit cfa93fe99^"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/tb1"
+check_verdict "an arms entry that is a string, not an object" UNMEASURED 7 single-stream
+check_cause "a string where an object was expected" manifest-field
+
+mkfixture "$TMP/tb2" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+python3 - "$TMP/tb2/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+# "²".isdigit() is True and int() of it raises -- a manifest field that used
+# to escape as a traceback.
+manifest["workload"]["ramp"] = "1,²"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/tb2"
+check_verdict "a ramp containing a superscript two" UNMEASURED 7 single-stream
+check_cause "a non-ASCII digit in the ramp" manifest-field
+
+mkfixture "$TMP/tb3" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+python3 - "$TMP/tb3/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+del manifest["workload"]["step_duration_seconds"]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/tb3"
+check_verdict "a manifest with no canonical step duration" UNMEASURED 7 single-stream
+check_cause "an absent canonical step duration" manifest-field
+
+# THE FALSE-REFUSAL CASE. `--step-duration 60` is valid to flight-loadgen (bare
+# means seconds), so a FINISHED session must not be declined over a suffix the
+# load generator never required. The driver normalises at pre-flight, so the raw
+# string can be anything the loadgen accepts.
+mkfixture "$TMP/bareseconds" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/bareseconds/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["workload"]["step_duration"] = "60"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/bareseconds"
+check_verdict "a bare-seconds step duration, which flight-loadgen accepts" MEETS-TARGET 0 single-stream
+
+echo
+echo "-- partial admission observation is not agreement --"
+
+mkfixture "$TMP/adm-partial" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/adm-partial/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    if entry["arm"] == "head":
+        entry["admission_observed"] = "NOT-OBSERVED"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/adm-partial"
+check_verdict "half the runs observed, half not" MEETS-TARGET 0 single-stream
+if grep -q 'corroboration partial (6 of 12 runs)' "$TMP/out.txt"; then
+  ok "the admission line counts which runs actually corroborated the ceiling"
+else
+  bad "partial admission observation was not counted"
+fi
+if grep -q '^AB-3649: admission max-concurrent-scans requested 16 observed 16 corroboration partial ' "$TMP/out.txt"; then
+  ok "requested and observed admission values are printed side by side, with the corroboration state"
+else
+  bad "the admission line did not print requested, observed and corroboration together"
+fi
+if grep -q 'PARTIAL OBSERVATION IS NOT AGREEMENT' "$TMP/out.txt"; then
+  ok "partial observation is disclosed rather than reduced to the observed value"
+else
+  bad "partial observation was silently upgraded to agreement"
+fi
+# THE REMEDY MUST TRAVEL WITH THE DIAGNOSTIC, and it is pinned so a wording pass
+# cannot delete it silently -- which is the failure mode this whole round was
+# about. Pinned by CONTENT, not just by the key: a line that keeps the key and
+# loses the fix, the time window or the honest scope is not the line that was
+# reviewed.
+if grep -q '^AB-3649: verdict-detail single-stream ADMISSION-REMEDY ' "$TMP/out.txt"; then
+  ok "a partial corroboration names its remedy in the OUTPUT, not only in the runbook"
+else
+  bad "a partial corroboration named a state with no remedy -- the shape this repo's fail-closed diagnostics exist to correct"
+fi
+check_remedy_shared "the partial remedy carries the time window, the log path and the honest scope"
+# THE REMEDY DIFFERS BY STATE. The gate-pin verdict splits NOT-HONOURED from
+# default because a shared remedy sends an operator in a circle; the same applies
+# here, so the two states must not print the same first action.
+if grep -q 'ADMISSION-REMEDY.*specific to the runs that did not report' "$TMP/out.txt"; then
+  ok "the PARTIAL remedy points at the runs that did not report, not at the parser"
+else
+  bad "the partial remedy does not name the runs that did not report"
+fi
+if [ "$(grep -c '^AB-3649: verdict-detail single-stream ADMISSION-REMEDY ' "$TMP/out.txt")" = "1" ]; then
+  ok "the remedy is ONE line, not a paragraph in the output"
+else
+  bad "the remedy grew past one line in the output"
+fi
+run_analyzer "$TMP/five"
+if grep -q 'corroboration agreed (10 of 10 runs)' "$TMP/out.txt" \
+   && ! grep -q '^AB-3649: verdict-detail single-stream ADMISSION ' "$TMP/out.txt"; then
+  ok "full corroboration is stated as such and carries no caveat"
+else
+  bad "a fully corroborated ceiling was not reported as agreed"
+fi
+if grep -q 'ADMISSION-REMEDY' "$TMP/out.txt"; then
+  bad "a fully corroborated run printed a remedy for a problem it does not have"
+else
+  ok "the remedy appears only where there is something to remedy"
+fi
+
+echo
+echo "-- corroboration is a claim about PROVENANCE, not just a value --"
+
+# `agreed` says the ceiling we passed is the ceiling that took effect. Counting
+# observed VALUES alone let that word mean less than it says: a numeric ceiling
+# paired with a derived or env source counted as fully corroborated.
+mkfixture "$TMP/prov-derived" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/prov-derived/manifest.json" derived <<'PYINNER'
+import json
+import sys
+
+path, source = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    if entry["arm"] == "head":
+        entry["admission_source"] = source
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/prov-derived"
+check_verdict "a run whose ceiling came from somewhere other than our flag" UNMEASURED 7 single-stream
+check_cause "a non-flag admission provenance" admission-provenance
+
+# A MISSING provenance is not a wrong one: it downgrades corroboration rather
+# than refusing, exactly as a missing value does.
+mkfixture "$TMP/prov-absent" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/prov-absent/manifest.json" NOT-OBSERVED <<'PYINNER'
+import json
+import sys
+
+path, source = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    if entry["arm"] == "head":
+        entry["admission_source"] = source
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/prov-absent"
+check_verdict "a run whose provenance could not be read" MEETS-TARGET 0 single-stream
+if grep -q 'corroboration partial (6 of 12 runs)' "$TMP/out.txt"; then
+  ok "a value without a flag provenance does not count toward corroboration"
+else
+  bad "a value with no provenance was counted as corroborated"
+fi
+
+echo
+echo "-- the target band is defined for --shape full --"
+
+mkfixture "$TMP/shape-bad" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+# The manifest AND the records: a session that ran limit-k produced limit-k
+# records, and the two must agree or the reconciliation refuses it first (which
+# is a different, also-correct refusal, and would leave this case untested).
+python3 - "$TMP/shape-bad" <<'PYINNER'
+import json
+import os
+import sys
+
+root = sys.argv[1]
+path = os.path.join(root, "manifest.json")
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["workload"]["shape"] = "limit-k"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+for name in os.listdir(root):
+    if not name.endswith(".jsonl"):
+        continue
+    target = os.path.join(root, name)
+    with open(target, encoding="utf-8") as handle:
+        records = [json.loads(line) for line in handle if line.strip()]
+    for record in records:
+        record["shape"] = "limit-k"
+    with open(target, "w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record) + "\n")
+PYINNER
+run_analyzer "$TMP/shape-bad"
+check_verdict "a limit-k session scored against the full-scan band" UNMEASURED 7 single-stream
+check_cause "a workload that is not a full scan" shape-not-full
+
+# A CONTROL may use any shape -- its verdict is disclaimed either way -- but the
+# shape must be named beside it.
+python3 - "$TMP/shape-bad/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["control"] = "shape-probe"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/shape-bad"
+check_verdict "a labelled control may use another shape" MEETS-TARGET 0 single-stream
+if grep -q '^AB-3649: verdict-detail single-stream SHAPE the workload was --shape limit-k' "$TMP/out.txt"; then
+  ok "a non-full shape is named beside the verdict it disclaims"
+else
+  bad "a non-full shape was not disclosed"
+fi
+run_analyzer "$TMP/meets"
+if grep -q '^AB-3649: verdict-detail single-stream SHAPE ' "$TMP/out.txt"; then
+  bad "a full-scan session printed a shape disclaimer it does not need"
+else
+  ok "a full-scan session carries no shape disclaimer"
+fi
+
+echo
+echo "-- within-pair order must be counterbalanced, and COUNTED from the record --"
+
+# Interleaving across replicates controls drift BETWEEN pairs. A gradient WITHIN
+# a pair -- thermal ramp, a neighbour starting -- lands on whichever arm runs
+# second, every time, and biases every ratio the same way. No test of the
+# statistics can catch that: every one of them passes.
+run_analyzer "$TMP/meets"
+if grep -q '^AB-3649: counterbalance base-first 3 head-first 3 residual 0 pair(s)$' "$TMP/out.txt"; then
+  ok "an even replicate count counterbalances exactly, and the counts are reported"
+else
+  bad "the counterbalance counts were not reported for an even session"
+fi
+if grep -q '^AB-3649: counterbalance order-by-replicate 1:base,2:head,3:base,4:head,5:base,6:head$' "$TMP/out.txt"; then
+  ok "the executed order is printed per replicate, so a reader can check it"
+else
+  bad "the per-replicate executed order was not printed"
+fi
+if grep -q '^AB-3649: verdict-detail single-stream COUNTERBALANCE ' "$TMP/out.txt"; then
+  bad "an exactly balanced session printed a residual disclosure it does not need"
+else
+  ok "an exactly balanced session carries no counterbalance residual"
+fi
+
+# An ODD count cannot balance exactly. That residual is disclosed, not refused:
+# refusing it would red a correct session.
+mkfixture "$TMP/cb-odd" 5 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000"
+run_analyzer "$TMP/cb-odd"
+check_verdict "an odd replicate count, which cannot balance exactly" MEETS-TARGET 0 single-stream
+if grep -q '^AB-3649: counterbalance base-first 3 head-first 2 residual 1 pair(s)$' "$TMP/out.txt" \
+   && grep -q '^AB-3649: verdict-detail single-stream COUNTERBALANCE 3 pair(s) ran base-first' "$TMP/out.txt"; then
+  ok "an odd count's one-pair residual is disclosed rather than hidden or refused"
+else
+  bad "an odd count's counterbalance residual was not disclosed"
+fi
+
+# THE DEFECT ITSELF: every pair in the same order.
+mkfixture "$TMP/cb-broken" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/cb-broken/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    entry["position_in_pair"] = 1 if entry["arm"] == "base" else 2
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/cb-broken"
+check_verdict "every pair run in the same within-pair order" UNMEASURED 7 single-stream
+# The PARITY check now fires first on this fixture, and correctly: an all-base-
+# first session violates the declared order as well as the counts.
+check_cause "an uncounterbalanced session" counterbalance-not-parity
+
+# ROUND 22 FINDING 3: A GROUPED ORDER HAS EQUAL COUNTS AND IS NOT
+# COUNTERBALANCED. base-first for the first half, head-first for the second --
+# three each, so the count test passed and the manifest went on claiming parity
+# counterbalancing. It is the worst arrangement to accept silently, because it
+# is exactly the one in which a time-varying drift correlates with arm order,
+# which is the thing counterbalancing exists to prevent.
+mkfixture "$TMP/cb-grouped" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/cb-grouped/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    first_half = entry["replicate"] <= 3
+    base_first = first_half
+    if entry["arm"] == "base":
+        entry["position_in_pair"] = 1 if base_first else 2
+    else:
+        entry["position_in_pair"] = 2 if base_first else 1
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/cb-grouped"
+check_verdict "a GROUPED order with equal first-position counts" UNMEASURED 7 single-stream
+check_cause "a grouped order that the count test accepted" counterbalance-not-parity
+# ...and the declared parity order still passes, or the above proves only that
+# something is refused.
+run_analyzer "$TMP/meets"
+if grep -q '^AB-3649: cause single-stream counterbalance' "$TMP/err.txt"; then
+  bad "the declared parity order was refused"
+else
+  ok "the declared parity order (base first on odd replicates) is accepted"
+fi
+
+# Counterbalancing that is not RECORDED is counterbalancing that cannot be
+# checked -- so an absent or duplicated position is a refusal, not an assumption.
+for breakage in absent duplicate; do
+  mkfixture "$TMP/cb-$breakage" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  python3 - "$TMP/cb-$breakage/manifest.json" "$breakage" <<'PYINNER'
+import json
+import sys
+
+path, breakage = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    if entry["replicate"] != 1:
+        continue
+    if breakage == "absent":
+        entry.pop("position_in_pair", None)
+    else:
+        entry["position_in_pair"] = 1
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/cb-$breakage"
+  check_verdict "a pair whose executed order is $breakage" UNMEASURED 7 single-stream
+  check_cause "an unrecorded within-pair order ($breakage)" position-not-recorded
+done
+
+echo
+echo "-- an observation that is taken must be COMPARED --"
+
+# Round 2 finding 1, one field over: max_batch_bytes and the admission wait
+# timeout were read off the startup line and then neither persisted nor compared,
+# so two arms could be verdicted under different effective configurations.
+for cfg_field in batch_size_observed max_batch_bytes_observed wait_timeout_ms_observed; do
+  mkfixture "$TMP/cfg-$cfg_field" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  python3 - "$TMP/cfg-$cfg_field/manifest.json" "$cfg_field" <<'PYINNER'
+import json
+import sys
+
+path, name = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    if entry["arm"] == "head":
+        entry[name] = "999999"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/cfg-$cfg_field"
+  check_verdict "arms served under a different $cfg_field" UNMEASURED 7 single-stream
+  check_cause "a differing $cfg_field" server-config-mismatch
+done
+run_analyzer "$TMP/meets"
+cfg_report_bad=''
+for expect in "batch-size value 8192" "max-batch-bytes value 4194304" "wait-timeout-ms value 30000"; do
+  grep -q "^AB-3649: server-observed $expect corroboration agreed (12 of 12 runs)\$" "$TMP/out.txt" \
+    || cfg_report_bad="$cfg_report_bad ${expect%% *}"
+done
+if [ -z "$cfg_report_bad" ]; then
+  ok "every readback reports its value AND its corroboration counts, through one type"
+else
+  bad "these readbacks were not reported with corroboration counts:$cfg_report_bad"
+fi
+# THE THIRD INSTANCE: a field observed for only some runs must not read as
+# agreement, and it must inherit that from the shared type rather than a
+# per-field guard.
+mkfixture "$TMP/cfg-partial" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/cfg-partial/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    if entry["arm"] == "head":
+        entry["max_batch_bytes_observed"] = "NOT-OBSERVED"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/cfg-partial"
+check_verdict "a readback observed for only half the runs" MEETS-TARGET 0 single-stream
+if grep -q '^AB-3649: server-observed max-batch-bytes value 4194304 corroboration partial (6 of 12 runs)$' "$TMP/out.txt" \
+   && grep -q '^AB-3649: verdict-detail single-stream READBACK max-batch-bytes was observed for 6 of 12 runs' "$TMP/out.txt"; then
+  ok "a partially observed readback is counted and disclosed, not read as agreement"
+else
+  bad "a partially observed readback was treated as agreement"
+fi
+
+echo
+echo "-- both sections in one report --"
+
+run_both "$TMP/meets" "$TMP/util-flat"
+if [ "$(grep -c '^AB-3649: verdict ' "$TMP/out.txt")" = "2" ]; then
+  ok "a two-section report carries exactly two verdict lines"
+else
+  bad "a two-section report did not carry exactly two verdict lines"
+fi
+if [ "$(verdict_token single-stream)" = "MEETS-TARGET" ] \
+   && [ "$(verdict_token utilization)" = "INCONCLUSIVE" ]; then
+  ok "each section's verdict is keyed by its own quantity"
+else
+  bad "the two sections' verdicts are not separately addressable"
+fi
+if [ "$RC" = "6" ]; then
+  ok "with both sections the exit is the largest, so the least affirmative governs"
+else
+  bad "a two-section exit was $RC, expected 6 (the larger of 0 and 6)"
+fi
+if [ "$(grep -c '^AB-3649: ==== section ' "$TMP/out.txt")" = "2" ] \
+   && [ "$(grep -c '^AB-3649: ---- end section ' "$TMP/out.txt")" = "2" ]; then
+  ok "the two sections are delimited so neither can be read as the other"
+else
+  bad "the two sections are not delimited"
+fi
+
+# One unusable session must never suppress the other.
+run_both "$TMP/malformed" "$TMP/util-rise"
+if [ "$(verdict_token single-stream)" = "UNMEASURED" ] \
+   && [ "$(verdict_token utilization)" = "RISES" ] && [ "$RC" = "7" ]; then
+  ok "an UNMEASURED section does not suppress the section that did measure"
+else
+  bad "an UNMEASURED section suppressed the other section (rc=$RC)"
+fi
+
+run_both "$TMP/meets" "$TMP/util-rise"
+cp "$TMP/out.txt" "$TMP/both.first"
+run_both "$TMP/meets" "$TMP/util-rise"
+if cmp -s "$TMP/both.first" "$TMP/out.txt"; then
+  ok "a two-section report is deterministic too"
+else
+  bad "a two-section report is not deterministic"
+fi
+
+set +e
+python3 "$ANALYZER" --profile narrow > "$TMP/out.txt" 2> "$TMP/err.txt"
+RC=$?
+set -e
+if [ "$RC" = "3" ] && anchored; then
+  ok "neither section requested is a usage error, not an empty report"
+else
+  bad "an invocation naming no section did not exit 3 (exit $RC)"
+fi
+
+echo
+echo "-- the #3058 single-source fast path cannot silently null the measurement --"
+
+# With one source on disk and no pinned merge arm, #3058 routes every request
+# onto a fast path #2820 never touched -- on BOTH arms -- so the ratio is 1.0 by
+# construction. That is a measurement of nothing and must not render a verdict.
+mkfixture "$TMP/bypassed" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+python3 - "$TMP/bypassed/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["workload"]["merge_path"] = "auto"
+manifest["corpus"]["data_db_files"] = 1
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/bypassed"
+check_verdict "one source with no pinned merge arm" UNMEASURED 7
+check_cause "the #3058 fast path served both arms" merge-path-bypassed
+
+# With several sources the arm cannot be settled from the manifest, so this is a
+# disclosure rather than a refusal.
+mkfixture "$TMP/unpinned" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+python3 - "$TMP/unpinned/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["workload"]["merge_path"] = "auto"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/unpinned"
+check_verdict "several sources with no pinned merge arm still renders" MEETS-TARGET 0
+if grep -q '^AB-3649: verdict-detail single-stream MERGE-PATH ' "$TMP/out.txt"; then
+  ok "an unpinned merge arm is disclosed beside the verdict"
+else
+  bad "an unpinned merge arm was not disclosed"
+fi
+
+run_analyzer "$TMP/meets"
+if grep -q '^AB-3649: merge-path merge$' "$TMP/out.txt" \
+   && ! grep -q '^AB-3649: verdict-detail single-stream MERGE-PATH ' "$TMP/out.txt"; then
+  ok "a pinned merge arm is recorded and carries no disclosure"
+else
+  bad "a pinned merge arm was not recorded cleanly"
+fi
+
+echo
+echo "-- a CONTROL session may render a verdict, but never a discharging one --"
+
+# A null / sensitivity control is still a real measurement, so it must produce a
+# token; what it must NOT do is read as if it discharged the acceptance criteria.
+mkfixture "$TMP/control" 6 "100000:116000,100000:117000,100000:117000,100000:118000,100000:118000,100000:119000"
+python3 - "$TMP/control/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["control"] = "sensitivity"
+manifest["server_extra"] = {"base": "", "head": "--max-batch-bytes 1"}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/control"
+check_verdict "a labelled control session still renders a token" MEETS-TARGET 0
+if grep -q "^AB-3649: control sensitivity$" "$TMP/out.txt"; then
+  ok "the control label is printed on its own line"
+else
+  bad "the control label was not printed"
+fi
+if grep -q '^AB-3649: verdict-detail single-stream CONTROL this session is labelled ' "$TMP/out.txt"; then
+  ok "a control session says in its own output that it does not discharge the criteria"
+else
+  bad "a control session did not disclaim discharging the criteria"
+fi
+if grep -q '^AB-3649: verdict-detail single-stream CONTROL the two arms were served under DIFFERENT ' "$TMP/out.txt"; then
+  ok "asymmetric per-arm server flags are disclosed beside the verdict"
+else
+  bad "asymmetric per-arm server flags were not disclosed"
+fi
+if grep -q '^AB-3649: arm head server-extra \[--max-batch-bytes 1\]$' "$TMP/out.txt"; then
+  ok "the injected handicap is printed verbatim"
+else
+  bad "the injected handicap was not printed"
+fi
+
+# An ordinary measurement says so, and carries neither disclaimer.
+run_analyzer "$TMP/meets"
+if grep -q '^AB-3649: control none$' "$TMP/out.txt" \
+   && ! grep -q '^AB-3649: verdict-detail single-stream CONTROL ' "$TMP/out.txt"; then
+  ok "an ordinary measurement reports control none and carries no control disclaimer"
+else
+  bad "an ordinary measurement was mislabelled as a control"
+fi
+
+echo
+echo "-- the driver's fail-closed guards, exercised without a rig --"
+
+# The driver refuses long before it builds anything, so its pre-flight guards are
+# testable on any box. These are the guards RUNBOOK.md's procedure depends on.
+run_driver() { # <args...> --profile narrow
+  set +e
+  bash "$DRIVER" "$@" > "$TMP/out.txt" 2> "$TMP/err.txt"
+  RC=$?
+  set -e
+}
+
+check_driver() { # <description> <expected-exit> [expected-cause]
+  local desc="$1" want_rc="$2" want_cause="${3:-}"
+  if [ "$RC" != "$want_rc" ]; then
+    bad "$desc (exit $RC, expected $want_rc)"
+    return
+  fi
+  if ! anchored; then
+    bad "$desc (an output line does not carry the AB-3649 anchor)"
+    return
+  fi
+  if [ -n "$want_cause" ] && ! grep -q "^AB-3649: cause $want_cause$" "$TMP/err.txt"; then
+    bad "$desc (cause '$want_cause' absent; stderr: $(head -2 "$TMP/err.txt" | tr '\n' ' '))"
+    return
+  fi
+  ok "$desc -> exit $RC${want_cause:+ cause $want_cause}"
+}
+
+if [ ! -f "$DRIVER" ]; then
+  bad "the driver is absent, so none of its guards could be exercised"
+else
+  # Two sources, so the #3058 SSTable-count guard is satisfied and the guards
+  # under test are the ones each case names.
+  mkdir -p "$TMP/tinycorpus/ks/tbl"
+  head -c 4096 /dev/zero > "$TMP/tinycorpus/ks/tbl/nb-1-big-Data.db"
+  head -c 4096 /dev/zero > "$TMP/tinycorpus/ks/tbl/nb-2-big-Data.db"
+  mkcompressioninfo "$TMP/tinycorpus/ks/tbl/nb-1-big-CompressionInfo.db" LZ4Compressor
+  mkcompressioninfo "$TMP/tinycorpus/ks/tbl/nb-2-big-CompressionInfo.db" LZ4Compressor
+  # Unrelated tables and a snapshot subtree that the census must NOT count: this
+  # is finding 1's shape, and without them the served-scope guard is untested.
+  mkdir -p "$TMP/tinycorpus/other/bigtable" "$TMP/tinycorpus/ks/tbl/snapshots/s1"
+  head -c 400000000 /dev/zero > "$TMP/tinycorpus/other/bigtable/nb-9-big-Data.db" 2>/dev/null || \
+    head -c 4096 /dev/zero > "$TMP/tinycorpus/other/bigtable/nb-9-big-Data.db"
+  head -c 4096 /dev/zero > "$TMP/tinycorpus/ks/tbl/snapshots/s1/nb-8-big-Data.db"
+  mkdir -p "$TMP/onesstcorpus/ks/tbl"
+  head -c 4096 /dev/zero > "$TMP/onesstcorpus/ks/tbl/nb-1-big-Data.db"
+  mkcompressioninfo "$TMP/onesstcorpus/ks/tbl/nb-1-big-CompressionInfo.db" LZ4Compressor
+  # ...and the one-source corpus gets a SECOND file elsewhere, so the #3058 guard
+  # can only pass by counting the wrong directory.
+  mkdir -p "$TMP/onesstcorpus/ks/decoy"
+  head -c 4096 /dev/zero > "$TMP/onesstcorpus/ks/decoy/nb-2-big-Data.db"
+  # The census describes the SERVED directory, so an "empty corpus" is now a
+  # served directory that exists and holds no Data.db -- not an empty data root,
+  # which is a different (and separately named) refusal.
+  mkdir -p "$TMP/emptycorpus/ks/tbl"
+  mkdir -p "$TMP/nosuchtable/ks/other"
+  printf '{"version": 2, "keyspace": "ks", "table": "tbl", "ddl": "CREATE TABLE ks.tbl (a int PRIMARY KEY)"}\n' > "$TMP/ticket.json"
+
+  # A SCRATCH REPOSITORY, SO NO CASE DEPENDS ON WHERE THIS SUITE WAS RUN FROM.
+  # The driver resolves --repo before its corpus, lock, ref and CPU checks, so a
+  # case that omits --repo only reaches the guard it names when the suite happens
+  # to live inside a git checkout. Run from a copied directory that is not one,
+  # ten cases red for a reason that has nothing to do with what they test -- and
+  # one (the CPU-overlap case) went on PASSING, because both the guard it names
+  # and the repo refusal exit 3. A case that tests a property AND an environment
+  # will eventually be read as evidence about the property alone.
+  #
+  # Every case below that must get PAST repo resolution therefore names this
+  # repository explicitly. The two cases that test repo resolution itself
+  # deliberately do not.
+  SCRATCH="$TMP/scratchrepo"
+  mkdir -p "$SCRATCH"
+  (
+    cd "$SCRATCH"
+    git init -q .
+    git config user.email selftest@example.invalid
+    git config user.name selftest
+    printf 'one\n' > f.txt && git add f.txt && git commit -qm one
+    printf 'two\n' > f.txt && git commit -qam two
+    # THE SCRATCH REPO SATISFIES THE #2820 PIN FOR REAL, rather than the driver
+    # check being bypassed for it. Round 19 requires an unlabelled measurement's
+    # arms to be cfa93fe99^ and cfa93fe99, and the sessions here run against a
+    # throwaway repository that cannot contain that commit. Git resolves REFS
+    # and object ids from one namespace, so a tag NAMED cfa93fe99 makes both
+    # `cfa93fe99` and `cfa93fe99^` resolve -- which means these cases exercise
+    # the real resolution path and the real refusal, instead of a manifest
+    # patched after the fact. Making the world satisfy the requirement beats
+    # editing the record of it.
+    git tag cfa93fe99 HEAD
+  ) > /dev/null 2>&1
+  if [ "$(git -C "$SCRATCH" rev-list --count HEAD 2>/dev/null || echo 0)" -ge 2 ]; then
+    ok "the driver-guard cases have a scratch repository, so none of them depends on where this suite lives"
+  else
+    bad "the scratch repository was not created, so the driver cases below are testing their environment"
+  fi
+
+  run_driver --help --profile narrow
+  check_driver "the driver --help exits 3, never 0" 3
+
+  # FINDING 4: a value-taking option with no value used to `shift 2` past the end
+  # and exit 1 with an unanchored bash error.
+  for lonely in --corpus --ticket-template --replicates --max-concurrent-scans \
+                --batch-size --step-duration --ramp --control; do
+    # NOT given --profile: this case's subject is a value-taking option with no
+    # value, and appending anything after it supplies the missing value.
+    run_driver "$lonely"
+    if [ "$RC" = "3" ] && anchored \
+       && grep -q "^AB-3649: usage-error $lonely requires a value\$" "$TMP/err.txt"; then
+      ok "$lonely with no value is an anchored usage error"
+    else
+      bad "$lonely with no value exited $RC without an anchored usage error"
+    fi
+  done
+  # STRUCTURAL: every arm that consumes a value must be in the one list, or the
+  # next option added is the next one to miss the guard. Done in Python because a
+  # sed/tr pipeline over a line-continued shell array is its own source of bugs.
+  if python3 - "$DRIVER" <<'PYINNER'
+import re
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+declared = re.search(r'VALUE_OPTS="((?:[^"\\]|\\.)*)"', source, re.S)
+if not declared:
+    sys.stderr.write("AB-3649: VALUE_OPTS is not a single quoted assignment\n")
+    raise SystemExit(1)
+listed = set(declared.group(1).replace("\\\n", " ").split())
+consuming = set(re.findall(r"^\s*(--[a-z-]+)\)[^\n]*shift 2", source, re.M))
+missing = sorted(consuming - listed)
+if missing:
+    sys.stderr.write("AB-3649: not in VALUE_OPTS: %s\n" % " ".join(missing))
+    raise SystemExit(1)
+if not consuming:
+    sys.stderr.write("AB-3649: found no value-consuming arms, so this guard proved nothing\n")
+    raise SystemExit(1)
+PYINNER
+  then
+    ok "every value-consuming option arm appears in the one VALUE_OPTS guard list"
+  else
+    bad "an option arm shifts a value without being in VALUE_OPTS (see stderr above)"
+  fi
+
+
+  for bogus in why todo TBD "  " "<why>"; do
+    run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+      --work-dir "$TMP/w-attest" --control selftest --repo "$SCRATCH" --attest-local-storage "$bogus" --profile narrow
+    # exit 3 is this driver's usage-error code, as for --help; exit 2 is a
+    # named refusal, which a bad flag value is not.
+    check_driver "an attestation reason of '$bogus'" 3
+  done
+
+  # ROUND 17 FINDING 4: a port above 65535 is an integer and is not a port, and
+  # digits-only let it reach the server launch -- after three release builds.
+  for badport in 65536 99999 4294967296; do
+    run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+      --work-dir "$TMP/w-port" --control selftest --repo "$SCRATCH" --port "$badport" --profile narrow
+    check_driver "a --port of $badport" 3
+  done
+  # ...and the boundary from the other side, or the above proves only that
+  # something was refused.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-port-ok" --min-corpus-bytes 1 --min-sstables 1 --control selftest --repo "$SCRATCH" --port 65535 --profile narrow
+  if grep -q '^AB-3649: cause-detail --port 65535 is above 65535' "$TMP/err.txt"; then
+    bad "--port 65535 was refused; the range check is exclusive where it should be inclusive"
+  else
+    ok "--port 65535 is accepted -- the range check is inclusive at the boundary"
+  fi
+
+  # ROUND 19 FINDING B: an unlabelled measurement must be the #2820 comparison.
+  # The scratch repo satisfies the pin for real (a tag named cfa93fe99), so
+  # these exercise the actual resolution path.
+  #
+  # A MEASUREMENT CANNOT LOWER THE FLOORS -- that is control-only -- so these
+  # need a corpus that genuinely meets them. Sparse, so 300 MB costs no blocks.
+  mkdir -p "$TMP/armcorpus/ks/tbl"
+  truncate -s 150000000 "$TMP/armcorpus/ks/tbl/nb-1-big-Data.db"
+  truncate -s 150000000 "$TMP/armcorpus/ks/tbl/nb-2-big-Data.db"
+  mkcompressioninfo "$TMP/armcorpus/ks/tbl/nb-1-big-CompressionInfo.db" LZ4Compressor
+  mkcompressioninfo "$TMP/armcorpus/ks/tbl/nb-2-big-CompressionInfo.db" LZ4Compressor
+  run_driver --corpus "$TMP/armcorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-arms" --repo "$SCRATCH" \
+    --profile narrow --base-ref HEAD --head-ref HEAD~1
+  check_driver "arms in the WRONG ORDER, which would invert the ratio" 2 arm-refs-not-2820
+  # The refusal must say it will not reorder, because an operator's next thought
+  # is "then swap them for me".
+  if grep -q 'The arms are NOT reordered for you' "$TMP/err.txt"; then
+    ok "the refusal says the arms are not reordered, and why a silent swap is worse"
+  else
+    bad "the arm refusal does not address the reorder an operator would expect"
+  fi
+  # A CONTROL may compare anything: that is what the label is for.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-arms-ctl" --min-corpus-bytes 1 --min-sstables 1 --repo "$SCRATCH" \
+    --control other-commits --base-ref HEAD --head-ref HEAD~1 --profile narrow
+  if grep -q '^AB-3649: cause arm-refs-not-2820$' "$TMP/err.txt"; then
+    bad "a control was refused for comparing other commits"
+  else
+    ok "a CONTROL may compare commits other than the #2820 pair"
+  fi
+  # A repository without the pin cannot confirm what it is measuring. The refs
+  # are given EXPLICITLY and resolvably here: with the defaults, `cfa93fe99^`
+  # fails to resolve first and the session dies arm-ref-unresolvable, which is
+  # correct but is a different cause. This case exists for the one where the
+  # arms resolve fine and the PIN is what is missing.
+  NOPIN="$TMP/nopinrepo"
+  mkdir -p "$NOPIN"
+  ( cd "$NOPIN" && git init -q . && git config user.email t@e && git config user.name t \
+    && printf 'a\n' > f && git add f && git commit -qm one && printf 'b\n' > f && git commit -qam two ) >/dev/null 2>&1
+  run_driver --corpus "$TMP/armcorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-nopin" --repo "$NOPIN" --profile narrow \
+    --base-ref HEAD~1 --head-ref HEAD
+  check_driver "a repository that does not contain the #2820 commit" 2 arm-pin-unresolvable
+
+  run_driver --no-such-flag --profile narrow
+  check_driver "an unrecognised driver flag exits 3" 3
+
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 --replicates 4 --profile narrow
+  check_driver "the driver refuses fewer than 5 replicates" 3
+
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --profile narrow
+  check_driver "the driver refuses to run without a pinned admission ceiling" 3
+
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --ramp 1,2,4,8 --profile narrow
+  check_driver "the driver refuses a ramp that tops out above the admission pin" 3
+
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 --server-cpus 0,2 --profile narrow
+  check_driver "the driver refuses a server CPU set with no client CPU set" 3
+
+  # The CPU-set check runs AFTER ref resolution, so this case must name refs that
+  # exist in the scratch repository; the default arms (cfa93fe99 and its parent)
+  # do not. Getting this wrong is how the case previously reported the right exit
+  # code from the wrong guard.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --server-cpus 0,2 --client-cpus 2,3 --work-dir "$TMP/w-overlap" --min-corpus-bytes 1 --control selftest \
+    --min-sstables 1 --repo "$SCRATCH" --base-ref HEAD~1 --head-ref HEAD --profile narrow
+  check_driver "the driver refuses overlapping server and client CPU sets" 3
+
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/nope.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-tpl" --repo "$SCRATCH" --profile narrow
+  check_driver "an absent ticket template" 2 ticket-template-absent
+
+  run_driver --corpus "$TMP/emptycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-empty" --min-corpus-bytes 1 --control selftest --repo "$SCRATCH" --profile narrow
+  check_driver "a served directory holding no Data.db files" 2 corpus-empty
+  run_driver --corpus "$TMP/nosuchtable" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-nodir" --min-corpus-bytes 1 --control selftest --repo "$SCRATCH" --profile narrow
+  check_driver "a ticket naming a table that is not under the data root" 2 served-dir-absent
+
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-small" --repo "$SCRATCH" --profile narrow
+  check_driver "a corpus below the stated minimum size" 2 corpus-too-small
+
+  # FINDING 1: the #3058 guard must count the SERVED directory. This corpus has a
+  # second Data.db under a DIFFERENT table, so the old whole-root census would
+  # have counted two and let a single-source served table through -- the exact
+  # phantom the guard exists to stop.
+  run_driver --corpus "$TMP/onesstcorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-onesst" --min-corpus-bytes 1 --control selftest --repo "$SCRATCH" --profile narrow
+  check_driver "a served table with one SSTable and a decoy elsewhere under the data root" \
+    2 corpus-too-few-sstables
+  # ...and the size floor is likewise a claim about the served table: this corpus
+  # has a large Data.db under another table and a snapshot subtree, neither of
+  # which the server would read.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-scope" --repo "$SCRATCH" --profile narrow
+  check_driver "a served table below the size floor, with a large unrelated table alongside" \
+    2 corpus-too-small
+  if grep -q 'served-dir .*ks/tbl data-db-files 2 data-db-bytes 8192' "$TMP/out.txt"; then
+    ok "the census counts the served directory only, not the data root"
+  else
+    bad "the census did not scope itself to the served directory"
+  fi
+  # ...and it must mirror the CONTAINMENT check too, not only the scope: the
+  # server excludes an entry whose canonical target escapes the served directory,
+  # so a symlinked decoy must satisfy neither floor.
+  mkdir -p "$TMP/symcorpus/ks/tbl" "$TMP/symcorpus/elsewhere"
+  head -c 4096 /dev/zero > "$TMP/symcorpus/ks/tbl/nb-1-big-Data.db"
+  mkcompressioninfo "$TMP/symcorpus/ks/tbl/nb-1-big-CompressionInfo.db" LZ4Compressor
+  head -c 400000 /dev/zero > "$TMP/symcorpus/elsewhere/real-Data.db"
+  ln -sf "$TMP/symcorpus/elsewhere/real-Data.db" "$TMP/symcorpus/ks/tbl/nb-2-big-Data.db"
+  run_driver --corpus "$TMP/symcorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-sym" --min-corpus-bytes 1 --control selftest --repo "$SCRATCH" --profile narrow
+  check_driver "a symlinked decoy standing in for a second SSTable" 2 corpus-too-few-sstables
+  # A HARD link -- which is what a Cassandra snapshot is -- canonicalises inside
+  # the directory and must still count, or the check would red on real corpora.
+  mkdir -p "$TMP/hardcorpus/ks/tbl"
+  head -c 4096 /dev/zero > "$TMP/hardcorpus/ks/tbl/nb-1-big-Data.db"
+  if ln "$TMP/hardcorpus/ks/tbl/nb-1-big-Data.db" "$TMP/hardcorpus/ks/tbl/nb-2-big-Data.db" 2>/dev/null; then
+    census_out="$(python3 "$SUPPORT" census-served "$TMP/hardcorpus" "$TMP/ticket.json" 2>/dev/null)"
+    if [ "${census_out%% *}" = "2" ]; then
+      ok "a hard link, as a Cassandra snapshot uses, still counts"
+    else
+      bad "the containment check wrongly excluded a hard link ('$census_out')"
+    fi
+  else
+    ok "hard-link case skipped: this filesystem does not support them (declared, not assumed)"
+  fi
+
+  # FINDING 5: arms served under different flags is a control by definition.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --head-server-extra '--max-batch-bytes 1' --profile narrow
+  check_driver "asymmetric per-arm flags without a control label" 3
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --head-server-extra '--max-batch-bytes 1' \
+    --control sensitivity --work-dir "$TMP/w-asym" --min-corpus-bytes 1 \
+    --min-sstables 1 --repo "$SCRATCH" --base-ref HEAD~1 --head-ref HEAD --profile narrow
+  if [ "$RC" != "3" ]; then
+    ok "a labelled control may serve the arms asymmetrically"
+  else
+    bad "a labelled control was refused for asymmetric flags (exit $RC)"
+  fi
+
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-badarm" --min-corpus-bytes 1 --control selftest --merge-path sideways --profile narrow
+  check_driver "an unrecognised --merge-path value" 3
+
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-same" --min-corpus-bytes 1 --control selftest --min-sstables 1 --repo "$SCRATCH" \
+    --base-ref HEAD --head-ref HEAD --profile narrow
+  check_driver "two arm refs resolving to the same commit" 2 arm-refs-identical
+
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-badref" --min-corpus-bytes 1 --control selftest --min-sstables 1 --repo "$SCRATCH" \
+    --base-ref no-such-rev-3649 --head-ref HEAD --profile narrow
+  check_driver "an arm ref that resolves to nothing" 2 arm-ref-unresolvable
+
+  # P1-3: every ramp element, through the same validator the helper exposes.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --ramp 1,abc --profile narrow
+  check_driver "the driver refuses a ramp with a non-numeric element" 3
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --ramp 2 --profile narrow
+  check_driver "the driver refuses a ramp that maps to no analyzer section" 3
+
+  # THE DRIVER MAY NOT ACCEPT A SESSION ITS OWN ANALYZER WILL REFUSE. A
+  # single-stream CONTROL used to be allowed to omit --profile, and
+  # `resolve_profile` refuses exactly that manifest with cause
+  # `profile-unrecorded` -- the case at the top of this suite pins that half --
+  # while the analyzer command the driver prints on its `next` line carries no
+  # flag that could supply one. So the accepted session was unscoreable by
+  # construction, and the bill arrived after three release builds and every
+  # replicate pair. Refused at pre-flight now, in the measurement branch's
+  # idiom; the e2e section below MEASURES that nothing was built.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --work-dir "$TMP/w-ctl-noprof" --min-corpus-bytes 1 \
+    --min-sstables 1 --repo "$SCRATCH" --control selftest \
+    --base-ref HEAD~1 --head-ref HEAD
+  check_driver "a single-stream control with no --profile" 3
+  if grep -q '^AB-3649: usage-error --profile is REQUIRED for a single-stream (--ramp 1) session, control or not' "$TMP/err.txt"; then
+    ok "the refusal names the requirement, and that a control's verdict is disclaimed rather than unscored"
+  else
+    bad "the single-stream control refusal does not name the requirement: $(head -1 "$TMP/err.txt")"
+  fi
+  # ...and it must name the cause the analyzer WOULD have produced, or an
+  # operator cannot tell that these two refusals are one requirement.
+  if grep -q 'profile-unrecorded' "$TMP/err.txt"; then
+    ok "the refusal names profile-unrecorded, the analyzer cause it stands in for"
+  else
+    bad "the refusal does not name the analyzer cause it exists to pre-empt"
+  fi
+  # WHAT "BEFORE ANY WORK" MEANS HERE, MEASURED RATHER THAN ASSUMED: this check
+  # sits after the lock and the session directory -- exactly where the
+  # measurement branch's does -- so the session directory DOES exist and is
+  # empty of everything expensive. The three worktrees and the three target
+  # directories are what a metered box is billed for, and none was created. The
+  # e2e section below pins the same property from the other end, by measuring
+  # that cargo was never invoked.
+  EXPENSIVE="$(find "$TMP/w-ctl-noprof" -maxdepth 1 \
+                 \( -name 'wt-*' -o -name 'target-*' \) 2>/dev/null || echo UNMEASURED)"
+  if [ -z "$EXPENSIVE" ]; then
+    ok "the refused control built no worktree and no target directory"
+  else
+    bad "a refused control had already begun building: $EXPENSIVE"
+  fi
+  # ...and it released the lock, or one mistyped flag bricks the work directory.
+  if [ ! -d "$TMP/w-ctl-noprof/.session-lock" ]; then
+    ok "the refused control released the work-directory lock"
+  else
+    bad "a control refused for its profile LEAKED the lock"
+  fi
+  # THE BOUNDARY FROM THE OTHER SIDE, or the above proves only that something
+  # was refused. A MULTI-STEP control consults no band -- the utilization
+  # section is a DIRECTION -- so requiring a profile there would red a correct
+  # session, and this case fails if the refusal is widened to it.
+  run_driver --corpus "$TMP/no-such-corpus-dir" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --ramp 1,2 --work-dir "$TMP/w-ctl-ramp" --min-corpus-bytes 1 \
+    --min-sstables 1 --repo "$SCRATCH" --control selftest \
+    --base-ref HEAD~1 --head-ref HEAD
+  check_driver "a multi-step control with no --profile, which needs no band" 2 corpus-absent
+  # ...and a multi-step MEASUREMENT still needs one, because the driver records
+  # the profile for whichever section reads it and the requirement is not the
+  # ramp's to relax.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --ramp 1,2 --work-dir "$TMP/w-meas-ramp" --repo "$SCRATCH"
+  check_driver "a multi-step measurement with no --profile" 3
+  if grep -q 'usage-error --profile is REQUIRED for a measurement' "$TMP/err.txt"; then
+    ok "a measurement's profile requirement is unchanged by the ramp it declares"
+  else
+    bad "a multi-step measurement was refused for the wrong reason: $(head -1 "$TMP/err.txt")"
+  fi
+
+  # FINDING 3 (round 8): a RELATIVE --work-dir. `CARGO_TARGET_DIR` is read after
+  # the driver cds into the worktree, so a relative path put the target directory
+  # somewhere the driver then did not look -- both arms compiling, then
+  # `build-incomplete`, on a metered box. The e2e cases all pass absolute paths,
+  # which is the natural thing to write and therefore exactly what a harness does
+  # not cover by accident.
+  ( cd "$TMP" && bash "$DRIVER" --corpus "$TMP/tinycorpus" \
+      --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+      --work-dir ./relwd --repo "$SCRATCH" --min-corpus-bytes 1 --control selftest --min-sstables 1 \
+      --base-ref HEAD~1 --head-ref HEAD --profile narrow ) > "$TMP/out.txt" 2>&1 || true
+  if grep -qE "^AB-3649: work-dir /" "$TMP/out.txt"; then
+    ok "a relative --work-dir is canonicalised to an absolute path before anything derives from it"
+  else
+    bad "a relative --work-dir was not canonicalised: $(grep -m1 '^AB-3649: work-dir' "$TMP/out.txt")"
+  fi
+
+  # ROUND 12 FINDING 1: the compressed-corpus requirement was documented by us
+  # and enforced by nothing -- and an uncompressed corpus biases the ratio TOWARD
+  # the target, so the failure was in the favourable direction.
+  mkdir -p "$TMP/plaincorpus/ks/tbl"
+  head -c 4096 /dev/zero > "$TMP/plaincorpus/ks/tbl/nb-1-big-Data.db"
+  head -c 4096 /dev/zero > "$TMP/plaincorpus/ks/tbl/nb-2-big-Data.db"
+  run_driver --corpus "$TMP/plaincorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --work-dir "$TMP/w-plain" --min-corpus-bytes 1 \
+    --min-sstables 1 --control selftest --repo "$SCRATCH" --profile narrow
+  # A control MAY measure an uncompressed corpus; only a measurement may not.
+  if grep -q 'corpus compression MISSING' "$TMP/out.txt"; then
+    ok "a corpus with no usable CompressionInfo.db is detected and named MISSING"
+  else
+    bad "the census did not detect a missing CompressionInfo.db"
+  fi
+  run_driver --corpus "$TMP/plaincorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --work-dir "$TMP/w-plain2" --repo "$SCRATCH" --profile narrow
+  check_driver "a measurement over an uncompressed corpus" 2 corpus-uncompressed
+  # A zero-length CompressionInfo.db is ABSENT, not present: this repository
+  # records that an empty one makes SELECT return 0 rows silently.
+  : > "$TMP/plaincorpus/ks/tbl/nb-1-big-CompressionInfo.db"
+  : > "$TMP/plaincorpus/ks/tbl/nb-2-big-CompressionInfo.db"
+  run_driver --corpus "$TMP/plaincorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --work-dir "$TMP/w-plain3" --repo "$SCRATCH" --profile narrow
+  check_driver "a zero-length CompressionInfo.db, which reads as absent" 2 corpus-uncompressed
+
+  # ROUND 12 FINDING 2: a ticket missing a required field used to fail after all
+  # three release builds.
+  printf '{"version":2,"keyspace":"ks","table":"t"}\n' > "$TMP/tk-noddl.json"
+  run_support validate-ticket "$TMP/tk-noddl.json"
+  check_support "a ticket with no ddl, which flight-loadgen cannot deserialise" 1 ticket-schema-invalid
+  # ROUND 13 FINDING 2, the TOO-STRICT half: `version` carries
+  # `#[serde(default = "default_ticket_version")]`, so a ticket without it
+  # deserialises fine. Demanding it red a CORRECT ticket -- the shape an operator
+  # learns to waive, and worse on a rig, where waiving means --control and a
+  # disclaimed verdict. This case asserted the wrong rule until round 13.
+  printf '{"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)"}\n' > "$TMP/tk-nover.json"
+  run_support validate-ticket "$TMP/tk-nover.json"
+  check_support "a ticket with no version, which serde defaults" 0
+  printf '{"version":2,"keyspace":"ks","table":"t","ddl":"   "}\n' > "$TMP/tk-blankddl.json"
+  run_support validate-ticket "$TMP/tk-blankddl.json"
+  check_support "a ticket whose ddl is blank" 1 ticket-schema-invalid
+
+  # FINDING 2 (round 9): THE FLOORS ARE FLOORS. An unlabelled measurement may not
+  # lower them -- the third route to #3058's bypass was simply passing
+  # `--min-sstables 1` and serving a single-source table.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --min-sstables 1 --profile narrow
+  check_driver "a measurement lowering the SSTable floor" 3
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --min-corpus-bytes 1 --profile narrow
+  check_driver "a measurement lowering the corpus-size floor" 3
+  if grep -q 'documented floor' "$TMP/err.txt"; then
+    ok "the floors are refused by name, with the documented minimum stated"
+  else
+    bad "the floor refusal did not name the documented minimum"
+  fi
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --min-sstables 1 --min-corpus-bytes 1 \
+    --control floor-probe --work-dir "$TMP/w-floorctl" --repo "$SCRATCH" \
+    --base-ref HEAD~1 --head-ref HEAD --profile narrow
+  if [ "$RC" != "3" ]; then
+    ok "a labelled control may lower the floors, where its verdict is disclaimed"
+  else
+    bad "a labelled control could not lower the floors (exit $RC)"
+  fi
+
+  # FINDING 1 (round 9): no `eval` on operator-supplied values.
+  #
+  # HONEST ACCOUNTING OF WHAT THIS CASE PROVES. The primary guarantee is
+  # STRUCTURAL -- the no-`eval` assert below -- because with the resolver in
+  # place a dangerous payload is REFUSED before it could reach an interpreter,
+  # so a "did it execute" check cannot fail however the code is written. What
+  # this case binds is (a) the refusal itself, which is behavioural and can fail,
+  # and (b) the absence of side effects, which would catch an `eval` placed
+  # UPSTREAM of validation -- exactly where the original one was.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --control inject \
+    --head-server-extra '--max-batch-bytes $(touch '"$TMP"'/PWNED)' \
+    --work-dir "$TMP/w-inject" --min-corpus-bytes 1 --min-sstables 1 --repo "$SCRATCH" --profile narrow
+  if [ "$RC" = "3" ] && grep -qE 'session-config-invalid|not resolvable per arm' "$TMP/err.txt"; then
+    ok "a shell-metacharacter payload in a per-arm flag is refused, not resolved"
+  else
+    bad "a shell-metacharacter payload was not refused (exit $RC)"
+  fi
+  if [ -e "$TMP/PWNED" ]; then
+    bad "a command substitution in a per-arm flag value was EXECUTED by the driver"
+  else
+    ok "...and produced no side effect, which would catch an eval before validation"
+  fi
+
+  # FINDING 1 (round 8): per-arm extras are a SECOND route to the batch-size
+  # floor, and symmetric extras need no control label.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --base-server-extra '--batch-size 0' \
+    --head-server-extra '--batch-size 0' --profile narrow
+  check_driver "symmetric per-arm extras that zero the batch size" 3
+  if grep -q 'resolved --batch-size' "$TMP/err.txt"; then
+    ok "the floor is enforced on the RESOLVED value, so the extras route inherits it"
+  else
+    bad "the batch-size floor was bypassed through per-arm extras"
+  fi
+
+  # FINDING 5: --batch-size 0 is silently clamped to one row per batch by the
+  # server, so the manifest would not record the value that was used.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --batch-size 0 --profile narrow
+  check_driver "the driver refuses --batch-size 0" 3
+
+  # FINDING 2: the shape and the ticket must match the claim the report makes.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --shape limit-k --profile narrow
+  check_driver "the driver refuses a non-full shape for a measurement session" 3
+  printf '{"version":2,"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)","limit":100}\n' > "$TMP/tk-narrow.json"
+  # NOT a control: the ticket check applies to measurements only, so labelling
+  # this one would skip the very guard it names. It therefore also cannot lower
+  # the corpus floors -- and does not need to, because the ticket is validated
+  # before the census runs.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/tk-narrow.json" \
+    --max-concurrent-scans 4 --work-dir "$TMP/w-narrow" --repo "$SCRATCH" --profile narrow
+  check_driver "the driver refuses a ticket carrying a LIMIT" 2 ticket-not-full-ring
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/tk-narrow.json" \
+    --max-concurrent-scans 4 --work-dir "$TMP/w-narrow-ctl" --min-corpus-bytes 1 \
+    --min-sstables 1 --repo "$SCRATCH" --control shape-probe \
+    --base-ref HEAD~1 --head-ref HEAD --shape limit-k --profile narrow
+  if [ "$RC" != "2" ] || grep -q 'ticket-not-full-ring' "$TMP/err.txt"; then
+    bad "a labelled control was still refused for a narrowed ticket (exit $RC)"
+  else
+    ok "a labelled control may narrow the ticket; the analyzer disclaims its verdict"
+  fi
+
+  # FINDING 3: a step duration flight-loadgen accepts must be accepted here too,
+  # and one it rejects must fail BEFORE the builds rather than after the money.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --step-duration nope --profile narrow
+  check_driver "the driver refuses a step duration flight-loadgen would reject" 3
+
+  # P0-3: --rows-declared reached int() unvalidated.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --rows-declared 3,999,890 --profile narrow
+  check_driver "the driver refuses a --rows-declared with separators" 3
+
+  # P1-6: an ordinary operator mistake must not leak an unanchored line.
+  mkdir -p "$TMP/notarepo"
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --repo "$TMP/notarepo" --profile narrow
+  check_driver "--repo pointing at a directory that is not a repository" 3
+  if grep -qi 'fatal:' "$TMP/err.txt"; then
+    bad "a raw git 'fatal:' line leaked past the anchor"
+  else
+    ok "a non-repository --repo is reported anchored, with no raw git output"
+  fi
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --repo "$TMP/no-such-dir-3649" --profile narrow
+  check_driver "--repo pointing at a directory that does not exist" 3
+  if [ -s "$TMP/err.txt" ]; then
+    ok "a missing --repo produces a diagnostic, not a silent exit 1"
+  else
+    bad "a missing --repo produced no output at all"
+  fi
+
+  # P1-5: two sessions in one work directory. The second must be refused BEFORE
+  # it can truncate the first's ledger.
+  # RESTRUCTURE DEBRIS, FOUND BY SWEEPING RATHER THAN BY A RED: this case used to
+  # assert that a lock-refused session did not truncate `results/runs.jsonl`. The
+  # driver stopped writing there in round 4, so the assertion became trivially
+  # true and the case proved nothing. The property worth asserting now is that a
+  # refused session leaves NOTHING -- which is why the lock is taken before the
+  # session directory is created.
+  mkdir -p "$TMP/w-locked/.session-lock"
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --work-dir "$TMP/w-locked" --min-corpus-bytes 1 --control selftest --min-sstables 1 \
+    --repo "$SCRATCH" --profile narrow
+  check_driver "a second session in a work directory already in use" 2 work-dir-busy
+  if [ -z "$(find "$TMP/w-locked" -maxdepth 1 -type d -name 'run-*' 2>/dev/null)" ]; then
+    ok "a session refused by the lock leaves no directory behind at all"
+  else
+    bad "a lock-refused session created a session directory before checking the lock"
+  fi
+  # ...AND IT MUST NOT RELEASE THE LOCK IT FAILED TO TAKE. The trap is armed
+  # BEFORE acquisition, so `cleanup` runs on this path too; keying its rmdir on
+  # the directory merely existing would delete the PEER'S lock, turning a leak
+  # into a silent mutual-exclusion failure -- strictly worse than the leak being
+  # fixed. This is the case that stops the obvious fix.
+  if [ -d "$TMP/w-locked/.session-lock" ]; then
+    ok "a lock-refused session leaves the holder's lock alone"
+  else
+    bad "a lock-refused session DELETED the lock another session holds"
+  fi
+  # Tolerant on purpose: if the assertion above FAILED the driver already
+  # removed this, and an unconditional rmdir would abort the whole suite under
+  # `set -e` -- turning one reported failure into no report at all.
+  rmdir "$TMP/w-locked/.session-lock" 2>/dev/null || true
+
+  # THE LEAK ITSELF: a session that fails AFTER taking the lock must release it,
+  # or the work directory is permanently unusable. `--corpus` naming nothing is a
+  # refusal that happens well after acquisition.
+  run_driver --corpus "$TMP/no-such-corpus-dir" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --work-dir "$TMP/w-leak" --min-corpus-bytes 1 --control selftest --min-sstables 1 \
+    --repo "$SCRATCH" --profile narrow
+  check_driver "a session failing after it took the lock" 2 corpus-absent
+  if [ -d "$TMP/w-leak/.session-lock" ]; then
+    bad "a session that failed after acquiring the lock LEAKED it, blocking every later session"
+  else
+    ok "a session that fails after acquiring the lock releases it"
+  fi
+  # ...and the proof that the release is real: the next session gets past the
+  # lock rather than being refused work-dir-busy. A stat on a directory is not
+  # the property an operator cares about; being able to run again is.
+  run_driver --corpus "$TMP/no-such-corpus-dir" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --work-dir "$TMP/w-leak" --min-corpus-bytes 1 --control selftest --min-sstables 1 \
+    --repo "$SCRATCH" --profile narrow
+  check_driver "a session reusing a work directory whose predecessor failed" 2 corpus-absent
+
+  # THE SESSION DIRECTORY AND THE LEDGER, WHEN THE FILESYSTEM SAYS NO. Both were
+  # created unguarded under `set -euo pipefail`, so a failure exited 1 with a
+  # native `mkdir:` or redirection diagnostic and NO anchor -- breaking the one
+  # property every line of this script is required to have, at the one moment an
+  # operator is reading it to find out what went wrong.
+  #
+  # INDUCING IT NEEDS A PLANT, AND THE PLANT IS A PATH, NOT THE GUARD. Both
+  # names live under the work directory and are created AFTER the lock, so any
+  # permission or read-only condition wide enough to fail them fails the LOCK
+  # first and the session is refused `work-dir-busy` -- a different guard, which
+  # is why no case reached this one before. So a scratch copy of the driver has
+  # ONE path constant substituted and the guard under test is the shipped one,
+  # byte for byte. The substitution is VERIFIED to have taken: a plant that
+  # silently did not apply is a case testing the ordinary path and reporting ok.
+  run_planted() { # <driver-copy> <args...>
+    local d="$1"; shift
+    set +e
+    bash "$d" "$@" > "$TMP/out.txt" 2> "$TMP/err.txt"
+    RC=$?
+    set -e
+  }
+  # The copy must sit BESIDE the python helpers -- the driver resolves
+  # `ab_driver_support.py` from its own directory and refuses without it -- so
+  # the plants live in a scratch directory holding both, never in the checkout.
+  PLANTDIR="$TMP/plantdir"
+  mkdir -p "$PLANTDIR"
+  cp "$HERE"/*.py "$PLANTDIR/"
+  plant_path() { # <dest> <sed-expression> <literal-that-must-appear>
+    sed -e "$2" "$DRIVER" > "$1"
+    if grep -qF -- "$3" "$1" && bash -n "$1" 2>/dev/null; then
+      ok "the planted driver copy carries '$3' and still parses"
+    else
+      bad "the plant '$3' did not take, so the case below tests the ordinary path"
+    fi
+  }
+
+  # 1. The session directory: its parent is steered onto a REGULAR FILE, which
+  #    is a real ENOTDIR from a real mkdir.
+  mkdir -p "$TMP/w-nodirs"
+  : > "$TMP/w-nodirs/blocked"
+  plant_path "$PLANTDIR/driver-nodirs.sh" \
+    's|^RUN_DIR="$WORK_DIR/run-$SESSION_ID"$|RUN_DIR="$WORK_DIR/blocked/run-$SESSION_ID"|' \
+    'RUN_DIR="$WORK_DIR/blocked/run-$SESSION_ID"'
+  run_planted "$PLANTDIR/driver-nodirs.sh" --corpus "$TMP/tinycorpus" \
+    --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-nodirs" --min-corpus-bytes 1 --min-sstables 1 \
+    --control selftest --repo "$SCRATCH" --base-ref HEAD~1 --head-ref HEAD --profile narrow
+  check_driver "a session directory that cannot be created" 2 session-dir-uncreatable
+  # The native diagnostic is CAPTURED, not discarded: it names the errno, which
+  # is the entire diagnosis, and it must arrive INSIDE an anchored line.
+  if grep -q '^AB-3649: cause-detail .*[Nn]ot a directory' "$TMP/err.txt"; then
+    ok "the mkdir diagnostic reaches the operator inside the anchored detail"
+  else
+    bad "the session-directory refusal discarded the errno: $(grep -m1 'cause-detail' "$TMP/err.txt")"
+  fi
+  # ...and the lock is released, or one failed session bricks the work directory.
+  if [ ! -d "$TMP/w-nodirs/.session-lock" ]; then
+    ok "a session that cannot create its directory still releases the lock"
+  else
+    bad "a session that failed creating its directory LEAKED the lock"
+  fi
+
+  # 2. The ledger: steered onto the log DIRECTORY the driver has just created,
+  #    which is a real EISDIR from the real redirection.
+  mkdir -p "$TMP/w-noledger"
+  plant_path "$PLANTDIR/driver-noledger.sh" \
+    's|^RUNS_JSONL="$RUN_DIR/runs.jsonl"$|RUNS_JSONL="$LOG_DIR"|' \
+    'RUNS_JSONL="$LOG_DIR"'
+  run_planted "$PLANTDIR/driver-noledger.sh" --corpus "$TMP/tinycorpus" \
+    --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-noledger" --min-corpus-bytes 1 --min-sstables 1 \
+    --control selftest --repo "$SCRATCH" --base-ref HEAD~1 --head-ref HEAD --profile narrow
+  check_driver "a ledger that cannot be initialized" 2 ledger-uninitialisable
+  if grep -q '^AB-3649: cause-detail .*[Ii]s a directory' "$TMP/err.txt"; then
+    ok "the redirection diagnostic reaches the operator inside the anchored detail"
+  else
+    bad "the ledger refusal discarded the errno: $(grep -m1 'cause-detail' "$TMP/err.txt")"
+  fi
+
+  # 3. THE POSITIVE CONTROL, without which the two cases above are worth
+  #    nothing: the SAME plant against a copy whose guards are removed -- the
+  #    pre-fix code, restored verbatim -- must exit 1 and emit an UNANCHORED
+  #    line. A case that passes against the defect and the fix alike proves only
+  #    that something happened.
+  if python3 - "$PLANTDIR/driver-nodirs.sh" "$PLANTDIR/driver-unguarded.sh" <<'PYINNER'
+import sys
+
+src = open(sys.argv[1], encoding="utf-8").read().split("\n")
+out, i, removed = [], 0, 0
+while i < len(src):
+    if src[i].startswith(("SESSION_DIR_ERR=", "LEDGER_ERR=")):
+        # Consume the whole line-continued statement and put back exactly what
+        # stood there before the fix.
+        out.append('mkdir -p "$RUN_DIR" "$LOG_DIR"'
+                   if src[i].startswith("SESSION_DIR_ERR=")
+                   else ': > "$RUNS_JSONL"')
+        removed += 1
+        while src[i].rstrip().endswith("\\"):
+            i += 1
+        i += 1
+        continue
+    out.append(src[i])
+    i += 1
+if removed != 2:
+    sys.stderr.write("AB-3649: expected 2 guarded statements to un-guard, found %d\n" % removed)
+    raise SystemExit(1)
+open(sys.argv[2], "w", encoding="utf-8").write("\n".join(out))
+PYINNER
+  then
+    ok "the pre-fix copy was produced: both guards removed, the path plant kept"
+  else
+    bad "the pre-fix copy could not be produced, so the guards are unproven"
+  fi
+  mkdir -p "$TMP/w-unguarded"
+  : > "$TMP/w-unguarded/blocked"
+  run_planted "$PLANTDIR/driver-unguarded.sh" --corpus "$TMP/tinycorpus" \
+    --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-unguarded" --min-corpus-bytes 1 --min-sstables 1 \
+    --control selftest --repo "$SCRATCH" --base-ref HEAD~1 --head-ref HEAD --profile narrow
+  if [ "$RC" = 1 ] && ! anchored; then
+    ok "the pre-fix code exits 1 with an unanchored diagnostic, so these cases discriminate"
+  else
+    bad "the pre-fix code did not reproduce the finding (exit $RC, anchored=$(anchored && echo yes || echo no))"
+  fi
+  if ! grep -q 'session-dir-uncreatable' "$TMP/err.txt"; then
+    ok "the pre-fix code names no cause at all, which is the finding"
+  else
+    bad "the pre-fix copy still carried the guard, so the plant removed nothing"
+  fi
+
+  # P1-7: a worktree at the right commit but carrying uncommitted edits builds
+  # code the manifest does not describe.
+  mkdir -p "$TMP/w-dirty"
+  git -C "$SCRATCH" worktree add -q --detach "$TMP/w-dirty/wt-base" HEAD > /dev/null 2>&1
+  printf 'uncommitted\n' >> "$TMP/w-dirty/wt-base/f.txt"
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --work-dir "$TMP/w-dirty" --min-corpus-bytes 1 --control selftest \
+    --min-sstables 1 --repo "$SCRATCH" --base-ref HEAD --head-ref HEAD~1 --profile narrow
+  check_driver "a reused worktree at the right commit but not clean" 2 worktree-dirty
+
+  # ROUND 2 FINDING 4 / ROUND 3 FINDING 2 / ROUND 4 FINDING 2 -- one class, now
+  # closed by construction rather than by sequencing. Each session writes ONLY to
+  # `<work-dir>/run-<session-id>/`, a name no other session can produce, so an
+  # earlier session's results cannot be reached by any code path here: not a
+  # failed pre-flight, not a failed build, not a lost port, not a kill.
+  mkdir -p "$TMP/w-prior/run-EARLIER-SESSION"
+  printf '{"arm":"base","replicate":1,"file":"base-r01.jsonl"}\n' \
+    > "$TMP/w-prior/run-EARLIER-SESSION/runs.jsonl"
+  printf '{"schema":"ab-3649.manifest/v1","note":"an earlier session"}\n' \
+    > "$TMP/w-prior/run-EARLIER-SESSION/manifest.json"
+  printf 'earlier replicate data\n' \
+    > "$TMP/w-prior/run-EARLIER-SESSION/base-r01.jsonl"
+  prior_before="$(cat "$TMP/w-prior/run-EARLIER-SESSION/"* | cksum)"
+  prior_files="$(find "$TMP/w-prior/run-EARLIER-SESSION" -type f | sort | tr '\n' ' ')"
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --work-dir "$TMP/w-prior" --repo "$SCRATCH" --profile narrow
+  check_driver "a re-used work directory whose new attempt fails pre-flight" 2 corpus-too-small
+  if [ "$(cat "$TMP/w-prior/run-EARLIER-SESSION/"* | cksum)" = "$prior_before" ]; then
+    ok "an earlier session's manifest, ledger AND replicate files are byte-identical after a failed attempt"
+  else
+    bad "a failed attempt altered an earlier session's results"
+  fi
+  if grep -q 'this session wrote only to ' "$TMP/out.txt"; then
+    ok "and the abort names the only directory it wrote to"
+  else
+    bad "the abort did not name the directory it confined itself to"
+  fi
+  # The replicate JSONLs live in the session directory too -- round 4 finding 2
+  # was that the manifest was staged while the files it references were not.
+  # Compared as a SET, not by mtime: the previous form asked whether any
+  # `base-r01.jsonl` was NEWER than the prior manifest, which depends on
+  # filesystem timestamp granularity and on the order the fixture happened to be
+  # created -- a case whose verdict moves with the filesystem is not a case.
+  if [ "$(find "$TMP/w-prior/run-EARLIER-SESSION" -type f | sort | tr '\n' ' ')" \
+       = "$prior_files" ]; then
+    ok "the earlier session's directory gained and lost no files"
+  else
+    bad "a file appeared in or vanished from the earlier session's directory"
+  fi
+
+  # ALSO RESTRUCTURE DEBRIS: this checked `results/manifest.json`, a path the
+  # driver no longer writes, so it passed by looking at nothing. A pre-flight
+  # abort now writes a truthful manifest into ITS OWN session directory recording
+  # zero runs, and the analyzer must refuse THAT rather than read it as a result.
+  BADREF_DIR="$(find "$TMP/w-badref" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
+  if [ -n "$BADREF_DIR" ] && [ -f "$BADREF_DIR/manifest.json" ]; then
+    ok "a pre-flight abort writes a truthful manifest into its own session directory"
+  else
+    bad "a pre-flight abort left no manifest to be refused"
+  fi
+  if [ -n "$BADREF_DIR" ]; then
+    run_analyzer "$BADREF_DIR"
+    check_verdict "the analyzer refuses a session that completed no replicate" UNMEASURED 7
+  fi
+fi
+
+echo
+echo "-- THE DRIVER, EXECUTED END TO END under PATH shims --"
+
+# WHY THIS SECTION EXISTS. Everything above tests the analyzer and the helpers
+# the driver was refactored to expose. Nothing ran the SESSION LOOP -- and
+# `bash -n` cannot see a command that does not exist or a variable that was never
+# exported, so a driver that died on its first replicate, after both release
+# builds, passed every check this suite had. That is the fifth instance of one
+# class in this lane (see FINDINGS.md §12), and the rule in §9 says stop fixing
+# instances and remove the reason the class exists.
+#
+# So the loop runs here, with the three externals replaced by PATH shims -- the
+# idiom this repo's own gate self-tests use for exactly this
+# (scripts/tests/test_agent_gate_feature_matrix_annotation.sh drives components
+# under a recording PATH-shim `cargo`). No source seam and no test-only flag: a
+# real invoker has nothing extra to trip over.
+#
+# DECLARED GAP, because a lane that omits coverage silently is indistinguishable
+# from one that covers it: the REAL cargo build, the REAL cqlite-flight and the
+# REAL flight-loadgen are NOT exercised anywhere. This proves the driver's own
+# logic -- ordering, plumbing, recording, promotion -- against realistic
+# behaviour, not that cqlite-flight works.
+
+e2e_supported=1
+command -v python3 >/dev/null 2>&1 || e2e_supported=0
+if [ "$e2e_supported" = "0" ]; then
+  bad "the end-to-end section needs python3 and could not run"
+else
+  SHIMBIN="$TMP/shimbin"
+  mkdir -p "$SHIMBIN"
+
+  # --- the stub server: binds a REAL socket, so the ephemeral-port plumbing is
+  # --- exercised rather than simulated, and prints the two lines the driver
+  # --- parses (configuration, then the post-bind readiness line).
+  cat > "$SHIMBIN/stub-cqlite-flight" <<'STUBEOF'
+#!/usr/bin/env python3
+import socket
+import sys
+import time
+
+args = sys.argv[1:]
+
+
+def opt(name, default=None):
+    return args[args.index(name) + 1] if name in args else default
+
+
+listen = opt("--listen", "127.0.0.1:0")
+host, _, port = listen.partition(":")
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind((host, int(port)))
+sock.listen(16)
+bound = "%s:%d" % (host, sock.getsockname()[1])
+
+# TRANSCRIBED FROM `cli::log_startup` (cqlite-flight/src/cli.rs:207-226), field
+# for field and IN ITS ORDER, not from what the parser happens to want. A stub
+# that prints what the parser expects rather than what the server emits passes
+# the test and fails on the rig -- #3042's round-trip lesson in a new place: a
+# stub I wrote agreeing with a parser I wrote proves self-consistency, not
+# correctness. The asymmetry that rescues it is that the contract is committed
+# source sitting right there, so it is transcribed and cited rather than
+# inferred. tracing's Full format renders the message first, then the fields.
+#
+# The three fields the driver does NOT read are printed anyway, because their
+# ABSENCE would make this an easier line to parse than the real one -- and
+# `max_concurrent_streams` in particular shares a prefix with
+# `max_concurrent_scans`, so leaving it out would hide an adjacency bug in the
+# regex rather than expose it.
+print(
+    "INFO cqlite_flight: cqlite-flight starting listen=%s batch_size=%s "
+    "max_batch_bytes=%s max_inflight_egress_bytes=12582912 "
+    "max_concurrent_scans=%s max_concurrent_scans_source=flag "
+    "available_parallelism=4 admission_wait_timeout_ms=%s "
+    "max_concurrent_streams=100"
+    % (
+        listen,
+        opt("--batch-size", "8192"),
+        opt("--max-batch-bytes", "4194304"),
+        opt("--max-concurrent-scans", "16"),
+        opt("--admission-wait-timeout-ms", "30000"),
+    ),
+    flush=True,
+)
+# `cli::log_listening` (cqlite-flight/src/cli.rs:228-241) prints the address
+# ACTUALLY BOUND, which with `--listen 127.0.0.1:0` is the only place the real
+# port appears -- the startup line above still says `:0`. Printing the requested
+# address here instead would hide a driver that reads the wrong field, which is
+# the single bug the port-0 design depends on not having.
+print("INFO cqlite_flight: cqlite-flight listening on %s listening_on=%s" % (bound, bound), flush=True)
+while True:
+    time.sleep(3600)
+STUBEOF
+
+  # --- a SECOND stub server: identical, but ANSI-COLOURED the way
+  # --- `tracing_subscriber::fmt` colours -- the FIELD NAME and the `=` styled,
+  # --- which is what makes a `name=value` pattern match nothing. Colour is on by
+  # --- default and survives redirection to a file, so an uncoloured log is not
+  # --- what a rig produces. The first three stub-fidelity failures were a
+  # --- missing field, a permissive argv and an ignored `-p`, all enumerable from
+  # --- cli.rs; this one is a FORMAT, and you only get it by asking what the real
+  # --- output looks like on the wire.
+  cat > "$SHIMBIN/stub-cqlite-flight-ansi" <<'STUBEOF'
+#!/usr/bin/env python3
+import re
+import socket
+import sys
+import time
+
+args = sys.argv[1:]
+
+
+def opt(name, default=None):
+    return args[args.index(name) + 1] if name in args else default
+
+
+def emit(line):
+    coloured = re.sub(
+        r"([a-z_]+)=",
+        lambda m: "\x1b[3m" + m.group(1) + "\x1b[0m\x1b[2m=\x1b[0m",
+        line,
+    )
+    print("\x1b[2m2026-09-01T10:00:00Z\x1b[0m \x1b[32m INFO\x1b[0m " + coloured,
+          flush=True)
+
+
+listen = opt("--listen", "127.0.0.1:0")
+host, _, port = listen.partition(":")
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind((host, int(port)))
+sock.listen(16)
+bound = "%s:%d" % (host, sock.getsockname()[1])
+
+emit(
+    "cqlite_flight: cqlite-flight starting listen=%s batch_size=%s "
+    "max_batch_bytes=%s max_inflight_egress_bytes=12582912 "
+    "max_concurrent_scans=%s max_concurrent_scans_source=flag "
+    "available_parallelism=4 admission_wait_timeout_ms=%s "
+    "max_concurrent_streams=100"
+    % (
+        listen,
+        opt("--batch-size", "8192"),
+        opt("--max-batch-bytes", "4194304"),
+        opt("--max-concurrent-scans", "16"),
+        opt("--admission-wait-timeout-ms", "30000"),
+    )
+)
+emit("cqlite_flight: cqlite-flight listening on %s listening_on=%s" % (bound, bound))
+while True:
+    time.sleep(3600)
+STUBEOF
+  chmod +x "$SHIMBIN/stub-cqlite-flight-ansi"
+
+  # --- the stub load generator: CONNECTS to the endpoint it was handed, so a
+  # --- wrong or stale address fails the run rather than passing quietly, and
+  # --- writes one internally-consistent record per ramp step.
+  cat > "$SHIMBIN/stub-flight-loadgen" <<'STUBEOF'
+#!/usr/bin/env python3
+import json
+import socket
+import sys
+
+args = sys.argv[1:]
+
+
+def opt(name, default=None):
+    return args[args.index(name) + 1] if name in args else default
+
+
+# EVERY TICKET PATH THIS SHIM IS HANDED IS RECORDED. The freeze's property is
+# not "a frozen copy exists" -- it is "every run READ the frozen copy", and only
+# the invocation can answer that. Asserting the artifact instead of the
+# behaviour is what let the first version of these cases pass under a plant that
+# pointed every run back at the mutable original.
+import os
+
+ticket_log = os.environ.get("AB_SELFTEST_TICKET_LOG")
+if ticket_log:
+    with open(ticket_log, "a", encoding="utf-8") as handle:
+        handle.write("%s\n" % opt("--ticket-template", "NONE"))
+
+endpoint = opt("--endpoint", "")
+host, _, port = endpoint.replace("http://", "").partition(":")
+# Proves the driver handed us a real, live address -- the whole point of the
+# ephemeral-port change is that this is OUR server and not somebody else's.
+with socket.create_connection((host, int(port)), timeout=10):
+    pass
+
+steps = [int(v) for v in opt("--ramp", "1").split(",")]
+raw = opt("--step-duration", "60s")
+for suffix, scale in (("ms", 0.001), ("m", 60.0), ("s", 1.0)):
+    if raw.endswith(suffix):
+        duration = float(raw[: -len(suffix)]) * scale
+        break
+else:
+    duration = float(raw)
+
+out = opt("--out", "/dev/null")
+label = opt("--round", "")
+# A deterministic rate that differs by arm, with a small per-replicate jitter.
+# The jitter is NOT decoration: without it every ratio is identical, the
+# bootstrap interval has zero width, and the analyzer correctly refuses the
+# session as `bootstrap-degenerate` -- which is the guard working, and would
+# make this case unable to reach a verdict. Derived from crc32 rather than
+# `hash()`, which is salted per process and would make the suite
+# non-deterministic.
+import zlib
+
+rate = 120000.0 if label.startswith("head") else 100000.0
+rate *= 1.0 + ((zlib.crc32(label.encode()) % 11) - 5) / 500.0
+with open(out, "w", encoding="utf-8") as handle:
+    for position, concurrency in enumerate(steps):
+        factor = 1.0 if position == len(steps) - 1 else 0.6
+        value = rate * factor
+        rows = int(value * duration)
+        handle.write(
+            json.dumps(
+                {
+                    "schema": "flight-loadgen.step/v1",
+                    "round": label,
+                    "endpoint": endpoint,
+                    "ts_unix_ms": 1780000000000,
+                    "seed": 42,
+                    "step": position,
+                    "target_concurrency": concurrency,
+                    "shape": opt("--shape", "full"),
+                    "duration_s": duration,
+                    "requests_ok": 5,
+                    "requests_unavailable": 0,
+                    "requests_error": 0,
+                    "error_codes": {},
+                    "qps": 5 / duration,
+                    "rows_per_s": rows / duration,
+                    "bytes_per_s": value * 200.0,
+                    "rows_total": rows,
+                    "bytes_total": rows * 200,
+                    "latency_ms": {"p50": 1.0, "p95": 1.1, "p99": 1.2, "max": 1.3, "samples": 5},
+                }
+            )
+            + "\n"
+        )
+STUBEOF
+
+  # --- the stub cargo: records its argv and produces the two binaries the
+  # --- driver then executes from that arm's own target directory.
+  cat > "$SHIMBIN/cargo" <<'STUBEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${AB_SELFTEST_CARGO_LOG:-/dev/null}"
+case "${1:-}" in
+  build)
+    # HONOURS `-p`, because real cargo does. Producing both binaries whatever was
+    # asked for made the stub MORE PERMISSIVE than cargo -- the same fidelity
+    # failure as the startup line and the argv, arriving at the package
+    # selection. It is what let "each arm builds its own load generator" look
+    # indistinguishable from "one shared client" on the filesystem.
+    rel="${CARGO_TARGET_DIR:?stub cargo needs CARGO_TARGET_DIR}/release"
+    mkdir -p "$rel"
+    want=" $* "
+    case "$want" in *" -p cqlite-flight "*)
+      cp "${AB_SELFTEST_SHIMBIN:?}/stub-cqlite-flight" "$rel/cqlite-flight"
+      chmod +x "$rel/cqlite-flight" ;;
+    esac
+    case "$want" in *" -p flight-loadgen "*)
+      cp "${AB_SELFTEST_SHIMBIN:?}/stub-flight-loadgen" "$rel/flight-loadgen"
+      chmod +x "$rel/flight-loadgen" ;;
+    esac
+    ;;
+esac
+exit 0
+STUBEOF
+  chmod +x "$SHIMBIN/cargo" "$SHIMBIN/stub-cqlite-flight" "$SHIMBIN/stub-flight-loadgen"
+
+  # A served corpus big enough for the floors this case passes.
+  # SPARSE, so the end-to-end sessions clear the DOCUMENTED corpus floor without
+  # writing 256 MiB. The floors are no longer lowerable for a measurement, and
+  # running the e2e cases as controls instead would mean the measurement path was
+  # never executed -- which is the coverage hole this whole section exists to
+  # close. `truncate` reports the size the census reads and costs no blocks.
+  mkdir -p "$TMP/e2e-corpus/ks/tbl"
+  truncate -s 150000000 "$TMP/e2e-corpus/ks/tbl/nb-1-big-Data.db"
+  truncate -s 150000000 "$TMP/e2e-corpus/ks/tbl/nb-2-big-Data.db"
+  # REAL LZ4 HEADERS, not 512 zero bytes. Those zeros satisfied round 12's
+  # "a non-empty CompressionInfo.db exists" check while being a corrupt file --
+  # this fixture WAS the defect round 15 finding 2 reports, sitting inside the
+  # test suite for it. The bytes are written from the layout in the definitive
+  # guide (appendix-g-compression-chunk-formats.md 34-70, authority
+  # CompressionMetadata.java at cassandra-5.0.8), so the fixture is a document
+  # the parser has to actually read.
+  mkcompressioninfo "$TMP/e2e-corpus/ks/tbl/nb-1-big-CompressionInfo.db" LZ4Compressor
+  mkcompressioninfo "$TMP/e2e-corpus/ks/tbl/nb-2-big-CompressionInfo.db" LZ4Compressor
+  printf '{"version":2,"keyspace":"ks","table":"tbl","ddl":"CREATE TABLE ks.tbl (a int PRIMARY KEY)","limit":null,"predicates":[],"filter":null,"aggregation":null,"columns":null,"token_start":null,"token_end":null,"wraparound":false}\n' \
+    > "$TMP/e2e-ticket.json"
+
+  # ROUND 17 FINDING 2: the ticket is FROZEN into the session directory, and
+  # every run reads that copy. Validate-then-reread was a TOCTOU on the
+  # measurement input -- edit the template mid-session and the arms execute
+  # different filters while every record still says shape `full`. The property
+  # is tested by MUTATING the original after the session and showing the frozen
+  # copy is unchanged and still matches its recorded digest.
+  e2e_ticket_frozen() { # <work-dir>
+    [ -d "$1" ] || return 0
+    local dir
+    dir="$(find "$1" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
+    [ -n "$dir" ] || return 0
+    printf '%s\n' "$dir"
+  }
+
+  # THE PROFILE GATE IS NOT WHAT THESE CASES TEST. Their subject is the
+  # driver->analyzer pipeline: that a real session's manifest and records are
+  # consumable end to end. The rig gate has its own dedicated fixtures across
+  # every profile, so patching nproc to the narrow value here removes a
+  # host-dependent variable rather than a check. Making these sessions CONTROLS
+  # instead would delete the measurement-path coverage they exist for -- the
+  # coverage that found the exit-127 defect -- and a conditional assertion
+  # ("verdict on a 4-core box, refusal elsewhere") would be non-deterministic,
+  # which is the thing this suite refuses to be.
+  # Neutralises the host and provenance variables these cases do not test. Named
+  # for the host half historically; it now covers the arms as well, and both are
+  # covered by dedicated fixture cases elsewhere.
+  e2e_narrow_profile() { # <work-dir>
+    # The work directory is checked FIRST because `set -o pipefail` is in force:
+    # `find` on a path that does not exist yet fails, and the failure propagates
+    # through the pipeline into the assignment, aborting the whole suite with no
+    # message. Several of these directories are created by later cases.
+    [ -d "$1" ] || return 0
+    local dir
+    dir="$(find "$1" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
+    [ -n "$dir" ] || return 0
+    python3 - "$dir/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as handle:
+        manifest = json.load(handle)
+except (OSError, ValueError):
+    raise SystemExit(0)
+manifest["host"]["hardware_cpus"] = 4
+manifest["host"]["process_cpus"] = 4
+# THE ARMS TOO, for the same reason and with the same limit. These sessions run
+# against a throwaway repository, so their real shas cannot start with the
+# #2820 commit; the analyzer's arm gate has its own fixture cases. What these
+# cases are for is the driver->analyzer PIPELINE, and a host or provenance
+# variable that differs per box is noise in that subject, not the subject.
+manifest["arms"]["base"]["commit"] = "674cffa9da917a3a1ee3146d4a4ae718f58612d7"
+manifest["arms"]["head"]["commit"] = "cfa93fe99a51be2b132a5d0fb57c75f3c3555731"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  }
+  run_e2e() { # <work-dir> <extra driver args...>
+    local wd="$1"; shift
+    set +e
+    AB_SELFTEST_SHIMBIN="$SHIMBIN" \
+    AB_SELFTEST_CARGO_LOG="$TMP/cargo-argv.log" \
+    AB_SELFTEST_TICKET_LOG="$TMP/ticket-paths.log" \
+    PATH="$SHIMBIN:$PATH" \
+      bash "$DRIVER" \
+        --corpus "$TMP/e2e-corpus" --ticket-template "$TMP/e2e-ticket.json" \
+        --work-dir "$wd" --repo "$SCRATCH" \
+        --base-ref HEAD~1 --head-ref HEAD \
+        --max-concurrent-scans 16 \
+        --attest-local-storage 'selftest harness: scratch corpus on the test box, whose device model this probe does not recognise; the storage class is not the property these cases exercise' \
+        --profile narrow \
+        --replicates 5 --step-duration 1s "$@" \
+        > "$TMP/out.txt" 2> "$TMP/err.txt"
+    RC=$?
+    set -e
+    # Called HERE, for every session, rather than from a list of work
+    # directories maintained by hand -- two later sessions were analysed before
+    # the one-shot version reached them, which is the shape a hand-maintained
+    # subject set always eventually takes.
+    e2e_narrow_profile "$wd"
+  }
+
+  # THE REQUIRED-NESS OF --profile, ASSERTED BEFORE ANY BUILD. Written as its
+  # own case rather than left implicit in the 27 invocations that had to gain
+  # the flag: those show the requirement FIRES, but a requirement nothing names
+  # is one a later change can relax without anything going red. "Before any
+  # build" is MEASURED here, not assumed -- the shimmed cargo logs every
+  # invocation, so an empty log is the evidence that nothing was compiled.
+  : > "$TMP/cargo-argv.log"
+  set +e
+  AB_SELFTEST_SHIMBIN="$SHIMBIN" \
+  AB_SELFTEST_CARGO_LOG="$TMP/cargo-argv.log" \
+  PATH="$SHIMBIN:$PATH" \
+    bash "$DRIVER" \
+      --corpus "$TMP/e2e-corpus" --ticket-template "$TMP/e2e-ticket.json" \
+      --work-dir "$TMP/e2e-noprofile" --repo "$SCRATCH" \
+      --base-ref HEAD~1 --head-ref HEAD --max-concurrent-scans 16 \
+      --replicates 5 --step-duration 1s --ramp 1 --no-prewarm \
+      > "$TMP/out.txt" 2> "$TMP/err.txt"
+  RC=$?
+  set -e
+  if [ "$RC" = 3 ]; then
+    ok "a measurement with no --profile is a usage error, not a default"
+  else
+    bad "a measurement with no --profile exited $RC, expected 3"
+  fi
+  if grep -q 'usage-error --profile is REQUIRED for a measurement' "$TMP/err.txt"; then
+    ok "the refusal says the profile is required and why there is no default"
+  else
+    bad "the missing-profile refusal does not name the requirement"
+  fi
+  if [ ! -s "$TMP/cargo-argv.log" ]; then
+    ok "no --profile refuses BEFORE any build -- the cargo log is empty"
+  else
+    bad "a session missing --profile reached cargo: $(head -1 "$TMP/cargo-argv.log")"
+  fi
+  # ...AND THE SAME REQUIREMENT FOR A SINGLE-STREAM CONTROL, which is the
+  # finding: the label disclaims the verdict, it does not remove the band the
+  # single-stream section reaches its verdict through, so a `--ramp 1` control
+  # that recorded no profile was accepted here and refused by
+  # `resolve_profile` with `profile-unrecorded` -- after everything had been
+  # built and run. Measured the same way, because "refuses before any build" is
+  # the whole value of moving it: an empty cargo log is the evidence.
+  : > "$TMP/cargo-argv.log"
+  set +e
+  AB_SELFTEST_SHIMBIN="$SHIMBIN" \
+  AB_SELFTEST_CARGO_LOG="$TMP/cargo-argv.log" \
+  PATH="$SHIMBIN:$PATH" \
+    bash "$DRIVER" \
+      --corpus "$TMP/e2e-corpus" --ticket-template "$TMP/e2e-ticket.json" \
+      --work-dir "$TMP/e2e-ctl-noprofile" --repo "$SCRATCH" \
+      --base-ref HEAD~1 --head-ref HEAD --max-concurrent-scans 16 \
+      --control profile-probe \
+      --replicates 5 --step-duration 1s --ramp 1 --no-prewarm \
+      > "$TMP/out.txt" 2> "$TMP/err.txt"
+  RC=$?
+  set -e
+  if [ "$RC" = 3 ]; then
+    ok "a single-stream control with no --profile is a usage error too"
+  else
+    bad "a single-stream control with no --profile exited $RC, expected 3"
+  fi
+  if [ ! -s "$TMP/cargo-argv.log" ]; then
+    ok "a single-stream control with no --profile refuses BEFORE any build -- the cargo log is empty"
+  else
+    bad "a control missing --profile reached cargo: $(head -1 "$TMP/cargo-argv.log")"
+  fi
+  if anchored; then
+    ok "the single-stream control refusal is anchored on both streams"
+  else
+    bad "the single-stream control refusal emitted an unanchored line"
+  fi
+  # ROUND 19 FINDING C, THROUGH THE WHOLE DRIVER. AB_SHAPE was exported before
+  # canonicalisation and never updated, so an accepted alias put the CANONICAL
+  # label in the JSONL and the RAW one in the manifest -- and the analyzer then
+  # rejected a valid COMPLETED session with shape-record-mismatch. This runs a
+  # session with an alias and requires it to complete AND to reconcile; only the
+  # end-to-end path can show that, because the mismatch is between two artifacts
+  # that only a real session produces.
+  run_e2e "$TMP/e2e-alias" --ramp 1 --no-prewarm --control alias-spelling --shape limit
+  if [ "$RC" = "0" ]; then
+    ok "a session using the alias 'limit' completes"
+  else
+    bad "an aliased --shape aborted the session (exit $RC): $(grep -m2 '^AB-3649: cause' "$TMP/err.txt" | tr '\n' ' ')"
+  fi
+  ALIAS_DIR="$(find "$TMP/e2e-alias" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
+  if [ -n "$ALIAS_DIR" ] && [ -f "$ALIAS_DIR/manifest.json" ]; then
+    if python3 - "$ALIAS_DIR" <<'PYINNER'
+import glob
+import json
+import os
+import sys
+
+run_dir = sys.argv[1]
+manifest = json.load(open(os.path.join(run_dir, "manifest.json"), encoding="utf-8"))
+problems = []
+if manifest["workload"]["shape"] != "limit-k":
+    problems.append("the manifest records shape %r, not the canonical 'limit-k'"
+                    % manifest["workload"]["shape"])
+if manifest["workload"].get("shape_requested") != "limit":
+    problems.append("the manifest lost the requested spelling: %r"
+                    % manifest["workload"].get("shape_requested"))
+# The records carry the canonical label, so manifest and records must agree --
+# which is the reconciliation that used to reject the session.
+# The REPLICATE files only. `runs.jsonl` is the session ledger and carries a
+# different schema with no `shape`, so globbing all JSONL made this case report
+# a mismatch that was its own imprecision rather than the driver's.
+for path in sorted(glob.glob(os.path.join(run_dir, "*-r*.jsonl"))):
+    for line in open(path, encoding="utf-8"):
+        if not line.strip():
+            continue
+        shape = json.loads(line).get("shape")
+        if shape != manifest["workload"]["shape"]:
+            problems.append("%s records shape %r while the manifest says %r"
+                            % (os.path.basename(path), shape,
+                               manifest["workload"]["shape"]))
+            break
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+    then
+      ok "an aliased shape reconciles: canonical in both the manifest and the records, requested spelling kept"
+    else
+      bad "an aliased shape does not reconcile (see above)"
+    fi
+  else
+    bad "the aliased-shape session produced no manifest"
+  fi
+
+  : > "$TMP/cargo-argv.log"
+  # ROUND 15 FINDING 3, THROUGH THE WHOLE DRIVER. Round 14 canonicalised resolved
+  # integers, and one comparison kept reading the raw option string -- so
+  # `--max-concurrent-scans 04` launched the server as `4`, the startup line
+  # echoed `4`, and the string `04` did not match: a CORRECT session aborting
+  # with admission-mismatch after BOTH release builds, caused by our own fix.
+  # Only the end-to-end path sees this, because it needs a real server printing a
+  # real startup line, which is exactly why the shims exist.
+  run_e2e "$TMP/e2e-zero" --ramp 1 --no-prewarm --max-concurrent-scans 04
+  if [ "$RC" = "0" ]; then
+    ok "a leading-zero --max-concurrent-scans completes instead of a false admission-mismatch"
+  else
+    bad "a leading-zero --max-concurrent-scans aborted the session (exit $RC): $(grep -m2 '^AB-3649: cause' "$TMP/err.txt" | tr '\n' ' ')"
+  fi
+  if grep -q '^AB-3649: run .* admission requested 04 resolved 4 observed 4 ' "$TMP/out.txt"; then
+    ok "the log distinguishes the raw request from the resolved value it is compared against"
+  else
+    bad "the admission line does not show both the raw request and the resolved value"
+  fi
+
+  : > "$TMP/cargo-argv.log"
+  run_e2e "$TMP/e2e-ss" --ramp 1 --no-prewarm
+  if [ "$RC" = "0" ]; then
+    ok "a complete single-stream session runs end to end under the shims"
+  else
+    bad "the driver could not complete a session (exit $RC): $(grep -m2 '^AB-3649: cause' "$TMP/err.txt" | tr '\n' ' ')"
+  fi
+  if ! anchored; then
+    bad "a real session emitted a line without the AB-3649 anchor"
+  else
+    ok "every line of a real session carries the anchor"
+  fi
+
+  # THE FREEZE, tested by mutating the original AFTER the session ran.
+  E2E_TICKET_DIR="$(e2e_ticket_frozen "$TMP/e2e-ss")"
+  if [ -n "$E2E_TICKET_DIR" ] && [ -f "$E2E_TICKET_DIR/ticket.json" ]; then
+    ok "the session froze a ticket copy into its own run directory"
+    FROZEN_BEFORE="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$E2E_TICKET_DIR/ticket.json")"
+    RECORDED_SHA="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["workload"]["ticket_sha256"])' "$E2E_TICKET_DIR/manifest.json" 2>/dev/null || echo ABSENT)"
+    if [ "$FROZEN_BEFORE" = "$RECORDED_SHA" ]; then
+      ok "the manifest's ticket digest matches the frozen copy on disk"
+    else
+      bad "the manifest records $RECORDED_SHA but the frozen ticket hashes to $FROZEN_BEFORE"
+    fi
+    # Mutate the ORIGINAL, then RESTORE it. The original is shared by every
+    # later e2e session, so leaving it narrowed made all of them die
+    # ticket-not-full-ring -- a case that breaks its successors is a case that
+    # tests the suite's ordering as well as its subject. Saved and put back
+    # rather than parameterised, because the property under test is specifically
+    # that the FROZEN copy does not follow THIS path.
+    cp -- "$TMP/e2e-ticket.json" "$TMP/e2e-ticket.orig"
+    printf '{"version":2,"keyspace":"ks","table":"tbl","ddl":"CREATE TABLE ks.tbl (a int PRIMARY KEY)","limit":7}\n' > "$TMP/e2e-ticket.json"
+    FROZEN_AFTER="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$E2E_TICKET_DIR/ticket.json")"
+    mv -- "$TMP/e2e-ticket.orig" "$TMP/e2e-ticket.json"
+    if [ "$FROZEN_AFTER" = "$FROZEN_BEFORE" ]; then
+      ok "editing the original template does not change the frozen copy the runs read"
+    else
+      bad "the frozen ticket followed an edit to the original -- the freeze is not a freeze"
+    fi
+    # The manifest carries the CONTENT too, so a reader needs no session dir.
+    if python3 - "$E2E_TICKET_DIR/manifest.json" <<'PYINNER'
+import json
+import sys
+
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+content = manifest["workload"].get("ticket_content")
+raise SystemExit(0 if isinstance(content, dict) and content.get("keyspace") else 1)
+PYINNER
+    then
+      ok "the manifest carries the frozen ticket's content, not only its path"
+    else
+      bad "the manifest does not carry the ticket content"
+    fi
+    # ROUND 18 FINDING 1 -- THE OTHER HALF OF THE PROPERTY. Round 17 asserted
+    # that every run READ the frozen copy and said nothing about what the
+    # manifest RECORDS, and the manifest recorded the mutable original. Both
+    # halves are needed: an instrument that runs the right ticket and documents
+    # a different one is not self-describing.
+    if AB_SELFTEST_EXPECTED_TICKET="$TMP/e2e-ticket.json" python3 - "$E2E_TICKET_DIR" <<'PYINNER'
+import json
+import os
+import sys
+
+run_dir = sys.argv[1]
+manifest = json.load(open(os.path.join(run_dir, "manifest.json"), encoding="utf-8"))
+workload = manifest["workload"]
+recorded = workload.get("ticket_template", "")
+problems = []
+if os.path.realpath(recorded) != os.path.realpath(os.path.join(run_dir, "ticket.json")):
+    problems.append("workload.ticket_template is %r, not the frozen copy" % recorded)
+# THE EXEMPTION, CHECKED RATHER THAN ASSERTED. The static census exempts
+# AB_TICKET_ORIGINAL by a naming rule, which records an INTENT; this checks the
+# VALUE the intent claims -- that it is exactly the template the session was
+# given. "Exempt because it is named _ORIGINAL" and "provably the requested
+# path" are different guarantees, and only the second survives an edit.
+original = workload.get("ticket_original", "")
+expected_original = os.environ.get("AB_SELFTEST_EXPECTED_TICKET", "")
+if not original or os.path.realpath(original) == os.path.realpath(recorded):
+    problems.append("ticket_original is absent or equal to the frozen path, so "
+                    "provenance is lost")
+elif expected_original and os.path.realpath(original) != os.path.realpath(
+        expected_original):
+    problems.append("ticket_original is %r but the session was given %r"
+                    % (original, expected_original))
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+    then
+      ok "the manifest records the FROZEN ticket path, with the original kept only as provenance"
+    else
+      bad "the manifest does not record the frozen ticket (see above)"
+    fi
+    # INTERNAL CONSISTENCY ONLY, and labelled as such because it CANNOT catch
+    # finding (1) on its own: at session time the original and the frozen copy
+    # hold identical bytes, so a manifest that read the wrong one records the
+    # same content. The PATH assertion above is what catches the defect. What
+    # this adds is that the three ticket fields describe ONE document -- a
+    # manifest whose path, content and digest disagreed would be self-refuting,
+    # and nothing else checks that.
+    if python3 - "$E2E_TICKET_DIR" <<'PYINNER'
+import hashlib
+import json
+import os
+import sys
+
+run_dir = sys.argv[1]
+manifest = json.load(open(os.path.join(run_dir, "manifest.json"), encoding="utf-8"))
+content = manifest["workload"].get("ticket_content")
+frozen = json.load(open(os.path.join(run_dir, "ticket.json"), encoding="utf-8"))
+if content != frozen:
+    sys.stderr.write("AB-3649: the manifest's ticket_content is not the frozen "
+                     "ticket: %r vs %r\n" % (content, frozen))
+    raise SystemExit(1)
+digest = hashlib.sha256(
+    open(os.path.join(run_dir, "ticket.json"), "rb").read()).hexdigest()
+if manifest["workload"].get("ticket_sha256") != digest:
+    sys.stderr.write("AB-3649: the recorded digest does not match the frozen file\n")
+    raise SystemExit(1)
+PYINNER
+    then
+      ok "the manifest's ticket path, content and digest describe one document"
+    else
+      bad "the manifest's ticket fields describe different documents (see above)"
+    fi
+
+    # THE BEHAVIOUR, not the artifact: every load-generator invocation must have
+    # been handed a path inside a session run directory. A source grep for the
+    # original's literal name passed under a plant that redirected the VARIABLE,
+    # which is the difference between checking what the code says and checking
+    # what it did.
+    if [ -s "$TMP/ticket-paths.log" ]; then
+      OFFENDERS="$(grep -cv '/run-[^/]*/ticket\.json$' "$TMP/ticket-paths.log" || true)"
+      if [ "$OFFENDERS" = 0 ]; then
+        ok "every load-generator invocation read a frozen per-session ticket ($(wc -l < "$TMP/ticket-paths.log") runs)"
+      else
+        bad "$OFFENDERS load-generator invocation(s) read a ticket outside the session directory: $(grep -v '/run-[^/]*/ticket\.json$' "$TMP/ticket-paths.log" | head -1)"
+      fi
+    else
+      bad "no load-generator invocation was recorded, so the freeze proves nothing"
+    fi
+  else
+    bad "the session did not freeze a ticket copy into its run directory"
+  fi
+
+  E2E_DIR="$(find "$TMP/e2e-ss" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
+  if [ -n "$E2E_DIR" ] && [ -f "$E2E_DIR/manifest.json" ]; then
+    ok "the session wrote a manifest into its own run directory"
+  else
+    bad "no session directory with a manifest was produced"
+  fi
+  if [ "$(find "$TMP/e2e-ss" -maxdepth 2 -name '*-r0*.jsonl' 2>/dev/null | wc -l)" = "10" ]; then
+    ok "all ten replicate files (5 pairs x 2 arms) were written"
+  else
+    bad "expected 10 replicate JSONL files, found $(find "$TMP/e2e-ss" -maxdepth 2 -name '*-r0*.jsonl' 2>/dev/null | wc -l)"
+  fi
+  # FINDING 2: the census reached the manifest, rather than defaulting to zero.
+  if [ -n "$E2E_DIR" ] && python3 - "$E2E_DIR/manifest.json" <<'PYINNER'
+import json
+import sys
+
+corpus = json.load(open(sys.argv[1], encoding="utf-8"))["corpus"]
+raise SystemExit(
+    0 if corpus["data_db_files"] == 2 and corpus["data_db_bytes"] == 300000000 else 1
+)
+PYINNER
+  then
+    ok "the manifest records the real corpus census, not zeros"
+  else
+    bad "the manifest's corpus census is wrong -- the AC requires the corpus size be stated"
+  fi
+  # The two arms really were built separately, with their own target dirs.
+  if [ "$(grep -c 'target/release\|build --release' "$TMP/cargo-argv.log" 2>/dev/null || echo 0)" -ge 2 ]; then
+    ok "each arm was built once, through its own cargo invocation"
+  else
+    bad "the two arms were not both built"
+  fi
+  # And the analyzer reads what the driver produced -- the two halves meeting is
+  # the property no fixture can establish.
+  if [ -n "$E2E_DIR" ]; then
+    set +e
+    python3 "$ANALYZER" --single-stream "$E2E_DIR/manifest.json" \
+      > "$TMP/out.txt" 2> "$TMP/err.txt"
+    RC=$?
+    set -e
+    if [ "$(verdict_token single-stream)" = "MEETS-TARGET" ] && [ "$RC" = "0" ]; then
+      ok "the analyzer consumes a REAL driver manifest and renders a verdict"
+    else
+      bad "the analyzer could not read the driver's own output (verdict '$(verdict_token single-stream)', exit $RC)"
+    fi
+    if grep -q '^AB-3649: counterbalance base-first 3 head-first 2 residual 1 pair(s)$' "$TMP/out.txt"; then
+      ok "the order the driver ACTUALLY ran is what the analyzer counts"
+    else
+      bad "the executed order did not reach the analyzer"
+    fi
+    if grep -q 'corroboration agreed (10 of 10 runs)' "$TMP/out.txt"; then
+      ok "the admission ceiling was read back from every real server start"
+    else
+      bad "the admission readback did not survive a real session"
+    fi
+  fi
+
+  # THE COLOURED-LOG SESSION. Left unfixed this was total: every startup regex
+  # failing means every field NOT-OBSERVED, corroboration `none`, and -- after
+  # round 10's ruling -- every real rig session refused as UNMEASURED.
+  cp "$SHIMBIN/stub-cqlite-flight" "$SHIMBIN/stub-cqlite-flight.plain"
+  cp "$SHIMBIN/stub-cqlite-flight-ansi" "$SHIMBIN/stub-cqlite-flight"
+  run_e2e "$TMP/e2e-ansi" --ramp 1 --no-prewarm
+  cp "$SHIMBIN/stub-cqlite-flight.plain" "$SHIMBIN/stub-cqlite-flight"
+  if [ "$RC" = "0" ]; then
+    ok "a session whose server logs are ANSI-coloured completes"
+  else
+    bad "a coloured server log broke the session (exit $RC): $(grep -m2 '^AB-3649: cause' "$TMP/err.txt" | tr '\n' ' ')"
+  fi
+  ANSI_DIR="$(find "$TMP/e2e-ansi" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
+  if [ -n "$ANSI_DIR" ] && grep -q $'\x1b\[' "$ANSI_DIR/logs/base-r01.server.log" 2>/dev/null; then
+    ok "...and the captured log really does contain escape sequences"
+  else
+    bad "the coloured-log case did not actually produce a coloured log, so it proved nothing"
+  fi
+  if [ -n "$ANSI_DIR" ]; then
+    set +e
+    python3 "$ANALYZER" --single-stream "$ANSI_DIR/manifest.json" > "$TMP/out.txt" 2> "$TMP/err.txt"
+    RC=$?
+    set -e
+    if [ "$(verdict_token single-stream)" != "UNMEASURED" ] \
+       && grep -q 'corroboration agreed' "$TMP/out.txt"; then
+      ok "every server field is still read back through the colour"
+    else
+      bad "colour defeated the startup readback: $(grep -m1 '^AB-3649: cause single-stream' "$TMP/err.txt")"
+    fi
+  fi
+
+  # A ramp session, so the multi-step validation path runs for real too.
+  run_e2e "$TMP/e2e-ut" --ramp 1,2 --no-prewarm
+  if [ "$RC" = "0" ]; then
+    ok "a complete concurrency-ramp session runs end to end"
+  else
+    bad "the ramp session failed (exit $RC): $(grep -m2 '^AB-3649: cause' "$TMP/err.txt" | tr '\n' ' ')"
+  fi
+  UT_DIR="$(find "$TMP/e2e-ut" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
+  if [ -n "$UT_DIR" ]; then
+    set +e
+    python3 "$ANALYZER" --utilization "$UT_DIR/manifest.json" > "$TMP/out.txt" 2> "$TMP/err.txt"
+    RC=$?
+    set -e
+    if [ "$(verdict_token utilization)" = "RISES" ]; then
+      ok "a real ramp session yields a utilization verdict"
+    else
+      bad "the utilization section could not read a real ramp session ('$(verdict_token utilization)')"
+    fi
+  fi
+
+  # THE SENSITIVITY CONTROL, RUN FOR REAL. Two individually-correct rules --
+  # "refuse cross-arm config differences" and "asymmetric per-arm flags require
+  # --control" -- made the runbook's own positive control unrunnable, and nothing
+  # short of executing it would have shown that. This is the case that would have
+  # caught it.
+  run_e2e "$TMP/e2e-ctl" --ramp 1 --no-prewarm --control sensitivity     --head-server-extra '--max-batch-bytes 1'
+  if [ "$RC" = "0" ]; then
+    ok "the sensitivity control -- deliberately asymmetric -- completes a session"
+  else
+    bad "the sensitivity control could not run (exit $RC): $(grep -m2 '^AB-3649: cause' "$TMP/err.txt" | tr '
+' ' ')"
+  fi
+  # ROUND 18 FINDING 2, THE CASE THAT WOULD HAVE CAUGHT IT. workload.* was
+  # populated from the GLOBAL options, so IDENTICAL per-arm extras ran both
+  # servers at 1 while the manifest said 8192 -- and after round 17 the manifest
+  # is THE SOURCE for the target band, so every field in it that can lie is
+  # load-bearing. This session sets the same override on BOTH arms, which is
+  # exactly the case a "record it when the arms agree" reconciliation would also
+  # have got wrong, since the arms DO agree -- with each other, and not with the
+  # global.
+  run_e2e "$TMP/e2e-both" --ramp 1 --no-prewarm --control both-arms-overridden \
+    --base-server-extra '--max-batch-bytes 1' --head-server-extra '--max-batch-bytes 1'
+  BOTH_DIR="$(find "$TMP/e2e-both" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
+  if [ -n "$BOTH_DIR" ] && [ -f "$BOTH_DIR/manifest.json" ]; then
+    if python3 - "$BOTH_DIR/manifest.json" <<'PYINNER'
+import json
+import sys
+
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+problems = []
+for arm in ("base", "head"):
+    got = manifest["expected_server_config"][arm]["max_batch_bytes_observed"]
+    if got != "1":
+        problems.append("expected_server_config.%s records %r, but that arm was "
+                        "launched with --max-batch-bytes 1" % (arm, got))
+# The global field must not exist at all: its presence is the defect, and a
+# CORRECT value in it would still be a second source that can drift later.
+for gone in ("max_batch_bytes", "batch_size", "admission_wait_timeout_ms"):
+    if gone in manifest["workload"]:
+        problems.append("workload.%s still exists; a per-arm overridable option "
+                        "recorded globally is a second source" % gone)
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+    then
+      ok "per-arm overrides are recorded per arm, and no global copy of them exists"
+    else
+      bad "the manifest misrecords a per-arm override (see above)"
+    fi
+  else
+    bad "the both-arms-overridden session produced no manifest"
+  fi
+
+  CTL_DIR="$(find "$TMP/e2e-ctl" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
+  if [ -n "$CTL_DIR" ]; then
+    set +e
+    python3 "$ANALYZER" --single-stream "$CTL_DIR/manifest.json"       > "$TMP/out.txt" 2> "$TMP/err.txt"
+    RC=$?
+    set -e
+    if [ "$(verdict_token single-stream)" != "UNMEASURED" ]; then
+      ok "the analyzer ANALYSES the sensitivity control instead of refusing it"
+    else
+      bad "the analyzer refused the sensitivity control: $(grep -m1 '^AB-3649: cause single-stream' "$TMP/err.txt")"
+    fi
+    if grep -q '^AB-3649: verdict-detail single-stream CONTROL the two arms were served under DIFFERENT ' "$TMP/out.txt"; then
+      ok "...and still discloses that the arms were served differently"
+    else
+      bad "the control's asymmetry was not disclosed"
+    fi
+    # EXACTLY the declared difference, and nothing else: an observed value that
+    # does not match what the manifest declared is still a refusal.
+    python3 - "$CTL_DIR/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["expected_server_config"]["head"]["max_batch_bytes_observed"] = "999"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+    set +e
+    python3 "$ANALYZER" --single-stream "$CTL_DIR/manifest.json"       > "$TMP/out.txt" 2> "$TMP/err.txt"
+    RC=$?
+    set -e
+    if grep -q '^AB-3649: cause single-stream server-config-unexpected$' "$TMP/err.txt"; then
+      ok "a control whose arms differ in a way the manifest did NOT declare is refused"
+    else
+      bad "an undeclared per-arm difference was permitted under a control label"
+    fi
+  fi
+
+  # FINDING 1 (round 10): ONE load generator, so the client cannot vary with the
+  # server commit. Checked on the filesystem the session actually produced.
+  if [ -n "$E2E_DIR" ]; then
+    if [ -x "$TMP/e2e-ss/target-loadgen/release/flight-loadgen" ] \
+       && [ ! -e "$TMP/e2e-ss/target-base/release/flight-loadgen" ] \
+       && [ ! -e "$TMP/e2e-ss/target-head/release/flight-loadgen" ]; then
+      ok "exactly one load generator was built, and neither arm has its own"
+    else
+      bad "an arm built its own load generator, so the client varies with the server commit"
+    fi
+    if python3 - "$E2E_DIR/manifest.json" <<'PYINNER'
+import json
+import sys
+
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+commits = {run.get("loadgen_commit") for run in manifest["runs"]}
+raise SystemExit(
+    0 if len(commits) == 1 and manifest["loadgen"]["commit"] in commits else 1
+)
+PYINNER
+    then
+      ok "every run records the same load-generator commit, and the manifest names it"
+    else
+      bad "the load-generator provenance is not recorded consistently"
+    fi
+  fi
+
+  # The prewarm path is a separate branch and has its own way to be wrong.
+  run_e2e "$TMP/e2e-warm" --ramp 1
+  if [ "$RC" = "0" ]; then
+    ok "a session with the warming pass enabled also completes"
+  else
+    bad "the prewarm branch failed (exit $RC): $(grep -m2 '^AB-3649: cause' "$TMP/err.txt" | tr '\n' ' ')"
+  fi
+
+  # THE MISNAMED CASE, FIXED. This ran `--temperature warm` into a directory
+  # called `e2e-cold` and then inspected the WARM session -- so cold-cache
+  # handling and `prewarm: false` were untested while the name asserted coverage.
+  # Fifth case in this lane that did not test what it claimed.
+  #
+  # A genuine cold session needs passwordless sudo to drop the page cache, which
+  # a suite may not assume. What IS testable, and is the property that matters
+  # here, is that cold FAILS CLOSED without it -- a run that could not drop the
+  # cache must not proceed and record itself as cold.
+  if sudo -n true 2>/dev/null; then
+    ok "cold fail-closed case skipped: this box HAS passwordless sudo, so the refusal cannot be provoked (declared, not assumed)"
+  else
+    run_e2e "$TMP/e2e-cold" --ramp 1 --temperature cold --no-prewarm
+    if [ "$RC" = "2" ] && grep -q 'cold-drop-failed' "$TMP/err.txt"; then
+      ok "a cold session without passwordless sudo fails closed rather than running warm"
+    else
+      bad "a cold session that could not drop the page cache did not fail closed (exit $RC)"
+    fi
+  fi
+  # ...and `prewarm: false` is exercised for real by the --no-prewarm session,
+  # which is the half that needs no privileges.
+  SS_DIR="$(find "$TMP/e2e-ss" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
+  if [ -n "$SS_DIR" ] && python3 - "$SS_DIR" <<'PYINNER'
+import json
+import os
+import sys
+
+manifest = json.load(open(os.path.join(sys.argv[1], "manifest.json"), encoding="utf-8"))
+raise SystemExit(0 if manifest["workload"]["prewarm"] is False else 1)
+PYINNER
+  then
+    ok "a --no-prewarm session records prewarm: false"
+  else
+    bad "a --no-prewarm session did not record prewarm: false"
+  fi
+
+  # FINDING 3 (round 6): the manifest must record what HAPPENED, not what was
+  # asked for -- checked against the warm session, where a pass really ran.
+  WARM_DIR="$(find "$TMP/e2e-warm" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
+  if [ -n "$WARM_DIR" ] && python3 - "$WARM_DIR" <<'PYINNER'
+import json
+import os
+import sys
+
+root = sys.argv[1]
+manifest = json.load(open(os.path.join(root, "manifest.json"), encoding="utf-8"))
+recorded = manifest["workload"]["prewarm"]
+happened = any(
+    name.endswith(".prewarm.log")
+    for name in os.listdir(os.path.join(root, "logs"))
+)
+raise SystemExit(0 if recorded == happened else 1)
+PYINNER
+  then
+    ok "the manifest's prewarm flag matches whether a warming pass actually ran"
+  else
+    bad "the manifest records a prewarm value the session did not perform"
+  fi
+
+  # No server may outlive the session: the reap path runs for real here.
+  if pgrep -f "$TMP/e2e-ss.*cqlite-flight" >/dev/null 2>&1 \
+     || pgrep -f "$TMP/e2e-warm.*cqlite-flight" >/dev/null 2>&1; then
+    bad "a stub server outlived its session"
+  else
+    ok "every server was reaped; none outlived its session"
+  fi
+  echo "  note    DECLARED GAP 1: the real cargo build, cqlite-flight and flight-loadgen are"
+  echo "          exercised by nothing here -- these cases prove the DRIVER's logic only."
+  echo "  note    DECLARED GAP 2: the stub is MORE PERMISSIVE than the real binary. It"
+  echo "          parses its own argv, so an argument line Clap would REJECT still runs"
+  echo "          here -- a duplicated option, an unknown flag, a bad value. That class"
+  echo "          is covered structurally instead (the server-argv cases above assert no"
+  echo "          option is emitted twice); nothing in this suite can reproduce Clap."
+fi
+
+echo
+echo "-- one client for both arms, checked rather than assumed --"
+
+mkfixture "$TMP/lg-split" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/lg-split/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    if entry["arm"] == "head":
+        entry["loadgen_commit"] = "9" * 40
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/lg-split"
+check_verdict "arms driven by different load generators" UNMEASURED 7 single-stream
+check_cause "a client that varies with the server commit" loadgen-provenance-mismatch
+run_analyzer "$TMP/meets"
+if grep -q '^AB-3649: loadgen commit 2222222222222222222222222222222222222222 ref ' "$TMP/out.txt"; then
+  ok "the load generator's provenance is reported, not merely checked"
+else
+  bad "the load-generator provenance was not reported"
+fi
+
+# A guard satisfiable by ABSENCE is not satisfied. One arm omitting its commit --
+# or every run omitting it -- used to leave at most one value in the set, so the
+# confound check passed with no evidence at all.
+for absence in one all; do
+  mkfixture "$TMP/lg-$absence" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  python3 - "$TMP/lg-$absence/manifest.json" "$absence" <<'PYINNER'
+import json
+import sys
+
+path, absence = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    if absence == "all" or entry["arm"] == "head":
+        entry.pop("loadgen_commit", None)
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/lg-$absence"
+  check_verdict "loadgen provenance missing from $absence run(s)" UNMEASURED 7 single-stream
+  check_cause "provenance absent ($absence)" loadgen-provenance-absent
+done
+# ...and a commit the manifest does not itself declare is a mismatch, not a pass.
+mkfixture "$TMP/lg-undecl" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/lg-undecl/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["loadgen"]["commit"] = "8" * 40
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/lg-undecl"
+check_verdict "runs naming a client the manifest does not declare" UNMEASURED 7 single-stream
+check_cause "a client the manifest does not declare" loadgen-provenance-mismatch
+
+# The analyzer re-checks compression rather than trusting the manifest's driver.
+mkfixture "$TMP/uncompressed" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/uncompressed/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["corpus"]["compressed"] = False
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/uncompressed"
+check_verdict "a measurement the manifest records as uncompressed" UNMEASURED 7 single-stream
+check_cause "an uncompressed corpus" corpus-uncompressed
+# ...and absence is not compression either.
+python3 - "$TMP/uncompressed/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+del manifest["corpus"]["compressed"]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/uncompressed"
+check_verdict "a manifest that says nothing about compression" UNMEASURED 7 single-stream
+
+echo
+echo "-- requirements that can be disclosed but not honestly refused --"
+
+# THE SWEEP. A rig class is not reliably derivable from a host string, so
+# refusing on it would red a correct rig the day someone uses i4i.2xlarge -- the
+# guard people learn to waive. Disclosed instead, and the disclosure is pinned.
+mkfixture "$TMP/wronghost" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/wronghost/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["host"]["instance_type"] = "c7i.4xlarge"
+manifest["host"]["loadavg1"] = "18.4"
+manifest["host"]["contention"] = "CONTENDED"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/wronghost"
+check_verdict "a session run off the named rig" MEETS-TARGET 0 single-stream
+if grep -q '^AB-3649: verdict-detail single-stream HOST the acceptance criteria name the field i4i' "$TMP/out.txt"; then
+  ok "a session off the named rig is disclosed, not silently scored"
+else
+  bad "running off the named rig was not disclosed"
+fi
+if grep -q '^AB-3649: verdict-detail single-stream HOST the one-minute load average' "$TMP/out.txt"; then
+  ok "a contended box at session start is disclosed beside the verdict"
+else
+  bad "a loaded host was not disclosed"
+fi
+# ---- every verdict-gating property is enforced ANALYZER-SIDE -----------------
+# ROUND 20. Rounds 18, 19 and 20 each found ONE angle of the same boundary: the
+# driver refuses things the analyzer then trusts, so a manifest the driver did
+# not create walks past them. Patching the angle we were shown is what produced
+# three rounds of it, so this enumerates the properties that gate a verdict and
+# requires each to have an analyzer-side refusal -- the same move that stopped
+# the export class.
+#
+# THE LIST IS CURATED AND SAYS SO. There is no mechanical way to derive "the
+# set of properties a verdict depends on" from source; what IS derived is
+# whether each named property has a refusal, so the list can be wrong by
+# OMISSION but never by staleness. A property whose cause is renamed or deleted
+# reds here.
+set +e
+GATING_OUT="$(python3 - "$HERE" <<'PYINNER'
+import re
+import sys
+
+# THE ANALYZER'S ENFORCEMENT SURFACE IS THREE FILES, not one. `ab_input.py`
+# holds the record and reconciliation refusals, and since round 20 the ticket
+# refusal is raised through the DRIVER'S validator, which the analyzer imports
+# and calls -- so the cause literal lives in ab_driver_support.py. Scanning only
+# analyze-ab.py reported a property as unenforced that is enforced through a
+# shared function, which is the guard being right about the file and wrong about
+# the question.
+both = "".join(
+    open("%s/%s" % (sys.argv[1], name), encoding="utf-8").read()
+    for name in ("analyze-ab.py", "ab_input.py", "ab_driver_support.py")
+)
+
+# property -> the cause that refuses it analyzer-side.
+GATING = {
+    "the target band this session declared": "profile-unrecorded",
+    "an analysis flag cannot re-band a session": "profile-assertion-mismatch",
+    "the arms are the #2820 pair": "arms-not-2820",
+    "the workload is a full-ring scan": "ticket-not-full-ring",
+    "the workload was recorded at all": "ticket-unrecorded",
+    "the records' shape matches the manifest": "shape-record-mismatch",
+    "the declared shape is full": "shape-not-full",
+    "the corpus is LZ4": "corpus-compression-not-lz4",
+    "the corpus is compressed at all": "corpus-uncompressed",
+    "the corpus is on local storage": "corpus-storage-unverified",
+    "the corpus is not on network storage": "corpus-network-storage",
+    "the corpus meets the size floor": "corpus-below-floor",
+    "the machine is the narrow rig": "rig-profile-mismatch",
+    "the merge path was not bypassed": "merge-path-bypassed",
+    "the load generator's provenance is known": "loadgen-provenance-absent",
+    "the pairs are EXACTLY the declared sampling plan": "replicate-set-mismatch",
+    "enough pairs survived": "insufficient-pairs",
+    "the server's configuration was observed": "startup-unobserved",
+    "the arms ran under one admission ceiling": "admission-mismatch",
+    "each record is internally consistent": "record-internally-inconsistent",
+    "the records come from THIS session's directory": "run-file-outside-session",
+}
+problems = []
+for prop, cause in sorted(GATING.items()):
+    if '"%s"' % cause not in both:
+        problems.append("%r is gated by cause %r, which no longer exists "
+                        "analyzer-side" % (prop, cause))
+if len(GATING) < 20:
+    problems.append("the enumeration has shrunk to %d entries" % len(GATING))
+
+# THE OMISSION DIRECTION, WHICH ROUND 20 DECLARED AND DID NOT CLOSE. That census
+# checked only that each ENUMERATED cause still exists; nothing checked that
+# every refusal is enumerated, so four rounds of new causes accumulated
+# unlisted and the census went on reporting "20 properties" while the analyzer
+# raised many more. A declared gap that nobody measures is a gap that grows.
+#
+# CLASSIFIED BY SET, NOT BY PROSE, and that is deliberate. The two weak
+# predicates round 23 found were weak because they were SENTENCES, and adding
+# forty more sentences would add forty more chances to state a property more
+# weakly than the check enforces -- the census inheriting the class it exists to
+# close. Membership of a set carries no claim about WHAT the cause enforces,
+# only that somebody decided which kind of refusal it is.
+INPUT_INTEGRITY = {
+    # The manifest or its records cannot be READ at all. These gate nothing
+    # about the measurement; they are the difference between having input and
+    # not having it.
+    "manifest-unreadable", "manifest-not-json", "manifest-schema",
+    "manifest-field", "run-file-unreadable", "run-file-empty",
+    "run-file-not-jsonl", "run-record-count", "run-record-schema",
+    "run-record-field", "ticket-template-unparseable", "internal-error",
+}
+VERDICT_GATING_EXTRA = {
+    # Verdict-gating, and deliberately NOT given prose statements above: the
+    # statements are what went weak, so these are listed as members only.
+    "ticket-digest-mismatch", "ticket-identifier-invalid", "ticket-schema-invalid",
+    "affinity-unverified", "counterbalance-broken", "counterbalance-not-parity",
+    "position-not-recorded", "duplicate-run", "unpaired-replicates",
+    "round-label-mismatch", "ramp-order-mismatch", "ramp-steps-not-comparable",
+    "ramp-no-common-ladder", "ramp-fully-shed", "step-duration-mismatch",
+    "server-config-mismatch", "server-config-unexpected", "admission-provenance",
+    "run-errors", "run-shed", "run-degenerate", "run-non-finite",
+    "loadgen-provenance-mismatch", "ratio-non-finite", "ci-non-finite",
+    "bootstrap-degenerate", "mode-manifest-mismatch", "shape-record-mismatch",
+}
+# DRIVER-side causes are deliberately absent: this census is about the
+# ANALYZER's enforcement surface, and `die corpus-empty` in the driver is not a
+# refusal the analyzer can make. Including them made the staleness half red,
+# which is the half working -- it caught the over-inclusion immediately.
+classified = set(GATING.values()) | INPUT_INTEGRITY | VERDICT_GATING_EXTRA
+raised = set(re.findall(r'raise Unmeasured\(\s*"([a-z-]+)"', both))
+raised |= set(re.findall(r'return "([a-z-]+)", \[', both))
+unclassified = sorted(raised - classified)
+if unclassified:
+    problems.append(
+        "%d refusal cause(s) are raised and classified NEITHER as verdict-gating "
+        "NOR as input-integrity: %s. Every refusal must be one or the other, or "
+        "the enumeration silently stops describing the analyzer"
+        % (len(unclassified), unclassified))
+stale = sorted(c for c in (INPUT_INTEGRITY | VERDICT_GATING_EXTRA)
+               if '"%s"' % c not in both)
+if stale:
+    problems.append("%d classified cause(s) no longer exist: %s" % (len(stale), stale))
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+sys.stdout.write("%d\n" % len(GATING))
+raise SystemExit(1 if problems else 0)
+PYINNER
+)"
+set -e
+GATING_COUNT="$GATING_OUT"
+if [ -n "$GATING_OUT" ]; then
+  ok "every enumerated verdict-gating property has an analyzer-side refusal, and every refusal is classified ($GATING_COUNT with property statements, plus the rest by set)"
+else
+  bad "a verdict-gating property has no analyzer-side refusal (see above)"
+fi
+
+# ---- the prose and the adjacent check state the SAME property ----------------
+# ROUND 21'S CENSUS, for the most dangerous class this lane has found: THE
+# COMMENT STATES THE CORRECT PROPERTY AND THE CHECK BESIDE IT IMPLEMENTS A
+# WEAKER ONE. Five instances -- the nproc comment, the analyzer's docstring
+# naming the pinned commit while nothing enforced it, the arm prefix test
+# beneath a message describing exact identity, the affinity helper returning
+# success beneath "never pinned correctly", and my own host-versus-workload
+# no-op. It is dangerous because a reviewer reads the sentence AS the behaviour,
+# which is how every one of them was signed off.
+#
+# "DOES THE PROSE MATCH THE CODE" IS UNDECIDABLE, so this does not attempt it.
+# It recognises the THREE SHAPES that produced those five instances and says so
+# in its output. A sixth instance of an UNRECOGNISED shape is invisible to it --
+# the declared gap, and the reason this is a census and not a proof.
+if python3 - "$HERE" <<'PYINNER'
+import importlib.util
+import re
+import sys
+
+sys.path.insert(0, sys.argv[1])
+MODULES = ["analyze-ab.py", "ab_driver_support.py", "ab_input.py",
+           "ab_stats.py", "ab_common.py"]
+# Built rather than written, because a literal triple quote cannot appear inside
+# the generator that produced this file -- the same class of quoting limit the
+# harness keeps meeting.
+DQ, SQ = '"' * 3, "'" * 3
+DOC_DELIMS = (DQ, SQ, "r" + DQ, "r" + SQ)
+# ONE reasoned exemption, and a LIST of one rather than a rule, because what
+# distinguishes it is SEMANTIC: that comment QUOTES a malformed manifest value
+# as an example rather than claiming the module enforces the commit. Nothing
+# mechanical separates a quoted example from a claim, so this is a human
+# judgement and is recorded as one.
+PROSE_EXAMPLE_EXEMPT = {("ab_input.py", "cfa93fe99")}
+
+
+def split_prose_and_code(text):
+    prose, code, in_doc = [], [], False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(DOC_DELIMS):
+            in_doc = not in_doc
+            prose.append(stripped)
+            continue
+        (prose if (in_doc or stripped.startswith("#")) else code).append(stripped)
+    return "\n".join(prose), "\n".join(code)
+
+
+def following(lines, index, count=8):
+    out, cursor = [], index + 1
+    while cursor < len(lines) and len(out) < count:
+        stripped = lines[cursor].strip()
+        if stripped and not stripped.startswith("#"):
+            out.append(stripped)
+        cursor += 1
+    return out
+
+
+problems, scanned = [], 0
+for name in MODULES:
+    text = open("%s/%s" % (sys.argv[1], name), encoding="utf-8").read()
+    lines = text.splitlines()
+    prose_text, code_text = split_prose_and_code(text)
+
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("#"):
+            continue
+        scanned += 1
+        # SHAPE A: "never" / "must not" beside a bare success.
+        if re.search(r"\bnever\b|\bmust not\b", stripped, re.I):
+            window = following(lines, index)
+            for position, statement in enumerate(window):
+                if re.fullmatch(r"return 0|raise SystemExit\(0\)", statement):
+                    if not any(re.match(r"err\(|raise |problems\.append", earlier)
+                               for earlier in window[:position]):
+                        problems.append(
+                            "%s:%d says never/must-not and the next statement is "
+                            "a bare success" % (name, index + 1))
+                    break
+        # SHAPE B: an exactness claim beside a PREFIX test.
+        if re.search(r"exact(ly)? equal|\bidentity\b|exact match", stripped, re.I):
+            if any(".startswith(" in statement
+                   for statement in following(lines, index)):
+                problems.append(
+                    "%s:%d claims exactness and the adjacent check is a prefix "
+                    "test" % (name, index + 1))
+
+    # SHAPE C: an object id named in prose and unreachable from the code.
+    try:
+        spec = importlib.util.spec_from_file_location(
+            name[:-3].replace("-", "_"), "%s/%s" % (sys.argv[1], name))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        reachable = " ".join(
+            value for value in vars(module).values() if isinstance(value, str))
+    except Exception:
+        reachable = ""
+    for token in sorted(set(re.findall(r"\b[0-9a-f]{7,40}\b", prose_text))):
+        if token in code_text or token in reachable:
+            continue
+        if (name, token) in PROSE_EXAMPLE_EXEMPT:
+            continue
+        problems.append("%s names %r in prose and nothing in its code can reach "
+                        "it" % (name, token))
+
+if scanned < 200:
+    problems.append("only %d comment lines were scanned; the derivation has "
+                    "broken" % scanned)
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+sys.stdout.write("%d\n" % scanned)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "no comment states a property its adjacent check implements more weakly (3 recognised shapes)"
+  ok "the prose census declares its gap: 'does the prose match the code' is undecidable, so a sixth instance of an unrecognised shape is invisible to it"
+else
+  bad "a comment states a property the adjacent check does not enforce (see above)"
+fi
+
+# ---- no AB_* export precedes its variable's final value ----------------------
+# THE CLASS, not the two instances. AB_TICKET_TEMPLATE (round 18) and AB_SHAPE
+# (round 19) were the same defect: a value exported, then transformed, with the
+# manifest keeping the pre-transform value -- and `die` writes a manifest, so
+# the stale window is reachable. Finding an instance and not sweeping for the
+# class is what let the second one sit in the same file, introduced by the same
+# round. This derives every `export AB_X="$VAR"` from the driver and requires
+# VAR to have no later assignment.
+EXPORT_CENSUS="$(python3 - "$DRIVER" <<'PYINNER'
+import re
+import sys
+
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+# A RULE, NOT A LIST. Some exports capture the PRE-transform value ON PURPOSE:
+# AB_TICKET_ORIGINAL holds the path before the freeze, AB_SHAPE_REQUESTED the
+# spelling before canonicalisation. Both are the "record both facts" pattern
+# this instrument uses everywhere, and both would be flagged by a naive
+# position check. Rather than list them -- a list grows and stops being read --
+# the SUFFIX declares the intent: a name ending _ORIGINAL or _REQUESTED says
+# "this deliberately holds the value from before the transform", so the later
+# reassignment is the point and not the defect. A new pre-transform capture
+# inherits the exemption by being named honestly; anything else is flagged.
+EXEMPT_SUFFIXES = ("_ORIGINAL", "_REQUESTED")
+problems = []
+seen = 0
+for number, line in enumerate(lines, start=1):
+    if line.lstrip().startswith("#") or "export " not in line:
+        continue
+    for match in re.finditer(r'\b(AB_[A-Z0-9_]+)="\$([A-Za-z_][A-Za-z0-9_]*)"', line):
+        name, var = match.group(1), match.group(2)
+        seen += 1
+        if name.endswith(EXEMPT_SUFFIXES):
+            continue
+        later = [j for j, l in enumerate(lines, start=1)
+                 if j > number and re.match(r'\s*%s=' % re.escape(var), l)
+                 and not l.lstrip().startswith("#")]
+        if later:
+            problems.append("%s is exported at line %d from %s, which is "
+                            "reassigned at %s -- the manifest would record the "
+                            "pre-transform value" % (name, number, var, later))
+if seen < 20:
+    problems.append("only %d AB_* exports were derived; the derivation has broken"
+                    % seen)
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+# THE SUBJECT SET IS PRINTED, because a guard whose subject nobody can see is
+# one that can silently shrink. The count is PER VARIABLE, not per line: a
+# single `export AB_A="$a" AB_B="$b"` is two subjects, which is the count that
+# matters here and not the one a grep for `export AB_` returns.
+sys.stdout.write("%d\n" % seen)
+raise SystemExit(1 if problems else 0)
+PYINNER
+)"
+if [ -n "$EXPORT_CENSUS" ]; then
+  ok "no AB_* export names a variable reassigned after it ($EXPORT_CENSUS subjects, counted per variable)"
+  # WHAT THIS CENSUS CANNOT SEE, said here rather than left to be assumed. It
+  # answers "is this export STALE", and that is not "is this export measuring
+  # the RIGHT THING": AB_PROCESS_CPUS is a command substitution with no later
+  # reassignment, so this guard passes it -- and the value it captured was the
+  # wrong subject entirely, which was round 19 finding (A). Reporting the first
+  # as though it covered the second is the shape this whole lane has been about.
+  ok "the census declares its scope: staleness only, never whether the captured value is the right subject"
+else
+  bad "an AB_* export precedes its variable's final value (see above)"
+fi
+
+# ---- a fully shed step is EXCLUDED, not fatal --------------------------------
+# ROUND 21 FINDING 3. validate_record_usable requires requests_ok >= 1, and it
+# ran before shedding was considered -- so a step the server shed ENTIRELY was
+# rejected as run-degenerate, killing a session the ANALYZER would have accepted
+# with that step excluded. The driver contradicted both the analyzer and its own
+# stated contract.
+rm -f "$TMP/shedzero.jsonl"
+python3 - "$TMP/shedzero.jsonl" <<'PYINNER'
+import json
+import sys
+
+records = []
+for index, (concurrency, ok, shed) in enumerate(((1, 5, 0), (2, 5, 0), (4, 0, 7))):
+    records.append({
+        "schema": "flight-loadgen.step/v1", "round": "base-r01",
+        "endpoint": "http://127.0.0.1:8815", "ts_unix_ms": 1780000000000,
+        "seed": 42, "step": index, "target_concurrency": concurrency,
+        "shape": "full", "duration_s": 60.0,
+        "requests_ok": ok, "requests_unavailable": shed, "requests_error": 0,
+        "error_codes": {}, "qps": ok / 60.0,
+        # A fully shed step did no work: zero rows, zero rate. That is exactly
+        # the shape `run-degenerate` refuses, and exactly what the analyzer
+        # excludes rather than refusing.
+        "rows_per_s": 100000.0 if ok else 0.0,
+        "rows_total": 6000000 if ok else 0,
+        "latency_ms": {"p50": 1.0, "p95": 2.0, "p99": 3.0, "max": 4.0},
+    })
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    for record in records:
+        handle.write(json.dumps(record) + "\n")
+PYINNER
+run_support validate-replicate "$TMP/shedzero.jsonl" base-r01 1,2,4 full 60s
+check_support "a ramp whose last step was shed ENTIRELY" 0
+if grep -q 'SHED requests-unavailable 7' "$TMP/out.txt"; then
+  ok "the shed step is reported as excluded rather than killing the session"
+else
+  bad "the fully shed step was not reported as shed"
+fi
+# ...and shedding at concurrency 1 is STILL fatal: it is not a throughput
+# measurement, and the exclusion above must not have widened into that.
+rm -f "$TMP/shedone.jsonl"
+mkstep "$TMP/shedone.jsonl" base-r01 1 100000 3
+run_support validate-replicate "$TMP/shedone.jsonl" base-r01 1 full 60s
+check_support "shedding at single-stream concurrency" 1 replicate-invalid
+
+# ---- a requested pin that nothing verified is not a pin ----------------------
+# ROUND 21 FINDING 2. check_affinity returned SUCCESS on three unverifiable
+# paths -- unreadable /proc, absent Cpus_allowed_list, unparsable value -- under
+# a comment saying an unreadable /proc is "never 'pinned correctly'". So the
+# driver recorded the REQUESTED set and the analyzer reported it as pinning.
+affinity_case() { # <name> <server-cpus> <state> <want-verdict> <want-exit>
+  mkfixture "$TMP/aff" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  AB_CPUS="$2" AB_STATE="$3" python3 - "$TMP/aff/manifest.json" <<'PYINNER'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["workload"]["server_cpus"] = os.environ["AB_CPUS"] or None
+manifest["workload"]["affinity_state"] = os.environ["AB_STATE"]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/aff"
+  check_verdict "$1" "$4" "$5" single-stream
+}
+affinity_case "a verified pin"                    "0,2" VERIFIED       MEETS-TARGET 0
+# THE DEFECT: a requested pin the helper could not establish.
+affinity_case "a requested pin recorded UNVERIFIABLE" "0,2" UNVERIFIABLE UNMEASURED 7
+check_cause "a requested pin nothing verified" affinity-unverified
+affinity_case "a requested pin with no state at all" "0,2" NOT-RECORDED UNMEASURED 7
+check_cause "a requested pin with no recorded state" affinity-unverified
+# No pin requested is not a defect: there is nothing to verify.
+affinity_case "no pin requested"                  ""    NOT-REQUESTED  MEETS-TARGET 0
+# THE HELPER ITSELF: every unverifiable path must be a REFUSAL, not a success.
+# pid 1 is not our server and its Cpus_allowed_list will not match, so this
+# exercises the mismatch arm; a pid that cannot exist exercises the unreadable
+# arm, which is the one that used to exit 0.
+# NOT via check_support: this subcommand prints a VALUE on stdout (the state
+# token), which is deliberately unanchored the way parse-startup's value is, so
+# the anchor assertion does not apply to it. The DIAGNOSTIC on stderr is
+# anchored, and that is what is checked.
+run_support check-affinity 2147483647 0-3
+if [ "$RC" = 1 ] && grep -q '^AB-3649: cause affinity-unverified$' "$TMP/err.txt"; then
+  ok "an unreadable /proc is a REFUSAL, not a success printing UNVERIFIABLE"
+else
+  bad "an unreadable /proc returned $RC; it used to be 0, which is the finding"
+fi
+run_support check-affinity 2147483647 not-a-cpu-list
+if [ "$RC" = 1 ] && grep -q '^AB-3649: cause affinity-unverifiable$' "$TMP/err.txt"; then
+  ok "an unparsable requested CPU list is refused with its own cause"
+else
+  bad "an unparsable requested CPU list returned $RC"
+fi
+
+# ---- CPU lists are validated for EVERY property, and anchored ----------------
+# ROUND 24 FINDING 1. The pre-flight checked only OVERLAP, so the inline parser
+# reached int() on unvalidated input and emitted an unanchored traceback, while
+# empty, reversed and out-of-range sets passed to fail at taskset after all
+# three builds.
+cpuset_case() { # <name> <server> <client> <want-rc> [<want-cause>]
+  set +e
+  python3 "$SUPPORT" validate-cpu-sets "$2" "$3" > "$TMP/cs-out.txt" 2> "$TMP/cs-err.txt"
+  local rc=$?
+  set -e
+  if [ "$rc" != "$4" ]; then
+    bad "cpu sets $1 (exit $rc, expected $4)"
+    return
+  fi
+  # EVERY line anchored, stdout and stderr both. An unanchored line cannot be
+  # attributed by a reader or bounded by a parser, and a raw traceback is the
+  # worst case: multi-line, unprefixed, and looking like a crash.
+  if grep -qv '^AB-3649: ' "$TMP/cs-err.txt" 2>/dev/null \
+     && [ -s "$TMP/cs-err.txt" ]; then
+    bad "cpu sets $1 emitted an unanchored line: $(grep -m1 -v '^AB-3649: ' "$TMP/cs-err.txt")"
+    return
+  fi
+  if grep -q 'Traceback' "$TMP/cs-err.txt"; then
+    bad "cpu sets $1 emitted a Python traceback rather than a named refusal"
+    return
+  fi
+  if [ -n "${5:-}" ] && ! grep -q "^AB-3649: cause $5\$" "$TMP/cs-err.txt"; then
+    bad "cpu sets $1 (cause '$5' absent; stderr: $(head -1 "$TMP/cs-err.txt"))"
+    return
+  fi
+  ok "cpu sets $1 -> exit $rc${5:+ cause $5}"
+}
+cpuset_case "disjoint and valid"        "0,2"   "1,3"  0
+cpuset_case "overlapping"               "0,2"   "2,4"  1 cpu-sets-overlap
+# THE TRACEBACK CASES: malformed input used to reach int().
+cpuset_case "a non-numeric server list" "x,2"   "1,3"  1 cpu-list-invalid
+cpuset_case "a non-numeric client list" "0,2"   "1,y"  1 cpu-list-invalid
+cpuset_case "a trailing separator only" ","     "1,3"  1 cpu-list-invalid
+# REVERSED ranges get their OWN message, because expand_cpu_list builds an
+# empty set from 3-1 and would otherwise report "not a CPU list" for something
+# that is one and is merely backwards -- a wrong diagnosis sends an operator to
+# the wrong place.
+cpuset_case "a reversed range"          "3-1"   "5"    1 cpu-list-invalid
+# Captured BEFORE grepping: `set -o pipefail` is in force, so piping a command
+# that exits non-zero into grep yields the COMMAND's status and the test reads
+# backwards. This validator exits 1 by design here.
+set +e
+python3 "$SUPPORT" validate-cpu-sets "3-1" "5" > "$TMP/rev.txt" 2>&1
+set -e
+if grep -q 'reversed range' "$TMP/rev.txt"; then
+  ok "a reversed range is diagnosed as reversed, not as unparsable"
+else
+  bad "a reversed range was misdiagnosed as an unparsable list"
+fi
+# OUT OF RANGE against the machine's actual online count.
+cpuset_case "a CPU beyond the machine"  "0-99999" "1"  1 cpu-list-invalid
+# An unpinned session passes both empty.
+cpuset_case "no pinning at all"         ""      ""     0
+
+# ---- records are SESSION-LOCAL, and the pairs are the DECLARED PLAN ----------
+# ROUND 23. Both properties were encoded in the round-20 enumeration as weaker
+# cousins -- "enough replicates completed" is a FLOOR, and "the records describe
+# this session" was conflating internal consistency with provenance -- which is
+# why that census did not prevent them.
+runfile_case() { # <name> <python-mutation> <want-cause>
+  mkfixture "$TMP/rf" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  python3 - "$TMP/rf" <<PYINNER
+import json
+import os
+
+run_dir = "$TMP/rf"
+path = os.path.join(run_dir, "manifest.json")
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+runs = manifest["runs"]
+$2
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/rf"
+  check_cause "$1" "$3"
+}
+# An ABSOLUTE path: the manifest can name any file on the box.
+runfile_case "a run file named by absolute path" \
+  'runs[0]["file"] = os.path.join(run_dir, runs[0]["file"])' run-file-outside-session
+# PARENT TRAVERSAL: syntactically relative, resolves outside.
+# A traversal that returns INSIDE is not an escape and must not be refused --
+# `../<this-dir>/<file>` resolves to the same file. The escape is one that
+# LEAVES, so the traversal case points at the parent itself.
+runfile_case "a run file reached by parent traversal" \
+  'import shutil
+shutil.copy(os.path.join(run_dir, runs[0]["file"]),
+            os.path.join(os.path.dirname(run_dir), runs[0]["file"]))
+runs[0]["file"] = os.path.join("..", runs[0]["file"])' \
+  run-file-outside-session
+# AN ESCAPING SYMLINK: relative, no `..`, and still another directory's records.
+mkfixture "$TMP/rf-sym" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+mkdir -p "$TMP/rf-elsewhere"
+python3 - "$TMP/rf-sym" "$TMP/rf-elsewhere" <<'PYINNER'
+import json
+import os
+import shutil
+import sys
+
+run_dir, elsewhere = sys.argv[1], sys.argv[2]
+path = os.path.join(run_dir, "manifest.json")
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+victim = manifest["runs"][0]["file"]
+shutil.move(os.path.join(run_dir, victim), os.path.join(elsewhere, victim))
+os.symlink(os.path.join(elsewhere, victim), os.path.join(run_dir, victim))
+PYINNER
+run_analyzer "$TMP/rf-sym"
+check_cause "a run file that is a symlink out of the session" run-file-outside-session
+# ...and an ordinary relative name still works, or the above proves only that
+# something is refused.
+run_analyzer "$TMP/meets"
+if grep -q '^AB-3649: cause single-stream run-file-outside-session$' "$TMP/err.txt"; then
+  bad "an ordinary session-local run file was refused"
+else
+  ok "an ordinary relative run file inside the session directory is accepted"
+fi
+
+# THE DECLARED PLAN, not a floor. Extra and renumbered replicates entered the
+# bootstrap, which then resampled a set that is not the design the manifest
+# describes.
+replicate_set_case() { # <name> <python-mutation>
+  mkfixture "$TMP/rs" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  python3 - "$TMP/rs/manifest.json" <<PYINNER
+import json
+import os
+
+path = "$TMP/rs/manifest.json"
+run_dir = os.path.dirname(path)
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+runs = manifest["runs"]
+
+
+def renumber(old_rep, new_rep):
+    """Renumber a replicate CONSISTENTLY -- manifest entry, file name and the
+    round label inside the records. Renumbering only the manifest is refused
+    earlier by the round-label reconciliation, so the case would never reach
+    the replicate-set check it exists for."""
+    for entry in runs:
+        if entry["replicate"] != old_rep:
+            continue
+        arm = entry["arm"]
+        old_name, new_name = entry["file"], "%s-r%02d.jsonl" % (arm, new_rep)
+        old_tag, new_tag = "%s-r%02d" % (arm, old_rep), "%s-r%02d" % (arm, new_rep)
+        body = open(os.path.join(run_dir, old_name), encoding="utf-8").read()
+        with open(os.path.join(run_dir, new_name), "w", encoding="utf-8") as handle:
+            handle.write(body.replace(old_tag, new_tag))
+        entry["replicate"], entry["file"] = new_rep, new_name
+
+
+$2
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/rs"
+  check_cause "$1" replicate-set-mismatch
+}
+# EXTRA pairs: more data than declared is a different design, not a bigger one.
+replicate_set_case "more pairs than the manifest declares" \
+  'manifest["replicates_requested"] = 5'
+# NONCONTIGUOUS ids: 1,2,3,4,5,9 is not the plan 1..6.
+replicate_set_case "noncontiguous replicate ids" \
+  'renumber(6, 9)'
+# ZERO and NEGATIVE ids are outside any declared plan.
+replicate_set_case "a zero replicate id" \
+  'renumber(1, 0)'
+replicate_set_case "a replicate id outside the declared range" \
+  'renumber(1, 99)'
+
+# ---- the analyzer enforces the arms and the ticket ---------------------------
+# ROUND 20 findings 1 and 2. The driver refused both and the analyzer trusted
+# the manifest for both, so a hand-made or edited manifest received a #2820
+# band verdict over any two commits and any narrowed template. These are
+# fixture cases because that is precisely the input the driver never produced.
+arms_case() { # <name> <base-commit> <head-commit> <want-verdict> <want-exit>
+  mkfixture "$TMP/arms" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  AB_B="$2" AB_H="$3" python3 - "$TMP/arms/manifest.json" <<'PYINNER'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["arms"]["base"]["commit"] = os.environ["AB_B"]
+manifest["arms"]["head"]["commit"] = os.environ["AB_H"]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/arms"
+  check_verdict "$1" "$4" "$5" single-stream
+}
+arms_case "the real #2820 pair" "$PIN_BASE" "$PIN_HEAD" MEETS-TARGET 0
+# UNRELATED commits: a verdict authoritative about something never measured.
+arms_case "arms that are not #2820 at all" "aaaaaaaa1${ZEROS31}" "bbbbbbbb2${ONES31}" UNMEASURED 7
+check_cause "arms that are not the #2820 pair" arms-not-2820
+# REVERSED: the head arm is the parent, which inverts the ratio's meaning.
+arms_case "the pair REVERSED" "$PIN_HEAD" "$PIN_BASE" UNMEASURED 7
+check_cause "the #2820 pair reversed" arms-not-2820
+# Base equal to head is not a comparison at all.
+arms_case "both arms identical" "$PIN_HEAD" "$PIN_HEAD" UNMEASURED 7
+check_cause "both arms identical" arms-not-2820
+# THE PREFIX CASE, which is the finding: an object id that merely BEGINS with
+# the pinned abbreviation is a different commit, and a fabricated manifest can
+# simply say so.
+arms_case "a head that only PREFIX-matches the pin" "$PIN_BASE" "cfa93fe99${ONES31}" UNMEASURED 7
+check_cause "a head that only prefix-matches" arms-not-2820
+# ...and the BASE was read but never pinned, so a real head with an invented
+# parent passed. This is the half the message described and the check omitted.
+arms_case "the real head with a fabricated base" "aaaaaaaa1${ZEROS31}" "$PIN_HEAD" UNMEASURED 7
+check_cause "a fabricated base beside the real head" arms-not-2820
+
+ticket_manifest_case() { # <name> <python-mutation> <want-verdict> <want-exit>
+  mkfixture "$TMP/tkm" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  python3 - "$TMP/tkm/manifest.json" <<PYINNER
+import json
+
+path = "$TMP/tkm/manifest.json"
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+ticket = manifest["workload"]["ticket_content"]
+$2
+# The digest is RECOMPUTED, because these cases exercise the FULL-RING refusal
+# and a stale digest would make every one of them test the digest check
+# instead. The non-recomputing case is separate and deliberate, below.
+import hashlib
+manifest["workload"]["ticket_canonical_sha256"] = hashlib.sha256(
+    json.dumps(ticket, sort_keys=True, separators=(",", ":")).encode("utf-8")
+).hexdigest()
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/tkm"
+  check_verdict "$1" "$3" "$4" single-stream
+}
+# `shape: full` is a NOUN standing in for an ADJECTIVE: Shape::Full preserves
+# the template's bounds, projections, predicates, filters and aggregations, so
+# every one of these satisfies the label and violates the property.
+ticket_manifest_case "a recorded ticket carrying a LIMIT"      'ticket["limit"] = 10' UNMEASURED 7
+check_cause "a recorded ticket carrying a LIMIT" ticket-not-full-ring
+ticket_manifest_case "a recorded ticket projecting columns"    'ticket["columns"] = ["a"]' UNMEASURED 7
+check_cause "a recorded ticket projecting columns" ticket-not-full-ring
+ticket_manifest_case "a recorded ticket with a predicate"      'ticket["predicates"] = [{"column": "a", "op": "Gt", "value": 1}]' UNMEASURED 7
+check_cause "a recorded ticket with a predicate" ticket-not-full-ring
+ticket_manifest_case "a recorded ticket narrowing the token range" 'ticket["token_start"] = 42' UNMEASURED 7
+check_cause "a recorded ticket narrowing the token range" ticket-not-full-ring
+ticket_manifest_case "a manifest recording NO ticket"          'manifest["workload"]["ticket_content"] = None' UNMEASURED 7
+check_cause "a manifest recording no ticket at all" ticket-unrecorded
+
+# ROUND 22 FINDING 2, THE ANALYZER HALF: content edited WITHOUT updating the
+# digest. This is the case the recomputation above deliberately avoids, and it
+# is what makes the two halves unforgeable alone -- editing the workload now
+# requires editing the digest too, and the digest is reproducible from the
+# content, so the two cannot be made to agree on a lie.
+mkfixture "$TMP/tkdigest" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/tkdigest/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+# A narrowed ticket, with the digest left describing the honest one.
+manifest["workload"]["ticket_content"]["limit"] = 10
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/tkdigest"
+check_verdict "a ticket edited without updating its digest" UNMEASURED 7 single-stream
+check_cause "content and digest that disagree" ticket-digest-mismatch
+# ...and the digest edited without the content is caught by the same check.
+mkfixture "$TMP/tkdigest2" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/tkdigest2/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["workload"]["ticket_canonical_sha256"] = "0" * 64
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/tkdigest2"
+check_cause "a digest edited without the content" ticket-digest-mismatch
+
+# ---- the machine's CPUs, not the process's ----------------------------------
+# ROUND 19 FINDING A. `nproc` reports CPUs available to the PROCESS: on this box
+# `nproc` is 16 and `taskset -c 0-3 nproc` is 4, while the sysfs online set is
+# `0-15` under both. So a large rig pinned to four CPUs passed a guard whose own
+# text forbids exactly that. The probe is exercised UNDER A MASK, because that
+# is the condition the defect needed and an unmasked run cannot distinguish the
+# two sources at all.
+HW_PLAIN="$(python3 "$SUPPORT" hardware-cpus | cut -d' ' -f1)"
+if command -v taskset >/dev/null 2>&1; then
+  HW_MASKED="$(taskset -c 0 python3 "$SUPPORT" hardware-cpus | cut -d' ' -f1)"
+  NPROC_MASKED="$(taskset -c 0 nproc)"
+  if [ "$HW_MASKED" = "$HW_PLAIN" ]; then
+    ok "the hardware CPU count is unchanged under an affinity mask ($HW_PLAIN)"
+  else
+    bad "the hardware count changed under a mask: $HW_PLAIN -> $HW_MASKED"
+  fi
+  if [ "$NPROC_MASKED" != "$HW_PLAIN" ]; then
+    ok "nproc DOES change under the same mask ($NPROC_MASKED), so the two sources are distinguishable here"
+  else
+    bad "nproc did not change under a one-CPU mask, so this box cannot demonstrate the defect"
+  fi
+else
+  bad "taskset is unavailable, so the affinity-independence of the hardware probe was NOT demonstrated"
+fi
+# The range grammar, since the sysfs value is a list and not a number.
+if python3 - "$HERE" <<'PYINNER'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import ab_driver_support as S
+
+cases = {"0-15": 16, "0": 1, "0-3,8-11": 8, "0,2,4": 3, "": None,
+         "3-1": None, "banana": None}
+problems = []
+for raw, want in cases.items():
+    got = S._parse_cpu_range_list(raw) if hasattr(S, "_parse_cpu_range_list") else None
+    if got != want:
+        problems.append("%r -> %r, expected %r" % (raw, got, want))
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "the sysfs CPU range grammar counts lists, ranges and refuses garbage"
+else
+  bad "the sysfs CPU range grammar is wrong (see above)"
+fi
+
+# ---- the NARROW PROFILE is a property, not a label ---------------------------
+# ROUND 15 FINDING 1. The band is defined for the M0 rig -- 4 vCPU, RUNBOOK line
+# 9 -- and `if not host_type.startswith("i4i")` let the whole FAMILY through: an
+# i4i.32xlarge scored a clean band verdict on 128 vCPU. Requiring the instance
+# type to EQUAL "i4i.xlarge" would have enforced the name AWS gives the machine,
+# which is the label-versus-property mistake already removed for storage. So the
+# refusal is on nproc and the label is a disclosure, and both are pinned here.
+profile_case() { # <name> <instance-type> <nproc> <want-verdict> <want-exit>
+  mkfixture "$TMP/prof" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  AB_TYPE="$2" AB_NPROC="$3" python3 - "$TMP/prof/manifest.json" <<'PYINNER'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["host"]["instance_type"] = os.environ["AB_TYPE"]
+manifest["host"]["hardware_cpus"] = int(os.environ["AB_NPROC"])
+manifest["host"]["process_cpus"] = int(os.environ["AB_NPROC"])
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/prof"
+  check_verdict "$1" "$4" "$5" single-stream
+}
+profile_case "the narrow rig itself"            i4i.xlarge    4   MEETS-TARGET 0
+# THE DEFECT SCENARIO ITSELF, and the only shape that can detect it: a LARGE
+# machine under a four-CPU mask. Every other case sets both counts equal, so a
+# gate reading the wrong one is invisible to them -- which is how the original
+# defect survived, and how my first plant of it passed.
+mkfixture "$TMP/prof-masked" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/prof-masked/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["host"]["instance_type"] = "i4i.8xlarge"
+manifest["host"]["hardware_cpus"] = 32
+manifest["host"]["hardware_cpus_detail"] = "0-31"
+# The mask makes the PROCESS see exactly the narrow count. This is the value
+# `nproc` would have reported, and the value the guard must NOT read.
+manifest["host"]["process_cpus"] = 4
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/prof-masked"
+check_verdict "a 32-CPU machine masked down to 4" UNMEASURED 7 single-stream
+check_cause "a pinned large machine is not the narrow rig" rig-profile-mismatch
+if grep -q "MACHINE of 32 vCPU" "$TMP/err.txt"; then
+  ok "the refusal names the MACHINE's size, not the masked count the process saw"
+else
+  bad "the refusal does not name the machine's size, so it may be reading the process count"
+fi
+# ...and a machine whose size could not be measured is not a pass either.
+mkfixture "$TMP/prof-unmeasured" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/prof-unmeasured/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["host"]["hardware_cpus"] = "NOT-MEASURABLE"
+manifest["host"]["process_cpus"] = 4
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/prof-unmeasured"
+check_cause "a machine whose CPU count could not be measured" rig-profile-mismatch
+# THE FINDING: a wider i4i used to score against a band derived for 4 vCPU.
+profile_case "a wider i4i (8 vCPU)"             i4i.2xlarge   8   UNMEASURED   7
+profile_case "a far wider i4i (128 vCPU)"       i4i.32xlarge  128 UNMEASURED   7
+profile_case "a narrower host (2 vCPU)"         i4i.large     2   UNMEASURED   7
+check_cause "a host that is not the narrow profile" rig-profile-mismatch
+# The refusal must name the affinity residual, because an operator who pinned a
+# big rig to 4 cores will otherwise read this as a false red.
+if grep -q 'PINNING A LARGER RIG TO 4 CPUs DOES NOT SUBSTITUTE' "$TMP/err.txt"; then
+  ok "the profile refusal states that pinning does not substitute for the machine"
+else
+  bad "the profile refusal does not address the pinning case an operator will try"
+fi
+# The LABEL is still disclosed, and now for a wider i4i too -- it used to be
+# silent for the whole family.
+mkfixture "$TMP/prof-wide" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/prof-wide/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["host"]["instance_type"] = "i4i.2xlarge"
+manifest["control"] = "wider-rig-sensitivity"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/prof-wide"
+if grep -q 'HOST the acceptance criteria name the field i4i' "$TMP/out.txt"; then
+  ok "a wider i4i is disclosed by label as well as refused by property"
+else
+  bad "a wider i4i carries no label disclosure"
+fi
+# A control may measure other hardware; that is what the label is for.
+mkfixture "$TMP/prof-ctl" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/prof-ctl/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["host"]["hardware_cpus"] = 64
+manifest["host"]["process_cpus"] = 64
+manifest["control"] = "wider-rig-sensitivity"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/prof-ctl"
+if [ "$RC" = "0" ]; then
+  ok "a CONTROL may measure hardware that is not the narrow profile"
+else
+  bad "a control was refused by the profile gate (exit $RC)"
+fi
+# NOT ATTESTABLE: nproc is evidence, and the storage rule is that an attestation
+# covers ignorance only. There is no flag for this and there must not be one.
+#
+# FOUR-VALUED, because the first version was two-valued and both of its failure
+# modes landed in one `else`. It read `analyze-ab.py` as a BARE RELATIVE PATH,
+# so invoked from the repository root -- which is how this suite is normally
+# run -- grep exited 2 and the case reported "the profile refusal appears to be
+# attestable": a claim about the code's behaviour derived from never having read
+# the code. A missing file is a HARNESS fault; a vacuous positive control is a
+# third state again (if `attest` has vanished from the file entirely, the
+# proximity test is true for the boring reason); only the last is a code fault.
+set +e
+python3 - "$HERE" 2> "$TMP/attest-err.txt" <<'PYINNER'
+import re
+import sys
+
+path = "%s/analyze-ab.py" % sys.argv[1]
+try:
+    source = open(path, encoding="utf-8").read()
+except OSError as exc:
+    sys.stderr.write("HARNESS could not read %s: %s\n" % (path, exc.strerror or exc))
+    raise SystemExit(2)
+# POSITIVE CONTROL: the concept must appear in this file at all, or "no
+# attestation near the profile refusal" is true for the boring reason.
+if "attest" not in source:
+    sys.stderr.write("CONTROL the word 'attest' no longer appears in "
+                     "analyze-ab.py at all, so the proximity test proves "
+                     "nothing -- the concept was renamed or removed\n")
+    raise SystemExit(3)
+# Located STRUCTURALLY rather than by a line count: a `-A12` window silently
+# changes meaning every time the message is reworded.
+block = re.search(r'raise Unmeasured\(\s*"rig-profile-mismatch".*?\n        \)',
+                  source, re.S)
+if block is None:
+    sys.stderr.write("HARNESS the rig-profile-mismatch refusal could not be "
+                     "located; the derivation has broken\n")
+    raise SystemExit(2)
+body = block.group(0).lower().replace("not attestable", "")
+if "attest" in body:
+    sys.stderr.write("VIOLATION the profile refusal mentions an attestation; a "
+                     "core count is evidence, and evidence is not attestable\n")
+    raise SystemExit(1)
+PYINNER
+ATTEST_RC=$?
+set -e
+if [ "$ATTEST_RC" = 0 ]; then
+  ok "the profile refusal has no attestation escape -- a core count is evidence"
+else
+  case "$ATTEST_RC" in
+    2) bad "HARNESS FAULT in the attestation case, not a code fault: $(head -1 "$TMP/attest-err.txt")" ;;
+    3) bad "the attestation case's positive control failed, so it proves nothing: $(head -1 "$TMP/attest-err.txt")" ;;
+    *) bad "the profile refusal is attestable: $(head -1 "$TMP/attest-err.txt")" ;;
+  esac
+fi
+
+# THE CLASS, not the instance: a case that reads an artifact by a BARE RELATIVE
+# PATH tests the property AND the caller's working directory, and then reports
+# the environment failure as a property failure. This suite is run from the repo
+# root, from its own directory, and from an out-of-tree copy; only one of those
+# worked. The filenames are assembled from parts so this guard cannot match its
+# own source.
+if python3 - "$HERE/selftest-analyze.sh" <<'PYINNER'
+import re
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+# Assembled from parts so this guard cannot match its own source line.
+names = ["analyze" + "-ab.py", "ab_" + "driver_support.py", "ab_" + "input.py",
+         "ab_" + "stats.py", "ab_" + "common.py", "ab-" + "throughput.sh"]
+readers = r"(?:grep|cat|head|tail|sed|awk|wc|bash|python3|sh)"
+problems = []
+for number, line in enumerate(source.splitlines(), start=1):
+    if line.lstrip().startswith("#"):
+        continue
+    for name in names:
+        # A BARE occurrence is one not reached through a path variable, an
+        # absolute path, or a quoted format string.
+        for match in re.finditer(r"(?<![/\w$'\"])" + re.escape(name), line):
+            before = line[: match.start()]
+            if re.search(readers + r"[^|;&]*$", before):
+                problems.append("line %d reads %s by a bare relative path"
+                                % (number, name))
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "no case reads an artifact by a bare relative path, so none depends on the caller's CWD"
+else
+  bad "a case reads an artifact by a bare relative path (see above)"
+fi
+
+# ---- the properties the `i4i` label stood for -------------------------------
+# CHECK THE PROPERTY, NOT THE LABEL. The acceptance criteria say "field i4i rig";
+# what that stood for is a corpus on LOCAL NVMe on an UNCONTENDED box. Neither is
+# derivable from a host string, and both are measurable. They are dispositioned
+# DIFFERENTLY on purpose -- storage is a stable device fact and is REFUSED;
+# contention is a decaying one-minute average and is DISCLOSED -- so each is
+# pinned to the disposition it actually has, not to a shared idea of rigour.
+for spec in \
+  "NETWORK:nvme0n1 Amazon Elastic Block Store:refuse" \
+  "NOT-MEASURABLE:- no device model:disclose" \
+  "UNRECOGNISED:nvme0n1 Samsung SSD 980 PRO:unrecognised"
+do
+  token="${spec%%:*}"; rest="${spec#*:}"
+  detail="${rest%%:*}"; want="${rest##*:}"
+  mkfixture "$TMP/storage-$want" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  AB_TOKEN="$token" AB_DETAIL="$detail" python3 - "$TMP/storage-$want/manifest.json" <<'PYINNER'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["corpus"]["storage"] = os.environ["AB_TOKEN"]
+manifest["corpus"]["storage_detail"] = os.environ["AB_DETAIL"]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/storage-$want"
+  if [ "$want" = refuse ]; then
+    check_verdict "a corpus on network storage" UNMEASURED 7 single-stream
+    check_cause "a network-backed corpus" corpus-network-storage
+  else
+    # NOT-KNOWN-LOCAL IS NOT A VERDICT. Both of these used to disclose and score.
+    # The criteria REQUIRE local NVMe, so a probe that could not tell leaves the
+    # requirement unsatisfied -- and a four-state classifier is only as good as
+    # the four-way disposition downstream of it.
+    check_verdict "a corpus whose storage is $token" UNMEASURED 7 single-stream
+    check_cause "a corpus whose storage is $token" corpus-storage-unverified
+  fi
+done
+
+# A CLOSED TOKEN SET, because `!= "NETWORK"` accepts a typo -- and SILENCE is not
+# NOT-MEASURABLE: a manifest that never asked and one that asked and could not
+# tell are different facts, so the first refuses instead of inheriting the
+# permissive branch. This is the sentinel rule applied to the record itself.
+for spec in "corpus:storage:LOACL" "host:contention:probably fine"; do
+  holder="${spec%%:*}"; rest="${spec#*:}"; key="${rest%%:*}"; value="${rest##*:}"
+  mkfixture "$TMP/rigtok" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  AB_H="$holder" AB_K="$key" AB_V="$value" python3 - "$TMP/rigtok/manifest.json" <<'PYINNER'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest[os.environ["AB_H"]][os.environ["AB_K"]] = os.environ["AB_V"]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/rigtok"
+  check_cause "an unrecognised $holder.$key token is refused, not read as 'not the bad one'" manifest-field
+done
+for spec in "corpus:storage" "host:contention"; do
+  holder="${spec%%:*}"; key="${spec##*:}"
+  mkfixture "$TMP/rigmissing" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  AB_H="$holder" AB_K="$key" python3 - "$TMP/rigmissing/manifest.json" <<'PYINNER'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+del manifest[os.environ["AB_H"]][os.environ["AB_K"]]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/rigmissing"
+  check_cause "a manifest silent about $holder.$key refuses rather than passing as unmeasurable" manifest-field
+done
+
+# The contention disclosure is keyed on the RECORDED TOKEN, so NOT-MEASURABLE
+# reports itself. The predecessor read it as a quiet box (`except ValueError:
+# busy = False`) -- a third value crammed into a two-valued test.
+mkfixture "$TMP/nocontention" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/nocontention/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["host"]["contention"] = "NOT-MEASURABLE"
+manifest["host"]["loadavg1"] = "NOT-RECORDED"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/nocontention"
+if grep -q '^AB-3649: verdict-detail single-stream HOST whether the box was contended could not be measured' "$TMP/out.txt"; then
+  ok "an unmeasurable load probe is disclosed as a gap, not scored as a quiet box"
+else
+  bad "an unmeasurable load probe was silently read as quiet"
+fi
+
+# ---- the compression REQUIREMENT is the algorithm, not the metadata's existence
+# ROUND 15 FINDING 2. Round 12 enforced "a non-empty CompressionInfo.db exists"
+# while the comment beside the check said "the field is LZ4" -- so Snappy,
+# Deflate, Zstd, NOOP and any corrupt-but-non-empty file passed as the required
+# corpus. Enforcing EXISTENCE where the requirement is IDENTITY. FOUR-valued,
+# because the three refusals are three different operator actions: regenerate
+# with the right compressor / this is a compressor we do not know / this file is
+# damaged. Collapsing them hands one remedy to three problems.
+compression_case() { # <name> <compressor> <want-state> [chunk-length] [max-compressed] [chunk-count]
+  mkcompressioninfo "$TMP/ci-probe.db" "$2" "${4:-16384}" "${5:-2147483647}" "${6:-3}"
+  local got
+  got="$(python3 - "$HERE" "$TMP/ci-probe.db" <<'PYINNER'
+import sys
+sys.path.insert(0, sys.argv[1])
+import ab_driver_support as S
+print(S.parse_compression_info(sys.argv[2])[0])
+PYINNER
+)"
+  if [ "$got" = "$3" ]; then
+    ok "compression $1 -> $got"
+  else
+    bad "compression $1 parsed as $got, expected $3"
+  fi
+}
+compression_case lz4          LZ4Compressor     LZ4
+compression_case snappy       SnappyCompressor  OTHER
+compression_case deflate      DeflateCompressor OTHER
+compression_case zstd         ZstdCompressor    OTHER
+# NOOP is the one that matters most: it is metadata for NO compression at all,
+# so it satisfied "compressed: true" while removing every byte of decode work.
+compression_case noop         NoopCompressor    OTHER
+# Parses cleanly, names something we do not know -- NOT the same fact as a
+# damaged file, and reported as itself so the operator sees the name.
+compression_case future       FutureCompressor  UNRECOGNISED
+# Self-consistency, which is what separates "parsed" from "has readable bytes".
+compression_case zero-chunklen LZ4Compressor    UNPARSEABLE 0
+compression_case zero-maxcomp  LZ4Compressor    UNPARSEABLE 16384 0
+compression_case zero-chunks   LZ4Compressor    UNPARSEABLE 16384 2147483647 0
+
+# THE FIXTURE THAT WAS THE DEFECT: 512 zero bytes passed round 12's non-empty
+# check and lived in this suite's own e2e corpus.
+head -c 512 /dev/zero > "$TMP/ci-zeros.db"
+if python3 - "$HERE" "$TMP/ci-zeros.db" <<'PYINNER' | grep -q '^UNPARSEABLE'
+import sys
+sys.path.insert(0, sys.argv[1])
+import ab_driver_support as S
+print(S.parse_compression_info(sys.argv[2])[0])
+PYINNER
+then
+  ok "a non-empty file of zero bytes is UNPARSEABLE, not 'compressed'"
+else
+  bad "512 zero bytes was accepted as a compression header"
+fi
+# Truncation anywhere in the header is a refusal, not a partial read.
+mkcompressioninfo "$TMP/ci-full.db" LZ4Compressor
+for cut in 4 12 20 30; do
+  head -c "$cut" "$TMP/ci-full.db" > "$TMP/ci-cut.db"
+  if python3 - "$HERE" "$TMP/ci-cut.db" <<'PYINNER' | grep -q '^UNPARSEABLE'
+import sys
+sys.path.insert(0, sys.argv[1])
+import ab_driver_support as S
+print(S.parse_compression_info(sys.argv[2])[0])
+PYINNER
+  then
+    ok "a header truncated to $cut bytes is UNPARSEABLE"
+  else
+    bad "a header truncated to $cut bytes was accepted"
+  fi
+done
+
+# ROUND 20 FINDING 3, BOTH DIRECTIONS. The mirror of pathsafe::assert_within was
+# wrong two ways: too STRICT per file (immediate-parent equality, so a symlink
+# resolving deeper INSIDE the served directory was omitted from the size and
+# compression checks) and ABSENT for the directory itself (so a served dir whose
+# canonical target escapes --data-dir passed pre-flight and the server then
+# refused every request -- a FALSE ACCEPT, which costs the whole session).
+rm -rf "$TMP/deepcorpus" && mkdir -p "$TMP/deepcorpus/sub"
+truncate -s 1000 "$TMP/deepcorpus/sub/real-Data.db"
+mkcompressioninfo "$TMP/deepcorpus/sub/real-CompressionInfo.db" LZ4Compressor
+truncate -s 1000 "$TMP/deepcorpus/nb-1-big-Data.db"
+mkcompressioninfo "$TMP/deepcorpus/nb-1-big-CompressionInfo.db" LZ4Compressor
+# A symlink whose target is DEEPER INSIDE the served directory. assert_within is
+# ANCESTOR containment, so the server SERVES this; the old mirror omitted it.
+ln -sf "sub/real-Data.db" "$TMP/deepcorpus/nb-2-big-Data.db"
+mkcompressioninfo "$TMP/deepcorpus/nb-2-big-CompressionInfo.db" LZ4Compressor
+DEEP="$(python3 "$SUPPORT" probe-compression "$TMP/deepcorpus")"
+if [ "${DEEP%% *}" = "LZ4" ] && printf '%s' "$DEEP" | grep -q '2 served'; then
+  ok "a symlink resolving deeper INSIDE the served dir is counted, as the server counts it"
+else
+  bad "an in-tree symlink was omitted from the census ($DEEP)"
+fi
+# ...and its companion is found beside the SYMLINK, not beside the target: the
+# server opens the entry as enumerated. Removing the symlink's own
+# CompressionInfo must be detected even though the TARGET still has one.
+rm -f "$TMP/deepcorpus/nb-2-big-CompressionInfo.db"
+DEEP="$(python3 "$SUPPORT" probe-compression "$TMP/deepcorpus")"
+if [ "${DEEP%% *}" = "MISSING" ]; then
+  ok "a symlinked SSTable's companion is looked for beside the SYMLINK, not the target"
+else
+  bad "the companion was resolved against the canonical target ($DEEP)"
+fi
+# A symlink ESCAPING the served directory is still excluded, as before.
+rm -rf "$TMP/outside" && mkdir -p "$TMP/outside"
+truncate -s 1000 "$TMP/outside/escapee-Data.db"
+rm -f "$TMP/deepcorpus/nb-2-big-Data.db"
+ln -sf "$TMP/outside/escapee-Data.db" "$TMP/deepcorpus/nb-3-big-Data.db"
+DEEP="$(python3 "$SUPPORT" probe-compression "$TMP/deepcorpus")"
+if printf '%s' "$DEEP" | grep -q '1 served'; then
+  ok "a symlink escaping the served dir is still excluded, as the server excludes it"
+else
+  bad "an escaping symlink was counted ($DEEP)"
+fi
+# CONTAINMENT IS COMPONENT-WISE: /a/bc must not be treated as inside /a/b.
+if python3 - "$HERE" <<'PYINNER'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import ab_driver_support as S
+
+cases = [("/a/b", "/a/b", True), ("/a/b", "/a/b/c", True),
+         ("/a/b", "/a/bc", False), ("/a/b", "/a", False),
+         ("/a/b/", "/a/b/c", True)]
+problems = []
+for root, target, want in cases:
+    got = S._canonically_within(root, target)
+    if got != want:
+        problems.append("within(%r, %r) -> %r, expected %r" % (root, target, got, want))
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "containment is component-wise: /a/bc is not inside /a/b"
+else
+  bad "containment is string-wise, so a prefix-sharing sibling counts as inside"
+fi
+# THE DIRECTORY-LEVEL CHECK, which the mirror omitted entirely.
+rm -rf "$TMP/escaperoot" && mkdir -p "$TMP/escaperoot/ks" "$TMP/elsewhere/tbl"
+truncate -s 1000 "$TMP/elsewhere/tbl/nb-1-big-Data.db"
+ln -sfn "$TMP/elsewhere/tbl" "$TMP/escaperoot/ks/tbl"
+printf '{"version":2,"keyspace":"ks","table":"tbl","ddl":"CREATE TABLE ks.tbl (a int PRIMARY KEY)","limit":null,"predicates":[],"filter":null,"aggregation":null,"columns":null,"token_start":null,"token_end":null,"wraparound":false}\n' > "$TMP/escape-ticket.json"
+run_support census-served "$TMP/escaperoot" "$TMP/escape-ticket.json"
+check_support "a served directory whose canonical target escapes --data-dir" 1 served-dir-escapes
+
+# THE AGGREGATE: checked per FILE, so one wrong table among right ones refuses.
+rm -rf "$TMP/mixedcorpus" && mkdir -p "$TMP/mixedcorpus"
+for n in 1 2 3; do
+  truncate -s 1000 "$TMP/mixedcorpus/nb-$n-big-Data.db"
+  mkcompressioninfo "$TMP/mixedcorpus/nb-$n-big-CompressionInfo.db" LZ4Compressor
+done
+AGG="$(python3 "$SUPPORT" probe-compression "$TMP/mixedcorpus")"
+if [ "${AGG%% *}" = "LZ4" ]; then
+  ok "a corpus whose every served SSTable is LZ4 aggregates to LZ4"
+else
+  bad "an all-LZ4 corpus aggregated to ${AGG%% *}"
+fi
+mkcompressioninfo "$TMP/mixedcorpus/nb-2-big-CompressionInfo.db" SnappyCompressor
+AGG="$(python3 "$SUPPORT" probe-compression "$TMP/mixedcorpus")"
+if [ "${AGG%% *}" = "OTHER" ] && printf '%s' "$AGG" | grep -q 'nb-2-big-CompressionInfo.db'; then
+  ok "one non-LZ4 table among LZ4 ones refuses, naming the file"
+else
+  bad "a mixed-compressor corpus did not refuse naming the offending file ($AGG)"
+fi
+rm -f "$TMP/mixedcorpus/nb-2-big-CompressionInfo.db"
+AGG="$(python3 "$SUPPORT" probe-compression "$TMP/mixedcorpus")"
+if [ "${AGG%% *}" = "MISSING" ]; then
+  ok "a served SSTable with no CompressionInfo.db aggregates to MISSING"
+else
+  bad "a missing CompressionInfo.db aggregated to ${AGG%% *}"
+fi
+
+# ---- ONE validator for one record schema -------------------------------------
+# ROUND 14 FINDING 4. The driver used to check five fields by hand and nothing
+# else, so it ACCEPTED records the analyzer later refuses -- and a malformed
+# `latency_ms` reached `.get` on a non-dict and produced an UNANCHORED
+# TRACEBACK. It now CALLS the analyzer's typed validation. The property under
+# test is therefore AGREEMENT, not a list of rejections: for each malformed
+# record, the driver must refuse it AND the analyzer must refuse it, because a
+# second validator drifting from the first is the defect being closed.
+record_agreement_case() { # <name> <python-mutation>
+  python3 - "$TMP/agree.jsonl" <<PYINNER
+import json
+
+record = {
+    "schema": "flight-loadgen.step/v1", "round": "base-r01",
+    "endpoint": "http://127.0.0.1:8815", "ts_unix_ms": 1780000000000,
+    "seed": 42, "step": 0, "target_concurrency": 1, "shape": "full",
+    "duration_s": 60.0, "requests_ok": 5, "requests_unavailable": 0,
+    "requests_error": 0, "error_codes": {}, "qps": 5 / 60.0,
+    "rows_per_s": 100000.0, "rows_total": 6000000,
+    "latency_ms": {"p50": 1.0, "p95": 2.0, "p99": 3.0, "max": 4.0},
+}
+$2
+with open("$TMP/agree.jsonl", "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(record) + "\n")
+PYINNER
+  set +e
+  python3 "$SUPPORT" validate-replicate "$TMP/agree.jsonl" base-r01 1 full 60s \
+    > "$TMP/agree-out.txt" 2> "$TMP/agree-err.txt"
+  local driver_rc=$?
+  set -e
+  if [ "$driver_rc" = 0 ]; then
+    bad "record $1 was ACCEPTED by the driver; the analyzer refuses it"
+    return
+  fi
+  if grep -q 'Traceback' "$TMP/agree-err.txt"; then
+    bad "record $1 produced an unanchored traceback instead of a named refusal"
+    return
+  fi
+  if ! grep -q '^AB-3649: cause replicate-invalid$' "$TMP/agree-err.txt"; then
+    bad "record $1 was refused without the driver's own anchored cause"
+    return
+  fi
+  # The analyzer's cause is carried through, so the operator sees the exact
+  # refusal the analysis would give while the rig is still up.
+  if ! grep -q 'the analyzer refuses this with cause ' "$TMP/agree-err.txt"; then
+    bad "record $1 was refused without naming the analyzer's cause"
+    return
+  fi
+  ok "record $1 is refused by the driver, naming the analyzer's own cause"
+}
+# THE TRACEBACK: a non-dict latency_ms used to reach `.get` in the print path.
+# ROUND 24 FINDING 2: a TYPE is a noun, a VALID RANGE is the property.
+# NOT ALL OF THESE ARE CAUGHT BY THE RANGE CHECK ALONE, and that is worth
+# knowing rather than assuming: negative requests_error and requests_unavailable
+# reach a verdict only because of it, while a negative requests_ok, a negative
+# rows_total, a zero concurrency and a negative latency are ALSO caught by later
+# checks. The first two are the cases that actually red when the range check is
+# removed; the rest assert a refusal that would happen anyway. Keeping them is
+# cheap and states the property per field, but they are not evidence for it.
+record_agreement_case negative-errors   'record["requests_error"] = -3'
+record_agreement_case negative-shed     'record["requests_unavailable"] = -1'
+record_agreement_case negative-ok       'record["requests_ok"] = -5'
+record_agreement_case negative-rows     'record["rows_total"] = -1'
+record_agreement_case zero-concurrency  'record["target_concurrency"] = 0'
+record_agreement_case negative-latency  'record["latency_ms"]["p95"] = -2.0'
+record_agreement_case latency-not-dict   'record["latency_ms"] = "fast"'
+record_agreement_case latency-missing-p50 'del record["latency_ms"]["p50"]'
+record_agreement_case latency-p50-string 'record["latency_ms"]["p50"] = "1.0"'
+# SCHEMA, SHAPE, DURATION AND CONSISTENCY -- none of which the driver checked.
+record_agreement_case wrong-schema       'record["schema"] = "flight-loadgen.step/v2"'
+record_agreement_case wrong-shape        'record["shape"] = "point"'
+record_agreement_case duration-from-elsewhere 'record["duration_s"] = 1.5'
+record_agreement_case rows-inconsistent  'record["rows_total"] = 17'
+record_agreement_case missing-qps        'del record["qps"]'
+record_agreement_case duration-not-number 'record["duration_s"] = "60"'
+# ...and a well-formed record still passes, or the above proves only that
+# everything is refused.
+python3 - "$TMP/agree-ok.jsonl" <<'PYINNER'
+import json
+import sys
+
+record = {
+    "schema": "flight-loadgen.step/v1", "round": "base-r01",
+    "endpoint": "http://127.0.0.1:8815", "ts_unix_ms": 1780000000000,
+    "seed": 42, "step": 0, "target_concurrency": 1, "shape": "full",
+    "duration_s": 60.0, "requests_ok": 5, "requests_unavailable": 0,
+    "requests_error": 0, "error_codes": {}, "qps": 5 / 60.0,
+    "rows_per_s": 100000.0, "rows_total": 6000000,
+    "latency_ms": {"p50": 1.0, "p95": 2.0, "p99": 3.0, "max": 4.0},
+}
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(record) + "\n")
+PYINNER
+run_support validate-replicate "$TMP/agree-ok.jsonl" base-r01 1 full 60s
+check_support "a well-formed record passes the shared validator" 0
+
+# STRUCTURAL: there must be exactly ONE implementation. A driver that re-derived
+# these checks would drift from the analyzer within two rounds, and the drift
+# presents as the driver accepting what the analysis rejects -- after the rig is
+# gone. So the call is asserted, and so is the absence of a second copy.
+if python3 - "$HERE" <<'PYINNER'
+import re
+import sys
+
+source = open("%s/ab_driver_support.py" % sys.argv[1], encoding="utf-8").read()
+problems = []
+if "from ab_input import validate_record_shape, validate_record_usable" not in source:
+    problems.append("ab_driver_support does not import the analyzer's validators")
+body = re.search(r"def validate_replicate\(.*?\n(?=\n\n[A-Za-z_#])", source, re.S)
+if not body:
+    problems.append("validate_replicate was not found")
+else:
+    text = body.group(0)
+    for call in ("validate_record_shape(", "validate_record_usable("):
+        if call not in text:
+            problems.append("validate_replicate does not call %s" % call)
+    # A re-derived copy would look like this: the analyzer owns the schema
+    # constant and the latency percentile names, so neither belongs here.
+    for smell, why in (
+        ("flight-loadgen.step/v1", "the record schema constant"),
+        ('"p95"', "the latency percentile names"),
+    ):
+        if smell in text:
+            problems.append("validate_replicate re-derives %s" % why)
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "the driver CALLS the analyzer's record validation and keeps no second copy"
+else
+  bad "there is more than one implementation of the record schema (see stderr above)"
+fi
+
+# ---- --shape mirrors flight-loadgen's PARSER, aliases and case included ------
+# ROUND 17 FINDING 3. The driver carried the RAW string while the load generator
+# emits the CANONICAL label, so `--shape limit` produced records saying
+# `limit-k` that reconciliation then rejected as a mismatch -- after all three
+# release builds. Read from Shape::parse (tools/flight-loadgen/src/shape.rs:34)
+# rather than from the finding's list, which was right about the aliases and
+# silent about the lowercase match.
+shape_case() { # <input> <want-canonical-or-REFUSE>
+  local got rc
+  set +e
+  got="$(python3 "$SUPPORT" canonical-shape "$1" 2>/dev/null)"
+  rc=$?
+  set -e
+  if [ "$2" = REFUSE ]; then
+    if [ "$rc" != 0 ]; then
+      ok "shape '$1' is refused at preflight, not after three builds"
+    else
+      bad "shape '$1' was accepted and canonicalised to '$got'"
+    fi
+  elif [ "$rc" = 0 ] && [ "$got" = "$2" ]; then
+    ok "shape '$1' -> '$got'"
+  else
+    bad "shape '$1' gave '$got' (rc $rc), expected '$2'"
+  fi
+}
+shape_case full     full
+shape_case limit    limit-k
+shape_case limitk   limit-k
+shape_case limit-k  limit-k
+shape_case ptr      point
+shape_case point    point
+shape_case mix      mixed
+shape_case mixed    mixed
+# CASE-INSENSITIVE, because Shape::parse lowercases. Refusing these would red a
+# session the load generator accepts -- the too-strict half.
+shape_case FULL     full
+shape_case Limit-K  limit-k
+shape_case PtR      point
+# Unknown shapes fail HERE, not at the load generator after the builds.
+shape_case scan     REFUSE
+shape_case ''       REFUSE
+shape_case full-ring REFUSE
+
+# THE ALIAS SET IS DERIVED FROM THE PARSER, not curated here: a new alias in
+# shape.rs that this mirror does not know would silently become an unknown
+# shape refused at preflight -- a correct session red by a stale mirror.
+if python3 - "$HERE" <<'PYINNER'
+import os
+import re
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import ab_driver_support as S
+
+# Same three-valued locate as the TICKET_SCHEMA completeness guard: out of the
+# repository is DECLARED, a crate present without the file is a FAIL.
+here = os.path.abspath(sys.argv[1])
+shape_rs, saw_crate, probe = None, False, here
+while True:
+    if os.path.isdir(os.path.join(probe, "tools", "flight-loadgen")):
+        saw_crate = True
+    candidate = os.path.join(probe, "tools", "flight-loadgen", "src", "shape.rs")
+    if os.path.isfile(candidate):
+        shape_rs = candidate
+        break
+    parent = os.path.dirname(probe)
+    if parent == probe:
+        break
+    probe = parent
+if shape_rs is None:
+    if saw_crate:
+        sys.stderr.write("AB-3649: flight-loadgen is present but src/shape.rs is "
+                         "not; the parser moved and the mirror cannot be checked\n")
+        raise SystemExit(1)
+    sys.stdout.write("AB-3649: DECLARED-NOT-MEASURABLE outside the repository, so "
+                     "Shape::parse cannot be read from here\n")
+    raise SystemExit(0)
+
+source = open(shape_rs, encoding="utf-8").read()
+body = re.search(r"pub fn parse\(s: &str\).*?\n    \}", source, re.S)
+if body is None:
+    sys.stderr.write("AB-3649: Shape::parse could not be located; the derivation "
+                     "has broken, which is a FAIL and not an empty subject set\n")
+    raise SystemExit(1)
+declared = set()
+for arm in re.finditer(r'^\s*((?:"[a-z-]+"\s*\|\s*)*"[a-z-]+")\s*=>\s*Ok\(',
+                       body.group(0), re.M):
+    for literal in re.findall(r'"([a-z-]+)"', arm.group(1)):
+        declared.add(literal)
+if len(declared) < 4:
+    sys.stderr.write("AB-3649: only %d aliases were derived from Shape::parse; "
+                     "the parse has broken\n" % len(declared))
+    raise SystemExit(1)
+problems = []
+for alias in sorted(declared - set(S.SHAPE_ALIASES)):
+    problems.append("Shape::parse accepts %r and the mirror does not -- a "
+                    "correct session would be refused at preflight" % alias)
+for alias in sorted(set(S.SHAPE_ALIASES) - declared):
+    problems.append("the mirror accepts %r and Shape::parse does not -- it "
+                    "would fail after every build" % alias)
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "the shape mirror covers exactly the aliases Shape::parse accepts"
+else
+  bad "the shape mirror and Shape::parse disagree (see above)"
+fi
+
+# ---- resolved integers are parsed, bounded and CANONICAL ---------------------
+# Two failures pointing opposite ways. `[0-9]+` accepted `08`, which Clap parses
+# as 8 -- so the startup line echoed `8`, the read-back compared it against the
+# string `08`, and a CORRECT session died on a mismatch that was not one, after
+# the builds. And an oversized value reached Clap only at server launch, which is
+# also after all three release builds on a metered box.
+resolved_uint_case() { # <name> <batch> <scans> <want-rc> [<canonical-batch>]
+  set +e
+  python3 "$SUPPORT" resolve-session "$2" NOT-REQUESTED NOT-REQUESTED "$3" \
+    268435456 2 1 '' '' '' > "$TMP/rs-out.txt" 2> "$TMP/rs-err.txt"
+  local rc=$?
+  set -e
+  if [ "$rc" != "$4" ]; then
+    bad "resolved uint $1 (exit $rc, expected $4)"
+    return
+  fi
+  if [ -n "${5:-}" ]; then
+    local got
+    got="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["base"]["batch_size_observed"])' "$TMP/rs-out.txt" 2>/dev/null || echo PARSE-FAILED)"
+    if [ "$got" != "$5" ]; then
+      bad "resolved uint $1 canonicalised to '$got', expected '$5'"
+      return
+    fi
+  fi
+  ok "resolved uint $1 -> exit $rc${5:+ canonical $5}"
+}
+resolved_uint_case plain             8192 4 0 8192
+# THE FALSE-MISMATCH HALF: a leading zero is a different STRING and the same
+# NUMBER, and the read-back compares strings.
+resolved_uint_case leading-zero      08192 4 0 8192
+resolved_uint_case leading-zeros-only 0008 4 0 8
+resolved_uint_case scans-leading-zero 8192 04 0 8192
+# THE LATE-FAILURE HALF: refused here, not by Clap after three release builds.
+resolved_uint_case batch-over-u64    99999999999999999999 4 1
+resolved_uint_case scans-over-u64    8192 99999999999999999999 1
+resolved_uint_case batch-zero        0 4 1
+resolved_uint_case scans-zero        8192 0 1
+resolved_uint_case batch-not-numeric 8k 4 1
+# u64::MAX itself is in range; one past it is not. The boundary is the thing
+# most likely to be written down wrong, so it is the thing pinned.
+resolved_uint_case batch-at-u64-max  18446744073709551615 4 0 18446744073709551615
+resolved_uint_case batch-past-u64-max 18446744073709551616 4 1
+# The overflow message must NOT carry the zero-clamp explanation: that pairing
+# printed two unrelated explanations of one number.
+if python3 "$SUPPORT" resolve-session 99999999999999999999 NOT-REQUESTED NOT-REQUESTED 4 268435456 2 1 '' '' '' 2>&1 \
+     | grep -q 'exceeds 18446744073709551615.*clamps 0 to one row'; then
+  bad "the overflow message carries the zero-clamp note, which explains a different failure"
+else
+  ok "each resolved-integer failure carries only its own explanation"
+fi
+
+# ---- the ticket validator mirrors the DESERIALISER, both directions ----------
+# Eighth validator-versus-consumer instance, and the first wrong in BOTH
+# directions at once: too STRICT (it demanded `version`, which carries a serde
+# default, so it red a ticket the consumer accepts) and too LOOSE (only four
+# fields were looked at, so `"predicates": {}` passed pre-flight and failed after
+# all three release builds). Both halves are pinned, because fixing one and not
+# the other is how a validator ends up wrong in a new direction.
+ticket_case() { # <name> <json> <schema-rc> <full-ring-rc>
+  printf '%s\n' "$2" > "$TMP/tk-$1.json"
+  set +e
+  python3 "$SUPPORT" validate-ticket-schema "$TMP/tk-$1.json" >/dev/null 2>&1
+  local schema_rc=$?
+  python3 "$SUPPORT" validate-ticket "$TMP/tk-$1.json" >/dev/null 2>&1
+  local full_rc=$?
+  set -e
+  if [ "$schema_rc" = "$3" ] && [ "$full_rc" = "$4" ]; then
+    ok "ticket $1 -> schema $schema_rc, full-ring $full_rc"
+  else
+    bad "ticket $1 (schema $schema_rc want $3; full-ring $full_rc want $4)"
+  fi
+}
+
+FULL_TICKET='{"version":2,"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)","snapshot":null,"token_start":null,"token_end":null,"wraparound":false,"columns":null,"predicates":[],"filter":null,"aggregation":null,"limit":null}'
+ticket_case complete           "$FULL_TICKET" 0 0
+# TOO STRICT, the half that reds a CORRECT ticket on the rig: `version` carries
+# `#[serde(default = "default_ticket_version")]`, so a ticket without it
+# deserialises fine and must be accepted by both halves.
+# `version` is deliberately ABSENT here and PRESENT in every malformed case
+# above, so each case isolates the field it names.
+ticket_case no-version         '{"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)"}' 0 0
+# NOT deny_unknown_fields, so the consumer IGNORES an unknown key -- rejecting it
+# would refuse a ticket from a newer connector that the server reads fine.
+ticket_case unknown-field      '{"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)","future_knob":7}' 0 0
+# TOO LOOSE, the half that fails AFTER all three builds.
+ticket_case predicates-object  '{"version":2,"keyspace":"ks","table":"t","ddl":"d","predicates":{}}' 1 1
+ticket_case predicates-badop   '{"version":2,"keyspace":"ks","table":"t","ddl":"d","predicates":[{"column":"a","op":"NOPE","value":1}]}' 1 1
+ticket_case predicates-nocol   '{"version":2,"keyspace":"ks","table":"t","ddl":"d","predicates":[{"op":"Equal","value":1}]}' 1 1
+ticket_case wraparound-string  '{"version":2,"keyspace":"ks","table":"t","ddl":"d","wraparound":"yes"}' 1 1
+ticket_case columns-not-strings '{"version":2,"keyspace":"ks","table":"t","ddl":"d","columns":[1,2]}' 1 1
+ticket_case limit-negative     '{"version":2,"keyspace":"ks","table":"t","ddl":"d","limit":-1}' 1 1
+ticket_case token-not-int      '{"version":2,"keyspace":"ks","table":"t","ddl":"d","token_start":"0"}' 1 1
+ticket_case version-not-u8     '{"keyspace":"ks","table":"t","ddl":"d","version":300}' 1 1
+ticket_case ddl-missing        '{"version":2,"keyspace":"ks","table":"t"}' 1 1
+ticket_case ddl-null           '{"version":2,"keyspace":"ks","table":"t","ddl":null}' 1 1
+ticket_case ddl-blank          '{"version":2,"keyspace":"ks","table":"t","ddl":"   "}' 1 1
+# A JSON bool is a Python int; serde is not so forgiving and neither is this.
+ticket_case version-bool       '{"keyspace":"ks","table":"t","ddl":"d","version":true}' 1 1
+# THE TWO HALVES ARE SEPARATE: a narrowed ticket DESERIALISES fine, so the schema
+# half accepts it and only the full-ring half refuses. That split is the whole
+# reason a control can be schema-checked without being forced to be a full scan.
+ticket_case narrowed-limit     '{"version":2,"keyspace":"ks","table":"t","ddl":"d","limit":10}' 0 1
+ticket_case narrowed-columns   '{"version":2,"keyspace":"ks","table":"t","ddl":"d","columns":["a"]}' 0 1
+
+# THE FROZEN TICKET IS RE-VERIFIED AROUND EVERY INVOCATION -- pinned
+# STRUCTURALLY, and labelled as such. A mid-session swap cannot be induced from
+# outside the driver: the frozen copy is created during the run, so there is no
+# moment at which this suite can replace it between the two checks. What IS
+# checkable is that both checks exist at every invocation site, which is the
+# property the finding is about. Found by a plant that removed one call and
+# produced no red at all.
+if python3 - "$DRIVER" <<'PYINNER'
+import re
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+lines = source.splitlines()
+problems = []
+if "verify_frozen_ticket()" not in source:
+    problems.append("the driver has no verify_frozen_ticket helper")
+# The helper must REFUSE, not warn: a mutated measurement input is not a nit.
+body = re.search(r"verify_frozen_ticket\(\) \{.*?\n  \}", source, re.S)
+if not body:
+    problems.append("verify_frozen_ticket's body was not found")
+elif "die ticket-mutated" not in body.group(0):
+    problems.append("verify_frozen_ticket does not die on a mismatch")
+# Every load-generator invocation must be BRACKETED by a check.
+invocations = [i for i, line in enumerate(lines)
+               if '"$LOADGEN_BIN" --endpoint' in line]
+if len(invocations) < 2:
+    problems.append("only %d load-generator invocations were found; the "
+                    "derivation has broken" % len(invocations))
+for index in invocations:
+    before = any("verify_frozen_ticket" in lines[j]
+                 for j in range(max(0, index - 6), index))
+    after = any("verify_frozen_ticket" in lines[j]
+                for j in range(index, min(len(lines), index + 12)))
+    if not before:
+        problems.append("the invocation at line %d has no digest check BEFORE it"
+                        % (index + 1))
+    if not after:
+        problems.append("the invocation at line %d has no digest check AFTER it "
+                        "-- a before-only check cannot see a swap DURING the run"
+                        % (index + 1))
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "every load-generator invocation is bracketed by a frozen-ticket digest check"
+else
+  bad "a load-generator invocation is not bracketed by a digest check (see above)"
+fi
+
+# THE EXPORT INTERVAL, PINNED STRUCTURALLY. `die` writes a manifest, so any
+# abort between the freeze and the export of AB_TICKET_TEMPLATE records a ticket
+# path nothing read -- and the digest step below the copy CAN die, so this was a
+# reachable window and not a latent one. The property is that no such interval
+# exists: the export happens at the assignment, and nothing exports the
+# pre-freeze value at all.
+if python3 - "$DRIVER" <<'PYINNER'
+import re
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+lines = source.splitlines()
+problems = []
+exports = [i for i, l in enumerate(lines)
+           if re.match(r'\s*export AB_TICKET_TEMPLATE=', l)]
+if len(exports) != 1:
+    problems.append("AB_TICKET_TEMPLATE is exported %d times; it must be exported "
+                    "exactly once, at the assignment" % len(exports))
+else:
+    where = exports[0]
+    if 'TICKET_FROZEN' not in lines[where]:
+        problems.append("the one export of AB_TICKET_TEMPLATE does not name the "
+                        "frozen copy: %s" % lines[where].strip())
+    # It must sit immediately after the assignment, with nothing that can `die`
+    # in between -- comments and other exports only.
+    assign = [i for i, l in enumerate(lines)
+              if re.match(r'\s*TICKET_TEMPLATE="\$TICKET_FROZEN"\s*$', l)]
+    if len(assign) != 1:
+        problems.append("TICKET_TEMPLATE is assigned from TICKET_FROZEN %d times"
+                        % len(assign))
+    elif where < assign[0]:
+        problems.append("AB_TICKET_TEMPLATE is exported before the assignment")
+    else:
+        between = lines[assign[0] + 1:where]
+        for line in between:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.startswith("export "):
+                continue
+            problems.append("a statement sits between the assignment and the "
+                            "export, so an abort there records the original: %s"
+                            % stripped)
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "AB_TICKET_TEMPLATE is exported exactly once, at the assignment, with no interval"
+else
+  bad "there is an interval in which AB_TICKET_TEMPLATE names the wrong ticket (see above)"
+fi
+
+# THE COMPLETENESS OF `TICKET_SCHEMA`, DERIVED FROM `ticket.rs` ITSELF.
+# A curated field list is the shape this lane keeps closing: `filter` and
+# `aggregation` were unvalidated because nobody looked at them, exactly as
+# `predicates` had been one round earlier. Listing the fields more carefully
+# does not end that -- CHECKING THE LIST AGAINST THE STRUCT does. So the subject
+# set comes from the deserialiser, the same standard as OPTION_DISPOSITION
+# deriving its options from the driver's own dispatch.
+#
+# THREE-VALUED on purpose. `cqlite-flight/src/ticket.rs` absent AND no
+# `cqlite-flight` directory anywhere above means these artifacts were copied out
+# of the repository, which is a supported way to run this suite -- declared, not
+# silently passed. A `cqlite-flight` directory that exists WITHOUT that file
+# means the struct moved, which is a FAIL: that is the case a skip would hide.
+set +e
+python3 - "$HERE" > "$TMP/schema-completeness.txt" 2> "$TMP/schema-completeness-err.txt" <<'PYINNER'
+import os
+import re
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import ab_driver_support as S
+
+here = os.path.abspath(sys.argv[1])
+ticket_rs = None
+saw_crate = False
+probe = here
+while True:
+    candidate = os.path.join(probe, "cqlite-flight", "src", "ticket.rs")
+    if os.path.isdir(os.path.join(probe, "cqlite-flight")):
+        saw_crate = True
+    if os.path.isfile(candidate):
+        ticket_rs = candidate
+        break
+    parent = os.path.dirname(probe)
+    if parent == probe:
+        break
+    probe = parent
+
+if ticket_rs is None:
+    if saw_crate:
+        sys.stderr.write("AB-3649: a cqlite-flight directory exists but "
+                         "src/ticket.rs is not in it -- the struct moved, and "
+                         "TICKET_SCHEMA can no longer be checked against it\n")
+        raise SystemExit(1)
+    sys.stdout.write("DECLARED-NOT-MEASURABLE these artifacts are outside the "
+                     "repository, so TICKET_SCHEMA cannot be checked against "
+                     "ticket.rs from here\n")
+    raise SystemExit(0)
+
+source = open(ticket_rs, encoding="utf-8").read()
+block = re.search(r"^pub struct FlightTicket \{\n(.*?)^\}$", source, re.S | re.M)
+if not block:
+    sys.stderr.write("AB-3649: the FlightTicket struct could not be located in "
+                     "%s; the derivation has broken, which is a FAIL rather "
+                     "than an empty subject set\n" % ticket_rs)
+    raise SystemExit(1)
+declared = set(re.findall(r"^\s{4}pub ([a-z_][a-z0-9_]*):", block.group(1), re.M))
+if len(declared) < 8:
+    sys.stderr.write("AB-3649: only %d fields were derived from FlightTicket; "
+                     "the parse has broken\n" % len(declared))
+    raise SystemExit(1)
+
+problems = []
+for field in sorted(declared - set(S.TICKET_SCHEMA)):
+    problems.append("FlightTicket declares %r and TICKET_SCHEMA does not "
+                    "validate it -- an unvalidated field is one that fails "
+                    "after every build" % field)
+for field in sorted(set(S.TICKET_SCHEMA) - declared):
+    problems.append("TICKET_SCHEMA validates %r, which FlightTicket no longer "
+                    "declares" % field)
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+SCHEMA_RC=$?
+set -e
+if [ "$SCHEMA_RC" != 0 ]; then
+  bad "TICKET_SCHEMA and FlightTicket disagree about the field set: $(head -2 "$TMP/schema-completeness-err.txt" | tr '\n' ' ')"
+elif grep -q '^DECLARED-NOT-MEASURABLE' "$TMP/schema-completeness.txt"; then
+  # NOT a pass. Saying "covers exactly the fields" here would be a claim the run
+  # did not earn -- the same false-affirmation shape the rest of this suite
+  # exists to refuse. It is reported as the declared gap it is.
+  ok "TICKET_SCHEMA completeness DECLARED-NOT-MEASURABLE (running outside the repository, so ticket.rs is unreachable)"
+else
+  ok "TICKET_SCHEMA covers exactly the fields FlightTicket declares, derived from ticket.rs"
+fi
+
+# ROUND 14 FINDING 2: `filter` and `aggregation` were checked for being OBJECTS,
+# not for matching PredicateExpr/Aggregation -- so `filter: {}` passed pre-flight
+# and failed deserialisation after every build. That is round 13's `predicates:
+# {}` one field over: THE FIX THAT DOES NOT GENERALISE TO ITS SIBLINGS IS HALF A
+# FIX, which is why the whole tagged grammar is mirrored here and not just the
+# two shapes that were reported.
+GOOD_CMP='{"type":"Compare","column":"a","op":"Gt","value":1}'
+ticket_case filter-empty        '{"version":2,"keyspace":"ks","table":"t","ddl":"d","filter":{}}' 1 1
+ticket_case filter-untagged     '{"version":2,"keyspace":"ks","table":"t","ddl":"d","filter":{"column":"a"}}' 1 1
+ticket_case filter-badtag       '{"version":2,"keyspace":"ks","table":"t","ddl":"d","filter":{"type":"Xor","exprs":[]}}' 1 1
+ticket_case filter-cmp-noop     '{"version":2,"keyspace":"ks","table":"t","ddl":"d","filter":{"type":"Compare","column":"a","value":1}}' 1 1
+ticket_case filter-cmp-badop    '{"version":2,"keyspace":"ks","table":"t","ddl":"d","filter":{"type":"Compare","column":"a","op":"Approx","value":1}}' 1 1
+ticket_case filter-isnull-nocol '{"version":2,"keyspace":"ks","table":"t","ddl":"d","filter":{"type":"IsNull"}}' 1 1
+ticket_case filter-in-notlist   '{"version":2,"keyspace":"ks","table":"t","ddl":"d","filter":{"type":"In","column":"a","values":3}}' 1 1
+# RECURSION: a malformed leaf buried inside a well-formed tree must be found.
+# Checking only the root is the same "stopped at the first layer" mistake.
+ticket_case filter-nested-bad   "{\"version\":2,\"keyspace\":\"ks\",\"table\":\"t\",\"ddl\":\"d\",\"filter\":{\"type\":\"And\",\"exprs\":[$GOOD_CMP,{\"type\":\"Not\",\"expr\":{\"type\":\"Compare\",\"column\":\"a\",\"op\":\"NOPE\",\"value\":1}}]}}" 1 1
+ticket_case filter-nested-good  "{\"version\":2,\"keyspace\":\"ks\",\"table\":\"t\",\"ddl\":\"d\",\"filter\":{\"type\":\"And\",\"exprs\":[$GOOD_CMP,{\"type\":\"Not\",\"expr\":$GOOD_CMP}]}}" 0 1
+ticket_case agg-empty           '{"version":2,"keyspace":"ks","table":"t","ddl":"d","aggregation":{}}' 1 1
+ticket_case agg-badfunc         '{"version":2,"keyspace":"ks","table":"t","ddl":"d","aggregation":{"aggregates":[{"func":"Median","output":"m"}]}}' 1 1
+ticket_case agg-nooutput        '{"version":2,"keyspace":"ks","table":"t","ddl":"d","aggregation":{"aggregates":[{"func":"Count"}]}}' 1 1
+ticket_case agg-groupby-nonstr  '{"version":2,"keyspace":"ks","table":"t","ddl":"d","aggregation":{"group_by":[1],"aggregates":[{"func":"Count","output":"c"}]}}' 1 1
+# count(*) is `column: null`, and group_by carries a serde default -- both are
+# VALID, so the schema half accepts them and only the full-ring half refuses.
+ticket_case agg-countstar       '{"version":2,"keyspace":"ks","table":"t","ddl":"d","aggregation":{"aggregates":[{"func":"Count","column":null,"output":"c"}]}}' 0 1
+
+# A tree deeper than the bound is a NAMED refusal, never a RecursionError: an
+# unanchored traceback is the failure mode this harness exists not to have.
+python3 - "$TMP/tk-deep.json" <<'PYINNER'
+import json
+import sys
+
+node = {"type": "Compare", "column": "a", "op": "Gt", "value": 1}
+for _ in range(200):
+    node = {"type": "Not", "expr": node}
+ticket = {"version": 2, "keyspace": "ks", "table": "t", "ddl": "d", "filter": node}
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(ticket, handle)
+PYINNER
+set +e
+python3 "$SUPPORT" validate-ticket-schema "$TMP/tk-deep.json" >"$TMP/deep-out.txt" 2>"$TMP/deep-err.txt"
+DEEP_RC=$?
+set -e
+if [ "$DEEP_RC" = "1" ] && grep -q '^AB-3649: cause ticket-schema-invalid$' "$TMP/deep-err.txt" \
+   && ! grep -q 'Traceback' "$TMP/deep-err.txt"; then
+  ok "a predicate tree past the depth bound is a named refusal, not a RecursionError"
+else
+  bad "a deeply nested predicate tree did not produce an anchored refusal (exit $DEEP_RC)"
+fi
+
+# STRUCTURAL: the control branch must apply the SCHEMA half. It used to check
+# only that the file was JSON, so a control wasted the same three release builds
+# on a ticket the load generator could not read.
+if grep -q 'validate-ticket-schema "\$TICKET_TEMPLATE"' "$DRIVER"; then
+  ok "a control's ticket is schema-checked, not merely parsed as JSON"
+else
+  bad "the control branch does not run the ticket schema check"
+fi
+
+# THE ATTESTATION COVERS IGNORANCE, NEVER EVIDENCE. An operator may assert that
+# an unrecognised device is local; nobody may assert that an IDENTIFIED network
+# device is not -- otherwise the one thing this check exists to refuse is the one
+# thing a flag turns off. Both directions are pinned, because only the pair says
+# what the override means.
+for spec in "UNRECOGNISED:nvme0n1 Samsung SSD 980 PRO:grants" "NETWORK:nvme0n1 Amazon Elastic Block Store:refuses"; do
+  token="${spec%%:*}"; rest="${spec#*:}"
+  detail="${rest%%:*}"; want="${rest##*:}"
+  mkfixture "$TMP/attest-$want" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  AB_TOKEN="$token" AB_DETAIL="$detail" python3 - "$TMP/attest-$want/manifest.json" <<'PYINNER'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["corpus"]["storage"] = os.environ["AB_TOKEN"]
+manifest["corpus"]["storage_detail"] = os.environ["AB_DETAIL"]
+manifest["corpus"]["storage_attestation"] = "rig-2026-09: instance store confirmed by hand against the launch template"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/attest-$want"
+  if [ "$want" = grants ]; then
+    check_verdict "an attested unrecognised device" MEETS-TARGET 0 single-stream
+    if grep -q '^AB-3649: verdict-detail single-stream STORAGE-ATTESTED .*NOT independently verified' "$TMP/out.txt"; then
+      ok "an attestation travels with the verdict, saying what it rests on"
+    else
+      bad "an attested verdict did not print the attestation beside itself"
+    fi
+  else
+    check_verdict "an attested NETWORK device" UNMEASURED 7 single-stream
+    check_cause "an attestation cannot overrule an identified network device" corpus-network-storage
+  fi
+done
+
+# An attestation with nothing recorded in it is not an attestation.
+mkfixture "$TMP/attest-blank" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/attest-blank/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["corpus"]["storage"] = "UNRECOGNISED"
+manifest["corpus"]["storage_attestation"] = "   "
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/attest-blank"
+check_cause "a blank attestation" manifest-field
+
+# STRUCTURAL: the driver must not REFUSE on the storage probe, only warn. The
+# refusal lives in the analyzer, where the false claim would be made. If it moved
+# back into the driver, this suite's own end-to-end sessions would pass or fail
+# depending on whether `df` names a resolvable device for the scratch directory
+# -- which on this box it does not (`/dev/root`), so they would pass BY ACCIDENT
+# here and refuse on a box that names a real one. Pinned structurally because the
+# behavioural case cannot be written without a network-backed path to point at.
+if python3 - "$DRIVER" <<'PYINNER'
+import re
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+# ANCHORED ON THE FULL CONDITION. A second `AB_STORAGE" = "NETWORK"` test now
+# exists inside the attestation block -- which DOES `die`, deliberately, because
+# an attestation may not overrule an identified network device -- so a loose
+# anchor would read that block's body and report the wrong branch.
+window = re.search(
+    r'AB_STORAGE" = "NETWORK" \] && \[ -z "\$CONTROL" \]; then.*?\nfi\n',
+    source, re.S)
+if not window:
+    sys.stderr.write("AB-3649: the driver's NETWORK-storage branch was not found\n")
+    raise SystemExit(1)
+body = window.group(0)
+if re.search(r"^\s*die ", body, re.M):
+    sys.stderr.write("AB-3649: the driver refuses on network storage; that refusal "
+                     "belongs in the analyzer\n")
+    raise SystemExit(1)
+if "warn " not in body:
+    sys.stderr.write("AB-3649: the driver neither warns nor refuses on network storage\n")
+    raise SystemExit(1)
+if "analyze-ab.py refuses it" not in body:
+    sys.stderr.write("AB-3649: the warning does not name the refusal the operator "
+                     "will hit at analysis\n")
+    raise SystemExit(1)
+PYINNER
+then
+  ok "the driver warns on network storage and names the analysis refusal, rather than refusing itself"
+else
+  bad "the driver's network-storage handling is not warn-and-name (see stderr above)"
+fi
+
+# THE FALL-THROUGH. The probe's first version returned LOCAL for any model that
+# was not EBS, so an NFS-backed loop device or another cloud's network volume
+# passed as a local disk -- a pass derived from the ABSENCE of a bad signal, in
+# the one check added to stop exactly that. Pinned by calling the classifier
+# directly, because no path on this box reports a third-party model.
+if python3 - "$HERE" <<'PYINNER'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import ab_driver_support as S
+
+cases = {
+    "Amazon Elastic Block Store": "NETWORK",
+    "Amazon EC2 NVMe Instance Storage": "LOCAL",
+    "Samsung SSD 980 PRO": "UNRECOGNISED",
+    "NetApp LUN C-Mode": "UNRECOGNISED",
+    "": "NOT-MEASURABLE",
+}
+problems = []
+for model, want in cases.items():
+    got = S.classify_storage_model(model)
+    if got != want:
+        problems.append("model %r classified %s, expected %s" % (model, got, want))
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "an unrecognised device model is UNRECOGNISED, not waved through as local"
+else
+  bad "the storage classifier mis-sorts a device model (see stderr above)"
+fi
+
+if python3 - "$DRIVER" <<'PYINNER'
+import re
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+block = re.search(r'if \[ -n "\$ATTEST_LOCAL_STORAGE" \]; then.*?\n^fi$',
+                  source, re.S | re.M)
+if not block:
+    sys.stderr.write("AB-3649: the driver has no attestation block\n")
+    raise SystemExit(1)
+body = block.group(0)
+if 'AB_STORAGE" = "NETWORK"' not in body:
+    sys.stderr.write("AB-3649: the attestation block does not check for an "
+                     "identified NETWORK device, so an attestation could "
+                     "overrule evidence\n")
+    raise SystemExit(1)
+if not re.search(r"^\s*die corpus-network-storage-attested", body, re.M):
+    sys.stderr.write("AB-3649: the attestation block does not REFUSE on an "
+                     "identified NETWORK device\n")
+    raise SystemExit(1)
+PYINNER
+then
+  ok "an attestation cannot be used to overrule an identified network device"
+else
+  bad "the driver's attestation block does not refuse identified network storage (see stderr above)"
+fi
+
+# The storage PROBE itself, against real paths. `/` on this box is EBS-backed, so
+# the NETWORK arm is exercised against a genuine device rather than a mock; a box
+# where it is not simply reports LOCAL or NOT-MEASURABLE, all three of which are
+# recognised tokens, which is the property under test.
+probe_out="$(python3 "$SUPPORT" probe-storage / 2>/dev/null || echo 'FAILED - -')"
+case "${probe_out%% *}" in
+  LOCAL|NETWORK|UNRECOGNISED|NOT-MEASURABLE)
+    ok "probe-storage answers with a recognised token for a real path" ;;
+  *)
+    bad "probe-storage answered '${probe_out%% *}', which is not a recognised token" ;;
+esac
+if python3 "$SUPPORT" probe-storage /no/such/path 2>/dev/null | grep -q '^NOT-MEASURABLE '; then
+  ok "probe-storage reports an unresolvable path as NOT-MEASURABLE, not as local"
+else
+  bad "probe-storage did not report an unresolvable path as NOT-MEASURABLE"
+fi
+
+run_analyzer "$TMP/meets"
+if grep -q '^AB-3649: verdict-detail single-stream HOST ' "$TMP/out.txt"; then
+  bad "an i4i session on a quiet box printed a host disclosure it does not need"
+else
+  ok "an i4i session on a quiet box carries no host disclosure"
+fi
+if [ "$(grep -c '^AB-3649: sections-coverage this run covers single-stream' "$TMP/out.txt")" = 2 ]; then
+  ok "a single-section report names the missing quantity, before AND after the verdict"
+else
+  bad "a single-section report did not name the missing quantity twice"
+fi
+if grep -q '^AB-3649: sections-coverage .*does NOT cover utilization' "$TMP/out.txt"; then
+  ok "the coverage note names the quantity that is missing, not just that one is"
+else
+  bad "the coverage note did not name the absent quantity"
+fi
+
+echo
+echo "-- the none refusal covers EVERY readback, not just admission --"
+
+# The ruling was about corroboration as such; it had been applied to the one
+# field under discussion, so a session whose batch size was never observed still
+# rendered a verdict -- and the batch size is the mechanism under measurement.
+for field in batch_size_observed max_batch_bytes_observed wait_timeout_ms_observed; do
+  mkfixture "$TMP/none-$field" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  python3 - "$TMP/none-$field/manifest.json" "$field" <<'PYINNER'
+import json
+import sys
+
+path, field = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    entry[field] = "NOT-OBSERVED"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/none-$field"
+  check_verdict "a session where $field was never observed" UNMEASURED 7 single-stream
+  check_cause "no observation of $field" startup-unobserved
+done
+
+echo
+echo "-- the analyzer enforces the DOCUMENTED floors, not the recorded ones --"
+
+# THE THIRD ROUTE TO #3058's BYPASS: the operator simply lowers the bar. The
+# analyzer must not derive validity from a threshold the session under test
+# chose, so it checks the documented minimum and ignores `min_*_required`.
+for breach in files bytes; do
+  mkfixture "$TMP/floor-$breach" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  python3 - "$TMP/floor-$breach/manifest.json" "$breach" <<'PYINNER'
+import json
+import sys
+
+path, breach = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+if breach == "files":
+    manifest["corpus"]["data_db_files"] = 1
+    manifest["corpus"]["min_sstables_required"] = 1
+else:
+    manifest["corpus"]["data_db_bytes"] = 4096
+    manifest["corpus"]["min_bytes_required"] = 1
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/floor-$breach"
+  check_verdict "a measurement whose corpus is below the $breach floor" UNMEASURED 7 single-stream
+  check_cause "a corpus below the documented $breach floor" corpus-below-floor
+done
+# ...and a labelled control may sit below them, because its verdict is disclaimed.
+python3 - "$TMP/floor-files/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["control"] = "floor-probe"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/floor-files"
+check_verdict "a labelled control below the floors" MEETS-TARGET 0 single-stream
+
+echo
+echo "-- every shared field is reconciled, or excused by name --"
+
+# THE SWEEP, MECHANISED. Nine shared fields were reconciled one at a time, each
+# after a review found it missing; the tenth (`shape`) is what made the pattern
+# undeniable. These cases assert COMPLETENESS in both directions, so an
+# unreconciled field cannot join quietly: every key of a REAL step record must
+# appear in RECORD_FIELD_DISPOSITION, and every `workload` key of a REAL manifest
+# must appear in WORKLOAD_DISPOSITION.
+if [ -n "$E2E_DIR" ] && [ -f "$E2E_DIR/base-r01.jsonl" ]; then
+  RECON_RECORD="$E2E_DIR/base-r01.jsonl"
+  RECON_MANIFEST="$E2E_DIR/manifest.json"
+else
+  mkfixture "$TMP/recon" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  RECON_RECORD="$TMP/recon/base-r01.jsonl"
+  RECON_MANIFEST="$TMP/recon/manifest.json"
+fi
+if python3 - "$HERE" "$RECON_RECORD" "$RECON_MANIFEST" <<'PYINNER'
+import json
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import ab_input as I
+
+problems = []
+with open(sys.argv[2], encoding="utf-8") as handle:
+    record = json.loads(handle.readline())
+for key in sorted(record):
+    if key not in I.RECORD_FIELD_DISPOSITION:
+        problems.append("step-record field %r has no disposition" % key)
+for key, (state, why) in sorted(I.RECORD_FIELD_DISPOSITION.items()):
+    if state not in ("reconciled", "checked", "excused"):
+        problems.append("record field %r has an unknown disposition %r" % (key, state))
+    if not why.strip():
+        problems.append("record field %r has an empty reason" % key)
+
+workload = json.load(open(sys.argv[3], encoding="utf-8"))["workload"]
+for key in sorted(workload):
+    if key not in I.WORKLOAD_DISPOSITION:
+        problems.append("workload field %r has no disposition" % key)
+for key, (state, why) in sorted(I.WORKLOAD_DISPOSITION.items()):
+    if state not in ("constrains", "excused"):
+        problems.append("workload field %r has an unknown disposition %r" % (key, state))
+    if not why.strip():
+        problems.append("workload field %r has an empty reason" % key)
+
+# A table that describes nothing would satisfy every check above.
+if len(I.RECORD_FIELD_DISPOSITION) < 15 or len(I.WORKLOAD_DISPOSITION) < 10:
+    problems.append("a disposition table has shrunk below its floor")
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "every field of a real step record and a real manifest carries a disposition"
+else
+  bad "a shared field has no recorded disposition (see stderr above)"
+fi
+
+# ...and `shape`, the field that prompted the table, is actually reconciled.
+mkfixture "$TMP/shape-drift" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/shape-drift/head-r03.jsonl" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    record = json.loads(handle.read())
+record["shape"] = "limit-k"
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(record) + "\n")
+PYINNER
+run_analyzer "$TMP/shape-drift"
+check_verdict "a record produced under a shape the manifest does not declare" UNMEASURED 7 single-stream
+check_cause "a record whose shape contradicts the manifest" shape-record-mismatch
+
+echo
+echo "-- cross-references in FINDINGS.md name the section they point at --"
+
+# I have now introduced a stale `§n` twice while renumbering, in consecutive
+# rounds, and this repository treats a reference that no longer says what it
+# used to as decay rather than cosmetics. A bare `§13` cannot be checked -- both
+# the old and the new number exist -- so every cross-reference carries a short
+# title and this case asserts the title still matches that section's heading.
+if [ ! -f "$HERE/FINDINGS.md" ]; then
+  ok "cross-reference check skipped: FINDINGS.md is not beside this suite (declared, not assumed)"
+elif python3 - "$HERE/FINDINGS.md" <<'PYINNER'
+import re
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+headings = {
+    int(number): title.lower()
+    for number, title in re.findall(r"^## (\d+)\.\s+(.*)$", text, re.M)
+}
+flat = " ".join(text.split())
+bad = []
+for number, title in re.findall(r"§(\d+)\s*\(([^)]+)\)", flat):
+    number = int(number)
+    if number not in headings:
+        bad.append("§%d names no section" % number)
+    elif title.strip().lower().rstrip(".") not in headings[number]:
+        bad.append("§%d says %r but that section is %r" % (number, title, headings[number]))
+# EVERY INTERNAL reference needs a title, not only the lesson ones. Scoping this
+# to sections 9+ was my reasoning that the fact sections are stable -- and a bare
+# `\u00a76` pointing at what is actually \u00a75 got straight past it, because a
+# renumbering shifts fact sections too once one is inserted among them. What a
+# bare number is legitimately used for is a reference to ANOTHER document, which
+# always names it: `RUNBOOK.md \u00a72`, `phase2-verify-row-engine.md \u00a73.2`,
+# or a `>` quotation carrying someone else's numbering. So the exemption is
+# "names a document or is quoted", not "is a low number".
+lines = text.splitlines()
+bare = []
+for line in lines:
+    if line.lstrip().startswith(">") or ".md" in line:
+        continue
+    # `\u00a7(\d+)(?!\s*\()` BACKTRACKS: on `\u00a718 (title)` the greedy `\d+`
+    # takes 18, the lookahead fails, and it retries with `1` -- which passes,
+    # because the next character is `8`. So a correctly titled reference reported
+    # itself as a bare one, and `\u00a73.2` (another document's section) reported
+    # as `\u00a73`. `(?![\d.])` pins the number to its whole self and exempts a
+    # dotted foreign reference at the same time.
+    for n in re.findall(r"\u00a7(\d+)(?![\d.])(?!\s*\()", line):
+        if int(n) in headings:
+            bare.append(n)
+if bare:
+    bad.append(
+        "internal references with no title: %s -- a bare number cannot be checked "
+        "against the section it points at" % ", ".join(sorted(set(bare))))
+if not re.search(r"§\d+\s*\(", flat):
+    bad.append("no titled cross-references found, so this guard proved nothing")
+for problem in bad:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if bad else 0)
+PYINNER
+then
+  ok "every FINDINGS.md cross-reference names the section it points at, and matches it"
+else
+  bad "a cross-reference does not match its section (see stderr above)"
+fi
+
+# ---------------------------------------------------------------------------
+ACCOUNTED=$((PASSED + FAILED))
+echo
+echo "==== self-test tally ===="
+printf 'cases ok: %d   broken: %d   accounted: %d (floor %d)\n' \
+  "$PASSED" "$FAILED" "$ACCOUNTED" "$CASE_FLOOR"
+if [ "$ACCOUNTED" -lt "$CASE_FLOOR" ]; then
+  echo "case-floor: only $ACCOUNTED cases were accounted against a floor of $CASE_FLOOR."
+  echo "Cases are being skipped or dying silently, and a zero-broken tally over a"
+  echo "shrunken suite is exactly the vacuous green this floor exists to catch."
+  exit 1
+fi
+if [ "$FAILED" -ne 0 ]; then
+  echo "The analyzer is not behaving as its verdict rule requires. Do not publish a"
+  echo "verdict from it until every case is ok."
+  exit 1
+fi
+echo "Every case behaved as the verdict rule requires, including the two that must"
+echo "NOT produce a number: the overlapping-dispersion case and every unmeasurable"
+echo "input."
+exit 0

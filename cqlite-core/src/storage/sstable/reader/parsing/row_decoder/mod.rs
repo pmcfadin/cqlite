@@ -706,13 +706,9 @@ pub(crate) struct ComplexColumnMeta {
     pub shadow_filtered_element_count: usize,
 }
 
-// Row header flag constants
-const ROW_HAS_TIMESTAMP: u8 = 0x04;
-const ROW_HAS_TTL: u8 = 0x08;
-const ROW_HAS_DELETION: u8 = 0x10;
-const ROW_HAS_ALL_COLUMNS: u8 = 0x20;
-const ROW_HAS_COMPLEX_DELETION: u8 = 0x40; // Issue #221: Row contains complex column with deletion info
-const ROW_HAS_EXTENDED_FLAGS: u8 = 0x80;
+// Cassandra `UnfilteredSerializer` row-header / marker flag bits (epic #1116 split).
+mod row_flags;
+use row_flags::*;
 
 // Issue #3095 / epic #1116: the row DISPLAY + static-merge helpers
 // (`row_has_non_key_cell`, `merge_static_cells`, `build_display_row`,
@@ -731,19 +727,6 @@ use timestamp_policy::TimestampPolicy;
 // its `CQLITE_TTL_NOW_OVERRIDE_SECS` test seam) lives in `now_clock` — split
 // out to keep this module under the file-size ratchet (epic #1116).
 use now_clock::now_epoch_secs;
-
-// Unfiltered marker constants (from Cassandra UnfilteredSerializer.java lines 102-109)
-// Issue #229: These markers were being misinterpreted as row data, causing parsing failures
-const END_OF_PARTITION: u8 = 0x01; // Signal end of partition - nothing follows this flag byte
-const IS_MARKER: u8 = 0x02; // Range tombstone marker (not a data row)
-
-// Extended flags constants (from Cassandra UnfilteredSerializer.java lines 114-122)
-// These are in the SECOND byte when ROW_HAS_EXTENDED_FLAGS (0x80) is set
-const EXTENDED_IS_STATIC: u8 = 0x01; // Static row - has NO clustering prefix
-
-// NOTE: V5CompressedLegacy format has NO trailing field after row data.
-// The next partition/row starts immediately after row_size bytes.
-// (Previous ROW_TRAILING_FIELD_SIZE constant was removed as part of Issue #237 fix)
 
 /// Parser for V5CompressedLegacy format decompressed blocks
 pub struct V5CompressedLegacyParser {
@@ -813,6 +796,7 @@ mod raw_type_value;
 mod raw_value;
 mod row_data;
 mod row_framing;
+mod typed_value;
 mod udt;
 mod vuint_length;
 
