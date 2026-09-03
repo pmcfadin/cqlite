@@ -396,6 +396,7 @@ async fn marker_stop_non_final_chunk_needmore_no_emit() {
 /// returns the decode error, KIND PRESERVED, instead of flushing a partial
 /// partition and reporting `Emitted`. No further bytes can arrive at the final
 /// chunk, so the error is truncation/corruption — data loss — never framing.
+#[cfg(feature = "write-support")]
 #[tokio::test]
 async fn final_chunk_row_decode_error_is_returned_not_swallowed() {
     // One good row, then a row the policy cannot decode.
@@ -431,6 +432,7 @@ async fn final_chunk_row_decode_error_is_returned_not_swallowed() {
 /// boundary: request more bytes, forward nothing, and never surface an error.
 /// Measured over the well-formed corpus this is where 100% of the 614
 /// tolerations occur.
+#[cfg(feature = "write-support")]
 #[tokio::test]
 async fn non_final_chunk_row_decode_error_still_requests_more_bytes() {
     let data = synthetic_partition(&[STUB_ROW_BYTE, STUB_ERR_BYTE]);
@@ -449,6 +451,7 @@ async fn non_final_chunk_row_decode_error_still_requests_more_bytes() {
 /// (f) Issue #3782 did NOT change the DECLINE path: a policy that returns
 /// `Ok(None)` still ends the partition on the final chunk and still flushes the
 /// rows buffered before it. Only a genuine `Err` refuses.
+#[cfg(feature = "write-support")]
 #[tokio::test]
 async fn final_chunk_policy_decline_still_flushes_as_before() {
     let data = synthetic_partition(&[STUB_ROW_BYTE, STUB_DECLINE_BYTE]);
@@ -495,6 +498,7 @@ async fn final_chunk_policy_decline_still_flushes_as_before() {
 /// Sibling case (e) is the control: the SAME driver, the SAME non-final chunk,
 /// a `DecodeFailed` instead — which MUST stay tolerant. Without that pairing a
 /// blanket "always refuse" would pass here and break every point read.
+#[cfg(feature = "write-support")]
 #[tokio::test]
 async fn refusal_on_a_window_extent_refuses_and_never_requests_more_bytes() {
     assert!(
@@ -540,6 +544,7 @@ async fn refusal_on_a_window_extent_refuses_and_never_requests_more_bytes() {
 /// at a Window" alone would still hold if the driver had merely widened
 /// #3782's final-chunk rule; the property is that `at_final_chunk` is not
 /// consulted for a refusal at all.
+#[cfg(feature = "write-support")]
 #[tokio::test]
 async fn refusal_is_refused_at_every_extent_including_a_complete_buffer() {
     assert!(
