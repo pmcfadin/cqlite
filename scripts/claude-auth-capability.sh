@@ -261,6 +261,10 @@ CLAUDE_AUTH_ALT_CRED_KEYS='ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_US
 claude_auth_alt_credentials_into() {
   local __o="$1" __k='' __acc=''
   eval "$__o="
+  # shellcheck disable=SC2086  # intentional word-split over the space-separated key list
+  # `${!__k:-}` distinguishes nothing: it is the VALUE that matters, and a set-but-empty
+  # variable authenticates nothing, so only a non-empty one is reported. Reporting an empty
+  # one would be a false alarm in a line whose whole job is to be believable.
   for __k in $CLAUDE_AUTH_ALT_CRED_KEYS; do
     [ -n "${!__k:-}" ] || continue
     __acc="${__acc:+$__acc }$__k"
