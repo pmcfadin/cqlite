@@ -222,6 +222,19 @@
 #                canonicalized and opened), while the same link outside every target tree
 #                does not refuse. A half-applied boundary is worse than none.
 #
+#  60.  RED+GREEN — an IN-REPOSITORY symlinked `.rs` FILE crossing package trees
+#                (`a/src/shared.rs -> ../../b/src/*.rs`) credits the feature of the
+#                package whose tree LEXICALLY holds the link, not only the destination's.
+#                Ownership used to come from the resolved path alone, so a feature of `a`
+#                gated in there read DEAD while cargo compiles it as part of `a` — a FALSE
+#                FAIL, and the out-of-repo refusals (54/55) never fire because the link
+#                resolves INSIDE the repository. THE CONTROL IS THE POINT: with the link
+#                removed the feature must go back to DEAD, or the "fix" is just blanket
+#                crediting and the guard has lost its detection power.
+#
+#  61.  RED+GREEN — the same at the DIRECTORY level: an in-repo symlinked source DIRECTORY
+#                crossing package trees, with the same removal control.
+#
 #   CASE NUMBERS ARE STABLE IDENTIFIERS, NOT POSITIONS — deleted cases leave gaps (the
 #   convention scripts/tests/test_pub_surface_guard.sh already uses). The suite asserts
 #   the exact NUMBER OF CASES RUN at the end, which is what catches a silent deletion.
@@ -1597,13 +1610,82 @@ ln -s "$OUTSIDE_FILE_DIR/offsite_module.rs" "$D/vendor_js/offsite_module.rs"
 expect_green "$D" "case 55 (control)"
 ok "an OUT-OF-REPO symlinked FILE inside a target's source tree is a NAMED refusal; the same link outside every target tree does not refuse (the boundary is applied at BOTH levels)"
 
+# --- 60. RED + control: an IN-REPO symlinked FILE crossing package trees ------
+# Cases 54/55 close the OUT-OF-REPO boundary. This is the in-repo half, and it failed the
+# other way: the link resolves inside the repository, so neither refusal fires, and
+# ownership computed from the RESOLVED path alone attributed the module wholly to the
+# DESTINATION package. A feature of the SOURCE package gated in there was reported DEAD
+# while `cargo` compiles it as part of that package — a false FAIL, contradicting the
+# printed "NO FALSE FAIL for a gate written in a RECOGNISED spelling" contract
+# (roborev job 115).
+#
+# THE REMOVAL CONTROL IS WHAT MAKES THIS A TEST AND NOT A RUBBER STAMP: crediting every
+# member unconditionally would also turn the first half green, so the second half requires
+# the DEAD verdict to come back once the link is gone.
+D="$(fixture in-repo-symlinked-file-xpkg)"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'xpkgfeat = []'
+cat >"$D/b/src/shared_impl.rs" <<'EOF'
+#[cfg(feature = "xpkgfeat")]
+pub fn a_gate_living_in_bs_tree() {}
+EOF
+ln -s ../../b/src/shared_impl.rs "$D/a/src/shared.rs"
+[ -L "$D/a/src/shared.rs" ] || fail_case "case 60: the in-repo file symlink was not created"
+case "$(readlink "$D/a/src/shared.rs")" in
+  /*) fail_case "case 60: the link must be RELATIVE, or the fixture is not portable" ;;
+esac
+[ -f "$D/a/src/shared.rs" ] || fail_case "case 60: the in-repo file symlink does not resolve"
+printf 'pub mod shared;
+' >>"$D/a/src/lib.rs"
+expect_green "$D" "case 60"
+grep -q 'xpkgfeat' "$TMPROOT/out.txt"   && { cat "$TMPROOT/out.txt"; fail_case "case 60: a feature of the LEXICALLY owning package, gated in an in-repo symlinked module, was still reported dead — ownership is being taken from the resolved path alone"; }
+
+# THE DETECTION-POWER CONTROL: same tree, link removed, so nothing in `a` references it.
+D="$(fixture in-repo-symlinked-file-xpkg-control)"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'xpkgfeat = []'
+cat >"$D/b/src/shared_impl.rs" <<'EOF'
+#[cfg(feature = "xpkgfeat")]
+pub fn a_gate_living_in_bs_tree() {}
+EOF
+run_guard "$D" && { cat "$TMPROOT/out.txt"; fail_case "case 60 (control): with no link into a's tree, a's xpkgfeat has no reference site in a and MUST read dead — the union has degraded into blanket crediting and the guard can no longer detect a dead feature"; }
+grep -q 'xpkgfeat' "$TMPROOT/out.txt"   || { cat "$TMPROOT/out.txt"; fail_case "case 60 (control): the guard failed but did not name xpkgfeat — a bare non-zero exit is not evidence"; }
+ok "an IN-REPO symlinked FILE crossing package trees credits the LEXICALLY owning package's feature, and removing the link restores the DEAD verdict (detection power intact)"
+
+# --- 61. RED + control: an IN-REPO symlinked DIRECTORY crossing package trees --
+# The directory level of case 60. Case 54 refuses an out-of-repo symlinked directory; an
+# in-repo one is legitimate and must be ATTRIBUTED, not refused — and attributed to the
+# tree that lexically holds it, not only to the destination package.
+D="$(fixture in-repo-symlinked-dir-xpkg)"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'xpkgdirfeat = []'
+mkdir -p "$D/b/src/sharedmod"
+cat >"$D/b/src/sharedmod/inner.rs" <<'EOF'
+#[cfg(feature = "xpkgdirfeat")]
+pub fn a_gate_in_a_shared_dir() {}
+EOF
+ln -s ../../b/src/sharedmod "$D/a/src/sharedmod"
+[ -L "$D/a/src/sharedmod" ] || fail_case "case 61: the in-repo directory symlink was not created"
+[ -f "$D/a/src/sharedmod/inner.rs" ] || fail_case "case 61: the in-repo directory symlink does not resolve"
+expect_green "$D" "case 61"
+grep -q 'xpkgdirfeat' "$TMPROOT/out.txt"   && { cat "$TMPROOT/out.txt"; fail_case "case 61: a feature gated inside an in-repo symlinked DIRECTORY in a's source tree was reported dead"; }
+
+# THE DETECTION-POWER CONTROL, directory level.
+D="$(fixture in-repo-symlinked-dir-xpkg-control)"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'xpkgdirfeat = []'
+mkdir -p "$D/b/src/sharedmod"
+cat >"$D/b/src/sharedmod/inner.rs" <<'EOF'
+#[cfg(feature = "xpkgdirfeat")]
+pub fn a_gate_in_a_shared_dir() {}
+EOF
+run_guard "$D" && { cat "$TMPROOT/out.txt"; fail_case "case 61 (control): with no link into a's tree, a's xpkgdirfeat MUST read dead"; }
+grep -q 'xpkgdirfeat' "$TMPROOT/out.txt"   || { cat "$TMPROOT/out.txt"; fail_case "case 61 (control): the guard failed but did not name xpkgdirfeat"; }
+ok "an IN-REPO symlinked DIRECTORY crossing package trees is attributed to the lexically owning package (not refused), and removing the link restores the DEAD verdict"
+
 # --- CASE COUNT: EXACT, not a floor ------------------------------------------
 # #3544's lesson is this suite's own subject: a span-replacing edit once deleted four
 # cases from a suite and it reported "failed: 0" over the shrunken remainder. A FLOOR
 # below the real count tolerates exactly that — one case can be deleted and the guard
 # still greens (roborev job 50, finding 5) — so the count is pinned EXACTLY. Adding a
 # case means changing this number in the same diff, deliberately.
-CASE_COUNT_EXPECTED=59
+CASE_COUNT_EXPECTED=61
 [ "$CASES" -eq "$CASE_COUNT_EXPECTED" ] \
   || fail_case "CASE COUNT: $CASES cases ran, expected EXACTLY $CASE_COUNT_EXPECTED. Cases were deleted, skipped or added without updating this assertion; a green tally over a changed suite certifies nothing."
 

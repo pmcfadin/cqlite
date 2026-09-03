@@ -451,7 +451,9 @@ CONTRACT_LINE = (
     "package; a .rs file that NO TARGET COVERS credits EVERY workspace member (any of them "
     "could reach it via #[path]/include!, which this scan does not resolve), and one under "
     "a nested member's dir credits the outer member too; indirectly redundant dependency "
-    "edges."
+    "edges; and an IN-REPOSITORY symlinked source directory is attributed through ONE "
+    "level of aliasing, so a shared directory reachable only THROUGH another symlinked "
+    "directory credits the lexical owner of the outer link alone."
 )
 
 STR_SENTINEL = "\x01"   # every byte of a string literal, in the cleaned text
@@ -1233,6 +1235,30 @@ def _walk_error(err):
 # the refusal fires on ZERO cases here and cannot red a gate on current content.
 scanned_files = 0
 visited_dirs = {os.path.realpath(REPO_ROOT)}
+# real directory -> every lexical path inside a target source tree that reaches it.
+# Populated during the walk (above the traversal dedup) and consumed by
+# `_spellings_of` when attributing a file. One level of aliasing is resolved; a link
+# reached only THROUGH another link is not, and that residual is declared in the
+# contract line rather than silently assumed away.
+dir_aliases = {}
+
+# Files in scope, as (lexical, resolved) pairs, attributed only after the walk -- see
+# the note at the `pending_files.append` site.
+pending_files = []
+
+
+def _spellings_of(raw, full):
+    """Every in-repo path this file is compiled under: lexical, resolved, and any
+    alias of a containing symlinked directory."""
+    out = {raw, full}
+    for real_d, lexical_dirs in dir_aliases.items():
+        if full == real_d or full.startswith(real_d + os.sep):
+            suffix = full[len(real_d):]
+            for lex in lexical_dirs:
+                out.add(lex + suffix)
+    return out
+
+
 for dirpath, dirnames, filenames in os.walk(REPO_ROOT, onerror=_walk_error, followlinks=True):
     keep = []
     for d in dirnames:
@@ -1240,6 +1266,16 @@ for dirpath, dirnames, filenames in os.walk(REPO_ROOT, onerror=_walk_error, foll
             continue
         full_d = os.path.join(dirpath, d)
         real_d = os.path.realpath(full_d)
+        # RECORD EVERY LEXICAL SPELLING, INCLUDING THE ONE WE ARE ABOUT TO PRUNE
+        # (roborev job 115, directory half). The traversal dedup below is correct and
+        # stays -- it is what stops a self-referential link looping -- but it pruned the
+        # SECOND spelling of a shared directory before any file in it was seen, so the
+        # file-level union could never see that spelling and the package holding the link
+        # got no credit. Worse, WHICH spelling survived was `os.scandir` order: the very
+        # same tree passed or failed depending on the filesystem. Traversal is
+        # deduplicated; ATTRIBUTION is not.
+        if _within_target_tree(full_d):
+            dir_aliases.setdefault(real_d, set()).add(full_d)
         if real_d in visited_dirs:
             continue
         if os.path.islink(full_d) and not (real_d == REPO_ROOT or real_d.startswith(REPO_ROOT + os.sep)):
@@ -1272,11 +1308,20 @@ for dirpath, dirnames, filenames in os.walk(REPO_ROOT, onerror=_walk_error, foll
             # Outside every target source tree: the scan never treated it as source, so
             # there is nothing to be wrong about. Skipped, as before.
             continue
-        # BOTH spellings, lexical first (roborev job 115): `full` alone attributed an
-        # in-repo symlink crossing package trees to the destination package only, and a
-        # feature of the SOURCE package gated in that module read DEAD -- a false FAIL.
-        owners = owners_of(raw, full)
-        bs_owners = buildscript_owners_of(raw, full)
+        # DEFERRED TO PHASE 2 (roborev job 115). Attribution cannot happen here: the
+        # alias map is still being built, and the spelling that credits the SOURCE
+        # package of a shared directory may not be recorded until later in the walk --
+        # in the measured case it was recorded AFTER the file had already been scanned
+        # and attributed to the destination package alone. So the walk only decides
+        # WHICH files are in scope; ownership is settled once, afterwards, when every
+        # spelling is known. Order-independent by construction, which the previous
+        # arrangement was not.
+        pending_files.append((raw, full))
+
+for raw, full in pending_files:
+        spellings = _spellings_of(raw, full)
+        owners = owners_of(*spellings)
+        bs_owners = buildscript_owners_of(*spellings)
         if not owners and not bs_owners:
             # Not a source file of any workspace-member target and not inside a
             # build-script package: a non-member crate's source (the measurement
