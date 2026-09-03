@@ -1509,6 +1509,14 @@ if ! cp "$ASSERT" "$MUTDIR/premerge-assert.sh"; then
 else
   printf '%s\n' "$NEUTRAL_ADV" >"$MUTDIR/base-staleness.sh"
   chmod +x "$MUTDIR/base-staleness.sh"
+  # #3752: the assert now REQUIRES premerge-review-binding.sh beside it and exits 3
+  # TOOL-FAILURE when it is absent — correctly, since a guard that silently does not
+  # run is worse than no guard. A scratch copy of the ARTIFACT must therefore stage
+  # the helper too, or this non-vacuity control measures the MISSING HELPER instead
+  # of the neutered ancestry call: the mutant would exit 3 and the case would report
+  # that 44(b) proves nothing, when in fact the fixture was incomplete.
+  printf '%s\n' "$NEUTRAL_BINDING" >"$MUTDIR/premerge-review-binding.sh"
+  chmod +x "$MUTDIR/premerge-review-binding.sh"
   # The call site, replaced by the assignment it would have made on success.
   # shellcheck disable=SC2016  # a LITERAL line of another script; it must not expand here
   MUT_FROM='  assert_anchor_on_history "$delta_anchor" "$certified"'
