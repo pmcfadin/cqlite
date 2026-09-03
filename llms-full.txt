@@ -2458,6 +2458,31 @@ The 2-low root pointed at exactly the subtree the un-prefixed bounds were keyed 
 
 **Rule.** For any on-disk framing/encoding property, the oracle must be **Cassandra-written bytes or Cassandra source**, never CQLite’s own output. A round-trip test is a useful regression net for internal invariants; it is not parity evidence.
 
+### The projected-column blind spot (point-vs-scan on a SUBSET of columns, issue #3890)
+
+[Section titled “The projected-column blind spot (point-vs-scan on a SUBSET of columns, issue #3890)”](#the-projected-column-blind-spot-point-vs-scan-on-a-subset-of-columns-issue-3890)
+
+Every blind spot above is about which **oracle** you compare against. This one is about **how much of the row** you compare, and it is the cheapest of the five to reintroduce:
+
+> **A point-read test that compares a SUBSET of columns against the scan cannot see a TRUNCATED point row.**
+
+`assert_point_equals_scan` (`cqlite-core/tests/issue_1573_readat_positional.rs`) projected `id` plus one named column and ran `SELECT id, <col>` on both legs. `SELECT id, name` decodes the first two cells and stops, so a point read whose *later* cells failed to decode compared equal on exactly the two columns under comparison — and stayed green for years.
+
+Two properties turn “under-tested” into “invisible”:
+
+1. **The failure does not propagate.** A cell-decode error inside the row loop is swallowed — `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/row_data.rs` logs it at `debug` and `break`s out of the column loop (removing that swallow is issue #3721). So the query returns `Ok`.
+2. **The failure has no positive signal.** The cells after the failure point are simply **absent** from the row’s `values` map. A `get(col)` comparison over the columns you named cannot notice a column you did not name.
+
+**Rule.** A point/seek-vs-scan comparison runs `SELECT *` and asserts **both directions** of the column set — no scan column absent from the point row, no point column the scan lacks — and names the missing column in the failure message. Row counts and whole-row fingerprint *sets* are not substitutes: neither says, per row, which column went missing.
+
+**The corpus-wide instance** is `cqlite-core/tests/issue_3890_point_read_column_parity_sweep.rs`: it derives its table set at run time from `test-data/schemas/**/*.cql` intersected with the `*-Data.db` components on disk (never a curated list), sweeps every table it can express, and prints by name every table it cannot — `no-schema`, `unrenderable-key`, `empty` — because a lane that omits coverage silently is indistinguishable from one that covers it.
+
+**And its bound is measured, not chosen** — a bound tight enough to cost nothing can be tight enough to miss most of what it exists to catch, so when you cap a sweep, measure what the cap EXCLUDES. Raising that sweep’s per-table cap from 4 to 32 multiplied what it detects several times over while leaving the whole run under a second (962 targeted reads over 101 tables, a runtime anyone can reproduce with `cargo test`).
+
+**A cap is only as reproducible as its SELECTION, and that is the subtler half.** The first version stopped collecting after 32 distinct keys in *scan* order and sorted afterwards, while its own doc said “the first 32 in sorted order” — so which keys got swept moved with scan ordering. Fixing it to collect every distinct key first and apply the cap in sorted order *changed the detection count outright*, from the same corpus against the same defect. Neither count was wrong; they were counts over different samples. If you quote what a cap detects, quote the selection with it.
+
+**The detection figures themselves live in that test’s module header, not here, and the reason is a rule in its own right.** Measuring a guard’s detection power requires instrumenting the swallowed error AND reverting the fix — detection is only meaningful against the defect PRESENT (the “membership is not detection” rule). So the numbers are not reproducible from committed source, and a figure in doctrine that nobody can re-derive from the repo is worse than no figure: it is what stops the next person looking. Keep such numbers beside the code they describe, with the command, the cap value and the revert step written out.
+
 ## Golden JSONL files
 
 [Section titled “Golden JSONL files”](#golden-jsonl-files)
