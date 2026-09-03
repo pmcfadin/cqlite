@@ -3204,6 +3204,23 @@ if [ "$SKIP_CLAUDE_AUTH" = 1 ]; then
   info "this section only ever REPORTS (#3733); drop the opt-out to see the two observation lines"
 elif [ ! -r "$CLAUDE_AUTH_LIB" ]; then
   info "claude-auth: UNREPORTED (scripts/claude-auth-capability.sh missing from this checkout — nothing here can produce the observation lines)"
+  # THE OBSERVATION LINE ABOVE STAYS A NON-VERDICT; A REQUESTED REPAIR THAT COULD NOT EVEN BE
+  # ATTEMPTED IS AN ACTION FAILURE (#3733). This branch never consulted FIX_CLAUDE_AUTH, so
+  # `--fix-claude-auth` against a checkout with no capability script meant the operator's
+  # explicitly requested repair silently did not happen and the run could still exit 0,
+  # `--strict` included. THIRD INSTANCE OF ONE FAMILY on this branch — the discarded pipeline
+  # status, the half-done seed, and now a repair that never ran at all: an action the operator
+  # requested vanished without affecting the status.
+  #
+  # THE BOUNDARY IS NARROW AND DELIBERATE. The `info` above is not upgraded: nothing here is
+  # certified, so there is no green to buy, and a `warn` on that line would make `--strict`
+  # fail on something the #3733 ruling says is not a verdict. What IS a legitimate verdict is
+  # whether an ACTION completed, which is observable from the action's own outcome. So the
+  # observation stays as it was and the requested-repair case is reported beside it.
+  if [ "$FIX_CLAUDE_AUTH" = 1 ]; then
+    warn "claude-auth-repair: the repair you requested with --fix-claude-auth COULD NOT BE ATTEMPTED — $CLAUDE_AUTH_LIB is missing or unreadable, and it is what knows how to seed a tmux server. Nothing was changed on this box"
+    info "restore the file (it is committed: scripts/claude-auth-capability.sh) and re-run, or seed by hand:  tmux setenv -g CLAUDE_CODE_OAUTH_TOKEN \"\$TOKEN\"; tmux setenv -g CLAUDE_CONFIG_DIR \"\$CLAUDE_CONFIG_DIR\""
+  fi
 else
   CLAUDE_AUTH_SECTION_OK=1
 fi

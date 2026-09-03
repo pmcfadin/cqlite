@@ -1771,6 +1771,16 @@ claude_auth_case 'a 401 embedded in a larger number is NOT a rejection' s29i 1 \
 # =====================================================================================
 # run_bootstrap_in <shimdir> <envfile> <args...>: the same pinned, offline invocation as
 # section 18, parameterised so a case can vary the planted verdicts.
+# run_bootstrap_root <root> <shimdir> <envfile> <args...>: as run_bootstrap_in, but against
+# a CALLER-CHOSEN sandbox root, so a case can drive a root whose capability script is absent.
+# The root is always a COPY under $tmp — this suite never makes its own checkout unreadable.
+run_bootstrap_root() {
+  local rt="$1" sd="$2" evf="$3"; shift 3
+  PATH="$sd:$PATH" env CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 \
+    CQLITE_CLAUDE_AUTH_ENV_FILE="$evf" HOME="$tmp/home" \
+    CQLITE_PROJECT_ACCOUNT="$BS_ACCOUNT" CQLITE_PROJECT_OWNER=pmcfadin CQLITE_PROJECT_NUMBER=1 \
+    bash "$rt/scripts/bootstrap-agent-machine.sh" "$@" 2>&1
+}
 run_bootstrap_in() {
   local sd="$1" evf="$2"; shift 2
   PATH="$sd:$PATH" env CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 \
@@ -2657,6 +2667,96 @@ else
 fi
 
 # =====================================================================================
+# 42. A REQUESTED REPAIR THAT COULD NOT EVEN BE ATTEMPTED IS AN ACTION FAILURE (#3733).
+#     The `[ ! -r "$CLAUDE_AUTH_LIB" ]` branch printed `claude-auth: UNREPORTED` through
+#     `info` and never consulted FIX_CLAUDE_AUTH — so `--fix-claude-auth` with the capability
+#     script missing or unreadable meant the operator's explicitly requested repair silently
+#     did not happen and the run could still exit 0, `--strict` included. Third instance of
+#     one family on this branch (the discarded pipeline status, the half-done seed, and now a
+#     repair that never ran at all): AN ACTION THE OPERATOR REQUESTED VANISHED WITHOUT
+#     AFFECTING THE STATUS.
+#     THE LICENCE IS THE ONE ALREADY ESTABLISHED, and the boundary is narrow. The OBSERVATION
+#     lines stay `info`: nothing is certified, so there is no green to buy, and a `warn` there
+#     would make `--strict` fail on a line the #3733 ruling says is not a verdict. What is a
+#     legitimate verdict is whether an ACTION completed — observable from the action's own
+#     outcome. So the UNREPORTED line is untouched and a REQUESTED-repair-impossible case is
+#     added beside it.
+#     HOW THE STATUS IS ASSERTED, stated plainly because a proxy here would be the very
+#     defect: in bootstrap `warn()` IS the mechanism `--strict` reads (it increments the
+#     counter `--strict` exits 1 on). So the attributable assertion is the warn-count DELTA
+#     between the same sandbox with and without `--fix-claude-auth` — a bare `--strict` exit
+#     code is NOT attributable here, because this sandbox has ambient warnings (an
+#     origin-less root, the push-probe opt-out) that red it either way.
+# =====================================================================================
+# A ROOT WITH NO CAPABILITY SCRIPT. A copy under $tmp with the library removed — the same
+# `[ ! -r ]` branch an unreadable one takes, without leaving a mode-000 file behind.
+bs_nolib="$tmp/bs-root-nolib"; mkroot "$bs_nolib"; rm -f "$bs_nolib/scripts/claude-auth-capability.sh"
+d42=$(mkshim "$tmp/s42"); plant_bootstrap_quiet_stubs "$d42"
+bs42fix=$(run_bootstrap_root "$bs_nolib" "$d42" "$ef2" --skip-smoke --skip-push-probe --fix-claude-auth)
+bs42no=$(run_bootstrap_root "$bs_nolib" "$d42" "$ef2" --skip-smoke --skip-push-probe)
+printf '%s\n%s\n' "$bs42fix" "$bs42no" >>"$TRANSCRIPT"
+# THE FIXTURE MUST HAVE REACHED THE MISSING-LIBRARY BRANCH, asserted first.
+if grep -q 'claude-auth: UNREPORTED' <<<"$bs42fix"; then
+  ok "requested repair impossible: the fixture reached the missing-capability-script branch"
+else
+  bad "requested repair impossible: the fixture did not reach the UNREPORTED branch, so this case tests nothing: $(printf '%s' "$bs42fix" | sed -n '/Claude credential/,/^$/p' | head -6)"
+fi
+if bs_marked "$bs42fix" warn 'claude-auth' >/dev/null; then
+  ok "requested repair impossible: --fix-claude-auth with no capability script emits a [warn]"
+else
+  bad "requested repair impossible: the requested repair vanished silently — no [warn], so bootstrap can exit 0 under --strict: $(printf '%s' "$bs42fix" | sed -n '/Claude credential/,/^$/p' | head -8)"
+fi
+# THE NO-FIX PATH IS UNCHANGED: an observation that could not be produced is not a failure.
+if bs_marked "$bs42no" warn 'claude-auth' >/dev/null; then
+  bad "requested repair impossible: a run that requested NO repair now warns about the missing script — that turns a non-verdict line into one --strict fails on: $(bs_marked "$bs42no" warn 'claude-auth')"
+else
+  ok "requested repair impossible: with no repair requested the UNREPORTED line stays a non-verdict (no [warn])"
+fi
+w42f=$(bs_marked "$bs42fix" 'ok|warn' '.' 2>/dev/null | grep -c '\[warn\]')
+w42n=$(bs_marked "$bs42no" 'ok|warn' '.' 2>/dev/null | grep -c '\[warn\]')
+if [ "$w42f" -eq "$((w42n + 1))" ]; then
+  ok "requested repair impossible: the requesting run carries EXACTLY ONE more [warn] ($w42f vs $w42n), which is what --strict counts"
+else
+  bad "requested repair impossible: the warning counts differ by $((w42f - w42n)), not 1 (requested=$w42f not-requested=$w42n) — the red is not attributable to the vanished repair"
+fi
+
+# =====================================================================================
+# 43. OPT-OUT PLUS --fix-claude-auth IS ALREADY DECIDED — BOTH WAYS — AND MUST SAY SO.
+#     NOT AMBIGUOUS, and this pins it rather than re-litigating it. The flag-parsing block
+#     resolves the pair explicitly and the reasoning is at that site:
+#       * an EXPLICIT `--skip-claude-auth` beside `--fix-claude-auth` is a USAGE ERROR,
+#         exit 2 (already pinned by the contradictory-flags case in section 18) — two
+#         explicit, opposite intents must not resolve silently;
+#       * the ENV spelling `CQLITE_BOOTSTRAP_SKIP_CLAUDE_AUTH=1` is the WEAKER signal, so an
+#         explicit `--fix-claude-auth` OVERRIDES it — a harness exporting the opt-out on a
+#         fixed command line must not be able to neuter a caller's explicit repair.
+#     SO THE SECTION'S OPT-OUT BRANCH CAN NEVER WIN OVER AN EXPLICIT `--fix-claude-auth`.
+#     What WAS missing is that the override happened SILENTLY: the operator opted out via the
+#     environment, asked for a repair, and got one with nothing saying which intent lost.
+#     That is the same "a requested action's fate is unstated" shape as section 42, so it is
+#     reported rather than left implicit.
+# =====================================================================================
+d43=$(mkshim "$tmp/s43"); plant_bootstrap_quiet_stubs "$d43"
+plant_claude_probe_env "$d43"; plant_tmux_stateful "$d43" "$TOK_OTHER" "$CFGDIR"
+bs43=$(CQLITE_BOOTSTRAP_SKIP_CLAUDE_AUTH=1 run_bootstrap_in "$d43" "$ef2" --skip-smoke --skip-push-probe --fix-claude-auth)
+printf '%s\n' "$bs43" >>"$TRANSCRIPT"
+if grep -q 'claude-auth: OPT-OUT' <<<"$bs43"; then
+  bad "opt-out override: the env opt-out won over an EXPLICIT --fix-claude-auth — a harness can neuter a caller's repair: $(printf '%s' "$bs43" | grep 'claude-auth: OPT-OUT')"
+else
+  ok "opt-out override: an explicit --fix-claude-auth overrides the ENV opt-out (the section ran)"
+fi
+if grep -q 'claude-tmux-env: SERVER-CARRIES-BOTH' <<<"$bs43"; then
+  ok "opt-out override: ...and the repair it asked for actually happened"
+else
+  bad "opt-out override: the override reported no completed repair: $(printf '%s' "$bs43" | grep 'claude-tmux-env:')"
+fi
+if grep -qi 'opt-out.*overrid\|overrid.*opt-out' <<<"$bs43"; then
+  ok "opt-out override: the run STATES that the env opt-out was overridden by the explicit flag"
+else
+  bad "opt-out override: the override is SILENT — the operator cannot tell which of their two intents lost: $(printf '%s' "$bs43" | sed -n '/Claude credential/,/^$/p' | head -6)"
+fi
+
+# =====================================================================================
 # 37. ROOT MUST CREATE EVERYTHING IT OWNS **BEFORE** IT TRANSFERS THE DIRECTORY (#3733,
 #     was LIMITATION 4 of 5, now FIXED).
 #     WHY THIS ONE IS NOT COVERED BY THE "IT IS ONLY A REPORT" RULING. The other four
@@ -2947,9 +3047,9 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # a host without `uname` is a named refusal at startup, because that host would take the
 # non-Linux branch in every case. Raised 91 -> 122 by round 4 (the digest identity of a
 # delivered credential, the sudo-posture cases, and the bounding class), 122 -> 124 by
-# round 5's two probe-working-directory interrupt cases, and 124 -> 163 by #3733's
-# DEMOTION, the handover fix, the two repair-status fixes, the bounded report read and the
-# argument validation.
+# round 5's two probe-working-directory interrupt cases, and 124 -> 170 by #3733's
+# DEMOTION, the handover fix, the three repair-status fixes, the bounded report read, the
+# argument validation and the opt-out-override report.
 # Sections 34-36 (the
 # no-certification invariant, the alternate-credential observation, the
 # limitation-findability guard and the live/FIXED split), section 37 (the handover ordering,
@@ -2959,13 +3059,16 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # success, and a COMPLETE one must still exit 0), and the assertions that changed subject
 # where a verdict became an observation, and section 40 (the pane report is read ONCE, under
 # the bound — the fifo-substitution BLOCKER) and section 41 (unknown/extra arguments are
-# refused with status 2 and never reach the billed probe). 166 cases run, and the real-tmux
-# isolation case (3 assertions) is still the only legitimately skippable one.
+# refused with status 2 and never reach the billed probe), section 42 (a requested repair
+# that could not be ATTEMPTED is an action failure) and section 43 (opt-out plus
+# --fix-claude-auth is already decided both ways, and says which intent lost). 173 cases run,
+# and the real-tmux isolation case (3 assertions) is still the only legitimately skippable
+# one.
 # THE FIGURE IS MEASURED, NOT COUNTED BY EYE, AND IT IS RE-MEASURED WHENEVER IT MOVES:
 # forcing the tmux block's `command -v tmux` test to `true` in a throwaway `git worktree`
-# reports 163/0/1. The value in this file is the authority — a figure quoted in a commit
+# reports 170 always-run (169/1/1 while section 43 was still red). The value in this file is the authority — a figure quoted in a commit
 # message is a snapshot of the run that produced it and does not follow later edits.
-CASE_FLOOR=163
+CASE_FLOOR=170
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1
