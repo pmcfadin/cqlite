@@ -29,10 +29,10 @@ writes a `cqlite.db` beside itself, which must not land in either worktree):
 
 | leg | tree | commit |
 |---|---|---|
-| BEFORE | `git worktree --detach` at `merge-base(HEAD, origin/main)` | `fb889e227` |
-| AFTER | this branch | `6a3b1c1d5` |
+| BEFORE | `git worktree --detach` at `merge-base(HEAD, origin/main)` | `d659de8fc` |
+| AFTER | this branch | `412fcd92e` |
 
-Only `docs/round-artifacts/**` changes after `6a3b1c1d5` (this file and its two TSVs),
+Only `docs/round-artifacts/**` changes after `412fcd92e` (this file and its two TSVs),
 so the AFTER leg covers every code commit on the branch.
 
 ## Result: byte-for-byte identical
@@ -71,6 +71,20 @@ harness did not capture per file. The prior run's `UNPARSEABLE` / `ERROR(rc=5)` 
 is preserved in git history if that distinction is ever needed. Stated rather than
 papered over: what is established here is per-file OUTPUT equality between the two
 trees, which is the non-regression property, not a diagnosis of the 14.
+
+### A base-vs-head census is INVARIANT to `main` advancing — measured, not argued
+
+This census was run twice: once at base `fb889e227` / head `6a3b1c1d5`, then again after
+a rebase at base `d659de8fc` / head `412fcd92e` — **27 `main` commits apart**, one of
+which (#3644, `29d0ae533`) changed CLI JSON egress for `decimal` and `varint`. Both
+TSVs came out **byte-identical** across the two runs.
+
+That is the empirical form of the reason this artifact does not need re-running every
+time `main` moves: the comparison is BASE vs HEAD, so a change on `main` moves **both**
+legs and cancels. What invalidates it is a change to **this branch's own diff** — which
+is exactly what happened the first time (the AFTER leg predated six of this branch's
+own commits) and is the only staleness that matters. Stated as a measurement rather
+than an argument because a property nobody measured is a property nobody has.
 
 ### The hash column is not comparable to the PREVIOUS artifact
 
