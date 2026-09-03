@@ -481,7 +481,10 @@ fn the_byte_backed_families_are_not_admitted_because_empty_is_meaningful_there()
 /// Measured before this issue: 40. Measured after: 40 — the sentinel's payload
 /// is a fieldless 1-byte tag, which fits in the existing padding of the widest
 /// (32-byte `Bytes`) variant. An inline `CqlType` payload would have taken
-/// `Value` to 64 (`size_of::<CqlType>() == 56`), which is why the tag exists.
+/// `Value` to 56 (`size_of::<CqlType>()` is 48, measured), which is why the tag
+/// exists — pinned below as the inequality that actually decides it, so a future
+/// `CqlType` that SHRANK past the ceiling would surface as a named failure
+/// inviting a re-evaluation rather than leaving a stale comment.
 #[test]
 fn the_value_layout_pin_is_unmoved_at_40_bytes() {
     assert_eq!(
@@ -494,5 +497,12 @@ fn the_value_layout_pin_is_unmoved_at_40_bytes() {
         std::mem::size_of::<EmptyValueType>(),
         1,
         "EmptyValueType is no longer a fieldless tag; re-measure the Value pin"
+    );
+    assert!(
+        std::mem::size_of::<CqlType>() > 32,
+        "size_of::<CqlType>() now fits inside Value's 40-byte ceiling ({} bytes); \
+         re-evaluate whether the sentinel should carry a CqlType directly \
+         instead of the EmptyValueType tag",
+        std::mem::size_of::<CqlType>()
     );
 }

@@ -30,12 +30,16 @@ use serde::{Deserialize, Serialize};
 ///    `schema/ColumnMetadata.java:457-467` (`validateCellPath`) would itself
 ///    reject it. A closed tag makes `Empty(tinyint)` UNCONSTRUCTIBLE; a
 ///    `Box<CqlType>` payload would happily admit it.
-/// 2. **The [`Value`] size pin.** `size_of::<CqlType>()` is 56 (its widest
-///    variant is `Udt(String, Vec<(String, CqlType)>)` = 24 + 24 + tag), so an
-///    inline `CqlType` would take `Value` to 64 and break the 40-byte ceiling
-///    below. A `Box<CqlType>` would fit but costs a heap allocation per sentinel
-///    and buys nothing over a 1-byte tag. This tag is fieldless, so
-///    `size_of::<EmptyValueType>() == 1` and `Value` stays at 40.
+/// 2. **The [`Value`] size pin.** `size_of::<CqlType>()` is **48, measured**
+///    (its widest variant is `Udt(String, Vec<(String, CqlType)>)` = 24 + 24,
+///    with a niche-packed discriminant), so an inline `CqlType` would take
+///    `Value` to **56** and break the 40-byte ceiling in `types.rs`. A
+///    `Box<CqlType>` would fit but costs a heap allocation per sentinel and buys
+///    nothing over a 1-byte tag. This tag is fieldless, so
+///    `size_of::<EmptyValueType>()` is 1 and `Value` stays at 40 (both measured;
+///    pinned in `cqlite-core/tests/issue_3805_empty_value_sentinel.rs`, which
+///    also pins the load-bearing inequality `size_of::<CqlType>() > 32` rather
+///    than trusting this prose).
 ///
 /// # Membership rule (source-derived, not curated)
 ///
