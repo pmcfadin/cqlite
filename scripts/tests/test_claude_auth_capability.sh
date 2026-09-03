@@ -253,6 +253,13 @@ EOF
 #                 (still inside the probe bound, and the pane still reports). The only mode
 #                 that puts an interrupt INSIDE the cold probe's own working-directory
 #                 lifetime, which is what the interrupt-safety case below needs.
+#   fiforesult  — no server, and the would-be server replaces the pane's REPORT PATH with a
+#                 FIFO whose writer emits one complete report (satisfying the bounded wait
+#                 loop, which CONSUMES it — a fifo is not seekable) and then holds the fifo
+#                 open without writing again. So every LATER open of that path blocks
+#                 forever. This is the post-handover substitution hazard made deterministic:
+#                 a same-uid peer lane can do exactly this to the handed-over directory
+#                 (#3733 F1).
 #   seedfail    — reads exactly like `stale`, but every `setenv` is RECORDED and then FAILS.
 #                 The one mode in which an explicitly requested repair is REACHED and does
 #                 not complete, which is the only way to observe what bootstrap does with
@@ -298,6 +305,18 @@ case "\$1" in
     done
     printf 'new-session sock=%s\n' "\$sock" >>"\$log"
     case '$mode' in
+      fiforesult)
+        # The command the probe passes is `sh 'DIR/probe.sh' 'RES'` — a fixed shape, since
+        # the probe REFUSES a directory containing a quote or whitespace. Take the last
+        # single-quoted word as the report path.
+        __r="\${cmd##* \'}"; __r="\${__r%\'}"
+        rm -f "\$__r"
+        mkfifo "\$__r" || exit 1
+        # ONE complete report, then hold the writer open WITHOUT writing again. The wait
+        # loop's `grep` consumes the bytes; every read after it blocks on an empty fifo.
+        # Bounded by `sleep` so a killed test leaves nothing running for long.
+        { printf 'tok=set\ntoklen=%s\ntokdig=deadbeef\ncfg=%s\nend\n' "\${#0}" '$cfg'; sleep 45; } >"\$__r" &
+        exit 0 ;;
       probefail) printf 'error connecting to socket\n' >&2; exit 1 ;;
       slowstart)
         # A DEDICATED MARKER, written before the sleep: the interrupt case below must signal
@@ -320,7 +339,7 @@ case "\$1" in
     exit 0 ;;
   show-environment)
     case '$mode' in
-      no-server|probefail|substitute|slowstart) printf 'no server running on %s/tmux-1000/default\n' "\${TMPDIR:-/tmp}" >&2; exit 1 ;;
+      no-server|probefail|substitute|slowstart|fiforesult) printf 'no server running on %s/tmux-1000/default\n' "\${TMPDIR:-/tmp}" >&2; exit 1 ;;
       broken)     printf 'lost server\n' >&2; exit 1 ;;
       wedged)     sleep 120; exit 0 ;;
       missing)    printf 'CLAUDE_CONFIG_DIR=%s\nPATH=/usr/bin\n' '$cfg'; exit 0 ;;
@@ -2511,6 +2530,67 @@ else
 fi
 
 # =====================================================================================
+# 40. THE PANE REPORT IS READ ONCE, UNDER THE BOUND (#3733 F1, BLOCKER).
+#     THE HAZARD. The report lived at a path inside the directory the probe has ALREADY
+#     `chown`ed to the invoking user, and it was read by FOUR unbounded `sed … | tail -1`
+#     calls. On this fleet every lane runs as ONE user, so a peer lane can replace that path
+#     between the bounded wait and those reads — and **replacing it with a FIFO makes root's
+#     `sed` block forever**: an unattended provisioning run hangs with NO verdict at all.
+#     This repo already names that exact shape as grounds for a fatal refusal elsewhere
+#     ("opening one BLOCKS FOREVER, which is a verdict-less stall in an unattended lane").
+#     IT SUPERSEDES A DECLARED RESIDUAL, and that is the lesson worth keeping. The old note
+#     argued the read was safe because the bounded wait loop had already seen the `end` line,
+#     so the file was "complete, regular and small by the time it is read". That argues about
+#     what the file WAS THEN, not about what the path RESOLVES TO NOW — the same shape as
+#     every other finding on this issue: a check placed before the harm cannot bound it.
+#     AND FOUR OPENS ARE FOUR CHANCES TO READ A MUTATED FILE, so today's record could be
+#     internally inconsistent with no attacker at all. Hence ONE bounded read into memory,
+#     then parse in-process, and the terminating marker is re-required on the captured bytes.
+#     BEHAVIOURAL, NOT STRUCTURAL — the substitution is made deterministic rather than raced:
+#     the `fiforesult` stub emits one complete report through a FIFO (the wait loop's `grep`
+#     CONSUMES it, since a fifo is not seekable) and then holds the writer open without
+#     writing again, so every later open of that path blocks forever. Under the old code the
+#     run hangs and only an OUTER timeout ends it; under the fix the probe's own bound fires
+#     and it reports a named cause. Costs ~20s of wall clock: that is the bound doing its job.
+# =====================================================================================
+d40=$(mkshim "$tmp/s40"); plant_tmux "$d40" fiforesult
+f40_t0=$(date +%s)
+f40_rc=0
+# INVOKED WITH AN OUTER `timeout` rather than through run_cap, because the RED state of this
+# case is a HANG: without an outer bound the suite would stall instead of failing, and a
+# stalled suite is not a red. The outer bound is generous relative to the probe's own 20s, so
+# firing it means the probe did not bound itself.
+f40_out=$(timeout 75 env -u SUDO_USER -u SUDO_UID -u CLAUDE_CONFIG_DIR \
+      PATH="$d40:$PATH" CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_CLAUDE_AUTH_ENV_FILE="$ef2" \
+      bash "$CAPLIB" --tmux-env 2>&1) || f40_rc=$?
+f40_elapsed=$(( $(date +%s) - f40_t0 ))
+printf '%s\n' "$f40_out" >>"$TRANSCRIPT"
+# THE FIXTURE MUST HAVE PLANTED ITS FIFO, asserted first: if `mkfifo` was unavailable or the
+# path parse failed, the stub falls through and this case measures an ordinary probe.
+if [ -f "$d40/tmux-calls.log" ] && grep -q '^new-session ' "$d40/tmux-calls.log"; then
+  ok "bounded report read: the fifo fixture reached new-session (the substitution was planted)"
+else
+  bad "bounded report read: the fifo fixture never started a probe, so this case measures nothing: $(cat "$d40/tmux-calls.log" 2>/dev/null)"
+fi
+if [ "$f40_rc" != 124 ] && [ "$f40_rc" != 137 ]; then
+  ok "bounded report read: the run ENDED ITSELF (${f40_elapsed}s) — the outer timeout never had to fire"
+else
+  bad "bounded report read: the run had to be killed by the OUTER timeout after ${f40_elapsed}s — an unbounded read of the report path blocks forever, which is a verdict-less stall in an unattended lane"
+fi
+if grep -q '^claude-tmux-env: ' <<<"$f40_out"; then
+  ok "bounded report read: it still produced an observation line rather than dying silently"
+else
+  bad "bounded report read: no observation line was printed at all: $f40_out"
+fi
+# AND THE CAUSE NAMES THE READ, not the pane: "the pane did not report" would send the reader
+# to tmux for a path that was substituted underneath us.
+if grep '^claude-tmux-env: ' <<<"$f40_out" | grep -qi 'report could not be read\|reading the isolated pane'; then
+  ok "bounded report read: the cause names the READ that was bounded, not a pane that never answered"
+else
+  bad "bounded report read: the cause misattributes a substituted report path: $(grep '^claude-tmux-env: ' <<<"$f40_out")"
+fi
+
+# =====================================================================================
 # 37. ROOT MUST CREATE EVERYTHING IT OWNS **BEFORE** IT TRANSFERS THE DIRECTORY (#3733,
 #     was LIMITATION 4 of 5, now FIXED).
 #     WHY THIS ONE IS NOT COVERED BY THE "IT IS ONLY A REPORT" RULING. The other four
@@ -2801,21 +2881,23 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # a host without `uname` is a named refusal at startup, because that host would take the
 # non-Linux branch in every case. Raised 91 -> 122 by round 4 (the digest identity of a
 # delivered credential, the sudo-posture cases, and the bounding class), 122 -> 124 by
-# round 5's two probe-working-directory interrupt cases, and 124 -> 155 by #3733's
-# DEMOTION, the handover fix and the two repair-status fixes. Sections 34-36 (the
+# round 5's two probe-working-directory interrupt cases, and 124 -> 159 by #3733's
+# DEMOTION, the handover fix, the two repair-status fixes and the bounded report read.
+# Sections 34-36 (the
 # no-certification invariant, the alternate-credential observation, the
 # limitation-findability guard and the live/FIXED split), section 37 (the handover ordering,
 # behavioural + structural + its positive control), section 38 (an explicitly requested
 # repair that FAILED must red, and a SUCCESSFUL one must not), the seam-refusal exit-status
 # pin, the marker-scanner positive control, section 39 (a PARTIAL repair must not report
 # success, and a COMPLETE one must still exit 0), and the assertions that changed subject
-# where a verdict became an observation. 158 cases run, and the real-tmux isolation case
+# where a verdict became an observation, and section 40 (the pane report is read ONCE, under
+# the bound — the fifo-substitution BLOCKER). 162 cases run, and the real-tmux isolation case
 # (3 assertions) is still the only legitimately skippable one.
 # THE FIGURE IS MEASURED, NOT COUNTED BY EYE, AND IT IS RE-MEASURED WHENEVER IT MOVES:
 # forcing the tmux block's `command -v tmux` test to `true` in a throwaway `git worktree`
-# reports 155/0/1. The value in this file is the authority — a figure quoted in a commit
+# reports 159/0/1. The value in this file is the authority — a figure quoted in a commit
 # message is a snapshot of the run that produced it and does not follow later edits.
-CASE_FLOOR=155
+CASE_FLOOR=159
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1

@@ -342,7 +342,8 @@ claude_auth_resolve_timeout() {
 # external invocation in this file is either BOUNDED or declared here as unable to block:
 #   BOUNDED — `claude -p` (90s, the network probe); every `tmux` invocation, live or
 #     throwaway (`show-environment -g`, `setenv -g`, `new-session`, `kill-server`); the
-#     pane-report wait loop; the digest tool; and (below) the identity lookups `id` uses.
+#     pane-report wait loop; THE SINGLE `cat` THAT READS THE PANE REPORT BACK; the digest
+#     tool; and (below) the identity lookups `id` uses.
 #     A DELEGATION PREFIX AND A SCRUBBING `env` ARE INSIDE THE BOUND, NOT IN FRONT OF IT:
 #     `runuser -u`/`sudo -n -u` and `env -u …` are words of the bounded argv, and `env`
 #     EXECVEs its target rather than forking one, so the single process the bound kills is
@@ -360,13 +361,14 @@ claude_auth_resolve_timeout() {
 #       bounding them would make the NOT-PERSISTED verdict itself depend on a `timeout`
 #       binary that a correct box need not have (the read must still work when the probe
 #       cannot run);
-#     * `sed`/`tail` over the pane REPORT file — the ONE read here of a file another process
-#       wrote, so it is declared on its own terms rather than riding on the clause above:
-#       this process CREATED it (`: >` inside a 0700 `mktemp -d`, so it is a regular file,
-#       never a fifo), and the read is reached only after the BOUNDED wait loop has already
-#       observed the terminating `end` line in it — so it is complete, regular and small by
-#       the time it is read, and a wedged or absent pane is the wait loop's outcome, not a
-#       hang here;
+#     * (REMOVED — the pane REPORT file is now BOUNDED, see the list above. Recorded rather
+#       than silently deleted, because the reasoning is the lesson: this entry argued the read
+#       was safe because the bounded wait loop had already observed the terminating `end` line,
+#       so the file was "complete, regular and small by the time it is read". THAT ARGUMENT
+#       WAS UNSOUND. The report path sits inside the directory the probe has ALREADY handed to
+#       the invoking user, so what the wait loop proves is what the file WAS THEN, not what the
+#       path RESOLVES TO NOW; a peer lane replacing it with a fifo made an unbounded read block
+#       FOREVER. It is one bounded `cat` now, parsed in memory;)
 #     * `tr`/`cut` inside the redaction boundary, over a string already in memory — a bound
 #       that fired there would DESTROY the verdict text it is rendering.
 #   NOT AN EXTERNAL CALL AT ALL — `command -v`, `printf` and the `kill -s` signal re-raise
@@ -1390,12 +1392,57 @@ CLAUDE_AUTH_PROBE
     return 0
   fi
 
+  # ---- ONE BOUNDED READ, THEN PARSE IN MEMORY ---------------------------------------
+  # THIS WAS FOUR UNBOUNDED `sed … | tail -1` CALLS, AND IT WAS A BLOCKER (#3733). The report
+  # path lives inside the directory this probe has ALREADY handed to the invoking user, and
+  # on this fleet every lane runs as ONE user — so a PEER LANE can replace that path between
+  # the wait loop and these reads. Replace it with a FIFO and an unbounded read BLOCKS
+  # FOREVER: an unattended provisioning run hangs with no verdict at all, which this repo
+  # already treats as grounds for a fatal refusal rather than a risk to accept.
+  #
+  # IT SUPERSEDES THE RESIDUAL THAT USED TO SIT IN THE BOUNDING CENSUS, and the reason is the
+  # lesson: that note argued the read was safe because the bounded wait loop had already seen
+  # the `end` line, so the file was "complete, regular and small by the time it is read".
+  # That is an argument about what the file WAS THEN, not about what the path RESOLVES TO
+  # NOW — a check placed before the harm cannot bound it, which is the shape this whole issue
+  # has been teaching. The census entry is rewritten to match the code rather than left
+  # asserting a safety argument the code does not have.
+  #
+  # AND FOUR OPENS WERE FOUR CHANCES TO READ A MUTATED FILE, with no attacker required: the
+  # four fields could come from four different versions of the file and the record would be
+  # internally inconsistent. One read fixes that too, so the terminating marker is
+  # RE-REQUIRED on the captured bytes — the wait loop saw `end` in whatever the path was then,
+  # and this asserts it in what we actually parsed. An affirmative re-measurement, not an
+  # inference from the absence of a bad signal.
   local __rtok='' __rlen='' __rcfg='' __rdig='' __match=unmeasured
-  __rtok=$(sed -n 's/^tok=//p' "$__res" 2>/dev/null | tail -1)
-  __rlen=$(sed -n 's/^toklen=//p' "$__res" 2>/dev/null | tail -1)
-  __rdig=$(sed -n 's/^tokdig=//p' "$__res" 2>/dev/null | tail -1)
-  __rcfg=$(sed -n 's/^cfg=//p' "$__res" 2>/dev/null | tail -1)
+  local __report='' __rrc=0 __line='' __sawend=0
+  __report=$(claude_auth_bounded "$CLAUDE_AUTH_TMUX_PROBE_BOUND" cat "$__res" 2>/dev/null)
+  __rrc=$?
+  if [ "$__rrc" -ne 0 ]; then
+    claude_auth_probe_cleanup; claude_auth_probe_restore_traps
+    if claude_auth_bound_fired "$__rrc"; then
+      eval "$__owhy=\"the isolated pane's report could not be read within \${CLAUDE_AUTH_TMUX_PROBE_BOUND}s and the read was KILLED — that path no longer resolves to the regular file the pane wrote (a fifo or a device blocks forever on open), and it sits in a directory already handed to the invoking agent, so nothing could be measured\""
+    else
+      eval "$__owhy=\"the isolated pane's report could not be read back (rc=\$__rrc), so what a new server would deliver is UNKNOWN\""
+    fi
+    return 0
+  fi
+  # A HERE-STRING, NOT A PIPE: a piped `while read` runs in a subshell and every assignment
+  # below would be discarded. Last assignment wins, which is what `| tail -1` did.
+  while IFS= read -r __line; do
+    case "$__line" in
+      end)       __sawend=1 ;;
+      tok=*)     __rtok=${__line#tok=} ;;
+      toklen=*)  __rlen=${__line#toklen=} ;;
+      tokdig=*)  __rdig=${__line#tokdig=} ;;
+      cfg=*)     __rcfg=${__line#cfg=} ;;
+    esac
+  done <<<"$__report"
   claude_auth_probe_cleanup; claude_auth_probe_restore_traps
+  if [ "$__sawend" != 1 ]; then
+    eval "$__owhy=\"the isolated pane's report could not be read as a complete record: the bytes read back carry no terminating 'end' line although the wait loop observed one, so the path changed underneath the probe (truncated, replaced, or a fifo whose bytes another reader consumed)\""
+    return 0
+  fi
   case "$__rlen" in ''|*[!0-9]*) __rlen=0 ;; esac
   # THE IDENTITY, decided here rather than by the caller, so no caller can read a
   # could-not-tell as a match. Both digests are salted with the SAME per-run salt; an empty
