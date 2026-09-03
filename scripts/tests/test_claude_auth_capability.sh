@@ -247,6 +247,10 @@ EOF
 #                 (still inside the probe bound, and the pane still reports). The only mode
 #                 that puts an interrupt INSIDE the cold probe's own working-directory
 #                 lifetime, which is what the interrupt-safety case below needs.
+#   seedfail    — reads exactly like `stale`, but every `setenv` is RECORDED and then FAILS.
+#                 The one mode in which an explicitly requested repair is REACHED and does
+#                 not complete, which is the only way to observe what bootstrap does with
+#                 the repair's exit status (#3733 F1).
 #   wedged      — the server accepts the call and NEVER ANSWERS (show-environment sleeps
 #                 far past any bound). The shape a half-dead tmux server has in the field.
 #   substitute  — no server, and a would-be server SUBSTITUTES a DIFFERENT token of the
@@ -314,7 +318,7 @@ case "\$1" in
       broken)     printf 'lost server\n' >&2; exit 1 ;;
       wedged)     sleep 120; exit 0 ;;
       missing)    printf 'CLAUDE_CONFIG_DIR=%s\nPATH=/usr/bin\n' '$cfg'; exit 0 ;;
-      stale)      printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\nCLAUDE_CONFIG_DIR=%s\n' '$TOK_OTHER' '$cfg'; exit 0 ;;
+      stale|seedfail) printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\nCLAUDE_CONFIG_DIR=%s\n' '$TOK_OTHER' '$cfg'; exit 0 ;;
       incomplete) printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n-CLAUDE_CONFIG_DIR\n' '$TOK'; exit 0 ;;
       complete)   printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\nCLAUDE_CONFIG_DIR=%s\n' '$TOK' '$cfg'; exit 0 ;;
     esac ;;
@@ -327,6 +331,7 @@ case "\$1" in
       shift
     done
     printf 'setenv %s len=%s\n' "\$key" "\${#val}" >>"\$log"
+    case '$mode' in seedfail) exit 1 ;; esac
     exit 0 ;;
 esac
 exit 0
@@ -2383,6 +2388,73 @@ else
 fi
 
 # =====================================================================================
+# 38. AN EXPLICITLY REQUESTED REPAIR THAT FAILED MUST AFFECT THE EXIT STATUS (#3733 F1).
+#     THE FAMILY: `claude_auth_fix_tmux_env | while read; do info; done` DISCARDS the
+#     repair's own status. bootstrap runs `set -uo pipefail`, so the PIPELINE's status is
+#     actually correct — and nothing reads it, and there is no `set -e`. So a failed or
+#     refused repair was followed by re-reporting and the run could still exit 0, `--strict`
+#     included. Same shape as `$?` after a pipe into `head`/`tail` and a trailing `echo`
+#     masking a gate's status: a status that is right and unread.
+#     WHY THIS IS NOT THE VERDICT THE #3733 RULING REMOVED. That ruling forbids a claim that
+#     THE CREDENTIAL IS VALID, because no observation here can establish it. This is a
+#     different subject: whether an ACTION THE OPERATOR EXPLICITLY REQUESTED completed, which
+#     is directly observable from the action's own outcome. An action's success is a
+#     legitimate verdict; a credential's validity is not. Do not "fix" this back.
+#     TWO CASES, AND THE SECOND IS WHY THE FIRST CANNOT BE "ALWAYS warn". The existing
+#     comment deliberately used `info` so `--strict --fix-claude-auth` does NOT red on a
+#     SUCCESSFUL repair the operator asked for. That reasoning is correct and is pinned here,
+#     so a future round cannot satisfy (a) by warning unconditionally.
+# =====================================================================================
+# (a) THE REPAIR FAILS. `seedfail` reads as SERVER-STALE — so the repair branch is REACHED —
+#     and then refuses every setenv.
+d38a=$(mkshim "$tmp/s38a"); plant_bootstrap_quiet_stubs "$d38a"
+plant_claude_probe_env "$d38a"; plant_tmux "$d38a" seedfail
+bs38a=$(run_bootstrap_in "$d38a" "$ef2" --skip-smoke --skip-push-probe --fix-claude-auth)
+printf '%s\n' "$bs38a" >>"$TRANSCRIPT"
+# THE FIXTURE MUST HAVE REACHED AND FAILED THE REPAIR, asserted first: if the branch was
+# never entered, or the seed silently succeeded, the assertion below has no subject.
+if grep -q 'fix FAILED' <<<"$bs38a" && [ -f "$d38a/tmux-calls.log" ] \
+   && grep -q '^setenv CLAUDE_CODE_OAUTH_TOKEN len=' "$d38a/tmux-calls.log"; then
+  ok "repair status: the fixture really did reach the repair and fail it (setenv attempted, fix FAILED reported)"
+else
+  bad "repair status: the fixture did not reach a FAILED repair, so the case below tests nothing: $(printf '%s' "$bs38a" | grep -i 'claude-auth' | head -4)"
+fi
+if bs_marked "$bs38a" warn 'claude-auth' >/dev/null; then
+  ok "repair status: a FAILED explicit repair emits a [warn], so --strict reds on it"
+else
+  bad "repair status: a FAILED explicit repair emitted NO [warn] — its exit status is discarded and bootstrap can still exit 0: $(printf '%s' "$bs38a" | sed -n '/Claude credential/,/^$/p' | head -14)"
+fi
+
+# (b) THE REPAIR SUCCEEDS — and must NOT red. This is the distinction the F1 fix must not
+#     collapse: a verdict about a health finding vs a verdict about a requested action.
+d38b=$(mkshim "$tmp/s38b"); plant_bootstrap_quiet_stubs "$d38b"
+plant_claude_probe_env "$d38b"; plant_tmux_stateful "$d38b" "$TOK_OTHER" "$CFGDIR"
+bs38b=$(run_bootstrap_in "$d38b" "$ef2" --skip-smoke --skip-push-probe --fix-claude-auth)
+printf '%s\n' "$bs38b" >>"$TRANSCRIPT"
+if grep -q 'claude-tmux-env: SERVER-CARRIES-BOTH' <<<"$bs38b"; then
+  ok "repair status: the success fixture really did complete its repair (re-read reports a delivery)"
+else
+  bad "repair status: the success fixture did not complete its repair, so the no-red assertion below is vacuous: $(printf '%s' "$bs38b" | grep 'claude-tmux-env:')"
+fi
+if bs_marked "$bs38b" warn 'claude-auth' >/dev/null; then
+  bad "repair status: a SUCCESSFUL repair emitted a [warn] — --strict --fix-claude-auth would red on a repair that worked: $(bs_marked "$bs38b" warn 'claude-auth')"
+else
+  ok "repair status: a SUCCESSFUL repair emits NO [warn], so --strict --fix-claude-auth does not red on it"
+fi
+# AND THE DIFFERENCE IS EXACTLY ONE WARNING, which is what makes "--strict reds" a
+# measurement rather than an inference: `warn()` increments the counter `--strict` reads, and
+# these two runs differ in nothing but whether the seed succeeded. Counting the DELTA is
+# immune to the sandbox's ambient warnings (an origin-less bs-root, the push-probe opt-out),
+# which a bare `--strict` exit code is not — both runs would exit 1 on those alone.
+w38a=$(bs_marked "$bs38a" 'ok|warn' '.' 2>/dev/null | grep -c '\[warn\]')
+w38b=$(bs_marked "$bs38b" 'ok|warn' '.' 2>/dev/null | grep -c '\[warn\]')
+if [ "$w38a" -eq "$((w38b + 1))" ]; then
+  ok "repair status: the failing run carries EXACTLY ONE more [warn] than the succeeding one ($w38a vs $w38b)"
+else
+  bad "repair status: the failing/succeeding warning counts differ by $((w38a - w38b)), not 1 (failing=$w38a succeeding=$w38b) — the red is not attributable to the repair"
+fi
+
+# =====================================================================================
 # 37. ROOT MUST CREATE EVERYTHING IT OWNS **BEFORE** IT TRANSFERS THE DIRECTORY (#3733,
 #     was LIMITATION 4 of 5, now FIXED).
 #     WHY THIS ONE IS NOT COVERED BY THE "IT IS ONLY A REPORT" RULING. The other four
@@ -2673,18 +2745,20 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # a host without `uname` is a named refusal at startup, because that host would take the
 # non-Linux branch in every case. Raised 91 -> 122 by round 4 (the digest identity of a
 # delivered credential, the sudo-posture cases, and the bounding class), 122 -> 124 by
-# round 5's two probe-working-directory interrupt cases, and 124 -> 146 by #3733's
-# DEMOTION and the handover fix. Sections 34-36 (the no-certification invariant, the
-# alternate-credential observation, the limitation-findability guard and the live/FIXED
-# split), section 37 (the handover ordering, behavioural + structural + its positive
-# control), the seam-refusal exit-status pin, the marker-scanner positive control, and the
-# assertions that changed subject where a verdict became an observation. 149 cases run, and
-# the real-tmux isolation case (3 assertions) is still the only legitimately skippable one.
+# round 5's two probe-working-directory interrupt cases, and 124 -> 151 by #3733's
+# DEMOTION, the handover fix and the repair-status fix. Sections 34-36 (the
+# no-certification invariant, the alternate-credential observation, the
+# limitation-findability guard and the live/FIXED split), section 37 (the handover ordering,
+# behavioural + structural + its positive control), section 38 (an explicitly requested
+# repair that FAILED must red, and a SUCCESSFUL one must not), the seam-refusal exit-status
+# pin, the marker-scanner positive control, and the assertions that changed subject where a
+# verdict became an observation. 154 cases run, and the real-tmux isolation case
+# (3 assertions) is still the only legitimately skippable one.
 # THE FIGURE IS MEASURED, NOT COUNTED BY EYE, AND IT IS RE-MEASURED WHENEVER IT MOVES:
 # forcing the tmux block's `command -v tmux` test to `true` in a throwaway `git worktree`
-# reports 146/0/1. The value in this file is the authority — a figure quoted in a commit
+# reports 151/0/1. The value in this file is the authority — a figure quoted in a commit
 # message is a snapshot of the run that produced it and does not follow later edits.
-CASE_FLOOR=146
+CASE_FLOOR=151
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1

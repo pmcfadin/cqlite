@@ -3284,10 +3284,35 @@ if [ "$CLAUDE_AUTH_SECTION_OK" = 1 ]; then
         info "claude-auth-repair: WARNING — this OVERWRITES the running tmux server's credential with the value persisted in /etc/environment. NOTHING HERE HAS VALIDATED THAT VALUE (#3733: no observation in this section can tell which credential authenticated), so if the server currently holds the only working credential on this box, this destroys it. You asked for it explicitly; proceeding."
         info "claude-auth-repair: seeding the running tmux server from the persisted value (nothing is written to disk)"
         claude_auth_fix_tmux_env | while IFS= read -r claude_fix_line; do info "$claude_fix_line"; done
+        # `${PIPESTATUS[0]}` ON THE VERY NEXT LINE, and BOTH of those are the fix. The
+        # pipeline's own status is the `while` loop's, so the repair function's status was
+        # DISCARDED — and there is no `set -e` to catch it, so a failed or REFUSED repair was
+        # followed by re-reporting and the run could still exit 0, `--strict` included.
+        # THE FAMILY: a status that is right and unread. This session has met it twice
+        # already — `$?` read after a pipe into `head`/`tail`, and a trailing `echo` reporting
+        # over a failed command. Note this file DOES set `pipefail`, so the pipeline's status
+        # happens to be correct here; `PIPESTATUS[0]` is used anyway because it NAMES the
+        # stage we are asking about, and a correctness that depends on an option set 3000
+        # lines away is a coupling the next reader cannot see. It must be read IMMEDIATELY —
+        # any intervening command clobbers the array.
+        claude_fix_rc=${PIPESTATUS[0]}
         # RE-READ, never assumed: `tmux setenv` exiting 0 is a claim about the command, not
         # about the server's environment, and this whole section exists because those are
         # different facts.
-        claude_tmux_env_verdict_into CLAUDE_TMUX_V CLAUDE_TMUX_D ;;
+        claude_tmux_env_verdict_into CLAUDE_TMUX_V CLAUDE_TMUX_D
+        # SUCCESS STAYS SILENT, FAILURE REDS — and the two must not be collapsed. The `info`
+        # above is deliberate: `--strict --fix-claude-auth` must NOT red on a repair the
+        # operator asked for and GOT. But an explicitly requested action that did NOT complete
+        # is a different fact, and it is one this section may legitimately judge: the #3733
+        # ruling forbids claiming THE CREDENTIAL IS VALID (no observation here can establish
+        # that), and says nothing about whether an action completed — which is directly
+        # observable from the action's own outcome. An action's success is a legitimate
+        # verdict; a credential's validity is not. Do not "fix" this back.
+        # The CAUSE is not repeated: `claude_auth_fix_tmux_env` already printed its own
+        # `fix FAILED`/`fix REFUSED`/`fix SKIPPED` line through the `info` above.
+        if [ "$claude_fix_rc" -ne 0 ]; then
+          warn "claude-auth-repair: the repair you requested with --fix-claude-auth did NOT complete (rc=$claude_fix_rc; the cause is on the claude-auth: fix line above). The tmux server was left as found, or seeded only in part — re-read the claude-tmux-env: line below for what it holds now"
+        fi ;;
       *)
         # NO BACKTICKS INSIDE THIS DOUBLE-QUOTED STRING: they are LIVE command
         # substitution here, and the first draft of this line really did run `tmux`.
