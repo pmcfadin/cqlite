@@ -967,6 +967,152 @@ else
 fi
 
 # ===========================================================================
+# PART 4b — THE ENVIRONMENT IS PART OF THE MEASUREMENT (#3551 item 8)
+# ===========================================================================
+# `lib-binaries.sh` freezes and digests three binaries; the session manifest captured NO
+# environment at all. With ONE binary set across all arms — deliberate, and kept — the artifact
+# sets for "glibc" and "jemalloc" therefore differed in NOTHING that is written down, which makes
+# arm C unfalsifiable. And an AMBIENT allocator variable is worse than unrecorded: it would be
+# INHERITED by `ws0-scan-bench`, putting the DRIFT CONTROL on the allocator under test, where the
+# flight arm's own check cannot see it (the system arm's launch sets LD_PRELOAD empty for the
+# SERVER, so the server looks clean while the control arm is perturbed).
+env_lib_call() {
+  local fn="$1"; shift
+  ( set -uo pipefail
+    # shellcheck disable=SC1090
+    source "$FLIGHT_LIB"
+    "$fn" "$@" ) 2>&1
+}
+
+# --- 4b-1. THE AMBIENT RECORD NAMES EVERY KEY, AFFIRMATIVELY -------------------------------
+out=$(env -u LD_PRELOAD -u LD_LIBRARY_PATH -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
+        bash -c "source '$FLIGHT_LIB'; ws0_ambient_env_record" 2>&1)
+if grep -q "LD_PRELOAD=<unset>" <<<"$out" && grep -q "LD_LIBRARY_PATH=<unset>" <<<"$out" \
+   && grep -q "RUSTFLAGS=<unset>" <<<"$out" && grep -q "CARGO_ENCODED_RUSTFLAGS=<unset>" <<<"$out" \
+   && grep -q "MALLOC_VARS=<none>" <<<"$out"; then
+  pass "env record: an absent variable is recorded as an AFFIRMATIVE <unset>/<none>, never as a blank — 'nothing was set' and 'nobody wrote it down' must not look the same"
+else
+  fail "the ambient record must name every key with affirmative markers (out: $out)"
+fi
+# ...and a SET value is recorded VERBATIM, including one carrying a space: this box exports
+# RUSTFLAGS='-D warnings' by default, and ws0-3552 §4 is explicit that it must be stated AS
+# MEASURED — an unrecorded environment has already cost this repo an hour once.
+out=$(env RUSTFLAGS='-D warnings' MALLOC_TOP_PAD_=9 \
+        bash -c "source '$FLIGHT_LIB'; ws0_ambient_env_record" 2>&1)
+if grep -q "RUSTFLAGS=-D warnings" <<<"$out" && grep -q "MALLOC_VARS=MALLOC_TOP_PAD_=9" <<<"$out"; then
+  pass "env record: a set value is recorded VERBATIM (RUSTFLAGS='-D warnings'), and the MALLOC_* family is DISCOVERED by prefix rather than enumerated"
+else
+  fail "a set value must be recorded verbatim and MALLOC_* discovered (out: $out)"
+fi
+
+# --- 4b-2. AN AMBIENT ALLOCATOR VARIABLE IS REFUSED, BOTH VARIABLES ------------------------
+out=$(env MALLOC_ARENA_MAX=2 bash -c "source '$FLIGHT_LIB'; refuse_ambient_allocator_env" 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "MALLOC_ARENA_MAX='2'" <<<"$out" \
+   && grep -q "DRIFT CONTROL" <<<"$out" && grep -q "env -u LD_PRELOAD" <<<"$out"; then
+  pass "ambient env: an ambient MALLOC_ARENA_MAX is REFUSED, naming it, the drift-control reason, and the one-command remedy"
+else
+  fail "an ambient MALLOC_* must be refused (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+out=$(env LD_PRELOAD="$TMP/fake-libjemalloc.so.2" \
+        bash -c "source '$FLIGHT_LIB'; refuse_ambient_allocator_env" 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "LD_PRELOAD='$TMP/fake-libjemalloc.so.2'" <<<"$out"; then
+  pass "ambient env: an ambient LD_PRELOAD is REFUSED naming its value (the flight arm's own check cannot see it — the system arm's launch empties LD_PRELOAD for the SERVER)"
+else
+  fail "an ambient LD_PRELOAD must be refused (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+# THE ACCEPT DIRECTION: a clean environment passes, so this is not a guard that refuses every
+# host. `LD_LIBRARY_PATH` and `RUSTFLAGS` are RECORDED and deliberately NOT refused — they do not
+# change the allocator, and RUSTFLAGS is set by default on this box, so refusing it would red
+# every correct run here.
+out=$(env -u LD_PRELOAD RUSTFLAGS='-D warnings' LD_LIBRARY_PATH=/opt/lib \
+        bash -c "source '$FLIGHT_LIB'; refuse_ambient_allocator_env" 2>&1); rc=$?
+if [ "$rc" -eq 0 ]; then
+  pass "ambient env: a clean-of-allocator environment is ACCEPTED even with RUSTFLAGS and LD_LIBRARY_PATH set — those are recorded, not refused (a guard that reds on this box's default would be waived)"
+else
+  fail "RUSTFLAGS/LD_LIBRARY_PATH must not be refused (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+# ...and the DRIVER refuses too, above its argument boundary, so nothing is executed first.
+out=$(env MALLOC_ARENA_MAX=2 bash -c "cd '$REPO_ROOT'; source scripts/tests/lib-ws0-hermetic.sh; ws0_hermetic_init '$TMP/amb'; ws0_driver_run '$DRIVER' --corpus /nonexistent-corpus" 2>&1); rc=$?
+if [ "$rc" -eq 2 ] && grep -q "carries allocator settings" <<<"$out"; then
+  pass "ambient env: the DRIVER refuses an ambient MALLOC_* at exit 2, above the argument boundary — before any build, sysctl write or cache drop"
+else
+  fail "the driver must refuse an ambient allocator variable (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+
+# --- 4b-3. THE BARE SCAN ASSERTS IT RECEIVED NEITHER ----------------------------------------
+# The drift control must be UNPERTURBED, and that is asserted per rep against the very shell its
+# bench inherits — an affirmative measurement of what the child will receive, not an intention.
+out=$(env -u LD_PRELOAD bash -c "source '$FLIGHT_LIB'; assert_scan_env_unperturbed scan-warm-1" 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "scan env VERIFIED for scan-warm-1" <<<"$out"; then
+  pass "scan env: a clean environment yields affirmative evidence naming the rep (recorded per rep as <tag>.scan-env.status)"
+else
+  fail "the scan-env assertion must pass on a clean environment (rc=$rc, out: $out)"
+fi
+out=$(env MALLOC_ARENA_MAX=4 bash -c "source '$FLIGHT_LIB'; assert_scan_env_unperturbed scan-warm-1" 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "bare-scan rep scan-warm-1 would inherit" <<<"$out" \
+   && grep -q "MALLOC_ARENA_MAX='4'" <<<"$out"; then
+  pass "scan env: a perturbed environment is REFUSED naming the rep and the variable (a perturbed control inverts the comparison rather than adding noise)"
+else
+  fail "the scan-env assertion must refuse a perturbed environment (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+# ...and the LEG calls it, before its bench launches. Structural, because the call ORDER is the
+# property: the check must precede the launches whose inheritance it is about.
+if python3 - "$MEASURE_LIB" <<'PY'
+import sys
+lines = open(sys.argv[1]).read().split("\n")
+start = next(i for i, l in enumerate(lines) if l.startswith("measure_scan() {"))
+call = next(i for i, l in enumerate(lines) if "assert_scan_env_unperturbed" in l)
+launch = next(i for i, l in enumerate(lines)
+              if i > start and "ws0-scan-bench" in l and "taskset" in l)
+assert start < call < launch, (start, call, launch)
+PY
+then
+  pass "scan env (STRUCTURAL): measure_scan calls the assertion BEFORE its first bench launch — the order is the property, since the child inherits the shell as it is at that moment"
+else
+  fail "the scan-env assertion must precede the bench launches in measure_scan"
+fi
+
+# --- 4b-4. THE MANIFEST CARRIES BOTH RECORDS, AND KEY COMPLETENESS IS ENFORCED -------------
+d="$TMP/env-ok"; make_session "$d" "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$d" "$TMP/corpus"
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "^env ambient  : LD_PRELOAD=<unset>" <<<"$out" \
+   && grep -q "^env injected : flight server process ONLY" <<<"$out"; then
+  pass "env manifest: the report prints AMBIENT and INJECTED as SEPARATE lines — a stray operator variable and a deliberate injection are different facts"
+else
+  fail "both env records must be printed (rc=$rc, out: $(grep '^env ' <<<"$out"))"
+fi
+if python3 - "$d/results.json" <<'PY'
+import json, sys
+j = json.load(open(sys.argv[1]))
+e = j["environment"]
+assert "LD_PRELOAD=<unset>" in e["ambient"], e
+assert "flight server process ONLY" in e["injected"], e
+assert "separate fields" in e["note"], e
+PY
+then
+  pass "env manifest: results.json carries both records at the TOP LEVEL with the note that an ambient allocator variable is refused (a reproduction must not have to guess the subsection)"
+else
+  fail "results.json must carry the environment block"
+fi
+# KEY COMPLETENESS: a record that silently dropped a key would read exactly like "that variable
+# was unset" — a different fact, and the permissive one.
+d="$TMP/env-short"; make_session "$d" "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$d" "$TMP/corpus"
+python3 - "$d/session-corpus-pin.json" <<'PY'
+import json, sys
+p = sys.argv[1]; j = json.load(open(p))
+j["config"]["env_ambient"] = "LD_PRELOAD=<unset>; MALLOC_VARS=<none>"
+json.dump(j, open(p, "w"), indent=1)
+PY
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "names no LD_LIBRARY_PATH, RUSTFLAGS, CARGO_ENCODED_RUSTFLAGS" <<<"$out"; then
+  pass "env manifest: an env_ambient missing keys is REFUSED naming every absent one (an absent key reads exactly like an unset variable, which is the permissive reading)"
+else
+  fail "an incomplete env_ambient must be refused naming the keys (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+
+# ===========================================================================
 # PART 5 — THE ADMISSION CEILING IS READ BACK, AND MUST AGREE (#3551 item 10)
 # ===========================================================================
 # `cqlite-flight` DERIVES its ceiling when `--max-concurrent-scans` is not pinned:
@@ -1129,8 +1275,9 @@ fi
 # case cannot red the suite. RE-DERIVED BY RUNNING IT at each addition, never counted from the
 # source — loops and helpers multiply, and a source estimate understated a floor by 29 elsewhere
 # in this repo's history. MEASURED: 56 (pin/allocator/report), 66 (+ items 5/7's counting
-# domain), 80 (+ item 9's environ and arena), 91 (+ item 10's admission read-back).
-MIN_CHECKS=80
+# domain), 80 (+ item 9's environ and arena), 91 (+ item 10's admission read-back), 103
+# (+ item 8's environment records).
+MIN_CHECKS=90
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
