@@ -1406,10 +1406,17 @@ else
 fi
 # …and the two suites that carry the component-row patterns must positively RECOGNISE a
 # VACUOUS row, not merely have had the literal edited.
+# VACUOUS must be PRESENT in the alternation, not LAST in it (#3402). These needles pinned
+# `VACUOUS)` — the token immediately followed by the group's close — which asserts a token
+# ORDER rather than the property R3 is about, and so reds on a correct EXTENSION of the
+# vocabulary. #3402 added OPT-OUT in the same window this guard landed, making the recognisers
+# read `(PASS|FAIL|SKIP|VACUOUS|OPT-OUT)`: still recognising VACUOUS, still correct, and
+# invisible to a needle anchored on `VACUOUS)`. A guard that reds on correct input is the
+# guard agents learn to waive, so it asks for membership and lets the set grow.
 r_missing=()
-grep -qE 'PASS\|FAIL\|SKIP\|VACUOUS\) \\\(\[0-9\]\+s' "$REPO_ROOT/scripts/tests/test_agent_gate_tree_provenance.sh" \
+grep -qE 'PASS\|FAIL\|SKIP\|[A-Z|-]*VACUOUS[A-Z|-]*\) \\\(\[0-9\]\+s' "$REPO_ROOT/scripts/tests/test_agent_gate_tree_provenance.sh" \
   || r_missing+=("tree-provenance-boundary-row-count")
-grep -qE 'PASS\|FAIL\|SKIP\|VACUOUS\)\.\*\\\[\(UNDECLARED' "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" \
+grep -qE 'PASS\|FAIL\|SKIP\|[A-Z|-]*VACUOUS[A-Z|-]*\)\.\*\\\[\(UNDECLARED' "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" \
   || r_missing+=("summary-3453-annot-b-undeclared-screen")
 if [ "${#r_missing[@]}" -eq 0 ]; then
   ok "R3: the boundary row count and the UNDECLARED screen both recognise a VACUOUS component row"

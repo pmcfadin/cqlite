@@ -1073,7 +1073,30 @@ Keep files small — agentic context cost scales with file size. Targets (total 
 included): source `~800`, test files `~1500`. The gate's `file-size` ratchet FAILs if your change
 grows an over-threshold `.rs` file (or pushes one over). Touching an over-threshold file → split it
 by responsibility (source: epic #1116; tests: #1135). Genuinely out of scope → re-run with
-`CQLITE_ALLOW_FILE_GROWTH=1` and leave a note linking #1116/#1135.
+`CQLITE_ALLOW_FILE_GROWTH=1` and leave a note linking #1116/#1135. **That override is now
+VISIBLE in the SUMMARY, and the component's status token says so (#3402):**
+`file-size: OPT-OUT (0s)  [no-cargo] — CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); N
+over-threshold file(s) grown — see <logdir>/file-size.log`. `PASS` means the check RAN
+and was SATISFIED; it never means the check was switched off — a bare `file-size: PASS` under an
+engaged override was indistinguishable from a genuine one, so the disclosure depended on the
+author remembering to write it in the PR body. `OPT-OUT` is NON-FAILING (only an exact `FAIL`
+sets `OVERALL=FAIL`), so an acknowledged growth still reaches `RESULT: PASS` — it is now merely
+impossible to hide. It is emitted ONLY for the value **exactly `1`**: a value SET BUT NOT `1`
+(`0`, `true`, `yes`) is not an opt-out, stays a ratchet violation and FAILs, because a
+permissive branch keyed on `!= <bad>` would let a typo waive the ratchet. **The row carries NO
+repository content**: the file NAMES live in `file-size.log` (#3401) and, for a reviewer, in the
+PR diff itself. Rendering them inline was tried and REMOVED — it was the optional half of #3402
+("ideally naming the files") and produced THREE of that PR's seven review findings, one per
+round, each a different way of mangling a filename (a `: ` split recovering a path from a
+display string; substitution inside a path containing `RESULT:`; `,` joining, making
+`src/a.rs,b.rs` indistinguishable from two files). **Remove the mechanism rather than carve it a
+fourth time** (#3229's ruling); escaping only moves the argument to the escape grammar (#3312).
+So the one boundary rendering these details (`_status_detail`) takes GATE-AUTHORED text only —
+fixed wording plus computed values — strips `[:cntrl:]` under `LC_ALL=C`, and WITHHOLDS any
+value carrying the completion probe's `RESULT:` token rather than rewriting it, because a
+rewrite would name something that does not exist. If you add a component that needs repository
+content in its detail, re-introduce a trusted/untrusted split deliberately; do not smuggle it
+through the gate-authored field.
 
 ### Testing
 - Integration tests use real SSTable data only; validate against `sstabledump` output via JSONL
@@ -1168,6 +1191,28 @@ by responsibility (source: epic #1116; tests: #1135). Genuinely out of scope →
   floors** (minimum fixture/vector/refusal counts plus required names and CQL kinds), since an emptied
   table otherwise yields an empty parametrize that pytest reports as one skipped placeholder — #3544's
   case-floor lesson, one directory over.
+- **Fifth blind spot: a point-read test that compares a SUBSET of columns against the scan cannot see
+  a TRUNCATED point row (issue #3890).** The four above are about which ORACLE you compare against;
+  this one is about how much of the row you compare. `assert_point_equals_scan`
+  (`cqlite-core/tests/issue_1573_readat_positional.rs`) projected `id` plus ONE named column, and
+  `SELECT id, name` decodes the first two cells and stops — so a point read whose LATER cells failed to
+  decode compared equal on exactly the columns being compared, for years. Two properties make it
+  invisible rather than merely under-tested: a failed cell decode inside the row loop is SWALLOWED
+  (`row_decoder/row_data.rs` logs at `debug` and `break`s — #3721 is removing that), so nothing
+  propagates; and the missing cells are simply ABSENT from the row's map, so a `get(col)` comparison
+  over the columns you named can never notice them. **Rule: a point/seek-vs-scan comparison uses
+  `SELECT *` and asserts BOTH directions of the column set** — no scan column absent from the point
+  row, no point column the scan lacks — and reports the missing column BY NAME. The corpus-wide
+  instance is `cqlite-core/tests/issue_3890_point_read_column_parity_sweep.rs`. **Two rules about
+  its per-table key cap, both of which cost a review round: a bound tight enough to cost nothing
+  can be tight enough to miss most of what it exists to catch, so measure what your cap EXCLUDES;
+  and a cap's detection figure is only meaningful alongside its SELECTION** — capping in scan order
+  and sorting afterwards samples different keys than capping over the sorted set, and that alone
+  moved the same measurement. **No figure is quoted here on purpose: measuring a guard's detection
+  power needs the swallow instrumented AND the fix reverted, so it is not reproducible from
+  committed source, and a number nobody can re-derive from the repo is what stops the next person
+  looking.** That target's module header carries the numbers with the exact recipe — commands, cap
+  values, and how the fix is reverted so detection is measured against the defect PRESENT.
 
 ### Fuzzing (issue #1614)
 `fuzz/` is a cargo-fuzz/libFuzzer crate in its own workspace, excluded from the main one — the gate

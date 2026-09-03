@@ -1447,3 +1447,12 @@ fn meter_off_installs_no_subphase_sink() {
         "meter-off do_get must install NO sub-phase sink (spawn_streaming M1 gating)"
     );
 }
+
+// MEASUREMENT ONLY (issue #3742): does a zero-column `RecordBatch`'s explicit
+// row count survive the real `do_get` encoder plus an arrow-flight client
+// decode? Declared here rather than in `streaming.rs` so the production module
+// stays under the campsite source threshold (epic #1116); a grandchild module
+// still sees `crate::streaming`'s private `encode_do_get`, which is the encoder
+// the real `do_get` response stream uses.
+#[path = "issue_3742_zero_column_wire_tests.rs"]
+mod issue_3742_zero_column_wire_tests;
