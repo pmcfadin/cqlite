@@ -271,6 +271,14 @@ case "$OS" in
 esac
 
 WARNINGS=0
+# GAPS (issue #3727 roborev round 428) — a SECOND counter, deliberately NOT folded into
+# WARNINGS. A [warn] is a per-box defect an operator can CLEAR on this machine; a [gap] is a
+# DECLARED limit of what this script can measure at all, identical on every correctly
+# provisioned host and clearable only by landing the issue it names. Collapsing the two made
+# `--strict` — and therefore `.agent-ami/profile.yaml`'s verify.run — fail on EVERY host
+# forever, which is the alarm people learn to waive, and then nothing is checked at all. So
+# --strict keys on WARNINGS alone and the summary reports GAPS separately and by name.
+GAPS=0
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # ---- bounded execution (issue #2942) ----
@@ -326,6 +334,12 @@ bounded() {
 }
 ok()   { printf '  \033[32m[ok]\033[0m   %s\n' "$1"; }
 warn() { printf '  \033[33m[warn]\033[0m %s\n' "$1"; WARNINGS=$((WARNINGS + 1)); }
+# gap(): a DECLARED, MEASURED-BUT-INCOMPLETE state — printed as loudly as a [warn], never an
+# [ok], and it can NEVER be a success token. It does not increment WARNINGS because no action on
+# THIS box changes it; the summary names every gap and the issue that would close it. Adding a
+# gap() call for anything an operator could fix on the machine would be a mute button — the one
+# caller today is section 5b2's SCOPED-NON-LOGIN (#3946), and the suite pins that count.
+gap()  { printf '  \033[35m[gap]\033[0m  %s\n' "$1"; GAPS=$((GAPS + 1)); }
 info() { printf '         %s\n' "$1"; }
 hdr()  { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
 
@@ -4557,9 +4571,19 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
                 # a measurement: it is sccache reporting what it actually enforces.)
                 # ONE VERDICT CALL, with the varying phrase in a variable: the self-test's
                 # structural guard requires section 5b2 to contain NO `ok "` at all, and to
-                # reach this state through exactly one `warn "sccache-cap: SCOPED-NON-LOGIN (`
+                # reach this state through exactly one `gap "sccache-cap: SCOPED-NON-LOGIN (`
                 # call — two call sites would defeat a guard that exists to stop a future
                 # success token sneaking in for a file write, an exemption or this state.
+                #
+                # IT IS A gap(), NOT A warn() (roborev round 428). Round 426 was right that this
+                # may never be an [ok] and wrong about the counter: as a [warn] it made --strict
+                # — and therefore .agent-ami/profile.yaml's verify.run — fail on EVERY host
+                # forever, including a perfectly provisioned one, because no action on any box
+                # can clear a limit of what this script MEASURES. That is strictly worse than
+                # the false [ok] it replaced: a check that always fails gets waived, and then
+                # nothing is checked. gap() keeps every word of the verdict, prints as loudly,
+                # is still not a success token, and is still counted and named in the summary —
+                # it simply does not accuse THIS box of a defect it does not have.
                 if [ "$SCC_SERVER_STARTED" = 1 ]; then
                   # "THIS RUN STARTED" is as strong as the evidence allows: there was no server
                   # when the run began, this run asked for one at this value, and the server now
@@ -4570,7 +4594,7 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
                 else
                   scc_srv_phrase="the ALREADY-RUNNING sccache server enforces exactly the $SCC_SEEN_BYTES bytes it means"
                 fi
-                warn "sccache-cap: SCOPED-NON-LOGIN ($SCC_ENV_FILE sets SCCACHE_CACHE_SIZE=$SCC_FILE_VALUE, a fresh PAM-created, profile-free session sees that SAME value, and $scc_srv_phrase; this run's own value, BASH_ENV and ENV were scrubbed first) — SCOPED, NOT a certification: that NON-LOGIN PAM session is the ONLY context measured, a LOGIN shell additionally runs /etc/profile.d and can export a DIFFERENT value, and no disagreement between the two is detected here (#3946), so the cap a gate actually gets is NOT established — this verdict is deliberately NOT a success token"
+                gap "sccache-cap: SCOPED-NON-LOGIN ($SCC_ENV_FILE sets SCCACHE_CACHE_SIZE=$SCC_FILE_VALUE, a fresh PAM-created, profile-free session sees that SAME value, and $scc_srv_phrase; this run's own value, BASH_ENV and ENV were scrubbed first) — SCOPED, NOT a certification: that NON-LOGIN PAM session is the ONLY context measured, a LOGIN shell additionally runs /etc/profile.d and can export a DIFFERENT value, and no disagreement between the two is detected here (#3946), so the cap a gate actually gets is NOT established — this verdict is deliberately NOT a success token"
                 scc_scope_note
               else
                 warn "sccache-cap: NOT-SYSTEM-WIDE ($SCC_ENV_FILE sets SCCACHE_CACHE_SIZE='$SCC_FILE_VALUE' but this session sees '$scc_probe_seen' — a sudo- or user-specific source is OVERRIDING the system-wide file, so ordinary PAM sessions get the file's value and whichever of them starts the sccache server will cap it with THAT, not with the one measured here)"
@@ -4730,6 +4754,17 @@ if [ "$WARNINGS" -eq 0 ]; then
 else
   printf '  \033[33m%d warning(s).\033[0m Address the [warn] lines above (or re-run with --yes to auto-install).\n' "$WARNINGS"
 fi
+# DECLARED GAPS ARE REPORTED SEPARATELY, ALWAYS, AND AFFIRMATIVELY AT ZERO (issue #3727 round
+# 428). "All checks green." means nothing on THIS box needs attention; it does not mean every
+# property was established, and a gap outstanding under a green line would be a silent
+# overclaim if it were not printed here. `0 RECOGNISED` rather than a bare 0, and the set is
+# DECLARED non-exhaustive: these are the incompletenesses this script KNOWS it has, not a
+# proof there are no others.
+if [ "$GAPS" -eq 0 ]; then
+  info "declared gaps: 0 RECOGNISED (of the incompletenesses this script knows how to name)"
+else
+  printf '  \033[35m%d declared gap(s) RECOGNISED.\033[0m Measured and reported, NOT clearable on this box — see the [gap] line(s) above and the issue each names. This is not a defect of this machine and --strict does not fail on it.\n' "$GAPS"
+fi
 info "Full doctrine: docs/development/agent-machine-setup.md"
 # Informational bootstrap: DEFAULT is always exit 0 so it composes into setup scripts.
 # That contract is preserved deliberately (issue #3369) — callers rely on it.
@@ -4739,8 +4774,17 @@ info "Full doctrine: docs/development/agent-machine-setup.md"
 # the presence of the literal string "All checks green." in stdout, so any caller that
 # forgot to string-match — or matched it loosely — onboarded a broken box while this
 # script exited 0. An exit code cannot be forgotten by accident.
+#
+# --strict KEYS ON WARNINGS ALONE, NEVER ON GAPS (issue #3727 round 428). A [warn] is a defect
+# of this machine; a [gap] is a declared limit of what this script can measure, identical on
+# every correctly provisioned host. Failing --strict on a gap makes verify.run red on EVERY
+# box forever with no operator action available — an alarm that fires always is one people
+# learn to waive, and a waived preflight checks nothing. The gap stays LOUD in stdout and in
+# the summary above; what it does not do is claim this box is broken.
 if [ "$STRICT" = 1 ] && [ "$WARNINGS" -ne 0 ]; then
-  info "--strict: exiting 1 ($WARNINGS warning(s)) — this machine is NOT certified ready"
+  scc_strict_gapnote=""
+  [ "$GAPS" -ne 0 ] && scc_strict_gapnote="; $GAPS declared gap(s) NOT counted toward this"
+  info "--strict: exiting 1 ($WARNINGS warning(s)$scc_strict_gapnote) — this machine is NOT certified ready"
   exit 1
 fi
 exit 0
