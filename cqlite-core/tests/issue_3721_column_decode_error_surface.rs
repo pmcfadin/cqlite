@@ -975,32 +975,24 @@ async fn select_all_truncated(
     Ok(result.rows.len())
 }
 
-/// The exhaustion must be the per-column variant AND must say what it measured:
-/// which column of how many was still outstanding, and where the body ran out. A
-/// bare "corrupt SSTable" would leave an operator no better off than the
-/// `tracing::debug!` this replaces.
-fn assert_row_body_exhausted(err: &Error, column: &str, at: usize, on_disk_columns: usize) {
-    assert_column_decode(err, column);
-    let Error::ColumnDecode { offset, source, .. } = err else {
-        unreachable!("assert_column_decode already matched the variant");
-    };
-    assert_eq!(
-        *offset, at,
-        "the failure must be reported at the byte where the body ran out"
-    );
-    let cause = source.to_string();
-    assert!(
-        cause.contains("row body exhausted"),
-        "the surfaced cause must be the row-body-exhaustion one this case exists for, \
-         not some other failure aborting the same read; got: {cause}"
-    );
-    assert!(
-        cause.contains(&format!("of {on_disk_columns}")),
-        "the cause must say how much of the column set was outstanding (`of \
-         {on_disk_columns}`), which is what distinguishes truncation from the end of a \
-         row; got: {cause}"
-    );
-}
+// DECLARED COVERAGE GAP (#3721, after #3782): `row_body_exhausted` is no longer
+// asserted by any test in this file.
+//
+// The helper that asserted it (`assert_row_body_exhausted`) is deleted rather than
+// kept dead, because `-D warnings` correctly reds an unused test fn and silencing
+// that with `#[allow(dead_code)]` would hide the gap instead of declaring it.
+//
+// WHY the gap exists: the only fixture that reached the condition was a TRUNCATED
+// one, and #3782 added a `row_size`-vs-available-bytes guard that fires BEFORE row
+// assembly, so that fixture is now refused at the ROW EXTENT and never dispatches a
+// column. Retargeting it (correctly — naming a column there would attribute the
+// failure to the wrong subject) left the condition unpinned.
+//
+// The condition is NOT dead in src: `row_data.rs:444` still guards
+// `if offset >= after_row_offset` and calls `row_body_exhausted`, which is reachable
+// when a row's declared extent FITS the buffer but its column bitmap over-declares —
+// a bitmap edit, not a truncation. Pinning it needs such a fixture, which is real
+// work and is recorded as a residual rather than faked here.
 
 /// A truncation whose RESYNC walk reads real payload as a range-tombstone marker
 /// must FAIL the read, not truncate the partition (issue #3721, marker level).
