@@ -1191,10 +1191,16 @@ else
 fi
 # ...and available_parallelism is reported as its own disagreeing field, because a changed
 # ceiling with an UNCHANGED available_parallelism means something pinned it — a different cause.
-if grep -q "available_parallelism:" <<<"$out"; then
-  pass "admission: EVERY disagreeing field is named, so 'the mask changed' and 'someone pinned it' are distinguishable causes"
+# ...naming BOTH VALUES of that field too, not merely the field: `available_parallelism` is the
+# INPUT whose dependence on the affinity mask is the whole reason this check exists, so a
+# disagreement there is the most diagnostic one available and the operator's next question is
+# "which rep saw what".
+if grep -q "available_parallelism:" <<<"$out" \
+   && grep -qE "available_parallelism: .*flight-bypass-warm-1='2'" <<<"$out" \
+   && grep -qE "available_parallelism: .*flight-bypass-warm-2='4'" <<<"$out"; then
+  pass "admission: a disagreement on AVAILABLE_PARALLELISM is named with BOTH reps' values ('2' and '4'), so 'the mask changed' and 'someone pinned the ceiling' are distinguishable causes"
 else
-  fail "each disagreeing field must be named (out: $(head -4 <<<"$out"))"
+  fail "each disagreeing field must be named with both values (out: $(head -4 <<<"$out"))"
 fi
 # THE POSITIVE CONTROL, one property apart: with rep 2's log AGREEING, the same two-rep session
 # reports. Without it, 5b would be satisfied by any two-rep session failing for any reason.
