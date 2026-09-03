@@ -320,17 +320,29 @@ mk_boundary_json() { # <path> <load1>
 }
 mk_boundary_json "$TMP/comp-b.json" 0.11
 mk_boundary_json "$TMP/comp-a.json" 0.19
-read -r CWS CWE < <(python3 - "$TS_LIVE" <<'PYWIN'
-import datetime, json, sys
 # The window is derived from the timeseries' OWN first/last stamps +- one cadence, so this case
-# cannot pass by accident on a window that happens to contain nothing.
+# cannot pass by accident on a window that happens to contain nothing. A derivation that FAILS
+# is its own named check: without it, a sampler emitting no `ts` reds the composition case with
+# `QUIESCENCE_WINDOW_UNBOUNDED` (an empty --window-start), which names the harness rather than
+# the defect -- and layer 1 IS the defect.
+# NO command substitution around this heredoc: `$( ... <<'X' )` leaves the body outside the
+# substitution and bash warns "unterminated here-document" while limping on. Redirected instead.
+if python3 - "$TS_LIVE" > "$TMP/win.txt" 2> "$TMP/win.err" <<'PYWIN'; then
+import datetime, json, sys
 stamps = [json.loads(l)["ts"] for l in open(sys.argv[1]) if l.strip()]
 fmt = "%Y-%m-%dT%H:%M:%SZ"
 lo = datetime.datetime.strptime(min(stamps), fmt) - datetime.timedelta(seconds=10)
 hi = datetime.datetime.strptime(max(stamps), fmt) + datetime.timedelta(seconds=10)
 print(lo.strftime(fmt), hi.strftime(fmt))
 PYWIN
-)
+  read -r CWS CWE < "$TMP/win.txt"
+  pass "a window is derivable from the sampler's OWN stamps (layer 1: every record has a ts)"
+else
+  fail "the sampler's records carry no usable ts — layer 1 of the composition defect: $(head -1 "$TMP/win.err")"
+  # A fixed, VALID window so the judge below refuses on the SCHEMA and reports that cause,
+  # instead of refusing on an empty window and reporting the harness.
+  CWS=2026-01-01T00:00:00Z; CWE=2026-01-01T00:00:20Z
+fi
 out="$(python3 "$Q" judge --before "$TMP/comp-b.json" --after "$TMP/comp-a.json" \
         --timeseries "$TS_LIVE" --window-start "$CWS" --window-end "$CWE" \
         --out "$TMP/composed-verdict.json" 2>&1)"; rc=$?
@@ -642,7 +654,7 @@ fi
 # doing its job on its own author, and it is why the rule is "derive by running": a source count
 # is an estimate, and an estimate in a floor is either decorative (too low) or a false failure
 # (too high).
-MIN_CHECKS=37
+MIN_CHECKS=38
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
