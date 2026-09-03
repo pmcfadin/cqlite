@@ -458,6 +458,15 @@ satisfied for the whole set.
 
 ## 9. Residuals
 
+0. **The two report-producing tools had NO TESTS when they produced these figures.** They have
+   86 hermetic checks now (`scripts/tests/test_ws0_3551_artifact_tools.sh`, in `tooling-tests`),
+   added after roborev found a real coverage defect in them — but the figures in §5 were computed
+   before that suite existed and were re-derived under it afterwards, unchanged. Two defects were
+   found this way and both were verified byte-neutral for the published artifact: the coverage
+   rule (above) and a reporting hole where a run with EVERY pair excluded printed "nothing is
+   readable" and dropped the reason, which is the one case where the reason is the whole of the
+   information.
+
 1. **No session carries an IN-RUN quiescence verdict.** `--quiescence-timeseries` refuses a
    contaminated session and leaves a non-empty `--out` the driver can never retry into, so one
    peer gate strands a round permanently. The sets were run without it — recorded honestly by the

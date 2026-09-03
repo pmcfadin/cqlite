@@ -123,7 +123,15 @@ def clean(sess: dict, rows: list[dict]) -> tuple[str, int, int, float | None]:
     gap = coverage_gap(sess, win)
     if comp:
         return "contaminated", comp, len(win), gap
-    if gap is None or gap > MAX_SAMPLE_GAP_S:
+    # "COULD NOT MEASURE AT ALL" AND "MEASURED TOO SPARSELY" ARE DIFFERENT OPERATOR FACTS and
+    # get different states, matching `window-census.py`'s text. Collapsing them onto one label
+    # was a declared residual of the first version; the two tools implement ONE three-valued
+    # rule and having them disagree about its vocabulary is the drift that costs the next
+    # reader. Neither is ever counted clean, so no published figure turns on the distinction —
+    # which is exactly why it was cheap to make them agree.
+    if gap is None:
+        return "unobserved", comp, len(win), gap
+    if gap > MAX_SAMPLE_GAP_S:
         return "undercovered", comp, len(win), gap
     return "clean", comp, len(win), gap
 
@@ -205,7 +213,8 @@ def main(argv=None) -> int:
     nclean = states.count("clean")
     out.append(f"Sessions examined: {total} across {len(sets)} set(s); "
                f"**{nclean} clean**, {states.count('contaminated')} contaminated, "
-               f"{states.count('undercovered')} UNDERCOVERED (an unobserved window is "
+               f"{states.count('undercovered')} UNDERCOVERED, "
+               f"{states.count('unobserved')} UNOBSERVED (an unobserved window is "
                f"could-not-measure, never clean: the bound is the judge's own "
                f"MAX_SAMPLE_GAP_S = {MAX_SAMPLE_GAP_S:.0f}s at a {SAMPLER_CADENCE_S:.0f}s "
                f"cadence).")
