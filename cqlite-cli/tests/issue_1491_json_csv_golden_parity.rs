@@ -357,21 +357,28 @@ const CASES: &[Case] = &[
         ck: &[],
         multicell: &[],
         // MEASURED DIVERGENCE, not a normalization: `employee.home` is a
-        // `frozen<address>` nested inside a `frozen<employee>`. The golden decodes
-        // it (`{"street": "1 Navy Way", …}`); both CLI egress formats emit the
-        // inner UDT's RAW BYTES as blob hex
-        // (`0x0000000a31204e617679205761790000000941726c696e67746f6e…`).
+        // NO SKIPS — and the removal of the one that was here is COVERAGE
+        // RECOVERED, not a relaxation.
         //
-        // The exclusion is FIELD-scoped (`e.home`, not `e`) so the sibling fields
-        // `e.name` and `e.level` are still value-compared. Excluding the whole
-        // column left this case comparing nothing but its primary key while the
-        // comment claimed otherwise (review finding F5).
-        skips: &[Skip {
-            path: "e.home",
-            formats: BOTH,
-            divergence: Divergence::NestedFrozenUdtRendersAsBlobHex,
-            why: "nested frozen UDT renders as blob hex, not a decoded object",
-        }],
+        // `e.home` is a `frozen<address>` nested inside a `frozen<employee>`. This
+        // case used to exclude that path because the golden decoded it
+        // (`{"street": "1 Navy Way", …}`) while both CLI egress formats emitted the
+        // inner UDT's RAW BYTES as blob hex. That was one instance of the defect
+        // #3722 fixed: two divergent UDT-field decoders both fell through to
+        // `_ => Value::Blob`, so a nested frozen UDT field never decoded.
+        //
+        // With one decoder that is total over `CqlType`, the two sides AGREE at
+        // `e.home`, and THIS LANE IS WHAT CAUGHT IT: it refuses to let an exclusion
+        // that suppresses no divergence keep standing, on the grounds that such a
+        // gap holds back recovered coverage. Its message named exactly that. So
+        // `e.home` is now value-compared like its `e.name` and `e.level` siblings.
+        //
+        // `Divergence::NestedFrozenUdtRendersAsBlobHex` is deliberately KEPT: it is
+        // still used as fixture data by the gap machinery's own unit tests
+        // (`support/golden_value_compare_gap_tests.rs`,
+        // `support/golden_value_compare_udt_tests.rs`), which exercise the
+        // exclusion MECHANISM rather than claiming anything about live behaviour.
+        skips: &[],
     },
     // test-data/schemas/signed-collection-parity.cql — NON-frozen and frozen
     // collections of signed numerics: the "path is a JSON string, CLI element is a
