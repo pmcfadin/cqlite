@@ -5,8 +5,15 @@
 //! per-type authority notes (float total order, and the `time`/`timestamp`
 //! asymmetry) that #3935 required.
 //!
+//! A CHILD of `mutation` rather than a sibling under `write_engine`, on purpose:
+//! `write_engine/mod.rs` is itself ~3560 lines, so adding a `mod` line there
+//! would grow an over-threshold file and the `file-size` ratchet would (rightly)
+//! FAIL. Declaring it from `mutation.rs`, which this split leaves ~70 lines
+//! SMALLER than before, costs the ratchet nothing — and `ClusteringKey` is its
+//! only caller anyway.
+//!
 //! This is the comparator BOTH routes to clustering order reach:
-//! [`ClusteringKey::compare`](super::mutation::ClusteringKey::compare) (schema-aware,
+//! [`ClusteringKey::compare`](super::ClusteringKey::compare) (schema-aware,
 //! used by `write_engine::merge` to sort merged rows "for output order") and
 //! `ClusteringKey`'s `Ord` (the memtable `BTreeMap` key order). It therefore
 //! REQUIRES a strict total order — see the per-arm notes.

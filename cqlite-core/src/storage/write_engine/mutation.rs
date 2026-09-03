@@ -10,7 +10,8 @@
 //! - `ClusteringKey`: Multi-column clustering key with ASC/DESC ordering
 //! - `CellOperation`: Cell-level write/delete operations
 
-use super::clustering_order::compare_values;
+mod clustering_order;
+use self::clustering_order::compare_values;
 use crate::error::{Error, Result};
 use crate::schema::{ClusteringOrder, TableSchema};
 use crate::types::{ComparatorType, Value};
