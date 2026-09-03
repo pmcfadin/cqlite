@@ -22,20 +22,38 @@ function getNonexistentPath() {
 }
 
 /**
- * Require test datasets to be available.
+ * Assert that the SSTable test corpus is available, THROWING if it is not.
  * Use this in beforeAll() or at the start of tests that require real data.
  *
- * Note: This throws an error rather than skipping to match Python test behavior.
- * Missing test data is considered a setup failure, not a skippable condition.
- * This ensures CI failures are visible when test data is not properly configured.
+ * IT DOES NOT SKIP, AND THE NAME IS THE POINT (issue #3641). This helper was
+ * called `skipIfNoDatasets()` for its whole life while throwing on every call,
+ * and the misnomer shaped a merge gate's design: a reader who trusted the name
+ * expected a reduced-coverage run to be available over an absent corpus, so the
+ * gate's `node-bindings` component looked like it could run "leniently". It
+ * cannot -- measured on an empty root, `prepared.test.js` reports 16 FAILED of
+ * 16 total, not 16 skipped -- which is why that component SKIPs wholesale under
+ * `AGENT_GATE_ALLOW_MISSING_FIXTURES=1` instead.
+ *
+ * The throwing BEHAVIOUR is deliberate and stays (issue #1458): a silent skip
+ * over an absent corpus is how #646-class holes hide, and this repo's Node
+ * convention is to fail loudly instead. Renaming this back to a `skip`-word, or
+ * making it actually skip, reintroduces that hole and needs #1458 re-argued.
+ *
+ * NOT `requireDatasets()`, deliberately: `require` is already this suite's
+ * STRICT-MODE vocabulary (`CQLITE_REQUIRE_FIXTURES` /
+ * `CQLITE_PARITY_REQUIRE_DATASETS` -> `global.REQUIRE_FIXTURES` in setup.js),
+ * and this assertion is INDEPENDENT of strict mode -- it fires on an absent
+ * corpus whether or not strict mode is on. A `require`-named helper beside that
+ * global invites the reading "this only fires in strict mode", which is the
+ * same class of misreading the rename exists to remove.
  *
  * @throws {Error} If test data is not available
  * @example
  * beforeAll(() => {
- *   skipIfNoDatasets();
+ *   assertDatasetsAvailable();
  * });
  */
-function skipIfNoDatasets() {
+function assertDatasetsAvailable() {
   if (!global.DATASETS_AVAILABLE) {
     throw new Error('Test data not available. Set CQLITE_DATASETS_ROOT or run fetch-datasets.sh');
   }
@@ -76,7 +94,7 @@ async function withDatabase(callback, schemaPath) {
 }
 
 module.exports = {
-  skipIfNoDatasets,
+  assertDatasetsAvailable,
   openDatabase,
   withDatabase,
   getNonexistentPath,

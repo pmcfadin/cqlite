@@ -9,6 +9,7 @@
 use super::super::scan_stream_windowed::{WindowedOut, BATCH_EMIT_ROWS};
 use super::super::SSTableReader;
 use super::model::{sort_by_token_order_with_meta, SCAN_FOR_KEY_CALLS};
+use crate::storage::sstable::reader::parsing::BufferExtent;
 use crate::types::{CellWriteMetadata, ScanRow};
 use crate::{Result, RowKey};
 use std::io::SeekFrom;
@@ -137,16 +138,12 @@ impl SSTableReader {
 
         // AUTHORITATIVE end bound (issue #953 / #951 MEDIUM): the target partition
         // occupies `[offset, end)`, where `end` is the SUCCESSOR partition's start
-        // offset (next trie/index entry). Decompressing exactly the chunks covering
-        // that half-open range materializes every byte of the target partition —
-        // including a row/cell that SPANS multiple compression chunks — without
-        // reading the next partition. This replaces the previous next-partition
-        // *boundary-scan* heuristic (a row-count-stability guard that could falsely
-        // accept a boundary mid-partition); see `bti_decompress_and_parse_target_all`.
-        //
-        // `None` means `offset` is the LAST partition (no successor): the callee
-        // bounds the end with the authoritative data-section length, or falls back
-        // to the safe full-scan path when that length is unknown.
+        // offset (next trie/index entry) — never a boundary-scan heuristic. It
+        // bounds BOTH the decompression and (issue #3890) the parse; the callee's
+        // doc comment states which is which and why they differ under a #954
+        // clustering narrowing. `None` = the LAST partition (no successor): the
+        // callee then uses the authoritative data-section length, or falls back to
+        // the safe full-scan path when even that is unknown.
         let end_bound = self
             .successor_partition_offset(offset, partition_key)
             .await?
@@ -213,6 +210,10 @@ impl SSTableReader {
             .bti_decompress_and_parse_target_all(
                 offset as usize,
                 decode_end_bound,
+                // Issue #3890: the UN-narrowed successor offset — `decode_end_bound`
+                // may point INSIDE the partition, which is right for the
+                // DECOMPRESSION and wrong for the PARSE.
+                end_bound,
                 row_body_window,
                 &key,
                 table_id,
@@ -630,8 +631,20 @@ impl SSTableReader {
             Some(now) => parser.with_now_secs(now),
             None => parser,
         };
-        let parsed =
-            parser.parse_block_with_cell_metadata(&whole, effective_schema.as_ref(), self)?;
+        // Issue #3782 (roborev job 48): `whole` is the ENTIRE data section —
+        // every chunk, stitched from a fresh cursor seeked to the data-section
+        // start above — so no further bytes can arrive to finish a row and a row
+        // decode error here is DATA LOSS. Before this declaration the `da` full
+        // scan (this is the route `scan`/`get_all_entries`/the batched streaming
+        // surface all take) inherited the tolerant break and returned `Ok` with
+        // 120 of 468 rows on a fixture with ONE compressed byte flipped inside a
+        // clustering value.
+        let parsed = parser.parse_block_with_cell_metadata(
+            &whole,
+            BufferExtent::Complete,
+            effective_schema.as_ref(),
+            self,
+        )?;
 
         let mut results = Vec::new();
         // Work-probe (issue #2398, threaded to BTI by #3109): "changed partition key

@@ -10,7 +10,7 @@
 //! driver never has to keep a WIDE partition fully resident).
 
 use super::compaction::CompactionPolicy;
-use super::partition_driver::{MarkerOutcome, SlidingPartitionPolicy};
+use super::partition_driver::{DataRowOutcome, MarkerOutcome, SlidingPartitionPolicy};
 use super::row_framing::PartitionHeaderReadiness;
 use super::{RowColumnResolution, V5CompressedLegacyParser};
 use crate::schema::TableSchema;
@@ -233,7 +233,32 @@ impl V5CompressedLegacyParser {
         // A data row: decode exactly one, emit it, and report its consumed bytes.
         let mut emitted: Vec<crate::storage::sstable::reader::compaction_row::CompactionRow> =
             Vec::new();
-        match policy.on_data_row(data, 0, schema, reader, resolution, &mut emitted) {
+        let decoded = match policy.on_data_row(data, 0, schema, reader, resolution, &mut emitted) {
+            DataRowOutcome::Decoded(v) => Some(v),
+            DataRowOutcome::Declined => None,
+            // Issue #3809 — a REFUSAL is EXTENT-INDEPENDENT: the row decoded and
+            // its content is unrepresentable, which is not a bytes-availability
+            // question, so `at_final_chunk` is not consulted. Converting it to
+            // `NeedMore` here would make this streaming driver — which every
+            // windowed consumer drives with `at_final_chunk == false` until its
+            // last chunk — swallow the refusal and truncate the partition.
+            DataRowOutcome::Refused(e) => return Err(e),
+            // Issue #3782 — the SAME rule as the buffered `drive_partition_sliding`,
+            // deliberately spelled out here rather than shared, because this driver
+            // resumes from offset 0 per structure and owns its own `ParseStep`
+            // vocabulary. At the final chunk no further bytes can arrive, so a
+            // decode error is truncation/corruption (DATA LOSS), never a row
+            // straddling the window; mid-stream it is the ordinary straddling case
+            // and stays tolerant. Measured over 42 well-formed corpus tables the
+            // tolerant path fires 614 times, ALL at `at_final_chunk == false`.
+            DataRowOutcome::DecodeFailed(e) => {
+                if at_final_chunk {
+                    return Err(e);
+                }
+                return Ok(PartitionStreamStep::NeedMore);
+            }
+        };
+        match decoded {
             Some(next_offset) => {
                 // Confirm the row is fully framed WITHIN the window: a next_offset
                 // STRICTLY PAST the buffer end means we decoded a truncated row on a
@@ -285,9 +310,11 @@ impl V5CompressedLegacyParser {
                 Ok(PartitionStreamStep::Consumed(next_offset))
             }
             None => {
-                // A row failed to parse. Mid-stream that may be a row straddling the
-                // chunk boundary, so request more bytes unless this is the final
-                // chunk (where it is end-of-partition).
+                // The policy DECLINED the row with no error to report (#3782: an
+                // actual decode error took the `DecodeFailed` arm above; #3809: a
+                // refusal took the `Refused` arm). Mid-stream that may be a row
+                // straddling the chunk boundary, so request more bytes unless this
+                // is the final chunk (where it is end-of-partition).
                 if at_final_chunk {
                     state.reset();
                     Ok(PartitionStreamStep::PartitionDone(0))

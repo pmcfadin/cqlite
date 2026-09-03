@@ -14,11 +14,12 @@ impl V5CompressedLegacyParser {
     pub fn parse_block(
         &self,
         data: &[u8],
+        extent: BufferExtent,
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
     ) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
         let mut results = Vec::new();
-        self.parse_block_emit(data, schema, reader, |entry| {
+        self.parse_block_emit(data, extent, schema, reader, |entry| {
             results.push(entry);
             Ok(std::ops::ControlFlow::Continue(()))
         })?;
@@ -34,11 +35,12 @@ impl V5CompressedLegacyParser {
     pub fn parse_block_with_cell_metadata(
         &self,
         data: &[u8],
+        extent: BufferExtent,
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
     ) -> Result<ParsedBlockWithMeta> {
         let mut results = Vec::new();
-        self.parse_block_emit_with_metadata(data, schema, reader, |entry| {
+        self.parse_block_emit_with_metadata(data, extent, schema, reader, |entry| {
             results.push(entry);
             Ok(std::ops::ControlFlow::Continue(()))
         })?;
@@ -49,6 +51,7 @@ impl V5CompressedLegacyParser {
     fn parse_block_emit_with_metadata<F>(
         &self,
         data: &[u8],
+        extent: BufferExtent,
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         mut emit: F,
@@ -268,6 +271,13 @@ impl V5CompressedLegacyParser {
                             offset,
                             e
                         );
+                        // Issue #3782: same contract as the primary block-emit site —
+                        // when the caller declared the buffer COMPLETE no further
+                        // bytes can complete this row, so the failure is data loss
+                        // and is reported; otherwise the tolerant break stays.
+                        if extent.is_complete() {
+                            return Err(e);
+                        }
                         break;
                     }
                 }
@@ -720,6 +730,7 @@ impl V5CompressedLegacyParser {
     pub fn parse_block_emit<F>(
         &self,
         data: &[u8],
+        extent: BufferExtent,
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         emit: F,
@@ -728,6 +739,6 @@ impl V5CompressedLegacyParser {
         F: FnMut((TableId, RowKey, ScanRow)) -> Result<std::ops::ControlFlow<()>>,
     {
         // Whole-block decode: no within-partition row-body window narrowing.
-        self.parse_block_emit_windowed(data, schema, reader, None, emit)
+        self.parse_block_emit_windowed(data, extent, schema, reader, None, emit)
     }
 }

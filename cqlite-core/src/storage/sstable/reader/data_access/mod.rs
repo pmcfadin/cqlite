@@ -117,6 +117,7 @@ pub(in crate::storage::sstable::reader) use model::DECOMPRESS_CALLS;
 use super::source::ScanCursor;
 use super::SSTableReader;
 use crate::parser::DataFormat;
+use crate::storage::sstable::reader::parsing::BufferExtent;
 use crate::types::{CellWriteMetadata, ScanRow, TableId};
 use crate::{Error, Result, RowKey};
 use std::io::SeekFrom;
@@ -243,7 +244,9 @@ impl SSTableReader {
         };
 
         // Parse the stitched decompressed buffer
-        let entries = parser.parse_block(&stitched_buffer, table_schema, self)?;
+        // #3782: EVERY chunk of the data section — see `BufferExtent`.
+        let entries =
+            parser.parse_block(&stitched_buffer, BufferExtent::Complete, table_schema, self)?;
         tracing::debug!(
             "stitch_and_parse_all_chunks: Parsed {} entries from stitched buffer",
             entries.len()
@@ -281,7 +284,13 @@ impl SSTableReader {
         };
 
         let entries =
-            parser.parse_block_with_cell_metadata(&stitched_buffer, table_schema, self)?;
+            // #3782: whole stitched data section — see `BufferExtent`.
+            parser.parse_block_with_cell_metadata(
+                &stitched_buffer,
+                BufferExtent::Complete,
+                table_schema,
+                self,
+            )?;
         tracing::debug!(
             "stitch_and_parse_all_chunks_with_metadata: Parsed {} entries with metadata",
             entries.len()
@@ -975,6 +984,14 @@ impl SSTableReader {
 
         // Build a parser (re-using the existing builder so version-gates and
         // UDT registry are threaded through correctly).
+        //
+        // #3782: this buffer IS the whole data section, and no extent has to be
+        // declared for it — the delta-scan consumer is `parse_block_emit_delta`,
+        // which refuses a partition-header or row decode failure
+        // UNCONDITIONALLY (`Error::corruption`, `block_emit.rs`). So there is no
+        // defaulted-lossy behaviour for this site to inherit; adding an extent
+        // argument the parse never consults would assert a contract that does
+        // not exist.
         let parser = self.build_v5_parser(false);
 
         Ok((stitched, parser))

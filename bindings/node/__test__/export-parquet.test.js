@@ -17,7 +17,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { skipIfNoDatasets, withDatabase } = require('./helpers.js');
+const { assertDatasetsAvailable, withDatabase } = require('./helpers.js');
 
 const SCALAR_QUERY = 'SELECT * FROM test_basic.simple_table';
 const COLLECTIONS_QUERY = 'SELECT * FROM test_collections.collection_table';
@@ -41,7 +41,7 @@ function assertParquetMagic(filePath) {
 
 describe('exportParquet - scalar table', () => {
   test('creates a valid Parquet file with matching row count', async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     await withDatabase(async (db) => {
       const out = path.join(tmpDir, 'simple_table.parquet');
       const rows = await db.exportParquet(SCALAR_QUERY, out);
@@ -56,7 +56,7 @@ describe('exportParquet - scalar table', () => {
   });
 
   test('accepts rowGroupSize option', async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     await withDatabase(async (db) => {
       const out = path.join(tmpDir, 'small_groups.parquet');
       const rows = await db.exportParquet(SCALAR_QUERY, out, {
@@ -68,7 +68,7 @@ describe('exportParquet - scalar table', () => {
   });
 
   test('accepts zstd compression', async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     await withDatabase(async (db) => {
       const out = path.join(tmpDir, 'zstd.parquet');
       const rows = await db.exportParquet(SCALAR_QUERY, out, {
@@ -82,7 +82,7 @@ describe('exportParquet - scalar table', () => {
 
 describe('exportParquet - collections table', () => {
   test('creates a valid Parquet file with matching row count', async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     await withDatabase(async (db) => {
       const out = path.join(tmpDir, 'collection_table.parquet');
       const rows = await db.exportParquet(COLLECTIONS_QUERY, out);
@@ -99,7 +99,7 @@ describe('exportParquet - collections table', () => {
 
 describe('exportParquet - error handling', () => {
   test('invalid compression rejects with CONFIG code', async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     await withDatabase(async (db) => {
       expect.assertions(3);
       try {
@@ -115,7 +115,7 @@ describe('exportParquet - error handling', () => {
   });
 
   test('zero rowGroupSize rejects with CONFIG code', async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     await withDatabase(async (db) => {
       expect.assertions(1);
       try {
@@ -129,7 +129,7 @@ describe('exportParquet - error handling', () => {
   });
 
   test('unwritable path rejects with IO code', async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     await withDatabase(async (db) => {
       expect.assertions(2);
       try {
@@ -148,7 +148,7 @@ describe('exportParquet - error handling', () => {
     // The query engine is permissive about unknown tables (matching
     // execute(), which returns 0 rows rather than erroring), so export
     // produces a valid empty file.
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     await withDatabase(async (db) => {
       const out = path.join(tmpDir, 'empty.parquet');
       const rows = await db.exportParquet(

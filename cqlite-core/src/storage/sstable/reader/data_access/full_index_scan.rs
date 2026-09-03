@@ -29,6 +29,7 @@
 
 use super::super::SSTableReader;
 use super::model::sort_by_token_order;
+use crate::storage::sstable::reader::parsing::BufferExtent;
 use crate::types::ScanRow;
 use crate::{Result, RowKey};
 
@@ -303,7 +304,11 @@ impl SSTableReader {
             // so zero rows means legitimately zero LIVE rows (all-shadowed /
             // all-TTL-expired / all-tombstoned / a pure partition-delete) — never a
             // swallowed parse failure.
-            let parsed = parser.parse_block(&raw, schema, self)?;
+            // #3782: `partition_slice_fully_consumed` above PROVED this slice
+            // decodes to exactly one structurally complete partition consuming
+            // every byte of `raw`, so nothing further can arrive to finish a row
+            // — a decode failure here is corruption, not a straddle.
+            let parsed = parser.parse_block(&raw, BufferExtent::Complete, schema, self)?;
             for (_table_id, row_key, value) in parsed {
                 if self.filter_tombstone(&value) {
                     results.push((row_key, value));
