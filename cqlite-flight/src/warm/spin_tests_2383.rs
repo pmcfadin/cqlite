@@ -422,6 +422,25 @@ fn cancel_at_large_index_parse_entry_aborts_promptly() {
     // retain. Verified by positive control: with fix C's parse-side cancel polling
     // removed, this assertion FAILS with `res == Ok`.
     //
+    // WHAT "PROMPTLY" MEANS HERE, because it is narrower than the word suggests
+    // (roborev job 90): the cancel is observed by `parse_index_data_cancellable`'s
+    // coarse pre-parse `cancel.check()?`, which runs AFTER `Index.db` has been
+    // opened and read into memory — the parse operates on an in-memory `&[u8]`.
+    // So this does NOT assert that the file read was avoided. It asserts that the
+    // O(entries) ENTRY LOOP is skipped in its entirety, which is exactly the cost
+    // #2383 fix C exists to avoid (a 1.58M-entry parse continuing after a client
+    // disconnect); the read is bounded by file size, not by entry count. That
+    // placement is fix C's, is unchanged by #3940, and was equally true of the
+    // calibrated-margin predecessor — whose cancel also landed after the read.
+    //
+    // WHY THIS IS NOT STRENGTHENED WITH THE PARSE COUNTER, so the idea is not
+    // re-proposed: `cqlite.sstable.index_parses_total` would prove the full parse
+    // did not complete, but reading it needs the OTel capture harness, which
+    // installs a PROCESS-GLOBAL meter provider and therefore must not share
+    // cqlite-flight's parallel `--lib` unit-test binary (roborev #2163 precedent;
+    // the #3382 `OnceLock` poisoning class). This test is a `--lib` unit test, so
+    // that counter is unavailable to it by construction, not by omission.
+    //
     // WHAT IT DOES NOT DISCRIMINATE, stated because a silent narrowing is
     // indistinguishable from coverage: a cancel positioned at the open boundary is
     // caught by fix C's coarse PRE-PARSE check, which is behaviourally identical
