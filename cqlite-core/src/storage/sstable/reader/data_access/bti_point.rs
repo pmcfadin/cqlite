@@ -7,6 +7,11 @@
 //! parse, and the prefix-collision key guard. The whole-Data.db BTI scan, the
 //! single-partition seek, and clustering-slice narrowing stay in `bti.rs`.
 
+// Issue #3890: the partition-extent parse bound, a CHILD module of this one (see
+// its header for why it is not a `data_access` sibling).
+#[cfg(not(feature = "tombstones"))]
+mod partition_extent;
+
 use super::super::SSTableReader;
 use super::model::{bti_lookup_step, table_header_consistent_for_seek, BtiLookupStep};
 use crate::storage::sstable::reader::parsing::BufferExtent;

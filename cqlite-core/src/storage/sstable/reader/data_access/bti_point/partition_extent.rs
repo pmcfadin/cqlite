@@ -1,5 +1,10 @@
 //! Bounding a single-partition seek's parse input to the target partition's
-//! AUTHORITATIVE byte extent (issue #3890; campsite #1116 split of `bti_point.rs`).
+//! AUTHORITATIVE byte extent (issue #3890).
+//!
+//! A CHILD of `bti_point` (campsite #1116 split of `bti_point.rs`, which shrinks
+//! 960 -> 915 lines), rather than a sibling under `data_access`: `data_access/mod.rs`
+//! is itself over the 800-line threshold, so a sibling declaration there would have
+//! grown an over-threshold file to buy a split.
 //!
 //! `bti_decompress_and_parse_target_all` buffers whole COMPRESSION CHUNKS, so the
 //! window it hands to the parser routinely overruns the target partition's end by
@@ -29,8 +34,8 @@
 //! input at the partition's authoritative exclusive end before the walk begins,
 //! so there is nothing past the partition for the walker to misread.
 
-use super::super::SSTableReader;
-use super::model::table_header_consistent_for_seek;
+use super::super::super::SSTableReader;
+use super::super::model::table_header_consistent_for_seek;
 use crate::storage::sstable::reader::parsing::BufferExtent;
 use crate::types::{ScanRow, TableId};
 use crate::{Error, Result, RowKey};
@@ -68,7 +73,13 @@ impl SSTableReader {
     /// A bound at or below `within` is CORRUPTION, not an empty result: it means
     /// the index's successor offset contradicts the resolved partition offset. It
     /// is reported as a named [`Error::corruption`] rather than silently yielding
-    /// zero rows for a present partition.
+    /// zero rows for a present partition (a 0-rows-when-present pass is the failure
+    /// this repo says must never happen). DECLARED, so nobody looks for a
+    /// behavioural test of it: that branch is UNREACHABLE from today's callers —
+    /// both `successor_partition_offset` arms end in `.filter(|&off| off >
+    /// target_offset)` and the `data_length` fallback in `.filter(|&len| len >
+    /// offset)`, so an end bound is either absent or strictly greater than the
+    /// partition's start. It is a guard against a future caller, not a live path.
     ///
     /// # Why the `Break`-on-different-key callback stays
     ///

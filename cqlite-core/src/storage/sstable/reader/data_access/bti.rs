@@ -138,16 +138,12 @@ impl SSTableReader {
 
         // AUTHORITATIVE end bound (issue #953 / #951 MEDIUM): the target partition
         // occupies `[offset, end)`, where `end` is the SUCCESSOR partition's start
-        // offset (next trie/index entry). Decompressing exactly the chunks covering
-        // that half-open range materializes every byte of the target partition —
-        // including a row/cell that SPANS multiple compression chunks — without
-        // reading the next partition. This replaces the previous next-partition
-        // *boundary-scan* heuristic (a row-count-stability guard that could falsely
-        // accept a boundary mid-partition); see `bti_decompress_and_parse_target_all`.
-        //
-        // `None` means `offset` is the LAST partition (no successor): the callee
-        // bounds the end with the authoritative data-section length, or falls back
-        // to the safe full-scan path when that length is unknown.
+        // offset (next trie/index entry) — never a boundary-scan heuristic. It
+        // bounds BOTH the decompression and (issue #3890) the parse; the callee's
+        // doc comment states which is which and why they differ under a #954
+        // clustering narrowing. `None` = the LAST partition (no successor): the
+        // callee then uses the authoritative data-section length, or falls back to
+        // the safe full-scan path when even that is unknown.
         let end_bound = self
             .successor_partition_offset(offset, partition_key)
             .await?
@@ -214,10 +210,9 @@ impl SSTableReader {
             .bti_decompress_and_parse_target_all(
                 offset as usize,
                 decode_end_bound,
-                // Issue #3890: the UN-narrowed successor offset. `decode_end_bound`
-                // above may have been tightened to a clustering slice's row-index
-                // block extent INSIDE the partition, which is the right bound for
-                // the DECOMPRESSION and the wrong one for the PARSE.
+                // Issue #3890: the UN-narrowed successor offset — `decode_end_bound`
+                // may point INSIDE the partition, which is right for the
+                // DECOMPRESSION and wrong for the PARSE.
                 end_bound,
                 row_body_window,
                 &key,
