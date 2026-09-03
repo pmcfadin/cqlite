@@ -656,19 +656,16 @@ impl V5CompressedLegacyParser {
                                     row_count,
                                     offset,
                                 )?;
-                                // Issue #3928 round 5 (I2): END THE WALK. The two changes
-                                // compose EXACTLY here — #3721 decides above whether this
-                                // failure is PROPAGATED (only it can tell), #3928 where a
-                                // non-propagated one LANDS. `Ok` from
-                                // `end_of_partition_or_bail` means only "not
-                                // `Error::ColumnDecode`", and it consumed nothing, so the
+                                // Issue #3928 round 5 (I2): END THE WALK. `Ok` from
+                                // `end_of_partition_or_bail` establishes only "not
+                                // `Error::ColumnDecode`" and consumed nothing, so the
                                 // cursor still sits where the failed row parse STARTED —
                                 // the only exit here leaving it UNCONFIRMED (both boundary
                                 // exits set `partition_complete`), reachable only when
                                 // `!extent.is_complete()`, i.e. MID-ROW under the straddle
-                                // protocol. Reasoning and the measurement in BOTH
-                                // directions: `partition_header_arm.rs`, "Reconciling
-                                // #3721 and #3928".
+                                // protocol. How this composes with #3721 above, and the
+                                // measurement in BOTH directions:
+                                // `partition_header_arm.rs`, "Reconciling #3721 and #3928".
                                 break 'partitions; // End of valid data in partition
                             }
                         }
