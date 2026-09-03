@@ -708,22 +708,368 @@ baseline source (`— baseline read via the committed manifest` / `— baseline 
 FALLBACK: … VERIFIED ABSENT at that sha`), so use of the fallback is visible rather than inferred.
 
 **And it ends by naming the OBJECT provenance too, because the shared object store is TRUSTED, not
-verified** (`; objects: baseline REUSED from this lane's SHARED store` / `baseline FETCHED from the
-canonical remote, HEAD's own from this lane's SHARED store` / `provenance NOT RECORDED` — each
-followed by `store TRUSTED, not verified (#3746)`). Git does not rehash a packed object against the
-id it was asked for on an ordinary read, and on this fleet **every lane on a box is a worktree of
-one shared `.git`**, so a peer lane planting a forged pack/index can make a canonical sha resolve to
-a shortened manifest — a false `PASS`, and a non-invoker route, hence a defect.
+verified per-read** (`; objects: baseline REUSED from this lane's SHARED store` / `baseline FETCHED
+from the canonical remote, HEAD's own from this lane's SHARED store` / `provenance NOT RECORDED` —
+each followed by `store TRUSTED, not verified (#3749)`). Git does not rehash a packed object against
+the id it was asked for on an ordinary read, and on this fleet **every lane on a box is a worktree of
+one shared `.git`**, so a planted pack/index can make a canonical sha resolve to a shortened
+manifest — a false `PASS`. What an ordinary read *does* verify is the pack CRC and the zlib stream,
+which catch **accidental** damage (bit rot, a torn or truncated write) but never rehash content
+against its own name.
 
-It is **declared rather than closed** because removal does not close it. The ancestry walk and the
-provenance leg read HEAD's **committed** content, which has no source other than that store — the
-working tree cannot substitute, since the `UNCOMMITTED` verdict exists precisely to compare against
-what is committed — so a forged HEAD object still turns `UNCOMMITTED` (fatal) into `DECLARED`
-(non-fatal) after removal, while charging every `--lite` round for a half-closure (measured
-3.41 s / 93 MB full, 3.58 s / 45 MB at `--depth=1`; shallow is *not* cheaper — it still ships the
-tip's whole tree). A check that claims nothing false is worth more than one claiming a closure it
-does not deliver. Closing it properly — including the possibility that the real subject is the
-infrastructure decision that lanes share an object store at all — is **#3746**.
+**#3749's owner ruling split that into two subjects, and overturned the earlier framing.** This page
+used to call a peer lane planting objects "a non-invoker route, hence a defect"; that is
+**retracted**. *Deliberate* forgery by a same-host peer is **invoker-class and out of model** — the
+#3312 triage rule already says same-host actors able to write these scripts are invoker-class, and a
+peer wanting a false `PASS` can simply edit `scripts/agent-gate.sh`, which is cheaper than forging
+pack data; no check inside a process defends against the party that controls the process.
+*Accidental* corruption **is** in model, and its control is a periodic full-rehash sweep:
+`scripts/check-object-store-integrity.sh` runs a full `git fsck` (never `--connectivity-only`, which
+does not rehash content) over the shared store and emits an anchored four-valued
+`VERIFIED`/`CORRUPT`/`UNSWEEPABLE`/`UNMEASURED` verdict — exit 0/4/6/5, and **a consumer must not
+read `UNMEASURED` as clean**. It runs at machine onboarding (`bootstrap-agent-machine.sh` section 5d, where
+`VERIFIED` is the only `[ok]`, so an unmeasured host cannot pass `--strict`) and on the worker
+supervisor's throttled per-iteration cadence (default every 6h). There, `CORRUPT` **stops the
+supervisor loudly** instead of holding — corruption is non-self-clearing, so a hold-and-repoll loop
+would spin to the wall-clock budget taking no useful action — and so does `UNSWEEPABLE` (below),
+while `UNMEASURED` is journalled and
+paged once and deliberately does **not** stop the loop, because refusing to run any worker over a
+hygiene probe that could not run is a self-DoS. **That sweep is periodic, not per-read, which is why
+the emitted clause still says `TRUSTED, not verified`.**
+
+**The fatal verdict is affirmative, and it had to be made so.** A `git fsck` over a store up to
+eight peer lanes are concurrently writing prints `error:` lines on a **healthy** store (measured on
+this fleet: `invalid reflog entry` naming a different branch each run, on a quarter to a half of all
+runs), so recognising damage from the *text shape* of a diagnostic made a healthy box page high, stop
+its supervisor and fail `--strict` bootstrap. The class comes from fsck's exit **bitmask** — bits
+`1 ERROR_OBJECT`/`4 ERROR_PACK` are the subject; `2 ERROR_REACHABLE`/`8 ERROR_REFS`/
+`16 ERROR_COMMIT_GRAPH`/`32 ERROR_MULTI_PACK_INDEX` are *not* demoted to clean but get their own
+non-passing `UNMEASURED` cause. **Except that `2 ERROR_REACHABLE` has two causes, and routing both
+to `UNMEASURED` was a false negative on real corruption.** That bit fires for a stale reflog entry
+naming an object a peer's gc pruned (routine, not the subject) *and* for an object genuinely absent
+while a live ref, the index or HEAD still needs it (corruption). Both reproduce, so the reproduction
+discriminator cannot separate them, and `UNMEASURED` is deliberately non-fatal to the supervisor's
+loop — so workers kept running against a demonstrably damaged store, reported as "not measured".
+They are separated by a **third walk with `--no-reflogs`**, which drops the reflogs from the
+reachability roots and keeps everything else: a complaint that *survives* it is reachable from a live
+root and is `CORRUPT`, with a remedy that says the reflog remedy does not apply; one that *clears* is
+`REFLOG-SCOPED` and stays `UNMEASURED`. Measured on git 2.43.0 on real fixtures, both directions: a
+blob deleted while HEAD's tree names it exits 2 with and without reflogs; a commit deleted after
+`reset --hard`, named only by the reflog, exits 2 with and **0** without. This is **not** the
+`--no-reflogs` *suppression* rejected earlier — that decided whether to report and was measured not
+to help; this decides which cause, on a class that has already reproduced twice, and can only make
+the verdict stronger. Passes 1 and 2 never carry the flag (asserted structurally over the shipped
+call sites), an attribution walk that is killed, unlaunchable or unclassifiable leaves the complaint
+`UNATTRIBUTED` and non-passing, and a damage bit appearing only in the third walk has not reproduced
+across the sweep walks. The verdict set stays closed at three: the split is in the *cause* text, not
+in a fourth token two readers and a structural assert would have to learn. **And "the roots the walk
+has" was itself an unchecked assumption, wrong in both directions.** A review finding held that
+`--git-dir=<common>` discards linked worktrees' private administrative context, so a missing object
+needed only by a lane's private HEAD or index would be overlooked. Measured on git 2.43.0, that is
+**false**: a common-dir fsck *does* walk every registered worktree's private `HEAD`, its private
+index, and the HEAD of a *prunable* worktree — all three surviving `--no-reflogs`, hence already
+`CORRUPT`. What it does *not* walk is a **linked** worktree's per-worktree refs (`refs/worktree/*`,
+`refs/bisect/*`, `refs/rewritten/*`; the main worktree's live in the common dir and are walked):
+delete an object named only by one and the sweep exits **0 VERIFIED**, because the HEAD reflog echoes
+the id and that echo clears under `--no-reflogs`. The covered roots are pinned by fixtures; **the
+hole is a DECLARED GAP, and the probe built to close it was removed.** Three measurements rule out
+the fsck-shaped fixes and are recorded so nobody re-derives them: `git fsck <sha>` *replaces* the
+default heads (so private roots can never be appended to the sweep walk), an explicit-head fsck
+still scans the whole object directory and so costs a full rehash, and `rev-list <missing-root>`
+dies 128 (so `--missing=print` cannot answer the case that fires). What was built instead was an
+O(refs) question — enumerate each linked worktree's refs, subtract the common ones, ask
+`cat-file --batch-check` whether the remainder's targets are present — and **its first review
+returned three false-`VERIFIED` routes of its own, two of them High**: a present root whose
+reachable *child* is missing is invisible to a target-presence check; a per-worktree ref is
+discarded by the name subtraction when a common ref shares its name, even pointing at a different,
+missing object; and a failed `awk`/`sort`/`comm` degrades to a zero-root census and then permits
+`VERIFIED`. A mechanism added to prevent one false clean produced three new ways to reach one, in
+one review — so #3229's ruling (*a guard with known documented false-PASSes is worse than no guard*),
+its companion (*subtraction cannot introduce a false PASS*) and #3544's own posture (*a check that
+claims nothing false is worth more than one claiming a closure it does not deliver*) all point the
+same way. **The class also has zero instances on this fleet**, measured twice independently on
+2026-09-02: 14 registered worktrees, all three namespaces absent from every linked worktree's admin
+dir and from the common dir, 0 mentions in `packed-refs` — live per-worktree refs would have made
+removal leave a live hole, and the right answer would then have been to fix the three findings.
+**The declaration is emitted on every run**: `declared-gap` lines, on all three verdict classes
+(what a run did not walk does not depend on what it found), in **`1 RECOGNISED`** form rather than a
+bare count, naming the un-walked namespaces, the coverage that is *not* in the gap (the measurement
+above, which is what keeps the gap one namespace wide) and the fleet measurement with its date,
+since "zero instances" expires. One measurement is kept for whoever revisits this:
+**`git worktree list --porcelain` is fail-open** — it silently drops a worktree whose admin `gitdir`
+file is missing (rc 0, no diagnostic) — so any future enumeration must be filesystem-first over
+`$GIT_COMMON_DIR/worktrees/*`, git's own administrative directory, with the command only as a
+cross-check in the direction it can fail. **The mask does not end at
+31, and assuming it did dropped real damage.** A range check over `1..31` — reasoned from 128 being
+`die()` and `127 & 1` being 1 — classified 33 (`32|1`) and 36 (`32|4`) as unclassified and therefore
+`UNMEASURED`, a false negative on genuine object corruption. Measured on git 2.43.0: a truncated
+`multi-pack-index` exits 32, and that store with one corrupted blob exits 35. So the damage bits are
+tested **independently, and first**, and an unrelated bit can never mask them; only a status at or
+above 124 (timeout/shell conventions, `die()` and signal deaths above them) is refused bit-testing
+outright, and a status carrying a bit outside the supported mask is unclassified rather than folded
+into a class whose remedy would be wrong — which is how it degrades safely as git adds bits.
+
+**And that range has two halves, which sharing one verdict made a false negative on real
+commit-object corruption.** Measured on git 2.43.0: overwrite the loose object a live ref points *at*
+with unparseable bytes and fsck prints `fatal: loose object <sha> … is corrupt` and exits **128**,
+while the same damage to a *blob* — or a valid object stored under the commit's name — exits 3
+(`2|1`) and is caught. So the exact damage this control exists for lands outside the mask, where
+`unclassified` ⇒ `UNMEASURED` ⇒ the supervisor writes a fresh throttle stamp and keeps spawning
+workers. `124..127` is the timeout/exec convention — the fsck **never ran**, a fact about the box's
+tooling, and it stays permissive; `128`+ is git's own `die()` or a signal death — it **ran and did
+not finish**, and reproduced on *both* walks it is the stopping verdict `UNSWEEPABLE` (exit 6). The
+boundary is argued from the exec chain rather than assumed: `env`/`nice`/`timeout` each report their
+own failures inside `125..127`, so a status at or above 128 is the innermost command having actually
+started, which together with the launch marker below makes "fsck ran and died" an *affirmative*
+observation. **On that cause `UNSWEEPABLE` claims no cause and prints no repair** (scoped to the
+*fatal* cause: the verdict gained a second one, below, which does name its cause) — the alternative was to read the
+`fatal:` text for a damage signature, i.e. the text-shape classifier again, narrower, with every
+wording nobody enumerated falling back to the same permissive state. It tells the operator to run the
+walk by hand and act on what the `fatal:` line names (that line is kept in the findings **for display
+only**; it reaches no branch), and it makes a completed sweep the condition for resuming. The
+verdict set is closed at **four**, and the closure is over *dispositions*, not over a count: a token
+is what every consumer keys its behaviour on, so a state that stops the box cannot be expressed as
+another verdict's cause text, while two causes that both continue (the reflog split above) must be.
+
+**`UNSWEEPABLE` has a second cause: the store's own `fsck.*` config, which the environment allowlist
+cannot reach.** `env -i` plus the allowlist closes git's *environment* config sources; a **local
+config is a file in the repository, not an environment variable**, and `git fsck` is configurable.
+Measured on git 2.43.0 against a real fixture (a commit object with no author email — an
+ERROR-severity message, exit bit 1, the sweep's own damage class): plain fsck exits **1**, while both
+`fsck.<msg-id>=ignore` and a `fsck.skipList` naming that object exit **0** — so the sweep reported
+`VERIFIED` **about a damaged store**, the exact false affirmative this control exists to prevent. It
+is in model because the file is the *shared* `.git/config` a peer lane, or an accident, writes. It is
+**refused, not overridden**: `fsck.<msg-id>` is an open-ended key space (one key per message id, new
+ids with new git versions), so a `-c` per key is a list that is wrong the moment git adds a message,
+and a partial override is the "one axis closed, space declared done" shape this issue has hit five
+times. So any `fsck.*` key in the configuration the walk would read means **no walk at all** and
+`UNSWEEPABLE`, naming the keys and the `config --list --show-origin --name-only` that lists them, and
+claiming **no damage** — nothing was rehashed. It *stops* rather than reporting, because the policy is
+a persistent property of the repository and because an `fsck.<msg-id>` naming an id this git does not
+know **already** stops the box through the fatal cause, so the permissive reading would stop a box
+whose config merely breaks fsck while letting one that suppresses real damage carry on. "Could not
+**ask**" stays permissive and is its own state: a failed probe, or an rc-0 answer listing no key at
+all (an *unread* policy, not an empty one — every repository's config declares
+`core.repositoryformatversion`), is `UNMEASURED` with its own cause and no walk, so `VERIFIED` is
+reachable only from a policy that was read and found empty. And both consumers' text is now derived
+from the **token** alone — the latch records only the verdict, so a reader naming the fatal mechanism
+was affirmatively false on the other cause.
+
+**And a status is only a bitmask if the command that produced it actually ran.** fsck's status space
+is shared with the shell's, so the classifier had a precondition it never checked: the two capture
+redirections are part of the fsck command, and a failure to open the scratch output file (a full or
+reaped `TMPDIR`) means bash execs nothing and exits **1** — `ERROR_OBJECT`. Both passes then fail
+identically, both "reproduce", and the sweep emitted `CORRUPT` **about a store it never opened** —
+the same false-`CORRUPT` harm as the text-shape classifier, arriving through the shell instead of
+through a concurrent writer. It cannot be inferred from the status, which is the point; the evidence
+is **affirmative** — a marker written inside the redirected group as its first statement (a
+redirection failure on a compound command means the body does not execute at all) plus both capture
+files existing afterwards — and its absence is a `launchfail` class routed to `UNMEASURED`, never
+bit-tested. Generalise it: **before reading a status as a structured value, establish that the
+process whose convention you are applying is the process that produced it.**
+
+And no non-clean walk is fatal on one observation: it is re-run **once** as a discriminator — a
+concurrency artefact does not survive a second independent walk, damage does — never a
+retry-until-clean loop (the reachability attribution above is a third walk answering a different
+question; `MAX_SWEEP_WALKS` in the sweep script is the declared ceiling, and every caller's bound is
+derived from it). **The two channels must also agree before the fatal verdict is acted on.** Both
+consumers read the exit status *and* the anchored `verdict ` line, and both tested them with `||`
+while the comment above each asserted the conjunction — so an exit 4 with no verdict line, or a stray
+`CORRUPT` line under any other status, was enough to create a sticky, box-wide, operator-cleared
+latch that halts every lane. Blast radius decides the direction: a false latch stops four lanes until
+a human notices, while one more iteration over a genuinely damaged store costs the next sweep, which
+reproduces it and latches it properly. A disagreement is therefore routed to `UNMEASURED` and *named*
+(`INCONSISTENT sweep result`), never folded into the generic "could not measure" line; the
+`UNMEASURED` tests stay disjunctive on purpose, because a disjunction that can only reach a
+non-passing branch cannot manufacture a verdict. The `CORRUPT` verdict is **persisted for the box in its own create-only
+file** (`<stamp>.STOP`, which records *which* stopping verdict it is, read affirmatively — it was
+`.CORRUPT` until a second stopping verdict existed, and a file whose *name* asserts damage is a
+confidently-wrong claim on disk for a verdict that establishes no cause; an unrecognised second line
+is a cause-free stop and is never defaulted to the damage text), because a timestamp-only stamp let
+the detecting lane stop while its
+peers skipped their own sweep for the interval and kept spawning workers over the damaged store.
+Putting the verdict *in* that stamp was the first fix and was itself a defect: stamp writes are
+unsynchronised overwrites, so a lane whose sweep started before the detection could finish after it
+and replace `CORRUPT` with `VERIFIED`. Two consecutive review rounds found a defect in that one
+shared mutable cell, so the channel is **removed rather than serialised** — the latch's only
+transition is ABSENT → PRESENT, created under `set -C` so the kernel arbitrates and a losing writer
+cannot overwrite the winner, while the timestamp stays freely overwritable because moving a
+timestamp backwards costs one extra sweep. A lock was considered and rejected: it makes the
+read-modify-write atomic but leaves a value any writer can move backwards, so "CORRUPT is sticky"
+would rest on every future writer remembering to honour it. The latch does not expire and is cleared
+by hand (`rm -f <latch>`, named in every message that mentions it); a create that could not happen
+is reported, never read as a latched box. The stamp's **key** is resolved by the sweep script itself
+(`--print-store`), never by a `git` call in the supervisor — a bare `git rev-parse
+--git-common-dir` inherits the caller's environment, so an inherited `GIT_DIR` keyed the stamp on
+another repository — and it is a **digest** of that canonical path, because flattening is not
+injective: replacing `/` and every unsupported character with `_` maps `/tmp/a/b/objects` and
+`/tmp/a_b/objects` to one name, so two repositories on a box shared a throttle stamp *and* a
+`CORRUPT` latch. The form is `<sanitised tail>.<16 hex of sha256>`, where the tail is readability
+only and carries no identity. **The digest is taken from the RAW path, in the resolver — digesting
+the RENDERED value was itself the next defect (round 5).** Round 4 made the key injective over the
+flattening and then fed the digest the value `--print-store` had already passed through the sweep
+script's `sane()` escaper, which is a *display* encoding and a lossy one: a path holding a real
+newline and one holding the two literal characters `\n` produced ONE key, which is the same
+shared-stamp-and-latch harm arriving through the fix for it. So `store_key` lives in the sweep
+script — the only process holding the raw bytes — and publishes a second anchored `store-key` line
+that the caller validates and uses verbatim, while the supervisor's own digest helper is gone, so no
+lossy value is left for a future caller to digest. The transferable rule: **a value sanitised for
+DISPLAY is not an IDENTITY; derive a comparison key before any rendering, and where both are needed
+publish two fields rather than deriving one from the other.** Three digest tools (`sha256sum`, `shasum -a 256`,
+`openssl dgst -sha256`) cover both platforms, the output is parsed from both ends and then validated
+as hex, and a host with none fails closed to the **empty** key — no throttle, no latch, announced
+once naming both causes — never a silent fall back to the colliding form. `cksum` is present
+everywhere and deliberately unused: CRC32 is not collision-resistant, and a colliding key is the
+defect being removed.
+
+**The latch is created before the throttle stamp, re-read before every return that leads to a spawn,
+and the remaining race is declared rather than closed.** The stamp used to be written for every
+outcome *before* the `CORRUPT` branch ran, so between those two writes a peer read a fresh
+non-corrupt stamp and throttled past a corruption about to be recorded; and a lane whose own sweep
+said `VERIFIED` returned toward a spawn without re-reading the latch, so a peer latching the box
+*during* that lane's two fsck walks was never seen. Both are ordering fixes, neither needs a lock:
+latch first, stamp second, and one `obj_sweep_stop_if_latched` helper before the throttled,
+`VERIFIED` and `UNMEASURED` returns alike — one rule instead of a set of paths to audit.
+**And ordering was not enough: the stamp is written only if the latch is CONFIRMED present, else it
+is forced stale (round 9, item 1).** "Latch first, stamp second" left the stamp unconditional, so on
+the one branch where the latch could not be *persisted* — a writable stamp inside a directory that is
+not writable, so creating `<stamp>.STOP` fails while rewriting `<stamp>` succeeds — the detecting
+lane stopped (correct) and still advertised a freshly swept box (not correct): its peers read the
+fresh stamp, skipped their own sweep for the whole interval, and kept working against a store already
+confirmed damaged. The stamp write is now gated on `obj_sweep_latch_present`, the afterwards-existence
+check and never the create's exit status (which cannot tell "a peer got there first" from "the
+directory is unwritable"); where the latch is missing the stamp is forced to epoch `0`, because a peer
+whose sweep started earlier can finish *during* this one and write a fresh timestamp. Forcing can only
+cause MORE sweeping, so it cannot manufacture a false clean.
+
+**And the printed remedy has to work, which it did not (round 9, item 2).** All three copies of the
+repair instruction said `git fetch --force origin`, which repairs nothing: `--force` only permits
+non-fast-forward *ref* updates and re-downloads no objects, so with the advertised tips unchanged the
+negotiation can transfer nothing — an operator following it exactly kept the corruption and gained the
+impression of a repair. Measured on git 2.43.0 against planted damage, by the sweep's own verdict:
+`--force` leaves a corrupt loose object, a flipped pack byte and a missing object untouched;
+`git fetch --refetch origin` (git 2.36+) restores a MISSING object but not damaged content, whose bytes
+stay in the object directory where fsck still finds them — so content damage needs the pack or loose
+object deleted first, after which `--refetch` verifies clean. A fresh clone works, but only **from the
+canonical remote over the network**: `git clone <local path>` hardlinks the object files, so a clone of
+the damaged repository is damaged too. Hence the sweep owns the text (it knows the damage class, and
+the measurements live beside it) and both consumers QUOTE its `verdict-detail` lines instead of
+paraphrasing, with a fail-closed fallback so a stopped box is never left with no remedy — and clearing
+the latch is gated on a re-run of the sweep reporting its affirmative verdict.
+
+**That rule was still a set of SITES, and round 5 found the fourth — so the read is now at ENTRY,
+above every branch.** The documented opt-out `OBJ_SWEEP_INTERVAL_HOURS=0` returned before any latch
+read, so switching the sweep off also switched off an already-recorded `CORRUPT` verdict. Patching
+the fourth site would have left a fifth, because the design required every early return to remember
+the check; the read is therefore hoisted to the top of `object_store_sweep`, whose prologue is now
+declarations and assignments only, and the invariant is a property of the FUNCTION ("it cannot be
+entered without a latch read") that holds for branches nobody has written yet — asserted
+structurally. The post-sweep reads stay: a peer can latch the box while this lane spends up to
+`MAX_SWEEP_WALKS` walks. Cost: one `--print-store` resolution per iteration (measured 5 ms) on a
+path that previously paid none. The latch question is also **four-valued**, because `[[ -e ]]` is
+false both for an absent latch and for one the process cannot look at: `unknown` STOPS under its own
+reason (`object-store-latch-unreadable`, never as `CORRUPT` — nothing observed damage), and
+`absent` requires the absence to be **established through searchable ancestors** — `-d` on the
+holding directory is itself two-valued (false both for a directory that does not exist and for one
+whose *ancestor* cannot be searched), so the probe walks up to the deepest ancestor it can stat and
+counts the absence only when that one is searchable, and
+`unkeyed` is the one permissive answer, announced once, because no key means no latch was ever named
+and stopping would make a missing sweep script halt every lane for want of a hygiene probe.
+
+**The thundering herd is closed, with the hazard its fix introduces.** The throttle read and the
+sweep invocation were unsynchronised and the stamp is written at the END of a sweep, so when the
+interval expired every lane read the same stale stamp and started its own full-store fsck — not
+merely a CPU cost: the walks are I/O-bound, so contention pushes them toward the per-walk bound, and
+an expired bound is `UNMEASURED`, a correlated loss of the measurement on every lane at once. The
+serialiser is a per-store claim **directory** created with `mkdir` (the latch's kernel-arbitrated
+create-only primitive, and deliberately not `flock`, since this file's single-instance lock is
+mkdir-based precisely because macOS ships no `flock(1)`). **A loser *does* wait, which reverses the
+original design.** It used to skip that iteration's probe and carry straight on to the spawn path
+after one latch read, on the argument that "a peer is doing it right now" is a complete answer for a
+6-hourly hygiene sweep — a complete answer about the SWEEP and no answer at all about the SPAWN,
+because the loser knows a full-store fsck is in flight (that is why its claim failed) and that fsck
+can end in `CORRUPT` or `UNSWEEPABLE`, latching the box. The window it discarded was the peer's
+**entire sweep**: 13-80s measured on this fleet, up to `MAX_SWEEP_WALKS` × `OBJ_SWEEP_TIMEOUT_SECS`
+(600s at the shipped defaults) by construction — not the narrow post-read spawn gap the residual
+note described. The loser now waits, re-reading the latch, the stamp, the claim and the stop file
+every `OBJ_SWEEP_CLAIM_POLL_SECS` (granularity, not a bound), **bounded by the claim's own derived
+staleness value**: the same 660s that says "this claim may be taken over" says "stop waiting for
+it", so a dead peer cannot wedge the wait and there is no second, driftable constant. A timeout is
+not a clean result and does not carry on — when the peer neither finishes nor vacates, that claim is
+stale by construction at the deadline, so the next acquire recovers it and **the loser becomes the
+sweeper**. **And a completed peer ends the wait — it does not send the loser back to contend.** The
+wait's `completed` (the throttle stamp went fresh) was treated as "go round and acquire again", and
+it is reached *without sleeping*, on the pass that observes the stamp — so a peer that writes the
+stamp and then dies before releasing leaves the claim present and the stamp fresh, every acquire
+answers `held`, every wait answers `completed` in microseconds, and the lane spun CPU-hot until the
+supervisor's whole `MAX_HOURS` budget expired (measured: 2165 completions in 20s). The age-based
+recovery built for exactly that dead peer could not save it, which is the transferable part:
+`completed` was tested *before* the claim's deadline on every pass, so the recovery the design
+relies on never ran. The fix adds no second notion of "the peer is gone" — a fresh stamp is the same
+answer the throttle at the top of the sweep gives, so the lane skips exactly as it would have there,
+which is strictly less work than the acquire-and-release round trip the ordinary case used to make.
+The loop is now bounded in wall time **by construction** and by a value it already derived
+(`exhausted` and `completed` break; neither surviving state is required to have slept, so the loop
+itself is bounded by the iteration's own `claim_stale` budget), never by `MAX_HOURS`. The general
+rule: **a state a loop can reach without sleeping must not be a loop-continuing state**, and a bound
+placed after a fast-path test is not a bound at all.
+Otherwise, only where peers keep handing the claim around for the whole budget does the lane skip,
+journalled and paged as `NOT SWEPT AND NOT MEASURED`, never as clean, and never as a stop (a peer
+sweeping is also the shape of a healthy box recovering a wedged claim, and stopping four lanes over a
+hygiene probe's contention is the self-DoS that file refuses everywhere else). The throttle is
+**re-read after acquiring**, which is what stops the claim converting a herd into a queue of
+redundant sweeps. A
+stale claim must not wedge the box, which would be worse than the herd, so the recovery threshold is
+**derived**: a claim cannot be stale while the sweep it represents could still be running, so it is
+the sweep's own `MAX_SWEEP_WALKS` (read from that script) × this supervisor's per-walk bound + slack
+= 3 × 200 + 60 = 660s; a claim with no parseable start time reads as stale on purpose (its cause is
+a lane killed between the `mkdir` and the write, and the other reading wedges the sweep forever),
+and where the bound cannot be derived **no claim is taken at all** and the previous behaviour is
+restored, announced. The claim is a registered resource released by the EXIT trap, so the `CORRUPT`
+path — which ends the process — does not leave peers waiting out the bound. Not closed, and
+pre-existing: this file installs no INT/TERM handlers, so a signalled supervisor releases neither
+its claim nor its lock; for the claim that is a delay, not a wedge. **What is not closed, per path
+and with its real magnitude** — a residual whose size is understated is worse than one described
+honestly, and a residual left standing when it could be closed is the other half of that. **Path 1,
+the claim loser: closed** — it was the peer's whole sweep (13-80s measured, 600s by construction),
+now bounded by one `OBJ_SWEEP_CLAIM_POLL_SECS`. **Path 2, a lane's own sweep: covered** by the entry
+read plus the post-sweep reads. **Path 3, the last latch read to the worker spawn: narrowed from up
+to an hour to one pre-spawn prologue, and it is not zero.** The hold loop used to run after the last
+latch read and never re-read it, so at the shipped defaults a lane could sit for `BUILD_HOLD_MAX` ×
+`HOLD_POLL_SECS` = 12 × 300s = **3600s** (leftover-worker family: `LEFTOVER_HOLD_MAX` ×
+`HOLD_POLL_SECS` = 900s) and then spawn onto a box a peer had latched meanwhile. `preflight_wait` is
+now a **wrapper**: the loop lives in `preflight_wait_holds` and the STOP latch is re-read on *every*
+return out of it, so the hold window is closed structurally — a property of the function boundary,
+not an enumerated set of returns (round 3 fixed three such returns and round 5 found a fourth; that
+shape does not converge). What remains is `run_iteration`'s pre-spawn prologue: `stamp_claim`, i.e.
+one `claim-heartbeat.sh stamp` ref push to `origin`, around an `rm`/`mkdir`/assignments — a measured
+lower bound of **0.26-0.28s** for a bare `git ls-remote origin HEAD` on this fleet, unbounded in
+principle since the supervisor puts no timeout on that push, and **not** the "milliseconds" a purely
+local prologue would give. It is bounded in harm (that lane's next iteration reads the latch at the
+top of its sweep and stops, and nothing certifies a merge in that window without a full gate, which
+a latched box refuses), and closing it entirely still needs per-store synchronisation shared by the
+sweep and the spawn decision, which is split to its own issue. Path 1 and the hold window are
+closed; the pre-spawn window is open; the race is not gone. The sweep is also **not interruptible** — its two walks
+run in a child process — so the supervisor checks the stop file and the wall-clock budget
+immediately *before* the sweep, and bounds the exposure in wall time: its per-walk default is the
+sweep script's own bound **divided by `MAX_SWEEP_WALKS`** (200 vs 600/3), so every walk it can pay
+for still costs no more than one walk at the script's bound. The walk count is **read from the
+shipped script**, not re-typed in the test: the relation was asserted with a hard-coded factor 2, so
+adding the third walk would have kept it green while the supervisor's real worst case rose to 900s —
+a relation whose own constant is restated is two magic numbers wearing a relation's clothes. Raising
+a bound, or the walk count, is a change to somebody's stop latency.
+
+Three alternatives were **rejected** by the same ruling, recorded so they are not re-derived:
+per-lane full clones (a permanent multi-GB tax for an out-of-model threat); per-read rehashing (the
+fourth carve into one pre-flight, charged to every `--lite` round); and removing the reuse
+optimisation — whose original argument still stands, because removal does not close it. The ancestry
+walk and the provenance leg read HEAD's **committed** content, which has no source other than that
+store — the working tree cannot substitute, since the `UNCOMMITTED` verdict exists precisely to
+compare against what is committed — so a forged HEAD object still turns `UNCOMMITTED` (fatal) into
+`DECLARED` (non-fatal) after removal, while charging every `--lite` round for a half-closure
+(measured 3.41 s / 93 MB full, 3.58 s / 45 MB at `--depth=1`; shallow is *not* cheaper — it still
+ships the tip's whole tree). A check that claims nothing false is worth more than one claiming a
+closure it does not deliver.
 
 **The baseline's identity is validated before the fetch.** Trusting a remote merely *named*
 `origin` made `git remote set-url origin <anything>` a git-config-shaped opt-out — and it fires
