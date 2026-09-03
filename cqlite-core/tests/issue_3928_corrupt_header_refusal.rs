@@ -464,6 +464,23 @@ async fn bti_scan_refuses_a_partition_header_cassandra_itself_rejects() {
 /// 180 LOST and 113 FABRICATED. An arm the corpus cannot reach needs a
 /// constructed oracle, never an argument from silence.
 ///
+/// RE-TAKEN A FIFTH TIME after round 5 ended the walk at every unconfirmed
+/// break. Same subject set and the same 542 / 3 / 0 figures with 0 errors — plus
+/// one NEW number that appeared only because this run finally drove POINT READS,
+/// which the four earlier AC3 scans never did:
+///
+/// * the block-emit tolerant ROW break fires **2** times on the well-formed
+///   corpus. It read **0** in rounds 1-4 purely because no surface those scans
+///   drove reaches it. Those two are real straddling rows, and the walk now ENDS
+///   there rather than probing for a header — with 0 errors, so terminating
+///   costs nothing on healthy data.
+/// * the marker breaks fire **0** times, which is why reporting the marker's own
+///   error on a proven-complete buffer (closing I2) is free.
+///
+/// The lesson is the one this comment keeps relearning: a zero means "this
+/// surface set does not reach the arm", never "the arm is healthy". Four rounds
+/// read that zero before one run with a wider surface set produced a two.
+///
 /// So the header-arm refusal costs nothing on well-formed input, and the row
 /// arm's toleration count did not move — which is AC3's property. The
 /// instrumentation was temporary and is not committed; re-take the measurement
