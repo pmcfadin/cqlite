@@ -124,7 +124,15 @@ from ws0_boundary_observations import (  # noqa: E402
 
 TEMPS_ALLOWED = ("warm", "cold")
 ARMS_ALLOWED = ("bypass", "merge")
-def fmt(label: str, block: dict) -> str:
+def fmt(label: str, block: dict, counted_cpus: str) -> str:
+    """One arm's figures, WITH THE CPUS THEY WERE COUNTED ON (#3551).
+
+    `counted_cpus` is REQUIRED rather than defaulted: since the two arms can be pinned
+    differently, "cycles/row" means "hardware-thread cycles on THESE cpus per row", and the two
+    arms may legitimately name different lists. A default here would let one arm's figure be
+    printed under the other arm's counted list, which is the #3551 defect wearing a report's
+    clothes.
+    """
     rps, cpr = block["rows_per_sec"], block["cycles_per_row"]
     return (
         f"  {label:<34} {rps['median']:>12,.0f} rows/s  "
@@ -132,7 +140,7 @@ def fmt(label: str, block: dict) -> str:
         f"{cpr['median']:>10,.0f} cycles/row "
         f"[{cpr['min']:,.0f}..{cpr['max']:,.0f}, {cpr['spread_pct_of_median']:.1f}%]   "
         f"IPC {block['ipc']['median']:.2f}   rows={block['row_denominator_total']:,} "
-        f"(n={rps['n']})"
+        f"(n={rps['n']})   counted on cpus {counted_cpus}"
     )
 
 
@@ -663,6 +671,11 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
             # closed mode set by ws0_pinning, so this document can never describe a
             # distinct-cores pin in the sibling vocabulary.
             "flight_server_cpus": flight_server_cpus,
+            # WHAT EACH ARM'S CYCLES WERE COUNTED ON (#3551 item 6), as a mapping rather than
+            # only inside the prose of `counter_mode`: a machine reader comparing two arms needs
+            # to know that "cycles/row" is per-hardware-thread-set and that the two sets may
+            # differ. Derived from the same two values the driver's verified pairing table is.
+            "counted_cpus_by_arm": {"scan": server_cpus, "flight": flight_server_cpus},
             "flight_pin_mode": pinning_verification["flight_pin_mode"],
             "flight_pin_claim": pinning_verification["flight_pin_claim"],
             "flight_allocator": pinning_verification["flight_allocator"],
@@ -979,7 +992,7 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         )
         results["measurements"].append(scan)
         lines.append(f"[{temp.upper()}]")
-        lines.append(fmt("bare scan (execute_streaming)", scan))
+        lines.append(fmt("bare scan (execute_streaming)", scan, server_cpus))
         lines += prewarm_warning(scan, "bare-scan", temp)
         for arm in arms:
             fl = collect_flight(
@@ -999,7 +1012,10 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
             # * Read from `fl["requested_merge_path"]`, so the summary and results.json cannot
             #   disagree: a rename on one side that missed the other would raise a KeyError here
             #   rather than print a label the JSON does not support.
-            lines.append(fmt(f"flight do_get ({fl['requested_merge_path']} requested)", fl))
+            lines.append(
+                fmt(f"flight do_get ({fl['requested_merge_path']} requested)", fl,
+                    flight_server_cpus)
+            )
             lines += prewarm_warning(fl, f"flight/{arm}", temp)
             # THE ARROW-VOLUME CAVEAT, DIRECTLY UNDER THE FIGURE IT QUALIFIES (#3272 round 20).
             # Beside the number, not appended once at the bottom — a caveat eleven bullets below

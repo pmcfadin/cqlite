@@ -792,6 +792,35 @@ if grep -q "perf stat -C 2,10 (bare scan) / -C 2,3 (Flight)" <<<"$out_dist"; the
 else
   fail "the counters line must name both domains (line: $(grep '^counters' <<<"$out_dist"))"
 fi
+# WHAT EACH ARM'S CYCLES WERE COUNTED ON, beside its own figures (#3551 item 6). "cycles/row"
+# now means "hardware-thread cycles on THESE cpus per row", and the two arms may legitimately
+# name different lists, so a reader who cannot see the list cannot read the number.
+if grep -qE '^  bare scan .*counted on cpus 2,10$' <<<"$out_dist" \
+   && grep -qE '^  flight do_get .*counted on cpus 2,3$' <<<"$out_dist"; then
+  pass "REPORT: each arm's figure line names the CPUS ITS CYCLES WERE COUNTED ON, and under a differing flight pin the two lists DIFFER (2,10 vs 2,3)"
+else
+  fail "each arm's figures must name their counted cpus (out: $(grep -E '^  (bare scan|flight do_get)' <<<"$out_dist"))"
+fi
+# ...and the standing NOTES bullet must be TRUE IN BOTH CONFIGURATIONS. The pre-#3551 wording
+# ("summed over BOTH SMT siblings of the pinned physical core … Both arms are counted
+# identically") is FALSE under a distinct-core flight pin, so it was rewritten rather than
+# deleted: the quantity is stated in terms that hold either way, and the distinct-core case is
+# named as the property under test.
+if ! grep -q "Both arms are counted identically, so the ratio" <<<"$out_dist" \
+   && grep -q "summed over EVERY hardware thread in the counted list" <<<"$out_dist" \
+   && grep -q "PROPERTY UNDER TEST" <<<"$out_dist"; then
+  pass "REPORT NOTES: the SMT bullet no longer asserts the two arms are counted identically, states the quantity in terms true of both configurations, and names the distinct-core case as the property under test"
+else
+  fail "the counting NOTES bullet must be true in both configurations (notes: $(grep -A3 'hardware thread' <<<"$out_dist" | head -5))"
+fi
+# ...and the DEFAULT configuration still reads as close to the pre-#3551 report as is honest:
+# both arms name the same list, and the bullet says so.
+if grep -qE '^  bare scan .*counted on cpus 2,10$' <<<"$out_sib" \
+   && grep -q "each arm's figure is a per-physical-core one and the two are counted identically" <<<"$out_sib"; then
+  pass "REPORT NOTES: with both pins at the default the bullet AFFIRMS the per-physical-core reading and the identical counting (the honest no-op-by-default half)"
+else
+  fail "the default configuration must still state the per-physical-core reading (out: $(grep -B1 -A2 'hardware thread' <<<"$out_sib" | head -6))"
+fi
 # ...and results.json carries the same facts for a machine reader.
 if python3 - "$TMP/f-distinct/results.json" <<'PY'
 import json, sys
@@ -802,6 +831,9 @@ assert pin["flight_pin_mode"] == "distinct-cores", pin
 assert pin["flight_pin_claim"] == "pairwise DISTINCT physical cores", pin
 assert pin["flight_allocator"] == "system", pin
 assert "2,3" in pin["counter_mode"] and "2,10" in pin["counter_mode"], pin
+# The counted list PER ARM as a mapping, not only inside the prose of counter_mode (#3551
+# item 6): a machine reader comparing two arms needs it as data.
+assert pin["counted_cpus_by_arm"] == {"scan": "2,10", "flight": "2,3"}, pin
 v = j["pinning"]["verification"]
 # The record read through, including the per-rep verification contract. The value here is the
 # FIXTURE's (shaped like the driver's), so what is asserted is that the field reaches the
