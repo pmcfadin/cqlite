@@ -20,18 +20,6 @@ pub enum CompressionAlgorithm {
 }
 
 /// Maximum allowed decompressed size to prevent memory exhaustion attacks (128MB)
-///
-/// Gated to the union of its consumers' features — same reason and same idiom as
-/// `validate_decompression_size` below (issue #1873). With no backend enabled every
-/// `decompress` arm errors without decompressing, so nothing unbounded is left to
-/// guard: genuinely dead, not merely unreferenced. Ungated, `cargo test -p
-/// cqlite-ffi-common` (cqlite-core at `default-features = false`) fails `-D warnings`.
-#[cfg(any(
-    feature = "lz4",
-    feature = "snappy",
-    feature = "deflate",
-    feature = "zstd"
-))]
 const MAX_DECOMPRESSED_SIZE: usize = 128 * 1024 * 1024;
 
 impl CompressionAlgorithm {
