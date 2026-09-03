@@ -24,17 +24,44 @@
 //! landed entirely in the SUCCESSOR partition's bytes, so no TARGET-partition row
 //! ever lost a column, and this sweep is GREEN both before and after the fix. It
 //! is therefore forward-looking coverage for the class, not a red-first pin of
-//! this instance. What the sweep DID measure, with the swallow temporarily
-//! instrumented (not committed): its 962 targeted reads produce 10 swallowed
-//! `invalid cell flags` errors on `origin/main` and ZERO with the fix — the same
-//! signal as the two named regression tests (17 -> 0 on `test_basic.simple_table`,
-//! 2 -> 0 on the #953 repacked `test_da.wide_table`). Once #3721 removes the
-//! swallow those 10 become hard failures, and this sweep is the lane that runs
-//! them.
+//! this instance.
 //!
-//! That measurement is also why [`MAX_KEYS_PER_TABLE`] is 32 and not 4: at 4 the
-//! sweep reaches only 2 of the 10 — a bound tight enough to make the lane cost
-//! nothing is a bound tight enough to miss most of what it exists to catch.
+//! # What the sweep DID measure, and how to re-measure it
+//!
+//! Its 962 targeted reads surface 10 swallowed `invalid cell flags` errors on
+//! `origin/main` and ZERO with the fix. Once #3721 removes the swallow those 10
+//! become hard failures, and this sweep is the lane that runs them.
+//!
+//! That number is NOT reproducible from committed source: the swallow has to be
+//! instrumented first, and detection has to be measured against the DEFECT
+//! PRESENT (membership is not detection — a guard measured with the fix in place
+//! describes nothing). Full recipe, so the figure is checkable rather than
+//! trusted; run from the repo root with `CQLITE_DATASETS_ROOT` exported:
+//!
+//! 1. Add `eprintln!("SWALLOWED3890: {}", e);` as the FIRST statement of the
+//!    `Err(e)` arm in `reader/parsing/row_decoder/row_data.rs` whose comment opens
+//!    "CRITICAL FIX: Stop parsing remaining columns when we hit an error". Do not
+//!    commit it.
+//! 2. `cargo test -p cqlite-core --features cli-helpers --test
+//!    issue_3890_point_read_column_parity_sweep -- every_fixture --nocapture 2>&1
+//!    | grep -c SWALLOWED3890` -> **0** (the fix in place).
+//! 3. Revert ONLY the fix, keeping the instrumentation:
+//!    `git stash -q -u && git checkout -q origin/main --
+//!    cqlite-core/src/storage/sstable/reader/data_access/ && rm -rf
+//!    cqlite-core/src/storage/sstable/reader/data_access/bti_point && git stash
+//!    pop -q`, then confirm with `git status --porcelain` that `row_data.rs` still
+//!    carries the eprintln.
+//! 4. Re-run step 2's command -> **10**.
+//! 5. Set [`MAX_KEYS_PER_TABLE`] to 4, re-run -> **2**.
+//! 6. Restore: `git checkout -q HEAD -- cqlite-core/src`.
+//!
+//! Step 4 is why [`MAX_KEYS_PER_TABLE`] is 32 and not 4: at 4 the sweep reaches
+//! only 2 of the 10 — a bound tight enough to make the lane cost nothing is a
+//! bound tight enough to miss most of what it exists to catch. The two named
+//! regression tests carry the same signal at their own fixtures (17 -> 0 on
+//! `test_basic.simple_table` via `issue_1573_readat_positional --
+//! big_point_read_matches_scan`, 2 -> 0 on the #953 repacked `test_da.wide_table`),
+//! measured by steps 1/3 plus that target's own command.
 //!
 //! # Derivation, not curation
 //!
@@ -272,6 +299,8 @@ fn must_run_violations(
 /// reads that decode badly on `origin/main`, a cap of 4 reaches **2** and a cap of
 /// 32 reaches **all 10** — and the whole sweep still runs in <1 s (962 targeted
 /// reads over 101 tables). Lowering it silently removes detection, not just cost.
+/// The module header carries the exact re-measurement recipe, including how the
+/// fix is reverted so detection is measured against the defect PRESENT.
 ///
 /// Both figures are with the SELECTION BELOW (all distinct keys collected first,
 /// then the cap applied in sorted order). They moved when that was fixed — under

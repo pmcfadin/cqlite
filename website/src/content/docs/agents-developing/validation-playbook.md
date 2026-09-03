@@ -257,19 +257,27 @@ disk (never a curated list), sweeps every table it can express, and prints by na
 table it cannot — `no-schema`, `unrenderable-key`, `empty` — because a lane that omits
 coverage silently is indistinguishable from one that covers it.
 
-**And its bound is measured, not chosen.** Of the 10 point reads that decode badly on the
-pre-fix code, a per-table cap of 4 reaches **2** and a cap of 32 reaches **all 10** — and the
-sweep still runs in under a second (962 targeted reads over 101 tables). A bound tight enough
-to cost nothing can be tight enough to miss most of what it exists to catch, so when you cap a
-sweep, measure what the cap excludes.
+**And its bound is measured, not chosen** — a bound tight enough to cost nothing can be tight
+enough to miss most of what it exists to catch, so when you cap a sweep, measure what the cap
+EXCLUDES. Raising that sweep's per-table cap from 4 to 32 multiplied what it detects several
+times over while leaving the whole run under a second (962 targeted reads over 101 tables, a
+runtime anyone can reproduce with `cargo test`).
 
 **A cap is only as reproducible as its SELECTION, and that is the subtler half.** The first
 version stopped collecting after 32 distinct keys in *scan* order and sorted afterwards, while
 its own doc said "the first 32 in sorted order" — so which keys got swept moved with scan
 ordering. Fixing it to collect every distinct key first and apply the cap in sorted order
-*changed the measurement*: 14 detected before, 10 after, from the same corpus and the same
-defect. Neither number is wrong; they are counts over different samples. If you quote what a
-cap detects, quote the selection with it.
+*changed the detection count outright*, from the same corpus against the same defect. Neither
+count was wrong; they were counts over different samples. If you quote what a cap detects,
+quote the selection with it.
+
+**The detection figures themselves live in that test's module header, not here, and the reason
+is a rule in its own right.** Measuring a guard's detection power requires instrumenting the
+swallowed error AND reverting the fix — detection is only meaningful against the defect
+PRESENT (the "membership is not detection" rule). So the numbers are not reproducible from
+committed source, and a figure in doctrine that nobody can re-derive from the repo is worse
+than no figure: it is what stops the next person looking. Keep such numbers beside the code
+they describe, with the command, the cap value and the revert step written out.
 
 ## Golden JSONL files
 
