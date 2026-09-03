@@ -16396,7 +16396,7 @@ EOF
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # all-features-check: COMPILE + LINT cqlite-core at `--all-features` (issue #3453).
