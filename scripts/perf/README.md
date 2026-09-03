@@ -187,13 +187,32 @@ changed on the measured path.** So this rig produces **no reusable absolute**.
 that would make a cross-arm comparison readable — same-session interleaved A/B/C
 with a drift control code-identical across arms, "or NO COMPARISON".
 
-**#3551 supplies the CONTROL LEG of that specification and NOT the interleaving.**
-The bare-scan arm is now mechanically guaranteed to be code-identical AND pin-identical
-across a comparison whose only moving part is the Flight pin or the Flight allocator
-(above), which is step 3. Steps 1, 2 and 4 — one rep at a time, rotate the arm order,
-difference WITHIN a round — remain **operator procedure that nothing verifies**, so the
-paragraph below is unchanged in substance: no session-ordering property is established
-by any artifact this rig writes.
+**#3551 supplies the CONTROL LEG of that specification, and EXECUTES the other three
+steps without VERIFYING them.** Read those as three distinct states, because collapsing
+them is how this section acquired a false claim once already:
+
+* **Step 3 (the drift control) is mechanically guaranteed.** The bare-scan arm is
+  code-identical AND pin-identical across a comparison whose only moving part is the
+  Flight pin or the Flight allocator (above), because `--server-cpus` is what it is
+  pinned to and only `--flight-server-cpus` varies. `ws0_abc_aggregate.py` prints its
+  cross-arm movement FIRST and declares any smaller treatment delta NOT READABLE.
+* **Steps 1, 2 and 4 are now EXECUTED AND RECORDED, which they were not before.**
+  `ws0-3551-abc.sh` runs one rep at a time, computes the per-round arm rotation itself,
+  and writes each session's `round`, `position_in_round`, `arms_in_round` and the round's
+  `order` to that session's own `abc-window.json`; `ws0_abc_aggregate.py` takes the
+  difference WITHIN a round and prints the direction count. So the blanket sentence
+  "no session-ordering property is established by any artifact this rig writes" is
+  **true of `ws0-baseline.sh` and no longer true of the rig as a whole** — the A/B/C
+  driver's artifacts do record one.
+* **Nothing VERIFIES that ordering, and that is the whole of what is still missing.**
+  The driver claims the order it EXECUTED, because it executed it; no artifact-side
+  check establishes that a recorded order is the rotation step 2 asks for, or that the
+  driver followed its own table. That is the OBSERVED control **#3287/#3299** own, and
+  it is unchanged by #3551.
+
+The distinction matters operationally: a reader may rely on the control leg, may read the
+recorded positions as a description of what ran, and may **not** read either as an
+observed interleaving control.
 
 **The interleaving control is NOT IMPLEMENTED OR ENFORCED by this rig, and the rig makes
 NO INTERLEAVING CLAIM (#3272 review round 4).** What `ws0-baseline.sh` does have is a
