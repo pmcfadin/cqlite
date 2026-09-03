@@ -386,13 +386,31 @@ mod fixture_drain {
     /// the current thread (the function is synchronous); the bounded channel
     /// is pre-filled and its sender dropped so `blocking_recv` never blocks.
     fn drain_count(reader: &SSTableReader, chunks: &[Vec<u8>], io_failed: bool) -> usize {
-        drain_result(reader, chunks, io_failed).expect("drain_scan_window_blocking")
+        let (res, n) = drain_result(reader, chunks, io_failed);
+        res.expect("drain_scan_window_blocking");
+        n
     }
 
-    /// As [`drain_count`], but hands back the parse half's `Result` so a test can
-    /// assert a REFUSAL (issue #3782: a terminal drain over a TRUNCATED window now
-    /// returns the decode error instead of emitting a partial trailing partition).
-    fn drain_result(reader: &SSTableReader, chunks: &[Vec<u8>], io_failed: bool) -> Result<usize> {
+    /// As [`drain_count`], but hands back the drain's own `Result` ALONGSIDE the
+    /// number of rows that reached the output channel before it returned.
+    ///
+    /// Issue #3721 needs both halves: a per-column decode failure now PROPAGATES
+    /// out of the parse half instead of being swallowed as an end-of-partition
+    /// signal, so a caller must be able to observe the `Err` — and, separately, to
+    /// measure whether the streaming path had already emitted rows to its consumer
+    /// when it did.
+    ///
+    /// Issue #3782 needs the same helper to assert a REFUSAL (a terminal drain over a
+    /// TRUNCATED window returns the decode error instead of emitting a partial
+    /// trailing partition). The tuple serves both, where its `Result<usize>` could
+    /// not: on `Err` a `Result<usize>` carries NO count, and the rows-already-emitted
+    /// figure is exactly what distinguishes "refused before emitting" from "refused
+    /// after handing rows to the consumer".
+    fn drain_result(
+        reader: &SSTableReader,
+        chunks: &[Vec<u8>],
+        io_failed: bool,
+    ) -> (Result<()>, usize) {
         let ctx = WindowParseCtx {
             now_secs: None,
             start_key: None,
@@ -418,14 +436,14 @@ mod fixture_drain {
         // that `blocking_send` never blocks here; count rows ACROSS batches.
         let (out_tx, mut out_rx) = mpsc::channel::<Result<Vec<(RowKey, ScanRow)>>>(4096);
         let flag = Arc::new(AtomicBool::new(io_failed));
-        reader.drain_scan_window_blocking(ctx, raw_rx, out_tx, flag)?;
+        let res = reader.drain_scan_window_blocking(ctx, raw_rx, out_tx, flag);
         let mut n = 0usize;
         while let Ok(item) = out_rx.try_recv() {
             if let Ok(rows) = item {
                 n += rows.len();
             }
         }
-        Ok(n)
+        (res, n)
     }
 
     /// Build the same `WindowParseCtx` the I/O half resolves for this fixture.
@@ -832,40 +850,88 @@ mod fixture_drain {
             .expect("failed drain task");
 
         eprintln!(
-            "Issue #1143 terminal-drain guard: truncated window clean(io_failed=false)={:?} \
-             vs failed(io_failed=true)={:?}",
-            clean.as_ref().map_err(|e| e.to_string()),
-            failed.as_ref().map_err(|e| e.to_string())
+            "Issue #1143 terminal-drain guard: truncated window, \
+             clean(io_failed=false) -> {:?} after {} rows; \
+             failed(io_failed=true) -> {:?} after {} rows",
+            clean.0.as_ref().err().map(|e| e.to_string()),
+            clean.1,
+            failed.0.as_ref().err().map(|e| e.to_string()),
+            failed.1
         );
 
-        // Issue #1143's property is UNCHANGED and the discriminator is now sharper.
-        // The clean run RUNS the terminal drain over the truncated trailing window;
-        // since #3782 that drive is `at_final_chunk = true` over bytes whose last row
-        // is cut, so it REFUSES with the decode error rather than emitting a partial
-        // trailing partition. (Before #3782 it emitted those partial rows and the
-        // guard compared row COUNTS — the silent-truncation shape this fixture was
-        // built to expose, asserted from the wrong side.)
-        let err = match clean {
-            Err(e) => e,
-            Ok(n) => panic!(
-                "Issue #1143/#3782 REGRESSION: the clean run's terminal drain accepted a \
-                 TRUNCATED window and emitted {n} rows; a cut trailing row at the final \
-                 chunk is data loss and must surface"
-            ),
+        // Issue #3782 sharpened the same discriminator from its side: the clean run's
+        // terminal drive is `at_final_chunk = true` over bytes whose last row is cut, so
+        // it REFUSES rather than emitting partial rows. Before that it emitted them and
+        // this guard compared row COUNTS — i.e. the fixture built to expose silent
+        // truncation was asserted from the wrong side. Both issues reached that
+        // conclusion independently.
+        //
+        // THE PROPERTY (issue #1143), unchanged: `io_failed` SKIPS the terminal
+        // drain, so a mid-stream read error never surfaces the partial trailing
+        // partition. The gated run must therefore complete cleanly, having parsed
+        // only whole partitions confirmed before the truncation.
+        assert!(
+            failed.0.is_ok(),
+            "Issue #1143 REGRESSION: with io_failed set, the terminal drain must be \
+             SKIPPED, so the truncated trailing fragment is never parsed and the \
+             drain returns Ok; got {:?}",
+            failed.0
+        );
+
+        // HOW THE PROPERTY IS MEASURED CHANGED WITH ISSUE #3721, and this is an
+        // INVERSION of the old measurement, not a relaxation of it.
+        //
+        // The old assertion was `clean > failed`: the ungated run parsed the
+        // truncated fragment and emitted MORE rows, and that surplus was the
+        // evidence its terminal drain had run. Those surplus rows existed only
+        // because row assembly SWALLOWED the decode failure the truncation causes
+        // and returned the partial partition as a successful read — the defect
+        // issue #3721 removes. With the swallow gone the ungated run reports the
+        // truncation instead of serving it, so the evidence that its terminal
+        // drain RAN is now the ERROR rather than the surplus.
+        //
+        // This discriminates STRICTLY MORE than `clean > failed` did: the drain
+        // must ERROR, instead of comparing two row counts that could coincide for
+        // unrelated reasons. The `let Err(e) = ... else { panic! }` below IS the
+        // #3721 discriminator: a swallow returns `Ok`, and `Ok` fails here.
+        //
+        // WHY THE VARIANT SET HAS TWO MEMBERS, and why pinning ONE was wrong.
+        // An earlier form of this guard required `Error::ColumnDecode` alone. It
+        // passed only because of WHERE this fixture's chunk boundary happens to
+        // fall in the corpus: the cut landed inside a cell, so the walk reached a
+        // column before running out of bytes. It does not any more. The row-body
+        // extent bound (#3809) clamps the decoders to the row's OWN declared
+        // extent, so a cut that lands in or before a row HEADER is now refused
+        // structurally by the `row_size`-vs-available framing check BEFORE any
+        // column is decoded — measured here as `row_size=592 at offset 73` with
+        // 581 bytes remaining. That is a strictly BETTER refusal (fewer bytes
+        // decoded, no column attributed that was never reached), and it is not
+        // something this test controls: `truncated` drops a whole raw CHUNK, so
+        // which surface fires is a property of the fixture's compression-chunk
+        // boundary, not of the code under test.
+        //
+        // So the assertion names BOTH legitimate truncation surfaces and is
+        // matched on the VARIANT (never on message text, issue #28). Widening it
+        // costs nothing the property needs: the swallow this issue removes returns
+        // `Ok`, which cannot satisfy either arm.
+        let Err(e) = clean.0 else {
+            panic!(
+                "Issue #1143/#3721 REGRESSION: the ungated (io_failed=false) drain \
+                 must RUN its terminal drain over the truncated trailing fragment \
+                 and REPORT the resulting decode failure. It returned Ok after {} \
+                 rows instead — either the terminal drain did not run (the #1143 \
+                 property is broken in the other direction) or the failure was \
+                 swallowed into a partial partition (the #3721 defect is back).",
+                clean.1
+            );
         };
         assert!(
-            matches!(err, Error::Corruption(_)),
-            "the refusal must carry the decode error's own kind, got: {err}"
-        );
-
-        // The io_failed run SKIPS that terminal drain entirely, so it neither emits
-        // the partial partition NOR surfaces its error — the #1143 gate, intact.
-        let failed = failed.unwrap_or_else(|e| {
-            panic!("io_failed did NOT skip the terminal drain: it surfaced {e}")
-        });
-        eprintln!(
-            "Issue #1143 terminal-drain guard: io_failed skipped the drain and confirmed \
-             {failed} rows from the prefix"
+            matches!(e, Error::ColumnDecode { .. } | Error::Corruption(_)),
+            "the truncated fragment's failure must surface as a truncation \
+             refusal — the per-column variant (issue #3721) when the cut lands \
+             inside a cell, or the row-framing corruption refusal when it lands \
+             in or before a row header (#3809's row-extent bound) — and as \
+             neither an unrelated error nor a swallowed partial read; got {e:?}"
         );
     }
 }

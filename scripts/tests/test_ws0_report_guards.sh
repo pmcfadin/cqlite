@@ -208,6 +208,9 @@ run_report_full() {
   # refuse. Cases whose subject is a MISSING manifest remove it explicitly after this call.
   rm -f "$1/session-corpus-pin.json"
   ws0_pin_session_corpus "$1" "$2" "$5" "$3" "$4" "$6"
+  # ...and the per-rep SERVER LOG the reporter requires, if absent — this local invoker stamps
+  # the manifest itself, so it bypasses the shared `run_report` that would otherwise do it.
+  ws0_stamp_missing_server_logs "$1"
   python3 "$REPORT" --dir "$1" --corpus "$2" 2>&1
 }
 
@@ -1347,7 +1350,10 @@ fi
 # `requested_merge_path`, so a future rename on one side raises rather than printing a label the
 # JSON does not support. Asserted structurally, because a behavioural case can only cover the
 # spelling that exists today.
-if grep -q "fmt(f\"flight do_get ({fl\['requested_merge_path'\]} requested)\", fl)" \
+# The `fmt(...)` call gained a third argument in #3551 (the CPUS the arm was counted on, which
+# is REQUIRED there rather than defaulted), so the needle is the LABEL EXPRESSION alone — the
+# narrowest thing that makes this the property under test — rather than the whole call literal.
+if grep -q "fmt(f\"flight do_get ({fl\['requested_merge_path'\]} requested)\"," \
      "$REPO_ROOT/scripts/perf/ws0_report.py"; then
   pass "the printed arm label is derived FROM the recorded block, not from the loop variable"
 else
@@ -1502,6 +1508,12 @@ verdict = {
 # `python3 -` (no __file__) and the suite does not guarantee its working directory.
 sys.path.insert(0, sys.argv[7])
 from ws0_quiescence_evidence import assert_self_consistent, EvidenceError  # noqa: E402
+# #3551: the verdict now DECLARES what its zero census does not bound, and the evidence checker
+# asserts that field BY DERIVATION from `samples` -- so it is composed through the writer's own
+# function rather than pasted. A pasted literal is the drift pair the assert below exists to
+# catch, and this is the FOURTH time this fixture has lagged the shipped shape.
+from ws0_quiescence import census_scope_note  # noqa: E402
+census["census_scope"] = census_scope_note(census["samples"])
 try:
     assert_self_consistent(verdict, "the fixture's OWN baseline verdict")
 except EvidenceError as exc:

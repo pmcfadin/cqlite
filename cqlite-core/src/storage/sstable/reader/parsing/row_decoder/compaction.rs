@@ -463,9 +463,27 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
             .parse_range_tombstone_marker_with_ldt(data, offset, schema)
         {
             Ok(v) => v,
-            // Truncated marker body at a chunk boundary (or corrupt at the
-            // final chunk): terminate exactly as the prior skip path did.
-            Err(_) => return MarkerOutcome::Stop,
+            // Issue #3721 (roborev job 16): a marker PARSE failure is NOT
+            // automatically a chunk boundary, and answering `Stop` here made it
+            // one — on the FINAL chunk the driver converted `Stop` into a
+            // SUCCESSFUL partition completion, so a corrupt or truncated marker
+            // was dropped and this policy's rows were still WRITTEN. That
+            // resurrects every row the tombstone shadowed, durably, on disk: the
+            // same harm as the unrecognised bound kind below (#3808), one arm up.
+            //
+            // The cause is PRESERVED in the outcome (never discarded and
+            // re-synthesised — the parser's own message is what makes the
+            // condition actionable) and the FINAL-vs-non-final decision is left
+            // to the driver, the only holder of the chunking state: a non-final
+            // chunk may simply have cut the marker body in half, which is the one
+            // explanation a refill can fix. Nothing here inspects bytes to guess
+            // whether more data exists (issue #28).
+            Err(cause) => {
+                let partition = format!("key 0x{}", hex::encode(self.partition_key.as_bytes()));
+                return MarkerOutcome::Unparseable(range_marker_error::range_marker_unparseable(
+                    cause, &partition, offset,
+                ));
+            }
         };
 
         // ClusteringPrefix.Kind ordinals:
@@ -518,9 +536,33 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
                 let new_start = self.make_bound(schema, bound_values, bound_kind == 2, true);
                 self.pending_range_start = Some((new_start, new_mfda, new_ldt));
             }
-            _ => {
-                // Unknown bound kind: skip it rather than mis-parse the partition
-                // (the offset already advanced past the marker).
+            unknown => {
+                // Issue #3808: an unrecognised `ClusteringPrefix.Kind` ordinal is
+                // NOT skippable here, and skipping it was the worst instance of the
+                // #3721 swallow: this policy's output is WRITTEN, so omitting an
+                // unrepresentable deletion marker resurrects the rows it shadowed
+                // durably, on disk. `row_framing` returns `bound_kind` unvalidated,
+                // so an arbitrary byte reaches this match; giving it a permissive
+                // default meaning is the byte-pattern inference issue #28 forbids.
+                // Both sibling readers of the same byte already refuse
+                // (`partition_shadow::feed_range_marker`, delta-scan
+                // `block_emit`), so this arm was the lone fail-open.
+                //
+                // The marker PARSED — `next_offset` is bound and the partition body
+                // continues there — so this is `Refused`, never the `Unparseable`
+                // a marker PARSE failure earns above (which has no resume point and
+                // so is still refillable on a non-final chunk). Both are terminal on
+                // the final chunk; neither can be silently completed.
+                let partition = format!("key 0x{}", hex::encode(self.partition_key.as_bytes()));
+                return MarkerOutcome::Refused(range_marker_error::range_marker_refused(
+                    Error::corruption(format!(
+                        "compaction: unknown range tombstone bound kind {unknown} — cannot \
+                         represent faithfully (no-heuristics mandate, issue #28)"
+                    )),
+                    &partition,
+                    offset,
+                    next_offset,
+                ));
             }
         }
         MarkerOutcome::Advanced(next_offset)
@@ -553,10 +595,18 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
                 Ok((_cells, _meta, _hdr, next_offset, _is_static, _complex)) => {
                     DataRowOutcome::Decoded(next_offset)
                 }
-                // Issue #3782: preserve the decode error. The structural coverage
-                // check that drives this arm passes `at_final_chunk = false`, so the
-                // driver still answers `NeedMore` (⇒ "not fully consumed") there;
-                // the error only becomes terminal where no more bytes can arrive.
+                // Issue #3782: preserve the decode error — the POLICY never decides
+                // tolerance, the driver does. The structural coverage check that drives
+                // this arm passes `at_final_chunk = false`, so the driver still answers
+                // `NeedMore` (⇒ "not fully consumed") there; the error only becomes
+                // terminal where no more bytes can arrive.
+                //
+                // Issue #3721, on why folding it into `Ok(None)` was wrong here
+                // specifically: this path exists to measure byte CONSUMPTION, and a row
+                // whose column decode failed has an UNKNOWN consumption (the failing
+                // parser returns no offset). Answering `Ok(None)` reported "end of
+                // partition" for a row that is really there — the same silent truncation,
+                // one level up.
                 //
                 // Structure-only builds NO row, so it raises no #3809 refusal —
                 // see the DIVERGENCE note on `structure_only`.
@@ -617,6 +667,13 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
             // made compaction emit MORE rows than the source while losing real
             // partitions — a loss it would then write back to disk. This is the
             // BYTES half; the row-BUILD refusal above is the semantic half (#3809).
+            //
+            // Issue #3721 names the arm: this is the compaction / elements-out read,
+            // the caller of `parse_row_data_with_offset_impl` with
+            // `compaction_complex_out = Some(..)`. Handing back `Ok(None)` for a
+            // column that failed to decode let compaction WRITE OUT a row missing
+            // that column and every later one — the read defect turned into durable
+            // data loss.
             Err(e) => DataRowOutcome::DecodeFailed(e),
         }
     }
