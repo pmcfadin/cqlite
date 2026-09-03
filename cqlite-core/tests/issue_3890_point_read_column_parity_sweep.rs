@@ -41,9 +41,27 @@
 //!
 //! The table set is derived at run time from TWO committed sources and nothing
 //! else — the schema registry built from `test-data/schemas/**/*.cql`, intersected
-//! with the `*-Data.db` components actually present under each candidate
-//! `sstables/` root (issue #3220's TABLE-granular resolution). So a new fixture
+//! with the `*-Data.db` components actually present on disk, each table's root
+//! resolved individually by `sstables_root_for_table` (issue #3220's TABLE-granular
+//! resolution; neither candidate root is a superset of the other). So a new fixture
 //! joins the sweep with no edit here, and a removed one cannot silently narrow it.
+//!
+//! # …with ONE curated floor, because a derived set derives to EMPTY
+//!
+//! A subject set derived entirely from disk has a failure mode derivation cannot
+//! fix: with no corpus it is empty, every accounting assertion is then vacuously
+//! satisfied, and the target reports `ok` having compared nothing. Measured at
+//! `8a71589e6`: `CQLITE_DATASETS_ROOT=$(mktemp -d)` gave `test result: ok. 2
+//! passed` with the whole AC4 guarantee gone and no output saying so. A suite-wide
+//! `assert!(swept > 0)` is not the fix either (#3220: it cannot see ONE case
+//! dropping out behind its siblings), so the three tables this issue is ABOUT are
+//! named in [`MUST_RUN`] and asserted PER CASE, FAIL-CLOSED UNCONDITIONALLY.
+//! Everything else stays derived.
+//!
+//! Consequence, stated because it is a real behaviour change: this target reads
+//! `CQLITE_REQUIRE_FIXTURES` NOWHERE. The sibling dataset lanes use that variable
+//! to turn a clean skip into a failure; there is no clean skip here to turn, so
+//! consulting it would be a settable way to make the floor optional.
 //!
 //! # The bound (gate cost)
 //!
@@ -56,7 +74,8 @@
 //!     probed, taken in sorted (deterministic) order — so a 400k-partition fixture
 //!     costs the same as a 32-partition one;
 //!   * exactly ONE full scan per table serves as the oracle for all its keys;
-//!   * exactly ONE ingest per (candidate root) — not per table.
+//!   * per-table root resolution costs ONE ingest per RESOLVED ROOT, not one per
+//!     table (the tables are grouped by the root that answers for each).
 //!
 //! # Declared non-coverage, printed every run
 //!
@@ -73,10 +92,21 @@
 //!     probe. This is only tolerated when the scan itself succeeded; it is
 //!     reported, and it is the class to watch if a fixture regresses to 0 rows.
 //!
-//! Requires `CQLITE_DATASETS_ROOT` (or a checkout corpus). With no corpus at all
-//! the sweep SKIPs — unless `CQLITE_REQUIRE_FIXTURES=1`, under which it fails
-//! closed. Excluded under `tombstones` (that build serves point reads via a
-//! full-scan filter, so there is no seek path to sweep).
+//! A [`MUST_RUN`] table can NEVER be absorbed into one of those classes: landing
+//! in any of them is a FAILURE naming the table AND the class. Otherwise adding a
+//! schema-less fixture, or a fixture regressing to 0 scanned rows, would quietly
+//! retire a must-run case while the run still printed a tidy declaration for it.
+//!
+//! Fixture contract: two of the three [`MUST_RUN`] tables are COMMITTED, so they
+//! resolve from the checkout on any machine; `test_basic.simple_table` is FETCHED,
+//! so this target REQUIRES the fetched corpus (`bash
+//! test-data/scripts/fetch-datasets.sh`) and FAILS by name without it. That is
+//! deliberate and it is stated here rather than discovered: the full gate is
+//! already fail-closed on an absent corpus (`missing-fixtures: FAIL-CLOSED`,
+//! #2078), and a sweep that green-passes on a corpus-less box is the exact
+//! 0-rows-when-present class this repo says must never pass. Excluded under
+//! `tombstones` (that build serves point reads via a full-scan filter, so there is
+//! no seek path to sweep).
 
 #![cfg(all(
     feature = "state_machine",
@@ -99,7 +129,136 @@ use cqlite_core::types::Value;
 use cqlite_core::{Config, Database};
 use serial_test::serial;
 
-use datasets_root::{describe_roots, repo_root, sstables_root_candidates, table_has_data};
+use datasets_root::{
+    describe_roots, describe_search, repo_root, sstables_root_candidates, sstables_root_for_table,
+    table_has_data,
+};
+
+/// Where a MUST-RUN fixture's SSTable binaries come from. AUTHORITY for the value
+/// is `git ls-files 'test-data/datasets/sstables/**-Data.db'`, never directory
+/// presence in a working tree: `fetch-datasets.sh` unpacks the fetched corpus into
+/// `test-data/datasets/` by default, so a GITIGNORED fixture is routinely present
+/// on disk in a checkout where another machine has nothing. It selects the REMEDY
+/// printed on failure, never whether the failure happens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Binaries {
+    /// In git. An absence means the CHECKOUT is damaged.
+    Committed,
+    /// Gitignored, delivered by `test-data/scripts/fetch-datasets.sh`.
+    Fetched,
+}
+
+/// A table this issue is ABOUT, asserted PER CASE and FAIL-CLOSED
+/// UNCONDITIONALLY (#3220).
+///
+/// # Why a curated set exists inside a derived sweep
+///
+/// The 126-table subject set is derived from disk and must stay that way — nobody
+/// maintains a list of 126 identities, and a derived set is what lets a new
+/// fixture join with no edit here. But a set derived ENTIRELY from disk has one
+/// failure mode a derived set cannot fix: on a box with no corpus it derives to
+/// EMPTY, every accounting assertion below is vacuously satisfied, and the target
+/// reports `ok` having compared nothing. That is exactly what happened —
+/// `CQLITE_DATASETS_ROOT=$(mktemp -d)` gave `test result: ok. 2 passed` at
+/// `8a71589e6`, with the whole AC4 guarantee evaporated and no output saying so.
+///
+/// A suite-wide `assert!(swept > 0)` is NOT the fix and #3220 says why: it cannot
+/// see ONE case dropping out behind its siblings. So the tables #3890 is actually
+/// about are named here and asserted INDIVIDUALLY. Everything else stays derived.
+///
+/// # A must-run table can never be absorbed into a DECLARED class
+///
+/// If a must-run table lands in `empty` / `no-schema` / `unrenderable-key` that is
+/// a FAILURE naming the table AND the class, not a declaration. Otherwise adding a
+/// schema-less fixture, or a fixture regressing to 0 scanned rows, would quietly
+/// retire a must-run case while the run still printed a tidy declaration for it.
+struct MustRun {
+    keyspace: &'static str,
+    table: &'static str,
+    /// What this fixture is evidence OF. Printed on failure, so the operator
+    /// learns what coverage they just lost rather than only which path was absent.
+    why: &'static str,
+    binaries: Binaries,
+}
+
+const MUST_RUN: &[MustRun] = &[
+    MustRun {
+        keyspace: "test_basic",
+        table: "simple_table",
+        why: "the compressed BIG (`nb`) point-read fixture #3890 was filed against: 19 columns, \
+              LZ4, and the one whose point reads produced 17 swallowed `invalid cell flags` \
+              errors (`Cell 'active': invalid cell flags 0x37 at offset 1223` among them)",
+        binaries: Binaries::Fetched,
+    },
+    MustRun {
+        keyspace: "test_da",
+        table: "wide_table",
+        why: "the #953 multi-chunk-row BTI (`da`) fixture — 3 partitions x 300 rows of ~2 KiB \
+              payload; issue_953_multichunk_cell_seek re-compresses THIS table at 512-byte \
+              chunks, and its seek produced the reported `invalid cell flags 0x32 at offset \
+              619369`",
+        binaries: Binaries::Committed,
+    },
+    MustRun {
+        keyspace: "test_big",
+        table: "wide_partition",
+        why: "the corpus's largest committed multi-chunk compressed fixture (114 LZ4 chunks over \
+              ~1.8 MB), i.e. where an unbounded parse input overruns furthest into the successor \
+              partition; also the fixture the issue's stale `0x63` breadcrumb pointed at",
+        binaries: Binaries::Committed,
+    },
+];
+
+/// PURE decision behind the per-case must-run assertion: for each [`MustRun`]
+/// entry, the reason it did NOT run, or nothing when it did.
+///
+/// Factored out (the #3220 idiom) so the assertion has a proof it CAN fail —
+/// `must_run_violations_fire_for_every_non_running_outcome` below drives all three
+/// outcomes. A fail-closed guard whose failing branch is never exercised is
+/// indistinguishable from a guard that cannot fire, which is the shape of the very
+/// defect this floor replaces.
+fn must_run_violations(
+    must_run: &[MustRun],
+    swept: &BTreeMap<String, usize>,
+    declared: &[Declared],
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for m in must_run {
+        let id = format!("{}.{}", m.keyspace, m.table);
+        let remedy = match m.binaries {
+            Binaries::Committed => {
+                "REMEDY: these binaries are COMMITTED to git, so an absence means this checkout \
+                 is damaged — `git restore test-data/datasets`."
+            }
+            Binaries::Fetched => {
+                "REMEDY: these binaries are GITIGNORED (fetched), so run \
+                 `bash test-data/scripts/fetch-datasets.sh` and export the CQLITE_DATASETS_ROOT \
+                 line it prints."
+            }
+        };
+        match swept.get(&id) {
+            // The only passing outcome: swept, having actually compared something.
+            Some(&keys) if keys > 0 => continue,
+            Some(_) => out.push(format!(
+                "{id}: SWEPT but compared 0 targeted reads. Must-run because it is {}. {remedy}",
+                m.why
+            )),
+            None => match declared.iter().find(|d| d.table == id) {
+                Some(d) => out.push(format!(
+                    "{id}: absorbed into the DECLARED `{}` class ({}) — a must-run table may \
+                     NEVER be declared non-coverable. Must-run because it is {}. {remedy}",
+                    d.class, d.detail, m.why
+                )),
+                None => out.push(format!(
+                    "{id}: NOT SWEPT, and no `*-Data.db` for it was discovered. Must-run \
+                     because it is {}. {remedy}",
+                    m.why
+                )),
+            },
+        }
+    }
+    out
+}
 
 /// Per-table cap on DISTINCT partition keys probed. Keeps the sweep's cost a
 /// function of the TABLE COUNT, not of the corpus's largest partition count,
@@ -399,12 +558,6 @@ async fn open_root(
     Ok((result.database, schemas))
 }
 
-fn require_fixtures() -> bool {
-    std::env::var("CQLITE_REQUIRE_FIXTURES")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-}
-
 /// THE sweep. `#[serial]` because it ingests a whole corpus root and the sibling
 /// dataset lanes in this package contend for the same files and process-global
 /// work counters.
@@ -425,31 +578,51 @@ async fn every_fixture_table_point_read_matches_the_scan_column_for_column() {
     // completeness reference the terminal assertion is taken against.
     let mut discovered: BTreeSet<String> = BTreeSet::new();
 
+    // Discovery, in TWO steps, so root selection is TABLE-granular (#3220) rather
+    // than one root chosen up front and committed to. Step 1 enumerates every
+    // (keyspace, table) carrying a `*-Data.db` under ANY candidate root; step 2
+    // asks `sstables_root_for_table` which root actually holds each one. Neither
+    // root is a superset of the other — a fleet `/data/datasets` has ~120 tables
+    // yet lacks the git-committed `test_da/multiclustering_table`, which the
+    // checkout carries — so a fixed env-first/checkout-first rule picks wrong for
+    // one set of tables whichever way it is written.
     for root in sstables_root_candidates() {
         if !root.is_dir() {
             continue;
         }
-        // What this root offers that no earlier root already covered.
-        let mut on_disk: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for keyspace in keyspace_dirs(&root) {
-            let tables = tables_with_data(&root, &keyspace);
-            if !tables.is_empty() {
-                for t in &tables {
-                    discovered.insert(format!("{keyspace}.{t}"));
-                }
-                on_disk.insert(keyspace, tables);
+            for table in tables_with_data(&root, &keyspace) {
+                discovered.insert(format!("{keyspace}.{table}"));
             }
         }
-        let fresh: BTreeSet<String> = on_disk
-            .iter()
-            .flat_map(|(ks, ts)| ts.iter().map(move |t| format!("{ks}.{t}")))
-            .filter(|id| !swept.contains_key(id) && !declared.iter().any(|d| &d.table == id))
-            .collect();
-        if fresh.is_empty() {
+    }
+    // Group the discovered tables by the root that answers for each, so the
+    // per-table resolution above costs ONE ingest per root, not one per table.
+    let mut by_root: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
+    for id in &discovered {
+        let Some((keyspace, table)) = id.split_once('.') else {
+            failures.push(format!(
+                "discovered identity {id:?} is not `keyspace.table`"
+            ));
             continue;
+        };
+        match sstables_root_for_table(keyspace, table) {
+            Some(root) => {
+                by_root.entry(root).or_default().insert(id.clone());
+            }
+            // Discovered by the directory walk yet unresolvable by the shared
+            // resolver: the two disagree, which is a defect in one of them and
+            // never something to skip past.
+            None => failures.push(format!(
+                "{id}: a `*-Data.db` was discovered on disk but sstables_root_for_table could \
+                 not resolve a root for it ({})",
+                describe_search(keyspace, table)
+            )),
         }
+    }
 
-        let (db, schemas) = match open_root(&root, &schema_files).await {
+    for (root, fresh) in &by_root {
+        let (db, schemas) = match open_root(root, &schema_files).await {
             Ok(v) => v,
             Err(e) => {
                 failures.push(e);
@@ -486,7 +659,7 @@ async fn every_fixture_table_point_read_matches_the_scan_column_for_column() {
         }
 
         // A fixture present on disk that NO committed schema declares.
-        for id in &fresh {
+        for id in fresh.iter() {
             if !with_schema.contains(id) {
                 declared.push(Declared {
                     table: id.clone(),
@@ -552,18 +725,35 @@ async fn every_fixture_table_point_read_matches_the_scan_column_for_column() {
         unaccounted.len()
     );
 
-    // Anti-vacuous: a present corpus must sweep something. With NO corpus at all
-    // this SKIPs, unless CQLITE_REQUIRE_FIXTURES demands otherwise.
-    if discovered.is_empty() {
-        assert!(
-            !require_fixtures(),
-            "CQLITE_REQUIRE_FIXTURES=1 but no fixture table was discovered under any candidate \
-             root ({}) — the sweep cannot green-pass without running (#2078)",
-            describe_roots()
-        );
-        eprintln!("SKIP (#3890 sweep): no fixture corpus under any candidate root");
-        return;
-    }
+    // PER-CASE must-run, UNCONDITIONALLY (#3220). This is what stops the whole
+    // sweep evaporating on a box with no corpus: with the subject set derived
+    // entirely from disk, an absent corpus derives to EMPTY and every accounting
+    // assertion above is vacuously satisfied. A suite-wide `assert!(swept > 0)`
+    // would not fix it either — it cannot see ONE named case dropping out behind
+    // its siblings — so each table #3890 is about is checked BY NAME here.
+    //
+    // Three outcomes, and only the first is a pass:
+    //   * SWEPT with >= 1 targeted read  -> the coverage exists;
+    //   * DECLARED non-coverable         -> FAIL naming the table AND the class, so
+    //                                       adding a schema-less fixture (or a
+    //                                       fixture regressing to 0 scanned rows)
+    //                                       cannot quietly retire a must-run case;
+    //   * neither                        -> FAIL naming the table and the resolver
+    //                                       search that came up empty.
+    let must_run_violations = must_run_violations(MUST_RUN, &swept, &declared);
+    assert!(
+        must_run_violations.is_empty(),
+        "#3890 sweep: {} of {} MUST-RUN fixture(s) did not run — the sweep's subject set is \
+         derived from disk, so an absent corpus makes every other assertion in this test \
+         vacuously true (#3220). Candidate roots searched: {}\n{}",
+        must_run_violations.len(),
+        MUST_RUN.len(),
+        describe_roots(),
+        must_run_violations.join("\n")
+    );
+
+    // Belt, now that the must-run floor above cannot be satisfied by an empty run:
+    // a corpus that discovered tables must have swept at least one of them.
     assert!(
         !swept.is_empty(),
         "{} fixture table(s) were discovered on disk but NONE could be swept — a corpus with \
@@ -605,4 +795,78 @@ fn column_parity_reports_a_missing_column() {
         none_missing.is_empty(),
         "identical column sets must report no divergence"
     );
+}
+
+/// The per-case must-run floor has a proof it CAN fire, for EVERY non-running
+/// outcome — absent, absorbed into a DECLARED class, and swept-having-compared-0.
+/// Without this, the floor is exactly the shape of the defect it replaces: a guard
+/// whose failing branch nothing exercises.
+#[test]
+fn must_run_violations_fire_for_every_non_running_outcome() {
+    let one = [MustRun {
+        keyspace: "test_basic",
+        table: "simple_table",
+        why: "the #3890 fixture",
+        binaries: Binaries::Fetched,
+    }];
+
+    // (a) Genuinely swept -> no violation.
+    let swept: BTreeMap<String, usize> = [("test_basic.simple_table".to_string(), 4)].into();
+    assert!(
+        must_run_violations(&one, &swept, &[]).is_empty(),
+        "a must-run table swept with >= 1 targeted read is not a violation"
+    );
+
+    // (b) Absent entirely (the empty-corpus case that made the whole sweep pass
+    //     vacuously) -> ONE violation naming the table.
+    let v = must_run_violations(&one, &BTreeMap::new(), &[]);
+    assert_eq!(v.len(), 1, "an absent must-run table must be reported");
+    assert!(
+        v[0].contains("test_basic.simple_table") && v[0].contains("NOT SWEPT"),
+        "the violation must name the table and why it did not run: {}",
+        v[0]
+    );
+
+    // (c) Absorbed into a DECLARED class -> a violation naming the table AND the
+    //     class, never a tidy declaration.
+    let declared = [Declared {
+        table: "test_basic.simple_table".to_string(),
+        class: "no-schema",
+        detail: "no committed .cql declares it".to_string(),
+    }];
+    let v = must_run_violations(&one, &BTreeMap::new(), &declared);
+    assert_eq!(v.len(), 1, "a declared must-run table must be reported");
+    assert!(
+        v[0].contains("no-schema") && v[0].contains("NEVER be declared non-coverable"),
+        "the violation must name the DECLARED class it was absorbed into: {}",
+        v[0]
+    );
+
+    // (d) Swept but having compared nothing -> still a violation (presence in the
+    //     swept map is not evidence of a comparison).
+    let zero: BTreeMap<String, usize> = [("test_basic.simple_table".to_string(), 0)].into();
+    let v = must_run_violations(&one, &zero, &[]);
+    assert_eq!(v.len(), 1, "swept-with-0-reads must be reported");
+    assert!(
+        v[0].contains("compared 0 targeted reads"),
+        "the violation must say the table compared nothing: {}",
+        v[0]
+    );
+
+    // And the SHIPPED set is non-empty and names the three fixtures #3890 is about,
+    // so a future edit cannot empty the floor and leave this control passing.
+    let ids: Vec<String> = MUST_RUN
+        .iter()
+        .map(|m| format!("{}.{}", m.keyspace, m.table))
+        .collect();
+    for required in [
+        "test_basic.simple_table",
+        "test_da.wide_table",
+        "test_big.wide_partition",
+    ] {
+        assert!(
+            ids.iter().any(|i| i == required),
+            "MUST_RUN must name {required} (it is one of the fixtures #3890 is about); got {ids:?}"
+        );
+    }
 }
