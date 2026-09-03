@@ -39,7 +39,7 @@
 //! actually seen (see `super::compare_value_at`).
 
 use super::super::schema::CqlType;
-use super::{canon_typed, csv_container, is_scalar_type, Depth, Egress, Kinding};
+use super::{csv_container, is_scalar_type, Depth, Egress, Kinding};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -115,29 +115,51 @@ pub enum Divergence {
     /// ordinary members: JSON can spell them, so losing one is data loss with no
     /// format excuse.
     NonFiniteFloatRendersAsJsonNull,
-    /// A `decimal` renders as a JSON STRING where the oracle emits an unquoted
-    /// number.
+    /// A `decimal` whose digits exceed a `double`'s precision cannot be compared
+    /// EXACTLY in this lane's JSON comparison, because this lane's JSON PARSE
+    /// cannot carry them.
     ///
-    /// ORACLE: `cassandra-5.0.8 DecimalType.toJSONString` returns
-    /// `BigDecimal.toString()` with no quotes, i.e. a JSON NUMBER.
+    /// A LIMITATION OF THIS COMPARATOR, NOT A DISAGREEMENT between the two sides —
+    /// the same family as [`Divergence::ContainerMapKeyNotPairableByThisLane`],
+    /// and NOT a defect awaiting an egress fix.
     ///
-    /// EGRESS SHAPE: a JSON string, in the JSON lane only, whose NUMERIC VALUE is
-    /// the golden's. That last clause is what makes this variant narrow: the two
-    /// sides are canonicalized under the declared type and must come out EQUAL, so
-    /// the only thing suppressed is the JSON KIND. A `decimal` whose digits differ
-    /// from the golden's — the 30-digit exactness this lane exists to check — is
-    /// NOT this gap and is reported.
+    /// ORACLE: `cassandra-5.0.8 DecimalType.toJSONString` (`DecimalType.java:314-317`)
+    /// returns `Objects.toString(getSerializer().deserialize(buffer), "\"\"")`, an
+    /// UNQUOTED `BigDecimal.toString()`, deliberately overriding the quoting form at
+    /// `AbstractType.java:186-189`. So an unquoted JSON NUMBER is what the CLI is
+    /// SUPPOSED to emit, and since issue #3644 it does
+    /// (`cqlite-cli/src/output/json_cell.rs`).
     ///
-    /// This is the ONE place the CLI side is read with [`Kinding::Stringified`],
-    /// the relaxation reserved for the golden (`super::compare_value_body` holds
-    /// the CLI to [`Kinding::Natural`] at every position — finding M1). It is
-    /// scoped to deciding THIS gap's own question, "is the kind the only
-    /// difference?", and it decides nothing else: a non-match here becomes an
-    /// ordinary diff, compared under the normal asymmetry.
+    /// WHY A GAP REMAINS. A `decimal`'s unscaled value is a Java `BigInteger`, so
+    /// its rendering is arbitrarily long — the committed
+    /// `signed_special_collections` fixture carries 33 significant digits — while
+    /// `super::super::strict_json` parses a JSON number into a `serde_json::Value`,
+    /// i.e. an `i64`/`u64`/`f64` and nothing wider (`arbitrary_precision` is
+    /// deliberately not enabled in this crate; see `cqlite-cli/Cargo.toml`). The
+    /// digits are therefore gone before the comparator sees them. The GOLDEN's copy
+    /// survives (`sstabledump` writes a multicell cell PATH with
+    /// `writeString(getString(v))` — `JsonTransformer.java:452` — so it arrives as
+    /// text), which is exactly why the two sides can no longer be equated here.
     ///
-    /// NOT COVERED: a different number, a null, a non-numeric string, and the CSV
-    /// lane (where every cell is text and the 30-digit values match exactly).
-    DecimalRendersAsJsonString,
+    /// WHAT IS STILL CHECKED, so this gap suppresses as little as possible:
+    /// * the two must be THE SAME `double` — bit for bit, the golden's text parsed
+    ///   exactly against the CLI's parsed number — so a sign error, a wrong
+    ///   magnitude, a lost leading digit, a null or a non-numeric token is NOT this
+    ///   gap and is reported; only sub-`double` digits are excused; and
+    ///   the CLI must have emitted a NUMBER, so a regression back to the #3644
+    ///   quoted string fails here too.
+    /// * the same 33 digits ARE compared exactly in the CSV lane (every cell is
+    ///   text there), which is why this variant refuses to match under
+    ///   [`Egress::Csv`].
+    /// * the JSON egress's own digits are pinned, against this same golden, by
+    ///   `cqlite-cli/tests/issue_3644_json_decimal_unquoted.rs`, which reads the
+    ///   `sd` cell paths out of the `*-Data.db.jsonl` and requires each to appear
+    ///   in the emitted JSON TEXT, unquoted and digit for digit.
+    ///
+    /// Carrying the lexeme through this lane's JSON parse (the `RawValue`
+    /// preservation `tests/support/parquet_parity/golden_text.rs` does for the
+    /// #1490 lane) would close it; that is a comparator change, not an egress one.
+    ExactDecimalNotCarriedByThisLanesJsonParse,
     /// A frozen value nested inside a multi-cell collection is left UNDECODED by
     /// the golden as a flat scalar, while the egress decodes it into a structure.
     ///
@@ -279,10 +301,14 @@ impl Divergence {
                 "the golden carries a non-finite float token (`NaN`/`Infinity`/`-Infinity`) \
                  which JSON has no literal for, and the JSON egress renders null"
             }
-            Divergence::DecimalRendersAsJsonString => {
-                "the golden's decimal is an unquoted JSON number (DecimalType.toJSONString \
-                 returns BigDecimal.toString()) while the JSON egress quotes the SAME \
-                 number as a JSON string"
+            Divergence::ExactDecimalNotCarriedByThisLanesJsonParse => {
+                "both sides carry the SAME decimal but this lane's JSON parse holds a \
+                 number as an f64 (no arbitrary precision), so digits beyond a double's \
+                 precision cannot be compared here — a limitation of this comparator, NOT \
+                 a disagreement between the two sides: the two are still required to be \
+                 the same double, the CSV lane compares the same digits exactly, and the \
+                 JSON egress's digits are pinned by \
+                 tests/issue_3644_json_decimal_unquoted.rs"
             }
             Divergence::NestedFrozenValueLeftUndecodedByGolden => {
                 "the golden leaves a frozen value nested in a multi-cell collection \
@@ -359,24 +385,24 @@ impl Divergence {
                     && matches!(golden, Value::String(token) if is_non_finite(token))
                     && matches!(cli, Value::Null)
             }
-            Divergence::DecimalRendersAsJsonString => {
+            Divergence::ExactDecimalNotCarriedByThisLanesJsonParse => {
                 if egress != Egress::Json || !is_decimal_type(ty) {
                     return false;
                 }
-                let Value::String(_) = cli else {
+                // The GOLDEN kept its digits (a stringified cell path) and the CLI
+                // emitted a JSON NUMBER, which is what `DecimalType.toJSONString`
+                // requires. A CLI string here is the #3644 defect, not this gap.
+                let (Value::String(golden_text), Value::Number(cli_number)) = (golden, cli) else {
                     return false;
                 };
-                // The ONLY difference may be the JSON kind: read the CLI's string
-                // with the relaxation the golden gets at a stringified position and
-                // require the two canonical values to be EQUAL. A decimal whose
-                // digits differ fails here and is reported as an ordinary diff.
-                match (
-                    canon_typed(golden, egress, ty, depth, kinding),
-                    canon_typed(cli, egress, ty, depth, Kinding::Stringified),
-                ) {
-                    (Ok(g), Ok(c)) => g == c,
-                    _ => false,
-                }
+                // Excuse ONLY the digits the parse could not carry: both sides must
+                // be the SAME double, bit for bit. `str::parse::<f64>` and
+                // `serde_json`'s number parse both round to nearest, so this is the
+                // strongest statement available once the CLI's digits are gone.
+                let (Ok(g), Some(c)) = (golden_text.parse::<f64>(), cli_number.as_f64()) else {
+                    return false;
+                };
+                g.to_bits() == c.to_bits()
             }
             Divergence::NestedFrozenValueLeftUndecodedByGolden => {
                 // The GOLDEN side: a flat scalar STRING at a position the committed

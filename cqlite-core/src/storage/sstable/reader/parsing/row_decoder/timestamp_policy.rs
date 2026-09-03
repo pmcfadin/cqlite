@@ -148,7 +148,7 @@ impl SlidingPartitionPolicy for TimestampPolicy<'_> {
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         resolution: &RowColumnResolution,
         pending: &mut Vec<Self::Row>,
-    ) -> Option<usize> {
+    ) -> Result<Option<usize>> {
         match self.parser.parse_row_data_with_offset(
             data,
             offset,
@@ -233,9 +233,12 @@ impl SlidingPartitionPolicy for TimestampPolicy<'_> {
                         ));
                     }
                 }
-                Some(next_offset)
+                Ok(Some(next_offset))
             }
-            Err(_) => None,
+            // Issue #3782: preserve the decode error instead of collapsing it into
+            // "no row here". The DRIVER decides whether to tolerate it, from
+            // `at_final_chunk`; a policy has no way to know.
+            Err(e) => Err(e),
         }
     }
 

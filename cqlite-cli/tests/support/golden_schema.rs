@@ -694,27 +694,83 @@ fn parse_bare_type(text: &str, scope: &TypeScope<'_>) -> Result<CqlType, String>
             )),
         };
     }
-    Ok(match lower.as_str() {
-        "int" | "bigint" | "smallint" | "tinyint" | "varint" | "float" | "double" | "decimal"
-        | "counter" => CqlType::Numeric(lower),
-        "text" | "varchar" | "ascii" => CqlType::Text(lower),
-        "boolean" => CqlType::Boolean,
-        "blob" => CqlType::Blob,
-        "timestamp" => CqlType::Timestamp,
-        "uuid" | "timeuuid" | "date" | "time" | "duration" | "inet" => CqlType::Opaque(lower),
-        other => match scope.resolve(other) {
-            Some(udt) => CqlType::Udt(udt.clone()),
-            // Fail closed: a guessed type restores the permissive comparison this
-            // module exists to remove.
-            None => {
-                return Err(format!(
-                    "unknown type `{trimmed}` — neither a native CQL type this reader \
-                     knows nor a `CREATE TYPE` declared earlier in the same file and \
-                     in the same keyspace"
-                ))
-            }
-        },
-    })
+    // Every native scalar name comes from the four censused lists below and
+    // NOWHERE else, so a type this reader newly recognises cannot slip past the
+    // spelling census that consumes them (roborev job 21 F2).
+    let name = lower.as_str();
+    if NATIVE_NUMERIC.contains(&name) {
+        return Ok(CqlType::Numeric(lower));
+    }
+    if NATIVE_TEXT.contains(&name) {
+        return Ok(CqlType::Text(lower));
+    }
+    if NATIVE_OPAQUE.contains(&name) {
+        return Ok(CqlType::Opaque(lower));
+    }
+    if let Some((_, ty)) = NATIVE_SINGLETON.iter().find(|(known, _)| *known == name) {
+        return Ok(ty.clone());
+    }
+    match scope.resolve(name) {
+        Some(udt) => Ok(CqlType::Udt(udt.clone())),
+        // Fail closed: a guessed type restores the permissive comparison this
+        // module exists to remove.
+        None => Err(format!(
+            "unknown type `{trimmed}` — neither a native CQL type this reader \
+             knows nor a `CREATE TYPE` declared earlier in the same file and \
+             in the same keyspace"
+        )),
+    }
+}
+
+// --- the native scalar type set, as DATA -------------------------------------
+//
+// These four lists are the SOLE source of the native scalar names
+// [`parse_bare_type`] recognises, and they are read back by the per-type spelling
+// differential in `golden_csv_container_spelling_tests.rs`, whose census requires
+// a case for EVERY name in them. Written as data rather than as match arms for
+// exactly that reason: a census over `CqlType` VARIANTS cannot see a missing
+// concrete type (any one numeric case satisfies `Numeric`), which is how `counter`
+// came to have no spelling case at all (roborev job 21 F2). Add a native type here
+// and the census fails until its spelling is established.
+
+/// Names mapping to [`CqlType::Numeric`] — the types whose value may be compared
+/// numerically.
+pub const NATIVE_NUMERIC: &[&str] = &[
+    "int", "bigint", "smallint", "tinyint", "varint", "float", "double", "decimal", "counter",
+];
+
+/// Names mapping to [`CqlType::Text`] — compared as exact strings.
+pub const NATIVE_TEXT: &[&str] = &["text", "varchar", "ascii"];
+
+/// Names mapping to [`CqlType::Opaque`] — compared as exact text.
+pub const NATIVE_OPAQUE: &[&str] = &["uuid", "timeuuid", "date", "time", "duration", "inet"];
+
+/// The names whose variant carries no name of its own, paired with that variant.
+///
+/// A `(name, variant)` table rather than three match arms so this list is the
+/// mapping itself: there is no second spelling of `"boolean"` for the list and the
+/// parser to disagree about.
+pub const NATIVE_SINGLETON: &[(&str, CqlType)] = &[
+    ("boolean", CqlType::Boolean),
+    ("blob", CqlType::Blob),
+    ("timestamp", CqlType::Timestamp),
+];
+
+/// EVERY native scalar name this reader recognises, in the order the four lists
+/// declare them.
+///
+/// The completeness claim is bounded and stated: it is complete with respect to
+/// those lists, which [`parse_bare_type`] is the only consumer of, so a name it
+/// accepts is necessarily here. It says nothing about types this reader does not
+/// implement (a `vector`, say) — those are a hard parse error, not a silent gap.
+pub fn native_scalar_decls() -> Vec<&'static str> {
+    NATIVE_NUMERIC
+        .iter()
+        .chain(NATIVE_TEXT)
+        .chain(NATIVE_OPAQUE)
+        .copied()
+        .chain(NATIVE_SINGLETON.iter().map(|(name, _)| *name))
+        .collect()
 }
 
 /// The content between the first `<` and its match.
