@@ -2589,8 +2589,8 @@ JESTSTUB
     # ~11 sites -- and the vocabulary is already FIVE tokens wide (_status_is_nonfailing's
     # closed non-failing set PASS|SKIP|OPT-OUT, plus FAIL and VACUOUS). So an enumeration
     # goes blind every time a token is added, and blind in the direction that matters
-    # here: a token this capture DROPS is a recorded verdict property (a) cannot see, i.e.
-    # a disagreeing verdict that leaves the case green. Shape also makes the two halves of
+    # here: a token this capture DROPS is a recorded verdict that property (a) CANNOT SEE,
+    # i.e. a disagreeing verdict that leaves the case green. Shape also makes the two halves of
     # this function AGREE -- the SUMMARY reader four lines below has always read
     # `[A-Za-z-]*`, and only the log side had a list.
     #
@@ -2709,7 +2709,7 @@ JESTSTUB
   {
     # Two lines the capture MUST NOT take: the SKIP branch's continuation prose, and an
     # ALL-CAPS census heading whose first word is followed by ` (` — that second one is
-    # not hypothetical, it RED this case against a first draft whose shape stopped at
+    # not hypothetical, it REDDENED this case against a first draft whose shape stopped at
     # ` (`, and it is why the pattern requires the paren to CLOSE at end of line. Plus a
     # sibling component's verdict, which the `[node-bindings]` anchor must exclude.
     echo ">>> [node-bindings]   NOT VALIDATED by this run: the 14 dataset-gated jest suites."
@@ -2727,17 +2727,19 @@ JESTSTUB
   # Case 103 — the DETECTION half. Every other property of the triple holds, so the assert
   # can only fail on the recorded verdicts, and it must NAME both planted tokens: a bare
   # non-zero in a file this size is produced identically by an unrelated breakage.
-  nbg_probe_why=""
-  if _nbgate_assert parseprobe "PASS" yes; then
-    nbg_probe_why="the assert PASSED over recorded verdicts '${NBG_LOG_TOKS:-<none>}' with only PASS allowed"
-  else
-    nbg_probe_why="$NBG_WHY"
-  fi
-  case "$nbg_probe_why" in
-    *VACUOUS*OPT-OUT*|*OPT-OUT*VACUOUS*)
+  # The assert must FAIL **and** name both tokens. Both halves, because reading the reason
+  # alone would let a PASS whose text happens to quote the recorded sequence satisfy this
+  # case -- a control with its own false-pass route is not a control.
+  nbg_probe_state=refused
+  _nbgate_assert parseprobe "PASS" yes && nbg_probe_state=admitted
+  nbg_probe_why="$NBG_WHY"
+  [ "$nbg_probe_state" = refused ] \
+    || nbg_probe_why="THE ASSERT PASSED with only PASS allowed over recorded verdicts '${NBG_LOG_TOKS:-<none>}'"
+  case "$nbg_probe_state:$nbg_probe_why" in
+    refused:*VACUOUS*OPT-OUT*|refused:*OPT-OUT*VACUOUS*)
       ok "case 103: the log-side verdict capture SEES tokens the retired three-token enumeration dropped — a planted VACUOUS and OPT-OUT are both RECORDED and both NAMED as out-of-vocabulary by _nbgate_assert (#3977)" ;;
     *)
-      bad "case 103: a planted VACUOUS/OPT-OUT verdict was not both seen and named (recorded: '${NBG_LOG_TOKS:-<none>}', n=$NBG_LOG_N; why: ${nbg_probe_why:-<empty>}). A token the capture drops is a DISAGREEING verdict property (a) cannot see, which is what leaves a case green over a lost \`return\`. Log: $nbg_probe_log" ;;
+      bad "case 103: a planted VACUOUS/OPT-OUT verdict was not both seen and named (assert verdict: $nbg_probe_state; recorded: '${NBG_LOG_TOKS:-<none>}', n=$NBG_LOG_N; why: ${nbg_probe_why:-<empty>}). A token the capture drops is a DISAGREEING verdict property (a) cannot see, which is what leaves a case green over a lost \`return\`. Log: $nbg_probe_log" ;;
   esac
   # Case 104 — the POSITIVE CONTROL. Without it, a case 103 that reds for an unrelated
   # reason reads as proof. Same triple, same measurement: with all three tokens allowed the
