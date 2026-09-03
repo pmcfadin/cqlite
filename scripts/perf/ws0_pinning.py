@@ -115,6 +115,7 @@ PINNING_RECORD_FIELDS = (
     "flight_pin_verified",
     "flight_allocator",
     "flight_allocator_lib",
+    "flight_malloc_arena_max",
     "flight_allocator_verification",
 )
 
@@ -264,6 +265,13 @@ def verify_pinning_record(
         "flight_pin_claim": FLIGHT_PIN_CLAIM[mode],
         "flight_allocator": allocator,
         "flight_allocator_lib": rec["flight_allocator_lib"],
+        # THE ARENA CAP (#3551, #3217 partC F1's AC2). Recorded as an affirmative sentence in
+        # both directions — a cap, or "not injected … which is deliberately NOT the same as
+        # setting it to 0" — because "no cap" and "nobody wrote the field down" must not look
+        # the same in the record the report's claim rests on. An arena cap leaves NO mapping, so
+        # /proc/<pid>/environ is the ONLY place it is observable and this field is the only place
+        # a reader of the report can see which arm they are looking at.
+        "flight_malloc_arena_max": rec["flight_malloc_arena_max"],
         "flight_allocator_verification": rec["flight_allocator_verification"],
         "host": rec["host"],
         "verified_by": rec["verified_by"],

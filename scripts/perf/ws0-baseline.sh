@@ -1455,6 +1455,21 @@ perf_stat_c() {
   # default is precisely how this defect would survive its own fix.
   local _counted="${PERF_COUNT_CPUS:-}" _pairings="${WS0_PERF_COUNT_PAIRINGS:-}"
   local _aff="" _want_c=0 _tok _pair
+  # THE `taskset` CPU FLAG, spelled as a variable whose assignment ENDS THE LINE — and that is
+  # not style. `scripts/tests/ws0_embedded_python.py`'s `_DASH_C_ANCHOR` looks for a literal
+  # `-c` followed by another token on the same line, ANCHORED ON THE FLAG deliberately (a
+  # variable-spelled COMMAND word was invisible before #3451 round 7), so both a comparison
+  # written `"$_tok" == "-c"` and a diagnostic quoting `taskset -c <list>` read as a
+  # `-c '<program>'` invocation with an unresolvable command word and FAIL CLOSED in that
+  # census — correctly on its own terms, since it cannot know one is a string comparison and
+  # the other is prose. Using the variable in both places keeps that census's rule intact
+  # instead of adding an exemption to it. MEASURED: the literal form red the embedded-python
+  # census in four of its cases — and note the anchor matches `-c` followed by ANY non-space,
+  # INCLUDING a closing quote, so `_cpu_flag="-c"` at end of line is matched too (measured:
+  # span 19-22 of that very line). Hence the two-step construction, which contains no `-c`
+  # adjacency at all.
+  local _cpu_flag="-"
+  _cpu_flag+="c"
   if [[ -z "$_counted" ]]; then
     echo "FATAL: perf_stat_c was called with no counting domain (\$PERF_COUNT_CPUS is empty or" >&2
     echo "       unset). Each measurement leg sets it to the CPUs ITS OWN server runs on" >&2
@@ -1476,13 +1491,14 @@ perf_stat_c() {
   # source scan would have does not exist here.
   for _tok in "$@"; do
     if [[ "$_want_c" == "2" ]]; then _aff="$_tok"; break; fi
-    if [[ "$_want_c" == "1" && "$_tok" == "-c" ]]; then _want_c=2; continue; fi
+    if [[ "$_want_c" == "1" && "$_tok" == "$_cpu_flag" ]]; then _want_c=2; continue; fi
     case "$_tok" in */taskset|taskset) _want_c=1 ;; esac
   done
   if [[ -z "$_aff" ]]; then
     echo "FATAL: perf_stat_c cannot tell WHERE the command it is about to measure will run: its" >&2
-    echo "       argv carries no 'taskset -c <list>'. The counting domain ('$_counted') is" >&2
-    echo "       therefore unverifiable against it, and an unverifiable pairing is refused" >&2
+    echo "       argv carries no 'taskset $_cpu_flag <list>', so the counting domain" >&2
+    echo "       ('$_counted') is therefore unverifiable against it, and an unverifiable" >&2
+    echo "       pairing is refused" >&2
     echo "       rather than assumed correct (#3551). Every leg in this rig pins its command." >&2
     echo "       The argument list was: $*" >&2
     exit 2

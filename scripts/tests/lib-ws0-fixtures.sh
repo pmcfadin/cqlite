@@ -311,6 +311,15 @@ config = {"reps": sys.argv[4], "temps": sys.argv[5], "arms": sys.argv[6],
           # flight pin (a manifest naming CPUs no verification ran against, or a distinct-cores
           # session) edits one side EXPLICITLY.
           "flight_server_cpus": "2,10",
+          # The ENVIRONMENT records (#3551), declared manifest fields the reader REFUSES to do
+          # without — and `env_ambient` must NAME every key the rig records, so this is not a
+          # placeholder: a fixture missing a key would fail every downstream case on the
+          # completeness assert rather than on its own subject. Shaped like the driver output
+          # (`<unset>`/`<none>` are affirmative markers, never blanks).
+          "env_ambient": "LD_PRELOAD=<unset>; LD_LIBRARY_PATH=<unset>; RUSTFLAGS=<unset>;"
+                         " CARGO_ENCODED_RUSTFLAGS=<unset>; MALLOC_VARS=<none>",
+          "env_injected": "flight server process ONLY: LD_PRELOAD=<empty>, not injected"
+                          " (fixture); bare scan (the drift control): NOTHING is injected",
           "step_duration": "45s/1s", "flight_endpoint": sys.argv[9],
           "events": "cycles,instructions",
           "bin_dir": "/fixture/target/release",
@@ -484,6 +493,7 @@ ws0_pin_verification() {
   # the colon form would silently hand it the healthy default instead.
   local flight="${4-$server}" mode="${5-siblings}" allocator="${6-system}"
   local allocator_lib="${7-none (system malloc; fixture)}"
+  local arena="${8-not injected (fixture)}"
   # DOES NOT CREATE the session dir, and that is load-bearing rather than tidiness: an earlier
   # draft used `mkdir(parents=True)`, which brought a deliberately-NONEXISTENT `--dir` into
   # existence and turned the reporter's "not an existing directory" refusal into a
@@ -497,6 +507,7 @@ sys.path.insert(0, sys.argv[1])
 from ws0_pinning import pinning_record_path
 session, server, client = pathlib.Path(sys.argv[2]), sys.argv[3], sys.argv[4]
 flight, mode, allocator, allocator_lib = sys.argv[5], sys.argv[6], sys.argv[7], sys.argv[8]
+arena = sys.argv[9]
 # The expanded form mirrors `verify_sibling_pair`s real output line, so the reporter parses the
 # same shape a driver produces rather than a fixture-only spelling.
 rec = {
@@ -526,12 +537,14 @@ rec = {
     ),
     "flight_allocator": allocator,
     "flight_allocator_lib": allocator_lib,
+    "flight_malloc_arena_max": arena,
     "flight_allocator_verification":
         "per rep, AFTER await_server_ready: /proc/<server-pid>/maps is READ (synthetic fixture"
         " record, shaped like the one the driver writes)",
 }
 pinning_record_path(session).write_text(json.dumps(rec, indent=1) + "\n")
-' "$perf_dir" "$session" "$server" "$client" "$flight" "$mode" "$allocator" "$allocator_lib"
+' "$perf_dir" "$session" "$server" "$client" "$flight" "$mode" "$allocator" "$allocator_lib" \
+    "$arena"
 }
 
 # ws0_pin_boundary_observations <session-dir> <reps> <temps> <arms> — the driver's MEASUREMENT-BOUNDARY

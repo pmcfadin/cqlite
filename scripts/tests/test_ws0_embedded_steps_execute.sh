@@ -253,6 +253,9 @@ driver_step_env() {
     "QUIESCENCE_RECORDED=NOT VERIFIED (no timeseries supplied)" \
     "WS0_SERVER_SIBLINGS=server cpu 2 siblings 2,10" "CPU_TOPOLOGY_ROOT=$TMP/fake-topology" \
     FLIGHT_SERVER_CPUS=2,10 FLIGHT_PIN_MODE=siblings FLIGHT_ALLOCATOR=system \
+    "WS0_ENV_AMBIENT=LD_PRELOAD=<unset>; LD_LIBRARY_PATH=<unset>; RUSTFLAGS=<unset>; CARGO_ENCODED_RUSTFLAGS=<unset>; MALLOC_VARS=<none>" \
+    "WS0_ENV_INJECTED=flight server process ONLY: LD_PRELOAD=<empty>, not injected; bare scan: NOTHING" \
+    "FLIGHT_ARENA_RECORDED=not injected (fixture)" \
     "WS0_FLIGHT_PIN_VERIFIED=flight cpu 2 siblings 2,10" \
     "FLIGHT_ALLOCATOR_LIB_RECORDED=none (fixture)" \
     "FLIGHT_ALLOCATOR_VERIFICATION=per rep from /proc/<pid>/maps (fixture)"
@@ -305,6 +308,7 @@ WS0_EXPECTED_PIN=(
   "flight_server_cpus=2,10" "flight_pin_mode=siblings"
   "flight_pin_verified=flight cpu 2 siblings 2,10"
   "flight_allocator=system" "flight_allocator_lib=none (fixture)"
+  "flight_malloc_arena_max=not injected (fixture)"
   "flight_allocator_verification=per rep from /proc/<pid>/maps (fixture)"
 )
 
@@ -1128,6 +1132,10 @@ CFG_PAIRS=(
   # states for events/profile/quiescence: a fixture pinning a value the driver never produces
   # makes the round trip approve an artifact production would refuse.
   "flight_server_cpus=2,10"
+  # ...and #3551's environment records. `env_ambient` must NAME every key the rig records — the
+  # reader asserts key COMPLETENESS — so this is the driver's own shape and not a placeholder.
+  "env_ambient=LD_PRELOAD=<unset>; LD_LIBRARY_PATH=<unset>; RUSTFLAGS=<unset>; CARGO_ENCODED_RUSTFLAGS=<unset>; MALLOC_VARS=<none>"
+  "env_injected=flight server process ONLY: LD_PRELOAD=<empty>, not injected; bare scan: NOTHING"
   # ...and the fields #3455 added. Each value is THE DRIVER'S OWN DEFAULT SHAPE, not merely
   # something the validator accepts — the round-8 lesson about the Flight endpoint applied here
   # before it could cost a round: a fixture pinning a value the driver never produces makes the

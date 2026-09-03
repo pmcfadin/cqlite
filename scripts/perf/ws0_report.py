@@ -290,6 +290,10 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     # WHERE THE FLIGHT SERVER RAN (#3551) — read from the manifest for the same reason as
     # everything else here, and tied to the driver's recorded verification below.
     flight_server_cpus = config["flight_server_cpus"]
+    # THE ENVIRONMENT THIS SESSION RAN IN (#3551 item 8) — ambient and injected, separately,
+    # because with one binary set across all arms it is the only thing that distinguishes them.
+    env_ambient = config["env_ambient"]
+    env_injected = config["env_injected"]
     step_duration = config["step_duration"]
     # WHICH COUNTERS AND WHICH BINARIES (#3248). Read from the manifest for the same reason as
     # everything above: a value that cannot be supplied cannot disagree. Promoted to the report's
@@ -663,6 +667,22 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         # the build mode and every measured binary's digest, observed by the driver before the first
         # rep. This rig's output is a ratio between two binaries, so this is provenance.
         "binary_provenance": binary_provenance,
+        # THE ENVIRONMENT, AS MEASURED AND AS INJECTED (#3551 item 8). At the TOP LEVEL rather
+        # than inside `pinning`, because it is a property of the whole session and because a
+        # reader comparing two results.json files for a reproduction has to find it without
+        # knowing which subsection the rig happened to file it under (ws0-3552 §4).
+        "environment": {
+            "ambient": env_ambient,
+            "injected": env_injected,
+            "note": (
+                "AMBIENT is the driver's own environment as MEASURED before the first rep;"
+                " INJECTED is what the rig set, on the flight server's launch line ONLY. They"
+                " are separate fields because a stray operator variable and a deliberate"
+                " injection are different facts. An ambient LD_PRELOAD or MALLOC_* is REFUSED by"
+                " the driver, because ws0-scan-bench would inherit it and the bare scan is the"
+                " drift control (#3551)."
+            ),
+        },
         "pinning": {
             "server_cpus": server_cpus,
             "client_cpus": client_cpus,
@@ -680,6 +700,7 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
             "flight_pin_claim": pinning_verification["flight_pin_claim"],
             "flight_allocator": pinning_verification["flight_allocator"],
             "flight_allocator_lib": pinning_verification["flight_allocator_lib"],
+            "flight_malloc_arena_max": pinning_verification["flight_malloc_arena_max"],
             # THE COUNTING DOMAIN IS PER ARM since the flight pin became separable: the bare
             # scan is counted over the server set and the flight arm over the flight set, which
             # is where its server actually ran. Stated as two entries rather than one, because a
@@ -909,6 +930,9 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         # malloc), so the only thing worth printing is what was OBSERVED in the running process.
         f"allocator    : flight server ran under {pinning_verification['flight_allocator']}"
         f" (library: {pinning_verification['flight_allocator_lib']})",
+        f"  arena      : {pinning_verification['flight_malloc_arena_max']}",
+        f"env ambient  : {env_ambient}",
+        f"env injected : {env_injected}",
         f"  evidence   : {pinning_verification['flight_allocator_verification']}",
         f"counters     : perf stat -C {server_cpus} (bare scan) /"
         f" -C {flight_server_cpus} (Flight)  [CPU-WIDE; no -p anywhere]"

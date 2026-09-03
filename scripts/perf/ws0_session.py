@@ -335,6 +335,27 @@ MANIFEST_CONFIG_DISPOSITION: dict[str, str] = {
                           " pin is not recorded cannot be told apart from one where both arms"
                           " shared a core, and those are different measurements. It EQUALS"
                           " server_cpus for every run that does not pass --flight-server-cpus",
+    "env_ambient": "validated as a non-empty recorded STRING that NAMES EVERY KEY the rig"
+                   " records (LD_PRELOAD, LD_LIBRARY_PATH, RUSTFLAGS, CARGO_ENCODED_RUSTFLAGS,"
+                   " MALLOC_VARS), so a field that silently dropped one is REFUSED rather than"
+                   " read as `that variable was unset`. The substance: with ONE binary set"
+                   " across all arms — deliberate — the ENVIRONMENT is the only thing that"
+                   " differs between the system and jemalloc arms, and it was recorded NOWHERE"
+                   " (the only os.environ read in this whole path was WS0_BUILD_MODE), which"
+                   " made arm C unfalsifiable. AMBIENT is what the DRIVER's own environment"
+                   " carried, as measured; the values are affirmative (`<unset>`/`<none>`,"
+                   " never blank). docs/reports/ws0-3552-report.md §4 is the governing rule:"
+                   " state RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS AS MEASURED, because a"
+                   " reproduction only corroborates if its ENVIRONMENT differs — not just its"
+                   " tree, box or operator (#3551)",
+    "env_injected": "as env_ambient, and SEPARATE from it deliberately: `the operator had a"
+                    " stray LD_PRELOAD` and `the rig set one on purpose` are different facts and"
+                    " only one of them is a defect, so they are never merged into one field."
+                    " Validated as a non-empty recorded STRING naming the flight server as the"
+                    " ONLY injection site and the bare scan as receiving nothing — that scoping"
+                    " IS the method (an exported LD_PRELOAD would reach ws0-scan-bench and put"
+                    " the DRIFT CONTROL on the allocator under test, breaking §3b step 3), and"
+                    " the driver asserts it per rep (#3551)",
     "step_duration": "a non-empty recorded STRING (`<warm>/<cold>`), reported verbatim; the"
                      " DURATIONS that bound a rep were validated by the driver's own argument"
                      " checks (lib-args.sh) before the session ran",
@@ -408,6 +429,8 @@ _MANIFEST_READER_KEYS = (
     "server_cpus",
     "client_cpus",
     "flight_server_cpus",
+    "env_ambient",
+    "env_injected",
     "step_duration",
     "flight_endpoint",
     "baseline_mode",
@@ -607,6 +630,35 @@ def session_manifest_config(
             " was checked for competing load."
         )
     out["quiescence"] = quies
+    # THE ENVIRONMENT RECORDS (#3551). `env_ambient` is checked for KEY COMPLETENESS rather
+    # than parsed into a mapping: the values are recorded VERBATIM (a RUSTFLAGS containing the
+    # renderer's `; ` separator would be visually ambiguous, and mangling it would make the field
+    # lie about what was measured), so what is asserted is that every key the rig claims to
+    # record is NAMED. A field that silently dropped one would otherwise read as "that variable
+    # was unset", which is a different fact and the permissive one.
+    for key in ("env_ambient", "env_injected"):
+        value = config[key]
+        if not isinstance(value, str) or not value.strip():
+            raise Invalid(
+                f"{p} `config.{key}` is {value!r}, which is not a recorded value. With one binary"
+                " set across all arms the ENVIRONMENT is the only thing that distinguishes the"
+                " allocator arms, so an empty record here makes them indistinguishable in the"
+                " artifact — the state that made arm C unfalsifiable (#3551)."
+            )
+    absent_keys = [
+        k for k in ("LD_PRELOAD", "LD_LIBRARY_PATH", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS",
+                    "MALLOC_VARS")
+        if f"{k}=" not in config["env_ambient"]
+    ]
+    if absent_keys:
+        raise Invalid(
+            f"{p} `config.env_ambient` names no {', '.join(absent_keys)}. Every key the rig"
+            " records is one a reproduction has to be able to compare, and an ABSENT key reads"
+            " exactly like a variable that was unset — a different fact, and the permissive one"
+            " (ws0-3552 §4: state them AS MEASURED). Re-run the session with the current driver."
+        )
+    out["env_ambient"] = config["env_ambient"]
+    out["env_injected"] = config["env_injected"]
     for key in ("server_cpus", "client_cpus", "flight_server_cpus", "step_duration", "bin_dir"):
         value = config[key]
         if not isinstance(value, str) or not value.strip():
