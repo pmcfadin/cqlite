@@ -567,6 +567,60 @@ printf 'PATH=/usr/bin\0LD_PRELOAD=\0HOME=/root\0' > "$ENV_PRELOAD_EMPTY"
   printf '7f0400-7f0500 rw-p 00000000 00:00 0  [heap]\n'
 } > "$MAPS_WITHOUT"
 : > "$MAPS_EMPTY"
+# --- THE FIELD-PARSE FIXTURES (roborev #3551 round 3 F3) ------------------------------------
+# Each is the SHAPE of one false verdict the whole-line substring match produced, or one line
+# shape a field parse has to survive. They differ from $MAPS_WITHOUT / $MAPS_WITH in exactly the
+# property their case names.
+MAPS_JEM_DIR="$TMP/maps-jemalloc-in-directory"
+MAPS_JEM_OTHER="$TMP/maps-other-jemalloc-library"
+MAPS_JEM_DELETED="$TMP/maps-jemalloc-deleted"
+MAPS_JEM_NEEDLE_IN_DIR="$TMP/maps-needle-in-directory"
+MAPS_ANON_ONLY="$TMP/maps-anon-and-pseudo-only"
+MAPS_SPACED="$TMP/maps-spaced-pathname"
+MAPS_UNPARSEABLE="$TMP/maps-unparseable-line"
+# A mapping whose PARENT DIRECTORY contains `jemalloc` and whose FILE does not. The control arm
+# was refused on this line; the file is `libfoo.so`, so nothing jemalloc is mapped.
+{
+  printf '7f0200-7f0300 r-xp 00000000 08:01 102 /usr/lib/x86_64-linux-gnu/libc.so.6\n'
+  printf '7f0600-7f0700 r-xp 00000000 08:01 105 /opt/jemalloc-build/libfoo.so\n'
+} > "$MAPS_JEM_DIR"
+# A jemalloc-NAMED library that is NOT the requested one. The jemalloc arm must refuse it.
+{
+  printf '7f0200-7f0300 r-xp 00000000 08:01 102 /usr/lib/x86_64-linux-gnu/libc.so.6\n'
+  printf '7f0800-7f0900 r-xp 00000000 08:01 106 /usr/lib/libjemalloc-not-the-one.so\n'
+} > "$MAPS_JEM_OTHER"
+# The requested library, unlinked after being mapped: still in effect.
+{
+  printf '7f0a00-7f0b00 r-xp 00000000 08:01 107 %s (deleted)\n' "$JLIB"
+  printf '7f0200-7f0300 r-xp 00000000 08:01 102 /usr/lib/x86_64-linux-gnu/libc.so.6\n'
+} > "$MAPS_JEM_DELETED"
+# A DIRECTORY spelt like the requested library's basename, holding a different file. The
+# whole-line match accepted this for the jemalloc arm.
+{
+  printf '7f0c00-7f0d00 r-xp 00000000 08:01 108 /opt/%s/libunrelated.so\n' "${JLIB##*/}"
+  printf '7f0200-7f0300 r-xp 00000000 08:01 102 /usr/lib/x86_64-linux-gnu/libc.so.6\n'
+} > "$MAPS_JEM_NEEDLE_IN_DIR"
+# Only mappings with NO pathname field and a pseudo-path: nothing to compare, and the file is
+# non-empty, so this is neither an empty read nor an assertion about a path.
+{
+  printf '7f0e00-7f0f00 rw-p 00000000 00:00 0 \n'
+  printf '7f1000-7f1100 rw-p 00000000 00:00 0\n'
+  printf '7f1200-7f1300 r-xp 00000000 00:00 0                          [vdso]\n'
+  printf '7f1400-7f1500 rw-p 00000000 00:00 0  [heap]\n'
+} > "$MAPS_ANON_ONLY"
+# A pathname CONTAINING SPACES (the kernel escapes only newlines in this file), whose basename
+# is the requested library's.
+{
+  printf '7f1600-7f1700 r-xp 00000000 08:01 109 /opt/my libs/%s\n' "${JLIB##*/}"
+  printf '7f0200-7f0300 r-xp 00000000 08:01 102 /usr/lib/x86_64-linux-gnu/libc.so.6\n'
+} > "$MAPS_SPACED"
+# A non-blank line that is not a mapping at all, plus one blank line (which is not a mapping and
+# cannot hide one, so it must be ignored rather than refused).
+{
+  printf '7f0200-7f0300 r-xp 00000000 08:01 102 /usr/lib/x86_64-linux-gnu/libc.so.6\n'
+  printf '\n'
+  printf 'this is not a mapping line\n'
+} > "$MAPS_UNPARSEABLE"
 
 # --- 3a. THE BRANCH THIS CHECK EXISTS FOR: the preload was IGNORED ---------------------------
 # glibc prints "object … cannot be preloaded …: ignored" and CONTINUES with system malloc, exit
@@ -700,6 +754,192 @@ if [ "$rc" -ne 0 ] && grep -q "does not exist" <<<"$out"; then
   pass "environ half: an ABSENT environ refuses (the process exited before it could be read)"
 else
   fail "an absent environ must refuse (rc=$rc, out: $(head -2 <<<"$out"))"
+fi
+
+# --- 3g. THE PATHNAME IS A FIELD, NOT A SUBSTRING OF THE LINE (roborev #3551 round 3 F3) ----
+# The shipped check matched `$needle` and `jemalloc` against the WHOLE maps line, which is a
+# substring over a namespace the subject also occupies — false in BOTH directions, and both are
+# pinned here. Every arm below differs from its control in exactly ONE property: which pathname
+# the fixture's second mapping carries.
+
+# 3g-1. THE FALSE RED, which is the half an operator would have had to work around: the CONTROL
+# arm with a mapping whose PARENT DIRECTORY is spelt `jemalloc-build` and whose FILE is
+# `libfoo.so`. Nothing jemalloc is mapped, so it must be ACCEPTED. This is a POSITIVE control:
+# the pre-fix code refused it.
+out=$(maps_call "$MAPS_JEM_DIR" "$ENV_CLEAN" system "" "" flight-bypass-warm-1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "system VERIFIED for flight-bypass-warm-1" <<<"$out"; then
+  pass "3g-1. system arm: /opt/jemalloc-build/libfoo.so is ACCEPTED — the BASENAME is the library's name, and a parent directory spelt like one is not a jemalloc mapping (the pre-fix false RED)"
+else
+  fail "3g-1. a jemalloc-named DIRECTORY must not refuse the control arm (rc=$rc, out: $(head -4 <<<"$out"))"
+fi
+# ...and the discriminating control, differing in exactly that one property: move the token from
+# the directory into the FILE name and the same arm refuses, NAMING the offending pathname.
+out=$(maps_call "$MAPS_JEM_OTHER" "$ENV_CLEAN" system "" "" flight-bypass-warm-1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "HAS a" <<<"$out" \
+   && grep -qF "/usr/lib/libjemalloc-not-the-one.so" <<<"$out"; then
+  pass "3g-1. system arm: the same fixture with the token in the FILE name (libjemalloc-not-the-one.so) IS refused, and the refusal NAMES that pathname — so 3g-1 is a basename decision, not a deleted check"
+else
+  fail "3g-1. a jemalloc-named FILE must refuse the control arm, naming it (rc=$rc, out: $(head -4 <<<"$out"))"
+fi
+
+# 3g-2. THE FALSE ACCEPT: the jemalloc arm with NO mapping of the requested library, only an
+# unrelated library whose name merely CONTAINS `jemalloc`. The pre-fix line match would not even
+# need that much — the requested basename anywhere in the line sufficed — so both spellings are
+# driven: a differently-named jemalloc library, and a DIRECTORY named exactly like the requested
+# library holding some other file.
+out=$(maps_call "$MAPS_JEM_OTHER" "$ENV_PRELOAD" jemalloc "$JLIB" "" flight-merge-warm-1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "NO mapping of '${JLIB##*/}' is present" <<<"$out"; then
+  pass "3g-2. jemalloc arm: a DIFFERENT jemalloc-named library does NOT satisfy the requested one — the identity is the requested library, not the token"
+else
+  fail "3g-2. an unrelated jemalloc library must not satisfy the jemalloc arm (rc=$rc, out: $(head -4 <<<"$out"))"
+fi
+out=$(maps_call "$MAPS_JEM_NEEDLE_IN_DIR" "$ENV_PRELOAD" jemalloc "$JLIB" "" flight-merge-warm-1)
+rc=$?
+if [ "$rc" -ne 0 ] && grep -q "NO mapping of '${JLIB##*/}' is present" <<<"$out"; then
+  pass "3g-2. jemalloc arm: a DIRECTORY named '${JLIB##*/}' holding libunrelated.so does NOT satisfy it either (the whole-line match accepted this)"
+else
+  fail "3g-2. the requested basename appearing as a DIRECTORY must not satisfy the jemalloc arm (rc=$rc, out: $(head -4 <<<"$out"))"
+fi
+# ...and the accept direction of the same comparison, so 3g-2 is not satisfied by a check that
+# refuses everything: the requested library itself, by basename, is accepted and the evidence
+# NAMES which identity was used.
+out=$(maps_call "$MAPS_WITH" "$ENV_PRELOAD" jemalloc "$JLIB" "" flight-merge-warm-1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "jemalloc VERIFIED" <<<"$out" \
+   && grep -qF "identity: the mapped" <<<"$out"; then
+  pass "3g-2. CONTROL: the REQUESTED library IS accepted, and the evidence names the identity it matched on"
+else
+  fail "3g-2. the requested library must be accepted with its identity named (rc=$rc, out: $(head -4 <<<"$out"))"
+fi
+
+# 3g-3. A ` (deleted)` SUFFIX ON THE REQUESTED LIBRARY STILL MATCHES, and this is a decision
+# rather than an accident: the mapping is IN EFFECT whether or not the file was unlinked
+# afterwards, and effect is what both assertions are about. Refusing it would red a correct arm C
+# on a box where the package was upgraded mid-session.
+out=$(maps_call "$MAPS_JEM_DELETED" "$ENV_PRELOAD" jemalloc "$JLIB" "" flight-merge-warm-1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "jemalloc VERIFIED" <<<"$out" && grep -qF "(deleted)" <<<"$out"; then
+  pass "3g-3. jemalloc arm: a '(deleted)' mapping of the requested library MATCHES (the mapping is in effect; the evidence line carries the suffix)"
+else
+  fail "3g-3. a deleted mapping of the requested library must match (rc=$rc, out: $(head -4 <<<"$out"))"
+fi
+# ...and the same suffix on the CONTROL arm still refuses, which is the other half of that one
+# decision: a deleted jemalloc is still jemalloc in effect.
+out=$(maps_call "$MAPS_JEM_DELETED" "$ENV_CLEAN" system "" "" flight-bypass-warm-1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "HAS a" <<<"$out"; then
+  pass "3g-3. system arm: the SAME deleted jemalloc mapping still REFUSES the control arm — one decision, both directions"
+else
+  fail "3g-3. a deleted jemalloc mapping must refuse the control arm (rc=$rc, out: $(head -4 <<<"$out"))"
+fi
+
+# 3g-4. A PATHNAME CONTAINING SPACES is read WHOLE. The pathname is the 6th field ONWARD, and the
+# kernel escapes only newlines in this file, so a space is a literal space — a parse that stopped
+# at the first whitespace would see basename `libs/` and miss the library.
+out=$(maps_call "$MAPS_SPACED" "$ENV_PRELOAD" jemalloc "$JLIB" "" flight-merge-warm-1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "jemalloc VERIFIED" <<<"$out" \
+   && grep -qF "/opt/my libs/${JLIB##*/}" <<<"$out"; then
+  pass "3g-4. a pathname containing SPACES is read whole ('/opt/my libs/${JLIB##*/}') and its basename compared"
+else
+  fail "3g-4. a space-bearing pathname must be read whole (rc=$rc, out: $(head -4 <<<"$out"))"
+fi
+
+# 3g-5. AN ANONYMOUS MAPPING AND A PSEUDO-PATH ARE IGNORED, NOT PARSED AS PATHNAMES — and the
+# file is NON-EMPTY, so this is distinct from the empty-read refusal above. The control arm
+# accepts (nothing jemalloc is mapped) and the jemalloc arm refuses with its mapping COUNT
+# reported, which is what says the lines were read rather than skipped wholesale.
+out=$(maps_call "$MAPS_ANON_ONLY" "$ENV_CLEAN" system "" "" flight-bypass-warm-1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "system VERIFIED" <<<"$out" && grep -q "4 mappings" <<<"$out"; then
+  pass "3g-5. anonymous mappings and [heap]/[vdso] are counted as mappings (4 read) and compared against nothing"
+else
+  fail "3g-5. anonymous and pseudo-path mappings must be counted and ignored (rc=$rc, out: $(head -4 <<<"$out"))"
+fi
+if grep -q "0 file-backed" <<<"$out"; then
+  pass "3g-5. ...and the verdict REPORTS that none of them was file-backed, so 'no jemalloc mapping' is attributable to a scan that found no pathname at all"
+else
+  fail "3g-5. the verdict must report the file-backed count (out: $(head -4 <<<"$out"))"
+fi
+out=$(maps_call "$MAPS_ANON_ONLY" "$ENV_PRELOAD" jemalloc "$JLIB" "" flight-merge-warm-1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "NO mapping of '${JLIB##*/}' is present" <<<"$out" \
+   && grep -q "4 mappings read" <<<"$out"; then
+  pass "3g-5. ...and the jemalloc arm refuses over the same file, reporting 4 mappings read (not a could-not-measure)"
+else
+  fail "3g-5. the jemalloc arm must refuse an anonymous-only maps file as an ABSENT mapping (rc=$rc, out: $(head -4 <<<"$out"))"
+fi
+
+# 3g-6. A NON-BLANK LINE THAT IS NOT A MAPPING IS A REFUSAL, in BOTH modes: a real maps line
+# always carries the five leading fields, so an unparseable one is a state in which the assertion
+# COULD NOT BE MADE — and it could be the very mapping either arm is about. The same fixture also
+# carries a BLANK line, which is not a mapping and cannot hide one, so it must be ignored: if it
+# were refused, this case would pass for the wrong reason, which is why the refusal must NAME the
+# planted line.
+for mode_pair in "system::" "jemalloc:$JLIB:"; do
+  m="${mode_pair%%:*}"; l="${mode_pair#*:}"; l="${l%:}"
+  if [ "$m" = system ]; then envf="$ENV_CLEAN"; else envf="$ENV_PRELOAD"; fi
+  out=$(maps_call "$MAPS_UNPARSEABLE" "$envf" "$m" "$l" "" flight-warm-1); rc=$?
+  if [ "$rc" -ne 0 ] && grep -qF "this is not a mapping line" <<<"$out" \
+     && grep -q "NOT a /proc/<pid>/maps mapping" <<<"$out"; then
+    pass "3g-6. $m arm: an unparseable maps line is REFUSED and the offending line is NAMED (not skipped, which could drop the mapping the arm is about)"
+  else
+    fail "3g-6. $m arm: an unparseable maps line must refuse naming it (rc=$rc, out: $(head -4 <<<"$out"))"
+  fi
+done
+# ...and the BLANK line alone is NOT a refusal: same fixture minus the unparseable line, so the
+# two differ in exactly one property.
+{ printf '7f0200-7f0300 r-xp 00000000 08:01 102 /usr/lib/x86_64-linux-gnu/libc.so.6\n'; printf '\n'; } \
+  > "$TMP/maps-blank-line-only"
+out=$(maps_call "$TMP/maps-blank-line-only" "$ENV_CLEAN" system "" "" flight-bypass-warm-1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "system VERIFIED" <<<"$out" && grep -q "1 mappings" <<<"$out"; then
+  pass "3g-6. a BLANK line is ignored (1 mapping counted, not refused) — 3g-6's refusal is the unparseable line and not any non-mapping text"
+else
+  fail "3g-6. a blank maps line must be ignored (rc=$rc, out: $(head -4 <<<"$out"))"
+fi
+
+# 3g-6b. THE RECOGNISER AGAINST THE REAL KERNEL FORMAT. Every fixture above was written by the
+# same hand as the regex, so together they cannot show that a REAL `/proc/<pid>/maps` parses —
+# and a recogniser that refuses real input is the guard an operator learns to work around, which
+# is the failure direction 3g-1 already paid for once. This process's OWN maps file is the only
+# oracle for that, and reading it needs no server, no root and no privilege. Its verdict must be
+# `system VERIFIED`: the function refuses on the FIRST unparseable line, so a clean run is the
+# assertion that every line of a live maps file was recognised.
+#
+# NOT-MEASURED is DECLARED and non-fatal: on a host with no procfs this control cannot be taken,
+# and a red there would be a red on correct input. It is printed either way so its absence is
+# never silent.
+#
+# `-s` IS NOT USED TO DECIDE READABILITY, and that is measured rather than styled: procfs
+# reports SIZE 0 for `maps` (verified on this box: `-r` true, `-s` FALSE, 39 lines via `grep`),
+# so an `-s` probe reads a live file as empty — the two-valued probe taking its permissive
+# answer, one directory over from the rule this whole case exists for.
+#
+# The assertion is on the RECOGNISER and not on the arm's verdict: a box that really did preload
+# jemalloc would legitimately refuse the control arm, and pinning `system VERIFIED` would red
+# there for a reason that has nothing to do with parsing. What must never appear is the
+# unparseable-line refusal.
+if [ -r /proc/self/maps ]; then
+  out=$(maps_call /proc/self/maps "$ENV_CLEAN" system "" "" flight-bypass-warm-1); rc=$?
+  real_lines=$(grep -c . /proc/self/maps)
+  if grep -q "NOT a /proc/<pid>/maps mapping" <<<"$out"; then
+    fail "3g-6b. the recogniser REFUSED a line of a REAL maps file — it reds on correct input (out: $(head -4 <<<"$out"))"
+  elif [ "$real_lines" -gt 0 ]; then
+    pass "3g-6b. the recogniser accepts a LIVE /proc/self/maps (~$real_lines lines; verdict: $(head -1 <<<"$out" | cut -c1-60)…) — every line parsed, since it refuses on the first that does not"
+  else
+    echo "note - 3g-6b. CONTROL NOT TAKEN: /proc/self/maps read as 0 lines, so nothing was recognised (declared, not fatal)"
+  fi
+else
+  echo "note - 3g-6b. CONTROL NOT TAKEN: /proc/self/maps is not readable on this host, so the recogniser was not driven against a real kernel maps file (declared, not fatal — every other 3g case is synthetic)"
+fi
+
+# 3g-7. STRUCTURAL: the whole-line substring tests are GONE. The behavioural arms above cover the
+# shapes someone thought of; this pins that neither original comparison survives anywhere in the
+# function, which no behavioural case can express. The needles are SPLIT so this test cannot
+# match its own source.
+if grep -qE '"\$line"'"$(printf '%s' ' == *')"'jemalloc\*' "$FLIGHT_LIB"; then
+  fail "3g-7. STRUCTURAL: a whole-LINE jemalloc substring test is back in $FLIGHT_LIB — the F3 defect"
+else
+  pass "3g-7. STRUCTURAL: no whole-LINE jemalloc substring test remains (the comparison is on the pathname field's basename)"
+fi
+if grep -qE '"\$line"'"$(printf '%s' ' == *"$need')"'le"\*' "$FLIGHT_LIB"; then
+  fail "3g-7. STRUCTURAL: a whole-LINE requested-basename substring test is back in $FLIGHT_LIB"
+else
+  pass "3g-7. STRUCTURAL: no whole-LINE requested-basename substring test remains"
 fi
 
 # --- 3f. THE ARENA CAP, which NO mapping can see (#3551 item 9 / #3217 partC F1) ------------

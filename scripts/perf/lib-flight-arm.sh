@@ -249,7 +249,7 @@ record_flight_allocator_facts() {
     # line cites a mechanism rather than a label. It also states its OWN LIMIT, in the record, for
     # the reason `provenance` does: the per-rep files are written where the observation is made and
     # NOTHING AT REPORT TIME requires them to be present.
-      FLIGHT_ALLOCATOR_VERIFICATION="per rep, AFTER await_server_ready, BOTH /proc/<server-pid>/environ AND /proc/<server-pid>/maps are READ, because they prove DIFFERENT things and neither is sufficient alone: environ must carry the whole NUL-separated entry 'LD_PRELOAD=$FLIGHT_ALLOCATOR_LIB' (what the process RECEIVED, measured rather than echoed from what the driver believes it passed) AND maps must carry a mapping whose path contains '$FLIGHT_ALLOCATOR_LIB_BASENAME' (that the preload TOOK EFFECT — environ alone cannot see glibc silently ignoring an unloadable object and continuing with system malloc, and maps alone cannot see MALLOC_ARENA_MAX at all, since an arena cap leaves no mapping). ARENA: $FLIGHT_ARENA_RECORDED, asserted as an exact whole entry (a substring match would confuse =1 with =16). Either half absent is FATAL for that rep; an unreadable or empty environ/maps is FATAL as COULD-NOT-MEASURE, never read as verified. Each rep's outcome is written to <tag>.allocator.status by scripts/perf/lib-flight-arm.sh verify_flight_server_allocator. DECLARED LIMIT: the driver ABORTS on a failure, and nothing at REPORT time requires those per-rep files to exist — that completeness check is the boundary-observation shape (#3272 round 22) and is NOT implemented for the allocator (#3551)."
+      FLIGHT_ALLOCATOR_VERIFICATION="per rep, AFTER await_server_ready, BOTH /proc/<server-pid>/environ AND /proc/<server-pid>/maps are READ, because they prove DIFFERENT things and neither is sufficient alone: environ must carry the whole NUL-separated entry 'LD_PRELOAD=$FLIGHT_ALLOCATOR_LIB' (what the process RECEIVED, measured rather than echoed from what the driver believes it passed) AND maps must carry a mapping whose PATHNAME FIELD identifies that library — parsed as 'address perms offset dev inode [pathname]' and compared as an identity (pathname == readlink -f of the library, or basename == '$FLIGHT_ALLOCATOR_LIB_BASENAME'), NEVER as a substring of the line, and a ' (deleted)' suffix still matches because the mapping is in effect (that the preload TOOK EFFECT — environ alone cannot see glibc silently ignoring an unloadable object and continuing with system malloc, and maps alone cannot see MALLOC_ARENA_MAX at all, since an arena cap leaves no mapping). ARENA: $FLIGHT_ARENA_RECORDED, asserted as an exact whole entry (a substring match would confuse =1 with =16). Either half absent is FATAL for that rep; an unreadable or empty environ/maps is FATAL as COULD-NOT-MEASURE, never read as verified. Each rep's outcome is written to <tag>.allocator.status by scripts/perf/lib-flight-arm.sh verify_flight_server_allocator. DECLARED LIMIT: the driver ABORTS on a failure, and nothing at REPORT time requires those per-rep files to exist — that completeness check is the boundary-observation shape (#3272 round 22) and is NOT implemented for the allocator (#3551)."
   else
     FLIGHT_ALLOCATOR_LIB=""
     FLIGHT_ALLOCATOR_LIB_RECORDED="none (system malloc; any inherited LD_PRELOAD is EMPTIED for the server launch, and the absence of a jemalloc mapping is asserted per rep)"
@@ -258,7 +258,7 @@ record_flight_allocator_facts() {
     # `LD_PRELOAD` exported in their shell — would INVERT the comparison, so it is refused rather
     # than assumed: the launch EMPTIES `LD_PRELOAD` and the absence of a jemalloc mapping is then
     # OBSERVED. Same declared limit as the jemalloc branch.
-      FLIGHT_ALLOCATOR_VERIFICATION="per rep, AFTER await_server_ready, BOTH /proc/<server-pid>/environ AND /proc/<server-pid>/maps are READ: environ must carry NO non-empty 'LD_PRELOAD=' entry (the launch sets it EMPTY rather than trusting it to be unset, and an ambient one is refused before the first rep) AND maps must carry NO jemalloc mapping. Both halves, because they prove different things: environ shows what the process RECEIVED and maps shows what TOOK EFFECT. ARENA: $FLIGHT_ARENA_RECORDED, asserted as an exact whole entry. Either violation is FATAL — a CONTROL arm quietly running the allocator under test does not add noise, it INVERTS the comparison — and an unreadable or empty environ/maps is FATAL as COULD-NOT-MEASURE. Each rep's outcome is written to <tag>.allocator.status by scripts/perf/lib-flight-arm.sh verify_flight_server_allocator. DECLARED LIMIT: the driver ABORTS on a failure, and nothing at REPORT time requires those per-rep files to exist — that completeness check is the boundary-observation shape (#3272 round 22) and is NOT implemented for the allocator (#3551)."
+      FLIGHT_ALLOCATOR_VERIFICATION="per rep, AFTER await_server_ready, BOTH /proc/<server-pid>/environ AND /proc/<server-pid>/maps are READ: environ must carry NO non-empty 'LD_PRELOAD=' entry (the launch sets it EMPTY rather than trusting it to be unset, and an ambient one is refused before the first rep) AND maps must carry NO mapped FILE whose BASENAME contains 'jemalloc' — decided on the parsed pathname field, so a parent directory spelt like one is not a jemalloc mapping and a jemalloc-named library IS, whether or not it was since unlinked. Both halves, because they prove different things: environ shows what the process RECEIVED and maps shows what TOOK EFFECT. ARENA: $FLIGHT_ARENA_RECORDED, asserted as an exact whole entry. Either violation is FATAL — a CONTROL arm quietly running the allocator under test does not add noise, it INVERTS the comparison — and an unreadable or empty environ/maps is FATAL as COULD-NOT-MEASURE. Each rep's outcome is written to <tag>.allocator.status by scripts/perf/lib-flight-arm.sh verify_flight_server_allocator. DECLARED LIMIT: the driver ABORTS on a failure, and nothing at REPORT time requires those per-rep files to exist — that completeness check is the boundary-observation shape (#3272 round 22) and is NOT implemented for the allocator (#3551)."
   fi
 }
 
@@ -353,6 +353,59 @@ verify_flight_arm_pin() {
 # runs under the driver's `set -o pipefail`, where a `grep | head` on a match closes the pipe and
 # reports FAILURE on the SUCCESS case (the trap #3248 already hit in this rig, at `nm | grep -q`).
 #
+# # THE MAPS SIDE IS PARSED BY FIELD, NEVER SUBSTRING-MATCHED (roborev #3551 round 3 F3)
+#
+# The first version tested `[[ "$line" == *"$needle"* ]]` and `[[ "$line" == *jemalloc* ]]`
+# against the WHOLE line, i.e. a substring over a namespace the subject also occupies — the same
+# class as `agent-gate.sh`'s census defect. It was false in BOTH directions:
+#
+#   * the CONTROL arm was refused by any mapping whose PARENT DIRECTORY merely contains
+#     `jemalloc` (`/opt/jemalloc-build/libfoo.so`) — a red on correct input, which is the guard
+#     an operator learns to work around;
+#   * the JEMALLOC arm was satisfied by any mapping whose line merely CONTAINS the requested
+#     basename (`/usr/lib/libjemalloc.so.2.backup`, or a differently-named library in a
+#     directory spelt like the requested one) — a rep certified as running the library under
+#     test on the strength of a different file.
+#
+# So each line is split into `address perms offset dev inode [pathname]` and only the PATHNAME
+# field is compared, as an IDENTITY:
+#
+#   * the pathname is the 6th field ONWARD, so a path CONTAINING SPACES is read whole. The
+#     kernel escapes only `\n` (as `\012`, `mangle_path` with `esc="\n"`) in this file, so one
+#     mapping is one line and a space is a literal space. Trailing whitespace inside a pathname
+#     is the one shape this cannot recover, and it is declared rather than guessed at.
+#   * an ABSENT pathname (an anonymous mapping) and a PSEUDO-PATH (`[heap]`, `[stack]`,
+#     `[vdso]`, `[anon:…]` — every one bracketed) are file-backed by nothing, so they are
+#     counted as mappings and compared against nothing.
+#   * a ` (deleted)` suffix is STRIPPED FOR COMPARISON, and both spellings are tried. The
+#     mapping is IN EFFECT whether or not the file was later unlinked, and effect is what both
+#     assertions are about — so a deleted mapping of the requested library MATCHES (the jemalloc
+#     arm accepts it) and a deleted jemalloc still refuses the control arm. Trying the unstripped
+#     spelling too costs nothing and keeps a file genuinely named `x (deleted)` matchable.
+#   * a NON-BLANK line that does not parse is a REFUSAL naming it. A real `/proc/<pid>/maps` line
+#     always carries the five leading fields IN THEIR OWN SHAPES (`show_map_vma`'s
+#     `%08lx-%08lx %c%c%c%c %08llx %02x:%02x %lu`), so an unparseable one is a state in which the
+#     assertion COULD NOT BE MADE — and it could be hiding either arm's subject. The shapes are
+#     asserted rather than the field COUNT: prose has words too, and a count-only parse read
+#     `this is not a mapping line` as a mapping of a file called `line`. A future kernel adding a
+#     field therefore refuses loudly instead of being read as something it is not.
+#
+# The jemalloc arm's identity is the REQUESTED library, three affirmative ways, no substring in
+# any of them: the pathname EQUALS `readlink -f <lib>`, or its basename equals the requested
+# basename, or its basename equals the resolved library's basename. The resolution exists to
+# avoid a false RED: `/proc` reports the kernel's own dentry path, so `--jemalloc-lib
+# /usr/lib/libjemalloc.so` (a symlink) legitimately maps as `libjemalloc.so.2`. It is an extra
+# way to ACCEPT and never a way to refuse, and where `readlink` is unavailable or the path does
+# not resolve the basename comparison stands alone. Which identity was used is NAMED in the
+# evidence line, because "the exact library is mapped" and "a file of that name is mapped" are
+# different strengths of the same verdict.
+#
+# The control arm cannot compare against a requested library — there is none — so its subject is
+# a jemalloc library mapping, and that is decided on the BASENAME (a jemalloc build's file name
+# carries the token; its parent directory's name is not the library). Deliberately the
+# fail-closed direction: `libfoo-jemalloc-shim.so` refuses, because a control arm running the
+# allocator under test does not add noise, it INVERTS the comparison.
+#
 # HERMETIC BY CONSTRUCTION: both paths are PARAMETERS, so
 # `scripts/tests/test_ws0_flight_arm_guards.sh` drives every branch — including the
 # absent-mapping and absent-entry branches this check exists for — against synthetic files, with
@@ -361,7 +414,20 @@ verify_flight_server_allocator() {
   local maps="$1" environ="$2" mode="$3" lib="$4" arena="$5" tag="$6"
   local needle="${lib##*/}" line="" entry="" first_match="" saw_jemalloc=0 n_maps=0 n_env=0
   local have_preload=0 preload_value="" have_arena=0 arena_value=""
-  local f
+  local f path base match_kind="" jemalloc_path="" lib_real="" lib_real_base="" n_paths=0
+  # `address perms offset dev inode [pathname]`, each of the five with its own SHAPE — a hex
+  # range, four permission characters, a hex offset, a hex `major:minor`, a decimal inode — and
+  # then the pathname VERBATIM (spaces included) or nothing. The shapes are what make this a
+  # RECOGNISER rather than a word count: `this is not a mapping line` has six whitespace-free
+  # words and would otherwise parse, yielding pathname `line`. Compiled once, used per line.
+  local maps_re='^[0-9a-fA-F]+-[0-9a-fA-F]+[[:space:]]+[-rwxsp]{4}[[:space:]]+[0-9a-fA-F]+[[:space:]]+[0-9a-fA-F]+:[0-9a-fA-F]+[[:space:]]+[0-9]+[[:space:]]*(.*)$'
+  # THE REQUESTED LIBRARY IS RESOLVED ONCE, BEFORE THE LOOP, and a failure to resolve is not a
+  # verdict: it only means the basename comparison is the whole test. `readlink -f` fails for a
+  # path whose leading components do not exist, which is the ordinary case in a hermetic test.
+  if [[ -n "$lib" ]] && command -v readlink >/dev/null 2>&1; then
+    lib_real="$(readlink -f -- "$lib" 2>/dev/null)" || lib_real=""
+    lib_real_base="${lib_real##*/}"
+  fi
   # THE THREE-VALUED PRESENCE PROBE, for BOTH files. `-L` before `-e`, because `-e` FOLLOWS a
   # symlink and would report a dangling one as plain absence — a different cause with a
   # different remedy.
@@ -377,9 +443,43 @@ verify_flight_server_allocator() {
     fi
   done
   while IFS= read -r line; do
+    # A blank line carries no mapping and so can hide neither arm's subject; anything else that
+    # does not parse is a state in which the comparison COULD NOT BE MADE, and is refused.
+    [[ -n "${line//[[:space:]]/}" ]] || continue
+    if [[ ! "$line" =~ $maps_re ]]; then
+      echo "FATAL: $maps carries a line that is NOT a /proc/<pid>/maps mapping, so the allocator" >&2
+      echo "       state of the Flight server of $tag COULD NOT BE MEASURED from it:" >&2
+      echo "         $line" >&2
+      echo "       Every real mapping line carries 'address perms offset dev inode [pathname]'," >&2
+      echo "       so an unparseable one is refused rather than skipped: a skipped line could be" >&2
+      echo "       the mapping either arm's assertion is ABOUT (#3551)." >&2
+      return 1
+    fi
     n_maps=$((n_maps + 1))
-    if [[ -n "$needle" && -z "$first_match" && "$line" == *"$needle"* ]]; then first_match="$line"; fi
-    if [[ "$line" == *jemalloc* ]]; then saw_jemalloc=1; fi
+    path="${BASH_REMATCH[1]}"
+    # No pathname at all (anonymous) or a bracketed pseudo-path: file-backed by nothing, so
+    # there is no identity to compare. Counted as a mapping, compared against nothing.
+    [[ -n "$path" && "$path" != "["* ]] || continue
+    n_paths=$((n_paths + 1))
+    base="${path##*/}"
+    # ` (deleted)` is the kernel's note that the file was unlinked; the mapping is still in
+    # effect. Both spellings are tried, so a file genuinely named `x (deleted)` still matches.
+    if [[ -z "$match_kind" && -n "$lib_real" && ( "$path" == "$lib_real" || "$path" == "$lib_real (deleted)" ) ]]; then
+      match_kind="path-identity: the mapped pathname IS ${lib_real} (readlink -f of the requested library)"
+      first_match="$line"
+    elif [[ -z "$match_kind" && -n "$needle" && ( "$base" == "$needle" || "${base% (deleted)}" == "$needle" ) ]]; then
+      match_kind="basename-identity: the mapped file is named '$needle'"
+      first_match="$line"
+    elif [[ -z "$match_kind" && -n "$lib_real_base" && ( "$base" == "$lib_real_base" || "${base% (deleted)}" == "$lib_real_base" ) ]]; then
+      match_kind="basename-identity: the mapped file is named '$lib_real_base', the resolved name of the requested library"
+      first_match="$line"
+    fi
+    # The CONTROL arm's subject, on the BASENAME: the library's own file name, never a parent
+    # directory that happens to be spelt like one.
+    if [[ "$base" == *jemalloc* ]] && ((saw_jemalloc == 0)); then
+      saw_jemalloc=1
+      jemalloc_path="$path"
+    fi
   done < "$maps"
   # NUL-SEPARATED, one WHOLE entry per iteration. The `|| [[ -n "$entry" ]]` tail is required: a
   # final entry with no trailing NUL leaves `read` non-zero with the value still set, and
@@ -461,7 +561,9 @@ verify_flight_server_allocator() {
       if [[ -z "$first_match" ]]; then
         echo "FATAL: --flight-allocator jemalloc: the Flight server process of $tag RECEIVED" >&2
         echo "       LD_PRELOAD='$lib', but NO mapping of '$needle' is present in it" >&2
-        echo "       ($n_maps mappings read from $maps)." >&2
+        echo "       ($n_maps mappings read from $maps, $n_paths of them file-backed; the" >&2
+        echo "       PATHNAME FIELD of each was compared as an identity, never as a substring" >&2
+        echo "       of the line)." >&2
         echo "       LD_PRELOAD FAILS OPEN: glibc prints \"object ... cannot be preloaded ...:" >&2
         echo "       ignored\" and CONTINUES with system malloc, exit 0, server healthy. So this" >&2
         echo "       rep would have been a byte-identical duplicate of the system arm under a" >&2
@@ -472,7 +574,7 @@ verify_flight_server_allocator() {
         echo "       that the library matches the binary's architecture." >&2
         return 1
       fi
-      echo "jemalloc VERIFIED for $tag: RECEIVED LD_PRELOAD=$lib ($n_env environ entries) and $needle is MAPPED in the server process ($n_maps mappings) | $first_match"
+      echo "jemalloc VERIFIED for $tag: RECEIVED LD_PRELOAD=$lib ($n_env environ entries) and $needle is MAPPED in the server process ($n_maps mappings, $n_paths file-backed; $match_kind) | $first_match"
       return 0 ;;
     system)
       # THE CONTROL ARM'S NEGATIVE, both files. An EMPTY `LD_PRELOAD=` entry is accepted and a
@@ -491,14 +593,16 @@ verify_flight_server_allocator() {
       fi
       if ((saw_jemalloc == 1)); then
         echo "FATAL: --flight-allocator system, but the Flight server process of $tag HAS a" >&2
-        echo "       jemalloc mapping ($n_maps mappings read from $maps)." >&2
+        echo "       jemalloc mapping ($n_maps mappings read from $maps, $n_paths file-backed):" >&2
+        echo "         $jemalloc_path" >&2
+        echo "       That is the mapped FILE's own name, not a directory spelt like one." >&2
         echo "       Its LD_PRELOAD is clean, so suspect /etc/ld.so.preload or a jemalloc linked" >&2
         echo "       into the binary itself — and note this is the half environ CANNOT see." >&2
         echo "       Refused rather than noted because the CONTROL arm running the allocator" >&2
         echo "       under test INVERTS the comparison (#3551)." >&2
         return 1
       fi
-      echo "system VERIFIED for $tag: no non-empty LD_PRELOAD received ($n_env environ entries) and no jemalloc mapping in the server process ($n_maps mappings)"
+      echo "system VERIFIED for $tag: no non-empty LD_PRELOAD received ($n_env environ entries) and no jemalloc-named mapped FILE in the server process ($n_maps mappings, $n_paths file-backed; each pathname field compared by basename, never by substring of the line)"
       return 0 ;;
     *)
       echo "FATAL: the allocator check for $tag was passed the unknown mode '$mode'." >&2
