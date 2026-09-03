@@ -40,9 +40,9 @@
 use super::super::SSTableReader;
 use crate::schema::TableSchema;
 use crate::storage::sstable::reader::parsing::row_decoder::column_decode_error;
+use crate::storage::sstable::reader::parsing::BufferExtent;
 use crate::types::{ScanRow, TableId};
 use crate::{Result, RowKey};
-use crate::storage::sstable::reader::parsing::BufferExtent;
 
 /// One decode attempt's outcome: `None` means the seek could not bound the target
 /// partition authoritatively and the caller must fall back to a full scan.
