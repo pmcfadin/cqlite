@@ -155,11 +155,12 @@ impl V5CompressedLegacyParser {
     pub fn parse_block_for_compaction(
         &self,
         data: &[u8],
+        extent: BufferExtent,
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
     ) -> Result<Vec<crate::storage::sstable::reader::compaction_row::CompactionRow>> {
         let mut results = Vec::new();
-        self.parse_block_for_compaction_emit(data, schema, reader, |row| {
+        self.parse_block_for_compaction_emit(data, extent, schema, reader, |row| {
             results.push(row);
             Ok(std::ops::ControlFlow::Continue(()))
         })?;
@@ -172,6 +173,7 @@ impl V5CompressedLegacyParser {
     pub fn parse_block_for_compaction_emit<F>(
         &self,
         data: &[u8],
+        extent: BufferExtent,
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         mut emit: F,
@@ -209,7 +211,13 @@ impl V5CompressedLegacyParser {
                 &data[offset..],
                 Some(schema),
                 reader,
-                true,
+                // Issue #3782: the caller's DECLARED extent, not a hard-coded
+                // `true`. `at_final_chunk` is what makes a row decode error
+                // fatal here, so baking it in meant this entry point silently
+                // ASSUMED a complete buffer — the mirror of the defaulted flag
+                // #3782 removed, and a window handed in would have produced
+                // false refusals.
+                extent.is_complete(),
                 &mut tracking_emit,
             )? {
                 ParseStep::Emitted(consumed) => {
@@ -250,6 +258,7 @@ impl V5CompressedLegacyParser {
     pub fn parse_block_for_compaction_emit_with_offset<F>(
         &self,
         data: &[u8],
+        extent: BufferExtent,
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         mut emit: F,
@@ -302,7 +311,9 @@ impl V5CompressedLegacyParser {
                 &data[offset..],
                 Some(schema),
                 reader,
-                true,
+                // Issue #3782: the caller's DECLARED extent (see the sibling
+                // emit entry point).
+                extent.is_complete(),
                 &mut tagging_emit,
             )? {
                 ParseStep::Emitted(consumed) => {
@@ -645,7 +656,7 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         resolution: &RowColumnResolution,
         pending: &mut Vec<Self::Row>,
-    ) -> Option<usize> {
+    ) -> Result<Option<usize>> {
         use crate::storage::sstable::reader::compaction_row::CompactionRow;
         // Structure-only (issue #3058): advance over the row WITHOUT allocating a
         // per-cell metadata map, a complex-element map or a `CompactionRow` — the
@@ -661,8 +672,14 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
                 resolution,
                 None,
             ) {
-                Ok((_cells, _meta, _hdr, next_offset, _is_static, _complex)) => Some(next_offset),
-                Err(_) => None,
+                Ok((_cells, _meta, _hdr, next_offset, _is_static, _complex)) => {
+                    Ok(Some(next_offset))
+                }
+                // Issue #3782: preserve the decode error. The structural coverage
+                // check that drives this arm passes `at_final_chunk = false`, so the
+                // driver still answers `NeedMore` (⇒ "not fully consumed") there;
+                // the error only becomes terminal where no more bytes can arrive.
+                Err(e) => Err(e),
             };
         }
         // Compaction mode: capture per-column complex elements and request
@@ -700,9 +717,12 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
                     row_timestamp: row_ts,
                     row_data,
                 });
-                Some(next_offset)
+                Ok(Some(next_offset))
             }
-            Err(_) => None,
+            // Issue #3782: preserve the decode error. Swallowing it here is what
+            // made compaction emit MORE rows than the source while losing real
+            // partitions — a loss it would then write back to disk.
+            Err(e) => Err(e),
         }
     }
 }

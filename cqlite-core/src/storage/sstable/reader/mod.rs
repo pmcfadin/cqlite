@@ -99,6 +99,9 @@ pub use compaction_row::{
 // Re-export V5CompressedLegacyParser for integration testing (Issue #166 regression tests)
 #[doc(hidden)]
 pub use parsing::PublicV5CompressedLegacyParser as V5CompressedLegacyParser;
+// #3782: the extent those public `parse_block*` REQUIRE (contract on the type).
+#[doc(hidden)]
+pub use parsing::PublicBufferExtent as BufferExtent;
 
 // Re-export compression utilities for testing (Issue #202)
 #[doc(hidden)]
