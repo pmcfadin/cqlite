@@ -3825,7 +3825,14 @@ obj_sweep_claim_release() {
 # one of:
 #
 #   completed — the throttle stamp went FRESH, so that peer finished a sweep and advertised
-#               it; the box is inside the interval again
+#               it; the box is inside the interval again. THE CALLER MUST NOT CONTEND FOR
+#               THE CLAIM AGAIN ON THIS OUTCOME (#3749 review round 14): this state is
+#               reached WITHOUT SLEEPING, on the pass that observes the stamp, so a peer
+#               that advertised a sweep and then died holding its claim would answer
+#               `held` -> `completed` -> `held` -> `completed` at CPU speed forever. A
+#               fresh stamp says the store was measured inside the interval, which is all
+#               the caller needs: it skips, exactly as the throttle at the top of
+#               object_store_sweep would.
 #   vacated   — the claim is GONE with no fresh stamp: the peer ended without advertising a
 #               sweep (killed mid-sweep, or it stopped on a verdict it could not latch and
 #               FORCED the stamp stale on purpose so that every lane re-sweeps)
@@ -3954,6 +3961,10 @@ obj_sweep_claim_wait() {
       # the next statement. The caller re-reads the latch before it returns toward a spawn;
       # this line is a journal entry, not a licence.
       log "object-store sweep: the peer lane holding $claim FINISHED its sweep after ${elapsed}s of waiting and advertised it in the throttle stamp; no stopping verdict had been recorded for this box as of the read that observed it (#3749)."
+      # AND THE CALLER STOPS THERE. This line says nothing about whether that peer has
+      # RELEASED its claim — a peer killed between the stamp write and its EXIT trap has
+      # not — which is why the caller treats `completed` as a terminal skip rather than as
+      # a cue to contend again (round 14).
       ;;
     vacated)
       log "object-store sweep: the peer lane holding $claim GAVE THE CLAIM UP after ${elapsed}s without advertising a sweep — it was killed mid-sweep, or it stopped on a verdict it could not latch and forced the throttle stamp stale so every lane re-sweeps. No stopping verdict had been recorded for this box as of the read that observed it; this lane will contend for the claim again (#3749)."
@@ -4330,16 +4341,39 @@ object_store_sweep() {
   if [[ "$claim_stale" =~ ^[0-9]+$ ]]; then
     wait_until=$(($(date +%s) + claim_stale))
   fi
-  # ACQUIRE, AND IF A PEER IS SWEEPING, WAIT FOR IT — THEN CONTEND AGAIN.
+  # ACQUIRE, AND IF A PEER IS SWEEPING, WAIT FOR IT — THEN CONTEND AGAIN, EXCEPT WHERE
+  # CONTENDING AGAIN COULD NEVER ACHIEVE ANYTHING (#3749 review round 14).
   #
-  # THE LOOP TERMINATES, and here is why rather than a hope. `held` is the only state that
-  # loops: every other one breaks immediately. A `held` costs a call to obj_sweep_claim_wait,
-  # which returns only on an affirmative observation (`completed`/`vacated`), on the claim
-  # having aged past its DERIVED recovery bound (`expired`, after which the very next acquire
-  # takes it over), or on the ITERATION's overall budget being spent (`exhausted`, which
-  # breaks out). It cannot spin: a claim that is present with no readable start time is waited
-  # out on the outer deadline rather than being read as instantly expired, and every pass of
-  # the wait sleeps.
+  # THE DEFECT THIS LOOP HAD. `completed` — the throttle stamp went FRESH — was treated as
+  # "go round again", and the wait reaches it WITHOUT SLEEPING (it is tested on the pass that
+  # observes it). In the ordinary case that costs one harmless extra acquire: the peer
+  # released a moment earlier, so the re-acquire succeeds and the second throttle read below
+  # skips. But a peer that writes the stamp and then DIES before releasing leaves the claim
+  # PRESENT and the stamp FRESH — a state in which every acquire answers `held` and every
+  # wait answers `completed` in microseconds — so the lane spun CPU-hot, achieving nothing,
+  # until the supervisor's whole MAX_HOURS wall-clock budget expired. A liveness and CPU
+  # defect, not a wrong verdict, and on a four-lane box it is a burnt core that reads as
+  # "the fleet got slow" with no attributable cause.
+  #
+  # AND THE STALENESS RECOVERY COULD NOT SAVE IT, WHICH IS THE INTERESTING PART. Round 5 gave
+  # the claim an age-based bound precisely so a dead peer's claim becomes recoverable — but
+  # `completed` is tested BEFORE the claim's deadline on every pass, so on this path that
+  # recovery never ran. The fix does NOT add a second notion of "the peer is gone" (a second
+  # mechanism is a second thing to drift): a fresh stamp is the same answer the throttle at the
+  # top of this function gives, so the lane takes the same action it would have taken there —
+  # SKIP — and stops contending. See the `completed` branch below the loop.
+  #
+  # THE LOOP IS BOUNDED IN WALL TIME BY CONSTRUCTION, and by the value it already derived.
+  # `held` is the only state that continues, and after this round only `vacated` and `expired`
+  # reach the next pass: `exhausted` and `completed` break. Both survivors mean the claim this
+  # lane observed is gone or recoverable, so the next acquire normally ends the loop — but
+  # neither is REQUIRED to have slept (a claim that vanishes on the wait's first pass returns
+  # `vacated` immediately), so a peer flapping the claim could otherwise still spin. The
+  # `wait_until` test below is therefore over the ITERATION's own derived budget — the same
+  # `claim_stale` the wait and the recovery threshold use, never a second constant — which
+  # makes every path out of this loop bounded by ~claim_stale of wall clock rather than by
+  # MAX_HOURS. A break there leaves OBJ_SWEEP_CLAIM_STATE at `held`, i.e. the honest
+  # NOT-SWEPT-AND-NOT-MEASURED outcome below, which is exactly what `exhausted` reports.
   #
   # NOTHING BETWEEN THE WAIT AND THE RE-ACQUIRE NEEDS A LATCH READ: the wait itself reads the
   # latch on every pass and does not return if the box is latched.
@@ -4347,8 +4381,27 @@ object_store_sweep() {
     obj_sweep_claim_acquire "$claim" "$claim_stale"
     [[ "$OBJ_SWEEP_CLAIM_STATE" == held ]] || break
     obj_sweep_claim_wait "$claim" "$claim_stale" "$latch" "$stamp" "$wait_until"
-    [[ "$OBJ_SWEEP_CLAIM_WAIT_STATE" != exhausted ]] || break
+    case "$OBJ_SWEEP_CLAIM_WAIT_STATE" in
+      exhausted | completed) break ;;
+    esac
+    if [[ "$wait_until" =~ ^[0-9]+$ ]] && [[ "$(date +%s)" -gt "$wait_until" ]]; then
+      break
+    fi
   done
+  # THE PEER FINISHED AND ADVERTISED IT: SKIP, AND DO NOT CONTEND FOR THAT CLAIM AGAIN
+  # (#3749 review round 14). The stamp is fresh, so this box HAS been rehashed inside the
+  # interval — there is nothing for this lane to measure this iteration whether or not the
+  # peer ever gives its claim up. Returning here is not a new policy: it is the same skip the
+  # throttle at the top of this function performs on the same observation, and it is STRICTLY
+  # LESS work than the acquire-and-release round trip this path used to make in the ordinary
+  # case, so the common case (a peer that released a moment ago) gains no latency from the
+  # fix. The latch read is the one rule that governs every return from this function: no
+  # return that leads to a spawn without a fresh read.
+  if [[ "$OBJ_SWEEP_CLAIM_STATE" == held && "$OBJ_SWEEP_CLAIM_WAIT_STATE" == completed ]]; then
+    log "object-store sweep: SKIPPED — the peer lane holding $claim finished sweeping this store and advertised it in the throttle stamp while this lane waited, so the box is inside the interval again and this lane does not contend for that claim again (#3749)."
+    obj_sweep_stop_if_latched "$latch"
+    return 0
+  fi
   case "$OBJ_SWEEP_CLAIM_STATE" in
     held)
       # REACHED ONLY WITH THE WAIT BUDGET SPENT (or on a box that cannot wait at all): a peer
@@ -4606,8 +4659,9 @@ object_store_sweep() {
 # been swept" before a stopping finding is durable; no lane returns from object_store_sweep
 # toward a spawn without having re-read the latch; a lane that LOSES the sweep claim waits for
 # the peer's verdict, re-reading the latch every OBJ_SWEEP_CLAIM_POLL_SECS, instead of walking
-# off with one stale read; and no lane returns from preflight_wait — however long its hold
-# loop ran — without one more fresh read (round 13).
+# off with one stale read; that wait ends in bounded wall time whatever the peer does, rather
+# than spinning on a claim a dead peer will never give up (round 14); and no lane returns from
+# preflight_wait — however long its hold loop ran — without one more fresh read (round 13).
 #
 # PATH 1 — THE CLAIM LOSER. CLOSED as a distinct window (round 12). It WAS the peer's whole
 # sweep: 13-80s measured, 600s by construction. It is now bounded by the poll granularity —
@@ -4616,6 +4670,16 @@ object_store_sweep() {
 # 660s wait budget is spent with peers still handing the claim around, the lane carries on
 # UNMEASURED — journalled and paged, never counted as clean — and from that point its
 # exposure is PATH 3's, below.
+#
+# AND THE WAIT ITSELF IS BOUNDED IN WALL TIME BY CONSTRUCTION, NOT BY MAX_HOURS (round 14).
+# `completed` is reached WITHOUT SLEEPING, and the contention loop used to go round again on
+# it — so a peer that advertised its sweep and then DIED holding its claim (stamp FRESH,
+# claim PRESENT) made this lane spin CPU-hot until the supervisor's whole wall-clock budget
+# expired: 2165 observed completions in 20s, a burnt core on a four-lane box reading as "the
+# fleet got slow" with no attributable cause. `completed` now ENDS the wait and the lane
+# SKIPS (a fresh stamp is the same answer the throttle at the top of object_store_sweep
+# gives), and the loop carries its own deadline over the iteration's derived `claim_stale`
+# budget because neither remaining continuing state is required to have slept.
 #
 # PATH 2 — THIS LANE'S OWN SWEEP. Covered, not residual. The entry latch read and the
 # post-sweep reads bracket it, so a peer latching the box during this lane's own walks (up to

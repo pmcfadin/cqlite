@@ -752,7 +752,28 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   waiting for it", so a dead peer cannot wedge the wait and no second, driftable constant exists.
   **The timeout is NOT a clean result and does not carry on**: when the peer neither finishes nor
   vacates, that claim is by construction stale at the deadline, so the next acquire RECOVERS it and
-  **the loser becomes the sweeper** rather than proceeding unmeasured. Only where peers keep handing
+  **the loser becomes the sweeper** rather than proceeding unmeasured.
+  **AND A COMPLETED PEER ENDS THE WAIT — IT DOES NOT SEND THE LOSER BACK TO CONTEND (round 14).**
+  The wait's `completed` (the throttle stamp went FRESH) was treated as "go round and acquire
+  again", and it is reached **WITHOUT SLEEPING**, on the pass that observes the stamp. So a peer
+  that writes the stamp and then DIES before releasing leaves the claim PRESENT and the stamp
+  FRESH — a state in which every acquire answers `held` and every wait answers `completed` in
+  microseconds — and the lane **spun CPU-hot until the supervisor's whole `MAX_HOURS` budget
+  expired** (measured: **2165** completions in 20s). A liveness and CPU defect, not a wrong
+  verdict, and on a four-lane box it is a burnt core that reads as *"the fleet got slow"* with no
+  attributable cause. **The age-based recovery built for exactly this dead peer could not save it,
+  which is the transferable part: `completed` was tested BEFORE the claim's deadline on every
+  pass, so the recovery the design relies on never ran.** The fix adds no second notion of "the
+  peer is gone" — a second mechanism is a second thing to drift: a fresh stamp is the SAME answer
+  the throttle at the top of `object_store_sweep` gives, so the lane SKIPS exactly as it would
+  have there and stops contending, which is strictly LESS work than the acquire-and-release round
+  trip the ordinary case used to make (so the common case — a peer that released a moment ago —
+  gains no latency). **The loop is now bounded in WALL TIME BY CONSTRUCTION and by a value it
+  already derived**: `exhausted` and `completed` break, and because neither surviving state
+  (`vacated`, `expired`) is REQUIRED to have slept, the loop itself is bounded by the iteration's
+  own `claim_stale` budget — never `MAX_HOURS`, and never a second constant. **The general rule:
+  a state a loop can reach WITHOUT SLEEPING must not be a loop-CONTINUING state**, and a bound
+  placed after a fast-path test is not a bound at all. Only where peers keep handing
   the claim around for the whole budget does the lane skip — journalled, paged once, reported as
   `NOT SWEPT AND NOT MEASURED`, never as clean. It does NOT stop the box there: a peer sweeping is
   also the shape of a HEALTHY box recovering a wedged claim, and stopping four lanes over a hygiene

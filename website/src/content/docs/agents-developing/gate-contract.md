@@ -943,7 +943,23 @@ staleness value**: the same 660s that says "this claim may be taken over" says "
 it", so a dead peer cannot wedge the wait and there is no second, driftable constant. A timeout is
 not a clean result and does not carry on — when the peer neither finishes nor vacates, that claim is
 stale by construction at the deadline, so the next acquire recovers it and **the loser becomes the
-sweeper**; only where peers keep handing the claim around for the whole budget does the lane skip,
+sweeper**. **And a completed peer ends the wait — it does not send the loser back to contend.** The
+wait's `completed` (the throttle stamp went fresh) was treated as "go round and acquire again", and
+it is reached *without sleeping*, on the pass that observes the stamp — so a peer that writes the
+stamp and then dies before releasing leaves the claim present and the stamp fresh, every acquire
+answers `held`, every wait answers `completed` in microseconds, and the lane spun CPU-hot until the
+supervisor's whole `MAX_HOURS` budget expired (measured: 2165 completions in 20s). The age-based
+recovery built for exactly that dead peer could not save it, which is the transferable part:
+`completed` was tested *before* the claim's deadline on every pass, so the recovery the design
+relies on never ran. The fix adds no second notion of "the peer is gone" — a fresh stamp is the same
+answer the throttle at the top of the sweep gives, so the lane skips exactly as it would have there,
+which is strictly less work than the acquire-and-release round trip the ordinary case used to make.
+The loop is now bounded in wall time **by construction** and by a value it already derived
+(`exhausted` and `completed` break; neither surviving state is required to have slept, so the loop
+itself is bounded by the iteration's own `claim_stale` budget), never by `MAX_HOURS`. The general
+rule: **a state a loop can reach without sleeping must not be a loop-continuing state**, and a bound
+placed after a fast-path test is not a bound at all.
+Otherwise, only where peers keep handing the claim around for the whole budget does the lane skip,
 journalled and paged as `NOT SWEPT AND NOT MEASURED`, never as clean, and never as a stop (a peer
 sweeping is also the shape of a healthy box recovering a wedged claim, and stopping four lanes over a
 hygiene probe's contention is the self-DoS that file refuses everywhere else). The throttle is

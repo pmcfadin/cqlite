@@ -10419,7 +10419,7 @@ t test_object_store_sweep_claim_loser_waits_for_the_peer_verdict
 #    recoverable), and a literal would still pass every behavioural case here because the
 #    fixtures pin the knobs anyway.
 test_object_store_sweep_claim_wait_is_wired_correctly() {
-  local body call_line wait_line subst
+  local body call_line wait_line subst loop_body loop_break loop_bound
   body="$(awk '/^object_store_sweep\(\) \{$/,/^\}$/' "$SUPERVISOR")"
   if [[ -n "$body" ]] && grep -q 'obj_sweep_claim_wait ' <<<"$body" &&
     grep -q 'obj_sweep_claim_stale_secs ' <<<"$body"; then
@@ -10455,9 +10455,164 @@ test_object_store_sweep_claim_wait_is_wired_correctly() {
   else
     fail "obj-sweep(wait-bound-derived): call='$wait_line' budget='$call_line' — the wait bound must be the derived claim_stale, never a literal"
   fi
+  # (3) THE CALLER'S LOOP MUST BREAK ON `completed`, AND ITS OWN BOUND MUST BE THE DERIVED
+  #     BUDGET (#3749 review round 14). `completed` is reached WITHOUT SLEEPING, so a loop
+  #     that contends again on it spins at CPU speed for as long as the peer's claim stays
+  #     put — until MAX_HOURS. There IS behavioural coverage
+  #     (obj-sweep(claim-wait-completed/*)) and it necessarily costs a 20s liveness cap,
+  #     because the symptom is a lane that never returns; this assert reds INSTANTLY if the
+  #     break is dropped again, and it also pins the loop-level deadline to `wait_until`
+  #     rather than to a number somebody typed.
+  loop_body="$(awk '/^  while true; do$/,/^  done$/' <<<"$body" | head -20)"
+  loop_break="$({ grep -E '^\s*exhausted \| completed\)' <<<"$loop_body" || true; } | head -1)"
+  loop_bound="$({ grep -E '^\s*if \[\[ "\$wait_until"' <<<"$loop_body" || true; } | head -1)"
+  if [[ "$loop_break" == *break* ]] && [[ "$loop_bound" == *'wait_until'* ]] &&
+    [[ ! "$loop_bound" =~ [0-9]{2,} ]]; then
+    pass "obj-sweep(wait-completed-breaks): the caller's contention loop BREAKS on \`completed\` (a state the wait reaches without sleeping) and bounds itself on the iteration's own derived \`wait_until\` budget — so a peer that advertises a sweep and dies holding its claim cannot make this lane spin [STRUCTURAL]"
+  else
+    fail "obj-sweep(wait-completed-breaks): break-arm='$loop_break' loop-bound='$loop_bound' — \`completed\` must end the loop and the loop's own deadline must be the derived wait_until, never a literal"
+  fi
 }
 
 t test_object_store_sweep_claim_wait_is_wired_correctly
+
+# A PEER THAT ADVERTISES A SWEEP AND THEN NEVER RELEASES ITS CLAIM MUST NOT MAKE THIS LANE
+# SPIN (#3749 review round 14).
+#
+# THE DEFECT. `obj_sweep_claim_wait` returns `completed` the instant the throttle stamp goes
+# FRESH — and it does so on the pass that observes it, WITHOUT sleeping. The caller's loop
+# then treated `completed` as "go round and contend again". In the ordinary case that is
+# harmless (the peer released a moment earlier, so the re-acquire succeeds and the second
+# throttle read skips), but a peer that writes the stamp and DIES before releasing leaves the
+# claim present and the stamp fresh — and in that state every acquire answers `held`, every
+# wait answers `completed` in microseconds, and the loop spins CPU-hot with nothing to do
+# until the supervisor's whole MAX_HOURS wall-clock budget expires. It is a liveness and CPU
+# defect, not a wrong verdict: on a four-lane box it burns a core and reads as "the fleet got
+# slow" with no obvious cause.
+#
+# WHY THE STALENESS RECOVERY DID NOT SAVE IT. Round 5 gave the claim an age-based bound
+# precisely so a dead peer's claim is recoverable. This path never reached it: `completed` is
+# tested BEFORE the claim's deadline on every pass, so the recovery the design relies on never
+# ran. The fix does not add a second notion of "the peer is gone" — a fresh stamp means the
+# box has been measured inside the interval, which is the SAME answer the throttle at the top
+# of object_store_sweep gives, so the lane skips exactly as it would have and stops contending.
+#
+# TWO ARMS, ONE PROPERTY APART. Arm `dead-peer`: the peer writes the stamp and NEVER releases.
+# Arm `released-peer`: the same peer releases normally — the common case, which must still
+# fall straight through with no added latency. And the CONSTRUCTION is asserted in both, since
+# without it these arms could pass because nothing ever happened: the stamp really did go
+# FRESH while the lane was parked, and in the dead-peer arm the claim really is still present
+# when the lane finishes.
+#
+# THE BOUND IS DISCRIMINATING, NOT ARBITRARY. The derived wait budget here is
+# MAX_SWEEP_WALKS(3) x OBJ_SWEEP_TIMEOUT_SECS(1) + OBJ_SWEEP_CLAIM_SLACK_SECS(60) = 63s, so a
+# lane that merely waited the claim out could not finish inside this case's 20s cap: a pass
+# inside it is the skip, never an `exhausted` in disguise.
+test_object_store_sweep_claim_wait_completed_stops_contending() {
+  local d root calls counter rc claim stamp sup_pid waited finished arm
+  local completed_n release stamp_ts now_ts skipped_n
+  for arm in dead-peer released-peer; do
+    d="$(new_case_dir)"; calls="$d/calls"; counter="$d/counter"
+    common_env "$d"
+    write_finalize_stub "$d/bin/worker.sh" "$counter"
+    export WORKER_CMD="$d/bin/worker.sh"
+    export MAX_ISSUES=1
+    export OBJ_SWEEP_INTERVAL_HOURS=6
+    export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+    export OBJ_SWEEP_TIMEOUT_SECS=1
+    export OBJ_SWEEP_CLAIM_SLACK_SECS=60
+    export OBJ_SWEEP_CLAIM_POLL_SECS=1
+    stamp="$OBJ_SWEEP_STAMP"
+    claim="$stamp.sweeping"
+    # NO STAMP YET: the lane must find the box outside the interval, or it would take the
+    # throttled path at the top of object_store_sweep and never reach the claim at all.
+    mkdir -p "$claim"
+    printf '%s\n' "$(date +%s)" >"$claim/started"
+    root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
+    # THE PEER, as a separate process, so the stamp goes fresh WHILE the lane is parked
+    # inside the wait rather than before it starts. It waits for the lane's own WAITING line
+    # — the only observable that says the lane is in the wait — then advertises the sweep.
+    if [[ "$arm" == released-peer ]]; then
+      release="rm -rf -- $(printf '%q' "$claim")"
+    else
+      release=": # dead peer: the claim is deliberately left behind"
+    fi
+    {
+      printf '#!/usr/bin/env bash\n'
+      printf 'i=0\n'
+      printf 'while [ "$i" -lt 600 ]; do\n'
+      printf '  if grep -q %s %s 2>/dev/null; then\n' \
+        "$(printf '%q' 'WAITING for the peer lane that holds the sweep claim')" \
+        "$(printf '%q' "$d/sup.log")"
+      printf '    printf "%%s\\n" "$(date +%%s)" >%s\n' "$(printf '%q' "$stamp")"
+      printf '    %s\n' "$release"
+      printf '    exit 0\n'
+      printf '  fi\n'
+      printf '  sleep 0.05\n'
+      printf '  i=$((i + 1))\n'
+      printf 'done\n'
+      printf 'exit 1\n'
+    } >"$d/bin/peer.sh"
+    chmod +x "$d/bin/peer.sh"
+    env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/sup.log" 2>&1 &
+    sup_pid=$!
+    bash "$d/bin/peer.sh" >"$d/peer.log" 2>&1 &
+    # BOUNDED, background+poll+kill (macOS has no `timeout(1)`), and the cap is what makes the
+    # spin observable: under the defect this lane never exits at all until MAX_HOURS.
+    waited=0; finished=no
+    while [[ "$waited" -lt 200 ]]; do   # 200 x 0.1s = 20s, well inside the derived 63s budget
+      kill -0 "$sup_pid" 2>/dev/null || { finished=yes; break; }
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    rc=0
+    if [[ "$finished" == yes ]]; then
+      wait "$sup_pid" || rc=$?
+    else
+      kill -KILL "$sup_pid" 2>/dev/null || true
+      wait "$sup_pid" 2>/dev/null || true
+      rc=timeout
+    fi
+    wait >/dev/null 2>&1 || true
+    completed_n="$({ grep -c 'FINISHED its sweep after' "$d/sup.log" 2>/dev/null || true; } | head -1)"
+    [[ "$completed_n" =~ ^[0-9]+$ ]] || completed_n=0
+    skipped_n="$({ grep -c 'does not contend for that claim again' "$d/sup.log" 2>/dev/null || true; } | head -1)"
+    [[ "$skipped_n" =~ ^[0-9]+$ ]] || skipped_n=0
+    # CONSTRUCTION FIRST, AND IT IS NOT THE PROPERTY UNDER TEST: the stamp must really have
+    # gone FRESH (so the lane really did observe `completed`), and in the dead-peer arm the
+    # claim must really still be there (so the lane really was in the fresh-stamp +
+    # persistent-claim state). Without this both arms are passed by a run in which the peer
+    # never fired.
+    stamp_ts=""
+    { read -r stamp_ts || true; } <"$stamp" 2>/dev/null || true
+    now_ts="$(date +%s)"
+    if [[ "$stamp_ts" =~ ^[0-9]+$ ]] && [[ "$stamp_ts" -le "$now_ts" ]] &&
+      [[ "$completed_n" -ge 1 ]] &&
+      { [[ "$arm" == released-peer ]] || [[ -d "$claim" ]]; }; then
+      pass "obj-sweep(claim-wait-completed-plant/$arm): the peer advertised its sweep in the throttle stamp WHILE this lane was parked in the wait (the lane logged the completion), and the claim is $([[ -d "$claim" ]] && echo 'still present' || echo 'released') exactly as this arm stages it"
+    else
+      fail "obj-sweep(claim-wait-completed-plant/$arm): STAGING — stamp='$stamp_ts' completions=$completed_n claim=$([[ -d "$claim" ]] && echo present || echo absent) peer-rc=$(cat "$d/peer.log" 2>/dev/null | head -1) (see $d/sup.log); the assert below would prove nothing"
+      unset OBJ_SWEEP_TIMEOUT_SECS OBJ_SWEEP_CLAIM_SLACK_SECS OBJ_SWEEP_CLAIM_POLL_SECS
+      continue
+    fi
+    # THE PROPERTY: ONE completion, no re-contention, the worker runs, and NO fsck was spent
+    # (the box is inside the interval — that is what a fresh stamp means).
+    if [[ "$rc" == 0 && "$completed_n" -eq 1 && "$skipped_n" -eq 1 && -f "$counter" && ! -s "$calls" ]]; then
+      if [[ "$arm" == dead-peer ]]; then
+        pass "obj-sweep(claim-wait-completed/dead-peer): a peer that advertises a sweep and then never releases its claim ends this lane's wait ONCE — the lane skips the interval and runs its worker instead of re-contending for a claim nobody will give up"
+      else
+        pass "obj-sweep(claim-wait-completed/released-control): the SAME staging with the peer RELEASING normally also ends in one completion and one skip, inside the same cap — so the dead-peer arm is the persistent claim and not a lane that stopped working"
+      fi
+    elif [[ "$rc" == timeout ]]; then
+      fail "obj-sweep(claim-wait-completed/$arm): THE DEFECT — the lane did NOT exit within 20s (the derived wait budget is 63s, so this is not the wait expiring): it observed the peer's completion $completed_n time(s), i.e. it went back and contended for the still-present claim after every one of them, spinning until the wall-clock budget (see $d/sup.log)"
+    else
+      fail "obj-sweep(claim-wait-completed/$arm): rc=$rc completions=$completed_n skips=$skipped_n spawned=$([[ -f "$counter" ]] && echo yes || echo no) sweeps=$(obj_sweep_calls "$calls") (see $d/sup.log)"
+    fi
+    unset OBJ_SWEEP_TIMEOUT_SECS OBJ_SWEEP_CLAIM_SLACK_SECS OBJ_SWEEP_CLAIM_POLL_SECS
+  done
+}
+
+t test_object_store_sweep_claim_wait_completed_stops_contending
 
 # THE OTHER HALF, AND THE HAZARD THE CLAIM INTRODUCES: A STALE CLAIM MUST NOT WEDGE THE BOX
 # (#3749 review round 5, item 2). A lane killed mid-sweep leaves its claim behind, and
