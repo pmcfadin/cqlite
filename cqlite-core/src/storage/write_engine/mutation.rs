@@ -828,14 +828,33 @@ fn compare_values(a: &Value, b: &Value) -> Result<Ordering> {
         // BTreeMap key order + compaction merge), which requires a TOTAL order:
         // a non-total order would let NaN compare Equal to everything
         // (transitivity violation) and collapse -0.0/+0.0. See float_cmp.rs and
-        // issues #1870/#2010. Must agree with the reader's Value::partial_cmp.
+        // issues #1870/#2010. Must agree with the reader's Value::partial_cmp,
+        // which since #3935 it does for EVERY arm, `Time` included, and with
+        // `types::comparator::custom::compare_time`.
         (Float32(a), Float32(b)) => Ok(crate::float_cmp::cassandra_float_cmp(*a, *b)),
         (Float(a), Float(b)) => Ok(crate::float_cmp::cassandra_double_cmp(*a, *b)),
         (Text(a), Text(b)) => Ok(a.cmp(b)),
         (Blob(a), Blob(b)) => Ok(a.cmp(b)),
+        // `timestamp` is `TimestampType` = ComparisonType.CUSTOM, whose
+        // `compareCustom` delegates to `LongType.compareLongs` — SIGNED.
         (Timestamp(a), Timestamp(b)) => Ok(a.cmp(b)),
         (Date(a), Date(b)) => Ok(a.cmp(b)),
-        (Time(a), Time(b)) => Ok(a.cmp(b)),
+        // `time` is `TimeType` = ComparisonType.BYTE_ORDER (pinned
+        // `cassandra-5.0.8` `db/marshal/TimeType.java`), i.e.
+        // `ByteBufferUtil.compareUnsigned` over the 8-byte big-endian
+        // nanos-of-day. NOT signed `i64::cmp`: the two agree over `time`'s valid
+        // range (`0..=86_399_999_999_999`) and diverge for an out-of-range
+        // NEGATIVE nanos, which Cassandra's own binary `validate` accepts
+        // (see `types::comparator::custom::compare_time` for the canonical
+        // statement, and #3935 for why validation is NOT the fix).
+        //
+        // TOTAL-ORDER SAFETY: this arm feeds `ClusteringKey`'s `Ord`/`compare`,
+        // hence the memtable `BTreeMap` key order, the compaction merge order
+        // and the physical `Data.db` row order — all of which REQUIRE a strict
+        // total order. Unsigned lexicographic comparison of a FIXED 8-byte array
+        // is trivially total (antisymmetric, transitive, no incomparable pair),
+        // so this is safe; the total-order hazard lives in the float arms above.
+        (Time(a), Time(b)) => Ok(a.to_be_bytes().cmp(&b.to_be_bytes())),
         (Uuid(a), Uuid(b)) => Ok(a.cmp(b)),
         (Inet(a), Inet(b)) => Ok(a.cmp(b)),
 

@@ -1356,6 +1356,17 @@ impl From<Bytes> for Value {
 /// routes them through this SAME total order (all NaN → ONE group; `-0.0`/`+0.0`
 /// DISTINCT). Any future `impl Ord for Value` MUST reuse this comparator, never
 /// derive from `PartialEq`.
+///
+/// NOTE (`time` vs `timestamp`, #3935): the `Time` arm compares the 8-byte
+/// BIG-ENDIAN serialized form as UNSIGNED bytes, matching `TimeType`'s
+/// `super(ComparisonType.BYTE_ORDER)` (pinned `cassandra-5.0.8`
+/// `db/marshal/TimeType.java`); `ByteBufferUtil.compareUnsigned` is what
+/// `BYTE_ORDER` resolves to. The `Timestamp` arm stays SIGNED numeric, because
+/// `TimestampType` is `ComparisonType.CUSTOM` and its `compareCustom` delegates
+/// to `LongType.compareLongs`. The two arms therefore diverge BY DESIGN for a
+/// negative long, and unifying them would break one of the two types. This arm
+/// now agrees with `types::comparator::custom::compare_time` and with the write
+/// path's `write_engine::mutation::compare_values` for ALL inputs.
 impl PartialOrd for Value {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         use crate::float_cmp::{cassandra_double_cmp as dcmp, cassandra_float_cmp as fcmp};
@@ -1372,8 +1383,12 @@ impl PartialOrd for Value {
             (Value::Float(a), Value::Float(b)) => Some(dcmp(*a, *b)),
             (Value::Text(a), Value::Text(b)) => a.partial_cmp(b),
             (Value::Blob(a), Value::Blob(b)) => a.partial_cmp(b),
+            // `timestamp` (`TimestampType`) is ComparisonType.CUSTOM and its
+            // `compareCustom` delegates to `LongType.compareLongs` — SIGNED.
+            // `time` (`TimeType`) is ComparisonType.BYTE_ORDER — UNSIGNED bytes.
+            // The asymmetry is Cassandra's; do NOT "unify" these two arms.
             (Value::Timestamp(a), Value::Timestamp(b)) => a.partial_cmp(b),
-            (Value::Time(a), Value::Time(b)) => a.partial_cmp(b),
+            (Value::Time(a), Value::Time(b)) => a.to_be_bytes().partial_cmp(&b.to_be_bytes()),
             (Value::Date(a), Value::Date(b)) => a.partial_cmp(b),
             (Value::Uuid(a), Value::Uuid(b)) => a.partial_cmp(b),
             (Value::TinyInt(a), Value::TinyInt(b)) => a.partial_cmp(b),
