@@ -564,9 +564,25 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    files are not (a workflow injecting a variable). "Theoretically redundant" never justifies leaving a hole
    a non-invoker or an accident can walk through.
    **TWO RESIDUALS INSIDE THE MODEL, named rather than implied:** the marker is read from **top-level PR
-   comments only**, so one posted inside a review body or a review-thread reply is silently not applied (the
-   run reports `waiver: NONE` and the FAIL stands — fail-closed, but it reads as "my waiver was ignored");
-   and **an authorized human can authorize carelessly** — pre-authorizing a job id, or waiving without
+   comments only**, and **THE MOST PROBABLE MISPLACEMENT IS THE PR'S LINKED ISSUE THREAD (#3759)** — that is
+   where lane/lead coordination lives — followed by a review body and a review-thread reply. None of the
+   three is read, so a marker posted there is silently not applied (the run reports `waiver: NONE` and the
+   FAIL stands — fail-closed, but it reads as "my waiver was ignored"). **Measured on PR #3710:** the lead
+   granted BOTH markers, field-perfect and sole-content, from an allowlisted author — on **issue #3544**;
+   both keys read `NONE`, which is textually identical to "the lead refused", and position 1 of a six-PR
+   serial queue idled ~8 hours and blocked five lanes. **SINCE #3759 THE LINKED-ISSUE CASE IS DIAGNOSED,
+   NOT GRANTED:** when the PR-side scan returns `none`, the PR's linked issue(s) — resolved from the
+   structured `closingIssuesReferences` relation, NEVER from the mutable PR body — are scanned with the
+   SAME scanner and the SAME base/head/job/allowlist, and a marker there that WOULD have been accepted by
+   the channel is reported `waiver: MISPLACED (found on linked issue #N …)` naming the issue and the
+   remedy. **`MISPLACED` GRANTS NOTHING — not partially, not with a notice — and the FAIL STANDS**: only a
+   marker on the PULL REQUEST grants, and moving it there is a HUMAN act by the authorizer, never
+   something the tool does. A `NONE` now also DECLARES whether that probe ran (checked / bounded /
+   no linked issue / could-not-check), so "checked and it is not there either" and "never checked" can no
+   longer read alike. **LEAD-SIDE PROCEDURE, the other half of the fix: after posting either marker,
+   verify with `gh pr view <PR> --json comments` that the line is ON THE PR — a grant is only granted once
+   it is readable by the scanner that reads it.**
+   And **an authorized human can authorize carelessly** — pre-authorizing a job id, or waiving without
    checking the token accounting. Nothing mechanical detects either; the control is the permanent,
    attributable comment, which is why a substantive reason is required and recorded verbatim.
    **AND A SECOND, EQUALLY TRANSFERABLE RULE FROM THE SAME ISSUE: THE CONSTRAINED PARTY MUST NOT CHOOSE ITS
@@ -836,6 +852,20 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    party must not choose its own enforcer* — and a worker could then clear its own findings. That absence
    is asserted **structurally** in the guard suite, because behavioural cases only cover the channels
    someone already thought of.
+
+   **It inherits the misplacement residual by call too (issue #3759).** The deferral marker is read
+   from **top-level PR comments only**, and the **most probable misplacement is the PR's linked issue
+   thread**, ahead of a review body and a review-thread reply — measured on PR #3710, where both
+   markers were granted field-perfect on issue #3544 and both keys read `NONE`. Since #3759 that case
+   is **diagnosed, not granted**: a would-have-been-accepted marker on a linked issue reports
+   `deferral: MISPLACED (found on linked issue #N …)` with the remedy, while `findings:` stays exactly
+   as measured — **never `DEFERRED`** (that would be the grant) and **never `NONE`** (that would read
+   as a clean review) — and `RESULT` stays `FAIL`. **`MISPLACED` grants nothing**; only a marker on the
+   pull request grants. The rendering claims the marker *would have been accepted by the channel*, not
+   that it *would have granted*: the network issue-disposition legs are deliberately **not run
+   issue-side** and still apply once the marker is on the PR, because a diagnostic that overstates
+   what it measured is what stops the next person looking. As with the waiver, **verify with
+   `gh pr view <PR> --json comments` that the line is on the PR after posting it.**
 
    **The match is affirmative, which is what makes this a match and not a mute button.** `count=` must
    **equal** the observed findings count and `issues=` must be non-empty. A job is a completed review and

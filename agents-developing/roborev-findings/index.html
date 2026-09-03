@@ -649,9 +649,25 @@ scanner-path env override cost nothing and closes contexts where the environment
 files are not (a workflow injecting a variable). “Theoretically redundant” never justifies leaving a hole
 a non-invoker or an accident can walk through.
 <strong>TWO RESIDUALS INSIDE THE MODEL, named rather than implied:</strong> the marker is read from <strong>top-level PR
-comments only</strong>, so one posted inside a review body or a review-thread reply is silently not applied (the
-run reports <code dir="auto">waiver: NONE</code> and the FAIL stands — fail-closed, but it reads as “my waiver was ignored”);
-and <strong>an authorized human can authorize carelessly</strong> — pre-authorizing a job id, or waiving without
+comments only</strong>, and <strong>THE MOST PROBABLE MISPLACEMENT IS THE PR’S LINKED ISSUE THREAD (#3759)</strong> — that is
+where lane/lead coordination lives — followed by a review body and a review-thread reply. None of the
+three is read, so a marker posted there is silently not applied (the run reports <code dir="auto">waiver: NONE</code> and the
+FAIL stands — fail-closed, but it reads as “my waiver was ignored”). <strong>Measured on PR #3710:</strong> the lead
+granted BOTH markers, field-perfect and sole-content, from an allowlisted author — on <strong>issue #3544</strong>;
+both keys read <code dir="auto">NONE</code>, which is textually identical to “the lead refused”, and position 1 of a six-PR
+serial queue idled ~8 hours and blocked five lanes. <strong>SINCE #3759 THE LINKED-ISSUE CASE IS DIAGNOSED,
+NOT GRANTED:</strong> when the PR-side scan returns <code dir="auto">none</code>, the PR’s linked issue(s) — resolved from the
+structured <code dir="auto">closingIssuesReferences</code> relation, NEVER from the mutable PR body — are scanned with the
+SAME scanner and the SAME base/head/job/allowlist, and a marker there that WOULD have been accepted by
+the channel is reported <code dir="auto">waiver: MISPLACED (found on linked issue #N …)</code> naming the issue and the
+remedy. <strong><code dir="auto">MISPLACED</code> GRANTS NOTHING — not partially, not with a notice — and the FAIL STANDS</strong>: only a
+marker on the PULL REQUEST grants, and moving it there is a HUMAN act by the authorizer, never
+something the tool does. A <code dir="auto">NONE</code> now also DECLARES whether that probe ran (checked / bounded /
+no linked issue / could-not-check), so “checked and it is not there either” and “never checked” can no
+longer read alike. <strong>LEAD-SIDE PROCEDURE, the other half of the fix: after posting either marker,
+verify with <code dir="auto">gh pr view &#x3C;PR> --json comments</code> that the line is ON THE PR — a grant is only granted once
+it is readable by the scanner that reads it.</strong>
+And <strong>an authorized human can authorize carelessly</strong> — pre-authorizing a job id, or waiving without
 checking the token accounting. Nothing mechanical detects either; the control is the permanent,
 attributable comment, which is why a substantive reason is required and recorded verbatim.
 <strong>AND A SECOND, EQUALLY TRANSFERABLE RULE FROM THE SAME ISSUE: THE CONSTRAINED PARTY MUST NOT CHOOSE ITS
@@ -902,6 +918,19 @@ the constrained party the power to satisfy its own constraint — #3312’s coro
 party must not choose its own enforcer</em> — and a worker could then clear its own findings. That absence
 is asserted <strong>structurally</strong> in the guard suite, because behavioural cases only cover the channels
 someone already thought of.</p>
+<p><strong>It inherits the misplacement residual by call too (issue #3759).</strong> The deferral marker is read
+from <strong>top-level PR comments only</strong>, and the <strong>most probable misplacement is the PR’s linked issue
+thread</strong>, ahead of a review body and a review-thread reply — measured on PR #3710, where both
+markers were granted field-perfect on issue #3544 and both keys read <code dir="auto">NONE</code>. Since #3759 that case
+is <strong>diagnosed, not granted</strong>: a would-have-been-accepted marker on a linked issue reports
+<code dir="auto">deferral: MISPLACED (found on linked issue #N …)</code> with the remedy, while <code dir="auto">findings:</code> stays exactly
+as measured — <strong>never <code dir="auto">DEFERRED</code></strong> (that would be the grant) and <strong>never <code dir="auto">NONE</code></strong> (that would read
+as a clean review) — and <code dir="auto">RESULT</code> stays <code dir="auto">FAIL</code>. <strong><code dir="auto">MISPLACED</code> grants nothing</strong>; only a marker on the
+pull request grants. The rendering claims the marker <em>would have been accepted by the channel</em>, not
+that it <em>would have granted</em>: the network issue-disposition legs are deliberately <strong>not run
+issue-side</strong> and still apply once the marker is on the PR, because a diagnostic that overstates
+what it measured is what stops the next person looking. As with the waiver, <strong>verify with
+<code dir="auto">gh pr view &#x3C;PR> --json comments</code> that the line is on the PR after posting it.</strong></p>
 <p><strong>The match is affirmative, which is what makes this a match and not a mute button.</strong> <code dir="auto">count=</code> must
 <strong>equal</strong> the observed findings count and <code dir="auto">issues=</code> must be non-empty. A job is a completed review and
 its findings do not change, so <code dir="auto">job=</code> already fixes the finding <em>set</em>; the count equality is the
