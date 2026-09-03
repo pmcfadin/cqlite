@@ -31,6 +31,7 @@
 //! `Window` the SAME condition is the ordinary straddle — a header split across
 //! the chunk boundary — and stays tolerant.
 
+use super::super::buffer_extent::HeaderTolerance;
 use super::super::*;
 
 /// What the block-emit walk should do with the bytes at a candidate partition
@@ -53,48 +54,36 @@ impl V5CompressedLegacyParser {
     /// Decode the partition header at `offset`, or say what the walk should do
     /// instead.
     ///
-    /// Tolerance is decided by TWO caller-stated facts and nothing else:
+    /// Tolerance is decided by ONE piece of state, [`HeaderTolerance`], which the
+    /// caller owns and threads in: "can a byte still arrive, or is this walk's
+    /// progress no longer attributable?" See that type for why it replaced the
+    /// per-site byte count plus per-call boolean this arm used to consult, and
+    /// for the two edges each of those got wrong.
     ///
-    /// * `extent` — can more bytes still arrive? The parse cannot know, so the
-    ///   caller states it (see [`BufferExtent`]'s contract, which forbids a
-    ///   default).
-    /// * `bounded` — was this CALL asked to stop SHORT of the extent? A #954
-    ///   clustering-slice walk (`row_body_window`) stops its row loop at
-    ///   `body_end`, mid-partition by construction, and the outer partition loop
-    ///   then re-enters here at bytes that were never claimed to begin a
-    ///   partition. Only an UNBOUNDED walk over a complete buffer can hold the
-    ///   bytes at `offset` to that promise, so only there is an undecodable
-    ///   header proof of corruption.
+    /// Two consequences worth stating here, at the arm:
     ///
-    /// `bounded` is `row_body_window.is_some()` for the WHOLE call, and that
-    /// coarseness is deliberate rather than an oversight. The narrower
-    /// `row_body_window.is_some() && partition_index == 0` — which reads as the
-    /// exact property, since the window is applied only at partition 0 — was
-    /// tried and MEASURED to red
-    /// `regression_1741c_tests::range_tombstone_before_slice_is_shadowed_on_windowed_read`:
-    /// `partition_index` is incremented at the END of the windowed partition's
-    /// arm, so at the very offset `body_end` left behind it already reads `1`,
-    /// and the refusal fires on correct input (observed:
-    /// `only 1 byte(s) remain … (partition=1)`, the byte being that partition's
-    /// own `END_OF_PARTITION` marker). So the honest statement of what this flag
-    /// means is: once a window has truncated this call's progress, NO later
-    /// offset in the call is attributable, and tolerance is the conservative
-    /// answer for all of them. The cost is real and is stated rather than
-    /// hidden — partitions 1..n of a windowed call do not get the refusal — and
-    /// it is bounded by the fact that every production caller passing a
-    /// `row_body_window` today also passes [`BufferExtent::Window`]
-    /// (`big_promoted.rs`, `bti_point.rs`), so `refuse` is already `false` for
-    /// them on the extent alone.
+    /// * partition 0's own header is refused on a BOUNDED call too. A row-body
+    ///   window supplied at the call is not yet an uncertainty; reaching its
+    ///   endpoint is, and `HeaderTolerance::bounded_out` is called there
+    ///   (finding C2).
+    /// * `row_body_window.is_some() && partition_index == 0` — which reads as
+    ///   that property and was the obvious patch — is NOT what this does, and
+    ///   was measured to be wrong: `partition_index` is incremented at the END of
+    ///   the windowed partition's arm, so at the very offset `body_end` leaves
+    ///   behind it already reads `1`, and the refusal fired on correct input
+    ///   (`regression_1741c_tests::range_tombstone_before_slice_is_shadowed_on_windowed_read`,
+    ///   observed: `only 1 byte(s) remain … (partition=1)`, the byte being that
+    ///   partition's own `END_OF_PARTITION` marker). Tracking the STOP rather
+    ///   than inferring it from a partition index is what makes both edges right
+    ///   at once.
     pub(super) fn block_partition_header(
         &self,
         data: &[u8],
         offset: usize,
-        extent: BufferExtent,
-        bounded: bool,
+        tolerance: HeaderTolerance,
         partition_index: usize,
     ) -> Result<HeaderStep> {
-        // The ONE tolerance predicate, named once and read twice below.
-        let refuse = extent.is_complete() && !bounded;
+        let refuse = tolerance.refuses();
         // Cassandra partition key size limits (used in header validation)
         // - CASSANDRA_MAX_KEY_SIZE: 64KB limit per Apache Cassandra specification
         // - FORMAT_MAX_KEY_SIZE: u8 max value - V5CompressedLegacy format limitation
@@ -119,16 +108,12 @@ impl V5CompressedLegacyParser {
         // each bound below without an addition a reader has to check.
         let remaining = data.len().saturating_sub(offset);
         if remaining < 2 {
-            // Fewer bytes remain than ANY header needs. Whether that is an
-            // ordinary end of walk or DATA LOSS is decided by the same `refuse`
-            // predicate as every other answer here — and it must be, because
-            // this arm's two tolerant readings are both about the CALLER's
-            // situation and neither is about the byte count:
-            //
-            // * on a `Window` the header continues in the next chunk;
-            // * on a BOUNDED walk (`row_body_window`) the walk was asked to stop
-            //   short of the extent, so these bytes were never claimed to begin
-            //   a partition.
+            // Fewer bytes remain than ANY header needs — which decides NOTHING
+            // on its own, and treating it as a decision was finding C1's mirror
+            // on this arm. It is judged by the same `refuse` predicate as every
+            // other answer here, because the two tolerant readings are both
+            // about the CALLER's situation (see `HeaderTolerance::why_tolerant`)
+            // and neither is about how many bytes are left.
             //
             // On an UNBOUNDED, proven-complete walk neither reading is
             // available: the file ends here, so a surviving header stub is the
@@ -154,7 +139,8 @@ impl V5CompressedLegacyParser {
             }
             tracing::debug!(
                 "V5CompressedLegacy: Not enough bytes for partition header at offset \
-                 {offset} (need 2, have {remaining}), stopping"
+                 {offset} (need 2, have {remaining}), stopping — tolerated because {}",
+                tolerance.why_tolerant()
             );
             return Ok(HeaderStep::EndOfBlock);
         }
@@ -182,7 +168,8 @@ impl V5CompressedLegacyParser {
             }
             tracing::warn!(
                 "V5CompressedLegacy: Skipping malformed partition header at offset {offset} \
-                 ({detail})"
+                 ({detail}) — resynchronising because {}",
+                tolerance.why_tolerant()
             );
             return Ok(HeaderStep::Resync);
         }
@@ -207,7 +194,8 @@ impl V5CompressedLegacyParser {
                 }
                 tracing::warn!(
                     "V5CompressedLegacy: Failed to parse partition header at offset {offset} \
-                     (partition={partition_index}): {e}. Attempting to continue to next partition."
+                     (partition={partition_index}): {e}. Resynchronising because {}.",
+                    tolerance.why_tolerant()
                 );
                 Ok(HeaderStep::Resync)
             }

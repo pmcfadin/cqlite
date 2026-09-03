@@ -1,3 +1,4 @@
+use super::buffer_extent::HeaderTolerance;
 use super::*;
 
 use range_marker_error::unparseable_marker_in_buffered_block as unparseable;
@@ -103,6 +104,13 @@ impl V5CompressedLegacyParser {
         // Parse ALL partitions in block (Issue #2 fix: previously only parsed one partition)
         let mut partition_index = 0;
         let mut skipped_partitions = 0;
+        // Issue #3928 (finding C2): the ONE header-tolerance state for this
+        // walk. It starts ATTRIBUTABLE — including on a call that supplied a
+        // `row_body_window`, because a window is not yet an uncertainty; it
+        // becomes one only when its endpoint is REACHED, which is where
+        // `bounded_out()` is called. Before that, partition 0's own header is as
+        // attributable as on an unbounded walk.
+        let mut tolerance = HeaderTolerance::for_extent(extent);
         while offset < data.len() {
             // Cooperative cancellation (issue #2264): an uncompressed, index-less
             // SSTable is returned to the scan as ONE contiguous block, so this loop
@@ -130,13 +138,7 @@ impl V5CompressedLegacyParser {
             // both drops the partition and can invent one out of misaligned
             // bytes. `?` propagates that refusal; `Resync`/`EndOfBlock` are only
             // reachable on a `BufferExtent::Window`.
-            match self.block_partition_header(
-                data,
-                offset,
-                extent,
-                row_body_window.is_some(),
-                partition_index,
-            )? {
+            match self.block_partition_header(data, offset, tolerance, partition_index)? {
                 HeaderStep::Parsed(partition_key, new_offset, partition_deletion) => {
                     let header_size = new_offset - offset;
                     offset = new_offset;
@@ -279,6 +281,17 @@ impl V5CompressedLegacyParser {
                         // block-granularity over-read within the window).
                         if let Some(body_end) = row_body_end {
                             if offset >= body_end {
+                                // Issue #3928 (C2): THE stop that costs this walk
+                                // its positional authority. The row loop halts
+                                // mid-partition by the caller's request, so every
+                                // later offset in this call — the outer partition
+                                // loop's next header probe included — sits at
+                                // bytes nothing promised would begin a partition.
+                                // Recorded HERE rather than inferred from
+                                // `partition_index` (which is bumped only at the
+                                // END of this arm, so it is already 1 by then —
+                                // the measured false-refusal this replaces).
+                                tolerance.bounded_out();
                                 break;
                             }
                         }

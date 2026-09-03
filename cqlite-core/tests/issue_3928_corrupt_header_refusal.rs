@@ -1213,20 +1213,33 @@ async fn both_stitched_walks_agree_and_refuse_a_truncated_final_header() {
     }
 }
 
-/// B1(a) — the sliding drivers' `Incomplete`-at-the-final-chunk answer.
+/// B1(a)/C1 — the sliding drivers' `Incomplete`-at-the-final-chunk answer.
 ///
 /// `DriverHeader::Done` is read by BOTH drivers as clean completion
-/// (`ParseStep::Done` / `PartitionStreamStep::AllDone`), so it is only a truthful
-/// answer for the sub-two-byte tail. A header whose declared key length is valid
-/// and nonzero but whose key or `DeletionTime` was truncated away is not a tail:
-/// no further bytes can arrive at the final chunk, the partition is gone, and
-/// reporting completion drops it silently.
+/// (`ParseStep::Done` / `PartitionStreamStep::AllDone`), so it is truthful only
+/// where there is genuinely nothing there. At the final chunk a NON-EMPTY
+/// incomplete header is a header Cassandra wrote whose bytes were truncated
+/// away — including the one-byte case, because that byte can be the surviving
+/// first byte of a partition key length.
 ///
-/// The `OneByte` cut is the CONTROL for the carve-out that stays: it must remain
-/// a clean `Done`, so this case pins both directions and cannot pass by refusing
-/// everything.
+/// Round 2 (C1) made the one-byte case fatal too. It had been kept tolerant as a
+/// both-directions guard, which was guarding the wrong thing: the proof that
+/// this case cannot pass by refusing everything now comes from a leg that is
+/// LEGITIMATELY tolerant — the same cuts at `at_final_chunk == false`, where
+/// more bytes can still arrive and `NeedMore` is the correct answer.
+///
+/// Evidence that no caller legitimately leaves one byte at the final chunk,
+/// since making it fatal rests on that: (1) both drivers early-return on an
+/// EMPTY buffer (`partition_driver.rs`, `compaction_stream.rs`), so the arm sees
+/// at least one byte by construction; (2) every `Emitted(consumed)` /
+/// `PartitionDone(consumed)` counts the structural terminator, and the callers
+/// advance by exactly that (`scan_stream_windowed.rs`'s `window.consume(take)`,
+/// `drain_compaction_window`), so a well-formed walk leaves ZERO bytes, never
+/// one; (3) measured — the AC3 counters recorded ZERO arrivals at this arm at
+/// the final chunk across 126 tables / 148 SSTables on four surfaces, two of
+/// which drive these drivers.
 #[tokio::test]
-async fn the_sliding_driver_refuses_a_final_chunk_header_truncated_past_its_length() {
+async fn the_sliding_driver_refuses_any_non_empty_truncated_header_at_the_final_chunk() {
     let spec = &BIG_COMPOSITE_HEADER;
     let dir = fixture_dir(spec);
     let schema = table_schema(spec);
@@ -1242,36 +1255,187 @@ async fn the_sliding_driver_refuses_a_final_chunk_header_truncated_past_its_leng
         "control: the whole last partition must report Emitted(consumed), got {whole}"
     );
 
-    // The tolerated tail: fewer than two bytes cannot be a partition Cassandra
-    // wrote, so `Done` is the truthful answer and must STAY.
-    let (dec, hdr, keep) = truncation(&dir, HeaderCut::OneByte);
-    let tail = driver_at_final_chunk(spec, &schema, &reader, &dec[hdr..keep]).unwrap_or_else(|e| {
-        panic!(
-            "the sub-two-byte tail must stay tolerated — refusing it reds a #954 \
-             clustering-slice walk on correct input: {e}"
-        )
-    });
-    assert!(
-        tail.starts_with("Done"),
-        "the one-surviving-byte tail must report Done, got {tail}"
-    );
-
-    // The two deeper cuts are NOT tails and must refuse.
-    for cut in [HeaderCut::InsideKey, HeaderCut::InsideDeletionTime] {
+    for cut in [
+        HeaderCut::OneByte,
+        HeaderCut::InsideKey,
+        HeaderCut::InsideDeletionTime,
+    ] {
         let (dec, hdr, keep) = truncation(&dir, cut);
+        let declared = u16::from_be_bytes([dec[hdr], dec[hdr + 1]]);
+
+        // The LEGITIMATELY-TOLERANT leg: the same bytes mid-stream, where a
+        // header may still be completed by the next chunk. `NeedMore` is the
+        // correct answer and this case must not turn it into an error — that is
+        // what stops it passing by refusing everything.
+        let midstream =
+            driver_mid_stream(spec, &schema, &reader, &dec[hdr..keep]).unwrap_or_else(|e| {
+                panic!(
+                    "{cut:?}: mid-stream a truncated header must ask for more bytes, not \
+                     refuse — more bytes can still arrive there: {e}"
+                )
+            });
+        assert!(
+            midstream.starts_with("NeedMore"),
+            "{cut:?}: mid-stream must report NeedMore, got {midstream}"
+        );
+
+        // At the final chunk every one of them is DATA LOSS.
         let got = driver_at_final_chunk(spec, &schema, &reader, &dec[hdr..keep]);
         assert!(
             got.is_err(),
-            "B1(a) {cut:?}: a header truncated PAST its declared key length must be \
-             REFUSED at the final chunk, not reported as completion. The driver answered \
-             {} over {} byte(s) of a header that declares a {}-byte key — the partition \
-             Cassandra wrote there is gone, and both drivers read this answer as a clean \
-             end of walk.",
+            "C1 {cut:?}: a NON-EMPTY truncated header must be REFUSED at the final chunk, \
+             not reported as completion. The driver answered {} over {} byte(s) of a header \
+             that declares a {declared}-byte key — the partition Cassandra wrote there is \
+             gone, and both drivers read that answer as a clean end of walk.",
             got.as_ref().map_or_else(|e| e.clone(), |s| s.clone()),
-            keep - hdr,
-            u16::from_be_bytes([dec[hdr], dec[hdr + 1]])
+            keep - hdr
         );
     }
+}
+
+/// C1's second half — the DRIVER path and the two BLOCK-EMIT walks must agree.
+///
+/// `both_stitched_walks_agree_and_refuse_a_truncated_final_header` pins the
+/// block-vs-metadata pair, so it stays green while a DRIVER-vs-block-emit
+/// divergence survives — and one did: with one header byte surviving, the
+/// drivers reported clean completion while `block_emit` refused the identical
+/// bytes. Three surfaces, ONE buffer, one verdict.
+#[tokio::test]
+async fn the_driver_and_both_block_walks_agree_on_a_truncated_final_header() {
+    let spec = &BIG_COMPOSITE_HEADER;
+    let dir = fixture_dir(spec);
+    let schema = table_schema(spec);
+    let reader = open_reader(&dir).await;
+
+    for cut in [
+        HeaderCut::OneByte,
+        HeaderCut::InsideKey,
+        HeaderCut::InsideDeletionTime,
+    ] {
+        let (dec, hdr, keep) = truncation(&dir, cut);
+        // ONE buffer for all three: it begins at a partition header and is
+        // declared complete and unbounded, so every surface is being asked the
+        // same question about the same bytes.
+        let buf = &dec[hdr..keep];
+        let driver = driver_at_final_chunk(spec, &schema, &reader, buf);
+        let block = block_walk(spec, &schema, &reader, buf);
+        let meta = metadata_walk(spec, &schema, &reader, buf);
+
+        let verdicts = [
+            ("driver (at_final_chunk)", driver.is_err()),
+            ("block-emit walk", block.is_err()),
+            ("cell-metadata walk", meta.is_err()),
+        ];
+        assert!(
+            verdicts.iter().all(|(_, e)| *e) || verdicts.iter().all(|(_, e)| !*e),
+            "{cut:?}: the three walks DISAGREE about the same {} byte(s) — {}. A truncated \
+             header cannot be corruption on one surface and clean completion on another.",
+            buf.len(),
+            verdicts
+                .iter()
+                .map(|(n, e)| format!("{n}: {}", if *e { "Err" } else { "Ok" }))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        assert!(
+            verdicts.iter().all(|(_, e)| *e),
+            "{cut:?}: all three walks must REFUSE — they agreed on Ok, which reports a \
+             table with one fewer partition than the file holds"
+        );
+    }
+}
+
+/// C2 — a BOUNDED walk must still refuse a malformed INITIAL header.
+///
+/// The `bounded` flag disabled refusal for the WHOLE call, so
+/// `BufferExtent::Complete` plus `row_body_window: Some(..)` byte-resynced past
+/// the FIRST partition's header — before any window logic had run, and therefore
+/// before the window had introduced any uncertainty at all. The window's
+/// uncertainty begins only once the bounded row-body endpoint has been reached.
+///
+/// The resync WARN's absence is asserted alongside the refusal, because on this
+/// fixture the resync's garbage can trip #3782's row arm and produce an
+/// incidental `Err` — the same trap the BIG AC1 case documents. The positive
+/// control is the same bounded walk on a `Window` extent, which must still
+/// resync and log.
+#[tokio::test]
+async fn a_bounded_walk_still_refuses_a_malformed_initial_header() {
+    let spec = &BIG_COMPOSITE_HEADER;
+    let staged = fixture::stage_spec(spec, &fixture_dir(spec), "bounded-initial");
+    let schema = table_schema(spec);
+    let reader = open_reader(&staged.mutated_dir).await;
+    let mutated = fixture::stitched_data_section(&staged.mutated_dir);
+
+    // A well-formed clustering-slice request. The VALUES are immaterial — the
+    // malformed header sits at offset 0 and is reached before `row_body_window`
+    // is consulted at all — so they are taken from the PRISTINE section's first
+    // partition body so the request is a realistic one rather than arbitrary.
+    let pristine = fixture::stitched_data_section(&staged.control_dir);
+    let key_len = usize::from(u16::from_be_bytes([pristine[0], pristine[1]]));
+    let body_start = 2 + key_len + 12; // nb: fixed 12-byte partition DeletionTime
+    let window = (body_start, (body_start + 64).min(mutated.len()));
+
+    // POSITIVE CONTROL: on a Window the bounded walk must still take the
+    // tolerant resync and LOG it, which proves the sink captures and the needles
+    // are current.
+    let window_sink = LogSink::default();
+    let window_result = {
+        let _dispatch = tracing::subscriber::set_default(warn_subscriber(&window_sink));
+        bounded_walk(
+            spec,
+            &schema,
+            &reader,
+            &mutated,
+            window,
+            cqlite_core::storage::sstable::reader::BufferExtent::Window,
+        )
+    };
+    let window_logs = window_sink.text();
+    let observed: Vec<&str> = RESYNC_WARNS
+        .iter()
+        .copied()
+        .filter(|n| window_logs.contains(n))
+        .collect();
+    assert!(
+        !observed.is_empty(),
+        "positive control FAILED: a BOUNDED walk on a Window extent must still resync past \
+         the malformed initial header and LOG it. Expected one of {RESYNC_WARNS:?}; the walk \
+         answered {} and captured:\n{window_logs}",
+        window_result
+            .as_ref()
+            .map_or_else(|e| format!("Err({e})"), |k| format!("Ok({} keys)", k.len()))
+    );
+
+    // The subject: the SAME bounded walk on a COMPLETE buffer must refuse the
+    // initial header, and must not have resynced past it.
+    let sink = LogSink::default();
+    let got = {
+        let _dispatch = tracing::subscriber::set_default(warn_subscriber(&sink));
+        bounded_walk(
+            spec,
+            &schema,
+            &reader,
+            &mutated,
+            window,
+            cqlite_core::storage::sstable::reader::BufferExtent::Complete,
+        )
+    };
+    let logs = sink.text();
+    for needle in RESYNC_WARNS {
+        assert!(
+            !logs.contains(needle),
+            "C2: a bounded walk RESYNCHRONISED past the malformed INITIAL header — it logged \
+             {needle:?}. The row-body window introduces no uncertainty until its endpoint is \
+             reached, so partition 0's own header is as attributable as on an unbounded walk \
+             and must be REFUSED. (Capture proved live above: {observed:?}.) Captured:\n{logs}"
+        );
+    }
+    assert!(
+        got.is_err(),
+        "C2: a bounded walk over a PROVEN-COMPLETE buffer must refuse a malformed initial \
+         header; it answered Ok with {} key occurrence(s)",
+        got.map_or(0, |k| k.len())
+    );
 }
 
 /// The block-emit walk over `buf` declared a chunk-covering WINDOW — the
@@ -1295,6 +1459,52 @@ fn window_walk(
             Some(schema),
             reader,
             None,
+            |(_t, k, _r)| {
+                keys.push(k.as_bytes().to_vec());
+                Ok(std::ops::ControlFlow::Continue(()))
+            },
+        )
+        .map_err(why)
+        .map(|()| keys)
+}
+
+/// The SLIDING driver MID-STREAM (`at_final_chunk == false`) — the legitimately
+/// tolerant leg, where a truncated header may still be completed by the next
+/// chunk and `NeedMore` is the correct answer.
+fn driver_mid_stream(
+    spec: &FixtureSpec,
+    schema: &TableSchema,
+    reader: &SSTableReader,
+    buf: &[u8],
+) -> Result<String, String> {
+    let mut emitted = 0usize;
+    framing_parser(spec)
+        .parse_one_partition_for_compaction(buf, Some(schema), reader, false, &mut |_row| {
+            emitted += 1;
+            Ok(std::ops::ControlFlow::Continue(()))
+        })
+        .map_err(why)
+        .map(|step| format!("{step:?} after emitting {emitted} row(s)"))
+}
+
+/// The block-emit walk over `buf` with a #954 row-body window — a BOUNDED walk,
+/// at the caller's stated extent.
+fn bounded_walk(
+    spec: &FixtureSpec,
+    schema: &TableSchema,
+    reader: &SSTableReader,
+    buf: &[u8],
+    window: (usize, usize),
+    extent: cqlite_core::storage::sstable::reader::BufferExtent,
+) -> Result<Vec<Vec<u8>>, String> {
+    let mut keys: Vec<Vec<u8>> = Vec::new();
+    framing_parser(spec)
+        .parse_block_emit_windowed(
+            buf,
+            extent,
+            Some(schema),
+            reader,
+            Some(window),
             |(_t, k, _r)| {
                 keys.push(k.as_bytes().to_vec());
                 Ok(std::ops::ControlFlow::Continue(()))

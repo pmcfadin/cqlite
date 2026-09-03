@@ -40,6 +40,7 @@
 //! window the driver can still advance out of may legitimately be positioned
 //! mid-structure.
 
+use super::super::buffer_extent::HeaderTolerance;
 use super::super::*;
 
 /// Issue #3999 — every refusal derived from CQLite's partition-key-LENGTH model
@@ -83,20 +84,41 @@ pub(in crate::storage::sstable::reader::parsing::row_decoder) enum DriverHeader 
     /// arrive, so the driver consumes ONE byte and re-tries. Unreachable at the
     /// final chunk.
     Resync,
-    /// The header is incomplete AND this is the final chunk: the walk is over
-    /// (trailing bytes shorter than a header, which is how a truncated tail
-    /// presents). Preserved verbatim from both drivers' pre-#3928 behaviour —
-    /// this issue changed the MALFORMED and UNPARSEABLE answers, not this one.
+    /// There is NOTHING here: an EMPTY buffer at the final chunk. The drivers
+    /// translate it to `ParseStep::Done` / `PartitionStreamStep::AllDone`, i.e.
+    /// clean completion of the walk.
+    ///
+    /// Reachable ONLY for an empty buffer since finding C1 — a non-empty
+    /// incomplete header at the final chunk is a truncated partition and is
+    /// refused. Both drivers early-return on `data.is_empty()` before calling
+    /// this arm, so no caller reaches this variant today; it exists so the arm
+    /// is total, because "there is nothing here" is not corruption.
     Done,
+}
+
+/// What CQLite READ as the partition key length, when there were enough bytes to
+/// read one at all (issue #3928 / #3999).
+///
+/// With a single byte present NO length has been read, so the diagnostic must
+/// not name one — asserting a length nobody read is the same class of false
+/// statement #3999 is about, one field over.
+fn read_length_note(data: &[u8]) -> String {
+    match data.get(1) {
+        Some(&low) => format!(" (CQLite READ a key length of {low} from byte 1)"),
+        None => " (too short for CQLite to have read a key length at all)".to_string(),
+    }
 }
 
 impl V5CompressedLegacyParser {
     /// Classify and (on success) parse the partition header at the front of
     /// `data`.
     ///
-    /// `at_final_chunk` decides tolerance and nothing else does: the parse
-    /// cannot know whether more bytes can arrive, so the driver — which owns the
-    /// sliding window — states it.
+    /// `at_final_chunk` is the driver's authoritative "no further bytes can
+    /// arrive" fact, and it is converted at this boundary into the same
+    /// [`HeaderTolerance`] the block-emit arm consults, so both arms ask ONE
+    /// question with one answer. A driver has no row-body bound, so its progress
+    /// is always attributable: every call starts at a partition boundary the
+    /// caller advanced to by a CONFIRMED consumed-byte count.
     pub(in crate::storage::sstable::reader::parsing::row_decoder) fn driver_partition_header(
         &self,
         data: &[u8],
@@ -107,12 +129,13 @@ impl V5CompressedLegacyParser {
         // so a deleted header split across a NON-FINAL chunk returns `NeedMore`
         // instead of being mis-parsed and skipped (which desynced the scan and,
         // on compaction, dropped a partition tombstone).
+        let tolerance = HeaderTolerance::for_final_chunk(at_final_chunk);
         match self.partition_header_readiness(data) {
             // `Malformed` is decidable from TWO bytes (a zero or over-long
             // declared key length), so no additional byte can rescue it — and at
             // the final chunk none can arrive at all.
             PartitionHeaderReadiness::Malformed => {
-                if at_final_chunk {
+                if tolerance.refuses() {
                     return Err(Error::corruption(format!(
                         "V5CompressedLegacy: refusing an unreadable partition header at the \
                          FINAL chunk (leading bytes {:02x?}, {} byte(s) in window): CQLite \
@@ -129,50 +152,58 @@ impl V5CompressedLegacyParser {
                 }
                 Ok(DriverHeader::Resync)
             }
-            // `Incomplete` has THREE causes in `partition_header_readiness`, and
-            // only the first is a tail (issue #3928, fix round 1):
+            // `Incomplete` means the header could not be COMPLETED from the
+            // bytes present — the declared key runs past the buffer, its
+            // `DeletionTime` does, or there are fewer than the two bytes any
+            // header needs.
             //
-            //   1. `data.len() < 2` — fewer bytes than ANY header needs;
-            //   2. the declared key runs past the buffer (the discriminator byte
-            //      at `2 + key_len` is absent);
-            //   3. the `DeletionTime` for its live/deleted form runs past it.
+            // Mid-stream that is the ordinary straddle: more bytes can arrive,
+            // so `NeedMore`. At the final chunk none can, and then EVERY
+            // non-empty case is a header Cassandra wrote whose bytes were
+            // truncated away. `DriverHeader::Done` is read by BOTH drivers as
+            // CLEAN COMPLETION (`ParseStep::Done` / `PartitionStreamStep::AllDone`),
+            // so it is truthful only where there is genuinely NOTHING here.
             //
-            // Mid-stream all three are the ordinary straddle and become
-            // `NeedMore`. At the FINAL chunk they are NOT the same fact:
-            // `DriverHeader::Done` is read by BOTH drivers as CLEAN COMPLETION
-            // (`ParseStep::Done` / `PartitionStreamStep::AllDone`), which is
-            // truthful only for cause 1 — fewer than two bytes cannot be a
-            // partition Cassandra wrote, so nothing is lost there.
+            // Issue #3928 round 1 kept the one-byte case tolerant, reasoning that
+            // fewer than two bytes cannot be a partition. Finding C1: that byte
+            // can be the surviving FIRST byte of a truncated partition-key
+            // length, so the partition IS lost — and `block_emit`'s walk already
+            // refused the identical bytes, leaving the driver path and the
+            // block-emit path disagreeing about one file. Measured pre-fix: the
+            // driver answered `Done` over ONE byte of a header declaring a
+            // 16-byte key while both block walks answered `Err`.
             //
-            // Causes 2 and 3 are a header with a VALID, NONZERO declared key
-            // length whose key or `DeletionTime` was truncated away: well over
-            // two bytes, no further bytes can arrive, and the partition
-            // Cassandra wrote is gone. Reporting that as completion drops it
-            // silently and answers `Ok` — the swallow this issue exists to
-            // close, one classifier arm over from the ones it started with.
+            // So the byte COUNT decides nothing (it never did — see
+            // `HeaderTolerance`); emptiness does. And an empty buffer cannot
+            // reach here from either driver today: both early-return on
+            // `data.is_empty()` before this call. The arm is kept total anyway,
+            // because a function that refuses "there is nothing here" as
+            // corruption would be wrong in isolation, and this one is
+            // `pub(in row_decoder)`.
             //
-            // The cause is re-derived from the SAME two bytes the classifier
-            // judged rather than by widening the classifier's own vocabulary:
-            // `partition_header_readiness` is shared with the non-allocating
-            // boundary peek (`peek_partition_boundary`), where a new variant
-            // would have to be mapped for a question that does not arise.
+            // No caller legitimately leaves a non-empty stub at the final chunk:
+            // every `Emitted`/`PartitionDone` consumed-count includes the
+            // structural terminator and the callers advance by exactly it
+            // (`scan_stream_windowed.rs`'s `window.consume(take)`,
+            // `drain_compaction_window`), and the AC3 counters recorded ZERO
+            // arrivals here at the final chunk across 126 tables / 148 SSTables
+            // on four surfaces.
             PartitionHeaderReadiness::Incomplete => {
-                if !at_final_chunk {
+                if !tolerance.refuses() {
                     return Ok(DriverHeader::NeedMore);
                 }
-                if data.len() < 2 {
+                if data.is_empty() {
                     return Ok(DriverHeader::Done);
                 }
                 Err(Error::corruption(format!(
                     "V5CompressedLegacy: refusing a TRUNCATED partition header at the FINAL \
-                     chunk: CQLite READ a {}-byte partition key length from the window's \
-                     {} byte(s), so the key and its partition-level DeletionTime cannot \
-                     both be present, and no further bytes can arrive. The partition \
-                     Cassandra wrote here was truncated away, so reporting completion \
-                     would DROP it and answer Ok with one fewer partition than the file \
-                     holds (issue #3928). {KEY_LENGTH_MODEL_CAVEAT}",
-                    usize::from(data[1]),
-                    data.len()
+                     chunk: {} byte(s) are present{}, too few to complete the header, and no \
+                     further bytes can arrive. The partition Cassandra wrote here was \
+                     truncated away, so reporting completion would DROP it and answer Ok \
+                     with one fewer partition than the file holds (issue #3928). \
+                     {KEY_LENGTH_MODEL_CAVEAT}",
+                    data.len(),
+                    read_length_note(data)
                 )))
             }
             PartitionHeaderReadiness::Ready => match self.parse_partition_header_full(data, 0) {

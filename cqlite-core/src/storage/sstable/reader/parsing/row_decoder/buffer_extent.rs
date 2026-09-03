@@ -73,3 +73,110 @@ impl BufferExtent {
         matches!(self, BufferExtent::Complete)
     }
 }
+
+/// Issue #3928 — the ONE piece of state that decides whether an undecodable
+/// partition HEADER is refused, computed once per walk and consulted at every
+/// header arm.
+///
+/// # Why this exists, and why it replaced a mechanism rather than extending one
+///
+/// The header arms reached this shape over three review rounds, each moving the
+/// boundary by one case: the arm consulted NOTHING (a `tracing::warn!` and
+/// `offset += 1`, unconditionally); then a per-site byte-count test
+/// (`remaining < 2`, `data.len() < 2`) plus a per-CALL boolean (`bounded`); and
+/// each of those turned out to be wrong at its own edges — the byte count
+/// because one surviving byte is the first byte of a truncated header and not a
+/// tail, the call-wide boolean because a row-body window introduces no
+/// uncertainty until its endpoint is REACHED, so partition 0's own header was
+/// being excused before the window had done anything.
+///
+/// Three rounds in one predicate is this repository's signal to replace the
+/// mechanism. Both edges are edges of ONE question, so the question is asked
+/// once, in one place:
+///
+/// > Can a byte still arrive, or is this walk's progress no longer attributable?
+///
+/// * **Can a byte still arrive** — [`BufferExtent`], stated by the caller.
+/// * **Is progress attributable** — has every byte before this offset been
+///   consumed as a complete structure, so that "a partition starts here" is a
+///   promise the walk actually made? It has, until something stops the walk
+///   somewhere it was not promised a boundary.
+///
+/// A byte count answers NEITHER, which is why it is gone from the decision and
+/// survives only in the diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::storage::sstable::reader::parsing::row_decoder) struct HeaderTolerance {
+    extent: BufferExtent,
+    attributable: bool,
+}
+
+impl HeaderTolerance {
+    /// The block-emit walk, which is handed its extent explicitly. Progress is
+    /// attributable from the start: the walk begins at a partition boundary the
+    /// caller vouches for.
+    pub(in crate::storage::sstable::reader::parsing::row_decoder) fn for_extent(
+        extent: BufferExtent,
+    ) -> Self {
+        Self {
+            extent,
+            attributable: true,
+        }
+    }
+
+    /// The sliding drivers, whose `at_final_chunk` IS the "no further bytes can
+    /// arrive" fact — an authoritative property of the window, not a guess about
+    /// the bytes. They have no row-body bound, so their progress is always
+    /// attributable: each call starts at a partition boundary the caller
+    /// advanced to by a confirmed consumed-byte count.
+    pub(in crate::storage::sstable::reader::parsing::row_decoder) fn for_final_chunk(
+        at_final_chunk: bool,
+    ) -> Self {
+        Self::for_extent(if at_final_chunk {
+            BufferExtent::Complete
+        } else {
+            BufferExtent::Window
+        })
+    }
+
+    /// The walk has been stopped by its caller's #954 row-body END BOUND, i.e.
+    /// SHORT of the extent and mid-partition by construction. Every later offset
+    /// in this call is therefore unattributable — the bytes there were never
+    /// claimed to begin a partition — so tolerance takes over from here on.
+    ///
+    /// Call this AT the stop, never at the start of the call: that ordering is
+    /// the whole of finding C2. A window supplied at the call is not yet an
+    /// uncertainty; reaching its endpoint is.
+    pub(in crate::storage::sstable::reader::parsing::row_decoder) fn bounded_out(&mut self) {
+        self.attributable = false;
+    }
+
+    /// Must an undecodable partition header here be REPORTED rather than
+    /// resynchronised past?
+    ///
+    /// Affirmative in both conjuncts, so a permissive answer is never keyed on
+    /// "not the bad one": the buffer must be PROVEN complete AND the walk must
+    /// still be attributable.
+    pub(in crate::storage::sstable::reader::parsing::row_decoder) fn refuses(self) -> bool {
+        self.extent.is_complete() && self.attributable
+    }
+
+    /// Which conjunct is tolerating, for a diagnostic. Never used to decide.
+    pub(in crate::storage::sstable::reader::parsing::row_decoder) fn why_tolerant(
+        self,
+    ) -> &'static str {
+        match (self.extent.is_complete(), self.attributable) {
+            (false, _) => {
+                "the buffer is a chunk-covering WINDOW, so a header may still be \
+                           completed by the next chunk"
+            }
+            (true, false) => {
+                "this walk was stopped by its row-body end bound, so offsets past \
+                              that bound were never claimed to begin a partition"
+            }
+            (true, true) => {
+                "nothing is tolerating: this walk is unbounded over a proven-complete \
+                             buffer"
+            }
+        }
+    }
+}
