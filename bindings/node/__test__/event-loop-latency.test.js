@@ -33,6 +33,7 @@
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { Database } = require('../lib/index.js');
+const { assertDatasetsAvailable } = require('./helpers.js');
 
 const ADDON_ENTRY = path.resolve(__dirname, '..', 'lib', 'index.js');
 const DIR = global.testPaths.SSTABLES_DIR;
@@ -56,19 +57,11 @@ const TIMER_INTERVAL_MS = 10;
 // fails fast (with diagnostics) instead of blocking the worker forever.
 const CHILD_TIMEOUT_MS = 20000;
 
-function requireData() {
-  if (!global.DATASETS_AVAILABLE) {
-    throw new Error(
-      'Test data not available. Set CQLITE_DATASETS_ROOT or run fetch-datasets.sh'
-    );
-  }
-}
-
 describe('executeNative event-loop latency (issue #1442)', () => {
   let db;
 
   beforeAll(async () => {
-    requireData();
+    assertDatasetsAvailable();
     db = await Database.open(DIR, { schema: SCHEMA });
   });
 

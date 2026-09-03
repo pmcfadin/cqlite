@@ -13,7 +13,7 @@
  */
 
 const { Database, _errorContractProbe } = require('../lib/index.js');
-const { skipIfNoDatasets, getNonexistentPath } = require('./helpers.js');
+const { assertDatasetsAvailable, getNonexistentPath } = require('./helpers.js');
 
 describe('Error Mapping Tests (Issue #297)', () => {
   beforeAll(() => {
@@ -62,7 +62,7 @@ describe('Error Mapping Tests (Issue #297)', () => {
     // first token is not a known verb is rejected earlier as
     // `Error::QueryExecution` ("Unsupported query type"), which is genuinely
     // `QUERY` — see the sibling case below.
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     const db = await Database.open(global.testPaths.SSTABLES_DIR, {
       schema: global.testPaths.SCHEMA_BASIC_TYPES,
     });
@@ -82,7 +82,7 @@ describe('Error Mapping Tests (Issue #297)', () => {
     // The other side of the #1451 fix: `PARSE` now means a genuine CQL syntax
     // failure, so an unsupported STATEMENT TYPE (an `Error::QueryExecution`)
     // must NOT borrow it.
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     const db = await Database.open(global.testPaths.SSTABLES_DIR, {
       schema: global.testPaths.SCHEMA_BASIC_TYPES,
     });
@@ -138,7 +138,7 @@ describe('Error Mapping Tests (Issue #297)', () => {
   });
 
   test('Query error has correct properties', async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     const db = await Database.open(global.testPaths.SSTABLES_DIR, {
       schema: global.testPaths.SCHEMA_BASIC_TYPES,
     });
@@ -158,7 +158,7 @@ describe('Error Mapping Tests (Issue #297)', () => {
   });
 
   test('RuntimeError (InvalidState) has correct properties', async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     const db = await Database.open(global.testPaths.SSTABLES_DIR, {
       schema: global.testPaths.SCHEMA_BASIC_TYPES,
     });

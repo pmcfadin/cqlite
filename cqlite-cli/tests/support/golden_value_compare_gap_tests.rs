@@ -493,23 +493,28 @@ fn the_non_finite_float_gap_does_not_cover_a_finite_member() {
     }
 }
 
-/// The `sd` gap declares that a `decimal` is QUOTED where
-/// `cassandra-5.0.8 DecimalType.toJSONString` emits an unquoted number — the JSON
-/// KIND and nothing else. The quoted NUMBER must still be the golden's, which is
-/// the 30-digit exactness this lane exists to check.
+/// The `sd` gap declares ONE thing: this lane's JSON parse cannot carry a
+/// `decimal`'s digits past a `double`'s precision (`serde_json::Value`, no
+/// `arbitrary_precision`). It excuses those digits and NOTHING else — the two
+/// sides must still be the same double, and the CLI must still have emitted the
+/// unquoted NUMBER `cassandra-5.0.8 DecimalType.toJSONString:314-317` requires.
+///
+/// Note the `json!` literals below go through the same `f64` the real lane does,
+/// so this test exercises the gap on exactly the values the parse produces.
 #[test]
-fn the_decimal_quoting_gap_does_not_cover_a_different_number() {
+fn the_decimal_precision_gap_covers_only_the_digits_the_parse_lost() {
     let schema = schema_of("CREATE TABLE t (id int PRIMARY KEY, sd set<decimal>);", "t");
-    let gap = [("sd", Divergence::DecimalRendersAsJsonString)];
+    let gap = [("sd", Divergence::ExactDecimalNotCarriedByThisLanesJsonParse)];
     let golden = vec![row(&[
         ("id", json!(1)),
         ("sd", json!(["-999999999999999999999999999999.999", "0"])),
     ])];
 
-    // DECLARED: the same numbers, quoted.
+    // DECLARED: the CLI emits unquoted NUMBERS. The 33-digit member survives only
+    // as the double it parsed to; the exactly-representable `0` compares normally.
     let declared = vec![row(&[
         ("id", json!(1)),
-        ("sd", json!(["-999999999999999999999999999999.999", "0"])),
+        ("sd", json!([-999999999999999999999999999999.999_f64, 0])),
     ])];
     let report = compare_rows(
         &golden,
@@ -523,19 +528,24 @@ fn the_decimal_quoting_gap_does_not_cover_a_different_number() {
     assert!(report.diffs.is_empty(), "{:?}", report.diffs);
     assert!(report.stale_skips.is_empty(), "{:?}", report.stale_skips);
 
-    // UNDECLARED: one digit of the 30 lost, and a rounded rendering. Both are
-    // quoted, so the old whole-path suppression absorbed them.
+    // UNDECLARED: a DIFFERENT double — the ONE-ULP neighbour of the golden's
+    // value, which is the tightest thing still caught, plus a plainly wrong
+    // magnitude (so a sign error or a lost leading digit is caught too) — a null,
+    // a non-numeric token, and a regression to the issue #3644 QUOTED rendering,
+    // which this gap must never excuse however exact its digits are.
     for wrong in [
-        json!(["-999999999999999999999999999999.998", "0"]),
-        json!(["-1.0E+30", "0"]),
-        json!(["not-a-number", "0"]),
+        json!([-1.0000000000000002e30_f64, 0]),
+        json!([-1.0_f64, 0]),
+        json!([null, 0]),
+        json!(["not-a-number", 0]),
+        json!(["-999999999999999999999999999999.999", 0]),
     ] {
         let cli = vec![row(&[("id", json!(1)), ("sd", wrong.clone())])];
         let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &gap, Egress::Json);
         assert_eq!(
             report.diffs.len(),
             1,
-            "a quoted decimal must still hold the golden's number ({wrong}): {:?}",
+            "only the sub-double digits are excused ({wrong}): {:?}",
             report.diffs
         );
         assert!(
@@ -547,9 +557,10 @@ fn the_decimal_quoting_gap_does_not_cover_a_different_number() {
 }
 
 /// The gap is FORMAT-SCOPED in the divergence too: `NonFiniteFloatRendersAsJsonNull`
-/// and `DecimalRendersAsJsonString` are statements about JSON's own vocabulary, so
-/// neither may fire in the CSV lane — where every cell is text and all three tokens
-/// and all 30 digits survive verbatim. A gap mis-declared for CSV suppresses
+/// and `ExactDecimalNotCarriedByThisLanesJsonParse` are statements about the JSON
+/// lane alone — JSON's own value vocabulary, and this lane's JSON number parse — so
+/// neither may fire in the CSV lane, where every cell is text and all three tokens
+/// and all 33 digits survive verbatim. A gap mis-declared for CSV suppresses
 /// nothing and is reported, rather than quietly widening.
 #[test]
 fn a_json_vocabulary_gap_never_fires_in_the_csv_lane() {
