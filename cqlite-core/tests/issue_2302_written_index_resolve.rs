@@ -869,22 +869,33 @@ fn absent_index_does_not_warn_present_but_unloadable() {
 /// structurally consumed, so the walk bails with a loud WARN and falls back to
 /// `sequential_scan` — the caller never accepts a guess.
 ///
-/// Consistency note (explicitly requested by roborev job 1609): `sequential_scan`
-/// itself is NOT lossless on this corruption. Its shared row/partition decoder
-/// (`parse_block_emit_windowed`) ALSO swallows the same row-parse failure — but
-/// WORSE, its byte-pattern partition-header resync (issue #164/#258's "try-parse,
-/// no heuristics" recovery) can drift for SEVERAL bytes before it happens to
-/// resynchronize with a real partition boundary, silently losing MULTIPLE
-/// partitions' rows (not just the one corrupted partition) in the process. This
-/// is a PRE-EXISTING, separate defect in the shared shadowed-decode swallow/resync
-/// path — out of scope for #2302 (which is about index-resolution ROUTING, not
-/// the underlying row decoder) — but it means this test does NOT assert "the
-/// fallback recovers every partition" (that would be false). Instead it proves
-/// the ROUTING decision itself introduces no NEW inconsistency: the auto-routed
-/// reader (index → detects corruption → WARNs → falls back) returns the EXACT
-/// SAME row set as an independently-opened reader whose Index.db/Summary.db were
-/// stripped from the identical corrupted files (forcing `sequential_scan`
-/// directly, no auto-routing at all) — the two paths agree, and the WARN fired.
+/// Consistency note (originally requested by roborev job 1609) — **REWRITTEN BY
+/// ISSUE #3721, WHICH CLOSED THE DEFECT THIS NOTE DECLARED OUT OF SCOPE.**
+///
+/// The note used to read: `sequential_scan` is NOT lossless on this corruption,
+/// because its shared row/partition decoder (`parse_block_emit_windowed`) ALSO
+/// swallows the same row-parse failure, and its byte-pattern partition-header
+/// resync (issue #164/#258) can then drift for several bytes before it happens to
+/// resynchronize, silently losing MULTIPLE partitions' rows. That swallow was
+/// filed as a pre-existing defect of the shared decoder, out of scope for #2302
+/// (which is about index-resolution ROUTING, not the row decoder). **Issue #3721
+/// is that defect, and it is fixed**: the shared decoder no longer swallows a
+/// row-body decode failure, so neither route serves a lossy row set any more.
+///
+/// The property this fixture proves therefore got STRICTLY STRONGER, and the
+/// assertions below changed shape rather than being relaxed. Before #3721 the
+/// claim was "the two routes agree on WHICH ROWS SURVIVE the swallow" — an
+/// equality between two lossy sets, which held while both routes lost the same
+/// rows for the same reason. Now the claim is "NEITHER route serves rows at all:
+/// both REFUSE the corrupted body, with the same named error" — the routing
+/// decision still introduces no divergence, and there is no longer a partial
+/// result set for it to diverge ABOUT. The `rows.len() < n` assertion is gone
+/// with the lossy set it measured; a count strictly below `n` was evidence of
+/// tolerated loss, which is exactly what must no longer happen.
+///
+/// The #2302 WARN assertion is UNCHANGED and still load-bearing: the auto-routed
+/// reader must still detect the corruption at the index path, WARN loudly, and
+/// fall back — the fallback then refusing is #3721's behaviour, not #2302's.
 #[test]
 #[serial_test::serial]
 fn corrupt_partition_body_refused_not_silently_emptied() {
@@ -922,8 +933,11 @@ fn corrupt_partition_body_refused_not_silently_emptied() {
             !oracle_reader.has_partition_index(),
             "oracle fixture must force sequential_scan directly (no index components)"
         );
-        let oracle_rows = oracle_reader.iterate_all_partitions().await.unwrap();
-        oracle_len = oracle_rows.len();
+        // Both legs are captured as Results and asserted on: this corrupted body
+        // must be REFUSED, and an `unwrap()` here would abort the test on the
+        // very error the fix exists to produce.
+        let oracle_res = oracle_reader.iterate_all_partitions().await;
+        oracle_len = oracle_res.as_ref().map(|r| r.len()).unwrap_or(0);
 
         // Auto-routed reader: full component set, corruption detected mid-walk.
         let reader = open_reader(&data_path).await;
@@ -931,34 +945,53 @@ fn corrupt_partition_body_refused_not_silently_emptied() {
             reader.has_partition_index(),
             "corrupted-but-index-present fixture must still expose the index path"
         );
-        let rows = reader.iterate_all_partitions().await.unwrap();
-        rows_len = rows.len();
+        let auto_res = reader.iterate_all_partitions().await;
+        rows_len = auto_res.as_ref().map(|r| r.len()).unwrap_or(0);
 
-        let mut auto_pairs: Vec<(Vec<u8>, ScanRow)> = rows
-            .iter()
-            .map(|(k, v)| (k.as_bytes().to_vec(), v.clone()))
-            .collect();
-        let mut oracle_pairs: Vec<(Vec<u8>, ScanRow)> = oracle_rows
-            .iter()
-            .map(|(k, v)| (k.as_bytes().to_vec(), v.clone()))
-            .collect();
-        auto_pairs.sort_by(|a, b| a.0.cmp(&b.0));
-        oracle_pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        // Issue #3721: a row body that fails to decode is REFUSED, never served
+        // as a partial partition — on BOTH routes. Matched on the variant, never
+        // on message text (#28).
+        let oracle_err = match oracle_res {
+            Err(e) => e,
+            Ok(rows) => panic!(
+                "issue #3721 REGRESSION: the forced sequential_scan over a \
+                 corrupted row body returned Ok with {} of {n} row(s) — the \
+                 swallow is back and the corrupted partition was served as a \
+                 lossy result set",
+                rows.len()
+            ),
+        };
+        let auto_err = match auto_res {
+            Err(e) => e,
+            Ok(rows) => panic!(
+                "issue #3721 REGRESSION: the auto-routed read over a corrupted \
+                 row body returned Ok with {} of {n} row(s) — the index path \
+                 detected the corruption and fell back, and the fallback then \
+                 swallowed the failure",
+                rows.len()
+            ),
+        };
+        for (which, e) in [("forced sequential_scan", &oracle_err), ("auto-routed", &auto_err)] {
+            assert!(
+                matches!(e, cqlite_core::Error::ColumnDecode { .. }),
+                "the {which} route must refuse the corrupted row body with the \
+                 dedicated per-column variant (issue #3721), not some other \
+                 error; got {e:?}"
+            );
+        }
+
+        // The routing decision introduces no divergence: both routes refuse, and
+        // they refuse IDENTICALLY. This replaces the pre-#3721 equality between
+        // two lossy row sets — see the doc comment. Comparing the rendered
+        // messages is sound HERE (unlike a variant check) because the claim is
+        // that the two routes report the SAME thing, not that either reports a
+        // particular thing.
         assert_eq!(
-            auto_pairs, oracle_pairs,
-            "the auto-routed fallback must return the SAME row set as an \
-             independently-forced sequential_scan over the identical corrupted \
-             bytes — the routing decision introduces no NEW divergence"
-        );
-
-        // The corruption DID cost data (documented pre-existing sequential_scan
-        // resync gap, see doc comment) — never MORE rows than the healthy n, and
-        // strictly fewer than n since a body genuinely failed to decode.
-        assert!(
-            rows.len() < n as usize,
-            "corrupted body must cost at least the corrupted partition's row \
-             (got {} of {n})",
-            rows.len()
+            oracle_err.to_string(),
+            auto_err.to_string(),
+            "the auto-routed fallback and an independently-forced \
+             sequential_scan over the identical corrupted bytes must refuse with \
+             the SAME error — the routing decision introduces no NEW divergence"
         );
     });
 

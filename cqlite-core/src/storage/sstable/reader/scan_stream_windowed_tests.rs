@@ -890,10 +890,30 @@ mod fixture_drain {
         // truncation instead of serving it, so the evidence that its terminal
         // drain RAN is now the ERROR rather than the surplus.
         //
-        // This discriminates STRICTLY MORE than `clean > failed` did: it names the
-        // mechanism (`Error::ColumnDecode`, matched on the VARIANT — never on
-        // message text, issue #28) instead of comparing two row counts that could
-        // coincide for unrelated reasons.
+        // This discriminates STRICTLY MORE than `clean > failed` did: the drain
+        // must ERROR, instead of comparing two row counts that could coincide for
+        // unrelated reasons. The `let Err(e) = ... else { panic! }` below IS the
+        // #3721 discriminator: a swallow returns `Ok`, and `Ok` fails here.
+        //
+        // WHY THE VARIANT SET HAS TWO MEMBERS, and why pinning ONE was wrong.
+        // An earlier form of this guard required `Error::ColumnDecode` alone. It
+        // passed only because of WHERE this fixture's chunk boundary happens to
+        // fall in the corpus: the cut landed inside a cell, so the walk reached a
+        // column before running out of bytes. It does not any more. The row-body
+        // extent bound (#3809) clamps the decoders to the row's OWN declared
+        // extent, so a cut that lands in or before a row HEADER is now refused
+        // structurally by the `row_size`-vs-available framing check BEFORE any
+        // column is decoded — measured here as `row_size=592 at offset 73` with
+        // 581 bytes remaining. That is a strictly BETTER refusal (fewer bytes
+        // decoded, no column attributed that was never reached), and it is not
+        // something this test controls: `truncated` drops a whole raw CHUNK, so
+        // which surface fires is a property of the fixture's compression-chunk
+        // boundary, not of the code under test.
+        //
+        // So the assertion names BOTH legitimate truncation surfaces and is
+        // matched on the VARIANT (never on message text, issue #28). Widening it
+        // costs nothing the property needs: the swallow this issue removes returns
+        // `Ok`, which cannot satisfy either arm.
         let Err(e) = clean.0 else {
             panic!(
                 "Issue #1143/#3721 REGRESSION: the ungated (io_failed=false) drain \
@@ -906,9 +926,12 @@ mod fixture_drain {
             );
         };
         assert!(
-            matches!(e, Error::ColumnDecode { .. }),
-            "the truncated fragment's failure must surface as the dedicated \
-             per-column variant (issue #3721), not as some other error; got {e:?}"
+            matches!(e, Error::ColumnDecode { .. } | Error::Corruption(_)),
+            "the truncated fragment's failure must surface as a truncation \
+             refusal — the per-column variant (issue #3721) when the cut lands \
+             inside a cell, or the row-framing corruption refusal when it lands \
+             in or before a row header (#3809's row-extent bound) — and as \
+             neither an unrelated error nor a swallowed partial read; got {e:?}"
         );
     }
 }
