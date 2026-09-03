@@ -235,17 +235,6 @@ mach2 = "0.4"
 # which is its ONLY automated executor and fails closed on a vacuous 0-run — the
 # default `cli-helpers`-only core-tests run and pr-gate's `--lib --all-features`
 # both skip this integration target.
-# Issue #3747's empty-map-key fixture is written by real Cassandra, which compressed
-# it with LZ4 (`CompressionInfo.db` present; `LZ4Compressor` in the metadata). Reading
-# it therefore needs the `lz4` feature. `lz4` arrives via the DEFAULT `all-compression`
-# set, so every normal build and the gate's `core-tests` already have it — but under
-# `--no-default-features` this target would COMPILE and then fail at runtime on a
-# fixture it cannot decompress, which is a false red rather than a real signal
-# (roborev job 73). Declared so cargo skips the target instead.
-[[test]]
-name = "issue_3747_empty_map_key"
-required-features = ["lz4"]
-
 [[test]]
 name = "issue_1495_arrow_accessor_parity"
 required-features = ["arrow"]

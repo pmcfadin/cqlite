@@ -39,6 +39,24 @@
 //! byte-compare the golden across regenerations. Entry SET membership is the
 //! assertion subject, not cell order.
 
+#![cfg(feature = "lz4")]
+//  ^ SOURCE-level gate, deliberately NOT a `[[test]] required-features` entry.
+//
+//  The fixture is real Cassandra output and LZ4-compressed (`CompressionInfo.db`
+//  present, `LZ4Compressor` in the metadata), so reading it needs `lz4`. Without the
+//  feature the target would compile and then fail at runtime on a blob it cannot
+//  decompress — a false red, not a signal (roborev job 73).
+//
+//  A `[[test]]` entry would have been the obvious way to say that, and it is WRONG
+//  here: this file is in the package `exclude` list (it fails closed on a fixture
+//  outside the crate, roborev job 61), so a manifest target would survive into the
+//  published manifest pointing at a source file that does not (roborev job 92). The
+//  repo pattern is exclude OR declare, never both. A source-level `cfg` needs no
+//  target declaration, so all three hold at once.
+//
+//  `lz4` arrives via the DEFAULT `all-compression` set, so every lane that runs this
+//  package has it and none silently executes zero tests here (the #3375 hazard).
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
