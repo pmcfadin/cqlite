@@ -9,6 +9,7 @@
 use super::super::scan_stream_windowed::{WindowedOut, BATCH_EMIT_ROWS};
 use super::super::SSTableReader;
 use super::model::{sort_by_token_order_with_meta, SCAN_FOR_KEY_CALLS};
+use crate::storage::sstable::reader::parsing::BufferExtent;
 use crate::types::{CellWriteMetadata, ScanRow};
 use crate::{Result, RowKey};
 use std::io::SeekFrom;
@@ -630,8 +631,20 @@ impl SSTableReader {
             Some(now) => parser.with_now_secs(now),
             None => parser,
         };
-        let parsed =
-            parser.parse_block_with_cell_metadata(&whole, effective_schema.as_ref(), self)?;
+        // Issue #3782 (roborev job 48): `whole` is the ENTIRE data section —
+        // every chunk, stitched from a fresh cursor seeked to the data-section
+        // start above — so no further bytes can arrive to finish a row and a row
+        // decode error here is DATA LOSS. Before this declaration the `da` full
+        // scan (this is the route `scan`/`get_all_entries`/the batched streaming
+        // surface all take) inherited the tolerant break and returned `Ok` with
+        // 120 of 468 rows on a fixture with ONE compressed byte flipped inside a
+        // clustering value.
+        let parsed = parser.parse_block_with_cell_metadata(
+            &whole,
+            BufferExtent::Complete,
+            effective_schema.as_ref(),
+            self,
+        )?;
 
         let mut results = Vec::new();
         // Work-probe (issue #2398, threaded to BTI by #3109): "changed partition key

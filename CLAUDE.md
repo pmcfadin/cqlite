@@ -1073,7 +1073,30 @@ Keep files small — agentic context cost scales with file size. Targets (total 
 included): source `~800`, test files `~1500`. The gate's `file-size` ratchet FAILs if your change
 grows an over-threshold `.rs` file (or pushes one over). Touching an over-threshold file → split it
 by responsibility (source: epic #1116; tests: #1135). Genuinely out of scope → re-run with
-`CQLITE_ALLOW_FILE_GROWTH=1` and leave a note linking #1116/#1135.
+`CQLITE_ALLOW_FILE_GROWTH=1` and leave a note linking #1116/#1135. **That override is now
+VISIBLE in the SUMMARY, and the component's status token says so (#3402):**
+`file-size: OPT-OUT (0s)  [no-cargo] — CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); N
+over-threshold file(s) grown — see <logdir>/file-size.log`. `PASS` means the check RAN
+and was SATISFIED; it never means the check was switched off — a bare `file-size: PASS` under an
+engaged override was indistinguishable from a genuine one, so the disclosure depended on the
+author remembering to write it in the PR body. `OPT-OUT` is NON-FAILING (only an exact `FAIL`
+sets `OVERALL=FAIL`), so an acknowledged growth still reaches `RESULT: PASS` — it is now merely
+impossible to hide. It is emitted ONLY for the value **exactly `1`**: a value SET BUT NOT `1`
+(`0`, `true`, `yes`) is not an opt-out, stays a ratchet violation and FAILs, because a
+permissive branch keyed on `!= <bad>` would let a typo waive the ratchet. **The row carries NO
+repository content**: the file NAMES live in `file-size.log` (#3401) and, for a reviewer, in the
+PR diff itself. Rendering them inline was tried and REMOVED — it was the optional half of #3402
+("ideally naming the files") and produced THREE of that PR's seven review findings, one per
+round, each a different way of mangling a filename (a `: ` split recovering a path from a
+display string; substitution inside a path containing `RESULT:`; `,` joining, making
+`src/a.rs,b.rs` indistinguishable from two files). **Remove the mechanism rather than carve it a
+fourth time** (#3229's ruling); escaping only moves the argument to the escape grammar (#3312).
+So the one boundary rendering these details (`_status_detail`) takes GATE-AUTHORED text only —
+fixed wording plus computed values — strips `[:cntrl:]` under `LC_ALL=C`, and WITHHOLDS any
+value carrying the completion probe's `RESULT:` token rather than rewriting it, because a
+rewrite would name something that does not exist. If you add a component that needs repository
+content in its detail, re-introduce a trusted/untrusted split deliberately; do not smuggle it
+through the gate-authored field.
 
 ### Testing
 - Integration tests use real SSTable data only; validate against `sstabledump` output via JSONL
