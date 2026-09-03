@@ -438,7 +438,7 @@ fn cancel_during_large_index_parse_aborts_promptly() {
     // two-scheduling-window defect one crate over, in a longer-running gate
     // component. It is out of scope for #3940 (different crate, and a
     // deterministic fix there needs a hook INSIDE the core parse loop, whose
-    // mid-loop landing is precisely that test's value) and is tracked separately.
+    // mid-loop landing is precisely that test's value) and is tracked as issue #3982.
     assert!(
         matches!(res, Err(WarmError::Cancelled)),
         "a cancel tripped on the opening thread immediately before a large \
