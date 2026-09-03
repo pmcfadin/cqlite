@@ -47,7 +47,7 @@ SUBJECT="$REPO_ROOT/scripts/gate-liveness.sh"
 # Case floor (CLAUDE.md, #3544): a span-replacing edit that silently deletes cases yields a green
 # tally over a shrunken suite. This is ENFORCED (exit 1), not merely printed, and may only go DOWN
 # with a stated reason.
-CASE_FLOOR=21
+CASE_FLOOR=23
 
 pass=0; fail=0; cases=0
 ok()   { cases=$((cases+1)); pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
@@ -110,76 +110,63 @@ print_scope
 violations() {
   local file="$1"
   awk '
-    # QUOTE-CORRECT STRUCTURE (roborev jobs 36 + 74). Two derived strings from ONE pass, each
-    # used for exactly one purpose, because the two purposes want opposite things inside quotes:
-    #   mode 0 -> neutralise only ; | & inside a quoted span. Used for the structural split and
-    #             for READER detection, which must still see the sed quit command (normally
-    #             written inside quotes).
-    #   mode 1 -> the same, PLUS blank every other character inside the span. Used for WRITER
-    #             detection, so a quoted ARGUMENT that merely contains the word printf or echo
-    #             is not mistaken for a builtin writer (job 74, finding 2).
-    # Both strings keep identical length and identical separator positions, so the splits below
-    # stay index-parallel.
-    # Backslash escapes are tracked inside DOUBLE quotes only, which is where bash honours them:
-    # without that, a literal escaped quote desynchronises the quote state and MASKS a real pipe
-    # (job 74, finding 1 -- a false negative, the direction that lets the defect return).
-    function destructure(s, mode,   out, i, n, c, q, esc) {
-      out = ""; q = ""; esc = 0; n = length(s)
-      for (i = 1; i <= n; i++) {
+    # THE BROAD FORM (lead ruling on REQUEST-3803-B, 2026-09-03). A bash BUILTIN writer
+    # (printf/echo) with a pipe anywhere after it on the same line is a FAIL. Full stop. No quote
+    # tracking, no command-segment splitting, no recognised-reader set, no stage ordering.
+    #
+    # WHY THE NARROW FORM WAS ABANDONED. Six review rounds produced NINE findings in a ~50-line
+    # matcher and the per-round count ROSE (1,1,1,2,2,3). Three of the nine were false NEGATIVES:
+    # a quoted semicolon splitting a command and hiding a real hazard; an escaped quote
+    # desynchronising the scanner and masking a real pipe; an unquoted backslash doing the same;
+    # `echo|head` missed for want of whitespace after the builtin. Each fix to the recogniser
+    # opened the next hole, because it was a recogniser over bash-as-written -- a grammar the
+    # author controls, so the residual set never closes (#3312).
+    #
+    # THE ASYMMETRY THAT DECIDES IT (#3229). A guard with documented false-PASSes is worse than no
+    # guard: it hides defects while reading green. A guard with loud false POSITIVES costs NOISE,
+    # not blindness -- it fails in the direction someone notices and fixes. The broad form catches
+    # every hazard raised across all six rounds, including the four false negatives above.
+    #
+    # THE DECLARED FALSE-POSITIVE SET -- accepted noise, not oversight. Each of these is CORRECT
+    # code that this guard REPORTS. The remedy is always the same: restructure the line (move the
+    # pipe off it, or split the statement). None occurs in the subject today.
+    #   1. a pipe inside a format string        printf %s "a | b"
+    #   2. a pipe inside a quoted argument      echo "col1|col2"
+    #   3. a pipe in a trailing comment         printf %s "$x"   # see: cmd | head
+    #   4. an unrelated later pipeline          v=$(printf %s "$x"); other | grep -q y
+    #   5. a quoted option-looking pattern      printf %s "$t" | grep -e "text -q"
+    #   6. a run-to-EOF reader                  printf %s "$t" | grep -c foo
+    # NOT in this set, because the broad form gets it RIGHT: a writer in the LAST pipeline stage
+    # (`producer | grep -q x | printf %s done`) feeds nothing and is correctly NOT reported.
+    # Narrowing any of these is issue #3992, whose acceptance criteria are the nine findings.
+    #
+    # First `|` that is a pipe rather than half of `||`.
+    # Searches from `from`, so the pipe found is one the WRITER could feed. Taking the first
+    # pipe on the whole line instead was a FALSE NEGATIVE I shipped and caught by test:
+    # `producer | printf %s "$x" | grep -q y` has a pipe BEFORE the writer, and skipping on
+    # that comparison dropped a real hazard.
+    function first_pipe(s, from,   i, c, n) {
+      n = length(s)
+      if (from < 1) from = 1
+      for (i = from; i <= n; i++) {
         c = substr(s, i, 1)
-        if (q == "") {
-          if (c == "\047" || c == "\042") q = c
-          out = out c
-        } else if (esc) {
-          out = out (mode ? "Q" : c); esc = 0
-        } else if (q == "\042" && c == "\\") {
-          esc = 1; out = out (mode ? "Q" : c)
-        } else if (c == q) {
-          q = ""; out = out c
-        } else if (c == ";" || c == "|" || c == "&") {
-          out = out "_"
-        } else {
-          out = out (mode ? "Q" : c)
-        }
+        if (c != "|") continue
+        if (substr(s, i + 1, 1) == "|") { i++; continue }
+        if (i > 1 && substr(s, i - 1, 1) == "|") continue
+        return i
       }
-      return out
+      return 0
     }
     { line = $0 }
     line ~ /^[[:space:]]*#/ { next }
     {
-      work = destructure(line, 0); wmask = destructure(line, 1)
-      gsub(/&&/, ";", work);  gsub(/\|\|/, ";", work)
-      gsub(/&&/, ";", wmask); gsub(/\|\|/, ";", wmask)
-      ncmd = split(work, cmd, ";"); split(wmask, wcmd, ";")
-      for (c = 1; c <= ncmd; c++) {
-        n = split(cmd[c], seg, "|"); split(wcmd[c], wseg, "|")
-        if (n < 2) continue
-        # The writer must be UPSTREAM of the reader: a builtin in the LAST stage feeds nothing
-        # that can short-circuit, so it can never take EPIPE (case 9c pins both directions).
-        # Detected on the MASKED stage, so quoted text cannot supply the writer name.
-        wstage = 0
-        for (i = 1; i <= n; i++) {
-          if (wseg[i] ~ /(^|[^[:alnum:]_.\/-])(printf|echo)[[:space:]]/) { wstage = i; break }
-        }
-        if (wstage == 0 || wstage == n) continue
-        for (i = wstage + 1; i <= n; i++) {
-          s = seg[i]
-          sub(/^[[:space:]]+/, "", s)
-          sub(/^&[[:space:]]*/, "", s)   # |& redirects stderr too; still a pipe
-          sub(/^[[:space:]]+/, "", s)
-          if (match(s, /^[A-Za-z_][A-Za-z0-9_.-]*/) == 0) continue
-          w = substr(s, 1, RLENGTH)
-          if (w == "head")                                              hazard = 1
-          else if (w == "grep" && s ~ /(^|[[:space:]])-[A-Za-z]*[qm]/)  hazard = 1
-          else if (w == "grep" && s ~ /(^|[[:space:]])--(quiet|silent|max-count)([=[:space:]]|$)/) hazard = 1
-          else if (w == "read")                                         hazard = 1
-          # The underscore is in these classes because destructure maps a QUOTED semicolon to an
-          # underscore, and the sed quit is normally written inside quotes as p semicolon q.
-          else if (w == "sed"  && s ~ /(^|[;_\'"'"'"[:space:]])[0-9]*q([;_\'"'"'"[:space:]]|$)/) hazard = 1
-          else if (w == "awk"  && s ~ /exit/)                           hazard = 1
-        }
-      }
-      if (hazard) { printf "%d:%s\n", NR, line; hazard = 0 }
+      # The writer token boundary is whitespace OR the pipe itself, so `echo|head` is caught --
+      # a form the narrow revisions missed for want of trailing whitespace.
+      if (!match(line, /(^|[^[:alnum:]_.\/-])(printf|echo)([[:space:]]|\|)/)) next
+      w = RSTART
+      p = first_pipe(line, w)
+      if (p == 0) next
+      printf "%d:%s\n", NR, line
     }
   ' "$file"
 }
@@ -265,11 +252,10 @@ _field() {
 open_ln=$(grep -nxF 'X' <<<"$t" | head -1 | cut -d: -f1)
 verdict() { echo "gate-liveness: $1 ($3)"; }
 if [ "$a" = "b" ] || [ "$c" = "d" ]; then printf 'x\n'; fi
-cnt=$(printf '%s\n' "$t" | grep -c '^x: ')
 NEG
 neg_n=$(n_violations "$tmp/neg.sh")
 if [ "$neg_n" -eq 0 ]; then
-  ok "5 negative control: herestrings, \`||\`, and a run-to-EOF reader are NOT flagged (0 RECOGNISED)"
+  ok "5 negative control: herestrings and \`||\` are NOT flagged (0 RECOGNISED)"
 else
   bad "5 negative control" "matcher flagged $neg_n site(s) in a clean fixture — false positives"
 fi
@@ -283,24 +269,29 @@ fi
 # four cases are the regression pins. Each is a SEPARATE case so a fix that repairs three of them
 # cannot hide behind an aggregate.
 # ---------------------------------------------------------------------------
-_fp_case() { # _fp_case <n> <label> <line-of-bash>
+# DECLARED FALSE POSITIVE. The broad form REPORTS these shapes, which are correct code. That is
+# the accepted cost of the lead ruling on REQUEST-3803-B: loud noise instead of silent blindness
+# (#3229). Each is pinned so the accepted set is EXPLICIT and cannot drift silently -- if one of
+# these stops being reported the matcher has been narrowed, which is issue #3992 and needs the
+# declaration in violations() updated in the same change.
+_declared_fp() { # _declared_fp <n> <label> <line-of-bash>
   local n="$1" label="$2" body="$3" got
   printf '%s\n' '#!/usr/bin/env bash' >"$tmp/fp$n.sh"
   printf '%s\n' "$body" >>"$tmp/fp$n.sh"
   got=$(n_violations "$tmp/fp$n.sh")
-  if [ "$got" -eq 0 ]; then
-    ok "$n negative control (false-positive class): $label — 0 RECOGNISED"
+  if [ "$got" -ge 1 ]; then
+    ok "$n DECLARED false positive (accepted noise): $label — reported, remedy is to restructure the line"
   else
-    bad "$n negative control (false-positive class): $label" "matcher flagged $got site(s) on CORRECT code: $body"
+    bad "$n DECLARED false positive: $label" "expected the broad form to REPORT this shape and it did not — the matcher has been narrowed; see #3992 and update the declaration in violations()"
   fi
 }
-_fp_case 6 "a pipe inside the FORMAT STRING"        "printf 'a | b\\n'"
-_fp_case 7 "a pipe inside a TRAILING COMMENT"       'printf '"'"'%s\n'"'"' "x"   # comment with | pipes in it'
-_fp_case 8 "a pipe inside a QUOTED ARGUMENT"        'echo "col1|col2"'
+_declared_fp 6 "a pipe inside the FORMAT STRING"        "printf 'a | b\\n'"
+_declared_fp 7 "a pipe inside a TRAILING COMMENT"       'printf '"'"'%s\n'"'"' "x"   # comment with | pipes in it'
+_declared_fp 8 "a pipe inside a QUOTED ARGUMENT"        'echo "col1|col2"'
 # NOTE: the reader here is DELIBERATELY a recognised one (`grep -q`). With a non-reader such as
 # `thing` this case passes on the reader requirement alone and never exercises the `;` handling it
 # claims to test -- a case passing for the wrong reason.
-_fp_case 9 "an UNRELATED later pipeline, same line" 'v=$(printf '"'"'%s'"'"' "$x"); other | grep -q x'
+_declared_fp 9 "an UNRELATED later pipeline, same line" 'v=$(printf '"'"'%s'"'"' "$x"); other | grep -q x'
 
 # ---------------------------------------------------------------------------
 # 9b. CONVERSE CONTROL. Cases 6-9 assert the matcher stays QUIET on correct code; alone they are
@@ -349,7 +340,7 @@ _pin() { # _pin <id> <expected-count> <label> <line-of-bash>
 # finding 1, false-NEGATIVE half: a quoted `;` must not hide a real hazard.
 _pin 9d 1 "a quoted semicolon does NOT hide a real hazard" 'printf '"'"'x;y\n'"'"' | grep -q x'
 # finding 1, false-POSITIVE half: a quoted `|` is not a pipe.
-_pin 9e 0 "a quoted pipe is NOT read as a pipeline"        'printf '"'"'x | grep -q y\n'"'"''
+_pin 9e 1 "DECLARED noise: a quoted pipe IS reported (accepted; #3992)"        'printf '"'"'x | grep -q y\n'"'"''
 # finding 2: long-option short-circuiting spellings must be recognised.
 _pin 9f 3 "grep long options --quiet/--silent/--max-count are recognised" 'printf %s "$t" | grep --quiet a
 printf %s "$t" | grep --silent a
@@ -364,7 +355,18 @@ _pin 9g 1 "sed quit inside quotes is still recognised"     'printf %s "$t" | sed
 #    could have come back under a green gate.
 # ---------------------------------------------------------------------------
 _pin 9h 1 "an escaped double quote does NOT mask a real pipe" 'printf "%s\n" "a\"b" | grep -q a'
-_pin 9i 0 "a quoted ARGUMENT containing the word printf is not a writer" 'grep -F "printf value" "$file" | grep -q value'
+_pin 9i 1 "DECLARED noise: a quoted arg containing the word printf IS reported (accepted; #3992)" 'grep -F "printf value" "$file" | grep -q value'
+
+# ---------------------------------------------------------------------------
+# 9j-9k. The two hazards the BROAD form exists to catch that EVERY narrow revision missed.
+#    9j is `echo|head` -- missed for want of whitespace after the builtin (job 76).
+#    9k is a writer preceded by an UNRELATED pipe -- a false negative I shipped in the broad
+#    form itself and caught by test: taking the first pipe on the whole LINE rather than the
+#    first pipe after the WRITER skipped it. Both are false-negative direction, which is the
+#    direction this whole design change exists to eliminate.
+# ---------------------------------------------------------------------------
+_pin 9j 1 "no-argument writer: echo|head is caught (every narrow revision missed it)" 'echo|head -n 0'
+_pin 9k 1 "a writer preceded by an unrelated pipe is still caught" 'producer | printf %s "$x" | grep -q y'
 
 # ---------------------------------------------------------------------------
 # 10. THE ASSERTION. Scan the SHIPPED reader.
