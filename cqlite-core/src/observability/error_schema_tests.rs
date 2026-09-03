@@ -422,6 +422,8 @@ fn error_samples() -> Vec<Error> {
             source: None,
         },
         Error::Corruption("c".into()),
+        // Issue #3721: a per-column decode failure, wrapping its underlying cause.
+        Error::column_decode("col", "int", 0, Error::Corruption("c".into())),
         Error::Schema("s".into()),
         Error::CqlParse("q".into()),
         Error::InvalidFormat("f".into()),
@@ -801,6 +803,14 @@ fn independent_expectations() -> Vec<(Error, ObsErrorCategory)> {
         // deliberately NOT `Parsing`, so a checksum/framing failure lands on the
         // corruption dashboard an operator watches for bit-rot (#1705, F10).
         (Error::CorruptCommitLogFrame("f".into()), Corruption),
+        // Issue #3721: a column whose value could not be decoded IS undecodable
+        // data at the cell level, so it joins `Corruption` on the dashboard an
+        // operator watches for bad bytes — deliberately NOT `Schema` (the declared
+        // type may be perfectly valid and the BYTES wrong) and never `Other`.
+        (
+            Error::column_decode("col", "int", 0, Error::corruption("c")),
+            Corruption,
+        ),
         (Error::schema("s"), Schema),
         (Error::Table("t".into()), Schema),
         (Error::parse("p"), Parsing),

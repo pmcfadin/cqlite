@@ -301,6 +301,39 @@ required-features = ["state_machine", "cli-helpers"]
 name = "issue_2148_statistics_toc_single_walk"
 required-features = ["cli-helpers"]
 
+# Per-column decode failures must be OBSERVABLE, not a silently truncated row
+# (issue #3721). Drives the fixtures through `cqlite_core::ingestion::ingest` +
+# `Database::execute` — the public read surface — which lives behind
+# `cli-helpers`, so the target is declared here rather than compiled into a
+# default-feature `cargo test` that cannot link it. The gate's `core-tests`
+# component runs `--features cli-helpers`, so it EXECUTES there.
+[[test]]
+name = "issue_3721_column_decode_error_surface"
+required-features = ["cli-helpers"]
+
+# Column decoding must be bounded by the ROW's authoritative end, not by the length
+# of the whole parse unit (issue #3809, found reviewing #3721): a cell reading past
+# its row returns the NEXT row's bytes as a value, and a cell stopping short leaves
+# the body partly unaccounted for — both SILENT wrong answers. Same public surface
+# (`ingestion::ingest` + `Database::execute`), so the same `cli-helpers` gate.
+[[test]]
+name = "issue_3809_column_decode_row_bound"
+required-features = ["cli-helpers"]
+
+# Range-tombstone MARKER refusals must be OBSERVABLE too — the same swallow one
+# structural level up from the per-column one (issue #3721). Same public surface
+# (`ingestion::ingest` + `Database::execute`), so the same `cli-helpers` gate.
+[[test]]
+name = "issue_3721_range_marker_refusal_surface"
+required-features = ["cli-helpers"]
+
+# The delta-scan row loop must not re-wrap (and so ERASE) `Error::ColumnDecode`
+# (issue #3721). `#![cfg]`-gated on `delta-scan` + `cli-helpers`; declared here so
+# the target is not compiled into a default-feature `cargo test`.
+[[test]]
+name = "issue_3721_delta_scan_column_decode_variant"
+required-features = ["delta-scan", "cli-helpers"]
+
 # Scan-path error counting (issue #1704). It is
 # `#![cfg(all(feature = "observability-testing", feature = "delta-scan"))]` — the
 # in-memory metric capture harness needs the SDK testing exporters, and the
