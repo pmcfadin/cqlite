@@ -7,8 +7,9 @@
 //! During #3790 the `time` comparator was changed to SIGNED and `time` was removed
 //! from this path's raw-byte fast path, on the argument that the comparator should
 //! agree with "the writer". **Both changes were wrong and were reverted.** The
-//! argument verified the wrong writer: `Value::PartialOrd` is signed, but it does
-//! NOT determine on-disk collection order. **PRECISELY WHICH WRITER SORTS WHERE**
+//! argument verified the wrong writer: `Value::PartialOrd` was signed AT THE TIME
+//! (#3935 has since made it BYTE_ORDER too), and it does NOT determine on-disk
+//! collection order either way. **PRECISELY WHICH WRITER SORTS WHERE**
 //! (an earlier revision of this paragraph said `complex.rs` re-sorts EVERY non-list
 //! collection's cell paths, which is FALSE — only ONE of its two paths does):
 //!

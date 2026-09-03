@@ -84,40 +84,51 @@ fn compare_inet(left: &Value, right: &Value) -> Result<Ordering> {
 /// `to_be_bytes()` is the serialized form verbatim, so THIS COMPARATOR agrees
 /// with Cassandra for all inputs.
 ///
-/// SCOPED CLAIM — this comparator, not the whole system (roborev jobs 45/70).
-/// Other sites order `time` too. What #3935 closed is the COLLECTION-ORDER write
-/// sites, which now agree with this comparator for ALL inputs:
+/// CONVERGENCE (#3935): every `time` ordering site in the tree now compares the
+/// 8-byte big-endian serialized form as unsigned bytes, so they agree for ALL
+/// inputs — in-range and out-of-range-negative alike. The enumerated set:
+///   * THIS comparator, `types::comparator::custom::compare_time`, reached by
+///     `ComparatorType::Custom("time")` on the read/clustering path;
+///   * `Value::PartialOrd`'s `Time` arm (`types.rs`) — corrected from signed
+///     `i64::partial_cmp` by #3935. The query-side comparator
+///     `select_executor::value_ops::try_compare_values` delegates here for
+///     same-variant operands (`Value::Time` has no `as_f64`, so it never takes
+///     the numeric-coercion branch), so it converged with it;
+///   * `write_engine::mutation::compare_values` — corrected from signed
+///     `i64::cmp` by #3935. Both `ClusteringKey::compare` and `ClusteringKey`'s
+///     `Ord` call it, and `write_engine::merge` sorts merged rows with
+///     `ClusteringKey::compare` under the comment "Sort merged rows by
+///     clustering key for output order", i.e. it decides the PHYSICAL ROW ORDER
+///     written to `Data.db` for a `time` CLUSTERING COLUMN. That is the
+///     disk-reaching site, and it is why a partial fix was refused;
 ///   * the whole-collection AND frozen writer,
 ///     `data_writer/collection_order::compare_collection_elements` — called both
 ///     by `write_set_complex_cells`/`write_map_complex_cells` (which then emit
 ///     cell paths in that order with no re-sort) and by `encoding.rs`'s frozen
-///     `serialize_value` — corrected from signed to `to_be_bytes()`;
+///     `serialize_value` — corrected from signed by #3935;
 ///   * the frozen sorted-collection canonicalizer,
 ///     `data_writer/marshal_comparator::classify_comparator`, which orders a UDT's
 ///     `SetType` element / `MapType` key field and had the SAME defect
 ///     independently (`serialize_collection_elements` does not re-sort, so its
-///     order is the on-disk order for a UDT field);
-///   * the per-element writer, `schema_helpers::compare_cell_paths`, already
-///     unsigned raw bytes.
+///     order is the on-disk order for a UDT field) — corrected by #3935;
+///   * the per-element writer, `schema_helpers::compare_cell_paths`, and the
+///     merged-read raw-byte fast path
+///     (`merge::read_assembly::comparator_orders_by_raw_cell_path_bytes`), both
+///     already unsigned raw bytes.
 ///
-/// TWO SITES REMAIN SIGNED, and the DISK-REACHING SET IS NOT CLOSED:
-///   * `Value::PartialOrd` (`types.rs`);
-///   * `write_engine::mutation::compare_values`, whose `Time` arm is `a.cmp(b)`.
-///     Both `ClusteringKey::compare` and `ClusteringKey`'s `Ord` call it, and
-///     `write_engine::merge` sorts merged rows with `ClusteringKey::compare`
-///     under the comment "Sort merged rows by clustering key for output order" —
-///     i.e. it decides the PHYSICAL ROW ORDER written to `Data.db`. So a signed
-///     `time` comparison DOES still reach disk, for a `time` CLUSTERING COLUMN.
-///     An earlier revision of this comment said "the site that REACHES DISK is
-///     now unsigned"; that was FALSE, and the corrected statement is the scoped
-///     one above.
-///
-/// Both are tracked by **#3920**.
-///
-/// The remaining signed sites agree with this one for every value in `time`'s
-/// valid range and DISAGREE for an out-of-range negative nanos. **A READ CAN
-/// OBSERVE THAT** — an earlier revision of this comment claimed it could not,
-/// which was wrong.
+/// The enumeration is a CENSUS, not a proof of closure: it records the sites
+/// found by grepping every `Value::Time`-vs-`Value::Time` comparison arm plus
+/// every `TimeType` classification in the marshal-name comparators, and a NEW
+/// comparator added later would not be in it. After #3935 the only signed
+/// `Value::Time` comparison LEFT in the tree is a deliberate test-only NEGATIVE
+/// CONTROL (`collection_order`'s `time_orders_by_byte_order`, which re-sorts
+/// with the old signed closure and asserts the two sequences DIFFER, so the
+/// byte-order assertion provably has teeth). `Value::Timestamp` is deliberately
+/// NOT in this set and must stay SIGNED everywhere — `TimestampType` is
+/// `ComparisonType.CUSTOM` and its `compareCustom` delegates to
+/// `LongType.compareLongs` — so do not "unify" a `Time` arm with a `Timestamp`
+/// one. The convergence is pinned by
+/// `cqlite-core/tests/issue_3935_collection_time_byte_order.rs`.
 ///
 /// # CANONICAL STATEMENT: range validation would *not* close the class
 ///
@@ -138,7 +149,9 @@ fn compare_inet(left: &Value, right: &Value) -> Result<Ordering> {
 /// validation, is stored, and is ordered by `TimeType`'s BYTE_ORDER. Cassandra
 /// does not reject such a value; BYTE_ORDER is simply what the pinned tag
 /// specifies for it, which is why byte-order-exactness — not validation — is the
-/// rule every site has to converge on (#3920 for the two that have not yet).
+/// rule every site has converged on (see CONVERGENCE above). Range validation was
+/// explicitly REFUSED for #3935: if stock Cassandra can write it, CQLite must read
+/// it, so a range check would make CQLite reject data Cassandra created.
 fn compare_time(left: &Value, right: &Value) -> Result<Ordering> {
     match (left, right) {
         (Value::Time(l), Value::Time(r)) => Ok(l.to_be_bytes().cmp(&r.to_be_bytes())),
