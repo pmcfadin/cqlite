@@ -95,7 +95,32 @@
 //!   with only 10 bytes present answered `Done` and dropped the partition.
 //!
 //! Both are pinned by `both_stitched_walks_agree_and_refuse_a_truncated_final_header`
-//! and `the_sliding_driver_refuses_a_final_chunk_header_truncated_past_its_length`.
+//! and `the_sliding_driver_refuses_any_non_empty_truncated_header_at_the_final_chunk`.
+//!
+//! # Fix round 2 — one predicate, and the two edges the round-1 one got wrong
+//!
+//! Review found the round-1 predicate wrong at BOTH its edges, which is the
+//! third consecutive finding in one place — so the mechanism was replaced rather
+//! than given a fourth condition. Tolerance is now ONE piece of state,
+//! `HeaderTolerance` (in `buffer_extent.rs`, beside the contract it completes):
+//! *can a byte still arrive, or is this walk's progress no longer attributable?*
+//! Both header arms consult it and the byte count decides nothing.
+//!
+//! * **C1** — a ONE-BYTE final chunk was returned as clean completion. That byte
+//!   can be the surviving first byte of a truncated key length, so both drivers
+//!   dropped the final partition; and `block_emit` already REFUSED the identical
+//!   bytes, so the DRIVER path and the BLOCK-EMIT path disagreed about one file —
+//!   a different pair from the block-vs-metadata one round 1 closed. Measured
+//!   pre-fix: `Done after emitting 0 row(s) over 1 byte(s) of a header that
+//!   declares a 16-byte key`, and three-way `driver: Ok, block-emit walk: Err,
+//!   cell-metadata walk: Err`. Pinned by
+//!   `the_driver_and_both_block_walks_agree_on_a_truncated_final_header`.
+//! * **C2** — the round-1 flag disabled refusal for the WHOLE call, so a
+//!   `Complete` buffer with a `row_body_window` byte-resynced past the malformed
+//!   INITIAL header, before the window had introduced any uncertainty. Measured
+//!   pre-fix: `Skipping malformed partition header at offset 0 … key length of
+//!   0 … (partition=0)`. Pinned by
+//!   `a_bounded_walk_still_refuses_a_malformed_initial_header`.
 //!
 //! # DECLARED RESIDUAL — the partition-key LENGTH model (#3999)
 //!
@@ -801,9 +826,21 @@ async fn bti_scan_refuses_a_partition_header_cassandra_itself_rejects() {
 ///
 /// RE-TAKEN after fix round 1 added two more refusing arms (the drivers'
 /// truncated-`Incomplete` refusal and the block walk's sub-two-byte tail): the
-/// same figures again, to the unit — 542, and 0 at all six header sites. So
-/// neither new arm fires on well-formed input, and the row arm's count has not
-/// moved across either round.
+/// same figures again, to the unit — 542, and 0 at all six header sites.
+///
+/// RE-TAKEN AGAIN after fix round 2 replaced the predicate with
+/// `HeaderTolerance` and made every non-empty incomplete header fatal at the
+/// final chunk (C1). Same subject set, same 542, still ZERO at every REFUSING
+/// header site and zero errors — plus one figure the earlier runs did not
+/// separate out: the drivers' `Incomplete` arm fires **3** times MID-STREAM
+/// (`NeedMore`) on the well-formed corpus.
+///
+/// Those 3 are the legitimate straddling header — #1741's whole subject, a
+/// header split across a chunk boundary — and they are the measured reason C1's
+/// refusal is gated on `at_final_chunk` rather than applied to every incomplete
+/// header: three real corpus tables would red if it were not. The final-chunk
+/// side of that same arm fires **0** times, which is why making it fatal costs
+/// nothing.
 ///
 /// So the header-arm refusal costs nothing on well-formed input, and the row
 /// arm's toleration count did not move — which is AC3's property. The
