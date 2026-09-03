@@ -160,33 +160,47 @@ describe('the helper error message is not inlined by another suite (issue #3641)
       // but package.json ships x86_64-pc-windows-msvc, and the extension path
       // is exactly what this allow-list exists to invite.
       .map((full) => path.relative(__dirname, full).split(path.sep).join('/'))
-      // PER-OCCURRENCE, not per-file (roborev job 101). The allow-list's stated
-      // contract is that it permits a file to ASSERT on the message -- but
-      // exempting the whole FILE delivered something weaker: once a file was
-      // allow-listed, a fresh inline copy of the helper's body ANYWHERE in that
-      // same file became invisible to this guard, which is the one thing it
-      // exists to catch. The mechanism was coarser than the contract, which is
-      // this issue's own defect class inside its own exemption path.
+      // The exemption is FILE-level, and that is a DECLARED GAP rather than an
+      // oversight (roborev jobs 101 and 103). Read this before "tightening" it.
       //
-      // So an allow-listed file exempts only the occurrences that ARE
-      // assertions; every other occurrence in it is still an offender. Judged
-      // per LINE by the assertion shape, deliberately NOT by an expected
-      // occurrence COUNT: a count is a curated number that reds the moment
-      // someone adds a legitimate third assertion, and a guard that reds on
-      // correct input is the guard agents learn to waive -- the same reasoning
-      // that removed the hard-coded suite count this issue began with.
+      // job 101 was right that the contract ("permits a file to ASSERT on the
+      // message") is stronger than a file-level exemption delivers: an inline
+      // copy of the helper's body elsewhere in an allow-listed file is not
+      // seen. The obvious fix -- exempt only occurrences that LOOK like
+      // assertions -- was implemented, and job 103 then showed it reds on
+      // CORRECT input. Both halves of that are MEASURED in this suite, not
+      // supposed:
+      //   * multiline assertions are real here: `.toThrow(` with its argument
+      //     on the NEXT line appears at leak-paths.test.js:766 and in 4 more
+      //     places, so a same-line shape test misses them;
+      //   * the anticipated exemption case, dataset-guard.test.js, asserts on
+      //     child-process output with `toMatch` (107 `toMatch` / 70 `toContain`
+      //     / 39 `toThrow` across the suite), so a toThrow-only test would
+      //     report the very file this allow-list exists to serve.
+      // Widening the matcher set fixes neither the multiline half nor the next
+      // shape: it is a recogniser over source text, and those do not close
+      // (CLAUDE.md: remove the channel, do not pick a rarer delimiter; and a
+      // guard that reds on correct input is the guard agents learn to waive).
+      // An expected-occurrence COUNT was rejected too -- a curated number goes
+      // red the moment someone adds a legitimate third assertion, the same trap
+      // as the hard-coded suite count this issue began with.
+      //
+      // So the CONTRACT is narrowed to what the mechanism delivers, and the
+      // residual is stated: within an allow-listed file this guard does not
+      // distinguish an assertion from a copy. That residual is bounded by the
+      // allow-list being one deliberate, reasoned entry long -- adding to it is
+      // a reviewed act, which is the actual control here. Closing it properly
+      // needs a syntax-aware check, which is far beyond this issue's subject.
+      .filter((rel) => !MESSAGE_LITERAL_ALLOWED.has(rel))
+      // Reported as file:line even though the exemption is file-level, because
+      // a location is a better diagnostic than a bare filename.
       .flatMap((rel) => {
         const lines = fs
           .readFileSync(path.join(__dirname, rel), 'utf8')
           .split('\n');
-        const allowed = MESSAGE_LITERAL_ALLOWED.has(rel);
         return lines
           .map((line, i) => ({ line, no: i + 1 }))
           .filter(({ line }) => line.includes(MESSAGE_LITERAL))
-          // In an allowed file an assertion USE is exempt; a `throw` of the
-          // message -- i.e. a copy of the helper's body -- is not. In a
-          // non-allowed file every occurrence is an offender.
-          .filter(({ line }) => !(allowed && line.includes('toThrow(')))
           .map(({ no }) => `${rel}:${no}`);
       });
     expect(offenders).toEqual([]);
