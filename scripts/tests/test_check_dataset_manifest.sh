@@ -2594,16 +2594,26 @@ JESTSTUB
     # this function AGREE -- the SUMMARY reader four lines below has always read
     # `[A-Za-z-]*`, and only the log side had a list.
     #
-    # ` (' -- the duration/reason paren -- is the DISCRIMINATOR, and it is the whole
-    # reason a one-word token is safe: it keeps the capture off this component's
-    # continuation prose (`>>> [node-bindings]   NOT VALIDATED by this run: ...`) and off
-    # its coverage census. It deliberately does NOT require `([0-9]+s)`: the BRANCH
-    # ANNOUNCEMENTS (`SKIP (AGENT_GATE_ALLOW_MISSING_FIXTURES=1 and ...)`) carry no
-    # duration, and those are exactly the lines property (a) needs to see -- the
-    # announcement and the terminal line share a shape, so a lost `return` is only ever
-    # visible as a SECOND, DISAGREEING verdict. Cases 103/104 are the control: they plant
-    # VACUOUS and OPT-OUT (both DROPPED by the enumeration this replaced) and require the
-    # assert to SEE them.
+    # THE DISCRIMINATOR IS THE WHOLE `<TOKEN> (<detail>)` SHAPE, token to end of line, and
+    # it is what makes a one-word token safe: agent-gate.sh emits a verdict as exactly
+    # that, while this component's continuation prose (`>>> [node-bindings]   NOT VALIDATED
+    # by this run: ...`) and its coverage census do not close a paren at end of line.
+    # ` (` ALONE IS NOT ENOUGH, and case 104 is what measured it: an ALL-CAPS census
+    # heading of the form `SUBJECTS (all DERIVED from cargo …):` is indistinguishable from
+    # a status BY TOKEN SHAPE -- a status is all-caps too -- so the trailing `)$` is
+    # load-bearing, not decoration. (That heading is another component's today; the shape
+    # is the exposure, not the current caller set.)
+    #
+    # It deliberately does NOT require `([0-9]+s)`: the BRANCH ANNOUNCEMENTS
+    # (`SKIP (AGENT_GATE_ALLOW_MISSING_FIXTURES=1 and ...)`) carry no duration, and those
+    # are exactly the lines property (a) needs to see -- the announcement and the terminal
+    # line share a shape, so a lost `return` is only ever visible as a SECOND, DISAGREEING
+    # verdict. Nothing here reads a PRESENTATION property (#3400): these are gate-authored
+    # `echo`s, not cargo output, and no colour or quiet setting reaches them.
+    #
+    # Cases 103/104 are the control: they plant VACUOUS and OPT-OUT (both DROPPED by the
+    # enumeration this replaced) and require the assert to SEE them, alongside prose the
+    # capture must not take.
     #
     # HOW THE PAIR REACHED `main`, declared so the next person does not re-derive it: the
     # R1 guard (bdaf2b6e1, #3625/#3916, 2026-09-02 09:27 -07) is an ANCESTOR of the commit
@@ -2615,7 +2625,7 @@ JESTSTUB
     # and cannot fail a run. What would have BLOCKED it is a gate on the MERGE RESULT,
     # which is #3650 SLICE 2 and is explicitly not implemented; that issue owns this
     # residual. No second guard is added here for the combination.
-    toks=$(sed -n 's/^>>> \[node-bindings\] \([A-Za-z][A-Za-z-]*\) (.*/\1/p' "$log" 2>/dev/null)
+    toks=$(sed -n 's/^>>> \[node-bindings\] \([A-Za-z][A-Za-z-]*\) (.*)$/\1/p' "$log" 2>/dev/null)
     NBG_LOG_TOKS=$(printf '%s\n' "$toks" | grep -E '.' | tr '\n' ' ')
     NBG_LOG_N=$(printf '%s\n' "$toks" | grep -cE '.')
     NBG_LOG_LAST=$(printf '%s\n' "$toks" | grep -E '.' | tail -1)
@@ -2697,9 +2707,11 @@ JESTSTUB
   # between one of those and its measure).
   nbg_probe_log="$WORK/nbgate-parseprobe.log"
   {
-    # Two lines the capture MUST NOT take: the SKIP branch's continuation prose and a
-    # census heading whose first word is followed by ` (`. Plus a sibling component's
-    # verdict, which the `[node-bindings]` anchor must exclude.
+    # Two lines the capture MUST NOT take: the SKIP branch's continuation prose, and an
+    # ALL-CAPS census heading whose first word is followed by ` (` — that second one is
+    # not hypothetical, it RED this case against a first draft whose shape stopped at
+    # ` (`, and it is why the pattern requires the paren to CLOSE at end of line. Plus a
+    # sibling component's verdict, which the `[node-bindings]` anchor must exclude.
     echo ">>> [node-bindings]   NOT VALIDATED by this run: the 14 dataset-gated jest suites."
     echo ">>> [node-bindings] SUBJECTS (all DERIVED from cargo at run time, never hard-coded):"
     echo ">>> [node-bindings-leak-lane] FAIL (9s)"
