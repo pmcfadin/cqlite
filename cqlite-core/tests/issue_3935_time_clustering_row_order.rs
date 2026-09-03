@@ -223,7 +223,9 @@ fn clustering_key_ord_orders_time_by_byte_order() {
     assert_premises();
 
     let mut sorted: Vec<i64> = INSERTION_ORDER.to_vec();
-    sorted.sort_by(|a, b| ck(*a).cmp(&ck(*b)));
+    // `sort_by_key` over a `ClusteringKey` sorts by its `Ord`, which is the
+    // impl under test (it calls `compare_values`).
+    sorted.sort_by_key(|v| ck(*v));
     assert_eq!(
         sorted,
         EXPECTED.to_vec(),
@@ -317,7 +319,7 @@ fn clustering_key_time_order_is_a_strict_total_order() {
     // And the order really is the unsigned-byte one over those boundaries:
     // 0x00.. < 0x7F.. < 0x80.. < 0xFF..
     let mut sorted = vals.to_vec();
-    sorted.sort_by(|a, b| ck(*a).cmp(&ck(*b)));
+    sorted.sort_by_key(|v| ck(*v));
     assert_eq!(
         sorted,
         vec![0, T_LOW, T_MID, T_MAX, i64::MAX, i64::MIN, T_NEG, -1],
@@ -332,7 +334,7 @@ fn clustering_key_time_order_is_a_strict_total_order() {
 fn clustering_key_keeps_timestamp_signed() {
     let tk = |ms: i64| ClusteringKey::single(CK, Value::Timestamp(ms));
     let mut sorted: Vec<i64> = vec![1, -1, 0, i64::MIN];
-    sorted.sort_by(|a, b| tk(*a).cmp(&tk(*b)));
+    sorted.sort_by_key(|v| tk(*v));
     assert_eq!(
         sorted,
         vec![i64::MIN, -1, 0, 1],
