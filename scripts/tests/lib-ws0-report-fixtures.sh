@@ -103,6 +103,19 @@ make_flight_rep() {
   printf '%s\n' "${body//__ENDPOINT__/$WS0_FIXTURE_ENDPOINT}" > "$d/$tag.jsonl"
   perf_csv "$d/perf-$tag.csv" 8000000 16000000
   printf '%s\n' "$4" > "$d/$tag.prewarm.status"
+  # ...and the SERVER LOG the reporter reads the admission ceiling back from (#3551 item 10).
+  # The reporter REQUIRES it — the ceiling is DERIVED from available_parallelism, which respects
+  # the CPU affinity mask, so it moves with --flight-server-cpus and a session whose reps
+  # disagree differed in a SECOND property besides the one under test — so every OTHER case would
+  # die here rather than reaching its own subject. A case whose SUBJECT is the log (absent, empty,
+  # unparseable, disagreeing) removes or rewrites it EXPLICITLY.
+  #
+  # WRITTEN WITH THE REAL LOG'S ANSI ESCAPES, deliberately: `cqlite-flight` colours the field
+  # NAME and puts the reset BETWEEN the name and its `=` (measured on a real smoke log: 88 escape
+  # sequences, and a parse of the UNSTRIPPED text matches NOTHING). A plain-text fixture would let
+  # every healthy case pass while the shipped parser was keyed on a presentation property — the
+  # #3400 class — so the healthy path here exercises the strip.
+  ws0_write_server_log "$d/$tag.server.log" 4 derived 2
   [ "$2" != "warm" ] || ws0_make_preflight "$d" "$tag" "$WS0_PREFLIGHT_BYTES_PER_SCAN"
   # ...and the flight arm takes the OTHER position, mirroring the driver.
   make_round "$d" "$tag" "$3" "$(ws0_alternating_position "$3" flight)"

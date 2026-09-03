@@ -130,6 +130,25 @@ ws0_scan_session_bound() { # ws0_scan_session_bound <corpus-path>
 # one), so a fixture omitting it is refused — correctly. Supplying a realistic value keeps
 # the fixtures a model of real perf output instead of a model of what the parser happened
 # to read.
+# ws0_write_server_log <path> <max-concurrent-scans> <source> <available-parallelism>
+#
+# One `cqlite-flight starting` line in the SHAPE THE SERVER REALLY EMITS, escapes included: the
+# reset sits between each field NAME and its `=`, which is what makes an unstripped parse match
+# nothing (#3400). `printf '%b'` renders the escapes.
+ws0_write_server_log() {
+  local path="$1" scans="$2" src="$3" par="$4" e
+  e="$(printf '%b' '\033[0m\033[2m')"
+  {
+    printf '%b' '\033[2m2026-09-02T23:22:00.411152Z\033[0m \033[32m INFO\033[0m '
+    printf '%b' '\033[2mcqlite_flight::cli\033[0m\033[2m:\033[0m '
+    printf 'cqlite-flight starting '
+    printf '%blisten%s=%b127.0.0.1:18815 ' '\033[3m' "$e" '\033[0m'
+    printf '%bmax_concurrent_scans%s=%b%s ' '\033[3m' "$e" '\033[0m' "$scans"
+    printf '%bmax_concurrent_scans_source%s=%b"%s" ' '\033[3m' "$e" '\033[0m' "$src"
+    printf '%bavailable_parallelism%s=%b%s\n' '\033[3m' "$e" '\033[0m' "$par"
+  } > "$path"
+}
+
 perf_csv() {
   printf '%s,,cycles,1000000000,100.00,1.000,GHz\n%s,,instructions,1000000000,100.00,2.000,insn per cycle\n' "$2" "$3" > "$1"
 }

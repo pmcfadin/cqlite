@@ -1330,7 +1330,10 @@ fi
 # `requested_merge_path`, so a future rename on one side raises rather than printing a label the
 # JSON does not support. Asserted structurally, because a behavioural case can only cover the
 # spelling that exists today.
-if grep -q "fmt(f\"flight do_get ({fl\['requested_merge_path'\]} requested)\", fl)" \
+# The `fmt(...)` call gained a third argument in #3551 (the CPUS the arm was counted on, which
+# is REQUIRED there rather than defaulted), so the needle is the LABEL EXPRESSION alone — the
+# narrowest thing that makes this the property under test — rather than the whole call literal.
+if grep -q "fmt(f\"flight do_get ({fl\['requested_merge_path'\]} requested)\"," \
      "$REPO_ROOT/scripts/perf/ws0_report.py"; then
   pass "the printed arm label is derived FROM the recorded block, not from the loop variable"
 else

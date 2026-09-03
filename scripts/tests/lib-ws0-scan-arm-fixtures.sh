@@ -65,6 +65,11 @@ make_flight_rep() {
 {"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"$tag","endpoint":"$WS0_FIXTURE_ENDPOINT","requests_ok":$ok,"requests_error":0,"error_codes":{},"requests_unavailable":0,"rows_total":$rows,"rows_per_s":$rps,"duration_s":$secs}
 EOF
   perf_csv "$d/perf-$tag.csv" 8000000 16000000
+  # ...and the SERVER LOG the reporter reads the admission ceiling back from (#3551 item 10),
+  # which it REQUIRES: without it every case in the suites using this builder would die here
+  # rather than reaching its own subject. Written through the SHARED writer, in the real log's
+  # ANSI-escaped shape, so the healthy path exercises the strip (#3400).
+  ws0_write_server_log "$d/$tag.server.log" 4 derived 2
   [ "$pw" = "-none-" ] || printf '%s\n' "$pw" > "$d/$tag.prewarm.status"
   make_round "$d" "$tag" "$rep" "$(ws0_alternating_position "$rep" flight)"
 }

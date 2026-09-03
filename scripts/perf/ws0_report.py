@@ -55,7 +55,11 @@ from ws0_collect import (  # noqa: E402  (path set above; stdlib-only, no deps)
 # ARM B lives in its own module since #3272's F2 split: one file per MEASUREMENT ARM, which is
 # the seam the rig is built around (the two arms are separate claims measured through different
 # surfaces with different contracts).
-from ws0_flight_arm import collect_flight  # noqa: E402
+from ws0_flight_arm import collect_flight, flight_rep_tag  # noqa: E402
+# DID EVERY FLIGHT REP RUN UNDER THE SAME ADMISSION CEILING — #3551 item 10. The ceiling is
+# DERIVED from available_parallelism, which respects the CPU affinity mask, so it moves with
+# --flight-server-cpus: two arms could differ in the pin AND in how much work the server admits.
+from ws0_flight_admission import verify_flight_admission  # noqa: E402
 # THE ARROW-VOLUME CAVEAT, BESIDE THE FIGURES (#3272 round 20). Rounds 18/19 stated the withdrawal
 # in `results.json` and in ONE bullet at the bottom of the NOTES; a reader of the summary's numbers
 # and its PASS / BELOW TARGET verdicts saw nothing. Imported from the module that owns the claim's
@@ -1036,10 +1040,7 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
             # * Read from `fl["requested_merge_path"]`, so the summary and results.json cannot
             #   disagree: a rename on one side that missed the other would raise a KeyError here
             #   rather than print a label the JSON does not support.
-            lines.append(
-                fmt(f"flight do_get ({fl['requested_merge_path']} requested)", fl,
-                    flight_server_cpus)
-            )
+            lines.append(fmt(f"flight do_get ({fl['requested_merge_path']} requested)", fl, flight_server_cpus))
             lines += prewarm_warning(fl, f"flight/{arm}", temp)
             # THE ARROW-VOLUME CAVEAT, DIRECTLY UNDER THE FIGURE IT QUALIFIES (#3272 round 20).
             # Beside the number, not appended once at the bottom — a caveat eleven bullets below
@@ -1125,8 +1126,36 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         recorded_rounds[temp] = collect_recorded_round_metadata(temp, arms_meta)
         lines.append("")
 
+    # DID EVERY FLIGHT REP ADMIT THE SAME AMOUNT OF WORK (#3551 item 10)? Read back from each
+    # rep's own server log rather than pinned: pinning --max-concurrent-scans would change the
+    # configuration #3248 measured and would hide exactly this drift.
+    #
+    # AFTER THE COLLECTION LOOP, deliberately, and that ORDER is a correctness property rather
+    # than a preference: the collectors above refuse an ABSENT or malformed rep with a diagnostic
+    # naming what is wrong with THAT rep ("collected 0 of 1", "carries 2 step records"), and
+    # running this first PREEMPTED all of them — measured, it turned six other suites' specific
+    # refusals into "carries no server log", blaming the artifact this check happens to read
+    # first. A check that fires before the more specific one makes every diagnostic downstream of
+    # it unreachable. By here every selected rep has been established to exist, so an absent
+    # server log is genuinely about the log.
+    flight_admission = verify_flight_admission(d, temps, arms, reps, flight_rep_tag)
+    # WHAT THE FLIGHT SERVER ADMITTED, per rep and agreed. Recorded rather than merely asserted:
+    # a reader comparing two sessions needs the ceiling AND its input (available_parallelism),
+    # because the ceiling is a FUNCTION of the pin. Assigned here rather than in the results
+    # literal above for the ordering reason stated at the call — the value does not exist until
+    # the collectors have run, and the collectors must run first.
+    results["flight_admission"] = flight_admission
     results["recorded_round_metadata"] = recorded_rounds
     lines += [
+        # THE ADMISSION CEILING, printed with the tail rather than the header block — the value
+        # cannot exist up there, because this check must run AFTER the collectors whose specific
+        # refusals it would otherwise preempt (see the call above).
+        f"admission    : max_concurrent_scans={flight_admission['max_concurrent_scans']}"
+        f" (source {flight_admission['max_concurrent_scans_source']},"
+        f" available_parallelism={flight_admission['available_parallelism']}) —"
+        f" OBSERVED IDENTICAL across all {flight_admission['reps_agreeing']} flight rep(s),"
+        " read back from each server log; deliberately NOT pinned",
+        "",
         "NOTES",
         "  * warm and cold are SEPARATE claims above; nothing here is blended.",
     ]

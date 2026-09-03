@@ -531,15 +531,33 @@ fi
 # `verify_flight_allocator_mapping` takes the maps PATH as a parameter precisely so this can be
 # driven with no server, no root and no real jemalloc — including the branch the check EXISTS for
 # (the mapping ABSENT), which is the non-zero-count half no "does it run" test can reach.
+# maps_call <maps> <environ> <mode> <lib-path> <arena> <tag>
 maps_call() {
   ( set -uo pipefail
     # shellcheck disable=SC1090
     source "$FLIGHT_LIB"
-    verify_flight_allocator_mapping "$@" ) 2>&1
+    verify_flight_server_allocator "$@" ) 2>&1
 }
 MAPS_WITH="$TMP/maps-with-jemalloc"
 MAPS_WITHOUT="$TMP/maps-without-jemalloc"
 MAPS_EMPTY="$TMP/maps-empty"
+JLIB="/usr/lib/x86_64-linux-gnu/libjemalloc.so.2"
+# The ENVIRON side, NUL-separated exactly as /proc/<pid>/environ is (#3551 item 9). `printf` with
+# `\0` writes real NUL bytes, so the shipped reader's `read -r -d ''` split is exercised rather
+# than a newline-separated stand-in — and the LAST entry deliberately has NO trailing NUL in one
+# of them, the shape that makes a naive loop drop the final variable.
+ENV_PRELOAD="$TMP/environ-preload"
+ENV_CLEAN="$TMP/environ-clean"
+ENV_ARENA1="$TMP/environ-arena1"
+ENV_ARENA16="$TMP/environ-arena16"
+ENV_PRELOAD_EMPTY="$TMP/environ-preload-empty"
+ENV_EMPTY="$TMP/environ-empty"
+printf 'PATH=/usr/bin\0LD_PRELOAD=%s\0HOME=/root\0' "$JLIB" > "$ENV_PRELOAD"
+printf 'PATH=/usr/bin\0HOME=/root\0' > "$ENV_CLEAN"
+printf 'PATH=/usr/bin\0MALLOC_ARENA_MAX=1\0HOME=/root' > "$ENV_ARENA1"
+printf 'PATH=/usr/bin\0MALLOC_ARENA_MAX=16\0HOME=/root' > "$ENV_ARENA16"
+printf 'PATH=/usr/bin\0LD_PRELOAD=\0HOME=/root\0' > "$ENV_PRELOAD_EMPTY"
+: > "$ENV_EMPTY"
 {
   printf '7f0000-7f0100 r-xp 00000000 08:01 101 /usr/lib/x86_64-linux-gnu/libjemalloc.so.2\n'
   printf '7f0200-7f0300 r-xp 00000000 08:01 102 /usr/lib/x86_64-linux-gnu/libc.so.6\n'
@@ -556,7 +574,7 @@ MAPS_EMPTY="$TMP/maps-empty"
 # duplicate of arm B under a label saying otherwise — and the two arms would AGREE, which reads
 # as a result. The maps file here is non-empty and carries other libraries, so this is the
 # genuine "mappings were read and none of them is jemalloc" case rather than an unreadable file.
-out=$(maps_call "$MAPS_WITHOUT" jemalloc libjemalloc.so.2 flight-merge-warm-1); rc=$?
+out=$(maps_call "$MAPS_WITHOUT" "$ENV_PRELOAD" jemalloc "$JLIB" "" flight-merge-warm-1); rc=$?
 if [ "$rc" -ne 0 ] && grep -q "NO mapping of 'libjemalloc.so.2' is present" <<<"$out" \
    && grep -q "flight-merge-warm-1" <<<"$out" && grep -q "FAILS OPEN" <<<"$out"; then
   pass "jemalloc arm: an ABSENT jemalloc mapping is FATAL, names the REP, and states why (LD_PRELOAD fails open)"
@@ -572,7 +590,7 @@ else
 fi
 
 # --- 3b. THE ACCEPT DIRECTION, with the observed mapping as the evidence ---------------------
-out=$(maps_call "$MAPS_WITH" jemalloc libjemalloc.so.2 flight-merge-warm-1); rc=$?
+out=$(maps_call "$MAPS_WITH" "$ENV_PRELOAD" jemalloc "$JLIB" "" flight-merge-warm-1); rc=$?
 if [ "$rc" -eq 0 ] && grep -q "jemalloc VERIFIED for flight-merge-warm-1" <<<"$out" \
    && grep -q "libjemalloc.so.2" <<<"$out"; then
   pass "jemalloc arm: a PRESENT mapping is accepted and the evidence is the mapping LINE itself (recorded per rep)"
@@ -583,14 +601,14 @@ fi
 # --- 3c. THE CONTROL ARM'S NEGATIVE, both directions -----------------------------------------
 # Not the weaker half: an operator with LD_PRELOAD exported would have the CONTROL arm running
 # the allocator under test, which INVERTS the comparison the whole session exists to make.
-out=$(maps_call "$MAPS_WITH" system "" flight-bypass-warm-1); rc=$?
+out=$(maps_call "$MAPS_WITH" "$ENV_CLEAN" system "" "" flight-bypass-warm-1); rc=$?
 if [ "$rc" -ne 0 ] && grep -q "HAS a" <<<"$out" && grep -q "jemalloc mapping" <<<"$out" \
    && grep -q "INVERTS" <<<"$out"; then
   pass "system arm: a jemalloc mapping in the CONTROL arm is REFUSED (it inverts the comparison rather than adding noise)"
 else
   fail "the system arm must refuse a jemalloc mapping (rc=$rc, out: $(head -3 <<<"$out"))"
 fi
-out=$(maps_call "$MAPS_WITHOUT" system "" flight-bypass-warm-1); rc=$?
+out=$(maps_call "$MAPS_WITHOUT" "$ENV_CLEAN" system "" "" flight-bypass-warm-1); rc=$?
 if [ "$rc" -eq 0 ] && grep -q "system VERIFIED for flight-bypass-warm-1" <<<"$out"; then
   pass "system arm: a clean process is accepted, and the NEGATIVE is stated as observed rather than assumed"
 else
@@ -600,38 +618,130 @@ fi
 # --- 3d. COULD-NOT-MEASURE IS A REFUSAL, and each cause is its own message -------------------
 # The three-valued rule, at the one place a two-valued `grep -q` would have read "the file could
 # not be scanned" as "no jemalloc mapping is present" — i.e. as a PASS on the control arm.
-out=$(maps_call "$TMP/no-such-maps" system "" flight-bypass-warm-2); rc=$?
-if [ "$rc" -ne 0 ] && grep -q "does not exist" <<<"$out" && grep -q "COULD NOT BE MEASURED" <<<"$out"; then
+out=$(maps_call "$TMP/no-such-maps" "$ENV_CLEAN" system "" "" flight-bypass-warm-2); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "does not exist" <<<"$out" && grep -q "COULD" <<<"$out"; then
   pass "maps ABSENT (the process exited) is COULD-NOT-MEASURE and refuses — never 'no jemalloc mapping present'"
 else
   fail "an absent maps file must refuse as could-not-measure (rc=$rc, out: $(head -2 <<<"$out"))"
 fi
-out=$(maps_call "$MAPS_EMPTY" system "" flight-bypass-warm-2); rc=$?
+out=$(maps_call "$MAPS_EMPTY" "$ENV_CLEAN" system "" "" flight-bypass-warm-2); rc=$?
 if [ "$rc" -ne 0 ] && grep -q "readable but EMPTY" <<<"$out"; then
   pass "maps EMPTY is its OWN could-not-measure refusal (a live process always publishes mappings, so an empty read is a failed measurement)"
 else
   fail "an empty maps file must refuse with its own message (rc=$rc, out: $(head -2 <<<"$out"))"
 fi
 # ...and the same for the jemalloc arm, so neither direction inherits the permissive branch.
-out=$(maps_call "$MAPS_EMPTY" jemalloc libjemalloc.so.2 flight-merge-warm-2); rc=$?
+out=$(maps_call "$MAPS_EMPTY" "$ENV_PRELOAD" jemalloc "$JLIB" "" flight-merge-warm-2); rc=$?
 if [ "$rc" -ne 0 ] && grep -q "readable but EMPTY" <<<"$out"; then
   pass "maps EMPTY refuses on the JEMALLOC arm too (an unmeasurable state is not evidence in either direction)"
 else
   fail "an empty maps file must refuse on the jemalloc arm (rc=$rc, out: $(head -2 <<<"$out"))"
 fi
 # An unknown mode refuses rather than picking a direction to assert.
-out=$(maps_call "$MAPS_WITH" tcmalloc "" t1); rc=$?
+out=$(maps_call "$MAPS_WITH" "$ENV_CLEAN" tcmalloc "" "" t1); rc=$?
 if [ "$rc" -ne 0 ] && grep -q "unknown mode 'tcmalloc'" <<<"$out"; then
   pass "an unknown allocator mode refuses rather than asserting one of the two directions"
 else
   fail "an unknown mode must refuse (rc=$rc, out: $(head -2 <<<"$out"))"
 fi
 # ...and the jemalloc arm with NO basename to look for refuses rather than asserting nothing.
-out=$(maps_call "$MAPS_WITH" jemalloc "" t1); rc=$?
-if [ "$rc" -ne 0 ] && grep -q "no library basename" <<<"$out"; then
-  pass "the jemalloc arm with no basename refuses (a check with nothing to look for would pass whatever the process is running)"
+out=$(maps_call "$MAPS_WITH" "$ENV_PRELOAD" jemalloc "" "" t1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "no library path was passed" <<<"$out"; then
+  pass "the jemalloc arm with no library path refuses (a check with nothing to look for would pass whatever the process is running)"
 else
-  fail "the jemalloc arm must refuse an empty needle (rc=$rc, out: $(head -2 <<<"$out"))"
+  fail "the jemalloc arm must refuse an empty library path (rc=$rc, out: $(head -2 <<<"$out"))"
+fi
+
+# --- 3e. THE ENVIRON HALF: what the process RECEIVED (#3551 item 9) --------------------------
+# `maps` proves the preload TOOK EFFECT; it cannot prove the process was GIVEN anything, and it
+# cannot see an arena cap AT ALL (a cap leaves no mapping). So both files are read, and each half
+# is asserted on its own.
+out=$(maps_call "$MAPS_WITH" "$ENV_CLEAN" jemalloc "$JLIB" "" flight-merge-warm-1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "did not" <<<"$out" && grep -q "RECEIVE the preload" <<<"$out" \
+   && grep -q "ABSENT" <<<"$out"; then
+  pass "environ half: a jemalloc arm whose process never RECEIVED LD_PRELOAD is refused, even though a jemalloc mapping IS present (maps alone would have passed it)"
+else
+  fail "an absent LD_PRELOAD entry must be refused on the jemalloc arm (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+# ...and a preload of a DIFFERENT library is refused: the comparison is on the whole entry's
+# VALUE, not on the presence of the variable.
+out=$(maps_call "$MAPS_WITH" "$ENV_PRELOAD" jemalloc "/opt/other/libjemalloc.so.2" "" flight-merge-warm-1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "/opt/other/libjemalloc.so.2" <<<"$out"; then
+  pass "environ half: a preload of a DIFFERENT library path is refused (an exact VALUE comparison, not a presence test)"
+else
+  fail "a mismatched LD_PRELOAD value must be refused (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+# ...and the CONTROL arm's environ negative: a non-empty inherited LD_PRELOAD is refused even
+# when no jemalloc mapping is present (the operator's stray preload of anything else).
+out=$(maps_call "$MAPS_WITHOUT" "$ENV_PRELOAD" system "" "" flight-bypass-warm-1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "RECEIVED" <<<"$out" && grep -q "INVERTS" <<<"$out"; then
+  pass "environ half: the CONTROL arm refuses a non-empty LD_PRELOAD it RECEIVED, with no jemalloc mapping needed to notice"
+else
+  fail "the system arm must refuse a received LD_PRELOAD (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+# ...while an EMPTY `LD_PRELOAD=` entry — which is what the launch itself sets on the system arm
+# — is ACCEPTED. The assertion is on the VALUE, affirmatively, and a guard that red on the rig's
+# own launch line is the guard nobody keeps.
+out=$(maps_call "$MAPS_WITHOUT" "$ENV_PRELOAD_EMPTY" system "" "" flight-bypass-warm-1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "system VERIFIED" <<<"$out"; then
+  pass "environ half: an EMPTY LD_PRELOAD= entry (what the system arm's own launch sets) is ACCEPTED — the check is on the value, not the variable's presence"
+else
+  fail "an empty LD_PRELOAD must be accepted on the system arm (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+# ...and an EMPTY environ is COULD-NOT-MEASURE, distinctly from an empty maps.
+out=$(maps_call "$MAPS_WITHOUT" "$ENV_EMPTY" system "" "" flight-bypass-warm-1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "was readable but EMPTY" <<<"$out" && grep -q "environ" <<<"$out"; then
+  pass "environ half: an EMPTY environ is its OWN could-not-measure refusal (a live process always has a non-empty environment)"
+else
+  fail "an empty environ must refuse (rc=$rc, out: $(head -2 <<<"$out"))"
+fi
+out=$(maps_call "$MAPS_WITHOUT" "$TMP/no-such-environ" system "" "" flight-bypass-warm-1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "does not exist" <<<"$out"; then
+  pass "environ half: an ABSENT environ refuses (the process exited before it could be read)"
+else
+  fail "an absent environ must refuse (rc=$rc, out: $(head -2 <<<"$out"))"
+fi
+
+# --- 3f. THE ARENA CAP, which NO mapping can see (#3551 item 9 / #3217 partC F1) ------------
+# The pre-registered experiment is MALLOC_ARENA_MAX = 1, 2, 4, default. An arena cap leaves no
+# mapping at all, so environ is the ONLY place it is observable, and a rep labelled with a cap it
+# never had would make that experiment measure nothing.
+out=$(maps_call "$MAPS_WITHOUT" "$ENV_ARENA1" system "" 1 flight-bypass-warm-1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "system VERIFIED" <<<"$out"; then
+  pass "arena: a requested cap of 1 that the process RECEIVED is accepted (the accept half, on the only file that can see it)"
+else
+  fail "a received arena cap must be accepted (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+# THE SUBSTRING TRAP, which is the reason for whole-entry matching: `MALLOC_ARENA_MAX=1` must NOT
+# be satisfied by `MALLOC_ARENA_MAX=16`.
+out=$(maps_call "$MAPS_WITHOUT" "$ENV_ARENA16" system "" 1 flight-bypass-warm-1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "'16'" <<<"$out" && grep -q "not '1'" <<<"$out"; then
+  pass "arena: a cap of 16 does NOT satisfy a requested 1 — whole-entry match with an exact value compare, so the =1/=16 substring trap cannot fire"
+else
+  fail "MALLOC_ARENA_MAX=16 must not satisfy a requested 1 (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+# ...an absent cap when one was requested is refused, naming the experiment it would have voided.
+out=$(maps_call "$MAPS_WITHOUT" "$ENV_CLEAN" system "" 2 flight-bypass-warm-1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "ABSENT from its environment" <<<"$out"; then
+  pass "arena: a requested cap the process never received is refused (an arena cap leaves NO mapping, so environ is the only observable)"
+else
+  fail "an absent arena cap must be refused (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+# ...and the OTHER direction: a cap present when none was requested is refused too, because the
+# rep would be capped while the session says it is not.
+out=$(maps_call "$MAPS_WITHOUT" "$ENV_ARENA1" system "" "" flight-bypass-warm-1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "no arena cap was requested" <<<"$out"; then
+  pass "arena: an UNREQUESTED cap the process somehow received is refused — a configuration difference between arms that no recorded field would describe"
+else
+  fail "an unrequested arena cap must be refused (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+# ...and the FINAL ENTRY WITH NO TRAILING NUL is read, not dropped: `$ENV_ARENA1` ends without
+# one, and its LAST variable is HOME — but the cap is mid-blob, so this case pins the shape by
+# accepting a file the naive loop would have truncated.
+if grep -q "system VERIFIED" <<<"$(maps_call "$MAPS_WITHOUT" "$ENV_ARENA1" system "" 1 t)"; then
+  pass "environ parse: a blob whose LAST entry carries no trailing NUL is still read in full (the naive read loop drops it)"
+else
+  fail "a NUL-terminated-less final entry must still be read"
 fi
 
 # ===========================================================================
