@@ -18,17 +18,17 @@
 //!    as fabrication (roborev job 57 finding 1; duplication is how the measured
 //!    pre-fix compaction result grew to 102 rows while losing two partitions).
 //!
-//! # The change's tracked residuals — TWO are declared here, THREE exist
+//! # The change's tracked residuals — ONE is declared here, THREE existed
 //!
-//! The "GAP N of 2" labels below count the gaps declared IN THIS LANE, not
-//! #3782's residuals in total: #3782 has **three** tracked residuals touching
-//! read routes, and the third is declared where its route is exercised rather
-//! than duplicated here.
+//! The "GAP N of 1" label below counts the gaps declared IN THIS LANE that are
+//! still OPEN, not #3782's residuals in total: #3782 had **three** tracked
+//! residuals touching read routes, and the others are recorded where their
+//! route is exercised rather than duplicated here.
 //!
 //! | residual | route | declared in |
 //! |----------|-------|-------------|
-//! | **#3922** | the POINT read path still answers `Ok` short | GAP 1 of 2 below |
-//! | **#3928** | the partition-HEADER arm still resyncs one byte | GAP 2 of 2 below |
+//! | **#3922** | the POINT read path still answers `Ok` short | GAP 1 of 1 below |
+//! | **#3928** | the partition-HEADER arm resynced one byte | **CLOSED** — see the note below and `issue_3928_corrupt_header_refusal.rs` |
 //! | **#3949** | AC2 half (b): the index-random-read refusal still arrives via #2302's Signal-B WARN + sequential re-walk | `issue_3782_corrupt_row_refusal.rs` module doc |
 //!
 //! Nothing in this lane reaches #3949's route: both arms here go through
@@ -36,7 +36,7 @@
 //! `SSTableReader::iterate_all_partitions`, so declaring it as a third gap of
 //! THIS case would claim a coverage boundary this case does not have.
 //!
-//! # DECLARED GAP 1 of 2 (in this lane) — point and full do NOT yet agree here (#3782, #3922)
+//! # DECLARED GAP 1 of 1 (in this lane) — point and full do NOT yet agree here (#3782, #3922)
 //!
 //! The POINT arm still answers `Ok` with a SHORT row set for the damaged
 //! partition. That is not an oversight in the fix: the BIG-promoted and BTI point
@@ -66,23 +66,26 @@
 //! — the two read paths agreeing on the corrupt fixture — stays untested
 //! forever behind a green suite.
 //!
-//! # DECLARED GAP 2 of 2 (in this lane) — the partition-HEADER arm still resyncs (#3928)
+//! # CLOSED — the partition-HEADER arm no longer resyncs (#3928)
 //!
-//! #3782 fixes the ROW arm: on a proven-complete buffer a row that fails to
-//! decode is refused. The partition-HEADER arm is UNCHANGED and still
-//! `tracing::warn!`s and advances ONE byte to resynchronise
-//! (`block_emit_windowed.rs`, and the same shape in
-//! `partition_driver.rs`'s `PartitionHeaderReadiness::Malformed` arm). So a
-//! corrupted header byte in a proven-complete section can still both DROP that
-//! partition and FABRICATE one by landing the resync on misaligned bytes — the
-//! same "2 lost / 3 fabricated" mechanism this issue measured — while returning
-//! `Ok`. On the #3782 measurement probe, 15 of the 35 corrupted-fixture losses
-//! were attributable to that header arm against 20 to the row arm.
+//! #3782 fixed the ROW arm only, and this lane declared the header half as its
+//! second gap: the header arm still `tracing::warn!`ed and advanced ONE byte to
+//! resynchronise, so a corrupted header byte in a proven-complete section could
+//! both DROP that partition and FABRICATE one by landing the resync on
+//! misaligned bytes, while returning `Ok`.
 //!
-//! **So #3782's guarantee is scoped to ROW framing**, and the header half is
-//! tracked in **#3928**. It is stated here because a gap our own doctrine
-//! implies is covered is a false certification: nothing else in this change
-//! would tell a reader that a header-byte corruption is still swallowed.
+//! **#3928 closed it.** Five arms now refuse where no further bytes can arrive
+//! — the two in the block-emit walk (keyed on `BufferExtent`), the one now
+//! SHARED by the two sliding drivers (keyed on `at_final_chunk`, and
+//! UNCONDITIONALLY for a `Ready`-then-`Err` header, which cannot straddle), and
+//! the bare `Err(_) => break` on the BTI stitched-scan route. Its own lane is
+//! `issue_3928_corrupt_header_refusal.rs`, which stages the SAME fixtures
+//! through the SAME harness with a HEADER-byte mutation instead of a clustering
+//! one.
+//!
+//! This note is kept rather than deleted because the multiset comparison below
+//! is still justified by that mechanism: fabrication-by-DUPLICATION is a shape a
+//! membership test cannot see, whoever produces it.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -260,10 +263,12 @@ async fn full_read_refuses_a_corrupt_partition_and_neither_arm_fabricates() {
             // test asks "is every returned row one the control also has", which
             // N duplicate copies of a legitimate row satisfy — and duplication
             // is precisely one of the shapes fabrication takes here: the
-            // partition-HEADER resync (declared gap #3928) advances one byte and
-            // can RE-EMIT a partition already emitted, which is how the measured
+            // pre-#3928 partition-HEADER resync advanced one byte and could
+            // RE-EMIT a partition already emitted, which is how the measured
             // pre-fix compaction result reached 102 rows while LOSING two
-            // partitions. Comparing occurrence COUNTS reports the surplus copy;
+            // partitions. That arm now refuses (#3928), but the comparison stays
+            // a multiset: duplication is a fabrication shape whoever causes it,
+            // and the point arm this case guards is still #3922's residual. Comparing occurrence COUNTS reports the surplus copy;
             // membership cannot (proved in `support/multiset.rs`).
             let got = multiset::multiset(normalize(&r.rows));
             let fabricated = multiset::surplus(&got, &expected_counts);

@@ -67,7 +67,8 @@
 //! is #3949's completion signal**. Two further residuals of this change are
 //! declared in the differential lane
 //! (`point_vs_full_differential/issue_3782_corrupt_agreement.rs`): the point
-//! read path (#3922) and the partition-HEADER resync arm (#3928).
+//! read path (#3922, still OPEN) and the partition-HEADER resync arm (#3928,
+//! since CLOSED — its lane is `issue_3928_corrupt_header_refusal.rs`).
 #![cfg(all(
     feature = "state_machine",
     feature = "cli-helpers",
@@ -401,9 +402,10 @@ async fn compaction_refuses_a_corrupt_row_and_never_loses_or_fabricates_partitio
     );
     // MULTISET of partition keys, never a SET (roborev job 57 finding 1): the
     // #3782 shape is "count goes UP while data is lost", and one of the ways it
-    // goes up is the header-arm resync RE-EMITTING a partition already emitted
-    // (declared gap #3928). A set comparison cannot see a surplus duplicate of a
-    // legitimate key, which is exactly the fabrication this case is named for.
+    // went up was the header-arm resync RE-EMITTING a partition already emitted
+    // (that arm now refuses — #3928). A set comparison cannot see a surplus
+    // duplicate of a legitimate key, which is exactly the fabrication this case
+    // is named for, so the multiset stays whatever produces the duplicate.
     let control_counts = multiset::multiset(control_rows.iter().map(|r| r.key.as_bytes().to_vec()));
 
     // AC8: the well-formed partition set is unchanged, and the two compaction
