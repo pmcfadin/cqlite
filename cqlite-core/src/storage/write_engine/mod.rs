@@ -73,6 +73,9 @@ pub use mutation::{
 pub use wal::{RecoveryReport, WriteAheadLog};
 
 #[cfg(feature = "write-support")]
+// `compare_values` — the clustering-value comparator `mutation::ClusteringKey`
+// reaches from both its `Ord` and its schema-aware `compare` (epic #1116 split).
+mod clustering_order;
 mod compaction;
 #[cfg(feature = "write-support")]
 pub(crate) mod durability;
