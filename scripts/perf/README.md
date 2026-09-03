@@ -21,7 +21,8 @@ scripts/perf/ws0-baseline.sh --corpus /data/ws0-3096
 | `ws0_report.py` | aggregation → `results.json` + a human summary |
 | `ws0_validate.py` | the fail-closed layer: what the reporter is ALLOWED to aggregate |
 | `lib-measure.sh` | how ONE rep of each arm is executed, prewarmed and counted |
-| `lib-flight-arm.sh` | the two arms no longer run the same way — WHAT differs (pin, allocator) and was it VERIFIED (#3551) |
+| `lib-flight-arm.sh` | the two arms no longer run the same way — WHAT differs (pin, allocator, arena) and was it VERIFIED (#3551) |
+| `ws0_flight_admission.py` | the server's admission ceiling, READ BACK from each rep's log and required to AGREE (#3551) |
 
 Full method, the traps, the recorded pinning and the residual caveats:
 **`docs/reports/ws0-3096-artifacts/measurement-method.md`** — read it before
@@ -103,17 +104,21 @@ escape hatch on a measurement guard can only ever buy a confident wrong number.
 
 ## The flight arm can be moved ONE property at a time (issue #3551)
 
-Three flags change the **Flight arm only**; the bare-scan arm always stays on
+Four flags change the **Flight arm only**; the bare-scan arm always stays on
 `--server-cpus` and on the system allocator, which is what makes it a
 **code-identical AND pin-identical** leg in the same session — §3b step 3's drift
 control, which this rig has never had.
 
 ```bash
 # arm B vs a Flight server on two DISTINCT physical cores (SMT unpin), bare scan unchanged
-scripts/perf/ws0-baseline.sh --corpus /data/ws0-3096   --flight-server-cpus 2,3 --flight-pin-mode distinct-cores
+scripts/perf/ws0-baseline.sh --corpus /data/ws0-3096 \
+  --flight-server-cpus 2,3 --flight-pin-mode distinct-cores
 
 # arm C: the same binary, the Flight SERVER PROCESS ONLY under jemalloc
 scripts/perf/ws0-baseline.sh --corpus /data/ws0-3096 --flight-allocator jemalloc
+
+# arm C generalised — the mechanism under test is ARENA CONTENTION (#3217 partC F1's AC2)
+scripts/perf/ws0-baseline.sh --corpus /data/ws0-3096 --flight-malloc-arena-max 1
 ```
 
 * **Omitting all of them changes nothing.** `--flight-server-cpus` defaults to
@@ -124,16 +129,46 @@ scripts/perf/ws0-baseline.sh --corpus /data/ws0-3096 --flight-allocator jemalloc
   read from the real `thread_siblings_list` and both fail closed: `siblings` REFUSES a
   distinct-core set, `distinct-cores` REFUSES a sibling pair — and refuses a single-CPU
   list, over which "pairwise distinct" compares nothing.
-* **The counting domain follows the arm.** `perf stat -C` counts where each arm's server
-  actually ran; counting `--server-cpus` while the Flight server ran elsewhere would
-  divide another core's cycles by this rep's rows.
-* **`--flight-allocator jemalloc` is VERIFIED FROM THE RUNNING PROCESS, per rep.**
-  `LD_PRELOAD` fails open — glibc prints `object ... cannot be preloaded ...: ignored`
-  and continues with system malloc, exit 0 — so without reading `/proc/<pid>/maps` arm C
-  would be a byte-identical duplicate of arm B under a label saying otherwise. The
-  **negative** is asserted on the system arm too (no jemalloc mapping, and any inherited
-  `LD_PRELOAD` is emptied for the launch), because a control arm quietly running the
-  allocator under test does not add noise — it inverts the comparison.
+* **The counting domain follows the arm, and FAILS CLOSED.** `perf stat -C` counts where each
+  arm's server actually ran. Counting `--server-cpus` while the Flight server ran on `2,3` would
+  collect cpu10's **idle** and miss cpu3's **work**, so the same rows cost FEWER cycles and the
+  arm reads as a large win — a fabricated number in the flattering direction, invisible in the
+  output. So each leg sets the domain on the line before its own window and `perf_stat_c`
+  VALIDATES it against a CLOSED TABLE of the pairings this session verified
+  (`<counted>|<affinity of the process in the window>`, derived from the verified lists). An
+  empty domain, an absent table and an argv with no `taskset` CPU list are each named refusals:
+  there is **no default**, because a silent fall-back to `--server-cpus` is how this defect would
+  survive its own fix. Note the two legitimate pairings DIFFER — the Flight window brackets the
+  LOAD GENERATOR on the client set while counting the SERVER — so "counted == pinned list" would
+  red every correct Flight rep.
+* **Every arm's figures name the CPUs they were counted on**, and `results.json` records
+  `pinning.counted_cpus_by_arm`: with the pins separable, "cycles/row" means "hardware-thread
+  cycles on THESE cpus per row", and the two arms may legitimately name different lists.
+* **The ENVIRONMENT is recorded, ambient and injected SEPARATELY** (`config.env_ambient` /
+  `config.env_injected`, printed and in `results.json`): with one binary set across all arms —
+  deliberate — the environment is the only thing that distinguishes them, and it used to be
+  recorded nowhere. `RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS` are included AS MEASURED, per
+  `docs/reports/ws0-3552-report.md` §4. An **ambient** `LD_PRELOAD`/`MALLOC_*` is REFUSED before
+  the first rep — `ws0-scan-bench` would inherit it, putting the drift control on the allocator
+  under test where the flight arm's own check cannot see it — and the bare-scan leg asserts per
+  rep that it received neither.
+* **The admission ceiling is READ BACK and required to agree** (`ws0_flight_admission.py`).
+  `cqlite-flight` derives it as `clamp(2 x available_parallelism, 2, 64)` and
+  `available_parallelism` respects the CPU affinity mask, so it is a FUNCTION OF THE PIN: a
+  2-CPU pin and a 4-CPU pin differ in TWO properties. All three fields are recorded per rep and
+  a session whose reps disagree is REFUSED. `--max-concurrent-scans` is deliberately NOT pinned:
+  pinning would change the configuration #3248 measured and hide exactly this drift.
+* **`--flight-allocator jemalloc` is VERIFIED FROM THE RUNNING PROCESS, per rep, from BOTH
+  `/proc/<pid>/environ` AND `/proc/<pid>/maps`** — they prove different things and neither is
+  sufficient. `environ` is what the process RECEIVED (and the ONLY way to see
+  `--flight-malloc-arena-max` at all: an arena cap leaves no mapping); `maps` is what TOOK
+  EFFECT, because `LD_PRELOAD` fails open — glibc prints `object ... cannot be preloaded ...:
+  ignored` and continues with system malloc, exit 0 — so without it arm C would be a
+  byte-identical duplicate of arm B under a label saying otherwise. `environ` is NUL-separated
+  and matched as WHOLE ENTRIES with an exact value compare, so `MALLOC_ARENA_MAX=1` cannot be
+  satisfied by `=16`. The **negative** is asserted on the system arm too (no jemalloc mapping and
+  no non-empty `LD_PRELOAD` received), because a control arm quietly running the allocator under
+  test does not add noise — it inverts the comparison.
 * **Everything above is recorded in `pinning-verification.json` and asserted where it is
   used**: the manifest's flight pin must EQUAL the list the driver verified (the #3272-F6
   substitution check, at the new field), and `ws0_report.py` prints the property that was
