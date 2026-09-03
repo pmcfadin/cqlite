@@ -357,21 +357,19 @@ const CASES: &[Case] = &[
         ck: &[],
         multicell: &[],
         // NO DECLARED GAP — and the absence is the assertion. `employee.home` is a
-        // `frozen<address>` nested inside a `frozen<employee>`, and until #3631
-        // both egress formats emitted the inner UDT's RAW BYTES as blob hex
-        // (`0x0000000a31204e617679205761790000000941726c696e67746f6e…`) where the
-        // golden decodes an object (`{"street": "1 Navy Way", …}`). That was
-        // carried here as a FIELD-scoped `e.home` skip standing for
+        // `frozen<address>` nested inside a `frozen<employee>`; until #3631 both
+        // egress formats emitted the inner UDT's RAW BYTES as blob hex where the
+        // golden decodes an object (`{"street": "1 Navy Way", …}`), carried here as
+        // a FIELD-scoped `e.home` skip for
         // `Divergence::NestedFrozenUdtRendersAsBlobHex`.
         //
-        // #3631 made the nested frozen UDT decode, and the gap RETIRED ITSELF
-        // exactly as the `Report::stale_skips` mechanism is built to: with the
-        // skip still declared, BOTH lanes FAILed with "the two sides AGREE at that
-        // path now, so the exclusion suppresses nothing and is holding back
-        // recovered coverage". So `e.home` is compared for real from here on, in
-        // both formats, against the Cassandra-written `sstabledump` golden — a
-        // third oracle, independent of the unit and integration coverage, and the
-        // reason removing the skip is the ONLY sound response to that failure.
+        // #3631 made that value decode and the gap RETIRED ITSELF, which is what
+        // `Report::stale_skips` is for: with the skip still declared BOTH lanes
+        // FAILed — "the two sides AGREE at that path now, so the exclusion
+        // suppresses nothing and is holding back recovered coverage". Removing it
+        // is the only sound response, and `e.home` is now value-compared in both
+        // formats against the Cassandra-written `sstabledump` golden — a third
+        // oracle for #3631, independent of the unit and integration coverage.
         skips: &[],
     },
     // test-data/schemas/signed-collection-parity.cql — NON-frozen and frozen
