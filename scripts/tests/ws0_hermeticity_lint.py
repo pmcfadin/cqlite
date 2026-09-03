@@ -365,6 +365,38 @@ EXEMPTIONS: dict[str, str] = {
     # `ws0_loadgen_record.py` is deliberately absent too: it never names the driver, so an
     # exemption for it would be a claim about nothing — which the STALE-EXEMPTION check
     # correctly refused when it was added speculatively.
+    # #3551's interleaved A/B/C driver, and it is a NEW EXEMPTION CLASS — the first entry here
+    # that genuinely INVOKES `ws0-baseline.sh`, for real, un-stubbed. Every other entry is "IS
+    # the driver", "a library that never invokes it", or "prose only / rust cannot invoke a shell
+    # script"; writing one of those reasons here would be FALSE, and a false reason in an
+    # exemption table is worse than no exemption, because it is what stops the next person
+    # looking.
+    #
+    # The honest reason is that this lint's subject is SELF-TESTS: `test_ws0_hermeticity.sh`
+    # exists so a shipped self-test cannot accidentally run a REAL measurement (sysctl writes, a
+    # cache drop, a 45s loadgen step) instead of a stubbed one. `ws0-3551-abc.sh` is not a
+    # self-test — it is a production measurement driver whose entire function is to invoke the
+    # real driver once per (round, arm), which is exactly what the method's interleaving
+    # requirement asks an operator to do. Hermeticity is not a property it should have.
+    #
+    # It was reported UNCOVERED the moment it became TRACKED, exactly as its predecessors were
+    # — and note the trap that cost a green run: this census is CONTENT-based over `git`-tracked
+    # files, so the suite passed 99/99 while the file was still uncommitted and failed the
+    # moment it was committed. A git-derived subject set cannot see an untracked file, so a
+    # pre-commit green on this suite proves nothing about a new file.
+    "scripts/perf/ws0-3551-abc.sh":
+        "a PRODUCTION measurement driver, not a self-test: invoking ws0-baseline.sh for real,"
+        " once per (round, arm), IS its function (issue #3551 interleaved A/B/C). This lint's"
+        " subject is self-tests, which must never run a real measurement; this file must",
+    # #3551's aggregator, and — unlike its `ws0-3551-abc.sh` sibling above — this one is the
+    # ORDINARY class: it reads `results.json` files off disk and never runs anything. Its two
+    # driver mentions are prose explaining WHY an A/B/C comparison is a SET of driver sessions
+    # (the driver measures one configuration per invocation) and therefore why the paired
+    # per-round deltas cannot come out of a single session.
+    "scripts/perf/ws0_abc_aggregate.py":
+        "reads results.json artifacts only, never invokes anything; its ws0-baseline.sh"
+        " mentions are prose stating that the driver measures ONE configuration per invocation,"
+        " which is why an A/B/C comparison is a set of its sessions",
     "tools/ws0-corpus-gen/README.md": "documentation",
     "tools/ws0-corpus-gen/src/bin/scan_bench.rs": "rust; cannot invoke a shell script bare",
     # Round 10's F-B test file, and the census reported it UNCOVERED the moment it was staged —
