@@ -145,15 +145,29 @@ pub fn sstables_root_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-/// True when `<root>/<keyspace>` holds at least one `<table>-*` directory carrying a
-/// `*-Data.db` — i.e. the binaries are really there, not just the JSONL sidecars.
-pub fn table_has_data(root: &Path, keyspace: &str, table: &str) -> bool {
-    let ks_dir = root.join(keyspace);
-    let Ok(entries) = std::fs::read_dir(&ks_dir) else {
-        return false;
+/// Every `<root>/<keyspace>/<table>-*` generation directory that carries a real
+/// `*-Data.db`, **sorted by directory name** — never `read_dir` order.
+///
+/// Two properties, both load-bearing (issue #3782, roborev job 57 finding 2):
+///
+///   * **usable, not merely named**: the repo commits JSONL/`.txt` sidecars for
+///     fixtures whose binaries are gitignored, so `<table>-<uuid>/` can exist
+///     with no readable SSTable in it. Measured on this fleet:
+///     `test_basic/composite_key_table-6ab56990…/` in the CHECKOUT holds four
+///     sidecars and NO `Data.db`, while the fetched root's copy of the same
+///     directory name is complete. Any selection that does not REQUIRE a
+///     `*-Data.db` can therefore bind to the unusable copy.
+///   * **deterministic**: `read_dir` order is unspecified (filesystem- and
+///     creation-order-dependent), so a lane that takes "the first match" is
+///     nondeterministic the moment a table has more than one generation
+///     directory — it can pass on one machine and fail on another with the same
+///     bytes on disk.
+pub fn table_generation_dirs(root: &Path, keyspace: &str, table: &str) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root.join(keyspace)) else {
+        return Vec::new();
     };
     let prefix = format!("{table}-");
-    entries
+    let mut dirs: Vec<PathBuf> = entries
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| {
@@ -163,8 +177,8 @@ pub fn table_has_data(root: &Path, keyspace: &str, table: &str) -> bool {
                     .map(|n| n.starts_with(&prefix))
                     .unwrap_or(false)
         })
-        .any(|dir| {
-            std::fs::read_dir(&dir)
+        .filter(|dir| {
+            std::fs::read_dir(dir)
                 .map(|rd| {
                     rd.filter_map(|e| e.ok()).any(|e| {
                         e.file_name()
@@ -175,6 +189,59 @@ pub fn table_has_data(root: &Path, keyspace: &str, table: &str) -> bool {
                 })
                 .unwrap_or(false)
         })
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+/// True when `<root>/<keyspace>` holds at least one `<table>-*` directory carrying a
+/// `*-Data.db` — i.e. the binaries are really there, not just the JSONL sidecars.
+pub fn table_has_data(root: &Path, keyspace: &str, table: &str) -> bool {
+    !table_generation_dirs(root, keyspace, table).is_empty()
+}
+
+/// The ONE usable generation directory of `<keyspace>.<table>`, resolved by
+/// EVIDENCE across every candidate root and selected DETERMINISTICALLY, or an
+/// `Err` naming what was searched.
+///
+/// Two decisions, stated because a fixture-staging lane depends on both:
+///
+///   * the ROOT is [`sstables_root_for_table`] — the first candidate that
+///     actually carries the table's bytes, never a fixed env-first/checkout-first
+///     preference (#3220/#3104);
+///   * among that root's usable generation directories the **lexicographically
+///     FIRST** is taken. The choice of "first" is arbitrary; that it is
+///     *defined* is not. A corruption-staging lane needs ONE Cassandra-written
+///     generation to copy and mutate, and any usable one serves — so a
+///     multi-generation table is legitimate here and is treated as "pick the
+///     defined one", NOT as an error. A lane that must cover EVERY generation
+///     (the corpus-wide negative control) enumerates
+///     [`table_generation_dirs`] instead of calling this.
+///
+/// `Err` rather than a panic so each caller keeps its own diagnostic — but no
+/// caller may turn it into a SKIP: "no usable generation" means the corpus this
+/// lane measures is not there, which is a fail-closed condition (#3220).
+pub fn resolve_table_generation_dir(keyspace: &str, table: &str) -> Result<PathBuf, String> {
+    let Some(root) = sstables_root_for_table(keyspace, table) else {
+        return Err(describe_search(keyspace, table));
+    };
+    match table_generation_dirs(&root, keyspace, table)
+        .into_iter()
+        .next()
+    {
+        Some(dir) => Ok(dir),
+        // Unreachable via `sstables_root_for_table` (it selects on the same
+        // predicate), so this arm exists for the case where the corpus changes
+        // UNDER the process — and it names that rather than pretending the
+        // table was never there.
+        None => Err(format!(
+            "no *-Data.db-bearing {table}-* generation directory under \
+             {}/{keyspace} even though that root was selected as carrying the \
+             table; {}",
+            root.display(),
+            describe_search(keyspace, table)
+        )),
+    }
 }
 
 /// The first candidate `sstables/` root that actually carries

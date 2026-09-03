@@ -24,6 +24,7 @@
  * sample, and set the budget with generous headroom over the observed spread.
  */
 const { Database } = require('../lib/index.js');
+const { assertDatasetsAvailable } = require('./helpers.js');
 
 const DIR = global.testPaths.SSTABLES_DIR;
 const SCHEMA = global.testPaths.SCHEMA_WIDE_ROWS;
@@ -85,11 +86,7 @@ describe('conversion per-row heap budget (issue #1449)', () => {
   let db;
 
   beforeAll(async () => {
-    if (!global.DATASETS_AVAILABLE) {
-      throw new Error(
-        'Test data not available. Set CQLITE_DATASETS_ROOT or run fetch-datasets.sh'
-      );
-    }
+    assertDatasetsAvailable();
     // Budget measurement is meaningless without gc control; FAIL, do not skip.
     if (typeof global.gc !== 'function') {
       throw new Error(

@@ -14,13 +14,13 @@
  */
 
 const { Database } = require('../lib/index.js');
-const { skipIfNoDatasets } = require('./helpers.js');
+const { assertDatasetsAvailable } = require('./helpers.js');
 
 describe('QueryResult and ColumnInfo Tests (Issue #303)', () => {
   let db = null;
 
   beforeAll(async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     console.log(`Test data root: ${global.testPaths.TEST_DATA_ROOT}`);
     console.log(`SSTables dir: ${global.testPaths.SSTABLES_DIR}`);
     console.log(`Schema file: ${global.testPaths.SCHEMA_BASIC_TYPES}`);
@@ -246,7 +246,7 @@ describe('Row property order matches SELECT order (Issue #1446)', () => {
   let db = null;
 
   beforeAll(async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     db = await Database.open(global.testPaths.SSTABLES_DIR, {
       schema: global.testPaths.SCHEMA_BASIC_TYPES,
     });
@@ -350,9 +350,9 @@ describe('Row property order matches SELECT order (Issue #1446)', () => {
  * the signal above V8/native baseline noise the query is issued K times and its
  * payload retained, so `totalPayload` reaches tens of MB.
  *
- * Dataset-absence is handled by `skipIfNoDatasets()` in `beforeAll`: per the
- * repo's Node test convention it THROWS (never skips) when the corpus is not
- * configured, so a misconfigured CI run fails loudly rather than passing
+ * Dataset-absence is handled by `assertDatasetsAvailable()` in `beforeAll`:
+ * per the repo's Node test convention it THROWS (never skips) when the corpus
+ * is not configured, so a misconfigured CI run fails loudly rather than passing
  * silently. Within the test itself we also THROW for the present-but-empty
  * fixture case (rowCount == 0) and when `--expose-gc` is unavailable. Requires
  * `node --expose-gc` (wired via package.json `test` script).
@@ -361,7 +361,7 @@ describe('executeNative blob payload memory footprint (Issue #1447)', () => {
   let db = null;
 
   beforeAll(async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     db = await Database.open(global.testPaths.SSTABLES_DIR, {
       schema: global.testPaths.SCHEMA_WIDE_ROWS,
     });

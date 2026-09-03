@@ -9,6 +9,7 @@
 
 use super::super::SSTableReader;
 use super::model::{bti_lookup_step, table_header_consistent_for_seek, BtiLookupStep};
+use crate::storage::sstable::reader::parsing::BufferExtent;
 use crate::types::{ScanRow, TableId};
 use crate::{Error, Result, RowKey};
 use tracing::debug;
@@ -357,8 +358,11 @@ impl SSTableReader {
             // key (see `emitted_our_key` below).
             let mut found: Option<ScanRow> = None;
             let mut emitted_our_key = false;
+            // #3782: a chunk-covering WINDOW — a truncated tail here is this
+            // reader's straddle signal ("pull the next chunk"), not corruption.
             let parse_result = parser.parse_block_emit(
                 &window[within..],
+                BufferExtent::Window,
                 schema_opt,
                 self,
                 |(tid, entry_key, entry_value)| {
@@ -784,8 +788,10 @@ impl SSTableReader {
             let avail = window.len().saturating_sub(within);
             (start.min(avail), end.min(avail))
         });
+        // #3782: chunk-covering window (see above) — tolerant tail by contract.
         parser.parse_block_emit_windowed(
             &window[within..],
+            BufferExtent::Window,
             schema_opt,
             self,
             clamped_window,

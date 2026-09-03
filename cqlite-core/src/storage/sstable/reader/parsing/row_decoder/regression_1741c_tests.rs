@@ -58,10 +58,20 @@ fn count_emitted(
     window: Option<(usize, usize)>,
 ) -> Result<usize> {
     let mut n = 0usize;
-    parser.parse_block_emit_windowed(block, Some(schema), reader, window, |_entry| {
-        n += 1;
-        Ok(std::ops::ControlFlow::Continue(()))
-    })?;
+    // #3782: `block` is the whole stitched data section (see the callers), so
+    // the truthful extent is `Complete`; the `window` argument narrows the
+    // row-index BODY, which is a different axis.
+    parser.parse_block_emit_windowed(
+        block,
+        super::BufferExtent::Complete,
+        Some(schema),
+        reader,
+        window,
+        |_entry| {
+            n += 1;
+            Ok(std::ops::ControlFlow::Continue(()))
+        },
+    )?;
     Ok(n)
 }
 

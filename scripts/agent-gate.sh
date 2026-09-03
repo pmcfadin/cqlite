@@ -150,7 +150,9 @@
 #                      closes parity.test.js's `test.skip` placeholder, the one
 #                      corpus-conditional path that WOULD pass silently. It is NOT
 #                      protection against `describe.skip`: no *.test.js uses it (the
-#                      repo's Node convention is skipIfNoDatasets(), which THROWS).
+#                      repo's Node convention is assertDatasetsAvailable(), which
+#                      THROWS — #3641 renamed it from skipIfNoDatasets(), a skip-named
+#                      function that never skipped).
 #                      --only/--lite stay lenient and the #2078 opt-out is honoured,
 #                      with the mode PRINTED. check_jest_suites_ran is
 #                      the affirmative guard: the reported suite total must equal the
@@ -1874,6 +1876,11 @@ CANONICAL_FIXTURE_KEYSPACE="test_basic"
 # Stamped into the SUMMARY when the opt-out (AGENT_GATE_ALLOW_MISSING_FIXTURES=1)
 # restores SKIP, so an intentional opt-out is visible in the pasted block.
 MISSING_FIXTURES_MARKER=""
+# #3402/job 74: set to 1 beside every site that BUILDS component rows into a meta array, and
+# read by _emit_meta_lines to decide whether the funnel must append them. Explicit state, so
+# the decision can never be spoofed by a caller-controlled value that happens to look like a
+# row (the defect this replaced). Declared here so it is bound under `set -u` at every emit.
+_SUMMARY_ROWS_BUILT=0
 
 # _missing_fixtures_marker: the machine-checkable OPT-OUT line stamped into the
 # SUMMARY. Single-sourced so the real preflight and the hidden --preflight-fixtures
@@ -2633,7 +2640,7 @@ apply_schemas_preflight() {
         return 1
       fi
       _tree_meta_array   # #2926: every emitted block carries the tree provenance
-      emit_summary FAIL \
+        emit_summary FAIL \
         "preflight: FAIL (committed CQL schema fixtures unreadable under $root — missing: $missing)" \
         "missing-schemas: FAIL-CLOSED (#3148) — dataset-backed components would panic on an absent .cql; overall verdict FAIL" \
         "$(_component_set_meta)" \
@@ -6772,17 +6779,167 @@ _fm_annotate() {
   return 0
 }
 
+# _status_detail_file <component> (#3402): the per-component SIDECAR carrying a short
+# free-text detail that the SUMMARY line appends after the feature-matrix annotation.
+# A FILE, not a variable, for the same reason `.result` is one: a component may run in a
+# backgrounded subshell of the bounded pool (#1737) and cannot write the parent's state.
+_status_detail_file() { printf '%s/%s.status-detail' "${LOG_DIR:-}" "$1"; }
+
+# _record_status_detail <component> <text> (#3402): publish that detail. The text must be
+# GATE-AUTHORED — fixed wording plus values the component computed. No repository-derived
+# content (paths, branch names, commit subjects) may be interpolated into it.
+#
+# WATCH THE PATHS, which is how this contract was broken the first day it existed (roborev
+# job 25): `$LOG_DIR` is `mktemp -d "${TMPDIR:-/tmp}/agent-gate.XXXXXX"`, so ANY path under it
+# is caller-influenced, not gate-authored. Interpolating one put a `TMPDIR` containing the
+# probe's verdict token straight into this field, where the guard below would withhold the
+# WHOLE detail and take the override name and the growth count with it. Name the FILE and let
+# the block's own `logs:` line supply the directory — a pointer that composes rather than one
+# that carries.
+#
+# That is a CONTRACT, not an observation, and it is what makes the reader's job small. A
+# two-field trusted/untrusted sidecar was built here when the row still rendered grown-file
+# PATHS, and was removed with them: the untrusted half had no writer left, and unused
+# generality is a liability that the next reader has to reason about. A future writer that
+# genuinely needs repository content should re-introduce the split deliberately (#3312:
+# separate the channel; do not escape harder) rather than smuggle it through this field.
+# Best-effort by
+# design — the detail EXPLAINS a status token, it does not carry the verdict, so a
+# LOG_DIR that cannot take it must not change what the component reports. (The token
+# itself rides `.result`, whose write failure is already handled by the missing-result
+# guard.)
+# WRITE-THEN-RENAME, and on failure leave NOTHING renderable (roborev job 108). The previous
+# form truncated the destination and wrote in place, which fails two ways:
+#   * a write that dies partway (ENOSPC, a quota boundary) leaves a PARTIAL detail, which
+#     renders as a truncated disclosure — the silent truncation this issue exists to remove;
+#   * this function is called a SECOND time on the persistence path, to REPLACE the opt-out
+#     detail with the persistence one. If that second write fails, the FIRST one survives, and
+#     the row then claims `CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced)` while the
+#     component is FAIL for a reason that has nothing to do with the ratchet. That is exactly
+#     the false attribution fixed on the C1 round, arriving through a failed write instead of
+#     a missing branch.
+# So: write a temp file, rename only on a COMPLETE write, and on any failure remove both the
+# temp and the DESTINATION. Losing the detail is a truthful absence; keeping a stale one is a
+# false statement, and this whole issue is about which of those a summary may contain.
+_record_status_detail() {
+  [ -n "${LOG_DIR:-}" ] || return 0
+  local _sd_f _sd_t
+  _sd_f=$(_status_detail_file "$1")
+  _sd_t="$_sd_f.partial"
+  if printf '%s\n' "$2" 2>/dev/null >"$_sd_t" && mv -f "$_sd_t" "$_sd_f" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "$_sd_t" "$_sd_f" 2>/dev/null
+  return 0
+}
+
+# _status_detail <component> (#3402): read it back, reduced to ONE line with the C0 controls
+# and DEL removed. This value is interpolated into the SUMMARY block, and every reader of
+# that block parses it LINE-WISE — the #2908/#3041 completion probe, premerge-assert's
+# single-block assert, the #3453 annotation census. A multi-line or CR-bearing detail would
+# INJECT rows into the block, and a detail carrying an ESC would put ANSI into a block that
+# gets pasted into PR comments; LF, CR and ESC are all C0, so both routes are closed at this
+# ONE emit boundary rather than trusted of each writer (#3312: neutralise where the value is
+# rendered, not per interpolation site — a per-site escape is a list to keep complete).
+#
+# THE SCOPE IS C0 + DEL, NOT "ALL CONTROL CHARACTERS" (roborev job 107). This opening used to
+# claim "no control characters at all" and that `[:cntrl:]` is "the whole class" — which the
+# note further down then correctly contradicted, in the same comment block. A doc block that
+# argues with itself is worse than either half alone, because a reader cannot tell which
+# sentence was written last. The honest scope is stated here and the C1 residual is explained
+# at the LC_ALL=C pin below.
+#
+# DEFENCE IN DEPTH, stated as such rather than implied: the one writer today (run_file_size)
+# emits fixed wording, a count and a bare filename — no repository PATH and no
+# caller-controlled value — so no REACHABLE input carries a control character at all. This
+# boundary exists so the NEXT writer cannot reintroduce the row-injection route by not
+# thinking about it.
+# NOT BEHAVIOURALLY TESTED ON THIS PLATFORM, and that is DECLARED rather than papered over
+# (roborev job 20, L2). A test was written for this pin and then DELETED: GNU `tr` is
+# byte-wise, so for every input any writer here can produce, `[:cntrl:]` selects the same
+# bytes with or without the pin — the rendering is identical, no mutant can distinguish the
+# two, and the case could not fail. It was ALSO flaky, comparing whole rows from two
+# separate runs with the elapsed `(Ns)` field included. A case that cannot fail but CAN
+# flake is strictly worse than none: it costs reds in a merge-gating suite and buys no
+# signal. The pin STAYS — free, and it removes a real environment dependence on any
+# platform where the class IS locale-sensitive — but it is defence in depth with NO
+# behavioural coverage, said plainly so nobody reads the neighbouring cases as evidence.
+# LOCALE-PINNED, and the CLAIM is narrowed to what the code delivers (roborev round 1, L2):
+# `[:cntrl:]` is evaluated in the CURRENT locale, so an unpinned `tr` makes this boundary's
+# coverage a property of the caller's environment rather than of this line. `LC_ALL=C`
+# fixes it at C0 (0x00-0x1F) + DEL (0x7F), which is the whole of what row injection and ANSI
+# need: LF/CR forge rows, ESC starts a sequence, and both are C0.
+# WHAT IS DELIBERATELY *NOT* COVERED, said plainly rather than left inside a word like
+# "all": the C1 block (U+0080-U+009F). In UTF-8 those are TWO bytes (0xC2 0x80-0x9F), which
+# a byte-wise `tr` cannot match as a class, and which a UTF-8 terminal does not treat as
+# control introducers anyway — so the residual is not a route, and the previous wording
+# ("no control characters at all", "the whole class") asserted a coverage this line never
+# had. A comment claiming more than its code is the defect class this repo polices; the
+# claim is narrowed rather than the implementation grown, because no reachable input
+# carries even a C0 (see the defence-in-depth note above).
+# LENGTH is NOT capped here: a cap would be a SILENT truncation of a disclosure, which is
+# the defect this issue removes. Bounding the value is the WRITER's job, and today's writers
+# need no bound — every detail is a fixed sentence plus a count and a log path.
+_status_detail() {
+  local f
+  f=$(_status_detail_file "$1")
+  [ -n "${LOG_DIR:-}" ] && [ -s "$f" ] || return 0
+  # …and a detail carrying the completion probe's verdict token is REFUSED, not rewritten
+  # (roborev job 19, L1). The #2908/#3041 probe greps the summary FILE for
+  # `RESULT: (PASS|FAIL)` and this detail lands on a component ROW inside that file, so the
+  # token must not appear here. The first attempt SUBSTITUTED it — and a blanket
+  # substitution edits the token wherever it occurs, INCLUDING inside repository-derived
+  # text — at the time, a legitimate grown-file path such as `cqlite-core/src/RESULT: PASS.rs`,
+  # which the row then named in a spelling that exists nowhere on disk. That was the SAME
+  # false-reporting defect this change exists to remove, reintroduced by its own guard.
+  # No shipping writer can reach that case any more (the row carries no repository content),
+  # but REFUSE-DON'T-REWRITE is kept as the boundary's rule, because the next writer to need
+  # such content must not inherit a silent rewriter.
+  #
+  # So the offending value is WITHHELD, loudly, and the reader is sent to the component log
+  # — a truthful degradation instead of a false statement.
+  #
+  # The refusal names NO part of the token it refuses (the reason is described, not quoted),
+  # because a diagnostic reproducing the token it exists to keep off this row would forge the
+  # very row it prevents — the rule this repo already applies to the roborev waiver markers.
+  #
+  # THE TRIGGER IS DELIBERATELY BROADER THAN THE PROBE PATTERN. It fires on any `RESULT:`,
+  # not only `RESULT: PASS`/`RESULT: FAIL`, because narrowing it would require knowing every
+  # consumer's regex AND that it stays that way — and the consumers are not enumerable from
+  # here (pollers outside this repo read these blocks). The cost of the broad trigger is a
+  # withheld detail on a pathological filename; the cost of a narrow one is a forged verdict
+  # for a consumer nobody surveyed. Only one of those is recoverable by reading the log.
+  local _sd_v
+  _sd_v=$(head -1 "$f" 2>/dev/null | LC_ALL=C tr -d '[:cntrl:]')
+  # CHECKED, not assumed. The gate-authored contract above is a property of today's four
+  # call sites; a fifth could interpolate something, and this boundary is the one place that
+  # notices. It cannot fire on any writer shipping today, which is why its coverage is a
+  # SEEDED case in scripts/tests/test_agent_gate_tree_provenance.sh (phase B3) rather than a
+  # filename fixture — an untestable guard is one nobody can trust.
+  case "$_sd_v" in
+    *RESULT:*) printf '%s' "[detail WITHHELD: it carries the completion probe's reserved verdict token (#2908), which on this row would forge a terminal verdict — see the component log]" ;;
+    *)         printf '%s' "$_sd_v" ;;
+  esac
+}
+
 # _fm_summary_line <name> <status> <time>: the ONE renderer for a SUMMARY component
 # line, used by all six emit sites (full, lite, two delta sites, the aggregation
 # self-test and --emit-summary-selftest) so no mode can render a block the others do
 # not. `%-18s` and the `(time)` shape are unchanged — the annotation is appended, so
-# every existing prefix/stage-line assertion still matches.
+# every existing prefix/stage-line assertion still matches, and the #3402 status detail
+# is appended AFTER the annotation (absent → the line is byte-identical to before).
 _fm_summary_line() {
   # #3625: the census suffix rides here, at the ONE renderer, for the same reason the
   # feature matrix does -- no mode can then emit a component line the others do not.
   # `%-18s` and the `(time)` shape are UNCHANGED (#3453 kept them deliberately and
   # existing prefix/stage assertions match on them); the census is APPENDED.
-  printf '%-18s %s (%s)  %s  %s' "$1:" "$2" "$3" "$(_fm_annotate "$1")" "$(_census_annotate "$1" "$2")"
+  # #3402: …and the status detail is appended AFTER the census, last of the three suffixes.
+  # Order is deliberate: the matrix and the census are STRUCTURED tokens a parser may key on,
+  # while the detail is free text that ends the line, so nothing structured sits behind
+  # something unstructured. Absent detail → the line is byte-identical to #3625's.
+  local _detail
+  _detail=$(_status_detail "$1")
+  printf '%-18s %s (%s)  %s  %s%s' "$1:" "$2" "$3" "$(_fm_annotate "$1")" "$(_census_annotate "$1" "$2")" "${_detail:+ — $_detail}"
 }
 
 # _fm_note_if_no_cargo_observed <component> <status>: a component that ENDED without a
@@ -7783,10 +7940,17 @@ census_summary_line() { # <name> <status> [<name> <status>]...
 # PERMISSIVE branch. That is the exact shape CLAUDE.md forbids ("key a permissive
 # branch on the AFFIRMATIVE value, never on != <bad>"), and it is what a new
 # non-passing token like VACUOUS would otherwise have walked straight through.
+# #3402 adds OPT-OUT to the set, EXPLICITLY. An acknowledged growth override is a disclosed
+# waiver, not a failure — that is the whole point of the token — but note what changed here:
+# the original #3402 design rested on "every aggregator fails only on an EXACT `FAIL`", i.e.
+# on the PERMISSIVE default this function exists to abolish. #3625 closed that default, and it
+# was right to: a token that means "do not fail the run" must SAY so in the one closed set,
+# not inherit it from the absence of a match. So the claim is now checked rather than assumed,
+# and a future non-passing token cannot ride in the way OPT-OUT would have.
 _status_is_nonfailing() {
   case "$1" in
-    PASS|SKIP) return 0 ;;
-    *)         return 1 ;;
+    PASS|SKIP|OPT-OUT) return 0 ;;
+    *)                 return 1 ;;
   esac
 }
 # ==== END component census (#3625) ====
@@ -9069,6 +9233,47 @@ fi
 # warning to STDERR (more likely to survive than stdout under a leaked-child/pty
 # capture). The caller's exit logic turns SUMMARY_WRITE_FAILED into a non-zero
 # exit so a green gate never silently lacks its summary file.
+# _emit_meta_lines <meta…> (#3402/job 30): the caller's meta lines, then the rows of every
+# component that has already RECORDED a verdict. Called by ALL THREE renderings inside
+# emit_summary (the authoritative file write and both fallback sinks) so they cannot diverge
+# — the same reason _fm_summary_line is the one row renderer.
+#
+# WHY AT THE FUNNEL. Three review rounds found the same defect at three different emit sites:
+# the tree-integrity boundary block, then the dataset/schemas preflights, then the `--only`
+# zero-dataset preflight and the summary-integrity paths. There are ~20 emit sites and each
+# hand-builds its own meta list, so each is an independent chance to omit the table and
+# enumerating them is a treadmill. `run_file_size` runs before every one of those exits, so
+# an acknowledged CQLITE_ALLOW_FILE_GROWTH=1 was invisible in whichever block the run
+# actually emitted.
+#
+# SUPPRESSED when the caller already built rows, so the terminal emits — which build theirs
+# from _fm_summary_line and carry the #3453 feature-matrix annotation — are unchanged rather
+# than doubled.
+#
+# THE SUPPRESSION SIGNAL IS EXPLICIT STATE, NOT A GREP OF THE RENDERED TEXT (roborev job 74).
+# The first version decided by matching the block's own row grammar against the meta it was
+# about to print — inferring CONTROL from DATA, on a stream that carries caller-controlled
+# values. `datasets: N Data.db files under $CQLITE_DATASETS_ROOT` alone is enough: a root
+# whose name contains a row-shaped line suppresses the genuine rows and hides the very
+# disclosure this issue exists to publish. That is #3312's umbrella lesson committed inside
+# the fix for it, and the ruling there is to REMOVE THE SHARED CHANNEL rather than choose a
+# rarer pattern. `_SUMMARY_ROWS_BUILT` is set beside each row-append, in the same shell, and
+# nothing a caller can name reaches it.
+#
+# DELIBERATELY NOT RESET HERE: emit_summary renders this block up to THREE times (the
+# authoritative file write and both fallback sinks), so a consume-and-clear would make the
+# second and third renderings differ from the first — three sinks disagreeing about one
+# block, which is worse than the leak it would prevent. The flag means "this run's meta
+# arrays carry rows", which does not become false later in the run.
+_emit_meta_lines() {
+  local line
+  for line in ${@+"$@"}; do echo "$line"; done
+  if [ "${_SUMMARY_ROWS_BUILT:-0}" != 1 ]; then
+    line=$(_recorded_component_rows_block)
+    [ -z "$line" ] || printf '%s\n' "$line"
+  fi
+}
+
 emit_summary() {
   local result="$1"; shift
   # Write the complete block to the caller-known file FIRST, with plain
@@ -9089,8 +9294,7 @@ emit_summary() {
       echo "run-id: $RUN_ID"
       [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
       [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
-      local line
-      for line in "$@"; do echo "$line"; done
+      _emit_meta_lines ${@+"$@"}
       echo "logs: $LOG_DIR"
       echo "summary-file: $SUMMARY_FILE"
       # #3473: declare the liveness mechanism's state in the block itself. A pasted
@@ -9159,8 +9363,7 @@ emit_summary() {
       echo "run-id: $RUN_ID"
       [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
       [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
-      local line
-      for line in "$@"; do echo "$line"; done
+      _emit_meta_lines ${@+"$@"}
       echo "logs: $LOG_DIR"
       echo "summary-file: $SUMMARY_FILE (WRITE FAILED — see stderr)"
       echo "RESULT: $emit_result"
@@ -9183,8 +9386,7 @@ emit_summary() {
       echo "run-id: $RUN_ID"
       [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
       [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
-      local line
-      for line in "$@"; do echo "$line"; done
+      _emit_meta_lines ${@+"$@"}
       echo "logs: $LOG_DIR"
       echo "summary-file: $SUMMARY_FILE (WRITE FAILED — see stderr)"
       echo "RESULT: $emit_result"
@@ -9249,14 +9451,22 @@ _integrity_fail_block() {
   # meta line is dropped, so exactly ONE authoritative line appears no matter which caller
   # supplied the meta (the --lite/--delta terminals push it into SUMMARY_META; the MAIN
   # foreground lane passes none).
+  # #3402/job 74: this block is hand-rolled (it is the no-clobber publish path), so it
+  # BYPASSED _emit_meta_lines and carried no recorded component rows — a `file-size: OPT-OUT`
+  # followed by a foreign-owner detection published a block with the disclosure missing from
+  # the private log, the sibling AND stdout at once. Same class as the boundary and preflight
+  # findings: a hand-built block is a hand-built omission. The filtered lines are collected
+  # and handed to the ONE renderer rather than echoed here.
   local line
+  local -a _ifb_meta=()
   for line in ${@+"$@"}; do
     case "$line" in
       tree-start:*|tree-end:*|tree-integrity:*|tree-hash-cap:*) continue ;;
       component-set:*) continue ;;
     esac
-    echo "$line"
+    _ifb_meta+=("$line")
   done
+  _emit_meta_lines ${_ifb_meta[@]+"${_ifb_meta[@]}"}
   _tree_meta_lines
   printf '%s\n' "$(_component_set_meta)"
   echo "logs: $LOG_DIR"
@@ -9728,6 +9938,64 @@ _tree_mode_components() {
   fi
 }
 
+# _recorded_component_rows_block (#3402): the aggregate `census:` line, a
+# `components-recorded:` count and one row per component that has RECORDED a verdict — as ONE
+# string, or nothing when no component has recorded yet.
+#
+# WHY IT EXISTS: `run_file_size` executes before the dataset and schemas preflights, and every
+# early-exit `emit_summary` hand-builds its own meta list, so each is an independent chance to
+# omit the table. Three review rounds found the same omission at three different emit sites
+# before it was fixed at the FUNNEL instead of per site.
+#
+# ONE FUNCTION, ONE SHELL, DELIBERATELY. This was a helper pair — a traversal that printed
+# rows plus a wrapper that captured them — and the split cost the same bug TWICE: the traversal
+# assigned its count, and later its census subject set, to globals that the wrapper read across
+# a COMMAND SUBSTITUTION, i.e. across a subshell, so the wrapper saw neither. The first
+# instance rendered `0` beside one printed row; the second silently dropped the census line.
+# Both were caught by RUNNING it, not by reading it. Folded together, the rows, the pairs and
+# the count are produced by the same shell and no global crosses a boundary.
+#
+# The census goes ABOVE the rows because its subject set is only known once the traversal is
+# done — the same shape, and the same reason, as the boundary table.
+_recorded_component_rows_block() {
+  # SAFE AT EVERY EMIT SITE, including blocks emitted from the ARG DISPATCH before LOG_DIR
+  # exists and before COMPONENTS is in scope: an unguarded `"$LOG_DIR"/*.result` with LOG_DIR
+  # empty globs `/*.result`, and `_tree_mode_components` is not yet defined there.
+  [ -n "${LOG_DIR:-}" ] && [ -d "$LOG_DIR" ] || return 0
+  command -v _tree_mode_components >/dev/null 2>&1 || return 0
+  command -v census_summary_line   >/dev/null 2>&1 || return 0
+  local _c _rf _st _secs _seen=" " _rows="" _pairs="" _n=0
+  for _c in $(_tree_mode_components); do
+    _rf="$LOG_DIR/$_c.result"
+    [ -f "$_rf" ] || continue
+    _st=""; _secs=""
+    read -r _st _secs < "$_rf" || true
+    _rows="$_rows$(_fm_summary_line "$_c" "$_st" "${_secs}s")
+"
+    _pairs="$_pairs $_c $_st"
+    _seen="$_seen $_c "
+    _n=$(( _n + 1 ))
+  done
+  # …then a SWEEP for any remaining `.result`: a recorded verdict must never be dropped merely
+  # because no static list names it. LOG_DIR is this run's own mktemp directory, so the sweep
+  # can only see verdicts record_result wrote, and the glob is deterministically ordered.
+  for _rf in "$LOG_DIR"/*.result; do
+    [ -f "$_rf" ] || continue
+    _c="${_rf##*/}"; _c="${_c%.result}"
+    case "$_seen" in *" $_c "*) continue ;; esac
+    _st=""; _secs=""
+    read -r _st _secs < "$_rf" || true
+    _rows="$_rows$(_fm_summary_line "$_c" "$_st" "${_secs}s")
+"
+    _pairs="$_pairs $_c $_st"
+    _n=$(( _n + 1 ))
+  done
+  [ -n "$_rows" ] || return 0
+  # shellcheck disable=SC2086  # intentional word-split over the name/STATUS pairs
+  printf '%s\ncomponents-recorded: %s when this block was emitted (a component not listed had recorded no verdict)\n%s' \
+    "$(census_summary_line $_pairs)" "$_n" "$_rows"
+}
+
 _tree_boundary_meta_lines() {
   local _c _s _rf _st _secs _done=0 _sel=0 _seen=" " _cen_names="" _rows=""
   _tree_commit_meta_render
@@ -9808,6 +10076,14 @@ _tree_boundary_meta_lines() {
   # shellcheck disable=SC2086  # intentional word-split over the name/STATUS pairs
   printf '%s\n' "$(census_summary_line $_cen_names)"
   [ -n "$_rows" ] && printf '%s' "$_rows"
+  #
+  # #3402: this path keeps its OWN traversal, deliberately. The emit FUNNEL has a second one
+  # (`_recorded_component_rows_block`) for the ordinary blocks that carry no table of their
+  # own, and the two are not worth merging: this one BUFFERS its rows so the aggregate
+  # `census:` line can be printed ABOVE them, and it accumulates the census subject set as it
+  # goes — neither of which the funnel needs, since it appends after a caller's meta and the
+  # census is already on those blocks. Both render through `_fm_summary_line`, so the ROW
+  # SHAPE cannot diverge, which is the property that actually matters.
   # Selected-count via the bash-3.2 empty-array-safe idiom used throughout this script
   # (a bare "${ARR[@]}" on an empty array aborts under `set -u` on bash < 4.4).
   for _s in ${SELECTED_MAIN[@]+"${SELECTED_MAIN[@]}"} ${SELECTED_SIDE[@]+"${SELECTED_SIDE[@]}"}; do
@@ -9857,6 +10133,12 @@ _tree_boundary_fail() {
   # here, or it would overwrite this block's component-named verdict line.
   local -a _meta=()
   while IFS= read -r _l; do _meta+=("$_l"); done < <(_tree_boundary_meta_lines)
+  # The boundary block builds its OWN table (#3402/job 74), so without this the funnel would
+  # append a duplicate one under a block that already has it. Both render through
+  # `_fm_summary_line`, so the two tables cannot differ in SHAPE — this flag is only about not
+  # printing it twice. The read loop runs in THIS shell, so the assignment lands where
+  # _emit_meta_lines will see it.
+  _SUMMARY_ROWS_BUILT=1
   _meta+=("detected-after-component: $comp")
   _emit_terminal_summary FAIL "${_meta[@]}" || true
   exit 1
@@ -10157,6 +10439,7 @@ if [ "$SELFTEST" -eq 1 ]; then
   meta+=("$(census_summary_line ${_cen_args[@]+"${_cen_args[@]}"})")
   for i in "${!NAMES[@]}"; do
     meta+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
+    _SUMMARY_ROWS_BUILT=1   # #3402/job 74: EXPLICIT, never inferred from rendered text
   done
   # #2078: when the opt-out is engaged, drive the visible missing-fixtures marker
   # through the real emit path so the self-test can assert it lands in the block.
@@ -11797,11 +12080,18 @@ EOF
 # THE CORPUS HALF IS NOW HONOURED, NOT AVOIDED — AND THE REASON IS NOT THE ONE THIS
 # COMMENT FIRST GAVE (roborev/rust-reviewer round 1, B4). 14 of the suite's files gate on
 # dataset availability, so node-bindings IS now in DATASET_COMPONENTS (it was NOT before,
-# and that comment was correct then and would be a stale rationale now).
+# and that comment was correct then and would be a stale rationale now). Since #3641 the
+# 14 is checkable rather than remembered: `grep -l 'assertDatasetsAvailable('
+# __test__/*.test.js` lists exactly those plus helpers.test.js, the helper's own test.
+# The OPERAND is kept contiguous on one line deliberately (roborev job 71): split as
+# `__test__/` + `*.test.js` it is two operands, and it does not fail loudly -- measured,
+# it silently lists 2 files and exits 0, so a reader would under-count the gated suites.
+# Before #3641 it was 11 callers of `skipIfNoDatasets()` PLUS 3 files carrying a verbatim
+# COPY of its body, so the number in this comment and any grep for it disagreed by three.
 #
 # The FULL gate additionally exports CQLITE_REQUIRE_FIXTURES=1. What that buys, MEASURED:
 #   * ONE clean, named setup failure (setup.js's `No SSTable fixtures found: …` throw)
-#     instead of 14 separate `beforeAll` THROWS from `skipIfNoDatasets()`; and
+#     instead of 14 separate `beforeAll` THROWS from `assertDatasetsAvailable()`; and
 #   * it closes `parity.test.js:70`'s `test.skip` placeholder — the ONE
 #     corpus-conditional path in the whole suite that would otherwise pass SILENTLY.
 #
@@ -11809,7 +12099,7 @@ EOF
 # claim was false in three ways. There is no `describe.skip` anywhere in
 # `bindings/node/__test__/*.test.js` — the only occurrence of that string is inside a
 # COMMENT in dataset-guard.test.js. The repo's Node convention is the OPPOSITE of
-# skipping: `helpers.js`'s `skipIfNoDatasets()` THROWS, and `result.test.js` says so
+# skipping: `helpers.js`'s `assertDatasetsAvailable()` THROWS, and `result.test.js` says so
 # outright ("per the repo's Node test convention it THROWS (never skips) … so a
 # misconfigured CI run fails loudly rather than passing silently"). The earlier text also
 # said "7 suites"; the measured number is 14.
@@ -11866,7 +12156,7 @@ run_node_bindings() {
   # FAIL where it used to PASS: the old scope was `write-readback-content` alone, which
   # self-generates its SSTables. `env -u`'ing the strict variables (correct for B2, and kept)
   # does NOT help here, because the suites do not gate on them — `helpers.js`'s
-  # `skipIfNoDatasets()` throws on `!global.DATASETS_AVAILABLE` and never consults
+  # `assertDatasetsAvailable()` throws on `!global.DATASETS_AVAILABLE` and never consults
   # `REQUIRE_FIXTURES` at all. So 14 suites throw whenever the corpus is absent, opt-out or
   # not.
   #
@@ -11887,7 +12177,7 @@ run_node_bindings() {
     status=SKIP
     echo ">>> [$name] SKIP (AGENT_GATE_ALLOW_MISSING_FIXTURES=1 and no usable corpus at CQLITE_DATASETS_ROOT='${CQLITE_DATASETS_ROOT:-<unset>}')"
     echo ">>> [$name]   NOT VALIDATED by this run: the 14 dataset-gated jest suites. helpers.js's"
-    echo ">>> [$name]   skipIfNoDatasets() THROWS on an absent corpus and never consults the strict-mode"
+    echo ">>> [$name]   assertDatasetsAvailable() THROWS on an absent corpus and never consults strict-mode"
     echo ">>> [$name]   env vars, so they cannot be run leniently — the honest options are SKIP or FAIL,"
     echo ">>> [$name]   and FAIL would make the documented #2078 opt-out ineffective (roborev C2)."
     echo ">>> [$name]   The corpus-free half (incl. the #1231 write-readback content proof) is ALSO"
@@ -17824,6 +18114,54 @@ run_file_size() {
     _fs_emit "$log" ">>> [$name] base ref unavailable — growth ratchet skipped (advisory only)"
   elif [ "${#grew[@]}" -gt 0 ]; then
     if [ "${CQLITE_ALLOW_FILE_GROWTH:-0}" = 1 ]; then
+      # #3402: the opt-out must be VISIBLE IN THE PASTED SUMMARY, not only in this log.
+      # A bare `file-size: PASS (0s)` is byte-indistinguishable from a run where the
+      # ratchet was genuinely satisfied, so an override nobody reviewing the PR can see
+      # is an override nothing mechanical can catch omitting. `PASS` means "the check ran
+      # and was satisfied"; it must never mean "the check was switched off". Hence the
+      # component's OWN status token, plus the env var and the COUNT and a pointer to this
+      # log — data this log already holds, PROMOTED rather than recomputed. The file NAMES
+      # stay in the log ONLY; see the removed-cases note in
+      # scripts/tests/test_agent_gate_file_size_log.sh for why rendering them on the row was
+      # tried and withdrawn.
+      #
+      # THREE STATES, NOT TWO. This branch is the ONLY one that may emit OPT-OUT, and it
+      # is keyed on the AFFIRMATIVE `= 1`. A value that is SET BUT NOT 1 (`0`, `true`,
+      # `yes`) falls through to the `else` below and stays a genuine ratchet violation,
+      # exactly as before — see the `growth allowance: NOT enabled … this IS a ratchet
+      # violation` wording in the persistence block, which distinguishes the same three
+      # states. Keying the permissive branch on `!= <bad>` would let a typo buy a green,
+      # which is the false-PASS route this issue must not open while closing another.
+      #
+      # NON-FAILING BY DECLARATION, not by default: OPT-OUT is a member of
+      # `_status_is_nonfailing`, the ONE closed set every aggregator consults (#3625). This
+      # used to say "by construction … only an EXACT FAIL fails", which was true of the old
+      # permissive `!= FAIL` aggregations and became FALSE the moment #3625 replaced them with
+      # an affirmative set — correctly, since a permissive branch keyed on `!= <bad>` is the
+      # shape CLAUDE.md forbids. The token now says it is non-failing where that is decided.
+      status=OPT-OUT
+      # NO REPOSITORY CONTENT ON THIS ROW — env var + COUNT + a pointer to the log, which is
+      # exactly what the issue asks for (#3402: "OPT-OUT (CQLITE_ALLOW_FILE_GROWTH=1; N
+      # file(s) grown)", with naming the files marked "ideally" and explicitly deferred to
+      # the sibling log issue, #3401, now merged).
+      #
+      # An earlier revision rendered the grown PATHS inline. It was dropped after that one
+      # embellishment produced THREE of this PR's seven review findings, each a different
+      # way of mangling a filename: splitting on `: ` when recovering a path from a display
+      # string, substituting inside a path that contained the completion probe's token, and
+      # joining with `,` so `src/a.rs,b.rs` was indistinguishable from two files. Each fix
+      # was correct and the next round found another — the signature the repo already ruled
+      # on for #3229's census predicate: REMOVE the mechanism rather than carve it again.
+      # Escaping would only move the argument to the escape grammar (#3312: a rarer
+      # delimiter is still forgeable).
+      #
+      # Nothing is actually lost. `file-size.log` carries every path with its before -> after
+      # arithmetic (that is #3401's whole subject, and this issue points at it), and a PR
+      # reviewer has a second copy in the DIFF ITSELF — the grown files are the files the PR
+      # changed. What the row must carry is what a pasted SUMMARY cannot get anywhere else:
+      # that the ratchet was NOT enforced, and over how many files.
+      _record_status_detail "$name" \
+        "CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); ${#grew[@]} over-threshold file(s) grown — see file-size.log under logs:"
       _fs_emit "$log" ">>> [$name] ${#grew[@]} over-threshold file(s) grew; ALLOWED via CQLITE_ALLOW_FILE_GROWTH=1:"
       for line in ${grew[@]+"${grew[@]}"}; do
         _fs_emit "$log" "      $line"
@@ -17977,6 +18315,57 @@ run_file_size() {
       # loop broke mid-block (a PARTIAL sibling exists), or the landed line count differs.
       # "the only copy" was false for the middle one (#3401 review item 4).
       msg+=("    (It could NOT be written IN FULL to $sib — stdout carries the complete copy.)")
+    fi
+    # #3402: the STATUS DETAIL must describe why the COMPONENT failed, not merely echo the
+    # ratchet state. The opt-out branch above already stamped `CQLITE_ALLOW_FILE_GROWTH=1
+    # (ratchet NOT enforced); …`, and `status` has since become FAIL for a reason that has
+    # nothing to do with the ratchet — so without this the SUMMARY row reads
+    # `file-size: FAIL (0s)  [no-cargo] — CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced);
+    # 1 over-threshold file(s) grown: …`: a FAIL whose ENTIRE detail describes an opt-out
+    # that is not why it failed. That was MEASURED on the real gate, not inferred. It is
+    # #3401 review's own class ("a state reporting something it never computed"), which
+    # that issue hit SIX times — arriving one level up, in the very artifact this issue
+    # exists to make trustworthy.
+    #
+    # THREE ARMS, because the row must not claim a computation that did not happen (#3401
+    # review L1): both-failed; ratchet SKIPPED (no base ref — `ratchet_verdict` is PASS
+    # there, but NOTHING was compared, so naming that verdict would assert a comparison
+    # that never ran); and persistence-only, which is where OPT-OUT lands.
+    #
+    # The `see <sib>` pointer is added ONLY on the VERIFIED-sibling path. Pointing a reader
+    # at a file that rejected every write is the false-pointer failure #3401 review FIX 2
+    # already removed from stdout, and it must not reappear one artifact over. `sib_ok` is
+    # final here and nowhere earlier — this block must stay BELOW the landed-line check.
+    # A FILENAME, not a path (roborev job 25). $sib is under LOG_DIR, which mktemp created
+    # under the caller's TMPDIR, so interpolating it puts caller-controlled text into a field
+    # this boundary's contract says is gate-authored. The SUMMARY already publishes the
+    # directory on its own `logs:` line, so naming the file composes to the same place with
+    # nothing borrowed from the environment.
+    local _fs_detail_where=""
+    [ "$sib_ok" = 1 ] && _fs_detail_where=" — see file-size.persistence-error.log under logs:"
+    if [ "$ratchet_verdict" = FAIL ]; then
+      _record_status_detail "$name" \
+        "TWO failures: a REAL size-ratchet violation AND a log-persistence failure ($log_persist_err)$_fs_detail_where"
+    elif [ "$ratchet_verdict" = OPT-OUT ]; then
+      # THE OPT-OUT ARM RETAINS THE DISCLOSURE (roborev job 104). The other arms replace the
+      # detail wholesale, which is right for them — there is nothing to retain. Here there is:
+      # the override NAME and the grown COUNT are the entire point of this issue, and this is
+      # the one state where they can be lost from EVERY reachable artifact at once, because
+      # the log that would otherwise hold them is precisely what failed to persist and the
+      # sibling may be unwritable too. Job 21 established this property for the WITHHOLD path
+      # and it was not carried to the PERSISTENCE path — the same omission, one branch over.
+      #
+      # It still LEADS with the persistence failure, so the row never attributes the FAIL to
+      # the ratchet, and it says OPTED OUT OF rather than "computed OPT-OUT" because a reader
+      # needs to know the ratchet was switched off, not merely what token it produced.
+      _record_status_detail "$name" \
+        "LOG PERSISTENCE FAILURE, not a ratchet violation ($log_persist_err); the ratchet was OPTED OUT OF: CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); ${#grew[@]} over-threshold file(s) grown$_fs_detail_where"
+    elif [ -z "$base" ]; then
+      _record_status_detail "$name" \
+        "LOG PERSISTENCE FAILURE, not a ratchet violation ($log_persist_err); the ratchet was SKIPPED (base ref unavailable), so nothing was compared$_fs_detail_where"
+    else
+      _record_status_detail "$name" \
+        "LOG PERSISTENCE FAILURE, not a ratchet violation ($log_persist_err); the ratchet itself computed $ratchet_verdict$_fs_detail_where"
     fi
     for _m in ${msg[@]+"${msg[@]}"}; do
       printf '%s\n' "$_m"
@@ -18508,6 +18897,7 @@ run_lite() {
   SUMMARY_META+=("$(census_summary_line ${_cen_args[@]+"${_cen_args[@]}"})")
   for i in "${!NAMES[@]}"; do
     SUMMARY_META+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
+    _SUMMARY_ROWS_BUILT=1   # #3402/job 74: EXPLICIT, never inferred from rendered text
   done
   # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
   # (falls through to emit_summary when no live peer owns the path; forces FAIL + non-zero exit
@@ -18923,6 +19313,7 @@ run_delta() {
     SUMMARY_META+=("$(census_summary_line ${_cen_args[@]+"${_cen_args[@]}"})")
     for i in "${!DN[@]}"; do
       SUMMARY_META+=("$(_fm_summary_line "${DN[$i]}" "${DS[$i]}" "${DT[$i]}")")
+      _SUMMARY_ROWS_BUILT=1   # #3402/job 74: EXPLICIT, never inferred from rendered text
     done
     SUMMARY_META+=("refusal: python tier skipped — cannot re-certify changed bindings/python/tests/* files; run the full gate (scripts/agent-gate.sh)")
     emit_summary "$(_tree_result REFUSED)" "${SUMMARY_META[@]}"
@@ -18977,6 +19368,7 @@ run_delta() {
   SUMMARY_META+=("$(census_summary_line ${_cen_args[@]+"${_cen_args[@]}"})")
   for i in "${!DN[@]}"; do
     SUMMARY_META+=("$(_fm_summary_line "${DN[$i]}" "${DS[$i]}" "${DT[$i]}")")
+    _SUMMARY_ROWS_BUILT=1   # #3402/job 74: EXPLICIT, never inferred from rendered text
   done
   # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
   # (falls through to emit_summary when no live peer owns the path; forces FAIL + non-zero exit
@@ -19176,6 +19568,7 @@ if [ "$LITE_AGG_SELFTEST" -eq 1 ]; then
   SUMMARY_META+=("$(census_summary_line ${_cen_args[@]+"${_cen_args[@]}"})")
   for _i in "${!NAMES[@]}"; do
     SUMMARY_META+=("$(_fm_summary_line "${NAMES[$_i]}" "${STATUSES[$_i]}" "${TIMES[$_i]}")")
+    _SUMMARY_ROWS_BUILT=1   # #3402/job 74: EXPLICIT, never inferred from rendered text
   done
   # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
   # (falls through to emit_summary when no live peer owns the path; forces FAIL + non-zero exit
@@ -20106,6 +20499,7 @@ fi
 SUMMARY_META+=("$(census_summary_line ${_cen_args[@]+"${_cen_args[@]}"})")
 for i in "${!NAMES[@]}"; do
   SUMMARY_META+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
+  _SUMMARY_ROWS_BUILT=1   # #3402/job 74: EXPLICIT, never inferred from rendered text
 done
 # #1465: node-bindings' leak lane is skippable under the #2078 opt-out, so the block states
 # which of RAN / SKIPPED / NOT-RUN happened. Absent file = the component was not selected,
