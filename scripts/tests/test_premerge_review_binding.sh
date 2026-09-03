@@ -2073,19 +2073,109 @@ if run_binding 4 "result: a deferral naming a NON-EXISTENT issue does not bind" 
   esac
 fi
 
-# --- G3: an issue whose state could NOT BE ASKED must NOT bind ----------------
+# --- job 102: an issue whose state could NOT BE ASKED is UNMEASURED, not UNBOUND
 # No fixture at all => the mock fails with a diagnostic that does NOT say the
 # issue is missing. That is a could-not-ask, and a could-not-ask never grants.
+#
+# THIS CASE PREVIOUSLY EXPECTED EXIT 4, and that was the defect roborev job 102
+# found: an unreachable `gh` was reported as "no authorized deferral covers this
+# job", which is a WRONG REMEDY — it sends a lead to re-post a marker that was
+# already fine when the fix is restoring GitHub access. `absent` and `closed`
+# are answers GitHub GAVE (exit 4); this is GitHub not answering (exit 5). Both
+# refuse the merge — premerge-assert maps 4 and 5 alike to its exit-2 refusal —
+# so the change is to the DIAGNOSIS, never to whether the merge is blocked.
 pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 616)" pmcfadin \
   "$(defer_marker 3777 1 "$MB_MAIN" "$HEAD_AFTER" 616 'filed and lead-deferred')"
 roborev_job 616 "$MB_MAIN" "$HEAD_AFTER" F
 rm -f "$MOCK_GH_DIR/issue-3777.json"
-if run_binding 4 "result: an UNASKABLE issue state does not bind" \
+if run_binding 5 "result: an UNASKABLE issue state is UNMEASURED, not a measured refusal" \
   review-binding 1 o/r "$HEAD_AFTER"; then
   case "$OUT" in
-    *"ISSUE-UNVERIFIABLE"*)
-      ok "result: a could-not-ask is a refusal, never read as verified" ;;
-    *) bad "result: an unverifiable tracking issue was accepted or misnamed (got: $OUT)" ;;
+    *"could NOT BE ASKED"*)
+      ok "result: the cause names GitHub not answering, not an unauthorized deferral" ;;
+    *) bad "result: the unmeasured cause did not name what could not be asked (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"verdict UNMEASURED"*)
+      ok "result: a could-not-ask carries the UNMEASURED verdict token" ;;
+    *) bad "result: expected the UNMEASURED token for an unaskable issue (got: $OUT)" ;;
+  esac
+  # THE REMEDY IS THE POINT OF THE FIX, so it is asserted, not assumed.
+  case "$OUT" in
+    *"Do NOT re-post a deferral marker"*)
+      ok "result: the unmeasured remedy tells the operator NOT to re-post a marker or re-triage" ;;
+    *) bad "result: the unmeasured cause carries the wrong remedy (got: $OUT)" ;;
+  esac
+fi
+
+# --- job 102: an ABSENT authorization SCANNER is UNMEASURED -------------------
+# The scanner path is resolved from the script's OWN directory with no env
+# override, deliberately (#3312: the constrained party must not choose its own
+# enforcer). So this case SUBSTITUTES THE ARTIFACT — a second scratch flow dir
+# with the scanner removed — rather than pointing a variable somewhere, which
+# would be one more thing a real invoker could set.
+FLOW_NOSCAN="$T/scripts/flow-noscan"   # beside scripts/ci, which the leg resolves as ../ci
+mkdir -p "$FLOW_NOSCAN"
+noscan_ready=1
+for f in premerge-review-binding.sh premerge-pr-scan.py roborev-job-facts.py \
+  roborev-review-oracles.sh base-staleness.sh; do
+  cp "$FLOW/$f" "$FLOW_NOSCAN/$f" || noscan_ready=0
+done
+chmod +x "$FLOW_NOSCAN"/*.sh "$FLOW_NOSCAN"/*.py 2>/dev/null
+# The absence is measured AFFIRMATIVELY, not with a bare `[ ! -f ]`: a plain
+# negative file test folds "the directory is unreadable" onto "the file is
+# absent", which is the two-valued collapse this whole suite exists to refuse.
+# So the SIBLING must be present (proving the copy ran and the directory reads)
+# while the scanner is not.
+noscan_sib=0
+noscan_gone=0
+[ -f "$FLOW_NOSCAN/premerge-review-binding.sh" ] && noscan_sib=1
+[ -e "$FLOW_NOSCAN/roborev-waiver-scan.py" ] || noscan_gone=1
+if [ "$noscan_ready" -ne 1 ]; then
+  bad "scanner-absent fixture: could not stage the substitute flow directory"
+elif [ "$noscan_sib" -eq 1 ] && [ "$noscan_gone" -eq 1 ]; then
+  ok "scanner-absent fixture: the substitute reads (sibling present) and the scanner is absent"
+  pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 617)" pmcfadin \
+    "$(defer_marker 3602 1 "$MB_MAIN" "$HEAD_AFTER" 617 'filed and lead-deferred')"
+  roborev_job 617 "$MB_MAIN" "$HEAD_AFTER" F
+  issue_state_fixture 3602 OPEN
+  OUT=$(cd "$WORK" && PATH="$BIN:$PATH" bash "$FLOW_NOSCAN/premerge-review-binding.sh" \
+    review-binding 1 o/r "$HEAD_AFTER" 2>&1)
+  RC=$?
+  if [ "$RC" -ne 5 ]; then
+    bad "result: an absent authorization scanner should be UNMEASURED (exit $RC, wanted 5)"
+    printf '     output: %s\n' "$OUT"
+  else
+    case "$OUT" in
+      *"deferral scanner is absent"*)
+        ok "result: an absent authorization scanner is UNMEASURED and names itself" ;;
+      *) bad "result: the absent-scanner cause did not name the scanner (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"no authorized deferral covers"*)
+        bad "result: an absent scanner was reported as an UNAUTHORIZED deferral — job 102's conflation" ;;
+      *)
+        ok "result: an absent scanner is NOT reported as an unauthorized deferral" ;;
+    esac
+  fi
+else
+  bad "scanner-absent fixture: could not verify the scanner is absent from the substitute"
+fi
+
+# --- job 102 (control): a scanner that RUNS and refuses stays UNBOUND ---------
+# The counterpart to the two cases above: when the oracle IS available and says
+# no, that is a measurement, and it must keep its exit-4 refusal. Without this
+# control the fix could have made every deferral path unmeasured.
+pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 618)" stranger \
+  "$(defer_marker 3602 1 "$MB_MAIN" "$HEAD_AFTER" 618 'filed and lead-deferred')"
+roborev_job 618 "$MB_MAIN" "$HEAD_AFTER" F
+issue_state_fixture 3602 OPEN
+if run_binding 4 "result: a scanner that RUNS and refuses is UNBOUND, not UNMEASURED" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  case "$OUT" in
+    *"verdict UNBOUND"*)
+      ok "result: an evaluated-and-refused authorization keeps its MEASURED refusal" ;;
+    *) bad "result: an evaluated refusal was not UNBOUND (got: $OUT)" ;;
   esac
 fi
 
@@ -2186,7 +2276,7 @@ fi
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.
-CASE_FLOOR=140
+CASE_FLOOR=146
 TOTAL=$((PASSED + FAILED))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"

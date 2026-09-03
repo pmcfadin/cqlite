@@ -2065,7 +2065,15 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   REVIEW — this leg never ran the review and the record carries a verdict letter and no count, so
   fabricating one would be an affirmative assert over an unmeasured value and comparing the
   marker's count with itself would be a tautology. It is enforced at review time, where the
-  measurement exists. **The disarm half AND BOTH COMMENT THREADS are read with `gh api --paginate`,
+  measurement exists. **AND THE DEFERRAL PATH IS THREE-VALUED, NOT TWO (roborev job 102): "the
+  authorization was evaluated and REFUSED" and "the authorization COULD NOT BE EVALUATED" are
+  different states with different REMEDIES, so they get different exits.** A CLOSED or non-existent
+  tracking issue is an answer GitHub GAVE ⇒ `UNBOUND` (exit 4); an issue whose state could not be
+  ASKED, an absent or failing `roborev-waiver-scan.py`, an unreadable author allowlist, or a scanner
+  payload carrying no readable state ⇒ `UNMEASURED` (exit 5). Both refuse the merge — `premerge-assert`
+  maps 4 and 5 alike to its loud exit-2 refusal — so this is the DIAGNOSIS and never a softening:
+  reporting "no authorized deferral covers this job" for an unreachable `gh` sends a lead to re-post a
+  marker that was already fine, when the fix is restoring access. **The disarm half AND BOTH COMMENT THREADS are read with `gh api --paginate`,
   with EVERY page decoded before any verdict**: one page of 100 events is not the timeline, and
   `--json comments` is a BOUNDED connection — so a persistent `HOLD:` outside the first page
   produced a false `NO-HOLD-RECOGNISED` on the artifact a lead actually posts a stop order in. ONE

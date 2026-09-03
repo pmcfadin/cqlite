@@ -100,7 +100,15 @@
 #      shared four-valued oracle (`roborev_issue_retrievability`): only an OPEN
 #      issue GitHub confirms may grant, because `gh issue view` exits 0 for a
 #      CLOSED issue and a deferral naming an issue closed weeks ago would
-#      otherwise bind with the finding permanently untracked.
+#      otherwise bind with the finding permanently untracked. The oracle's
+#      FOURTH state is carried through to its own verdict rather than folded
+#      onto a refusal (roborev job 102): a CLOSED or non-existent issue is an
+#      answer GitHub GAVE, so it is UNBOUND (exit 4), while an issue whose state
+#      could not be ASKED — and likewise an absent/failing authorization scanner
+#      or an unreadable allowlist — is UNMEASURED (exit 5). Both refuse the
+#      merge; they differ in the REMEDY, and reporting "no authorized deferral
+#      covers this job" for an unreachable `gh` sends a lead to re-post a marker
+#      that was already fine.
 #      STILL NOT RE-VERIFIED HERE, and declared rather than implied: the
 #      deferral marker's `count=` half, which is matched against the findings
 #      count OBSERVED BY THE REVIEW. This leg never ran the review and the
@@ -447,17 +455,61 @@ issue_state_of() {
 
 DEFERRAL_AUTHOR=""
 DEFERRAL_ISSUE_REFUSAL=""
+DEFERRAL_UNMEASURED=""
+# deferral_authorized — THREE-VALUED (roborev job 102).
+#   0  an allowlisted human authorized deferring THIS job's findings
+#   1  the authorization WAS evaluated and REFUSED
+#   2  the authorization COULD NOT BE EVALUATED
+#
+# 1 and 2 were one return value, and collapsing them is the defect this whole
+# file exists to refuse: "measured and rejected" and "could not measure" are
+# different states needing DIFFERENT OPERATOR ACTIONS. The concrete cost was a
+# WRONG REMEDY — an unreachable `gh` was reported as "no authorized deferral
+# covers this job", sending a lead to re-post a marker that was already fine
+# when the actual fix was restoring GitHub access.
+#
+# NOTE THE ASYMMETRY, AND KEEP IT: both non-zero returns REFUSE the merge, so
+# this was never a false green — `premerge-assert.sh` maps exit 4 AND exit 5
+# alike to its loud exit-2 refusal. This changes the DIAGNOSIS, not whether the
+# merge is blocked. Do NOT read 2 / UNMEASURED as the softer answer: it is the
+# same refusal with an accurate cause.
 deferral_authorized() {
-  local job="$1" base="$2" head="$3" tmp="$4" repo_slug="$5" allow result state
+  local job="$1" base="$2" head="$3" tmp="$4" repo_slug="$5" allow result state rc
   DEFERRAL_AUTHOR=""
-  [ -f "$WAIVER_SCAN_TOOL" ] || return 1
-  allow=$(waiver_authors) || return 1
-  [ -n "$allow" ] || return 1
+  DEFERRAL_UNMEASURED=""
+  # THE ORACLE'S OWN AVAILABILITY IS AN UNMEASURED CAUSE, NOT A REFUSAL. An
+  # absent scanner says nothing whatever about whether a human authorized this
+  # deferral; reporting it as "not authorized" states as measured fact something
+  # no measurement was taken of.
+  if [ ! -f "$WAIVER_SCAN_TOOL" ]; then
+    DEFERRAL_UNMEASURED="the deferral scanner is absent beside this script at $(sane "$WAIVER_SCAN_TOOL"), so whether an allowlisted human authorized this deferral could not be asked"
+    return 2
+  fi
+  # Every failure mode of `waiver_authors` is a failure to READ the allowlist
+  # (an absent oracles file, an unreadable declaration, more than one
+  # declaration, an empty value) — never a finding that the author is not on it.
+  if ! allow=$(waiver_authors) || [ -z "$allow" ]; then
+    DEFERRAL_UNMEASURED="the hard-coded author allowlist could not be read from $(sane "$ORACLES_FILE"), so WHO may authorize a deferral is unknown"
+    return 2
+  fi
   result=$(python3 "$WAIVER_SCAN_TOOL" findings-deferral-authorization \
-    "$base" "$head" "$job" "$allow" <"$tmp/pr.json" 2>/dev/null) || return 1
+    "$base" "$head" "$job" "$allow" <"$tmp/pr.json" 2>/dev/null)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    DEFERRAL_UNMEASURED="the deferral scanner failed (exit $rc), so the PR's comments could not be scanned for an authorization"
+    return 2
+  fi
   state=$(printf '%s\n' "$result" | sed -n 's/^state=//p' | head -1)
+  # AN EMPTY STATE IS AN UNPARSEABLE PAYLOAD, NOT A REFUSAL. The scanner exited
+  # 0 but said nothing this code can read, so no verdict was delivered.
+  if [ -z "$state" ]; then
+    DEFERRAL_UNMEASURED="the deferral scanner returned no readable state, so its answer could not be established"
+    return 2
+  fi
   # KEYED ON THE AFFIRMATIVE VALUE, never on `!= <bad>`: a state this code has
-  # never judged is not a grant.
+  # never judged is not a grant. A NAMED non-granting state (NONE, MALFORMED,
+  # UNAUTHORIZED, STALE, …) IS a measurement — the scanner looked and found no
+  # valid authorization — so it stays a refusal.
   [ "$state" = "granted-authorization" ] || return 1
   DEFERRAL_AUTHOR=$(printf '%s\n' "$result" | sed -n 's/^author=//p' | head -1)
 
@@ -496,8 +548,14 @@ deferral_authorized() {
         return 1
         ;;
       *)
-        DEFERRAL_ISSUE_REFUSAL="ISSUE-UNVERIFIABLE — whether issue #$(sane "$num") exists and is OPEN could NOT BE ASKED, and a could-not-ask is never read as verified"
-        return 1
+        # ISSUE-UNVERIFIABLE IS AN UNMEASURED CAUSE, NOT A REFUSAL (job 102).
+        # `absent` and `closed` above are answers GitHub GAVE; this is GitHub
+        # not answering. `gh issue view` exits 1 for BOTH a missing issue and an
+        # unreachable API, which is exactly why the oracle is four-valued — and
+        # folding its fourth state back onto a refusal here threw that
+        # distinction away one call later.
+        DEFERRAL_UNMEASURED="whether issue #$(sane "$num") exists and is OPEN could NOT BE ASKED (no gh, no auth, or an API/network failure), and a could-not-ask is never read as verified"
+        return 2
         ;;
     esac
   done
@@ -659,7 +717,7 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
   local job bound=0 unclassifiable=0 unclassifiable_base=0 reviewed
   local heads=()
   local unresolved=()
-  local findings_unauthorized=0 verdict_unknown=0 unconcluded=0
+  local findings_unauthorized=0 verdict_unknown=0 unconcluded=0 authz_unmeasured=0
   # THE COVERING SET (job 78, finding F2). Parallel indexed arrays, because
   # bash 3.2 has no associative arrays and this file must run on the macOS
   # system bash.
@@ -713,12 +771,24 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
         ;;
       findings)
         DEFERRAL_ISSUE_REFUSAL=""
-        if deferral_authorized "$j" "$RH_BASE" "$RH_HEAD" "$tmp" "$repo"; then
-          # A DISTINCT TOKEN, deliberately: nobody grepping this log for a
-          # clean bind can match a deferred one.
-          RESULT_NOTE="record verdict is FINDINGS, deferral AUTHORIZED by @$(sane "$DEFERRAL_AUTHOR") (tracking issues VERIFIED OPEN)"
-          return 0
-        fi
+        DEFERRAL_UNMEASURED=""
+        deferral_authorized "$j" "$RH_BASE" "$RH_HEAD" "$tmp" "$repo"
+        case "$?" in
+          0)
+            # A DISTINCT TOKEN, deliberately: nobody grepping this log for a
+            # clean bind can match a deferred one.
+            RESULT_NOTE="record verdict is FINDINGS, deferral AUTHORIZED by @$(sane "$DEFERRAL_AUTHOR") (tracking issues VERIFIED OPEN)"
+            return 0
+            ;;
+          2)
+            # COULD NOT EVALUATE. Distinct from a refusal because the remedy is
+            # completely different: restore access / fix the box, NOT re-post a
+            # marker or re-triage findings.
+            RESULT_NOTE="record verdict is FINDINGS and its deferral could NOT BE EVALUATED: $DEFERRAL_UNMEASURED"
+            RESULT_UNMEASURED=1
+            return 1
+            ;;
+        esac
         # The issue-state refusal is NAMED when there was one: "the deferral is
         # not authorized" and "it is authorized but names a CLOSED issue" are
         # different operator actions, and collapsing them would send a lead to
@@ -755,6 +825,12 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
       say "job $(sane "$j") CANNOT bind: $(sane "$RESULT_NOTE")"
       if [ "${RESULT_UNCONCLUDED:-0}" -eq 1 ]; then
         class=unconcluded
+      elif [ "${RESULT_UNMEASURED:-0}" -eq 1 ]; then
+        # Checked BEFORE the verdict class: this record's verdict IS `findings`,
+        # but the reason it cannot bind is that the authorization oracle could
+        # not be consulted — not that the deferral was refused. Classifying it
+        # as `findings` here would restore exactly the conflation job 102 found.
+        class=authz_unmeasured
       else
         case "$(record_verdict_class "$RH_VERDICT")" in
           findings) class=findings ;;
@@ -781,6 +857,7 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
     RH_STATUS=""
     RH_STARTED=""
     RESULT_UNCONCLUDED=0
+    RESULT_UNMEASURED=0
     if ! reviewed_head_of "$job" "$tmp"; then
       say "job $(sane "$job") $(sane "$RH_ERR")"
       unresolved+=("$RH_ERR")
@@ -915,6 +992,7 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
       say "latest $(sane "${cov_note[0]}")"
       case "${cov_class[0]}" in
         unconcluded) unconcluded=1 ;;
+        authz_unmeasured) authz_unmeasured=1 ;;
         findings) findings_unauthorized=1 ;;
         *) verdict_unknown=1 ;;
       esac
@@ -1006,6 +1084,7 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
           say "latest $(sane "${cov_note[$best]}")"
           case "${cov_class[$best]}" in
             unconcluded) unconcluded=1 ;;
+            authz_unmeasured) authz_unmeasured=1 ;;
             findings) findings_unauthorized=1 ;;
             *) verdict_unknown=1 ;;
           esac
@@ -1028,9 +1107,10 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
         detail "authorization was re-verified here from the PR's top-level comments (marker"
         detail "form, sole content, column-zero, structured authorship, hard-coded allowlist,"
         detail "base/head/job scope), and EVERY issue its issues= half names was verified to"
-        detail "be an OPEN issue GitHub confirms — asked four-valued, so a CLOSED issue, a"
-        detail "non-existent one, and one that could NOT BE ASKED are each a refusal and none"
-        detail "of them grants. The marker's count= half is NOT re-verified here and is not"
+        detail "be an OPEN issue GitHub confirms — asked four-valued, so a CLOSED issue and a"
+        detail "non-existent one are each a measured REFUSAL (exit 4), one that could NOT BE"
+        detail "ASKED is UNMEASURED (exit 5), and none of the three grants. The marker's"
+        detail "count= half is NOT re-verified here and is not"
         detail "claimed to be: it is matched against the findings count OBSERVED BY THE"
         detail "REVIEW, which this leg never ran, and it is enforced at review time. That is"
         detail "the ONE unverified half of this authorization, and it is named rather than"
@@ -1071,6 +1151,14 @@ AFFIRMATIVELY report a terminal-success status, so the review did not CONCLUDE (
 completion could not be read). A verdict letter on an unconcluded job is a partial row, not a \
 review result. Wait for the round to finish, or run a fresh one at this head and post the block \
 it prints.")
+  fi
+  if [ "$authz_unmeasured" -eq 1 ]; then
+    causes+=("a recorded round COVERS the certified head and its record verdict is FINDINGS, \
+so it can bind ONLY via an authorized deferral — and whether such an authorization exists could \
+NOT BE EVALUATED. This is NOT a finding that the deferral is unauthorized: the oracle itself was \
+unavailable. REMEDY: restore what was unavailable and re-run this assert — typically GitHub \
+access (\`gh auth status\`) or a complete checkout beside this script. Do NOT re-post a deferral \
+marker and do NOT re-triage the findings on the strength of this verdict; neither was measured.")
   fi
   if [ "$verdict_unknown" -eq 1 ]; then
     causes+=("a recorded round COVERS the certified head, but its job RECORD carries no \
