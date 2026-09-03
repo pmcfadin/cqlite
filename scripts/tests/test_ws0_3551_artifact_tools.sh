@@ -1064,6 +1064,105 @@ else
   fail "R5. window-census must still report r1-B while omitting the window-less r1-A (rc=$rc, out: $(tailout))"
 fi
 
+# ===========================================================================
+# PART 5 — THE COVERAGE FIXTURES ARE ONLY REJECTED BECAUSE OF THE BOUND
+# ===========================================================================
+# Cases 2, 3-start and 3-end assert that a gappy fixture is REFUSED. On its own that leaves a
+# hole: the fixture might be refused for some unrelated reason, in which case the cases would
+# keep passing after the coverage rule was deleted. So each is paired with a POSITIVE CONTROL
+# ON THE ORACLE — a scratch copy of the tool with the bound comparison REMOVED must ACCEPT the
+# same fixture. That is what makes the refusal attributable to the rule.
+#
+# THE ARTIFACT IS SUBSTITUTED (a mutated scratch copy, judge and all), never a test-only seam,
+# and EVERY PLANT IS ASSERTED TO HAVE TAKEN: a mutation whose pattern stopped matching leaves
+# the copy byte-identical to the shipped tool, and the arm then agrees with the shipped
+# behaviour while proving nothing.
+cat > "$TMP/mutate.py" <<'MUT'
+import pathlib
+import sys
+
+target, mutation = pathlib.Path(sys.argv[1]), sys.argv[2]
+before = target.read_text()
+if mutation == "no-bound":
+    # The ORIGINAL DEFECT, restored: a non-empty sample set is treated as coverage. The empty
+    # check is left in place, so this mutant differs from the shipped tool in exactly the
+    # coverage BOUND and in nothing else.
+    after = before.replace("elif gap > MAX_SAMPLE_GAP_S:", "elif False:")
+elif mutation == "interior-only":
+    # The gap set loses its two BOUNDARY terms and keeps every interior one, which is the
+    # shape a naive consecutive-differences scan has.
+    after = before.replace(
+        "gaps = [inst[0] - a] + [inst[i + 1] - inst[i] for i in range(len(inst) - 1)]"
+        " + [b - inst[-1]]",
+        "gaps = [0.0] + [inst[i + 1] - inst[i] for i in range(len(inst) - 1)] + [0.0]")
+else:
+    sys.stderr.write(f"unknown mutation {mutation!r}\n")
+    raise SystemExit(2)
+if after == before:
+    sys.stderr.write(f"PLANT DID NOT TAKE: {mutation} matched nothing in {target}\n")
+    raise SystemExit(1)
+target.write_text(after)
+MUT
+
+# One scratch tree per mutation, each a full copy WITH the judge (so the only difference from
+# the shipped tool is the planted one, never a failed import).
+mutant_census() {
+  local mutation="$1" root="$TMP/mutant-$1"
+  rm -rf "$root"
+  scratch_tree "$root" with-judge
+  if python3 "$TMP/mutate.py" "$root/docs/reports/ws0-3551-artifacts/window-census.py" "$mutation"; then
+    printf '%s\n' "$root/docs/reports/ws0-3551-artifacts/window-census.py"
+    return 0
+  fi
+  return 1
+}
+# run_mutant <tool-path> <root> <timeseries> — into $RUNOUT; sets `rc`.
+run_mutant() {
+  python3 "$1" --root "$2" --timeseries "$3" >"$RUNOUT" 2>&1
+  rc=$?
+}
+
+for mutation in no-bound interior-only; do
+  MUTTOOL="$(mutant_census "$mutation")"
+  if [ -z "$MUTTOOL" ] || [ ! -f "$MUTTOOL" ]; then
+    fail "5-$mutation. PLANT DID NOT TAKE: the '$mutation' mutation matched nothing, so this control would prove nothing"
+    continue
+  fi
+  pass "5-$mutation. plant took: a scratch copy of window-census.py differing from the shipped tool only in the '$mutation' property"
+  # The fixtures this mutation is expected to let through. `no-bound` deletes the bound, so all
+  # three gappy fixtures pass it; `interior-only` deletes only the boundary terms, so the
+  # INTERIOR fixture must still be caught — which is what proves case 2 and case 3 are testing
+  # different halves of the rule rather than one.
+  if [ "$mutation" = no-bound ]; then
+    expect_interior=clean
+  else
+    expect_interior=undercovered
+  fi
+  while IFS=$'\t' read -r label tsfile expect; do
+    [ -n "$label" ] || continue
+    run_mutant "$MUTTOOL" "$COV" "$tsfile"
+    verdict="$(mdcell "$RUNOUT" session r1-B verdict)"
+    case "$expect" in
+      clean)
+        if [ "$rc" -eq 0 ] && grep -q '^clean (census 0' <<<"$verdict"; then
+          pass "5-$mutation. CONTROL: with '$mutation' planted, the $label fixture is ACCEPTED ('$verdict') — so the shipped tool's refusal is the RULE, not a malformed fixture"
+        else
+          fail "5-$mutation. the $label fixture must be accepted with '$mutation' planted, or case 2/3's refusal is not attributable to the coverage rule (rc=$rc, verdict: '$verdict')"
+        fi ;;
+      undercovered)
+        if [ "$rc" -eq 0 ] && grep -qF '**UNDERCOVERED**' <<<"$verdict"; then
+          pass "5-$mutation. DISCRIMINATION: the $label fixture is STILL caught with only the boundary terms removed — case 2 and case 3 test different halves of the gap set"
+        else
+          fail "5-$mutation. the $label fixture must still be caught by the boundary-only mutant (rc=$rc, verdict: '$verdict')"
+        fi ;;
+    esac
+  done <<CTRL
+interior	$TMP/ts-interior-gap.jsonl	$expect_interior
+window-start	$TMP/ts-start-gap.jsonl	clean
+window-end	$TMP/ts-end-gap.jsonl	clean
+CTRL
+done
+
 # ==========================================================================
 # A MINIMUM CHECK COUNT — this file has no `set -e`
 # ==========================================================================
@@ -1072,7 +1171,7 @@ fi
 # code. The floor is DERIVED FROM A MEASURED RUN and set below the observed count, so adding a
 # case cannot red the suite. RE-DERIVE IT BY RUNNING THE SUITE at each addition, never by
 # counting the source — the loops and the driven tables multiply.
-MIN_CHECKS=60
+MIN_CHECKS=80
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
@@ -1088,3 +1187,4 @@ if [ "$fails" -eq 0 ]; then
 fi
 echo "FAIL - $fails of $checks check(s) failed"
 exit 1
+
