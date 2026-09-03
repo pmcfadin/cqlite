@@ -1040,36 +1040,31 @@ fn a_minus_one_component_length_is_still_a_null_field() {
 // only the pair is evidence.
 
 /// The `N`-or-`0` family: a 0-byte key passes the WIDTH table (Cassandra's
-/// serializer accepts an empty buffer for these). It still fails to DECODE, from
-/// the decoder's own minimum-length guard — so the observable outcome is an
-/// error either way, which is exactly why encoding the `0` is a fidelity fix and
-/// not a behaviour change. Asserted on the MESSAGE, which is the only thing that
-/// distinguishes "the width table refused it" from "the decoder refused it".
-/// Reached by a real read since #3747 removed the caller's empty-path guard;
-/// see the REACHABILITY note above.
+/// serializer accepts an empty buffer) and is now PRESERVED, opaquely.
+///
+/// #3612 asserted an `Err` here and called the `0` allowance "a fidelity fix, not a
+/// behaviour change" — true then: the decoder's length guard refused what the table
+/// admitted. **#3747 changed that on purpose** — losing a key Cassandra accepts is
+/// the data loss it exists to stop, and an untypeable key already had a policy:
+/// opaque bytes plus `opaque_out`. The STRICT sibling alone now carries the other half.
 #[test]
-fn an_empty_key_of_an_n_or_zero_type_is_not_refused_by_the_width_table() {
+fn an_empty_key_of_an_n_or_zero_type_is_preserved_opaquely() {
     let p = parser();
-    for type_str in [
-        "int",
-        "bigint",
-        "float",
-        "double",
-        "uuid",
-        "timeuuid",
-        "timestamp",
-        "counter",
-        "boolean",
-    ] {
-        let err = p
-            .parse_cell_path_key(&[], type_str, "k")
-            .expect_err("a 0-byte fixed-width value still cannot be decoded");
-        let msg = err.to_string();
+    #[rustfmt::skip]
+    let types = ["int","bigint","float","double","uuid","timeuuid","timestamp","counter","boolean"];
+    for type_str in types {
+        let mut opaque = false;
+        let decoded = p
+            .parse_cell_path_key_reporting(&[], type_str, "k", &mut opaque)
+            .unwrap_or_else(|e| panic!("{type_str}: Cassandra accepts empty; keep it: {e}"));
+        assert_eq!(
+            decoded,
+            Value::blob(Vec::new()),
+            "{type_str}: preserved opaquely"
+        );
         assert!(
-            !msg.contains("requires exactly"),
-            "{type_str}: Cassandra's serializer ACCEPTS an empty buffer for this \
-             type, so the refusal must come from the decoder, not from the width \
-             table — got the width table's message: {msg}"
+            opaque,
+            "{type_str}: opaque_out must be raised (gap goes to the log)"
         );
     }
 }
