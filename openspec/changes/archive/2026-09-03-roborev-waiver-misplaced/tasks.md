@@ -194,6 +194,6 @@ can set).
 
 ## 7. PR body (for whoever opens the PR — not the implementer's to tick)
 
-- [ ] 7.1 State that the **wrapper cannot certify itself**, that the **live demonstration is
+- [x] 7.1 State that the **wrapper cannot certify itself**, that the **live demonstration is
       post-merge**, and that `MISPLACED` is a **diagnosability** change that grants nothing.
-- [ ] 7.2 Record the website phrase to grep post-merge (task 5.5).
+- [x] 7.2 Record the website phrase to grep post-merge (task 5.5).
