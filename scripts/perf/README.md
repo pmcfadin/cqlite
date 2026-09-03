@@ -23,6 +23,8 @@ scripts/perf/ws0-baseline.sh --corpus /data/ws0-3096
 | `lib-measure.sh` | how ONE rep of each arm is executed, prewarmed and counted |
 | `lib-flight-arm.sh` | the two arms no longer run the same way — WHAT differs (pin, allocator, arena) and was it VERIFIED (#3551) |
 | `ws0_flight_admission.py` | the server's admission ceiling, READ BACK from each rep's log and required to AGREE (#3551) |
+| `ws0-3551-abc.sh` | the interleaved A/B/C(/C0) driver: one rep at a time, arm order rotated per round, one FROZEN binary set (#3551) |
+| `ws0_abc_aggregate.py` | that set's paired per-round deltas and within-round direction count, with the drift control printed FIRST (#3551) |
 
 Full method, the traps, the recorded pinning and the residual caveats:
 **`docs/reports/ws0-3096-artifacts/measurement-method.md`** — read it before
@@ -218,6 +220,53 @@ measured `+2.3%` by medians and **zero** over 8 rounds (median −0.03%, 4 of 8
 positive). Worked example with all 30 per-run numbers, and a discarded run with the
 reason it was discarded:
 `docs/reports/ws0-3096-artifacts/abc-interleaved-2026-08-03.md`.
+
+## An A/B/C SET is one experiment only if its sessions are comparable (issue #3551)
+
+`ws0-baseline.sh` measures ONE configuration per invocation, so an A/B/C comparison is a SET of
+its sessions in one directory. `ws0-3551-abc.sh` runs that set (rounds outside, arms inside,
+order rotated per round, one `--bin-dir` measured by every arm) and `ws0_abc_aggregate.py`
+reports it. Both had to be taught that a DIRECTORY LAYOUT is not a provenance claim.
+
+* **The resume is CHECKED, not assumed.** A `(round, arm)` already holding a `results.json` is
+  SKIPPED, which matters on a shared box — an interrupted set that has to start over loses its
+  window. So the first invocation writes `$OUT/abc-run.json`, the RUN FINGERPRINT, and every
+  later one VERIFIES it field by field: the corpus PATH **and** its recorded `Data.db` sha256 +
+  row count (a path can be repopulated with a different corpus), the `--bin-dir` path **and** a
+  digest of every measured binary in it (the arms must measure IDENTICAL BYTES — the whole
+  reason `--bin-dir` is not per-arm), the arm SET and each arm's EXACT flag list, plus
+  `--step-duration`, `--arena-max`, `--jemalloc-lib` and `--port`. A differing field is a
+  REFUSAL naming the field and both values. **`--rounds` is deliberately NOT fingerprinted**:
+  extending a set from 3 rounds to 5 over one `--out` is a legitimate resume, and a guard that
+  reds on correct input is the guard an operator works around.
+* **A skipped session must prove it is the session the slot expects.** `results.json` alone
+  establishes no provenance — it is the reporter's output and carries no round, position or arm
+  label of this set's vocabulary — so the session's own `abc-window.json` must exist, must name
+  the arm and round of the directory it sits in, and must record `exit: 0`. The window is
+  written for FAILED sessions on purpose (so a failure can be correlated against the box-load
+  timeseries), which is exactly why a failed session's leftover `results.json` may not be
+  adopted. Every refusal names the DIRECTORY.
+* **Configuration is validated over EVERY `(round, arm)`, not read from the first.** Measurements
+  are aggregated from every pairable round, so reading configuration from round one let a later
+  round carry a different pin, allocator, arena cap, counter mode or admission ceiling and
+  produce a delta ACROSS TREATMENTS. Two DISTINCT requirements: per-arm TREATMENT STABILITY
+  (an arm's flight pin, pin mode, allocator, arena cap and counter mode identical in every
+  round — a treatment that changed mid-set is not one arm) and CROSS-ARM INVARIANTS (the
+  bare-scan pin, the client pin, the corpus identity, every binary digest and the admission
+  triple identical across the whole set). All of it read back out of each session's OWN
+  `results.json`, never re-derived from the driver's table: the job is to detect a divergence
+  between what the driver INTENDED and what was MEASURED. An ABSENT field is COULD-NOT-MEASURE
+  and is REFUSED with the field named.
+* **`ratio bare/flight` is a ROWS/S ratio here as everywhere else in this rig** —
+  `rows/s(bare) / rows/s(flight)`, above 1 when the bare scan is faster, the same quantity
+  `ws0_report.py` prints and `ws0-3248-artifacts/ac0/DELTA-TABLE.md` reports — and
+  `cycles/row delta` is `flight - bare`, absolute and percent, unconstrained in sign. The
+  aggregator's Layer 1 printed the CYCLES quotient under that name, inverted with respect to
+  its own label, so its tables were comparable with nothing.
+* Guards: `scripts/tests/test_ws0_abc_driver_guards.sh` (in the gate's `tooling-tests`),
+  hermetic — synthetic session dirs, corpus-identity and binary fixtures, and a recording STUB
+  standing in for the measurement driver beside a scratch copy of the A/B/C driver, so no real
+  measurement can run inside the gate.
 
 ## Reusing this rig for another corpus (issues #3232, #3234)
 
