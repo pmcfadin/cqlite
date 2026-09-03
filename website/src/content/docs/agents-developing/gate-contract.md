@@ -1665,6 +1665,8 @@ python-bindings:   PASS|SKIP (<Ns>)  [via maturin: feature set NOT observed]  {v
 tooling-tests:     FAIL (<Ns>)  [test ws0-corpus-gen default-features | + cargo not observable: cargo may run inside ~60 nested test scripts (child processes)]  {no census: component ended FAIL, so there is no PASS to affirm}
 smoke:             PASS|FAIL|VACUOUS (<Ns>)  [build cqlite-cli default-features]  {no census — smoke-test-all-tables.sh prints no machine-readable table count (#3162)}
 logs: /tmp/agent-gate.<random>
+logdir-disposition: REMOVED at exit on PASS; AGENT_GATE_KEEP_LOGS=1 retains
+logdir-sweep: <N> REMOVED of <M> aged (>7d) under /tmp (owner ...; examined <E>, removals attempted <A>, cap 1000)
 summary-file: <AGENT_GATE_SUMMARY_FILE or $PWD/.agent-gate-summary.txt>
 RESULT: PASS
 ==== END AGENT-GATE SUMMARY ====
@@ -1685,6 +1687,8 @@ census: <A>/<N> components AFFIRMED a count; <G> DECLARED-GAP (RECOGNISED); ... 
 fmt:               PASS (<Ns>)  [fmt workspace features=n/a]  {no census — cargo fmt --all --check emits no per-file tally to count}
 clippy:            PASS (<Ns>)  [clippy workspace(excl 5) --all-features | ...]  {no census — cargo clippy emits a per-crate tally only COLD; a warm run prints Finished alone}
 logs: /tmp/agent-gate.<random>
+logdir-disposition: RETAINED: PARTIAL
+logdir-sweep: <N> REMOVED of <M> aged (>7d) under /tmp (owner ...; examined <E>, removals attempted <A>, cap 1000)
 summary-file: <AGENT_GATE_SUMMARY_FILE or $PWD/.agent-gate-summary.txt>
 RESULT: PARTIAL
 ==== END AGENT-GATE SUMMARY ====

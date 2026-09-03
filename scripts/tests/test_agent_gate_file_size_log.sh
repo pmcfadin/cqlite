@@ -82,6 +82,12 @@ unset GATE_BASE_OVERRIDE
 unset CQLITE_ALLOW_FILE_GROWTH
 export CQLITE_GATE_DISABLE_CAP=1
 
+# #3637: the gate now REMOVES its per-run log dir on a terminal PASS and on ANY
+# verdict when it is nested (which it is here — this script runs inside the gate's
+# tooling-tests component, so the child gates below inherit AGENT_GATE_PARENT_RUN_ID).
+# These cases READ `<logdir>/<component>.log` AFTER the child exits, so they opt out.
+export AGENT_GATE_KEEP_LOGS=1
+
 PASS=0
 FAIL=0
 SKIP=0

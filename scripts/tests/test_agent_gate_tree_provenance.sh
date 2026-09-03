@@ -43,8 +43,28 @@ FAIL=0
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-tree-prov.XXXXXX")
+# FAIL-CLOSED before anything is derived from it: an unchecked `mktemp -d` leaves
+# `tmp` EMPTY, after which every child path becomes root-level and the cleanup trap
+# `rm -rf ""` reclaims none of them — and the $TMPDIR export below is one more such
+# derivation, which would silently fall back to the ambient /tmp.
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-tree-prov.XXXXXX" 2>/dev/null) || tmp=""
+if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
+  printf 'FAIL - could not create a scratch dir under %s — refusing to run\n' "${TMPDIR:-/tmp}"
+  exit 1
+fi
 trap 'rm -rf "$tmp"' EXIT INT TERM
+
+# #3637 (roborev job 111 medium 3): every gate this file spawns creates a per-run
+# LOG_DIR under ITS $TMPDIR. These runs are TOP-LEVEL (AGENT_GATE_PARENT_RUN_ID is
+# unset above) and many of them deliberately end in FAIL — a verdict the gate RETAINS
+# BY DESIGN, and that retention is a property this suite must not weaken: a failed
+# gate's post-mortem bundle is exactly what an operator needs. So the fix belongs at
+# the HARNESS end, as it already does in test_agent_gate_nested_isolation.sh and
+# test_agent_gate_delta.sh: retained under the AMBIENT shared temp those bundles are a
+# leak this harness owns (measured before this change: 16 per run of this file);
+# retained under the harness's own scratch root, the trap above reclaims them.
+export TMPDIR="$tmp/tmpdir"
+mkdir -p "$TMPDIR" || { printf 'FAIL - could not create the scoped TMPDIR %s\n' "$TMPDIR"; exit 1; }
 
 GIT_ID=(-c user.email=gate@example.invalid -c user.name=gate-selftest)
 COMMIT_ENV=(GIT_AUTHOR_NAME=gate GIT_AUTHOR_EMAIL=gate@example.invalid

@@ -1444,6 +1444,131 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   unconditionally (selected == executed, which is exactly what was NOT true of jest) and because no
   uniform per-script assertion tally exists to prefer; its residual — a script that runs and
   asserts nothing — is declared there too.
+- **A RUN DIRECTORY IS BOUND TO A GATE ONLY BY THE `run-id:` LINE IN THAT GATE'S OWN SUMMARY FILE
+  (#3637). Never locate one by `ls -t`, by a glob, or by recency. Progress read from an unbound run
+  dir is a peer's progress; a verdict read from one is a peer's verdict.** Up to four gates per box
+  share one `$TMPDIR`, so recency picks a peer ROUTINELY — the #3616 near-miss was a closer's
+  hand-rolled progress loop (`ls -t /tmp/agent-gate.*`) reading a PEER LANE's dir, seeing 33 of 37
+  components PASS and nearly merging one PR on another PR's verdict; the count, the dir and the
+  timestamps were all real, and only the `run-id:` line exposed it, read by a human. The gate now
+  also **cleans its run dir up**: before #3637 every invocation left one `mktemp -d` behind forever
+  (5,697 on one box, ~61,000 fleet-wide in three days), which is what made that recency habit wrong
+  so reliably. A terminal `RESULT: PASS` — and any NESTED run (`AGENT_GATE_PARENT_RUN_ID` set), on
+  either verdict — REMOVES its directory from the EXIT trap, after the SUMMARY is emitted and the
+  beater reaped; every other state RETAINS it with a **named reason on its own `logdir-disposition:`
+  line** (any non-PASS verdict, the `INCOMPLETE` sentinel path, the #2874 no-clobber publish, an
+  unwritable summary file, and the #2874 nested shape whose summary lives INSIDE the dir — removing
+  that one would delete the block the parent asserts on). **`logs:` stays PATH-ONLY and
+  byte-identical to its pre-#3637 form — do not parse a disposition out of it.** A first draft
+  appended ` (REMOVED …)` to that path and told consumers to cut at the first `" ("`; `$TMPDIR` is
+  environment-controlled and may contain `" ("`, so `/tmp/build (scratch)/agent-gate.ABC123`
+  truncated to `/tmp/build` — control and environment-controlled data on one channel, which #3312
+  says to REMOVE rather than re-delimit. **An EARLY EXIT gets a disposition too, and by construction
+  rather than by remembering to ask for one**: the LOG_DIR-only EXIT trap is armed the moment the
+  directory exists (~2000 lines before the composed `_gate_atexit` arming, which supersedes it), and
+  the at-exit handler SUPPLIES the disposition when nothing decided one — `AGENT_GATE_KEEP_LOGS=1`
+  retains, **exit 0 with no verdict** (the `CQLITE_GATE_STUB_RUNDIR` stub, any future early-return
+  hook) REMOVES, and a **non-zero** exit keeps the bundle only if it holds diagnostic content, an
+  empty husk being removed. So a new early exit cannot leak. **And a retention is always NAMED, in an
+artifact the run OWNS**: an early exit has no terminal emit to carry the `logdir-disposition:` line
+(the `INCOMPLETE` sentinel is written AT LAUNCH, before any decision exists), so every retaining path
+also writes `<log-dir>/logdir-disposition.txt` INTO the bundle — same field names, `logs:` path-only
+there too, plus the `run-id:` that BINDS it, since a bundle found by recency is a peer's. It goes
+with the directory on a removal, so nothing is ever orphaned beside a deleted bundle. **The DECISION
+is early and the CLEARANCE is late (#3637, roborev job 61)**: `_logdir_decide` records an INTENT so
+the block can declare it, and the removal is armed only AFTER the summary write is verified — arming
+both at once meant the reachable ENOSPC case (one `/dev/root` holds every lane's summary file AND its
+LOG_DIR) lost the verdict and the post-mortem bundle together. A removal that is then never cleared,
+or that FAILS, publishes a `logdir-disposition-superseded:` key into the surviving bundle quoting the
+SUMMARY's now-false claim: a published line cannot be retracted, so the correction goes where the
+reader already is. **"A signal runs no EXIT trap" is FALSE and was measured so**: on bash 5.2 the
+EXIT trap RUNS for an untrapped INT/TERM/HUP delivered while bash waits on a foreground command, with
+`$?` == **0** — so the status-0 arm was deleting signalled gates' bundles (reproduced: three
+components' `.result` files). That arm now retains on EVIDENCE (anything beyond the run's own launch
+artifacts); there is deliberately no signal trap, because trapping makes bash DEFER the handler until
+the current component returns.
+  A bounded depth-1 **startup sweep** takes `agent-gate.*` dirs older than
+  7 days (two orders of magnitude clear of the longest observed run, a ~1h31m QUEUED gate) **AND
+  whose owning process is PROVABLY GONE** — age is not proof of abandonment, so every run writes an
+  owner marker (pid + a machine-and-boot-and-pid-NAMESPACE token + pid-START token, since a reused pid
+  is not identity, and since two containers can share a boot id and a temp dir while having SEPARATE
+  pid namespaces — every axis REQUIRED, an unreadable one meaning `cannot-tell` for every candidate;
+  **every input is `/proc`, so the LIVENESS gate is LINUX-ONLY and a non-Linux host degrades to
+  KEEP-EVERYTHING** — empty token ⇒ every candidate `cannot-tell` ⇒ 0 attempted, 0 removed, a
+  declared platform residual, and the reason the suite probes that capability affirmatively rather
+  than assuming Linux)
+  INSIDE its own bundle, where a sweeper holding only the directory can read it (the
+  `<summary-file>.heartbeat` sits BESIDE the summary file, which such a sweeper cannot locate). The
+  probe is THREE-VALUED and **`cannot-tell` is NOT permissive**: a missing/malformed marker, another
+  machine's, another boot's, or an unestablishable pid identity is KEPT — a leaked inode, never a
+  destroyed live bundle. The per-invocation **cap bounds the candidates MATERIALIZED and EXAMINED, not the removals
+  attempted and not the removals that SUCCEEDED** — two earlier forms each bounded a strictly smaller
+  quantity than the work (a cap on successes issued an `rm -rf` per candidate when removals kept
+  failing; a cap on attempts probed the WHOLE aged population whenever the candidates were live,
+  malformed or **markerless**, which every pre-#3637 directory is and stays for ever) — but **it
+  bounds NEITHER TRAVERSAL, and the claim is written to match the mechanism**: finding the aged
+  subset means READING the directory, so the depth-1 scan is O(N) in the entries PRESENT under the
+  temp parent, inherently — no `find` invocation offers a bounded sample of one — and N does not
+  shrink, because a markerless legacy directory reads `cannot-tell` for ever. So every gate start,
+  nested gates included, pays that traversal TWICE (once to size the population, once to select the
+  window, since a rotating walk cannot know its window until it knows the size), and what the cap
+  bounds is what the SHELL reads, holds and probes: the selection runs INSIDE the pipeline
+  (`find … | awk`), so at most `cap` records reach bash instead of a ~7,000-element array on every
+  start — a bound **COUNTED inside awk, never inferred from the counted total** (job 131), since
+  `k < want` over a modulo of `total` repeats earlier `k` values the moment the listing overruns the
+  count and emits another `cap` records per extra block, which on this fleet is the NORMAL case (peers
+  and nested gates create directories continuously between the two passes). Emission stops at the cap;
+  **reading does not** — an `exit`/`nextfile` bound would jump to END before the in-band status marker
+  was read and report `unobserved` for every window scan, trading a broken bound for a broken
+  tri-state. That pipeline is also why the scan's `find` status is carried IN BAND on a marker record — a
+  pipeline's `$?` is its LAST stage's, a lost status is indistinguishable from an empty listing
+  (#1699's find-tristate rule), and `head -n <cap>` is worse than lost because it SIGPIPEs find. The
+  outcome is read three-valued and BOTH non-measured answers remove nothing: `UNMEASURED (find
+  rc=<n> …)`, `UNMEASURED (scan status unobserved …)`, and a count of `0` as a measured EMPTY. The
+  remainder is reported as `deferred`, then examined by a later run, because the walk is **CIRCULAR
+  from a starting offset DERIVED — deterministically, and persisted nowhere — from this run's own
+  `run-id`** once the population exceeds the cap: a fixed start position plus a failing prefix
+  (`find`'s order is stable and a failed directory stays eligible) starved everything past position
+  1000 for ever. **STATED EXACTLY, because the honest property is weaker than "rotation" sounds:
+  successive runs start at different offsets, since their run-ids differ, so the population is
+  covered OVER TIME — coverage is SPREAD ACROSS RUNS, with NO guarantee of complete coverage within
+  any bounded number of runs (two runs can land on overlapping windows; nothing sequences them).**
+  What IS guaranteed is the property the starvation defect was about: no window is structurally
+  privileged, so no entry is excluded for ever by its position in `find`'s order. The eventual-
+  coverage guarantee a **persisted cursor under a lock** would buy was DECLINED (roborev job 117
+  medium, lead ruling): a cursor file under the shared temp parent is cross-process mutable state
+  shared by up to four concurrent lane gates plus dozens of nested self-test gates per suite, and
+  that lock's failure modes (lock ordering, a stale lock, a sweeper that cannot write,
+  register-before-create — three findings on this very PR came from that family) are worse than the
+  property it secures, which is only the ORDER in which stale temp directories are reclaimed. The
+  offset being a pure function of a value **every SUMMARY already stamps** (`run-id:`) is what makes
+  a sweep reproducible and explainable after the fact — and what makes its tests deterministic:
+  a `$RANDOM` start made the rotation cases assert properties of a SAMPLE, i.e. a flake generator
+  inside a registered `tooling-tests` suite, which is worse than the gap they covered. Reported
+  affirmatively, with BOTH numbers so the bound is observable
+  rather than asserted, and with the owner census read as a census OF THE EXAMINED SUBSET:
+  `logdir-sweep: N REMOVED of M aged (>7d) under <parent> (owner verified-dead …, live …,
+  unverifiable …; examined …, removals attempted …, declined on identity re-check …, cap …)` —
+  `0 REMOVED`, never a bare `0`. **Identity is re-confirmed AT THE REMOVAL SITE**: the probe
+  judges a directory and the `rm` happens LATER, BY PATHNAME, so a concurrent cleanup plus a
+  `mktemp -d` name reuse could otherwise destroy a NEW, LIVE run's bundle. The owner probe
+  publishes the identity its verdict came from, and the guard's LAST act before the unlink
+  re-reads that pathname and requires the same `verified-dead` subject — three-valued, with
+  `changed` and `cannot-tell` both declining and reported on their own census field, never
+  counted as removed. It NARROWS the window to two adjacent statements and cannot close it (a
+  shell holds no directory handle); the per-run removal-on-PASS path passes no expected identity,
+  since its owner is the live calling process.
+  **DECLARED RESIDUAL: this sweep does not clean up the pre-#3637 BACKLOG.** A markerless directory
+  reads `cannot-tell` for ever and is therefore KEPT for ever, and every directory created before the
+  marker existed is markerless — so the ~7,000-per-box / ~61,000-fleet-wide population the issue was
+  filed about needs a **one-time out-of-band cleanup**; what this sweep converges over is the
+  marker-carrying population created after it, and what stops NEW accumulation is the
+  removal-on-PASS half. Deliberately not guessed at: "markerless AND older than N days is probably
+  legacy" is the heuristic reasoning this repo forbids, and being wrong means destroying a live
+  peer's post-mortem bundle.
+  **`AGENT_GATE_KEEP_LOGS=1` suppresses BOTH halves** — set it whenever you need
+  `<logs-dir>/<component>.log` after a PASSing or nested run. Full record:
+  `docs/development/gate-ops.md`.
 - Every SUMMARY carries an `accelerators:` line (sccache/nextest/lane state, plus a `mold=` token and
   a `perf=` profiling-capability token on Linux hosts, #2859/#3249) — degradation there is
   actionable, not noise. `perf=paranoid-<N>`/`kptr-restricted` means THIS BOX CANNOT BE PROFILED (a

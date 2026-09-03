@@ -38,8 +38,23 @@ FAIL=0
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-nested.XXXXXX")
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-nested.XXXXXX" 2>/dev/null) || tmp=""
+if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
+  printf 'FAIL - could not create a scratch dir under %s — refusing to run\n' "${TMPDIR:-/tmp}"
+  exit 1
+fi
 trap 'rm -rf "$tmp"' EXIT INT TERM
+
+# #3637: every gate this file spawns creates a per-run LOG_DIR under ITS $TMPDIR, and
+# the runs here are nested ones whose #2874 private summary lives INSIDE that
+# directory — so the gate RETAINS them by design (removing one would delete the
+# verdict block the parent asserts on). Retained under the AMBIENT shared temp they
+# are a leak this harness owns; retained under the harness's own scratch root the
+# trap above reclaims them. The scratch root is validated FIRST because this export
+# is one more derivation from it (an empty $tmp would silently restore the ambient
+# /tmp and the leak with it).
+export TMPDIR="$tmp/tmpdir"
+mkdir -p "$TMPDIR" || { printf 'FAIL - could not create the scoped TMPDIR %s\n' "$TMPDIR"; exit 1; }
 
 # Isolated fake checkout: copy ONLY the gate script into <fakeroot>/scripts/ so that
 # `cd "$(dirname "$0")/.."` inside the gate resolves REPO_ROOT to $fakeroot and the

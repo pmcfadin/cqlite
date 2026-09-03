@@ -83,7 +83,24 @@ assert_complete() {
 }
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-test.XXXXXX")
+# An unchecked mktemp here would make `export TMPDIR=""` below silently fall back to
+# /tmp and the trap `rm -rf ""` clean nothing — the containment would read as present
+# and do nothing, which is worse than not having it.
+if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
+  printf 'FAIL - could not create a scratch dir under %s — refusing to run\n' "${TMPDIR:-/tmp}"
+  exit 1
+fi
 trap 'rm -rf "$tmp"' EXIT
+
+# CONTAIN every child gate's per-run LOG_DIR inside this run's scratch dir (#3637).
+# The gate creates `mktemp -d "${TMPDIR:-/tmp}/agent-gate.XXXXXX"` per invocation and
+# RETAINS it on every non-PASS verdict — correctly, that is the post-mortem case — and
+# this suite drives dozens of deliberately-FAILing hermetic runs. Measured before this
+# line: ~12 directories left in the shared /tmp per run of this file, on every gate of
+# record, since it runs inside `tooling-tests`. Redirecting TMPDIR puts them under $tmp,
+# which the trap above reclaims, so the retention stays correct and stops being a leak.
+# The same idiom as scripts/tests/test_agent_gate_file_size_log.sh.
+export TMPDIR="$tmp"
 
 # Every invocation pins AGENT_GATE_SUMMARY_FILE to a caller-chosen path inside our
 # scratch dir, so (a) we never write the repo-root default during the test, and
@@ -296,7 +313,11 @@ fi
 #    redirect the repo-root default into the scratch dir so the test never writes
 #    the real .agent-gate-summary.txt.
 iso_tmp=$(mktemp -d "$tmp/iso-tmpdir.XXXXXX")
-AGENT_GATE_SUMMARY_FILE="$tmp/iso-default.txt" TMPDIR="$iso_tmp" \
+# AGENT_GATE_KEEP_LOGS=1 (#3637): this run ends RESULT: PASS, and a terminal PASS now
+# REMOVES its own log dir at exit — the archival copy this case asserts on is exactly
+# what would go with it. The opt-out is the documented way to keep the bundle, and
+# $iso_tmp is scratch, so nothing leaks.
+AGENT_GATE_KEEP_LOGS=1 AGENT_GATE_SUMMARY_FILE="$tmp/iso-default.txt" TMPDIR="$iso_tmp" \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
 assert_exit "isolated-tmpdir" "$?" 0
 log_summary=$(ls -t "$iso_tmp"/agent-gate.*/summary.txt 2>/dev/null | head -1)
@@ -4448,10 +4469,18 @@ if [ "$(printf '%s\n' "$gate_src" | grep -cE 'done < <\(find ')" -gt 0 ]; then
 else
   ok "1699-find-status: no find is consumed by a status-discarding process substitution"
 fi
-if [ "$(printf '%s\n' "$gate_src" | sed 's/^[[:space:]]*#.*$//' | grep -cE '\[ -z "\$\(find ')" -gt 0 ]; then
-  bad "1699-find-tristate: a find result is tested with [ -z \"\$(find ...)\" ], which reads a FAILED scan as 'no match' — the two need different remedies"
+# BOTH POLARITIES. The pattern used to match `[ -z "$(find ` alone, and the negated
+# spelling `[ -n "$(find ` is the SAME two-valued collapse with the branches swapped —
+# an unreadable directory reads as "empty" either way. #3637's own new test carried the
+# `-n` form and this lint could not see it. `agent-gate.sh` contains no `-n` occurrence
+# today, so widening the polarity cannot red the existing subject set; the SUBJECT set
+# is deliberately still `agent-gate.sh` alone (widening it to scripts/tests/** needs a
+# census of pre-existing violations first — a guard that reds on a pile of unrelated
+# code is the guard agents learn to waive).
+if [ "$(printf '%s\n' "$gate_src" | sed 's/^[[:space:]]*#.*$//' | grep -cE '\[ -[zn] "\$\(find ')" -gt 0 ]; then
+  bad "1699-find-tristate: a find result is tested with [ -z/-n \"\$(find ...)\" ], which reads a FAILED scan as 'no match' — the two need different remedies"
 else
-  ok "1699-find-tristate: no find result is collapsed onto a two-valued emptiness test"
+  ok "1699-find-tristate: no find result is collapsed onto a two-valued emptiness test (either polarity)"
 fi
 
 # --- 48. #1699: the closure-report split must observe grep status (self-review after job 115) ---
