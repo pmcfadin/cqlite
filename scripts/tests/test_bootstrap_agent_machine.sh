@@ -2678,8 +2678,16 @@ else
   push_verdict "$out7pg"
 fi
 
-divergence=0; green_runs=0; nongreen_runs=0
+# THE GREEN DIRECTION IS CURRENTLY UNREACHABLE, AND THAT IS ASSERTED RATHER THAN SKIPPED
+# (issue #3727 round 426). Since section 5b2 may no longer emit an [ok], EVERY invocation of
+# bootstrap carries at least its declared SCOPED-NON-LOGIN gap, so `All checks green.` and
+# `--strict` exit 0 cannot be produced on any host until #3946 measures the launch contexts.
+# A bare `skip` here would be the silently-disabled-case defect this suite's case 15 exists to
+# catch, so the zero-green state must be EXPLAINED by that gap in every run (counted below) or
+# it is a failure. When #3946 restores a green run the first branch fires again with no edit.
+divergence=0; green_runs=0; nongreen_runs=0; sccgap_runs=0
 check_divergence() {   # <label> <output> <rc-of-a---strict-run>
+  out_has "$2" -E '\[warn\].*sccache-cap: SCOPED-NON-LOGIN' && sccgap_runs=$((sccgap_runs + 1))
   if push_green "$2"; then
     green_runs=$((green_runs + 1))
     [ "$3" -eq 0 ] || { divergence=1; echo "   divergence: $1 printed 'All checks green.' but --strict exited $3"; }
@@ -2696,8 +2704,10 @@ if [ "$divergence" -eq 0 ] && [ "$green_runs" -ge 1 ] && [ "$nongreen_runs" -ge 
   ok "push: --strict's exit code and 'All checks green.' agree in BOTH directions ($green_runs green, $nongreen_runs non-green runs)"
 elif [ "$divergence" -ne 0 ]; then
   bad "push: --strict and the 'All checks green.' string DIVERGED (see the divergence lines above)"
+elif [ "$green_runs" -eq 0 ] && [ "$nongreen_runs" -ge 1 ] && [ "$sccgap_runs" -eq 4 ]; then
+  ok "push: --strict and 'All checks green.' agree in the ONE direction now reachable ($nongreen_runs non-green); the green direction is UNREACHABLE because section 5b2's declared scope gap warns in all 4 runs (#3946) — asserted, not skipped"
 else
-  skip "push: divergence check needs both directions (green=$green_runs nongreen=$nongreen_runs on this host)"
+  bad "push: the green direction is unreachable for a reason OTHER than 5b2's declared gap (green=$green_runs nongreen=$nongreen_runs scc-gap-runs=$sccgap_runs of 4)"
 fi
 
 # 7p-h. FLAG HYGIENE. --skip-push-probe and --skip-smoke are different subjects (the
