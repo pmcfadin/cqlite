@@ -971,7 +971,10 @@ fn corrupt_partition_body_refused_not_silently_emptied() {
                 rows.len()
             ),
         };
-        for (which, e) in [("forced sequential_scan", &oracle_err), ("auto-routed", &auto_err)] {
+        for (which, e) in [
+            ("forced sequential_scan", &oracle_err),
+            ("auto-routed", &auto_err),
+        ] {
             assert!(
                 matches!(e, cqlite_core::Error::ColumnDecode { .. }),
                 "the {which} route must refuse the corrupted row body with the \
