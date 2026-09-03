@@ -1440,6 +1440,75 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   What distinguishes them is a **human plus the review's token accounting** (genuine: 398k–649k input /
   314k–554k cached; vacuous baseline ~18.7k / 0). That trade was chosen over a machine guessing from
   injectable text.
+  **THAT COST IS TRUE AT REVIEW TIME, AND FALSE AFTER THE FACT ONLY FOR A HUMAN READING THE STORED
+  RECORD — IT STAYS TRUE OF THE MACHINE, AND MUST (#3654).** The prompt roborev SENT is RETAINED in the job record and retrievable
+  later — `roborev show <id> --prompt` — even though the snapshot file it names is transient and
+  already deleted, and a delivery-by-path prompt says so in its own words under `### Combined
+  Diff`. That is the **DIRECT ARTIFACT** — roborev's ACTUAL prompt rather than a statistic about it —
+  **IT IS NOT SELF-AUTHENTICATING, AND THE
+  TRUST PROPERTIES RUN THE OPPOSITE WAY FROM THE OBVIOUS READING:** roborev's prompt EMBEDS
+  repository-controlled content at positions indistinguishable from roborev's own text, so a
+  reviewed branch can carry text MIMICKING that delivery wording — a human in the loop is not a
+  channel separation, it is the same shared channel with a slower parser — so the prompt is read for
+  the STRUCTURAL fact it reports, never as proof of its own provenance. The **token accounting is
+  DAEMON-RECORDED BUT NOT INDEPENDENT, and it does not establish delivery either**: the RECORD is
+  authentic (the branch cannot rewrite it), but the counts measure THE PROMPT, and the prompt embeds
+  repository-controlled content — so a branch influences their MAGNITUDE without forging anything.
+  That bites where the counts are used: the vacuous baseline is ~18.7k input / 0 cached, so padding
+  non-diff prompt content can make a review that received NO diff look token-rich. **NEITHER SIGNAL
+  ESTABLISHES PROVENANCE, and they are NOT INDEPENDENT** — both are functions of the same
+  repository-influenced prompt. **Which evidence a waiver should rest on is an OPEN QUESTION,
+  tracked as #3826** — nothing here recommends one signal over the other, or any ordering between
+  them (an earlier revision of this paragraph asserted the counts were
+  unwritable-and-therefore-corroborating; that was false in the half that mattered). **It resurrects nothing of the deleted delivery classifier,
+  and that distinction is load-bearing rather than a caveat:** the classifier read injectable prompt
+  text AT DECISION TIME to produce an AUTOMATED verdict, while this is a HUMAN reading a STORED
+  record as evidence for a HAND-GRANTED waiver, so the direct PARSER exploit is gone: nothing in
+  the wrapper parses the prompt for delivery mode, and nothing may be added that does. **THAT IS
+  ALL IT BUYS** — the human is IN the path, not outside it, so spoofed repository-controlled prompt
+  text can still mislead an authorizer into issuing the marker, and the marker is what makes
+  `--recheck-job` pass. That exposure is **#3826**'s subject and is NOT settled here.
+  **AND `job=` IS DAEMON-SCOPED, WHICH NOBODY HAD WRITTEN DOWN (#3654).** Each box runs its own
+  roborev daemon with its own database and its own sequential ids, so **two boxes can legitimately
+  present the SAME id for DIFFERENT reviews** — measured: `job=265` on two lanes 50 minutes apart,
+  different ranges, branches and token counts, both correct — and the coordination lead read the
+  repetition as a collision and WITHHELD a valid waiver. The failure is symmetric and the other
+  direction is worse: a lead who therefore treats `job=` as uninformative discards the one field
+  binding an authorization to a REVIEW rather than to a RANGE. So **verify the record's `git_ref`,
+  never the id alone** — `roborev show <id> --json | jq '.job | {id, git_ref, branch, status,
+  token_usage}'`, because `show` NESTS those fields under `.job`, while for
+  `roborev list --json --limit <n> --repo <abs> --branch <branch>`
+  **`--limit` is REQUIRED READING and must be RAISED until the job appears or the returned row
+  count STOPS GROWING** — it defaults to 50 (measured, v0.61.2), so an older job is outside the
+  window and the query yields nothing though the record exists, an absence indistinguishable from
+  "no such job" and exactly the reach a waiver argument needs; an empty result at a limit that is
+  still growing the row count is UNMEASURED, not an answer. And
+  `list`'s default branch filter follows the **`--repo` PATH's CURRENT HEAD**, not the branch your
+  shell is standing in — so name `--branch` whenever that checkout is not on the job's branch, which
+  is exactly the `--recheck-job` case. An earlier revision of this line named the cwd's branch and
+  was FALSE; the evidence offered for it — a `null` from a `--repo` sitting on `main` — is explained
+  identically by both readings, so it could never have separated them. The measurement that does:
+  from cwd `/tmp`, which is not a git repository at all, `--repo <lane>` returns that lane's rows. **Read `.job`, never a `show` payload's TOP-LEVEL
+  `id`**: that is the REVIEW row's own sequence and need not be the job you asked for (measured over
+  ten records — asking for 9 returns `id=8`, `job_id=9`, `job.id=9`), so a top-level jq manufactures
+  the very "is this the right review?" doubt the check exists to remove. The wrapper is unaffected —
+  `find_job` matches `id`/`job_id`/`job` and then prefers the object carrying `git_ref` — so this is
+  a trap for the human running the check by hand, not a live false `STALE`. **A LOCAL ROW COUNT IS NOT EVIDENCE OF
+  UNIQUENESS**: `roborev list … | jq '[.[] | select(.id==N)] | length'` returns `1` whether or not
+  another box holds that id, because `list` only ever sees the LOCAL daemon — and `0` when the row
+  fell outside the `--limit` window, so the count says nothing about the window it was taken over — another probe whose
+  output is IDENTICAL under the two states it claims to separate (the `RESULT: INCOMPLETE` launch
+  sentinel read as a verdict; a gate run dir found by `ls -t`; `mergeable: MERGEABLE` on a
+  marker-bearing merge commit) — and it gave both lanes the right answer for a reason that did not
+  hold. Use `git_ref`. **AND WHAT THE `git_ref` CHECK SETTLES IS SCOPED TO ONE DAEMON — the rest is
+  NOT CLAIMED.** It settles that the id names the review you think it does *on this daemon*. It does
+  NOT settle the cross-box case: two daemons can hold the same id for the SAME `git_ref` range, so a
+  waiver authorized against machine A's review can be accepted by `--recheck-job` against machine B's
+  DIFFERENT review of that range, and **no local lookup can detect it** — `roborev list` only ever
+  sees the local daemon, while the marker travels through GITHUB. So same-range cross-daemon
+  collisions remain UNPROTECTED; that is declared, not closed. **Whether the block should NAME the
+  issuing daemon — and the cross-box question that comes with it — is tracked as #3825, together with
+  the marker-grammar question it raises.**
   **THE ABSENCE WAIVER — the break-glass, its four constraints, and why the documentation is not the
   credential (#3312 job 23).** The **OWNER or the coordination LEAD** may excuse an absence FAIL with a
   **dedicated, column-zero line** of a PR comment:
