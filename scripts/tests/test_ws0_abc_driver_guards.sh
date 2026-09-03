@@ -381,14 +381,20 @@ fi
 # measured must be ACCEPTED, must SKIP every session, and must measure NOTHING. Without this
 # half, a fingerprint check hardcoded to refuse would satisfy every case that follows.
 BASE_OUT="$TMP/out-base"
-measure_all "$BASE_OUT" 3
 base_args=(--corpus "$CORPUS" --bin-dir "$BINS" --out "$BASE_OUT" --rounds 3)
+# THE ORDER HERE IS LOAD-BEARING, and case 1r is why: the driver REFUSES to write a first run
+# record into an `--out` that already holds `r<N>-<arm>/results.json`, because such sessions
+# cannot be shown to belong to this experiment. So a resumable fixture is built the way a real
+# operator gets one — the record is written over a FRESH directory FIRST, and the sessions are
+# marked measured afterwards. Seeding the other way round would make every case below depend on
+# the very adoption F1 closes.
 out=$(run_abc "$TMP/d-base" "${base_args[@]}"); rc=$?
 if [ "$rc" -eq 0 ] && grep -q "run record WRITTEN" <<<"$out"; then
-  pass "1a. (setup) the fingerprint is written for the base set"
+  pass "1a. (setup) the fingerprint is written for the base set over a FRESH --out"
 else
   fail "1a. (setup) the base set's fingerprint must be written (rc=$rc, out: $out)"
 fi
+measure_all "$BASE_OUT" 3
 out=$(run_abc "$TMP/d-base" "${base_args[@]}"); rc=$?
 skips=$(grep -c 'SKIP (measured, window VERIFIED' <<<"$out")
 n=$(stub_invocations)
@@ -531,8 +537,9 @@ fi
 # MADE, and every one of them must be a REFUSAL rather than "compatible" — a comparison that
 # could not be made has not been made.
 UNREADABLE_OUT="$TMP/out-unreadable"
-measure_all "$UNREADABLE_OUT" 1
+# Record first, sessions second — see case 1a's note on the seeding order.
 out=$(run_abc "$TMP/d-base" --corpus "$CORPUS" --bin-dir "$BINS" --out "$UNREADABLE_OUT" --rounds 1)
+measure_all "$UNREADABLE_OUT" 1
 chmod 000 "$UNREADABLE_OUT/abc-run.json"
 if [ "$(id -u)" -eq 0 ]; then
   # root reads anything, so the case cannot be constructed — and a SKIP here would be a hole
@@ -590,6 +597,101 @@ else
   fail "1q. the reverted fixture must be accepted again (rc=$rc, out: $(tail -5 <<<"$out"))"
 fi
 
+# --- 1r. THE FINGERPRINT-ABSENT HALF (roborev #3551 round 3 F1) -------------------------
+# Cases 1b-1p all drive the branch where a run record EXISTS. The other half is where one does
+# NOT: with nothing to compare against, an `--out` that already holds `r<N>-<arm>/results.json`
+# would get a fingerprint written over it and its sessions ADOPTED — the loop skips a measured
+# slot after validating its round, arm and exit only, none of which is a treatment. So the
+# WRITE must refuse, naming the directories.
+#
+# The RED arm and its control differ in EXACTLY ONE property: whether that `--out` holds a
+# session directory. Nothing else moves — same corpus, same binaries, same driver copy.
+ADOPT_OUT="$TMP/out-adoptable"
+make_measured "$ADOPT_OUT" 1 "${DRIVER_ARMS[0]}"
+rm -f "$ADOPT_OUT/abc-run.json"
+refuses_naming "1r. an --out holding a session but NO abc-run.json is REFUSED, naming the directory, the session and the remedy" \
+  "$TMP/d-base" "$ADOPT_OUT" "abc-run.json" "r1-${DRIVER_ARMS[0]}" "ADOPTABLE session(s)" \
+  "point --out at a FRESH directory" -- \
+  --corpus "$CORPUS" --bin-dir "$BINS" --out "$ADOPT_OUT" --rounds 1
+# ...and it names EVERY such directory, not just the first: the operator's next action is on all
+# of them, and a set is 12 to 20.
+make_measured "$ADOPT_OUT" 1 "${DRIVER_ARMS[1]}"
+out=$(run_abc "$TMP/d-base" --corpus "$CORPUS" --bin-dir "$BINS" --out "$ADOPT_OUT" --rounds 1)
+rc=$?
+if [ "$rc" -ne 0 ] && grep -qF "r1-${DRIVER_ARMS[0]}" <<<"$out" \
+   && grep -qF "r1-${DRIVER_ARMS[1]}" <<<"$out"; then
+  pass "1r. ...and BOTH adoptable sessions are named (r1-${DRIVER_ARMS[0]} and r1-${DRIVER_ARMS[1]}), not just the first"
+else
+  fail "1r. every adoptable session must be named (rc=$rc, out: $(tail -8 <<<"$out"))"
+fi
+# THE POSITIVE CONTROL, differing in that one property: the same arguments over an --out with no
+# session in it are ACCEPTED, the record is written and every arm is measured. Without this arm
+# the refusal above would be satisfied by a driver that refuses every non-fresh directory — or
+# every directory at all.
+FRESH_OUT="$TMP/out-fresh-control"
+mkdir -p "$FRESH_OUT"
+out=$(run_abc "$TMP/d-base" --corpus "$CORPUS" --bin-dir "$BINS" --out "$FRESH_OUT" --rounds 1)
+rc=$?
+n=$(stub_invocations)
+if [ "$rc" -eq 0 ] && grep -q "run record WRITTEN to $FRESH_OUT/abc-run.json" <<<"$out" \
+   && [ "$n" -eq "$NARMS" ]; then
+  pass "1r. CONTROL: an EMPTY --out (the only difference) is ACCEPTED, the record is WRITTEN and all $NARMS arms measured"
+else
+  fail "1r. an empty --out must still be accepted (rc=$rc, invocations=$n, out: $(tail -5 <<<"$out"))"
+fi
+# ...and an --out that does not exist yet, which is the ordinary first invocation.
+out=$(run_abc "$TMP/d-base" --corpus "$CORPUS" --bin-dir "$BINS" --out "$TMP/out-absent-control" --rounds 1)
+rc=$?
+if [ "$rc" -eq 0 ] && grep -q "run record WRITTEN" <<<"$out"; then
+  pass "1r. CONTROL: an --out that did not exist is ACCEPTED too — the refusal is of adoptable SESSIONS, not of a non-fresh path"
+else
+  fail "1r. an absent --out must be accepted (rc=$rc, out: $(tail -5 <<<"$out"))"
+fi
+# THE REGRESSION CONTROL: restore the run record over the SAME adoptable sessions and the resume
+# is VERIFIED and skips them, exactly as before. This is what makes the refusal above a
+# statement about the MISSING RECORD and not about the sessions.
+#
+# The record is obtained the only sanctioned way — the DRIVER writes one over a throwaway
+# `--out` under the IDENTICAL configuration and it is copied in. A literal here would be a
+# second implementation of the fingerprint, free to agree with this suite while disagreeing
+# with the driver.
+run_abc "$TMP/d-base" --corpus "$CORPUS" --bin-dir "$BINS" --out "$TMP/out-fp-donor" --rounds 1 \
+  >/dev/null
+if [ -f "$TMP/out-fp-donor/abc-run.json" ]; then
+  cp "$TMP/out-fp-donor/abc-run.json" "$ADOPT_OUT/abc-run.json"
+  pass "1r. (setup) a fingerprint for the identical configuration was written BY THE DRIVER and copied over the adoptable sessions"
+else
+  fail "1r. (setup) the donor fingerprint must be written by the driver, not composed here"
+fi
+out=$(run_abc "$TMP/d-base" --corpus "$CORPUS" --bin-dir "$BINS" --out "$ADOPT_OUT" --rounds 1)
+rc=$?
+skips=$(grep -c 'SKIP (measured, window VERIFIED' <<<"$out")
+n=$(stub_invocations)
+if [ "$rc" -eq 0 ] && grep -q "resume:   VERIFIED against" <<<"$out" && [ "$skips" -eq 2 ] \
+   && [ "$n" -eq "$((NARMS - 2))" ]; then
+  pass "1r. REGRESSION CONTROL: with the run record RESTORED the same two sessions are VERIFIED and SKIPPED (2 skips, $n arms measured) — the refusal is about the missing record"
+else
+  fail "1r. a valid matching fingerprint must still resume and skip (rc=$rc, skips=$skips, stub=$n, out: $(tail -6 <<<"$out"))"
+fi
+# THE POSITIVE CONTROL ON THE ORACLE. The two arms above prove the refusal fires and that a
+# fresh --out does not; neither shows the refused FIXTURE is otherwise acceptable, so the RED
+# arm would keep passing if the driver refused it for some unrelated reason. A scratch copy with
+# THIS ONE COMPARISON disabled must ACCEPT the same directory and run to completion — and
+# `abc_copy` asserts the edit took, so a pattern that stopped matching cannot leave a copy
+# byte-identical to the shipped driver and "prove" the same thing twice.
+ADOPT_ORACLE="$TMP/out-adoptable-oracle"
+make_measured "$ADOPT_ORACLE" 1 "${DRIVER_ARMS[0]}"
+if abc_copy "$TMP/d-no-adopt-guard" 's/^    if adopted:$/    if False:/'; then
+  out=$(run_abc "$TMP/d-no-adopt-guard" --corpus "$CORPUS" --bin-dir "$BINS" \
+    --out "$ADOPT_ORACLE" --rounds 1); rc=$?
+  if [ "$rc" -eq 0 ] && grep -q "run record WRITTEN" <<<"$out" \
+     && grep -q 'SKIP (measured, window VERIFIED' <<<"$out"; then
+    pass "1r. CONTROL ON THE ORACLE: with the adoption guard disabled the SAME directory is accepted and its session ADOPTED (skipped) — so the shipped refusal is that guard and not an unrelated red"
+  else
+    fail "1r. the guard-disabled copy must accept the adoptable fixture, or 1r's refusal is not attributable to the guard (rc=$rc, out: $(tail -6 <<<"$out"))"
+  fi
+fi
+
 # ===========================================================================
 # PART 2 — A SKIPPED SESSION MUST PROVE IT IS THE SESSION THE SLOT EXPECTS
 # ===========================================================================
@@ -597,8 +699,10 @@ fi
 # round, no position and no arm label of this set's vocabulary. Every refusal here names the
 # DIRECTORY, because that is what the operator acts on and a set is 12 to 20 of them.
 WIN_OUT="$TMP/out-window"
-measure_all "$WIN_OUT" 1
 win_args=(--corpus "$CORPUS" --bin-dir "$BINS" --out "$WIN_OUT" --rounds 1)
+# Record first, sessions second — see case 1a's note on the seeding order.
+run_abc "$TMP/d-base" "${win_args[@]}" >/dev/null
+measure_all "$WIN_OUT" 1
 out=$(run_abc "$TMP/d-base" "${win_args[@]}"); rc=$?
 if [ "$rc" -eq 0 ] && [ "$(grep -c 'SKIP (measured, window VERIFIED' <<<"$out")" -eq "$NARMS" ]; then
   pass "2a. (control) all $NARMS intact sessions are ACCEPTED and skipped"

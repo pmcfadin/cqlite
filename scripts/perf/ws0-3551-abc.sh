@@ -90,7 +90,10 @@ sha256 + row count, the --bin-dir path AND a digest of every measured binary in 
 and each arm's exact flag list, --step-duration, --arena-max, --jemalloc-lib and --port. It is
 WRITTEN on the first invocation and VERIFIED on every later one; a differing field is a REFUSAL
 naming the field and both values, because two sessions measured under different treatments are
-not a paired experiment however much the directory layout says they are.
+not a paired experiment however much the directory layout says they are. And the WRITE itself
+REFUSES an --out that already holds r<N>-<arm>/results.json: with no run record there is
+nothing to compare against, so those sessions cannot be shown to be this experiment and
+adopting them under a fingerprint written now would publish two treatments as one set.
 EOF
 }
 
@@ -377,6 +380,65 @@ if path.exists():
         f"resume:   VERIFIED against {path} — all {len(fields)} fingerprint field(s) identical"
     )
 else:
+    # NO RUN RECORD — SO THIS --out MUST NOT ALREADY HOLD SESSIONS (roborev #3551 round 3 F1).
+    #
+    # The verified branch above closed the case where a fingerprint EXISTS; this is the other
+    # half of the same defect, and it is the half that fails silently. With no `abc-run.json`
+    # there is NOTHING to compare this invocation's configuration against, so any `r<N>-<arm>/
+    # results.json` already sitting here is a session of an experiment whose treatments cannot
+    # be shown to be these — and the loop below SKIPS such a session after validating only its
+    # round, its arm and its exit status, none of which is a treatment. Writing a fresh
+    # fingerprint over them would stamp this invocation's configuration onto sessions measured
+    # under another one, and the aggregator would then pair across treatments under a table
+    # describing one. Reachable by accident in one gesture: `--out` pointed at an earlier set
+    # whose run record was deleted, or a set started before this fingerprint existed at all.
+    #
+    # So it is REFUSED, not adopted: "cannot be shown to be this experiment" is a
+    # could-not-measure, and this rig's standing rule is that a comparison that could not be
+    # made has not been made. A FRESH (empty or absent) --out is unaffected, which is the
+    # legitimate path this must not red.
+    try:
+        adopted = sorted(
+            p.parent.name for p in path.parent.glob("r*-*/results.json") if p.is_file()
+        )
+    except OSError as exc:
+        # THREE-VALUED: the scan itself failing is not "nothing is here". An unreadable --out
+        # is UNMEASURED and takes the refusal, never the permissive branch.
+        sys.stderr.write(
+            f"FATAL: {path.parent} could not be SCANNED for existing sessions ({exc}), so it"
+            " cannot be\n"
+            "       shown to be empty. Refused rather than assumed fresh: an unmeasurable\n"
+            "       directory is not an empty one. Fix the permissions, or use a fresh --out.\n"
+        )
+        raise SystemExit(2)
+    if adopted:
+        sys.stderr.write(
+            f"FATAL: {path.parent} ALREADY HOLDS session artifacts but carries NO"
+            f" {path.name}, so\n"
+            "       nothing records which configuration measured them. This invocation would"
+            " write a\n"
+            "       fresh run record and then ADOPT them: the loop skips a measured (round,"
+            " arm) after\n"
+            "       validating its round, arm and exit status only — none of which is a"
+            " TREATMENT — so\n"
+            "       sessions from an earlier or differently configured set would be published"
+            " as one\n"
+            "       paired experiment. Refused: they cannot be SHOWN to be this experiment,"
+            " and a\n"
+            "       comparison that could not be made has not been made.\n"
+            "       ADOPTABLE session(s) (each holds a results.json):\n"
+        )
+        for name in adopted[:10]:
+            sys.stderr.write(f"         {name}\n")
+        if len(adopted) > 10:
+            sys.stderr.write(f"         ... and {len(adopted) - 10} more\n")
+        sys.stderr.write(
+            "       Remedy: point --out at a FRESH directory, or restore the"
+            f" {path.name} of the\n"
+            "       set these sessions belong to (which is then VERIFIED field by field"
+            " instead).\n"
+        )
+        raise SystemExit(2)
     body = {
         "issue": "#3551",
         "fields": fields,
