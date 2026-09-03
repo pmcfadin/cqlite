@@ -1143,17 +1143,29 @@ same_dir_other_issue() {
   else
     G_DIR_GUARD=""
   fi
-  # A DISCLOSURE IS NOT A GUARD (#3436, roborev round 25). Round 23 counted the records this scan
-  # could not read and let the WRITE proceed with a caveat — but if one of those records is a
-  # live holder of THIS directory, the caveat is printed AFTER two processes already own the
-  # lane. Reporting a collision risk is not preventing one.
+  # WHAT THIS RETURN MEANS: "no live conflicting holder was FOUND", which is NOT the same as
+  # "none exists". `return 1` is the clean-scan status, and both callers proceed to acquire,
+  # appending `dir-guard=NOT-EXHAUSTIVE` when the scan could not read every record. The
+  # disclosure is the whole mitigation; the write is NOT refused.
   #
-  # I ARGUED FOR THE DISCLOSURE ON FIX 5/14 GROUNDS AND MIS-APPLIED MY OWN RULE. That ruling is
-  # "a guard must not red on CORRECT input" — an unreadable record in the lock root is a BROKEN
-  # ENVIRONMENT, not correct input, so refusing there reds on nothing legitimate. The remedy is
-  # named in the message and the state is loud, diagnosable and rare; two silent writers are
-  # none of those. Readers (probe/status) still only REPORT: a read-only command must never
-  # refuse, and it is the write that has to be safe.
+  # THIS COMMENT USED TO DESCRIBE THE OPPOSITE, AND THAT IS THE DEFECT ROUND 38 CAUGHT
+  # (#3436). It argued at length that a disclosure is not a guard and that an unreadable
+  # record is a broken environment where refusing "reds on nothing legitimate" — i.e. it
+  # described a REFUSAL, while the code beneath it returned the clean-scan status and
+  # acquired anyway. That argument was mine and it LOST: the lead ruled OPTION (c) on the
+  # round-25 request — keep the disclosure, defer the refusal mechanism — and the four
+  # conditions went to #3761. So the CODE is correct per that ruling and the COMMENT
+  # preserved the losing argument as though it were policy.
+  #
+  # A stale comment here is worse than none: the next maintainer reads "we refuse", believes
+  # the collision window is closed, and stops looking. That is the same decay this change has
+  # fixed repeatedly in doctrine prose — a comment naming a mechanism is a claim about code,
+  # and this one had gone false.
+  #
+  # THE RESIDUAL, STATED PLAINLY, because it is real and only #3761 closes it: if one of the
+  # records this scan could not read IS a live holder of this directory, two processes end up
+  # owning the lane and the caveat is printed after the fact. Readers (probe/status) only ever
+  # REPORT, which is correct for a read-only command; the write's safety is what #3761 owes.
   return 1
 }
 
