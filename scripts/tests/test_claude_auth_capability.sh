@@ -113,7 +113,13 @@ run_cap() {
   # agent's identity from them, so a suite run under `sudo` would put every case on the
   # delegation path and measure something else entirely. Cases that want that posture set
   # them explicitly, which is also how they stay legible as being about it.
-  out=$(PATH="$shimdir:$PATH" env -u SUDO_USER -u SUDO_UID \
+  # CLAUDE_CONFIG_DIR IS SCRUBBED BY DEFAULT TOO, and on this fleet that is not theoretical:
+  # the host exports it (`/data/auth/claude`), and the repair falls back to THIS PROCESS's
+  # value when the pam_env file names none — so a case about "the config dir could not be
+  # seeded from anywhere" silently took the inherited-value branch and tested the opposite
+  # thing. Cases that want it set pass it explicitly, which still wins: `env` applies `-u`
+  # before assignments.
+  out=$(PATH="$shimdir:$PATH" env -u SUDO_USER -u SUDO_UID -u CLAUDE_CONFIG_DIR \
         CQLITE_BOOTSTRAP_TEST_MODE=1 \
         CQLITE_CLAUDE_AUTH_ENV_FILE="$envfile" \
         ${pre[@]+"${pre[@]}"} \
@@ -2455,6 +2461,56 @@ else
 fi
 
 # =====================================================================================
+# 39. A PARTIAL REPAIR MUST NOT REPORT SUCCESS, AND MUST SAY WHICH HALF WORKED (#3733 F2).
+#     `claude_auth_fix_tmux_env` seeds the TOKEN, then the CONFIG DIR. When the config dir
+#     is in NEITHER the pam_env file NOR this process's environment it printed
+#     "could NOT be seeded" and `return 0` — so `--fix-tmux-env` exited 0 on a repair that
+#     half happened, and bootstrap's F1 check (which reads that status) would have called it
+#     complete. TOKEN-SEEDED-BUT-NO-CONFIG-DIR IS PRECISELY THE UN-ONBOARDED PICKER STATE
+#     THIS ISSUE EXISTS FOR: the credential authenticates and `claude` still lands on the
+#     first-run chooser (fact 2), so reporting it as success is the worst available answer.
+#     SAME LICENCE AS F1: this is a verdict about whether an ACTION THE OPERATOR REQUESTED
+#     completed, not about whether the credential is valid. The first is observable from the
+#     action's own outcome; the second is what the #3733 demotion removed.
+#     THE OPERATOR NEEDS BOTH FACTS, so the assertions are on the TEXT as well as the status:
+#     the token half WORKED and the config half did NOT. A bare non-zero would send someone
+#     to re-run a seed that already succeeded.
+# =====================================================================================
+# $ef_nocfg carries a token and NO CLAUDE_CONFIG_DIR; run_cap scrubs the inherited one (see
+# the note there — the host really does export it), so the repair has no source for it.
+d39=$(mkshim "$tmp/s39"); plant_tmux "$d39" missing
+run_cap "$d39" "$ef_nocfg" -- --fix-tmux-env
+# THE FIXTURE MUST HAVE REACHED THE PARTIAL STATE, asserted first: if the token half had
+# also failed, or a config dir had been found, the status assertion below has another cause.
+if grep -q 'seeded CLAUDE_CODE_OAUTH_TOKEN into the running tmux server' <<<"$out" \
+   && grep -q 'CLAUDE_CONFIG_DIR could NOT be seeded' <<<"$out"; then
+  ok "partial repair: the fixture really is the partial case (token seeded, config dir sourceable from nowhere)"
+else
+  bad "partial repair: the fixture is not the partial case, so the status assertion below has another cause: $out"
+fi
+if [ "$rc" -ne 0 ]; then
+  ok "partial repair: --fix-tmux-env exits NON-ZERO when only half the requested repair happened"
+else
+  bad "partial repair: --fix-tmux-env exited 0 on a half-done repair — token seeded, no config dir, which IS the un-onboarded picker state"
+fi
+# AND IT REPORTS WHICH HALF, both directions, because the remedy depends on it: re-running
+# the seed is pointless and the operator has to know only the config dir is outstanding.
+if grep -q 'the CLAUDE_CODE_OAUTH_TOKEN half of this repair SUCCEEDED' <<<"$out"; then
+  ok "partial repair: the failure line states that the token half already succeeded"
+else
+  bad "partial repair: the failure line does not say the token was already seeded, so the operator cannot tell which half is outstanding: $(printf '%s' "$out" | grep 'could NOT be seeded')"
+fi
+# NOT A BLANKET NON-ZERO: the FULL repair must still exit 0, or F1's status check would call
+# every successful repair a failure. $ef2 names a config dir, so both halves complete.
+d39b=$(mkshim "$tmp/s39b"); plant_tmux "$d39b" missing
+run_cap "$d39b" "$ef2" -- --fix-tmux-env
+if [ "$rc" -eq 0 ] && grep -q 'seeded CLAUDE_CONFIG_DIR=' <<<"$out"; then
+  ok "partial repair: a COMPLETE repair still exits 0 (the non-zero is about the missing half, not about seeding)"
+else
+  bad "partial repair: a complete repair no longer exits 0 (rc=$rc) — F1's status check would call every success a failure: $out"
+fi
+
+# =====================================================================================
 # 37. ROOT MUST CREATE EVERYTHING IT OWNS **BEFORE** IT TRANSFERS THE DIRECTORY (#3733,
 #     was LIMITATION 4 of 5, now FIXED).
 #     WHY THIS ONE IS NOT COVERED BY THE "IT IS ONLY A REPORT" RULING. The other four
@@ -2745,20 +2801,21 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # a host without `uname` is a named refusal at startup, because that host would take the
 # non-Linux branch in every case. Raised 91 -> 122 by round 4 (the digest identity of a
 # delivered credential, the sudo-posture cases, and the bounding class), 122 -> 124 by
-# round 5's two probe-working-directory interrupt cases, and 124 -> 151 by #3733's
-# DEMOTION, the handover fix and the repair-status fix. Sections 34-36 (the
+# round 5's two probe-working-directory interrupt cases, and 124 -> 155 by #3733's
+# DEMOTION, the handover fix and the two repair-status fixes. Sections 34-36 (the
 # no-certification invariant, the alternate-credential observation, the
 # limitation-findability guard and the live/FIXED split), section 37 (the handover ordering,
 # behavioural + structural + its positive control), section 38 (an explicitly requested
 # repair that FAILED must red, and a SUCCESSFUL one must not), the seam-refusal exit-status
-# pin, the marker-scanner positive control, and the assertions that changed subject where a
-# verdict became an observation. 154 cases run, and the real-tmux isolation case
+# pin, the marker-scanner positive control, section 39 (a PARTIAL repair must not report
+# success, and a COMPLETE one must still exit 0), and the assertions that changed subject
+# where a verdict became an observation. 158 cases run, and the real-tmux isolation case
 # (3 assertions) is still the only legitimately skippable one.
 # THE FIGURE IS MEASURED, NOT COUNTED BY EYE, AND IT IS RE-MEASURED WHENEVER IT MOVES:
 # forcing the tmux block's `command -v tmux` test to `true` in a throwaway `git worktree`
-# reports 151/0/1. The value in this file is the authority — a figure quoted in a commit
+# reports 155/0/1. The value in this file is the authority — a figure quoted in a commit
 # message is a snapshot of the run that produced it and does not follow later edits.
-CASE_FLOOR=151
+CASE_FLOOR=155
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1

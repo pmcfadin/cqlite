@@ -1611,9 +1611,26 @@ claude_auth_fix_tmux_env__untraced() {
   elif [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
     __cfg="$CLAUDE_CONFIG_DIR"; __cfgsrc='this process environment (the fleet keeps it in /etc/profile.d, which a tmux-spawned lane never reads)'
   else
-    printf 'claude-auth: %s could NOT be seeded — it is in neither %s nor this environment; seed it by hand: tmux setenv -g %s <dir>\n' \
-      "$CLAUDE_AUTH_CONFIG_KEY" "$__file" "$CLAUDE_AUTH_CONFIG_KEY"
-    return 0
+    # A HALF-DONE REPAIR IS NOT A SUCCESS, and this branch returned 0 (#3733 F2). The
+    # combination it reports — token seeded, NO config dir — is PRECISELY the un-onboarded
+    # first-run picker this whole issue exists for: the credential authenticates and `claude`
+    # still lands on the chooser, because the token authenticates INDEPENDENTLY of
+    # CLAUDE_CONFIG_DIR (fact 2). So reporting it as success is the worst available answer,
+    # and bootstrap's own status check (F1) would have read that 0 and called the repair
+    # complete.
+    #
+    # SAME LICENCE AS F1, since a reader will ask: the #3733 demotion forbids a verdict that
+    # THE CREDENTIAL IS VALID, which no observation here can establish. Whether an ACTION THE
+    # OPERATOR EXPLICITLY REQUESTED completed is a different subject and is observable from
+    # the action's own outcome. An action's success is a legitimate verdict.
+    #
+    # BOTH HALVES ARE NAMED, because the remedy depends on which one is outstanding: without
+    # the first clause a non-zero status sends the operator to re-run a seed that already
+    # worked, and the token value must never be re-handled needlessly.
+    printf 'claude-auth: fix INCOMPLETE — the %s half of this repair SUCCEEDED (already seeded, above), but %s could NOT be seeded: it is in neither %s nor this environment. A server holding the token with NO %s still gives every pane the un-onboarded first-run picker. Seed it by hand: tmux setenv -g %s <dir>\n' \
+      "$CLAUDE_AUTH_TOKEN_KEY" "$CLAUDE_AUTH_CONFIG_KEY" "$__file" \
+      "$CLAUDE_AUTH_CONFIG_KEY" "$CLAUDE_AUTH_CONFIG_KEY"
+    return 1
   fi
   claude_auth_tmux_run "$CLAUDE_AUTH_TMUX_OP_BOUND" setenv -g "$CLAUDE_AUTH_CONFIG_KEY" "$__cfg" 2>/dev/null
   __cfgrc=$?
