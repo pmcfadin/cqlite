@@ -670,6 +670,18 @@ elif [ -n "${SCC_STUB_STATE:-}" ] && [ -s "${SCC_STUB_STATE:-}" ]; then
 elif [ "${SCC_STUB_MAX:-none}" = none ]; then
   printf "{\"stats\":{},\"cache_location\":\"Local disk: \\\"%s\\\"\",\"cache_size\":null,\"max_cache_size\":%s,\"version\":\"0.17.0\"}\n" \
     "${SCC_STUB_LOC:-/data/sccache-stub}" "$(scc_resolve)"
+elif [ -n "${SCC_STUB_DUP_WHEN_ENV_SET:-}" ] && [ -n "${SCCACHE_CACHE_SIZE+set}" ]; then
+  # DUPLICATE max_cache_size FIELDS, PLANTED ON THE SECOND ATTRIBUTION READING ONLY (#3727
+  # roborev job 435). The discriminator is the one production itself uses: the differential
+  # takes reading 1 under `env -u SCCACHE_CACHE_SIZE` and reading 2 under
+  # `env SCCACHE_CACHE_SIZE=<sentinel>`, so "the client env is SET" identifies reading 2
+  # without this stub hard-coding the value of the sentinel — if that value ever changes, the
+  # plant still lands rather than silently vanishing.
+  # The FIRST field equals SCC_STUB_MAX, i.e. exactly the value reading 1 returned. That is
+  # what makes this the falsifying payload: a `head -1` extractor takes it, compares EQUAL,
+  # and ESTABLISHES server attribution from a payload nothing disambiguated.
+  printf "{\"stats\":{},\"cache_location\":\"Local disk: \\\"%s\\\"\",\"cache_size\":%s,\"max_cache_size\":%s,\"max_cache_size\":%s,\"version\":\"0.17.0\"}\n" \
+    "${SCC_STUB_LOC:-/data/sccache-stub}" "${SCC_STUB_USED:-1000}" "$SCC_STUB_MAX" 1234
 else
   printf "{\"stats\":{},\"cache_location\":\"Local disk: \\\"%s\\\"\",\"cache_size\":%s,\"max_cache_size\":%s,\"version\":\"0.17.0\"}\n" \
     "${SCC_STUB_LOC:-/data/sccache-stub}" "${SCC_STUB_USED:-1000}" "$SCC_STUB_MAX"
@@ -5378,6 +5390,32 @@ else
   else
     bad "sccache-cap: emitted text promises a REMOVED detection — the exact failure mode this PR is about"
     printf '%s\n' "$scc_sl_v" | grep -n 'CONFLICTING-SOURCES\|would have been\|classify as routing' | head -3
+  fi
+
+  # 12b-a2. THE ATTRIBUTION DIFFERENTIAL CHECKS UNIQUENESS ON **BOTH** READINGS (#3727 roborev
+  #        job 435). The first reading always counted its `max_cache_size` matches and refused an
+  #        ambiguous payload; the second took `head -1`. So a payload carrying DUPLICATE fields
+  #        whose FIRST one equals the first reading compares EQUAL, and server attribution — the
+  #        entire basis for reporting a cap as IN FORCE — gets ESTABLISHED from a payload nothing
+  #        disambiguated. That is this issue's own defect class (a number reported as measured
+  #        when it was not) reappearing inside the mechanism built to prevent it.
+  #
+  #        THIS IS THE RED ARM AND 12b-a IS ITS CONTROL: same bootstrap, same shims, same env
+  #        file, same SCC_STUB_MAX, differing in EXACTLY ONE property — SCC_STUB_DUP_WHEN_ENV_SET.
+  #        12b-a establishes attribution and reaches SCOPED-NON-LOGIN; this one must refuse. A
+  #        bare red would not be evidence (any unrelated breakage reds identically), so the
+  #        assertion requires the output to NAME the planted construct: the field COUNT it saw.
+  scc_out_dup=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G \
+    SCC_STUB_MAX=32212254720 SCC_STUB_DUP_WHEN_ENV_SET=1 SCC_STUB_LOG="$scc_log")
+  scc_sl_dup=$(scc_slice "$scc_out_dup")
+  if out_has "$scc_sl_dup" -F '2 max_cache_size fields' \
+     && out_has "$scc_sl_dup" -F 'which one to compare is ambiguous' \
+     && ! out_has "$scc_sl_dup" -F 'SCOPED-NON-LOGIN' \
+     && ! out_has "$scc_sl_dup" -E '^[[:space:]]+\[ok\] '; then
+    ok "sccache-cap: duplicate max_cache_size on the SECOND reading REFUSES and names the count — attribution is not established from an ambiguous payload (job 435)"
+  else
+    bad "sccache-cap: a duplicate-field second reading established attribution, or refused without naming the planted count"
+    printf '%s\n' "$scc_sl_dup" | grep 'sccache-cap:' | head -3
   fi
 
   # 12b-b. NOT-HONOURED — the #3727 state itself: the value is persisted, visible and accepted,

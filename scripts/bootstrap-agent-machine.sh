@@ -3980,13 +3980,25 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
       SCC_RUN_WHY="the attribution differential could not be taken (the second 'sccache --show-stats' produced no output, rc $rc2), so it cannot be established whether $hits is a RUNNING server's cap or this client's own resolution of SCCACHE_CACHE_SIZE"
       return 1
     fi
-    cap2=$(printf '%s\n' "$json2" | grep -o '"max_cache_size":[0-9][0-9]*' 2>/dev/null | head -1)
-    cap2=${cap2##*:}
-    if [ -z "$cap2" ]; then
+    # UNIQUENESS IS CHECKED ON BOTH READINGS, NOT JUST THE FIRST (#3727 roborev job 435). This
+    # used to take `head -1`, so a payload carrying DUPLICATE max_cache_size fields whose first
+    # one happened to equal the first reading would compare EQUAL and thereby ESTABLISH server
+    # attribution from an ambiguous payload — a cap reported as IN FORCE on the strength of a
+    # field nothing had disambiguated. The differential is the whole basis for claiming
+    # attribution, so both of its legs answer to the same grammar the first reading does.
+    local hits2 n2
+    hits2=$(printf '%s\n' "$json2" | grep -o '"max_cache_size":[0-9][0-9]*' 2>/dev/null)
+    n2=$(printf '%s\n' "$hits2" | grep -c '^' 2>/dev/null)
+    if [ -z "$hits2" ]; then
       SCC_RUN_CAP=""
       SCC_RUN_WHY="the attribution differential could not be taken (the second reading carries no max_cache_size), so it cannot be established whether the cap is a RUNNING server's or this client's own"
       return 1
+    elif [ "$n2" != 1 ]; then
+      SCC_RUN_CAP=""
+      SCC_RUN_WHY="the attribution differential could not be taken (the second reading carries $n2 max_cache_size fields, so which one to compare is ambiguous), so it cannot be established whether the cap is a RUNNING server's or this client's own"
+      return 1
     fi
+    cap2=${hits2##*:}
     if [ "$cap2" != "$SCC_RUN_CAP" ]; then
       # The reading MOVED with the client's env, so the client is answering: nothing is running.
       # AFFIRMATIVE, not a catch-all — this is the one branch that KNOWS there is no server, which
