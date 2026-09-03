@@ -15,13 +15,27 @@
 #      executes for a spawned lane either;
 #   6. therefore NOTHING ON DISK distinguishes a working box from a broken one — the
 #      distinguishing state is a long-running process's start environment.
-# Hence two independent verdicts, and hence this suite drives them independently.
+# Hence two independent observation lines, and hence this suite drives them independently.
+#
+# AND NEITHER LINE CERTIFIES ANYTHING (#3733, lead ruling). They were CERTIFYING verdicts
+# whose passing state was `VERIFIED`; three consecutive independent reviews each found a
+# NEW High of one shape — the probe cannot observe the property its verdict named — so the
+# DESIGN changed instead of the code being carved a fourth time. Section 34 is where that
+# lives, as an INVARIANT rather than case by case, because a rename can be undone one state
+# at a time while an invariant reds on the first reintroduction.
 #
 # WHAT IT ASSERTS BEYOND "THE CODE IS THERE":
-#   * every verdict is REACHABLE and correctly labeled, by planting its condition;
-#   * an INHERITED CLAUDE_CODE_OAUTH_TOKEN can never produce a positive verdict about a
+#   * every state is REACHABLE and correctly labeled, by planting its condition;
+#   * an INHERITED CLAUDE_CODE_OAUTH_TOKEN can never produce a positive observation about a
 #     PERSISTED one (#3414's shipped defect, one subject over) — the scrub case;
-#   * rc alone and output alone are each INSUFFICIENT for VERIFIED (both halves required);
+#   * rc alone and output alone are each INSUFFICIENT for PROBE-ANSWERED (both halves
+#     required);
+#   * NO input yields a state named VERIFIED, every report declares its own scope, and the
+#     BEST- and WORST-looking inputs share an exit status — so nothing downstream can gate
+#     on one (section 34);
+#   * an alternate credential in the probe's environment is REPORTED, and the line does not
+#     claim the persisted value authenticated (section 35);
+#   * all five documented limitations are FINDABLE at their code sites (section 36);
 #   * NO run prints a token-shaped value anywhere on stdout/stderr.
 #
 # HOST SAFETY, STATED AS WHAT IS ACTUALLY TRUE. Nothing here reads the real
