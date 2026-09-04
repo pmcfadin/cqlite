@@ -8,8 +8,8 @@
 //! Issue #3723 set out to make a wrong-width fixed-width element FATAL and to
 //! validate it even when the filter is about to drop it. Issue **#3811** landed
 //! first and enforced the width property one layer down, inside
-//! `raw_value::parse_value_from_raw_bytes`, as the pre-existing TOLERATED
-//! `Error::Corruption` class rather than a new fatal variant — so #3723's own
+//! `raw_value::parse_value_from_raw_bytes`, reporting the pre-existing
+//! `Error::Corruption` rather than adding a new fatal variant — so #3723's own
 //! mechanism was superseded and removed. What survives here is the
 //! CHARACTERISATION half: these cases pin TODAY's filtering behaviour exactly,
 //! including the part that is still wrong, so any change of disposition is
@@ -26,10 +26,24 @@
 //! filtered rather than refused, purely because some OTHER cell shadows it or
 //! its own TTL has expired.
 //!
-//! And even on the LIVE path the refusal does not reach a read: it is
-//! `Error::Corruption`, which the complex-column caller in `row_data.rs`
-//! absorbs into a partial-row `break`. So the disposition is TOLERATED in both
-//! directions today.
+//! The LIVE path is NOT part of that gap, and the tolerance is therefore
+//! ONE-DIRECTIONAL — the DROPPED path only. A wrong-width element that is not
+//! dropped surfaces `Error::Corruption`, and `row_data.rs`'s complex-column
+//! caller PROPAGATES it: the `Err(e)` arm of its `parse_complex_column_inner`
+//! match returns `column_decode_failure(...)` under #3721's
+//! `column_decode_error` policy. The partial-row `break` that used to absorb it
+//! there was removed by #3721.
+//!
+//! That paragraph is a claim about a DIFFERENT file, and nothing mechanically
+//! couples it to that file: re-read the `Err(e)` arm before trusting it. It has
+//! already decayed once — it asserted the absorbing `break` for as long as it
+//! took #3721 to land — which is the drifted-mechanism class this module exists
+//! to make visible in a diff.
+//!
+//! What the cases below assert about either direction is deliberately narrower
+//! than that: every assertion is taken at `parse_complex_column_inner`, so they
+//! pin `Err` on the live path and `Ok` on the dropped one and say nothing about
+//! what the row-level caller ultimately reports.
 //!
 //! Oracle for why that is wrong — pinned `cassandra-5.0.8`, never CQLite's own
 //! prior output:
