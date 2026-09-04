@@ -817,4 +817,52 @@ mod tests {
              frozen value would be a different bug: {populated:?}"
         );
     }
+
+    /// roborev: a scale-only (4-byte) decimal has no unscaled BigInteger and must
+    /// be refused.
+    ///
+    /// The citation is `DecimalSerializer.deserialize`, not `validate`, and the two
+    /// DISAGREE: `validate` permits "0 or at least 4 bytes", so Cassandra accepts
+    /// 4 bytes at validation — but `deserialize` builds
+    /// `new BigInteger(toArray(value, 4, size - 4))`, a ZERO-LENGTH array at size 4,
+    /// and the JDK throws `NumberFormatException("Zero length BigInteger")`. No
+    /// value exists, so refusing matches what governs a read.
+    #[test]
+    fn a_scale_only_decimal_is_refused_and_five_bytes_is_accepted() {
+        let p = parser();
+
+        // 4 bytes = scale only, no unscaled magnitude.
+        let scale_only = 2i32.to_be_bytes().to_vec();
+        assert!(
+            p.parse_udt_field_value(&scale_only, &CqlType::Decimal, 0)
+                .is_err(),
+            "a 4-byte scale-only decimal has no unscaled BigInteger and must be \
+             refused, not decoded to an empty magnitude"
+        );
+
+        // 5 bytes = scale + one unscaled byte: the SMALLEST legal non-empty decimal.
+        // This is the control — a check that refused the boundary would reject data
+        // Cassandra reads fine.
+        let mut minimal = 2i32.to_be_bytes().to_vec();
+        minimal.push(0x07);
+        match p.parse_udt_field_value(&minimal, &CqlType::Decimal, 0) {
+            Ok(Value::Decimal { scale, unscaled }) => {
+                assert_eq!(scale, 2, "scale");
+                assert_eq!(unscaled, vec![0x07], "unscaled magnitude");
+            }
+            other => panic!("the smallest legal decimal (5 bytes) must decode: {other:?}"),
+        }
+
+        // And the fixture's real value still decodes: 123.45 = scale 2 / 0x3039.
+        let mut real = 2i32.to_be_bytes().to_vec();
+        real.extend_from_slice(&[0x30, 0x39]);
+        assert_eq!(
+            p.parse_udt_field_value(&real, &CqlType::Decimal, 0)
+                .expect("123.45 must decode"),
+            Value::Decimal {
+                scale: 2,
+                unscaled: vec![0x30, 0x39]
+            }
+        );
+    }
 }

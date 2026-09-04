@@ -222,10 +222,28 @@ impl V5CompressedLegacyParser {
             // ---------------------------------------------------------------
             // Numeric with a prefix: `[i32 BE scale][unscaled BigInteger]`.
             // ---------------------------------------------------------------
+            // `[i32 BE scale][unscaled BigInteger]`, and the unscaled part must be
+            // AT LEAST ONE BYTE — so a non-empty decimal is 5+ bytes, never exactly
+            // 4.
+            //
+            // The authority here is `deserialize`, NOT `validate`, and the two
+            // disagree — which is worth writing down because it looks like an
+            // over-strict check otherwise. `DecimalSerializer.validate` permits
+            // "0 or at least 4 bytes", so Cassandra ACCEPTS a 4-byte decimal at
+            // validation; but `deserialize` computes
+            // `new BigInteger(accessor.toArray(value, 4, size - 4))`, which for
+            // size 4 is a ZERO-LENGTH array, and the JDK's `BigInteger(byte[])`
+            // throws `NumberFormatException("Zero length BigInteger")` on that. So
+            // no value exists for a scale-only decimal and Cassandra cannot read
+            // one; refusing it matches the behaviour that governs a READ.
+            //
+            // A 0-length field is a different case entirely and never reaches here:
+            // it is null, handled by `udt_field_empty` (roborev; #3722).
             CqlType::Decimal => {
-                if data.len() < 4 {
+                if data.len() < 5 {
                     return Err(Error::corruption(format!(
-                        "Decimal field requires at least 4 bytes for the scale, got {}",
+                        "Decimal field requires 4 bytes of scale plus at least 1 \
+                         unscaled byte (5 minimum), got {}",
                         data.len()
                     )));
                 }
