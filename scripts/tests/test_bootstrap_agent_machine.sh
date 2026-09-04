@@ -36,6 +36,24 @@ $1"; }
 # instead, by the base_warns assertion in block 7p.
 skip() { printf 'skip - %s\n' "$1"; SKIPS=$((SKIPS + 1)); }
 
+# --- SECTION 5d IS OPTED OUT SUITE-WIDE, AND THE PUSH SANDBOXES OPT BACK IN (#3749) -
+# 5d rehashes the SHARED git object store with a full `git fsck`. Against the REAL
+# checkout that is 13-24s per invocation warm and 47-80s cold or under concurrent gates
+# (two independent measurement sets on this fleet's 366M store, git 2.43.0), and this
+# suite drives bootstrap dozens of times — roughly 8 to 45 MINUTES added to a MANDATORY
+# gate component for a property most of these cases are not about. (An earlier revision
+# quoted a single "19.83s" from one warm run; a single number was what made that claim
+# wrong.) So the env opt-out is set ONCE here.
+#
+# THE OPT-OUT IS A [warn] BY DESIGN (it can never buy a vacuous green), so it would push
+# `base_warns` from 1 to 2 and silently turn block 7p's three end-to-end assertions into
+# skips — the exact drift the comments in that block record happening FOUR times. Hence
+# `run_push` sets it back to 0 and `mk_push_repo` stages the sweep script: in those
+# sandboxes the subject is the sandbox's OWN tiny repo, so the sweep runs in milliseconds,
+# reports VERIFIED, and contributes ZERO warnings. The dedicated 5d cases below then
+# get a real end-to-end verdict instead of a mocked one.
+export CQLITE_BOOTSTRAP_SKIP_OBJECT_STORE_SWEEP=1
+
 # --- THIS SUITE IS NOT RUNNABLE AS ROOT, AND SAYS SO UP FRONT (#3414 roborev round 7) --
 # OUR OWN REGRESSION, and the second time these three cases have been silently disabled.
 # Round 5 made the test seam refuse under EUID 0 (finding S, a real privilege-escalation
@@ -1643,6 +1661,13 @@ mk_push_repo() {
   # running. Staging it here plus the pinned `sudo` shim in mk_push_bin makes 5b contribute
   # ZERO warnings deterministically — on a pinned host and an unpinned one alike.
   cp "$SCRIPT_DIR/../agent-gate.sh" "$dir/scripts/agent-gate.sh"
+  # Staged for SECTION 5d (#3749), for the same reason agent-gate.sh is staged above:
+  # without it the section reports `object-store: UNMEASURED (no
+  # scripts/check-object-store-integrity.sh ...)` — one extra [warn] in EVERY case built on
+  # this helper, which is precisely how base_warns has drifted before. With it staged, the
+  # subject is this sandbox's own (objectless, therefore trivially intact) repo, so the
+  # section contributes ZERO warnings deterministically.
+  cp "$SCRIPT_DIR/../check-object-store-integrity.sh" "$dir/scripts/check-object-store-integrity.sh"
   # A PER-SANDBOX system env file carrying the pin, pointed at by run_push. Section 5b's
   # VERIFIED now requires BOTH the file line and a session that sees it (roborev round 2),
   # so without this the sandboxes would take the new NOT-SYSTEM-WIDE branch, base_warns
@@ -1776,7 +1801,7 @@ run_push() {
   push_rc=0
   push_out=$(PATH="$bin:$PATH" HOME="$repo/.home" CARGO_HOME="$repo/.home/.cargo" \
     CQLITE_BOOTSTRAP_ENV_FILE="$repo/etc-environment" \
-    CQLITE_CLAUDE_AUTH_ENV_FILE="$repo/etc-environment" CQLITE_BOOTSTRAP_SKIP_CLAUDE_AUTH=0 \
+    CQLITE_CLAUDE_AUTH_ENV_FILE="$repo/etc-environment" CQLITE_BOOTSTRAP_SKIP_CLAUDE_AUTH=0 CQLITE_BOOTSTRAP_SKIP_OBJECT_STORE_SWEEP=0 \
     GIT_CONFIG_GLOBAL="$gc" GIT_CONFIG_NOSYSTEM=1 CLAIM_MACHINE=push-probe-test \
     CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t' \
     CQLITE_PROJECT_OWNER=pmcfadin CQLITE_PROJECT_NUMBER=1 \
@@ -1855,6 +1880,306 @@ if [ "$base_warns" -eq 1 ]; then
 else
   skip "push: absolute-green assertions need an otherwise-clean sandbox (baseline=$base_warns warnings)"
   printf '%s' "$out7pd" | grep -F '[warn]' | sed 's/\x1b\[[0-9;]*m//g' | head -5
+fi
+
+# ---------------------------------------------------------------------------
+# 7o. SECTION 5d — the SHARED OBJECT-STORE INTEGRITY SWEEP (issue #3749)
+#
+# Four cases, all end-to-end through the real section: the affirmative verdict, the
+# opt-out, a PLANTED CORRUPTION, and the unmeasurable case. The sweep script's own
+# behaviour is covered by scripts/tests/test_check_object_store_integrity.sh; what these
+# assert is BOOTSTRAP's half — that VERIFIED is the only [ok], that CORRUPT is loud, and
+# that neither the opt-out nor an unmeasured host can buy a green.
+# ---------------------------------------------------------------------------
+# 7o-a. THE AFFIRMATIVE VERDICT, on the same run block 7p just proved goes fully green.
+#   Its zero-warning baseline is the second half of the assertion: a section that reported
+#   ok while warning would have shown up as base_warns drift.
+if printf '%s' "$out7pa" | grep -q '\[ok\].*object-store: VERIFIED' &&
+  printf '%s' "$out7pa" | grep -q 'point-in-time'; then
+  ok "obj: a clean store is reported VERIFIED as [ok], declared as a POINT-IN-TIME sweep (not a per-read guarantee)"
+else
+  bad "obj: section 5d did not report VERIFIED as [ok] on a clean sandbox"
+  push_plain "$out7pa" | grep -F 'object-store:' | head -4
+fi
+
+# 7o-b. THE OPT-OUT: loud, non-passing, and it names WHICH spelling was used. One property
+#   apart from 7o-a — the flag.
+run_push "$repo7pa" "$bin7pa" "$gc7pa" --skip-push-probe --skip-object-store-sweep --strict
+if printf '%s' "$push_out" | grep -q '\[warn\].*object-store: OPT-OUT (--skip-object-store-sweep)' &&
+  ! push_green "$push_out" && [ "$push_rc" -ne 0 ]; then
+  ok "obj: --skip-object-store-sweep is a LOUD [warn] OPT-OUT that withholds green and fails --strict"
+else
+  bad "obj: the opt-out was silent, reported ok, or bought a green (rc=$push_rc)"
+  push_plain "$push_out" | grep -F 'object-store:' | head -4
+fi
+
+# 7o-c. PLANTED CORRUPTION, one property apart from a clean sandbox: a hash-path mismatch
+#   in the sandbox's OWN object store. The construction is ASSERTED with git before
+#   bootstrap runs — `cat-file` must hand back the WRONG content without complaint — so
+#   this cannot pass against an intact fixture, and the [warn] cannot be attributed to
+#   some unrelated breakage.
+repo7oc="$tmp/repo7oc"; mk_push_repo "$repo7oc" "file://$bare7pa"
+(
+  cd "$repo7oc" || exit 1
+  printf 'aaa\n' >objf1
+  printf 'bbb\n' >objf2
+  git -c user.email=t@t -c user.name=t add objf1 objf2 >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -q -m obj-fixture >/dev/null 2>&1
+) || true
+oc_a=$(git -C "$repo7oc" rev-parse HEAD:objf1 2>/dev/null)
+oc_b=$(git -C "$repo7oc" rev-parse HEAD:objf2 2>/dev/null)
+if [ -n "$oc_a" ] && [ -n "$oc_b" ] && [ "$oc_a" != "$oc_b" ]; then
+  oc_pa="$repo7oc/.git/objects/${oc_a:0:2}/${oc_a:2}"
+  oc_pb="$repo7oc/.git/objects/${oc_b:0:2}/${oc_b:2}"
+  chmod 644 "$oc_pa" 2>/dev/null
+  cp "$oc_pb" "$oc_pa" 2>/dev/null
+fi
+if [ -n "$oc_a" ] && [ "$(git -C "$repo7oc" cat-file -p "$oc_a" 2>/dev/null)" = "bbb" ]; then
+  ok "obj: the plant IS the defect described (git returns objf2's content for objf1's sha, no error)"
+else
+  bad "obj: the corruption plant did not take — the case below would prove nothing"
+fi
+run_push "$repo7oc" "$bin7pa" "$gc7pa" --skip-push-probe --strict
+if printf '%s' "$push_out" | grep -q '\[warn\].*object-store: CORRUPT' &&
+  ! push_green "$push_out" && [ "$push_rc" -ne 0 ]; then
+  ok "obj: a corrupt shared store is reported CORRUPT, withholds green and fails --strict"
+else
+  bad "obj: a corrupt store did not produce a CORRUPT verdict (rc=$push_rc)"
+  push_plain "$push_out" | grep -F 'object-store:' | head -4
+fi
+if [ -n "$oc_a" ] && printf '%s' "$push_out" | grep -q "object $oc_a"; then
+  ok "obj: the CORRUPT report NAMES the affected object id ($oc_a)"
+else
+  bad "obj: the affected object id is not named in the bootstrap output"
+fi
+if printf '%s' "$push_out" | grep -q 'REMEDY' &&
+  printf '%s' "$push_out" | grep -q 'SHARED OBJECT STORE CORRUPT'; then
+  ok "obj: CORRUPT carries a remedy AND is restated in the summary banner (one [warn] among many is missable)"
+else
+  bad "obj: CORRUPT lacks a remedy line or the summary restatement"
+fi
+
+# 7o-d2. A SWEEP THAT RAN AND REPRODUCIBLY DIED IS ITS OWN [warn], AND IT CLAIMS NO CAUSE
+#   (#3749 review round 10, item 1). Real commit-object corruption makes `git fsck` DIE
+#   (exit 128 on git 2.43.0) rather than report a bit, and that status used to land on
+#   UNMEASURED — which in the sibling supervisor means "write a fresh throttle stamp and
+#   keep spawning workers". A false negative on genuine corruption of the shared store.
+#
+#   A REAL FIXTURE, one property apart from 7o-c above: the damaged object is the COMMIT
+#   the ref names rather than a blob. The construction is asserted with git — the type,
+#   and the fatal status — because a case that could not tell a broken fixture from a
+#   broken subject proves nothing.
+repo7od2="$tmp/repo7od2"; mk_push_repo "$repo7od2" "file://$bare7pa"
+# The sandbox repo is deliberately OBJECTLESS (see mk_push_repo), so the fixture makes its
+# own commit first — exactly as 7o-c above does.
+(
+  cd "$repo7od2" || exit 1
+  printf 'aaa\n' >objf3
+  git -c user.email=t@t -c user.name=t add objf3 >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -q -m obj-fatal-fixture >/dev/null 2>&1
+) || true
+od2_sha=$(git -C "$repo7od2" rev-parse HEAD 2>/dev/null)
+od2_type=$(git -C "$repo7od2" cat-file -t "$od2_sha" 2>/dev/null)
+if [ -n "$od2_sha" ]; then
+  od2_p="$repo7od2/.git/objects/${od2_sha:0:2}/${od2_sha:2}"
+  chmod u+w "$od2_p" 2>/dev/null
+  printf 'not zlib at all, definitely garbage bytes' >"$od2_p" 2>/dev/null
+fi
+od2_rc=0
+git -C "$repo7od2" fsck --no-progress --no-dangling >/dev/null 2>&1 || od2_rc=$?
+if [ "$od2_type" = commit ] && [ "$od2_rc" -ge 128 ]; then
+  ok "obj: the plant IS the shape described (the COMMIT object the ref names is unparseable, and git exits $od2_rc — a fatal death, not a bitmask status)"
+else
+  bad "obj: type='$od2_type' fsck-status=$od2_rc — not the fatal-death shape; the case below would prove nothing"
+fi
+run_push "$repo7od2" "$bin7pa" "$gc7pa" --skip-push-probe --strict
+if printf '%s' "$push_out" | grep -q '\[warn\].*object-store: UNSWEEPABLE' &&
+  ! push_green "$push_out" && [ "$push_rc" -ne 0 ]; then
+  ok "obj: a store whose sweep RUNS and reproducibly DIES is reported UNSWEEPABLE, withholds green and fails --strict — never the permissive 'not measured' that let every lane carry on"
+else
+  bad "obj: a fatal sweep did not produce an UNSWEEPABLE verdict (rc=$push_rc)"
+  push_plain "$push_out" | grep -F 'object-store:' | head -4
+fi
+# IT MUST NOT CLAIM DAMAGE, and it must be restated in the banner under its OWN wording:
+# nothing here established a cause, so the CORRUPT text and its measured re-clone remedy
+# would be a confidently-wrong instruction (round 9's class).
+if printf '%s' "$push_out" | grep -q 'COULD NOT BE SWEPT' &&
+  ! printf '%s' "$push_out" | grep -q '\[warn\].*object-store: CORRUPT' &&
+  ! printf '%s' "$push_out" | grep -q 'SHARED OBJECT STORE CORRUPT'; then
+  ok "obj: UNSWEEPABLE is restated in the summary banner under its own wording and claims NO damage — a different fact from CORRUPT, with a different remedy"
+else
+  bad "obj: UNSWEEPABLE either lacks its banner restatement or claims damage nothing established"
+  push_plain "$push_out" | grep -F 'OBJECT STORE' | head -4
+fi
+# 7o-d3. THE SAME [warn] FOR THE VERDICT'S OTHER CAUSE, ON A STORE WITH NO DAMAGE AT ALL
+#   (#3749 review round 11, item 1). UNSWEEPABLE now also fires when the store's OWN
+#   configuration sets `fsck.*` keys, which can suppress or downgrade the very diagnostics
+#   the sweep reads its verdict from — so no walk is run and no affirmative verdict is
+#   obtainable. ONE PROPERTY from 7o-d2: the fixture is UNDAMAGED, and the refusal comes
+#   from the config alone.
+#
+#   WHY IT IS WORTH A CASE HERE when the branch is shared: this reader's text is derived
+#   from the TOKEN, and until this round it named the fatal mechanism ("git fsck RAN and
+#   reproducibly DIED") as though it were the only cause. A fixture that reaches the same
+#   branch by the other route is what stops that text drifting back.
+repo7od3="$tmp/repo7od3"; mk_push_repo "$repo7od3" "file://$bare7pa"
+(
+  cd "$repo7od3" || exit 1
+  printf 'bbb\n' >objf4
+  git -c user.email=t@t -c user.name=t add objf4 >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -q -m obj-policy-fixture >/dev/null 2>&1
+  git config fsck.missingEmail ignore >/dev/null 2>&1
+) || true
+od3_rc=0
+git -C "$repo7od3" fsck --no-progress --no-dangling >/dev/null 2>&1 || od3_rc=$?
+od3_key=$(git -C "$repo7od3" config --get fsck.missingEmail 2>/dev/null)
+if [ "$od3_rc" -eq 0 ] && [ "$od3_key" = ignore ]; then
+  ok "obj: the plant IS the shape described (an UNDAMAGED store — plain fsck exits 0 — whose own config sets an fsck.* key)"
+else
+  bad "obj: fsck-status=$od3_rc key='$od3_key' — not the undamaged-with-policy shape; the case below would prove nothing"
+fi
+run_push "$repo7od3" "$bin7pa" "$gc7pa" --skip-push-probe --strict
+if printf '%s' "$push_out" | grep -q '\[warn\].*object-store: UNSWEEPABLE' &&
+  printf '%s' "$push_out" | grep -q 'COULD NOT BE SWEPT' &&
+  ! push_green "$push_out" && [ "$push_rc" -ne 0 ]; then
+  ok "obj: a store whose own fsck policy could suppress the diagnostics reaches the SAME stopping verdict, withholds green and fails --strict — the verdict is about what can be measured, not about what was found"
+else
+  bad "obj: an fsck-policy refusal did not produce an UNSWEEPABLE verdict (rc=$push_rc)"
+  push_plain "$push_out" | grep -F 'object-store:' | head -4
+fi
+# AND IT STILL CLAIMS NO DAMAGE — nothing was rehashed on this path either, so the damage
+# text and its measured repairs would be as wrong here as on the fatal path.
+if ! printf '%s' "$push_out" | grep -q '\[warn\].*object-store: CORRUPT' &&
+  ! printf '%s' "$push_out" | grep -q 'SHARED OBJECT STORE CORRUPT' &&
+  printf '%s' "$push_out" | grep -qi 'no damage was established'; then
+  ok "obj: the fsck-policy refusal claims NO damage and is not folded into the CORRUPT banner"
+else
+  bad "obj: the fsck-policy refusal claims damage nothing established, or lost its no-damage statement"
+  push_plain "$push_out" | grep -F 'OBJECT STORE' | head -4
+fi
+
+# 7o-e/f. THE TWO CHANNELS MUST AGREE BEFORE CORRUPT IS CLAIMED (#3749 review round 4,
+#   item 2). This reader used to accept `rc == 4 || verdict == CORRUPT` while its own
+#   comment asserted the conjunction, so an exit 4 with NO verdict line — or a stray
+#   `CORRUPT` line under any other status — produced the CORRUPT report here and, in the
+#   sibling supervisor, a persistent BOX-WIDE latch that halts every lane until an
+#   operator clears it by hand. An unrecognised or incomplete sweep must not be able to do
+#   that: a false latch is worse than one more iteration over a store whose damage, if
+#   real, the next sweep reproduces.
+#
+#   THE ARTIFACT IS SUBSTITUTED, not a variable set: the sandbox's own copy of the sweep
+#   script is replaced by a stub, because a test-only seam is one more thing a real
+#   invoker can set (CLAUDE.md #3312 corollary). Two arms, one property apart — WHICH of
+#   the two channels says CORRUPT.
+mk_sweep_stub() {
+  # mk_sweep_stub <sandbox> <verdict-or-NONE> <exit> [verdict-detail-line]
+  # The 4th argument is optional and exists for ONE property (#3749 review round 9, item
+  # 2): this section must QUOTE the sweep's operator remedy rather than restate it, and a
+  # planted token is the only way to measure a pass-through end to end.
+  local sandbox="$1" verdict="$2" rc="$3" detail="${4:-}" f="$1/scripts/check-object-store-integrity.sh"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'for a in "$@"; do [ "$a" = --print-store ] && exit 0; done\n'
+    printf 'printf "OBJECT-STORE: measured stub\\n"\n'
+    [ -z "$detail" ] || printf 'printf "OBJECT-STORE: verdict-detail %%s\\n" %s\n' "$(printf '%q' "$detail")"
+    [ "$verdict" = NONE ] || printf 'printf "OBJECT-STORE: verdict %s\\n"\n' "$verdict"
+    printf 'exit %s\n' "$rc"
+  } >"$f"
+  chmod +x "$f"
+}
+for _arm in "NONE:4:status-only" "CORRUPT:5:line-only"; do
+  # Parsed by expansion rather than `set --`: this is top-level script code, and `set --`
+  # would overwrite the suite's own positional parameters.
+  _av="${_arm%%:*}"
+  _rest="${_arm#*:}"
+  _ar="${_rest%%:*}"
+  _an="${_rest#*:}"
+  repo7oe="$tmp/repo7oe-$_an"; mk_push_repo "$repo7oe" "file://$bare7pa"
+  mk_sweep_stub "$repo7oe" "$_av" "$_ar"
+  _src=0
+  _sout=$(bash "$repo7oe/scripts/check-object-store-integrity.sh" --repo "$repo7oe" 2>&1) || _src=$?
+  _sline=no
+  printf '%s' "$_sout" | grep -q 'OBJECT-STORE: verdict ' && _sline=yes
+  _swant=yes
+  [ "$_av" = NONE ] && _swant=no
+  if [ "$_src" -eq "$_ar" ] && [ "$_sline" = "$_swant" ]; then
+    ok "obj: the inconsistency plant IS the shape described ($_an: the stub exits $_ar, verdict line present=$_sline)"
+  else
+    bad "obj: the inconsistency plant ($_an) exited $_src with verdict-line=$_sline (wanted $_ar/$_swant) — the case below would prove nothing"
+  fi
+  run_push "$repo7oe" "$bin7pa" "$gc7pa" --skip-push-probe --strict
+  if printf '%s' "$push_out" | grep -q '\[warn\].*object-store: UNMEASURED — INCONSISTENT' &&
+    ! printf '%s' "$push_out" | grep -q '\[warn\].*object-store: CORRUPT' &&
+    ! printf '%s' "$push_out" | grep -q 'SHARED OBJECT STORE CORRUPT' &&
+    ! push_green "$push_out"; then
+    ok "obj: $_an — exactly ONE channel saying CORRUPT is reported UNMEASURED/INCONSISTENT, never the CORRUPT verdict, and never certified"
+  else
+    bad "obj: $_an — an inconsistent sweep result was not handled as UNMEASURED/INCONSISTENT (rc=$push_rc)"
+    push_plain "$push_out" | grep -F 'object-store:' | head -4
+  fi
+done
+
+# 7o-d. UNMEASURABLE: the sweep script absent from the checkout. Must be a [warn] naming
+#   what could not be measured — never an [ok], because an [ok] is what --strict reads.
+repo7od="$tmp/repo7od"; mk_push_repo "$repo7od" "file://$bare7pa"
+rm -f "$repo7od/scripts/check-object-store-integrity.sh"
+if [ ! -e "$repo7od/scripts/check-object-store-integrity.sh" ]; then
+  ok "obj: the unmeasurable plant IS the property described (the sweep script is absent from that checkout)"
+else
+  bad "obj: could not remove the sweep script from the sandbox"
+fi
+run_push "$repo7od" "$bin7pa" "$gc7pa" --skip-push-probe --strict
+if printf '%s' "$push_out" | grep -q '\[warn\].*object-store: UNMEASURED' &&
+  ! printf '%s' "$push_out" | grep -q '\[ok\].*object-store:' &&
+  ! push_green "$push_out"; then
+  ok "obj: an unmeasurable store is a [warn] UNMEASURED with no [ok] anywhere — unmeasured is never certified"
+else
+  bad "obj: an unmeasurable store did not warn, or produced an [ok]"
+  push_plain "$push_out" | grep -F 'object-store:' | head -4
+fi
+
+# 7o-e. THE REMEDY IS QUOTED FROM THE SWEEP, NOT RESTATED HERE (#3749 review round 9,
+#   item 2). This section used to carry its own copy of the repair instruction, and it
+#   said `git fetch --force origin` — measured to repair NOTHING (`--force` only permits
+#   non-fast-forward REF updates; it re-downloads no objects), so an operator who followed
+#   it exactly kept the corruption and believed it fixed. The measurements live beside the
+#   text in check-object-store-integrity.sh; what this case pins is that ONE correction
+#   there reaches the operator here.
+#
+#   NOT A STRING TAUTOLOGY: it asserts nothing about what the remedy SAYS. It plants a
+#   token this file could not otherwise produce and requires the section to have passed it
+#   through, so deleting the quote — or writing a fresh paraphrase — reds this case
+#   whatever the paraphrase says.
+repo7oe2="$tmp/repo7oe-remedy"; mk_push_repo "$repo7oe2" "file://$bare7pa"
+_rtok="REMEDY: PLANTED-REPAIR-TEXT-7oe-$$"
+mk_sweep_stub "$repo7oe2" CORRUPT 4 "$_rtok"
+_rout=$(bash "$repo7oe2/scripts/check-object-store-integrity.sh" --repo "$repo7oe2" 2>&1 || true)
+if printf '%s' "$_rout" | grep -qF "OBJECT-STORE: verdict-detail $_rtok"; then
+  ok "obj: the remedy plant IS the shape described (the stub sweep prints that verdict-detail line)"
+else
+  bad "obj: the remedy plant did not take — the case below would prove nothing (stub said: $(printf '%s' "$_rout" | tr '\n' ';'))"
+fi
+run_push "$repo7oe2" "$bin7pa" "$gc7pa" --skip-push-probe --strict
+if printf '%s' "$push_out" | grep -qF "$_rtok" &&
+  printf '%s' "$push_out" | grep -q '\[warn\].*object-store: CORRUPT' &&
+  ! push_green "$push_out"; then
+  ok "obj: the CORRUPT report QUOTES the sweep's own operator remedy verbatim — the guidance is owned by the file that measured it"
+else
+  bad "obj: the sweep's remedy text did not reach the bootstrap output"
+  push_plain "$push_out" | grep -F 'object-store:' | head -4
+fi
+# THE FALLBACK, one property apart: a sweep that prints NO guidance (an older or stubbed
+# script). A stopped box must never be left with no remedy at all.
+repo7oe3="$tmp/repo7oe-remedy-none"; mk_push_repo "$repo7oe3" "file://$bare7pa"
+mk_sweep_stub "$repo7oe3" CORRUPT 4
+run_push "$repo7oe3" "$bin7pa" "$gc7pa" --skip-push-probe --strict
+if printf '%s' "$push_out" | grep -q 'REMEDY' &&
+  printf '%s' "$push_out" | grep -q 'check-object-store-integrity.sh' &&
+  ! push_green "$push_out"; then
+  ok "obj: with nothing to quote, CORRUPT still carries a remedy naming the sweep to run by hand — the diagnostic fails closed"
+else
+  bad "obj: a CORRUPT verdict with no quotable guidance left the operator with no remedy"
+  push_plain "$push_out" | grep -F 'object-store:' | head -4
 fi
 
 # 7p-b. PUSH FAILS, credential-shaped. The bare repo's pre-receive hook speaks the
@@ -2084,7 +2409,17 @@ if push_plain "$out7pk" | grep -q "git ls-remote .* refs/claims/smoke-"; then
   ok "push: the quoted verdict reaches the operator with the ls-remote check for the possibly-stranded ref"
 else
   bad "push: cleanup-unverified verdict lost its stray-ref guidance in transit"
-  push_plain "$out7pk" | grep -E 'CLAIM:|git-push' | head -3
+  # THE DIAGNOSTIC CARRIES THE rc AND A COUNT, NOT JUST THE FIRST THREE MATCHES (#3749
+  # review round 4). This pair has failed twice on this branch and the captured evidence
+  # could not tell the candidate causes apart: a different reason code, a probe KILLED at
+  # its 60s bound under load (which prints the UNMEASURED verdict and no CLAIM line at
+  # all), or a sandbox missing claim.sh. All three look the same when only the first three
+  # matching lines are shown — one observed log printed a single line and left it
+  # ambiguous whether a CLAIM verdict was quoted at ALL, which is precisely the fact that
+  # separates them. So: the probe's exit status, how many CLAIM lines reached the output,
+  # and then the lines.
+  printf '  rc=%s claim-lines=%s\n' "$rc7pk" "$(push_plain "$out7pk" | grep -cE 'CLAIM: ' || true)"
+  push_plain "$out7pk" | grep -E 'CLAIM: |git-push:' | head -6 | sed 's/^/    /'
 fi
 # NO CAUSE MAY BE ATTRIBUTED (#3369 review). One nonzero exit cannot tell a deletion
 # policy from a network drop from a post-readback auth failure, so neither claim.sh nor

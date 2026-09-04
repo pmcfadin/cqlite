@@ -367,14 +367,36 @@ case "$nb_next" in
   'npm run build'*) ;;
   *) b11+=("node-bindings-recorder-is-not-immediately-before-npm-run-build(next-line:'${nb_next:-<none>}')") ;;
 esac
-# …and every `indirect:` class declared must have SOME recording site naming its component,
-# derived from the class table rather than a list typed here.
-for _ic in python-bindings node-bindings; do
-  case "$(_fm_component_class "$_ic")" in
-    indirect:*)
-      grep -qE "(_fm_observe_driver $_ic|_fm_note_maturin_rc \"\\\$name\")" "$GATE" \
-        || b11+=("$_ic-declares-a-driver-but-records-no-reach") ;;
+# …and every `indirect:` class declared must have SOME reach-recording site attributable
+# to it. THE SET IS DERIVED FROM COMPONENTS + the extracted class table, never typed here,
+# so a NEW indirect component is covered with no edit to this file — which is what the
+# comment above this loop used to CLAIM while iterating a two-name literal (#1700: a third
+# indirect component joined and was structurally unchecked).
+#
+# ATTRIBUTION, not merely existence: a recorder call somewhere in an 18k-line script says
+# nothing about THIS component, so the site must either NAME the component
+# (`_fm_observe_driver <name>`) or live INSIDE that component's own runner
+# (`run_<name-with-underscores>`), whose body is extracted here. Existence-anywhere is the
+# permissive answer, and a guard that accepts it green-lights the next unrecorded driver.
+_b11_runner_body() { # <component> -> the body of run_<component>, or nothing
+  awk -v fn="run_$(printf '%s' "$1" | tr '-' '_')" '
+    $0 ~ "^" fn "\\(\\) \\{" { inside = 1; next }
+    inside && /^}/ { exit }
+    inside { print }
+  ' "$GATE"
+}
+for _ic in "${comps_arr[@]}"; do
+  case "$(_fm_component_class "$_ic" 2>/dev/null)" in
+    indirect:*) ;;
+    *) continue ;;
   esac
+  if grep -qE "_fm_observe_driver $_ic" "$GATE"; then
+    continue
+  fi
+  if _b11_runner_body "$_ic" | grep -qE '_fm_note_driver "\$name"|_fm_note_maturin_rc "\$name"'; then
+    continue
+  fi
+  b11+=("$_ic-declares-a-driver-but-records-no-reach-attributable-to-it")
 done
 if [ "${#b11[@]}" -eq 0 ]; then
   ok "B11: every indirect component records its driver's reach from an explicit signal (rc 0/2/3 for both maturin callers; an in-body recorder immediately before node's napi build)"

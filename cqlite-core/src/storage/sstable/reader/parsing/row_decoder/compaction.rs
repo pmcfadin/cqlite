@@ -1,154 +1,18 @@
 use super::*;
+// The discriminated data-row policy outcome (issue #3809). Imported EXPLICITLY
+// rather than through `row_decoder/mod.rs`'s glob because that file sits at the
+// campsite-rule size limit and this costs no line there.
+use super::partition_driver::DataRowOutcome;
+
+// Issue #3809 (campsite #1116): the per-element row BUILDER, split out of this
+// file so the clustering-identity invariant and its tests have room. A child
+// module rather than a sibling so this split costs no line in `row_decoder/mod.rs`
+// (that file is itself at its size limit); `build_compaction_row_data` is
+// `pub(super)` purely so its former host still calls it.
+#[path = "compaction_row_build.rs"]
+mod compaction_row_build;
 
 impl V5CompressedLegacyParser {
-    /// Build a [`CompactionRow`] from a parsed row's pieces (epic #899).
-    ///
-    /// `cells` is the collapsed column→value map (simple columns plus the
-    /// collapsed `Value` for each complex column); `cell_meta` carries per-simple
-    /// -cell write timestamps / TTLs; `complex` carries the per-element capture
-    /// for the complex columns. The complex columns are split out of `cells` (the
-    /// collapsed complex `Value` is dropped in favour of the per-element cells).
-    ///
-    /// A row tombstone produces [`CompactionRowData::Tombstone`]; an empty row
-    /// (no cells, no tombstone) produces an empty `Live`.
-    fn build_compaction_row_data(
-        &self,
-        cells: RowCells,
-        cell_meta: Option<HashMap<String, CellWriteMetadata>>,
-        complex: CompactionComplexColumns,
-        row_header_opt: &Option<RowHeader>,
-        row_ts: i64,
-        schema: &TableSchema,
-    ) -> crate::storage::sstable::reader::compaction_row::CompactionRowData {
-        use crate::storage::sstable::reader::compaction_row::{
-            CompactionRowData, ComplexColumn, SimpleCell,
-        };
-
-        // Issue #932: a row with `HAS_DELETION` may ALSO carry surviving cells
-        // (cells written strictly after the row deletion). The row deletion is
-        // captured here either as the coexisting `row_deletion` on a `Live` row
-        // (when data cells survive) or as a pure `Tombstone` (when only the
-        // deletion remains). The decision is made AFTER building the cell sets so
-        // we can tell whether any NON-clustering data cell survived.
-        let row_deletion: Option<(i64, i32)> = row_header_opt
-            .as_ref()
-            .filter(|h| h.is_row_tombstone())
-            .map(|h| {
-                (
-                    h.row_tombstone_deletion_time(),
-                    // localDeletionTime in SECONDS (GC-grace clock). Preserve the
-                    // far-future [2^31, 2^32) encoding via wrapping `as u32 as i32`.
-                    h.local_deletion_time.unwrap_or(0),
-                )
-            });
-
-        // Build complex columns (sorted by name for deterministic output, mirroring
-        // the collapsed-value path's column ordering).
-        let mut complex_cols: Vec<ComplexColumn> = complex
-            .into_iter()
-            .map(
-                |(column, (complex_deletion, elements, collapsed_value))| ComplexColumn {
-                    column,
-                    complex_deletion,
-                    elements,
-                    collapsed_value,
-                },
-            )
-            .collect();
-        complex_cols.sort_by(|a, b| a.column.cmp(&b.column));
-
-        // Simple cells are every collapsed cell whose column is NOT a complex
-        // column. Per-cell timestamp / ttl / local-deletion-time come from
-        // `cell_meta` when present, else inherit the row timestamp.
-        let complex_names: std::collections::HashSet<&str> =
-            complex_cols.iter().map(|c| c.column.as_str()).collect();
-
-        let mut simple_cells: Vec<SimpleCell> = cells
-            .into_iter()
-            .filter(|(name, _)| !complex_names.contains(name.as_ref()))
-            .map(|(column, value)| {
-                let (timestamp, ttl, local_deletion_time) =
-                    match cell_meta.as_ref().and_then(|m| m.get(column.as_ref())) {
-                        Some(meta) => {
-                            let ttl = meta.expiration.as_ref().map(|e| e.ttl_seconds as u32);
-                            let ldt = meta
-                                .expiration
-                                .as_ref()
-                                .map(|e| e.expires_at_seconds as u32 as i32);
-                            (meta.write_timestamp_micros, ttl, ldt)
-                        }
-                        None => (row_ts, None, None),
-                    };
-                SimpleCell {
-                    column: column.to_string(),
-                    value,
-                    timestamp,
-                    ttl,
-                    local_deletion_time,
-                }
-            })
-            .collect();
-        simple_cells.sort_by(|a, b| a.column.cmp(&b.column));
-
-        // Issue #932: a row deletion either COEXISTS with surviving data cells
-        // (kept as `Live { row_deletion: Some(..) }`) or — when no NON-primary-key
-        // cell and no complex element survives — is a pure row tombstone (kept as
-        // `Tombstone`, preserving the #912 clustering-prefix capture). The earlier
-        // code always took the `Tombstone` branch, DROPPING surviving cells and
-        // letting older cells of other columns resurrect in a partial compaction.
-        if let Some((deletion_time, local_deletion_time)) = row_deletion {
-            let primary_key: std::collections::HashSet<&str> = schema
-                .partition_keys
-                .iter()
-                .map(|k| k.name.as_str())
-                .chain(schema.clustering_keys.iter().map(|c| c.name.as_str()))
-                .collect();
-            let has_simple_data = simple_cells
-                .iter()
-                .any(|c| !primary_key.contains(c.column.as_str()));
-            let has_complex_data = complex_cols
-                .iter()
-                .any(|c| !c.elements.is_empty() || c.complex_deletion.is_some());
-
-            if !has_simple_data && !has_complex_data {
-                // Pure row tombstone: rebuild the clustering prefix in schema
-                // order from the surfaced clustering pseudo-cells (#912). A
-                // missing clustering column falls back to the `None` bucket.
-                let mut clustering: Vec<(String, Value)> =
-                    Vec::with_capacity(schema.clustering_keys.len());
-                for ck in &schema.clustering_keys {
-                    match simple_cells.iter().find(|c| c.column == ck.name) {
-                        Some(c) => clustering.push((ck.name.clone(), c.value.clone())),
-                        None => {
-                            clustering.clear();
-                            break;
-                        }
-                    }
-                }
-                return CompactionRowData::Tombstone {
-                    deletion_time,
-                    local_deletion_time,
-                    clustering,
-                };
-            }
-        }
-
-        // Issue #2374/#2789: carry the row-marker liveness so the READ path can
-        // hide a row whose only content is an expired liveness marker + already-
-        // tombstoned cells (carry-only; the write path ignores it).
-        let row_liveness = row_header_opt
-            .as_ref()
-            .map(|h| h.row_liveness())
-            .unwrap_or_default();
-
-        CompactionRowData::Live {
-            simple: simple_cells,
-            complex: complex_cols,
-            row_deletion,
-            row_liveness,
-        }
-    }
-
     /// Parse all partitions in a decompressed block into per-element
     /// [`CompactionRow`]s (epic #899, compaction-only). Thin Vec wrapper over
     /// [`Self::parse_block_for_compaction_emit`].
@@ -394,6 +258,10 @@ impl V5CompressedLegacyParser {
     /// remaining per-row `CellWriteMetadata` allocation (spec R3), and on the
     /// merge arm it was pure waste — the structural verdict is byte-identical
     /// because consumption never depended on the discarded rows.
+    ///
+    /// It also runs no row-BUILD invariant, so a partition this reports fully
+    /// consumed may still be REFUSED by the real per-element read — see the
+    /// DIVERGENCE note on [`CompactionPolicy::structure_only`] (issue #3809).
     pub fn parse_one_partition_structure_only(
         &self,
         data: &[u8],
@@ -434,6 +302,16 @@ pub(super) struct CompactionPolicy<'a> {
     /// the last thing allocating a per-row metadata `HashMap` on a path whose whole
     /// point is not to (spec R3). Consumption/`ParseStep` are byte-driven and
     /// therefore identical in both modes, so the structural verdict is unchanged.
+    ///
+    /// DIVERGENCE, stated because it is not nothing (issue #3809): building no row
+    /// also runs none of the row-BUILD invariants, so the #3809 row-deletion
+    /// clustering-identity refusal
+    /// (`CompactionRowData::require_tombstone_clustering_identity`) cannot fire
+    /// here. `partition_slice_fully_consumed` can therefore report a partition
+    /// structurally fine that the real per-element compaction read of the same
+    /// bytes REFUSES. That is deliberate — the coverage check's question is byte
+    /// framing, and answering it must not depend on row semantics — but the two
+    /// verdicts are not interchangeable.
     structure_only: bool,
     partition_key: RowKey,
     /// Issue #933: in-flight range-tombstone start bound
@@ -585,9 +463,27 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
             .parse_range_tombstone_marker_with_ldt(data, offset, schema)
         {
             Ok(v) => v,
-            // Truncated marker body at a chunk boundary (or corrupt at the
-            // final chunk): terminate exactly as the prior skip path did.
-            Err(_) => return MarkerOutcome::Stop,
+            // Issue #3721 (roborev job 16): a marker PARSE failure is NOT
+            // automatically a chunk boundary, and answering `Stop` here made it
+            // one — on the FINAL chunk the driver converted `Stop` into a
+            // SUCCESSFUL partition completion, so a corrupt or truncated marker
+            // was dropped and this policy's rows were still WRITTEN. That
+            // resurrects every row the tombstone shadowed, durably, on disk: the
+            // same harm as the unrecognised bound kind below (#3808), one arm up.
+            //
+            // The cause is PRESERVED in the outcome (never discarded and
+            // re-synthesised — the parser's own message is what makes the
+            // condition actionable) and the FINAL-vs-non-final decision is left
+            // to the driver, the only holder of the chunking state: a non-final
+            // chunk may simply have cut the marker body in half, which is the one
+            // explanation a refill can fix. Nothing here inspects bytes to guess
+            // whether more data exists (issue #28).
+            Err(cause) => {
+                let partition = format!("key 0x{}", hex::encode(self.partition_key.as_bytes()));
+                return MarkerOutcome::Unparseable(range_marker_error::range_marker_unparseable(
+                    cause, &partition, offset,
+                ));
+            }
         };
 
         // ClusteringPrefix.Kind ordinals:
@@ -640,9 +536,33 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
                 let new_start = self.make_bound(schema, bound_values, bound_kind == 2, true);
                 self.pending_range_start = Some((new_start, new_mfda, new_ldt));
             }
-            _ => {
-                // Unknown bound kind: skip it rather than mis-parse the partition
-                // (the offset already advanced past the marker).
+            unknown => {
+                // Issue #3808: an unrecognised `ClusteringPrefix.Kind` ordinal is
+                // NOT skippable here, and skipping it was the worst instance of the
+                // #3721 swallow: this policy's output is WRITTEN, so omitting an
+                // unrepresentable deletion marker resurrects the rows it shadowed
+                // durably, on disk. `row_framing` returns `bound_kind` unvalidated,
+                // so an arbitrary byte reaches this match; giving it a permissive
+                // default meaning is the byte-pattern inference issue #28 forbids.
+                // Both sibling readers of the same byte already refuse
+                // (`partition_shadow::feed_range_marker`, delta-scan
+                // `block_emit`), so this arm was the lone fail-open.
+                //
+                // The marker PARSED — `next_offset` is bound and the partition body
+                // continues there — so this is `Refused`, never the `Unparseable`
+                // a marker PARSE failure earns above (which has no resume point and
+                // so is still refillable on a non-final chunk). Both are terminal on
+                // the final chunk; neither can be silently completed.
+                let partition = format!("key 0x{}", hex::encode(self.partition_key.as_bytes()));
+                return MarkerOutcome::Refused(range_marker_error::range_marker_refused(
+                    Error::corruption(format!(
+                        "compaction: unknown range tombstone bound kind {unknown} — cannot \
+                         represent faithfully (no-heuristics mandate, issue #28)"
+                    )),
+                    &partition,
+                    offset,
+                    next_offset,
+                ));
             }
         }
         MarkerOutcome::Advanced(next_offset)
@@ -656,7 +576,7 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         resolution: &RowColumnResolution,
         pending: &mut Vec<Self::Row>,
-    ) -> Result<Option<usize>> {
+    ) -> DataRowOutcome {
         use crate::storage::sstable::reader::compaction_row::CompactionRow;
         // Structure-only (issue #3058): advance over the row WITHOUT allocating a
         // per-cell metadata map, a complex-element map or a `CompactionRow` — the
@@ -673,13 +593,24 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
                 None,
             ) {
                 Ok((_cells, _meta, _hdr, next_offset, _is_static, _complex)) => {
-                    Ok(Some(next_offset))
+                    DataRowOutcome::Decoded(next_offset)
                 }
-                // Issue #3782: preserve the decode error. The structural coverage
-                // check that drives this arm passes `at_final_chunk = false`, so the
-                // driver still answers `NeedMore` (⇒ "not fully consumed") there;
-                // the error only becomes terminal where no more bytes can arrive.
-                Err(e) => Err(e),
+                // Issue #3782: preserve the decode error — the POLICY never decides
+                // tolerance, the driver does. The structural coverage check that drives
+                // this arm passes `at_final_chunk = false`, so the driver still answers
+                // `NeedMore` (⇒ "not fully consumed") there; the error only becomes
+                // terminal where no more bytes can arrive.
+                //
+                // Issue #3721, on why folding it into `Ok(None)` was wrong here
+                // specifically: this path exists to measure byte CONSUMPTION, and a row
+                // whose column decode failed has an UNKNOWN consumption (the failing
+                // parser returns no offset). Answering `Ok(None)` reported "end of
+                // partition" for a row that is really there — the same silent truncation,
+                // one level up.
+                //
+                // Structure-only builds NO row, so it raises no #3809 refusal —
+                // see the DIVERGENCE note on `structure_only`.
+                Err(e) => DataRowOutcome::DecodeFailed(e),
             };
         }
         // Compaction mode: capture per-column complex elements and request
@@ -696,33 +627,54 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
             // Compaction is a physical consumer: no read-side shadowing.
             None,
         ) {
-            Ok((cells, cell_meta, row_header_opt, next_offset, _is_static, _complex_meta)) => {
+            Ok((cells, cell_meta, row_header_opt, next_offset, is_static, _complex_meta)) => {
                 // Issue #932 (K1): the ONE row-write-timestamp coexistence rule.
                 let row_ts = row_write_timestamp(&row_header_opt);
 
                 // Issue #1074: emit BOTH static and clustering rows as their own
                 // `CompactionRow` (static-ness is decided by the schema in the
                 // writer, not by on-disk folding).
-                let row_data = self.parser.build_compaction_row_data(
+                //
+                // Issue #3809: `is_static` is threaded in because it is what makes
+                // an EMPTY tombstone clustering legitimate. A build failure is
+                // reported as `Refused`, NEVER as `DecodeFailed`: the decode above
+                // already returned `Ok`, so the row is fully framed and no refill
+                // can change the verdict — routing it through #3782's
+                // driver-decides-tolerance channel would convert it into a
+                // straddle/refill request on every `BufferExtent::Window` entry
+                // point and silently truncate the read.
+                let row_data = match self.parser.build_compaction_row_data(
                     cells,
                     cell_meta,
                     complex_capture,
                     &row_header_opt,
                     row_ts,
                     schema,
-                );
+                    is_static,
+                ) {
+                    Ok(row_data) => row_data,
+                    Err(e) => return DataRowOutcome::Refused(e),
+                };
 
                 pending.push(CompactionRow {
                     key: self.partition_key.clone(),
                     row_timestamp: row_ts,
                     row_data,
                 });
-                Ok(Some(next_offset))
+                DataRowOutcome::Decoded(next_offset)
             }
             // Issue #3782: preserve the decode error. Swallowing it here is what
             // made compaction emit MORE rows than the source while losing real
-            // partitions — a loss it would then write back to disk.
-            Err(e) => Err(e),
+            // partitions — a loss it would then write back to disk. This is the
+            // BYTES half; the row-BUILD refusal above is the semantic half (#3809).
+            //
+            // Issue #3721 names the arm: this is the compaction / elements-out read,
+            // the caller of `parse_row_data_with_offset_impl` with
+            // `compaction_complex_out = Some(..)`. Handing back `Ok(None)` for a
+            // column that failed to decode let compaction WRITE OUT a row missing
+            // that column and every later one — the read defect turned into durable
+            // data loss.
+            Err(e) => DataRowOutcome::DecodeFailed(e),
         }
     }
 }

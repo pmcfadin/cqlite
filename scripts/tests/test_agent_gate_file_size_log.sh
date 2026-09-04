@@ -81,6 +81,9 @@ unset AGENT_GATE_PARENT_RUN_ID
 unset GATE_BASE_OVERRIDE
 unset CQLITE_ALLOW_FILE_GROWTH
 export CQLITE_GATE_DISABLE_CAP=1
+# #3755: this test's subject is not disk. Pin the admission bar to 0 so a box that
+# happens to be low on space cannot red a component whose subject is something else.
+export CQLITE_GATE_MIN_FREE_GB=0
 
 PASS=0
 FAIL=0

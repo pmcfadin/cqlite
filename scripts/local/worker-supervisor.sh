@@ -184,6 +184,71 @@ PROMPT_SIGNATURE_RE="${PROMPT_SIGNATURE_RE:-AskUserQuestion|Do you want to|waiti
 LEFTOVER_HOLD_MAX="${LEFTOVER_HOLD_MAX:-3}"
 BUILD_HOLD_MAX="${BUILD_HOLD_MAX:-12}"
 UNVERIFIED_MAX="${UNVERIFIED_MAX:-2}"
+# issue #3749: the SHARED git object store on this box (every lane here is a worktree of
+# ONE `.git`) is rehashed with `git fsck` on a THROTTLED cadence from the per-iteration
+# preflight path. This is the recurring half of #3749's control; the one-shot half is
+# scripts/bootstrap-agent-machine.sh section 5d. Both go through the SAME script,
+# scripts/check-object-store-integrity.sh — a second implementation would be a second
+# place for the verdict to drift.
+#
+# OBJ_SWEEP_INTERVAL_HOURS — minimum hours between sweeps, throttled by a stamp file.
+#   MEASURED COST IS A RANGE WITH CONDITIONS, NOT A NUMBER (#3749 review): on this
+#   fleet's shared store (366M, git 2.43.0) two independent measurement sets give 13-24s
+#   warm and 47-80s cold or under concurrent gates — the sweep is I/O-bound, so cache
+#   state and box load dominate. An earlier revision of this comment quoted a single
+#   "19.83s" from one warm run and was wrong by 2.5-4x. A box runs up to 4 lanes, so an
+#   UNTHROTTLED sweep would burn ~50-320s of every iteration cycle across the box for a
+#   property that changes on the timescale of disk faults, not minutes.
+#   A value of 0 DISABLES the sweep (same `<=0 disables` semantics as BUILD_HOLD_MAX),
+#   which is ANNOUNCED ONCE in the journal rather than left silent: a disabled hygiene
+#   probe must be visible in the log, not inferred from the absence of its lines. It buys
+#   no green anywhere — this sweep certifies nothing, it only refuses to run workers over
+#   a store known to be damaged.
+# OBJ_SWEEP_TIMEOUT_SECS — passed through as the sweep's own `--timeout`, and it is the
+#   bound on EACH of the sweep's walks, of which there can be MAX_SWEEP_WALKS (declared
+#   in the sweep script: the sweep, the reproduction discriminator when walk 1 is not
+#   clean, and the `--no-reflogs` reachability-cause discriminator when both walks report
+#   ERROR_REACHABLE). Worst-case wall time is therefore MAX_SWEEP_WALKS x this value. The
+#   bound exists to stop a HANG, not to police duration, and a bound that expires on a
+#   healthy-but-busy box yields UNMEASURED noise nobody acts on.
+#   THE SUPERVISOR'S DEFAULT IS THE SCRIPT'S BOUND DIVIDED BY MAX_SWEEP_WALKS (200 vs
+#   600/3), AND THAT IS THIS CALLER'S LATENCY BUDGET RATHER THAN A DIFFERENT VIEW OF THE
+#   STORE (#3749 review round 3, item 3; re-derived in round 4 when the third walk was
+#   added). The sweep runs inside a CHILD process, so nothing here can check the stop
+#   file or the wall-clock budget BETWEEN its walks; the only lever this caller has is
+#   how long they may take in total. At 200 the worst case stays 600s — one walk at the
+#   script's own bound — which is the property round 3 fixed and round 4 must not undo by
+#   adding a walk. 200s is ~2.5x the observed COLD worst case (47-80s on this fleet's
+#   366M store) and ~12x the warm one; the third walk is the CHEAPEST of the three
+#   (measured 12.5s vs 24s on the live store, because excluding the reflogs is what it
+#   does). The other caller, scripts/bootstrap-agent-machine.sh, keeps 600: machine
+#   onboarding is a one-shot step where nobody is waiting on a stop file.
+#   THE TRADE, STATED: this is stop latency bought with UNMEASURED headroom. A walk that
+#   runs past 200s under load pages UNMEASURED here where it would have completed at 300.
+#   Nothing on this fleet has been observed above 80s, and nothing monitors it either.
+#   STRICTLY POSITIVE: the sweep rejects 0 as a usage error, which would turn the probe
+#   into a permanent UNMEASURED — a silently self-disabling bound, the shape
+#   validate_numeric_knobs exists for.
+# OBJ_SWEEP_CLAIM_POLL_SECS — the poll granularity of the WAIT a claim loser does on a peer
+#   lane's in-flight sweep (#3749 review round 12). NOT a bound: the bound is the claim's own
+#   DERIVED staleness threshold. This value is how often the waiting lane re-reads the STOP
+#   latch, the throttle stamp, the claim and the stop file, so it is also that lane's stop
+#   latency for as long as it waits — and, unlike the sweep itself, a wait IS interruptible
+#   because it runs in this shell rather than in the sweep's child process. STRICTLY POSITIVE
+#   for the opposite reason to the knobs above: a 0 does not disable the wait, it converts it
+#   into a busy spin over the whole derived budget.
+OBJ_SWEEP_INTERVAL_HOURS="${OBJ_SWEEP_INTERVAL_HOURS:-6}"
+OBJ_SWEEP_TIMEOUT_SECS="${OBJ_SWEEP_TIMEOUT_SECS:-200}"
+# POLL GRANULARITY for waiting on a PEER lane's in-flight sweep (#3749 review round 12) —
+# NOT a bound. The bound is derived (obj_sweep_claim_stale_secs); this is only how often the
+# waiting lane re-reads the latch, the throttle stamp, the claim and the stop file while it
+# waits, so it is also this lane's STOP LATENCY during a wait. STRICTLY POSITIVE: a 0 would
+# turn a bounded wait into a busy spin for up to the whole derived budget.
+OBJ_SWEEP_CLAIM_POLL_SECS="${OBJ_SWEEP_CLAIM_POLL_SECS:-5}"
+# Empty => derived per SHARED STORE in obj_sweep_stamp_path (below), so lanes sharing one
+# object store share one throttle. It also names the STOP latch (`<stamp>.STOP`), so
+# pinning it relocates both files together.
+OBJ_SWEEP_STAMP="${OBJ_SWEEP_STAMP:-}"
 # issue #2670 (roborev 1813): before escalating a non-merged PR state to a
 # mismatch, re-read gh a few times to absorb read-after-merge lag. Env-tunable so
 # the tooling tests set the wait to 0 (nothing sleeps in the suite).
@@ -2645,7 +2710,18 @@ supervisor_lock_take() {
     if ! rm -f -- "$marker" 2>/dev/null; then
       log "$(supervisor_one_line "startup: could not remove our own ownership marker $(supervisor_shell_quote "$marker") after acquiring the lock. Harmless to this run — the lock is held and its release removes the directory wholesale — but a non-recursive manual clear of that lock would refuse until the marker is gone (#3601).")"
     fi
-    trap 'supervisor_lock_release' EXIT
+    # THE CLAIM IS RELEASED BEFORE THE LOCK, AND IT IS REGISTERED HERE RATHER THAN AT ITS
+    # CREATE SITE (#3749 review round 5, item 2; CLAUDE.md's roborev-job-282 ruling that a
+    # fix which ADDS a resource inherits that resource's lifetime bugs). The trap is
+    # installed before any sweep can run, so the handler exists before the resource does,
+    # and the resource's identity travels in OBJ_SWEEP_CLAIM_OWNED — empty until a claim is
+    # created, cleared the moment it is released, so this is a no-op on every other path.
+    # KNOWN AND NOT CLOSED HERE: this file installs no INT/TERM handlers, so a SIGNALLED
+    # supervisor releases neither its claim nor its lock. For the claim that is a delay and
+    # not a wedge — a peer recovers it once it ages past the staleness bound — and adding
+    # signal handlers to this process is a change to the LOCK's lifetime too, which is
+    # #3683's subject and not this one's.
+    trap 'obj_sweep_claim_release "$OBJ_SWEEP_CLAIM_OWNED"; supervisor_lock_release' EXIT
     return 0
   fi
   SUPERVISOR_LOCK_TAKE_CAUSE="$pub"
@@ -3177,6 +3253,1474 @@ acquire_lock() {
 }
 
 # ---------------------------------------------------------------------------
+# Shared-object-store integrity sweep (issue #3749) — THROTTLED, and deliberately
+# NOT a hold reason.
+#
+# WHY IT IS HERE. Every lane on this box reads ONE shared `.git`, and git does not
+# rehash an object against the id it was asked for on an ordinary read. A corrupt
+# shared store can therefore change ANY gate's verdict on this box, so no worker
+# should be allowed to certify against it. #3749's owner ruling scopes this to
+# ACCIDENTAL corruption (bit rot, a torn pack write, a SIGKILLed gc); DELIBERATE
+# peer forgery is invoker-class and out of model per the #3312 triage rule.
+#
+# WHY `CORRUPT` STOPS THE LOOP RATHER THAN HOLDING IT. Corruption is
+# NON-SELF-CLEARING: a HOLD-and-repoll loop would spin until the wall-clock budget
+# taking no useful action, which is precisely the latch #2670 bounded the leftover
+# families to avoid. So it uses the established "stop loudly" idiom — notify high,
+# journal, finalize_exit with its own reason — the same shape as leftover-worker
+# exceeding LEFTOVER_HOLD_MAX.
+# ---------------------------------------------------------------------------
+OBJ_SWEEP_ANNOUNCED=0
+OBJ_SWEEP_UNMEASURED_NOTIFIED=0
+OBJ_SWEEP_NOSTAMP_NOTIFIED=0
+OBJ_SWEEP_CLAIM_NOTIFIED=0
+# The in-progress claim this process currently owns, or empty. Read by the EXIT trap, so
+# it is assigned before anything can create a claim (`set -u`), and it is what makes the
+# claim a REGISTERED resource rather than one whose lifetime nobody owns (CLAUDE.md's
+# roborev-job-282 ruling: a fix that adds a resource inherits that resource's lifetime
+# bugs, so register it the moment it exists and clear it the moment it is released).
+OBJ_SWEEP_CLAIM_OWNED=""
+# THE OWNERSHIP TOKEN THIS PROCESS WRITES INTO ITS OWN CLAIM (#3749 review round 11, item
+# 2). It is what makes a release ASK before deleting: the path alone cannot tell this
+# lane's claim from a SUCCESSOR's claim at the same path. Set once, on the line after the
+# claim is created; empty until then, and an empty token can never match anything.
+OBJ_SWEEP_CLAIM_TOKEN=""
+OBJ_SWEEP_CLAIM_STATE=""
+# THE OUTCOME OF THE LAST WAIT ON A PEER'S IN-FLIGHT SWEEP (#3749 review round 12). A GLOBAL
+# and not stdout, for the same reason OBJ_SWEEP_CLAIM_STATE is one, plus a sharper one: the
+# wait STOPS THIS LANE from inside (obj_sweep_stop_if_latched -> finalize_exit) the moment a
+# peer latches the box, and a `$(...)` command substitution would confine that exit to a
+# SUBSHELL — the wait would appear to return normally and the lane would carry on to spawn a
+# worker on a box it had just seen condemned. That is the defect this wait exists to close,
+# reintroduced by the plumbing.
+OBJ_SWEEP_CLAIM_WAIT_STATE=""
+OBJ_SWEEP_CLAIM_WAIT_UNMEASURED_NOTIFIED=0
+# SLACK on the claim-staleness bound: what a sweep spends OUTSIDE its bounded fsck walks —
+# process startup, the `--print-store` resolution, output capture, and the notify/journal
+# writes. It is additive to a DERIVED product (see obj_sweep_claim_stale_secs) rather than
+# a bound in its own right, which is why it is a small constant and not a measurement.
+# ENV-OVERRIDABLE SINCE #3749 REVIEW ROUND 12, AND THE REASON IS TESTABILITY, STATED HERE SO
+# IT IS NOT MISREAD AS AN OPERATOR TUNING KNOB. Round 12 made a claim LOSER wait out this
+# derived bound before giving up, so the "a peer holds a claim that never completes" state
+# now costs a real wait — and with a hard-coded 60s slack the shortest such wait expressible
+# in a test was ~61s, which is a minute of pure sleeping inside a suite that must stay fast.
+# The bound itself is still DERIVED (walks x per-walk + slack) and this term is still additive
+# slack rather than a bound in its own right; 0 is a legitimate value (no slack) and is
+# therefore validated in the NON-NEGATIVE group, not the strictly-positive one, with the trade
+# that a sweep whose overhead lands outside its walks could be taken over just as it finishes.
+OBJ_SWEEP_CLAIM_SLACK_SECS="${OBJ_SWEEP_CLAIM_SLACK_SECS:-60}"
+
+# obj_sweep_stamp_path <sweep-script> — the THROTTLE stamp: WHEN this box last SPENT a
+# sweep. Keyed on the SHARED OBJECT STORE, not on the lane, so four lanes of one box
+# share one cadence instead of sweeping four times.
+#
+# IT HOLDS A TIMESTAMP AND NOTHING ELSE, AND THAT IS THE DESIGN, NOT AN OMISSION (#3749
+# review round 2, BLOCKER 1). The CORRUPT verdict lives in a SEPARATE, CREATE-ONLY file
+# — see obj_sweep_set_latch below for the reasoning. A timestamp is a cell it is
+# HARMLESS to move backwards: the worst a losing writer can do is buy the box one extra
+# sweep. A VERDICT is not, which is why it is not kept here.
+#
+# THE STORE IS RESOLVED BY THE SWEEP SCRIPT ITSELF (`--print-store`), NOT BY A `git`
+# CALL IN THIS FILE, AND THAT IS THE REVIEW'S OTHER CORRECTION (BLOCKER 2). This
+# function used to run a BARE `git -C "$REPO_ROOT" rev-parse --git-common-dir`,
+# inheriting the caller's environment, while the sweep it keys runs EVERY git call under
+# `env -i` + one allowlist. An inherited GIT_DIR/GIT_COMMON_DIR therefore selected
+# ANOTHER repository's stamp — so the real store's sweep is throttled away, or its
+# verdict recorded under the wrong key. That is the same defect class the sweep had just
+# closed, at a site the same round left behind, which is CLAUDE.md's roborev-job-276
+# ruling verbatim ("the migrated object reads ran under a bare `env` … the round-13 hole
+# re-opened at the NEW sites, not a new route"), and its remedy is the same: ONE
+# resolver, in the file that owns the allowlist. A future git call cannot be added
+# un-isolated HERE because there is no git call here at all — the un-isolated shape is
+# unavailable rather than discouraged.
+#
+# THE DIRECTORY IS DERIVED, NOT TAKEN FROM THE CALLER. Both facts this pair of files
+# records — "this box swept recently" and "this box's shared store is damaged" — are
+# BOX-wide facts about a store every lane reads, so a per-lane `TMPDIR` would silently
+# make them per-lane: peers would keep their own cadence and, worse, never see a peer's
+# CORRUPT. `/tmp` when it is a writable directory, `${TMPDIR:-/tmp}` only as a fallback
+# for a host without one. OBJ_SWEEP_STAMP still overrides both (the self-suite pins it
+# per case), and the latch follows it, so a pinned stamp relocates BOTH files together.
+#
+# AN UNRESOLVABLE STORE — OR A HOST WITH NO DIGEST TOOL — DOES NOT THROTTLE AT ALL: this
+# prints the empty string, and the caller then neither reads nor writes a stamp (and says
+# so once in the journal). The old fallback collapsed every unresolvable store on a box
+# onto ONE name, so two different checkouts shared a 6-hour throttle and one suppressed
+# the other's sweep: a MISSED sweep, not an extra one. Not throttling costs nothing in the
+# unresolvable case, because the sweep resolves the same store itself and fails FAST (a
+# sub-second UNMEASURED) in exactly those states; on a host with no digest tool it costs
+# an un-throttled sweep per iteration, which is loud and visible rather than a key two
+# stores can share.
+obj_sweep_stamp_path() {
+  local script="$1" line key dir
+  if [[ -n "$OBJ_SWEEP_STAMP" ]]; then
+    printf '%s' "$OBJ_SWEEP_STAMP"
+    return 0
+  fi
+  [[ -n "$script" && -r "$script" ]] || return 0
+  # `{ grep || true; }` for the reason spelled out in object_store_sweep below: this
+  # file runs under `set -euo pipefail`, so a grep that matches nothing (an older or
+  # stubbed sweep script that has no --print-store mode) would take the supervisor down.
+  line="$(bash "$script" --repo "$REPO_ROOT" --print-store 2>/dev/null |
+    { grep '^OBJECT-STORE: store-key ' || true; } | head -1)"
+  key="${line#OBJECT-STORE: store-key }"
+  # Both halves are required: an empty line yields an empty value, and a line the prefix
+  # did NOT strip is not the answer to this question.
+  [[ -n "$key" && "$key" != "$line" ]] || return 0
+  # THE KEY IS DERIVED BY THE SWEEP SCRIPT, FROM THE RAW CANONICAL PATH — NOT HERE, AND NOT
+  # FROM THE `store` LINE (#3749 review round 5, item 3). Round 4 made this key injective
+  # over the FLATTENING (`/tmp/a/b/objects` and `/tmp/a_b/objects` collapse to one name) by
+  # digesting the path — and digested the value from the resolver's `store` line, which is
+  # passed through that script's `sane()` display encoding. That encoding is LOSSY: a path
+  # holding a real newline and one holding the literal characters `\n` print identically, so
+  # two stores shared a throttle stamp AND a CORRUPT latch. Either direction is a defect —
+  # one store suppresses the other's sweep, or one store's damage stops every lane working
+  # on the other.
+  #
+  # So the identity now arrives already computed, from the only process that has the raw
+  # bytes, and there is no lossy value left here to digest. See `store_key` in
+  # check-object-store-integrity.sh for the tail/digest split and the three digest tools.
+  #
+  # IT IS STILL VALIDATED, because it is another process's stdout and not a fact: the shape
+  # is checked rather than assumed, and anything else yields the EMPTY path — no throttle,
+  # no latch, announced once by the caller — instead of a filename built out of whatever
+  # arrived. A host with no digest tool prints no key line at all and lands here too.
+  [[ "$key" =~ ^[A-Za-z0-9._-]{1,64}\.[0-9a-f]{16}$ ]] || return 0
+  dir="/tmp"
+  [[ -d "$dir" && -w "$dir" ]] || dir="${TMPDIR:-/tmp}"
+  printf '%s' "${dir}/cqlite-object-store-sweep.${key}.stamp"
+}
+
+# obj_sweep_latch_path <stamp-path> — the STOP latch that belongs to that stamp. Derived
+# from the stamp so the two always live in the same box-wide directory and a pinned
+# OBJ_SWEEP_STAMP relocates both.
+#
+# ONE FILE, ONE QUESTION: "is this box stopped?" — AND ITS NAME CLAIMS NO CAUSE (#3749
+# review round 10, item 1). It was `<stamp>.CORRUPT`, which was accurate while damage was
+# the only stopping verdict. It is not any more: a sweep that RAN and reproducibly DIED
+# without finishing also stops the box, and it establishes NO cause — so a file called
+# `.CORRUPT` would have been a confidently-wrong claim in the one artifact an operator
+# finds on disk, and every message naming that path would have sent them to the re-clone
+# remedy for a store nothing observed damage in. That is round 9's defect (a printed
+# remedy that does not match what was measured) arriving through a file name.
+#
+# WHICH verdict was recorded is therefore CONTENT, read affirmatively by
+# obj_sweep_latch_verdict, and it is safe as content for a reason the throttle stamp's
+# verdict field was not: this file is CREATE-ONLY, so its bytes are written once by the
+# lane that wins the create and no later writer can move them (see obj_sweep_set_latch).
+# TWO FILES WERE THE OTHER OPTION and were rejected: the latch question is answered in
+# four values already, and asking it of two paths multiplies those states (present-here,
+# present-there, both, one-unreadable) for no gain — a lane reading either must stop.
+obj_sweep_latch_path() {
+  local stamp="$1"
+  [[ -n "$stamp" ]] || return 0
+  printf '%s.STOP' "$stamp"
+}
+
+# obj_sweep_latch_state <latch-path> — the latch question, answered in FOUR values on
+# stdout: `present`, `absent`, `unknown` or `unkeyed`.
+#
+# WHY IT IS NOT A FILE PREDICATE (CLAUDE.md's standing rule, #3749 review round 5 item 1).
+# Every `test`/`[` file predicate is TWO-valued, so it has to collapse "cannot tell" onto
+# one of its two answers — and it always picks the permissive one. `[[ -e "$latch" ]]` is
+# FALSE both for a latch that is genuinely absent and for a latch this process cannot look
+# at, and reading the second as the first is a fail-open on the one file whose entire job
+# is to stop this box.
+#
+#   present — something is at that path. `-e || -L`, because a DANGLING symlink is
+#             `-e`-false and the fail-safe reading of "something is at the latch path" is
+#             LATCHED. Same idiom, same reason, as the supervisor lock's existence test.
+#   absent  — nothing is there AND the absence was ESTABLISHED THROUGH SEARCHABLE
+#             ANCESTORS, so it is a MEASUREMENT and not a failure to look.
+#             SEARCH (`-x`) and not READ (`-r`) is the right test, deliberately: `-e` on a
+#             named path needs only search permission on the parent, so a searchable but
+#             unlistable directory gives a TRUE answer and requiring `-r` as well would
+#             refuse a probe that was in fact valid — a false stop bought for nothing.
+#   unknown — a latch may be sitting there unread, because some directory on the way to it
+#             exists and this process cannot search it. NEVER folded into `absent`.
+#
+# AND `-d` IS ITSELF A TWO-VALUED PREDICATE, WHICH IS THE SAME TRAP ONE LEVEL UP (#3749
+# review round 10, item 2). The first version answered `absent` whenever `[[ ! -d "$dir" ]]`
+# — reading "the holding directory does not exist" off a test that is ALSO false when an
+# ANCESTOR of that directory is not searchable. On a box where `/tmp/x` is mode 000 and the
+# latch would live at `/tmp/x/y/stamp.STOP`, `-d /tmp/x/y` is false, and a latch that may
+# well be sitting there was reported as an affirmative `absent` — bypassing the fail-closed
+# `unknown` state built for exactly this. So absence is established by WALKING UP to the
+# deepest ancestor this process can actually stat, and it counts only when that ancestor is
+# SEARCHABLE: with a searchable ancestor, a stat of its child gives a true answer (and so
+# does each stat below it, by induction), so a component that fails `-d` beneath one
+# genuinely is not there. With an UNSEARCHABLE one, nothing below it is observable and the
+# answer is `unknown`.
+#   unkeyed — there is no latch PATH at all, because the box-wide key could not be
+#             derived. A different statement from all three above: it is not that the file
+#             is unreadable, it is that no file was ever named. The caller decides, and
+#             says why at the branch.
+obj_sweep_latch_state() {
+  local latch="$1" dir probe parent
+  [[ -n "$latch" ]] || {
+    printf 'unkeyed'
+    return 0
+  }
+  if [[ -e "$latch" || -L "$latch" ]]; then
+    printf 'present'
+    return 0
+  fi
+  dir="${latch%/*}"
+  # No slash at all: the holding directory is the CWD, which is what a bare `-e` would
+  # have resolved the name against.
+  [[ "$dir" == "$latch" ]] && dir="."
+  # A latch directly under the root: `${latch%/*}` strips to the empty string.
+  [[ -n "$dir" ]] || dir="/"
+  # Walk up to the deepest ancestor that can be STATTED. Each step strictly shortens the
+  # path or breaks, so this terminates; `.` is the implicit parent of a relative
+  # single-component path, and `/` is its own parent, which is where the walk ends.
+  probe="$dir"
+  while [[ ! -d "$probe" ]]; do
+    parent="${probe%/*}"
+    [[ -n "$parent" ]] || parent="/"
+    [[ "$parent" == "$probe" ]] && parent="."
+    [[ "$parent" != "$probe" ]] || break
+    probe="$parent"
+  done
+  # Not even the end of that walk is a statable directory: nothing was established, so the
+  # answer is `unknown` and not an absence.
+  if [[ ! -d "$probe" ]]; then
+    printf 'unknown'
+    return 0
+  fi
+  if [[ -x "$probe" ]]; then
+    printf 'absent'
+    return 0
+  fi
+  printf 'unknown'
+}
+
+# obj_sweep_latch_present <latch-path> — is the latch in place? The affirmative half of
+# obj_sweep_latch_state, kept as its own name because obj_sweep_set_latch asks exactly
+# this question (did the file end up there?) and nothing else.
+obj_sweep_latch_present() {
+  local latch="$1"
+  [[ "$(obj_sweep_latch_state "$latch")" == present ]]
+}
+
+# obj_sweep_write_stamp <path> — record WHEN this box last swept. One line, the epoch.
+#
+# `2>/dev/null` PRECEDES the output redirection deliberately: bash applies redirections
+# LEFT TO RIGHT, so with the old order a failed `>"$stamp"` printed bash's own
+# UNANCHORED error before the suppression took effect, in addition to the intended log
+# line.
+obj_sweep_write_stamp() {
+  local path="$1"
+  [[ -n "$path" ]] || return 0
+  printf '%s\n' "$(date +%s)" 2>/dev/null >"$path" ||
+    log "object-store sweep: could not write the throttle stamp $path — the sweep will re-run next iteration"
+  return 0
+}
+
+# obj_sweep_force_stamp_stale <path> — make the throttle stamp read as EXPIRED, so no lane
+# on this box can throttle past a CORRUPT verdict that could NOT be latched (#3749 review
+# round 9, item 1).
+#
+# THE DEFECT IT EXISTS FOR. The CORRUPT branch wrote the throttle stamp unconditionally,
+# INCLUDING on the path where the latch could not be persisted (a stamp that is writable
+# inside a directory that is not — so the create of `<stamp>.CORRUPT` fails while the
+# rewrite of `<stamp>` succeeds). The detecting lane stopped, correctly; its peers then
+# read that FRESH stamp, skipped their own sweep for the whole interval, and kept spawning
+# workers over a store already confirmed damaged. That is round 1's harm surviving in the
+# one branch that never got round 1's treatment: the latch is what a peer must not
+# throttle past, and where there is no latch the ONLY thing that stops a peer is a stamp
+# it reads as expired.
+#
+# WHY IT FORCES RATHER THAN MERELY LEAVING THE STAMP ALONE. Not writing would be enough
+# for the stamp THIS lane read as stale — but a peer whose own sweep started earlier can
+# finish DURING this one and write a fresh timestamp, and then "leave it alone" throttles
+# every lane for the full interval on that peer's stamp. `0` is an affirmative statement
+# that this box's last sweep is to be treated as expired, and obj_sweep_stamp_is_fresh
+# reads it as expired for any plausible clock.
+#
+# IT CANNOT MANUFACTURE A FALSE CLEAN. Its only effect is MORE sweeping: every lane
+# re-measures the store, reproduces the damage and stops on its own finding. The cost is a
+# repeated sweep per lane per iteration until an operator repairs the store, which is the
+# correct price for a corruption verdict that has nowhere durable to live.
+obj_sweep_force_stamp_stale() {
+  local path="$1"
+  [[ -n "$path" ]] || return 0
+  if printf '0\n' 2>/dev/null >"$path"; then
+    log "object-store: the throttle stamp $path has been FORCED STALE (epoch 0) because the CORRUPT verdict could not be latched — every lane on this box will re-sweep, reproduce the damage and stop on its own finding rather than throttling past it (#3749)."
+  else
+    log "object-store: the throttle stamp $path could NEITHER be advanced nor forced stale, so peer lanes will throttle on whatever it already holds. If it is fresh they will skip their own sweep for up to ${OBJ_SWEEP_INTERVAL_HOURS}h over a store found DAMAGED: stop every lane on this box by hand (#3749)."
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# THE IN-PROGRESS CLAIM: ONE SWEEP PER BOX AT A TIME (#3749 review round 5, item 2 —
+# raised as a Low in round 1, recorded as "not disposed of" in round 2, returned as a
+# Medium with a consequence attached in round 5).
+#
+# THE DEFECT. The throttle read and the sweep invocation are unsynchronised, and the stamp
+# is written at the END of a sweep — so when the interval expires EVERY lane on the box
+# reads the same stale stamp and starts its own full-store `git fsck`. On a four-lane box
+# that is four concurrent rehashes of one 366M store, and the consequence is not merely
+# CPU: the walks are I/O-bound (17-19s of user time inside an 80s wall), so contention
+# pushes them toward the per-walk bound — and an expired bound is UNMEASURED. That is a
+# CORRELATED loss of the measurement on every lane at once, which is the state this whole
+# feature exists to prevent.
+#
+# THE CLAIM IS A DIRECTORY CREATED WITH `mkdir`: the same kernel-arbitrated create-only
+# primitive as the CORRUPT latch, for the same reason — exactly one caller can win and
+# there is no read-modify-write to serialise. NOT `flock`: this file's single-instance lock
+# is an atomic mkdir + pid-liveness precisely because MACOS SHIPS NO `flock(1)` (see the
+# SUPERVISOR_LOCK header), and a second locking mechanism in one file is a second set of
+# failure modes.
+#
+# A LOSER *DOES* WAIT, AND THAT REVERSES THE ORIGINAL DESIGN (#3749 review round 12). It
+# used to skip its sweep and carry straight on to the spawn path after one latch read, on
+# the argument that "a peer is doing it right now" is a complete answer for a 6-hourly
+# hygiene probe. It is a complete answer about the SWEEP and it is not an answer about the
+# SPAWN: the loser knows a sweep is IN FLIGHT — that is precisely why its claim failed — and
+# the verdict of that sweep can be CORRUPT or UNSWEEPABLE, in which case the peer latches
+# the box. Skipping immediately spends the peer's whole sweep duration walking toward a
+# worker start on a box that is being condemned as it reads: MEASURED 13-80s of wall clock
+# on this fleet's 366M store, and up to MAX_SWEEP_WALKS x OBJ_SWEEP_TIMEOUT_SECS (600s at
+# the shipped defaults) by construction. So the loser waits for the peer, polling the latch,
+# the stamp and the claim — see obj_sweep_claim_wait for the bound and the four outcomes.
+# The cost is paid ONLY when a sweep is genuinely running, which the throttle makes at most
+# once per interval per lane.
+# ---------------------------------------------------------------------------
+
+# obj_sweep_claim_path <stamp-path> — the claim that belongs to that stamp. Derived from
+# the stamp, so it is keyed on the SHARED STORE (the resource being contended) and a pinned
+# OBJ_SWEEP_STAMP relocates the stamp, the latch and the claim together.
+obj_sweep_claim_path() {
+  local stamp="$1"
+  [[ -n "$stamp" ]] || return 0
+  printf '%s.sweeping' "$stamp"
+}
+
+# obj_sweep_claim_stale_secs <sweep-script> — the age at which a claim may be TAKEN OVER;
+# nothing (exit 1) when it cannot be derived.
+#
+# DERIVED, NOT A CONSTANT, BECAUSE THE HAZARD IS REAL IN BOTH DIRECTIONS. A lane killed
+# mid-sweep leaves its claim behind, and with no recovery no lane on the box ever sweeps
+# again — strictly worse than the herd. But a threshold shorter than a legitimate sweep
+# would let a peer take over a claim whose sweep is still running, which is the herd back
+# again with a stolen claim on top. So: one invocation spends at most MAX_SWEEP_WALKS
+# bounded walks — DECLARED in the sweep script and READ FROM IT here rather than re-typed
+# (round 4's lesson: a relation whose own constant is restated in its consumer is two magic
+# numbers wearing a relation's clothes) — and each walk is bounded by the
+# OBJ_SWEEP_TIMEOUT_SECS this supervisor passes. The earliest safe threshold is their
+# PRODUCT, plus OBJ_SWEEP_CLAIM_SLACK_SECS for what is not inside a walk. With the shipped
+# defaults that is 3 x 200 + 60 = 660s.
+#
+# IF IT CANNOT BE DERIVED, NO CLAIM IS TAKEN AT ALL and the caller announces it once. That
+# is the non-wedging direction: without a bound a stale claim could never be recovered, and
+# an unrecoverable claim is worse than the herd it prevents, so the mechanism degrades to
+# exactly the previous behaviour instead of inventing a number nobody measured.
+obj_sweep_claim_stale_secs() {
+  local script="$1" walks
+  [[ -n "$script" && -r "$script" ]] || return 1
+  walks="$({ grep -m1 '^MAX_SWEEP_WALKS=' "$script" || true; } 2>/dev/null)"
+  walks="${walks#MAX_SWEEP_WALKS=}"
+  walks="${walks%%[!0-9]*}"
+  [[ "$walks" =~ ^[0-9]+$ ]] || return 1
+  [[ "$walks" -ge 1 ]] || return 1
+  printf '%s' "$((walks * OBJ_SWEEP_TIMEOUT_SECS + OBJ_SWEEP_CLAIM_SLACK_SECS))"
+}
+
+# obj_sweep_claim_acquire <claim-dir> <stale-secs> — try to become the one lane sweeping
+# this store. Sets OBJ_SWEEP_CLAIM_STATE to exactly one of:
+#
+#   acquired    — this lane created the claim and owns it
+#   taken       — this lane RECOVERED a stale claim and owns it
+#   held        — a peer lane is sweeping; this lane must skip
+#   unavailable — no claim could be taken at all (no key, or no derivable recovery bound),
+#                 so the caller sweeps unserialised exactly as it did before this existed
+#
+# IT SETS GLOBALS RATHER THAN PRINTING, deliberately: a command substitution would run it
+# in a SUBSHELL, and OBJ_SWEEP_CLAIM_OWNED — the registration the EXIT trap reads — would
+# be lost with that subshell. The registration must happen in THIS shell, on the line after
+# the create, or a lane killed a moment later leaves a claim its own exit will not release.
+obj_sweep_claim_acquire() {
+  local claim="$1" stale="$2" now started age
+  OBJ_SWEEP_CLAIM_STATE=unavailable
+  [[ -n "$claim" ]] || return 0
+  [[ "$stale" =~ ^[0-9]+$ ]] || return 0
+  now="$(date +%s)"
+  if mkdir "$claim" 2>/dev/null; then
+    OBJ_SWEEP_CLAIM_OWNED="$claim"
+    obj_sweep_claim_mark_owner "$claim"
+    obj_sweep_claim_mark_started "$claim" "$now"
+    OBJ_SWEEP_CLAIM_STATE=acquired
+    return 0
+  fi
+  # Not ours, and not creatable. If there is no directory there at all, this is not
+  # contention — it is a name we cannot use (an unwritable parent, a file in the way) — and
+  # claiming nothing is the honest answer rather than reading it as a peer.
+  [[ -d "$claim" ]] || return 0
+  # THE AGE COMES FROM A FILE THIS CODE WROTE, NOT FROM mtime. `stat` is GNU-vs-BSD
+  # incompatible (the same reason bootstrap verifies a mode with `find -perm`), and the
+  # throttle stamp beside it already records an epoch this way.
+  started=""
+  { read -r started || true; } <"$claim/started" 2>/dev/null || true
+  if [[ "$started" =~ ^[0-9]+$ ]] && [[ "$started" -le "$now" ]]; then
+    age=$((now - started))
+    if [[ "$age" -le "$stale" ]]; then
+      OBJ_SWEEP_CLAIM_STATE=held
+      return 0
+    fi
+  fi
+  # NO PARSEABLE START TIME — OR ONE IN THE FUTURE — COUNTS AS STALE, and the direction is
+  # deliberate. Its cause is a lane killed in the microseconds between the `mkdir` and the
+  # `started` write (or a clock that moved), and the alternative reading — "keep it" —
+  # wedges the box's sweep FOREVER on a file nobody can age. Cost of this direction: if a
+  # peer is taken over inside that microsecond window, two lanes sweep once. One extra
+  # sweep is recoverable; an unrecoverable claim is not. The throttle stamp treats a future
+  # timestamp the same way, for the same reason.
+  #
+  # `mv` THEN `mkdir`: rename(2) is atomic, so of N lanes finding one stale claim exactly
+  # ONE can move it aside — and the `mkdir` that follows is the arbiter of ownership
+  # anyway, so a lane whose rename lost still ends up `held` rather than sweeping beside
+  # the winner.
+  mv "$claim" "$claim.stale.$$" 2>/dev/null || true
+  rm -rf "$claim.stale.$$" 2>/dev/null || true
+  if mkdir "$claim" 2>/dev/null; then
+    OBJ_SWEEP_CLAIM_OWNED="$claim"
+    obj_sweep_claim_mark_owner "$claim"
+    obj_sweep_claim_mark_started "$claim" "$now"
+    OBJ_SWEEP_CLAIM_STATE=taken
+    return 0
+  fi
+  OBJ_SWEEP_CLAIM_STATE=held
+  return 0
+}
+
+# obj_sweep_claim_mark_started <claim-dir> <epoch> — record WHEN the sweep this claim
+# represents began, which is the only thing that makes the claim recoverable. A failed
+# write is not fatal and is not silent: the claim still serialises, and a peer will read it
+# as unageable and therefore stale, which is the recoverable direction.
+obj_sweep_claim_mark_started() {
+  local claim="$1" epoch="$2"
+  printf '%s\n' "$epoch" 2>/dev/null >"$claim/started" ||
+    log "object-store sweep: could not record a start time in the sweep claim $claim — a peer will read it as unageable and may sweep beside this lane (#3749)"
+  return 0
+}
+
+# obj_sweep_claim_mark_owner <claim-dir> — write THIS process's ownership token into the
+# claim it has just created, and remember it in OBJ_SWEEP_CLAIM_TOKEN.
+#
+# WHY THE CLAIM CARRIES AN OWNER AT ALL (#3749 review round 11, item 2). The release used
+# to `rm -rf` the claim PATH unconditionally, and a path is not an identity: round 5 gave
+# this claim a stale-recovery route, so the directory at that path may be a SUCCESSOR's
+# claim by the time the original owner releases — a lane whose sweep overran the staleness
+# bound, or one on the `unavailable` path that never owned the claim at all and still ran
+# the release at the end of its own sweep. Deleting it then permits a second concurrent
+# full-store fsck, which is exactly the herd the claim exists to prevent.
+#
+# THE TOKEN IS WRITTEN BEFORE `started`, and that ordering is the one property worth
+# having: `started` is what makes a claim AGEABLE by a peer, so writing the owner first
+# means a claim a peer can age is a claim that also names its owner. The only way to get
+# `started` without `owner` is a write failure, which is reported.
+#
+# IT IS NOT A SECURITY BOUNDARY. `$$` plus the epoch plus `$RANDOM` distinguishes
+# concurrent and successive lanes on one box, which is the entire question here; a peer
+# that wanted to forge it could simply write the file, and a same-host peer able to do
+# that is invoker-class (#3312's triage rule).
+obj_sweep_claim_mark_owner() {
+  local claim="$1"
+  OBJ_SWEEP_CLAIM_TOKEN="$$.$(date +%s).${RANDOM}${RANDOM}"
+  printf '%s\n' "$OBJ_SWEEP_CLAIM_TOKEN" 2>/dev/null >"$claim/owner" || {
+    # THE TOKEN IS DROPPED, NOT KEPT, when it could not be recorded: keeping it would make
+    # every later ownership test answer `unknown` for a claim this lane does own, and the
+    # honest state is "this lane cannot prove ownership of that claim". The consequence is
+    # named: this lane will not delete it, so peers wait out the staleness bound once.
+    OBJ_SWEEP_CLAIM_TOKEN=""
+    log "object-store sweep: could not record an ownership token in the sweep claim $claim — this lane will NOT remove that claim when it finishes (it cannot prove the claim is still its own), so peer lanes will skip their sweep until the claim ages past the recovery bound (#3749)"
+  }
+  return 0
+}
+
+# obj_sweep_claim_owner_state <claim-dir> — FOUR-VALUED, on stdout:
+#   ours     — the token in that claim is the one THIS process wrote (affirmative)
+#   other    — a token was read and it is NOT ours: a successor owns this claim
+#   gone     — there is no claim at that path (nothing to release)
+#   unknown  — the token could not be read while something IS at that path
+# Only `ours` licenses a delete. `other`, `gone` and `unknown` are all non-deleting, so a
+# probe that fails cannot destroy a peer's claim — the cost of that direction is a claim
+# left behind, which round 5's stale recovery already handles.
+obj_sweep_claim_owner_state() {
+  local claim="$1" tok=""
+  [[ -n "$claim" ]] || { printf 'gone'; return 0; }
+  # `2>/dev/null` PRECEDES the input redirection, and the order is load-bearing: bash
+  # applies redirections left to right, so with it second an ABSENT owner file makes the
+  # shell print its own `No such file or directory` on the REAL stderr — an unanchored
+  # diagnostic from a function whose ordinary case (a double release: the sweep path, then
+  # the EXIT trap) has no file there at all. That is round 1's NIT 4, one file over, and a
+  # RED arm for item 2 is what surfaced it.
+  { read -r tok || true; } 2>/dev/null <"$claim/owner" || tok=""
+  if [[ -n "$tok" && -n "$OBJ_SWEEP_CLAIM_TOKEN" && "$tok" == "$OBJ_SWEEP_CLAIM_TOKEN" ]]; then
+    printf 'ours'
+    return 0
+  fi
+  if [[ -n "$tok" ]]; then
+    printf 'other'
+    return 0
+  fi
+  # NO TOKEN READ. Distinguish "the claim is not there" from "it is there and its token
+  # could not be read" — same answer (do not delete), different journal line, and the
+  # unreadable case is the one worth seeing. `-e` is asked SECOND and only to choose the
+  # message, so its own two-valuedness cannot make a delete happen.
+  if [[ -e "$claim" || -L "$claim" ]]; then
+    printf 'unknown'
+  else
+    printf 'gone'
+  fi
+  return 0
+}
+
+# obj_sweep_claim_release <claim-dir> — give the claim up, IF IT IS STILL OURS. Called BOTH
+# from the sweep path (so the next interval is contended honestly) AND from the EXIT trap
+# (so a lane that stops mid-iteration does not make its peers wait out the staleness
+# bound).
+#
+# WHAT THIS GUARANTEES, AND WHAT IT DOES NOT (#3749 review round 11, item 2). It removes
+# the claim only after reading an ownership token that is this process's own, so the
+# "delete a successor's claim" route is closed for every case except one: the read and the
+# `rm` are two operations, so a takeover landing BETWEEN them is still deleted. That window
+# is microseconds wide and needs a claim to be taken over in it; the previous behaviour was
+# to delete unconditionally, always. THIS IS NOT ATOMIC and is not claimed to be — a
+# rename-then-verify would make the removal atomic but would move a successor's claim
+# aside before it could be checked, and restoring it is not atomic either (and `mv` onto an
+# existing directory moves INTO it). The harm bound is unchanged from the claim's own
+# design: a wrongly-removed claim costs a second concurrent 6-hourly probe, never a wrong
+# verdict.
+obj_sweep_claim_release() {
+  local claim="$1" state
+  [[ -n "$claim" ]] || return 0
+  state="$(obj_sweep_claim_owner_state "$claim")"
+  case "$state" in
+    ours)
+      rm -rf -- "$claim" 2>/dev/null || true
+      OBJ_SWEEP_CLAIM_TOKEN=""
+      ;;
+    other)
+      log "object-store sweep: NOT removing the sweep claim $claim — it carries another lane's ownership token, so this claim was taken over after this lane acquired it (its sweep overran the recovery bound, or this lane never owned it). Removing it would permit a second concurrent full-store fsck (#3749)."
+      ;;
+    unknown)
+      log "object-store sweep: NOT removing the sweep claim $claim — its ownership token could not be read, so this lane cannot tell its own claim from a successor's. Leaving it for the staleness bound to recover (#3749)."
+      ;;
+  esac
+  # THE REGISTRATION IS CLEARED FOR EVERY STATE EXCEPT `unknown`, where the read itself may
+  # have failed transiently and the EXIT trap gets one more attempt. `other` and `gone` are
+  # settled answers: there is nothing at that path for this lane to release.
+  if [[ "$state" != unknown ]]; then
+    [[ "$OBJ_SWEEP_CLAIM_OWNED" != "$claim" ]] || OBJ_SWEEP_CLAIM_OWNED=""
+  fi
+  return 0
+}
+
+# obj_sweep_claim_wait <claim-dir> <stale-secs> <latch-path> <stamp-path> <overall-deadline>
+# — WAIT for the peer lane holding this claim to finish its sweep, and STOP THIS LANE from
+# inside the moment that peer latches the box. Sets OBJ_SWEEP_CLAIM_WAIT_STATE to exactly
+# one of:
+#
+#   completed — the throttle stamp went FRESH, so that peer finished a sweep and advertised
+#               it; the box is inside the interval again. THE CALLER MUST NOT CONTEND FOR
+#               THE CLAIM AGAIN ON THIS OUTCOME (#3749 review round 14): this state is
+#               reached WITHOUT SLEEPING, on the pass that observes the stamp, so a peer
+#               that advertised a sweep and then died holding its claim would answer
+#               `held` -> `completed` -> `held` -> `completed` at CPU speed forever. A
+#               fresh stamp says the store was measured inside the interval, which is all
+#               the caller needs: it skips, exactly as the throttle at the top of
+#               object_store_sweep would.
+#   vacated   — the claim is GONE with no fresh stamp: the peer ended without advertising a
+#               sweep (killed mid-sweep, or it stopped on a verdict it could not latch and
+#               FORCED the stamp stale on purpose so that every lane re-sweeps)
+#   expired   — the claim outlived the DERIVED staleness bound while still present, so it is
+#               recoverable now and the caller's next acquire takes it over and sweeps
+#   exhausted — this ITERATION's whole wait budget is spent (or this lane cannot wait at
+#               all), so the caller must stop waiting
+#
+# THE DEFECT IT EXISTS FOR (#3749 review round 12). The `held` branch read the latch ONCE and
+# returned toward the spawn path while the peer's sweep was still running. The residual note
+# at the bottom of this file described the remaining race as the narrow gap between a lane's
+# last latch read and its worker start; for the claim loser that was wrong by orders of
+# magnitude — the gap was the peer's ENTIRE sweep. A comment that understates the window it
+# exists to disclose is worse than no comment, because it is what stops the next person
+# looking, so both the behaviour and the note were fixed together.
+#
+# THE BOUND IS NOT A NEW CONSTANT. It is the claim's OWN staleness bound, `stale`, the value
+# obj_sweep_claim_stale_secs derives from the shipped sweep's MAX_SWEEP_WALKS x this
+# supervisor's per-walk bound + slack. That is deliberate and it is the whole reason a dead
+# peer cannot wedge this wait: the same threshold that says "this claim can be TAKEN OVER"
+# says "stop waiting for it". A second, independently chosen wait bound could drift from the
+# sweep's real worst case in either direction — too short and a live peer is abandoned
+# mid-sweep, too long and a dead one is waited out past the point where the claim was already
+# recoverable — which is round 4's "a relation whose own constant is restated is two magic
+# numbers wearing a relation's clothes", one file over.
+#
+# TWO DEADLINES, AND THE CALLER OWNS THE OUTER ONE. Per PASS this function recomputes the
+# CLAIM's deadline from the `started` file, so a TAKEOVER by a third lane mid-wait extends
+# the wait to that lane's own bound instead of abandoning a sweep that has just begun. The
+# caller's `overall` deadline caps the sum of all of it at one `stale` from the top of the
+# iteration, which is what makes a chain of takeovers terminate.
+#
+# `expired` IS THE NON-PERMISSIVE OUTCOME, AND IT IS THE ONE THE REVIEW ASKED ABOUT. When the
+# peer neither finishes nor vacates, the claim it holds is by construction STALE at this
+# deadline — the bound above is exactly the age at which "the sweep it represents cannot
+# still be running" — so the answer is not "carry on unmeasured": the caller loops, the next
+# acquire RECOVERS that claim, and this lane MEASURES the store itself. The loser becomes the
+# sweeper.
+#
+# THE STOP FILE AND THE WALL-CLOCK BUDGET ARE RE-READ ON EVERY PASS. Unlike the sweep itself
+# — whose fsck walks run in a child process and are therefore not interruptible from here —
+# this wait executes in THIS shell, so it can and does honour a stop requested while it
+# waits. Stop latency during a wait is one OBJ_SWEEP_CLAIM_POLL_SECS.
+obj_sweep_claim_wait() {
+  local claim="$1" stale="$2" latch="$3" stamp="$4" overall="$5"
+  local now started deadline started_at elapsed
+  # DEFAULT `exhausted`: every early return here means "this lane did not, or could not,
+  # wait", and the caller must treat that as a spent budget rather than as progress. The
+  # permissive-looking states (`completed`, `vacated`, `expired`) are only ever reached by an
+  # AFFIRMATIVE observation below.
+  OBJ_SWEEP_CLAIM_WAIT_STATE=exhausted
+  [[ -n "$claim" ]] || return 0
+  [[ "$stale" =~ ^[0-9]+$ ]] || return 0
+  # NO OUTER DEADLINE MEANS NO WAIT, and it restores exactly the pre-round-12 behaviour for
+  # that box rather than inventing a budget: the caller could not derive one, which is the
+  # same condition under which no claim is taken at all.
+  [[ "$overall" =~ ^[0-9]+$ ]] || return 0
+  started_at="$(date +%s)"
+  log "object-store sweep: WAITING for the peer lane that holds the sweep claim ($claim) to finish its sweep before this lane goes anywhere near a worker spawn — a sweep in flight can end in a verdict that latches this box, and 13-80s is the measured range on this fleet. Polling every ${OBJ_SWEEP_CLAIM_POLL_SECS}s (stop file and wall-clock budget included), bounded by the claim's own derived staleness bound of ${stale}s (#3749)."
+  while true; do
+    # THE STOP FILE FIRST. An operator who touches it while this lane is parked behind a
+    # peer's fsck is entitled to be obeyed within one poll.
+    preflight_stop_or_budget
+    # THEN THE LATCH — THE ENTIRE POINT OF THIS FUNCTION. It never returns if the box has
+    # been latched; see the global's comment for why this must not be called in a subshell.
+    obj_sweep_stop_if_latched "$latch"
+    # THEN COMPLETION, IN THE PEER'S OWN WRITE ORDER. A stopping peer creates the LATCH,
+    # then writes the stamp, then exits (its EXIT trap releases the claim); a non-stopping
+    # one writes the stamp, then releases. So a fresh stamp or an absent claim observed
+    # AFTER the latch read above can only belong to a peer whose latch, if any, was already
+    # in place when that read happened — which is what makes these two checks safe to treat
+    # as "the sweep is over and this box is not latched".
+    if obj_sweep_stamp_is_fresh "$stamp"; then
+      OBJ_SWEEP_CLAIM_WAIT_STATE=completed
+      break
+    fi
+    if [[ ! -d "$claim" ]]; then
+      OBJ_SWEEP_CLAIM_WAIT_STATE=vacated
+      break
+    fi
+    now="$(date +%s)"
+    # THE CLAIM'S OWN DEADLINE, RE-READ EVERY PASS so a mid-wait takeover by a third lane is
+    # waited out on that lane's bound. `stat` is not used for the same GNU-vs-BSD reason
+    # obj_sweep_claim_acquire gives; an unreadable or future `started` falls back to the
+    # caller's outer deadline rather than to a made-up one, and the outer deadline is the
+    # ceiling in every case.
+    started=""
+    { read -r started || true; } 2>/dev/null <"$claim/started" || started=""
+    if [[ "$started" =~ ^[0-9]+$ ]] && [[ "$started" -le "$now" ]]; then
+      deadline=$((started + stale))
+    else
+      deadline="$overall"
+    fi
+    [[ "$deadline" -le "$overall" ]] || deadline="$overall"
+    # STRICTLY GREATER, AND IT MATCHES obj_sweep_claim_acquire'S TAKEOVER TEST EXACTLY. That
+    # function holds a claim while `age <= stale` and takes it over only when `age > stale`,
+    # so an expiry at `age >= stale` would return `expired` for one second during which the
+    # caller's re-acquire still answers `held` — a tight loop between the two, brief but real.
+    # The two comparisons are two halves of one threshold and they have to agree on the
+    # boundary, not merely on the number.
+    if [[ "$now" -gt "$deadline" ]]; then
+      if [[ "$now" -gt "$overall" ]]; then
+        OBJ_SWEEP_CLAIM_WAIT_STATE=exhausted
+      else
+        OBJ_SWEEP_CLAIM_WAIT_STATE=expired
+      fi
+      break
+    fi
+    # A FAILING `sleep` MUST NOT BECOME A BUSY SPIN over the whole derived budget, which is
+    # what `sleep ... || true` would buy on a host without it. It ends the wait instead, in
+    # the state that says the budget cannot be spent — announced, because a box that cannot
+    # wait has lost this protection and nothing else would say so.
+    if ! sleep "$OBJ_SWEEP_CLAIM_POLL_SECS" 2>/dev/null; then
+      log "object-store sweep: cannot WAIT for the peer lane's sweep — 'sleep $OBJ_SWEEP_CLAIM_POLL_SECS' failed on this host, so this lane will not poll for the peer's verdict and loses the protection that wait provides (#3749)."
+      OBJ_SWEEP_CLAIM_WAIT_STATE=exhausted
+      break
+    fi
+  done
+  elapsed=$(( $(date +%s) - started_at ))
+  case "$OBJ_SWEEP_CLAIM_WAIT_STATE" in
+    completed)
+      # WHAT THIS MAY CLAIM IS BOUNDED BY WHEN IT LOOKED. The pass that observed the fresh
+      # stamp read the latch first and found none, so what is true is that NO STOPPING
+      # VERDICT HAD BEEN RECORDED AS OF THAT READ — not that the box "is not latched" now,
+      # which is a claim about the present that a peer can falsify between this printf and
+      # the next statement. The caller re-reads the latch before it returns toward a spawn;
+      # this line is a journal entry, not a licence.
+      log "object-store sweep: the peer lane holding $claim FINISHED its sweep after ${elapsed}s of waiting and advertised it in the throttle stamp; no stopping verdict had been recorded for this box as of the read that observed it (#3749)."
+      # AND THE CALLER STOPS THERE. This line says nothing about whether that peer has
+      # RELEASED its claim — a peer killed between the stamp write and its EXIT trap has
+      # not — which is why the caller treats `completed` as a terminal skip rather than as
+      # a cue to contend again (round 14).
+      ;;
+    vacated)
+      log "object-store sweep: the peer lane holding $claim GAVE THE CLAIM UP after ${elapsed}s without advertising a sweep — it was killed mid-sweep, or it stopped on a verdict it could not latch and forced the throttle stamp stale so every lane re-sweeps. No stopping verdict had been recorded for this box as of the read that observed it; this lane will contend for the claim again (#3749)."
+      ;;
+    expired)
+      log "object-store sweep: the peer lane holding $claim has neither finished nor given it up in ${elapsed}s, and that claim is now older than the derived ${stale}s recovery bound, so the sweep it represents cannot still be running. This lane will RECOVER the claim and measure the store itself rather than carry on unmeasured (#3749)."
+      ;;
+  esac
+  return 0
+}
+
+# obj_sweep_stamp_is_fresh <stamp-path> — 0 when this box swept inside the interval.
+#
+# ONE implementation, because the throttle is now read TWICE: once before contending for
+# the claim, and again after winning it — the winner of a race may have finished sweeping
+# and written the stamp while this lane was deciding, and re-reading is what stops the
+# claim from converting a herd into a queue of redundant sweeps.
+#
+# A stamp in the FUTURE (clock skew, a hand-edited file, a restored snapshot) must not park
+# the sweep forever: it reads as never-swept. It does NOT clear the CORRUPT latch, which is
+# a fact about the store rather than about when it was last measured.
+obj_sweep_stamp_is_fresh() {
+  local stamp="$1" now last=0 ts=""
+  [[ -n "$stamp" && -r "$stamp" ]] || return 1
+  now="$(date +%s)"
+  { read -r ts || true; } <"$stamp" 2>/dev/null || true
+  [[ "$ts" =~ ^[0-9]+$ ]] && last="$ts"
+  [[ "$last" -gt "$now" ]] && last=0
+  [[ $((now - last)) -lt $((OBJ_SWEEP_INTERVAL_HOURS * 3600)) ]]
+}
+
+# obj_sweep_set_latch <latch-path> — record MONOTONICALLY that this box's shared object
+# store has been found damaged. Exits 0 when the latch is in place AFTERWARDS (whether
+# this call created it or found a peer's), 1 when it could not be persisted at all.
+#
+# WHY A SEPARATE CREATE-ONLY FILE AND NOT A VERDICT FIELD IN THE STAMP — THE DESIGN CALL
+# (#3749 review round 2, BLOCKER 1). Round 1 put the verdict IN the throttle stamp, and
+# the stamp is a mutable shared cell that every lane rewrites at the END of its own
+# sweep. Stamp writes are unsynchronised, so a peer whose sweep STARTED before this lane
+# detected corruption can finish AFTER it and overwrite `CORRUPT` with `VERIFIED` or
+# `UNMEASURED`; the other lanes then throttle on that fresh non-corrupt stamp and keep
+# working against a store already known to be damaged. That is round 1's own harm coming
+# back through a different door, and it is the SECOND consecutive review finding in this
+# one shared cell.
+#
+# A LOCK WAS THE OTHER OPTION AND WAS REJECTED. It makes the read-modify-write atomic,
+# but the value stays a mutable cell any writer can move BACKWARDS, so "CORRUPT is
+# sticky" would rest on every present and future writer remembering to honour it — plus
+# a lock has its own could-not-acquire path, which must then not silently skip the
+# latch. CLAUDE.md's standing ruling for this family is to REMOVE THE SHARED MUTABLE
+# CHANNEL rather than to serialise access to it, so the latch is its own file and its
+# only state transition is ABSENT -> PRESENT:
+#
+#   * `set -C` (noclobber) makes `>` FAIL on an existing path instead of truncating it,
+#     and create with O_EXCL on a missing one. The kernel arbitrates; a losing writer
+#     cannot overwrite the winner, and there is no read-modify-write to serialise.
+#   * It is set in a SUBSHELL so the option cannot leak into the rest of this script.
+#   * NOTHING HERE EVER REMOVES IT. Corruption is non-self-clearing, so it does not
+#     expire either; the operator who repairs the store removes the file, and every
+#     message that mentions the latch names that exact command.
+#
+# THE LATCH IS THE FILE'S EXISTENCE, ASKED AFTERWARDS — never this call's own exit
+# status, which cannot tell "a peer got there first" (fine, the box is latched) from
+# "the directory is unwritable" (not fine, and the caller must say so out loud).
+#
+# THE SECOND ARGUMENT IS THE STOPPING VERDICT, FROM A CLOSED SET OF TWO, AND AN
+# UNRECOGNISED VALUE CREATES NOTHING (#3749 review round 10, item 1). A latch whose
+# content a reader cannot recognise can only be reported as a cause-free stop, so writing
+# one would record a fact nobody can act on; refusing instead makes the caller take its
+# own could-not-persist path, which is journalled and forces the throttle stamp stale.
+# Validated here rather than at the two call sites, so a third caller cannot invent a
+# token, and asserted structurally by the suite.
+obj_sweep_set_latch() {
+  local latch="$1" verdict="${2:-}"
+  [[ -n "$latch" ]] || return 1
+  case "$verdict" in
+    CORRUPT | UNSWEEPABLE) ;;
+    *) return 1 ;;
+  esac
+  (
+    set -C
+    printf '%s\n%s\n' "$(date +%s)" "$verdict" >"$latch"
+  ) 2>/dev/null || true
+  obj_sweep_latch_present "$latch"
+}
+
+# obj_sweep_latch_verdict <latch-path> — WHICH stopping verdict the latch records, on
+# stdout: `CORRUPT`, `UNSWEEPABLE`, or `UNRECOGNISED`.
+#
+# AFFIRMATIVE RECOGNITION, AND NOTHING ELSE (CLAUDE.md: a positive verdict requires an
+# affirmative measurement). Only a second line that IS one of the two tokens is reported
+# as that token. Anything else — an empty file, a dangling symlink, a latch written by a
+# newer supervisor, a truncated write — is `UNRECOGNISED`, which its caller reports as a
+# cause-free stop. It is never guessed at and never defaulted to CORRUPT: that would name
+# a cause the box may not have, which is the whole reason the file is no longer called
+# `.CORRUPT`.
+obj_sweep_latch_verdict() {
+  local latch="$1" line
+  line="$(sed -n '2p' "$latch" 2>/dev/null || true)"
+  case "$line" in
+    CORRUPT) printf 'CORRUPT' ;;
+    UNSWEEPABLE) printf 'UNSWEEPABLE' ;;
+    *) printf 'UNRECOGNISED' ;;
+  esac
+}
+
+# obj_sweep_stop_if_latched <latch-path> — ASK THE LATCH QUESTION AND STOP UNLESS THE
+# ANSWER IS AN AFFIRMATIVE "no". Returns 0 (carry on) only for `absent` and `unkeyed`;
+# never returns at all for `present` or `unknown`, because finalize_exit ends the process.
+#
+# IT IS CALLED AT THE TOP OF object_store_sweep, BEFORE EVERY BRANCH, AGAIN BEFORE EVERY
+# RETURN THAT LEADS TO A SPAWN, AND ONCE MORE ON THE WAY OUT OF preflight_wait — which is
+# where the HOLD LOOP could otherwise carry a lane past a peer's verdict for up to an hour
+# (#3749 review rounds 3, 5 and 13, item 1). Round 3 found
+# THREE returns that reached a spawn without re-reading the latch and fixed all three;
+# round 5 found a FOURTH — the OBJ_SWEEP_INTERVAL_HOURS=0 opt-out, which returned before
+# any latch read at all, so the documented way to disable the sweep also disabled an
+# already-recorded CORRUPT verdict. That is ONE defect arriving through a new door each
+# round, because the shape required every early return to independently remember the
+# check. So the ENTRY read is hoisted above every branch in object_store_sweep: the
+# invariant is now "this function cannot be ENTERED without a latch read", which holds for
+# branches nobody has written yet, and the post-sweep reads stay because a PEER can latch
+# the box WHILE this lane sweeps (up to MAX_SWEEP_WALKS fsck walks).
+#
+# `unknown` STOPS, AND HERE IS THE REASONING AT THE BRANCH. It means the directory holding
+# the latch exists and this process cannot search it, so a CORRUPT verdict may be sitting
+# there unread. The two directions are not symmetric: a false stop is ONE lane exiting with
+# a named, actionable reason an operator fixes in seconds, while a false carry-on is
+# workers certifying merges against a store already known to be damaged. It is also not a
+# plausible self-DoS — that directory is the same box-wide `/tmp` this supervisor puts its
+# own flock in, so a box on which it is unsearchable cannot get this far anyway. It is
+# reported as its OWN reason (`object-store-latch-unreadable`), never as CORRUPT: nothing
+# here observed damage, and claiming it would send an operator to re-clone a healthy store.
+#
+# `unkeyed` CARRIES ON, AND THAT IS THE ONE PERMISSIVE ANSWER (CLAUDE.md #3229: where a
+# signal genuinely SHOULD be permissive, record the why at the branch). No key means no
+# latch was ever NAMED — and the writer derives the name through the same resolver, so on
+# the two box-wide causes (the store cannot be resolved; this host has no digest tool) no
+# lane here could have recorded one either. It is announced once and it costs this lane its
+# throttle, so it re-measures the store itself every iteration and would rediscover damage
+# rather than inherit it. What it does NOT cover is a TRANSIENT resolver failure in THIS
+# lane while a peer keyed and latched successfully: that lane misses the peer's verdict for
+# one iteration. Stopping instead would make a missing or older `check-object-store-
+# integrity.sh` — an ordinary state on any branch cut before #3749 merged — halt every lane
+# on the box for want of a hygiene probe, which is the self-DoS CLAUDE.md rules out.
+obj_sweep_stop_if_latched() {
+  local latch="$1" latch_ts state latch_verdict stop_reason
+  state="$(obj_sweep_latch_state "$latch")"
+  case "$state" in
+    absent)
+      return 0
+      ;;
+    unkeyed)
+      if [[ "$OBJ_SWEEP_NOSTAMP_NOTIFIED" -eq 0 ]]; then
+        log "object-store sweep: no box-wide key for this store — the shared store could not be resolved, or this host has no sha256 digest tool. There is no throttle and NO LATCH: a CORRUPT verdict recorded by a peer cannot be read here, and one found here cannot be recorded for peers. The sweep runs every iteration instead (#3749)."
+        OBJ_SWEEP_NOSTAMP_NOTIFIED=1
+      fi
+      return 0
+      ;;
+    unknown)
+      notify "high" "worker-supervisor: object-store STOP latch UNREADABLE" \
+        "the directory holding this box's object-store STOP latch ($latch) exists and cannot be searched, so a recorded stopping verdict may be sitting there unread. Stopping this lane rather than spawning a worker on an unknown store. This is NOT a corruption finding."
+      log "object-store: the STOP latch state could NOT be read at $latch (its directory exists and is not searchable) — stopping. UNKNOWN is not clean: a peer's verdict may be unread. This is NOT a corruption finding; fix the directory's permissions (#3749)."
+      finalize_exit "object-store-latch-unreadable" 1
+      ;;
+  esac
+  latch_ts="$(head -1 "$latch" 2>/dev/null || true)"
+  [[ "$latch_ts" =~ ^[0-9]+$ ]] || latch_ts="<unrecorded>"
+  # WHICH STOPPING VERDICT WAS RECORDED DECIDES WHAT THIS LANE SAYS, AND IT IS READ
+  # AFFIRMATIVELY (#3749 review round 10, item 1). This lane did NOT sweep — that is the
+  # point of the latch — so everything it can say about the store comes from the file. A
+  # latch recording that the store could not be SWEPT must not be reported as damage: the
+  # detecting sweep established no cause, and repeating a claim it did not make would send
+  # an operator to re-clone a store nothing observed damage in (round 9's defect class).
+  # An unrecognised token is a cause-free stop, never a default to the damage text.
+  latch_verdict="$(obj_sweep_latch_verdict "$latch")"
+  case "$latch_verdict" in
+    CORRUPT)
+      notify "high" "worker-supervisor: SHARED OBJECT STORE CORRUPT (latched)" \
+        "a sweep on this box recorded CORRUPT for the shared git object store every lane here reads. Stopping without re-sweeping. Repair the store, then re-run the sweep and require its affirmative verdict BEFORE removing $latch."
+      log "object-store: CORRUPT (cached at $latch_ts by a sweep on this box) — stopping; no worker may certify against a damaged shared store (#3749)."
+      stop_reason="object-store-corrupt"
+      ;;
+    UNSWEEPABLE)
+      # THE LATCH RECORDS THE TOKEN AND NOTHING ELSE, so this text may only assert what is
+      # true of EVERY cause of that token — and since #3749 review round 11 there are two
+      # (git fsck ran and reproducibly died; or the store's own config sets fsck.* keys, so
+      # no walk was run at all). The earlier wording named the first mechanism as though it
+      # were the only one, which on the second cause is a confidently-wrong sentence in the
+      # one place an operator reads when the box has stopped. What the reader knows is the
+      # DISPOSITION, so that is all it says; the CAUSE is named by the sweep that recorded
+      # it, in the journal of the lane that stopped.
+      notify "high" "worker-supervisor: SHARED OBJECT STORE could not be SWEPT (latched)" \
+        "a sweep on this box recorded that the shared git object store every lane here reads could NOT be swept to an affirmative verdict, so its integrity is UNKNOWN and NO damage was established. Stopping without re-sweeping. Run 'bash scripts/check-object-store-integrity.sh' by hand, act on what THAT run reports, and require its affirmative verdict BEFORE removing $latch."
+      log "object-store: UNSWEEPABLE (cached at $latch_ts by a sweep on this box) — that sweep could not obtain an affirmative verdict for this store, so its object content is UNKNOWN, not clean. Stopping. NO damage was established: this is NOT a damage finding, and this reader knows only the verdict, not which of its causes fired (#3749)."
+      stop_reason="object-store-unsweepable"
+      ;;
+    *)
+      notify "high" "worker-supervisor: shared object store LATCHED (verdict unrecognised)" \
+        "a sweep on this box latched the shared git object store with a stopping verdict this supervisor does not recognise (an older or newer check-object-store-integrity.sh, or a latch that could not be read). Stopping rather than guessing which verdict it was. Run 'bash scripts/check-object-store-integrity.sh' by hand and require its affirmative verdict BEFORE removing $latch."
+      log "object-store: LATCHED with an UNRECOGNISED stopping verdict at $latch (cached at $latch_ts) — stopping. NO cause is claimed: this supervisor will not guess whether damage was found (#3749)."
+      stop_reason="object-store-latch-unrecognised"
+      ;;
+  esac
+  # THE REMEDY NAMES WHAT ACTUALLY REPAIRS THE STORE (#3749 review round 9, item 2). It
+  # used to say "re-obtain the objects from the canonical remote", which read as
+  # `git fetch --force origin` — the instruction the sweep itself used to print, and
+  # measured to repair NOTHING: `--force` only permits non-fast-forward REF updates and
+  # re-downloads no objects at all. This lane did NOT sweep (that is the point of the
+  # latch), so it has no damage class and no fsck output to quote: for the damage verdict
+  # it names the two things that are true of every damage class, for the others it names
+  # nothing at all (see the branch), it points at the sweep for the class-specific text,
+  # and it makes a successful sweep — not a belief — the condition for clearing the latch.
+  if [[ "$latch_verdict" == CORRUPT ]]; then
+    log "object-store: REMEDY — stop every lane on this box, then repair the shared store. 'git fetch --force origin' does NOT repair it (--force only permits non-fast-forward REF updates; it re-downloads no objects), and neither does a local 'git gc'/'git repack'. Run 'bash scripts/check-object-store-integrity.sh' for the measured remedy for the damage class it finds (#3749)."
+  else
+    # NO REPAIR INSTRUCTION WHERE NO CAUSE WAS ESTABLISHED. The two other verdicts this
+    # latch can carry say the store could not be swept, or say something this supervisor
+    # cannot recognise; naming a repair for either would be a second confidently-wrong
+    # instruction, which is the class round 9 removed. The one thing that is true for all
+    # of them is where to get the class-specific text: the sweep itself.
+    log "object-store: REMEDY — stop every lane on this box, then run 'bash scripts/check-object-store-integrity.sh' by hand and act on what IT names. NO repair instruction is given here because the latched verdict established no cause, and a repair chosen for the wrong cause is worse than none (#3749)."
+  fi
+  log "object-store: CLEAR THE LATCH ONLY AFTER that sweep completes and reports its affirmative verdict — 'I think I fixed it' is not an exit condition: rm -f $latch"
+  # PER-VERDICT, so the journal records WHICH stopping fact ended this lane rather than a
+  # generic "it was latched" a reader would have to correlate by timestamp.
+  finalize_exit "$stop_reason" 1
+}
+
+# obj_sweep_script_path — THE ONE PLACE THAT NAMES THE SWEEP SCRIPT. Two call sites now
+# derive this box's latch path from it (object_store_sweep's entry gate and
+# obj_sweep_stop_if_latched_now), and the latch KEY is derived FROM this path, so two
+# spellings of it would key two different latches: one lane would record a stopping
+# verdict at a name the other never reads, which is the silent-permissive direction.
+obj_sweep_script_path() {
+  printf '%s' "$REPO_ROOT/scripts/check-object-store-integrity.sh"
+}
+
+# obj_sweep_stop_if_latched_now — ASK THE LATCH QUESTION FROM SCRATCH, for a caller that
+# holds no resolved paths of its own. It resolves script -> stamp -> latch through the
+# same three functions object_store_sweep uses and hands the answer to the same gate, so
+# `unknown` still STOPS and `unkeyed` is still the one permissive answer (see
+# obj_sweep_stop_if_latched for the reasoning at each branch — this wrapper adds no
+# policy of its own, deliberately: a second opinion about what a latch state means is a
+# second place for the permissive collapse to reappear).
+#
+# IT RESOLVES FRESH RATHER THAN READING A VALUE object_store_sweep LEFT BEHIND. A global
+# would save one `--print-store` (5 ms, measured) and would be EMPTY on any future path
+# that reaches this gate without having run the sweep first — and an empty latch path
+# answers `unkeyed`, which CARRIES ON. That is a silent fail-open bought for 5 ms of a
+# supervisor iteration measured in minutes.
+obj_sweep_stop_if_latched_now() {
+  local stamp latch
+  stamp="$(obj_sweep_stamp_path "$(obj_sweep_script_path)")"
+  latch="$(obj_sweep_latch_path "$stamp")"
+  obj_sweep_stop_if_latched "$latch"
+}
+
+object_store_sweep() {
+  local script stamp latch claim claim_stale wait_until rc out verdict stop_verdict
+  # ---------------------------------------------------------------------------
+  # THE ENTRY LATCH READ. IT IS ABOVE EVERY BRANCH IN THIS FUNCTION, AND THE LINES
+  # BEFORE IT ARE ASSIGNMENTS ONLY — NO `if`, NO `return`, NOTHING THAT CAN LEAVE
+  # (#3749 review round 5, item 1).
+  #
+  # THE HISTORY IS THE POINT. Round 3 found "a return path that reaches a spawn without
+  # re-reading the latch" at THREE sites and fixed all three; round 5 found a FOURTH, the
+  # OBJ_SWEEP_INTERVAL_HOURS=0 opt-out, which returned before any latch read — so the
+  # documented way to switch the sweep OFF also switched off an already-recorded CORRUPT
+  # verdict, contradicting "a latch ignores the interval". Patching the fourth site would
+  # have left a fifth for the next reviewer, because the design required EVERY early
+  # return to independently remember the check. The read is therefore hoisted here, ONCE,
+  # at entry: "this function cannot be entered without a latch read" is a property of the
+  # function rather than of a set of sites, and it holds for branches nobody has written
+  # yet. Asserted STRUCTURALLY (test_worker_supervisor.sh, obj-sweep(entry-latch-read)):
+  # the first control-flow line in this body must come AFTER this call, so a future early
+  # return cannot be placed above it without reddening that case.
+  #
+  # THE POST-SWEEP READS STAY. They answer a DIFFERENT question — a peer can latch the box
+  # WHILE this lane sweeps, which is up to MAX_SWEEP_WALKS fsck walks — so the entry read
+  # does not subsume them (round 3, and its RED arm is still in the suite).
+  #
+  # THE COST IS ONE `--print-store` RESOLUTION PER ITERATION, MEASURED AT 5 ms on this
+  # fleet's store (10 runs, 2026-09-02; round 2 measured 7 ms for the same call). The
+  # opt-out path did not pay it before and now does. A supervisor iteration is minutes, so
+  # this is not a trade worth making conditional: a cache would be one more piece of
+  # process-scoped state on a question ("is this box latched?") whose whole value is that
+  # it is asked FRESH.
+  #
+  # THE LATCH PATH CANNOT ALWAYS BE DERIVED, and that is a NAMED state rather than an
+  # absent latch: obj_sweep_latch_state answers `unkeyed`, and obj_sweep_stop_if_latched
+  # announces it once and carries on, with the reasoning — and the residual it leaves — at
+  # that branch.
+  # ---------------------------------------------------------------------------
+  script="$(obj_sweep_script_path)"
+  stamp="$(obj_sweep_stamp_path "$script")"
+  latch="$(obj_sweep_latch_path "$stamp")"
+  obj_sweep_stop_if_latched "$latch"
+  if [[ "$OBJ_SWEEP_INTERVAL_HOURS" -le 0 ]]; then
+    # ANNOUNCED, never silent (the CLAIM_CMD-disabled precedent in main()): a hygiene
+    # probe that is off must be visible in the journal rather than inferred from missing
+    # lines.
+    #
+    # AND IT IS REACHED ONLY AFTER THE ENTRY LATCH READ ABOVE. Disabling the sweep means
+    # "do not spend fsck walks on this box", never "ignore a verdict a sweep already
+    # recorded": the latch is a fact about the store, not a schedule.
+    if [[ "$OBJ_SWEEP_ANNOUNCED" -eq 0 ]]; then
+      log "object-store sweep DISABLED (OBJ_SWEEP_INTERVAL_HOURS=0) — this box's SHARED git object store is NOT being rehashed this run; an existing CORRUPT latch is still honoured (#3749)"
+      OBJ_SWEEP_ANNOUNCED=1
+    fi
+    return 0
+  fi
+  if [[ ! -r "$script" ]]; then
+    # PERMISSIVE, AND HERE IS THE REASON, IN CODE (CLAUDE.md #3229: where a signal
+    # genuinely SHOULD be permissive, record the why at the branch). The sweep is absent
+    # from this checkout — an older branch, or a partial tree. Refusing to run any worker
+    # because a hygiene probe is missing is a self-DoS on the whole fleet, and the probe
+    # certifies nothing on the passing side either. Journalled once so it is visible.
+    if [[ "$OBJ_SWEEP_ANNOUNCED" -eq 0 ]]; then
+      log "object-store sweep UNAVAILABLE: no $script in this checkout — the shared store is NOT being rehashed (#3749). NOT treated as clean and NOT a stop reason."
+      OBJ_SWEEP_ANNOUNCED=1
+    fi
+    return 0
+  fi
+  # THE STAMP AND LATCH WERE RESOLVED AT ENTRY, ABOVE, and the "no box-wide key" state is
+  # announced there by obj_sweep_stop_if_latched's `unkeyed` branch — the one place that
+  # can say it, because it is the branch that could not ask the latch question.
+  # A LATCHED BOX STOPS THIS LANE WITHOUT RE-SWEEPING, AND IT IGNORES THE INTERVAL —
+  # WHICH IS WHY THE READ THAT ENFORCES IT IS AT THE TOP OF THIS FUNCTION AND NOT HERE.
+  #
+  # THE DEFECT IT EXISTS FOR (#3749 review, BLOCKER A). The throttle is keyed on the
+  # SHARED store and lives in a box-wide directory, so it is genuinely box-wide. When it
+  # recorded only a timestamp, the lane that DETECTED corruption stopped — and its three
+  # peers then saw a FRESH stamp, skipped their own sweep for the whole interval, and kept
+  # spawning workers against a store known to be damaged. That is the exact harm this
+  # feature exists to prevent, delivered by the throttle.
+  #
+  # THE LATCH IS A DIFFERENT FILE FROM THE STAMP, ON PURPOSE (round 2, BLOCKER 1): see
+  # obj_sweep_set_latch for why a verdict field in the mutable stamp is not monotonic
+  # under concurrency and why a lock was rejected. The consequence here is simply that the
+  # test is an EXISTENCE test, which no concurrent writer can undo.
+  #
+  # IT DOES NOT EXPIRE, and it is CLEARED BY HAND. Corruption is non-self-clearing, so an
+  # age-based expiry would resume workers over a still-damaged store; the operator who
+  # repairs the store removes the file, and every message that names the latch names that
+  # exact command, because a latch nobody can clear bricks the box after the repair.
+  #
+  # There is deliberately NO second read between the entry read and the throttle branch
+  # below: nothing between them can change the latch except a peer, in the microseconds it
+  # takes to stat one file, and the reads that DO cover a real window (this lane's own
+  # multi-walk sweep) are the ones after it.
+  if obj_sweep_stamp_is_fresh "$stamp"; then
+    # RE-ASKED ON THE THROTTLED PATH. Cheap (one stat), and it keeps ONE rule —
+    # "no return that leads to a spawn without a fresh latch read" — instead of a set of
+    # paths someone has to remember to audit individually.
+    obj_sweep_stop_if_latched "$latch"
+    return 0
+  fi
+
+  # --- ONE SWEEP PER BOX AT A TIME (#3749 review round 5, item 2) -------------
+  # The throttle alone cannot prevent the herd: the stamp is written at the END of a sweep,
+  # so every lane reads the same stale stamp at the same moment and all of them start their
+  # own full-store fsck. See the obj_sweep_claim_* header for the mechanism and for why the
+  # loser skips instead of waiting.
+  claim="$(obj_sweep_claim_path "$stamp")"
+  claim_stale="$(obj_sweep_claim_stale_secs "$script" || true)"
+  # THE ITERATION'S OVERALL WAIT BUDGET, AND IT IS THE SAME DERIVED VALUE AS THE STALENESS
+  # BOUND — not a second constant (#3749 review round 12). Any single claim can be at most
+  # `claim_stale` seconds from being recoverable, so one `claim_stale` from here is enough to
+  # outlast the claim this lane found AND to bound a chain of takeovers by peers. Where the
+  # bound could not be derived there is no budget and no wait, which is the same box on which
+  # no claim is taken at all.
+  wait_until=""
+  if [[ "$claim_stale" =~ ^[0-9]+$ ]]; then
+    wait_until=$(($(date +%s) + claim_stale))
+  fi
+  # ACQUIRE, AND IF A PEER IS SWEEPING, WAIT FOR IT — THEN CONTEND AGAIN, EXCEPT WHERE
+  # CONTENDING AGAIN COULD NEVER ACHIEVE ANYTHING (#3749 review round 14).
+  #
+  # THE DEFECT THIS LOOP HAD. `completed` — the throttle stamp went FRESH — was treated as
+  # "go round again", and the wait reaches it WITHOUT SLEEPING (it is tested on the pass that
+  # observes it). In the ordinary case that costs one harmless extra acquire: the peer
+  # released a moment earlier, so the re-acquire succeeds and the second throttle read below
+  # skips. But a peer that writes the stamp and then DIES before releasing leaves the claim
+  # PRESENT and the stamp FRESH — a state in which every acquire answers `held` and every
+  # wait answers `completed` in microseconds — so the lane spun CPU-hot, achieving nothing,
+  # until the supervisor's whole MAX_HOURS wall-clock budget expired. A liveness and CPU
+  # defect, not a wrong verdict, and on a four-lane box it is a burnt core that reads as
+  # "the fleet got slow" with no attributable cause.
+  #
+  # AND THE STALENESS RECOVERY COULD NOT SAVE IT, WHICH IS THE INTERESTING PART. Round 5 gave
+  # the claim an age-based bound precisely so a dead peer's claim becomes recoverable — but
+  # `completed` is tested BEFORE the claim's deadline on every pass, so on this path that
+  # recovery never ran. The fix does NOT add a second notion of "the peer is gone" (a second
+  # mechanism is a second thing to drift): a fresh stamp is the same answer the throttle at the
+  # top of this function gives, so the lane takes the same action it would have taken there —
+  # SKIP — and stops contending. See the `completed` branch below the loop.
+  #
+  # THE LOOP IS BOUNDED IN WALL TIME BY CONSTRUCTION, and by the value it already derived.
+  # `held` is the only state that continues, and after this round only `vacated` and `expired`
+  # reach the next pass: `exhausted` and `completed` break. Both survivors mean the claim this
+  # lane observed is gone or recoverable, so the next acquire normally ends the loop — but
+  # neither is REQUIRED to have slept (a claim that vanishes on the wait's first pass returns
+  # `vacated` immediately), so a peer flapping the claim could otherwise still spin. The
+  # `wait_until` test below is therefore over the ITERATION's own derived budget — the same
+  # `claim_stale` the wait and the recovery threshold use, never a second constant — which
+  # makes every path out of this loop bounded by ~claim_stale of wall clock rather than by
+  # MAX_HOURS. A break there leaves OBJ_SWEEP_CLAIM_STATE at `held`, i.e. the honest
+  # NOT-SWEPT-AND-NOT-MEASURED outcome below, which is exactly what `exhausted` reports.
+  #
+  # NOTHING BETWEEN THE WAIT AND THE RE-ACQUIRE NEEDS A LATCH READ: the wait itself reads the
+  # latch on every pass and does not return if the box is latched.
+  while true; do
+    obj_sweep_claim_acquire "$claim" "$claim_stale"
+    [[ "$OBJ_SWEEP_CLAIM_STATE" == held ]] || break
+    obj_sweep_claim_wait "$claim" "$claim_stale" "$latch" "$stamp" "$wait_until"
+    case "$OBJ_SWEEP_CLAIM_WAIT_STATE" in
+      exhausted | completed) break ;;
+    esac
+    if [[ "$wait_until" =~ ^[0-9]+$ ]] && [[ "$(date +%s)" -gt "$wait_until" ]]; then
+      break
+    fi
+  done
+  # THE PEER FINISHED AND ADVERTISED IT: SKIP, AND DO NOT CONTEND FOR THAT CLAIM AGAIN
+  # (#3749 review round 14). The stamp is fresh, so this box HAS been rehashed inside the
+  # interval — there is nothing for this lane to measure this iteration whether or not the
+  # peer ever gives its claim up. Returning here is not a new policy: it is the same skip the
+  # throttle at the top of this function performs on the same observation, and it is STRICTLY
+  # LESS work than the acquire-and-release round trip this path used to make in the ordinary
+  # case, so the common case (a peer that released a moment ago) gains no latency from the
+  # fix. The latch read is the one rule that governs every return from this function: no
+  # return that leads to a spawn without a fresh read.
+  if [[ "$OBJ_SWEEP_CLAIM_STATE" == held && "$OBJ_SWEEP_CLAIM_WAIT_STATE" == completed ]]; then
+    log "object-store sweep: SKIPPED — the peer lane holding $claim finished sweeping this store and advertised it in the throttle stamp while this lane waited, so the box is inside the interval again and this lane does not contend for that claim again (#3749)."
+    obj_sweep_stop_if_latched "$latch"
+    return 0
+  fi
+  case "$OBJ_SWEEP_CLAIM_STATE" in
+    held)
+      # REACHED ONLY WITH THE WAIT BUDGET SPENT (or on a box that cannot wait at all): a peer
+      # lane is sweeping and this lane has already waited out one full derived staleness bound
+      # watching claims change hands. It is NOT a clean result and it is not reported as one —
+      # nothing here read the store, so its integrity is UNKNOWN, and the box gets a page once
+      # per run because a claim that keeps changing hands for that long is an anomaly, not a
+      # cadence. The lane does not stop: a peer sweeping is also the shape of a HEALTHY box
+      # recovering a wedged claim, and stopping four lanes on a hygiene probe's contention is
+      # the self-DoS this file refuses everywhere else. The residual this leaves is stated in
+      # full at the bottom of this file, per path, with its magnitude.
+      log "object-store sweep: NOT SWEPT AND NOT MEASURED — a peer lane still holds the sweep claim ($claim) after this lane waited out the whole derived ${claim_stale}s budget, so the claim has changed hands or overrun rather than completing. This box's store integrity is UNKNOWN, not clean, for this iteration (#3749)."
+      if [[ "$OBJ_SWEEP_CLAIM_WAIT_UNMEASURED_NOTIFIED" -eq 0 ]]; then
+        notify "high" "worker-supervisor: object-store sweep never got a turn" \
+          "a peer lane held the sweep claim for this box's shared object store for longer than the whole derived recovery bound (${claim_stale}s) — the store was NOT rehashed on this iteration and its integrity is UNKNOWN, not clean. Check for a wedged sweep on this box."
+        OBJ_SWEEP_CLAIM_WAIT_UNMEASURED_NOTIFIED=1
+      fi
+      obj_sweep_stop_if_latched "$latch"
+      return 0
+      ;;
+    taken)
+      log "object-store sweep: RECOVERED a stale sweep claim ($claim, older than ${claim_stale}s = the sweep's own MAX_SWEEP_WALKS x this supervisor's per-walk bound + slack, so the sweep it represented cannot still be running) — the lane holding it was killed mid-sweep. Sweeping (#3749)."
+      ;;
+    unavailable)
+      # ANNOUNCED ONCE, never inferred from missing lines: without a claim the herd is back,
+      # and that is a property of the box (no box-wide key, or a sweep script whose
+      # MAX_SWEEP_WALKS could not be read to derive a recovery bound), not of the iteration.
+      if [[ "$OBJ_SWEEP_CLAIM_NOTIFIED" -eq 0 ]]; then
+        log "object-store sweep: NO in-progress claim is being taken — there is no box-wide key for this store, or the sweep's own MAX_SWEEP_WALKS could not be read to derive a recovery bound. Every lane on this box may sweep at once when the interval expires (#3749)."
+        OBJ_SWEEP_CLAIM_NOTIFIED=1
+      fi
+      ;;
+  esac
+  # RE-READ THE THROTTLE UNDER THE CLAIM, AND THAT SECOND READ IS WHAT MAKES THE CLAIM
+  # WORTH TAKING. The winner of the race may have finished its sweep and written the stamp
+  # between this lane's first read and its own acquire, so without this the claim would
+  # merely convert N simultaneous sweeps into N sequential ones.
+  if [[ "$OBJ_SWEEP_CLAIM_STATE" != unavailable ]] && obj_sweep_stamp_is_fresh "$stamp"; then
+    log "object-store sweep: SKIPPED — a peer lane finished sweeping this store while this lane was taking the claim, so the box is inside the interval again (#3749)."
+    obj_sweep_claim_release "$claim"
+    obj_sweep_stop_if_latched "$latch"
+    return 0
+  fi
+  rc=0
+  out="$(bash "$script" --repo "$REPO_ROOT" --timeout "$OBJ_SWEEP_TIMEOUT_SECS" 2>&1)" || rc=$?
+  # Read the verdict from the sweep's OWN anchored control line, never from loose text:
+  # its output prints repository-controlled paths verbatim, so an unanchored match could
+  # land on one. Both the line AND the exit status are required to AGREE for the two
+  # actionable verdicts, and since #3749 review round 4 the CORRUPT branch really does
+  # require both (it was `||`, while this comment already claimed the conjunction — the
+  # false-rationale class, and the reason a reader would not have looked).
+  # `{ grep || true; }` ON EVERY PIPELINE BELOW, AND IT IS LOAD-BEARING, NOT DEFENSIVE.
+  # This file runs under `set -euo pipefail`: a `grep` that matches NOTHING exits 1, and
+  # with `pipefail` that status becomes the pipeline's — so an ASSIGNMENT from such a
+  # substitution, or a bare pipeline, KILLS THE SUPERVISOR with rc=1. TWO REACHABLE
+  # CAUSES, and neither is a hypothetical (an earlier version of this comment named two
+  # that are NOT reachable, which is worse than no comment because it is what stops the
+  # next person looking):
+  #   * `$script` IS WHATEVER THIS CHECKOUT HOLDS. An older, newer or stubbed sweep, or
+  #     one killed from OUTSIDE this process (an operator, the OOM killer), prints no
+  #     `verdict ` line and no `unmeasured-cause` line at all. This supervisor must not
+  #     depend on the current output shape of a sibling script to stay alive.
+  #   * `head -1`/`head -4`/`head -6` CLOSE THE PIPE EARLY, so grep dies of SIGPIPE (141)
+  #     whenever there are more matching lines than the head takes — which is the ORDINARY
+  #     case for the finding and cause pipelines. `|| true` INSIDE the brace group is what
+  #     absorbs that status before `pipefail` can promote it.
+  # Caught by scripts/tests/test_worker_supervisor.sh's obj-sweep(UNMEASURED) case, which
+  # planted a verdict with no cause line and observed the whole loop exit 1.
+  verdict="$(printf '%s\n' "$out" | { grep '^OBJECT-STORE: verdict ' || true; } | head -1)"
+  verdict="${verdict#OBJECT-STORE: verdict }"
+  verdict="${verdict%% *}"
+
+  # THE CORRUPT BRANCH IS TESTED FIRST, AND IT CREATES THE LATCH BEFORE THE THROTTLE
+  # STAMP IS WRITTEN (#3749 review round 3, item 1a).
+  #
+  # THE ORDERING DEFECT THIS FIXES. The stamp used to be written for every outcome
+  # BEFORE this branch ran, so between that write and the latch create there was a
+  # window in which a peer lane saw a FRESH, non-corrupt throttle stamp, skipped its own
+  # sweep for the whole interval, and went on spawning workers over a store this lane
+  # had already found damaged. The window was as long as it took to build the `findings`
+  # string and create a file; it is now empty in that direction, because the latch — the
+  # thing a peer must not throttle past — is in place before anything advertises that
+  # this box has been swept.
+  #
+  # AND IT TAKES *BOTH*, WHICH IS ITEM 2 OF THE SAME REVIEW. With `||`, an exit 4 with no
+  # verdict line — or a `CORRUPT` line under any other status — created a PERSISTENT,
+  # BOX-WIDE latch that stops every lane on this box and can only be cleared by hand. An
+  # unrecognised or incomplete sweep must not be able to do that: the blast radius of a
+  # false latch (four lanes halted until someone notices) is worse than one more
+  # iteration of a store whose damage, if real, the NEXT sweep reproduces and latches
+  # properly. A disagreement therefore falls through to the UNMEASURED path below, which
+  # is non-passing, journalled, and paged once — and it is named explicitly there, so the
+  # signal is not swallowed on the way past.
+  # ONE STOPPING PATH FOR BOTH STOPPING VERDICTS, AND THAT IS DELIBERATE (#3749 review
+  # round 10, item 1). `UNSWEEPABLE` (the sweep RAN and reproducibly DIED without
+  # finishing; see the sweep script's PASS 2 branch) has to stop this box for the same
+  # reason CORRUPT does — a peer must not throttle past a durable finding — so it goes
+  # through the SAME latch-then-stamp ordering rather than a second copy of it. Four
+  # review rounds hardened that ordering (round 3's latch-before-stamp, round 4's
+  # two-channel conjunction, round 9's stamp gated on a CONFIRMED latch); a copied branch
+  # would inherit none of them, and the structural write-order assert reads THIS body.
+  # Only the operator-facing text differs, and it differs where a `case` says so.
+  stop_verdict=""
+  if [[ "$rc" -eq 4 && "$verdict" == "CORRUPT" ]]; then
+    stop_verdict=CORRUPT
+  elif [[ "$rc" -eq 6 && "$verdict" == "UNSWEEPABLE" ]]; then
+    stop_verdict=UNSWEEPABLE
+  fi
+  if [[ -n "$stop_verdict" ]]; then
+    local findings latched=0 stop_headline stop_title stop_body stop_reason
+    case "$stop_verdict" in
+      CORRUPT)
+        stop_headline="CORRUPT — stopping loudly; no worker may certify against a damaged shared store (#3749)."
+        stop_title="worker-supervisor: SHARED OBJECT STORE CORRUPT"
+        stop_body="git fsck reports damaged objects in this box's shared git object store — every lane here reads it, so NO gate verdict on this box can be trusted. Stopping."
+        stop_reason="object-store-corrupt"
+        ;;
+      *)
+        # ONE TOKEN, TWO CAUSES (#3749 review round 11, item 1): the fatal-death branch and
+        # the refusal to walk a store whose own config sets fsck.* keys. This text is
+        # derived from the TOKEN, so it asserts only the disposition; the sweep's own
+        # verdict-detail lines are quoted verbatim below and they name the cause.
+        stop_headline="UNSWEEPABLE — this box's shared store could NOT be swept to an affirmative verdict, so its object content is UNKNOWN, not clean. Stopping. NO damage was established: this is NOT a damage finding, and the sweep's own lines below say what it observed (#3749)."
+        stop_title="worker-supervisor: SHARED OBJECT STORE could not be SWEPT"
+        stop_body="the sweep could NOT obtain an affirmative verdict for this box's shared git object store — every lane here reads it, so NO gate verdict on this box can be trusted. Stopping. NO damage was established; act on what the sweep reported."
+        stop_reason="object-store-unsweepable"
+        ;;
+    esac
+    # LATCH FIRST, THEN EVERYTHING ELSE. A failure to persist it is REPORTED, never
+    # silent: this lane stops either way, but without the latch the peers on this box
+    # will re-run their own sweep and rediscover the damage rather than inheriting the
+    # verdict, and an operator reading only this journal would otherwise never learn that.
+    if [[ -z "$latch" ]]; then
+      log "object-store: the $stop_verdict verdict could NOT be latched — this box's shared store could not be resolved, so there is no box-wide file to record it in. Peer lanes will re-sweep and rediscover it (#3749)."
+    else
+      obj_sweep_set_latch "$latch" "$stop_verdict" || true
+      # CONFIRMED BY ASKING THE FILE AFTERWARDS, NEVER BY THE CREATE'S EXIT STATUS — the
+      # same test obj_sweep_set_latch itself ends on, and for the same reason: a create's
+      # status cannot tell "a peer got there first" (fine, the box IS latched) from "the
+      # directory is unwritable" (not fine). One extra stat, and it makes the gate below
+      # a property of the file rather than of a return value.
+      if obj_sweep_latch_present "$latch"; then
+        latched=1
+      else
+        log "object-store: the $stop_verdict verdict could NOT be latched at $latch (unwritable?) — peer lanes will re-sweep and rediscover it rather than inheriting this verdict (#3749)."
+      fi
+    fi
+    # THE THROTTLE STAMP IS WRITTEN ONLY WHEN THE LATCH IS CONFIRMED IN PLACE (#3749
+    # review round 9, item 1). A fresh stamp tells every peer on this box "somebody swept
+    # recently, do not spend another fsck" — which is safe ONLY because the latch they
+    # will also read stops them. With no latch there is nothing to stop them, so
+    # advertising a swept box would buy six hours of silence over a store confirmed
+    # damaged. See obj_sweep_force_stamp_stale for why the stamp is forced expired rather
+    # than merely left alone.
+    if [[ "$latched" -eq 1 ]]; then
+      obj_sweep_write_stamp "$stamp"
+    else
+      obj_sweep_force_stamp_stale "$stamp"
+    fi
+    findings="$(printf '%s\n' "$out" | { grep -E '^OBJECT-STORE: (finding|object) ' || true; } | head -6 | tr '\n' ';' | cut -c1-600)"
+    notify "high" "$stop_title" \
+      "$stop_body ${findings:-<no findings captured>}"
+    log "object-store: $stop_headline ${findings:-<no findings captured>}"
+    # THE REMEDY IS QUOTED FROM THE SWEEP, NEVER RESTATED (#3749 review round 9, item 2).
+    # This lane HAS the sweep's output, and the sweep knows which damage class it found —
+    # the repair differs by class, and it was measured there. Restating it here is how the
+    # wrong instruction ('git fetch --force origin', which re-downloads no objects and
+    # repairs nothing) survived in three files at once.
+    printf '%s\n' "$out" | { grep '^OBJECT-STORE: verdict-detail ' || true; } | head -40 | while IFS= read -r obj_line; do
+      log "object-store: $obj_line"
+    done
+    # FAIL-CLOSED ON THE DIAGNOSTIC: an older, newer or stubbed sweep may print no
+    # guidance, and a stopping lane must never leave an operator with none.
+    if ! printf '%s\n' "$out" | grep -q '^OBJECT-STORE: verdict-detail REMEDY'; then
+      log "object-store: REMEDY — this sweep printed no operator guidance (an older or stubbed check-object-store-integrity.sh). Stop every lane on this box and run 'bash scripts/check-object-store-integrity.sh' by hand for the measured remedy; 'git fetch --force origin' does NOT repair a damaged store and neither does a local 'git gc'/'git repack' (#3749)."
+    fi
+    # AND THE CLEARING INSTRUCTION IS PRINTED ONLY WHERE THERE IS SOMETHING TO CLEAR. On
+    # the un-latchable path (above) no latch exists, and naming one would be a second
+    # confidently-wrong instruction — the exact class item 2 removed — pointing an operator
+    # at a file that is not there while the real state (peers will re-sweep) was logged
+    # separately.
+    if [[ "$latched" -eq 1 ]]; then
+      log "object-store: CLEAR THE LATCH ONLY AFTER a re-run of that sweep reports its affirmative verdict — 'I think I fixed it' is not an exit condition: rm -f $latch"
+    else
+      log "object-store: there is NO latch to clear (this verdict could not be recorded box-wide) — repair the store, then re-run the sweep and require its affirmative verdict before resuming any lane (#3749)."
+    fi
+    finalize_exit "$stop_reason" 1
+  fi
+
+  # THE STAMP IS WRITTEN FOR EVERY OUTCOME. It bounds how often this box SPENDS the
+  # sweep — a box that cannot measure (no timeout binary, say) must not re-attempt it
+  # every iteration — and it says nothing about what was found. What a peer lane must
+  # not throttle past is recorded separately, and monotonically, by the latch above.
+  obj_sweep_write_stamp "$stamp"
+  # AND ONLY THEN THE CLAIM, IN THAT ORDER: a peer that acquires the claim next reads the
+  # stamp this lane just wrote and throttles, instead of paying for a sweep that has just
+  # happened. The CORRUPT branch above does not reach this line — it ends the process — and
+  # the EXIT trap releases the claim there, which is why the claim is registered in
+  # OBJ_SWEEP_CLAIM_OWNED on the line after it is created rather than here.
+  obj_sweep_claim_release "$claim"
+
+  if [[ "$rc" -eq 0 && "$verdict" == "VERIFIED" ]]; then
+    log "object-store: VERIFIED — $(printf '%s\n' "$out" | { grep '^OBJECT-STORE: measured ' || true; } | head -1)"
+    # RE-ASKED AFTER THE SWEEP, BEFORE RETURNING TO THE SPAWN PATH. This lane's own walk
+    # said VERIFIED, but it took up to MAX_SWEEP_WALKS fsck bounds to say it, and a PEER may have
+    # latched the box in the meantime. The peer's finding is about the same store and is
+    # strictly newer than this measurement, so it wins.
+    obj_sweep_stop_if_latched "$latch"
+    return 0
+  fi
+  # UNMEASURED (or no recognised verdict at all): REPORTED, and DELIBERATELY PERMISSIVE.
+  # THE WHY, IN CODE (CLAUDE.md #3229). An UNMEASURED sweep is not clean — nothing here
+  # reads it as clean, and it stops no worker from being spawned either, because refusing
+  # to run any worker on this box because a HYGIENE PROBE could not run is a self-DoS: the
+  # probe's failure modes are its own (no timeout binary, an unresolvable git dir, an
+  # expired bound on a loaded box), none of which is evidence about the store. So it is
+  # journalled every time and paged ONCE per run — loud enough to fix, never a silent
+  # swallow and never a latch.
+  # A DISAGREEMENT IS NAMED, NOT MERELY DEMOTED. One of the two channels said CORRUPT and
+  # the other did not, so this run neither established damage nor ruled it out — and the
+  # generic UNMEASURED line below would read as an ordinary "could not measure". Loud
+  # enough to investigate, and still not a latch (see the CORRUPT branch for why).
+  if [[ "$rc" -eq 4 || "$rc" -eq 6 || "$verdict" == "CORRUPT" || "$verdict" == "UNSWEEPABLE" ]]; then
+    log "object-store: INCONSISTENT sweep result (rc=$rc verdict='${verdict:-<none>}') — exactly ONE of the exit status and the anchored verdict line reports a STOPPING verdict, or the two name different ones. Treated as UNMEASURED and NOT latched: an incomplete or unrecognised sweep must not stop every lane on this box (#3749). If the next sweep reproduces the finding it will latch it; investigate the sweep itself."
+  fi
+  log "object-store: UNMEASURED (rc=$rc verdict='${verdict:-<none>}') — the shared store was NOT rehashed, so its integrity is UNKNOWN, not clean. Continuing: a hygiene probe that cannot run must not stop the fleet (#3749)."
+  printf '%s\n' "$out" | { grep '^OBJECT-STORE: unmeasured-cause ' || true; } | head -4 | while IFS= read -r obj_line; do
+    log "object-store: $obj_line"
+  done
+  if [[ "$OBJ_SWEEP_UNMEASURED_NOTIFIED" -eq 0 ]]; then
+    notify "high" "worker-supervisor: object-store sweep UNMEASURED" \
+      "the shared git object store could not be rehashed on this box (rc=$rc) — integrity is UNKNOWN, not clean. The loop continues; fix the cause so the sweep can run."
+    OBJ_SWEEP_UNMEASURED_NOTIFIED=1
+  fi
+  # Same re-check on the permissive path: UNMEASURED lets this lane carry on, so it is a
+  # return that leads to a spawn and it gets a fresh latch read like every other one.
+  obj_sweep_stop_if_latched "$latch"
+  return 0
+}
+
+# THE RESIDUAL WINDOWS, PER PATH, WITH THEIR REAL MAGNITUDES (#3749 review rounds 3 and 12).
+#
+# THE PREVIOUS VERSION OF THIS NOTE WAS WRONG, AND IN THE DIRECTION THAT MATTERS. It gave
+# ONE figure for every path — "a peer can create the latch in the gap between this lane's
+# last latch read and the moment its worker actually starts", "ONE worker is spawned on a box
+# that was latched corrupt MOMENTS earlier" — and round 12's review found that for the
+# CLAIM-LOSER path this understated the window by orders of magnitude: it was never the
+# post-read gap, it was the peer's ENTIRE sweep — 13-80s measured on this fleet's 366M store
+# and up to MAX_SWEEP_WALKS x OBJ_SWEEP_TIMEOUT_SECS = 600s at the shipped defaults. A note
+# that understates the very window it exists to disclose is worse than no note, because it is
+# what stops the next person looking. So the magnitudes below are stated PER PATH and each is
+# derived from a shipped default or from a measurement, never from the word "moments".
+#
+# WHAT THE ORDERING, THE WAIT AND THE PREFLIGHT GATE BUY. No lane advertises "this box has
+# been swept" before a stopping finding is durable; no lane returns from object_store_sweep
+# toward a spawn without having re-read the latch; a lane that LOSES the sweep claim waits for
+# the peer's verdict, re-reading the latch every OBJ_SWEEP_CLAIM_POLL_SECS, instead of walking
+# off with one stale read; that wait ends in bounded wall time whatever the peer does, rather
+# than spinning on a claim a dead peer will never give up (round 14); and no lane returns from
+# preflight_wait — however long its hold loop ran — without one more fresh read (round 13).
+#
+# PATH 1 — THE CLAIM LOSER. CLOSED as a distinct window (round 12). It WAS the peer's whole
+# sweep: 13-80s measured, 600s by construction. It is now bounded by the poll granularity —
+# the waiting lane observes the latch within one OBJ_SWEEP_CLAIM_POLL_SECS (5s at the
+# shipped default) of its creation and stops there. One sub-case survives: if the derived
+# 660s wait budget is spent with peers still handing the claim around, the lane carries on
+# UNMEASURED — journalled and paged, never counted as clean — and from that point its
+# exposure is PATH 3's, below.
+#
+# AND THE WAIT ITSELF IS BOUNDED IN WALL TIME BY CONSTRUCTION, NOT BY MAX_HOURS (round 14).
+# `completed` is reached WITHOUT SLEEPING, and the contention loop used to go round again on
+# it — so a peer that advertised its sweep and then DIED holding its claim (stamp FRESH,
+# claim PRESENT) made this lane spin CPU-hot until the supervisor's whole wall-clock budget
+# expired: 2165 observed completions in 20s, a burnt core on a four-lane box reading as "the
+# fleet got slow" with no attributable cause. `completed` now ENDS the wait and the lane
+# SKIPS (a fresh stamp is the same answer the throttle at the top of object_store_sweep
+# gives), and the loop carries its own deadline over the iteration's derived `claim_stale`
+# budget because neither remaining continuing state is required to have slept.
+#
+# PATH 2 — THIS LANE'S OWN SWEEP. Covered, not residual. The entry latch read and the
+# post-sweep reads bracket it, so a peer latching the box during this lane's own walks (up to
+# 600s) is caught by the read on the way out.
+#
+# PATH 3 — THE LAST LATCH READ TO THE WORKER SPAWN. NARROWED FROM UP TO AN HOUR TO ONE
+# PRE-SPAWN PROLOGUE (round 13), AND IT IS NOT ZERO. It USED to be the largest of the three:
+# object_store_sweep returned, the caller ran the preflight hold loop, and that loop never
+# re-read the latch — every hold sleeps HOLD_POLL_SECS and the loop tolerates up to
+# BUILD_HOLD_MAX of them, so at the shipped defaults a lane could sit for 12 x 300s = 3600s,
+# ONE HOUR (the leftover-worker family is bounded at LEFTOVER_HOLD_MAX x HOLD_POLL_SECS =
+# 900s) and then spawn onto a box a peer had latched meanwhile. preflight_wait is now a
+# WRAPPER around preflight_wait_holds that re-reads the STOP latch on EVERY return out of the
+# loop, so the hold window is closed STRUCTURALLY — as a property of the function boundary,
+# not at an enumerated set of returns (see preflight_wait for why that shape was chosen).
+#
+# WHAT REMAINS IS run_iteration'S PRE-SPAWN PROLOGUE, AND IT IS A NETWORK ROUND-TRIP, NOT
+# "MILLISECONDS". Between that read and `bash -c "$WORKER_CMD"` sit an ITER bump, an `rm -f`,
+# a `mkdir -p`, some assignments — and stamp_claim, which runs CLAIM_CMD `stamp`: a ref PUSH
+# to origin (plus a best-effort delete push on a lane transition). Measured lower bound on
+# this fleet: a bare `git ls-remote origin HEAD` is 0.26-0.28s, and a push negotiates and
+# updates a ref on top of that. The supervisor puts NO timeout on it, so the window is
+# sub-second-to-seconds in practice and UNBOUNDED in principle if the network stalls. A lane
+# with CLAIM_CMD empty pays only the local prologue, which really is milliseconds.
+#
+# THE BOUND ON THE HARM, unchanged and still true for every path. It is not silent and not
+# durable: that lane's NEXT iteration begins with object_store_sweep, whose first act is the
+# entry latch read, so it stops there and its worker exits at the end of its current issue.
+# Nothing certifies a merge inside that window without a full gate, and a full gate on a
+# latched box is exactly what the next iteration refuses.
+#
+# WHY THE REMAINDER IS NOT CLOSED HERE. An atomic "no worker may start after any peer latches"
+# guarantee needs per-store synchronisation shared by the sweep and the spawn decision (a
+# lock held across both, with the spawn decision taken inside it) — a redesign of the boundary
+# between this function and the spawn path, not another read. It is split to its own issue. A
+# further latch read immediately before the spawn would shrink the window again and CANNOT
+# remove it: a read and a spawn are two operations, and putting the read after stamp_claim
+# only moves the network round-trip to the other side of it. PATH 1 AND THE HOLD WINDOW ARE
+# CLOSED; THE PRE-SPAWN WINDOW IS OPEN. Do not describe the race as gone.
+
+# ---------------------------------------------------------------------------
 # Preflight: fail-closed, wait-don't-spin. Returns a hold reason on stdout, or
 # empty when clear. stop-file / budgets are handled by the caller (clean exit,
 # not a hold).
@@ -3217,11 +4761,50 @@ LAST_HOLD_REASON=""
 # leftover families are bounded SEPARATELY (roborev 1839): a non-self-clearing worker
 # orphan trips the TIGHT LEFTOVER_HOLD_MAX; a self-clearing build/gate process is
 # allowed the LOOSE BUILD_HOLD_MAX so a legitimate concurrent full gate is waited out.
-preflight_wait() {
+# preflight_stop_or_budget — the TWO clean-exit conditions, in one place so they can be
+# asked wherever this file is about to commit to something long and uninterruptible.
+# Never returns when either fires (finalize_exit ends the process).
+preflight_stop_or_budget() {
+  [[ -f "$STOP_FILE" ]] && finalize_exit "stop-file" 0
+  [[ $(($(date +%s) - START_TS)) -ge "$MAX_HOURS_SECS" ]] && finalize_exit "budget-wallclock" 0
+  return 0
+}
+
+preflight_wait_holds() {
   local worker_holds=0 build_holds=0
+  # ASKED IMMEDIATELY BEFORE THE SWEEP (#3749 review round 3, item 3). The sweep is the
+  # longest uninterruptible step in an iteration, and it used to run BEFORE the hold
+  # loop's stop-file and wall-clock checks — so a stop requested just after the outer
+  # loop's own check was ignored for the whole sweep. An operator who touches the stop
+  # file is entitled to have it read before this process spends minutes on hygiene.
+  preflight_stop_or_budget
+  # The throttled shared-object-store sweep (#3749) runs ONCE per iteration, HERE, before
+  # the hold loop: it is per-iteration box hygiene, not a hold reason, and it must not be
+  # re-run on every hold repoll. `CORRUPT` never returns — it stops the loop loudly from
+  # inside (see object_store_sweep).
+  #
+  # THE IN-FLIGHT SWEEP IS STILL NOT INTERRUPTIBLE, AND THAT IS A DELIBERATE LIMIT, NOT
+  # AN OVERSIGHT. The sweep's fsck walks (up to MAX_SWEEP_WALKS of them) happen inside a
+  # CHILD PROCESS
+  # (`bash scripts/check-object-store-integrity.sh`), so "check the stop file between the
+  # passes" is not something this function can do: there is no point between them that
+  # executes here. Making it interruptible means running the child in its own process
+  # group, polling, and signalling that group — a bounded-runner redesign whose own
+  # lifetime and process-ownership hazards this repo has already paid for once
+  # (CLAUDE.md: never signal a process group you no longer own), for a stop-latency win.
+  # So the exposure is BOUNDED IN WALL TIME INSTEAD: see OBJ_SWEEP_TIMEOUT_SECS, whose
+  # supervisor default is the sweep script's own bound DIVIDED BY MAX_SWEEP_WALKS,
+  # precisely so that every walk this caller can pay for still costs no more than ONE
+  # walk at the script's bound. The stop file is re-read the moment
+  # the sweep returns (the loop's first statement, below).
+  #
+  # ONE PART OF IT IS INTERRUPTIBLE, AND IT IS THE NEW PART (#3749 review round 12): when a
+  # PEER lane holds the sweep claim this lane now WAITS for that peer's verdict, and that
+  # wait runs in THIS shell rather than in the sweep's child, so it re-reads the stop file,
+  # the wall-clock budget and the STOP latch on every poll.
+  object_store_sweep
   while true; do
-    [[ -f "$STOP_FILE" ]] && finalize_exit "stop-file" 0
-    [[ $(($(date +%s) - START_TS)) -ge "$MAX_HOURS_SECS" ]] && finalize_exit "budget-wallclock" 0
+    preflight_stop_or_budget
     local reason
     reason="$(preflight_reason)"
     if [[ -z "$reason" ]]; then
@@ -3264,6 +4847,50 @@ preflight_wait() {
     log "HOLD: $reason; sleeping ${HOLD_POLL_SECS}s"
     sleep "$HOLD_POLL_SECS"
   done
+}
+
+# preflight_wait — THE HOLD LOOP, PLUS A FRESH STOP-LATCH READ ON THE WAY OUT
+# (#3749 review round 13).
+#
+# THE DEFECT. The STOP latch was read at the top of object_store_sweep and again before
+# every return out of it — and then this function's hold loop ran, which does not read the
+# latch at all. Every hold sleeps HOLD_POLL_SECS and the loop tolerates up to
+# BUILD_HOLD_MAX of them, so at the shipped defaults a lane could sit here for up to
+# 12 x 300s = ONE HOUR after its last latch read and then spawn a worker on a box a PEER
+# had latched CORRUPT (or UNSWEEPABLE) in the meantime. It was declared as a residual for
+# a round and overruled: the read below is one stat plus one `--print-store`, and it
+# reduces that window from an hour to the code between here and the spawn.
+#
+# WHY A WRAPPER AND NOT A CALL BEFORE THE `return 0`. That is the shape round 3 and round 5
+# already paid for twice in object_store_sweep: "remember the check at every early return"
+# leaves a fifth door for the next reviewer. Splitting the loop into preflight_wait_holds
+# and gating it HERE makes the property structural — every RETURN out of the inner body,
+# including ones nobody has written yet, is followed by the latch read, because the caller
+# never sees the inner function at all. Asserted structurally in test_worker_supervisor.sh
+# (`preflight-latch-gate`), which also requires preflight_wait_holds to have exactly ONE
+# call site, so the gate cannot be bypassed by calling the inner body directly.
+#
+# THE OTHER EXITS ARE NOT RETURNS, AND THEY ARE DELIBERATELY UNTOUCHED. The stop-file,
+# wall-clock-budget and leftover-hold paths end in finalize_exit, which ends the PROCESS:
+# they never reach this gate, they never spawn, and their exit codes are unchanged.
+#
+# WHAT THIS DOES NOT CLOSE. The gap is now the code between this read and the spawn —
+# microseconds, not milliseconds of policy — and closing it entirely needs per-store
+# synchronisation shared by the sweep and the spawn decision (a lock held across both), not
+# another read. Do NOT describe the race as gone.
+preflight_wait() {
+  local rc=0
+  preflight_wait_holds || rc=$?
+  # UNCONDITIONAL, on every return the inner body can make. A non-zero return is not a
+  # reason to skip it: the caller does not test this function's status, so ANY return from
+  # it continues toward a spawn.
+  #
+  # NOT INSIDE A COMMAND SUBSTITUTION, and that is load-bearing (the trap
+  # obj_sweep_claim_wait documents): the gate stops this lane by calling finalize_exit, and
+  # inside `$( )` that would end a SUBSHELL — the wait would appear to return normally and
+  # the lane would spawn on a box it had just seen condemned.
+  obj_sweep_stop_if_latched_now
+  return "$rc"
 }
 
 # ---------------------------------------------------------------------------
@@ -3884,10 +5511,15 @@ validate_numeric_knobs() {
   # silently break the bound (e.g. MAX_ISSUES=-1 ⇒ instant budget-issues rc=0, roborev
   # 1843). MAX_HOURS is here because its `$((MAX_HOURS * 3600))` derivation is integer
   # arithmetic (a bare-word MAX_HOURS would coerce to 0 → a broken wall-clock budget).
+  # OBJ_SWEEP_INTERVAL_HOURS is here, not in the signed group: 0 is its documented
+  # `disables` value and a NEGATIVE would be an operator typo whose meaning is undefined
+  # (the `-le 0` guard would treat it as disabled, which is not what a `-1` was trying to
+  # say). #3749.
   for name in MAX_HOURS MAX_ISSUES BREAKER_N BACKOFF_NOWORK_SECS HOLD_POLL_SECS \
               MAX_ITER_SECS STUCK_POLL_SECS STUCK_TAIL_LINES LEFTOVER_HOLD_MAX \
               UNVERIFIED_MAX MISMATCH_RETRIES MISMATCH_RETRY_WAIT_SECS \
-              PENDING_AUTOMERGE_MAX PENDING_AUTOMERGE_MIN_SECS; do
+              PENDING_AUTOMERGE_MAX PENDING_AUTOMERGE_MIN_SECS \
+              OBJ_SWEEP_INTERVAL_HOURS OBJ_SWEEP_CLAIM_SLACK_SECS; do
     val="${!name}"
     [[ "$val" =~ ^[0-9]+$ ]] || _bad_knob "$name" "$val" "a non-negative integer"
   done
@@ -3902,6 +5534,25 @@ validate_numeric_knobs() {
     val="${!name}"
     [[ "$val" =~ ^[0-9]+$ ]] || _bad_knob "$name" "$val" "a positive integer"
     [[ "$val" -ge 1 ]] || _bad_knob "$name" "$val" "a positive integer (0 would silently skip the migration entirely)"
+  done
+  # OBJ_SWEEP_TIMEOUT_SECS is the same class (#3749): it is passed straight through as the
+  # sweep's `--timeout`, which REJECTS 0 as a usage error — so a 0 would make every sweep
+  # UNMEASURED forever, i.e. a bound that silently disables the probe rather than loosening
+  # it. Its own group because the message has to say that.
+  for name in OBJ_SWEEP_TIMEOUT_SECS; do
+    val="${!name}"
+    [[ "$val" =~ ^[0-9]+$ ]] || _bad_knob "$name" "$val" "a positive integer"
+    [[ "$val" -ge 1 ]] || _bad_knob "$name" "$val" "a positive integer (the sweep rejects 0, which would make every run UNMEASURED)"
+  done
+  # OBJ_SWEEP_CLAIM_POLL_SECS (#3749 review round 12) is the same class again, in the other
+  # direction: it is the sleep between passes of the wait on a PEER lane's in-flight sweep,
+  # so a 0 does not disable the wait — it turns a bounded wait into a BUSY SPIN for up to the
+  # whole derived staleness bound, on a box that is already spending an fsck. Its own group
+  # because the message has to say that.
+  for name in OBJ_SWEEP_CLAIM_POLL_SECS; do
+    val="${!name}"
+    [[ "$val" =~ ^[0-9]+$ ]] || _bad_knob "$name" "$val" "a positive integer"
+    [[ "$val" -ge 1 ]] || _bad_knob "$name" "$val" "a positive integer (0 would busy-spin the wait on a peer's sweep instead of polling it)"
   done
   # SIGNED integer knobs — the two with a documented `<=0 disables` contract.
   for name in BUILD_HOLD_MAX MISMATCH_GRACE_CAP_SECS; do

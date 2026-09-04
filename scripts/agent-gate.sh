@@ -264,6 +264,38 @@
 #                      opt-out. Source-only: no cargo, sub-second, offline, no
 #                      datasets.
 #                      SKIP-aware (loud): SKIPs only when cqlite-core is absent.
+#   dep-duplicates     ADVISORY DUPLICATE-DEPENDENCY RATCHET
+#                      (scripts/ci/check-dep-duplicates.sh, issue #1700 AH7).
+#                      Measures `cargo tree -d --workspace --target all` — the
+#                      audit's own invocation; the BARE `cargo tree -d` reads the
+#                      ROOT PACKAGE only and reports a small fraction of it, and
+#                      without `--target all` cargo measures the HOST target, so a
+#                      COMMITTED baseline would mean different things on a Linux
+#                      lane and a macOS one — and compares the
+#                      duplicate-instance / duplicated-crate counts against the
+#                      committed baseline scripts/ci/dep-duplicates-baseline.txt
+#                      (a generated file; one documented regeneration command,
+#                      `bash scripts/ci/check-dep-duplicates.sh --regenerate`).
+#                      ADVISORY BY MANDATE (#1700 AC2): an INCREASE is recorded PASS
+#                      and never fails the gate — a legitimate new dependency can add
+#                      a duplicate no local decision can collapse, and a lane that
+#                      reds on correct input is the lane agents learn to waive — but
+#                      it prints a LOUD, textually distinct ADVISORY-INCREASE block
+#                      naming the delta AND the crates that grew / became newly
+#                      duplicated. Never a bare number, in either direction: a clean
+#                      result prints `0 INCREASE RECOGNISED`.
+#                      …and never a VACUOUS pass: THREE states, not two. A run that
+#                      could not MEASURE (no cargo, `cargo tree` non-zero, a bounded
+#                      timeout, output the parser does not recognise) or could not
+#                      read the BASELINE (missing/garbage) is a SKIP NAMING THE CAUSE,
+#                      never a PASS — a pass may not rest on an unmeasured state.
+#                      "cargo tree printed nothing" (a legitimate zero) is kept
+#                      distinct from "printed something unparseable". Colour-immune
+#                      (#3400): parses an ANSI-stripped copy by redirection, never a
+#                      pipe. No datasets, no network, no build — a metadata probe.
+#                      This component emits no FAIL at all, by design; its own
+#                      self-test (which DOES fail on a broken guard) is in
+#                      tooling-tests.
 #   tooling-tests      shell-tooling regression tests (fast, no datasets/network):
 #                      scripts/tests/test_workspace_test_disposition.sh (+ its
 #                      self-test): the PACKAGE-granular #3522 census — every cargo
@@ -468,6 +500,97 @@
 #                      a readiness TIMEOUT fatal, an unanswerable prober stopping the run.
 #                      Hermetic: fake sysfs + a loopback listener under $TMPDIR; no
 #                      perf/sudo/taskset/root/hardware.
+#                      Also runs scripts/tests/test_ws0_flight_arm_guards.sh (#3551) —
+#                      the FLIGHT arm's own pin and allocator, split from the file above
+#                      (at the ~1500-line target) along a RESPONSIBILITY seam: that one
+#                      asks whether the pinned CPUs are one physical core, this one asks
+#                      what DIFFERS between two arms that no longer run the same way.
+#                      --flight-pin-mode selects between two AFFIRMATIVE assertions and
+#                      relaxes neither, so distinct-cores REFUSES a sibling pair (naming
+#                      both CPUs and the sysfs answer) and siblings REFUSES a distinct
+#                      one, proved over the SAME two inputs; a single-CPU list is refused
+#                      because pairwise-distinct over one element compares nothing.
+#                      --flight-allocator is verified from the RUNNING PROCESS because
+#                      LD_PRELOAD FAILS OPEN (glibc prints "cannot be preloaded ...:
+#                      ignored" and continues with system malloc, exit 0), so arm C would
+#                      otherwise be a byte-identical duplicate of arm B under a label
+#                      saying otherwise; the absent-mapping branch and the EMPTY/ABSENT
+#                      maps files are driven against synthetic maps, the last two as
+#                      COULD-NOT-MEASURE refusals rather than "no mapping present"
+#                      (measured on a mutant: `system VERIFIED ... (0 mappings read)`).
+#                      Plus the #3272-F6 substitution at the new pin, the record's closed
+#                      grammars, and a ONE-FIELD report differential proving a
+#                      distinct-cores pin is never described as physical-core siblings.
+#                      Hermetic: fake sysfs, synthetic maps/session dirs/corpus under
+#                      $TMPDIR, every driver call through ws0_driver_run.
+#                      Also runs scripts/tests/test_ws0_abc_driver_guards.sh (#3551) —
+#                      the INTERLEAVED A/B/C SET's own guards, the subject neither file
+#                      above can answer: is a directory of WS0 measurement sessions ONE
+#                      PAIRED EXPERIMENT? Three roborev findings, one family (an artifact
+#                      ADOPTED without its provenance established). ws0-3551-abc.sh's
+#                      RESUME is deliberate and stays, so it is CHECKED: a run
+#                      FINGERPRINT (corpus path AND its recorded Data.db sha256 + rows,
+#                      --bin-dir AND all three binaries' digests, each arm's EXACT flag
+#                      list, --step-duration/--arena-max/--jemalloc-lib/--port) written
+#                      once and verified field-by-field after, with --rounds DELIBERATELY
+#                      excluded because extending a set is a legitimate resume — asserted
+#                      in BOTH directions, since a guard that reds on correct input is the
+#                      guard an operator works around. Plus per-session window validation
+#                      (arm and round must match the directory name, recorded exit must be
+#                      0) and ws0_abc_aggregate.py's configuration validation over EVERY
+#                      (round, arm) rather than the first, and `ratio bare/flight` pinned
+#                      NUMERICALLY to the rig's own quantity (rows/s bare over rows/s
+#                      flight, not a cycles quotient) on a fixture separating all three
+#                      candidate readings, plus a flight-FASTER fixture pinning the
+#                      direction below 1. Every pin/mode/allocator RED arm is planted by
+#                      SUBSTITUTING the artifact (a sed on a scratch copy — those are the
+#                      driver's DEFINITION of an arm, not flags) and the plant is asserted
+#                      to have TAKEN, because a sed that matched nothing leaves a RED arm
+#                      identical to its control. Hermetic: synthetic session dirs,
+#                      identity and binary fixtures under $TMPDIR, plus a recording STUB
+#                      standing in for the measurement driver beside the scratch copy,
+#                      so the real driver is never reached — asserted from the stub's
+#                      own log (a positive control proves the harness CAN see an
+#                      invocation) and from lib-ws0-hermetic.sh's shims.
+#                      Also runs scripts/tests/test_ws0_3551_artifact_tools.sh (#3551) —
+#                      the two MEASUREMENT-ANALYSIS tools under
+#                      docs/reports/ws0-3551-artifacts/ (clean-pairs.py,
+#                      window-census.py) whose stdout IS that issue's published result.
+#                      This repo reviews docs/reports/*-artifacts/ harnesses as CODE
+#                      (#3229) and these two had NO tests, which is how a real defect
+#                      got in: a session read CLEAN on ONE zero-census sample anywhere
+#                      in its window, so a mostly UNOBSERVED session could enter the
+#                      published medians — a non-empty sample set is not COVERAGE. The
+#                      coverage BOUND is DERIVED from the committed judge
+#                      (ws0_quiescence.MAX_SAMPLE_GAP_S) at run time, never restated,
+#                      and which side of it is permissive is READ from that rule's own
+#                      strict `>`. Driven from BOTH ends, and the two BOUNDARY halves
+#                      (window start to first sample, last sample to window end) are
+#                      driven SEPARATELY from the interior one, because a
+#                      consecutive-differences scan cannot see them and that is where
+#                      this rule is usually got wrong. NOT MEASURED is asserted
+#                      textually DISTINCT from UNDERCOVERED. Pairing: a contaminated
+#                      BASELINE voids its whole round (the set-3-round-2 event, four
+#                      clean treatments lost); a pair whose own bare-scan control moved
+#                      at least as much as its treatment is REPORTED and excluded —
+#                      including when it is the only pair, which used to print a bare
+#                      NO CLEAN PAIRS and drop the reason; pairs pool across SETS and
+#                      never across ROUNDS, on fixtures where a violation would change
+#                      the answer. Medians and direction counts pinned NUMERICALLY by
+#                      column HEADER (never position) with a FASTER and a SLOWER
+#                      treatment, so both signs are pinned. And the per-CPU column's
+#                      corrected claim is pinned phrase by phrase — TOTAL busy
+#                      INCLUDING our own measurement, explicitly NOT a contamination
+#                      bound — plus a count-equality assert that no un-negated mention
+#                      can appear, which a phrase list cannot express. Every refusal is
+#                      matched on the tool's OWN diagnostic, never a bare non-zero exit,
+#                      and each coverage refusal carries a positive control ON THE
+#                      ORACLE: a MUTATED scratch copy with the bound removed must ACCEPT
+#                      the same fixture (so the refusal is the RULE and not a malformed
+#                      fixture), with a boundary-only mutant discriminating the halves
+#                      and every plant asserted to have TAKEN. Hermetic: synthetic
+#                      session dirs, window records and sampler JSONL under $TMPDIR,
+#                      and NOTHING read from /data/ws0-3551 (one lane's live outputs).
 #                      Also runs scripts/tests/test_ws0_perf_invocation_lint.sh (#3272
 #                      item 10) — the THIRD structural guard, split out of the file above
 #                      under the campsite rule (it reached 1607 lines against the ~1500
@@ -5176,6 +5299,19 @@ _component_set_probe_inner() {
   if [ "$_cs_complete" = yes ]; then
     _CS_SHA="$remote_sha"
     _CS_BASE_OBJ=reused
+    # WHAT THIS FAST PATH RELIES ON, AND WHAT IT DOES NOT (#3749 owner ruling; the full argument,
+    # including the three REJECTED alternatives, is at the `src_note` object-provenance block in
+    # `_component_set_line`). It reads the baseline's committed manifest out of THIS LANE'S SHARED
+    # object store instead of transferring it: every lane on a box is a worktree of one `.git`, and
+    # an ordinary git read verifies the pack CRC and the zlib stream — enough to catch ACCIDENTAL
+    # damage — but does NOT rehash content against the requested object id. DELIBERATE forgery by a
+    # same-host peer is INVOKER-CLASS and OUT OF MODEL (#3312 triage rule: a peer able to plant
+    # objects can equally edit this script). ACCIDENTAL corruption is in model, and its control is
+    # NOT here: it is the periodic full `git fsck` sweep in
+    # `scripts/check-object-store-integrity.sh`, run at bootstrap and on the worker supervisor's
+    # throttled cadence. The emitted `component-set:` line DECLARES this boundary on every
+    # BASELINE-BEARING arm (the `src_note` suffix); the UNMEASURED arms have no baseline to name
+    # and so do not carry it, which is CLAUDE.md's scoping of the same sentence.
     # THE SCRATCH REPOSITORY IS KEPT EVEN HERE (roborev job 285, High — and a decision the lead
     # made explicitly). It used to be dropped, because "nothing was fetched, so nothing needs an
     # isolated store" — and that left the ancestry walk running in the LIVE repository, where
@@ -5588,36 +5724,65 @@ _component_set_line() {
     declaration) src_note=" — baseline read via the TEXTUAL FALLBACK: $_CS_MANIFEST_REL is VERIFIED ABSENT at that sha (#3544 transitional; the declaration is parsed as TEXT, never executed)" ;;
   esac
   # THE OBJECT STORE IS TRUSTED, NOT VERIFIED — AND THAT IS DECLARED IN THE LINE (roborev job 311,
-  # High; lead ruling on REQ-3544-OBJTRUST, option A; owned by #3746).
+  # High; lead ruling on REQ-3544-OBJTRUST, option A; RESOLVED by #3749).
   #
   # Git does not rehash a packed object against the id it was asked for on an ordinary read, and on
   # this fleet EVERY LANE ON A BOX IS A WORKTREE OF ONE SHARED `.git` (measured:
-  # `/data/lanes/repo/.git/objects` for lane-3544, lane-3473 and lane-3629 alike). So a peer lane
-  # that plants a forged pack/index can make a canonical sha resolve to different content — a
-  # shortened manifest, and a false PASS. Under the triage rule that is a NON-INVOKER route, hence
-  # a defect and not an out-of-model bypass.
+  # `/data/lanes/repo/.git/objects` for lane-3544, lane-3473 and lane-3629 alike). What an ordinary
+  # read DOES check is the pack CRC and the zlib stream, which catch ACCIDENTAL damage — bit rot, a
+  # truncated or torn pack write — but NOT a whole object whose content fails to hash to its own
+  # name. So a planted pack/index could make a canonical sha resolve to different content: a
+  # shortened manifest, and a false PASS.
   #
-  # WHY IT IS DECLARED RATHER THAN CLOSED HERE, which is a ruling and not a shrug. The recorded
-  # "a third finding here should REMOVE the reuse optimisation" ruling assumes removal CLOSES the
-  # exposure, and it does not: the ancestry walk and the provenance leg read HEAD's COMMITTED
-  # content, which has no source other than this store — the working tree cannot substitute,
-  # because `UNCOMMITTED` exists precisely to compare against what is committed. So removing the
-  # fast path leaves a forged HEAD object still able to turn `UNCOMMITTED` (fatal) into `DECLARED`
-  # (non-fatal), while charging every `--lite` round for it: measured 2026-08-31, 3.41 s / 93 MB
-  # full and 3.58 s / 45 MB at `--depth=1` (shallow is NOT cheaper — it still ships the tip's whole
-  # tree). A permanent tax for a half-closure is the guard people learn to waive.
+  # THE THREAT MODEL, AND A RULING THAT OVERTURNED WHAT THIS COMMENT USED TO SAY (#3749, owner
+  # ruling 2026-09-01). This block previously read that a peer lane planting objects "is a
+  # NON-INVOKER route, hence a defect and not an out-of-model bypass". THAT IS OVERTURNED, and the
+  # reversal is recorded here rather than quietly edited so it reads as a decision and not as
+  # drift. DELIBERATE forgery by a same-host peer is INVOKER-CLASS and OUT OF MODEL: CLAUDE.md's
+  # #3312 triage rule is explicit that "same-host actors able to write these scripts or roborev's
+  # database are invoker-class, not third parties" — and a peer that wants a false PASS can simply
+  # EDIT THIS FILE, which is cheaper than forging pack data and is not defended against by anything
+  # inside this process. No check inside a process defends against a party that controls the
+  # process; pretending otherwise is the false-assurance shape #3312 exists to remove.
+  #
+  # WHAT IS IN MODEL IS ACCIDENTAL CORRUPTION, AND ITS CONTROL IS A PERIODIC SWEEP, NAMED HERE SO
+  # THE POINTER SURVIVES: `scripts/check-object-store-integrity.sh` rehashes the whole shared store
+  # with a full `git fsck` (NOT `--connectivity-only`, which does not rehash content and could not
+  # detect this), reporting VERIFIED / CORRUPT / UNMEASURED. It runs at machine onboarding
+  # (`scripts/bootstrap-agent-machine.sh` section 5d) and on the worker supervisor's throttled
+  # per-iteration cadence (`scripts/local/worker-supervisor.sh`, default every 6h; a CORRUPT verdict
+  # stops that supervisor loudly rather than letting a worker certify against a damaged store).
+  # THAT IS PERIODIC, NOT PER-READ — which is exactly why the emitted clause still says TRUSTED,
+  # not verified. Do not inflate it.
+  #
+  # THREE ALTERNATIVES WERE CONSIDERED AND REJECTED BY THAT RULING. Recorded so they are not
+  # re-derived a fourth time:
+  #   * PER-LANE FULL CLONES — a permanent multi-GB, multi-minute tax on every lane for a threat
+  #     that is out of model.
+  #   * PER-READ REHASHING of the consumed objects — the FOURTH carve into this one pre-flight, and
+  #     a permanent cost on every `--lite` round.
+  #   * REMOVING THE REUSE OPTIMISATION — and this one is worth keeping the original argument for,
+  #     because it is still correct and still load-bearing: the recorded "a third finding here
+  #     should REMOVE the reuse optimisation" ruling assumes removal CLOSES the exposure, and it
+  #     does not. The ancestry walk and the provenance leg read HEAD's COMMITTED content, which has
+  #     no source other than this store — the working tree cannot substitute, because `UNCOMMITTED`
+  #     exists precisely to compare against what is committed. So removing the fast path leaves a
+  #     forged HEAD object still able to turn `UNCOMMITTED` (fatal) into `DECLARED` (non-fatal),
+  #     while charging every `--lite` round for it: measured 2026-08-31, 3.41 s / 93 MB full and
+  #     3.58 s / 45 MB at `--depth=1` (shallow is NOT cheaper — it still ships the tip's whole
+  #     tree). A permanent tax for a HALF-closure is the guard people learn to waive.
   #
   # So the line says what it depends on. A check that claims nothing false is worth more than one
   # claiming a closure it does not deliver — the same move the roborev waiver's threat model makes
   # where a dependency cannot be removed. It is FOLDED INTO `src_note` deliberately: that suffix is
   # already the uniform "this line ends by naming its baseline source", eleven printf arms consume
-  # it, and appending an twelfth-argument clause to each would be one fact written eleven times.
+  # it, and appending a twelfth-argument clause to each would be one fact written eleven times.
   case "${src_note:+set}" in
     set)
       case "$_CS_BASE_OBJ" in
-        reused)  src_note="$src_note; objects: baseline REUSED from this lane's SHARED store — store TRUSTED, not verified (#3746)" ;;
-        fetched) src_note="$src_note; objects: baseline FETCHED from the canonical remote, HEAD's own from this lane's SHARED store — store TRUSTED, not verified (#3746)" ;;
-        *)       src_note="$src_note; objects: provenance NOT RECORDED — treat the store as TRUSTED, not verified (#3746)" ;;
+        reused)  src_note="$src_note; objects: baseline REUSED from this lane's SHARED store — store TRUSTED, not verified (#3749)" ;;
+        fetched) src_note="$src_note; objects: baseline FETCHED from the canonical remote, HEAD's own from this lane's SHARED store — store TRUSTED, not verified (#3749)" ;;
+        *)       src_note="$src_note; objects: provenance NOT RECORDED — treat the store as TRUSTED, not verified (#3749)" ;;
       esac ;;
   esac
   case "$verdict" in
@@ -6016,7 +6181,7 @@ _python_build_verify_venv() {
   return 3
 }
 
-COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan python-bindings node-bindings binding-rust-tests delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface tooling-tests minimal-build all-features-check smoke)
+COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan python-bindings node-bindings binding-rust-tests delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface dep-duplicates tooling-tests minimal-build all-features-check smoke)
 
 # _component_lane <name> (issues #1737, #2657): SINGLE SOURCE OF TRUTH for the
 # MAIN-vs-SIDE lane split. Defined early (before the arg-parse dispatch) so the
@@ -6681,6 +6846,19 @@ _fm_component_class() {
     # cargo argv passes through this shell. Naming the DRIVER is structural (it is the
     # command the component runs); the feature set is NOT claimed.
     python-bindings) printf 'indirect:maturin' ;;
+    # dep-duplicates: `cargo tree -d --workspace --target all` runs inside
+    # scripts/ci/check-dep-duplicates.sh — a CHILD PROCESS — and the interceptors above
+    # are deliberately unexported, so class `cargo` would be an unexercisable claim of
+    # observability (the roborev job 273 F2 defect) and would render UNDECLARED. There IS
+    # one nameable driver whose reach is recordable from an EXPLICIT signal (the guard
+    # prints `dep-duplicates: probe cargo tree -d --workspace --target all INVOKED
+    # (rc N)` before any
+    # verdict, and run_dep_duplicates records reach from THAT line, never from the
+    # terminal status), so this is `indirect:`, not `unobservable:`. The driver text names
+    # the probe AND that it compiles nothing, because `cargo tree` is a metadata query:
+    # _fm_describe_cargo rejects such invocations by design, so there is no feature set
+    # anybody could have observed here even in the gate's own shell.
+    dep-duplicates)  printf 'indirect:check-dep-duplicates.sh (cargo tree -d --workspace --target all; a metadata probe, compiles nothing)' ;;
     node-bindings)   printf 'indirect:npm run build (napi)' ;;
     fmt|clippy|core-tests|tombstones-scan|scan-offload-guard|work-counters-guard) printf 'cargo' ;;
     byte-budget-guard|arrow-parity-guard|memory-budget|integration-tests) printf 'cargo' ;;
@@ -7308,7 +7486,7 @@ _census_kind() {
     # selected `.rs` file cannot be read — changes the RATCHET's failure semantics for every
     # diff, which is its own decision with its own risk of reddening correct input. Doing
     # `emitted` properly requires settling that first. Tracked in #3162.
-    file-size|pub-surface|roborev-lints|binding-unwind-profile|delivery-telemetry|tooling-tests)
+    file-size|pub-surface|roborev-lints|binding-unwind-profile|delivery-telemetry|tooling-tests|dep-duplicates)
                     printf 'gap:shell/python guard prints no AGENT-GATE-CENSUS contract line yet (#3162)' ;;
     *) return 1 ;;
   esac
@@ -9156,6 +9334,13 @@ _gate_atexit() {
   if declare -F _gate_release_slot >/dev/null 2>&1; then
     _gate_release_slot
   fi
+  # #3755/job 349: belt for the capture triple. Guarded on the definition for the same
+  # reason `_gate_release_slot` is — bash defines functions as it reads the file, and the
+  # early-exit paths run this trap long before that block is parsed. Normally a no-op:
+  # both owners close on their own return path, and the files live in $LOG_DIR anyway.
+  if declare -F _gate_admission_capture_close >/dev/null 2>&1; then
+    _gate_admission_capture_close
+  fi
 }
 
 # Synthetic-identity modes run against a stubbed rundir and never certify a real tree;
@@ -9211,6 +9396,72 @@ if {
 fi
 
 # ===========================================================================
+
+# ---- #3755 disk-admission RENDERERS, hoisted above emit_summary --------------------
+#
+# THESE TWO LIVE HERE, APART FROM THE REST OF THE #3755 BLOCK, FOR ONE REASON: bash
+# defines functions as it READS the file, and emit_summary is reached by early-terminal
+# paths (the component-set pre-flight, the fixture and schemas preflights) long before
+# the slot-cap block near acquire_gate_slot is ever parsed. Defined down there, they
+# were UNDEFINED at those call sites — `_emit_wants_disk_admission: command not found`
+# on the gate's own stderr, and, because an undefined function exits non-zero, the line
+# SILENTLY OMITTED from exactly the early blocks the shared assembly exists to cover.
+# The same hazard the `_gate_atexit`/`_gate_release_slot` guard documents further down.
+# Caught by the minimal-PATH case in test_agent_gate_summary.sh, which reads any
+# `command not found` on the gate's stderr as a defect.
+#
+# They are pure renderers: they read state and print, and depend on nothing else in the
+# #3755 block, so hoisting them costs nothing.
+
+# The `disk-admission:` line every FULL-gate SUMMARY carries. Empty until the probe runs,
+# i.e. for the exempt modes and for every block emitted before acquire_gate_slot.
+DISK_ADMISSION_LINE=""
+# 1 once acquire_gate_slot has passed its mode exemptions, i.e. once this run is a class
+# of run the probe applies to. Lets _disk_admission_meta tell "emitted before the probe"
+# (benign, ordering) from "the probe ran and produced nothing" (a defect, and named one).
+_DA_PROBE_REACHED=0
+
+# _disk_admission_meta: the line for the shared assembly slot. ALWAYS prints something.
+#
+# OMISSION IS THE ONE RENDERING THAT MUST NEVER HAPPEN (roborev job 335). A block with
+# no `disk-admission:` line at all leaves a reader unable to tell "this gate was never
+# probed" from "this block predates the probe" from "somebody forgot a call site" — and
+# the third is the state that ships a hole. So every state has a NAME:
+#
+#   * a verdict exists                -> the verdict
+#   * --only (self-exempt from the cap, so the probe never runs)
+#                                     -> NOT EVALUATED, naming the exemption
+#   * the block was emitted BEFORE acquire_gate_slot (the component-set pre-flight at
+#     the mode dispatch is a real instance)
+#                                     -> NOT EVALUATED, naming the ordering
+#   * the probe RAN and left no verdict
+#                                     -> that is a DEFECT in this file, and it says so
+#                                        rather than rendering as one of the benign
+#                                        states above
+_disk_admission_meta() {
+  if [ -n "${DISK_ADMISSION_LINE:-}" ]; then
+    printf '%s' "$DISK_ADMISSION_LINE"
+  elif [ -n "${ONLY:-}" ]; then
+    printf '%s' 'disk-admission: NOT EVALUATED (--only self-exempts from the #1825 slot cap, so the #3755 probe never runs) — asserts NOTHING about free space'
+  elif [ "${_DA_PROBE_REACHED:-0}" -eq 0 ]; then
+    printf '%s' 'disk-admission: NOT EVALUATED (this block was emitted BEFORE the #3755 probe, which runs inside acquire_gate_slot) — asserts NOTHING about free space'
+  else
+    printf '%s' 'disk-admission: INTERNAL (#3755) — the probe was reached but left no verdict; this is a defect in agent-gate.sh, not a property of the filesystem'
+  fi
+}
+
+# _emit_wants_disk_admission: which MODES carry the line. The full gate and --only reach
+# the full-gate terminal path and so must carry it (--only as an honest NOT EVALUATED);
+# --lite/--delta are exempt from the cap and from the probe, and the two selftest hooks
+# emit synthetic blocks whose content is pinned by test_agent_gate_summary.sh.
+_emit_wants_disk_admission() {
+  [ "${LITE:-0}" -eq 1 ] && return 1
+  [ "${DELTA:-0}" -eq 1 ] && return 1
+  [ "${SELFTEST:-0}" -eq 1 ] && return 1
+  [ "${LITE_AGG_SELFTEST:-0}" -eq 1 ] && return 1
+  return 0
+}
+
 
 # emit_summary <result> [meta-line ...]
 #
@@ -9276,6 +9527,42 @@ _emit_meta_lines() {
 
 emit_summary() {
   local result="$1"; shift
+
+  # ---- SHARED FULL-GATE METADATA ASSEMBLY (issue #3755, roborev job 335) ----------
+  #
+  # `disk-admission:` used to be pushed by the two builders that happened to remember
+  # it, so a full gate dying in the component-set, fixture, schemas, zero-dataset or
+  # tree-integrity path emitted a block with NO such line — contradicting both AC3 and
+  # this file's own header contract. Adding the call to five more builders would have
+  # left the sixth to the next person; assembling it HERE, in the one function every
+  # block (bar the hand-rolled no-clobber publish, which threads it itself for the same
+  # reason it threads the tree lines) passes through, means a new emit site CANNOT omit
+  # it by being written somewhere else. That is exactly the argument the six-return-path
+  # disposer rests on, one layer up.
+  #
+  # Any incoming `disk-admission:` line is DROPPED and re-emitted from the live global,
+  # so the assembly is idempotent and exactly ONE authoritative line appears no matter
+  # what the caller supplied — the same rule _publish_integrity_fail applies to the
+  # tree and component-set lines.
+  #
+  # FIELD ORDER: the line lands at the END of the caller's meta, immediately before
+  # `logs:`. In the normal full-gate terminal block it previously sat just after
+  # `component-set:`; nothing else moved.
+  #
+  # `set --` rather than a new array threaded through the three renderers below: the
+  # renderers keep their existing `for line in "$@"` untouched, so this change cannot
+  # perturb what they emit for any other line.
+  local -a _es_meta=()
+  local _es_line
+  for _es_line in ${@+"$@"}; do
+    case "$_es_line" in disk-admission:*) continue ;; esac
+    _es_meta+=("$_es_line")
+  done
+  if _emit_wants_disk_admission; then
+    _es_meta+=("$(_disk_admission_meta)")
+  fi
+  set -- ${_es_meta[@]+"${_es_meta[@]}"}
+
   # Write the complete block to the caller-known file FIRST, with plain
   # redirection (no pipe). This is the authoritative artifact and the advertised
   # recovery path. Capture stderr from the redirection so we can report WHY the
@@ -9463,12 +9750,17 @@ _integrity_fail_block() {
     case "$line" in
       tree-start:*|tree-end:*|tree-integrity:*|tree-hash-cap:*) continue ;;
       component-set:*) continue ;;
+      disk-admission:*) continue ;;
     esac
     _ifb_meta+=("$line")
   done
   _emit_meta_lines ${_ifb_meta[@]+"${_ifb_meta[@]}"}
   _tree_meta_lines
   printf '%s\n' "$(_component_set_meta)"
+  # #3755: this block does NOT go through emit_summary's shared assembly (it is the
+  # hand-rolled no-clobber publish path), so it threads the disk-admission line itself
+  # — the same argument, and the same code shape, as the component-set line above.
+  if _emit_wants_disk_admission; then printf '%s\n' "$(_disk_admission_meta)"; fi
   echo "logs: $LOG_DIR"
   echo "summary-file: $SUMMARY_FILE (NOT rewritten — live peer owns it)"
   echo "integrity-fail-sibling: $sibling"
@@ -16225,6 +16517,184 @@ run_pub_surface() {
   echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
+# dep-duplicates: the ADVISORY DUPLICATE-DEPENDENCY RATCHET (issue #1700 AH7).
+# scripts/ci/check-dep-duplicates.sh measures `cargo tree -d --workspace --target all`
+# and compares the duplicate-instance / duplicated-crate counts against the committed
+# baseline scripts/ci/dep-duplicates-baseline.txt. BOTH flags are load-bearing:
+# `--workspace` because the bare `cargo tree -d` reads the ROOT PACKAGE only (this
+# workspace HAS a root package, so cargo's default member set is that one package) and a
+# ratchet over the bare form would be blind to most of the subject; `--target all`
+# because `cargo tree` otherwise measures the HOST target, so the COMMITTED baseline
+# would mean a different thing on a Linux lane than on a macOS one and each would report
+# a phantom advisory delta against the other's numbers.
+#
+# THE PROBE IS RUN READ-ONLY (`--locked --offline`), AND THAT PROTECTS THIS GATE. Without
+# `--locked` cargo will UPDATE `Cargo.lock` whenever it decides the manifests need it —
+# a TRACKED file — and a component that rewrites one mid-run trips this gate's own
+# mid-run tree-mutation check (#2926, `tree-integrity: FAIL (tree-mutated-midrun; …)`).
+# That would be an ADVISORY component, which may never emit a FAIL, reddening the gate of
+# record from a mutation it caused itself. `--offline` removes the registry access. A
+# failure under either flag is UNMEASURABLE ⇒ SKIP naming the cause; the guard
+# deliberately does NOT retry without them, since that would restore the mutability
+# silently.
+#
+# THIS COMPONENT NEVER EMITS FAIL, and that is a mandate rather than an oversight
+# (#1700 AC2). An increase in duplication is a signal to a human: a legitimate new
+# dependency can add a duplicate that no local decision can collapse, `[patch]` and pins
+# that fight upstream ecosystems are explicitly out of scope, and a lane that reds on
+# correct input is the lane agents learn to waive. So an increase is recorded PASS with a
+# LOUD, textually distinct ADVISORY-INCREASE block echoed into the gate log, naming the
+# delta and the crates responsible.
+#
+# IT ALSO NEVER PASSES VACUOUSLY, which is the other half and the harder one. "Advisory"
+# is not a licence to green on nothing (CLAUDE.md: a positive verdict requires an
+# affirmative measurement), so PASS is keyed on THREE AFFIRMATIVE SIGNALS TOGETHER, never
+# on the absence of an error: the guard's `verdict NO-INCREASE|ADVISORY-INCREASE` line,
+# its `probe … INVOKED` line (cargo really ran) and its `MEASURED …` line (a census was
+# really published). The verdict ALONE is not enough — a stale log, a replayed or
+# hard-coded verdict line, or a guard that returned a verdict having measured nothing all
+# reach it, and keying on it alone once permitted the self-contradictory
+# `PASS [never reached …]`. Every other outcome is a SKIP NAMING THE CAUSE: the guard absent
+# from the checkout, no cargo on PATH, no `timeout(1)` accepting `-k` with which to BOUND
+# the probe (the guard then does not run it at all — an unbounded `cargo tree` could hang
+# this component with no verdict, and a missing capability must not inherit the permissive
+# branch), `cargo tree` non-zero or timed out, output the
+# parser does not recognise, a missing or ungrammatical baseline, an unexpected exit
+# status, a zero exit with NO verdict line (a guard that returned early measured
+# nothing, and that is a SKIP, not a pass), or a verdict unaccompanied by the probe or
+# the MEASURED line. A SKIP is visible in the SUMMARY and is not a
+# certification; the component's own self-test — which DOES fail, on all of those paths —
+# lives in tooling-tests.
+#
+# No datasets, no network, no build: `cargo tree` is a metadata probe. It is therefore
+# NOT in DATASET_COMPONENTS.
+run_dep_duplicates() {
+  local name=dep-duplicates
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local guard="scripts/ci/check-dep-duplicates.sh"
+  local log="$LOG_DIR/$name.log"
+  local start end status cause="" drv
+  start=$(date +%s)
+  # ONE SPELLING of the driver text, taken from the declaration site itself rather than
+  # retyped here, so the class-based rendering (empty sidecar) and the recorded reach can
+  # never read as two different states.
+  drv="$(_fm_component_class "$name" 2>/dev/null || printf 'indirect:%s' "$guard")"
+  drv="${drv#indirect:}"
+  if [ ! -f "$REPO_ROOT/$guard" ]; then
+    status=SKIP
+    echo ">>> [$name] SKIP (cause=guard-absent: $guard is not in this checkout, so nothing was measured)"
+    _fm_note_driver "$name" "$drv" not-reached "the guard script is absent from this checkout"
+    record_result "$name" "$status" 0
+    echo ">>> [$name] $RECORDED_STATUS (0s)"
+    return 0
+  fi
+  echo ">>> [$name] bash $guard"
+  local rc=0
+  bash "$REPO_ROOT/$guard" >"$log" 2>&1 || rc=$?
+
+  # ANSI-STRIPPED, READ BY REDIRECTION (#3400). The guard's own lines carry no escapes,
+  # but cargo's stderr shares this log and colour SURVIVES redirection to a file — and a
+  # parse routed through the shared idiom cannot rot into the one that is not.
+  local src verdict="" probe="" measured="" unmeas=""
+  src=$(_ansi_stripped_log "$log" 2>/dev/null) || src=""
+  if [ -n "$src" ] && [ -r "$src" ]; then
+    local line
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        'dep-duplicates: verdict '*)            [ -n "$verdict" ] || verdict="${line#dep-duplicates: verdict }" ;;
+        'dep-duplicates: probe '*' INVOKED '*)  [ -n "$probe" ] || probe="$line" ;;
+        'dep-duplicates: MEASURED '*)           [ -n "$measured" ] || measured="$line" ;;
+        'dep-duplicates: SKIP-UNMEASURABLE '*)  [ -n "$unmeas" ] || unmeas="${line#dep-duplicates: SKIP-UNMEASURABLE }" ;;
+        'dep-duplicates: SKIP-BASELINE-UNUSABLE '*) [ -n "$unmeas" ] || unmeas="${line#dep-duplicates: SKIP-BASELINE-UNUSABLE }" ;;
+      esac
+    done <"$src"
+  else
+    # A log we could not normalise is a log we did not read: say so rather than deriving a
+    # verdict from a file the parse failed on.
+    unmeas="cause=log-unreadable detail=could not normalise $log for parsing"
+    rc=99
+  fi
+
+  # THE DRIVER'S REACH, from an EXPLICIT SIGNAL (#3453, roborev job 273 F3): the guard
+  # prints `probe <cmd> INVOKED (rc N)` immediately after invoking cargo, before any
+  # verdict. Reach is read from THAT line and never inferred from the terminal status —
+  # the guard can exit 3 having never reached cargo at all (cargo absent), and claiming
+  # an invocation that did not happen is exactly the defect this recording exists to fix.
+  if [ -n "$probe" ]; then
+    _fm_note_driver "$name" "$drv" reached
+  else
+    _fm_note_driver "$name" "$drv" not-reached "no 'probe … INVOKED' line in $log"
+  fi
+
+  case "$rc" in
+    0)
+      case "$verdict" in
+        NO-INCREASE*|ADVISORY-INCREASE*)
+          # A VERDICT IS NOT A MEASUREMENT (roborev round 3, #1700). PASS requires the
+          # verdict AND BOTH affirmative signals that a census was actually taken: the
+          # guard's `probe … INVOKED` line (cargo really ran) and its `MEASURED …` line
+          # (a census was really published). Keying PASS on the verdict alone permitted
+          # the self-contradictory `PASS [never reached …]` — this component certifying a
+          # duplicate census beside its own record that cargo was never invoked — and let
+          # a stale, replayed or hard-coded verdict line manufacture exactly the vacuous
+          # pass the component exists to prevent. Absent either signal it is a SKIP naming
+          # WHICH one was missing; this component may never FAIL, so SKIP is how it says
+          # "nothing was measured".
+          if [ -z "$probe" ]; then
+            status=SKIP
+            cause="cause=verdict-without-probe detail=$guard printed 'verdict $verdict' but NO 'probe … INVOKED' line, so no cargo invocation is evidenced and the verdict rests on nothing measured here"
+          elif [ -z "$measured" ]; then
+            status=SKIP
+            cause="cause=verdict-without-measurement detail=$guard printed 'verdict $verdict' but NO 'MEASURED …' line, so no duplicate census was published for that verdict to be about"
+          else
+            status=PASS
+            # Echo the guard's OWN statements so a pasted gate log shows the ratchet RAN
+            # over real numbers, and so an increase is loud where a human will see it.
+            local l
+            while IFS= read -r l || [ -n "$l" ]; do
+              case "$l" in
+                'dep-duplicates: 0 INCREASE RECOGNISED'*|'dep-duplicates: ADVISORY-INCREASE'*|'dep-duplicates: RATCHET-LOOSE'*|'dep-duplicates: MEASURED '*|'dep-duplicates: verdict '*) echo "$l" ;;
+              esac
+            done <"$src"
+          fi
+          ;;
+        *)
+          # Exit 0 with no verdict: the guard returned early, so NOTHING was compared.
+          # A pass may not rest on an unmeasured state, and this component may not FAIL —
+          # so it is a SKIP that names exactly that.
+          status=SKIP
+          cause="guard-exited-0-without-a-verdict"
+          ;;
+      esac
+      ;;
+    3|4)
+      status=SKIP
+      cause="${unmeas:-cause=unnamed detail=the guard exited $rc without naming a cause}"
+      ;;
+    *)
+      status=SKIP
+      cause="cause=unexpected-rc detail=$guard exited $rc"
+      [ -n "$unmeas" ] && cause="$unmeas"
+      ;;
+  esac
+  if [ "$status" = SKIP ]; then
+    echo ">>> [$name] SKIP ($cause)"
+    echo "    ADVISORY component (#1700): a SKIP here is NOT a pass and NOT a failure — it"
+    echo "    records that no duplicate-count comparison was made. Remedy depends on the"
+    echo "    cause above (install cargo / fix the lockfile / restore or regenerate"
+    echo "    scripts/ci/dep-duplicates-baseline.txt with"
+    echo "    \`bash scripts/ci/check-dep-duplicates.sh --regenerate\`)."
+    echo "--- last 40 lines of $log ---"
+    tail -40 "$log" 2>/dev/null || true
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+}
+
 # tooling-tests: fast shell-tooling regression tests that have no Rust target and
 # no dataset/network needs. Currently scripts/tests/test_agent_gate_summary.sh,
 # which verifies the SUMMARY block survives non-foreground capture (#1175), and
@@ -16273,6 +16743,15 @@ run_pub_surface() {
 # peer's artifacts are never answered as ours. Includes the /proc starttime parser tested
 # differentially against awk over every live pid. Hermetic; one bounded nested
 # `--only file-size` for wiring evidence (cannot select tooling-tests, so no recursion).
+# Also runs scripts/tests/test_gate_component_verdict.sh (#3750), the non-vacuity proof
+# for the split of COMPLETION from VERDICT: 106 cases (per-section floors) over
+# scripts/gate-component-verdict.sh
+# and the two DOCUMENTED text-completion grammars. Pins the case the lead named — a
+# COMPLETED `--only` run whose component SKIPped is NOT a pass, because a SKIP means the
+# check never ran — that a status token which merely STARTS WITH `PASS` is not one, that
+# the verdict is never DERIVED from the run's terminal token in either direction, and that
+# the gate-of-record grammar keeps REFUSING `PARTIAL` while the `--only` grammar terminates
+# on it without readmitting the #3041 `INCOMPLETE` sentinel. Hermetic: temp dirs only.
 # Also runs scripts/tests/test_gate_detached.sh (#3473), which pins BOTH the cgroup
 # mechanism (a `KillMode=control-group` teardown kills work that used setsid+nohup, while
 # the same work in its own cgroup survives — demonstrated on a cgroup the test creates and
@@ -16318,6 +16797,16 @@ run_pub_surface() {
 # two defects landed inside the two prior fix rounds — the #3229 `census-exclusion:` precedent),
 # so this file measures BEHAVIOUR against real code and nothing here depends on it; mechanization
 # is #3499. Hermetic: temp dir only, no cargo, no datasets, no network, never invokes the gate.
+# Also runs scripts/tests/test_dep_duplicates_ratchet.sh (#1700), the non-vacuity proof
+# for the ADVISORY dep-duplicates component: its cases drive
+# scripts/ci/check-dep-duplicates.sh over PLANTED cargo-tree output (shim `cargo` +
+# scratch copy of the guard, no test seam) and assert the emitted TOKENS, and its G1/G2
+# cases substitute a stub guard in a detached worktree to prove the COMPONENT records PASS
+# for BOTH affirmative verdicts and SKIP — never PASS — when nothing was measured. Its ONE
+# live case accepts either affirmative verdict and reports an unmeasurable host as SKIPPED,
+# deliberately: this suite runs HERE, so a suite that red on a legitimate ADVISORY-INCREASE
+# would fail the full gate and defeat the component's advisory contract. It carries its own
+# case FLOOR. Offline; SKIP-aware where cargo or `git worktree` is unavailable.
 run_tooling_tests() {
   local name=tooling-tests
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -16886,6 +17375,129 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_ws0_cpu_pinning_guards.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (ws0 cpu-pinning / server-ownership guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 FLIGHT-ARM GUARDS (#3551) — the pin MODE, the ALLOCATOR and what the report
+  # may SAY about either. Its own file because the suite above is at the ~1500-line
+  # test target and this is a different subject: not "are the pinned CPUs one physical
+  # core" but "the two arms no longer run the same way, so what exactly differs, and is
+  # the difference the one the label claims". `--flight-pin-mode` selects between TWO
+  # AFFIRMATIVE assertions (each read from a fake thread_siblings_list) rather than
+  # relaxing one, so distinct-cores must REFUSE a sibling pair and siblings must REFUSE a
+  # distinct one — proved over the SAME two inputs — and a single-CPU list is refused
+  # because "pairwise distinct" over one element compares nothing. `--flight-allocator`
+  # is verified from the RUNNING PROCESS because LD_PRELOAD FAILS OPEN (glibc prints
+  # "cannot be preloaded ...: ignored" and continues with system malloc, exit 0), so the
+  # absent-mapping branch — the one the check exists for — is driven against synthetic
+  # /proc/<pid>/maps files, as are the EMPTY and ABSENT maps files, which must read as
+  # COULD-NOT-MEASURE refusals and never as "no jemalloc mapping present" (measured on a
+  # mutant: `system VERIFIED ... (0 mappings read)`). Plus the #3272-F6 substitution at
+  # the new pin, the record's closed grammars, and a ONE-FIELD report differential
+  # proving a distinct-cores pin is never described as `physical-core siblings`.
+  # Hermetic: fake sysfs, synthetic maps + session dirs + a few-KB corpus under $TMPDIR;
+  # every driver call through ws0_driver_run. No cargo, perf, sudo, taskset, root,
+  # libjemalloc, server, corpus or network.
+  echo ">>> [$name] bash scripts/tests/test_ws0_flight_arm_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_flight_arm_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 flight-arm pin/allocator guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 INTERLEAVED A/B/C GUARDS (#3551) — its own file because the two suites above are
+  # about ONE SESSION (which CPUs, which program, what differs between the two arms of
+  # it) and this is about a SET of sessions: is a directory of WS0 measurement runs one
+  # PAIRED EXPERIMENT? `ws0-3551-abc.sh`'s resume is deliberate (a shared box, and a set
+  # that starts over loses its window), so it is CHECKED rather than removed: a run
+  # FINGERPRINT — the corpus path AND its recorded Data.db sha256 + row count, the
+  # --bin-dir AND a digest of all three measured binaries, each arm's EXACT flag list,
+  # --step-duration/--arena-max/--jemalloc-lib/--port — written on the first invocation
+  # and verified field-by-field on every later one, with `--rounds` DELIBERATELY excluded
+  # and that exclusion asserted in BOTH directions (3->5 and 5->2 must be ACCEPTED),
+  # because a guard that reds on correct input is the guard an operator works around.
+  # Plus: a SKIPPED session must prove it is the session the slot expects (its
+  # abc-window.json present and readable, its arm and round matching the directory name,
+  # its recorded exit 0 — `results.json` alone carries no provenance at all); the
+  # aggregator's configuration validated over EVERY (round, arm) rather than the first,
+  # per-arm treatment stability and cross-arm invariants kept DISTINCT, and an ABSENT
+  # field refused as COULD-NOT-MEASURE with the field named; and `ratio bare/flight`
+  # pinned NUMERICALLY to this rig's own quantity (rows/s bare over rows/s flight — it
+  # was a cycles quotient, and inverted) on a fixture where all three candidate readings
+  # DIFFER, beside a flight-FASTER fixture that pins the direction below 1.
+  # The pin/mode/allocator RED arms substitute the ARTIFACT (a `sed` over a scratch copy
+  # of the driver — those three are its definition of an arm, not flags) and the plant is
+  # asserted to have TAKEN, since a `sed` that stopped matching leaves a RED arm identical
+  # to its control. Hermetic: synthetic session dirs, corpus identity and binary fixtures
+  # under $TMPDIR, plus a recording STUB beside the scratch copy so the `$HERE/`-relative
+  # driver path never resolves to the real measurement driver — and hermeticity is asserted
+  # AFFIRMATIVELY, from the stub's own log (one positive control proves the harness can
+  # SEE an invocation) and from lib-ws0-hermetic.sh's shims. No cargo, perf, sudo,
+  # taskset, root, corpus binaries, server or network.
+  # NOTE: the WS0 measurement driver's FILENAME is deliberately not written anywhere in
+  # this file. `test_ws0_hermeticity.sh`'s completeness census is CONTENT-based over every
+  # tracked file, so a prose mention here would report scripts/agent-gate.sh UNCOVERED and
+  # need the WHOLE GATE exempted from that lint — a real coverage reduction (a future gate
+  # component that genuinely invoked the driver would then go unflagged) bought for a
+  # comment. MEASURED: it reported exactly that, uncovered=1, the moment this comment first
+  # named it.
+  echo ">>> [$name] bash scripts/tests/test_ws0_abc_driver_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_abc_driver_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 interleaved A/B/C set guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 #3551 ARTIFACT-TOOL GUARDS — the two MEASUREMENT-ANALYSIS tools under
+  # docs/reports/ws0-3551-artifacts/ whose stdout IS the published result of that
+  # issue (clean-pairs.py, window-census.py). This repo reviews
+  # docs/reports/*-artifacts/ harnesses as CODE (#3229) and these two had NO tests,
+  # which is how a real defect got in: a session was accepted as CLEAN on the
+  # strength of ONE zero-census sample anywhere in its window, so a mostly
+  # UNOBSERVED session could enter the published medians. A non-empty sample set is
+  # not COVERAGE. The suite drives that rule from BOTH ends — the accept direction
+  # first, because a guard that only ever reds proves nothing — and separately
+  # drives the two BOUNDARY halves (window start to first sample, last sample to
+  # window end), which a consecutive-differences scan cannot see and which is where
+  # this rule is usually got wrong. The coverage BOUND is DERIVED from the committed
+  # judge (scripts/perf/ws0_quiescence.py's MAX_SAMPLE_GAP_S) at run time rather
+  # than restated, and which side of it is permissive is READ from that rule's own
+  # strict `>` rather than guessed. Plus: NOT MEASURED asserted textually distinct
+  # from UNDERCOVERED; the pairing rules (a contaminated BASELINE voids its whole
+  # round; a pair whose own bare-scan control moved at least as much as its
+  # treatment is reported and excluded; pairs pool across SETS and never across
+  # ROUNDS, on fixtures where a violation would change the answer); the medians and
+  # direction counts pinned NUMERICALLY by column HEADER with a faster AND a slower
+  # treatment so both signs are pinned; and the per-CPU column's corrected claim —
+  # it is TOTAL busy INCLUDING our own measurement and explicitly NOT a
+  # contamination bound, pinned phrase by phrase plus a count-equality assert that
+  # no un-negated mention can appear. Every refusal is matched on the tool's OWN
+  # diagnostic, never on a bare non-zero exit. Each coverage refusal also carries a
+  # positive control ON THE ORACLE: a MUTATED scratch copy with the bound removed
+  # must ACCEPT the same fixture, so the refusal is attributable to the rule and not
+  # to a malformed fixture, and a boundary-only mutant discriminates the two halves.
+  # Hermetic: synthetic session dirs, window records and sampler JSONL under
+  # $TMPDIR; NOTHING is read from /data/ws0-3551 (one lane's live outputs). No
+  # cargo, perf, sudo, taskset, root, corpus bytes, server or network.
+  echo ">>> [$name] bash scripts/tests/test_ws0_3551_artifact_tools.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_3551_artifact_tools.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 #3551 artifact-tool guards); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
@@ -17694,6 +18306,22 @@ run_tooling_tests() {
     return 0
   fi
 
+  # the #3750 split of COMPLETION from VERDICT: scripts/gate-component-verdict.sh plus
+  # the two DOCUMENTED text-completion grammars it sits beside. Pins the case the lead
+  # named — a COMPLETED `--only` run whose component SKIPped is NOT a pass — and that the
+  # gate-of-record grammar keeps REFUSING `PARTIAL`. No cargo, no datasets, no network.
+  echo ">>> [$name] bash scripts/tests/test_gate_component_verdict.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_gate_component_verdict.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (completion-vs-verdict split #3750); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
   # detached-gate launcher + the cgroup mechanism it rests on (#3473). Internally
   # SKIP-aware for hosts with no working `systemd-run --user`.
   echo ">>> [$name] bash scripts/tests/test_gate_detached.sh"
@@ -17717,6 +18345,35 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_pub_surface_guard.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (pub-surface guard self-test #1712); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # dep-duplicates ratchet self-test (#1700). Proves the ADVISORY guard actually FIRES,
+  # which for an always-non-failing guard is the harder property: its cases drive
+  # scripts/ci/check-dep-duplicates.sh over PLANTED cargo-tree output (a shim `cargo` on
+  # PATH and a scratch copy of the guard — there is no test seam) and assert the emitted
+  # TOKENS, not exit statuses: NO-INCREASE / ADVISORY-INCREASE naming who grew /
+  # RATCHET-LOOSE / colour-immunity with a positive control that the fixture really carries
+  # escapes / an empty-but-legitimate ZERO kept distinct from an unparseable read / every
+  # UNMEASURABLE and baseline-garbage refusal / the --regenerate round trip / a MIXED delta
+  # where one metric grows while the other shrinks. Its G1/G2 cases substitute a stub guard
+  # in a detached scratch worktree and assert the GATE COMPONENT records PASS for a clean
+  # measurement AND for an ADVISORY-INCREASE (naming the crates), and SKIP — never PASS —
+  # for an unmeasurable exit, a zero exit with no verdict line, and an unexpected status:
+  # the vacuous-pass guard for the one component that may never FAIL. Its ONE live case (G3)
+  # accepts either affirmative verdict and reports an unmeasurable host SKIPPED, so this
+  # component cannot red on correct input. Cheap and offline (the only cargo is a warm metadata probe); it
+  # SKIPs its live/gate cases where cargo or `git worktree` is unavailable. A failure FAILs
+  # the component, mirroring the guards above.
+  echo ">>> [$name] bash scripts/tests/test_dep_duplicates_ratchet.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_dep_duplicates_ratchet.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (dep-duplicates ratchet self-test #1700); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
@@ -17955,18 +18612,35 @@ run_tooling_tests() {
     return 0
   fi
 
+  # shared-object-store sweep guard (#3749): ABOVE the python3 gate on purpose. This suite
+  # needs nothing beyond bash + git, and folding a never-SKIPping suite into a SKIP-aware
+  # block would be a coverage hole wearing a SKIP's clothes (#3522's ruling). A failure
+  # here FAILs the component, mirroring the two guards above.
+  echo ">>> [$name] bash scripts/tests/test_check_object_store_integrity.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_check_object_store_integrity.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (object-store integrity sweep #3749); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
   if ! command -v python3 >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no python3 on PATH; selftest truncation reader needs it)"
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claude_auth_capability.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/tests/test_drive_issue_state.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh; bash scripts/tests/test_agent_gate_census.sh"
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_agent_gate_disk_admission.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claude_auth_capability.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/tests/test_drive_issue_state.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh; bash scripts/tests/test_agent_gate_census.sh"
   if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_notify.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_notify_contract.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_smoke_target_dir.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_concurrency_cap.sh" >>"$log" 2>&1 &&
+     bash "$REPO_ROOT/scripts/tests/test_agent_gate_disk_admission.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_bootstrap_agent_machine.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_perf_capability.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_perf_capability_bootstrap.sh" >>"$log" 2>&1 &&
@@ -19418,6 +20092,1406 @@ run_delta() {
 # derivation for #2640) so the per-gate core budget and this machine-wide cap
 # share a single source of truth for the slot count.
 
+# ---- DISK ADMISSION: evaluated at LAUNCH, RE-EVALUATED AT SLOT GRANT (issue #3755) ----
+#
+# THE DEFECT. Admission and consumption are two different moments, and the gate only
+# ever had the first one. A full gate launched with 167G free can sit an hour in the
+# #1825 queue and begin its build at 30G: the whole queue wait is wasted, the build
+# aborts into a floor, and it does so WHILE STILL HOLDING the slot a peer could have
+# used. An admission test taken at launch says nothing about the moment the resource
+# is actually consumed.
+#
+# THE PREMISE CORRECTION worth recording, because #3755 is written as if a launch-time
+# check existed: it did not. Before this block the only `df` in scripts/ was
+# worker-supervisor.sh's DISK_FLOOR_GB=40, which gates WORKER SPAWN and not the gate.
+# So "the same predicate as the launch-time check" had no referent, and delivering it
+# means introducing ONE predicate and evaluating it at BOTH moments — which is what
+# _gate_disk_admission_measure is. There is deliberately no second implementation:
+# a second implementation of a predicate is a second place for it to disagree.
+#
+# WHERE. Both evaluations live inside acquire_gate_slot. That function already
+# self-exempts --lite/--delta/--only, so the guard is full-gate-only BY CONSTRUCTION
+# rather than by a condition someone has to remember, and it returns immediately
+# before the certification window and the first component — which is exactly "after
+# slot grant and before the first build step".
+#
+# THE RULE, and it is one rule rather than a disposition per branch (roborev job 329):
+#
+#     THE MEASUREMENT IMMEDIATELY PRECEDING THE BUILD IS ALWAYS FAIL-CLOSED.
+#     A LAUNCH MEASUREMENT IS ADVISORY *ONLY* WHEN A SLOT GRANT WILL FOLLOW IT.
+#
+# The first draft had it as "launch advisory, post-slot fail-closed", which is the rule
+# above only on the path where a grant actually happens — and it left FIVE paths that
+# return straight into the build with nothing binding in front of them: the cap being
+# force-disabled, python3 absent, the daemon script absent, the slots dir uncreatable,
+# and the daemon dying before it acquired. On the first four no queue elapses, so the
+# launch reading IS the consumption-moment reading and is simply binding. The fifth is
+# the sharp one: the queue DID elapse, so the launch reading is stale by exactly the
+# interval this issue is about — that is #3755's own defect reproduced inside its own
+# fix — so that path RE-MEASURES rather than reusing a reading taken before the wait.
+#
+# Read the rule the other way for the advisory case, which survives unchanged and for
+# an unchanged reason: a low reading at launch can be freed by the very peer gate we
+# are about to queue behind, so refusing there would red a run that is about to be
+# perfectly fine — a guard that reds on correct input is the guard agents learn to
+# waive. `ADVISORY` is therefore a RENDERING that appears only where it is still true.
+#
+# UNMEASURED is DECLARED and non-fatal at every moment (the cap's own stated doctrine
+# is that the gate must never be un-runnable because of the cap) — but never SILENTLY,
+# so an unmeasurable reading names itself in the SUMMARY instead of taking the
+# permissive branch quietly.
+#
+# WHAT THE OUTCOME IS CALLED. RESULT stays FAIL. A new terminal token
+# (`RESULT: REFUSED`, which --delta has) would break the mandated completion probe
+# `grep -qE 'RESULT: (PASS|FAIL)'` and reintroduce #3041 from the other side: a poller
+# would read a FINISHED refusal as still-running or dead. Distinctness is carried by a
+# NAMED line and a NAMED `refusal:` key, exactly the documented
+# `missing-fixtures: FAIL-CLOSED (#2078)` / `missing-schemas: FAIL-CLOSED (#3148)`
+# precedent.
+
+# The bar, in GiB. 40 is #3755's own "40G building floor" and the value the committed
+# fleet tooling already uses (worker-supervisor.sh's DISK_FLOOR_GB).
+_GATE_MIN_FREE_GB_DEFAULT=40
+
+# The largest bar this gate accepts, STATED HERE rather than inherited from whatever
+# `printf %d` an implementation happens to ship (roborev job 329). 1 PiB exceeds by
+# orders of magnitude the capacity of any filesystem a gate can run on, and
+# 1048576 GiB = 1099511627776 KiB is exactly representable both as an IEEE-754 double
+# and as a 64-bit integer, so nothing in the comparison chain can round or wrap it.
+#
+# A bar ABOVE it is a NAMED REFUSAL (`out-of-range`), not a clamp and not a fallback to
+# the default. Both of those LOOSEN a bar the operator set high — the default grossly, a
+# downward clamp merely by less — and a guard may not quietly substitute a floor nobody
+# asked for. See `_gate_min_free_gb`.
+_GATE_MAX_FREE_GB=1048576
+
+# DISK_ADMISSION_LINE and _DA_PROBE_REACHED are declared above emit_summary (see the
+# hoist note there); everything else the probe needs is declared here.
+# Rendered per-moment states, so the line can name BOTH evaluations and a reader can
+# tell whether a run was admitted once or twice.
+_DA_LAUNCH_RENDER=""
+_DA_POST_RENDER=""
+_DA_BAR=""
+_DA_BAR_SRC=""
+# How many times the predicate was actually EVALUATED this run (1 = launch only, i.e.
+# no slot was ever granted; 2 = launch + slot grant). Counted explicitly rather than
+# inferred from the rendered post-slot text: a verdict must not be derived by sniffing
+# a display string two other functions independently format.
+_DA_EVALUATIONS=0
+# Which of the three binding moments produced the verdict, and what the slot state was
+# there — so a refusal can never claim a slot was released when none was ever held.
+_DA_MOMENT=""
+_DA_SLOT_NOTE=""
+# Set by the disposer immediately before a refusal so the two binding causes render their
+# OWN verdict token, lead sentence and remedy. Defaulted at the use site, never assumed.
+_DA_REFUSE_VERDICT=""
+_DA_REFUSE_LEAD=""
+_DA_REFUSE_REMEDY=""
+# The resolved target dir the CURRENTLY retained _DA_MOUNT was measured against. The
+# pairing is explicit so a later measurement can PROVE the retained mount still describes
+# the same subject rather than assume it (roborev job 345).
+_DA_MOUNT_FOR_TARGET=""
+# The write-probe artifact the probe could not remove, if any (job 395). A failed unlink
+# AFTER a successful write is NOT a writability answer and never refuses; it is DECLARED in
+# the emitted line so a leftover cannot be absorbed into the certification baseline unseen.
+_DA_LEFTOVER=""
+# ACCUMULATED ACROSS EVALUATIONS, newline-separated (roborev job 398). A full gate probes
+# TWICE, and `_DA_LEFTOVER` is reset per measurement, so when both unlinks failed only the
+# POST-SLOT artifact was ever declared and the launch one was absorbed silently — the exact
+# outcome the declaration exists to prevent. Deduplicated, because the two evaluations can
+# legitimately resolve the same directory and a repeated path is noise, not a second stray.
+_DA_LEFTOVER_ALL=""
+# Per-measurement outputs of _gate_disk_admission_measure.
+_DA_STATE=""
+_DA_VALUE=""
+_DA_MOUNT=""
+_DA_WHY=""
+
+# _gate_is_nonneg_decimal <s>: true for an unsigned integer or decimal (`40`, `0.5`,
+# `.5`, `40.`). Written with `case` globs, not `[[ =~ ]]`: this script carries no
+# other `=~` and supports the bash 3.2 floor.
+# The most fractional digits a bar may carry, and WHY THIS NUMBER (roborev job 389).
+#
+# THE DEFECT. The grammar accepted arbitrarily precise decimals while the comparison runs in
+# IEEE-754 doubles, so `40.0000000000000000001` converts to exactly 40 and a filesystem with
+# EXACTLY 40 GiB free PASSED a floor set strictly above 40. Measured: that bar times 2^20 is
+# exactly 41943040, and a reading of 41943040 KiB compares `>=` and is ADMITTED. Same
+# direction as the round-5 `%d` saturation — a false admission in a guard.
+#
+# WHY REFUSING EXCESS PRECISION RATHER THAN ROUNDING UP: the loss happens in the TEXT->double
+# conversion, before any arithmetic this code performs, so no amount of conservative rounding
+# afterwards can recover it. Refusing fails closed; rounding would not.
+#
+# WHY 3 AND NOT "EXACTLY REPRESENTABLE": requiring exact representability would refuse `0.1`,
+# a perfectly reasonable floor, i.e. it would red correct input. 3 digits is 0.001 GiB ~= 1
+# MiB, finer than any plausible floor, and it makes the comparison SAFE BY MEASUREMENT: with
+# at most 3 decimals the true product is a multiple of 2^20/1000 = 131072/125, so when it is
+# not an integer its distance from one is a multiple of 1/125 = 8e-3 KiB, while the double
+# error over the whole accepted range is at most ~1.1e-16 * 1.1e12 = 1.2e-4 KiB — 65x smaller.
+# So a rounding error can never carry the product across an integer KiB boundary, which is
+# the only way the comparison against an integer reading could flip.
+_GATE_MAX_BAR_DECIMALS=3
+
+# _gate_bar_decimals <v>: how many digits follow the decimal point (0 when there is none).
+_gate_bar_decimals() {
+  local frac
+  case "$1" in
+    *.*) frac="${1#*.}"; printf '%s' "${#frac}" ;;
+    *)   printf '0' ;;
+  esac
+}
+
+_gate_is_nonneg_decimal() {
+  case "$1" in
+    ''|.) return 1 ;;
+    *[!0-9.]*) return 1 ;;
+    *.*.*) return 1 ;;
+  esac
+  return 0
+}
+
+# _gate_min_free_gb: prints "<gib> <source>", source ∈ default|pinned|invalid|clamped.
+#
+# The source token is the #3414 `cpu-budget:` idiom and exists for the same measured
+# reason: an UNSET variable and a MIS-SET one are different operational facts, and
+# `${VAR:-40}` renders them IDENTICALLY — which is how a pin that was never in effect
+# read as installed for months. `${VAR+set}` is the only spelling that tells unset from
+# set-empty. Fractional values are legal (worker-supervisor's DISK_FLOOR_GB accepts
+# them). A negative bar clamps to 0 rather than being refused: "never refuse" is a
+# coherent thing to ask for, and `-0` clamping to `0` is the same value.
+_gate_min_free_gb() {
+  local v body neg=0 rc
+  if [ -z "${CQLITE_GATE_MIN_FREE_GB+set}" ]; then
+    printf '%s default' "$_GATE_MIN_FREE_GB_DEFAULT"; return 0
+  fi
+  v="$CQLITE_GATE_MIN_FREE_GB"
+  body="$v"
+  case "$v" in -*) neg=1; body="${v#-}" ;; esac
+  if ! _gate_is_nonneg_decimal "$body"; then
+    printf '%s invalid' "$_GATE_MIN_FREE_GB_DEFAULT"; return 0
+  fi
+  [ "$neg" -eq 1 ] && { printf '0 clamped'; return 0; }
+  # Precision BEFORE range: an over-precise value cannot be compared correctly at all, so
+  # there is nothing for a range check to be right about.
+  if [ "$(_gate_bar_decimals "$body")" -gt "$_GATE_MAX_BAR_DECIMALS" ]; then
+    printf '%.24s too-precise' "$v"; return 0
+  fi
+  # THREE-VALUED, like every other probe here: over the maximum / within it / could not
+  # be compared. The third case keeps the operator's pin rather than inventing a verdict
+  # — the measurement below then reports `comparison-unavailable`, which is the truth.
+  _gate_bar_over_max "$v"; rc=$?
+  case "$rc" in
+    0)
+      # OUT OF RANGE IS FAIL-CLOSED, NOT CLAMPED DOWN (roborev job 367).
+      #
+      # It used to clamp to the maximum, so a requested 2 PiB floor on a multi-PiB
+      # filesystem with 1.5 PiB free PASSED. Round 5 rejected DISCARDING an over-range bar
+      # for the 40GiB default because that would loosen a bar the operator set high; that
+      # reasoning was right and INCOMPLETE — clamping down loosens it too, just less. The
+      # operator asked for a floor this machinery cannot represent, and the honest answer
+      # is a named refusal naming the representable maximum, not a quieter floor nobody
+      # asked for. The value is reported AS TYPED (truncated for display only, since the
+      # grammar admits arbitrarily many digits) so the refusal names what was set.
+      #
+      # Low-side clamping to 0 is untouched: that direction cannot admit anything it
+      # should not.
+      printf '%.24s out-of-range' "$v"; return 0 ;;
+  esac
+  printf '%s pinned' "$v"
+}
+
+# ---- EVERY NUMERIC CONVERSION AND RENDERING RUNS UNDER `LC_ALL=C` (roborev job 392) ----
+#
+# A guard may not have a verdict that varies with `LANG`. Numeric text and message text are
+# both locale-dependent, which is the same reasoning that made the mkdir classifier report
+# `errno.errorcode` instead of parsing `mkdir`'s output (job 357).
+#
+# MEASURED, across every awk on this host, against a PRIVATE comma-decimal locale built with
+# `localedef` (none is installed, so this had to be constructed to test at all):
+#   INPUT  conversion of the dot-decimal string `40.5` -> CORRECT (81 for g*2) on gawk, mawk,
+#          nawk and busybox awk, in default AND `--posix` modes. So the false-admission
+#          direction the finding describes is NOT reachable on any awk here.
+#   OUTPUT rendering `printf "%.1f"` -> **mawk emits `200,0`** under that locale; gawk, nawk
+#          and busybox emit `200.0`. That one IS real: it corrupts the operator-facing number
+#          in the SUMMARY and it reds this suite on a mawk-default box, the same host-
+#          dependent class as the GNU-only digest tool in the same round.
+#
+# So `LC_ALL=C` fixes one demonstrated defect (the render) and forecloses the other direction
+# on implementations this host cannot exercise. It costs nothing: C is already the effective
+# locale for every measurement above.
+
+# _gate_bar_over_max <gib>: rc 0 = ABOVE the accepted maximum, 1 = within it, other =
+# could not be compared (no awk). Floating point, never an integer conversion.
+_gate_bar_over_max() {
+  LC_ALL=C awk -v g="$1" -v m="$_GATE_MAX_FREE_GB" 'BEGIN { exit (g + 0 > m + 0) ? 0 : 1 }' \
+    </dev/null 2>/dev/null
+}
+
+# _gate_disk_admission_clears_bar <available-kib> <bar-gib>
+#   rc 0 = the reading CLEARS the bar, 1 = it is BELOW, other = could not be compared.
+#
+# THE COMPARISON IS IN FLOATING POINT AND THERE IS NO INTEGER CONVERSION (roborev job
+# 329). The first draft rendered the threshold through `awk`'s `%d` and compared with
+# bash's `[ -ge ]`, and that chain is BOTH implementation-dependent and wrong in the
+# ADMITTING direction. Measured on one host, one payload (200GiB available, an 8-EiB
+# bar): busybox awk's `%d` yields **-2147483648** — a 32-bit wrap — so
+# `[ 209715200 -ge -2147483648 ]` is TRUE and the gate ADMITS a filesystem it must
+# refuse. gawk/mawk/nawk instead print a value beyond INT64_MAX, which makes bash's
+# `[` ERROR (`integer expression expected`, rc 2) and emit a diagnostic on the gate's
+# own stderr — a verdict reached by an error rather than by a measurement, which is not
+# a defensible way to be right either. Doubles carry every value in play exactly (the
+# accepted bar tops out at 1.0995e12 KiB and any real filesystem is far below 2^53), so
+# the comparison is exact and no implementation's printf enters the chain.
+_gate_disk_admission_clears_bar() {
+  LC_ALL=C awk -v k="$1" -v g="$2" 'BEGIN { exit ((k + 0) >= (g * 1048576)) ? 0 : 1 }' \
+    </dev/null 2>/dev/null
+}
+
+# ---- resolving WHICH filesystem the build will fill (roborev job 341) -------------
+#
+# THE DEFECT. The subject used to be `${CARGO_TARGET_DIR:-$REPO_ROOT/target}`. Cargo also
+# honours `CARGO_BUILD_TARGET_DIR` and `[build] target-dir` in a `.cargo/config.toml`,
+# which may live in the workspace, in `$CARGO_HOME`, or in ANY ancestor directory. Point
+# either at another volume and the guard measures a device the build never touches — so
+# it ADMITS while the real target is below the floor, and symmetrically refuses a run
+# that would have been fine. A confident, specific, wrong number in the SUMMARY is worse
+# than no number, because a reader acts on it.
+#
+# ASK CARGO; DO NOT MODEL CARGO. The effective directory comes from
+# `cargo metadata --no-deps`'s `target_directory`, which IS cargo's own answer after its
+# whole precedence chain (verified here, all three mechanisms and their ordering). This
+# repository's standing ruling is the reason: a port is a second implementation, and a
+# second implementation's correctness is only knowable by differential testing against
+# the original — and env-vs-workspace-vs-ancestor-vs-CARGO_HOME precedence is exactly the
+# chain that looks simple and is not.
+#
+# BOUNDED, because this runs at slot grant while HOLDING the machine-wide slot: a hung
+# probe would burn the slot with no verdict, which is the resource waste #3755 exists to
+# remove, re-created by its own fix. It reuses `_component_set_bounded` — the tree's
+# existing TERM -> grace -> group-KILL ladder with file-captured streams — rather than a
+# second bounding mechanism. Measured cost on this workspace: 0.37 s.
+#
+# NOT CACHED between the two evaluations, deliberately. A `.cargo/config.toml` edited
+# during a long queue changes where the build will write, so re-resolving at slot grant
+# is the same principle as re-measuring free space there.
+#
+# NO FALLBACK TO `$REPO_ROOT/target`. That would reinstate the defect in precisely the
+# configurations that trigger it; an unresolvable target dir is UNMEASURED with a cause
+# that names TARGET-DIR RESOLUTION, distinct from a df failure and from a bad bar,
+# because they are three different operator actions.
+#
+# `cargo metadata` is a PROBE, not a build/test invocation: `_fm_describe_cargo` rejects
+# `metadata`/`tree`/`--version`, so this cannot pollute a component's `[…]` feature-matrix
+# annotation (pinned by test_agent_gate_feature_matrix_annotation.sh).
+# ---- EXTERNAL COMMANDS ON THE ADMISSION PATH: THE COMPLETE AUDIT (roborev job 349) ----
+#
+# The rule this list exists to enforce: ANY command on this path that touches a
+# FILESYSTEM must be bounded, because the path runs at slot grant WHILE HOLDING THE
+# MACHINE-WIDE SLOT, and a stalled NFS/FUSE mount turns a measurement into a held slot
+# producing nothing — #3755's own failure recreated inside its fix. It is written out
+# because this family has now recurred twice: `cargo metadata` was bounded in round 5
+# while its sibling `df` was not, and fixing only what a review names is how the third
+# instance arrives.
+#
+#   FILESYSTEM-TOUCHING — every one BOUNDED via `_component_set_bounded`:
+#     cargo metadata   the target-dir resolution        (_GATE_TARGET_DIR_BOUND_SECS)
+#     python3 -c       reads the metadata payload       (_GATE_TARGET_DIR_BOUND_SECS)
+#     python3 -c       creating + errno-classifying the target dir (_GATE_DF_BOUND_SECS)
+#     df -Pk           the free-space reading           (_GATE_DF_BOUND_SECS)
+#
+#   NO FILESYSTEM ACCESS — deliberately NOT bounded, and each stated so the next reader
+#   does not have to re-derive it:
+#     awk              reads a shell STRING through a pipe (df output, or nothing at all
+#                      in the two BEGIN-block comparators) — never a path
+#     tr, cut          pure string filters over a variable, in the stderr WARN only
+#
+# A new command on this path belongs in one of those two lists, with its reason.
+#
+# ---- SECOND AXIS: WHAT EACH ONE MAY *WRITE* (roborev job 390) ----------------------
+#
+# A different question from bounding, and it needs its own enumeration for the same reason
+# the first one did: this family has regenerated three times by closing one axis at a time.
+# The rule: NOTHING on this path may write inside the REPOSITORY, because the probe runs
+# BEFORE `_tree_recapture_after_slot` and a write landing there is absorbed into the
+# certification baseline instead of being caught by `tree-integrity`.
+#
+#   cargo metadata   READ-ONLY, and now EXPLICITLY so: `--locked` forbids it creating or
+#                    updating `Cargo.lock`, the one tracked file it could otherwise touch.
+#   python3 (parse)  reads `$md` from stdin; writes nothing.
+#   python3 (mkdir)  WRITES, deliberately and declared: it creates the resolved TARGET DIR
+#                    and one `O_EXCL` probe file inside it, removed in a `finally`. Both
+#                    live under the target dir, which is a BUILD OUTPUT directory and is
+#                    gitignored — never a tracked path. Argued in full at that function.
+#   df -Pk           read-only by construction.
+#   $md              written under `$LOG_DIR`, this run's own scratch, never the worktree.
+#   capture triple   written under `$LOG_DIR` for the same reason (job 349).
+#
+# A new command belongs in this list too, with what it writes and where.
+#
+# ---- THIRD AXIS: THE ENVIRONMENTAL-ASSUMPTIONS CENSUS (roborev job 392) -------------
+#
+# WHY A CENSUS AND NOT ANOTHER FIX. Five findings in a row have been one family — an
+# assumption about the EXECUTION ENVIRONMENT, each in a NEW direction: an inherited
+# `CARGO_TARGET_DIR`, awk's `%d` differing by implementation, `$HOME`/cargo-config, a
+# GNU-only `sha256sum`, a comma-decimal locale. Closing them one at a time regenerated the
+# family five times. So the assumptions are enumerated: what is assumed, whether the
+# assumption is ENFORCED (pinned or isolated) or merely HELD, and what happens when it is
+# false. The point is that the next finding here is a LOOKUP rather than a discovery.
+#
+# BINARIES INVOKED (all four also appear in the bounding axis above):
+#   cargo      HELD on PATH. False -> rc 127 -> `target-dir-cargo-unavailable`, UNMEASURED,
+#              declared, non-fatal.
+#   python3    HELD. False -> rc 127 -> `target-dir-no-json-reader` /
+#              `target-dir-mkdir-no-classifier`, UNMEASURED, declared.
+#   df         HELD. False -> rc 127 -> `df-unavailable`, UNMEASURED, declared.
+#   awk        HELD. False -> the render degrades to `<n>KiB` and the comparators return
+#              neither 0 nor 1 -> `comparison-unavailable`, UNMEASURED, declared.
+#   timeout / gtimeout / bash+sleep   ENFORCED three-valued by `_component_set_bounded`:
+#              no mechanism -> `_CS_UNBOUNDABLE_RC` -> the `*-unboundable` causes, declared,
+#              and the command is NOT RUN rather than run unbounded.
+#   tr, cut    HELD, and verdict-irrelevant: they format one stderr WARN.
+#   NOTE every "false" above lands in the DECLARED "cannot tell" branch. None of them can
+#   produce a false ADMISSION, which is the property that matters.
+#
+# ENVIRONMENT VARIABLES READ:
+#   CQLITE_GATE_MIN_FREE_GB   ENFORCED: validated, and the value in effect is reported with
+#              a source token (default|pinned|invalid|clamped|out-of-range|too-precise).
+#   LC_ALL / LC_NUMERIC / LANG   ENFORCED: every numeric conversion and rendering runs under
+#              `LC_ALL=C` (job 392). Nothing here reads a locale-formatted number.
+#   CARGO_TARGET_DIR / CARGO_BUILD_TARGET_DIR / CARGO_HOME / HOME
+#              READ BY CARGO, NOT BY US, and that is the design ("ask cargo, do not model
+#              cargo"). HELD, and BENIGN BY CONSTRUCTION: whatever cargo resolves from them
+#              is where the build will write, and after a binding resolution we EXPORT
+#              `CARGO_TARGET_DIR` so measured == used. Contrast the SUITE, which must
+#              ISOLATE all four — a test's subject is the precedence itself, so an inherited
+#              value there decides the answer before the case does.
+#   PATH       HELD, and unavoidable: it selects which cargo/df/python3/awk runs. A shim
+#              ahead of the real tool is measured through. Not closable by this code.
+#   TMPDIR     NOT read on this path: the bounded runner's capture triple is assigned under
+#              `$LOG_DIR` (job 349), so nothing here depends on $TMPDIR.
+#
+# CONFIG FILES CONSULTED:
+#   .cargo/config.toml in the cwd, EVERY ANCESTOR, and `$CARGO_HOME`
+#              consulted BY CARGO, deliberately. HELD and correct for the same reason as the
+#              variables above: the build reads the same files.
+#   Cargo.toml / Cargo.lock   read by `cargo metadata`; `--locked` forbids WRITING the lock
+#              (job 390). A lockfile cargo will not accept ->
+#              `target-dir-lockfile-stale-or-metadata-failed`, UNMEASURED, declared.
+#
+# LOCALE-SENSITIVE CONVERSIONS:
+#   awk numeric in/out        ENFORCED (`LC_ALL=C`, 4 sites).
+#   `df -Pk` output           HELD: `-P` pins the COLUMN LAYOUT, the sizes are integers with
+#              no decimal separator, and the anchor is the `^[0-9]+%$` Capacity field. An
+#              implementation rendering that field differently yields `df-unparsable` ->
+#              UNMEASURED, declared — it fails SAFE, it cannot admit.
+#   errno -> symbol           ENFORCED by mechanism: `errno.errorcode` is a numeric table
+#              lookup. No message text is parsed anywhere on this path, by design (job 357).
+#
+# WHAT THE CENSUS DID *NOT* SURFACE: no new false-admission route. Every HELD assumption
+# above either degrades to a declared UNMEASURED or is benign because the build reads the
+# same source we do. The two irreducible ones are PATH selecting the tools and the
+# unisolable ancestor `.cargo/config.toml` — and both are shared with the build itself, so
+# they cannot make the measurement disagree with what the build does.
+_GATE_DF_BOUND_SECS=15
+
+# ---- CAPTURE OWNERSHIP FOR THE BOUNDED CALLS (roborev job 349, Low) -------------------
+#
+# THE LEAK. `_component_set_bounded` lazily mktemps a capture TRIPLE into $TMPDIR and
+# memoizes the paths in `_CS_CAP_*`. Every bounded call on this path is made from inside a
+# `$( … )` — `_gate_disk_admission_probe`, `_gate_resolve_target_dir` — so the memo landed
+# in a SUBSHELL and evaporated while the three files stayed on disk. Result: three
+# `agent-gate-bcap.*` files per resolution, multiplied by every nested gate this issue's
+# own suite launches on every `tooling-tests` run.
+#
+# THE FIX IS OWNERSHIP OUTSIDE THE SUBSTITUTION, and it also removes the signal exposure
+# rather than adding handlers for it: the paths are ASSIGNED (never mktemp'd) inside
+# `$LOG_DIR`, this run's own artifact directory. `_component_set_capture_paths` then
+# returns early — all three globals are non-empty — so nothing is created in $TMPDIR at
+# all, and a SIGKILLed gate leaves the files inside the log bundle it was always going to
+# leave, not as strays. Registration therefore genuinely PRECEDES creation (this repo's
+# standing rule from the gate-detached work): the names exist in the globals before the
+# bounded runner's `: > "$file"` brings them into being, so the cleanup can act on a
+# half-created state.
+#
+# OWNERSHIP IS CONDITIONAL. If a triple is already live — the #3544 pre-flight owns one
+# while it runs — we take no ownership and touch nothing; that pre-flight clears the
+# globals when it drops its own files, so by the time this path runs they are free.
+_DA_CAP_OWNER=0
+_gate_admission_capture_open() {
+  [ -n "${_CS_CAP_OUT:-}" ] && { _DA_CAP_OWNER=0; return 0; }
+  _DA_CAP_OWNER=1
+  _CS_CAP_OUT="$LOG_DIR/disk-admission.bcap.out"
+  _CS_CAP_ERR="$LOG_DIR/disk-admission.bcap.err"
+  _CS_CAP_RC="$LOG_DIR/disk-admission.bcap.rc"
+  return 0
+}
+# Reuses the pre-flight's own dropper so the two cannot disagree about what "release"
+# means — notably that `_CS_BOUND_MECH` is memoized WITH those files and must not outlive
+# them.
+_gate_admission_capture_close() {
+  [ "${_DA_CAP_OWNER:-0}" -eq 1 ] || return 0
+  _DA_CAP_OWNER=0
+  _component_set_drop_capture_files
+  return 0
+}
+
+_GATE_TARGET_DIR_BOUND_SECS=30
+# The resolved build-output directory and how it was obtained — reported in the SUMMARY,
+# because WHICH directory was measured is now the whole question.
+_DA_TARGET_DIR=""
+_DA_TARGET_NOTE=""
+
+# _gate_resolve_target_dir: prints `OK <path>` or `UNRESOLVED <why>`; returns 0 either
+# way, three-valued like every other probe here.
+_gate_resolve_target_dir() {
+  local md rc path
+  md="$LOG_DIR/disk-admission-cargo-metadata.json"
+  # `--locked` (roborev job 390). WITHOUT it, `cargo metadata` is PERMITTED to create or
+  # update `Cargo.lock` — a TRACKED file — and this probe runs BEFORE
+  # `_tree_recapture_after_slot`, so such a write would land before the certification window
+  # is captured and be ABSORBED into the baseline rather than caught. `tree-integrity` makes
+  # a mid-run mutation fatal; a mutation before the recapture is invisible to it, which is a
+  # false-certification route. Note the asymmetry that makes it worse than the tolerated
+  # case: when the FIRST CARGO COMPONENT re-resolves a stale lockfile, that is a mutation
+  # INSIDE the window and surfaces as tree-integrity's named `lockfile-settled` class; a
+  # write from here surfaces as nothing at all.
+  #
+  # MEASURED, and the measurement is the reason this comment is long: on the pinned
+  # toolchain the mutation is NOT REACHABLE — `--no-deps` does not write the lockfile even
+  # when it is MISSING, with or without `--offline`, network available or not (four
+  # measurements, all "Cargo.lock absent", rc 0). So `--locked` is not fixing an observed
+  # write; it converts a property we were relying on INCIDENTALLY — an undocumented
+  # `--no-deps` implementation detail that a future cargo may change — into an EXPLICIT one,
+  # at zero measured cost (the normal case exits 0 with it).
+  _component_set_bounded "$_GATE_TARGET_DIR_BOUND_SECS" \
+    cargo metadata --no-deps --locked --format-version 1 >"$md" 2>/dev/null
+  rc=$?
+  case "$rc" in
+    0) ;;
+    127) printf 'UNRESOLVED target-dir-cargo-unavailable'; return 0 ;;
+    124|137) printf 'UNRESOLVED target-dir-probe-timeout'; return 0 ;;
+    "$_CS_UNBOUNDABLE_RC") printf 'UNRESOLVED target-dir-probe-unboundable'; return 0 ;;
+    "$_CS_REPLAY_RC") printf 'UNRESOLVED target-dir-output-truncated'; return 0 ;;
+    *)
+      # THE `--locked` ARM, and it is DELIBERATELY the honest name rather than a confident
+      # one. With `--locked` the dominant cause of a non-zero exit is a stale or missing
+      # lockfile, so the cause NAMES it — a fourth operator situation with a fourth string,
+      # distinct from every df cause, every bar cause and the other target-dir causes. It
+      # does not claim certainty, because confirming it would mean parsing cargo's message,
+      # and that is a locale-dependent string oracle (the same reason the mkdir classifier
+      # reports `errno.errorcode` instead of reading `mkdir`'s output).
+      #
+      # WHICH EPISTEMIC STATE: UNMEASURED, and the choice is deliberate. A lockfile cargo
+      # will not accept establishes NOTHING about whether the build can write to the target
+      # filesystem — unlike an ENOSPC from the writability probe, which does. So it is the
+      # "cannot tell" branch, DECLARED in the block by its own cause rather than silent.
+      # Remedy for an operator who sees it: `cargo generate-lockfile`, or rebase onto a main
+      # whose lockfile matches the manifests.
+      printf 'UNRESOLVED target-dir-lockfile-stale-or-metadata-failed'; return 0 ;;
+  esac
+  # Parsed as JSON, never with a regex: a path may contain any byte and cargo escapes it.
+  # Bounded for the same reason the probe is. A newline in the value is REFUSED rather
+  # than rendered, because it would split the one-fact-per-line SUMMARY contract.
+  # `-I -S`: BOTH FLAGS, AND NEITHER ALONE IS SUFFICIENT (roborev job 416).
+  #
+  # THE DEFECT. This probe inherited PYTHONPATH and auto-loaded `sitecustomize`, so
+  # environment state could monkeypatch what it computes. IN MODEL, and this is why it is a
+  # defect rather than an invoker-class hazard: PYTHONPATH can be set SYSTEM-WIDE in
+  # `/etc/environment`, which the fleet bootstrap writes — so the setter need not be the
+  # invoker, and a non-invoker route is a defect. The consequence here is the worst
+  # available: a shadowed stdlib `json` hands this call an ATTACKER-CHOSEN
+  # `target_directory`, which the gate then MEASURES and PINS as CARGO_TARGET_DIR, so the
+  # admission and the build both move to a filesystem nobody chose. MEASURED end to end
+  # against a planted `json.py`: the block reported `PASS` naming the planted directory.
+  #
+  # WHICH FLAG BUYS WHICH PROPERTY, measured on python 3.12.3:
+  #   `-S` stops `site` running, which is what imports `sitecustomize`. With `-I` ALONE
+  #        `site` still runs and the SYSTEM site dirs stay on sys.path (measured: `site
+  #        imported: True`, /usr/local/lib/python3.12/dist-packages and
+  #        /usr/lib/python3/dist-packages present), so a `sitecustomize.py` in a system dir
+  #        still executes.
+  #   `-I` drops PYTHONPATH (via the `-E` it implies) and the user site dir (via `-s`). With
+  #        `-S` ALONE, PYTHONPATH IS STILL ON sys.path (measured: True), so a planted
+  #        `json.py` shadows the stdlib — which is exactly this call site.
+  # `os` happens to be a FROZEN module in 3.12 and is not shadowable that way, but `json` is
+  # ordinary python and `sitecustomize` can patch anything; the pair closes both routes.
+  #
+  # Costs a correct run nothing: this body needs only `json` and `sys`, verified importable
+  # under `-I -S`.
+  path=$(_component_set_bounded "$_GATE_TARGET_DIR_BOUND_SECS" python3 -I -S -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(3)
+p = d.get("target_directory")
+if not isinstance(p, str) or not p or "\n" in p or "\r" in p or "\t" in p:
+    sys.exit(4)
+sys.stdout.write(p)
+' <"$md" 2>/dev/null)
+  rc=$?
+  case "$rc" in
+    0) ;;
+    127) printf 'UNRESOLVED target-dir-no-json-reader'; return 0 ;;
+    124|137) printf 'UNRESOLVED target-dir-parse-timeout'; return 0 ;;
+    "$_CS_UNBOUNDABLE_RC") printf 'UNRESOLVED target-dir-parse-unboundable'; return 0 ;;
+    *) printf 'UNRESOLVED target-dir-unparsable'; return 0 ;;
+  esac
+  [ -n "$path" ] || { printf 'UNRESOLVED target-dir-unparsable'; return 0; }
+  printf 'OK %s' "$path"
+}
+
+# _gate_disk_admission_subject: prints
+#     OK<TAB><probe-path><TAB><target-dir><TAB><leftover-or-empty>
+#     UNWRITABLE<TAB><errno-name><TAB><target-dir><TAB><leftover-or-empty>
+#     UNRESOLVED<TAB><why><TAB><target-dir-or-empty>
+# `target-dir` is present on EVERY post-resolution response, empty only when cargo itself
+# never answered (job 398).
+#
+# EVERY FACT TRAVELS OUT THROUGH THE PRINTED PROTOCOL, never through a global. This
+# function is reached via `$(_gate_disk_admission_probe)`, a COMMAND SUBSTITUTION, so a
+# global assigned here is set in a SUBSHELL and discarded — the same hazard the tree
+# guard records for `_tree_commit_meta` ("sets a global rather than printing, so a caller
+# can never invoke it in a `$( … )` subshell"). Caught here by the resolved directory
+# rendering as `UNRESOLVED` in a block whose df reading had plainly succeeded. TAB is the
+# field separator because BOTH a mount point and a target dir may contain spaces; a TAB
+# in either is refused upstream rather than rendered.
+#
+# The resolved target dir legitimately does not exist yet on a cold lane, so it is CREATED
+# (bounded `mkdir -p`) rather than approximated by an ancestor. See the body: that removed
+# a two-valued predicate that could admit on the wrong filesystem.
+_gate_disk_admission_subject() {
+  local r td e out _cwv _cwl
+  r=$(_gate_resolve_target_dir)
+  case "$r" in
+    'OK '*) td="${r#OK }" ;;
+    # PRE-resolution: cargo never told us a directory, so the empty field is the truth.
+    *) printf 'UNRESOLVED\t%s\t' "${r#UNRESOLVED }"; return 0 ;;
+  esac
+  # THE ANCESTOR WALK IS GONE — REMOVED, NOT HARDENED (roborev job 351).
+  #
+  # It ascended from the target dir to the nearest path `test -e` accepted, because the
+  # directory legitimately does not exist yet on a cold lane. `test -e` is TWO-VALUED: it
+  # answers 1 for a permission-denied component, a symlink loop and a non-directory
+  # component exactly as it does for a genuinely missing path. So the walk climbed PAST an
+  # inaccessible mount and measured a DIFFERENT filesystem — a FALSE ADMISSION, and the
+  # `1699-find-tristate` shape this repo lints for: a multi-state signal read two-valued
+  # always takes the permissive branch. MEASURED, both halves, on one fixture:
+  #
+  #   test -e <unreadable-parent>/inner/target   -> rc 1  ("absent" — the false answer)
+  #   mkdir -p <unreadable-parent>/inner/target  -> rc 1  (an honest refusal)
+  #
+  # `mkdir -p` replaces it, and the reason is NOT merely that it is less code. It answers
+  # the question this probe actually has — CAN THE BUILD WRITE HERE — where the walk
+  # answered a PROXY, "which ancestor exists". Those differ exactly where it matters: a
+  # target dir whose parent exists but is not writable made the walk measure the parent's
+  # filesystem and ADMIT, while the build would have failed. Its failure modes are also
+  # already distinct (permission, ENOSPC, a non-directory component, a stalled mount via
+  # the bound), so the three-valued answer comes for free instead of being reconstructed
+  # from a two-valued primitive.
+  #
+  # THE SIDE EFFECT IS ACCEPTED, DELIBERATELY. On a refusal we may leave an empty directory
+  # that would not otherwise exist. It is inert, it is reused by the next run, and cargo
+  # creates exactly this directory seconds later on every path that does not refuse
+  # (measured: `cargo metadata` does NOT create it, so this is the first creation) — so the
+  # gate does nothing here the build was not about to do anyway.
+  # THE FAILURE OF `mkdir -p` IS CLASSIFIED FROM THE ACTUAL ERRNO (roborev job 357).
+  #
+  # THE DEFECT IT FIXES, and it was in the central disposition rule rather than in the
+  # periphery: a failed creation was classified UNMEASURED, which is non-fatal and
+  # PROCEEDS. So on ENOSPC or inode exhaustion — THE EXACT CONDITION THIS WHOLE CHANGE
+  # EXISTS TO CATCH — admission was BYPASSED, and a permission or non-directory failure
+  # walked into a build already known to be impossible. That is the permissive-branch-on-
+  # unknown shape in the one place it costs everything, and it inverts the meaning of its
+  # own input: an ENOSPC from `mkdir` is not an ABSENCE of information, it is an
+  # AFFIRMATIVE MEASUREMENT that the build cannot write.
+  #
+  # So the two epistemic states are separated, and they are genuinely different:
+  #
+  #   ESTABLISHES THE BUILD CANNOT WRITE  -> BINDING REFUSAL, disposed exactly like a
+  #     below-bar reading (slot released, named outcome, RESULT: FAIL) but under its OWN
+  #     verdict token: "the floor was crossed" and "the directory cannot be created" are
+  #     different operator situations with different remedies.
+  #   ESTABLISHES NOTHING (the bound fired, no bounding mechanism, an error we cannot
+  #     classify) -> non-fatal UNMEASURED. There the honest answer really is "cannot tell",
+  #     and REFUSING on an unclassified error would red correct runs — a guard that reds on
+  #     correct input is the guard agents learn to waive.
+  #
+  # CLASSIFIED FROM THE ERRNO, NOT FROM A BARE NON-ZERO EXIT, which would collapse the two
+  # groups back together and reinstate the finding. python3 performs the creation and
+  # reports `errno.errorcode`, so the classification is NUMERIC and locale-independent —
+  # parsing `mkdir`'s message would be a locale-dependent string oracle. python3 is already
+  # required on this path (it parses the cargo metadata payload), so this adds no
+  # dependency; its absence is rc 127 and lands in the honest "cannot tell" branch.
+  # `-I -S` FOR THE SAME REASON AS THE METADATA PROBE ABOVE, where the two flags are argued
+  # in full (roborev job 416). Here the exposure was the sharper of the two: this body IS the
+  # write measurement, so a `sitecustomize` patching `os.makedirs`/`os.open`/`os.close`
+  # dictates the verdict outright. THIS REPOSITORY OWN TEST SUITE WAS THE PROOF OF
+  # EXPLOITABILITY — that is how it plants EIO/ESTALE/close failures — and it now plants them
+  # by constructing the hostile interpreter itself instead, which is strictly better coverage:
+  # it proves the SHIPPED argv is isolated while keeping the ability to force any errno.
+  # Needs only `errno`, `os` and `sys`, verified importable under `-I -S`.
+  out=$(_component_set_bounded "$_GATE_DF_BOUND_SECS" python3 -I -S -c '
+import errno, os, sys
+p = sys.argv[1]
+# ONE ERROR BOUNDARY AROUND THE WHOLE PROBE (roborev job 395). This is the THIRD round in
+# which this mechanism was the finding -- job 390 was --locked, job 394 was the errno
+# allowlist, job 395 is a discarded close() error -- and three findings in one mechanism is
+# this repository own signal to CONSOLIDATE rather than carve again. So there are no
+# per-call except clauses any more: makedirs, the isdir check, open, write, fsync and close
+# all sit inside a SINGLE try, and ANY OSError from ANY of them is CANNOT-WRITE. No call
+# site decides fatality for itself. Branch count went 11 -> 5.
+#
+# WHY close() BELONGS INSIDE IT, which is the defect that prompted the consolidation: on NFS
+# and on quota-enforced filesystems a write error is NOT reported at write(); it surfaces at
+# close(). fsync narrows that window but does not shut it. With close() errors discarded the
+# probe could print OK after a write that never landed -- a false admission.
+#
+# The errno is reported for the operator; it no longer decides anything.
+#
+# ---- THE ONE INVARIANT OF THIS EMIT PATH (roborev job 416) --------------------------------
+#
+# ONCE THE VERDICT IS DECIDED, NOTHING THAT RUNS LATER MAY WEAKEN IT -- not an exception, not
+# a hang, not the outer bound expiring. That is stronger than the job 398 rule "cleanup may only
+# APPEND", and it had to be, because the job 398 fix VIOLATED it: it computed the verdict
+# first (correct) and WROTE it after `os.unlink`, and python3 stdout is BLOCK-BUFFERED onto
+# the regular file `_component_set_bounded` captures into -- so nothing reaches the caller
+# until the process EXITS. A hung unlink (dead NFS mount, stale handle) therefore made the
+# outer bound fire with NO OUTPUT AT ALL, the shell read rc=124 as "cannot tell", and the
+# gate PROCEEDED on a filesystem that had DEFINITIVELY refused its own write probe. MEASURED,
+# on this body, with unlink() patched to sleep: rc=124, 0 bytes of payload.
+#
+# SO THE VERDICT IS WRITTEN **AND FLUSHED** BEFORE ANY CLEANUP RUNS. Two consequences that
+# shape everything below:
+#
+#   * THE GRAMMAR IS `<verdict-token>[ LEFTOVER <path>]` -- a COMPLETE PREFIX plus an
+#     OPTIONAL SUFFIX. The old grammar had two mutually exclusive LEADING tokens
+#     (`CANNOT-WRITE <code>` vs `CANNOT-WRITE-LEFTOVER <code> <path>`), which cannot be
+#     emitted verdict-first at all: whether to write the first byte depended on how the
+#     cleanup would turn out. A verdict that is a prefix is what makes a partial payload
+#     READABLE, so this is a correctness property of the grammar, not a formatting choice.
+#   * EVERY EMISSION GOES THROUGH ONE OF EXACTLY TWO FUNCTIONS. `verdict()` is the single
+#     verdict boundary and `leftover()` the single suffix boundary, so a future cleanup arm
+#     cannot start emitting a verdict of its own -- the structural point job 395/398 kept
+#     having to re-establish by counting write sites.
+#
+# The flush is EXPLICIT and not left to interpreter exit, which is precisely the thing a hang
+# prevents from happening.
+def verdict(tok):
+    sys.stdout.write(tok)
+    sys.stdout.flush()
+
+def leftover(path):
+    sys.stdout.write(" LEFTOVER " + path)
+    sys.stdout.flush()
+
+def fail(e, w):
+    # REFUSE, **THEN** CLEAN UP. The reverse order is the defect above. `created` and `fd` are
+    # read as globals rather than taken as parameters so this stays the one-call-site
+    # `fail(e, w)` the suite asserts structurally.
+    code = "unknown"
+    if isinstance(e, OSError) and e.errno is not None:
+        code = errno.errorcode.get(e.errno, "E%s" % (e.errno,))
+    verdict("CANNOT-WRITE " + code)
+    # NOTHING ABOVE THIS LINE MAY TOUCH THE FILESYSTEM, AND NOTHING BELOW IT MAY DECIDE A
+    # VERDICT. close() is attempted here (it moved INSIDE fail() this round, from the handler
+    # above): a descriptor left open keeps the inode alive and makes the unlink pointless on
+    # some filesystems -- but on the OLD ordering a close() that HUNG discarded the verdict
+    # exactly as a hung unlink did, so it belongs after the emission, not before it. Its own
+    # failure is swallowed: the verdict is already decided and process exit releases the fd.
+    if fd is not None:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+    # ONLY A FILE THAT WAS ACTUALLY CREATED CAN BE A STRAY. `w` is the intended PATH; it is
+    # set before os.open, so when open() ITSELF fails nothing exists there and the unlink
+    # legitimately fails with ENOENT. Keying the declaration on `w` therefore named an
+    # artifact that never existed -- a false statement in a certification artifact, and a
+    # defect introduced by the first draft of this cleanup. Keyed on `created` instead: set
+    # only after os.open returns.
+    if created:
+        try:
+            os.unlink(w)
+        except Exception:
+            leftover(w)
+    sys.exit(0)
+w = ""
+fd = None
+created = False
+try:
+    os.makedirs(p, exist_ok=True)
+    if not os.path.isdir(p):
+        verdict("CANNOT-WRITE ENOTDIR")
+        sys.exit(0)
+    w = os.path.join(p, "." + os.urandom(12).hex() + ".agent-gate-writeprobe")
+    fd = os.open(w, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    created = True
+    os.write(fd, b"\0")
+    os.fsync(fd)
+    os.close(fd)
+    fd = None
+except OSError as e:
+    fail(e, w)
+except Exception:
+    # THE INTERNAL-FAULT ARM, emitted FIRST for the same reason. Its cleanup declares
+    # NOTHING, deliberately: UNCLASSIFIED already maps to the "cannot tell" branch of the shell,
+    # whose protocol response carries no leftover field, so a declaration here would be a
+    # fact with nowhere to go. Widening that protocol is not the subject of this round.
+    verdict("UNCLASSIFIED unknown")
+    if fd is not None:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+    if created:
+        try:
+            os.unlink(w)
+        except Exception:
+            pass
+    sys.exit(0)
+# THE ONE DELIBERATE EXCEPTION, AND IT IS OUTSIDE THE BOUNDARY ON PURPOSE.
+#
+# Everything above has succeeded, so the filesystem IS writable -- which is the only
+# question this probe exists to answer. A failed unlink AFTER a successful write therefore
+# says nothing about writability, and refusing on it would red correct input; the standing
+# rule from job 349 is that this probe answers a question and does not own the directory.
+#
+# But a leftover artifact could be absorbed into the certification baseline unnoticed, so it
+# is resolved by DECLARING rather than by refusing: the path is reported to the caller and
+# named in the emitted SUMMARY line. Visible, attributable, and not a verdict.
+verdict("OK")
+try:
+    os.unlink(w)
+except Exception:
+    leftover(w)
+sys.exit(0)
+# The line below is the EXTRACTION END ANCHOR that
+# scripts/tests/test_agent_gate_disk_admission.sh matches (with `^import errno, os, sys$`
+# above it) to run THIS body verbatim under planted failures. It is LOAD-BEARING and must
+# stay EXACTLY that text on a line of its own: a suite that cannot find its subject reports
+# a green having measured nothing.
+# END-WRITE-PROBE
+' "$td" 2>/dev/null); e=$?
+  # ---- ONE PARSE OF THE ONE GRAMMAR: `<verdict-token>[ LEFTOVER <path>]` (job 416) ----
+  #
+  # Done BEFORE the rc dispatch because the rc dispatch now has to consult it (see the
+  # 124|137 arm). Split on the FIRST ` LEFTOVER `: no verdict token contains that substring,
+  # so the split is exact even for a target dir that happens to.
+  _cwv="$out"; _cwl=""
+  case "$out" in
+    *' LEFTOVER '*) _cwv="${out%% LEFTOVER *}"; _cwl="${out#* LEFTOVER }" ;;
+  esac
+  # ---- A FAILED MEASUREMENT MAY ONLY KEEP OR STRENGTHEN A REFUSAL, NEVER SOFTEN ONE ----
+  #
+  # THE DEFECT THIS CLOSES (roborev job 416, the shell half). The probe can decide
+  # CANNOT-WRITE and then HANG in its own cleanup — a dead NFS mount, a stale handle.
+  # Discarding the whole payload turned that DEFINITIVE REFUSAL into a non-fatal UNMEASURED
+  # and the gate PROCEEDED on a filesystem that had just proven itself unwritable.
+  #
+  # ONE ARM, NOT ONE PER STATUS — SWEEP THE CLASS, NOT THE INSTANCE. The finding named
+  # rc=124, and the identical discard sat on EVERY other non-zero arm: after the flush, the
+  # probe still runs cleanup, and a `BaseException` escaping there (KeyboardInterrupt on a
+  # SIGINT, an interpreter-level fault) exits NON-ZERO with the verdict ALREADY IN THE
+  # CAPTURE — which the `*) classifier-failed` arm discarded exactly as the timeout arm did.
+  # A per-status fix would have left that route open, so the honouring is stated over the
+  # PROPERTY (a complete refusal is present) rather than over the STATUS.
+  #
+  # MEASURED PREMISE, because the whole thing rests on it and it is not obvious:
+  # `_component_set_bounded` captures the child stdout into a REGULAR FILE and replays it
+  # AFTER the child completes, so partial stdout SURVIVES a kill. On this host, with a child
+  # that writes+flushes a token and then hangs — timeout arm rc=124 out=16 bytes;
+  # bash-watchdog arm rc=124 out=16 bytes; and with the flush REMOVED, 0 bytes. The third
+  # reading is why the python flush is a PREREQUISITE and not a tidy-up beside it.
+  #
+  # THE ASYMMETRY IS DELIBERATE AND LOAD-BEARING: a PERMISSIVE token (`OK`) recovered the
+  # same way is STILL DISCARDED, because only `CANNOT-WRITE ` is matched here. A refusal
+  # recovered from a partial write is FAIL-CLOSED and therefore safe; an ADMISSION recovered
+  # from a process WE KILLED would be deriving a pass from an incomplete measurement, which
+  # is the one thing this whole guard exists to forbid. Do not "simplify" this into
+  # honouring whatever the capture holds.
+  #
+  # TWO STATUSES ARE DELIBERATELY EXCLUDED, each for its own reason:
+  #   `$_CS_REPLAY_RC` (198) says OUR OWN READ of the capture failed, so those bytes are
+  #     known-UNUSABLE rather than known-PARTIAL. A verdict may be recovered from a
+  #     measurement we CUT SHORT; it may not be recovered from one we could not READ.
+  #   `$_CS_UNBOUNDABLE_RC` (199) means the command was NOT RUN, so the capture is empty and
+  #     there is nothing to honour — excluded explicitly rather than left to rely on that
+  #     emptiness, which is a property of the runner and not of this call site.
+  #
+  # THE HONOURING NEEDS THE COMPLETE VERDICT PREFIX. An unrecognisable fragment
+  # (`CANNOT-WRI`) takes the ordinary failure branch, which is what "cannot tell" means; the
+  # verdict is one short `write()`, so a torn payload is not a case seen in practice.
+  #
+  # DECLARED RESIDUAL: when the cleanup was KILLED mid-unlink the probe file remains, and its
+  # name — chosen inside the child and never printed — is unknowable here, so this path
+  # declares NO leftover. It is a REFUSAL, and its remedy line already sends the operator to
+  # that directory.
+  if [ "$e" -ne 0 ] && [ "$e" -ne "$_CS_REPLAY_RC" ] && [ "$e" -ne "$_CS_UNBOUNDABLE_RC" ]; then
+    case "$_cwv" in
+      'CANNOT-WRITE '*) e=0 ;;
+    esac
+  fi
+  case "$e" in
+    0) ;;
+    # EVERY POST-RESOLUTION FAILURE STILL CARRIES `td` (roborev job 398). These arms are all
+    # reached AFTER cargo has told us the target directory, so dropping it made the block say
+    # `target-dir UNRESOLVED` about a directory that WAS resolved — a false statement in a
+    # certification artifact — and left `_DA_TARGET_DIR` empty, which silently skipped
+    # `_gate_disk_admission_pin_target_dir` and forfeited round 367's measured-fs-is-used-fs
+    # guarantee on exactly these paths. The measurement failed; the RESOLUTION did not.
+    127) printf 'UNRESOLVED\ttarget-dir-mkdir-no-classifier\t%s' "$td"; return 0 ;;
+    124|137) printf 'UNRESOLVED\ttarget-dir-mkdir-timeout\t%s' "$td"; return 0 ;;
+    "$_CS_UNBOUNDABLE_RC") printf 'UNRESOLVED\ttarget-dir-mkdir-unboundable\t%s' "$td"; return 0 ;;
+    "$_CS_REPLAY_RC") printf 'UNRESOLVED\ttarget-dir-mkdir-output-truncated\t%s' "$td"; return 0 ;;
+    *) printf 'UNRESOLVED\ttarget-dir-mkdir-classifier-failed\t%s' "$td"; return 0 ;;
+  esac
+  case "$_cwv" in
+    # The leftover field is the same fourth field on BOTH dispositions now, because the
+    # payload says the same thing in the same place on both: writability is answered by the
+    # verdict PREFIX, and the stray — if any — is an independent fact appended after it.
+    OK) printf 'OK\t%s\t%s\t%s' "$td" "$td" "$_cwl"; return 0 ;;
+    'CANNOT-WRITE '*) printf 'UNWRITABLE\t%s\t%s\t%s' "${_cwv#CANNOT-WRITE }" "$td" "$_cwl"; return 0 ;;
+    'UNCLASSIFIED '*) printf 'UNRESOLVED\ttarget-dir-uncreatable-%s\t%s' "${_cwv#UNCLASSIFIED }" "$td"; return 0 ;;
+    *) printf 'UNRESOLVED\ttarget-dir-mkdir-unrecognised\t%s' "$td"; return 0 ;;
+  esac
+}
+
+# _gate_disk_admission_parse: the ONE parse of a `df -Pk` data line, ANCHORED ON THE
+# CAPACITY FIELD. Reads the payload on stdin, prints `OK<TAB><avail-kib><TAB><mount>`
+# or `AMBIG <why>`.
+#
+# WHY NOT `$4` — this is a FALSE-PASS route, not a cosmetic one (roborev job 323).
+# POSIX `-P` guarantees ONE LOGICAL LINE per filesystem. It guarantees NOTHING about
+# spaces INSIDE the source name or the mount point, and both occur in the field
+# (`my server:/export vol`, `/Volumes/Macintosh HD`). A space in the SOURCE shifts every
+# column right, so `$4` lands on the USED-space value — which is large, and NUMERIC, so
+# a "is this a number" validation SUCCEEDS and the run is ADMITTED BELOW THE BAR. That
+# is the two-valued-predicate shape this repo lints for, one level up: "is it numeric"
+# standing in for "is it the right number".
+#
+# Counting from the RIGHT fails symmetrically — the mount point is the LAST field and
+# can contain spaces too — so no fixed offset from either end is safe. The CAPACITY
+# field is the only one whose SHAPE identifies it (`^[0-9]+%$`), and it sits between the
+# two variable-width regions: available KiB is the field immediately BEFORE it, the
+# mount point is everything AFTER it. That is robust to spaces on both sides at once.
+#
+# EXACTLY ONE capacity-shaped field is required. A mount point like `/mnt/50%` produces
+# a second one, and with two candidates the anchor identifies nothing — so the parse
+# REFUSES rather than picking one. There is deliberately NO fallback to `$4`: falling
+# back to the defective parse in precisely the cases that defeat the anchor would
+# reinstate the false pass under a fix that claims to have removed it.
+_gate_disk_admission_parse() {
+  LC_ALL=C awk '
+    END {
+      cap = 0; n = 0
+      for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+%$/) { cap = i; n++ }
+      if (n == 0) { print "AMBIG no-capacity-field"; exit }
+      if (n > 1)  { print "AMBIG multiple-capacity-fields"; exit }
+      # Filesystem, 1024-blocks, Used, Available, Capacity: the anchor cannot be
+      # earlier than column 5 in a well-formed line, and a source name with spaces only
+      # pushes it further right.
+      if (cap < 5) { print "AMBIG capacity-field-too-early"; exit }
+      avail = $(cap - 1)
+      # SIGNED (roborev job 373). df legitimately reports a NEGATIVE Available on an
+      # overcommitted filesystem or one dipping into its reserved blocks. Rejecting it as
+      # unparsable produced a non-fatal UNMEASURED and let the build proceed in the most
+      # severe low-space condition there is — a false admission at the worst possible
+      # moment. It needs no new comparison logic: the bar is non-negative by construction
+      # (the low side clamps to 0), so any negative reading compares BELOW it.
+      if (avail !~ /^-?[0-9]+$/) { print "AMBIG available-not-numeric"; exit }
+      m = ""
+      for (i = cap + 1; i <= NF; i++) m = (m == "" ? $i : m " " $i)
+      printf "OK\t%s\t%s\n", avail, m
+    }' 2>/dev/null
+}
+
+# _gate_disk_admission_probe: the THREE-VALUED reading of the subject filesystem.
+# Prints exactly one of
+#     MEASURED<TAB><available-kib><TAB><target-dir><TAB><leftover><TAB><mount-point>
+#     UNWRITABLE<TAB><errno-name><TAB><target-dir><TAB>
+#     UNMEASURED<TAB><why><TAB><target-dir-or-empty><TAB><leftover>
+# <leftover> is the write-probe artifact the probe could not remove (empty when there is
+# none). It rides in the payload rather than a global for the reason every other field does:
+# this function runs inside a command substitution, where a global assignment is discarded.
+# and returns 0 either way — the CALLER disposes, because the two moments dispose of
+# the same reading differently. TAB-delimited because BOTH the target dir and the mount
+# point may legitimately contain SPACES; the mount point stays the trailing remainder.
+# The target dir rides in the payload even on the UNMEASURED arms, so a block can still
+# say WHICH directory was being asked about when the reading itself failed.
+#
+# Three-valued on purpose. Every `test`/`[` file predicate is two-valued and therefore
+# has to collapse "cannot tell" onto one of its answers, and it always picks the
+# permissive one (the `1699-find-tristate` shape). "Below the bar" and "could not be
+# measured" are DIFFERENT states here and must never merge: the first refuses, the
+# second declares.
+#
+# `df -Pk`, never `df -h`: POSIX `-P` pins the column ORDER (Filesystem, 1024-blocks,
+# Used, Available, Capacity, Mounted on) and forbids the line-wrapping plain `df` may do
+# for a long device name, and `-k` pins the unit to KiB, where `-h` rounds and appends a
+# locale-dependent suffix. What `-P` does NOT pin is the column POSITIONS — see
+# _gate_disk_admission_parse. Read by ASSIGNMENT, never `df | while read`: a piped loop
+# runs in a SUBSHELL and its verdict is discarded, which is the same silent-pass shape
+# #3400 records for the cargo parsers.
+#
+# rc 127 is separated from every other failure because that is EXACTLY what a shell
+# reports for an ABSENT command — "this box has no df" and "df ran and could not
+# answer" are different operational facts. The call's stderr is discarded so an absent
+# df cannot leak `command not found` onto the gate's own stderr, where
+# test_agent_gate_summary.sh's minimal-PATH case reads any such line as a defect.
+_gate_disk_admission_probe() {
+  local path out rc parsed avail mount availbody subj
+  subj=$(_gate_disk_admission_subject)
+  local td="" leftover="" _uw_why=""
+  case "$subj" in
+    OK$'\t'*)
+      subj="${subj#OK$'\t'}"
+      path="${subj%%$'\t'*}"; subj="${subj#*$'\t'}"
+      td="${subj%%$'\t'*}"; leftover="${subj#*$'\t'}" ;;
+    UNWRITABLE$'\t'*)
+      # An AFFIRMATIVE measurement that the build cannot write here. It is passed through
+      # as its own kind rather than folded into UNMEASURED, which is what let it proceed.
+      subj="${subj#UNWRITABLE$'\t'}"
+      _uw_why="${subj%%$'\t'*}"; subj="${subj#*$'\t'}"
+      printf 'UNWRITABLE\t%s\t%s\t%s' "$_uw_why" "${subj%%$'\t'*}" "${subj#*$'\t'}"; return 0 ;;
+    UNRESOLVED$'\t'*)
+      subj="${subj#UNRESOLVED$'\t'}"
+      # `td` survives the conversion (job 398): a failed MEASUREMENT does not unresolve a
+      # directory cargo already named, and carrying it is what keeps the block truthful and
+      # the target-dir pin reachable on this path.
+      printf 'UNMEASURED\t%s\t%s\t' "${subj%%$'\t'*}" "${subj#*$'\t'}"; return 0 ;;
+    *) printf 'UNMEASURED\ttarget-dir-resolver-unrecognised\t\t'; return 0 ;;
+  esac
+  # BOUNDED (roborev job 349): a stalled NFS/FUSE mount hangs `df` forever, and this runs
+  # at slot grant while the machine-wide slot is HELD. A hang and a parse failure are
+  # different operator situations, so they get different causes.
+  out=$(_component_set_bounded "$_GATE_DF_BOUND_SECS" df -Pk "$path" 2>/dev/null); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    case "$rc" in
+      127) printf 'UNMEASURED\tdf-unavailable\t%s\t%s' "$td" "$leftover"; return 0 ;;
+      124|137) printf 'UNMEASURED\tdf-timeout\t%s\t%s' "$td" "$leftover"; return 0 ;;
+      "$_CS_UNBOUNDABLE_RC") printf 'UNMEASURED\tdf-unboundable\t%s\t%s' "$td" "$leftover"; return 0 ;;
+      "$_CS_REPLAY_RC") printf 'UNMEASURED\tdf-output-truncated\t%s\t%s' "$td" "$leftover"; return 0 ;;
+    esac
+    printf 'UNMEASURED\tdf-failed\t%s\t%s' "$td" "$leftover"; return 0
+  fi
+  # The LAST line, not `NR==2`: `-P` guarantees one line per operand, and taking the
+  # last one is additionally immune to a leading advisory line some df builds print.
+  parsed=$(printf '%s\n' "$out" | _gate_disk_admission_parse)
+  case "$parsed" in
+    OK$'\t'*) ;;
+    *) printf 'UNMEASURED\tdf-unparsable\t%s\t%s' "$td" "$leftover"; return 0 ;;
+  esac
+  parsed="${parsed#OK$'\t'}"
+  avail="${parsed%%$'\t'*}"
+  mount="${parsed#*$'\t'}"
+  # Belt on the anchor's own numeric assert: the caller compares this as a number. SIGNED,
+  # for the reason stated in the awk above — a negative Available is a real reading of a
+  # filesystem in its worst state, not a parse failure.
+  local availbody="$avail"
+  case "$availbody" in -*) availbody="${availbody#-}" ;; esac
+  case "$availbody" in
+    ''|*[!0-9]*) printf 'UNMEASURED\tdf-unparsable\t%s\t%s' "$td" "$leftover"; return 0 ;;
+  esac
+  # The mount point is rendered VERBATIM into a `key: value` SUMMARY line, and a mount
+  # point may contain arbitrary bytes. Spaces are fine (the value is the rest of the
+  # line); CONTROL characters are not — one newline would split the line and break the
+  # one-fact-per-line contract every consumer of a pasted block relies on. Stripped
+  # rather than refused: this field is DISPLAY ONLY and must never be able to fail a
+  # measurement that succeeded.
+  mount=$(printf '%s' "$mount" | tr -d '\000-\037\177' 2>/dev/null)
+  printf 'MEASURED\t%s\t%s\t%s\t%s' "$avail" "$td" "$leftover" "${mount:-unknown}"
+}
+
+# _gate_gib_render <kib> -> "<n.n>GiB" (display only). Empty when awk cannot answer.
+_gate_gib_render() { LC_ALL=C awk -v k="$1" 'BEGIN { printf "%.1fGiB", k/1048576 }' 2>/dev/null; }
+
+# _gate_disk_admission_measure: ONE evaluation of the ONE predicate. Sets _DA_STATE
+# (OK | BELOW | UNWRITABLE | UNMEASURED), _DA_VALUE (rendered GiB), _DA_MOUNT, _DA_WHY. Both
+# moments call THIS — that identity is the whole of AC1.
+_gate_disk_admission_measure() {
+  local probe crc
+  # THE MOUNT IS RETAINED ONLY WHERE THE SUBJECT IS PROVEN THE SAME (roborev job 345, Low).
+  #
+  # The earlier rule — "_DA_MOUNT names the subject filesystem, which is the same one at
+  # both moments" — stopped being true the moment the target dir was RE-RESOLVED at slot
+  # grant (which it is, deliberately: a `.cargo/config.toml` edited during a long queue
+  # changes where the build will write). A post-queue measurement that fails could then
+  # pair the NEW target dir with the OLD mount, and the remedy line would send an operator
+  # to clean the wrong filesystem — this whole change's failure mode in miniature: a
+  # specific, confident, wrong answer.
+  #
+  # So the mount is carried forward ONLY when the newly resolved subject is IDENTICAL to
+  # the one it was measured against, tracked explicitly rather than assumed because
+  # nothing looked different; otherwise it is cleared and the block reads `fs unknown`.
+  # DECLARED RESIDUAL: identity is by RESOLVED PATH, so a remount of the same path between
+  # the two moments is not detected. That bound is acceptable here and nowhere else in this
+  # block, because the mount is DISPLAY AND REMEDY only — no verdict has ever depended on
+  # it — whereas every value a verdict does depend on is re-measured outright.
+  _DA_STATE=""; _DA_VALUE=""; _DA_WHY=""; _DA_LEFTOVER=""
+  # Ownership is taken HERE, in the main shell, because the probe below runs inside a
+  # `$( … )` where the bounded runner's lazily-created capture triple would be memoized
+  # in a subshell and leak (roborev job 349).
+  _gate_admission_capture_open
+  probe=$(_gate_disk_admission_probe)
+  _gate_admission_capture_close
+  case "$probe" in
+    MEASURED$'\t'*)
+      probe="${probe#MEASURED$'\t'}"
+      local kib="${probe%%$'\t'*}"
+      probe="${probe#*$'\t'}"
+      _DA_TARGET_DIR="${probe%%$'\t'*}"
+      [ -n "$_DA_TARGET_DIR" ] && _DA_TARGET_NOTE="via cargo metadata"
+      probe="${probe#*$'\t'}"
+      _DA_LEFTOVER="${probe%%$'\t'*}"
+      _DA_MOUNT="${probe#*$'\t'}"
+      _DA_MOUNT_FOR_TARGET="$_DA_TARGET_DIR"
+      _DA_VALUE=$(_gate_gib_render "$kib")
+      [ -n "$_DA_VALUE" ] || _DA_VALUE="${kib}KiB"
+      # Keyed on the AFFIRMATIVE value (the reading CLEARS the bar), never on the
+      # absence of a bad signal — and three-valued, so a comparison that could not be
+      # made is UNMEASURED rather than silently taking either branch.
+      _gate_disk_admission_clears_bar "$kib" "$_DA_BAR"; crc=$?
+      case "$crc" in
+        0) _DA_STATE=OK ;;
+        1) _DA_STATE=BELOW ;;
+        *) _DA_STATE=UNMEASURED; _DA_WHY=comparison-unavailable ;;
+      esac
+      ;;
+    UNWRITABLE$'\t'*)
+      probe="${probe#UNWRITABLE$'\t'}"
+      _DA_STATE=UNWRITABLE
+      _DA_WHY="${probe%%$'\t'*}"
+      probe="${probe#*$'\t'}"
+      _DA_TARGET_DIR="${probe%%$'\t'*}"
+      _DA_LEFTOVER="${probe#*$'\t'}"
+      [ -n "$_DA_TARGET_DIR" ] && _DA_TARGET_NOTE="via cargo metadata"
+      # No filesystem was read, so any retained mount describes something else.
+      _DA_MOUNT=""; _DA_MOUNT_FOR_TARGET=""
+      ;;
+    UNMEASURED$'\t'*)
+      probe="${probe#UNMEASURED$'\t'}"
+      _DA_STATE=UNMEASURED
+      _DA_WHY="${probe%%$'\t'*}"
+      probe="${probe#*$'\t'}"
+      _DA_TARGET_DIR="${probe%%$'\t'*}"
+      _DA_LEFTOVER="${probe#*$'\t'}"
+      [ -n "$_DA_TARGET_DIR" ] && _DA_TARGET_NOTE="via cargo metadata"
+      # Keep the previous mount ONLY if it was measured against THIS subject; an empty or
+      # differing target dir means the retained value describes something else.
+      if [ -z "$_DA_TARGET_DIR" ] || [ "$_DA_MOUNT_FOR_TARGET" != "$_DA_TARGET_DIR" ]; then
+        _DA_MOUNT=""; _DA_MOUNT_FOR_TARGET=""
+      fi
+      ;;
+    *)
+      _DA_STATE=UNMEASURED; _DA_WHY=probe-unrecognised
+      _DA_MOUNT=""; _DA_MOUNT_FOR_TARGET="" ;;
+  esac
+  # job 398: every evaluation contributes its stray, so a two-probe run declares BOTH.
+  _gate_disk_admission_record_leftover
+  return 0
+}
+
+# _gate_disk_admission_render_state: the per-moment rendering shared by both moments,
+# so the two can never drift into two spellings of one fact.
+# _gate_disk_admission_record_leftover: fold this measurement's stray (if any) into the
+# run-wide accumulator, once. Called from the measurement, so BOTH evaluations contribute.
+_gate_disk_admission_record_leftover() {
+  [ -n "${_DA_LEFTOVER:-}" ] || return 0
+  case "$_DA_LEFTOVER_ALL" in
+    *"$_DA_LEFTOVER"*) return 0 ;;   # already recorded (same dir on both evaluations)
+  esac
+  if [ -n "$_DA_LEFTOVER_ALL" ]; then
+    _DA_LEFTOVER_ALL="$_DA_LEFTOVER_ALL
+$_DA_LEFTOVER"
+  else
+    _DA_LEFTOVER_ALL="$_DA_LEFTOVER"
+  fi
+  return 0
+}
+
+_gate_disk_admission_render_state() {
+  case "$_DA_STATE" in
+    OK)    printf '%s' "$_DA_VALUE" ;;
+    BELOW) printf '%s(BELOW BAR)' "$_DA_VALUE" ;;
+    UNWRITABLE) printf 'UNWRITABLE(%s)' "${_DA_WHY:-unknown}" ;;
+    *)     printf 'UNMEASURED(%s)' "${_DA_WHY:-unknown}" ;;
+  esac
+}
+
+# _gate_disk_admission_line <verdict-clause> <detail>: assemble DISK_ADMISSION_LINE.
+# The parenthetical always names BOTH moments and the bar, so AC3's three facts
+# (value observed, bar applied, verdict) and the admitted-once-vs-twice distinction
+# are present in every rendering, including the failing ones.
+_gate_disk_admission_line() {
+  local verdict="$1" detail="$2"
+  local td
+  if [ -n "$_DA_TARGET_DIR" ]; then
+    td="$_DA_TARGET_DIR ($_DA_TARGET_NOTE)"
+  else
+    td="UNRESOLVED"
+  fi
+  DISK_ADMISSION_LINE="disk-admission: $verdict (evaluated ${_DA_EVALUATIONS}x: launch $_DA_LAUNCH_RENDER; post-slot $_DA_POST_RENDER; bar ${_DA_BAR}GiB(${_DA_BAR_SRC}); fs ${_DA_MOUNT:-unknown}; target-dir $td)"
+  [ -n "$detail" ] && DISK_ADMISSION_LINE="$DISK_ADMISSION_LINE — $detail"
+  # DECLARED, never a verdict (job 395): the write probe proved the filesystem writable and
+  # then could not clean up after itself. Naming the exact path is what keeps a stray
+  # artifact from being absorbed into the certification baseline unnoticed.
+  if [ -n "${_DA_LEFTOVER_ALL:-}" ]; then
+    local _lo_n _lo_list
+    _lo_n=$(printf '%s\n' "$_DA_LEFTOVER_ALL" | grep -c '[^[:space:]]')
+    _lo_list=$(printf '%s' "$_DA_LEFTOVER_ALL" | tr '\n' '|' | sed 's/|/ | /g')
+    DISK_ADMISSION_LINE="$DISK_ADMISSION_LINE; write-probe artifacts LEFT BEHIND ($_lo_n; unlink failed after the write, so writability is unaffected): $_lo_list"
+  fi
+  # ---- THE SUBJECT SET IS NON-EXHAUSTIVE, AND SAYS SO ON EVERY RENDERING (#3886) ----
+  #
+  # This probe measures ONE filesystem: the build-output directory cargo resolved. The
+  # gate also writes a python venv (`<target>/agent-gate-venv`) and
+  # `bindings/node/node_modules`, and node_modules is under the REPOSITORY whatever
+  # cargo's target dir says — so with an EXTERNAL target dir a run can be admitted on the
+  # build volume while the repository volume is below the floor. That is a
+  # COUNTING-completeness question, split to #3886; #3755 is the TIMING half.
+  #
+  # It is DECLARED rather than left implicit because a bare `disk-admission: PASS` invites
+  # a reader to infer a completeness this check does not deliver, and a check that claims
+  # nothing false is worth more than one claiming a closure it does not have. The count is
+  # AFFIRMATIVE (`1 RECOGNISED`, never a bare number in prose) for the reason the
+  # `cfg-gated-subtree … N RECOGNISED` form exists: a bare figure in a gate log reads as a
+  # verified all-clear from a scan that is documented as incomplete.
+  #
+  # MEASURED SCOPE OF THE EXPOSURE, stated as a measurement and not as a reassurance: with
+  # NO external target dir configured — every lane on this fleet today — cargo resolves
+  # the build output to `$REPO_ROOT/target`, which is on the repository filesystem, so the
+  # venv and node_modules are covered INCIDENTALLY by the one reading. The gap opens only
+  # when an operator points the target dir at another volume.
+  DISK_ADMISSION_LINE="$DISK_ADMISSION_LINE; subjects 1 RECOGNISED (the cargo-resolved BUILD-OUTPUT filesystem only) — NON-EXHAUSTIVE: other filesystems this gate writes to (the python venv, bindings/node/node_modules) are NOT measured (#3886)"
+  return 0
+}
+
+# _disk_admission_meta / _emit_wants_disk_admission are DELIBERATELY NOT HERE: they are
+# defined ABOVE emit_summary instead, because bash defines functions as it READS the
+# file and emit_summary is reached by early-terminal paths thousands of lines before
+# this block. See the note at their definition site.
+
+# _gate_disk_admission_launch: the FIRST evaluation, taken before the daemon is
+# started and therefore before this run can queue.
+#
+# ADVISORY, NEVER FATAL, and the reason is specific to this moment: the box can be
+# below the bar at launch precisely BECAUSE a peer gate is mid-build, and that peer is
+# the run we are about to queue behind — it frees its target dir churn as it finishes.
+# Refusing here would red a run that is about to be perfectly fine, i.e. a guard that
+# reds on correct input, which is the guard agents learn to waive. What the launch
+# reading IS for is the second half of AC3: it is the baseline the post-slot reading is
+# read against, so a queue that ate 137G is visible as such in the block.
+# _gate_disk_admission_bar: resolve and VALIDATE the bar. Split out of the launch
+# measurement (roborev job 394) so an unusable bar refuses INSTANTLY — it is a pure
+# environment read with no I/O, and it must not sit behind the potentially blocking cap
+# setup that now precedes the measurement.
+_gate_disk_admission_bar() {
+  local bar
+  bar=$(_gate_min_free_gb)
+  _DA_BAR="${bar%% *}"; _DA_BAR_SRC="${bar##* }"
+  # AN UNREPRESENTABLE BAR REFUSES BEFORE ANYTHING IS MEASURED (roborev job 367).
+  #
+  # THE ADVISORY-AT-LAUNCH RULE DOES NOT APPLY HERE, and the distinction is the whole
+  # reason this sits before the measurement rather than in the disposer. That rule exists
+  # because a MEASUREMENT of a changing resource can legitimately improve while we queue —
+  # a peer gate mid-build frees space. A BAR is not a measurement: it is a configuration
+  # constant read from the environment, it cannot self-heal in a queue, and no reading can
+  # rescue it. So refusing immediately is both correct and cheaper — the run never takes a
+  # slot it was always going to hand back.
+  #
+  # Its own verdict token, distinct from a below-bar refusal AND from an unwritable one:
+  # three different operator actions (free space / fix the directory / fix the variable).
+  # TWO UNUSABLE-BAR CAUSES, TWO TOKENS. Out of range and over-precise are different
+  # operator mistakes with different remedies ("that number is too big" vs "that number has
+  # more digits than a floor can carry"), so they are never merged — the same rule the three
+  # measurement refusals follow.
+  case "$_DA_BAR_SRC" in
+    out-of-range|too-precise)
+      _DA_EVALUATIONS=0
+      _DA_LAUNCH_RENDER='NOT MEASURED (the bar was refused before any measurement)'
+      _DA_POST_RENDER='NOT MEASURED (the bar was refused before any measurement)'
+      _DA_MOMENT="at LAUNCH (before any measurement: the BAR itself is unusable)"
+      _DA_SLOT_NOTE="no slot was ever requested; NOTHING was built"
+      if [ "$_DA_BAR_SRC" = out-of-range ]; then
+        _DA_REFUSE_VERDICT="BAR-UNREPRESENTABLE-FAIL-CLOSED (#3755)"
+        _DA_REFUSE_LEAD="CQLITE_GATE_MIN_FREE_GB=${_DA_BAR} exceeds the largest representable bar (${_GATE_MAX_FREE_GB}GiB), so the requested floor cannot be applied"
+        _DA_REFUSE_REMEDY="set CQLITE_GATE_MIN_FREE_GB to a value in 0..${_GATE_MAX_FREE_GB} GiB (it is a FLOOR in GiB, not a byte count), then re-run"
+      else
+        _DA_REFUSE_VERDICT="BAR-TOO-PRECISE-FAIL-CLOSED (#3755)"
+        _DA_REFUSE_LEAD="CQLITE_GATE_MIN_FREE_GB=${_DA_BAR} carries more than ${_GATE_MAX_BAR_DECIMALS} decimal places, which the comparison cannot represent exactly — a rounded floor would ADMIT a filesystem the requested one refuses"
+        _DA_REFUSE_REMEDY="set CQLITE_GATE_MIN_FREE_GB with at most ${_GATE_MAX_BAR_DECIMALS} decimal places (0.001 GiB is ~1 MiB, finer than any real floor), then re-run"
+      fi
+      _gate_disk_admission_refuse ;;       # exits 1 — never returns
+  esac
+  # A bar the operator SET but the gate did not use AS SET is an operator action that
+  # needs an operator response, so it is named on stderr as well as in the block. The
+  # raw value is stripped of control characters and truncated: it is untrusted input
+  # being rendered onto the gate's own stderr.
+  #
+  # `out-of-range` is NOT in this list: it refuses above rather than proceeding under a
+  # substituted bar, so there is no "in effect" value to warn about.
+  #
+  # Worded "AS SET" rather than the obvious alternative on purpose: the #1699
+  # `1699-emit-noverbatim` guard in test_agent_gate_summary.sh scans every EMITTED
+  # `echo ` line for that other word, and matching its narrow exclusion string would be
+  # gaming a guard rather than satisfying it.
+  case "$_DA_BAR_SRC" in
+    invalid|clamped)
+      echo "agent-gate: WARN: CQLITE_GATE_MIN_FREE_GB='$(printf '%s' "${CQLITE_GATE_MIN_FREE_GB:-}" | tr -d '\000-\037\177' | cut -c1-60)' was NOT used AS SET ($_DA_BAR_SRC); the bar in effect is ${_DA_BAR}GiB (accepted range 0..${_GATE_MAX_FREE_GB} GiB) (#3755)" >&2 ;;
+  esac
+  return 0
+}
+
+# _gate_disk_admission_launch: THE FIRST MEASUREMENT. Called AFTER the cap setup (see
+# acquire_gate_slot) so that nothing which can BLOCK stands between it and either the queue
+# or the build. Assumes _gate_disk_admission_bar has already run.
+_gate_disk_admission_launch() {
+  _gate_disk_admission_measure
+  _DA_EVALUATIONS=1
+  _DA_LAUNCH_RENDER=$(_gate_disk_admission_render_state)
+  _DA_POST_RENDER='NOT MEASURED (the slot was never granted)'
+  if [ "$_DA_STATE" = UNWRITABLE ]; then
+    echo "agent-gate: WARN: the build output directory ${_DA_TARGET_DIR:-<unresolved>} cannot be created at LAUNCH (${_DA_WHY:-unknown}) — ADVISORY *only if a slot grant follows* (a queued peer may free space or inodes); the binding check is re-taken at slot grant (#3755)" >&2
+  fi
+  if [ "$_DA_STATE" = BELOW ]; then
+    echo "agent-gate: WARN: only $_DA_VALUE free on ${_DA_MOUNT:-the target filesystem} at LAUNCH, below the ${_DA_BAR}GiB bar — ADVISORY *only if a slot grant follows* (a queued peer may free space); if the cap does not engage, THIS reading is the binding one (#3755)" >&2
+  fi
+  return 0
+}
+
+# _gate_disk_admission_dispose <slot-note> <pass-detail>: THE ONE DISPOSITION.
+#
+# Every path that is about to return into the build calls this with the state of the
+# LAST measurement taken. There is exactly one of these so a new return path cannot
+# acquire a different disposition by being written somewhere else — which is precisely
+# how the five unguarded paths of the first draft came about (roborev job 329).
+_gate_disk_admission_dispose() {
+  _DA_SLOT_NOTE="$1"
+  case "$_DA_STATE" in
+    BELOW)
+      _DA_REFUSE_VERDICT="FAIL-CLOSED (#3755)"
+      _DA_REFUSE_LEAD="only $_DA_VALUE free on ${_DA_MOUNT:-the target filesystem} ${_DA_MOMENT%% (*}, below the ${_DA_BAR}GiB bar (${_DA_BAR_SRC})"
+      _DA_REFUSE_REMEDY="free space on ${_DA_MOUNT:-the target filesystem} (cargo clean / prune stale /tmp/agent-gate.* run dirs), then re-run"
+      _gate_disk_admission_refuse ;;        # exits 1 — never returns
+    UNWRITABLE)
+      # A DISTINCT verdict token: "the floor was crossed" and "the build output directory
+      # cannot be created" are different operator situations with different remedies, and a
+      # reader must not have to infer which one happened.
+      _DA_REFUSE_VERDICT="UNWRITABLE-FAIL-CLOSED (#3755)"
+      _DA_REFUSE_LEAD="the build output directory ${_DA_TARGET_DIR:-<unresolved>} CANNOT BE CREATED (${_DA_WHY:-unknown}) ${_DA_MOMENT%% (*}"
+      _DA_REFUSE_REMEDY="make ${_DA_TARGET_DIR:-the target directory} creatable — free space or inodes, fix the permissions, or correct a target dir whose parent is not a directory — then re-run"
+      _gate_disk_admission_refuse ;;        # exits 1 — never returns
+    OK)    _gate_disk_admission_line PASS "$2" ;;
+    *)     _gate_disk_admission_line "UNMEASURED (${_DA_WHY:-unknown})" "the bar was NOT APPLIED; the run proceeds UNADMITTED (#3755)" ;;
+  esac
+  echo "agent-gate: $DISK_ADMISSION_LINE" >&2
+  # THE MEASURED FILESYSTEM BECOMES THE USED ONE, BY CONSTRUCTION (roborev job 367).
+  _gate_disk_admission_pin_target_dir
+  return 0
+}
+
+# _gate_disk_admission_pin_target_dir: export the RESOLVED directory as CARGO_TARGET_DIR
+# for every cargo invocation this run makes.
+#
+# THE DEFECT. Only the SIDE lane reused the resolved directory; MAIN-lane cargo commands
+# re-resolve configuration for themselves, so an ancestor `.cargo/config.toml` or a
+# CARGO_HOME change landing after the metadata call sent them to an UNMEASURED filesystem —
+# and a change landing before `_tree_recapture_after_slot` is absorbed into the new
+# certification baseline rather than flagged. Two resolutions that have to AGREE is a TOCTOU
+# hope; one resolution the builds are PINNED to is a structural guarantee. Same move as the
+# round-6 side-lane consolidation, one lane over: the second resolution is deleted, not
+# defended.
+#
+# ONLY ON A BINDING RESOLUTION. An empty `_DA_TARGET_DIR` means the resolution itself failed
+# (the block reads `target-dir UNRESOLVED`), and inventing a target dir from a failed
+# resolution would move the build somewhere nobody chose. A measurement that failed while
+# the RESOLUTION succeeded still pins: we know where cargo will write, we merely could not
+# read the free space, and pinning is what keeps "measured" and "used" the same place.
+#
+# NO-OP IN THE NORMAL CASE, by construction rather than by hope: the value came from cargo
+# itself, so on a lane with no target-dir configuration it is exactly the path cargo would
+# have chosen unaided (asserted in scripts/tests/test_agent_gate_disk_admission.sh).
+#
+# NESTED CHILDREN INHERIT IT, and that is coherent rather than a side effect to tolerate: a
+# nested `agent-gate.sh` then MEASURES the inherited directory and BUILDS into it, so the
+# measured==used property holds for the child too. Nested self-tests run `--only`/`--lite`/
+# stub gates, which self-exempt from the probe and therefore pin nothing of their own.
+_gate_disk_admission_pin_target_dir() {
+  [ -n "${_DA_TARGET_DIR:-}" ] || return 0
+  export CARGO_TARGET_DIR="$_DA_TARGET_DIR"
+  return 0
+}
+
+# _gate_disk_admission_bind_launch <why>: the cap never engaged, so NO QUEUE ELAPSED
+# between the launch reading and the build. Under the rule at the top of this block the
+# launch reading IS the consumption-moment reading, so it is BINDING — and it is not
+# re-taken, because re-measuring an interval in which nothing happened would only add a
+# second `df` and a second chance to disagree with itself.
+_gate_disk_admission_bind_launch() {
+  _DA_MOMENT="at LAUNCH (BINDING: the cap never engaged, so no queue separated this reading from the build)"
+  _DA_POST_RENDER="NOT RE-MEASURED (no slot grant: $1; no queue elapsed, so the LAUNCH reading IS the consumption-moment reading and is BINDING)"
+  _gate_disk_admission_dispose \
+    "no slot was ever held; NOTHING was built" \
+    "the LAUNCH reading is BINDING here — no queue separated it from the build (#3755)"
+}
+
+# _gate_disk_admission_bind_after_queue <why>: we DID queue, and the grant then failed.
+#
+# This is the path that most needed the rule. The queue may have run for an hour, so the
+# launch reading is stale by exactly the interval #3755 exists to close — reusing it here
+# would reproduce this issue's own defect inside its own fix. So the reading is RE-TAKEN,
+# and the fresh one is binding.
+_gate_disk_admission_bind_after_queue() {
+  _gate_disk_admission_measure
+  _DA_EVALUATIONS=2
+  _DA_MOMENT="after the queue (RE-MEASURED: the slot grant failed, but the queue had already elapsed, so the launch reading was stale)"
+  _DA_POST_RENDER="$(_gate_disk_admission_render_state) (RE-MEASURED after the queue; no slot grant: $1)"
+  _gate_disk_admission_dispose \
+    "no slot was held (the grant failed); NOTHING was built" \
+    "re-measured after the queue even though the grant failed — a stale launch reading is what #3755 is about"
+}
+
+# _gate_disk_admission_refuse: the FAIL-CLOSED disposition, reachable from all three
+# binding moments. _DA_MOMENT and _DA_SLOT_NOTE name WHICH one, so the block never
+# claims a slot was released when none was ever held.
+_gate_disk_admission_refuse() {
+  # AC2, and it is FIRST for a reason. The slot is a machine-wide resource and the
+  # entire point of refusing here is to hand it straight back to a peer that can use
+  # it; every millisecond spent rendering or emitting before the release is time a
+  # queued gate waits on a run that has already decided not to build. _gate_release_slot
+  # is idempotent (it clears GATE_SLOT_DAEMON_PID) and a no-op when no slot was ever
+  # acquired, so calling it unconditionally here is safe at all three moments.
+  _gate_release_slot
+  _gate_disk_admission_line "${_DA_REFUSE_VERDICT:-FAIL-CLOSED (#3755)}" "$_DA_SLOT_NOTE"
+  echo "agent-gate: FAIL: ${_DA_REFUSE_LEAD:-the admission check refused} — refusing to start a build that cannot finish (#3755)" >&2
+  echo "agent-gate: $_DA_SLOT_NOTE." >&2
+  echo "agent-gate: remedy: ${_DA_REFUSE_REMEDY:-free space on the target filesystem, then re-run}." >&2
+  echo "agent-gate: $DISK_ADMISSION_LINE" >&2
+  # A complete, well-formed terminal block — the refusal must not be information-poorer
+  # than any other FAIL. _tree_commit_meta runs BEFORE _tree_meta_array so the `commit:`
+  # stamp comes from the same verified capture the tree lines do (#2926 review C1).
+  _tree_commit_meta
+  _tree_meta_array
+  declare -a _da_meta=()
+  _da_meta+=("$TREE_COMMIT_LINE")
+  _da_meta+=("refusal: disk admission (#3755) — refused $_DA_MOMENT; $_DA_SLOT_NOTE; NO component ran")
+  _da_meta+=("$DISK_ADMISSION_LINE")
+  _da_meta+=("$(_component_set_meta)")
+  _da_meta+=("$(accelerators_line)")
+  _da_meta+=("$(cpu_budget_line)")
+  _da_meta+=("${TREE_META_LINES[@]}")
+  _da_meta+=("hint: bar override CQLITE_GATE_MIN_FREE_GB=<gib> (source token in the line above says whether the value in effect was default|pinned|invalid|clamped; out-of-range and too-precise REFUSE rather than substituting a bar)")
+  # Routed through the shared no-clobber terminal contract (#2874), not a bare
+  # emit_summary: a refusal is a TERMINAL block and must obey the same live-peer rules
+  # as every other one.
+  _emit_terminal_summary FAIL "${_da_meta[@]}" || true
+  if [ "$SUMMARY_WRITE_FAILED" -ne 0 ]; then
+    echo "agent-gate: exiting non-zero because the summary file could not be written (#1175)" >&2
+  fi
+  exit 1
+}
+
 # PID of the background slot daemon (empty when the cap is inactive for this run).
 GATE_SLOT_DAEMON_PID=""
 
@@ -19444,24 +21518,61 @@ acquire_gate_slot() {
   [ "$LITE" -eq 1 ] && return 0
   [ "$DELTA" -eq 1 ] && return 0
   [ -n "$ONLY" ] && return 0
-  [ "${CQLITE_GATE_DISABLE_CAP:-0}" = 1 ] && return 0
-  if ! command -v python3 >/dev/null 2>&1; then
+  # #3755: reached by exactly the run class that queues and then builds — the full gate —
+  # and by nothing else, because the exemptions above have already returned.
+  _DA_PROBE_REACHED=1
+
+  # ---- ORDER: BAR, then the BLOCKING CAP SETUP, then the MEASUREMENT (roborev job 394) ----
+  #
+  # THE HOLE THIS CLOSES was in round 329's own rule, not a new axis. That rule reads: the
+  # measurement immediately preceding the build is ALWAYS fail-closed, and a launch
+  # measurement is advisory ONLY when a slot grant will follow it. Its justification for
+  # BINDING the launch reading on the cap-inactive paths was that NO TIME HAD ELAPSED
+  # between the reading and the build. But `mkdir -p "$dir"` can BLOCK — a network-backed
+  # `CQLITE_GATE_SLOTS_DIR` is the obvious case — and if it blocks and then FAILS, the gate
+  # bound a reading taken an arbitrarily long interval earlier. Stale in exactly the way a
+  # post-queue reading is stale, which is the whole subject of this issue.
+  #
+  # FIXED BY ORDER, NOT BY RE-MEASURING ON EACH FAILURE PATH. One measurement in the right
+  # place keeps the invariant statable; N measurements patched onto N paths is how the
+  # invariant stops being checkable. So everything that can block or fail in the cap setup
+  # happens FIRST and only records WHY the cap is off; the measurement is taken after it, so
+  # nothing which can block stands between the reading and either the queue or the build.
+  #
+  # The BAR is resolved before both, because it is a pure environment read that can refuse
+  # instantly and must not sit behind a blocking mkdir.
+  _gate_disk_admission_bar
+
+  local n dir poll daemon ready cap_off=""
+  if [ "${CQLITE_GATE_DISABLE_CAP:-0}" = 1 ]; then
+    cap_off="cap force-disabled"
+  elif ! command -v python3 >/dev/null 2>&1; then
     echo "agent-gate: python3 unavailable -- full-gate concurrency cap DISABLED (#1825)" >&2
+    cap_off="python3 unavailable"
+  else
+    n=$(_gate_max_concurrency)
+    dir="${CQLITE_GATE_SLOTS_DIR:-${TMPDIR:-/tmp}/cqlite-gate-slots}"
+    poll="${CQLITE_GATE_POLL_SECS:-2}"
+    daemon="$REPO_ROOT/scripts/lib/gate_slot_daemon.py"
+    if [ ! -f "$daemon" ]; then
+      echo "agent-gate: slot daemon $daemon missing -- concurrency cap DISABLED (#1825)" >&2
+      cap_off="slot daemon missing"
+    elif ! mkdir -p "$dir" 2>/dev/null; then
+      # The potentially BLOCKING call, and it is now upstream of the measurement.
+      echo "agent-gate: cannot create slot dir $dir -- concurrency cap DISABLED (#1825)" >&2
+      cap_off="slot dir uncreatable"
+    fi
+  fi
+
+  # THE LAUNCH MEASUREMENT. Advisory when a grant follows (the queue can free space);
+  # BINDING when the cap is off, which is sound precisely because the blocking setup above
+  # has already happened and nothing between here and the build can take time.
+  _gate_disk_admission_launch
+  if [ -n "$cap_off" ]; then
+    _gate_disk_admission_bind_launch "$cap_off"
     return 0
   fi
-  local n dir poll daemon ready
-  n=$(_gate_max_concurrency)
-  dir="${CQLITE_GATE_SLOTS_DIR:-${TMPDIR:-/tmp}/cqlite-gate-slots}"
-  poll="${CQLITE_GATE_POLL_SECS:-2}"
-  daemon="$REPO_ROOT/scripts/lib/gate_slot_daemon.py"
-  if [ ! -f "$daemon" ]; then
-    echo "agent-gate: slot daemon $daemon missing -- concurrency cap DISABLED (#1825)" >&2
-    return 0
-  fi
-  if ! mkdir -p "$dir" 2>/dev/null; then
-    echo "agent-gate: cannot create slot dir $dir -- concurrency cap DISABLED (#1825)" >&2
-    return 0
-  fi
+
   ready="$LOG_DIR/gate-slot.ready"
   rm -f "$ready" 2>/dev/null || true
   # Start the background lock-holder for THIS gate (pid $$). It writes $ready once
@@ -19483,6 +21594,7 @@ acquire_gate_slot() {
     if ! kill -0 "$GATE_SLOT_DAEMON_PID" 2>/dev/null; then
       echo "agent-gate: slot daemon exited before acquiring -- cap DISABLED for this run (#1825)" >&2
       GATE_SLOT_DAEMON_PID=""
+      _gate_disk_admission_bind_after_queue "slot daemon exited before acquiring"
       return 0
     fi
     if [ "$printed" -eq 0 ] && [ "$waited" -ge 3 ]; then
@@ -19507,6 +21619,29 @@ acquire_gate_slot() {
     sleep 0.2
   done
   [ "$printed" -eq 1 ] && echo "agent-gate: gate slot acquired -- proceeding (#1825)" >&2
+
+  # ---- #3755: the RE-EVALUATION, at the moment the resource is actually consumed ----
+  #
+  # The slot is now held and NOTHING has been built yet: the next thing this function
+  # does is return, into _tree_recapture_after_slot and the first component. So this is
+  # the last instant at which a refusal costs nothing and the first at which the reading
+  # is the one that matters. Same predicate as the launch call above — literally the
+  # same function — which is what makes the two readings comparable at all.
+  #
+  # FAIL-CLOSED here, unlike at launch: there is no peer left to free space for us (we
+  # hold the slot), so a below-bar reading now is the reading the build would start on.
+  _gate_disk_admission_measure
+  _DA_EVALUATIONS=2
+  _DA_MOMENT="at SLOT GRANT"
+  _DA_POST_RENDER=$(_gate_disk_admission_render_state)
+  # Routed through the ONE disposition (which is also what makes UNMEASURED declared
+  # rather than silent: the cap's standing doctrine is that the gate must never be
+  # un-runnable because of the cap, but a reading that could not be TAKEN must never be
+  # rendered as one that PASSED).
+  _gate_disk_admission_dispose \
+    "slot RELEASED immediately; NOTHING was built" \
+    "re-checked AT SLOT GRANT, not merely at launch (#3755)"
+  return 0
 }
 
 # Test-only stub (issue #1825 concurrency self-test): when CQLITE_GATE_STUB_RUNDIR
@@ -20236,6 +22371,7 @@ dispatch_component() {
     kit-dashboard-drift) run_kit_dashboard_drift ;;
     binding-unwind-profile) run_component binding-unwind-profile bash "$REPO_ROOT/scripts/tests/test_binding_unwind_profile.sh" ;;
     pub-surface) run_pub_surface ;;
+    dep-duplicates) run_dep_duplicates ;;
     tooling-tests) run_tooling_tests ;;
     minimal-build)
       # #3453: the minimal lane's DEFINING property is --no-default-features, so the
@@ -20314,8 +22450,92 @@ dispatch_component() {
 is_side_component() {
   [ "$(_component_lane "$1")" = side ]
 }
+# ---- ONE RESOLVED TARGET DIRECTORY, SHARED BY THE PROBE AND THE BUILDS (#3755) ----
+#
+# THE DEFECT (roborev job 345, and it is fallout from the fix one round earlier rather
+# than a separate bug). The #3755 probe stopped modelling cargo's target-dir precedence
+# and started ASKING cargo — which exposed that the side lane was still modelling it,
+# with the exact expression the probe had just shed: `${CARGO_TARGET_DIR:-$REPO_ROOT/target}`.
+# So with `CARGO_BUILD_TARGET_DIR` or a `[build] target-dir` set, the guard measured
+# cargo's resolved directory while several large side-lane builds wrote somewhere else,
+# and the run could begin below the intended floor on the filesystem that actually fills.
+#
+# A finding whose grammar is "these two disagree" says CONSOLIDATE, not patch. Measuring
+# both filesystems would keep two resolutions alive and add multi-subject verdict logic on
+# top; deriving one from the other leaves ONE resolver and ONE truth, and the probe and the
+# builds then agree BY CONSTRUCTION rather than by reconciliation.
+#
+# *** BEHAVIOUR CHANGE, stated rather than left to be inferred: when a config-based target
+# dir is in effect (`[build] target-dir`, or `CARGO_BUILD_TARGET_DIR`), SIDE-LANE BUILDS
+# ARE NOW PLACED UNDER IT instead of under `$REPO_ROOT/target`. That is the CORRECT
+# placement — it is where cargo would have put them had we not overridden it with a
+# modelled path — and it fixes a second-order defect the old base had on its own terms: it
+# silently ignored an operator's configured target dir and wrote into the repo instead,
+# which is the "fills the wrong volume" class #3434 exists for. Nothing changes when no
+# such config is set, which is every lane on this fleet today. ***
+#
+# Resolved ONCE, in the MAIN shell, before any lane starts. Not lazily inside
+# run_side_component: that runs inside the backgrounded SIDE sub-pool, where (a) a cache
+# write lands in a subshell and is discarded, so every side component would re-resolve, and
+# (b) concurrent resolutions would race on `_component_set_bounded`'s SHARED capture files.
+_GATE_SIDE_BASE=""
+_GATE_SIDE_BASE_NOTE=""
+
+# _gate_side_target_base_init: resolve the side lane's base exactly once, in the main shell.
+_gate_side_target_base_init() {
+  local r
+  [ -n "$_GATE_SIDE_BASE" ] && return 0
+  if [ -n "${_DA_TARGET_DIR:-}" ]; then
+    # The #3755 probe already asked cargo, at slot grant. Reuse its answer verbatim — a
+    # second call could only produce a second opinion.
+    _GATE_SIDE_BASE="$_DA_TARGET_DIR"
+    _GATE_SIDE_BASE_NOTE="cargo-resolved (shared with the #3755 admission probe)"
+    return 0
+  fi
+  # No probe verdict: `--only` self-exempts from the slot cap and therefore from the probe,
+  # and it still runs components. Ask the SAME resolver rather than reintroducing the model.
+  _gate_admission_capture_open
+  r=$(_gate_resolve_target_dir)
+  _gate_admission_capture_close
+  case "$r" in
+    'OK '*)
+      _GATE_SIDE_BASE="${r#OK }"
+      _GATE_SIDE_BASE_NOTE="cargo-resolved (the #3755 probe does not run in this mode)" ;;
+    *)
+      # Resolution genuinely failed. The side lane must still build somewhere, so this is
+      # the ONE place the legacy modelled base survives — and it is LOUD, never silent,
+      # because it is the configuration in which the probe and the builds can disagree.
+      _GATE_SIDE_BASE="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+      _GATE_SIDE_BASE_NOTE="UNRESOLVED (${r#UNRESOLVED }) — legacy modelled base"
+      echo "agent-gate: WARN: could not resolve cargo's target directory (${r#UNRESOLVED }); SIDE-lane builds fall back to the modelled base $_GATE_SIDE_BASE, which may not be where cargo writes (#3755)" >&2 ;;
+  esac
+  return 0
+}
+
+# _gate_side_lane_needs_cargo <component...>: rc 0 when at least one of them is
+# Cargo-backed, i.e. when a resolved target dir is actually going to be used.
+#
+# DERIVED from `_fm_component_class` rather than from a list kept here, so this cannot
+# drift from the classification the rest of the gate reasons with. `no-cargo` is the ONLY
+# class that skips: `indirect:<driver>` really does run cargo (through maturin/napi) and
+# needs the dir, and `unobservable:*` is by definition a class we cannot rule cargo out
+# for. An unreadable class defaults to needing it — resolving when we did not have to costs
+# one bounded probe, while NOT resolving when we had to would send a side build to the
+# wrong directory, so the conservative branch is the one that resolves.
+_gate_side_lane_needs_cargo() {
+  local c cls
+  for c in "$@"; do
+    cls=$(_fm_component_class "$c" 2>/dev/null) || cls=cargo
+    [ "$cls" = no-cargo ] || return 0
+  done
+  return 1
+}
+
 run_side_component() {
-  local base="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+  # Reads the value resolved in the main shell. The `:-` is a guard for a dispatch path
+  # that never called the init, not a second resolution: resolving HERE would be inside the
+  # SIDE sub-pool, which is exactly what the init exists to avoid.
+  local base="${_GATE_SIDE_BASE:-${CARGO_TARGET_DIR:-$REPO_ROOT/target}}"
   CARGO_TARGET_DIR="$base/agent-gate-side/$1" dispatch_component "$1"
 }
 
@@ -20350,6 +22570,34 @@ launch_components() {
     if is_side_component "$c"; then side_lane+=("$c"); SELECTED_SIDE+=("$c")
     else main_lane+=("$c"); SELECTED_MAIN+=("$c"); fi
   done
+
+  # #3755: resolve the side lane's target base HERE — AFTER the lanes are known, and ONLY
+  # when the side lane has something in it (roborev job 351).
+  #
+  # THE DEFECT THIS ORDERING FIXES. The call used to sit at the top of this function, before
+  # anything established whether a side component had even been selected, so a MAIN-ONLY
+  # invocation — `--only file-size`, DOCUMENTED as cargo-free and hermetic — ran
+  # `cargo metadata`. That is a delay and a possible `Cargo.lock` write on a path whose
+  # whole contract is that it touches neither, and `--only` is what the nested tooling
+  # self-tests use, so it reached the gate of record by a path nobody was watching.
+  #
+  # LAZY, not eager: the resolution's only consumer is run_side_component. It still happens
+  # exactly once, in the MAIN shell, before any lane starts — which is what keeps it out of
+  # the backgrounded SIDE sub-pool, where a cache write would land in a subshell and
+  # concurrent resolutions would race on the bounded runner's shared capture files.
+  #
+  # GATED ON THE CLASS, NOT ON LANE MEMBERSHIP (roborev job 357). The first cut gated on
+  # `side_lane` being non-empty, which fixed the INSTANCE the review named (`--only
+  # file-size`, a MAIN-lane run) and left the CLASS open: `delivery-telemetry` and
+  # `binding-unwind-profile` are SIDE components that are explicitly Cargo-free, so
+  # `--only delivery-telemetry` still ran `cargo metadata` with the same delay and lockfile
+  # exposure. A finding names an instance; the defect is a class, and the question to ask is
+  # what ENUMERATES the class. Here it already exists: `_fm_component_class`, the same
+  # classification the #3453 feature-matrix annotation is derived from — so a future
+  # Cargo-free side component is covered with no edit here.
+  if [ "${#side_lane[@]}" -gt 0 ] && _gate_side_lane_needs_cargo ${side_lane[@]+"${side_lane[@]}"}; then
+    _gate_side_target_base_init
+  fi
 
   # Bash 3.2 under `set -u` treats "${arr[@]}" of an EMPTY array as unbound (fixed
   # in bash 4.4+; #1841 latent bug surfaced by the #1825 concurrency-cap self-test,
@@ -20468,6 +22716,11 @@ fi
 # was compared against), so a pasted block shows the skew check RAN and names its
 # baseline. Always non-empty on this path — the pre-flight runs at the mode dispatch.
 [ -n "$COMPONENT_SET_LINE" ] && SUMMARY_META+=("$COMPONENT_SET_LINE")
+# #3755: `disk-admission:` is NOT pushed here. It is assembled centrally in
+# emit_summary so that EVERY full-gate block carries it, including the early-terminal
+# preflight paths this builder never reaches (roborev job 335). Pushing it here as well
+# would be dropped and re-appended by that assembly — harmless, but it would imply this
+# is where the contract lives, which is what let five paths omit it.
 SUMMARY_META+=("ci-pins: $PINS")
 SUMMARY_META+=("$(accelerators_line)")
 SUMMARY_META+=("$(cpu_budget_line)")

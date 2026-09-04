@@ -337,6 +337,10 @@ trino-connector/docker/field-repro-artifacts/
 # repo, and leaving them untracked stamps `dirty: yes` on the certification block.
 .review-*.md
 .followup-*.md
+# Same class, fourth instance (#3749): an implementer's hand-off report to the lead.
+# Written as the LAST action of a fix round and read by a human, never shipped — and an
+# untracked-but-not-ignored file stamps `dirty: yes` on the next certification block.
+.fix-report.md
 # Same class, third instance (#3414 gate #7 prep): a stage-C intent audit's verdict file. A
 # spec-auditor writes it MID-RUN, and an untracked-but-not-ignored write while the gate of
 # record is running is `tree-integrity: FAIL (tree-mutated-midrun)` — which is exactly how

@@ -52,6 +52,10 @@ run_report_cfg() {
   local d="$1" c="$2"
   rm -f "$d/session-corpus-pin.json"
   ws0_pin_session_corpus "$d" "$c" "$3" "$4" "$5" "$6"
+  # ...and the per-rep SERVER LOG the reporter requires, if absent — this local invoker stamps
+  # the manifest itself, so it bypasses the shared `run_report` that would otherwise do it
+  # (#3551 item 10).
+  ws0_stamp_missing_server_logs "$d"
   python3 "$REPORT" --dir "$d" --corpus "$c" 2>&1
 }
 
