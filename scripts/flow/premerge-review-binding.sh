@@ -268,8 +268,31 @@ load_findings_count_lib() {
       "cannot be read as a regular file, so the count a findings deferral must match could" \
       "not be derived. It is resolved from this script's OWN directory with no override" \
       "(#3312), so an absent or non-regular artifact is a broken checkout."
+  # SOURCED IN A CONDITIONAL, AND THE REASON IS *NOT* THE ONE THAT APPLIES TO
+  # roborev-review-checks.sh — measured, because a false rationale is worse than none
+  # (roborev job 123, whose finding named both files and is only right about the other).
+  # THIS file sets `set -uo pipefail` with NO `-e` (line 139) and premerge-assert.sh
+  # EXECUTES it (`bash "$REVIEW_BINDING_TOOL"`), so a parent's `-e` does not reach it
+  # either. A BARE `.` on a corrupt library here would therefore return non-zero, execution
+  # would CONTINUE, and the required-function check below would emit a correct anchored
+  # refusal. There is no dead-shell hazard at this call site and none is claimed.
+  # What the conditional buys is TWO smaller things, both real:
+  #   * A TRUE CAUSE. A syntax error is not "did not define roborev_findings_count" — that
+  #     wording sends the reader looking for a missing function in a file whose real defect
+  #     is that it does not parse. The two states get their own sentences.
+  #   * UNIFORMITY with the other consumer, which is what the structural assert in
+  #     scripts/tests/test_roborev_review_guard.sh pins over BOTH files. There the hazard
+  #     IS fatal: roborev-review-checks.sh is SOURCED by roborev-review.sh, which sets
+  #     `-euo pipefail`, so a bare `.` kills that shell at exit 2 with no wrapper verdict
+  #     (measured by reverting it: case cor4050 goes from exit 1 to exit 2).
+  # The required-function check that follows still cannot cover a syntax error on its own:
+  # it only runs if sourcing RETURNED, which under a caller that DID set `-e` it would not.
   # shellcheck source=lib/roborev-findings-count.sh
-  . "$ROBOREV_FINDINGS_COUNT_LIB"
+  if ! . "$ROBOREV_FINDINGS_COUNT_LIB"; then
+    unmeasured "$(sane "$ROBOREV_FINDINGS_COUNT_LIB") could not be SOURCED (it is readable" \
+      "but did not load — most likely a syntax error from a truncated or corrupt file), so" \
+      "the count a findings deferral must match could not be derived."
+  fi
   [ "$(type -t roborev_findings_count)" = function ] ||
     unmeasured "$(sane "$ROBOREV_FINDINGS_COUNT_LIB") did not define roborev_findings_count," \
       "so the findings count cannot be derived. The file is truncated or corrupt."

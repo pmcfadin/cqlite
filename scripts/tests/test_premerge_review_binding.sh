@@ -2349,6 +2349,88 @@ else
   bad "recogniser-absent fixture: the substitute was not in the expected state (sibling=$nolib_sib absent=$nolib_gone)"
 fi
 
+# --- (g) a READABLE but CORRUPT shared recogniser is UNMEASURED too -----------
+# THE STATE (f)'s GUARD ADMITS (roborev job 123). A truncated library is `-f` AND `-r`, so
+# the readability guard lets it through, and `.` then fails on a SYNTAX ERROR.
+#
+# WHAT THIS CASE DOES *NOT* CLAIM, because it was measured and is false here: there is no
+# dead-shell hazard at THIS call site. premerge-review-binding.sh sets `-uo pipefail` with
+# no `-e`, and premerge-assert.sh EXECUTES it (`bash "$REVIEW_BINDING_TOOL"`), so a bare
+# source would return non-zero, continue, and be caught downstream. Reverting the
+# conditional leaves every assertion below PASSING — verified — so this case has NO TEETH
+# against that regression and must not be described as if it had. The fatal version of this
+# hazard is real one file over (roborev-review-checks.sh, sourced under roborev-review.sh's
+# `set -e`) and is pinned WITH teeth by case cor4050 in test_roborev_review_guard.sh, which
+# goes from exit 1 to exit 2 when reverted.
+#
+# WHAT IT DOES PIN, and why it is still worth its lines: a corrupt library must refuse
+# UNMEASURED with an ANCHORED verdict that NAMES the library, and must never bind. Those
+# hold whatever the mechanism, so they are the properties a consumer depends on.
+FLOW_CORRUPT="$T/scripts/flow-corruptlib"
+mkdir -p "$FLOW_CORRUPT/lib"
+corrupt_ready=1
+for f in premerge-review-binding.sh premerge-pr-scan.py roborev-job-facts.py \
+  roborev-waiver-scan.py roborev-review-oracles.sh base-staleness.sh; do
+  cp "$FLOW/$f" "$FLOW_CORRUPT/$f" || corrupt_ready=0
+done
+chmod +x "$FLOW_CORRUPT"/*.sh "$FLOW_CORRUPT"/*.py 2>/dev/null
+# Truncate an open function body: the realistic corruption (a partial write, a cut-off
+# copy) and a guaranteed bash syntax error.
+printf 'roborev_findings_count() {\n  echo unterminated\n' > "$FLOW_CORRUPT/lib/roborev-findings-count.sh"
+# AFFIRM THE FIXTURE IS THE ONE THIS CASE IS ABOUT: readable as a regular file AND
+# unsourceable. A file that merely fails to source proves nothing about the guard it must
+# get past, and one that sources cleanly would make the case vacuous.
+corrupt_readable=0
+corrupt_unsourceable=0
+[ -f "$FLOW_CORRUPT/lib/roborev-findings-count.sh" ] && [ -r "$FLOW_CORRUPT/lib/roborev-findings-count.sh" ] && corrupt_readable=1
+( . "$FLOW_CORRUPT/lib/roborev-findings-count.sh" ) >/dev/null 2>&1 || corrupt_unsourceable=1
+if [ "$corrupt_ready" -ne 1 ]; then
+  bad "recogniser-corrupt fixture: could not stage the substitute flow directory"
+elif [ "$corrupt_readable" -eq 1 ] && [ "$corrupt_unsourceable" -eq 1 ]; then
+  ok "recogniser-corrupt fixture: the recogniser is readable as a regular file AND fails to source — the state (f)'s guard admits"
+  pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 647)" pmcfadin \
+    "$(defer_marker 3602,3613 2 "$MB_MAIN" "$HEAD_AFTER" 647 'both filed and lead-deferred')"
+  roborev_job 647 "$MB_MAIN" "$HEAD_AFTER" F done 2026-09-02T10:00:00Z "$FC_REVIEW2"
+  CL_OUT=$(cd "$WORK" && PATH="$BIN:$PATH" bash "$FLOW_CORRUPT/premerge-review-binding.sh" \
+    review-binding 1 o/r "$HEAD_AFTER" 2>&1)
+  CL_RC=$?
+  if [ "$CL_RC" -ne 5 ]; then
+    bad "4050(g): a corrupt shared recogniser did not refuse UNMEASURED (exit $CL_RC, wanted 5): $CL_OUT"
+  else
+    ok "4050(g): a corrupt shared recogniser is UNMEASURED (exit 5) — the refusal a consumer must treat as non-binding"
+  fi
+  # THE ANCHOR IS THE POINT: a shell killed mid-source emits no anchored line at all, so
+  # this is what separates "refused" from "died with a status that looks like a refusal".
+  case "$CL_OUT" in
+    *"PREMERGE: REVIEW-BINDING verdict UNMEASURED"*)
+      ok "4050(g): it emits its ANCHORED verdict, so a consumer keying on the anchor sees a refusal" ;;
+    *) bad "4050(g): no anchored UNMEASURED verdict on a corrupt recogniser (got: $CL_OUT)" ;;
+  esac
+  case "$CL_OUT" in
+    *"lib/roborev-findings-count.sh"*)
+      ok "4050(g): the cause NAMES the library, so a corrupt checkout is actionable" ;;
+    *) bad "4050(g): the cause did not name the library (got: $CL_OUT)" ;;
+  esac
+  case "$CL_OUT" in
+    *"verdict BOUND"*)
+      bad "4050(g): a run that could not load the recogniser still BOUND (got: $CL_OUT)" ;;
+    *) ok "4050(g): no bind is possible with an unsourceable recogniser" ;;
+  esac
+  # POSITIVE CONTROL, one property different: replace the corrupt library with the REAL one
+  # in the SAME substitute tree and require a BIND. Without it the refusal above could be
+  # caused by anything in the copy — the same reason (f) carries one.
+  cp "$FLOW/lib/roborev-findings-count.sh" "$FLOW_CORRUPT/lib/roborev-findings-count.sh" 2>/dev/null
+  CG_OUT=$(cd "$WORK" && PATH="$BIN:$PATH" bash "$FLOW_CORRUPT/premerge-review-binding.sh" \
+    review-binding 1 o/r "$HEAD_AFTER" 2>&1)
+  case "$CG_OUT" in
+    *"verdict BOUND"*)
+      ok "4050(g) control: the same tree with an INTACT recogniser BINDS, so the refusal is attributable to the corruption alone" ;;
+    *) bad "4050(g) control: the repaired tree did not bind, so the refusal is unattributable (got: $CG_OUT)" ;;
+  esac
+else
+  bad "recogniser-corrupt fixture: not in the expected state (readable=$corrupt_readable unsourceable=$corrupt_unsourceable)"
+fi
+
 # --- G3: an authorized deferral naming a CLOSED issue must NOT bind -----------
 # `gh issue view` EXITS 0 for a closed issue, so a number-only test made "the
 # finding is tracked" satisfiable by an issue closed as a duplicate weeks ago —
@@ -2585,7 +2667,7 @@ fi
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.
-CASE_FLOOR=172
+CASE_FLOOR=178
 TOTAL=$((PASSED + FAILED))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"

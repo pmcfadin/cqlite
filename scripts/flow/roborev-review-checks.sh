@@ -59,11 +59,20 @@
 # and routes to the named, block-emitting refusal below.
 _rfc_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || _rfc_dir=""
 ROBOREV_FINDINGS_COUNT_LIB="$_rfc_dir/lib/roborev-findings-count.sh"
+# THE SOURCE ITSELF IS CONDITIONAL, not just the readability probe (roborev job 123):
+# a readable-but-CORRUPT library makes `.` return non-zero, and a bare `.` under a
+# caller's `set -e` would kill the wrapper before its required-function check could fail
+# closed. Both failures land on the SAME diagnostic, because both leave the recogniser
+# undefined and the remedy is identical; the wording covers both causes.
+_rfc_lib_loaded=0
 if { [ -f "$ROBOREV_FINDINGS_COUNT_LIB" ] && [ -r "$ROBOREV_FINDINGS_COUNT_LIB" ]; }; then
   # shellcheck source=lib/roborev-findings-count.sh
-  . "$ROBOREV_FINDINGS_COUNT_LIB"
+  if . "$ROBOREV_FINDINGS_COUNT_LIB"; then _rfc_lib_loaded=1; fi
+fi
+if [ "$_rfc_lib_loaded" -eq 1 ]; then
+  :
 else
-  printf '%s\n' "roborev-review-checks.sh: cannot read $ROBOREV_FINDINGS_COUNT_LIB as a regular file (the shared findings-count recogniser, #4050) — the findings count CANNOT be measured; the wrapper's required-function check will fail closed on roborev_findings_count" >&2
+  printf '%s\n' "roborev-review-checks.sh: cannot read or source $ROBOREV_FINDINGS_COUNT_LIB (the shared findings-count recogniser, #4050 — absent, non-regular, unreadable, or corrupt) — the findings count CANNOT be measured; the wrapper's required-function check will fail closed on roborev_findings_count" >&2
 fi
 
 roborev_check_review_completed() {

@@ -9014,6 +9014,83 @@ else
 fi
 reset_stub
 
+# ===========================================================================
+# CASE (cor4050): READABLE BUT CORRUPT — the case the `-f`/`-r` guard and the
+# required-function check BOTH miss (roborev job 123).
+#
+# A truncated or corrupt library is `-f` AND `-r`, so the readability guard admits it, and
+# `.` then fails on a SYNTAX ERROR. Under `set -e` a BARE source kills the shell at that
+# line: the required-function check below it never runs, no refusal is emitted, and the
+# process exits with a status a caller can mistake for a verdict this wrapper never gave.
+# Measured on bash 5.2: bare `. bad.sh` exits 2 and never reaches the next statement.
+#
+# DISTINCT FROM (fl4050) IN ITS INPUT, IDENTICAL IN ITS REQUIRED OUTCOME: absent and
+# corrupt must both FAIL CLOSED with an anchored verdict. That is why this is a separate
+# case and not a widened assertion — the absent path exercises the `-f` guard, this one
+# exercises the source itself, and only this one can regress to a verdict-less death.
+# THIS CASE HAS MEASURED TEETH: reverting the checks-side conditional makes it go from
+# `RESULT: FAIL` + exit 1 to `RESULT: FAIL` + exit 2 — bash's syntax-error death under the
+# wrapper's `set -e`, with the wrapper's own verdict never emitted. The equivalent case at
+# the premerge end (test_premerge_review_binding.sh 4050(g)) pins the CAUSE WORDING and the
+# refusal, NOT a death: that file sets no `-e` and is executed, so there is no death there
+# to pin, and claiming otherwise would be the false rationale this suite exists to catch.
+work=$(make_fixture case_cor4050 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+# Corrupt it by TRUNCATING an open function body — the realistic corruption (a partial
+# write or a cut-off copy), and a guaranteed bash syntax error.
+printf 'roborev_findings_count() {\n  echo unterminated\n' > "$_fl_dir/lib/roborev-findings-count.sh"
+_cor_readable=0
+_cor_sources=1
+[ -f "$_fl_dir/lib/roborev-findings-count.sh" ] && [ -r "$_fl_dir/lib/roborev-findings-count.sh" ] && _cor_readable=1
+# AFFIRM THE FIXTURE IS THE ONE THIS CASE IS ABOUT: it must pass the readability guard AND
+# fail to source. A file that merely fails to source proves nothing about this path, and one
+# that sources cleanly would make the whole case vacuous.
+( . "$_fl_dir/lib/roborev-findings-count.sh" ) >/dev/null 2>&1 && _cor_sources=0
+if [ "$_cor_readable" -eq 1 ] && [ "$_cor_sources" -eq 1 ]; then
+  ok 'case (cor4050) fixture: the recogniser is readable as a regular file AND fails to source — the state both existing guards miss'
+  run_wrapper --wrapper "$_fl_dir/roborev-review.sh" "$work"
+  assert_verdict 'case (cor4050) a CORRUPT shared recogniser FAILs the wrapper, with a verdict rather than a dead shell' FAIL 1
+  assert_says 'case (cor4050) and it points at the shared library' \
+    'lib/roborev-findings-count\.sh'
+  assert_lacks 'case (cor4050) it never reaches PASS with the findings count unmeasurable' '^RESULT: PASS'
+else
+  bad "case (cor4050) fixture: could not stage a readable-but-unsourceable recogniser (readable=$_cor_readable unsourceable=$_cor_sources), so the corrupt-library path was never exercised"
+fi
+reset_stub
+
+# ===========================================================================
+# STRUCTURAL (cor4050): NEITHER CONSUMER MAY SOURCE THE SHARED LIBRARY BARE.
+# The behavioural case above covers the wrapper. The merge-point consumer's own
+# corrupt-library path is covered in test_premerge_review_binding.sh, but the INVARIANT
+# — that no consumer sources it outside a conditional — is asserted here over BOTH files,
+# because it is one rule and a per-file assertion is a rule with a copy to lose.
+for _bs_f in "$CHECKS_SRC" "$SCRIPT_DIR/../flow/premerge-review-binding.sh"; do
+  if [ ! -r "$_bs_f" ]; then
+    bad "structural (cor4050): $_bs_f is unreadable, so the bare-source invariant could not be checked"
+    continue
+  fi
+  # A BARE source is a line whose FIRST TOKEN is `.` or `source` AND which carries no
+  # same-line guard operator. Both halves are needed and each was measured against this
+  # repo's own call sites:
+  #   * FIRST TOKEN — so `if . "$LIB"; then` and `if ! . "$LIB"; then` do not match. They
+  #     begin with `if`, and the source is guarded by the `if` itself.
+  #   * NO SAME-LINE `||`/`&&` — so `. "$LIB" || refusal` is accepted. It begins with `.`
+  #     but is guarded, and `||` also suspends `set -e` for the source.
+  # THE SECOND HALF EXISTS BECAUSE THIS RULE RED ON CORRECT INPUT WITHOUT IT: the first
+  # draft flagged a source that was guarded by an `&&` on the PRECEDING line. That is a
+  # multi-line construct a line-oriented rule cannot see, so the CALL SITES are kept
+  # single-line-verifiable and the rule says so — rather than growing a shell parser that
+  # would never close (#3312's ruling on recognisers over author-controlled text). A rule
+  # that reds on correct input is the rule agents learn to waive.
+  _bs_bad=$(grep -nE '^[[:space:]]*(\.|source)[[:space:]]+"?\$(\{)?ROBOREV_FINDINGS_COUNT_LIB' "$_bs_f" \
+    | grep -vE '(\|\||&&)' || true)
+  if [ -z "$_bs_bad" ]; then
+    ok "structural (cor4050): $(basename "$_bs_f") sources the shared recogniser only in a conditional, so a corrupt library cannot kill it under set -e"
+  else
+    bad "structural (cor4050): $(basename "$_bs_f") sources the shared recogniser BARE at line(s) $(printf '%s' "$_bs_bad" | cut -d: -f1 | tr '\n' ',') — in roborev-review-checks.sh that is FATAL (it is sourced under roborev-review.sh's set -e, so a syntax error kills the shell with no verdict); in premerge-review-binding.sh it is not fatal (no -e, and it is executed) but it degrades the cause to 'did not define' for a file that does not parse"
+  fi
+done
+
 printf '== (#4050) the RECHECK-ONLY restriction the merge-point count argument rests on ==\n'
 # ===========================================================================
 # #4050's soundness argument at the merge point is a claim ABOUT THIS FILE PAIR, and a
