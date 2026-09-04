@@ -48,7 +48,30 @@
 use super::*;
 
 impl V5CompressedLegacyParser {
-    /// A MAP KEY IS NEVER `null`, whatever produced it.
+    /// Every member of a FROZEN SET, through [`Self::frozen_key_never_null`].
+    ///
+    /// A set member is a KEY (Cassandra stores it in the cell path), so this is the
+    /// set-shaped spelling of the same rule. It exists so the call sites in
+    /// `frozen.rs` read as ONE self-documenting line: that file sits at its 800-line
+    /// campsite threshold, and an inlined `into_iter().map(...)` costs four lines
+    /// there once rustfmt has wrapped it.
+    pub(super) fn frozen_set_members_never_null(&self, xs: Vec<Value>, desc: &str) -> Vec<Value> {
+        xs.into_iter()
+            .map(|v| self.frozen_key_never_null(v, desc))
+            .collect()
+    }
+
+    /// A KEY IS NEVER `null`, whatever produced it — MAP KEYS *and* SET MEMBERS.
+    ///
+    /// roborev job 170 widened this from map keys alone, and the reason is the
+    /// STORAGE MODEL rather than a convention: Cassandra puts a `set<T>` member in
+    /// the CELL PATH (the cell's name, with an empty value), exactly as it puts a
+    /// map key there — so a set member IS a key and `Set([Null])` is as
+    /// unexpressible as a null map key. A `list` element, by contrast, is stored as
+    /// the cell VALUE under a UUID name, so `List([Null])` is a faithful
+    /// `deserialize()` answer and is left alone. The multicell set path already got
+    /// this for free (it decodes members through `cell_path_key`); the FROZEN set
+    /// path did not, which is the gap job 170 found.
     ///
     /// roborev job 153 (Medium). #3847 widened the shared fixed-width rule so an
     /// empty buffer answers `Value::Null`, and BOTH frozen-map key paths decode
@@ -72,7 +95,7 @@ impl V5CompressedLegacyParser {
     /// that has none. It PEELS first, via the same helper the cell-path `Blob`
     /// diagnostic uses (`frozen<int>` decodes to `Frozen(Null)`, just as invalid),
     /// and that helper LOOPS, so nesting is covered.
-    fn frozen_map_key_never_null(&self, key: Value, desc: &str) -> Value {
+    pub(super) fn frozen_key_never_null(&self, key: Value, desc: &str) -> Value {
         if matches!(Self::peeled_for_inspection(&key), Value::Null) {
             tracing::warn!(
                 "Frozen {}: empty fixed-width map key decoded as null; preserving it \
@@ -112,7 +135,7 @@ impl V5CompressedLegacyParser {
             let key_value =
                 self.read_frozen_element(data, &mut offset, blob_end, key_type, &key_desc, 0)?;
             // A map key is never null (job 153) — ONE rule, both frozen key sites.
-            let key_value = self.frozen_map_key_never_null(key_value, &key_desc);
+            let key_value = self.frozen_key_never_null(key_value, &key_desc);
 
             let val_desc = format!("map '{}' value {}", column.name, i);
             let val_value =
@@ -182,7 +205,7 @@ impl V5CompressedLegacyParser {
                 self.parse_value_from_raw_bytes(key_data, key_type, column_name, depth)?;
             // A map key is never null (job 153) — ONE rule, both frozen key sites.
             let key_desc = format!("map '{}' key {}", column_name, i);
-            let key_value = self.frozen_map_key_never_null(key_value, &key_desc);
+            let key_value = self.frozen_key_never_null(key_value, &key_desc);
             offset += key_len;
 
             // Value: [i32 BE len][value bytes]

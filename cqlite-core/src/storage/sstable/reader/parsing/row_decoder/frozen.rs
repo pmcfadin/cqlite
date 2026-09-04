@@ -86,7 +86,8 @@ impl V5CompressedLegacyParser {
 
         Self::require_frozen_extent(offset, blob_end, kind, &column.name)?; // #3811 (F)
         if as_set {
-            Ok((Value::Set(elements), blob_end))
+            let xs = self.frozen_set_members_never_null(elements, kind);
+            Ok((Value::Set(xs), blob_end))
         } else {
             Ok((Value::List(elements), blob_end))
         }
@@ -184,7 +185,8 @@ impl V5CompressedLegacyParser {
         }
 
         if as_set {
-            Ok((Value::Set(elements), offset))
+            let xs = self.frozen_set_members_never_null(elements, kind);
+            Ok((Value::Set(xs), offset))
         } else {
             Ok((Value::List(elements), offset))
         }

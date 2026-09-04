@@ -334,8 +334,8 @@ fn zero_length_fixed_width_element_decodes_to_null_at_the_four_value_positions()
     let p = parser();
     for (t, _width) in FIXED_WIDTH_TYPES {
         for (label, type_str, build) in nesting_positions(t) {
-            if label.contains("key") {
-                continue; // the map KEY is the sibling case, not a null position
+            if label.contains("key") || label.contains("set<") {
+                continue; // KEY-LIKE positions (map key, set member) are the sibling case
             }
             let body = build(&[]);
             let decoded = p
@@ -364,19 +364,24 @@ fn zero_length_fixed_width_element_decodes_to_null_at_the_four_value_positions()
     }
 }
 
-/// AC2's sibling: a ZERO-length fixed-width MAP KEY is preserved OPAQUELY and is
-/// NEVER null (#3847, roborev job 153).
+/// AC2's sibling: a ZERO-length fixed-width KEY-LIKE member — a MAP KEY or a SET
+/// MEMBER — is preserved OPAQUELY and is NEVER null (#3847, roborev jobs 153/170).
+///
+/// Cassandra stores a `set<T>` member in the CELL PATH, exactly as it stores a map
+/// key, so a set member IS a key: `Set([Null])` is as unexpressible as a null map
+/// key. An earlier revision of THIS test asserted `Null` for the set position and
+/// was wrong; job 170 caught it.
 ///
 /// `Value::Null` is the right answer for a VALUE and an impossible one for a KEY —
 /// Cassandra cannot express a null map key — so the key path applies #3747's opaque
 /// answer instead of inheriting the value rule. The rule, and the four defects one
 /// root cause produced, are documented in `row_decoder::frozen_map`.
 #[test]
-fn zero_length_fixed_width_map_key_is_opaque_never_null() {
+fn zero_length_fixed_width_key_like_member_is_opaque_never_null() {
     let p = parser();
     for (t, _width) in FIXED_WIDTH_TYPES {
         for (label, type_str, build) in nesting_positions(t) {
-            if !label.contains("key") {
+            if !(label.contains("key") || label.contains("set<")) {
                 continue;
             }
             let body = build(&[]);
@@ -385,17 +390,21 @@ fn zero_length_fixed_width_map_key_is_opaque_never_null() {
                 .unwrap_or_else(|e| {
                     panic!("{t} at {label}: the entry must be kept, not dropped: {e:?}")
                 });
-            let Value::Map(kv) = &decoded else {
-                panic!("{t} at {label}: expected a map, got {decoded:?}");
+            let key = match &decoded {
+                Value::Map(kv) => {
+                    &kv.first()
+                        .unwrap_or_else(|| panic!("{t} at {label}: map empty"))
+                        .0
+                }
+                Value::Set(xs) => xs
+                    .first()
+                    .unwrap_or_else(|| panic!("{t} at {label}: set empty")),
+                other => panic!("{t} at {label}: expected a map or set, got {other:?}"),
             };
-            let key = &kv
-                .first()
-                .unwrap_or_else(|| panic!("{t} at {label}: map empty"))
-                .0;
             assert_ne!(
                 *key,
                 Value::Null,
-                "{t} at {label}: a map key must NEVER be null"
+                "{t} at {label}: a key-like member must NEVER be null"
             );
             assert_eq!(
                 *key,
