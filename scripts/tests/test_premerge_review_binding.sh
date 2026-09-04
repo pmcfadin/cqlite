@@ -213,7 +213,7 @@ chmod +x "$BIN/roborev"
 # readable verdict no longer binds, so a fixture omitting it would be asserting
 # the unknown-verdict path by accident. Pass `-` for a record carrying NO
 # verdict field at all.
-# roborev_job <id> <base> <head> [<verdict>] [<status>] [<started_at>]
+# roborev_job <id> <base> <head> [<verdict>] [<status>] [<started_at>] [<review-text>]
 #
 # <verdict>    P clean / F findings / - omit the field entirely
 # <status>     the JOB's terminal state; `done` is the observed success token
@@ -221,12 +221,20 @@ chmod +x "$BIN/roborev"
 # <started_at> the F2 chronology key. `-` omits it. Defaults are chosen so every
 #              pre-F2 caller keeps its meaning: one covering record, terminal and
 #              stamped, i.e. unambiguously the latest.
+# <review-text> the RECORD'S OWN REVIEW OUTPUT, on the review row as `output` — the
+#              real shape, measured on this box's jobs 120/116/115 (834/789/835
+#              bytes, retrievable days after the review). Since #4050 the merge
+#              point derives the findings count from it, so a fixture that omits it
+#              is asserting the "no count could be DERIVED" path. It DEFAULTS TO
+#              ABSENT deliberately: that keeps every pre-#4050 caller's meaning
+#              (they all exercise the UNMEASURED path), so a case wanting a
+#              countable record has to say so. `\n` escapes are rendered.
 roborev_job() {
   mkdir -p "$MOCK_ROBOREV_DIR"
   python3 - "$MOCK_ROBOREV_DIR/job-$1.json" "$1" "$2" "$3" "${4:-P}" \
-    "${5:-done}" "${6:-2026-09-02T10:00:00Z}" <<'PYJOB'
+    "${5:-done}" "${6:-2026-09-02T10:00:00Z}" "${7:-}" <<'PYJOB'
 import json, sys
-out, job, base, head, verdict, status, started = sys.argv[1:8]
+out, job, base, head, verdict, status, started, review = sys.argv[1:9]
 row = {"id": int(job), "git_ref": "%s..%s" % (base, head),
        "model": "gpt-5.6-sol",
        "token_usage": json.dumps({"input_tokens": 400000,
@@ -238,9 +246,24 @@ if status != "-":
     row["status"] = status
 if started != "-":
     row["started_at"] = started
-json.dump({"id": int(job), "job_id": int(job), "agent": "codex", "job": row},
-          open(out, "w"))
+payload = {"id": int(job), "job_id": int(job), "agent": "codex", "job": row}
+if review != "":
+    payload["output"] = review.replace("\\n", "\n")
+json.dump(payload, open(out, "w"))
 PYJOB
+}
+
+# findings_review_text <n> — a review transcript reporting exactly <n> findings, in the
+# shape the shared recogniser counts (a `## Findings` heading, one `**Severity**:` marker
+# per finding, a line-initial `## Summary` terminator). Built here rather than hard-coded
+# so a case says how many findings it means and the count is not a magic string.
+findings_review_text() {
+  local n="$1" i=1 out="## Findings"
+  while [ "$i" -le "$n" ]; do
+    out="$out\n- **Severity**: Medium\n  Problem: finding number $i.\n  Fix: address it."
+    i=$((i + 1))
+  done
+  printf '%s\n## Summary\n%s finding(s) reported.' "$out" "$n"
 }
 
 # defer_marker <issues> <count> <base> <head> <job> <reason> — the authorization
@@ -2018,15 +2041,19 @@ if run_binding 5 "status: an unconcluded job does not bind even WITH a deferral"
   esac
 fi
 
-# --- verdict FINDINGS + AUTHORIZED deferral: UNMEASURED, never BOUND ----------
-# roborev job 103. The authorization itself is impeccable here — allowlisted
-# author, sole-content top-level marker, correct base/head/job scope, both
-# tracking issues verified OPEN — and it STILL must not bind, because the
-# marker's `count=` half is matched against the count the REVIEW observed and no
-# trusted count exists at the merge point (the job record carries a verdict
-# LETTER; a recheck writes no row). Declaring that gap and binding anyway let the
-# merge gate honour a marker the review-time path would REJECT: an allowlisted
-# human can post a fresh marker afterwards carrying any count at all.
+# --- FINDINGS + AUTHORIZED deferral, RECORD WITH NO REVIEW TEXT: UNMEASURED ---
+# roborev job 103, and since #4050 this is specifically the NO-DERIVABLE-COUNT
+# path (AC4c): `roborev_job` writes no `output` field, so the record carries no
+# review text and no count can be DERIVED from it. The authorization itself is
+# impeccable — allowlisted author, sole-content top-level marker, correct
+# base/head/job scope, both tracking issues verified OPEN — and it STILL must not
+# bind, because the marker's `count=` half is matched against the count the REVIEW
+# observed. Declaring that gap and binding anyway let the merge gate honour a
+# marker the review-time path would REJECT: an allowlisted human can post a fresh
+# marker afterwards carrying any count at all. The positive control that this is
+# about the MISSING TEXT and not about the authorization is the #4050 case below,
+# where the SAME authorization over a record that DOES carry a countable review
+# binds.
 MB_MAIN=$(cd "$WORK" && git rev-parse main)
 pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 612)" pmcfadin \
   "$(defer_marker 3602,3613 2 "$MB_MAIN" "$HEAD_AFTER" 612 'both filed and lead-deferred')"
@@ -2034,7 +2061,7 @@ roborev_job 612 "$MB_MAIN" "$HEAD_AFTER" F
 # `issues=` names two tracking issues, so BOTH must be OPEN issues GitHub confirms.
 issue_state_fixture 3602 OPEN
 issue_state_fixture 3613 OPEN
-if run_binding 5 "result: FINDINGS + an authorized deferral is UNMEASURED, not BOUND (job 103)" \
+if run_binding 5 "result: FINDINGS + an authorized deferral over a record with NO review text is UNMEASURED, not BOUND (job 103)" \
   review-binding 1 o/r "$HEAD_AFTER"; then
   case "$OUT" in
     *"verdict UNMEASURED"*)
@@ -2068,6 +2095,182 @@ if run_binding 5 "result: FINDINGS + an authorized deferral is UNMEASURED, not B
     *"obtain a clean covering round"* | *"re-run the review"*)
       ok "result: the remedy is a clean round, not a fixed box and not a fresh marker" ;;
     *) bad "result: the cause carried no usable remedy (got: $OUT)" ;;
+  esac
+fi
+
+# ===========================================================================
+# ISSUE #4050 — A FULLY MEASURED DEFERRAL BINDS, AND EVERY UNMEASURABLE STATE
+# KEEPS TODAY'S REFUSAL.
+# ===========================================================================
+# The record carries no findings-count FIELD, which is what made the case above
+# UNMEASURED — but it DOES carry the review TEXT, and #4050 derives the count from
+# it with the SAME recogniser the review-time gate uses. Before this, no sequence
+# of actions could merge a validly deferred PR: three (#3859, #3858, #3816) were
+# hard-blocked. The cases below pin BOTH directions.
+
+# --- (a) count= EQUALS the derived count: BOUND -------------------------------
+# THE CASE THAT UNBLOCKS THOSE PRs, and the positive control for every refusal
+# below: it differs from them in ONE property at a time (the count, the review
+# text, the marker's presence), so a refusal elsewhere cannot be a setup failure.
+FC_REVIEW2=$(findings_review_text 2)
+pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 640)" pmcfadin \
+  "$(defer_marker 3602,3613 2 "$MB_MAIN" "$HEAD_AFTER" 640 'both filed and lead-deferred')"
+roborev_job 640 "$MB_MAIN" "$HEAD_AFTER" F done 2026-09-02T10:00:00Z "$FC_REVIEW2"
+issue_state_fixture 3602 OPEN
+issue_state_fixture 3613 OPEN
+if run_binding 0 "4050(a): a deferral whose count= EQUALS the DERIVED count BINDS" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  case "$OUT" in
+    *"verdict BOUND"*)
+      ok "4050(a): a fully measured authorized deferral binds — the merge is obtainable again" ;;
+    *) bad "4050(a): a matched deferral did not reach BOUND (got: $OUT)" ;;
+  esac
+  # The bind must SAY it rests on a deferral and name the matched count, or a
+  # reader cannot tell it from a bind on a clean record — which is the whole
+  # reason `findings:` reports DEFERRED and never NONE at review time.
+  case "$OUT" in
+    *"DEFERRED by an authorization from @pmcfadin"*)
+      ok "4050(a): the bind records that it rests on an authorized deferral, not on a clean record" ;;
+    *) bad "4050(a): the BOUND verdict did not disclose the deferral it rests on (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"count= EQUALS the 2 finding(s) DERIVED from job 640"*)
+      ok "4050(a): the note names the equality that was actually measured, and where the count came from" ;;
+    *) bad "4050(a): the bind did not name the measured count equality (got: $OUT)" ;;
+  esac
+fi
+
+# --- (b) a MISMATCHED count= REFUSES, exit 4, NAMED ---------------------------
+# roborev job 103's false green stays closed. ONE property differs from (a): the
+# marker authorizes 1 finding while the record's review reports 2. The refusal
+# must be exit 4 (a MEASURED refusal) and must NAME count-mismatch — folding it
+# into the generic "no authorized deferral covers this job" would send a lead to
+# re-post a marker that was already well-formed, when the action is to re-triage
+# and re-authorize for the count actually observed.
+pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 641)" pmcfadin \
+  "$(defer_marker 3602 1 "$MB_MAIN" "$HEAD_AFTER" 641 'one filed, but the review found two')"
+roborev_job 641 "$MB_MAIN" "$HEAD_AFTER" F done 2026-09-02T10:00:00Z "$FC_REVIEW2"
+if run_binding 4 "4050(b): a MISMATCHED count= is a measured refusal (exit 4), not a bind" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  case "$OUT" in
+    *"verdict UNBOUND"*)
+      ok "4050(b): a count mismatch is UNBOUND — measured and rejected, not unmeasurable" ;;
+    *) bad "4050(b): a mismatched count did not reach UNBOUND (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *COUNT-MISMATCH*)
+      ok "4050(b): the refusal NAMES count-mismatch as its own state" ;;
+    *) bad "4050(b): the count mismatch was not named (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"authorizes 1 finding(s) but this job reports 2"*)
+      ok "4050(b): the scanner's own detail travels, so both counts are visible to the authorizer" ;;
+    *) bad "4050(b): the refusal did not report both counts (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"verdict BOUND"*)
+      bad "4050(b): a mismatched deferral reached BOUND (got: $OUT)" ;;
+    *) ok "4050(b): no mismatched deferral reaches BOUND on any path" ;;
+  esac
+fi
+
+# --- (c) an EMPTY review text REFUSES, exit 5 ---------------------------------
+# The absent-text half is the job-103 case above. This is the other spelling: the
+# record HAS an `output` field and it is empty, which is a non-measurement and not
+# a count of zero. Same authorization as (a), same count, so the only difference
+# is the text.
+pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 642)" pmcfadin \
+  "$(defer_marker 3602,3613 2 "$MB_MAIN" "$HEAD_AFTER" 642 'both filed and lead-deferred')"
+roborev_job 642 "$MB_MAIN" "$HEAD_AFTER" F done 2026-09-02T10:00:00Z '   '
+if run_binding 5 "4050(c): an EMPTY recorded review text is UNMEASURED, never a bind" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  case "$OUT" in
+    *"verdict UNMEASURED"*)
+      ok "4050(c): a record whose review text is unusable cannot be counted, so it cannot clear" ;;
+    *) bad "4050(c): an empty review text was not UNMEASURED (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"no findings count could be DERIVED"*)
+      ok "4050(c): the cause says the count could not be DERIVED — not that no count 'exists'" ;;
+    *) bad "4050(c): the cause did not name the derivation as what failed (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"AUTHORIZED by @pmcfadin"*)
+      ok "4050(c): the good authorization is still reported, so the remedy is not 're-post the marker'" ;;
+    *) bad "4050(c): the cause did not record that an authorization was found (got: $OUT)" ;;
+  esac
+fi
+
+# --- (d) a DERIVED count of 0 on a `verdict=F` record REFUSES, exit 5 ---------
+# The structured verdict affirmatively says FINDINGS while the census over the
+# review text finds no severity marker — a CONTRADICTION, not a measurement of
+# this record's findings (the shape #3564 met twice: a findings review whose
+# findings carry no recognised marker). Matching a marker against that 0 would let
+# an authorization declaring `count=0` clear a findings-bearing record, so the
+# marker below declares exactly that and must NOT bind.
+pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 643)" pmcfadin \
+  "$(defer_marker 3602 0 "$MB_MAIN" "$HEAD_AFTER" 643 'the review text carries no severity marker')"
+roborev_job 643 "$MB_MAIN" "$HEAD_AFTER" F done 2026-09-02T10:00:00Z \
+  '## Findings\n1. Something is wrong, stated in prose with no severity marker.\n## Summary\none issue'
+if run_binding 5 "4050(d): a DERIVED count of 0 on a FINDINGS record is UNMEASURED, never a bind" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  case "$OUT" in
+    *"verdict UNMEASURED"*)
+      ok "4050(d): a zero census against an F verdict is a contradiction, so nothing rests on it" ;;
+    *) bad "4050(d): a zero derived count was not UNMEASURED (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"ZERO severity markers"*)
+      ok "4050(d): the cause names the contradiction rather than reporting a count of zero" ;;
+    *) bad "4050(d): the zero-vs-F contradiction was not named (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"verdict BOUND"*)
+      bad "4050(d): a count=0 marker cleared a findings-bearing record (got: $OUT)" ;;
+    *) ok "4050(d): a count=0 authorization cannot clear a findings-bearing record" ;;
+  esac
+fi
+
+# --- (e) "no authorization" (4) stays DISTINCT from "count unverifiable" (5) --
+# Both refuse the merge, so this is about the DIAGNOSIS: the remedies are
+# different operator actions and collapsing them is the wrong-remedy defect job
+# 102 closed one call over. The record here is COUNTABLE — same review text as
+# (a) — so the only reason it cannot bind is that no marker was posted, which
+# must read as a measured refusal and never as an unmeasurable count.
+pr_payload "$MOCK_GH_DIR/pr.json" main "$(roborev_block 644)"
+roborev_job 644 "$MB_MAIN" "$HEAD_AFTER" F done 2026-09-02T10:00:00Z "$FC_REVIEW2"
+FC_E_RC4=""
+if run_binding 4 "4050(e): a COUNTABLE findings record with NO authorization is UNBOUND (exit 4)" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  FC_E_RC4="$OUT"
+  case "$OUT" in
+    *"no authorized deferral covers this job"*)
+      ok "4050(e): the no-authorization refusal keeps its own wording on a countable record" ;;
+    *) bad "4050(e): the no-authorization refusal was misworded (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"count= half CANNOT BE VERIFIED"* | *"could not be DERIVED"*)
+      bad "4050(e): a missing marker was reported as an unverifiable COUNT — the two diagnoses collapsed (got: $OUT)" ;;
+    *) ok "4050(e): a missing marker is never reported as an unverifiable count" ;;
+  esac
+fi
+# ...and the converse half, re-run here so the two texts are compared in one place
+# rather than across the file. Same job number, same countable-record absence, an
+# authorization present: exit 5 and a DIFFERENT cause.
+pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 645)" pmcfadin \
+  "$(defer_marker 3602,3613 2 "$MB_MAIN" "$HEAD_AFTER" 645 'both filed and lead-deferred')"
+roborev_job 645 "$MB_MAIN" "$HEAD_AFTER" F
+if run_binding 5 "4050(e): an AUTHORIZED deferral over an uncountable record is UNMEASURED (exit 5)" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  if [ -n "$FC_E_RC4" ] && [ "$OUT" != "$FC_E_RC4" ]; then
+    ok "4050(e): the two refusals are numerically (4 vs 5) AND textually distinct"
+  else
+    bad "4050(e): the exit-4 and exit-5 refusals produced identical output, so the operator cannot tell them apart"
+  fi
+  case "$OUT" in
+    *"no authorized deferral covers this job"*)
+      bad "4050(e): an unverifiable count was reported as an unauthorized deferral — job 102's conflation (got: $OUT)" ;;
+    *) ok "4050(e): an unverifiable count is never reported as a missing authorization" ;;
   esac
 fi
 
@@ -2307,7 +2510,7 @@ fi
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.
-CASE_FLOOR=148
+CASE_FLOOR=165
 TOTAL=$((PASSED + FAILED))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"

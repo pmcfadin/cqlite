@@ -8910,6 +8910,64 @@ crlf-severity|## Findings\r\n- **Severity**: High\r\n## Summary\r\n'
   fi
 fi
 
+printf '== (#4050) ONE source guard on the shared recogniser, in BOTH consumers ==\n'
+# ===========================================================================
+# The guard on a `source` cannot itself be sourced — whoever sources the guard would need
+# a guard — so it cannot be deduplicated into an artifact the way the recogniser was. What
+# CAN be deduplicated is the DEFINITION OF RECORD: both consumers must carry the SAME
+# predicate on the SAME variable name, byte for byte, and that identity is asserted here.
+# A guard duplicated by copying is a guard that gets weakened in ONE copy — which is
+# exactly how #3822 clause 12 was found (drive-issue-state.sh guarded `-f`+`-r` while
+# claim-heartbeat.sh guarded `-r` alone, and a FIFO made the `.` block forever with NO
+# diagnostic and NO verdict). Both halves matter: `-r` alone is TRUE for a FIFO, and in a
+# MERGE GATE a verdict-less stall is the worst available failure.
+_fg_checks="$SCRIPT_DIR/../flow/roborev-review-checks.sh"
+_fg_binding="$SCRIPT_DIR/../flow/premerge-review-binding.sh"
+# The predicate, written ONCE here as the expected form. Both files must contain it
+# verbatim; `grep -F` so no character of it is read as a pattern.
+_fg_want='{ [ -f "$ROBOREV_FINDINGS_COUNT_LIB" ] && [ -r "$ROBOREV_FINDINGS_COUNT_LIB" ]; }'
+_fg_ok=1
+for _fg_f in "$_fg_checks" "$_fg_binding"; do
+  if [ ! -f "$_fg_f" ] || [ ! -r "$_fg_f" ]; then
+    bad "structural (#4050): $_fg_f is not readable, so its guard on the shared recogniser could not be checked"
+    _fg_ok=0
+    continue
+  fi
+  if ! grep -Fq "$_fg_want" "$_fg_f"; then
+    bad "structural (#4050): $_fg_f does not carry the shared guard predicate byte-for-byte — the two consumers of lib/roborev-findings-count.sh must apply the IDENTICAL -f AND -r test, or one copy gets weakened and a FIFO makes its \`.\` block forever with no verdict"
+    _fg_ok=0
+  fi
+  # ...and it must be the ONLY shape guarding that source in the file: a second, looser
+  # test beside it would make the identity above true and the behaviour different.
+  if grep -n '\. "\$ROBOREV_FINDINGS_COUNT_LIB"' "$_fg_f" >/dev/null 2>&1; then
+    : # the source exists, which is what the guard is for
+  else
+    bad "structural (#4050): $_fg_f carries the guard but never sources \$ROBOREV_FINDINGS_COUNT_LIB — the guard has no subject, so it greens vacuously"
+    _fg_ok=0
+  fi
+  # NO ENV OVERRIDE AND NO `${...:-...}` FALLBACK on the library path (#3312's second rule:
+  # the constrained party must not choose its own enforcer). A settable library path is a
+  # settable findings COUNT, which is a settable authorization.
+  if grep -nE 'ROBOREV_FINDINGS_COUNT_LIB="?\$\{?ROBOREV_FINDINGS_COUNT_LIB' "$_fg_f" >/dev/null 2>&1 ||
+    grep -nE 'ROBOREV_FINDINGS_COUNT_LIB=.*:-' "$_fg_f" >/dev/null 2>&1; then
+    bad "structural (#4050): $_fg_f resolves the shared recogniser through an environment override or a \`:-\` fallback — the count a deferral must match would then be chosen by the party the check constrains"
+    _fg_ok=0
+  fi
+done
+# The library must be resolved from each consumer's OWN directory, so a scratch copy of the
+# tree carries its own library and no case can reach the ambient checkout's.
+if ! grep -Fq 'ROBOREV_FINDINGS_COUNT_LIB="$OWN_DIR/lib/roborev-findings-count.sh"' "$_fg_binding"; then
+  bad 'structural (#4050): premerge-review-binding.sh does not resolve the shared recogniser from its OWN directory'
+  _fg_ok=0
+fi
+if ! grep -Fq 'BASH_SOURCE[0]' "$_fg_checks"; then
+  bad 'structural (#4050): roborev-review-checks.sh does not resolve the shared recogniser from its own BASH_SOURCE directory'
+  _fg_ok=0
+fi
+if [ "$_fg_ok" -eq 1 ]; then
+  ok 'structural (#4050): both consumers guard the shared recogniser with the IDENTICAL -f AND -r predicate, resolved from their own directory with no override'
+fi
+
 printf '== hermeticity: the wrapper never reaches a real roborev ==\n'
 reset_stub
 if grep -qE '^\s*roborev (review|show|list)' "$WRAPPER_REAL"; then
