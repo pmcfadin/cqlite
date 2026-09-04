@@ -2366,6 +2366,16 @@ fi
 # WHAT IT DOES PIN, and why it is still worth its lines: a corrupt library must refuse
 # UNMEASURED with an ANCHORED verdict that NAMES the library, and must never bind. Those
 # hold whatever the mechanism, so they are the properties a consumer depends on.
+#
+# WHERE THE TEETH ARE, NAMED (lead ruling on #4050 §4). A declaration that says only what
+# it CANNOT detect leaves a reader to conclude the property is uncovered, which is false —
+# so this note must point at its own complement. The bare-source regression IS pinned, with
+# measured teeth, by case `cor4050` in scripts/tests/test_roborev_review_guard.sh: reverting
+# the checks-side conditional moves it from `RESULT: FAIL` + exit 1 to exit 2, bash's
+# syntax-error death under roborev-review.sh's `set -e`, with the wrapper's own verdict
+# never emitted. That file is where the fatal version of this hazard lives, because that
+# consumer is SOURCED under `-e` while this one is EXECUTED without it. Read the two cases
+# as a pair: this one covers the properties, that one covers the death.
 FLOW_CORRUPT="$T/scripts/flow-corruptlib"
 mkdir -p "$FLOW_CORRUPT/lib"
 corrupt_ready=1
@@ -2430,6 +2440,69 @@ elif [ "$corrupt_readable" -eq 1 ] && [ "$corrupt_unsourceable" -eq 1 ]; then
 else
   bad "recogniser-corrupt fixture: not in the expected state (readable=$corrupt_readable unsourceable=$corrupt_unsourceable)"
 fi
+
+# --- (h)(i) #4090: an ABSENT recogniser must NOT affect paths that need no count ----
+# LEAD RULING on roborev job 125 (#4050 §5): the recogniser used to load unconditionally in
+# the preflight, so a missing or corrupt library refused questions it was never needed for.
+# It is now loaded LAZILY inside the `findings)` arm. These two cases pin the paths that
+# were wrongly affected; 4050(f) above already pins that the FINDINGS path still refuses.
+#
+# BOTH RUN THROUGH `$FLOW_NOLIB`, the substitute flow copy whose library was removed for
+# case (f). Its state is RE-ASSERTED here rather than assumed: (f) is upstream in this file
+# and a future edit could restore the library, which would make both cases pass while
+# exercising nothing.
+nolib_still_gone=0
+nolib_still_sib=0
+[ -f "$FLOW_NOLIB/premerge-review-binding.sh" ] && nolib_still_sib=1
+[ -e "$FLOW_NOLIB/lib/roborev-findings-count.sh" ] || nolib_still_gone=1
+if [ "$nolib_still_sib" -ne 1 ] || [ "$nolib_still_gone" -ne 1 ]; then
+  bad "4090 fixture: \$FLOW_NOLIB is not in the expected state (sibling=$nolib_still_sib absent=$nolib_still_gone), so neither case below exercised an absent recogniser"
+else
+  ok "4090 fixture: the substitute flow copy still reads and its recogniser is still absent"
+
+  # (h) A CODE-FREE PR diff needs no findings count at all. Its correct answer is the
+  # loudly DECLARED NOT-APPLICABLE, and an absent recogniser must not turn that into
+  # UNMEASURED. Exit 0, same as the library-present case above.
+  pr_payload "$MOCK_GH_DIR/pr.json" main "no review recorded here"
+  H_OUT=$(cd "$WORK" && PATH="$BIN:$PATH" bash "$FLOW_NOLIB/premerge-review-binding.sh" \
+    review-binding 1 pmcfadin/cqlite "$PROSE_ONLY" 2>&1)
+  H_RC=$?
+  if [ "$H_RC" -ne 0 ]; then
+    bad "4090(h): a code-free diff did not stay NOT-APPLICABLE with the recogniser absent (exit $H_RC, wanted 0): $H_OUT"
+  else
+    ok "4090(h): a code-free diff is still NOT-APPLICABLE (exit 0) with the recogniser absent"
+  fi
+  case "$H_OUT" in
+    *"verdict NOT-APPLICABLE"*)
+      ok "4090(h): and it is the DECLARED exemption, not some other exit-0 answer" ;;
+    *) bad "4090(h): expected 'verdict NOT-APPLICABLE' (got: $H_OUT)" ;;
+  esac
+  case "$H_OUT" in
+    *"roborev-findings-count.sh"*)
+      bad "4090(h): a code-free diff still mentions the recogniser, so it is still being loaded on this path (got: $H_OUT)" ;;
+    *) ok "4090(h): the recogniser is not even NAMED on the code-free path — it was never loaded" ;;
+  esac
+
+  # (i) A CLEAN recorded review binds through the STRUCTURED verdict letter and never asks
+  # how many findings there were. An absent recogniser must not turn a legitimate bind into
+  # UNMEASURED. Default verdict for `roborev_job` is `P`, i.e. clean.
+  pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 648)" pmcfadin "irrelevant"
+  roborev_job 648 "$MB_MAIN" "$HEAD_AFTER"
+  I_OUT=$(cd "$WORK" && PATH="$BIN:$PATH" bash "$FLOW_NOLIB/premerge-review-binding.sh" \
+    review-binding 1 o/r "$HEAD_AFTER" 2>&1)
+  I_RC=$?
+  if [ "$I_RC" -ne 0 ]; then
+    bad "4090(i): a CLEAN record did not bind with the recogniser absent (exit $I_RC, wanted 0): $I_OUT"
+  else
+    ok "4090(i): a CLEAN record still BINDS (exit 0) with the recogniser absent — it needs no count"
+  fi
+  case "$I_OUT" in
+    *"affirmatively CLEAN"*)
+      ok "4090(i): and it binds for the right reason — the structured verdict, not a count" ;;
+    *) bad "4090(i): the bind did not cite the structured CLEAN verdict (got: $I_OUT)" ;;
+  esac
+fi
+reset_stub 2>/dev/null || true
 
 # --- G3: an authorized deferral naming a CLOSED issue must NOT bind -----------
 # `gh issue view` EXITS 0 for a closed issue, so a number-only test made "the
@@ -2667,7 +2740,7 @@ fi
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.
-CASE_FLOOR=178
+CASE_FLOOR=184
 TOTAL=$((PASSED + FAILED))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"

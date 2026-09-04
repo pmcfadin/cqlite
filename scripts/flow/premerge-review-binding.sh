@@ -771,9 +771,16 @@ cmd_review_binding() {
   need_file "$SCAN_TOOL"
   need_file "$FACTS_TOOL"
   need_file "$CLASSIFY_TOOL"
-  # THE SHARED FINDINGS-COUNT RECOGNISER (#4050). Loaded here, with `P` already set, so a
-  # guard failure prints this leg's anchored UNMEASURED rather than an unprefixed line.
-  load_findings_count_lib
+  # THE SHARED FINDINGS-COUNT RECOGNISER IS *NOT* LOADED HERE (#4090, lead ruling on
+  # roborev job 125). It used to be, and that made a MISSING OR CORRUPT library refuse
+  # paths that need no findings count at all: a CODE-FREE diff, whose correct answer is a
+  # loudly DECLARED NOT-APPLICABLE, and a CLEAN recorded review, which binds through the
+  # structured-verdict path and never asks how many findings there were. Widening a
+  # certification tool's refusal beyond its subject is the fail-closed direction, but it
+  # is still wrong: it reports "could not measure" about a question it did not need to ask.
+  # The load now happens INSIDE the `findings)` arm, immediately before the count is
+  # derived — the one place the recogniser is needed. `P` is set well before that point,
+  # so a guard failure still prints this leg's anchored UNMEASURED and never a bare line.
 
   # GLOBAL, deliberately: the EXIT trap below fires as the shell unwinds, by
   # which point a `local` may be out of scope and the trap would expand to
@@ -1021,6 +1028,10 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
         # exactly as before, so it cannot introduce a false green in the unmeasurable
         # direction. A refusal is subtracted only where a count was affirmatively
         # measured AND the same judge that gates review time granted.
+        # LOADED HERE, LAZILY (#4090): this is the only arm that needs the recogniser, so
+        # a broken checkout refuses THIS question and leaves the code-free and clean-record
+        # answers alone. Reached only for a record whose structured verdict is FINDINGS.
+        load_findings_count_lib
         local rpb_observed=""
         if derive_findings_count "$tmp/review" "$tmp/findings-block"; then
           rpb_observed="$DERIVED_FINDINGS_COUNT"
