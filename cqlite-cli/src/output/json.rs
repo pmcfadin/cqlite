@@ -7,14 +7,11 @@
 use crate::config::OutputConfig;
 use crate::output::{OutputError, StreamingWriter};
 use cqlite_core::query::{QueryMetadata, QueryResult, QueryRow};
-use cqlite_core::util::udt_json::udt_to_json_object;
-use cqlite_core::Value;
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
-use serde_json::{json, Value as JsonValue};
 use std::error::Error as StdError;
 use std::io::Write;
 
-use super::value_fmt::ValueFormatter;
+use super::json_cell::JsonCell;
 
 /// A single result row serialized as a JSON object with keys in `metadata.columns`
 /// order, borrowing each column name (`&str`) as the object key instead of cloning
@@ -62,89 +59,13 @@ impl Serialize for RowObj<'_> {
         let mut map = serializer.serialize_map(Some(self.keys.len()))?;
         for &key in self.keys {
             // Missing column → JSON null, matching the historical Map behaviour.
-            let json_value = match self.row.values.get(key) {
-                Some(value) => JSONWriter::value_to_json(value),
-                None => JsonValue::Null,
+            let cell = match self.row.values.get(key) {
+                Some(value) => JsonCell::from_value(value),
+                None => JsonCell::Plain(serde_json::Value::Null),
             };
-            map.serialize_entry(key, &json_value)?;
+            map.serialize_entry(key, &cell)?;
         }
         map.end()
-    }
-}
-
-/// Serialize a CQL `float` as the shortest decimal that round-trips the **f32**.
-///
-/// Issue #3777. `Number::from_f64(f as f64)` widens the f32 to its
-/// exact-but-imprecise f64 first, so the emitted decimal is the shortest one
-/// round-tripping THAT f64 (`1.6699999570846558`) instead of the f32 (`1.67`).
-/// The oracle is `sstabledump`, whose `float` cells carry the f32 spelling
-/// (Cassandra `FloatSerializer` -> `Float.toString`); the CSV and table writers
-/// already agree with it via `ValueFormatter::format_float32`.
-///
-/// # Why this and not `serde_json`'s `float_roundtrip`
-///
-/// MEASURED, not assumed (see
-/// `json_tests.rs::serde_json_value_from_f32_still_widens_so_the_fix_must_be_local`):
-/// `float_roundtrip` is a DESERIALIZATION feature — it appears only in
-/// serde_json's `src/de.rs` and `src/value/de.rs`, never in `ser.rs`/`number.rs` —
-/// so it cannot reach this arm at all. And `serde_json::Number` stores an `f64`
-/// unconditionally (`Number::from_f32` is itself `N::Float(f as f64)`), so no
-/// `Number`/`Value` constructor can carry f32 precision. Only the streaming
-/// `Serializer::serialize_f32` path preserves it, and this writer builds a
-/// `JsonValue`. So the conversion is done here, locally, with no new dependency
-/// and no feature flag whose absence would silently change release output.
-///
-/// # How the shortest f32 form is obtained, and why not `f32::to_string`
-///
-/// Via serde_json's OWN f32 serializer (`serde_json::to_string(&f32)`, which is the
-/// only path in the crate that formats an f32 as an f32), then re-parsed as `f64`
-/// for the `Number`. Rust's `Display` was tried first and is WRONG against the
-/// oracle on an exact tie: for `36.6015625f32` (exactly representable, and a real
-/// `test_timeseries.sensor_data` `temperature`) four 8-digit decimals round-trip
-/// and two are equidistant, so the tie-break decides. Measured —
-///
-/// ```text
-/// f32 36.6015625:  Display -> 36.601563     serde_json -> 36.601562
-/// sstabledump golden (Cassandra Float.toString): 36.601562
-/// ```
-///
-/// — serde_json rounds the tie to an EVEN last digit, which is what `Float.toString`
-/// specifies and what the committed dump carries, while `Display` rounds away from
-/// zero. This is the same "Rust float formatting is not Java's" family as
-/// `total_cmp` vs `Float.compare` (CLAUDE.md self-check list), and the AD2 lane's
-/// `test_timeseries.sensor_data` case is what caught it.
-///
-/// Re-parsing that text as `f64` is lossless: the text carries at most 9
-/// significant digits, f64 recovers any decimal of up to 15, so the nearest f64 to
-/// it is the only f64 whose own shortest form is that same text. Verified over a
-/// spread of values by
-/// `json_tests.rs::float32_json_round_trips_through_f32_for_a_spread_of_values`.
-///
-/// The cost is one short `String` per `float` cell — the same order as this
-/// writer's blob, timestamp and decimal arms, all of which render through a
-/// `String` already — in exchange for not adding a formatting dependency and not
-/// depending on a cargo feature whose absence would silently change release output.
-fn float32_to_json(f: f32) -> JsonValue {
-    // Non-finite floats stay JSON `null`: JSON has no literal for NaN or
-    // +/-Infinity. That is a DECLARED divergence (CLAUDE.md `bindings/parity`
-    // gap 4, AD2's `Divergence::NonFiniteFloatRendersAsJsonNull`), deliberately
-    // NOT changed here — pinned by
-    // `json_tests.rs::nonfinite_float_renders_as_json_null_unchanged`.
-    if !f.is_finite() {
-        return JsonValue::Null;
-    }
-    // serde_json's f32 serializer, NOT `f32::to_string` — see the tie-break
-    // measurement above. `serialize_f32` cannot fail for a finite f32 (it writes
-    // into a `Vec<u8>`), but the error is mapped rather than unwrapped: no
-    // `unwrap()`/`expect()` in this crate.
-    let Ok(shortest) = serde_json::to_string(&f) else {
-        return JsonValue::Null;
-    };
-    match shortest.parse::<f64>() {
-        Ok(widened) => serde_json::Number::from_f64(widened)
-            .map(JsonValue::Number)
-            .unwrap_or(JsonValue::Null),
-        Err(_) => JsonValue::Null,
     }
 }
 
@@ -214,104 +135,6 @@ impl JSONWriter {
             SerializeSeq::end(seq)?;
         }
         String::from_utf8(buf).map_err(|e| e.into())
-    }
-
-    /// Convert a CQLite Value to a serde_json::Value
-    ///
-    /// Uses string representations for complex types to ensure human readability.
-    #[allow(dead_code)]
-    fn value_to_json(value: &Value) -> JsonValue {
-        match value {
-            Value::Null => JsonValue::Null,
-            Value::Boolean(b) => JsonValue::Bool(*b),
-            Value::Integer(i) => JsonValue::Number((*i).into()),
-            Value::BigInt(i) => JsonValue::Number((*i).into()),
-            Value::Counter(c) => JsonValue::Number((*c).into()),
-            Value::TinyInt(i) => JsonValue::Number((*i as i64).into()),
-            Value::SmallInt(i) => JsonValue::Number((*i as i64).into()),
-            Value::Float(f) => serde_json::Number::from_f64(*f)
-                .map(JsonValue::Number)
-                .unwrap_or(JsonValue::Null),
-            Value::Float32(f) => float32_to_json(*f),
-            Value::Text(s) => JsonValue::String(String::from_utf8_lossy(s).into_owned()),
-            // Use ValueFormatter for human-readable Blob formatting (0x... hex)
-            Value::Blob(_) => JsonValue::String(ValueFormatter::format_value(value)),
-            // Use ValueFormatter for human-readable Timestamp (YYYY-MM-DD HH:MM:SS.fff+0000)
-            Value::Timestamp(_) => JsonValue::String(ValueFormatter::format_value(value)),
-            // Use ValueFormatter for human-readable Date (YYYY-MM-DD)
-            Value::Date(_) => JsonValue::String(ValueFormatter::format_value(value)),
-            // Use ValueFormatter for human-readable Time (HH:MM:SS.nnnnnnnnn)
-            Value::Time(_) => JsonValue::String(ValueFormatter::format_value(value)),
-            Value::Uuid(uuid) => {
-                // Format UUID via the shared hex lookup-table encoder (issue #1499)
-                // instead of a 16-arg `format!` per cell.
-                let mut uuid_str = String::with_capacity(36);
-                ValueFormatter::format_uuid_into(uuid, &mut uuid_str);
-                JsonValue::String(uuid_str)
-            }
-            // Use ValueFormatter for human-readable Varint (decimal string)
-            Value::Varint(_) => JsonValue::String(ValueFormatter::format_value(value)),
-            // Use ValueFormatter for human-readable Decimal (e.g., "69799.73")
-            Value::Decimal { .. } => JsonValue::String(ValueFormatter::format_value(value)),
-            // Use ValueFormatter for human-readable Duration (XmoYdZns format)
-            Value::Duration { .. } => JsonValue::String(ValueFormatter::format_value(value)),
-            Value::Json(j) => (**j).clone(),
-            Value::List(list) => {
-                let json_list: Vec<JsonValue> = list.iter().map(Self::value_to_json).collect();
-                JsonValue::Array(json_list)
-            }
-            Value::Set(set) => {
-                let json_list: Vec<JsonValue> = set.iter().map(Self::value_to_json).collect();
-                JsonValue::Array(json_list)
-            }
-            Value::Map(map) => {
-                // Maps are Vec<(Value, Value)> in CQLite
-                // Represent as array of {"key": k, "value": v} objects for clarity
-                let entries: Vec<JsonValue> = map
-                    .iter()
-                    .map(|(k, v)| {
-                        json!({
-                            "key": Self::value_to_json(k),
-                            "value": Self::value_to_json(v)
-                        })
-                    })
-                    .collect();
-                JsonValue::Array(entries)
-            }
-            Value::Tuple(tuple) => {
-                let json_list: Vec<JsonValue> = tuple.iter().map(Self::value_to_json).collect();
-                JsonValue::Array(json_list)
-            }
-            // Declared fields and NOTHING else — no injected `_type` (issue
-            // #3629): type identity must not share the user's field namespace.
-            // One shared rule, each writer keeping its own field-value renderer.
-            Value::Udt(udt) => udt_to_json_object(udt, Self::value_to_json),
-            Value::Frozen(boxed_value) => Self::value_to_json(boxed_value),
-            // Tombstoned cells represent deleted values. Emit JSON null to match
-            // cqlsh and Python binding behaviour (issue #806).
-            Value::Tombstone(_) => JsonValue::Null,
-            Value::Inet(bytes) => {
-                // Format as IP address string if possible
-                if bytes.len() == 4 {
-                    JsonValue::String(format!(
-                        "{}.{}.{}.{}",
-                        bytes[0], bytes[1], bytes[2], bytes[3]
-                    ))
-                } else if bytes.len() == 16 {
-                    // IPv6 - use std::net::Ipv6Addr for canonical formatting
-                    use std::net::Ipv6Addr;
-                    let mut octets = [0u8; 16];
-                    octets.copy_from_slice(bytes);
-                    let addr = Ipv6Addr::from(octets);
-                    JsonValue::String(addr.to_string())
-                } else {
-                    // Invalid length, encode as base64
-                    use base64::Engine;
-                    let engine = base64::engine::general_purpose::STANDARD;
-                    JsonValue::String(engine.encode(bytes))
-                }
-            }
-        }
     }
 }
 
@@ -469,5 +292,381 @@ impl<W: Write + Send> StreamingWriter for StreamingJSONWriter<W> {
 }
 
 #[cfg(test)]
-#[path = "json_tests.rs"]
-mod json_tests;
+mod tests {
+    use super::*;
+    use cqlite_core::query::ColumnInfo;
+    use cqlite_core::{RowKey, Value};
+    use std::collections::HashMap;
+
+    fn default_config() -> OutputConfig {
+        OutputConfig::default()
+    }
+
+    #[test]
+    fn test_deterministic_key_ordering() {
+        // Create QueryResult with columns in reverse alphabetical order: [c, b, a]
+        let mut result = QueryResult::new();
+
+        // Set metadata with columns in specific order
+        result.metadata.columns = vec![
+            ColumnInfo::new(
+                "c".to_string(),
+                cqlite_core::types::DataType::Integer,
+                false,
+                0,
+            ),
+            ColumnInfo::new(
+                "b".to_string(),
+                cqlite_core::types::DataType::Integer,
+                false,
+                1,
+            ),
+            ColumnInfo::new(
+                "a".to_string(),
+                cqlite_core::types::DataType::Integer,
+                false,
+                2,
+            ),
+        ];
+
+        // Add a row
+        let mut values = HashMap::new();
+        values.insert("a".to_string(), Value::Integer(1));
+        values.insert("b".to_string(), Value::Integer(2));
+        values.insert("c".to_string(), Value::Integer(3));
+
+        let row = QueryRow::with_values(RowKey::new(vec![1]), values);
+        result.rows.push(row);
+
+        // Write to JSON
+        let json_str = JSONWriter::write(&result, &default_config()).unwrap();
+
+        // Parse to verify structure
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed.len(), 1);
+
+        let row_obj = parsed[0].as_object().unwrap();
+
+        // CRITICAL: Verify key order matches column order [c, b, a], NOT [a, b, c]
+        let keys: Vec<&String> = row_obj.keys().collect();
+        assert_eq!(keys, vec!["c", "b", "a"], "Keys must be in column order");
+
+        // Verify JSON string representation has keys in correct order
+        assert!(
+            json_str.find("\"c\"").unwrap() < json_str.find("\"b\"").unwrap(),
+            "Key 'c' must appear before 'b' in JSON string"
+        );
+        assert!(
+            json_str.find("\"b\"").unwrap() < json_str.find("\"a\"").unwrap(),
+            "Key 'b' must appear before 'a' in JSON string"
+        );
+    }
+
+    /// Issue #1499: the borrowed-key serializer must produce byte-identical pretty
+    /// JSON to the previous `serde_json::Map` + `to_string_pretty` path.
+    #[test]
+    fn test_borrowed_key_pretty_output_is_byte_identical() {
+        let mut result = QueryResult::new();
+        result.metadata.columns = vec![
+            ColumnInfo::new(
+                "id".to_string(),
+                cqlite_core::types::DataType::Integer,
+                false,
+                0,
+            ),
+            ColumnInfo::new(
+                "name".to_string(),
+                cqlite_core::types::DataType::Text,
+                false,
+                1,
+            ),
+        ];
+        let mut values = HashMap::new();
+        values.insert("id".to_string(), Value::Integer(7));
+        values.insert("name".to_string(), Value::text("null".to_string()));
+        result
+            .rows
+            .push(QueryRow::with_values(RowKey::new(vec![7]), values));
+
+        let json_str = JSONWriter::write(&result, &default_config()).unwrap();
+
+        // Reference: what the old Map-based path produced.
+        let mut map = serde_json::Map::new();
+        map.insert("id".to_string(), serde_json::json!(7));
+        map.insert("name".to_string(), serde_json::json!("null"));
+        let expected = serde_json::to_string_pretty(&vec![serde_json::Value::Object(map)]).unwrap();
+
+        assert_eq!(json_str, expected);
+        // A literal text "null" is a JSON string, never dropped.
+        assert!(json_str.contains("\"null\""));
+    }
+
+    /// Issue #1499: a result whose `metadata.columns` contains a duplicate output
+    /// column name (e.g. `SELECT a, a`) must render a SINGLE `"a"` key holding the
+    /// LAST value, byte-identical to the old `serde_json::Map::insert` (last-wins)
+    /// path — NOT two duplicate `"a"` keys.
+    #[test]
+    fn test_duplicate_column_names_collapse_last_wins_batch() {
+        let mut result = QueryResult::new();
+        result.metadata.columns = vec![
+            ColumnInfo::new(
+                "a".to_string(),
+                cqlite_core::types::DataType::Integer,
+                false,
+                0,
+            ),
+            ColumnInfo::new(
+                "a".to_string(),
+                cqlite_core::types::DataType::Integer,
+                false,
+                1,
+            ),
+        ];
+        // The row's HashMap holds a single value per name — the LAST written value.
+        let mut values = HashMap::new();
+        values.insert("a".to_string(), Value::Integer(2));
+        result
+            .rows
+            .push(QueryRow::with_values(RowKey::new(vec![1]), values));
+
+        let json_str = JSONWriter::write(&result, &default_config()).unwrap();
+
+        // Reference: old Map-based path, inserting both duplicate columns in order
+        // (first=1, then last=2) collapses to a single `"a"` key holding 2.
+        let mut map = serde_json::Map::new();
+        map.insert("a".to_string(), serde_json::json!(1));
+        map.insert("a".to_string(), serde_json::json!(2));
+        let expected = serde_json::to_string_pretty(&vec![serde_json::Value::Object(map)]).unwrap();
+
+        assert_eq!(
+            json_str, expected,
+            "duplicate column name must collapse to a single last-wins key"
+        );
+        // Exactly one occurrence of the `"a"` key.
+        assert_eq!(json_str.matches("\"a\"").count(), 1);
+    }
+
+    /// Issue #1499: the streaming writer must apply the same duplicate-key collapse
+    /// as the batch writer.
+    #[test]
+    fn test_duplicate_column_names_collapse_last_wins_streaming() {
+        let metadata = {
+            let mut m = QueryResult::new().metadata;
+            m.columns = vec![
+                ColumnInfo::new(
+                    "a".to_string(),
+                    cqlite_core::types::DataType::Integer,
+                    false,
+                    0,
+                ),
+                ColumnInfo::new(
+                    "a".to_string(),
+                    cqlite_core::types::DataType::Integer,
+                    false,
+                    1,
+                ),
+            ];
+            m
+        };
+
+        let mut values = HashMap::new();
+        values.insert("a".to_string(), Value::Integer(2));
+        let row = QueryRow::with_values(RowKey::new(vec![1]), values);
+
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut writer = StreamingJSONWriter::new(&mut buf);
+            writer.write_header(&metadata).unwrap();
+            writer.write_chunk(std::slice::from_ref(&row)).unwrap();
+            writer.finalize().unwrap();
+        }
+        let json_str = String::from_utf8(buf).unwrap();
+
+        // Parsing into a Map (last-wins) proves there is exactly one `"a"` key.
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed.len(), 1);
+        let obj = parsed[0].as_object().unwrap();
+        assert_eq!(obj.len(), 1, "duplicate key must collapse to one entry");
+        assert_eq!(obj.get("a").unwrap(), &serde_json::json!(2));
+        // No duplicate `"a"` key in the raw bytes.
+        assert_eq!(json_str.matches("\"a\"").count(), 1);
+    }
+
+    #[test]
+    fn test_empty_result_is_empty_array_bytes() {
+        // serialize_seq(Some(0)) must still render exactly "[]".
+        let result = QueryResult::new();
+        let json_str = JSONWriter::write(&result, &default_config()).unwrap();
+        assert_eq!(json_str, "[]");
+    }
+
+    #[test]
+    fn test_null_values() {
+        let mut result = QueryResult::new();
+        result.metadata.columns = vec![ColumnInfo::new(
+            "nullable_col".to_string(),
+            cqlite_core::types::DataType::Text,
+            true,
+            0,
+        )];
+
+        // Row with missing value (should be null)
+        let values = HashMap::new(); // Empty - no value for nullable_col
+        let row = QueryRow::with_values(RowKey::new(vec![1]), values);
+        result.rows.push(row);
+
+        let json_str = JSONWriter::write(&result, &default_config()).unwrap();
+        assert!(
+            json_str.contains("null"),
+            "Missing values should be JSON null"
+        );
+    }
+
+    #[test]
+    fn test_value_types() {
+        let mut result = QueryResult::new();
+        result.metadata.columns = vec![
+            ColumnInfo::new(
+                "int_col".to_string(),
+                cqlite_core::types::DataType::Integer,
+                false,
+                0,
+            ),
+            ColumnInfo::new(
+                "text_col".to_string(),
+                cqlite_core::types::DataType::Text,
+                false,
+                1,
+            ),
+            ColumnInfo::new(
+                "bool_col".to_string(),
+                cqlite_core::types::DataType::Boolean,
+                false,
+                2,
+            ),
+        ];
+
+        let mut values = HashMap::new();
+        values.insert("int_col".to_string(), Value::Integer(42));
+        values.insert("text_col".to_string(), Value::text("hello".to_string()));
+        values.insert("bool_col".to_string(), Value::Boolean(true));
+
+        let row = QueryRow::with_values(RowKey::new(vec![1]), values);
+        result.rows.push(row);
+
+        let json_str = JSONWriter::write(&result, &default_config()).unwrap();
+
+        // Verify values are correctly represented
+        assert!(json_str.contains("42"));
+        assert!(json_str.contains("\"hello\""));
+        assert!(json_str.contains("true"));
+    }
+
+    #[test]
+    fn test_empty_result() {
+        let result = QueryResult::new();
+        let json_str = JSONWriter::write(&result, &default_config()).unwrap();
+
+        // Empty result should be empty array
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed.len(), 0);
+    }
+
+    #[test]
+    fn test_multiple_rows() {
+        let mut result = QueryResult::new();
+        result.metadata.columns = vec![ColumnInfo::new(
+            "id".to_string(),
+            cqlite_core::types::DataType::Integer,
+            false,
+            0,
+        )];
+
+        // Add multiple rows
+        for i in 1..=3 {
+            let mut values = HashMap::new();
+            values.insert("id".to_string(), Value::Integer(i));
+            let row = QueryRow::with_values(RowKey::new(vec![i as u8]), values);
+            result.rows.push(row);
+        }
+
+        let json_str = JSONWriter::write(&result, &default_config()).unwrap();
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed.len(), 3);
+    }
+
+    #[test]
+    fn test_config_limit() {
+        let mut result = QueryResult::new();
+        result.metadata.columns = vec![ColumnInfo::new(
+            "id".to_string(),
+            cqlite_core::types::DataType::Integer,
+            false,
+            0,
+        )];
+
+        // Add 10 rows
+        for i in 1..=10 {
+            let mut values = HashMap::new();
+            values.insert("id".to_string(), Value::Integer(i));
+            let row = QueryRow::with_values(RowKey::new(vec![i as u8]), values);
+            result.rows.push(row);
+        }
+
+        // Apply limit of 3 rows
+        let config = OutputConfig {
+            color_enabled: true,
+            limit: Some(3),
+            page_size: None,
+            target: crate::output::OutputTarget::Stdout,
+            overwrite: false,
+        };
+        let json_str = JSONWriter::write(&result, &config).unwrap();
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).unwrap();
+
+        // Should only have 3 rows, not 10
+        assert_eq!(parsed.len(), 3, "Limit should restrict output to 3 rows");
+    }
+
+    #[test]
+    fn test_tombstone_column_in_result_is_null() {
+        use cqlite_core::types::{TombstoneInfo, TombstoneType};
+
+        let mut result = QueryResult::new();
+        result.metadata.columns = vec![ColumnInfo::new(
+            "deleted_col".to_string(),
+            cqlite_core::types::DataType::Tombstone,
+            true,
+            0,
+        )];
+
+        let mut values = HashMap::new();
+        values.insert(
+            "deleted_col".to_string(),
+            Value::Tombstone(Box::new(TombstoneInfo {
+                deletion_time: 0,
+                tombstone_type: TombstoneType::CellTombstone,
+                local_deletion_time: 0,
+                ttl: None,
+                range_start: None,
+                range_end: None,
+            })),
+        );
+        let row = QueryRow::with_values(RowKey::new(vec![1]), values);
+        result.rows.push(row);
+
+        let json_str = JSONWriter::write(&result, &default_config()).unwrap();
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).unwrap();
+
+        let col_val = &parsed[0]["deleted_col"];
+        assert!(
+            col_val.is_null(),
+            "Tombstoned column must be JSON null in output, got: {col_val}"
+        );
+        // Ensure NO internal metadata leaked
+        assert!(
+            !json_str.contains("tombstone_type"),
+            "Internal tombstone metadata must not appear in output: {json_str}"
+        );
+    }
+}

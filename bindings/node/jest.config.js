@@ -17,11 +17,31 @@
  *     own (`--selectProjects leaks`, used by `npm run test:leaks`) and so a future
  *     lane-only option has somewhere to live. NOTE (round 9): a bare `npm test` runs
  *     BOTH projects, so the gate's whole-suite run already executes the leak file
- *     exactly once — measured via `jest --listTests`: 28 files, no duplicates. The
- *     gate therefore does NOT invoke `test:leaks`; it affirms the budget tests by
- *     name from the whole-suite `--json` report. Keep that in mind before adding a
- *     second lane that selects this project: two executions where only one is
- *     affirmed is what the recomposition removed.
+ *     exactly once. The gate therefore does NOT invoke `test:leaks`; it affirms the
+ *     budget tests by name from the whole-suite `--json` report. Keep that in mind
+ *     before adding a second lane that selects this project: two executions where
+ *     only one is affirmed is what the recomposition removed.
+ *
+ *     NO FILE COUNT IS QUOTED (issue #3772). This note used to end with a hard-coded
+ *     file count "measured via `jest --listTests`", asserted as duplicate-free —
+ *     repeating a number `scripts/agent-gate.sh` carried in four more places; the
+ *     suite grew and every copy went stale, so the sentence asserted a false
+ *     measurement in the one place a reader checks this composition against. Nothing
+ *     here needs the count: the
+ *     `node-bindings` gate component DERIVES it every run from two independent
+ *     oracles and prints `suite set RECONCILED: N`.
+ *
+ *     The "no duplicates" half was worse than stale — it named an oracle that cannot
+ *     see the violation. Measured on jest 29.7.0 (#3772), two projects both matching
+ *     one file: `jest --listTests` prints it ONCE while the run reports
+ *     `Test Suites: 2 passed, 2 total`. Deleting the `testPathIgnorePatterns` entry
+ *     below leaves this package's `--listTests` output unchanged, too. What actually
+ *     catches a double execution is the gate comparing jest's reported suite TOTAL
+ *     against the DEDUPLICATED disk inventory, plus the leak affirmation's refusal on
+ *     two suites at the leak path. So: if you change the projects' `testMatch` or the
+ *     ignore list, do not reason about it from `--listTests` — run the suite and read
+ *     the total. If you need today's file count, run `--listTests`; do not write the
+ *     answer down here.
  *
  * WHY NO `detectOpenHandles`/`detectLeaks` ANYWHERE (measured on jest 29.7.0, not
  * assumed):

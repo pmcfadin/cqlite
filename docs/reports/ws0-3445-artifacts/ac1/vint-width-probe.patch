@@ -1,0 +1,54 @@
+diff --git a/cqlite-core/src/parser/vint.rs b/cqlite-core/src/parser/vint.rs
+index 91cb37a66..dfe66321f 100644
+--- a/cqlite-core/src/parser/vint.rs
++++ b/cqlite-core/src/parser/vint.rs
+@@ -36,6 +36,33 @@ pub enum VIntError {
+ /// table and no `fixed → zigzag` double-decode fallback.
+ ///
+ /// Returns `(value, bytes_consumed)` where `bytes_consumed == leading_ones + 1`.
++/// MEASUREMENT PROBE ONLY (issue #3445) — never committed to a CQLite branch.
++///
++/// Counts decoded VInt widths so the corpus's width distribution can be OBSERVED rather
++/// than argued from the schema. Relaxed atomics on a static array: this perturbs the hot
++/// loop, which is why the probe's TIMING is discarded and only its DISTRIBUTION is used.
++pub static VINT_WIDTH_COUNTS: [std::sync::atomic::AtomicU64; 10] = [
++    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
++    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
++    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
++    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
++    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
++];
++
++#[inline]
++fn probe_record_width(total: usize) {
++    use std::sync::atomic::Ordering::Relaxed;
++    let n = VINT_WIDTH_COUNTS[total.min(9)].fetch_add(1, Relaxed);
++    // One dump per 25M decodes of a given width, to stderr, so the histogram is observable without
++    // touching the harness. The scan performs far more than this per pass.
++    if n % 25_000_000 == 24_999_999 {
++        let v: Vec<String> = (1..=9)
++            .map(|w| format!("{}:{}", w, VINT_WIDTH_COUNTS[w].load(Relaxed)))
++            .collect();
++        eprintln!("VINT_WIDTH_HISTOGRAM {}", v.join(" "));
++    }
++}
++
+ #[inline]
+ pub fn decode_unsigned(input: &[u8]) -> Result<(u64, usize), VIntError> {
+     let first = *input.first().ok_or(VIntError::Truncated)?;
+@@ -48,6 +75,7 @@ pub fn decode_unsigned(input: &[u8]) -> Result<(u64, usize), VIntError> {
+     }
+     if extra == 0 {
+         // Single byte: 0xxxxxxx
++        probe_record_width(1);
+         return Ok((first as u64, 1));
+     }
+     // Load the `extra` continuation bytes as the low bits of a u64 via ONE
+@@ -69,6 +97,7 @@ pub fn decode_unsigned(input: &[u8]) -> Result<(u64, usize), VIntError> {
+         // shift overflow.
+         ((first as u64 & mask) << (extra * 8)) | tail
+     };
++    probe_record_width(total);
+     Ok((value, total))
+ }
+ 

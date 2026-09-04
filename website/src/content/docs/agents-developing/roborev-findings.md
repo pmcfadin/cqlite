@@ -24,6 +24,7 @@ Several of these delivery costs now FAIL in the fast `scripts/agent-gate.sh --li
 | clippy `manual_range_contains` | `cargo clippy -D warnings` | `clippy` (`--lite` + full) |
 | Wall-clock races in tests | `scripts/tests/check-no-wallclock-asserts.sh` (#2642) | `roborev-lints` (`--lite`) + `tooling-tests` (full) |
 | Vacuous roborev reviews (a "clean" verdict that reviewed nothing) | `scripts/tests/test_roborev_review_guard.sh` (#2964) — hermetic regression check over every vacuity trigger of `scripts/flow/roborev-review.sh` | `roborev-lints` (`--lite`) + `tooling-tests` (full) |
+| GNU-only shell constructs in a macOS-sensitive script (`sed -i EXPR`, `xargs -r`, `stat -c`, `readlink -f`, `grep -P`, `timeout`, bash-4 constructs, …) | `scripts/tests/test_roborev_guard_portability.sh` (#3296) — an enumerated construct table, every rule carrying a positive control, plus a behavioural BSD-shim differential. **Its SUBJECT SET is enumerated, not derived, and a pass says nothing about a file outside it** — so since #3756 the run PRINTS its scope: every scanned path, plus a measured `unscanned: N of M tracked scripts/**/*.sh` line (`NOT MEASURED` when the census cannot be taken). Scanned today: the roborev wrapper + guard, this lint itself, and `scripts/bootstrap-agent-machine.sh` + its suite | `roborev-lints` (`--lite` + full) |
 | Executable harness files under `docs/` being classified as prose (the PR #3222 class) | `scripts/tests/test_roborev_review_guard.sh` (#3229) — the `(cx*)` cases drive the census classification and the `prompt-content:` match. **NOT mechanized: whether the configuration would swallow them.** No guard predicts roborev's exclusion set; that is deferred to #3283 | `roborev-lints` (`--lite`) + `tooling-tests` (full) |
 
 The other classes below (integer/decimal overflow, float ordering, no-heuristics,
@@ -303,6 +304,85 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    cached; vacuous baseline ~18.7k / 0). That trade was chosen deliberately over a machine guessing from
    injectable text.
 
+   **That cost is true at review time, and false after the fact only for a *human* reading the stored
+   record — it stays true of the *machine*, and must (#3654).** The prompt roborev *sent* is **retained in the job record** and retrievable later —
+   `roborev show <id> --prompt` — even though the snapshot file it names is transient and already deleted,
+   and a delivery-by-path prompt says so in its own words under `### Combined Diff`. That is **the direct
+   artifact** — roborev's *actual prompt* rather than a statistic about it.
+
+   **It is not self-authenticating, and the trust properties run the opposite way from the obvious
+   reading.** roborev's prompt **embeds repository-controlled content** at positions indistinguishable from
+   roborev's own text, so a reviewed branch can carry text *mimicking* that delivery wording and an
+   authorizer would read it as roborev's — a human in the loop is not a channel separation, it is the same
+   shared channel with a slower parser. So the prompt is read for the **structural fact** it reports, never
+   as proof of its own provenance. The **token accounting is daemon-recorded but not independent, and
+   it does not establish delivery either**: the *record* is authentic (the branch cannot rewrite it), but
+   the counts measure **the prompt**, and the prompt embeds repository-controlled content — so a branch
+   influences their *magnitude* without forging anything. That bites exactly where the counts are used:
+   the vacuous baseline is ~18.7k input / 0 cached, so padding non-diff prompt content can make a review
+   that received **no diff** look token-rich. **Neither signal establishes provenance, and the two are not
+   independent** — both are functions of the same repository-influenced prompt. **Which evidence a waiver
+   should rest on is an open question, tracked as
+   [#3826](https://github.com/pmcfadin/cqlite/issues/3826)** — nothing here recommends one signal over the
+   other, or any ordering between them. **It resurrects nothing of the deleted delivery classifier, and that distinction is
+   load-bearing rather than a caveat:** the classifier read injectable prompt text *at decision time* to
+   produce an **automated verdict**, while this is a **human** reading a **stored record** as evidence for a
+   **hand-granted** waiver — there is no automated verdict to spoof. Nothing in the wrapper parses the
+   prompt for delivery mode, and nothing may be added that does. **That closes the PARSER path and not
+   the HUMAN one, and keeping the two separate is what makes this true:** the human is *in* the path, so
+   spoofed repository-controlled prompt text can still mislead an authorizer into posting the marker, and
+   the marker is what makes `--recheck-job` pass. That exposure is real, is
+   [#3826](https://github.com/pmcfadin/cqlite/issues/3826)'s subject, and is **not** settled here.
+
+   **And `job=` is daemon-scoped, which nobody had written down (#3654).** Each fleet box runs its own
+   roborev daemon with its own database and its own sequential ids, so **two boxes can legitimately present
+   the same id for different reviews** — measured: `job=265` on two lanes 50 minutes apart, different
+   ranges, branches and token counts, both correct — and the coordination lead read the repetition as a
+   collision and **withheld a valid waiver**. The failure is symmetric and the other direction is worse: a
+   lead who therefore treats `job=` as uninformative discards the one field binding an authorization to a
+   *review* rather than to a *range*. So **verify the record's `git_ref`, never the id alone**:
+
+   ```bash
+   # git_ref / status / token_usage are NESTED under .job on this payload:
+   roborev show <id> --json | jq '.job | {id, git_ref, branch, status, token_usage}'
+   # `roborev list` defaults its branch filter to the --repo path's CURRENT HEAD, not to the
+   # branch your shell is on — so name --branch when that checkout is not on the job's branch.
+   # --limit defaults to 50 (measured, v0.61.2): RAISE it until the job appears, or until the
+   # returned row count stops growing. An empty result at a still-growing limit is UNMEASURED.
+   roborev list --json --limit 200 --repo <abs> --branch <branch> | jq '.[] | select(.id==<id>) | {id, git_ref, branch}'
+   ```
+
+   **Read `.job`, never a `show` payload's top-level `id`.** That field is the *review* row's own
+   sequence and need not be the job you asked for — measured over ten records, asking for 9 returns
+   `id=8` with `job_id=9` and `job.id=9` — so a top-level jq manufactures exactly the "is this the right
+   review?" doubt the check exists to remove. The wrapper is unaffected (`find_job` matches
+   `id`/`job_id`/`job` and then **prefers the object carrying `git_ref`**, so it lands on the job row
+   either way): this is a trap for the human running the check by hand, not a live false `STALE`. For the
+   same reason, do not reach for the top-level `uuid` as a machine proxy: it identifies the **review row**,
+   not the daemon, so it answers a different question however it renders. (It would not render blank in any
+   case — the writer emits no line at all for an empty value, so the key would read `NOT RECORDED`.)
+
+   **A local row count is not evidence of uniqueness.** `roborev list … | jq '[.[] | select(.id==N)] |
+   length'` returns `1` whether or not another box holds that id — and `0` when the row fell outside the
+   `--limit` window, so the count says nothing about the window it was taken over — because `list` only
+   ever sees the **local** daemon — one more probe whose output is **identical under the two states it claims to separate** (the
+   `RESULT: INCOMPLETE` launch sentinel read as a verdict; a gate run dir found by `ls -t`;
+   `mergeable: MERGEABLE` on a marker-bearing merge commit). Run on both `job=265` lanes it gave the right
+   answer for a reason that did not hold.
+
+   **What the `git_ref` check settles is scoped to one daemon; the rest is not claimed.** It settles
+   that the id names the review you think it does *on this daemon*. It does **not** settle the cross-box
+   case: two daemons can hold the same id for the **same `git_ref` range**, so a waiver authorized
+   against machine A's review can be accepted by `--recheck-job` against machine B's different review of
+   that range — and **no local lookup can detect it**, because `roborev list` only ever sees the local
+   daemon while the marker travels through GitHub. Same-range cross-daemon collisions therefore remain
+   **unprotected**: declared here, not closed here.
+
+   **Whether the block should name the issuing daemon — and the cross-box question that comes with it,
+   since the marker travels through GitHub while `--recheck-job` reads the *local* daemon — is tracked as
+   [#3825](https://github.com/pmcfadin/cqlite/issues/3825), together with the marker-grammar question it
+   raises.**
+
    **THE ABSENCE WAIVER — the break-glass, its four constraints, and why the documentation is not the
    credential (#3312 job 23).** The **OWNER or the coordination LEAD** may excuse an absence FAIL with a
    **dedicated, column-zero line** of a PR comment:
@@ -484,9 +564,25 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    files are not (a workflow injecting a variable). "Theoretically redundant" never justifies leaving a hole
    a non-invoker or an accident can walk through.
    **TWO RESIDUALS INSIDE THE MODEL, named rather than implied:** the marker is read from **top-level PR
-   comments only**, so one posted inside a review body or a review-thread reply is silently not applied (the
-   run reports `waiver: NONE` and the FAIL stands — fail-closed, but it reads as "my waiver was ignored");
-   and **an authorized human can authorize carelessly** — pre-authorizing a job id, or waiving without
+   comments only**, and **THE MOST PROBABLE MISPLACEMENT IS THE PR'S LINKED ISSUE THREAD (#3759)** — that is
+   where lane/lead coordination lives — followed by a review body and a review-thread reply. None of the
+   three is read, so a marker posted there is silently not applied (the run reports `waiver: NONE` and the
+   FAIL stands — fail-closed, but it reads as "my waiver was ignored"). **Measured on PR #3710:** the lead
+   granted BOTH markers, field-perfect and sole-content, from an allowlisted author — on **issue #3544**;
+   both keys read `NONE`, which is textually identical to "the lead refused", and position 1 of a six-PR
+   serial queue idled ~8 hours and blocked five lanes. **SINCE #3759 THE LINKED-ISSUE CASE IS DIAGNOSED,
+   NOT GRANTED:** when the PR-side scan returns `none`, the PR's linked issue(s) — resolved from the
+   structured `closingIssuesReferences` relation, NEVER from the mutable PR body — are scanned with the
+   SAME scanner and the SAME base/head/job/allowlist, and a marker there that WOULD have been accepted by
+   the channel is reported `waiver: MISPLACED (found on linked issue #N …)` naming the issue and the
+   remedy. **`MISPLACED` GRANTS NOTHING — not partially, not with a notice — and the FAIL STANDS**: only a
+   marker on the PULL REQUEST grants, and moving it there is a HUMAN act by the authorizer, never
+   something the tool does. A `NONE` now also DECLARES whether that probe ran (checked / bounded /
+   no linked issue / could-not-check), so "checked and it is not there either" and "never checked" can no
+   longer read alike. **LEAD-SIDE PROCEDURE, the other half of the fix: after posting either marker,
+   verify with `gh pr view <PR> --json comments` that the line is ON THE PR — a grant is only granted once
+   it is readable by the scanner that reads it.**
+   And **an authorized human can authorize carelessly** — pre-authorizing a job id, or waiving without
    checking the token accounting. Nothing mechanical detects either; the control is the permanent,
    attributable comment, which is why a substantive reason is required and recorded verbatim.
    **AND A SECOND, EQUALLY TRANSFERABLE RULE FROM THE SAME ISSUE: THE CONSTRAINED PARTY MUST NOT CHOOSE ITS
@@ -756,6 +852,20 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    party must not choose its own enforcer* — and a worker could then clear its own findings. That absence
    is asserted **structurally** in the guard suite, because behavioural cases only cover the channels
    someone already thought of.
+
+   **It inherits the misplacement residual by call too (issue #3759).** The deferral marker is read
+   from **top-level PR comments only**, and the **most probable misplacement is the PR's linked issue
+   thread**, ahead of a review body and a review-thread reply — measured on PR #3710, where both
+   markers were granted field-perfect on issue #3544 and both keys read `NONE`. Since #3759 that case
+   is **diagnosed, not granted**: a would-have-been-accepted marker on a linked issue reports
+   `deferral: MISPLACED (found on linked issue #N …)` with the remedy, while `findings:` stays exactly
+   as measured — **never `DEFERRED`** (that would be the grant) and **never `NONE`** (that would read
+   as a clean review) — and `RESULT` stays `FAIL`. **`MISPLACED` grants nothing**; only a marker on the
+   pull request grants. The rendering claims the marker *would have been accepted by the channel*, not
+   that it *would have granted*: the network issue-disposition legs are deliberately **not run
+   issue-side** and still apply once the marker is on the PR, because a diagnostic that overstates
+   what it measured is what stops the next person looking. As with the waiver, **verify with
+   `gh pr view <PR> --json comments` that the line is on the PR after posting it.**
 
    **The match is affirmative, which is what makes this a match and not a mute button.** `count=` must
    **equal** the observed findings count and `issues=` must be non-empty. A job is a completed review and

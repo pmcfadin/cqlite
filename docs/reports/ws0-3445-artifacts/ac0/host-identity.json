@@ -1,0 +1,17 @@
+{
+  "hostname": "ip-172-31-5-53",
+  "ec2_instance_id": "i-08fd63cf25f768e5f",
+  "instance_type": "c7i.4xlarge",
+  "boot_id": "b4c64247-1c55-45b7-9d19-3fc2263b51d8",
+  "machine_id": "ec2f98a29985d6274379610ea076dfab",
+  "cpu_model": "Intel(R) Xeon(R) Platinum 8488C",
+  "cores": 16,
+  "kernel": "6.17.0-1019-aws",
+  "microcode": "0x2b000661",
+  "smt": "on",
+  "perf_event_paranoid": "-1",
+  "kptr_restrict": "0",
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "perf": "perf version 6.17.13",
+  "why_recorded": "This is NOT the #3248 host (that was ip-172-31-7-163 / i-04ac0a860eef7f241), so the corpus was regenerated from seed rather than reused; boot_id + machine_id make that a stated cross-instance fact instead of an undecidable one. perf_event_paranoid/kptr_restrict are recorded because they are the capability precondition for every number in this report."
+}

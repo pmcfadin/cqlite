@@ -1,0 +1,22 @@
+diff --git a/cqlite-core/src/parser/vint.rs b/cqlite-core/src/parser/vint.rs
+index 91cb37a66..f79d51303 100644
+--- a/cqlite-core/src/parser/vint.rs
++++ b/cqlite-core/src/parser/vint.rs
+@@ -36,7 +36,7 @@ pub enum VIntError {
+ /// table and no `fixed → zigzag` double-decode fallback.
+ ///
+ /// Returns `(value, bytes_consumed)` where `bytes_consumed == leading_ones + 1`.
+-#[inline]
++#[inline(never)]
+ pub fn decode_unsigned(input: &[u8]) -> Result<(u64, usize), VIntError> {
+     let first = *input.first().ok_or(VIntError::Truncated)?;
+     // A u8 has at most 8 leading ones, so `extra ∈ 0..=8` and `total ∈ 1..=9`
+@@ -75,7 +75,7 @@ pub fn decode_unsigned(input: &[u8]) -> Result<(u64, usize), VIntError> {
+ /// Decode a SIGNED (ZigZag) VInt — [`decode_unsigned`] then ZigZag unmap.
+ ///
+ /// Returns `(value, bytes_consumed)`.
+-#[inline]
++#[inline(never)]
+ pub fn decode_signed(input: &[u8]) -> Result<(i64, usize), VIntError> {
+     let (unsigned, consumed) = decode_unsigned(input)?;
+     Ok((zigzag_decode(unsigned), consumed))

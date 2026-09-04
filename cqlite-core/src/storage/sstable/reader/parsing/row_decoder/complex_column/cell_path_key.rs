@@ -58,24 +58,16 @@
 //!      `catch (UnknownHostException)` block below it. Read the whole method, not
 //!      a grep of its `if`s.
 //!
-//!    Encoding the `0` allowances is a FIDELITY fix with no behaviour change: the
-//!    sole caller only decodes a NON-EMPTY `path_bytes`, so a 0-byte slice never
-//!    reaches here. Worth doing anyway, because a table that disagrees with
-//!    Cassandra is a false rejection waiting for the day someone moves the call
-//!    site, and "correct only because the caller filters" is a coupling one file
-//!    away from being silently broken.
+//!    #3612 encoded the `0` allowances as a FIDELITY fix with no behaviour change,
+//!    because the caller then decoded only a NON-EMPTY `path_bytes` — while warning
+//!    that "correct only because the caller filters" was one file from breaking.
 //!
-//!    **That filter is itself a defect, and the `0` rows do NOT claim otherwise
-//!    (issue #3612, R6-F2).** Because the caller skips an empty cell path, a
-//!    LEGAL empty `text`/`blob` map key — `{'': 1}` is valid CQL, and Cassandra's
-//!    `CollectionSerializer` rejects only a NULL (-1) key, never a zero-length one
-//!    — is not merely left undecoded: the entry is DROPPED from the reconstructed
-//!    `Value::Map`, because the caller's `if let Some(key_value) = decoded_key`
-//!    never fires. So an empty-keyed entry silently disappears from query and
-//!    compaction results. That filter is PRE-EXISTING and governs every complex
-//!    column, so it is filed separately rather than changed under #3612, and the
-//!    empty-key unit tests are labelled UNIT-ONLY so they cannot be read as
-//!    end-to-end support.
+//!    **#3747 removed that filter, so these `0` rows are now load-bearing.** The
+//!    filter WAS the defect #3612 described: a legal empty `text`/`blob` key was
+//!    DROPPED from the `Value::Map`. The caller now decodes every cell path, so this
+//!    table decides an empty key's fate and the empty-key tests are reached by a real
+//!    read (UNIT-ONLY labels gone). Where it ADMITS `0` but no `Value` can carry it,
+//!    the decode below preserves the entry OPAQUELY; a typed one is **#3805**'s.
 //!
 //! # When this site may return `Err` — and why the line is drawn at Cassandra
 //!
@@ -160,7 +152,7 @@
 //! | tuple (`parse_tuple_elements_raw`) | reported `&mut offset`, was DISCARDED — now checked |
 //! | UDT, marshal + registry-bare-name (`parse_raw_type_value`, whose UDT work is TWO inline field loops in `raw_type_value.rs` — the marshal one and the registry-bare one — not a call to `parse_udt_value`) | reported offset, was DISCARDED — now checked |
 //! | `frozen<T>` / `FrozenType(T)` | recursion for the VALUE; exactness is the inner arm's, and for a fixed-width inner it comes from the width table, which is why that table peels frozen first (B1) |
-//! | duration | measured from its own three-VInt framing (the decoder ignores the remainder) |
+//! | duration | the SHARED decoder's own assert, one layer down: its `"duration"` arm reports where the third VInt ended, so this module no longer walks the framing itself (#3631 unification) |
 //! | unknown type → opaque `Value::Blob` | whole slice by construction; also raises the caller-aggregated opaque-key signal (the `warn!` is the caller's — see above) |
 //!
 //! ## The residual: NESTED CONSUMPTION IS UNCHECKED AT EVERY LEVEL BELOW THE FIRST
@@ -178,7 +170,9 @@
 //! * **nested tuples and UDTs** — the decoders iterate the DECLARED components and
 //!   stop, leaving any extra components unread;
 //! * **nested collections** — the element loop runs the DECLARED count and stops;
-//! * **`duration`** — reads three VInts and ignores whatever follows.
+//! * **`duration`** — reads three VInts and ignores whatever follows (at the
+//!   OUTER level this is now caught by the shared decoder's exhaustion assert;
+//!   the residual is a duration NESTED inside another value).
 //!
 //! Consequence, and it is this PR's own headline symptom one level down: for
 //! `frozen<list<int>>` the byte strings `[count=1][len=4][4B]` and
@@ -186,16 +180,20 @@
 //! `List([Integer(x)])`, so two distinct cell paths become one logical key and can
 //! collapse a Python map entry.
 //!
-//! WHY IT IS NOT FIXED HERE, measured rather than asserted. The root cause is that
-//! `parse_value_from_raw_bytes` has NO consumption channel at all — it returns a
-//! `Value` — so no caller could check even if it wanted to. Adding one is a
-//! recursive signature change across that function's ~45 call sites plus 8 further
-//! decoders in the same path (`parse_raw_type_value`, `parse_udt_value`,
-//! `parse_nested_udt_from_registry`, `parse_inline_udt_value`,
-//! `parse_tuple_elements_raw`, `parse_frozen_sequence_value_raw`,
-//! `parse_frozen_map_value_raw`, `read_frozen_element`), ~100 sites in total. That
-//! is a shared-decoder tightening with its own oracle, i.e. its own PR — NOT the
-//! one map-key path this module consolidated, which is two call sites.
+//! WHY IT WAS NOT FIXED HERE, measured rather than asserted: the root cause was
+//! that `parse_value_from_raw_bytes` had NO consumption channel at all — it
+//! returned a `Value` — so no caller could check even if it wanted to. That was
+//! a shared-decoder tightening with its own oracle, i.e. its own PR, and it has
+//! since LANDED as **issue #3811**: that function is now a thin wrapper over
+//! `parse_value_from_raw_bytes_reporting` plus `require_fully_consumed`, so
+//! every bounded caller of the short name inherits the rule and the collapse
+//! described above no longer occurs. The UNIFICATION #3811 asked for has now
+//! LANDED as **#3631**: there is ONE `require_fully_consumed`, in
+//! `typed_value.rs`, which every layer names, and this module's `duration`
+//! consumption special-case is GONE with it — the shared decoder's own assert
+//! reaches a trailing byte first (see `decode_reporting_consumption` below).
+//! What this module still owns is the fixed-width ALLOWED-width table, which is
+//! cell-path-specific and has no equivalent on the value side.
 //!
 //! It is also deliberately NOT patched with a second framing walk here: a
 //! call-site validator that must know about every decoder is precisely the shape
@@ -399,7 +397,16 @@ impl V5CompressedLegacyParser {
         // ONE decode, which also REPORTS what it consumed (see
         // `decode_reporting_consumption`).
         let (decoded, consumed) =
-            self.decode_reporting_consumption(data, type_str, column_name, 0)?;
+            match self.decode_reporting_consumption(data, type_str, column_name, 0) {
+                Ok(v) => v,
+                // #3747: the table ADMITTED this empty buffer but no `Value` carries an
+                // empty fixed-width scalar — same OPAQUE policy as below. Typed: #3805.
+                Err(_) if data.is_empty() && allowed.contains(&0) => {
+                    *opaque_out = true;
+                    return Ok(Value::blob(Vec::new()));
+                }
+                Err(e) => return Err(e),
+            };
         // A PEELED VIEW FOR THE CHECKS ONLY — the value itself is returned exactly
         // as the shared decoder produced it (see the return, and the module header's
         // parity section). A `frozen<absent_udt>` key can come back as
@@ -468,8 +475,9 @@ impl V5CompressedLegacyParser {
     /// frozen list/set/map keys and `duration`, plus a partial trailing header —
     /// because a validator at the call site has to know about every decoder, and
     /// this one knew about two. Every composite decoder ALREADY reports a consumed
-    /// offset and `parse_value_from_raw_bytes` merely DISCARDS it (`let (val, _)`),
-    /// so the correct shape is to keep that offset instead of re-deriving it.
+    /// offset, which `parse_value_from_raw_bytes` used to DISCARD (`let (val, _)`)
+    /// until #3811 gave it a reporting twin; the correct shape is to keep that
+    /// offset instead of re-deriving it.
     ///
     /// # The `None` arms are exact, not unchecked
     /// `None` is returned only where the arm's contract IS "the entire slice is the
@@ -499,8 +507,8 @@ impl V5CompressedLegacyParser {
     /// impossibility. A scan pairing `parse_value_from_raw_bytes`'s `starts_with` literals
     /// with this file's would match all ten (five inline in both files, five as the `const`s
     /// below), but it needs a scanner that locates a fn body in another module's source, and
-    /// the two NON-literal arms — `"duration" =>` and `other if is_udt_type(other)` — carry
-    /// no literal for it to pair, so they would stay uncovered either way.
+    /// the one NON-literal arm — `other if is_udt_type(other)` — carries
+    /// no literal for it to pair, so it would stay uncovered either way.
     fn decode_reporting_consumption(
         &self,
         data: &[u8],
@@ -522,7 +530,6 @@ impl V5CompressedLegacyParser {
         const M_SET: &str = "org.apache.cassandra.db.marshal.settype(";
         const M_MAP: &str = "org.apache.cassandra.db.marshal.maptype(";
         const M_TUPLE: &str = "org.apache.cassandra.db.marshal.tupletype(";
-        const M_DURATION: &str = "org.apache.cassandra.db.marshal.durationtype";
 
         // frozen<T> / FrozenType(T): recurse on the inner type, then RE-WRAP,
         // mirroring `parse_value_from_raw_bytes`'s frozen arm
@@ -602,22 +609,17 @@ impl V5CompressedLegacyParser {
             let (val, off) = self.parse_raw_type_value(data, 0, type_str, column_name, depth)?;
             return Ok((val, Some(off)));
         }
-        // `duration` is three consecutive signed VInts and the decoder ignores
-        // whatever follows the third, so its consumption is measured here from the
-        // same framing (`parse_vint` reports the remaining slice). Framing only —
-        // the VALUE still comes from the one shared decode below.
-        if lower == "duration" || lower == M_DURATION {
-            let value = self.parse_value_from_raw_bytes(data, type_str, column_name, depth)?;
-            let mut pos = 0usize;
-            for _ in 0..3 {
-                let (rest, _) = parse_vint(&data[pos..]).map_err(|e| {
-                    Error::corruption(format!("Map key '{}': duration VInt: {:?}", column_name, e))
-                })?;
-                pos = data.len() - rest.len();
-            }
-            return Ok((value, Some(pos)));
-        }
-        // Everything else consumes the whole slice by construction (see above).
+        // `duration`'s own three-VInt walk USED to live here, and was live only
+        // while `parse_value_from_raw_bytes` discarded the count its arm already
+        // had. #3811 made the short name assert `consumed == data.len()` and made
+        // that arm report where the third VInt ended, so the callee refuses a
+        // trailing byte one layer down and the walk here could never fire — dead
+        // code that only appeared to do the work. Folded out under #3631's
+        // ONE-implementation ruling (recorded beside `require_fully_consumed`);
+        // both layers refuse in the shared "decoded only N of M byte(s)" class, so
+        // `cell_path_key_tests`'s pinned assertions are unaffected. Everything
+        // reaching here consumes the whole slice by construction (see above) or is
+        // enforced by the callee: nothing left to compare.
         Ok((
             self.parse_value_from_raw_bytes(data, type_str, column_name, depth)?,
             None,

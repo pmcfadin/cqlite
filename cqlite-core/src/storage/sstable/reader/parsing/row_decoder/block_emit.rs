@@ -14,11 +14,12 @@ impl V5CompressedLegacyParser {
     pub fn parse_block(
         &self,
         data: &[u8],
+        extent: BufferExtent,
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
     ) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
         let mut results = Vec::new();
-        self.parse_block_emit(data, schema, reader, |entry| {
+        self.parse_block_emit(data, extent, schema, reader, |entry| {
             results.push(entry);
             Ok(std::ops::ControlFlow::Continue(()))
         })?;
@@ -34,11 +35,12 @@ impl V5CompressedLegacyParser {
     pub fn parse_block_with_cell_metadata(
         &self,
         data: &[u8],
+        extent: BufferExtent,
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
     ) -> Result<ParsedBlockWithMeta> {
         let mut results = Vec::new();
-        self.parse_block_emit_with_metadata(data, schema, reader, |entry| {
+        self.parse_block_emit_with_metadata(data, extent, schema, reader, |entry| {
             results.push(entry);
             Ok(std::ops::ControlFlow::Continue(()))
         })?;
@@ -49,6 +51,7 @@ impl V5CompressedLegacyParser {
     fn parse_block_emit_with_metadata<F>(
         &self,
         data: &[u8],
+        extent: BufferExtent,
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         mut emit: F,
@@ -130,13 +133,37 @@ impl V5CompressedLegacyParser {
                     if let Some(sh) = shadow.as_mut() {
                         match self.parse_range_tombstone_marker_full(data, offset, schema) {
                             Ok((bv, bk, dp, ds, next_offset)) => {
-                                if sh.feed_range_marker(bv, bk, dp, ds).is_err() {
-                                    break;
+                                // Issue #3721: the marker is FRAMED (`next_offset`
+                                // is bound, so the body continues) and the FSM
+                                // refuses only an unrepresentable bound kind — a
+                                // `break` here reported `Ok` while dropping the
+                                // tombstone and every later row of the partition.
+                                if let Err(e) = sh.feed_range_marker(bv, bk, dp, ds) {
+                                    return Err(range_marker_error::range_marker_refused(
+                                        e,
+                                        &partition_index,
+                                        offset,
+                                        next_offset,
+                                    ));
                                 }
                                 offset = next_offset;
                                 continue;
                             }
-                            Err(_) => break,
+                            // Issue #3721 (roborev job 78): a marker that
+                            // cannot be PARSED is corruption here, never a
+                            // framing terminator — this block is fully buffered,
+                            // so no refill can complete it, and `break` reported
+                            // `Ok` with the tombstone AND every later row of the
+                            // partition gone. See `range_marker_error`'s docs.
+                            Err(cause) => {
+                                return Err(
+                                    range_marker_error::unparseable_marker_in_buffered_block(
+                                        cause,
+                                        &partition_index,
+                                        offset,
+                                    ),
+                                )
+                            }
                         }
                     }
                     match self.skip_range_tombstone_marker(data, offset, schema) {
@@ -144,7 +171,14 @@ impl V5CompressedLegacyParser {
                             offset = next_offset;
                             continue;
                         }
-                        Err(_) => break,
+                        // Same decision on the PHYSICAL path (no shadowing).
+                        Err(cause) => {
+                            return Err(range_marker_error::unparseable_marker_in_buffered_block(
+                                cause,
+                                &partition_index,
+                                offset,
+                            ))
+                        }
                     }
                 }
 
@@ -262,12 +296,31 @@ impl V5CompressedLegacyParser {
                         }
                     }
                     Err(e) => {
-                        tracing::debug!(
-                            "V5CompressedLegacy: Row parse error in partition {} at offset {}: {}",
+                        // Issue #3721: `Err` here is normally the end-of-partition
+                        // signal; a per-column decode failure is NOT, and only
+                        // `column_decode_error` decides which is which.
+                        // Issue #3782 composes with it: the tolerance decision belongs
+                        // to the CALLER's declared extent, never to this parse. When the
+                        // buffer is COMPLETE no further bytes can arrive, so the
+                        // discrimination above is authoritative and a column decode
+                        // failure is data loss. When it is INCOMPLETE the same failure is
+                        // the ordinary straddling-row case a refill fixes, so the
+                        // tolerant break stays — measured on #3782: over 42 well-formed
+                        // corpus tables the tolerant path fires 614 times, every one of
+                        // them with an incomplete extent and none with a complete one.
+                        // #3782 FIRST: a proven-complete buffer makes ANY failure data
+                        // loss. Then #3721's discrimination for the incomplete case, so a
+                        // column decode failure still reaches the caller that owns the
+                        // tolerance decision rather than being swallowed here.
+                        if extent.is_complete() {
+                            return Err(e);
+                        }
+                        column_decode_error::end_of_partition_or_bail(
+                            e,
                             partition_index,
+                            row_count,
                             offset,
-                            e
-                        );
+                        )?;
                         break;
                     }
                 }
@@ -676,6 +729,20 @@ impl V5CompressedLegacyParser {
                         }
                     }
                     Err(e) => {
+                        // Issue #3721: keep the MATCHABLE variant. Re-wrapping a
+                        // per-column failure in `Error::corruption` erased the one
+                        // thing that distinguishes it — the `Error::ColumnDecode`
+                        // discriminant that `column_decode_error::is_column_decode`
+                        // and `indexed_walk_falls_back` match on — so every caller
+                        // above this point lost the ability to tell a decode
+                        // failure from any other corruption, and the only
+                        // alternative left to them would be inspecting message
+                        // text (issue #28 forbids it). Nothing is lost by
+                        // returning it as-is: the variant already carries the
+                        // column, the dispatch type, the offset and the cause.
+                        if column_decode_error::is_column_decode(&e) {
+                            return Err(e);
+                        }
                         return Err(Error::corruption(format!(
                             "delta-scan: row parse error in partition {} at offset {} in {}.{}: {}",
                             partition_index, offset, self.keyspace, self.table_name, e
@@ -720,6 +787,7 @@ impl V5CompressedLegacyParser {
     pub fn parse_block_emit<F>(
         &self,
         data: &[u8],
+        extent: BufferExtent,
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         emit: F,
@@ -728,6 +796,6 @@ impl V5CompressedLegacyParser {
         F: FnMut((TableId, RowKey, ScanRow)) -> Result<std::ops::ControlFlow<()>>,
     {
         // Whole-block decode: no within-partition row-body window narrowing.
-        self.parse_block_emit_windowed(data, schema, reader, None, emit)
+        self.parse_block_emit_windowed(data, extent, schema, reader, None, emit)
     }
 }

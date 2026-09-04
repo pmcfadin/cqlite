@@ -1414,11 +1414,4 @@ done <"$DERIVED_MODS"
 [ "$READ_COUNT" -eq "$OPEN_COUNT" ] \
   || fail "$OPEN_COUNT unconditional crate-root declaration(s) were found but only $READ_COUNT module prologue(s) were read. Every one of them must be examined; refusing to pass over a declaration that was skipped."
 
-# Affirmative success line: a pasted gate SUMMARY must show that this check RAN, and
-# every element of it is something the guard can only know AFTER enumerating the
-# crate-root declarations and READING that many module files from disk. The
-# `pub-surface` component of scripts/agent-gate.sh matches this line WHOLE (never a
-# prefix — roborev r7 F3: a check against a PREFIX tests a SPELLING, not a STATE), so
-# ANY change to its wording must be made in BOTH places, plus case 26(b)'s positive
-# control in scripts/tests/test_pub_surface_guard.sh.
 echo "pub-surface: $DECL_COUNT crate-root declarations scanned in $LIB_RS_REL ($MOD_COUNT pub mod, of which $OPEN_COUNT unconditional); $READ_COUNT module-file prologues read from source; $inconsistent inconsistent"

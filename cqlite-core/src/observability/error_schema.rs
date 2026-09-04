@@ -13,7 +13,7 @@
 //! |----------------|------------------|-------------------------------------------------------------------|
 //! | `Io`           | `io`             | `Io`, `InvalidPath`, `Timeout`                                     |
 //! | `Serialization`| `serialization`  | `Serialization`, `TypeConversion`                                 |
-//! | `Corruption`   | `corruption`     | `Corruption`, `CorruptCommitLogFrame`                              |
+//! | `Corruption`   | `corruption`     | `Corruption`, `CorruptCommitLogFrame`, `ColumnDecode`             |
 //! | `Schema`       | `schema`         | `Schema`, `Table`                                                  |
 //! | `Parsing`      | `parsing`        | `Parse`, `CqlParse`, `InvalidFormat`, `UnsupportedFormat`,        |
 //! |                |                  | `UnsupportedVersion`, `UnsupportedCommitLogVersion`               |
@@ -159,7 +159,12 @@ pub(crate) fn classify(err: &Error) -> ObsErrorCategory {
 
         Error::Serialization { .. } | Error::TypeConversion(_) => ObsErrorCategory::Serialization,
 
-        Error::Corruption(_) | Error::CorruptCommitLogFrame(_) => ObsErrorCategory::Corruption,
+        // Issue #3721: a per-column decode failure IS damaged/undecodable data at
+        // the cell level — the same operator signal as `Corruption`, and never the
+        // `Other` bucket, so a dashboard shows a read that failed on bad bytes.
+        Error::Corruption(_)
+        | Error::CorruptCommitLogFrame(_)
+        | Error::ColumnDecode { .. } => ObsErrorCategory::Corruption,
 
         Error::Schema(_) | Error::Table(_) => ObsErrorCategory::Schema,
 

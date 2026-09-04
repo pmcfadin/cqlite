@@ -29,6 +29,12 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 0
 fi
 
+# #3755: this suite's subject is the SEMAPHORE, not disk. Every stub below is a full
+# gate and so runs the disk-admission probe; without this pin a low-on-space box — or an
+# inherited CQLITE_GATE_MIN_FREE_GB — would make every stub refuse before it ever
+# reached the slot, and the suite's verdict would become a function of the host.
+export CQLITE_GATE_MIN_FREE_GB=0
+
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/gate-cap-test.XXXXXX")
 trap 'rm -rf "$tmp"; kill $(jobs -p) 2>/dev/null' EXIT
 
