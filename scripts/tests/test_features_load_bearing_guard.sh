@@ -235,6 +235,14 @@
 #  61.  RED+GREEN — the same at the DIRECTORY level: an in-repo symlinked source DIRECTORY
 #                crossing package trees, with the same removal control.
 #
+#  62.  RED — PINS A DECLARED LIMIT: a module `#[path]`-included from a BASENAME-PRUNED
+#                directory (`.git`, `node_modules`) is NOT visited, so a feature gated
+#                only there reads DEAD. Chosen over scanning those trees, which would
+#                walk a vendored JS tree and a git object store on every mandatory gate
+#                run. The case asserts BOTH the dead verdict AND that the printed
+#                contract admits the IN-REPOSITORY half — a limit nobody states is a
+#                defect, and this is what makes the declaration testable (roborev 157).
+#
 #   CASE NUMBERS ARE STABLE IDENTIFIERS, NOT POSITIONS — deleted cases leave gaps (the
 #   convention scripts/tests/test_pub_surface_guard.sh already uses). The suite asserts
 #   the exact NUMBER OF CASES RUN at the end, which is what catches a silent deletion.
@@ -1692,13 +1700,46 @@ run_guard "$D" && { cat "$TMPROOT/out.txt"; fail_case "case 61 (control): with n
 grep -q 'xpkgdirfeat' "$TMPROOT/out.txt"   || { cat "$TMPROOT/out.txt"; fail_case "case 61 (control): the guard failed but did not name xpkgdirfeat"; }
 ok "an IN-REPO symlinked DIRECTORY crossing package trees is attributed to the lexically owning package (not refused), and removing the link restores the DEAD verdict"
 
+# --- 62. RED: a module under a BASENAME-PRUNED dir is a DECLARED not-seen route
+# roborev job 157. `.git` and `node_modules` are pruned by BASENAME anywhere, and Rust
+# will compile a module under either via an explicit `#[path]`, so a feature gated ONLY
+# there reads DEAD. That is a FALSE FAIL, and the fix chosen was to NARROW THE CONTRACT
+# rather than scan those trees — walking a vendored JS tree or a git object store on
+# every mandatory gate run is the worse trade. This case pins the DECLARED behaviour so
+# the declaration is testable rather than prose (the idiom case 28 uses for the orphan
+# residual): if anyone ever makes the walk visit those directories, this case reds and
+# the contract sentence must change with it.
+D="$(fixture basename-pruned-module)"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'prunedfeat = []'
+mkdir -p "$D/node_modules/vendored"
+cat >"$D/node_modules/vendored/gated.rs" <<'EOF'
+#[cfg(feature = "prunedfeat")]
+pub fn only_under_node_modules() {}
+EOF
+printf '#[path = "../../node_modules/vendored/gated.rs"]
+mod vendored_gate;
+' >>"$D/a/src/lib.rs"
+[ -f "$D/node_modules/vendored/gated.rs" ] || fail_case "case 62: the fixture module was not created"
+expect_red_naming "$D" "prunedfeat" "case 62"
+
+# THE DECLARATION MUST BE PRINTED, not merely true: a limit nobody states is a defect.
+# Asserted against a GREEN run, because the CONTRACT line belongs to the guard's success
+# output — the failure path prints the dead set and a remedy instead. Checking it on the
+# red run above was this case's own first bug: the assertion would have been satisfiable
+# only by a guard that never fails.
+D="$(fixture basename-pruned-contract)"
+expect_green "$D" "case 62 (contract)"
+grep -q 'IN-REPOSITORY under a basename-pruned' "$TMPROOT/out.txt" \
+  || { cat "$TMPROOT/out.txt"; fail_case "case 62: the printed CONTRACT does not admit that a basename-pruned IN-REPOSITORY module is not visited — the guard can report such a feature dead while the contract claims only out-of-repository modules are unseen"; }
+ok "a module under a basename-pruned .git/node_modules dir is NOT SEEN (reported dead), and the printed CONTRACT admits the in-repository half rather than only the out-of-repository one"
+
 # --- CASE COUNT: EXACT, not a floor ------------------------------------------
 # #3544's lesson is this suite's own subject: a span-replacing edit once deleted four
 # cases from a suite and it reported "failed: 0" over the shrunken remainder. A FLOOR
 # below the real count tolerates exactly that — one case can be deleted and the guard
 # still greens (roborev job 50, finding 5) — so the count is pinned EXACTLY. Adding a
 # case means changing this number in the same diff, deliberately.
-CASE_COUNT_EXPECTED=61
+CASE_COUNT_EXPECTED=62
 [ "$CASES" -eq "$CASE_COUNT_EXPECTED" ] \
   || fail_case "CASE COUNT: $CASES cases ran, expected EXACTLY $CASE_COUNT_EXPECTED. Cases were deleted, skipped or added without updating this assertion; a green tally over a changed suite certifies nothing."
 

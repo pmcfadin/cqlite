@@ -409,6 +409,17 @@ EXEMPT_FEATURES = {
 #   `<root>/fuzz`           — pruned as EXACTLY that one path: it is the excluded
 #                             cargo-fuzz workspace (see the header). `src/fuzz/`, or a
 #                             `fuzz` module anywhere else, is scanned.
+# PRUNED BY BASENAME ANYWHERE, and that is a DECLARED not-seen route (roborev job
+# 157). Rust will compile a module under either directory via an explicit
+# `#[path]`/`include!`, so a feature gated ONLY there is never scanned and reads DEAD —
+# a false FAIL. The reviewer offered two remedies and the other is worse: scanning
+# `node_modules` walks a vendored JS tree (thousands of files, none of it a workspace
+# member's source) on every mandatory gate run, and scanning `.git` walks an object
+# store. So the pruning STAYS and the printed CONTRACT is narrowed to admit it — this
+# guard's standing posture is to declare a limit and pin it (case 62), never to claim
+# soundness it lacks. Contrast `target`/`fuzz` below, pruned by ANCHORED PATH exactly so
+# that `src/target/` or a `fuzz` module elsewhere IS scanned (case 47); basename pruning
+# is reserved for the two directories that are never a member's source.
 PRUNE_BY_NAME = {".git", "node_modules"}
 FUZZ_WORKSPACE = os.path.realpath(os.path.join(REPO_ROOT, "fuzz"))
 PRUNE_EXACT = set()   # filled once the metadata and the target set are known
@@ -442,8 +453,9 @@ CONTRACT_LINE = (
     "(a dead feature can escape). A gate written in a spelling OUTSIDE that set is NOT "
     "SEEN; three such are known and are not lexically resolvable: a cfg whose feature NAME "
     "is produced by MACRO EXPANSION; a build-script env key CONSTRUCTED AT RUNTIME; and a "
-    "module reached by an explicit OUT-OF-REPOSITORY #[path]/include!, which is not "
-    "visited, so a feature gated only there can be reported dead. "
+    "module reached by an explicit #[path]/include! this walk does not visit — either "
+    "OUT-OF-REPOSITORY, or IN-REPOSITORY under a basename-pruned .git/node_modules "
+    "directory — so a feature gated only there can be reported dead. "
     "Escape routes: cfgs inside unexpanded macro bodies; orphan .rs files under a target "
     "source dir; any textual CARGO_FEATURE_* mention in a build-script package's sources "
     "(no API, module or scope analysis; a bare CARGO_FEATURE_ prefix credits every "
