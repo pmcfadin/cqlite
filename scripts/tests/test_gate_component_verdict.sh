@@ -1016,17 +1016,25 @@ else
       "published='$_only_pub' enforced='$_only_code'"
 fi
 
-echo "=== section 17: the component-line shape is anchored over BOTH real emitters (F2) ==="
+echo "=== section 17: the component-line shape is anchored over the ONE real emitter (F2) ==="
 # The shape was validated as a PREFIX, so `fmt: PASS (1s) arbitrary text` was accepted as a
 # genuine component verdict. Anchored at BOTH ends now.
 #
-# THE OBVIOUS TIGHTENING IS WRONG AND WOULD RED CORRECT INPUT. Requiring the two spaces and
-# an annotation — because `_fm_summary_line` always emits one — assumes ONE emitter. There
-# are TWO: `_tree_boundary_meta_lines` emits `printf '%-18s %s (%ss)\n'`, with NO annotation
-# at all, and that is the shape a tree-integrity BOUNDARY block carries. Requiring the
-# annotation would reject a legitimate component line — a false FAIL, and a tool that reds on
-# correct input is the tool lanes learn to waive. Hence a fully anchored ALTERNATION over the
-# two real shapes; 17.3 is the regression guard for that trap, so do not "tidy" it away.
+# ONE EMITTER, NOT TWO — the correction this comment itself needed (#4029). It used to say
+# there were TWO (`_fm_summary_line`'s ANNOTATED row plus `_tree_boundary_meta_lines`' raw
+# unannotated `printf '%-18s %s (%ss)\n'`), that the unannotated one was "the shape a
+# tree-integrity BOUNDARY block carries", and that the parser therefore had to accept an
+# ALTERNATION over both or it would red correct input. #3625 (`bdaf2b6e1`) ROUTED both boundary
+# loops through `_fm_summary_line`, THE ONE RENDERER, and DELETED that raw printf — so a real
+# boundary block's rows are now ANNOTATED like every other row, and the unannotated shape is
+# UNEMITTABLE by any mode. The parser (`_COMP_LINE_RE`) requires the annotated shape and still
+# REJECTS the unannotated one, now as defence in depth rather than as a live discrimination.
+#
+# So the trap the old text warned about no longer exists, and three guards below keep this
+# honest: 17.7 pins the REACHABLE behaviour (the real, ANNOTATED boundary block, refused on
+# INTEGRITY), 17.3 keeps the defence-in-depth refusal of the unemittable unannotated shape, and
+# 17.5 DERIVES the emitter count from the shipped gate so a new raw printf reds instead of
+# silently escaping the one shape this tool accepts. Do not "tidy" any of the three away.
 SG1="$TMP/shape-garbage.txt"
 mk_only_summary "$SG1" run-1 PARTIAL tooling-tests "tooling-tests:     PASS (1112s) arbitrary text"
 expect "17.1 trailing garbage after a single space is MALFORMED, not absent" \
@@ -1035,20 +1043,27 @@ SG2="$TMP/shape-annotated.txt"
 mk_only_summary "$SG2" run-1 PARTIAL tooling-tests "$(comp_line tooling-tests PASS 1112s '[unobservable:nested]')"
 expect "17.2 control: the ANNOTATED shape (_fm_summary_line) is accepted" \
   PASS 0 "tooling-tests" -- "$SG2" --mode only --component tooling-tests --run-id run-1
-# THE UNANNOTATED SHAPE, PINNED WHERE IT IS ACTUALLY REACHABLE — the correction to round 4.
-# That round accepted the unannotated shape, citing a REAL `tooling-tests:     FAIL (512s)`
-# line as proof that requiring the annotation would red correct input. The line is real; the
-# reasoning skipped the ORDER OF THE CHECKS. MEASURED from source, all four legs:
-# `_tree_boundary_meta_lines` has exactly ONE caller (agent-gate.sh:8734, inside
+# THE UNANNOTATED SHAPE — DEFENCE IN DEPTH FOR A SHAPE THAT CAN NO LONGER BE EMITTED.
+# Two rounds of reasoning are embedded here and only the conclusion survived #3625. Round 4
+# ACCEPTED the unannotated shape in the parser, citing a REAL `tooling-tests:     FAIL (512s)`
+# line from a tree-mutated run as proof that requiring the annotation would red correct input.
+# Round 5 REJECTED it — not about the emitter, about the ORDER OF THE CHECKS. MEASURED from
+# source, all four legs: `_tree_boundary_meta_lines` had exactly ONE caller (inside
 # `_tree_boundary_fail`); that caller requires TREE_GUARDED=1, so no SKIP path coexists; it
 # calls `_tree_detection_mark` immediately before, whose BOTH arms route to
 # `_tree_fail_closed`, which sets `tree-integrity: FAIL`; and `_emit_terminal_summary` names
 # none of `_tree_finalize`/`_tree_meta_array`/`TREE_INTEGRITY_LINE`, so nothing resets it to
-# PASS in between. Empirically confirmed on this lane's own real boundary block. So the
-# unannotated shape occurs ONLY in `tree-integrity: FAIL` blocks, which the B3 precondition
-# rejects BEFORE the component read — accepting it was dead permissiveness.
+# PASS in between. So the unannotated shape occurred ONLY in `tree-integrity: FAIL` blocks,
+# which the B3 precondition rejects BEFORE the component read — accepting it was dead
+# permissiveness.
 #
-# This fixture is that real block's shape, so the case pins the REACHABLE behaviour.
+# #3625 (`bdaf2b6e1`) then removed the emitter itself: both boundary loops route through
+# `_fm_summary_line`, THE ONE RENDERER, so NO mode can emit this fixture's shape and it is
+# UNEMITTABLE rather than merely unreachable-at-this-point-in-the-flow. This case is KEPT
+# deliberately — the parser still refuses the shape, and a guard on a shape nothing emits is
+# cheap defence in depth against the raw printf coming back — but it is NO LONGER evidence
+# about reachable behaviour, and its fixture is NOT what a real boundary block looks like.
+# 17.7, immediately below, is that evidence.
 SG3="$TMP/shape-boundary-real.txt"
 { echo "==== AGENT-GATE SUMMARY ===="
   echo "run-id: run-1"
@@ -1062,8 +1077,33 @@ SG3="$TMP/shape-boundary-real.txt"
   echo "RESULT: FAIL"
   echo "==== END AGENT-GATE SUMMARY ===="
 } > "$SG3"
-expect "17.3 the REAL boundary block (unannotated shape + integrity FAIL) is rejected on INTEGRITY" \
+expect "17.3 defence in depth: the now-UNEMITTABLE unannotated shape + integrity FAIL is rejected on INTEGRITY" \
   NOT-PASS 1 "tree-integrity" -- "$SG3" --mode only --component tooling-tests --run-id run-1
+
+# 17.7 — THE REACHABLE SHAPE, and the case #3625 left owed. Since both boundary loops route
+# through `_fm_summary_line`, a mutated-mid-run gate writes a boundary block whose component
+# rows are ANNOTATED, so 17.3's fixture pins a shape no emitter produces and NOTHING pinned
+# the integrity refusal for the block the gate REALLY writes. Built with this file's own
+# `comp_line` helper — the same renderer shape every other fixture here uses — so the fixture
+# cannot drift from what the gate emits. The expectation is 17.3's, unchanged: the integrity
+# precondition rejects the block BEFORE the component read, so a well-formed row cannot rescue
+# it. That is the whole point — a boundary block is not certifying evidence about a component
+# however cleanly its rows are rendered.
+SG6="$TMP/shape-boundary-annotated.txt"
+{ echo "==== AGENT-GATE SUMMARY ===="
+  echo "run-id: run-1"
+  echo "commit: bc4e347 branch: issue-3750 dirty: no (VERIFIED START — the tree MUTATED mid-run)"
+  echo "tree-start: bc4e3471e478 dirty: no digest: dccb793eceab"
+  echo "tree-end: 94e041b61dc2 dirty: no digest: 22f4e590dd43 (POST-MUTATION observation)"
+  echo "tree-integrity: FAIL (tree-mutated-midrun; head bc4e3471e478->94e041b61dc2; detected-after-component: tooling-tests)"
+  comp_line tooling-tests FAIL 512s '[unobservable:cargo may run inside ~60 nested test scripts (child processes)]'
+  echo "components-completed: 1 of 1 selected (run STOPPED at the tree-integrity boundary — the rest never ran)"
+  echo "detected-after-component: tooling-tests"
+  echo "RESULT: FAIL"
+  echo "==== END AGENT-GATE SUMMARY ===="
+} > "$SG6"
+expect "17.7 the REAL boundary block (ANNOTATED rows + integrity FAIL) is rejected on INTEGRITY" \
+  NOT-PASS 1 "tree-integrity" -- "$SG6" --mode only --component tooling-tests --run-id run-1
 SG4="$TMP/shape-nosecs.txt"
 mk_only_summary "$SG4" run-1 PARTIAL tooling-tests "$(printf '%-18s %s (%ss)' 'tooling-tests:' PASS '')"
 expect "17.4 an empty duration field is MALFORMED, not absent (a truncated .result)" \
@@ -1076,15 +1116,33 @@ mk_only_summary "$SG5" run-1 PARTIAL tooling-tests "$(printf '%-18s %s (%ss)' 't
 expect "17.6 the UNANNOTATED shape in an integrity-PASS block is MALFORMED, not absent (no emitter makes that pair)" \
   COULD-NOT-MEASURE 4 "component-line-malformed" -- "$SG5" --mode only --component tooling-tests --run-id run-1
 
-# DERIVED, like the delta token set: there are exactly TWO distinct component-line printf
-# formats in the shipped gate. A THIRD emitter appearing must RED here rather than silently
-# not matching one of this tool's two alternatives.
-_emitters=$(grep -o "printf '%-18s[^']*'" "$REPO_ROOT/scripts/agent-gate.sh" | sort -u | grep -c '^')
-if [ "$_emitters" = 2 ]; then
-  ok "17.5 the shipped gate still has exactly TWO component-line emitters (the alternation covers both)"
+# DERIVED, like the delta token set, and COMMENT-BLIND — the #4029 correction. There is
+# exactly ONE non-comment component-row `printf '%-18s …'` in the shipped gate:
+# `_fm_summary_line`'s own definition, the ONE renderer every mode routes through since #3625.
+# A NEW raw emitter must RED here rather than silently emitting a row this tool's single
+# accepted shape (`_COMP_LINE_RE`) does not cover.
+#
+# WHY THE EXPECTATION IS 1 AND WHY THE OLD NEEDLE WAS WRONG. This used to be
+# `grep -o "printf '%-18s[^']*'" | sort -u | grep -c` with an expected count of 2, and it
+# MEASURED 3 on `origin/main` — failing `tooling-tests` and therefore every lane's gate of
+# record. There was no third emitter: that needle is not comment-blind, and #3625 — which
+# DELETED the second emitter by routing both boundary loops through `_fm_summary_line` — left
+# two COMMENTS in `_tree_boundary_meta_lines` QUOTING the two formats it had just removed. The
+# guard was counting the changelog of its own subject. Bumping the literal to 3 would pin a
+# count derived from PROSE, which moves whenever someone edits a comment; the fix is to count
+# only CODE, and then the honest count is 1.
+#
+# The needle is `scripts/tests/test_agent_gate_feature_matrix_annotation.sh`'s B1 and
+# `scripts/tests/test_agent_gate_census.sh`'s, verbatim: `%-18s` is the NAME FIELD that MAKES
+# a line a component row, so a near-miss in the rest of the format cannot hide an emit path
+# (#3625, roborev job 360 finding 2). Do NOT spell it a third way — a third spelling is a
+# third place for it to drift.
+_emitters=$(grep -cE "^[^#]*printf '%-18s" "$REPO_ROOT/scripts/agent-gate.sh")
+if [ "$_emitters" = 1 ]; then
+  ok "17.5 the shipped gate still has exactly ONE non-comment component-line emitter (_fm_summary_line's own definition)"
 else
-  bad "17.5 the shipped gate still has exactly TWO component-line emitters (the alternation covers both)" \
-      "found $_emitters distinct printf formats — the alternation may no longer cover them all"
+  bad "17.5 the shipped gate still has exactly ONE non-comment component-line emitter (_fm_summary_line's own definition)" \
+      "found $_emitters non-comment 'printf %-18s' site(s), expected exactly 1 — a mode may emit a component row this tool's single accepted shape does not cover; run: grep -nE \"^[^#]*printf '%-18s\" $REPO_ROOT/scripts/agent-gate.sh"
 fi
 
 echo "=== section 18: a PARTIAL token REQUIRES its --only scope line (F4) ==="
@@ -1462,12 +1520,14 @@ fi
 # 106 -> 108; #3951 grew section 10 by eight (an uncertain tree-integrity must not mask a
 # certain summary-integrity FAIL, plus four controls for the mappings that must NOT move),
 # 108 -> 116; job 401 added section 22 (the reserved-line recognizer class: malformed is its
-# own refusal, never absent), 116 -> 125. Raised
+# own refusal, never absent), 116 -> 125; #4029 grew section 17 by one (17.7: the REAL,
+# post-#3625 ANNOTATED boundary block refused on INTEGRITY — the reachable shape 17.3's
+# fixture stopped being), 125 -> 126. Raised
 # DELIBERATELY each time: the total is a
 # `-lt` floor, so leaving it low would let the added cases be deleted while the suite still
 # reported green — this repo's own case-floor lesson.
-SECTION_FLOORS="1:4 2:5 3:3 4:5 5:7 6:8 7:2 8:4 9:5 10:16 11:6 12:5 13:4 14:2 15:12 16:4 17:6 18:5 19:3 20:5 21:5 22:9"
-FLOOR=125
+SECTION_FLOORS="1:4 2:5 3:3 4:5 5:7 6:8 7:2 8:4 9:5 10:16 11:6 12:5 13:4 14:2 15:12 16:4 17:7 18:5 19:3 20:5 21:5 22:9"
+FLOOR=126
 for _sf in $SECTION_FLOORS; do
   _sec=${_sf%%:*}; _min=${_sf##*:}
   eval "_got=\${SEC_$_sec:-0}"

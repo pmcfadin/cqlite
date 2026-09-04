@@ -660,32 +660,43 @@ esac
 # be discarded in a subshell (#3400), and grep's status is CHECKED: rc >= 2 is a failed
 # measurement, not "no match".
 # ---------------------------------------------------------------------------
-# FULLY ANCHORED, AND REQUIRING THE **ANNOTATED** SHAPE — the round-5 correction.
-# Validating only a PREFIX accepted `fmt: PASS (1s) arbitrary text` as a genuine component
-# verdict (F2). Anchored at BOTH ends now, AND against ONE shape rather than two:
+# FULLY ANCHORED, AND REQUIRING THE **ANNOTATED** SHAPE — the round-5 correction, which
+# #3625 then made unconditional. Validating only a PREFIX accepted `fmt: PASS (1s) arbitrary
+# text` as a genuine component verdict (F2). Anchored at BOTH ends now, AND against ONE shape:
 #
-#   annotated    agent-gate.sh's `_fm_summary_line`:          printf '%-18s %s (%s)  %s'
+#   annotated    agent-gate.sh's `_fm_summary_line`:  printf '%-18s %s (%s)  %s'
 #                -> TWO spaces after the duration, then a non-empty annotation. ACCEPTED.
-#   unannotated  agent-gate.sh's `_tree_boundary_meta_lines`: printf '%-18s %s (%ss)\n'
-#                -> NOTHING after the duration. REJECTED HERE, because it is unreachable.
+#                -> Since #3625 (`bdaf2b6e1`) this is the ONLY shape any mode can emit: both
+#                   loops in `_tree_boundary_meta_lines` route through that ONE renderer too,
+#                   so even a tree-integrity BOUNDARY block's rows are annotated.
+#   unannotated  the boundary printer's FORMER raw `printf '%-18s %s (%ss)\n'`
+#                -> NOTHING after the duration. REJECTED HERE, and now UNEMITTABLE: #3625
+#                   DELETED that printf, so this rejection is defence in depth against the raw
+#                   emitter returning, not a live discrimination between two shipped shapes.
 #
 # ROUND 4 ACCEPTED BOTH AND THAT WAS WRONG — not about the emitter, about the ORDER OF THE
-# CHECKS. The unannotated shape is real (this lane's own tree-mutated run emitted
-# `tooling-tests:     FAIL (512s)`), but it can never reach this regex. MEASURED from source,
-# all four legs: `_tree_boundary_meta_lines` has EXACTLY ONE caller (`_tree_boundary_fail`);
+# CHECKS. The unannotated shape was real at the time (a tree-mutated run emitted
+# `tooling-tests:     FAIL (512s)`), but it could never reach this regex. MEASURED from source,
+# all four legs: `_tree_boundary_meta_lines` had EXACTLY ONE caller (`_tree_boundary_fail`);
 # that caller requires TREE_GUARDED=1, so no SKIP path coexists; it calls
 # `_tree_detection_mark` immediately before, whose BOTH arms route to `_tree_fail_closed`,
 # which sets `tree-integrity: FAIL`; and `_emit_terminal_summary` names none of
 # `_tree_finalize`/`_tree_meta_array`/`TREE_INTEGRITY_LINE`, so nothing resets it to PASS in
-# between. So the unannotated shape occurs ONLY in `tree-integrity: FAIL` blocks — which the
-# integrity precondition ABOVE rejects before the component read. Accepting it here was DEAD
-# permissiveness, the same root cause as the `mode:` skip above.
+# between. So that shape occurred ONLY in `tree-integrity: FAIL` blocks — which the integrity
+# precondition ABOVE rejects before the component read. Accepting it here was DEAD
+# permissiveness, the same root cause as the `mode:` skip above. #3625 then removed the emitter
+# and the question with it: a real boundary block's rows are ANNOTATED, and such a block is
+# still refused ON INTEGRITY.
 #
-# THE SUITE KEEPS BOTH GUARDS AGAINST GETTING THIS WRONG AGAIN: 17.3 pins the real boundary
-# block being rejected ON INTEGRITY (the reachable behaviour), and 17.5 asserts BY DERIVATION
-# that the shipped gate still has exactly TWO component-line emitters — so if a third appears,
-# or if the boundary emitter ever starts appearing in an integrity-PASS block, it reds rather
-# than silently widening what counts as certifying evidence.
+# THE SUITE KEEPS THREE GUARDS AGAINST GETTING THIS WRONG AGAIN
+# (scripts/tests/test_gate_component_verdict.sh): 17.7 pins the REACHABLE behaviour — the real,
+# post-#3625 ANNOTATED boundary block refused ON INTEGRITY; 17.3 keeps the defence-in-depth
+# refusal of the now-unemittable unannotated shape; and 17.5 asserts BY DERIVATION, COUNTING
+# CODE ONLY, that the shipped gate still has exactly ONE non-comment component-row emitter — so
+# a new raw printf, or the boundary shape appearing in an integrity-PASS block, reds rather
+# than silently widening what counts as certifying evidence. (17.5 measured 3 before #4029
+# because its needle counted COMMENTS quoting the two formats #3625 had deleted; a count
+# derived from prose is not a count of emitters.)
 #
 # DECLARED RESIDUAL: the annotation is FREE TEXT containing spaces (`[test cqlite-core
 # --features cli-helpers]`), so garbage APPENDED to an annotation is indistinguishable from
@@ -693,9 +704,9 @@ esac
 # anchoring closes is the SINGLE-space tail, which no emitter can produce.
 _COMP_LINE_RE="^${COMP_RE}: +[A-Za-z][A-Za-z-]* \([0-9]+s\)  .+$"
 # STEP 1 — COUNT BY BARE PREFIX. Counting with the full row grammar was the third measured
-# false PASS: one valid `PASS` row plus a same-component row in a malformed or unannotated
-# shape left the count at 1, so an artifact that could not have been coherently emitted
-# answered PASS.
+# false PASS: one valid `PASS` row plus a same-component row in a malformed shape (the
+# unannotated one included) left the count at 1, so an artifact that could not have been
+# coherently emitted answered PASS.
 COMP_N=$(_count_prefix "$COMP_RE" "$BODY") \
   || cnm "component-scan-failed; the scan for this component's line failed, and a failed measurement is never reported as an absence"
 
