@@ -72,6 +72,24 @@ fi
 if [ "$_rfc_lib_loaded" -eq 1 ]; then
   :
 else
+  # A PARTIAL LOAD MUST NOT LEAVE A CALLABLE RECOGNISER (roborev job 124, High).
+  # Bash executes a sourced file INCREMENTALLY, so a file that defines these functions and
+  # THEN fails — a syntax error or a failing command in its tail — returns non-zero with the
+  # definitions already in effect. `roborev_findings_count` is defined LAST (line ~137), so
+  # every function exists in exactly the case where the file did not finish loading, and the
+  # wrapper's required-function check — which tests only that the function EXISTS — would
+  # PASS. Measured: `. late-fail.sh` returns 2 while `type -t` reports `function` and the
+  # function returns its value.
+  #
+  # SO THE FLAG IS NOT MADE A SECOND AUTHORITY; the FIRST one is made truthful instead. The
+  # wrapper already fails closed on "the recogniser is not defined", so a failed load
+  # UNDEFINES it and that one check keeps deciding. Requiring the wrapper to consult
+  # `_rfc_lib_loaded` AS WELL would be two sources of truth for one question, and #3564 is
+  # what happens when a key's failure is delegated to its neighbour: the coupling holds only
+  # while one event populates both, and evaporates in the first mode where it does not.
+  # Undefining is also robust to what this file may grow later — trailing state, a fourth
+  # helper — which a flag consulted at one call site is not.
+  unset -f roborev_findings_block roborev_findings_marker_count roborev_findings_count 2>/dev/null || true
   printf '%s\n' "roborev-review-checks.sh: cannot read or source $ROBOREV_FINDINGS_COUNT_LIB (the shared findings-count recogniser, #4050 — absent, non-regular, unreadable, or corrupt) — the findings count CANNOT be measured; the wrapper's required-function check will fail closed on roborev_findings_count" >&2
 fi
 

@@ -9059,6 +9059,57 @@ fi
 reset_stub
 
 # ===========================================================================
+# CASE (late4050): a library that DEFINES the recogniser and THEN FAILS must not leave it
+# callable (roborev job 124, High).
+#
+# THE CASE cor4050 MISSES, and the reason is mechanical: bash executes a sourced file
+# INCREMENTALLY, so a file whose TAIL fails returns non-zero with every definition already
+# in effect. cor4050 truncates INSIDE the function, so the function never exists and the
+# wrapper's required-function check catches it. Truncate AFTER it and all three functions
+# exist — and `roborev_findings_count` is the LAST one defined, so this is the case where
+# the existence check is MOST likely to pass on a file that did not finish loading.
+# Measured: `. late-fail.sh` returns 2 while `type -t` reports `function`.
+#
+# The fix undefines the functions on a failed load, so the EXISTING fail-closed path keeps
+# deciding rather than a second authority being introduced.
+work=$(make_fixture case_late4050 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+# Append a complete, VALID copy of the real library, then a tail that fails to parse. The
+# real body is kept so the failure is genuinely "defined, then failed" and not "defined
+# something useless" — a stub would not prove the function was the working one.
+# FROM THE REAL LIBRARY IN THE REPO, never from `$_fl_dir`'s copy: the preceding cases in
+# this file DELETE it (fl4050) and OVERWRITE it with a truncated stub (cor4050), so reading
+# the scratch copy here silently produced a file that fails INSIDE the function — which is
+# cor4050's input, not this case's, and the function was then never defined at all. The
+# affirmative fixture check below is what caught that; without it this case would have
+# reported a PASS while exercising the wrong state.
+mkdir -p "$_fl_dir/lib"
+{
+  cat "$SCRIPT_DIR/../flow/lib/roborev-findings-count.sh"
+  printf '\n# planted tail failure, AFTER every definition\nif true; then\n'
+} > "$_fl_dir/lib/roborev-findings-count.sh.late"
+mv "$_fl_dir/lib/roborev-findings-count.sh.late" "$_fl_dir/lib/roborev-findings-count.sh"
+# AFFIRM THE FIXTURE IS THE ONE THIS CASE IS ABOUT, in a SUBSHELL so the definitions cannot
+# leak into this suite: sourcing must FAIL and the recogniser must nonetheless be DEFINED.
+# If either half is untrue the case is testing something else.
+_late_src_failed=0
+_late_defined=0
+( . "$_fl_dir/lib/roborev-findings-count.sh" ) >/dev/null 2>&1 || _late_src_failed=1
+_late_probe=$( ( . "$_fl_dir/lib/roborev-findings-count.sh" >/dev/null 2>&1; type -t roborev_findings_count ) 2>/dev/null )
+[ "$_late_probe" = function ] && _late_defined=1
+if [ "$_late_src_failed" -eq 1 ] && [ "$_late_defined" -eq 1 ]; then
+  ok 'case (late4050) fixture: the library FAILS to source yet still DEFINES roborev_findings_count — the state a function-existence check cannot see'
+  run_wrapper --wrapper "$_fl_dir/roborev-review.sh" "$work"
+  assert_verdict 'case (late4050) a PARTIALLY LOADED recogniser FAILs the wrapper rather than being used' FAIL 1
+  assert_says 'case (late4050) the cause names the shared library' \
+    'lib/roborev-findings-count\.sh'
+  assert_lacks 'case (late4050) it never reaches PASS on a library that did not finish loading' '^RESULT: PASS'
+else
+  bad "case (late4050) fixture: not in the expected state (source-failed=$_late_src_failed still-defined=$_late_defined), so the partial-load path was never exercised"
+fi
+reset_stub
+
+# ===========================================================================
 # STRUCTURAL (cor4050): NEITHER CONSUMER MAY SOURCE THE SHARED LIBRARY BARE.
 # The behavioural case above covers the wrapper. The merge-point consumer's own
 # corrupt-library path is covered in test_premerge_review_binding.sh, but the INVARIANT
