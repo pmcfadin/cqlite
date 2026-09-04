@@ -455,7 +455,7 @@ CONTRACT_LINE = (
     "is produced by MACRO EXPANSION; a build-script env key CONSTRUCTED AT RUNTIME; and a "
     "module reached by an explicit #[path]/include! this walk does not visit — either "
     "OUT-OF-REPOSITORY, or IN-REPOSITORY under a basename-pruned .git/node_modules "
-    "directory — so a feature gated only there can be reported dead. "
+    "directory — so a feature gated only there can be reported dead; and a target whose ROOT SOURCE PATH or its directory is ITSELF A SYMLINK is not analysed, because cargo reports the RESOLVED src_path and this scan compares the lexical link against it. "
     "Escape routes: cfgs inside unexpanded macro bodies; orphan .rs files under a target "
     "source dir; any textual CARGO_FEATURE_* mention in a build-script package's sources "
     "(no API, module or scope analysis; a bare CARGO_FEATURE_ prefix credits every "
