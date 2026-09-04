@@ -391,9 +391,13 @@ fn strip_comments_and_literals(src: &str) -> String {
     let mut i = 0usize;
     // Blank `[from, to)` but keep newlines so line structure survives.
     let blank = |out: &mut Vec<char>, from: usize, to: usize| {
-        for k in from..to.min(n) {
-            if out[k] != '\n' {
-                out[k] = ' ';
+        let to = to.min(n);
+        if from >= to {
+            return;
+        }
+        for slot in &mut out[from..to] {
+            if *slot != '\n' {
+                *slot = ' ';
             }
         }
     };
@@ -461,8 +465,14 @@ fn strip_comments_and_literals(src: &str) -> String {
             i = j;
         } else if c == '\'' {
             // A char literal, or a lifetime. Only the former is blanked.
-            if i + 2 < n && b[i + 1] == '\\' {
-                let mut j = i + 2;
+            if i + 3 < n && b[i + 1] == '\\' {
+                // The closing quote is at or after `i + 3`: starting the scan at
+                // `i + 2` would find the ESCAPED quote of `'\''` and leave the
+                // real one behind, after which a stray `'` swallows following
+                // code as a char literal — blanking braces (breaking the body
+                // matching) or a real `Value::Empty` arm (the permissive
+                // direction, hence a false "no arm").
+                let mut j = i + 3;
                 while j < n && b[j] != '\'' {
                     j += 1;
                 }
@@ -1034,7 +1044,14 @@ fn prose_only(value: &Value) -> Result<Vec<u8>> {
     let raw = r#"Value::Empty in a raw string"#;
     let open_brace = '{';
     let quote = '"';
-    let _ = (msg, raw, open_brace, quote);
+    // An ESCAPED-QUOTE char literal ADJACENT to another char literal: the one
+    // input that discriminates a scan starting at the escaped quote from one
+    // starting past it. Mis-handled, the first literal leaks its real closing
+    // quote, the leaked quote pairs with the comma to look like a char literal,
+    // and the '{' below survives unblanked — unbalancing the body matching.
+    let adjacent = ['\'','{'];
+    let newline = '\n';
+    let _ = (msg, raw, open_brace, quote, adjacent, newline);
     Ok(Vec::new())
 }
 
