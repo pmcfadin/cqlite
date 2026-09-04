@@ -1105,9 +1105,19 @@ Three consequences to work with:
   intact. `--skip-claude-auth` is loud and is **not** a `[warn]`, unlike its `git-push:`/`gate-pin:`
   siblings: those decline a real verdict, and here there is no green to buy.
 
-**`FAILED` is an accusation about a credential, so it is earned, not defaulted to**: it is emitted
-only for a positively identified authentication rejection, and every other unsuccessful probe —
-rate limit, outage, quota, crash, bound fired, no sentinel — is `UNMEASURED` with its cause named.
+**`FAILED` is an accusation about a credential, so it is earned, not defaulted to**: it needs BOTH
+halves — a positively identified authentication rejection AND **no alternate credential in the
+probe's environment** — and every other unsuccessful probe (rate limit, outage, quota, crash, bound
+fired, no sentinel, an unattributable rejection) is `UNMEASURED` with its cause named. The second
+half is LIMITATION 2 deciding a verdict rather than annotating one: `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK` and `CLAUDE_CODE_USE_VERTEX` are retained by
+design, which is why `PROBE-ANSWERED` claims only that *some* credential answered — and by the same
+reasoning a rejection means only that *some* credential was rejected, while `FAILED`'s remedy names
+the PERSISTED value. An invalid **alternate** therefore used to earn a confident instruction to
+destroy a **valid** token: the same harm as the rate-limit case, on the axis the report-only
+demotion did not sweep (roborev job 433). Scrubbing the alternates would make the accusation
+attributable and is refused — it changes what the probe authenticates with, which is a behaviour
+change hiding behind a report — so the VERDICT is narrowed instead.
 The matchers are ordered killed-by-bound -> transport -> service failure -> **rejection last**, so a
 response naming both a benign cause and an authentication wording takes the non-accusing answer:
 ambiguity is not evidence, and telling someone to replace a working token because the API was
@@ -1134,8 +1144,8 @@ They are two lines because they observe different things and the operator action
 | `claude-tmux-env: SERVER-CARRIES-BOTH` | The running server's **global** environment carries a matching token and a matching `CLAUDE_CONFIG_DIR` that exists as seen by this process. No pane was spawned (LIMITATION 5) and the directory's usability to the agent is unobserved (LIMITATION 3). | Nothing. |
 | `claude-tmux-env: COLD-START-DELIVERS-BOTH` | No live server. A throwaway one, **started with the two values this process read out of `/etc/environment`**, passed both to a pane. So it observes tmux **propagation**, not pam_env **delivery** — a line pam would have dropped is invisible to it (LIMITATION 1). | Nothing. |
 | `claude-auth: NOT-PERSISTED` | No `CLAUDE_CODE_OAUTH_TOKEN` line in `/etc/environment`. | Provision it (below). Bootstrap deliberately never writes the credential itself. |
-| `claude-auth: FAILED` | A token IS persisted and the API **positively identified it as rejected** (an authentication error, a 401, `Failed to authenticate`, `Please run /login`). | Replace the **value**; bootstrap never rewrites an existing one. |
-| `claude-auth: UNMEASURED` | The probe did not succeed and **did not identify a credential rejection**: a rate limit, an API outage or overload, an exhausted quota, an unreachable network, a CLI crash, the hard bound firing, no `claude` on PATH, no `timeout` able to enforce a hard bound, an unreadable `/etc/environment`, or rc 0 with no sentinel. | Read the named cause and resolve it, then re-run. **Do NOT replace the token on this evidence**: `FAILED` is the only state that means the credential was rejected. |
+| `claude-auth: FAILED` | A token IS persisted, **no alternate credential was in the probe's environment**, and the API **positively identified the credential as rejected** (an authentication error, a 401, `Failed to authenticate`, `Please run /login`). Both halves are required, so the rejection is attributable to the persisted value. | Replace the **value**; bootstrap never rewrites an existing one. |
+| `claude-auth: UNMEASURED` | The probe did not succeed and **did not identify a credential rejection**: a rate limit, an API outage or overload, an exhausted quota, an unreachable network, a CLI crash, the hard bound firing, no `claude` on PATH, no `timeout` able to enforce a hard bound, an unreadable `/etc/environment`, rc 0 with no sentinel, **or a real rejection that an alternate credential in the environment made unattributable** (the line names which alternates were set — unset them and re-run). | Read the named cause and resolve it, then re-run. **Do NOT replace the token on this evidence**: `FAILED` is the only state that means the PERSISTED credential was rejected. |
 | `claude-tmux-env: SERVER-MISSING` | A tmux server is running and carries no token. **THE field failure.** | `--fix-claude-auth`, **explicitly** — it overwrites; see the note below. |
 | `claude-tmux-env: SERVER-STALE` | The server's token **differs** from the persisted one. Worse than missing: everything looks provisioned. | `--fix-claude-auth`, explicitly. **Read the note below first**: this is the state where an overwrite can destroy the box's only working credential. |
 | `claude-tmux-env: SERVER-INCOMPLETE` | Token matches, `CLAUDE_CONFIG_DIR` absent — the un-onboarded picker (fact 5). | `--fix-claude-auth`, explicitly. |

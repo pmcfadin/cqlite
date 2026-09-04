@@ -2502,7 +2502,19 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   the cause named. **The matcher ORDER is that rule, not a detail of it** — killed-by-bound, then
   transport, then service failure, then rejection — so a response naming BOTH a benign cause and an
   authentication wording takes the non-accusing answer; with rejection tested first, a 429 body
-  carrying `authentication_error` told the operator to replace a potentially VALID token. Every
+  carrying `authentication_error` told the operator to replace a potentially VALID token.
+  **AND `FAILED` NEEDS A SECOND HALF, BECAUSE THE DEMOTION WAS APPLIED TO ONE AXIS ONLY (roborev
+  job 433): the accusation must be ATTRIBUTABLE, so it is UNREACHABLE while ANY of the retained
+  alternates (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`,
+  `CLAUDE_CODE_USE_VERTEX`) is set** — a rejection there is `UNMEASURED` naming them. `PROBE-ANSWERED`
+  is worded as it is precisely because those are not scrubbed, so *some* credential answered; by the
+  same reasoning *some* credential was rejected, while `FAILED`'s remedy names the PERSISTED value —
+  i.e. an invalid ALTERNATE earned a confident instruction to destroy a VALID token, this issue's own
+  harm surviving on the axis nobody swept. **Fix the VERDICT, not the environment**: scrubbing the
+  alternates would make the accusation attributable and is refused, because silently changing what
+  the probe authenticates with is a behaviour change hiding behind a report. Generalises past this
+  file: **when a report is demoted to claim only what it observed, sweep the FAILURE states too — an
+  over-claim on a success is a weaker statement, an over-claim on a failure is an accusation.** Every
   bound must ESCALATE (`--kill-after=`/`-k`, probed by running it): a SIGTERM-only `timeout` does
   not bound a child that ignores SIGTERM — measured, rc 124 after the child's own 30s — so where no
   hard bound exists the call is NOT MADE, and an unbounded `show-environment -g`/`setenv -g` would

@@ -40,7 +40,11 @@
 #      (claude_tmux_cold_probe_into);
 #   2. the `claude -p` probe does not neutralise ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN,
 #      CLAUDE_CODE_USE_BEDROCK or CLAUDE_CODE_USE_VERTEX, so an answered probe means SOME
-#      credential in its environment worked (claude_auth_verdict_into__untraced);
+#      credential in its environment worked. NAMING them is NOT the whole handling of it:
+#      the mirror claim on the FAILURE axis is an ACCUSATION, so `FAILED` is UNREACHABLE
+#      while any of them is set — a rejection there is UNMEASURED naming the alternates,
+#      because "some credential was rejected" cannot license "replace the persisted one"
+#      (claude_auth_verdict_into__untraced);
 #   3. `[ -d <config dir> ]` is evaluated as THIS process — root, under the documented sudo
 #      invocation — so it says nothing about the delegated agent's access
 #      (claude_tmux_env_verdict_into__untraced and claude_tmux_cold_verdict_into);
@@ -87,9 +91,12 @@
 #                     PROBE-ANSWERED | NOT-PERSISTED | FAILED | UNMEASURED
 #                     PROBE-ANSWERED means rc 0 AND the sentinel came back. It does NOT say
 #                     the persisted value is what authenticated (LIMITATION 2).
-#                     FAILED is reserved for a POSITIVELY IDENTIFIED rejection; every other
-#                     unsuccessful probe (rate limit, outage, quota, crash, no sentinel) is
-#                     UNMEASURED with its cause named — see the matcher block below.
+#                     FAILED needs BOTH halves: a POSITIVELY IDENTIFIED rejection AND no
+#                     alternate credential in the probe's environment (LIMITATION 2 — with
+#                     one present, WHICH credential was rejected was not observed). Every
+#                     other unsuccessful probe (rate limit, outage, quota, crash, no
+#                     sentinel, an unattributable rejection) is UNMEASURED with its cause
+#                     named — see the matcher block below.
 #   claude-tmux-env:  what does a tmux server hold, or what would a new one hand a pane?
 #                     live server:  SERVER-CARRIES-BOTH | SERVER-STALE | SERVER-MISSING |
 #                                   SERVER-INCOMPLETE | SERVER-CONFIG-STALE |
@@ -230,8 +237,14 @@ CLAUDE_AUTH_PROBE_BOUND=90
 #   2. TRANSPORT: the API was not reached, so it never saw the credential;
 #   3. SERVICE: the API was reached and refused for a reason that is NOT about this
 #      credential — a rate limit, a 5xx, an overload, an exhausted quota;
-#   4. REJECTION: only here, with NO benign explanation present in the output, is FAILED
-#      earned;
+#   4. REJECTION: only here, with NO benign explanation present in the output AND NO
+#      alternate credential in the probe's environment, is FAILED earned. The alternates
+#      are retained by design (LIMITATION 2), so with one set the rejection is real but
+#      UNATTRIBUTABLE — "some credential was rejected" — and FAILED's remedy names the
+#      PERSISTED value, so it would tell the operator to destroy a possibly VALID token.
+#      That is this issue's own harm on the axis the demotion did not sweep: the success
+#      state was renamed to claim only what was observed, and the failure state kept
+#      claiming more. UNMEASURED, naming the alternates;
 #   5. rc 0 with no sentinel — it did not answer, which is not evidence of rejection;
 #   6. anything else — non-zero with nothing identified.
 # THE ORDER *IS* THE SAFE-TIE RULE, not a detail of it: a message naming both a benign
@@ -315,8 +328,13 @@ claude_auth_set_var() {
 # return the sentinel with the persisted value playing no part. They are NOT scrubbed:
 # under the lead's ruling this file REPORTS rather than certifies, and silently changing
 # what the probe authenticates with would be a behaviour change hiding behind a report.
-# What it does instead is NAME the ones present, so a reader of the line knows the probe's
-# environment held another way in. NAMES ONLY — never a value; two of these are secrets.
+# It does TWO things instead, and the second is not optional. It NAMES the ones present, so
+# a reader of the line knows the probe's environment held another way in (NAMES ONLY — never
+# a value; two of these are secrets). And it makes `FAILED` UNREACHABLE while any of them is
+# set: a rejection is then attributable to no particular credential, and FAILED's remedy is
+# to replace the PERSISTED value, so an invalid alternate would earn an instruction to
+# destroy a valid token. Naming was enough for the ANSWER (an over-claim there is only a
+# weaker statement); it is not enough for the ACCUSATION.
 CLAUDE_AUTH_ALT_CRED_KEYS='ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX'
 # claude_auth_alt_credentials_into <outvar>: a space-separated list of the alternate
 # credential variables SET (and non-empty) in this process's environment, or empty.
@@ -880,7 +898,7 @@ claude_auth_verdict_into__untraced() {
   case "$__state" in
     absent|absent-file)
       claude_auth_set_var "$__ov" 'NOT-PERSISTED'
-      claude_auth_set_var "$__od" "no $CLAUDE_AUTH_TOKEN_KEY assignment in $__file ($__state) — a tmux-spawned lane inherits no credential at all and lands on the first-run login chooser"
+      claude_auth_set_var "$__od" "no $CLAUDE_AUTH_TOKEN_KEY assignment in $__file ($__state) — a tmux-spawned lane inherits no $CLAUDE_AUTH_TOKEN_KEY and lands on the first-run login chooser; only that key is read here, so an alternate credential reaching the box another way is not observed (LIMITATION 2 of 5)"
       return 0 ;;
     unreadable)
       claude_auth_set_var "$__od" "$__file cannot be read as a regular file (a symlink, or no read permission), so what a PAM session would receive is UNKNOWN"
@@ -931,6 +949,11 @@ claude_auth_verdict_into__untraced() {
   # with would be a behaviour change hiding behind a report, and the honest move is to NAME
   # what was present (see `claude_auth_alt_credentials_into`, whose output goes into the
   # PROBE-ANSWERED detail).
+  #
+  # AND NAMING IS NOT ENOUGH ON THE FAILURE AXIS: because these are retained, `FAILED` is
+  # UNREACHABLE while any of them is set (see the rejection branch below). An over-claim on
+  # the ANSWER is a weaker statement; an over-claim on the REJECTION is an accusation whose
+  # remedy destroys the persisted value.
   #
   # NOT A PIPE. `__out=$(...)` then `__rc=$?` on its own line. ONE invocation, because
   # there is no longer a bound-without-escalation form to branch on: the resolver refuses
@@ -986,8 +1009,34 @@ claude_auth_verdict_into__untraced() {
     return 0
   fi
   if claude_auth_matches_ci "$__out" "$CLAUDE_AUTH_REJECT_RE"; then
+    # ---- LIMITATION 2 of 5 (#3733) DECIDES THIS VERDICT; IT DOES NOT MERELY ANNOTATE IT.
+    # The demotion that renamed the success state was applied to the SUCCESS axis and not to
+    # this one, and the two are the same claim with the sign flipped. `PROBE-ANSWERED` is
+    # worded the way it is because the alternates are retained, so an answer means SOME
+    # credential worked; by exactly that reasoning a REJECTION means SOME credential was
+    # rejected — and `FAILED`'s remedy is "replace the value persisted in $__file", which
+    # on an invalid ALTERNATE is an instruction to destroy a VALID token. That is the same
+    # harm the FAILED/UNMEASURED split was built to remove (a rate limit told the operator
+    # to throw a working credential away), surviving on the axis nobody swept.
+    #
+    # SO `FAILED` NEEDS BOTH HALVES: a positively identified rejection AND no alternate
+    # credential in the probe's environment. THE OTHER AVAILABLE FIX — scrub the alternates
+    # so the accusation becomes attributable — IS REFUSED, on the standing decision recorded
+    # at CLAUDE_AUTH_ALT_CRED_KEYS: silently changing what the probe authenticates with
+    # would be a behaviour change hiding behind a report. So the verdict is narrowed
+    # instead, which is the move the decision order above already makes for every other
+    # ambiguous shape: ambiguity takes the NON-ACCUSING answer.
+    if [ -n "$__alt" ]; then
+      # BUDGETED (see the 500-character note at the COLD-START-DELIVERS-BOTH site): the
+      # probe OUTPUT is the tail, so every word of explanation here is a word of the
+      # rejection text an operator loses. The reasoning lives in the comment above and in
+      # docs/development/fleet-runbook.md; the line carries the reference, the NAMES and
+      # the action.
+      claude_auth_set_var "$__od" "LIMITATION 2 of 5 — a rejection WAS identified but is NOT ATTRIBUTABLE: these unscrubbed alternate credentials were in the probe's environment too: $__alt. FAILED's remedy is to replace the value persisted in $__file, so it is WITHHELD — unset them and re-run before replacing anything (rc=$__rc): $(claude_auth_redact "$__out")"
+      return 0
+    fi
     claude_auth_set_var "$__ov" 'FAILED'
-    claude_auth_set_var "$__od" "the $CLAUDE_AUTH_TOKEN_KEY persisted in $__file was REJECTED (rc=$__rc): $(claude_auth_redact "$__out")"
+    claude_auth_set_var "$__od" "no alternate credential was set here ($CLAUDE_AUTH_ALT_CRED_KEYS), so the rejection IS attributable: the $CLAUDE_AUTH_TOKEN_KEY persisted in $__file was REJECTED (rc=$__rc): $(claude_auth_redact "$__out")"
     return 0
   fi
   if [ "$__rc" -eq 0 ]; then
@@ -1130,9 +1179,15 @@ claude_tmux_env_verdict_into__untraced() {
   claude_tmux_show_key_into __stok  __sstate    "$__out" "$CLAUDE_AUTH_TOKEN_KEY"
   claude_tmux_show_key_into __scfg  __scfgstate "$__out" "$CLAUDE_AUTH_CONFIG_KEY"
 
+  # THE READ IS OF TWO NAMED KEYS, SO THE CONSEQUENCE IS SCOPED TO THEM. `claude`
+  # authenticates from any of $CLAUDE_AUTH_ALT_CRED_KEYS too (LIMITATION 2), and this path
+  # never enumerates them in the server's table — so "no credential reaches the pane" is a
+  # claim about more than was observed. Costless here (the remedy is to seed the server
+  # either way), and stated anyway: a report whose sentences over-claim is what taught this
+  # file to rename its verdicts.
   if [ "$__sstate" != present ] || [ -z "$__stok" ]; then
     claude_auth_set_var "$__ov" 'SERVER-MISSING'
-    claude_auth_set_var "$__od" "a tmux server IS running and its global environment carries NO $CLAUDE_AUTH_TOKEN_KEY ($__sstate) — every pane it spawns lands on the first-run login chooser, whatever $__file says"
+    claude_auth_set_var "$__od" "a tmux server IS running and its global environment carries NO $CLAUDE_AUTH_TOKEN_KEY ($__sstate) — its panes get no $CLAUDE_AUTH_TOKEN_KEY, whatever $__file says, and land on the first-run login chooser unless the server's table holds another credential, which is not read here (LIMITATION 2 of 5)"
     return 0
   fi
 
@@ -1633,7 +1688,7 @@ claude_tmux_cold_verdict_into() {
 
   if [ "$__prtok" != set ] || [ "$__prlen" -eq 0 ]; then
     claude_auth_set_var "$__ov" 'COLD-START-MISSING'
-    claude_auth_set_var "$__od" "no tmux server is running, and a throwaway one started from $__file handed its pane NO $CLAUDE_AUTH_TOKEN_KEY — so the NEXT real server will not either, and every lane it spawns lands on the first-run login chooser"
+    claude_auth_set_var "$__od" "no tmux server is running, and a throwaway one started from $__file handed its pane NO $CLAUDE_AUTH_TOKEN_KEY — so the NEXT real server will not either, and its lanes land on the first-run login chooser unless another credential reaches them; only $CLAUDE_AUTH_TOKEN_KEY and $CLAUDE_AUTH_CONFIG_KEY are read (LIMITATION 2 of 5)"
     return 0
   fi
   # THE DELIVERED VALUE MUST BE THE PERSISTED VALUE, COMPARED AS A VALUE. This was a LENGTH

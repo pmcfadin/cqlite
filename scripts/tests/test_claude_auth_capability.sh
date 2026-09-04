@@ -34,7 +34,9 @@
 #     BEST- and WORST-looking inputs share an exit status — so nothing downstream can gate
 #     on one (section 34);
 #   * an alternate credential in the probe's environment is REPORTED, and the line does not
-#     claim the persisted value authenticated (section 35);
+#     claim the persisted value authenticated (section 35) — and on the FAILURE axis it
+#     makes `FAILED` UNREACHABLE, because an accusation whose remedy is "replace the
+#     persisted value" must be attributable to that value (section 47, both directions);
 #   * all five documented limitations are FINDABLE at their code sites (section 36);
 #   * NO run prints a token-shaped value anywhere on stdout/stderr.
 #
@@ -97,6 +99,43 @@ CFGDIR="$tmp/claude-config";       mkdir -p "$CFGDIR"
 CFGDIR_OTHER="$tmp/claude-config-other"; mkdir -p "$CFGDIR_OTHER"
 CFGDIR_GHOST="$tmp/claude-config-never-created"
 
+# THE ALTERNATE CREDENTIALS ARE SCRUBBED FROM EVERY RUNNER, AND THE LIST IS DERIVED (#3733).
+# `claude` authenticates from ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_USE_BEDROCK
+# or CLAUDE_CODE_USE_VERTEX, and the library retains them BY DESIGN (LIMITATION 2) — which is
+# why `FAILED` is unreachable while any is set. So every case that expects a MEASURED verdict
+# about the persisted credential must run without them, or it passes (or reds) for a reason
+# that is the invoking shell's environment and not the code: a fleet box exporting
+# ANTHROPIC_API_KEY would turn every FAILED case in this suite into an UNMEASURED one.
+# Scrubbed HERE, in the shared runners, rather than per case — the same idiom as SUDO_USER
+# and CLAUDE_CONFIG_DIR above, and the reason is the same: a case that has to remember is a
+# case that will forget. A case that WANTS an alternate passes it explicitly, which still
+# wins, because `env` applies every `-u` before any assignment.
+#
+# DERIVED FROM THE LIBRARY'S OWN DECLARATION, never copied: a fifth alternate added there and
+# not here would leave this suite scrubbing four of five. Sourcing is safe — the library's
+# `main` runs only under its `BASH_SOURCE[0] = $0` guard — and it happens in a SUBSHELL so
+# none of its globals reach the cases. A FAILED derivation is a NAMED REFUSAL and never an
+# empty list: an empty scrub set is silently permissive in exactly the direction that matters.
+# COUNTED IN A SCALAR, NOT `${#alt_scrub[@]}`: on bash 3.2 — a platform this repo supports
+# and ships gtimeout/taskpolicy guards for — `${#arr[@]}` on an EMPTY array under `set -u`
+# aborts the shell, which is exactly the derivation-failed path whose whole purpose is to
+# print a NAMED refusal. A refusal that dies before its own message is not a refusal.
+ALT_KEYS=$(. "$CAPLIB" >/dev/null 2>&1 && printf '%s' "${CLAUDE_AUTH_ALT_CRED_KEYS:-}")
+alt_scrub=()
+alt_n=0
+for alt_k in $ALT_KEYS; do
+  case "$alt_k" in
+    ''|*[!A-Za-z0-9_]*) printf 'test_claude_auth_capability: REFUSING TO RUN (alt-key-derivation): the library declared an alternate credential name this harness will not scrub: %s\n' "'$alt_k'" >&2; exit 1 ;;
+  esac
+  alt_scrub+=(-u "$alt_k")
+  alt_n=$((alt_n + 1))
+done
+if [ "$alt_n" -lt 4 ]; then
+  printf 'test_claude_auth_capability: REFUSING TO RUN (alt-key-derivation): CLAUDE_AUTH_ALT_CRED_KEYS yielded %s names (%s); the suite cannot neutralise what it cannot read.\n' \
+    "$alt_n" "'${ALT_KEYS:-<empty>}'" >&2
+  exit 1
+fi
+
 # EVERY case's combined stdout+stderr is appended here, and case "no leak" greps it once.
 TRANSCRIPT="$tmp/transcript.log"; : >"$TRANSCRIPT"
 # run_cap <shimdir> <envfile-or-empty> [extra env assignments...] -- <cap args...>
@@ -120,6 +159,7 @@ run_cap() {
   # thing. Cases that want it set pass it explicitly, which still wins: `env` applies `-u`
   # before assignments.
   out=$(PATH="$shimdir:$PATH" env -u SUDO_USER -u SUDO_UID -u CLAUDE_CONFIG_DIR \
+        "${alt_scrub[@]}" \
         CQLITE_BOOTSTRAP_TEST_MODE=1 \
         CQLITE_CLAUDE_AUTH_ENV_FILE="$envfile" \
         ${pre[@]+"${pre[@]}"} \
@@ -1101,7 +1141,7 @@ plant_bootstrap_quiet_stubs "$d18"
 # run_bootstrap <args...> -> $bs_out. The board identity is PINNED so the run cannot vary
 # with the host operator's exported CQLITE_PROJECT_* values.
 run_bootstrap() {
-  PATH="$d18:$PATH" env CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 \
+  PATH="$d18:$PATH" env "${alt_scrub[@]}" CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 \
     CQLITE_CLAUDE_AUTH_ENV_FILE="$ef2" HOME="$tmp/home" \
     CQLITE_PROJECT_ACCOUNT="$BS_ACCOUNT" CQLITE_PROJECT_OWNER=pmcfadin CQLITE_PROJECT_NUMBER=1 \
     bash "$bs_root/scripts/bootstrap-agent-machine.sh" "$@" 2>&1
@@ -1796,14 +1836,14 @@ claude_auth_case 'a 401 embedded in a larger number is NOT a rejection' s29i 1 \
 # The root is always a COPY under $tmp — this suite never makes its own checkout unreadable.
 run_bootstrap_root() {
   local rt="$1" sd="$2" evf="$3"; shift 3
-  PATH="$sd:$PATH" env CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 \
+  PATH="$sd:$PATH" env "${alt_scrub[@]}" CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 \
     CQLITE_CLAUDE_AUTH_ENV_FILE="$evf" HOME="$tmp/home" \
     CQLITE_PROJECT_ACCOUNT="$BS_ACCOUNT" CQLITE_PROJECT_OWNER=pmcfadin CQLITE_PROJECT_NUMBER=1 \
     bash "$rt/scripts/bootstrap-agent-machine.sh" "$@" 2>&1
 }
 run_bootstrap_in() {
   local sd="$1" evf="$2"; shift 2
-  PATH="$sd:$PATH" env CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 \
+  PATH="$sd:$PATH" env "${alt_scrub[@]}" CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 \
     CQLITE_CLAUDE_AUTH_ENV_FILE="$evf" HOME="$tmp/home" \
     CQLITE_PROJECT_ACCOUNT="$BS_ACCOUNT" CQLITE_PROJECT_OWNER=pmcfadin CQLITE_PROJECT_NUMBER=1 \
     bash "$bs_root/scripts/bootstrap-agent-machine.sh" "$@" 2>&1
@@ -3364,6 +3404,113 @@ else
 fi
 
 # =====================================================================================
+# 47. AN ACCUSATION MUST BE ATTRIBUTABLE: `FAILED` IS UNREACHABLE WHILE AN ALTERNATE
+#     CREDENTIAL IS PRESENT (#3733, roborev job 433).
+#     Section 35 pinned the SUCCESS axis — the probe retains the alternates, so an answer
+#     means SOME credential worked and the line must not name the persisted one. The same
+#     reasoning was never applied to the FAILURE axis: a rejection means SOME credential was
+#     rejected, and `FAILED`'s remedy is "replace the value persisted in /etc/environment".
+#     So an invalid ALTERNATE earned a confident instruction to destroy a VALID token —
+#     which is this issue's own recorded harm (a rate limit telling the operator to throw a
+#     working credential away) surviving on the axis the demotion did not sweep.
+#     THE FIX IS THE VERDICT, NOT THE ENVIRONMENT. Scrubbing the alternates would make the
+#     accusation attributable and is REFUSED at CLAUDE_AUTH_ALT_CRED_KEYS: it changes what
+#     the probe authenticates with, which is a behaviour change hiding behind a report. So
+#     the rejection becomes UNMEASURED, naming the alternates — the decision order's own
+#     safe-tie rule (ambiguity takes the non-accusing answer) applied to one more shape.
+#
+#     BOTH DIRECTIONS, WITH ONE VARIABLE BETWEEN THEM. "A false-positive fix that also
+#     loses the true positive is not a fix" — so 47a and 47b plant the IDENTICAL rejecting
+#     stub and the IDENTICAL persisted file, and differ ONLY in whether an alternate
+#     credential is in the probe's environment. A one-sided case here would pass equally
+#     well against a library that had deleted the FAILED verdict outright.
+# =====================================================================================
+# The stub rejects UNCONDITIONALLY — it does not consult the alternate. That is deliberate
+# and it is what makes the pair a one-variable contrast: the probe's OUTPUT is identical in
+# both runs, so any difference in the verdict is the library's classification and nothing
+# else. (Section 35's stub, which answers only WITH the alternate, covers the other shape.)
+REJECT_TEXT='API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}'
+ALT_VALUE='sk-ant-alternate-value-3733-do-not-print'
+
+d47a=$(mkshim "$tmp/s47a"); plant_claude "$d47a" 1 "$REJECT_TEXT"
+run_cap "$d47a" "$ef2" "ANTHROPIC_API_KEY=$ALT_VALUE" -- --auth
+# THE VERDICT IS THE TOKEN, NOT THE LINE — and the first draft of this case got that
+# wrong, which is worth keeping as a note. It required the string `FAILED` to be ABSENT
+# from the whole line, and red on correct output: the detail legitimately EXPLAINS that
+# FAILED's remedy is what is being withheld. A `grep -q FAILED` over a line whose job is
+# to discuss FAILED is a guard that reds on correct input. So the state is read as the
+# second FIELD and compared EXACTLY — which also closes the prefix hole a `^claude-auth:
+# UNMEASURED` match would leave (an `UNMEASURED-ish` rename would satisfy it).
+auth_state_of() { printf '%s' "$1" | awk '/^claude-auth:/ { print $2; exit }'; }
+a47=$(printf '%s' "$out" | grep '^claude-auth:')
+if [ "$(auth_state_of "$a47")" = UNMEASURED ]; then
+  ok "attributable accusation: a rejection with an alternate credential present is UNMEASURED"
+else
+  bad "attributable accusation: expected state UNMEASURED with ANTHROPIC_API_KEY set, got '$(auth_state_of "$a47")': $a47"
+fi
+# AND THE REJECTION MUST STILL BE REPORTED. Withholding the accusation must not throw away
+# the observation: an UNMEASURED whose text said only "nothing was learned" would send the
+# operator looking for an outage that did not happen. The detail has to say a rejection was
+# seen AND that it could not be attributed.
+if printf '%s' "$a47" | grep -qi 'reject'; then
+  ok "attributable accusation: ...and the detail still reports that a rejection was observed"
+else
+  bad "attributable accusation: the rejection observation was discarded along with the accusation: $a47"
+fi
+# THE OPERATOR HAS TO BE ABLE TO ACT: an UNMEASURED that does not say WHICH alternate was
+# found is a dead end, and naming it is the only route from this line to a re-run.
+if printf '%s' "$a47" | grep -q 'ANTHROPIC_API_KEY'; then
+  ok "attributable accusation: the line NAMES the alternate credential that made the rejection unattributable"
+else
+  bad "attributable accusation: the line does not name the alternate, so nothing tells the operator what to unset: $a47"
+fi
+# NAMES ONLY. The alternate's VALUE is not the persisted secret, so `claude_auth_redact` —
+# which is armed with the PERSISTED token — would not mask it: this is the one credential in
+# the run that the redaction boundary cannot catch, which is exactly why it is asserted here
+# rather than left to the suite-wide sweep in section 23 (that sweep greps for $TOK).
+if printf '%s' "$out" | grep -qF -- "$ALT_VALUE"; then
+  bad "attributable accusation: the alternate credential's VALUE was printed — names only"
+else
+  ok "attributable accusation: the alternate's NAME is reported and its VALUE never is"
+fi
+if printf '%s' "$out" | grep -qF -- "$TOK"; then
+  bad "attributable accusation: the persisted token leaked into the unattributable-rejection line"
+else
+  ok "attributable accusation: ...and the persisted token does not leak on this path either"
+fi
+
+# 47b. THE TRUE POSITIVE, PRESERVED. Same stub, same rejection text, same persisted file —
+#      no alternate. `run_cap` scrubs all four by default (see the derivation at the top), so
+#      this case is clean whatever the invoking shell exports; before that scrub existed, a
+#      fleet box with ANTHROPIC_API_KEY set would have made THIS case red and 47a pass for
+#      the wrong reason, which is the pair failing as a unit.
+d47b=$(mkshim "$tmp/s47b"); plant_claude "$d47b" 1 "$REJECT_TEXT"
+run_cap "$d47b" "$ef2" -- --auth
+b47=$(printf '%s' "$out" | grep '^claude-auth:')
+if [ "$(auth_state_of "$b47")" = FAILED ]; then
+  ok "attributable accusation: the SAME rejection with NO alternate present still earns FAILED"
+else
+  bad "attributable accusation: the narrowing removed the FAILED verdict instead of narrowing it, got: $b47"
+fi
+# The pair must differ, or one of the two runs is not exercising what it claims.
+if [ "$a47" != "$b47" ]; then
+  ok "attributable accusation: the one-variable contrast really does change the verdict"
+else
+  bad "attributable accusation: both runs produced the same line, so the contrast measures nothing: $a47"
+fi
+# AND THE SCRUB ITSELF IS PINNED, in the direction that can go silently wrong. `run_cap`
+# must neutralise an inherited alternate, or 47b (and sections 3, 29f-h and 30) would be
+# measuring the invoking shell. Asserted by INHERITING one into the harness for one call:
+# if the scrub were dropped, this run would take 47a's branch and read UNMEASURED.
+d47c=$(mkshim "$tmp/s47c"); plant_claude "$d47c" 1 "$REJECT_TEXT"
+if ANTHROPIC_AUTH_TOKEN="$ALT_VALUE" run_cap "$d47c" "$ef2" -- --auth \
+   && [ "$(auth_state_of "$(printf '%s' "$out" | grep '^claude-auth:')")" = FAILED ]; then
+  ok "attributable accusation: run_cap scrubs an INHERITED alternate, so every other case measures the code and not the shell"
+else
+  bad "attributable accusation: an inherited ANTHROPIC_AUTH_TOKEN reached the probe — every FAILED case in this suite is then host-dependent: $(printf '%s' "$out" | grep '^claude-auth:')"
+fi
+
+# =====================================================================================
 # 24. STRUCTURAL: NO HOST- OR SESSION-SPECIFIC ABSOLUTE PATH LITERAL, ANYWHERE.
 #     `tooling-tests` is a MANDATORY gate component, so a path that exists on ONE box —
 #     or in ONE agent session — makes the gate host-dependent, and if that directory
@@ -3489,8 +3636,11 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # (the substitution capability is REMOVED, not detected) and section 45 (output-variable
 # assignment never goes through `eval`, with the surviving eval a closed set of one) and
 # section 46 (the repair dispatch is a CLOSED SET derived from the producer, `*)` is a
-# FAILURE, and the three dispositions are pinned behaviourally by warn-count delta).
-# 204 cases run, and there are
+# FAILURE, and the three dispositions are pinned behaviourally by warn-count delta), and
+# section 47 (`FAILED` is an ACCUSATION, so it is unreachable while an alternate credential
+# makes the rejection unattributable — pinned in BOTH directions off one variable, plus the
+# runner-level scrub without which every FAILED case in this suite is host-dependent).
+# 212 cases run, and there are
 # TWO legitimately skippable cases, not one: the real-tmux isolation case (3 assertions) and
 # section 44's OS-mechanism case, which cannot measure "a non-owner is refused" when the
 # suite itself runs as root. The floor therefore excludes both — it is the count that runs on
@@ -3498,12 +3648,14 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # reds on correct input.
 # THE FIGURE IS MEASURED, NOT COUNTED BY EYE, AND IT IS RE-MEASURED WHENEVER IT MOVES:
 # forcing the tmux block's `command -v tmux` test to `true` AND section 44(a)'s
-# root-owned-directory guard to `false` in a throwaway `git worktree` reports 200/0/2 with
+# root-owned-directory guard to `false` in a throwaway `git worktree` reports 208/0/2 with
 # BOTH skippable branches forced (179 -> 200 by section 46's 21 cases: the derivation, the
 # structural location, the exhaustiveness assert, its positive control and the control's
-# isolation, plus four fixtures x four assertions). The value in this file is the authority — a figure quoted in a commit
+# isolation, plus four fixtures x four assertions; 200 -> 208 by section 47's 8 — five on
+# the alternate-present rejection, two on the no-alternate contrast, one on the runner
+# scrub). The value in this file is the authority — a figure quoted in a commit
 # message is a snapshot of the run that produced it and does not follow later edits.
-CASE_FLOOR=200
+CASE_FLOOR=208
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1

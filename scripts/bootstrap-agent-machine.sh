@@ -95,7 +95,11 @@
 #      lesson, one subject over): PROBE-ANSWERED / NOT-PERSISTED / FAILED / UNMEASURED.
 #      PROBE-ANSWERED means rc 0 AND the sentinel came back; it does NOT say the persisted
 #      value is what authenticated, and the line NAMES any alternate credential
-#      (ANTHROPIC_API_KEY and friends) that was also in the probe's environment.
+#      (ANTHROPIC_API_KEY and friends) that was also in the probe's environment. The same
+#      fact decides the FAILURE axis: FAILED is an ACCUSATION whose remedy is "replace the
+#      persisted value", so it needs BOTH a positively identified rejection AND no
+#      alternate present — with one set, a real rejection is UNATTRIBUTABLE and reports
+#      UNMEASURED naming the alternates (roborev job 433).
 #      `claude-tmux-env:` reports what a tmux server holds, or what a newly created one
 #      would hand a pane — the dimension that actually failed in the field: a pane's
 #      environment comes from the tmux SERVER, fixed at server start, so a server predating
@@ -3263,7 +3267,12 @@ if [ "$CLAUDE_AUTH_SECTION_OK" = 1 ]; then
   # replace a value that IS there; UNMEASURED means fix the named precondition and re-run.
   # FAILED IS RESERVED FOR A POSITIVELY IDENTIFIED REJECTION (#3733 round 3): a rate limit,
   # an outage, a quota error or a CLI crash prove nothing about the credential, so they
-  # report UNMEASURED — equally non-passing, but never "throw this token away".
+  # report UNMEASURED — equally non-passing, but never "throw this token away". AND IT
+  # NEEDS A SECOND HALF (roborev job 433): the accusation must be ATTRIBUTABLE, so an
+  # alternate credential in the probe's environment also sends a real rejection to
+  # UNMEASURED — otherwise an invalid ANTHROPIC_API_KEY earned "replace the persisted
+  # value", i.e. destroy a working token. So FAILED's remedy below is safe to state
+  # confidently precisely BECAUSE the library withholds the verdict when it is not.
   case "$CLAUDE_AUTH_V" in
     PROBE-ANSWERED)
       info "this does NOT say the box can start a lane, and it does not say the PERSISTED value is what authenticated — see the LIMITATION references on the line above" ;;
@@ -3275,7 +3284,7 @@ if [ "$CLAUDE_AUTH_SECTION_OK" = 1 ]; then
       info "replace the VALUE (not the presence) — the CLAUDE_CODE_OAUTH_TOKEN line in /etc/environment is there and the API IDENTIFIED IT AS REJECTED; bootstrap never rewrites it"
       info "then re-run, and seed the running tmux server:  bash scripts/bootstrap-agent-machine.sh --fix-claude-auth" ;;
     UNMEASURED)
-      info "the credential was NOT exercised end to end; the cause is named above. This is NOT a verdict about the token — a rate limit, an outage, an exhausted quota or a crash never means the value is wrong, so do NOT replace it on this evidence"
+      info "the credential was NOT exercised end to end, or a rejection could not be ATTRIBUTED to the persisted value; the cause is named above. This is NOT a verdict about the token: not one of a rate limit, an outage, an exhausted quota, a crash, or a rejection seen while an alternate credential (ANTHROPIC_API_KEY and friends) was in the environment means the persisted value is wrong, so do NOT replace it on this evidence"
       info "resolve the named condition and re-run; check by hand:  bash scripts/claude-auth-capability.sh --auth" ;;
   esac
 
