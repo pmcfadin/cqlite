@@ -866,3 +866,11 @@ mod regression_3848_frozen_preamble_overflow_tests;
 // the value silently degrades to `Blob`.
 #[cfg(test)]
 mod regression_2807_qualified_udt_decode_tests;
+
+// Issue #3778 (lead ruling COORD-REQ:3778-03, Option A): CHARACTERISATION of the
+// two sites that TOLERATE trailing bytes inside a `duration`'s declared extent —
+// `raw_type_value.rs`'s nested arm and `cell_value_scalar.rs`'s cell-level arm.
+// Cassandra's `DurationSerializer` performs no consumption check either, so this
+// is parity-correct tolerance and NOT a latent bug; the tests carry the oracle.
+#[cfg(test)]
+mod issue_3778_duration_parity_tests;
