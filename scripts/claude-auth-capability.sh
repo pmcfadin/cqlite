@@ -264,6 +264,51 @@ CLAUDE_AUTH_TMUX_PROBE_BOUND=20
 # Read as CAP+1 so hitting the cap is DETECTABLE rather than silently truncating a record.
 CLAUDE_AUTH_REPORT_MAX=65536
 
+# ---- output-variable assignment: NEVER `eval` --------------------------------------
+# claude_auth_set_var <name> <value>: set the CALLER's variable <name> to the LITERAL
+# <value>. rc 2 and NO assignment if <name> is not a plain shell identifier.
+#
+# THIS REPLACES 118 `eval "$name=…"` SITES, AND IT IS A CLASS FIX RATHER THAN TEN PATCHES.
+# `eval` REPARSES its argument, so every value interpolated into that string was CODE.
+# Probe output, tmux STDERR and tmux-controlled configuration values all reach these
+# assignments, and crafted text carrying a quote and a `;` EXECUTED. bootstrap SOURCES this
+# file under `sudo`, so the ceiling was ROOT COMMAND EXECUTION from text that an invoking
+# user, `claude`, or tmux could influence. It is IN MODEL for the same reason the earlier
+# findings here were: a same-uid peer lane can influence tmux's configuration and therefore
+# its stderr, so the attacker is not the invoker — a non-invoker route is a defect.
+#
+# WHY NOT ESCAPE THE INPUTS: that is the "rarer delimiter" move this repository rules
+# against, and it would be the FOURTH sanitiser in this issue's history. `printf -v` never
+# reparses, so the class is ELIMINATED instead of filtered.
+#
+# `printf -v` RATHER THAN A NAMEREF (`local -n`), for portability, measured and not assumed:
+# `printf -v` is a bash builtin since 3.1, `local -n` needs 4.3 — and macOS ships
+# /bin/bash 3.2, a platform this repo supports (it ships gtimeout/taskpolicy/perf guards for
+# it). The rest of this file stays inside bash 3.x (`${!x}`, `local -a`, `<<<`, `[[ =~ ]]`),
+# so a nameref would be the one construct that broke it there. Verified on this host
+# (bash 5.2.21, `printf` a builtin): the attack payload is stored LITERALLY here, and the
+# same payload through `eval` ran its command.
+#
+# IT ASSIGNS TO THE CALLER'S LOCAL through bash's dynamic scoping, exactly as the `eval` did.
+# Its own locals therefore carry a `__cas_` prefix that no out-var name in this file uses: a
+# collision would make it assign to itself, which is the same hazard the `__pr*` prefix note
+# in claude_tmux_cold_verdict_into records.
+#
+# THE NAME SIDE IS VALIDATED, not just the value: an out-var name is data supplied by a
+# caller, and `printf -v 'a[$(cmd)]'` would otherwise be an array-subscript EVALUATION. Every
+# caller in this file passes a literal name or a positional holding one, so a refusal means a
+# programming error rather than a runtime condition — and it refuses loudly instead of
+# assigning somewhere unintended.
+claude_auth_set_var() {
+  local __cas_n="${1-}" __cas_v="${2-}"
+  case "$__cas_n" in
+    ''|*[!A-Za-z0-9_]*|[0-9]*)
+      printf 'claude-auth-capability: REFUSING: assignment target is not a plain variable name\n' >&2
+      return 2 ;;
+  esac
+  printf -v "$__cas_n" '%s' "$__cas_v"
+}
+
 # ---- alternate credentials: OBSERVED AND NAMED, DELIBERATELY NOT SCRUBBED ----------
 # LIMITATION 2 of 5 (#3733) lives at the probe's `env` call; this is the list it reports.
 # `claude` will authenticate from any of these, so a probe that leaves them in place can
@@ -279,7 +324,7 @@ CLAUDE_AUTH_ALT_CRED_KEYS='ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_US
 # only a non-empty one is reported — reporting a set-empty variable would be a false alarm.
 claude_auth_alt_credentials_into() {
   local __o="$1" __k='' __acc=''
-  eval "$__o="
+  claude_auth_set_var "$__o" ''
   # shellcheck disable=SC2086  # intentional word-split over the space-separated key list
   # `${!__k:-}` distinguishes nothing: it is the VALUE that matters, and a set-but-empty
   # variable authenticates nothing, so only a non-empty one is reported. Reporting an empty
@@ -288,7 +333,7 @@ claude_auth_alt_credentials_into() {
     [ -n "${!__k:-}" ] || continue
     __acc="${__acc:+$__acc }$__k"
   done
-  eval "$__o=\$__acc"
+  claude_auth_set_var "$__o" "$__acc"
 }
 
 claude_auth_test_mode() { [ "${CQLITE_BOOTSTRAP_TEST_MODE:-}" = 1 ]; }
@@ -605,7 +650,7 @@ claude_auth_resolve_digest() {
 # (`shasum -a 256`), chosen from the closed literal set above and from nowhere else.
 claude_auth_digest_into() {
   local __o="$1" __salt="$2" __val="$3" __d=''
-  eval "$__o="
+  claude_auth_set_var "$__o" ''
   [ -n "$CLAUDE_AUTH_DIGEST_CMD" ] || return 1
   # The pipe is safe here for the reason the matcher block gives: the SIGPIPE hazard is an
   # early-exiting consumer, and a digest tool reads to EOF by construction.
@@ -615,14 +660,14 @@ claude_auth_digest_into() {
     *[!0-9a-f]*|'') return 1 ;;
   esac
   [ "${#__d}" -eq 64 ] || return 1
-  eval "$__o=\$__d"
+  claude_auth_set_var "$__o" "$__d"
 }
 
 # claude_auth_probe_salt_into <outvar>: a per-run salt. It is not a secret and needs no
 # cryptographic source — its only job is to keep the digest from being a stable
 # fingerprint of the credential across runs.
 claude_auth_probe_salt_into() {
-  eval "$1=\"cqlite-3733-\$\$-\${RANDOM}\${RANDOM}-\${SECONDS}\""
+  claude_auth_set_var "$1" "cqlite-3733-$$-${RANDOM}${RANDOM}-${SECONDS}"
 }
 
 # ---- shell tracing: OFF ACROSS EVERY SECRET-BEARING PATH ---------------------------
@@ -716,17 +761,17 @@ claude_auth_redact__untraced() {
 # claude_auth_env_file_into <outvar>: the file whose contents pam_env consumes. rc 1 with
 # a LOUD refusal when the seam is set without the marker.
 claude_auth_env_file_into() {
-  eval "$1="
+  claude_auth_set_var "$1" ''
   if claude_auth_seam_set; then
     if ! claude_auth_test_mode; then
       printf 'claude-auth-capability: REFUSING: CQLITE_CLAUDE_AUTH_ENV_FILE is a TEST-ONLY seam (inert without CQLITE_BOOTSTRAP_TEST_MODE=1). Unset it; the production path is %s.\n' \
         "$CLAUDE_AUTH_ENV_FILE_DEFAULT" >&2
       return 1
     fi
-    eval "$1=\$CQLITE_CLAUDE_AUTH_ENV_FILE"
+    claude_auth_set_var "$1" "$CQLITE_CLAUDE_AUTH_ENV_FILE"
     return 0
   fi
-  eval "$1=\$CLAUDE_AUTH_ENV_FILE_DEFAULT"
+  claude_auth_set_var "$1" "$CLAUDE_AUTH_ENV_FILE_DEFAULT"
 }
 
 # claude_auth_strip_pam_quotes_into <outvar> <raw>: reproduce pam_env's own de-quoting so
@@ -739,11 +784,11 @@ claude_auth_strip_pam_quotes_into() {
   case "$__v" in
     '"'*) __q='"' ;;
     "'"*) __q="'" ;;
-    *) eval "$1=\$__v"; return 0 ;;
+    *) claude_auth_set_var "$1" "$__v"; return 0 ;;
   esac
   __v=${__v#?}
   case "$__v" in *"$__q") __v=${__v%?} ;; esac
-  eval "$1=\$__v"
+  claude_auth_set_var "$1" "$__v"
 }
 
 # claude_auth_read_key_into <outvar_value> <outvar_state> <file> <key>:
@@ -767,14 +812,14 @@ claude_auth_strip_pam_quotes_into() {
 # pam_env consumes, and an unknown must never resolve to the good case.
 claude_auth_read_key_into__untraced() {
   local __ov="$1" __os="$2" __f="$3" __k="$4" __raw __g=0
-  eval "$__ov="; eval "$__os=unreadable"
+  claude_auth_set_var "$__ov" ''; claude_auth_set_var "$__os" 'unreadable'
   # `-L` IS TESTED FIRST, and the order is the whole point: a DANGLING symlink fails `-e`,
   # so an existence test in front of it answered `absent-file` — "nothing is provisioned
   # here, add a line" — about a path we deliberately refuse to look through. The comment
   # above said symlinks are refused; the code said they are missing. Refusal wins.
-  if [ -L "$__f" ]; then eval "$__os=unreadable"; return 0; fi
-  if [ ! -e "$__f" ]; then eval "$__os=absent-file"; return 0; fi
-  if [ ! -f "$__f" ] || [ ! -r "$__f" ]; then eval "$__os=unreadable"; return 0; fi
+  if [ -L "$__f" ]; then claude_auth_set_var "$__os" 'unreadable'; return 0; fi
+  if [ ! -e "$__f" ]; then claude_auth_set_var "$__os" 'absent-file'; return 0; fi
+  if [ ! -f "$__f" ] || [ ! -r "$__f" ]; then claude_auth_set_var "$__os" 'unreadable'; return 0; fi
   # `grep` IS THREE-VALUED: 0 match, 1 NO match, >=2 ERROR (127 absent). `if ! grep -q`
   # reads it two-valued and collapses "cannot tell" onto the AFFIRMATIVE `absent`, which
   # reported NOT-PERSISTED for a box whose token IS provisioned and sent the operator to
@@ -785,16 +830,16 @@ claude_auth_read_key_into__untraced() {
   __g=$?
   case "$__g" in
     0) ;;
-    1) eval "$__os=absent"; return 0 ;;
-    *) eval "$__os=unreadable"; return 0 ;;
+    1) claude_auth_set_var "$__os" 'absent'; return 0 ;;
+    *) claude_auth_set_var "$__os" 'unreadable'; return 0 ;;
   esac
   # A SENTINEL PREFIX, because an EMPTY capture and a FAILED capture are otherwise the
   # same string: `KEY=` is a legitimate (empty) assignment while sed producing nothing
   # means the parse failed. Without the marker the `unparseable` branch is unreachable.
   __raw=$(sed -n "s/^[[:space:]]*\(export \)\{0,1\}$__k=/VAL:/p" "$__f" 2>/dev/null | tail -1)
   case "$__raw" in
-    VAL:*) claude_auth_strip_pam_quotes_into "$__ov" "${__raw#VAL:}"; eval "$__os=present" ;;
-    *)     eval "$__os=unparseable" ;;
+    VAL:*) claude_auth_strip_pam_quotes_into "$__ov" "${__raw#VAL:}"; claude_auth_set_var "$__os" 'present' ;;
+    *)     claude_auth_set_var "$__os" 'unparseable' ;;
   esac
 }
 
@@ -815,18 +860,18 @@ claude_auth_read_key_into__untraced() {
 claude_auth_verdict_into__untraced() {
   local __ov="$1" __od="$2" __op="${3:-}"
   local __file='' __state='' __tok='' __cfg='' __out='' __rc=0 __alt=''
-  eval "$__ov=UNMEASURED"; eval "$__od="
-  [ -z "$__op" ] || eval "$__op="
+  claude_auth_set_var "$__ov" 'UNMEASURED'; claude_auth_set_var "$__od" ''
+  [ -z "$__op" ] || claude_auth_set_var "$__op" ''
   # Read BEFORE the probe runs, from THIS process's environment — which is the environment
   # the probe inherits everything but the two scrubbed keys from.
   claude_auth_alt_credentials_into __alt
 
   if ! claude_auth_env_file_into __file; then
-    eval "$__od='the TEST-ONLY seam CQLITE_CLAUDE_AUTH_ENV_FILE is set without CQLITE_BOOTSTRAP_TEST_MODE=1 — refusing to answer about an env-chosen file (details on stderr)'"
+    claude_auth_set_var "$__od" 'the TEST-ONLY seam CQLITE_CLAUDE_AUTH_ENV_FILE is set without CQLITE_BOOTSTRAP_TEST_MODE=1 — refusing to answer about an env-chosen file (details on stderr)'
     return 0
   fi
   if ! claude_auth_platform_linux; then
-    eval "$__od=\"/etc/environment + pam_env is a Linux mechanism; on \$(uname -s 2>/dev/null) there is no system-wide file a cold session would read, so the persisted credential cannot be measured\""
+    claude_auth_set_var "$__od" "/etc/environment + pam_env is a Linux mechanism; on $(uname -s 2>/dev/null) there is no system-wide file a cold session would read, so the persisted credential cannot be measured"
     return 0
   fi
 
@@ -834,19 +879,19 @@ claude_auth_verdict_into__untraced() {
   CLAUDE_AUTH_SECRET="$__tok"
   case "$__state" in
     absent|absent-file)
-      eval "$__ov=NOT-PERSISTED"
-      eval "$__od=\"no \$CLAUDE_AUTH_TOKEN_KEY assignment in \$__file (\$__state) — a tmux-spawned lane inherits no credential at all and lands on the first-run login chooser\""
+      claude_auth_set_var "$__ov" 'NOT-PERSISTED'
+      claude_auth_set_var "$__od" "no $CLAUDE_AUTH_TOKEN_KEY assignment in $__file ($__state) — a tmux-spawned lane inherits no credential at all and lands on the first-run login chooser"
       return 0 ;;
     unreadable)
-      eval "$__od=\"\$__file cannot be read as a regular file (a symlink, or no read permission), so what a PAM session would receive is UNKNOWN\""
+      claude_auth_set_var "$__od" "$__file cannot be read as a regular file (a symlink, or no read permission), so what a PAM session would receive is UNKNOWN"
       return 0 ;;
     unparseable)
-      eval "$__od=\"\$__file carries a \$CLAUDE_AUTH_TOKEN_KEY line this parser could not read; a parse failure is an ABSENCE OF EVIDENCE, never a mismatch\""
+      claude_auth_set_var "$__od" "$__file carries a $CLAUDE_AUTH_TOKEN_KEY line this parser could not read; a parse failure is an ABSENCE OF EVIDENCE, never a mismatch"
       return 0 ;;
   esac
   if [ -z "$__tok" ]; then
-    eval "$__ov=NOT-PERSISTED"
-    eval "$__od=\"\$__file assigns \$CLAUDE_AUTH_TOKEN_KEY an EMPTY value — set but empty is a misconfigured box, not a provisioned one\""
+    claude_auth_set_var "$__ov" 'NOT-PERSISTED'
+    claude_auth_set_var "$__od" "$__file assigns $CLAUDE_AUTH_TOKEN_KEY an EMPTY value — set but empty is a misconfigured box, not a provisioned one"
     return 0
   fi
 
@@ -857,15 +902,15 @@ claude_auth_verdict_into__untraced() {
     # ran `claude`, emitting "claude: command not found" into the operator's transcript and
     # deleting the subject from the message. Pinned structurally by
     # scripts/tests/test_claude_auth_capability.sh.
-    eval "$__od='no claude binary on PATH — the persisted credential exists but nothing here can exercise it'"
+    claude_auth_set_var "$__od" 'no claude binary on PATH — the persisted credential exists but nothing here can exercise it'
     return 0
   fi
   if ! claude_auth_resolve_timeout; then
-    eval "$__od='no timeout/gtimeout on PATH can enforce a HARD bound (neither --kill-after= nor -k is accepted) — a SIGTERM-only bound does not bound a child that ignores SIGTERM, so this refuses to run the network probe rather than hang the provisioning entry point'"
+    claude_auth_set_var "$__od" 'no timeout/gtimeout on PATH can enforce a HARD bound (neither --kill-after= nor -k is accepted) — a SIGTERM-only bound does not bound a child that ignores SIGTERM, so this refuses to run the network probe rather than hang the provisioning entry point'
     return 0
   fi
   if ! __cfg=$(mktemp -d "${TMPDIR:-/tmp}/cqlite-claude-probe.XXXXXX") || [ ! -d "$__cfg" ]; then
-    eval "$__od='could not create a throwaway CLAUDE_CONFIG_DIR for the probe, so the token could not be measured in isolation'"
+    claude_auth_set_var "$__od" 'could not create a throwaway CLAUDE_CONFIG_DIR for the probe, so the token could not be measured in isolation'
     return 0
   fi
   # ARMED BETWEEN THE `mktemp -d` AND THE PROBE, for the same reason the cold probe arms
@@ -897,10 +942,10 @@ claude_auth_verdict_into__untraced() {
   __rc=$?
   claude_auth_probe_cleanup
   claude_auth_probe_restore_traps
-  [ -z "$__op" ] || eval "$__op=\"\$(claude_auth_redact \"\$__out\")\""
+  [ -z "$__op" ] || claude_auth_set_var "$__op" "$(claude_auth_redact "$__out")"
 
   if [ "$__rc" -eq 0 ] && claude_auth_contains "$__out" "$CLAUDE_AUTH_SENTINEL"; then
-    eval "$__ov=PROBE-ANSWERED"
+    claude_auth_set_var "$__ov" 'PROBE-ANSWERED'
     # THE WORDING IS THE WHOLE DEMOTION. This used to say the persisted credential
     # "authenticated", which is a claim about WHICH credential worked — and nothing here
     # observes that (LIMITATION 2 at the `env` call above). What was observed is that a run
@@ -912,9 +957,9 @@ claude_auth_verdict_into__untraced() {
     # characters, so a reference at the end of a long sentence is silently cut — a
     # documented limitation a reader cannot find is not documented.
     if [ -n "$__alt" ]; then
-      eval "$__od=\"LIMITATION 2 of 5 — THIS DOES NOT SAY THE PERSISTED VALUE IS WHAT WORKED: these alternate credentials were in the probe's environment too and are NOT scrubbed: \$__alt. What was observed: a cold, non-interactive 'claude -p' run whose environment CARRIED the \$CLAUDE_AUTH_TOKEN_KEY persisted in \$__file answered (rc 0 AND the sentinel returned) against a FRESH empty config dir\""
+      claude_auth_set_var "$__od" "LIMITATION 2 of 5 — THIS DOES NOT SAY THE PERSISTED VALUE IS WHAT WORKED: these alternate credentials were in the probe's environment too and are NOT scrubbed: $__alt. What was observed: a cold, non-interactive 'claude -p' run whose environment CARRIED the $CLAUDE_AUTH_TOKEN_KEY persisted in $__file answered (rc 0 AND the sentinel returned) against a FRESH empty config dir"
     else
-      eval "$__od=\"LIMITATION 2 of 5 — no alternate credential (\$CLAUDE_AUTH_ALT_CRED_KEYS) was set here, which is an OBSERVATION about this process and not a proof that the persisted value is what worked. What was observed: a cold, non-interactive 'claude -p' run whose environment CARRIED the \$CLAUDE_AUTH_TOKEN_KEY persisted in \$__file answered (rc 0 AND the sentinel returned) against a FRESH empty config dir\""
+      claude_auth_set_var "$__od" "LIMITATION 2 of 5 — no alternate credential ($CLAUDE_AUTH_ALT_CRED_KEYS) was set here, which is an OBSERVATION about this process and not a proof that the persisted value is what worked. What was observed: a cold, non-interactive 'claude -p' run whose environment CARRIED the $CLAUDE_AUTH_TOKEN_KEY persisted in $__file answered (rc 0 AND the sentinel returned) against a FRESH empty config dir"
     fi
     return 0
   fi
@@ -923,13 +968,13 @@ claude_auth_verdict_into__untraced() {
   # earns FAILED. `__ov` is already UNMEASURED from the top of the function, so every
   # branch below except the rejection one simply names its cause.
   if [ "$__rc" = 124 ] || [ "$__rc" = 137 ]; then
-    eval "$__od=\"the probe exceeded its \${CLAUDE_AUTH_PROBE_BOUND}s bound and was killed — the credential is UNKNOWN, not ok\""
+    claude_auth_set_var "$__od" "the probe exceeded its ${CLAUDE_AUTH_PROBE_BOUND}s bound and was killed — the credential is UNKNOWN, not ok"
     return 0
   fi
   # TRANSPORT FIRST (step 2), so a message naming both a transport failure and a rejection
   # takes the safe answer: an unreachable API says nothing about the credential.
   if claude_auth_matches_ci "$__out" "$CLAUDE_AUTH_NETWORK_RE"; then
-    eval "$__od=\"the probe could not reach the API (\$(claude_auth_redact \"\$__out\")) — the credential is UNKNOWN, not ok\""
+    claude_auth_set_var "$__od" "the probe could not reach the API ($(claude_auth_redact "$__out")) — the credential is UNKNOWN, not ok"
     return 0
   fi
   # SERVICE BEFORE REJECTION, and the order is the safe-tie rule itself (see step 3/4 of
@@ -937,19 +982,19 @@ claude_auth_verdict_into__untraced() {
   # authentication error says nothing certain about the credential, and FAILED's remedy is
   # "replace the VALUE".
   if claude_auth_matches_ci "$__out" "$CLAUDE_AUTH_SERVICE_RE"; then
-    eval "$__od=\"the API refused for a reason that is NOT credential rejection — a rate limit, an outage, an overload or an exhausted quota (rc=\$__rc): \$(claude_auth_redact \"\$__out\") — the credential is UNKNOWN, not rejected; retry rather than replace it\""
+    claude_auth_set_var "$__od" "the API refused for a reason that is NOT credential rejection — a rate limit, an outage, an overload or an exhausted quota (rc=$__rc): $(claude_auth_redact "$__out") — the credential is UNKNOWN, not rejected; retry rather than replace it"
     return 0
   fi
   if claude_auth_matches_ci "$__out" "$CLAUDE_AUTH_REJECT_RE"; then
-    eval "$__ov=FAILED"
-    eval "$__od=\"the \$CLAUDE_AUTH_TOKEN_KEY persisted in \$__file was REJECTED (rc=\$__rc): \$(claude_auth_redact \"\$__out\")\""
+    claude_auth_set_var "$__ov" 'FAILED'
+    claude_auth_set_var "$__od" "the $CLAUDE_AUTH_TOKEN_KEY persisted in $__file was REJECTED (rc=$__rc): $(claude_auth_redact "$__out")"
     return 0
   fi
   if [ "$__rc" -eq 0 ]; then
-    eval "$__od=\"'claude -p' exited 0 but did NOT return the sentinel, so it did not answer — which is not evidence that the credential was rejected: \$(claude_auth_redact \"\$__out\")\""
+    claude_auth_set_var "$__od" "'claude -p' exited 0 but did NOT return the sentinel, so it did not answer — which is not evidence that the credential was rejected: $(claude_auth_redact "$__out")"
     return 0
   fi
-  eval "$__od=\"'claude -p' exited \$__rc and its output identifies NO authentication rejection, so what happened to the credential is UNKNOWN: \$(claude_auth_redact \"\$__out\") — read the output before replacing anything\""
+  claude_auth_set_var "$__od" "'claude -p' exited $__rc and its output identifies NO authentication rejection, so what happened to the credential is UNKNOWN: $(claude_auth_redact "$__out") — read the output before replacing anything"
 }
 
 # ---- (b) claude-tmux-env: does the credential REACH a tmux-spawned pane? -----------
@@ -964,10 +1009,10 @@ claude_tmux_env_verdict_into__untraced() {
   local __ov="$1" __od="$2"
   local __file='' __state='' __tok='' __out='' __err='' __rc=0
   local __stok='' __sstate='' __scfg='' __scfgstate='' __cfg='' __cfgstate=''
-  eval "$__ov=UNMEASURED"; eval "$__od="
+  claude_auth_set_var "$__ov" 'UNMEASURED'; claude_auth_set_var "$__od" ''
 
   if ! claude_auth_env_file_into __file; then
-    eval "$__od='the TEST-ONLY seam CQLITE_CLAUDE_AUTH_ENV_FILE is set without CQLITE_BOOTSTRAP_TEST_MODE=1 — refusing to answer about an env-chosen file (details on stderr)'"
+    claude_auth_set_var "$__od" 'the TEST-ONLY seam CQLITE_CLAUDE_AUTH_ENV_FILE is set without CQLITE_BOOTSTRAP_TEST_MODE=1 — refusing to answer about an env-chosen file (details on stderr)'
     return 0
   fi
   # LINUX-SCOPED, and the reason is the BASELINE, not tmux (tmux runs on macOS fine): this
@@ -979,13 +1024,13 @@ claude_tmux_env_verdict_into__untraced() {
   # Neither line reaches `ok()` since #3733, so the guard now keeps the TEXT honest rather
   # than keeping a false [ok] out of a strict run.
   if ! claude_auth_platform_linux; then
-    eval "$__od=\"/etc/environment + pam_env is a Linux mechanism; on \$(uname -s 2>/dev/null) there is no persisted baseline a tmux server could be compared against, so pane reachability cannot be measured\""
+    claude_auth_set_var "$__od" "/etc/environment + pam_env is a Linux mechanism; on $(uname -s 2>/dev/null) there is no persisted baseline a tmux server could be compared against, so pane reachability cannot be measured"
     return 0
   fi
   if ! command -v tmux >/dev/null 2>&1; then
     # No backticks: see the identical note in claude_auth_verdict_into. This one really did
     # run `tmux` and print "tmux: command not found" on a box with no tmux.
-    eval "$__od='no tmux binary on PATH — there is no server environment to inspect'"
+    claude_auth_set_var "$__od" 'no tmux binary on PATH — there is no server environment to inspect'
     return 0
   fi
   # A LIVE SERVER CAN WEDGE, so the read needs the same HARD bound the network probe needs,
@@ -993,7 +1038,7 @@ claude_tmux_env_verdict_into__untraced() {
   # HERE rather than read from the bounded runner's rc, because the read below runs in a
   # command substitution — a subshell — where any global the runner set is discarded.
   if ! claude_auth_resolve_timeout; then
-    eval "$__od='no timeout/gtimeout on PATH can enforce a HARD bound (neither --kill-after= nor -k is accepted) — refusing to run an UNBOUNDED tmux read, because a server that accepts a connection and never answers would hang this provisioning entry point indefinitely'"
+    claude_auth_set_var "$__od" 'no timeout/gtimeout on PATH can enforce a HARD bound (neither --kill-after= nor -k is accepted) — refusing to run an UNBOUNDED tmux read, because a server that accepts a connection and never answers would hang this provisioning entry point indefinitely'
     return 0
   fi
   # WHOSE SERVER (see the identity block above). Under the documented `sudo` invocation the
@@ -1002,7 +1047,7 @@ claude_tmux_env_verdict_into__untraced() {
   # is how this check certified a box that could not start a lane.
   claude_auth_resolve_tmux_identity
   if [ "$CLAUDE_AUTH_TMUX_IDENTITY" = ambiguous ]; then
-    eval "$__od=\"the tmux server to inspect could not be identified: \$CLAUDE_AUTH_TMUX_IDENTITY_WHY — this runs under sudo, and a pane is spawned by the INVOKING agent's server, so answering about this process's own UID would certify the wrong one\""
+    claude_auth_set_var "$__od" "the tmux server to inspect could not be identified: $CLAUDE_AUTH_TMUX_IDENTITY_WHY — this runs under sudo, and a pane is spawned by the INVOKING agent's server, so answering about this process's own UID would certify the wrong one"
     return 0
   fi
 
@@ -1057,7 +1102,7 @@ claude_tmux_env_verdict_into__untraced() {
   # all, so the wordings below would fall through to "failed for a reason that is not a
   # missing server" and name no cause. What was learned is nothing, and the verdict says so.
   if claude_auth_bound_fired "$__rc"; then
-    eval "$__od=\"the running tmux server did not answer 'show-environment -g' within \${CLAUDE_AUTH_TMUX_OP_BOUND}s and the read was killed (a server that accepts a connection but never responds) — what its panes receive is UNKNOWN\""
+    claude_auth_set_var "$__od" "the running tmux server did not answer 'show-environment -g' within ${CLAUDE_AUTH_TMUX_OP_BOUND}s and the read was killed (a server that accepts a connection but never responds) — what its panes receive is UNKNOWN"
     return 0
   fi
   if [ "$__rc" -ne 0 ]; then
@@ -1077,7 +1122,7 @@ claude_tmux_env_verdict_into__untraced() {
       # created server deliver the credential to a pane", and that is directly measurable.
       claude_tmux_cold_verdict_into "$__ov" "$__od" "$__file"
     else
-      eval "$__od=\"'tmux show-environment -g' failed for a reason that is not a missing server: \$(claude_auth_redact \"\$__err\")\""
+      claude_auth_set_var "$__od" "'tmux show-environment -g' failed for a reason that is not a missing server: $(claude_auth_redact "$__err")"
     fi
     return 0
   fi
@@ -1086,25 +1131,25 @@ claude_tmux_env_verdict_into__untraced() {
   claude_tmux_show_key_into __scfg  __scfgstate "$__out" "$CLAUDE_AUTH_CONFIG_KEY"
 
   if [ "$__sstate" != present ] || [ -z "$__stok" ]; then
-    eval "$__ov=SERVER-MISSING"
-    eval "$__od=\"a tmux server IS running and its global environment carries NO \$CLAUDE_AUTH_TOKEN_KEY (\$__sstate) — every pane it spawns lands on the first-run login chooser, whatever \$__file says\""
+    claude_auth_set_var "$__ov" 'SERVER-MISSING'
+    claude_auth_set_var "$__od" "a tmux server IS running and its global environment carries NO $CLAUDE_AUTH_TOKEN_KEY ($__sstate) — every pane it spawns lands on the first-run login chooser, whatever $__file says"
     return 0
   fi
 
   # `__tok`/`__state` were read at the top of this function (see the note there); re-reading
   # would be a second reading of a file that may have changed underneath us.
   if [ "$__state" != present ] || [ -z "$__tok" ]; then
-    eval "$__od=\"the server carries a \$CLAUDE_AUTH_TOKEN_KEY (SET) but \$__file provides no persisted value to compare it against (\$__state), so whether the server is CURRENT is UNKNOWN\""
+    claude_auth_set_var "$__od" "the server carries a $CLAUDE_AUTH_TOKEN_KEY (SET) but $__file provides no persisted value to compare it against ($__state), so whether the server is CURRENT is UNKNOWN"
     return 0
   fi
   if [ "$__stok" != "$__tok" ]; then
-    eval "$__ov=SERVER-STALE"
-    eval "$__od=\"the running server's \$CLAUDE_AUTH_TOKEN_KEY DIFFERS from the one persisted in \$__file — the server predates provisioning (or was seeded from an older value), so panes get a credential nobody re-checked\""
+    claude_auth_set_var "$__ov" 'SERVER-STALE'
+    claude_auth_set_var "$__od" "the running server's $CLAUDE_AUTH_TOKEN_KEY DIFFERS from the one persisted in $__file — the server predates provisioning (or was seeded from an older value), so panes get a credential nobody re-checked"
     return 0
   fi
   if [ "$__scfgstate" != present ] || [ -z "$__scfg" ]; then
-    eval "$__ov=SERVER-INCOMPLETE"
-    eval "$__od=\"the server's \$CLAUDE_AUTH_TOKEN_KEY MATCHes \$__file but it carries no \$CLAUDE_AUTH_CONFIG_KEY (\$__scfgstate) — 'tmux new-session <command>' runs no login shell, so /etc/profile.d never supplies it either and the pane gets the un-onboarded first-run picker\""
+    claude_auth_set_var "$__ov" 'SERVER-INCOMPLETE'
+    claude_auth_set_var "$__od" "the server's $CLAUDE_AUTH_TOKEN_KEY MATCHes $__file but it carries no $CLAUDE_AUTH_CONFIG_KEY ($__scfgstate) — 'tmux new-session <command>' runs no login shell, so /etc/profile.d never supplies it either and the pane gets the un-onboarded first-run picker"
     return 0
   fi
 
@@ -1117,12 +1162,12 @@ claude_tmux_env_verdict_into__untraced() {
   # requires an AFFIRMATIVE match — equal to the persisted value AND the directory exists.
   claude_auth_read_key_into __cfg __cfgstate "$__file" "$CLAUDE_AUTH_CONFIG_KEY"
   if [ "$__cfgstate" != present ] || [ -z "$__cfg" ]; then
-    eval "$__od=\"the server names a \$CLAUDE_AUTH_CONFIG_KEY but \$__file provides no persisted value to compare it against (\$__cfgstate) — PRESENT is not CORRECT, and a comparison with nothing is not a verdict\""
+    claude_auth_set_var "$__od" "the server names a $CLAUDE_AUTH_CONFIG_KEY but $__file provides no persisted value to compare it against ($__cfgstate) — PRESENT is not CORRECT, and a comparison with nothing is not a verdict"
     return 0
   fi
   if [ "$__scfg" != "$__cfg" ]; then
-    eval "$__ov=SERVER-CONFIG-STALE"
-    eval "$__od=\"the server's \$CLAUDE_AUTH_CONFIG_KEY DIFFERS from the one persisted in \$__file (server: \$__scfg) — panes are pointed at a config directory nobody provisioned, which is the un-onboarded first-run picker even though the token is right\""
+    claude_auth_set_var "$__ov" 'SERVER-CONFIG-STALE'
+    claude_auth_set_var "$__od" "the server's $CLAUDE_AUTH_CONFIG_KEY DIFFERS from the one persisted in $__file (server: $__scfg) — panes are pointed at a config directory nobody provisioned, which is the un-onboarded first-run picker even though the token is right"
     return 0
   fi
   # `[ -d ]` is two-valued, so an UNREADABLE parent collapses onto 'does not exist'. That
@@ -1141,14 +1186,14 @@ claude_tmux_env_verdict_into__untraced() {
   # this reason. (Note the tmux READ is delegated — see the identity block — so this is a
   # gap in one predicate, not in the section's posture.)
   if [ ! -d "$__scfg" ]; then
-    eval "$__ov=SERVER-CONFIG-NODIR"
-    eval "$__od=\"the server's \$CLAUDE_AUTH_CONFIG_KEY MATCHes \$__file but that directory does not exist (or cannot be read as one): \$__scfg — a pane gets a config dir claude will treat as un-onboarded\""
+    claude_auth_set_var "$__ov" 'SERVER-CONFIG-NODIR'
+    claude_auth_set_var "$__od" "the server's $CLAUDE_AUTH_CONFIG_KEY MATCHes $__file but that directory does not exist (or cannot be read as one): $__scfg — a pane gets a config dir claude will treat as un-onboarded"
     return 0
   fi
-  eval "$__ov=SERVER-CARRIES-BOTH"
+  claude_auth_set_var "$__ov" 'SERVER-CARRIES-BOTH'
   # Limitation references FIRST — the detail is truncated at 500 characters (see the note
   # in claude_tmux_cold_verdict_into).
-  eval "$__od=\"LIMITATION 5 of 5 (the server's GLOBAL table only — no pane was spawned) + LIMITATION 3 of 5 (the dir exists TO THIS PROCESS). The running server's global environment carries a \$CLAUDE_AUTH_TOKEN_KEY MATCHing \$__file and a \$CLAUDE_AUTH_CONFIG_KEY MATCHing it whose directory exists\""
+  claude_auth_set_var "$__od" "LIMITATION 5 of 5 (the server's GLOBAL table only — no pane was spawned) + LIMITATION 3 of 5 (the dir exists TO THIS PROCESS). The running server's global environment carries a $CLAUDE_AUTH_TOKEN_KEY MATCHing $__file and a $CLAUDE_AUTH_CONFIG_KEY MATCHing it whose directory exists"
 }
 
 # ---- the COLD-START probe: what would a NEWLY created server deliver? --------------
@@ -1218,6 +1263,16 @@ claude_auth_probe_cleanup() {
 }
 claude_auth_probe_restore_traps() {
   trap - EXIT INT TERM HUP
+  # THE ONE SURVIVING `eval` IN THIS FILE, AND IT IS A DIFFERENT CONSTRUCT — kept
+  # deliberately, named here so nobody has to wonder whether it was missed by the sweep.
+  # It is NOT an output-variable assignment: `trap -p` emits ready-to-re-execute `trap`
+  # COMMANDS, already quoted by bash for exactly this purpose, and re-executing them is the
+  # documented way to restore a caller's handlers. There is no `printf -v` equivalent
+  # because the thing being restored is a command, not a value.
+  # ITS INPUT IS NOT ATTACKER-INFLUENCED, which is what separates it from the 118 sites the
+  # sweep removed: the string comes from bash's own `trap -p` in this same process, and its
+  # content is whatever the CALLER (bootstrap, or this CLI) set — invoker-class, not a peer
+  # lane, `claude`, or tmux. Probe output and tmux stderr cannot reach it.
   if [ -n "$CLAUDE_AUTH_PROBE_PREV_TRAPS" ]; then eval "$CLAUDE_AUTH_PROBE_PREV_TRAPS"; fi
   CLAUDE_AUTH_PROBE_PREV_TRAPS=''
 }
@@ -1249,23 +1304,23 @@ claude_tmux_cold_probe_into() {
   local __ok="$1" __otok="$2" __olen="$3" __omatch="$4" __ocfg="$5" __owhy="$6"
   local __ptok="$7" __pcfg="$8"
   local __dir='' __res='' __sock='' __rc=0 __salt='' __expdig=''
-  eval "$__ok=0"; eval "$__otok=unset"; eval "$__olen=0"; eval "$__omatch=unmeasured"
-  eval "$__ocfg="; eval "$__owhy="
+  claude_auth_set_var "$__ok" '0'; claude_auth_set_var "$__otok" 'unset'; claude_auth_set_var "$__olen" '0'; claude_auth_set_var "$__omatch" 'unmeasured'
+  claude_auth_set_var "$__ocfg" ''; claude_auth_set_var "$__owhy" ''
 
   if ! claude_auth_resolve_timeout; then
-    eval "$__owhy='no timeout/gtimeout on PATH can enforce a HARD bound (neither --kill-after= nor -k is accepted) — refusing to start a tmux probe whose bound could not kill a wedged child'"
+    claude_auth_set_var "$__owhy" 'no timeout/gtimeout on PATH can enforce a HARD bound (neither --kill-after= nor -k is accepted) — refusing to start a tmux probe whose bound could not kill a wedged child'
     return 0
   fi
   # THE IDENTITY COMPARISON IS A PRECONDITION OF THE PROBE, not a step inside it: without a
   # digest tool the only available comparison is by LENGTH, which a same-length
   # substitution satisfies. Refusing is the non-permissive answer and the cause is named.
   if ! claude_auth_resolve_digest; then
-    eval "$__owhy='no sha256 digest tool (sha256sum / shasum -a 256) on PATH, so what a pane RECEIVES could not be compared to the persisted value by VALUE — refusing rather than falling back to a LENGTH comparison, which a same-length substitution satisfies'"
+    claude_auth_set_var "$__owhy" 'no sha256 digest tool (sha256sum / shasum -a 256) on PATH, so what a pane RECEIVES could not be compared to the persisted value by VALUE — refusing rather than falling back to a LENGTH comparison, which a same-length substitution satisfies'
     return 0
   fi
   claude_auth_probe_salt_into __salt
   if ! __dir=$(mktemp -d "${TMPDIR:-/tmp}/cqlite-tmux-probe.XXXXXX") || [ ! -d "$__dir" ]; then
-    eval "$__owhy='could not create a private working directory for the isolated probe'"
+    claude_auth_set_var "$__owhy" 'could not create a private working directory for the isolated probe'
     return 0
   fi
   __res="$__dir/result"; : >"$__res"
@@ -1286,7 +1341,7 @@ claude_tmux_cold_probe_into() {
   # needed here either.
   if ! mkdir "$__dir/sock" 2>/dev/null || [ ! -d "$__dir/sock" ]; then
     rm -rf "$__dir"
-    eval "$__owhy='could not create the private socket subdirectory for the isolated probe'"
+    claude_auth_set_var "$__owhy" 'could not create the private socket subdirectory for the isolated probe'
     return 0
   fi
   # `-S <path>` INSIDE the private working directory, not `-L <name>`: a `-L` socket lives
@@ -1297,7 +1352,7 @@ claude_tmux_cold_probe_into() {
   __sock="$__dir/sock/cqlite-authprobe.sock"
   if [ "${#__sock}" -gt 100 ]; then
     rm -rf "$__dir"
-    eval "$__owhy='the private probe socket path would exceed the unix-socket length limit (TMPDIR is too long) — refusing rather than guessing'"
+    claude_auth_set_var "$__owhy" 'the private probe socket path would exceed the unix-socket length limit (TMPDIR is too long) — refusing rather than guessing'
     return 0
   fi
   # The pane command is ONE tmux argument and the paths are interpolated into it, so a
@@ -1306,7 +1361,7 @@ claude_tmux_cold_probe_into() {
   case "$__dir" in
     *[\'\"\ ]*|*'	'*)
       rm -rf "$__dir"
-      eval "$__owhy='the private working directory path contains a quote or whitespace, which cannot be passed safely as a tmux pane command — refusing'"
+      claude_auth_set_var "$__owhy" 'the private working directory path contains a quote or whitespace, which cannot be passed safely as a tmux pane command — refusing'
       return 0 ;;
   esac
   # ---- ROOT CREATES EVERYTHING IT OWNS **BEFORE** THE HANDOVER BELOW ----------------
@@ -1357,7 +1412,7 @@ CLAUDE_AUTH_PROBE
   # looking at tmux.
   if [ ! -s "$__dir/probe.sh" ]; then
     rm -rf "$__dir"
-    eval "$__owhy='the isolated probe pane script could not be written into the private working directory (no space, or the write failed) — refusing rather than starting a probe whose pane has nothing to run'"
+    claude_auth_set_var "$__owhy" 'the isolated probe pane script could not be written into the private working directory (no space, or the write failed) — refusing rather than starting a probe whose pane has nothing to run'
     return 0
   fi
 
@@ -1408,7 +1463,7 @@ CLAUDE_AUTH_PROBE
        || ! chmod 0700 "$__dir/sock" 2>/dev/null \
        || ! chmod 0711 "$__dir" 2>/dev/null; then
       rm -rf "$__dir"
-      eval "$__owhy=\"the probe's private working directory could not be handed to the invoking agent (\$CLAUDE_AUTH_TMUX_IDENTITY_USER) — the report file, the socket subdirectory and the traverse-only mode on the directory itself are all required, so a tmux started as that login could not run; refusing rather than measuring the wrong user's cold start\""
+      claude_auth_set_var "$__owhy" "the probe's private working directory could not be handed to the invoking agent ($CLAUDE_AUTH_TMUX_IDENTITY_USER) — the report file, the socket subdirectory and the traverse-only mode on the directory itself are all required, so a tmux started as that login could not run; refusing rather than measuring the wrong user's cold start"
       return 0
     fi
   fi
@@ -1441,7 +1496,7 @@ CLAUDE_AUTH_PROBE
   __rc=$?
   if [ "$__rc" -ne 0 ]; then
     claude_auth_probe_cleanup; claude_auth_probe_restore_traps
-    eval "$__owhy=\"an isolated throwaway tmux server could not be started on a private socket (rc=\$__rc)\""
+    claude_auth_set_var "$__owhy" "an isolated throwaway tmux server could not be started on a private socket (rc=$__rc)"
     return 0
   fi
 
@@ -1453,7 +1508,7 @@ CLAUDE_AUTH_PROBE
   __rc=$?
   if [ "$__rc" -ne 0 ]; then
     claude_auth_probe_cleanup; claude_auth_probe_restore_traps
-    eval "$__owhy=\"the isolated pane did not report within \${CLAUDE_AUTH_TMUX_PROBE_BOUND}s, so what a new server would deliver is UNKNOWN\""
+    claude_auth_set_var "$__owhy" "the isolated pane did not report within ${CLAUDE_AUTH_TMUX_PROBE_BOUND}s, so what a new server would deliver is UNKNOWN"
     return 0
   fi
 
@@ -1494,9 +1549,9 @@ CLAUDE_AUTH_PROBE
   if [ "$__rrc" -ne 0 ]; then
     claude_auth_probe_cleanup; claude_auth_probe_restore_traps
     if claude_auth_bound_fired "$__rrc"; then
-      eval "$__owhy=\"the isolated pane's report could not be read within \${CLAUDE_AUTH_TMUX_PROBE_BOUND}s and the read was KILLED — that path no longer resolves to the regular file the pane wrote (a fifo or a device blocks forever on open), and it sits in a directory already handed to the invoking agent, so nothing could be measured\""
+      claude_auth_set_var "$__owhy" "the isolated pane's report could not be read within ${CLAUDE_AUTH_TMUX_PROBE_BOUND}s and the read was KILLED — that path no longer resolves to the regular file the pane wrote (a fifo or a device blocks forever on open), and it sits in a directory already handed to the invoking agent, so nothing could be measured"
     else
-      eval "$__owhy=\"the isolated pane's report could not be read back (rc=\$__rrc), so what a new server would deliver is UNKNOWN\""
+      claude_auth_set_var "$__owhy" "the isolated pane's report could not be read back (rc=$__rrc), so what a new server would deliver is UNKNOWN"
     fi
     return 0
   fi
@@ -1518,11 +1573,11 @@ CLAUDE_AUTH_PROBE
   # `end` — the cap would have cut the marker off and the diagnosis would name the wrong
   # thing.
   if [ "${#__report}" -gt "$CLAUDE_AUTH_REPORT_MAX" ]; then
-    eval "$__owhy=\"the isolated pane's report exceeded its \${CLAUDE_AUTH_REPORT_MAX}-byte cap and the read was stopped — this probe writes a handful of short lines, so that path is not holding what a pane wrote; nothing could be measured\""
+    claude_auth_set_var "$__owhy" "the isolated pane's report exceeded its ${CLAUDE_AUTH_REPORT_MAX}-byte cap and the read was stopped — this probe writes a handful of short lines, so that path is not holding what a pane wrote; nothing could be measured"
     return 0
   fi
   if [ "$__sawend" != 1 ]; then
-    eval "$__owhy=\"the isolated pane's report could not be read as a complete record: the bytes read back carry no terminating 'end' line although the wait loop observed one, so the report was truncated or is not the record the pane wrote\""
+    claude_auth_set_var "$__owhy" "the isolated pane's report could not be read as a complete record: the bytes read back carry no terminating 'end' line although the wait loop observed one, so the report was truncated or is not the record the pane wrote"
     return 0
   fi
   case "$__rlen" in ''|*[!0-9]*) __rlen=0 ;; esac
@@ -1532,9 +1587,9 @@ CLAUDE_AUTH_PROBE
   if [ -n "$__ptok" ] && [ -n "$__rdig" ] && claude_auth_digest_into __expdig "$__salt" "$__ptok"; then
     if [ "$__rdig" = "$__expdig" ]; then __match=match; else __match=differs; fi
   fi
-  eval "$__omatch=\$__match"
-  eval "$__otok=\${__rtok:-unset}"; eval "$__olen=\$__rlen"; eval "$__ocfg=\$__rcfg"
-  eval "$__ok=1"
+  claude_auth_set_var "$__omatch" "$__match"
+  claude_auth_set_var "$__otok" "${__rtok:-unset}"; claude_auth_set_var "$__olen" "$__rlen"; claude_auth_set_var "$__ocfg" "$__rcfg"
+  claude_auth_set_var "$__ok" '1'
 }
 
 # claude_tmux_cold_verdict_into <outvar_verdict> <outvar_detail> <env-file>
@@ -1551,34 +1606,34 @@ claude_tmux_cold_verdict_into() {
   # The out-var names here must NOT collide with the callee's own local parameter names:
   # `eval "$__ok=1"` on a shadowed `__ok` evaluates `0=1`. Hence the `__pr*` prefix.
   local __prok=0 __prtok='' __prlen=0 __prmatch='' __prcfg='' __prwhy=''
-  eval "$__ov=UNMEASURED"; eval "$__od="
+  claude_auth_set_var "$__ov" 'UNMEASURED'; claude_auth_set_var "$__od" ''
 
   claude_auth_read_key_into __tok __state "$__file" "$CLAUDE_AUTH_TOKEN_KEY"
   CLAUDE_AUTH_SECRET="$__tok"
   case "$__state" in
     unreadable|unparseable)
-      eval "$__ov=NO-SERVER"
-      eval "$__od=\"no tmux server is running, and the cold-start probe cannot be constructed either: \$__file could not be read as a source (\$__state) — UNMEASURED-class, never an ok\""
+      claude_auth_set_var "$__ov" 'NO-SERVER'
+      claude_auth_set_var "$__od" "no tmux server is running, and the cold-start probe cannot be constructed either: $__file could not be read as a source ($__state) — UNMEASURED-class, never an ok"
       return 0 ;;
   esac
   claude_auth_read_key_into __cfg __cfgstate "$__file" "$CLAUDE_AUTH_CONFIG_KEY"
   case "$__cfgstate" in
     unreadable|unparseable)
-      eval "$__ov=NO-SERVER"
-      eval "$__od=\"no tmux server is running, and \$__file could not be read for \$CLAUDE_AUTH_CONFIG_KEY (\$__cfgstate), so the cold-start probe cannot be constructed — UNMEASURED-class\""
+      claude_auth_set_var "$__ov" 'NO-SERVER'
+      claude_auth_set_var "$__od" "no tmux server is running, and $__file could not be read for $CLAUDE_AUTH_CONFIG_KEY ($__cfgstate), so the cold-start probe cannot be constructed — UNMEASURED-class"
       return 0 ;;
   esac
 
   claude_tmux_cold_probe_into __prok __prtok __prlen __prmatch __prcfg __prwhy "$__tok" "$__cfg"
   if [ "$__prok" != 1 ]; then
-    eval "$__ov=NO-SERVER"
-    eval "$__od=\"no tmux server is running, and the isolated cold-start probe could not run: \$(claude_auth_redact \"\$__prwhy\") — UNMEASURED-class, never an ok\""
+    claude_auth_set_var "$__ov" 'NO-SERVER'
+    claude_auth_set_var "$__od" "no tmux server is running, and the isolated cold-start probe could not run: $(claude_auth_redact "$__prwhy") — UNMEASURED-class, never an ok"
     return 0
   fi
 
   if [ "$__prtok" != set ] || [ "$__prlen" -eq 0 ]; then
-    eval "$__ov=COLD-START-MISSING"
-    eval "$__od=\"no tmux server is running, and a throwaway one started from \$__file handed its pane NO \$CLAUDE_AUTH_TOKEN_KEY — so the NEXT real server will not either, and every lane it spawns lands on the first-run login chooser\""
+    claude_auth_set_var "$__ov" 'COLD-START-MISSING'
+    claude_auth_set_var "$__od" "no tmux server is running, and a throwaway one started from $__file handed its pane NO $CLAUDE_AUTH_TOKEN_KEY — so the NEXT real server will not either, and every lane it spawns lands on the first-run login chooser"
     return 0
   fi
   # THE DELIVERED VALUE MUST BE THE PERSISTED VALUE, COMPARED AS A VALUE. This was a LENGTH
@@ -1591,22 +1646,22 @@ claude_tmux_cold_verdict_into() {
   # branch says which of the two it was.
   if [ "$__prmatch" != match ]; then
     if [ "$__prmatch" = differs ]; then
-      eval "$__ov=NO-SERVER"
-      eval "$__od=\"the isolated pane received a \$CLAUDE_AUTH_TOKEN_KEY that does not match the persisted value (compared by salted digest; neither value printed) — something between \$__file and the pane SUBSTITUTES the credential, so this measured something other than the persisted source — UNMEASURED-class\""
+      claude_auth_set_var "$__ov" 'NO-SERVER'
+      claude_auth_set_var "$__od" "the isolated pane received a $CLAUDE_AUTH_TOKEN_KEY that does not match the persisted value (compared by salted digest; neither value printed) — something between $__file and the pane SUBSTITUTES the credential, so this measured something other than the persisted source — UNMEASURED-class"
     else
-      eval "$__ov=NO-SERVER"
-      eval "$__od=\"the isolated pane's \$CLAUDE_AUTH_TOKEN_KEY could not be compared to the persisted value at all (no digest was computable on one side), so whether a new server would deliver the RIGHT credential is UNKNOWN — UNMEASURED-class\""
+      claude_auth_set_var "$__ov" 'NO-SERVER'
+      claude_auth_set_var "$__od" "the isolated pane's $CLAUDE_AUTH_TOKEN_KEY could not be compared to the persisted value at all (no digest was computable on one side), so whether a new server would deliver the RIGHT credential is UNKNOWN — UNMEASURED-class"
     fi
     return 0
   fi
   if [ -z "$__prcfg" ]; then
-    eval "$__ov=COLD-START-INCOMPLETE"
-    eval "$__od=\"a throwaway server started from \$__file delivers the \$CLAUDE_AUTH_TOKEN_KEY but NO \$CLAUDE_AUTH_CONFIG_KEY — 'tmux new-session <command>' runs no login shell, so /etc/profile.d never supplies it and the pane gets the un-onboarded first-run picker\""
+    claude_auth_set_var "$__ov" 'COLD-START-INCOMPLETE'
+    claude_auth_set_var "$__od" "a throwaway server started from $__file delivers the $CLAUDE_AUTH_TOKEN_KEY but NO $CLAUDE_AUTH_CONFIG_KEY — 'tmux new-session <command>' runs no login shell, so /etc/profile.d never supplies it and the pane gets the un-onboarded first-run picker"
     return 0
   fi
   if [ "$__prcfg" != "$__cfg" ]; then
-    eval "$__ov=NO-SERVER"
-    eval "$__od=\"the isolated pane received a \$CLAUDE_AUTH_CONFIG_KEY the probe did not set (\$__prcfg), so the measurement is not about the persisted source — UNMEASURED-class\""
+    claude_auth_set_var "$__ov" 'NO-SERVER'
+    claude_auth_set_var "$__od" "the isolated pane received a $CLAUDE_AUTH_CONFIG_KEY the probe did not set ($__prcfg), so the measurement is not about the persisted source — UNMEASURED-class"
     return 0
   fi
   # Same two-valued caveat as the live path: an unreadable parent collapses onto "does not
@@ -1616,15 +1671,15 @@ claude_tmux_cold_verdict_into() {
   # not that the agent that will spawn the lane can use it. Two sites, one limitation,
   # marked at both: a reader lands on whichever one they are reading.
   if [ ! -d "$__prcfg" ]; then
-    eval "$__ov=COLD-START-NODIR"
-    eval "$__od=\"a throwaway server started from \$__file delivers both variables, but the \$CLAUDE_AUTH_CONFIG_KEY it delivers does not exist as a directory: \$__prcfg — claude will treat it as un-onboarded\""
+    claude_auth_set_var "$__ov" 'COLD-START-NODIR'
+    claude_auth_set_var "$__od" "a throwaway server started from $__file delivers both variables, but the $CLAUDE_AUTH_CONFIG_KEY it delivers does not exist as a directory: $__prcfg — claude will treat it as un-onboarded"
     return 0
   fi
-  eval "$__ov=COLD-START-DELIVERS-BOTH"
+  claude_auth_set_var "$__ov" 'COLD-START-DELIVERS-BOTH'
   # THE DETAIL IS BUDGETED, not merely written: `claude_auth_redact` truncates at 500
   # characters, so a limitation reference buried in a long sentence is silently cut — which
   # is a documented limitation that a reader cannot find. The references come FIRST.
-  eval "$__od=\"LIMITATION 1 of 5 (tmux propagation, NOT pam_env delivery: the probe supplies the values itself) + LIMITATION 3 of 5 (the dir exists TO THIS PROCESS). No live server, so measured COLD: an isolated throwaway server on a private socket, handed what \$__file holds with the inherited credential scrubbed, delivered BOTH \$CLAUDE_AUTH_TOKEN_KEY and an existing \$CLAUDE_AUTH_CONFIG_KEY to a pane\""
+  claude_auth_set_var "$__od" "LIMITATION 1 of 5 (tmux propagation, NOT pam_env delivery: the probe supplies the values itself) + LIMITATION 3 of 5 (the dir exists TO THIS PROCESS). No live server, so measured COLD: an isolated throwaway server on a private socket, handed what $__file holds with the inherited credential scrubbed, delivered BOTH $CLAUDE_AUTH_TOKEN_KEY and an existing $CLAUDE_AUTH_CONFIG_KEY to a pane"
 }
 
 # claude_tmux_show_key_into <outvar_value> <outvar_state> <show-environment-output> <key>:
@@ -1634,7 +1689,7 @@ claude_tmux_cold_verdict_into() {
 claude_tmux_show_key_into() {
   local __ov="$1" __os="$2" __text="$3" __k="$4"
   local __line='' __hit='' __found=0 __removed=0
-  eval "$__ov="; eval "$__os=absent"
+  claude_auth_set_var "$__ov" ''; claude_auth_set_var "$__os" 'absent'
   # A LINE WALK, not `printf | grep`: `grep -x`/`grep -m1` EXIT ON THE FIRST MATCH and the
   # producer then takes SIGPIPE, so under `pipefail` a PRESENT key read as ABSENT once the
   # server environment passed one pipe buffer (see the matcher block above).
@@ -1659,7 +1714,7 @@ claude_tmux_show_key_into() {
   # The whole text is scanned either way, so an explicit removal wins wherever it appears —
   # exactly as the `grep -qx` precedence did.
   if [ "$__removed" = 1 ]; then return 0; fi
-  if [ "$__found" = 1 ]; then eval "$__ov=\$__hit"; eval "$__os=present"; fi
+  if [ "$__found" = 1 ]; then claude_auth_set_var "$__ov" "$__hit"; claude_auth_set_var "$__os" 'present'; fi
   return 0
 }
 

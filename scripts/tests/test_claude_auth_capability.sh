@@ -2862,6 +2862,90 @@ else
 fi
 
 # =====================================================================================
+# 45. OUTPUT-VARIABLE ASSIGNMENT NEVER GOES THROUGH `eval` (#3733).
+#     WHAT WAS ACTUALLY WRONG, stated precisely because the review's description and the
+#     measurement disagree and the measurement wins. The finding said probe output and tmux
+#     STDERR were "interpolated into strings that eval then reparses", so crafted text would
+#     execute. MEASURED ON THE EXACT SHIPPED CONSTRUCT, that is NOT reproducible: every one
+#     of the 118 sites used the DEFERRED form (`\$var` / `\$(cmd)` inside the eval string),
+#     and bash does NOT re-parse an expansion's RESULT — the payload is stored LITERALLY.
+#     A scan of the pre-fix file found ZERO sites with an unescaped expansion in the RHS,
+#     which is the form that would execute. So the VALUE side was not a live vector.
+#     WHAT *IS* REAL, AND IS WHAT THIS CASE PINS: the NAME side. `eval "$__ov=…"` expands
+#     `$__ov` BEFORE eval parses, at all 118 sites, so a crafted out-var NAME executes.
+#     Proven through the real public function against both versions: the old code RAN the
+#     payload, the new code refuses it. Today every caller passes a literal name, so it was
+#     LATENT rather than live — one refactor away, and worth removing rather than trusting.
+#     WHY THE SWEEP IS STILL THE RIGHT FIX rather than patching the name side: it removes the
+#     CONSTRUCT, so the value-side form that WOULD execute (an unescaped interpolation, which
+#     nothing in this file prevented and which the older backtick/`$(` guard does not catch)
+#     cannot be written into a new site at all.
+# =====================================================================================
+# (a) BEHAVIOURAL, WITH A REAL SIDE EFFECT — not a string comparison. The payload would
+#     `touch` a canary; the assertion is that the canary does not exist AND the call refused.
+inj_canary="$tmp/injection-canary"
+rm -f "$inj_canary"
+inj_err=$( . "$CAPLIB"; claude_auth_read_key_into "z=1; touch '$inj_canary'; e" inj_st "$ef2" CLAUDE_CODE_OAUTH_TOKEN 2>&1 >/dev/null )
+if [ ! -e "$inj_canary" ]; then
+  ok "no eval assignment: a crafted out-var NAME does not execute (no canary was created)"
+else
+  bad "no eval assignment: a crafted out-var NAME EXECUTED its payload — the canary exists"
+  rm -f "$inj_canary"
+fi
+# THE REFUSAL IS ANNOUNCED, and stderr is what is asserted rather than an exit status.
+# DECLARED RESIDUAL, measured while writing this case: the refusal's rc 2 does NOT propagate
+# out of the public wrapper — the helper is called as the last statement of a branch that
+# then `return`s its own status, at 118 sites. It is left that way deliberately: a
+# non-identifier out-var name is a PROGRAMMING error (every caller in the file passes a
+# literal name or a positional holding one), not a runtime condition, so threading a status
+# through 118 call sites would carry real regression risk for a path no caller can reach.
+# What must not happen is that it is SILENT, so the loud stderr line is the assertion.
+if printf '%s' "$inj_err" | grep -q 'REFUSING: assignment target is not a plain variable name'; then
+  ok "no eval assignment: ...and the refusal is ANNOUNCED on stderr rather than landing somewhere unintended"
+else
+  bad "no eval assignment: a non-identifier assignment target was accepted silently — stderr was [$inj_err]"
+fi
+# ...and the ordinary path still assigns, or the refusal would be a guard that reds on
+# correct input. Asserted through the same public function on a real name.
+inj_ok=$( . "$CAPLIB"; claude_auth_read_key_into inj_v inj_s "$ef2" CLAUDE_CODE_OAUTH_TOKEN; printf '%s' "$inj_s" )
+if [ "$inj_ok" = present ]; then
+  ok "no eval assignment: a legitimate out-var name still receives its value"
+else
+  bad "no eval assignment: the ordinary assignment path regressed (state=[$inj_ok])"
+fi
+
+# (b) STRUCTURAL, AS A CLOSED SET. Not "no eval assignments" but "there is EXACTLY ONE eval
+#     and it is the trap restore" — a closed set makes a NEW eval of any shape require a
+#     deliberate update here, where "no assignments" would silently admit other constructs.
+#     The trap restore is exempt for a stated reason: `trap -p` emits ready-to-re-execute
+#     COMMANDS that bash itself quoted, there is no `printf -v` equivalent for a command, and
+#     its input is the CALLER's own traps — invoker-class, unreachable by a peer lane,
+#     `claude` or tmux.
+inj_evals=$(grep -n 'eval ' "$CAPLIB" | grep -vE ':[[:space:]]*#' || true)
+inj_n=$(printf '%s\n' "$inj_evals" | grep -c . || true)
+inj_assign=$(printf '%s\n' "$inj_evals" | grep -E 'eval "\$([A-Za-z_][A-Za-z0-9_]*|[0-9]+)=' || true)
+if [ -n "$inj_assign" ]; then
+  bad "no eval assignment: an eval-based assignment to a caller-named variable is back: $inj_assign"
+elif [ "$inj_n" != 1 ]; then
+  bad "no eval assignment: expected EXACTLY ONE eval (the trap restore), found $inj_n — a new eval needs a stated justification here: $inj_evals"
+elif printf '%s\n' "$inj_evals" | grep -q 'CLAUDE_AUTH_PROBE_PREV_TRAPS'; then
+  ok "no eval assignment: the file holds exactly one eval and it is the justified trap restore"
+else
+  bad "no eval assignment: the single remaining eval is not the trap restore: $inj_evals"
+fi
+# THE POSITIVE CONTROL. Every assertion above is negative, so a scanner that matched nothing
+# would green them all. Plant an eval assignment in a COPY and require the scan to find it.
+inj_copy="$tmp/caplib-eval-planted.sh"
+{ printf 'eval "$out=\\"planted\\""\n'; cat "$CAPLIB"; } >"$inj_copy"
+if grep -n 'eval ' "$inj_copy" | grep -vE ':[[:space:]]*#' \
+     | grep -qE 'eval "\$([A-Za-z_][A-Za-z0-9_]*|[0-9]+)=' \
+   && ! printf '%s\n' "$inj_evals" | grep -qE 'eval "\$([A-Za-z_][A-Za-z0-9_]*|[0-9]+)='; then
+  ok "no eval assignment: the scan FINDS a planted eval assignment (so the clean verdict is not vacuous)"
+else
+  bad "no eval assignment: the scan cannot see a planted eval assignment — it proves nothing about the real file"
+fi
+
+# =====================================================================================
 # 37. ROOT MUST CREATE EVERYTHING IT OWNS **BEFORE** IT TRANSFERS THE DIRECTORY (#3733,
 #     was LIMITATION 4 of 5, now FIXED).
 #     WHY THIS ONE IS NOT COVERED BY THE "IT IS ONLY A REPORT" RULING. The other four
@@ -3163,10 +3247,10 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # a host without `uname` is a named refusal at startup, because that host would take the
 # non-Linux branch in every case. Raised 91 -> 122 by round 4 (the digest identity of a
 # delivered credential, the sudo-posture cases, and the bounding class), 122 -> 124 by
-# round 5's two probe-working-directory interrupt cases, and 124 -> 174 by #3733's
+# round 5's two probe-working-directory interrupt cases, and 124 -> 179 by #3733's
 # DEMOTION, the handover fix, the three repair-status fixes, the bounded report read, the
-# argument validation, the opt-out-override report and the removal of the substitution
-# capability.
+# argument validation, the opt-out-override report, the removal of the substitution
+# capability and the removal of eval-based output assignment.
 # Sections 34-36 (the
 # no-certification invariant, the alternate-credential observation, the
 # limitation-findability guard and the live/FIXED split), section 37 (the handover ordering,
@@ -3179,7 +3263,9 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # refused with status 2 and never reach the billed probe), section 42 (a requested repair
 # that could not be ATTEMPTED is an action failure) and section 43 (opt-out plus
 # --fix-claude-auth is already decided both ways, and says which intent lost) and section 44
-# (the substitution capability is REMOVED, not detected). 178 cases run, and there are now
+# (the substitution capability is REMOVED, not detected) and section 45 (output-variable
+# assignment never goes through `eval`, with the surviving eval a closed set of one).
+# 183 cases run, and there are
 # TWO legitimately skippable cases, not one: the real-tmux isolation case (3 assertions) and
 # section 44's OS-mechanism case, which cannot measure "a non-owner is refused" when the
 # suite itself runs as root. The floor therefore excludes both — it is the count that runs on
@@ -3187,9 +3273,9 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # reds on correct input.
 # THE FIGURE IS MEASURED, NOT COUNTED BY EYE, AND IT IS RE-MEASURED WHENEVER IT MOVES:
 # forcing the tmux block's `command -v tmux` test to `true` in a throwaway `git worktree`
-# reports 174/0/2 with BOTH skippable branches forced. The value in this file is the authority — a figure quoted in a commit
+# reports 179/0/2 with BOTH skippable branches forced. The value in this file is the authority — a figure quoted in a commit
 # message is a snapshot of the run that produced it and does not follow later edits.
-CASE_FLOOR=174
+CASE_FLOOR=179
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1
