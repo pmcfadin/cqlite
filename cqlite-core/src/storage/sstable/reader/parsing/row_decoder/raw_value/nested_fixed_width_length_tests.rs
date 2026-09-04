@@ -572,6 +572,11 @@ fn admissible_widths_match_the_pinned_serializers() {
 #[test]
 fn inet_is_width_unconstrained_here_but_not_in_cassandra_declared_divergence() {
     let p = parser();
+    // Zero is the EMPTY disposition, not part of the divergence: Cassandra reads an
+    // empty `inet` as null rather than throwing, so its acceptance here is not a
+    // widening. Asserted separately so the width claims below stay about widths.
+    p.parse_value_from_raw_bytes(&[], "inet", "col", 0)
+        .unwrap_or_else(|e| panic!("inet: an EMPTY value must decode, got {e:?}"));
     // Cassandra-admissible widths must decode — the anti-vacuity half.
     for len in [4usize, 16] {
         p.parse_value_from_raw_bytes(&vec![0x31u8; len], "inet", "col", 0)
