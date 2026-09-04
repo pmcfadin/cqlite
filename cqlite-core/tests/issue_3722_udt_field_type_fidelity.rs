@@ -257,33 +257,42 @@ fn any_column<'a>(
         .unwrap_or_else(|| panic!("{ctx}: column {name} is absent or NULL in every row"))
 }
 
+/// Every UDT reachable in ONE value: the UDT itself, a map's KEYS, or a set's /
+/// list's ELEMENTS — in the order the decoder produced them.
+///
+/// Extracted from `udts_in_column` so a SINGLE ROW's container can be examined
+/// (`row3_multi_element_containers_decode_both_distinct_udts` needs exactly
+/// that). One implementation, so the whole-column and single-row views cannot
+/// disagree about what "the UDTs in this value" means.
+fn udts_in_value<'a>(v: &'a Value, out: &mut Vec<&'a UdtValue>) {
+    match peel(v) {
+        Value::Udt(u) => out.push(u.as_ref()),
+        Value::Map(pairs) => {
+            for (k, _) in pairs {
+                if let Value::Udt(u) = peel(k) {
+                    out.push(u.as_ref());
+                }
+            }
+        }
+        Value::Set(items) | Value::List(items) => {
+            for e in items {
+                if let Value::Udt(u) = peel(e) {
+                    out.push(u.as_ref());
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn udts_in_column<'a>(
     rows: &'a [cqlite_core::query::result::QueryRow],
     name: &str,
 ) -> Vec<&'a UdtValue> {
     let mut out: Vec<&UdtValue> = Vec::new();
-    let push = |v: &'a Value, out: &mut Vec<&'a UdtValue>| {
-        if let Value::Udt(u) = peel(v) {
-            out.push(u.as_ref());
-        }
-    };
     for r in rows {
-        let Some(v) = r.values.get(name) else {
-            continue;
-        };
-        match peel(v) {
-            Value::Udt(u) => out.push(u.as_ref()),
-            Value::Map(pairs) => {
-                for (k, _) in pairs {
-                    push(k, &mut out);
-                }
-            }
-            Value::Set(items) | Value::List(items) => {
-                for e in items {
-                    push(e, &mut out);
-                }
-            }
-            _ => {}
+        if let Some(v) = r.values.get(name) {
+            udts_in_value(v, &mut out);
         }
     }
     out
@@ -518,6 +527,214 @@ fn assert_wide_fully_decoded(udt: &UdtValue, ctx: &str) {
     }
 }
 
+/// Assert the SECOND, distinct `wide` value (`WIDE_B` in the generator) decoded
+/// every field.
+///
+/// # Why a second full assertion exists at all
+///
+/// `full_udt` returns the FIRST fully-populated UDT across every row, and row 1's
+/// `WIDE_A` satisfies that for every container column — so each route's assertion
+/// passed on row 1 alone and row 3, which is the row carrying TWO elements per
+/// container, was never validated. A dropped, duplicated or mis-decoded second
+/// element was therefore invisible, while the generator's header claimed
+/// "multi-element ordering and uniqueness are exercised by Cassandra's OWN
+/// writer". Coverage the fixture pays for and the assertions do not collect is
+/// the blind spot this repo keeps rediscovering, so it is collected here.
+///
+/// # Every value is the sstabledump golden's, not CQLite's output
+///
+/// Taken from `nb-1-big-Data.db.jsonl`, partition key `3`. Two of them are the
+/// reason this is derived from the golden rather than from the CQL literal:
+/// `ip` is written `2001:db8::dead:beef` and the golden reads
+/// `2001:db8:0:0:0:0:dead:beef`, and `du`'s three components are all NEGATIVE
+/// (Cassandra's `Duration` carries one sign across months/days/nanos), which a
+/// per-component reading of `-1y2mo3d4h5m6s7ms8us9ns` gets wrong.
+fn assert_wide_b_fully_decoded(udt: &UdtValue, ctx: &str) {
+    assert_eq!(udt.type_name, "wide", "{ctx}: wrong UDT type name");
+
+    // ── scalars, all at the OPPOSITE end of their range from WIDE_A ─────────
+    assert_eq!(
+        field(udt, "s"),
+        &Value::SmallInt(32767),
+        "{ctx}: smallint i16::MAX"
+    );
+    assert_eq!(
+        field(udt, "t"),
+        &Value::TinyInt(127),
+        "{ctx}: tinyint i8::MAX"
+    );
+    assert_eq!(
+        field(udt, "d"),
+        &Value::Decimal {
+            scale: 3,
+            unscaled: vec![0xFF]
+        },
+        "{ctx}: decimal -0.001 = scale 3 / unscaled -1 (0xff, minimal two's complement)"
+    );
+    // -(2^127): the NEGATIVE extreme, and 16 bytes wide, so a sign-extension or
+    // width bug that survives WIDE_A's positive 9-byte varint shows up here.
+    assert_eq!(
+        raw_bytes(field(udt, "vi")),
+        Some(
+            [
+                0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00,
+            ]
+            .as_slice()
+        ),
+        "{ctx}: varint -(2^127) big-endian two's complement"
+    );
+    assert!(
+        matches!(peel(field(udt, "vi")), Value::Varint(_)),
+        "{ctx}: varint must be Value::Varint, got {}",
+        variant(peel(field(udt, "vi")))
+    );
+    assert_eq!(
+        field(udt, "tm"),
+        &Value::Time(1),
+        "{ctx}: time 00:00:00.000000001 = 1 nanosecond since midnight"
+    );
+    assert_eq!(
+        field(udt, "tu"),
+        &Value::Uuid([
+            0x8a, 0xc6, 0xd5, 0x81, 0x6d, 0x4d, 0x11, 0xee, 0xb9, 0x62, 0x02, 0x42, 0xac, 0x12,
+            0x00, 0x02,
+        ]),
+        "{ctx}: timeuuid — differs from WIDE_A's in ONE byte (…d580 vs …d581)"
+    );
+    // ALL THREE components negative: Cassandra's Duration carries a single sign.
+    // 4h5m6s7ms8us9ns = 14_706_007_008_009 ns, negated.
+    assert_eq!(
+        field(udt, "du"),
+        &Value::Duration {
+            months: -14,
+            days: -3,
+            nanos: -14_706_007_008_009
+        },
+        "{ctx}: duration -1y2mo3d4h5m6s7ms8us9ns — months -14 (a year is 12 months), days -3"
+    );
+    assert_eq!(
+        field(udt, "dt"),
+        &Value::Date(1),
+        "{ctx}: date 1970-01-02 = 1 day since epoch; an UNOFFSET read gives 1 - 2^31"
+    );
+    // IPv6 — 16 bytes, where WIDE_A's is a 4-byte IPv4, so a fixed-width inet
+    // read cannot satisfy both.
+    assert_eq!(
+        raw_bytes(field(udt, "ip")),
+        Some(
+            [
+                0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xde, 0xad,
+                0xbe, 0xef,
+            ]
+            .as_slice()
+        ),
+        "{ctx}: inet 2001:db8::dead:beef (golden renders it expanded)"
+    );
+
+    // ── collections / tuple / nested UDT ───────────────────────────────────
+    assert_eq!(
+        peel(field(udt, "fl")),
+        &Value::List(vec![
+            Value::Integer(-2147483648),
+            Value::Integer(2147483647)
+        ]),
+        "{ctx}: frozen<list<int>> at both i32 extremes"
+    );
+    match peel(field(udt, "fs")) {
+        Value::Set(items) => {
+            let got: Vec<&str> = items.iter().filter_map(Value::as_str).collect();
+            assert_eq!(got, vec!["zzz"], "{ctx}: frozen<set<text>> elements");
+        }
+        other => panic!(
+            "{ctx}: frozen<set<text>> must be Value::Set, got {}",
+            variant(other)
+        ),
+    }
+    match peel(field(udt, "fm")) {
+        Value::Map(pairs) => {
+            let got: Vec<(&str, i32)> = pairs
+                .iter()
+                .filter_map(|(k, v)| Some((k.as_str()?, v.as_i32()?)))
+                .collect();
+            assert_eq!(got, vec![("neg", -1)], "{ctx}: frozen<map<text,int>> pairs");
+        }
+        other => panic!(
+            "{ctx}: frozen<map<text,int>> must be Value::Map, got {}",
+            variant(other)
+        ),
+    }
+    match peel(field(udt, "tp")) {
+        Value::Tuple(items) => {
+            assert_eq!(items.len(), 2, "{ctx}: tuple arity");
+            assert_eq!(items[0].as_i32(), Some(-1), "{ctx}: tuple.0");
+            assert_eq!(items[1].as_str(), Some("minus"), "{ctx}: tuple.1");
+        }
+        other => panic!(
+            "{ctx}: frozen<tuple<int,text>> must be Value::Tuple, got {}",
+            variant(other)
+        ),
+    }
+    // ONE element where WIDE_A has two — an arity bug that reads a fixed count
+    // cannot satisfy both.
+    match peel(field(udt, "fu")) {
+        Value::List(items) => {
+            assert_eq!(items.len(), 1, "{ctx}: frozen<list<frozen<inner_u>>> arity");
+            let e = as_udt(&items[0], &format!("{ctx}: fu[0]"));
+            assert_eq!(e.type_name, "inner_u", "{ctx}: fu[0] type name");
+            assert_eq!(field(e, "a"), &Value::Integer(-33), "{ctx}: fu[0].a");
+            assert_eq!(field(e, "b").as_str(), Some("e3"), "{ctx}: fu[0].b");
+        }
+        other => panic!(
+            "{ctx}: frozen<list<frozen<inner_u>>> must be Value::List of Udt, got {}",
+            variant(other)
+        ),
+    }
+
+    let nested = as_udt(field(udt, "nu"), &format!("{ctx}: nested frozen<inner_u>"));
+    assert_eq!(nested.type_name, "inner_u", "{ctx}: nested UDT type name");
+    assert_eq!(
+        field(nested, "a"),
+        &Value::Integer(-5),
+        "{ctx}: nested UDT field a"
+    );
+    assert_eq!(
+        field(nested, "b").as_str(),
+        Some("nested-b"),
+        "{ctx}: nested UDT field b"
+    );
+    assert_eq!(
+        nested.keyspace, KEYSPACE,
+        "{ctx}: nested UDT keyspace — `\"\"` is a different public identity (#3504)"
+    );
+
+    // ── CONTROLS ───────────────────────────────────────────────────────────
+    assert_eq!(
+        field(udt, "bl"),
+        &Value::blob(vec![0x00, 0xFF]),
+        "{ctx}: CONTROL — a field DECLARED blob must remain Value::Blob"
+    );
+    assert_eq!(
+        field(udt, "i"),
+        &Value::Integer(-7),
+        "{ctx}: CONTROL — int already decoded pre-fix and must not regress"
+    );
+
+    // ── the blanket property AC1 states ────────────────────────────────────
+    for f in &udt.fields {
+        if f.name == "bl" {
+            continue;
+        }
+        if let Some(v) = &f.value {
+            assert!(
+                !matches!(peel(v), Value::Blob(_)),
+                "{ctx}: field `{}` is declared non-blob and decoded to Value::Blob (#3722 AC1)",
+                f.name
+            );
+        }
+    }
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // AC1 + AC2 + AC3 — three container routes x two reachable spellings
 // ════════════════════════════════════════════════════════════════════════════
@@ -677,6 +894,81 @@ async fn multicell_map_udt_key_decodes_every_field() {
     }
 }
 
+/// ROW 3 — every multi-element container holds BOTH distinct UDTs, and both
+/// decode in full.
+///
+/// # The gap this closes
+///
+/// Every route above asserts `full_udt(...)`, which is the FIRST fully-populated
+/// UDT across ALL rows — always row 1's `WIDE_A`. So each route could pass while
+/// row 3's SECOND element was dropped, duplicated or decoded wrongly, and the
+/// fixture's whole reason for carrying two elements per container went
+/// unasserted. Three properties are needed, and no one of them is sufficient:
+///
+/// * **count** — exactly 2, which catches a dropped OR duplicated element;
+/// * **distinctness** — the two are not the same value, which catches the
+///   duplication a count alone accepts (2 copies of `WIDE_A` is still 2);
+/// * **both fully decoded** — `WIDE_A` and `WIDE_B` each asserted field by
+///   field, which is what catches a mis-decode of whichever one the other
+///   routes never look at.
+///
+/// # Order is asserted as a SET, deliberately
+///
+/// Cassandra sorts collection elements by its own serialized-UDT comparator, and
+/// the golden shows `WIDE_A` first in `fmw` even though the INSERT wrote
+/// `WIDE_B` first. Pinning a position would assert CQLite's agreement with that
+/// comparator, which is a different property (and a real one — it is what
+/// `mw`/`sw` cell-path ordering rests on); this case asserts membership, and
+/// says so rather than implying more.
+///
+/// # CQL-short spelling only
+///
+/// The same measured reason the `fmw`/`fsw` routes give: a frozen-outer
+/// collection column is an opaque `Value::Blob` with no schema loaded, so the
+/// marshal spelling reaches no UDT for two of these four columns. Pre-existing
+/// and not #3722's subject.
+#[tokio::test]
+async fn row3_multi_element_containers_decode_both_distinct_udts() {
+    let rows = rows(Spelling::CqlShort).await;
+
+    // Row 3 populates exactly these four; `w` is NULL there by design, so a
+    // top-level failure cannot mask a container one.
+    for name in ["mw", "fmw", "fsw", "sw"] {
+        let ctx = format!("row 3, column {name} (two-element container)");
+        let mut found: Vec<&UdtValue> = Vec::new();
+        udts_in_value(column(&rows, 3, name), &mut found);
+
+        assert_eq!(
+            found.len(),
+            2,
+            "{ctx}: expected BOTH WIDE_A and WIDE_B to decode as UDTs, got {} — \
+             a dropped element reads as 1 and a duplicated one as 3+",
+            found.len()
+        );
+        for (i, u) in found.iter().enumerate() {
+            assert!(
+                u.fields.iter().all(|f| f.value.is_some()),
+                "{ctx}: element {i} has an absent field; both elements are written fully populated"
+            );
+        }
+
+        // Distinctness on a discriminating scalar: WIDE_A's `s` is -300 and
+        // WIDE_B's is 32767, so two copies of one value fail here even though
+        // the count is right.
+        let a = found
+            .iter()
+            .find(|u| field(u, "s") == &Value::SmallInt(-300))
+            .unwrap_or_else(|| panic!("{ctx}: no element decoded WIDE_A (smallint -300)"));
+        let b = found
+            .iter()
+            .find(|u| field(u, "s") == &Value::SmallInt(32767))
+            .unwrap_or_else(|| panic!("{ctx}: no element decoded WIDE_B (smallint 32767)"));
+
+        assert_wide_fully_decoded(a, &format!("{ctx} / WIDE_A"));
+        assert_wide_b_fully_decoded(b, &format!("{ctx} / WIDE_B"));
+    }
+}
+
 /// CASE FLOOR (issue #3544's idiom, and this file has already needed it).
 ///
 /// While flipping the `mw` pin, a span-replacing edit silently DELETED
@@ -692,6 +984,7 @@ fn every_case_in_this_file_is_still_present() {
         "null_udt_fields_stay_null_and_populated_siblings_still_decode",
         "multicell_set_udt_element_decodes_every_field_both_spellings",
         "multicell_map_udt_key_decodes_every_field",
+        "row3_multi_element_containers_decode_both_distinct_udts",
     ];
     let src = include_str!("issue_3722_udt_field_type_fidelity.rs");
     for name in EXPECTED {
