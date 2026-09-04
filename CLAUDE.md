@@ -1908,9 +1908,43 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   → rust-reviewer + roborev on the lite-green diff   (review-first, DEFAULT)
   → fix rounds: --lite re-cert + diff-scoped targets  (NEVER a full gate per round)
   → open PR
-  → flow-closer { FULL gate ONCE → C → final roborev → merge-on-green → finalize }
+  → flow-closer { rebase → FULL gate ONCE → C → ROBOREV LAST → premerge-assert → arm → finalize }
 ```
 
+- **ROBOREV LAST, and a later rebase VOIDS the roborev round (#3752).** The endgame order is
+  **rebase → gate of record → C → roborev → `premerge-assert` → arm**, and the reason is a
+  **BYTE ASYMMETRY** that decides it by itself: **a roborev round changes no bytes, so reviewing
+  after gating costs nothing and cannot invalidate a gate PASS; a rebase changes bytes, so gating
+  or reviewing before it certifies the wrong tree.** Review-after-gate is free; gate-after-review
+  is not. A rebase REWRITES the reviewed commit, so a PR can truthfully record "roborev: PASS"
+  about a commit that no longer exists on the branch being merged — measured on PR #3735, whose
+  genuine job 304 at `d3812f59` (`findings: NONE`, 1.07M input tokens) became, after the lane's
+  correct rebase, a `git cat-file -t` that reports no such object, with TWO unreviewed commits
+  after the reviewed content, one of them the semantic rebase-conflict fix in the only file that
+  overlapped `main` — i.e. the most review-worthy commit on the branch. So **if you rebase, you
+  are back at the gate**: re-gate, re-review, re-assert, in that order.
+  **POST THE BLOCK ON THE PR.** `premerge-assert.sh`'s `review-binding` leg reads the roborev job
+  id from a `==== ROBOREV REVIEW SUMMARY ====` block recorded in the PR body or a top-level
+  comment, so recording it is what lets the merge gate know a review happened at all.
+  **AND A NON-EMPTY SEMANTIC OVERLAP MEANS GIT CAN MERGE CLEANLY AND STILL BE WRONG.** After a
+  rebase, compute the overlap over `merge-base..origin/main` — **never `HEAD..origin/main`**,
+  which includes reverting your own work (measured 16 files vs the correct 3) — re-run the tests
+  touching every overlapping file, and EXPECT a fix. Any such fix is new code, so it invalidates
+  the gate AND the review.
+- **How a lead actually stops a merge (#3752 AC7).** The sanctioned stop is **converting the PR
+  to draft** (`gh pr ready --undo <pr>`), which GitHub enforces against merging, or a per-tier
+  `ci:` state. **`gh pr merge --disable-auto` alone is NOT a stop** — it removes the auto-merge
+  REQUEST, and a plain `gh pr merge --squash` succeeds immediately afterward (measured: #3735
+  merged three minutes after the lead disarmed it). A column-zero `HOLD:` **COMMENT** on the PR or on
+  the issue it closes is now mechanical too, because `premerge-assert`'s `hold-check` leg reads
+  it (30-minute disarm window, a named committed constant with no env override); a lead clears
+  one with a column-zero `GO:` or `RELEASE:` line. **A COMMENT, not the PR DESCRIPTION** — the
+  leg scans comment bodies and never the description, deliberately: a PR body is editable at any
+  time by anyone with write access **with no per-edit attribution**, so it is the weaker artifact
+  and must never be an authorization channel (#3312), whereas a comment is permanent and
+  attributable. Do not "helpfully" add body scanning; a `HOLD:` typed into the description is
+  silently unenforced, which is why this sentence names the artifact. But a draft is the only stop that holds
+  without the lane's cooperation.
 - **Review-first (#2086)**: review BEFORE the first full gate so the ONE gate certifies
   already-reviewed code. Skip ONLY for a genuinely mechanical diff (no `pub`-item change AND single
   call site AND no new surface). When in doubt, review.
@@ -2595,7 +2629,108 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   Before arming `gh pr merge --auto` the closer runs the scripted pre-merge assert
   `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-of-record-summary> [<delta-summary>]`
   (#2456/#3465) — refusing to merge unless the PR head still equals the certified SHA **AND** a gate
-  of record exists for it — and re-reads comments for a fresh `HOLD:` order. **The third argument is
+  of record exists for it. Since #3752 it also runs two legs BEFORE its head check, both fail-closed
+  and both refusing on `UNMEASURED` (a positive verdict requires a positive measurement):
+  **`PREMERGE: REVIEW-BINDING`** — the roborev job recorded on the PR must have a reviewed head that
+  is an ANCESTOR of the certified sha (`git merge-base --is-ancestor` is the load-bearing test and
+  runs FIRST; `git cat-file -t` is a DIAGNOSTIC ONLY, because a rebase leaves the old commit dangling
+  and reflog-reachable so it still answers `commit`) with no reviewable code after it by
+  `classify-docs-only.sh`, the reviewed head being derived from the JOB RECORD's `git_ref`
+  (`<base40>..<head40>`), never from the `Enqueued job <N> for <sha>` line, which for a range review
+  names only the BASE; a **code-free PR diff** is a loudly DECLARED `NOT-APPLICABLE`, since a
+  code-free diff cannot be roborev-certified at all. **BOTH HALVES of `git_ref` bind, and the base
+  half is the T4 vacuity class one level down**: a `<head~1>..<head>` record has a head EQUAL to the
+  certified sha, so it passes every head test there is while leaving every earlier commit on the
+  branch unreviewed — the leg therefore requires the reviewed base, PROJECTED onto the branch as
+  `merge-base(recorded-base, certified)`, to be at or before the PR's **merge-base** (never the base
+  ref's tip, #3392), or the skipped prefix to be code-free. That projection is the difference between
+  a check and a false FAIL: a base recorded OFF the branch skips none of the PR's own commits, so the
+  skipped prefix is a COMMIT SET and never a path diff against the recorded base. **AMONG THE ROUNDS THAT COVER,
+  THE LATEST DECIDES, AND IT MUST ITSELF BIND (#3752, roborev job 78).** The first draft said "ANY
+  recorded round that covers suffices" and stopped the scan at the first bindable record — so an
+  earlier CLEAN round stayed sufficient even when a LATER recorded round at the same certified head
+  reported findings or failure, i.e. a **known, newer, adverse review result was ignored because an
+  older favourable one was encountered first**. With exactly ONE covering round there is no ordering question and no chronology is
+  required — F2's defect needs two covering rounds by construction, and demanding an order key to
+  sort a set of one reds correct input the moment a real record lacks the field. With more than one,
+  chronology comes from the record's own `started_at`,
+  never from PR-comment order (a comment can be posted out of order or edited) and never from the job
+  id (nothing guarantees ids are monotonic across agents); ordering is lexicographic, so the
+  fixed-width ISO-8601 UTC form is CHECKED and anything else is `UNMEASURED` rather than sorted
+  wrongly, as is a covering round with no readable stamp — **the order is never guessed, because
+  guessing it is what lets an older favourable round win again**. **AND A VALIDATED STAMP IS STILL
+  NOT AN ORDER WHEN TWO ROUNDS SHARE IT (roborev job 82).** The selection comparison is strict, so on
+  EQUAL `started_at` the first-encountered index survived — PR-record order deciding a merge, which
+  is the very thing the sentence above forbids, one level down. There is **no finer key to break it
+  with**: measured on live records, every chronology field the job record carries
+  (`enqueued_at`/`started_at`/`finished_at`/`created_at`) is **second**-resolution and the record's
+  own `uuid` is v4 (random, not time-ordered). So a tie at the maximum refuses as `UNMEASURED`,
+  naming both tied jobs, **unless EVERY round tied there is independently bindable** — with no
+  disagreement there is nothing for an ordering to resolve, and refusing would red the correct input
+  of two reviewers legitimately starting inside one second. Still true, and orthogonal: every
+  job on the PR is examined and one unretrievable record cannot end the scan (an unresolved record
+  decides only when no covering round decided the question, as `UNMEASURED`). **Declared residual**:
+  an unretrievable record could in principle BE a newer adverse round, and that cannot be
+  distinguished from an early round aged out of `roborev list --limit`, so demanding retrievability
+  of every historical record would red a correct multi-round PR — what is closed is the finding's
+  subject, known newer results being ignored. **AND A RANGE MATCH ALONE DOES NOT BIND** — the leg's first draft REPORTED the
+  recorded verdict and derived nothing from it, declaring that a residual, which was a false-green
+  route in a merge gate: a block naming an in-progress, FAILED or findings-bearing job whose range
+  happened to match bound the merge, and it is an ACCIDENT route before a hostile one (a lane
+  pasting its own first FAILING round certifies itself). A job now binds only when the **JOB
+  RECORD's structured verdict** — never the PR block's self-reported one, which is untrusted text —
+  says `clean`. The verdict is THREE-VALUED and an unreadable one is `UNMEASURED`: a range
+  match is not a review.
+  **AND A `findings` RECORD CANNOT BIND AT THE MERGE POINT AT ALL — NOT EVEN WITH A PERFECT
+  AUTHORIZATION (roborev job 103). DECLARING THE GAP WAS NOT ENOUGH.** The deferral route exists at
+  REVIEW time because roborev **re-reports** a lead-deferred finding on every later round (#3626), so
+  a record stays `findings` forever and requiring `clean` there with no way out would make such a
+  merge UNOBTAINABLE. At the MERGE point the authorization is still re-verified through the SAME
+  scanner the wrapper uses (`roborev-waiver-scan.py findings-deferral-authorization`, a narrow kind
+  returning the DISTINCT state `granted-authorization`) — but a grant now yields **`UNMEASURED`
+  (exit 5), never `BOUND`**. The reason is the one half that kind cannot judge: the marker's
+  **`count=`**, the field that ties a deferral to the findings it defers, is matched against the
+  count OBSERVED BY THE REVIEW, and **no trusted count exists at merge time** — measured, on
+  findings-bearing jobs 78 and 102, `roborev show --json` exposes only `verdict_bool`/`verdict`, a
+  letter and no count, and `--recheck-job` enqueues nothing so it writes no record either. The
+  earlier design DECLARED that gap in the leg's output and bound anyway, which let the merge gate
+  honour an authorization **the review-time path would REJECT**: an allowlisted human can post a
+  fresh marker after the review carrying any count at all, and nothing at the merge point compared
+  it to anything. The actor is a NON-INVOKER and the shape is an ACCIDENT, so by #3312's triage rule
+  it is a defect and not an out-of-model bypass — and a declaration is not a control. Fabricating a
+  count would be an affirmative assert over an unmeasured value; comparing the marker's count with
+  itself would be a tautology. **So the remedy at merge time is a CLEAN covering round, never a
+  marker** — the leg says exactly that, and the call is kept only to separate "no authorization
+  exists" (a measured refusal, exit 4) from "the authorization is good but unverifiable here"
+  (exit 5), which are different operator actions. **AND THE DEFERRAL PATH IS THREE-VALUED, NOT TWO (roborev job 102): "the
+  authorization was evaluated and REFUSED" and "the authorization COULD NOT BE EVALUATED" are
+  different states with different REMEDIES, so they get different exits.** A CLOSED or non-existent
+  tracking issue is an answer GitHub GAVE ⇒ `UNBOUND` (exit 4); an issue whose state could not be
+  ASKED, an absent or failing `roborev-waiver-scan.py`, an unreadable author allowlist, or a scanner
+  payload carrying no readable state ⇒ `UNMEASURED` (exit 5). Both refuse the merge — `premerge-assert`
+  maps 4 and 5 alike to its loud exit-2 refusal — so this is the DIAGNOSIS and never a softening:
+  reporting "no authorized deferral covers this job" for an unreachable `gh` sends a lead to re-post a
+  marker that was already fine, when the fix is restoring access. **The disarm half AND BOTH COMMENT THREADS are read with `gh api --paginate`,
+  with EVERY page decoded before any verdict**: one page of 100 events is not the timeline, and
+  `--json comments` is a BOUNDED connection — so a persistent `HOLD:` outside the first page
+  produced a false `NO-HOLD-RECOGNISED` on the artifact a lead actually posts a stop order in. ONE
+  normalised stream feeds both job discovery and the hold scan, and the REST-vs-GraphQL spelling
+  difference (`user.login`/`created_at` vs `author.login`/`createdAt`) is reconciled ONCE at the
+  fetch boundary: read the wrong one and every author is EMPTY, which silently stops granting
+  deferrals and stops honouring an allowlisted release — fail-closed, and wrong on correct input.
+  An unrecognised payload shape REFUSES rather than yielding a shorter comment list, because a
+  short thread is indistinguishable from a quiet one. A `clear` derived from a partially
+  read signal is a false clearance on exactly the scenario this leg exists for. **`PREMERGE: HOLD-CHECK`** — the machine-readable
+  half of the `HOLD:` re-read (below). **Resolved PER THREAD, and it refuses while ANY thread is
+  held (#3752, roborev job 78):** every marker used to land in one global timeline, so an authorized
+  `GO:` on one closing issue cleared an unrelated, NEWER `HOLD:` on another thread purely by being
+  later — a release nobody wrote for the thread that was held. A release now clears only the thread
+  it is posted on, the report NAMES each held thread so the operator knows where to post one, and
+  there is deliberately **no cross-thread release**: if one is ever wanted it needs its own explicit
+  design, and the conservative direction is to refuse. **Markers are ordered by `updatedAt`, not `createdAt`** —
+  what a reader SEES is the current text, so an OLD comment EDITED to carry `HOLD:` must not lose
+  to a `GO:` posted before that edit; a marker-bearing comment whose edit timestamp is unreadable
+  cannot be ordered against its siblings and is `UNMEASURED`. **The third argument is
   REQUIRED, and that is the #3465 mechanism**: verifying the head against a *claimed* certified sha never verified that a
   certified sha EXISTS. **Two distinct escapes, one mechanism.** #3408 = **no gate at all** (merged on
   22 `--lite` PASSes and not one full `scripts/agent-gate.sh` run, because nothing in the merge path
