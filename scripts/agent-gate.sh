@@ -6775,7 +6775,19 @@ _disk_verdict_read() {
     _disk_note_unread_verdict "$comp" "verdict file MALFORMED"; return 1
   fi
   case "$DISK_VERDICT_ST" in
-    # THE CLOSED SET IS FOUR TOKENS SINCE #3625, AND THE FOURTH IS WHY (merge of 2026-09-04).
+    # THE CLOSED SET IS FIVE TOKENS, AND TWO OF THEM WERE MEASURED FALSE REDS (merge of
+    # 2026-09-04). Both were found the same way -- by reading what `record_result` can actually
+    # WRITE, not by reasoning about what a verdict "should" be:
+    #   * VACUOUS (#3625) -- a PASS whose measured subject count was zero.
+    #   * OPT-OUT (#3402) -- file-size's verdict under `CQLITE_ALLOW_FILE_GROWTH=1`, which is a
+    #     SANCTIONED escape documented in CLAUDE.md, so this one reds any lane using it.
+    # With either omitted, that token read as MALFORMED, became an unread verdict, and was
+    # normalised to a synthetic `FAIL 0` that forced OVERALL -- a false RED on correct input.
+    # Two instances in one merge is why the set is now covered by a DERIVED assert in
+    # `scripts/tests/test_agent_gate_disk_exhaustion.sh`: it takes the union of the tokens the
+    # shipped `_status_is_nonfailing` and `_census_status_for` can produce and requires this set to
+    # cover it, so a SIXTH token reds that suite instead of reappearing here as a false red in the
+    # gate of record. Do not add a token here without that assert seeing it.
     # `_census_status_for` can return **VACUOUS** -- a PASS whose measured subject count was zero
     # -- described by #3625 as "a distinct non-passing token in the gate's PASS/FAIL/SKIP
     # vocabulary", so a component that verified nothing can never report PASS (its AC2). Omitting
@@ -6785,10 +6797,7 @@ _disk_verdict_read() {
     # VALID verdict here and is passed through UNCHANGED; whether it passes the RUN is #3625's
     # business, not this reader's. Converting it to FAIL would both mislabel it and destroy the
     # distinction #3625 exists to draw.
-    # `scripts/tests/test_agent_gate_disk_exhaustion.sh` asserts this set covers every token
-    # `_census_status_for` can emit, so a fifth token reds that suite instead of silently
-    # reappearing here as a false red in the gate of record.
-    PASS|FAIL|SKIP|VACUOUS) ;;
+    PASS|FAIL|SKIP|OPT-OUT|VACUOUS) ;;
     *) _disk_note_unread_verdict "$comp" "verdict file MALFORMED"; return 1 ;;
   esac
   _disk_secs_is_int "$DISK_VERDICT_SECS" || {
@@ -22461,6 +22470,13 @@ _gate_disk_admission_refuse() {
   # Routed through the shared no-clobber terminal contract (#2874), not a bare
   # emit_summary: a refusal is a TERMINAL block and must obey the same live-peer rules
   # as every other one.
+  # disk-exhaustion-exempt: #3755 disk-admission REFUSAL. VERIFIED, not assumed (the #3800 job-358
+  # lesson): all four refusal moments precede `run_file_size` -- the three call sites at LAUNCH /
+  # after-the-queue and the SLOT-GRANT one -- so no component can have recorded a verdict and there
+  # is nothing to attribute. It is also the ONE block whose cause IS disk BY CONSTRUCTION and which
+  # already names it affirmatively in `disk-admission:` with its own bar and remedy, so a second
+  # disk marker here would be redundant rather than informative -- the opposite of every other
+  # marked site, where the existing text CANNOT name disk.
   _emit_terminal_summary FAIL "${_da_meta[@]}" || true
   if [ "$SUMMARY_WRITE_FAILED" -ne 0 ]; then
     echo "agent-gate: exiting non-zero because the summary file could not be written (#1175)" >&2

@@ -100,6 +100,7 @@ EXTRACT_OK=1
             _disk_free_field _disk_scan_field _disk_note_capture_failure \
             _disk_note_unread_verdict _disk_secs_is_int _disk_verdict_read \
             _disk_verdict_read_aggregate _disk_recorded_pairs _disk_preflight_meta \
+            _status_is_nonfailing \
             _disk_scan_subject _disk_exhaustion_line \
             _tree_excluded _tree_probe_tools _tree_sort0 _tree_digest_file _tree_hex_id_ok \
             _tree_digest_ok _tree_manifest_ok _tree_mtime _tree_identity \
@@ -113,7 +114,7 @@ for want in DISK_EXHAUSTION_SIGNATURES DISK_MEM_SUBJECTS DISK_UNREAD_VERDICTS _d
             _disk_df_probe _disk_gib _disk_free_leg _disk_free_field _disk_scan_field \
             _disk_note_capture_failure _disk_note_unread_verdict _disk_secs_is_int \
             _disk_verdict_read _disk_verdict_read_aggregate _disk_recorded_pairs \
-            _disk_preflight_meta \
+            _disk_preflight_meta _status_is_nonfailing \
             record_result _disk_scan_subject _disk_exhaustion_line \
             _tree_excluded _tree_probe_tools _tree_sort0 _tree_digest_file _tree_hex_id_ok \
             _tree_digest_ok _tree_manifest_ok _tree_mtime _tree_identity \
@@ -140,6 +141,25 @@ fi
 # file it could not READ -- correct even if the `disk-exhaustion:` line did not exist. The line
 # itself still changes nothing, which is why case 15 must keep failing on any ATTRIBUTION
 # function that touches OVERALL.
+# A MISSING FUNCTION RETURNS 127, AND EVERY `|| OVERALL=FAIL` THEN FIRES. That cost three false
+# failures in this suite twice over (`_pool_selected`, then `_status_is_nonfailing` after the #3625
+# merge): the harness looked like it was measuring a fail-closed disposition when it was measuring
+# an undefined command. `_status_is_nonfailing` is now EXTRACTED (shipped, self-contained, and the
+# lite aggregator keys OVERALL on it).
+#
+# `_census_finalize` is STUBBED TO IDENTITY instead, deliberately and visibly. Extracting it would
+# pull in `_census_measure`/`_census_status_for`/`_census_read`/`_census_classify` and make every
+# case in this file depend on #3625's census having data -- while the subject of these cases is the
+# `.result` WRITE and the verdict READ, not the census. Identity is what the shipped function
+# returns for a component with an ordinary census, so the cases measure their own subject. Any case
+# whose subject IS the census must extract the real chain rather than lean on this.
+printf '%s\n' \
+  '_census_finalize() { printf "%s" "$2"; }' \
+  '_census_measure() { :; }' \
+  '_census_annotate() { :; }' \
+  'census_summary_line() { printf "census: (stubbed in harness)"; }' \
+  >> "$EX"
+
 EX_AGG="$tmp/extracted-aggregator.sh"
 extract_region '^aggregate_lite_components[(][)] [{]$' '^[}]$' > "$EX_AGG"
 if grep -q '^aggregate_lite_components' "$EX_AGG" && grep -q '_disk_verdict_read_aggregate' "$EX_AGG"; then
@@ -1640,17 +1660,31 @@ fi
 # (20c-mutation) restore the pre-fix disposition (read raw, do not normalise, never signal) and
 # the SAME run must certify -- which IS the false PASS this round removes. Without this control a
 # green 20c proves only that the aggregator sets OVERALL somewhere.
+# ISOLATED TO THE RESIDUAL THIS WRAPPER UNIQUELY CLOSES (narrowed after the #3625 merge, and the
+# narrowing is worth stating rather than hiding). Main now keys OVERALL on an AFFIRMATIVE closed
+# set -- `_status_is_nonfailing "$st" || OVERALL=FAIL` -- which independently catches an EMPTY
+# status, i.e. the shape an ENOSPC write leaves. So the empty-`.result` half of 20c is no longer
+# evidence about THIS wrapper: it would fail with the wrapper disabled too.
+#
+# What main's check does NOT catch is a VALID token with an unreadable SECONDS field: `PASS abc`
+# yields st=PASS, `_status_is_nonfailing PASS` returns 0, and the run certifies over a verdict that
+# was not fully read. That is the residual, so the mutation seeds exactly it -- one good verdict and
+# one `PASS abc` -- and must certify with the pre-fix disposition restored.
 o20cm=$(
   . "$EX"; . "$EX_AGG"; LOG_DIR="$d"; _disk_env
   _pool_selected() { [ -z "${ONLY:-}" ] && return 0; case " ${ONLY//,/ } " in *" $1 "*) return 0 ;; esac; return 1; }
   _disk_verdict_read_aggregate() { _disk_verdict_read "$1" "$2" || true; return 0; }
-  ONLY="file-size,fmt,clippy"
+  # The EMPTY clippy verdict must be REMOVED, not merely de-selected: the aggregator's selection
+  # check guards only the ABSENT branch, so a present-but-empty `.result` is still read and its
+  # empty status trips main's affirmative check -- masking the residual this control isolates.
+  rm -f "$d/clippy.result"
+  ONLY="file-size,fmt"
   OVERALL=PASS; NAMES=(); STATUSES=(); TIMES=()
   aggregate_lite_components
   printf 'OVERALL %s\n' "$OVERALL"
 )
 if [ "$o20cm" = "OVERALL PASS" ]; then
-  ok "20c-mutation: with the pre-fix disposition restored the identical run reports OVERALL=PASS over two unread verdicts -- the false certification this round removes, and proof 20c measures the new arm"
+  ok "20c-mutation: with the pre-fix disposition restored, a VALID token whose SECONDS field could not be read ('PASS abc') certifies the run -- the residual main's affirmative _status_is_nonfailing check does NOT cover, and therefore the exact false certification this wrapper closes"
 else
   bad "20c-mutation: the pre-fix disposition did not certify, so 20c is not measuring the aggregation fix; got: $o20cm"
 fi
@@ -1975,6 +2009,82 @@ if ! cat "$d/sub/inner.log" >/dev/null 2>&1; then
 else
   chmod 755 "$d/sub" 2>/dev/null || true
   printf 'SKIP - 24b-open-fail: this host still reads a file under a mode-000 directory (running as root), so a failed open cannot be induced. DECLARED, not silently omitted.\n'
+fi
+
+# (28) THE CLOSED VERDICT SET IS DERIVED FROM THE SHIPPED SOURCE (merge of 2026-09-04).
+#
+# `_disk_verdict_read` validates the `.result` STATUS against a closed set, and TWICE in one merge
+# a token was missing from it -- each time a MEASURED false RED on correct input, because an
+# unrecognised token reads MALFORMED, becomes an unread verdict, and is normalised to a synthetic
+# `FAIL 0` that forces OVERALL:
+#   * VACUOUS (#3625) -- a PASS whose measured subject count was zero.
+#   * OPT-OUT (#3402) -- file-size under `CQLITE_ALLOW_FILE_GROWTH=1`, a SANCTIONED escape that
+#     CLAUDE.md itself documents, so that one reds any lane using it.
+# Two instances is the signal to stop hand-maintaining the list. The producers are derived instead:
+# the non-failing alternatives in `_status_is_nonfailing`'s case, and the literals
+# `_census_status_for` can `printf`. A SIXTH token reds HERE rather than in someone's gate.
+_vs_nonfailing=$(awk '
+  /^_status_is_nonfailing\(\) \{/ { inb=1; next }
+  inb && /^\}/ { exit }
+  inb && /return 0/ && /\|/ { gsub(/[)].*$/, ""); gsub(/^[ \t]+/, ""); print }
+' "$GATE" | tr '|' '\n' | grep -E '^[A-Z][A-Z-]+$' | sort -u)
+_vs_census=$(awk '
+  /^_census_status_for\(\) \{/ { inb=1; next }
+  inb && /^\}/ { exit }
+  inb { print }
+' "$GATE" | grep -oE "printf '[A-Z][A-Z-]+'" | sed "s/printf '//; s/'//" | sort -u)
+_vs_want=$(printf '%s\n%s\nFAIL\n' "$_vs_nonfailing" "$_vs_census" | grep -E '^[A-Z][A-Z-]+$' | sort -u)
+# Factored so the control below can run the SAME extraction against a scratch gate -- a derived
+# guard whose extraction is inlined cannot be shown to discriminate.
+_vs_reader_set() { awk '
+  /^_disk_verdict_read\(\) \{/ { inb=1 }
+  inb && /^\}$/ { exit }
+  inb && /^[ \t]*[A-Z][A-Z|-]+\) ;;/ { gsub(/[)].*$/, ""); gsub(/^[ \t]+/, ""); print }
+' "${1:-$GATE}" | tr '|' '\n' | grep -E '^[A-Z][A-Z-]+$' | sort -u; }
+_vs_have=$(_vs_reader_set "$GATE")
+_vs_missing=$(comm -23 <(printf '%s\n' "$_vs_want") <(printf '%s\n' "$_vs_have") | tr '\n' ' ')
+_vs_nw=$(printf '%s\n' "$_vs_want" | grep -c .)
+if [ "$_vs_nw" -ge 4 ] && [ -z "${_vs_missing// /}" ]; then
+  ok "28-closed-set-derived: the reader's closed status set covers all $_vs_nw verdict tokens the SHIPPED producers can emit ($(printf '%s' "$_vs_want" | tr '\n' ' ')) -- so a new token reds this suite instead of becoming a false RED in the gate of record"
+else
+  bad "28-closed-set-derived: derived $_vs_nw producible token(s); MISSING from _disk_verdict_read's closed set: ${_vs_missing:-<none>} -- each missing token is a false RED on correct input (it reads MALFORMED and is normalised to a synthetic FAIL that forces OVERALL)"
+fi
+# POSITIVE CONTROL: drop ONE token from the reader's closed set in a scratch gate and require the
+# derivation to name it. Without this, a green above could mean the extraction matched nothing.
+_vs_ctl="$tmp/closed-set-ctl.sh"
+sed 's/    PASS|FAIL|SKIP|OPT-OUT|VACUOUS) ;;/    PASS|FAIL|SKIP|VACUOUS) ;;/' "$GATE" > "$_vs_ctl"
+_vs_ctl_missing=$(comm -23 <(printf '%s\n' "$_vs_want") <(_vs_reader_set "$_vs_ctl") | tr '\n' ' ')
+if [ "$_vs_ctl_missing" = "OPT-OUT " ]; then
+  ok "28-closed-set-control: removing OPT-OUT from the reader's closed set makes the derivation name exactly that token as missing, so the clean reading above is a measurement and not an empty extraction"
+else
+  bad "28-closed-set-control: expected the derivation to report 'OPT-OUT' missing; got '${_vs_ctl_missing:-<nothing>}' -- the extraction is not discriminating and case 28 proves nothing"
+fi
+
+# BEHAVIOURAL, both directions: every producible token passes through UNCHANGED and records
+# nothing, while an off-set token is still MALFORMED. Whether a token passes the RUN is
+# `_status_is_nonfailing`'s business, not this reader's -- so VACUOUS and OPT-OUT must NOT be
+# converted to FAIL here, which would mislabel them and destroy the distinctions they encode.
+d="$tmp/c28"; mkdir -p "$d"
+o28=$(
+  . "$EX"; LOG_DIR="$d"; _disk_env
+  for tok in $_vs_want NOT-A-VERDICT; do
+    printf '%s 12\n' "$tok" > "$d/c.result"
+    rc=0; _disk_verdict_read_aggregate c "$d/c.result" || rc=$?
+    printf '%s rc=%s st=%s notes=%s\n' "$tok" "$rc" "$DISK_VERDICT_ST" "${#DISK_UNREAD_VERDICTS[@]}"
+    DISK_UNREAD_VERDICTS=()
+  done
+)
+_o28_bad=$(printf '%s\n' "$o28" | awk '$1 != "NOT-A-VERDICT" && $2 != "rc=0" { print }')
+_o28_off=$(printf '%s\n' "$o28" | awk '$1 == "NOT-A-VERDICT" { print $2 }')
+if [ -z "$_o28_bad" ] && [ "$_o28_off" = "rc=1" ]; then
+  ok "28-closed-set-behaviour: every producible token reads rc 0 and is passed through UNCHANGED (VACUOUS and OPT-OUT are NOT converted to FAIL -- whether they pass the RUN is _status_is_nonfailing's call), while an off-set token is still MALFORMED at rc 1"
+else
+  bad "28-closed-set-behaviour: producible tokens must read rc 0 and an off-set token rc 1.
+off-set got: ${_o28_off:-<none>}
+offenders:
+$_o28_bad
+full:
+$o28"
 fi
 
 # (27) roborev job 370 -- ENUMERATE THE CLASS, DO NOT FIX THE INSTANCES.
@@ -2489,7 +2599,7 @@ fi
 # exempt member, with a control that strips one marking and requires the check to see it.);
 # +0 (roborev job 319 rounds 4-5 added 21d, whose runtime half shares 21c's DECLARED skip; its
 # STRUCTURAL half needs no host capability but is counted at 0 to keep the floor host-independent.)
-CASE_FLOOR=94
+CASE_FLOOR=97
 printf '\n%s\n' "----------------------------------------"
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case-floor: %d cases ran but this suite declares a floor of %d -- cases were REMOVED or are dying silently.\n' \
