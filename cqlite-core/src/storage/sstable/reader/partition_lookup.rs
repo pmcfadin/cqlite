@@ -623,6 +623,8 @@ impl SSTableReader {
     /// directly. For V5CompressedLegacy NB SSTables (the format the writer emits),
     /// `sequential_scan` uses the chunk-stitching path and returns every partition.
     pub async fn iterate_all_partitions(&self) -> Result<Vec<(RowKey, ScanRow)>> {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
+
         // Delegates to the per-call-token sibling with the reader's own field —
         // byte-identical to the pre-#2346 behaviour of this method (every
         // pre-existing caller keeps its exact cancellation semantics).
@@ -645,6 +647,8 @@ impl SSTableReader {
         &self,
         scan_cancel: &crate::storage::scan_cancel::ScanCancel,
     ) -> Result<Vec<(RowKey, ScanRow)>> {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
+
         // Index-random-read path (issue #2302): when a `Index.db` is present on a
         // BIG SSTable, enumerate EVERY partition via the full Index.db
         // partition-offset table instead of the sparse `Summary.db` samples.

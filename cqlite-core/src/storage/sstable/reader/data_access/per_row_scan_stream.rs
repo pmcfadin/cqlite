@@ -165,6 +165,7 @@ impl SSTableReader {
             ScanAdmission::Acquire => Some(scan_admission::admit().await),
             ScanAdmission::Exempt => None,
         };
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
 
         // Issue #3124 (site 2): the ONE test-only fault checkpoint for this task,
         // placed ABOVE every format branch (BTI trie walk, windowed stitch,

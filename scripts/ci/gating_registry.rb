@@ -52,6 +52,21 @@ module GatingRegistry
   DEFAULT_WORKFLOWS_DIR = ".github/workflows"
   DEFAULT_WAIT_MINUTES = 60
 
+  # THE LOCAL AGENT GATE'S COMPONENT MANIFEST (issue #3725). An exemption whose
+  # declared merge-gating half is `kind: gate-component` is checked against this
+  # file, so a component that was renamed or deleted turns the exemption RED
+  # instead of leaving it quietly false.
+  #
+  # Resolved from THIS FILE's location, not the process CWD. The other defaults
+  # here are CWD-relative because the two callers (`validate-workflows.rb` and
+  # `aggregate-required-tiers.sh`) both run from the repo root — but this one is
+  # also consulted by the hermetic self-test, which runs the rule against
+  # synthetic trees from an arbitrary directory. A CWD-relative default would
+  # then resolve to a file that does not exist and the check would fail for the
+  # wrong reason (or, worse, a future `File.file?` guard would make it PASS for
+  # the wrong reason).
+  DEFAULT_GATE_COMPONENTS = File.expand_path("../agent-gate.components", __dir__)
+
   # How long a `cancelled`/`stale` tier is treated as superseded-and-re-polling
   # before it becomes a failure. GitHub mints the replacement run's check runs
   # within seconds of the cancellation; this window is generous and still far
@@ -63,7 +78,46 @@ module GatingRegistry
   AGGREGATOR_KEYS = %w[workflow job].freeze
   DEFAULTS_KEYS = %w[wait_minutes].freeze
   TIER_KEYS = %w[id workflow context wait_minutes mandate_paths notes].freeze
-  EXEMPT_KEYS = %w[workflow reason issue].freeze
+  EXEMPT_KEYS = %w[workflow reason issue merge_gating_half].freeze
+
+  # THE DECLARED MERGE-GATING HALF (issue #3725) — a CLOSED grammar.
+  #
+  # #3493's finding was that `.github/ci-gating-tiers.yml` excuses a workflow from
+  # `required` by naming, IN PROSE, the thing that supposedly gates the merge in
+  # its place — and nothing checked that claim. `node-ci.yml`'s exemption said
+  # "the merge-gating half is the local gate's node-bindings component" while that
+  # component ran 1 of the suite's 27 test files, so 26 were gated by neither side
+  # and a deterministic red sat on `main` for ~2 days.
+  #
+  # `merge_gating_half:` is the machine-checked half of that claim: a NON-EMPTY
+  # LIST (a workflow can have more than one counterpart — node-ci.yml has two) of
+  # mappings, each naming a KIND from the closed set below plus that kind's one
+  # subject field. An unrecognised kind, an unknown field, a missing field or an
+  # empty list is a NAMED refusal — never accepted, and never silently skipped.
+  #
+  # A KIND IS ADDED ONLY WITH ITS VALIDATOR. Each of the three below is checkable
+  # against committed source, which is the whole point; a kind whose subject
+  # cannot be verified would be prose wearing a schema's clothes.
+  MERGE_GATING_HALF_KINDS = {
+    # A component of the full local agent gate (scripts/agent-gate.sh). Verified
+    # to EXIST in scripts/agent-gate.components.
+    "gate-component" => "component",
+    # A named step of a job that the branch-protection context `required`
+    # depends on — i.e. a step whose failure fails `required` directly. Verified
+    # to exist in the aggregator workflow's `needs` closure.
+    "required-gate-step" => "step",
+    # NOTHING merge-gating covers this workflow. An honest declaration of a hole,
+    # which is the state several of these lanes are genuinely in; `ground` states
+    # why that is acceptable.
+    "none" => "ground"
+  }.freeze
+
+  # scripts/agent-gate.components' own declared grammar (see that file's header):
+  # one name per line; a name matches [A-Za-z0-9._-]+ and may not start with `-`;
+  # blank lines are skipped and a line whose FIRST character is `#` is a comment;
+  # ANYTHING else — including a name with leading or trailing whitespace — is a
+  # named refusal. A parser that trims is a parser that guesses.
+  GATE_COMPONENT_NAME_PATTERN = /\A[A-Za-z0-9._][A-Za-z0-9._-]*\z/
 
   # Fail-closed: `success` is the ONLY conclusion that clears a registered tier.
   # A registered tier's context is emitted by an unconditional `if: always()`
@@ -143,6 +197,151 @@ module GatingRegistry
   def exemptions(registry)
     value = registry["exempt"]
     value.is_a?(Array) ? value.select { |e| e.is_a?(Hash) } : []
+  end
+
+  # ------------------------------------ the gate component manifest (#3725) --
+
+  # THREE-VALUED, never two. Returns [component_names, error] — `error` non-nil
+  # means the manifest could not be read or does not parse under its own declared
+  # grammar, and the CALLER must treat that as a refusal. It must NOT degrade to
+  # "an empty component set", which would make every `gate-component` claim fail
+  # for a misleading reason, nor to "assume it exists", which is the permissive
+  # branch this whole issue is about: a positive verdict requires an AFFIRMATIVE
+  # measurement.
+  def load_gate_components(path)
+    return [[], "#{path}: the local gate's component manifest is not a readable file"] unless File.file?(path)
+
+    text = begin
+      File.read(path)
+    rescue SystemCallError, IOError => e
+      return [[], "#{path}: the local gate's component manifest could not be read (#{e.class}: #{e.message})"]
+    end
+
+    names = []
+    text.each_line.with_index(1) do |line, number|
+      stripped = line.chomp("\n").chomp("\r")
+      next if stripped.empty?
+      next if stripped.start_with?("#")
+      unless stripped.match?(GATE_COMPONENT_NAME_PATTERN)
+        return [[], "#{path}:#{number}: not a component name under the manifest's own closed grammar " \
+                    "(one name per line matching [A-Za-z0-9._-]+, not starting with `-`; blank and " \
+                    "`#`-prefixed lines are skipped): #{stripped.inspect}"]
+      end
+
+      names << stripped
+    end
+    return [[], "#{path}: the local gate's component manifest declares no components"] if names.empty?
+
+    [names, nil]
+  end
+
+  # The step names of every job the aggregating job DEPENDS ON, transitively,
+  # within the aggregator's own workflow — i.e. the steps whose failure fails the
+  # branch-protection context `required` directly. This is what makes
+  # `kind: required-gate-step` a checkable claim rather than a sentence.
+  #
+  # Also three-valued: [step_names, error]. Derived from the registry's declared
+  # aggregator (workflow + job), never from a hard-coded job name, so renaming
+  # `pr-gate-core` moves this with it.
+  # ONLY ABSENT OR PROVABLY-FALSE `continue-on-error` LEAVES A FAILURE FATAL (roborev round 9).
+  # Round 8 excluded the literal `true` and stopped there, which is the two-valued reading of a
+  # three-valued field: GitHub Actions also permits an EXPRESSION
+  # (`continue-on-error: ${{ … }}`), whose value is not knowable here — and an unknowable value
+  # was being treated as "fatal on failure", i.e. the permissive answer. There are 2
+  # expression-valued instances in this repository's workflows today, so this is a live shape
+  # rather than a hypothetical.
+  #
+  # Absent or literal `false` => a failure of this step/job CAN fail the context, so it may
+  # carry a `required-gate-step` claim. Anything else — literal `true`, an expression, a string,
+  # a number — is NOT provably fatal and is excluded. A claim naming an excluded step then fails
+  # closed with the caller's "no such gating step" diagnostic, which is the conservative
+  # direction: the cost is a refused claim (loud, fixable by naming a different step), never an
+  # accepted claim whose failure would be ignored.
+  def gating_failure_possible?(node)
+    return true unless node.is_a?(Hash)
+    return true unless node.key?("continue-on-error")
+
+    node["continue-on-error"] == false
+  end
+
+  def required_gate_step_names(registry, workflows)
+    # THE SCHEMA VALIDATOR MUST NOT CRASH ON THE SCHEMA IT VALIDATES (roborev round
+    # 2). `Hash#dig` raises TypeError the moment an intermediate value is not
+    # diggable, so a registry with a NON-MAPPING `aggregator` (`aggregator:
+    # pr-gate.yml`, or a list) used to abort this whole run with an uncaught ruby
+    # backtrace — and it did so from INSIDE schema validation, pre-empting the
+    # named `aggregator must be a mapping` error that aggregator_schema_errors was
+    # about to produce for the very same key. The operator learned that something
+    # blew up, not which key was wrong.
+    #
+    # Same rule as the unparseable-YAML and empty-document branches in
+    # gating_policy_rules.rb, one layer up: input this code cannot interpret gets a
+    # NAMED refusal. `nil` needs no guard — `Hash#dig` returns nil through a nil
+    # intermediate — but it is covered by the same predicate anyway, so there is
+    # one condition rather than a list of shapes to keep complete.
+    aggregator = registry["aggregator"]
+    unless aggregator.is_a?(Hash)
+      return [[], "the registry's `aggregator` is #{aggregator.class}, not a mapping naming the " \
+                  "aggregating workflow and job, so no `required-gate-step` claim can be verified"]
+    end
+
+    workflow_name = aggregator["workflow"].to_s
+    job_name = aggregator["job"].to_s
+    workflow = workflows[workflow_name]
+    return [[], "aggregator workflow #{workflow_name} is not readable, so no `required-gate-step` " \
+                "claim can be verified"] unless workflow.is_a?(Hash)
+
+    jobs = workflow["jobs"]
+    return [[], "aggregator workflow #{workflow_name} declares no `jobs:` mapping"] unless jobs.is_a?(Hash)
+    return [[], "aggregator workflow #{workflow_name} has no job `#{job_name}`"] unless jobs[job_name].is_a?(Hash)
+
+    closure = []
+    frontier = Array(jobs.dig(job_name, "needs")).map(&:to_s)
+    until frontier.empty?
+      current = frontier.shift
+      next if closure.include?(current)
+
+      job = jobs[current]
+      next unless job.is_a?(Hash)
+
+      closure << current
+      frontier.concat(Array(job["needs"]).map(&:to_s))
+    end
+
+    # A STEP WHOSE FAILURE CANNOT FAIL THE CONTEXT IS NOT A GATING STEP (roborev round 8).
+    # `continue-on-error: true`, at step OR job level, makes a failure non-fatal, so such a
+    # step cannot carry a `required-gate-step` claim and is EXCLUDED here rather than
+    # accepted. Measured when added: ZERO steps in the aggregator's closure carry either
+    # flag, so this changes no current verdict and closes the route for the next one.
+    #
+    # DELIBERATELY NOT EXCLUDED: a step bearing an `if:`. Both claims in the registry today
+    # (`Validate workflow policy`, `cqlite-core fast representative tests`) are conditional
+    # on the docs-only short-circuit, BY DESIGN — a docs-only PR is meant to skip the core
+    # gate. Rejecting conditional steps would therefore red the registry on correct input,
+    # which is the guard agents learn to waive. So the residual is DECLARED instead: on a PR
+    # where the condition is false the named step does not run, and the exemption's gating
+    # claim is correspondingly weaker for that PR. Deciding whether a conditional step may
+    # carry the claim at all is a policy question for the registry's owner, not something to
+    # settle by tightening a parser.
+    names = closure.flat_map do |job|
+      job_hash = jobs[job]
+      next [] unless job_hash.is_a?(Hash)
+      next [] unless gating_failure_possible?(job_hash)
+
+      steps = job_hash["steps"]
+      next [] unless steps.is_a?(Array)
+
+      steps.filter_map do |step|
+        next unless step.is_a?(Hash) && step["name"]
+        next unless gating_failure_possible?(step)
+
+        step["name"].to_s
+      end
+    end.reject(&:empty?)
+    return [[], "the aggregating job `#{job_name}` depends on no job with a NAMED step, so no " \
+                "`required-gate-step` claim can be verified"] if names.empty?
+
+    [names, nil]
   end
 
   def default_wait_minutes(registry)
@@ -707,7 +906,8 @@ if __FILE__ == $PROGRAM_NAME
     labels: [],
     final: false,
     now: nil,
-    grace: GatingRegistry::DEFAULT_SUPERSESSION_GRACE_SECONDS
+    grace: GatingRegistry::DEFAULT_SUPERSESSION_GRACE_SECONDS,
+    gate_components: GatingRegistry::DEFAULT_GATE_COMPONENTS
   }
 
   options[:context] = nil
@@ -722,6 +922,10 @@ if __FILE__ == $PROGRAM_NAME
     opts.on("--context NAME", "check-run name for `recorded-result`") { |v| options[:context] = v }
     opts.on("--registry PATH") { |v| options[:registry] = v }
     opts.on("--workflows-dir DIR") { |v| options[:workflows_dir] = v }
+    opts.on("--gate-components PATH",
+            "the local agent gate's component manifest (merge_gating_half validation)") do |v|
+      options[:gate_components] = v
+    end
     opts.on("--check-runs PATH", "check-run JSON/NDJSON file, or - for stdin") { |v| options[:check_runs] = v }
     opts.on("--exclude-ids LIST", "comma/space/newline separated check-run ids to drop") do |v|
       options[:exclude_ids] = v.split(/[\s,]+/).reject(&:empty?)
@@ -755,7 +959,9 @@ if __FILE__ == $PROGRAM_NAME
   begin
     case command
     when "policy"
-      errors = GatingRegistry.policy_errors(workflows_dir: options[:workflows_dir], registry_path: options[:registry])
+      errors = GatingRegistry.policy_errors(workflows_dir: options[:workflows_dir],
+                                            registry_path: options[:registry],
+                                            gate_components_path: options[:gate_components])
       if errors.empty?
         puts "gating-tier registry validated (#{GatingRegistry.tiers(GatingRegistry.load_registry(options[:registry])).length} tiers)"
         exit 0
