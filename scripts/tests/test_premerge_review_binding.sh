@@ -89,6 +89,14 @@ cp "$REPO_ROOT/ci/classify-docs-only.sh" "$CI/classify-docs-only.sh" || {
   printf 'FAIL - could not copy scripts/ci/classify-docs-only.sh into scratch.\n' >&2
   exit 1
 }
+# THE SHARED FINDINGS-COUNT RECOGNISER (#4050) is resolved from the script's OWN `lib/`
+# directory with no override, so scratch must lay it out identically or the leg refuses
+# UNMEASURED on every case — a setup failure that would look like the leg's own refusal.
+mkdir -p "$FLOW/lib"
+cp "$REPO_ROOT/flow/lib/roborev-findings-count.sh" "$FLOW/lib/" || {
+  printf 'FAIL - could not copy scripts/flow/lib/roborev-findings-count.sh into scratch.\n' >&2
+  exit 1
+}
 # An IMMEDIATE advisory stub, so no case scans the ambient checkout.
 cat >"$FLOW/base-staleness.sh" <<'ADV'
 #!/usr/bin/env bash
@@ -680,6 +688,8 @@ fi
 UNCLS="$T/uncls"
 mkdir -p "$UNCLS/scripts/flow" "$UNCLS/scripts/ci"
 cp "$FLOW"/*.sh "$FLOW"/*.py "$UNCLS/scripts/flow/" 2>/dev/null
+mkdir -p "$UNCLS/scripts/flow/lib"
+cp "$FLOW/lib/roborev-findings-count.sh" "$UNCLS/scripts/flow/lib/" 2>/dev/null
 # The stub must fail ONLY on the SECOND call. An always-failing classifier is
 # consumed by the leg's FIRST use — the PR-diff code-free check — so the case
 # would pass on a different cause than the one it names, which is a test green
@@ -2140,6 +2150,8 @@ for f in premerge-review-binding.sh premerge-pr-scan.py roborev-job-facts.py \
   roborev-review-oracles.sh base-staleness.sh; do
   cp "$FLOW/$f" "$FLOW_NOSCAN/$f" || noscan_ready=0
 done
+mkdir -p "$FLOW_NOSCAN/lib"
+cp "$FLOW/lib/roborev-findings-count.sh" "$FLOW_NOSCAN/lib/" || noscan_ready=0
 chmod +x "$FLOW_NOSCAN"/*.sh "$FLOW_NOSCAN"/*.py 2>/dev/null
 # The absence is measured AFFIRMATIVELY, not with a bare `[ ! -f ]`: a plain
 # negative file test folds "the directory is unreadable" onto "the file is

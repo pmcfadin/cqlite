@@ -117,7 +117,10 @@
 #      here (the record carries a verdict LETTER; a recheck writes no row). This
 #      used to be DECLARED and allowed to bind, which let the merge gate honour a
 #      marker the review-time path would REJECT — a fresh marker can carry any
-#      count. Every bind therefore rests on an affirmatively CLEAN record.
+#      count. A FINDINGS record binds ONLY through an authorization whose every
+#      half was MEASURED — including its `count=` matched against the count
+#      derived from that record's own recorded review text by the recogniser the
+#      review-time gate uses (#4050). Every other findings state refuses.
 #   2. It does NOT model roborev's exclusion set, and it does not re-derive the
 #      wrapper's own asserts. It answers ONE question: is the commit a recorded
 #      review actually covered an ancestor of the tree about to merge, with no
@@ -154,6 +157,13 @@ CLASSIFY_TOOL="$OWN_DIR/../ci/classify-docs-only.sh"
 # a drift there is an authorization bypass.
 WAIVER_SCAN_TOOL="$OWN_DIR/roborev-waiver-scan.py"
 ORACLES_FILE="$OWN_DIR/roborev-review-oracles.sh"
+# THE SHARED FINDINGS-COUNT RECOGNISER (#4050). #3626's deferral grants only when the
+# marker's `count=` EQUALS the count the review observed, so this leg must derive that
+# count from the record's own review text — and it must derive it by running the SAME CODE
+# the review-time end runs, or the two ends can disagree and a disagreement there is an
+# authorization bypass in one direction or the other. Same resolution rule as everything
+# else here: this script's OWN directory, no env override, no `${...:-...}` fallback.
+ROBOREV_FINDINGS_COUNT_LIB="$OWN_DIR/lib/roborev-findings-count.sh"
 
 P=''
 
@@ -226,6 +236,87 @@ need_file() {
     unmeasured "the required artifact $1 is absent beside this script. It is resolved from" \
       "this script's OWN directory with no override (#3312), so an absent artifact is a" \
       "broken checkout, never a reason to skip the check."
+}
+
+# load_findings_count_lib — guard and source the SHARED findings-count recogniser (#4050).
+#
+# `-f` AS WELL AS `-r`, and this is the SAME PREDICATE roborev-review-checks.sh applies to
+# the SAME library — pinned byte-identical by scripts/tests/test_roborev_review_guard.sh,
+# because a guard duplicated by copying is a guard that gets weakened in one copy. `.` on a
+# FIFO would BLOCK FOREVER waiting for a writer and `-r` is TRUE for one: measured elsewhere
+# in this repo as `timeout 10` -> rc 124 with NO diagnostic at all, which in a MERGE GATE is
+# the worst available failure — not a wrong verdict but NO verdict, forever, in a lane nobody
+# is watching. A socket, a device or a directory is the same class and `-f` is false for every
+# one of them, so ONE predicate covers the class rather than a list of types to keep complete.
+# Both predicates FOLLOW a symlink, which is deliberate: a symlinked checkout is a legitimate
+# layout. THIS EXPOSURE IS NEW WITH THE EXTRACTION — before it there was no `source` here to
+# guard (#3822 clause 12).
+#
+# AN ABSENT LIBRARY IS UNMEASURED, NEVER A REFUSAL AND NEVER A SKIP: it says nothing about
+# whether a human authorized this deferral. Called from inside `cmd_review_binding`, AFTER
+# `P` is set, so the diagnostic carries this leg's anchor; sourcing inside a function still
+# defines the functions globally.
+load_findings_count_lib() {
+  { [ -f "$ROBOREV_FINDINGS_COUNT_LIB" ] && [ -r "$ROBOREV_FINDINGS_COUNT_LIB" ]; } ||
+    unmeasured "the shared findings-count recogniser at $(sane "$ROBOREV_FINDINGS_COUNT_LIB")" \
+      "cannot be read as a regular file, so the count a findings deferral must match could" \
+      "not be derived. It is resolved from this script's OWN directory with no override" \
+      "(#3312), so an absent or non-regular artifact is a broken checkout."
+  # shellcheck source=lib/roborev-findings-count.sh
+  . "$ROBOREV_FINDINGS_COUNT_LIB"
+  [ "$(type -t roborev_findings_count)" = function ] ||
+    unmeasured "$(sane "$ROBOREV_FINDINGS_COUNT_LIB") did not define roborev_findings_count," \
+      "so the findings count cannot be derived. The file is truncated or corrupt."
+}
+
+# derive_findings_count <review-text-file> <scratch-block-file> — THREE-VALUED.
+#   0  DERIVED_FINDINGS_COUNT holds an AFFIRMATIVELY MEASURED integer >= 1
+#   1  it could not be affirmatively measured, and DERIVED_FINDINGS_COUNT_CAUSE says why
+#
+# ONLY THE ZERO RETURN MAY FEED A BINDING. Every other state — no review text, empty text, a
+# census that could not be taken, a non-integer, or a count of 0 on a record whose verdict is
+# affirmatively FINDINGS — keeps this leg's pre-#4050 behaviour exactly: UNMEASURED, never a
+# bind and never a refusal. That asymmetry is what makes this change addition-only in the
+# permissive direction (see the binding site).
+#
+# A COUNT OF 0 ON AN `F` RECORD IS NOT A MEASUREMENT OF THIS RECORD'S FINDINGS, IT IS A
+# CONTRADICTION. The structured verdict says the review found something; a census that finds
+# no severity marker has therefore failed to see what the verdict asserts — most likely a
+# review whose findings carry no recognised marker at all, a shape this repo has met twice
+# (#3564). Comparing a marker's `count=` against that 0 would let a marker authorizing zero
+# findings clear a findings-bearing record, so it is refused as unmeasured rather than used.
+DERIVED_FINDINGS_COUNT=""
+DERIVED_FINDINGS_COUNT_CAUSE=""
+derive_findings_count() {
+  local review="$1" block="$2" count
+  DERIVED_FINDINGS_COUNT=""
+  DERIVED_FINDINGS_COUNT_CAUSE=""
+  # `-f` AND `-r`, three-valued: "the record carried no review text" and "a file we cannot
+  # read" are both non-measurements, and each NAMES the input it could not read.
+  { [ -f "$review" ] && [ -r "$review" ]; } || {
+    DERIVED_FINDINGS_COUNT_CAUSE="the job record yielded no readable review text at $(sane "$review"), so no findings count could be DERIVED from it"
+    return 1
+  }
+  if [ ! -s "$review" ]; then
+    DERIVED_FINDINGS_COUNT_CAUSE="the job record's review text is EMPTY (roborev exposes it as \`output\`/\`verdict_text\`), so no findings count could be DERIVED from it"
+    return 1
+  fi
+  count=$(roborev_findings_count "$review" "$block") || {
+    DERIVED_FINDINGS_COUNT_CAUSE="the findings-count census over the record's review text could NOT BE TAKEN (the block extraction or the marker scan failed), so no count could be DERIVED — and an untakeable census is never read as zero"
+    return 1
+  }
+  case "$count" in
+    '' | *[!0-9]*)
+      DERIVED_FINDINGS_COUNT_CAUSE="the findings-count census answered '$(sane "$count")', which is not a count, so no findings count could be DERIVED"
+      return 1
+      ;;
+    0)
+      DERIVED_FINDINGS_COUNT_CAUSE="the findings-count census over the record's review text found ZERO severity markers while the record's structured verdict is affirmatively FINDINGS — a CONTRADICTION, not a measurement of this record's findings (most likely a review whose findings carry no recognised severity marker). A marker's count= may not be matched against it, so no count could be DERIVED"
+      return 1
+      ;;
+  esac
+  DERIVED_FINDINGS_COUNT="$count"
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -471,6 +562,13 @@ issue_state_of() {
 DEFERRAL_AUTHOR=""
 DEFERRAL_ISSUE_REFUSAL=""
 DEFERRAL_UNMEASURED=""
+# The scanner's own non-granting STATE, so the binding site can NAME it. `count-mismatch`
+# and "no marker at all" are different operator actions — re-triage and re-authorize for
+# the count actually observed, versus post an authorization at all — and collapsing them
+# into one generic "no authorized deferral covers this job" is the wrong-remedy defect
+# roborev job 102 closed one call over (#4050).
+DEFERRAL_REFUSED_STATE=""
+DEFERRAL_REFUSED_DETAIL=""
 # deferral_authorized — THREE-VALUED (roborev job 102).
 #   0  an allowlisted human authorized deferring THIS job's findings
 #   1  the authorization WAS evaluated and REFUSED
@@ -489,9 +587,27 @@ DEFERRAL_UNMEASURED=""
 # merge is blocked. Do NOT read 2 / UNMEASURED as the softer answer: it is the
 # same refusal with an accurate cause.
 deferral_authorized() {
-  local job="$1" base="$2" head="$3" tmp="$4" repo_slug="$5" allow result state rc
+  local job="$1" base="$2" head="$3" tmp="$4" repo_slug="$5" observed="${6:-}"
+  local allow result state rc kind want
   DEFERRAL_AUTHOR=""
   DEFERRAL_UNMEASURED=""
+  DEFERRAL_REFUSED_STATE=""
+  DEFERRAL_REFUSED_DETAIL=""
+  # ===== WHICH KIND, AND WHY THAT IS THE WHOLE OF THE #4050 CHANGE HERE =====
+  # With an AFFIRMATIVELY MEASURED count the scanner is asked the FULL question
+  # (`findings-deferral`, the DEFER kind) — the same judge, with the same count equality,
+  # that the review-time path uses — and only its `granted` state may bind. Without one it
+  # is asked the AUTHORIZATION-ONLY question exactly as before (`granted-authorization`),
+  # which the binding site then reports as UNMEASURED. The judge is untouched: it already
+  # accepts this argument, and giving it one is the difference between a count compared and
+  # a count skipped.
+  if [ -n "$observed" ]; then
+    kind=findings-deferral
+    want=granted
+  else
+    kind=findings-deferral-authorization
+    want=granted-authorization
+  fi
   # THE ORACLE'S OWN AVAILABILITY IS AN UNMEASURED CAUSE, NOT A REFUSAL. An
   # absent scanner says nothing whatever about whether a human authorized this
   # deferral; reporting it as "not authorized" states as measured fact something
@@ -507,8 +623,16 @@ deferral_authorized() {
     DEFERRAL_UNMEASURED="the hard-coded author allowlist could not be read from $(sane "$ORACLES_FILE"), so WHO may authorize a deferral is unknown"
     return 2
   fi
-  result=$(python3 "$WAIVER_SCAN_TOOL" findings-deferral-authorization \
-    "$base" "$head" "$job" "$allow" <"$tmp/pr.json" 2>/dev/null)
+  # The count is passed ONLY for the DEFER kind: the AUTHZ kind treats a count argument as a
+  # USAGE ERROR rather than ignoring it, which is deliberate on its side and is why the two
+  # argument lists are built separately instead of interpolating a possibly-empty word.
+  if [ -n "$observed" ]; then
+    result=$(python3 "$WAIVER_SCAN_TOOL" "$kind" \
+      "$base" "$head" "$job" "$allow" "$observed" <"$tmp/pr.json" 2>/dev/null)
+  else
+    result=$(python3 "$WAIVER_SCAN_TOOL" "$kind" \
+      "$base" "$head" "$job" "$allow" <"$tmp/pr.json" 2>/dev/null)
+  fi
   rc=$?
   if [ "$rc" -ne 0 ]; then
     DEFERRAL_UNMEASURED="the deferral scanner failed (exit $rc), so the PR's comments could not be scanned for an authorization"
@@ -521,11 +645,17 @@ deferral_authorized() {
     DEFERRAL_UNMEASURED="the deferral scanner returned no readable state, so its answer could not be established"
     return 2
   fi
-  # KEYED ON THE AFFIRMATIVE VALUE, never on `!= <bad>`: a state this code has
-  # never judged is not a grant. A NAMED non-granting state (NONE, MALFORMED,
-  # UNAUTHORIZED, STALE, …) IS a measurement — the scanner looked and found no
-  # valid authorization — so it stays a refusal.
-  [ "$state" = "granted-authorization" ] || return 1
+  # KEYED ON THE AFFIRMATIVE VALUE, never on `!= <bad>`: `$want` is this kind's
+  # ONE granting state, so a state this code has never judged is not a grant.
+  # A NAMED non-granting state (NONE, MALFORMED, UNAUTHORIZED, STALE,
+  # COUNT-MISMATCH, …) IS a measurement — the scanner looked and found no valid
+  # authorization — so it stays a refusal, and it is RECORDED so the binding site
+  # can name which one it was.
+  if [ "$state" != "$want" ]; then
+    DEFERRAL_REFUSED_STATE="$state"
+    DEFERRAL_REFUSED_DETAIL=$(printf '%s\n' "$result" | sed -n 's/^detail=//p' | head -1)
+    return 1
+  fi
   DEFERRAL_AUTHOR=$(printf '%s\n' "$result" | sed -n 's/^author=//p' | head -1)
 
   # ===== EVERY DECLARED ISSUE MUST BE AN OPEN ISSUE GITHUB CONFIRMS =====
@@ -599,6 +729,9 @@ cmd_review_binding() {
   need_file "$SCAN_TOOL"
   need_file "$FACTS_TOOL"
   need_file "$CLASSIFY_TOOL"
+  # THE SHARED FINDINGS-COUNT RECOGNISER (#4050). Loaded here, with `P` already set, so a
+  # guard failure prints this leg's anchored UNMEASURED rather than an unprefixed line.
+  load_findings_count_lib
 
   # GLOBAL, deliberately: the EXIT trap below fires as the shell unwinds, by
   # which point a `local` may be out of scope and the trap would expand to
@@ -787,23 +920,70 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
       findings)
         DEFERRAL_ISSUE_REFUSAL=""
         DEFERRAL_UNMEASURED=""
-        deferral_authorized "$j" "$RH_BASE" "$RH_HEAD" "$tmp" "$repo"
+        # ===== DERIVE THE OBSERVED FINDINGS COUNT FROM THE RECORD (#4050) =====
+        # #3626's deferral grants only when the marker's `count=` EQUALS the count
+        # the review observed, and that equality is the ONLY affirmative evidence
+        # that the findings the authorizer judged are the findings this record
+        # reports. The record carries no count FIELD — which is why this leg used to
+        # return UNMEASURED for EVERY authorized findings record, making a validly
+        # deferred PR permanently unmergeable — but it DOES carry the review TEXT,
+        # and the count is derived from it by the SHARED recogniser, running the
+        # SAME CODE the review-time end runs.
+        #
+        # THE RESIDUAL, STATED HERE BECAUSE IT WILL BE REVIEWED. The count comes out
+        # of PROSE, and #3564 rules that a recogniser over author-controlled prose
+        # never closes. It is nonetheless sound:
+        #   * NOTHING here derives CLEANLINESS from prose. `clean` stays reachable
+        #     ONLY from the record's structured verdict letter (the `clean)` arm
+        #     above); this arm is entered only for a record already affirmatively
+        #     `F`, and all the prose supplies is HOW MANY.
+        #   * The recogniser's non-closure is inherited IDENTICALLY at both ends —
+        #     same file, same bytes, same call — so it cannot create a
+        #     review-time-vs-merge-time disagreement and cannot widen what review
+        #     time already granted. An undercount that fooled this leg fooled review
+        #     time first. The property delivered is exactly #3626's: the authorizer's
+        #     count equals the count our recogniser observes in the DAEMON-RECORDED
+        #     review.
+        #   * It does NOT make the count tamper-proof against a party who can write
+        #     roborev's database. That actor is INVOKER-CLASS and out of model
+        #     (#3312's triage rule); it is not claimed and must not be claimed.
+        #
+        # AND THE CHANGE IS ADDITION-ONLY IN THE PERMISSIVE DIRECTION: it adds a
+        # BOUND path where none existed and leaves EVERY unmeasurable state refusing
+        # exactly as before, so it cannot introduce a false green in the unmeasurable
+        # direction. A refusal is subtracted only where a count was affirmatively
+        # measured AND the same judge that gates review time granted.
+        local rpb_observed=""
+        if derive_findings_count "$tmp/review" "$tmp/findings-block"; then
+          rpb_observed="$DERIVED_FINDINGS_COUNT"
+        fi
+        deferral_authorized "$j" "$RH_BASE" "$RH_HEAD" "$tmp" "$repo" "$rpb_observed"
         case "$?" in
           0)
+            if [ -n "$rpb_observed" ]; then
+              # EVERY HALF OF THE AUTHORIZATION WAS MEASURED AND MATCHED: an
+              # allowlisted author, a sole-content top-level marker, the scope
+              # bound to THIS base AND head AND job, every named issue an OPEN
+              # issue GitHub confirms, AND the declared `count=` equal to the count
+              # derived from this record's own review text by the same recogniser
+              # the review-time gate uses. That is #3626's property in full, so it
+              # binds — which is the whole point of #4050: before it, no sequence
+              # of actions could merge a validly deferred PR.
+              RESULT_NOTE="record verdict is FINDINGS and ALL $(sane "$rpb_observed") of them are DEFERRED by an authorization from @$(sane "$DEFERRAL_AUTHOR") naming THIS review (tracking issues VERIFIED OPEN), whose declared count= EQUALS the $(sane "$rpb_observed") finding(s) DERIVED from job $(sane "$j")'s own recorded review text by the SAME recogniser the review-time gate uses"
+              return 0
+            fi
             # THE AUTHORIZATION IS GOOD AND IT STILL CANNOT BIND (roborev job
-            # 103). The marker's `count=` half is what ties a deferral to the
-            # findings it defers, and it is matched against the count OBSERVED
-            # BY THE REVIEW. This leg never ran the review, and the job record
-            # carries a verdict LETTER and NO count (measured: findings-bearing
-            # jobs 78 and 102 both expose only `verdict_bool`/`verdict`), nor
-            # does a recheck write a job row. So there is no trusted count here
-            # to compare against — and DECLARING that gap, which is what this
-            # code used to do, let the merge gate accept a marker the
-            # review-time path would REJECT: an allowlisted human can post a
-            # fresh marker after the review carrying any count at all. An
-            # accident route past a check that exists is a defect (#3312), so
-            # the binding is UNMEASURED rather than declared.
-            RESULT_NOTE="record verdict is FINDINGS and its deferral is AUTHORIZED by @$(sane "$DEFERRAL_AUTHOR") (tracking issues VERIFIED OPEN), but the marker's count= half CANNOT BE VERIFIED at the merge point: no trusted findings count exists in job $(sane "$j")'s record, which carries a verdict letter only"
+            # 103) — because the half that ties it to the findings it defers was
+            # not MEASURABLE for this record. The marker's `count=` is matched
+            # against the count OBSERVED BY THE REVIEW; this leg never ran the
+            # review, and no count could be DERIVED from this record. Declaring
+            # that gap and binding anyway — what this code did before job 103 —
+            # let the merge gate accept a marker the review-time path would
+            # REJECT, since an allowlisted human can post a fresh marker
+            # afterwards carrying any count at all. An accident route past a
+            # check that exists is a defect (#3312), so this stays UNMEASURED
+            # rather than declared.
+            RESULT_NOTE="record verdict is FINDINGS and its deferral is AUTHORIZED by @$(sane "$DEFERRAL_AUTHOR") (tracking issues VERIFIED OPEN), but the marker's count= half CANNOT BE VERIFIED for this record: $DERIVED_FINDINGS_COUNT_CAUSE"
             RESULT_DEFERRAL_UNVERIFIABLE=1
             return 1
             ;;
@@ -822,6 +1002,16 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
         # re-post a marker that was already fine.
         if [ -n "$DEFERRAL_ISSUE_REFUSAL" ]; then
           RESULT_NOTE="record verdict is FINDINGS and its deferral cannot stand: $DEFERRAL_ISSUE_REFUSAL"
+        elif [ "$DEFERRAL_REFUSED_STATE" = count-mismatch ]; then
+          # NAMED, AND DISTINCT FROM "no authorization exists" (#4050). The
+          # authorization is present and well-formed; its declared count does not
+          # equal the count this record reports, which is the one thing tying a
+          # deferral to the findings it defers — so ANY new finding at the same head
+          # lands here rather than riding an older authorization. The remedy is to
+          # re-triage and re-authorize for the count actually observed, NOT to
+          # re-post the same marker and NOT to fix a box, so it may not be folded
+          # into the generic refusal below.
+          RESULT_NOTE="record verdict is FINDINGS and its deferral is COUNT-MISMATCH: $(sane "${DEFERRAL_REFUSED_DETAIL:-the marker's declared count= does not equal the $rpb_observed finding(s) derived from this record's own recorded review text}")"
         else
           RESULT_NOTE="record verdict is FINDINGS and no authorized deferral covers this job"
         fi
@@ -1137,11 +1327,14 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
     verdict BOUND
     detail "a recorded roborev round covers the certified head's reviewable content, and that"
     detail "round's RECORD says its review concluded in a bindable state: $BOUND_NOTE."
-    # NOTE: there is deliberately no "this bind rests on a deferral" arm here.
-    # Since roborev job 103 a FINDINGS record can never reach BOUND — its
-    # deferral's count= half is unverifiable at the merge point — so every bind
-    # rests on an affirmatively CLEAN record. An arm describing a deferred bind
-    # would be describing an unreachable state.
+    # A DEFERRED BIND IS REACHABLE SINCE #4050, AND `$BOUND_NOTE` IS WHAT SAYS
+    # SO. There is deliberately still no separate arm: the note is written at the
+    # binding site, which is the only place that knows which half was measured,
+    # and a second rendering here would be a second place for it to drift. What
+    # roborev job 103 forbade — a deferral binding with its `count=` half merely
+    # DECLARED rather than compared — remains unreachable: a findings record
+    # binds only where a count was DERIVED from that record's own review text and
+    # the same judge that gates review time granted on it.
     exit 0
   fi
 
@@ -1182,12 +1375,15 @@ it prints.")
 so it can bind ONLY via an authorized deferral — and an authorization WAS found, from an \
 allowlisted human, naming tracking issues verified OPEN. It still cannot bind: the marker's \
 \`count=\` half is what ties a deferral to the findings it defers, it is matched against the count \
-OBSERVED BY THE REVIEW, and no trusted findings count exists at this point — the job record \
-carries a verdict LETTER and no count, and a recheck writes no record. Accepting the marker \
-anyway would let the merge gate honour an authorization the review-time path would REJECT, since \
-a fresh marker can carry any count at all. REMEDY: re-run the review after the findings are \
-addressed, or otherwise obtain a clean covering round — a deferral cannot be verified at the \
-merge point. This is NOT a finding that the authorization is bad; do not re-post the marker.")
+OBSERVED BY THE REVIEW, and for THIS record no such count could be DERIVED. Since #4050 that \
+count is derived from the job record's OWN recorded review text by the same recogniser the \
+review-time gate uses, so this verdict means that text was absent, empty, uncountable, or \
+reported ZERO severity markers on a record whose verdict is affirmatively FINDINGS — the cause \
+above says which. Accepting the marker without it would let the merge gate honour an \
+authorization the review-time path would REJECT, since a fresh marker can carry any count at \
+all. REMEDY: run a fresh round at this head so its record carries a countable review (then \
+re-authorize for the count that round observes), or obtain a clean covering round. This is NOT a \
+finding that the authorization is bad; do not re-post the same marker on the strength of it.")
   fi
   if [ "$authz_unmeasured" -eq 1 ]; then
     causes+=("a recorded round COVERS the certified head and its record verdict is FINDINGS, \
@@ -1225,11 +1421,15 @@ different actions — so it is reported as its own verdict rather than folded in
     say "unbound FINDINGS and no authorized deferral covers it."
     verdict UNBOUND
     detail "REMEDY: resolve the findings and run a fresh round at this head, so a covering"
-    detail "round exists whose record verdict is affirmatively CLEAN. A findings-deferral"
-    detail "marker will NOT make this bind (roborev job 103): its count= half is matched"
-    detail "against the count the REVIEW observed, and no trusted count exists at the merge"
-    detail "point, so an authorized deferral is UNMEASURED here rather than a clearance. A"
-    detail "deferral is still the route past the WRAPPER's own findings gate at review time."
+    detail "round exists whose record verdict is affirmatively CLEAN — or, if a lead has"
+    detail "DEFERRED them to filed issues, get that deferral AUTHORIZED for this exact"
+    detail "review. Since #4050 an authorized deferral CAN bind here, but only when every"
+    detail "half is measured: an allowlisted author, a sole-content top-level PR comment,"
+    detail "the scope bound to this base AND head AND job, every named issue an OPEN issue"
+    detail "GitHub confirms, and a count= EQUAL to the findings count derived from this"
+    detail "record's own recorded review text. Read the per-job line above for which half"
+    detail "was missing; a COUNT-MISMATCH means re-triage and re-authorize for the count"
+    detail "actually observed, not re-post the same marker."
     exit 4
   fi
   say "unbound none of the recorded roborev rounds covers the certified head."
@@ -1282,11 +1482,20 @@ reviewed_head_of() {
     esac
     [ -n "$json" ] || continue
     : >"$tmp/facts"
+    # THE FOURTH PATH IS THE RECORD'S REVIEW TEXT (#4050, AC2). The record carries no
+    # findings-count FIELD, but it does carry the review OUTPUT (`output`/`verdict_text`,
+    # on the review row or the nested job row), and `roborev-job-facts.py` already writes
+    # it out for `--recheck-job`. Asking for it here is what lets the binding site derive
+    # the count the #3626 deferral marker's `count=` must equal — through the SHARED
+    # recogniser, running the SAME code the review-time end runs. No second parser is
+    # added and no JSON is parsed in bash: this is the SAME ONE parse, given one more
+    # output path.
+    : 2>/dev/null >"$tmp/review" || continue
     # Redirection, not a pipe, for the reason given in `classify_paths`: under
     # `set -o pipefail` a consumer that exits before draining stdin makes the
     # pipeline report the PRODUCER's SIGPIPE, which is indistinguishable here
     # from the parse having failed.
-    python3 "$FACTS_TOOL" "$job" "$tmp/facts" "$tmp/prompt" \
+    python3 "$FACTS_TOOL" "$job" "$tmp/facts" "$tmp/prompt" "$tmp/review" \
       >/dev/null 2>&1 <<<"$json" || continue
     ref=$(sed -n 's/^git_ref=//p' "$tmp/facts" | head -1 | tr 'A-F' 'a-f')
     [ -n "$ref" ] || continue
