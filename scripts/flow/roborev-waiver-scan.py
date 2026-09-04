@@ -114,12 +114,20 @@ DEFER_STEM = "roborev-defer: findings"
 #
 # WHAT IT DELIBERATELY DOES NOT JUDGE, AND WHY THIS IS A SEPARATE KIND RATHER THAN A FLAG ON THE
 # EXISTING ONE: the `count=` equality. That half is matched against the findings count OBSERVED BY
-# THE REVIEW, and the merge gate never ran the review — the job record carries a verdict LETTER and
-# no count at all. There is therefore no measured count for the merge gate to compare against, and
-# the two dishonest ways to manufacture one are both refused here: passing a fabricated count would
-# make an affirmative check pass on an unmeasured value (the exact shape #3586 forbids), and parsing
-# the count out of the marker so it can be compared with itself would be a tautology dressed as a
-# check. Enforcing it at REVIEW time is what the wrapper does and where the measurement exists.
+# THE REVIEW, and this kind is asked ONLY WHEN NO SUCH COUNT COULD BE DERIVED — so for the caller
+# that asks it, there is no measured count to compare against, and the two dishonest ways to
+# manufacture one are both refused here: passing a fabricated count would make an affirmative check
+# pass on an unmeasured value (the exact shape #3586 forbids), and parsing the count out of the
+# marker so it can be compared with itself would be a tautology dressed as a check.
+#
+# SCOPED TO THIS KIND SINCE #4050, AND IT USED TO BE STATED ABSOLUTELY. The old wording said the
+# merge gate "never ran the review" and that enforcing the equality at review time is "where the
+# measurement exists" — true of the reviewer, and FALSE as a claim about what the merge gate can
+# measure. The job record carries no count FIELD, but it does carry the review TEXT, so the merge
+# gate DERIVES the count from it with the same recogniser the wrapper uses and then asks DEFER_KIND,
+# count included. Those sentences read as this design's rationale, so leaving them absolute made the
+# rationale affirmatively wrong once #4050 landed — the class this repo grades worse than silence.
+# See the AUTHZ_KIND note below for what the merge gate now does and when it still falls back here.
 #
 # So the state is `granted-authorization`, TEXTUALLY DISTINCT from the wrapper's `granted`, and the
 # consumer prints it as its own token. Nobody grepping for a full deferral grant can match this. One

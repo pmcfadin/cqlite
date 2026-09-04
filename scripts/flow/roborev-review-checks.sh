@@ -62,8 +62,12 @@ ROBOREV_FINDINGS_COUNT_LIB="$_rfc_dir/lib/roborev-findings-count.sh"
 # THE SOURCE ITSELF IS CONDITIONAL, not just the readability probe (roborev job 123):
 # a readable-but-CORRUPT library makes `.` return non-zero, and a bare `.` under a
 # caller's `set -e` would kill the wrapper before its required-function check could fail
-# closed. Both failures land on the SAME diagnostic, because both leave the recogniser
-# undefined and the remedy is identical; the wording covers both causes.
+# closed. Both failures land on the SAME diagnostic and the remedy is identical, so one
+# wording covers both causes. They can share it because the failed-load branch below
+# UNDEFINES the recogniser — BY CONSTRUCTION, NOT BY NATURE: a corrupt library that fails
+# in its TAIL leaves the functions already defined (roborev job 124, measured), which is
+# precisely why that `unset -f` exists. Read the two halves together; neither is complete
+# on its own, and without the unset this sentence would be false.
 _rfc_lib_loaded=0
 if { [ -f "$ROBOREV_FINDINGS_COUNT_LIB" ] && [ -r "$ROBOREV_FINDINGS_COUNT_LIB" ]; }; then
   # shellcheck source=lib/roborev-findings-count.sh
