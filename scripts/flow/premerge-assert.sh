@@ -1907,6 +1907,282 @@ c_assert_verdict_from_validated_generation() {
   esac
 }
 
+# --- the superseded-generation census (#3751 round 22, AB1) --------------------
+# A PRESERVED BLOCKING VERDICT WAS READ BY NOBODY, AND THIS IS WHERE IT IS READ.
+#
+# THE FINDING (roborev job 435, High, review-stage.sh:3920-3926). `record-author-performed`
+# re-verifies the report and the stage record and then publishes, and the span between those
+# reads and the `rename(2)` that publishes is one fork/exec wide. Round 21's per-stage publish
+# lock (AA1) excluded the tool's OTHER publisher from that span; the party that REMAINS is a LATE
+# REVIEWER writing its own report with its own tooling, which takes no lock and cannot be made to
+# — rounds 9 and 15 ruled on that and the ruling stands. Round 15 (U1) made the outcome
+# NON-DESTRUCTIVE: the late `result: FINDINGS` lands in its own generation and STAYS on disk. It
+# stopped exactly there. The substitute still becomes the PUBLISHED verdict, so the blocking
+# independent verdict is preserved and IGNORED, and the merge proceeds under AUTHOR-PERFORMED with
+# no `--force` and no `replaced-verdict:` trace.
+#
+# WHY THE FIX IS HERE AND NOT THERE. Bash has no compare-and-swap rename — coreutils `mv` exposes
+# neither `RENAME_EXCHANGE` nor `RENAME_NOREPLACE` — so "publish only if the report is still the
+# one I read" is NOT EXPRESSIBLE, and a fifth check inside that window would only narrow it again.
+# THIS script runs long after the reviewer has stopped writing, so a check here races nobody.
+#
+# THE SHAPE OF THE ARGUMENT, stated because this repository usually REJECTS it: a check placed
+# AFTER a harmful effect can only REPORT it, never PREVENT it (CLAUDE.md, roborev job 264). What
+# makes a consumer-side check SUFFICIENT here rather than a fig leaf is that the harm is a
+# MIS-PUBLISHED VERDICT and nothing else — no bytes were destroyed, BECAUSE ROUND 15 KEPT THEM —
+# so the evidence is still on disk to be read, and the only thing that must be prevented is a
+# MERGE resting on it. That is precisely and only what this script decides. THE WINDOW IS NOT
+# CLOSED BY THIS AND NO SITE MAY CLAIM IT IS: `record-author-performed` is not made atomic by
+# anything here. What changes is that the window's outcome can no longer certify a merge.
+#
+# IT IS ASKED OF `AUTHOR-PERFORMED` ONLY, AND THE `PASS` CASE IS NOT REACHABLE AS A DEFECT. No
+# subcommand of `review-stage.sh` publishes a `PASS`: `open`/`open --force` publish a fresh
+# generation carrying the NON-VERDICT sentinel, and `record-author-performed` publishes its own
+# distinct token. So a published `PASS` is always a report AN INDEPENDENT REVIEWER WROTE, at a
+# generation whose head-sha binds the certified tree — and a superseded generation recording
+# `FINDINGS` beneath it is the SANCTIONED REMEDIATION FLOW this very script prints as its remedy
+# (findings recorded, fixed, stage re-opened, re-audited, `PASS`). Those two shapes are
+# INDISTINGUISHABLE ON DISK, so refusing there would red on correct input — the guard agents learn
+# to waive — and there is nothing to check rather than something left unchecked.
+#
+# THE BLOCKING SET IS CLOSED AND IS `FINDINGS` ALONE. `NOT-RUN` at a superseded generation is an
+# ABSENT audit, which is the exact state a disclosed substitute exists to stand in for; `PASS`
+# there is a STRONGER verdict than the substitute and lets nothing through that it would not have;
+# `AUTHOR-PERFORMED` there is another substitute. Only `FINDINGS` is an independent audit that
+# said NO.
+#
+# TWO DECLARED RESIDUALS, both real:
+#   * An EXPLICIT `--c-verdict <path>` is NOT censused. That mode consults no stage — it never
+#     learns an issue number — so there is no generation set to enumerate. A caller who supplies a
+#     file instead of `AUTO` is choosing the evidence, which is invoker-class and out of this
+#     script's model (see the header); `AUTO` is what flow-closer's doctrine mandates. Pinned as a
+#     case in section 44v so a later reader cannot mistake the boundary for coverage.
+#   * There is NO break-glass, deliberately. A recorded independent `FINDINGS` is not waivable by
+#     an author's own audit: CLAUDE.md's remedy for FINDINGS is to fix it or get the lead's ruling
+#     and RE-RUN THE STAGE, and a re-run recording `PASS` clears this check by construction. An
+#     authorization channel was NOT invented here — that is a whole mechanism (#3312's rules on
+#     who may grant, through which channel, bound to what) and it is not needed for a state whose
+#     remedy is ordinary and always available.
+
+# _c_generation_result_awk — read ONE report generation on stdin; print `blocking=0` or
+# `blocking=1`.
+#
+# IT ANSWERS ONE NARROW QUESTION and is deliberately NOT a third implementation of
+# `review-stage.sh`'s `classify_report` taxonomy: it decides no stage's verdict, names no cause
+# and reduces nothing to a token set — it reports whether a COLUMN-ZERO `result:` line of this file
+# records the blocking token. Column zero for the reason `classify_report` and `_c_verdict_awk` are
+# anchored there (#3312): a report body is author-controlled text that QUOTES verdict lines by
+# design, so every indented, `>`-quoted or bulleted copy is DATA. The KEY match is
+# case-insensitive and the TOKEN match is case-SENSITIVE, both exactly as `classify_report`.
+#
+# WHERE IT DIVERGES FROM `classify_report` IT DIVERGES TOWARD REFUSING, AND THAT IS THE WHOLE
+# LICENCE FOR A SECOND READER OF THIS SHAPE. `classify_report` refuses a report with SEVERAL
+# column-zero `result:` lines as AMBIGUOUS (round 3's G2) and reports NOT-RUN; this reader reports
+# `blocking` if ANY of them carries the blocking token, because G2's own measured defect was a
+# stale `result: PASS` followed by an APPENDED `result: FINDINGS`, and a merge proceeding over
+# recorded blocking findings is exactly what that count exists to stop. So this reader is never
+# MORE PERMISSIVE than `classify_report` about `FINDINGS`, which is the only direction that can
+# produce a false pass — pinned as a DIFFERENTIAL over a shared table in section 44v of
+# scripts/tests/test_premerge_assert.sh rather than argued here, because a second
+# implementation's agreement is only knowable by testing it.
+#
+# THE VALUE IS NORMALISED THE WAY `one_line` NORMALISES IT before the first word is taken — the
+# whitespace controls to a SPACE, the rest of C0 plus DEL to a VISIBLE `?`, runs collapsed, ends
+# trimmed — so `FIND<ESC>INGS` and `FIND<SOH>INGS` are NOT the token, exactly as they are not at
+# `classify_report`. ANSI IS DELIBERATELY NOT STRIPPED, for the same reason: `classify_report` does
+# not strip it either, so a CSI-spliced or CSI-bracketed token is not `FINDINGS` at EITHER reader.
+# Stripping it here would MANUFACTURE a token this file does not hold (#3751 round 15, U2) and
+# would be a UNILATERAL change to one of two readers of one shape — the divergence section 44g
+# exists to detect.
+_c_generation_result_awk() {
+  awk '
+  BEGIN { blocking = 0 }
+  # CASE-INSENSITIVE ON THE KEY ONLY: `Result:` at column zero is one author'"'"'s spelling of the
+  # control line, not a payload posing as one — `classify_report`'"'"'s `grep -i` ruling. The value is
+  # taken from the ORIGINAL record, never from the lower-cased copy, or the token comparison below
+  # would accept `findings`.
+  tolower($0) ~ /^result:/ {
+    v = $0
+    # `${line#*:}` — everything after the FIRST colon, which is the grammar the other reader uses.
+    sub(/^[^:]*:/, "", v)
+    # `one_line`'"'"'s THREE CLASSES, in its order and with its per-byte rendering, so one value
+    # cannot read two ways depending on which script read it. A newline cannot occur inside an awk
+    # record, and NUL cannot reach here (the stream is NUL-mapped at the read boundary and a body
+    # carrying the mapped byte is refused before this runs) — the classes are complete over what
+    # can arrive.
+    gsub(/[\r\t\013\014]/, " ", v)
+    gsub(/[\001-\010\016-\037\177]/, "?", v)
+    gsub(/ +/, " ", v)
+    sub(/^ /, "", v)
+    sub(/ $/, "", v)
+    # REDUCE TO THE FIRST WORD AND COMPARE BY STRING EQUALITY — never a prefix test, so
+    # `FINDINGSNOW` is not the token. The runs above are already collapsed, so the first space
+    # really is the first word boundary.
+    tok = v
+    sub(/ .*$/, "", tok)
+    if (tok == "FINDINGS") blocking = 1
+  }
+  END { print "blocking=" blocking }
+'
+}
+
+# c_generation_disposition <path> — print ONE word of a CLOSED vocabulary saying what this
+# generation records: `blocking`, `clear`, or one of five `unmeasurable-*` causes. Prints only
+# that, never dies, so it is safe from any command substitution.
+#
+# EVERY CAUSE IS ITS OWN WORD (round 4's H4), because the operator action differs per cause:
+# remove a link, repair an entry, chmod, rewrite a report. NO VALUE IS INTERPOLATED into anything
+# it prints, so it is not a value-returning printf the emit-boundary guard has to be told about —
+# the CALLER renders the prose from the word.
+#
+# `unmeasurable-*` IS FAIL-CLOSED AT THE CALLER, and naming it is the point: "I could not read
+# this generation" is not "this generation records nothing blocking". Never derive a pass from the
+# absence of a bad signal.
+c_generation_disposition() {
+  local p="$1" obs body out line blk="" nl
+  nl='
+'
+  # THE LEAF SYMLINK TEST FIRST, BEFORE ANY PREDICATE THAT DEREFERENCES ONE (#3751 round 19, Y1).
+  # `-f`/`-e` answer about the TARGET — TRUE for a link to a regular file, FALSE for a dangling
+  # one, which is the PERMISSIVE `absent` state — so `[ -L ]` is the only question that can be
+  # asked here and it has to be asked first. A linked generation's content is another file's, so
+  # it evidences nothing about this stage in either direction.
+  if [ -L "$p" ]; then printf 'unmeasurable-symlink\n'; return 0; fi
+  # THROUGH THIS SCRIPT'S ONE READ BOUNDARY (#3751 round 13, S2; round 14, T1), by REUSING the
+  # observation helper rather than adding a second reader: a raw capture DROPS NUL bytes, which
+  # does not merely lose information but MANUFACTURES grammar the file does not hold. That helper
+  # is named for the stage record and its body is path-generic; what is required of it here is
+  # exactly what it was built for — a complete read asserted by TWO signals, delivered in a form
+  # carrying a STATE word, so "absent" and "empty" stay different observations.
+  obs="$(c_record_bytes "$p")"
+  case "$obs" in
+    "state=present$nl"*) body="${obs#"state=present$nl"}" ;;
+    # An EMPTY generation: the reserved-but-not-yet-written name, which round 15 deliberately
+    # leaves on disk as history. It records no verdict, which is `clear` and not a defect. Its own
+    # arm rather than a `*` catch, so a genuinely empty file is measured as empty.
+    "state=present") body="" ;;
+    # THE GLOB NAMED THIS ENTRY, so `no-such-file` here is not absence: it is a directory, a
+    # device, or an entry that vanished mid-census. Unmeasurable, never absent.
+    "state=no-such-file") printf 'unmeasurable-not-a-file\n'; return 0 ;;
+    "state=unreadable") printf 'unmeasurable-unreadable\n'; return 0 ;;
+    "state=unrepresentable") printf 'unmeasurable-nul\n'; return 0 ;;
+    # A state this reader does not recognise. Unreachable while `c_record_bytes` is the only
+    # producer (its output is a closed set); refused rather than defaulted, so a state added to
+    # that helper later cannot inherit a permissive branch.
+    *) printf 'unmeasurable-unreadable\n'; return 0 ;;
+  esac
+  # PIPED IN, NEVER READ FROM THE PATH AGAIN: the bytes above are the ONE observation of this
+  # generation, and a second read could classify a third state (#3751 round 12, R2).
+  out="$(printf '%s\n' "$body" | _c_generation_result_awk 2>/dev/null)" || out=""
+  while IFS= read -r line; do
+    case "$line" in blocking=*) blk="${line#blocking=}" ;; esac
+  done <<EOF
+$out
+EOF
+  # THE PERMISSIVE VALUE IS THE AFFIRMATIVE `0`, with a fail-closed `*)`: a census that published
+  # no flag must not arrive as "nothing blocking was found".
+  case "$blk" in
+    1) printf 'blocking\n' ;;
+    0) printf 'clear\n' ;;
+    *) printf 'unmeasurable-census\n' ;;
+  esac
+}
+
+# c_assert_no_superseded_blocking_verdict <issue> — REFUSE the merge when a SUPERSEDED generation
+# of this stage records a blocking independent verdict that the published AUTHOR-PERFORMED token
+# does not account for. See the block above for why the check lives at the merge point.
+#
+# THE GENERATION SET IS DERIVED FROM THE STAGE DIRECTORY, never from a list a caller supplies:
+# `review-stage.sh`'s `report_path` names a generation `<kind>.<nonce>.md` in the stage directory,
+# so that is the glob. The LEGACY bare `<kind>.md` is deliberately NOT in it — a record with no
+# `report-nonce:` cannot be bound at all, and `c_assert_verdict_from_validated_generation` above
+# refuses such a stage before this is ever reached.
+#
+# THE ENUMERATION IS PROVED TO HAVE REACHED THE RIGHT DIRECTORY, AFFIRMATIVELY. The published
+# generation MUST appear in the glob — the accepted verdict was read out of that file an instant
+# ago — so if it does not, this census enumerated something else and its silence means nothing. A
+# zero count of SUPERSEDED generations is ordinary and is not a defect; a census that never saw
+# the published generation is a NON-MEASUREMENT, and keeping the two apart is exactly the "an
+# empty probe is not a zero" rule.
+c_assert_no_superseded_blocking_verdict() {
+  local issue="$1" dir g base nonce disp
+  local blocking="" nblocking=0 unmeas="" nunmeas=0 scanned=0 saw_published=0
+  # FROM THE GLOBAL, NEVER A CAPTURE (#3751 round 18, X1): a `$(c_stage_root)` strips a trailing
+  # newline back off the directory name and points this glob at a SIBLING lane.
+  c_stage_root
+  dir="$C_STAGE_ROOT/.review-stage/issue-$issue"
+  for g in "$dir/$C_STAGE_KIND".*.md; do
+    # THE `-L` TEST IS PART OF THE EXISTENCE PROBE, not a step after it: `-e` is FALSE for a
+    # DANGLING link, so `[ -e ] || continue` alone would SKIP a linked generation — the permissive
+    # branch — and a skipped generation is one this census silently did not read. An UNEXPANDED
+    # pattern (nothing matched) is neither, and is what the `continue` is for.
+    [ -L "$g" ] || [ -e "$g" ] || continue
+    base="${g##*/}"
+    nonce="${base#"$C_STAGE_KIND."}"
+    nonce="${nonce%.md}"
+    if [ "$nonce" = "$C_STAGE_NONCE" ]; then
+      saw_published=1
+      continue
+    fi
+    scanned=$((scanned + 1))
+    disp="$(c_generation_disposition "$g")"
+    case "$disp" in
+      blocking)
+        nblocking=$((nblocking + 1))
+        blocking="${blocking}${blocking:+, }$nonce"
+        ;;
+      clear) ;;
+      # EVERY OTHER WORD OF THE CLOSED VOCABULARY IS A NON-MEASUREMENT, and it takes this arm
+      # rather than `clear`. The cause travels WITH the nonce, because the operator action differs.
+      *)
+        nunmeas=$((nunmeas + 1))
+        unmeas="${unmeas}${unmeas:+, }$nonce ($disp)"
+        ;;
+    esac
+  done
+  if [ "$saw_published" -ne 1 ]; then
+    refuse_tool_failure \
+      "c_assert_no_superseded_blocking_verdict (the published generation $C_STAGE_KIND.$C_STAGE_NONCE.md is not in $dir, so this census enumerated something else and its silence is not a measurement)" \
+      "the C stage verdict"
+  fi
+  # THE BLOCKING CASE FIRST: it is the more specific operator fact, and when both hold it is the
+  # one to act on.
+  if [ "$nblocking" -gt 0 ]; then
+    refuse_no_c_verdict \
+      "The '$C_STAGE_KIND' stage reports AUTHOR-PERFORMED, and $nblocking of the $scanned SUPERSEDED" \
+      "generation(s) of this stage record a BLOCKING verdict (result: FINDINGS) that the published" \
+      "substitute does not account for:" \
+      "  published generation:   $C_STAGE_KIND.$C_STAGE_NONCE.md (AUTHOR-PERFORMED)" \
+      "  blocking generation(s): $blocking" \
+      "  stage directory: $dir" \
+      "An author's hand audit is the sanctioned fallback for an ABSENT independent audit — never an" \
+      "override of one that WAS obtained and said NO. Read the generation(s) named above: their" \
+      "verdict is still on disk in full, because review-stage.sh SUPERSEDES a report rather than" \
+      "destroying it (#3751 round 15)." \
+      "This is the state a review landing its verdict inside record-author-performed's publish" \
+      "window leaves, and it is indistinguishable on disk from a deliberate --force over a recorded" \
+      "FINDINGS. Either way an independent audit blocked, and CLAUDE.md's remedy is the same:" \
+      "FIX IT, or get the lead's ruling, then RE-RUN THE STAGE so the audit records its own verdict." \
+      "$C_REOPEN_REMEDY"
+  fi
+  if [ "$nunmeas" -gt 0 ]; then
+    refuse_no_c_verdict \
+      "The '$C_STAGE_KIND' stage reports AUTHOR-PERFORMED, and $nunmeas of the $scanned SUPERSEDED" \
+      "generation(s) of this stage COULD NOT BE READ, so whether an independent audit recorded a" \
+      "blocking verdict beneath the substitute is UNKNOWN:" \
+      "  published generation:     $C_STAGE_KIND.$C_STAGE_NONCE.md (AUTHOR-PERFORMED)" \
+      "  unreadable generation(s): $unmeas" \
+      "  stage directory: $dir" \
+      "A non-measurement is never read as a pass. The cause is named per generation:" \
+      "  unmeasurable-symlink     the name is a SYMLINK, so its content is another file's — remove it" \
+      "  unmeasurable-not-a-file  the directory names it, but it is not a regular file" \
+      "  unmeasurable-unreadable  it could not be read (a chmod, or an I/O error)" \
+      "  unmeasurable-nul         it holds a NUL 0x00 or SOH 0x01 byte, which no text record may contain" \
+      "  unmeasurable-census      the census tool produced no usable answer about it" \
+      "$C_REOPEN_REMEDY"
+  fi
+}
+
 # c_auto_locate_issue — find THE open C stage in this worktree, by its stage
 # RECORD (`.review-stage/issue-<N>/<kind>.stage`), which is the artifact that
 # proves a stage was opened at all. Prints the issue number, or nothing.
@@ -2060,6 +2336,15 @@ c_evaluate() {
     # grammar below, so no unbound generation ever reaches an accepting arm.
     case "$C_TOKEN" in
       PASS | AUTHOR-PERFORMED) c_assert_verdict_from_validated_generation "$issue" ;;
+    esac
+    # AND A SUBSTITUTE MAY NOT STAND OVER A BLOCKING INDEPENDENT VERDICT (#3751 round 22, AB1).
+    # AFTER the generation binding, because the census is stated in terms of the VALIDATED
+    # generation: it has to know which file the accepted verdict came from in order to say which
+    # of the others are SUPERSEDED. AUTHOR-PERFORMED ALONE — a published PASS over a superseded
+    # FINDINGS is the sanctioned remediation flow, not a defect, and the two are
+    # indistinguishable on disk; see `c_assert_no_superseded_blocking_verdict`.
+    case "$C_TOKEN" in
+      AUTHOR-PERFORMED) c_assert_no_superseded_blocking_verdict "$issue" ;;
     esac
   fi
 

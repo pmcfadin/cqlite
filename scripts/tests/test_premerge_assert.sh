@@ -5331,14 +5331,16 @@ if LC_ALL=C grep -q 'C_STAGE_ROOT="\$root"' "$X1_CODE_F"; then
 else
   bad "x1/structural: the resolver does not assign C_STAGE_ROOT — the one-resolution property is gone"
 fi
-# The four consumers must READ the global. Counted, so a new consumer that resolves for itself is
-# visible as a count that no longer matches its call sites.
+# The five consumers must READ the global. Counted, so a new consumer that resolves for itself is
+# visible as a count that no longer matches its call sites. FIVE since #3751 round 22 (AB1): the
+# superseded-generation census globs the stage directory and is the fifth. Moved CONSCIOUSLY, in
+# the same diff as the consumer it accounts for — the count is the whole guard.
 X1_READS="$(LC_ALL=C grep -c '"\$C_STAGE_ROOT' "$X1_CODE_F" || true)"
 X1_CALLS="$(LC_ALL=C grep -c '^[[:space:]]*c_stage_root$' "$X1_CODE_F" || true)"
-if [ "$X1_READS" -eq 4 ] && [ "$X1_CALLS" -eq 4 ]; then
-  ok "x1/structural: all 4 consumers CALL the resolver and READ the global (4 calls, 4 reads)"
+if [ "$X1_READS" -eq 5 ] && [ "$X1_CALLS" -eq 5 ]; then
+  ok "x1/structural: all 5 consumers CALL the resolver and READ the global (5 calls, 5 reads)"
 else
-  bad "x1/structural: $X1_CALLS resolver calls against $X1_READS global reads (want 4 and 4) — a consumer resolves or captures for itself"
+  bad "x1/structural: $X1_CALLS resolver calls against $X1_READS global reads (want 5 and 5) — a consumer resolves or captures for itself"
 fi
 # THE SENTINEL IS WHAT MAKES THE CAPTURE FAITHFUL, and its completeness is asserted by TWO signals
 # (round 13's lesson): the sentinel AND the status, the latter captured with `|| rc=$?` rather than
@@ -6060,6 +6062,523 @@ else
   esac
 fi
 
+# --- 44v: A SUPERSEDED BLOCKING VERDICT MUST NOT BE MERGED OVER (round 22, AB1) ---
+# THE FINDING (roborev job 435, High, review-stage.sh:3920-3926). A reviewer can record
+# `result: FINDINGS` AFTER `record-author-performed`'s final report comparison and BEFORE the
+# `rename(2)` that publishes the substitute. Round 15 (U1) made that outcome NON-DESTRUCTIVE —
+# the blocking verdict lands in its own generation and STAYS on disk — and round 21 (AA1)
+# excluded the tool's other publisher from the span with a lock. Neither made the blocking
+# verdict MATTER: the substitute still becomes the PUBLISHED verdict, `verdict` reports
+# AUTHOR-PERFORMED, and the merge proceeds with no `--force` and no `replaced-verdict:` trace.
+#
+# THE FIX IS AT THE MERGE POINT, WHERE THERE IS NO RACE — `premerge-assert.sh` runs long after the
+# reviewer has stopped writing. The window is NOT closed by it; what changes is that its outcome
+# can no longer certify a merge.
+#
+# THE INTERLEAVE IS SIMULATED, NOT RACED. One line is injected into a SCRATCH COPY of
+# `review-stage.sh`, immediately before the LAST `commit_write "$sfile" stage-record` — the
+# publication inside `cmd_record_author_performed` — so the late write is deterministic, cannot
+# flake and makes no claim about timing. The ARTIFACT is substituted (#3312's corollary for
+# tests); there is no settable seam. The plant is ASSERTED to have landed, because a green over a
+# plant that did not land proves nothing.
+AB_DIR="$T/ab"
+mkdir -p "$AB_DIR"
+ab_ok=1
+cp "$SCRIPT_DIR/../flow/review-stage.sh" "$AB_DIR/review-stage.sh" 2>/dev/null || ab_ok=0
+# THE LATE-REVIEWER PLANT. `$STAGE_REPORT` is the generation being superseded — the file the
+# reviewer was handed at `open` — so this is exactly what a reviewer writing its own report with
+# its own tooling does, one instant too late. It takes no lock, which is the whole reason round
+# 21's lock does not reach it.
+AB_PLANT='  printf '"'"'result: FINDINGS\n\n### [BLOCKER] AB1_LATE_REVIEWER landed here\n'"'"' >"$STAGE_REPORT"   # AB1_PLANT'
+AB_ANCHOR='commit_write "$sfile" stage-record'
+if [ "$ab_ok" -eq 1 ]; then
+  # INJECTED AT THE **LAST** OCCURRENCE, and that is measured rather than assumed: the anchor
+  # appears twice (`cmd_open` publishes too, and round 21's census pins that there are exactly
+  # two publishers), and `cmd_record_author_performed` is the later definition. An absent anchor
+  # EXITS NON-ZERO rather than emitting an unplanted copy.
+  AB_A="$AB_ANCHOR" AB_P="$AB_PLANT" LC_ALL=C awk '
+    BEGIN { a = ENVIRON["AB_A"]; p = ENVIRON["AB_P"]; last = 0 }
+    { L[NR] = $0; if (index($0, a) > 0) last = NR }
+    END {
+      if (last == 0) { exit 1 }
+      for (i = 1; i <= NR; i++) { if (i == last) print p; print L[i] }
+    }
+  ' "$AB_DIR/review-stage.sh" >"$AB_DIR/late.sh" 2>/dev/null || ab_ok=0
+fi
+if [ "$ab_ok" -eq 1 ] && [ -s "$AB_DIR/late.sh" ] &&
+  LC_ALL=C grep -q 'AB1_PLANT' "$AB_DIR/late.sh" &&
+  [ "$(LC_ALL=C grep -c 'AB1_PLANT' "$AB_DIR/late.sh")" = 1 ]; then
+  ok "ab1 plant: the late-reviewer write was injected ONCE, at the publication inside record-author-performed (asserted, not assumed)"
+else
+  bad "ab1 plant: the plant did NOT land, so every case below would be unattributable"
+  ab_ok=0
+fi
+# AND IT IS THE **RECORD-AUTHOR-PERFORMED** PUBLICATION, not `cmd_open`'s. Measured structurally
+# on the planted copy: the plant must sit AFTER the `stage-record-changed-mid-write` guard, which
+# exists only in `cmd_record_author_performed`. A plant at the wrong publisher would make the
+# fixture an `open` case and the section would test nothing it claims to.
+if [ "$ab_ok" -eq 1 ]; then
+  AB_PLANT_LN=$(LC_ALL=C grep -n 'AB1_PLANT' "$AB_DIR/late.sh" | LC_ALL=C cut -d: -f1)
+  AB_GUARD_LN=$(LC_ALL=C grep -n 'reason=stage-record-changed-mid-write' "$AB_DIR/late.sh" | LC_ALL=C head -1 | LC_ALL=C cut -d: -f1)
+  if [ -n "$AB_PLANT_LN" ] && [ -n "$AB_GUARD_LN" ] && [ "$AB_PLANT_LN" -gt "$AB_GUARD_LN" ]; then
+    ok "ab1 plant: it sits AFTER the record-changed-mid-write guard, so it is inside record-author-performed's publish window and not cmd_open's"
+  else
+    bad "ab1 plant: it is not inside record-author-performed's publish window (plant line '$AB_PLANT_LN', guard line '$AB_GUARD_LN')"
+    ab_ok=0
+  fi
+fi
+
+AB_REPO=$(c_repo ab design) || AB_REPO=""
+AB_CTL=$(c_repo abctl design) || AB_CTL=""
+AB_PASS=$(c_repo abpass design) || AB_PASS=""
+AB_SYM=$(c_repo absym design) || AB_SYM=""
+if [ -n "$AB_REPO" ] && [ -n "$AB_CTL" ] && [ -n "$AB_PASS" ] && [ -n "$AB_SYM" ]; then
+  ok "ab1 fixtures: four design-routed synthetic repositories were built"
+else
+  bad "ab1 fixtures: the synthetic repositories could not be built — every case below would be vacuous"
+  ab_ok=0
+fi
+
+# ab_record <repo> <review-stage-script> [--force] — open a `c` stage and record the
+# author-performed substitute with it. Prints the RECORD-OK line.
+ab_record() {
+  local d="$1" rs="$2"
+  shift 2
+  (cd "$d" && bash "$rs" open c --issue 3751 --agent spec-auditor >/dev/null 2>&1) || return 1
+  (cd "$d" && bash "$rs" record-author-performed c --issue 3751 \
+    --reason no-independent-auditor-was-available-on-this-lane \
+    --evidence docs/round-artifacts/ab1-working.md --performed-by author "$@" 2>&1)
+}
+# ab_gens <repo> — the generation nonces on disk, sorted, space separated.
+ab_gens() {
+  local d="$1/.review-stage/issue-3751" g out=""
+  for g in "$d"/c.*.md; do
+    [ -L "$g" ] || [ -e "$g" ] || continue
+    g="${g##*/}"; g="${g#c.}"; g="${g%.md}"
+    out="$out$g
+"
+  done
+  printf '%s' "$out" | LC_ALL=C sort | LC_ALL=C tr '\n' ' '
+}
+# ab_nonce <repo> — the PUBLISHED generation, from the stage record.
+ab_nonce() {
+  LC_ALL=C sed -n 's/^report-nonce:[[:space:]]*//p' "$1/.review-stage/issue-3751/c.stage" 2>/dev/null |
+    LC_ALL=C head -1
+}
+
+# ------------------------------------------------------------------------------
+# (a) THE DEFECT, end to end on the shipped scripts plus the one planted line.
+# ------------------------------------------------------------------------------
+AB_DEFECT_OK=0
+if [ "$ab_ok" -eq 1 ]; then
+  AB_OUT=$(ab_record "$AB_REPO" "$AB_DIR/late.sh") || AB_OUT="<failed>"
+  AB_PUB=$(ab_nonce "$AB_REPO")
+  case "$AB_OUT" in
+    *"RECORD-OK"*"result=AUTHOR-PERFORMED"*)
+      ok "ab1/premise: record-author-performed SUCCEEDED with the late reviewer inside its publish window" ;;
+    *) bad "ab1/premise: the recording did not succeed, so the fixture is not the finding's state (got: $AB_OUT)" ;;
+  esac
+  # NO `--force` AND NO TRACE — the two things the finding says are missing. Asserted, because
+  # they are what distinguishes this from a deliberate, disclosed override.
+  case "$AB_OUT" in
+    *"replaced-verdict="*)
+      bad "ab1/premise: the recording carried a replaced-verdict trace, so this is not the untraced state (got: $AB_OUT)" ;;
+    *) ok "ab1/premise: and it carried NO replaced-verdict trace (the late verdict was never seen by it)" ;;
+  esac
+  AB_SUP=$(LC_ALL=C sed -n 's/.*supersedes-report-nonce=\([A-Za-z0-9]*\).*/\1/p' <<<"$AB_OUT" | LC_ALL=C head -1)
+  if [ -n "$AB_SUP" ] && [ -n "$AB_PUB" ] && [ "$AB_SUP" != "$AB_PUB" ] &&
+    LC_ALL=C grep -q '^result: FINDINGS$' "$AB_REPO/.review-stage/issue-3751/c.$AB_SUP.md" 2>/dev/null; then
+    ok "ab1/premise: the SUPERSEDED generation ($AB_SUP) holds the late reviewer's blocking 'result: FINDINGS', still on disk (round 15's U1 working)"
+    AB_DEFECT_OK=1
+  else
+    bad "ab1/premise: the superseded generation does not hold the blocking verdict (superseded '$AB_SUP', published '$AB_PUB'), so this case proves nothing"
+  fi
+  # AND THE PUBLISHED VERDICT IS THE MERGE-PROCEEDING TOKEN. This is the state the merge point
+  # is being asked about, read through the seam the merge point itself uses.
+  AB_V=$(cd "$AB_REPO" && bash "$NEUTRAL_DIR/review-stage.sh" verdict c --issue 3751 2>&1) || true
+  case "$AB_V" in
+    *"RESULT: AUTHOR-PERFORMED"*)
+      ok "ab1/premise: review-stage.sh reports the stage as AUTHOR-PERFORMED — the blocking verdict is preserved and IGNORED" ;;
+    *) bad "ab1/premise: the stage does not report AUTHOR-PERFORMED (got: $AB_V)" ;;
+  esac
+fi
+
+if [ "$AB_DEFECT_OK" -eq 1 ]; then
+  if run_in_repo "$AB_REPO" 2 \
+    "ab1/defect: AUTHOR-PERFORMED published over a SUPERSEDED 'result: FINDINGS' must NOT certify a merge" \
+    --c-verdict AUTO; then
+    case "$OUT" in
+      *"PREMERGE: NO-C-VERDICT"*) ok "ab1/defect: refused under the NO-C-VERDICT verdict" ;;
+      *) bad "ab1/defect: must refuse with NO-C-VERDICT (got: $OUT)" ;;
+    esac
+    # THE GENERATION IS NAMED, so an operator can read the superseded verdict directly rather
+    # than being told that something, somewhere, disagrees.
+    case "$OUT" in
+      *"$AB_SUP"*) ok "ab1/defect: the refusal NAMES the blocking generation's nonce ($AB_SUP), so the superseded verdict is readable" ;;
+      *) bad "ab1/defect: the refusal does not name the blocking generation (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"result: FINDINGS"*) ok "ab1/defect: and it names WHAT was recorded there (result: FINDINGS)" ;;
+      *) bad "ab1/defect: the refusal does not say what the superseded generation records (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"$(ab_nonce "$AB_REPO")"*) ok "ab1/defect: and it names the PUBLISHED generation too, so the two can be told apart" ;;
+      *) bad "ab1/defect: the refusal does not name the published generation (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: OK"*) bad "ab1/defect: the refusal ALSO printed the success verdict" ;;
+      *) ok "ab1/defect: and no PREMERGE: OK line was printed" ;;
+    esac
+  fi
+fi
+
+# ------------------------------------------------------------------------------
+# (b) THE CONTROL — an ORDINARY author-performed stage still proceeds. A guard that reds on
+#     correct input is the guard agents learn to waive, so this is not optional.
+# ------------------------------------------------------------------------------
+if [ "$ab_ok" -eq 1 ]; then
+  AB_COUT=$(ab_record "$AB_CTL" "$AB_DIR/review-stage.sh") || AB_COUT="<failed>"
+  case "$AB_COUT" in
+    *"RECORD-OK"*"result=AUTHOR-PERFORMED"*)
+      ok "ab1/control: an ordinary substitute was recorded over the sentinel with the UNPLANTED script" ;;
+    *) bad "ab1/control: the ordinary recording failed, so the control proves nothing (got: $AB_COUT)" ;;
+  esac
+  # ITS SUPERSEDED GENERATION IS THE SENTINEL, which records NOT-RUN — an ABSENT audit, which is
+  # exactly the state a disclosed substitute exists to stand in for. Asserted, so the control is
+  # known to exercise a stage that HAS a superseded generation rather than one with none.
+  AB_CSUP=$(LC_ALL=C sed -n 's/.*supersedes-report-nonce=\([A-Za-z0-9]*\).*/\1/p' <<<"$AB_COUT" | LC_ALL=C head -1)
+  if [ -n "$AB_CSUP" ] && LC_ALL=C grep -q '^result: NOT-RUN' "$AB_CTL/.review-stage/issue-3751/c.$AB_CSUP.md" 2>/dev/null; then
+    ok "ab1/control: and its superseded generation ($AB_CSUP) records the NOT-RUN sentinel, so the census has a real generation to census"
+  else
+    bad "ab1/control: the control has no superseded generation recording NOT-RUN, so it does not exercise the census (superseded '$AB_CSUP')"
+  fi
+  if run_in_repo "$AB_CTL" 0 \
+    "ab1/control: an ordinary AUTHOR-PERFORMED with no blocking generation still PROCEEDS" \
+    --c-verdict AUTO; then
+    case "$OUT" in
+      *"PREMERGE: C-VERDICT AUTHOR-PERFORMED"*)
+        ok "ab1/control: under its own distinct token, exactly as before this check existed" ;;
+      *) bad "ab1/control: the substitute's own token was not printed (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: OK"*) ok "ab1/control: and the merge proceeds" ;;
+      *) bad "ab1/control: the merge must proceed (got: $OUT)" ;;
+    esac
+  fi
+fi
+
+# ------------------------------------------------------------------------------
+# (c) THE `PASS` CASE IS NOT REACHABLE AS A DEFECT, AND MUST NOT BE REFUSED. A superseded
+#     `result: FINDINGS` beneath a PUBLISHED `PASS` is the SANCTIONED REMEDIATION FLOW this very
+#     script prints as its remedy: findings recorded, fixed, stage re-opened (`--force`
+#     publishes a FRESH generation), re-audited, PASS. No subcommand publishes a `PASS` — `open`
+#     publishes the NON-VERDICT sentinel and `record-author-performed` its own token — so a
+#     published PASS is always an independent reviewer's own report at a generation bound to the
+#     certified tree. Refusing it would red on correct input.
+# ------------------------------------------------------------------------------
+if [ "$ab_ok" -eq 1 ]; then
+  ab_pass_ok=1
+  (cd "$AB_PASS" && bash "$NEUTRAL_DIR/review-stage.sh" open c --issue 3751 \
+    --agent spec-auditor >/dev/null 2>&1) || ab_pass_ok=0
+  printf 'result: FINDINGS\n\n### [BLOCKER] an audit that blocked, in round one\n' \
+    >"$(SR_REPORT "$AB_PASS" 3751 c)" 2>/dev/null || ab_pass_ok=0
+  AB_PGEN1=$(ab_nonce "$AB_PASS")
+  (cd "$AB_PASS" && bash "$NEUTRAL_DIR/review-stage.sh" open c --issue 3751 \
+    --agent spec-auditor --force >/dev/null 2>&1) || ab_pass_ok=0
+  printf 'result: PASS\n\nthe findings were fixed and the audit was re-run.\n' \
+    >"$(SR_REPORT "$AB_PASS" 3751 c)" 2>/dev/null || ab_pass_ok=0
+  AB_PGEN2=$(ab_nonce "$AB_PASS")
+  if [ "$ab_pass_ok" -eq 1 ] && [ -n "$AB_PGEN1" ] && [ -n "$AB_PGEN2" ] &&
+    [ "$AB_PGEN1" != "$AB_PGEN2" ] &&
+    LC_ALL=C grep -q '^result: FINDINGS$' "$AB_PASS/.review-stage/issue-3751/c.$AB_PGEN1.md" 2>/dev/null; then
+    ok "ab1/remediation: the sanctioned flow was built — a superseded FINDINGS ($AB_PGEN1) beneath a published PASS ($AB_PGEN2)"
+  else
+    bad "ab1/remediation: the fixture could not be built ('$AB_PGEN1' -> '$AB_PGEN2'), so this case proves nothing"
+    ab_pass_ok=0
+  fi
+  if [ "$ab_pass_ok" -eq 1 ] && run_in_repo "$AB_PASS" 0 \
+    "ab1/remediation: a published PASS over a superseded FINDINGS is the REMEDY, not the defect — it must PROCEED" \
+    --c-verdict AUTO; then
+    case "$OUT" in
+      *"PREMERGE: C-VERDICT PASS"*) ok "ab1/remediation: under the PASSING token" ;;
+      *) bad "ab1/remediation: the PASSING token was not printed (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: OK"*) ok "ab1/remediation: and the merge proceeds" ;;
+      *) bad "ab1/remediation: refusing here would red on correct input (got: $OUT)" ;;
+    esac
+  fi
+fi
+
+# ------------------------------------------------------------------------------
+# (d) AN UNREADABLE SUPERSEDED GENERATION IS A NON-MEASUREMENT, NOT A CLEAN ONE. Never derive a
+#     pass from the absence of a bad signal: "I could not read this generation" is not "this
+#     generation records nothing blocking". The `-L` test has to come FIRST, because `-e` is
+#     FALSE for a dangling link — the permissive branch — and `-f` answers about the TARGET.
+# ------------------------------------------------------------------------------
+if [ "$ab_ok" -eq 1 ]; then
+  AB_SOUT=$(ab_record "$AB_SYM" "$AB_DIR/review-stage.sh") || AB_SOUT="<failed>"
+  AB_SSUP=$(LC_ALL=C sed -n 's/.*supersedes-report-nonce=\([A-Za-z0-9]*\).*/\1/p' <<<"$AB_SOUT" | LC_ALL=C head -1)
+  ab_sym_ok=0
+  if [ -n "$AB_SSUP" ]; then
+    rm -f "$AB_SYM/.review-stage/issue-3751/c.$AB_SSUP.md" 2>/dev/null || true
+    if ln -s /nonexistent/dangling-target "$AB_SYM/.review-stage/issue-3751/c.$AB_SSUP.md" 2>/dev/null &&
+      [ -L "$AB_SYM/.review-stage/issue-3751/c.$AB_SSUP.md" ] &&
+      [ ! -e "$AB_SYM/.review-stage/issue-3751/c.$AB_SSUP.md" ]; then
+      ab_sym_ok=1
+      ok "ab1/unmeasurable: the superseded generation ($AB_SSUP) was replaced by a DANGLING symlink — the shape a plain [ -e ] probe skips"
+    else
+      bad "ab1/unmeasurable: the dangling link could not be planted, so this case proves nothing"
+    fi
+  else
+    bad "ab1/unmeasurable: no superseded generation to replace (got: $AB_SOUT)"
+  fi
+  if [ "$ab_sym_ok" -eq 1 ] && run_in_repo "$AB_SYM" 2 \
+    "ab1/unmeasurable: a superseded generation that CANNOT be read must refuse, never read as clear" \
+    --c-verdict AUTO; then
+    case "$OUT" in
+      *"unmeasurable-symlink"*) ok "ab1/unmeasurable: refused under its OWN named cause (unmeasurable-symlink), so the operator action is 'remove the link'" ;;
+      *) bad "ab1/unmeasurable: the cause was not named (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"UNKNOWN"*) ok "ab1/unmeasurable: and the refusal says the blocking question is UNKNOWN rather than asserting a verdict it never read" ;;
+      *) bad "ab1/unmeasurable: the refusal must state that it could not tell (got: $OUT)" ;;
+    esac
+  fi
+fi
+
+# ------------------------------------------------------------------------------
+# (e) THE DECLARED RESIDUAL, ASSERTED RATHER THAN LEFT AS PROSE: an EXPLICIT `--c-verdict <path>`
+#     is NOT censused. That mode consults no stage — it never learns an issue number — so there
+#     is no generation set to enumerate. A caller who supplies a file instead of AUTO is choosing
+#     the evidence, which is invoker-class and out of this script's model; AUTO is what
+#     flow-closer's doctrine mandates. This case PINS the boundary so a later reader cannot
+#     mistake it for coverage.
+# ------------------------------------------------------------------------------
+if [ "$ab_ok" -eq 1 ] && [ "$AB_DEFECT_OK" -eq 1 ] &&
+  run_in_repo "$AB_REPO" 0 \
+    "ab1/residual: an EXPLICIT --c-verdict AUTHOR-PERFORMED is not censused (declared residual, pinned)" \
+    --c-verdict "$(c_verdict_file abres "$(cv_line AUTHOR-PERFORMED)")"; then
+  case "$OUT" in
+    *"PREMERGE: OK"*) ok "ab1/residual: it proceeds — the same repository whose stage AUTO refuses" ;;
+    *) bad "ab1/residual: the explicit path behaved unexpectedly (got: $OUT)" ;;
+  esac
+fi
+
+# ------------------------------------------------------------------------------
+# (f) THE DIFFERENTIAL — the census reader must never be MORE PERMISSIVE than `classify_report`
+#     about the blocking token. That is the ONLY direction that can produce a false pass, and it
+#     is the whole licence for a second reader of this grammar: where the two DIVERGE, the census
+#     diverges toward REFUSING (`classify_report` reports several column-zero `result:` lines as
+#     AMBIGUOUS/NOT-RUN; the census reports `blocking` if any of them carries the token, which is
+#     round 3's G2 defect — a stale PASS followed by an APPENDED FINDINGS — read the safe way).
+#
+#     THE CENSUS READER IS EXTRACTED FROM THE SHIPPED SCRIPT AND RUN, never re-implemented here:
+#     a copy would agree with itself.
+# ------------------------------------------------------------------------------
+AB_X="$T/ab-x"
+mkdir -p "$AB_X"
+ab_x_ok=0
+if LC_ALL=C sed -n '/^_c_generation_result_awk() {$/,/^}$/p' "$ASSERT" >"$AB_X/reader.sh" 2>/dev/null &&
+  [ -s "$AB_X/reader.sh" ] && LC_ALL=C grep -q 'blocking' "$AB_X/reader.sh"; then
+  ab_x_ok=1
+  ok "ab1/differential: the census reader was EXTRACTED from the shipped premerge-assert.sh (so the differential is about shipped code)"
+else
+  bad "ab1/differential: the census reader could not be extracted from the shipped script — the differential would be vacuous"
+fi
+
+AB_ROWS="findings indented several pass ansi crlf lowercase sentinel token-junk fenced"
+AB_EXPECT_findings=blocking
+AB_EXPECT_indented=clear
+# THE LICENSED DIVERGENCE, and it is deliberately in the table: reader A reports NOT-RUN
+# (AMBIGUOUS) here while the census reports `blocking`. Strict, not permissive.
+AB_EXPECT_several=blocking
+AB_EXPECT_pass=clear
+AB_EXPECT_ansi=clear
+AB_EXPECT_crlf=blocking
+AB_EXPECT_lowercase=clear
+AB_EXPECT_sentinel=clear
+AB_EXPECT_token_junk=clear
+AB_EXPECT_fenced=blocking
+ab_expect() {
+  local key
+  key="AB_EXPECT_$(printf '%s' "$1" | tr '-' '_')"
+  eval "printf '%s\n' \"\${$key}\""
+}
+ab_row_body() {
+  case "$1" in
+    findings)   printf 'result: FINDINGS\n\nan unmet requirement.\n' ;;
+    indented)   printf '  result: FINDINGS\n\nan INDENTED copy, which is DATA.\n' ;;
+    several)    printf 'result: PASS\n\nan earlier round.\n\nresult: FINDINGS\n\nan APPENDED blocking verdict.\n' ;;
+    pass)       printf 'result: PASS\n\nreviewed the whole diff.\n' ;;
+    ansi)       printf 'result: FIND\033[31mINGS\n\na token spliced by a colour escape.\n' ;;
+    crlf)       printf 'result: FINDINGS\r\n\r\na CRLF report.\r\n' ;;
+    lowercase)  printf 'Result: findings\n\nthe KEY is case-insensitive, the TOKEN is not.\n' ;;
+    sentinel)   printf 'result: NOT-RUN (no report written)\n\nthe sentinel open writes.\n' ;;
+    token-junk) printf 'result: FINDINGSNOW\n\nan invented token; first-word EQUALITY, never a prefix test.\n' ;;
+    fenced)     printf '```\nresult: FINDINGS\n```\n\na fence does not move a line off column zero.\n' ;;
+  esac
+}
+AB_ROW_COUNT=$(printf '%s\n' $AB_ROWS | LC_ALL=C grep -c .)
+if [ "$AB_ROW_COUNT" -ge 10 ]; then
+  ok "ab1/differential: the shared table holds $AB_ROW_COUNT shapes (floor 10)"
+else
+  bad "ab1/differential: the shared table holds only $AB_ROW_COUNT rows, below the floor of 10 — a row was lost and a green over a shrunken table is not agreement"
+fi
+
+AB_DREPO="$T/ab-diff"
+ab_d_ok=0
+if mkdir -p "$AB_DREPO" && git init -q "$AB_DREPO" >/dev/null 2>&1 &&
+  printf '.review-stage/\n' >"$AB_DREPO/.gitignore"; then
+  ab_d_ok=1
+  ok "ab1/differential: a scratch worktree for reader A was built"
+else
+  bad "ab1/differential: could not build the scratch worktree — the differential would be vacuous"
+fi
+
+if [ "$ab_x_ok" -eq 1 ] && [ "$ab_d_ok" -eq 1 ]; then
+  AB_DN=8900
+  for AROW in $AB_ROWS; do
+    AB_DN=$((AB_DN + 1))
+    AEXP=$(ab_expect "$AROW")
+    # READER B — the census, on the SHIPPED extracted reader.
+    AB_BODY="$AB_X/body-$AROW.txt"
+    ab_row_body "$AROW" >"$AB_BODY"
+    AB_BOUT=$(bash -c '. "$1"; _c_generation_result_awk <"$2"' _ "$AB_X/reader.sh" "$AB_BODY" 2>&1) || AB_BOUT="<failed>"
+    case "$AB_BOUT" in
+      *"blocking=1"*) AB_B=blocking ;;
+      *"blocking=0"*) AB_B=clear ;;
+      *) AB_B=UNCLASSIFIED ;;
+    esac
+    if [ "$AB_B" = "$AEXP" ]; then
+      ok "ab1/differential/$AROW: the census reports $AB_B, as expected"
+    else
+      bad "ab1/differential/$AROW: expected $AEXP, got $AB_B (out: $AB_BOUT)"
+    fi
+    # READER A — review-stage.sh's classify_report, through the shipped subcommand.
+    if ! (cd "$AB_DREPO" && bash "$NEUTRAL_DIR/review-stage.sh" open c --issue "$AB_DN" \
+      --agent spec-auditor >/dev/null 2>&1); then
+      bad "ab1/differential/$AROW: could not open the stage — the one-directional property is untested for this row"
+      continue
+    fi
+    ab_row_body "$AROW" >"$(SR_REPORT "$AB_DREPO" "$AB_DN" c)"
+    AB_AOUT=$(cd "$AB_DREPO" && bash "$NEUTRAL_DIR/review-stage.sh" verdict c --issue "$AB_DN" 2>&1) || true
+    case "$AB_AOUT" in
+      *"RESULT: FINDINGS"*) AB_A_F=yes ;;
+      *) AB_A_F=no ;;
+    esac
+    # THE ONE-DIRECTIONAL PROPERTY: if `classify_report` calls this report FINDINGS, the census
+    # MUST call it blocking. The converse is NOT required, and the `several` row is why.
+    if [ "$AB_A_F" = yes ] && [ "$AB_B" != blocking ]; then
+      bad "ab1/differential/$AROW: classify_report reports FINDINGS while the census reports $AB_B — the census is MORE PERMISSIVE than the reader it defers to, which is a false pass (A: $AB_AOUT)"
+    else
+      ok "ab1/differential/$AROW: the census is not more permissive than classify_report (A findings=$AB_A_F, census=$AB_B)"
+    fi
+  done
+fi
+
+# ------------------------------------------------------------------------------
+# (g) STRUCTURAL PINS. Behavioural cases only cover the shapes someone already thought of.
+# ------------------------------------------------------------------------------
+AB_SRC="$ASSERT"
+# THE CENSUS RUNS AFTER THE GENERATION BINDING, because it is stated in terms of the VALIDATED
+# generation: it has to know which file the accepted verdict came from to say which of the others
+# are SUPERSEDED. Order, not presence.
+AB_BIND_LN=$(LC_ALL=C grep -n 'PASS | AUTHOR-PERFORMED) c_assert_verdict_from_validated_generation' "$AB_SRC" | LC_ALL=C head -1 | LC_ALL=C cut -d: -f1)
+AB_CENS_LN=$(LC_ALL=C grep -n 'AUTHOR-PERFORMED) c_assert_no_superseded_blocking_verdict' "$AB_SRC" | LC_ALL=C head -1 | LC_ALL=C cut -d: -f1)
+if [ -n "$AB_BIND_LN" ] && [ -n "$AB_CENS_LN" ] && [ "$AB_CENS_LN" -gt "$AB_BIND_LN" ]; then
+  ok "ab1/structural: the census is dispatched AFTER the generation binding, so 'superseded' is measured against the VALIDATED generation"
+else
+  bad "ab1/structural: the census is not dispatched after the generation binding (bind '$AB_BIND_LN', census '$AB_CENS_LN')"
+fi
+# IT IS ASKED OF AUTHOR-PERFORMED ONLY, and the PASS arm is deliberately absent. A `case` arm
+# listing both would red the remediation case above; this pins the intent in source too.
+if LC_ALL=C grep -q '^      AUTHOR-PERFORMED) c_assert_no_superseded_blocking_verdict "\$issue" ;;$' "$AB_SRC"; then
+  ok "ab1/structural: the census arm names AUTHOR-PERFORMED alone (the PASS case is the sanctioned remedy, not a defect)"
+else
+  bad "ab1/structural: the census dispatch arm is not the expected AUTHOR-PERFORMED-only shape"
+fi
+# THE PERMISSIVE VALUE IS THE AFFIRMATIVE `0`, WITH A FAIL-CLOSED `*)`. A census that published
+# no flag must not arrive as "nothing blocking found" — the standing rule against deriving a pass
+# from the absence of a bad signal.
+AB_DISP_F="$T/ab-disposition-code.txt"
+LC_ALL=C sed -n '/^c_generation_disposition() {$/,/^}$/p' "$AB_SRC" >"$AB_DISP_F" 2>/dev/null || : >"$AB_DISP_F"
+if [ -s "$AB_DISP_F" ] && LC_ALL=C grep -q "^    0) printf 'clear" "$AB_DISP_F"; then
+  ok "ab1/structural: the CLEAR verdict is keyed on the affirmative flag value 0, not on '!= 1'"
+else
+  bad "ab1/structural: the clear verdict is not keyed on the affirmative 0"
+fi
+if [ -s "$AB_DISP_F" ] && LC_ALL=C grep -q "^    \*) printf 'unmeasurable-census" "$AB_DISP_F"; then
+  ok "ab1/structural: and an unrecognised flag is a NAMED non-measurement, never a fall-through to clear"
+else
+  bad "ab1/structural: the unrecognised-flag arm is not a named non-measurement"
+fi
+# THE `-L` TEST PRECEDES EVERY PREDICATE THAT DEREFERENCES ONE (round 19's Y1, round 20's Z1).
+AB_L_LN=$(LC_ALL=C grep -n 'if \[ -L "\$p" \]' "$AB_DISP_F" | LC_ALL=C head -1 | LC_ALL=C cut -d: -f1)
+AB_R_LN=$(LC_ALL=C grep -n 'c_record_bytes "\$p"' "$AB_DISP_F" | LC_ALL=C head -1 | LC_ALL=C cut -d: -f1)
+if [ -n "$AB_L_LN" ] && [ -n "$AB_R_LN" ] && [ "$AB_L_LN" -lt "$AB_R_LN" ]; then
+  ok "ab1/structural: the -L leaf test precedes the read, so a linked generation is refused rather than followed"
+else
+  bad "ab1/structural: the -L test does not precede the read (-L '$AB_L_LN', read '$AB_R_LN')"
+fi
+# THE READ GOES THROUGH THIS SCRIPT'S ONE OBSERVATION HELPER, not a fresh reader: a raw capture
+# DROPS NUL bytes, which MANUFACTURES grammar the file does not hold (round 13's S2).
+if [ -s "$AB_DISP_F" ] && LC_ALL=C grep -q 'obs="\$(c_record_bytes "\$p")"' "$AB_DISP_F"; then
+  ok "ab1/structural: the generation is read through c_record_bytes, so it inherits the NUL boundary and the two-signal complete-read assert"
+else
+  bad "ab1/structural: the generation read does not go through c_record_bytes"
+fi
+# NO ANSI STRIP IN THE CENSUS READER. `classify_report` does not strip either, so stripping here
+# would MANUFACTURE a token the file does not hold (round 15's U2) and would be a UNILATERAL
+# change to one of two readers of one shape.
+# A NEGATIVE ASSERT OVER AN ABSENT FUNCTION PASSES VACUOUSLY, so the extraction is required to
+# be NON-EMPTY first — the "empty probe is not a zero" trap, one directory over.
+AB_RDR_F="$T/ab-reader-code.txt"
+LC_ALL=C sed -n '/^_c_generation_result_awk() {$/,/^}$/p' "$AB_SRC" >"$AB_RDR_F" 2>/dev/null || : >"$AB_RDR_F"
+AB_RDR=""
+[ -s "$AB_RDR_F" ] && AB_RDR=present
+if [ -z "$AB_RDR" ]; then
+  bad "ab1/structural: _c_generation_result_awk could not be extracted, so the two negative asserts below would pass vacuously"
+elif LC_ALL=C grep -q '033\[' "$AB_RDR_F"; then
+  bad "ab1/structural: the census reader strips ANSI — that MANUFACTURES a token and diverges from classify_report"
+else
+  ok "ab1/structural: the census reader does NOT strip ANSI, exactly as classify_report does not"
+fi
+# THE BLOCKING SET IS `FINDINGS` ALONE, and that is a closed decision recorded in source: the
+# other three tokens of the closed grammar are not independent audits that said NO.
+if [ -n "$AB_RDR" ] && [ "$(LC_ALL=C grep -c 'tok == "' "$AB_RDR_F" || true)" = 1 ]; then
+  ok "ab1/structural: exactly ONE token comparison in the census reader — the blocking set is closed at FINDINGS"
+else
+  bad "ab1/structural: the census reader compares against more than one token; the blocking set must be FINDINGS alone"
+fi
+# THE ENUMERATION IS PROVED TO HAVE REACHED THE STAGE DIRECTORY. An empty probe is not a zero:
+# the published generation MUST be in the glob, because the verdict was read from it an instant
+# ago, so its absence means the census enumerated something else and its silence means nothing.
+AB_CENSFULL_F="$T/ab-census-full.txt"
+LC_ALL=C sed -n '/^c_assert_no_superseded_blocking_verdict() {$/,/^}$/p' "$AB_SRC" >"$AB_CENSFULL_F" 2>/dev/null || : >"$AB_CENSFULL_F"
+if [ -s "$AB_CENSFULL_F" ] && LC_ALL=C grep -q 'saw_published' "$AB_CENSFULL_F"; then
+  ok "ab1/structural: the census asserts AFFIRMATIVELY that it saw the published generation, so a zero count is a measurement and not an empty probe"
+else
+  bad "ab1/structural: the census does not affirm that it enumerated the right directory"
+fi
+# THE ROOT COMES FROM THE GLOBAL, NEVER A CAPTURE (round 18's X1): `$(c_stage_root)` strips a
+# trailing newline off the directory name and points the glob at a SIBLING lane.
+# COMMENT LINES ARE STRIPPED FIRST, and the needle is SPLIT — the same two idioms section 44s
+# uses on the same needle, for the same two reasons: a comment legitimately NAMES the construct
+# it warns against (a guard that reds on correct input is the guard agents learn to waive), and a
+# guard must not match its own source line.
+AB_CENS_F="$T/ab-census-code.txt"
+LC_ALL=C sed -n '/^c_assert_no_superseded_blocking_verdict() {$/,/^}$/p' "$AB_SRC" 2>/dev/null |
+  LC_ALL=C sed -e 's/^[[:space:]]*#.*$//' >"$AB_CENS_F" 2>/dev/null || : >"$AB_CENS_F"
+AB_CAP="\$(c_stage""_root)"
+if [ ! -s "$AB_CENS_F" ]; then
+  bad "ab1/structural: c_assert_no_superseded_blocking_verdict could not be extracted, so the negative assert below would pass vacuously"
+elif LC_ALL=C grep -qF "$AB_CAP" "$AB_CENS_F"; then
+  bad "ab1/structural: the census CAPTURES the root resolver — a captured path is not the path (round 18, X1)"
+else
+  ok "ab1/structural: the census reads the root from the global, never a capture (round 18, X1)"
+fi
+
 # --- case floor (#3544) ------------------------------------------------------
 # A span-replacing edit once silently deleted FOUR cases from a suite in this repo
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a
@@ -6359,7 +6878,26 @@ fi
 # 44q, with the replacement stated beside them. Every added assertion needs only bash, git and
 # coreutils, and a fixture that cannot be built calls `bad`, so a displaced count can never be a
 # silent green.
-ASSERT_FLOOR=573
+# ROUND 22's AB1 ADDS 56, ALL HOST-INDEPENDENT (579 -> 635; floor 573 -> 629, the documented
+# 6-assertion host-gated margin PRESERVED UNCHANGED — the margin exists for Case 41's
+# host-branching bound cases, and nothing in section 44v branches on the host: it needs git, bash,
+# coreutils and `ln -s`, the same set section 44t already requires): section 44v — a SUPERSEDED
+# blocking verdict must not be merged over. Round 15 (U1) made a late `result: FINDINGS` landing
+# in `record-author-performed`'s publish window NON-DESTRUCTIVE, and round 21 (AA1) excluded the
+# tool's other publisher from that window; neither made the preserved blocking verdict MATTER, so
+# the substitute became the PUBLISHED verdict and the merge proceeded. Measured on the shipped
+# artifacts: `PREMERGE: OK` at exit 0 over a superseded generation holding `result: FINDINGS`,
+# with no `--force` and no `replaced-verdict:` trace. 11 of these assertions RED on the shipped
+# script, 0 after. The section carries THREE controls, because a guard that reds on correct input
+# is the guard agents learn to waive: an ordinary AUTHOR-PERFORMED over the NOT-RUN sentinel still
+# proceeds; the SANCTIONED REMEDIATION FLOW (a superseded FINDINGS beneath a published PASS, which
+# is what re-opening and re-auditing leaves) still proceeds; and the explicitly-supplied
+# `--c-verdict <path>` residual is PINNED rather than left as prose. Its differential drives the
+# SHIPPED census reader, extracted from the artifact, against `classify_report` over one shared
+# 10-row table and asserts the one-directional property that matters — the census is never MORE
+# PERMISSIVE than the reader it defers to.
+#
+ASSERT_FLOOR=629
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"
