@@ -38,5 +38,4 @@ path = "src/main.rs"
 
 [features]
 default = []
-ci_zero_tolerance = []
 docker-integration = ["bollard", "futures-util"]

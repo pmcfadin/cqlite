@@ -275,9 +275,32 @@
 //! counted as compared container coverage. Every refusal is decided from the
 //! GOLDEN and the committed DDL alone, so it can never be caused by the very
 //! defect under test.
+//!
+//! ## A SECOND declared residual: no refusal is asked at a MAP KEY node (#3726)
+//!
+//! Every position the COMPARISON walks is asked [`node_refusal`], because
+//! `compare::compare_value_at` asks it at each node it visits. A map KEY is not
+//! such a node: `compare::compare_map` PAIRS keys (it canonicalizes them) rather
+//! than recursing into them, so there is nowhere in that path to record a refusal.
+//!
+//! What that costs, exactly. At the map NODE, [`decode_does_not_recover`] does
+//! verify a container key's recoverability twice over — the entry split must give
+//! the golden's entries back, and [`entry_cut`] must give each rendered KEY back —
+//! so a `, ` or a `: ` that would move either cut IS refused. What it does not
+//! reach is the key's OWN member split: a `, ` inside a scalar member of the key
+//! (a `list<text>` key holding `["a, b"]`, rendering `{a, b}`) leaves both of those
+//! cuts intact and yet decodes into two members where the golden has one — which
+//! this lane would report as a divergence the CLI did not cause. Bounding it means
+//! `compare_map` asking [`node_refusal`] at the key node and recording it, which is
+//! a code path no committed fixture reaches; it is declared here instead. MEASURED
+//! on the corpus: no container map key anywhere in it carries a `, `, a `: ` or a
+//! bracket inside a member — `test_nested_udt_keys.nested_udt_keys`'s keys are
+//! `key_part` UDTs whose `label`s are plain identifiers, an empty string or null.
 
 use super::schema::CqlType;
-use super::{stringified_blob_spelling, Kinding};
+use super::{
+    canon_typed, container, stringified_blob_spelling, Canon, Depth, Egress, Kinding, Side,
+};
 use serde_json::{Map, Value};
 
 /// The ONE bracket pair a container of this declared type may be rendered with
@@ -286,6 +309,62 @@ use serde_json::{Map, Value};
 /// Taken from the DDL, so each kind is required to use its own bracket: a `set`
 /// rendered `[a, b]` or a `tuple` rendered `[a, b]` is a failure (review finding
 /// R2), where the earlier golden-shape-only rule accepted any of the three.
+/// This type's declared map KEY type, or `None` when it is not a map.
+fn map_key_ty(ty: &CqlType) -> Option<&CqlType> {
+    match ty {
+        CqlType::Map(key_ty, _) => Some(key_ty),
+        _ => None,
+    }
+}
+
+/// A GOLDEN map key as the canonical value it denotes, or `None` when it does not
+/// denote one under the declared key type.
+///
+/// Goes through the lane's ONE answer to "what does the golden's map key denote"
+/// (`container::golden_map_key_value`) and the ONE canonicalizer, so the guide lookup
+/// pairs keys by exactly the equality `compare::compare_map` will use on them — which
+/// is the whole point of matching this way rather than on text.
+fn canonical_golden_key(key: &str, key_ty: &CqlType) -> Option<(Canon, Value)> {
+    let value =
+        container::golden_map_key_value(key, key_ty, container::MapKeySpelling::ToJsonString)
+            .ok()?;
+    let canon = canon_typed(
+        &value,
+        Egress::Csv,
+        key_ty,
+        Depth::Inside,
+        container::golden_map_key_kinding(key_ty, container::MapKeySpelling::ToJsonString),
+        Side::Golden,
+    )
+    .ok()?;
+    Some((canon, value))
+}
+
+/// A CSV entry's key TEXT as the canonical value it denotes WHEN READ UNDER `guide`.
+///
+/// Used only to CHOOSE the guide, by asking of each candidate "does this text, read
+/// under you, denote you?" — never to produce the value, which is decoded again by the
+/// caller once a candidate is selected. It must take a guide because reading the text
+/// depends on one: with `Null` the token `null` reads as `Null`, so a golden slot
+/// holding the TEXT `"null"` would never match its own entry.
+fn canonical_cli_key(
+    text: &str,
+    key_ty: &CqlType,
+    guide: &Value,
+    excluded: &Excluded<'_>,
+) -> Option<Canon> {
+    let decoded = decode_at(guide, text, key_ty, "", excluded, Kinding::Natural).ok()?;
+    canon_typed(
+        &decoded,
+        Egress::Csv,
+        key_ty,
+        Depth::Inside,
+        Kinding::Natural,
+        Side::Cli,
+    )
+    .ok()
+}
+
 fn brackets(ty: &CqlType) -> Option<(char, char)> {
     match ty {
         CqlType::List(_) => Some(('[', ']')),
@@ -435,14 +514,53 @@ fn decode_does_not_recover(
             split_mismatch(&rendering, "member", &parts, &want)
         }
         Value::Object(fields) => {
+            // The keys are rendered ONCE and reused below, so the split check and
+            // the key-cut check cannot ask two different questions about the same
+            // key — and so the "a key that does not render" case is decided in one
+            // place (here, by returning `None`: no refusal, because the golden's
+            // key is not a spelling of this declared type at all, which is a
+            // divergence for the comparison to report and not a format limit).
+            let keys = fields
+                .keys()
+                .map(|key| entry_key_rendering(ty, key))
+                .collect::<Option<Vec<String>>>()?;
+            // TWO DISTINCT KEYS THAT RENDER ALIKE make this node's rendering
+            // ambiguous, so it is refused (roborev finding, issue #3726).
+            //
+            // This is the EMPTY-CONTAINER refusal's sibling and is bounded the same
+            // way. The module doc declines the general question "could another value
+            // have rendered these bytes" — CSV members are unquoted, so a
+            // `list<text>` holding `["a", "b"]` and one holding `["a, b"]` render
+            // identically and refusing on mere non-uniqueness would refuse most of
+            // the corpus. This asks the NARROWER, OBSERVED question: do two keys
+            // PRESENT IN THIS GOLDEN collide? A container map key makes that
+            // reachable — a UDT key with `label` null and one with the text `"null"`
+            // both render `{label: null, …}` — and it cannot be reached by a scalar
+            // key, whose CSV text is the key itself.
+            //
+            // It is also the PRECONDITION that makes `decode_object`'s `.find()`
+            // correct: a refused node never reaches the decode (`decode_shape`
+            // returns the un-split body first), so by the time a key is looked up by
+            // its rendering, the renderings are known distinct.
+            for (i, key) in keys.iter().enumerate() {
+                if let Some(j) = keys.iter().take(i).position(|earlier| earlier == key) {
+                    return Some(format!(
+                        "entries {j} and {i} of the golden render the SAME key text {} — \
+                         the CSV rendering cannot tell them apart, so no reading of it \
+                         recovers which entry is which",
+                        brief(key)
+                    ));
+                }
+            }
             let want = fields
                 .iter()
-                .map(|(key, value)| {
+                .zip(keys.iter())
+                .map(|((key, value), rendered_key)| {
                     // The VALUE of a map entry / UDT field is a cell value, so it
                     // keeps its natural kind — `compare::compare_map` and
                     // `compare::udt::compare_udt` say the same thing.
                     golden_rendering(value, field_type(Some(ty), key), Kinding::Natural)
-                        .map(|value| format!("{}: {value}", entry_key_rendering(ty, key)))
+                        .map(|value| format!("{rendered_key}: {value}"))
                 })
                 .collect::<Option<Vec<String>>>()?;
             if let Some(why) = split_mismatch(&rendering, "entry", &parts, &want) {
@@ -458,26 +576,22 @@ fn decode_does_not_recover(
             // as the split's above — a key whose brackets balance leaves the `: `
             // that follows it at depth zero — and is reported rather than dropped
             // on the same grounds.
-            fields
-                .iter()
-                .zip(parts.iter())
-                .find_map(|((key, _), part)| {
-                    // Compared against the key AS RENDERED, which for a map key is
-                    // the CSV spelling of the golden's stringified text — the same
-                    // text `compare::compare_map` canonicalizes the golden key to.
-                    let key = entry_key_rendering(ty, key);
-                    match entry_cut(part) {
-                        Err(why) => Some(format!("the golden's own rendering: {why}")),
-                        Ok((got, _)) if got != key => Some(format!(
-                            "the decoder recovers key {} from the golden's own entry {}, not \
+            keys.iter().zip(parts.iter()).find_map(|(key, part)| {
+                // Compared against the key AS RENDERED — for a map key the CSV
+                // spelling of the value the golden's object key DENOTES, which
+                // is the same value `compare::compare_map` canonicalizes it to.
+                match entry_cut(part) {
+                    Err(why) => Some(format!("the golden's own rendering: {why}")),
+                    Ok((got, _)) if got != key => Some(format!(
+                        "the decoder recovers key {} from the golden's own entry {}, not \
                              the golden's key {}",
-                            brief(got),
-                            brief(part),
-                            brief(&key)
-                        )),
-                        Ok(_) => None,
-                    }
-                })
+                        brief(got),
+                        brief(part),
+                        brief(key)
+                    )),
+                    Ok(_) => None,
+                }
+            })
         }
         // Unreachable: the scalar case returned above and every other shape is a
         // container the two arms cover.
@@ -585,9 +699,11 @@ fn golden_rendering(golden: &Value, ty: Option<&CqlType>, kinding: Kinding) -> O
             let body = fields
                 .iter()
                 .map(|(key, value)| {
+                    let rendered_key = entry_key_rendering(object, key)?;
                     // A map VALUE / UDT field is a cell value: natural kind.
-                    golden_rendering(value, field_type(ty, key), Kinding::Natural)
-                        .map(|value| format!("{}: {value}", entry_key_rendering(object, key)))
+                    let rendered_value =
+                        golden_rendering(value, field_type(ty, key), Kinding::Natural)?;
+                    Some(format!("{rendered_key}: {rendered_value}"))
                 })
                 .collect::<Option<Vec<String>>>()?
                 .join(", ");
@@ -625,18 +741,57 @@ fn member_kinding(seq: &CqlType, kinding: Kinding) -> Kinding {
     }
 }
 
-/// The text the CSV rendering carries for one object entry's KEY.
+/// The text the CSV rendering carries for one object entry's KEY, or `None` when
+/// the golden's key is not a spelling the declared key type has (see
+/// [`golden_rendering`], whose `None` this propagates).
 ///
-/// A UDT entry's key is a FIELD NAME — not a value — and the grammar writes it
-/// verbatim. A MAP entry's key IS a value, and the golden always spells it under
-/// [`Kinding::Stringified`], because a JSON object key can only be a string; that
-/// is the same reading `compare::compare_map` applies to the golden key (and the
-/// reason it holds the CLI's own key to [`Kinding::Natural`]), so the same
-/// translation applies here.
-fn entry_key_rendering(object: &CqlType, key: &str) -> String {
+/// Three cases, and each one's authority:
+///
+///   * a UDT entry's key is a FIELD NAME — not a value — so the grammar writes it
+///     verbatim;
+///   * a MAP entry's key whose declared type is a CONTAINER is the key value's own
+///     `toJSONString` document (`cassandra-5.0.8 MapType.toJSONString` writes
+///     `keys.toJSONString(kv, protocolVersion)` and quotes it only when it does not
+///     already start with `"`), so it is PARSED — through the lane's one
+///     `container::golden_map_key_value` — and then rendered by this module's own
+///     grammar, at [`Kinding::Natural`] because a frozen container's members are
+///     cell values (issue #3726). Left as the raw JSON text it would carry `, ` and
+///     `: ` of its own, so [`decode_does_not_recover`] would judge every such node
+///     unrecoverable and REFUSE it — which is how the CSV half of this issue stayed
+///     open;
+///   * a MAP entry's key whose declared type is a SCALAR is spelled by the golden
+///     under [`Kinding::Stringified`], because a JSON object key can only be a
+///     string. That is the same reading `compare::compare_map` applies (and the
+///     reason it holds the CLI's own key to [`Kinding::Natural`]), so the same
+///     translation applies here.
+fn entry_key_rendering(object: &CqlType, key: &str) -> Option<String> {
     match object {
-        CqlType::Map(key_ty, _) => stringified_csv_text(key.to_string(), key_ty),
-        _ => key.to_string(),
+        CqlType::Map(key_ty, _) if container::is_container_type(key_ty) => {
+            // [`container::MapKeySpelling::ToJsonString`] because that is the
+            // question THIS site asks: is the golden's key text the toJSONString
+            // document this module can re-render through its own grammar? A MULTICELL
+            // map's `getString` key answers no and the `None` propagates.
+            //
+            // WHAT THAT `None` DOES, stated exactly, because the obvious reading is
+            // wrong: it does NOT refuse the node. `decode_does_not_recover` returns
+            // `None` for "no refusal", so a key that does not render leaves the node
+            // UNREFUSED and the divergence is reported by the comparison instead —
+            // which is deliberate and is stated on `node_refusal`: a golden key
+            // contradicting the DDL is a divergence to report, not a limit of the flat
+            // format. For the multicell shape that report is then suppressed by the
+            // declared `MulticellMapKeyUndecodedByGoldenRendersAsBlobHex` gap.
+            // `a_getstring_spelled_golden_key_renders_as_nothing_and_is_not_refused`
+            // asserts exactly this.
+            let value = container::golden_map_key_value(
+                key,
+                key_ty,
+                container::MapKeySpelling::ToJsonString,
+            )
+            .ok()?;
+            golden_rendering(&value, Some(key_ty), Kinding::Natural)
+        }
+        CqlType::Map(key_ty, _) => Some(stringified_csv_text(key.to_string(), key_ty)),
+        _ => Some(key.to_string()),
     }
 }
 
@@ -983,312 +1138,16 @@ fn body_emptiness_bound(members: usize, body: &str, rendering: &str) -> Result<(
     Ok(())
 }
 
-/// A predicate over a value path: `true` means the comparison excludes that path,
-/// so the decoder must not require the CLI's text there to invert the grammar.
-///
-/// Kept as a bare closure type rather than a dependency on the comparator's
-/// `SkipPaths`, so this module stays independent of it.
-pub type Excluded<'a> = dyn Fn(&str) -> bool + 'a;
-
-/// Decode `text` (one CSV field, or one member of one) into the shape `golden`
-/// declares, with `ty` — the column's DECLARED CQL type — supplying the bracket
-/// each container kind must be rendered with. A map/UDT decodes to the
-/// `[{"key":…,"value":…}, …]` spelling the JSON egress uses, so the existing map
-/// comparison applies unchanged.
-pub fn decode(golden: &Value, text: &str, ty: &CqlType, kinding: Kinding) -> Result<Value, String> {
-    decode_at(golden, text, ty, "", &|_| false, kinding)
-}
-
-/// [`decode`], but aware of the paths the comparison excludes.
-///
-/// `path` is the fully-qualified position of `text` in the row, spelled the same
-/// way the comparator spells it (`col.field` for a named field, `col[i]` for a
-/// positional member). At an EXCLUDED path the decode is ATTEMPTED and its result
-/// used when it succeeds, falling back to the raw, UNDECODED text only when the
-/// grammar does not invert there. That fallback is what keeps one un-invertible
-/// member from failing a whole cell nobody compares — which is what forced the
-/// `udt_nested` exclusion to be whole-column (issue #1491 review finding F5).
-///
-/// Attempting it rather than short-circuiting matters for the STALENESS side
-/// (finding L1): an exclusion is applied only while it suppresses a real
-/// divergence, and an unconditional raw-text answer here would keep the excluded
-/// position diverging (an object against a string) even after CQLite renders it
-/// correctly — so the gap could never retire itself.
-///
-/// The refusal scan is deliberately NOT exclusion-aware: it is decided from the
-/// golden alone, and refusing a node is a conservative, counted, NAMED outcome in
-/// the census, never a silent pass.
-pub fn decode_at(
-    golden: &Value,
-    text: &str,
-    ty: &CqlType,
-    path: &str,
-    excluded: &Excluded<'_>,
-    kinding: Kinding,
-) -> Result<Value, String> {
-    if excluded(path) {
-        return Ok(decode_shape(golden, text, ty, path, excluded, kinding)
-            .unwrap_or_else(|_| Value::String(text.to_string())));
-    }
-    decode_shape(golden, text, ty, path, excluded, kinding)
-}
-
-/// The decode itself, with no exclusion check of its own at this level — that
-/// belongs to [`decode_at`], so this can be run for an excluded path too. Nested
-/// members still go through [`decode_at`], so a deeper exclusion applies normally.
-fn decode_shape(
-    golden: &Value,
-    text: &str,
-    ty: &CqlType,
-    path: &str,
-    excluded: &Excluded<'_>,
-    kinding: Kinding,
-) -> Result<Value, String> {
-    // A node the GOLDEN's own content makes unsplittable is not split: its FRAME
-    // is still required (that is `strip`, i.e. property 2 of
-    // `decidable_despite_node_refusal`, applied at every depth) and its un-split
-    // BODY is handed on for the count bounds. Interpreting the body here is what
-    // would produce a member count no reading of the rendering supports — and
-    // deciding the refusal for the whole CELL instead is what let an ambiguous
-    // NESTED member suppress its unambiguous siblings and the outer structure
-    // (review finding P2).
-    //
-    // The comparator asks `node_refusal` at the same node, on the same golden and
-    // the same declared type, so it expects exactly what is left here.
-    if node_refusal(golden, Some(ty), kinding).is_some() {
-        return Ok(Value::String(strip(text, ty)?.to_string()));
-    }
-    // The declared TYPE decides the structure — including which bracket is
-    // required — and the golden decides the member shapes underneath it. When the
-    // two disagree the child is decoded against `null`, and the comparison is what
-    // reports the shape divergence.
-    match ty {
-        CqlType::List(element) | CqlType::Set(element) => decode_sequence(
-            golden,
-            text,
-            ty,
-            &|_| Some(element),
-            path,
-            excluded,
-            member_kinding(ty, kinding),
-        ),
-        CqlType::Tuple(items) => decode_sequence(
-            golden,
-            text,
-            ty,
-            &|i| items.get(i),
-            path,
-            excluded,
-            member_kinding(ty, kinding),
-        ),
-        CqlType::Map(_, value_ty) => {
-            decode_object(golden, text, ty, &|_| Some(value_ty), path, excluded)
-        }
-        CqlType::Udt(udt) => decode_object(
-            golden,
-            text,
-            ty,
-            &|field| {
-                udt.fields
-                    .iter()
-                    .find(|(name, _)| name == field)
-                    .map(|(_, t)| t)
-            },
-            path,
-            excluded,
-        ),
-        // NULL-TOKEN: the golden's own type resolves the `null` token.
-        _ => match golden {
-            Value::Null if text == "null" => Ok(Value::Null),
-            _ => Ok(Value::String(text.to_string())),
-        },
-    }
-}
-
-/// A list / set / tuple: one bracket pair fixed by `ty`, `, `-separated members,
-/// each decoded under the element type `element_ty` gives for its position.
-///
-/// `element_ty` answers `None` only for a member BEYOND a tuple's declared arity,
-/// which has no declared type; such a member is kept as raw text so the
-/// comparator reports the arity divergence rather than the decoder swallowing it.
-fn decode_sequence<'t>(
-    golden: &Value,
-    text: &str,
-    ty: &'t CqlType,
-    element_ty: &dyn Fn(usize) -> Option<&'t CqlType>,
-    path: &str,
-    excluded: &Excluded<'_>,
-    element_kinding: Kinding,
-) -> Result<Value, String> {
-    let parts = members(text, ty)?;
-    let items = golden.as_array();
-    let mut out = Vec::with_capacity(parts.len());
-    for (i, part) in parts.iter().enumerate() {
-        // A member the golden does not have is decoded against `null`; the
-        // length mismatch is what the comparison then reports.
-        let child_golden = items.and_then(|g| g.get(i)).unwrap_or(&Value::Null);
-        out.push(match element_ty(i) {
-            Some(et) => decode_at(
-                child_golden,
-                part,
-                et,
-                &format!("{path}[{i}]"),
-                excluded,
-                element_kinding,
-            )?,
-            None => Value::String((*part).to_string()),
-        });
-    }
-    Ok(Value::Array(out))
-}
-
-/// A map or UDT: `{…}`, `, `-separated `key: value` entries. `value_ty` answers
-/// with the declared type of the value under a given key — `None` for a UDT field
-/// the `CREATE TYPE` does not declare, whose value is therefore left as raw text
-/// for the comparator to reject by name.
-fn decode_object<'t>(
-    golden: &Value,
-    text: &str,
-    ty: &'t CqlType,
-    value_ty: &dyn Fn(&str) -> Option<&'t CqlType>,
-    path: &str,
-    excluded: &Excluded<'_>,
-) -> Result<Value, String> {
-    let parts = members(text, ty)?;
-    let fields = golden.as_object();
-    let mut out = Vec::with_capacity(parts.len());
-    for part in parts {
-        let (key, value) = entry_cut(part)?;
-        let mut entry = Map::new();
-        entry.insert("key".to_string(), Value::String(key.to_string()));
-        // A UDT field step, spelled `parent.field` as the comparator spells it. A
-        // MAP key reaches the same branch (CSV cannot tell the two apart), but a
-        // dotted skip path through a map is rejected when the case is validated
-        // against the DDL, so no exclusion can ever name one.
-        let child = if path.is_empty() {
-            key.to_string()
-        } else {
-            format!("{path}.{key}")
-        };
-        let child_golden = fields.and_then(|g| g.get(key)).unwrap_or(&Value::Null);
-        let decoded = match value_ty(key) {
-            // A map VALUE / UDT field is a cell value: natural kind, as in
-            // `golden_rendering`'s object arm and in the comparator.
-            Some(vt) => decode_at(child_golden, value, vt, &child, excluded, Kinding::Natural)?,
-            None => Value::String(value.to_string()),
-        };
-        entry.insert("value".to_string(), decoded);
-        out.push(Value::Object(entry));
-    }
-    Ok(Value::Array(out))
-}
-
-/// Cut one map/UDT entry into its key and its value at the FIRST top-level `: `,
-/// which is the only cut the grammar defines: a `: ` in a VALUE is ordinary text.
-///
-/// Factored out because [`decode_object`] and [`decode_does_not_recover`] must make
-/// the IDENTICAL cut — the refusal asks whether this cut gives the golden's key
-/// back, so a second spelling of it is a second notion of decodability, which is
-/// the drift this lane's review history is made of.
-fn entry_cut(part: &str) -> Result<(&str, &str), String> {
-    let cut = *scan(part, ": ")?.first().ok_or_else(|| {
-        format!(
-            "map/UDT entry {} has no top-level `: ` separator",
-            brief(part)
-        )
-    })?;
-    Ok((&part[..cut], &part[cut + 2..]))
-}
-
-/// Strip the bracket pair `ty` requires and split the body at every depth-zero
-/// `, `. An empty body is zero members.
-fn members<'a>(text: &'a str, ty: &CqlType) -> Result<Vec<&'a str>, String> {
-    let inner = strip(text, ty)?;
-    if inner.is_empty() {
-        return Ok(Vec::new());
-    }
-    split_top_level(inner, ", ")
-}
-
-/// Remove the opening/closing bracket pair the DECLARED type requires. Strict in
-/// both directions: a body that does not open with THAT bracket, or does not close
-/// with its mate, is an error rather than a best-effort parse — so a `set`
-/// rendered `[a, b]` fails instead of being read as a list.
-fn strip<'a>(text: &'a str, ty: &CqlType) -> Result<&'a str, String> {
-    let (open, close) = brackets(ty).ok_or_else(|| {
-        format!(
-            "{} was decoded as a container but the schema declares the scalar type \
-             `{}`",
-            brief(text),
-            ty.describe()
-        )
-    })?;
-    let rest = text.strip_prefix(open).ok_or_else(|| {
-        format!(
-            "{} is not a `{}` rendering: the declared type requires an opening \
-             `{open}` (`{open}…{close}`)",
-            brief(text),
-            ty.describe()
-        )
-    })?;
-    rest.strip_suffix(close).ok_or_else(|| {
-        format!(
-            "{} opens with `{open}` but does not close with `{close}`",
-            brief(text)
-        )
-    })
-}
-
-/// Split `body` at every depth-zero `sep`.
-fn split_top_level<'a>(body: &'a str, sep: &str) -> Result<Vec<&'a str>, String> {
-    let cuts = scan(body, sep)?;
-    let mut parts = Vec::with_capacity(cuts.len() + 1);
-    let mut start = 0usize;
-    for cut in cuts {
-        parts.push(&body[start..cut]);
-        start = cut + sep.len();
-    }
-    parts.push(&body[start..]);
-    Ok(parts)
-}
-
-/// Byte offsets of every depth-zero, non-overlapping `sep` in `body`.
-///
-/// Iterates by `char_indices` so slicing stays on UTF-8 boundaries (member text
-/// is arbitrary CQL `text`). Unbalanced brackets are an error — the rendering is
-/// then not the grammar this decoder inverts, and silently tolerating it is how
-/// a decoder starts absorbing writer defects.
-fn scan(body: &str, sep: &str) -> Result<Vec<usize>, String> {
-    let mut cuts = Vec::new();
-    let mut depth: i32 = 0;
-    let mut consumed = 0usize;
-    for (idx, ch) in body.char_indices() {
-        match ch {
-            '[' | '{' | '(' => depth += 1,
-            ']' | '}' | ')' => {
-                depth -= 1;
-                if depth < 0 {
-                    return Err(format!(
-                        "{} closes a bracket that never opened",
-                        brief(body)
-                    ));
-                }
-            }
-            _ => {}
-        }
-        if depth == 0 && idx >= consumed && body[idx..].starts_with(sep) {
-            cuts.push(idx);
-            consumed = idx + sep.len();
-        }
-    }
-    if depth != 0 {
-        return Err(format!(
-            "{} leaves {depth} bracket(s) unclosed",
-            brief(body)
-        ));
-    }
-    Ok(cuts)
-}
+/// Inverting the rendering — the DECODE half of this module (issue #3726 split it
+/// out under the campsite rule). Re-exported so no call site changes.
+#[path = "golden_csv_decode.rs"]
+mod decode_half;
+pub use decode_half::{decode, decode_at, Excluded};
+// `members` and `entry_cut` are the grammar helpers the REFUSAL half asks its question
+// WITH — the same two the decode runs, which is what stops the refusal set drifting from
+// the decode. `scan` is imported for this module's own test cases, which exercise the
+// depth rule directly; it is not used by the refusal path.
+use decode_half::{entry_cut, members, scan};
 
 /// Truncate a rendering for a diagnostic (the corpus carries 4 KiB blobs).
 fn brief(s: &str) -> String {
