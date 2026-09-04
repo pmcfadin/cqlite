@@ -98,8 +98,8 @@ const KEYSPACE: &str = "test_empty_fixedwidth_key";
 const TABLE: &str = "empty_fixedwidth_map_key";
 const SCHEMA: &str = "issue-3805-empty-fixedwidth-map-key.cql";
 
-/// THE DECLARED BLOCKERS — the two out-of-scope decode refusals that make this
-/// fixture unreadable through EVERY public read surface today, each with the
+/// THE DECLARED BLOCKER — the ONE remaining out-of-scope decode refusal that
+/// makes this fixture unreadable through EVERY public read surface, with the
 /// issue that owns it.
 ///
 /// # Why this list exists instead of a silently-skipped test
@@ -116,33 +116,26 @@ const SCHEMA: &str = "issue-3805-empty-fixedwidth-map-key.cql";
 ///     widening it "is a behaviour change with its own oracle and its own corpus
 ///     measurement: **issue #3847**. Do not 'fix' it by relaxing this guard
 ///     alone." Tracked for the frozen/inline path as **#4071**.
-///   * **m_dec** `map<decimal,int>` — `decimal`'s allowed widths are the EMPTY
-///     slice (it is variable-width: Cassandra accepts `0` or `>= 4`), so the
-///     cell-path arm's guard `allowed.contains(&0)` is false and `decimal` never
-///     reaches it. Typing it would move that arm's ADMISSION GATE from the width
-///     table to the tag table — `EmptyValueType::for_cql_type(&CqlType::Decimal)`
-///     is already `Some`, and both `empty_value.rs` and this fixture's schema
-///     record that "empty decimal is corrupt" was a WRONG committed claim — and
-///     that is a deliberate scope decision, not an oversight.
+///
+/// # m_dec WAS the second blocker and is CLOSED
+/// `decimal`'s allowed widths are the EMPTY slice (it is variable-width:
+/// Cassandra accepts `{0} ∪ [4, ∞)`), so the cell-path arm's original guard
+/// `allowed.contains(&0)` was false and `decimal` never reached it — measured as
+/// `Corruption("Frozen element 'm_dec': decimal too short (0 bytes)")`, which
+/// failed the whole SELECT. Slice 2 moved that arm's ADMISSION GATE from the
+/// WIDTH table to the TAG table (`for_cql_type`, derived from `validate()`), so
+/// the empty `m_dec` key now decodes to `Empty(Decimal)` and is asserted below.
 ///
 /// So this lane asserts the FULL golden the moment the read succeeds, and until
 /// then it requires the failure to be EXACTLY one of these. It can therefore
 /// never green vacuously, and it REDS as soon as either blocker lands, which is
 /// what forces the full assertions to be turned on rather than remembered.
-const DECLARED_BLOCKERS: &[(&str, &str, &str)] = &[
-    (
-        "m_frozen",
-        "need 4 byte(s) for int, got 0",
-        "#3847/#4071 — inline frozen element, require_fixed_width refuses a legal \
-         empty fixed-width value",
-    ),
-    (
-        "m_dec",
-        "decimal too short (0 bytes)",
-        "#3805 residual — decimal is variable-width so its allowed-width slice is \
-         empty, and the cell-path arm's admission gate is that slice",
-    ),
-];
+const DECLARED_BLOCKERS: &[(&str, &str, &str)] = &[(
+    "m_frozen",
+    "need 4 byte(s) for int, got 0",
+    "#3847/#4071 — inline frozen element, require_fixed_width refuses a legal \
+     empty fixed-width value",
+)];
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -318,16 +311,20 @@ fn declared_blocker(err: &str) -> Option<&'static (&'static str, &'static str, &
 /// which it does today (m_frozen, #3847/#4071). Any other error, or a partial
 /// row, FAILS.
 ///
-/// MEASURED post-fix through this same surface, with the two declared blockers
-/// stepped past by a throwaway schema (m_frozen/m_dec re-declared
-/// `map<blob,int>`, NOT committed — the schema is the fixture's oracle and is not
-/// edited to make a test pass): `m_int = Map([(Empty(Int), 7), (Integer(42), 1)])`,
+/// MEASURED post-fix through this same surface, with the ONE declared blocker
+/// stepped past by a throwaway schema (m_frozen alone re-declared `map<blob,int>`
+/// — m_dec kept as the real `decimal`; NOT committed, the schema is the fixture's
+/// oracle and is not edited to make a test pass):
+/// `m_int = Map([(Empty(Int), 7), (Integer(42), 1)])`,
 /// `m_bigint = Map([(Empty(BigInt), 7), (BigInt(99), 1)])`,
 /// `m_uuid = Map([(Empty(Uuid), 7), (Uuid(123e4567-…), 1)])`,
 /// `m_bool = Map([(Empty(Boolean), 7), (Boolean(true), 1)])`,
 /// `m_inet = Map([(Inet(b""), 7), (Inet(10.0.0.1), 1)])`,
-/// `m_text = Map([(Text(b""), 7), (Text("k"), 1)])`. Pre-fix the four sentinels
-/// were each `Blob(b"")` — one opaque spelling for four distinct declared types.
+/// `m_text = Map([(Text(b""), 7), (Text("k"), 1)])`, and
+/// `m_dec = Map([(Empty(Decimal), 7), (Decimal{scale:1,unscaled:[0x0f]}, 1)])`.
+/// Pre-fix the four fixed-width sentinels were each `Blob(b"")` — one opaque
+/// spelling for four distinct declared types — and m_dec was an outright refusal
+/// that failed the whole SELECT.
 #[cfg(feature = "cli-helpers")]
 #[tokio::test]
 async fn an_empty_fixed_width_map_key_reads_as_the_typed_sentinel() {
@@ -337,7 +334,8 @@ async fn an_empty_fixed_width_map_key_reads_as_the_typed_sentinel() {
             let Some((column, _, owner)) = declared_blocker(&err) else {
                 panic!(
                     "the committed fixture failed to read with an UNDECLARED error — this is \
-                     not one of the two known out-of-scope blockers, so it is a regression: \
+                     not the one known out-of-scope blocker (m_frozen, #3847/#4071), so it \
+                     is a regression: \
                      {err}"
                 );
             };
@@ -358,6 +356,18 @@ async fn an_empty_fixed_width_map_key_reads_as_the_typed_sentinel() {
         ("m_int", EmptyValueType::Int, Value::Integer(42)),
         ("m_bigint", EmptyValueType::BigInt, Value::BigInt(99)),
         ("m_bool", EmptyValueType::Boolean, Value::Boolean(true)),
+        // m_dec is the family the admission-gate move exists for: `decimal` is
+        // VARIABLE-width, so no width table can admit its empty buffer, and only
+        // the tag table (`validate()`-derived) can. Its golden sibling is the
+        // decimal `1.5`, whose serialized form is `[i32 scale][unscaled]`.
+        (
+            "m_dec",
+            EmptyValueType::Decimal,
+            Value::Decimal {
+                scale: 1,
+                unscaled: vec![0x0f],
+            },
+        ),
     ];
     for (column, tag, sibling) in expected {
         let entries = map_entries(&rows, 1, column);
@@ -429,7 +439,9 @@ async fn an_empty_fixed_width_map_key_reads_as_the_typed_sentinel() {
 
     // THE CONTRAST ROW. No empty key anywhere in the golden, so no sentinel may
     // appear: the fix is a property of the empty-key path, not of the data.
-    for column in ["m_int", "m_bigint", "m_uuid", "m_bool", "m_inet", "m_text"] {
+    for column in [
+        "m_int", "m_bigint", "m_uuid", "m_bool", "m_inet", "m_dec", "m_text",
+    ] {
         let entries = map_entries(&rows, 2, column);
         assert_eq!(
             entries.len(),
@@ -459,10 +471,12 @@ async fn an_empty_fixed_width_map_key_reads_as_the_typed_sentinel() {
 fn the_declared_blocker_list_is_specific_and_bounded() {
     assert_eq!(
         DECLARED_BLOCKERS.len(),
-        2,
-        "exactly two blockers are declared (m_frozen: #3847/#4071, m_dec: #3805 \
-         residual). ADDING one is an admission that this lane covers LESS; REMOVING \
-         one means the read now works and the assertions must be turned on."
+        1,
+        "exactly ONE blocker is declared: m_frozen (#3847/#4071, the inline frozen \
+         path). m_dec was the second and slice 2 CLOSED it by moving the arm's \
+         admission gate to the tag table. ADDING an entry is an admission that this \
+         lane covers LESS; REMOVING this one means the read now works and every \
+         assertion in the subject test must be turned on."
     );
     for (column, needle, owner) in DECLARED_BLOCKERS {
         assert!(
