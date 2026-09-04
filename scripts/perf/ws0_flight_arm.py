@@ -251,6 +251,16 @@ def session_bound_expectations(tag: str, flight_endpoint: str) -> dict[str, str]
     return expected
 
 
+def flight_rep_tag(arm: str, temp: str, rep: int) -> str:
+    """The artifact tag of ONE flight rep — the ONLY spelling of this convention (#3551).
+
+    Extracted so `ws0_flight_admission.verify_flight_admission` can derive the same tag set this
+    collector reads: a second copy of the convention would drift, and its failure mode is an
+    absent-artifact refusal for a rep whose files exist under the other module's name.
+    """
+    return f"flight-{arm}-{temp}-{rep}"
+
+
 def collect_flight(
     d: pathlib.Path, temp: str, arm: str, reps: int, corpus_rows: int, flight_endpoint: str,
     counted_events: tuple = REQUIRED_EVENTS,
@@ -282,7 +292,7 @@ def collect_flight(
     prewarm: list[dict] = []
     round_meta: dict[int, dict[str, int]] = {}
     for rep in range(1, reps + 1):
-        tag = f"flight-{arm}-{temp}-{rep}"
+        tag = flight_rep_tag(arm, temp, rep)
         jsonl = d / f"{tag}.jsonl"
         if not jsonl.exists():
             missing.append(jsonl.name)

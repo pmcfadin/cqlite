@@ -264,6 +264,38 @@
 #                      opt-out. Source-only: no cargo, sub-second, offline, no
 #                      datasets.
 #                      SKIP-aware (loud): SKIPs only when cqlite-core is absent.
+#   dep-duplicates     ADVISORY DUPLICATE-DEPENDENCY RATCHET
+#                      (scripts/ci/check-dep-duplicates.sh, issue #1700 AH7).
+#                      Measures `cargo tree -d --workspace --target all` — the
+#                      audit's own invocation; the BARE `cargo tree -d` reads the
+#                      ROOT PACKAGE only and reports a small fraction of it, and
+#                      without `--target all` cargo measures the HOST target, so a
+#                      COMMITTED baseline would mean different things on a Linux
+#                      lane and a macOS one — and compares the
+#                      duplicate-instance / duplicated-crate counts against the
+#                      committed baseline scripts/ci/dep-duplicates-baseline.txt
+#                      (a generated file; one documented regeneration command,
+#                      `bash scripts/ci/check-dep-duplicates.sh --regenerate`).
+#                      ADVISORY BY MANDATE (#1700 AC2): an INCREASE is recorded PASS
+#                      and never fails the gate — a legitimate new dependency can add
+#                      a duplicate no local decision can collapse, and a lane that
+#                      reds on correct input is the lane agents learn to waive — but
+#                      it prints a LOUD, textually distinct ADVISORY-INCREASE block
+#                      naming the delta AND the crates that grew / became newly
+#                      duplicated. Never a bare number, in either direction: a clean
+#                      result prints `0 INCREASE RECOGNISED`.
+#                      …and never a VACUOUS pass: THREE states, not two. A run that
+#                      could not MEASURE (no cargo, `cargo tree` non-zero, a bounded
+#                      timeout, output the parser does not recognise) or could not
+#                      read the BASELINE (missing/garbage) is a SKIP NAMING THE CAUSE,
+#                      never a PASS — a pass may not rest on an unmeasured state.
+#                      "cargo tree printed nothing" (a legitimate zero) is kept
+#                      distinct from "printed something unparseable". Colour-immune
+#                      (#3400): parses an ANSI-stripped copy by redirection, never a
+#                      pipe. No datasets, no network, no build — a metadata probe.
+#                      This component emits no FAIL at all, by design; its own
+#                      self-test (which DOES fail on a broken guard) is in
+#                      tooling-tests.
 #   tooling-tests      shell-tooling regression tests (fast, no datasets/network):
 #                      scripts/tests/test_workspace_test_disposition.sh (+ its
 #                      self-test): the PACKAGE-granular #3522 census — every cargo
@@ -468,6 +500,97 @@
 #                      a readiness TIMEOUT fatal, an unanswerable prober stopping the run.
 #                      Hermetic: fake sysfs + a loopback listener under $TMPDIR; no
 #                      perf/sudo/taskset/root/hardware.
+#                      Also runs scripts/tests/test_ws0_flight_arm_guards.sh (#3551) —
+#                      the FLIGHT arm's own pin and allocator, split from the file above
+#                      (at the ~1500-line target) along a RESPONSIBILITY seam: that one
+#                      asks whether the pinned CPUs are one physical core, this one asks
+#                      what DIFFERS between two arms that no longer run the same way.
+#                      --flight-pin-mode selects between two AFFIRMATIVE assertions and
+#                      relaxes neither, so distinct-cores REFUSES a sibling pair (naming
+#                      both CPUs and the sysfs answer) and siblings REFUSES a distinct
+#                      one, proved over the SAME two inputs; a single-CPU list is refused
+#                      because pairwise-distinct over one element compares nothing.
+#                      --flight-allocator is verified from the RUNNING PROCESS because
+#                      LD_PRELOAD FAILS OPEN (glibc prints "cannot be preloaded ...:
+#                      ignored" and continues with system malloc, exit 0), so arm C would
+#                      otherwise be a byte-identical duplicate of arm B under a label
+#                      saying otherwise; the absent-mapping branch and the EMPTY/ABSENT
+#                      maps files are driven against synthetic maps, the last two as
+#                      COULD-NOT-MEASURE refusals rather than "no mapping present"
+#                      (measured on a mutant: `system VERIFIED ... (0 mappings read)`).
+#                      Plus the #3272-F6 substitution at the new pin, the record's closed
+#                      grammars, and a ONE-FIELD report differential proving a
+#                      distinct-cores pin is never described as physical-core siblings.
+#                      Hermetic: fake sysfs, synthetic maps/session dirs/corpus under
+#                      $TMPDIR, every driver call through ws0_driver_run.
+#                      Also runs scripts/tests/test_ws0_abc_driver_guards.sh (#3551) —
+#                      the INTERLEAVED A/B/C SET's own guards, the subject neither file
+#                      above can answer: is a directory of WS0 measurement sessions ONE
+#                      PAIRED EXPERIMENT? Three roborev findings, one family (an artifact
+#                      ADOPTED without its provenance established). ws0-3551-abc.sh's
+#                      RESUME is deliberate and stays, so it is CHECKED: a run
+#                      FINGERPRINT (corpus path AND its recorded Data.db sha256 + rows,
+#                      --bin-dir AND all three binaries' digests, each arm's EXACT flag
+#                      list, --step-duration/--arena-max/--jemalloc-lib/--port) written
+#                      once and verified field-by-field after, with --rounds DELIBERATELY
+#                      excluded because extending a set is a legitimate resume — asserted
+#                      in BOTH directions, since a guard that reds on correct input is the
+#                      guard an operator works around. Plus per-session window validation
+#                      (arm and round must match the directory name, recorded exit must be
+#                      0) and ws0_abc_aggregate.py's configuration validation over EVERY
+#                      (round, arm) rather than the first, and `ratio bare/flight` pinned
+#                      NUMERICALLY to the rig's own quantity (rows/s bare over rows/s
+#                      flight, not a cycles quotient) on a fixture separating all three
+#                      candidate readings, plus a flight-FASTER fixture pinning the
+#                      direction below 1. Every pin/mode/allocator RED arm is planted by
+#                      SUBSTITUTING the artifact (a sed on a scratch copy — those are the
+#                      driver's DEFINITION of an arm, not flags) and the plant is asserted
+#                      to have TAKEN, because a sed that matched nothing leaves a RED arm
+#                      identical to its control. Hermetic: synthetic session dirs,
+#                      identity and binary fixtures under $TMPDIR, plus a recording STUB
+#                      standing in for the measurement driver beside the scratch copy,
+#                      so the real driver is never reached — asserted from the stub's
+#                      own log (a positive control proves the harness CAN see an
+#                      invocation) and from lib-ws0-hermetic.sh's shims.
+#                      Also runs scripts/tests/test_ws0_3551_artifact_tools.sh (#3551) —
+#                      the two MEASUREMENT-ANALYSIS tools under
+#                      docs/reports/ws0-3551-artifacts/ (clean-pairs.py,
+#                      window-census.py) whose stdout IS that issue's published result.
+#                      This repo reviews docs/reports/*-artifacts/ harnesses as CODE
+#                      (#3229) and these two had NO tests, which is how a real defect
+#                      got in: a session read CLEAN on ONE zero-census sample anywhere
+#                      in its window, so a mostly UNOBSERVED session could enter the
+#                      published medians — a non-empty sample set is not COVERAGE. The
+#                      coverage BOUND is DERIVED from the committed judge
+#                      (ws0_quiescence.MAX_SAMPLE_GAP_S) at run time, never restated,
+#                      and which side of it is permissive is READ from that rule's own
+#                      strict `>`. Driven from BOTH ends, and the two BOUNDARY halves
+#                      (window start to first sample, last sample to window end) are
+#                      driven SEPARATELY from the interior one, because a
+#                      consecutive-differences scan cannot see them and that is where
+#                      this rule is usually got wrong. NOT MEASURED is asserted
+#                      textually DISTINCT from UNDERCOVERED. Pairing: a contaminated
+#                      BASELINE voids its whole round (the set-3-round-2 event, four
+#                      clean treatments lost); a pair whose own bare-scan control moved
+#                      at least as much as its treatment is REPORTED and excluded —
+#                      including when it is the only pair, which used to print a bare
+#                      NO CLEAN PAIRS and drop the reason; pairs pool across SETS and
+#                      never across ROUNDS, on fixtures where a violation would change
+#                      the answer. Medians and direction counts pinned NUMERICALLY by
+#                      column HEADER (never position) with a FASTER and a SLOWER
+#                      treatment, so both signs are pinned. And the per-CPU column's
+#                      corrected claim is pinned phrase by phrase — TOTAL busy
+#                      INCLUDING our own measurement, explicitly NOT a contamination
+#                      bound — plus a count-equality assert that no un-negated mention
+#                      can appear, which a phrase list cannot express. Every refusal is
+#                      matched on the tool's OWN diagnostic, never a bare non-zero exit,
+#                      and each coverage refusal carries a positive control ON THE
+#                      ORACLE: a MUTATED scratch copy with the bound removed must ACCEPT
+#                      the same fixture (so the refusal is the RULE and not a malformed
+#                      fixture), with a boundary-only mutant discriminating the halves
+#                      and every plant asserted to have TAKEN. Hermetic: synthetic
+#                      session dirs, window records and sampler JSONL under $TMPDIR,
+#                      and NOTHING read from /data/ws0-3551 (one lane's live outputs).
 #                      Also runs scripts/tests/test_ws0_perf_invocation_lint.sh (#3272
 #                      item 10) — the THIRD structural guard, split out of the file above
 #                      under the campsite rule (it reached 1607 lines against the ~1500
@@ -6058,7 +6181,7 @@ _python_build_verify_venv() {
   return 3
 }
 
-COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan python-bindings node-bindings binding-rust-tests delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface tooling-tests minimal-build all-features-check smoke)
+COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan python-bindings node-bindings binding-rust-tests delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface dep-duplicates tooling-tests minimal-build all-features-check smoke)
 
 # _component_lane <name> (issues #1737, #2657): SINGLE SOURCE OF TRUTH for the
 # MAIN-vs-SIDE lane split. Defined early (before the arg-parse dispatch) so the
@@ -6723,6 +6846,19 @@ _fm_component_class() {
     # cargo argv passes through this shell. Naming the DRIVER is structural (it is the
     # command the component runs); the feature set is NOT claimed.
     python-bindings) printf 'indirect:maturin' ;;
+    # dep-duplicates: `cargo tree -d --workspace --target all` runs inside
+    # scripts/ci/check-dep-duplicates.sh — a CHILD PROCESS — and the interceptors above
+    # are deliberately unexported, so class `cargo` would be an unexercisable claim of
+    # observability (the roborev job 273 F2 defect) and would render UNDECLARED. There IS
+    # one nameable driver whose reach is recordable from an EXPLICIT signal (the guard
+    # prints `dep-duplicates: probe cargo tree -d --workspace --target all INVOKED
+    # (rc N)` before any
+    # verdict, and run_dep_duplicates records reach from THAT line, never from the
+    # terminal status), so this is `indirect:`, not `unobservable:`. The driver text names
+    # the probe AND that it compiles nothing, because `cargo tree` is a metadata query:
+    # _fm_describe_cargo rejects such invocations by design, so there is no feature set
+    # anybody could have observed here even in the gate's own shell.
+    dep-duplicates)  printf 'indirect:check-dep-duplicates.sh (cargo tree -d --workspace --target all; a metadata probe, compiles nothing)' ;;
     node-bindings)   printf 'indirect:npm run build (napi)' ;;
     fmt|clippy|core-tests|tombstones-scan|scan-offload-guard|work-counters-guard) printf 'cargo' ;;
     byte-budget-guard|arrow-parity-guard|memory-budget|integration-tests) printf 'cargo' ;;
@@ -7350,7 +7486,7 @@ _census_kind() {
     # selected `.rs` file cannot be read — changes the RATCHET's failure semantics for every
     # diff, which is its own decision with its own risk of reddening correct input. Doing
     # `emitted` properly requires settling that first. Tracked in #3162.
-    file-size|pub-surface|roborev-lints|binding-unwind-profile|delivery-telemetry|tooling-tests)
+    file-size|pub-surface|roborev-lints|binding-unwind-profile|delivery-telemetry|tooling-tests|dep-duplicates)
                     printf 'gap:shell/python guard prints no AGENT-GATE-CENSUS contract line yet (#3162)' ;;
     *) return 1 ;;
   esac
@@ -16381,6 +16517,184 @@ run_pub_surface() {
   echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
+# dep-duplicates: the ADVISORY DUPLICATE-DEPENDENCY RATCHET (issue #1700 AH7).
+# scripts/ci/check-dep-duplicates.sh measures `cargo tree -d --workspace --target all`
+# and compares the duplicate-instance / duplicated-crate counts against the committed
+# baseline scripts/ci/dep-duplicates-baseline.txt. BOTH flags are load-bearing:
+# `--workspace` because the bare `cargo tree -d` reads the ROOT PACKAGE only (this
+# workspace HAS a root package, so cargo's default member set is that one package) and a
+# ratchet over the bare form would be blind to most of the subject; `--target all`
+# because `cargo tree` otherwise measures the HOST target, so the COMMITTED baseline
+# would mean a different thing on a Linux lane than on a macOS one and each would report
+# a phantom advisory delta against the other's numbers.
+#
+# THE PROBE IS RUN READ-ONLY (`--locked --offline`), AND THAT PROTECTS THIS GATE. Without
+# `--locked` cargo will UPDATE `Cargo.lock` whenever it decides the manifests need it —
+# a TRACKED file — and a component that rewrites one mid-run trips this gate's own
+# mid-run tree-mutation check (#2926, `tree-integrity: FAIL (tree-mutated-midrun; …)`).
+# That would be an ADVISORY component, which may never emit a FAIL, reddening the gate of
+# record from a mutation it caused itself. `--offline` removes the registry access. A
+# failure under either flag is UNMEASURABLE ⇒ SKIP naming the cause; the guard
+# deliberately does NOT retry without them, since that would restore the mutability
+# silently.
+#
+# THIS COMPONENT NEVER EMITS FAIL, and that is a mandate rather than an oversight
+# (#1700 AC2). An increase in duplication is a signal to a human: a legitimate new
+# dependency can add a duplicate that no local decision can collapse, `[patch]` and pins
+# that fight upstream ecosystems are explicitly out of scope, and a lane that reds on
+# correct input is the lane agents learn to waive. So an increase is recorded PASS with a
+# LOUD, textually distinct ADVISORY-INCREASE block echoed into the gate log, naming the
+# delta and the crates responsible.
+#
+# IT ALSO NEVER PASSES VACUOUSLY, which is the other half and the harder one. "Advisory"
+# is not a licence to green on nothing (CLAUDE.md: a positive verdict requires an
+# affirmative measurement), so PASS is keyed on THREE AFFIRMATIVE SIGNALS TOGETHER, never
+# on the absence of an error: the guard's `verdict NO-INCREASE|ADVISORY-INCREASE` line,
+# its `probe … INVOKED` line (cargo really ran) and its `MEASURED …` line (a census was
+# really published). The verdict ALONE is not enough — a stale log, a replayed or
+# hard-coded verdict line, or a guard that returned a verdict having measured nothing all
+# reach it, and keying on it alone once permitted the self-contradictory
+# `PASS [never reached …]`. Every other outcome is a SKIP NAMING THE CAUSE: the guard absent
+# from the checkout, no cargo on PATH, no `timeout(1)` accepting `-k` with which to BOUND
+# the probe (the guard then does not run it at all — an unbounded `cargo tree` could hang
+# this component with no verdict, and a missing capability must not inherit the permissive
+# branch), `cargo tree` non-zero or timed out, output the
+# parser does not recognise, a missing or ungrammatical baseline, an unexpected exit
+# status, a zero exit with NO verdict line (a guard that returned early measured
+# nothing, and that is a SKIP, not a pass), or a verdict unaccompanied by the probe or
+# the MEASURED line. A SKIP is visible in the SUMMARY and is not a
+# certification; the component's own self-test — which DOES fail, on all of those paths —
+# lives in tooling-tests.
+#
+# No datasets, no network, no build: `cargo tree` is a metadata probe. It is therefore
+# NOT in DATASET_COMPONENTS.
+run_dep_duplicates() {
+  local name=dep-duplicates
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local guard="scripts/ci/check-dep-duplicates.sh"
+  local log="$LOG_DIR/$name.log"
+  local start end status cause="" drv
+  start=$(date +%s)
+  # ONE SPELLING of the driver text, taken from the declaration site itself rather than
+  # retyped here, so the class-based rendering (empty sidecar) and the recorded reach can
+  # never read as two different states.
+  drv="$(_fm_component_class "$name" 2>/dev/null || printf 'indirect:%s' "$guard")"
+  drv="${drv#indirect:}"
+  if [ ! -f "$REPO_ROOT/$guard" ]; then
+    status=SKIP
+    echo ">>> [$name] SKIP (cause=guard-absent: $guard is not in this checkout, so nothing was measured)"
+    _fm_note_driver "$name" "$drv" not-reached "the guard script is absent from this checkout"
+    record_result "$name" "$status" 0
+    echo ">>> [$name] $RECORDED_STATUS (0s)"
+    return 0
+  fi
+  echo ">>> [$name] bash $guard"
+  local rc=0
+  bash "$REPO_ROOT/$guard" >"$log" 2>&1 || rc=$?
+
+  # ANSI-STRIPPED, READ BY REDIRECTION (#3400). The guard's own lines carry no escapes,
+  # but cargo's stderr shares this log and colour SURVIVES redirection to a file — and a
+  # parse routed through the shared idiom cannot rot into the one that is not.
+  local src verdict="" probe="" measured="" unmeas=""
+  src=$(_ansi_stripped_log "$log" 2>/dev/null) || src=""
+  if [ -n "$src" ] && [ -r "$src" ]; then
+    local line
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        'dep-duplicates: verdict '*)            [ -n "$verdict" ] || verdict="${line#dep-duplicates: verdict }" ;;
+        'dep-duplicates: probe '*' INVOKED '*)  [ -n "$probe" ] || probe="$line" ;;
+        'dep-duplicates: MEASURED '*)           [ -n "$measured" ] || measured="$line" ;;
+        'dep-duplicates: SKIP-UNMEASURABLE '*)  [ -n "$unmeas" ] || unmeas="${line#dep-duplicates: SKIP-UNMEASURABLE }" ;;
+        'dep-duplicates: SKIP-BASELINE-UNUSABLE '*) [ -n "$unmeas" ] || unmeas="${line#dep-duplicates: SKIP-BASELINE-UNUSABLE }" ;;
+      esac
+    done <"$src"
+  else
+    # A log we could not normalise is a log we did not read: say so rather than deriving a
+    # verdict from a file the parse failed on.
+    unmeas="cause=log-unreadable detail=could not normalise $log for parsing"
+    rc=99
+  fi
+
+  # THE DRIVER'S REACH, from an EXPLICIT SIGNAL (#3453, roborev job 273 F3): the guard
+  # prints `probe <cmd> INVOKED (rc N)` immediately after invoking cargo, before any
+  # verdict. Reach is read from THAT line and never inferred from the terminal status —
+  # the guard can exit 3 having never reached cargo at all (cargo absent), and claiming
+  # an invocation that did not happen is exactly the defect this recording exists to fix.
+  if [ -n "$probe" ]; then
+    _fm_note_driver "$name" "$drv" reached
+  else
+    _fm_note_driver "$name" "$drv" not-reached "no 'probe … INVOKED' line in $log"
+  fi
+
+  case "$rc" in
+    0)
+      case "$verdict" in
+        NO-INCREASE*|ADVISORY-INCREASE*)
+          # A VERDICT IS NOT A MEASUREMENT (roborev round 3, #1700). PASS requires the
+          # verdict AND BOTH affirmative signals that a census was actually taken: the
+          # guard's `probe … INVOKED` line (cargo really ran) and its `MEASURED …` line
+          # (a census was really published). Keying PASS on the verdict alone permitted
+          # the self-contradictory `PASS [never reached …]` — this component certifying a
+          # duplicate census beside its own record that cargo was never invoked — and let
+          # a stale, replayed or hard-coded verdict line manufacture exactly the vacuous
+          # pass the component exists to prevent. Absent either signal it is a SKIP naming
+          # WHICH one was missing; this component may never FAIL, so SKIP is how it says
+          # "nothing was measured".
+          if [ -z "$probe" ]; then
+            status=SKIP
+            cause="cause=verdict-without-probe detail=$guard printed 'verdict $verdict' but NO 'probe … INVOKED' line, so no cargo invocation is evidenced and the verdict rests on nothing measured here"
+          elif [ -z "$measured" ]; then
+            status=SKIP
+            cause="cause=verdict-without-measurement detail=$guard printed 'verdict $verdict' but NO 'MEASURED …' line, so no duplicate census was published for that verdict to be about"
+          else
+            status=PASS
+            # Echo the guard's OWN statements so a pasted gate log shows the ratchet RAN
+            # over real numbers, and so an increase is loud where a human will see it.
+            local l
+            while IFS= read -r l || [ -n "$l" ]; do
+              case "$l" in
+                'dep-duplicates: 0 INCREASE RECOGNISED'*|'dep-duplicates: ADVISORY-INCREASE'*|'dep-duplicates: RATCHET-LOOSE'*|'dep-duplicates: MEASURED '*|'dep-duplicates: verdict '*) echo "$l" ;;
+              esac
+            done <"$src"
+          fi
+          ;;
+        *)
+          # Exit 0 with no verdict: the guard returned early, so NOTHING was compared.
+          # A pass may not rest on an unmeasured state, and this component may not FAIL —
+          # so it is a SKIP that names exactly that.
+          status=SKIP
+          cause="guard-exited-0-without-a-verdict"
+          ;;
+      esac
+      ;;
+    3|4)
+      status=SKIP
+      cause="${unmeas:-cause=unnamed detail=the guard exited $rc without naming a cause}"
+      ;;
+    *)
+      status=SKIP
+      cause="cause=unexpected-rc detail=$guard exited $rc"
+      [ -n "$unmeas" ] && cause="$unmeas"
+      ;;
+  esac
+  if [ "$status" = SKIP ]; then
+    echo ">>> [$name] SKIP ($cause)"
+    echo "    ADVISORY component (#1700): a SKIP here is NOT a pass and NOT a failure — it"
+    echo "    records that no duplicate-count comparison was made. Remedy depends on the"
+    echo "    cause above (install cargo / fix the lockfile / restore or regenerate"
+    echo "    scripts/ci/dep-duplicates-baseline.txt with"
+    echo "    \`bash scripts/ci/check-dep-duplicates.sh --regenerate\`)."
+    echo "--- last 40 lines of $log ---"
+    tail -40 "$log" 2>/dev/null || true
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+}
+
 # tooling-tests: fast shell-tooling regression tests that have no Rust target and
 # no dataset/network needs. Currently scripts/tests/test_agent_gate_summary.sh,
 # which verifies the SUMMARY block survives non-foreground capture (#1175), and
@@ -16501,6 +16815,16 @@ run_pub_surface() {
 #                                                        three-way legacy-branch refusal).
 #                                                        Moved ahead of the python3 gate for
 #                                                        the same reason as the other two.
+# Also runs scripts/tests/test_dep_duplicates_ratchet.sh (#1700), the non-vacuity proof
+# for the ADVISORY dep-duplicates component: its cases drive
+# scripts/ci/check-dep-duplicates.sh over PLANTED cargo-tree output (shim `cargo` +
+# scratch copy of the guard, no test seam) and assert the emitted TOKENS, and its G1/G2
+# cases substitute a stub guard in a detached worktree to prove the COMPONENT records PASS
+# for BOTH affirmative verdicts and SKIP — never PASS — when nothing was measured. Its ONE
+# live case accepts either affirmative verdict and reports an unmeasurable host as SKIPPED,
+# deliberately: this suite runs HERE, so a suite that red on a legitimate ADVISORY-INCREASE
+# would fail the full gate and defeat the component's advisory contract. It carries its own
+# case FLOOR. Offline; SKIP-aware where cargo or `git worktree` is unavailable.
 run_tooling_tests() {
   local name=tooling-tests
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -17069,6 +17393,129 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_ws0_cpu_pinning_guards.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (ws0 cpu-pinning / server-ownership guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 FLIGHT-ARM GUARDS (#3551) — the pin MODE, the ALLOCATOR and what the report
+  # may SAY about either. Its own file because the suite above is at the ~1500-line
+  # test target and this is a different subject: not "are the pinned CPUs one physical
+  # core" but "the two arms no longer run the same way, so what exactly differs, and is
+  # the difference the one the label claims". `--flight-pin-mode` selects between TWO
+  # AFFIRMATIVE assertions (each read from a fake thread_siblings_list) rather than
+  # relaxing one, so distinct-cores must REFUSE a sibling pair and siblings must REFUSE a
+  # distinct one — proved over the SAME two inputs — and a single-CPU list is refused
+  # because "pairwise distinct" over one element compares nothing. `--flight-allocator`
+  # is verified from the RUNNING PROCESS because LD_PRELOAD FAILS OPEN (glibc prints
+  # "cannot be preloaded ...: ignored" and continues with system malloc, exit 0), so the
+  # absent-mapping branch — the one the check exists for — is driven against synthetic
+  # /proc/<pid>/maps files, as are the EMPTY and ABSENT maps files, which must read as
+  # COULD-NOT-MEASURE refusals and never as "no jemalloc mapping present" (measured on a
+  # mutant: `system VERIFIED ... (0 mappings read)`). Plus the #3272-F6 substitution at
+  # the new pin, the record's closed grammars, and a ONE-FIELD report differential
+  # proving a distinct-cores pin is never described as `physical-core siblings`.
+  # Hermetic: fake sysfs, synthetic maps + session dirs + a few-KB corpus under $TMPDIR;
+  # every driver call through ws0_driver_run. No cargo, perf, sudo, taskset, root,
+  # libjemalloc, server, corpus or network.
+  echo ">>> [$name] bash scripts/tests/test_ws0_flight_arm_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_flight_arm_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 flight-arm pin/allocator guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 INTERLEAVED A/B/C GUARDS (#3551) — its own file because the two suites above are
+  # about ONE SESSION (which CPUs, which program, what differs between the two arms of
+  # it) and this is about a SET of sessions: is a directory of WS0 measurement runs one
+  # PAIRED EXPERIMENT? `ws0-3551-abc.sh`'s resume is deliberate (a shared box, and a set
+  # that starts over loses its window), so it is CHECKED rather than removed: a run
+  # FINGERPRINT — the corpus path AND its recorded Data.db sha256 + row count, the
+  # --bin-dir AND a digest of all three measured binaries, each arm's EXACT flag list,
+  # --step-duration/--arena-max/--jemalloc-lib/--port — written on the first invocation
+  # and verified field-by-field on every later one, with `--rounds` DELIBERATELY excluded
+  # and that exclusion asserted in BOTH directions (3->5 and 5->2 must be ACCEPTED),
+  # because a guard that reds on correct input is the guard an operator works around.
+  # Plus: a SKIPPED session must prove it is the session the slot expects (its
+  # abc-window.json present and readable, its arm and round matching the directory name,
+  # its recorded exit 0 — `results.json` alone carries no provenance at all); the
+  # aggregator's configuration validated over EVERY (round, arm) rather than the first,
+  # per-arm treatment stability and cross-arm invariants kept DISTINCT, and an ABSENT
+  # field refused as COULD-NOT-MEASURE with the field named; and `ratio bare/flight`
+  # pinned NUMERICALLY to this rig's own quantity (rows/s bare over rows/s flight — it
+  # was a cycles quotient, and inverted) on a fixture where all three candidate readings
+  # DIFFER, beside a flight-FASTER fixture that pins the direction below 1.
+  # The pin/mode/allocator RED arms substitute the ARTIFACT (a `sed` over a scratch copy
+  # of the driver — those three are its definition of an arm, not flags) and the plant is
+  # asserted to have TAKEN, since a `sed` that stopped matching leaves a RED arm identical
+  # to its control. Hermetic: synthetic session dirs, corpus identity and binary fixtures
+  # under $TMPDIR, plus a recording STUB beside the scratch copy so the `$HERE/`-relative
+  # driver path never resolves to the real measurement driver — and hermeticity is asserted
+  # AFFIRMATIVELY, from the stub's own log (one positive control proves the harness can
+  # SEE an invocation) and from lib-ws0-hermetic.sh's shims. No cargo, perf, sudo,
+  # taskset, root, corpus binaries, server or network.
+  # NOTE: the WS0 measurement driver's FILENAME is deliberately not written anywhere in
+  # this file. `test_ws0_hermeticity.sh`'s completeness census is CONTENT-based over every
+  # tracked file, so a prose mention here would report scripts/agent-gate.sh UNCOVERED and
+  # need the WHOLE GATE exempted from that lint — a real coverage reduction (a future gate
+  # component that genuinely invoked the driver would then go unflagged) bought for a
+  # comment. MEASURED: it reported exactly that, uncovered=1, the moment this comment first
+  # named it.
+  echo ">>> [$name] bash scripts/tests/test_ws0_abc_driver_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_abc_driver_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 interleaved A/B/C set guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 #3551 ARTIFACT-TOOL GUARDS — the two MEASUREMENT-ANALYSIS tools under
+  # docs/reports/ws0-3551-artifacts/ whose stdout IS the published result of that
+  # issue (clean-pairs.py, window-census.py). This repo reviews
+  # docs/reports/*-artifacts/ harnesses as CODE (#3229) and these two had NO tests,
+  # which is how a real defect got in: a session was accepted as CLEAN on the
+  # strength of ONE zero-census sample anywhere in its window, so a mostly
+  # UNOBSERVED session could enter the published medians. A non-empty sample set is
+  # not COVERAGE. The suite drives that rule from BOTH ends — the accept direction
+  # first, because a guard that only ever reds proves nothing — and separately
+  # drives the two BOUNDARY halves (window start to first sample, last sample to
+  # window end), which a consecutive-differences scan cannot see and which is where
+  # this rule is usually got wrong. The coverage BOUND is DERIVED from the committed
+  # judge (scripts/perf/ws0_quiescence.py's MAX_SAMPLE_GAP_S) at run time rather
+  # than restated, and which side of it is permissive is READ from that rule's own
+  # strict `>` rather than guessed. Plus: NOT MEASURED asserted textually distinct
+  # from UNDERCOVERED; the pairing rules (a contaminated BASELINE voids its whole
+  # round; a pair whose own bare-scan control moved at least as much as its
+  # treatment is reported and excluded; pairs pool across SETS and never across
+  # ROUNDS, on fixtures where a violation would change the answer); the medians and
+  # direction counts pinned NUMERICALLY by column HEADER with a faster AND a slower
+  # treatment so both signs are pinned; and the per-CPU column's corrected claim —
+  # it is TOTAL busy INCLUDING our own measurement and explicitly NOT a
+  # contamination bound, pinned phrase by phrase plus a count-equality assert that
+  # no un-negated mention can appear. Every refusal is matched on the tool's OWN
+  # diagnostic, never on a bare non-zero exit. Each coverage refusal also carries a
+  # positive control ON THE ORACLE: a MUTATED scratch copy with the bound removed
+  # must ACCEPT the same fixture, so the refusal is attributable to the rule and not
+  # to a malformed fixture, and a boundary-only mutant discriminates the two halves.
+  # Hermetic: synthetic session dirs, window records and sampler JSONL under
+  # $TMPDIR; NOTHING is read from /data/ws0-3551 (one lane's live outputs). No
+  # cargo, perf, sudo, taskset, root, corpus bytes, server or network.
+  echo ">>> [$name] bash scripts/tests/test_ws0_3551_artifact_tools.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_3551_artifact_tools.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 #3551 artifact-tool guards); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
@@ -17889,7 +18336,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -17916,6 +18363,35 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_pub_surface_guard.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (pub-surface guard self-test #1712); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # dep-duplicates ratchet self-test (#1700). Proves the ADVISORY guard actually FIRES,
+  # which for an always-non-failing guard is the harder property: its cases drive
+  # scripts/ci/check-dep-duplicates.sh over PLANTED cargo-tree output (a shim `cargo` on
+  # PATH and a scratch copy of the guard — there is no test seam) and assert the emitted
+  # TOKENS, not exit statuses: NO-INCREASE / ADVISORY-INCREASE naming who grew /
+  # RATCHET-LOOSE / colour-immunity with a positive control that the fixture really carries
+  # escapes / an empty-but-legitimate ZERO kept distinct from an unparseable read / every
+  # UNMEASURABLE and baseline-garbage refusal / the --regenerate round trip / a MIXED delta
+  # where one metric grows while the other shrinks. Its G1/G2 cases substitute a stub guard
+  # in a detached scratch worktree and assert the GATE COMPONENT records PASS for a clean
+  # measurement AND for an ADVISORY-INCREASE (naming the crates), and SKIP — never PASS —
+  # for an unmeasurable exit, a zero exit with no verdict line, and an unexpected status:
+  # the vacuous-pass guard for the one component that may never FAIL. Its ONE live case (G3)
+  # accepts either affirmative verdict and reports an unmeasurable host SKIPPED, so this
+  # component cannot red on correct input. Cheap and offline (the only cargo is a warm metadata probe); it
+  # SKIPs its live/gate cases where cargo or `git worktree` is unavailable. A failure FAILs
+  # the component, mirroring the guards above.
+  echo ">>> [$name] bash scripts/tests/test_dep_duplicates_ratchet.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_dep_duplicates_ratchet.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (dep-duplicates ratchet self-test #1700); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
@@ -18166,7 +18642,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -22050,6 +22526,7 @@ dispatch_component() {
     kit-dashboard-drift) run_kit_dashboard_drift ;;
     binding-unwind-profile) run_component binding-unwind-profile bash "$REPO_ROOT/scripts/tests/test_binding_unwind_profile.sh" ;;
     pub-surface) run_pub_surface ;;
+    dep-duplicates) run_dep_duplicates ;;
     tooling-tests) run_tooling_tests ;;
     minimal-build)
       # #3453: the minimal lane's DEFINING property is --no-default-features, so the
