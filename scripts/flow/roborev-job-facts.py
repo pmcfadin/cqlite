@@ -60,7 +60,7 @@ OUTPUT_TOKEN_KEYS = (
     "completionTokens",
 )
 TOKEN_CONTAINER_KEYS = ("token_usage", "tokenUsage", "usage", "token_counts")
-STRING_FACTS = ("git_ref", "status", "model", "requested_model", "verdict")
+STRING_FACTS = ("git_ref", "status", "model", "requested_model", "verdict", "started_at")
 
 
 def objects(node):
