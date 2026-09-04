@@ -40,6 +40,12 @@
 
 use super::super::container::{golden_map_key_value, is_container_type, MapKeySpelling};
 use super::super::schema::CqlType;
+// `is_blob_hex` — the ONE predicate for what a CQL blob literal is. It moved to
+// `scalar_spelling` when `container::canon_matches_declared_kinds` needed the same
+// rule for a `blob` LEAF (issue #3726, roborev job 105): two copies of "what a blob
+// spelling is" would be two sources of truth for one fact from Cassandra's
+// `BytesType.toJSONString`, whose text is quoted at the definition.
+use super::super::scalar_spelling::is_blob_hex;
 use super::{csv_container, Depth, Egress, Kinding, Side};
 use serde_json::Value;
 use std::cell::RefCell;
@@ -774,15 +780,6 @@ fn is_exact_f32_tie_with_both_formatter_spellings(golden: &Value, cli: &Value) -
 #[path = "golden_value_exact_decimal.rs"]
 mod exact_decimal;
 
-/// CQL's blob literal: `0x` and an EVEN number of hex digits (a byte string), and
-/// nothing else. `0x` alone is a legal empty blob and is accepted; the point of the
-/// check is that arbitrary text at that position is NOT this gap.
-fn is_blob_hex(text: &str) -> bool {
-    let Some(digits) = text.strip_prefix("0x") else {
-        return false;
-    };
-    digits.len() % 2 == 0 && digits.chars().all(|c| c.is_ascii_hexdigit())
-}
 
 /// The three tokens a non-finite IEEE-754 float is spelled with in the golden —
 /// Java's `Double.toString`/`Float.toString` spelling, as the committed

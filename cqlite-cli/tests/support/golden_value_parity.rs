@@ -197,6 +197,12 @@ pub mod fixture_root;
 #[path = "golden_value_canon_container.rs"]
 pub mod container;
 
+/// What a WELL-FORMED SPELLING of each non-text scalar type is — one bounded,
+/// authority-quoting predicate per type, shared by `container`'s leaf-kind read-back
+/// and by `compare::gap` (issue #3726, roborev job 105).
+#[path = "golden_value_scalar_spelling.rs"]
+pub mod scalar_spelling;
+
 use schema::CqlType;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;

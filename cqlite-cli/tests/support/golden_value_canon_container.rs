@@ -76,7 +76,7 @@
 
 use super::compare::pair;
 use super::schema::{CqlType, UdtType};
-use super::{canon_typed, strict_json, Canon, Depth, Egress, Kinding, Side};
+use super::{canon_typed, scalar_spelling, strict_json, Canon, Depth, Egress, Kinding, Side};
 use serde_json::Value;
 
 /// The side's name, for a refusal message.
@@ -272,12 +272,20 @@ pub fn golden_map_key_value(
 /// as "the egress produced a well-formed value of this type" suppresses `"not-an-int"`
 /// inside a declared `set<int>`.
 ///
-/// NOT a second opinion about the type system, which is the shape #3500 abandoned. It reads
-/// `canon_typed`'s OWN OUTPUT back against the declared type: the canonicalizer already
-/// decided what each leaf became, and this only asks whether that variant is the one the DDL
-/// implies. No parsing, no spelling rules, no arity logic — arity and field sets are already
-/// enforced inside `canon_container`, so this adds exactly the leaf-kind question and nothing
-/// else.
+/// NOT a second opinion about the type system, which is the shape #3500 abandoned — and NOT
+/// the general strict validator #3846 rules out either. It reads `canon_typed`'s OWN OUTPUT
+/// back against the declared type: the canonicalizer already decided what each leaf became,
+/// and this asks whether that variant is the one the DDL implies. No arity logic and no field
+/// sets — `canon_container` already enforces both — so this adds exactly the leaf question
+/// and nothing else.
+///
+/// For four declared types the variant alone is not the whole question, because they share
+/// `Canon::Text`: `blob`, `timestamp` and the six opaque scalars each get ONE BOUNDED
+/// SPELLING CHECK, quoting the `cassandra-5.0.8` `toJSONString` it is read from, in
+/// `scalar_spelling`. `text`/`varchar`/`ascii` get none, because every string is a
+/// well-formed value of those. That is the per-type read-back the CSV `Boolean` arm already
+/// does, not a spelling GRAMMAR for the type system at large: an opaque type this module has
+/// read no authority for is REFUSED rather than given a guessed rule.
 ///
 /// `Canon::Null` is accepted at EVERY position: a null member is legal in every container
 /// this lane compares, and `cassandra-5.0.8 UserType.toJSONString` emits `null` for a field
@@ -335,9 +343,35 @@ fn kinds_match(canon: &Canon, ty: &CqlType, egress: Egress, null_here: NullHere)
                 _ => false,
             },
         },
-        CqlType::Text(_) | CqlType::Blob | CqlType::Timestamp | CqlType::Opaque(_) => {
-            matches!(canon, Canon::Text(_))
+        // `text`/`varchar`/`ascii`: EVERY string is a well-formed value, so
+        // `Canon::Text` is the whole question here and there is nothing to narrow.
+        CqlType::Text(_) => matches!(canon, Canon::Text(_)),
+        // THE OTHER THREE `Canon::Text` FAMILIES ARE NOT (roborev job 105, Medium).
+        // These four types used to share one arm accepting every `Canon::Text`, so a
+        // non-hex blob, a malformed uuid and arbitrary text at an `inet` position all
+        // qualified as decodes of those types — and the undecoded-golden gap then
+        // SUPPRESSED them, at a position where the golden is undecoded and there is no
+        // other side left to catch it. Same shape as the CSV `Boolean` arm above (job
+        // 72) and `NullHere` (job 60), and answered the same way: read `canon_typed`'s
+        // OWN OUTPUT back with a BOUNDED, authority-quoting spelling check, per type.
+        //
+        // NOT the strict type validator #3846 rules out: each predicate is one
+        // Cassandra `toJSONString` spelling, quoted at its definition in
+        // `scalar_spelling`, with no calendar, range or arity logic anywhere.
+        CqlType::Blob => matches!(canon, Canon::Text(text) if scalar_spelling::is_blob_hex(text)),
+        CqlType::Timestamp => {
+            matches!(canon, Canon::Text(text) if scalar_spelling::is_canonical_timestamp(text))
         }
+        // `Opaque` covers SIX types with distinct syntaxes (`schema::NATIVE_OPAQUE`),
+        // so the rule is per NAME — and a name no authority has been read for answers
+        // `None`, which REFUSES here rather than accepting any text. That is the
+        // fail-closed direction: the gap stops suppressing at that position and reports
+        // an ordinary diff. `== Some(true)` rather than `!= Some(false)` for the
+        // standing reason a permissive branch is keyed on the affirmative value.
+        CqlType::Opaque(name) => match canon {
+            Canon::Text(text) => scalar_spelling::opaque_spelling_matches(name, text) == Some(true),
+            _ => false,
+        },
         CqlType::List(element) | CqlType::Set(element) => match canon {
             Canon::Seq(items) => items
                 .iter()
