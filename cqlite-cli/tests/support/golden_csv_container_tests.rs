@@ -41,6 +41,7 @@ fn ty_of(decl: &str) -> CqlType {
     let ddl = format!(
         "CREATE TYPE address (street text, city text, zip text); \
          CREATE TYPE person (first_name text, last_name text, age int); \
+         CREATE TYPE key_part (label text, rank int); \
          CREATE TABLE t (id int PRIMARY KEY, c {decl});"
     );
     let schema = match super::super::schema::from_ddl(&ddl, "t") {
@@ -950,6 +951,302 @@ fn a_surplus_member_is_kept_so_the_length_mismatch_is_reported() {
 fn a_member_beyond_a_tuples_arity_is_kept_as_text() {
     let decoded = decode(&json!([1]), "(1, 2)", &ty_of("tuple<int>")).unwrap();
     assert_eq!(decoded, json!(["1", "2"]));
+}
+
+// --- a MAP whose declared KEY type is a container (issue #3726) ---------
+//
+// The key type used throughout is quoted from the committed
+// `test-data/schemas/nested-udt-keys.cql`; `key_part` is added to [`ty_of`]'s DDL
+// preamble so these cases parse against the real schema reader.
+
+/// A container key is DECODED under its declared type, not kept as raw text. Left
+/// as text, `compare::compare_map` was handed a flat scalar where the DDL declares
+/// a container, so the CSV half of a container-keyed map could not be compared.
+///
+/// The rendering is the one the CSV egress MEASURABLY emits for
+/// `test_nested_udt_keys.nested_udt_keys`'s `f_map_tuple_udt` (row `id=1`); the
+/// golden is that row's own golden cell.
+#[test]
+fn a_container_map_key_is_decoded_under_its_declared_type() {
+    let ty = ty_of("frozen<map<frozen<tuple<frozen<key_part>, int>>, int>>");
+    let golden = json!({"[{\"label\": \"mkey-a\", \"rank\": 21}, 1]": 210});
+    let decoded = decode(&golden, "{({label: mkey-a, rank: 21}, 1): 210}", &ty)
+        .expect("the rendering inverts the grammar");
+    assert_eq!(
+        decoded,
+        json!([{
+            // The tuple's two slots, the first of them a UDT in this module's
+            // `{key,value}` spelling (CSV cannot tell a UDT from a map, so every
+            // brace-delimited body decodes that way).
+            "key": [
+                [{"key": "label", "value": "mkey-a"}, {"key": "rank", "value": "21"}],
+                "1"
+            ],
+            "value": "210"
+        }]),
+        "decoded: {decoded}"
+    );
+}
+
+/// The `, ` and `: ` INSIDE a container key are not top-level cuts, because
+/// [`scan`] tracks `[ { (` depth — which is what lets the entry split and the
+/// key/value cut of a container-keyed map work at all. Asserted on [`scan`]
+/// directly, so the property is pinned where it lives rather than inferred from a
+/// decode that happens to succeed.
+#[test]
+fn the_separators_inside_a_container_key_are_not_top_level_cuts() {
+    let body = "({label: mkey-a, rank: 21}, 1): 210, ({label: mkey-b, rank: 22}, 2): 220";
+    assert_eq!(
+        scan(body, ", ").expect("balanced"),
+        vec![body.find(", (").expect("the entry separator")],
+        "only the `, ` BETWEEN the two entries is at depth zero"
+    );
+    let entry = "({label: mkey-a, rank: 21}, 1): 210";
+    assert_eq!(
+        scan(entry, ": ").expect("balanced"),
+        vec![entry.rfind(": ").expect("the entry cut")],
+        "only the `: ` after the key's closing bracket is at depth zero"
+    );
+    // And the cut the decoder actually makes agrees with that.
+    assert_eq!(
+        entry_cut(entry).expect("cuts"),
+        ("({label: mkey-a, rank: 21}, 1)", "210")
+    );
+}
+
+/// The golden's own rendering of a container key is what the refusal machinery
+/// requires the decoder to recover, so [`entry_key_rendering`] must render the
+/// PARSED key rather than the golden's JSON text. Left as that text, the `, ` and
+/// `: ` inside it would make the golden's own rendering unsplittable and the node
+/// would be REFUSED — which is how the CSV half of this stayed open.
+#[test]
+fn the_goldens_container_key_renders_in_the_csv_grammar() {
+    let ty = ty_of("frozen<map<frozen<tuple<frozen<key_part>, int>>, int>>");
+    let golden = json!({"[{\"label\": \"mkey-a\", \"rank\": 21}, 1]": 210});
+    assert_eq!(
+        golden_rendering(&golden, Some(&ty), Kinding::Natural),
+        Some("{({label: mkey-a, rank: 21}, 1): 210}".to_string())
+    );
+    assert_eq!(
+        node_refusal(&golden, Some(&ty)),
+        None,
+        "the golden's own rendering must round-trip, or the node is refused"
+    );
+}
+
+/// A golden key that is NOT the declared type's `toJSONString` spelling renders as
+/// nothing, and that is deliberately NOT a refusal: the golden's key contradicting
+/// the DDL is a divergence for the comparison to report, not a limit of the flat
+/// format. This is the MEASURED multicell `m_tuple_udt` shape — `getString`'s
+/// colon-joined cell path.
+#[test]
+fn a_getstring_spelled_golden_key_renders_as_nothing_and_is_not_refused() {
+    let ty = ty_of("frozen<map<frozen<tuple<frozen<key_part>, int>>, int>>");
+    let golden = json!({"charlie\\:3:8": 80});
+    assert_eq!(entry_key_rendering(&ty, "charlie\\:3:8"), None);
+    assert_eq!(golden_rendering(&golden, Some(&ty), Kinding::Natural), None);
+    assert_eq!(node_refusal(&golden, Some(&ty)), None);
+}
+
+/// A KEY THE TWO SIDES SPELL DIFFERENTLY STILL FINDS ITS GUIDE, and the guide is
+/// chosen by asking each CANDIDATE whether the CSV text READ UNDER IT denotes it
+/// (roborev job 11, issue #3726).
+///
+/// `entry_key_rendering` translates only the spellings this lane knows (`blob`, via
+/// `stringified_csv_text`) and deliberately leaves `timestamp` alone, so the golden
+/// renders `2024-01-01T00:00:00Z` where the CSV cell carries
+/// `2024-01-01 00:00:00+0000` and the TEXT lookup finds nothing.
+///
+/// BOTH DIRECTIONS ARE HERE ON PURPOSE, because testing only the first is what made an
+/// earlier round of this work conclude — wrongly — that the missing guide was harmless:
+///
+///   * golden slot `null`, CSV token `null` — harmless. `decode_shape`'s null-token arm
+///     is `Value::Null if text == "null"`, so an ABSENT guide (which is `Value::Null`)
+///     resolves the token correctly by coincidence.
+///   * golden slot the TEXT `"null"`, CSV token `null` — NOT harmless, and it is the
+///     same bytes on the CSV side, because CSV is unquoted. With no guide the token
+///     reads as `Null` where the golden says `Text("null")`, so CORRECT egress is
+///     reported as a divergence.
+///
+/// Note what the second case rules out: canonicalizing the CSV text ON ITS OWN and
+/// matching that against the golden keys cannot work, because reading the text needs
+/// the guide being chosen. Hence the per-candidate question.
+#[test]
+fn a_key_spelled_differently_by_the_two_sides_still_finds_its_guide() {
+    let ty = ty_of("frozen<map<frozen<tuple<timestamp, text>>, int>>");
+    let csv = "{(2024-01-01 00:00:00+0000, null): 7}";
+
+    // The premise both cases share: the golden's rendering and the CSV text differ, so
+    // the text lookup finds nothing and the fallback is what is under test.
+    assert_eq!(
+        entry_key_rendering(&ty, "[\"2024-01-01T00:00:00Z\", null]").as_deref(),
+        Some("(2024-01-01T00:00:00Z, null)"),
+        "premise: the golden renders with the T separator"
+    );
+
+    for (slot, expected) in [
+        (json!(null), json!(["2024-01-01 00:00:00+0000", null])),
+        (json!("null"), json!(["2024-01-01 00:00:00+0000", "null"])),
+    ] {
+        let key = format!("[\"2024-01-01T00:00:00Z\", {slot}]");
+        let golden = json!({ key.clone(): 7 });
+        let decoded = match decode(&golden, csv, &ty) {
+            Ok(decoded) => decoded,
+            Err(why) => panic!("golden slot {slot}: the CSV cell must decode: {why}"),
+        };
+        assert_eq!(
+            decoded[0]["key"], expected,
+            "golden slot {slot}: the guide must be found, so the CSV token `null` reads \
+             as whatever the golden says it is"
+        );
+    }
+}
+
+/// A MULTICELL container-keyed map's VALUES get their guide POSITIONALLY, so a legitimate
+/// text value spelled `null` is not read as an actual null (roborev job 36, issue #3726).
+///
+/// Such a map resolves NO `golden_key` by text: the golden's object key is `getString`'s
+/// cell-path text, which is not the declared type's `toJSONString` document, so it renders to
+/// nothing and matches no entry. Every value was therefore decoded against `Value::Null` —
+/// and that is not inert, because `decode_shape` reads the token `null` as `Value::Null`
+/// exactly when the guide is null. A text value spelled `null` came back as a real null and
+/// was reported as a divergence it is not.
+///
+/// The fallback is the i-th golden entry, which is not a guess: emitted order IS
+/// `compare::map::compare_map`'s pairing rule and both sides preserve it.
+#[test]
+fn a_multicell_container_keyed_maps_values_are_guided_positionally() {
+    let ty = ty_of("frozen<map<frozen<tuple<timestamp, text>>, text>>");
+    // Golden keys are getString cell-path text — they render to nothing, so no key matches.
+    // The VALUES are the text "null" and an ordinary word.
+    let golden = json!({"a\\:1": "null", "b\\:2": "word"});
+    let csv = "{(a, 1): null, (b, 2): word}";
+    let decoded = match decode(&golden, csv, &ty) {
+        Ok(decoded) => decoded,
+        Err(why) => panic!("the cell must decode: {why}"),
+    };
+    assert_eq!(
+        decoded[0]["value"],
+        json!("null"),
+        "the golden says this value is the TEXT `null`, so the CSV token must not become a \
+         real null: {decoded}"
+    );
+    assert_eq!(decoded[1]["value"], json!("word"), "{decoded}");
+}
+
+/// THE DUPLICATE-RENDERING REFUSAL IS WHOLE-NODE, AND THAT COSTS THE ENTRY VALUES —
+/// pinned executably as a known hole (roborev job 34, issue #3726).
+///
+/// When two container keys render alike the node is refused, `decode_shape` returns the
+/// un-split body, and NOTHING inside is compared: not the entry count, not the pair shape,
+/// not the values. Measured — a value corrupted 20 -> 999 inside such a cell is invisible.
+///
+/// It is the same shape as the gap that suppressed a whole map (fixed earlier in this
+/// issue), one module over, and the same answer would work: entry boundaries and emitted
+/// order ARE still recoverable, so the entries could be paired POSITIONALLY with only the
+/// ambiguous KEY suppressed.
+///
+/// NOT FIXED HERE, and the reasons are worth stating rather than implying:
+///   * this refusal was itself the FIX for a false divergence (two keys sharing a spelling
+///     used to select the wrong decode guide), so the current behaviour trades coverage for
+///     the FAIL-CLOSED direction — it loses checks, it does not produce wrong verdicts;
+///   * no committed fixture has colliding container-key renderings, so nothing in the
+///     corpus exercises it;
+///   * doing it properly needs KEY-SCOPED suppression inside `csv_container`'s refusal
+///     model, which is a design change in a module already at its size ceiling.
+///
+/// This test asserts the hole ON PURPOSE. When key-scoped refusal lands it will RED, and
+/// that is the signal to delete it — a residual that reds beats a paragraph nobody re-reads.
+#[test]
+fn a_duplicate_rendering_refusal_also_costs_the_entry_values() {
+    let ty = ty_of("frozen<map<frozen<key_part>, int>>");
+    let golden = json!({
+        "{\"label\": null, \"rank\": 1}": 10,
+        "{\"label\": \"null\", \"rank\": 1}": 20
+    });
+    // The SECOND entry's value is corrupted 20 -> 999.
+    let csv = "{{label: null, rank: 1}: 10, {label: null, rank: 1}: 999}";
+    assert!(
+        node_refusal(&golden, Some(&ty)).is_some(),
+        "premise: colliding renderings refuse the node"
+    );
+    let decoded = match decode(&golden, csv, &ty) {
+        Ok(decoded) => decoded,
+        Err(why) => panic!("a refused node decodes to its un-split body, not an error: {why}"),
+    };
+    assert!(
+        decoded.is_string(),
+        "KNOWN HOLE: the whole cell comes back as raw text, so the corrupted value is never \
+         compared. If this now fails, key-scoped refusal has landed — delete this test and \
+         update the residual note on `decode_does_not_recover`."
+    );
+}
+
+/// TWO DISTINCT CONTAINER KEYS THAT RENDER ALIKE make the node unrecoverable, so it
+/// is REFUSED rather than decoded against the wrong guide (roborev finding, #3726).
+///
+/// CSV is unquoted, so a `key_part` whose `label` is NULL and one whose `label` is
+/// the TEXT `"null"` both render `{label: null, rank: 1}`. The decoder looks a CSV
+/// entry's key text up among the golden's rendered keys, so without this refusal both
+/// entries would resolve to the FIRST golden key: the second is then decoded against
+/// the wrong type guide and CORRECT egress is reported as a divergence — a false
+/// divergence, which this lane treats as a defect in its own right (#1491 finding T1).
+///
+/// Refusing is the fail-closed answer AND the precondition that makes the decoder's
+/// lookup single-valued. It is the EMPTY-CONTAINER refusal's sibling: an OBSERVED
+/// ambiguity between two keys actually present in this golden, not the general
+/// "could another value have rendered these bytes", which the module doc declines.
+#[test]
+fn two_container_keys_that_render_alike_are_refused() {
+    let ty = ty_of("frozen<map<frozen<key_part>, int>>");
+    let golden = json!({
+        "{\"label\": null, \"rank\": 1}": 10,
+        "{\"label\": \"null\", \"rank\": 1}": 20
+    });
+    // Both keys DO render — individually they are perfectly legal spellings.
+    assert_eq!(
+        entry_key_rendering(&ty, "{\"label\": null, \"rank\": 1}"),
+        entry_key_rendering(&ty, "{\"label\": \"null\", \"rank\": 1}"),
+        "the premise of this test: the two distinct keys render identically"
+    );
+    let why = match node_refusal(&golden, Some(&ty)) {
+        Some(why) => why,
+        None => panic!("a node whose two keys render alike cannot be decoded"),
+    };
+    assert!(
+        why.contains("SAME key text"),
+        "the refusal must name the collision: {why}"
+    );
+
+    // And the control: two keys that render DIFFERENTLY are not refused, so this
+    // narrows rather than refusing every container-keyed map.
+    let distinct = json!({
+        "{\"label\": \"a\", \"rank\": 1}": 10,
+        "{\"label\": \"b\", \"rank\": 1}": 20
+    });
+    assert_eq!(node_refusal(&distinct, Some(&ty)), None);
+}
+
+/// A UDT entry's key is a FIELD NAME, not a value, and stays verbatim — the one
+/// thing that must NOT change with the map rule above.
+#[test]
+fn a_udt_entry_key_is_still_a_verbatim_field_name() {
+    let ty = ty_of("frozen<person>");
+    assert_eq!(
+        entry_key_rendering(&ty, "first_name"),
+        Some("first_name".to_string())
+    );
+    let golden = json!({"first_name": "ada", "last_name": "l", "age": 36});
+    let decoded = decode(&golden, "{first_name: ada, last_name: l, age: 36}", &ty)
+        .expect("inverts the grammar");
+    assert_eq!(
+        decoded,
+        json!([
+            {"key": "first_name", "value": "ada"},
+            {"key": "last_name", "value": "l"},
+            {"key": "age", "value": "36"}
+        ])
+    );
 }
 
 #[path = "golden_csv_container_spelling_tests.rs"]
