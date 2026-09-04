@@ -852,7 +852,7 @@
 #                      fail here as noise, not leakage. No opt-out.
 #                      Also runs scripts/tests/test_features_load_bearing_guard.sh
 #                      (#1698), the non-vacuity proof for the
-#                      features-load-bearing component: 61 cases over throwaway
+#                      features-load-bearing component: 63 cases over throwaway
 #                      fixture workspaces, each criterion pinned by a green/red
 #                      differential pair, every negative case requiring the
 #                      diagnostic to NAME the planted feature, and an EXACT case
@@ -17657,7 +17657,7 @@ run_features_load_bearing() {
 # is planted in a throwaway git repo with a LOCAL bare origin and must be NAMED, not just
 # red. Hermetic: no network (path remote), no cargo, no #1825 slot.
 # Also runs scripts/tests/test_features_load_bearing_guard.sh (#1698), the non-vacuity
-# proof for the features-load-bearing component: 61 cases over throwaway fixture
+# proof for the features-load-bearing component: 63 cases over throwaway fixture
 # workspaces, each criterion of the predicate pinned by a green/red differential pair,
 # every negative case required to NAME the planted feature, and an EXACT case count (a
 # floor below the real count lets one case be deleted silently — #3544's lesson applied

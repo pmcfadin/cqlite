@@ -255,6 +255,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SUITE_SELF="${BASH_SOURCE[0]}"   # this file, for the case-63 two-place invariant
 GUARD_REL="scripts/ci/check-features-load-bearing.sh"
 GUARD="$REPO_ROOT/$GUARD_REL"
 
@@ -1733,13 +1734,49 @@ grep -q 'IN-REPOSITORY under a basename-pruned' "$TMPROOT/out.txt" \
   || { cat "$TMPROOT/out.txt"; fail_case "case 62: the printed CONTRACT does not admit that a basename-pruned IN-REPOSITORY module is not visited — the guard can report such a feature dead while the contract claims only out-of-repository modules are unseen"; }
 ok "a module under a basename-pruned .git/node_modules dir is NOT SEEN (reported dead), and the printed CONTRACT admits the in-repository half rather than only the out-of-repository one"
 
+# --- 63. THE TWO-PLACE INVARIANT: the gate's DOC count must equal this suite's -
+# roborev found this same drift TWICE (jobs 154 and 158): scripts/agent-gate.sh
+# documents the component's self-test as "N cases" and I updated CASE_COUNT_EXPECTED
+# without updating the prose, twice, at 59->61 and 61->62. Fixing the instance a third
+# time would leave the class open, and a gate whose comments misstate its own coverage
+# is the untruth this whole issue is about. So the invariant is ASSERTED here: the doc
+# and the suite are two places holding one fact, which is exactly the shape this guard's
+# own fixtures keep catching elsewhere.
+# SCOPED to the lines that name THIS component: agent-gate.sh documents a case count
+# for several components' self-tests (106, 255, 42, ...), so an unscoped sweep collects
+# all of them and can never agree with any single number. That was this case's own first
+# bug, caught immediately: it reported nine distinct counts and failed.
+# `|| true` is LOAD-BEARING: under `set -e` an assignment takes its command
+# substitution's exit status, so when the doc states no count the greps exit 1 and the
+# suite DIES SILENTLY at this line — the -n check below never runs and the vacuity guard
+# is unreachable. That was this case's THIRD bug, and it is the documented `set -e` rider
+# (a verdict must not depend on an optional command substitution). Measured: with the
+# count removed the suite printed no tally and exited 1, no FAIL line at all.
+_doc_counts=$(grep -E 'features-load-bearing' "$REPO_ROOT/scripts/agent-gate.sh" \
+                | grep -oE '[0-9]+ cases' | grep -oE '^[0-9]+' | sort -u || true)
+[ -n "$_doc_counts" ] \
+  || fail_case "case 63: found NO 'N cases' reference in scripts/agent-gate.sh — the doc no longer states a count, so this invariant cannot be checked and the assertion would pass vacuously"
+[ "$(printf '%s\n' "$_doc_counts" | wc -l)" -eq 1 ] \
+  || fail_case "case 63: scripts/agent-gate.sh states MORE THAN ONE distinct case count ($(printf '%s ' $_doc_counts)) — they cannot all be right"
+# The enforced count is read from THIS FILE'S OWN SOURCE rather than from
+# $CASE_COUNT_EXPECTED, because that variable is assigned in the CASE COUNT block BELOW
+# this case and the suite runs under `set -u` — referencing it here was this case's
+# second bug (`unbound variable`, exit 1, no tally printed at all). Reading the
+# assignment is also order-independent, so moving either block cannot silently break it.
+_enforced=$(grep -oE '^CASE_COUNT_EXPECTED=[0-9]+' "$SUITE_SELF" | grep -oE '[0-9]+$')
+[ -n "$_enforced" ] \
+  || fail_case "case 63: could not read CASE_COUNT_EXPECTED from $SUITE_SELF — the invariant cannot be checked and must not pass vacuously"
+[ "$_doc_counts" -eq "$_enforced" ] \
+  || fail_case "case 63: scripts/agent-gate.sh documents $_doc_counts cases but this suite enforces $_enforced — update the prose in the SAME diff as the count (roborev jobs 154, 158)"
+ok "THE TWO-PLACE INVARIANT: the gate's documented case count equals this suite's enforced count, checked affirmatively (a missing or ambiguous doc count FAILS rather than passing vacuously)"
+
 # --- CASE COUNT: EXACT, not a floor ------------------------------------------
 # #3544's lesson is this suite's own subject: a span-replacing edit once deleted four
 # cases from a suite and it reported "failed: 0" over the shrunken remainder. A FLOOR
 # below the real count tolerates exactly that — one case can be deleted and the guard
 # still greens (roborev job 50, finding 5) — so the count is pinned EXACTLY. Adding a
 # case means changing this number in the same diff, deliberately.
-CASE_COUNT_EXPECTED=62
+CASE_COUNT_EXPECTED=63
 [ "$CASES" -eq "$CASE_COUNT_EXPECTED" ] \
   || fail_case "CASE COUNT: $CASES cases ran, expected EXACTLY $CASE_COUNT_EXPECTED. Cases were deleted, skipped or added without updating this assertion; a green tally over a changed suite certifies nothing."
 
