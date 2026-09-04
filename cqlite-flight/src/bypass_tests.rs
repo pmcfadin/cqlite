@@ -487,10 +487,23 @@ fn a_resolvable_composite_set_element_selects_the_fast_arm() {
         );
     }
 
-    // A composite MAP KEY is refused regardless of the scope.
-    for map_key in [
-        "map<frozen<contact_info>, text>",
-        "map<frozen<tuple<int, text>>, text>",
+    // A composite MAP KEY behaves EXACTLY like a composite set element (roborev job
+    // 125). This block previously asserted the opposite — "refused regardless of the
+    // scope", justified by the single-generation decoder serving such a key as an
+    // opaque `Blob`. THAT RATIONALE WAS STALE: `issue_3631_structured_values_not_blobs`
+    // records the `map<frozen<udt>, int>` cell-path key case as "FIXED ON MAIN by
+    // #3612 / PR #3736", and `cell_path_key_tests`'
+    // `multicell_and_frozen_sides_present_every_composite_key_type_identically`
+    // asserts the multicell and frozen sides present every composite key type
+    // identically. So the arms agree on the key, and forcing one-source queries
+    // through the merge path was a cost with no divergence behind it.
+    // `needs_registry` is the distinction that makes the controls meaningful: a UDT
+    // NAME must be looked up, while `tuple<int, text>` carries its own structure and
+    // so resolves under ANY scope. Asserting the same controls for both would be
+    // wrong — measured: the tuple key is `Selected` even under `wrong_keyspace`.
+    for (map_key, needs_registry) in [
+        ("map<frozen<contact_info>, text>", true),
+        ("map<frozen<tuple<int, text>>, text>", false),
     ] {
         assert_eq!(
             bypass_reason_with_udts(
@@ -500,11 +513,56 @@ fn a_resolvable_composite_set_element_selects_the_fast_arm() {
                 false,
                 resolving
             ),
-            BypassReason::MulticellArmDivergence,
-            "`{map_key}`: the single-generation decoder serves a composite map key as \
-             an opaque Blob, so the arms still diverge"
+            BypassReason::Selected,
+            "`{map_key}`: a RESOLVABLE, orderable composite map key is served \
+             identically by both arms since #3612, so the fast path must be permitted"
         );
+        // Control 1: with NO scope at all the merge arm can resolve nothing —
+        // `merge_arm_resolves_composite` returns false without a scope — so BOTH
+        // shapes are refused. This is what stops the flip from being unconditional.
+        assert_eq!(
+            bypass_reason(&readers, &with_type(map_key), ForcedMergePath::Auto, false),
+            BypassReason::MulticellArmDivergence,
+            "`{map_key}`: with NO scope the merge arm cannot resolve it, so refuse"
+        );
+        // Control 2: a scope pointing at the WRONG keyspace resolves no UDT NAME, but
+        // a self-describing tuple is unaffected.
+        let wrong = bypass_reason_with_udts(
+            &readers,
+            &with_type(map_key),
+            ForcedMergePath::Auto,
+            false,
+            wrong_keyspace,
+        );
+        if needs_registry {
+            assert_eq!(
+                wrong,
+                BypassReason::MulticellArmDivergence,
+                "`{map_key}`: a UDT NAME under a scope that resolves NOTHING must refuse"
+            );
+        } else {
+            assert_eq!(
+                wrong,
+                BypassReason::Selected,
+                "`{map_key}`: a tuple carries its own structure, so a useless scope \
+                 does not make it unresolvable"
+            );
+        }
     }
+
+    // And the #4063 ordering veto applies to a map KEY exactly as to a set element.
+    assert_eq!(
+        bypass_reason_with_udts(
+            &readers,
+            &with_type("map<frozen<tuple<uuid, text>>, text>"),
+            ForcedMergePath::Auto,
+            false,
+            resolving
+        ),
+        BypassReason::MulticellArmDivergence,
+        "a `uuid` leaf in a composite MAP KEY is refused by compare_composite (#4063), \
+         so the fast path must not serve it either"
+    );
 }
 
 /// Roborev F2 (issue #2339): the bypass predicate's "the merge arm can resolve

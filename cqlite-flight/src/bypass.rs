@@ -361,12 +361,34 @@ fn declares_composite_keyed_collection(data_type: &str, udts: Option<UdtScope<'_
             }
             is_opaque_composite(&inner) && !merge_arm_resolves_composite(&inner, udts)
         }
-        // A composite MAP KEY is still divergent, in the opposite direction from
-        // before #2339: the merge arm decodes it structurally, the
-        // single-generation decoder's `parse_cell_path_key` has no composite arm
-        // and falls back to an opaque `Value::Blob`. Closing that half belongs to
-        // the single-generation reader.
-        CqlType::Map(key, _) => is_opaque_composite(&key),
+        // A composite MAP KEY is treated EXACTLY like a composite set element
+        // (roborev job 125). The previous comment here claimed the single-generation
+        // `parse_cell_path_key` "has no composite arm and falls back to an opaque
+        // `Value::Blob`", so every composite-keyed map was refused unconditionally.
+        // THAT CLAIM WAS FALSE, and a committed test says so:
+        // `multicell_and_frozen_sides_present_every_composite_key_type_identically`
+        // (cell_path_key_tests.rs) asserts the multicell and frozen sides present
+        // EVERY composite key type identically — UDT marshal, `tuple<..>`,
+        // `frozen<tuple<..>>`, `frozen<set/list/map<..>>` and the marshal-class
+        // spelling. So the single-generation side already decodes these structurally
+        // and the two arms agree on the KEY; a one-source query was being forced
+        // through the merge path for no reason.
+        //
+        // Ordering is not a second concern here: a bypass serves ONE source, so the
+        // entry order is that file's own on-disk order, which is authoritative by
+        // construction — the same reason the set-element arm above may bypass.
+        //
+        // The two real vetoes still apply, in the same order and via the same
+        // helpers, so map keys and set elements cannot drift apart: a leaf the merged
+        // arm refuses to ORDER (#4063) vetoes first, then an UNRESOLVABLE composite
+        // (the merge arm needs the ticket registry to resolve it; the
+        // single-generation decoder resolves from the SSTable's own marshal type).
+        CqlType::Map(key, _) => {
+            if merged_arm_refuses_ordering(&key, udts) {
+                return true;
+            }
+            is_opaque_composite(&key) && !merge_arm_resolves_composite(&key, udts)
+        }
         // A LIST is element-for-element equivalent on both arms: its cell path is
         // a position TimeUUID, so the order is authoritative either way — even for
         // a `frozen<UDT>` element.
