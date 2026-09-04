@@ -52,6 +52,15 @@ mod compaction_cancel_tests;
 // `write-support` to synthesize the range-tombstone SSTable bytes.
 #[cfg(all(test, feature = "write-support"))]
 mod compaction_range_marker_resume_tests;
+// Issue #3853 fix round 1: in-crate proof that the three whole-data-section
+// walks the integration suite structurally cannot reach — `prepare_delta_scan`
+// (feature-gated), `scan_for_key` (`pub(super)`) and the
+// `stitch_all_chunks_cancellable` funnel (`pub(super)` on `reader`) — each hold
+// a scan-lifetime guard. Needs crate-internal visibility AND the `delta-scan`
+// case must be a LIB test to execute at all (#3522), so it cannot live in
+// `tests/`. See the module docs for which lane executes which case.
+#[cfg(all(test, feature = "write-support"))]
+mod scan_lifetime_wiring_tests;
 // BIG ("nb"/uncompressed) point lookup: raw-key Index.db resolve + covering-chunk
 // seek (issue #1572), replacing the whole-file scan_for_key fallback.
 mod big_point;
@@ -968,6 +977,17 @@ impl SSTableReader {
         &self,
     ) -> Result<(Vec<u8>, super::parsing::V5CompressedLegacyParser)> {
         use tokio::io::AsyncSeekExt;
+
+        // #3853 scan-lifetime madvise seam. This function reads the WHOLE data
+        // section (seek past the header, then stitch every chunk), so by the
+        // seam's own definition it is a scan and holds a guard.
+        //
+        // The guard's scope is THIS BODY, deliberately, and not the caller's
+        // (`delta_scan::scan.rs`): the return value is an OWNED `Vec<u8>` plus a
+        // parser, and the caller parses that owned buffer — no borrow into the
+        // mapping survives the return. So releasing when the stitch completes is
+        // the RSS control working, not a premature release.
+        let _scan = self.begin_scan();
 
         // Seek the per-scan cursor to the start of the data section.
         let cursor = self.new_scan_cursor().await?;
