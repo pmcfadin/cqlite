@@ -6919,9 +6919,8 @@ _disk_abbrev() {
 # GNU and BSD and macOS is a first-class gate host, and `-P` is what guarantees one
 # unwrapped line per filesystem so field positions mean what they say.
 _disk_df_probe() {
-  local p="${1:-}" out
+  local p="${1:-}" out a bs mp
   [ -n "$p" ] || return 1
-  command -v df >/dev/null 2>&1 || return 1
   # Walk up to the first EXISTING ancestor: the cargo target dir legitimately does not exist
   # on a clean checkout, and `df` on a missing path is an ERROR, not a free-space of zero.
   # Bounded by the loop below shortening `p` every iteration.
@@ -6929,6 +6928,38 @@ _disk_df_probe() {
     case "$p" in */*) p="${p%/*}"; [ -n "$p" ] || p=/ ;; *) p="." ;; esac
   done
   [ -e "$p" ] || return 1
+  # PREFER `stat`, AND THE REASON IS A MEASURED CROSS-FEATURE REGRESSION, not tidiness.
+  #
+  # This probe used to invoke the `df` BINARY unconditionally. #3755's disk-admission suite
+  # PATH-shims `df` and asserts on the NUMBER and the OPERANDS of every df call in the run -- and
+  # its shim answers from a SEQUENCED script. So the two calls `_disk_capture_start` makes (target
+  # + logs) broke 25 of its cases three ways at once: they inflated exact counts (`expected 1
+  # measurement, got 3`), introduced a foreign operand (a LOG DIR) into `df_operands_all`, and
+  # CONSUMED the shim's scripted answers, so cases expecting a df-timeout or a specific mount got
+  # someone else's reading. They even fired on non-full-gate runs, where the admission probe is
+  # supposed to measure nothing at all. #3755 landed FIRST, so absorbing this is #3800's job.
+  #
+  # `stat` reads the same statvfs data WITHOUT executing `df`, so the shim cannot see this probe
+  # and the non-interference is STRUCTURAL rather than negotiated. Verified numerically on this
+  # fleet: `stat -f -c '%a' * '%S' / 1024` equals `df -Pk` avail to the byte.
+  #
+  # DECLARED RESIDUAL: `stat -f -c` and `stat -c %m` are GNU. On a BSD/macOS host -- and macOS is a
+  # first-class gate host -- this falls back to `df` and the interference RETURNS there. The
+  # durable fix is for #3755's assertions to be scoped to the ADMISSION WINDOW rather than to every
+  # df call in the process, so that ANY future filesystem measurement cannot red them. That is a
+  # change to another lane's tests, so it is DECLARED to the coordinator, not made from here.
+  if a=$(stat -f -c '%a' "$p" 2>/dev/null) \
+     && bs=$(stat -f -c '%S' "$p" 2>/dev/null) \
+     && mp=$(stat -c '%m' "$p" 2>/dev/null); then
+    case "$a"  in ''|*[!0-9]*) a="" ;; esac
+    case "$bs" in ''|*[!0-9]*) bs="" ;; esac
+    case "$mp" in ''|'?') mp="" ;; esac
+    if [ -n "$a" ] && [ -n "$bs" ] && [ -n "$mp" ]; then
+      printf '%s %s' "$(( a * bs / 1024 ))" "$mp"
+      return 0
+    fi
+  fi
+  command -v df >/dev/null 2>&1 || return 1
   # Mount points may contain spaces, so avail is $4 and the mount point is $6..NF.
   out=$(df -Pk "$p" 2>/dev/null | awk 'NR>1 {a=$4; m=$6; for(i=7;i<=NF;i++) m=m" "$i; print a" "m; exit}')
   case "$out" in ''|[!0-9]*) return 1 ;; esac
