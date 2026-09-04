@@ -109,15 +109,21 @@
 #      merge; they differ in the REMEDY, and reporting "no authorized deferral
 #      covers this job" for an unreachable `gh` sends a lead to re-post a marker
 #      that was already fine.
-#      AND A FINDINGS RECORD CAN NEVER REACH BOUND (roborev job 103): even a
-#      well-formed authorization from an allowlisted human, naming issues
-#      verified OPEN, is UNMEASURED (exit 5), because the marker's `count=` half
-#      — the field that ties a deferral to the findings it defers — is matched
-#      against the count OBSERVED BY THE REVIEW, and no trusted count exists
-#      here (the record carries a verdict LETTER; a recheck writes no row). This
-#      used to be DECLARED and allowed to bind, which let the merge gate honour a
-#      marker the review-time path would REJECT — a fresh marker can carry any
-#      count. A FINDINGS record binds ONLY through an authorization whose every
+#      AND A FINDINGS RECORD BINDS ONLY ON A FULLY MEASURED AUTHORIZATION
+#      (roborev job 103, then #4050). The marker's `count=` half — the field that
+#      ties a deferral to the findings it defers — is matched against the count
+#      OBSERVED BY THE REVIEW, and job 103's defect was DECLARING that half
+#      unverifiable here and binding anyway, which let the merge gate honour a
+#      marker the review-time path would REJECT (a fresh marker can carry any
+#      count). #4050 supplies the missing measurement instead of restoring the
+#      declaration: the job record carries no count FIELD but it DOES carry the
+#      review TEXT, so the count is DERIVED from that text by the recogniser the
+#      review-time gate itself uses (`lib/roborev-findings-count.sh`) and the
+#      SAME judge is then asked the full question. Where no count can be derived
+#      — no review text, empty text, an untakeable census, or ZERO markers on a
+#      record whose verdict is affirmatively FINDINGS — job 103's UNMEASURED
+#      (exit 5) stands unchanged. A FINDINGS record binds ONLY through an
+#      authorization whose every
 #      half was MEASURED — including its `count=` matched against the count
 #      derived from that record's own recorded review text by the recogniser the
 #      review-time gate uses (#4050). Every other findings state refuses.
@@ -514,19 +520,28 @@ record_status_class() {
 # since-closed issue is an ACCIDENT route, and by #3312's triage rule an accident
 # route is a defect, not an out-of-model invoker bypass.
 #
-# THE `count=` HALF CANNOT BE VERIFIED HERE, AND DECLARING THAT IS NOT ENOUGH
-# (roborev job 103). It is matched against the findings count OBSERVED BY THE
-# REVIEW; this leg never ran the review, the job record carries a verdict LETTER
-# and no count (measured on findings-bearing jobs 78 and 102, which expose only
+# THE `count=` HALF IS VERIFIED HERE WHEN IT CAN BE MEASURED, AND ONLY THEN
+# (roborev job 103, then #4050). It is matched against the findings count OBSERVED
+# BY THE REVIEW. This leg never ran the review and the job record carries no count
+# FIELD (measured on findings-bearing jobs 78 and 102, which expose only
 # `verdict_bool`/`verdict`), and `--recheck-job` enqueues nothing so it writes no
-# record either. Both routes to a trusted count are therefore unavailable.
+# record either — so for a long time BOTH routes to a count were unavailable and
+# this code DECLARED the gap and bound anyway. That let the merge gate accept an
+# authorization the review-time path would REJECT: an allowlisted human can post a
+# fresh marker after the review carrying any count at all, and nothing here
+# compared it to anything. The actor is a non-invoker and the shape is an accident,
+# which by #3312's triage rule makes it a defect rather than an out-of-model
+# bypass — so job 103 replaced the declaration with UNMEASURED.
 #
-# This code used to DECLARE that gap and bind anyway. That let the merge gate
-# accept an authorization the review-time path would REJECT: an allowlisted human
-# can post a fresh marker after the review carrying any count at all, and nothing
-# here compared it to anything. The actor is a non-invoker and the shape is an
-# accident, which by #3312's triage rule makes it a defect rather than an
-# out-of-model bypass — so a grant here yields UNMEASURED, never BOUND.
+# THAT MADE A VALIDLY DEFERRED PR UNMERGEABLE, which is its own defect class, so
+# #4050 supplies the measurement rather than restoring the declaration: the record
+# carries no count FIELD but it DOES carry the review TEXT, and the count is
+# derived from it by the SHARED recogniser the review-time gate uses. With an
+# affirmatively measured count this function asks the scanner the FULL question
+# (the DEFER kind, whose judge compares `count=`); without one it asks the
+# AUTHORIZATION-ONLY question exactly as job 103 left it, and the binding site
+# reports UNMEASURED. The count is never fabricated, never defaulted, and never
+# compared with itself.
 #
 # THE CALL IS STILL MADE, and it still earns its keep: it separates "there is no
 # authorization at all" (a MEASURED refusal, exit 4) from "the authorization is

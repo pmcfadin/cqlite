@@ -135,6 +135,13 @@ DEFER_STEM = "roborev-defer: findings"
 # job is purely diagnostic — separating "no authorization exists" (a measured refusal) from "the
 # authorization is good but its count is unverifiable at the merge point", which are different
 # operator actions. A caller must never treat it as equivalent to `granted`.
+#
+# AND SINCE #4050 THE MERGE GATE MOSTLY DOES NOT NEED THIS KIND. Where it can DERIVE the observed
+# count from the job record's own recorded review text — with the same recogniser the wrapper uses,
+# `scripts/flow/lib/roborev-findings-count.sh` — it asks DEFER_KIND instead, count included, and binds
+# only on `granted`. This kind is what it falls back to when no count can be derived, i.e. exactly the
+# state in which nothing may be granted. Nothing about THIS kind's judgement changed: it still skips
+# the count half and it still may not license a merge on its own.
 AUTHZ_KIND = "findings-deferral-authorization"
 
 # ===== NO EMITTED DIAGNOSTIC CARRIES ANY PART OF THE MARKER FORM (#3312 job 23, layer 3) =====

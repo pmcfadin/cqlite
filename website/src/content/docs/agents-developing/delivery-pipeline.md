@@ -150,10 +150,24 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   unreadable one is `UNMEASURED`: a range match is not a review. The deferral route exists because
   roborev RE-REPORTS a lead-deferred finding on every later round, so a record stays `findings`
   forever once findings were deferred and requiring `clean` outright would make such a merge
-  unobtainable. That authorization is re-verified through the SAME scanner the wrapper uses, under a
-  deliberately narrow kind returning a DISTINCT state, so nothing is decided from the block's text —
-  and the marker's `count=` half is deliberately NOT re-verified, which the output SAYS rather than
-  implies: it is matched against the count OBSERVED BY THE REVIEW, which this leg never ran.
+  unobtainable. That authorization is re-verified through the SAME scanner the wrapper uses, so nothing
+  is decided from the block's text — and since issue #4050 that includes the marker's `count=` half,
+  the field tying a deferral to the findings it defers. The job record carries no findings-count
+  FIELD but it DOES carry the review TEXT, so the count is DERIVED from that daemon-recorded text by
+  the ONE shared recogniser `scripts/flow/lib/roborev-findings-count.sh` — the same code the
+  review-time gate runs, guarded in both consumers by the identical `-f`+`-r` test, since `-r` alone
+  is true for a FIFO and the `.` would then block forever with no verdict — and the same judge is
+  then asked the full question, binding only on `granted`. A `count-mismatch` is a MEASURED refusal
+  (exit 4) named as its own state. Every unmeasurable state keeps the earlier refusal exactly (no
+  review text, empty text, an untakeable census, or ZERO severity markers on a record whose verdict
+  is affirmatively `findings`, which is a contradiction and not a count), so the change adds a BOUND
+  path and widens nothing else: it never derives CLEANLINESS from prose — `clean` stays reachable
+  only from the structured verdict letter — and the recogniser's known non-closure over prose is
+  inherited identically at both ends, so an undercount that fools the merge point fooled review time
+  first. It does not make the count tamper-proof against a party who can write roborev's database;
+  that actor is invoker-class and out of model. Before #4050 this half was DECLARED unverifiable and
+  a validly deferred PR was permanently unmergeable — three at once — which is why the measurement
+  was supplied rather than the declaration restored.
   `PREMERGE: HOLD-CHECK` re-reads the PR thread and the issue it closes for a
   column-zero `HOLD:` order, and the PR timeline for a lead disarm inside 30 minutes.
   **The threads are read with `gh api --paginate`, every page decoded before any verdict.**
