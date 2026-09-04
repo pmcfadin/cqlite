@@ -52,14 +52,7 @@
 //! ## WHAT THIS DOES NOT EXERCISE — declared, not implied (roborev job 54)
 //!
 //! It calls `assemble_read_cells` on hand-built `CellData`, so it pins the
-//! **merged-read assembly** order and **NOTHING ABOUT THE WRITER**.
-//!
-//! Its two trailing `None` arguments are the projection filter (no projection —
-//! assemble every column) and the UDT registry (issue #2339). The registry is
-//! `None` because this fixture's schema declares only `set<time>` and
-//! `map<time, text>`: no UDT reference to resolve, so a registry could not change
-//! any ordering asserted below. A COMPOSITE element/key type WOULD need one and
-//! fails closed without it. An earlier
+//! **merged-read assembly** order and **NOTHING ABOUT THE WRITER**. An earlier
 //! revision named these cases `..._matching_the_writer`, which was an overclaim
 //! twice over: the writer is never invoked here, and at the time "the writer" was
 //! ambiguous, because CQLite had TWO collection write paths that DISAGREED for a
@@ -166,7 +159,7 @@ fn negative_time_set_element_sorts_by_unsigned_serialized_bytes() {
         time_elem("tset", 86_399_999_999_999, Value::Time(86_399_999_999_999)),
         time_elem("tset", -2, Value::Time(-2)),
     ];
-    let row = assemble_read_cells(cells, &schema(), None, None).expect("assembly");
+    let row = assemble_read_cells(cells, &schema(), None).expect("assembly");
     let got: Vec<i64> = match column_of(&row, "tset") {
         Value::Set(v) | Value::List(v) => v
             .iter()
@@ -197,7 +190,7 @@ fn negative_time_map_key_sorts_by_unsigned_serialized_bytes() {
         time_elem("tmap", -5, Value::text("neg".to_string())),
         time_elem("tmap", 0, Value::text("zero".to_string())),
     ];
-    let row = assemble_read_cells(cells, &schema(), None, None).expect("assembly");
+    let row = assemble_read_cells(cells, &schema(), None).expect("assembly");
     let keys: Vec<i64> = match column_of(&row, "tmap") {
         Value::Map(m) => m
             .iter()
@@ -225,7 +218,7 @@ fn in_range_time_order_is_ascending_by_nanos() {
         time_elem("tset", 45_296_000_000_007, Value::Time(45_296_000_000_007)),
         time_elem("tset", 3_600_000_000_000, Value::Time(3_600_000_000_000)),
     ];
-    let row = assemble_read_cells(cells, &schema(), None, None).expect("assembly");
+    let row = assemble_read_cells(cells, &schema(), None).expect("assembly");
     let got: Vec<i64> = match column_of(&row, "tset") {
         Value::Set(v) | Value::List(v) => v
             .iter()

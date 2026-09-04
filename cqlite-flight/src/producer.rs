@@ -1117,13 +1117,14 @@ impl MergeProducer {
         // its cell_path instead of failing closed. Without it an all-lowercase UDT
         // name stays a bare `CqlType::Custom` with no field list and the path
         // (correctly) still fails closed.
-        let row_cells: RowCells = cqlite_core::storage::write_engine::merge::assemble_read_cells(
-            cells,
-            &self.schema,
-            needed,
-            self.udt_scope(),
-        )
-        .map_err(ProducerError::Merge)?;
+        let row_cells: RowCells =
+            cqlite_core::storage::write_engine::merge::assemble_read_cells_with_udts(
+                cells,
+                &self.schema,
+                needed,
+                self.udt_scope(),
+            )
+            .map_err(ProducerError::Merge)?;
 
         // Issue #2374/#2789: Cassandra row-visibility rule for the READ path. A
         // reconciled row is visible to a `SELECT` iff it has at least one

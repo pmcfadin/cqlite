@@ -470,14 +470,16 @@ fn a_resolvable_composite_set_element_selects_the_fast_arm() {
 /// generation count, which is the defect #2339 exists to remove.
 ///
 /// This test drives BOTH sides for real (the predicate, and
-/// `assemble_read_cells` on a Cassandra-framed `cell_path`) and asserts they
+/// `assemble_read_cells_with_udts` on a Cassandra-framed `cell_path`) and asserts they
 /// agree, so a future divergence between the two resolvers reds here rather than
 /// only under a two-generation table.
 #[test]
 fn the_bypass_predicate_and_the_merge_arm_agree_on_a_qualified_udt_reference() {
     use crate::testutil::{simple_schema, write_row};
     use cqlite_core::schema::udt_registry_from_cql;
-    use cqlite_core::storage::write_engine::merge::{assemble_read_cells, CellData, UdtScope};
+    use cqlite_core::storage::write_engine::merge::{
+        assemble_read_cells_with_udts, CellData, UdtScope,
+    };
     use cqlite_core::Value;
 
     let (_temp, readers) = open_readers(vec![vec![write_row(1, "a", 10, 100)]]);
@@ -538,7 +540,8 @@ fn the_bypass_predicate_and_the_merge_arm_agree_on_a_qualified_udt_reference() {
             is_deleted: false,
             has_empty_value: false,
         };
-        let merge_arm_decodes = assemble_read_cells(vec![element], &schema, None, scope()).is_ok();
+        let merge_arm_decodes =
+            assemble_read_cells_with_udts(vec![element], &schema, None, scope()).is_ok();
 
         assert_eq!(
             predicate_selects, merge_arm_decodes,

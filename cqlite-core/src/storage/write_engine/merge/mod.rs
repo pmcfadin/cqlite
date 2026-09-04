@@ -104,7 +104,7 @@ pub use model::{CellData, ComplexDeletion, MergeEntry, MergeStats, MergeStep, Ro
 /// `Value::Set` / `Value::Map` for read consumers that key cells by column name.
 mod read_assembly;
 #[cfg(feature = "write-support")]
-pub use read_assembly::{assemble_read_cells, UdtScope};
+pub use read_assembly::{assemble_read_cells, assemble_read_cells_with_udts, UdtScope};
 
 /// Single-partition point-read merge builder (issue #2207): assembles a
 /// [`KWayMerger`] from per-candidate single-partition runs (seeked or key-filtered)

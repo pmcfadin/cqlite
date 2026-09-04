@@ -139,7 +139,7 @@ fn get<'a>(cells: &'a RowCells, name: &str) -> Option<&'a Value> {
 #[test]
 fn simple_column_passes_through() {
     let cells = vec![CellData::new("s".into(), Value::Integer(7), 1)];
-    let out = assemble_read_cells(cells, &schema(), None, registry()).unwrap();
+    let out = assemble_read_cells_with_udts(cells, &schema(), None, registry()).unwrap();
     assert_eq!(get(&out, "s"), Some(&Value::Integer(7)));
 }
 
@@ -154,7 +154,7 @@ fn simple_tombstone_reads_absent() {
         range_end: None,
     }));
     let cells = vec![CellData::new("s".into(), tomb, 1)];
-    let out = assemble_read_cells(cells, &schema(), None, registry()).unwrap();
+    let out = assemble_read_cells_with_udts(cells, &schema(), None, registry()).unwrap();
     assert_eq!(
         get(&out, "s"),
         None,
@@ -172,7 +172,7 @@ fn set_and_list_reassemble_all_members_not_last_cell() {
         elem("items", Value::Integer(2), vec![1]),
         elem("items", Value::Integer(3), vec![2]),
     ];
-    let out = assemble_read_cells(cells, &schema(), None, registry()).unwrap();
+    let out = assemble_read_cells_with_udts(cells, &schema(), None, registry()).unwrap();
     assert_eq!(
         get(&out, "nums"),
         Some(&Value::Set(vec![Value::Integer(10), Value::Integer(20)])),
@@ -196,7 +196,7 @@ fn map_reassembles_entries_decoding_key_from_cell_path() {
         elem("m", Value::BigInt(100), b"alpha".to_vec()),
         elem("m", Value::BigInt(200), b"beta".to_vec()),
     ];
-    let out = assemble_read_cells(cells, &schema(), None, registry()).unwrap();
+    let out = assemble_read_cells_with_udts(cells, &schema(), None, registry()).unwrap();
     assert_eq!(
         get(&out, "m"),
         Some(&Value::Map(vec![
@@ -221,7 +221,7 @@ fn set_of_inet_orders_by_raw_bytes_not_string() {
         elem("iset", Value::inet(ip_10.clone()), ip_10.clone()),
         elem("iset", Value::inet(ip_9.clone()), ip_9.clone()),
     ];
-    let out = assemble_read_cells(cells, &schema(), None, registry()).unwrap();
+    let out = assemble_read_cells_with_udts(cells, &schema(), None, registry()).unwrap();
     assert_eq!(
         get(&out, "iset"),
         Some(&Value::Set(vec![
@@ -252,7 +252,7 @@ fn set_of_time_orders_by_raw_bytes_not_formatted_string() {
         elem("tset", Value::Time(t_big), t_big.to_be_bytes().to_vec()),
         elem("tset", Value::Time(t_small), t_small.to_be_bytes().to_vec()),
     ];
-    let out = assemble_read_cells(cells, &schema(), None, registry()).unwrap();
+    let out = assemble_read_cells_with_udts(cells, &schema(), None, registry()).unwrap();
     assert_eq!(
         get(&out, "tset"),
         Some(&Value::Set(vec![Value::Time(t_small), Value::Time(t_big)])),
@@ -266,7 +266,7 @@ fn deleted_elements_are_dropped() {
     let mut deleted = elem("nums", Value::Integer(99), vec![0, 0, 0, 99]);
     deleted.is_deleted = true;
     let cells = vec![elem("nums", Value::Integer(10), vec![0, 0, 0, 10]), deleted];
-    let out = assemble_read_cells(cells, &schema(), None, registry()).unwrap();
+    let out = assemble_read_cells_with_udts(cells, &schema(), None, registry()).unwrap();
     assert_eq!(
         get(&out, "nums"),
         Some(&Value::Set(vec![Value::Integer(10)])),
@@ -294,7 +294,7 @@ fn elements_reassemble_in_cell_path_order_not_arrival_order() {
         elem("m", Value::BigInt(1), b"alpha".to_vec()),
         elem("m", Value::BigInt(2), b"beta".to_vec()),
     ];
-    let out = assemble_read_cells(cells, &schema(), None, registry()).unwrap();
+    let out = assemble_read_cells_with_udts(cells, &schema(), None, registry()).unwrap();
     assert_eq!(
         get(&out, "nums"),
         Some(&Value::Set(vec![
@@ -338,7 +338,7 @@ fn map_deleted_entry_omitted_per_cassandra_select_semantics() {
         deleted,
         elem("m", Value::BigInt(2), b"beta".to_vec()),
     ];
-    let out = assemble_read_cells(cells, &schema(), None, registry()).unwrap();
+    let out = assemble_read_cells_with_udts(cells, &schema(), None, registry()).unwrap();
     assert_eq!(
         get(&out, "m"),
         Some(&Value::Map(vec![
@@ -357,7 +357,8 @@ fn simple_then_complex_same_column_fails_closed() {
     // fell through); now it fails closed naming the column.
     let simple = CellData::new("nums".into(), Value::Integer(5), 1);
     let complex = elem("nums", Value::Integer(10), vec![0, 0, 0, 10]);
-    let err = assemble_read_cells(vec![simple, complex], &schema(), None, registry()).unwrap_err();
+    let err = assemble_read_cells_with_udts(vec![simple, complex], &schema(), None, registry())
+        .unwrap_err();
     assert!(
         err.to_string().contains("nums"),
         "mixed-shape error must name the column, got: {err}"
@@ -371,7 +372,8 @@ fn complex_then_simple_same_column_fails_closed() {
     // collection; now it fails closed naming the column (roborev 1629 F1).
     let complex = elem("nums", Value::Integer(10), vec![0, 0, 0, 10]);
     let simple = CellData::new("nums".into(), Value::Integer(5), 1);
-    let err = assemble_read_cells(vec![complex, simple], &schema(), None, registry()).unwrap_err();
+    let err = assemble_read_cells_with_udts(vec![complex, simple], &schema(), None, registry())
+        .unwrap_err();
     assert!(
         err.to_string().contains("nums"),
         "mixed-shape error must name the column, got: {err}"
@@ -404,7 +406,7 @@ fn set_of_frozen_udt_decodes_structurally() {
         elem("kset", Value::blob(Vec::new()), nulls.clone()),
         elem("kset", Value::blob(Vec::new()), beta.clone()),
     ];
-    let out = assemble_read_cells(cells, &schema(), None, registry()).unwrap();
+    let out = assemble_read_cells_with_udts(cells, &schema(), None, registry()).unwrap();
     let field = |name: &str, v: Value| UdtField {
         name: name.to_string(),
         value: Some(v),
@@ -465,7 +467,7 @@ fn set_of_frozen_udt_decodes_structurally() {
 fn set_of_qualified_frozen_udt_decodes_structurally() {
     let beta = hex("00000004626574610000000400000002");
     let gamma = hex("0000000567616d6d610000000400000003");
-    let bare = assemble_read_cells(
+    let bare = assemble_read_cells_with_udts(
         vec![
             elem("kset", Value::blob(Vec::new()), gamma.clone()),
             elem("kset", Value::blob(Vec::new()), beta.clone()),
@@ -475,7 +477,7 @@ fn set_of_qualified_frozen_udt_decodes_structurally() {
         registry(),
     )
     .expect("the BARE reference decodes (the pre-existing path)");
-    let qualified = assemble_read_cells(
+    let qualified = assemble_read_cells_with_udts(
         vec![
             elem("qset", Value::blob(Vec::new()), gamma),
             elem("qset", Value::blob(Vec::new()), beta),
@@ -536,7 +538,7 @@ fn composite_with_an_inet_component_orders_by_address_bytes_not_text() {
         elem("ituple", Value::blob(Vec::new()), ten),
         elem("ituple", Value::blob(Vec::new()), nine),
     ];
-    let out = assemble_read_cells(cells, &schema(), None, registry()).unwrap();
+    let out = assemble_read_cells_with_udts(cells, &schema(), None, registry()).unwrap();
     let tuple = |addr: Vec<u8>| {
         Value::Frozen(Box::new(Value::Tuple(vec![
             Value::inet(addr),
@@ -583,7 +585,7 @@ fn composite_with_a_time_component_orders_by_serialized_bytes() {
         elem("ttuple", Value::blob(Vec::new()), at(late)),
         elem("ttuple", Value::blob(Vec::new()), at(early)),
     ];
-    let out = assemble_read_cells(cells, &schema(), None, registry()).unwrap();
+    let out = assemble_read_cells_with_udts(cells, &schema(), None, registry()).unwrap();
     let tuple = |nanos: i64| {
         Value::Frozen(Box::new(Value::Tuple(vec![
             Value::Time(nanos),
@@ -681,7 +683,7 @@ fn set_of_unresolved_udt_still_fails_closed() {
         Value::blob(Vec::new()),
         hex("00000004626574610000000400000002"),
     )];
-    let err = assemble_read_cells(cells, &schema(), None, registry()).unwrap_err();
+    let err = assemble_read_cells_with_udts(cells, &schema(), None, registry()).unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("fset") && msg.contains("addr_type") && msg.contains("#2339"),
@@ -714,7 +716,7 @@ fn composite_cell_path_with_trailing_bytes_fails_closed() {
     path.push(0xAA); // trailing garbage
 
     let cells = vec![elem("ftk", Value::BigInt(1), path)];
-    let err = assemble_read_cells(cells, &schema(), None, registry()).unwrap_err();
+    let err = assemble_read_cells_with_udts(cells, &schema(), None, registry()).unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("ftk") && msg.contains("trailing"),
@@ -732,7 +734,7 @@ fn composite_cell_path_with_trailing_bytes_fails_closed() {
     assert_eq!(ok_path.len(), well_formed_len);
     let ok_cells = vec![elem("ftk", Value::BigInt(1), ok_path)];
     assert!(
-        assemble_read_cells(ok_cells, &schema(), None, registry()).is_ok(),
+        assemble_read_cells_with_udts(ok_cells, &schema(), None, registry()).is_ok(),
         "the same cell path WITHOUT the trailing byte must still decode"
     );
 }
@@ -765,7 +767,7 @@ fn composite_cell_path_with_trailing_bytes_fails_closed() {
 /// The expectation is derived from Cassandra's semantics (`IntegerType.compare`,
 /// signed two's-complement), never from CQLite's own prior behaviour (#3041).
 #[test]
-#[ignore = "GAP #2339: central ComparatorType::compare orders varint by raw bytes, not signed IntegerType order; un-ignore when the central varint/decimal/uuid arms converge on collection_order::scalar"]
+#[ignore = "GAP #4063 (from #2339): central ComparatorType::compare orders varint by raw bytes, not signed IntegerType order; un-ignore when the central varint/decimal/uuid arms converge on collection_order::scalar"]
 fn varint_component_of_a_composite_orders_signed_not_by_raw_bytes() {
     let cmp = ComparatorType::Tuple(vec![ComparatorType::Varint]);
     let minus_one = Value::Tuple(vec![Value::Varint(vec![0xFF].into())]);
@@ -802,12 +804,79 @@ fn nested_unresolved_udt_fails_closed() {
         Value::blob(Vec::new()),
         hex("00000004626574610000000400000002"),
     )];
-    let err = assemble_read_cells(cells, &schema(), None, registry()).unwrap_err();
+    let err = assemble_read_cells_with_udts(cells, &schema(), None, registry()).unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("nset") && msg.contains("ghost_part") && msg.contains("#2339"),
         "an unresolved UDT NESTED inside a tuple must fail closed naming the column \
          and the nested type — never an opaque Blob, got: {msg}"
+    );
+}
+/// **The three-argument [`assemble_read_cells`] is PUBLIC API and must keep
+/// behaving as `assemble_read_cells_with_udts(.., None)` (roborev job 110 F2).**
+///
+/// #2339 needed a UDT registry on this path, and adding a required parameter to a
+/// `pub` re-exported function would break every external consumer at compile
+/// time. So the original arity is preserved as a delegation. This pins the
+/// delegation itself, which is the part that can silently rot: a future edit that
+/// gave the three-arg form its OWN body, or defaulted it to something other than
+/// `None`, would still compile and would still pass every other test in this file
+/// (they all call the four-arg form).
+///
+/// Asserted on BOTH sides of the registry's observable effect, so neither arm is
+/// a tautology: a scalar collection where both must SUCCEED identically, and a
+/// composite UDT element where both must FAIL CLOSED with the same message.
+#[test]
+fn three_arg_entry_point_is_exactly_the_four_arg_form_with_no_registry() {
+    // (1) Registry-independent input: identical Ok values.
+    let scalar = || {
+        vec![
+            elem("nums", Value::Integer(20), vec![0, 0, 0, 20]),
+            elem("nums", Value::Integer(10), vec![0, 0, 0, 10]),
+        ]
+    };
+    let three = assemble_read_cells(scalar(), &schema(), None).unwrap();
+    let four = assemble_read_cells_with_udts(scalar(), &schema(), None, None).unwrap();
+    assert_eq!(
+        get(&three, "nums"),
+        get(&four, "nums"),
+        "the three-arg form must produce the same row as the four-arg form with None"
+    );
+    assert_eq!(
+        get(&three, "nums"),
+        Some(&Value::Set(vec![Value::Integer(10), Value::Integer(20)])),
+        "sanity: that shared value is the real reassembled set, not two empty rows"
+    );
+
+    // (2) Registry-DEPENDENT input: both must fail closed, identically. This is
+    // what would break if the three-arg form silently supplied a registry.
+    let composite = || {
+        vec![elem(
+            "kset",
+            Value::blob(Vec::new()),
+            hex("00000004626574610000000400000002"),
+        )]
+    };
+    let three_err = assemble_read_cells(composite(), &schema(), None)
+        .expect_err("no registry => a composite UDT element must fail closed");
+    let four_err = assemble_read_cells_with_udts(composite(), &schema(), None, None)
+        .expect_err("explicit None registry => same fail-closed");
+    assert_eq!(
+        three_err.to_string(),
+        four_err.to_string(),
+        "both entry points must fail closed with the SAME error"
+    );
+    assert!(
+        three_err.to_string().contains("kset") && three_err.to_string().contains("#2339"),
+        "sanity: that shared error is the #2339 composite refusal, got: {three_err}"
+    );
+
+    // (3) And the registry genuinely CHANGES this outcome, which is what makes
+    // (2) meaningful rather than a restatement of "both return Err".
+    assert!(
+        assemble_read_cells_with_udts(composite(), &schema(), None, registry()).is_ok(),
+        "control: WITH the registry the same composite element decodes, so (2) \
+         pins the absence of a registry rather than an unconditional failure"
     );
 }
 
@@ -821,7 +890,7 @@ fn composite_element_without_registry_fails_closed() {
         Value::blob(Vec::new()),
         hex("00000004626574610000000400000002"),
     )];
-    let err = assemble_read_cells(cells, &schema(), None, None).unwrap_err();
+    let err = assemble_read_cells_with_udts(cells, &schema(), None, None).unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("kset") && msg.contains("key_part") && msg.contains("#2339"),
@@ -833,7 +902,7 @@ fn composite_element_without_registry_fails_closed() {
 fn all_deleted_collection_is_absent() {
     let mut deleted = elem("nums", Value::Integer(99), vec![0, 0, 0, 99]);
     deleted.is_deleted = true;
-    let out = assemble_read_cells(vec![deleted], &schema(), None, registry()).unwrap();
+    let out = assemble_read_cells_with_udts(vec![deleted], &schema(), None, registry()).unwrap();
     assert_eq!(
         get(&out, "nums"),
         None,
@@ -857,7 +926,7 @@ fn unprojected_composite_collection_column_is_dropped_not_errored() {
         elem("ftk", Value::BigInt(1), TUPLE_KEY_1A.to_vec()),
     ];
     let needed: HashSet<String> = ["s".to_string()].into_iter().collect();
-    let out = assemble_read_cells(cells, &schema(), Some(&needed), registry()).unwrap();
+    let out = assemble_read_cells_with_udts(cells, &schema(), Some(&needed), registry()).unwrap();
     assert_eq!(get(&out, "s"), Some(&Value::Integer(7)));
     assert_eq!(
         get(&out, "ftk"),
@@ -878,7 +947,7 @@ fn composite_column_is_assembled_without_projection_filter() {
         CellData::new("s".into(), Value::Integer(7), 1),
         elem("ftk", Value::BigInt(1), TUPLE_KEY_1A.to_vec()),
     ];
-    let out = assemble_read_cells(cells, &schema(), None, registry()).unwrap();
+    let out = assemble_read_cells_with_udts(cells, &schema(), None, registry()).unwrap();
     assert_eq!(get(&out, "s"), Some(&Value::Integer(7)));
     assert_eq!(
         get(&out, "ftk"),
@@ -900,7 +969,7 @@ fn projected_composite_collection_column_is_decoded() {
     // (roborev 1632/1633).
     let cells = vec![elem("ftk", Value::BigInt(1), TUPLE_KEY_1A.to_vec())];
     let needed: HashSet<String> = ["ftk".to_string()].into_iter().collect();
-    let out = assemble_read_cells(cells, &schema(), Some(&needed), registry()).unwrap();
+    let out = assemble_read_cells_with_udts(cells, &schema(), Some(&needed), registry()).unwrap();
     assert_eq!(
         get(&out, "ftk"),
         Some(&Value::Map(vec![(
@@ -933,7 +1002,7 @@ fn map_with_frozen_tuple_key_decodes_structurally() {
         elem("ftk", Value::BigInt(2), k2),
         elem("ftk", Value::BigInt(1), k1),
     ];
-    let out = assemble_read_cells(cells, &schema(), None, registry()).unwrap();
+    let out = assemble_read_cells_with_udts(cells, &schema(), None, registry()).unwrap();
     assert_eq!(
         get(&out, "ftk"),
         Some(&Value::Map(vec![
@@ -974,7 +1043,7 @@ fn set_of_frozen_map_decodes_with_i32_element_framing() {
         elem("smap", Value::blob(Vec::new()), two),
         elem("smap", Value::blob(Vec::new()), one),
     ];
-    let out = assemble_read_cells(cells, &schema(), None, registry()).unwrap();
+    let out = assemble_read_cells_with_udts(cells, &schema(), None, registry()).unwrap();
     assert_eq!(
         get(&out, "smap"),
         Some(&Value::Set(vec![

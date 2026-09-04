@@ -170,8 +170,39 @@ pub struct UdtScope<'a> {
 /// observable pre-#2324 behaviour — while the clean error still fires when that
 /// composite column IS projected or referenced (issue #2324, roborev 1633). It
 /// is also a small perf win (unprojected collections are never reassembled).
+/// The BACK-COMPATIBLE entry point, at this function's pre-#2339 signature.
+///
+/// `assemble_read_cells` is public API of `cqlite-core` (re-exported through
+/// `storage::write_engine::merge`), so #2339 may not change its arity: adding a
+/// required parameter would break every external consumer at compile time
+/// (roborev job 110 F2). It therefore keeps its three arguments and delegates
+/// with NO registry.
+///
+/// Composite/UDT-aware callers want [`assemble_read_cells_with_udts`]: with no
+/// registry, a composite whose element/key is a bare UDT reference has no field
+/// list to decode into and fails closed (never a guess — no-heuristics, #28).
+/// Behaviour here is otherwise IDENTICAL, because this is a delegation and not a
+/// second implementation — there is exactly one body.
+///
+/// Deliberately NOT `#[deprecated]`: this is the correct entry point for a caller
+/// with no UDT registry, and the attribute would red `-D warnings` on every
+/// in-repo use of it.
 #[cfg(feature = "write-support")]
 pub fn assemble_read_cells(
+    cells: Vec<CellData>,
+    schema: &TableSchema,
+    needed: Option<&HashSet<String>>,
+) -> Result<RowCells> {
+    assemble_read_cells_with_udts(cells, schema, needed, None)
+}
+
+/// As [`assemble_read_cells`], plus the [`UdtScope`] an unqualified UDT reference
+/// in a declared element/key type resolves against (issue #2339).
+///
+/// This holds the implementation; the three-argument form delegates here with
+/// `udts: None`.
+#[cfg(feature = "write-support")]
+pub fn assemble_read_cells_with_udts(
     cells: Vec<CellData>,
     schema: &TableSchema,
     needed: Option<&HashSet<String>>,

@@ -305,7 +305,8 @@ pub(super) fn compare_composite(
         // dispatches on the SCHEMA type, so keeping both would leave two ordering
         // authorities for one type — the divergence class #2339 exists to remove.
         //
-        // GAP: three leaf types are ordered by `ComparatorType::compare` in a way
+        // GAP (tracked as #4063): three leaf types are ordered by
+        // `ComparatorType::compare` in a way
         // that does NOT match Cassandra, a PRE-EXISTING central-comparator defect
         // this arm now inherits rather than papers over (a second path would hide
         // it, and fixing the central comparator is its own change with its own
