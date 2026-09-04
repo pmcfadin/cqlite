@@ -62,6 +62,26 @@ point: the two postures in `results.json` now agree rather than contradicting ea
 What it DOES close is the substitution: a manifest whose `server_cpus` was edited to a value the
 driver never verified no longer prints as verified, because the recorded verification names the
 list it actually checked and the two are compared.
+
+# THE FLIGHT ARM'S SIX FIELDS ARE REQUIRED, NOT OPTIONAL (#3551) — and why that is safe
+
+`--flight-server-cpus` / `--flight-pin-mode` / `--flight-allocator` add six fields, and this
+reader REQUIRES every declared field, so a session dir written by an older driver is REFUSED
+rather than half-read. That was a deliberate choice between two options, decided by measurement
+rather than by taste:
+
+* **(a) required** — chosen. `git ls-files` holds NO `session-corpus-pin.json` and NO
+  `pinning-verification.json`: the ws0 artifacts committed under `docs/reports/ws0-*-artifacts/`
+  are report OUTPUTS (`results.json`, `summary.txt`), which this reporter never reads back. So
+  nothing in the repository is refused by the new requirement, the only affected session dirs are
+  scratch dirs under `target/`, and the existing INCOMPLETE diagnostic already names the remedy
+  ("Re-run the session with the current driver") in the idiom `events`/`bin_dir` established when
+  #3248 added them.
+* **(b) optional with an affirmative absent-marker** — rejected. It would introduce a SECOND
+  vocabulary for every one of these claims ("this session predates the flight pin" vs a real
+  value), which the report would then have to render, and each of those renderings is a sentence
+  about a measurement nobody made. The cost of (a) is re-running a scratch session; the cost of
+  (b) is permanent, in the artifact the report's claims rest on.
 """
 
 from __future__ import annotations
@@ -88,7 +108,32 @@ PINNING_RECORD_FIELDS = (
     "host",
     "verified_by",
     "provenance",
+    # THE FLIGHT ARM (#3551). Six fields, all REQUIRED — see the backwards-compatibility note in
+    # the module docstring for why required rather than optional.
+    "flight_server_cpus",
+    "flight_pin_mode",
+    "flight_pin_verified",
+    "flight_allocator",
+    "flight_allocator_lib",
+    "flight_malloc_arena_max",
+    "flight_allocator_verification",
 )
+
+# THE PIN MODES, AND THE WORDS EACH ONE LICENSES (#3551).
+#
+# A CLOSED SET, for the reason `baseline_mode` is one: an unrecognised value would otherwise
+# reach the report as a claim about which property was verified, and that is the entire content
+# of the flag. The mapping to WORDING lives here rather than in `ws0_report.py` because there
+# must be exactly ONE place that decides what may be said about a mode: the report may NEVER
+# print `physical-core siblings` about a `distinct-cores` pin, and a second copy of that mapping
+# is a second place for it to be spelled wrong.
+FLIGHT_PIN_CLAIM = {
+    "siblings": "physical-core siblings",
+    "distinct-cores": "pairwise DISTINCT physical cores",
+}
+
+# ...and the allocator arms, closed for the same reason.
+FLIGHT_ALLOCATORS = ("system", "jemalloc")
 
 
 def pinning_record_path(session_dir: pathlib.Path) -> pathlib.Path:
@@ -96,7 +141,12 @@ def pinning_record_path(session_dir: pathlib.Path) -> pathlib.Path:
     return session_dir / PINNING_VERIFICATION
 
 
-def verify_pinning_record(session_dir: pathlib.Path, server_cpus: str, client_cpus: str) -> dict:
+def verify_pinning_record(
+    session_dir: pathlib.Path,
+    server_cpus: str,
+    client_cpus: str,
+    flight_server_cpus: str,
+) -> dict:
     """REQUIRE the driver's recorded sibling verification, and require it to be ABOUT these pins.
 
     `server_cpus`/`client_cpus` come from the session manifest — the values the report is about
@@ -108,6 +158,9 @@ def verify_pinning_record(session_dir: pathlib.Path, server_cpus: str, client_cp
     pinning was ever verified, and the report would otherwise print "verified" on the strength
     of nothing — which is the finding. The remedy is a re-run with the current driver, and the
     diagnostic says so.
+
+    `flight_server_cpus` is the same fact for the FLIGHT arm's own pin (#3551) and is tied to the
+    driver's record by the same comparison, at the new field.
     """
     p = pinning_record_path(session_dir)
     if not p.exists():
@@ -142,6 +195,28 @@ def verify_pinning_record(session_dir: pathlib.Path, server_cpus: str, client_cp
                 " record as the evidence for its pinning claim, so an empty field would make the"
                 " claim rest on nothing."
             )
+    # THE CLOSED GRAMMARS (#3551). Checked BEFORE the substitution comparison below, because a
+    # mode or an allocator nobody planned for cannot support any claim at all — and the report's
+    # wording is DERIVED from these two values, so an unrecognised one would either crash the
+    # reporter or, worse, fall back to a default and describe a property nothing verified.
+    mode = rec["flight_pin_mode"]
+    if mode not in FLIGHT_PIN_CLAIM:
+        raise Invalid(
+            f"{p} `flight_pin_mode` is {mode!r}, which is not one of"
+            f" {', '.join(repr(m) for m in FLIGHT_PIN_CLAIM)}. The report states WHICH property"
+            " the flight pin was verified to have — one physical core's siblings, or pairwise"
+            " distinct physical cores — and a value nobody planned for cannot support either"
+            " sentence (#3551). It is refused rather than reported verbatim, and never defaulted:"
+            " a default would print the wrong one of two mutually exclusive claims."
+        )
+    allocator = rec["flight_allocator"]
+    if allocator not in FLIGHT_ALLOCATORS:
+        raise Invalid(
+            f"{p} `flight_allocator` is {allocator!r}, which is not one of"
+            f" {', '.join(repr(a) for a in FLIGHT_ALLOCATORS)}. The report prints the allocator"
+            " the measured server ran under, and an unrecognised value is a claim about an arm"
+            " this rig does not have (#3551)."
+        )
     # THE SUBSTITUTION CHECK, which is the whole finding. The manifest's lists must be the lists
     # the driver actually verified. A hand-edited `config.server_cpus` (the reviewer's `99,99`)
     # names CPUs no verification was ever performed against, and it is refused here rather than
@@ -155,6 +230,12 @@ def verify_pinning_record(session_dir: pathlib.Path, server_cpus: str, client_cp
     for label, manifest_value, recorded_key in (
         ("server", server_cpus, "server_cpus"),
         ("client", client_cpus, "client_cpus"),
+        # THE SAME CHECK AT THE NEW PIN (#3551). Without it, `config.flight_server_cpus` would be
+        # exactly what `config.server_cpus` was before F6: an opaque manifest string that reaches
+        # a "verified" sentence in the report having been validated by nothing. Compared on the
+        # RECORDED SPELLING for the reason stated below — a normalising comparison here would be
+        # a second implementation of `cpu_list_expand`.
+        ("flight server", flight_server_cpus, "flight_server_cpus"),
     ):
         recorded = rec[recorded_key]
         if manifest_value != recorded:
@@ -172,6 +253,26 @@ def verify_pinning_record(session_dir: pathlib.Path, server_cpus: str, client_cp
         "client_cpus": rec["client_cpus"],
         "server_siblings_expanded": rec["server_siblings_expanded"],
         "topology_root": rec["topology_root"],
+        # THE FLIGHT ARM, read through (#3551). Every one of these is read here — a field
+        # declared in PINNING_RECORD_FIELDS and never read is a test failure
+        # (`scripts/tests/test_ws0_provenance_guards.sh` asserts both directions), and it would
+        # also be a property of the measurement the report cannot see.
+        "flight_server_cpus": rec["flight_server_cpus"],
+        "flight_pin_mode": mode,
+        "flight_pin_verified": rec["flight_pin_verified"],
+        # WHAT MAY BE SAID about this pin, derived from the closed mode set above so the sentence
+        # and the verification cannot disagree.
+        "flight_pin_claim": FLIGHT_PIN_CLAIM[mode],
+        "flight_allocator": allocator,
+        "flight_allocator_lib": rec["flight_allocator_lib"],
+        # THE ARENA CAP (#3551, #3217 partC F1's AC2). Recorded as an affirmative sentence in
+        # both directions — a cap, or "not injected … which is deliberately NOT the same as
+        # setting it to 0" — because "no cap" and "nobody wrote the field down" must not look
+        # the same in the record the report's claim rests on. An arena cap leaves NO mapping, so
+        # /proc/<pid>/environ is the ONLY place it is observable and this field is the only place
+        # a reader of the report can see which arm they are looking at.
+        "flight_malloc_arena_max": rec["flight_malloc_arena_max"],
+        "flight_allocator_verification": rec["flight_allocator_verification"],
         "host": rec["host"],
         "verified_by": rec["verified_by"],
         # Carried FORWARD into results.json verbatim, so a reader of the report alone sees the

@@ -9,7 +9,11 @@ Validation is `scripts/agent-gate.sh`, run in the tiered loop:
 `AGENT_GATE_SUMMARY_FILE=<path> bash scripts/agent-gate.sh [--lite] > gate.log 2>&1 < /dev/null`, then
 read only the summary file — never `gate.log`.
 
-- **Iterate:** `--lite` on every fix round (~1-5 min). Its components are exactly
+- **Iterate:** `--lite` on every fix round. **Budget by the diff, not a flat `~1-5 min` (#3764):** that is the
+  warm NARROW-diff case (median 1.4 min); a `cqlite-core/src/` diff measures median 20 min (up to 43 min
+  locally; up to ~104 min under peer load is reported, #3764), and a cold `clippy` alone adds 16-24 min
+  whatever the diff. CLAUDE.md's
+  Lite row carries the full cost model. Its components are exactly
   `file-size fmt clippy roborev-lints scoped-tests` (the `scripts/agent-gate.sh` `LITE_COMPONENTS` array),
   where lite clippy is **per-package scoped** (#1844), not whole-workspace, and `scoped-tests` is
   blast-radius (touched package `--lib` + the diff's new `--test` targets). It emits a distinct
@@ -22,6 +26,18 @@ read only the summary file — never `gate.log`.
 - **`INCOMPLETE` is a liveness placeholder, not a verdict (#3041).** The startup sentinel puts
   `RESULT: INCOMPLETE (gate did not finish)` in the summary file before any component runs (a queued
   gate already has one), so any completion poll must be
-  `grep -qE 'RESULT: (PASS|FAIL)' "$AGENT_GATE_SUMMARY_FILE"`, never a bare `grep -q` on the bare `RESULT:` token.
+  the **RECORD grammar** `grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE"` — for a
+  full gate or `--lite` ONLY, and never a bare `grep -q` on the bare `RESULT:` token nor an unanchored form
+  (which matches `RESULT: PASSENGER`). **`--only` and `--delta` each need their OWN grammar** — see the two
+  bullets below; using this one on either spins forever on a terminal outcome (#3750).
+- **An `--only <component>` run needs the OTHER grammar, and its verdict is a SEPARATE read (#3750).** `--only`
+  demotes success to `RESULT: PARTIAL`, so the record grammar above spins on green. Completion: **exit status
+  `3`** where observable, else `grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'`. Verdict:
+  `bash scripts/gate-component-verdict.sh "$SUM" --mode only --component <name>` — a completed run whose
+  component SKIPped or is absent is NOT a pass.
+- **`--delta` is a THIRD mode with a THIRD completion set (#3750).** It alone can terminate `ERROR` or
+  `REFUSED`, so polling it with the record grammar hangs on a terminal outcome:
+  `grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)'` — `gate-liveness.sh`'s own
+  enumerated terminal set, token for token.
 
 See `SKILL.md` (this dir) for the loop and `docs/development/pm-operating-loop.md` for the delivery model.

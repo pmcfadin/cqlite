@@ -21,6 +21,24 @@ set -uo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 GATE="$SCRIPT_DIR/../agent-gate.sh"
 
+# The nested `agent-gate.sh --only node-bindings` runs below (cases 97-102) each execute the
+# gate's component-set pre-flight, which is unrelated to anything they assert -- and which
+# contacts `origin` when `origin` names the CANONICAL upstream. This suite's header claims it
+# is NETWORK-FREE, and with a scratch tree whose `origin` was the real one that claim was
+# false: measured, each nested run made two DNS lookups plus two TLS connects to
+# github.com:443 (the pre-flight runs once before the gate slot and once inside the certified
+# window), so four runs made eight probes and could have added ~2 minutes on a stalled
+# network at the pre-flight's 15s lenient bound (roborev #3642, job 100).
+#
+# The sanctioned fix is the one the other gate self-tests already use: give the fixture its
+# OWN LOCAL origin and SUBSTITUTE THE ARTIFACT -- rewrite the canonical-identity literal in
+# the fixture's own scratch COPY of agent-gate.sh so that local origin is canonical FOR THAT
+# COPY -- never a settable seam in the shipped script, which would be one more thing a real
+# invoker can set (#3312). Same helper, same call shape as test_agent_gate_delta.sh,
+# test_agent_gate_tree_integrity.sh and test_agent_gate_component_set.sh.
+# shellcheck source=scripts/tests/lib/agent-gate-canonical-pin.bash
+. "$SCRIPT_DIR/lib/agent-gate-canonical-pin.bash"
+
 # #2751 defense-in-depth: this self-test drives nested `agent-gate.sh --only
 # node-bindings` runs. Each case pins its own AGENT_GATE_SUMMARY_FILE, but scrub
 # any inherited value up front so a standalone run can never clobber the caller's.
@@ -53,31 +71,19 @@ bad() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 WORK=$(mktemp -d) || { echo "FAIL: mktemp -d failed; refusing to run with an unset work dir" >&2; exit 1; }
 [ -n "$WORK" ] && [ -d "$WORK" ] || {
   echo "FAIL: mktemp -d produced no usable directory (got '${WORK:-<empty>}')" >&2; exit 1; }
-# A scratch git worktree is REGISTERED IN REPOSITORY METADATA, so deleting its directory
-# is not cleanup -- an interrupt between `worktree add` and `worktree remove` leaves a
-# registered-but-missing worktree behind in the real repo (roborev #3493 round 25).
-# Tracked here and unregistered from the trap, which also covers INT/TERM.
-SCRATCH_WORKTREE=""
-SCRATCH_WORKTREE_REPO=""
+# NOTHING THIS SCRIPT CREATES IS REGISTERED IN REPOSITORY METADATA ANY MORE, so `rm -rf
+# "$WORK"` IS complete cleanup. Cases 97-102 used to build their scratch tree with
+# `git worktree add`, which is registered in the real repo -- an interrupt between the add
+# and the remove left a registered-but-missing worktree behind (roborev #3493 round 25), the
+# remove could not be replaced by a repository-wide `worktree prune` without risking a PEER
+# LANE's registration on this multi-lane box (round 27), and the remove had to be idempotent
+# because the INT/TERM handlers reach _cleanup twice (round 29). That scratch tree is now a
+# `git clone --local --shared` living entirely inside $WORK (issue #3642): it needs a LOCAL
+# `origin` so the gate's component-set pre-flight cannot reach the network, and a clone gets
+# one where a worktree -- which shares the real repo's config, and so its real `origin` --
+# cannot. All three hazards are therefore ELIMINATED rather than guarded: there is no
+# registration to leak, nothing to prune, and nothing for a second cleanup pass to retry.
 _cleanup() {
-  # NO repository-wide `worktree prune` (roborev #3493 round 27). Pruning unregisters
-  # every worktree git currently considers stale -- including a PEER LANE's whose
-  # directory is temporarily unavailable -- so a cleanup for one scratch tree could
-  # deregister someone else's work. This machine runs several lanes concurrently, so that
-  # is a live hazard, not a theoretical one. Remove only what this script registered, and
-  # SAY SO if that fails rather than reaching for a broader hammer.
-  # IDEMPOTENT (roborev #3493 round 29): the INT/TERM handlers call _cleanup and then
-  # re-raise, which runs the EXIT trap and calls _cleanup a SECOND time. Without clearing
-  # the tracking on success, that second pass tried to remove an already-removed worktree
-  # and printed a false "could not remove" warning -- a cleanup path inventing a problem
-  # it had just fixed.
-  if [ -n "$SCRATCH_WORKTREE" ] && [ -n "$SCRATCH_WORKTREE_REPO" ]; then
-    if git -C "$SCRATCH_WORKTREE_REPO" worktree remove --force "$SCRATCH_WORKTREE" >/dev/null 2>&1; then
-      SCRATCH_WORKTREE=""; SCRATCH_WORKTREE_REPO=""
-    else
-      echo "WARN: could not remove scratch worktree $SCRATCH_WORKTREE (left registered; run 'git worktree prune' by hand if it is stale)" >&2
-    fi
-  fi
   rm -rf "$WORK"
 }
 # INT/TERM get their OWN traps that clean up and then EXIT with the conventional
@@ -110,6 +116,15 @@ cat > "$STUB/npm" <<'STUBEOF'
 # Record the environment the component actually handed us, so the schemas-root
 # plumbing (#3493) is asserted from what was PASSED, not from reading the source.
 [ -n "${STUB_ENV_DUMP:-}" ] && env > "$STUB_ENV_DUMP"
+# Record the ARGV of every npm invocation, one per line, when a case asks for it
+# (roborev #3642, blocker 2). Case 101 claimed "the component proceeds to the suite"
+# while asserting only the `corpus complete` MESSAGE, which agent-gate.sh prints BEFORE
+# `npm test` -- so a return or a failure inserted between the two would have kept that
+# case green. A marker written by the stub is the invocation itself, not a message about
+# it, and its ABSENCE is what case 102 asserts for a rejected corpus.
+if [ -n "${STUB_NPM_INVOCATIONS:-}" ]; then
+  printf '%s\n' "$*" >> "$STUB_NPM_INVOCATIONS"
+fi
 if [ "${STUB_FAIL_BUILD:-0}" = 1 ] && [ "$1" = "run" ] && [ "$2" = "build" ]; then
   echo "stub npm: simulated build failure" >&2
   exit 1
@@ -2212,6 +2227,630 @@ if [ -f "$GATE_SRC3" ]; then
   fi
 else
   echo "info - agent-gate.sh unreadable; skipping the leak-lane declaration case"
+fi
+
+# ---------------------------------------------------------------------------
+# Cases 93-95 (issue #3642, residual 1 of #3493): the two lines that make the
+# node-ci.yml exemption TRUE must be pinned.
+#
+# `.github/ci-gating-tiers.yml` excuses node-ci.yml from `required` by asserting that the
+# local gate's `node-bindings` component "runs `npm run typecheck`" and "pairs `npm test`
+# with check-dataset-manifest.sh". Both claims rest on SINGLE LINES inside
+# run_node_bindings. Delete either and the registry sentence becomes false silently —
+# which is #3493's own defect class (an exemption is only as true as the named
+# component's scope) reintroduced one level down, at line granularity.
+#
+# STRUCTURAL, like case 92 and for the same reason: the behavioural facts cost a full
+# npm ci + napi build (138s measured on PR #3555's post-rebase build) to prove one line's
+# presence, inside a
+# tooling-tests component already near ~950s. The property being asserted IS a property
+# of the source.
+#
+# EACH PIN CARRIES ITS OWN DISCRIMINATION CONTROL. A presence grep that has never been
+# seen to fail is not evidence: a typo in the pattern, or an awk scan that stopped seeing
+# the function after a refactor, both report "present" for every input. So each pin is
+# also run against a scratch copy of agent-gate.sh with exactly that line deleted, and
+# must report it ABSENT there. That is the RED, executed on every run rather than
+# remembered from the day the pin was written.
+# ---------------------------------------------------------------------------
+GATE_SRC4=$(cd "$(dirname "$GATE")" && pwd)/agent-gate.sh
+
+# _nb_body_line <file> <awk-pattern> -- line number of the FIRST non-comment line inside
+# run_node_bindings matching <awk-pattern> (after leading whitespace is trimmed), or 0.
+#
+# The comment filter is load-bearing: run_node_bindings' body carries long comments that
+# NAME `npm run typecheck` and `check-dataset-manifest.sh` in prose, so a scan that did
+# not exclude them would report the command present after the command itself was deleted
+# -- the pin would be satisfied by the documentation of the thing it is pinning.
+_nb_body_line() { # <file> <awk-pattern>
+  awk -v pat="$2" '
+    /^run_node_bindings\(\) \{/ { inf = 1; next }
+    inf && /^\}/                { inf = 0 }
+    inf {
+      line = $0
+      sub(/^[ \t]+/, "", line)
+      if (line ~ /^#/) next
+      if (!found && line ~ pat) found = NR
+    }
+    END { print found + 0 }
+  ' "$1"
+}
+
+# _nb_strip_line <src> <dst> <awk-pattern> -- copy <src> to <dst> with the FIRST
+# non-comment line of run_node_bindings matching <awk-pattern> removed. Substituting the
+# ARTIFACT rather than adding a seam to the gate (CLAUDE.md: a test-only seam is one more
+# thing a real invoker can set).
+_nb_strip_line() { # <src> <dst> <awk-pattern>
+  awk -v pat="$3" '
+    /^run_node_bindings\(\) \{/ { inf = 1; print; next }
+    inf && /^\}/                { inf = 0 }
+    {
+      if (inf && !done) {
+        line = $0
+        sub(/^[ \t]+/, "", line)
+        if (line !~ /^#/ && line ~ pat) { done = 1; next }
+      }
+      print
+    }
+  ' "$1" > "$2"
+}
+
+# _nb_pin <label> <awk-pattern> <symbol> -- assert the line is present in the real gate
+# AND that deleting it is detected. Two `ok`s per pin: presence, and discrimination.
+_nb_pin() { # <label> <awk-pattern> <symbol>
+  local label=$1 pat=$2 sym=$3
+  local n stripped m
+  n=$(_nb_body_line "$GATE_SRC4" "$pat")
+  if [ "$n" -gt 0 ]; then
+    ok "$label: run_node_bindings runs $sym (agent-gate.sh:$n) — the node-ci.yml exemption in .github/ci-gating-tiers.yml asserts it does"
+  else
+    bad "$label: run_node_bindings NO LONGER runs $sym — the node-ci.yml exemption in .github/ci-gating-tiers.yml claims it does, so that exemption is now FALSE. Restore the line or correct the registry entry in the same diff (#3642/#3493)."
+    return 0
+  fi
+  stripped="$WORK/nb-stripped-$$-$(echo "$sym" | tr -c 'a-zA-Z0-9' '-')"
+  _nb_strip_line "$GATE_SRC4" "$stripped" "$pat"
+  m=$(_nb_body_line "$stripped" "$pat")
+  if [ "$m" -eq 0 ]; then
+    ok "$label: the pin DISCRIMINATES — a copy with the $sym line deleted is reported absent"
+  else
+    bad "$label: the pin does NOT discriminate — a copy with the $sym line deleted still reports it present at line $m, so this pin would pass over its own defect"
+  fi
+}
+
+if [ -f "$GATE_SRC4" ]; then
+  # Sanity: the scan must actually be seeing the function body. A renamed function or a
+  # changed brace style would make every pattern "absent", turning three pins into three
+  # reds with a misleading cause -- or, with the polarity of a naive scan, three vacuous
+  # greens.
+  nb_body_lines=$(awk '/^run_node_bindings\(\) \{/{i=1} i&&/^\}/{i=0} i{n++} END{print n+0}' "$GATE_SRC4")
+  if [ "$nb_body_lines" -lt 100 ]; then
+    bad "cases 93-95: the run_node_bindings body scan saw only $nb_body_lines line(s); the scan is not seeing the function, so the pins below assert nothing"
+  else
+    _nb_pin "case 93" '^npm run typecheck$' 'npm run typecheck'
+    _nb_pin "case 94" '^bash .*check-dataset-manifest[.]sh' 'check-dataset-manifest.sh'
+    _nb_pin "case 95" '^npm test( |$)' 'npm test'
+
+    # And the PAIRING the registry entry claims: the corpus check runs BEFORE the suite.
+    # Presence of both is not the claim -- "pairs `npm test` with check-dataset-manifest.sh,
+    # which checks the CORPUS is complete rather than that the suite ran" only holds if the
+    # corpus verdict gates the run. A manifest check placed AFTER npm test could only report
+    # a corpus the suite had already been green over (CLAUDE.md: a check placed after the
+    # harmful effect can only report it).
+    nb_dm=$(_nb_body_line "$GATE_SRC4" '^bash .*check-dataset-manifest[.]sh')
+    nb_test=$(_nb_body_line "$GATE_SRC4" '^npm test( |$)')
+    if [ "$nb_dm" -gt 0 ] && [ "$nb_test" -gt 0 ]; then
+      if [ "$nb_dm" -lt "$nb_test" ]; then
+        ok "case 96: check-dataset-manifest.sh (line $nb_dm) runs BEFORE npm test (line $nb_test) — the corpus verdict gates the suite rather than reporting on it"
+      else
+        bad "case 96: check-dataset-manifest.sh (line $nb_dm) now runs AFTER npm test (line $nb_test); a corpus check downstream of the suite can only report a corpus the suite was already green over"
+      fi
+    fi
+  fi
+else
+  echo "info - agent-gate.sh unreadable; skipping the node-ci exemption pins (cases 93-96)"
+fi
+
+# ---------------------------------------------------------------------------
+# Cases 97-102 (issue #3642, residual 2 of #3493): the COMPONENT's interpretation of
+# check-dataset-manifest.sh's exit codes, exercised BEHAVIOURALLY.
+#
+# The cases above cover the script's OWN exit codes well (9 = corpus verdict, 2 =
+# tooling malfunction). What they do not cover is what run_node_bindings DOES with them:
+#
+#   rc 9 + AGENT_GATE_ALLOW_MISSING_FIXTURES=1  -> SKIP  (the #2078 opt-out reaches this
+#                                                         verdict, not just the absent-corpus one)
+#   rc 9 without the opt-out                    -> FAIL, named as an INCOMPLETE CORPUS
+#   any other non-zero                          -> FAIL, named as a TOOLING failure, and
+#                                                  the opt-out deliberately does NOT excuse it
+#   rc 0                                        -> the component proceeds to the suite
+#
+# That mapping was verified BY HAND once during #3493 and by nothing since. A hand
+# verification is not a test: the three branches differ by one comparison each, and
+# collapsing any two of them (dropping the `-eq 9` guard on the opt-out branch, say)
+# leaves every other assertion in this repository green while the opt-out silently starts
+# excusing a tooling malfunction -- an unanswered question read as a judged corpus.
+#
+# BEHAVIOURAL AND HERMETIC AT ~3s PER CASE, which is why it is affordable where the rest
+# of this component's behaviour is not. The expensive half of run_node_bindings (npm ci,
+# the napi build, typecheck, the jest run) is satisfied by STUBS on PATH; the manifest
+# script itself is SUBSTITUTED in a scratch tree so it exits with the code the
+# case chose. Substituting the ARTIFACT, never adding a seam to agent-gate.sh: a
+# test-only environment hook would be one more thing a real invoker can set (#3312).
+#
+# The scratch tree is a LOCAL `git clone --local --shared` of this checkout, and it gets the
+# WORKING TREE's agent-gate.sh copied over the cloned one, so the subject is the script being
+# changed rather than the last commit's. A clone rather than a linked worktree because the
+# clone's `origin` is a LOCAL PATH: pinned as canonical for that copy (see the construction
+# below), the nested gate's component-set pre-flight reads its baseline locally instead of
+# probing the canonical remote twice per run (issue #3642, roborev job 100).
+#
+# Case 101 is the positive control. Without it, cases 97-99 could all be satisfied by a
+# component that FAILs or SKIPs for some reason upstream of the manifest entirely.
+#
+# EVERY case here is decided through the ONE `_nbgate_measure`/`_nbgate_assert` pair below
+# (roborev #3642, round 3), which requires both halves of the same claim: every verdict the
+# run RECORDS (log lines AND the single SUMMARY entry, never the first line that happens to
+# match) and the RECORDED npm argv (the stub appends to $STUB_NPM_INVOCATIONS), so no case
+# can rest on a message the component prints before the suite starts, nor on a branch
+# announcement a later disagreeing verdict contradicts.
+# ---------------------------------------------------------------------------
+# ---- ONE assertion path for EVERY node-gate case (roborev #3642, round 3) ------------
+# Three review rounds each found the SAME defect in a DIFFERENT case, and each was fixed
+# only in the case the reviewer named -- which is how a finding family regenerates:
+#   round 1 -> case 101: asserted a message the component prints BEFORE `npm test`, so it
+#              passed when the suite never ran;
+#   round 2 -> case 100: never asserted that `npm test` was NOT invoked, so a lost early
+#              return would print the right diagnostic and run the suite anyway;
+#   round 3 -> cases 98/99: selected the FIRST verdict-shaped line (`head -1`), which is
+#              the branch ANNOUNCEMENT, so a later disagreeing verdict recorded after a
+#              lost `return` left both green -- and neither consulted the npm log.
+# ONE defect: an assertion keyed on an EARLY or PARTIAL marker instead of on what the run
+# RECORDED, uncorroborated by the invocation log. So both properties now live in one
+# helper every node-gate case goes through, and a case cannot be written without them:
+#
+#   (a) EVERY verdict the run RECORDS -- each `>>> [node-bindings] <V> (` line in the log
+#       AND the single SUMMARY entry -- must be in the case's allowed set, and there must
+#       be at least one. Not "the first", not "some line matches": the announcement and
+#       the terminal line have the SAME shape, so a `return` lost after the announcement
+#       is only ever visible as a SECOND, DISAGREEING verdict.
+#   (b) The recorded npm argv must agree with the case's contract: npm must have been
+#       reached AT ALL (`ci`/`install` precede every branch under test, so an absent
+#       `test` line then means "not reached" rather than "the marker was never written"),
+#       and `npm test` must be present or absent exactly as the case requires.
+#
+# `_nbgate_measure` reads the three artifacts of one completed run ONCE; the assert
+# REFUSES to answer about any tag other than the last measured one, so re-ordering or
+# inserting a case reds it instead of silently reading a stale measurement.
+#
+# DEFINED OUTSIDE THE `$nbgate_ok` CLONE GUARD BELOW, because nothing in the pair needs
+# git or the scratch clone — only $WORK — and cases 103/104, which test the pair itself,
+# must run on a box where the clone cannot be built (see their header).
+NBG_TAG=""; NBG_LOG_N=0; NBG_LOG_TOKS=""; NBG_LOG_LAST=""
+NBG_SUM_N=0; NBG_SUM_TOKS=""; NBG_LIVE=0; NBG_TEST=0; NBG_WHY=""
+_nbgate_measure() { # <tag>
+  local tag=$1 log sum argv toks sumtoks
+  log="$WORK/nbgate-$tag.log"; sum="$WORK/nbgate-$tag.summary"
+  argv="$WORK/nbgate-$tag.npm-argv"
+  NBG_TAG=$tag
+  # THE TOKEN IS CAPTURED BY SHAPE, NOT ENUMERATED (#3977) -------------------------
+  # These lines parse the **GATE's** component-status vocabulary, not the dataset
+  # manifest's own, so test_agent_gate_census.sh's R1 sweep applies to them: an
+  # enumeration here is the same defect R1 exists for, one artifact over. The token is
+  # an OPEN VARIABLE -- agent-gate.sh emits `>>> [<name>] $RECORDED_STATUS (<n>s)` from
+  # many sites, 12 of them inside `run_node_bindings` alone (measured 2026-09-03; a
+  # count in a comment decays, so it is scoped to the one function this parses) -- and
+  # the vocabulary is already FIVE tokens wide (_status_is_nonfailing's
+  # closed non-failing set PASS|SKIP|OPT-OUT, plus FAIL and VACUOUS). So an enumeration
+  # goes blind every time a token is added, and blind in the direction that matters
+  # here: a token this capture DROPS is a recorded verdict that property (a) CANNOT SEE,
+  # i.e. a disagreeing verdict that leaves the case green. Shape also makes the two halves of
+  # this function AGREE -- the SUMMARY reader four lines below has always read
+  # `[A-Za-z-]*`, and only the log side had a list.
+  #
+  # THE DISCRIMINATOR IS THE WHOLE `<TOKEN> (<detail>)` SHAPE, token to end of line, and
+  # it is what makes a one-word token safe: agent-gate.sh emits a verdict as exactly
+  # that, while this component's continuation prose (`>>> [node-bindings]   NOT VALIDATED
+  # by this run: ...`) and its coverage census do not close a paren at end of line.
+  # ` (` ALONE IS NOT ENOUGH, and case 104 is what measured it: an ALL-CAPS census
+  # heading of the form `SUBJECTS (all DERIVED from cargo …):` is indistinguishable from
+  # a status BY TOKEN SHAPE -- a status is all-caps too -- so the trailing `)$` is
+  # load-bearing, not decoration. (That heading is another component's today; the shape
+  # is the exposure, not the current caller set.)
+  #
+  # It deliberately does NOT require `([0-9]+s)`: the BRANCH ANNOUNCEMENTS
+  # (`SKIP (AGENT_GATE_ALLOW_MISSING_FIXTURES=1 and ...)`) carry no duration, and those
+  # are exactly the lines property (a) needs to see -- the announcement and the terminal
+  # line share a shape, so a lost `return` is only ever visible as a SECOND, DISAGREEING
+  # verdict. Nothing here reads a PRESENTATION property (#3400): these are gate-authored
+  # `echo`s, not cargo output, and no colour or quiet setting reaches them.
+  #
+  # Cases 103/104 are the control: they plant VACUOUS and OPT-OUT (both DROPPED by the
+  # enumeration this replaced) and require the assert to SEE them, alongside prose the
+  # capture must not take.
+  #
+  # HOW THE PAIR REACHED `main`, declared so the next person does not re-derive it:
+  # 694df0d90 (#3642/#3867, 2026-09-02 12:38 -07) is the commit that ADDED all four
+  # literal sites, as `+` lines in this file. Had its branch carried the R1 guard
+  # (bdaf2b6e1, #3625/#3916, same day 09:27 -07), its own `tooling-tests` would have RED
+  # on its own diff; it merged green, so its base predated the guard -- ordinary base
+  # staleness, not an authoring error on either side. Ancestry holds between the two
+  # commits but evidences only that the guard was on `main` when #3867 merged, which is
+  # true of ANY squash-merge landing after it, wherever the branch was cut.
+  # `scripts/tests/**` IS in base-staleness.sh's GATE_GLOBAL_PATTERNS (:307), so #3650
+  # slice 1's advisory RECOGNISES this pair today -- but it is advisory by construction
+  # and cannot fail a run. What would have BLOCKED it is a gate on the MERGE RESULT,
+  # which is #3650 SLICE 2 and is explicitly not implemented; that issue owns this
+  # residual. No second guard is added here for the combination.
+  toks=$(sed -n 's/^>>> \[node-bindings\] \([A-Za-z][A-Za-z-]*\) (.*)$/\1/p' "$log" 2>/dev/null)
+  NBG_LOG_TOKS=$(printf '%s\n' "$toks" | grep -E '.' | tr '\n' ' ')
+  NBG_LOG_N=$(printf '%s\n' "$toks" | grep -cE '.')
+  NBG_LOG_LAST=$(printf '%s\n' "$toks" | grep -E '.' | tail -1)
+  # `^node-bindings:` cannot match the sibling `node-bindings-leak-lane:` line.
+  sumtoks=$(sed -n 's/^node-bindings:[[:space:]]*\([A-Za-z-]*\).*/\1/p' "$sum" 2>/dev/null)
+  NBG_SUM_TOKS=$(printf '%s\n' "$sumtoks" | grep -E '.' | tr '\n' ' ')
+  NBG_SUM_N=$(printf '%s\n' "$sumtoks" | grep -cE '.')
+  NBG_LIVE=0; NBG_TEST=0; NBG_BUILD=0; NBG_TYPECHECK=0
+  grep -qE '^(ci|install)( |$)' "$argv" 2>/dev/null && NBG_LIVE=1
+  grep -qE '^test( |$)' "$argv" 2>/dev/null && NBG_TEST=1
+  # ANCHORED, so `run build:debug` / `run typecheck:watch` cannot satisfy the claim that
+  # `npm run build` / `npm run typecheck` themselves ran (roborev job 102).
+  grep -qE '^run build( |$)' "$argv" 2>/dev/null && NBG_BUILD=1
+  grep -qE '^run typecheck( |$)' "$argv" 2>/dev/null && NBG_TYPECHECK=1
+  return 0
+}
+# _nbgate_assert <tag> <allowed verdicts, space-separated> <expect npm test: yes|no>
+# Sets NBG_WHY to EVERY violated property (not just the first) and returns non-zero.
+_nbgate_assert() {
+  local tag=$1 allowed=$2 wanttest=$3 t why=""
+  if [ "$NBG_TAG" != "$tag" ]; then
+    NBG_WHY="measurement mismatch: the last measured run is '${NBG_TAG:-<none>}', not '$tag' — a case must assert the run it just measured"
+    return 1
+  fi
+  [ "$NBG_LOG_N" -ge 1 ] || why="$why; the run recorded NO node-bindings verdict line at all"
+  for t in $NBG_LOG_TOKS; do
+    case " $allowed " in
+      *" $t "*) ;;
+      *) why="$why; the run RECORDED verdict '$t' (allowed: $allowed); recorded sequence: ${NBG_LOG_TOKS:-<none>}, final: ${NBG_LOG_LAST:-<none>}" ;;
+    esac
+  done
+  [ "$NBG_SUM_N" = 1 ] || why="$why; the SUMMARY holds $NBG_SUM_N 'node-bindings:' entries, expected exactly 1 (entries: ${NBG_SUM_TOKS:-<none>})"
+  for t in $NBG_SUM_TOKS; do
+    case " $allowed " in
+      *" $t "*) ;;
+      *) why="$why; the SUMMARY records '$t' (allowed: $allowed)" ;;
+    esac
+  done
+  [ "$NBG_LIVE" = 1 ] || why="$why; no 'npm ci'/'npm install' in the argv log, so the invocation marker is not PROVEN LIVE in this run and an absent 'test' line would prove nothing"
+  # EVERY nested run below reaches the manifest check, and the component invokes
+  # `npm run build` then `npm run typecheck` BEFORE it. So both are required in all four
+  # cases -- unconditionally, not per-contract (roborev job 102).
+  #
+  # WHY THIS IS NOT REDUNDANT WITH THE STRUCTURAL PIN, which is the whole point: case 93
+  # pins that the `npm run typecheck` LINE EXISTS in run_node_bindings. It cannot pin that
+  # the line RUNS. A control-flow change that returns, branches or short-circuits past it
+  # while LEAVING THE LINE PRESENT satisfies case 93 and every verdict assertion here --
+  # and silently re-falsifies the .github/ci-gating-tiers.yml sentence that names this
+  # component as the merge-gating half of the node-ci exemption. That is #3493's own defect
+  # class, and it is what this issue exists to close.
+  [ "$NBG_BUILD" = 1 ] || why="$why; 'npm run build' was NOT invoked, so the native module this component's claims rest on was never built in this run"
+  [ "$NBG_TYPECHECK" = 1 ] || why="$why; 'npm run typecheck' was NOT invoked — the ci-gating-tiers.yml exemption names THIS component as running it, so a run that reaches the manifest check without it makes that registry sentence FALSE (the structural pin proves the line exists, never that it executes)"
+  if [ "$wanttest" = yes ]; then
+    [ "$NBG_TEST" = 1 ] || why="$why; 'npm test' was NOT invoked, so the suite never ran"
+  else
+    [ "$NBG_TEST" = 0 ] || why="$why; 'npm test' WAS invoked, so the run continued into the suite it was supposed to gate"
+  fi
+  if [ -n "$why" ]; then
+    NBG_WHY="${why#; } [recorded npm argv: $(tr '\n' '|' < "$WORK/nbgate-$tag.npm-argv" 2>/dev/null || echo '<no argv log>')]"
+    return 1
+  fi
+  NBG_WHY=""
+  return 0
+}
+
+# ---- Cases 103/104: MEMBERSHIP IS NOT DETECTION -------------------------------------
+# Removing the three-token list from _nbgate_measure proves the LITERAL is gone; it does
+# not prove the capture SEES a token the list dropped, which is the property the fix is
+# for. So the parse is exercised against a SYNTHETIC triple carrying VACUOUS and OPT-OUT
+# — both shipping component statuses, and both invisible to the enumeration this
+# replaced. Driven straight at the two helpers rather than through a nested
+# `agent-gate.sh --only node-bindings` run (cases 97-102 pay ~6 of those): a real run
+# cannot be made to emit an out-of-vocabulary verdict on demand, and the subject here is
+# the PARSE, not the component.
+#
+# Placed BEFORE every case that consumes the helpers, so a broken parse is named without
+# waiting for the slow runs — and before any measurement whose globals a later case reads
+# (cases 102 and 99 assert off the PRECEDING measurement, so nothing may be inserted
+# between one of those and its measure).
+#
+# AND OUTSIDE THE `$nbgate_ok` CLONE GUARD, WHICH IS WHERE THEY FIRST SHIPPED. These two
+# cases need neither git nor the scratch clone — only $WORK and the synthetic triple they
+# write themselves — so a git-less box, or ANY clone/checkout/pin failure above, used to
+# take #3977's ONLY detection control with it while the suite still printed `failed: 0`.
+# A lane that omits coverage silently is indistinguishable from one that covers it, and
+# this is the control that certifies the shape capture itself.
+nbg_probe_log="$WORK/nbgate-parseprobe.log"
+{
+  # Two lines the capture MUST NOT take: the SKIP branch's continuation prose, and an
+  # ALL-CAPS census heading whose first word is followed by ` (` — that second one is
+  # not hypothetical, it REDDENED this case against a first draft whose shape stopped at
+  # ` (`, and it is why the pattern requires the paren to CLOSE at end of line. Plus a
+  # sibling component's verdict, which the `[node-bindings]` anchor must exclude.
+  echo ">>> [node-bindings]   NOT VALIDATED by this run: the 14 dataset-gated jest suites."
+  echo ">>> [node-bindings] SUBJECTS (all DERIVED from cargo at run time, never hard-coded):"
+  echo ">>> [node-bindings-leak-lane] FAIL (9s)"
+  # Three it MUST take: the ordinary token, and the two the old list dropped.
+  echo ">>> [node-bindings] PASS (12s)"
+  echo ">>> [node-bindings] VACUOUS (0s)"
+  echo ">>> [node-bindings] OPT-OUT (3s)"
+} > "$nbg_probe_log"
+printf 'node-bindings: PASS (12s)  [via npm: feature set NOT observed]\nnode-bindings-leak-lane: BUDGETS-AFFIRMED\n' \
+  > "$WORK/nbgate-parseprobe.summary"
+printf 'ci\nrun build\nrun typecheck\ntest\n' > "$WORK/nbgate-parseprobe.npm-argv"
+_nbgate_measure parseprobe
+# Case 103 — the DETECTION half. Every other property of the triple holds, so the assert
+# can only fail on the recorded verdicts, and it must NAME both planted tokens: a bare
+# non-zero in a file this size is produced identically by an unrelated breakage.
+# The assert must FAIL **and** name both tokens. Both halves, because reading the reason
+# alone would let a PASS whose text happens to quote the recorded sequence satisfy this
+# case -- a control with its own false-pass route is not a control.
+nbg_probe_state=refused
+_nbgate_assert parseprobe "PASS" yes && nbg_probe_state=admitted
+nbg_probe_why="$NBG_WHY"
+[ "$nbg_probe_state" = refused ] \
+  || nbg_probe_why="THE ASSERT PASSED with only PASS allowed over recorded verdicts '${NBG_LOG_TOKS:-<none>}'"
+# THE NAMING HALF IS ASSERTED PER TOKEN, on the PER-TOKEN clause `_nbgate_assert` emits
+# for each out-of-vocabulary verdict (`the run RECORDED verdict '<TOK>'`) — deliberately
+# NOT on the `recorded sequence:` field, which carries BOTH tokens whenever EITHER one
+# fires. Keying on the sequence made the two-token claim INCIDENTAL: a capture that saw
+# only VACUOUS would still print a sequence mentioning OPT-OUT and satisfy a substring
+# test. So each planted token must appear in its OWN clause, and the count must be 2.
+nbg_probe_named=0
+case "$nbg_probe_why" in *"RECORDED verdict 'VACUOUS'"*) nbg_probe_named=$((nbg_probe_named + 1)) ;; esac
+case "$nbg_probe_why" in *"RECORDED verdict 'OPT-OUT'"*) nbg_probe_named=$((nbg_probe_named + 1)) ;; esac
+if [ "$nbg_probe_state" = refused ] && [ "$nbg_probe_named" = 2 ]; then
+  ok "case 103: the log-side verdict capture SEES tokens the retired three-token enumeration dropped — a planted VACUOUS and OPT-OUT are both RECORDED and each is NAMED in its OWN out-of-vocabulary clause by _nbgate_assert (#3977)"
+else
+  bad "case 103: a planted VACUOUS/OPT-OUT verdict was not both seen and named per token (assert verdict: $nbg_probe_state; per-token clauses matched: $nbg_probe_named of 2; recorded: '${NBG_LOG_TOKS:-<none>}', n=$NBG_LOG_N; why: ${nbg_probe_why:-<empty>}). A token the capture drops is a DISAGREEING verdict property (a) cannot see, which is what leaves a case green over a lost \`return\`. Log: $nbg_probe_log"
+fi
+# Case 104 — the POSITIVE CONTROL. Without it, a case 103 that reds for an unrelated
+# reason reads as proof. Same triple, same measurement: with all three tokens allowed the
+# assert must PASS, and the capture must have taken EXACTLY the three verdict lines —
+# which is what pins the prose/census/sibling lines OUT.
+if _nbgate_assert parseprobe "PASS VACUOUS OPT-OUT" yes && [ "$NBG_LOG_N" = 3 ] \
+   && [ "$NBG_LOG_TOKS" = "PASS VACUOUS OPT-OUT " ] && [ "$NBG_LOG_LAST" = "OPT-OUT" ]; then
+  ok "case 104: the same triple PASSes once the planted tokens are ALLOWED, and the capture took exactly the 3 verdict lines — the continuation prose, the census heading and the sibling component's line are excluded by shape and by anchor, not by enumeration"
+else
+  bad "case 104: the shape capture does not hold on correct input (recorded: '${NBG_LOG_TOKS:-<none>}', n=$NBG_LOG_N, last='${NBG_LOG_LAST:-<none>}'; expected exactly 'PASS VACUOUS OPT-OUT '; ${NBG_WHY:-<verdict properties held>}). Either it is taking prose/census/sibling lines, or case 103's red is not attributable to the planted tokens. Log: $nbg_probe_log"
+fi
+
+nbgate_ok=0
+if ! command -v git >/dev/null 2>&1; then
+  echo "info - git absent; skipping the node-bindings manifest exit-code mapping cases (97-102)"
+elif [ ! -f "$GATE_SRC4" ]; then
+  echo "info - agent-gate.sh unreadable; skipping the manifest exit-code mapping cases (97-102)"
+else
+  nbgate_repo=$(cd "$(dirname "$GATE")/.." && pwd)
+  nbgate_wt="$WORK/nb-gate-tree"
+  # A LOCAL `--shared` CLONE, NOT `git worktree add` (issue #3642, roborev job 100). A linked
+  # worktree shares the real repository's config, so its `origin` IS the canonical upstream and
+  # the nested gate's component-set pre-flight went to the network twice per run; a clone's
+  # `origin` is this local path, which is what the pin below then makes canonical FOR THE
+  # SCRATCH COPY of the gate. `--shared` (alternates) rather than the default hardlink/copy
+  # because $WORK is a `mktemp -d` and is routinely on a DIFFERENT FILESYSTEM from the
+  # checkout, where `git clone --local` fails outright with `Invalid cross-device link`
+  # (measured) and `--no-hardlinks` would copy the whole object store. Measured at 0.6s, i.e.
+  # the same cost as the `worktree add` it replaces, and it leaves nothing registered in the
+  # real repo for cleanup to unregister.
+  # --no-checkout + an EXPLICIT sha, because a plain clone checks out the source's default
+  # BRANCH -- and a source on a DETACHED HEAD that no local branch points at then clones
+  # SUCCESSFULLY with an empty working tree, so the `cp` below would land in a directory with
+  # no scripts/ and every case would fail on fixture construction rather than on its subject
+  # (roborev job 102). The `worktree add --detach` this replaced handled that state; the clone
+  # has to be told. Lanes DO run detached -- this suite's own throwaway fixtures use
+  # `git worktree add --detach` -- so the state is reachable, not theoretical.
+  nbgate_src_sha=$(git -C "$nbgate_repo" rev-parse --verify HEAD 2>/dev/null || true)
+  if [ -z "$nbgate_src_sha" ]; then
+    bad "cases 97-102: could not resolve HEAD of '$nbgate_repo' to a sha, so the scratch clone cannot be checked out at a known commit"
+  # SHALLOW SOURCES (roborev job 109). git's handling of `--local` against a shallow source is
+  # VERSION-DEPENDENT: 2.43.0 WARNS ("source repository is shallow, ignoring --local") and
+  # succeeds -- measured, with the whole sequence below completing and scripts/ present, so the
+  # finding's claim that fixture construction FAILS does NOT reproduce here. Older git rejected
+  # outright. Rather than depend on which behaviour the host has, ask and pick: a shallow source
+  # gets the local TRANSPORT (`--no-local`), which is still file-based and touches NO network, so
+  # job 100's hermeticity property is unaffected either way. Three-valued on purpose -- an
+  # UNKNOWN shallowness answer takes the conservative branch, because paying for a slower local
+  # transport is not a correctness cost while guessing "not shallow" would be.
+  elif nbgate_shallow=$(git -C "$nbgate_repo" rev-parse --is-shallow-repository 2>/dev/null || echo unknown); \
+       [ "$nbgate_shallow" != false ] \
+       && ! git clone --no-local --no-checkout --quiet "$nbgate_repo" "$nbgate_wt" >"$WORK/nb-gate-tree.log" 2>&1; then
+    bad "cases 97-102: could not clone the scratch tree through the local transport from a shallow-or-unknown source (is-shallow-repository='$nbgate_shallow'): $(tail -1 "$WORK/nb-gate-tree.log" 2>/dev/null)"
+  elif [ "$nbgate_shallow" = false ] \
+       && ! git clone --local --shared --no-checkout --quiet "$nbgate_repo" "$nbgate_wt" >"$WORK/nb-gate-tree.log" 2>&1; then
+    bad "cases 97-102: could not clone a scratch tree for the exit-code mapping cases: $(tail -1 "$WORK/nb-gate-tree.log" 2>/dev/null)"
+  elif ! git -C "$nbgate_wt" checkout --detach --quiet "$nbgate_src_sha" >>"$WORK/nb-gate-tree.log" 2>&1; then
+    bad "cases 97-102: cloned the scratch tree but could not check out source HEAD $nbgate_src_sha in it: $(tail -1 "$WORK/nb-gate-tree.log" 2>/dev/null)"
+  elif [ ! -d "$nbgate_wt/scripts" ]; then
+    bad "cases 97-102: the scratch clone has no scripts/ directory after checkout of $nbgate_src_sha -- fixture construction is broken, not the subject under test"
+  else
+    nbgate_ok=1
+  fi
+fi
+
+if [ "$nbgate_ok" = 1 ]; then
+  # The SUBJECT: this checkout's agent-gate.sh, not HEAD's.
+  cp "$GATE_SRC4" "$nbgate_wt/scripts/agent-gate.sh"
+
+  # NETWORK-FREE PRE-FLIGHT, FAIL-CLOSED. Two fixture-construction steps, both through the
+  # shared helper the other gate self-tests use (scripts/tests/lib/agent-gate-canonical-pin.bash):
+  #
+  #   * the components manifest is DERIVED FROM THE COPY, because the copy is the WORKING
+  #     TREE's gate while the cloned `scripts/agent-gate.components` is HEAD's -- a COMPONENTS
+  #     change in the working tree would otherwise stop the pre-flight at `manifest-stale`
+  #     instead of at the baseline it is being pointed at;
+  #   * the canonical-identity literal is pinned to THIS CLONE'S OWN `origin` (the local
+  #     checkout path), so the pre-flight reads its baseline from that local path -- measured
+  #     `component-set: ADVISORY-PASS (37/37 names vs origin/main <sha>) ... objects: baseline
+  #     REUSED`, with ZERO external connects under `strace -f -e trace=connect`, against two
+  #     DNS lookups + two connects to github.com:443 per run before the change.
+  #
+  # A FAILED PIN IS A `bad`, NOT A SHRUG: it means the shipped constant was renamed, and the
+  # silent consequence is that these four runs quietly go back to probing the network on every
+  # `tooling-tests` run on every lane. Neither step can change what cases 97-102 assert -- the
+  # pre-flight is lenient under `--only` and decides no node-bindings verdict -- so this is
+  # hermeticity, not part of any case's subject.
+  if ! agent_gate_install_components_manifest "$nbgate_wt/scripts/agent-gate.sh" 2>"$WORK/nb-gate-manifest.err"; then
+    nbgate_ok=0
+    bad "cases 97-102: could not derive the scratch tree's agent-gate.components: $(tail -1 "$WORK/nb-gate-manifest.err" 2>/dev/null)"
+  elif ! agent_gate_pin_canonical_remote "$nbgate_wt/scripts/agent-gate.sh" "$nbgate_repo" 2>"$WORK/nb-gate-pin.err"; then
+    nbgate_ok=0
+    bad "cases 97-102: could not pin the scratch gate copy's canonical origin to the local clone source, so the nested runs would contact the canonical remote: $(tail -1 "$WORK/nb-gate-pin.err" 2>/dev/null)"
+  fi
+fi
+
+if [ "$nbgate_ok" = 1 ]; then
+
+  # Substituted manifest: exits with the code the case picks, and says so in the log so a
+  # case can prove the component actually reached it.
+  cat > "$nbgate_wt/test-data/scripts/check-dataset-manifest.sh" <<'DMSTUB'
+#!/usr/bin/env bash
+echo "substituted check-dataset-manifest.sh: exiting ${STUB_MANIFEST_RC:-0} for root '${1:-<none>}'"
+exit "${STUB_MANIFEST_RC:-0}"
+DMSTUB
+
+  # `./node_modules/.bin/jest --listTests` is invoked by PATH-independent relative path, so
+  # it is substituted too. It must agree with the component's INDEPENDENT `find` inventory
+  # (the #3522 two-oracle reconciliation), so it lists the same committed suites.
+  mkdir -p "$nbgate_wt/bindings/node/node_modules/.bin"
+  cat > "$nbgate_wt/bindings/node/node_modules/.bin/jest" <<'JESTSTUB'
+#!/bin/sh
+d=$(cd "$(dirname "$0")/../.." && pwd)
+find "$d/__test__" -name '*.test.js' | sort
+JESTSTUB
+  chmod +x "$nbgate_wt/bindings/node/node_modules/.bin/jest"
+
+  # A corpus root that SATISFIES _node_bindings_corpus_present, so the pre-npm absent-corpus
+  # SKIP branch does not fire and the run reaches the manifest verdict. That is the exact
+  # state #3493's post-rebase round was about: a PARTIAL corpus reports "present" here.
+  nbgate_ds="$WORK/nb-gate-ds"
+  mkdir -p "$nbgate_ds/sstables/test_basic/simple_table-$UUID"
+  printf 'x\n' > "$nbgate_ds/sstables/test_basic/simple_table-$UUID/nb-1-big-Data.db"
+
+  # _nbgate_run <tag> <manifest-rc> <optout 0|1> -- run `--only node-bindings` against the
+  # scratch tree and echo the component's status line. `--only` is deliberate: it is the
+  # single-component probe mode, and it does not change any branch under test here.
+  #
+  # EVERY VARIABLE A CASE'S VERDICT DEPENDS ON IS `env -u`'d HERE, AND THE OPT-OUT IS THEN
+  # RESTORED ONLY WHERE THE CASE ASKED FOR IT (roborev #3642, blocker 1). Omitting the
+  # assignment is NOT the same as unsetting it: `env` INHERITS an exported value, so a
+  # suite run under the documented `AGENT_GATE_ALLOW_MISSING_FIXTURES=1` opt-out -- the
+  # very remedy #2078 prints, and a plausible ambient value on a corpus-less box -- turned
+  # case 97's "WITHOUT the opt-out" invocation into an opt-out run: it SKIPped, and case 97
+  # false-FAILED the whole tooling gate on correct code. Measured before the fix:
+  # `AGENT_GATE_ALLOW_MISSING_FIXTURES=1 bash scripts/tests/test_check_dataset_manifest.sh`
+  # -> `case 97 ... gave verdict 'SKIP'`, 156/157.
+  #
+  # The other four are the SAME defect shape and are neutralised for the same reason, not
+  # because a leak was observed: `CQLITE_PARITY_REQUIRE_DATASETS` is the second strict-mode
+  # trigger the component pairs with `CQLITE_REQUIRE_FIXTURES` (the suite scrubs it at the
+  # top too, so this is defence in depth), and `STUB_FAIL_BUILD`/`STUB_ENV_DUMP`/
+  # `STUB_MANIFEST_RC` steer THIS suite's own PATH stubs -- an inherited `STUB_FAIL_BUILD=1`
+  # would fail `npm run build` inside every case here and read as a component defect.
+  # `STUB_MANIFEST_RC` is assigned per case below, which already overrides any inherited
+  # value; the others have no assignment to protect them.
+  _nbgate_run() { # <tag> <rc> <optout>
+    local tag=$1 rc=$2 optout=$3
+    local out="$WORK/nbgate-$tag.log"
+    local optenv=()
+    [ "$optout" = 1 ] && optenv=(AGENT_GATE_ALLOW_MISSING_FIXTURES=1)
+    env -u AGENT_GATE_SUMMARY_FILE -u CQLITE_REQUIRE_FIXTURES \
+      -u CQLITE_PARITY_REQUIRE_DATASETS \
+      -u AGENT_GATE_ALLOW_MISSING_FIXTURES \
+      -u STUB_FAIL_BUILD -u STUB_ENV_DUMP \
+      PATH="$STUB:$PATH" \
+      CQLITE_GATE_DISABLE_CAP=1 \
+      CQLITE_DATASETS_ROOT="$nbgate_ds" \
+      STUB_MANIFEST_RC="$rc" \
+      STUB_NPM_INVOCATIONS="$WORK/nbgate-$tag.npm-argv" \
+      AGENT_GATE_SUMMARY_FILE="$WORK/nbgate-$tag.summary" \
+      ${optenv[@]+"${optenv[@]}"} \
+      bash "$nbgate_wt/scripts/agent-gate.sh" --only node-bindings >"$out" 2>&1
+    printf '%s' "$out"
+  }
+
+  # Case 101 FIRST — the positive control. If a green manifest does not carry the run past
+  # the corpus gate, the verdict cases below prove nothing.
+  #
+  # ALLOWED VERDICTS ARE `PASS FAIL`, DELIBERATELY, AND `SKIP` IS WHAT THAT EXCLUDES. Under
+  # the substituted stubs the run reaches `npm test` and then FAILs DOWNSTREAM of the corpus
+  # gate: the jest stub writes no JSON report, so the #1465 budget affirmation cannot pass
+  # (measured: terminal verdict FAIL, `node-bindings-leak-lane: NO-BUDGET-AFFIRMATION`).
+  # Pinning `PASS` here would red on correct code — the guard agents learn to waive. The
+  # property this case owns is that the run did NOT stop at the corpus gate, which is
+  # exactly `no SKIP recorded anywhere` + `npm test` invoked.
+  nbg_log=$(_nbgate_run rc0 0 0)
+  _nbgate_measure rc0
+  nbg_msg=0
+  grep -q 'corpus complete: check-dataset-manifest.sh verified every expected table' "$nbg_log" && nbg_msg=1
+  if _nbgate_assert rc0 "PASS FAIL" yes && [ "$nbg_msg" = 1 ]; then
+    ok "case 101: manifest rc 0 -> the component passes the corpus gate and INVOKES npm test (recorded in the stub's argv log, not merely announced), with no corpus-gate SKIP recorded anywhere"
+  else
+    bad "case 101: manifest rc 0 did not reach the suite (corpus-complete message: $nbg_msg; ${NBG_WHY:-<properties held>}), so the mapping cases below are not measuring the mapping. Log: $nbg_log"
+  fi
+
+  # Case 97 — rc 9 WITHOUT the opt-out is a FAIL, named as an incomplete corpus, and the
+  # suite must not run: a FAIL verdict alone would not say the corpus gate GATED.
+  nbg_log=$(_nbgate_run rc9 9 0)
+  _nbgate_measure rc9
+  if _nbgate_assert rc9 "FAIL" no && grep -q 'the corpus at .* is INCOMPLETE' "$nbg_log"; then
+    ok "case 97: manifest rc 9 without the opt-out -> node-bindings FAIL (every recorded verdict, log and SUMMARY), named as an INCOMPLETE corpus, with the suite not run"
+  else
+    bad "case 97: manifest rc 9 without the opt-out did not record a gated FAIL: ${NBG_WHY:-<verdict properties held>}; incomplete-corpus diagnostic: $(grep -c 'the corpus at .* is INCOMPLETE' "$nbg_log" 2>/dev/null). A corpus this component cannot vouch for must not pass. Log: $nbg_log"
+  fi
+
+  # Case 102 — the invocation half of case 97's run, named as its own case because it is a
+  # DIFFERENT fact: a FAIL verdict is not the same claim as "the suite did not run". Read
+  # from the SAME measurement (never re-grepped), so the two cases cannot drift.
+  if [ "$NBG_TAG" = rc9 ] && [ "$NBG_LIVE" = 1 ] && [ "$NBG_TEST" = 0 ]; then
+    ok "case 102: the rc-9 FAIL STOPS the run before the suite — npm ci was recorded and 'npm test' was not (the corpus gate gates, it does not merely complain)"
+  else
+    bad "case 102: the rc-9 run's npm argv log does not show a gated suite (measured run: '${NBG_TAG:-<none>}', npm ci/install recorded: $NBG_LIVE, 'npm test' recorded: $NBG_TEST; argv: $(tr '\n' '|' < "$WORK/nbgate-rc9.npm-argv" 2>/dev/null || echo '<no argv log>')). Either the component ran the suite over a corpus it refused to vouch for, or the marker was never written and case 101's proof is vacuous."
+  fi
+
+  # Case 98 — rc 9 WITH the opt-out is a SKIP. The #2078 opt-out has to reach THIS verdict
+  # and not only the absent-corpus one: the pre-npm branch keys on
+  # _node_bindings_corpus_present, which a PARTIAL corpus satisfies. `SKIP` is the ONLY
+  # allowed verdict, so the announcement-then-FAIL shape a lost `return` produces reds here
+  # (measured RED: deleting that branch's `return 0` records SKIP then FAIL and invokes
+  # `npm test`; before this round both halves selected the announcement and stayed green).
+  nbg_log=$(_nbgate_run rc9opt 9 1)
+  _nbgate_measure rc9opt
+  if _nbgate_assert rc9opt "SKIP" no && grep -q 'reports an INCOMPLETE corpus' "$nbg_log"; then
+    ok "case 98: manifest rc 9 + AGENT_GATE_ALLOW_MISSING_FIXTURES=1 -> node-bindings SKIP as its ONLY recorded verdict, with the suite not run (the #2078 opt-out reaches the manifest verdict, not just the absent-corpus one, and it is EFFECTIVE)"
+  else
+    bad "case 98: manifest rc 9 under the #2078 opt-out did not record an effective SKIP: ${NBG_WHY:-<verdict properties held>}; opt-out diagnostic: $(grep -c 'reports an INCOMPLETE corpus' "$nbg_log" 2>/dev/null). Either the documented remedy would not work in the state that prints it, or the run did not stop where it said it did. Log: $nbg_log"
+  fi
+  # Case 99 — the SUMMARY half of the same run, named separately because an opt-out is only
+  # worth having if it is both EFFECTIVE (case 98) and VISIBLE. Asserted from the same
+  # measurement: exactly ONE `node-bindings:` entry, and that entry is SKIP — an appended or
+  # overwritten later entry is what a lost `return` would leave behind.
+  if [ "$NBG_TAG" = rc9opt ] && [ "$NBG_SUM_N" = 1 ] && [ "$NBG_SUM_TOKS" = "SKIP " ]; then
+    ok "case 99: the rc-9 opt-out SKIP is RECORDED as the gate SUMMARY's ONE node-bindings entry"
+  else
+    bad "case 99: the rc-9 opt-out SKIP is not the SUMMARY's single node-bindings entry (measured run: '${NBG_TAG:-<none>}', entries: $NBG_SUM_N, verdicts: '${NBG_SUM_TOKS:-<none>}'; lines: $(grep -E '^node-bindings:' "$WORK/nbgate-rc9opt.summary" 2>/dev/null | tr '\n' '|'))"
+  fi
+
+  # Case 100 — any OTHER non-zero code is a TOOLING failure, and the opt-out does NOT
+  # excuse it. Run WITH the opt-out on purpose: that is the direction that can go wrong.
+  # The opt-out excuses missing fixtures, not an unanswered question. Same two properties:
+  # FAIL is the only verdict allowed to be recorded, and the suite must not have run.
+  nbg_log=$(_nbgate_run rc2opt 2 1)
+  _nbgate_measure rc2opt
+  if _nbgate_assert rc2opt "FAIL" no \
+     && grep -q 'TOOLING failure, not a corpus verdict' "$nbg_log"; then
+    ok "case 100: manifest rc 2 under the #2078 opt-out -> node-bindings FAIL as a TOOLING failure, FAIL its only recorded verdict, AND the suite is not run (npm ci recorded, 'npm test' not) — the opt-out excuses missing fixtures, not an unanswered question"
+  else
+    bad "case 100: manifest rc 2 under the opt-out did not record a gated tooling FAIL: ${NBG_WHY:-<verdict properties held>}; tooling diagnostic: $(grep -c 'TOOLING failure, not a corpus verdict' "$nbg_log" 2>/dev/null). Either a malfunctioning checker is read as a judged corpus, or the run continued into the suite anyway. Log: $nbg_log"
+  fi
 fi
 
 echo "----"

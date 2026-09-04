@@ -178,7 +178,9 @@ fn the_csv_lane_requires_every_declared_field_too() {
 
 /// The `udt_nested` shape from the committed
 /// `test-data/schemas/compaction-parity-udt.cql`, which is where this lane's one
-/// FIELD-scoped gap (`e.home`) lives.
+/// FIELD-scoped gap (`e.home`) lived until #3631 made the nested frozen UDT decode
+/// and the gap retired itself. The pair below is synthetic from then on, and is
+/// what keeps the FIELD-scoped rules covered.
 const NESTED_EMPLOYEE_DDL: &str = "CREATE TYPE address (street text, city text, zip text); \
      CREATE TYPE employee (name text, home frozen<address>, level int); \
      CREATE TABLE t (id int PRIMARY KEY, e frozen<employee>);";

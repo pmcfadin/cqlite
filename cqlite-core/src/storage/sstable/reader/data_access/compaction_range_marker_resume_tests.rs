@@ -173,6 +173,23 @@ async fn open_reader(data_path: &std::path::Path) -> SSTableReader {
         .unwrap()
 }
 
+/// The whole decompressed data section (header stripped) — the SAME bytes both the
+/// buffered and the streaming compaction decoders consume.
+async fn stitch_data_section(reader: &SSTableReader) -> Vec<u8> {
+    let cursor = reader.new_scan_cursor().await.unwrap();
+    let header_size = reader.calculate_header_size();
+    {
+        let mut file_guard = cursor.file.lock().await;
+        file_guard
+            .seek(SeekFrom::Start(header_size as u64))
+            .await
+            .unwrap();
+    }
+    let whole = reader.stitch_all_chunks(&cursor).await.unwrap();
+    assert!(!whole.is_empty(), "stitched data section must be non-empty");
+    whole
+}
+
 /// Drive the row-granular streaming compaction decode over `whole` with the window
 /// refilled ONE BYTE AT A TIME — the strongest chunk-straddling stress, so every
 /// multi-byte structure (range-tombstone bound markers included) is assembled
@@ -256,24 +273,20 @@ async fn range_marker_resumes_across_window_refill_byte_identical() {
 
     // Stitch the whole decompressed data section (header stripped) — the SAME
     // bytes both the buffered and streaming decoders consume.
-    let cursor = reader.new_scan_cursor().await.unwrap();
-    let header_size = reader.calculate_header_size();
-    {
-        let mut file_guard = cursor.file.lock().await;
-        file_guard
-            .seek(SeekFrom::Start(header_size as u64))
-            .await
-            .unwrap();
-    }
-    let whole = reader.stitch_all_chunks(&cursor).await.unwrap();
-    assert!(!whole.is_empty(), "stitched data section must be non-empty");
+    let whole = stitch_data_section(&reader).await;
 
     let parser = reader.build_v5_parser(false);
     let resolution = RowColumnResolution::build(&schema, &reader);
 
     // Reference: the buffered whole-partition decode.
     let buffered = parser
-        .parse_block_for_compaction(&whole, Some(&schema), &reader)
+        // #3782: `whole` came from `stitch_all_chunks` — the entire data section.
+        .parse_block_for_compaction(
+            &whole,
+            crate::storage::sstable::reader::parsing::BufferExtent::Complete,
+            Some(&schema),
+            &reader,
+        )
         .expect("buffered compaction decode");
 
     // Non-vacuity: the fixture really produced a RangeMarker per partition, so the
@@ -303,5 +316,179 @@ async fn range_marker_resumes_across_window_refill_byte_identical() {
         "the row-granular streaming drain (range-marker START/END bounds split \
          across window refills) must emit a CompactionRow sequence byte-identical \
          to the buffered parse_block_for_compaction output on the same bytes"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Issue #3721 (roborev job 16) — a marker PARSE failure is a chunk boundary on a
+// NON-final chunk and CORRUPTION on the final one.
+//
+// `CompactionPolicy::on_range_marker` used to answer every marker parse failure
+// with the since-REMOVED `MarkerOutcome::Stop`, which both compaction drivers
+// converted on the final
+// chunk into a SUCCESSFUL partition completion — the marker silently dropped from
+// output that is WRITTEN, resurrecting the rows it shadowed.
+//
+// Both tests below assert the two halves over the SAME prefixes, so each is the
+// other's control:
+//
+// * the FINAL-chunk half proves the prefix really does reach the marker-parse
+//   failure (the refusal text names it), which is this pair's non-vacuity proof —
+//   without it a sweep that never truncated a marker would pass trivially;
+// * the NON-final half proves that path still asks for a refill. A fix that
+//   refused every unparseable marker regardless of chunk state would break
+//   chunked compaction outright: every marker straddling a window boundary is
+//   unparseable at the moment it is first seen.
+//
+// The prefixes are the fixture's own stitched bytes truncated at every length, so
+// nothing is synthesised and no offset is hard-coded. Prefixes that fail EARLIER
+// than the marker (a truncated row whose column decode fails — the sibling #3721
+// fix) are skipped by the same text test rather than asserted about here.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Does `rendered` name the range-tombstone marker refusal this section is about
+/// (as opposed to a truncated ROW's column-decode failure, which the same sweep
+/// also produces and which belongs to a different lane)?
+fn is_marker_parse_refusal(rendered: &str) -> bool {
+    rendered.contains("range-tombstone marker")
+        && rendered.contains("could not be PARSED")
+        && rendered.contains("FINAL chunk")
+}
+
+/// Buffered driver (`parse_one_partition_for_compaction` ->
+/// `drive_partition_sliding`).
+#[tokio::test(flavor = "multi_thread")]
+async fn buffered_marker_parse_failure_refills_mid_stream_and_refuses_at_the_final_chunk() {
+    let schema = schema();
+    let (_temp, data_path) = write_fixture().await;
+    let reader = open_reader(&data_path).await;
+    let whole = stitch_data_section(&reader).await;
+    let parser = reader.build_v5_parser(false);
+
+    let drive = |prefix: &[u8], at_final: bool| {
+        parser.parse_one_partition_for_compaction(
+            prefix,
+            Some(&schema),
+            &reader,
+            at_final,
+            &mut |_row| Ok(std::ops::ControlFlow::Continue(())),
+        )
+    };
+
+    let mut refused = 0usize;
+    for len in 1..whole.len() {
+        let prefix = &whole[..len];
+        let Err(err) = drive(prefix, true) else {
+            continue;
+        };
+        let rendered = err.to_string();
+        if !is_marker_parse_refusal(&rendered) {
+            continue;
+        }
+        refused += 1;
+
+        match drive(prefix, false) {
+            Ok(step) => assert_eq!(
+                step,
+                crate::storage::sstable::reader::parsing::ParseStep::NeedMore,
+                "the SAME {len}-byte prefix on a NON-final chunk must ask for a refill: the \
+                 marker body may simply straddle the window boundary"
+            ),
+            Err(e) => panic!(
+                "a marker truncated at {len} bytes must be NeedMore on a non-final chunk, not \
+                 an error — refusing it would break every chunked compaction whose marker \
+                 straddles a window boundary; got: {e}"
+            ),
+        }
+    }
+
+    assert!(
+        refused > 0,
+        "non-vacuity: at least one prefix of the {}-byte fixture must truncate a range-tombstone \
+         marker and be REFUSED at the final chunk — otherwise the non-final half above asserted \
+         nothing",
+        whole.len()
+    );
+}
+
+/// Row-granular streaming driver (`stream_partition_body_incremental`), which owns
+/// its own copy of the same decision. Returns the terminal step, or the error.
+fn drive_incremental(
+    reader: &SSTableReader,
+    parser: &crate::storage::sstable::reader::parsing::V5CompressedLegacyParser,
+    schema: &TableSchema,
+    resolution: &RowColumnResolution,
+    bytes: &[u8],
+    at_final: bool,
+) -> crate::Result<PartitionStreamStep> {
+    let mut window = WindowCursor::new();
+    window.refill(bytes);
+    let mut state = CompactionPartitionState::new();
+    loop {
+        if window.is_empty() {
+            return Ok(PartitionStreamStep::AllDone);
+        }
+        let step = parser.stream_partition_body_incremental(
+            window.as_slice(),
+            Some(schema),
+            reader,
+            Some(resolution),
+            at_final,
+            &mut state,
+            &mut |_row| Ok(std::ops::ControlFlow::Continue(())),
+        )?;
+        match step {
+            PartitionStreamStep::Consumed(n) | PartitionStreamStep::PartitionDone(n) => {
+                if n == 0 {
+                    return Ok(step);
+                }
+                window.consume(n);
+            }
+            PartitionStreamStep::Break(_)
+            | PartitionStreamStep::NeedMore
+            | PartitionStreamStep::AllDone => return Ok(step),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn streaming_marker_parse_failure_refills_mid_stream_and_refuses_at_the_final_chunk() {
+    let schema = schema();
+    let (_temp, data_path) = write_fixture().await;
+    let reader = open_reader(&data_path).await;
+    let whole = stitch_data_section(&reader).await;
+    let parser = reader.build_v5_parser(false);
+    let resolution = RowColumnResolution::build(&schema, &reader);
+
+    let mut refused = 0usize;
+    for len in 1..whole.len() {
+        let prefix = &whole[..len];
+        let Err(err) = drive_incremental(&reader, &parser, &schema, &resolution, prefix, true)
+        else {
+            continue;
+        };
+        let rendered = err.to_string();
+        if !is_marker_parse_refusal(&rendered) {
+            continue;
+        }
+        refused += 1;
+
+        match drive_incremental(&reader, &parser, &schema, &resolution, prefix, false) {
+            Ok(step) => assert_eq!(
+                step,
+                PartitionStreamStep::NeedMore,
+                "the SAME {len}-byte prefix on a NON-final chunk must ask for a refill"
+            ),
+            Err(e) => panic!(
+                "a marker truncated at {len} bytes must be NeedMore on a non-final chunk, not \
+                 an error; got: {e}"
+            ),
+        }
+    }
+
+    assert!(
+        refused > 0,
+        "non-vacuity: at least one prefix must truncate a range-tombstone marker and be REFUSED \
+         at the final chunk"
     );
 }

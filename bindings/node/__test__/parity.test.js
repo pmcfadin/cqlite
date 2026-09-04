@@ -15,7 +15,7 @@
  */
 
 const { Database } = require('../lib/index.js');
-const { skipIfNoDatasets } = require('./helpers.js');
+const { assertDatasetsAvailable } = require('./helpers.js');
 const {
   findJsonlFile,
   findOaJsonlFile,
@@ -89,7 +89,7 @@ const KEYSPACE_SCHEMAS = {
 let databases = {};
 
 beforeAll(async () => {
-  skipIfNoDatasets();
+  assertDatasetsAvailable();
 
   // Open databases for each keyspace
   for (const [keyspace, schemaPath] of Object.entries(KEYSPACE_SCHEMAS)) {
@@ -542,7 +542,7 @@ describe('VG6: OA Format Parity — Row Count (Issue #672)', () => {
   let dbOa = null;
 
   beforeAll(async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
 
     // Issue #3493: the COMMITTED-SOURCE check runs FIRST, before the fetched-fixture
     // one. The ORDER is the whole point (roborev round 13): with oaBinariesPresent()
@@ -606,7 +606,7 @@ describe('VG4: OA Format Parity — Value Spot Check (Issue #656)', () => {
   let dbOa = null;
 
   beforeAll(async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
 
     // Issue #3493: the COMMITTED-SOURCE check runs FIRST, before the fetched-fixture
     // one. The ORDER is the whole point (roborev round 13): with oaBinariesPresent()

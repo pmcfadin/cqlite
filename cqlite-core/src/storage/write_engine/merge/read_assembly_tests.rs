@@ -86,8 +86,8 @@ fn schema() -> TableSchema {
             col("ituple", "set<frozen<tuple<inet, int>>>"),
             col("ttuple", "set<frozen<tuple<time, int>>>"),
             // inet/time element ordering (roborev 1631/1632): InetAddressType /
-            // TimeType order by raw serialized bytes, NOT the formatted-string
-            // order the scalar `compare_custom` would use.
+            // TimeType order by raw serialized bytes, which the scalar comparator
+            // contradicted with a formatted-string order until #3790.
             col("iset", "set<inet>"),
             col("tset", "set<time>"),
         ],
@@ -237,14 +237,14 @@ fn set_of_inet_orders_by_raw_bytes_not_string() {
 fn set_of_time_orders_by_raw_bytes_not_formatted_string() {
     // set<time>: cell_path is the 8-byte big-endian nanoseconds-of-day; Cassandra's
     // TimeType orders by that raw long (non-negative → byte order == numeric order).
-    // The scalar Custom("time") comparator instead falls to compare_custom's
+    // Until #3790 the scalar Custom("time") comparator instead used a
     // FORMATTED-string order ("TIME(HH:MM:SS.nnn)"), which — because the hours
     // field is only zero-padded to two digits — diverges from numeric order once
     // the hours magnitude changes digit-width. 10h vs 100h: the string
     // "TIME(100:..." sorts BEFORE "TIME(10:..." ('0' < ':'), the REVERSE of numeric
     // order, so a multi-SSTable set would mis-order pre-fix. (Valid times-of-day
     // happen to coincide under the current Display; ordering by the raw cell_path
-    // bytes is the robust, parity-correct rule and closes the compare_custom class,
+    // bytes is the robust, parity-correct rule and closes that class here,
     // roborev 1632.) Arrive out of order to prove the sort runs.
     let t_small = 36_000_000_000_000i64; // 10h in ns
     let t_big = 360_000_000_000_000i64; // 100h in ns

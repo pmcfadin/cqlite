@@ -15,7 +15,7 @@
 'use strict';
 
 const { Database } = require('../lib/index.js');
-const { skipIfNoDatasets } = require('./helpers.js');
+const { assertDatasetsAvailable } = require('./helpers.js');
 
 const QUERY =
   'SELECT id, WRITETIME(name), TTL(name) FROM test_basic.simple_table LIMIT 5';
@@ -24,7 +24,7 @@ describe('WRITETIME/TTL output (Issue #693)', () => {
   let db = null;
 
   beforeAll(async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     db = await Database.open(global.testPaths.SSTABLES_DIR, {
       schema: global.testPaths.SCHEMA_BASIC_TYPES,
     });

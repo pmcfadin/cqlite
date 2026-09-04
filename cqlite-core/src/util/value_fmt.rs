@@ -1,5 +1,5 @@
 //! Value formatting shared by output writers
-//! Implements the Value → String mapping per QUERY_RESULT_CONTRACT.md
+//! Implements the Value → String mapping per `docs/development/QUERY_RESULT_CONTRACT.md`.
 //!
 //! This module provides stable, cqlsh-compatible formatting for all CQL value
 //! types.  It originally lived in `cqlite-cli/src/output/value_fmt.rs` and was
@@ -311,28 +311,28 @@ impl ValueFormatter {
         // value as a two's-complement big-endian BigInteger, which is exactly what
         // `from_signed_bytes_be` decodes (positive when the high bit is clear).
         let bigint = num_bigint::BigInt::from_signed_bytes_be(unscaled);
-        // ONE base-10 conversion — the sole superlinear step; every branch below is
-        // a single O(digits) pass over the resulting string (no repeated division,
-        // no scale-width padding blowup).
+        // ONE base-10 conversion — the sole superlinear step; every branch below
+        // is a single O(digits) pass over it (no repeated division/padding blowup).
         let mut decimal_str = bigint.to_string();
         let is_neg = decimal_str.starts_with('-');
         if is_neg {
             decimal_str = decimal_str[1..].to_string();
         }
 
-        // Faithful, bounded exponent form for over-bound cases (issue #1754). Two
-        // triggers, both of which would otherwise require an O(digits)-wide
-        // positional expansion:
-        //   - a large-but-valid unscaled magnitude (thousands+ of digits), and
+        // Faithful, bounded exponent form `<digits>e<-scale>` (value = unscaled ×
+        // 10^(−scale)), which preserves every digit AND the scale exactly. Three
+        // triggers, each a case the positional form below renders unboundedly or
+        // invalidly (#1754, #3644 — see the tests for the zero case):
+        //   - a large-but-valid unscaled magnitude (thousands+ of digits),
         //   - a pathological `scale` used as a `repeat`/padding width (which at
-        //     `scale == i32::MIN` would also overflow `(-scale)`).
-        // Rendering `<digits>e<-scale>` (value = unscaled × 10^(−scale)) preserves
-        // EVERY digit exactly with no unbounded padding. Legitimate, normal-size
-        // decimals fall through to the byte-identical positional form below.
+        //     `scale == i32::MIN` would also overflow `(-scale)`), and
+        //   - a ZERO magnitude at negative scale, where padding emits a
+        //     leading-zero run (`00`) that is not a valid JSON number.
         const DECIMAL_POSITIONAL_MAX_BYTES: usize = 1024;
         const SCALE_RENDER_CAP: usize = 1_000_000;
         if unscaled.len() > DECIMAL_POSITIONAL_MAX_BYTES
             || scale.unsigned_abs() as usize > SCALE_RENDER_CAP
+            || (scale < 0 && decimal_str == "0")
         {
             let body = if is_neg {
                 format!("-{decimal_str}")

@@ -10,7 +10,7 @@
 //! driver never has to keep a WIDE partition fully resident).
 
 use super::compaction::CompactionPolicy;
-use super::partition_driver::{MarkerOutcome, SlidingPartitionPolicy};
+use super::partition_driver::{DataRowOutcome, MarkerOutcome, SlidingPartitionPolicy};
 use super::row_framing::PartitionHeaderReadiness;
 use super::{RowColumnResolution, V5CompressedLegacyParser};
 use crate::schema::TableSchema;
@@ -220,20 +220,65 @@ impl V5CompressedLegacyParser {
                     }
                     return Ok(PartitionStreamStep::Consumed(next_offset));
                 }
-                MarkerOutcome::Stop => {
+                // Issue #3721 (roborev job 16): the marker could not be PARSED.
+                // On a NON-final chunk that may be nothing worse than a marker
+                // body straddling the window boundary, which is exactly what
+                // `NeedMore` is for. On the FINAL chunk no refill is coming, so
+                // reporting `PartitionDone` — a SUCCESSFUL partition completion —
+                // silently dropped a corrupt or truncated tombstone from output
+                // that is WRITTEN, resurrecting the rows it shadowed. Propagate
+                // the preserved parse error instead. `at_final_chunk` is the
+                // caller's own chunking state; no bytes are inspected to guess
+                // whether more data exists (issue #28).
+                MarkerOutcome::Unparseable(cause) => {
                     if at_final_chunk {
-                        state.reset();
-                        return Ok(PartitionStreamStep::PartitionDone(0));
+                        return Err(
+                            super::range_marker_error::unparseable_marker_at_final_chunk(cause),
+                        );
                     }
                     return Ok(PartitionStreamStep::NeedMore);
                 }
+                // Issue #3721/#3808: a marker that PARSED but cannot be
+                // represented is corruption at a known resume point — no refill
+                // fixes it, and ending the partition here would report `Ok` with
+                // rows missing. `CompactionPolicy::on_range_marker` produces this
+                // for an unrecognised bound kind (#3808): the kind byte is real
+                // in-window on-disk data whenever the marker parsed at all, so a
+                // larger window cannot change it, and this policy's rows are
+                // WRITTEN — skipping the marker resurrects what it shadowed.
+                MarkerOutcome::Refused(e) => return Err(e),
             }
         }
 
         // A data row: decode exactly one, emit it, and report its consumed bytes.
         let mut emitted: Vec<crate::storage::sstable::reader::compaction_row::CompactionRow> =
             Vec::new();
-        match policy.on_data_row(data, 0, schema, reader, resolution, &mut emitted) {
+        let decoded = match policy.on_data_row(data, 0, schema, reader, resolution, &mut emitted) {
+            DataRowOutcome::Decoded(v) => Some(v),
+            DataRowOutcome::Declined => None,
+            // Issue #3809 — a REFUSAL is EXTENT-INDEPENDENT: the row decoded and
+            // its content is unrepresentable, which is not a bytes-availability
+            // question, so `at_final_chunk` is not consulted. Converting it to
+            // `NeedMore` here would make this streaming driver — which every
+            // windowed consumer drives with `at_final_chunk == false` until its
+            // last chunk — swallow the refusal and truncate the partition.
+            DataRowOutcome::Refused(e) => return Err(e),
+            // Issue #3782 — the SAME rule as the buffered `drive_partition_sliding`,
+            // deliberately spelled out here rather than shared, because this driver
+            // resumes from offset 0 per structure and owns its own `ParseStep`
+            // vocabulary. At the final chunk no further bytes can arrive, so a
+            // decode error is truncation/corruption (DATA LOSS), never a row
+            // straddling the window; mid-stream it is the ordinary straddling case
+            // and stays tolerant. Measured over 42 well-formed corpus tables the
+            // tolerant path fires 614 times, ALL at `at_final_chunk == false`.
+            DataRowOutcome::DecodeFailed(e) => {
+                if at_final_chunk {
+                    return Err(e);
+                }
+                return Ok(PartitionStreamStep::NeedMore);
+            }
+        };
+        match decoded {
             Some(next_offset) => {
                 // Confirm the row is fully framed WITHIN the window: a next_offset
                 // STRICTLY PAST the buffer end means we decoded a truncated row on a
@@ -285,9 +330,11 @@ impl V5CompressedLegacyParser {
                 Ok(PartitionStreamStep::Consumed(next_offset))
             }
             None => {
-                // A row failed to parse. Mid-stream that may be a row straddling the
-                // chunk boundary, so request more bytes unless this is the final
-                // chunk (where it is end-of-partition).
+                // The policy DECLINED the row with no error to report (#3782: an
+                // actual decode error took the `DecodeFailed` arm above; #3809: a
+                // refusal took the `Refused` arm). Mid-stream that may be a row
+                // straddling the chunk boundary, so request more bytes unless this
+                // is the final chunk (where it is end-of-partition).
                 if at_final_chunk {
                     state.reset();
                     Ok(PartitionStreamStep::PartitionDone(0))

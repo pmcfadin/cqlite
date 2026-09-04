@@ -284,8 +284,15 @@ pub enum Depth {
 ///     `JsonUtils.quoteAsJsonString`), `uuid`/`timeuuid`/`duration` (the default
 ///     `toJSONString`, whose `Object.toString()` is what those serializers return),
 ///     and `date`/`time` (both override `toJSONString` to call `serializer.toString`,
-///     the very function `getString` uses). `counter` cannot occupy a stringified
-///     position at all.
+///     the very function `getString` uses). **`counter` cannot occupy a
+///     stringified position at all** — not a spelling claim but a type rule, and
+///     read from the pin rather than assumed: a PRIMARY KEY column is refused by
+///     `CreateTableStatement.java:231-232` ("counter type is not supported for
+///     PRIMARY KEY column") and a collection element / map key by
+///     `CQL3Type.java:825-836` ("Counters are not allowed inside collections"),
+///     which is every stringified position there is. Its `getString` WOULD
+///     diverge materially if one existed (`CounterColumnType.java:74-77` returns
+///     `accessor.toHex(value)`, bare hex like a blob's).
 ///
 /// Not covered, and named rather than implied: a FROZEN collection/tuple/UDT as a
 /// partition-key component. `getString` spells the whole frozen value as one string,

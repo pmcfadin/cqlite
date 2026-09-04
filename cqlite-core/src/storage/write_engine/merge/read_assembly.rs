@@ -44,11 +44,11 @@
 //! (no-heuristics, issue #28).
 //!
 //! Two decodable scalars — `inet` (`InetAddressType`) and `time` (`TimeType`) —
-//! route through the comparator's `compare_custom`, which orders by the FORMATTED
-//! string and can diverge from Cassandra's raw-byte order; their serialized
-//! `cell_path` form IS unsigned-byte-comparable, so they are ordered by raw
-//! `cell_path` bytes instead ([`comparator_orders_by_raw_cell_path_bytes`],
-//! roborev 1631/1632).
+//! have serialized `cell_path` forms that ARE unsigned-byte-comparable, so they
+//! are ordered by raw `cell_path` bytes rather than decoded and routed through
+//! the scalar comparator ([`comparator_orders_by_raw_cell_path_bytes`], roborev
+//! 1631/1632). The scalar comparator used to order them by FORMATTED string;
+//! since #3790 it agrees, so raw-byte order stays equivalent and cheaper.
 //!
 //! Tombstone handling follows Cassandra SELECT semantics (issue #1742: SELECT
 //! output is the read-path authority), NOT the single-generation reader's
@@ -396,8 +396,8 @@ fn cell_path_bytes(cell: &CellData) -> &[u8] {
 /// silently mis-ordering it. Two scalar shapes:
 ///   * A `inet`/`time` comparator ([`comparator_orders_by_raw_cell_path_bytes`])
 ///     orders by raw `cell_path` byte comparison — its serialized form's unsigned
-///     byte order IS its Cassandra order, and routing it through the scalar
-///     `compare_custom` would mis-order it (roborev 1631/1632).
+///     byte order IS its Cassandra order (roborev 1631/1632; the scalar comparator
+///     mis-ordered these by formatted string until #3790).
 ///   * Any other scalar decodes each `cell_path` to a `Value` and orders by the
 ///     type comparator (e.g. signed-int order != raw byte order), surfacing any
 ///     genuine decode error (wrong-width scalar) rather than masking it.
@@ -473,22 +473,22 @@ fn key_is_opaque_composite(cmp: &ComparatorType) -> bool {
 }
 
 /// True when the element/key type's Cassandra ordering IS unsigned raw-byte
-/// comparison of the `cell_path`, so decoding to a `Value` and routing through
-/// the scalar type comparator would MIS-order it.
+/// comparison of the `cell_path`, so the raw bytes can be compared directly with
+/// no decode round-trip.
 ///
-/// Every other scalar [`ComparatorType`] in this sort path has a proper
-/// [`ComparatorType::compare`] arm; the ONLY declared scalar types that fall
-/// through to `compare_custom` (which orders by the FORMATTED string, diverging
-/// from a single-generation `SELECT`) are the two decodable `Custom` names —
-/// `inet` and `time`. Both have a canonical serialized form whose UNSIGNED byte
-/// order equals their Cassandra order, and the element/key `cell_path` IS that
-/// serialized form, so ordering by raw `cell_path` bytes matches Cassandra
-/// exactly and closes the whole `compare_custom` class here (roborev 1631/1632):
-///   * `inet` (`InetAddressType`): raw address bytes, e.g. `9.0.0.1` = `[9,0,0,1]`
-///     precedes `10.0.0.1` = `[10,0,0,1]` (formatted-string order is the reverse).
-///   * `time` (`TimeType`): 8-byte big-endian nanoseconds-of-day, always
-///     non-negative, so byte order == numeric order (formatted `HH:MM:...` string
-///     order misorders, e.g. any value whose text form sorts against its magnitude).
+/// The two decodable `Custom` names — `inet` and `time` — are the ONLY declared
+/// scalar types in this sort path without a dedicated [`ComparatorType`] arm.
+/// Both have a canonical serialized form whose UNSIGNED byte order equals their
+/// Cassandra order, and the element/key `cell_path` IS that serialized form, so
+/// ordering by raw `cell_path` bytes matches Cassandra exactly and needs no
+/// decode round-trip (roborev 1631/1632). Until #3790 the scalar `Custom` arm
+/// ordered both by FORMATTED string; correct either way here, but only `inet`
+/// actually diverged (roborev job 67):
+///   * `inet` (`InetAddressType`): raw address bytes — `9.0.0.1` = `[9,0,0,1]`
+///     precedes `10.0.0.1`, the REVERSE of string order: a real misordering.
+///   * `time` (`TimeType`): nanos-of-day, BYTE_ORDER — raw `cell_path` bytes ARE
+///     Cassandra's order for EVERY 8-byte value, negatives included (#3935 refuted
+///     the "always non-negative" premise; citations in `custom::compare_time`).
 ///
 /// Branches on the DECLARED type only (no-heuristics, issue #28); recurses through
 /// `Frozen` defensively though neither inet nor time is ever frozen here.
