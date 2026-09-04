@@ -96,3 +96,50 @@ full-gate PASS alongside this lite FAIL is not a contradiction — it is the
 documented coverage hole. This is disclosed in the PR rather than waived: the
 #3042 cite-and-waive does NOT apply, because this diff touches scripts/ and
 `scripts/ci/classify-docs-only.sh` fails it closed.
+
+================================================================================
+RE-MEASUREMENT 2026-09-04, AFTER MERGING origin/main — THE SET SHRANK 6 -> 2
+================================================================================
+Everything above measured SIX failures. That is no longer the count, and the
+correction is recorded here rather than by editing the earlier record, because
+the earlier record was true when it was taken.
+
+Measured at merged head 8f6538a33 (this branch + origin/main at 4bd0d1cf6),
+`cargo test -p cqlite-integration-tests --lib`, read from the `--lite` run's
+own scoped-tests component log (run-id /tmp/agent-gate.CEHumB):
+
+    running 145 tests
+    test result: FAILED. 127 passed; 2 failed; 16 ignored; 0 measured
+
+The two that remain, both previously in the six:
+    issue_28a_heuristics_removal_tests::test_row_cell_state_machine_no_blob_fallback_modern
+      tests/src/issue_28a_heuristics_removal_tests.rs:203 — "BIG v5 format
+      should fail instead of falling back to blob"
+    parser_validation::vint_validation_tests::test_vint_length_parsing
+      tests/src/parser_validation.rs:317 — assert left==right, left: 2, right: 1
+
+The FOUR that now PASS, all four of the CLI ones:
+    cli_integration_tests::tests::test_cli_error_handling
+    cli_integration_tests::tests::test_cli_integration_basic
+    integration::cli_tests::tests::test_cli_help
+    integration::cli_tests::tests::test_cli_version
+They were fixed by commits on main between 045a6e28f and 4bd0d1cf6, not by
+anything on this branch: this branch's only changes since the previous
+measurement are scripts/agent-gate.sh (four progress lines) and this file.
+
+WHAT THIS RE-MEASUREMENT DOES *NOT* ESTABLISH, stated because the distinction
+is the whole value of the record. It was taken at THIS BRANCH'S head, not on a
+clean origin/main checkout, so by itself it cannot attribute the two survivors
+to main. The attribution rests on the EARLIER measurement in this file, which
+did run against a clean origin/main (045a6e28f) and named both survivors among
+its six. A clean-main re-measurement of just those two was deliberately NOT run
+this round: it needs a fresh worktree with its own target dir, i.e. a full
+parallel compile, and the standing fleet rule is ONE gate per box — a second
+concurrent cargo build degrades the gate of record that has to run on this same
+machine. If the two ever need re-attributing, do it on an idle box, not
+alongside a gate.
+
+The SCOPE paragraph above is unchanged and still governs: no full-gate
+component executes `cqlite-integration-tests --lib` (#3522), so the gate of
+record neither runs nor certifies these two, and a full-gate PASS beside a lite
+FAIL here remains the documented coverage hole rather than a contradiction.
