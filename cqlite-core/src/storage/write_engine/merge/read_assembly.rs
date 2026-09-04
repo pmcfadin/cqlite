@@ -356,7 +356,7 @@ fn assemble_complex(
                 // is NOT Cassandra's order for a composite).
                 let keyed = decode_composite_elements(name, "set element", elements, &elem_cmp)?;
                 return Ok(Value::Set(
-                    sort_composite(keyed, &elem_cmp)?
+                    sort_composite(name, keyed, &elem_cmp)?
                         .into_iter()
                         .map(|(v, _)| v)
                         .collect(),
@@ -383,7 +383,7 @@ fn assemble_complex(
                 // comparator over the DECODED keys (issue #2339).
                 let keyed = decode_composite_elements(name, "map key", elements, &key_cmp)?;
                 return Ok(Value::Map(
-                    sort_composite(keyed, &key_cmp)?
+                    sort_composite(name, keyed, &key_cmp)?
                         .into_iter()
                         .map(|(key, cell)| (key, cell.value))
                         .collect(),
@@ -597,15 +597,20 @@ fn decode_composite_elements(
 /// component-wise comparator, and the two orders genuinely DISAGREE on
 /// Cassandra-written bytes (see [`composite`] for the
 /// measured cases). The decode is fallible and already done, so the sort itself is
-/// total; a comparison error (a decoded shape the declared type contradicts) is
-/// captured and surfaced rather than silently mis-ordering.
+/// total; a comparison error is captured and surfaced rather than silently
+/// mis-ordering. Two shapes reach here: a decoded shape the declared type
+/// contradicts, and a leaf type whose central comparator is known to diverge from
+/// Cassandra's and is therefore REFUSED (`varint`/`decimal`/`uuid`, issue #4063 —
+/// see `composite::divergent_leaf`). `column` is carried in only so those refusals
+/// can name it.
 #[cfg(feature = "write-support")]
 fn sort_composite(
+    column: &str,
     mut keyed: Vec<(Value, CellData)>,
     cmp: &ComparatorType,
 ) -> Result<Vec<(Value, CellData)>> {
     let mut first_err: Option<Error> = None;
-    keyed.sort_by(|a, b| match compare_composite(&a.0, &b.0, cmp) {
+    keyed.sort_by(|a, b| match compare_composite(column, &a.0, &b.0, cmp) {
         Ok(ord) => ord,
         Err(e) => {
             if first_err.is_none() {

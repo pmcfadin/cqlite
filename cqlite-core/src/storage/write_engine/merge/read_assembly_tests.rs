@@ -90,6 +90,13 @@ fn schema() -> TableSchema {
             // contradicted with a formatted-string order until #3790.
             col("iset", "set<inet>"),
             col("tset", "set<time>"),
+            // #4063 fail-closed (roborev job 111): a composite whose leaf type has
+            // no Cassandra-compatible ordering in the central comparator. `varint`
+            // stands for all three (`decimal`/`uuid` too) — the per-type, per-depth
+            // matrix is unit-level in
+            // `leaf_types_without_cassandra_ordering_fail_closed_at_every_depth`;
+            // this column is what proves the REAL merged-read path refuses.
+            col("vset", "set<frozen<tuple<varint, int>>>"),
         ],
         comments: HashMap::new(),
         dropped_columns: HashMap::new(),
@@ -650,13 +657,13 @@ fn an_omitted_tuple_suffix_compares_equal_to_an_explicit_all_null_suffix() {
         "precondition: the explicit encoding decodes to a null component"
     );
     assert_eq!(
-        composite::compare_composite(&omitted, &explicit, &cmp).unwrap(),
+        composite::compare_composite("c", &omitted, &explicit, &cmp).unwrap(),
         std::cmp::Ordering::Equal,
         "TupleType.compareCustom: both sides' remaining components are all null \
          (vacuously so for the exhausted one), so it returns 0"
     );
     assert_eq!(
-        composite::compare_composite(&explicit, &omitted, &cmp).unwrap(),
+        composite::compare_composite("c", &explicit, &omitted, &cmp).unwrap(),
         std::cmp::Ordering::Equal,
         "and the relation is symmetric"
     );
@@ -665,7 +672,7 @@ fn an_omitted_tuple_suffix_compares_equal_to_an_explicit_all_null_suffix() {
     // length".
     let present = decode(&hex("00000001610000000400000007"));
     assert_eq!(
-        composite::compare_composite(&omitted, &present, &cmp).unwrap(),
+        composite::compare_composite("c", &omitted, &present, &cmp).unwrap(),
         std::cmp::Ordering::Less,
         "a side that runs out is LESS than one carrying a non-null component"
     );
@@ -739,8 +746,8 @@ fn composite_cell_path_with_trailing_bytes_fails_closed() {
     );
 }
 
-/// **GAP (issue #2339) — a `varint` COMPONENT of a composite does NOT yet order as
-/// Cassandra does. `#[ignore]`d, and DELIBERATELY still asserting the CORRECT order.**
+/// **GAP (issue #4063, from #2339) — the #4063 TRIPWIRE. `#[ignore]`d, and
+/// DELIBERATELY still asserting the CORRECT Cassandra order.**
 ///
 /// Cassandra's `IntegerType.compare` orders `varint` by SIGNED two's-complement
 /// magnitude, so `-1` (body `0xFF`) sorts BELOW `0` (body `0x00`). The central
@@ -750,39 +757,216 @@ fn composite_cell_path_with_trailing_bytes_fails_closed() {
 /// comparison") and `uuid` (raw `Uuid::cmp` rather than `UUIDType`'s
 /// version-then-v1-timestamp-then-tail order) are wrong in the same way.
 ///
-/// Since #2339 the composite scalar leaves delegate to that central comparator and to
-/// nothing else, so this arm INHERITS the defect rather than papering over it. That is
-/// the deliberate trade: the alternative was to keep the write path's
-/// `collection_order::compare_collection_elements` as a SECOND ordering authority for
-/// the same types, which is the divergence class #2339 exists to remove — and a second
-/// path would also HIDE this defect from exactly the test that reports it.
+/// **What the composite arm DOES today (roborev job 111): it REFUSES.** It does not
+/// misorder these three leaves and it does not carry a second comparator for them —
+/// `compare_composite` returns an `Err` naming the leaf type and #4063 (pinned by
+/// `leaf_types_without_cassandra_ordering_fail_closed_at_every_depth` and, through
+/// the real merged-read path, by
+/// `varint_composite_element_fails_closed_through_the_merged_read_path`). So TODAY
+/// this test's `.unwrap()` would panic on that refusal, not on a wrong `Ordering`;
+/// either way it is not green, which is exactly what a tripwire is for.
 ///
-/// The fix is a CONVERGENCE, not new code: `collection_order::scalar` already
-/// implements all three correctly under its `IntegerType`/`DecimalType`/`UUIDType`
-/// citations (#1275). When the central comparator adopts them, DELETE the `#[ignore]`
-/// and this test passes as written — which is why the expectation is NOT inverted to
-/// pin the current wrong answer. Pinning the defect would green-wash it and would red
-/// the moment somebody fixed it.
+/// A local correct comparator here was rejected: it would be a SECOND ordering
+/// authority for the same types, the divergence class #2339 exists to remove, and it
+/// would HIDE the central defect from exactly the test that reports it.
+///
+/// **WHEN #4063 CONVERGES, TWO EDITS ARE NEEDED, NOT ONE**: adopt
+/// `collection_order::scalar`'s already-correct `IntegerType`/`DecimalType`/
+/// `UUIDType` semantics (#1275) in the central comparator, AND delete the
+/// fail-closed guard in `composite::divergent_leaf` / its `compare_composite` arm.
+/// Then delete this `#[ignore]`; the test passes as written. The expectation is NOT
+/// inverted to pin the current answer — pinning a defect green-washes it and reds
+/// the moment somebody fixes it.
 ///
 /// The expectation is derived from Cassandra's semantics (`IntegerType.compare`,
 /// signed two's-complement), never from CQLite's own prior behaviour (#3041).
 #[test]
-#[ignore = "GAP #4063 (from #2339): central ComparatorType::compare orders varint by raw bytes, not signed IntegerType order; un-ignore when the central varint/decimal/uuid arms converge on collection_order::scalar"]
+#[ignore = "GAP #4063 (from #2339): the central ComparatorType::compare varint arm is raw-byte, not signed IntegerType order, so the composite arm REFUSES a varint/decimal/uuid ordering decision (fail-closed). Un-ignore only after BOTH: the central arms converge on collection_order::scalar AND composite::divergent_leaf's guard is deleted"]
 fn varint_component_of_a_composite_orders_signed_not_by_raw_bytes() {
     let cmp = ComparatorType::Tuple(vec![ComparatorType::Varint]);
     let minus_one = Value::Tuple(vec![Value::Varint(vec![0xFF].into())]);
     let zero = Value::Tuple(vec![Value::Varint(vec![0x00].into())]);
 
     assert_eq!(
-        compare_composite(&minus_one, &zero, &cmp).unwrap(),
+        compare_composite("c", &minus_one, &zero, &cmp).unwrap(),
         std::cmp::Ordering::Less,
         "a varint component must order -1 BEFORE 0 (signed, per Cassandra IntegerType); \
          raw-byte order would put 0 first because 0xFF > 0x00"
     );
     assert_eq!(
-        compare_composite(&zero, &minus_one, &cmp).unwrap(),
+        compare_composite("c", &zero, &minus_one, &cmp).unwrap(),
         std::cmp::Ordering::Greater,
         "and the comparison must be antisymmetric"
+    );
+}
+
+/// **roborev job 111 — a leaf type with NO Cassandra-compatible ordering is
+/// REFUSED, at EVERY composite depth (#4063 fail-closed guard, issue #2339).**
+///
+/// `varint`, `decimal` and `uuid`/`timeuuid` are ordered by the central
+/// `ComparatorType::compare` in ways that provably differ from Cassandra's
+/// `IntegerType`/`DecimalType`/`UUIDType` (citations on
+/// `composite::divergent_leaf`, and the tripwire above). Inheriting that answer
+/// would emit a plausible-looking collection in the wrong order — the
+/// silent-wrong-value class #28 forbids — so `compare_composite` fails closed
+/// instead, exactly as `nested_unresolved_udt_fails_closed` does for a UDT with no
+/// field list.
+///
+/// **NESTED positions are asserted, not assumed.** The refusal lives in the scalar
+/// leaf arm, which every other arm recurses INTO, but "it should recurse" is what
+/// roborev job 52 / G2 already disproved once for the unresolved-UDT guard (a
+/// top-level-only check let a nested `Custom` through as an opaque `Blob`). So the
+/// matrix is 3 leaf types x 4 positions, one per recursion arm: a top-level
+/// component, a tuple nested in a tuple, a set element, and a map value.
+///
+/// RED BEFORE THE FIX: every case returned `Ok(_)` with the central comparator's
+/// known-wrong ordering.
+#[test]
+fn leaf_types_without_cassandra_ordering_fail_closed_at_every_depth() {
+    // (leaf comparator, the type name the message must carry, two DISTINCT
+    // non-null values of that type — distinct so an ordering DECISION is really
+    // reached rather than short-circuited by equality).
+    let leaves: Vec<(ComparatorType, &str, Value, Value)> = vec![
+        (
+            ComparatorType::Varint,
+            "varint",
+            Value::Varint(vec![0xFF].into()),
+            Value::Varint(vec![0x00].into()),
+        ),
+        (
+            ComparatorType::Decimal,
+            "decimal",
+            Value::Decimal {
+                scale: 0,
+                unscaled: vec![0x01],
+            },
+            Value::Decimal {
+                scale: 2,
+                unscaled: vec![0x63],
+            },
+        ),
+        (
+            // `CqlType::TimeUuid` maps onto this same variant, so this covers
+            // `timeuuid` as well.
+            ComparatorType::Uuid,
+            "uuid",
+            Value::Uuid([0x11; 16]),
+            Value::Uuid([0x22; 16]),
+        ),
+    ];
+
+    for (leaf, type_name, a, b) in leaves {
+        let positions: Vec<(&str, ComparatorType, Value, Value)> = vec![
+            (
+                "top-level component of the composite",
+                ComparatorType::Tuple(vec![leaf.clone()]),
+                Value::Tuple(vec![a.clone()]),
+                Value::Tuple(vec![b.clone()]),
+            ),
+            (
+                "nested inside a tuple component",
+                ComparatorType::Tuple(vec![
+                    ComparatorType::Tuple(vec![leaf.clone()]),
+                    ComparatorType::Int,
+                ]),
+                Value::Tuple(vec![Value::Tuple(vec![a.clone()]), Value::Integer(1)]),
+                Value::Tuple(vec![Value::Tuple(vec![b.clone()]), Value::Integer(1)]),
+            ),
+            (
+                "nested as a frozen-collection element",
+                ComparatorType::Set(Box::new(leaf.clone())),
+                Value::Set(vec![a.clone()]),
+                Value::Set(vec![b.clone()]),
+            ),
+            (
+                "nested as a frozen-map VALUE (reached only after the keys compare equal)",
+                ComparatorType::Map(Box::new(ComparatorType::Text), Box::new(leaf.clone())),
+                Value::Map(vec![(Value::Text("k".into()), a.clone())]),
+                Value::Map(vec![(Value::Text("k".into()), b.clone())]),
+            ),
+        ];
+
+        for (position, cmp, left, right) in positions {
+            for (l, r, direction) in [
+                (&left, &right, "left-to-right"),
+                (&right, &left, "right-to-left"),
+            ] {
+                let err = compare_composite("vcol", l, r, &cmp).unwrap_err();
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("vcol") && msg.contains(type_name) && msg.contains("#4063"),
+                    "a '{type_name}' leaf {position} ({direction}) must fail closed naming \
+                     the column, the leaf type and #4063, got: {msg}"
+                );
+            }
+        }
+    }
+
+    // CONTROL: the refusal is TYPE-SPECIFIC, not a blanket refusal of composites.
+    // The same four shapes with an `int` leaf still order, so the assertions above
+    // cannot be passing because composite comparison is broken outright.
+    assert_eq!(
+        compare_composite(
+            "vcol",
+            &Value::Tuple(vec![Value::Integer(1)]),
+            &Value::Tuple(vec![Value::Integer(2)]),
+            &ComparatorType::Tuple(vec![ComparatorType::Int]),
+        )
+        .unwrap(),
+        std::cmp::Ordering::Less,
+        "an int leaf must still order normally"
+    );
+}
+
+/// **roborev job 111 — the REAL merged-read path refuses a `#4063` leaf, naming the
+/// column (issue #2339).**
+///
+/// The unit matrix above pins `compare_composite`; this pins the whole
+/// `assemble_read_cells_with_udts` path that a multi-generation `SELECT` takes, so
+/// the guard cannot be bypassed by the assembler ordering elements some other way.
+/// `vset set<frozen<tuple<varint, int>>>` differs between the two elements ONLY in
+/// the `varint` component, so the ordering decision lands squarely on the refused
+/// leaf.
+///
+/// The CONTROL is the load-bearing half: with ONE element there is no ordering
+/// decision to make, so the same column still reads. The refusal is triggered by a
+/// comparison that cannot be answered correctly — never by the mere presence of the
+/// type in the schema — which is why this guard costs no availability where no
+/// ordering is at stake.
+///
+/// RED BEFORE THE FIX: this returned `Ok` with the two elements in raw-unsigned-byte
+/// order (`0` before `-1`), the reverse of Cassandra's `IntegerType` order.
+#[test]
+fn varint_composite_element_fails_closed_through_the_merged_read_path() {
+    // frozen<tuple<varint, int>>: i32-BE length per component (`TupleType.buildValue`).
+    let path = |varint_body: u8| {
+        let mut p = Vec::new();
+        p.extend_from_slice(&1i32.to_be_bytes());
+        p.push(varint_body);
+        p.extend_from_slice(&4i32.to_be_bytes());
+        p.extend_from_slice(&1i32.to_be_bytes());
+        p
+    };
+    let cells = vec![
+        elem("vset", Value::blob(Vec::new()), path(0xFF)), // varint -1
+        elem("vset", Value::blob(Vec::new()), path(0x00)), // varint 0
+    ];
+    let err = assemble_read_cells_with_udts(cells, &schema(), None, registry()).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("vset") && msg.contains("varint") && msg.contains("#4063"),
+        "a composite element ordered on a varint leaf must fail closed naming the \
+         column, the leaf type and #4063, got: {msg}"
+    );
+
+    // CONTROL: ONE element makes no ordering decision, so it still reads.
+    let single = vec![elem("vset", Value::blob(Vec::new()), path(0xFF))];
+    let cells = assemble_read_cells_with_udts(single, &schema(), None, registry())
+        .expect("a single composite element needs no ordering decision, so it must still read");
+    assert!(
+        matches!(get(&cells, "vset"), Some(Value::Set(items)) if items.len() == 1),
+        "the single-element control must decode to a one-element set, got: {:?}",
+        get(&cells, "vset")
     );
 }
 

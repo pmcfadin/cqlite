@@ -46,6 +46,13 @@
 //! to remove, and a schema-driven dispatch is the no-heuristics direction (#28)
 //! where a runtime-`Value`-variant dispatch is not.
 //!
+//! Three leaf types — `varint`, `decimal` and `uuid`/`timeuuid` — have no
+//! Cassandra-compatible ordering in that single owner yet (issue #4063), so
+//! [`compare_composite`] REFUSES an ordering decision on them instead of
+//! inheriting a known-wrong answer; the citations and the reasoning are on
+//! [`divergent_leaf`]. Refusal keeps ONE ordering authority: a locally-correct
+//! comparator here would be the second one, which is the very class above.
+//!
 //! `inet` and `time` need no special case: `types::comparator::custom` orders both
 //! by their serialized form's unsigned byte order, which IS their Cassandra
 //! `ComparisonType.BYTE_ORDER` (fixture-backed against the Cassandra-written
@@ -238,8 +245,14 @@ fn first_unresolved_custom(cmp: &ComparatorType) -> Option<&str> {
 /// comparator does (see the module doc for the pinned-source transcription).
 ///
 /// `Err` on a value/comparator shape mismatch the declared metadata should never
-/// produce — surfaced rather than silently mis-ordered.
+/// produce — surfaced rather than silently mis-ordered — and on a scalar leaf whose
+/// central comparator is KNOWN to diverge from Cassandra's (see
+/// [`divergent_leaf`]), which is refused rather than ordered wrongly.
+///
+/// `column` is carried only to NAME the column in those refusals, exactly as the
+/// decode-side refusals in this module do; it never influences the ordering.
 pub(super) fn compare_composite(
+    column: &str,
     left: &Value,
     right: &Value,
     cmp: &ComparatorType,
@@ -252,7 +265,7 @@ pub(super) fn compare_composite(
         // a tuple order identically (component-wise, nulls first).
         ComparatorType::Tuple(field_cmps) => {
             let (l, r) = (tuple_fields(left, cmp)?, tuple_fields(right, cmp)?);
-            compare_components(&l, &r, field_cmps)
+            compare_components(column, &l, &r, field_cmps)
         }
         ComparatorType::Udt {
             field_comparators, ..
@@ -260,13 +273,13 @@ pub(super) fn compare_composite(
             let (l, r) = (udt_fields(left, cmp)?, udt_fields(right, cmp)?);
             let field_cmps: Vec<&ComparatorType> =
                 field_comparators.iter().map(|(_, c)| c).collect();
-            compare_components_ref(&l, &r, &field_cmps)
+            compare_components_ref(column, &l, &r, &field_cmps)
         }
         // `CollectionType.compareListOrSet`: element-wise, then size.
         ComparatorType::List(elem) | ComparatorType::Set(elem) => {
             let (l, r) = (sequence(left, cmp)?, sequence(right, cmp)?);
             for (a, b) in l.iter().zip(r.iter()) {
-                match compare_composite(a, b, elem)? {
+                match compare_composite(column, a, b, elem)? {
                     Ordering::Equal => {}
                     other => return Ok(other),
                 }
@@ -277,11 +290,11 @@ pub(super) fn compare_composite(
         ComparatorType::Map(key_cmp, val_cmp) => {
             let (l, r) = (entries(left, cmp)?, entries(right, cmp)?);
             for ((lk, lv), (rk, rv)) in l.iter().zip(r.iter()) {
-                match compare_composite(lk, rk, key_cmp)? {
+                match compare_composite(column, lk, rk, key_cmp)? {
                     Ordering::Equal => {}
                     other => return Ok(other),
                 }
-                match compare_composite(lv, rv, val_cmp)? {
+                match compare_composite(column, lv, rv, val_cmp)? {
                     Ordering::Equal => {}
                     other => return Ok(other),
                 }
@@ -305,24 +318,91 @@ pub(super) fn compare_composite(
         // dispatches on the SCHEMA type, so keeping both would leave two ordering
         // authorities for one type — the divergence class #2339 exists to remove.
         //
-        // GAP (tracked as #4063): three leaf types are ordered by
-        // `ComparatorType::compare` in a way
-        // that does NOT match Cassandra, a PRE-EXISTING central-comparator defect
-        // this arm now inherits rather than papers over (a second path would hide
-        // it, and fixing the central comparator is its own change with its own
-        // blast radius — the writer path already has a correct implementation of
-        // each, so the fix is a convergence, not new code):
-        //   * `varint` — `compare_varint` is `Bytes::cmp`, i.e. raw unsigned bytes,
-        //     where Cassandra `IntegerType` compares SIGNED two's-complement
-        //     magnitude (so a negative sorts ABOVE `0` here, which is reversed).
-        //   * `decimal` — `compare_decimal` normalizes unequal scales by comparing
-        //     `format!("{:?}.{}", unscaled, scale)` STRINGS, self-described in
-        //     source as "For now, simple string comparison"; Cassandra
-        //     `DecimalType` compares numerically.
-        //   * `uuid` — `compare_uuid` is `Uuid::cmp` (raw bytes), where Cassandra
-        //     `UUIDType` compares version first, then a v1 timestamp, then the tail.
-        _ => cmp.compare(left, right),
+        // GAP (tracked as #4063), and what this arm DOES about it: three leaf types
+        // have no Cassandra-compatible ordering in `ComparatorType::compare`, so an
+        // ordering DECISION on one of them is REFUSED here rather than answered
+        // wrongly (see [`divergent_leaf`] for the per-type citations). Returning the
+        // central comparator's answer would emit a plausible-looking collection in
+        // the wrong order — a silent-wrong-value outcome, which is the class #28
+        // forbids and the same shape as the nested-unresolved-UDT bug this module
+        // already fails closed on.
+        //
+        // Fixing the central arms is deliberately NOT done here: it is a convergence
+        // on `collection_order::scalar` (which already implements all three under its
+        // own Cassandra citations) with its own blast radius, tracked as #4063. A
+        // local correct comparator would be a SECOND ordering authority for the same
+        // types — the divergence class #2339 exists to remove — so refusal, not a
+        // second path, is the only option that keeps ONE authority.
+        _ => {
+            if let Some(leaf) = divergent_leaf(cmp) {
+                return Err(divergent_leaf_error(column, leaf));
+            }
+            cmp.compare(left, right)
+        }
     }
+}
+
+/// A scalar leaf type whose CENTRAL `ComparatorType::compare` arm is KNOWN not to
+/// implement Cassandra's ordering, with the pinned-source citation for WHY
+/// (issue #4063).
+///
+/// This is a REFUSAL list, not a second comparator: [`compare_composite`] fails
+/// closed for these leaves instead of ordering them. It exists because the
+/// alternative — inheriting `ComparatorType::compare`'s answer — returns a
+/// plausible-looking collection in an order Cassandra would not produce, and a
+/// merged read has no way for the caller to notice.
+///
+/// The divergences, read from `types::comparator` rather than assumed, against the
+/// pinned `cassandra-5.0.8` comparators:
+///
+/// * `varint` — `compare_varint` is `Bytes::cmp`, i.e. raw UNSIGNED bytes, where
+///   Cassandra `IntegerType.compare` orders by SIGNED two's-complement magnitude
+///   (so `-1`, body `0xFF`, sorts ABOVE `0` here — reversed).
+/// * `decimal` — `compare_decimal` normalizes unequal scales by comparing
+///   `format!("{:?}.{}", unscaled, scale)` STRINGS, self-described in source as
+///   "For now, simple string comparison"; Cassandra `DecimalType.compare` compares
+///   NUMERICALLY.
+/// * `uuid` — `compare_uuid` is `Uuid::cmp` (raw bytes), where Cassandra `UUIDType`
+///   compares version first, then a v1 timestamp, then the tail. `CqlType::TimeUuid`
+///   maps onto this SAME `ComparatorType::Uuid` variant, so a `timeuuid` leaf is
+///   refused here too — and Cassandra's `TimeUUIDType` order differs again, so
+///   inheriting would be wrong for both spellings.
+///
+/// Dispatch is on the DECLARED comparator, never on the runtime value (#28).
+fn divergent_leaf(cmp: &ComparatorType) -> Option<(&'static str, &'static str)> {
+    match cmp {
+        ComparatorType::Varint => Some((
+            "varint",
+            "IntegerType (signed two's-complement magnitude), where compare_varint is raw \
+             unsigned byte order",
+        )),
+        ComparatorType::Decimal => Some((
+            "decimal",
+            "DecimalType (numeric across scales), where compare_decimal falls back to a \
+             formatted-string comparison for unequal scales",
+        )),
+        ComparatorType::Uuid => Some((
+            "uuid/timeuuid",
+            "UUIDType (version, then v1 timestamp, then tail), where compare_uuid is raw \
+             byte order",
+        )),
+        _ => None,
+    }
+}
+
+/// The refusal [`compare_composite`] returns for a [`divergent_leaf`].
+///
+/// Names the COLUMN, the offending LEAF TYPE and issue #4063, in the same style as
+/// this module's decode-side refusals, so an operator can tell which column and
+/// which type to look at without reading source.
+fn divergent_leaf_error(column: &str, (leaf, citation): (&'static str, &'static str)) -> Error {
+    Error::unsupported_format(format!(
+        "column '{column}': refusing to ORDER a composite collection key/element \
+         whose '{leaf}' leaf has no Cassandra-compatible ordering yet — the central \
+         ComparatorType::compare arm for '{leaf}' diverges from Cassandra's {citation} \
+         (tracked as issue #4063). Failing closed rather than returning a \
+         plausible-looking collection in the wrong order (issues #28/#2339)"
+    ))
 }
 
 /// `TupleType.compareCustom`'s component loop over already-decoded components.
@@ -332,15 +412,17 @@ pub(super) fn compare_composite(
 ///   component of the other side is NULL, else the side with content is GREATER;
 /// * an EMPTY value therefore sorts first, matching the `isEmpty` pre-check.
 fn compare_components(
+    column: &str,
     left: &[Value],
     right: &[Value],
     field_cmps: &[ComparatorType],
 ) -> Result<Ordering> {
     let refs: Vec<&ComparatorType> = field_cmps.iter().collect();
-    compare_components_ref(left, right, &refs)
+    compare_components_ref(column, left, right, &refs)
 }
 
 fn compare_components_ref(
+    column: &str,
     left: &[Value],
     right: &[Value],
     field_cmps: &[&ComparatorType],
@@ -354,7 +436,7 @@ fn compare_components_ref(
             (false, true) => return Ok(Ordering::Greater),
             (false, false) => {}
         }
-        match compare_composite(l, r, field_cmps[i])? {
+        match compare_composite(column, l, r, field_cmps[i])? {
             Ordering::Equal => {}
             other => return Ok(other),
         }
