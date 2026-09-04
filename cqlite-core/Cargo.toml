@@ -39,7 +39,15 @@ readme = "../README.md"
 # repo-root-fixture property". 454 is a real number and it is the one above — packaged
 # `tests/` ENTRIES, most of which read no fixture at all — attached to a claim about a
 # property it does not measure. The two counts answer different questions.
-exclude = ["tests/issue_3358_bti_query_token_bound.rs"]
+# issue_3747_empty_map_key.rs JOINS the same class for the same reason: it resolves
+# `test-data/fixtures/issue_3747/` CHECKOUT-relative and fails CLOSED (a committed
+# fixture is `must_run`), so a packaged copy without the fixture would always panic.
+# Excluded narrowly, matching the scoping decision above rather than pre-empting
+# #3677's class-wide call.
+exclude = [
+    "tests/issue_3358_bti_query_token_bound.rs",
+    "tests/issue_3747_empty_map_key.rs",
+]
 
 # docs.rs build: document the commonly used features. Deliberately excludes
 # `wasm` (wasm32-only deps would fail the default x86_64 docs.rs target).
