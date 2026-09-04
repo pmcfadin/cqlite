@@ -41,7 +41,7 @@
 
 use super::super::V5CompressedLegacyParser;
 use crate::schema::{CqlType, UdtRegistry};
-use crate::types::UdtTypeDef;
+use crate::types::{EmptyValueType, UdtTypeDef};
 use crate::Value;
 
 const KEYSPACE: &str = "test_udt_collision";
@@ -1040,31 +1040,54 @@ fn a_minus_one_component_length_is_still_a_null_field() {
 // only the pair is evidence.
 
 /// The `N`-or-`0` family: a 0-byte key passes the WIDTH table (Cassandra's
-/// serializer accepts an empty buffer) and is now PRESERVED, opaquely.
+/// serializer accepts an empty buffer) and is now PRESERVED **as the TYPED
+/// `Value::Empty` sentinel**, with `opaque_out` deliberately UNSET.
 ///
+/// # The three revisions of this one assertion, and why each moved
 /// #3612 asserted an `Err` here and called the `0` allowance "a fidelity fix, not a
 /// behaviour change" — true then: the decoder's length guard refused what the table
 /// admitted. **#3747 changed that on purpose** — losing a key Cassandra accepts is
-/// the data loss it exists to stop, and an untypeable key already had a policy:
-/// opaque bytes plus `opaque_out`. The STRICT sibling alone now carries the other half.
+/// the data loss it exists to stop — and, having no `Value` that could carry an
+/// empty fixed-width scalar, applied the existing policy for an untypeable key:
+/// opaque bytes plus `opaque_out`. **#3805 slice 2 supersedes that placeholder**:
+/// slice 1 added the sentinel, so the key is now typed, and `opaque_out` MUST be
+/// clear — that flag drives a `warn!` per column per row, and raising it for data
+/// this reader now models correctly is the misleading-diagnostic defect #3612
+/// closed. The STRICT sibling below carries the other half of the split.
+///
+/// ORACLE: the admitted set is `EmptyValueType`'s source-derived membership rule
+/// (`cassandra-5.0.8` serializers), never CQLite's own prior output. `counter` is
+/// included here and NOT in `regression_3747_empty_map_key_tests` because CQL
+/// forbids a `counter` collection element, so it is reachable at this function
+/// only — the one family with no `map<counter,…>` spelling to test through.
 #[test]
-fn an_empty_key_of_an_n_or_zero_type_is_preserved_opaquely() {
+fn an_empty_key_of_an_n_or_zero_type_is_the_typed_empty_sentinel() {
     let p = parser();
-    #[rustfmt::skip]
-    let types = ["int","bigint","float","double","uuid","timeuuid","timestamp","counter","boolean"];
-    for type_str in types {
+    let cases: &[(&str, EmptyValueType)] = &[
+        ("int", EmptyValueType::Int),
+        ("bigint", EmptyValueType::BigInt),
+        ("float", EmptyValueType::Float),
+        ("double", EmptyValueType::Double),
+        ("uuid", EmptyValueType::Uuid),
+        ("timeuuid", EmptyValueType::TimeUuid),
+        ("timestamp", EmptyValueType::Timestamp),
+        ("counter", EmptyValueType::Counter),
+        ("boolean", EmptyValueType::Boolean),
+    ];
+    for (type_str, tag) in cases {
         let mut opaque = false;
         let decoded = p
             .parse_cell_path_key_reporting(&[], type_str, "k", &mut opaque)
             .unwrap_or_else(|e| panic!("{type_str}: Cassandra accepts empty; keep it: {e}"));
         assert_eq!(
             decoded,
-            Value::blob(Vec::new()),
-            "{type_str}: preserved opaquely"
+            Value::Empty(*tag),
+            "{type_str}: preserved as the typed sentinel, not an opaque blob"
         );
         assert!(
-            opaque,
-            "{type_str}: opaque_out must be raised (gap goes to the log)"
+            !opaque,
+            "{type_str}: opaque_out must NOT be raised — the key is modelled now, and \
+             the flag emits a warn! per column per row"
         );
     }
 }

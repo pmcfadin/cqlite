@@ -326,6 +326,7 @@
 //! to the frozen/set routes is out of #3612's scope.
 
 use super::*;
+use crate::types::EmptyValueType;
 
 impl V5CompressedLegacyParser {
     /// Parse a MULTICELL map's cell-path key, DISCARDING the undecodable-key
@@ -392,9 +393,40 @@ impl V5CompressedLegacyParser {
         let (decoded, consumed) =
             match self.decode_reporting_consumption(data, type_str, column_name, 0) {
                 Ok(v) => v,
-                // #3747: the table ADMITTED this empty buffer but no `Value` carries an
-                // empty fixed-width scalar — same OPAQUE policy as below. Typed: #3805.
+                // #3747 ADMITTED this empty buffer through `allowed` and then had
+                // nowhere to put it: no `Value` carried an empty fixed-width scalar,
+                // so it applied the OPAQUE policy below and recorded the seam
+                // ("Typed: #3805"). #3805 slice 1 added the typed sentinel, and this
+                // is slice 2 spending it.
+                //
+                // TWO facts decide the two branches, and neither is this call site's
+                // to invent:
+                //
+                //  * The ADMISSION GATE is [`EmptyValueType::for_cql_type`] — the ONE
+                //    place the legal/corruption line is drawn, on Cassandra's
+                //    `validate()` rather than on decodability. A `Some` tag means
+                //    `cassandra-5.0.8`'s serializer for that family accepts the empty
+                //    buffer AND maps it to null (see that function's membership rule),
+                //    so the key is PRESENT, TYPED and MEANINGLESS-VALUED.
+                //  * `opaque_out` stays UNSET on the typed branch. The flag exists to
+                //    diagnose a key this reader CANNOT MODEL, and it now can; leaving
+                //    it set would emit a `warn!` per column per row for correct data,
+                //    which is the misleading-diagnostic half of #3612.
+                //
+                // `None` keeps the opaque fallback verbatim — fail-safe, and it
+                // documents that a family this reader has no sentinel for is still
+                // preserved rather than dropped or refused. The four STRICT families
+                // (`tinyint`/`smallint`/`date`/`time`) never reach here at all: the
+                // width check above refuses their empty buffer, exactly as Cassandra's
+                // bare `!= N` `validate` does.
                 Err(_) if data.is_empty() && allowed.contains(&0) => {
+                    if let Some(tag) = self
+                        .cell_path_key_cql_type(type_str)
+                        .as_ref()
+                        .and_then(EmptyValueType::for_cql_type)
+                    {
+                        return Ok(Value::Empty(tag));
+                    }
                     *opaque_out = true;
                     return Ok(Value::blob(Vec::new()));
                 }
@@ -617,6 +649,39 @@ impl V5CompressedLegacyParser {
             self.parse_value_from_raw_bytes(data, type_str, column_name, depth)?,
             None,
         ))
+    }
+
+    /// The declared KEY type as a [`CqlType`], or `None` when this module's own
+    /// classifiers cannot name it.
+    ///
+    /// Composed from the TWO normalizers already in this decode path — no third
+    /// parser, because a second opinion about a type spelling is the drift this
+    /// module's header calls out by name:
+    ///
+    ///   * `frozen<…>` / `FrozenType(…)` is peeled by
+    ///     [`Self::peel_frozen_spellings`], the SAME unwrapper
+    ///     [`Self::cell_path_key_allowed_widths`] and
+    ///     [`Self::cell_path_key_declares_blob`] use, so all three form one opinion
+    ///     about which spellings are frozen.
+    ///   * a MARSHAL name goes through [`Self::native_marshal_to_cql_type`] — the
+    ///     crate's one marshal-class-to-[`CqlType`] table, and the very table
+    ///     `primitive_marshal_to_cql_short` (which the width classifier consults)
+    ///     is built on. It enforces the package rule, so `com.acme.Int32Type` is
+    ///     `None` here rather than silently CQL `int`.
+    ///   * everything else is a CQL short form and goes through
+    ///     [`CqlType::parse`], the crate's one CQL-type-string parser
+    ///     (case-insensitive, like the decoder's own lowercased matching).
+    ///
+    /// `CqlType::parse` cannot fail for a bare unrecognised name — it yields
+    /// `CqlType::Custom`, for which `EmptyValueType::for_cql_type` is `None` — so
+    /// an unmodelled type reaches the caller's opaque fallback rather than a
+    /// guessed family (#28).
+    fn cell_path_key_cql_type(&self, type_str: &str) -> Option<CqlType> {
+        let peeled = self.peel_frozen_spellings(type_str);
+        if peeled.contains("org.apache.cassandra.db.marshal.") {
+            return Self::native_marshal_to_cql_type(&peeled);
+        }
+        CqlType::parse(&peeled).ok()
     }
 
     /// Whether `type_str` DECLARES a blob key, i.e. whether `Value::Blob` is the

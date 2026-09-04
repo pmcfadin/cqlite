@@ -40,7 +40,7 @@
 use super::V5CompressedLegacyParser;
 use crate::parser::vint::encode_vuint;
 use crate::schema::Column;
-use crate::types::Value;
+use crate::types::{EmptyValueType, Value};
 
 fn parser() -> V5CompressedLegacyParser {
     V5CompressedLegacyParser::new("ks".to_string(), "t".to_string(), 0, 0, None)
@@ -133,39 +133,114 @@ fn empty_key_decodes_for_the_families_that_admit_it() {
     }
 }
 
-/// CASSANDRA-VALID BUT UNTYPED — the entry SURVIVES, opaquely. This is the case
-/// roborev pushed on across four rounds and was right about every time.
+/// CASSANDRA-VALID, AND NOW TYPED — the entry survives as the `Value::Empty`
+/// SENTINEL carrying its declared family. This is the case roborev pushed on
+/// across four rounds and was right about every time.
 ///
 /// Cassandra's `size != N && !isEmpty` shape makes an EMPTY buffer legal for the
-/// `N`-or-`0` families, and #3612's width table encodes that. CQLite has no `Value`
-/// that carries an empty fixed-width scalar — but it already has a POLICY for a key
-/// it cannot model: surface the bytes opaquely and raise `opaque_out`, never drop
-/// and never `Err`. Two earlier revisions of this fix got that wrong: one let the
-/// error propagate (which `break`s row assembly and takes the column plus every
-/// later one), the other dropped the entry (the very data loss #3747 exists to
-/// stop). Applying the existing opaque policy is what resolves both.
+/// `N`-or-`0` families, and #3612's width table encodes that. **#3805 slice 2
+/// DELIBERATELY SUPERSEDED #3747's opaque-blob placeholder**: when this test was
+/// written CQLite had no `Value` that could carry an empty fixed-width scalar, so
+/// the module applied its existing policy for an unmodellable key — surface the
+/// bytes opaquely and raise `opaque_out`, never drop and never `Err` — and the
+/// arm's own comment recorded the seam ("Typed: #3805"). Slice 1 added
+/// [`crate::types::Value::Empty`] + [`crate::types::EmptyValueType`], so the key
+/// is now PRESENT, TYPED and NOT opaque; `opaque_out` is deliberately left unset,
+/// because emitting a `warn!` per entry per row for correct data was the
+/// diagnostic defect #3612 closed.
+///
+/// The two earlier revisions this test was written against are still wrong for the
+/// same reasons: one let the error propagate (which `break`s row assembly and
+/// takes the column plus every later one), the other dropped the entry (the very
+/// data loss #3747 exists to stop).
+///
+/// ORACLE — the admitted set and its per-family authority is
+/// `EmptyValueType`'s membership rule, derived from `cassandra-5.0.8`'s
+/// serializers (`Int32Serializer.java:40-44` *"Expected 4 or 0 byte int"*, and
+/// its siblings); never from CQLite's prior output, which is exactly the opaque
+/// blob this test used to pin.
 #[test]
-fn a_cassandra_valid_but_untyped_empty_key_survives_as_an_opaque_blob() {
-    for ty in [
-        "int",
-        "float",
-        "bigint",
-        "double",
-        "timestamp",
-        "uuid",
-        "timeuuid",
-        "boolean",
-    ] {
+fn a_cassandra_valid_empty_key_survives_as_the_typed_empty_sentinel() {
+    let cases: &[(&str, EmptyValueType)] = &[
+        ("int", EmptyValueType::Int),
+        ("float", EmptyValueType::Float),
+        ("bigint", EmptyValueType::BigInt),
+        ("double", EmptyValueType::Double),
+        ("timestamp", EmptyValueType::Timestamp),
+        ("uuid", EmptyValueType::Uuid),
+        ("timeuuid", EmptyValueType::TimeUuid),
+        ("boolean", EmptyValueType::Boolean),
+    ];
+    for (ty, tag) in cases {
         let map_type = format!("map<{ty},int>");
         let decoded = decode(&map_type, b"", &7i32.to_be_bytes()).unwrap_or_else(|e| {
             panic!("Cassandra admits an empty {ty}; the entry must survive, not error: {e}")
         });
         assert_eq!(
             decoded,
-            Value::Map(vec![(Value::blob(Vec::new()), Value::Integer(7))]),
-            "the empty {ty} key must be PRESERVED opaquely, not dropped and not typed"
+            Value::Map(vec![(Value::Empty(*tag), Value::Integer(7))]),
+            "the empty {ty} key must be PRESERVED as the TYPED sentinel, not dropped, \
+             not refused and no longer an opaque blob (#3805 slice 2)"
         );
     }
+}
+
+/// The MARSHAL spelling of the same eight families must reach the same tag.
+///
+/// A `Statistics.db`-sourced key type arrives in marshal form and is normalized by
+/// a DIFFERENT branch of the type classifier, so a fix that only handled the CQL
+/// short form would pass the test above and leave every no-schema read opaque.
+#[test]
+fn the_marshal_spelling_of_an_empty_key_reaches_the_same_tag() {
+    const P: &str = "org.apache.cassandra.db.marshal.";
+    let cases: &[(&str, EmptyValueType)] = &[
+        ("Int32Type", EmptyValueType::Int),
+        ("FloatType", EmptyValueType::Float),
+        ("LongType", EmptyValueType::BigInt),
+        ("DoubleType", EmptyValueType::Double),
+        ("TimestampType", EmptyValueType::Timestamp),
+        ("UUIDType", EmptyValueType::Uuid),
+        ("TimeUUIDType", EmptyValueType::TimeUuid),
+        ("BooleanType", EmptyValueType::Boolean),
+    ];
+    for (marshal, tag) in cases {
+        let map_type = format!("map<{P}{marshal},{P}Int32Type>");
+        let decoded = decode(&map_type, b"", &7i32.to_be_bytes())
+            .unwrap_or_else(|e| panic!("an empty {marshal} key must survive: {e}"));
+        assert_eq!(
+            decoded,
+            Value::Map(vec![(Value::Empty(*tag), Value::Integer(7))]),
+            "marshal {marshal} must reach the same sentinel tag as its CQL short form"
+        );
+    }
+}
+
+/// The `frozen<…>` SPELLING of a fixed-width key type must also reach the tag.
+///
+/// `cell_path_key_allowed_widths` PEELS `frozen<…>` before classifying (that peel
+/// is load-bearing — see its doc comment), so the sentinel lookup must peel the
+/// same way or a frozen-spelled key would keep the opaque fallback while the width
+/// table admitted it: a spelling cannot be handled in one helper and assumed
+/// impossible in the other.
+///
+/// # The result is UNWRAPPED, and that is PRE-EXISTING, not a new opinion
+/// This arm is the fallback taken when the decoder REFUSED the slice, so no
+/// decoder produced a `Value::Frozen` wrapper to preserve — and it already
+/// returned a BARE `Blob(b"")` for this spelling before #3805 slice 2. The
+/// sentinel keeps that shape exactly. Introducing a `Frozen(…)` wrapper here
+/// would be a presentation change with no oracle behind it (`frozen<int>` is not
+/// a legal CQL map-key type, so no Cassandra-written bytes can settle it), and it
+/// is deliberately NOT bundled into this fix.
+#[test]
+fn a_frozen_spelled_fixed_width_empty_key_reaches_the_tag() {
+    let decoded = decode("map<frozen<int>,int>", b"", &7i32.to_be_bytes())
+        .expect("a frozen-spelled empty int key is admitted by the same width table");
+    assert_eq!(
+        decoded,
+        Value::Map(vec![(Value::Empty(EmptyValueType::Int), Value::Integer(7))]),
+        "the frozen spelling reaches the same tag, in this arm's pre-existing \
+         UNWRAPPED shape"
+    );
 }
 
 /// CASSANDRA-INVALID — REFUSED, because that is where the module's committed rule
