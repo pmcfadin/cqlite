@@ -1,7 +1,8 @@
 //! CHARACTERISATION of the #1741 per-element shadow/TTL filter in the
-//! multicell complex-column loop — its SET, MAP and UDT branches; the LIST
-//! branch (`complex_column.rs`'s list arm) is NOT covered here — and of the ONE
-//! width gap that filter still leaves open (issue #3723).
+//! multicell complex-column loop — its LIST, SET, MAP and UDT branches — and of
+//! the ONE width gap that filter still leaves open (issue #3723; the LIST
+//! branch was added by issue #4034, which closed this header's earlier
+//! declaration that it was uncovered).
 //!
 //! ## What these cases are, and are not
 //!
@@ -19,12 +20,25 @@
 //! The gap is tracked as **#3778**; the width property itself is pinned by
 //! `raw_value/nested_fixed_width_length_tests.rs`.
 //!
-//! ## The gap, stated plainly
+//! ## The gap, stated plainly — and the branch it does NOT reach
 //!
-//! An element the filter DROPS is `continue`d before any decode runs, so its
-//! bytes are never width-validated: a malformed fixed-width element is silently
-//! filtered rather than refused, purely because some OTHER cell shadows it or
-//! its own TTL has expired.
+//! An element the filter DROPS is `continue`d before its branch's OWN element
+//! decode runs, so its bytes are never width-validated: a malformed
+//! fixed-width element is silently filtered rather than refused, purely because
+//! some OTHER cell shadows it or its own TTL has expired.
+//!
+//! That is a claim about the elements whose decode is DEFERRED past the
+//! `continue`, and only those: the SET member and the MAP key (both live in the
+//! cell PATH, decoded in the branch body) and the UDT field (whose value the
+//! loop reads as `BytesType` and re-decodes per field afterwards). It does NOT
+//! reach the LIST element, which lives in the cell VALUE and which
+//! `parse_complex_cell_value` decodes with the declared element type BEFORE
+//! `element_dropped` is ever consulted — so a wrong-width dropped list element
+//! is REFUSED. That divergence is pinned by
+//! `a_wrong_width_dropped_list_element_is_still_refused_unlike_set_map_and_udt`,
+//! which carries the mechanism (issue #4034). A malformed multicell map VALUE
+//! is refused on both paths for the same reason and is not covered here — the
+//! map case below characterises its KEY.
 //!
 //! The LIVE path is NOT part of that gap, and the tolerance is therefore
 //! ONE-DIRECTIONAL — the DROPPED path only. A wrong-width element that is not
@@ -196,6 +210,115 @@ fn field_path(index: i16) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// LIST-branch fixtures (issue #4034).
+//
+// A multicell LIST does NOT key its elements by value the way a SET does: the
+// cell PATH is a generated 16-byte TimeUUID carrying only insertion order, and
+// the element itself lives in the cell VALUE, unsigned-VInt length-prefixed
+// even for a fixed-width element type. Authority is the on-disk framing table
+// and the verbatim `test_collections/collection_table` bytes in
+// `docs/sstables-definitive-guide/chapters/05-data-db-format.md` ("Cell Path
+// and Value by Collection Type" / "List Element Ordering") — the path below is
+// literally cell 1's TimeUUID from that dump. So `build_set_cell_bytes` cannot
+// build a list element (it sets `HAS_EMPTY_VALUE` and writes no value at all)
+// and there is no list analogue of it; the generic [`cell`] helper, which
+// writes `[flags][ts][path_len][path][value_len][value]`, is the right shape.
+// ---------------------------------------------------------------------------
+
+/// The 16-byte TimeUUID cell path of a multicell list element — **cell 1** of
+/// the verbatim `test_collections/collection_table` dump. Its CONTENT is inert
+/// to a SINGLE-element case (the list arm never decodes a list cell path; it
+/// only records it for the compaction contract), and it is a real
+/// Cassandra-written TimeUUID rather than a made-up one so the fixture's
+/// framing is the framing on disk.
+///
+/// A MULTI-element fixture must NOT reuse it: Cassandra generates a unique
+/// TimeUUID per element and that is what carries insertion order, so two cells
+/// sharing a path is a state Cassandra cannot produce — use
+/// [`list_element_path_2`] for the second element (roborev job 163).
+fn list_element_path() -> Vec<u8> {
+    vec![
+        0x79, 0xf2, 0xa0, 0x80, 0xa2, 0x51, 0x11, 0xf0, 0xa3, 0xfe, 0xf1, 0xa5, 0x51, 0x38, 0x3f,
+        0xb9,
+    ]
+}
+
+/// The TimeUUID cell path of **cell 2** of that same dump — the element written
+/// AFTER [`list_element_path`], so a two-element fixture using both is ordered
+/// the way Cassandra wrote it. The two differ only in byte 4 (`0x80` vs
+/// `0x8a`), which is the time field, so cell 2 sorts second.
+fn list_element_path_2() -> Vec<u8> {
+    vec![
+        0x79, 0xf2, 0xa0, 0x8a, 0xa2, 0x51, 0x11, 0xf0, 0xa3, 0xfe, 0xf1, 0xa5, 0x51, 0x38, 0x3f,
+        0xb9,
+    ]
+}
+
+/// A multicell list cell carrying an EXPLICIT element timestamp — `ts_delta` is
+/// an unsigned VInt delta from `min_timestamp`, which [`parser`] sets to 0, so
+/// the absolute write ts IS `ts_delta`.
+///
+/// Prefer this over `USE_ROW_TIMESTAMP` (0x08) for a LIVE element in a
+/// multi-element fixture: that flag means "inherit the row's timestamp", so it
+/// is only producible alongside a row timestamp — and `element_dropped`'s own
+/// comment records that the read path ALWAYS sets `row_ts` from the row header.
+/// A cell carrying the flag while the filter supplies `row_ts: None` is
+/// therefore a state Cassandra cannot write, and a per-element filtering claim
+/// resting on it would rest on unreachable input (roborev job 164).
+fn list_cell_at_ts(path: &[u8], ts_delta: u64, value: &[u8]) -> Vec<u8> {
+    let mut buf = vec![0x00u8];
+    encode_unsigned(ts_delta, &mut buf);
+    encode_unsigned(path.len() as u64, &mut buf);
+    buf.extend_from_slice(path);
+    encode_unsigned(value.len() as u64, &mut buf);
+    buf.extend_from_slice(value);
+    buf
+}
+
+/// One live multicell list element carrying `value` in the cell VALUE, with an
+/// EXPLICIT timestamp delta of 0 (so [`shadow_everything`] shadows it — an
+/// element that instead carried `USE_ROW_TIMESTAMP` would have no
+/// authoritative write ts and could never be shadowed, per #1741).
+fn list_cell(value: &[u8]) -> Vec<u8> {
+    cell(&list_element_path(), value)
+}
+
+/// One EXPIRING live list element (`IS_EXPIRING`, and deliberately NOT
+/// `HAS_EMPTY_VALUE`, so a value still follows) whose explicit
+/// `localDeletionTime`/`ttl` is one second — i.e. long expired at [`NOW`].
+///
+/// `[flags][timestamp][localDeletionTime][ttl][path_len][path][value_len][value]`
+fn expiring_list_cell(value: &[u8]) -> Vec<u8> {
+    let path = list_element_path();
+    assert!(
+        path.len() < 0x80 && value.len() < 0x80,
+        "single-byte VUInt only"
+    );
+    let mut buf = vec![0x02u8, 0x00, 0x01, 0x01, path.len() as u8];
+    buf.extend_from_slice(&path);
+    buf.push(value.len() as u8);
+    buf.extend_from_slice(value);
+    buf
+}
+
+/// One live list element flagged `HAS_EMPTY_VALUE` (0x04): no value length and
+/// no value bytes follow at all, which is how Cassandra writes a zero-length
+/// element. Contrast an explicit `value_len = 0`, which [`list_cell`] with an
+/// empty slice produces and which is a DIFFERENT encoding — see
+/// `a_zero_length_shadowed_list_element_filters_only_under_has_empty_value`.
+fn empty_value_list_cell() -> Vec<u8> {
+    let path = list_element_path();
+    assert!(path.len() < 0x80, "single-byte VUInt only");
+    let mut buf = vec![0x04u8, 0x00, path.len() as u8];
+    buf.extend_from_slice(&path);
+    buf
+}
+
+fn decode_list(cells: &[Vec<u8>], filter: Option<ElementShadow>) -> Result<(Value, usize)> {
+    decode("my_list", "list<int>", "list<int>", cells, filter)
+}
+
+// ---------------------------------------------------------------------------
 // Negative controls: the filter drops exactly what it should, and counts it.
 // ---------------------------------------------------------------------------
 
@@ -264,6 +387,78 @@ fn a_well_formed_shadowed_set_member_still_filters_with_the_same_accounting() {
     );
 }
 
+/// A WELL-FORMED shadowed LIST element filters, with the drop counted
+/// (issue #4034). This is the LIST counterpart of the three cases above; it is
+/// the case that establishes the filter reaches the list arm AT ALL, so it is
+/// also the control the divergence case below leans on.
+#[test]
+fn a_well_formed_shadowed_list_element_still_filters_with_the_same_accounting() {
+    let cells = [list_cell(&7i32.to_be_bytes())];
+
+    assert_eq!(
+        decode_list(&cells, None).expect("physical consumers filter nothing"),
+        (Value::List(vec![Value::Integer(7)]), 0),
+        "control: with no filter the element is present and nothing is counted as dropped"
+    );
+
+    assert_eq!(
+        decode_list(&cells, Some(shadow_everything()))
+            .expect("a well-formed shadowed element must still filter silently"),
+        (Value::List(vec![]), 1),
+        "the shadowed element is dropped and counted"
+    );
+}
+
+/// A WELL-FORMED TTL-EXPIRED LIST element filters, with the drop counted
+/// (issue #4034) — the OTHER drop reason, reached with no covering deletion at
+/// all. Its own no-filter control proves the element was there to drop, so the
+/// case cannot pass because the cell simply failed to parse.
+#[test]
+fn a_well_formed_ttl_expired_list_element_still_filters_with_the_same_accounting() {
+    let cells = [expiring_list_cell(&7i32.to_be_bytes())];
+
+    assert_eq!(
+        decode_list(&cells, None).expect("physical consumers filter nothing"),
+        (Value::List(vec![Value::Integer(7)]), 0),
+        "control: with no filter the expiring element is present and nothing is dropped"
+    );
+
+    assert_eq!(
+        decode_list(&cells, Some(expiry_only_filter()))
+            .expect("a well-formed TTL-expired element must still filter silently"),
+        (Value::List(vec![]), 1),
+        "the expired element is dropped and counted, with no covering deletion involved"
+    );
+}
+
+/// A shadowed list element alongside a LIVE one: only the shadowed element
+/// goes, the live element survives, and the count is 1 (issue #4034) — the LIST
+/// counterpart of [`only_the_shadowed_member_is_filtered_from_a_mixed_set`],
+/// and what distinguishes PER-ELEMENT filtering in the list arm from dropping
+/// the whole column.
+#[test]
+fn only_the_shadowed_element_is_filtered_from_a_mixed_list() {
+    // Both elements are producible on disk, which is the whole point of this
+    // fixture: each carries its OWN explicit timestamp (no USE_ROW_TIMESTAMP,
+    // which would need an inherited row ts the filter here does not supply —
+    // see [`list_cell_at_ts`]), and each carries a DISTINCT real TimeUUID path
+    // in the order Cassandra wrote them.
+    //
+    // `shadow_everything`'s cover is 100 and `parser`'s `min_timestamp` is 0,
+    // so an absolute ts of 200 is NOT shadowed while `list_cell`'s delta of 0
+    // is. Unlike the set fixture the value still follows the path, because a
+    // list element lives in the cell VALUE.
+    let live = list_cell_at_ts(&list_element_path_2(), 200, &9i32.to_be_bytes());
+    let shadowed = list_cell(&7i32.to_be_bytes());
+
+    assert_eq!(
+        decode_list(&[shadowed, live], Some(shadow_everything()))
+            .expect("a mixed list must decode"),
+        (Value::List(vec![Value::Integer(9)]), 1),
+        "exactly the shadowed element is dropped; the live element is untouched"
+    );
+}
+
 /// A shadowed set member alongside a LIVE one: only the shadowed member goes,
 /// the live member survives, and the count is 1. This is the case that breaks
 /// if the element loop's filtering is ever restructured.
@@ -295,9 +490,14 @@ fn only_the_shadowed_member_is_filtered_from_a_mixed_set() {
 /// behaviour**, and the assertions here are NOT a guard for it.
 ///
 /// A wrong-width fixed-width element that the #1741 filter drops is accepted
-/// silently, because the `continue` runs before any decode. Coverage is the
-/// SET, MAP and UDT branches for the SHADOWED reason, plus the SET branch for
-/// the TTL-EXPIRED reason — 4 of the 6 branch x reason combinations, not a
+/// silently, because the `continue` runs before these branches' own element
+/// decode. Coverage HERE is the SET, MAP and UDT branches for the SHADOWED
+/// reason, plus the SET branch for the TTL-EXPIRED reason. The LIST branch is
+/// NOT one of them and is not an omission: it REFUSES instead, under
+/// `a_wrong_width_dropped_list_element_is_still_refused_unlike_set_map_and_udt`
+/// (issue #4034), which covers both drop reasons. So of the 8 branch x reason
+/// combinations, 6 are characterised across the two cases and the two still
+/// uncovered are (MAP, TTL-expired) and (UDT, TTL-expired) — neither case is a
 /// cross product.
 ///
 /// Each case carries a live-path control: the same bytes decoded with NO filter
@@ -373,6 +573,124 @@ fn a_wrong_width_dropped_element_is_not_validated_today_known_gap_3778() {
     match &value {
         Value::Udt(u) => assert_eq!(u.fields[0].value, None, "the field is left absent"),
         other => panic!("expected a UDT, got {other:?}"),
+    }
+}
+
+/// CHARACTERISATION of the LIST branch, which **DIVERGES** from SET, MAP and
+/// UDT on exactly this axis: a wrong-width dropped list element is **REFUSED**,
+/// so the #3778 gap above does NOT reach it (issue #4034).
+///
+/// Why, mechanically — established by reading `complex_column.rs`, not inferred
+/// from this outcome: every branch calls `parse_complex_cell_value` FIRST, and
+/// that function decodes the cell VALUE (its step 6) with the `element_type` it
+/// was handed, BEFORE the loop body ever consults `element_dropped`. What the
+/// branch passes there decides whether the gap can exist:
+///
+/// * LIST passes the DECLARED element type (`list<int>` ⇒ `int`), and the list
+///   element lives in the cell VALUE — so it is width-validated eagerly, on
+///   both paths, and no `continue` can skip it.
+/// * SET passes the element type too, but a live set member sets
+///   `HAS_EMPTY_VALUE`, so `parse_complex_cell_value` decodes nothing; the
+///   member is decoded from the cell PATH in the branch body, AFTER the
+///   `continue`.
+/// * MAP passes the VALUE type, and the case above characterises its KEY, which
+///   is the cell PATH and is likewise decoded after the `continue`. (A
+///   malformed multicell map VALUE is therefore refused on both paths for the
+///   same reason LIST is — not covered here.)
+/// * UDT passes `BytesType` (identity) and re-decodes each field with its
+///   declared type afterwards, again past the `continue`.
+///
+/// This case is NOT a guard for desired behaviour either, but it is the
+/// direction Cassandra takes: `schema/ColumnMetadata.java` `validateCell(...)`
+/// validates a live cell's bytes without consulting a covering deletion or the
+/// read clock. So the LIST branch happens to be the CORRECT one on this axis
+/// and #3778's remedy for the other three is to make them behave like it.
+///
+/// It fails in BOTH directions:
+///
+/// * if a dropped list element starts being FILTERED silently (someone deferred
+///   the list value decode past the `continue`, extending #3778 to a fourth
+///   branch — a real behaviour change that must update this test and the module
+///   header in the same commit);
+/// * if the well-formed controls stop filtering (the #1741 filter no longer
+///   reaches the list arm, which would make the refusals below vacuous).
+///
+/// # Falsification, measured rather than asserted
+///
+/// A test that pins an absence has to be shown to red when the absence ends.
+/// MEASURED on this commit: replace `&element_type` with `"blob"` in the list
+/// arm's `parse_complex_cell_value` call in `complex_column.rs` — which is the
+/// #3778 shape, a list element decode deferred past the `continue` — and all
+/// FIVE list cases in this module fail (`9 passed; 5 failed`), this one on its
+/// `live-path control` line, because the element type is what carries the width
+/// rule on BOTH paths: deferring the decode removes the live refusal too. So
+/// the mutation is a check on vacuity, not a per-arm isolation; the dropped-path
+/// `panic!` arm's own wording is what a genuine one-sided change would print.
+#[test]
+fn a_wrong_width_dropped_list_element_is_still_refused_unlike_set_map_and_udt() {
+    // Anti-vacuity control: the SAME cell shape with a WELL-FORMED 4-byte value
+    // IS dropped by each filter below. Without it every refusal here could hold
+    // because the element was never a drop candidate in the first place, which
+    // is the whole claim (compare the live-path controls in the gap case above,
+    // which make the mirror-image argument for the other three branches).
+    assert_eq!(
+        decode_list(&[list_cell(&7i32.to_be_bytes())], Some(shadow_everything()))
+            .expect("control: a well-formed shadowed element filters"),
+        (Value::List(vec![]), 1),
+        "control: the covering deletion DOES drop an element of this shape"
+    );
+    assert_eq!(
+        decode_list(
+            &[expiring_list_cell(&7i32.to_be_bytes())],
+            Some(expiry_only_filter())
+        )
+        .expect("control: a well-formed TTL-expired element filters"),
+        (Value::List(vec![]), 1),
+        "control: expiry DOES drop an element of this shape"
+    );
+
+    // (list, shadowed) — a 3-byte `int` element. Refused, not filtered. The
+    // message pins the LAYER (#3811's composed width rule reached through
+    // `parse_complex_cell_value`'s eager value decode), the same way the
+    // direct-map-key case below pins `cell_path_key`'s table, so a change of
+    // layer is visible in a diff rather than silent.
+    let short = list_cell(&[0x00, 0x00, 0x07]);
+    assert!(
+        decode_list(std::slice::from_ref(&short), None).is_err(),
+        "live-path control: a 3-byte `int` list element IS refused"
+    );
+    match decode_list(std::slice::from_ref(&short), Some(shadow_everything())) {
+        Err(Error::Corruption(msg)) => assert!(
+            msg.contains("need 4 byte(s) for int, got 3"),
+            "the shadowed element must still be refused by the composed width rule: {msg}"
+        ),
+        other => panic!(
+            "a 3-byte `int` list element is refused on the DROPPED path too today, \
+             because the list value decode runs before the filter. If this changed, \
+             #3778 now reaches the list branch — update this test and the module \
+             header together. Got {other:?}"
+        ),
+    }
+
+    // (list, TTL-expired) — the other drop reason, same refusal.
+    let short_expiring = expiring_list_cell(&[0x00, 0x00, 0x07]);
+    assert!(
+        decode_list(std::slice::from_ref(&short_expiring), None).is_err(),
+        "live-path control: the same TTL-expiring element's 3-byte `int` IS refused"
+    );
+    match decode_list(
+        std::slice::from_ref(&short_expiring),
+        Some(expiry_only_filter()),
+    ) {
+        Err(Error::Corruption(msg)) => assert!(
+            msg.contains("need 4 byte(s) for int, got 3"),
+            "the TTL-expired element must still be refused by the composed width rule: {msg}"
+        ),
+        other => panic!(
+            "a 3-byte `int` list element is refused on the TTL-expired path too today. \
+             If this changed, update this test and the module header together. \
+             Got {other:?}"
+        ),
     }
 }
 
@@ -468,6 +786,63 @@ fn a_zero_length_shadowed_set_member_still_filters_silently() {
         (Value::Set(vec![]), 1),
         "the member is filtered and counted"
     );
+}
+
+/// A dropped LIST element that is ZERO-LENGTH filters silently ONLY when the
+/// cell carries `HAS_EMPTY_VALUE`; an explicit `value_len = 0` is refused on
+/// both paths (issue #4034).
+///
+/// The two are DIFFERENT encodings of "empty" and the flag is what decides,
+/// because `HAS_EMPTY_VALUE` makes `parse_complex_cell_value` skip its eager
+/// value decode entirely (`value = None`), so nothing looks at the bytes and
+/// the `continue` is reached — while an explicit zero length still reaches
+/// #3811's composed rule, whose accepted set for `int` is exactly `{4}`
+/// (`#3847` records that Cassandra's is `{4, 0}`, i.e. the LIVE-path refusal
+/// here is narrower than Cassandra's — that is a separate, pre-existing gap and
+/// not this module's subject).
+///
+/// So the LIST counterpart of
+/// [`a_zero_length_shadowed_udt_field_still_filters_silently`] holds for one
+/// framing and not the other, which is worth pinning precisely rather than
+/// forcing into the other branches' shape.
+#[test]
+fn a_zero_length_shadowed_list_element_filters_only_under_has_empty_value() {
+    // (a) HAS_EMPTY_VALUE: no value bytes exist, so the drop is silent.
+    assert_eq!(
+        decode_list(&[empty_value_list_cell()], None)
+            .expect("control: an empty-value element parses with no filter"),
+        (Value::List(vec![]), 0),
+        "control: an empty-value element contributes no member and is not counted as dropped"
+    );
+    assert_eq!(
+        decode_list(&[empty_value_list_cell()], Some(shadow_everything()))
+            .expect("a HAS_EMPTY_VALUE dropped element must not fail the read"),
+        (Value::List(vec![]), 1),
+        "the element is filtered and counted, and no error escapes"
+    );
+
+    // (b) An EXPLICIT `value_len = 0` for a declared `int` is refused, dropped
+    // path included — the same divergence as the wrong-width case above, for
+    // the same reason.
+    let explicit_zero = list_cell(&[]);
+    assert!(
+        decode_list(std::slice::from_ref(&explicit_zero), None).is_err(),
+        "live-path control: an explicitly zero-length `int` element IS refused"
+    );
+    match decode_list(
+        std::slice::from_ref(&explicit_zero),
+        Some(shadow_everything()),
+    ) {
+        Err(Error::Corruption(msg)) => assert!(
+            msg.contains("need 4 byte(s) for int, got 0"),
+            "the shadowed zero-length element must still be refused: {msg}"
+        ),
+        other => panic!(
+            "an explicitly zero-length `int` list element is refused on the DROPPED \
+             path too today. If this changed, update this test and the module header \
+             together. Got {other:?}"
+        ),
+    }
 }
 
 /// A dropped SET member whose path fails for a NON-width reason (invalid UTF-8
