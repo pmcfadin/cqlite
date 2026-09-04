@@ -225,14 +225,31 @@ fn field_path(index: i16) -> Vec<u8> {
 // writes `[flags][ts][path_len][path][value_len][value]`, is the right shape.
 // ---------------------------------------------------------------------------
 
-/// The 16-byte TimeUUID cell path of a multicell list element. Its CONTENT is
-/// inert to every case here — the list arm never decodes a list cell path (it
-/// only records it for the compaction contract) — so one fixed literal is
-/// enough, and it is a real Cassandra-written TimeUUID rather than a made-up
-/// one so the fixture's framing is the framing on disk.
+/// The 16-byte TimeUUID cell path of a multicell list element — **cell 1** of
+/// the verbatim `test_collections/collection_table` dump. Its CONTENT is inert
+/// to a SINGLE-element case (the list arm never decodes a list cell path; it
+/// only records it for the compaction contract), and it is a real
+/// Cassandra-written TimeUUID rather than a made-up one so the fixture's
+/// framing is the framing on disk.
+///
+/// A MULTI-element fixture must NOT reuse it: Cassandra generates a unique
+/// TimeUUID per element and that is what carries insertion order, so two cells
+/// sharing a path is a state Cassandra cannot produce — use
+/// [`list_element_path_2`] for the second element (roborev job 163).
 fn list_element_path() -> Vec<u8> {
     vec![
         0x79, 0xf2, 0xa0, 0x80, 0xa2, 0x51, 0x11, 0xf0, 0xa3, 0xfe, 0xf1, 0xa5, 0x51, 0x38, 0x3f,
+        0xb9,
+    ]
+}
+
+/// The TimeUUID cell path of **cell 2** of that same dump — the element written
+/// AFTER [`list_element_path`], so a two-element fixture using both is ordered
+/// the way Cassandra wrote it. The two differ only in byte 4 (`0x80` vs
+/// `0x8a`), which is the time field, so cell 2 sorts second.
+fn list_element_path_2() -> Vec<u8> {
+    vec![
+        0x79, 0xf2, 0xa0, 0x8a, 0xa2, 0x51, 0x11, 0xf0, 0xa3, 0xfe, 0xf1, 0xa5, 0x51, 0x38, 0x3f,
         0xb9,
     ]
 }
@@ -405,7 +422,10 @@ fn only_the_shadowed_element_is_filtered_from_a_mixed_list() {
     // (no-heuristics, #1741). Unlike the set fixture its value still follows
     // the path, because a list element lives in the cell VALUE.
     let live = {
-        let path = list_element_path();
+        // Cell 2's path, NOT cell 1's: a real multicell list gives every
+        // element a unique TimeUUID, so reusing one path would make this
+        // fixture unrepresentable on disk and the two-element claim untestable.
+        let path = list_element_path_2();
         assert!(path.len() < 0x80, "single-byte VUInt only");
         let mut c = vec![0x08u8, path.len() as u8];
         c.extend_from_slice(&path);
