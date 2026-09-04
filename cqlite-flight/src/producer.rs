@@ -336,11 +336,15 @@ fn sstable_token_span(data_path: &Path, rt: &PruneRuntime) -> Option<(i64, i64)>
 /// Raw-cell row-visibility signals (issue #2339, roborev job 120 F1). Computed
 /// without decoding any value, so an excluded column cannot fail a query.
 struct RawVisibility {
-    /// Any live non-primary-key cell at all — the pre-#2339 answer.
-    any_raw_live: bool,
     /// A live non-primary-key cell that outranks every tombstone in its own column,
-    /// hence provably survives reconciliation.
+    /// hence provably survives reconciliation. Exact, and needs no comparator.
     outranks_every_tombstone: bool,
+    /// Non-primary-key columns whose liveness is AMBIGUOUS from timestamps alone: they
+    /// have at least one live cell, but EVERY one of them is outranked by a tombstone in
+    /// the same column. Only these need the comparator-aware pass (roborev job 128) —
+    /// whether the tombstone actually supersedes a live cell depends on whether their
+    /// cell paths are comparator-EQUAL, which timestamps cannot say.
+    ambiguous_columns: Vec<String>,
 }
 
 /// Produces Arrow record batches from a compaction merge of a table's SSTables.
@@ -651,7 +655,10 @@ impl MergeProducer {
     /// cannot be superseded by any of them, whatever the comparator says about their
     /// cell paths — so the row is visible with no comparator and no decode.
     ///
-    /// `any_raw_live` is the pre-#2339 answer, kept as the last-resort tier.
+    /// `ambiguous_columns` is the rest: columns with live cells that are ALL outranked by
+    /// a tombstone in the same column. Timestamps cannot decide those — it depends on
+    /// whether the cell PATHS are comparator-equal — so the caller asks cqlite-core's
+    /// reconciliation for exactly those columns (roborev job 128).
     ///
     /// TWO LINEAR PASSES, never a rescan per cell (roborev job 122). The first draft
     /// re-scanned every cell to find its column's maximum tombstone timestamp, which is
@@ -677,25 +684,33 @@ impl MergeProducer {
                 })
                 .or_insert(cell.timestamp);
         }
-        // Pass 2: evaluate the live cells against it.
-        let mut any_raw_live = false;
+        // Pass 2: evaluate the live cells against it. No early exit: the ambiguous set
+        // has to be complete, because any ONE of those columns can still hold a
+        // surviving cell and the caller must be able to ask about all of them.
         let mut outranks_every_tombstone = false;
+        let mut ambiguous: Vec<String> = Vec::new();
         for cell in cells {
             if is_tomb(cell) || self.is_primary_key_column(&cell.column) {
                 continue;
             }
-            any_raw_live = true;
             if max_tomb
                 .get(cell.column.as_str())
                 .is_none_or(|t| cell.timestamp > *t)
             {
                 outranks_every_tombstone = true;
-                break;
+            } else if !ambiguous.iter().any(|c| c == &cell.column) {
+                ambiguous.push(cell.column.clone());
             }
         }
         RawVisibility {
-            any_raw_live,
             outranks_every_tombstone,
+            ambiguous_columns: if outranks_every_tombstone {
+                // Tier 1 already decided the row visible, so nothing needs the
+                // comparator pass and nothing needs cloning.
+                Vec::new()
+            } else {
+                ambiguous
+            },
         }
     }
 
@@ -1264,6 +1279,28 @@ impl MergeProducer {
         // this API documents. Visibility is decided WITHOUT decoding unneeded columns,
         // by `outranks_every_tombstone` below.
         let visibility = self.raw_visibility_signal(&cells);
+        // Clone ONLY the ambiguous columns' cells, and only when tier 1 did not already
+        // decide the row visible — `cells` is moved into the assembly below, and the
+        // comparator pass needs them. Bounded by construction: an unambiguous row clones
+        // nothing (roborev job 128; the O(n^2) lesson of job 122 is why this is not a
+        // blanket clone).
+        let ambiguous_cells: Vec<(
+            String,
+            Vec<cqlite_core::storage::write_engine::merge::CellData>,
+        )> = visibility
+            .ambiguous_columns
+            .iter()
+            .map(|col| {
+                (
+                    col.clone(),
+                    cells
+                        .iter()
+                        .filter(|c| &c.column == col)
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
         let row_cells: RowCells =
             cqlite_core::storage::write_engine::merge::assemble_read_cells_with_udts(
                 cells,
@@ -1273,23 +1310,55 @@ impl MergeProducer {
             )
             .map_err(ProducerError::Merge)?;
 
-        // The verdict, in three tiers, cheapest first — and NOTHING here decodes a
-        // column the projection excluded:
+        // The verdict, in three tiers, cheapest first:
         //   1. a live non-PK cell that OUTRANKS every tombstone in its own column
         //      definitely survives reconciliation — exact, and no comparator needed;
         //   2. else, if a non-PK column SURVIVED the (projected) assembly, it is live;
-        //   3. else fall back to the raw scan, which is the pre-#2339 answer.
-        // Tier 3 is deliberately CONSERVATIVE-TOWARD-VISIBLE: the alternative is
-        // hiding a row whose live cell merely happens to be older than an unrelated
-        // tombstone in the same column, which would be DATA LOSS. Its residual is a
-        // phantom key-only row in the narrow case where an EXCLUDED composite column's
-        // every live cell is older than a comparator-EQUAL tombstone — strictly
-        // narrower than the pre-#2339 behaviour and declared rather than hidden.
-        let has_live_data_cell = visibility.outranks_every_tombstone
+        //   3. else ask cqlite-core's reconciliation about the AMBIGUOUS columns only.
+        // Tier 3 used to be a raw-cell guess, conservative toward visible, whose declared
+        // residual was a phantom key-only row for an EXCLUDED composite column. roborev
+        // job 128 (correctly) refused a declared phantom: a comment acknowledging a wrong
+        // answer does not make it right. It is now MEASURED instead of guessed.
+        let mut has_live_data_cell = visibility.outranks_every_tombstone
             || row_cells
                 .iter()
-                .any(|(name, _)| !self.is_primary_key_column(name))
-            || visibility.any_raw_live;
+                .any(|(name, _)| !self.is_primary_key_column(name));
+
+        // TIER 3 — the comparator-aware pass, replacing the raw-cell guess that produced
+        // a PHANTOM key-only row (roborev job 128). A raw cell can look live and still
+        // lose reconciliation to a comparator-EQUAL newer tombstone; when its column is
+        // EXCLUDED by the projection, `row_cells` cannot show that, so tier 2 is blind to
+        // it. Deciding it from raw cells was the declared residual this replaces.
+        //
+        // Asked of cqlite-core's OWN reconciliation (`column_has_surviving_live_cell`), so
+        // there is ONE decision procedure rather than a second "lightweight" copy that
+        // would have to track `cell_wins` by hand. Reached only for the genuinely
+        // ambiguous columns, so an unambiguous row pays nothing.
+        if !has_live_data_cell {
+            for (column, column_cells) in ambiguous_cells {
+                match cqlite_core::storage::write_engine::merge::column_has_surviving_live_cell(
+                    &column,
+                    column_cells,
+                    &self.schema,
+                    self.udt_scope(),
+                ) {
+                    Ok(true) => {
+                        has_live_data_cell = true;
+                        break;
+                    }
+                    Ok(false) => {}
+                    // UNMEASURABLE, not "absent": an EXCLUDED column failing to decode
+                    // must never abort a query it was not part of (roborev job 120 F1), and
+                    // a positive verdict may not rest on an unmeasured state. Fall back to
+                    // VISIBLE — hiding a row on a decode error we could not interpret would
+                    // be DATA LOSS, which is strictly worse than a spurious row.
+                    Err(_) => {
+                        has_live_data_cell = true;
+                        break;
+                    }
+                }
+            }
+        }
 
         // Issue #2374/#2789: Cassandra row-visibility rule for the READ path. A
         // reconciled row is visible to a `SELECT` iff it has at least one
@@ -3351,6 +3420,102 @@ mod tests {
         // Count is non-nullable; sum/min/max are nullable.
         assert!(!s.field_with_name("agg0").unwrap().is_nullable());
         assert!(s.field_with_name("agg1").unwrap().is_nullable());
+    }
+
+    /// Decode a hex literal to bytes — the cell-path encodings in the job-128 test are
+    /// written as hex because the BYTES are the point (two spellings of one logical key).
+    fn hex_bytes(h: &str) -> Vec<u8> {
+        (0..h.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&h[i..i + 2], 16).expect("valid hex"))
+            .collect()
+    }
+
+    /// **Issue #2339 / roborev job 128 — no PHANTOM key-only row when an EXCLUDED
+    /// composite column's only live cell lost to a comparator-EQUAL tombstone.**
+    ///
+    /// `ftk` is `map<frozen<tuple<int, text>>, bigint>`. Two cell paths that are
+    /// comparator-EQUAL but DIFFERENT BYTES — an omitted trailing component vs an explicit
+    /// null one — carry a ts-100 LIVE cell and a ts-200 TOMBSTONE. Reconciliation gives the
+    /// delete, so the column is absent and the row has no surviving data and no liveness
+    /// marker: Cassandra returns NOTHING.
+    ///
+    /// Under a PK-only projection the assembled row cannot show that (`ftk` is dropped), so
+    /// the old raw-cell tier said "a live cell exists" and emitted a key-only row. That was
+    /// the residual DECLARED in a comment until job 128 refused it.
+    ///
+    /// The second half is the control that makes the first meaningful: swap the timestamps
+    /// so the LIVE cell is newer, and the row must be VISIBLE. Without it, "hide whenever an
+    /// ambiguous column exists" would pass the phantom assertion while losing real rows.
+    #[test]
+    fn no_phantom_row_when_an_excluded_composite_column_lost_to_a_comparator_equal_tombstone() {
+        use cqlite_core::storage::sstable::reader::compaction_row::RowLiveness;
+        use cqlite_core::storage::write_engine::merge::{CellData, MergeEntry, RowData};
+        use cqlite_core::storage::write_engine::PartitionKey;
+        use cqlite_core::Value;
+        use std::collections::HashSet;
+
+        // `simple_schema` has no composite-keyed map, so declare one on `name`.
+        let mut schema = simple_schema();
+        if let Some(c) = schema.columns.iter_mut().find(|c| c.name == "name") {
+            c.data_type = "map<frozen<tuple<int, text>>, bigint>".to_string();
+        }
+        let producer = MergeProducer::new(schema.clone(), 1024).unwrap();
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let decorated = pk.to_decorated_key(&schema).unwrap();
+        let pk_bytes = decorated.key.clone();
+
+        // Same logical key, two encodings: omitted trailing component vs explicit null.
+        let omitted = hex_bytes("0000000400000001");
+        let explicit = hex_bytes("0000000400000001ffffffff");
+
+        let entry = |live_ts: i64, tomb_ts: i64| {
+            let mut live = CellData::new("name".into(), Value::BigInt(1), live_ts);
+            live.cell_path = Some(omitted.clone());
+            let mut tomb = CellData::new("name".into(), Value::BigInt(0), tomb_ts);
+            tomb.cell_path = Some(explicit.clone());
+            tomb.is_deleted = true;
+            MergeEntry::new(
+                0,
+                decorated.clone(),
+                None,
+                live_ts.max(tomb_ts),
+                RowData::Live {
+                    cells: vec![live, tomb],
+                },
+            )
+            .with_row_liveness(RowLiveness::default())
+        };
+
+        assert!(
+            !entry(100, 200).row_liveness.marker_live_at(300),
+            "precondition: marker-less, so visibility can only come from the data cell"
+        );
+
+        let pk_only: HashSet<String> = ["id".to_string()].into_iter().collect();
+
+        // Tombstone NEWER -> the entry is deleted -> NO row, even though a raw live cell
+        // is present and `name` is excluded by the projection.
+        let mut cache = PartitionKeyCache::default();
+        let row = producer
+            .entry_to_row(&pk_bytes, entry(100, 200), &mut cache, Some(&pk_only), 300)
+            .unwrap();
+        assert!(
+            row.is_none(),
+            "PHANTOM row: the ts-100 live cell lost to a comparator-EQUAL ts-200 tombstone, \
+             so nothing survives and the row must not be returned (roborev job 128)"
+        );
+
+        // CONTROL: live cell NEWER -> the row is real and must be VISIBLE.
+        let mut cache = PartitionKeyCache::default();
+        let row = producer
+            .entry_to_row(&pk_bytes, entry(200, 100), &mut cache, Some(&pk_only), 300)
+            .unwrap();
+        assert!(
+            row.is_some(),
+            "a row whose live cell OUTRANKS the comparator-equal tombstone must stay \
+             visible — hiding it would be data loss, not a phantom fix"
+        );
     }
 
     /// Issue #2374/#2789 (roborev BLOCKER 1): a row written ONLY by an UPDATE

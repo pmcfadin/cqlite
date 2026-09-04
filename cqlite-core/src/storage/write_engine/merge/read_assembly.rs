@@ -794,6 +794,41 @@ fn unwrap_frozen(cql: &CqlType) -> &CqlType {
 /// The last element's value, or `Value::Null` when there are none — the safe
 /// fallback for a column whose collection type cannot be resolved.
 #[cfg(feature = "write-support")]
+/// Does this column have any cell that SURVIVES reconciliation? (issue #2339, roborev
+/// job 128.)
+///
+/// **Why this exists.** `cqlite-flight` decides row VISIBILITY from the full
+/// pre-projection cell set, but a raw cell can look live and still lose: a composite
+/// cell path written with an omitted trailing component is comparator-EQUAL to one
+/// written with an explicit null, so a NEWER tombstone in the other encoding supersedes
+/// it. When that column is EXCLUDED by the projection, the assembled row cannot correct
+/// the decision, and the row surfaces as a PHANTOM key-only row. Deciding it from raw
+/// cells is therefore wrong, and deciding it from the PROJECTED assembly cannot see the
+/// excluded column.
+///
+/// **Why it delegates to [`assemble_complex`] rather than reimplementing the rule.**
+/// This is exactly the question assembly already answers — `None` means the column is
+/// absent because every element was a deletion or lost reconciliation. A second,
+/// "lightweight" copy of comparator-equal coalescing plus tombstone-winner selection is
+/// a second reconciliation authority, which is the divergence class #2339 exists to
+/// remove; it would also have to be kept in step with `cell_wins` by hand. So there is
+/// ONE decision procedure and this is a thin projection of it.
+///
+/// **The cost, stated rather than hidden.** For a column the projection EXCLUDED this
+/// does build that column's `Value` in order to discard it. That is accepted because the
+/// caller only asks about columns whose liveness is genuinely AMBIGUOUS from timestamps
+/// alone — every live cell outranked by a tombstone in the same column — which is rare,
+/// and because the alternative is a wrong answer. It performs no Arrow conversion.
+#[cfg(feature = "write-support")]
+pub fn column_has_surviving_live_cell(
+    name: &str,
+    cells: Vec<CellData>,
+    schema: &TableSchema,
+    udts: Option<UdtScope<'_>>,
+) -> Result<bool> {
+    Ok(assemble_complex(name, cells, schema, udts)?.is_some())
+}
+
 /// A deleted collection element is OMITTED from the reassembled value, never
 /// surfaced as `(key, Null)` — the #2324 / roborev-1628 adjudication, unchanged.
 /// Only the POINT at which it is dropped moved (issue #2339, roborev job 119).
