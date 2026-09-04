@@ -323,36 +323,58 @@ fn an_empty_decimal_key_is_typed_because_cassandra_admits_it() {
 }
 
 /// THE BOUND ON THE GATE MOVE. Every OTHER type whose allowed-width slice is
-/// EMPTY — so which now reaches the arm's guard — must NOT become a sentinel.
+/// EMPTY — so which the widened guard can now reach — must keep EXACTLY the
+/// outcome it had before, and in particular must never become a sentinel or an
+/// opaque blob.
 ///
 /// This is the assertion that makes "the tag table is the gate" safe rather than
-/// permissive: `for_cql_type` is `None` for `duration`, for every composite
+/// permissive, and it is the regression the naive widening
+/// (`allowed.contains(&0) || allowed.is_empty()`) would have caused: every
+/// composite ALSO has an empty allowed-width slice.
+/// `EmptyValueType::for_cql_type` is `None` for `duration`, for every composite
 /// (`list`/`set`/`map`/`tuple`/UDT/`frozen<collection>`) and for an unmodelled
-/// custom type, so each keeps EXACTLY the behaviour it had before the move —
-/// whatever that was. The cases are split by MEASURED outcome rather than
-/// asserted uniformly, because the two groups are refused for different reasons
-/// and collapsing them would hide a change in either:
+/// custom type (MEASURED, all of them), so each falls past the sentinel branch.
 ///
-///   * REFUSED (the decoder needs bytes it does not have): `duration`,
-///     `list<int>`, `set<int>`, `map<int,int>`, `frozen<list<int>>`.
-///   * DECODED, and NOT as a sentinel: `tuple<int,int>` yields
-///     `Tuple([Null, Null])` — legal per `TupleType.split` at `cassandra-5.0.8`,
-///     where an encoding whose components are simply omitted leaves
-///     `position == length` — and an unregistered UDT name yields the
-///     pre-existing opaque `Blob(b"")`. Both take the `Ok` arm, so the guard is
-///     never even reached for them.
+/// # The families split into TWO groups BY MEASUREMENT, and the split corrects an
+/// # expectation worth recording
+/// It is natural to expect every composite to `Err` on an empty buffer. FOUR of
+/// them do — but `tuple` and UDT (in BOTH spellings) DECODE it, and always did:
+///
+///   * **REFUSED, and the error must be the DECODER'S OWN, byte-identical to
+///     before the gate move** — `duration`, `list<int>`, `set<int>`,
+///     `map<int,int>`, `frozen<list<int>>`. Asserted on the MESSAGE, not merely
+///     on `is_err()`: an `Err` alone cannot distinguish "the decoder refused it,
+///     unchanged" from "some new guard refused it for a different reason", and
+///     the whole claim here is that this path is untouched.
+///   * **DECODED, and NOT as a sentinel — the `Ok` arm, so the guard is never
+///     even reached**: `tuple<int,int>` -> `Tuple([Null, Null])` and
+///     `TupleType(Int32Type)` -> `Tuple([Null])`, legal per `TupleType.split` at
+///     `cassandra-5.0.8`, where an encoding whose trailing components are simply
+///     omitted leaves `position == length`; a REGISTERED UDT (bare name and
+///     `UserType(…)` marshal alike) -> a `Udt` whose every field is `None`, by
+///     the same rule one layer down; and an UNREGISTERED UDT name -> the
+///     pre-existing opaque `Blob(b"")`.
 #[test]
 fn no_other_empty_width_family_becomes_a_sentinel() {
-    for ty in [
-        "duration",
-        "list<int>",
-        "set<int>",
-        "map<int,int>",
-        "frozen<list<int>>",
-    ] {
+    // (declared key type, a substring of the decoder's OWN pre-existing error)
+    let refused: &[(&str, &str)] = &[
+        ("duration", "failed to parse duration months"),
+        ("list<int>", "not enough bytes for element count"),
+        ("set<int>", "not enough bytes for element count"),
+        ("map<int,int>", "not enough bytes for element count"),
+        ("frozen<list<int>>", "not enough bytes for element count"),
+    ];
+    for (ty, needle) in refused {
         let map_type = format!("map<{ty},int>");
         match decode(&map_type, b"", &7i32.to_be_bytes()) {
-            Err(_) => {}
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains(needle),
+                    "{ty}: the error must still be the DECODER's own ({needle:?}), so the \
+                     gate move demonstrably did not reroute this path; got: {msg}"
+                );
+            }
             Ok(v) => panic!(
                 "an empty {ty} key is admitted by NO authority — neither the width table \
                  nor the tag table — so it must stay refused, never a sentinel and never \
@@ -360,23 +382,65 @@ fn no_other_empty_width_family_becomes_a_sentinel() {
             ),
         }
     }
-    for (ty, want) in [
-        (
-            "tuple<int,int>",
-            Value::Tuple(vec![Value::Null, Value::Null]),
-        ),
-        ("unregistered_udt_name", Value::blob(Vec::new())),
-    ] {
+
+    // The `Ok` arm: unchanged by construction, because the guard only sees an
+    // `Err`. Pinned anyway, because "the guard cannot see them" is a claim about
+    // control flow and this is the measurement of it.
+    const UDT_MARSHAL: &str = "org.apache.cassandra.db.marshal.UserType(ks,\
+616464726573735f74797065,6669656c64:org.apache.cassandra.db.marshal.Int32Type)";
+    let decoded_not_sentinel: &[&str] = &[
+        "tuple<int,int>",
+        "org.apache.cassandra.db.marshal.TupleType(org.apache.cassandra.db.marshal.Int32Type)",
+        // The marshal `UserType(…)` spelling needs no registry, so it is the UDT
+        // case reachable here — and it is the NO-SCHEMA (`Statistics.db`) route,
+        // i.e. the one a real read takes when there is no CQL schema.
+        UDT_MARSHAL,
+        "unregistered_udt_name",
+    ];
+    for ty in decoded_not_sentinel {
         let map_type = format!("map<{ty},int>");
         let decoded = decode(&map_type, b"", &7i32.to_be_bytes())
             .unwrap_or_else(|e| panic!("an empty {ty} key decoded before the gate move: {e}"));
-        assert_eq!(
-            decoded,
-            Value::Map(vec![(want, Value::Integer(7))]),
-            "{ty}: takes the Ok arm, so the gate is never reached and the value is \
-             UNCHANGED by the move"
+        let entries = match decoded {
+            Value::Map(entries) => entries,
+            other => panic!("{ty}: expected a Map, got {other:?}"),
+        };
+        assert_eq!(entries.len(), 1, "{ty}: one entry");
+        assert!(
+            !matches!(entries[0].0, Value::Empty(_)),
+            "{ty}: takes the Ok arm, so it must NOT be a sentinel: {:?}",
+            entries[0].0
         );
     }
+    assert_eq!(
+        decode("map<tuple<int,int>,int>", b"", &7i32.to_be_bytes())
+            .expect("tuple decodes as before"),
+        Value::Map(vec![(
+            Value::Tuple(vec![Value::Null, Value::Null]),
+            Value::Integer(7)
+        )]),
+        "tuple<int,int>: the exact pre-existing value, per TupleType.split"
+    );
+    let udt = decode(&format!("map<{UDT_MARSHAL},int>"), b"", &7i32.to_be_bytes())
+        .expect("a marshal UserType decodes an empty cell path as before");
+    match udt {
+        Value::Map(entries) => match &entries[0].0 {
+            Value::Udt(u) => assert!(
+                u.fields.iter().all(|f| f.value.is_none()),
+                "a UDT key from an empty cell path has every field omitted, per the same \
+                 TupleType.split rule one layer down: {u:?}"
+            ),
+            other => panic!("expected a Udt key, got {other:?}"),
+        },
+        other => panic!("expected a Map, got {other:?}"),
+    }
+    assert_eq!(
+        decode("map<unregistered_udt_name,int>", b"", &7i32.to_be_bytes())
+            .expect("an unresolvable name decodes opaquely as before"),
+        Value::Map(vec![(Value::blob(Vec::new()), Value::Integer(7))]),
+        "an unregistered UDT name keeps the pre-existing OPAQUE blob — that policy is \
+         for a type this reader cannot model and is untouched by the gate move"
+    );
 }
 
 /// `varint` and `inet` are the two families the tag table ADMITS and this arm can
