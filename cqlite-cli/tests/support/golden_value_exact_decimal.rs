@@ -73,13 +73,12 @@ impl ExactDecimal {
             Some((m, e)) => {
                 let e = e.strip_prefix('+').unwrap_or(e);
                 let parsed: i64 = e.parse().ok()?;
-                // `i64::MIN` has NO positive counterpart, so `parsed.abs()` panics
-                // on the perfectly legal-looking `1e-9223372036854775808` — a
-                // panic where this module promises `None` (roborev job 96). The
-                // refusal is spelled out rather than left to a wrapping `abs`.
-                let Some(magnitude) = parsed.checked_abs() else {
-                    return None;
-                };
+                // `i64::MIN` has NO positive counterpart, so a plain
+                // `parsed.abs()` PANICS on the perfectly legal-looking
+                // `1e-9223372036854775808` — a panic where this module promises
+                // `None` (roborev job 96). The `?` is that refusal: `checked_abs`
+                // answers `None` there, and `None` here is "I cannot decide this".
+                let magnitude = parsed.checked_abs()?;
                 if magnitude > i64::from(MAX_ABS_EXPONENT) {
                     return None;
                 }
