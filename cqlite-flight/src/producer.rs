@@ -333,6 +333,16 @@ fn sstable_token_span(data_path: &Path, rt: &PruneRuntime) -> Option<(i64, i64)>
     Some((min_token, max_token))
 }
 
+/// Raw-cell row-visibility signals (issue #2339, roborev job 120 F1). Computed
+/// without decoding any value, so an excluded column cannot fail a query.
+struct RawVisibility {
+    /// Any live non-primary-key cell at all — the pre-#2339 answer.
+    any_raw_live: bool,
+    /// A live non-primary-key cell that outranks every tombstone in its own column,
+    /// hence provably survives reconciliation.
+    outranks_every_tombstone: bool,
+}
+
 /// Produces Arrow record batches from a compaction merge of a table's SSTables.
 pub struct MergeProducer {
     // `schema` + `spec` are `pub(crate)` so the point-read routing (issue #2207)
@@ -620,6 +630,46 @@ impl MergeProducer {
     /// divergence predicate ([`Self::udt_scope`]) — so the Arrow schema a client is
     /// promised and the values the reassembler produces cannot resolve under
     /// different keyspaces.
+    /// Row-visibility signals taken from RAW cells only — no decoding, so a column
+    /// the projection excluded can never abort the query (issue #2339, roborev job
+    /// 120 F1).
+    ///
+    /// `outranks_every_tombstone` is the EXACT half: a live non-primary-key cell whose
+    /// timestamp is strictly greater than every tombstone timestamp in its OWN column
+    /// cannot be superseded by any of them, whatever the comparator says about their
+    /// cell paths — so the row is visible with no comparator and no decode.
+    ///
+    /// `any_raw_live` is the pre-#2339 answer, kept as the last-resort tier.
+    fn raw_visibility_signal(
+        &self,
+        cells: &[cqlite_core::storage::write_engine::merge::CellData],
+    ) -> RawVisibility {
+        let is_tomb = |c: &cqlite_core::storage::write_engine::merge::CellData| {
+            c.is_deleted || matches!(c.value, cqlite_core::Value::Tombstone(_))
+        };
+        let mut any_raw_live = false;
+        let mut outranks_every_tombstone = false;
+        for cell in cells {
+            if is_tomb(cell) || self.is_primary_key_column(&cell.column) {
+                continue;
+            }
+            any_raw_live = true;
+            let max_tomb = cells
+                .iter()
+                .filter(|o| o.column == cell.column && is_tomb(o))
+                .map(|o| o.timestamp)
+                .max();
+            if max_tomb.is_none_or(|t| cell.timestamp > t) {
+                outranks_every_tombstone = true;
+                break;
+            }
+        }
+        RawVisibility {
+            any_raw_live,
+            outranks_every_tombstone,
+        }
+    }
+
     pub(crate) fn effective_udt_keyspace(&self) -> &str {
         self.udt_keyspace
             .as_deref()
@@ -1153,18 +1203,6 @@ impl MergeProducer {
         // Cassandra returns it. Scan the full cells for any live (non-tombstone,
         // non-deleted-element) cell whose column is not a primary-key column —
         // mirroring the drop logic `assemble_read_cells` applies.
-        // A CHEAP NECESSARY condition only — it is no longer the verdict (issue #2339,
-        // roborev job 119). A raw cell can LOOK live and still lose reconciliation: a
-        // composite cell path written with an omitted trailing component is
-        // comparator-EQUAL to one written with an explicit null, so a NEWER tombstone
-        // in the other encoding supersedes it. Deciding visibility from raw cells then
-        // emits a PHANTOM key-only row for a row whose only content is that superseded
-        // element. The verdict is taken below, from the RECONCILED winners.
-        let any_raw_live_data_cell = cells.iter().any(|c| {
-            !c.is_deleted
-                && !matches!(c.value, cqlite_core::Value::Tombstone(_))
-                && !self.is_primary_key_column(&c.column)
-        });
 
         // Issue #2324: the k-way merger emits every element of a non-frozen
         // collection (list/set/map) as its OWN cell, all sharing the column name.
@@ -1185,36 +1223,39 @@ impl MergeProducer {
         // its cell_path instead of failing closed. Without it an all-lowercase UDT
         // name stays a bare `CqlType::Custom` with no field list and the path
         // (correctly) still fails closed.
-        // Assembled UNPROJECTED, then filtered to `needed` below — deliberately, and
-        // in ONE pass (issue #2339, roborev job 119). Visibility must be decided from
-        // the FULL pre-projection column set (#2374/#2789: an `UPDATE`-written row
-        // carries a live `v` and no PK liveness marker, so a PK-only projection or a
-        // `count(*)` would otherwise hide a row Cassandra returns) AND from RECONCILED
-        // winners rather than raw cells. Assembling unprojected satisfies both without
-        // a second reassembly per row; the projection is only a column filter, so
-        // applying it afterwards changes no value.
-        let assembled: RowCells =
+        // PROJECTION-SCOPED ASSEMBLY IS RESTORED (issue #2339, roborev job 120 F1).
+        // Assembling unprojected to decide visibility was wrong: a composite column
+        // the query never requested could fail structural decode or UDT resolution and
+        // ABORT the whole query, discarding the projection-scoped fail-closed contract
+        // this API documents. Visibility is decided WITHOUT decoding unneeded columns,
+        // by `outranks_every_tombstone` below.
+        let visibility = self.raw_visibility_signal(&cells);
+        let row_cells: RowCells =
             cqlite_core::storage::write_engine::merge::assemble_read_cells_with_udts(
                 cells,
                 &self.schema,
-                None,
+                needed,
                 self.udt_scope(),
             )
             .map_err(ProducerError::Merge)?;
 
-        // The VERDICT: a data column that actually SURVIVED reconciliation.
-        let has_live_data_cell = any_raw_live_data_cell
-            && assembled
+        // The verdict, in three tiers, cheapest first — and NOTHING here decodes a
+        // column the projection excluded:
+        //   1. a live non-PK cell that OUTRANKS every tombstone in its own column
+        //      definitely survives reconciliation — exact, and no comparator needed;
+        //   2. else, if a non-PK column SURVIVED the (projected) assembly, it is live;
+        //   3. else fall back to the raw scan, which is the pre-#2339 answer.
+        // Tier 3 is deliberately CONSERVATIVE-TOWARD-VISIBLE: the alternative is
+        // hiding a row whose live cell merely happens to be older than an unrelated
+        // tombstone in the same column, which would be DATA LOSS. Its residual is a
+        // phantom key-only row in the narrow case where an EXCLUDED composite column's
+        // every live cell is older than a comparator-EQUAL tombstone — strictly
+        // narrower than the pre-#2339 behaviour and declared rather than hidden.
+        let has_live_data_cell = visibility.outranks_every_tombstone
+            || row_cells
                 .iter()
-                .any(|(name, _)| !self.is_primary_key_column(name));
-
-        let row_cells: RowCells = match needed {
-            Some(needed) => assembled
-                .into_iter()
-                .filter(|(name, _)| needed.contains(&**name))
-                .collect(),
-            None => assembled,
-        };
+                .any(|(name, _)| !self.is_primary_key_column(name))
+            || visibility.any_raw_live;
 
         // Issue #2374/#2789: Cassandra row-visibility rule for the READ path. A
         // reconciled row is visible to a `SELECT` iff it has at least one

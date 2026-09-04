@@ -638,6 +638,39 @@ fn composite_with_a_time_component_orders_by_serialized_bytes() {
 /// Byte encodings, not hand-built values: the decoder is what turns an omitted
 /// suffix into a SHORTER `Value::Tuple`, and that is half of the property.
 #[test]
+/// **Issue #2339 / roborev job 120 F2 — an ALL-TOMBSTONE composite collection reads
+/// ABSENT, and must not be decoded at all.**
+///
+/// Retaining tombstones for reconciliation (job 119) made an absent collection walk
+/// the whole composite path: comparator construction plus structural cell-path decode.
+/// So an UNRESOLVED UDT — or a malformed DELETED key — could turn "this column is
+/// absent" into an unsupported-format or corruption ERROR, where the pre-#2339 code
+/// returned absent. No element can survive an all-tombstone column, so none of that
+/// work can change the answer.
+///
+/// `nset` is `set<frozen<tuple<frozen<ghost_part>, int>>>`, whose `ghost_part` is NOT
+/// in the registry — the very shape `nested_unresolved_udt_fails_closed` proves fails
+/// closed when a LIVE element is present. Here every element is deleted, so it must be
+/// absent instead.
+///
+/// RED BEFORE THE FIX: `Err` naming `ghost_part`.
+#[test]
+fn an_all_tombstone_composite_collection_is_absent_not_an_error() {
+    let mut deleted = elem(
+        "nset",
+        Value::blob(Vec::new()),
+        hex("00000004626574610000000400000002"),
+    );
+    deleted.is_deleted = true;
+    let out = assemble_read_cells_with_udts(vec![deleted], &schema(), None, registry())
+        .expect("an all-deleted composite collection must NOT error — it is absent");
+    assert_eq!(
+        get(&out, "nset"),
+        None,
+        "every element was a deletion, so the column reads absent"
+    );
+}
+
 /// **Issue #2339 / roborev job 119 (High) — a NEWER tombstone at a comparator-EQUAL
 /// encoding must SUPPRESS the older live cell, not be discarded before it can win.**
 ///

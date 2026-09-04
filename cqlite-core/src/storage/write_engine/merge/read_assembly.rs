@@ -354,6 +354,17 @@ fn assemble_complex(
     // producer builds cells for every on-disk column, even ones the caller did
     // not declare) has no type here; such columns are never emitted to Arrow, so
     // fall back to the last live element's value rather than fail the whole row.
+    // ALL-TOMBSTONE SHORT-CIRCUIT, BEFORE any type resolution or decoding (issue
+    // #2339, roborev job 120 F2). Retaining tombstones for reconciliation made an
+    // ABSENT collection walk the whole composite path — comparator construction and
+    // structural cell-path decode — so an unresolved UDT or a malformed DELETED key
+    // could turn "the column is absent" into an unsupported-format / corruption
+    // ERROR, where the pre-#2339 code simply returned absent. No element can survive
+    // here, so none of that work can change the answer.
+    if elements.iter().all(is_tombstone_cell) {
+        return Ok(None);
+    }
+
     let declared = schema
         .columns
         .iter()
