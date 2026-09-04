@@ -150,16 +150,51 @@ pub(super) fn try_compare_values(a: &Value, b: &Value) -> Result<std::cmp::Order
             return Ok(crate::float_cmp::cassandra_double_cmp(x, y));
         }
     }
-    // LOAD-BEARING FOR THE `Ord` CONTRACT, not merely a fast path (issue #3805,
-    // lead audit Q3). Two `Value::Empty` values share a discriminant WHATEVER
-    // their tags, so this test fires FIRST for a sentinel-vs-sentinel pair and
-    // routes it to `partial_cmp`, which answers `Equal` for equal tags. That is
-    // what keeps such a pair OUT of the `Less`/`Greater` arms below, where the
-    // left-hand `if let Value::Empty(tag) = a` would match and return `Less` for
-    // a pair that must be `Equal` — breaking reflexivity and able to panic a
-    // `sort_by`. A refactor that reorders these blocks, or narrows this test to
-    // specific variants, reintroduces that defect: if the sentinel arms ever
-    // move above this line they must handle `(Empty, Empty)` themselves.
+    // SENTINEL vs SENTINEL — HANDLED HERE, ABOVE the discriminant test, and it
+    // must stay above it (issue #3805; roborev job 451 + lead audit Q3). This
+    // one arm owns BOTH halves of that pair's contract, because every
+    // `Value::Empty` shares ONE discriminant whatever its tag, so neither the
+    // discriminant test below nor the sentinel-vs-non-empty arms under it can
+    // decide the case correctly:
+    //
+    // * DIFFERENT tags are DIFFERENT DECLARED TYPES, and this function's rule
+    //   for those is an ERROR. Left to the discriminant test, the pair reached
+    //   `Value::partial_cmp`, which orders two sentinels BY TAG — it must, being
+    //   a total order (`types::value_ord`) — so a cross-type `WHERE` comparison
+    //   got an ORDERING instead of the type diagnostic. Nothing lossy happens
+    //   here: a sentinel CARRIES its type, so `uuid` vs `timeuuid` is refused
+    //   too, and `empty_tag_matches_operand`'s admission of that pair — which
+    //   exists only because a NON-EMPTY timeuuid is indistinguishable from a
+    //   uuid in `Value` — deliberately does not apply.
+    // * EQUAL tags are the same (empty) bytes ⇒ `Equal`, exactly as
+    //   `Int32Type.compareCustom` reports for two empty buffers
+    //   (`db/marshal/Int32Type.java:61-71` at `cassandra-5.0.8`:
+    //   `Boolean.compare(true, true) == 0`). This is LOAD-BEARING FOR THE `Ord`
+    //   CONTRACT, not a nicety: `compare_values_ordering` feeds `sort_by`, and
+    //   without this arm the pair would fall into the `Less`/`Greater` arms
+    //   below, whose left-hand `if let Value::Empty(tag) = a` matches and
+    //   answers `Less` for a pair that must be `Equal` — breaking reflexivity
+    //   and able to panic the sort.
+    //
+    // So a refactor may NOT move this block below the discriminant test, and
+    // may not narrow it to specific tags; anything that reorders these blocks
+    // has to keep `(Empty, Empty)` decided before either of them.
+    if let (Value::Empty(x), Value::Empty(y)) = (a, b) {
+        return if x == y {
+            Ok(std::cmp::Ordering::Equal)
+        } else {
+            // Data-safety (issue #1694): the tags ARE type names, so they are
+            // safe to log; the values are not, and there are none here.
+            tracing::debug!(
+                "Cannot compare empty-buffer sentinels of incompatible types: {:?} vs {:?}",
+                x,
+                y
+            );
+            Err(Error::query_execution(
+                "Cannot compare incompatible types".to_string(),
+            ))
+        };
+    }
     if std::mem::discriminant(a) == std::mem::discriminant(b) {
         return a.partial_cmp(b).ok_or_else(|| {
             Error::query_execution("Cannot compare incompatible types".to_string())
@@ -781,5 +816,144 @@ mod tests {
             &Value::text("x".to_string())
         )
         .is_err());
+    }
+
+    /// All 12 `EmptyValueType` tags, so a new admitted family joins the
+    /// sentinel-vs-sentinel cases below automatically rather than silently
+    /// staying uncovered. Kept local to these tests: `EmptyValueType` exposes
+    /// no `ALL`, and inventing one would be a public-surface change nobody
+    /// ruled.
+    const ALL_EMPTY_TAGS: [crate::types::EmptyValueType; 12] = {
+        use crate::types::EmptyValueType as E;
+        [
+            E::Int,
+            E::BigInt,
+            E::Counter,
+            E::Float,
+            E::Double,
+            E::Timestamp,
+            E::Uuid,
+            E::TimeUuid,
+            E::Boolean,
+            E::Inet,
+            E::Decimal,
+            E::Varint,
+        ]
+    };
+
+    /// REGRESSION, roborev job 451. Every `Value::Empty` shares ONE
+    /// discriminant whatever its tag, so before the dedicated
+    /// sentinel-vs-sentinel arm the discriminant test routed
+    /// `Empty(Int)` vs `Empty(BigInt)` into `Value::partial_cmp`, which orders
+    /// two sentinels BY TAG (it must: it is a total order). That handed a
+    /// CROSS-TYPE comparison an ORDERING where this function's own rule for two
+    /// different declared types is an ERROR — so a `WHERE` comparison between
+    /// two differently-typed sentinels answered `Less`/`Greater` instead of
+    /// diagnosing the type mismatch.
+    ///
+    /// Both orders for every ordered pair of DISTINCT tags: an error is
+    /// symmetric, so `a` vs `b` and `b` vs `a` must BOTH refuse (an
+    /// error one way and an ordering the other would be the same defect
+    /// wearing one direction).
+    #[test]
+    fn two_sentinels_of_different_declared_types_are_incomparable() {
+        for x in ALL_EMPTY_TAGS {
+            for y in ALL_EMPTY_TAGS {
+                if x == y {
+                    continue;
+                }
+                let (a, b) = (Value::Empty(x), Value::Empty(y));
+                assert!(
+                    try_compare_values(&a, &b).is_err(),
+                    "Empty({x:?}) vs Empty({y:?}) must be incomparable, not ordered"
+                );
+                assert!(
+                    try_compare_values(&b, &a).is_err(),
+                    "Empty({y:?}) vs Empty({x:?}) must be incomparable, not ordered"
+                );
+            }
+        }
+    }
+
+    /// `uuid` and `timeuuid` are DISTINCT declared types, and for two sentinels
+    /// CQLite knows which is which — the tag is carried, so nothing is lossy
+    /// here. The `empty_tag_matches_operand` admission of that pair exists ONLY
+    /// because a NON-EMPTY timeuuid is indistinguishable from a uuid in `Value`
+    /// (`Value::Uuid([u8; 16])` for both); it must NOT leak into the
+    /// sentinel-vs-sentinel case, where no such loss occurs. Pinned separately
+    /// from the sweep above because this is the one pair a future reader is
+    /// most likely to "fix" in the wrong direction.
+    #[test]
+    fn the_uuid_timeuuid_admission_does_not_leak_into_sentinel_vs_sentinel() {
+        use crate::types::EmptyValueType;
+
+        assert!(try_compare_values(
+            &Value::Empty(EmptyValueType::Uuid),
+            &Value::Empty(EmptyValueType::TimeUuid)
+        )
+        .is_err());
+        assert!(try_compare_values(
+            &Value::Empty(EmptyValueType::TimeUuid),
+            &Value::Empty(EmptyValueType::Uuid)
+        )
+        .is_err());
+    }
+
+    /// The OTHER half of the same line, which slice 1's lead audit (Q3)
+    /// established and roborev's finding did not touch: two sentinels of the
+    /// SAME declared type are `Equal`, INCLUDING a value compared with itself.
+    /// `compare_values_ordering` feeds `sort_by`, so a sentinel that did not
+    /// compare `Equal` to itself would break reflexivity and can panic the
+    /// sort. Asserted through BOTH entry points, because the ordering wrapper
+    /// swallows errors and would hide a regression in the `Result` one.
+    #[test]
+    fn matching_sentinel_tags_are_equal_and_reflexive() {
+        use std::cmp::Ordering;
+
+        for tag in ALL_EMPTY_TAGS {
+            let a = Value::Empty(tag);
+            let b = Value::Empty(tag);
+            assert_eq!(
+                try_compare_values(&a, &b)
+                    .unwrap_or_else(|e| panic!("Empty({tag:?}) vs Empty({tag:?}) refused: {e}")),
+                Ordering::Equal
+            );
+            // Reflexivity proper: the SAME value, both entry points.
+            assert_eq!(
+                try_compare_values(&a, &a)
+                    .unwrap_or_else(|e| panic!("Empty({tag:?}) vs itself refused: {e}")),
+                Ordering::Equal
+            );
+            assert_eq!(compare_values_ordering(&a, &a), Ordering::Equal);
+        }
+    }
+
+    /// The sentinel-vs-NON-EMPTY arms BELOW the discriminant test must not be
+    /// weakened by the new arm above it: an empty buffer still sorts strictly
+    /// before every non-empty value of its own declared type
+    /// (`db/marshal/Int32Type.java:61-71` at `cassandra-5.0.8`), and the
+    /// uuid/timeuuid 16-byte admission still holds. Antisymmetry on every pair.
+    #[test]
+    fn sentinel_versus_non_empty_ordering_survives_the_new_arm() {
+        use crate::types::EmptyValueType;
+        use std::cmp::Ordering;
+
+        let pairs = [
+            (EmptyValueType::Int, Value::Integer(5)),
+            (EmptyValueType::Int, Value::Integer(i32::MIN)),
+            (EmptyValueType::BigInt, Value::BigInt(-1)),
+            (EmptyValueType::Uuid, Value::Uuid([0u8; 16])),
+            (EmptyValueType::TimeUuid, Value::Uuid([0xff; 16])),
+        ];
+        for (tag, other) in &pairs {
+            let empty = Value::Empty(*tag);
+            let fwd = try_compare_values(&empty, other)
+                .unwrap_or_else(|e| panic!("Empty({tag:?}) vs {other:?} refused: {e}"));
+            let rev = try_compare_values(other, &empty)
+                .unwrap_or_else(|e| panic!("{other:?} vs Empty({tag:?}) refused: {e}"));
+            assert_eq!(fwd, Ordering::Less, "Empty({tag:?}) did not sort first");
+            assert_eq!(rev, Ordering::Greater, "asymmetry broken for {tag:?}");
+            assert_eq!(fwd.reverse(), rev);
+        }
     }
 }

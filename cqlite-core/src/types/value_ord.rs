@@ -65,6 +65,12 @@ impl PartialOrd for Value {
                 // declared types is a cross-type comparison, which Cassandra
                 // never performs (a map has ONE key type); ordering by the tag
                 // keeps this total and deterministic rather than arbitrary.
+                // That tag ordering is a TOTALITY requirement of this impl and
+                // NOT a claim that the pair is comparable: the diagnosing
+                // comparator refuses it (`select_executor::value_ops::
+                // try_compare_values` decides `(Empty, Empty)` itself, above
+                // its discriminant test, and errors on mismatched tags —
+                // roborev job 451).
                 Some(a.cmp(b))
             }
             (Value::Empty(_), _) => Some(Ordering::Less),
