@@ -62,11 +62,29 @@ Resolve them in the worktree and reply per thread.
    matches what you changed (#3465) and re-arm `gh pr merge --auto --squash --delete-branch`:
    ```bash
    # A CODE fix moved the certified SHA -> it needs a NEW full gate at the new head:
-   bash scripts/flow/premerge-assert.sh <pr> <certified-sha> <full-gate-summary>
+   bash scripts/flow/premerge-assert.sh <pr> <certified-sha> <full-gate-summary> --c-verdict AUTO
    # A TEST/DOCS-ONLY fix on top of a full PASS at anchor X -> #1892's --delta re-cert,
    # never a repeat full gate; pass BOTH the anchor's full summary AND the delta summary:
-   bash scripts/flow/premerge-assert.sh <pr> <certified-sha> <anchor-full-summary> <delta-summary>
+   bash scripts/flow/premerge-assert.sh <pr> <certified-sha> <anchor-full-summary> <delta-summary> \
+     --c-verdict AUTO
    ```
+   `--c-verdict` is REQUIRED and has no default (#3751): omitting it is exit 3, never a silent
+   "C is not required". `AUTO` MEASURES whether C is required from the certified tree and reads
+   the `c` stage's verdict; a design-routed branch whose C stage is absent or `NOT-RUN` is
+   REFUSED. Run it IN the lane you certified: `AUTO` requires this worktree's `HEAD` to EQUAL
+   `<certified-sha>` before it trusts a locally-located stage, because every lane here is a
+   worktree of ONE shared `.git` and a peer lane's certified commit resolves from any lane
+   (#3616's class — resolvability is not provenance). And do NOT re-open the stage while the assert
+   runs: it binds the verdict to ONE observation of the stage record AND requires the verdict's own
+   `report=` to name that generation's nonce (#3751 rounds 9-10) — and since round 16 it RE-RUNS
+   the whole C check immediately before the success emit, after the advisory and the `gh` call, so
+   a supersede landing ANYWHERE in the run REFUSES with a `phase: revalidation` line naming what
+   changed (even a fresh generation that itself PASSES, since the audit that answered is then not
+   the audit that was validated). Re-run the assert once the stage is quiescent. If addressing comments changed the SPEC deltas, C has to be re-run — re-open the
+   stage (`review-stage.sh open c --issue <N> --agent spec-auditor --force`, which KEEPS the
+   original clock and publishes the report under a FRESH NONCE — spawn the auditor with the path
+   that command PRINTS, since the previous report is no longer read and the new name cannot be
+   guessed) and read its `verdict` again.
    **A CODE FIX ALSO VOIDS THE ROBOREV ROUND, not just the gate (#3752).** Re-review AFTER the
    new gate — a roborev round changes no bytes, so it can never invalidate a gate PASS, while a
    rebase or a src fix changes bytes and invalidates both — and post the new

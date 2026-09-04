@@ -86,6 +86,18 @@
 # block was recovered from a coloured CAPTURE rather than from the summary file
 # (#3400: colour survives redirection).
 #
+# WHICH READS MAY NORMALISE, PER READER (#3751 round 15 U2, round 21 AA2). The rule
+# is: a read may normalise TO LOCATE a line, and may never normalise TO SUPPLY A
+# VALUE. The GATE SUMMARY reader keeps the looser VALUE-ONLY form of it, because a
+# coloured gate capture is documented-legitimate input and real colouring brackets
+# the KEY as readily as the value. The two readers of `review-stage.sh`'s own
+# artifacts — the `--c-verdict` line and the stage record — are STRICT: the parsed
+# line must be BYTE-IDENTICAL to the line on disk minus one trailing CR, because
+# those artifacts have ONE producer and it emits no control byte at all. Round 15
+# asked that strictness as a field-membership JOIN test, which a CSI BRACKETING a
+# field satisfies, so `RESULT: <CSI>PASS<CSI>` normalised into `PASS` and certified
+# a merge; it is an IDENTITY now, so every mandatory field is compared RAW.
+#
 # FOUR RESIDUALS, STATED RATHER THAN FAKED
 # ----------------------------------------
 #  1. `run-id:` CANNOT be verified here. The #2874 reader contract says a reader
@@ -203,9 +215,229 @@
 #           elsewhere and that the DEFECT WAS THE CONSTRAINT NOT BEING STATED
 #           WHERE THE GUARD IS READ. Stating it is the fix.
 #
+# THE C (INTENT AUDIT) VERDICT IS REQUIRED AT THE MERGE POINT (#3751)
+# -------------------------------------------------------------------
+# A delegated review stage used to write NOTHING at any point in its life, so its
+# reader had only ABSENCE to reason from — and every consumer of an absence has to
+# CHOOSE how to read it. Every measured instance so far was recorded as not-run by
+# its own lane and nothing REQUIRED it; no false certification has occurred yet.
+# `scripts/flow/review-stage.sh` makes a stage's verdict an ARTIFACT with a CLOSED
+# grammar; this script is the point that CONSUMES it, so an absent C can no longer
+# reach a merge.
+#
+#   --c-verdict AUTO     MEASURE whether C is required from the CERTIFIED tree,
+#                        then read the stage's verdict. The intended form.
+#   --c-verdict <path>   a file holding a captured verdict line, i.e.
+#                        `review-stage.sh verdict c --issue <N> > <path>`.
+#
+# THE FLAG IS REQUIRED AND ITS OMISSION IS EXIT 3 — the #3465 precedent, which
+# broke pre-existing callers loudly and on purpose. A silent default of "C is not
+# required" would reproduce, inside the enforcer, the exact defect the enforcer
+# exists to close. It is a NAMED flag rather than a fifth positional so it
+# composes with #3752's sibling required flag in EITHER landing order, and the
+# missing-flag census names each absent flag independently, so this one's exit 3
+# does not depend on being the only required flag.
+#
+# ROUTING IS MEASURED FROM THE CERTIFIED TREE, NEVER TAKEN FROM THE CALLER.
+# A caller-supplied "C does not apply here" is exactly the escape hatch #3751
+# exists to remove, so `AUTO` asks git what THIS BRANCH does to
+# `openspec/changes/`: the diff between merge-base(origin/main, <certified>) and
+# <certified>, with `openspec/changes/archive/**` AND pure DELETIONS excluded
+# (archiving is flow-finalize's work, never a routing signal — and because rename
+# detection is pinned off, a real archive MOVE is a deletion plus an addition under
+# `archive/`, so counting the deletion refused every finalize PR: #3751 round 1 F4).
+# Non-empty ⇒ DESIGN-ROUTED ⇒ C
+# REQUIRED; empty ⇒ affirmatively `NOT-APPLICABLE (no openspec change on branch)`.
+#   * A plain LISTING of `openspec/changes/` cannot answer this. Measured
+#     2026-09-01: `origin/main` carries `archive` PLUS two sibling lanes' in-flight
+#     change directories, so every branch would read design-routed and the
+#     "measurement" would be vacuous — a check that reds on correct input is the
+#     check agents learn to waive.
+#   * The base is the MERGE-BASE, never `origin/main`'s TIP (#3392). A tip
+#     comparison reports another lane's newly-landed change as a difference of
+#     THIS branch, which reds a correct oracle-driven PR.
+#   * THE PATHSPEC IS ROOT-ANCHORED (`:(top)`), so the answer does NOT depend on
+#     the caller's WORKING DIRECTORY (#3751 round 11, Q1). A bare pathspec is
+#     interpreted relative to the cwd, so run from a repository subdirectory this
+#     measurement returned EMPTY and a design-routed branch merged with NO C
+#     verdict. `diff.relative=false` does NOT cover this — it controls the OUTPUT
+#     path prefix, not pathspec interpretation — so BOTH are pinned, and neither
+#     substitutes for the other. (The stage LOOKUP has always been
+#     cwd-independent, via `c_stage_root`'s `--show-toplevel` — captured with a
+#     SENTINEL since #3751 round 18 (X1), because a plain `$( )` strips a
+#     trailing newline off the directory name and lands on a SIBLING lane; the routing
+#     measurement was the one half that was not.)
+#   * It measures the CERTIFIED sha, not this checkout's HEAD — the same rule the
+#     base-staleness advisory follows: a report about a different tree than the one
+#     being merged is the "satisfied and wrong" shape.
+#   * ANY failure to measure (no git, no `origin/main`, the certified commit absent
+#     from this checkout, a failing diff) is `UNMEASURED` and is TREATED AS
+#     REQUIRED. Never derive a pass from the absence of a bad signal.
+# There is deliberately NO spelling of the flag that means "not applicable": a
+# supplied PATH can only carry a review-stage verdict token, and `NOT-APPLICABLE`
+# is not in that closed grammar, so a file asserting it is refused as an
+# unrecognised token. Inapplicability is reachable ONLY through AUTO's measurement.
+#
+# EVERY READ OF UNTRUSTED CONTENT GOES THROUGH `c_capture_map_nul` (#3751 round
+# 13, S2), because a COMMAND SUBSTITUTION SILENTLY DISCARDS NUL BYTES and so does
+# not merely lose information — it MANUFACTURES the token this script validates.
+# Measured on the shipped artifacts: gawk passes a NUL through a field, so a
+# `--c-verdict` file whose token is `PA\0SS` — NOT `PASS`, and a token the closed
+# set must therefore refuse — arrived here as `PASS` and this script reported
+# `PREMERGE: OK` at exit 0. A capture that normalises its input cannot be the thing
+# that validates it.
+#
+# THAT SENTENCE WAS FALSE FOR ONE READER FOR A WHOLE ROUND (#3751 round 14, T1).
+# Round 13 routed the `--c-verdict` read and `c_record_bytes` and left `_gate_awk`
+# — the parser of the GATE OF RECORD, the artifact #3465 exists to require —
+# reading its file RAW. Measured: `RESULT: PA<NUL>SS` yielded `v_result=PA<NUL>SS`
+# from awk and the capture in `gate_parse_file` removed the byte, so this script
+# read `PASS` from a summary that does not contain it. THREE rounds in a row have
+# now found "a boundary exists and one path bypasses it", so the completeness is
+# asserted STRUCTURALLY by `scripts/tests/lib/read-boundary-scan.sh` rather than
+# by this sentence — round 13's own asserts check the mapping appears exactly ONCE,
+# which is a property of the BOUNDARY and not of its CALLERS.
+#
+# AND EVERY LINE IS PRINTED WITH `printf` OF A LITERAL FORMAT — NEVER `echo`
+# (#3751 round 14, T2). `c_safe_display` neutralises the VALUE; the printing
+# COMMAND must not re-interpret what it just neutralised. Under the bash option
+# `xpg_echo`, settable by an INHERITED environment (`BASHOPTS`, `SHELLOPTS`, a
+# `BASH_ENV` file) and never by this script, `echo` performs BACKSLASH ESCAPE
+# PROCESSING on its argument, so a `\n` in a legal path splits a line, `\033`
+# injects terminal control, `\c` truncates, and octal `\075` manufactures a REAL
+# `=`. This script uses no `echo` today — measured, zero occurrences — and
+# `scripts/tests/lib/emit-boundary-scan.sh` keeps it that way, also requiring
+# every `printf` FORMAT to be a literal this script authored.
+#
+# ONLY `PASS` AND `AUTHOR-PERFORMED` PROCEED, AND THE SECOND KEEPS ITS OWN TOKEN.
+# `AUTHOR-PERFORMED` is review-stage.sh's disclosed hand-audit substitute; it is
+# reported on its own `PREMERGE: C-VERDICT` line and is NEVER folded into
+# `PREMERGE: OK`, because a reader must be able to see that the intent audit was
+# performed by the diff's AUTHOR. `FINDINGS`, `NOT-RUN` and every unrecognised
+# token REFUSE, naming the stage and the cause. The token is reduced to its FIRST
+# WORD and matched by STRING EQUALITY, never a prefix test (#3544).
+#
+# AND `AUTHOR-PERFORMED` MAY NOT STAND OVER A BLOCKING INDEPENDENT VERDICT (#3751
+# round 22, AB1). Under `AUTO`, when the published token is the substitute, EVERY
+# generation of that stage is censused and the merge is REFUSED — naming the
+# generation and its nonce — if one records `result: FINDINGS`. review-stage.sh
+# SUPERSEDES a report rather than destroying it, so a blocking verdict landing in
+# `record-author-performed`'s publish window survives on disk and was read by
+# nobody: the substitute became the published verdict and the merge proceeded with
+# no `--force` and no `replaced-verdict:` trace. That window cannot be closed in a
+# shell (no compare-and-swap rename), and this script races nobody, so the check
+# lives HERE. It is asked of the substitute ALONE: a published `PASS` over a
+# superseded `FINDINGS` is the SANCTIONED REMEDIATION FLOW (fix, re-open, re-audit)
+# and is indistinguishable from anything else on disk, so refusing it would red on
+# correct input. See `c_assert_no_superseded_blocking_verdict` for the closed
+# blocking set, the two declared residuals, and why a consumer-side check is
+# sufficient here when this repository ordinarily rejects one.
+#
+# ONE DECLARED RESIDUAL. With an explicit `--c-verdict <path>` this script verifies
+# the verdict's GRAMMAR (including that the stage KIND is `c`) and TOKEN, not that
+# the stage it came from belongs to THIS issue: the verdict line carries a kind, an
+# agent and a report path, and no sha. The report path IS printed on the success
+# line so a human can see which stage answered. Under `AUTO` the binding is
+# MECHANICAL and is why AUTO is the intended form: the stage is located in this
+# worktree, two stage records are refused as ambiguous, and TWO INDEPENDENT
+# BINDINGS are applied, because they answer different questions and neither
+# replaces the other.
+#   (a) THE WORKTREE (#3751 round 1, F1). This worktree's HEAD must EQUAL the
+#       certified commit before a locally-located stage is trusted at all — every
+#       lane on this box is a worktree of ONE shared `.git`, so a peer lane's
+#       certified commit RESOLVES here and resolvability is not provenance. Rule 1
+#       asserts `headRefOid` == certified, so HEAD == certified binds the local
+#       artifact to THIS PR transitively.
+#   (b) THE ARTIFACT (#3751 round 3, G1). The stage RECORD's own `head-sha:` — the
+#       commit review-stage.sh resolved when the stage was OPENED — must equal the
+#       certified commit too. (a) cannot see a STALE ARTIFACT: it is satisfied BY
+#       CONSTRUCTION, because a lane stands at the very commit it is certifying, so
+#       a `result: PASS` recorded BEFORE a further commit, an amend or a rebase
+#       persisted in `.review-stage/` and certified the NEW tree. A record with no
+#       `head-sha:`, several of them, or a value that is not a 40-hex sha is a
+#       NAMED REFUSAL and never a skip — an older record predating the field must
+#       not be readable as certifying. FAIL-CLOSED BY DESIGN: this is the
+#       gate-of-record rule (any change after the gate INVALIDATES it) applied to
+#       the intent audit, and an audit of an older tree may not certify a newer
+#       one. Every one of those refusals prints the same remedy — re-open the stage
+#       at this commit with `--force` (which RE-STAMPS `head-sha`, deliberately
+#       unlike `spawned-at`) and re-run C.
+#   (c) ONE OBSERVATION (#3751 round 9, N2). (b) validates `head-sha` from the stage
+#       record, and `review-stage.sh verdict` then RE-READS that record to find which
+#       report is current — two reads of one record are TWO DIFFERENT FACTS. An atomic
+#       replacement in between yields a verdict from a different GENERATION of the
+#       stage, possibly bound to a different commit, under a binding checked on the
+#       old one: measured, the success line named `stage-head=<validated>` beside a
+#       report belonging to a generation whose own head-sha was forty zeros. So the
+#       record is captured ONCE (the `head-sha` is parsed from that capture, not from a
+#       second read) and is re-required to be BYTE-IDENTICAL before the token is
+#       parsed. A handoff — resolving the report here and passing it to `verdict` —
+#       is deliberately NOT the fix: round 4 (H2) deleted `--report` so that nothing
+#       outside `review-stage.sh` can name which file holds a verdict, and a path
+#       argument would rebuild that channel from the other end.
+#   (d) THE GENERATION (#3751 round 10, P2). (c) is defeated by an ABA REPLACEMENT:
+#       the record can go from the validated generation A to a foreign generation B
+#       while `verdict` reads B, and BACK to A before the byte comparison — two
+#       identical observations, comparison passes, accepted verdict came from B.
+#       Equality of two observations is not identity of the thing observed at a third
+#       instant. So the verdict is bound to the generation ITSELF, using a value it
+#       already reports OUTWARD: since round 6 (K2) the report path carries the
+#       generation's nonce (`<kind>.<nonce>.md`) and `verdict` publishes it as its
+#       mandatory `report=` field, so that field must name the nonce carried by the
+#       capture (b) was validated on — read from the SAME capture, never a fresh
+#       read. ABA cannot satisfy it: a verdict read from B returns B's nonce. Still
+#       nothing is passed INTO `review-stage.sh` — reading a value OUT of the verdict
+#       line rebuilds no control channel — and (c) is KEPT as defence in depth: it
+#       catches an edit under the SAME nonce and a vanished record, which (d) cannot,
+#       and (d) catches what it cannot. Every state that cannot be bound REFUSES and
+#       NAMES itself (a legacy record with no `report-nonce:`, several of them, an
+#       unusable token, a `report=unresolved`, a foreign nonce). It gates the two
+#       tokens the closed grammar lets PROCEED, because acceptance is the only thing
+#       that can certify — every other token already refuses, and there
+#       `review-stage.sh`'s own cause is the more precise operator action.
+#   (e) THE WINDOW (#3751 round 16, V1). (a)-(d) all ran ONCE, near the top of the
+#       merge-point checks — and the base-staleness advisory (bounded at 65s) and the
+#       `gh pr view` round trip then ran with NOTHING re-checking C, so a concurrent
+#       `review-stage.sh open --force` superseded the validated PASS and the script
+#       still emitted its success verdict on the strength of it (measured: `PREMERGE:
+#       OK b5f49d60aae4…` at exit 0 with the supersede planted immediately after the
+#       single evaluation). This repository's own ruling covers it — a check must be
+#       INSIDE the window it certifies, not before it and not after the harm (roborev
+#       job 290, on the gate's component-set pre-flight) — and its remedy is followed
+#       verbatim: the whole evaluation is REPEATED immediately before the success
+#       emit, after everything that can consume time, while the EARLY one is KEPT
+#       because it is what stops an uncertifiable run paying for the advisory and the
+#       network call at all. The repeat RESETS the captured observation, so it takes
+#       (c)'s single observation and (d)'s generation binding AFRESH rather than
+#       inheriting a capture from before the window. A disagreement is a REFUSAL
+#       NAMING WHICH FIELD MOVED — never a second opinion, never last-one-wins — and
+#       that comparison is load-bearing rather than decorative: a supersede to a
+#       DIFFERENT generation that itself PASSES at the same head yields an accepting
+#       token from an audit this run never validated, which a bare repeat would
+#       certify. RESIDUAL, DECLARED: two checks cannot both be last, so the C window
+#       is NARROWED (to a local git measurement plus one `review-stage.sh` read) and
+#       not closed, and the `gh` head check is correspondingly no longer the last
+#       thing before the success emit.
+#   WHICH REPORT the record names is NOT this script's question (#3751 round 5 J1,
+#   round 6 K2). The record also carries a `report-nonce:`, and the report path
+#   INCLUDES it (`<kind>.<nonce>.md`; a bare `<kind>.md` only for a record written
+#   before the field existed) so that a PREVIOUS, idle agent resuming after a
+#   `--force` holds a stale path and cannot write into the current report at all.
+#   The nonce is GENERATED, never chosen by scanning what is on disk, so two
+#   concurrent opens cannot be handed one path. This script never derives that path:
+#   it runs `review-stage.sh verdict`, which resolves the nonce from the same
+#   record with the same function `open` wrote it with. A record whose
+#   `report-nonce:` cannot be read therefore arrives here as a NON-PASSING
+#   TOKEN (`NOT-RUN (stage record unreadable: …)`), which the closed grammar below
+#   refuses like any other — no fallback, and no second opinion about which file
+#   holds the verdict. It does, since round 10, CHECK the ANSWER — binding (d)
+#   requires the returned `report=` to name the validated generation's nonce — which
+#   is a different act from deriving the path or naming one inward: the callee still
+#   decides which report is current.
+#
 # USAGE
 #   scripts/flow/premerge-assert.sh <pr-number> <certified-sha> \
-#       <gate-of-record-summary> [<delta-summary>]
+#       <gate-of-record-summary> [<delta-summary>] --c-verdict <path|AUTO>
 #
 # ENVIRONMENT
 #   GH_REPO   the target repo (default: pmcfadin/cqlite). `gh` honors GH_REPO
@@ -216,22 +448,26 @@
 #       — prints "PREMERGE: OK <sha>", "PREMERGE: SCOPE ..." (what was and was
 #         NOT proven, #3650), "PREMERGE: ADVISORY ..." (the non-blocking
 #         base-staleness report, #3650 slice 1 — it NEVER changes this exit
-#         code) and "PREMERGE: GATE-OF-RECORD ..."
+#         code), "PREMERGE: GATE-OF-RECORD ..." and "PREMERGE: C-VERDICT ..."
 #         (plus "PREMERGE: DELTA-RECERT ... anchor-ancestry: BOUND ..." in Case B,
-#          the affirmative record that the #3653 ancestry binding RAN), and the
-#          two #3752 legs' own anchored reports: "PREMERGE: REVIEW-BINDING ..."
-#          (the recorded roborev round is bound to the certified head) and
-#          "PREMERGE: HOLD-CHECK ..." (no stop order was recognised)
+#          the affirmative record that the #3653 ancestry binding RAN,
+#          "PREMERGE: C-VERDICT-NOTE ..." when the C token is AUTHOR-PERFORMED,
+#          and the two #3752 legs' own anchored reports:
+#          "PREMERGE: REVIEW-BINDING ..." (the recorded roborev round is bound to
+#          the certified head) and "PREMERGE: HOLD-CHECK ..." (no stop order was
+#          recognised))
 #   2   no/invalid gate of record (INCLUDING a Case B anchor that is NOT on the
-#       certified sha's history, #3653), OR head moved (mismatch), OR PR
-#       closed/merged, OR the recorded roborev round does not cover the certified
-#       head (#3752 `PREMERGE: REVIEW-UNBOUND`), OR a stop order is in force
-#       (#3752 `PREMERGE: HOLD`) — LOUD multi-line refusal. An UNMEASURED leg
-#       refuses here too: a positive verdict requires a positive measurement, so
+#       certified sha's history, #3653), OR no/invalid C verdict where C is
+#       required (#3751), OR head moved (mismatch), OR PR closed/merged, OR the
+#       recorded roborev round does not cover the certified head (#3752
+#       `PREMERGE: REVIEW-UNBOUND`), OR a stop order is in force (#3752
+#       `PREMERGE: HOLD`) — LOUD multi-line refusal. An UNMEASURED leg refuses
+#       here too: a positive verdict requires a positive measurement, so
 #       "could not tell" is the bad verdict, never a clearance.
 #   3   gh/network failure, a required TOOL failing, an UNMEASURABLE anchor
-#       ancestry, or a usage error — fail closed, never merge on uncertainty. The
-#       four are distinguished by the printed marker, NOT by the code:
+#       ancestry, or a usage error (which now INCLUDES omitting --c-verdict,
+#       #3751) — fail closed, never merge on uncertainty. The four are
+#       distinguished by the printed marker, NOT by the code:
 #       `PREMERGE: USAGE` (you called it wrong), `PREMERGE: TOOL-FAILURE` (a
 #       broken box — fix the box, do NOT re-run the gate), `PREMERGE: GH-FAILURE`
 #       (auth/network/no-such-PR), `PREMERGE: ANCHOR-UNVERIFIABLE` (#3653 — this
@@ -249,8 +485,16 @@ usage() {
   # a TOOL failure and a GH failure, and a caller must be able to tell them apart
   # — "you called me wrong" is not "GitHub is down". The exit CODES are unchanged.
   printf 'PREMERGE: USAGE — the call is wrong (this is NOT a gh/network failure)\n' >&2
-  printf 'usage: %s <pr-number> <certified-sha> <gate-of-record-summary> [<delta-summary>]\n' \
+  # Optional REASON lines, printed FIRST so the specific complaint is the first
+  # thing read. `usage` with no arguments is unchanged, which is why every
+  # pre-#3751 call site still reads correctly.
+  while [ "$#" -gt 0 ]; do
+    printf 'PREMERGE: USAGE   %s\n' "$1" >&2
+    shift
+  done
+  printf 'usage: %s <pr-number> <certified-sha> <gate-of-record-summary> [<delta-summary>] \\\n' \
     "$(basename "$0")" >&2
+  printf '           --c-verdict <path|AUTO>\n' >&2
   printf '       <gate-of-record-summary> is REQUIRED: the AGENT_GATE_SUMMARY_FILE of the\n' >&2
   printf '       FULL gate (a "==== AGENT-GATE SUMMARY ====" block with RESULT: PASS and\n' >&2
   printf '       tree-integrity: PASS). With 3 args it must be AT the certified sha.\n' >&2
@@ -258,26 +502,133 @@ usage() {
   printf '       whose delta-anchor: is the full block above and whose own commit:/\n' >&2
   printf '       tree-start: are AT the certified sha (the #1892 post-gate-polish route).\n' >&2
   printf '       See #3465.\n' >&2
+  printf '       --c-verdict is REQUIRED (#3751) and has NO default — omitting it is THIS\n' >&2
+  printf '       usage failure, never a silent "C is not required":\n' >&2
+  printf '         --c-verdict AUTO     MEASURE from the certified tree whether C is\n' >&2
+  printf '                              required, then read the stage verdict. The stage\n' >&2
+  printf '                              must be BOUND to the certified sha twice: this\n' >&2
+  printf '                              worktree HEAD, and the stage record head-sha: it\n' >&2
+  printf '                              was opened at. A stale, missing or unparsable\n' >&2
+  printf '                              head-sha REFUSES — re-open with --force, re-run C\n' >&2
+  printf '                              WRITING INTO THE PATH THAT open PRINTS: a --force\n' >&2
+  printf '                              re-open publishes a report under a FRESH NONCE, so\n' >&2
+  printf '                              the previous file is no longer read (#3751).\n' >&2
+  printf '                              The record is read ONCE and must still be\n' >&2
+  printf '                              byte-identical when the verdict comes back: a\n' >&2
+  printf '                              generation swapped in mid-check REFUSES (#3751).\n' >&2
+  printf '                              AND the verdict itself must NAME that generation:\n' >&2
+  printf '                              its report= field must carry the record report-nonce:\n' >&2
+  printf '                              that was validated, so a record swapped in and BACK\n' >&2
+  printf '                              OUT (byte-identical, verdict read from the other\n' >&2
+  printf '                              generation) REFUSES too. A legacy record with no\n' >&2
+  printf '                              report-nonce: cannot be bound and REFUSES (#3751).\n' >&2
+  printf '                              The routing measure is ROOT-ANCHORED, so it does\n' >&2
+  printf '                              not depend on your working directory (#3751).\n' >&2
+  printf '                              The WHOLE C check runs TWICE: once here, offline, so\n' >&2
+  printf '                              "you have no C verdict" needs no network; and again\n' >&2
+  printf '                              immediately before the success verdict, so the check\n' >&2
+  printf '                              sits INSIDE the window it certifies. A stage\n' >&2
+  printf '                              SUPERSEDED in between — even by a generation that\n' >&2
+  printf '                              itself PASSES — REFUSES, naming what changed (#3751).\n' >&2
+  printf '         --c-verdict <path>   a file holding a captured verdict line, i.e.\n' >&2
+  printf '                              scripts/flow/review-stage.sh verdict c --issue <N> > <path>\n' >&2
+  printf '                              Capture it WHOLE: the stage KIND, every mandatory key\n' >&2
+  printf '                              AND each key VALUE are validated, so a bare report= or\n' >&2
+  printf '                              an emptied elapsed=/deadline=/agent= is refused (#3751).\n' >&2
 }
 
-if [ "$#" -ne 3 ] && [ "$#" -ne 4 ]; then
-  usage
+# --- ARGUMENTS: POSITIONALS PLUS NAMED REQUIRED FLAGS (#3751/#3752) ----------
+# The three/four positionals are the pre-#3751 contract and are UNCHANGED. What is
+# new is that a required argument arrives as a NAMED FLAG, deliberately:
+#
+#  * #3752 binds this same script to the roborev certification and will add a
+#    sibling required flag. A named flag composes in EITHER landing order, where a
+#    fifth positional would not — and this parse loop is the one place a new flag
+#    is added.
+#  * the missing-flag census below names EACH absent required flag independently,
+#    so `--c-verdict`'s exit-3-on-omission does NOT depend on being the only
+#    required flag. A `[ $# -ne N ]` arity test would have exactly that dependency.
+c_verdict=""
+c_verdict_set=0
+pos_count=0
+pos1=""; pos2=""; pos3=""; pos4=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --c-verdict)
+      shift
+      # An ABSENT value is a usage failure, never an empty default — the same rule
+      # the empty fourth positional gets below. A caller whose variable expanded to
+      # nothing must be told, never silently downgraded.
+      if [ "$#" -eq 0 ]; then
+        usage '--c-verdict requires a value: a <path> to a captured verdict line, or AUTO'
+        exit 3
+      fi
+      c_verdict="$1"
+      c_verdict_set=1
+      ;;
+    --c-verdict=*)
+      c_verdict="${1#*=}"
+      c_verdict_set=1
+      ;;
+    -*)
+      usage "unknown option '$1'"
+      exit 3
+      ;;
+    *)
+      pos_count=$((pos_count + 1))
+      case "$pos_count" in
+        1) pos1="$1" ;;
+        2) pos2="$1" ;;
+        3) pos3="$1" ;;
+        4) pos4="$1" ;;
+        *)
+          usage "too many positional arguments (got $pos_count, expected 3 or 4)"
+          exit 3
+          ;;
+      esac
+      ;;
+  esac
+  shift
+done
+
+if [ "$pos_count" -ne 3 ] && [ "$pos_count" -ne 4 ]; then
+  usage "expected 3 or 4 positional arguments, got $pos_count"
   exit 3
 fi
 
-pr="$1"
-certified="$2"
-summary_file="$3"
-delta_file="${4:-}"
+# THE MISSING-FLAG CENSUS. One entry per required flag, each named on its own, so
+# adding #3752's flag here cannot weaken this one's refusal.
+missing_flags=""
+[ "$c_verdict_set" -eq 1 ] || missing_flags="$missing_flags --c-verdict"
+if [ -n "$missing_flags" ]; then
+  usage "MISSING REQUIRED FLAG(S):$missing_flags" \
+    "This is deliberately NOT a default (#3751): a silent 'C is not required' would" \
+    "reproduce, inside the enforcer, the exact defect the enforcer exists to close —" \
+    "an absent review read as a clean one. Pass --c-verdict AUTO to have the routing" \
+    "MEASURED from the certified tree."
+  exit 3
+fi
+if [ -z "$c_verdict" ]; then
+  usage '--c-verdict was given an EMPTY value' \
+    'An empty value is a caller bug (an unset variable), not "AUTO" and not "skip".'
+  exit 3
+fi
+
+pr="$pos1"
+certified="$pos2"
+certified_raw="$pos2"
+summary_file="$pos3"
+delta_file="$pos4"
 
 if [ -z "$pr" ] || [ -z "$certified" ] || [ -z "$summary_file" ]; then
-  usage
+  usage 'an empty <pr-number>, <certified-sha> or <gate-of-record-summary>'
   exit 3
 fi
 # An EMPTY fourth argument is a usage failure, not "3-arg mode": a caller whose
 # variable expanded to nothing must be told, never silently downgraded.
-if [ "$#" -eq 4 ] && [ -z "$delta_file" ]; then
-  usage
+if [ "$pos_count" -eq 4 ] && [ -z "$delta_file" ]; then
+  usage 'an EMPTY fourth argument (<delta-summary>)' \
+    'This is not "3-arg mode" — a caller whose variable expanded to nothing is told.'
   exit 3
 fi
 
@@ -286,14 +637,14 @@ fi
 certified=$(printf '%s' "$certified" | tr '[:upper:]' '[:lower:]')
 case "$certified" in
   *[!0-9a-f]* | "")
-    printf 'error: certified SHA must be 40 hex chars (got: %s)\n' "$2" >&2
+    printf 'error: certified SHA must be 40 hex chars (got: %s)\n' "$certified_raw" >&2
     usage
     exit 3
     ;;
 esac
 if [ "${#certified}" -ne 40 ]; then
   printf 'error: certified SHA must be a full 40-char hex SHA (got %d chars: %s)\n' \
-    "${#certified}" "$2" >&2
+    "${#certified}" "$certified_raw" >&2
   usage
   exit 3
 fi
@@ -307,8 +658,12 @@ fi
 refuse_no_gate() {
   printf '========================================================\n' >&2
   printf 'PREMERGE: NO-GATE-OF-RECORD — REFUSING TO MERGE\n' >&2
-  printf '  summary file: %s\n' "$summary_file" >&2
-  [ -n "$delta_file" ] && printf '  delta summary file: %s\n' "$delta_file" >&2
+  printf '  summary file: %s\n' "$(c_safe_display "$summary_file")" >&2
+  # ROUTED LIKE ITS SIBLING ONE LINE UP (#3751 round 9, N3). This is the CALLER's fourth
+  # argument, exactly as invoker-supplied as `$summary_file`, and it went out raw for months
+  # because the structural guard could not SEE this line: its scope was anchored at the start of a
+  # line and this statement begins `[ -n … ] &&`. The guard is positional now.
+  [ -n "$delta_file" ] && printf '  delta summary file: %s\n' "$(c_safe_display "$delta_file")" >&2
   printf '  certified sha: %s\n' "$certified" >&2
   while [ "$#" -gt 0 ]; do
     printf '  %s\n' "$1" >&2
@@ -338,6 +693,1909 @@ refuse_tool_failure() {
   printf '  assert — do NOT re-run the gate. Refusing to merge (fail closed).\n' >&2
   printf '========================================================\n' >&2
   exit 3
+}
+
+# ---------------------------------------------------------------------------
+# THE C (INTENT AUDIT) VERDICT AT THE MERGE POINT (#3751)
+# ---------------------------------------------------------------------------
+# See the header. Everything below is OFFLINE, so "you have no C verdict" is
+# reportable without a network round trip, exactly like the gate-of-record half.
+#
+# `c` is the stage KIND the C intent audit uses, by convention shared with
+# scripts/flow/review-stage.sh's callers (flow-closer opens `c`). It is a constant
+# and NOT an option: a caller able to choose which stage counts as C could point
+# this check at a stage nobody gates on.
+# --- the capture boundary ----------------------------------------------------
+# A CAPTURE MUST NOT MANUFACTURE THE TOKEN IT VALIDATES (#3751 round 13, S2).
+#
+# THE FINDING, measured on the shipped artifacts: bash SILENTLY DISCARDS NUL bytes in a command
+# substitution, and BOTH of this script's reads of untrusted content are captures — awk's OUTPUT for
+# the `--c-verdict` file, and `c_record_bytes`' read of the stage record. gawk passes a NUL through
+# a field, so a verdict file whose token is `PA\0SS` — a token that is NOT `PASS`, and which the
+# closed-set match must therefore refuse — arrived here as `PASS` and the merge point reported
+# `PREMERGE: OK`. The capture created the very token the flag exists to verify.
+#
+# THE FIX IS IN THE READ, NOT IN A PROBE: a separate `grep -q`/`wc -c` of the same path is a SECOND
+# observation, and one direction of its disagreement is a FALSE PASS (the capture reads the
+# NUL-bearing version while the probe reads a clean one). So the ONE read maps NUL to SOH in the
+# stream. The byte count is preserved, nothing is lost, and `PA<SOH>SS` fails the closed-set match
+# by STRING EQUALITY exactly as `PASSthisNeverRan` does.
+#
+# ONE LITERAL, THE BYTE DERIVED FROM IT — `tr` needs the four characters `\001` and a detector needs
+# the byte, and two hand-written spellings are two places to diverge, where a divergence means the
+# detector looks for a byte the mapper never writes (a silent false PASS).
+#
+# `review-stage.sh` carries the same idiom over its own files and the two are deliberately NOT a
+# shared implementation, for the reason `c_record_bytes` states about its sibling: no agreement
+# between them is required, since each is used within ONE process over a DIFFERENT file.
+C_CAPTURE_NUL_TR='\001'
+C_CAPTURE_NUL_BYTE="$(printf '%b' "$C_CAPTURE_NUL_TR")"
+
+# c_capture_map_nul <path> — read <path> for a value that is about to enter a SHELL VARIABLE (or a
+# tool whose output will). The ONE mapping implementation in this script.
+c_capture_map_nul() {
+  LC_ALL=C tr '\000' "$C_CAPTURE_NUL_TR" <"$1"
+}
+
+C_STAGE_KIND=c
+
+# The stage-verdict grammar this script CONSUMES (scripts/flow/review-stage.sh):
+#   REVIEW-STAGE: <kind> RESULT: <token> elapsed=<s> deadline=<s> agent=<t> report=<p>
+# Only these two tokens may proceed. Everything else — FINDINGS, NOT-RUN, and any
+# unrecognised value — REFUSES.
+C_TOKEN=""          # the token that was read
+C_TOKEN_LINE=""     # the verdict line it was read from, for the diagnostic
+C_TOKEN_REPORT=""   # the `report=` field, so a human can see WHICH stage answered
+C_SOURCE=""         # how the verdict was obtained
+C_ROUTING=""        # REQUIRED | NOT-APPLICABLE | UNMEASURED
+C_ROUTING_DETAIL=""
+# WHICH OF THE TWO C EVALUATIONS IS RUNNING (#3751 round 16, V1). Empty during the EARLY one and
+# `revalidation` during the one that runs immediately before the success emit, so every refusal the
+# second raises SAYS SO — otherwise a `NOT-RUN` refusal raised after a PASS was already validated
+# reads as "there was never a verdict", which is affirmatively false about the run and hides the
+# fact that the stage MOVED while the merge was being armed.
+C_PHASE=""
+# ONE remedy sentence for every stage-binding refusal (#3751 round 3, G1): each of those
+# refusals has the SAME next action, and six copies of it is six places for it to drift.
+C_REOPEN_REMEDY="Remedy: re-open the stage at THIS commit and re-run C — review-stage.sh open <kind> --issue <N> --agent spec-auditor --force (--force RE-STAMPS head-sha, deliberately unlike spawned-at, and publishes the report under a FRESH NONCE: spawn the auditor with the path that command PRINTS, because the previous file is no longer read) — then read it with: review-stage.sh verdict <kind> --issue <N>"
+
+# c_safe_display <text> — THE ONE EMIT BOUNDARY for text this script did not produce (#3751 round
+# 5, J3). The stage verdict line, its token, its `report=` field and its stage KIND all come from a
+# file a DELEGATED AGENT wrote, so they are DATA — and they used to reach stderr and stdout
+# verbatim. `_c_verdict_awk` strips ANSI CSI sequences as parse hygiene (#3400), which is neither
+# complete (a bare ESC, BEL, backspace, VT/FF, DEL or an OSC `ESC ] … BEL` sequence survives it)
+# nor a display guarantee. So every value those two printers render goes through here.
+#
+# Same three classes as `review-stage.sh`'s `one_line`, and the same rendering PER BYTE, so one
+# value cannot read two ways depending on which script printed it: the whitespace controls become a
+# SPACE (this printer puts ONE argument per line, so a smuggled newline would forge a line of the
+# refusal block), every other C0 byte plus DEL becomes a VISIBLE `?`, and NUL is dropped. It does
+# NOT squeeze runs of spaces, which `one_line` does: the detail lines of this block are ALIGNED
+# with leading and internal spaces, and collapsing them would mangle correct output to normalise
+# text nobody reads as a record. The property required here is one line per argument, not a
+# canonical spacing.
+#
+# DISPLAY-ONLY, and that is the whole safety argument: every decision — the token comparison, the
+# stage-kind equality, the field census, the exit code — is made EARLIER, on the RAW value, so this
+# cannot turn a refusal into a pass. `LC_ALL=C` keeps `tr` byte-oriented, so a UTF-8 sequence
+# passes through readable instead of aborting a BSD `tr` mid-pipeline.
+c_safe_display() {
+  printf '%s' "${1:-}" |
+    LC_ALL=C tr -d '\000' |
+    LC_ALL=C tr '\n\r\t\013\014' '     ' |
+    LC_ALL=C tr '\001-\010\016-\037\177' '?'
+}
+
+refuse_no_c_verdict() {
+  printf '========================================================\n' >&2
+  printf 'PREMERGE: NO-C-VERDICT — REFUSING TO MERGE\n' >&2
+  printf '  stage: %s (the C intent audit)\n' "$C_STAGE_KIND" >&2
+  printf '  --c-verdict: %s\n' "$(c_safe_display "$c_verdict")" >&2
+  printf '  routing: %s%s\n' "$C_ROUTING" \
+    "${C_ROUTING_DETAIL:+ ($(c_safe_display "$C_ROUTING_DETAIL"))}" >&2
+  # WHICH WINDOW (#3751 round 16, V1). The C verdict is evaluated TWICE — once early, offline, so
+  # an uncertifiable run never pays for the advisory or the network call, and once immediately
+  # before `PREMERGE: OK` so the check sits INSIDE the window it certifies (roborev job 290). A
+  # refusal from the second one means the stage CHANGED after it was validated, which is a
+  # different operator fact from "there was never a verdict" — so it is named rather than left to
+  # be inferred from the wording. Routed like every other value on this channel, though `C_PHASE`
+  # is a script constant: ONE rule for EVERY value is what stops the next added field forgetting.
+  if [ -n "$C_PHASE" ]; then
+    printf '  phase: %s — this refusal comes from the SECOND evaluation of the audit, the one\n' \
+      "$(c_safe_display "$C_PHASE")" >&2
+    printf '         that runs immediately before this script emits its success verdict. The\n' >&2
+    printf '         FIRST one had already succeeded, so the stage moved between the two.\n' >&2
+  fi
+  [ -z "$C_TOKEN" ] || printf '  verdict token: %s\n' "$(c_safe_display "$C_TOKEN")" >&2
+  [ -z "$C_TOKEN_LINE" ] || printf '  verdict line: %s\n' "$(c_safe_display "$C_TOKEN_LINE")" >&2
+  # EVERY DETAIL LINE TOO, not only the two fields above: several callers INTERPOLATE a value they
+  # read from the verdict stream into their prose (the stage KIND, the value that could not be
+  # parsed), and neutralising the fields while leaving the prose raw is the per-site escaping this
+  # boundary exists to replace — a list to keep complete is a list that goes stale.
+  while [ "$#" -gt 0 ]; do
+    printf '  %s\n' "$(c_safe_display "$1")" >&2
+    shift
+  done
+  printf '  An ABSENT review is not a clean one (#3751). Every measured instance so\n' >&2
+  printf '  far was recorded as not-run by its own lane, and nothing REQUIRED it.\n' >&2
+  printf '  This check is that requirement. The remedy is to RUN\n' >&2
+  printf '  the stage and let it record a verdict:\n' >&2
+  printf '    bash scripts/flow/review-stage.sh open %s --issue <N> --agent spec-auditor\n' \
+    "$C_STAGE_KIND" >&2
+  printf '    # ...spawn the auditor with the clause that command prints...\n' >&2
+  printf '    bash scripts/flow/review-stage.sh verdict %s --issue <N>\n' "$C_STAGE_KIND" >&2
+  printf '  If no independent audit is available, the SANCTIONED FALLBACK is a\n' >&2
+  printf '  disclosed substitute WITH ITS WORKING — never a hand-asserted pass:\n' >&2
+  printf '    bash scripts/flow/review-stage.sh record-author-performed %s --issue <N> \\\n' \
+    "$C_STAGE_KIND" >&2
+  printf '      --reason <why-no-peer-audit> --evidence <artifact> --performed-by author\n' >&2
+  printf '  It reports the DISTINCT token AUTHOR-PERFORMED, never PASS.\n' >&2
+  printf '========================================================\n' >&2
+  exit 2
+}
+
+# _c_verdict_awk — read a verdict STREAM on stdin, print `key=value` lines.
+#
+# COLUMN-ZERO ANCHORED (`/^REVIEW-STAGE: /`), never awk's `$1 ==`, which is
+# whitespace-insensitive: an INDENTED or `>`-quoted copy of a verdict line is
+# DATA — this repository's docs, PR comments and issue bodies all contain such
+# copies, and this very script's header will too. Same anchoring rule, same
+# reason, as the gate-summary marker matching above (#3312).
+#
+# The FIRST anchored line supplies the values and every anchored line is COUNTED,
+# so two verdicts in one file are AMBIGUOUS and refusable rather than last-wins.
+# ANSI is stripped as belt (#3400: colour survives redirection).
+#
+# THE OTHER READER OF THIS SHAPE IS `review-stage.sh`'s `classify_report`, which
+# locates the REPORT's `result:` record. Neither reads the other's file, but both
+# answer the same three questions — column zero, exactly one, a closed token set —
+# and they DIVERGED TWICE in two review rounds, once per axis, each time with a
+# reviewer naming one side (round 2: `classify_report` was not anchored; round 3:
+# it did not count). Patching whichever side was named is what let the second
+# divergence exist, so their agreement is MECHANICALLY CHECKED: section 44g of
+# scripts/tests/test_premerge_assert.sh drives BOTH over ONE shared table of
+# adversarial inputs and asserts they agree per row AND reach the expected
+# disposition. Change the rule here and that test tells you the other side moved.
+#
+# IT REPORTS THE WHOLE GRAMMAR, NOT JUST THE TOKEN (#3751 round 1, F2). The
+# documented line is
+#
+#   REVIEW-STAGE: <kind> RESULT: <token> elapsed=<n> deadline=<n> agent=<t> report=<abs>
+#
+# and the shape is DERIVED FROM WHAT review-stage.sh ACTUALLY EMITS (pinned in
+# scripts/tests/test_premerge_assert.sh against a captured real line, so the parser
+# cannot drift from the emitter). So `kind` is `$2` and the token is `$4` GATED on
+# `$3` being literally `RESULT:` — never a scan for `RESULT:` anywhere on the line,
+# which accepted a truncated line and, worse, a SIBLING stage's verdict: a
+# `rust-review` PASS line satisfied the C check, measured on this very branch.
+# Each mandatory key is COUNTED so the caller can require it EXACTLY ONCE: a
+# duplicate is two answers to one question, and a first-wins read is the rule this
+# file refuses everywhere else. Keys are counted from field 4 onward because the
+# token may be MULTI-WORD (`NOT-RUN (no report written)`), so their positions are
+# not fixed; a cause word cannot pose as a key because review-stage.sh neutralises
+# `=` in the cause at its emit boundary, and a planted one raises a count and is
+# refused as a duplicate — the fail-closed direction.
+#
+# `report=` IS TAKEN AS THE REMAINDER OF THE LINE, NOT AS ONE FIELD (#3751 round
+# 11, Q3). It carries an absolute PATH, and a path may legitimately contain
+# WHITESPACE — a checkout at `/tmp/work tree`; this repository itself tracks 40
+# space-bearing paths under `docs/`. Read as one whitespace-delimited field the
+# value TRUNCATED at the first space, and round 10's nonce match then REFUSED an
+# otherwise VALID verdict: a FALSE REFUSAL on correct input, which is the guard
+# agents learn to waive (measured, on the shipped artifacts in a checkout named
+# `…/work tree`: `verdict reported: /tmp/…/work` beside a `validated generation:`
+# that was exactly the one the verdict named).
+#
+# THE REMAINDER RULE IS SOUND ONLY BECAUSE `report=` IS EMITTED LAST, so that
+# assumption is ENFORCED rather than assumed: section 44l of
+# scripts/tests/test_premerge_assert.sh RUNS the shipped emitter through every
+# state it has and requires no mandatory key to follow `report=` on any line it
+# produces, and pins the single emit site's trailing field structurally. Append a
+# field after `report=` and that suite reds instead of verdicts silently
+# truncating again.
+#
+# THE CURSOR WALK IS WHAT MAKES THE OFFSET EXACT. `index()` is searched from the
+# END OF THE PREVIOUS FIELD, so a field whose text also occurs earlier on the line
+# cannot mis-locate it — a bare `index($0, "report=")` could. `fs == 0` cannot
+# occur (a field is by construction present at or after that cursor) and there is
+# DELIBERATELY NO FALLBACK to the field value: a prefix of the real path is a
+# value nobody measured, and this file's standing rule is that a positive verdict
+# requires an affirmative measurement. `rep` therefore stays EMPTY, which the
+# value validator below refuses BY NAME (`report= is EMPTY`) — the fail-closed
+# direction, and it keeps the truncating form out of the source entirely, which is
+# what the structural pin in section 44l asserts.
+#
+# TWO PROPERTIES DELIBERATELY UNCHANGED. (1) The key census still scans EVERY
+# field, including the words of a space-bearing path, so a duplicated `report=`
+# is still refused; the cost is that a path component spelled `elapsed=…` /
+# `deadline=…` / `agent=…` / `report=…` raises a count and REFUSES — fail-closed,
+# and declared rather than silently permitted. (2) NOTHING IS TRIMMED from the
+# remainder: a parser that trims is a parser that guesses, the emitter's own
+# `one_line` leaves no trailing whitespace, and a hand-edited capture that gained
+# some fails the nonce match and refuses.
+#
+# The emitter's `one_line` COLLAPSES runs of whitespace to one space, so a path
+# containing a tab or two adjacent spaces is already lossy ON THE PRODUCING SIDE.
+# That is not this reader's to repair — and it does not matter to the binding,
+# whose pattern matches the FILENAME tail. Stated so the limit is not rediscovered.
+#
+# THE ANSI/CR STRIP MAY LOCATE A LINE; IT MAY NOT SUPPLY A VALUE (#3751 round 15, U2).
+# This is round 13's S2 rule at a different byte: *a transform that normalises its
+# input cannot be the thing that validates it.* The strip ran on every line BEFORE
+# the closed grammar was applied to the fields it produced, so a token spelt
+# `PA<ESC>[31mSS` was NORMALISED INTO `PASS` and certified a merge — measured on the
+# shipped parser: a file `grep -c 'RESULT: PASS'` answers 0 for published
+# `token=PASS`. Same shape as the NUL: the read did not lose information, it
+# MANUFACTURED grammar the file does not contain.
+#
+# WHICH READS LEGITIMATELY NEED THE TOLERANCE, AND WHY A VERDICT DOES NOT. The strip
+# exists for #3400 — colour SURVIVES redirection to a file, so a capture taken from a
+# coloured stream still carries escapes, and a reader anchored on a marker line
+# (`/^REVIEW-STAGE: /` here, the four `==== AGENT-GATE … ====` whole-line equalities
+# in `_gate_awk`) would MATCH NOTHING and report "no verdict line" for a document
+# that has one. That is a diagnostic loss and it is worth avoiding: the strip is kept
+# so the line can be FOUND and the refusal can NAME what is wrong with it. What may
+# not rest on it is a VALUE. Every artifact this script reads is produced by `printf`
+# — `review-stage.sh`'s emitter routes every value through `one_line`, which DELETES
+# the whole C0 range, and `agent-gate.sh` writes its summary the same way — so an
+# escape in a value is never legitimate here. Refused BY NAME, naming the transform,
+# so the operator is not sent to look at the token.
+#
+# AND THE LINE BETWEEN AN ESCAPE AND A TRAILING CR IS *SEPARATE VERSUS JOIN*, which is
+# the transferable half: a `\r$` strip removes ONE byte at end of line, where nothing
+# follows, so it can only SEPARATE — `PASS<CR>` is the token `PASS` plus separator
+# whitespace, exactly as `PASS<TAB>` and `PASS   ` are, and the `<key>: <value>` grammar
+# is made of that. A CSI deletion removes bytes from the MIDDLE and JOINS two runs the
+# file keeps apart. The trailing CR therefore stays tolerated (the full ruling, with its
+# three corroborating reasons, is at the check in `c_parse_verdict`).
+#
+# THE RULE IS THEREFORE STATED, ONCE, AS *WHICH READS MAY NORMALISE*: a read may
+# normalise TO LOCATE a line and may NEVER normalise TO SUPPLY A VALUE. Round 15
+# implemented the second half with a JOIN test — every field of the deleted reading had
+# to survive as a whole field of a CSI-as-SEPARATOR reading — and that MISSED A CSI THAT
+# BRACKETS A FIELD, because a bracketed field is still a whole field of the separating
+# reading (#3751 round 21, AA2). Measured on the shipped parser: `RESULT: <CSI>PASS<CSI>`
+# normalised to `PASS`, the escape counter stayed ZERO, and a line whose RAW token is not
+# `PASS` — one this artifact's declared producer CANNOT EMIT — reached `PREMERGE: OK`.
+# Every one of the EIGHT fields of the verdict line, and the stage record's `head-sha:`,
+# had the same hole; the class is *compared the NORMALISED form*, not one token.
+#
+# SO THE MEASUREMENT IS AN IDENTITY AND NOT A WIDER JOIN TEST: the parsed reading must be
+# BYTE-IDENTICAL to the line the file holds, minus the one trailing CR. Either the line is
+# refused, or every field IS the raw field — so the closed grammar is applied to bytes
+# nobody transformed, for all fields at once instead of being re-argued per field. It also
+# closes a shape NO join test could reach: an ESC forming no CSI at all (a bare `\033`,
+# `\033(B`) is deleted by NEITHER reading, so the two readings agreed and the join test
+# passed while the token still carried an escape. `_gate_awk` KEEPS the value-only join
+# form on purpose — see the reasoning at `esc_joined`.
+_c_verdict_awk() {
+  awk '
+  BEGIN {
+    n = 0; tok = ""; rep = ""; line = ""; kind = ""; rpos = 0; rawline = ""
+    ke = 0; kd = 0; ka = 0; kr = 0
+    ve = ""; vd = ""; va = ""
+    n_esc = 0
+  }
+  # TWO READINGS OF THE LINE, ONE PER JOB (#3751 round 15, U2; the second reading REPLACED in
+  # round 21, AA2). `loc` is the line with each CSI DELETED — the reading everything below
+  # parses, and the reading that makes a coloured capture LOCATABLE at all (#3400). The second
+  # reading answers only: DID THE STRIP CHANGE THIS LINE? Round 15 asked that as a JOIN test
+  # (each field of `loc` must survive as a whole field of a CSI-as-SEPARATOR reading), which a
+  # CSI BRACKETING a field satisfies — so `RESULT: <CSI>PASS<CSI>` normalised to `PASS` with
+  # the flag at ZERO and certified a merge. It is now an IDENTITY against the raw line minus
+  # the one trailing CR, so a bracketed field, an interior splice and a bare non-CSI ESC are
+  # all the same answer.
+  #
+  # STRICT HERE — the parsed line must BE the line on disk — because a `--c-verdict` artifact
+  # has exactly ONE producer, `review-stage.sh verdict > <path>`, which emits no colour at all
+  # (every value goes through `one_line`, which maps the whole C0 range to a space or to `?`).
+  # The legitimate coloured capture of #3400 is about the GATE SUMMARY, whose reader therefore
+  # keeps the looser value-only join form; see `_gate_awk`.
+  {
+    raw = $0
+    loc = raw; gsub(/\033\[[0-9;]*[a-zA-Z]/, "", loc); sub(/\r$/, "", loc)
+    # THE MEASUREMENT IS AN IDENTITY, NOT A FIELD-MEMBERSHIP TEST (#3751 round 21, AA2). `rawcr` is
+    # the line AS THE FILE HOLDS IT, minus the ONE trailing CR that is separator whitespace by
+    # ruling (see `c_parse_verdict`). If the parsed reading differs from THAT by a single byte, the
+    # strip CHANGED the line, so every field below would be a value the strip SUPPLIED — refused.
+    # Either this line is refused, or `$0` is byte-identical to the bytes on disk and each
+    # mandatory field is compared RAW, by string equality, with nothing normalised out of it.
+    rawcr = raw; sub(/\r$/, "", rawcr)
+    lesc = (loc != rawcr) ? 1 : 0
+    $0 = loc
+  }
+  /^REVIEW-STAGE: / {
+    n++
+    if (n == 1) {
+      if (lesc) n_esc = 1
+      line = $0
+      # THE RAW LINE, published SEPARATELY and used ONLY by the escape refusal: printing the
+      # NORMALISED line beside "this line contains an escape" would show the operator a clean
+      # `RESULT: PASS` and contradict the sentence above it. A misleading rationale is worse
+      # than none (round 2, B7). Rendered through `c_safe_display`, which turns the ESC into
+      # `?` — the same rendering the review-stage.sh classifier reports it under.
+      rawline = raw
+      kind = $2
+      if ($3 == "RESULT:") {
+        rpos = 1
+        if (NF >= 4) tok = $4
+      }
+      cur = 1
+      for (i = 1; i <= NF; i++) {
+        off = index(substr($0, cur), $i)
+        fs = 0
+        if (off > 0) { fs = cur + off - 1; cur = fs + length($i) }
+        if (i < 4) continue
+        if (substr($i, 1, 8) == "elapsed=") { ke++; if (ke == 1) ve = substr($i, 9) }
+        else if (substr($i, 1, 9) == "deadline=") { kd++; if (kd == 1) vd = substr($i, 10) }
+        else if (substr($i, 1, 6) == "agent=") { ka++; if (ka == 1) va = substr($i, 7) }
+        else if (substr($i, 1, 7) == "report=") {
+          kr++
+          if (kr == 1 && fs > 0) rep = substr($0, fs + 7)
+        }
+      }
+    }
+  }
+  END {
+    print "n=" n; print "token=" tok; print "report=" rep
+    print "kind=" kind; print "rpos=" rpos
+    print "ke=" ke; print "kd=" kd; print "ka=" ka; print "kr=" kr
+    print "velapsed=" ve; print "vdeadline=" vd; print "vagent=" va
+    print "n_esc=" n_esc
+    print "rawline=" rawline
+    print "line=" line
+  }
+'
+}
+
+# c_parse_verdict <stream-kind:file|text> <value> <what> — publish CV_* from the
+# stream. Refuses (exit 2) on zero or several anchored lines: zero certifies
+# nothing, and picking one of several is the "last one wins" rule this file
+# refuses everywhere else.
+c_parse_verdict() {
+  local kind="$1" value="$2" what="$3" out k v
+  local missing dup key kname kcount vbad
+  if [ "$kind" = file ]; then
+    # THROUGH THE ONE CAPTURE BOUNDARY (#3751 round 13, S2): read raw, a NUL inside the token
+    # survived awk and was then REMOVED by the capture of awk's output, manufacturing the very
+    # token this function validates. `pipefail` is set, so an unreadable file still fails the
+    # pipeline and reaches `refuse_tool_failure` exactly as the redirection did.
+    out=$(c_capture_map_nul "$value" | _c_verdict_awk) || refuse_tool_failure awk "$what"
+  else
+    # NO MAPPING HERE, AND NOT BECAUSE IT IS UNTESTED: `$value` has ALREADY passed through a shell
+    # variable, so any NUL is long gone and a mapping would be theatre. Its producer is
+    # `review-stage.sh verdict`, whose every emitted value goes through `one_line`, which DELETES
+    # NUL — an affirmative property of the producer, not an absence of evidence about it.
+    out=$(printf '%s\n' "$value" | _c_verdict_awk) || refuse_tool_failure awk "$what"
+  fi
+  CV_N=""; CV_TOKEN=""; CV_REPORT=""; CV_LINE=""
+  CV_KIND=""; CV_RPOS=""; CV_KE=""; CV_KD=""; CV_KA=""; CV_KR=""
+  CV_VE=""; CV_VD=""; CV_VA=""; CV_ESC=""; CV_RAWLINE=""
+  while IFS='=' read -r k v; do
+    case "$k" in
+      n)      CV_N="$v" ;;
+      token)  CV_TOKEN="$v" ;;
+      report) CV_REPORT="$v" ;;
+      kind)   CV_KIND="$v" ;;
+      rpos)   CV_RPOS="$v" ;;
+      ke)     CV_KE="$v" ;;
+      kd)     CV_KD="$v" ;;
+      ka)     CV_KA="$v" ;;
+      kr)     CV_KR="$v" ;;
+      velapsed)  CV_VE="$v" ;;
+      vdeadline) CV_VD="$v" ;;
+      vagent)    CV_VA="$v" ;;
+      n_esc)  CV_ESC="$v" ;;
+      rawline) CV_RAWLINE="$v" ;;
+      line)   CV_LINE="$v" ;;
+    esac
+  done <<C_PARSE
+$out
+C_PARSE
+  case "$CV_N" in
+    ''|*[!0-9]*)
+      C_TOKEN_LINE=""
+      refuse_no_c_verdict \
+        "The $what parse produced no usable line count — refusing (fail closed)."
+      ;;
+  esac
+  if [ "$CV_N" -eq 0 ]; then
+    refuse_no_c_verdict \
+      "The $what holds NO verdict line (no line begins 'REVIEW-STAGE: ' at column zero)." \
+      "A captured verdict is produced by:  review-stage.sh verdict $C_STAGE_KIND --issue <N> > <path>" \
+      "The stage's REPORT file (.review-stage/issue-<N>/$C_STAGE_KIND.<nonce>.md, whose" \
+      "name the stage record names — see review-stage.sh) is NOT that line:" \
+      "the report is the agent's prose, the verdict line is the closed-grammar reading of it."
+  fi
+  if [ "$CV_N" -gt 1 ]; then
+    C_TOKEN_LINE="$CV_LINE"
+    refuse_no_c_verdict \
+      "The $what holds $CV_N verdict lines — AMBIGUOUS, refusing rather than picking one." \
+      "A 'take the last line' rule would let a stale or foreign stage certify this merge."
+  fi
+  C_TOKEN_LINE="$CV_LINE"
+
+  # THE VERDICT LINE MUST BE WHAT THE FILE HOLDS (#3751 round 15, U2; measured as an
+  # IDENTITY since round 21, AA2). The strip above located this line; it may not have
+  # SUPPLIED it. Asked BEFORE the grammar checks below, because every one of them reads
+  # a field the normalisation produced — a refusal placed after them would name the wrong
+  # defect (or, for `PA<ESC>[31mSS`, name nothing at all and certify).
+  #
+  # WHAT PASSING THIS CHECK NOW GUARANTEES, and it is what the grammar below rests on:
+  # `$0` is BYTE-IDENTICAL to the line on disk minus one trailing CR, so every token the
+  # grammar compares — the stage kind, `RESULT:`, the verdict token, the four mandatory
+  # values — is the RAW value and the comparison is a string equality against bytes
+  # nobody transformed. Round 15 asked a weaker question (does each field survive as a
+  # field of a CSI-as-SEPARATOR reading?) which a CSI BRACKETING a field satisfies, so
+  # `RESULT: <CSI>PASS<CSI>` reached `PREMERGE: OK` with this flag at ZERO.
+  #
+  # THE PERMISSIVE VALUE IS THE AFFIRMATIVE `0`, so an unparseable or absent flag
+  # refuses rather than reading as "no escape found": a positive verdict requires an
+  # affirmative measurement, and this file's standing rule is never to derive a pass
+  # from the absence of a bad signal.
+  case "$CV_ESC" in
+    0) ;;
+    1)
+      C_TOKEN_LINE="$CV_RAWLINE"
+      refuse_no_c_verdict \
+        "The $what's verdict line contains an ANSI ESCAPE SEQUENCE (0x1b), so its raw bytes are not" \
+        "the verdict they were read as: stripping the escape would MANUFACTURE a token the file does" \
+        "not contain — a value spelt PA<ESC>[31mSS normalises to PASS, and one spelt <ESC>[32mPASS<ESC>[0m" \
+        "normalises to PASS while BRACKETING it, and a transform that normalises its input cannot be" \
+        "the thing that validates it. Every mandatory field of this line is compared RAW; a CSI" \
+        "anywhere on it means no field can be." \
+        "review-stage.sh emits every value through one_line, which deletes the whole C0 range, so an" \
+        "escape here did not come from the emitter. Re-capture the verdict from the tool, not from a" \
+        "coloured terminal log:  review-stage.sh verdict $C_STAGE_KIND --issue <N> > <path>"
+      ;;
+    *)
+      refuse_no_c_verdict \
+        "The $what parse produced no usable escape-sequence measurement — refusing (fail closed)."
+      ;;
+  esac
+  # THE TRAILING CR IS DELIBERATELY *NOT* REFUSED, AND THE LINE BETWEEN THE TWO IS THE
+  # WHOLE RULE (#3751 round 15, U2). A CR is WHITESPACE: `sub(/\r$/, "")` removes ONE
+  # byte at end of line, where nothing follows it, so it can SEPARATE but it can never
+  # JOIN — the token `PASS<CR>` and the token `PASS   ` are the same token followed by
+  # separator whitespace, which is what the `<key>: <value>` grammar is made of.
+  # Deleting a CSI sequence is the opposite operation: it removes bytes from the MIDDLE
+  # and JOINS two runs the file keeps apart, so `PA` + `SS` becomes a token the file
+  # does not contain anywhere. Manufacture, not separation.
+  #
+  # THREE FURTHER REASONS, so this is a ruling and not a tolerance. (1) `review-stage.sh`'s
+  # `classify_report` — the sibling reader of the same shape — ALSO reads a CRLF line as
+  # its token (measured: `result: PASS\r` reports `RESULT: PASS`, exactly as a trailing
+  # TAB or trailing SPACES do, because `one_line` treats all three as whitespace), and
+  # section 44g of scripts/tests/test_premerge_assert.sh exists to stop these two readers
+  # holding two opinions about one shape. Refusing here unilaterally would BE that
+  # divergence. (2) It cannot manufacture a TOKEN even where it changes the last field: for
+  # the CR to sit against the token the line must END at the token, and such a line carries
+  # no `elapsed=`/`deadline=`/`agent=`/`report=` and is refused by the mandatory-field
+  # census below. (3) A MID-line CR is not stripped at all and is not a field separator to
+  # awk, so `RESULT: PA<CR>SS` stays a token the closed set refuses — the fail-closed
+  # direction, at both readers. What would be a REAL divergence is the ESC row, and it was
+  # one: measured on the shipped code, `classify_report` read `PA<ESC>[31mSS` as
+  # `NOT-RUN (unrecognised result token 'PA?[31mSS')` while THIS reader published `PASS`.
+  # The refusal above makes the two agree.
+
+  # THE FULL GRAMMAR, VALIDATED (#3751 round 1, F2) — because "somewhere on this
+  # line it says RESULT: PASS" is not a verdict about the C stage. Two things were
+  # unchecked and both are reachable by ACCIDENT, not only by a hostile hand: a
+  # SIBLING stage's verdict (this branch's own diff produced a `code-review` stage
+  # whose PASS line satisfied `--c-verdict`), and a TRUNCATED capture (a redirect
+  # cut short, a copied fragment) with no `elapsed=`/`deadline=`/`agent=`/`report=`
+  # at all.
+  #
+  # THE STAGE KIND IS COMPARED BY STRING EQUALITY, never a prefix or substring test
+  # (#3544): `c-review` is a different stage from `c`, exactly as `PASSthisNeverRan`
+  # is not `PASS`.
+  if [ "$CV_KIND" != "$C_STAGE_KIND" ]; then
+    refuse_no_c_verdict \
+      "The $what's verdict line names stage kind '$CV_KIND', not '$C_STAGE_KIND'." \
+      "This check is about the C INTENT AUDIT and nothing else: a sibling stage's PASS" \
+      "(a rust-review or coverage verdict) says nothing about whether the implementation" \
+      "matches its acceptance criteria, so it may not certify C." \
+      "Capture the C stage's own verdict:  review-stage.sh verdict $C_STAGE_KIND --issue <N> > <path>"
+  fi
+  # `RESULT:` MUST BE THE THIRD FIELD, because a scan for it anywhere on the line
+  # lets any prose that contains the word supply a token.
+  if [ "$CV_RPOS" != 1 ]; then
+    refuse_no_c_verdict \
+      "The $what's verdict line does not carry 'RESULT:' as its THIRD field, so it is not" \
+      "a line of the documented grammar:" \
+      "  REVIEW-STAGE: <kind> RESULT: <token> elapsed=<n> deadline=<n> agent=<t> report=<abs>" \
+      "A 'RESULT:' found anywhere on the line would let prose supply the token."
+  fi
+  # THE MANDATORY-FIELD CENSUS runs only once the line HAS a token: a tokenless
+  # line's specific complaint is that it has no token (reported by the caller's
+  # closed-grammar switch, which names it), and naming the missing fields instead
+  # would answer a question the operator did not ask.
+  if [ -n "$CV_TOKEN" ]; then
+    missing=""; dup=""
+    for key in elapsed:"$CV_KE" deadline:"$CV_KD" agent:"$CV_KA" report:"$CV_KR"; do
+      kname="${key%%:*}"; kcount="${key#*:}"
+      case "$kcount" in
+        1) ;;
+        0) missing="$missing ${kname}=" ;;
+        *) dup="$dup ${kname}=(x$kcount)" ;;
+      esac
+    done
+    if [ -n "$missing" ] || [ -n "$dup" ]; then
+      # The detail lines are BUILT rather than passed with `${var:+...}` guards: an
+      # empty guard still passes an EMPTY argument, and refuse_no_c_verdict prints
+      # every argument it is given, so the refusal would carry blank lines where a
+      # cause is expected. `set --` is safe here — this function's own positionals
+      # are already held in locals.
+      set -- \
+        "The $what's verdict line is not of the documented grammar:" \
+        "  REVIEW-STAGE: <kind> RESULT: <token> elapsed=<n> deadline=<n> agent=<t> report=<abs>"
+      [ -z "$missing" ] || set -- "$@" "  ABSENT field(s):$missing — each one is MANDATORY."
+      [ -z "$dup" ] || set -- "$@" \
+        "  DUPLICATED field(s):$dup — each must appear EXACTLY ONCE. A duplicate is two" \
+        "  answers to one question, and a first-wins read is the rule this file refuses" \
+        "  everywhere else."
+      set -- "$@" \
+        "A truncated capture is the shape a cut-short redirect or a copied fragment leaves." \
+        "Re-capture it whole:  review-stage.sh verdict $C_STAGE_KIND --issue <N> > <path>"
+      refuse_no_c_verdict "$@"
+    fi
+
+    # THE VALUES, NOT ONLY THE FIELD NAMES (#3751 round 7, L3). The census above COUNTS each
+    # mandatory key and never looked at what it carried, so a `PASS` line ending in a BARE
+    # `report=` — or carrying an empty `elapsed=`, `deadline=` or `agent=` — was ACCEPTED and
+    # certified a merge. Round 1's F2 closed presence and multiplicity and left the values
+    # unmeasured, which is this repository's recurring "counted, not measured" shape: a count is an
+    # affirmative measurement of PRESENCE and of nothing else.
+    #
+    # THE PERMITTED SET IS DERIVED FROM WHAT THE EMITTER CAN PRODUCE, not from what looks
+    # reasonable — otherwise this reds on correct input, which is the guard agents learn to waive.
+    # `review-stage.sh verdict` was RUN across every state it has (PASS, FINDINGS, AUTHOR-PERFORMED,
+    # and each NOT-RUN cause: no report written / report absent / report empty / report unreadable /
+    # report ungrammatical / a self-reported cause / stage never opened / stage record unreadable),
+    # and the captured lines carry exactly two shapes per field:
+    #   elapsed=  digits (`0` included) or the literal `unknown`
+    #   deadline= digits (`0` included, from `--deadline-secs 0`) or the literal `unknown`
+    #   agent=    a sanitize_field token, or the literal `unknown`
+    #   report=   an absolute path, or the literal `unresolved`  (round 6's K1 states)
+    # So `unknown`/`unresolved` are ACCEPTED — they are the emitter's honest "not measured" and are
+    # NOT a passing verdict on their own (the token is what proceeds, and it is `NOT-RUN` in every
+    # state that produces them). Only agent and report are checked for NON-EMPTINESS rather than for
+    # a charset, and the REASON differs per field. `report=` DOES arrive whole, spaces and all,
+    # since round 11's Q3 (it is emitted LAST and read as the remainder of the line), so a charset
+    # there would be a claim about a legitimate absolute PATH — which may contain anything a
+    # filesystem allows. `agent=` is written through `review-stage.sh`'s `sanitize_field`, whose
+    # character class excludes whitespace, so it cannot legitimately carry a space; a HAND-EDITED
+    # record could, and that value would truncate here — a truncated DIAGNOSTIC, never a wrong
+    # verdict, because the token is what proceeds and `=` is neutralised at the emit boundary so a
+    # path or cause word cannot forge a key.
+    vbad=0
+    set -- \
+      "The $what's verdict line carries a MANDATORY FIELD WITH NO USABLE VALUE:" \
+      "  REVIEW-STAGE: <kind> RESULT: <token> elapsed=<n> deadline=<n> agent=<t> report=<abs>"
+    case "$CV_VE" in
+      unknown) ;;
+      "" | *[!0-9]*) set -- "$@" "  elapsed='$CV_VE' — must be a decimal number of seconds, or the literal 'unknown'."; vbad=1 ;;
+    esac
+    case "$CV_VD" in
+      unknown) ;;
+      "" | *[!0-9]*) set -- "$@" "  deadline='$CV_VD' — must be a decimal number of seconds, or the literal 'unknown'."; vbad=1 ;;
+    esac
+    if [ -z "$CV_VA" ]; then
+      set -- "$@" "  agent= is EMPTY — the line must name the agent whose silence this stage measures (review-stage.sh emits 'unknown' when the record cannot be read)."
+      vbad=1
+    fi
+    if [ -z "$CV_REPORT" ]; then
+      set -- "$@" "  report= is EMPTY — the line must name the report of record (review-stage.sh emits 'unresolved' when no report path could be derived)."
+      vbad=1
+    fi
+    if [ "$vbad" -eq 1 ]; then
+      set -- "$@" \
+        "A key that is PRESENT but carries nothing is the shape a hand-edited or truncated capture" \
+        "leaves, and the field census above only asserts that each key appears EXACTLY ONCE." \
+        "Re-capture it whole:  review-stage.sh verdict $C_STAGE_KIND --issue <N> > <path>"
+      refuse_no_c_verdict "$@"
+    fi
+  fi
+
+  C_TOKEN="$CV_TOKEN"
+  C_TOKEN_REPORT="$CV_REPORT"
+}
+
+# c_measure_routing — is C REQUIRED for the tree being merged? Measured, never
+# taken from the caller. See the header for why a plain listing of
+# `openspec/changes/` cannot answer it and why the base is the MERGE-BASE.
+#
+# Sets C_ROUTING to REQUIRED / NOT-APPLICABLE / UNMEASURED. UNMEASURED is treated
+# as REQUIRED by the caller: never derive a pass from the absence of a bad signal.
+C_ROUTING_BASE_REF=origin/main
+c_measure_routing() {
+  local main_sha base out rc=0 p slug="" hits=0
+  if ! command -v git >/dev/null 2>&1; then
+    C_ROUTING=UNMEASURED; C_ROUTING_DETAIL="git is not on PATH"; return 0
+  fi
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    C_ROUTING=UNMEASURED; C_ROUTING_DETAIL="not inside a git work tree"; return 0
+  fi
+  if ! git rev-parse --verify --quiet "$certified^{commit}" >/dev/null 2>&1; then
+    C_ROUTING=UNMEASURED
+    C_ROUTING_DETAIL="the certified commit $certified is not present in this checkout"
+    return 0
+  fi
+  if ! main_sha=$(git rev-parse --verify --quiet "$C_ROUTING_BASE_REF^{commit}" 2>/dev/null) ||
+    [ -z "$main_sha" ]; then
+    C_ROUTING=UNMEASURED
+    C_ROUTING_DETAIL="$C_ROUTING_BASE_REF does not resolve to a commit here"
+    return 0
+  fi
+  if ! base=$(git merge-base "$main_sha" "$certified" 2>/dev/null) || [ -z "$base" ]; then
+    C_ROUTING=UNMEASURED
+    C_ROUTING_DETAIL="no merge-base between $C_ROUTING_BASE_REF and the certified commit"
+    return 0
+  fi
+  # THE PATHSPEC IS ROOT-ANCHORED WITH `:(top)`, AND THAT IS NOT WHAT
+  # `diff.relative=false` DOES (#3751 round 11, Q1). A bare `-- openspec/changes/`
+  # pathspec is interpreted RELATIVE TO THE CALLER'S CWD, so this script run from a
+  # repository SUBDIRECTORY got an EMPTY diff, measured `NOT-APPLICABLE` on a
+  # genuinely design-routed branch, and let the merge proceed with NO C verdict —
+  # the exact escape `--c-verdict` exists to close, reached by nothing more exotic
+  # than the working directory. `:(top)` is git's pathspec magic for "match from the
+  # top of the working tree", so the answer no longer depends on where we were
+  # invoked from. `diff.relative` is a DIFFERENT axis: it controls the OUTPUT PATH
+  # PREFIX, not pathspec interpretation (measured: from a subdirectory,
+  # `-c diff.relative=false diff … -- openspec/changes/` is still empty, while
+  # `-- ':(top)openspec/changes/'` finds the path). So BOTH are needed and neither
+  # substitutes for the other, and BOTH must stay: `:(top)` anchors what is
+  # SELECTED, `diff.relative=false` keeps what is PRINTED root-relative, which the
+  # `archive/` prefix test and the slug extraction below both depend on.
+  #
+  # `diff.renames` pinned OFF for the reason F4 records below (and which
+  # scripts/flow/base-staleness.sh records in full for its own scan). NUL-delimited,
+  # then translated: a path containing a newline would split into two entries, and
+  # both halves then fail the `archive/` prefix test, which counts as DESIGN-ROUTED
+  # — the fail-closed direction.
+  #
+  # DELETIONS ARE NOT A ROUTING SIGNAL (`--diff-filter=d`, lowercase = EXCLUDE
+  # deletions; #3751 round 1, F4). Because rename detection is pinned off — and it
+  # must stay off, for the reasons above — a real `openspec archive` move shows up
+  # as a DELETION from `openspec/changes/<slug>/` plus an ADDITION under
+  # `archive/`. The addition is excluded below, so counting the deletion made every
+  # archive-only finalize PR read design-routed and REFUSE for want of a C verdict:
+  # a false refusal on correct, doctrine-mandated input, which is the guard agents
+  # learn to waive. A path that is ONLY deleted also contributes nothing to audit —
+  # there is no spec delta at the certified tree for C to anchor to. Every ADDED or
+  # MODIFIED path under a live `openspec/changes/<slug>/` still routes to C, which
+  # is the fail-closed half and is pinned by its own case in the suite.
+  out=$(git -c diff.renames=false -c diff.relative=false \
+    diff --diff-filter=d --name-only -z "$base" "$certified" -- ':(top)openspec/changes/' 2>/dev/null |
+    tr '\0' '\n') ||
+    rc=$?
+  if [ "$rc" -ne 0 ]; then
+    C_ROUTING=UNMEASURED
+    C_ROUTING_DETAIL="git diff <merge-base>..<certified> -- openspec/changes/ failed"
+    return 0
+  fi
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    case "$p" in
+      openspec/changes/archive/*) continue ;;
+    esac
+    hits=$((hits + 1))
+    if [ -z "$slug" ]; then
+      slug="${p#openspec/changes/}"
+      slug="${slug%%/*}"
+    fi
+  done <<C_ROUTE
+$out
+C_ROUTE
+  if [ "$hits" -gt 0 ]; then
+    C_ROUTING=REQUIRED
+    C_ROUTING_DETAIL="this branch touches openspec/changes/$slug ($hits path(s) vs merge-base ${base:0:12})"
+  else
+    C_ROUTING=NOT-APPLICABLE
+    C_ROUTING_DETAIL="no openspec change on branch"
+  fi
+  return 0
+}
+
+# c_assert_head_binds_certified — AUTO locates the C stage in the CURRENT
+# worktree, so before that stage is TRUSTED, this worktree must BE the one that
+# was certified. The binding is HEAD-equality, and it is the whole answer to the
+# question "whose artifact is this?".
+#
+# WHY RESOLVABILITY PROVES NOTHING. On this fleet EVERY lane is a worktree of ONE
+# shared `.git` (measured: `/data/lanes/repo/.git/objects` serves lane-3544,
+# lane-3473 and lane-3629 alike), so a PEER lane's certified commit RESOLVES from
+# any lane — `git rev-parse <peer-sha>` succeeds, `git merge-base` succeeds, the
+# routing diff succeeds. Every one of those reads can therefore be about a commit
+# that has nothing to do with the `.review-stage/` records sitting in THIS
+# directory. That is #3616's peer-artifact class (a closer read a peer lane's gate
+# run dir by RECENCY and was about to merge on it), which this very file exists to
+# refuse.
+#
+# WHY HEAD-EQUALITY IS SUFFICIENT. Rule 1 below already asserts the PR's
+# `headRefOid` == the certified sha. So HEAD == certified binds this worktree's
+# local artifact to THIS PR transitively: certified ties the artifact to the tree,
+# and headRefOid ties the tree to the pull request being merged.
+#
+# CORRECT INPUT IS UNAFFECTED: the closer pushes and then asserts in the lane it
+# just certified, where HEAD is the certified commit by construction. A worktree
+# that has moved on since certification is not a lane whose stage may certify it.
+# Unreadable HEAD is a REFUSAL, never a pass — "cannot tell" must not take the
+# permissive branch.
+c_assert_head_binds_certified() {
+  local head=""
+  if ! head=$(git rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null) ||
+    [ -z "$head" ]; then
+    refuse_no_c_verdict \
+      "AUTO locates the '$C_STAGE_KIND' stage in THIS worktree, but this checkout's HEAD" \
+      "could not be read, so the stage cannot be BOUND to the certified commit." \
+      "A stage whose provenance cannot be established may not certify a merge." \
+      "Run this assert from the lane that produced the certified commit, or name the" \
+      "verdict explicitly: --c-verdict <path>."
+  fi
+  head=$(printf '%s' "$head" | tr '[:upper:]' '[:lower:]')
+  if [ "$head" != "$certified" ]; then
+    refuse_no_c_verdict \
+      "This worktree's HEAD ($head) is not the certified commit ($certified)," \
+      "so a '$C_STAGE_KIND' stage found HERE is not evidence about the tree being merged." \
+      "Every lane on this box is a worktree of ONE shared .git, so a peer lane's" \
+      "certified commit RESOLVES from any lane — resolvability is not provenance. This is" \
+      "the #3616 peer-artifact class: a stage record in this directory says nothing about" \
+      "whose branch the certified sha belongs to." \
+      "Remedy: run this assert in the lane that produced the certified commit (the closer" \
+      "pushes, then asserts, in the lane it just certified), or name the verdict" \
+      "explicitly with --c-verdict <path>."
+  fi
+}
+
+# THE WORKTREE ROOT THE AUTO STAGE LOOKUP IS RELATIVE TO. ONE resolution, shared by the
+# locator and the binding asserts below, so the two cannot form two opinions about WHICH
+# `.review-stage/` they are talking about.
+#
+# IT IS A GLOBAL, AND IT IS NEVER PRINTED — A CAPTURED PATH IS NOT THE PATH (#3751 round 18, X1).
+#
+# THE FINDING (roborev job 397). This resolver captured `git rev-parse --show-toplevel` in a
+# command substitution, and every one of its four callers then captured `c_stage_root` in a
+# SECOND one — so the trailing newline was stripped TWICE. A checkout whose DIRECTORY NAME ends
+# in an LF therefore resolved to a DIFFERENT, EXISTING SIBLING path, and the AUTO path located,
+# bound and read THAT directory's stage record: a peer lane's `PASS` certifying this lane's
+# merge. Measured, from a checkout named `lanetrail<LF>`, the captured root was
+# `…/red2/lanetrail` and the locator's glob found `…/red2/lanetrail/.review-stage/issue-900/`.
+# It is the #3616 peer-artifact class reached through a lossy capture instead of a recency scan,
+# and `c_assert_head_binds_certified` cannot see it: HEAD is read in the CWD (the real lane, so
+# it binds) while the ARTIFACT comes from the sibling.
+#
+# ROUND 13 (S2) enumerated trailing-newline stripping and declared it harmless. That was CORRECT
+# about the stage RECORD's content — every grammar here is per-line and column-zero anchored —
+# and FALSE about a PATH, whose stripped bytes are part of its identity. A lossy-capture
+# conclusion must be RE-DERIVED PER CONSUMER, never carried.
+#
+# SO THERE IS NO SUBSTITUTION LEFT TO STRIP ANYTHING: the resolver assigns a GLOBAL and prints
+# nothing, and each call site reads `$C_STAGE_ROOT` directly. Removing the channel beats making
+# one more capture faithful — a fifth call site added later cannot reintroduce the defect by
+# writing `$(c_stage_root)`, because there is nothing to capture. Pinned structurally by
+# section 44i of scripts/tests/test_premerge_assert.sh.
+#
+# It still REPORTS rather than refuses (it falls back to `$PWD`), which is unchanged: an
+# unresolvable root is the "no stage was ever opened" state the locator's caller names, and
+# every value this script prints goes through `c_safe_display`, so a newline-bearing root cannot
+# break the `PREMERGE:` anchor the way it breaks review-stage.sh's one-line verdict grammar.
+C_STAGE_ROOT=""
+c_stage_root() {
+  local raw="" root="" rc=0
+  # A SENTINEL INSIDE THE SUBSTITUTION, so the stripping has nothing of ours to eat; then the
+  # sentinel, then EXACTLY ONE newline — git's own terminator for `--show-toplevel` — and
+  # nothing else. Any further trailing newline belongs to the DIRECTORY NAME and is kept.
+  #
+  # COMPLETENESS BY TWO SIGNALS (round 13's own lesson): the sentinel AND git's exit status.
+  # A value whose last byte happens to be the sentinel is indistinguishable from a complete
+  # read, and `if ! x=$(…)` reads the status as 0.
+  raw="$( { git rev-parse --show-toplevel 2>/dev/null && printf 'E'; } )" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    case "$raw" in
+      *E) raw="${raw%E}" ;;
+      *) raw="" ;;
+    esac
+    # No terminator is not `--show-toplevel`'s documented shape; treated as unresolved rather
+    # than guessed at, which is what falls back to `$PWD` below.
+    case "$raw" in
+      *$'\n') root="${raw%$'\n'}" ;;
+      *) root="" ;;
+    esac
+  fi
+  [ -n "$root" ] || root="$PWD"
+  C_STAGE_ROOT="$root"
+}
+
+# c_record_bytes <path> — ONE OBSERVATION OF THE STAGE RECORD (#3751 round 9, N2), in a form two
+# reads can be compared for equality: a STATE marker on the first line, the file's bytes after it.
+# Prints only that, never dies, so it is safe from any command substitution.
+#
+# THE COMPLETE READ IS ASSERTED AFFIRMATIVELY, not inferred from an exit status that is easy to
+# lose inside a substitution: the sentinel `E` is printed by a SECOND command joined with `&&`, so
+# a truncated or failed read cannot produce a value ending in it. A positive verdict requires an
+# affirmative measurement, and "this record is the one that was validated" is a positive verdict.
+#
+# THE STATE MARKER EXISTS SO THAT "ABSENT" AND "EMPTY" ARE DIFFERENT OBSERVATIONS: both are the
+# empty string once read, and they are not the same fact.
+#
+# `review-stage.sh` has a sibling function (`report_bytes`) over the REPORT. They are deliberately
+# NOT a shared implementation, and the reason is that no agreement between them is required: each
+# is used for EQUALITY WITHIN ONE PROCESS, over a DIFFERENT file, so a divergence cannot make the
+# two tools disagree about anything — unlike `_c_verdict_awk` and `classify_report`, which read the
+# same grammar and are therefore mechanically reconciled (section 44g).
+#
+# DECLARED LIMIT: bash DISCARDS NUL bytes in a command substitution, so a change consisting only of
+# NUL bytes is not represented here. The stage record is text written by `review-stage.sh` and its
+# every field is validated on the read side; stated rather than left as an unexamined blind spot.
+c_record_bytes() {
+  local p="$1" body rc=0
+  if [ ! -f "$p" ]; then printf 'state=no-such-file\n'; return 0; fi
+  # THROUGH THE ONE CAPTURE BOUNDARY (#3751 round 13, S2) — a raw capture DROPPED NUL bytes, so a
+  # record whose `head-sha:`/`report-nonce:` line carried one was parsed as a line it does not
+  # hold. See `c_capture_map_nul`.
+  #
+  # AND THE COMPLETE READ IS ASSERTED BY *TWO* SIGNALS: the sentinel `E` survives a refactor that
+  # folds this assignment into its `local` declaration (where the STATUS would become `local`'s),
+  # and the STATUS catches what the sentinel cannot — a read that fails after delivering a prefix
+  # whose last byte happens to BE an `E` is textually indistinguishable from a complete one, and
+  # `${body%E}` would then eat a real byte. `|| rc=$?`, never `if ! …; then rc=$?`, which reads 0.
+  body="$( { c_capture_map_nul "$p" && printf 'E'; } 2>/dev/null )" || rc=$?
+  if [ "$rc" -ne 0 ]; then printf 'state=unreadable\n'; return 0; fi
+  case "$body" in
+    *E) ;;
+    *) printf 'state=unreadable\n'; return 0 ;;
+  esac
+  body="${body%E}"
+  # ITS OWN STATE, so the refusal names the byte rather than reporting a permission failure that
+  # did not happen: the operator action is to rewrite the record (or re-open the stage), not chmod.
+  case "$body" in
+    *"$C_CAPTURE_NUL_BYTE"*) printf 'state=unrepresentable\n'; return 0 ;;
+  esac
+  printf 'state=present\n%s' "$body"
+}
+
+# _c_stage_record_awk — read a STAGE RECORD on stdin, print `key=value` lines.
+#
+# COLUMN-ZERO ANCHORED (`/^head-sha:[ \t]/`, `/^report-nonce:[ \t]/`) and every anchored line
+# COUNTED, for the same reasons `_c_verdict_awk` above is: a first-wins read of several candidates
+# is the rule this file refuses everywhere else, and an indented copy is DATA. ANSI/CR stripped to
+# LOCATE the line (#3400), never to SUPPLY its value (#3751 round 15, U2 — see `_c_verdict_awk`
+# for the rule and for why a trailing CR is separator whitespace while a CSI deletion is
+# manufacture): a CSI ANYWHERE on either anchored line is published as `esc=1` and REFUSED by
+# name, because `head-sha: <ESC>[32m<40-hex><ESC>[0m` would otherwise normalise into a clean sha
+# and bind a stage to a tree the record does not name. THAT CLAIM WAS FALSE UNTIL ROUND 21's AA2
+# and is now true: the round-15 JOIN test passed a CSI that BRACKETED the value, so a bracketed
+# splice reached `PREMERGE: OK` on a record whose raw bytes carry no such sha. The measurement is
+# an IDENTITY against the raw line, so both anchored lines are covered by the one per-line flag. `NF == 2` is required AFFIRMATIVELY of BOTH fields: the documented shapes are
+# exactly `head-sha: <40-hex>` and `report-nonce: <token>`, so an empty value or trailing junk is
+# UNPARSABLE and must not be reduced to its first word — a record that cannot state which tree it
+# audited, or which report of it is current, certifies nothing.
+#
+# IT READS TWO FIELDS IN ONE PASS BECAUSE THEY ARE ASKED OF ONE OBSERVATION (#3751 round 10, P2).
+# The head-sha binds the audit to the TREE (round 3, G1); the report-nonce names the GENERATION of
+# the stage whose report the accepted verdict came from (round 6, K2). Both questions are asked of
+# the single capture in `C_STAGE_RECORD`, so a second pass over a re-read file cannot make them
+# two different facts. It was named `_c_stage_head_awk` while it read one field; the name moved
+# with the content, because a comment that lies is worse than none.
+_c_stage_record_awk() {
+  awk '
+  BEGIN { n = 0; v = ""; nn = 0; nv = ""; esc = 0 }
+  # THE SAME TWO READINGS AND THE SAME STRICT RULE as `_c_verdict_awk` (#3751 round 15, U2;
+  # identity measurement since round 21, AA2), for the same reason: this record has ONE
+  # producer, `review-stage.sh`, which writes it with printf through a sanitizer that maps the
+  # whole C0 range to a space or to `?`, so no colouring of it is legitimate. `head-sha:
+  # <ESC>[32m<40-hex><ESC>[0m` would otherwise normalise into a clean sha and BIND this stage to
+  # a tree the record does not name — and under the round-15 join test it DID.
+  {
+    raw = $0
+    loc = raw; gsub(/\033\[[0-9;]*[a-zA-Z]/, "", loc); sub(/\r$/, "", loc)
+    # THE MEASUREMENT IS AN IDENTITY, NOT A FIELD-MEMBERSHIP TEST (#3751 round 21, AA2). `rawcr` is
+    # the line AS THE FILE HOLDS IT, minus the ONE trailing CR that is separator whitespace by
+    # ruling (see `c_parse_verdict`). If the parsed reading differs from THAT by a single byte, the
+    # strip CHANGED the line, so every field below would be a value the strip SUPPLIED — refused.
+    # Either this line is refused, or `$0` is byte-identical to the bytes on disk and each
+    # mandatory field is compared RAW, by string equality, with nothing normalised out of it.
+    rawcr = raw; sub(/\r$/, "", rawcr)
+    lesc = (loc != rawcr) ? 1 : 0
+    $0 = loc
+  }
+  /^head-sha:[ \t]/ {
+    n++
+    if (n == 1) { if (lesc) esc = 1; if (NF == 2) v = $2 }
+  }
+  /^report-nonce:[ \t]/ {
+    nn++
+    if (nn == 1) { if (lesc) esc = 1; if (NF == 2) nv = $2 }
+  }
+  END { print "n=" n; print "value=" v; print "nn=" nn; print "nonce=" nv; print "esc=" esc }
+'
+}
+
+# c_assert_stage_binds_certified <issue> — THE ARTIFACT, not the worktree (#3751 round 3, G1).
+#
+# `c_assert_head_binds_certified` above binds this WORKTREE to the certified commit. That is a
+# different question from "is this ARTIFACT about the certified tree?", and the second one was
+# unanswerable: the stage record carried no commit identity, so a `result: PASS` recorded
+# BEFORE a further commit, an amend or a rebase persisted in `.review-stage/` and certified the
+# NEW tree — with the HEAD check satisfied BY CONSTRUCTION, because the lane stands at the very
+# commit it is certifying. Both checks are kept; neither replaces the other.
+#
+# WHY FAIL-CLOSED ON A MISSING OR UNPARSABLE FIELD. This is the gate-of-record rule (any src
+# change after the gate INVALIDATES it) applied to the intent audit: an audit of an older tree
+# may not certify a newer one, and a record that does not say WHICH tree it audited is not
+# evidence about this one. So a record with no `head-sha:`, several of them, or a value that is
+# not a 40-hex sha is a NAMED refusal — never a skip, because an older record predating the
+# field would otherwise be readable as certifying, which is the permissive branch this whole
+# file exists to remove. The remedy is always the same and is printed: re-open the stage
+# (`--force` RE-STAMPS `head-sha`, deliberately unlike `spawned-at`) and re-run C.
+#
+# review-stage.sh's `open` is the SOLE writer of this record. This reader is deliberately
+# STRICTER than that writer's own `read_field` (column zero, exactly one line, 40 hex or
+# refuse), so a format drift refuses rather than passing — the fail-closed direction.
+C_STAGE_HEAD=""
+# THE OBSERVATION THE BINDING WAS VALIDATED AGAINST. Set by the assert below, consumed by
+# `c_assert_stage_record_unchanged`. Empty means the binding never ran, which that function
+# refuses rather than reading as "unchanged".
+C_STAGE_RECORD=""
+# THE GENERATION THE BINDING WAS VALIDATED ON (#3751 round 10, P2). `report-nonce:` names WHICH
+# report of this stage is current, and it is read from the SAME capture as `head-sha:`. The COUNT
+# is published beside the value because 0 (a legacy pre-nonce record), 1 and several are three
+# DIFFERENT states and only one of them can be bound — see
+# `c_assert_verdict_from_validated_generation`, which is where they are judged.
+C_STAGE_NONCE=""
+C_STAGE_NONCE_N=""
+c_assert_stage_binds_certified() {
+  local issue="$1" sfile out k v n="" value="" nn="" nonce=""
+  # THE ROOT IS READ FROM THE GLOBAL, NEVER CAPTURED (#3751 round 18, X1): a
+  # `$(c_stage_root)` here would strip a trailing newline back off the directory name and
+  # point this read at a sibling path. See `c_stage_root`.
+  c_stage_root
+  sfile="$C_STAGE_ROOT/.review-stage/issue-$issue/$C_STAGE_KIND.stage"
+  if [ ! -f "$sfile" ]; then
+    refuse_no_c_verdict \
+      "The '$C_STAGE_KIND' stage record for issue $issue is not a readable file:" \
+      "  $sfile" \
+      "It is the artifact that proves a stage was opened AND records the commit it was" \
+      "opened at, so without it nothing binds the audit to the tree being merged." \
+      "$C_REOPEN_REMEDY"
+  fi
+  # ONE READ OF THE RECORD, AND EVERY QUESTION IS ASKED OF THAT ONE OBSERVATION (#3751 round 9,
+  # N2). The head-sha used to be parsed by reading `$sfile` again here; that is a SECOND read, and
+  # two reads of one record are two different facts — so the value the binding validated could
+  # already have come from a generation other than the one the re-verification below compares.
+  # Capturing the bytes and parsing THOSE makes the binding and the comparison the same fact.
+  C_STAGE_RECORD="$(c_record_bytes "$sfile")"
+  case "$C_STAGE_RECORD" in
+    'state=present'*) ;;
+    'state=unrepresentable')
+      refuse_no_c_verdict \
+        "The '$C_STAGE_KIND' stage record for issue $issue holds a NUL 0x00 or SOH 0x01 byte, so it" \
+        "is not a text record and nothing in it may be read as one:" \
+        "  record: $sfile" \
+        "A shell capture silently DROPS a NUL, so a reader would parse lines this file does not" \
+        "hold — which is how a forged 'report-nonce:' could name another generation's report." \
+        "$C_REOPEN_REMEDY"
+      ;;
+    *)
+      refuse_no_c_verdict \
+        "The '$C_STAGE_KIND' stage record for issue $issue could not be READ, so nothing binds the" \
+        "audit to the tree being merged:" \
+        "  record: $sfile" \
+        "This is a permission or an I/O failure, not a missing stage — the file exists. It is a" \
+        "NON-measurement, and a non-measurement is never read as a pass." \
+        "$C_REOPEN_REMEDY"
+      ;;
+  esac
+  # `printf '%s\n'` guarantees awk a terminated final line, whatever the file ended with.
+  out=$(printf '%s\n' "${C_STAGE_RECORD#*$'\n'}" | _c_stage_record_awk) ||
+    refuse_tool_failure awk "the C stage record's head-sha and report-nonce"
+  local esc=""
+  while IFS='=' read -r k v; do
+    case "$k" in
+      n)     n="$v" ;;
+      value) value="$v" ;;
+      nn)    nn="$v" ;;
+      nonce) nonce="$v" ;;
+      esc)   esc="$v" ;;
+    esac
+  done <<C_STAGE_HEAD_PARSE
+$out
+C_STAGE_HEAD_PARSE
+  # THE STRIP LOCATED THESE LINES; IT MAY NOT HAVE SUPPLIED THEIR VALUES (#3751 round 15, U2).
+  # Asked FIRST, before the counts and the hex/length/equality asserts below, because every one of
+  # them reads a value the normalisation produced — `head-sha: <ESC>[32m<40-hex>` normalises into a
+  # clean 40-hex sha and would BIND this stage to a tree the record does not name. The permissive
+  # value is the affirmative `0`.
+  case "$esc" in
+    0) ;;
+    1)
+      refuse_no_c_verdict \
+        "The '$C_STAGE_KIND' stage record's head-sha:/report-nonce: line contains an ANSI ESCAPE" \
+        "SEQUENCE (0x1b), so its raw bytes are not the value it would be read as — stripping the" \
+        "escape would MANUFACTURE a sha or a nonce the record does not contain, and a transform" \
+        "that normalises its input cannot be the thing that validates it." \
+        "  record: $sfile" \
+        "review-stage.sh writes this record with printf and routes every value through a" \
+        "sanitizer that deletes the whole C0 range, so an escape here did not come from it." \
+        "$C_REOPEN_REMEDY"
+      ;;
+    *)
+      refuse_no_c_verdict \
+        "The '$C_STAGE_KIND' stage record parse produced no usable escape-sequence measurement" \
+        "— refusing (fail closed)." \
+        "  record: $sfile"
+      ;;
+  esac
+  # PUBLISHED FROM THIS ONE PARSE, AND DELIBERATELY NOT JUDGED HERE (#3751 round 10, P2). The
+  # generation is only ever compared against a value `review-stage.sh verdict` reports back, which
+  # does not exist yet — and pre-empting that comparison with a refusal HERE would relabel the
+  # seam section 44f(d) pins: an unusable `report-nonce:` is diagnosed by `review-stage.sh` itself
+  # as `NOT-RUN (stage record unreadable: …)`, which names the field to repair, and this script
+  # replacing that with a binding failure would be a worse diagnostic for the same refusal.
+  C_STAGE_NONCE_N="$nn"
+  C_STAGE_NONCE="$nonce"
+  case "$n" in
+    ''|*[!0-9]*)
+      refuse_no_c_verdict \
+        "The '$C_STAGE_KIND' stage record parse produced no usable count of head-sha: lines" \
+        "— refusing (fail closed)." \
+        "  record: $sfile"
+      ;;
+  esac
+  if [ "$n" -eq 0 ]; then
+    refuse_no_c_verdict \
+      "The '$C_STAGE_KIND' stage record carries NO 'head-sha:' field, so it does not say which" \
+      "tree the audit was about:" \
+      "  record: $sfile" \
+      "This is the shape a record written before that field existed has, and it may NOT be" \
+      "read as certifying: an intent audit of an OLDER tree does not certify a newer one" \
+      "(the gate-of-record rule — any change after the audit invalidates it)." \
+      "$C_REOPEN_REMEDY"
+  fi
+  if [ "$n" -gt 1 ]; then
+    refuse_no_c_verdict \
+      "The '$C_STAGE_KIND' stage record carries $n 'head-sha:' fields — AMBIGUOUS, refusing" \
+      "rather than picking one." \
+      "  record: $sfile" \
+      "Two answers to one question is not a binding, and a first-wins read is the rule this" \
+      "file refuses everywhere else." \
+      "$C_REOPEN_REMEDY"
+  fi
+  # 40 LOWERCASE HEX, ASSERTED AFFIRMATIVELY. `unresolved` is what review-stage.sh records
+  # where HEAD is unborn — an honest NON-measurement, and a non-measurement is not a pass.
+  case "$value" in
+    *[!0-9a-f]* | "")
+      refuse_no_c_verdict \
+        "The '$C_STAGE_KIND' stage record's head-sha is '$value', which is not a 40-hex commit sha," \
+        "so the audit cannot be bound to the tree being merged." \
+        "  record: $sfile" \
+        "review-stage.sh records 'unresolved' where the checkout had no resolvable HEAD; that" \
+        "is an honest non-measurement, and a non-measurement is never read as a pass." \
+        "$C_REOPEN_REMEDY"
+      ;;
+  esac
+  if [ "${#value}" -ne 40 ]; then
+    refuse_no_c_verdict \
+      "The '$C_STAGE_KIND' stage record's head-sha is '$value' (${#value} chars), not a full" \
+      "40-char commit sha — an abbreviated value can never be safely compared." \
+      "  record: $sfile" \
+      "$C_REOPEN_REMEDY"
+  fi
+  if [ "$value" != "$certified" ]; then
+    refuse_no_c_verdict \
+      "The '$C_STAGE_KIND' stage was OPENED at commit $value, but the commit being certified" \
+      "is $certified — so the recorded verdict is an audit of a DIFFERENT tree." \
+      "  record: $sfile" \
+      "This is the stale-artifact case: a PASS recorded before a further commit, an amend or a" \
+      "rebase persists in .review-stage/, and this worktree's HEAD equals the certified sha BY" \
+      "CONSTRUCTION, so the HEAD binding cannot see it. An intent audit of an older tree does" \
+      "not certify a newer one — the gate-of-record rule (any change after the audit" \
+      "invalidates it), applied to C." \
+      "$C_REOPEN_REMEDY"
+  fi
+  C_STAGE_HEAD="$value"
+}
+
+# c_assert_stage_record_unchanged <issue> — THE CERTIFICATION RESTS ON ONE OBSERVATION OF THE
+# RECORD (#3751 round 9, N2).
+#
+# THE DEFECT. `c_assert_stage_binds_certified` validates `head-sha` from the stage record; AUTO
+# then invokes `review-stage.sh verdict`, which RE-READS that record to find which report is
+# current (the `report-nonce:` of round 6's K2). An atomic replacement between the two reads makes
+# the ACCEPTED verdict come from a different GENERATION of the stage — and potentially a different
+# commit — than the `head-sha` that was validated. Measured: with a second generation swapped in,
+# the success line read `C-VERDICT PASS ... stage-head=273cd3dff12c ... report:
+# .../c.decoygenerationB.md`, i.e. it asserted a binding to a generation it never read, while the
+# decoy's own head-sha was forty zeros. That defeats G1 and the nonce IN COMBINATION, which is the
+# pair that stops a stale audit certifying a new tree.
+#
+# WHY A COMPARISON AND NOT A HANDOFF. The obvious alternative is to resolve the report ONCE here
+# and pass it to `review-stage.sh verdict`. That is refused: round 4 (H2) DELETED `--report`
+# precisely so that no caller and no data file can name which file holds a verdict, and
+# re-introducing a path argument would rebuild that control channel from the other end. So the
+# record is re-read and required to be BYTE-IDENTICAL to the observation the binding validated. The
+# property that buys: either the record never changed (so `verdict` read the validated one), or it
+# changed and this refuses. A change-and-change-back to IDENTICAL BYTES is harmless by definition —
+# identical bytes mean the same nonce and the same head-sha, hence the same report.
+#
+# WHAT IT DOES NOT CLAIM: the REPORT could still change after `verdict` classified it. A verdict is
+# a snapshot of a file at a time; that is inherent to reading one, and `review-stage.sh`'s own
+# write path is what makes each such read atomic. This function is about the RECORD's generation.
+#
+# CHECKED BEFORE THE TOKEN IS PARSED, never after: a check placed after the token was produced
+# could only report that the token came from somewhere unvalidated.
+c_assert_stage_record_unchanged() {
+  local issue="$1" sfile now
+  # THE ROOT IS READ FROM THE GLOBAL, NEVER CAPTURED (#3751 round 18, X1): a
+  # `$(c_stage_root)` here would strip a trailing newline back off the directory name and
+  # point this read at a sibling path. See `c_stage_root`.
+  c_stage_root
+  sfile="$C_STAGE_ROOT/.review-stage/issue-$issue/$C_STAGE_KIND.stage"
+  if [ -z "$C_STAGE_RECORD" ]; then
+    # FAIL CLOSED: no captured observation means the binding assert did not run, so there is
+    # nothing to compare and no basis for a pass. Never read as "unchanged".
+    refuse_tool_failure "c_assert_stage_record_unchanged (no captured stage-record observation)" \
+      "the C stage verdict"
+  fi
+  now="$(c_record_bytes "$sfile")"
+  if [ "$now" != "$C_STAGE_RECORD" ]; then
+    refuse_no_c_verdict \
+      "The '$C_STAGE_KIND' stage record for issue $issue CHANGED while its verdict was being read:" \
+      "  record: $sfile" \
+      "The head-sha binding was validated against ONE observation of that record, and" \
+      "review-stage.sh then read it AGAIN to find which report is current — so a replacement in" \
+      "between hands back a verdict from a DIFFERENT generation of the stage, possibly bound to a" \
+      "different commit, under a binding that was checked on the old one. Two reads of one record" \
+      "are two different facts, and NOTHING is accepted from the second." \
+      "The ordinary cause is a concurrent 'review-stage.sh open --force' (or a hand edit) landing" \
+      "mid-check. Re-run this assert once the stage is quiescent." \
+      "$C_REOPEN_REMEDY"
+  fi
+}
+
+# c_assert_verdict_from_validated_generation <issue> — THE ACCEPTED VERDICT MUST DEMONSTRABLY COME
+# FROM THE GENERATION THIS SCRIPT VALIDATED (#3751 round 10, P2).
+#
+# THE DEFECT. Round 9's N2 captures the stage record ONCE, validates `head-sha` from that capture,
+# lets `review-stage.sh verdict` re-read the record to pick which report is current, and then
+# re-compares the record's bytes. **An ABA REPLACEMENT DEFEATS THE BYTE COMPARISON**: the record
+# can go from the validated generation A to a foreign generation B while `verdict` reads B, and
+# back to A before the comparison runs. Both observations are then byte-identical and the check
+# passes — while the ACCEPTED verdict came from B, which may be stale, may be another lane's, and
+# may be bound to a different commit. Equality of two observations is not identity of the thing
+# observed at a third instant; that is what "one observation" could not buy on its own.
+#
+# THE FIX BINDS THE VERDICT ITSELF, USING A VALUE THE VERDICT ALREADY REPORTS OUTWARD. Since round
+# 6 (K2) the report path INCLUDES the generation's nonce (`<kind>.<nonce>.md`), and `verdict`
+# publishes that path as its mandatory `report=` field. So the returned `report=` is required to
+# name the nonce carried by THE CAPTURE the binding was validated on. ABA cannot satisfy that: a
+# verdict read from B returns B's nonce, whatever the record says afterwards. "The record looks
+# unchanged" becomes "the verdict I am accepting came from the generation I validated".
+#
+# NOTHING IS PASSED INTO review-stage.sh, AND THAT IS DELIBERATE — DO NOT "SIMPLIFY" IT INTO AN
+# ARGUMENT. Round 4 (H2) DELETED `--report` so that no caller and no data file can name which file
+# holds a verdict, and round 9 (N2) refused the same shortcut for this reason: an inbound path or
+# nonce argument would rebuild that control channel from the other end. This reads a value OUT of
+# the verdict line, which creates no such channel — the callee still decides which report is
+# current, and this only checks that its answer is about the generation that was validated.
+#
+# THE COMPARISON IS AGAINST THE SAME SINGLE CAPTURE `head-sha` WAS PARSED FROM (`C_STAGE_NONCE`,
+# published by `c_assert_stage_binds_certified`), never a fresh read: a re-read expectation would
+# be a second fact, which is the defect one level down and exactly what round 9 removed.
+#
+# THE BYTE COMPARISON IS KEPT AS DEFENCE IN DEPTH, not replaced. It catches changes this cannot
+# see — a `spawned-at`, `agent` or `deadline-secs` edit under the SAME nonce, and the record
+# vanishing — and this catches the one it cannot. Neither contains the other.
+#
+# IT GATES ACCEPTANCE, WHICH IS THE ONLY THING THAT CAN CERTIFY. The caller invokes it for the two
+# tokens the closed grammar lets proceed. Every other token already REFUSES, and where the token
+# is non-accepting `review-stage.sh`'s OWN cause is the more precise operator action: an unusable
+# `report-nonce:` arrives as `NOT-RUN (stage record unreadable: …)`, which names the field to
+# repair, and section 44f(d) pins that seam on purpose. This is not a permissive branch — the
+# tokens it does not gate do not proceed.
+#
+# EVERY STATE IT CANNOT BIND REFUSES, AND SAYS WHICH STATE IT WAS. A pass requires an affirmative
+# match; there is no state in which an unbindable generation is read as bound.
+#
+# AUTO-ONLY BY CONSTRUCTION, not by omission. The `--c-verdict <path>` branch reads a verdict from a
+# file the CALLER supplied and locates no stage at all (it reports `routing: NOT-CONSULTED`), so
+# there is no captured record and no validated generation for a returned nonce to be compared
+# against. That branch's own bar is the WHOLE-GRAMMAR validation in `c_parse_verdict` — kind by
+# string equality, every mandatory key exactly once, every value measured — which is what it has
+# instead. Adding a generation binding there would mean deriving the expected nonce from a stage
+# this invocation never bound, i.e. asserting a relationship between two unrelated facts.
+c_assert_verdict_from_validated_generation() {
+  local issue="$1" sfile
+  # THE ROOT IS READ FROM THE GLOBAL, NEVER CAPTURED (#3751 round 18, X1): a
+  # `$(c_stage_root)` here would strip a trailing newline back off the directory name and
+  # point this read at a sibling path. See `c_stage_root`.
+  c_stage_root
+  sfile="$C_STAGE_ROOT/.review-stage/issue-$issue/$C_STAGE_KIND.stage"
+  if [ -z "$C_STAGE_RECORD" ]; then
+    # FAIL CLOSED: no captured observation means the binding assert did not run, so there is no
+    # validated generation to bind to. Never read as bound.
+    refuse_tool_failure \
+      "c_assert_verdict_from_validated_generation (no captured stage-record observation)" \
+      "the C stage verdict"
+  fi
+  case "$C_STAGE_NONCE_N" in
+    ''|*[!0-9]*)
+      # The parse produced no usable count. A non-measurement is never read as a pass.
+      refuse_tool_failure \
+        "c_assert_verdict_from_validated_generation (no usable count of report-nonce: lines)" \
+        "the C stage verdict"
+      ;;
+  esac
+  if [ "$C_STAGE_NONCE_N" -eq 0 ]; then
+    refuse_no_c_verdict \
+      "The '$C_STAGE_KIND' stage record carries NO 'report-nonce:' field, so it does not say" \
+      "which report of this stage is current — and the verdict just read therefore cannot be" \
+      "bound to the generation whose head-sha was validated:" \
+      "  record: $sfile" \
+      "This is the shape a record written before that field existed has (the LEGACY bare" \
+      "<kind>.md report). review-stage.sh still READS that shape, deliberately, so an old stage" \
+      "reports rather than crashes — but a generation that cannot be named cannot be bound, and" \
+      "an unbindable audit may not certify a merge. Re-open the stage: --force publishes the" \
+      "report under a FRESH NONCE." \
+      "$C_REOPEN_REMEDY"
+  fi
+  if [ "$C_STAGE_NONCE_N" -gt 1 ]; then
+    refuse_no_c_verdict \
+      "The '$C_STAGE_KIND' stage record carries $C_STAGE_NONCE_N 'report-nonce:' fields —" \
+      "AMBIGUOUS, refusing rather than picking one." \
+      "  record: $sfile" \
+      "Two answers to 'which report of this stage is current' is not a generation, and a" \
+      "first-wins read is the rule this file refuses everywhere else." \
+      "$C_REOPEN_REMEDY"
+  fi
+  # ALPHANUMERIC AND NON-EMPTY, ASSERTED AFFIRMATIVELY. This reader is deliberately at least as
+  # strict as review-stage.sh's own `nonce_is_valid`, so a format drift REFUSES rather than
+  # passing — the same relationship this file's head-sha reader has to that writer. Its LENGTH
+  # BOUNDS are deliberately NOT re-implemented here: they belong to review-stage.sh, and a second
+  # copy of a bound is a second place for it to drift. What is required here is that the token
+  # names exactly one generation.
+  case "$C_STAGE_NONCE" in
+    "" | *[!A-Za-z0-9]*)
+      refuse_no_c_verdict \
+        "The '$C_STAGE_KIND' stage record's report-nonce is '$C_STAGE_NONCE', which is not an" \
+        "alphanumeric token, so the generation the verdict came from cannot be identified." \
+        "  record: $sfile" \
+        "$C_REOPEN_REMEDY"
+      ;;
+  esac
+  # review-stage.sh's OWN honest non-measurement (round 6's K1 states): it could not derive a
+  # report path at all, so its `report=` names no generation. A non-measurement is never a pass,
+  # and it is named as ITS OWN state rather than folded into the mismatch below, because the
+  # operator action differs — repair the record, not "a peer replaced your stage".
+  if [ "$C_TOKEN_REPORT" = unresolved ]; then
+    refuse_no_c_verdict \
+      "The '$C_STAGE_KIND' stage verdict reports report=unresolved — review-stage.sh could not" \
+      "derive WHICH report of this stage is current, so the verdict cannot be bound to the" \
+      "generation whose head-sha was validated." \
+      "  record: $sfile" \
+      "The verdict line above names the record defect it observed; repair that field." \
+      "$C_REOPEN_REMEDY"
+  fi
+  # THE AFFIRMATIVE MATCH. review-stage.sh's `report_path` prints `<dir>/<kind>.<nonce>.md`, so
+  # this requires the RETURNED path to end in the validated generation's own name. The pattern's
+  # payload is QUOTED (hence literal) and only the directory half is a glob: this script does not
+  # reconstruct the path — that would be H2's deleted channel written from this side — it checks
+  # that the callee's answer is about the generation that was validated.
+  case "$C_TOKEN_REPORT" in
+    */"$C_STAGE_KIND.$C_STAGE_NONCE.md") ;;
+    *)
+      refuse_no_c_verdict \
+        "The '$C_STAGE_KIND' verdict just accepted names a report that does NOT belong to the" \
+        "generation of the stage this script validated:" \
+        "  validated generation: $C_STAGE_KIND.$C_STAGE_NONCE.md (from the report-nonce: of the record the head-sha binding read)" \
+        "  verdict reported:     $C_TOKEN_REPORT" \
+        "  record: $sfile" \
+        "So the verdict came from a DIFFERENT generation of this stage — possibly a stale one," \
+        "possibly another lane's, possibly one bound to a different commit — under a binding that" \
+        "was checked on the validated one. The byte re-comparison cannot see this on its own: a" \
+        "record replaced and put BACK (A to B to A) leaves two identical observations while the" \
+        "verdict in between was read from B. Equality of two observations is not identity of the" \
+        "thing observed at a third instant." \
+        "The ordinary cause is a concurrent 'review-stage.sh open --force' (or a hand edit)" \
+        "landing while this assert runs. Re-run it once the stage is quiescent." \
+        "$C_REOPEN_REMEDY"
+      ;;
+  esac
+}
+
+# --- the superseded-generation census (#3751 round 22, AB1) --------------------
+# A PRESERVED BLOCKING VERDICT WAS READ BY NOBODY, AND THIS IS WHERE IT IS READ.
+#
+# THE FINDING (roborev job 435, High, review-stage.sh:3920-3926). `record-author-performed`
+# re-verifies the report and the stage record and then publishes, and the span between those
+# reads and the `rename(2)` that publishes is one fork/exec wide. Round 21's per-stage publish
+# lock (AA1) excluded the tool's OTHER publisher from that span; the party that REMAINS is a LATE
+# REVIEWER writing its own report with its own tooling, which takes no lock and cannot be made to
+# — rounds 9 and 15 ruled on that and the ruling stands. Round 15 (U1) made the outcome
+# NON-DESTRUCTIVE: the late `result: FINDINGS` lands in its own generation and STAYS on disk. It
+# stopped exactly there. The substitute still becomes the PUBLISHED verdict, so the blocking
+# independent verdict is preserved and IGNORED, and the merge proceeds under AUTHOR-PERFORMED with
+# no `--force` and no `replaced-verdict:` trace.
+#
+# WHY THE FIX IS HERE AND NOT THERE. Bash has no compare-and-swap rename — coreutils `mv` exposes
+# neither `RENAME_EXCHANGE` nor `RENAME_NOREPLACE` — so "publish only if the report is still the
+# one I read" is NOT EXPRESSIBLE, and a fifth check inside that window would only narrow it again.
+# THIS script runs long after the reviewer has stopped writing, so a check here races nobody.
+#
+# THE SHAPE OF THE ARGUMENT, stated because this repository usually REJECTS it: a check placed
+# AFTER a harmful effect can only REPORT it, never PREVENT it (CLAUDE.md, roborev job 264). What
+# makes a consumer-side check SUFFICIENT here rather than a fig leaf is that the harm is a
+# MIS-PUBLISHED VERDICT and nothing else — no bytes were destroyed, BECAUSE ROUND 15 KEPT THEM —
+# so the evidence is still on disk to be read, and the only thing that must be prevented is a
+# MERGE resting on it. That is precisely and only what this script decides. THE WINDOW IS NOT
+# CLOSED BY THIS AND NO SITE MAY CLAIM IT IS: `record-author-performed` is not made atomic by
+# anything here. What changes is that the window's outcome can no longer certify a merge.
+#
+# IT IS ASKED OF `AUTHOR-PERFORMED` ONLY, AND THE `PASS` CASE IS NOT REACHABLE AS A DEFECT. No
+# subcommand of `review-stage.sh` publishes a `PASS`: `open`/`open --force` publish a fresh
+# generation carrying the NON-VERDICT sentinel, and `record-author-performed` publishes its own
+# distinct token. So a published `PASS` is always a report AN INDEPENDENT REVIEWER WROTE, at a
+# generation whose head-sha binds the certified tree — and a superseded generation recording
+# `FINDINGS` beneath it is the SANCTIONED REMEDIATION FLOW this very script prints as its remedy
+# (findings recorded, fixed, stage re-opened, re-audited, `PASS`). Those two shapes are
+# INDISTINGUISHABLE ON DISK, so refusing there would red on correct input — the guard agents learn
+# to waive — and there is nothing to check rather than something left unchecked.
+#
+# THE BLOCKING SET IS CLOSED AND IS `FINDINGS` ALONE. `NOT-RUN` at a superseded generation is an
+# ABSENT audit, which is the exact state a disclosed substitute exists to stand in for; `PASS`
+# there is a STRONGER verdict than the substitute and lets nothing through that it would not have;
+# `AUTHOR-PERFORMED` there is another substitute. Only `FINDINGS` is an independent audit that
+# said NO.
+#
+# TWO DECLARED RESIDUALS, both real:
+#   * An EXPLICIT `--c-verdict <path>` is NOT censused. That mode consults no stage — it never
+#     learns an issue number — so there is no generation set to enumerate. A caller who supplies a
+#     file instead of `AUTO` is choosing the evidence, which is invoker-class and out of this
+#     script's model (see the header); `AUTO` is what flow-closer's doctrine mandates. Pinned as a
+#     case in section 44v so a later reader cannot mistake the boundary for coverage.
+#   * There is NO break-glass, deliberately. A recorded independent `FINDINGS` is not waivable by
+#     an author's own audit: CLAUDE.md's remedy for FINDINGS is to fix it or get the lead's ruling
+#     and RE-RUN THE STAGE, and a re-run recording `PASS` clears this check by construction. An
+#     authorization channel was NOT invented here — that is a whole mechanism (#3312's rules on
+#     who may grant, through which channel, bound to what) and it is not needed for a state whose
+#     remedy is ordinary and always available.
+
+# _c_generation_result_awk — read ONE report generation on stdin; print `blocking=0` or
+# `blocking=1`.
+#
+# IT ANSWERS ONE NARROW QUESTION and is deliberately NOT a third implementation of
+# `review-stage.sh`'s `classify_report` taxonomy: it decides no stage's verdict, names no cause
+# and reduces nothing to a token set — it reports whether a COLUMN-ZERO `result:` line of this file
+# records the blocking token. Column zero for the reason `classify_report` and `_c_verdict_awk` are
+# anchored there (#3312): a report body is author-controlled text that QUOTES verdict lines by
+# design, so every indented, `>`-quoted or bulleted copy is DATA. The KEY match is
+# case-insensitive and the TOKEN match is case-SENSITIVE, both exactly as `classify_report`.
+#
+# WHERE IT DIVERGES FROM `classify_report` IT DIVERGES TOWARD REFUSING, AND THAT IS THE WHOLE
+# LICENCE FOR A SECOND READER OF THIS SHAPE. `classify_report` refuses a report with SEVERAL
+# column-zero `result:` lines as AMBIGUOUS (round 3's G2) and reports NOT-RUN; this reader reports
+# `blocking` if ANY of them carries the blocking token, because G2's own measured defect was a
+# stale `result: PASS` followed by an APPENDED `result: FINDINGS`, and a merge proceeding over
+# recorded blocking findings is exactly what that count exists to stop. So this reader is never
+# MORE PERMISSIVE than `classify_report` about `FINDINGS`, which is the only direction that can
+# produce a false pass — pinned as a DIFFERENTIAL over a shared table in section 44v of
+# scripts/tests/test_premerge_assert.sh rather than argued here, because a second
+# implementation's agreement is only knowable by testing it.
+#
+# THE VALUE IS NORMALISED THE WAY `one_line` NORMALISES IT before the first word is taken — the
+# whitespace controls to a SPACE, the rest of C0 plus DEL to a VISIBLE `?`, runs collapsed, ends
+# trimmed — so `FIND<ESC>INGS` and `FIND<SOH>INGS` are NOT the token, exactly as they are not at
+# `classify_report`. ANSI IS DELIBERATELY NOT STRIPPED, for the same reason: `classify_report` does
+# not strip it either, so a CSI-spliced or CSI-bracketed token is not `FINDINGS` at EITHER reader.
+# Stripping it here would MANUFACTURE a token this file does not hold (#3751 round 15, U2) and
+# would be a UNILATERAL change to one of two readers of one shape — the divergence section 44g
+# exists to detect.
+_c_generation_result_awk() {
+  awk '
+  BEGIN { blocking = 0 }
+  # CASE-INSENSITIVE ON THE KEY ONLY: `Result:` at column zero is one author'"'"'s spelling of the
+  # control line, not a payload posing as one — `classify_report`'"'"'s `grep -i` ruling. The value is
+  # taken from the ORIGINAL record, never from the lower-cased copy, or the token comparison below
+  # would accept `findings`.
+  tolower($0) ~ /^result:/ {
+    v = $0
+    # `${line#*:}` — everything after the FIRST colon, which is the grammar the other reader uses.
+    sub(/^[^:]*:/, "", v)
+    # `one_line`'"'"'s THREE CLASSES, in its order and with its per-byte rendering, so one value
+    # cannot read two ways depending on which script read it. A newline cannot occur inside an awk
+    # record, and NUL cannot reach here (the stream is NUL-mapped at the read boundary and a body
+    # carrying the mapped byte is refused before this runs) — the classes are complete over what
+    # can arrive.
+    gsub(/[\r\t\013\014]/, " ", v)
+    gsub(/[\001-\010\016-\037\177]/, "?", v)
+    gsub(/ +/, " ", v)
+    sub(/^ /, "", v)
+    sub(/ $/, "", v)
+    # REDUCE TO THE FIRST WORD AND COMPARE BY STRING EQUALITY — never a prefix test, so
+    # `FINDINGSNOW` is not the token. The runs above are already collapsed, so the first space
+    # really is the first word boundary.
+    tok = v
+    sub(/ .*$/, "", tok)
+    if (tok == "FINDINGS") blocking = 1
+  }
+  END { print "blocking=" blocking }
+'
+}
+
+# c_generation_disposition <path> — print ONE word of a CLOSED vocabulary saying what this
+# generation records: `blocking`, `clear`, or one of five `unmeasurable-*` causes. Prints only
+# that, never dies, so it is safe from any command substitution.
+#
+# EVERY CAUSE IS ITS OWN WORD (round 4's H4), because the operator action differs per cause:
+# remove a link, repair an entry, chmod, rewrite a report. NO VALUE IS INTERPOLATED into anything
+# it prints, so it is not a value-returning printf the emit-boundary guard has to be told about —
+# the CALLER renders the prose from the word.
+#
+# `unmeasurable-*` IS FAIL-CLOSED AT THE CALLER, and naming it is the point: "I could not read
+# this generation" is not "this generation records nothing blocking". Never derive a pass from the
+# absence of a bad signal.
+c_generation_disposition() {
+  local p="$1" obs body out line blk="" nl
+  nl='
+'
+  # THE LEAF SYMLINK TEST FIRST, BEFORE ANY PREDICATE THAT DEREFERENCES ONE (#3751 round 19, Y1).
+  # `-f`/`-e` answer about the TARGET — TRUE for a link to a regular file, FALSE for a dangling
+  # one, which is the PERMISSIVE `absent` state — so `[ -L ]` is the only question that can be
+  # asked here and it has to be asked first. A linked generation's content is another file's, so
+  # it evidences nothing about this stage in either direction.
+  if [ -L "$p" ]; then printf 'unmeasurable-symlink\n'; return 0; fi
+  # THROUGH THIS SCRIPT'S ONE READ BOUNDARY (#3751 round 13, S2; round 14, T1), by REUSING the
+  # observation helper rather than adding a second reader: a raw capture DROPS NUL bytes, which
+  # does not merely lose information but MANUFACTURES grammar the file does not hold. That helper
+  # is named for the stage record and its body is path-generic; what is required of it here is
+  # exactly what it was built for — a complete read asserted by TWO signals, delivered in a form
+  # carrying a STATE word, so "absent" and "empty" stay different observations.
+  obs="$(c_record_bytes "$p")"
+  case "$obs" in
+    "state=present$nl"*) body="${obs#"state=present$nl"}" ;;
+    # An EMPTY generation: the reserved-but-not-yet-written name, which round 15 deliberately
+    # leaves on disk as history. It records no verdict, which is `clear` and not a defect. Its own
+    # arm rather than a `*` catch, so a genuinely empty file is measured as empty.
+    "state=present") body="" ;;
+    # THE GLOB NAMED THIS ENTRY, so `no-such-file` here is not absence: it is a directory, a
+    # device, or an entry that vanished mid-census. Unmeasurable, never absent.
+    "state=no-such-file") printf 'unmeasurable-not-a-file\n'; return 0 ;;
+    "state=unreadable") printf 'unmeasurable-unreadable\n'; return 0 ;;
+    "state=unrepresentable") printf 'unmeasurable-nul\n'; return 0 ;;
+    # A state this reader does not recognise. Unreachable while `c_record_bytes` is the only
+    # producer (its output is a closed set); refused rather than defaulted, so a state added to
+    # that helper later cannot inherit a permissive branch.
+    *) printf 'unmeasurable-unreadable\n'; return 0 ;;
+  esac
+  # PIPED IN, NEVER READ FROM THE PATH AGAIN: the bytes above are the ONE observation of this
+  # generation, and a second read could classify a third state (#3751 round 12, R2).
+  out="$(printf '%s\n' "$body" | _c_generation_result_awk 2>/dev/null)" || out=""
+  while IFS= read -r line; do
+    case "$line" in blocking=*) blk="${line#blocking=}" ;; esac
+  done <<EOF
+$out
+EOF
+  # THE PERMISSIVE VALUE IS THE AFFIRMATIVE `0`, with a fail-closed `*)`: a census that published
+  # no flag must not arrive as "nothing blocking was found".
+  case "$blk" in
+    1) printf 'blocking\n' ;;
+    0) printf 'clear\n' ;;
+    *) printf 'unmeasurable-census\n' ;;
+  esac
+}
+
+# c_assert_no_superseded_blocking_verdict <issue> — REFUSE the merge when a SUPERSEDED generation
+# of this stage records a blocking independent verdict that the published AUTHOR-PERFORMED token
+# does not account for. See the block above for why the check lives at the merge point.
+#
+# THE GENERATION SET IS DERIVED FROM THE STAGE DIRECTORY, never from a list a caller supplies:
+# `review-stage.sh`'s `report_path` names a generation `<kind>.<nonce>.md` in the stage directory,
+# so that is the glob. The LEGACY bare `<kind>.md` is deliberately NOT in it — a record with no
+# `report-nonce:` cannot be bound at all, and `c_assert_verdict_from_validated_generation` above
+# refuses such a stage before this is ever reached.
+#
+# THE ENUMERATION IS PROVED TO HAVE REACHED THE RIGHT DIRECTORY, AFFIRMATIVELY. The published
+# generation MUST appear in the glob — the accepted verdict was read out of that file an instant
+# ago — so if it does not, this census enumerated something else and its silence means nothing. A
+# zero count of SUPERSEDED generations is ordinary and is not a defect; a census that never saw
+# the published generation is a NON-MEASUREMENT, and keeping the two apart is exactly the "an
+# empty probe is not a zero" rule.
+c_assert_no_superseded_blocking_verdict() {
+  local issue="$1" dir g base nonce disp
+  local blocking="" nblocking=0 unmeas="" nunmeas=0 scanned=0 saw_published=0
+  # FROM THE GLOBAL, NEVER A CAPTURE (#3751 round 18, X1): a `$(c_stage_root)` strips a trailing
+  # newline back off the directory name and points this glob at a SIBLING lane.
+  c_stage_root
+  dir="$C_STAGE_ROOT/.review-stage/issue-$issue"
+  for g in "$dir/$C_STAGE_KIND".*.md; do
+    # THE `-L` TEST IS PART OF THE EXISTENCE PROBE, not a step after it: `-e` is FALSE for a
+    # DANGLING link, so `[ -e ] || continue` alone would SKIP a linked generation — the permissive
+    # branch — and a skipped generation is one this census silently did not read. An UNEXPANDED
+    # pattern (nothing matched) is neither, and is what the `continue` is for.
+    [ -L "$g" ] || [ -e "$g" ] || continue
+    base="${g##*/}"
+    nonce="${base#"$C_STAGE_KIND."}"
+    nonce="${nonce%.md}"
+    if [ "$nonce" = "$C_STAGE_NONCE" ]; then
+      saw_published=1
+      continue
+    fi
+    scanned=$((scanned + 1))
+    disp="$(c_generation_disposition "$g")"
+    case "$disp" in
+      blocking)
+        nblocking=$((nblocking + 1))
+        blocking="${blocking}${blocking:+, }$nonce"
+        ;;
+      clear) ;;
+      # EVERY OTHER WORD OF THE CLOSED VOCABULARY IS A NON-MEASUREMENT, and it takes this arm
+      # rather than `clear`. The cause travels WITH the nonce, because the operator action differs.
+      *)
+        nunmeas=$((nunmeas + 1))
+        unmeas="${unmeas}${unmeas:+, }$nonce ($disp)"
+        ;;
+    esac
+  done
+  if [ "$saw_published" -ne 1 ]; then
+    refuse_tool_failure \
+      "c_assert_no_superseded_blocking_verdict (the published generation $C_STAGE_KIND.$C_STAGE_NONCE.md is not in $dir, so this census enumerated something else and its silence is not a measurement)" \
+      "the C stage verdict"
+  fi
+  # THE BLOCKING CASE FIRST: it is the more specific operator fact, and when both hold it is the
+  # one to act on.
+  if [ "$nblocking" -gt 0 ]; then
+    refuse_no_c_verdict \
+      "The '$C_STAGE_KIND' stage reports AUTHOR-PERFORMED, and $nblocking of the $scanned SUPERSEDED" \
+      "generation(s) of this stage record a BLOCKING verdict (result: FINDINGS) that the published" \
+      "substitute does not account for:" \
+      "  published generation:   $C_STAGE_KIND.$C_STAGE_NONCE.md (AUTHOR-PERFORMED)" \
+      "  blocking generation(s): $blocking" \
+      "  stage directory: $dir" \
+      "An author's hand audit is the sanctioned fallback for an ABSENT independent audit — never an" \
+      "override of one that WAS obtained and said NO. Read the generation(s) named above: their" \
+      "verdict is still on disk in full, because review-stage.sh SUPERSEDES a report rather than" \
+      "destroying it (#3751 round 15)." \
+      "This is the state a review landing its verdict inside record-author-performed's publish" \
+      "window leaves, and it is indistinguishable on disk from a deliberate --force over a recorded" \
+      "FINDINGS. Either way an independent audit blocked, and CLAUDE.md's remedy is the same:" \
+      "FIX IT, or get the lead's ruling, then RE-RUN THE STAGE so the audit records its own verdict." \
+      "$C_REOPEN_REMEDY"
+  fi
+  if [ "$nunmeas" -gt 0 ]; then
+    refuse_no_c_verdict \
+      "The '$C_STAGE_KIND' stage reports AUTHOR-PERFORMED, and $nunmeas of the $scanned SUPERSEDED" \
+      "generation(s) of this stage COULD NOT BE READ, so whether an independent audit recorded a" \
+      "blocking verdict beneath the substitute is UNKNOWN:" \
+      "  published generation:     $C_STAGE_KIND.$C_STAGE_NONCE.md (AUTHOR-PERFORMED)" \
+      "  unreadable generation(s): $unmeas" \
+      "  stage directory: $dir" \
+      "A non-measurement is never read as a pass. The cause is named per generation:" \
+      "  unmeasurable-symlink     the name is a SYMLINK, so its content is another file's — remove it" \
+      "  unmeasurable-not-a-file  the directory names it, but it is not a regular file" \
+      "  unmeasurable-unreadable  it could not be read (a chmod, or an I/O error)" \
+      "  unmeasurable-nul         it holds a NUL 0x00 or SOH 0x01 byte, which no text record may contain" \
+      "  unmeasurable-census      the census tool produced no usable answer about it" \
+      "$C_REOPEN_REMEDY"
+  fi
+}
+
+# c_auto_locate_issue — find THE open C stage in this worktree, by its stage
+# RECORD (`.review-stage/issue-<N>/<kind>.stage`), which is the artifact that
+# proves a stage was opened at all. Prints the issue number, or nothing.
+# Several stages is AMBIGUOUS and refuses: 1:1:1:1 puts exactly one issue in a
+# worktree, so two records mean the caller is not where it thinks it is.
+# IT REFUSES NOTHING ITSELF, BY DESIGN (#3751 round 2, S3). Its only caller is a COMMAND
+# SUBSTITUTION, and an `exit` inside one terminates the SUBSHELL — so the AMBIGUOUS refusal
+# raised here reached the top level ONLY because `set -e` propagates the status of a simple
+# assignment whose substitution failed. That made a correct diagnostic depend on a shell option
+# a later edit could disturb: with `set -e` off (or the call moved inside a condition, where it
+# is suppressed) the refusal became an advisory PRINT followed by "No 'c' stage was ever
+# OPENED" — the wrong diagnostic for two stages. So the ambiguity is REPORTED as a value and
+# a status, and the CALLER refuses explicitly.
+c_auto_locate_issue() {
+  local root d n count=0 found=""
+  # FROM THE GLOBAL, NEVER A CAPTURE (#3751 round 18, X1) — this is the site the finding
+  # was measured at: the captured value named an existing SIBLING directory, so the glob
+  # below enumerated a PEER lane's stage records. See `c_stage_root`.
+  c_stage_root
+  root="$C_STAGE_ROOT"
+  for d in "$root"/.review-stage/issue-*/"$C_STAGE_KIND".stage; do
+    [ -f "$d" ] || continue
+    n=$(basename "$(dirname "$d")")
+    n="${n#issue-}"
+    case "$n" in ''|*[!0-9]*) continue ;; esac
+    count=$((count + 1))
+    found="$n"
+  done
+  if [ "$count" -gt 1 ]; then
+    printf 'AMBIGUOUS|%s|%s\n' "$count" "$root"
+    return 3
+  fi
+  printf '%s\n' "$found"
+}
+
+# c_evaluate — the whole check, called once. Refuses, or leaves C_TOKEN holding a
+# token that may proceed (PASS / AUTHOR-PERFORMED / NOT-APPLICABLE).
+c_evaluate() {
+  local rs issue out rc=0 arc=0 amb_count="" amb_root=""
+  if [ "$c_verdict" != AUTO ]; then
+    # AN EXPLICIT PATH. Routing is NOT consulted: a supplied path can only carry a
+    # review-stage verdict token, and NOT-APPLICABLE is not in that closed
+    # grammar, so no caller-supplied value can declare C inapplicable on a branch
+    # that carries an OpenSpec change (a file asserting it is refused BELOW, as
+    # an unrecognised token). Whether C was required is therefore irrelevant here:
+    # a verdict was supplied and it is held to the same bar either way.
+    C_ROUTING=NOT-CONSULTED
+    C_ROUTING_DETAIL="an explicit verdict path was supplied, so routing was not consulted"
+    C_SOURCE="file $c_verdict"
+    if [ ! -f "$c_verdict" ]; then
+      refuse_no_c_verdict \
+        "--c-verdict names '$c_verdict', which does not exist (or is not a regular file)."
+    fi
+    if [ ! -r "$c_verdict" ]; then
+      refuse_no_c_verdict "--c-verdict names '$c_verdict', which is not readable."
+    fi
+    if [ ! -s "$c_verdict" ]; then
+      refuse_no_c_verdict \
+        "--c-verdict names '$c_verdict', which is EMPTY — nothing was recorded." \
+        "An empty file is the shape a redirect leaves when the command it captured never ran."
+    fi
+    c_parse_verdict file "$c_verdict" "C verdict file"
+  else
+    c_measure_routing
+    if [ "$C_ROUTING" = NOT-APPLICABLE ]; then
+      # AFFIRMATIVE, and it says WHAT WAS MEASURED. This is the one branch that
+      # proceeds without a verdict, and it does so on a measurement that SUCCEEDED
+      # — never on a failure to measure, which lands in UNMEASURED below.
+      C_TOKEN=NOT-APPLICABLE
+      C_SOURCE="AUTO (measured: $C_ROUTING_DETAIL)"
+      return 0
+    fi
+    # REQUIRED, or UNMEASURED — which is treated as REQUIRED. Fail closed.
+    C_SOURCE="AUTO (routing $C_ROUTING: $C_ROUTING_DETAIL)"
+    rs=""
+    if [ -n "$self_dir" ]; then
+      rs="$self_dir/review-stage.sh"
+    fi
+    # Resolved from THIS script's own directory, with NO env override — #3312's
+    # rule that the constrained party must not choose its own enforcer. A test
+    # needing a different one substitutes the ARTIFACT in a scratch copy of the
+    # tree, exactly as the base-staleness advisory is substituted.
+    if [ -z "$rs" ] || [ ! -f "$rs" ]; then
+      refuse_tool_failure "review-stage.sh (expected beside this script${self_dir:+ at $rs})" \
+        "the C stage verdict"
+    fi
+    # BOUND BEFORE TRUSTED (#3751 round 1, F1). Checked here, immediately before
+    # the local stage is located, and NOT before the routing measurement: routing
+    # is taken against `$certified` EXPLICITLY, so it is correct about the merged
+    # tree whatever this checkout's HEAD is, and refusing earlier would relabel
+    # the UNMEASURED cause an operator needs to read.
+    c_assert_head_binds_certified
+    # THE STATUS IS CHECKED HERE, EXPLICITLY, and the refusal is raised in THIS shell (S3).
+    # `issue=$(...) || arc=$?` is the correct idiom: `if ! issue=$(...)` would read `$?` as 0.
+    arc=0
+    issue=$(c_auto_locate_issue) || arc=$?
+    if [ "$arc" -ne 0 ]; then
+      case "$issue" in
+        AMBIGUOUS\|*)
+          amb_count=${issue#AMBIGUOUS|}; amb_count=${amb_count%%|*}
+          amb_root=${issue#AMBIGUOUS|*|}
+          refuse_no_c_verdict \
+            "$amb_count '$C_STAGE_KIND' stage records exist under $amb_root/.review-stage/ — AMBIGUOUS." \
+            "1:1:1:1 puts exactly ONE issue in a worktree, so two records mean this is not the" \
+            "lane you think it is. Name the verdict explicitly: --c-verdict <path>."
+          ;;
+        *)
+          # An unrecognised failure of the locator is a TOOL failure, never "no stage found":
+          # "cannot tell" must not take the permissive branch.
+          refuse_tool_failure "c_auto_locate_issue (exit $arc)" "the C stage verdict"
+          ;;
+      esac
+    fi
+    if [ -z "$issue" ]; then
+      refuse_no_c_verdict \
+        "No '$C_STAGE_KIND' stage was ever OPENED in this worktree (.review-stage/issue-*/$C_STAGE_KIND.stage)," \
+        "so there is no verdict to read and nothing recorded that C was even attempted." \
+        "This is the state review-stage.sh reports as 'NOT-RUN (stage never opened)'."
+    fi
+    # THE ARTIFACT IS BOUND BEFORE IT IS READ (G1). Checked here, after the issue is known
+    # and BEFORE the verdict is read, so a stale record can never produce a token at all —
+    # a check placed after the token was read could only report the staleness.
+    c_assert_stage_binds_certified "$issue"
+    out=$(bash "$rs" verdict "$C_STAGE_KIND" --issue "$issue" 2>/dev/null) || rc=$?
+    # The LINE is the authority, not the exit status: one grammar, read in one
+    # place. review-stage.sh's non-zero exits (4 FINDINGS / 5 NOT-RUN / 6
+    # AUTHOR-PERFORMED) are by design, so a non-zero rc with a parseable line is
+    # ORDINARY. Only an rc with NO line is a tool failure.
+    if [ -z "$out" ]; then
+      refuse_tool_failure "review-stage.sh verdict $C_STAGE_KIND --issue $issue (exit $rc, no output)" \
+        "the C stage verdict"
+    fi
+    # ONE OBSERVATION, RE-VERIFIED BEFORE THE TOKEN EXISTS (#3751 round 9, N2). `verdict` re-read
+    # the record to pick which report is current, so this requires that record to still be the one
+    # whose head-sha was validated above; otherwise the token below would come from a generation
+    # nothing bound to the certified tree — and the success line would name a binding it never read.
+    c_assert_stage_record_unchanged "$issue"
+    # The SOURCE names the verified binding, so a pasted success line shows that the stage
+    # was bound to the certified tree rather than merely found in this directory.
+    C_SOURCE="AUTO issue=$issue stage=$C_STAGE_KIND stage-head=${C_STAGE_HEAD:0:12} (routing $C_ROUTING)"
+    c_parse_verdict text "$out" "C stage verdict for issue $issue"
+    # AND THE VERDICT IS BOUND TO THE GENERATION THAT WAS VALIDATED (#3751 round 10, P2). The
+    # byte re-comparison above is defeated by an ABA replacement — A to B and back to A leaves two
+    # identical observations while `verdict` read B — so the returned `report=` field must name
+    # the nonce carried by the capture the head-sha binding was validated on. Read OUT of the
+    # verdict line, never passed IN (H2's deleted `--report` channel; see the function).
+    #
+    # RUN FOR THE TOKENS THAT WOULD PROCEED, because acceptance is the only thing that can
+    # certify: every other token already refuses, and for those `review-stage.sh`'s own cause is
+    # the more precise operator action (section 44f(d)'s seam). It is placed BEFORE the closed
+    # grammar below, so no unbound generation ever reaches an accepting arm.
+    case "$C_TOKEN" in
+      PASS | AUTHOR-PERFORMED) c_assert_verdict_from_validated_generation "$issue" ;;
+    esac
+    # AND A SUBSTITUTE MAY NOT STAND OVER A BLOCKING INDEPENDENT VERDICT (#3751 round 22, AB1).
+    # AFTER the generation binding, because the census is stated in terms of the VALIDATED
+    # generation: it has to know which file the accepted verdict came from in order to say which
+    # of the others are SUPERSEDED. AUTHOR-PERFORMED ALONE — a published PASS over a superseded
+    # FINDINGS is the sanctioned remediation flow, not a defect, and the two are
+    # indistinguishable on disk; see `c_assert_no_superseded_blocking_verdict`.
+    case "$C_TOKEN" in
+      AUTHOR-PERFORMED) c_assert_no_superseded_blocking_verdict "$issue" ;;
+    esac
+  fi
+
+  # THE CLOSED GRAMMAR, MATCHED BY STRING EQUALITY ON THE FIRST WORD (#3544). awk
+  # already gave us the first whitespace-delimited token after `RESULT:`, so this
+  # is token-exact: `PASS-BUT-UNMEASURED` equals nothing in the set and refuses.
+  case "$C_TOKEN" in
+    PASS) return 0 ;;
+    AUTHOR-PERFORMED) return 0 ;;
+    FINDINGS)
+      refuse_no_c_verdict \
+        "The $C_STAGE_KIND stage reports FINDINGS — the intent audit found a blocking gap." \
+        "An unmet or uncovered requirement BLOCKS the merge (CLAUDE.md's 'done' definition):" \
+        "fix it, or get the lead's ruling, then re-run the stage."
+      ;;
+    NOT-RUN)
+      refuse_no_c_verdict \
+        "The $C_STAGE_KIND stage reports NOT-RUN — no verdict was ever recorded." \
+        "NOT-RUN covers seven distinct states (sentinel-only, report absent, report unreadable," \
+        "report empty, report ungrammatical, stage never opened, stage record unreadable) and the" \
+        "verdict line above NAMES which, because the operator action differs per cause."
+      ;;
+    '')
+      refuse_no_c_verdict \
+        "The $C_STAGE_KIND verdict line carries NO token after 'RESULT:'."
+      ;;
+    *)
+      refuse_no_c_verdict \
+        "The $C_STAGE_KIND verdict token is '$C_TOKEN', which is not in the closed set" \
+        "{PASS, FINDINGS, NOT-RUN, AUTHOR-PERFORMED}. An unrecognised token is NEVER passed" \
+        "through and never read as a pass: this is where a hand-written 'NOT-APPLICABLE' or" \
+        "'PASS-BUT-UNMEASURED' lands. Only AUTO's MEASUREMENT of the branch can make C" \
+        "inapplicable — never a value a caller supplies."
+      ;;
+  esac
+}
+
+# c_revalidate — THE C VERDICT IS RE-VALIDATED INSIDE THE WINDOW IT CERTIFIES (#3751 round 16, V1).
+#
+# THE DEFECT. `c_evaluate` ran ONCE, near the top of the merge-point checks — and then the
+# base-staleness advisory (bounded at ADVISORY_TIMEOUT_SECS + ADVISORY_KILL_GRACE = 65s) and the
+# `gh pr view` network call happened, and NOTHING re-validated C before `PREMERGE: OK` was emitted.
+# A concurrent `review-stage.sh open --force` landing in that interval supersedes the validated
+# PASS with a fresh NOT-RUN generation, and the script still printed OK on the strength of the
+# stale PASS. Measured on the shipped artifact with the supersede planted immediately after the
+# single evaluation: `PREMERGE: OK b5f49d60aae4…` at exit 0, while `review-stage.sh verdict` read
+# from the same worktree an instant later reported the FRESH generation.
+#
+# THE PRECEDENT IS THIS REPOSITORY'S OWN (CLAUDE.md, roborev job 290, on the gate's component-set
+# pre-flight): a check must be INSIDE the window it certifies — not before it, not after the harm —
+# and the remedy applied there was to REPEAT the check inside the window while KEEPING the earlier
+# one. That arrangement is followed here rather than replaced by one late check: the EARLY call is
+# what stops an uncertifiable run paying for the advisory and the network round trip at all, and
+# "you have no C verdict" must stay reportable offline.
+#
+# IT RE-EVALUATES ON THE SAME SINGLE-OBSERVATION DISCIPLINE, NOT ON A CHEAPER PROXY. The captured
+# observation is RESET first, so the second evaluation CAPTURES the stage record once itself,
+# parses its `head-sha` and `report-nonce` from THAT capture (round 9's N2) and binds the returned
+# verdict to that generation (round 10's P2). Leaving the first capture in place would compare the
+# record against an observation taken BEFORE the window — a different property, which reads as
+# satisfied while the second evaluation measured nothing of its own.
+#
+# A DISAGREEMENT IS A REFUSAL NAMING WHAT CHANGED, never a second opinion and never last-one-wins.
+# Two outcomes are possible and both are covered. The second evaluation can REFUSE on its own terms
+# — the stage is now NOT-RUN, its head-sha no longer binds, its generation is unnameable — and
+# those refusals carry `C_PHASE`, so the block says which of the two windows raised it. Or it can
+# SUCCEED with a DIFFERENT answer, which only a comparison can see: a peer's `open --force`
+# followed by a fresh PASS at the same head yields an ACCEPTING token from an audit that is not the
+# audit this run validated, so running the check twice without comparing would certify it. That
+# case is why this is a comparison and not merely a repeat.
+#
+# WHAT IT DOES NOT CLAIM, stated because the residual is real: TWO CHECKS CANNOT BOTH BE LAST. This
+# narrows the C window from "the advisory plus a network round trip" to "the re-validation itself"
+# — a local git measurement plus one `review-stage.sh` read — and it cannot close it, because a
+# verdict is a snapshot of a file at a time (round 9's own statement about the report). The `gh`
+# head/state check is correspondingly no longer the last thing before OK; that trade is measured
+# and recorded at this function's call site, which is where the ordering decision lives.
+#
+# NOTHING IS PASSED INTO THE SECOND EVALUATION AND NOTHING IS INHERITED BY IT — do not "optimize"
+# it into a cheap re-read of one field. Round 4 (H2) deleted `--report` so no caller can name which
+# file holds a verdict, and a re-validation that took a shortcut past `c_evaluate` would be a
+# SECOND implementation of the whole binding, i.e. a second place for it to drift from the first.
+C_RV_DIFFS=()
+C_RV_N=0
+# c_rv_note <field> <before> <after> — record a disagreement, or nothing. The COUNT is a separate
+# scalar so `${#C_RV_DIFFS[@]}` is never evaluated on an empty array (bash 3.2 under `set -u`).
+c_rv_note() {
+  local name="$1" before="$2" after="$3"
+  if [ "$before" = "$after" ]; then
+    return 0
+  fi
+  C_RV_DIFFS[$C_RV_N]="  $name: was '$before' — is now '$after'"
+  C_RV_N=$((C_RV_N + 1))
+}
+# c_rv_note_flat <text> — a disagreement whose VALUES are not worth rendering (see the record-bytes
+# comparison below).
+c_rv_note_flat() {
+  C_RV_DIFFS[$C_RV_N]="  $1"
+  C_RV_N=$((C_RV_N + 1))
+}
+c_revalidate() {
+  local p_token="$C_TOKEN" p_report="$C_TOKEN_REPORT" p_source="$C_SOURCE"
+  local p_routing="$C_ROUTING" p_detail="$C_ROUTING_DETAIL"
+  local p_head="$C_STAGE_HEAD" p_nonce="$C_STAGE_NONCE" p_record="$C_STAGE_RECORD"
+  C_RV_DIFFS=()
+  C_RV_N=0
+  C_PHASE=revalidation
+  # RESET, so the second evaluation MEASURES rather than inheriting the first's capture. Both
+  # round 9's byte comparison and round 10's nonce match FAIL CLOSED on an empty capture, so this
+  # cannot silently skip them: it forces them to be taken again, on this window's own observation.
+  C_TOKEN=""
+  C_TOKEN_LINE=""
+  C_TOKEN_REPORT=""
+  C_SOURCE=""
+  C_ROUTING=""
+  C_ROUTING_DETAIL=""
+  C_STAGE_HEAD=""
+  C_STAGE_RECORD=""
+  C_STAGE_NONCE=""
+  C_STAGE_NONCE_N=""
+  c_evaluate
+  # COMPARED FIELD BY FIELD, so a refusal NAMES what moved rather than asserting that something
+  # did. `C_TOKEN_LINE` is deliberately NOT compared: it carries `elapsed=`, which legitimately
+  # advances between two reads of ONE stage, and a guard that reds on correct input is the guard
+  # agents learn to waive.
+  c_rv_note 'verdict token' "$p_token" "$C_TOKEN"
+  c_rv_note 'routing' "$p_routing" "$C_ROUTING"
+  c_rv_note 'routing detail' "$p_detail" "$C_ROUTING_DETAIL"
+  c_rv_note 'stage record head-sha' "$p_head" "$C_STAGE_HEAD"
+  c_rv_note 'stage record report-nonce' "$p_nonce" "$C_STAGE_NONCE"
+  c_rv_note 'report (WHICH report answered)' "$p_report" "$C_TOKEN_REPORT"
+  c_rv_note 'source (the provenance the success line prints)' "$p_source" "$C_SOURCE"
+  # THE RECORD'S BYTES, reported as a FACT and not as a value: the whole file on a refusal line
+  # would bury the named fields above, and the two load-bearing fields inside it are compared by
+  # name already. Kept as defence in depth for the same reason round 9 keeps its own comparison —
+  # it catches an edit to `spawned-at`, `agent` or `deadline-secs` under an UNCHANGED nonce, which
+  # none of the named comparisons can see.
+  if [ "$p_record" != "$C_STAGE_RECORD" ]; then
+    c_rv_note_flat "stage record bytes: CHANGED (a field other than the two named above was edited, or the record was replaced)"
+  fi
+  if [ "$C_RV_N" -gt 0 ]; then
+    refuse_no_c_verdict \
+      "The '$C_STAGE_KIND' intent audit CHANGED between the two evaluations of it:" \
+      "${C_RV_DIFFS[@]}" \
+      "The audit was validated, and THEN the base-staleness advisory (up to 65s) and the gh call" \
+      "ran; this is the RE-VALIDATION that runs immediately before the success verdict. A check" \
+      "outside the window it certifies can only REPORT the harm (roborev job 290), so both" \
+      "evaluations" \
+      "must agree: nothing is accepted from the first alone, and a later answer NEVER overrides" \
+      "an earlier one — that would be last-one-wins on a merge gate." \
+      "The ordinary cause is a concurrent 'review-stage.sh open --force' (or a hand edit) landing" \
+      "mid-check. Re-run this assert once the stage is quiescent." \
+      "$C_REOPEN_REMEDY"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -550,9 +2808,14 @@ refuse_anchor_unverifiable() {
   shift 3
   printf '========================================================\n' >&2
   printf 'PREMERGE: ANCHOR-UNVERIFIABLE — REFUSING TO MERGE\n' >&2
-  printf '  delta anchor:  %s\n' "$anchor" >&2
-  printf '  certified sha: %s\n' "$head" >&2
-  printf '  cause: %s\n' "$cause" >&2
+  # ROUTED THROUGH THE ONE EMIT BOUNDARY (#3751 round 7, L1). `$anchor` is read out
+  # of the delta summary FILE and `$cause` is assembled from git's own stderr, so
+  # both are DATA; `$head` is hex-validated already and is routed anyway, because
+  # ONE rule applied to EVERY value is what stops the next added field forgetting.
+  # Display-only: the ancestry verdict was decided on the RAW values above.
+  printf '  delta anchor:  %s\n' "$(c_safe_display "$anchor")" >&2
+  printf '  certified sha: %s\n' "$(c_safe_display "$head")" >&2
+  printf '  cause: %s\n' "$(c_safe_display "$cause")" >&2
   while [ "$#" -gt 0 ]; do
     printf '  %s\n' "$1" >&2
     shift
@@ -966,7 +3229,9 @@ ANCHOR_SCRATCH=""
 # to race here — reporting a path cannot delete anything.
 _anchor_cleanup() {
   [ -n "$ANCHOR_SCRATCH" ] || return 0
-  printf 'PREMERGE: NOTE scratch dir left in place (NOT deleted): %s\n' "$ANCHOR_SCRATCH" >&2
+  # The scratch pathname derives from TMPDIR, which is INVOKER ENVIRONMENT, so it is
+  # routed through the one emit boundary like every other non-authored value (#3751 L1).
+  printf 'PREMERGE: NOTE scratch dir left in place (NOT deleted): %s\n' "$(c_safe_display "$ANCHOR_SCRATCH")" >&2
   printf 'PREMERGE: NOTE  a delete through a peer-mutable pathname cannot be made race-free in\n' >&2
   printf 'PREMERGE: NOTE  shell (no openat/unlinkat), and every lane here runs as the same user,\n' >&2
   printf 'PREMERGE: NOTE  so it was REMOVED rather than narrowed a fourth time (#3653). It is an\n' >&2
@@ -1495,9 +3760,39 @@ assert_anchor_on_history() {
 # documented 0/2/3 set, from a line that only feeds a NON-BLOCKING advisory. An
 # unresolvable directory degrades to the ABSENT branch below, which is reported
 # and not fatal, exactly like a deleted advisory.
+#
+# AND IT IS RESOLVED WITHOUT LOSING A BYTE OF THE PATH (#3751 round 18, X1, swept). This is the
+# SECOND instance of the round-18 class in this file, found by sweeping every path-bearing
+# command substitution rather than by fixing the one the finding named. It was
+# `$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)` — TWO nested substitutions, each stripping
+# trailing newlines — so if the directory holding this script were named with a trailing LF,
+# `dirname` produced `…/flow<LF>`, the capture ate the LF, and `cd` landed on an EXISTING
+# SIBLING. What that mislocates is `review-stage.sh`, i.e. the ENFORCER of the C verdict this
+# script refuses to merge without (#3312: the constrained party must not choose its own
+# enforcer — nor may a lossy capture choose it for us), plus `base-staleness.sh`.
+#
+# NO CAPTURE AT ALL FOR THE DIRECTORY PART: `${BASH_SOURCE[0]%/*}` is pure parameter expansion,
+# which is byte-faithful, and it degrades to `.` for a bare filename exactly as `dirname` does.
+# The absolutisation still needs a subshell (a `cd` in THIS shell would move the cwd every git
+# command below reads), so it carries the same SENTINEL as `c_stage_root`. Here the format is
+# OURS, so there is no terminator to remove and the sentinel alone is faithful — unlike git's
+# `--show-toplevel`, whose own newline must be removed and exactly one of them.
 self_dir=""
-if ! self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"; then
-  self_dir=""
+self_src="${BASH_SOURCE[0]:-}"
+if [ -n "$self_src" ]; then
+  self_dir_rel="${self_src%/*}"
+  [ "$self_dir_rel" != "$self_src" ] || self_dir_rel="."
+  self_dir_raw=""
+  self_dir_rc=0
+  self_dir_raw="$( { cd -- "$self_dir_rel" 2>/dev/null && printf '%sE' "$PWD"; } )" || self_dir_rc=$?
+  if [ "$self_dir_rc" -eq 0 ]; then
+    case "$self_dir_raw" in
+      *E) self_dir="${self_dir_raw%E}" ;;
+      # No sentinel on a zero status is not a shape this parses; degrade to the reported
+      # ABSENT branch below rather than guess, which is the non-fatal, named direction.
+      *) self_dir="" ;;
+    esac
+  fi
 fi
 if [ -n "$self_dir" ]; then
   advisory_script="$self_dir/base-staleness.sh"
@@ -1620,8 +3915,30 @@ assert_readable_summary() {
   fi
 }
 
-# Parse the summary by REDIRECTION, never a pipe (#3400: a piped `while read`
-# runs in a subshell and its verdict is discarded). One awk pass:
+# THROUGH THE ONE CAPTURE BOUNDARY (#3751 round 14, T1). Round 13 (S2) routed
+# `c_parse_verdict`'s file read and `c_record_bytes` through `c_capture_map_nul`
+# and left THIS reader — the GATE-OF-RECORD summary parser, the other half of the
+# merge gate — reading the file RAW. Measured on the shipped script: a summary
+# holding `RESULT: PA<NUL>SS` yielded `v_result=PA<NUL>SS` from awk (gawk passes a
+# NUL through a field) and the capture of awk's OUTPUT in `gate_parse_file` then
+# REMOVED it, so this script read `PASS`. Same defect, third site — a boundary
+# introduced with one path left bypassing it, which is round 7 and round 13 over
+# again. The `#3400` REDIRECTION rule this comment used to open with is about a
+# piped `while read` losing its verdict in a subshell; `pipefail` is set, so an
+# unreadable file still fails this pipeline and reaches `refuse_tool_failure`
+# exactly as the redirection did.
+#
+# THE BYTE IS NOT NAMED BY ITS OWN STATE HERE, DELIBERATELY, AND THAT IS WEAKER
+# THAN `c_record_bytes` — declared rather than implied. Every field this parser
+# publishes is matched AFFIRMATIVELY downstream (block markers by whole-line
+# equality, `RESULT:`/`tree-integrity:`/`dirty:` against closed sets, `commit:`/
+# `tree-start:` as hex against the certified sha), so a mapped SOH makes each of
+# them refuse, and the refusal RENDERS the value through `c_safe_display`, which
+# shows SOH as a visible `?` — the operator sees `PA?SS`. A dedicated state would
+# buy a better sentence, not a different verdict, and this parser feeds two files
+# through one path.
+#
+# One awk pass:
 #   * strips ANSI escapes and a trailing CR before matching anything (belt — see
 #     the header: the summary file's own block lines are not coloured)
 #   * counts blocks by WHOLE-LINE-EXACT marker equality, never substring. That
@@ -1637,10 +3954,13 @@ assert_readable_summary() {
 #     (the headers are distinct by construction: scripts/agent-gate.sh)
 #   * emits key=value lines with per-key occurrence COUNTS, so a duplicated key
 #     inside one block is refusable rather than silently last-wins
-# WANT selects which family is "the block": full (default) or delta.
+# WANT selects which family is "the block": full (default) or delta. It is now
+# the ONLY argument — the file operand went with the redirection, and a parameter
+# nothing reads is a parameter a later caller passes wrongly.
 _gate_awk() {
-  awk -v WANT="$2" '
+  awk -v WANT="$1" '
   BEGIN {
+    esc = 0
     FULL_S  = "==== AGENT-GATE SUMMARY ===="
     FULL_E  = "==== END AGENT-GATE SUMMARY ===="
     LITE_S  = "==== AGENT-GATE LITE SUMMARY ===="
@@ -1653,20 +3973,60 @@ _gate_awk() {
     v_result = ""; v_ti = ""; v_commit = ""; v_ts = ""; v_dirty = ""
     v_mode = ""; v_anchor = ""
   }
+  # NORMALISE FOR LOCATING ONLY, AND REMEMBER THAT IT HAPPENED (#3751 round 15, U2 — the rule and
+  # the separate-versus-join distinction that keeps the trailing CR tolerated are at
+  # `_c_verdict_awk`). Colour legitimately reaches a captured gate summary (#3400: colour survives
+  # redirection), and WITHOUT the strip a coloured marker line would fail the whole-line equalities
+  # below and this reader would report "no summary block" for a file that has one — so the strip
+  # stays, for LOCATING. It may not SUPPLY a value: `RESULT: PA<ESC>[31mSS` normalises into the
+  # `PASS` this script matches against its closed set, and nothing else here would catch it (the
+  # `RESULT:` value has no mandatory-field census standing behind it, unlike the c-verdict token).
+  # `esc` is set on the lines that CONTRIBUTE — the markers that open/close the selected block and
+  # the value lines inside it — never on a component line, which supplies nothing and would red on
+  # correct input.
+  # THE VALUE-ONLY FORM OF THE SAME RULE (#3751 round 15, U2 — stated at `_c_verdict_awk`).
+  # `esc_joined(v)` answers ONE question about a value the deleting strip produced: does that
+  # value survive as a WHOLE FIELD when each CSI is a SEPARATOR instead? If not, the deletion
+  # JOINED two runs and the value is one the file does not contain — `RESULT: PA<ESC>[31mSS`
+  # normalises into the `PASS` this script matches token-exactly, and nothing else here would
+  # catch it (unlike the c-verdict token, the `RESULT:` value has no mandatory-field census
+  # standing behind it).
+  #
+  # VALUE-ONLY AND NOT STRICT, DELIBERATELY: a coloured GATE SUMMARY capture is
+  # documented-legitimate input (#3400, and Case 24 of scripts/tests/test_premerge_assert.sh
+  # pins it), and real colouring brackets the KEY as readily as the value —
+  # `<ESC>[32mRESULT<ESC>[0m: <ESC>[1;32mPASS<ESC>[0m` — which the strict form would red on.
+  # Asking only about the values is what keeps this guard off correct input while still making
+  # a spliced value unusable.
+  #
+  # DECLARED RESIDUAL: a value spliced by a CSI while the SAME TEXT also appears as another
+  # field of that line (`RESULT: PA<ESC>[31mSS PASS`) satisfies the field-membership test.
+  # Hand-crafting that is INVOKER-class, which this script does not model (see the header);
+  # no colouring tool or transport produces it by accident.
+  function esc_joined(v, val_,   _nv, _j, _B) {
+    if (v == "") return 0
+    if (val_ == "") return 0
+    _nv = split(val_, _B)
+    for (_j = 1; _j <= _nv; _j++) if (_B[_j] == v) return 0
+    return 1
+  }
   {
-    gsub(/\033\[[0-9;]*[a-zA-Z]/, "")
-    sub(/\r$/, "")
+    raw = $0
+    loc = raw; gsub(/\033\[[0-9;]*[a-zA-Z]/, "", loc); sub(/\r$/, "", loc)
+    lval = raw; gsub(/\033\[[0-9;]*[a-zA-Z]/, " ", lval); sub(/\r$/, "", lval)
+    $0 = loc
   }
   $0 == FULL_S  { full++;  if (S == FULL_S)  { blocks++; if (open == 1) unterminated = 1; open = 1 } next }
   $0 == DELTA_S { delta++; if (S == DELTA_S) { blocks++; if (open == 1) unterminated = 1; open = 1 } next }
   $0 == LITE_S  { lite++;  next }
   $0 == E       { if (open == 1) open = 0; next }
   open == 1 {
-    if ($1 == "MODE:")                { n_mode++;   v_mode = $2 }
-    else if ($1 == "RESULT:")         { n_result++; v_result = $2 }
-    else if ($1 == "tree-integrity:") { n_ti++;     v_ti = $2 }
+    if ($1 == "MODE:")                { n_mode++;   v_mode = $2; if (esc_joined($2, lval)) esc = 1 }
+    else if ($1 == "RESULT:")         { n_result++; v_result = $2; if (esc_joined($2, lval)) esc = 1 }
+    else if ($1 == "tree-integrity:") { n_ti++;     v_ti = $2; if (esc_joined($2, lval)) esc = 1 }
     else if ($1 == "tree-start:") {
       n_ts++; v_ts = $2
+      if (esc_joined($2, lval)) esc = 1
       # tree-start: carries its OWN `dirty:`, and it is NOT redundant with the
       # commit: one: commit: renders TREE_END_DIRTY on the normal path
       # (agent-gate.sh:8810), so a run that STARTED dirty and finished clean --
@@ -1675,16 +4035,18 @@ _gate_awk() {
       # executed against uncommitted content (#3648 roborev round 4).
       for (i = 2; i <= NF; i++) if ($i == "dirty:") {
         n_tsdirty++
-        if (n_tsdirty == 1 && i < NF) v_tsdirty = $(i + 1)
+        if (n_tsdirty == 1 && i < NF) { v_tsdirty = $(i + 1); if (esc_joined($(i + 1), lval)) esc = 1 }
       }
     }
     else if ($1 == "nested-under:")   { n_nested++ }
     else if ($1 == "delta-anchor:") {
       n_anchor++; v_anchor = $2
+      if (esc_joined($2, lval)) esc = 1
       for (i = 2; i <= NF; i++) if ($i == "(UNRESOLVED)") anchor_unresolved = 1
     }
     else if ($1 == "commit:") {
       n_commit++; v_commit = $2
+      if (esc_joined($2, lval)) esc = 1
       # COUNT every `dirty:` token and keep the FIRST value, never the last.
       # The old loop assigned on every match, so `dirty: yes dirty: no` reduced
       # to `no` and certified a dirty run (#3648 roborev round 2). That is the
@@ -1693,7 +4055,7 @@ _gate_awk() {
       # occurrence; its value stays empty and refuses on the empty-value path.
       for (i = 2; i <= NF; i++) if ($i == "dirty:") {
         n_dirty++
-        if (n_dirty == 1 && i < NF) v_dirty = $(i + 1)
+        if (n_dirty == 1 && i < NF) { v_dirty = $(i + 1); if (esc_joined($(i + 1), lval)) esc = 1 }
       }
     }
     next
@@ -1723,8 +4085,9 @@ _gate_awk() {
     print "v_tsdirty=" v_tsdirty
     print "v_mode=" v_mode
     print "v_anchor=" v_anchor
+    print "esc=" esc
   }
-' <"$1"
+'
 }
 
 # gate_parse_file <file> <want> <what> — run the parse and publish its fields as
@@ -1733,12 +4096,15 @@ _gate_awk() {
 # unparseable/absent count is refused, never treated as "no problem found".
 gate_parse_file() {
   local gp_out gp_k gp_v
-  gp_out=$(_gate_awk "$1" "$2") || refuse_tool_failure awk "$3"
+  # THROUGH THE ONE CAPTURE BOUNDARY (#3751 round 14, T1) — see `_gate_awk`. The
+  # mapping is applied HERE, at the read, rather than inside the parser, because
+  # the parser is a pure stdin filter and this is the one place a FILE is opened.
+  gp_out=$(c_capture_map_nul "$1" | _gate_awk "$2") || refuse_tool_failure awk "$3"
   GP_blocks=""; GP_full=""; GP_lite=""; GP_delta=""; GP_unterminated=""
   GP_n_mode=""; GP_n_result=""; GP_n_ti=""; GP_n_commit=""; GP_n_ts=""
   GP_n_anchor=""; GP_n_nested=""; GP_anchor_unresolved=""; GP_n_dirty=""; GP_n_tsdirty=""
   GP_v_result=""; GP_v_ti=""; GP_v_commit=""; GP_v_ts=""; GP_v_dirty=""
-  GP_v_mode=""; GP_v_anchor=""; GP_v_tsdirty=""
+  GP_v_mode=""; GP_v_anchor=""; GP_v_tsdirty=""; GP_esc=""
   while IFS='=' read -r gp_k gp_v; do
     case "$gp_k" in
       blocks)       GP_blocks="$gp_v" ;;
@@ -1764,10 +4130,33 @@ gate_parse_file() {
       v_tsdirty)    GP_v_tsdirty="$gp_v" ;;
       v_mode)       GP_v_mode="$gp_v" ;;
       v_anchor)     GP_v_anchor="$gp_v" ;;
+      esc)          GP_esc="$gp_v" ;;
     esac
   done <<GATE_PARSE
 $gp_out
 GATE_PARSE
+  # THE STRIP LOCATED THE BLOCK; IT MAY NOT HAVE SUPPLIED ITS VALUES (#3751 round 15, U2 — the
+  # rule is stated at `_c_verdict_awk`). Asked FIRST, before every count and value assert below,
+  # because each of them reads a field the normalisation produced: `RESULT: PA<ESC>[31mSS`
+  # normalises into the `PASS` this script matches token-exactly, and no census stands behind
+  # that value. The permissive value is the affirmative `0`, never `!= 1`.
+  case "$GP_esc" in
+    0) ;;
+    1)
+      refuse_no_gate \
+        "A marker or value line of the $3 contains an ANSI ESCAPE SEQUENCE (0x1b), so its raw" \
+        "bytes are not the values it would be read as — stripping the escape would MANUFACTURE" \
+        "grammar the file does not contain (a RESULT: value spelt PA<ESC>[31mSS normalises to" \
+        "PASS), and a transform that normalises its input cannot be the thing that validates it." \
+        "agent-gate.sh writes its SUMMARY block with printf, so an escape here means this file is" \
+        "a capture of a COLOURED STREAM rather than the summary file itself. Re-run the gate with" \
+        "AGENT_GATE_SUMMARY_FILE=<path> and pass THAT file, never a terminal or CI log."
+      ;;
+    *)
+      refuse_no_gate \
+        "Gate summary parse produced no usable escape-sequence measurement for the $3 — refusing (fail closed)."
+      ;;
+  esac
   for gp_k in blocks full lite delta unterminated n_mode n_result n_ti n_commit \
               n_ts n_anchor n_nested anchor_unresolved n_dirty n_tsdirty; do
     eval "gp_v=\${GP_$gp_k}"
@@ -2151,6 +4540,21 @@ if [ -n "$delta_file" ]; then
   assert_anchor_on_history "$delta_anchor" "$certified"
 fi
 
+# THE C (INTENT AUDIT) VERDICT (#3751) — offline, and checked BEFORE the advisory
+# and the `gh` call for the same reason the gate of record is: "you have no C
+# verdict" must be reportable without a network round trip. It runs AFTER the
+# gate-of-record half so that a run with no gate at all is still reported as the
+# more fundamental failure first.
+#
+# THIS IS THE FIRST OF TWO EVALUATIONS, AND IT STAYS (#3751 round 16, V1). It is
+# NOT the one that certifies — `c_revalidate` below is, because a check must be
+# inside the window it certifies (roborev job 290) — but it is KEPT, exactly as
+# job 290's own remedy kept the gate's pre-slot component-set pre-flight: it is
+# what stops a run with no C verdict at all from paying for the 65s advisory and
+# a network round trip before being told so. Deleting it would make the common
+# failure the slowest one to report.
+c_evaluate
+
 # ---------------------------------------------------------------------------
 # THE ADVISORY IS MEASURED **BEFORE** THE HEAD CHECK (#3650, roborev job 250)
 # ---------------------------------------------------------------------------
@@ -2161,7 +4565,18 @@ fi
 # a sha that is no longer the PR head, which is precisely the stale-head merge
 # #2456 exists to refuse. The fix is ordering, not a re-check: the advisory is
 # MEASURED here and PRINTED later in its original position, so the gh head/state
-# check remains the LAST thing that happens before OK.
+# check stays as late as it can.
+#
+# IT IS NO LONGER THE LAST THING BEFORE OK, AND THAT TRADE IS DELIBERATE (#3751
+# round 16, V1). The C re-validation now runs after it, because the C verdict was
+# the check sitting OUTSIDE the window it certifies — validated, then 65s of
+# advisory plus a network call, then OK. Two checks cannot both be last, so the
+# question is which residual window is smaller: `c_revalidate` is a LOCAL git
+# measurement plus one `review-stage.sh` read, where the window it removes was the
+# bounded-at-65s advisory plus an unbounded-latency `gh` call. The head-check
+# window therefore widens by a local, sub-second, non-blocking amount and the C
+# window shrinks by two orders of magnitude — net strictly better, and neither
+# window is claimed closed.
 #
 # Capturing changes no output: every line of the report is written to stdout by
 # `print_base_staleness_advisory`, and printing it at the original call site keeps
@@ -2188,6 +4603,13 @@ fi
 # it. The HOLD leg runs LAST of the three measurements — after the advisory's
 # 65s bound — because it is the most time-sensitive: a two-minute-old blocking
 # comment is exactly what it exists to catch.
+#
+# ONE CORRECTION FROM THE #3751 MERGE, so this paragraph is not read as false:
+# the gh head/state check is no longer literally the last thing before OK —
+# `c_revalidate` (#3751 round 16, V1) runs after it, for the same job-290 reason
+# these legs run before it. What this paragraph constrains is unchanged and is
+# honoured: BOTH legs run BEFORE the head check, and nothing network-touching or
+# time-consuming — these legs included — may be moved AFTER `c_revalidate`.
 #
 # Resolved from THIS script's own directory with no env override and no
 # `${...:-...}` fallback (#3312's enforcer rule), exactly like the advisory. An
@@ -2341,6 +4763,25 @@ if [ "$actual" != "$certified" ]; then
   exit 2
 fi
 
+# THE C VERDICT IS RE-VALIDATED HERE, INSIDE THE WINDOW IT CERTIFIES (#3751 round 16, V1).
+# LAST, deliberately: after everything that can consume time (the advisory measurement above, the
+# `gh pr view` round trip) and BEFORE the first byte a reader can take as certification. See
+# `c_revalidate` for the defect, the job-290 precedent it follows, and the residual it declares.
+#
+# ORDERING INVARIANT FOR ANY FUTURE MERGE RESOLVER — DO NOT REORDER THIS SILENTLY.
+# `c_revalidate` MUST remain the LAST statement before `printf 'PREMERGE: OK'`, and it MUST run
+# AFTER both #3752 legs (`run_binding_leg review-binding` and `run_binding_leg hold-check`, each of
+# which shells out to `gh` through premerge-review-binding.sh) as well as after the advisory
+# measurement and the `gh pr view` head/state check. Anything that consumes time or touches the
+# network placed BETWEEN this call and the OK line re-opens exactly the staleness window this call
+# exists to close — roborev job 290's ruling, "a check must be inside the window it certifies, not
+# before it". The two sides' comments were reconciled at this merge rather than one being taken:
+# #3752's paragraph above `run_binding_leg` reads "the gh head/state check must remain the LAST
+# thing before OK", which was true of #3752's own tree and is superseded here by V1's trade (a
+# local, sub-second C re-read after it) — the LEGS' position relative to the head check is what
+# that paragraph constrains, and it is honoured.
+c_revalidate
+
 printf 'PREMERGE: OK %s\n' "$certified"
 # Scope clause (#3650) — printed on EVERY success so `GATE-OF-RECORD` can never be
 # read as "certified against main". See residual 3 in the header.
@@ -2363,8 +4804,15 @@ fi
 if [ -n "$hold_check_out" ]; then
   printf '%s\n' "$hold_check_out"
 fi
+# EVERY DATA VALUE ON AN EMITTED LINE GOES THROUGH THE ONE BOUNDARY (#3751 round 7, L1).
+# `commit:`/`tree-start:`/`dirty:` are hex- and closed-token-validated before this point and
+# the summary path is the invoker's own argv, so none of them is a route on its own — they are
+# routed anyway because ONE rule applied to EVERY value on these lines is what stops the next
+# added field being the one that forgot (round 2's S1 reasoning, and the reason L1 existed at
+# all: three sites in this class have now been found one at a time). Display-only, as ever.
 printf 'PREMERGE: GATE-OF-RECORD commit: %s tree-start: %s tree-integrity: PASS dirty: %s summary: %s\n' \
-  "$full_commit" "$full_ts" "$full_dirty" "$summary_file"
+  "$(c_safe_display "$full_commit")" "$(c_safe_display "$full_ts")" \
+  "$(c_safe_display "$full_dirty")" "$(c_safe_display "$summary_file")"
 if [ -n "$delta_file" ]; then
   # `anchor-ancestry:` is the AFFIRMATIVE record that the #3653 binding RAN. After
   # assert_anchor_on_history it can only ever read BOUND — which is the point: a
@@ -2381,8 +4829,48 @@ if [ -n "$delta_file" ]; then
   # here, so this token can never silently mean "we gave up on bounding". Printed
   # rather than assumed, because a bounded path degrading unnoticed is the hazard
   # the token exists for.
+  # EVERY VALUE ON THIS LINE GOES THROUGH THE ONE EMIT BOUNDARY (#3751 round 7, L1),
+  # the three #3653 tokens included: `anchor-ancestry:`/`anchor-reads:` are
+  # script-authored closed tokens and `ANCHOR_PROVENANCE` is a script constant, so none
+  # is a route on its own — they are routed anyway because ONE rule applied to EVERY
+  # value is what stops the next added field being the one that forgot. Display-only:
+  # the ancestry verdict was decided on the RAW value in assert_anchor_on_history.
   printf 'PREMERGE: DELTA-RECERT anchor: %s anchor-ancestry: %s anchor-reads: %s commit: %s tree-start: %s tree-integrity: PASS dirty: %s summary: %s | %s\n' \
-    "$delta_anchor" "$ANCHOR_ANCESTRY" "$ANCHOR_READS" "$delta_commit" "$delta_ts" "$delta_dirty" \
-    "$delta_file" "$ANCHOR_PROVENANCE"
+    "$(c_safe_display "$delta_anchor")" "$(c_safe_display "$ANCHOR_ANCESTRY")" \
+    "$(c_safe_display "$ANCHOR_READS")" "$(c_safe_display "$delta_commit")" \
+    "$(c_safe_display "$delta_ts")" "$(c_safe_display "$delta_dirty")" \
+    "$(c_safe_display "$delta_file")" "$(c_safe_display "$ANCHOR_PROVENANCE")"
+fi
+# THE C VERDICT IS REPORTED UNDER ITS OWN TOKEN, NEVER FOLDED INTO `OK` (#3751).
+# `PREMERGE: OK` says the head matches and a gate of record covers it; it says
+# NOTHING about who performed the intent audit. So the token is printed here, on
+# its own line, and `AUTHOR-PERFORMED` — the disclosed hand-audit substitute — is
+# textually distinct from `PASS` for the same reason the roborev wrapper's
+# `WAIVED` is: nobody grepping the passing token may read a substitute as the real
+# thing.
+# THE SAME EMIT BOUNDARY ON THE SUCCESS PATH (#3751 round 5, J3). `C_TOKEN` and `C_TOKEN_REPORT`
+# are read from a file a delegated agent wrote, and a PASSING run's line is the one that gets
+# pasted into a PR comment — so it is neutralised exactly as the refusal's is. The token has
+# already been compared by string equality against the closed set at this point, so this is
+# display-only and cannot change the verdict.
+#
+# `C_SOURCE` WAS THE THIRD SITE OF THIS CLASS FOUND ONE AT A TIME (#3751 round 7, L1), and it is
+# NOT merely invoker text: on the `AUTO` path it carries `C_ROUTING_DETAIL`, which interpolates a
+# `openspec/changes/<slug>` path measured out of the certified tree — and GIT PERMITS NEWLINES IN
+# PATHS, exactly the class `base-staleness.sh` sanitizes for. Unrouted, such a path emits a second
+# line with no `PREMERGE: ` prefix inside the one block a human reads as the merge verdict. Hence
+# the STRUCTURAL guard beside this rule — `scripts/tests/lib/emit-boundary-scan.sh`, run by both
+# suites — because patching site three and waiting for site four is the wrong shape.
+# `C_STAGE_KIND` is the ONE unrouted value here and it is a script CONSTANT (`c`), not data.
+printf 'PREMERGE: C-VERDICT %s stage: %s source: %s%s\n' \
+  "$(c_safe_display "$C_TOKEN")" "$C_STAGE_KIND" "$(c_safe_display "$C_SOURCE")" \
+  "${C_TOKEN_REPORT:+ report: $(c_safe_display "$C_TOKEN_REPORT")}"
+if [ "$C_TOKEN" = AUTHOR-PERFORMED ]; then
+  printf 'PREMERGE: C-VERDICT-NOTE the intent audit was performed by the diff'"'"'s AUTHOR, not\n'
+  printf 'PREMERGE: C-VERDICT-NOTE independently: an author'"'"'s hand audit is not an independent\n'
+  printf 'PREMERGE: C-VERDICT-NOTE one; weight it accordingly. It is the SANCTIONED FALLBACK and\n'
+  printf 'PREMERGE: C-VERDICT-NOTE is recorded with its working (review-stage.sh\n'
+  printf 'PREMERGE: C-VERDICT-NOTE record-author-performed), which is why it is acceptable at\n'
+  printf 'PREMERGE: C-VERDICT-NOTE all — an absent audit is not auditable, a disclosed one is.\n'
 fi
 exit 0

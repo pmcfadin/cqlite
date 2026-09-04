@@ -56,8 +56,14 @@ back into one.
   (**rebase → gate of record → C → ROBOREV LAST → premerge-assert → arm**, because a roborev round
   changes no bytes while a rebase does, so a rebase VOIDS every review taken before it) — the closer
   runs the pre-merge assert in one of its **two call
-  shapes** — the third argument is REQUIRED and is the FULL gate's own summary file, so a merge with
-  NO gate of record is mechanically refused (#3465) — re-reads for
+  shapes** — `bash scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-summary-file>
+  [<delta-summary-file>] --c-verdict AUTO` — the third argument is REQUIRED and is the
+  FULL gate's own summary file, so a merge with NO gate of record is mechanically refused (#3465),
+  and `--c-verdict` is REQUIRED with no default (omitting it is exit 3), so a merge with NO recorded
+  C intent audit is refused too where C is required — routing MEASURED from the certified tree, never
+  taken from the caller (#3751), and the verdict it accepts must NAME the generation of the stage
+  record it validated, so a stage re-opened mid-check (or a legacy record with no `report-nonce:`)
+  refuses rather than certifying an audit nothing bound (#3751 round 10) — re-reads for
   a fresh `HOLD:` order, then **arms `gh pr merge --auto --squash
   --delete-branch`** and `flow-finalize`s. GitHub owns the CI-green wait — the `required` check
   (#2433, enforced for admins too via `enforce_admins`) lands the PR the instant it passes; **never
@@ -65,12 +71,13 @@ back into one.
   is the ONLY standing human gate.**
   ```bash
   # CASE A — the usual shape: the full gate ran on the head being merged.
-  bash scripts/flow/premerge-assert.sh <pr> <certified-sha> /tmp/gate-<N>.txt
+  bash scripts/flow/premerge-assert.sh <pr> <certified-sha> /tmp/gate-<N>.txt --c-verdict AUTO
   # CASE B — the #1892 post-gate-polish route: a full PASS at anchor X, then a
   # test/docs-only diff re-certified with `--delta X` (never a repeat full gate).
   # Arg 3 is the ANCHOR's full summary, arg 4 the delta block; the anchor must
   # also be an ANCESTOR of <certified-sha>, checked fail-closed (#3653).
-  bash scripts/flow/premerge-assert.sh <pr> <certified-sha> /tmp/gate-<N>.txt /tmp/delta-<N>.txt
+  bash scripts/flow/premerge-assert.sh <pr> <certified-sha> /tmp/gate-<N>.txt /tmp/delta-<N>.txt \
+    --c-verdict AUTO
   ```
   (`.claude/agents/flow-closer.md` carries the full contract for both shapes.)
 - **Escalate and HOLD the merge ONLY for:** a genuine design-call roborev finding, a scope/product

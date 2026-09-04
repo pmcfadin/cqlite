@@ -347,6 +347,15 @@ trino-connector/docker/field-repro-artifacts/
 # gate #6 of this branch died. Ignoring it removes the hazard rather than relying on nobody
 # spawning a C agent at the wrong moment.
 .c-audit-*.md
+# Delegated review-stage report-of-record files (issue #3751). `scripts/flow/review-stage.sh`
+# pre-stamps one of these BEFORE a review agent is spawned, so an agent that writes nothing
+# leaves a readable NOT-RUN sentinel instead of an absence a consumer has to guess about.
+# It MUST be ignored, and the script REFUSES to write a path `git check-ignore` does not
+# confirm: the file is written MID-RUN, routinely while the gate of record is running, and an
+# untracked-but-not-ignored write is `tree-integrity: FAIL (tree-mutated-midrun)` (#2926) —
+# the same hazard as .c-audit-*.md above, one directory up.
+.review-stage/
+
 # Live box-load sampler output (#3248). MUST stay out of the worktree: it is appended
 # every 10s, so an in-tree copy trips the gate tree-integrity check mid-run, and a
 # worktree is deleted at finalize which would destroy a sampler meant to outlive the issue.

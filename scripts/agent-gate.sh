@@ -17445,6 +17445,14 @@ run_dep_duplicates() {
 # two defects landed inside the two prior fix rounds — the #3229 `census-exclusion:` precedent),
 # so this file measures BEHAVIOUR against real code and nothing here depends on it; mechanization
 # is #3499. Hermetic: temp dir only, no cargo, no datasets, no network, never invokes the gate.
+# Also runs scripts/tests/test_review_stage.sh (#3751), which covers scripts/flow/review-stage.sh
+# — the mechanism that makes a delegated review stage's verdict an ARTIFACT rather than an
+# absence a consumer has to guess about. It rides in THIS component rather than adding one:
+# the subject is a flow script beside claim.sh and premerge-assert.sh, whose suites already
+# live here, and a new component would change the component SET that #3544's pre-flight
+# compares against origin/main for every branch in flight. Hermetic in the same sense as its
+# neighbours: it builds synthetic `git init` repositories under mktemp -d and reads nothing
+# from the surrounding checkout.
 # Also runs scripts/tests/test_dep_duplicates_ratchet.sh (#1700), the non-vacuity proof
 # for the ADVISORY dep-duplicates component: its cases drive
 # scripts/ci/check-dep-duplicates.sh over PLANTED cargo-tree output (shim `cargo` +
@@ -17476,6 +17484,31 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_generator_keyspace_scoping.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (keyspace-scoping guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # review-stage verdict guard (#3751): no python3 needed, always runs. Covers
+  # scripts/flow/review-stage.sh, which makes a delegated review stage's verdict an
+  # ARTIFACT so an absent review reports as NOT-RUN instead of as an absence a
+  # consumer has to guess about. It is placed HERE, above the python3 SKIP, and not
+  # in the &&-chain below it, for #3522's reason stated in its own words: a
+  # never-SKIPping lane must not be folded into a SKIP-aware one. The suite needs
+  # nothing beyond bash and git, so inheriting the selftest reader's python3 SKIP
+  # would leave the anti-vacuous-green mechanism's ONLY test silently unexecuted --
+  # which is this issue's own subject. A failure FAILs the component, mirroring the
+  # keyspace-scoping guard. (The bash-only suites still in the gated chain --
+  # test_claim_lock, test_premerge_assert, test_base_staleness and friends -- inherit
+  # that SKIP too; that is PRE-EXISTING and deliberately NOT swept here, since a
+  # sweep of the component's structure is not this issue's scope. Follow-up material.)
+  echo ">>> [$name] bash scripts/tests/test_review_stage.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_review_stage.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (review-stage verdict guard); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)

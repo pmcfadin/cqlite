@@ -82,7 +82,8 @@ carry).
   and never poll a PR's own CI.
 - **Residual — re-run order.** A tier re-run *after* `required` has already gone green cannot be
   retracted by a finished job: **re-run the tier, then re-run `required`**, in that order.
-  `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-of-record-summary> [<delta-summary>]`
+  `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-of-record-summary> [<delta-summary>]
+  --c-verdict <path|AUTO>`
   remains the closer's last look — and since #3465 it is where the gate of record stops being a
   convention: the third argument is REQUIRED, and the script refuses the merge unless that file holds
   one full `==== AGENT-GATE SUMMARY ====` block with `RESULT: PASS`, `tree-integrity: PASS`, no
@@ -160,6 +161,142 @@ carry).
   proves ancestry over what this box's shared store presents; it does NOT prove the anchor is on the PR
   as GitHub sees it, nor anything against a peer that can WRITE that store. A further route in the family
   is a residual under that declaration rather than a false claim here.
+  **`--c-verdict <path|AUTO>` is REQUIRED too, and omitting it is exit 3 (#3751).** It is the C intent
+  audit's half of the same idea: a gate summary certifies that the code BUILDS AND PASSES, and nothing in
+  the merge path used to ask whether the audit of *intent* had reported at all. `AUTO` measures the routing
+  from the CERTIFIED TREE (does this branch touch `openspec/changes/`, excluding `archive/**` and
+  pure deletions — a real
+  archive MOVE is a deletion plus an addition under `archive/`, and counting the deletion refused every
+  finalize PR — between the merge-base with `origin/main` and the certified sha) rather than
+  trusting the caller. That pathspec is ROOT-ANCHORED (`:(top)openspec/changes/`) because
+  `diff.relative=false` does **not** do that (#3751 round 11): a bare pathspec is interpreted
+  relative to the caller's CWD, so from a repository subdirectory the diff came back EMPTY, a
+  design-routed branch measured `NOT-APPLICABLE` and the merge PROCEEDED with no C verdict —
+  `diff.relative` governs the OUTPUT path prefix, not pathspec interpretation, so both pins are
+  needed and neither substitutes for the other. An `UNMEASURED`
+  measurement is treated as REQUIRED, and only `PASS` and `AUTHOR-PERFORMED` proceed — the second under its
+  own `PREMERGE: C-VERDICT` token, never folded into `PREMERGE: OK`, **and under `AUTO` refused outright
+  when a SUPERSEDED generation of that stage records `result: FINDINGS` (#3751 round 22)**: a review
+  landing its verdict inside `record-author-performed`'s publish window is SUPERSEDED rather than
+  destroyed, so the blocking audit survives on disk — and was read by nobody, while the substitute
+  became the published verdict and the merge proceeded with no `--force` and no trace. That window
+  cannot be closed in a shell (no compare-and-swap rename) and `premerge-assert.sh` races nobody, so
+  the check lives at the merge point; it makes the window's OUTCOME uncertifiable and does **not**
+  make the recording atomic. Asked of the substitute ALONE — a published `PASS` over a superseded
+  `FINDINGS` is the sanctioned remediation flow and is indistinguishable from anything else on disk. Three bindings tie the verdict to the
+  merge (#3751 rounds 1 and 3): under `AUTO` this worktree's `HEAD` must EQUAL the certified commit before a
+  locally-located stage is trusted — every lane here is a worktree of ONE shared `.git`, so a peer lane's
+  certified commit resolves from any lane and **resolvability is not provenance** (#3616's class); the stage
+  RECORD's own `head-sha:` (written by `open`, RE-STAMPED by `--force`) must equal it too, because
+  HEAD-equality binds the WORKTREE and is satisfied BY CONSTRUCTION, so it cannot see a STALE ARTIFACT — a
+  `PASS` recorded before a further commit, an amend or a rebase used to certify the NEW tree, and a
+  missing, duplicated or non-sha field is a NAMED refusal rather than a skip (the gate-of-record rule
+  applied to the intent audit: an audit of an older tree may not certify a newer one); and the
+  verdict line is held to its WHOLE grammar, with the stage KIND compared by string equality, so a sibling
+  stage's `PASS` cannot certify C. **A SIBLING can also be reached by a LOSSY CAPTURE, and no sha
+  binding can see that (#3751 round 18).** Both tools resolved the worktree root through
+  `$(git rev-parse --show-toplevel)`, which strips every trailing newline, so a checkout whose
+  DIRECTORY NAME ends in an LF resolved to an existing SIBLING lane and the AUTO path read THAT
+  lane's stage records — while `HEAD == certified` still passed, because HEAD is read in the CWD (the
+  real lane) and only the ARTIFACT came from the sibling. Fixed by framing the capture with a
+  sentinel and removing exactly one newline (git's own terminator), and by removing the capture
+  entirely where the value has a single resolution site. **The transferable rule: a conclusion that
+  a lossy capture is harmless is bound to the consumer it was reasoned about** — round 13 had
+  correctly ruled trailing-newline stripping harmless for a report's per-line grammar, and carrying
+  that ruling to a PATH, whose stripped bytes are its identity, is what left this reachable. **The record binding rests on ONE OBSERVATION (#3751 round 9)** — it
+  was validated on one read while `review-stage.sh verdict` re-read the record to pick which report is
+  current, so a replacement in between produced a verdict from a different GENERATION under a binding
+  checked on the old one; the record is now captured once, the `head-sha` parsed from that capture, and the
+  capture required to be byte-identical before the token is parsed. **That was the FIRST of three
+  instances of one shape, and the third made it a mechanism (#3751 round 17)**: `review-stage.sh`
+  itself read the report using the generation loaded earlier and then read the record independently,
+  so a concurrent `open --force` left BOTH re-verifications satisfied — an unchanged report A, an
+  unchanged record B — and published a merge-proceeding token over B **without inspecting B's
+  verdict**, with a trace naming A. Two reads of one subject are one observation only if something
+  RE-VERIFIES between them; that tool now has ONE primitive that captures the record, reads the
+  report of the generation those bytes name, and re-reads the record, with a structural guard
+  (`scripts/tests/lib/observation-boundary-scan.sh`) requiring every decision path to reason from
+  one such observation and to read no stage file for itself. **And a coherent observation of the
+  WRONG ARTIFACT is still wrong (#3751 round 19)** — every reader of the report and the stage record
+  DEREFERENCED (`[ -f ]` and an input redirection both follow links), so a symlink planted at either
+  name made `verdict`, and this AUTO validation with it, accept a verdict read out of a file the stage
+  does not name: measured, `RESULT: PASS` at exit 0 off a link. Both read targets now test the leaf
+  with `[ -L ]` BEFORE any dereferencing predicate — the dangling case is why the order matters, since
+  `-f` calls a dangling link ABSENT, which is the permissive state — each under its own cause and
+  `state=`. **And a leaf test was not enough (#3751 round 20)**: a symlink at `.review-stage/` or at
+  `issue-<N>/` moves a stage's WHOLE DIRECTORY into another tree, so this AUTO validation reached
+  `PREMERGE: OK` with `C-VERDICT PASS … source: AUTO` over a PEER LANE's clean stage — measured end
+  to end. Every read target now validates EVERY PARENT COMPONENT below the repository root, without
+  following links, before any predicate that dereferences one, with one cause per level; and the
+  caller-side `[ ! -f ]` probe that used to run ahead of the reader is REMOVED, because it
+  dereferenced first and read a dangling link as `stage never opened`. This script INHERITS all of
+  it — it consumes the verdict LINE — and that inheritance is asserted end to end rather than
+  predicted. The residual is the TOCTOU WINDOW between a check and its open (#3929's family) and
+  **nothing wider**: round 19's declaration that the parent case belonged to #3929 is WITHDRAWN,
+  since a link planted earlier and simply followed needs no race at all. **And byte equality is not
+  IDENTITY (#3751 round 10)** — an ABA replacement (A to a foreign generation B while `verdict`
+  reads B, then back to A) leaves two identical observations — so the accepted verdict must also
+  NAME the validated generation: its `report=` field carries the report nonce, which must equal the
+  `report-nonce:` of that same capture.
+  **And the whole C check runs TWICE, because a check must be INSIDE the window it certifies
+  (#3751 round 16)** — the ruling this repository already applied to the gate's own component-set
+  pre-flight (roborev job 290). It ran ONCE, and then the base-staleness advisory (bounded at 65s)
+  and the `gh pr view` round trip ran with nothing re-checking it, so a concurrent
+  `review-stage.sh open --force` superseded the validated PASS and the script still certified
+  (measured on the shipped artifact: exit 0 with the success line printed, while
+  `review-stage.sh verdict` read an instant later reported the FRESH generation). Job 290's remedy
+  is followed verbatim: REPEAT the evaluation inside the window and KEEP the earlier one, the early
+  call being what stops an uncertifiable run paying for the advisory and the network round trip at
+  all. The repeat RESETS its captured observation, so rounds 9 and 10's bindings are taken AFRESH
+  rather than inherited from before the window, and a disagreement REFUSES naming the field that
+  moved — never a second opinion, never last-one-wins. A repeat alone would not be enough: a
+  supersede to a DIFFERENT generation that ITSELF PASSES at the same head returns an accepting
+  token from an audit this run never validated, and only the COMPARISON sees it. Residual,
+  declared: two checks cannot both be last, so the C window is NARROWED (to a local git
+  measurement plus one `review-stage.sh` read) and not closed, and the `gh` head/state check is
+  correspondingly no longer the last thing before the success emit.
+  **And the CAPTURE must not MANUFACTURE the token it validates
+  (#3751 round 13)** — a command substitution SILENTLY DISCARDS NUL bytes, and gawk passes a NUL
+  through a field, so a `--c-verdict` file whose token was `PA<NUL>SS` (a token the closed set must
+  refuse, since the match is string equality) arrived as `PASS` and this script reported
+  `PREMERGE: OK` at exit 0. Every read of untrusted content now maps NUL to SOH IN THE STREAM, which
+  the closed-set match then refuses; a separate probe of the same path was rejected because it is a
+  SECOND observation and one direction of its disagreement fails OPEN. **And the PRINTING COMMAND is
+  part of that boundary too (#3751 round 14)**: `c_safe_display` neutralises the value, so the command
+  must not re-interpret it — every line is `printf` of a literal format, never `echo`, whose argument
+  is a FORMAT under the inherited-environment option `xpg_echo` (a `\n` splits a line, `\033` injects
+  terminal control, `\c` truncates, octal `\075` manufactures a real `=`). This script uses no `echo`
+  today — measured — and the scanner keeps it that way. **And the GATE-OF-RECORD read was the third
+  site of the same NUL defect (#3751 round 14)**: round 13 routed the `--c-verdict` read and the stage
+  record and left `_gate_awk` — the parser of the artifact #3465 exists to require — reading its file
+  RAW, so `RESULT: PA<NUL>SS` yielded `v_result=PA<NUL>SS` from awk and the capture in
+  `gate_parse_file` removed the byte, and this script read `PASS` from a summary that does not contain
+  it. Routed now, and the caller-side completeness is asserted by
+  `scripts/tests/lib/read-boundary-scan.sh` rather than by a sentence in a header — round 13's own
+  asserts check the mapping appears exactly ONCE, which is a property of the boundary and not of its
+  callers. **AND THE GATE-OF-RECORD READ CARRIED THE SAME DEFECT AT A SECOND BYTE (#3751 round 15,
+  U2): an ANSI strip may LOCATE a line and may never SUPPLY a value.** `_gate_awk` deleted every CSI
+  sequence before the closed grammar ran on the fields that deletion produced, so
+  `RESULT: PA<ESC>[31mSS` normalised into the `PASS` this script matches token-exactly — and unlike
+  the c-verdict token, that value has no mandatory-field census standing behind it. The strip stays,
+  because a coloured capture is documented-legitimate input here (#3400) and without it a coloured
+  marker line fails the whole-line equality and the block reads as absent; what changed is that the
+  VALUES are now checked against a second reading in which each CSI is a SEPARATOR rather than
+  deleted, so colour that BRACKETS a value passes while colour INSIDE one is refused by name. The
+  trailing-CR strip is kept deliberately: it removes one byte where nothing follows, so it can
+  separate but never join.
+  **THAT LOOSER FORM IS CORRECT *HERE* AND WAS WRONG FOR THE TWO REVIEW-STAGE READERS (#3751 round
+  21, AA2).** A bracketing CSI satisfies the field-membership test by construction, so
+  `RESULT: <CSI>PASS<CSI>` in a `--c-verdict` artifact — and a bracketed `head-sha:` in a stage
+  record — normalised into a clean value with the escape flag at ZERO and reached `PREMERGE: OK`;
+  measured field by field, all eight fields of the verdict line had the same hole. Those two artifacts
+  have ONE producer that emits no control byte, so they are now held to an **identity**: the parsed
+  line must be byte-identical to the line on disk minus one trailing CR, and every mandatory field is
+  compared RAW. The GATE SUMMARY reader is deliberately NOT strictened — a coloured gate capture is
+  documented-legitimate input, and colour brackets the KEY as readily as the value, so the identity
+  form would red on correct input. **Which reads may normalise is therefore stated PER READER, in the
+  source**, and a reader added later has to say which side it is on. Details:
+  [delivery pipeline](/cqlite/agents-developing/delivery-pipeline/).
   **What a `PREMERGE: OK` does NOT prove (#3650), printed on the success path as `PREMERGE: SCOPE`.**
   It proves the diff is unchanged since certification and that a full gate PASSed on THAT EXACT TREE.
   It does not prove the change was certified against the `main` it will join: a squash-merge composes
@@ -188,7 +325,9 @@ carry).
   (gap 2 of 2, beside the dependency-closure gap), and the two path sources are pinned
   **rename-symmetric and root-relative** — porcelain `git diff` honours `diff.renames`/`diff.relative`
   and plumbing `git diff-tree` does not, so unpinned, a PR that renames a path would lose the old path
-  and report `blast-radius 0 RECOGNISED` on a genuinely stale base (a fail-open). **It is
+  and report `blast-radius 0 RECOGNISED` on a genuinely stale base (a fail-open). Those pins are the
+  whole cwd story for *this* scan only because it passes **no pathspec**; where a pathspec is passed,
+  cwd-independence needs `:(top)` as well (#3751 round 11, above). **It is
   information, not a verdict** — it cannot change `premerge-assert.sh`'s exit code, and an absent,
   failing, timed-out or `UNMEASURED` advisory is reported and non-fatal. Its 60s bound carries a
   **SIGKILL escalation** (`--kill-after`), because plain `timeout <secs>` only SIGTERMs and then waits,

@@ -99,6 +99,20 @@ ADV
 chmod +x "$FLOW"/*.sh "$FLOW"/*.py "$CI"/*.sh
 SB="$FLOW/premerge-review-binding.sh"
 
+# --- THE INJECTED C VERDICT (#3751) -----------------------------------------
+# `premerge-assert.sh` REQUIRES `--c-verdict` and has no default: omitting it is
+# exit 3 `PREMERGE: USAGE`, which is what every `wiring:` case below hit the
+# moment #3751 and #3752 met (measured on that merge: 10 assertions red, all of
+# them reporting a USAGE refusal where they wanted a REVIEW-UNBOUND / HOLD /
+# success verdict). These cases are about the #3752 legs, so the flag is given
+# an explicit PASS FILE rather than `AUTO`: AUTO would locate a stage in the
+# AMBIENT repository (the scratch flow copy carries no review-stage.sh), and a
+# case that reads the checkout it happens to run in is not hermetic. The line is
+# in the shape review-stage.sh emits, with `report=` LAST (#3751 round 11, Q3).
+C_PASS_FILE="$T/c-verdict-pass.txt"
+printf 'REVIEW-STAGE: c RESULT: PASS elapsed=42 deadline=1800 agent=spec-auditor report=%s\n' \
+  "$T/injected-c-report.md" >"$C_PASS_FILE"
+
 # --- shims -------------------------------------------------------------------
 # `gh` and `roborev` are EXTERNAL binaries; both are driven by files whose paths
 # the case exports, so no case depends on network, auth or a local roborev DB.
@@ -823,7 +837,8 @@ roborev_job 304 "$(cd "$WORK" && git rev-parse main~1)" "$REVIEWED_PRE"
 hold_payload "$MOCK_GH_DIR/pr-hold.json" '[]'
 printf '[]\n' >"$MOCK_GH_DIR/timeline.json"
 E2E=$(cd "$WORK" && PATH="$BIN:$PATH" MOCK_GH_OUT="$HEAD_AFTER OPEN" \
-  bash "$FLOW/premerge-assert.sh" 1 "$HEAD_AFTER" "$E2E_GATE" 2>&1)
+  bash "$FLOW/premerge-assert.sh" 1 "$HEAD_AFTER" "$E2E_GATE" \
+    --c-verdict "$C_PASS_FILE" 2>&1)   # #3751: REQUIRED, no default
 E2E_RC=$?
 if [ "$E2E_RC" -eq 2 ]; then
   ok "wiring: the shipped assert REFUSES (exit 2) when the recorded review was rebased away"
@@ -856,7 +871,8 @@ esac
 # arrive as the documented refusal (2), not as a bare 5 from an unwound subshell.
 rm -f "$MOCK_ROBOREV_DIR/job-304.json" "$MOCK_ROBOREV_DIR/list.json"
 E2E5=$(cd "$WORK" && PATH="$BIN:$PATH" MOCK_GH_OUT="$HEAD_AFTER OPEN" \
-  bash "$FLOW/premerge-assert.sh" 1 "$HEAD_AFTER" "$E2E_GATE" 2>&1)
+  bash "$FLOW/premerge-assert.sh" 1 "$HEAD_AFTER" "$E2E_GATE" \
+    --c-verdict "$C_PASS_FILE" 2>&1)   # #3751: REQUIRED, no default
 E2E5_RC=$?
 if [ "$E2E5_RC" -eq 2 ]; then
   ok "wiring: an UNMEASURED leg (raw exit 5) arrives as the documented refusal exit 2"
@@ -873,7 +889,8 @@ roborev_job 304 "$(cd "$WORK" && git rev-parse main~1)" "$REVIEWED_PRE"
 # And the success path: a bound review reaches PREMERGE: OK with both reports.
 roborev_job 304 "$(cd "$WORK" && git rev-parse main)" "$HEAD_AFTER"
 E2E_OK=$(cd "$WORK" && PATH="$BIN:$PATH" MOCK_GH_OUT="$HEAD_AFTER OPEN" \
-  bash "$FLOW/premerge-assert.sh" 1 "$HEAD_AFTER" "$E2E_GATE" 2>&1)
+  bash "$FLOW/premerge-assert.sh" 1 "$HEAD_AFTER" "$E2E_GATE" \
+    --c-verdict "$C_PASS_FILE" 2>&1)   # #3751: REQUIRED, no default
 E2E_OK_RC=$?
 if [ "$E2E_OK_RC" -eq 0 ]; then
   ok "wiring: a bound review + a clear thread still reaches exit 0"
@@ -895,7 +912,8 @@ esac
 hold_payload "$MOCK_GH_DIR/pr-hold.json" \
   "[{\"author\":{\"login\":\"pmcfadin\"},\"createdAt\":\"$HOLD_AT\",\"body\":\"HOLD: merge after #9999\"}]"
 E2E_HOLD=$(cd "$WORK" && PATH="$BIN:$PATH" MOCK_GH_OUT="$HEAD_AFTER OPEN" \
-  bash "$FLOW/premerge-assert.sh" 1 "$HEAD_AFTER" "$E2E_GATE" 2>&1)
+  bash "$FLOW/premerge-assert.sh" 1 "$HEAD_AFTER" "$E2E_GATE" \
+    --c-verdict "$C_PASS_FILE" 2>&1)   # #3751: REQUIRED, no default
 E2E_HOLD_RC=$?
 if [ "$E2E_HOLD_RC" -eq 2 ]; then
   ok "wiring: the shipped assert REFUSES (exit 2) on a column-zero HOLD: comment (AC7)"
@@ -913,7 +931,8 @@ esac
 hold_payload "$MOCK_GH_DIR/pr-hold.json" \
   "[{\"author\":{\"login\":\"pmcfadin\"},\"createdAt\":\"$HOLD_AT\",\"body\":\"HOLD: merge after #9999\"},{\"author\":{\"login\":\"pmcfadin\"},\"createdAt\":\"$GO_AT\",\"body\":\"GO: cleared\"}]"
 E2E_GO=$(cd "$WORK" && PATH="$BIN:$PATH" MOCK_GH_OUT="$HEAD_AFTER OPEN" \
-  bash "$FLOW/premerge-assert.sh" 1 "$HEAD_AFTER" "$E2E_GATE" 2>&1)
+  bash "$FLOW/premerge-assert.sh" 1 "$HEAD_AFTER" "$E2E_GATE" \
+    --c-verdict "$C_PASS_FILE" 2>&1)   # #3751: REQUIRED, no default
 E2E_GO_RC=$?
 if [ "$E2E_GO_RC" -eq 0 ]; then
   ok "wiring: an allowlisted GO: releases the hold and the shipped assert reaches exit 0"

@@ -144,7 +144,64 @@ never gate stdout or review churn.
    Do NOT run the full `scripts/agent-gate.sh` during the fix-round loop — that is the `flow-closer`'s single
    gate of record (step 7).
 5. **Review-first — DEFAULT, BEFORE the first full gate (issues #2086/#2087/#2088).** On the **lite-green**
-   diff, run `rust-reviewer` (explicit `model: opus`) **and** roborev NOW. **`scripts/flow/roborev-review.sh`
+   diff, run `rust-reviewer` (explicit `model: opus`) **and** roborev NOW.
+
+   **OPEN THE REVIEW STAGE BEFORE THE SPAWN, READ ITS VERDICT AFTER (#3751).** A delegated review
+   stage that writes nothing leaves its reader only ABSENCE to reason from, and an idle notice is
+   *weaker* evidence than the gate's `INCOMPLETE` sentinel — at least the sentinel names itself a
+   non-verdict. So the artifact is pre-stamped BEFORE the agent exists:
+   ```bash
+   bash scripts/flow/review-stage.sh open rust-review --issue <N> --agent rust-reviewer
+   #   -> prints the absolute report path AND a paste-ready clause; paste that clause into the
+   #      spawn prompt VERBATIM (the paraphrase is what varied across the measured sessions)
+   #   ... spawn rust-reviewer with that clause ...
+   bash scripts/flow/review-stage.sh verdict rust-review --issue <N>
+   ```
+   `verdict` emits exactly one line of a CLOSED grammar and exits `0` PASS / `4` FINDINGS / `5`
+   NOT-RUN / `6` AUTHOR-PERFORMED. **`NOT-RUN` is not a clean review** — it means sentinel-only,
+   absent, unreadable, empty, ungrammatical or never-opened, and the token NAMES which, because the operator
+   action differs per cause — plus `stage record unreadable`, where the RECORD does not name which
+   report is current, and (since #3751 round 19) `report is a symlink` / `stage record is a symlink`,
+   where the artifact was NOT READ because following a link would decide the stage from a file that
+   is not the one it names. Those two say **remove the link** — not a chmod, not a re-spawn. **Since
+   round 20 the same holds one level up**: `… path has a symlinked parent directory` means a
+   DIRECTORY above the stage (`.review-stage/` or `issue-<N>/`) is a link, so the whole stage
+   directory resolves into another tree — remove the DIRECTORY link, not the report — and
+   `… path has an unsearchable parent directory` means whether it is a link could not be determined
+   at all (`chmod +x` that directory; unverified never reads as clean). Do NOT proceed to the PR on a `NOT-RUN` stage: re-spawn
+   (`open --force` KEEPS the original clock, so the elapsed time still reads true, and publishes the
+   report under a FRESH NONCE — spawn with the path it PRINTS, because the previous file is no
+   longer read, so an idle agent that resumes and writes there cannot certify anything, #3751 rounds
+   5-6; the nonce is GENERATED rather than chosen by scanning, and since round 12 it is also
+   ATOMICALLY RESERVED (`O_EXCL`, a fresh nonce on collision), so neither two concurrent `--force`
+   calls nor a repeat of a HISTORICAL report can be handed one path — a nonce that was merely
+   generated let an open overwrite an older report and republish its path to the agent still
+   holding it; and since **round 21** `open` and `record-author-performed` hold a **per-stage lock**
+   across their recheck-and-publish span, so a re-open cannot slip a generation in between and leave
+   the agent you just spawned holding a report NOTHING reads — two new refusals to recognise:
+   `reason=stage-lock-timeout` (another `review-stage.sh` publisher for THIS stage held the lock for
+   the whole bounded wait — find it and re-run once, never in a loop) and
+   `reason=stage-lock-unavailable` (this box has no `flock`, which is a broken box to fix, not a
+   condition to work around). `verdict`/`status` take NO lock, so a READ can never be blocked; and since **round 22** the merge
+   point CENSUSES every generation of the stage when the published verdict is `AUTHOR-PERFORMED`
+   and REFUSES to merge over a SUPERSEDED `result: FINDINGS`, naming the generation — a late
+   reviewer's blocking verdict is neither destroyed (round 15) nor ignored, and the remedy is to
+   fix it or get the lead's ruling and re-open the stage, never to re-record the substitute;
+   and since round 10 the merge point REFUSES a verdict that names any
+   OTHER generation, so writing to a stale path now blocks the merge rather than merely wasting the
+   round; and since round 16 the merge point RE-VALIDATES the whole C check immediately before
+   arming the merge, so a `--force` landing while `premerge-assert.sh` runs REFUSES too), or read
+   `status` for how long it has produced nothing. **For the PATH itself use `verdict`, not
+   `status` (#3751 round 16):** the verdict line's `report=` is exempt from the `=`->`~` map and so
+   is exact even on a checkout whose path contains `=`, where `status` names a file that does not
+   exist. **And if `open`/`verdict` REFUSES at exit 64 saying this checkout's path cannot be
+   represented on the one-line grammar (#3751 round 18), the LANE DIRECTORY is unusable** — a name
+   carrying a newline, a tab or a trailing space — so rename or re-clone it; never hand the agent a
+   path you constructed instead, because the refusal replaced a measured verdict line that named a
+   SIBLING lane's report. **Never infer a clean review from an idle
+   notice** — that is the exact false certification #3751 exists to prevent.
+   `review-stage.sh` writes only under `.review-stage/`, which is gitignored and verified so
+   fail-closed, so it cannot dirty a running gate (#2926/#3648). **`scripts/flow/roborev-review.sh`
    is the ONLY sanctioned roborev invocation (#2964)** — there is no `/roborev-review-branch` slash
    command, and a bare `roborev review --branch --base origin/main` is **NON-SANCTIONED** (from a worktree
    it resolves against the ROOT checkout and enqueues `origin/main`, reporting clean having reviewed

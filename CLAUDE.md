@@ -1905,12 +1905,525 @@ order: (1) the pinned `cassandra-5.0.8` Cassandra source, (2) `sstabledump` outp
 
 ```
 implement (TDD) → --lite each fix round (summary-file redirect)
-  → rust-reviewer + roborev on the lite-green diff   (review-first, DEFAULT)
+  → review-stage.sh open  → rust-reviewer + roborev on the lite-green diff  (review-first, DEFAULT)
+  → review-stage.sh verdict  (NOT-RUN blocks; an idle notice is not a verdict)
   → fix rounds: --lite re-cert + diff-scoped targets  (NEVER a full gate per round)
   → open PR
-  → flow-closer { rebase → FULL gate ONCE → C → ROBOREV LAST → premerge-assert → arm → finalize }
+  → flow-closer { rebase → FULL gate ONCE → open→C→verdict → ROBOREV LAST → premerge-assert → arm → finalize }
 ```
 
+- **EVERY DELEGATED STAGE'S VERDICT IS A FILE, PRE-STAMPED BEFORE THE SPAWN (#3751).** A review
+  stage used to write NOTHING at any point, so its reader had only ABSENCE to reason from — and
+  every consumer of an absence has to CHOOSE how to read it. Nine measured spawns across five
+  lanes and four agent types produced no report; nine for nine the lanes recorded "not run" and
+  disclosed it, **which is discipline, not mechanism**. So `scripts/flow/review-stage.sh` transplants
+  #3041's idiom: `open <kind> --issue <N> --agent <type>` creates the report-of-record file
+  **before the agent is spawned**, carrying a non-verdict sentinel, and prints the absolute path
+  plus **a paste-ready clause to put in the spawn prompt verbatim** (the paraphrase is what varied
+  across the measured sessions). `verdict` then emits ONE line of a CLOSED grammar —
+  `{PASS, FINDINGS, NOT-RUN, AUTHOR-PERFORMED}`, first word, **string equality, never a prefix
+  test** (#3544) — exiting `0/4/5/6`; and it reads the report's `result:` line **AT COLUMN ZERO
+  ONLY**, because the report body is author-controlled text carrying example verdict lines BY
+  DESIGN — the sentinel must show the agent the spelling — so while indentation was tolerated the
+  template's own examples were valid records held off by `grep -m1` ORDER alone, and deleting the
+  column-zero sentinel then appending a verdict read the TEMPLATE's `PASS` (measured; #3312's rule
+  — anchor the control token where the payload cannot reach, never pick a rarer delimiter), **and
+  EXACTLY ONE of them** (round 3, G2): anchoring without COUNTING left `grep -m1` deciding by
+  ORDER, so a stale `result: PASS` followed by an APPENDED `result: FINDINGS` classified as PASS
+  and a merge proceeded over recorded blocking findings — several column-zero records is now
+  `NOT-RUN (… N column-zero 'result:' lines …)`, refused rather than resolved by order in EITHER
+  direction. That fix is a CONSOLIDATION, not a patch: `premerge-assert.sh`'s `_c_verdict_awk`
+  already counted its own anchored lines and refused several as AMBIGUOUS, so the two readers of
+  one shape had diverged TWICE in two rounds, once per axis, each time with a reviewer naming one
+  side. Their agreement is now MECHANICALLY CHECKED — a DIFFERENTIAL test
+  (`scripts/tests/test_premerge_assert.sh` §44g) drives BOTH readers over ONE shared table of
+  adversarial inputs (indented, several, zero, CRLF, a token with trailing junk, a `result:`
+  inside a fenced block, a glob-ish value) and asserts they agree per row AND reach the expected
+  disposition, because agreement on a wrong answer is not correctness and a second
+  implementation's correctness is only knowable by testing it against the first. **AND THE WHOLE
+  REPORT IS READ EXACTLY ONCE PER VERDICT (round 12, R2):** `classify_report` read its subject
+  EIGHT times — existence, a readability probe, the body for emptiness, the `result:` census, the
+  disclosure, and `performed-by`/`reason`/`evidence` each through their own field read — so a
+  report REPLACED between two of those reads let it assemble `AUTHOR-PERFORMED` from fields drawn
+  from DIFFERENT, INDIVIDUALLY INVALID versions (one version's usable `reason` beside another's
+  usable `evidence`), i.e. working **no single snapshot ever contained**. A verdict is a statement
+  about a document; assembled across two documents it is a statement about neither. One observation
+  now feeds every field, the `<key>: <value>` grammar has ONE implementation shared by the snapshot
+  and file readers, an unclassifiable observation is a NON-VERDICT reported as UNREADABLE (never
+  ungrammatical — the bytes were not obtained, so nothing may be asserted about content), and
+  `record-author-performed` passes its OWN byte snapshot in so the bytes its write is guarded on
+  and the verdict it decides by are one instant. That is round 9's N2 property one level down;
+  `status` reports elapsed/deadline and is **advisory, never a
+  verdict input** — **which is not licence to answer from a comparison that never happened (#3751
+  round 8)**: bash's `[ -gt ]` is a FIXED-WIDTH int64 comparison, so an ALL-DIGIT `--deadline-secs`
+  wider than int64 was accepted at the boundary and leaked a raw `integer expression expected` onto
+  stderr, OUTSIDE the `REVIEW-STAGE: ` anchor, then reported the permissive `past-deadline=no`;
+  `$(( ))` is worse because it does not fail at all but **WRAPS SILENTLY**, so a record's
+  `spawned-epoch` yielded `elapsed=1788315330` (56 years, for a stage opened a second earlier) and
+  a `reopen-count` wrap was **written back**, while a zero-padded value is read as OCTAL by `$(( ))`
+  and DECIMAL by `[ ]`. **Being digits is not being comparable**: ONE predicate
+  (`int_is_comparable`, bound `MAX_INT_DIGITS = 10` — ~317 years, or the year 2286 as an epoch)
+  gates all 7 boundaries where argv or a record value reaches a fixed-width operation, INCLUDING
+  the clock's own `date -u +%s` reading, which nothing else validates. Out of bound from argv is a
+  named usage refusal that writes nothing; from the record it is `elapsed=unknown` /
+  `past-deadline=unknown`, with the record's own text still DISPLAYED so a hand edit stays visible. `NOT-RUN` always names ONE OF FIFTEEN causes (`no report written`, `report absent`, `report unreadable`, **`report is a symlink`**, `report empty`, `report ungrammatical: <what>`, `stage never opened`, `stage record unreadable: <what>`, **`stage record is a symlink: <what>`**, **`report path has a symlinked parent directory`**, **`report path has an unsearchable parent directory`**, **`stage record path has a symlinked parent directory: <what>`**, **`stage record path has an unsearchable parent directory: <what>`**, `stage record changed mid-read: <what>`, `stage not observed`) because
+  the operator action differs per cause — `report unreadable` was added in round 2 rather than folded
+  into `report empty` (whose fix is the AGENT, where an unreadable file's is `chmod`) or into
+  `report ungrammatical` (which would assert something about content never observed: a false
+  rationale is worse than none). **AND THE *READ* PATH REFUSES A SYMLINKED ARTIFACT TOO (round 19, Y1)** — round 1's walk refuses one where this tool WRITES and NOTHING refused one where it READS, and both `[ -f ]` and an input redirection DEREFERENCE, so replacing a generation's report with a link to any regular file holding `result: PASS` made `verdict` (and `premerge-assert.sh`'s AUTO C validation with it) accept a verdict from an artifact that is not the report of record — measured: `RESULT: PASS`, exit 0. Both artifacts the read path opens now refuse a leaf symlink under their OWN cause and state, the record included because it names WHICH generation is authoritative and carries the `head-sha:`. The DANGLING case is why the test is `[ -L ]` and comes FIRST: `-f` is FALSE for a dangling link, i.e. `no-such-file`, i.e. the PERMISSIVE `absent` state the clobber guard reads as "no recorded verdict to destroy". **AND ROUND 19's FIX WAS LEAF-SHAPED FOR A PATH-SHAPED PROBLEM (round 20, Z1/Z2).** A symlink at `.review-stage/` or at `issue-<N>/` moves a stage's WHOLE DIRECTORY into another tree, and every predicate on the leaf then answers about the far end of the link — measured on the round-19 script, both levels: `RESULT: PASS` at exit 0 off a peer tree's clean stage, and end to end through `premerge-assert.sh --c-verdict AUTO`, `PREMERGE: OK` plus `C-VERDICT PASS … source: AUTO`, i.e. another lane's audit clearing this merge. So every read target now validates EVERY PARENT COMPONENT below the repository root, without following links, BEFORE any predicate that dereferences one, with one cause and one `status` state per LEVEL (a DIRECTORY link is a different operator action from a file link, and an unsearchable parent is a `chmod +x` on a directory). Second half: `observe_record` gated on its OWN `[ ! -f ]` ahead of the single reader, so a DANGLING link at the record's name — or at any directory above it — answered FALSE and read as `stage never opened`, the permissive state; that probe is REMOVED (a subtraction, not a reordering) and `absent` is now the reader's own affirmative status, reachable only after the walk and the leaf test. **The residual's BOUNDARY is CORRECTED and round 19's wider claim WITHDRAWN**: #3929 owns the TOCTOU WINDOW between a check and the open that follows it and NOTHING WIDER — a link planted at any earlier moment and simply followed needs no race at all. The rule, worth carrying elsewhere: **the existence of an irreducible residual in a neighbourhood is not a licence to defer the reachable cases in it — ask whether the defect needs a race; if it does not, it is not that issue.** **An idle notice is strictly WEAKER than the gate's `INCOMPLETE` sentinel** —
+  at least the sentinel names itself a non-verdict — so never read one as a completed review. All
+  six pipeline-gating agent definitions carry the matching report-of-record clause (Q1=(a): the
+  class is *spawns whose silence gates a merge*, so `flow-closer`, which owns the merge, and
+  `sstable-developer`, which had queued work it never did, are in it beside the four reviewers).
+  Writes go under `.review-stage/`, whose ignore status is **verified with `git check-ignore`,
+  fail-closed**, so a stage opened mid-run cannot dirty a running gate (#2926) or make
+  `premerge-assert.sh` refuse on `dirty: yes` (#3648). **The report path is DERIVED and NONCE-BOUND —
+  `<repo-root>/.review-stage/issue-<N>/<kind>.<nonce>.md`, one fresh unpredictable nonce per open
+  (a bare `<kind>.md` is READ, never written, for a record predating the field), computed the same
+  way by the writer and by every reader, with NO `--report` override (removed in round 4).** The
+  per-open nonce exists because
+  `--force` used to reset the report AT THE SAME PATH (#3751 round 5, J1): the PREVIOUS, idle agent
+  could wake up after the reset and write its OLD-TREE verdict into that path, where it was paired
+  with the newly stamped `head-sha:`, and **a commit nobody audited passed `premerge-assert.sh`** —
+  which is the expected behaviour of this population, not an exotic race, since this whole mechanism
+  exists because delegated agents return late. A resumed agent now holds a STALE PATH and is
+  STRUCTURALLY unable to write into the current report; a check could not deliver that, because the
+  harm is a write. The stage record names the report as an **OPAQUE TOKEN, never a path** (round 4
+  removed the `report:` path field precisely so no data file can redirect a reader), in the SAME
+  atomic write as `head-sha:`, so the tree audited and the artifact auditing it are published
+  together or not at all; an absent field is the LEGACY bare name (what every earlier version
+  wrote — an affirmative reading, not a permissive default), and several lines, an invalid token,
+  or a record that **could not be READ at all** is a `stage record unreadable` NON-VERDICT that
+  derives no path rather than falling back to that name — **`|| true` on the count once collapsed
+  "could not read" onto "no such field", so an unreadable record reported an OLD report's PASS at
+  exit 0 (#3751 round 6, K1); `grep` exits 1 for the second and >= 2 for the first, and only the
+  second is legitimately permissive.** **AND THE TOKEN IS GENERATED, NEVER SELECTED (round 6, K2):**
+  the first design numbered the generations and picked the next by SCANNING for an unused file, and
+  a value chosen from what is on disk is a value two concurrent `open --force` calls can both
+  choose — measured, both printed `c.1.md` and one agent's `FINDINGS` became the other's `PASS`. The
+  scan, its attempt bound and its exhaustion refusal are DELETED rather than locked: a lock
+  serialises a race a nonce removes and adds its own failure modes, while subtraction cannot
+  introduce a false PASS. **BUT GENERATED IS NOT RESERVED, AND THAT ROUND DELETED THE RESERVATION
+  ALONG WITH THE SCAN (round 12, R1).** `mktemp -u` invents a NAME and creates NOTHING, so an
+  unreserved nonce repeating a report already on disk — a HISTORICAL report of the same stage,
+  deliberately kept as the audit trail — let `open` write over that report and REPUBLISH its path
+  in the record: a recorded verdict replaced by the sentinel, and the superseded agent still
+  holding that path handed the ability to write the CURRENT one, i.e. exactly what round 5's
+  binding exists to prevent, reached with **no concurrency at all**. Deleting the scan was right;
+  deleting the reservation was not. The name is now CLAIMED — each candidate created under `set -C`
+  (`O_CREAT|O_EXCL`), a FRESH RANDOM nonce on collision, and exhausting the bounded attempts is a
+  NAMED refusal (`reason=report-nonce-not-reserved`), never a fallback to an unreserved name.
+  **That is not the scan returning, and the distinction is the whole point:** the scan SELECTED a
+  name by TESTING EXISTENCE and wrote it in a LATER step — two steps, with a window two callers
+  could both observe — while an exclusive create IS the choice, so decision and claim are one
+  operation. Everything the nonce bought survives (nothing selected by scanning, an opaque token,
+  the path from the record, the record written LAST); the reserved name is an owned resource
+  registered with the cleanup path the moment it exists and de-registered on fulfilment, so a
+  refused open leaves the tree as it found it and the cleanup can never delete the published
+  report. `reopen-count:` remains as the human-readable audit number — and it SATURATES at the ten-digit ceiling rather than restarting (#3751 round 9): `$(( prior + 1 ))` walked off round 8's bound, so the next re-open read an eleven-digit value as incomparable and restarted the count at `1` (measured: the record held `10000000000`, then `1`). Refusal was rejected as the fix — round 8's own ruling is that an unusable counter is never a reason to refuse a spawn — so it is HELD, meaning AT LEAST that many, `note`d when the hold happens, and rendered `<n>+` by ONE renderer on both `OPEN-OK` and `status` (which reports the counter as of this change).
+  Superseded reports stay on disk as HISTORY: nothing reads them, and since round 6 nothing depends
+  on their existence either. **So paste the path `open` PRINTS into the spawn prompt — never a
+  remembered one; it carries a nonce and cannot be reconstructed, so where none was named ask
+  `review-stage.sh status <kind> --issue <N>` and read its `report=` field.** That flag was mandated by no
+  requirement and used by nothing, and it was the caller-controlled component behind a finding
+  cluster across four rounds: written RAW into the LINE-oriented stage record, a legal
+  newline-bearing filename SPLIT and the reader took the PREFIX — which could select a DIFFERENT
+  pre-existing report recording `PASS` — and the report's parent directory was created BEFORE
+  containment was verified, so a REFUSED outside-the-repository path still created directories
+  outside the checkout. Both are now closed BY CONSTRUCTION: `<kind>` and `<issue>`, validated
+  strictly at one boundary, are the whole path-input surface. **And a SYMLINK at the report path, at the
+  `.stage` path or at ANY component under `.review-stage/` is REFUSED, never followed (#3751 round
+  1)** — `check-ignore` judges a LEXICAL path while a WRITE follows links, so an
+  ignored-but-symlinked report clobbered a TRACKED file and reported `OPEN-OK` (measured); the
+  writes themselves go through an UNPREDICTABLE same-directory temporary file (`mktemp -u`)
+  CREATED AND OPENED IN ONE STEP under `set -C`, i.e. `O_CREAT|O_EXCL`, then written through the
+  ALREADY-OPEN DESCRIPTOR and `mv -f -T`'d into place (#3751 round 3, G3; the `-T` is round 7's L2 —
+  a plain `mv -f` does NOT promise to replace the destination NAME, so a `dest` that is or BECOMES a
+  directory or a symlink-to-one receives the temp file INSIDE it and `mv` **EXITS 0**, landing the
+  write outside the verified path while the tool reports success. `-T` is **REQUIRED, not
+  attempted** — no fallback, since a fallback restores the defect exactly where it cannot be
+  detected — which makes GNU coreutils a stated HOST PRECONDITION of `review-stage.sh`; a stock
+  BSD/macOS `mv` fails the option parse, moves nothing, and every write REFUSES, naming the missing
+  option). The first version used a
+  PREDICTABLE `.<name>.tmp.$$`, validated it and then REOPENED it BY NAME — a TOCTOU a PEER LANE
+  could win (every lane here runs as one user under a shared HOME), making the write clobber a
+  planted symlink's target while `mv` installed the link as the report and reported success. The
+  window is REMOVED rather than narrowed, because a check placed after a harmful effect can only
+  REPORT it and the harm is a WRITE: there is no predictable name to plant at, `O_EXCL` refuses an
+  existing path INCLUDING a symlink (dangling or not — measured, without creating its target), and
+  no path is re-resolved between validation and writing. The gitignore check keeps its place
+  because it has no window of its own: it is lexical, and it is taken on the EXACT name about to be
+  created. A concurrent reader still never sees a half-written `result:` line. **THE CLAIM IS ABOUT THE CONSUMER AND NOT
+  ABOUT THE AGENTS, and stating it narrowly is the point**: naming a report path was effective for
+  `spec-auditor` and `flow-closer` and did NOTHING for `rust-reviewer` (0 of 3, one of them told IN
+  WRITING that an absent file would be recorded as a non-review) — and the mechanical reason
+  surfaced while writing that clause, which is that `rust-reviewer` had **no write channel at all**
+  (`Read, Glob, Grep`), so the contract was unsatisfiable by construction. It now carries `Write`
+  for that one purpose; note this grants nothing its siblings lacked, since three of the four
+  "read-only" reviewers already carry `Bash` — **"read-only" here was always prose, never a
+  mechanism.** Full record incl. the census, the tally and the limits:
+  `docs/development/review-stage-reporting.md`. `verdict` establishes that a VERDICT WAS RECORDED,
+  never that a review was PERFORMED — a report whose only content is `result: PASS` reads as PASS.
+  Where no independent audit can be obtained, the SANCTIONED FALLBACK is
+  `record-author-performed --reason <why> --evidence <artifact> --performed-by author` (the ONLY
+  performer this tool accepts — `peer` was REMOVED in round 6 (K3): it was accepted and then reported under the token `AUTHOR-PERFORMED`, so a PEER audit was stated to be the diff AUTHOR's, and a peer who CAN audit writes the report of record instead, reaching a genuine `PASS`), which
+  REQUIRES the working (placeholders refused as `claim.sh` refuses them) and reports the DISTINCT
+  token `AUTHOR-PERFORMED`, never `PASS`. **It REFUSES to overwrite a report that already RECORDS a
+  verdict without `--force`, and a forced replacement NAMES the token it replaced (#3751 round 2)** —
+  it used to write unconditionally, so a recorded blocking `FINDINGS` became a merge-PROCEEDING
+  `AUTHOR-PERFORMED` with no flag and no trace, while `open` refuses to re-stamp an already-open
+  stage for the far smaller harm of restarting a clock: the worse clobber had the weaker guard, and
+  an overwrite that leaves no trace is the audit-trail failure this mechanism exists to remove.
+  **AND THAT CHECK PREVENTS RATHER THAN REPORTS (#3751 round 9).** As first built it read the
+  recorded verdict and only THEN prepared and renamed its replacement, so a late reviewer landing
+  `FINDINGS` in that window was overwritten anyway — with no `--force` and no trace, i.e. the exact
+  harm under the new guard. A check placed before the act it guards, with a window in between, can
+  only report; so the observation the decision was made on (the report's BYTES, not just its token —
+  one `FINDINGS` replaced by ANOTHER leaves the token equal) is RE-TAKEN immediately before the
+  publication and any change REFUSES by name, `--force` included: `--force` authorizes replacing the
+  verdict the operator READ, never one that arrived afterwards.
+  **AND NARROWING THAT WINDOW WAS NOT ENOUGH — THE OVERWRITE IS NOW UNEXPRESSIBLE (#3751 round
+  15, U1).** Round 9 declared the remainder — the span between the re-observation and the
+  `rename(2)` inside one `mv` — as a narrow, irreducible residual (no compare-and-swap rename is
+  reachable from a shell, and a lock would not close it either, since the counterparty is an
+  arbitrary agent writing the report with its own tooling and taking no lock), accepting that a
+  verdict landing there would be LOST. **That declaration is WITHDRAWN.** It was right about the
+  shell and wrong about the harm: the party who loses a verdict in that span is not a hostile
+  racer, it is **a slow reviewer** — and this mechanism exists *because* delegated reviewers are
+  slow and return late — so the loss was produced by the system's own normal behaviour, and what
+  was lost was a recorded review verdict, exactly the harm #3751 was filed to prevent. A declared
+  boundary is not acceptable for that. So `record-author-performed` no longer writes to the report
+  of record AT ALL: it reserves a FRESH generation (round 6's nonce + round 12's atomic
+  reservation), writes the substitute there, and the stage record — the publication marker, written
+  LAST (round 4's H1) — names it. **Measured before the fix**, with the interleaving driven at that
+  instant: `RECORD-OK … result=AUTHOR-PERFORMED` at exit 0, no `--force`, no `replaced-verdict:`,
+  and the blocking `result: FINDINGS` **gone from disk entirely**. After it, the same interleaving
+  leaves that `FINDINGS` readable in its own generation while the published verdict is the
+  substitute. The window is not closed; **destruction is**. Whether the command may PROCEED over a
+  prior verdict is a SEPARATE question and keeps its rule — refuse without `--force`; under
+  `--force` record `replaced-verdict:` **plus** the `supersedes-report-nonce:` generation it came
+  from — and because nothing is overwritten, a wrong decision there is now recoverable and
+  auditable rather than silent. The stage record is held to the same mid-write rule
+  (`reason=stage-record-changed-mid-write`), since this call now rewrites it, and the rewrite
+  carries every other byte through VERBATIM: `head-sha:` is NOT re-stamped (that would bind a
+  substitute to a tree the stage was never opened at) and `reopen-count:` is not incremented (no
+  agent was re-spawned). The generalisable rule: **when a check can only narrow a window, ask
+  whether the harm can be made unexpressible instead — and never declare a residual whose victim
+  is your own system's normal behaviour.**
+  **AND THE *RECORD* WINDOW HAS A COUNTERPARTY THAT *CAN* BE MADE TO WAIT, WHICH IS WHY IT GETS A
+  LOCK AND THE REPORT WINDOW DOES NOT (#3751 round 21, AA1).** U1 removed the DESTRUCTION and left
+  the record's own publish window: `record-author-performed` RE-VERIFIES the stage record and then
+  publishes its replacement with a separate `mv`, so a concurrent `open --force` landing between
+  them published generation **B**, after which the recording overwrote B's record with **C** while
+  its `supersedes-report-nonce:` trace said **A**. Two harms, both this issue's core subject: the
+  agent the peer `open` had just spawned was left writing into an **ORPHANED** report — no record
+  names B, so nothing derives its path and its eventual `FINDINGS` is read by NOTHING — and the
+  audit trail **NAMED THE WRONG PREDECESSOR**, a FALSIFIED record rather than a missing one.
+  Measured on the shipped script with the interleave planted at the last instant before
+  publication: three generations on disk, one named by no record, `RECORD-OK` at exit 0.
+  **THE FIX IS A PER-STAGE `flock` HELD ACROSS EACH PUBLISHER'S RECHECK-AND-PUBLISH SPAN, AND THE
+  SCOPE OF THAT DECISION IS THE WHOLE POINT — DO NOT GENERALISE IT.** This issue REJECTED a lock
+  twice and both rulings STAND: round 6 (K2) replaced a SCANNED generation with a random nonce
+  *instead of* locking, because a nonce REMOVES that race rather than serialising it; and round
+  9/15 declined one for the LATE-REVIEWER window, because **the counterparty there is an arbitrary
+  agent writing its report with its own tooling, which takes no lock and cannot be made to.** What
+  differs here, and it is the only thing that differs, is that **both parties are subcommands of
+  `review-stage.sh`** (`open --force` and `record-author-performed`), so mutual exclusion between
+  our OWN publishers is AVAILABLE. Two publishers exist, both take it (a DERIVED census, not a
+  curated list), and **READERS TAKE NONE** — `verdict`/`status` stay lock-free, so a publisher can
+  never block a read, and they need no lock because W1's coherent observation already refuses
+  `stage record changed mid-read` on its own. `flock` is **REQUIRED, NOT ATTEMPTED** (the `mv -T`
+  precedent): its absence is `reason=stage-lock-unavailable` and never a silent unlocked fallback,
+  the wait is BOUNDED with `reason=stage-lock-timeout`, and there is no env var to widen or disable
+  it. The three objections round 6 recorded against `flock` are each ANSWERED rather than ignored,
+  and two of them dissolve on one fact about the mechanism: **an `flock` lock lives on the OPEN FILE
+  DESCRIPTION, so the kernel drops it when the holder exits, SIGKILL included** — a leftover lock
+  FILE holds no lock, which is also why the file is deliberately never deleted (deleting it would
+  let a peer holding the old inode and a newcomer creating a fresh one lock DIFFERENT objects and
+  both proceed). The transferable rule: **"we rejected a lock here" is a ruling about a
+  COUNTERPARTY, not about locks** — re-ask it whenever the parties change, and record which party
+  the earlier ruling was about.
+  **AND A PRESERVED BLOCKING VERDICT WAS READ BY NOBODY — SO THE WINDOW'S *OUTCOME* IS REFUSED AT
+  THE MERGE POINT, WHERE NOTHING IS RACING (#3751 round 22, AB1).** U1 stopped the late `FINDINGS`
+  being DESTROYED and AA1 shut our own publisher out of the span; **neither made the preserved
+  verdict MATTER.** The substitute still becomes the PUBLISHED verdict, so `verdict` reports
+  `AUTHOR-PERFORMED`, the blocking independent audit sits on disk in its own generation read by
+  nothing, and the merge proceeds — with no `--force` and no `replaced-verdict:` trace, because
+  nothing in `record-author-performed` ever saw it. Measured on the shipped scripts with the late
+  write planted at the last instant before publication: `PREMERGE: OK <sha>` at exit 0 beside
+  `PREMERGE: C-VERDICT AUTHOR-PERFORMED`. **The fix is NOT a fifth check inside the window** —
+  there is no compare-and-swap rename in a shell, so "publish only if the report is still the one
+  I read" is UNEXPRESSIBLE and every added check can only narrow it again. `premerge-assert.sh`
+  runs long after the reviewer has stopped writing, so under `--c-verdict AUTO` it censuses EVERY
+  generation of the stage when the published token is the substitute and REFUSES the merge, naming
+  the generation and its nonce so the superseded verdict is readable. **This is a CONSUMER-SIDE
+  check, which this repository ordinarily rejects** (*a check placed after a harmful effect can
+  only report it*) **and it is sufficient HERE for one specific reason: the harm is a MIS-PUBLISHED
+  VERDICT and nothing else, because round 15 kept the bytes** — so the evidence is still on disk
+  to be read, and the only thing that had to be prevented is a MERGE resting on it. `record-author-performed` is **not** made
+  atomic by any of this and **no site may say the window is closed**; what changed is that its
+  outcome cannot certify a merge. Two properties worth carrying: **it is asked of
+  `AUTHOR-PERFORMED` ALONE**, because no subcommand publishes a `PASS` (so a published PASS is
+  always an independent reviewer's own report, and a superseded `FINDINGS` beneath one is the
+  SANCTIONED REMEDIATION FLOW — fix, re-open, re-audit — which is INDISTINGUISHABLE on disk, so
+  refusing it would red on correct input); and **the blocking set is CLOSED at `FINDINGS`**, since
+  `NOT-RUN` at a superseded generation is the ABSENT audit a substitute exists to stand in for,
+  `PASS` there is a stronger verdict, and `AUTHOR-PERFORMED` there is another substitute. Two
+  declared residuals: an EXPLICIT `--c-verdict <path>` is NOT censused (that mode never learns an
+  issue number, so there is no generation set — invoker-class, and `AUTO` is what the doctrine
+  mandates), and there is deliberately **no break-glass** — a recorded independent `FINDINGS` is
+  not waivable by an author's own audit, and the ordinary remedy (fix it or get the lead's ruling,
+  then RE-RUN THE STAGE) clears the check by construction.
+  **AND "COULD NOT READ IT" IS NOT "NOTHING IS RECORDED"
+  (#3751 round 13, S1).** Round 12's single-observation classifier introduced an UNREADABLE state,
+  and this guard branched on the TOKEN — where that state arrives as `NOT-RUN`, i.e. on the
+  REPLACEABLE side — so a report whose recorded verdict was UNKNOWN, possibly a blocking
+  `FINDINGS`, was overwritten by the merge-proceeding `AUTHOR-PERFORMED` with no `--force` and no
+  `replaced-verdict:` trace (measured: a mode-000 report holding `result: FINDINGS` yielded
+  `RECORD-OK result=AUTHOR-PERFORMED` at exit 0, findings gone). *Unknown is not absent*, and
+  "cannot tell" may never take the permissive branch — so the permissive set is now AFFIRMATIVE,
+  the two states that were MEASURED: `absent` (verified-absent, no recorded verdict to destroy) and
+  `present` (read, so the token decides). Both are read through ONE reader of that grammar
+  (`report_state`, shared with the classifier, which used to match `report_bytes`' prefixes itself
+  — two readers being two opinions about whether a report was READ), so a state added to the
+  observation helper later refuses at both callers BY CONSTRUCTION rather than by someone
+  remembering to add an arm. **AND THE TOKEN HALF OF THAT SAME GUARD WAS STILL A LIST, WHICH LET `AUTHOR-PERFORMED` BE SILENTLY REPLACED (#3751 round 19, Y3).** S1 keyed the STATE affirmatively and left the token `case` enumerating `PASS | FINDINGS`, so the one other token that PROCEEDS at the merge point inherited the permissive branch: measured, an existing `AUTHOR-PERFORMED` verdict was superseded with no `--force`, exit 0, and no `replaced-verdict:` anywhere on disk. **The same shape one field over** — a guard that enumerates the states it will REFUSE lets through any state nobody listed — so the guard is re-keyed onto the AFFIRMATIVE property (*a verdict is RECORDED*, i.e. the prior token is not `NOT-RUN`), and a token added to the grammar later is protected BY CONSTRUCTION rather than by being remembered. Adding `AUTHOR-PERFORMED` to the list would have been the same defect with one more entry. The other four token/state decisions in this grammar were audited with it and were already in that form (`classify_report`'s token `case` and `cmd_verdict`'s exit map are allowlists with a fail-closed `*)`; `cmd_status` keys `NOT-RUN` affirmatively; `premerge-assert.sh`'s C gate admits `PASS | AUTHOR-PERFORMED` and refuses the rest by name), and all four are now pinned structurally. `--force` deliberately does NOT cover it, for the same reason the
+  mid-write re-verification does not, and refusing strands no one: `open <kind> --force` supersedes
+  the stage with a fresh report at a fresh nonce and leaves the unreadable file on disk as history. **The CLASSIFIER enforces that working too, by calling the
+  SAME function the writer does (#3751 round 1)** — `verdict` reads HAND-WRITTEN reports by design,
+  and it used to accept any NON-EMPTY `performed-by`/`reason`/`evidence`, so `performed-by: nobody`,
+  `reason: x`, `evidence: tbd` reached the token that PROCEEDS at the merge point while the writer
+  would have refused all three: *a non-emptiness test standing in for a validity test*, and the same
+  fact checked in two places with two strengths — *an author's hand audit is not an independent one; weight
+  it accordingly*, and it is sanctioned at all because *an audit whose working is shown is
+  auditable, whereas an absent one is not*.
+  **AND A CAPTURE THAT NORMALISES ITS INPUT CANNOT BE THE THING THAT VALIDATES IT (#3751 round 13,
+  S2) — a rule for every `$(…)` read of a file, not a fact about one byte.** A COMMAND SUBSTITUTION
+  SILENTLY DISCARDS NUL BYTES (bash 5.2 warns on stderr, which these call sites redirect away), so
+  the capture did not merely LOSE information, it MANUFACTURED grammar its source does not contain.
+  Three measured instances, all reaching a merge-proceeding answer at exit 0: a report whose bytes
+  are `res<NUL>ult: PASS` holds **no** column-zero `result:` line (`grep -c '^result:'` exits 1 on
+  it) and `verdict` reported `RESULT: PASS`; a stage record whose `report-nonce:` value was
+  `STALE<NUL>PASS1` — not a valid token, since a NUL is not alphanumeric — was read as the valid
+  `STALEPASS1`, redirecting the reader to a **stale** report's `PASS` (round 4's H2 defect, a data
+  file redirecting a reader, through a different door); and in `premerge-assert.sh`, **the merge gate
+  itself**, a `--c-verdict` file whose token is `PA<NUL>SS` — a token the closed-set match must
+  refuse — arrived as `PASS` and printed `PREMERGE: OK`, because gawk passes a NUL through a field
+  and the capture of awk's OUTPUT then removed it. **THE FIX IS IN THE READ, NOT IN A PROBE**, and
+  that is the transferable part: a separate `grep -q`/`wc -c` probe of the same path is a SECOND
+  OBSERVATION, and one direction of its disagreement is a FALSE PASS (the capture reads the
+  NUL-bearing version while the probe reads a clean one) — round 12's R2 lesson one layer down. So
+  the ONE read maps NUL to SOH **in the stream** (`capture_map_nul` / `c_capture_map_nul`, one per
+  script, each the single mapping implementation, deliberately NOT shared because no agreement
+  between the two is required): the byte count is preserved, the forged grammar is never created,
+  and the byte's PRESENCE becomes observable, so the refusal NAMES it instead of silently judging a
+  transformed document. **ONE literal, with the byte DERIVED from it** — `tr` needs the characters
+  `\001` and a detector needs the byte, so two hand-written spellings are two places to diverge, and
+  a divergence means the detector looks for a byte the mapper never writes: a silent false PASS. A
+  literal SOH is refused WITH the NUL, deliberately, because after the mapping the two are
+  indistinguishable without a second read and both are control bytes no text record may hold, with
+  the same operator action. **Two other lossy behaviours of the same capture were enumerated and
+  LEFT, with the reason recorded**: `$( )` strips TRAILING NEWLINES, which cannot change a verdict
+  **for the consumer that conclusion was reasoned about — the REPORT's CONTENT, and no other**
+  (every grammar here is per-line and column-zero anchored, so trailing newlines create no `result:`
+  line, no field and no disclosure, and a file of only newlines is `report empty` exactly as an empty
+  one is); and locale/encoding, where every consumer of the snapshot is already `LC_ALL=C`-pinned —
+  now MEASURED by a cross-locale invariance case rather than asserted, after a source scan for
+  unpinned text tools was written and DISCARDED for firing on four indented comments, a heredoc
+  opener and the `--help` renderer, i.e. reddening on correct input. A fourth, adjacent property came
+  with it: the COMPLETE read is now asserted by TWO signals, the sentinel `E` **and** the read's exit
+  status, because a read that fails after delivering a prefix whose last byte happens to BE an `E` is
+  textually indistinguishable from a complete one — and a truncated prefix that drops a SECOND
+  `result:` line turns an AMBIGUOUS refusal into a PASS.
+  **AND THAT "HARMLESS" VERDICT DID NOT SURVIVE ITS NEXT CONSUMER — A LOSSY-CAPTURE CONCLUSION MUST
+  BE RE-DERIVED PER CONSUMER, NEVER CARRIED (#3751 round 18).** Round 13's ruling above is right
+  about a report's CONTENT and **false about a PATH**, where the stripped bytes are part of the
+  value's IDENTITY and a shorter string names a DIFFERENT FILE. Both tools resolved the worktree
+  root with `root="$(git rev-parse --show-toplevel)"`, so a checkout whose DIRECTORY NAME ends in an
+  LF resolved to an EXISTING SIBLING — and the captured value then carries no newline, so round 17's
+  representability refusal never fires. Measured on the shipped scripts from a checkout named
+  `lanetrail<LF>` beside a peer lane: `review-stage.sh verdict` reported
+  `RESULT: PASS … report=…/lanetrail/.review-stage/issue-704/c.<nonce>.md` at **exit 0** off a report
+  that lane never opened, a refused `open` created a directory INSIDE the peer lane, and
+  `premerge-assert.sh`'s AUTO path enumerated the same sibling — **#3616's peer-artifact class
+  reached through a lossy capture instead of a recency scan**, and one `c_assert_head_binds_certified`
+  cannot see, because HEAD is read in the CWD (the real lane, so it binds) while the ARTIFACT comes
+  from the sibling. The fix keeps git's own framing: a SENTINEL appended INSIDE the substitution (so
+  the stripping has nothing of ours to eat), then the sentinel, then **exactly one** newline — git's
+  terminator — and nothing else; any further trailing newline belongs to the directory name.
+  `premerge-assert.sh` goes further and **removes the channel** (#3312's standing ruling): its
+  resolver ASSIGNS a global and prints nothing, so no call site can capture it and a fifth one
+  cannot reintroduce the defect. **The sweep found the class twice, which is why the sweep is the
+  rule and not the single fix**: `self_dir` also went through `$(cd "$(dirname "${BASH_SOURCE[0]}")"
+  && pwd)` — two nested strips — mislocating `review-stage.sh`, i.e. the **ENFORCER** of the C
+  verdict that script refuses to merge without. So when a capture is declared lossy-but-harmless,
+  the declaration binds ONE consumer; **ask the question again at every new one, and ask it of every
+  captured value that is a PATH or is used to locate a file.**
+  **AND NEUTRALISING THE VALUE IS WORTHLESS IF THE PRINTING COMMAND RE-INTERPRETS IT — EVERY LINE
+  IS `printf` OF A LITERAL FORMAT, NEVER `echo` (#3751 round 14).** `emit`, `note` and `die_usage`
+  used `echo`, and under the bash option `xpg_echo` — settable by an **inherited** environment
+  (`BASHOPTS`, `SHELLOPTS`, a `BASH_ENV` file) and never by the script — `echo` performs BACKSLASH
+  ESCAPE PROCESSING on its argument, which makes that argument a **FORMAT**, i.e. a control channel
+  carrying data. Measured on the shipped script from a LEGAL directory name and nothing else: a `\n`
+  in the checkout path split the one-line verdict into **two**, the second a column-zero
+  `REVIEW-STAGE: … RESULT: PASS` for a stage with no report at all, and octal `\075` put **real**
+  `key=` pairs on it — so `field_value`'s `=`→`~` map, which exists precisely so a value can never
+  introduce a field, was **defeated entirely**. (`\033` injects terminal control; `\c` truncates the
+  line.) The consumer refuses on the LINE COUNT today, so no false `PREMERGE: OK` was demonstrated —
+  the defect is a broken one-line grammar plus a void neutralisation guarantee, stated at that
+  width. This is #3312's rule at the LAST hop: **the fix is to stop sharing the channel, not to
+  escape harder** — a literal format cannot be data. Pinned structurally by
+  `scripts/tests/lib/emit-boundary-scan.sh`, which now refuses `echo` outright **with no allowlist**
+  (there is no value for which `echo` beats `printf '%s\n'`, and an entry here could only be a claim
+  that one line's data contains no backslash) and additionally requires every `printf` FORMAT to be
+  a literal the script authored — the same channel one step in, through `%`.
+  **AND THE `=` MAP HAS EXACTLY ONE EXEMPTION, COUPLED TO THE PROPERTY THAT JUSTIFIES IT (#3751
+  round 16, V2).** A repository root may LEGALLY contain `=`, and `report=` went through the same
+  map — so on such a checkout the verdict line advertised a path that **DOES NOT EXIST** while the
+  grammar promises the absolute report-of-record path (measured on the shipped script at
+  `…/eq=path/lane`: `open` printed the real `…/eq=path/…/c.<nonce>.md` on its raw line while
+  `verdict` published `…/eq~path/…`, which no `open(2)` resolves) — and `verdict`, unlike `open`,
+  offers **no separate raw channel** to fall back to. The exemption (`remainder_value`, everything
+  `field_value` does except the `=` map) is sound for ONE reason and only that reason: since round
+  11 `report=` is emitted **LAST** and read as the line **REMAINDER**, so an `=` inside it cannot
+  create an ambiguous field. **So the two facts are pinned TOGETHER** — one match asserts the field
+  is last AND routed through the exempt boundary, because either change alone makes the other wrong
+  — and the exemption is **CONFINED**: exactly one definition, exactly one call site, with the six
+  other `report=` emitters keeping `field_value`. That confinement is not bookkeeping: one of them
+  (`report-changed-mid-write`) emits `now-verdict=` AFTER `report=`, where the exemption would be
+  **unsound**, and no consumer reads any of those lines as a remainder — so exempting them would
+  rest on "no consumer exists today", a permission derived from the ABSENCE of a bad signal. The
+  control that proves the confinement, not the fix: a `report=` pair smuggled through the `agent=`
+  field must still be neutralised, because unmapped it puts a REAL `report=` **ahead of** the
+  measured one and the remainder reader takes the FIRST. Control-character neutralisation is
+  untouched in the exempt boundary (rounds 5/7/13/14), asserted behaviourally rather than by
+  reading the source, so the exemption is the `=` map ALONE.
+  **AND A PATH THIS GRAMMAR CANNOT CARRY IS REFUSED AT THE BOUNDARY, NOT PUBLISHED WRONG (#3751
+  round 17, W2).** The repository root is the one path component derivation does not validate, and
+  a root the one-line renderer rewrites made the two commands lie **DIFFERENTLY** about the same
+  file: `open` prints the RAW path on its own line, so a newline-bearing root **SPLIT** it across
+  two physical lines (the second carrying none of the `REVIEW-STAGE: ` anchor every consumer
+  reads), while `verdict` **FLATTENED** it and published `…/lane two/…`, a path no `open(2)` can
+  resolve. Round 11 declared such a path unrepresentable **and "never arriving"**; the second half
+  was FALSE — git resolves the root of whatever checkout the tool runs in — so that declaration is
+  **WITHDRAWN** and `require_repo_root` REFUSES (exit 64, nothing read or written), at the ONE
+  resolution site, so all four subcommands inherit it. **The rule is the RENDERER's own answer, not
+  a character list**: the root must survive `one_line` UNCHANGED, so it cannot drift from the
+  renderer the way a hand-written class of bad bytes would — with the newline case carrying its own
+  detail because its harm differs in KIND (a value that spans lines cannot be a field of a one-line
+  record under any rendering). A **SPACE** is unaffected and stays supported, which is the control
+  that keeps this from redding correct input (round 11's Q3 exists for space-bearing checkouts).
+  No opt-out, and none may be added: a checkout is always renamable, so an escape hatch could only
+  buy a published path that does not exist.
+  **AND A DECISION MUST REST ON *ONE* OBSERVATION — THE THIRD INSTANCE OF ONE SHAPE, SO THE FIX IS A
+  MECHANISM AND NOT A THIRD PATCH (#3751 round 17, W1).** Round 9's N2 (`premerge-assert` validated
+  `head-sha` from one read of the stage record and consumed a SECOND read for the nonce), round 12's
+  R2 (`classify_report` read the report EIGHT times, so a verdict could be assembled from versions
+  that never coexisted), and now: `record-author-performed` read the REPORT using the generation
+  loaded earlier and then read the RECORD independently. An `open --force` publishing generation B
+  between those reads left **both** final re-verifications satisfied — an unchanged report **A**, an
+  unchanged record **B**, each individually consistent — so `AUTHOR-PERFORMED` was published over B
+  **without ever inspecting B's verdict**, with no `--force`, and with a `supersedes-report-nonce:`
+  trace naming **A**. Measured: `RECORD-OK … supersedes-report-nonce=<A>` at exit 0 while B held
+  `result: FINDINGS`, and `verdict` then reported AUTHOR-PERFORMED. **A trace that names the wrong
+  generation is worse than no trace** — falsifying the audit trail is the worst failure this tool can
+  have, and it is the harm #3751 exists to prevent, committed by the mechanism itself. The fix is ONE
+  primitive: `observe_record` is the only place the stage record FILE is read (it used to be read
+  SEVEN times by the reader path and five more by `open`), and `observe_stage` pairs it with the
+  report of **the generation those bytes name** and then **RE-READS the record and requires it to be
+  byte-identical** — a record that moved is the NAMED refusal `stage record changed mid-read`, never
+  folded onto `stage record unreadable`, because the operator action differs (read it again, versus
+  repair or chmod). Three rules generalise. **(1) Two reads of one subject are one observation only
+  if something re-verifies between them**; without that, "nothing changed" is a claim each read makes
+  about itself. **(2) Publish a defect as a CLOSED KIND beside its detail sentence** — a consumer
+  keyed on the prose is reading a diagnostic as a control (#3312), and that fired immediately: two
+  legitimate detail sentences both contain the words `report-nonce`, so a text match sent a
+  read-level failure to the refusal that says "this record names two". **(3) Delete the parameter a
+  function no longer uses** — `classify_report` takes no report path at all now, so a second
+  observation is *unexpressible* rather than merely untaken, and an unobserved caller gets a named
+  non-verdict instead of a fresh read. Mechanized, in the same spirit as round 14's read boundary:
+  `scripts/tests/lib/observation-boundary-scan.sh` attributes every stage-file reader call to the
+  function it appears in and requires the owner to be the primitive (or a statement declared in the
+  scanner **with its reason** — the two in-window re-verifications are, because their whole purpose
+  is to be fresh), and requires each decision path to observe **exactly once** (none means it
+  reasons from an observation it did not take; several means two). It declares what it does not
+  cover on every run, and its six controls plant each violation class and require the guard to red
+  **and to name** the reader, the function and the line.
+  **AND "EVERY READ GOES THROUGH THE BOUNDARY" WAS FALSE FOR TWO READERS FOR A WHOLE ROUND — SO
+  THE CLASS IS NOW MECHANIZED, NOT ASSERTED (#3751 round 14).** Round 13 routed three of the five
+  non-boundary read sites and left two reading files directly, and **both** were found by the next
+  review round. (1) `count_field_lines` read the stage record with `grep -c` on the FILE. **`grep`
+  is a faithful reader; the ANSWER is not** — a record whose key is spelt `report-<NUL>nonce:` holds
+  **no** `report-nonce:` line, so the count was a *truthful* `0`, and `0` is exactly the value that
+  means "a pre-nonce record whose single report is the LEGACY bare `<kind>.md`". Measured: a stale
+  legacy `c.md` recording `result: PASS` was reported as the stage's verdict at exit 0 while the
+  CURRENT report held the sentinel. **The byte never has to defeat the counter to defeat the reader
+  — it only has to make the current record unparseable while a stale artifact is still on disk.**
+  (2) `_gate_awk` read the GATE-OF-RECORD summary raw, so `RESULT: PA<NUL>SS` became `PASS` at the
+  merge gate. Both are routed; the record-line counter is now **three-valued** (counted / not
+  countable / not representable) with the permissive set spelled affirmatively as `0` at every caller,
+  and the unrepresentable case carries its OWN refusal because the operator action differs (rewrite
+  the record, never a chmod). **THREE CONSECUTIVE ROUNDS FOUND THE SAME SHAPE — a boundary exists
+  and one path bypasses it** (round 7's emit sites, round 13's record reads, round 14's remaining
+  two) — which is the standing signal to mechanize. Round 13's own structural asserts could not see
+  either site, and the reason generalises: **they check that the mapping appears exactly ONCE, which
+  is a property of the BOUNDARY and not of its CALLERS.** So
+  `scripts/tests/lib/read-boundary-scan.sh` asks the caller-side question — no statement may read
+  file content except through the mapping, unless NAMED IN THE SCANNER WITH ITS REASON (a stale
+  entry, one matching nothing, is its own FAIL) — with two recognisers, an input redirection from a
+  value and a reading command at the START of a pipeline with a `$`-bearing operand, and it does
+  **not** reduce command substitutions, because both defects lived inside a `$( … )`. **Its own
+  first draft reported CLEAN on the very defect it exists for**, because every text call in these
+  scripts is spelled `LC_ALL=C grep …` so the text before the command word ends in `C` and no
+  spelling of "pipeline start" matched — caught by the positive control, which is why a control that
+  plants the EXACT shape (assignment prefix, inside a substitution) is the requirement and a clean
+  run is not.
+  **AND THE SAME RULE AT A DIFFERENT BYTE: AN ANSI STRIP MAY *LOCATE* A LINE AND MAY NEVER
+  *SUPPLY* A VALUE (#3751 round 15, U2).** All three of `premerge-assert.sh`'s awk readers deleted
+  every CSI sequence from every line BEFORE the closed grammar was applied to the fields that
+  deletion produced, so **a token spelt `PA<ESC>[31mSS` normalised into `PASS` and certified a
+  merge** — measured: a file whose `grep -c 'RESULT: PASS'` answers `0` published `token=PASS`.
+  Same class as the NUL, and the same sentence: *a transform that normalises its input cannot be
+  the thing that validates it.* **The strip is not gratuitous, so it was SPLIT rather than
+  deleted**: it exists for #3400 (colour survives redirection), and without it a coloured capture
+  fails every marker anchor and reports "no verdict line" for a document that has one. Each reader
+  now keeps **two readings** of each line — one with each CSI **deleted**, used to LOCATE and to
+  parse, and a second one used for ONE question: *did the strip CHANGE this line?*
+  **THE TRANSFERABLE RULE IS SEPARATE VERSUS JOIN**, and it decides which transforms are safe at
+  all: a `\r$` strip removes one byte where nothing follows, so it can only SEPARATE, while a CSI
+  deletion removes bytes from the MIDDLE and JOINS two runs the file keeps apart.
+  **WHAT ROUND 15 GOT WRONG WAS THE MEASUREMENT, NOT THE RULE (#3751 round 21, AA2):** it asked
+  the join question as a FIELD-MEMBERSHIP test — each field of the deleted reading must survive as
+  a whole field of a CSI-as-SEPARATOR reading — and **a CSI that BRACKETS a field satisfies that
+  test**, which is precisely what a colouring tool emits. So `RESULT: <CSI>PASS<CSI>` normalised
+  into `PASS` with the escape flag at **ZERO** and reached `PREMERGE: OK`: a line the declared
+  producer cannot emit, whose RAW token is not `PASS`, certifying a merge. **The class was
+  "compared the NORMALISED form", not one token** — all EIGHT fields of the verdict line had the
+  same hole, and so did the stage record's `head-sha:`, where a bracketed splice BOUND a stage to a
+  tree whose record carries no such sha in raw bytes. The two readers of `review-stage.sh`'s own
+  artifacts therefore ask an **IDENTITY** instead: the parsed line must be BYTE-IDENTICAL to the
+  line on disk minus the one trailing CR, so either it is refused or **every mandatory field IS the
+  raw field** and the closed grammar compares bytes nobody transformed — for all fields at once,
+  rather than being re-argued per field. That also closes a shape NO join test could reach: an ESC
+  forming no CSI at all (a bare `\033`, `\033(B`) is deleted by NEITHER reading, so the two agreed
+  while the token still carried an escape. The GATE summary KEEPS the **value-only join** form,
+  because a coloured capture is documented-legitimate input there and real colouring brackets the
+  KEY as readily as the value (`<ESC>[32mRESULT<ESC>[0m:`), which the identity form would red on.
+  Two rules for elsewhere: **state per reader which reads may NORMALISE (to locate) and which may
+  not (to supply a value)**, beside the code; and when a guard's own comment names the case it does
+  not catch — U2's did, calling a bracketing CSI benign — **treat that sentence as an unfiled
+  finding, not as a rationale.** **And the
+  trailing-CR strip is DELIBERATELY KEPT by the same rule**: `\r$` removes one byte where nothing
+  follows, so it can separate but never join — `PASS<CR>` is the token plus separator whitespace,
+  exactly as `PASS<TAB>` and `PASS   ` are — and the sibling reader `classify_report` reads all
+  three as the token too, so refusing it would have been a unilateral change to one of two readers
+  of one shape. **That reader differential is what made the call**: it FAILED on the ESC row
+  (`classify_report` reported `unrecognised result token 'PA?[31mSS'` while the awk published
+  `PASS`) and PASSED on the CR row, which named exactly one side as wrong. Two rules for elsewhere:
+  ask of every normalising transform whether it can **join**, not merely whether it changes bytes;
+  and when a differential says two readers disagree, **consolidate** — the fix belongs to whichever
+  side the shared rule condemns, and here that was decided by measurement rather than by whichever
+  one a reviewer named.
 - **ROBOREV LAST, and a later rebase VOIDS the roborev round (#3752).** The endgame order is
   **rebase → gate of record → C → roborev → `premerge-assert` → arm**, and the reason is a
   **BYTE ASYMMETRY** that decides it by itself: **a roborev round changes no bytes, so reviewing
@@ -2626,10 +3139,161 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   `Agent` tool**, so **C is spawned by the lead at the closer's `NEEDS-SPAWN` request** (the closer
   stops, emits a `NEEDS-SPAWN {role: spec-auditor, …}` packet, and the lead spawns `spec-auditor`
   then re-invokes with the verdict; a src-design fix respawns `sstable-developer` the same way).
+  **The closer `open`s the C stage BEFORE emitting that packet and carries the report path in it
+  (`report: <abs path>`, a REQUIRED field), so the lead's spawn and the closer's later read agree on
+  ONE path (#3751)** — a report written where nobody reads it is indistinguishable from no report at
+  all — and on re-invoke it reads `review-stage.sh verdict c --issue <N>`, **not the prose it was
+  re-invoked with**: a lead handing back a confident summary over a `NOT-RUN` stage is reporting a
+  review that did not happen.
+  **AND THE STAGE ARTIFACT IS BOUND TO THE CERTIFIED SHA, NOT ONLY THE WORKTREE (#3751 round
+  3).** `open` resolves `HEAD` and records it in the stage record as `head-sha:`, and AUTO
+  requires that RECORDED sha to equal the certified one IN ADDITION to requiring this
+  worktree's HEAD to. The two answer different questions and neither replaces the other: HEAD
+  == certified binds the WORKTREE and is satisfied BY CONSTRUCTION (a lane stands at the very
+  commit it certifies), so it cannot see a STALE ARTIFACT — a `result: PASS` recorded before a
+  further commit, an amend or a rebase persisted in `.review-stage/` and certified the NEW
+  tree. `--force` RE-STAMPS `head-sha` (deliberately unlike `spawned-at`, preserved so
+  elapsed-since-FIRST-spawn stays readable). A record with **no** `head-sha:`, **several** of
+  them, or a value that is not a 40-hex sha is a NAMED refusal, never a skip — an older record
+  predating the field must not read as certifying, which is the gate-of-record rule (any change
+  after the gate INVALIDATES it) applied to the intent audit; the remedy printed is always to
+  re-open the stage with `--force` and re-run C. **AND AUTO RESTS ON ONE OBSERVATION OF THAT
+  RECORD (#3751 round 9).** The `head-sha` was validated from one read and `review-stage.sh verdict`
+  then RE-READ the record to pick which report is current, so a replacement in between yielded a
+  verdict from a different GENERATION of the stage — measured, a success line naming
+  `stage-head=<the validated sha>` beside a report belonging to a generation whose own `head-sha`
+  was forty zeros. Two reads of one record are two different facts: the record is captured ONCE, the
+  `head-sha` is parsed from that capture rather than a second read, and the capture must still be
+  byte-identical before the token is parsed. A HANDOFF is deliberately not the fix — resolving the
+  report here and passing it to `verdict` would rebuild the control channel round 4 deleted with
+  `--report`, since nothing outside `review-stage.sh` may name which file holds a verdict.
+  **AND BYTE EQUALITY IS NOT IDENTITY — AN ABA REPLACEMENT DEFEATS THAT COMPARISON (#3751 round
+  10).** The record can go from the validated generation A to a foreign generation B while
+  `verdict` reads B, and BACK to A before the comparison: two identical observations, the check
+  passes, and the accepted verdict came from B. Equality of two observations is not identity of
+  the thing observed at a third instant. So the verdict is bound to the GENERATION itself, using a
+  value it already reports OUTWARD — its mandatory `report=` field carries that generation's nonce
+  (`<kind>.<nonce>.md`), which must equal the `report-nonce:` of the SAME capture `head-sha` was
+  parsed from. ABA cannot satisfy it: a verdict read from B returns B's nonce. Reading a value OUT
+  of the verdict line rebuilds no control channel — nothing is passed IN, `--report` stays deleted
+  — and the byte comparison is KEPT as defence in depth, since it catches what the nonce cannot (an
+  edit under the SAME nonce, a vanished record) and vice versa. Every state that cannot be bound
+  REFUSES BY NAME: a legacy record with no `report-nonce:`, several of them, an unusable token, a
+  `report=unresolved`, a foreign nonce. It gates the two tokens the closed grammar lets PROCEED,
+  because acceptance is the only thing that can certify — for every other token
+  `review-stage.sh`'s own cause is the more precise operator action.
   Before arming `gh pr merge --auto` the closer runs the scripted pre-merge assert
-  `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-of-record-summary> [<delta-summary>]`
-  (#2456/#3465) — refusing to merge unless the PR head still equals the certified SHA **AND** a gate
-  of record exists for it. Since #3752 it also runs two legs BEFORE its head check, both fail-closed
+  `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-of-record-summary> [<delta-summary>] --c-verdict <path|AUTO>`
+  (#2456/#3465/#3751/#3752) — refusing to merge unless the PR head still equals the certified SHA
+  **AND** a gate of record exists for it **AND** the C intent audit has a recorded verdict where C
+  is required — and re-reads comments for a fresh `HOLD:` order.
+  **`--c-verdict` IS REQUIRED AND HAS NO DEFAULT: OMITTING IT IS EXIT 3 (#3751)**, the #3465
+  precedent — a silent "C is not required" would reproduce, inside the enforcer, the exact defect the
+  enforcer exists to close. It is a NAMED flag rather than a fifth positional so it composes with
+  #3752's sibling required flag in EITHER landing order, and the missing-flag census names each
+  absent flag independently, so its exit 3 does not depend on being the only required flag. **AND
+  THE ROUTING IS MEASURED FROM THE CERTIFIED TREE, NEVER TAKEN FROM THE CALLER** — a
+  caller-supplied *"C does not apply here"* is precisely the escape hatch #3751 removes. `AUTO`
+  asks git what THIS BRANCH does to `openspec/changes/`: the diff between
+  merge-base(`origin/main`, `<certified>`) and `<certified>`, with `openspec/changes/archive/**`
+  excluded (archiving is flow-finalize's work, not a routing signal). Non-empty ⇒ design-routed ⇒
+  **C REQUIRED**, and an absent or `NOT-RUN` verdict REFUSES the merge naming the stage and the
+  cause; empty ⇒ affirmatively `c-verdict: NOT-APPLICABLE (no openspec change on branch)`. **PURE
+  DELETIONS ARE EXCLUDED TOO (`--diff-filter=d`, #3751 round 1).** Rename detection is pinned OFF
+  deliberately, so a real `openspec archive` MOVE appears as a DELETION from
+  `openspec/changes/<slug>/` plus an ADDITION under `archive/` — the addition is excluded, so
+  counting the deletion made every archive-only finalize PR read design-routed and REFUSE for want
+  of a C verdict: a false refusal on correct, doctrine-mandated input. A path that is ONLY deleted
+  also contributes nothing to audit, since there is no spec delta at the certified tree for C to
+  anchor to; every ADDED or MODIFIED path under a live change still routes to C. **A plain
+  LISTING of `openspec/changes/` cannot answer it** (measured 2026-09-01: `origin/main` carries
+  `archive` PLUS two sibling lanes' in-flight change directories, so every branch would read
+  design-routed and the "measurement" would be vacuous), and the base is the **MERGE-BASE, never
+  `origin/main`'s TIP** (#3392: a tip comparison reports another lane's newly-landed change as a
+  difference of THIS branch and reds a correct oracle-driven PR). **AND THE PATHSPEC IS
+  ROOT-ANCHORED — `:(top)openspec/changes/` — BECAUSE `diff.relative=false` DOES NOT DO THAT
+  (#3751 round 11).** A bare pathspec is interpreted relative to the CALLER'S CWD, so run from a
+  repository subdirectory the routing diff came back EMPTY, a genuinely design-routed branch
+  measured `NOT-APPLICABLE`, and the merge PROCEEDED with no C verdict at all — the exact escape
+  `--c-verdict` exists to close, reached by nothing more exotic than the working directory
+  (measured: `PREMERGE: OK`, exit 0, from `cqlite-core/src/storage` on the same repository, sha and
+  argv where the root invocation refuses with `routing: REQUIRED`). `diff.relative` is a DIFFERENT
+  AXIS: it controls the OUTPUT PATH PREFIX, not pathspec interpretation — measured, from a
+  subdirectory `-c diff.relative=false diff … -- openspec/changes/` is STILL empty while
+  `-- ':(top)openspec/changes/'` finds the path — so BOTH are pinned and neither substitutes for
+  the other: `:(top)` anchors what is SELECTED, `diff.relative=false` keeps what is PRINTED
+  root-relative (which the `archive/` prefix test and the slug extraction depend on). The
+  generalisation: **a pinned config option is a claim about ONE axis, and "cwd cannot change this
+  answer" needs the axis your call actually uses** — `base-staleness.sh`'s identical pin IS the
+  **AND THE WHOLE C CHECK RUNS TWICE, BECAUSE A CHECK MUST BE INSIDE THE WINDOW IT CERTIFIES
+  (#3751 round 16).** It was validated ONCE near the top, and then the base-staleness advisory
+  (bounded at 65s) and the `gh pr view` round trip ran with NOTHING re-checking it — so a
+  concurrent `review-stage.sh open --force` superseded the validated PASS and the script still
+  certified (measured on the shipped artifact, supersede planted immediately after the single
+  evaluation: `PREMERGE: OK b5f49d60aae4…` at exit 0, while `review-stage.sh verdict` read an
+  instant later reported the FRESH generation). **The remedy is roborev job 290's, verbatim** — the
+  same ruling that governs the gate's own component-set pre-flight: **REPEAT the check inside the
+  window and KEEP the earlier one**, the early call being what stops an uncertifiable run paying
+  for the advisory and the network call at all. The repeat **RESETS** its captured observation, so
+  the single-observation and generation bindings are taken AFRESH rather than inherited from before
+  the window; a disagreement **REFUSES naming the field that moved**, never a second opinion and
+  never last-one-wins. **A repeat is not a comparison, and only the comparison catches the
+  interesting case**: a supersede to a DIFFERENT generation that itself PASSES at the same head
+  returns an accepting token from an audit this run never validated, which running the check twice
+  would certify. **And a refusal's own prose may not reproduce the success marker** — this fix's
+  first draft said *"runs immediately before `PREMERGE: OK`"*, so a grep saw certification inside a
+  refusal (#3312's rule that a diagnostic must not print the marker it describes), caught only
+  because the test asserts NO such line is emitted at all rather than checking the exit code.
+  **Residual, DECLARED: two checks cannot both be last** — the C window narrows to a local git
+  measurement plus one `review-stage.sh` read and is NOT closed, and the `gh` head/state check is
+  correspondingly no longer the last thing before the success emit.
+  whole cwd story there only because that scan passes NO pathspec at all. **Any failure to measure — no git,
+  no `origin/main`, the certified commit absent from this checkout — is `UNMEASURED` and is TREATED
+  AS REQUIRED**: never derive a pass from the absence of a bad signal. There is deliberately NO
+  spelling of the flag that means "not applicable": a supplied PATH can only carry a review-stage
+  verdict token, so a file asserting `NOT-APPLICABLE` is refused as an unrecognised token, and
+  inapplicability is reachable ONLY through AUTO's measurement. **TWO BINDINGS MAKE `AUTO` THE
+  INTENDED FORM, AND BOTH WERE ADDED AFTER A REVIEW FOUND THEM ABSENT (#3751 round 1).** `AUTO`
+  locates the stage in the CURRENT worktree, so the stage must be BOUND to the tree being merged:
+  this worktree's `HEAD` must EQUAL the certified commit, else the merge REFUSES naming the
+  divergence. On this fleet every lane is a worktree of ONE shared `.git`, so a PEER lane's
+  certified commit RESOLVES from any lane — `rev-parse`, `merge-base` and the routing diff all
+  succeed against a commit that has nothing to do with the `.review-stage/` records in *this*
+  directory, which is #3616's peer-artifact class one directory over. **Resolvability is not
+  provenance.** Rule 1 already asserts `headRefOid == certified`, so HEAD == certified binds the
+  local artifact to THIS PR transitively, and correct input is unaffected (the closer pushes, then
+  asserts, in the lane it just certified). Second binding: the verdict line is validated against its
+  WHOLE documented grammar — `REVIEW-STAGE: <kind> RESULT: <token> elapsed=<n> deadline=<n>
+  agent=<t> report=<abs>` — with the **stage KIND compared by STRING EQUALITY**, each mandatory
+  key required EXACTLY ONCE, **and each one's VALUE measured** (round 7's L3: the census only
+  COUNTED, so a `PASS` line ending in a BARE `report=` was ACCEPTED — "counted, not measured". The
+  permitted set is DERIVED FROM WHAT THE EMITTER PRODUCES, which is what stops it redding on correct
+  input: digits or `unknown` for the two clocks, non-empty for `agent`/`report`, so round 6's honest
+  `unknown`/`unresolved` and a legitimate `deadline=0` all still pass). **`report=` IS READ AS THE
+  REMAINDER OF THE LINE, NOT AS ONE FIELD (round 11, Q3)** — it carries an absolute PATH, and a path
+  may legitimately contain WHITESPACE (a checkout at `/tmp/work tree`; this repo tracks 40
+  space-bearing paths under `docs/`), so a field read TRUNCATED it at the first space and the
+  generation binding above then REFUSED an otherwise VALID verdict: a false refusal on correct
+  input, measured on the shipped artifacts as `verdict reported: /tmp/…/work` beside a `validated
+  generation:` that was exactly the one the verdict named. **The remainder rule is sound ONLY
+  because `report=` is emitted LAST, so that assumption is ENFORCED, not assumed**: the emitter's 11
+  states are DERIVED by RUNNING it, no mandatory key may follow `report=` on any line it produces,
+  and its single emit site is pinned structurally — append a field after `report=` and the suite reds
+  instead of verdicts silently truncating again. The generalisation: **a parser that reads a
+  PATH-valued field positionally has a whitespace bug waiting; either take the remainder and pin the
+  field's position, or do not put a path on a positional line.** "Somewhere on this line it says `RESULT: PASS`" is not a verdict about
+  C: measured on #3751's own branch, a sibling `code-review` stage's PASS line satisfied
+  `--c-verdict`, and a truncated capture with no `elapsed=`/`agent=`/`report=` did too. Only `PASS`
+  and `AUTHOR-PERFORMED`
+  proceed; the second is printed **under its own token on a `PREMERGE: C-VERDICT` line and is NEVER
+  folded into `PREMERGE: OK`**, for the same reason the roborev wrapper's `WAIVED` is distinct from
+  `PASS` — a reader must be able to see that the intent audit was performed by the diff's author.
+  **AND UNDER `AUTO` A SUBSTITUTE MAY NOT STAND OVER A BLOCKING INDEPENDENT VERDICT (#3751 round
+  22, AB1)**: every generation of the stage is censused and the merge REFUSES, naming the
+  generation and its nonce, if a SUPERSEDED one records `result: FINDINGS` — see the
+  `record-author-performed` paragraph above for why that check lives at the merge point and what it
+  does NOT close.
+  Since #3752 it also runs two legs BEFORE its head check, both fail-closed
   and both refusing on `UNMEASURED` (a positive verdict requires a positive measurement):
   **`PREMERGE: REVIEW-BINDING`** — the roborev job recorded on the PR must have a reviewed head that
   is an ANCESTOR of the certified sha (`git merge-base --is-ancestor` is the load-bearing test and
@@ -2904,7 +3568,11 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   is the same class and is worse because the INVOKER controls it: set, porcelain run from a
   subdirectory strips the prefix, making the count a function of cwd. Both are pinned off on the
   porcelain call; **do NOT add `-M` to the `diff-tree` call**, which would reintroduce the asymmetry
-  from the other direction. `premerge-assert.sh` prints the finding on
+  from the other direction. **That pin is the WHOLE cwd story here ONLY because this scan passes no
+  PATHSPEC** — it takes the diff's paths wholesale and intersects them in shell. Where a pathspec IS
+  passed, `diff.relative=false` does NOT make the call cwd-independent (it governs the printed
+  prefix, not pathspec interpretation) and `:(top)` is needed as well; that gap merged unnoticed
+  into the C-routing measure and is recorded under `--c-verdict AUTO` above (#3751 round 11). `premerge-assert.sh` prints the finding on
   `PREMERGE: ADVISORY` lines and **can never fail on it** — an absent, failing or `UNMEASURED`
   advisory is REPORTED and is not fatal in slice 1 — and the three `PREMERGE: SCOPE` lines are
   RETAINED, because slice 1 does not close the gap they disclose. Three properties to carry:
