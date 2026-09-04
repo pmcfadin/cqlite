@@ -633,7 +633,16 @@ done
 
 # CONTROL: a remote with NO userinfo must pass through UNCHANGED, or the redaction would make
 # every ordinary diagnostic unreadable — the over-redaction failure mode.
-out16c=$( cd "$T" && CLAIM_REMOTE="$ORIGIN" LANE_ROOT="$LANE_ROOT" bash "$SCAN" 2>&1 )
+#
+# THIS CONTROL MUST MOCK gh LIKE EVERY OTHER CASE IN THIS SUITE, AND IT DID NOT. The line that
+# prints the remote unredacted is the SUCCESS summary (`remote=…`); when the board read fails
+# the scan takes the unmeasurable path and never prints it. Without a mock this invocation used
+# the REAL gh, so the assertion silently depended on GitHub being reachable and unthrottled —
+# and it duly red the whole suite the first time this box hit a GraphQL rate limit, with
+# nothing wrong in the code under test. A gate-wired hermetic suite that reds on someone else's
+# API quota is the guard agents learn to waive, and the fix is the mock the suite already has.
+GH16C="$T/gh-ctl-redact"; mk_gh "$GH16C" 600
+out16c=$( cd "$T" && PATH="$GH16C:$PATH" CLAIM_REMOTE="$ORIGIN" LANE_ROOT="$LANE_ROOT" bash "$SCAN" 2>&1 )
 if printf '%s' "$out16c" | grep -qF "$ORIGIN" && ! printf '%s' "$out16c" | grep -q '\*\*\*@'; then
   ok "control: a remote with no userinfo is printed unchanged — the redaction does not over-reach"
 else
