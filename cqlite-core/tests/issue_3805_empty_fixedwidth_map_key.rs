@@ -49,10 +49,24 @@
 //!     for a text type (`AbstractTextSerializer.java:72-77` overrides `isNull`
 //!     precisely to say so), represented natively, NEVER as a sentinel. This is
 //!     the contrast that proves the change did not go too wide.
-//!   * `inet` → `Value::Inet(b"")`. Pre-existing and unchanged: its serializer
-//!     RETURNS EARLY on empty, so the decode succeeds and never reaches the arm
-//!     slice 2 changed. It must never be described as a second instance of the
-//!     defect.
+//!   * `inet` → `Value::Empty(Inet)`, and `varint` likewise. Their DECODE always
+//!     succeeded (`InetAddressSerializer.java:52-55` returns early on empty;
+//!     `IntegerSerializer.java:31-34` accepts everything), so slice 2's gate —
+//!     which fired only on a decode FAILURE — never reached them and they kept
+//!     the family's own native empty spelling. `for_cql_type` ADMITS both, so
+//!     that was a SECOND spelling of one value (#4079), and roborev job 449
+//!     finding C closed it by consulting the gate BEFORE the decode. Note what
+//!     this is and is not: it is a REPRESENTATION defect, never the
+//!     refuse-or-blob defect the committed schema's `m_inet` note denies — CQLite
+//!     always decoded an empty `inet` key, and this lane still proves it does.
+//!     It matters because the representation was USER-VISIBLE: both bindings
+//!     REJECT a zero-length `Inet` (`cqlite_ffi_common::inet::inet_kind` admits
+//!     only 4 and 16, with no passthrough branch by #28 mandate; pinned by
+//!     `inet/malformed-empty` in `cqlite-ffi-common/src/vectors/tables.rs`, a
+//!     table driven through the FULL Python and Node value dispatches), while
+//!     `Value::Empty(_)` renders as `""` on both
+//!     (`bindings/python/src/value.rs:52`, `bindings/node/src/value.rs:217`) —
+//!     which is what `sstabledump` and `SELECT JSON` emit.
 //!   * `tinyint`/`smallint`/`date`/`time` are ABSENT from the fixture BY
 //!     CONSTRUCTION — `blobAsX(0x)` is refused by cqlsh for exactly those four,
 //!     so Cassandra cannot write such a key. This lane says nothing about them
@@ -219,7 +233,32 @@ const FROZEN_DECL_COMMITTED: &str = "m_frozen frozen<map<int, int>>";
 #[cfg(feature = "cli-helpers")]
 const FROZEN_DECL_SUBSTITUTED: &str = "m_frozen frozen<map<blob, int>>";
 
-/// Write the substituted schema into `dir` and return its path.
+/// THE SECOND DECLARED SUBSTITUTION, used by ONE lane: `m_inet` re-declared as
+/// `map<varint, int>`.
+///
+/// # Why a substitution rather than a fixture column
+/// `varint` is the OTHER family roborev job 449 finding C normalizes (#4079),
+/// and no committed Cassandra-written fixture in this repository carries a
+/// `map<varint, …>` column with an empty key — regenerating fixtures is out of
+/// this change's scope. What the substitution reinterprets is real
+/// Cassandra-written bytes, and for the SUBJECT of this lane it reinterprets
+/// nothing at all: **the empty cell path is zero bytes under every declared key
+/// type**, so "Cassandra wrote a zero-length cell path and CQLite must render it
+/// as `Empty(Varint)` when the declared key type is `varint`" is tested on the
+/// real thing. Only the SIBLING entry is a reinterpretation — the four bytes
+/// `0a 00 00 01` that mean `10.0.0.1` under `inet` mean the integer 167772161
+/// under `varint` — so this lane asserts that sibling only as the RAW BYTES it
+/// is, and asserts nothing that depends on `inet` semantics.
+///
+/// The unit-level counterpart, on synthesised bytes, is
+/// `regression_3747_empty_map_key_tests::varint_and_inet_empty_keys_are_the_typed_sentinel_closing_4079`.
+#[cfg(feature = "cli-helpers")]
+const INET_DECL_COMMITTED: &str = "m_inet   map<inet, int>";
+#[cfg(feature = "cli-helpers")]
+const INET_DECL_AS_VARINT: &str = "m_inet   map<varint, int>";
+
+/// Write a COPY of the committed schema into `dir`, with each `(from, to)`
+/// applied EXACTLY ONCE, and return its path.
 ///
 /// Isolation: the result is handed to `IngestionConfig::schema_paths`, a
 /// PER-READ parameter, so nothing process-wide is touched. `CQLITE_SCHEMAS_ROOT`
@@ -228,35 +267,45 @@ const FROZEN_DECL_SUBSTITUTED: &str = "m_frozen frozen<map<blob, int>>";
 /// process-global-state lesson) and would need `#[serial_test::serial]` plus a
 /// restore to be merely survivable.
 ///
-/// Fail-closed on the substitution itself: EXACTLY ONE occurrence of the
-/// committed declaration must be found (a reflowed or renamed schema must red
-/// here, not silently produce an unsubstituted copy), and `m_dec`'s real
-/// `decimal` declaration must survive.
+/// FAIL-CLOSED on every substitution: EXACTLY ONE occurrence of each `from` must
+/// be found and none may survive (a reflowed or renamed schema must RED here,
+/// never silently produce an unsubstituted copy), and `m_dec`'s real `decimal`
+/// declaration must survive whatever the caller asked for — the admission-gate
+/// move is asserted against the committed type in every lane.
 #[cfg(feature = "cli-helpers")]
-fn schema_with_the_frozen_blocker_stepped_past(dir: &Path) -> PathBuf {
+fn schema_with_substitutions(dir: &Path, subs: &[(&str, &str)]) -> PathBuf {
     let committed = schema_path();
-    let cql = std::fs::read_to_string(&committed)
+    let mut cql = std::fs::read_to_string(&committed)
         .unwrap_or_else(|e| panic!("committed schema {committed:?} unreadable: {e}"));
-    assert_eq!(
-        cql.matches(FROZEN_DECL_COMMITTED).count(),
-        1,
-        "expected EXACTLY ONE {FROZEN_DECL_COMMITTED:?} in {committed:?} — if the committed \
-         schema was reflowed or the column renamed, this substitution must be re-derived \
-         rather than silently skipped"
-    );
-    let substituted = cql.replace(FROZEN_DECL_COMMITTED, FROZEN_DECL_SUBSTITUTED);
+    for (from, to) in subs {
+        assert_eq!(
+            cql.matches(from).count(),
+            1,
+            "expected EXACTLY ONE {from:?} in {committed:?} — if the committed schema was \
+             reflowed or the column renamed, this substitution must be re-derived rather \
+             than silently skipped"
+        );
+        cql = cql.replace(from, to);
+        assert!(
+            !cql.contains(from),
+            "the substitution {from:?} -> {to:?} did not take"
+        );
+    }
     assert!(
-        substituted.contains("m_dec    map<decimal, int>"),
+        cql.contains("m_dec    map<decimal, int>"),
         "m_dec must keep its REAL decimal declaration: the admission-gate move is \
          asserted against the committed type, never a substituted one"
     );
-    assert!(
-        !substituted.contains(FROZEN_DECL_COMMITTED),
-        "the substitution did not take"
-    );
     let path = dir.join(SCHEMA);
-    std::fs::write(&path, substituted).expect("writing the throwaway schema");
+    std::fs::write(&path, cql).expect("writing the throwaway schema");
     path
+}
+
+/// The frozen-blocker substitution alone — what every lane needs before it can
+/// read this fixture at all.
+#[cfg(feature = "cli-helpers")]
+fn schema_with_the_frozen_blocker_stepped_past(dir: &Path) -> PathBuf {
+    schema_with_substitutions(dir, &[(FROZEN_DECL_COMMITTED, FROZEN_DECL_SUBSTITUTED)])
 }
 
 /// `(id, column) -> Value` for every fixture row via the PUBLIC
@@ -414,7 +463,7 @@ fn declared_blocker(err: &str) -> Option<&'static (&'static str, &'static str, &
 /// `m_bigint = Map([(Empty(BigInt), 7), (BigInt(99), 1)])`,
 /// `m_uuid = Map([(Empty(Uuid), 7), (Uuid(123e4567-…), 1)])`,
 /// `m_bool = Map([(Empty(Boolean), 7), (Boolean(true), 1)])`,
-/// `m_inet = Map([(Inet(b""), 7), (Inet(10.0.0.1), 1)])`,
+/// `m_inet = Map([(Empty(Inet), 7), (Inet(10.0.0.1), 1)])`,
 /// `m_text = Map([(Text(b""), 7), (Text("k"), 1)])`, and
 /// `m_dec = Map([(Empty(Decimal), 7), (Decimal{scale:1,unscaled:[0x0f]}, 1)])`.
 /// Pre-fix the four fixed-width sentinels were each `Blob(b"")` — one opaque
@@ -514,12 +563,30 @@ async fn an_empty_fixed_width_map_key_reads_as_the_typed_sentinel() {
             "row id=1 m_text must carry NO sentinel of any family: {m_text:?}"
         );
     }
+    // `inet` IS a sentinel family (roborev job 449 finding C, #4079) — its
+    // DECODE always succeeded, which is why the gate had to move above the
+    // decode to reach it. Both halves are asserted: the empty key is
+    // `Empty(Inet)`, and the NON-EMPTY sibling keeps its native `Inet` spelling,
+    // so the normalization is a property of the EMPTY cell path and not of the
+    // family.
     let m_inet = map_entries(&rows, 1, "m_inet");
     assert_eq!(
-        m_inet.get(&format!("{:?}", Value::inet(Vec::<u8>::new()))),
+        m_inet.get(&format!("{:?}", Value::Empty(EmptyValueType::Inet))),
         Some(&Value::Integer(7)),
-        "row id=1 m_inet: pre-existing and UNCHANGED — Inet(b\"\"), never the sentinel: \
-         {m_inet:?}"
+        "row id=1 m_inet: the empty key is the TYPED sentinel — a zero-length Inet is \
+         REJECTED by both bindings, so the native spelling was a user-visible defect \
+         (#4079): {m_inet:?}"
+    );
+    assert!(
+        !m_inet.contains_key(&format!("{:?}", Value::inet(Vec::<u8>::new()))),
+        "row id=1 m_inet: the zero-length Inet spelling must be GONE, not merely \
+         joined by the sentinel: {m_inet:?}"
+    );
+    assert_eq!(
+        m_inet.get(&format!("{:?}", Value::inet(vec![10u8, 0, 0, 1]))),
+        Some(&Value::Integer(1)),
+        "row id=1 m_inet: the golden's 10.0.0.1 sibling keeps its NATIVE Inet \
+         spelling: {m_inet:?}"
     );
 
     // THE CONTRAST ROW. No empty key anywhere in the golden, so no sentinel may
@@ -539,6 +606,72 @@ async fn an_empty_fixed_width_map_key_reads_as_the_typed_sentinel() {
              appear: {entries:?}"
         );
     }
+}
+
+/// The `varint` half of finding C, through the same public `Database::execute`
+/// surface (#4079).
+///
+/// `varint` and `inet` are the two families whose empty buffer DECODES
+/// successfully — `IntegerSerializer.java:31-34` returns null on empty and its
+/// `validate` body is the comment `// no invalid integers.`, so nothing about a
+/// zero-length varint is refusable — which is exactly why the pre-fix gate, sited
+/// in the decoder's `Err` arm, could never reach either of them. `inet` is
+/// asserted on its own committed column above; `varint` has no committed column,
+/// so this lane re-declares `m_inet`'s KEY TYPE (see [`INET_DECL_AS_VARINT`] for
+/// what that does and does NOT reinterpret — the empty cell path is zero bytes
+/// under every declared key type, so the SUBJECT is untouched Cassandra output).
+///
+/// # RED-verified
+/// With the admission gate returned to the decoder's `Err` arm this lane fails
+/// with `Varint(b"")` in place of `Empty(Varint)`.
+#[cfg(feature = "cli-helpers")]
+#[tokio::test]
+async fn an_empty_varint_map_key_reads_as_the_typed_sentinel() {
+    let dir = tempfile::tempdir().expect("a temp dir for the substituted schema");
+    let schema = schema_with_substitutions(
+        dir.path(),
+        &[
+            (FROZEN_DECL_COMMITTED, FROZEN_DECL_SUBSTITUTED),
+            (INET_DECL_COMMITTED, INET_DECL_AS_VARINT),
+        ],
+    );
+    // FAIL-CLOSED: no excusing arm. Any error is a failure.
+    let rows = select_star(schema)
+        .await
+        .unwrap_or_else(|err| panic!("the fixture failed to read under map<varint,int>: {err}"));
+
+    let entries = map_entries(&rows, 1, "m_inet");
+    assert_eq!(
+        entries.get(&format!("{:?}", Value::Empty(EmptyValueType::Varint))),
+        Some(&Value::Integer(7)),
+        "row id=1 m_inet-as-varint: the golden's path:[\"\"] entry must be Empty(Varint), \
+         never the native Varint(b\"\") second spelling (#4079): {entries:?}"
+    );
+    assert!(
+        !entries.contains_key(&format!("{:?}", Value::varint(Vec::<u8>::new()))),
+        "row id=1 m_inet-as-varint: the zero-length Varint spelling must be GONE: \
+         {entries:?}"
+    );
+    // The SIBLING is asserted only as the RAW BYTES it is — `0a 00 00 01`, which
+    // this declaration reads as a varint. Its VALUE means nothing here; its
+    // presence is what makes a failure legible (a map short one entry is
+    // distinguishable from a missing column), and its NATIVE spelling is what
+    // shows the normalization is a property of the EMPTY cell path.
+    assert_eq!(
+        entries.get(&format!(
+            "{:?}",
+            Value::varint(vec![0x0a, 0x00, 0x00, 0x01])
+        )),
+        Some(&Value::Integer(1)),
+        "row id=1 m_inet-as-varint: the non-empty sibling keeps its NATIVE Varint \
+         spelling: {entries:?}"
+    );
+    // THE CONTRAST ROW carries no empty key, so no sentinel may appear.
+    let contrast = map_entries(&rows, 2, "m_inet");
+    assert!(
+        !contrast.keys().any(|k| k.starts_with("Empty(")),
+        "row id=2 m_inet-as-varint: the CONTRAST row has no empty key: {contrast:?}"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
