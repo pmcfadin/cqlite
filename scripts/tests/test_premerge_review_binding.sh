@@ -2290,6 +2290,65 @@ if run_binding 5 "4050(e): an AUTHORIZED deferral over an uncountable record is 
   esac
 fi
 
+# --- (f) an ABSENT shared recogniser is UNMEASURED, never a bind and never a skip
+# The library is resolved from this script's OWN `lib/` directory with no override, so the
+# case SUBSTITUTES THE ARTIFACT in a scratch flow copy rather than pointing a variable
+# somewhere — a path variable would be one more seam a real invoker could set. It must
+# refuse UNMEASURED (an absent library says NOTHING about whether a human authorized the
+# deferral) and it must NAME the library, or the operator cannot act on it.
+FLOW_NOLIB="$T/scripts/flow-nolib"   # beside scripts/ci, which the leg resolves as ../ci
+mkdir -p "$FLOW_NOLIB"
+nolib_ready=1
+for f in premerge-review-binding.sh premerge-pr-scan.py roborev-job-facts.py \
+  roborev-waiver-scan.py roborev-review-oracles.sh base-staleness.sh; do
+  cp "$FLOW/$f" "$FLOW_NOLIB/$f" || nolib_ready=0
+done
+chmod +x "$FLOW_NOLIB"/*.sh "$FLOW_NOLIB"/*.py 2>/dev/null
+# Measured AFFIRMATIVELY: the SIBLING must be present (the copy ran, the directory reads)
+# while the library is not, so an absent verdict cannot come from a mis-staged fixture.
+nolib_sib=0
+nolib_gone=0
+[ -f "$FLOW_NOLIB/premerge-review-binding.sh" ] && nolib_sib=1
+[ -e "$FLOW_NOLIB/lib/roborev-findings-count.sh" ] || nolib_gone=1
+if [ "$nolib_ready" -ne 1 ]; then
+  bad "recogniser-absent fixture: could not stage the substitute flow directory"
+elif [ "$nolib_sib" -eq 1 ] && [ "$nolib_gone" -eq 1 ]; then
+  ok "recogniser-absent fixture: the substitute reads (sibling present) and the shared recogniser is absent"
+  pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 646)" pmcfadin \
+    "$(defer_marker 3602,3613 2 "$MB_MAIN" "$HEAD_AFTER" 646 'both filed and lead-deferred')"
+  roborev_job 646 "$MB_MAIN" "$HEAD_AFTER" F done 2026-09-02T10:00:00Z "$FC_REVIEW2"
+  NL_OUT=$(cd "$WORK" && PATH="$BIN:$PATH" bash "$FLOW_NOLIB/premerge-review-binding.sh" \
+    review-binding 1 o/r "$HEAD_AFTER" 2>&1)
+  NL_RC=$?
+  if [ "$NL_RC" -ne 5 ]; then
+    bad "4050(f): an absent shared recogniser did not refuse UNMEASURED (exit $NL_RC, wanted 5): $NL_OUT"
+  else
+    ok "4050(f): an absent shared recogniser is UNMEASURED (exit 5) — it says nothing about the authorization"
+    case "$NL_OUT" in
+      *"lib/roborev-findings-count.sh"*)
+        ok "4050(f): the cause NAMES the library, so a broken checkout is actionable" ;;
+      *) bad "4050(f): the cause did not name the missing library (got: $NL_OUT)" ;;
+    esac
+    case "$NL_OUT" in
+      *"verdict BOUND"*)
+        bad "4050(f): a run that could not load the recogniser still BOUND (got: $NL_OUT)" ;;
+      *) ok "4050(f): no bind is possible without the recogniser" ;;
+    esac
+  fi
+  # POSITIVE CONTROL, one property different: the SAME fixture through the COMPLETE flow copy
+  # binds. Without it, the refusal above could be caused by anything in the substitute tree.
+  if run_binding 0 "4050(f) control: the same fixture through the COMPLETE flow copy BINDS" \
+    review-binding 1 o/r "$HEAD_AFTER"; then
+    case "$OUT" in
+      *"verdict BOUND"*)
+        ok "4050(f) control: the refusal above is attributable to the missing library alone" ;;
+      *) bad "4050(f) control: the complete copy did not bind, so the refusal is unattributable (got: $OUT)" ;;
+    esac
+  fi
+else
+  bad "recogniser-absent fixture: the substitute was not in the expected state (sibling=$nolib_sib absent=$nolib_gone)"
+fi
+
 # --- G3: an authorized deferral naming a CLOSED issue must NOT bind -----------
 # `gh issue view` EXITS 0 for a closed issue, so a number-only test made "the
 # finding is tracked" satisfiable by an issue closed as a duplicate weeks ago —
@@ -2526,7 +2585,7 @@ fi
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.
-CASE_FLOOR=167
+CASE_FLOOR=172
 TOTAL=$((PASSED + FAILED))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"

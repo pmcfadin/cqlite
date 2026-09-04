@@ -8968,6 +8968,52 @@ if [ "$_fg_ok" -eq 1 ]; then
   ok 'structural (#4050): both consumers guard the shared recogniser with the IDENTICAL -f AND -r predicate, resolved from their own directory with no override'
 fi
 
+printf '== (#4050) an ABSENT shared recogniser FAILS the wrapper CLOSED, with a verdict ==\n'
+# ===========================================================================
+# The guard names the cause on stderr and deliberately does NOT `return`: the wrapper runs
+# under `set -e`, so a non-zero source would abort it with exit 1 and NO SUMMARY BLOCK — a
+# verdict-less exit, which is the one thing these scripts may never do. Instead
+# `roborev_findings_count` stays undefined and the wrapper's EXISTING required-function loop
+# fails closed with a named ERROR before any review is enqueued. Both halves are asserted,
+# because "it printed a warning" and "the run cannot reach PASS" are different claims and
+# only the second one is the guard.
+#
+# THE CONTROL RUNS FIRST: the same scratch copy WITH the library must reach PASS on the same
+# fixture, or a FAIL below would be satisfied by a copy that was simply staged wrong.
+reset_stub
+_fl_dir="$tmp/flow-without-findings-lib"
+mkdir -p "$_fl_dir"
+cp "$WRAPPER_REAL" "$ORACLES_SRC" "$CHECKS_SRC" "$SCAN_TOOL" "$_fl_dir/"
+if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
+  cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_fl_dir/"
+fi
+copy_flow_lib "$_fl_dir"
+work=$(make_fixture case_fl4050 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper --wrapper "$_fl_dir/roborev-review.sh" "$work"
+assert_verdict 'case (fl4050 control) the copy WITH the shared recogniser reaches PASS' PASS 0
+# ...now remove ONLY the library. The absence is measured AFFIRMATIVELY rather than with a bare
+# `[ ! -f ]`: the SIBLING must still be present (proving the directory reads and the copy ran)
+# while the library is not — the two-valued collapse this suite refuses everywhere else.
+rm -f "$_fl_dir/lib/roborev-findings-count.sh"
+_fl_sib=0
+_fl_gone=0
+[ -f "$_fl_dir/roborev-review-checks.sh" ] && _fl_sib=1
+[ -e "$_fl_dir/lib/roborev-findings-count.sh" ] || _fl_gone=1
+if [ "$_fl_sib" -eq 1 ] && [ "$_fl_gone" -eq 1 ]; then
+  ok 'case (fl4050) fixture: the substitute reads (sibling present) and the shared recogniser is absent'
+  run_wrapper --wrapper "$_fl_dir/roborev-review.sh" "$work"
+  assert_verdict 'case (fl4050) an absent shared recogniser FAILs the wrapper' FAIL 1
+  assert_says 'case (fl4050) the wrapper names the missing function, so the cause is actionable' \
+    'did not define roborev_findings_count'
+  assert_says 'case (fl4050) and it points at the shared library rather than only at the checks file' \
+    'lib/roborev-findings-count\.sh'
+  assert_lacks 'case (fl4050) it never reaches PASS with the findings count unmeasurable' '^RESULT: PASS'
+else
+  bad 'case (fl4050) fixture: could not stage a flow copy with the shared recogniser removed, so the fail-closed path was never exercised'
+fi
+reset_stub
+
 printf '== hermeticity: the wrapper never reaches a real roborev ==\n'
 reset_stub
 if grep -qE '^\s*roborev (review|show|list)' "$WRAPPER_REAL"; then

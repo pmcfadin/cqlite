@@ -53,7 +53,12 @@
 # unless every required function exists and that name is enrolled in the same list, so the
 # result is a named ERROR + `finish FAIL 1` before any review is enqueued — never a
 # silently no-op findings check.
-ROBOREV_FINDINGS_COUNT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/roborev-findings-count.sh"
+# THE RESOLUTION CANNOT ABORT THE WRAPPER. It runs under `set -e`, where an assignment whose
+# command substitution fails is FATAL — and a fatal exit here is a verdict-less exit, with no
+# summary block at all. So a failed `cd` degrades to an EMPTY directory, whose guard then fails
+# and routes to the named, block-emitting refusal below.
+_rfc_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || _rfc_dir=""
+ROBOREV_FINDINGS_COUNT_LIB="$_rfc_dir/lib/roborev-findings-count.sh"
 if { [ -f "$ROBOREV_FINDINGS_COUNT_LIB" ] && [ -r "$ROBOREV_FINDINGS_COUNT_LIB" ]; }; then
   # shellcheck source=lib/roborev-findings-count.sh
   . "$ROBOREV_FINDINGS_COUNT_LIB"
