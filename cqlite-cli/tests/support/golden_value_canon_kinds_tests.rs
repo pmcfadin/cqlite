@@ -540,3 +540,75 @@ fn the_recursion_reaches_a_nested_leaf_and_keeps_the_positional_null_rule() {
     let (json, csv) = matches_both(&null_slot, &ty);
     assert!(json && csv, "a null tuple slot is legal at any depth");
 }
+
+// =======================================================================
+// Completeness: a new declared-type variant cannot join this suite silently
+// =======================================================================
+
+/// Which case above asks about this declared type's arm.
+///
+/// The match is EXHAUSTIVE over [`CqlType`], so adding a variant does not compile
+/// until somebody names the case that covers it — the "derive, never curate" rule
+/// applied to a suite whose subject set is a Rust enum, and the reason this suite
+/// exists at all: `canon_matches_declared_kinds` grew four arms (roborev jobs 60,
+/// 72, 105 and this issue's) with no test naming any of them.
+///
+/// Like `scripts/tests/workspace-test-disposition.txt`, it records COMPLETENESS AND
+/// LABELING, not truth: it cannot check that the named case really exercises the
+/// arm, only that a decision was taken for every variant. That is deliberately the
+/// weaker claim, and it is the half a compiler can enforce.
+fn covering_case(ty: &CqlType) -> &'static str {
+    match ty {
+        CqlType::Numeric(_) => "a_numeric_declared_type_takes_a_number_only",
+        CqlType::Text(_) => "a_text_declared_type_takes_any_string_and_no_other_kind",
+        CqlType::Boolean => {
+            "a_boolean_declared_type_is_egress_aware_and_takes_only_the_two_spellings"
+        }
+        CqlType::Blob | CqlType::Timestamp | CqlType::Opaque(_) => {
+            "blob_timestamp_and_opaque_declared_types_each_consult_their_own_spelling"
+        }
+        CqlType::List(_) | CqlType::Set(_) => {
+            "a_list_or_set_requires_a_seq_and_checks_every_element"
+        }
+        CqlType::Tuple(_) => "a_tuple_checks_each_slot_against_its_own_declared_type",
+        CqlType::Map(..) => "a_map_checks_both_halves_of_every_entry",
+        CqlType::Udt(_) => "a_udt_checks_each_field_against_the_type_declared_for_that_name",
+    }
+}
+
+/// Every [`CqlType`] variant has a case, and the census cannot pass VACUOUSLY: the
+/// table below carries one value per variant and the count is FLOORED, so a
+/// shrunken table reports no gap because it asks about nothing (the case-floor
+/// idiom, CLAUDE.md).
+#[test]
+fn every_declared_type_variant_has_a_covering_case() {
+    let one_per_variant: &[CqlType] = &[
+        int_ty(),
+        text_ty(),
+        CqlType::Boolean,
+        CqlType::Blob,
+        CqlType::Timestamp,
+        CqlType::Opaque("uuid".to_string()),
+        CqlType::List(Box::new(int_ty())),
+        CqlType::Set(Box::new(int_ty())),
+        CqlType::Map(Box::new(text_ty()), Box::new(int_ty())),
+        CqlType::Tuple(vec![int_ty()]),
+        CqlType::Udt(UdtType {
+            name: "u".to_string(),
+            fields: vec![("f".to_string(), int_ty())],
+        }),
+    ];
+    assert_eq!(
+        one_per_variant.len(),
+        11,
+        "the per-variant table has shrunk, so this census asks about less than \
+         `CqlType` declares"
+    );
+    for ty in one_per_variant {
+        assert!(
+            !covering_case(ty).is_empty(),
+            "`{}` must name the case that covers its arm",
+            ty.describe()
+        );
+    }
+}
