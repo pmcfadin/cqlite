@@ -88,9 +88,14 @@ pub(in crate::storage::sstable::reader::parsing::row_decoder) enum FixedWidthCel
     /// value this classification admits (that composition is the whole substance
     /// of #3847: relaxing the width guard alone is a defect, not the fix).
     Null,
-    /// A non-empty slice wide enough for the type: `data.len() >= n` from
-    /// [`admissible_at_least`], `data.len() == n` from [`admissible_exactly`].
-    /// The caller may read the type's first `n` bytes.
+    /// A non-empty slice wide enough for the type: `data.len() >= n`, from
+    /// [`admissible_at_least`] — the sole remaining classifier. The caller may read
+    /// the type's first `n` bytes.
+    ///
+    /// An `admissible_exactly` sibling existed while this branch carried its own UDT
+    /// field decoders; #3631 superseded those with `row_decoder/typed_value.rs`, so it
+    /// was removed with them rather than left as an uncalled function. Referencing it
+    /// here would be a broken intra-doc link (roborev job 147).
     Bytes,
 }
 
