@@ -18269,6 +18269,22 @@ run_tooling_tests() {
   # different incarnation than --lane-lease named. Needs bash + coreutils only — no python3,
   # no git, no network — so it sits above the python3 gate with its siblings. finalize-cleanup
   # had NO suite at all before this; the orphaned-lock bug it covers was invisible.
+  # lane-lock pre-commit hook (#3436): the END-TO-END control the wiring-evidence ruling asked
+  # for — a second entrant is REFUSED at the act that caused the incident. Exercises the REAL
+  # hook against a REAL git repo laid out as a lane with a REAL live peer process; bash + git
+  # only, no python3, so it sits above the python3 gate with its siblings.
+  echo ">>> [$name] bash scripts/tests/test_lane_lock_precommit_hook.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_lane_lock_precommit_hook.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (lane-lock pre-commit enforcement #3436); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   echo ">>> [$name] bash scripts/tests/test_finalize_cleanup_lane_lock.sh"
   if ! bash "$REPO_ROOT/scripts/tests/test_finalize_cleanup_lane_lock.sh" >>"$log" 2>&1; then
     status=FAIL
