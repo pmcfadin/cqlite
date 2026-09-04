@@ -59,7 +59,7 @@ SUBJECT="$REPO_ROOT/scripts/gate-liveness.sh"
 # Case floor (CLAUDE.md, #3544): a span-replacing edit that silently deletes cases yields a green
 # tally over a shrunken suite. This is ENFORCED (exit 1), not merely printed, and may only go DOWN
 # with a stated reason.
-CASE_FLOOR=31
+CASE_FLOOR=33
 
 pass=0; fail=0; cases=0
 ok()   { cases=$((cases+1)); pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
@@ -70,8 +70,12 @@ bad()  { cases=$((cases+1)); fail=$((fail+1)); printf 'FAIL %s\n' "$1"; [ $# -gt
 #
 # CLAUDE.md: "a narrowed lane DECLARES the narrowing at run time" — a lane that omits coverage
 # silently is indistinguishable from one that covers it. This guard is narrowed on TWO axes: to ONE
-# FILE (a scope decision on #3803), and to a RECOGNISED READER SET (the fix for a measured
-# false-positive class). Both narrowings, and the residual each buys, are named here.
+# FILE (a scope decision on #3803), and to a LITERAL printf/echo COMMAND WORD (residuals b and c).
+# It is NOT narrowed by a reader set: that axis existed in an earlier design and was DELETED, along
+# with quote tracking and stage ordering, when the recogniser failed to converge (nine findings in
+# six rounds, four of them false NEGATIVES). Do not reintroduce one -- see #3992 and the lead
+# ruling on REQUEST-3803-B. Both surviving narrowings, and the residual each buys, are named
+# below, and the accepted false-POSITIVE classes each have a pinned case.
 # ---------------------------------------------------------------------------
 declare -a UNGUARDED=(
   "scripts/flow/claim.sh"
@@ -121,6 +125,16 @@ print_scope() {
   printf '              substitution is NOT recognised.\n'
   printf '           b. Only printf and echo count as writers. Any other bash builtin that can\n'
   printf '              take EPIPE is not recognised.\n'
+  printf '           c. The COMMAND WORD is matched LITERALLY, so a spelling bash resolves to\n'
+  printf '              the builtin only AFTER expansion is missed: p\\rintf (escaped), $cmd\n'
+  printf '              (variable), $(echo printf) (substitution). All three run the builtin --\n'
+  printf '              measured, not assumed -- and each keeps the EPIPE hazard. The last two\n'
+  printf '              are UNRECOGNISABLE BY ANY LEXICAL SCAN, since the command name need not\n'
+  printf '              appear in the file at all, so this residual is declared and is NOT\n'
+  printf '              narrowable to zero. A QUOTED spelling ("printf") IS reported, because a\n'
+  printf '              quote is a word-boundary character -- pinned as 9u so that stays true.\n'
+  printf '              Case 9t pins the escaped miss, so a later fix must update this\n'
+  printf '              declaration rather than silently outgrow it. See #3992.\n'
   printf 'GUARDED SET IS ONE FILE, AND THE SHAPE IS PERVASIVE. Measured across git-tracked\n'
   printf '           scripts/**/*.sh: %s files contain at least one line matching this rule.\n' "$SHAPE_FILE_COUNT"
   printf '           That is a count of SHAPE MATCHES, NOT of hazards -- most are presumably the\n'
@@ -466,6 +480,17 @@ _pin 9q 0 "final-stage writer, no whitespace: producer|printf is NOT a hazard" '
 # ---------------------------------------------------------------------------
 _pin 9r 0 "printf.local is NOT the printf builtin" 'printf.local | head -1'
 _pin 9s 0 "echo/tool is NOT the echo builtin"      'echo/tool | head -1'
+
+# Case 9t pins a DECLARED MISS (residual c), not a success: bash DOES run the builtin for the
+# escaped spelling, so it IS a real EPIPE hazard this guard does not report. Expected count is 0
+# BY DECLARATION -- if a later change detects it, this case REDS, which is the point: the
+# declaration may not silently outgrow the code. Case 9u is its control and the reason the
+# residual is scoped to expansion-time spellings: a QUOTED command word is already reported,
+# because a quote is a word-boundary character. Measured, both ways, rather than reasoned about;
+# an earlier draft of residual (c) claimed the quoted form was missed and 9u falsified it.
+# The $cmd / $(echo printf) spellings cannot be pinned at all -- no lexical scan expresses them.
+_pin 9t 0 "DECLARED MISS (residual c): escaped command word p\\rintf is NOT detected (#3992)" 'p\rintf %s "$text" | grep -m1 x'
+_pin 9u 1 "a QUOTED command word IS detected (a quote is a boundary char)" '"printf" %s "$text" | grep -m1 x'
 
 # ---------------------------------------------------------------------------
 # 10. THE ASSERTION. Scan the SHIPPED reader.
