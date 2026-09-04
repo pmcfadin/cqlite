@@ -1394,5 +1394,8 @@ mod order;
 #[path = "golden_value_compare_gap_tests.rs"]
 mod gaps;
 
+#[path = "golden_value_compare_gap_udt_tests.rs"]
+mod gap_udt;
+
 #[path = "golden_value_compare_refusal_tests.rs"]
 mod refusals;
