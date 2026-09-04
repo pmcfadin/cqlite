@@ -3253,6 +3253,407 @@ fi
 
 fi  # timeout available
 # ===========================================================================
+case_begin 48-piped-printf-sigpipe-stays-anchored "issue #4032: a piped printf whose reader has gone away must not leak bash's own unprefixed 'write error: Broken pipe'"
+# ===========================================================================
+# THE DEFECT. `printf` at the HEAD of a pipeline gets EPIPE when the reader goes away, and
+# **bash** — not the printf, and not the reader — then writes
+#   <script>: line N: printf: write error: Broken pipe
+# to stderr with NO `DRIVE-STATE: ` prefix. Contract (a) breaks. The `2>/dev/null` the READER
+# already carries cannot suppress it: bash applies redirections left to right, so a suppressor
+# after the `|` covers the reader's stderr and nothing of the writer's (#3822 correction (6)'s
+# lesson one command over). MEASURED, both placements: `printf … 2>/dev/null | rdr` is silent,
+# `printf … | rdr 2>/dev/null` still leaks.
+#
+# THE MECHANISM NEEDS TWO CONDITIONS, AND #4032'S OWN BODY NAMES ONLY ONE. The issue attributes
+# it to timing alone ("whether printf's buffer is flushed before the reader goes away"). Measured
+# here, the leak requires BOTH of:
+#
+#   (1) SIGPIPE disposition is SIG_IGN, INHERITED. Under the DEFAULT disposition the writing
+#       subshell is KILLED by SIGPIPE and prints nothing at all. SIG_IGN survives exec, so any
+#       harness that ignores SIGPIPE propagates it into this script — which is what actually
+#       explains "passes standalone, reds under the gate", and it is not load.
+#   (2) The read end is ALREADY CLOSED when printf writes, so write() returns EPIPE regardless
+#       of pipe buffer space. Reachable two ways: the reader exited first (a scheduling race —
+#       gate load), or the payload EXCEEDS pipe capacity so the writer is still writing when the
+#       reader goes.
+#
+#   Measured matrix (this box): small payload + SIGPIPE default -> no leak; small payload +
+#   SIGPIPE ignored -> no leak; oversize payload + SIGPIPE default -> no leak; oversize payload +
+#   SIGPIPE ignored -> LEAK, every trial.
+#
+# SO THIS CASE FORCES BOTH CONDITIONS EXPLICITLY AND IS NEVER TIMED. `trap '' PIPE` in the
+# invoking subshell supplies (1) by inheritance; an OVERSIZE payload plus a reader shim that
+# exits WITHOUT READING supplies (2) by construction. No sleep, no load dependency, no retry:
+# the writer cannot possibly finish its write before the reader is gone, because the payload is
+# larger than the pipe.
+#
+# THE SITE SET IS DERIVED FROM COMMITTED SOURCE, NEVER CURATED (requirement of #4032, and the
+# reason a NEW piped printf cannot join unnoticed): for each `printf` token, truncate its tail at
+# the first statement separator (`;`, `&&`, `||`) and ask whether a `|` remains. That is what
+# makes a `case` pattern's `|` (which sits BEFORE its printf) and `||` not count — 16 such lines
+# across the two files. A failed derivation is a FAIL naming the derivation, never a fallback to
+# "no sites found", which would excuse every site at once.
+#
+# BOTH FILES ARE IN SCOPE, AND THE SECOND ONE IS THE HALF #4032'S CENSUS MISSED. Its table lists
+# four sites, all in drive-issue-state.sh, because the census was scoped to one file.
+# lib/process-liveness.sh is `source`d INTO this script's process, so ITS leak lands on the SAME
+# stderr and breaks the SAME anchor — and it is shared with claim-heartbeat.sh, whose anchor it
+# breaks too. CLAUDE.md's #3822 clause (12): an extraction's DEDUPLICATION is not complete until
+# the GUARDS around the new dependency are deduplicated too. The sweep lives HERE ONLY: putting a
+# copy in test_claim_heartbeat.sh would be two places for one rule to drift.
+LIB_REL='lib/process-liveness.sh'
+LIB="$SCRIPT_DIR/../flow/$LIB_REL"
+
+# --- the derivation (see above). Emits `<line> <SUPPRESSED|UNSUPPRESSED>` per site. ---
+SP_DERIVE_AWK='
+{
+  line = $0
+  if (line ~ /^[[:space:]]*#/) next
+  rest = line
+  while (1) {
+    i = match(rest, /printf/)
+    if (i == 0) break
+    tail = substr(rest, i + 6)
+    cut = length(tail) + 1
+    for (n = 1; n <= length(tail) - 1; n++) {
+      two = substr(tail, n, 2)
+      if (two == "&&" || two == "||") { if (n < cut) cut = n; break }
+    }
+    s = index(tail, ";")
+    if (s > 0 && s < cut) cut = s
+    seg = substr(tail, 1, cut - 1)
+    p = index(seg, "|")
+    if (p > 0) {
+      pre = substr(seg, 1, p - 1)
+      printf "%d %s\n", FNR, (pre ~ /2>\/dev\/null/) ? "SUPPRESSED" : "UNSUPPRESSED"
+    }
+    rest = substr(rest, i + 6)
+  }
+}'
+# --- the plant: remove ONE site's OWN suppressor (the one BEFORE the `|`), never the reader's ---
+SP_PLANT_AWK='
+FNR == line {
+  p = index($0, "|")
+  if (p == 0) { exit 3 }
+  h = substr($0, 1, p - 1); t = substr($0, p)
+  gsub(/ 2>\/dev\/null/, "", h)
+  print h t
+  next
+}
+{ print }'
+
+sp_derive() { awk "$SP_DERIVE_AWK" "$1" 2>/dev/null; }
+
+# THE OVERSIZE PAYLOAD. Built by doubling in pure bash (this file prefers printf/awk over
+# python3, case 47's socket row being the one declared exception). 81920 bytes: comfortably over
+# the 65536-byte pipe capacity Linux and macOS both default to, and comfortably under
+# MAX_ARG_STRLEN (131072), which is what an env value or a single argv word may hold — an
+# earlier attempt at 256 KB died with `Argument list too long`, i.e. the command never ran, which
+# is a MEASUREMENT FAILURE and not a negative result.
+sp_big='aaaaa'
+while [ "${#sp_big}" -lt 80000 ]; do sp_big="$sp_big$sp_big"; done
+
+# sp_real <cmd> — the real absolute binary, resolved through `sh` and NOT through `command -v`.
+# MEASURED THE HARD WAY: an exported shell FUNCTION named `grep`/`tr`/`ps` in the inherited
+# environment makes bash's own `command -v grep` answer `grep`, so a passthrough shim built from
+# that answer `exec`s ITSELF — 105656 self-recursive invocations and a killed run, a measurement
+# failure that reads exactly like "the site is unreachable". `sh` carries no bash function table.
+sp_real() {
+  local p
+  p="$(sh -c 'command -v "$1"' sh "$1" 2>/dev/null || true)"
+  case "$p" in /*) [ -x "$p" ] && { printf '%s\n' "$p"; return 0; } ;; esac
+  return 1
+}
+
+# sp_line_of <file> <signature> — the DERIVED line number of the piped-printf site whose source
+# text contains <signature>. Keyed on the reader command, never on a constant: a comment added
+# above a site must not red this case, while a NEW site whose text matches no signature must.
+sp_line_of() {
+  local f="$1" sig="$2" l hit=''
+  while read -r l _; do
+    [ -n "$l" ] || continue
+    if sed -n "${l}p" "$f" 2>/dev/null | grep -Fq -- "$sig"; then
+      [ -z "$hit" ] || return 1     # ambiguous signature — refuse rather than guess
+      hit="$l"
+    fi
+  done <<EOF_SL
+$(sp_derive "$f")
+EOF_SL
+  [ -n "$hit" ] || return 1
+  printf '%s\n' "$hit"
+}
+
+# sp_tree <tag> [<rel-file> <line>] — a THROWAWAY scratch copy of the pair, optionally with one
+# site's own suppressor removed. Never a settable seam and never the shipped file (#3312's
+# corollary: a test-only seam is one more thing a real invoker can set).
+sp_tree() {
+  # SPLIT, NOT ONE `local`: `local` is an ordinary builtin, so ALL its argument words are
+  # expanded BEFORE any assignment happens — `local tag="$1" d="$T/sp-$tag"` therefore reads
+  # `$tag` from the ENCLOSING scope. It resolved to sp_probe's OWN `tag` (right by accident) and
+  # to an unbound variable at top level (`set -u`: fatal). Measured both ways.
+  local tag pf pl d
+  tag="$1"; pf="${2:-}"; pl="${3:-}"; d="$T/sp-$tag"
+  rm -rf "$d"; mkdir -p "$d/lib" || return 1
+  cp "$DS" "$d/drive-issue-state.sh" || return 1
+  cp "$LIB" "$d/$LIB_REL" || return 1
+  if [ -n "$pf" ]; then
+    awk -v line="$pl" "$SP_PLANT_AWK" "$d/$pf" >"$d/.plant" 2>/dev/null || return 1
+    # AFFIRMATIVE: the plant must have CHANGED something. A no-op plant (a moved line, a
+    # refactored site) would otherwise make the positive control silently prove nothing.
+    ! cmp -s "$d/$pf" "$d/.plant" || return 1
+    mv "$d/.plant" "$d/$pf" || return 1
+  fi
+  printf '%s\n' "$d"
+}
+
+SP_TR="$(sp_real tr || true)"; SP_PS="$(sp_real ps || true)"; SP_GREP="$(sp_real grep || true)"
+if [ -n "$SP_TR" ] && [ -n "$SP_PS" ] && [ -n "$SP_GREP" ]; then
+  ok "precondition: the real tr/ps/grep binaries resolve to absolute paths ($SP_TR, $SP_PS, $SP_GREP), so a passthrough shim cannot recurse into itself"
+else
+  bad "precondition: could not resolve the real tr/ps/grep binaries (tr='$SP_TR' ps='$SP_PS' grep='$SP_GREP') — the reader shims below would be UNMEASURED"
+fi
+
+# --- STRUCTURAL SWEEP over both files, derived from committed source -------------------------
+sp_sites=0; sp_unsuppressed=''
+for spf in "$DS" "$LIB"; do
+  spn=0
+  while read -r l st; do
+    [ -n "$l" ] || continue
+    spn=$((spn + 1)); sp_sites=$((sp_sites + 1))
+    [ "$st" = SUPPRESSED ] || sp_unsuppressed="$sp_unsuppressed $(basename "$spf"):$l"
+  done <<EOF_SW
+$(sp_derive "$spf")
+EOF_SW
+  if [ "$spn" -eq 0 ]; then
+    bad "the piped-printf DERIVATION returned NOTHING for $spf — an empty subject set excuses every site in it, so this is a FAIL naming the derivation, never a clean sweep"
+  fi
+done
+SP_SITE_FLOOR=5
+if [ "$sp_sites" -ge "$SP_SITE_FLOOR" ]; then
+  ok "the derivation found $sp_sites piped-printf sites across both files (floor $SP_SITE_FLOOR) — a green tally over a shrunken subject set would be this case's own subject"
+else
+  bad "the derivation found only $sp_sites piped-printf sites (floor $SP_SITE_FLOOR): either the derivation broke or sites were deleted; nothing below is measured"
+fi
+# COUPLED TO THE FLOOR, because an affirmative statement over an EMPTY subject set is the
+# vacuous pass this whole file exists to refuse — instrumenting an early draft showed this exact
+# row printing `ok` while the derivation had returned NOTHING.
+if [ -z "$sp_unsuppressed" ] && [ "$sp_sites" -ge "$SP_SITE_FLOOR" ]; then
+  ok "EVERY one of the $sp_sites piped printfs in drive-issue-state.sh and $LIB_REL carries its OWN 2>/dev/null BEFORE the pipe"
+else
+  bad "piped printf(s) with no suppressor of their own (bash will leak an unprefixed 'printf: write error: Broken pipe' from each):$sp_unsuppressed"
+fi
+
+# --- THE DISPOSITION TABLE. Every derived site must be classified `probe` or `gap`; a site in
+# --- neither is a FAIL, which is what stops a new piped printf joining unannounced. Keyed on the
+# --- reader command (stable), with the line number DERIVED. The `workspace-test-disposition.txt`
+# --- idiom: it records completeness and labelling, not truth.
+sp_disp_probe="drive-issue-state.sh|tr -c '\\040-\\176\\200-\\377' '?'
+drive-issue-state.sh|tr -c 'A-Za-z0-9._:/#-' '-'
+drive-issue-state.sh|count_matching_lines
+$LIB_REL|cut -d: -f2"
+sp_disp_gap="drive-issue-state.sh|tr 'A-Z' 'a-z'"
+sp_unclassified=''
+for spf in "$DS" "$LIB"; do
+  case "$spf" in *"$LIB_REL") sprel="$LIB_REL" ;; *) sprel='drive-issue-state.sh' ;; esac
+  while read -r l st; do
+    [ -n "$l" ] || continue
+    sptext="$(sed -n "${l}p" "$spf")"
+    spfound=0
+    while IFS='|' read -r rf rsig; do
+      [ -n "$rf" ] || continue
+      [ "$rf" = "$sprel" ] || continue
+      case "$sptext" in *"$rsig"*) spfound=1 ;; esac
+    done <<EOF_DT
+$sp_disp_probe
+$sp_disp_gap
+EOF_DT
+    [ "$spfound" -eq 1 ] || sp_unclassified="$sp_unclassified $sprel:$l"
+  done <<EOF_DS
+$(sp_derive "$spf")
+EOF_DS
+done
+if [ -z "$sp_unclassified" ] && [ "$sp_sites" -ge "$SP_SITE_FLOOR" ]; then
+  ok "every one of the $sp_sites derived piped-printf sites is CLASSIFIED (behavioural probe, or declared gap) — a new one reds this case instead of joining silently"
+else
+  bad "derivation found $sp_sites site(s) (floor $SP_SITE_FLOOR); classified as NEITHER probed NOR a declared gap:$sp_unclassified — classify them in this case's disposition table (a probe with a positive control, or a gap with the measurement behind it)"
+fi
+
+# --- PER-SITE BEHAVIOURAL PROBES, EACH WITH ITS POSITIVE CONTROL -----------------------------
+# A bare green proves nothing ("MEMBERSHIP IS NOT DETECTION"), and a bare red is not evidence
+# either — so for each site the SAME invocation is run twice: once against the SHIPPED pair, once
+# against a scratch copy with THAT site's own suppressor removed. The control must LEAK **and the
+# leaked line must NAME the planted site** (bash prints the file and line, so the attribution is
+# exact and cannot be satisfied by an unrelated breakage). The control is also what establishes
+# REACHABILITY: it is the same invocation, so a leak there proves the fixed run reached the site.
+sp_shim_tr() {   # sp_shim_tr <dir> <case-glob-for-the-target-site's-tr-argv> [<witness-file>]
+  local d="$1" pat="$2" w="${3:-}"
+  mkdir -p "$d"
+  { printf '#!/bin/sh\n'
+    printf 'case "$*" in\n'
+    printf '  %s)\n' "$pat"
+    [ -z "$w" ] || printf '    printf reached > %s\n' "$w"
+    printf '    echo sp-shim; exit 0 ;;\n'
+    printf 'esac\n'
+    printf 'exec %s "$@"\n' "$SP_TR"
+  } >"$d/tr"
+  chmod +x "$d/tr"
+}
+
+# The machine axis carries the oversize payload for the two `tr`-fed sites. `sane()` is reached
+# through the LOSSY refusal, which interpolates the RAW 81920-byte value; `sanitize_field()` is
+# reached by the axis resolution itself. The shim discriminates on tr's OWN argv (derived from
+# the source lines above), so one site is intercepted while the other keeps the real tr — which
+# is what makes the leak attributable to ONE line.
+sp_run_machine() {   # sp_run_machine <script-dir> <shim-dir>
+  local sd="$1" shim="$2" ln
+  ln="$(lane "sp-m-$(basename "$sd")")"
+  ( cd "$ln" && trap '' PIPE
+    env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID "CLAIM_MACHINE=$sp_big" \
+      "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" "PATH=$shim:$PATH" \
+      bash "$sd/drive-issue-state.sh" write 4032 2>&1 ) || true
+}
+
+# The assembled-prologue field census (`count_matching_lines`, i.e. `grep -c` reading STDIN)
+# carries the oversize payload as an UNRECOGNISED prologue key, which case 45 pins as preserved
+# across an owned write. The grep shim keys on `-c` — the only `grep -c` reading stdin in either
+# file; count_sentinel's `-Fxc` and the body scan's `-Fxq` both take a FILE and reach the real
+# binary.
+sp_run_prologue() {   # sp_run_prologue <script-dir>
+  local sd="$1" ln shim="$T/sp-shim-grep"
+  mkdir -p "$shim"
+  printf '#!/bin/sh\nif [ "$1" = "-c" ]; then echo 1; exit 0; fi\nexec %s "$@"\n' "$SP_GREP" >"$shim/grep"
+  chmod +x "$shim/grep"
+  ln="$(lane "sp-p-$(basename "$sd")")"
+  ( cd "$ln" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+      "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" \
+      bash "$sd/drive-issue-state.sh" write 4032 ) >/dev/null 2>&1
+  awk -v e="$sp_end" -v big="$sp_big" '$0 == e { printf "xtra: %s\n", big } { print }' \
+    "$ln/$MARKER" >"$ln/.sp" 2>/dev/null && mv "$ln/.sp" "$ln/$MARKER"
+  ( cd "$ln" && trap '' PIPE
+    env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+      "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" "PATH=$shim:$PATH" \
+      bash "$sd/drive-issue-state.sh" write 4032 --stage implement 2>&1 ) || true
+}
+
+# process_start_window's `etime` FALLBACK carries the oversize payload: a shimmed `ps` reports a
+# non-numeric `etimes` (forcing the fallback) and an `H:MM…:S` `etime` whose middle field is
+# 81920 bytes, and the `cut` shim — the ONLY cut invocation in either file — exits without
+# reading it. This is the site #4032's census never looked at.
+sp_run_startwindow() {   # sp_run_startwindow <script-dir>
+  local sd="$1" ln shim="$T/sp-shim-ps"
+  mkdir -p "$shim"
+  { printf '#!/bin/sh\n'
+    printf 'case "$*" in\n'
+    printf '  *etimes=*) echo sp-not-a-number; exit 0 ;;\n'
+    printf '  *etime=*)  echo "1:%s:1"; exit 0 ;;\n' "$sp_big"
+    printf 'esac\n'
+    printf 'exec %s "$@"\n' "$SP_PS"
+  } >"$shim/ps"
+  printf '#!/bin/sh\necho 30\nexit 0\n' >"$shim/cut"
+  chmod +x "$shim/ps" "$shim/cut"
+  ln="$(lane "sp-w-$(basename "$sd")")"
+  ( cd "$ln" && trap '' PIPE
+    env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+      "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" "PATH=$shim:$PATH" \
+      bash "$sd/drive-issue-state.sh" write 4032 2>&1 ) || true
+}
+
+sp_end="$(sed -n 's/^STAMP_END=.\(.*\).$/\1/p' "$DS" | head -1)"
+if [ -n "$sp_end" ]; then :; else
+  bad "could not derive STAMP_END from $DS — the oversize-prologue probe cannot be built"
+fi
+
+sp_probed=0; sp_controls=0; sp_leaks=0
+# sp_probe <tag> <rel-file> <signature> <runner-fn> [<runner-extra-arg>]
+sp_probe() {
+  local tag pf sig fn xtra pl good broken out ctl needle sp_names_site
+  tag="$1"; pf="$2"; sig="$3"; fn="$4"; xtra="${5:-}"
+  pl="$(sp_line_of "$SCRIPT_DIR/../flow/$pf" "$sig")" || {
+    bad "$tag: could not DERIVE a unique piped-printf line in $pf carrying '$sig' — the site moved, was rewritten, or the signature is ambiguous; NOTHING is measured for it"; return 1; }
+  good="$SCRIPT_DIR/../flow"          # the SHIPPED pair, so the green statement is about what ships
+  # THE SHIPPED ASSERTION RUNS FIRST AND UNCONDITIONALLY. An earlier draft built the planted tree
+  # first and `return`ed when the plant failed — so on a tree where the fix is ALREADY REVERTED
+  # the plant is a no-op, the probe bailed, and the row that would have caught the live leak never
+  # ran at all (measured: 4 probes reporting "plant changed NOTHING" and not one leak reported).
+  # An assertion an earlier failure can skip is a coverage hole; this ordering has none.
+  if [ -n "$xtra" ]; then out="$("$fn" "$good" "$xtra")"; else out="$("$fn" "$good")"; fi
+  if all_lines_anchored "$out"; then
+    ok "$tag: the SHIPPED $pf:$pl emits nothing unprefixed with SIGPIPE ignored and its reader gone (both streams combined)"
+  else
+    sp_leaks=$((sp_leaks + 1))
+    bad "$tag: the SHIPPED $pf:$pl LEAKED an unprefixed line:
+$(printf '%s\n' "$out" | grep -v '^DRIVE-STATE: ' | cut -c1-200 | head -5 | cat -v)"
+  fi
+  broken="$(sp_tree "$tag" "$pf" "$pl")" || {
+    bad "$tag: planting the defect at $pf:$pl changed NOTHING (or the scratch copy failed), so NO positive control was taken for this site — read the row above as an unverified probe, not as coverage. The usual cause is that $pf:$pl ALREADY lacks its own suppressor (the sweep above names it)."; return 1; }
+  if [ -n "$xtra" ]; then ctl="$("$fn" "$broken" "$xtra")"; else ctl="$("$fn" "$broken")"; fi
+  sp_probed=$((sp_probed + 1))
+  needle="$(basename "$pf"): line $pl: printf"
+  # THE NEEDLE TEST IS A BASH `case`, NOT `printf | grep -q` — AND THIS CASE'S OWN SUBJECT IS WHY
+  # (found by instrumenting it). `grep -q` exits the INSTANT it matches, so writing an 82 KB
+  # control payload into it makes the `printf` die of SIGPIPE, and under this file's `pipefail`
+  # the pipeline status becomes 141 — a MATCH reported as a non-match, which failed a control
+  # that had reproduced perfectly. Exactly `all_lines_anchored`'s recorded #3387 shape, and
+  # exactly the family under test one process over. A `case` needs no pipe at all: remove the
+  # channel rather than pick a rarer reader (#3312).
+  sp_names_site=0
+  case "$ctl" in *"$needle"*) sp_names_site=1 ;; esac
+  if ! all_lines_anchored "$ctl" && [ "$sp_names_site" -eq 1 ]; then
+    sp_controls=$((sp_controls + 1))
+    ok "POSITIVE CONTROL $tag: with $pf:$pl's OWN suppressor removed the probe LEAKS, and the leaked line NAMES the planted site ($needle) — so this probe demonstrably reaches it"
+  else
+    bad "POSITIVE CONTROL $tag DID NOT REPRODUCE: planting the defect at $pf:$pl produced no leak naming that site, so the shipped row ABOVE covers NOTHING. Do not read it as coverage.
+$(printf '%s\n' "$ctl" | grep -v '^DRIVE-STATE: ' | cut -c1-200 | head -5 | cat -v)"
+  fi
+}
+
+sp_shim_tr "$T/sp-shim-sane"     "*'\\040-\\176'*"
+sp_shim_tr "$T/sp-shim-sanitize" "*'A-Za-z0-9._:/#-'*"
+sp_probe sane            drive-issue-state.sh "tr -c '\\040-\\176\\200-\\377' '?'" sp_run_machine "$T/sp-shim-sane"
+sp_probe sanitize_field  drive-issue-state.sh "tr -c 'A-Za-z0-9._:/#-' '-'"        sp_run_machine "$T/sp-shim-sanitize"
+sp_probe prologue_census drive-issue-state.sh "count_matching_lines"               sp_run_prologue
+sp_probe start_window    "$LIB_REL"           "cut -d: -f2"                        sp_run_startwindow
+
+SP_PROBE_FLOOR=4
+if [ "$sp_probed" -ge "$SP_PROBE_FLOOR" ] && [ "$sp_controls" -eq "$sp_probed" ]; then
+  ok "NON-VACUITY: $sp_probed piped-printf sites were probed BEHAVIOURALLY (floor $SP_PROBE_FLOOR) and ALL $sp_controls positive controls reproduced the leak naming their own site"
+else
+  bad "NON-VACUITY breached: probed=$sp_probed (floor $SP_PROBE_FLOOR) controls_reproduced=$sp_controls — a probe whose control does not leak does not reach its site, and its green means nothing"
+fi
+
+# --- DECLARED GAP: 1 RECOGNISED ---------------------------------------------------------------
+# `--reason`'s placeholder fold pipes `$tok`, which is `sanitize_field`'s OUTPUT and therefore
+# TRUNCATED to 120 bytes — so the oversize-payload route structurally cannot reach it, and the
+# only other route (the reader exiting first) is a genuine scheduling race that is not
+# deterministically forceable. That is MEASURED here rather than asserted: the defect is PLANTED,
+# an 81920-byte --reason is offered, a witness file proves the reader WAS reached, and no leak
+# occurs. (Measured separately, and not asserted here because it would be a timing test: over 20
+# trials of the small-payload race route with the defect planted, 0 leaked.) Reported in the
+# affirmative `N RECOGNISED` form: a bare count reads as a completed census.
+sp_gap_witness="$T/sp-gap-witness"; rm -f "$sp_gap_witness"
+sp_shim_tr "$T/sp-shim-fold" "'A-Z a-z'" "$sp_gap_witness"
+sp_gap_line="$(sp_line_of "$DS" "tr 'A-Z' 'a-z'")" || sp_gap_line=''
+sp_gap_tree="$(sp_tree gapfold drive-issue-state.sh "${sp_gap_line:-0}")" || sp_gap_tree=''
+if [ -n "$sp_gap_line" ] && [ -n "$sp_gap_tree" ]; then
+  L48g=$(lane lane48-gap)
+  run "$L48g" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 4032 >/dev/null 2>&1
+  # `--reason` is validated during ARGUMENT PARSING, so the fold is reached whatever the
+  # ownership verdict turns out to be; only the witness and the anchor are asserted.
+  sp_gap_out=$( cd "$L48g" && trap '' PIPE
+    env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+      "CLAUDE_CODE_SESSION_ID=$SESS_B" "CLAUDE_PID=$$" "PATH=$T/sp-shim-fold:$PATH" \
+      bash "$sp_gap_tree/drive-issue-state.sh" adopt 4032 --reason "$sp_big" 2>&1 ) || true
+  if [ -f "$sp_gap_witness" ] && all_lines_anchored "$sp_gap_out" \
+     && grep -Fq "printf '%.120s'" "$DS"; then
+    ok "DECLARED GAP: 1 RECOGNISED — drive-issue-state.sh:$sp_gap_line (the --reason placeholder fold) is covered STRUCTURALLY (the sweep + the disposition table) and NOT behaviourally. MEASURED: with its suppressor removed and an 81920-byte --reason offered, the reader was REACHED (witness present) and nothing leaked, because sanitize_field truncates \$tok to 120 bytes (printf '%.120s') — far under pipe capacity. The reader-exits-first route is a real scheduling race and is deliberately not asserted."
+  else
+    bad "the declared gap's own measurement did not hold: witness=$([ -f "$sp_gap_witness" ] && echo reached || echo NOT-REACHED) anchored=$(all_lines_anchored "$sp_gap_out" && echo yes || echo NO) cap-present=$(grep -Fq "printf '%.120s'" "$DS" && echo yes || echo NO). If the 120-byte cap is gone this site is now FORCEABLE and owes a behavioural probe, not a gap.
+$(printf '%s\n' "$sp_gap_out" | grep -v '^DRIVE-STATE: ' | cut -c1-200 | head -5 | cat -v)"
+  fi
+else
+  bad "could not derive or plant the --reason placeholder-fold site, so its DECLARED GAP is itself unmeasured (line='$sp_gap_line')"
+fi
+# ===========================================================================
 case_begin 28-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
@@ -3276,8 +3677,9 @@ REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-iss
 42-verdict-emission-is-a-critical-section
 43-identity-recorded-losslessly 44-body-file-is-read-not-stat-gated
 45-unknown-prologue-keys-survive 46-symlink-marker-is-never-clobbered
-47-non-regular-paths-never-block 28-case-floor"
-CASE_FLOOR=47
+47-non-regular-paths-never-block
+48-piped-printf-sigpipe-stays-anchored 28-case-floor"
+CASE_FLOOR=48
 executed=0
 for _c in $CASES; do executed=$((executed + 1)); done
 missing=""
@@ -3289,10 +3691,10 @@ if [ "$executed" -ge "$CASE_FLOOR" ] && [ -z "$missing" ]; then
 else
   bad "case floor breached: executed=$executed floor=$CASE_FLOOR missing:$missing"
 fi
-if [ "$PASS" -ge 178 ]; then
-  ok "assertion floor: $PASS assertions passed (>= 178)"
+if [ "$PASS" -ge 192 ]; then
+  ok "assertion floor: $PASS assertions passed (>= 192)"
 else
-  bad "assertion floor breached: only $PASS assertions passed (floor 178)"
+  bad "assertion floor breached: only $PASS assertions passed (floor 192)"
 fi
 
 # ===========================================================================
