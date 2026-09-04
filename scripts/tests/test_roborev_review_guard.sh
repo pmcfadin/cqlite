@@ -9014,6 +9014,113 @@ else
 fi
 reset_stub
 
+printf '== (#4050) the RECHECK-ONLY restriction the merge-point count argument rests on ==\n'
+# ===========================================================================
+# #4050's soundness argument at the merge point is a claim ABOUT THIS FILE PAIR, and a
+# doctrine line naming a mechanism decays exactly like a comment — so it is pinned here
+# rather than trusted. The argument: the count a granted deferral was matched against at
+# review time was derived by the SHARED recogniser from the RECORD's own review text, i.e.
+# from the SAME BYTES premerge-review-binding.sh reads — so the recogniser's known
+# non-closure over prose cannot produce a review-vs-merge disagreement. That rests on TWO
+# properties, both asserted:
+#
+#   (1) A DEFERRAL IS GRANTABLE ONLY ON THE `--recheck-job` PATH.
+#       `roborev_check_findings_deferral` must return before consulting anything unless
+#       `RECHECK_JOB` is set. If it could grant on a LIVE run, the count would come from a
+#       LIVE reviewer transcript, which can diverge from the stored record — exactly the
+#       divergence the byte-identity argument rules out.
+#   (2) ON THAT PATH THE TRANSCRIPT *IS* THE RECORD'S REVIEW TEXT.
+#       roborev-review.sh must copy `$RECORD_OUTPUT_FILE` over `$LOG` under `RECHECK_JOB`,
+#       and `$RECORD_OUTPUT_FILE` must be the review-output path handed to the SAME
+#       `roborev-job-facts.py` the merge point calls. Break this and the two ends read
+#       different bytes while the code still looks correct.
+#
+# These are STRUCTURAL asserts on purpose: the behavioural deferral cases above prove a
+# grant HAPPENS on the recheck path, which is not the same claim as "and it can happen
+# NOWHERE ELSE" — an absence is not observable from a passing case.
+_rc4050_checks="$SCRIPT_DIR/../flow/roborev-review-checks.sh"
+_rc4050_wrapper="$WRAPPER_REAL"
+_rc4050_ok=1
+if [ ! -r "$_rc4050_checks" ] || [ ! -r "$_rc4050_wrapper" ]; then
+  bad 'structural (#4050): the checks file or the wrapper is unreadable, so the recheck-only premise could not be checked'
+  _rc4050_ok=0
+else
+  # (1) the early return, inside `roborev_check_findings_deferral` and BEFORE any lookup.
+  _rc4050_body="$tmp/rc4050-deferral-body.txt"
+  awk '/^roborev_check_findings_deferral\(\) \{/,/^\}$/' "$_rc4050_checks" >"$_rc4050_body"
+  if [ ! -s "$_rc4050_body" ]; then
+    bad 'structural (#4050): roborev_check_findings_deferral could not be extracted from the checks file, so the recheck-only gate has no subject'
+    _rc4050_ok=0
+  elif ! grep -Fq '[ -n "${RECHECK_JOB:-}" ] || return 0' "$_rc4050_body"; then
+    bad 'structural (#4050): roborev_check_findings_deferral no longer returns early outside recheck mode — a deferral grantable on a LIVE run would derive its count from a LIVE reviewer transcript, which can diverge from the stored record, and premerge-review-binding.sh'"'"'s byte-identity argument would be FALSE'
+    _rc4050_ok=0
+  else
+    # ...and it must come BEFORE the lookup that can grant, or the gate is decorative.
+    _rc4050_gate=$(grep -n -F '[ -n "${RECHECK_JOB:-}" ] || return 0' "$_rc4050_body" | head -1 | cut -d: -f1)
+    _rc4050_look=$(grep -n 'roborev_findings_deferral_lookup' "$_rc4050_body" | head -1 | cut -d: -f1)
+    if [ -n "$_rc4050_gate" ] && [ -n "$_rc4050_look" ] && [ "$_rc4050_gate" -lt "$_rc4050_look" ]; then
+      ok 'structural (#4050): a findings deferral is grantable ONLY on the --recheck-job path, and the gate precedes the granting lookup'
+    else
+      bad "structural (#4050): the recheck-only gate does not precede roborev_findings_deferral_lookup (gate line '${_rc4050_gate:-<none>}', lookup line '${_rc4050_look:-<none>}') — a check placed after the effect it guards can only report it"
+      _rc4050_ok=0
+    fi
+  fi
+  # (2) the record's review text BECOMES the transcript on that path.
+  if grep -Fq 'cat "$RECORD_OUTPUT_FILE" >"$LOG"' "$_rc4050_wrapper"; then
+    ok 'structural (#4050): on the recheck path the record'"'"'s own review text is copied over $LOG, so review time counts the SAME bytes the merge point reads'
+  else
+    bad 'structural (#4050): the wrapper no longer makes the record'"'"'s review text the recheck transcript — review time and the merge point would count DIFFERENT inputs while both look correct, and premerge-review-binding.sh'"'"'s byte-identity argument would be FALSE'
+    _rc4050_ok=0
+  fi
+  # ...and that file must be the review-output path of the SAME shared parser, or "the same
+  # field" is an assumption rather than a fact.
+  if grep -Fq 'extract_job_facts "$1" "$json" "$FACTS_FILE" "$PROMPT_FILE" "$RECORD_OUTPUT_FILE"' "$_rc4050_wrapper"; then
+    ok 'structural (#4050): $RECORD_OUTPUT_FILE is the review-output path of the SAME roborev-job-facts.py the merge point calls — one extraction of one field, not two spellings of it'
+  else
+    bad 'structural (#4050): $RECORD_OUTPUT_FILE is no longer filled from the shared roborev-job-facts.py review-output path, so "the same field at both ends" is unsupported'
+    _rc4050_ok=0
+  fi
+  # THE MERGE POINT'S HALF: it must ask for that same optional path, or it reads nothing.
+  _rc4050_binding="$SCRIPT_DIR/../flow/premerge-review-binding.sh"
+  if [ ! -r "$_rc4050_binding" ]; then
+    bad 'structural (#4050): premerge-review-binding.sh is unreadable, so its half of the byte-identity premise could not be checked'
+    _rc4050_ok=0
+  elif grep -Fq 'python3 "$FACTS_TOOL" "$job" "$tmp/facts" "$tmp/prompt" "$tmp/review"' "$_rc4050_binding"; then
+    ok 'structural (#4050): the merge point asks the shared parser for the record'"'"'s review text, which is what makes the two ends read one field'
+  else
+    bad 'structural (#4050): premerge-review-binding.sh no longer requests the review-output path from the shared parser — the merge point would have no bytes to count and the deferral route would be dead again'
+    _rc4050_ok=0
+  fi
+  # AND THE ARGUMENT MUST BE WRITTEN WHERE IT IS RELIED ON. A premise checked here but
+  # unstated at the branch is a guard nobody can trace back to the decision it protects.
+  if [ -r "$_rc4050_binding" ] && grep -Fq 'RECHECK_JOB' "$_rc4050_binding" &&
+    grep -Fq 'IDENTICAL BYTES, BY CONSTRUCTION' "$_rc4050_binding"; then
+    ok 'structural (#4050): the byte-identity argument is stated AT the binding site, naming the recheck-only restriction it rests on'
+  else
+    bad 'structural (#4050): the binding site does not state the byte-identity argument and the recheck-only restriction it rests on — the residual is then relied on without being declared (AC5)'
+    _rc4050_ok=0
+  fi
+fi
+# EACH LOAD-BEARING NEEDLE MUST OCCUR EXACTLY ONCE IN ITS FILE. A `grep -Fq` that matches a
+# COMMENT quoting the construct, or a second copy of the site, is green for the wrong reason —
+# and these greps are the only thing standing between the byte-identity argument and silent
+# decay. Counted rather than asserted present, so a duplicated or relocated site reds.
+_rc4050_uniq() { # _rc4050_uniq <file> <needle> <label>
+  local _n
+  _n=$(grep -F -c -- "$2" "$1" 2>/dev/null) || _n=""
+  case "$_n" in
+    1) ok "structural (#4050) needle: $3 occurs EXACTLY once, so the check above matched the real site" ;;
+    '') bad "structural (#4050) needle: $3 could not be counted in $1 — the check above is unverifiable" ;;
+    *) bad "structural (#4050) needle: $3 occurs $_n times in $1 — a duplicated or quoted occurrence makes the check above green for the wrong reason" ;;
+  esac
+}
+if [ -r "$_rc4050_checks" ] && [ -r "$_rc4050_wrapper" ] && [ -r "$_rc4050_binding" ]; then
+  _rc4050_uniq "$_rc4050_checks" '[ -n "${RECHECK_JOB:-}" ] || return 0' 'the recheck-only early return'
+  _rc4050_uniq "$_rc4050_wrapper" 'cat "$RECORD_OUTPUT_FILE" >"$LOG"' 'the record-output-becomes-the-transcript copy'
+  _rc4050_uniq "$_rc4050_binding" 'python3 "$FACTS_TOOL" "$job" "$tmp/facts" "$tmp/prompt" "$tmp/review"' 'the merge point'"'"'s review-text request'
+fi
+[ "$_rc4050_ok" -eq 1 ] || printf 'NOTICE - structural (#4050): the merge-point count argument rests on the two properties above; treat any FAIL here as invalidating premerge-review-binding.sh'"'"'s AC5 declaration, not merely as a lint\n'
+
 printf '== hermeticity: the wrapper never reaches a real roborev ==\n'
 reset_stub
 if grep -qE '^\s*roborev (review|show|list)' "$WRAPPER_REAL"; then

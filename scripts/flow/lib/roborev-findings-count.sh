@@ -29,13 +29,19 @@
 #
 # THE RECOGNISER OVER PROSE DOES NOT CLOSE, AND THAT IS SOUND HERE FOR A REASON THAT
 # MUST NOT BE WEAKENED (#3564, and see the merge-time call site):
+#   * SAME CODE OVER IDENTICAL BYTES, BY CONSTRUCTION. A findings deferral can be GRANTED
+#     only on the `--recheck-job` path (`roborev_check_findings_deferral` returns before
+#     looking at anything unless `RECHECK_JOB` is set), and on that path the transcript IS
+#     the record's review text: roborev-review.sh copies `$RECORD_OUTPUT_FILE` — the
+#     `output`/`verdict_text` field, extracted by `roborev-job-facts.py` — over `$LOG`
+#     before any text check runs. So both ends run THIS code over the SAME daemon-recorded
+#     bytes, and the non-closure cannot produce a review-vs-merge disagreement or widen
+#     what review time already granted. That follows from the recheck-only restriction, not
+#     from luck: a deferral is never granted off a LIVE reviewer transcript, which is the one
+#     input that could have diverged from the stored record.
 #   * NOTHING here derives CLEANLINESS from prose. `NONE`/clean stays reachable ONLY
 #     from the record's structured verdict letter. This answers "how many", and only for
 #     a record already affirmatively `F`.
-#   * The non-closure is inherited IDENTICALLY at both ends — same code, same bytes — so
-#     it cannot create a review-time-vs-merge-time disagreement and cannot widen what
-#     review time already granted. An undercount that fooled the merge point fooled
-#     review time first.
 # It does NOT make the count tamper-proof against a party who can write roborev's
 # database; that actor is invoker-class and out of model (#3312's triage rule).
 #

@@ -2759,14 +2759,33 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   it adds a BOUND path where none existed and subtracts a refusal only where a count was
   affirmatively measured AND the review-time judge granted on it. **THE RESIDUAL, WHICH IS WHERE THE
   SOUNDNESS ARGUMENT LIVES**: the count comes out of PROSE, and #3564 rules that a recogniser over
-  author-controlled prose never closes. It holds anyway because (1) nothing derives CLEANLINESS from
-  prose — `clean`/`NONE` stays reachable only from the structured verdict letter, and this arm is
-  entered only for a record already affirmatively `F`, so prose supplies only HOW MANY; and (2) the
-  non-closure is inherited IDENTICALLY at both ends, same file and same bytes, so it cannot create a
-  review-time-vs-merge-time disagreement and cannot widen what review time already granted — an
-  undercount that fools the merge point fooled review time first. It does **NOT** make the count
-  tamper-proof against a party who can write roborev's database; that actor is invoker-class and out
-  of model, and the code says so rather than claiming a closure it does not deliver. The
+  author-controlled prose never closes. It holds anyway, and the leading reason is **SAME CODE OVER
+  IDENTICAL BYTES, BY CONSTRUCTION — not merely "the same recogniser over comparable inputs"**. A
+  findings deferral is **grantable only on the `--recheck-job` path**:
+  `roborev_check_findings_deferral` returns before consulting anything unless `RECHECK_JOB` is set
+  (*"OUTSIDE RECHECK MODE THERE IS NOTHING TO LOOK FOR"*), and on that path **the transcript IS the
+  record's review text** — `roborev-review.sh` copies `$RECORD_OUTPUT_FILE`, filled from the same
+  `roborev-job-facts.py` review-output path the merge point now asks for, over `$LOG` before any
+  text check runs. So the count a granted marker was matched against at review time was derived, by
+  this same library, from the very `output`/`verdict_text` bytes the merge point reads. The
+  non-closure is therefore inherited IDENTICALLY at both ends and **cannot** produce a
+  review-vs-merge disagreement or widen what review time already granted — and that follows from
+  the recheck-only restriction, **not from luck**: a deferral is never granted off a LIVE reviewer
+  transcript, which is the one input that could have diverged from the stored record. (Where the
+  merge point cannot obtain those bytes — a `roborev list` payload carries JOB rows and no review
+  text — it REFUSES as unmeasured, so the failure mode is a refusal and never a disagreement.) The
+  weaker phrasing, *"an undercount that fools the merge point fooled review time first"*, is still
+  true and is a CONSEQUENCE of this rather than the argument. Second: nothing derives CLEANLINESS
+  from prose — `clean`/`NONE` stays reachable only from the structured verdict letter, and this arm
+  is entered only for a record already affirmatively `F`, so prose supplies only HOW MANY. It does
+  **NOT** make the count tamper-proof against a party who can write roborev's database — also the
+  only way those bytes could differ between the two reads; that actor is invoker-class and out of
+  model, and the code says so rather than claiming a closure it does not deliver. **The first point
+  is a claim about ANOTHER FILE, so it is PINNED, not asserted**:
+  `scripts/tests/test_roborev_review_guard.sh` checks that the recheck-only early return still
+  precedes the granting lookup and that the record-output-becomes-the-transcript copy is still
+  there — a doctrine line naming a mechanism decays exactly like a comment, so if either half is
+  removed that guard reds instead of this argument going quietly false. The
   authorization-only kind is retained for the unmeasurable case, where it still separates "no
   authorization exists" (a measured refusal, exit 4) from "the authorization is good but its count
   is unverifiable here" (exit 5) — different operator actions. **AND THE DEFERRAL PATH IS THREE-VALUED, NOT TWO (roborev job 102): "the

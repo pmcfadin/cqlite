@@ -951,21 +951,47 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
         #
         # THE RESIDUAL, STATED HERE BECAUSE IT WILL BE REVIEWED. The count comes out
         # of PROSE, and #3564 rules that a recogniser over author-controlled prose
-        # never closes. It is nonetheless sound:
+        # never closes. It is nonetheless sound, and the FIRST reason is the strong
+        # one:
+        #   * SAME CODE OVER IDENTICAL BYTES, BY CONSTRUCTION — not merely "the same
+        #     recogniser over comparable inputs". A findings deferral can be GRANTED
+        #     only on the `--recheck-job` path: `roborev_check_findings_deferral`
+        #     returns before looking at anything unless `RECHECK_JOB` is set
+        #     (roborev-review-checks.sh, "OUTSIDE RECHECK MODE THERE IS NOTHING TO
+        #     LOOK FOR"). And on that path the transcript IS this same record field:
+        #     roborev-review.sh copies the record's review text — extracted by THIS
+        #     script's `$FACTS_TOOL`, into its optional output path — over `$LOG`
+        #     before any text check runs. So the count a granted marker was matched
+        #     against at review time was derived, by this same library, from the very
+        #     `output`/`verdict_text` bytes read here. The recogniser's non-closure
+        #     is therefore inherited IDENTICALLY at both ends and CANNOT produce a
+        #     review-vs-merge disagreement, and it cannot widen what review time
+        #     already granted. This is a property of the recheck-only restriction,
+        #     not of luck: a deferral is never granted off a LIVE reviewer transcript,
+        #     which is the one input that could have diverged from the stored record.
+        #     (Where this leg cannot obtain those bytes at all — a `roborev list`
+        #     payload carries JOB rows and no review text — it REFUSES as unmeasured;
+        #     it never proceeds on a different input, so the failure mode is a refusal
+        #     and never a disagreement.) The property delivered is exactly #3626's:
+        #     the authorizer's count equals the count our recogniser observes in the
+        #     DAEMON-RECORDED review. (The weaker phrasing — "an undercount that
+        #     fooled this leg fooled review time first" — is still true and is a
+        #     consequence of the above, not the argument.)
         #   * NOTHING here derives CLEANLINESS from prose. `clean` stays reachable
         #     ONLY from the record's structured verdict letter (the `clean)` arm
         #     above); this arm is entered only for a record already affirmatively
         #     `F`, and all the prose supplies is HOW MANY.
-        #   * The recogniser's non-closure is inherited IDENTICALLY at both ends —
-        #     same file, same bytes, same call — so it cannot create a
-        #     review-time-vs-merge-time disagreement and cannot widen what review
-        #     time already granted. An undercount that fooled this leg fooled review
-        #     time first. The property delivered is exactly #3626's: the authorizer's
-        #     count equals the count our recogniser observes in the DAEMON-RECORDED
-        #     review.
         #   * It does NOT make the count tamper-proof against a party who can write
-        #     roborev's database. That actor is INVOKER-CLASS and out of model
+        #     roborev's database — which is also the only way those bytes could differ
+        #     between the two reads. That actor is INVOKER-CLASS and out of model
         #     (#3312's triage rule); it is not claimed and must not be claimed.
+        #
+        # THE FIRST POINT IS A CLAIM ABOUT ANOTHER FILE, SO IT IS PINNED RATHER THAN
+        # ASSERTED: scripts/tests/test_roborev_review_guard.sh checks that the
+        # recheck-only early return and the record-output-becomes-the-transcript copy
+        # are both still there. A doctrine line naming a mechanism decays exactly like
+        # a comment; if either half is ever removed, that guard reds instead of this
+        # argument going quietly false.
         #
         # AND THE CHANGE IS ADDITION-ONLY IN THE PERMISSIVE DIRECTION: it adds a
         # BOUND path where none existed and leaves EVERY unmeasurable state refusing

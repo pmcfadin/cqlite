@@ -161,11 +161,23 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   (exit 4) named as its own state. Every unmeasurable state keeps the earlier refusal exactly (no
   review text, empty text, an untakeable census, or ZERO severity markers on a record whose verdict
   is affirmatively `findings`, which is a contradiction and not a count), so the change adds a BOUND
-  path and widens nothing else: it never derives CLEANLINESS from prose — `clean` stays reachable
-  only from the structured verdict letter — and the recogniser's known non-closure over prose is
-  inherited identically at both ends, so an undercount that fools the merge point fooled review time
-  first. It does not make the count tamper-proof against a party who can write roborev's database;
-  that actor is invoker-class and out of model. Before #4050 this half was DECLARED unverifiable and
+  path and widens nothing else. The soundness argument, leading with the strongest part: the two
+  ends run the **same code over identical bytes, by construction**. A findings deferral is grantable
+  only on the `--recheck-job` path (`roborev_check_findings_deferral` returns before consulting
+  anything unless `RECHECK_JOB` is set), and on that path the transcript IS the record's review text
+  — the wrapper copies `$RECORD_OUTPUT_FILE`, filled from the same `roborev-job-facts.py`
+  review-output path the merge point asks for, over `$LOG` before any text check runs. So the
+  recogniser's known non-closure over prose cannot produce a review-vs-merge disagreement and cannot
+  widen what review time already granted; that follows from the recheck-only restriction rather than
+  from luck, because a deferral is never granted off a LIVE reviewer transcript — the one input that
+  could have diverged from the stored record. Where the merge point cannot obtain those bytes it
+  refuses as unmeasured, so the failure mode is a refusal, never a disagreement. Second, it never
+  derives CLEANLINESS from prose — `clean` stays reachable only from the structured verdict letter.
+  It does not make the count tamper-proof against a party who can write roborev's database — also
+  the only way those bytes could differ between the two reads; that actor is invoker-class and out
+  of model. Both halves of the byte-identity premise are PINNED in
+  `scripts/tests/test_roborev_review_guard.sh`, because a claim about another file decays exactly
+  like a comment. Before #4050 this half was DECLARED unverifiable and
   a validly deferred PR was permanently unmergeable — three at once — which is why the measurement
   was supplied rather than the declaration restored.
   `PREMERGE: HOLD-CHECK` re-reads the PR thread and the issue it closes for a
