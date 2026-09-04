@@ -808,3 +808,142 @@ fn the_float_tie_break_gap_rejects_a_spelling_neither_formatter_produces() {
         );
     }
 }
+
+/// Formatter disagreements that are NOT ties, so the gap may NOT claim them
+/// (roborev, issue #3777). Each entry is `(value, golden spelling, CLI spelling)`
+/// for ONE f32, each side being exactly what its own formatter emits — so the
+/// FORMATTER-PAIR half of the predicate matches and only the exact-tie proof
+/// rejects them.
+///
+/// `-0.0` is roborev's own counterexample: serde_json writes `-0.0`, Rust
+/// `Display` writes `-0`. Both denote the value EXACTLY, so nothing is being
+/// approximated and there is no tie to break. `1.0` vs `1` and `-7.0` vs `-7` are
+/// the same shape at an integral value.
+///
+/// A named const with a floor asserted below, not an inline list: a span-replacing
+/// edit that deletes cases leaves a green run over a shrunken set (#3544).
+const NON_TIE_FORMATTER_DISAGREEMENTS: &[(f32, &str, &str)] = &[
+    (-0.0, "-0.0", "-0"),
+    (1.0, "1.0", "1"),
+    (-7.0, "-7.0", "-7"),
+];
+
+/// The gap's own predicate, asked DIRECTLY (`Divergence::matched`) rather than
+/// through `compare_rows`, and that level is the point: these three pairs are
+/// numerically EQUAL to the comparator, so no divergence arises at that position
+/// and there is no diff either way. What would be wrong is the gap CLAIMING them —
+/// a declared gap that answers "yes" to a pair it was never measured on is a
+/// standing licence to suppress whatever lands there next, which is exactly what
+/// this module's doc forbids.
+#[test]
+fn the_float_tie_break_gap_rejects_a_formatter_disagreement_that_is_not_a_tie() {
+    assert!(
+        NON_TIE_FORMATTER_DISAGREEMENTS.len() >= 3,
+        "case floor: at least three non-tie formatter disagreements must be exercised"
+    );
+    let gap = Divergence::Float32TieBreakSpellingDiffersFromJava;
+    let float_ty = CqlType::Numeric("float".into());
+
+    for (value, golden_spelling, cli_spelling) in NON_TIE_FORMATTER_DISAGREEMENTS {
+        // Self-checked case data: each side really IS its formatter's own output
+        // for this f32, so the pair-equality half of the predicate is satisfied and
+        // the refusal can only come from the exact-tie proof.
+        assert_eq!(
+            &serde_json::to_string(value).expect("serialize f32"),
+            golden_spelling,
+            "the golden side must be serde_json's spelling"
+        );
+        assert_eq!(
+            &value.to_string(),
+            cli_spelling,
+            "the CLI side must be Display's spelling"
+        );
+        assert_eq!(
+            golden_spelling.parse::<f32>().expect("f32").to_bits(),
+            cli_spelling.parse::<f32>().expect("f32").to_bits(),
+            "both spellings must be the SAME f32, or the pair tests nothing"
+        );
+
+        assert!(
+            !gap.matched(
+                &json!(*golden_spelling),
+                &json!(*cli_spelling),
+                &float_ty,
+                Egress::Csv,
+                Depth::TopLevel,
+                Kinding::Natural,
+            ),
+            "{golden_spelling} vs {cli_spelling} is not a TIE and is not this gap"
+        );
+    }
+
+    // And the pair really is a non-event for the comparator: declaring the gap over
+    // it suppresses nothing, so the walk reports the gap as unapplied rather than
+    // silently carrying it.
+    let schema = schema_of(
+        "CREATE TABLE t (id int PRIMARY KEY, temperature float);",
+        "t",
+    );
+    let declared = [(
+        "temperature",
+        Divergence::Float32TieBreakSpellingDiffersFromJava,
+    )];
+    let golden = vec![row(&[("id", json!(1)), ("temperature", json!("-0.0"))])];
+    let cli = vec![row(&[("id", json!(1)), ("temperature", json!("-0"))])];
+    let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &declared, Egress::Csv);
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+    assert_eq!(
+        report.stale_skips.len(),
+        1,
+        "a gap that suppressed nothing must be reported stale: {:?}",
+        report.stale_skips
+    );
+}
+
+/// The MEASURED tie still applies after the exact-midpoint proof was added — the
+/// property the census depends on (CSV 15999 / JSON 16000 cells for
+/// `test_timeseries.sensor_data`). 36.6015625 is exactly the mean of the two
+/// decimals `36.601562` and `36.601563`, which is what makes this pair a tie and
+/// the pairs above not.
+///
+/// Written as the fraction 4685/128 (both operands exactly representable, so the
+/// division is exact): a decimal literal trips `clippy::excessive_precision`, whose
+/// suggested truncation is `36.601563` — one of the two spellings UNDER TEST.
+#[test]
+fn the_float_tie_break_gap_still_covers_the_measured_exact_tie() {
+    let tie: f32 = 4685.0 / 128.0;
+    let golden_spelling = serde_json::to_string(&tie).expect("serialize f32");
+    let cli_spelling = tie.to_string();
+    assert_eq!(golden_spelling, "36.601562");
+    assert_eq!(cli_spelling, "36.601563");
+
+    let schema = schema_of(
+        "CREATE TABLE t (id int PRIMARY KEY, temperature float);",
+        "t",
+    );
+    let gap = [(
+        "temperature",
+        Divergence::Float32TieBreakSpellingDiffersFromJava,
+    )];
+    let golden = vec![row(&[
+        ("id", json!(1)),
+        ("temperature", json!(golden_spelling)),
+    ])];
+    let cli = vec![row(&[
+        ("id", json!(1)),
+        ("temperature", json!(cli_spelling)),
+    ])];
+    let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &gap, Egress::Csv);
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+    assert!(report.stale_skips.is_empty(), "{:?}", report.stale_skips);
+
+    // And a DIFFERENT f32 at the same position — one ulp up, spelled by the same
+    // two formatters — is a value error, not this gap.
+    let next = f32::from_bits(tie.to_bits() + 1);
+    let wrong = vec![row(&[
+        ("id", json!(1)),
+        ("temperature", json!(next.to_string())),
+    ])];
+    let report = compare_rows(&golden, &wrong, &schema, &["id"], &[], &gap, Egress::Csv);
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+}

@@ -397,7 +397,7 @@ impl Divergence {
                 let _ = (depth, kinding);
                 egress == Egress::Csv
                     && matches!(ty, CqlType::Numeric(name) if name == "float")
-                    && same_f32_with_both_formatter_spellings(golden, cli)
+                    && is_exact_f32_tie_with_both_formatter_spellings(golden, cli)
             }
             Divergence::ContainerMapKeyNotPairableByThisLane => {
                 // DDL ONLY. No value is read — deliberately, and this is the whole
@@ -412,18 +412,35 @@ impl Divergence {
     }
 }
 
-/// Are these two renderings the SPELLINGS THE TWO FORMATTERS PRODUCE for one and
-/// the same f32?
+/// Is this pair an EXACT TIE — the two spellings the two formatters produce for one
+/// and the same f32, which that f32 sits exactly MIDWAY between?
 ///
-/// f32-equality alone is NOT enough, and accepting it made this gap a blind spot
-/// for the whole cell: `36.6015624` and `36.601564` also parse to 36.6015625, and
-/// neither is a spelling either formatter can emit, so suppressing them would
-/// excuse a regression the gap can never legitimately describe — the very thing
-/// [`Divergence::NestedFrozenValueLeftUndecodedByGolden`]'s doc condemns a few
-/// lines up (roborev, issue #3777).
+/// Three claims, each of which cost a review round to get right (issue #3777):
 ///
-/// So the predicate pins the FORMATTER PAIR, both spellings DERIVED from the parsed
-/// f32 rather than hard-coded, so it travels to any other tie cell unchanged:
+/// 1. **f32-equality alone is not enough.** Accepting it made the gap a blind spot
+///    for the whole cell: `36.6015624` and `36.601564` also parse to 36.6015625,
+///    and neither is a spelling either formatter can emit, so suppressing them
+///    would excuse a regression the gap can never legitimately describe.
+/// 2. **The formatter PAIR is not enough either.** Both spellings are DERIVED from
+///    the parsed f32 rather than hard-coded, so the predicate travels to any other
+///    tie cell unchanged — but "the two formatters disagree here" is a strictly
+///    weaker claim than "this is a tie". roborev's counterexample: for `-0.0`
+///    serde_json emits `-0.0` and Rust `Display` emits `-0`, same bits, each its
+///    own formatter's output — an unrelated discrepancy the gap would have
+///    silently swallowed.
+/// 3. So the tie itself is PROVEN, in exact arithmetic: the two texts must denote
+///    two DIFFERENT exact decimals, and the f32 must be exactly their arithmetic
+///    mean, `v == (d1 + d2) / 2`, with no floating-point tolerance anywhere.
+///    Comparing f64 error magnitudes would not do: each parsed decimal carries its
+///    own representation error, so that equality is not reliable, and a tolerance
+///    would be the same fudge in another spelling.
+///
+/// `-0.0` falls out of claim 3 for a reason worth stating: `-0.0` and `-0` BOTH
+/// denote the value exactly, so the two decimals are equal, neither is an
+/// approximation, and there is no tie to break. The same disposes of `1.0` vs `1`
+/// and of every other purely cosmetic formatter disagreement.
+///
+/// The two formatters, for the record:
 ///
 ///   * the CLI/CSV side must equal Rust's `f32` `Display` of that f32 — what
 ///     `cqlite_core::util::value_fmt::ValueFormatter::format_float32` renders
@@ -437,12 +454,11 @@ impl Divergence {
 /// variant's subject), and both must parse to identical f32 BITS — so every genuine
 /// value error stays an ordinary diff.
 ///
-/// Anything the pair does not describe — a third decimal inside the same rounding
-/// interval, an exponent-form spelling neither formatter chose here, a rounded
-/// value — falls through to the ordinary comparison and is REPORTED. That is the
-/// fail-closed direction: an unrecognised pair costs a diff to read, never a
-/// silent suppression.
-fn same_f32_with_both_formatter_spellings(golden: &Value, cli: &Value) -> bool {
+/// Everything FAILS CLOSED. A text that is not an exact decimal this module can
+/// read, a spelling outside the accepted grammar, a digit count or exponent beyond
+/// the stated bounds, an undecidable comparison — every one returns `false`, "not
+/// this gap", which costs a diff to read and never a silent suppression.
+fn is_exact_f32_tie_with_both_formatter_spellings(golden: &Value, cli: &Value) -> bool {
     let text = |v: &Value| match v {
         Value::Number(n) => Some(n.to_string()),
         Value::String(s) => Some(s.clone()),
@@ -467,8 +483,29 @@ fn same_f32_with_both_formatter_spellings(golden: &Value, cli: &Value) -> bool {
     let Ok(tie_to_even) = serde_json::to_string(&g) else {
         return false;
     };
-    g_text == tie_to_even && c_text == g.to_string()
+    if g_text != tie_to_even || c_text != g.to_string() {
+        return false;
+    }
+    // And the tie, in exact arithmetic over the two spellings as written.
+    let (Some(d1), Some(d2)) = (ExactDecimal::parse(&g_text), ExactDecimal::parse(&c_text)) else {
+        return false;
+    };
+    d1.is_exact_midpoint_of(&d2, g) == Some(true)
 }
+
+// ===========================================================================
+// Exact decimal arithmetic
+// ===========================================================================
+//
+// Split into its own file under the campsite rule and reached as
+// `exact_decimal::ExactDecimal`: whether an f32 is exactly the midpoint of two
+// decimal spellings is an arithmetic question with no notion of a `Value`, a
+// schema or an egress, and this file only asks it.
+
+#[path = "golden_value_exact_decimal.rs"]
+mod exact_decimal;
+
+use exact_decimal::ExactDecimal;
 
 /// CQL's blob literal: `0x` and an EVEN number of hex digits (a byte string), and
 /// nothing else. `0x` alone is a legal empty blob and is accepted; the point of the
