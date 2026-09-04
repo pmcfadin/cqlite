@@ -284,10 +284,11 @@ impl SSTableReader {
     /// so that tombstone-shadowing semantics can be applied during the merge.
     pub async fn get_all_entries(&self) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
         let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
-                                       // Issue #660: BTI ("da") tables have no Index.db; route through the
-                                       // whole-Data.db BTI scan, which resolves schema via get_table_schema
-                                       // (header/registry) and decodes every partition. It mints its own
-                                       // per-scan cursor, as does the non-BTI path below (issue #815).
+
+        // Issue #660: BTI ("da") tables have no Index.db; route through the
+        // whole-Data.db BTI scan, which resolves schema via get_table_schema
+        // (header/registry) and decodes every partition. It mints its own
+        // per-scan cursor, as does the non-BTI path below (issue #815).
         if self.bti_partitions_db.is_some() {
             let table_id = TableId::new(format!(
                 "{}.{}",

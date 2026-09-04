@@ -624,9 +624,10 @@ impl SSTableReader {
     /// `sequential_scan` uses the chunk-stitching path and returns every partition.
     pub async fn iterate_all_partitions(&self) -> Result<Vec<(RowKey, ScanRow)>> {
         let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
-                                       // Delegates to the per-call-token sibling with the reader's own field —
-                                       // byte-identical to the pre-#2346 behaviour of this method (every
-                                       // pre-existing caller keeps its exact cancellation semantics).
+
+        // Delegates to the per-call-token sibling with the reader's own field —
+        // byte-identical to the pre-#2346 behaviour of this method (every
+        // pre-existing caller keeps its exact cancellation semantics).
         self.iterate_all_partitions_cancellable(&self.scan_cancel)
             .await
     }
@@ -647,21 +648,22 @@ impl SSTableReader {
         scan_cancel: &crate::storage::scan_cancel::ScanCancel,
     ) -> Result<Vec<(RowKey, ScanRow)>> {
         let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
-                                       // Index-random-read path (issue #2302): when a `Index.db` is present on a
-                                       // BIG SSTable, enumerate EVERY partition via the full Index.db
-                                       // partition-offset table instead of the sparse `Summary.db` samples.
-                                       //
-                                       // The historical loop walked `Summary.db` (only ~1-in-128 partitions) AND
-                                       // passed `data_size = 0` to `parse_partition_at_offset` (Index.db never
-                                       // stores partition size), so it read zero bytes per entry, resolved zero
-                                       // partitions, and SILENTLY fell back to a full `sequential_scan` on EVERY
-                                       // read — even with complete, valid components. Each partition's span is
-                                       // bounded instead by the successor entry's offset (the last by the
-                                       // data-section end), authoritative on-disk structure rather than a size
-                                       // guess (issue #28). Index.db offsets are in the UNCOMPRESSED data-section
-                                       // domain: for an uncompressed reader that equals the raw file domain; for a
-                                       // compressed reader the per-partition slice is mapped to its covering
-                                       // compression chunk(s) and decompressed (`read_compressed_offset_window`).
+
+        // Index-random-read path (issue #2302): when a `Index.db` is present on a
+        // BIG SSTable, enumerate EVERY partition via the full Index.db
+        // partition-offset table instead of the sparse `Summary.db` samples.
+        //
+        // The historical loop walked `Summary.db` (only ~1-in-128 partitions) AND
+        // passed `data_size = 0` to `parse_partition_at_offset` (Index.db never
+        // stores partition size), so it read zero bytes per entry, resolved zero
+        // partitions, and SILENTLY fell back to a full `sequential_scan` on EVERY
+        // read — even with complete, valid components. Each partition's span is
+        // bounded instead by the successor entry's offset (the last by the
+        // data-section end), authoritative on-disk structure rather than a size
+        // guess (issue #28). Index.db offsets are in the UNCOMPRESSED data-section
+        // domain: for an uncompressed reader that equals the raw file domain; for a
+        // compressed reader the per-partition slice is mapped to its covering
+        // compression chunk(s) and decompressed (`read_compressed_offset_window`).
         if self.index_reader.is_some() && self.bti_partitions_db.is_none() {
             match self
                 .iterate_all_partitions_via_full_index(scan_cancel)

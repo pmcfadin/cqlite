@@ -162,15 +162,16 @@ impl SSTableReader {
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<super::super::compaction_row::CompactionRow>> {
         let _scan = self.begin_scan(); // #3853 (no-op: merge readers are buffered)
-                                       // Issue #2372: BTI (`da`) is chunk-compressed with the SAME V5 row layout
-                                       // as nb (why `bti_scan_with_metadata` stitches+parses it with the V5
-                                       // parser), but `requires_chunk_stitching()` gates on `is_nb_format()` and
-                                       // EXCLUDES BTI — so without this branch a BTI table fell into the
-                                       // block-by-block `parse_block_entries` fallback below and errored ("Blob
-                                       // fallback not allowed … V5_0Bti"): the compaction path had no BTI branch,
-                                       // unlike `get_all_entries`/`scan`. Route BTI through the SAME stitch path.
-                                       // Otherwise only V5CompressedLegacy NB is supported here; other formats
-                                       // fall back to iterate_all_partitions with timestamp 0 (LWW by run_index).
+
+        // Issue #2372: BTI (`da`) is chunk-compressed with the SAME V5 row layout
+        // as nb (why `bti_scan_with_metadata` stitches+parses it with the V5
+        // parser), but `requires_chunk_stitching()` gates on `is_nb_format()` and
+        // EXCLUDES BTI — so without this branch a BTI table fell into the
+        // block-by-block `parse_block_entries` fallback below and errored ("Blob
+        // fallback not allowed … V5_0Bti"): the compaction path had no BTI branch,
+        // unlike `get_all_entries`/`scan`. Route BTI through the SAME stitch path.
+        // Otherwise only V5CompressedLegacy NB is supported here; other formats
+        // fall back to iterate_all_partitions with timestamp 0 (LWW by run_index).
         if self.requires_chunk_stitching() || self.bti_partitions_db.is_some() {
             // We need schema; retrieve it once.
             // `schema` is Option<&TableSchema>; clone it into an owned value so we
@@ -595,8 +596,9 @@ impl SSTableReader {
         F: FnMut(super::super::compaction_row::CompactionRow) -> Result<std::ops::ControlFlow<()>>,
     {
         let _scan = self.begin_scan(); // #3853 (no-op: merge readers are buffered)
-                                       // Reset chunk reader to the start of the data section (mirrors
-                                       // iterate_all_partitions_for_compaction) using an own per-scan cursor.
+
+        // Reset chunk reader to the start of the data section (mirrors
+        // iterate_all_partitions_for_compaction) using an own per-scan cursor.
         let cursor = self.new_scan_cursor().await?;
         let header_size = self.calculate_header_size();
         {
