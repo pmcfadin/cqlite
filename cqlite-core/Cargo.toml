@@ -49,8 +49,7 @@ exclude = [
     "tests/issue_3747_empty_map_key.rs",
 ]
 
-# docs.rs build: document the commonly used features. Deliberately excludes
-# `wasm` (wasm32-only deps would fail the default x86_64 docs.rs target).
+# docs.rs build: document the commonly used features.
 [package.metadata.docs.rs]
 features = ["all-compression", "state_machine", "write-support", "arrow", "parquet", "cli-helpers", "delta-scan"]
 
@@ -149,11 +148,6 @@ opentelemetry-otlp = { workspace = true, optional = true }
 tracing-opentelemetry = { workspace = true, optional = true }
 opentelemetry-semantic-conventions = { workspace = true, optional = true }
 
-# Optional WASM support
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = { workspace = true, optional = true }
-js-sys = { workspace = true, optional = true }
-web-sys = { workspace = true, features = ["console"], optional = true }
 
 # Direct-I/O backend and system-memory probing need libc on Unix only
 # (O_DIRECT / F_NOCACHE, sysconf). Non-Unix targets fall back to buffered I/O.
@@ -592,7 +586,6 @@ metrics = ["observability"]
 observability-testing = ["observability", "opentelemetry_sdk?/testing"]
 
 pest = []
-wasm = ["wasm-bindgen", "js-sys", "web-sys"]
 
 # Fuzz-support surface (issue #1614) — gates a single `#[doc(hidden)] pub mod
 # fuzz_support` exposing thin, `Result`-returning drivers over the internal
@@ -639,12 +632,9 @@ producer-fault-injection = []
 # NOT enabled in default CI configuration - opt-in only
 legacy-heuristics = []
 
-# CI zero tolerance - treat warnings as errors
-ci_zero_tolerance = []
 
 # M1 testing remediation feature flags
 state_machine = []    # query/state orchestration (M2+)
-events = []           # validation/event recording (M2+)
 tombstones = []       # tombstone/GC logic (M3+)
 benchmarks = []       # opt-in perf runs
 
@@ -653,8 +643,6 @@ benchmarks = []       # opt-in perf runs
 extended-index-validation = []
 experimental = []     # Experimental features including bloom filter tests (Issue #65), disabled by default
 
-# Issue #80: Mock usage control - unit tests only
-unit-tests-only = []  # Enables mock/synthetic data usage for unit tests (disabled in CI integration paths)
 
 # Issue #66: Enhanced index validation features (M1: disabled by default)
 # Includes promoted index parsing, complex TOC validation, and advanced assertions
@@ -664,16 +652,11 @@ enhanced-index-validation = []
 docker-integration = []
 
 # Test infrastructure features for Phase 2 - Enhanced TestContext Framework
-test-infrastructure = [
-    "test-schema-validation",
-    "test-property-testing",
-    "test-coverage-tracking",
-    "test-quality-gates"
-]
-test-schema-validation = []    # Schema-aware test validation
-test-property-testing = []     # Property-based testing support
-test-coverage-tracking = []    # Real-time coverage tracking
-test-quality-gates = []        # Quality gate enforcement
+# Gates the enhanced TestContext framework (cqlite-core/tests/common/mod.rs). Its four
+# former leaves (test-schema-validation, test-property-testing,
+# test-coverage-tracking, test-quality-gates) had zero effect anywhere and were
+# deleted in #1698; this flag has its own cfg site and stays.
+test-infrastructure = []
 
 # M5: Write support - SSTable generation and persistence (Issue #359)
 # fs2 provides cross-platform advisory file locking for write_dir exclusivity (Issue #485)

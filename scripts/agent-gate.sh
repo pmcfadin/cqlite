@@ -296,6 +296,68 @@
 #                      This component emits no FAIL at all, by design; its own
 #                      self-test (which DOES fail on a broken guard) is in
 #                      tooling-tests.
+#   features-load-bearing
+#                      FEATURES-ARE-LOAD-BEARING guard
+#                      (scripts/ci/check-features-load-bearing.sh, issue #1698, epic
+#                      #1685). Derives every feature DECLARED by every workspace
+#                      member from `cargo metadata --no-deps` and asserts each one
+#                      changes something: it, or something in its feature CLOSURE,
+#                      has a cfg reference site in its DECLARING package's sources,
+#                      enables an optional dependency, enables a feature of an
+#                      external dependency, or is named in a target's
+#                      required-features. CREDIT FLOWS UP FROM EFFECTS, NEVER DOWN
+#                      FROM A PARENT — a leaf named only by an aggregator is dead,
+#                      which is exactly how four `test-*` leaves survived for
+#                      months while `all-compression` (credited through its four
+#                      dep-pulling leaves) stays green. Being ENUMERATED is not an
+#                      effect: this script's own clippy feature lists, a workflow
+#                      `--features` argument and a doc table all NAME features
+#                      without enabling anything, so deleting a dead flag means
+#                      cleaning those enumerations in the same diff.
+#                      cargo metadata, not a textual manifest sweep: cargo
+#                      SYNTHESISES implicit features from optional deps that no
+#                      [features] block contains (7 here), and a find(1) sweep
+#                      reaches non-member manifests cargo never builds. `fuzz/` is
+#                      its own excluded workspace and out of scope.
+#                      CONTRACT (#1698, roborev jobs 57/60), and it is SCOPED: NO
+#                      FALSE FAIL for a gate written in a RECOGNISED spelling —
+#                      #[cfg], #![cfg], cfg!, cfg_attr (condition AND tail), with
+#                      whitespace and string escapes handled — and explicitly
+#                      INCOMPLETE: a dead feature can escape. A gate OUTSIDE that
+#                      set is NOT SEEN, and the two known such cases (a feature NAME
+#                      produced by macro expansion; a build-script env key built at
+#                      runtime) are named in the line. The unqualified version of
+#                      this claim was tried and RETRACTED: six review rounds each
+#                      produced another valid Rust spelling it did not recognise,
+#                      because Rust admits unboundedly many, so an absolute claim
+#                      recreated the recogniser treadmill one level up. THIS
+#                      COMPONENT REQUIRES that line — a guard that quietly stopped
+#                      declaring its own bounds would imply coverage it lacks. The
+#                      asymmetry is deliberate: a false PASS leaves a dead flag in
+#                      place (the status quo), a false FAIL reds correct input and
+#                      makes this the guard everyone waives.
+#                      Fail-closed and affirmative — a failed `cargo metadata`, an
+#                      unreadable member/feature table, a `pkg/feature` edge naming
+#                      a feature that does not exist, an unreadable source file, a
+#                      zero-file scan or a zero-feature run are each a NAMED FAIL,
+#                      never a fallback to an empty feature or effect set (which
+#                      would silently excuse every flag). NO env opt-out and no
+#                      bypass flag, deliberately: a dead flag is always deletable,
+#                      so an escape hatch could only buy a vacuous green.
+#                      PREREQUISITES: cargo AND python3, both MANDATORY and both
+#                      declared — `cargo metadata` is the only source of truth for
+#                      the feature set, and the reader that parses its JSON and
+#                      lexes Rust is python3. Absent either, this component FAILs
+#                      with a named remedy and NEVER SKIPs: a verdict it did not
+#                      measure is not a verdict, and an escape hatch could only buy
+#                      a vacuous green. (Its SELF-TEST, in the SKIP-aware
+#                      tooling-tests component, does SKIP loudly without python3 —
+#                      its subject cannot run there at all — so this
+#                      never-SKIPping lane is NOT folded into a SKIP-aware one,
+#                      per #3522.)
+#                      `cargo metadata` runs with --locked, so this mandatory
+#                      component can never rewrite Cargo.lock mid-gate and trip
+#                      the tree-integrity check (#2926).
 #   tooling-tests      shell-tooling regression tests (fast, no datasets/network):
 #                      scripts/tests/test_workspace_test_disposition.sh (+ its
 #                      self-test): the PACKAGE-granular #3522 census — every cargo
@@ -788,6 +850,13 @@
 #                      invisible to a bare `cargo check` — while pulling in none of the
 #                      ~100 integration test files, which assume default features and
 #                      fail here as noise, not leakage. No opt-out.
+#                      Also runs scripts/tests/test_features_load_bearing_guard.sh
+#                      (#1698), the non-vacuity proof for the
+#                      features-load-bearing component: 64 cases over throwaway
+#                      fixture workspaces, each criterion pinned by a green/red
+#                      differential pair, every negative case requiring the
+#                      diagnostic to NAME the planted feature, and an EXACT case
+#                      count (a floor lets one case be deleted silently).
 #                      Also runs scripts/tests/test_pub_surface_guard.sh (#1712),
 #                      the non-vacuity proof for the pub-surface component. 42 cases,
 #                      source-only (no cargo doc since the #1712 descope), each
@@ -6192,7 +6261,7 @@ _python_build_verify_venv() {
   return 3
 }
 
-COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan python-bindings node-bindings binding-rust-tests delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface dep-duplicates tooling-tests minimal-build all-features-check smoke)
+COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan python-bindings node-bindings binding-rust-tests delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface dep-duplicates features-load-bearing tooling-tests minimal-build all-features-check smoke)
 
 # _component_lane <name> (issues #1737, #2657): SINGLE SOURCE OF TRUTH for the
 # MAIN-vs-SIDE lane split. Defined early (before the arg-parse dispatch) so the
@@ -6888,6 +6957,14 @@ _fm_component_class() {
     # invocation" while a child cargo build had in fact run — affirmatively false (roborev
     # job 273, F2).
     tooling-tests) printf 'unobservable:cargo may run inside ~60 nested test scripts (child processes)' ;;
+    # unobservable, for the SAME reason and NOT `no-cargo` (#1698): the guard is a
+    # separate script, so its ONE `cargo metadata --no-deps` runs in a child process
+    # where the unexported interceptors cannot see it. `no-cargo` would be an
+    # affirmatively false claim (cargo DOES run), and `cargo` would render UNDECLARED
+    # on every PASS — the roborev job 273 F2 defect. There is no nameable DRIVER
+    # either: `cargo metadata` is not a build and enables no features, so
+    # `indirect:<driver>` would promise a feature set that does not exist.
+    features-load-bearing) printf 'unobservable:cargo metadata runs inside scripts/ci/check-features-load-bearing.sh (a child process); it is a metadata read, not a build, and enables no features' ;;
     scoped-tests) printf 'cargo' ;;
     # The DYNAMIC --delta entries (roborev job 277 F2). These reach a SUMMARY line via
     # `NAMES+=("<literal>")` in run_delta_*, NOT via COMPONENTS, so classifying only
@@ -7506,7 +7583,7 @@ _census_kind() {
     # selected `.rs` file cannot be read — changes the RATCHET's failure semantics for every
     # diff, which is its own decision with its own risk of reddening correct input. Doing
     # `emitted` properly requires settling that first. Tracked in #3162.
-    file-size|pub-surface|roborev-lints|binding-unwind-profile|delivery-telemetry|tooling-tests|dep-duplicates)
+    file-size|pub-surface|roborev-lints|binding-unwind-profile|delivery-telemetry|tooling-tests|dep-duplicates|features-load-bearing)
                     printf 'gap:shell/python guard prints no AGENT-GATE-CENSUS contract line yet (#3162)' ;;
     *) return 1 ;;
   esac
@@ -11132,14 +11209,14 @@ run_clippy() {
   #     (the OpenTelemetry stack). Keep this in sync with cqlite-core/Cargo.toml when
   #     features are added; the nightly CQLITE_CLIPPY_FULL=1 pass is the drift guard.
   env RUSTFLAGS="-D warnings" cargo clippy -p cqlite-core --all-targets --features \
-"all-compression,arrow,bench-internals,benchmarks,ci_zero_tolerance,cli-helpers,deflate,delta-scan,dhat-heap,docker-integration,enhanced-index-validation,events,experimental,extended-index-validation,fuzz,legacy-heuristics,lz4,parquet,pest,scan-offload-probe,snappy,state_machine,test-coverage-tracking,test-infrastructure,test-property-testing,test-quality-gates,test-schema-validation,tombstones,unit-tests-only,wasm,work-counters,write-support,zstd" \
+"all-compression,arrow,bench-internals,benchmarks,cli-helpers,deflate,delta-scan,dhat-heap,docker-integration,enhanced-index-validation,experimental,extended-index-validation,fuzz,legacy-heuristics,lz4,parquet,pest,scan-offload-probe,snappy,state_machine,test-infrastructure,tombstones,work-counters,write-support,zstd" \
     || return 1
 
   # (3) cqlite-cli: every feature EXCEPT duckdb-tests + observability. Pulls in
   #     parquet/arrow via state_machine and delta-scan via delta-export, so the
   #     normal-build reachable surface stays linted.
   env RUSTFLAGS="-D warnings" cargo clippy -p cqlite-cli --all-targets --features \
-"benchmarks,ci_zero_tolerance,cli-helpers,delta-export,experimental,integration-tests,interactive,state_machine,tui,write-support" \
+"benchmarks,cli-helpers,delta-export,experimental,integration-tests,state_machine,tui,write-support" \
     || return 1
 
   # (4) cqlite-flight + the Python/Node bindings at their DEFAULT features (none of
@@ -17332,6 +17409,170 @@ run_dep_duplicates() {
   echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
+# features-load-bearing: the FEATURES-ARE-LOAD-BEARING guard (issue #1698, epic #1685
+# "config honesty"). scripts/ci/check-features-load-bearing.sh derives every feature
+# DECLARED by every workspace member from `cargo metadata --no-deps` and asserts each
+# one CHANGES SOMETHING: it, or some feature in its closure, has a cfg reference site in
+# its declaring package's sources, enables an optional dependency, enables a feature of
+# an external dependency, or is named in a target's `required-features`.
+# The defect it exists for: thirteen flags across six manifests — `events`,
+# `ci_zero_tolerance` in five manifests, four `test-*` leaves, `sstable-writer`, a CLI
+# `interactive` that sat in `default`, a `cqlite-core/unit-tests-only` forwarded from
+# another member — had ZERO effect of any kind. Enabling any of them changed nothing
+# that is compiled, linked or run, while reading to every human, every reviewer and
+# THIS SCRIPT'S OWN clippy feature enumerations as a switch that selects behaviour.
+# CREDIT FLOWS UP FROM EFFECTS, NEVER DOWN FROM A PARENT: that asymmetry is what makes
+# a dead leaf detectable while a legitimate aggregator passes. `all-compression` has no
+# effect of its own and is credited THROUGH lz4/snappy/deflate/zstd; the four `test-*`
+# leaves were named by `test-infrastructure` and credited by NOTHING. Under a symmetric
+# "referenced somewhere" rule the aggregator laundered all four, which is precisely how
+# they survived. Being ENUMERATED is likewise not an effect — the clippy lists a few
+# thousand lines up NAME features without enabling anything.
+# PREREQUISITES ARE DECLARED AND MANDATORY: cargo AND python3. This component NEVER
+# SKIPs — not for a missing guard script, not for a missing interpreter — because a
+# coverage hole wearing a SKIP's clothes is still a coverage hole (#3522), and it says so
+# in its own diagnostics with a named remedy. Its SELF-TEST is a different lane: it lives
+# in the SKIP-aware tooling-tests component and SKIPs loudly there when python3 is
+# absent, since the guard it exercises cannot run at all on such a box. That split is
+# deliberate — #3522's rule is that a never-SKIPping lane must not be FOLDED INTO a
+# SKIP-aware one, and these are two components.
+# THIS COMPONENT IS INDEPENDENT OF THE GUARD (the pub-surface precedent, #1712 r6 F2 /
+# r7 F3 / r9 F4): PASS requires the guard's AFFIRMATIVE MEASUREMENT LINE matched WHOLE
+# — never a prefix, which tests a spelling rather than a state — and the two counts in
+# it re-derived here, because `N/M` with N < M would mean the guard reported dead
+# features and exited 0 anyway. A zero exit with no measurement is an early return
+# inside the guard, so it is a NAMED FAIL here instead of a vacuous green.
+# That line also DECLARES the residual of the guard's own method (`cfg-site detection:
+# lexical, NON-EXHAUSTIVE …`) and this component REQUIRES the declaration to be present:
+# a guard whose success text quietly stopped stating what it cannot decide would be
+# implying coverage it does not have.
+run_features_load_bearing() {
+  local name=features-load-bearing
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local guard="scripts/ci/check-features-load-bearing.sh"
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+  if [ ! -f "$REPO_ROOT/$guard" ]; then
+    status=FAIL
+    echo ">>> [$name] FAIL: the guard $guard is MISSING (deleted or renamed)."
+    echo "    This component never SKIPs, so an absent guard is breakage, not an"
+    echo "    excusable environment."
+    record_result "$name" "$status" 0
+    echo ">>> [$name] $RECORDED_STATUS (0s)"
+    return 0
+  fi
+  # DECLARED PREREQUISITES, checked HERE so the diagnostic names the real cause rather
+  # than surfacing as "a feature is dead or the guard refused". Both are mandatory and
+  # neither is a SKIP: python3 is the metadata reader and Rust lexer, cargo is the only
+  # source of truth for the feature set.
+  # `type -P`, which searches PATH for a real executable — NEVER the `command -v` form:
+  # this gate defines a shell FUNCTION named cargo (the feature-matrix observer), and that
+  # form finds functions, so below the observer it always answers "present" and the probe
+  # is vacuous. The gate's own B6 lint enforces this and caught exactly that mistake here.
+  # (B6 greps the script textually, so it also matches the forbidden spelling inside a
+  # COMMENT — hence the circumlocution above. Reported to the lead, not fixed here: it is
+  # another component's lint.)
+  local missing_prereq=""
+  type -P cargo >/dev/null 2>&1 || missing_prereq="cargo"
+  type -P python3 >/dev/null 2>&1 || missing_prereq="${missing_prereq:+$missing_prereq and }python3"
+  if [ -n "$missing_prereq" ]; then
+    status=FAIL
+    echo ">>> [$name] FAIL: $missing_prereq is not on PATH."
+    echo "    Both cargo and python3 are DECLARED MANDATORY prerequisites of this"
+    echo "    component (cargo metadata is the only source of truth for the feature set;"
+    echo "    python3 is the reader that parses its JSON and lexes Rust). There is no"
+    echo "    fallback derivation for either, and this component never SKIPs — a verdict"
+    echo "    it did not measure is not a verdict. Remedy: install the missing tool."
+    record_result "$name" "$status" 0
+    echo ">>> [$name] $RECORDED_STATUS (0s)"
+    return 0
+  fi
+  echo ">>> [$name] bash $guard"
+  if bash "$REPO_ROOT/$guard" >"$log" 2>&1; then
+    # AFFIRMATIVE MEASUREMENT, matched WHOLE. Every element of this line is something
+    # the guard can only know AFTER deriving the member set from cargo, walking the
+    # sources and computing every closure, and the two load-bearing counts must be
+    # NONZERO: "0/0 features load-bearing across 0 manifests; 0 files scanned" is the
+    # vacuous measurement itself.
+    local measured
+    measured="$(grep -m1 -E '^features-load-bearing: [0-9]+/[0-9]+ declared features load-bearing across [1-9][0-9]* workspace manifests \([0-9]+ exempt: [^)]*\); [1-9][0-9]* Rust source files scanned for reference sites$' "$log" || true)"
+    # THE CONTRACT LINE IS REQUIRED TOO (#1698, roborev jobs 57/60). The guard makes a
+    # SCOPED no-false-FAIL claim over an ENUMERATED set of recognised cfg spellings, names
+    # the spellings it does NOT see, and lists the routes by which a dead feature can
+    # escape. A guard whose success text quietly stopped declaring those bounds would be
+    # implying coverage it does not have, so a measurement without a contract line is NOT a
+    # PASS here — and the pattern requires the SCOPED wording, so reverting to an
+    # unqualified soundness claim (retracted on job 60) reds this component.
+    local contract
+    contract="$(grep -m1 -E '^features-load-bearing: CONTRACT: NO FALSE FAIL for a gate written in a RECOGNISED spelling .+ and INCOMPLETE \(.+\)\. A gate written in a spelling OUTSIDE that set is NOT SEEN; .+\. Escape routes: .+$' "$log" || true)"
+    if [ -z "$contract" ]; then
+      echo "❌ [$name] the guard printed its measurement but NOT its CONTRACT line:" >&2
+      echo "    expected \`features-load-bearing: CONTRACT: NO FALSE FAIL for a gate written in a RECOGNISED spelling … and INCOMPLETE (…). A gate written in a spelling OUTSIDE that set is NOT SEEN; …. Escape routes: …\`" >&2
+      echo "    That line is where this guard declares what it cannot decide; without it a" >&2
+      echo "    green implies coverage the guard does not have. Refusing to record PASS." >&2
+      measured=""
+    fi
+    if [ -n "$measured" ]; then
+      # THE SHAPE IS NOT ENOUGH — THE COUNTS MUST COHERE. The guard asserts
+      # load-bearing == asserted before printing, so a line whose numerator differs
+      # from its denominator did not come from the guard (a stub, a truncation, a stale
+      # build) — and it would be reporting dead features under a zero exit. Re-derived
+      # here rather than trusted, because that is what makes this component independent.
+      local flb_n flb_d
+      flb_n="$(printf '%s' "$measured" | sed -E 's|^features-load-bearing: ([0-9]+)/[0-9]+ .*|\1|')"
+      flb_d="$(printf '%s' "$measured" | sed -E 's|^features-load-bearing: [0-9]+/([0-9]+) .*|\1|')"
+      if ! { [ "$flb_d" -gt 0 ] && [ "$flb_n" -eq "$flb_d" ]; }; then
+        echo "❌ [$name] the features-load-bearing measurement line is INCOHERENT:" >&2
+        echo "    $measured" >&2
+        echo "    require: asserted($flb_d) > 0 and load-bearing($flb_n) == asserted($flb_d)." >&2
+        echo "    A line matching the wording but not the arithmetic did not come from the" >&2
+        echo "    guard (stub, truncation or stale build). Refusing to record PASS." >&2
+        measured=""
+      fi
+    fi
+    if [ -n "$measured" ]; then
+      status=PASS
+      # Echo it so a pasted gate log shows the check RAN over a real feature set.
+      echo "$measured"
+    else
+      status=FAIL
+      echo "--- [$name] FAILED: the guard exited 0 but printed NO coherent affirmative"
+      echo "    measurement line (\`features-load-bearing: <N>/<N> declared features"
+      echo "    load-bearing across <M> workspace manifests (<K> exempt: …); <F> Rust source"
+      echo "    files scanned for reference sites; cfg-site detection: lexical,"
+      echo "    NON-EXHAUSTIVE (…)\`), so NOTHING was measured and this is NOT"
+      echo "    a PASS (issue #1698). A zero exit with no measurement is an early return"
+      echo "    inside $guard — a real defect in the guard, not a formatting slip; fix the"
+      echo "    guard (or, if its success wording moved, update BOTH it and this component"
+      echo "    AND scripts/tests/test_features_load_bearing_guard.sh)."
+      echo "--- last 60 lines of $log ---"
+      tail -60 "$log"
+      echo "--- end of $name output ---"
+    fi
+  else
+    status=FAIL
+    echo "--- [$name] FAILED: a feature declared in a workspace manifest is DEAD —"
+    echo "    enabling it changes nothing that is compiled, linked or selected — or the"
+    echo "    guard REFUSED over a derivation it could not complete (issue #1698). The"
+    echo "    diagnostic below names each feature and its manifest line."
+    echo "    Remedy, one of: DELETE the feature (and every enumeration that names it —"
+    echo "    this script's clippy feature lists, workflow \`--features\` arguments, the"
+    echo "    CLAUDE.md feature table, docs), or GIVE it an effect (a cfg site in the"
+    echo "    DECLARING package's sources, an optional dependency, or a target"
+    echo "    \`required-features\`). Being NAMED by an aggregator is not an effect."
+    echo "    There is no opt-out: a dead flag is always deletable."
+    echo "--- last 60 lines of $log ---"
+    tail -60 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+}
+
 # tooling-tests: fast shell-tooling regression tests that have no Rust target and
 # no dataset/network needs. Currently scripts/tests/test_agent_gate_summary.sh,
 # which verifies the SUMMARY block survives non-foreground capture (#1175), and
@@ -17415,6 +17656,12 @@ run_dep_duplicates() {
 # fetch, broken/empty/garbage/absent baseline, deliberate removal, no skew, lite leniency)
 # is planted in a throwaway git repo with a LOCAL bare origin and must be NAMED, not just
 # red. Hermetic: no network (path remote), no cargo, no #1825 slot.
+# Also runs scripts/tests/test_features_load_bearing_guard.sh (#1698), the non-vacuity
+# proof for the features-load-bearing component: 64 cases over throwaway fixture
+# workspaces, each criterion of the predicate pinned by a green/red differential pair,
+# every negative case required to NAME the planted feature, and an EXACT case count (a
+# floor below the real count lets one case be deleted silently — #3544's lesson applied
+# to the suite that is its own subject). It needs cargo and nothing else.
 # Also runs scripts/tests/test_pub_surface_guard.sh (#1712), the non-vacuity proof for
 # the pub-surface component: 42 cases driving scripts/ci/check-pub-surface.sh through
 # 10 greens, 30 reds, the usage case and the kill-safety case, substituting the artifact
@@ -19052,6 +19299,112 @@ run_tooling_tests() {
     record_result "$name" "$status" "$((end - start))"
     echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
+  fi
+
+  # features-are-load-bearing guard self-test (#1698): needs cargo (which this
+  # component's host always has) and nothing else — no datasets, no network. Proves
+  # scripts/ci/check-features-load-bearing.sh actually FIRES, and fires for the RIGHT
+  # reason: every criterion of its predicate is pinned by a GREEN/RED differential PAIR
+  # over a throwaway fixture workspace (a green alone is satisfiable by a guard that
+  # credits everything, a red alone by one that credits nothing), and every negative
+  # case requires the diagnostic to NAME the planted feature — a bare non-zero exit is
+  # produced just as well by an unrelated silent abort. The incident class it must red
+  # on is a dead LEAF named only by an aggregator, i.e. that credit does not flow DOWN.
+  # Its fixture reproduces in miniature every shape the guard has been wrong about
+  # (roborev job 50): a renamed cross-member dependency key, a weak `dep?/feature` edge
+  # both standalone and alongside its activation, a build script, and a NESTED MEMBER
+  # sitting in the outer member's own tests/ directory — the overlap the real workspace
+  # has between the root package's tests/ and cqlite-integration-tests. Five further
+  # cases (job 52) pin the LEXICAL pass and the ANCHORED cfg heads: a
+  # `doc(cfg(feature = ...))` in a cfg_attr tail, a raw/byte string carrying a whole cfg
+  # attribute, a local `var("CARGO_FEATURE_X")` with no proven `use std::env::var`, and a
+  # redundant dependency-feature edge (external and workspace) each confer NOTHING. Every
+  # one was MEASURED to pass on the pre-fix guard, so each is a real differential rather
+  # than a case that would green either way. Three more (job 55) pin the ANCHORED
+  # build-script env API (a local `mod env`, and `my_env::var`, confer nothing), the
+  # REGRESSION that a non-weak edge to an OPTIONAL dependency stays load-bearing even
+  # when the forwarded feature is already enabled, and the guard's DECLARED orphan-file
+  # residual — that last one asserts the success line NAMES the behaviour it exhibits, so
+  # the declaration cannot drift from the code. Four more (job 57) pin THE CONTRACT: two
+  # SOUNDNESS cases (a build script's helper-module env read, and a non-member path
+  # dependency sharing a member's package name) each MEASURED to FAIL on the previous
+  # guard — those were false FAILs, the direction the contract forbids — plus two more
+  # declared escape routes, each asserting both that the behaviour occurs AND that the
+  # contract line names it. Round 5 (job 58) made the PUBLISHED contract true: eleven
+  # further measured differentials, all of them false FAILs, covering six
+  # `CARGO_FEATURE_*` spellings, a bare `CARGO_FEATURE_` prefix, an out-of-tree
+  # `#[path]` module, a nested-member helper reached by the outer target, and THE
+  # ASYMMETRY itself — three differently-ambiguous files that must all credit, asserted
+  # by count, because "when ownership is ambiguous, CREDIT" is the invariant every other
+  # case rests on and the one a refactor would most easily break. Round 6 (job 60) pins
+  # the three bounded recogniser fixes (a cfg in a cfg_attr TAIL, whitespace in the
+  # attribute head, decoded string escapes), the two NOT-SEEN spellings the scoped claim
+  # names (a macro-expanded feature name, a runtime-built env key — both RED, both
+  # declared), and THE CLAIM ITSELF: the success output must state the scoped
+  # no-false-FAIL claim, ENUMERATE the recognised spellings, say what is NOT SEEN, and
+  # contain no form of the word "sound" — the unqualified soundness claim was retracted
+  # after six rounds of witnesses, and its return is a test failure, not a wording nit.
+  # Rounds 7-8 (jobs 62/64) add the gate-infrastructure cases: anchored/derived directory
+  # pruning (a member's own `target/` is source; cargo's reported target_directory is not),
+  # crediting at the cfg_attr recursion bound, all three `cfg!` delimiters, and a
+  # STRUCTURAL assert that this very invocation stays inside its `command -v python3`
+  # guard. Round 9 (job 65) adds the two fail-closed/soundness cases: an UNREADABLE source
+  # directory is a NAMED refusal rather than a silent omission (os.walk swallowed the
+  # error, so a live feature whose only site lived there was reported dead), and cargo's
+  # env-name normalization is matched exactly, so a punctuation-bearing feature name is
+  # credited. Round 10 (job 71) makes that traversal case EUID-INDEPENDENT — it induced
+  # the error with mode bits, which ROOT IGNORES, so this mandatory suite red in a root
+  # container while the guard was correct; it now exceeds PATH_MAX instead, verified to
+  # behave identically as root and as an unprivileged user. Also: Rust's whitespace set is
+  # Pattern_White_Space, not ASCII's, and each of the six CARGO_FEATURE_* spellings is now
+  # counted as its own case with the LIST asserted, since one shared `ok` let a deleted
+  # spelling escape the exact-count protection. Round 11 (job 72) is the last: the
+  # build-script scan DERIVES each declared name's env spelling from the metadata instead of
+  # parsing a suffix (so a Unicode name is credited, and cargo's grammar is no longer
+  # modelled at all), and dependency activations are tracked as (package, key) PAIRS because
+  # a key is package-local. Job 93 closes the last ownership hole: a `.rs` file that NO
+  # TARGET covers credits EVERY workspace member, not just its containing members — a
+  # shared module outside every member directory had no container and so was credited to
+  # nobody. Still no `#[path]`/`include!` resolution, by design. Job 110 closes the adjacent
+  # silent skip: a symlinked directory resolving OUTSIDE the repository, inside a target's
+  # source tree, is now a NAMED REFUSAL rather than skipped (it could hold a
+  # `#[path]`-included gate) — scoped to target source trees so it cannot red on
+  # `node_modules`, and measured to fire on ZERO of this checkout's 33 symlinks. Job 112
+  # applies that same boundary at the FILE level (a symlinked `.rs` was canonicalized and
+  # opened) and DECLARES the case that is genuinely out of bounds: a module reached by an
+  # explicit out-of-repository `#[path]`/`include!` is never visited, so it joins the
+  # NOT-SEEN spellings on the contract line rather than being resolved. Every fixture is a LOCAL path workspace with no registry dependency and every
+  # in-place edit goes through python3 helpers rather than `sed -i`, so the suite runs
+  # offline (verified under CARGO_NET_OFFLINE=1) and portably — this component is mandatory
+  # and must depend on neither a network nor a GNU userland.
+  # Each case SUBSTITUTES THE ARTIFACT (the guard is COPIED into the fixture's own
+  # scripts/ci/) because the guard has no test-only seam and must never grow one.
+  # SKIP-AWARE, LOUDLY, and that is the point (roborev job 62): this suite drives
+  # scripts/ci/check-features-load-bearing.sh, whose reader IS python3, so on a box
+  # without python3 its SUBJECT cannot run at all and there is nothing to exercise. This
+  # component is documented SKIP-aware for exactly that situation, and hard-FAILing here
+  # converted a SUPPORTED SKIP into a red gate of record for a reason the component
+  # denied. The MANDATORY half lives where it belongs — the `features-load-bearing`
+  # component declares cargo AND python3 as prerequisites and FAILs (never SKIPs)
+  # without them — so the never-SKIPping lane is a SEPARATE component and is not folded
+  # into this SKIP-aware one (#3522).
+  if command -v python3 >/dev/null 2>&1; then
+    echo ">>> [$name] bash scripts/tests/test_features_load_bearing_guard.sh"
+    if ! bash "$REPO_ROOT/scripts/tests/test_features_load_bearing_guard.sh" >>"$log" 2>&1; then
+      status=FAIL
+      echo "--- [$name] FAILED (features-load-bearing guard self-test #1698); last 40 lines of $log ---"
+      tail -40 "$log"
+      echo "--- end of $name output ---"
+      end=$(date +%s)
+      record_result "$name" "$status" "$((end - start))"
+      echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+      return 0
+    fi
+  else
+    echo ">>> [$name] SKIP scripts/tests/test_features_load_bearing_guard.sh (no python3 —"
+    echo "    the guard it exercises is python3-based, so its subject cannot run on this"
+    echo "    box; the features-load-bearing component itself FAILs here with a named"
+    echo "    remedy, which is where that requirement is enforced)"
   fi
 
   # nested/concurrent-gate isolation regression self-test (#2874): the concurrency
@@ -23051,6 +23404,7 @@ dispatch_component() {
     binding-unwind-profile) run_component binding-unwind-profile bash "$REPO_ROOT/scripts/tests/test_binding_unwind_profile.sh" ;;
     pub-surface) run_pub_surface ;;
     dep-duplicates) run_dep_duplicates ;;
+    features-load-bearing) run_features_load_bearing ;;
     tooling-tests) run_tooling_tests ;;
     minimal-build)
       # #3453: the minimal lane's DEFINING property is --no-default-features, so the
