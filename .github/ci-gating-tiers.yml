@@ -43,8 +43,50 @@
 #                    owner); this list exists so a reader can see the intent here.
 #     notes:         free text.
 #   exempt[]:
-#     workflow / reason / issue — a PR-triggered workflow that deliberately does NOT
-#     gate the merge. `reason` and `issue` are both mandatory.
+#     workflow / reason / issue / merge_gating_half — a PR-triggered workflow that
+#     deliberately does NOT gate the merge. All four are mandatory.
+#
+#     merge_gating_half:  THE MACHINE-CHECKED HALF OF THE EXEMPTION (issue #3725).
+#       #3493's finding: an exemption excuses a workflow by naming, IN PROSE, what
+#       gates the merge in its place — and nothing checked that claim. node-ci.yml's
+#       entry said "the merge-gating half is the local gate's node-bindings
+#       component" while that component ran 1 of the suite's 27 test files, so 26
+#       were gated by neither side and a deterministic red sat on `main` for ~2 days.
+#
+#       A NON-EMPTY LIST (a workflow can have more than one counterpart) under a
+#       CLOSED grammar — an unrecognised shape is a NAMED refusal, never accepted:
+#         - {kind: gate-component,     component: <name>}
+#             a component of the full local agent gate. VERIFIED to exist in
+#             scripts/agent-gate.components.
+#         - {kind: required-gate-step, step: <exact step name>}
+#             a named step of a job the branch-protection context `required`
+#             depends on, so its failure fails `required` directly. VERIFIED to
+#             exist in the aggregator workflow's `needs` closure.
+#         - {kind: none,               ground: <why that is acceptable>}
+#             NOTHING merge-gating covers this workflow. An honest declaration of
+#             a hole — several of these lanes are genuinely in that state, and
+#             saying so is the point. Must be the SOLE element: `none` beside a
+#             positive claim is incoherent.
+#
+#       IT CHECKS EXISTENCE, NOT SCOPE. A renamed, deleted or never-existent
+#       component now reds the gate. Whether the named component actually COVERS
+#       this workflow — #3493's real hazard, where the component existed all along
+#       — is not decidable here and is not claimed. Do not read a green run as
+#       "the deferral is adequate".
+#
+#       AND THE PROSE `reason` IS UNCHECKED BY DESIGN. There is deliberately no
+#       recogniser over it, per #3312 (remove the shared channel; a recogniser over
+#       author-controlled prose never closes). Declared residual: an entry whose
+#       prose contradicts its structured field is NOT caught. A deliberate trade.
+#
+#       NOTE ON THE TRIGGER FACT, which is derived and never stored: ALL 23
+#       exemptions below carry a `pull_request`/`pull_request_target` trigger
+#       (measured with `GatingRegistry.pull_request_workflow?`). A stored
+#       `pr_triggered:` boolean would be constant across every entry, carry no
+#       information, and be a second source of truth able to drift from the
+#       workflow — so the enrolment rule derives it from the workflow's own `on:`
+#       block at validation time (#3544: remove the second source, do not
+#       reconcile it).
 #
 # STRUCTURAL RULES ENFORCED ON EVERY ENTRY UNDER `tiers:` (gating_policy_rules.rb).
 # Each exists to prevent a concrete failure, in EITHER direction — a tier that can
@@ -113,41 +155,155 @@ tiers:
 
 exempt:
   - workflow: cassandra-parity.yml
-    reason: Scheduled/label-driven parity lane; its merge-gating half is the committed parity report checked by the local gate.
+    reason: >-
+      Scheduled/label-driven parity lane; its merge-gating half is the committed
+      parity report (docs/reports/cassandra-test-parity.md) whose staleness the
+      local gate's SKIP-aware parity-report component catches.
     issue: "#2910"
+    merge_gating_half:
+      - kind: gate-component
+        component: parity-report
+
   - workflow: cassandra-validation.yml
-    reason: Docker-backed validation lane run on demand; not merge-gating today.
+    reason: >-
+      Docker-backed validation lane. It runs `cargo test -p cqlite-core --release
+      --features write-support,docker-integration --test sstableloader_integration`
+      against a live Cassandra container, which no local gate component can do.
     issue: "#2910"
+    merge_gating_half:
+      - kind: none
+        ground: >-
+          NOTHING merge-gating executes sstableloader_integration. It is
+          `docker-integration`-gated and needs a running Cassandra, so no gate
+          component and no `required`-gating tier reaches it. Declared, not
+          covered.
+
   - workflow: ci-minimal-features.yml
-    reason: Feature-matrix build lane; the merge-gating minimal-features build runs in the local gate.
+    reason: >-
+      Feature-matrix build lane. The local gate's minimal-build component runs
+      `cargo build -p cqlite-core --no-default-features --features all-compression`
+      plus `cargo test … --lib --no-run` under RUSTFLAGS=-D warnings, which is the
+      build half. SCOPE DIFFERENCE, stated rather than left to be discovered: this
+      workflow additionally EXECUTES that `--lib` suite, builds/tests the `parquet`
+      feature path, and asserts the default-feature list — none of which any gate
+      component does. CLAUDE.md records the pair as a #3544 circular deferral.
     issue: "#2910"
+    merge_gating_half:
+      - kind: gate-component
+        component: minimal-build
+
   - workflow: ci.yml
-    reason: "Broad opt-in lane; exempt because it is ci:broad-label-gated and does not run on an unlabelled PR at all — NOT because the local agent gate is a superset of it. It is not: ci.yml executes `cargo test -p cqlite-core --features delta-scan --lib`, and the local gate only COMPILES those tests (feature-iso-delta-scan is `--lib --no-run`). Audited in #3522."
+    reason: >-
+      Broad opt-in lane; exempt because it is ci:broad-label-gated and does not run
+      on an unlabelled PR at all — NOT because the local agent gate is a superset of
+      it. CORRECTED IN #3725: this entry previously ended "the local gate only
+      COMPILES those tests (feature-iso-delta-scan is `--lib --no-run`)", which the
+      same change falsified. feature-iso-delta-scan now EXECUTES — it drops
+      `--no-run` and additionally names the cqlite-core integration targets
+      crate-level-gated on `delta-scan` — so ci.yml's
+      `cargo test -p cqlite-core --features delta-scan --lib` pass now has a
+      merge-gating counterpart, and the delta-scan half of #3522's audit finding is
+      closed. KEEP THIS ENTRY AND run_feature_iso_delta_scan IN STEP, for the reason
+      node-ci.yml's entry records: an exemption that defers to a local component is
+      only as true as that component's scope, and narrowing one for speed is a
+      change to a merge gate. SCOPE DIFFERENCE that remains: ci.yml is a broad lane
+      and its other jobs (the full workspace build/test matrix) are not claimed here.
     issue: "#2910"
+    merge_gating_half:
+      - kind: gate-component
+        component: feature-iso-delta-scan
+
   - workflow: compaction-parity.yml
-    reason: Byte-parity lane whose merge-gating half is the local gate's compaction-byte-parity component.
+    reason: >-
+      Byte-parity lane whose merge-gating half is the local gate's
+      compaction-byte-parity component.
     issue: "#2910"
+    merge_gating_half:
+      - kind: gate-component
+        component: compaction-byte-parity
+
   - workflow: coverage-baseline.yml
     reason: Advisory coverage trend lane; a coverage dip must not block a merge.
     issue: "#2910"
+    merge_gating_half:
+      - kind: none
+        ground: >-
+          By design: coverage is a TREND signal, and a dip is information for the
+          author, not a merge block. No merge-gating counterpart is wanted.
+
   - workflow: delta-roundtrip.yml
-    reason: Feature-flagged delta-export lane, covered by the local gate's delta tests.
+    reason: >-
+      Docker-backed delta-export round-trip lane. CORRECTED IN #3725 — the previous
+      reason ("covered by the local gate's delta tests") was FALSE: this workflow
+      runs `cargo test -p cqlite-cli --features delta-export,duckdb-tests --test
+      delta_roundtrip_tests`, and that target is named in the gate's own
+      "EXCLUDED from BOTH passes (delta-export/duckdb-tests/dhat-heap; deliberate,
+      #916)" line, so cli-tests runs it in neither pass.
     issue: "#2910"
+    merge_gating_half:
+      - kind: none
+        ground: >-
+          NOTHING merge-gating executes delta_roundtrip_tests. cli-tests excludes
+          it from both passes because `duckdb-tests` builds the DuckDB C++
+          amalgamation from source (#916), and it also needs Docker for the
+          multi-generation workload. Declared, not covered.
+
   - workflow: docs-site.yml
     reason: Docs site build/deploy; a site build failure is fixed forward, not merge-gating.
     issue: "#2910"
+    merge_gating_half:
+      - kind: none
+        ground: >-
+          By design: the site is redeployed from `main` on every push, so a broken
+          build is fixed forward. Blocking merges on it would couple product
+          delivery to documentation rendering.
+
   - workflow: e2e-readback.yml
     reason: Label-gated Cassandra readback tier (ci:ingest-full); promotion to a gating tier is tracked separately.
     issue: "#2910"
+    merge_gating_half:
+      - kind: none
+        ground: >-
+          NOTHING merge-gating performs a live Cassandra readback of CQLite-written
+          SSTables. The lane needs a Cassandra container and is label-gated;
+          promotion to a gating tier is tracked separately. Declared, not covered.
+
   - workflow: flight-trino-e2e.yml
     reason: Docker-compose Trino end-to-end tier; promotion to a gating tier is tracked separately.
     issue: "#2910"
+    merge_gating_half:
+      - kind: none
+        ground: >-
+          NOTHING merge-gating runs the Trino connector against a live Flight
+          server: the lane is docker-compose + gradle and no gate component or
+          registered tier reaches it. The `flight` tier covers cqlite-flight's own
+          Rust end-to-end tests, which is a different surface. Declared, not
+          covered.
+
   - workflow: fuzz.yml
     reason: Fuzz smoke plus nightly long-run; a fuzz finding is filed as a bug, not a merge block.
     issue: "#1614"
+    merge_gating_half:
+      - kind: none
+        ground: >-
+          By design, and structurally unavoidable: `fuzz/` is its own workspace,
+          excluded from the main one, and cargo-fuzz needs nightly — so the stable
+          gate cannot compile it at all. Crashes are filed as bug issues.
+
   - workflow: live-cell-compaction-parity.yml
-    reason: Docker-backed live-cell parity lane; not merge-gating today.
+    reason: >-
+      Docker-regenerating live-cell parity lane. CORRECTED IN #3725 — the previous
+      reason ("not merge-gating today") understated it: the two targets this lane
+      runs, issue_1017_live_cell_compaction_byte_parity and
+      issue_1020_udt_frozen_compaction_byte_parity, are BOTH named by the local
+      gate's compaction-byte-parity component. What this lane adds is Docker
+      REGENERATION of the fixtures those tests compare against, which the gate
+      consumes from the published corpus instead.
     issue: "#2910"
+    merge_gating_half:
+      - kind: gate-component
+        component: compaction-byte-parity
+
   - workflow: node-ci.yml
     reason: >-
       Node binding lane; the merge-gating half is the local gate's node-bindings
@@ -173,23 +329,120 @@ exempt:
       KEEP THIS ENTRY AND run_node_bindings IN STEP: an exemption that defers to a
       local component is only as true as that component's scope, and #1255's narrowing
       to 1 file in 27 is what made this entry false for ~2 days of a deterministic
-      main-red without blocking a merge.
+      main-red without blocking a merge. The three single lines the typecheck and
+      corpus claims above rest on - `npm run typecheck`, check-dataset-manifest.sh and
+      `npm test`, plus the ORDER of the last two - are PINNED by cases 93-96 of
+      scripts/tests/test_check_dataset_manifest.sh (gate component tooling-tests), and
+      the component's interpretation of check-dataset-manifest.sh's exit codes by its
+      cases 97-102, so deleting any of them reds the gate instead of silently
+      falsifying this sentence (#3642).
     issue: "#2910"
+    merge_gating_half:
+      - kind: gate-component
+        component: node-bindings
+      - kind: gate-component
+        component: binding-rust-tests
+
   - workflow: observability-gate.yml
-    reason: Observability correctness plus label-gated overhead bench; overhead is advisory.
+    reason: >-
+      Observability correctness plus label-gated overhead bench; the overhead bench
+      is advisory. Two merge-gating counterparts, and neither is a superset: the
+      gate's all-features-check runs `cargo check` + `cargo clippy -D warnings` at
+      `-p cqlite-core --all-features --all-targets` (the COMPILE/LINT half, the only
+      gate component that enables the OTLP stack, executing nothing), and
+      pr-gate-core's "cqlite-core fast representative tests" step EXECUTES
+      `cargo test -p cqlite-core --lib --all-features`. This workflow's own
+      `--test observability_*` integration targets are gated on
+      `observability-testing` and run in NEITHER — #3375's family.
     issue: "#2910"
+    merge_gating_half:
+      - kind: gate-component
+        component: all-features-check
+      - kind: required-gate-step
+        step: cqlite-core fast representative tests
+
   - workflow: parity-failure-issue-tests.yml
-    reason: Unit tests for the parity-failure issue filer tooling; tooling-only, not product correctness.
+    reason: >-
+      Unit tests for the parity-failure issue filer tooling
+      (`python3 scripts/tests/test_parity_failure_issue.py`); tooling-only, not
+      product correctness.
     issue: "#2910"
+    merge_gating_half:
+      - kind: none
+        ground: >-
+          NOTHING merge-gating runs test_parity_failure_issue.py — it is named by no
+          gate component (tooling-tests does not list it) and by no registered tier.
+          The subject is the issue-filer tooling, so a defect misfiles a report
+          rather than corrupting data. Declared, not covered.
+
   - workflow: parity-regen-matrix.yml
-    reason: Regeneration matrix lane driven by the weekly exhaustive tier, not by pull requests.
+    reason: >-
+      CORRECTED IN #3725. The previous reason — "driven by the weekly exhaustive
+      tier, NOT BY PULL REQUESTS" — was FACTUALLY FALSE: this workflow has a
+      `pull_request:` trigger (branches [main]) whose `paths:` include
+      cqlite-core/tests/issue_1007_complex_type_parity.rs and
+      cqlite-core/src/storage/sstable/reader/**, so it DOES run on matching pull
+      requests, and it is the ONLY executor of that file's 6 delta-scan-gated tests.
+      Why its PR result is nonetheless non-gating: each of the three legs
+      REGENERATES its fixture corpus from a `cassandra:5.0.2` Docker container
+      before running any test (60-minute job timeout), so the lane depends on Docker
+      Hub and on generator scripts that a `required` context cannot be made to wait
+      on without wedging every unrelated PR; and it is `paths:`-filtered, so its
+      context is ABSENT on most pull requests — and absence is always an error for a
+      registered tier, which is why enrolling it as-is would deadlock rather than
+      gate. Its PR run remains a real, strict signal (CQLITE_REQUIRE_FIXTURES=1,
+      panic-instead-of-skip) that an author should read.
+      THE THREE DECLARED HALVES BELOW MAP TO THE THREE LEGS, and #3725 is what made
+      the cql-type one true. CORRECTED by this issue's own C audit (F7): an earlier
+      draft of this paragraph said core-tests executes "the compression leg's targets
+      and the tombstone leg's". That is FALSE for 6 of the tombstone leg's 9 targets.
+      issue_1010/1011/1013 carry `#![cfg(feature = "delta-scan")]` and
+      issue_1012/1014/1015 `#![cfg(all(feature = "delta-scan", feature =
+      "write-support"))]`, so at `cli-helpers` all six compile to ZERO tests and
+      core-tests executes NONE of them. What core-tests does execute from that leg is
+      the other 3: issue_1019 and issue_1021 (gated on `write-support`, which is in
+      `default`) and the ungated sstable_parity_repaired_metadata_test --
+      compaction-byte-parity additionally names issue_1019. THE SIX ARE COVERED BY
+      feature-iso-delta-scan, the same component this issue added for the cql-type
+      leg, so the structured halves declared below are correct and it was this PROSE
+      that mis-attributed them. That is the #3493 shape reproduced INSIDE the field
+      built to stop it, and it is why the `merge_gating_half:` list is
+      machine-checked while this sentence can only be reviewed. The cql-type leg was the gap this issue
+      was filed on: at `cli-helpers`, issue_1007_complex_type_parity's crate-level
+      `#![cfg(feature = "delta-scan")]` compiles it to ZERO tests, so its 6 cases
+      ran in no merge-gating lane at all. feature-iso-delta-scan now EXECUTES those
+      targets under CQLITE_REQUIRE_FIXTURES=1. SCOPE DIFFERENCE that remains, stated
+      rather than left to be discovered: this lane compares against a corpus
+      REGENERATED from a cassandra:5.0.2 container, where the gate compares against
+      the published one — so a generator-side regression is still caught only here.
     issue: "#1026"
+    merge_gating_half:
+      - kind: gate-component
+        component: core-tests
+      - kind: gate-component
+        component: compaction-byte-parity
+      - kind: gate-component
+        component: feature-iso-delta-scan
+
   - workflow: perf-regression.yml
     reason: Label-gated performance lane (ci:perf); a bench delta is advisory and must not block a merge.
     issue: "#2910"
+    merge_gating_half:
+      - kind: none
+        ground: >-
+          By design: a benchmark delta on shared CI runners is too noisy to gate a
+          merge, and a real regression is triaged rather than auto-blocked.
+
   - workflow: project-board-sync.yml
     reason: Delivery-board automation on pull_request_target; it reports no product signal.
     issue: "#2910"
+    merge_gating_half:
+      - kind: none
+        ground: >-
+          By design: this workflow mutates the delivery board and status labels. It
+          asserts nothing about the code under review, so there is no product
+          property for a merge gate to protect.
+
   - workflow: python-ci.yml
     reason: >-
       Python binding lane. For the PYTEST SUITE the merge-gating half is the local
@@ -214,15 +467,52 @@ exempt:
       KEEP THIS ENTRY AND the python-bindings component IN STEP: an exemption that
       defers to a local component is only as true as that component's scope.
     issue: "#2910"
+    merge_gating_half:
+      - kind: gate-component
+        component: python-bindings
+
   - workflow: smoke-tests.yml
     reason: Dataset smoke lane; the merge-gating half is the local gate's smoke component.
     issue: "#2910"
+    merge_gating_half:
+      - kind: gate-component
+        component: smoke
+
   - workflow: sstabledump-parity-gate.yml
-    reason: Legacy parity context retained while branch protection points at pr-gate; superseded by this registry.
+    reason: >-
+      Legacy parity context retained while branch protection points at pr-gate;
+      superseded by this registry. Its merge-gating half is the local gate's
+      core-tests component, which runs `cargo test -p cqlite-core --features
+      cli-helpers` over EVERY target and so executes this lane's
+      sstabledump_parity_{data,index,summary} and friends. SCOPE DIFFERENCE, stated:
+      this lane additionally installs a real `sstabledump` binary and fetches the
+      full published corpus, so it compares against Cassandra's own tool where
+      core-tests compares against the committed JSONL goldens.
     issue: "#2910"
+    merge_gating_half:
+      - kind: gate-component
+        component: core-tests
+
   - workflow: trino-connector-ci.yml
     reason: Java connector build lane; the connector releases on its own cadence.
     issue: "#2910"
+    merge_gating_half:
+      - kind: none
+        ground: >-
+          NOTHING merge-gating builds or tests trino-connector/: it is a Gradle/Java
+          project outside the cargo workspace, and no gate component or registered
+          tier invokes gradle. It releases on its own cadence. Declared, not
+          covered.
+
   - workflow: workflow-config.yml
-    reason: Workflow configuration lint; its merge-gating half is validate-workflows.rb inside required.
+    reason: >-
+      Workflow configuration lint. Both of its steps are ALSO steps of
+      `pr-gate-core`, the job the branch-protection context `required` needs and
+      refuses to pass without — so the merge-gating half is those steps, not a
+      local gate component.
     issue: "#2910"
+    merge_gating_half:
+      - kind: required-gate-step
+        step: Validate workflow policy
+      - kind: required-gate-step
+        step: Dataset pin agreement (#2646)

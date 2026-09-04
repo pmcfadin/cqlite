@@ -9,6 +9,7 @@
 use super::super::scan_stream_windowed::{WindowedOut, BATCH_EMIT_ROWS};
 use super::super::SSTableReader;
 use super::model::{sort_by_token_order_with_meta, SCAN_FOR_KEY_CALLS};
+use crate::storage::sstable::reader::parsing::BufferExtent;
 use crate::types::{CellWriteMetadata, ScanRow};
 use crate::{Result, RowKey};
 use std::io::SeekFrom;
@@ -26,6 +27,11 @@ use crate::types::TableId;
 use crate::Error;
 #[cfg(not(feature = "tombstones"))]
 use tracing::debug;
+
+// Issue #3721: the seek's decode step + its ONE fallback. Declared HERE, and gated
+// exactly like `scan_single_partition_clustering` below, which is its only caller.
+#[cfg(not(feature = "tombstones"))]
+mod clustering_seek_decode;
 
 impl SSTableReader {
     /// Current value of the test-only `scan_for_key` invocation counter.
@@ -137,16 +143,12 @@ impl SSTableReader {
 
         // AUTHORITATIVE end bound (issue #953 / #951 MEDIUM): the target partition
         // occupies `[offset, end)`, where `end` is the SUCCESSOR partition's start
-        // offset (next trie/index entry). Decompressing exactly the chunks covering
-        // that half-open range materializes every byte of the target partition —
-        // including a row/cell that SPANS multiple compression chunks — without
-        // reading the next partition. This replaces the previous next-partition
-        // *boundary-scan* heuristic (a row-count-stability guard that could falsely
-        // accept a boundary mid-partition); see `bti_decompress_and_parse_target_all`.
-        //
-        // `None` means `offset` is the LAST partition (no successor): the callee
-        // bounds the end with the authoritative data-section length, or falls back
-        // to the safe full-scan path when that length is unknown.
+        // offset (next trie/index entry) — never a boundary-scan heuristic. It
+        // bounds BOTH the decompression and (issue #3890) the parse; the callee's
+        // doc comment states which is which and why they differ under a #954
+        // clustering narrowing. `None` = the LAST partition (no successor): the
+        // callee then uses the authoritative data-section length, or falls back to
+        // the safe full-scan path when even that is unknown.
         let end_bound = self
             .successor_partition_offset(offset, partition_key)
             .await?
@@ -169,59 +171,35 @@ impl SSTableReader {
             )
             .await?;
 
-        // Issue #1184: an engaged BIG clustering narrowing decodes the selected block
-        // window via `big_promoted.rs` (partition-key-bytes guard, not the BTI strict
-        // table-id match that rejects writer-header SSTables). BTI keeps its decoder.
-        if !is_bti && clustering_engaged {
-            if let Some(rows) = self
-                .big_decode_clustering_window(
-                    partition_key,
-                    offset,
-                    decode_end_bound,
-                    row_body_window,
-                    schema_opt.as_ref(),
-                )
-                .await?
-            {
-                if !rows.is_empty() {
-                    super::super::super::work_counters::add_partition_decoded();
-                }
-                return Ok(Some((rows, true)));
-            }
-        }
-
-        // 2. Decode ONLY the target partition at the resolved offset, using the
-        //    SAME parser the scan path uses. `bti_decompress_and_parse_target_all`
-        //    chunk-targets the decompression (decodes just the chunk window that
-        //    holds the partition) and re-verifies the decoded key, so this is
-        //    O(1) PARTITIONS decoded regardless of the SSTable's partition count.
-        //
-        //    Issue #953 correctness fix: this collects EVERY clustering row of the
-        //    one target partition (bounded by the authoritative successor offset /
-        //    data-section length), not just the first row, so a `WHERE pk = ?`
-        //    over a multi-clustering-row
-        //    partition returns all rows — byte-identical to filtering the full
-        //    scan down to `partition_key`. The single-row `*_target` decoder is
-        //    still used by the `get()` point-lookup path, which returns one Value.
-        //
-        //    Issue #954: when `row_body_window` is set, the parse is bounded to the
-        //    clustering slice's row-index block extent so only O(slice) rows are
-        //    decoded (the post-scan backstop trims the block-granularity slack).
-        let parser = self.build_v5_parser(true);
+        // 2. Decode ONLY the target partition at the resolved offset. Issue #3721:
+        //    the decode step lives in `clustering_seek_decode` because a per-column
+        //    decode failure under an INDEX-POSITIONED narrowing must retract that
+        //    narrowing and re-read the full partition — a decision that needs BOTH
+        //    the narrowed and the authoritative bounds, which only this call has.
+        //    `clustering_engaged` comes back FALSE when the narrowing was retracted,
+        //    so the caller's reported `AccessPath` stays honest.
         let key = RowKey::from(partition_key.to_vec());
-        let decoded_rows = match self
-            .bti_decompress_and_parse_target_all(
-                offset as usize,
+        let (decoded, clustering_engaged) = self
+            .decode_clustering_seek_target(
+                table_id,
+                partition_key,
+                &key,
+                is_bti,
+                fully_qualified_match,
+                offset,
+                // Issue #3890 x #3721: the UN-narrowed successor offset is BOTH
+                // the retraction bound and the authoritative PARSE bound —
+                // `decode_end_bound` may point INSIDE the partition, which is
+                // right for the DECOMPRESSION and wrong for the PARSE. Passed
+                // ONCE, as `full_end_bound`, so the two uses cannot drift apart.
+                end_bound,
                 decode_end_bound,
                 row_body_window,
-                &key,
-                table_id,
-                fully_qualified_match,
+                clustering_engaged,
                 schema_opt.as_ref(),
-                &parser,
             )
-            .await?
-        {
+            .await?;
+        let decoded_rows = match decoded {
             // Authoritatively bounded decode (rows may be empty for an absent key).
             Some(rows) => rows,
             // The seek could not bound the target partition authoritatively (the
@@ -555,6 +533,7 @@ impl SSTableReader {
             std::collections::HashMap<String, CellWriteMetadata>,
         )>,
     > {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
         self.bti_scan_with_metadata_cancellable(
             start_key,
             end_key,
@@ -601,6 +580,7 @@ impl SSTableReader {
             std::collections::HashMap<String, CellWriteMetadata>,
         )>,
     > {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
         scan_cancel.check()?;
         let cursor = self.new_scan_cursor().await?;
 
@@ -630,8 +610,20 @@ impl SSTableReader {
             Some(now) => parser.with_now_secs(now),
             None => parser,
         };
-        let parsed =
-            parser.parse_block_with_cell_metadata(&whole, effective_schema.as_ref(), self)?;
+        // Issue #3782 (roborev job 48): `whole` is the ENTIRE data section —
+        // every chunk, stitched from a fresh cursor seeked to the data-section
+        // start above — so no further bytes can arrive to finish a row and a row
+        // decode error here is DATA LOSS. Before this declaration the `da` full
+        // scan (this is the route `scan`/`get_all_entries`/the batched streaming
+        // surface all take) inherited the tolerant break and returned `Ok` with
+        // 120 of 468 rows on a fixture with ONE compressed byte flipped inside a
+        // clustering value.
+        let parsed = parser.parse_block_with_cell_metadata(
+            &whole,
+            BufferExtent::Complete,
+            effective_schema.as_ref(),
+            self,
+        )?;
 
         let mut results = Vec::new();
         // Work-probe (issue #2398, threaded to BTI by #3109): "changed partition key
@@ -758,6 +750,8 @@ impl SSTableReader {
         now_secs: Option<i64>,
         out: &WindowedOut,
     ) -> Result<()> {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
+
         // #1695 (roborev raised this in rounds 12, 14 and 15): race the
         // materialization against OUR consumer's departure.
         //

@@ -1,0 +1,1016 @@
+//! Issue #3890 (AC4): the CORPUS-WIDE point-read column-parity sweep.
+//!
+//! # What it asserts
+//!
+//! For EVERY fixture table the committed corpus can express, and for a bounded
+//! sample of that table's partition keys: the row a PARTITION-TARGETED read
+//! (`WHERE <pk> = <literal>`, which routes through the single-partition
+//! seek/point path) returns must have the SAME COLUMN SET and the SAME VALUES as
+//! the row the FULL-SCAN path returns for that key. Divergence is reported as
+//! `keyspace.table` + key + column.
+//!
+//! # Why column parity, and not "no error was returned"
+//!
+//! #3890's decode failures are SWALLOWED on this branch: the row loop's `Err` arm
+//! in `row_decoder/row_data.rs` logs at `debug` and `break`s, so an `invalid cell
+//! flags 0x37` inside a point read never reaches the caller (removing that swallow
+//! is #3721, which lands on top of this). A sweep keyed on an error propagating
+//! would therefore assert nothing today. The OBSERVABLE consequence of a
+//! truncated row is that the columns after the failure point are ABSENT from the
+//! row — that is detectable now, and it is what makes a future instance of this
+//! class red a lane instead of being swallowed.
+//!
+//! MEASURED CAVEAT, stated rather than implied: on this corpus #3890's overrun
+//! landed entirely in the SUCCESSOR partition's bytes, so no TARGET-partition row
+//! ever lost a column, and this sweep is GREEN both before and after the fix. It
+//! is therefore forward-looking coverage for the class, not a red-first pin of
+//! this instance.
+//!
+//! # What the sweep DID measure, and how to re-measure it
+//!
+//! Its 962 targeted reads surface 10 swallowed `invalid cell flags` errors on
+//! `origin/main` and ZERO with the fix. Once #3721 removes the swallow those 10
+//! become hard failures, and this sweep is the lane that runs them.
+//!
+//! That number is NOT reproducible from committed source: the swallow has to be
+//! instrumented first, and detection has to be measured against the DEFECT
+//! PRESENT (membership is not detection — a guard measured with the fix in place
+//! describes nothing). Full recipe, so the figure is checkable rather than
+//! trusted; run from the repo root with `CQLITE_DATASETS_ROOT` exported:
+//!
+//! 1. Add `eprintln!("SWALLOWED3890: {}", e);` as the FIRST statement of the
+//!    `Err(e)` arm in `reader/parsing/row_decoder/row_data.rs` whose comment opens
+//!    "CRITICAL FIX: Stop parsing remaining columns when we hit an error". Do not
+//!    commit it.
+//! 2. `cargo test -p cqlite-core --features cli-helpers --test
+//!    issue_3890_point_read_column_parity_sweep -- every_fixture --nocapture 2>&1
+//!    | grep -c SWALLOWED3890` -> **0** (the fix in place).
+//! 3. Revert ONLY the fix, keeping the instrumentation:
+//!    `git stash -q -u && git checkout -q origin/main --
+//!    cqlite-core/src/storage/sstable/reader/data_access/ && rm -rf
+//!    cqlite-core/src/storage/sstable/reader/data_access/bti_point && git stash
+//!    pop -q`, then confirm with `git status --porcelain` that `row_data.rs` still
+//!    carries the eprintln.
+//! 4. Re-run step 2's command -> **10**.
+//! 5. Set [`MAX_KEYS_PER_TABLE`] to 4, re-run -> **2**.
+//! 6. Restore: `git checkout -q HEAD -- cqlite-core/src`.
+//!
+//! Step 4 is why [`MAX_KEYS_PER_TABLE`] is 32 and not 4: at 4 the sweep reaches
+//! only 2 of the 10 — a bound tight enough to make the lane cost nothing is a
+//! bound tight enough to miss most of what it exists to catch. The two named
+//! regression tests carry the same signal at their own fixtures (17 -> 0 on
+//! `test_basic.simple_table` via `issue_1573_readat_positional --
+//! big_point_read_matches_scan`, 2 -> 0 on the #953 repacked `test_da.wide_table`),
+//! measured by steps 1/3 plus that target's own command.
+//!
+//! # Derivation, not curation
+//!
+//! The table set is derived at run time from TWO committed sources and nothing
+//! else — the schema registry built from `test-data/schemas/**/*.cql`, intersected
+//! with the `*-Data.db` components actually present on disk, each table's root
+//! resolved individually by `sstables_root_for_table` (issue #3220's TABLE-granular
+//! resolution; neither candidate root is a superset of the other). So a new fixture
+//! joins the sweep with no edit here, and a removed one cannot silently narrow it.
+//!
+//! # …with ONE curated floor, because a derived set derives to EMPTY
+//!
+//! A subject set derived entirely from disk has a failure mode derivation cannot
+//! fix: with no corpus it is empty, every accounting assertion is then vacuously
+//! satisfied, and the target reports `ok` having compared nothing. Measured at
+//! `8a71589e6`: `CQLITE_DATASETS_ROOT=$(mktemp -d)` gave `test result: ok. 2
+//! passed` with the whole AC4 guarantee gone and no output saying so. A suite-wide
+//! `assert!(swept > 0)` is not the fix either (#3220: it cannot see ONE case
+//! dropping out behind its siblings), so the three tables this issue is ABOUT are
+//! named in [`MUST_RUN`] and asserted PER CASE, FAIL-CLOSED UNCONDITIONALLY.
+//! Everything else stays derived.
+//!
+//! Consequence, stated because it is a real behaviour change: this target reads
+//! `CQLITE_REQUIRE_FIXTURES` NOWHERE. The sibling dataset lanes use that variable
+//! to turn a clean skip into a failure; there is no clean skip here to turn, so
+//! consulting it would be a settable way to make the floor optional.
+//!
+//! # The bound (gate cost)
+//!
+//! `core-tests` runs this target, so it is bounded but NEVER by skipping a table:
+//!
+//!   * every discovered table is swept — there is no per-table allowlist, and the
+//!     terminal assertion requires a positive swept count plus every table that
+//!     was discovered to have been either swept or DECLARED non-coverable;
+//!   * within a table, at most [`MAX_KEYS_PER_TABLE`] DISTINCT partition keys are
+//!     probed, taken in sorted (deterministic) order — so a 400k-partition fixture
+//!     costs the same as a 32-partition one;
+//!   * exactly ONE full scan per table serves as the oracle for all its keys;
+//!   * per-table root resolution costs ONE ingest per RESOLVED ROOT, not one per
+//!     table (the tables are grouped by the root that answers for each).
+//!
+//! # Declared non-coverage, printed every run
+//!
+//! Three classes of discovered table cannot be swept, and each is REPORTED BY NAME
+//! with a count rather than silently dropped (a lane that omits coverage silently
+//! is indistinguishable from one that covers it):
+//!
+//!   * `no-schema` — a `*-Data.db` exists but no committed `.cql` declares the
+//!     table (every `system*` keyspace, plus any fixture whose schema lives inline
+//!     in a test). Decoding without an authoritative schema is out of scope (#28).
+//!   * `unrenderable-key` — the partition key's decoded `Value` has no CQL literal
+//!     form this harness can write (e.g. a `Decimal`/`Duration`/collection key).
+//!   * `empty` — the table's full scan returned zero rows, so there is no key to
+//!     probe. This is only tolerated when the scan itself succeeded; it is
+//!     reported, and it is the class to watch if a fixture regresses to 0 rows.
+//!
+//! A [`MUST_RUN`] table can NEVER be absorbed into one of those classes: landing
+//! in any of them is a FAILURE naming the table AND the class. Otherwise adding a
+//! schema-less fixture, or a fixture regressing to 0 scanned rows, would quietly
+//! retire a must-run case while the run still printed a tidy declaration for it.
+//!
+//! Fixture contract: two of the three [`MUST_RUN`] tables are COMMITTED, so they
+//! resolve from the checkout on any machine; `test_basic.simple_table` is FETCHED,
+//! so this target REQUIRES the fetched corpus (`bash
+//! test-data/scripts/fetch-datasets.sh`) and FAILS by name without it. That is
+//! deliberate and it is stated here rather than discovered: the full gate is
+//! already fail-closed on an absent corpus (`missing-fixtures: FAIL-CLOSED`,
+//! #2078), and a sweep that green-passes on a corpus-less box is the exact
+//! 0-rows-when-present class this repo says must never pass. Excluded under
+//! `tombstones` (that build serves point reads via a full-scan filter, so there is
+//! no seek path to sweep).
+
+#![cfg(all(
+    feature = "state_machine",
+    feature = "cli-helpers",
+    not(feature = "tombstones")
+))]
+
+// TABLE-granular fixture-root resolution, shared with the sibling dataset lanes
+// (issue #3220).
+#[path = "support/datasets_root.rs"]
+mod datasets_root;
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+use cqlite_core::ingestion::{ingest, IngestionConfig};
+use cqlite_core::query::result::QueryRow;
+use cqlite_core::schema::TableSchema;
+use cqlite_core::types::Value;
+use cqlite_core::{Config, Database};
+use serial_test::serial;
+
+use datasets_root::{
+    describe_roots, describe_search, repo_root, sstables_root_candidates, sstables_root_for_table,
+    table_has_data,
+};
+
+/// Where a MUST-RUN fixture's SSTable binaries come from. AUTHORITY for the value
+/// is `git ls-files 'test-data/datasets/sstables/**-Data.db'`, never directory
+/// presence in a working tree: `fetch-datasets.sh` unpacks the fetched corpus into
+/// `test-data/datasets/` by default, so a GITIGNORED fixture is routinely present
+/// on disk in a checkout where another machine has nothing. It selects the REMEDY
+/// printed on failure, never whether the failure happens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Binaries {
+    /// In git. An absence means the CHECKOUT is damaged.
+    Committed,
+    /// Gitignored, delivered by `test-data/scripts/fetch-datasets.sh`.
+    Fetched,
+}
+
+/// A table this issue is ABOUT, asserted PER CASE and FAIL-CLOSED
+/// UNCONDITIONALLY (#3220).
+///
+/// # Why a curated set exists inside a derived sweep
+///
+/// The 126-table subject set is derived from disk and must stay that way — nobody
+/// maintains a list of 126 identities, and a derived set is what lets a new
+/// fixture join with no edit here. But a set derived ENTIRELY from disk has one
+/// failure mode a derived set cannot fix: on a box with no corpus it derives to
+/// EMPTY, every accounting assertion below is vacuously satisfied, and the target
+/// reports `ok` having compared nothing. That is exactly what happened —
+/// `CQLITE_DATASETS_ROOT=$(mktemp -d)` gave `test result: ok. 2 passed` at
+/// `8a71589e6`, with the whole AC4 guarantee evaporated and no output saying so.
+///
+/// A suite-wide `assert!(swept > 0)` is NOT the fix and #3220 says why: it cannot
+/// see ONE case dropping out behind its siblings. So the tables #3890 is actually
+/// about are named here and asserted INDIVIDUALLY. Everything else stays derived.
+///
+/// # A must-run table can never be absorbed into a DECLARED class
+///
+/// If a must-run table lands in `empty` / `no-schema` / `unrenderable-key` that is
+/// a FAILURE naming the table AND the class, not a declaration. Otherwise adding a
+/// schema-less fixture, or a fixture regressing to 0 scanned rows, would quietly
+/// retire a must-run case while the run still printed a tidy declaration for it.
+struct MustRun {
+    keyspace: &'static str,
+    table: &'static str,
+    /// What this fixture is evidence OF. Printed on failure, so the operator
+    /// learns what coverage they just lost rather than only which path was absent.
+    why: &'static str,
+    binaries: Binaries,
+}
+
+const MUST_RUN: &[MustRun] = &[
+    MustRun {
+        keyspace: "test_basic",
+        table: "simple_table",
+        why: "the compressed BIG (`nb`) point-read fixture #3890 was filed against: 19 columns, \
+              LZ4, and the one whose point reads produced 17 swallowed `invalid cell flags` \
+              errors (`Cell 'active': invalid cell flags 0x37 at offset 1223` among them)",
+        binaries: Binaries::Fetched,
+    },
+    MustRun {
+        keyspace: "test_da",
+        table: "wide_table",
+        why: "the #953 multi-chunk-row BTI (`da`) fixture — 3 partitions x 300 rows of ~2 KiB \
+              payload; issue_953_multichunk_cell_seek re-compresses THIS table at 512-byte \
+              chunks, and its seek produced the reported `invalid cell flags 0x32 at offset \
+              619369`",
+        binaries: Binaries::Committed,
+    },
+    MustRun {
+        keyspace: "test_big",
+        table: "wide_partition",
+        why: "the fixture the issue's third breadcrumb pointed at (a `clustering_seek_decode.rs` \
+              comment recording `invalid cell flags 0x63`, since moved or deleted — that path \
+              does not exist in this tree and `0x63` appears nowhere in cqlite-core/src). \
+              Independently, it is the largest committed multi-chunk compressed BIG (`nb`) \
+              fixture: 114 LZ4 chunks over a 1,837,037-byte UNCOMPRESSED data section (27,823 \
+              bytes on disk), read from CompressionInfo.db's header — `test_da.wide_table` is \
+              larger overall at 115 chunks but is BTI (`da`). See \
+              test-data/schemas/wide-partition-big.cql for the re-derivation command",
+        binaries: Binaries::Committed,
+    },
+];
+
+/// PURE decision behind the per-case must-run assertion: for each [`MustRun`]
+/// entry, the reason it did NOT run, or nothing when it did.
+///
+/// Factored out (the #3220 idiom) so the assertion has a proof it CAN fail —
+/// `must_run_violations_fire_for_every_non_running_outcome` below drives all three
+/// outcomes. A fail-closed guard whose failing branch is never exercised is
+/// indistinguishable from a guard that cannot fire, which is the shape of the very
+/// defect this floor replaces.
+fn must_run_violations(
+    must_run: &[MustRun],
+    swept: &BTreeMap<String, usize>,
+    declared: &[Declared],
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for m in must_run {
+        let id = format!("{}.{}", m.keyspace, m.table);
+        let remedy = match m.binaries {
+            Binaries::Committed => {
+                "REMEDY: these binaries are COMMITTED to git, so an absence means this checkout \
+                 is damaged — `git restore test-data/datasets`."
+            }
+            Binaries::Fetched => {
+                "REMEDY: these binaries are GITIGNORED (fetched), so run \
+                 `bash test-data/scripts/fetch-datasets.sh` and export the CQLITE_DATASETS_ROOT \
+                 line it prints."
+            }
+        };
+        match swept.get(&id) {
+            // The only passing outcome: swept, having actually compared something.
+            Some(&keys) if keys > 0 => continue,
+            Some(_) => out.push(format!(
+                "{id}: SWEPT but compared 0 targeted reads. Must-run because it is {}. {remedy}",
+                m.why
+            )),
+            None => match declared.iter().find(|d| d.table == id) {
+                Some(d) => out.push(format!(
+                    "{id}: absorbed into the DECLARED `{}` class ({}) — a must-run table may \
+                     NEVER be declared non-coverable. Must-run because it is {}. {remedy}",
+                    d.class, d.detail, m.why
+                )),
+                None => out.push(format!(
+                    "{id}: NOT SWEPT, and no `*-Data.db` for it was discovered. Must-run \
+                     because it is {}. {remedy}",
+                    m.why
+                )),
+            },
+        }
+    }
+    out
+}
+
+/// Per-table cap on DISTINCT partition keys probed. Keeps the sweep's cost a
+/// function of the TABLE COUNT, not of the corpus's largest partition count,
+/// without ever skipping a table.
+///
+/// 32 is MEASURED, not chosen for symmetry with the sibling lanes: of the 10 point
+/// reads that decode badly on `origin/main`, a cap of 4 reaches **2** and a cap of
+/// 32 reaches **all 10** — and the whole sweep still runs in <1 s (962 targeted
+/// reads over 101 tables). Lowering it silently removes detection, not just cost.
+/// The module header carries the exact re-measurement recipe, including how the
+/// fix is reverted so detection is measured against the defect PRESENT.
+///
+/// Both figures are with the SELECTION BELOW (all distinct keys collected first,
+/// then the cap applied in sorted order). They moved when that was fixed — under
+/// the earlier scan-order selection the same measurement read 14 and 0 — which is
+/// exactly why the selection is load-bearing rather than incidental: change which
+/// keys are sampled and you change what the cap detects.
+const MAX_KEYS_PER_TABLE: usize = 32;
+
+/// Committed CQL schema files, discovered from the checkout (never a hardcoded
+/// list): `test-data/schemas/**/*.cql`, including the `legacy/` and `udts/`
+/// subdirectories.
+fn committed_schema_files() -> Vec<PathBuf> {
+    let base = repo_root().join("test-data").join("schemas");
+    let mut out = Vec::new();
+    collect_cql(&base, &mut out);
+    out.sort();
+    out
+}
+
+fn collect_cql(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_cql(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("cql") {
+            out.push(path);
+        }
+    }
+}
+
+/// Keyspace directories present under `root` (`<root>/<keyspace>/`).
+fn keyspace_dirs(root: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .collect();
+    out.sort();
+    out
+}
+
+/// Table names present under `<root>/<keyspace>/`, judged by an actual
+/// `*-Data.db` component (never directory existence — the repo commits JSONL
+/// sidecars for fixtures whose binaries are gitignored).
+fn tables_with_data(root: &Path, keyspace: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let Ok(entries) = std::fs::read_dir(root.join(keyspace)) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // `<table>-<32-hex-uuid>`: split at the LAST '-', since table names may
+        // themselves contain '-'... they may not in CQL, but the split is on the
+        // last separator regardless so a future name cannot break it.
+        let Some((table, _uuid)) = dir_name.rsplit_once('-') else {
+            continue;
+        };
+        if table.is_empty() {
+            continue;
+        }
+        if table_has_data(root, keyspace, table) {
+            out.insert(table.to_string());
+        }
+    }
+    out
+}
+
+/// A CQL literal for a decoded partition-key value, or `None` when this harness
+/// cannot write one (reported as the `unrenderable-key` class, never guessed).
+fn cql_literal(v: &Value) -> Option<String> {
+    match v {
+        Value::Boolean(b) => Some(b.to_string()),
+        Value::TinyInt(i) => Some(i.to_string()),
+        Value::SmallInt(i) => Some(i.to_string()),
+        Value::Integer(i) => Some(i.to_string()),
+        Value::BigInt(i) | Value::Counter(i) => Some(i.to_string()),
+        Value::Uuid(b) => {
+            let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+            Some(format!(
+                "{}-{}-{}-{}-{}",
+                &hex[0..8],
+                &hex[8..12],
+                &hex[12..16],
+                &hex[16..20],
+                &hex[20..32]
+            ))
+        }
+        Value::Text(bytes) => {
+            let s = std::str::from_utf8(bytes).ok()?;
+            Some(format!("'{}'", s.replace('\'', "''")))
+        }
+        // DELIBERATELY absent: `Timestamp` and `Date`. Cassandra accepts a RAW
+        // INTEGER literal for both (`TimestampSerializer.fromString` takes a
+        // long, `SimpleDateSerializer.fromString` an unsigned int), and rendering
+        // them that way was MEASURED here: it parses, and then matches NOTHING —
+        // all four `test_timeseries` tables with a timestamp/date partition-key
+        // component returned 0 rows against a scan holding 1..70. That is a
+        // CQLite query-layer literal-coercion gap, NOT the #3890 seek defect, so
+        // it is REPORTED (see the `unrenderable-key` declared class) rather than
+        // worked around with a synthetic literal that would make this sweep red
+        // on something it is not measuring.
+        Value::Blob(bytes) => {
+            let hex: String = bytes.iter().map(|x| format!("{x:02x}")).collect();
+            Some(format!("0x{hex}"))
+        }
+        _ => None,
+    }
+}
+
+/// Sorted-by-column-name rendering of a row's cells. `Debug` on `Value` is stable
+/// and total across every CQL type, so this covers all values without a
+/// hand-maintained per-type matcher.
+fn row_cells(row: &QueryRow) -> BTreeMap<String, String> {
+    row.values
+        .iter()
+        .map(|(k, v)| (k.to_string(), format!("{v:?}")))
+        .collect()
+}
+
+/// One partition-key tuple: `(column, rendered CQL literal)` per partition-key
+/// column, in schema order. The literals build the predicate; the TUPLE is what
+/// pairs a scanned row to a probe.
+type KeyTuple = Vec<(String, String)>;
+
+/// True iff `row`'s partition-key columns render to EXACTLY this tuple's literals,
+/// component by component.
+///
+/// This is the fix for a real false-failure: matching by `predicate.contains("pk =
+/// 1")` is satisfied by the predicate `pk = 10`, so key 10's oracle absorbed key
+/// 1's scanned rows. Compare structured values instead of making the rendered
+/// string more unusual (#3312: remove the shared channel, do not pick a rarer
+/// delimiter).
+fn row_key_equals(row: &QueryRow, tuple: &KeyTuple) -> bool {
+    tuple.iter().all(|(col, lit)| {
+        row.values
+            .get(col.as_str())
+            .and_then(cql_literal)
+            .is_some_and(|got| got == *lit)
+    })
+}
+
+/// One non-coverable discovered table, with the reason. Printed every run.
+#[derive(Debug)]
+struct Declared {
+    table: String,
+    class: &'static str,
+    detail: String,
+}
+
+/// Outcome of sweeping one table.
+enum TableOutcome {
+    Swept { keys: usize },
+    Declared(&'static str, String),
+}
+
+/// Compare the targeted read against the full-scan oracle for one table.
+async fn sweep_table(
+    db: &Database,
+    schema: &TableSchema,
+    scan_rows: &[QueryRow],
+    failures: &mut Vec<String>,
+) -> TableOutcome {
+    let qualified = format!("{}.{}", schema.keyspace, schema.table);
+    if scan_rows.is_empty() {
+        return TableOutcome::Declared("empty", "full scan returned 0 rows".to_string());
+    }
+    let pk_cols: Vec<&str> = schema
+        .partition_keys
+        .iter()
+        .map(|k| k.name.as_str())
+        .collect();
+    if pk_cols.is_empty() {
+        return TableOutcome::Declared(
+            "unrenderable-key",
+            "schema declares no partition key columns".to_string(),
+        );
+    }
+
+    // Build the probe set. Every DISTINCT renderable partition-key tuple in the
+    // scan is collected FIRST, into an ordered map keyed by the tuple's rendered
+    // components, and only THEN is the cap applied — so the sampled keys are the
+    // first `MAX_KEYS_PER_TABLE` in SORTED order, which is what this file
+    // documents and what makes the cap's measured detection reproducible.
+    // Capping inside the collection loop instead took the first 32 in SCAN order
+    // and sorted afterwards, so which keys got swept moved with scan ordering.
+    //
+    // The map's VALUE is the STRUCTURED tuple (one `(column, literal)` per key
+    // column, in schema order). Pairing a scanned row to a probe is done against
+    // that tuple, component by component, never by searching the rendered
+    // predicate string: `pk = 10` CONTAINS `pk = 1`, so a substring test pulls
+    // key 1's rows into key 10's oracle — a false row-count/parity failure, and a
+    // real divergence masked by conflating two keys' rows. Structured comparison
+    // removes the shared channel rather than picking a rarer delimiter (#3312).
+    let mut probes: BTreeMap<Vec<String>, KeyTuple> = BTreeMap::new();
+    for row in scan_rows {
+        let mut tuple: KeyTuple = Vec::with_capacity(pk_cols.len());
+        for col in &pk_cols {
+            let Some(v) = row.values.get(*col) else {
+                return TableOutcome::Declared(
+                    "unrenderable-key",
+                    format!("scanned row carries no partition-key column '{col}'"),
+                );
+            };
+            let Some(lit) = cql_literal(v) else {
+                return TableOutcome::Declared(
+                    "unrenderable-key",
+                    format!("partition-key column '{col}' decoded as {v:?} (no CQL literal form)"),
+                );
+            };
+            tuple.push(((*col).to_string(), lit));
+        }
+        let sort_key: Vec<String> = tuple.iter().map(|(_, lit)| lit.clone()).collect();
+        probes.insert(sort_key, tuple);
+    }
+    if probes.is_empty() {
+        return TableOutcome::Declared(
+            "unrenderable-key",
+            "no partition-key predicate could be rendered".to_string(),
+        );
+    }
+
+    let mut probed = 0usize;
+    for tuple in probes.values().take(MAX_KEYS_PER_TABLE) {
+        let predicate = tuple
+            .iter()
+            .map(|(col, lit)| format!("{col} = {lit}"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let query = format!("SELECT * FROM {qualified} WHERE {predicate}");
+        let point = match db.execute(&query).await {
+            Ok(r) => r,
+            Err(e) => {
+                failures.push(format!("{qualified}: targeted read `{query}` FAILED: {e}"));
+                continue;
+            }
+        };
+        // Oracle: the scan rows whose partition key equals this probe's tuple —
+        // EXACT per-component equality of rendered values, never a substring of
+        // the predicate.
+        let expected: Vec<&QueryRow> = scan_rows
+            .iter()
+            .filter(|r| row_key_equals(r, tuple))
+            .collect();
+        if expected.is_empty() {
+            failures.push(format!(
+                "{qualified}: `{query}` — the full-scan oracle holds no row for this key, yet the \
+                 key was DISCOVERED from that same scan"
+            ));
+            continue;
+        }
+        if point.rows.len() != expected.len() {
+            failures.push(format!(
+                "{qualified}: `{query}` returned {} row(s); the full scan holds {} for that key",
+                point.rows.len(),
+                expected.len()
+            ));
+            continue;
+        }
+        // Column-set + value parity, per row, in scan order.
+        for (i, (got, want)) in point.rows.iter().zip(expected.iter()).enumerate() {
+            let got_cells = row_cells(got);
+            let want_cells = row_cells(want);
+            for (col, want_val) in &want_cells {
+                match got_cells.get(col) {
+                    Some(got_val) if got_val == want_val => {}
+                    Some(got_val) => failures.push(format!(
+                        "{qualified}: `{query}` row {i} column '{col}' DIVERGES — \
+                         targeted {got_val} vs scan {want_val}"
+                    )),
+                    None => failures.push(format!(
+                        "{qualified}: `{query}` row {i} is MISSING column '{col}' the full scan \
+                         returned (scan value {want_val}) — a truncated targeted read \
+                         (issue #3890). Targeted row has {:?}",
+                        got_cells.keys().collect::<Vec<_>>()
+                    )),
+                }
+            }
+            for col in got_cells.keys() {
+                if !want_cells.contains_key(col) {
+                    failures.push(format!(
+                        "{qualified}: `{query}` row {i} carries column '{col}' the full scan did \
+                         not return"
+                    ));
+                }
+            }
+        }
+        probed += 1;
+    }
+    TableOutcome::Swept { keys: probed }
+}
+
+/// Ingest every committed schema over one candidate root, once.
+async fn open_root(
+    root: &Path,
+    schemas: &[PathBuf],
+) -> Result<(Database, Vec<TableSchema>), String> {
+    let cfg = IngestionConfig {
+        schema_paths: schemas.to_vec(),
+        data_dir: root.to_path_buf(),
+        version_hint: Some("5.0".to_string()),
+        core_config: Config::default(),
+        table_directory_filter: None,
+    };
+    let result = ingest(cfg)
+        .await
+        .map_err(|e| format!("ingestion over {}: {e}", root.display()))?;
+    let registry = result.schema_registry.read().await;
+    let schemas = registry
+        .list_schemas(None)
+        .await
+        .map_err(|e| format!("list_schemas over {}: {e}", root.display()))?;
+    drop(registry);
+    Ok((result.database, schemas))
+}
+
+/// THE sweep. `#[serial]` because it ingests a whole corpus root and the sibling
+/// dataset lanes in this package contend for the same files and process-global
+/// work counters.
+#[tokio::test]
+#[serial]
+async fn every_fixture_table_point_read_matches_the_scan_column_for_column() {
+    let schema_files = committed_schema_files();
+    assert!(
+        !schema_files.is_empty(),
+        "no committed CQL schema found under test-data/schemas — these are COMMITTED SOURCE and \
+         are never legitimately absent (#3148)"
+    );
+
+    let mut swept: BTreeMap<String, usize> = BTreeMap::new();
+    let mut declared: Vec<Declared> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    // Every (keyspace, table) with a `*-Data.db` under ANY candidate root — the
+    // completeness reference the terminal assertion is taken against.
+    let mut discovered: BTreeSet<String> = BTreeSet::new();
+
+    // Discovery, in TWO steps, so root selection is TABLE-granular (#3220) rather
+    // than one root chosen up front and committed to. Step 1 enumerates every
+    // (keyspace, table) carrying a `*-Data.db` under ANY candidate root; step 2
+    // asks `sstables_root_for_table` which root actually holds each one. Neither
+    // root is a superset of the other — a fleet `/data/datasets` has ~120 tables
+    // yet lacks the git-committed `test_da/multiclustering_table`, which the
+    // checkout carries — so a fixed env-first/checkout-first rule picks wrong for
+    // one set of tables whichever way it is written.
+    for root in sstables_root_candidates() {
+        if !root.is_dir() {
+            continue;
+        }
+        for keyspace in keyspace_dirs(&root) {
+            for table in tables_with_data(&root, &keyspace) {
+                discovered.insert(format!("{keyspace}.{table}"));
+            }
+        }
+    }
+    // Group the discovered tables by the root that answers for each, so the
+    // per-table resolution above costs ONE ingest per root, not one per table.
+    let mut by_root: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
+    for id in &discovered {
+        let Some((keyspace, table)) = id.split_once('.') else {
+            failures.push(format!(
+                "discovered identity {id:?} is not `keyspace.table`"
+            ));
+            continue;
+        };
+        match sstables_root_for_table(keyspace, table) {
+            Some(root) => {
+                by_root.entry(root).or_default().insert(id.clone());
+            }
+            // Discovered by the directory walk yet unresolvable by the shared
+            // resolver: the two disagree, which is a defect in one of them and
+            // never something to skip past.
+            None => failures.push(format!(
+                "{id}: a `*-Data.db` was discovered on disk but sstables_root_for_table could \
+                 not resolve a root for it ({})",
+                describe_search(keyspace, table)
+            )),
+        }
+    }
+
+    for (root, fresh) in &by_root {
+        let (db, schemas) = match open_root(root, &schema_files).await {
+            Ok(v) => v,
+            Err(e) => {
+                failures.push(e);
+                continue;
+            }
+        };
+        let with_schema: BTreeSet<String> = schemas
+            .iter()
+            .map(|s| format!("{}.{}", s.keyspace, s.table))
+            .collect();
+
+        for schema in &schemas {
+            let id = format!("{}.{}", schema.keyspace, schema.table);
+            if !fresh.contains(&id) {
+                continue;
+            }
+            let scan = match db.execute(&format!("SELECT * FROM {id}")).await {
+                Ok(r) => r.rows,
+                Err(e) => {
+                    failures.push(format!("{id}: full-scan oracle FAILED: {e}"));
+                    continue;
+                }
+            };
+            match sweep_table(&db, schema, &scan, &mut failures).await {
+                TableOutcome::Swept { keys } => {
+                    swept.insert(id, keys);
+                }
+                TableOutcome::Declared(class, detail) => declared.push(Declared {
+                    table: id,
+                    class,
+                    detail,
+                }),
+            }
+        }
+
+        // A fixture present on disk that NO committed schema declares.
+        for id in fresh.iter() {
+            if !with_schema.contains(id) {
+                declared.push(Declared {
+                    table: id.clone(),
+                    class: "no-schema",
+                    detail: format!("no committed .cql declares {id}"),
+                });
+            }
+        }
+    }
+
+    // Declare the non-coverage IN FULL, every run.
+    let mut by_class: BTreeMap<&str, Vec<&Declared>> = BTreeMap::new();
+    for d in &declared {
+        by_class.entry(d.class).or_default().push(d);
+    }
+    eprintln!(
+        "#3890 sweep: {} table(s) SWEPT ({} targeted reads), {} DECLARED non-coverable, \
+         {} discovered on disk",
+        swept.len(),
+        swept.values().sum::<usize>(),
+        declared.len(),
+        discovered.len()
+    );
+    for (class, items) in &by_class {
+        eprintln!("  DECLARED {class}: {} table(s)", items.len());
+        for d in items.iter() {
+            eprintln!("    {} — {}", d.table, d.detail);
+        }
+    }
+    for (id, keys) in &swept {
+        eprintln!("  SWEPT {id} — {keys} targeted read(s) vs scan");
+    }
+
+    // A positive verdict requires an AFFIRMATIVE measurement: a table recorded as
+    // swept having COMPARED NOTHING is a measurement failure, not a pass. (Every
+    // failed targeted read already lands in `failures`, so this is a belt against
+    // a future path that drops a key without recording why.)
+    for (id, keys) in &swept {
+        if *keys == 0 {
+            failures.push(format!(
+                "{id}: recorded as SWEPT but compared 0 targeted reads — a table with a \
+                 renderable partition key must compare at least one"
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "#3890 point-read column parity sweep reported {} divergence(s):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+
+    // Completeness: every discovered table must have been swept OR declared. A
+    // table that is neither is a table the sweep silently dropped.
+    let unaccounted: Vec<&String> = discovered
+        .iter()
+        .filter(|id| !swept.contains_key(*id) && !declared.iter().any(|d| &d.table == *id))
+        .collect();
+    assert!(
+        unaccounted.is_empty(),
+        "sweep silently dropped {} discovered table(s): {unaccounted:?}",
+        unaccounted.len()
+    );
+
+    // PER-CASE must-run, UNCONDITIONALLY (#3220). This is what stops the whole
+    // sweep evaporating on a box with no corpus: with the subject set derived
+    // entirely from disk, an absent corpus derives to EMPTY and every accounting
+    // assertion above is vacuously satisfied. A suite-wide `assert!(swept > 0)`
+    // would not fix it either — it cannot see ONE named case dropping out behind
+    // its siblings — so each table #3890 is about is checked BY NAME here.
+    //
+    // Three outcomes, and only the first is a pass:
+    //   * SWEPT with >= 1 targeted read  -> the coverage exists;
+    //   * DECLARED non-coverable         -> FAIL naming the table AND the class, so
+    //                                       adding a schema-less fixture (or a
+    //                                       fixture regressing to 0 scanned rows)
+    //                                       cannot quietly retire a must-run case;
+    //   * neither                        -> FAIL naming the table and the resolver
+    //                                       search that came up empty.
+    let must_run_violations = must_run_violations(MUST_RUN, &swept, &declared);
+    assert!(
+        must_run_violations.is_empty(),
+        "#3890 sweep: {} of {} MUST-RUN fixture(s) did not run — the sweep's subject set is \
+         derived from disk, so an absent corpus makes every other assertion in this test \
+         vacuously true (#3220). Candidate roots searched: {}\n{}",
+        must_run_violations.len(),
+        MUST_RUN.len(),
+        describe_roots(),
+        must_run_violations.join("\n")
+    );
+
+    // Belt, now that the must-run floor above cannot be satisfied by an empty run:
+    // a corpus that discovered tables must have swept at least one of them.
+    assert!(
+        !swept.is_empty(),
+        "{} fixture table(s) were discovered on disk but NONE could be swept — a corpus with \
+         Data.db components must yield at least one targeted read (0 = a resolution/decode \
+         regression, never a skip). Declared: {declared:?}",
+        discovered.len()
+    );
+}
+
+/// Proof the comparison CAN fail: a fail-closed guard whose failing branch is
+/// never exercised is indistinguishable from one that cannot fire. Feeds the
+/// column comparison a row that LOST a column and requires it to be reported.
+#[test]
+fn column_parity_reports_a_missing_column() {
+    let full: BTreeMap<String, String> = [
+        ("id".to_string(), "Uuid([1])".to_string()),
+        ("name".to_string(), "Text(\"a\")".to_string()),
+        ("active".to_string(), "Boolean(true)".to_string()),
+    ]
+    .into_iter()
+    .collect();
+    // A row truncated after `id` — the #3890 shape.
+    let truncated: BTreeMap<String, String> = [("id".to_string(), "Uuid([1])".to_string())]
+        .into_iter()
+        .collect();
+
+    let missing: Vec<&String> = full
+        .keys()
+        .filter(|c| !truncated.contains_key(*c))
+        .collect();
+    assert_eq!(
+        missing.len(),
+        2,
+        "a truncated row must be reported as missing every column after the failure point"
+    );
+    // And an identical pair reports nothing.
+    let none_missing: Vec<&String> = full.keys().filter(|c| !full.contains_key(*c)).collect();
+    assert!(
+        none_missing.is_empty(),
+        "identical column sets must report no divergence"
+    );
+}
+
+/// The per-case must-run floor has a proof it CAN fire, for EVERY non-running
+/// outcome — absent, absorbed into a DECLARED class, and swept-having-compared-0.
+/// Without this, the floor is exactly the shape of the defect it replaces: a guard
+/// whose failing branch nothing exercises.
+#[test]
+fn must_run_violations_fire_for_every_non_running_outcome() {
+    let one = [MustRun {
+        keyspace: "test_basic",
+        table: "simple_table",
+        why: "the #3890 fixture",
+        binaries: Binaries::Fetched,
+    }];
+
+    // (a) Genuinely swept -> no violation.
+    let swept: BTreeMap<String, usize> = [("test_basic.simple_table".to_string(), 4)].into();
+    assert!(
+        must_run_violations(&one, &swept, &[]).is_empty(),
+        "a must-run table swept with >= 1 targeted read is not a violation"
+    );
+
+    // (b) Absent entirely (the empty-corpus case that made the whole sweep pass
+    //     vacuously) -> ONE violation naming the table.
+    let v = must_run_violations(&one, &BTreeMap::new(), &[]);
+    assert_eq!(v.len(), 1, "an absent must-run table must be reported");
+    assert!(
+        v[0].contains("test_basic.simple_table") && v[0].contains("NOT SWEPT"),
+        "the violation must name the table and why it did not run: {}",
+        v[0]
+    );
+
+    // (c) Absorbed into a DECLARED class -> a violation naming the table AND the
+    //     class, never a tidy declaration.
+    let declared = [Declared {
+        table: "test_basic.simple_table".to_string(),
+        class: "no-schema",
+        detail: "no committed .cql declares it".to_string(),
+    }];
+    let v = must_run_violations(&one, &BTreeMap::new(), &declared);
+    assert_eq!(v.len(), 1, "a declared must-run table must be reported");
+    assert!(
+        v[0].contains("no-schema") && v[0].contains("NEVER be declared non-coverable"),
+        "the violation must name the DECLARED class it was absorbed into: {}",
+        v[0]
+    );
+
+    // (d) Swept but having compared nothing -> still a violation (presence in the
+    //     swept map is not evidence of a comparison).
+    let zero: BTreeMap<String, usize> = [("test_basic.simple_table".to_string(), 0)].into();
+    let v = must_run_violations(&one, &zero, &[]);
+    assert_eq!(v.len(), 1, "swept-with-0-reads must be reported");
+    assert!(
+        v[0].contains("compared 0 targeted reads"),
+        "the violation must say the table compared nothing: {}",
+        v[0]
+    );
+
+    // And the SHIPPED set is non-empty and names the three fixtures #3890 is about,
+    // so a future edit cannot empty the floor and leave this control passing.
+    let ids: Vec<String> = MUST_RUN
+        .iter()
+        .map(|m| format!("{}.{}", m.keyspace, m.table))
+        .collect();
+    for required in [
+        "test_basic.simple_table",
+        "test_da.wide_table",
+        "test_big.wide_partition",
+    ] {
+        assert!(
+            ids.iter().any(|i| i == required),
+            "MUST_RUN must name {required} (it is one of the fixtures #3890 is about); got {ids:?}"
+        );
+    }
+}
+
+/// The oracle pairing must be EXACT per key component, not a substring of the
+/// rendered predicate. Proof it discriminates the collision that motivated it:
+/// the predicate `pk = 10` contains the text `pk = 1`, so the substring form
+/// paired key 1's scanned row into key 10's oracle — inflating the expected row
+/// count into a false parity failure, and conflating two keys' rows so a real
+/// divergence in one could be masked by the other.
+#[test]
+fn oracle_pairing_is_exact_per_key_component_not_a_substring() {
+    let row = |pk: i32| QueryRow {
+        values: [(std::sync::Arc::from("pk"), Value::Integer(pk))]
+            .into_iter()
+            .collect(),
+        key: cqlite_core::RowKey::from(pk.to_be_bytes().to_vec()),
+        metadata: Default::default(),
+        cell_metadata: None,
+    };
+    let tuple_10: KeyTuple = vec![("pk".to_string(), "10".to_string())];
+    let tuple_1: KeyTuple = vec![("pk".to_string(), "1".to_string())];
+
+    assert!(row_key_equals(&row(10), &tuple_10), "10 must pair with 10");
+    assert!(row_key_equals(&row(1), &tuple_1), "1 must pair with 1");
+    // The collision, both directions.
+    assert!(
+        !row_key_equals(&row(1), &tuple_10),
+        "key 1's row must NOT pair with the probe for key 10 (the substring bug)"
+    );
+    assert!(
+        !row_key_equals(&row(10), &tuple_1),
+        "key 10's row must NOT pair with the probe for key 1"
+    );
+    // Positive control that the substring form really does collide, so this test
+    // is known to discriminate rather than merely to pass.
+    let predicate_10 = "pk = 10";
+    assert!(
+        predicate_10.contains("pk = 1"),
+        "the rendered predicate for key 10 DOES contain key 1's rendering — which is \
+         why the pairing may not be a substring test"
+    );
+
+    // A COMPOUND key: every component must match, not just the first.
+    let compound = |a: &str, b: i32| QueryRow {
+        values: [
+            (
+                std::sync::Arc::from("bucket"),
+                Value::Text(a.as_bytes().to_vec().into()),
+            ),
+            (std::sync::Arc::from("seq"), Value::Integer(b)),
+        ]
+        .into_iter()
+        .collect(),
+        key: cqlite_core::RowKey::from(a.as_bytes().to_vec()),
+        metadata: Default::default(),
+        cell_metadata: None,
+    };
+    let t: KeyTuple = vec![
+        ("bucket".to_string(), "'bo'".to_string()),
+        ("seq".to_string(), "5".to_string()),
+    ];
+    assert!(row_key_equals(&compound("bo", 5), &t));
+    assert!(
+        !row_key_equals(&compound("bo", 50), &t),
+        "a differing SECOND component must not pair"
+    );
+    assert!(
+        !row_key_equals(&compound("boo", 5), &t),
+        "a differing FIRST component must not pair"
+    );
+    // A row MISSING a key column can never pair (it is not evidence of equality).
+    assert!(
+        !row_key_equals(&row(10), &t),
+        "a row without the tuple's key columns must not pair"
+    );
+}

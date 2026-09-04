@@ -130,6 +130,56 @@ ws0_scan_session_bound() { # ws0_scan_session_bound <corpus-path>
 # one), so a fixture omitting it is refused — correctly. Supplying a realistic value keeps
 # the fixtures a model of real perf output instead of a model of what the parser happened
 # to read.
+# ws0_write_server_log <path> <max-concurrent-scans> <source> <available-parallelism>
+#
+# One `cqlite-flight starting` line in the SHAPE THE SERVER REALLY EMITS, escapes included: the
+# reset sits between each field NAME and its `=`, which is what makes an unstripped parse match
+# nothing (#3400). `printf '%b'` renders the escapes.
+ws0_write_server_log() {
+  local path="$1" scans="$2" src="$3" par="$4" e
+  e="$(printf '%b' '\033[0m\033[2m')"
+  {
+    printf '%b' '\033[2m2026-09-02T23:22:00.411152Z\033[0m \033[32m INFO\033[0m '
+    printf '%b' '\033[2mcqlite_flight::cli\033[0m\033[2m:\033[0m '
+    printf 'cqlite-flight starting '
+    printf '%blisten%s=%b127.0.0.1:18815 ' '\033[3m' "$e" '\033[0m'
+    printf '%bmax_concurrent_scans%s=%b%s ' '\033[3m' "$e" '\033[0m' "$scans"
+    printf '%bmax_concurrent_scans_source%s=%b"%s" ' '\033[3m' "$e" '\033[0m' "$src"
+    printf '%bavailable_parallelism%s=%b%s\n' '\033[3m' "$e" '\033[0m' "$par"
+  } > "$path"
+}
+
+# ws0_stamp_missing_server_logs <session-dir> — stand in for the driver, for every flight rep
+# whose `.jsonl` exists and whose `.server.log` does not (#3551 item 10).
+#
+# The reporter REQUIRES a server log per flight rep (the admission ceiling is DERIVED from
+# available_parallelism, which respects the CPU affinity mask, so it moves with the pin and a
+# session whose reps disagree differed in a second property). ~34 case sites across these suites
+# build reps AD HOC rather than through `make_flight_rep`, and requiring each to stamp the log
+# would put the same line in 34 places — the one someone forgets then fails for a reason
+# unrelated to its subject. So this is called from `run_report`, IF ABSENT, exactly as the
+# pre-measurement corpus pin is and for the same stated reason.
+#
+# The tag set is DERIVED FROM THE ARTIFACTS PRESENT (every `flight-*.jsonl` in the dir), not from
+# a parameter: an ad-hoc case's rep set is whatever it wrote, and a parameterised list would go
+# stale exactly where those cases differ from the builders. A case whose SUBJECT is the log
+# (absent, empty, unparseable, disagreeing) must therefore invoke the reporter DIRECTLY rather
+# than through `run_report` — stated here because that is the one thing this convenience takes
+# away.
+ws0_stamp_missing_server_logs() {
+  local d="$1" j tag
+  [ -d "$d" ] || return 0
+  for j in "$d"/flight-*.jsonl; do
+    # A literal, unexpanded glob means there are no flight reps — nothing to stamp, and NOT an
+    # error: a scan-only fixture is legitimate.
+    [ -e "$j" ] || continue
+    tag="$(basename "$j" .jsonl)"
+    # `.prewarm.jsonl` is not a rep artifact; its tag would name a rep that does not exist.
+    case "$tag" in *.prewarm) continue ;; esac
+    [ -e "$d/$tag.server.log" ] || ws0_write_server_log "$d/$tag.server.log" 4 derived 2
+  done
+}
+
 perf_csv() {
   printf '%s,,cycles,1000000000,100.00,1.000,GHz\n%s,,instructions,1000000000,100.00,2.000,insn per cycle\n' "$2" "$3" > "$1"
 }
@@ -304,6 +354,22 @@ repo_root = pathlib.Path(sys.argv[1]).resolve().parent.parent
 # the pin it just wrote, which is how the other single-value fields are exercised too.
 config = {"reps": sys.argv[4], "temps": sys.argv[5], "arms": sys.argv[6],
           "scan_passes": sys.argv[7], "server_cpus": "2,10", "client_cpus": "4,12",
+          # The FLIGHT pin (#3551), a declared manifest field the reader REFUSES to do without.
+          # EQUAL to server_cpus here, which is the default every run without
+          # --flight-server-cpus produces, and it must equal what ws0_pin_verification stamps
+          # below: that agreement is what the reporter asserts. A case whose SUBJECT is the
+          # flight pin (a manifest naming CPUs no verification ran against, or a distinct-cores
+          # session) edits one side EXPLICITLY.
+          "flight_server_cpus": "2,10",
+          # The ENVIRONMENT records (#3551), declared manifest fields the reader REFUSES to do
+          # without — and `env_ambient` must NAME every key the rig records, so this is not a
+          # placeholder: a fixture missing a key would fail every downstream case on the
+          # completeness assert rather than on its own subject. Shaped like the driver output
+          # (`<unset>`/`<none>` are affirmative markers, never blanks).
+          "env_ambient": "LD_PRELOAD=<unset>; LD_LIBRARY_PATH=<unset>; RUSTFLAGS=<unset>;"
+                         " CARGO_ENCODED_RUSTFLAGS=<unset>; MALLOC_VARS=<none>",
+          "env_injected": "flight server process ONLY: LD_PRELOAD=<empty>, not injected"
+                          " (fixture); bare scan (the drift control): NOTHING is injected",
           "step_duration": "45s/1s", "flight_endpoint": sys.argv[9],
           "events": "cycles,instructions",
           "bin_dir": "/fixture/target/release",
@@ -471,6 +537,13 @@ provenance_path(session).write_text(json.dumps(rec, indent=1) + "\n")
 # manifest (the substitution the reporter must refuse) without rebuilding the whole manifest.
 ws0_pin_verification() {
   local session="$1" server="$2" client="$3" perf_dir
+  # THE FLIGHT ARM (#3551), defaulted so every existing caller keeps stamping a healthy record.
+  # `${N-default}` and not `${N:-default}` for the reason stated at ws0_pin_session_corpus: a
+  # case that deliberately passes an EMPTY value is testing the reader's empty-field refusal, and
+  # the colon form would silently hand it the healthy default instead.
+  local flight="${4-$server}" mode="${5-siblings}" allocator="${6-system}"
+  local allocator_lib="${7-none (system malloc; fixture)}"
+  local arena="${8-not injected (fixture)}"
   # DOES NOT CREATE the session dir, and that is load-bearing rather than tidiness: an earlier
   # draft used `mkdir(parents=True)`, which brought a deliberately-NONEXISTENT `--dir` into
   # existence and turned the reporter's "not an existing directory" refusal into a
@@ -483,6 +556,8 @@ import json, pathlib, sys
 sys.path.insert(0, sys.argv[1])
 from ws0_pinning import pinning_record_path
 session, server, client = pathlib.Path(sys.argv[2]), sys.argv[3], sys.argv[4]
+flight, mode, allocator, allocator_lib = sys.argv[5], sys.argv[6], sys.argv[7], sys.argv[8]
+arena = sys.argv[9]
 # The expanded form mirrors `verify_sibling_pair`s real output line, so the reporter parses the
 # same shape a driver produces rather than a fixture-only spelling.
 rec = {
@@ -496,9 +571,30 @@ rec = {
     "verified_by": "scripts/perf/lib-cpu.sh verify_sibling_pair + verify_disjoint, fail-closed,"
                    " against the real thread_siblings_list BEFORE the first rep",
     "provenance": "written BY THE DRIVER that performed the verification (synthetic fixture)",
+    # THE FLIGHT ARM (#3551). The expanded forms mirror the real echoes of
+    # `verify_sibling_pair` / `verify_distinct_cores`, so the reporter reads the same SHAPE a
+    # driver produces rather than a fixture-only spelling — the rule this file already follows
+    # for server_siblings_expanded.
+    "flight_server_cpus": flight,
+    "flight_pin_mode": mode,
+    "flight_pin_verified": (
+        f"flight server CPUs: {flight} -> verified siblings of one physical core"
+        f" ({flight.replace(chr(44), chr(32))})"
+        if mode == "siblings" else
+        f"flight server CPUs: {flight} -> verified pairwise DISTINCT physical cores"
+        f" ({flight.replace(chr(44), chr(32))}); thread_siblings_list read: "
+        + " ".join(f"cpu{c}=({c} {int(c) + 8})" for c in flight.split(chr(44)))
+    ),
+    "flight_allocator": allocator,
+    "flight_allocator_lib": allocator_lib,
+    "flight_malloc_arena_max": arena,
+    "flight_allocator_verification":
+        "per rep, AFTER await_server_ready: /proc/<server-pid>/maps is READ (synthetic fixture"
+        " record, shaped like the one the driver writes)",
 }
 pinning_record_path(session).write_text(json.dumps(rec, indent=1) + "\n")
-' "$perf_dir" "$session" "$server" "$client"
+' "$perf_dir" "$session" "$server" "$client" "$flight" "$mode" "$allocator" "$allocator_lib" \
+    "$arena"
 }
 
 # ws0_pin_boundary_observations <session-dir> <reps> <temps> <arms> — the driver's MEASUREMENT-BOUNDARY

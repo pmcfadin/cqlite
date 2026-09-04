@@ -1366,8 +1366,8 @@ fi
 # ...and the call site must consume the token through a VARIABLE: reading
 # `$(_perf_accel_token)` there would reintroduce the very fork the path excludes.
 accel_fn_text=$(fn_text "$GATE" accelerators_line)
-if printf '%s' "$accel_fn_text" | grep -q '_perf_accel_token_into' \
-   && ! printf '%s' "$accel_fn_text" | grep -q '\$(_perf_accel_token\|`_perf_accel_token'; then
+if grep -q '_perf_accel_token_into' <<<"$accel_fn_text" \
+   && ! grep -q '\$(_perf_accel_token\|`_perf_accel_token' <<<"$accel_fn_text"; then
   ok "perf-free: accelerators_line consumes the perf token through a variable, not a subshell"
 else
   bad "perf-free: accelerators_line reads the perf token through a command substitution"
@@ -1533,7 +1533,8 @@ mkdir -p "$ds_corpus/sstables/test_basic/simple_table-0001"
 #      (it exits at the preflight). The recovery file must show the FAIL-CLOSED marker
 #      + RESULT: FAIL and never RESULT: PASS. Cap disabled so the run never queues.
 full_fail="$tmp/2078-full-fail.txt"
-CQLITE_GATE_DISABLE_CAP=1 CQLITE_DATASETS_ROOT="$ds_nocorpus" \
+# #3755: bar pinned to 0 — this case's subject is the #2078 fixture preflight, not disk.
+CQLITE_GATE_DISABLE_CAP=1 CQLITE_GATE_MIN_FREE_GB=0 CQLITE_DATASETS_ROOT="$ds_nocorpus" \
   AGENT_GATE_SUMMARY_FILE="$full_fail" bash "$GATE" >/dev/null 2>&1
 full_fail_rc=$?
 if [ "$full_fail_rc" -ne 0 ] \
@@ -1900,7 +1901,14 @@ if [ -n "$dataset_components" ]; then
 else
   bad "1699-dataset-extract: could NOT extract DATASET_COMPONENTS — the extraction itself broke, so every membership assert below would pass vacuously"
 fi
-for lane in flight-tests legacy-heuristics; do
+# feature-iso-delta-scan JOINED THIS LOOP on #3725, and it used to be asserted ABSENT
+# below. The lane was widened from `--lib --no-run` to EXECUTING 13 dataset-consuming
+# parity targets, so the old assert (correct while it compiled only) would now certify
+# exactly the hole #3725 closes: enrollment is what puts the #2078 preflight in front of
+# it. Its SIBLING feature-iso-parquet is still compile-only and stays in the ABSENT loop —
+# the two lanes are deliberately ASYMMETRIC now, which is why they are asserted separately
+# rather than as one pair.
+for lane in flight-tests legacy-heuristics feature-iso-delta-scan; do
   case " $dataset_components " in
     *" $lane "*)
       ok "1699-dataset-present: $lane is in DATASET_COMPONENTS (so the #2078 missing-fixtures preflight covers it)" ;;
@@ -1908,7 +1916,7 @@ for lane in flight-tests legacy-heuristics; do
       bad "1699-dataset-present: $lane is NOT in DATASET_COMPONENTS — it runs dataset-dependent tests, so missing fixtures would bypass the preflight and it would fail obscurely instead" ;;
   esac
 done
-for lane in feature-iso-parquet feature-iso-delta-scan; do
+for lane in feature-iso-parquet; do
   case " $dataset_components " in
     *" $lane "*)
       bad "1699-dataset-absent: $lane is in DATASET_COMPONENTS — it is a compile-only isolation lane (--lib --no-run) that opens no fixture, so enrolling it makes a fixture-less checkout fail-closed for no reason" ;;
@@ -1984,7 +1992,7 @@ fi
 # it. Scoped to the two lane functions so the pre-existing clippy component (which has
 # the same latent exposure, filed separately) does not make this assert fail for
 # something outside this change.
-for fn_ in run_legacy_heuristics run_feature_iso; do
+for fn_ in run_legacy_heuristics run_feature_iso run_feature_iso_delta_scan; do
   body_="$tmp/1699-lanefn-$fn_.txt"
   awk -v f="^$fn_\\\\(\\\\) \\\\{" '$0 ~ f, /^\}/' "$GATE" > "$body_"
   if [ ! -s "$body_" ]; then
@@ -2105,7 +2113,7 @@ fi
 #
 # Scoped to the #1699 lane functions: the pattern is pervasive in this repo (~696 sites
 # in scripts/) and auditing all of it is #3380's neighbourhood, not this issue's.
-for fn_ in run_legacy_heuristics run_feature_iso run_flight_tests; do
+for fn_ in run_legacy_heuristics run_feature_iso run_feature_iso_delta_scan run_flight_tests; do
   body_="$tmp/1699-pipefail-$fn_.txt"
   awk -v f="^$fn_\\\\(\\\\) \\\\{" '$0 ~ f, /^\}/' "$GATE" > "$body_"
   if [ ! -s "$body_" ]; then
@@ -2787,9 +2795,10 @@ fi
 # with NO file arguments, and `grep -lE <pattern>` with no files reads STDIN. Portable loops
 # have neither problem. STATIC lint, following the precedent in
 # test_agent_gate_tree_portability.sh, which lints tree-integrity functions the same way.
-for fn_ in run_legacy_heuristics run_flight_tests run_feature_iso _rust_module_closure \
+for fn_ in run_legacy_heuristics run_flight_tests run_feature_iso run_feature_iso_delta_scan \
+           _rust_module_closure \
            _lh_positive_in_closure _package_test_targets_gated _package_unittest_srcs \
-           _resolved_package_features _deny_warnings; do
+           _resolved_package_features _deny_warnings _ds_inner_cfg_gate _ds_fixture_posture; do
   body_="$tmp/1699-gnu-$fn_.txt"
   awk -v f="^$fn_\\\\(\\\\) \\\\{" '$0 ~ f, /^\}/' "$GATE" > "$body_"
   if [ ! -s "$body_" ]; then
@@ -3474,6 +3483,181 @@ for goneid_ in _component_runs_target _feature_enabled_by_some_component gated_n
   fi
 done
 
+
+# --- 34b. #3725: the WIDENED delta-scan lane's instrument + fixture posture ---------------
+#
+# feature-iso-delta-scan used to be one half of a symmetric pair pinned by section 34
+# (`cargo test --lib --no-run`). #3725 made the two ASYMMETRIC: this one EXECUTES. Section
+# 34 still pins run_feature_iso (parquet, compile-only); this pins the widened lane, and
+# the two assertions are opposites in exactly one place — `--no-run` is REQUIRED there and
+# FORBIDDEN here — so reverting the widening reds by name instead of quietly restoring a
+# lane that compiles 13 parity targets and executes none of them.
+ds_body_="$tmp/3725-lanefn.txt"
+awk '/^run_feature_iso_delta_scan\(\) \{/, /^\}/' "$GATE" > "$ds_body_"
+if [ ! -s "$ds_body_" ]; then
+  bad "3725-lane-extract: could not extract run_feature_iso_delta_scan from the gate — every assert below would pass vacuously"
+else
+  ds_code_="$tmp/3725-lanefn-code.txt"
+  # Comments and echoed strings out first: this file's own rationale NAMES the forbidden
+  # shapes, and an oracle that reads its own prose as a violation is the #3312 defect (it
+  # has already false-FAILED once in this file).
+  sed -e 's/[[:space:]]*#.*$//' -e '/^[[:space:]]*echo[[:space:]]/d' \
+      -e '/^[[:space:]]*census+=(/d' "$ds_body_" > "$ds_code_"
+  # `write-support,` is PINNED (roborev round 1, finding 2). Without it 3 of the 13 derived
+  # targets — gated #![cfg(all(feature = "delta-scan", feature = "write-support"))] —
+  # compile to ZERO tests, so the lane declared the delta-scan family closed while a
+  # quarter of it executed nothing. Dropping it again silently re-opens that, which is why
+  # the feature name and not just the flag is the assertion.
+  for req_ in '--lib' '--no-default-features' 'all-compression,' 'write-support,' '--test' \
+              'check_no_unexpected_zero_tests' 'check_test_targets_observed' \
+              'check_unittest_targets_ran' '_deny_warnings' \
+              '_package_test_targets_gated' '_ds_fixture_posture'; do
+    if [ "$(grep -cF -- "$req_" "$ds_code_")" -gt 0 ]; then
+      ok "3725-iso-ds-instrument: the widened lane still passes/uses $req_"
+    else
+      bad "3725-iso-ds-instrument: the widened lane no longer uses $req_ — the instrument IS the requirement (#3725 AC2/AC3: a named merge-gating EXECUTOR whose per-target test count must be non-zero)"
+    fi
+  done
+  for forbid_ in '--no-run' 'cargo check' '--all-targets' '--all-features'; do
+    if [ "$(grep -cF -- "$forbid_" "$ds_code_")" -eq 0 ]; then
+      ok "3725-iso-ds-forbidden: the widened lane does not use '$forbid_'"
+    else
+      bad "3725-iso-ds-forbidden: the widened lane uses '$forbid_' — --no-run reverts it to compile-only (the #3725 defect), --all-targets pulls in ~100 default-feature integration files, and --all-features defeats mutual isolation with parquet"
+    fi
+  done
+  # The target set must be DERIVED, and a failed derivation must FAIL rather than fall back
+  # to an empty set (which would excuse every gated target while reporting PASS).
+  if [ "$(grep -cF 'FAIL-CLOSED' "$ds_code_")" -ge 4 ]; then
+    ok "3725-iso-ds-failclosed: the widened lane carries $(grep -cF 'FAIL-CLOSED' "$ds_code_") FAIL-CLOSED derivation branches (metadata, feature resolve, unreadable source, zero targets)"
+  else
+    bad "3725-iso-ds-failclosed: fewer than 4 FAIL-CLOSED branches in the widened lane — a derivation that can fall through silently is a lane with no subject reporting PASS"
+  fi
+  # The strict-mode fixture-blind FAIL that used to be asserted here was DESCOPED by lead
+  # ruling on #3725 (COORD-3725-08): seven rounds found seven holes in the source-text scan
+  # behind it, five introduced by the preceding fix, so the guard was removed rather than
+  # carved again (#3229/#3283 precedent). The coverage is now the strict flag itself plus a
+  # one-time behavioural measurement, and #3789 owns declared per-target posture. There is
+  # deliberately NO assertion here: pinning a mechanism that no longer exists is what made
+  # this suite red the gate of record after the descope landed.
+fi
+
+
+# The two targets that used to IGNORE the strict flag must keep honouring it (roborev round
+# 1, finding 1). Source facts, and cheap -- and since the per-target awareness scan was
+# DESCOPED (COORD-3725-08) THIS ASSERT IS THE ONLY MECHANICAL CHECK ON THAT PROPERTY. The
+# lane exports CQLITE_REQUIRE_FIXTURES=1 but computes NO per-target verdict, so a target
+# that stopped honouring the flag would still run N>0 tests and satisfy every guard the
+# lane has -- there is no "fails closed if either regresses" behind this. It is a TWO-FILE
+# source check, not a population-wide one; #3789 owns declared per-target posture. What it
+# buys is naming WHICH file and WHY, and redding in the fast loop.
+for sf_ in scan_delta_parity_test issue_1008_counter_final_value_parity; do
+  sf_path_="$SCRIPT_DIR/../../cqlite-core/tests/$sf_.rs"
+  if [ ! -r "$sf_path_" ]; then
+    bad "3725-strict-fixtures[$sf_]: source not readable — this assert would pass vacuously"
+  elif [ "$(grep -cF 'CQLITE_REQUIRE_FIXTURES' "$sf_path_")" -gt 0 ] \
+       && [ "$(grep -cE '^[[:space:]]*println!\("\[SKIP' "$sf_path_")" -le 1 ]; then
+    ok "3725-strict-fixtures[$sf_]: honours CQLITE_REQUIRE_FIXTURES and routes its absence paths through skip_or_fail (at most the one println inside that helper)"
+  else
+    bad "3725-strict-fixtures[$sf_]: an absence path prints [SKIP] and returns without consulting CQLITE_REQUIRE_FIXTURES — with its corpus absent it passes having compared nothing, and feature-iso-delta-scan executes it on the merge gate"
+  fi
+done
+
+# THE FIXTURE POSTURE, RUN — not inspected (#3725). This is the anti-vacuity half: with the
+# corpus absent and CQLITE_REQUIRE_FIXTURES unset, issue_1007_complex_type_parity reports
+# `6 passed` in 0.00s having compared NOTHING, so an executor that skipped this would
+# satisfy #3725's AC3 letter (it prints 6) and close the gap VACUOUSLY.
+#
+# It is EXTRACTED FROM THE SHIPPED GATE AND EXECUTED (the idiom §37b uses for
+# _rust_module_closure), never re-implemented here: a re-implementation would be a second
+# implementation whose agreement with the first is exactly what is untested. Only a FULL
+# gate takes the strict branch, and no harness can run a full gate for one component (the
+# #3544 component-set pre-flight refuses a substituted COMPONENTS array), so this is the
+# ONLY place the strict branch is exercised at all.
+fp_="$tmp/3725-posture.sh"
+awk '/^_ds_fixture_posture\(\) \{/, /^\}/' "$GATE" > "$fp_"
+if [ ! -s "$fp_" ]; then
+  bad "3725-posture-extract: could not extract _ds_fixture_posture — these asserts would pass vacuously"
+else
+  # full=1, no opt-out -> STRICT. The one case that closes the vacuity hole.
+  got_=$( . "$fp_"; _ds_fixture_posture 1 0 | cut -f1 )
+  [ "$got_" = strict ] && ok "3725-posture[full]: the FULL gate runs the derived targets under CQLITE_REQUIRE_FIXTURES=1" \
+    || bad "3725-posture[full]: got '$got_' — without the strict branch the lane reports 6 passed against an empty corpus, having compared nothing (#3725, measured)"
+  # --only / --lite -> LENIENT, per the documented fixture contract.
+  got_=$( . "$fp_"; _ds_fixture_posture 0 0 | cut -f1 )
+  [ "$got_" = lenient ] && ok "3725-posture[probe]: --only/--lite stay lenient (the fixture contract's #2078 leniency)" \
+    || bad "3725-posture[probe]: got '$got_' — a strict --only/--lite probe makes a fixture-less checkout red for no reason"
+  # The documented #2078 opt-out WINS over the full gate: an opt-out the SUMMARY reports as
+  # TAKEN but that does not let the run finish is the per-lane veto #2078 forbids.
+  got_=$( . "$fp_"; _ds_fixture_posture 1 1 | cut -f1 )
+  [ "$got_" = lenient ] && ok "3725-posture[opt-out]: AGENT_GATE_ALLOW_MISSING_FIXTURES=1 wins over the full gate (no silent per-lane veto of a documented opt-out)" \
+    || bad "3725-posture[opt-out]: got '$got_' — the lane would veto the documented #2078 opt-out while the SUMMARY reports it as taken"
+  # EVERY mode must carry a NOTE, in both fields: a posture with no stated reason is a
+  # posture nobody can read out of a pasted census.
+  fp_bad_=""
+  for args_ in "1 0" "0 0" "1 1"; do
+    n_=$( . "$fp_"; _ds_fixture_posture $args_ | cut -f2 )
+    case "$n_" in *CQLITE_REQUIRE_FIXTURES*) ;; *) fp_bad_="$fp_bad_ ($args_)" ;; esac
+  done
+  [ -z "$fp_bad_" ] && ok "3725-posture[note]: every mode names CQLITE_REQUIRE_FIXTURES in its census note" \
+    || bad "3725-posture[note]: mode(s)$fp_bad_ emit a note that never names the variable — an unreadable posture in a pasted census"
+fi
+
+# THE CRATE-LEVEL GATE SCAN, RUN (#3725). Its three non-zero exits are the whole polarity
+# argument: an unreadable file must NEVER be conflated with 'no gate' (that silently drops a
+# target, and a dropped target cannot fail the zero-tests guard), and an UNMODELLED shape
+# must cost the target its allowed-zero excusal rather than cost the gate a check.
+cg_="$tmp/3725-crategate.sh"
+awk '/^_ds_inner_cfg_gate\(\) \{/, /^\}/' "$GATE" > "$cg_"
+if [ ! -s "$cg_" ]; then
+  bad "3725-crategate-extract: could not extract _ds_inner_cfg_gate — these asserts would pass vacuously"
+else
+  cg_dir_="$tmp/3725-cg"; mkdir -p "$cg_dir_"
+  printf '#![cfg(feature = "delta-scan")]\n#[test] fn t() {}\n' > "$cg_dir_/bare.rs"
+  printf '#![cfg(all(feature = "delta-scan", feature = "write-support"))]\n' > "$cg_dir_/coreq.rs"
+  printf '#![cfg(all(feature = "write-support", feature = "delta-scan"))]\n' > "$cg_dir_/coreq_rev.rs"
+  printf '#![cfg(any(feature = "delta-scan", feature = "parquet"))]\n' > "$cg_dir_/anyshape.rs"
+  printf '#![cfg(not(feature = "delta-scan"))]\n' > "$cg_dir_/notshape.rs"
+  printf '#[cfg(feature = "delta-scan")]\n#[test] fn t() {}\n' > "$cg_dir_/itemlevel.rs"
+  printf '#![cfg(feature = "parquet")]\n' > "$cg_dir_/other.rs"
+  cg_run_() { ( . "$cg_"; _ds_inner_cfg_gate "$1" delta-scan; printf '|%s' "$?" ) 2>/dev/null; }
+  # (a) the bare form: RECOGNISED, no co-required feature.
+  [ "$(cg_run_ "$cg_dir_/bare.rs")" = "|0" ] \
+    && ok "3725-crategate[bare]: #![cfg(feature = \"delta-scan\")] is recognised with no co-required feature" \
+    || bad "3725-crategate[bare]: got '$(cg_run_ "$cg_dir_/bare.rs")'"
+  # (b) the conjunctive form, BOTH orders — the co-required feature is what makes a target
+  # legitimately allowed-zero, so mis-reading it either drops a real excusal (false red) or
+  # invents one (a target excused from the count guard it needs).
+  [ "$(cg_run_ "$cg_dir_/coreq.rs")" = "write-support|0" ] \
+    && ok "3725-crategate[coreq]: all(delta-scan, write-support) reports write-support as co-required" \
+    || bad "3725-crategate[coreq]: got '$(cg_run_ "$cg_dir_/coreq.rs")'"
+  [ "$(cg_run_ "$cg_dir_/coreq_rev.rs")" = "write-support|0" ] \
+    && ok "3725-crategate[coreq-order]: the conjunctive form is order-independent" \
+    || bad "3725-crategate[coreq-order]: got '$(cg_run_ "$cg_dir_/coreq_rev.rs")' — cqlite-core ships BOTH orders today (issue_1014 vs issue_1012), so an order-sensitive scan mis-classifies a real target"
+  # (c) any(...) and not(...) are NOT conjunctions and must NOT be excused: any(...) is
+  # REACHABLE at this feature set, so treating it as all(...) would excuse a target that
+  # ought to run tests.
+  for f_ in anyshape notshape; do
+    x_=$(cg_run_ "$cg_dir_/$f_.rs")
+    case "$x_" in
+      *"|3") ok "3725-crategate[$f_]: an unmodelled crate-level shape returns 3 (NOT excused, stays under the zero-tests guard)" ;;
+      *)     bad "3725-crategate[$f_]: got '$x_' — an unmodelled shape read as a conjunction excuses a target that must execute tests" ;;
+    esac
+  done
+  # (d) an ITEM-level gate is not a crate-level one: it does not configure the target out,
+  # so it must not be reported as a crate gate (it is censused as UNATTRIBUTED instead).
+  [ "$(cg_run_ "$cg_dir_/itemlevel.rs")" = "|1" ] \
+    && ok "3725-crategate[item]: an item-level #[cfg] is NOT reported as a crate-level gate" \
+    || bad "3725-crategate[item]: got '$(cg_run_ "$cg_dir_/itemlevel.rs")'"
+  # (e) a crate gate on ANOTHER feature is not this scan's subject.
+  [ "$(cg_run_ "$cg_dir_/other.rs")" = "|1" ] \
+    && ok "3725-crategate[other-feature]: a crate gate naming only another feature is not a delta-scan gate" \
+    || bad "3725-crategate[other-feature]: got '$(cg_run_ "$cg_dir_/other.rs")'"
+  # (f) UNREADABLE is exit 2 and is NEVER 1. This is the fail-open the lane's own
+  # FAIL-CLOSED branch depends on: conflating them drops a target silently.
+  [ "$(cg_run_ "$cg_dir_/does-not-exist.rs")" = "|2" ] \
+    && ok "3725-crategate[unreadable]: an unreadable source returns 2, never 1 (a failed scan is not 'no gate')" \
+    || bad "3725-crategate[unreadable]: got '$(cg_run_ "$cg_dir_/does-not-exist.rs")' — a failed read read as 'no gate' silently drops the target, and a dropped target cannot fail the zero-tests guard"
+fi
 
 # --- 35. #1699: a FAILED ANSI normalisation is not a fallback (roborev round-25, Medium) ---
 #
@@ -4304,7 +4488,7 @@ else
 fi
 # and the truncation must be MARKED, tested on real multiline input rather than on the prefix alone
 cs_fn=$(awk '/^_crate_gated_test_targets\(\) \{/,/^\}/' "$GATE")
-if printf '%s' "$cs_fn" | grep -q 's/\$/+/'; then
+if grep -q 's/\$/+/' <<<"$cs_fn"; then
   ok "1699-cfgsite-marker: a continued attribute is marked with a truncation indicator"
 else
   bad "1699-cfgsite-marker: no truncation marker in the cfg-site report — a multiline attribute is silently reported as if complete"
@@ -4560,9 +4744,15 @@ fi
 # the policy and the counts, which is what a reader needs to interpret an excusal at all.
 lh_fn52=$(awk '/^run_legacy_heuristics\(\) \{/,/^\}/' "$GATE")
 pol_cen_missing=""
-printf '%s\n' "$lh_fn52" | grep -qE 'lh_census\+=\("polarity: \$\{#allow_zero\[@\]\} of \$count' \
+# SIGPIPE-FREE MATCH (#3685), a THIRD measured-dangerous site — found because it false-FAILed a
+# real suite run in lane-3725 under six peer lanes' load, then matched rc=0 three times in three
+# when re-run quiet. It fits origin/main's own danger heuristic exactly: `$lh_fn52` is the WHOLE
+# ~670-line run_legacy_heuristics body and the `polarity:` line sits early in it, so `grep -q`
+# exits having discarded most of the input — and discarded bytes ARE the race window. Converted
+# to the `[[ ]]` glob form main measured at 0/80, per the same reasoning applied to L4618/L4930.
+[[ $lh_fn52 == *'lh_census+=("polarity: ${#allow_zero[@]} of $count'* ]] \
   || pol_cen_missing="$pol_cen_missing counts"
-printf '%s\n' "$lh_fn52" | grep -qF 'excusable ONLY when EVERY' || pol_cen_missing="$pol_cen_missing policy"
+[[ $lh_fn52 == *'excusable ONLY when EVERY'* ]] || pol_cen_missing="$pol_cen_missing policy"
 if [ -n "$pol_cen_missing" ]; then
   bad "1699-pol-census: the excusal policy/counts do not reach the census — missing:$pol_cen_missing. A reader of the component log would see an allowed-zero entry with no way to tell what earned it"
 else
@@ -4588,8 +4778,8 @@ fi
 nll_fn=$(sed -n '/^_node_leak_lane_affirm() {/,/^}$/p' "$GATE")
 nll_component=$(sed -n '/^run_node_bindings() {/,/^}$/p' "$GATE")
 if [ -n "$nll_fn" ] \
-   && ! printf '%s' "$nll_fn" | grep -qE 'npm (run )?test' \
-   && printf '%s' "$nll_component" | grep -q '_node_leak_lane_affirm "$(_node_leak_lane_note_file)" "$suite_json"' \
+   && ! grep -qE 'npm (run )?test' <<<"$nll_fn" \
+   && grep -q '_node_leak_lane_affirm "$(_node_leak_lane_note_file)" "$suite_json"' <<<"$nll_component" \
    && [ "$(printf '%s' "$nll_component" | grep -cE '^[[:space:]]*npm (run )?test( |$)')" -eq 1 ]; then
   ok "1465-one-executor: the affirmation is wired to the component, runs no jest itself, and node-bindings invokes npm test exactly once"
 else
@@ -4775,7 +4965,7 @@ else
   # Y4: the in-lane strictness control keys on CQLITE_JEST_JSON as its "this is the gate"
   # marker. NOTHING otherwise pins the pairing, so a rename on either side would silently
   # turn the control into a no-op instead of reddening. Both halves asserted here.
-  printf '%s' "$nll_comp_v1" | grep -q 'CQLITE_JEST_JSON=' \
+  grep -q 'CQLITE_JEST_JSON=' <<<"$nll_comp_v1" \
     || { nll_v1_ok=0; echo "  node-bindings no longer EXPORTS CQLITE_JEST_JSON — the lane-side strictness control has no marker to read"; }
   grep -q 'process\.env\.CQLITE_JEST_JSON' "$nll_leakfile_v1" \
     || { nll_v1_ok=0; echo "  the lane no longer READS CQLITE_JEST_JSON — its gate-of-record strictness assertion cannot fire"; }
@@ -4848,16 +5038,16 @@ fi
 nll_entered=$(bash -c '. /dev/stdin <<<"$(sed -n "/^_node_leak_lane_note() {/,/^}/p" "$1")"; _node_leak_lane_note ENTERED-FAILED' _ "$GATE" 2>/dev/null)
 nll_noaffirm=$(bash -c '. /dev/stdin <<<"$(sed -n "/^_node_leak_lane_note() {/,/^}/p" "$1")"; _node_leak_lane_note NO-BUDGET-AFFIRMATION' _ "$GATE" 2>/dev/null)
 nll_e_ok=1
-printf '%s' "$nll_entered" | grep -q "REACHED" || { nll_e_ok=0; echo "  ENTERED-FAILED does not say the invocation was reached"; }
-printf '%s' "$nll_entered" | grep -q "NOT an earlier" || { nll_e_ok=0; echo "  ENTERED-FAILED does not distinguish itself from an earlier step"; }
-printf '%s' "$nll_entered" | grep -qE "UNKNOWN|unknown" || { nll_e_ok=0; echo "  ENTERED-FAILED does not state that execution is UNKNOWN"; }
+grep -q "REACHED" <<<"$nll_entered" || { nll_e_ok=0; echo "  ENTERED-FAILED does not say the invocation was reached"; }
+grep -q "NOT an earlier" <<<"$nll_entered" || { nll_e_ok=0; echo "  ENTERED-FAILED does not distinguish itself from an earlier step"; }
+grep -qE "UNKNOWN|unknown" <<<"$nll_entered" || { nll_e_ok=0; echo "  ENTERED-FAILED does not state that execution is UNKNOWN"; }
 # No phrase may assert that the budgets ran. Each of these would be an overclaim.
 for _bad in "DID execute" "so the leak budgets ran" "the budgets ran" "budgets executed"; do
-  if printf '%s' "$nll_entered" | grep -qF "$_bad"; then
+  if grep -qF "$_bad" <<<"$nll_entered"; then
     nll_e_ok=0; echo "  ENTERED-FAILED overclaims execution via: '$_bad'"
   fi
 done
-printf '%s' "$nll_noaffirm" | grep -qE "named (#1465 )?budget test" || { nll_e_ok=0; echo "  NO-BUDGET-AFFIRMATION does not name the budget tests"; }
+grep -qE "named (#1465 )?budget test" <<<"$nll_noaffirm" || { nll_e_ok=0; echo "  NO-BUDGET-AFFIRMATION does not name the budget tests"; }
 if [ "$nll_e_ok" -eq 1 ]; then
   ok "1465-failure-states: ENTERED-FAILED says REACHED + execution UNKNOWN + not-an-earlier-step and asserts no execution; NO-BUDGET-AFFIRMATION names the budget tests"
 else
@@ -5082,22 +5272,67 @@ fi
 #
 # Host-INDEPENDENT: bash plus --emit-summary-selftest (no cargo, no python3, no jq, no
 # network, no datasets), so none of these five can become a declared tooling skip.
+#
+# GRAMMAR, and why it is a CLOSED set with FOUR tokens rather than three (#3402): the
+# component status token is part of this block contract, so a new one is an extension made
+# HERE, deliberately, not an assertion weakened to let a change through. `OPT-OUT` is the
+# `file-size` component's own non-failing token for an ENGAGED CQLITE_ALLOW_FILE_GROWTH=1
+# — `PASS` must mean "the check ran and was satisfied", never "the check was switched off".
+# Two consequences are encoded below: an OPT-OUT row is still a COUNTED component row (a
+# three-token grammar would silently drop it from `fm_lines`, and a dropped row is exactly
+# the undercount this census exists to catch), and it may carry a `— <detail>` suffix AFTER
+# the bracketed matrix, so the annotation assert is anchored on the bracket plus an
+# OPTIONAL detail rather than on end-of-line. `--emit-summary-selftest` emits no OPT-OUT
+# row itself; the behavioural coverage is scripts/tests/test_agent_gate_file_size_log.sh,
+# which drives the REAL `--only file-size` path (also in tooling-tests).
+#
+# ONE definition of the row grammar, shared by the census below and by 54f, which is what
+# makes 54f a test OF THIS CENSUS rather than of a second copy that can drift from it.
+# FIVE tokens, from two issues that landed together and reached the same conclusion
+# independently: #3625's VACUOUS (a PASS whose measured subject count is zero) and #3402's
+# OPT-OUT (file-size under an engaged CQLITE_ALLOW_FILE_GROWTH=1). A shape recogniser that
+# omits either stops SEEING the rows it does not name.
+FM_ROW_RE='^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS|OPT-OUT) \([0-9]+s\)'
+# The tail is `[<feature matrix>]  {<census>}` and then, optionally, #3402's ` — <detail>`.
+# BOTH structured suffixes stay REQUIRED and the census stays LAST OF THEM, so neither can be
+# dropped without this failing (#3453 + #3625). The detail is free text and is the only thing
+# allowed after the census — structured tokens a parser keys on never sit behind unstructured
+# prose. Absent detail, this is byte-identical to #3625's anchor.
+FM_ROW_ANNOT_RE="$FM_ROW_RE"' +\[.+\]  \{.+\}( — .*)?$'
 fm_sum="$tmp/3453-annot-summary.txt"
 if AGENT_GATE_SUMMARY_FILE="$fm_sum" bash "$GATE" --emit-summary-selftest >/dev/null 2>&1; then
-  fm_lines=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP) \([0-9]+s\)' "$fm_sum")
-  fm_annot=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP) \([0-9]+s\) +\[.+\]$' "$fm_sum")
+  fm_lines=$(grep -cE "$FM_ROW_RE" "$fm_sum")
+  fm_annot=$(grep -cE "$FM_ROW_ANNOT_RE" "$fm_sum")
   if [ "$fm_lines" -gt 0 ] && [ "$fm_annot" = "$fm_lines" ]; then
-    ok "3453-annot-a: all $fm_lines component line(s) carry a bracketed feature matrix"
+    ok "3453-annot-a: all $fm_lines component line(s) carry a bracketed feature matrix AND a census suffix"
   else
-    bad "3453-annot-a: only $fm_annot of $fm_lines component lines carry a feature matrix"
-    grep -E '^[a-z][a-z-]*: +(PASS|FAIL|SKIP)' "$fm_sum" || true
+    bad "3453-annot-a: only $fm_annot of $fm_lines component lines carry a feature matrix + census suffix"
+    grep -E "$FM_ROW_RE" "$fm_sum" || true
   fi
-  if grep -qE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP).*\[(UNDECLARED|UNCLASSIFIED)' "$fm_sum"; then
+  # #3625: the aggregate census line. It must be present, must declare its own
+  # NON-EXHAUSTIVENESS, and must report every non-affirmed class as `N RECOGNISED` rather
+  # than a bare N — a bare zero in a gate log reads as a verified all-clear.
+  fm_census=$(grep -E '^census: ' "$fm_sum" | head -1)
+  # The line carries STATE buckets (which name no status) and STATUS-DERIVED figures. The
+  # `VACUOUS (RECOGNISED)` heading this used to require is GONE on purpose (#3625, roborev
+  # job 371 + sweep): it was a STATUS word counted from the ZERO STATE, and a shipping mode
+  # already emitted a `VACUOUS` row beside `0 VACUOUS`. The state bucket is now
+  # `measured-ZERO` and the status figure is counted from the observed status.
+  case "$fm_census" in
+    *'AFFIRMED a count'*'DECLARED-GAP (RECOGNISED)'*'NOT-MEASURED (RECOGNISED)'*'measured-ZERO (RECOGNISED)'*'not-applicable (component did not PASS)'*'no-subject (PASSed'*'carry a VACUOUS status'*'NON-EXHAUSTIVE'*)
+      ok "3625-census-block: the block carries ONE aggregate census line whose status-naming qualifiers are DERIVED (not-applicable/did-not-PASS vs no-subject/PASSed, and a VACUOUS count from the status), declaring its own non-exhaustiveness" ;;
+    '') bad "3625-census-block: no 'census:' aggregate line in the emitted block" ;;
+    *)  bad "3625-census-block: the census line does not carry the required RECOGNISED / status-derived / NON-EXHAUSTIVE wording: $fm_census" ;;
+  esac
+  # VACUOUS included (#3625): omitting it made this screen BLIND to exactly the rows that
+  # report a component verified nothing — the ones most worth checking for a broken
+  # annotation.
+  if grep -qE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS|OPT-OUT).*\[(UNDECLARED|UNCLASSIFIED)' "$fm_sum"; then
     bad "3453-annot-b: a component line reads UNDECLARED/UNCLASSIFIED in the reference block"
   else
     ok "3453-annot-b: no component line reads UNDECLARED/UNCLASSIFIED in the reference block"
   fi
-  if grep -E '^[a-z][a-z-]*: +(PASS|FAIL|SKIP)' "$fm_sum" | grep -q 'RESULT:'; then
+  if grep -E "$FM_ROW_RE" "$fm_sum" | grep -q 'RESULT:'; then
     bad "3453-annot-c: an annotation embeds the RESULT: token — it would break the #2908 poll predicate"
   else
     ok "3453-annot-c: no annotation embeds the RESULT: token (the one-RESULT invariant is safe)"
@@ -5142,6 +5377,52 @@ if [ -r "$SCRIPT_DIR/../../$fm_guard" ] && grep -q "$fm_guard" "$GATE"; then
   ok "3453-annot-e: the completeness/no-drift guard exists AND is registered in the gate (tooling-tests)"
 else
   bad "3453-annot-e: $fm_guard missing (looked under $SCRIPT_DIR/../..) or not registered in $GATE — the COMPONENTS completeness census would be silently gone"
+fi
+
+# --- 54f. #3402: the census grammar must ADMIT the OPT-OUT component row ---------------
+#
+# WHY THIS EXISTS: `--emit-summary-selftest` emits no OPT-OUT row, so the fourth token has
+# NO SUBJECT in the census above — the extension would sit here unexercised, and a later
+# "tidy" back to three tokens would pass this whole section while silently dropping every
+# OPT-OUT row from it. MEASURED, so this is not a hypothetical: against a two-row sample
+# (one PASS, one OPT-OUT) the three-token grammar counted 1 of 2 with fm_lines == fm_annot
+# — i.e. it reported "all component line(s) carry a feature matrix" over a subject set it
+# had itself shrunk. A vacuous green is the one outcome this section exists to refuse, so
+# the undercount is worse than a red would have been.
+#
+# The two regexes are the SAME variables the census used, never re-spelled here — a second
+# copy could drift and then 54f would certify a grammar nobody uses. The row is the real
+# render (`%-18s` name, token, `(Ns)`, two spaces, the bracketed matrix, then #3402's
+# ` — <detail>` suffix); the behavioural half — that the gate actually PRODUCES this row,
+# and only for an override of exactly `1` — is scripts/tests/test_agent_gate_file_size_log.sh,
+# asserted registered below rather than duplicated here.
+# The samples carry ALL THREE suffixes in the shipped order — `[<matrix>]  {<census>}` then
+# #3402's optional ` — <detail>`. They were written before #3625's census landed and then
+# matched 0 of 2, because the annotation anchor now REQUIRES the census: a sample that lags
+# the real render turns this section into a test of an obsolete shape, which is worse than no
+# sample at all. Kept as literals rather than generated, so a change to the render must be
+# reflected here deliberately.
+fm_optout_row='file-size:         OPT-OUT (0s)  [no-cargo]  {no census: component ended OPT-OUT, so there is no PASS to affirm} — CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); 1 over-threshold file(s) grown — see file-size.log under logs:'
+fm_plain_row='fmt:               PASS (1s)  [fmt --all]  {AFFIRMED 1 target}'
+fm_rowfile="$tmp/3402-rows.txt"
+printf '%s\n%s\n' "$fm_plain_row" "$fm_optout_row" >"$fm_rowfile"
+fm_n_row=$(grep -cE "$FM_ROW_RE" "$fm_rowfile")
+fm_n_annot=$(grep -cE "$FM_ROW_ANNOT_RE" "$fm_rowfile")
+if [ "$fm_n_row" = 2 ]; then
+  ok "3402-grammar-a: the census counts an OPT-OUT row as a component row (2/2) — no silent undercount"
+else
+  bad "3402-grammar-a: the census counted $fm_n_row of 2 component rows — an OPT-OUT row is being dropped"
+fi
+if [ "$fm_n_annot" = 2 ]; then
+  ok "3402-grammar-b: the annotation assert tolerates the ' — <detail>' suffix after the bracketed matrix (2/2)"
+else
+  bad "3402-grammar-b: the annotation assert matched $fm_n_annot of 2 — a detail suffix defeats the end-of-line anchor"
+fi
+fs_guard=scripts/tests/test_agent_gate_file_size_log.sh
+if [ -r "$SCRIPT_DIR/../../$fs_guard" ] && grep -q "$fs_guard" "$GATE"; then
+  ok "3402-grammar-c: the behavioural OPT-OUT guard exists AND is registered in the gate (tooling-tests)"
+else
+  bad "3402-grammar-c: $fs_guard missing (looked under $SCRIPT_DIR/../..) or not registered in $GATE — the grammar above would have no behavioural counterpart"
 fi
 
 # TOLERANT BY DELIBERATE CHOICE, not by neglect (issue #1465 round 14 — the FALLBACK the
@@ -5197,7 +5478,10 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=410
+# 410 -> 413 on #3402: section 54f adds 3 asserts, host-INDEPENDENT for the same reason as
+# 54 (pure bash grep over an in-suite string, plus two file-presence reads), so the same
+# "raise by exactly the number added" rule applies and the deliberate ~9 margin is kept.
+ASSERT_FLOOR=413
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

@@ -7,11 +7,12 @@
 //! [`super::serialization_header`] for the schema that follows.
 
 use super::super::vint::parse_vuint;
+use super::super::vint_narrow::take_vuint_length;
 use super::marshal_type::build_column_infos;
 use super::serialization_header::{parse_serialization_header, parse_serialization_header_schema};
 use super::EncodingStatsResult;
 use crate::storage::sstable::version_gate::VersionGates;
-use nom::{bytes::complete::take, number::complete::be_u32, IResult};
+use nom::{number::complete::be_u32, IResult};
 
 /// Epoch constants matching Cassandra's EncodingStats.java (EncodingStats.Serializer)
 /// Used for delta-encoding/decoding EncodingStats fields in Statistics.db SERIALIZATION_HEADER.
@@ -167,8 +168,10 @@ fn parse_encoding_stats_fallback<'a>(
     // Parse partitioner string length (VInt)
     let (rest, partitioner_len) = parse_vuint(rest)?;
 
-    // Skip partitioner string
-    let (rest, _) = take(partitioner_len as usize)(rest)?;
+    // Skip partitioner string. #3848: `take_vuint_length` narrows the raw `u64`
+    // with a checked conversion — `take(partitioner_len as usize)` would accept a
+    // declared 4 GiB length as an empty run on a 32-bit target.
+    let (rest, _) = take_vuint_length(partitioner_len)(rest)?;
 
     // Skip additional metadata (observed: ~2 VInts before timestamp fields)
     let (rest, _metadata1) = parse_vuint(rest)?;

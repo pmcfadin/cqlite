@@ -73,7 +73,12 @@ below-floor and is an EXACT allowlist, not just a floor) and `version_gate/bti.r
 ## Gate & division of labor (issue #1855)
 
 Your job as the implementer ends at **commit + push + report** with `--lite`/targeted-test evidence. Verify
-with `scripts/agent-gate.sh --lite` (~1-5 min) each fix round, iterating until it PASSes. Its component set
+with `scripts/agent-gate.sh --lite` each fix round, iterating until it PASSes. **Budget it by your diff, not
+by a flat number (#3764):** `~1-5 min` is the warm NARROW-diff case only (measured median 1.4 min); a diff
+touching `cqlite-core/src/` makes `--lite` a near-workspace run — measured median 20 min, up to 43 min
+locally, and up to ~104 min under peer load (reported, #3764) — and a cold `clippy` alone adds 16-24 min
+whatever the diff. CLAUDE.md's
+Lite row has the full cost model. Its component set
 is `LITE_COMPONENTS` in `scripts/agent-gate.sh` — read it there or run `scripts/agent-gate.sh --lite-list`
 rather than trusting a transcribed list; note lite clippy is **per-package scoped** (NOT whole-workspace)
 and lite includes **`roborev-lints`** (#2656). **NEVER invoke the full `scripts/agent-gate.sh` yourself** —
@@ -96,8 +101,13 @@ AGENT_GATE_SUMMARY_FILE=/tmp/lite-<N>.txt \
   bash scripts/agent-gate.sh --lite > /tmp/lite-<N>.log 2>&1 < /dev/null
 cat /tmp/lite-<N>.txt   # the complete ==== AGENT-GATE LITE SUMMARY ==== block
 ```
-The correct liveness probe on a summary file is `grep -qE 'RESULT: (PASS|FAIL)'` — a bare `INCOMPLETE`
-is the start-of-run placeholder written by the EXIT trap, **not** a verdict (#3041).
+The correct liveness probe on a full or `--lite` summary file is the **RECORD grammar**
+`grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'` — a bare `INCOMPLETE` is the start-of-run placeholder
+written by the EXIT trap, **not** a verdict (#3041). An **`--only <component>`** run demotes success to
+`RESULT: PARTIAL`, so that grammar spins on green (#3750): poll its **exit status `3`** or
+`grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'`, then read the component's verdict SEPARATELY —
+`bash scripts/gate-component-verdict.sh "$SUM" --mode only --component <name>` — because a completed run
+whose component SKIPped is not a pass. `--delta` is a THIRD mode with a THIRD set — it alone can terminate `ERROR` or `REFUSED`, so polling it with the record grammar hangs on a terminal outcome: `grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)'` (#3750).
 (If you omit `AGENT_GATE_SUMMARY_FILE`, `--lite`'s default recovery file is
 `.agent-gate-lite-summary.txt`.) **Rule: never read raw gate stdout / `*.log` into a persistent context** —
 the SUMMARY block is the only gate text you retain.

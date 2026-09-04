@@ -91,6 +91,28 @@ bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 # `rm -rf "$tmp"` on an unverified path is the same hazard, hence the ordering. Non-empty AND a
 # directory: a diagnostic printed on stdout would pass the emptiness test alone.
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/roborev-guard-test.XXXXXX") || tmp=''
+
+# ===== `<producer> | grep -q` IS FAIL-OPEN UNDER `pipefail`, SO IT IS UNAVAILABLE HERE (#3387) =====
+# `grep -q` exits at its FIRST match and closes the pipe; the producer's next write takes SIGPIPE; and
+# this file's `pipefail` hands the PIPELINE a 141. So a genuine MATCH can report a NON-match, and
+# every assert built on that shape reds or greens BY BYTE POSITION and scheduler timing.
+#
+# THIS IS NOT THEORETICAL AND IT IS NOT NEW: the pre-existing assert "the waiver is looked up EXACTLY
+# ONCE, inside the absence branch" red once in five consecutive runs on an unrelated, clean diff, and
+# a guard added earlier in this same change reported DIFFERENT states missing on consecutive runs.
+# `tooling-tests` is a component of the GATE OF RECORD, so a 1-in-5 flake there can red a certifying
+# gate on a clean tree — and a lane must not waive a red it cannot attribute.
+#
+# The shape is therefore REMOVED rather than fixed site by site: the text is materialised and the FILE
+# is grepped, so there is no pipe to break. A structural assert below forbids reintroducing the shape,
+# because a rule this mechanical is one a future edit will otherwise re-add by habit.
+STR_MATCH_FILE="$tmp/str-match-subject.txt"
+str_matches() { # str_matches <text> <grep-args...>  -> grep's own status, with no pipeline
+  local _sm_text="$1"
+  shift
+  printf '%s\n' "$_sm_text" >"$STR_MATCH_FILE" || return 2
+  grep "$@" "$STR_MATCH_FILE" >/dev/null 2>&1
+}
 if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
   printf 'FAIL - mktemp -d did not yield a usable temp directory (got: %s) — refusing to run rather than resolving every "$tmp/..." fixture path under /\n' "${tmp:-<empty>}"
   exit 1
@@ -239,6 +261,9 @@ summary_key_order() { # summary_key_order <file> <extended-regex-of-keys> -> "k1
 #                        returns the REAL review-row shape (id/prompt, no git_ref or
 #                        status), forcing the richer `list --json` source; otherwise the
 #                        `list --json` fallback path
+#   STUB_REVIEW_ROW_ID   top-level `id` of the `show --json` REVIEW row; empty => the job id
+#                        (the agreeing shape), a DIFFERENT number => the measured divergence
+#                        where only job_id / job.id name the job asked for (#3654)
 #   STUB_INVOKED         file the stub appends its argv to (empty => never run)
 # ---------------------------------------------------------------------------
 stubbin="$tmp/bin"
@@ -329,8 +354,13 @@ case "$cmd" in
     # `review-completed`, the vacuity tiers and `findings` against (#3312 job 24). Empty means the record
     # has none, which a recheck must read as "not re-establishable" rather than inherit.
     if [ "${STUB_SHOW_JSON:-object}" = nested ]; then
-      # The MEASURED `roborev show <id> --json` shape: a REVIEW row carrying its own
-      # `id` (equal to the job id) that NESTS the job row under a "job" key.
+      # The MEASURED `roborev show <id> --json` shape: a REVIEW row carrying its OWN `id` that
+      # NESTS the job row under a "job" key. That top-level `id` is the REVIEW row's own sequence
+      # and NEED NOT equal the job asked for (#3654) — measured over records 1-10 on v0.61.2, six
+      # agree and two PAIRS swap (asking for 8 returns id=9, asking for 9 returns id=8), while
+      # `job_id` and the nested `job.id` name the requested job in every one. STUB_REVIEW_ROW_ID
+      # expresses that divergence; it defaults to the job id, so the AGREEING shape stays
+      # fixtured too and a case has to opt in to the divergent one.
       # `verdict_bool` is the SOURCE COLUMN the `verdict` letter is synthesised FROM, so the two
       # must AGREE or the fixture is a record roborev cannot emit: `P` <=> 1, `F` <=> 0 (measured —
       # job 154 clean/verdict_bool=1, job 162 findings-bearing/verdict_bool=0). Hard-coding 0 while
@@ -340,7 +370,7 @@ case "$cmd" in
       stub_verdict_bool=0
       [ "${STUB_VERDICT_FIELD:-}" != P ] || stub_verdict_bool=1
       printf '{"id":%s,"job_id":%s,"agent":"codex","verdict_bool":%s,"%s":"%s","prompt":"%s","job":' \
-        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "$stub_verdict_bool" "${STUB_RECORD_OUTPUT_FIELD:-output}" "${STUB_RECORD_OUTPUT:-}" "$(json_prompt)"
+        "${STUB_REVIEW_ROW_ID:-${STUB_JOB:-4600}}" "${STUB_JOB:-4600}" "$stub_verdict_bool" "${STUB_RECORD_OUTPUT_FIELD:-output}" "${STUB_RECORD_OUTPUT:-}" "$(json_prompt)"
       emit_job_object
       printf '}\n'
       exit 0
@@ -349,7 +379,7 @@ case "$cmd" in
       # The REAL `show --json` shape: the REVIEW row — id/agent/prompt, and no
       # git_ref / status / verdict / token_usage.
       printf '{"id":%s,"job_id":%s,"agent":"codex","prompt":"%s"}\n' \
-        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "$(json_prompt)"
+        "${STUB_REVIEW_ROW_ID:-${STUB_JOB:-4600}}" "${STUB_JOB:-4600}" "$(json_prompt)"
       exit 0
     fi
     emit_job_object; printf '\n'
@@ -403,7 +433,136 @@ fi
 # STUB_GH_ISSUE_ERR overrides the diagnostic (and forces exit 1) so a COULD-NOT-ASK can be fixtured
 # without also disabling `gh pr view`, which STUB_GH_RC would do — the deferral would then never reach
 # the retrievability leg at all and the case would pass for the wrong reason.
+# ===== `pr view --json closingIssuesReferences`: THE LINKED-ISSUE RELATION (#3759) =====
+# The misplacement probe resolves which thread to look at from the STRUCTURED GitHub relation, never
+# from the PR body. Modelled as its OWN call because the wrapper issues it as its own call: folding
+# it into `--json comments` would change the shape of the payload an AUTHORIZATION is decided from,
+# and would make the probe's data available on paths that never run it.
+#
+# `STUB_GH_LINKED_ISSUES` DEFAULTS TO EMPTY, so a case that wants a probe has to SAY so. That is the
+# fail-closed direction and it stops a case passing because the double happened to be permissive
+# about a question the wrapper asks. `STUB_GH_LINKED_JSON` passes a payload through verbatim (a
+# non-numeric entry, or garbage), and `STUB_GH_LINKED_RC` fails the call — each a distinct
+# could-not-check cause the wrapper must report separately.
+if [ "${1:-}" = "pr" ] && [ "${2:-}" = "view" ]; then
+  case " $* " in
+    *closingIssuesReferences*)
+      if [ "${STUB_GH_LINKED_RC:-0}" -ne 0 ]; then
+        printf '%s\n' "${STUB_GH_LINKED_ERR:-gh: simulated closingIssuesReferences failure}" >&2
+        exit "${STUB_GH_LINKED_RC}"
+      fi
+      if [ -n "${STUB_GH_LINKED_JSON:-}" ]; then
+        printf '%s\n' "$STUB_GH_LINKED_JSON"
+        exit 0
+      fi
+      # EVERY REFERENCE CARRIES ITS REPOSITORY, as the real payload does (#3759 round 1): a closing
+      # reference's number is scoped to ITS repository, so a double that omitted the repository
+      # would make every case exercise a code path the real payload never takes.
+      # STUB_GH_LINKED_ISSUES declares SAME-repository references (the stub's own
+      # STUB_GH_REPO_NWO); STUB_GH_LINKED_CROSS declares references in another repository, so a
+      # declared skip is expressible; STUB_GH_LINKED_NOREPO declares references whose repository
+      # object is absent, so a could-not-establish is expressible and cannot be confused with either.
+      _stub_refs=""
+      _stub_owner="${STUB_GH_REPO_NWO%%/*}"
+      _stub_name="${STUB_GH_REPO_NWO#*/}"
+      for _stub_n in ${STUB_GH_LINKED_ISSUES:-}; do
+        _stub_refs="${_stub_refs:+$_stub_refs,}{\"number\":$_stub_n,\"repository\":{\"name\":\"$_stub_name\",\"owner\":{\"login\":\"$_stub_owner\"}}}"
+      done
+      for _stub_n in ${STUB_GH_LINKED_CROSS:-}; do
+        _stub_refs="${_stub_refs:+$_stub_refs,}{\"number\":$_stub_n,\"repository\":{\"name\":\"other-repo\",\"owner\":{\"login\":\"other-owner\"}}}"
+      done
+      for _stub_n in ${STUB_GH_LINKED_NOREPO:-}; do
+        _stub_refs="${_stub_refs:+$_stub_refs,}{\"number\":$_stub_n}"
+      done
+      printf '{"closingIssuesReferences":[%s]}\n' "$_stub_refs"
+      exit 0
+      ;;
+  esac
+fi
+# ===== `repo view --json nameWithOwner`: WHICH REPOSITORY `gh issue view <N>` RESOLVES AGAINST =====
+# The probe asks `gh` rather than deriving it, so the double answers as `gh` does. Independently
+# failable (STUB_GH_REPO_RC) and independently malformable (STUB_GH_REPO_NWO without a slash),
+# because "the repository could not be established" is its own could-not-check cause.
+if [ "${1:-}" = "repo" ] && [ "${2:-}" = "view" ]; then
+  if [ "${STUB_GH_REPO_RC:-0}" -ne 0 ]; then
+    printf '%s\n' "${STUB_GH_REPO_ERR:-gh: simulated repo view failure}" >&2
+    exit "${STUB_GH_REPO_RC}"
+  fi
+  case " $* " in
+    *" --jq "*) printf '%s\n' "${STUB_GH_REPO_NWO:-}" ;;
+    *) printf '{"nameWithOwner":"%s"}\n' "${STUB_GH_REPO_NWO:-}" ;;
+  esac
+  exit 0
+fi
 if [ "${1:-}" = "issue" ] && [ "${2:-}" = "view" ]; then
+  # ===== `issue view <N> --json comments`: THE PROBED THREAD (#3759) =====
+  # Handled BEFORE the retrievability branch below, and driven by its OWN knobs, so a case that
+  # fixtures a disposition failure (STUB_GH_ISSUE_ERR) does not silently also break the probe read —
+  # two independent questions must be independently failable or a case measures the wrong one.
+  #
+  # The comment fixture is one multi-record string: a `\002#<issue-number>` line opens a record, and
+  # the usual `\001<login>` + body lines follow, so the SAME converter produces the SAME
+  # `{"comments":[{"author":{"login":…},"body":…}]}` shape the PR call produces — which is the
+  # measured fact that licenses the wrapper reusing one scanner for both threads.
+  #
+  # THE `#` IS LOAD-BEARING, NOT DECORATION. `printf %b` reads `\0nnn` as up to THREE octal digits
+  # after the `\0`, so an opener written WITHOUT the `#` would read its first digit as part of the
+  # escape (a four-character `\0` + `023` = 0x13) and the rest as text — a silently WRONG record
+  # opener, and the fixture then declares a thread nobody can select. The existing `\001<login>`
+  # form is safe only because a login never starts with a digit. `#` is not an octal digit, so the
+  # escape terminates deterministically; the converter strips it.
+  case " $* " in
+    *" comments"*|*",comments"*|*"comments,"*)
+      for _stub_fail in ${STUB_GH_ISSUE_COMMENTS_FAIL:-}; do
+        if [ "$_stub_fail" = "${3:-}" ]; then
+          printf '%s\n' "${STUB_GH_ISSUE_COMMENTS_ERR:-HTTP 502: Bad gateway (https://api.github.com/graphql)}" >&2
+          exit 1
+        fi
+      done
+      for _stub_garbage in ${STUB_GH_ISSUE_COMMENTS_GARBAGE:-}; do
+        if [ "$_stub_garbage" = "${3:-}" ]; then
+          printf 'not json at all\n'
+          exit 0
+        fi
+      done
+      # A VERBATIM payload for every thread, so a VALID-JSON-BUT-MALFORMED shape is expressible
+      # (#3759 round 2). `{}`, `{"comments":null}` and `{"comments":{}}` all parse, and the reused
+      # scanner reduces each to zero comments and exits 0 — which is why the CALLER has to validate
+      # the shape, and why the double has to be able to produce it.
+      if [ -n "${STUB_GH_ISSUE_COMMENTS_JSON:-}" ]; then
+        printf '%s\n' "$STUB_GH_ISSUE_COMMENTS_JSON"
+        exit 0
+      fi
+      printf '%b' "${STUB_GH_ISSUE_COMMENTS:-}" | STUB_WANT_ISSUE="${3:-}" python3 -c '
+import json, os, sys
+want = os.environ.get("STUB_WANT_ISSUE", "")
+raw = sys.stdin.read()
+current = None
+records = {}
+author = None
+body = []
+def flush():
+    if current is not None and author is not None:
+        records.setdefault(current, []).append(
+            {"author": {"login": author}, "body": "\n".join(body)})
+for line in raw.split("\n"):
+    if line.startswith("\u0002"):
+        flush()
+        current = line[1:].strip().lstrip("#")
+        author = None
+        body = []
+    elif line.startswith("\u0001"):
+        flush()
+        author = line[1:]
+        body = []
+    elif author is not None:
+        body.append(line)
+flush()
+json.dump({"comments": records.get(want, [])}, sys.stdout)
+'
+      exit 0
+      ;;
+  esac
   if [ -n "${STUB_GH_ISSUE_ERR:-}" ]; then
     printf '%s\n' "$STUB_GH_ISSUE_ERR" >&2
     exit 1
@@ -432,6 +591,12 @@ if [ "${1:-}" = "issue" ] && [ "${2:-}" = "view" ]; then
   done
   printf 'GraphQL: Could not resolve to an issue or pull request with the number of %s. (repository.issue)\n' "${3:-}" >&2
   exit 1
+fi
+# EXIT 0 WITH NOTHING ON STDOUT — its own knob, because it cannot be spelled with any other (#3759
+# round 4). It is a plausible real-world `gh` result and it is the shape that used to BYPASS the
+# validated read entirely, so it has to be expressible or the case measures nothing.
+if [ -n "${STUB_GH_PR_EMPTY_STDOUT:-}" ]; then
+  exit 0
 fi
 if [ -n "${STUB_GH_COMMENTS_JSON:-}" ]; then
   printf '%s\n' "$STUB_GH_COMMENTS_JSON"
@@ -1168,6 +1333,10 @@ export STUB_HAS_TOKEN_DATA=''
 export STUB_VERDICT_FIELD=''
 export STUB_RECORD_BLANK_FOR=0
 export STUB_PAYLOAD_JOB=''
+# #3654: the top-level `id` of a `show --json` REVIEW row. Defaults to the job id (the agreeing
+# shape); a case sets it to a DIFFERENT number to fixture the measured divergence, where only
+# `job_id` and the nested `job.id` name the job asked for.
+export STUB_REVIEW_ROW_ID=''
 export STUB_LIST_JSON=array
 export STUB_REVIEW_RC=0
 export STUB_ANNOUNCE_SHA=''
@@ -1181,6 +1350,7 @@ export STUB_RECORD_OUTPUT_FIELD=''
 export STUB_GH_COMMENTS=''
 export STUB_GH_COMMENTS_JSON=''
 export STUB_GH_COMMENTS_FILE=''
+export STUB_GH_PR_EMPTY_STDOUT=''
 export STUB_GH_RC=0
 # #3626: the FINDINGS-DEFERRAL knobs. STUB_GH_ISSUES is the set of issue numbers that EXIST, so
 # retrievability is a fixture decision and not a stub default; STUB_GH_ISSUE_ERR fixtures a
@@ -1189,6 +1359,29 @@ export STUB_GH_RC=0
 export STUB_GH_ISSUES=''
 export STUB_GH_ISSUES_CLOSED=''
 export STUB_GH_ISSUE_ERR=''
+# #3759: the LINKED-ISSUE MISPLACEMENT PROBE knobs. STUB_GH_LINKED_ISSUES is the closingIssuesReferences
+# relation and DEFAULTS TO EMPTY — a case that wants a probe has to say so, which is the fail-closed
+# direction; STUB_GH_ISSUE_COMMENTS carries per-issue comment fixtures (\002<n> opens a record), and the
+# _FAIL/_GARBAGE/_ERR knobs make an individual thread independently unreadable so a PARTIAL read is
+# expressible. Nothing here is a seam in the wrapper: the whole `gh` binary is a substituted artifact.
+export STUB_GH_LINKED_ISSUES=''
+export STUB_GH_LINKED_CROSS=''
+export STUB_GH_LINKED_NOREPO=''
+export STUB_GH_LINKED_JSON=''
+export STUB_GH_LINKED_RC=0
+export STUB_GH_LINKED_ERR=''
+# The current repository as `gh` resolves it. This one DEFAULTS TO A VALUE rather than to empty,
+# because it is the ordinary state of every real invocation and an empty default would make every
+# case take the could-not-establish path — the mirror of the fail-closed argument for the knobs
+# above, where the ordinary state is "no linked issue" and a permissive default would hide a gap.
+export STUB_GH_REPO_NWO='pmcfadin/cqlite'
+export STUB_GH_REPO_RC=0
+export STUB_GH_REPO_ERR=''
+export STUB_GH_ISSUE_COMMENTS=''
+export STUB_GH_ISSUE_COMMENTS_JSON=''
+export STUB_GH_ISSUE_COMMENTS_FAIL=''
+export STUB_GH_ISSUE_COMMENTS_GARBAGE=''
+export STUB_GH_ISSUE_COMMENTS_ERR=''
 export STUB_ON_REVIEW=''
 reset_stub() {
   STUB_JOB=4656
@@ -1206,16 +1399,32 @@ reset_stub() {
   STUB_VERDICT_FIELD=''
   STUB_RECORD_BLANK_FOR=0
   STUB_PAYLOAD_JOB=''
+  STUB_REVIEW_ROW_ID=''
   STUB_LIST_JSON=array
   STUB_RECORD_OUTPUT=''
   STUB_RECORD_OUTPUT_FIELD=''
   STUB_GH_COMMENTS=''
   STUB_GH_COMMENTS_JSON=''
   STUB_GH_COMMENTS_FILE=''
+  STUB_GH_PR_EMPTY_STDOUT=''
   STUB_GH_RC=0
   STUB_GH_ISSUES=''
   STUB_GH_ISSUES_CLOSED=''
   STUB_GH_ISSUE_ERR=''
+  STUB_GH_LINKED_ISSUES=''
+  STUB_GH_LINKED_CROSS=''
+  STUB_GH_LINKED_NOREPO=''
+  STUB_GH_LINKED_JSON=''
+  STUB_GH_LINKED_RC=0
+  STUB_GH_LINKED_ERR=''
+  STUB_GH_REPO_NWO='pmcfadin/cqlite'
+  STUB_GH_REPO_RC=0
+  STUB_GH_REPO_ERR=''
+  STUB_GH_ISSUE_COMMENTS=''
+  STUB_GH_ISSUE_COMMENTS_JSON=''
+  STUB_GH_ISSUE_COMMENTS_FAIL=''
+  STUB_GH_ISSUE_COMMENTS_GARBAGE=''
+  STUB_GH_ISSUE_COMMENTS_ERR=''
   STUB_ON_REVIEW=''
 }
 
@@ -1663,7 +1872,7 @@ assert_tracked_mode 'case (cx3h) fixture' "$cx3h_work" HEAD base-exec-head-plain
 assert_tracked_mode 'case (cx3h) fixture' "$cx3h_work" "$cx3h_base" head-exec-base-plain 100644
 assert_tracked_mode 'case (cx3h) fixture' "$cx3h_work" HEAD head-exec-base-plain 100755
 assert_tracked_mode 'case (cx3h) fixture' "$cx3h_work" "$cx3h_base" base-only-exec 100755
-if git -C "$cx3h_work" ls-tree HEAD -- ':(literal)base-only-exec' | grep -q .; then
+if [ -n "$(git -C "$cx3h_work" ls-tree HEAD -- ':(literal)base-only-exec')" ]; then
   bad 'case (cx3h): base-only-exec still exists at HEAD, so the BASE-only combination is not reproduced'
 else
   ok 'case (cx3h): base-only-exec is absent from HEAD (the BASE-only combination is reproduced)'
@@ -1784,7 +1993,7 @@ cx3j_shape() { # cx3j_shape <file> [funcname]
     inf { print }
   ' "$file" | grep -vE '^[[:space:]]*#' | grep -vE '^[[:space:]]*$')
   if [ -z "$body" ]; then printf 'NOT-FOUND\n'; return 0; fi
-  if printf '%s\n' "$body" | grep -qE '(^|[^[:alnum:]_])(break|continue)([^[:alnum:]_]|$)'; then
+  if str_matches "$body" -E '(^|[^[:alnum:]_])(break|continue)([^[:alnum:]_]|$)'; then
     printf 'HAS-BREAK-OR-CONTINUE\n'; return 0
   fi
   nret=$(printf '%s\n' "$body" | grep -cE '(^|[^[:alnum:]_])return([^[:alnum:]_]|$)' || true)
@@ -1869,7 +2078,9 @@ cx3j_pred=$(awk '
 if [ -z "$cx3j_pred" ]; then
   bad 'case (cx3j): _roborev_mode_exec_state_at was not found, so its range-blindness was not checked'
 else
-  if ! printf '%s\n' "$cx3j_pred" | grep -vE '^[[:space:]]*#' | grep -qE 'RANGE_BASE_SHA|BASE_TIP_SHA|\bHEAD\b'; then
+  _cx3j_exec="$tmp/cx3j-pred-exec.txt"
+  printf '%s\n' "$cx3j_pred" | grep -vE '^[[:space:]]*#' >"$_cx3j_exec" || true
+  if ! grep -qE 'RANGE_BASE_SHA|BASE_TIP_SHA|\bHEAD\b' "$_cx3j_exec"; then
     ok 'case (cx3j): the per-endpoint predicate names no endpoint (range-blind, so it cannot encode an ordering)'
   else
     bad 'case (cx3j): _roborev_mode_exec_state_at references a specific endpoint — it can encode a precedence again'
@@ -3614,17 +3825,29 @@ assert_says 'case (w4) names the undefined check function' 'did not define robor
 assert_never_enqueued 'case (w4)'
 
 if [ "$HAVE_PYTHON3" -eq 1 ]; then
-printf '== case (x10): the NESTED job row in show --json is read as a first-class source ==\n'
+printf '== case (x10): the NESTED job row is selected even when the review row id DIVERGES ==\n'
 reset_stub
-# MEASURED (round 6): `roborev show <id> --json` returns a REVIEW row whose own `id`
-# equals the job id and which NESTS the job row — git_ref, status, model,
-# requested_model, token_usage, verdict — under a "job" key. Returning the FIRST id
-# match handed back the outer row, which has none of those fields; that looked like an
+# MEASURED (round 6): `roborev show <id> --json` returns a REVIEW row that NESTS the job row —
+# git_ref, status, model, requested_model, token_usage, verdict — under a "job" key. Returning the
+# FIRST id match handed back the outer row, which has none of those fields; that looked like an
 # async durability problem and silently downgraded sha-assert, tier 2 and model.
-# `list --json` is disabled here so `show` is the ONLY source.
+#
+# AND THE REVIEW ROW'S OWN `id` NEED NOT EQUAL THE JOB (#3654): measured over records 1-10 on
+# v0.61.2, six agree and two PAIRS swap (asking for 8 returns id=9, asking for 9 returns id=8),
+# while `job_id` and `job.id` name the requested job in every one. Every fixture here used
+# MATCHING ids, so the divergent shape roborev really emits executed NOWHERE. Under divergence the
+# two objects answer through DIFFERENT keys — the review row only through `job_id`, the nested job
+# row only through `id` — so this case pins that `find_job` still lands on the job row when the
+# match keys differ, which the equal-id shape cannot distinguish. Measured, not assumed: with the
+# "prefer the object carrying git_ref" arm removed, the outer row is selected and the facts come
+# back with NO git_ref, NO status and token_state=absent, which the wrapper reports as job-record
+# DEGRADED — so this case goes RED on job-record / sha-assert / tier 2 / model at once. (That
+# break reds the equal-id shape too; what is new here is the payload shape, not the tie-break.)
+# `list --json` is disabled so `show` is the ONLY source.
 work=$(make_fixture case_x10 pushed)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
 STUB_SHOW_JSON=nested
+STUB_REVIEW_ROW_ID=$((STUB_JOB - 1))   # the measured divergence: review row 4655, job 4656
 STUB_LIST_JSON=none
 run_wrapper "$work"
 assert_verdict 'case (x10)' PASS 0
@@ -3632,6 +3855,19 @@ assert_says 'case (x10) the nested job row was used' '^job-record: PASS$'
 assert_says 'case (x10) the range oracle worked from the nested row' '^sha-assert: PASS$'
 assert_says 'case (x10) tokens came from the nested row' '^vacuity-tier2: PASS$'
 assert_says 'case (x10) the model was confirmed from the nested row' '^model: gpt-5\.6-sol$'
+
+printf '== case (x10b): the AGREEING review/job id shape still reads complete ==\n'
+reset_stub
+# The majority shape (six of the ten measured records), kept so the divergent fixture above does
+# not silently REPLACE the coverage it was derived from.
+work=$(make_fixture case_x10b pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+STUB_SHOW_JSON=nested
+STUB_LIST_JSON=none
+run_wrapper "$work"
+assert_verdict 'case (x10b)' PASS 0
+assert_says 'case (x10b) the nested job row was used' '^job-record: PASS$'
+assert_says 'case (x10b) the range oracle worked from the nested row' '^sha-assert: PASS$'
 fi  # HAVE_PYTHON3
 
 printf '== case (w): a MISSING oracles file FAILs closed, never silently no-ops ==\n'
@@ -3744,7 +3980,7 @@ assert_says 'case (wv1) the NONE cause names the SHAPE requirement (job 29)' \
 assert_says 'case (wv1) and it names the contexts that do not count' \
   'a marker inside prose, a code fence, a quote or a review body is not read'
 assert_says 'case (wv1) the waiver state is reported as NONE' \
-  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — a marker inside prose, a code fence, a quote or a review body is not read\)$'
+  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — a marker inside prose, a code fence, a quote or a review body is not read; no linked issue is declared on this PR, so no linked-issue thread was checked\)$'
 assert_lacks 'case (wv1) no NOTICE verdict exists for this key any more' '^prompt-content: NOTICE'
 assert_lacks 'case (wv1) and no snapshot keys are emitted' '^snapshot-'
 reset_stub
@@ -3929,7 +4165,7 @@ assert_verdict 'case (wv11)' FAIL 1
 assert_says 'case (wv11) reposting the diagnostic does not waive anything' \
   '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
 assert_says 'case (wv11) and no waiver is found in it' \
-  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — a marker inside prose, a code fence, a quote or a review body is not read\)$'
+  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — a marker inside prose, a code fence, a quote or a review body is not read; no linked issue is declared on this PR, so no linked-issue thread was checked\)$'
 assert_lacks 'case (wv11) the reposted block never grants' '^prompt-content: WAIVED'
 reset_stub
 
@@ -3944,7 +4180,7 @@ STUB_GH_COMMENTS="\001pmcfadin\n> roborev-waive: prompt-content-absent base=$w_b
 run_wrapper "$w_work"
 assert_verdict 'case (wv12)' FAIL 1
 assert_says 'case (wv12) no quoted or indented copy is honoured' \
-  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — a marker inside prose, a code fence, a quote or a review body is not read\)$'
+  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — a marker inside prose, a code fence, a quote or a review body is not read; no linked issue is declared on this PR, so no linked-issue thread was checked\)$'
 assert_lacks 'case (wv12) and none of them grants' '^prompt-content: WAIVED'
 reset_stub
 
@@ -4314,8 +4550,10 @@ STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" HOME="$FIXTURE_HOME" \
   --log "$tmp/transcript-$CASE_N.txt" >"$OUT" 2>&1
 RC=$?
 assert_verdict 'case (wv31)' FAIL 1
+# The wording is the SHARED helper's since #3759 round 3 — one validated read serves both kinds, so it
+# says "authorization" rather than "waiver". The properties asserted are unchanged.
 assert_says 'case (wv31) an unusable scanner is UNAVAILABLE and fails closed' \
-  '^waiver: UNAVAILABLE \(the structured waiver scanner is unusable'
+  '^waiver: UNAVAILABLE \(the structured authorization scanner is unusable'
 assert_says 'case (wv31) and it says a waiver is never decided from a text stream' \
   'NEVER decided from a flattened text stream'
 # THE LOAD-BEARING CONTROL FOR THE KEYWORD REDACTION'S WORD BOUNDARY (roborev job 230). This cause names
@@ -4763,7 +5001,7 @@ assert_verdict 'case (df2)' FAIL 1
 assert_no_marker_form 'case (df2)'
 assert_says 'case (df2) the findings stand as PRESENT' '^findings: PRESENT \(2\)$'
 assert_says 'case (df2) the NONE cause teaches the sole-content and top-level rules' \
-  '^deferral: NONE \(no findings-deferral comment for this review: the authorization must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — one inside prose, a code fence, a quote or a review body is not read\)$'
+  '^deferral: NONE \(no findings-deferral comment for this review: the authorization must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — one inside prose, a code fence, a quote or a review body is not read; no linked issue is declared on this PR, so no linked-issue thread was checked\)$'
 assert_lacks 'case (df2) nothing is deferred' '^findings: DEFERRED'
 # LAYER 3 (#3312 job 23): no emitted diagnostic carries ANY part of the marker, because a summary
 # block pasted into a PR comment would otherwise authorize the next run.
@@ -5739,6 +5977,848 @@ else
 fi
 reset_stub
 
+# =============================================================================================
+# (mp*) #3759: A MISPLACED AUTHORIZATION IS DIAGNOSED — AND GRANTS NOTHING
+# =============================================================================================
+# THE INCIDENT, measured. For PR #3710 the coordination lead granted BOTH authorizations —
+# field-perfect base/head/job, each the sole nonblank content of its own top-level comment, from an
+# allowlisted author — on ISSUE #3544, the thread where that lane's coordination had happened all
+# day. The wrapper reads PR comments only, so `--recheck-job 317` reported `waiver: NONE` /
+# `deferral: NONE`, which is TEXTUALLY IDENTICAL to "the lead refused" and to "nobody posted one".
+# Position 1 of a six-PR serial queue idled ~8 hours and blocked five lanes. `gh pr view 3710 --json
+# closingIssuesReferences` returns `[{"number":3544}]`, so the probe specified here WOULD have named
+# the right thread on the actual incident.
+#
+# WHAT THIS FAMILY PINS, in both directions:
+#   * an issue-side marker the channel WOULD have accepted ⇒ `MISPLACED` naming the issue and the
+#     remedy, with the underlying FAIL untouched and `RESULT: FAIL` — for BOTH kinds;
+#   * MISPLACED reaches NO granting path: `prompt-content:` never reads WAIVED, `findings:` never
+#     reads DEFERRED, and the structural asserts below pin that the granting gates are still the two
+#     token-exact `= "granted"` comparisons;
+#   * the escalation fires ONLY from `none` and ONLY from an issue-side `granted` — a PR-side STALE
+#     is not overwritten AND (measured against the stub's invocation log) is not even probed;
+#   * every `NONE` DECLARES what the probe did, from the closed rendering set, so "checked and it is
+#     not there either" and "never checked" can never read alike;
+#   * the linked issue comes from the STRUCTURED relation and nothing reads the PR body.
+mp_waive_grant="roborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=snapshot-delivered; 541812 in / 472576 cached"
+mp_defer_grant="roborev-defer: findings issues=$d_issues count=2 base=$w_base head=$w_head job=4656 reason=$d_reason"
+# The fixture EVERY waiver-side case needs: the census paths absent from the prompt, so the absence
+# branch runs and there is a waiver to look for, and NOTHING on the PR.
+mp_waiver_fixture() {
+  STUB_ANNOUNCE_SHA="$w_head"
+  STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+}
+
+printf '== (mp1) #3759: a would-have-granted WAIVER on the linked issue ⇒ MISPLACED, FAIL ==\n'
+# THE ACCEPTANCE CASE FOR THE WAIVER HALF, and the incident reproduced hermetically.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp1)' FAIL 1
+assert_no_marker_form 'case (mp1)'
+assert_one_result_line 'case (mp1)'
+assert_says 'case (mp1) the waiver key reports MISPLACED, naming the linked issue it was found on' \
+  '^waiver: MISPLACED \(an authorization for THIS review \(this base, head and job\) is on LINKED ISSUE #3544, not on the pull request'
+assert_says 'case (mp1) it claims only what the probe measured — accepted by the CHANNEL' \
+  'would have been ACCEPTED BY THE CHANNEL there'
+assert_says 'case (mp1) it states that it grants nothing and the FAIL stands' \
+  'IT GRANTS NOTHING AND THIS FAIL STANDS'
+assert_says 'case (mp1) and it carries the one operator action that fixes it' \
+  'REMEDY: the authorizer re-posts the IDENTICAL line as a TOP-LEVEL COMMENT ON THE PR'
+assert_says 'case (mp1) with the lead-side verification step named' \
+  "verifies with 'gh pr view <PR> --json comments' that it is there"
+# THE POSITIVE CONTROL FOR "GRANTS NOTHING" (R2). Behavioural, paired with the structural asserts.
+assert_says 'case (mp1) the absence FAIL is untouched' \
+  '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
+assert_lacks 'case (mp1) a misplaced waiver NEVER waives' '^prompt-content: WAIVED'
+assert_lacks 'case (mp1) and never reads as a certification' '^prompt-content: PASS'
+assert_lacks 'case (mp1) nor is it reported as if no authorization existed anywhere' '^waiver: NONE'
+assert_lacks 'case (mp1) nor as GRANTED' '^waiver: GRANTED'
+reset_stub
+
+printf '== (mp2) #3759: a would-have-granted DEFERRAL on the linked issue ⇒ MISPLACED, FAIL ==\n'
+# THE ACCEPTANCE CASE FOR THE DEFERRAL HALF. `findings:` must stay exactly as the run measured it —
+# never DEFERRED (that would be the grant) and never NONE (that would read as a clean review).
+reset_stub
+df_grant_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$mp_defer_grant\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (mp2)' FAIL 1
+assert_no_marker_form 'case (mp2)'
+assert_one_result_line 'case (mp2)'
+assert_says 'case (mp2) the deferral key reports MISPLACED, naming the linked issue' \
+  '^deferral: MISPLACED \(an authorization for THIS review \(this base, head and job\) is on LINKED ISSUE #3544, not on the pull request'
+assert_says 'case (mp2) the count= match IS claimed, because the scanner decided it' \
+  'its count= matches the 2 observed finding\(s\)'
+# R3: THE RENDERING DOES NOT CLAIM MORE THAN THE PROBE MEASURED. The network disposition leg is
+# deliberately not run issue-side, and the value says so instead of implying a completed check.
+assert_says 'case (mp2) but the issue-disposition legs are declared NOT run issue-side' \
+  'are NOT run issue-side and still apply once it is on the PR'
+assert_says 'case (mp2) the findings stand exactly as measured' '^findings: PRESENT \(2\)$'
+assert_lacks 'case (mp2) a misplaced deferral NEVER defers' '^findings: DEFERRED'
+assert_lacks 'case (mp2) and NEVER reads as a clean review' '^findings: NONE'
+assert_lacks 'case (mp2) nor is it reported as if no authorization existed anywhere' '^deferral: NONE'
+# MEASURED AGAINST THE INVOCATION LOG, not inferred: the disposition leg asks
+# `gh issue view <N> --json number,state`, and the probe must not have run it issue-side.
+if grep -qF -- '--json number,state' "$INVOKED"; then
+  bad 'case (mp2): the issue-disposition leg RAN on the probe path — the rendering claims it does not, and a diagnostic that overstates what it measured is what stops the next person looking'
+else
+  ok 'case (mp2): the network disposition leg was NOT run issue-side (checked against the stub invocation record)'
+fi
+reset_stub
+
+printf '== (mp3) #3759: an issue-side STALE / MALFORMED / UNAUTHORIZED marker stays NONE ==\n'
+# R3, SECOND HALF: only an issue-side marker the channel WOULD HAVE ACCEPTED escalates. Each of these
+# is a DIFFERENT defect that happens to be on a different thread, and re-posting it would not help —
+# reporting MISPLACED for it would make the run FAIL after the operator followed the remedy, which
+# spends the diagnostic's credibility. Asserted PER SHAPE, never one standing for the family.
+for _mp3 in \
+  "stale:roborev-waive: prompt-content-absent base=$w_base head=0000000000000000000000000000000000000000 job=4656 reason=names another review" \
+  "malformed:roborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=<why>" \
+  "unauthorized:\001a-stranger" ; do
+  _mp3_kind="${_mp3%%:*}"
+  _mp3_body="${_mp3#*:}"
+  reset_stub
+  mp_waiver_fixture
+  STUB_GH_LINKED_ISSUES='3544'
+  if [ "$_mp3_kind" = unauthorized ]; then
+    STUB_GH_ISSUE_COMMENTS="\002#3544\n\001a-stranger\n$mp_waive_grant\n"
+  else
+    STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$_mp3_body\n"
+  fi
+  run_wrapper "$w_work"
+  assert_verdict "case (mp3/$_mp3_kind)" FAIL 1
+  assert_no_marker_form "case (mp3/$_mp3_kind)"
+  assert_says "case (mp3/$_mp3_kind) the state stays NONE with the probe's checked declaration" \
+    '^waiver: NONE \(no waiver comment for this review:.*; linked issue #3544 checked: no matching marker there either \(NON-EXHAUSTIVE: a thread counts as read when its payload was a comments LIST the scanner accepted; a malformed ENTRY inside an otherwise well-formed list is skipped by the scanner and is not distinguished here\)\)$'
+  assert_lacks "case (mp3/$_mp3_kind) MISPLACED is not reported for a marker that would not have been accepted" \
+    '^waiver: MISPLACED'
+  assert_lacks "case (mp3/$_mp3_kind) and nothing is waived" '^prompt-content: WAIVED'
+  reset_stub
+done
+# THE ALLOWLIST APPLIES IDENTICALLY ON BOTH THREADS, which is what stops a stranger's comment on a
+# PUBLIC issue thread even producing a diagnostic that names it as an authorization.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001a-stranger\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_lacks 'case (mp3/unauthorized) a stranger is never named as an authorizer' 'a-stranger'
+reset_stub
+
+printf '== (mp4) #3759: a PR-side STALE is NOT overwritten, and the probe is NOT EVEN CALLED ==\n'
+# R3, FIRST HALF, MEASURED RATHER THAN ASSUMED. `stale` is already specific and already actionable;
+# replacing it with MISPLACED would substitute a vaguer diagnosis for a precise one. And the probe is
+# NOT PERFORMED — not merely ignored — which is the only version an invocation log can measure. A
+# network call whose result is discarded is latency plus a future footgun.
+reset_stub
+mp_waiver_fixture
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=0000000000000000000000000000000000000000 job=4656 reason=names another review\n"
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp4)' FAIL 1
+assert_no_marker_form 'case (mp4)'
+assert_says 'case (mp4) the precise PR-side cause survives' '^waiver: STALE \(the marker names a different review'
+assert_lacks 'case (mp4) a perfect issue-side marker does NOT overwrite it' '^waiver: MISPLACED'
+if grep -qF 'closingIssuesReferences' "$INVOKED"; then
+  bad 'case (mp4): the linked-issue relation WAS fetched on a state that had already diagnosed — reachability must rest on the call not being made, not on where an if sits'
+else
+  ok 'case (mp4): no closingIssuesReferences call was made (checked against the stub invocation record)'
+fi
+if grep -qE 'gh issue view [0-9]+ --json comments' "$INVOKED"; then
+  bad 'case (mp4): a linked-issue comment read WAS made on an already-diagnosed state'
+else
+  ok 'case (mp4): no linked-issue comment read was made either'
+fi
+reset_stub
+
+printf '== (mp5) #3759: NO linked issue ⇒ NONE naming the no-subject rendering ==\n'
+# The absence of a check is STATED rather than looking like a completed one — the same reason the
+# gate prints `0 RECOGNISED` rather than a bare `0`.
+reset_stub
+mp_waiver_fixture
+run_wrapper "$w_work"
+assert_verdict 'case (mp5)' FAIL 1
+assert_no_marker_form 'case (mp5)'
+assert_says 'case (mp5) the NONE value declares that no linked-issue thread was checked' \
+  '^waiver: NONE \(no waiver comment for this review:.*; no linked issue is declared on this PR, so no linked-issue thread was checked\)$'
+reset_stub
+
+printf '== (mp5b) #3759: a PR body mentioning an unlinked #N is NOT a subject (R4) ==\n'
+# THE RELATION, NOT THE PROSE, IS WHAT BOUNDS AND ATTRIBUTES THE PROBE. #3626 DELETED a PR-body link
+# check because a body is editable at any time by anyone with write access with NO per-edit
+# attribution; reinstating a body scan for ANY purpose would be reinstating a deleted generation. So
+# an issue mentioned only in prose is not probed, even though its thread carries a perfect marker.
+reset_stub
+mp_waiver_fixture
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp5b)' FAIL 1
+assert_says 'case (mp5b) an unlinked issue is not a subject, whatever the body says' \
+  'no linked issue is declared on this PR, so no linked-issue thread was checked'
+assert_lacks 'case (mp5b) and its marker is not found' '^waiver: MISPLACED'
+if grep -qE 'gh issue view [0-9]+ --json comments' "$INVOKED"; then
+  bad 'case (mp5b): a thread was probed although the structured relation declared none'
+else
+  ok 'case (mp5b): no thread was probed (checked against the stub invocation record)'
+fi
+reset_stub
+
+printf '== (mp6) #3759: the probe unable to run ⇒ NONE with the could-not-check cause ==\n'
+# EVERY FAILURE IS A STATE WITH A CAUSE — never a two-valued return, which would re-import the very
+# collapse this change exists to remove — and the run still FAILs on the underlying key: the probe
+# can neither rescue nor fail anything.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_RC=1
+run_wrapper "$w_work"
+assert_verdict 'case (mp6/relation)' FAIL 1
+assert_no_marker_form 'case (mp6/relation)'
+assert_says 'case (mp6/relation) the relation failure is named as a could-not-check' \
+  "the linked-issue thread could NOT be checked: 'gh pr view --json closingIssuesReferences' failed"
+assert_lacks 'case (mp6/relation) and it never reads as a completed check' 'checked: no matching marker there either'
+reset_stub
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS_FAIL='3544'
+run_wrapper "$w_work"
+assert_verdict 'case (mp6/thread)' FAIL 1
+assert_no_marker_form 'case (mp6/thread)'
+assert_says 'case (mp6/thread) an unreadable thread is a could-not-check naming the cause' \
+  'the linked-issue thread could NOT be checked: read with no matching marker: none; NOT read: #3544 \(HTTP 502: Bad gateway'
+reset_stub
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS_GARBAGE='3544'
+run_wrapper "$w_work"
+assert_verdict 'case (mp6/unparseable)' FAIL 1
+assert_says 'case (mp6/unparseable) an unparseable comments payload is its own could-not-check cause' \
+  'NOT read: #3544 \(refused: the payload was not a JSON object carrying a comments LIST'
+reset_stub
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_JSON='{"closingIssuesReferences":[{"number":"not-a-number"}]}'
+run_wrapper "$w_work"
+assert_verdict 'case (mp6/non-numeric)' FAIL 1
+assert_says 'case (mp6/non-numeric) a non-numeric relation entry is a could-not-check, reported as a KIND' \
+  'NOT read: an entry that is not an issue number'
+assert_lacks 'case (mp6/non-numeric) and the raw value is NEVER interpolated' 'not-a-number'
+reset_stub
+# ===== FOUR UNREADABLE PAYLOAD SHAPES, EACH A COULD-NOT-CHECK AND NEVER "NONE DECLARED" =====
+# (#3759 round 1, finding 2.) The coercion these replace turned an unparseable payload, a non-object
+# top level, a MISSING key and an explicit `null` all into ZERO declared references, which rendered
+# as the affirmative "no linked issue is declared on this PR" — an ANSWER derived from a payload
+# nobody could read. Asserted PER SHAPE: one standing for the family is exactly how three of these
+# stayed invisible behind the fourth.
+for _mp6_shape in \
+  'unparseable:this is not json' \
+  'non-object:[1, 2, 3]' \
+  'missing-key:{"someOtherField":[]}' \
+  'explicit-null:{"closingIssuesReferences":null}' \
+  'non-list:{"closingIssuesReferences":{"number":3544}}' ; do
+  reset_stub
+  mp_waiver_fixture
+  STUB_GH_LINKED_JSON="${_mp6_shape#*:}"
+  run_wrapper "$w_work"
+  assert_verdict "case (mp6/relation-shape/${_mp6_shape%%:*})" FAIL 1
+  assert_no_marker_form "case (mp6/relation-shape/${_mp6_shape%%:*})"
+  assert_says "case (mp6/relation-shape/${_mp6_shape%%:*}) is a could-not-check naming the broken payload" \
+    'the payload was not a JSON object carrying a closingIssuesReferences LIST'
+  assert_lacks "case (mp6/relation-shape/${_mp6_shape%%:*}) and NEVER claims that no linked issue is declared" \
+    'no linked issue is declared on this PR'
+  reset_stub
+done
+
+printf '== (mp7) #3759: a PARTIAL read is could-not-check naming BOTH halves, never checked ==\n'
+# A PARTIAL SCAN REPORTED AS A COMPLETE ONE IS WORSE THAN AN ADMITTED FAILURE, because it is the
+# version nobody re-checks. One thread read with no match, one unavailable.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544 3626'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\nnothing here\n"
+STUB_GH_ISSUE_COMMENTS_FAIL='3626'
+run_wrapper "$w_work"
+assert_verdict 'case (mp7)' FAIL 1
+assert_no_marker_form 'case (mp7)'
+assert_says 'case (mp7) both halves are named — what was read and what was not' \
+  'the linked-issue thread could NOT be checked: read with no matching marker: #3544; NOT read: #3626 \('
+assert_lacks 'case (mp7) a partial read NEVER takes the checked rendering' 'checked: no matching marker there either'
+reset_stub
+
+printf '== (mp8) #3759: MORE linked issues than the bound ⇒ the remainder is declared ==\n'
+# The probe is a diagnostic on a path that has already determined the run FAILs, so it is bounded —
+# and when the declared set exceeds the bound the rendering SAYS SO. The unprobed remainder is
+# visible rather than silent.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544 3626 3312 3710'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\nnothing\n\002#3626\n\001pmcfadin\nnothing\n\002#3312\n\001pmcfadin\nnothing\n\002#3710\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp8)' FAIL 1
+assert_no_marker_form 'case (mp8)'
+assert_says 'case (mp8) the rendering declares declared / probed / bound / remainder' \
+  'linked issues #3544,#3626,#3312 checked — 3 of 4 declared examined, probe bounded at 3, 1 never looked at: no matching marker'
+assert_lacks 'case (mp8) the unprobed remainder is not silently claimed as checked' \
+  'checked: no matching marker there either'
+if grep -qE 'gh issue view 3710 --json comments' "$INVOKED"; then
+  bad 'case (mp8): the bound was not honoured — a fourth thread was read'
+else
+  ok 'case (mp8): the bound was honoured (the fourth declared thread was not read)'
+fi
+reset_stub
+
+printf '== (mp8b) #3759: UNREADABLE inside the bound AND over-bound — BOTH gaps are declared ==\n'
+# (#3759 round 1, finding 3.) The case neither (mp7) nor (mp8) reaches: a read FAILS inside the
+# bounded prefix while declared references remain unexamined. The could-not-check rendering used to
+# return without ever saying that part of the declared set was never looked at, so a diagnostic that
+# had examined 3 of 5 and failed on one of them read exactly like one that had examined everything.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544 3626 3312 3710 3572'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\nnothing\n\002#3312\n\001pmcfadin\nnothing\n"
+STUB_GH_ISSUE_COMMENTS_FAIL='3626'
+run_wrapper "$w_work"
+assert_verdict 'case (mp8b)' FAIL 1
+assert_no_marker_form 'case (mp8b)'
+assert_says 'case (mp8b) the unreadable half is named' \
+  'the linked-issue thread could NOT be checked: read with no matching marker: #3544,#3312; NOT read: #3626 \('
+assert_says 'case (mp8b) AND the unexamined remainder is named in the SAME rendering' \
+  '3 of 5 declared examined, probe bounded at 3, 2 never looked at'
+assert_lacks 'case (mp8b) a could-not-check with an unexamined remainder never reads as checked' \
+  'checked: no matching marker there either'
+reset_stub
+
+printf '== (mp9) #3759: several linked issues, the FIRST MATCH is reported, in GitHub order ==\n'
+# Probed in the order GitHub returns them — not sorted; any sort is a policy nobody asked for.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544 3626'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\nno marker on the first thread\n\002#3626\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp9)' FAIL 1
+assert_no_marker_form 'case (mp9)'
+assert_says 'case (mp9) the SECOND declared issue is the one named' \
+  'is on LINKED ISSUE #3626, not on the pull request'
+reset_stub
+
+printf '== (mp10) #3759: a keyword-bearing gh diagnostic rides the ONE emit boundary ==\n'
+# R6. The `gh` diagnostic is arbitrary REMOTE text, and a marker keyword can reach a diagnostic
+# through fields this process does not control. The neutralisation lives at the ONE emit boundary
+# (`roborev_safe_line`), never per interpolation site — a per-site escape is a list to keep complete.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS_FAIL='3544'
+STUB_GH_ISSUE_COMMENTS_ERR='HTTP 502 while reading roborev-waive: prompt-content-absent base=x'
+run_wrapper "$w_work"
+assert_verdict 'case (mp10)' FAIL 1
+assert_no_marker_form 'case (mp10)'
+assert_says 'case (mp10) the cause is still quoted, with the keyword redacted at the boundary' \
+  'NOT read: #3544 \(HTTP 502 while reading \[authorization-keyword-redacted\]'
+assert_one_result_line 'case (mp10)'
+reset_stub
+
+printf '== (mp11) #3759: a CONTROL CHARACTER in the probe cause is a visible escape, one line ==\n'
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS_FAIL='3544'
+STUB_GH_ISSUE_COMMENTS_ERR='HTTP 502\nRESULT: PASS'
+run_wrapper "$w_work"
+assert_verdict 'case (mp11)' FAIL 1
+assert_one_result_line 'case (mp11)'
+assert_no_marker_form 'case (mp11)'
+assert_says 'case (mp11) no probe value can introduce a second RESULT line' '^RESULT: FAIL$'
+reset_stub
+
+printf '== (mp14) #3759 r1: a CROSS-REPOSITORY closing reference is skipped, and the skip is DECLARED ==\n'
+# ROUND-1 FINDING 1. A closing reference number is scoped to ITS repository, and `gh issue view <N>`
+# resolves it in the CURRENT one — so following a cross-repo reference probes a DIFFERENT issue that
+# merely shares a number. THE FALSE `MISPLACED` IS THE DANGEROUS DIRECTION: it names a thread that
+# never carried a marker and sends the operator somewhere pointless. The fixture makes that concrete:
+# issue #3544 in THIS repository DOES carry a would-have-granted marker, and the only declared
+# reference is `other-owner/other-repo#3544`. The probe must not report MISPLACED, and must say why.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_CROSS='3544'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp14)' FAIL 1
+assert_no_marker_form 'case (mp14)'
+assert_lacks 'case (mp14) a cross-repository reference NEVER yields a MISPLACED naming a same-number thread' \
+  '^waiver: MISPLACED'
+assert_says 'case (mp14) the skip is DECLARED, with its count and its reason' \
+  '1 cross-repository closing reference\(s\) declared and deliberately NOT probed'
+assert_says 'case (mp14) and the value does not claim that no reference is declared at all' \
+  'no linked issue IN THIS REPOSITORY is declared on this PR'
+# MEASURED, NOT ASSUMED: the same-number issue in THIS repository was never read.
+if grep -qE 'gh issue view 3544 --json comments' "$INVOKED"; then
+  bad 'case (mp14): the probe READ a same-number issue in this repository for a reference that points at another one — that is the false-MISPLACED route the skip exists to close'
+else
+  ok 'case (mp14): no same-number thread was read (checked against the stub invocation record)'
+fi
+reset_stub
+
+printf '== (mp14b) #3759 r1: the SAME reference in THIS repository IS probed (the control) ==\n'
+# THE CONTROL FOR (mp14), and it is not optional: without it, (mp14) would pass identically if the
+# probe had simply stopped working. Same number, same fixture, same marker — only the reference's
+# repository differs, and that one variable flips the outcome to MISPLACED.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp14b)' FAIL 1
+assert_says 'case (mp14b) a SAME-repository reference with the identical number IS probed and reported' \
+  '^waiver: MISPLACED \(an authorization for THIS review \(this base, head and job\) is on LINKED ISSUE #3544'
+assert_lacks 'case (mp14b) and no skip is declared for it' 'cross-repository closing reference'
+reset_stub
+
+printf '== (mp14c) #3759 r1: owner/name are matched CASE-INSENSITIVELY ==\n'
+# GitHub owner and repository names are case-insensitive, so `PMcFadin/CQLite` and `pmcfadin/cqlite`
+# are ONE repository. A case-sensitive compare would declare a skip for a same-repository reference —
+# a false negative that silently loses the very thread this mechanism exists to find.
+reset_stub
+mp_waiver_fixture
+STUB_GH_REPO_NWO='PMcFadin/CQLite'
+STUB_GH_LINKED_JSON='{"closingIssuesReferences":[{"number":3544,"repository":{"name":"cqlite","owner":{"login":"pmcfadin"}}}]}'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp14c)' FAIL 1
+assert_says 'case (mp14c) a differently-cased spelling of the same repository is the same repository' \
+  '^waiver: MISPLACED \(an authorization for THIS review'
+assert_lacks 'case (mp14c) and is not declared as a cross-repository skip' 'cross-repository closing reference'
+reset_stub
+
+printf '== (mp14d) #3759 r1: a reference whose REPOSITORY cannot be established is could-not-check ==\n'
+# "IN ANOTHER REPOSITORY" AND "CANNOT TELL WHICH REPOSITORY" ARE DIFFERENT FACTS, and only one of
+# them is an answer. A payload entry with no repository object must not be filed under the declared
+# skip — that would assert something nobody established — nor probed, which is the false-MISPLACED
+# route. It is a could-not-check, with its own cause.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_NOREPO='3544'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp14d)' FAIL 1
+assert_no_marker_form 'case (mp14d)'
+assert_says 'case (mp14d) the cause names an unestablished repository, not a cross-repository skip' \
+  'NOT read: an entry whose repository could not be established'
+assert_lacks 'case (mp14d) it is NOT filed as a declared cross-repository skip' 'cross-repository closing reference'
+assert_lacks 'case (mp14d) and it is never probed' '^waiver: MISPLACED'
+reset_stub
+
+printf '== (mp14e) #3759 r1: an unresolvable CURRENT repository is could-not-check, not a skip ==\n'
+# With the current repository unknown, "same repository" cannot be established AFFIRMATIVELY for ANY
+# reference — so the whole probe is a could-not-check rather than a set of skips or, worse, a set of
+# probes against numbers nobody could place. Both failure shapes are covered: the call failing, and
+# the call succeeding with an answer that is not an owner/name pair.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_REPO_RC=1
+run_wrapper "$w_work"
+assert_verdict 'case (mp14e/failed)' FAIL 1
+assert_no_marker_form 'case (mp14e/failed)'
+assert_says 'case (mp14e/failed) the cause names the resolution that failed' \
+  "'gh repo view --json nameWithOwner' failed"
+reset_stub
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_REPO_NWO='not-an-owner-name-pair'
+run_wrapper "$w_work"
+assert_verdict 'case (mp14e/malformed)' FAIL 1
+assert_says 'case (mp14e/malformed) an answer that is not an owner/name pair is not an identity' \
+  'did not answer with a single owner/name pair'
+assert_lacks 'case (mp14e/malformed) and nothing is probed on an unestablished identity' '^waiver: MISPLACED'
+reset_stub
+
+printf '== (mp14f) #3759 r1: a MIXED set — same-repo probed, cross-repo declared, both reported ==\n'
+# The realistic shape, and the one a per-fact case cannot reach: the same-repository thread IS read
+# and carries no marker, while a cross-repository reference is skipped. Both facts must appear in one
+# value, because a rendering that reported only the first would claim the whole declared set was
+# examined.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3626'
+STUB_GH_LINKED_CROSS='3544'
+STUB_GH_ISSUE_COMMENTS="\002#3626\n\001pmcfadin\nnothing here\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp14f)' FAIL 1
+assert_no_marker_form 'case (mp14f)'
+assert_says 'case (mp14f) the same-repository thread is reported as checked' \
+  'linked issues #3626 checked'
+assert_says 'case (mp14f) and the cross-repository skip is declared in the SAME value' \
+  '1 cross-repository closing reference\(s\) declared and deliberately NOT probed'
+reset_stub
+
+printf '== (mp15) #3759 r2: a valid-JSON but MALFORMED comments payload is could-not-check ==\n'
+# ROUND-2 BLOCKER, AND THE THIRD APPEARANCE OF ONE SHAPE. The reused scanner reduces `{}`,
+# `{"comments":null}` and `{"comments":{}}` to an EMPTY comment list and exits 0 — correct for its own
+# contract (*given these comments, is there an authorization in them?* over no comments is "no"), and
+# the scanner is reused UNMODIFIED by design. It was this CALLER that turned a zero exit into "the
+# thread was read", rendering "checked: no matching marker" over a thread nothing was read from.
+# THE FIXTURE MAKES THE FALSE CLAIM CONCRETE: a real, would-have-granted marker exists on #3544, and a
+# malformed payload must never let the probe say it looked and found nothing.
+for _mp15_shape in \
+  'empty-object:{}' \
+  'null-comments:{"comments":null}' \
+  'object-comments:{"comments":{"author":{"login":"pmcfadin"}}}' \
+  'string-comments:{"comments":"none"}' ; do
+  reset_stub
+  mp_waiver_fixture
+  STUB_GH_LINKED_ISSUES='3544'
+  STUB_GH_ISSUE_COMMENTS_JSON="${_mp15_shape#*:}"
+  run_wrapper "$w_work"
+  assert_verdict "case (mp15/${_mp15_shape%%:*})" FAIL 1
+  assert_no_marker_form "case (mp15/${_mp15_shape%%:*})"
+  assert_says "case (mp15/${_mp15_shape%%:*}) the thread is could-not-check, naming what was not a comments LIST" \
+    'NOT read: #3544 \(refused: the payload was not a JSON object carrying a comments LIST'
+  assert_lacks "case (mp15/${_mp15_shape%%:*}) and the probe NEVER claims it checked that thread" \
+    'checked: no matching marker there either'
+  assert_lacks "case (mp15/${_mp15_shape%%:*}) nor does a zero exit from the scanner become a grant" \
+    '^prompt-content: WAIVED'
+  reset_stub
+done
+
+printf '== (mp15b) #3759 r2: the WELL-FORMED payload is read (the control) ==\n'
+# Without this, (mp15) would pass identically if the probe had simply stopped reading anything. Same
+# fixture, same thread, same marker — only the payload SHAPE differs, and that one variable flips the
+# outcome from could-not-check to MISPLACED.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS_JSON="{\"comments\":[{\"author\":{\"login\":\"pmcfadin\"},\"body\":\"$mp_waive_grant\"}]}"
+run_wrapper "$w_work"
+assert_verdict 'case (mp15b)' FAIL 1
+assert_says 'case (mp15b) a well-formed payload IS read and its marker IS found' \
+  '^waiver: MISPLACED \(an authorization for THIS review \(this base, head and job\) is on LINKED ISSUE #3544'
+assert_lacks 'case (mp15b) and it is not reported as unreadable' 'was not a JSON object carrying a comments LIST'
+reset_stub
+
+printf '== (mp16) #3759 r2: an UNRECOGNISED or EMPTY scanner state is could-not-check, not checked ==\n'
+# THE SECOND HALF OF THE SAME INVARIANT. The `state=` line is an INPUT to this probe like any other,
+# so it is validated against the closed recognition grammar before a conclusion is drawn from it — the
+# permissive branch keyed on AFFIRMATIVE membership, never on `!= granted`. An empty, absent or
+# never-judged state used to count as a successfully checked thread.
+#
+# THE FIXTURE SUBSTITUTES THE ARTIFACT, NOT A PATH (job 27): a scratch copy of `scripts/flow/` whose
+# scanner is replaced. There is deliberately no way to point the wrapper at another enforcer — that
+# override WAS the hole — so a case needing different scanner behaviour replaces the file, which is a
+# state a real checkout can be in. The replacement answers `none` for an EMPTY comment list (so the
+# PR-side scan still reaches the probe) and the state under test for a non-empty one.
+for _mp16_state in 'unrecognised:totally-unknown-state' 'empty:' ; do
+  reset_stub
+  _mp16_dir="$tmp/scanner-state-${_mp16_state%%:*}"
+  mkdir -p "$_mp16_dir"
+  cp "$WRAPPER_REAL" "$ORACLES_SRC" "$CHECKS_SRC" "$_mp16_dir/"
+  if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
+    cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_mp16_dir/"
+  fi
+  cat >"$_mp16_dir/roborev-waiver-scan.py" <<MP16SCAN
+#!/usr/bin/env python3
+import json, os, sys
+data = json.load(sys.stdin)
+n = len(data.get("comments") or [])
+sys.stdout.write("state=%s\n" % ("none" if n == 0 else os.environ.get("MP16_STATE", "")))
+for _k in ("author", "scope", "reason", "detail", "issues", "count"):
+    sys.stdout.write("%s=\n" % _k)
+MP16SCAN
+  chmod +x "$_mp16_dir/roborev-waiver-scan.py"
+  mp_waiver_fixture
+  STUB_GH_LINKED_ISSUES='3544'
+  STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$mp_waive_grant\n"
+  MP16_STATE="${_mp16_state#*:}" run_wrapper --wrapper "$_mp16_dir/roborev-review.sh" "$w_work"
+  assert_verdict "case (mp16/${_mp16_state%%:*})" FAIL 1
+  assert_no_marker_form "case (mp16/${_mp16_state%%:*})"
+  assert_says "case (mp16/${_mp16_state%%:*}) an unvalidated state does not make a thread checked" \
+    'NOT read: #3544 \(refused: the scanner returned the unrecognised state'
+  assert_lacks "case (mp16/${_mp16_state%%:*}) and the probe never claims it checked that thread" \
+    'checked: no matching marker there either'
+  assert_lacks "case (mp16/${_mp16_state%%:*}) nor does an unrecognised state escalate" '^waiver: MISPLACED'
+  reset_stub
+done
+
+printf '== (mp17) #3759 r4: `gh` exiting 0 with EMPTY output is UNAVAILABLE, never NONE ==\n'
+# ROUND-4 FINDING 1, SECOND HALF, AND IT IS ON THE GRANTING PATH. Both PR-side callers had an
+# `[ -n "$json" ] || return 0` that BYPASSED the validated read on the one input shape a healthy-
+# looking `gh` most plausibly produces: exit 0, nothing on stdout. The early return left the state at
+# its `none` default, so the block asserted "there is no authorization" over comments NOBODY READ.
+# Like the missing shape check before it, this predates the misplacement probe.
+# THE FIXTURE MAKES THE FALSE CLAIM CONCRETE: a would-have-granted marker exists on the linked issue,
+# so a `none` here would additionally have run the probe and reported MISPLACED off an unread PR.
+reset_stub
+mp_waiver_fixture
+STUB_GH_PR_EMPTY_STDOUT=1
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp17)' FAIL 1
+assert_no_marker_form 'case (mp17)'
+assert_says 'case (mp17) an empty payload is the state that says the oracle could not be consulted' \
+  '^waiver: UNAVAILABLE \(the payload was not a JSON object carrying a comments LIST \(it was empty'
+assert_lacks 'case (mp17) it NEVER asserts that no authorization exists over comments nobody read' '^waiver: NONE'
+assert_lacks 'case (mp17) and nothing is waived' '^prompt-content: WAIVED'
+# AND THE PROBE IS NOT RUN AT ALL: it runs only from `none`, so an unreadable PR payload can no longer
+# produce a MISPLACED derived from a pull request that was never read.
+assert_lacks 'case (mp17) an unread PR payload can never yield a MISPLACED' '^waiver: MISPLACED'
+if grep -qF 'closingIssuesReferences' "$INVOKED"; then
+  bad 'case (mp17): the probe RAN over a PR payload that was never read'
+else
+  ok 'case (mp17): no probe was performed (checked against the stub invocation record)'
+fi
+reset_stub
+
+printf '== (mp17b) #3759 r4: the same on the DEFERRAL side ==\n'
+# The deferral carried the identical bypass, and a residual corrected in one of two places reads as
+# correct in the other.
+reset_stub
+df_grant_fixture
+STUB_GH_PR_EMPTY_STDOUT=1
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (mp17b)' FAIL 1
+assert_no_marker_form 'case (mp17b)'
+assert_says 'case (mp17b) an empty payload is UNAVAILABLE on the deferral side too' \
+  '^deferral: UNAVAILABLE \(the payload was not a JSON object carrying a comments LIST \(it was empty'
+assert_lacks 'case (mp17b) never NONE' '^deferral: NONE'
+assert_says 'case (mp17b) and the findings stand exactly as measured' '^findings: PRESENT \(2\)$'
+reset_stub
+
+printf '== (mp18) #3759 r4: a NEWLINE-BEARING identity is REPO-UNVERIFIED, not CROSS-REPO ==\n'
+# ROUND-4 FINDING 2. A trailing-dollar anchor in Python matches BEFORE a final newline, so a login or
+# repository name ending in a newline VALIDATED — and the newline then survived into the joined
+# identity, which compares unequal to everything. A SAME-repository reference therefore came out as a
+# CONFIDENT cross-repository DECLARED SKIP: the exact false confidence the identity validation exists
+# to remove, produced by the validation itself. `fullmatch` has no such exception.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_JSON='{"closingIssuesReferences":[{"number":3544,"repository":{"name":"cqlite\n","owner":{"login":"pmcfadin"}}}]}'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp18)' FAIL 1
+assert_no_marker_form 'case (mp18)'
+assert_says 'case (mp18) an identity that fails the grammar is a could-not-check' \
+  'NOT read: an entry whose repository could not be established'
+assert_lacks 'case (mp18) and is NEVER a confident cross-repository declared skip' \
+  'cross-repository closing reference'
+assert_lacks 'case (mp18) nor is it probed' '^waiver: MISPLACED'
+reset_stub
+
+printf '== (mp19) #3759 r4: a READ thread DECLARES what "read" does not establish ==\n'
+# R5 APPLIED TO THIS FEATURE'S OWN LIMIT. The validated read establishes the CONTAINER (a top-level
+# object whose field is a list), the exit status and the closed-grammar state — it does NOT
+# distinguish a malformed ELEMENT inside an otherwise well-formed list, because the scanner skips such
+# an entry and the scanner is reused UNMODIFIED by design. Re-validating each element in the caller
+# would be a SECOND implementation of the marker path, whose correctness is knowable only by
+# differential testing against the first. So the limit is DECLARED rather than closed — and it is
+# declared IN THE RENDERING, where the claim is made, not only in a comment nobody opens.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS_JSON='{"comments":[{"author":"not-an-object"},{"body":42},"a bare string"]}'
+run_wrapper "$w_work"
+assert_verdict 'case (mp19)' FAIL 1
+assert_no_marker_form 'case (mp19)'
+# The container IS well-formed, so the thread genuinely counts as read — and the value says exactly
+# what that does and does not mean rather than implying an element-level check nobody performed.
+assert_says 'case (mp19) the thread is reported as read' 'linked issue #3544 checked: no matching marker there either'
+assert_says 'case (mp19) and the rendering declares its own non-exhaustiveness' \
+  'NON-EXHAUSTIVE: a thread counts as read when its payload was a comments LIST the scanner accepted'
+assert_says 'case (mp19) naming precisely what is not distinguished' \
+  'a malformed ENTRY inside an otherwise well-formed list is skipped by the scanner and is not distinguished here'
+reset_stub
+
+printf '== (mp19b) #3759 r4: the declared limit is absent where no read is claimed ==\n'
+# A limit printed where nothing was read would be noise, and worse, would imply a read. The no-subject
+# rendering claims no read at all, so it carries no such clause.
+reset_stub
+mp_waiver_fixture
+run_wrapper "$w_work"
+assert_says 'case (mp19b) no linked issue means no read is claimed' \
+  'no linked issue is declared on this PR, so no linked-issue thread was checked'
+assert_lacks 'case (mp19b) so the read limit is not declared here' 'NON-EXHAUSTIVE: a thread counts as read'
+reset_stub
+
+printf '== (mp20) #3759 r5: the bound exhausted by SKIPS reads nothing — and never says "checked" ==\n'
+# ROUND-5 FINDING. Three cross-repository references exhaust the probe bound before it reaches the
+# same-repository one, so NOTHING is read — and the rendering used to be guarded on the bound clause
+# being EMPTY, so this fell through to `checked` and printed `linked issues none checked … no matching
+# marker`: a confident NEGATIVE derived from ZERO reads. Same false confidence as the defects the
+# identity grammar and the validated read each closed, arriving this time through the RENDERING.
+# THE FIXTURE PUTS A REAL MARKER ON THE UNEXAMINED THREAD, so "no matching marker" would be false in
+# fact and not merely unwarranted in form. Ordered explicitly via the payload, because the outcome
+# turns on the cross-repository references coming FIRST.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_JSON='{"closingIssuesReferences":[
+  {"number":3544,"repository":{"name":"other-repo","owner":{"login":"other-owner"}}},
+  {"number":3626,"repository":{"name":"other-repo","owner":{"login":"other-owner"}}},
+  {"number":3312,"repository":{"name":"other-repo","owner":{"login":"other-owner"}}},
+  {"number":3710,"repository":{"name":"cqlite","owner":{"login":"pmcfadin"}}}]}'
+STUB_GH_ISSUE_COMMENTS="\002#3710\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp20)' FAIL 1
+assert_no_marker_form 'case (mp20)'
+assert_says 'case (mp20) the outcome says plainly that no thread was read' \
+  'the linked-issue thread could NOT be checked: no thread was read'
+assert_says 'case (mp20) and names how much of the declared set it never looked at' \
+  '3 of 4 declared examined, probe bounded at 3, 1 never looked at'
+assert_says 'case (mp20) and why the three it examined were not read' \
+  '3 cross-repository closing reference\(s\) declared and deliberately NOT probed'
+# THE THREE FALSE CLAIMS THAT MUST NOT APPEAR. "no matching marker" is a statement about CONTENT, and
+# no content was read; "none checked" is the literal shape of the defect; and the read limit declares
+# what a READ does not establish, so it presupposes a read.
+assert_lacks 'case (mp20) it NEVER claims anything about a marker it did not look for' 'no matching marker'
+assert_lacks 'case (mp20) and never renders an empty read list as checked' 'linked issues none checked'
+assert_lacks 'case (mp20) nor carries the read limit, which presupposes a read' 'NON-EXHAUSTIVE: a thread counts as read'
+# AND IT IS NOT MISFILED AS "no linked issue": one IS declared in this repository, unexamined.
+assert_lacks 'case (mp20) a declared-but-unexamined reference is not "no linked issue"' \
+  'no linked issue IN THIS REPOSITORY is declared'
+# MEASURED: the same-repository thread really was never read, so the case is about the bound and not
+# about a read that silently failed.
+if grep -qE 'gh issue view 3710 --json comments' "$INVOKED"; then
+  bad 'case (mp20): the bound was not exhausted — the same-repository thread WAS read, so this case is not exercising the empty-read_list rendering at all'
+else
+  ok 'case (mp20): the same-repository thread was never reached (checked against the stub invocation record)'
+fi
+reset_stub
+
+printf '== (mp20b) #3759 r5: one thread read past the same skips DOES speak about content (control) ==\n'
+# Without this, (mp20) would pass identically if the probe had stopped rendering content claims
+# altogether. Two cross-repository skips instead of three, so the bound reaches the same-repository
+# reference: one variable, and the outcome flips back to a content claim with its declared limit.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_JSON='{"closingIssuesReferences":[
+  {"number":3544,"repository":{"name":"other-repo","owner":{"login":"other-owner"}}},
+  {"number":3626,"repository":{"name":"other-repo","owner":{"login":"other-owner"}}},
+  {"number":3710,"repository":{"name":"cqlite","owner":{"login":"pmcfadin"}}}]}'
+STUB_GH_ISSUE_COMMENTS="\002#3710\n\001pmcfadin\nnothing here\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp20b)' FAIL 1
+assert_says 'case (mp20b) a thread that WAS read is reported as checked, naming it' \
+  'linked issues #3710 checked'
+assert_says 'case (mp20b) with a content claim, because content was read' 'no matching marker'
+assert_says 'case (mp20b) and the declared read limit, because a read is claimed' \
+  'NON-EXHAUSTIVE: a thread counts as read'
+assert_lacks 'case (mp20b) and it is not a could-not-check' 'no thread was read'
+reset_stub
+
+printf '== (mp21) #3759 r7: NO linked issues + a FAILING repository resolution is still no-subject ==\n'
+# ROUND-7 FINDING 1, AND IT COST CORRECTNESS RATHER THAN A CALL. The current repository used to be
+# resolved BEFORE the relation was read, so a PR with NO linked issues at all still depended on
+# `gh repo view` — and when that call failed while the relation was perfectly readable, the probe
+# reported "could NOT be checked" where the truthful answer was the definitive `no-subject`. A
+# could-not-tell reported WHERE AN ANSWER EXISTS is the exact inverse of the collapse this path is
+# built against, and just as wrong: it hides a finished check behind an apparent infrastructure fault.
+reset_stub
+mp_waiver_fixture
+STUB_GH_REPO_RC=1
+run_wrapper "$w_work"
+assert_verdict 'case (mp21)' FAIL 1
+assert_no_marker_form 'case (mp21)'
+assert_says 'case (mp21) the definitive answer survives an unrelated resolution failure' \
+  'no linked issue is declared on this PR, so no linked-issue thread was checked'
+assert_lacks 'case (mp21) and it is NOT reported as a could-not-check' 'could NOT be checked'
+assert_lacks 'case (mp21) nor does it name a resolution the answer never needed' \
+  'gh repo view --json nameWithOwner'
+# MEASURED, NOT INFERRED: the call is NOT MADE, not merely ignored — which is the only version an
+# invocation log can distinguish, and the same standard the probe's own reachability is held to.
+if grep -qE 'gh repo view' "$INVOKED"; then
+  bad 'case (mp21): the repository was resolved for a PR with no linked references at all — the answer does not depend on it, so the call must not be made'
+else
+  ok 'case (mp21): no repository resolution was performed (checked against the stub invocation record)'
+fi
+reset_stub
+
+printf '== (mp21b) #3759 r7: WITH references, the resolution IS required and its failure IS reported ==\n'
+# The control: one variable changes — a reference now exists — and the same failing resolution becomes
+# load-bearing, so it must be reported rather than swallowed. Without this, (mp21) would pass
+# identically if the repository resolution had simply been deleted.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_REPO_RC=1
+run_wrapper "$w_work"
+assert_verdict 'case (mp21b)' FAIL 1
+assert_says 'case (mp21b) with references to classify, the failed resolution is the cause' \
+  "the linked-issue thread could NOT be checked: 'gh repo view --json nameWithOwner' failed"
+assert_lacks 'case (mp21b) and it is not misreported as no-subject' 'no linked issue is declared on this PR'
+if grep -qE 'gh repo view' "$INVOKED"; then
+  ok 'case (mp21b): the repository WAS resolved once a reference needed classifying (the ordering is conditional, not removed)'
+else
+  bad 'case (mp21b): the repository was never resolved even with a reference to classify, so (mp21) proves nothing about ordering'
+fi
+reset_stub
+
+printf '== (mp12) #3759 MUTANT: probing on EVERY state reds — the escalation is only from none ==\n'
+# A CASE THAT PASSES AGAINST BOTH THE REAL CODE AND ITS NAIVE FORM MEASURES NOTHING. The naive form
+# here is "probe whatever the PR-side state was", which overwrites a precise STALE with a vaguer
+# MISPLACED and sends the operator to move a comment that still would not grant.
+reset_stub
+_mp_dir="$tmp/misplaced-mutant"
+mkdir -p "$_mp_dir"
+cp "$WRAPPER_REAL" "$ORACLES_SRC" "$CHECKS_SRC" "$SCAN_TOOL" "$_mp_dir/"
+if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
+  cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_mp_dir/"
+fi
+# THE CONTROL RUNS FIRST AND IS NOT OPTIONAL: the UNPATCHED copy must produce the real behaviour on
+# this very fixture, so a red below cannot be the copy failing for an unrelated reason.
+mp_waiver_fixture
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=0000000000000000000000000000000000000000 job=4656 reason=names another review\n"
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper --wrapper "$_mp_dir/roborev-review.sh" "$w_work"
+assert_says 'case (mp12 control) the UNPATCHED copy keeps the precise STALE cause' '^waiver: STALE \('
+assert_lacks 'case (mp12 control) and reports no MISPLACED' '^waiver: MISPLACED'
+if sed_inplace_verified "$_mp_dir/roborev-review-oracles.sh" \
+  's/  if \[ "\$ROBOREV_WAIVER_STATE" = "none" \]; then/  if [ -n "$ROBOREV_WAIVER_STATE" ]; then/' \
+  'if [ -n "$ROBOREV_WAIVER_STATE" ]; then' 'if [ "$ROBOREV_WAIVER_STATE" = "none" ]; then'; then
+  ok 'case (mp12): the probe-on-every-state mutant was really applied to the copy'
+  run_wrapper --wrapper "$_mp_dir/roborev-review.sh" "$w_work"
+  assert_says 'case (mp12) the NAIVE form overwrites the precise STALE — which is why the real code guards it' \
+    '^waiver: MISPLACED'
+else
+  bad 'case (mp12): the probe-on-every-state mutant could not be applied, so the escalation guard was never contrasted with its naive form — a case that passes against both measures nothing'
+fi
+reset_stub
+
+printf '== (mp13) #3759 MUTANT: escalating on ANY issue-side marker reds ==\n'
+# The second naive form: "a marker is over there, say MISPLACED". It reports MISPLACED for a marker
+# that would NOT have been accepted, so the run FAILs after the operator followed the remedy.
+reset_stub
+_mp2_dir="$tmp/misplaced-mutant-2"
+mkdir -p "$_mp2_dir"
+cp "$WRAPPER_REAL" "$ORACLES_SRC" "$CHECKS_SRC" "$SCAN_TOOL" "$_mp2_dir/"
+if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
+  cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_mp2_dir/"
+fi
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=0000000000000000000000000000000000000000 job=4656 reason=names another review\n"
+run_wrapper --wrapper "$_mp2_dir/roborev-review.sh" "$w_work"
+assert_says 'case (mp13 control) the UNPATCHED copy leaves a stale issue-side marker at NONE' \
+  '^waiver: NONE \(no waiver comment for this review:'
+assert_lacks 'case (mp13 control) and reports no MISPLACED' '^waiver: MISPLACED'
+if sed_inplace_verified "$_mp2_dir/roborev-review-oracles.sh" \
+  's/^    if \[ "\$state" = "granted" \]; then$/    if [ -n "$state" ] \&\& [ "$state" != "none" ]; then/' \
+  'if [ -n "$state" ] && [ "$state" != "none" ]; then' '    if [ "$state" = "granted" ]; then'; then
+  ok 'case (mp13): the escalate-on-any-marker mutant was really applied to the copy'
+  run_wrapper --wrapper "$_mp2_dir/roborev-review.sh" "$w_work"
+  assert_says 'case (mp13) the NAIVE form escalates a marker the channel would have REFUSED' \
+    '^waiver: MISPLACED'
+else
+  bad 'case (mp13): the escalate-on-any-marker mutant could not be applied, so the would-have-granted condition was never contrasted with its naive form'
+fi
+reset_stub
+
 printf '== case (mb9): the ENQUEUED range is IMMUTABLE against a mid-review base-ref move ==\n'
 # THE RESIDUAL SECOND-ORDER RACE, CLOSED BY CONSTRUCTION (roborev round 1, Medium). The wrapper used
 # to pass the SYMBOLIC base ref to `roborev review --base`, so roborev re-resolved the mirror ref
@@ -5852,6 +6932,112 @@ assert_says 'header: roborev block present' '^==== ROBOREV REVIEW SUMMARY ====$'
 assert_lacks 'header: no AGENT-GATE SUMMARY header' '==== AGENT-GATE SUMMARY ===='
 assert_lacks 'header: no AGENT-GATE LITE SUMMARY header' '==== AGENT-GATE LITE SUMMARY ===='
 assert_lacks 'header: no AGENT-GATE DELTA SUMMARY header' '==== AGENT-GATE DELTA SUMMARY ===='
+
+printf '== (jd1) #3654: --help documents that job ids are PER-DAEMON, and how to settle it ==\n'
+# THE INCIDENT: two lanes on two boxes requested absence waivers 50 minutes apart, both naming
+# `job=265` for DIFFERENT reviews (different ranges, branches and token counts). Both were correct
+# — ids are sequential PER DAEMON, not global — but the coordination lead read the repetition as a
+# collision and WITHHELD a valid waiver. The failure is symmetric: a lead who then treats `job=` as
+# uninformative discards the one field binding an authorization to a REVIEW rather than to a RANGE.
+#
+# SCOPE (#3654 narrowed to asks 1+2): what ships is the DOCUMENTED FACT plus a check that settles
+# it. The emitted `job-machine:` key and the cross-box residual are #3825; waiver evidence policy
+# is #3826. This case therefore pins the doctrine and the payload traps, and nothing about a key.
+CASE_N=$((CASE_N + 1))
+OUT="$tmp/out-$CASE_N.txt"
+bash "$WRAPPER_REAL" --help >"$OUT" 2>"$tmp/jd1-help-err.txt"
+if [ -s "$tmp/jd1-help-err.txt" ]; then
+  bad "case (jd1) --help wrote to stderr: $(head -2 "$tmp/jd1-help-err.txt")"
+else
+  ok 'case (jd1) --help is clean on stderr'
+fi
+assert_says 'case (jd1) --help states that job ids are per-daemon' 'JOB IDS ARE PER-DAEMON, NOT GLOBAL'
+assert_says 'case (jd1) --help says to verify git_ref, never the id alone' "VERIFY THE RECORD'S git_ref AND NEVER THE ID"
+assert_says 'case (jd1) --help records the measurement behind it' "'job=265' on two lanes"
+# THE PRESCRIBED COMMANDS MUST BE ONES THAT WORK. `show <id> --json` NESTS the fields under `.job`,
+# so a top-level jq over that payload prints nulls — a check whose output cannot show what it claims.
+assert_says 'case (jd1) --help prescribes the NESTED .job projection' \
+  "roborev show <id> --json | jq '\.job |"
+assert_says 'case (jd1) --help names the nesting trap' "NESTS git_ref/status/token_usage"
+# THE TOP-LEVEL id IS THE REVIEW ROW'S OWN SEQUENCE, measured over ten records: asking for 9
+# returns id=8 with job_id=9. A human reading it manufactures the very doubt the check removes.
+assert_says 'case (jd1) --help warns that a show payload top-level id is not the job asked for' \
+  "TOP-LEVEL 'id' of a 'show' payload is the REVIEW"
+assert_says 'case (jd1) --help gives the measured id-divergence' 'asking for 9 returns id=8'
+# THE LIST DEFAULT FOLLOWS THE --repo PATH'S HEAD, not the invoking shell's branch. The earlier
+# claim here named the cwd's branch and was FALSE: its evidence was a null from a --repo sitting on
+# main, which BOTH readings explain identically — a probe that cannot distinguish what it asserts.
+assert_says 'case (jd1) --help states the list default follows the --repo HEAD' \
+  'defaults its branch filter to the CURRENT HEAD OF THE --repo PATH'
+assert_lacks 'case (jd1) --help no longer claims the list filters by the shell branch' \
+  'filters by the CURRENT BRANCH by default'
+# A LOCAL ROW COUNT IS NOT EVIDENCE OF UNIQUENESS: `list` only ever sees the LOCAL daemon, so the
+# length probe returns 1 whether or not another box holds the same id — identical output under the
+# two states it claims to separate.
+assert_says 'case (jd1) --help refuses the row-count probe as a collision check' \
+  'A LOCAL ROW COUNT IS NOT EVIDENCE OF UNIQUENESS'
+assert_says 'case (jd1) --help says why the probe cannot work' 'only ever sees the LOCAL daemon'
+# AND THE PROCEDURE MUST DECLARE ITS OWN LIMIT. Checking `job` plus `git_ref` settles that the id
+# names the review you think it does ON THIS DAEMON — it does NOT bind a waiver to one BOX: two
+# daemons can hold the same id for the SAME range, so an authorization for machine A's review is
+# accepted by `--recheck-job` against machine B's different review, undetectably from here. This
+# declaration was DELETED once, together with the (#3825) key it had been written beside, and the
+# residual was re-reported in one round — presenting the git_ref check as settling the question
+# with no statement of its limit IS the defect. It needs no key to be true, so it is pinned here.
+assert_says 'case (jd1) --help declares what the git_ref check does NOT claim' \
+  'WHAT THE git_ref CHECK SETTLES, AND WHAT IS NOT CLAIMED'
+assert_says 'case (jd1) --help scopes what it settles to one daemon' \
+  'names the review you think it does ON THIS DAEMON'
+assert_says 'case (jd1) --help says two daemons can share an id for the same range' \
+  'the SAME id for the SAME git_ref range'
+assert_says 'case (jd1) --help says no local lookup can detect it' 'no local lookup can detect it'
+assert_says 'case (jd1) --help declares the residual not closed here, and names #3825' \
+  'NOT CLAIMED and NOT closed here: closing it is #3825'
+# THE PRESCRIBED LOOKUP MUST REACH AN OLDER RECORD. `roborev list` returns a BOUNDED WINDOW —
+# `--limit` defaults to 50 (measured: `roborev list --help`, v0.61.2) — so a limitless documented
+# command answers NOTHING for a job outside it, an absence indistinguishable from "no such job",
+# and it is precisely the older reviews a waiver argument reaches back to. It also undercuts the
+# row-count probe next to it: a count of 1 says nothing about the window it was taken over.
+assert_says 'case (jd1) --help gives the documented list lookup an explicit --limit' \
+  'roborev list --json --limit 200 --repo <abs-repo> --branch'
+assert_says 'case (jd1) --help names the bounded window' 'BOUNDED WINDOW of the most recent rows'
+assert_says 'case (jd1) --help says to raise the limit until the job appears' \
+  'RAISE it until the job appears'
+assert_says 'case (jd1) --help gives the stopping rule for raising it' 'row count STOPS GROWING'
+assert_says 'case (jd1) --help calls a truncated empty result UNMEASURED' 'UNMEASURED, not an answer'
+assert_lacks 'case (jd1) --help no longer claims the row count is unconditionally 1' '# always 1'
+# ASK 5, FACTUAL HALF ONLY (policy is #3826): what each signal can and cannot establish.
+assert_says 'case (jd1) --help scopes the after-the-fact cost to a HUMAN reading the record' \
+  'ONLY FOR A HUMAN READING'
+assert_says 'case (jd1) --help says the prompt is NOT self-authenticating' 'IS NOT SELF-AUTHENTICATING'
+# Fragment kept to ONE line: the full phrase wraps in the rendered help, and a pattern spanning the
+# break matches nothing — the same line-wrapping trap that made an earlier assert pass by accident.
+assert_says 'case (jd1) --help says the counts are daemon-recorded but NOT independent' \
+  'IS DAEMON-RECORDED BUT NOT'
+assert_says 'case (jd1) --help says NEITHER signal establishes provenance' 'NEITHER SIGNAL ESTABLISHES'
+# AND NO PREFERENCE SHIPS. The narrowing keeps the limits and drops every recommendation; a
+# reintroduced "lead with it" would be policy this change deliberately does not decide.
+assert_says 'case (jd1) --help defers the evidence policy to #3826' 'TRACKED AS #3826'
+assert_lacks 'case (jd1) --help recommends no ordering between the signals' 'should LEAD with'
+# WHAT DELETING THE CLASSIFIER BOUGHT, AND WHAT IT DID NOT. The surviving claim is the PARSER one —
+# no automated verdict is derived from injectable prompt text, and nothing may be added that does —
+# and it is load-bearing: a future reader must not read the limit below as licence to resurrect the
+# classifier. The claim that was DELETED said there was "nothing to spoof into a PASS", which was
+# false and contradicted the sentence above it: the human is IN the path, so spoofed prompt text can
+# mislead an authorizer into issuing the marker that makes `--recheck-job` pass. Third overstatement
+# in this one paragraph across the issue's rounds, so it went by SUBTRACTION, not a third rewrite —
+# subtraction cannot introduce a false claim. Both halves are pinned, so neither can creep back.
+assert_says 'case (jd1) --help keeps the parser-exploit claim, which is the true one' \
+  'the direct PARSER exploit is gone'
+assert_says 'case (jd1) --help still forbids parsing the prompt for delivery mode' \
+  'parses the prompt for delivery mode, and nothing may be added that does'
+assert_says 'case (jd1) --help bounds what that buys' 'THAT IS ALL IT BUYS'
+assert_says 'case (jd1) --help puts the human IN the path' 'human is IN the path, not outside it'
+assert_says 'case (jd1) --help leaves the human-spoofing exposure to #3826' \
+  "#3826's subject and is"
+assert_lacks 'case (jd1) --help no longer claims there is nothing to spoof into a PASS' \
+  'nothing to spoof'
+reset_stub
 
 printf '== --help documents the exit codes and the live worktree probe ==\n'
 reset_stub
@@ -6003,7 +7189,7 @@ fi
 _unq_callers=$(grep -nE '(^|[^#])roborev_unquote_path ' "$ORACLES" "$CHECKS_FILE" "$WRAPPER_REAL" \
   | grep -v '^[^:]*:[0-9]*: *#' || true)
 _unq_caller_files=$(printf '%s\n' "$_unq_callers" | sed -n 's|^\([^:]*\):.*|\1|p' | sort -u | wc -l | tr -d '[:space:]')
-if [ "${_unq_caller_files:-0}" -eq 1 ] && printf '%s' "$_unq_callers" | grep -qF 'roborev-review-oracles.sh'; then
+if [ "${_unq_caller_files:-0}" -eq 1 ] && str_matches "$_unq_callers" -F 'roborev-review-oracles.sh'; then
   ok 'structural: roborev_unquote_path is called ONLY from the oracles file (one boundary)'
 else
   bad "structural: roborev_unquote_path is called from $_unq_caller_files file(s) — a second consumer normalises on its own"
@@ -6036,7 +7222,9 @@ fi
 # COMMENT LINES ARE EXEMPT: the file DOCUMENTS what was retired and why, which is the
 # record that keeps a future edit from reintroducing it. Only executable lines are checked.
 for _pat in 'diff --git a/\[\^ \]' 'promptpaths' 'grep -Fxq'; do
-  if grep -nE -- "$_pat" "$CHECKS_FILE" 2>/dev/null | grep -qv '^[0-9]*: *#'; then
+  _retired_hits="$tmp/retired-mechanism-hits.txt"
+  grep -nE -- "$_pat" "$CHECKS_FILE" >"$_retired_hits" 2>/dev/null || true
+  if grep -qv '^[0-9]*: *#' "$_retired_hits" 2>/dev/null; then
     bad "structural: roborev-review-checks.sh still EXECUTES the retired mechanism '$_pat'"
   else
     ok "structural: the retired mechanism '$_pat' is not executed by roborev-review-checks.sh"
@@ -6053,7 +7241,9 @@ fi
 #     grow a second, subtly different idea of the extended-header run. It therefore does no
 #     `diff --git` scanning of its own at all. Only a SCAN counts — the key's ERROR prose
 #     legitimately says the words "diff --git" when it explains what was looked for.
-if grep -nE '(grep|awk|sed|case)[^#]*diff --git' "$CHECKS_FILE" 2>/dev/null | grep -qv '^[0-9]*: *#'; then
+_dg_hits="$tmp/checks-diffgit-hits.txt"
+grep -nE '(grep|awk|sed|case)[^#]*diff --git' "$CHECKS_FILE" >"$_dg_hits" 2>/dev/null || true
+if grep -qv '^[0-9]*: *#' "$_dg_hits" 2>/dev/null; then
   bad 'structural: roborev-review-checks.sh EXECUTES its own diff --git scan — header-shape knowledge must stay with the matcher in the oracles file'
 else
   ok 'structural: roborev-review-checks.sh does no diff --git scanning of its own'
@@ -6223,7 +7413,7 @@ else
   _ac2_hits=$(_cls_hits "$_cls_all")
   _ac2_leaked=""
   for _ac2_tok in $_ac2_prose; do
-    printf '%s\n' "$_ac2_hits" | grep -qxF "$_ac2_tok" && _ac2_leaked="$_ac2_leaked $_ac2_tok"
+    str_matches "$_ac2_hits" -xF "$_ac2_tok" && _ac2_leaked="$_ac2_leaked $_ac2_tok"
   done
   if [ -z "$_ac2_leaked" ]; then
     ok "structural (#3367 AC2): the real wrapper's doctrine prose names$_ac2_prose and NONE of them is in the scanned token list — recording what was deleted cannot be a violation, with no heredoc exemption needed to make that true"
@@ -6359,9 +7549,9 @@ _pc_start=$(grep -nE '^roborev_check_prompt_content\(\) \{' "$CHECKS_FILE" | hea
 _pc_end=$(awk -v s="${_pc_start:-0}" 'NR>s && /^}/ {print NR; exit}' "$CHECKS_FILE")
 _pc_body=$(sed -n "${_pc_start:-1},${_pc_end:-1}p" "$CHECKS_FILE")
 _pc_exec=$(printf '%s\n' "$_pc_body" | grep -v '^[[:space:]]*#')
-if printf '%s\n' "$_pc_exec" | grep -qF 'roborev_absence_waiver_lookup "${RANGE_BASE_SHA:-}" "${HEAD_SHA:-}" "${JOB:-}"' \
+if str_matches "$_pc_exec" -F 'roborev_absence_waiver_lookup "${RANGE_BASE_SHA:-}" "${HEAD_SHA:-}" "${JOB:-}"' \
   && [ "$(printf '%s\n' "$_pc_exec" | grep -cF 'roborev_absence_waiver_lookup')" -eq 1 ] \
-  && printf '%s\n' "$_pc_body" | grep -qF 'PROMPT_CONTENT="WAIVED ('; then
+  && str_matches "$_pc_body" -F 'PROMPT_CONTENT="WAIVED ('; then
   ok 'structural: the waiver is looked up EXACTLY ONCE, inside the absence branch, so it can excuse only that verdict (constraint (c))'
 else
   bad 'structural: the absence waiver is not confined to the absence branch — a lookup anywhere else could excuse a verdict the ruling says it may never touch (#3312 ruling (4c))'
@@ -6456,6 +7646,18 @@ done
 grep -qF 'the INVOKER can bypass this' "$ORACLES" || _tm_missing="$_tm_missing oracles-triage-rule"
 grep -qF 'top-level PR comments only' "$ORACLES" \
   || grep -qF 'TOP-LEVEL PR COMMENTS ONLY' "$ORACLES" || _tm_missing="$_tm_missing comment-channel-residual"
+# ===== AND THE RESIDUAL NAMES THE LINKED-ISSUE THREAD, IN BOTH BLOCKS (#3759) =====
+# STRENGTHENED, NOT MERELY REWORDED. The residual used to name two misplacement locations — a review
+# body and a review-thread reply — and NOT the PR's LINKED ISSUE, which is the MOST PROBABLE of the
+# three because that is where lane/lead coordination lives. That omission is what the #3710 incident
+# cost 8 hours to. The two RESIDUALS blocks in the oracles (the waiver's and the deferral's) are the
+# artifacts an implementer actually reads, so BOTH must carry the correction: a residual corrected in
+# one of two places is a residual that reads as correct in the other. Counted rather than merely
+# found, for exactly that reason.
+if [ "$(grep -ciF 'PROBABLE MISPLACEMENT IS THE' "$ORACLES")" -lt 2 ]; then
+  _tm_missing="$_tm_missing linked-issue-residual-in-both-blocks"
+fi
+grep -qF 'MISPLACED' "$ORACLES" || _tm_missing="$_tm_missing misplaced-state-not-recorded-in-residual"
 if [ -z "$_tm_missing" ]; then
   ok 'structural: the waiver threat model, its triage rule and the comment-channel residual are stated in code'
 else
@@ -6599,8 +7801,16 @@ fi
 # divergence in a channel rule is an authorization bypass — which is exactly how the in-band author
 # channel came back once already (#3312 job 26).
 _dfe_bad=""
-grep -qF 'python3 "$WAIVER_SCAN_TOOL" findings-deferral' "$ORACLES" || _dfe_bad="$_dfe_bad deferral-does-not-call-the-one-scanner"
-grep -qF 'python3 "$WAIVER_SCAN_TOOL" prompt-content-absent' "$ORACLES" || _dfe_bad="$_dfe_bad waiver-kind-not-named-explicitly"
+# SINCE #3759 ROUND 3 THE CALL IS ONE HOP FURTHER IN, AND THE PROPERTY IS STRICTLY STRONGER. Both kinds
+# now reach the scanner through the single validated read `roborev_validated_authorization_scan`, so
+# what is asserted is that each kind is named explicitly AT ITS CALL of that one helper — an
+# unambiguous literal, exactly as the direct invocation was — rather than that each lookup spells out
+# its own `python3 "$WAIVER_SCAN_TOOL" <kind>`. The "no second enforcer" half is now enforced by the
+# #3759 chokepoint assert below, which requires EVERY scanner invocation to be inside that helper;
+# before the restructure nothing forbade a third call site anywhere in the file.
+grep -qF 'roborev_validated_authorization_scan findings-deferral' "$ORACLES" || _dfe_bad="$_dfe_bad deferral-does-not-call-the-one-scanner"
+grep -qF 'roborev_validated_authorization_scan prompt-content-absent' "$ORACLES" || _dfe_bad="$_dfe_bad waiver-kind-not-named-explicitly"
+grep -qF 'python3 "$WAIVER_SCAN_TOOL"' "$ORACLES" || _dfe_bad="$_dfe_bad one-scanner-path-not-invoked"
 grep -qF 'roborev-defer: findings' "$SCAN_TOOL" || _dfe_bad="$_dfe_bad marker-form-absent-from-the-scanner"
 # THE MARKER FORM MAY NOT LIVE IN THE SHELL. Executable lines only: the comment blocks in these files
 # describe the mechanism, and scanning prose would make writing it down a violation — the same mistake
@@ -6734,10 +7944,10 @@ fi
 # test, and none of them is a fall-through. PASS requires every code census path to have been FOUND;
 # FAIL is the absence; WAIVED is the absence plus a complete human provenance. A `0/0` is still never a
 # pass, which is the one case where "nothing to measure" must not read as "measured fine".
-if printf '%s\n' "$_pc_body" | grep -qF 'PROMPT_CONTENT="PASS (${#checked_paths[@]}/$census_total code census paths present)"' \
-  && printf '%s\n' "$_pc_body" | grep -qF 'PROMPT_CONTENT="FAIL (${#missing_paths[@]}/${#checked_paths[@]} code census paths absent from the prompt)"' \
-  && printf '%s\n' "$_pc_body" | grep -qF 'a 0/0 is never a pass' \
-  && printf '%s\n' "$_pc_body" | grep -qF 'FAIL (prompt unretrievable'; then
+if str_matches "$_pc_body" -F 'PROMPT_CONTENT="PASS (${#checked_paths[@]}/$census_total code census paths present)"' \
+  && str_matches "$_pc_body" -F 'PROMPT_CONTENT="FAIL (${#missing_paths[@]}/${#checked_paths[@]} code census paths absent from the prompt)"' \
+  && str_matches "$_pc_body" -F 'a 0/0 is never a pass' \
+  && str_matches "$_pc_body" -F 'FAIL (prompt unretrievable'; then
   ok 'structural: prompt-content has exactly its three affirmative outcomes (present PASS / absent FAIL / absent+provenance WAIVED), plus the 0/0 and unretrievable-prompt refusals'
 else
   bad 'structural: prompt-content no longer reaches its outcomes affirmatively — a missing absent-FAIL, a missing 0/0 refusal or a missing unretrievable-prompt refusal each turns an unmeasured prompt into a pass (#3312 ruling (4))'
@@ -6747,17 +7957,17 @@ fi
 # a bare positional test is exactly blocker 1 reintroduced.
 if [ -n "$_matcher_start" ] && [ -n "${_matcher_end:-}" ]; then
   _m_body=$(sed -n "${_matcher_start},${_matcher_end}p" "$ORACLES")
-  if printf '%s\n' "$_m_body" | grep -qE '\[ -n "\$from_tok" \] && \[ -n "\$to_tok" \]'; then
+  if str_matches "$_m_body" -E '\[ -n "\$from_tok" \] && \[ -n "\$to_tok" \]'; then
     ok 'structural: the matcher resolves a rename/copy header from its from/to path tokens first'
   else
     bad 'structural: the matcher no longer resolves from the rename/copy from/to tokens — ambiguity would be guessed positionally again (#3229 blocker 1)'
   fi
-  if printf '%s\n' "$_m_body" | grep -qE '"a/\$want b/"\*'; then
+  if str_matches "$_m_body" -E '"a/\$want b/"\*'; then
     bad 'structural: the matcher is back to the PREFIX test `case $rest in "a/$want b/"*` — a tracked file named `foo b/x` would make the unrelated path `foo` read PRESENT (#3229 blocker 1)'
   else
     ok 'structural: the retired `"a/$want b/"*` prefix test is gone from the matcher'
   fi
-  if printf '%s\n' "$_m_body" | grep -qE 'eq_seen'; then
+  if str_matches "$_m_body" -E 'eq_seen'; then
     ok 'structural: an ambiguous non-rename header is decided by the EQUAL split, not by position'
   else
     bad 'structural: the matcher has no equal-split resolution for an ambiguous header'
@@ -6780,12 +7990,12 @@ if [ -n "$_census_start" ]; then
   else
     ok "structural: the census body bounds resolved (lines $_census_start-$_census_end)"
     _census_body=$(sed -n "${_census_start},${_census_end}p" "$ORACLES")
-    if printf '%s\n' "$_census_body" | grep -q 'roborev_unquote_path '; then
+    if str_matches "$_census_body" -e 'roborev_unquote_path '; then
       bad 'structural: the census normalises inside its own loop — it must read raw paths instead (-z)'
     else
       ok 'structural: the census classifies the RAW path (no unquoting inside the census loop)'
     fi
-    if printf '%s\n' "$_census_body" | grep -qF 'read -r -d '; then
+    if str_matches "$_census_body" -F 'read -r -d '; then
       ok 'structural: the census reads NUL-terminated records (a newline-bearing path survives)'
     else
       bad 'structural: the census does not read NUL-terminated records — a newline-bearing path would split'
@@ -6855,8 +8065,13 @@ fi
 _fin_start=$(grep -nE '^finish\(\) \{' "$WRAPPER_REAL" | head -1 | cut -d: -f1)
 _fin_end=""
 [ -z "$_fin_start" ] || _fin_end=$(awk -v s="$_fin_start" 'NR>s && /^}/ {print NR; exit}' "$WRAPPER_REAL")
+_fin_body_f="$tmp/finish-body.txt"
+: >"$_fin_body_f"
+if [ -n "$_fin_start" ] && [ -n "$_fin_end" ]; then
+  sed -n "${_fin_start},${_fin_end}p" "$WRAPPER_REAL" >"$_fin_body_f" || true
+fi
 if [ -n "$_fin_start" ] && [ -n "$_fin_end" ] \
-  && sed -n "${_fin_start},${_fin_end}p" "$WRAPPER_REAL" | grep -q 'roborev_safe_line'; then
+  && grep -q 'roborev_safe_line' "$_fin_body_f"; then
   ok "structural: finish neutralises every DETAILS line (lines $_fin_start-$_fin_end)"
 else
   bad 'structural: finish does not neutralise DETAILS lines'
@@ -6877,11 +8092,13 @@ _rl_end=""
 if [ -z "$_rl_start" ] || [ -z "$_rl_end" ]; then
   bad 'structural: could not locate roborev_safe_line() to inspect the keyword denylist — a failure to measure, not a measurement'
 else
-  sed -n "${_rl_start},${_rl_end}p" "$WRAPPER_REAL" | grep -q 'ROBOREV_MARKER_REDACTION' \
+  _rl_body_f="$tmp/safe-line-body.txt"
+  sed -n "${_rl_start},${_rl_end}p" "$WRAPPER_REAL" >"$_rl_body_f" || true
+  grep -q 'ROBOREV_MARKER_REDACTION' "$_rl_body_f" \
     || _rd_bad="$_rd_bad wrapper-boundary-does-not-redact"
   # The word boundary is part of the rule, not an optimisation: without it the scanner's own file name
   # is mangled in the `waiver: UNAVAILABLE (... tool: <path>)` cause (case wv31).
-  sed -n "${_rl_start},${_rl_end}p" "$WRAPPER_REAL" | grep -qF '[^a-zA-Z]|$' \
+  grep -qF '[^a-zA-Z]|$' "$_rl_body_f" \
     || _rd_bad="$_rd_bad wrapper-redaction-has-no-word-boundary"
   # EVERY other mention is a per-site escape — the definition line is the one exception.
   _rd_out=$(grep -n 'ROBOREV_MARKER_REDACTION' "$WRAPPER_REAL" \
@@ -6945,17 +8162,17 @@ if [ -z "$_scan_block" ] || [ -z "$_scan_keys" ] || [ -z "$_scan_case" ]; then
   bad 'structural: could not locate the wrapper verdict scan STATEMENT (for scan_keyed in … case … done) to inspect'
 else
   ok "structural: the verdict scan is a single case over the per-check keys (lines $_scan_start-$_scan_end)"
-  if printf '%s\n' "$_scan_keys" | grep -qE '; do[[:space:]]*$'; then
+  if str_matches "$_scan_keys" -E '; do[[:space:]]*$'; then
     ok 'structural: the extracted key list is the complete for-statement (terminates at "; do")'
   else
     bad 'structural: the extracted verdict-scan key list does not terminate at "; do" — the extraction is truncated, so the per-key asserts below would be unreliable'
   fi
-  if printf '%s\n' "$_scan_case" | grep -qE 'case "\$verdict_token" in FAIL\|FINDINGS\|ERROR\|INCONSISTENT\)'; then
+  if str_matches "$_scan_case" -E 'case "\$verdict_token" in FAIL\|FINDINGS\|ERROR\|INCONSISTENT\)'; then
     ok 'structural: the failing-capable set is exactly FAIL|FINDINGS|ERROR|INCONSISTENT'
   else
     bad 'structural: the failing-capable verdict set is not the expected FAIL|FINDINGS|ERROR|INCONSISTENT'
   fi
-  if printf '%s\n' "$_scan_case" | grep -q 'NOTICE'; then
+  if str_matches "$_scan_case" -e 'NOTICE'; then
     bad 'structural: NOTICE appears in the failing-capable verdict scan — an advisory vacuity-tier1 NOTICE would red RESULT:'
   else
     ok 'structural: NOTICE is absent from the failing-capable verdict scan'
@@ -6965,12 +8182,12 @@ else
   # reject unplanned values would accept any value merely BEGINNING with a planned token.
   # Pinned structurally as well as behaviourally (cases cx28b/cx28c) because a future edit
   # could restore the globs while every behavioural case but those two stayed green.
-  if printf '%s\n' "$_scan_block" | grep -qE '^[[:space:]]*verdict_token="\$\{verdict%% \*\}"'; then
+  if str_matches "$_scan_block" -E '^[[:space:]]*verdict_token="\$\{verdict%% \*\}"'; then
     ok 'structural: the scan reduces each value to its VERDICT TOKEN (up to the first space) before classifying'
   else
     bad 'structural: the verdict scan does not extract a verdict token — it is classifying the whole value, so a token followed by anything is matched by prefix (#3229 M3)'
   fi
-  if printf '%s\n' "$_scan_block" | grep -qE '(PASS|FAIL|SKIP|NOTICE|UNAVAILABLE|DEGRADED|NONE|PRESENT|UNKNOWN)\*'; then
+  if str_matches "$_scan_block" -E '(PASS|FAIL|SKIP|NOTICE|UNAVAILABLE|DEGRADED|NONE|PRESENT|UNKNOWN)\*'; then
     bad 'structural: a PREFIX GLOB (TOKEN*) survives in the verdict scan — PASSthisNeverRan would match PASS* and inherit the non-failing branch (#3229 M3)'
   else
     ok 'structural: the verdict scan carries NO prefix globs — every token is matched exactly'
@@ -6994,7 +8211,7 @@ else
   _scan_fallthrough=$(printf '%s\n' "$_scan_block" \
     | awk '/PASS\|WAIVED\|SKIP\|NOTICE/ { inb = 1 } inb { print } inb && /esac/ { exit }' \
     | grep -A 3 -E '^[[:space:]]*\*\)' || printf '')
-  if printf '%s\n' "$_scan_fallthrough" | grep -qE '^[[:space:]]*failed=1[[:space:]]*$'; then
+  if str_matches "$_scan_fallthrough" -E '^[[:space:]]*failed=1[[:space:]]*$'; then
     ok 'structural: the positive arm FAILS CLOSED on an unrecognised value (its *) sets failed=1)'
   else
     bad 'structural: the verdict scan positive arm does not fail closed — an unrecognised value would be accepted silently, which is the shape this sweep closed'
@@ -7124,7 +8341,7 @@ else
   # rather than assumed: a leftover `"$CENSUS_EXCLUSION"` in the key list would be a permanently
   # EMPTY value, which the closed grammar (correctly) FAILs — i.e. the residue of an incomplete
   # deletion would red every run, and it must be caught here rather than in the field.
-  if printf '%s\n' "$_scan_keys" | grep -qE 'CENSUS_EXCLUSION'; then
+  if str_matches "$_scan_keys" -E 'CENSUS_EXCLUSION'; then
     bad 'structural: the deleted CENSUS_EXCLUSION key is still named in the verdict-scan key list — it would hold a permanently empty value and red every run'
   else
     ok 'structural: the deleted census-exclusion key is absent from the verdict-scan key list'
@@ -7181,6 +8398,344 @@ if [ -f "$SCRIPT_DIR/../../docs/reports/3229-artifacts/live-probe-procedure.md" 
   done
 else
   bad 'structural: docs/reports/3229-artifacts/live-probe-procedure.md is missing — the AC2 requirement was dropped rather than rescheduled'
+fi
+
+# =============================================================================================
+# structural (#3759): THE MISPLACED STATE IS DIAGNOSTIC-ONLY, AND THE PROBE REUSES ONE ENFORCER
+# =============================================================================================
+# Behavioural cases cover the fixtures someone thought of; these cover the properties a later
+# "simplification" would quietly undo. Neither substitutes for the other — a structural assert cannot
+# see a granting path built some other way, and a behavioural case cannot see a granting path nobody
+# fixtured.
+printf '== structural (#3387/#3759 r7): the fail-open `grep -q` PIPE SHAPE is gone from this file ==\n'
+# CLOSED AS A SHAPE, NOT AS A LINE. `grep -q` exits at its first match and closes the pipe; the
+# producer's next write takes SIGPIPE; `pipefail` hands the pipeline a 141 — so a genuine MATCH reports
+# a NON-match, and the assert built on it flips with scheduler timing and byte position. This file
+# documented the hazard in several places and still carried THIRTY instances of it, one of which — the
+# pre-existing "the waiver is looked up EXACTLY ONCE" assert — red once in five consecutive runs on a
+# clean, unrelated diff. `tooling-tests` is a component of the GATE OF RECORD, so that is a certifying
+# gate reddening spuriously, and a lane must not waive a red it cannot attribute.
+#
+# Every site now materialises its subject and greps the FILE (`str_matches` for the common
+# text-in-a-variable case). This guard stops the shape coming back by habit, which is the only way a
+# rule this mechanical survives. COMMENTS ARE EXCLUDED deliberately: the blocks above and below EXPLAIN
+# the hazard by naming it, and a guard that made writing the reasoning down a violation would be the
+# job-18 census mistake. THE NEEDLE IS SPLIT so this guard cannot match its own line — a self-matching
+# grep is a guard that can only ever be red.
+_pq_exec="$tmp/test-self-exec.txt"
+grep -v '^[[:space:]]*#' "$TEST_SELF" >"$_pq_exec" || true
+# THE NEEDLE CARRIES A LEADING SPACE, which is what separates a PIPE from a logical OR: this file has
+# legitimate `|| grep -qF … <file>` clauses (an OR into a grep OF A FILE, with no pipeline at all), and
+# a bare `| grep -q` needle matches the second bar of those too. Measured: it flagged two such lines
+# before the space was added — a guard reporting a violation that is not one, which is the same
+# false-claim shape this whole change is about.
+_pq_needle=' | grep -'"q"
+if [ ! -s "$_pq_exec" ]; then
+  bad 'structural (#3387): this suite could not be read to check for the fail-open pipe shape — a failure to measure, not a measurement'
+elif grep -qF -- "$_pq_needle" "$_pq_exec"; then
+  bad "structural (#3387): an executable line of this suite pipes into 'grep -q' again. Under pipefail that is fail-open BY BYTE POSITION: grep exits at its first match, SIGPIPEs the producer, and a real match reports as absent. Materialise the subject and grep the FILE (str_matches does this for text in a variable)"
+else
+  ok 'structural (#3387): no executable line pipes into a short-circuiting grep -q, so no assert in this gate-of-record component can flip on a SIGPIPE race'
+fi
+
+printf '== structural (#3759 r7): the documented output-state contracts list every state ==\n'
+# A COMMENT NAMING A MECHANISM IS A CLAIM ABOUT CODE and decays exactly like any other. These two
+# headers enumerate what their function can emit, and a CLOSED list missing states is worse than no
+# list, because a caller trusts it — the waiver's omitted `unauthorized` predates #3759 and had gone
+# unnoticed for exactly that reason. Asserted against the states the code can actually assign.
+# EXTRACTED TO FILES, NEVER PIPED INTO `grep -q` (#3387). The polarity here is fail-CLOSED in the
+# noisy direction — `grep -q` exits at its first match, SIGPIPEs the upstream `sed`, this file's
+# `pipefail` takes the 141, and a state that IS documented reads as missing. Caught in review of this
+# very block: two consecutive runs reported DIFFERENT states missing, which is the race and not the
+# contract. A guard that reds at random is one agents learn to ignore, so it is removed rather than
+# tolerated.
+_sc_bad=""
+_sc_wh="$tmp/state-contract-waiver.txt"
+_sc_dh="$tmp/state-contract-deferral.txt"
+# THE VALUE LINES ONLY, NOT THE HEADER PARAGRAPH AROUND THEM. Caught by this block's own mutant: with
+# the whole header extracted, the PROSE explaining which states had been missing named those states,
+# so deleting them from the CONTRACT still read as clean — a check about code satisfied by a comment,
+# which is the shape this repository already lints for elsewhere. The extraction now runs from the
+# state key to the next key and stops.
+awk '/^#   ROBOREV_WAIVER_STATE/{f=1} f&&/^#   ROBOREV_WAIVER_AUTHOR/{exit} f' "$ORACLES" >"$_sc_wh" || true
+awk '/^#   ROBOREV_DEFERRAL_STATE/{f=1} f&&/^#   ROBOREV_DEFERRAL_AUTHOR/{exit} f' "$ORACLES" >"$_sc_dh" || true
+[ -s "$_sc_wh" ] || _sc_bad="$_sc_bad waiver-header-not-found"
+[ -s "$_sc_dh" ] || _sc_bad="$_sc_bad deferral-header-not-found"
+for _sc_state in granted unauthorized stale malformed none misplaced unavailable; do
+  grep -qF -- "$_sc_state" "$_sc_wh" || _sc_bad="$_sc_bad waiver-header-missing:$_sc_state"
+done
+for _sc_state in granted unauthorized stale malformed none misplaced count-mismatch \
+                 issue-absent issue-closed issue-unverifiable unavailable; do
+  grep -qF -- "$_sc_state" "$_sc_dh" || _sc_bad="$_sc_bad deferral-header-missing:$_sc_state"
+done
+if [ -z "$_sc_bad" ]; then
+  ok 'structural (#3759): both lookup headers enumerate every state their function can emit, misplaced included'
+else
+  bad "structural (#3759): a documented output-state contract is incomplete —$_sc_bad. An inaccurate contract on a security-relevant function is what stops the next reader looking, and a closed list missing a state is worse than no list because a caller trusts it"
+fi
+
+printf '== structural (#3759 r6): the ONE name grammar means the SAME THING to both consumers ==\n'
+# ROUND-6 FINDING, AND IT FALSIFIED A STATED INVARIANT rather than adding an edge case. Hoisting the
+# grammar into one definition was supposed to deliver ONE GRAMMAR WITH ONE MEANING; it delivered one
+# STRING with two meanings, because a RANGE inside a bracket expression is resolved by the LOCALE's
+# collation in POSIX regex and by CODEPOINT in Python. A malformed current-repository identity could
+# then pass the shell check and fail `ref_repo()`, and a SAME-repository reference would be reported
+# as a cross-repository DECLARED SKIP — the feature silently declining to probe the one thread that
+# matters. A documented invariant that is untrue is worse than one never claimed, so it is tested
+# rather than asserted in prose.
+#
+# THE GRAMMAR IS EXTRACTED FROM THE SHIPPED FILE, never re-typed here: a test that re-types its
+# subject tests its own copy of it, which is the second-implementation hazard one directory over.
+_gr_re=$(sed -n "s/^ROBOREV_GH_NAME_RE='\(.*\)'\$/\1/p" "$ORACLES" | head -1)
+if [ -z "$_gr_re" ]; then
+  bad 'structural (#3759): the shared name grammar could not be extracted from the oracles, so neither its shape nor its agreement was measured — a failure to measure, not a measurement'
+else
+  # (a) NO RANGES. Deterministic on every host, and it is the property that makes (b) hold everywhere
+  #     rather than only where this box happens to have a locale that exposes the divergence.
+  if str_matches "$_gr_re" -E '[A-Za-z0-9]-[A-Za-z0-9]'; then
+    bad 'structural (#3759): the shared name grammar contains a RANGE, which POSIX regex resolves by locale collation and Python resolves by codepoint — so its two consumers can disagree and a same-repository reference can be misreported as a cross-repository skip. Enumerate the class (#3759 round 6)'
+  else
+    ok 'structural (#3759): the shared name grammar is enumerated, so no locale collation can give its two consumers different meanings'
+  fi
+  # (b) THE DIFFERENTIAL, which is the invariant itself: bash and python must AGREE on every probe in
+  #     every locale this host has. A second implementation is correct only insofar as it is
+  #     differentially tested against the first — this repository's standing ruling — and "one
+  #     definition" does not exempt it, which is exactly what round 6 proved.
+  _gr_locales="C"
+  for _gr_l in $(locale -a 2>/dev/null | grep -iE 'utf-?8$' | head -4); do
+    _gr_locales="$_gr_locales $_gr_l"
+  done
+  # The corpus deliberately mixes ASCII-valid, ASCII-invalid and NON-ASCII: the divergence lives only
+  # in the third group (measured on this fleet: under en_US.utf8 bash matched é, ǅ, İ and ß against
+  # the old ranged class while Python refused all four), so a corpus without it would agree vacuously.
+  _gr_bad=""
+  _gr_pairs=0
+  for _gr_l in $_gr_locales; do
+    for _gr_s in 'cqlite' 'pmcfadin' 'a.b_c-d' '0' 'a b' 'a/b' 'a:b' 'é' 'ǅ' 'İ' 'ß' 'Ω' 'cqlite␤'; do
+      _gr_s=${_gr_s/␤/$'\n'}
+      _gr_b=$(LC_ALL="$_gr_l" bash -c 'RE=$1; [[ $2 =~ ^${RE}$ ]] && echo M || echo n' _ "$_gr_re" "$_gr_s" 2>/dev/null)
+      _gr_p=$(LC_ALL="$_gr_l" python3 -c 'import re,sys; print("M" if re.compile(sys.argv[1]).fullmatch(sys.argv[2]) else "n")' "$_gr_re" "$_gr_s" 2>/dev/null)
+      _gr_pairs=$((_gr_pairs + 1))
+      [ "$_gr_b" = "$_gr_p" ] || _gr_bad="$_gr_bad ${_gr_l}:$(printf '%s' "$_gr_s" | tr -d '\n')(bash=$_gr_b,py=$_gr_p)"
+    done
+  done
+  if [ -z "$_gr_bad" ]; then
+    ok "structural (#3759): the shell and python consumers of the one name grammar AGREE on every probe, across $_gr_pairs locale/input pairs"
+  else
+    bad "structural (#3759): the two consumers of the ONE name grammar DISAGREE —$_gr_bad. 'Defined once' is not 'interpreted identically', and a divergence here misreports a same-repository reference as a cross-repository skip (#3759 round 6)"
+  fi
+  # DECLARED NON-EXHAUSTIVENESS, because the differential can only exercise locales this host HAS. On
+  # a box with no non-C UTF-8 locale the loop above agrees vacuously, so the range check (a) is what
+  # carries the property there — stated rather than left to be assumed from a green line.
+  if [ "$_gr_locales" = "C" ]; then
+    printf 'NOTICE - structural (#3759): only the C locale is installed here, so the differential could not exercise a collation that exposes a ranged class; clause (a) is what holds the property on this host\n'
+  fi
+fi
+
+printf '== structural (#3759 r3): EVERY payload read on the probe path goes through ONE helper ==\n'
+# WHY THIS ASSERT EXISTS RATHER THAN A FOURTH SITE FIX. Three review rounds produced 3, then 1, then 2
+# findings, and EVERY one was the same class — an input reaching a conclusion without an affirmative
+# validation. Round 3's second finding was inside code round 3 had just ADDED while fixing that class.
+# Site fixes provably do not converge here, so the validation was restructured into one chokepoint and
+# this assert is what keeps it one: it makes the NEXT input STRUCTURALLY unable to join the unvalidated
+# set. That is the repo's own "remove the shared channel rather than pick a rarer delimiter", applied
+# to validation.
+#
+# EXECUTABLE LINES ONLY, and EXTRACTED TO A FILE rather than piped into `grep -q` (#3387): the comment
+# blocks in the oracles NAME the rejected shapes and the mechanism, so scanning prose would make
+# writing the reasoning down a violation; and a negated `grep -q` on a pipe reports a non-match on a
+# real match once the writer outruns the 64 KB buffer, which is fail-open for every clause here.
+_chk_bad=""
+_chk_exec="$tmp/chokepoint-oracles-exec.txt"
+grep -v '^[[:space:]]*#' "$ORACLES" >"$_chk_exec" || true
+
+# (1) THE SCANNER IS INVOKED ONLY FROM INSIDE THE ONE VALIDATED READ. Extract that function's body and
+#     require every invocation in the file to be inside it. A count-based assert would pass a second
+#     call site that happened to replace one inside the helper.
+_chk_vscan="$tmp/chokepoint-vscan-body.txt"
+awk '/^roborev_validated_authorization_scan\(\) \{/,/^\}$/' "$ORACLES" >"$_chk_vscan"
+if [ ! -s "$_chk_vscan" ]; then
+  _chk_bad="$_chk_bad validated-read-helper-not-found"
+else
+  _chk_total=$(grep -cF 'python3 "$WAIVER_SCAN_TOOL"' "$_chk_exec" || true)
+  _chk_inside=$(grep -cF 'python3 "$WAIVER_SCAN_TOOL"' "$_chk_vscan" || true)
+  [ "$_chk_total" -gt 0 ] || _chk_bad="$_chk_bad no-scanner-invocation-at-all"
+  [ "$_chk_total" = "$_chk_inside" ] || _chk_bad="$_chk_bad scanner-invoked-outside-the-validated-read($_chk_inside-of-$_chk_total-inside)"
+  # AND THE STATE IS READ ONLY THERE. A caller extracting `state=` itself would be re-deriving the
+  # verdict from raw scanner output, which is the exact collapse the closed-grammar check removes.
+  _chk_state_total=$(grep -cF "sed -n 's/^state=//p'" "$_chk_exec" || true)
+  _chk_state_inside=$(grep -cF "sed -n 's/^state=//p'" "$_chk_vscan" || true)
+  [ "$_chk_state_total" = "$_chk_state_inside" ] || _chk_bad="$_chk_bad scanner-state-extracted-outside-the-validated-read"
+fi
+
+# (2) THE PAYLOAD SHAPE IS JUDGED ONLY INSIDE THE ONE VALIDATOR. The predicates are named individually
+#     because a future edit is far likelier to re-add one of them at a call site than to reimplement
+#     all three.
+_chk_jsonf="$tmp/chokepoint-jsonf-body.txt"
+awk '/^roborev_json_list_field\(\) \{/,/^\}$/' "$ORACLES" >"$_chk_jsonf"
+if [ ! -s "$_chk_jsonf" ]; then
+  _chk_bad="$_chk_bad shape-validator-not-found"
+else
+  for _chk_pred in 'if not isinstance(data, dict):' 'not in data' 'if not isinstance(data[' ; do
+    _chk_pt=$(grep -cF -- "$_chk_pred" "$_chk_exec" || true)
+    _chk_pi=$(grep -cF -- "$_chk_pred" "$_chk_jsonf" || true)
+    [ "$_chk_pt" = "$_chk_pi" ] || _chk_bad="$_chk_bad shape-predicate-outside-the-validator:${_chk_pred}"
+  done
+fi
+
+# (3) BOTH GRANTING LOOKUPS AND THE PROBE GO THROUGH THE HELPER — asserted positively, because
+#     (1) and (2) only forbid a SECOND implementation and would be satisfied by a caller that
+#     validated nothing at all.
+for _chk_caller in 'roborev_validated_authorization_scan prompt-content-absent' \
+                   'roborev_validated_authorization_scan findings-deferral' \
+                   'roborev_validated_authorization_scan "$kind"' \
+                   'roborev_json_list_field "$rel_json" closingIssuesReferences' ; do
+  grep -qF -- "$_chk_caller" "$_chk_exec" || _chk_bad="$_chk_bad caller-not-routed:${_chk_caller%% *}"
+done
+
+# (4) ONE GRAMMAR FOR A GITHUB OWNER OR REPOSITORY NAME. Round 3's second finding was two PARALLEL
+#     identity validations where only one constrained anything, so the character class is defined once
+#     and BOTH the shell's check and the python leg's `ref_repo` consume that one definition. A literal
+#     class re-appearing in the executable text is the drift this forbids.
+grep -qE "^ROBOREV_GH_NAME_RE='\[[A-Za-z0-9._-]+\]\+'$" "$_chk_exec" || _chk_bad="$_chk_bad name-grammar-not-defined-once"
+grep -qF 'PROBE_NAME_RE="$ROBOREV_GH_NAME_RE"' "$_chk_exec" || _chk_bad="$_chk_bad name-grammar-not-passed-to-the-python-leg"
+# ONE SPELLING, matched against the value the file actually defines rather than a literal repeated
+# here — a hard-coded copy would have to be edited in lockstep with the grammar, which is the drift
+# this clause exists to forbid.
+_chk_re_val=$(sed -n "s/^ROBOREV_GH_NAME_RE='\(.*\)'$/\1/p" "$ORACLES" | head -1)
+if [ -z "$_chk_re_val" ]; then
+  _chk_bad="$_chk_bad name-grammar-value-unreadable"
+elif [ "$(grep -cF -- "$_chk_re_val" "$_chk_exec" || true)" != "1" ]; then
+  _chk_bad="$_chk_bad name-grammar-spelled-more-than-once"
+fi
+
+if [ -z "$_chk_bad" ]; then
+  ok 'structural (#3759): every payload read, every scanner invocation and every identity check on the probe path goes through the ONE validated read, and the name grammar is defined once'
+else
+  bad "structural (#3759): the validation chokepoint has been bypassed —$_chk_bad. Four review rounds of per-site fixes did not converge on this class; the helper is what makes a NEW input structurally unable to join the unvalidated set, so a call site that reads a payload or the scanner directly reopens it (#3229/#3544: restructure, do not carve the same place again)"
+fi
+
+printf '== structural (#3759): MISPLACED grants nothing, and the probe reuses the one scanner ==\n'
+# (1) THE GRANTING GATES ARE STILL THE TWO TOKEN-EXACT `= "granted"` COMPARISONS, and `misplaced`
+# appears in NO granting branch. A `MISPLACED*` prefix test, a `!= none` test or a second granting
+# comparison would each be an authorization change wearing a diagnostic's clothes.
+_mps_ok=1
+_mps_why=""
+grep -qF '[ "$ROBOREV_WAIVER_STATE" = "granted" ]' "$CHECKS_FILE" || { _mps_ok=0; _mps_why="$_mps_why waiver-gate-not-token-exact;"; }
+grep -qF '[ "$ROBOREV_DEFERRAL_STATE" = "granted" ]' "$CHECKS_FILE" \
+  || grep -qF '[ "$ROBOREV_DEFERRAL_STATE" = "granted" ] || return 0' "$ORACLES" \
+  || { _mps_ok=0; _mps_why="$_mps_why deferral-gate-not-token-exact;"; }
+# EXTRACTED TO A FILE, NEVER PIPED INTO A NEGATED `grep -q` (#3387): the polarity here is the
+# fail-open one — a SIGPIPE-141 would read as "no granting use of misplaced found" exactly when one
+# exists. Every `misplaced` mention in the three shell files must be a RECOGNITION or a REPORT: the
+# two case-list entries, the two probe assignments, the two report arms, the probe's own outcome
+# handling, and comments. What must never appear is `misplaced` beside a grant.
+_mps_sites="$tmp/mps-misplaced-sites.txt"
+{ grep -nF 'misplaced' "$ORACLES" || true; grep -nF 'misplaced' "$CHECKS_FILE" || true; } >"$_mps_sites"
+if [ ! -s "$_mps_sites" ]; then
+  _mps_ok=0; _mps_why="$_mps_why no-misplaced-state-at-all;"
+fi
+# GRANT-SHAPED TOKENS beside the state: the verdicts a grant produces (`WAIVED`, `DEFERRED`) and the
+# admission variable. None of them may appear on a line that also mentions `misplaced`.
+_mps_lines="$tmp/mps-misplaced-lines.txt"
+grep -nE 'misplaced' "$_mps_sites" >"$_mps_lines" 2>/dev/null || true
+if grep -qE 'WAIVED|DEFERRED \(|deferral_admits|= "granted"' "$_mps_lines"; then
+  _mps_ok=0; _mps_why="$_mps_why misplaced-on-a-granting-line;"
+fi
+if [ "$_mps_ok" -eq 1 ]; then
+  ok 'structural (#3759): the only granting gates are the two token-exact = "granted" comparisons, and misplaced reaches none of them'
+else
+  bad "structural (#3759): the MISPLACED state has reached a granting path, or a granting gate is no longer token-exact —$_mps_why. MISPLACED is a DIAGNOSTIC state: only a marker on the PULL REQUEST grants, and moving one there is a human act by the authorizer"
+fi
+# (2) THE SCANNER IS UNMODIFIED BY THIS CHANGE, AND THERE IS NO SECOND ONE. A second implementation
+# of a marker grammar is a second place for it to diverge, and a divergence in an AUTHORIZATION
+# grammar is a bypass — which is why the issue-side call passes the SAME kind, base, head, job and
+# allowlist and the scanner is never told which thread its input came from.
+if grep -qF 'python3 "$WAIVER_SCAN_TOOL" "$kind" "$base" "$head" "$job" "$ROBOREV_WAIVER_AUTHORS"' "$ORACLES"; then
+  ok 'structural (#3759): the linked-issue probe calls the SAME scanner with the same kind, scope and allowlist'
+else
+  bad 'structural (#3759): the linked-issue probe no longer delegates to the one scanner with the caller-supplied kind/scope/allowlist — a second recogniser over an authorization grammar is a bypass (#3626 reuse-do-not-reinvent)'
+fi
+# AND THERE IS EXACTLY ONE SCANNER FILE. "The scanner is unmodified by this change" is a property of
+# a diff and cannot be asserted durably here (a `git diff origin/main` assert goes stale the moment
+# this merges, and a stale assert is one that reds on correct input); what IS durable is that no
+# SECOND scanner was added beside it, which is the thing the reuse ruling actually forbids.
+# The count is required to be EXACTLY 1, so a find that FAILED (yielding 0) reds rather than passing
+# — the fail-closed direction for the three-valued-signal trap this repo lints for (1699-find-tristate).
+_mps_scanners=$(find "$SCRIPT_DIR/../flow" -maxdepth 1 \( -name '*waiver*scan*.py' -o -name '*marker*scan*.py' \) 2>/dev/null | wc -l | tr -d '[:space:]')
+if [ "$_mps_scanners" = "1" ]; then
+  ok 'structural (#3759): exactly one authorization scanner exists — the probe forked no thread-specific variant'
+else
+  bad "structural (#3759): $_mps_scanners authorization scanner files exist in scripts/flow (want exactly 1) — a second implementation of a marker grammar is a second place for it to diverge, and a divergence in an AUTHORIZATION grammar is a bypass"
+fi
+if grep -qE 'misplaced' "$SCAN_TOOL"; then
+  bad 'structural (#3759): the SCANNER emits or knows about the misplaced state — thread identity is the CALLER-side knowledge, and telling the scanner would mean adding a provenance argument to the one component whose inputs must stay fixed'
+else
+  ok 'structural (#3759): the scanner knows nothing about threads — misplaced is assigned by the shell caller'
+fi
+# (3) THE GRANTING PAYLOAD DID NOT CHANGE SHAPE, AND THE RESOLVER IS A SEPARATE, LATER CALL. The
+# payload an AUTHORIZATION is decided from must not change shape as a side effect of adding a
+# DIAGNOSTIC — its fixed, measured shape is exactly what licenses reusing the scanner unmodified —
+# and a combined fetch would make the relation available on paths that never run the probe, so
+# reachability would rest on where an `if` sits rather than on the data not existing.
+# EXECUTABLE LINES ONLY, for the reason the #3229 sole-content guard states: the oracles' comment
+# block RECORDS the rejected combined form by name (`--json comments,closingIssuesReferences`) and
+# says why it was rejected, and that record is the durable artifact. Scanning prose would make
+# WRITING THE REASONING DOWN a violation — the same mistake as the job-18 census assert.
+_mpj_exec="$tmp/mpj-oracles-exec.txt"
+grep -v '^[[:space:]]*#' "$ORACLES" >"$_mpj_exec" || true
+_mpj_ok=1
+[ "$(grep -cF 'gh pr view --json comments 2>/dev/null' "$_mpj_exec")" -eq 2 ] || _mpj_ok=0
+grep -qE 'json comments,closingIssuesReferences|json closingIssuesReferences,comments' "$_mpj_exec" && _mpj_ok=0
+grep -qF 'gh pr view --json closingIssuesReferences' "$_mpj_exec" || _mpj_ok=0
+if [ "$_mpj_ok" -eq 1 ]; then
+  ok 'structural (#3759): the two granting --json comments calls are unchanged and the relation is fetched by its own later call'
+else
+  bad 'structural (#3759): the granting call was restructured, or comments and closingIssuesReferences are requested together — the payload an authorization is decided from must not change shape as a side effect of adding a diagnostic (#3759 R4)'
+fi
+# (4) NO PULL-REQUEST BODY READ CAME BACK, IN ANY FORM. #3626 deleted the PR-body link requirement
+# because a body is EDITABLE AT ANY TIME BY ANYONE WITH WRITE ACCESS WITH NO PER-EDIT ATTRIBUTION,
+# while a top-level comment is permanent and attributable — the recogniser problem was a SYMPTOM, not
+# the reason. Reinstating a body scan FOR ANY PURPOSE, including choosing which thread to name in a
+# diagnostic, would be reinstating a deleted generation.
+_mpb_exec="$tmp/mpb-exec.txt"
+{ grep -v '^[[:space:]]*#' "$ORACLES" || true; grep -v '^[[:space:]]*#' "$CHECKS_FILE" || true; } >"$_mpb_exec"
+if grep -qE -- '--json[ ,]*body|json body|PR_BODY|pr view --json [a-zA-Z,]*\bbody\b' "$_mpb_exec"; then
+  bad 'structural (#3759): a pull-request BODY read was reintroduced — the body is the weaker artifact (mutable by anyone with write access, no per-edit attribution) and #3626 deleted it deliberately'
+else
+  ok 'structural (#3759): no pull-request body read exists — the linked issue comes from the structured relation alone'
+fi
+# (5) THE MUTABLE-DERIVED BOUNDARY IS WRITTEN AT THE CALL SITE, not only in a design document,
+# because the next edit that adds a granting consumer reads the code before it reads a design note.
+if grep -qF 'THE MOMENT ANY CONSUMER DOWNSTREAM OF THIS RELATION COULD GRANT' "$ORACLES"; then
+  ok 'structural (#3759): the mutable-derived boundary for closingIssuesReferences is stated beside the call'
+else
+  bad 'structural (#3759): the closingIssuesReferences call no longer states WHY a mutable-derived relation is acceptable here (it grants nothing; it only selects which thread to name) — an unstated boundary is how a granting consumer gets added'
+fi
+# (6) THE PROBE NEVER RETURNS NON-ZERO AND ITS OUTCOME SET IS CLOSED. A two-valued return would
+# re-import the collapse this change exists to remove.
+_mpo_ok=1
+grep -qF 'ROBOREV_PROBE_OUTCOME  misplaced | checked | no-subject | could-not-check' "$ORACLES" || _mpo_ok=0
+grep -qF 'NEVER RETURNS NON-ZERO AND NEVER EXITS' "$ORACLES" || _mpo_ok=0
+_mpp_body="$tmp/mpp-body.txt"
+awk '/^roborev_linked_issue_marker_probe\(\) \{/,/^\}$/' "$ORACLES" >"$_mpp_body"
+[ -s "$_mpp_body" ] || _mpo_ok=0
+grep -qE '^[[:space:]]*return [1-9]' "$_mpp_body" && _mpo_ok=0
+grep -qE '^[[:space:]]*exit ' "$_mpp_body" && _mpo_ok=0
+if [ "$_mpo_ok" -eq 1 ]; then
+  ok 'structural (#3759): the probe has a closed four-outcome set and can neither return non-zero nor exit'
+else
+  bad 'structural (#3759): the probe can fail two-valued (a non-zero return or an exit), or its outcome set is no longer the declared closed four — every failure must be a STATE WITH A CAUSE, or "could not check" collapses onto "checked" again'
+fi
+# (7) THE GATE OF RECORD IS UNMODIFIED BY THIS CHANGE. `scripts/agent-gate.sh` is out of scope, and
+# no gate component may learn to read a misplacement diagnostic.
+_mpg_gate="$SCRIPT_DIR/../agent-gate.sh"
+if [ ! -f "$_mpg_gate" ]; then
+  bad "structural (#3759): the agent gate is not at $_mpg_gate, so the out-of-scope claim could not be checked"
+elif grep -qE 'closingIssuesReferences|ROBOREV_PROBE_|MISPLACED' "$_mpg_gate"; then
+  bad 'structural (#3759): the agent gate reads the misplacement probe or its state — this change is confined to the roborev wrapper diagnostic and agent-gate.sh must end it unmodified'
+else
+  ok 'structural (#3759): the agent gate is untouched by the misplacement probe'
 fi
 
 printf '== hermeticity: the wrapper never reaches a real roborev ==\n'

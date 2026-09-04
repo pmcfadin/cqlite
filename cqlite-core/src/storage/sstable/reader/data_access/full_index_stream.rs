@@ -47,6 +47,7 @@
 use super::super::SSTableReader;
 use crate::schema::TableSchema;
 use crate::storage::scan_cancel::ScanCancel;
+use crate::storage::sstable::reader::parsing::BufferExtent;
 use crate::types::ScanRow;
 use crate::util::cassandra_murmur3::cassandra_murmur3_token;
 use crate::{Error, Result, RowKey};
@@ -156,6 +157,7 @@ impl SSTableReader {
     where
         F: FnMut((RowKey, ScanRow)) -> Result<ControlFlow<()>>,
     {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
         let Some(index_reader) = &self.index_reader else {
             return Ok(FullIndexStreamOutcome::FellBack);
         };
@@ -363,7 +365,9 @@ impl SSTableReader {
         // token-range split must keep this bounded to its in-range slice, not
         // the SSTable's whole partition count.
         crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
-        let parsed = parser.parse_block(raw, schema, self)?;
+        // #3782: the coverage check above PROVED this slice is one complete
+        // partition consuming all of `raw` (and fails closed otherwise).
+        let parsed = parser.parse_block(raw, BufferExtent::Complete, schema, self)?;
         for (_table_id, row_key, value) in parsed {
             if self.filter_tombstone(&value) {
                 match emit((row_key, value))? {
@@ -426,6 +430,7 @@ impl SSTableReader {
     where
         F: FnMut((RowKey, ScanRow)) -> Result<ControlFlow<()>>,
     {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
         if self.index_reader.is_some() && self.bti_partitions_db.is_none() {
             match self
                 .stream_all_partitions_via_full_index(scan_cancel, None, caller_schema, &mut emit)

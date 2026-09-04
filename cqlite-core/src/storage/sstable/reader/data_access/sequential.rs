@@ -23,6 +23,7 @@ use super::model::{
     sort_by_token_order, sort_by_token_order_with_meta, table_ids_match, SCAN_FOR_KEY_CALLS,
 };
 use crate::storage::scan_cancel::ScanCancel;
+use crate::storage::sstable::reader::parsing::BufferExtent;
 use crate::types::{CellWriteMetadata, ScanRow, TableId};
 use crate::{Error, Result, RowKey};
 use std::io::SeekFrom;
@@ -106,6 +107,7 @@ impl SSTableReader {
         limit: Option<usize>,
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(RowKey, ScanRow)>> {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
         tracing::debug!("SSTableReader::scan - Starting scan");
         tracing::debug!("SSTableReader::scan - File path: {:?}", self.file_path());
         tracing::debug!("SSTableReader::scan - Table ID: {}", table_id);
@@ -281,6 +283,8 @@ impl SSTableReader {
     /// `Value::Tombstone` entries (with their authoritative deletion timestamps)
     /// so that tombstone-shadowing semantics can be applied during the merge.
     pub async fn get_all_entries(&self) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
+
         // Issue #660: BTI ("da") tables have no Index.db; route through the
         // whole-Data.db BTI scan, which resolves schema via get_table_schema
         // (header/registry) and decodes every partition. It mints its own
@@ -349,6 +353,30 @@ impl SSTableReader {
         // path never reaches the sequential scan.
         SCAN_FOR_KEY_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+        // #3853 scan-lifetime madvise seam. This site is NOT one of issue
+        // #3853's nine entry points and is a DELIBERATE extension, because a
+        // reviewer will otherwise ask why a point lookup takes a SCAN guard.
+        // Three reasons, and a fourth that follows from the code below:
+        //
+        // (a) It demonstrably reads the WHOLE data section. Both branches do:
+        //     the stitching branch stitches every chunk, and the non-stitching
+        //     block loop runs to EOF. By the seam's own invariant that makes it
+        //     a scan, whatever the caller's intent was.
+        // (b) There is no point-plane degradation to trade against. The arming
+        //     gate (`scan_lifetime::resolve`) enables the seam ONLY when
+        //     `!Arc::ptr_eq(point_plane_mmap, scan_mmap)`, so advising the scan
+        //     mapping provably cannot touch the #2210 `MADV_RANDOM` POINT
+        //     mapping — they are different allocations or the seam is disabled.
+        // (c) The `DONTNEED` at the end is actively DESIRABLE here: a whole-file
+        //     read performed to answer ONE key is precisely the resident-set
+        //     footprint worth releasing.
+        // (d) A guard here covers BOTH branches, whereas the funnel guard in
+        //     `stitch_all_chunks_cancellable` covers only the stitching one.
+        //
+        // The guard is taken before the early `Ok(None)` soft-miss returns and
+        // before the found-key early return, so every exit releases via `Drop`.
+        let _scan = self.begin_scan();
+
         // Issue #815: independent per-scan cursor — no cross-scan serialization.
         let cursor = self.new_scan_cursor().await?;
 
@@ -394,8 +422,13 @@ impl SSTableReader {
             // (issue #1411) is preserved: CRC/decompress failures already surfaced
             // via `stitch_all_chunks` above; only `parse_block` may soft-miss.
             let parser = self.build_v5_parser(true);
-            let all_entries = match parser.parse_block(&stitched_buffer, schema_opt.as_ref(), self)
-            {
+            // #3782: `stitch_all_chunks` returned the WHOLE data section.
+            let all_entries = match parser.parse_block(
+                &stitched_buffer,
+                BufferExtent::Complete,
+                schema_opt.as_ref(),
+                self,
+            ) {
                 Ok(entries) => entries,
                 // Issue #1411 (roborev): the scan path (`stitch_and_parse_all_chunks`)
                 // propagates EVERY `parse_block` error via `?`. Mirror that here so
@@ -484,6 +517,7 @@ impl SSTableReader {
         schema: Option<&crate::schema::TableSchema>,
         scan_cancel: &ScanCancel,
     ) -> Result<Vec<(RowKey, ScanRow)>> {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
         tracing::debug!(
             "SSTableReader::sequential_scan - starting: table_id={table_id}, has_schema={}",
             schema.is_some()
@@ -768,6 +802,7 @@ impl SSTableReader {
         )>,
     > {
         tracing::debug!("SSTableReader::scan_with_cell_metadata - Starting");
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
 
         // Issue #660: BTI ("da") metadata scan — same whole-Data.db walk as the
         // plain BTI scan, but surfaces per-cell write metadata for WRITETIME/TTL.

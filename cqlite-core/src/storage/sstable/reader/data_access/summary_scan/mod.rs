@@ -33,6 +33,7 @@
 //! partition body is bounded by the SUCCESSOR entry's offset (last by the
 //! data-section end) — never a guessed size.
 
+use crate::storage::sstable::reader::parsing::BufferExtent;
 use std::ops::ControlFlow;
 
 use super::super::SSTableReader;
@@ -432,6 +433,7 @@ impl SSTableReader {
     where
         F: FnMut((RowKey, ScanRow)) -> Result<ControlFlow<()>>,
     {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
         let parser = self.build_v5_parser(true);
         let parser = match now_secs {
             Some(now) => parser.with_now_secs(now),
@@ -442,7 +444,10 @@ impl SSTableReader {
             .or_else(|| self.get_table_schema(None));
         let schema = reader_schema.as_ref();
         self.walk_in_range_partition_slices(scan_cancel, token_bound, &parser, schema, &mut |raw| {
-            let parsed = parser.parse_block(raw, schema, self)?;
+            // #3782: `walk_in_range_partition_slices` runs
+            // `partition_slice_fully_consumed` per slice before calling this
+            // decode, so `raw` is a proven-complete partition extent.
+            let parsed = parser.parse_block(raw, BufferExtent::Complete, schema, self)?;
             for (_table_id, row_key, value) in parsed {
                 if self.filter_tombstone(&value) {
                     match emit((row_key, value))? {
@@ -475,6 +480,7 @@ impl SSTableReader {
     where
         F: FnMut(super::super::compaction_row::CompactionRow) -> Result<ControlFlow<()>>,
     {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
         use crate::storage::sstable::reader::parsing::ParseStep;
         let parser = self.build_v5_parser(false);
         let owned_schema = schema.cloned().or_else(|| self.get_table_schema(None));
@@ -542,6 +548,7 @@ impl SSTableReader {
     where
         F: FnMut(super::super::compaction_row::CompactionRow) -> Result<ControlFlow<()>>,
     {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
         let summary_usable = self
             .summary_reader
             .as_ref()

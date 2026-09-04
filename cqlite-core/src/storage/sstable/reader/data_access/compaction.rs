@@ -10,6 +10,7 @@ use super::super::source::ScanCursor;
 use super::super::window_cursor::WindowCursor;
 use super::super::SSTableReader;
 use crate::storage::scan_cancel::ScanCancel;
+use crate::storage::sstable::reader::parsing::BufferExtent;
 use crate::{Error, Result};
 use std::io::SeekFrom;
 use tokio::io::AsyncSeekExt;
@@ -121,7 +122,13 @@ impl SSTableReader {
             reader_schema.as_ref()
         };
 
-        let entries = parser.parse_block_for_compaction(&stitched_buffer, table_schema, self)?;
+        // #3782: `stitched_buffer` drained EVERY chunk from the cursor above.
+        let entries = parser.parse_block_for_compaction(
+            &stitched_buffer,
+            BufferExtent::Complete,
+            table_schema,
+            self,
+        )?;
         tracing::debug!(
             "stitch_and_parse_all_chunks_for_compaction: parsed {} entries",
             entries.len()
@@ -154,6 +161,8 @@ impl SSTableReader {
         &self,
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<super::super::compaction_row::CompactionRow>> {
+        let _scan = self.begin_scan(); // #3853 (no-op: merge readers are buffered)
+
         // Issue #2372: BTI (`da`) is chunk-compressed with the SAME V5 row layout
         // as nb (why `bti_scan_with_metadata` stitches+parses it with the V5
         // parser), but `requires_chunk_stitching()` gates on `is_nb_format()` and
@@ -242,6 +251,7 @@ impl SSTableReader {
     /// the partition key in `key` (partition-granular). No schema is required
     /// from the caller: the parser resolves it via the reader's header/registry.
     pub async fn distinct_partition_keys(&self) -> Result<Vec<Vec<u8>>> {
+        let _scan = self.begin_scan(); // #3853 (no-op: merge readers are buffered)
         use std::collections::HashSet;
 
         let cursor = self.new_scan_cursor().await?;
@@ -254,7 +264,14 @@ impl SSTableReader {
 
         let effective_schema = self.get_table_schema(None);
         let parser = self.build_v5_parser(false);
-        let rows = parser.parse_block_for_compaction(&whole, effective_schema.as_ref(), self)?;
+        // #3782: `whole` is the entire data section (fresh cursor, seeked to the
+        // data-section start, every chunk stitched).
+        let rows = parser.parse_block_for_compaction(
+            &whole,
+            BufferExtent::Complete,
+            effective_schema.as_ref(),
+            self,
+        )?;
 
         let mut seen: HashSet<Vec<u8>> = HashSet::new();
         let mut keys: Vec<Vec<u8>> = Vec::new();
@@ -285,6 +302,7 @@ impl SSTableReader {
     /// The stitch/parse strategy mirrors [`Self::distinct_partition_keys`]; only
     /// the parser entry point differs (it threads the partition-start offset).
     pub async fn distinct_partition_keys_with_positions(&self) -> Result<Vec<(u64, Vec<u8>)>> {
+        let _scan = self.begin_scan(); // #3853 (no-op: merge readers are buffered)
         use std::collections::HashSet;
 
         let cursor = self.new_scan_cursor().await?;
@@ -304,8 +322,10 @@ impl SSTableReader {
         // order and is the only place the position is read back.
         let mut seen: HashSet<Vec<u8>> = HashSet::new();
         let mut result: Vec<(u64, Vec<u8>)> = Vec::new();
+        // #3782: `whole` is the entire data section (see above).
         parser.parse_block_for_compaction_emit_with_offset(
             &whole,
+            BufferExtent::Complete,
             effective_schema.as_ref(),
             self,
             |partition_start, row| {
@@ -341,6 +361,7 @@ impl SSTableReader {
     ///
     /// [`parse_partition_header_full`]: crate::storage::sstable::reader::parsing::V5CompressedLegacyParser::parse_partition_header_full
     pub async fn partition_verify_scan(&self) -> Result<Vec<(Vec<u8>, Option<i32>)>> {
+        let _scan = self.begin_scan(); // #3853 (no-op: merge readers are buffered)
         use std::collections::HashSet;
 
         let cursor = self.new_scan_cursor().await?;
@@ -370,8 +391,10 @@ impl SSTableReader {
         // partition-start — including a duplicated key — reach the classifier.
         let mut seen: HashSet<usize> = HashSet::new();
         let mut starts: Vec<usize> = Vec::new();
+        // #3782: `whole` is the entire data section (see above).
         parser.parse_block_for_compaction_emit_with_offset(
             &whole,
+            BufferExtent::Complete,
             effective_schema.as_ref(),
             self,
             |partition_start, _row| {
@@ -422,6 +445,7 @@ impl SSTableReader {
     pub async fn partition_clustering_verify_scan(
         &self,
     ) -> Result<Vec<(usize, Vec<Vec<crate::types::Value>>)>> {
+        let _scan = self.begin_scan(); // #3853 (no-op: merge readers are buffered)
         use crate::types::Value;
         use std::collections::BTreeMap;
 
@@ -453,8 +477,10 @@ impl SSTableReader {
         // partition boundary and preserves on-disk partition order.
         let mut by_partition: BTreeMap<usize, Vec<Vec<Value>>> = BTreeMap::new();
         let schema = effective_schema.as_ref();
+        // #3782: `whole` is the entire data section (see above).
         parser.parse_block_for_compaction_emit_with_offset(
             &whole,
+            BufferExtent::Complete,
             schema,
             self,
             |partition_start, row| {
@@ -569,6 +595,8 @@ impl SSTableReader {
     where
         F: FnMut(super::super::compaction_row::CompactionRow) -> Result<std::ops::ControlFlow<()>>,
     {
+        let _scan = self.begin_scan(); // #3853 (no-op: merge readers are buffered)
+
         // Reset chunk reader to the start of the data section (mirrors
         // iterate_all_partitions_for_compaction) using an own per-scan cursor.
         let cursor = self.new_scan_cursor().await?;

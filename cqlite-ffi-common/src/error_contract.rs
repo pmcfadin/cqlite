@@ -189,6 +189,10 @@ ffi_error_contract_table! {
     Io => { py: Io, code: "IO", category: System, recoverable: true, prefix: Some("IoError"), },
     Serialization => { py: Cqlite, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
     Corruption => { py: Cqlite, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
+    // Issue #3721: a single column's value failing to decode. Same row as
+    // `Corruption` on every axis — it IS undecodable data reaching a caller — so a
+    // binding consumer that already handles a parse failure needs no new branch.
+    ColumnDecode => { py: Cqlite, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
     Schema => { py: Schema, code: "SCHEMA", category: Schema, recoverable: false, prefix: Some("SchemaError"), },
     // (#1451) real PARSE: a CQL syntax failure, not the generic QUERY bucket.
     CqlParse => { py: Parse, code: "PARSE", category: Query, recoverable: false, prefix: Some("ParseError"), },
@@ -254,6 +258,7 @@ pub fn variant_of(err: &Error) -> FfiErrorVariant {
         Error::Io(_) => FfiErrorVariant::Io,
         Error::Serialization { .. } => FfiErrorVariant::Serialization,
         Error::Corruption(_) => FfiErrorVariant::Corruption,
+        Error::ColumnDecode { .. } => FfiErrorVariant::ColumnDecode,
         Error::Schema(_) => FfiErrorVariant::Schema,
         Error::CqlParse(_) => FfiErrorVariant::CqlParse,
         Error::InvalidFormat(_) => FfiErrorVariant::InvalidFormat,
@@ -314,6 +319,12 @@ impl FfiErrorVariant {
             )),
             FfiErrorVariant::Serialization => Error::serialization("sample serialization failure"),
             FfiErrorVariant::Corruption => Error::corruption("sample corruption"),
+            FfiErrorVariant::ColumnDecode => Error::column_decode(
+                "sample_column",
+                "org.apache.cassandra.db.marshal.Int32Type",
+                0,
+                Error::corruption("sample cell decode failure"),
+            ),
             FfiErrorVariant::Schema => Error::schema("sample schema failure"),
             FfiErrorVariant::CqlParse => Error::cql_parse("sample CQL syntax failure"),
             FfiErrorVariant::InvalidFormat => Error::invalid_format("sample invalid format"),
