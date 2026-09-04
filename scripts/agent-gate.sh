@@ -19421,6 +19421,18 @@ run_tooling_tests() {
   # for — a second entrant is REFUSED at the act that caused the incident. Exercises the REAL
   # hook against a REAL git repo laid out as a lane with a REAL live peer process; bash + git
   # only, no python3, so it sits above the python3 gate with its siblings.
+  # PLATFORM GUARD (#3436, roborev job 446 Medium): BOTH suites below drive
+  # scripts/flow/lane-lock.sh, whose identity is boot-id + /proc/<pid> start-ticks, and the
+  # pre-commit suite reads /proc directly. On a host without /proc `acquire` refuses with
+  # reason=unresolved-identity, so there is no behaviour to assert and the suites would red on
+  # correct input — the guard agents learn to waive. Same `_AGENT_GATE_OS` key and same
+  # DECLARED-SKIP idiom as the test_lane_lock.sh guard above, so the narrowing is announced at
+  # run time rather than inferred, and it stays exercisable on Linux via AGENT_GATE_TEST_OS.
+  if [ "$_AGENT_GATE_OS" != "Linux" ]; then
+    echo ">>> [$name] DECLARED SKIP (#3436): test_lane_lock_precommit_hook.sh and test_finalize_cleanup_lane_lock.sh NOT executed on $_AGENT_GATE_OS"
+    echo ">>> [$name]   both drive the Linux-/proc-specific machine-local lane lock; every OTHER tooling-tests suite still runs here."
+  else
+
   echo ">>> [$name] bash scripts/tests/test_lane_lock_precommit_hook.sh"
   if ! bash "$REPO_ROOT/scripts/tests/test_lane_lock_precommit_hook.sh" >>"$log" 2>&1; then
     status=FAIL
@@ -19445,6 +19457,8 @@ run_tooling_tests() {
     return 0
   fi
 
+  fi
+
   echo ">>> [$name] bash scripts/tests/test_claim_lock.sh"
   if ! bash "$REPO_ROOT/scripts/tests/test_claim_lock.sh" >>"$log" 2>&1; then
     status=FAIL
@@ -19463,8 +19477,7 @@ run_tooling_tests() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_agent_gate_disk_admission.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/tests/test_drive_issue_state.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh; bash scripts/tests/test_agent_gate_census.sh"
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_agent_gate_disk_admission.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/tests/test_drive_issue_state.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_premerge_review_binding.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh; bash scripts/tests/test_agent_gate_census.sh"
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_agent_gate_disk_admission.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/tests/test_drive_issue_state.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_premerge_review_binding.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh; bash scripts/tests/test_agent_gate_census.sh"
   if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_notify.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_notify_contract.sh" >>"$log" 2>&1 &&
