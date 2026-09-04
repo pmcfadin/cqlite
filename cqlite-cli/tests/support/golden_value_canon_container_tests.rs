@@ -11,6 +11,7 @@
 //! quietly widening what this lane accepts.
 
 use super::super::compare::compare_rows;
+use super::super::compare::gap::{Divergence, Position};
 use super::super::schema::{from_ddl, CqlType, TableSchema};
 use super::super::Side;
 use super::super::{canon_typed, Canon, Depth, Egress, Kinding, Row};
@@ -807,5 +808,112 @@ fn the_canonical_model_and_the_comparator_agree() {
         disagreements.is_empty(),
         "the two recursive implementations have drifted:\n  {}",
         disagreements.join("\n  ")
+    );
+}
+
+/// A `blob`, a `timestamp` and an OPAQUE scalar LEAF must each have a spelling that
+/// TYPE's value can have — every `Canon::Text` no longer qualifies (roborev job 105,
+/// issue #3726).
+///
+/// Asked END TO END, through `compare::gap::Divergence::matched`, because the
+/// property that matters is the CONSEQUENCE: that gap is the one caller whose
+/// premise is "the golden is undecoded here", so it is the position where a
+/// malformed decode has no other side to catch it and where the old single
+/// `Canon::Text` arm therefore SUPPRESSED one. The predicates' own spellings are
+/// pinned separately in `golden_value_scalar_spelling_tests.rs`; this pins that the
+/// gap consults them.
+///
+/// Third instance of the shape the CSV `Boolean` arm (job 72) and `NullHere` (job
+/// 60) already closed in this same function. Each accepted spelling is quoted from
+/// `cassandra-5.0.8` (the authorities are enumerated in `scalar_spelling`'s module
+/// doc); for `inet` and `time` — the two types a COMMITTED fixture reaches through
+/// this gap, in `test_comparator_order.collection_order`'s `pair_set`
+/// (`set<frozen<tuple<inet, time>>>`) — it is that column's own measured egress.
+#[test]
+fn the_undecoded_golden_gap_reports_a_wrong_spelling_scalar_leaf() {
+    let gap = Divergence::NestedFrozenValueLeftUndecodedByGolden;
+    // The golden half of the gap: a flat string where the DDL declares a container.
+    let golden_hex = json!("000000020000001100000005616c706861");
+    let ask = |element: CqlType, cli: &Value| {
+        gap.matched(
+            &golden_hex,
+            cli,
+            Position {
+                ty: &CqlType::Set(Box::new(element)),
+                egress: Egress::Json,
+                depth: Depth::TopLevel,
+                kinding: Kinding::Natural,
+                map_key_spelling: MapKeySpelling::ToJsonString,
+            },
+        )
+    };
+    // (declared element type, a spelling that type HAS, a spelling it does NOT).
+    let cases: &[(CqlType, &str, &str)] = &[
+        // `BytesType.toJSONString` = `"0x" + bytesToHex(buffer)`. The refused text is
+        // the `getString` spelling, which is not what this position carries.
+        (CqlType::Blob, "0xdeadbeef", "deadbeef"),
+        // MEASURED, and it corrected this case's first draft: `matched` runs
+        // `canon_typed` itself, so a legitimate INPUT spelling — the CLI's own
+        // `2025-10-06 01:12:05.394+0000` — is CANONICALIZED on the way in and is
+        // rightly accepted. What the read-back refuses is text `canon_timestamp`
+        // did not recognise as a timestamp at all, which is passed through verbatim.
+        (
+            CqlType::Timestamp,
+            "2025-10-06 01:12:05.394+0000",
+            "not-a-timestamp",
+        ),
+        // `UUIDSerializer.toString` = Java `UUID.toString`.
+        (
+            CqlType::Opaque("uuid".to_string()),
+            "15291a77-d739-4e73-8397-b787442f3a1f",
+            "not-a-uuid",
+        ),
+        // `InetAddressSerializer.toString` = `getHostAddress()`.
+        (
+            CqlType::Opaque("inet".to_string()),
+            "2001:db8::1",
+            "not-an-address",
+        ),
+        // `TimeSerializer.toString` = fixed-width `HH:MM:SS.nnnnnnnnn`, so a
+        // second-precision spelling is not its output.
+        (
+            CqlType::Opaque("time".to_string()),
+            "00:00:10.000000000",
+            "00:00:10",
+        ),
+    ];
+    for (element, spelled, misspelled) in cases {
+        // The CONTROL first: without it the refusal below could pass because the
+        // matcher had stopped matching this type at all.
+        assert!(
+            ask(element.clone(), &json!([spelled])),
+            "`{spelled}` IS a spelling a `{}` value has, so a decoded member against \
+             an undecoded golden is the declared gap",
+            element.describe()
+        );
+        assert!(
+            !ask(element.clone(), &json!([misspelled])),
+            "`{misspelled}` is not a spelling a `{}` value has, so it is malformed \
+             output and must be REPORTED rather than suppressed",
+            element.describe()
+        );
+    }
+    // A NON-ZERO UTC OFFSET is refused too, and deliberately: `canon_timestamp`
+    // declines to shift an instant, so it leaves that spelling opaque — and the
+    // gap must then stop suppressing and let the comparison name the two
+    // spellings, which is what that function's own doc comment says.
+    assert!(
+        !ask(CqlType::Timestamp, &json!(["2025-10-06T01:12:05.394+0100"])),
+        "a non-zero offset is not canonicalized, so it is not a decoded timestamp here"
+    );
+    // AND AN OPAQUE TYPE NO AUTHORITY HAS BEEN READ FOR REFUSES, rather than
+    // accepting any text. Fail-closed: the gap stops suppressing there and reports an
+    // ordinary diff, which a reader can act on — accepting arbitrary text is what
+    // cannot be recovered from. `CqlType::Opaque` is constructed directly here
+    // BECAUSE the schema reader cannot produce this value (an unknown type name is a
+    // hard parse error there), so this pins that arm's own fail-closed branch.
+    assert!(
+        !ask(CqlType::Opaque("vector".to_string()), &json!(["anything"])),
+        "an opaque type with no spelling rule must be refused, never given a guessed one"
     );
 }

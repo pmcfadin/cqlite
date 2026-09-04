@@ -7,9 +7,7 @@
 //! quietly restoring the suppression this narrowing removed.
 
 use super::super::schema::NATIVE_OPAQUE;
-use super::{
-    is_blob_hex, is_canonical_timestamp, opaque_spelling_matches, DURATION_UNITS,
-};
+use super::{is_blob_hex, is_canonical_timestamp, opaque_spelling_matches, DURATION_UNITS};
 
 /// The narrowing's whole subject: `0x` + an even-length hex byte string, and nothing
 /// else. `BytesType.toJSONString` is `"\"0x" + bytesToHex(buffer) + '"'`.
@@ -20,9 +18,9 @@ fn a_blob_must_be_the_0x_hex_spelling() {
     // The empty blob: `bytesToHex` of an empty buffer is the empty string.
     assert!(is_blob_hex("0x"));
     for not_a_blob in [
-        "deadbeef",  // the `getString` spelling — not what toJSONString emits
-        "0xabc",     // odd digit count: not a byte string
-        "0xzz",      // not hex at all
+        "deadbeef", // the `getString` spelling — not what toJSONString emits
+        "0xabc",    // odd digit count: not a byte string
+        "0xzz",     // not hex at all
         "not-a-blob",
         "",
     ] {
@@ -102,11 +100,21 @@ fn each_opaque_type_accepts_only_its_own_spelling() {
         // the empty string; `46702000000000ns` is what the CLI emits.
         (
             "duration",
-            &["46702000000000ns", "12h58m22s", "-3y6mo", "1mo2d3ms4us5ns", ""],
+            &[
+                "46702000000000ns",
+                "12h58m22s",
+                "-3y6mo",
+                "1mo2d3ms4us5ns",
+                "",
+            ],
         ),
         (
             "inet",
-            &["154.47.65.214", "2001:db8::1", "2001:0db8:0000:0000:0000:0000:0000:0001"],
+            &[
+                "154.47.65.214",
+                "2001:db8::1",
+                "2001:0db8:0000:0000:0000:0000:0000:0001",
+            ],
         ),
     ];
     for (name, spellings) in accepted {
@@ -141,15 +149,21 @@ fn each_opaque_type_accepts_only_its_own_spelling() {
             "time",
             // Fixed width: `TimeSerializer.toString` always writes nine fraction
             // digits, so a millisecond-precision spelling is not its output.
-            &["01:12:05.394", "1:12:05.394017000", "01:12:05:394017000", "not-a-time", ""],
+            &[
+                "01:12:05.394",
+                "1:12:05.394017000",
+                "01:12:05:394017000",
+                "not-a-time",
+                "",
+            ],
         ),
         (
             "duration",
             &[
                 "not-a-duration",
-                "12", // digits with no unit
-                "h",  // a unit with no digits
-                "-",  // a sign alone is not producible (the zero duration is "")
+                "12",   // digits with no unit
+                "h",    // a unit with no digits
+                "-",    // a sign alone is not producible (the zero duration is "")
                 "3s5m", // units out of `Duration.toString`'s emission order
                 "3d3d", // a unit twice
                 "3mo4",

@@ -780,7 +780,6 @@ fn is_exact_f32_tie_with_both_formatter_spellings(golden: &Value, cli: &Value) -
 #[path = "golden_value_exact_decimal.rs"]
 mod exact_decimal;
 
-
 /// The three tokens a non-finite IEEE-754 float is spelled with in the golden —
 /// Java's `Double.toString`/`Float.toString` spelling, as the committed
 /// `signed_special_collections` golden carries them. Case-sensitive: these are

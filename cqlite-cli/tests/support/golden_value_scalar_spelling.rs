@@ -228,7 +228,7 @@ const DURATION_UNITS: &[&str] = &["y", "mo", "d", "h", "m", "s", "ms", "us", "ns
 fn is_duration(text: &str) -> bool {
     let rest = match text.strip_prefix('-') {
         // A sign with no groups after it is not producible.
-        Some(after) if after.is_empty() => return false,
+        Some("") => return false,
         Some(after) => after,
         None => text,
     };
