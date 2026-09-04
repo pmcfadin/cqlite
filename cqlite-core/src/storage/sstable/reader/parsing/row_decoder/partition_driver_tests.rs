@@ -2,7 +2,7 @@
 //! `V5CompressedLegacyParser::drive_partition_sliding` owns, driven through a STUB
 //! [`SlidingPartitionPolicy`] over a SYNTHETIC byte buffer — so the contract
 //! (buffer-then-flush, no-double-emit on a mid-partition `NeedMore`,
-//! marker-`Stop` termination, and the #3782/#3809 failure dispositions) is pinned
+//! marker-`Unparseable` termination, and the #3782/#3809 failure dispositions) is pinned
 //! independently of any real row decode, schema, or on-disk fixture.
 //!
 //! An external file (`#[path]`) rather than an inline `mod tests`, so
@@ -88,7 +88,7 @@ fn row_write_timestamp_pure_tombstone_without_mfda_promotes_seconds() {
 // loop whose divergence "manufactures parity regressions". These tests drive
 // that skeleton directly with a STUB `SlidingPartitionPolicy` over a SYNTHETIC
 // byte buffer, so the framing contract (buffer-then-flush, no-double-emit on a
-// mid-partition `NeedMore`, marker-Stop termination) is pinned independently of
+// mid-partition `NeedMore`, marker-Unparseable termination) is pinned independently of
 // any real row decode, schema, or on-disk fixture.
 //
 // `write-support` is a DEFAULT feature; the gate is only so the minimal
@@ -154,7 +154,8 @@ struct StubRow(u8);
 /// ([`DataRowOutcome::DecodeFailed`], issue #3782), [`STUB_REFUSE_BYTE`] is a
 /// row that DECODED but must not be emitted ([`DataRowOutcome::Refused`], issue
 /// #3809), any other byte DECLINES with no error, any range-tombstone marker
-/// is answered with [`MarkerOutcome::Stop`], and `buffered` records how many
+/// is answered with [`MarkerOutcome::Unparseable`] (issue #3721 removed the
+/// tolerant `Stop` variant), and `buffered` records how many
 /// rows were pushed into `pending` — so a test can prove a row WAS buffered
 /// even when the driver forwards ZERO rows.
 #[cfg(feature = "write-support")]
@@ -184,9 +185,11 @@ impl SlidingPartitionPolicy for StubPolicy {
         _schema: &TableSchema,
         _pending: &mut Vec<Self::Row>,
     ) -> MarkerOutcome {
-        // Mirror the pre-K1 `break`/`NeedMore` behaviour: a marker the policy
-        // cannot represent faithfully terminates the partition.
-        MarkerOutcome::Stop
+        // A marker this stub cannot parse. The NON-final half of that
+        // decision (a refill request) is what these framing tests pin.
+        MarkerOutcome::Unparseable(crate::error::Error::corruption(
+            "stub policy: unparseable marker",
+        ))
     }
 
     fn on_data_row(
@@ -362,25 +365,25 @@ async fn same_buffer_final_chunk_flushes_pending() {
     );
 }
 
-/// (c) A range-tombstone marker the policy answers with `MarkerOutcome::Stop`
+/// (c) A range-tombstone marker the policy answers with `MarkerOutcome::Unparseable`
 /// on a NON-final chunk yields `NeedMore` with NO emission — mirroring the
 /// pre-K1 `break`/`NeedMore` terminate-partition behaviour — and discards any
 /// rows already buffered before the marker.
 #[cfg(feature = "write-support")]
 #[tokio::test]
-async fn marker_stop_non_final_chunk_needmore_no_emit() {
+async fn marker_unparseable_non_final_chunk_needmore_no_emit() {
     // One row, then a marker byte (IS_MARKER set, END_OF_PARTITION clear).
     let data = synthetic_partition(&[STUB_ROW_BYTE, STUB_MARKER_BYTE]);
     let (step, buffered, collected) = drive(&data, false).await;
     assert_eq!(
         step,
         ParseStep::NeedMore,
-        "on_range_marker -> Stop on a non-final chunk requests more bytes"
+        "on_range_marker -> Unparseable on a non-final chunk requests more bytes"
     );
     assert_eq!(buffered, 1, "the pre-marker row was buffered into pending");
     assert!(
         collected.is_empty(),
-        "a marker Stop discards pending and forwards nothing"
+        "a marker Unparseable discards pending and forwards nothing"
     );
 }
 
