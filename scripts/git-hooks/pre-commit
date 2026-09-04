@@ -61,12 +61,36 @@ probe="$(cd "$wt" && bash "$ll" probe "$issue" 2>/dev/null || true)"
 field() { printf '%s' "$probe" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -1; }
 liveness="$(field liveness)"
 holder_pid="$(field holder-pid)"
+holder_ticks="$(field holder-start-ticks)"
+our_pid="$(field our-pid)"
+our_ticks="$(field our-start-ticks)"
 our_identity="$(field our-identity)"
 
+# IS THE HOLDER US? ASK ABOUT THE PROCESS, NOT THE VERDICT (roborev job 439). `liveness=SELF`
+# also requires the ACTOR to match, so the SAME process probing under a different
+# LANE_LOCK_ACTOR reports ALIVE and would be refused as a peer — demonstrated live: one process,
+# `probe` -> SELF, `probe --actor otheractor` -> ALIVE. The probe publishes holder-pid,
+# holder-start-ticks, our-pid and our-start-ticks precisely so a caller can compare PROCESSES.
+# start-ticks is carried with the pid because a pid alone is reusable; together they identify
+# one process on one boot.
+holder_is_us=0
+if [ -n "$our_pid" ] && [ "$holder_pid" = "$our_pid" ] && [ "$holder_ticks" = "$our_ticks" ]; then
+  holder_is_us=1
+fi
+
 case "$liveness" in
-  NO-RECORD)
-    # FREE. Acquire now, from inside the lane, with the session as our ancestor — this is the
-    # "acquire on the lane-entry path before writes begin" the lock never had.
+  NO-RECORD|DEAD-*)
+    # FREE, or a DEAD holder. Acquire now, from inside the lane, with the session as our
+    # ancestor — this is the "acquire on the lane-entry path before writes begin" the lock
+    # never had.
+    #
+    # DEAD-* BELONGS HERE, NOT IN THE WARN ARM (roborev job 439). It used to warn-and-allow on
+    # the reasoning that this hook should not reclaim on someone else's behalf. That was wrong
+    # about the mechanism: `acquire` AUTO-RECLAIMS a DEAD-* holder by design (only DEAD-*
+    # permits it; every UNKNOWN-* refuses), so declining to call it did not avoid a reclaim —
+    # it left the enforcement PERMANENTLY INACTIVE after any crash, since the hook acquires
+    # only when it sees no record. A crashed session would have disabled the guard for the
+    # life of that lane.
     out="$(cd "$wt" && bash "$ll" acquire "$issue" --lane-dir "$wt" 2>&1)" || {
       echo "lane-lock: could not acquire lane $issue before this commit:" >&2
       printf '%s\n' "$out" >&2
@@ -82,7 +106,9 @@ case "$liveness" in
     # A LIVE holder that is not us — but only if we could establish who WE are. Without our own
     # identity, "not us" is a positive claim derived from a failure to prove its opposite, which
     # is the error this file's own doctrine warns about repeatedly.
-    if [ "$our_identity" = "UNRESOLVED" ]; then
+    if [ "$holder_is_us" = "1" ]; then
+      : # same process under a different actor label — ours, not a peer (see holder_is_us)
+    elif [ "$our_identity" = "UNRESOLVED" ]; then
       echo "lane-lock: WARNING lane $issue has a LIVE holder (pid ${holder_pid:-?}) but this" >&2
       echo "lane-lock: process could not establish its own identity, so it cannot tell whether" >&2
       echo "lane-lock: that holder is you. Allowing the commit; verify before you continue." >&2
@@ -97,9 +123,9 @@ case "$liveness" in
     fi
     ;;
   *)
-    # DEAD-* / UNKNOWN-* / anything unrecognised. A DEAD holder is reclaimable and acquire would
-    # handle it, but this hook does not reclaim on someone else's behalf; an UNKNOWN one is
-    # unmeasurable. Both WARN and allow — see the residual note in the header.
+    # UNKNOWN-* / anything unrecognised. DEAD-* moved to the acquire arm above. An UNKNOWN
+    # holder is UNMEASURABLE, and refusing on one would brick a lane whose holder merely cannot
+    # be read — the guard that reds on correct input. WARN and allow; see the header residual.
     echo "lane-lock: WARNING lane $issue liveness=${liveness:-unmeasured}; not refusing, but this" >&2
     echo "lane-lock: commit is NOT protected by the lane lock. 'lane-lock.sh probe $issue' explains." >&2
     ;;

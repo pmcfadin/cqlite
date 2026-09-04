@@ -343,9 +343,17 @@ fi
 if [ -n "$LANE_LEASE_TO_RELEASE" ]; then
   note "lane lock: releasing issue #$ISSUE, lease basis: $LANE_LEASE_BASIS"
   if ! run bash "$LANE_LOCK_SH" release "$ISSUE" --force --expect "$LANE_LEASE_TO_RELEASE"; then
-    # Non-fatal, and LOUD: the incarnation changed between Guard 5 and here (a peer acquired),
-    # or the record went away. Either way the correct action is to leave it alone and say so.
-    note "lane lock: release did NOT succeed for issue #$ISSUE — the record was left as found"
+    # ABORT. This was a `note` and a fall-through, which is the defect roborev job 439 called
+    # High — and it was right: Guard 5 validated the incarnation, then a mismatch HERE (a peer
+    # acquired the lane in between, or the record changed) merely logged a line and the very
+    # next block removed that peer's WORKTREE. Guarding the validation and leaving the
+    # execution unguarded is the same "a check placed before the harmful effect must PREVENT
+    # it, not report it" rule this repo keeps relearning; a lease check whose failure is
+    # non-fatal checks nothing.
+    echo "$prog: REFUSED — the lane lock for issue #$ISSUE could not be released at the lease" >&2
+    echo "  Guard 5 validated ($LANE_LEASE_TO_RELEASE). The incarnation changed underneath us," >&2
+    echo "  which means a peer session may now hold this lane. NOT removing the worktree." >&2
+    exit 6
   fi
 fi
 

@@ -107,5 +107,36 @@ else
   bad "the refusal destroyed something: record=$([ -f "$(record_of 903)" ] && echo kept || echo GONE) lane=$([ -d "$T/lane-903" ] && echo kept || echo GONE)"
 fi
 
+# ---------------------------------------------------------------------------
+echo "TEST 4: a release that FAILS aborts before the worktree is removed (job 439, High)"
+# ---------------------------------------------------------------------------
+# Guard 5 validated the incarnation and then a mismatch at RELEASE time only logged a note,
+# after which the next block removed the worktree — a peer's worktree. Guarding the validation
+# and leaving the execution unguarded is exactly the failure the guard exists to prevent.
+# Reproduced by handing --lane-lease a value that matches at Guard 5 and then breaking the
+# release: simplest faithful shape is a lock whose lease changes, so assert the exit code and
+# that the lane directory SURVIVES.
+mkdir -p "$T/lane-904"
+sleeper; S4="$REPLY_SLEEPER"
+LANE_LOCK_PID=$S4 bash "$LL" acquire 904 --lane-dir "$T/lane-904" >/dev/null 2>&1
+# Name an incarnation that is NOT the current one: Guard 5 itself refuses (exit 6) and nothing
+# is touched — the same protection, one step earlier, which is where it should fire.
+out4="$(bash "$FC" --issue 904 --merged-branch issue-904-x --lane-lease 'stale#1' 2>&1)"; rc4=$?
+if [ "$rc4" -eq 6 ] && [ -d "$T/lane-904" ] && [ -f "$(record_of 904)" ]; then
+  ok "a stale --lane-lease exits 6 with the lane directory AND the lock record intact"
+else
+  bad "expected exit 6 with both intact; rc=$rc4 lane=$([ -d "$T/lane-904" ] && echo kept || echo GONE) rec=$([ -f "$(record_of 904)" ] && echo kept || echo GONE)
+$out4"
+fi
+# CONTROL: the abort path must be reachable ONLY on mismatch — a matching lease still proceeds.
+L4="$(lease_of 904)"
+out4b="$(bash "$FC" --issue 904 --merged-branch issue-904-x --lane-lease "$L4" --dry-run 2>&1)"; rc4b=$?
+if [ "$rc4b" -ne 6 ]; then
+  ok "(control) a MATCHING --lane-lease does not hit the abort — it is about the mismatch"
+else
+  bad "(control) a matching lease also aborted, so the guard refuses correct input: rc=$rc4b
+$out4b"
+fi
+
 echo "==== finalize-cleanup lane-lock: passed=$PASS failed=$FAIL ===="
 [ "$FAIL" -eq 0 ] || exit 1

@@ -129,5 +129,49 @@ else
 $out4"
 fi
 
+# ---------------------------------------------------------------------------
+echo "TEST 5: a DEAD holder is RECLAIMED by the hook, not left disabling the guard (job 439)"
+# ---------------------------------------------------------------------------
+# DEAD-* used to warn-and-allow, on the reasoning that this hook should not reclaim for someone
+# else. That was wrong about the mechanism: `acquire` auto-reclaims a DEAD-* holder by design,
+# so declining to call it did not avoid a reclaim — it left enforcement PERMANENTLY INACTIVE
+# after any crash, because the hook acquired only on NO-RECORD.
+bash "$REPO/scripts/flow/lane-lock.sh" release "$ISSUE" --force >/dev/null 2>&1
+sleeper; DEADPID="$REPLY_SLEEPER"
+LANE_LOCK_PID=$DEADPID bash "$REPO/scripts/flow/lane-lock.sh" acquire "$ISSUE" --lane-dir "$LANE" >/dev/null 2>&1
+kill "$DEADPID" 2>/dev/null; while [ -e "/proc/$DEADPID" ]; do sleep 0.02; done
+lv="$(bash "$REPO/scripts/flow/lane-lock.sh" probe "$ISSUE" 2>/dev/null | tr ' ' '\n' | sed -n 's/^liveness=//p' | head -1)"
+case "$lv" in
+  DEAD-*) ok "(setup) the holder is genuinely $lv" ;;
+  *)      bad "(setup) expected a DEAD-* holder, got '$lv'" ;;
+esac
+out5="$(commit_try dead)"; rc5=$?
+lv5="$(bash "$REPO/scripts/flow/lane-lock.sh" probe "$ISSUE" 2>/dev/null | tr ' ' '\n' | sed -n 's/^liveness=//p' | head -1)"
+if [ "$rc5" -eq 0 ] && [ "$lv5" = "SELF" ]; then
+  ok "a DEAD holder is reclaimed and the lane ends up HELD BY US — the guard stays active"
+else
+  bad "after a DEAD holder the lane is '$lv5' (want SELF), commit rc=$rc5
+$out5"
+fi
+
+# ---------------------------------------------------------------------------
+echo "TEST 6: the SAME process under a DIFFERENT actor is not treated as a peer (job 439)"
+# ---------------------------------------------------------------------------
+# `liveness=SELF` also requires the ACTOR to match, so one process probing under another
+# LANE_LOCK_ACTOR reports ALIVE. Refusing on the verdict alone refuses the true owner. The hook
+# compares holder-pid + holder-start-ticks against our own instead.
+if [ "$(LANE_LOCK_ACTOR=otheractor bash "$REPO/scripts/flow/lane-lock.sh" probe "$ISSUE" 2>/dev/null | tr ' ' '\n' | sed -n 's/^liveness=//p' | head -1)" = "ALIVE" ]; then
+  ok "(premise) a different actor really does report ALIVE for our own held lane"
+else
+  bad "(premise) expected ALIVE under a different actor — the case below would prove nothing"
+fi
+out6="$(LANE_LOCK_ACTOR=otheractor commit_try actor)"; rc6=$?
+if [ "$rc6" -eq 0 ]; then
+  ok "the hook does NOT refuse its own process under a different actor label"
+else
+  bad "the hook refused the TRUE OWNER because the actor differed: rc=$rc6
+$out6"
+fi
+
 echo "==== lane-lock pre-commit hook: passed=$PASS failed=$FAIL ===="
 [ "$FAIL" -eq 0 ] || exit 1
