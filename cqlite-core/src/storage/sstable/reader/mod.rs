@@ -318,7 +318,6 @@ impl SSTableReader {
         // backend degrades gracefully to a plain positioned fd if the faster
         // backend is refused, mirroring `build_block_sources`.
         // #3853: the mapping the POINT plane landed on (see `scan_lifetime::resolve`).
-        #[cfg(unix)]
         let mut point_plane_mmap: Option<Arc<memmap2::Mmap>> = None;
         let point_source: Arc<dyn read_at::ReadAt> = match &scan_source {
             ScanSource::Mapped(mmap) => {
@@ -327,7 +326,6 @@ impl SSTableReader {
                     Self::point_read_mmap(path, file_size, mmap, POINT_MMAP_MADV_RANDOM_MIN_BYTES);
                 #[cfg(not(unix))]
                 let point_mmap = mmap.clone();
-                #[cfg(unix)]
                 let _prev = point_plane_mmap.replace(point_mmap.clone()); // #3853
                 Arc::new(read_at::MmapReadAt::new(point_mmap))
             }
@@ -362,11 +360,8 @@ impl SSTableReader {
         };
 
         // #3853 scan-lifetime madvise seam; every gate condition: `scan_lifetime::resolve`.
-        #[cfg(unix)]
         let scan_lifetime =
             scan_lifetime::resolve(&scan_source, prefetch, point_plane_mmap.as_ref());
-        #[cfg(not(unix))]
-        let scan_lifetime = scan_lifetime::resolve(&scan_source, prefetch, None);
 
         // Parse header - read available bytes, not a fixed size
         // NOTE: For NB format files (Cassandra 4.x+), Data.db often contains compressed row data
