@@ -3596,6 +3596,278 @@ else
 fi
 
 # =====================================================================================
+# 48. THE LIVE `show-environment -g` READ IS BOUNDED IN BYTES, NOT ONLY IN TIME
+#     (#3733, roborev job 440).
+#     THE DEFECT. `__out=$(tmux show-environment -g)` accumulates until the producer
+#     stops. The op bound bounds TIME; nothing bounded MEMORY. `show-environment -g`
+#     prints the SERVER's global table, and on this fleet every lane runs as ONE user
+#     while bootstrap is documented to run under `sudo` — so a PEER LANE can `setenv -g`
+#     arbitrarily much into the server a ROOT-run report then reads. A non-invoker route,
+#     therefore a defect and not a documented limitation.
+#     THE CLASS, NOT THE CITED LINE. The finding named the stdout capture; the region
+#     held THREE unbounded reads of that one producer — the stdout capture, an unbounded
+#     `cat` of the stderr file, and a SECOND unbounded capture in the no-temp-file
+#     fallback (now removed: a read with nowhere to put the bytes cannot be capped, and
+#     this file's own rule is that an unboundable call is not made).
+#     AND THE ESTABLISHED IDIOM WAS ITSELF BROKEN, which is why the read is now ONE
+#     SHARED helper rather than a third copy: `$( )` STRIPS EVERY TRAILING NEWLINE, and
+#     every producer here is newline-TERMINATED, so a `head -c CAP+1` capture of an
+#     over-cap stream came back at exactly CAP and `-gt CAP` was FALSE. Measured on the
+#     shipped code before this section existed: an 8 MiB stderr was classified as a tmux
+#     failure with a truncated 500-character cause instead of as OVER THE CAP. (c) below
+#     is that measurement as a differential.
+#     WHY THE CAP IS 4 MiB AND NOT `CLAUDE_AUTH_REPORT_MAX`: section 25 declares a
+#     heavily populated table ORDINARY and pins a ~200 KB one and a 5000-variable one as
+#     reads that MUST STILL SUCCEED, so a 64 KiB cap would lose the true positive — and
+#     the direction it would lose it in is the dangerous one (SERVER-MISSING for a
+#     correctly seeded server, whose remedy is to overwrite the value already right).
+#     BOTH DIRECTIONS ARE PINNED HERE, and (b) is the one that matters most: an
+#     over-cap table must NOT be parsed. The token is planted on the FIRST line, so a
+#     truncated-but-accepted parse is directly observable as SERVER-CARRIES-BOTH.
+# =====================================================================================
+# The cap the library declares. DERIVED, never copied: a cap changed there and hard-coded
+# here would leave these cases asserting about a number the code no longer uses.
+CAPV=$(sed -n 's/^CLAUDE_AUTH_TMUX_ENV_MAX=\([0-9][0-9]*\)$/\1/p' "$CAPLIB" | tail -1)
+case "$CAPV" in ''|*[!0-9]*) CAPV='' ;; esac
+if [ -z "$CAPV" ]; then
+  bad "byte cap: CLAUDE_AUTH_TMUX_ENV_MAX could not be read from the library, so section 48 cannot assert about it"
+  CAPV=4194304
+else
+  ok "byte cap: the live-read cap is declared in the library and was derived, not copied ($CAPV bytes)"
+fi
+# A MARKER INSIDE THE PADDING, so "no captured value is echoed" is asserted against
+# something identifiable rather than against a length.
+PADMARK='CQLITE_PAD_MARKER_MUST_NOT_BE_PRINTED'
+ERRMARK='CQLITE_ERR_MARKER_MUST_NOT_BE_PRINTED'
+# plant_tmux_sized <dir> <pad-bytes>: a server whose global table carries BOTH keys — the
+# token FIRST — followed by <pad-bytes> of padding and a TRAILING NEWLINE. The newline is
+# the whole point: it is what the pre-fix capture silently dropped.
+plant_tmux_sized() {
+  local d="$1" pad="$2"
+  rm -f "$d/tmux"
+  cat >"$d/tmux" <<EOF
+#!/usr/bin/env bash
+while [ "\$#" -gt 0 ]; do case "\$1" in -L|-S) shift 2 ;; *) break ;; esac; done
+case "\$1" in
+  show-environment)
+    printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' '$TOK'
+    printf 'CLAUDE_CONFIG_DIR=%s\n' '$CFGDIR'
+    printf 'PAD_%s=' '$PADMARK'
+    printf '%*s' '$pad' ''
+    printf '\n'
+    exit 0 ;;
+esac
+exit 0
+EOF
+  chmod +x "$d/tmux"
+}
+
+# (a) OVER THE CAP: UNMEASURED, naming the cap.
+d48a=$(mkshim "$tmp/s48a"); plant_tmux_sized "$d48a" "$((CAPV + 4096))"
+run_cap "$d48a" "$ef2" -- --tmux-env
+if printf '%s' "$out" | grep -q '^claude-tmux-env: UNMEASURED' \
+   && printf '%s' "$out" | grep -qF -- "$CAPV-byte cap"; then
+  ok "byte cap: an over-cap global environment is UNMEASURED and the detail names the cap"
+else
+  bad "byte cap: an over-cap global environment did not report UNMEASURED naming the cap: $out"
+fi
+# (b) ...AND IT IS NEITHER AN ACCUSATION NOR A TRUNCATED PARSE. `FAILED` is the accusation
+# whose remedy destroys the persisted value, and an over-cap read establishes nothing about
+# the credential. SERVER-CARRIES-BOTH here would mean the truncated prefix WAS parsed — the
+# token is on line 1, so that state is reachable and would pass unnoticed without this.
+if printf '%s' "$out" | grep -qE '^claude-(auth|tmux-env): (FAILED|SERVER-)'; then
+  bad "byte cap: an over-cap read produced an accusation or a truncated-but-accepted parse: $out"
+else
+  ok "byte cap: an over-cap read is never FAILED and never a SERVER-* verdict (no truncated parse)"
+fi
+# (c) NO CAPTURED VALUE IS ECHOED. The table is peer-controlled text and one of its entries
+# is the credential; the detail must carry the cap and nothing from the table.
+if printf '%s' "$out" | grep -qF -- "$PADMARK"; then
+  bad "byte cap: the over-cap detail echoed content from the server's table"
+else
+  ok "byte cap: no content from the over-cap table appears in the output"
+fi
+# (d) UNDER THE CAP: THE TRUE POSITIVE SURVIVES. A fix that loses it is not a fix, and this
+# is the direction section 25 exists for.
+d48b=$(mkshim "$tmp/s48b"); plant_tmux_sized "$d48b" "$((CAPV - 65536))"
+run_cap "$d48b" "$ef2" -- --tmux-env
+if printf '%s' "$out" | grep -q '^claude-tmux-env: SERVER-CARRIES-BOTH'; then
+  ok "byte cap: a just-under-cap global environment is still read correctly (true positive kept)"
+else
+  bad "byte cap: a just-under-cap environment was misread: $out"
+fi
+# (e) THE STDERR HALF, which the finding named alongside the output. tmux FAILS with an
+# over-cap cause: the cause cannot be classified from a truncated fragment, so the verdict
+# is UNMEASURED naming the cap — not "failed for a reason that is not a missing server"
+# with 500 characters of someone else's text pasted after it.
+d48c=$(mkshim "$tmp/s48c")
+cat >"$d48c/tmux" <<EOF
+#!/usr/bin/env bash
+while [ "\$#" -gt 0 ]; do case "\$1" in -L|-S) shift 2 ;; *) break ;; esac; done
+printf 'ERR_%s=' '$ERRMARK' >&2
+printf '%*s' '$((CAPV + 4096))' '' >&2
+printf '\n' >&2
+exit 1
+EOF
+chmod +x "$d48c/tmux"
+run_cap "$d48c" "$ef2" -- --tmux-env
+if printf '%s' "$out" | grep -q '^claude-tmux-env: UNMEASURED' \
+   && printf '%s' "$out" | grep -qF -- "$CAPV-byte cap" \
+   && ! printf '%s' "$out" | grep -qF -- "$ERRMARK"; then
+  ok "byte cap: an over-cap tmux STDERR is UNMEASURED naming the cap, with none of it echoed"
+else
+  bad "byte cap: an over-cap tmux stderr was not reported by its cap: $out"
+fi
+# (f) THE WRITE IS BOUNDED TOO, or the fix only moves the accumulation from memory to disk.
+# An endlessly-writing server must not fill TMPDIR, must not leave a core file, must not
+# leave its private directory behind, and must still report the cap. The stub writes
+# NUL-FREE output on purpose: a NUL cannot reach a real tmux table (`setenv -g KEY VALUE`
+# passes the value through argv), and planting one would only measure bash's own
+# null-byte warning.
+d48d=$(mkshim "$tmp/s48d")
+cat >"$d48d/tmux" <<'EOF'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do case "$1" in -L|-S) shift 2 ;; *) break ;; esac; done
+case "$1" in show-environment) exec yes 'PAD_ENDLESS=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ;; esac
+exit 0
+EOF
+chmod +x "$d48d/tmux"
+wb_tmp="$tmp/writebound-tmp"; mkdir -p "$wb_tmp"
+wb_t0=$SECONDS
+run_cap "$d48d" "$ef2" TMPDIR="$wb_tmp" -- --tmux-env
+wb_dt=$((SECONDS - wb_t0))
+wb_left=$(glob_matches "$wb_tmp/cqlite-tmuxenv.*")
+wb_bytes=$(find "$wb_tmp" -type f -exec cat {} + 2>/dev/null | wc -c)
+if printf '%s' "$out" | grep -qF -- "$CAPV-byte cap" && [ "$wb_dt" -le 60 ] \
+   && [ -z "$wb_left" ] && [ "$wb_bytes" -eq 0 ]; then
+  ok "byte cap: an endlessly-writing server is reported by its cap in ${wb_dt}s, leaving no bytes and no directory"
+else
+  bad "byte cap: an endlessly-writing server was not bounded on the WRITE side (dt=${wb_dt}s left='$wb_left' bytes=$wb_bytes): $out"
+fi
+if [ -z "$(glob_matches "$wb_tmp/core*")" ] && [ -z "$(glob_matches "$tmp/core*")" ]; then
+  ok "byte cap: hitting the write bound leaves no core file (SIGXFSZ is ignored, not taken)"
+else
+  bad "byte cap: hitting the write bound dumped core"
+fi
+
+# --- (g) POSITIVE CONTROL 1: THE UNBOUNDED, UNCAPPED READ ---------------------------
+# A case that asserts "an over-cap table is refused" proves nothing until it is shown to
+# RED against the read that did not refuse it. So the fix is reverted in a THROWAWAY COPY
+# of the library — the shared capped read becomes the pre-fix unbounded `cat` — and (a)/(b)
+# are re-run against it. THE PATCH IS ASSERTED TO HAVE TAKEN: a control whose plant silently
+# failed is a case that passes for the wrong reason.
+# run_cap_lib <lib> <shimdir> <envfile> [pre...] -- args: `run_cap` against a NAMED library.
+run_cap_lib() {
+  local lib="$1" shimdir="$2" envfile="$3"; shift 3
+  local -a pre=()
+  while [ "$#" -gt 0 ] && [ "$1" != '--' ]; do pre+=("$1"); shift; done
+  [ "${1:-}" = '--' ] && shift
+  rc=0
+  out=$(PATH="$shimdir:$PATH" env -u SUDO_USER -u SUDO_UID -u CLAUDE_CONFIG_DIR \
+        "${alt_scrub[@]}" \
+        CQLITE_BOOTSTRAP_TEST_MODE=1 \
+        CQLITE_CLAUDE_AUTH_ENV_FILE="$envfile" \
+        ${pre[@]+"${pre[@]}"} \
+        bash "$lib" "$@" 2>&1) || rc=$?
+  printf '%s\n' "$out" >>"$TRANSCRIPT"
+}
+ctl48="$tmp/ctl48"; mkdir -p "$ctl48"
+ctl48lib="$ctl48/claude-auth-capability.sh"
+# BOTH HALVES OF THE PROTECTION ARE REVERTED, because reverting one is not the pre-fix
+# state and the first draft of this control proved it: with the READ made unbounded but the
+# oversize VERDICT left in place, `__olen` simply became the FULL length and the copy still
+# refused — a control that passed the case it was meant to red. Pre-fix there was no cap and
+# no refusal, so the copy gets neither: the read reads to EOF and the size branch can never
+# fire (spelled as an impossible comparison, so it stays a size test and cannot be mistaken
+# for a deleted line).
+sed -e 's|^  __crt_raw=\$(claude_auth_bounded.*$|  __crt_raw=$(cat "$__crt_f" 2>/dev/null)|' \
+    -e 's|^  __crt_rc=\${__crt_raw##\*R}$|  __crt_rc=$?|' \
+    -e 's|^  __crt_raw=\${__crt_raw%R\*}$|  :|' \
+    -e 's|^  if \[ "\$__olen" -gt "\$CLAUDE_AUTH_TMUX_ENV_MAX" \]; then$|  if [ "$__olen" -lt 0 ]; then|' \
+    "$CAPLIB" >"$ctl48lib"
+if grep -q '__crt_raw=\$(cat "\$__crt_f"' "$ctl48lib" \
+   && ! grep -q '^  __crt_raw=\$(claude_auth_bounded' "$ctl48lib" \
+   && grep -q '^  if \[ "\$__olen" -lt 0 \]; then$' "$ctl48lib" \
+   && ! grep -q '^  if \[ "\$__olen" -gt "\$CLAUDE_AUTH_TMUX_ENV_MAX" \]; then$' "$ctl48lib" \
+   && bash -n "$ctl48lib" 2>/dev/null; then
+  ok "byte cap control: the pre-fix unbounded read was planted in a throwaway copy (and it parses)"
+  run_cap_lib "$ctl48lib" "$d48a" "$ef2" -- --tmux-env
+  if printf '%s' "$out" | grep -q '^claude-tmux-env: SERVER-CARRIES-BOTH'; then
+    ok "byte cap control: pre-fix, the SAME over-cap table is read whole and reported SERVER-CARRIES-BOTH — so (a) and (b) discriminate"
+  else
+    bad "byte cap control: the pre-fix copy did not reproduce the unrefused read, so (a)/(b) prove nothing: $out"
+  fi
+else
+  bad "byte cap control: the pre-fix read could not be planted, so (a)/(b) have no positive control"
+fi
+
+# --- (h) POSITIVE CONTROL 2: THE TRAILING-NEWLINE UNDER-MEASUREMENT -----------------
+# The half a behavioural case cannot show, because both idioms REFUSE an over-cap stream by
+# some route: the pre-fix capture MIS-MEASURES it. One file, two reads, same cap — the old
+# idiom (`$( )` then `${#…}`) must land exactly AT the cap while the shipped helper reports
+# CAP+1. This is the shipped defect reduced to two numbers.
+# THE FIXTURE PUTS A NEWLINE AT EXACTLY BYTE CAP+1, which is the condition the defect
+# needs and is not a contrivance: for a table of short lines the CAP+1st byte is a newline
+# roughly once per line length, and a stream of short lines is exactly what an enlarged
+# environment is. (Padding that is one enormous line does NOT reproduce it — the first draft
+# of this control used one and measured CAP+1 from both idioms, because the only newline was
+# far past the cut. That is worth knowing: the defect is intermittent by content, which is
+# why it survived review.) The file is longer than CAP+1, so it is genuinely over the cap.
+nl_dir="$tmp/newline-cap"; mkdir -p "$nl_dir"
+nl_f="$nl_dir/stream"
+{ printf '%*s' "$CAPV" ''; printf '\nover\n'; } >"$nl_f"
+nl_old=$(bash -c 'v=$(head -c "$(( $2 + 1 ))" "$1" 2>/dev/null); printf "%s" "${#v}"' _ "$nl_f" "$CAPV")
+nl_new=$( (
+  # SOURCED IN A SUBSHELL so none of the library's globals reach the cases; its `main` runs
+  # only under its own `BASH_SOURCE[0] = $0` guard.
+  # shellcheck source=/dev/null
+  . "$CAPLIB" >/dev/null 2>&1
+  claude_auth_capped_read_into nl_t nl_r nl_b 10 "$CAPV" "$nl_f"
+  printf '%s' "$nl_b"
+) )
+if [ "$nl_old" = "$CAPV" ] && [ "$nl_new" = "$((CAPV + 1))" ]; then
+  ok "byte cap control: the pre-fix capture under-measures a newline-terminated over-cap stream ($nl_old = the cap) where the shared read reports $nl_new"
+else
+  bad "byte cap control: the trailing-newline differential did not reproduce (old=$nl_old new=$nl_new cap=$CAPV)"
+fi
+
+# --- (i) STRUCTURAL: NO UNBOUNDED READ OF THESE STREAMS MAY COME BACK ---------------
+# Behavioural cases cover the shapes someone thought of. This one asserts the CLASS: the
+# library captures no command output with `$(cat …)` and never captures a tmux invocation
+# into a variable, and every capped read goes through the ONE shared helper. Whole-line
+# comments are blanked first — this section's own prose names both shapes, and a guard that
+# reds on the text describing its subject is the guard agents learn to delete.
+scan_unbounded_capture() {
+  sed -e 's/^[[:space:]]*#.*$//' "$1" | grep -nE '=\$\((cat|claude_auth_tmux_run)[[:space:]]'
+}
+ctl48b="$ctl48/planted-capture.sh"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' '# a comment naming $(cat "$f") must NOT red'
+  printf '%s\n' 'safe=$(claude_auth_capped_read_into a b c 10 99 "$f")'
+  printf '%s\n' 'bad_one=$(cat "$f" 2>/dev/null)'
+} >"$ctl48b"
+ctl48b_hits=$(scan_unbounded_capture "$ctl48b")
+if printf '%s' "$ctl48b_hits" | grep -q 'bad_one' \
+   && [ "$(printf '%s\n' "$ctl48b_hits" | grep -c .)" -eq 1 ]; then
+  ok "byte cap guard: the unbounded-capture scanner finds a planted \$(cat …) (and only it)"
+else
+  bad "byte cap guard: the scanner did not isolate the planted unbounded capture: $ctl48b_hits"
+fi
+cap48_hits=$(scan_unbounded_capture "$CAPLIB")
+if [ -z "$cap48_hits" ]; then
+  ok "byte cap guard: the library captures no command output through an unbounded \$(cat …) or tmux substitution"
+else
+  bad "byte cap guard: an unbounded capture is back in the library: $cap48_hits"
+fi
+cap48_uses=$(grep -c '^[[:space:]]*claude_auth_capped_read_into ' "$CAPLIB")
+if [ "$cap48_uses" -eq 3 ]; then
+  ok "byte cap guard: all three capped reads (live stdout, live stderr, pane report) go through the ONE shared helper"
+else
+  bad "byte cap guard: expected 3 call sites of the shared capped read, found $cap48_uses"
+fi
+
+# =====================================================================================
 # 23. NO RUN PRINTS A TOKEN-SHAPED VALUE. Asserted over the WHOLE suite transcript, not
 #     per case: the property is about every emit path, and a per-case check only covers
 #     the paths someone remembered.
@@ -3639,8 +3911,11 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # FAILURE, and the three dispositions are pinned behaviourally by warn-count delta), and
 # section 47 (`FAILED` is an ACCUSATION, so it is unreachable while an alternate credential
 # makes the rejection unattributable — pinned in BOTH directions off one variable, plus the
-# runner-level scrub without which every FAILED case in this suite is host-dependent).
-# 212 cases run, and there are
+# runner-level scrub without which every FAILED case in this suite is host-dependent), and
+# section 48 (the live `show-environment -g` read is bounded in BYTES and not only in time —
+# both directions, plus the two positive controls that show the pre-fix read is NOT refused
+# and the pre-fix capture MIS-MEASURES a newline-terminated over-cap stream).
+# 226 cases run, and there are
 # TWO legitimately skippable cases, not one: the real-tmux isolation case (3 assertions) and
 # section 44's OS-mechanism case, which cannot measure "a non-owner is refused" when the
 # suite itself runs as root. The floor therefore excludes both — it is the count that runs on
@@ -3648,14 +3923,17 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # reds on correct input.
 # THE FIGURE IS MEASURED, NOT COUNTED BY EYE, AND IT IS RE-MEASURED WHENEVER IT MOVES:
 # forcing the tmux block's `command -v tmux` test to `true` AND section 44(a)'s
-# root-owned-directory guard to `false` in a throwaway `git worktree` reports 208/0/2 with
+# root-owned-directory guard to `false` in a throwaway `git worktree` reports 222/0/2 with
 # BOTH skippable branches forced (179 -> 200 by section 46's 21 cases: the derivation, the
 # structural location, the exhaustiveness assert, its positive control and the control's
 # isolation, plus four fixtures x four assertions; 200 -> 208 by section 47's 8 — five on
 # the alternate-present rejection, two on the no-alternate contrast, one on the runner
-# scrub). The value in this file is the authority — a figure quoted in a commit
+# scrub; 208 -> 222 by section 48's 14 — the derived cap, four assertions on an over-cap
+# table, the just-under-cap true positive, the over-cap stderr, the two write-bound ones,
+# the three-part unbounded-read positive control, the trailing-newline differential and the
+# three structural guards). The value in this file is the authority — a figure quoted in a commit
 # message is a snapshot of the run that produced it and does not follow later edits.
-CASE_FLOOR=208
+CASE_FLOOR=222
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1

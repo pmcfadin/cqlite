@@ -277,6 +277,29 @@ CLAUDE_AUTH_TMUX_PROBE_BOUND=20
 # Read as CAP+1 so hitting the cap is DETECTABLE rather than silently truncating a record.
 CLAUDE_AUTH_REPORT_MAX=65536
 
+# A HARD BYTE CAP ON THE LIVE SERVER'S GLOBAL ENVIRONMENT READ — BOTH STREAMS.
+# `tmux show-environment -g` prints whatever is in the SERVER's global table, and on this
+# fleet every lane runs as one user while bootstrap is documented to run under `sudo`: a
+# PEER LANE can `setenv -g` arbitrarily much into the server this root-run report then
+# reads, so the producer is a non-invoker. The op bound above bounds TIME, not MEMORY, and
+# an unbounded capture into a shell variable is the exact defect this file has now paid for
+# twice (the pane report, above, on a symlink to /dev/zero).
+#
+# WHY NOT `CLAUDE_AUTH_REPORT_MAX` (64 KiB): THAT WOULD LOSE THE TRUE POSITIVE. This
+# suite's own case 25 declares a heavily populated table ORDINARY and pins two of them — a
+# ~200 KB environment and a 5000-variable one (~250 KB) — as reads that MUST still succeed,
+# because the dangerous direction here is reporting SERVER-MISSING for a correctly seeded
+# server, whose remedy is to overwrite the value that is already right.
+#
+# WHY 4 MiB: it is above ARG_MAX (measured 2097152 on this fleet), and tmux takes a value
+# through `setenv -g KEY VALUE`'s argv, so no SINGLE legitimately set variable can be
+# excluded by it; it is ~16x the largest table this suite calls ordinary; and it bounds this
+# process's memory at a few MB, which cannot OOM an unattended bootstrap. It is a MEMORY
+# ceiling, not a size policy: exceeding it is UNMEASURED (see the read), never a verdict
+# about the credential.
+# Read as CAP+1, for the same reason the report is: at the cap and over it stay distinct.
+CLAUDE_AUTH_TMUX_ENV_MAX=4194304
+
 # ---- output-variable assignment: NEVER `eval` --------------------------------------
 # claude_auth_set_var <name> <value>: set the CALLER's variable <name> to the LITERAL
 # <value>. rc 2 and NO assignment if <name> is not a plain shell identifier.
@@ -320,6 +343,74 @@ claude_auth_set_var() {
       return 2 ;;
   esac
   printf -v "$__cas_n" '%s' "$__cas_v"
+}
+
+# ---- byte length, because a BYTE cap must be checked in BYTES ----------------------
+# claude_auth_bytelen_into <outvar> <string>: the length of <string> IN BYTES.
+#
+# `${#s}` COUNTS CHARACTERS, NOT BYTES, and every cap in this file is a byte cap because
+# `head -c` counts bytes. MEASURED on this fleet (default locale C.UTF-8): a 3-codepoint,
+# 6-byte string gives `${#s}` = 3 under C.UTF-8 and 6 under C. So comparing `${#s}` against
+# a `head -c` cap compares two different units, and multibyte content read at exactly CAP+1
+# BYTES could report as UNDER the cap — i.e. a TRUNCATED capture silently accepted and
+# parsed, which is the one outcome an oversize check exists to prevent (a table cut short
+# reads as SERVER-MISSING, whose remedy is to overwrite a possibly-good token).
+#
+# A SUBSHELL SETTING `LC_ALL=C` BEFORE THE EXPANSION, rather than a `wc -c` process or a
+# global locale change: bash re-runs setlocale on the assignment, so the expansion inside
+# measures the unit the cap is written in, and nothing outside this function sees a
+# different locale (the verdict text is rendered elsewhere and must keep the caller's).
+claude_auth_bytelen_into() {
+  claude_auth_set_var "$1" "$(LC_ALL=C; printf '%s' "${#2}")"
+}
+
+# ---- the ONE capped read: bounded, byte-capped, AND newline-faithful --------------
+# claude_auth_capped_read_into <ov_text> <ov_rc> <ov_bytes> <bound> <cap> <file>:
+# read at most <cap>+1 BYTES of <file> under a hard <bound>. <ov_bytes> is the BYTE length
+# actually read, so `> <cap>` means the file held MORE than the cap.
+#
+# THREE CALL SITES SHARE THIS BECAUSE THEY HAD THREE COPIES OF ONE DECISION, and one of the
+# copies was WRONG in a way nothing could see (#3733, roborev job 440). `$( )` STRIPS EVERY
+# TRAILING NEWLINE, and every producer here is newline-TERMINATED — so a `head -c CAP+1`
+# capture of an over-cap file came back at exactly CAP and the `-gt CAP` test was FALSE.
+# MEASURED against the shipped code: an 8 MiB stderr read at CAP+1 = 4194305 bytes lost its
+# final newline, measured 4194304, and was classified as a tmux failure with a truncated
+# 500-character cause instead of as OVER THE CAP. That defeats the whole point of reading
+# CAP+1 — "at the cap" and "over the cap" stop being distinguishable — and it is worse than
+# an off-by-one: output ending in N newlines loses all N, so a table CAP+N bytes long could
+# measure well UNDER the cap and be parsed as complete.
+#
+# A SENTINEL IS APPENDED INSIDE THE SUBSTITUTION so the newlines are no longer trailing, and
+# the rc rides in it rather than being lost: `$?` read outside would be `printf`'s. The
+# sentinel is stripped from the END, so a sentinel character in the CONTENT cannot be
+# mistaken for ours (the rc is digits, so the last `R` is always the one we wrote).
+# EVERY LOCAL CARRIES A `__crt_` PREFIX, and that is not style: an out-var NAME equal to one
+# of this function's own locals makes `claude_auth_set_var "$__orc" 125` assign to the LOCAL
+# instead of the caller's variable, after which the name is `125` and the guarded assignment
+# REFUSES. Measured on the first draft — every verdict became
+# `REFUSING: assignment target is not a plain variable name` — which is the same hazard
+# `claude_tmux_cold_verdict_into`'s `__pr*` prefix note records.
+# `read -r -N` would need no sentinel and is REJECTED for two measured reasons: it is bash
+# 4.1+ while this file stays inside bash 3.x for macOS's /bin/bash 3.2, and a builtin read
+# from a path cannot be wrapped in `timeout`, so a fifo would block forever — which is the
+# hazard the bound exists for.
+claude_auth_capped_read_into() {
+  local __crt_ot="$1" __crt_orc="$2" __crt_ob="$3" __crt_bnd="$4" __crt_cap="$5" __crt_f="$6"
+  local __crt_raw='' __crt_rc=0 __crt_len=0
+  claude_auth_set_var "$__crt_ot" ''; claude_auth_set_var "$__crt_orc" 125; claude_auth_set_var "$__crt_ob" 0
+  # `head -c <file>` DIRECTLY, never `cat file | head -c`: `head` exits at the cap and the
+  # producer would take SIGPIPE, which under `pipefail` reports a SUCCESSFUL read as a
+  # failed pipeline.
+  __crt_raw=$(claude_auth_bounded "$__crt_bnd" head -c "$((__crt_cap + 1))" "$__crt_f" 2>/dev/null; printf 'R%s' "$?")
+  __crt_rc=${__crt_raw##*R}
+  __crt_raw=${__crt_raw%R*}
+  # A NON-NUMERIC TAIL MEANS THE SENTINEL DID NOT ARRIVE, which is not a successful read:
+  # 125 is this file's "the call was not made under a bound, so nothing was measured".
+  case "$__crt_rc" in ''|*[!0-9]*) __crt_rc=125 ;; esac
+  claude_auth_bytelen_into __crt_len "$__crt_raw"
+  claude_auth_set_var "$__crt_ot" "$__crt_raw"
+  claude_auth_set_var "$__crt_orc" "$__crt_rc"
+  claude_auth_set_var "$__crt_ob" "$__crt_len"
 }
 
 # ---- alternate credentials: OBSERVED AND NAMED, DELIBERATELY NOT SCRUBBED ----------
@@ -417,8 +508,11 @@ claude_auth_resolve_timeout() {
 # external invocation in this file is either BOUNDED or declared here as unable to block:
 #   BOUNDED — `claude -p` (90s, the network probe); every `tmux` invocation, live or
 #     throwaway (`show-environment -g`, `setenv -g`, `new-session`, `kill-server`); the
-#     pane-report wait loop; THE SINGLE BYTE-CAPPED `head -c` THAT READS THE PANE REPORT
-#     BACK; the digest tool; and (below) the identity lookups `id` uses.
+#     pane-report wait loop; THE THREE BYTE-CAPPED `head -c` READS — the pane report, and
+#     the two streams of the LIVE `show-environment -g` (#3733, roborev job 440: the op
+#     bound bounds TIME, and a peer lane can make that table arbitrarily large, so the
+#     capture is bounded in BYTES as well); the digest tool; and (below) the identity
+#     lookups `id` uses.
 #     A DELEGATION PREFIX AND A SCRUBBING `env` ARE INSIDE THE BOUND, NOT IN FRONT OF IT:
 #     `runuser -u`/`sudo -n -u` and `env -u …` are words of the bounded argv, and `env`
 #     EXECVEs its target rather than forking one, so the single process the bound kills is
@@ -428,10 +522,13 @@ claude_auth_resolve_timeout() {
 #   DECLARED UNBOUNDABLE-BY-NEED, each because it cannot block indefinitely:
 #     * `uname -s` — a syscall wrapper;
 #     * `mktemp`, `rm`, `mkdir`, and the `chown`/`chmod` handover grants over the probe's own
-#       working directory, `cat` reading a
-#       file this process wrote and the `cat >` heredoc that writes the pane script into
-#       that directory — local filesystem calls on paths WE created, over content of a size
-#       this file fixes;
+#       working directory, and the `cat >` heredoc that writes the pane script into that
+#       directory — local filesystem calls on paths WE created, over content of a size this
+#       file fixes. THE `cat` THAT READ THE LIVE READ'S STDERR BACK USED TO BE LISTED HERE,
+#       and its entry was WRONG in the same way the pane report's was: "a file this process
+#       wrote" is a claim about the bytes, not about the size, and `cat` reads to EOF, so a
+#       table a peer lane had enlarged accumulated into a shell variable without limit. It
+#       is a byte-capped `head -c` now, and it is in the BOUNDED list above;
 #     * `grep`/`sed`/`tail` over the pam_env file — only reached AFTER `[ -f ]` has
 #       established it is a REGULAR file, so there is no fifo or device to block on, and
 #       bounding them would make the NOT-PERSISTED verdict itself depend on a `timeout`
@@ -1123,29 +1220,97 @@ claude_tmux_env_verdict_into__untraced() {
   # whose sessions are lanes, which is a worse thing for a report to do than being
   # incomplete. The cold path DOES spawn a pane — on its own throwaway server — and carries
   # LIMITATION 1 instead.
-  local __errf=''
-  if __errf=$(mktemp "${TMPDIR:-/tmp}/cqlite-tmuxenv.XXXXXX" 2>/dev/null) && [ -f "$__errf" ]; then
-    # REGISTERED WITH THE PROBE LIFECYCLE, not merely deleted on the success path. Bounding
-    # this read (above) turned the window between `mktemp` and `rm` from microseconds into
-    # up to CLAUDE_AUTH_TMUX_OP_BOUND seconds against a wedged server, and an interrupt in
-    # that window used to leave a `cqlite-tmuxenv.*` file behind in a directory we do not
-    # own — measured, from this suite's own interrupted run. Same machinery, same reason, as
-    # the two probes' working directories; cleanup is keyed on what is REGISTERED, so the
-    # socket and directory halves are simply skipped here.
-    CLAUDE_AUTH_PROBE_FILE="$__errf"
-    claude_auth_probe_arm_traps
-    __out=$(claude_auth_tmux_run "$CLAUDE_AUTH_TMUX_OP_BOUND" show-environment -g 2>"$__errf")
-    __rc=$?
-    __err=$(cat "$__errf" 2>/dev/null)
-    claude_auth_probe_cleanup
-    claude_auth_probe_restore_traps
-  else
-    # No temp file: keep the ONE invocation and say the cause was not captured, rather than
-    # taking a second reading of a different moment.
-    __out=$(claude_auth_tmux_run "$CLAUDE_AUTH_TMUX_OP_BOUND" show-environment -g 2>/dev/null)
-    __rc=$?
-    __err='(stderr not captured: no temporary file could be created)'
+  # ---- THE CAPTURE IS BOUNDED IN BYTES, NOT ONLY IN TIME (#3733, roborev job 440) ----
+  # `show-environment -g` prints the SERVER's global table, and on this fleet every lane
+  # runs as ONE user while bootstrap is documented to run under `sudo`, so a PEER LANE can
+  # `setenv -g` arbitrarily much into the server this root-run report reads. The op bound
+  # bounds TIME; a command substitution accumulates until the producer stops, so an
+  # unbounded capture is bounded by nothing this process controls. That is the same defect
+  # the pane report already paid for, one function down, and it is closed the same way:
+  # BOTH STREAMS GO TO FILES AND ARE READ BACK BYTE-CAPPED AT CAP+1.
+  #
+  # THE CLASS, NOT THE CITED LINE. The finding named the stdout capture; the region held
+  # THREE unbounded reads of the same producer — this capture, an unbounded `cat` of the
+  # stderr file, and a second unbounded capture in the no-temp-file fallback. A fix that
+  # reached only the cited one would leave the class alive, which is how this site came to
+  # be visited three rounds running.
+  #
+  # AND THE FALLBACK IS GONE RATHER THAN CAPPED. It existed to keep ONE invocation when no
+  # temp file could be made, and its read cannot be capped at all — there is nowhere to put
+  # the bytes. This function's own rule two blocks up ("where the call cannot be bounded it
+  # is not made at all") decides it: no private directory means the read is not taken and
+  # the cause is named. UNMEASURED is the honest answer; running an uncappable read to keep
+  # a fallback alive is the permissive one.
+  #
+  # ONE DIRECTORY, TWO FILES, ONE REGISTRATION. Two `mktemp` files would be two lifecycle
+  # slots for one operation and `CLAUDE_AUTH_PROBE_FILE` holds one path; a directory is what
+  # the existing machinery already cleans (`rm -rf`), and the `cqlite-tmuxenv.` prefix this
+  # suite's interrupt case asserts on is kept, so that case still sees this operation.
+  local __envd='' __outf='' __errf='' __orc=0 __erc=0 __olen=0 __elen=0
+  if ! __envd=$(mktemp -d "${TMPDIR:-/tmp}/cqlite-tmuxenv.XXXXXX" 2>/dev/null) || [ ! -d "$__envd" ]; then
+    claude_auth_set_var "$__od" "no private directory could be created under ${TMPDIR:-/tmp} to hold the two streams of one 'show-environment -g' invocation — refusing to run the read, because a capture with nowhere to put the bytes cannot be BYTE-capped and a peer lane can make that table arbitrarily large; nothing was measured"
+    return 0
   fi
+  __outf="$__envd/out"; __errf="$__envd/err"
+  # REGISTERED WITH THE PROBE LIFECYCLE, not merely deleted on the success path. Bounding
+  # this read (above) turned the window between `mktemp` and `rm` from microseconds into up
+  # to CLAUDE_AUTH_TMUX_OP_BOUND seconds against a wedged server, and an interrupt in that
+  # window used to leave a `cqlite-tmuxenv.*` entry behind in a directory we do not own —
+  # measured, from this suite's own interrupted run. Same machinery, same reason, as the two
+  # probes' working directories; cleanup is keyed on what is REGISTERED, so the socket and
+  # single-file halves are simply skipped here.
+  CLAUDE_AUTH_PROBE_DIR="$__envd"
+  claude_auth_probe_arm_traps
+  # AND THE *WRITE* IS BOUNDED TOO, OR THE FIX ONLY MOVES THE ACCUMULATION TO DISK. Reading
+  # 4 MiB back does nothing about the bytes tmux writes on its way there: an enlarged table
+  # would land in TMPDIR in full, and on this fleet a filled disk is its own outage. `ulimit
+  # -f` is the POSIX bound for that — MEASURED here: the unit is 1024-byte blocks, the file
+  # stops at exactly the limit, and the writer dies of SIGXFSZ (rc 153), which the oversize
+  # branch below then reports by its CAP rather than as a mystery tmux failure. TWICE the
+  # read cap on purpose: the file must still be able to hold CAP+1 bytes, or "over the cap"
+  # would be indistinguishable from "exactly at it".
+  #
+  # A `( )` SUBSHELL IS SAFE HERE, MEASURED IN BOTH RESPECTS: a subshell exiting does NOT
+  # run the parent's EXIT trap (so the registered directory is not deleted under us), and
+  # the traps are dropped inside it so a signal is handled once, by the parent, exactly as
+  # it was before this subshell existed.
+  #
+  # NO `|| true` AND NO REFUSAL ON A FAILED `ulimit`: lowering a soft limit always succeeds,
+  # so the only way this call fails is a HARD limit already below 8 MiB — in which case the
+  # inherited soft limit is lower still and the write is bounded MORE tightly than asked.
+  # The property holds either way, which is why this is a belt and not a checked control.
+  #
+  # ONE INVOCATION, BOTH STREAMS — NOT A SUBSTITUTION AND NOT A PIPE. Running
+  # `show-environment -g` twice meant `__err` came from a DIFFERENT invocation than
+  # `__rc`/`__out`, so a server that started or died between them produced a failure message
+  # with an empty cause. Both streams are redirected to files and `$?` is read on its own
+  # line, so the rc is tmux's own — a `| head -c` would report HEAD's status and, under
+  # `pipefail`, turn a successful capped read into a failed pipeline via SIGPIPE.
+  (
+    trap - EXIT INT TERM HUP
+    # SIGXFSZ IS *IGNORED*, NOT TAKEN — and this is not tidiness, it is two defects. Its
+    # DEFAULT action is terminate-and-DUMP-CORE, so hitting the write bound (a) wrote a core
+    # file into the lane and (b) made bash print its own unprefixed job diagnostic, which
+    # REPRODUCES THIS COMMAND TEXT onto the caller's stderr — measured, both. An IGNORED
+    # disposition is inherited across `execve`, so tmux inherits it too and its oversize
+    # `write` returns EFBIG instead: the bound still holds, the writer still stops, and the
+    # run reports the CAP (below) rather than a core dump and a quoted subshell. `ulimit -c
+    # 0` is belt for the same core file, since a disposition can be reset by the child.
+    trap '' XFSZ
+    ulimit -c 0 2>/dev/null
+    ulimit -f "$(((CLAUDE_AUTH_TMUX_ENV_MAX * 2) / 1024))" 2>/dev/null
+    claude_auth_tmux_run "$CLAUDE_AUTH_TMUX_OP_BOUND" show-environment -g >"$__outf" 2>"$__errf"
+  )
+  __rc=$?
+  # BOUNDED AS WELL AS CAPPED, for the pane report's reason: these paths are in a directory
+  # this process created, but on a fleet where every lane is the same user a same-uid peer
+  # owns it too, and `head -c` on a fifo blocks forever.
+  claude_auth_capped_read_into __out __orc __olen \
+    "$CLAUDE_AUTH_TMUX_OP_BOUND" "$CLAUDE_AUTH_TMUX_ENV_MAX" "$__outf"
+  claude_auth_capped_read_into __err __erc __elen \
+    "$CLAUDE_AUTH_TMUX_OP_BOUND" "$CLAUDE_AUTH_TMUX_ENV_MAX" "$__errf"
+  claude_auth_probe_cleanup
+  claude_auth_probe_restore_traps
   # THE BOUND FIRING IS ITS OWN OUTCOME, and it must be read BEFORE the error text is
   # classified: a server that accepts the connection and never answers produces no stderr at
   # all, so the wordings below would fall through to "failed for a reason that is not a
@@ -1154,7 +1319,53 @@ claude_tmux_env_verdict_into__untraced() {
     claude_auth_set_var "$__od" "the running tmux server did not answer 'show-environment -g' within ${CLAUDE_AUTH_TMUX_OP_BOUND}s and the read was killed (a server that accepts a connection but never responds) — what its panes receive is UNKNOWN"
     return 0
   fi
+  # ---- THE TABLE MUST BE WHOLE BEFORE IT IS PARSED (#3733, roborev job 440) ---------
+  # OVERSIZE IS `UNMEASURED`, NEVER `FAILED`, AND NEVER A SILENT TRUNCATION. An over-cap
+  # table establishes NOTHING about the credential — `FAILED` is an accusation whose remedy
+  # is to replace the persisted value — and parsing the truncated prefix is worse than
+  # either: a table cut before its `CLAUDE_CODE_OAUTH_TOKEN=` line reads as SERVER-MISSING,
+  # whose remedy is to overwrite the value that is already right. So the cap is checked
+  # BEFORE the key lookups, and the cause is NAMED. NO CAPTURED VALUE IS PRINTED: the
+  # detail carries the cap and nothing from the table, because the table is peer-controlled
+  # text and one of its entries is the credential itself.
+  #
+  # AND IT IS CHECKED BEFORE THE `__rc` CLASSIFICATION, not only before the key lookups:
+  # when the WRITE bound above kills tmux with SIGXFSZ the rc is 153, and the honest report
+  # of that run is its CAP — the rc branch below would otherwise call it "failed for a
+  # reason that is not a missing server" and name no cause. An over-cap table is UNMEASURED
+  # whatever tmux's rc was; the no-server and wedged paths write nothing, so neither is
+  # reachable from here.
+  if [ "$__orc" -ne 0 ]; then
+    if claude_auth_bound_fired "$__orc"; then
+      claude_auth_set_var "$__od" "'tmux show-environment -g' answered, but reading its output back was KILLED at ${CLAUDE_AUTH_TMUX_OP_BOUND}s — that path no longer resolves to the regular file this process created (a fifo or a device blocks forever on open), so what the server's global table holds is UNKNOWN"
+    else
+      claude_auth_set_var "$__od" "'tmux show-environment -g' answered, but its output could not be read back (rc=$__orc), so what the server's global table holds is UNKNOWN"
+    fi
+    return 0
+  fi
+  if [ "$__olen" -gt "$CLAUDE_AUTH_TMUX_ENV_MAX" ]; then
+    claude_auth_set_var "$__od" "the running tmux server's global environment exceeded its ${CLAUDE_AUTH_TMUX_ENV_MAX}-byte cap and the read was stopped, so the table was NOT parsed — a truncated table would read as missing a key it may well carry, and on this fleet any same-user process can enlarge that table; nothing could be measured"
+    return 0
+  fi
   if [ "$__rc" -ne 0 ]; then
+    # THE STDERR READ IS JUDGED HERE, NOT AT THE TOP, BECAUSE THIS IS WHERE IT DECIDES.
+    # `__err` is consumed by exactly the two branches below, so refusing the whole read on
+    # an unusable stderr while the TABLE read fine would red a correct run — the shape this
+    # file calls "a guard that reds on correct input". Where it does decide, an unreadable
+    # or over-cap cause cannot be matched against the no-server wordings, and matching a
+    # TRUNCATED cause would answer from a fragment.
+    if [ "$__erc" -ne 0 ]; then
+      if claude_auth_bound_fired "$__erc"; then
+        claude_auth_set_var "$__od" "'tmux show-environment -g' failed (rc=$__rc) and reading its stderr back was KILLED at ${CLAUDE_AUTH_TMUX_OP_BOUND}s — that path no longer resolves to the regular file this process created (a fifo or a device blocks forever on open), so WHY tmux failed is UNKNOWN"
+      else
+        claude_auth_set_var "$__od" "'tmux show-environment -g' failed (rc=$__rc) and its stderr could not be read back (rc=$__erc), so WHY it failed — and therefore whether this box merely has no server yet — is UNKNOWN"
+      fi
+      return 0
+    fi
+    if [ "$__elen" -gt "$CLAUDE_AUTH_TMUX_ENV_MAX" ]; then
+      claude_auth_set_var "$__od" "'tmux show-environment -g' failed (rc=$__rc) and its stderr exceeded its ${CLAUDE_AUTH_TMUX_ENV_MAX}-byte cap, so the read was stopped and the cause was not classified — a diagnosis taken from a truncated fragment would be a guess; nothing could be measured"
+      return 0
+    fi
     # TWO WORDINGS MEAN "NO SERVER", and only one of them was recognised. MEASURED on tmux
     # 3.4: a box that has never started a server has no socket, and tmux says `error
     # connecting to <path> (No such file or directory)` — which is precisely the FRESHLY
@@ -1589,18 +1800,17 @@ CLAUDE_AUTH_PROBE
   # RE-REQUIRED on the captured bytes — the wait loop saw `end` in whatever the path was then,
   # and this asserts it in what we actually parsed. An affirmative re-measurement, not an
   # inference from the absence of a bad signal.
-  local __rtok='' __rlen='' __rcfg='' __rdig='' __match=unmeasured
+  local __rtok='' __rlen='' __rcfg='' __rdig='' __match=unmeasured __rlenb=0
   local __report='' __rrc=0 __line='' __sawend=0
-  # `head -c` RATHER THAN `cat`, AND NOT THROUGH A PIPE. `cat` reads to EOF, so a path that
-  # never ends (a symlink to /dev/zero) accumulated into this variable until the bound fired
-  # — bounded in TIME and unbounded in MEMORY, which could OOM an unattended bootstrap. The
-  # cap is read as CAP+1 bytes so exceeding it is an observable state and not a silent
-  # truncation. `head -c <file>` directly, never `cat file | head -c`: `head` exits at the
-  # cap and the producer would take SIGPIPE, which under `pipefail` reports a SUCCESSFUL
-  # read as a failed pipeline (this file's standing rule).
-  __report=$(claude_auth_bounded "$CLAUDE_AUTH_TMUX_PROBE_BOUND" \
-    head -c "$((CLAUDE_AUTH_REPORT_MAX + 1))" "$__res" 2>/dev/null)
-  __rrc=$?
+  # THE ONE CAPPED READ, SHARED (see `claude_auth_capped_read_into`). `cat` reads to EOF, so
+  # a path that never ends (a symlink to /dev/zero) accumulated into this variable until the
+  # bound fired — bounded in TIME and unbounded in MEMORY, which could OOM an unattended
+  # bootstrap. The cap is read as CAP+1 bytes so exceeding it is an observable state and not
+  # a silent truncation — and it is the SHARED helper because this site's own copy of that
+  # idiom measured the capture with `${#…}` AFTER `$( )` had stripped the report's trailing
+  # newline, so an over-cap report measured exactly AT the cap and the check did not fire.
+  claude_auth_capped_read_into __report __rrc __rlenb \
+    "$CLAUDE_AUTH_TMUX_PROBE_BOUND" "$CLAUDE_AUTH_REPORT_MAX" "$__res"
   if [ "$__rrc" -ne 0 ]; then
     claude_auth_probe_cleanup; claude_auth_probe_restore_traps
     if claude_auth_bound_fired "$__rrc"; then
@@ -1627,7 +1837,14 @@ CLAUDE_AUTH_PROBE
   # incomplete. Checked before the marker, so an oversize read is not reported as a missing
   # `end` — the cap would have cut the marker off and the diagnosis would name the wrong
   # thing.
-  if [ "${#__report}" -gt "$CLAUDE_AUTH_REPORT_MAX" ]; then
+  # THE CAP IS IN BYTES, SO THE CHECK IS IN BYTES — and the length comes from the READ, not
+  # from a `${#…}` here. It was `${#__report}`, which counts CHARACTERS (a different unit
+  # from `head -c`'s) and, worse, was measured after `$( )` had already dropped the report's
+  # trailing newline. The report this probe writes is ASCII and newline-terminated, but the
+  # cap exists precisely because that path is not guaranteed to hold what the probe wrote
+  # (see the two rounds recorded above), and a check whose safety argument is "the content is
+  # ours" is the argument this file keeps retiring.
+  if [ "$__rlenb" -gt "$CLAUDE_AUTH_REPORT_MAX" ]; then
     claude_auth_set_var "$__owhy" "the isolated pane's report exceeded its ${CLAUDE_AUTH_REPORT_MAX}-byte cap and the read was stopped — this probe writes a handful of short lines, so that path is not holding what a pane wrote; nothing could be measured"
     return 0
   fi
