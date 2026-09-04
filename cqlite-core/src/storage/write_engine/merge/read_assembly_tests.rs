@@ -637,7 +637,6 @@ fn composite_with_a_time_component_orders_by_serialized_bytes() {
 ///
 /// Byte encodings, not hand-built values: the decoder is what turns an omitted
 /// suffix into a SHORTER `Value::Tuple`, and that is half of the property.
-#[test]
 /// **Issue #2339 / roborev job 120 F2 — an ALL-TOMBSTONE composite collection reads
 /// ABSENT, and must not be decoded at all.**
 ///
@@ -764,26 +763,6 @@ fn an_older_tombstone_does_not_suppress_a_comparator_equal_newer_live_cell() {
 ///
 /// RED BEFORE THE FIX: two entries (measured, and quoted above verbatim).
 #[test]
-/// **Issue #2339 / roborev job 117 — comparator-EQUAL cell paths must COALESCE to one
-/// logical cell, by timestamp.**
-///
-/// `reconcile.rs` keys cells by `(column, RAW cell_path)`, so two generations carrying
-/// two DIFFERENT byte encodings of the SAME logical key both survive reconciliation.
-/// Before the fix, assembly emitted BOTH as separate map entries:
-///
-/// ```text
-/// Map([(Frozen(Tuple([Integer(1)])),       BigInt(1)),
-///      (Frozen(Tuple([Integer(1), Null])), BigInt(2))])
-/// ```
-///
-/// which is not a valid CQL map. The pair is comparator-equal by
-/// `an_omitted_tuple_suffix_compares_equal_to_an_explicit_all_null_suffix` above, so
-/// exactly ONE must survive: the later timestamp, per the SHARED
-/// `reconcile_rules::cell_wins` rule.
-///
-/// RED BEFORE THE FIX: two entries (measured, and quoted above verbatim).
-#[test]
-
 fn comparator_equal_cell_paths_coalesce_to_the_timestamp_winner() {
     // ftk = map<frozen<tuple<int, text>>, bigint>: an omitted trailing component
     // vs an explicit null one — same logical key, different bytes.
@@ -826,6 +805,16 @@ fn comparator_equal_cell_paths_coalesce_to_the_timestamp_winner() {
     }
 }
 
+/// `TupleType.compareCustom` treats an omitted trailing component and an explicit
+/// NULL one as EQUAL: both sides' remaining components are all null (vacuously so for
+/// the exhausted one), so it returns 0. This is the property
+/// `comparator_equal_cell_paths_coalesce_to_the_timestamp_winner` and
+/// `a_newer_tombstone_suppresses_a_comparator_equal_older_live_cell` both build on, so
+/// it is pinned on its own rather than left implicit in them.
+///
+/// Byte encodings, not hand-built values: the decoder is what turns an omitted suffix
+/// into a SHORTER `Value::Tuple`, and that is half of the property.
+#[test]
 fn an_omitted_tuple_suffix_compares_equal_to_an_explicit_all_null_suffix() {
     let cmp = ComparatorType::Tuple(vec![ComparatorType::Text, ComparatorType::Int]);
     let decode =
