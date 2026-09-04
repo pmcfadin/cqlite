@@ -353,7 +353,30 @@ if [ -r "$LANE_LOCK_SH" ]; then
       fi
       LANE_LEASE_TO_RELEASE="$lane_cur"; LANE_LEASE_BASIS="asserted by --lane-lease"
     else
-      LANE_LEASE_TO_RELEASE="$lane_cur"; LANE_LEASE_BASIS="READ AT TEARDOWN (no --lane-lease given, so this is NOT a checked assertion about which incarnation is being finalized)"
+      # REFUSE — do not release an incarnation nobody asserted (roborev job 450, High; #4055).
+      #
+      # This branch used to ADOPT whatever lease was on disk and force-release it, declaring the
+      # weakness on the note. Declaring it does not make it safe: a peer session that acquired
+      # this lane AFTER finalization began owns that lease, and the next block removes its
+      # WORKTREE. That is #3436's own damage arriving through the teardown written to prevent
+      # it, and a note in a log does not stop it — the same "a check placed before the harmful
+      # effect must PREVENT it, not report it" rule this file already applies at Guard 5.
+      #
+      # SCOPED DELIBERATELY TO "A LEASE EXISTS": an absent record still proceeds (the
+      # affirmative FREE path above), so this cannot red a lane that never held a lock — which
+      # is most of them today, because #4024 means nothing acquires from production code. It
+      # fires only where a live incarnation would be destroyed unasserted, i.e. exactly the
+      # dangerous case, and it is why this is not a blanket `--lane-lease` requirement: a
+      # mandatory flag would refuse every no-lock lane and be the guard agents learn to waive.
+      echo "$prog: REFUSED — lane #$ISSUE HOLDS a lock and no --lane-lease was asserted" >&2
+      echo "  on disk (lease): $lane_cur" >&2
+      echo "  Releasing an incarnation this run never named would destroy a peer's lock and" >&2
+      echo "  then its worktree if that peer acquired the lane after finalization began." >&2
+      echo "  Nothing was released and nothing was removed." >&2
+      echo "  Remedy: pass --lane-lease with the lease you acquired, e.g." >&2
+      echo "    lease=\$(bash $LANE_LOCK_SH probe $ISSUE | tr ' ' '\\n' | sed -n 's/^lease=//p' | head -1)" >&2
+      echo "    $prog --issue $ISSUE --merged-branch <branch> --lane-lease \"\$lease\"" >&2
+      exit 6
     fi
   else
     note "lane lock for issue #$ISSUE: no record to release"

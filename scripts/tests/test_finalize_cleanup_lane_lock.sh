@@ -203,5 +203,49 @@ else
 $out5c"
 fi
 
+# ---------------------------------------------------------------------------
+echo "TEST 6: a lane that HOLDS a lock and no --lane-lease REFUSES (job 450, High; #4055)"
+# ---------------------------------------------------------------------------
+# The unasserted-lease path used to ADOPT whatever lease was on disk and force-release it,
+# declaring the weakness on a note. A peer that acquired the lane AFTER finalization began
+# owns that lease, so the next block removed its WORKTREE — #3436's own damage through the
+# teardown written to prevent it. Only an ASSERTED lease may be released.
+mkdir -p "$T/lane-906"
+sleeper; S6="$REPLY_SLEEPER"
+LANE_LOCK_PID=$S6 bash "$LL" acquire 906 --lane-dir "$T/lane-906" >/dev/null 2>&1
+out6="$(bash "$FC" --issue 906 --merged-branch issue-906-x --dry-run 2>&1)"; rc6=$?
+if [ "$rc6" -eq 6 ] && printf '%s' "$out6" | grep -q 'no --lane-lease was asserted'; then
+  ok "a HELD lane with no --lane-lease REFUSES (exit 6) instead of releasing an unasserted lease"
+else
+  bad "expected exit 6 naming the unasserted lease; got rc=$rc6
+$out6"
+fi
+if [ -f "$(record_of 906)" ] && [ -d "$T/lane-906" ]; then
+  ok "the refusal left BOTH the lock record and the lane directory intact"
+else
+  bad "the refusal destroyed something: rec=$([ -f "$(record_of 906)" ] && echo kept || echo GONE) lane=$([ -d "$T/lane-906" ] && echo kept || echo GONE)"
+fi
+# CONTROL 1: the SAME lane with the RIGHT --lane-lease still proceeds — the refusal is about
+# the ASSERTION being absent, not about the lane being held.
+L6="$(lease_of 906)"
+out6b="$(bash "$FC" --issue 906 --merged-branch issue-906-x --lane-lease "$L6" --dry-run 2>&1)"; rc6b=$?
+if [ "$rc6b" -ne 6 ]; then
+  ok "(control) an ASSERTED matching lease on the same held lane still proceeds"
+else
+  bad "(control) a correctly asserted lease was refused, so the guard reds on correct input: rc=$rc6b
+$out6b"
+fi
+# CONTROL 2: an EMPTY lane with no --lane-lease must STILL proceed. This is what keeps the
+# guard from reddening every lane that never held a lock — most of them, since #4024 means
+# nothing acquires from production code. Scope, not a blanket mandatory flag.
+mkdir -p "$T/lane-907"
+out6c="$(bash "$FC" --issue 907 --merged-branch issue-907-x --dry-run 2>&1)"; rc6c=$?
+if [ "$rc6c" -ne 6 ]; then
+  ok "(control) an EMPTY lane with no --lane-lease still proceeds — the guard is scoped to a HELD lane"
+else
+  bad "(control) an unlocked lane was refused; the guard would red every no-lock lane: rc=$rc6c
+$out6c"
+fi
+
 echo "==== finalize-cleanup lane-lock: passed=$PASS failed=$FAIL ===="
 [ "$FAIL" -eq 0 ] || exit 1
