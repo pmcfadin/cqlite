@@ -368,6 +368,25 @@ pub(super) fn compare_composite(
 ///   refused here too — and Cassandra's `TimeUUIDType` order differs again, so
 ///   inheriting would be wrong for both spellings.
 ///
+/// **SCOPE — why the refusal is CONFINED to the composite arm, measured not
+/// aesthetic.** The same central defect affects a SCALAR element/key of these types
+/// (`set<uuid>`, `set<decimal>`, `map<varint, ...>`), which
+/// `super::sort_elements_by_cell_path` orders with the same
+/// `ComparatorType::compare`. That arm is deliberately NOT narrowed here:
+///
+/// * For a COMPOSITE, refusing restores the PRE-#2339 outcome exactly — that arm
+///   failed closed for EVERY composite (see [`decode_composite`]) — so the refusal
+///   costs no behaviour that existed before #2339, and it stops #2339 introducing a
+///   NEW silent-wrong-order case.
+/// * For a SCALAR the wrong ordering is long-standing AND in-corpus: the committed
+///   Cassandra-written fixtures declare `uuid_set SET<UUID>` / `decimal_set
+///   SET<DECIMAL>` (`test-data/schemas/collections.cql`) and `related_products
+///   SET<UUID>` (`wide-rows.cql`), so refusing there would convert an ordering
+///   imprecision into an availability failure for data Cassandra reads fine.
+///
+/// Both halves converge when #4063 fixes the central arms — that is the fix, and
+/// this guard is deleted with it (the `#[ignore]`d tripwire test says so too).
+///
 /// Dispatch is on the DECLARED comparator, never on the runtime value (#28).
 fn divergent_leaf(cmp: &ComparatorType) -> Option<(&'static str, &'static str)> {
     match cmp {
