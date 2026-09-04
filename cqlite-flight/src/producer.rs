@@ -20,6 +20,7 @@
 //!
 //! [`produce_streaming`]: MergeProducer::produce_streaming
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use arrow::datatypes::{Field as ArrowField, Schema as ArrowSchema};
@@ -356,6 +357,23 @@ pub struct MergeProducer {
     agg: Option<AggPlan>,
     /// Partial-output column metadata, present iff [`Self::agg`] is `Some`.
     partial_columns: Option<Vec<ColumnInfo>>,
+    /// The UNRESOLVED `cql_type` each column carried as DECLARED by the schema,
+    /// captured before any registry resolution, keyed by column name.
+    ///
+    /// **Why a snapshot and not a re-derivation (issue #3960, roborev job 115).**
+    /// `UdtRegistry::resolve_type` is IDEMPOTENT on an already-resolved
+    /// `CqlType::Udt` node. That makes re-resolution safe but also makes it a
+    /// NO-OP, so a column bound under one keyspace can never be re-bound to
+    /// another's same-named UDT — which is exactly what
+    /// [`Self::with_udt_keyspace`] has to do when it runs AFTER
+    /// [`Self::with_udt_registry`]. Resetting to the declaration first is the
+    /// only way re-resolution can change the binding.
+    ///
+    /// It is a stored snapshot rather than a fresh `schema_columns(&self.schema)`
+    /// call because that call is FALLIBLE and `with_udt_keyspace` returns `Self`,
+    /// not `Result` — and fail-soft there would silently keep the stale binding,
+    /// i.e. the defect this exists to remove.
+    original_cql_types: HashMap<String, Option<CqlType>>,
     /// Authoritative UDT registry resolved from the ticket DDL's `CREATE TYPE`
     /// statements (issue #2349). When present it is threaded onto every merge
     /// reader (cold [`KWayMerger::new_with_gc_and_registry_cancellable`] and the
@@ -466,6 +484,10 @@ impl MergeProducer {
             // Keep schema (key-first) order, restricted to the projected set.
             columns.retain(|c| projection.iter().any(|p| p == &c.name));
         }
+        let original_cql_types = columns
+            .iter()
+            .map(|c| (c.name.clone(), c.cql_type.clone()))
+            .collect();
         Ok(Self {
             schema,
             columns,
@@ -478,6 +500,7 @@ impl MergeProducer {
             partial_columns: None,
             udt_registry: None,
             udt_keyspace: None,
+            original_cql_types,
             // Issue #2374/#2789: capture the read-time reconciliation clock once.
             now_secs: Self::reconciliation_now_secs(),
         })
@@ -550,12 +573,41 @@ impl MergeProducer {
         // already-resolved tree, so this can never un-resolve a column.
         if let Some(registry) = self.udt_registry.clone() {
             let keyspace = self.effective_udt_keyspace().to_string();
+            // RESET TO THE DECLARATION FIRST (issue #3960, roborev job 115). The
+            // previous revision relied on re-resolution alone and cited
+            // `resolve_type`'s idempotence as the safety argument — but idempotence
+            // is precisely why re-resolution could not FIX anything here: a column
+            // already bound to `schema.keyspace`'s `address` UDT stayed bound to it,
+            // so a registry holding a DIFFERENT same-named `address` in the newly
+            // selected keyspace was silently ignored and the promised Arrow metadata
+            // described the wrong type. Order-independence was documented and untrue.
+            Self::reset_columns_to_declared(&self.original_cql_types, &mut self.columns);
             Self::resolve_columns_udts(&registry, &keyspace, &mut self.columns);
             if let Some(partial) = self.partial_columns.as_mut() {
+                Self::reset_columns_to_declared(&self.original_cql_types, partial);
                 Self::resolve_columns_udts(&registry, &keyspace, partial);
             }
         }
         self
+    }
+
+    /// Restore each column's `cql_type` to the DECLARED (unresolved) form captured
+    /// at construction, so a following [`Self::resolve_columns_udts`] binds against
+    /// the current keyspace rather than no-oping on an already-resolved tree
+    /// (issue #3960).
+    ///
+    /// A column with no snapshot entry is left ALONE rather than cleared: absence
+    /// means it was never a schema-declared column, and clearing its type would
+    /// turn a resolution bug into a missing-type bug.
+    fn reset_columns_to_declared(
+        declared: &HashMap<String, Option<CqlType>>,
+        columns: &mut [ColumnInfo],
+    ) {
+        for column in columns {
+            if let Some(original) = declared.get(&column.name) {
+                column.cql_type = original.clone();
+            }
+        }
     }
 
     /// The keyspace an UNQUALIFIED UDT reference resolves under: the explicitly
@@ -654,6 +706,15 @@ impl MergeProducer {
     pub fn with_aggregation(mut self, aggregation: &Aggregation) -> Result<Self, ProducerError> {
         let plan = AggPlan::build(aggregation, &self.schema)?;
         let mut partial = plan.partial_columns(&self.schema)?;
+        // Snapshot the PARTIAL columns' declared types before any resolution, for the
+        // same reason as the full-row set (issue #3960): `with_udt_keyspace` running
+        // after this must be able to reset them to the declaration and re-bind.
+        // `partial_columns` derives from the RAW schema, so these ARE declarations.
+        for column in &partial {
+            self.original_cql_types
+                .entry(column.name.clone())
+                .or_insert_with(|| column.cql_type.clone());
+        }
         // Production order is `with_udt_registry(...)` THEN `with_aggregation(...)`
         // (service.rs). `plan.partial_columns` derives from the RAW schema, so a
         // UDT-typed group-by column would carry `Custom("udt:X")` while its emitted
