@@ -56,7 +56,7 @@
 //! its caller's `require_fully_consumed` (`typed_value.rs:91`) then REFUSES the same
 //! trailing bytes these tests accept. [`the_raw_value_path_refuses_what_these_two_sites_accept`]
 //! pins that asymmetry so it is visible rather than surprising. It is stricter than
-//! the oracle above; #3778 filed that separately as a follow-up and deliberately did
+//! the oracle above; #3778 filed that as follow-up **#4038** and deliberately did
 //! NOT relax it in this change. Do not "unify" the three arms by tightening these
 //! two — that is Option B under another name.
 
@@ -234,7 +234,7 @@ fn two_encodings_differing_only_in_trailing_bytes_decode_equal_cell() {
 ///
 /// Pinned so the divergence is VISIBLE rather than surprising. That path is
 /// STRICTER than the oracle (Cassandra's duration serializer performs no
-/// consumption check at all) — #3778 filed it as a separate follow-up and
+/// consumption check at all) — #3778 filed it as follow-up #4038 and
 /// deliberately did not relax it here. Note the framing difference: on this path
 /// the slice handed in IS the value, so there is no `[VInt len]` prefix.
 #[test]
@@ -246,7 +246,7 @@ fn the_raw_value_path_refuses_what_these_two_sites_accept() {
     let result = parser().parse_value_from_raw_bytes(&body, "duration", "d", 0);
     let err = result.expect_err(
         "the bounded raw_value path refuses trailing bytes (stricter than Cassandra; \
-         separate follow-up under #3778)",
+         follow-up #4038)",
     );
     let msg = err.to_string();
     assert!(

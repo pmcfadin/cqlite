@@ -236,7 +236,8 @@
 //! `…_cell`), whose header carries the oracle so a future reader does not "fix" it.
 //! That file also pins the ASYMMETRY: the third duration arm, `raw_value`'s bounded
 //! one, REFUSES the same input via `require_fully_consumed` — stricter than the
-//! oracle, filed as a separate follow-up under #3778 and deliberately unchanged.
+//! oracle, filed as follow-up **#4038** (direction: relax to match the oracle) and
+//! deliberately unchanged here.
 //!
 //! None of this is patched with a second framing walk here: a call-site validator
 //! that must know about every decoder is precisely the shape this module replaced.
