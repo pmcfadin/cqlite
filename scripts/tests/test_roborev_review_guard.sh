@@ -8763,6 +8763,153 @@ else
   ok 'structural (#3759): the agent gate is untouched by the misplacement probe'
 fi
 
+printf '== (#4050) the SHARED findings-count recogniser is BEHAVIOURALLY IDENTICAL ==\n'
+# ===========================================================================
+# ISSUE #4050 AC1. The recogniser moved out of `roborev_check_findings` into
+# `lib/roborev-findings-count.sh` so the MERGE-GATE leg can derive the same count from the
+# same daemon-recorded review text by running the SAME CODE. A move is only sound if it
+# changed nothing, and "nothing changed" is knowable only by DIFFERENTIAL TESTING against
+# what shipped — so the RETIRED INLINE PIPELINE is reproduced here VERBATIM as the oracle
+# and both are driven over a table of review-text shapes.
+#
+# THE ORACLE IS A COPY, WHICH IS THE ONE PLACE A SECOND IMPLEMENTATION IS CORRECT: it is
+# the artifact under comparison, not a second production path. It is deliberately NOT
+# re-derived from the library (that would share the defect's blind spot — the #3822
+# clause-7 lesson, where a test extracted through the same awk it was verifying).
+#
+# THE TABLE CARRIES THE SHAPES THIS REPO HAS ALREADY BEEN BURNED BY: a HEADERLESS findings
+# review (which `review-completed` deliberately accepts), a findings block whose findings
+# carry NO recognised severity marker, and a finding whose own prose contains "Summary:"
+# MID-SENTENCE — the terminator must stay LINE-INITIAL or the block closes early and the
+# count comes out low.
+_fc_lib="$SCRIPT_DIR/../flow/lib/roborev-findings-count.sh"
+if [ ! -f "$_fc_lib" ] || [ ! -r "$_fc_lib" ]; then
+  bad "structural (#4050): the shared recogniser is not readable at $_fc_lib, so the differential could not run"
+else
+  _fc_dir="$tmp/findings-count-differential"
+  mkdir -p "$_fc_dir"
+  # The RETIRED inline pipeline, verbatim from roborev-review-checks.sh before #4050.
+  cat >"$_fc_dir/reference.sh" <<'FCREF'
+#!/usr/bin/env bash
+# The pre-#4050 inline implementation, copied verbatim. $1 = transcript, $2 = block file.
+LOG="$1"
+FINDINGS_BLOCK_FILE="$2"
+{ awk 'BEGIN { inblock = 0 }
+       tolower($0) ~ /^[[:space:]]*#{1,4}[[:space:]]*(review[[:space:]]+)?findings?/ { inblock = 1; next }
+       tolower($0) ~ /^[[:space:]]*findings?[[:space:]]*:/ { inblock = 1; next }
+       tolower($0) ~ /^[[:space:]]*#{1,4}[[:space:]]*summary/ { inblock = 0 }
+       tolower($0) ~ /^[[:space:]]*summary[[:space:]]*:/ { inblock = 0 }
+       inblock { print }' "$LOG" 2>/dev/null || true; } >"$FINDINGS_BLOCK_FILE"
+block_marker_count=$({ grep -oiE '\*\*severity\*\*[[:space:]]*:[[:space:]]*(critical|high|medium|low)|\[(critical|high|medium|low)\]|(^|[^[:alnum:]])(critical|high|medium|low): ' "$FINDINGS_BLOCK_FILE" 2>/dev/null || true; } | wc -l | tr -d '[:space:]')
+block_marker_count=${block_marker_count:-0}
+printf '%s' "$block_marker_count"
+FCREF
+  # The library under test, driven through a one-line harness so it is exercised exactly as
+  # a consumer exercises it: sourced, then called.
+  cat >"$_fc_dir/subject.sh" <<'FCSUB'
+#!/usr/bin/env bash
+# $1 = library, $2 = transcript, $3 = block file. Prints the count, or `UNMEASURED`.
+. "$1"
+if c=$(roborev_findings_count "$2" "$3"); then printf '%s' "$c"; else printf 'UNMEASURED'; fi
+FCSUB
+  # --- the table: <name>|<review text with \n escapes> ----------------------
+  # `%b` renders the escapes, so each row is one line here and a multi-line transcript there.
+  _fc_rows='severity-heading|## Findings\n- **Severity**: High\n  Problem: x\n## Summary\nall done\n
+severity-lower-heading|### findings\n- **severity**:  medium\n## summary\n
+bracket-marker|## Review Findings\n1. [High] the thing\n2. [low] the other\n## Summary\n
+colon-marker|Findings:\nHigh: the thing\nMedium: the other\n\nSummary: done\n
+headerless-findings-review|The review found problems.\n- **Severity**: High\n\n## Summary\nnot great\n
+findings-block-with-no-severity-marker|## Findings\n1. The count is wrong here.\n2. And here.\n## Summary\ntwo issues\n
+summary-mid-sentence-in-a-finding|## Findings\n- **Severity**: High\n  Problem: the Summary: line is emitted before the count.\n- **Severity**: Low\n  Problem: second one.\n## Summary\ndone\n
+marker-after-the-summary-terminator|## Findings\n- **Severity**: High\n## Summary\nAlso [Critical] was mentioned in passing.\n
+marker-before-any-heading|A quoted [Critical] in the preamble.\n## Findings\n- **Severity**: Low\n## Summary\n
+clean-review|## Summary\nNo issues found.\n
+empty-transcript|
+one-blank-line|\n
+crlf-severity|## Findings\r\n- **Severity**: High\r\n## Summary\r\n'
+  _fc_n=0
+  _fc_bad=0
+  _fc_agree=0
+  _fc_saved_ifs="$IFS"
+  IFS='
+'
+  for _fc_row in $_fc_rows; do
+    IFS="$_fc_saved_ifs"
+    [ -n "$_fc_row" ] || continue
+    _fc_name="${_fc_row%%|*}"
+    _fc_body="${_fc_row#*|}"
+    _fc_n=$((_fc_n + 1))
+    _fc_log="$_fc_dir/log-$_fc_n.txt"
+    printf '%b' "$_fc_body" >"$_fc_log"
+    _fc_want=$(bash "$_fc_dir/reference.sh" "$_fc_log" "$_fc_dir/ref-block-$_fc_n.txt")
+    _fc_got=$(bash "$_fc_dir/subject.sh" "$_fc_lib" "$_fc_log" "$_fc_dir/lib-block-$_fc_n.txt")
+    if [ "$_fc_want" = "$_fc_got" ]; then
+      _fc_agree=$((_fc_agree + 1))
+    else
+      _fc_bad=1
+      bad "structural (#4050) differential '$_fc_name': the extracted library answers '$_fc_got' where the retired inline pipeline answered '$_fc_want' — the move CHANGED behaviour, and both ends of the #3626 count equality now read the same code"
+    fi
+    # The BLOCK the two extract must also match, or an agreeing count is a coincidence.
+    if ! cmp -s "$_fc_dir/ref-block-$_fc_n.txt" "$_fc_dir/lib-block-$_fc_n.txt"; then
+      _fc_bad=1
+      bad "structural (#4050) differential '$_fc_name': the two implementations extracted DIFFERENT findings blocks, so an equal count would be a coincidence"
+    fi
+    IFS='
+'
+  done
+  IFS="$_fc_saved_ifs"
+  # A FLOOR, not just a tally: a span-replacing edit that silently deletes rows leaves a
+  # green `failed: 0` over a shrunken table (#3544's case-floor lesson).
+  if [ "$_fc_n" -lt 13 ]; then
+    bad "structural (#4050): the differential table holds only $_fc_n rows — the committed floor is 13, so rows were deleted and the agreement below is over a shrunken table"
+  elif [ "$_fc_bad" -eq 0 ]; then
+    ok "structural (#4050): the extracted recogniser agrees with the retired inline pipeline on all $_fc_agree table shapes, block bytes included"
+  fi
+
+  # THE THREE-VALUED UPGRADE IS THE ONE DELIBERATE DIFFERENCE, AND IT IS ASSERTED AS SUCH.
+  # The inline pipeline collapsed "could not read the transcript" onto `0` through its
+  # `|| true`; the library returns 1 and echoes NOTHING, because the MERGE-TIME caller must
+  # never read an unmeasurable state as a measurement. The review-time caller still folds it
+  # to 0 at its audited `:-0` default, which is why nothing at that end changed.
+  _fc_missing="$_fc_dir/there-is-no-such-transcript.txt"
+  rm -f "$_fc_missing"
+  _fc_ref_missing=$(bash "$_fc_dir/reference.sh" "$_fc_missing" "$_fc_dir/ref-block-missing.txt")
+  _fc_lib_missing=$(bash "$_fc_dir/subject.sh" "$_fc_lib" "$_fc_missing" "$_fc_dir/lib-block-missing.txt")
+  if [ "$_fc_ref_missing" = "0" ] && [ "$_fc_lib_missing" = "UNMEASURED" ]; then
+    ok 'structural (#4050): an unreadable transcript is UNMEASURED in the library and was 0 inline — the one deliberate difference, and it is the three-valued direction'
+  else
+    bad "structural (#4050): the unreadable-transcript case did not behave as documented (inline '$_fc_ref_missing', library '$_fc_lib_missing') — the library must never answer 0 for a transcript it could not read"
+  fi
+  # ...and the REVIEW-TIME consumer must still fold that unmeasured answer onto 0 at its own
+  # audited default, or this refactor silently changed `findings:` on an unreadable transcript.
+  if grep -q 'block_marker_count=$(roborev_findings_count "$LOG" "$FINDINGS_BLOCK_FILE") ||' "$CHECKS_SRC" &&
+    grep -q 'block_marker_count=${block_marker_count:-0}' "$CHECKS_SRC"; then
+    ok 'structural (#4050): the review-time caller folds the unmeasured answer onto 0 at the audited `:-0` default, so its behaviour is unchanged'
+  else
+    bad 'structural (#4050): the review-time caller no longer routes through roborev_findings_count with the audited `:-0` fold — an unmeasured count would reach `findings:` unfolded'
+  fi
+
+  # POSITIVE CONTROL: the differential must be ABLE to catch a real regression, or its green
+  # says nothing. A scratch copy of the library loses the `^` anchor on the Summary
+  # terminator — the exact defect the mid-sentence row exists for — and the table must
+  # DISAGREE on that row while the anchored original agrees.
+  sed 's|tolower($0) ~ /\^\[\[:space:\]\]\*summary\[\[:space:\]\]\*:/|tolower($0) ~ /[[:space:]]*summary[[:space:]]*:/|' \
+    "$_fc_lib" >"$_fc_dir/mutant.sh"
+  if cmp -s "$_fc_lib" "$_fc_dir/mutant.sh"; then
+    bad 'structural (#4050) control: the un-anchoring mutation did not apply, so the differential was never shown to discriminate (a green table here would prove nothing)'
+  else
+    _fc_ctl_log="$_fc_dir/control-log.txt"
+    printf '%b' '## Findings\n- **Severity**: High\n  Problem: the Summary: line is emitted before the count.\n- **Severity**: Low\n  Problem: second one.\n## Summary\ndone\n' >"$_fc_ctl_log"
+    _fc_ctl_want=$(bash "$_fc_dir/reference.sh" "$_fc_ctl_log" "$_fc_dir/ctl-ref.txt")
+    _fc_ctl_got=$(bash "$_fc_dir/subject.sh" "$_fc_dir/mutant.sh" "$_fc_ctl_log" "$_fc_dir/ctl-mut.txt")
+    if [ "$_fc_ctl_want" = "2" ] && [ "$_fc_ctl_got" != "$_fc_ctl_want" ]; then
+      ok "structural (#4050) control: un-anchoring the Summary terminator makes the mid-sentence row answer '$_fc_ctl_got' instead of 2, so the table really discriminates that defect"
+    else
+      bad "structural (#4050) control: the un-anchored mutant answered '$_fc_ctl_got' against an expected inline answer of 2 (got '$_fc_ctl_want') — the differential cannot see the line-initial-terminator defect it is written for"
+    fi
+  fi
+fi
+
 printf '== hermeticity: the wrapper never reaches a real roborev ==\n'
 reset_stub
 if grep -qE '^\s*roborev (review|show|list)' "$WRAPPER_REAL"; then
