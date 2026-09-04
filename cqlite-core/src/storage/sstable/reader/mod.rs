@@ -49,6 +49,8 @@ mod prefetch_window;
 // sync-fallback registry-schema pre-resolution (issue #1692)
 #[cfg(feature = "state_machine")]
 mod registry_schema;
+// Reader-scoped scan-lifetime madvise seam (issue #3853).
+mod scan_lifetime;
 // Windowed streaming-scan driver (issue #1143); `pub` ONLY under non-default
 // `scan-offload-probe` so the #1143 guard reaches its probe, else private.
 #[cfg(not(feature = "scan-offload-probe"))]
@@ -124,7 +126,7 @@ use source::{BlockSource, ScanSource};
 // Disk-access backend resolution (`backend_resolve`). The parse helpers stay
 // private to that module and are exercised through it by `reader::tests`.
 #[cfg(unix)]
-use backend_resolve::mmap_advice_for;
+use backend_resolve::mmap_open_advice_for;
 use backend_resolve::{
     direct_io_available, disk_access_mode_via_env, mmap_enabled_via_env, prefetch_mode_via_env,
     resolve_disk_access_mode, system_memory_bytes,
@@ -315,6 +317,8 @@ impl SSTableReader {
         // contract that removes the BTI per-lookup `open(2)`. Every non-mmap
         // backend degrades gracefully to a plain positioned fd if the faster
         // backend is refused, mirroring `build_block_sources`.
+        // #3853: the mapping the POINT plane landed on (see `scan_lifetime::resolve`).
+        let mut point_plane_mmap: Option<Arc<memmap2::Mmap>> = None;
         let point_source: Arc<dyn read_at::ReadAt> = match &scan_source {
             ScanSource::Mapped(mmap) => {
                 #[cfg(unix)]
@@ -322,6 +326,7 @@ impl SSTableReader {
                     Self::point_read_mmap(path, file_size, mmap, POINT_MMAP_MADV_RANDOM_MIN_BYTES);
                 #[cfg(not(unix))]
                 let point_mmap = mmap.clone();
+                let _prev = point_plane_mmap.replace(point_mmap.clone()); // #3853
                 Arc::new(read_at::MmapReadAt::new(point_mmap))
             }
             #[cfg(unix)]
@@ -353,6 +358,10 @@ impl SSTableReader {
             ScanSource::Direct { .. } => point_source.clone(),
             ScanSource::Buffered { .. } => point_source.clone(),
         };
+
+        // #3853 scan-lifetime madvise seam; every gate condition: `scan_lifetime::resolve`.
+        let scan_lifetime =
+            scan_lifetime::resolve(&scan_source, prefetch, point_plane_mmap.as_ref());
 
         // Parse header - read available bytes, not a fixed size
         // NOTE: For NB format files (Cassandra 4.x+), Data.db often contains compressed row data
@@ -710,6 +719,7 @@ impl SSTableReader {
             bti_lookup_memo: std::sync::Mutex::new(None),
             key_offset_cache,
             generation_identity,
+            scan_lifetime,
         })
     }
 
@@ -829,10 +839,12 @@ impl SSTableReader {
                         path.display(),
                         file_size
                     );
-                    // Best-effort read-ahead advice (Unix-only; madvise has no
-                    // Windows equivalent here). Failure is non-fatal.
+                    // Best-effort OPEN-TIME read-ahead advice (Unix-only; madvise
+                    // has no Windows equivalent). Non-fatal. `WillNeed` is NOT
+                    // applied here any more: it moved to SCAN START (#3853, see
+                    // `reader::scan_lifetime`).
                     #[cfg(unix)]
-                    if let Some(advice) = mmap_advice_for(prefetch) {
+                    if let Some(advice) = mmap_open_advice_for(prefetch) {
                         if let Err(e) = mmap.advise(advice) {
                             tracing::debug!(
                                 "madvise({:?}) on {} failed: {}",

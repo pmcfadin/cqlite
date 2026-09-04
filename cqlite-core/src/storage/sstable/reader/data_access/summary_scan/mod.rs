@@ -433,6 +433,7 @@ impl SSTableReader {
     where
         F: FnMut((RowKey, ScanRow)) -> Result<ControlFlow<()>>,
     {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
         let parser = self.build_v5_parser(true);
         let parser = match now_secs {
             Some(now) => parser.with_now_secs(now),
@@ -479,6 +480,7 @@ impl SSTableReader {
     where
         F: FnMut(super::super::compaction_row::CompactionRow) -> Result<ControlFlow<()>>,
     {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
         use crate::storage::sstable::reader::parsing::ParseStep;
         let parser = self.build_v5_parser(false);
         let owned_schema = schema.cloned().or_else(|| self.get_table_schema(None));
@@ -546,6 +548,7 @@ impl SSTableReader {
     where
         F: FnMut(super::super::compaction_row::CompactionRow) -> Result<ControlFlow<()>>,
     {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
         let summary_usable = self
             .summary_reader
             .as_ref()
