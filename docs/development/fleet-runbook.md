@@ -903,6 +903,7 @@ machine + heartbeat age (issue #2089). Interpretation:
 | `missing-schemas: FAIL-CLOSED (#3148)` | Either a committed `test-data/schemas/*.cql` is unreadable (broken checkout — `git restore --source=HEAD -- test-data/schemas`) or `CQLITE_SCHEMAS_ROOT` is set to a **relative** path (export an absolute one, or unset it). Never a corpus-layout problem: the schemas root is checkout-relative. No opt-out exists — do not look for one. |
 | Two machines want the same issue | Impossible past the claim: the second claim-ref push is rejected server-side (non-fast-forward on the fixed-name ref, #2665); the loser sees `CLAIM LOST` and picks the next Ready item. |
 | **SSH accepts TCP but sends no banner** (from inside the VPC) | **Check `dmesg` for an OOM kill BEFORE concluding the instance is broken** — see the diagnostic order below. This is a memory symptom far more often than a broken box, and a soft reboot may be silently ignored. |
+| **A new tmux session lands on claude's first-run login chooser** (so a retired lane cannot be replaced) | The credential did not reach the pane. `bash scripts/claude-auth-capability.sh --report` **observes** where it stops — it is a report and certifies nothing, so read the lines rather than an exit status. Repair with an explicit `bash scripts/bootstrap-agent-machine.sh --fix-claude-auth`, which **overwrites** the running server's credential with the persisted one and is **not** implied by `--yes`. **No browser, no re-login, no reboot.** Full mechanism below, "Claude credential reachability" (#3733). |
 | A lane vanished — worktree clean, claim held, nothing reported | **On a `/drive-issue` fleet, `dead-lanes` is a DEAD END — read *Lane liveness on a supervisor-less `/drive-issue` fleet* below first (#3548).** Its subject set is `refs/lane-claims/*` (+ legacy `refs/machine-claims/*`), written by the supervisor (who writes them and who does not is stated once in *Lane liveness on a supervisor-less `/drive-issue` fleet*), and on this fleet it had nothing to report when measured — *nothing was reported*, never *nothing is dead*. The measurement, its date and its limits are stated once in the section below. What to do instead: check `dmesg` for an OOM kill (diagnostic order below), then reconcile the board against the branch using **the two board signatures, NEITHER of which is a verdict** — stated in full, once, in *Lane liveness on a supervisor-less `/drive-issue` fleet* below, and deliberately not restated here. **On a SUPERVISOR fleet** the command is the right tool: `bash scripts/flow/claim-heartbeat.sh dead-lanes` (#3393). Reports every claim whose owning process is gone, with no 4h wait and without suppressing a lane that holds an open PR. `should-reap` will not tell you: it consults the PID only after the claim is >4h old, so a lane killed a minute ago is indistinguishable from a healthy one for four hours. **Exit 3 = a dead lane was found; exit 1 = none was found.** This slice is positive-detection only and **never exits 0** (#3393 split): act on 3, never read 1 as a clean bill of health. Per-lane refs do make a sound clean verdict possible — a surviving lane's stamp no longer overwrites a dead sibling's — but it is tracked separately. LOCAL-ONLY: run it ON the box. A just-spawned lane reads `UNKNOWN-IDENTITY` until the supervisor's next stamp refresh; that is expected. |
 
 
@@ -1041,6 +1042,333 @@ silent lane deaths (`lane-1705` twice, `lane-1697` once), each leaving a clean w
 claim and an open PR; covering that is what `dead-lanes` exists for. And **lane density is the
 dial**: 4 lanes per box produced OOM kills and wedges on *both* boxes, while the 1-lane rig box
 recorded **zero** and never wedged.
+
+---
+
+## Claude credential reachability (#3733)
+
+**Symptom.** A newly created tmux session on a fleet box cannot start `claude`: it lands on the
+first-run login chooser, so a retired lane cannot be replaced. Nothing is wrong with the disk, and
+the *same box* was working an hour earlier.
+
+### The mechanism, in six measured facts
+
+1. The ONLY working credential is the environment variable `CLAUDE_CODE_OAUTH_TOKEN`.
+   `$CLAUDE_CONFIG_DIR/.credentials.json` holds **empty** `accessToken`/`refreshToken` and
+   `expiresAt: 0` — it authenticates nothing (probe it with no token: rc 1,
+   `Failed to authenticate: OAuth session expired and could not be refreshed`).
+2. The token authenticates **independently of `CLAUDE_CONFIG_DIR`** — token plus a fresh empty
+   config dir authenticates fine. The config dir is onboarding/session state, not auth. (An absent
+   `CLAUDE_CONFIG_DIR` is what produces the *un-onboarded* first-run picker, which looks like the
+   same failure and is not.)
+3. The token is provisioned in **`/etc/environment` only** (mode 644), which is read by **pam_env**
+   — so it reaches login/ssh sessions and nothing else. `/etc/profile.d/30-agent-ami-data.sh`
+   carries `CLAUDE_CONFIG_DIR` but **not** the token.
+4. A tmux pane's environment comes from the **tmux server**, fixed at server start. A server that
+   predates provisioning yields panes with **neither** variable. *This is the actual field failure.*
+5. `tmux new-session <command>` does **not** run the command through a login shell (measured:
+   `login_shell=no`), so `/etc/profile.d/*` never executes for a spawned lane either.
+6. Therefore **nothing on disk distinguishes a working box from a broken one** — the distinguishing
+   state is a long-running process's start environment. That is why the failure is silent until
+   dispatch, and why a file check can never find it.
+
+### What bootstrap reports — and why it is a REPORT, not a check
+
+**Nothing here certifies that this box can start a lane, and that is the #3733 lead ruling rather
+than an omission.** Section 5c used to print two CERTIFYING verdicts whose passing state was
+`VERIFIED` and which `--strict` read. Three consecutive independent reviews each found a NEW
+High-severity defect and all three were one shape — **the probe cannot observe the property its
+verdict named**: the cold-start probe re-supplies the `/etc/environment` values into its own
+throwaway server (tmux propagation, not pam_env delivery); the `claude -p` probe never neutralises
+`ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`/`CLAUDE_CODE_USE_BEDROCK`/`CLAUDE_CODE_USE_VERTEX` (so a
+sentinel means *some* credential worked); `[ -d <config dir> ]` runs as the caller, root under the
+documented `sudo` invocation (so it says the directory exists *to us*). Each fix was correct and the
+family kept regenerating, so the design changed instead. The **four** things the observations cannot
+see are documented **in the script** as `LIMITATION 1..5 (#3733)` at their own code sites — five
+numbered slots, of which slot 4 is a **record of one that was reclassified as a defect and fixed**
+(root wrote into a directory it had already handed to the invoking user, which on a one-user fleet is
+a peer lane's symlink opportunity; a hazard that exists whatever the output says is not a limitation
+of a report). The slot is kept rather than renumbered so older references still resolve.
+
+Three consequences to work with:
+
+* **No state is named `VERIFIED`.** That is the word a pasted log reads as a certification whatever
+  the prose beside it says, so the states now say what was *seen*. The live and cold "both present"
+  states are deliberately different tokens — one name for both hid which observation was made.
+* **Every run prints a scope note**, `claude-auth-report: OBSERVATIONS-ONLY`, in bootstrap's output
+  as well as the CLI's, because bootstrap's output is what an operator pastes.
+* **Nothing downstream may act on it.** Both lines go through `info` — never `[ok]`, which is what
+  `--strict` reads, and never `[warn]`, which is what makes it fail — so `--strict` neither passes
+  nor fails on them. In the CLI **the exit status carries no verdict**: a printed report exits 0
+  whatever it found, so the best- and worst-looking boxes are indistinguishable by status and
+  `if script --auth; then …` cannot be written. A state rename alone would have left that gate
+  intact. `--skip-claude-auth` is loud and is **not** a `[warn]`, unlike its `git-push:`/`gate-pin:`
+  siblings: those decline a real verdict, and here there is no green to buy.
+
+**`FAILED` is an accusation about a credential, so it is earned, not defaulted to**: it needs BOTH
+halves — a positively identified authentication rejection AND **no alternate credential in the
+probe's environment** — and every other unsuccessful probe (rate limit, outage, quota, crash, bound
+fired, no sentinel, an unattributable rejection) is `UNMEASURED` with its cause named. The second
+half is LIMITATION 2 deciding a verdict rather than annotating one: `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK` and `CLAUDE_CODE_USE_VERTEX` are retained by
+design, which is why `PROBE-ANSWERED` claims only that *some* credential answered — and by the same
+reasoning a rejection means only that *some* credential was rejected, while `FAILED`'s remedy names
+the PERSISTED value. An invalid **alternate** therefore used to earn a confident instruction to
+destroy a **valid** token: the same harm as the rate-limit case, on the axis the report-only
+demotion did not sweep (roborev job 433). Scrubbing the alternates would make the accusation
+attributable and is refused — it changes what the probe authenticates with, which is a behaviour
+change hiding behind a report — so the VERDICT is narrowed instead.
+The matchers are ordered killed-by-bound -> transport -> service failure -> **rejection last**, so a
+response naming both a benign cause and an authentication wording takes the non-accusing answer:
+ambiguity is not evidence, and telling someone to replace a working token because the API was
+rate-limiting is exactly the "measurement of something adjacent, reported as the thing itself"
+failure this section exists for. `NO-SERVER` is UNMEASURED-class — since the cold-start probe it
+means "the isolated probe could not run", **not** merely "no server was running": a serverless box
+is measured, not excused (below).
+
+```
+claude-auth:      PROBE-ANSWERED | NOT-PERSISTED | FAILED | UNMEASURED
+claude-tmux-env:  live server: SERVER-CARRIES-BOTH | SERVER-STALE | SERVER-MISSING
+                               | SERVER-INCOMPLETE | SERVER-CONFIG-STALE | SERVER-CONFIG-NODIR
+                  no server:   COLD-START-DELIVERS-BOTH | COLD-START-MISSING
+                               | COLD-START-INCOMPLETE | COLD-START-NODIR
+                  either:      NO-SERVER | UNMEASURED
+claude-auth-report: OBSERVATIONS-ONLY   <- printed every run; neither line above certifies the box
+```
+
+They are two lines because they observe different things and the operator actions differ:
+
+| Observation | What it means | What to do |
+|---|---|---|
+| `claude-auth: PROBE-ANSWERED` | A bounded `claude -p` run whose environment **carried** the persisted value returned rc 0 **and** the sentinel. It does **not** say the persisted value is what authenticated — the line names any alternate credential that was also present (LIMITATION 2). | Nothing. This is not a green light; it is one observation. |
+| `claude-tmux-env: SERVER-CARRIES-BOTH` | The running server's **global** environment carries a matching token and a matching `CLAUDE_CONFIG_DIR` that exists as seen by this process. No pane was spawned (LIMITATION 5) and the directory's usability to the agent is unobserved (LIMITATION 3). | Nothing. |
+| `claude-tmux-env: COLD-START-DELIVERS-BOTH` | No live server. A throwaway one, **started with the two values this process read out of `/etc/environment`**, passed both to a pane. So it observes tmux **propagation**, not pam_env **delivery** — a line pam would have dropped is invisible to it (LIMITATION 1). | Nothing. |
+| `claude-auth: NOT-PERSISTED` | No `CLAUDE_CODE_OAUTH_TOKEN` line in `/etc/environment`. | Provision it (below). Bootstrap deliberately never writes the credential itself. |
+| `claude-auth: FAILED` | A token IS persisted, **no alternate credential was in the probe's environment**, and the API **positively identified the credential as rejected** (an authentication error, a 401, `Failed to authenticate`, `Please run /login`). Both halves are required, so the rejection is attributable to the persisted value. | Replace the **value**; bootstrap never rewrites an existing one. |
+| `claude-auth: UNMEASURED` | The probe did not succeed and **did not identify a credential rejection**: a rate limit, an API outage or overload, an exhausted quota, an unreachable network, a CLI crash, the hard bound firing, no `claude` on PATH, no `timeout` able to enforce a hard bound, an unreadable `/etc/environment`, rc 0 with no sentinel, **or a real rejection that an alternate credential in the environment made unattributable** (the line names which alternates were set — unset them and re-run). | Read the named cause and resolve it, then re-run. **Do NOT replace the token on this evidence**: `FAILED` is the only state that means the PERSISTED credential was rejected. |
+| `claude-tmux-env: SERVER-MISSING` | A tmux server is running and carries no token. **THE field failure.** | `--fix-claude-auth`, **explicitly** — it overwrites; see the note below. |
+| `claude-tmux-env: SERVER-STALE` | The server's token **differs** from the persisted one. Worse than missing: everything looks provisioned. | `--fix-claude-auth`, explicitly. **Read the note below first**: this is the state where an overwrite can destroy the box's only working credential. |
+| `claude-tmux-env: SERVER-INCOMPLETE` | Token matches, `CLAUDE_CONFIG_DIR` absent — the un-onboarded picker (fact 5). | `--fix-claude-auth`, explicitly. |
+| `claude-tmux-env: SERVER-CONFIG-STALE` | Token matches, but the server's `CLAUDE_CONFIG_DIR` **differs** from the persisted one — panes are pointed at a directory nobody provisioned. | `--fix-claude-auth`, explicitly. |
+| `claude-tmux-env: SERVER-CONFIG-NODIR` | The config dir matches the persisted value and **that directory does not exist** — as seen by this process (LIMITATION 3). Seeding writes the same missing path back, so it cannot help. | Create the directory, or correct the `CLAUDE_CONFIG_DIR` line in `/etc/environment`, then `--fix-claude-auth`. |
+| `claude-tmux-env: COLD-START-MISSING` | No server is running, and a throwaway one started from the persisted environment handed its pane **no token**. The next real server will not either. | Provision the token (below). |
+| `claude-tmux-env: COLD-START-INCOMPLETE` | A new server would deliver the token but **no `CLAUDE_CONFIG_DIR`** — `/etc/profile.d` never reaches a spawned pane (fact 5). | Add a `CLAUDE_CONFIG_DIR=` line to `/etc/environment`. |
+| `claude-tmux-env: COLD-START-NODIR` | A new server would deliver both, but that config directory does not exist. | Create it, or correct the `/etc/environment` line. |
+| `claude-tmux-env: NO-SERVER` | No server is running **and** the isolated cold-start probe could not run (no `timeout`/`gtimeout` able to enforce a **hard** bound — one that escalates to SIGKILL via `--kill-after=` or `-k` — no private working directory, no `sha256sum`/`shasum` to compare the delivered credential BY VALUE, the directory could not be handed to the invoking agent, tmux would not start), **or** the pane received a token that is not the persisted one. **UNMEASURED-class.** | Resolve the named cause and re-run. `--fix-claude-auth` does **not** seed here and reports a `[warn]` (so `--strict` reds): nothing was repaired, and this run cannot say a repair was unnecessary. |
+| `claude-tmux-env: UNMEASURED` | Nothing could be read: no `tmux`, no enforceable hard bound for the read, the server did not answer within its bound, **or the tmux server to inspect could not be identified** (see the sudo note below). **Never a fall back to whichever UID the process happens to be.** | Resolve the named cause and re-run. `--fix-claude-auth` does **not** seed here and reports a `[warn]` (so `--strict` reds) — see the note under NO-SERVER. |
+
+**WHOSE tmux SERVER? THE INVOKING AGENT'S.** A tmux client with no `-S`/`-L` talks to the
+**current UID's** default server, and bootstrap both documents and prints
+`sudo bash scripts/bootstrap-agent-machine.sh --yes`. Under sudo, therefore, an unqualified
+`tmux show-environment -g` inspects **root's** server while the agent's own — the one that
+actually spawns lanes — stays broken; root usually has no server at all, so the read fell
+through to the cold-start probe, which measures the persisted FILE and reports a delivery. Under
+the old design that was a false `VERIFIED` on a box that still cannot start a lane — one of the
+findings that led to the demotion above. Section 5c resolves the invoking
+identity from `SUDO_USER` (cross-checked against `SUDO_UID`) and runs **every** tmux
+operation — the read, the repair, and the throwaway cold-start server — as that login via
+`runuser`/`sudo -n`. Where the identity cannot be resolved (an unresolvable login, a
+self-contradicting sudo record, no delegation tool) the verdict is `UNMEASURED` and
+`--fix-claude-auth` **refuses**: falling back to the current UID is the permissive branch
+wearing a default's clothes. Every tmux call is also **hard-bounded**, so a server that accepts
+a connection and never answers reports `UNMEASURED` instead of hanging an unattended
+provisioning run. One predicate is **not** delegated and is declared rather than fixed:
+`[ -d <config dir> ]` runs as the caller (LIMITATION 3), so on the `sudo` path it answers about
+root's access and not the agent's.
+
+**A box with no tmux server is measured, not excused.** That is the normal state of a freshly
+provisioned machine at the moment `.agent-ami/profile.yaml` runs bootstrap with `--strict`, so a
+blanket non-pass there would red this check on its primary use case with no way out
+(`--fix-claude-auth` deliberately excludes the four `COLD-START-*` states — no server is
+running, **measured**, so there is nothing to seed; it reports that and carries no `[warn]`).
+**That exclusion is not the same as the two UNMEASURED-class states** (`UNMEASURED`,
+`NO-SERVER`), where server presence is UNKNOWN: a requested repair there is reported as a
+`[warn]` — it neither happened nor was shown unnecessary — because "there is nothing to seed"
+would be a positive statement derived from the absence of a measurement (#3733). The dispatch is
+a **closed set** over every verdict the capability script can emit, and an unrecognised one is a
+`[warn]` naming it as an unhandled bootstrap state, never a silent fallback.
+Instead the
+answerable question is asked: *would a newly created server deliver the credential to a pane?* A
+throwaway tmux server is started **on a private socket inside a private working directory**, from
+an environment **reconstructed from `/etc/environment`** with the inherited credential scrubbed;
+one pane reports what it received; the server is killed in a trap on every exit path including
+signals, and the socket goes with the directory. The pane is spawned exactly the way a lane
+spawner spawns one — `tmux new-session <command>` runs the command through `sh -c`, **not** a
+login shell — or the probe would measure the wrong thing. What is reconstructed is the
+**credential** environment, not a whole PAM session: `PATH`/`HOME` and the rest are the running
+process's, because they are what make the probe runnable and are not the subject.
+**And note what that reconstruction costs in claim strength (LIMITATION 1):** the probe SUPPLIES
+those two values, so what it observes is that a tmux server propagates its start environment to a
+pane — not that pam_env would have delivered them in the first place. A `/etc/environment` line pam
+silently drops is invisible to it. That is deliberate: measuring pam_env means creating a PAM
+session, which needs privilege this may not have and would be a login on the operator's box.
+
+Two measured details worth keeping. A box that has **never** started a server does not say
+`no server running` — tmux 3.4 says `error connecting to <socket> (No such file or directory)`,
+and only a **stale** socket (server died, file remains) gives the familiar wording; both are
+recognised, and anything else (a permission denial, `lost server`) stays `UNMEASURED`. And a tmux
+**client** started inside a pane connects to the server named in `$TMUX` and **ignores**
+`TMUX_TMPDIR` — which is why the probe scrubs `TMUX`/`TMUX_PANE`.
+
+Run the same two checks by hand at any time, without the rest of bootstrap:
+
+```bash
+bash scripts/claude-auth-capability.sh --report          # both lines
+bash scripts/claude-auth-capability.sh --auth            # the credential probe alone
+bash scripts/claude-auth-capability.sh --tmux-env        # the pane-reachability observation alone
+bash scripts/claude-auth-capability.sh --fix-tmux-env    # seed the running server, then re-report
+```
+
+**Read the lines, not the status.** `--auth`/`--tmux-env`/`--report` exit 0 whenever a report was
+printed; only a usage error and a refusal to produce a report at all are non-zero. `--fix-tmux-env`
+is the exception, because seeding is an *action* that can fail — and it seeds **unconditionally**,
+which is what makes it the deliberate override.
+
+The `*-CARRIES-BOTH`/`*-DELIVERS-BOTH` states are an **affirmative match**, not an absence of bad
+news: the `CLAUDE_CONFIG_DIR` must **equal** the persisted value **and** that directory must
+**exist**. Testing only "is it absent" is the two-valued predicate that always picks the
+permissive answer, and a wrong config dir produces exactly the reported symptom.
+**Two declared residuals:** *exists* is not *onboarded* — whether the directory holds usable
+onboarding state is deliberately not probed, because that means depending on an internal
+JSON field shape that can change upstream — and *exists* is *exists to this process*
+(LIMITATION 3).
+
+The probe reads the token from `/etc/environment`, **scrubs the inherited one** (and `BASH_ENV`/
+`ENV` with it), and requires **both** rc 0 **and** a sentinel back from a bounded `claude -p`. The
+token value is never printed by any of these — they report `SET`/`ABSENT`/`MATCH`/`DIFFERS`.
+**It scrubs ONE credential and leaves the others (LIMITATION 2):** `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK` and `CLAUDE_CODE_USE_VERTEX` are inherited
+untouched and `claude` authenticates from any of them, so a returned sentinel means *some*
+credential in that environment worked. They are deliberately **not** scrubbed — silently changing
+what the probe authenticates with would be a behaviour change hiding behind a report — and the
+`PROBE-ANSWERED` line **names** the ones it found instead.
+
+**Which half of the scrub is the mechanism** — measured by deleting each flag and re-running
+`scripts/tests/test_claude_auth_capability.sh`, because a scrub nothing can falsify is a scrub
+nothing asserts. `-u BASH_ENV` on the `--auth` probe *is* the mechanism: a non-interactive bash
+sources `$BASH_ENV` **after** `env KEY=<persisted>` has run, so a file re-exporting the credential
+overrides the value the probe was deliberately handed and yields an answered probe about the
+inherited one. `-u CLAUDE_CODE_OAUTH_TOKEN` is the mechanism in the **cold-start** probe, where the
+re-supplying assignment is conditional. In the `--auth` probe that same flag is **belt**, redundant
+by construction (the assignment always follows and always wins) — kept, and *declared*, rather than
+covered by a case asserting something already true. `-u ENV` is belt everywhere: `$ENV` is read only
+by an interactive POSIX shell.
+
+**The sentinel is a transformation, not an echo.** The prompt asks for the UPPERCASE form of a
+lowercase word and never contains `CQLITE_CLAUDE_AUTH_OK` itself, so `grep -qF "$SENTINEL"` cannot
+be satisfied by anything that merely repeats its own argv — which the repo's own test stub did.
+
+**The `/etc/environment` grammar is measured, not assumed.** `/etc/pam.d/sudo` carries
+`pam_env.so readenv=1`, so appending a probe line and reading `sudo env` shows exactly what pam_env
+delivers. It skips leading whitespace, then drops an **exact 7-byte `export `** prefix (`export K=v`
+and `  export K=v` are delivered; `export  K=v`, `export<TAB>K=v`, `exportK=v` and `setenv K=v` are
+not), and the key runs to the first `=` with **no** whitespace before it. The parser matches that
+exactly — an over-permissive anchor would report `PERSISTED` for a line no session receives.
+Three further refusals, each the non-permissive answer to an unknown: a **symlink** at the env-file
+path is `unreadable` (what it points at is not the file pam_env consumes) **including a dangling
+one**; a `grep` that **errors** (rc >= 2) is `unreadable`, never the affirmative "no token line
+here"; and an unparseable line is an absence of evidence, never a mismatch.
+
+### Recovery: a box whose new sessions hit the login chooser
+
+```bash
+# 1. WHICH HALF is broken. Do not guess: the two halves have different remedies.
+bash scripts/claude-auth-capability.sh --report
+
+# 2. If `claude-auth:` is NOT-PERSISTED — provision the credential. Its OWN LINE, no inline
+#    comment (pam_env takes a trailing `# ...` as part of the value), root:root 0644. A
+#    leading `export ` (exactly one space) is fine — pam_env strips it — but `setenv `,
+#    `export  ` with two spaces and `K = v` are all silently NOT delivered.
+#    `$TOKEN` MUST be expanded by YOUR shell, not root's: `sudo sh -c '... "$TOKEN" ...'`
+#    hands the single-quoted text to a ROOT shell that never received the variable, so it
+#    appends `CLAUDE_CODE_OAUTH_TOKEN=` — an EMPTY value, which the check then correctly
+#    reports as NOT-PERSISTED while the line looks provisioned. Pipe instead:
+printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$TOKEN" | sudo tee -a /etc/environment >/dev/null
+
+# 3. Repair the RUNNING tmux server. This is the step that fixes the field failure, and it
+#    writes NOTHING to disk. It is UNCONDITIONAL and OVERWRITES -- read the note below.
+#    `--yes` does NOT do it: seeding is your decision, not an unattended run's.
+bash scripts/bootstrap-agent-machine.sh --fix-claude-auth
+#    ...or by hand:
+tmux setenv -g CLAUDE_CODE_OAUTH_TOKEN "$TOKEN"
+tmux setenv -g CLAUDE_CONFIG_DIR "$CLAUDE_CONFIG_DIR"
+
+# 4. Confirm by READING THE LINES, never by "the command exited 0" -- these entry points
+#    exit 0 whenever a report was printed, and no state on either line certifies the box.
+bash scripts/claude-auth-capability.sh --report
+```
+
+A pane created **before** the seeding keeps its old environment — tmux copies the server
+environment at pane creation. Kill and respawn the lane; you do not need to restart the server.
+
+**Seeding is YOUR decision. `--yes` never does it, and `--fix-claude-auth` does it
+unconditionally.** The hazard is real and unchanged: on a box whose persisted token is bad while
+the *running server* holds a working one, seeding overwrites the working value with the broken one
+and every lane spawned afterwards fails to authenticate — the repair breaking a working box,
+unattended, since `.agent-ami/profile.yaml` runs bootstrap this way. `SERVER-STALE` is exactly
+where it fires, because "the server's token differs from the persisted one" reads the same whether
+the server's copy is the stale one or the only good one on the machine, and nothing in that line
+can tell those apart.
+
+Round 3 met that with a precondition — seed only when `claude-auth:` is `VERIFIED` — and **that
+precondition is withdrawn (#3733 lead ruling)**, because `VERIFIED` was a *proxy* that could be true
+on a box whose persisted credential was never what authenticated (LIMITATION 2): false-positive in
+precisely the direction that causes the harm, which makes it **worse than no gate**, since it
+licenses the unattended seeding it cannot justify. Removing the gate while keeping the seeding
+under `--yes` would be that harm with the excuse deleted, so both went.
+
+So: **`--yes` reports and names the command**; an explicit `--fix-claude-auth` seeds and **states
+at the point of action** that it overwrites a value nothing here has validated. The hand-run
+`bash scripts/claude-auth-capability.sh --fix-tmux-env` is the same operation without the rest of
+bootstrap. Before you run either on a `SERVER-STALE` box, decide which copy is the good one — that
+is the judgement no mechanism in this repo can make for you, and pretending otherwise is what
+three review rounds kept finding.
+
+**A note on what #3733 delivered, so nobody re-reads this section as a green light.** Its AC1 —
+the six-fact diagnosis above — stands and is the durable value: it is what tells you where to look
+when a lane will not start. **AC3, a verified cold-start capability check, was NARROWED by owner
+ruling**: the observations remain, no certification is claimed, and no replacement mechanism is
+proposed. The four things they cannot see are `LIMITATION 1..5 (#3733)` — slot 4 being a fixed one, kept as a record — in
+`scripts/claude-auth-capability.sh`, marked at their own code sites.
+
+### Can an unattended box be re-authenticated without a human at a browser? **Yes.**
+
+This is #3733's AC4, answered explicitly. The credential is a **static, shareable gateway token**
+(owner ruling on the issue), so provisioning a box is a **file copy plus seeding the tmux server** —
+steps 2 and 3 above. **There is no interactive OAuth step**, no browser, and no per-machine login.
+
+One caveat, stated plainly because it is the whole failure mode:
+
+* A tmux server started **before** provisioning keeps a stale environment until it is seeded
+  (`tmux setenv -g`) or restarted. Provisioning the file alone does **not** reach it.
+* `tmux new-session <command>` bypasses **both** pam_env and `/etc/profile.d`, so a lane-spawning
+  script must pass `-e CLAUDE_CODE_OAUTH_TOKEN=… -e CLAUDE_CONFIG_DIR=…` explicitly, or rely on a
+  server that has already been seeded.
+
+### Why this is a bootstrap check and not a monitor
+
+Fact 6: no file check can see it. The distinguishing state lives in a running process, so the
+question has to be asked of that process — which is exactly what `tmux show-environment -g` does,
+and exactly what nothing did before #3733. The probe half deliberately makes one real, bounded,
+billed `claude -p` call; `--skip-claude-auth` (or `CQLITE_BOOTSTRAP_SKIP_CLAUDE_AUTH=1`) declines
+it **loudly** — it emits `claude-auth: OPT-OUT`. That line is **not** a `[warn]` and does not
+withhold "All checks green.", unlike its `git-push:`/`gate-pin:` siblings: those decline a real
+verdict, so an opt-out that bought a green would be a vacuous certification, whereas section 5c
+certifies nothing and there is no green to buy. Making it a `[warn]` would make `--strict` fail on
+a line that is not a verdict.
+
+**And the section is still not a monitor, for a second reason now.** It observes, so a green run
+proves nothing about the next dispatch. The thing that tells you a lane is actually broken is a
+lane failing to start — see "Diagnostic order for a box that stops answering".
+
+**Bootstrap writes the token to no file.** `/etc/environment` already holds it; a second 644 copy
+would buy nothing, and it is refused on the precedent of
+`openspec/specs/worker-environment-preflight/spec.md` — whose "SHALL NOT write the token
+itself to disk" clause is stated for `$GH_TOKEN` under the git-credential requirement, so it
+is the precedent for this rule rather than a clause that already names this credential.
+`tmux setenv -g` does pass the value in `argv` (briefly visible in `ps`) — declared rather than
+worked around, because tmux offers no stdin form and the same value is already world-readable in
+`/etc/environment` on these boxes.
 
 ---
 

@@ -38,8 +38,15 @@
 //! now produce an ordinary diff naming the column, the declared gap and what was
 //! actually seen (see `super::compare_value_at`).
 
+use super::super::container::{is_container_type, MapKeySpelling};
 use super::super::schema::CqlType;
-use super::{csv_container, is_scalar_type, Depth, Egress, Kinding};
+// `is_blob_hex` — the ONE predicate for what a CQL blob literal is. It moved to
+// `scalar_spelling` when `container::canon_matches_declared_kinds` needed the same
+// rule for a `blob` LEAF (issue #3726, roborev job 105): two copies of "what a blob
+// spelling is" would be two sources of truth for one fact from Cassandra's
+// `BytesType.toJSONString`, whose text is quoted at the definition.
+use super::super::scalar_spelling::is_blob_hex;
+use super::{csv_container, Depth, Egress, Kinding, Side};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -133,8 +140,10 @@ pub enum Divergence {
     /// cannot carry them.
     ///
     /// A LIMITATION OF THIS COMPARATOR, NOT A DISAGREEMENT between the two sides —
-    /// the same family as [`Divergence::ContainerMapKeyNotPairableByThisLane`],
-    /// and NOT a defect awaiting an egress fix.
+    /// the same family as [`Divergence::InetMapKeyIpv6SpellingNotPairableByThisLane`]
+    /// (and as the retired `ContainerMapKeyNotPairableByThisLane` this doc used to
+    /// cite, which issue #3726 removed by making container map keys pairable), and
+    /// NOT a defect awaiting an egress fix.
     ///
     /// ORACLE: `cassandra-5.0.8 DecimalType.toJSONString` (`DecimalType.java:314-317`)
     /// returns `Objects.toString(getSerializer().deserialize(buffer), "\"\"")`, an
@@ -202,39 +211,87 @@ pub enum Divergence {
     /// re-implementing Cassandra's collection and tuple serializers here. This gap
     /// costs the nested value's content; what it does not cost is the shape.
     NestedFrozenValueLeftUndecodedByGolden,
-    /// THIS LANE CANNOT COMPARE A MAP WITH A CONTAINER-TYPED KEY, so the whole
-    /// column is skipped.
+    /// A MULTICELL map's container-typed KEY is left UNDECODED by the golden as
+    /// `getString`'s flat text, while the egress renders the key's RAW BYTES as a
+    /// CQL blob literal. NEITHER SIDE DECODES IT.
     ///
-    /// **A LANE LIMITATION, NOT A VALUE DISAGREEMENT, AND IT DELIBERATELY
-    /// OVER-SKIPS.** `super::compare_map` pairs entries by their canonical SCALAR
-    /// key form and refuses a container key outright, so the two sides are never
-    /// compared at this position. A reader grepping declared divergences for parity
-    /// defects must NOT count this one.
+    /// **A VALUE disagreement, not a lane limitation.** It replaces the retired
+    /// `ContainerMapKeyNotPairableByThisLane`, which said this lane had no rule for
+    /// pairing a container map key at all — true until issue #3726, and false now:
+    /// `super::compare_map` pairs one through `container::golden_map_key_value`, and
+    /// the three FROZEN container-keyed columns of
+    /// `test_nested_udt_keys.nested_udt_keys` are compared in full, in both formats.
+    /// This one column is different, and the difference is measured rather than
+    /// structural.
     ///
-    /// DDL: the declared type is `map<K, V>` where `K` is a container, decided via
-    /// the same `super::is_scalar_type` predicate `compare_map` refuses on, so the
-    /// gap and the refusal cannot disagree about what a container key is.
+    /// ORACLE, both halves from the pin. A non-frozen map's entries are separate
+    /// cells whose KEY is the cell PATH, and
+    /// `cassandra-5.0.8 JsonTransformer.serializeCell` writes a cell path with
+    /// `writeString(ct.nameComparator().getString(...))` — `getString`, not
+    /// `toJSONString` — so the golden carries `TupleType.getString`'s colon-joined,
+    /// escaped spelling (`"charlie\:3:8"` in the committed golden) and no JSON
+    /// document at all. THAT FOLLOWS FROM THE DDL, so the golden side of this variant
+    /// is stated from the DDL and reads no value beyond requiring a JSON string:
+    /// multicell + a container key type IS "the dump wrote getString text here", the
+    /// same fact `super::map::compare_map` pairs on and the same one
+    /// `container::golden_map_key_value` refuses on. A conjunct asking whether the
+    /// text ALSO parses as the `toJSONString` form used to sit in the matcher and was
+    /// removed (roborev job 106): the two languages overlap — `TupleType.getString`
+    /// emits a one-component `tuple<text>` verbatim, so the component `[]` is spelled
+    /// `[]`, a well-formed document for that same type — so the parse reported a
+    /// legitimate divergence as a hard FAIL. See the matcher for the full argument and
+    /// for the retirement axis that conjunct was carrying.
     ///
-    /// **WHAT IT SUPPRESSES, STATED RATHER THAN DISCOVERED (roborev jobs 302/305/306).**
-    /// This matcher reads NO values, so it also suppresses a null, a scalar, a
-    /// malformed `{key,value}` array, a wrong entry COUNT and a wrong tuple ARITY in
-    /// these four columns. Three review rounds tried to bound that by validating
-    /// shape — at the outer level, then the element level, then cardinality — and
-    /// each round found a level the previous one had not reached. The reason is
-    /// structural: the correct scope for this claim is *"compare everything about
-    /// this map EXCEPT the keys"*, and a [`super::SkipPaths`] entry is PATH-SCOPED
-    /// TO A COLUMN, so it cannot express a partial comparison. Every added check was
-    /// therefore reimplementing one more thing `compare_map` already does, and that
-    /// list is `compare_map`'s own feature list — it does not close.
+    /// EGRESS SHAPE: the `{key,value}` array both formats produce — the JSON egress
+    /// directly, the CSV lane through `csv_container`'s decode — every entry of
+    /// which carries a `key` that is a CQL blob literal (`0x` + an EVEN number of
+    /// hex digits), i.e. the key's raw serialized bytes rather than a decoded
+    /// container. MEASURED: `0x0000001300000007636861726c696500000004000000030000000400000008`
+    /// against that same golden entry. The ENTRY COUNTS must agree too, which is
+    /// cheap and removes one item from the list below.
     ///
-    /// So the shape validation was abandoned and the over-skip is ACCEPTED and
-    /// DOCUMENTED. Over-skipping is honest and visible in the artifact; a claim that
-    /// misdescribes its own subject is neither. The real fix is a canonical
-    /// representation for CONTAINERS in `Canon` (which is scalar-only today, and
-    /// `canon_typed` refuses containers explicitly) plus recursive
-    /// canonicalization — tracked as the container-key comparison follow-up. When it
-    /// lands, `compare_map` no longer refuses, these skips suppress nothing, and
-    /// `Report::stale_skips` FAILS the lane until they are removed.
+    /// NOT COVERED: a null on either side, a golden that is not a JSON string at all,
+    /// an egress that decoded the key (or rendered anything else — text, a number, an
+    /// object) at it, a malformed `{key,value}` entry, and a differing entry COUNT.
+    /// Each of those is reported as an ordinary diff naming this gap. A golden whose
+    /// text happens to PARSE is deliberately NOT in that list any more — see above.
+    ///
+    /// DECLARED RESIDUAL, and it is the whole of what this gap costs: the KEY's
+    /// CONTENT is not compared, because neither side's key is a value this lane can
+    /// read. The entry VALUES are — `super::map::compare_map` pairs the entries
+    /// POSITIONALLY (emitted order is a map's order here, and both sides preserve
+    /// it), reports each unpairable key at its own node where this gap suppresses
+    /// it, and compares the value beside it like any other. Suppressing those too
+    /// was roborev job 28: measured, a value changed 90 -> 999 produced ZERO diffs.
+    /// Nor is what the blob's bytes DECODE TO recovered — that would mean re-implementing
+    /// Cassandra's tuple and UDT value serializers here, exactly as
+    /// [`Divergence::NestedFrozenUdtRendersAsBlobHex`] declares one level down. The
+    /// egress-side defect (a real `SELECT` returns the decoded tuple) is a
+    /// read-fidelity bug in CQLite and separable from this lane.
+    ///
+    /// # SUPERSEDED BY #3612, AND NO COMMITTED CASE DECLARES IT ANY MORE
+    ///
+    /// `8c503f7cf` (#3612 / PR #3736) taught `cqlite-core` to decode a multicell composite
+    /// cell-path map key STRUCTURALLY, so the egress half of this divergence — raw key bytes
+    /// as a `0x` blob literal — is no longer something CQLite produces. Measured on the
+    /// committed fixture after rebasing onto it: the CLI now emits
+    /// `[{label:charlie,rank:3},8]` where it previously emitted
+    /// `0x0000001300000007636861726c69650…`.
+    ///
+    /// `m_tuple_udt` has therefore moved to [`Divergence::NestedFrozenValueLeftUndecodedByGolden`],
+    /// which its five sibling columns already declare and which describes what is left exactly:
+    /// the GOLDEN still leaves the key as `getString`'s colon-joined text while the egress
+    /// decodes it. That is the self-retirement this gap was built to undergo, and it happened
+    /// for the reason predicted rather than by accident.
+    ///
+    /// KEPT, NOT DELETED, and the reason is scope rather than sentiment. Removing it is right
+    /// and is NOT free: the guard that pins the DDL-over-parse rule
+    /// (`gaps::a_frozen_column_with_an_unparseable_golden_key_is_not_this_gap`) tests that rule
+    /// THROUGH this variant, so deleting it means retargeting that guard onto
+    /// `container::golden_map_key_value` directly — better placed, but a change of its own with
+    /// its own review and gate. The variant is INERT in the meantime: a `Divergence` suppresses
+    /// nothing unless a `Skip` names it, and none does. Removal is proposed as a follow-up.
+    MulticellMapKeyUndecodedByGoldenRendersAsBlobHex,
     /// A `float` whose shortest decimal has an EXACT TIE is spelled with the
     /// away-from-zero digit by the CSV/table egress where the oracle rounds the tie
     /// to an EVEN last digit. The two spellings denote the SAME f32.
@@ -274,7 +331,6 @@ pub enum Divergence {
     /// [`Divergence::NonFiniteFloatRendersAsJsonNull`]'s subject), a `double`, any
     /// non-numeric spelling, and the JSON lane.
     Float32TieBreakSpellingDiffersFromJava,
-    ContainerMapKeyNotPairableByThisLane,
     /// AN IPv6 `inet` IS SPELLED IN CASSANDRA'S EXPANDED FORM IN THE GOLDEN AND IN
     /// RFC 5952 COMPRESSED FORM BY THE EGRESS — the SAME address, two spellings.
     ///
@@ -302,8 +358,12 @@ pub enum Divergence {
     InetIpv6RendersCompressed,
     /// THIS LANE CANNOT PAIR THE ENTRIES OF A MAP KEYED BY `inet`, so the whole
     /// column is skipped. **A LANE LIMITATION, NOT A VALUE DISAGREEMENT, AND IT
-    /// DELIBERATELY OVER-SKIPS** — the same shape, and the same resolution, as
-    /// [`Divergence::ContainerMapKeyNotPairableByThisLane`].
+    /// DELIBERATELY OVER-SKIPS** — the same shape as the
+    /// `ContainerMapKeyNotPairableByThisLane` this doc cited before issue #3726
+    /// RETIRED it, and the same resolution: that skip went away exactly as its own
+    /// docs predicted, when the lane gained a canonical representation for
+    /// CONTAINERS and `compare_map` stopped refusing to pair them. The `inet` case
+    /// needs the narrower fix named at the end of this comment, not that one.
     ///
     /// Map entries are paired and reported by their key's canonical form. For an
     /// IPv6 `inet` key the two sides spell the SAME address differently — the
@@ -332,6 +392,28 @@ pub enum Divergence {
     /// for key pairing to compare addresses rather than text; either retires this
     /// skip and [`SkipPaths::stale`] FAILS the lane until it is removed.
     InetMapKeyIpv6SpellingNotPairableByThisLane,
+}
+
+/// EVERYTHING A DIVERGENCE RULE MAY ASK ABOUT A POSITION, and nothing else.
+///
+/// One parameter rather than five, because every rule below states itself against
+/// the same handful of facts and passing them singly had reached clippy's arity
+/// limit — but the grouping is not merely cosmetic: it names the closed set a
+/// divergence is allowed to reason from. Each field is either the committed DDL or a
+/// property of the format, never a property of a VALUE, which is what keeps a
+/// matcher from drifting into the shape ladder #3500 abandoned (roborev jobs
+/// 302/305/306).
+#[derive(Clone, Copy)]
+pub struct Position<'t> {
+    /// The declared CQL type at this position.
+    pub ty: &'t CqlType,
+    pub egress: Egress,
+    /// What CSV's empty-field rule keys on.
+    pub depth: Depth,
+    /// How the GOLDEN spells this value's JSON kind.
+    pub kinding: Kinding,
+    /// WHICH CASSANDRA WRITER spelled this position's map keys, from the DDL.
+    pub map_key_spelling: MapKeySpelling,
 }
 
 impl Divergence {
@@ -368,6 +450,14 @@ impl Divergence {
                  colon-joined text for a tuple) while the egress decodes it into a \
                  structure"
             }
+            Divergence::MulticellMapKeyUndecodedByGoldenRendersAsBlobHex => {
+                "the golden leaves a MULTICELL map's container-typed key UNDECODED as \
+                 getString's flat cell-path text (writeString, not toJSONString) while \
+                 the egress renders the key's raw bytes as a CQL blob literal (`0x` + \
+                 hex digits) — neither side decodes it, so the KEY's content cannot be \
+                 compared; the entries are still paired in emitted order and their \
+                 VALUES compared"
+            }
             Divergence::Float32TieBreakSpellingDiffersFromJava => {
                 "the golden spells a `float` whose shortest decimal is an exact TIE with \
                  an EVEN last digit (Float.toString's rule) while the CSV egress spells \
@@ -384,12 +474,6 @@ impl Divergence {
                  and the egress spell differently, so this lane cannot pair the \
                  entries and the whole column is skipped"
             }
-            Divergence::ContainerMapKeyNotPairableByThisLane => {
-                "the declared map KEY type is a container, which this lane has no rule \
-                 for pairing, so the column is not compared at all — a limitation of \
-                 this comparator, NOT a disagreement between the two sides, and it \
-                 deliberately over-skips (see the variant's docs)"
-            }
         }
     }
 
@@ -399,15 +483,14 @@ impl Divergence {
     /// CSV's empty-field depth and how the GOLDEN spells its JSON kind here — so
     /// every rule below is stated against the committed DDL rather than against a
     /// value's appearance.
-    pub fn matched(
-        self,
-        golden: &Value,
-        cli: &Value,
-        ty: &CqlType,
-        egress: Egress,
-        depth: Depth,
-        kinding: Kinding,
-    ) -> bool {
+    pub fn matched(self, golden: &Value, cli: &Value, at: Position<'_>) -> bool {
+        let Position {
+            ty,
+            egress,
+            depth,
+            kinding,
+            map_key_spelling,
+        } = at;
         match self {
             Divergence::AbsentMulticellRendersEmpty => {
                 // The golden side: NO value at all. A multi-cell collection is
@@ -491,16 +574,124 @@ impl Divergence {
                 // array (`super::compare_map` reads a map as an array of
                 // `{key,value}` objects), so an object, a scalar, a null or a number
                 // here is NOT this gap and is reported as an ordinary diff.
-                matches!(cli, Value::Array(_))
+                //
+                // AND THE ARRAY MUST BE A WELL-FORMED VALUE OF THE DECLARED TYPE
+                // (roborev job 32). `Value::Array(_)` alone accepts a tuple of the wrong
+                // ARITY, or a nested UDT with a field the `CREATE TYPE` does not declare
+                // — so a MALFORMED decode was suppressed alongside the golden's
+                // non-decode, which is strictly more than this gap says it covers: "the
+                // golden leaves it undecoded WHILE THE EGRESS DECODES IT" presumes the
+                // egress produced something the DDL describes.
+                //
+                // Asked by CANONICALIZING the egress side under the declared type, which
+                // is DELEGATION rather than the shape ladder #3500 abandoned: `canon_typed`
+                // IS the lane's structural check — arity, declared fields, field order —
+                // so this reimplements none of it. A CLI value that does not canonicalize
+                // is not a decode of this type at all, and is reported.
+                //
+                // AND THE LEAF KINDS ARE CHECKED TOO (roborev job 38). `canon_typed(...).is_ok()`
+                // alone is NOT a validity test: the canonicalizer accepts a string where the DDL
+                // declares an `int` ON PURPOSE — it canonicalizes both sides and lets the
+                // COMPARISON report the inequality, which is how a wrong-kind egress is normally
+                // caught. At THIS position there is no other side (the golden is undecoded,
+                // which is the gap's premise), so reading `Ok` as "well-formed" suppressed
+                // `"not-an-int"` inside a declared `set<int>`.
+                //
+                // `container::canon_matches_declared_kinds` closes it by reading `canon_typed`'s
+                // OWN OUTPUT back against the declared type — the canonicalizer already decided
+                // what each leaf became, and this only asks whether that variant is the one the
+                // DDL implies. It is therefore NOT the strict validator #3500 abandoned: no
+                // parsing, no spelling rules, and no arity or field-set logic, all of which
+                // `canon_container` already enforces.
+                //
+                // This replaced a declared residual that was pinned as a test asserting the hole
+                // on purpose. Closing it RED that test, which is what a residual written as a
+                // test buys over one written as a paragraph.
+                if !matches!(cli, Value::Array(_)) {
+                    return false;
+                }
+                match super::canon_typed(cli, egress, ty, depth, Kinding::Natural, Side::Cli) {
+                    Ok(canon) => {
+                        super::super::container::canon_matches_declared_kinds(&canon, ty, egress)
+                    }
+                    Err(_) => false,
+                }
+            }
+            Divergence::MulticellMapKeyUndecodedByGoldenRendersAsBlobHex => {
+                // ASKED AT THE KEY NODE, NOT AT THE COLUMN (roborev job 28).
+                //
+                // This used to match the whole map — golden object vs CLI `{key,value}`
+                // array — and suppress it ENTIRE. That threw away the entry VALUES, which
+                // ARE comparable: both sides preserve emitted order and the values are
+                // ordinary cells. Measured before fixing: a value changed 90 -> 999 produced
+                // ZERO diffs. `compare::map::compare_map` now reports an unpairable key at
+                // its OWN position (`At::map_key`) and compares the values beside it, so
+                // this matcher describes exactly the key and nothing more.
+                let _ = (depth, kinding, egress);
+                // DDL ONLY for the two structural facts: this position's declared type is a
+                // CONTAINER, on a MULTICELL column. Neither is read from a value — see the
+                // note on `MapKeySpelling` for why inferring multicellness from the key text
+                // is unsound in the permissive direction.
+                if !is_container_type(ty) {
+                    return false;
+                }
+                if map_key_spelling != MapKeySpelling::GetString {
+                    return false;
+                }
+                // GOLDEN: the `getString` text, which at this node is simply a JSON
+                // STRING. That is ALL that is read of it — WHICH WRITER SPELLED IT IS
+                // ALREADY SETTLED, by the two DDL checks above and by nothing else.
+                //
+                // A PARSE GUARD USED TO SIT HERE AND IS GONE (roborev job 106). It asked
+                // `golden_map_key_value(.., MapKeySpelling::ToJsonString)` — under the very
+                // spelling the DDL has just said is NOT in play — and refused the gap when
+                // the text happened to parse. That decides a STRUCTURAL fact by INSPECTING A
+                // VALUE, the move this lane forbids most explicitly (issue #3500, roborev
+                // jobs 302/305/306), and it is unsound because THE TWO LANGUAGES OVERLAP:
+                // `cassandra-5.0.8 TupleType.getString` on a one-component `tuple<text>`
+                // emits that component's text verbatim, so a component whose value is `[]` is
+                // spelled `[]` — which is also a well-formed `toJSONString` document for the
+                // same declared type. A legitimate declared divergence was therefore reported
+                // as a hard FAIL. Tightening the parse cannot separate them: `["[]"]` is a
+                // correctly-sized, correctly-kinded one-element tuple document AND that
+                // component's own getString spelling. Both are pinned by
+                // `a_getstring_key_that_parses_as_the_declared_document_is_still_this_gap`.
+                //
+                // WHAT IT WAS FOR, so nobody re-adds it from `17f081264` read in isolation.
+                // It was the ORACLE retirement axis: were `sstabledump` to start decoding a
+                // multicell map's cell path, the gap should stop suppressing a column whose
+                // golden side had improved. The DDL SUBSUMES that for the pinned oracle and
+                // cannot be wrong — `cassandra-5.0.8 JsonTransformer.serializeCell` writes a
+                // cell path with `writeString(ct.nameComparator().getString(...))`, so on a
+                // MULTICELL container-keyed column the golden is undecoded BY CONSTRUCTION.
+                // It is the same fact `compare::map` pairs on (`unpairable_keys`, DDL only)
+                // and the same one `golden_map_key_value` refuses on, so dropping the guard
+                // is what makes the gap and the pairing AGREE about what the golden key is.
+                //
+                // DECLARED RESIDUAL: a FUTURE oracle that decoded the cell path would no
+                // longer retire this declaration on the golden axis, and no value-level test
+                // can restore that without the false FAIL above. Bounded, and stated rather
+                // than implied: the CLI half below is what guards a CQLite regression, and
+                // such a column would still genuinely diverge (a decoded document against
+                // blob hex), so what would go stale is the declaration's REASON, not its
+                // truth.
+                if !matches!(golden, Value::String(_)) {
+                    return false;
+                }
+                // EGRESS: a CQL blob literal — the raw key bytes, undecoded. Anything else
+                // here (a decoded container, a null, a number) is NOT this gap and is
+                // reported as an ordinary diff, which is how the egress learning to decode
+                // the cell path retires this declaration.
+                matches!(cli, Value::String(text) if is_blob_hex(text))
             }
             Divergence::Float32TieBreakSpellingDiffersFromJava => {
                 // CSV lane, DDL-declared `float` (never `double`: the tie-break the
                 // shared formatter gets wrong is `Float.toString`'s, and a `double`
                 // cell diverging is a different, unmeasured claim), and the two
-                // spellings must denote the SAME f32. Depth and kinding are not
-                // read: a `float` is a scalar, and the equality below is stated
-                // over the two RENDERINGS rather than over a canonical form.
-                let _ = (depth, kinding);
+                // spellings must denote the SAME f32. Depth, kinding and the map-key
+                // spelling are not read: a `float` is a scalar, and the equality below
+                // is stated over the two RENDERINGS rather than over a canonical form.
+                let _ = (depth, kinding, map_key_spelling);
                 egress == Egress::Csv
                     && matches!(ty, CqlType::Numeric(name) if name == "float")
                     && is_exact_f32_tie_with_both_formatter_spellings(golden, cli)
@@ -522,21 +713,14 @@ impl Divergence {
                 }
             }
             Divergence::InetMapKeyIpv6SpellingNotPairableByThisLane => {
-                // DDL ONLY, exactly like the container-key case below: reading
-                // values here would invite the same unbounded sequence of shape
-                // assertions. The over-skip is the accepted, documented cost.
+                // DDL ONLY. No value is read — deliberately, and this is the whole
+                // resolution of roborev jobs 302/305/306: any shape assertion here
+                // invites the next depth (outer kind, element kind, cardinality,
+                // arity, …), and the list of depths is `compare_map`'s feature list.
+                // The over-skip is the accepted, documented cost.
                 let _ = (golden, cli, egress, depth, kinding);
                 matches!(ty, CqlType::Map(key_ty, _)
                     if matches!(&**key_ty, CqlType::Opaque(n) if n == "inet"))
-            }
-            Divergence::ContainerMapKeyNotPairableByThisLane => {
-                // DDL ONLY. No value is read — deliberately, and this is the whole
-                // resolution of jobs 302/305/306: any shape assertion here invites
-                // the next depth (outer kind, element kind, cardinality, arity, …),
-                // and the list of depths is `compare_map`'s feature list. The
-                // over-skip is the accepted, documented cost.
-                let _ = (golden, cli, egress, depth, kinding);
-                matches!(ty, CqlType::Map(key_ty, _) if !is_scalar_type(key_ty))
             }
         }
     }
@@ -631,16 +815,6 @@ fn is_exact_f32_tie_with_both_formatter_spellings(golden: &Value, cli: &Value) -
 
 #[path = "golden_value_exact_decimal.rs"]
 mod exact_decimal;
-
-/// CQL's blob literal: `0x` and an EVEN number of hex digits (a byte string), and
-/// nothing else. `0x` alone is a legal empty blob and is accepted; the point of the
-/// check is that arbitrary text at that position is NOT this gap.
-fn is_blob_hex(text: &str) -> bool {
-    let Some(digits) = text.strip_prefix("0x") else {
-        return false;
-    };
-    digits.len() % 2 == 0 && digits.chars().all(|c| c.is_ascii_hexdigit())
-}
 
 /// The three tokens a non-finite IEEE-754 float is spelled with in the golden —
 /// Java's `Double.toString`/`Float.toString` spelling, as the committed
