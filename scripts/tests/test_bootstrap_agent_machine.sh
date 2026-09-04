@@ -355,6 +355,32 @@ export CQLITE_BOOTSTRAP_TEST_MODE=1
 export CQLITE_BOOTSTRAP_ENV_FILE="$tmp/etc-environment"
 : >"$CQLITE_BOOTSTRAP_ENV_FILE"
 
+# --- KEEP BOOTSTRAP'S CLAUDE CREDENTIAL SECTION OUT OF THIS SUITE (issue #3733) -----
+# Section 5c makes a REAL, BOUNDED, BILLED `claude -p` network call and, under --yes (which
+# 59 cases below pass), seeds the HOST's running tmux server via `tmux setenv -g`. Neither
+# is this suite's subject, and the second is host mutation caused by a test run. The
+# section's own loud, non-passing opt-out keeps it entirely out of the way; exported ONCE
+# here, exactly as the perf suite does for the pin section, so a case added later inherits
+# it. Section 5c's own coverage lives in scripts/tests/test_claude_auth_capability.sh.
+export CQLITE_BOOTSTRAP_SKIP_CLAUDE_AUTH=1
+# ...with ONE deliberate exception, block 7p (below). Its three green-path cases assert an
+# ABSOLUTELY GREEN run, so a permanent extra [warn] from an opt-out would silently turn
+# them into `skip`s — the exact drift the base_warns assertion exists to catch, and which
+# section 5b caused four times. So `run_push` turns section 5c back ON and its sandbox
+# STAGES the section to VERIFIED/VERIFIED deterministically: a per-sandbox pam_env file
+# carrying this token, plus pinned `claude` and `tmux` shims. Those cases then EXERCISE
+# 5c's green path instead of skipping it, which is strictly better coverage than the
+# opt-out would have bought.
+PUSH_CLAUDE_TOKEN='sk-cqlite-sandbox-3733-not-a-real-credential'
+# A REAL directory, not a decorative literal: the tmux verdict now requires the config dir
+# the server names to EQUAL the persisted one AND to EXIST, because a nonexistent one is
+# the un-onboarded first-run picker. A fixture naming `/sandbox/claude-config` staged the
+# section to SERVER-CONFIG-NODIR, base_warns went 1 -> 2, and the three end-to-end cases
+# below would have gone back to skipping — which is precisely the drift the baseline
+# assertion above exists to catch.
+PUSH_CLAUDE_CONFIG_DIR="$tmp/sandbox-claude-config"
+mkdir -p "$PUSH_CLAUDE_CONFIG_DIR"
+
 
 # --- CARGO_HOME isolation: THIS SUITE WAS BREAKING cargo FOR THE WHOLE BOX ---------
 # The mold section writes `${CARGO_HOME:-$HOME/.cargo}/config.toml`, and on this fleet
@@ -1620,6 +1646,11 @@ mk_push_repo() {
   mkdir -p "$dir/scripts/lib" "$dir/test-data/datasets/sstables/ks/tbl" "$dir/.home/.cargo"
   cp "$SCRIPT_DIR/../lib/gate-notify.sh" "$dir/scripts/lib/gate-notify.sh"
   cp "$SCRIPT_DIR/../perf-capability.sh" "$dir/scripts/perf-capability.sh"
+  # Staged for SECTION 5c for the same reason agent-gate.sh is staged for 5b: without it
+  # the section reports `claude-auth: UNMEASURED (capability script missing)` — one extra
+  # [warn] in EVERY case built on this helper, which is how base_warns drifts and the
+  # green-path cases below silently stop running.
+  cp "$SCRIPT_DIR/../claude-auth-capability.sh" "$dir/scripts/claude-auth-capability.sh"
   # agent-gate.sh is staged for SECTION 5b, not for the push probe (issue #3414 review B1).
   # 5b's verdict asks the gate what it will do with the probed value, so a sandbox without
   # it yields `gate-pin: UNMEASURED` — one extra [warn] in EVERY case built on this helper,
@@ -1646,6 +1677,12 @@ mk_push_repo() {
   # file is appended to by whichever earlier `--yes` case runs first, so what these cases
   # measured depended on suite ordering.
   printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$dir/etc-environment"
+  # The same per-sandbox file is section 5c's pam_env source (run_push points
+  # CQLITE_CLAUDE_AUTH_ENV_FILE at it), so a persisted credential exists to measure. Its
+  # own line with no inline comment, exactly as the production remedy instructs — pam_env
+  # takes a trailing `# ...` as part of the value.
+  printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$PUSH_CLAUDE_TOKEN" >>"$dir/etc-environment"
+  printf 'CLAUDE_CONFIG_DIR=%s\n' "$PUSH_CLAUDE_CONFIG_DIR" >>"$dir/etc-environment"
   : >"$dir/test-data/datasets/sstables/ks/tbl/nb-1-big-Data.db"
 }
 
@@ -1698,8 +1735,9 @@ EOF
 }
 
 # mk_push_bin <dir> [setup-git-body] — PATH stubs that keep every OTHER section quiet.
-# `uname` reports Darwin so the Linux-only mold + perf sections (whose verdicts depend
-# on the HOST's kernel settings) cannot leak host state into these cases.
+# `uname` reports LINUX (see the note on the stub below; this header said Darwin for four
+# rounds after the code stopped doing it) and `perf` is stubbed, so the Linux-only mold +
+# perf sections cannot leak the HOST's kernel settings into these cases.
 mk_push_bin() {
   local dir="$1" setup="${2:-:}"
   mkdir -p "$dir"
@@ -1712,6 +1750,8 @@ mk_push_bin() {
   # perf section warns. So the sandbox becomes Linux and the one section that made Darwin
   # attractive is satisfied directly. It also makes the green-path cases MORE meaningful:
   # "this box certifies green" is now a Linux-only claim, so they must model a Linux box.
+  # (The `sudo` shim's comment below still said "the perf section is skipped here, `uname`
+  # reports Darwin" for the same four rounds — corrected with this one.)
   mk_stub "$dir" uname 'echo Linux'
   # perf stat is invoked with CSV output, so the stub emits `<count>,,cycles` on stderr as
   # the real one does — a human-formatted row parses as no-cycles-row (verified against the
@@ -1728,11 +1768,24 @@ exit 0'
   # would depend on whether the HOST running the suite happens to be pinned. That is the
   # host-dependence this file removes everywhere else (GIT_CONFIG_GLOBAL, the board env,
   # the datasets stub); 5b is simply the newest place it could leak in. Section 3b never
-  # invokes sudo and the perf section is skipped here (`uname` reports Darwin), so this
-  # shim's only subject is 5b.
+  # invokes sudo and the perf section is served by the `perf` stub above (this sandbox
+  # reports LINUX), so this shim's only subject is 5b.
   mk_stub "$dir" sudo 'while [ "${1:-}" = "-n" ]; do shift; done
 if [ "${1:-}" = "-u" ]; then shift 2; fi
 exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
+  # Section 5c's two probes, pinned for the same reason as the `sudo` shim above: without
+  # them these sandboxes fall through to the REAL `claude` (a billed network call whose
+  # result depends on the HOST's credential) and the REAL tmux server (which the --yes
+  # cases would MUTATE). The claude stub UPPERCASES the prompt's last word, which is the
+  # transformation the prompt asks for — so it stays correct if the sentinel is ever
+  # re-spelled, rather than duplicating the constant here. It used to ECHO that word
+  # unchanged, which passed only because the sentinel WAS in the prompt; #3733 removed it
+  # from the prompt precisely so an argv echo can no longer satisfy the probe.
+  mk_stub "$dir" claude 'printf "%s\n" "${*##* }" | tr "[:lower:]" "[:upper:]"'
+  mk_stub "$dir" tmux "case \"\${1:-}\" in
+  show-environment) printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\\nCLAUDE_CONFIG_DIR=%s\\n' '$PUSH_CLAUDE_TOKEN' '$PUSH_CLAUDE_CONFIG_DIR' ;;
+esac
+exit 0"
   mk_push_gh "$dir" "$setup"
 }
 
@@ -1748,7 +1801,7 @@ run_push() {
   push_rc=0
   push_out=$(PATH="$bin:$PATH" HOME="$repo/.home" CARGO_HOME="$repo/.home/.cargo" \
     CQLITE_BOOTSTRAP_ENV_FILE="$repo/etc-environment" \
-    CQLITE_BOOTSTRAP_SKIP_OBJECT_STORE_SWEEP=0 \
+    CQLITE_CLAUDE_AUTH_ENV_FILE="$repo/etc-environment" CQLITE_BOOTSTRAP_SKIP_CLAUDE_AUTH=0 CQLITE_BOOTSTRAP_SKIP_OBJECT_STORE_SWEEP=0 \
     GIT_CONFIG_GLOBAL="$gc" GIT_CONFIG_NOSYSTEM=1 CLAIM_MACHINE=push-probe-test \
     CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t' \
     CQLITE_PROJECT_OWNER=pmcfadin CQLITE_PROJECT_NUMBER=1 \

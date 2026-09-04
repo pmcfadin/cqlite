@@ -569,27 +569,38 @@ pub(crate) const CASES: &[Case] = &[
             ("s_map_udt_key", Multicell::Set),
             ("s_map_udt_val", Multicell::Set),
         ],
-        // EVERY column except `id` and `f_set_tuple_udt` is excluded, in TWO
-        // distinct classes. Stated as the SURVIVING SET rather than as a count of
-        // the excluded: a count here drifted once already (roborev job 308 caught
-        // "Eight" after a ninth skip was added), and it drifted even though it sits
-        // in the same file as the `Skip` list that invalidates it — co-location is
-        // not enough when the edit that changes the number is not the edit that
-        // reads it. The surviving set is also what a reader needs: `f_set_tuple_udt`
-        // is a genuinely nested frozen column that IS compared, which is why this is
-        // a CASES entry rather than a NOT_COMPARABLE one. The authoritative count is
-        // emitted by the census line itself ("N cells compared, M of them
-        // containers") and needs no prose duplicate.
+        // COMPARED IN FULL: `id`, `f_set_tuple_udt`, and — since issue #3726 gave
+        // `Canon` a container representation — the three frozen container-keyed maps
+        // `f_map_tuple_udt`, `f_map_set_udt` and `f_map_tuple_list_udt`. Everything
+        // else is excluded, in TWO distinct classes.
+        //
+        // Stated as the SURVIVING SET rather than as a count of the excluded: a count
+        // here drifted once already (roborev job 308 caught "Eight" after a ninth skip
+        // was added), and it drifted even though it sits in the same file as the `Skip`
+        // list that invalidates it — co-location is not enough when the edit that
+        // changes the number is not the edit that reads it.
+        //
+        // AND THE SURVIVING SET DRIFTED TOO, one issue later: #3726 removed three skips
+        // and this sentence still read "every column except `id` and
+        // `f_set_tuple_udt`" until roborev job 14 caught it. So the lesson generalises
+        // past the count — ANY prose census of this list decays, because the edit that
+        // changes it is the `Skip` array below and nothing makes you re-read this. The
+        // authoritative figure is emitted by the census line itself ("N cells compared,
+        // M of them containers"), which is DERIVED and cannot drift; this prose exists
+        // only to say WHICH columns and WHY, and must be re-read whenever a `Skip` is
+        // added or removed.
         //
         // CLASS 1 — the golden leaves the nested frozen element UNDECODED (raw
         // bytes as hex for a collection, colon-joined text for a tuple) while the
         // CLI decodes it. A value disagreement, in the direction OPPOSITE to
         // `NestedFrozenUdtRendersAsBlobHex`.
         //
-        // CLASS 2 — a LANE LIMITATION, not a disagreement: the declared map KEY is
-        // a container and this lane has no pairing rule for one, so the two sides
-        // are never compared. Tracked for real support in #3726; when that lands
-        // these four skips go stale and FAIL, which is what removes them.
+        // CLASS 2 — WAS its own class and is now CLASS 1, which is the point. It
+        // covered four columns as a LANE limitation (golden left a MULTICELL map's
+        // container key as getString text, CLI rendered raw bytes as `0x`, NEITHER
+        // decoded). #3726 closed three (the FROZEN maps, compared in full); #3612
+        // then taught the CLI to decode the cell path, so the egress half is gone
+        // and only the GOLDEN's non-decode remains — Class 1's divergence exactly.
         skips: &[
             Skip {
                 path: "s_tuple_udt",
@@ -621,41 +632,30 @@ pub(crate) const CASES: &[Case] = &[
                 divergence: Divergence::NestedFrozenValueLeftUndecodedByGolden,
                 why: "golden leaves the frozen inner map (UDT as VALUE) as raw serialized hex while the CLI decodes it; only the SHAPE is checked — the element CONTENT is NOT compared",
             },
-            // THE FOUR CONTAINER-KEYED MAPS — a LANE limitation, not a value
-            // disagreement. `compare_map` pairs entries by canonical SCALAR key form
-            // and refuses a container key outright, so these columns are not compared
-            // AT ALL. The skip is whole-column and therefore OVER-SKIPS: it also
-            // suppresses a null, a malformed {key,value} array, a wrong entry count
-            // and a wrong tuple arity here. That cost is accepted and documented
-            // rather than bounded — three review rounds (roborev 302/305/306) showed
-            // that bounding it means reimplementing `compare_map`'s own feature list,
-            // because a Skip is path-scoped to a column and cannot express "compare
-            // everything except the keys". Real support needs a container
-            // representation in `Canon` (scalar-only today); tracked in #3726, and
-            // these four skips go stale and FAIL the lane when it lands.
+            // THE ONE MULTICELL CONTAINER-KEYED MAP. The other three
+            // (`f_map_tuple_udt`, `f_map_set_udt`, `f_map_tuple_list_udt`) were
+            // skipped here under `ContainerMapKeyNotPairableByThisLane` until issue
+            // #3726 gave `Canon` a container representation; they are now compared in
+            // full, in both formats, and their skips are GONE — which is the
+            // self-retiring link that scaffold was accepted for.
+            //
+            // This one cannot follow them, and the reason is MEASURED rather than
+            // structural: it is the only NON-frozen map of the four, so its entries
+            // are separate cells whose key is the cell PATH, which
+            // `cassandra-5.0.8 JsonTransformer.serializeCell` writes with
+            // `writeString(getString(...))`. The golden therefore carries
+            // `TupleType.getString`'s colon-joined text (`"charlie\:3:8"`). THE EGRESS
+            // CHANGED UNDER THIS BRANCH: until #3612 (`8c503f7cf`) the CLI rendered the
+            // key's raw bytes as a blob literal, so NEITHER side decoded it; that commit
+            // decodes a multicell composite cell path STRUCTURALLY, so the CLI now emits
+            // `[{label: charlie, rank: 3}, 8]` (measured after rebasing). `stale_skips`
+            // FAILED the lane over the now-false declaration; what remains is the
+            // GOLDEN's non-decode, which the five siblings above already declare.
             Skip {
                 path: "m_tuple_udt",
                 formats: BOTH,
-                divergence: Divergence::ContainerMapKeyNotPairableByThisLane,
-                why: "map key is tuple<key_part, int> — this lane pairs map keys by canonical scalar form only, so the column is NOT COMPARED AT ALL: a null, a malformed {key,value} array, a wrong entry COUNT and a wrong tuple ARITY are all UNCHECKED here (#3726)",
-            },
-            Skip {
-                path: "f_map_tuple_udt",
-                formats: BOTH,
-                divergence: Divergence::ContainerMapKeyNotPairableByThisLane,
-                why: "map key is frozen tuple<key_part, int> — column NOT COMPARED AT ALL: a null, a malformed {key,value} array, a wrong entry COUNT and a wrong tuple ARITY are all UNCHECKED here (#3726)",
-            },
-            Skip {
-                path: "f_map_set_udt",
-                formats: BOTH,
-                divergence: Divergence::ContainerMapKeyNotPairableByThisLane,
-                why: "map key is frozen set<key_part> — column NOT COMPARED AT ALL: a null, a malformed {key,value} array and a wrong entry COUNT are all UNCHECKED here (#3726)",
-            },
-            Skip {
-                path: "f_map_tuple_list_udt",
-                formats: BOTH,
-                divergence: Divergence::ContainerMapKeyNotPairableByThisLane,
-                why: "map key is frozen tuple<list<key_part>, int> — column NOT COMPARED AT ALL: a null, a malformed {key,value} array, a wrong entry COUNT and a wrong tuple ARITY are all UNCHECKED here (#3726)",
+                divergence: Divergence::NestedFrozenValueLeftUndecodedByGolden,
+                why: "the ONE multicell map here, and since #3612 landed it is the SAME divergence its five siblings above already declare: the golden leaves the tuple key as sstabledump's colon-joined getString cell-path text while the CLI now DECODES it into a structure. Only the KEY'S CONTENT is uncompared; the entry count, the {key,value} shape and every entry VALUE (paired in emitted order) ARE compared",
             },
         ],
     },
