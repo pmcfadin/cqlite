@@ -138,5 +138,70 @@ else
 $out4b"
 fi
 
+# ---------------------------------------------------------------------------
+echo "TEST 5: an UNMEASURABLE lane-lock probe REFUSES — it is not 'no record' (job 442, High)"
+# ---------------------------------------------------------------------------
+# The probe ran under `|| true` and only its `lease=` field was read, so a nonzero exit, a
+# kill, an empty capture or an unrecognised output shape all produced an empty value and took
+# the SAME branch as a genuinely empty lane — after which PHASE 2 removed the worktree. A
+# permissive branch on an ABSENCE OF INFORMATION, immediately before an irreversible delete:
+# if a live peer held that lane, its checkout went and its lock stayed. Only the probe's own
+# affirmative `FREE ... record=absent` may permit proceeding.
+#
+# Driven by SUBSTITUTING the artifact (a scratch copy of finalize-cleanup.sh beside a stub
+# lane-lock.sh), never a test seam in the shipped script — the same rule the canonical-pin
+# helper follows, because a settable seam is one more thing a real invoker can set.
+FCDIR="$T/fc-probe"; mkdir -p "$FCDIR"
+cp "$FC" "$FCDIR/finalize-cleanup.sh"
+mkdir -p "$T/lane-905"
+
+mk_probe_stub() { printf '%s\n' '#!/usr/bin/env bash' "$1" > "$FCDIR/lane-lock.sh"; }
+
+# RED ARM: the probe cannot answer (nonzero exit, no output).
+mk_probe_stub 'exit 1'
+red_md5="$(md5sum "$FCDIR/lane-lock.sh" | cut -d" " -f1)"
+out5="$(bash "$FCDIR/finalize-cleanup.sh" --issue 905 --merged-branch issue-905-x --dry-run 2>&1)"; rc5=$?
+if [ "$rc5" -eq 6 ] && printf '%s' "$out5" | grep -q 'could not be MEASURED'; then
+  ok "an unmeasurable probe REFUSES (exit 6) instead of reading as an empty lane"
+else
+  bad "expected exit 6 naming an unmeasurable probe; got rc=$rc5
+$out5"
+fi
+if [ -d "$T/lane-905" ]; then
+  ok "the unmeasurable refusal left the lane directory intact"
+else
+  bad "the unmeasurable refusal REMOVED the lane directory — the job-442 damage"
+fi
+
+# CONTROL 1: an AFFIRMATIVE free answer must still proceed, or the guard reds on correct input
+# (the guard agents learn to waive). Differs from the RED arm in exactly one property: the
+# probe now answers.
+mk_probe_stub 'echo "LANE-LOCK: FREE issue=905 liveness=NO-RECORD record=absent lane-dir=/tmp/x"'
+grn_md5="$(md5sum "$FCDIR/lane-lock.sh" | cut -d" " -f1)"
+if [ "$red_md5" != "$grn_md5" ]; then
+  ok "(construction) the RED and CONTROL arms are different artifacts"
+else
+  bad "(construction) both arms are byte-identical — the RED arm proved nothing"
+fi
+out5b="$(bash "$FCDIR/finalize-cleanup.sh" --issue 905 --merged-branch issue-905-x --dry-run 2>&1)"; rc5b=$?
+if [ "$rc5b" -ne 6 ] || ! printf '%s' "$out5b" | grep -q 'could not be MEASURED'; then
+  ok "(control) an affirmative 'FREE ... record=absent' still proceeds"
+else
+  bad "(control) an affirmatively empty lane was refused as unmeasurable: rc=$rc5b
+$out5b"
+fi
+
+# CONTROL 2: output present but UNRECOGNISED is unmeasurable too — the refusal is about the
+# ANSWER, not merely about the exit status. Without this, a stub exiting 0 with garbage would
+# still slip through on the empty-lease path.
+mk_probe_stub 'echo "something else entirely"'
+out5c="$(bash "$FCDIR/finalize-cleanup.sh" --issue 905 --merged-branch issue-905-x --dry-run 2>&1)"; rc5c=$?
+if [ "$rc5c" -eq 6 ] && printf '%s' "$out5c" | grep -q 'could not be MEASURED'; then
+  ok "(control) rc=0 with UNRECOGNISED output is unmeasurable too, not an empty lane"
+else
+  bad "(control) unrecognised probe output was read as an empty lane: rc=$rc5c
+$out5c"
+fi
+
 echo "==== finalize-cleanup lane-lock: passed=$PASS failed=$FAIL ===="
 [ "$FAIL" -eq 0 ] || exit 1

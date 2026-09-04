@@ -312,8 +312,35 @@ LANE_LEASE_BASIS=""
 # bit is irrelevant and an OR admits an executable-but-unreadable script that bash then cannot
 # run, turning a declared skip into a confusing failure.
 if [ -r "$LANE_LOCK_SH" ]; then
-  lane_probe="$(bash "$LANE_LOCK_SH" probe "$ISSUE" 2>/dev/null || true)"
+  # THREE-VALUED, because `[ -n "$lane_cur" ]` is not (roborev job 442, High). The probe was
+  # run under `|| true` and its output parsed for `lease=`, so EVERY unmeasurable outcome — a
+  # nonzero exit, a kill, an empty capture, an output shape this script does not recognise —
+  # produced an empty `lane_cur` and fell into the "no record to release" note, after which
+  # PHASE 2 removed the worktree. That is a permissive branch taken on an ABSENCE OF
+  # INFORMATION immediately before a destructive, irreversible action: the lane may be held by
+  # a live peer and we would have deleted its checkout while its lock survived. A positive
+  # verdict requires an AFFIRMATIVE MEASUREMENT, so only `FREE ... record=absent` — the
+  # probe's own affirmative statement that there is nothing there — permits proceeding.
+  # `&& rc=0 || rc=$?`, not `; rc=$?`: this script runs under `set -e`, where a FAILING command
+  # substitution in a plain assignment ABORTS the script before the next statement — so the
+  # capture never ran and an unmeasurable probe exited 1 rather than reaching this guard at all.
+  # The guard existed and was unreachable on exactly the input it was written for.
+  lane_probe="$(bash "$LANE_LOCK_SH" probe "$ISSUE" 2>/dev/null)" && lane_probe_rc=0 || lane_probe_rc=$?
   lane_cur="$(printf '%s' "$lane_probe" | tr ' ' '\n' | sed -n 's/^lease=//p' | head -1)"
+  lane_free=0
+  case "$lane_probe" in
+    *"LANE-LOCK: FREE "*) case "$lane_probe" in *"record=absent"*) lane_free=1 ;; esac ;;
+  esac
+  if [ "$lane_probe_rc" -ne 0 ] || { [ -z "$lane_cur" ] && [ "$lane_free" -eq 0 ]; }; then
+    echo "$prog: REFUSED — the lane lock for issue #$ISSUE could not be MEASURED" >&2
+    echo "  probe exit: $lane_probe_rc" >&2
+    echo "  probe said: ${lane_probe:-<no output>}" >&2
+    echo "  Neither a lease nor an affirmative 'FREE ... record=absent' was read, so this run" >&2
+    echo "  cannot tell an empty lane from a lane held by a live peer. Proceeding would remove" >&2
+    echo "  a worktree on unproven information. Nothing was released and nothing was removed." >&2
+    echo "  Remedy: run '\''bash $LANE_LOCK_SH probe $ISSUE'\'' by hand and act on its verdict." >&2
+    exit 6
+  fi
   if [ -n "$lane_cur" ]; then
     if [ -n "$LANE_LEASE" ]; then
       if [ "$LANE_LEASE" != "$lane_cur" ]; then
