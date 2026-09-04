@@ -59,7 +59,7 @@ SUBJECT="$REPO_ROOT/scripts/gate-liveness.sh"
 # Case floor (CLAUDE.md, #3544): a span-replacing edit that silently deletes cases yields a green
 # tally over a shrunken suite. This is ENFORCED (exit 1), not merely printed, and may only go DOWN
 # with a stated reason.
-CASE_FLOOR=29
+CASE_FLOOR=31
 
 pass=0; fail=0; cases=0
 ok()   { cases=$((cases+1)); pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
@@ -213,7 +213,12 @@ violations() {
       # and `printf>/dev/null|head -1` are all valid, all hazardous, and all evaded the guard.
       # Verified valid with `bash -n`. Excluding alnum/_/- from the boundary is what still keeps
       # `printfoo | head` and `echoes | head` out -- those are different words, not writers.
-      if (!match(line, /(^|[^[:alnum:]_.\/-])(printf|echo)([^[:alnum:]_-]|$)/)) next
+      # The two boundary classes are IDENTICAL on purpose. They were asymmetric -- `.` and `/`
+      # excluded before the writer but accepted after it -- so `printf.local | head` and
+      # `echo/tool | head` were reported as builtins (roborev job 116, undeclared false
+      # positives). A boundary rule that differs by side is a rule nobody can state in one
+      # sentence, which is how the asymmetry survived three rounds of review.
+      if (!match(line, /(^|[^[:alnum:]_.\/-])(printf|echo)([^[:alnum:]_.\/-]|$)/)) next
       # Scan for the pipe from just past the WRITER WORD, not from RSTART. match() may consume a
       # LEADING boundary character, and if that character is itself a pipe then starting at RSTART
       # finds it and treats the writer as upstream of it -- reporting `producer|printf %s done`,
@@ -453,6 +458,14 @@ _pin 9p 0 "echoes is NOT the echo builtin"                           'echoes | h
 #    positive is worse than a declared one -- it contradicts the rule the guard prints.
 # ---------------------------------------------------------------------------
 _pin 9q 0 "final-stage writer, no whitespace: producer|printf is NOT a hazard" 'producer|printf %s done'
+
+# ---------------------------------------------------------------------------
+# 9r-9s. Command names that merely BEGIN with a builtin name (roborev job 116). The boundary
+#    classes are symmetric so these are not writers. 9o/9p pin the alnum case; these pin the
+#    punctuation case that the asymmetry let through.
+# ---------------------------------------------------------------------------
+_pin 9r 0 "printf.local is NOT the printf builtin" 'printf.local | head -1'
+_pin 9s 0 "echo/tool is NOT the echo builtin"      'echo/tool | head -1'
 
 # ---------------------------------------------------------------------------
 # 10. THE ASSERTION. Scan the SHIPPED reader.
