@@ -1854,6 +1854,42 @@ Default (cqlite-core): `all-compression` (LZ4, Snappy, Deflate, Zstd), `state_ma
 (#65), and the unimplemented `Storage::put`/`delete` stubs (#175)). Build recipes:
 `docs/development/dev-cookbook.md`.
 
+**Every declared feature must be LOAD-BEARING, and the full gate's
+`features-load-bearing` component enforces it (#1698).**
+`scripts/ci/check-features-load-bearing.sh` derives every feature declared by every
+workspace member from `cargo metadata --no-deps` (never a textual manifest sweep — cargo
+SYNTHESISES implicit features from optional deps that no `[features]` block contains, and
+`find`ing manifests reaches non-members cargo never builds) and asserts each one changes
+something: it, or something in its feature CLOSURE, has a cfg reference site in its
+DECLARING package's sources, enables an optional dependency, enables a feature of an
+external dependency, or is named in a target's `required-features`. **CREDIT FLOWS UP FROM
+EFFECTS, NEVER DOWN FROM A PARENT** — a leaf named only by an aggregator is DEAD, which is
+exactly how four `test-*` leaves survived for months behind `test-infrastructure`, while
+the legitimate `all-compression` stays green through its four dep-pulling leaves. **Being
+ENUMERATED is not an effect**: the gate's own clippy feature lists, a workflow
+`--features` argument and a doc table all NAME features without enabling anything, so
+deleting a dead flag means cleaning those enumerations IN THE SAME DIFF. Only `default` is
+exempt (cargo defines its meaning; an empty `default = []` is legitimate). Fail-closed on
+every derivation failure, and there is deliberately **no bypass flag and no env opt-out** —
+a dead flag is always deletable, so an escape hatch could only buy a vacuous green.
+The component's prerequisites are **cargo AND python3, both mandatory and declared**
+(cargo metadata is the only source of truth for the feature set; python3 is the reader
+that parses its JSON and lexes Rust) — absent either it FAILs with a named remedy and
+never SKIPs, while its self-test in the SKIP-aware `tooling-tests` component SKIPs loudly
+on a python3-less box, so the never-SKIPping lane is not folded into a SKIP-aware one
+(#3522). Its `cargo metadata` runs `--locked`, so a mandatory component can never rewrite
+`Cargo.lock` mid-gate and trip the tree-integrity check (#2926). The guard's claim is
+SCOPED and printed: no false FAIL for a gate in a RECOGNISED spelling (`#[cfg]`,
+`#![cfg]`, `cfg!`, `cfg_attr` condition and tail, whitespace and string escapes handled),
+explicitly INCOMPLETE, with the escape routes and the two NOT-SEEN spellings (a
+macro-expanded feature name, a runtime-built build-script env key) enumerated in the
+line — an absolute soundness claim was tried and retracted after six rounds of witnesses.
+Deleted by #1698: `events`, `ci_zero_tolerance` (5 manifests), the four
+`test-infrastructure` leaves, `sstable-writer`, cqlite-cli `interactive` (it sat in
+`default`), `cqlite-core/unit-tests-only` (the cqlite-integration-tests feature of the
+same name keeps its 25 cfg sites) and `wasm` with its three wasm32-only deps — the 27
+`cfg(target_arch = "wasm32")` sites stay, they gate on target, not on that feature.
+
 ## Troubleshooting
 
 - **Missing test data / 0 rows**: `bash test-data/scripts/fetch-datasets.sh`, then export the

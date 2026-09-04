@@ -204,13 +204,13 @@ Enable enhanced testing features:
 
 ```toml
 [features]
-test-infrastructure = [
-    "test-schema-validation",
-    "test-property-testing",
-    "test-coverage-tracking",
-    "test-quality-gates"
-]
+test-infrastructure = []
 ```
+
+Its four former leaves (`test-schema-validation`, `test-property-testing`,
+`test-coverage-tracking`, `test-quality-gates`) were deleted in #1698 — none of them
+had a single `cfg` site, so enabling any of them changed nothing. `test-infrastructure`
+itself has a real site (`cqlite-core/tests/common/mod.rs`) and stays.
 
 ## Success Metrics
 
