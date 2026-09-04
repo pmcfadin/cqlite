@@ -353,6 +353,30 @@ impl SSTableReader {
         // path never reaches the sequential scan.
         SCAN_FOR_KEY_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+        // #3853 scan-lifetime madvise seam. This site is NOT one of issue
+        // #3853's nine entry points and is a DELIBERATE extension, because a
+        // reviewer will otherwise ask why a point lookup takes a SCAN guard.
+        // Three reasons, and a fourth that follows from the code below:
+        //
+        // (a) It demonstrably reads the WHOLE data section. Both branches do:
+        //     the stitching branch stitches every chunk, and the non-stitching
+        //     block loop runs to EOF. By the seam's own invariant that makes it
+        //     a scan, whatever the caller's intent was.
+        // (b) There is no point-plane degradation to trade against. The arming
+        //     gate (`scan_lifetime::resolve`) enables the seam ONLY when
+        //     `!Arc::ptr_eq(point_plane_mmap, scan_mmap)`, so advising the scan
+        //     mapping provably cannot touch the #2210 `MADV_RANDOM` POINT
+        //     mapping — they are different allocations or the seam is disabled.
+        // (c) The `DONTNEED` at the end is actively DESIRABLE here: a whole-file
+        //     read performed to answer ONE key is precisely the resident-set
+        //     footprint worth releasing.
+        // (d) A guard here covers BOTH branches, whereas the funnel guard in
+        //     `stitch_all_chunks_cancellable` covers only the stitching one.
+        //
+        // The guard is taken before the early `Ok(None)` soft-miss returns and
+        // before the found-key early return, so every exit releases via `Drop`.
+        let _scan = self.begin_scan();
+
         // Issue #815: independent per-scan cursor — no cross-scan serialization.
         let cursor = self.new_scan_cursor().await?;
 
