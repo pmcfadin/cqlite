@@ -39,18 +39,25 @@
 //! * `MapType.compareMaps`: `(key, value)`-wise over `min(sizeL, sizeR)`, then
 //!   `Integer.compare(sizeL, sizeR)`.
 //!
-//! Scalars delegate to [`ComparatorType::compare`], the single owner of per-type
-//! scalar ordering — EXCEPT `inet` and `time`, whose Cassandra types declare
-//! `ComparisonType.BYTE_ORDER` while that method's fall-through compares FORMATTED
-//! STRINGS ([`compare_byte_order_custom`], roborev F3). Dispatch is on the DECLARED
-//! comparator only, never a byte pattern (no-heuristics, issue #28).
+//! Scalar leaves delegate to [`ComparatorType::compare`], resolved from the
+//! DECLARED (schema) leaf type — the single owner of per-type scalar ordering.
+//! There is deliberately NO second scalar-ordering path here: two ordering
+//! authorities for one type is precisely the divergence class issue #2339 exists
+//! to remove, and a schema-driven dispatch is the no-heuristics direction (#28)
+//! where a runtime-`Value`-variant dispatch is not.
+//!
+//! `inet` and `time` need no special case: `types::comparator::custom` orders both
+//! by their serialized form's unsigned byte order, which IS their Cassandra
+//! `ComparisonType.BYTE_ORDER` (fixture-backed against the Cassandra-written
+//! `test_comparator_order` corpus, #3790/#3935).
+//!
+//! Dispatch is on the DECLARED comparator only, never a byte pattern (#28).
 
 #![cfg(feature = "write-support")]
 
 use std::cmp::Ordering;
 
 use crate::storage::sstable::reader::parsing::comparator_value_parsing::parse_value_with_comparator;
-use crate::storage::sstable::writer::data_writer::collection_order::compare_collection_elements;
 use crate::types::{ComparatorType, Value};
 use crate::{Error, Result};
 
@@ -281,88 +288,39 @@ pub(super) fn compare_composite(
             }
             Ok(l.len().cmp(&r.len()))
         }
-        // `inet` / `time` are ordered by the SERIALIZED FORM's unsigned byte order,
-        // NOT by `ComparatorType::compare` (roborev F3) — see
-        // [`compare_byte_order_custom`].
-        ComparatorType::Custom(name) if name == "inet" || name == "time" => {
-            compare_byte_order_custom(name, left, right, cmp)
-        }
-        // Every other scalar leaf routes through the write path's Cassandra-correct
-        // scalar comparator — NOT `ComparatorType::compare` (roborev job 57).
+        // Every scalar leaf delegates to the CENTRAL comparator, resolved from the
+        // DECLARED (schema) leaf type. `cmp` here is the frozen-unwrapped declared
+        // comparator for this component, so this is a schema-driven dispatch, never
+        // an inspection of the runtime value (no-heuristics, #28).
         //
-        // WHY NOT `ComparatorType::compare`: its `varint` arm compares raw bytes
-        // (so `0` sorts before `-1`), its `decimal` arm is a PLACEHOLDER STRING
-        // comparison, and its `uuid` arm is raw byte order — none of which is
-        // Cassandra's order. A tuple/UDT carrying any of those as a component was
-        // therefore ordered differently from Cassandra on the merged-read arm.
+        // `inet`/`time` come along for free: `types::comparator::custom` orders both
+        // by their serialized form's unsigned byte order — `compare_inet` is a
+        // `[u8]` compare of the raw address and `compare_time` a compare of
+        // `i64::to_be_bytes` — which is `ComparisonType.BYTE_ORDER` verbatim, backed
+        // by the Cassandra-written `test_comparator_order` fixtures (#3790/#3935).
         //
-        // WHY THIS FUNCTION: `collection_order::compare_collection_elements` is
-        // the repository's EXISTING owner of Cassandra element ordering (#1275
-        // scalars, #1296 composites) — signed integers, Java `Float/Double.compare`
-        // total order, signed `varint`, scale-aware `decimal` and `UUIDType`, with
-        // an unsigned-byte fallback that is correct for text/ascii/blob/boolean/
-        // inet/date. Reusing it is deliberate: a second implementation of an
-        // ordering is a second thing to drift, and the reviewer named this exact
-        // function as the reuse target. It dispatches on the `Value` VARIANT —
-        // authoritative type metadata carried by the value — never on a byte
-        // pattern (no-heuristics, #28).
-        _ => Ok(compare_collection_elements(left, right)),
-    }
-}
-
-/// Order an `inet` / `time` COMPONENT of a composite the way Cassandra does:
-/// unsigned byte order of the serialized form.
-///
-/// Both types declare `ComparisonType.BYTE_ORDER` at the pinned `cassandra-5.0.8`
-/// tag — verbatim:
-///
-/// ```text
-/// InetAddressType() {super(ComparisonType.BYTE_ORDER);} // singleton
-/// private TimeType()  {super(ComparisonType.BYTE_ORDER);} // singleton
-/// ```
-///
-/// `ComparatorType::compare`'s fall-through for these two names is
-/// `compare_custom`, which compares the values' FORMATTED STRINGS — a genuinely
-/// different order for `inet` (`9.0.0.1` precedes `10.0.0.1` by address bytes, the
-/// REVERSE of their dotted-quad text order), so a `tuple`/UDT carrying an `inet`
-/// component was ordered differently from Cassandra.
-///
-/// SCOPE (deliberate, issue #2339): this fixes the COMPOSITE path only.
-/// `ComparatorType::compare`'s own `inet`/`time` arms are a PRE-EXISTING defect
-/// that also affects the SCALAR collection path (where `read_assembly` works
-/// around it by sorting those elements on raw `cell_path` bytes — see
-/// `comparator_orders_by_raw_cell_path_bytes`), so rewriting the central
-/// comparator is a separate change with its own blast radius.
-///
-/// Serialized forms (`custom_scalar::decode_custom_scalar`, the decoder that
-/// produced these values):
-/// * `inet` — the raw address bytes, so unsigned byte order IS a byte compare of
-///   `Value::Inet`'s payload (Rust slice `Ord` is unsigned lexicographic then
-///   length, matching `ByteBufferUtil.compareUnsigned`).
-/// * `time` — an 8-byte big-endian `i64`, so unsigned byte order is `u64` order of
-///   the same bits (identical to `i64` order for the non-negative nanoseconds-of-day
-///   a valid value carries, and still faithful to BYTE_ORDER if one is not).
-///
-/// A value whose shape contradicts the declared type is an `Err`, never a silent
-/// mis-order — the rule the rest of this module follows.
-fn compare_byte_order_custom(
-    name: &str,
-    left: &Value,
-    right: &Value,
-    cmp: &ComparatorType,
-) -> Result<Ordering> {
-    // Nulls first, exactly as `ComparatorType::compare` does — the `List`/`Set`/
-    // `Map` arms above descend into elements without a null pre-check.
-    match (left.is_null(), right.is_null()) {
-        (true, true) => return Ok(Ordering::Equal),
-        (true, false) => return Ok(Ordering::Less),
-        (false, true) => return Ok(Ordering::Greater),
-        (false, false) => {}
-    }
-    match (name, left, right) {
-        ("inet", Value::Inet(l), Value::Inet(r)) => Ok(l.as_ref().cmp(r.as_ref())),
-        ("time", Value::Time(l), Value::Time(r)) => Ok((*l as u64).cmp(&(*r as u64))),
-        _ => Err(shape_error(left, cmp)),
+        // ONE authority, deliberately. An earlier revision of this arm called the
+        // WRITE path's `collection_order::compare_collection_elements` instead; that
+        // was wrong. It dispatches on the runtime `Value` VARIANT while this one
+        // dispatches on the SCHEMA type, so keeping both would leave two ordering
+        // authorities for one type — the divergence class #2339 exists to remove.
+        //
+        // GAP: three leaf types are ordered by `ComparatorType::compare` in a way
+        // that does NOT match Cassandra, a PRE-EXISTING central-comparator defect
+        // this arm now inherits rather than papers over (a second path would hide
+        // it, and fixing the central comparator is its own change with its own
+        // blast radius — the writer path already has a correct implementation of
+        // each, so the fix is a convergence, not new code):
+        //   * `varint` — `compare_varint` is `Bytes::cmp`, i.e. raw unsigned bytes,
+        //     where Cassandra `IntegerType` compares SIGNED two's-complement
+        //     magnitude (so a negative sorts ABOVE `0` here, which is reversed).
+        //   * `decimal` — `compare_decimal` normalizes unequal scales by comparing
+        //     `format!("{:?}.{}", unscaled, scale)` STRINGS, self-described in
+        //     source as "For now, simple string comparison"; Cassandra
+        //     `DecimalType` compares numerically.
+        //   * `uuid` — `compare_uuid` is `Uuid::cmp` (raw bytes), where Cassandra
+        //     `UUIDType` compares version first, then a v1 timestamp, then the tail.
+        _ => cmp.compare(left, right),
     }
 }
 
