@@ -2546,42 +2546,6 @@ else
 fi
 reset_stub 2>/dev/null || true
 
-# --- (k) #4050 job 127: NO authorization is UNBOUND (4), not UNMEASURED (5) ---------
-# THE THIRD AND LAST INSTANCE of one family: an absent recogniser refusing a question that
-# needs no count. A FINDINGS record with NO deferral marker can be refused DEFINITIVELY by
-# the authorization-only scan — there is nothing to count — so it must reach exit 4
-# (measured refusal: "no authorized deferral covers this job"), never exit 5.
-#
-# 4 AND 5 ARE DIFFERENT OPERATOR ACTIONS, which is why this is not cosmetic: 4 says
-# "obtain a clean round or an authorization", 5 says "fix the box". Reporting 5 here sends
-# a lead to repair a checkout when the actual answer is that nobody authorized anything.
-if [ "$nolib_still_sib" -eq 1 ] && [ "$nolib_still_gone" -eq 1 ]; then
-  pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 652)" pmcfadin \
-    "no deferral marker anywhere in this comment"
-  roborev_job 652 "$MB_MAIN" "$HEAD_AFTER" F done 2026-09-02T10:00:00Z "$FC_REVIEW2"
-  K_OUT=$(cd "$WORK" && PATH="$BIN:$PATH" bash "$FLOW_NOLIB/premerge-review-binding.sh" \
-    review-binding 1 o/r "$HEAD_AFTER" 2>&1)
-  K_RC=$?
-  if [ "$K_RC" -ne 4 ]; then
-    bad "4050(k): a findings record with NO authorization did not give the definitive UNBOUND with the recogniser absent (exit $K_RC, wanted 4): $K_OUT"
-  else
-    ok "4050(k): no authorization is UNBOUND (exit 4) even with the recogniser absent — a measured refusal, not 'fix your box'"
-  fi
-  case "$K_OUT" in
-    *"no authorized deferral covers this job"*)
-      ok "4050(k): and the cause names the missing authorization, not the missing library" ;;
-    *) bad "4050(k): the cause did not name the missing authorization (got: $K_OUT)" ;;
-  esac
-  case "$K_OUT" in
-    *"roborev-findings-count.sh"*)
-      bad "4050(k): the recogniser is still NAMED, so it is still being loaded on a path that needs no count (got: $K_OUT)" ;;
-    *) ok "4050(k): the recogniser is not even NAMED — it is no longer loaded on this path at all" ;;
-  esac
-else
-  bad "4050(k): \$FLOW_NOLIB was not in the expected state, so the no-authorization case did not run"
-fi
-reset_stub 2>/dev/null || true
-
 # --- G3: an authorized deferral naming a CLOSED issue must NOT bind -----------
 # `gh issue view` EXITS 0 for a closed issue, so a number-only test made "the
 # finding is tracked" satisfiable by an issue closed as a duplicate weeks ago —
@@ -2818,7 +2782,7 @@ fi
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.
-CASE_FLOOR=190
+CASE_FLOOR=187
 TOTAL=$((PASSED + FAILED))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"

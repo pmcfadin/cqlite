@@ -1050,50 +1050,17 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
         # authorization oracle could not be consulted, and nothing about the deferral was
         # refused. If the deciding round turns out to be this one, the run still ends
         # UNMEASURED — which is the only outcome that was ever correct here.
-        # ===== AUTHORIZATION FIRST, RECOGNISER ONLY IF ONE EXISTS =====
-        # THIS IS THE STRUCTURAL FIX FOR A FAMILY, NOT A THIRD INSTANCE OF IT (roborev
-        # jobs 125, 126, 127 — three consecutive Mediums, each a narrower case of ONE
-        # defect: an absent or corrupt recogniser refusing a question that needs no count).
-        #   * 125 code-free diffs and CLEAN records — fixed by loading lazily in this arm.
-        #   * 126 an older FINDINGS round sinking a newer CLEAN one — fixed by making the
-        #         loader non-fatal so the per-record scan survives it.
-        #   * 127 a FINDINGS record with NO authorization at all, which the authz-only scan
-        #         can refuse DEFINITIVELY as UNBOUND (exit 4) without any count.
-        # Patching instances was not closing the class, so the ORDER is inverted instead:
-        # ask whether an authorization EXISTS (the authz-only kind, which passes
-        # `observed_count=None` and skips the count half BY DESIGN), and touch the
-        # recogniser ONLY once one does. Every path that needs no count now reaches its
-        # own measured answer whatever state the library is in, and there is no fourth
-        # instance to find here because the load is no longer on those paths at all.
-        #
-        # THE COUNT HALF IS NOT WEAKENED, which is the property that must survive this
-        # reordering: a bind still requires the DEFER kind to have granted on an
-        # affirmatively measured count (below). The authz-only pass can only ever REFUSE
-        # or say "an authorization exists" — it can never license a merge on its own, and
-        # its `granted-authorization` state is textually distinct precisely so nobody can
-        # mistake it for one.
-        local rpb_observed=""
-        deferral_authorized "$j" "$RH_BASE" "$RH_HEAD" "$tmp" "$repo" ""
-        local rpb_authz=$?
-        if [ "$rpb_authz" -eq 0 ]; then
-          # AN AUTHORIZATION EXISTS. Only now is a count needed, so only now is the
-          # recogniser loaded — non-fatally, per job 126: a failure is THIS RECORD's
-          # `authz_unmeasured` result and never the run's verdict, because
-          # `record_covering` decides once, afterwards, from the LATEST covering round.
-          if ! load_findings_count_lib; then
-            RESULT_NOTE="record verdict is FINDINGS and its deferral could NOT BE EVALUATED: $FINDINGS_COUNT_LIB_CAUSE"
-            RESULT_UNMEASURED=1
-            return 1
-          fi
-          if derive_findings_count "$tmp/review" "$tmp/findings-block"; then
-            rpb_observed="$DERIVED_FINDINGS_COUNT"
-          fi
-          # RE-ASKED WITH THE COUNT, so the DEFER kind's own count equality decides the
-          # grant. The authz-only answer above is NOT reused as a grant.
-          deferral_authorized "$j" "$RH_BASE" "$RH_HEAD" "$tmp" "$repo" "$rpb_observed"
-          rpb_authz=$?
+        if ! load_findings_count_lib; then
+          RESULT_NOTE="record verdict is FINDINGS and its deferral could NOT BE EVALUATED: $FINDINGS_COUNT_LIB_CAUSE"
+          RESULT_UNMEASURED=1
+          return 1
         fi
-        case "$rpb_authz" in
+        local rpb_observed=""
+        if derive_findings_count "$tmp/review" "$tmp/findings-block"; then
+          rpb_observed="$DERIVED_FINDINGS_COUNT"
+        fi
+        deferral_authorized "$j" "$RH_BASE" "$RH_HEAD" "$tmp" "$repo" "$rpb_observed"
+        case "$?" in
           0)
             if [ -n "$rpb_observed" ]; then
               # EVERY HALF OF THE AUTHORIZATION WAS MEASURED AND MATCHED: an
