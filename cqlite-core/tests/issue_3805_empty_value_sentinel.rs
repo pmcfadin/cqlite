@@ -372,11 +372,12 @@ fn the_type_aware_serializer_refuses_a_tag_column_mismatch() {
 #[test]
 fn the_tagged_serializer_refuses_the_sentinel_for_every_admitted_family() {
     for (ty, name, _) in admitted_families() {
-        let err = cqlite_core::parser::types::serialize_cql_value(&Value::Empty(ty))
-            .expect_err(&format!(
+        let err = cqlite_core::parser::types::serialize_cql_value(&Value::Empty(ty)).expect_err(
+            &format!(
                 "Empty({name}) was serialized by the legacy tagged format, which has \
                  no representation that reads back as the sentinel"
-            ));
+            ),
+        );
         let msg = err.to_string();
         for needle in ["4072", "28", name] {
             assert!(
