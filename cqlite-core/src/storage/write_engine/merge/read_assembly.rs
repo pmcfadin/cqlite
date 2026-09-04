@@ -623,10 +623,74 @@ fn sort_composite(
             Ordering::Equal
         }
     });
-    match first_err {
-        Some(e) => Err(e),
-        None => Ok(keyed),
+    if let Some(e) = first_err {
+        return Err(e);
     }
+    coalesce_comparator_equal(column, keyed, cmp)
+}
+
+/// Collapse runs of comparator-EQUAL cell paths to ONE cell, by the shared
+/// reconciliation rule (issue #2339, roborev job 117).
+///
+/// **The defect this closes, reproduced before it was written.** Two encodings can be
+/// DIFFERENT BYTES and comparator-EQUAL — an omitted trailing tuple component versus
+/// an explicit null one, which `TupleType.compareCustom` returns 0 for and which
+/// `an_omitted_tuple_suffix_compares_equal_to_an_explicit_all_null_suffix` already
+/// pins. But `reconcile.rs` keys cells by `(column, RAW cell_path)`, so two
+/// generations carrying the two encodings both SURVIVE reconciliation and assembly
+/// emitted BOTH:
+///
+/// ```text
+/// Map([(Frozen(Tuple([Integer(1)])),       BigInt(1)),
+///      (Frozen(Tuple([Integer(1), Null])), BigInt(2))])
+/// ```
+///
+/// That is not a valid CQL map — one logical key, two entries — and Cassandra would
+/// return the later-timestamped winner alone.
+///
+/// **Why HERE and not in `reconcile.rs`.** Making `CellKey` comparator-aware would
+/// change the identity of every multi-cell column in the engine, needs the declared
+/// type at a layer that deliberately does not have it, and is far outside this
+/// issue. This runs where the comparator IS known and the run is already SORTED, so
+/// equal keys are adjacent and one linear pass suffices.
+///
+/// **The winner rule is NOT reimplemented**: `reconcile_rules::cell_wins` is the
+/// SHARED predicate already used by both the merge path and the flush/write path
+/// (issue #947) — higher timestamp, then a tombstone beats a live/expiring cell at
+/// equal timestamp, then first-seen. A second copy here would be a second
+/// reconciliation authority, which is the divergence class #2339 exists to remove.
+///
+/// The WINNER's own key encoding is the one kept, matching Cassandra keeping the
+/// winning cell rather than synthesising a canonical form.
+#[cfg(feature = "write-support")]
+fn coalesce_comparator_equal(
+    column: &str,
+    keyed: Vec<(Value, CellData)>,
+    cmp: &ComparatorType,
+) -> Result<Vec<(Value, CellData)>> {
+    let mut out: Vec<(Value, CellData)> = Vec::with_capacity(keyed.len());
+    for (key, cell) in keyed {
+        let collapses = match out.last() {
+            // The run is sorted, so a comparator-equal peer can only be the LAST
+            // pushed entry. Errors propagate rather than being swallowed into
+            // "not equal", which would silently re-admit the duplicate.
+            Some((prev_key, _)) => {
+                compare_composite(column, prev_key, &key, cmp)? == Ordering::Equal
+            }
+            None => false,
+        };
+        if collapses {
+            if let Some((prev_key, prev_cell)) = out.last_mut() {
+                if crate::storage::write_engine::reconcile_rules::cell_wins(&cell, prev_cell) {
+                    *prev_key = key;
+                    *prev_cell = cell;
+                }
+            }
+            continue;
+        }
+        out.push((key, cell));
+    }
+    Ok(out)
 }
 
 /// Sort `items` by the first tuple element with the fallible [`ComparatorType`],

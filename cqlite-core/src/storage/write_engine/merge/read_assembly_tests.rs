@@ -638,6 +638,67 @@ fn composite_with_a_time_component_orders_by_serialized_bytes() {
 /// Byte encodings, not hand-built values: the decoder is what turns an omitted
 /// suffix into a SHORTER `Value::Tuple`, and that is half of the property.
 #[test]
+/// **Issue #2339 / roborev job 117 — comparator-EQUAL cell paths must COALESCE to one
+/// logical cell, by timestamp.**
+///
+/// `reconcile.rs` keys cells by `(column, RAW cell_path)`, so two generations carrying
+/// two DIFFERENT byte encodings of the SAME logical key both survive reconciliation.
+/// Before the fix, assembly emitted BOTH as separate map entries:
+///
+/// ```text
+/// Map([(Frozen(Tuple([Integer(1)])),       BigInt(1)),
+///      (Frozen(Tuple([Integer(1), Null])), BigInt(2))])
+/// ```
+///
+/// which is not a valid CQL map. The pair is comparator-equal by
+/// `an_omitted_tuple_suffix_compares_equal_to_an_explicit_all_null_suffix` above, so
+/// exactly ONE must survive: the later timestamp, per the SHARED
+/// `reconcile_rules::cell_wins` rule.
+///
+/// RED BEFORE THE FIX: two entries (measured, and quoted above verbatim).
+#[test]
+fn comparator_equal_cell_paths_coalesce_to_the_timestamp_winner() {
+    // ftk = map<frozen<tuple<int, text>>, bigint>: an omitted trailing component
+    // vs an explicit null one — same logical key, different bytes.
+    let omitted = hex("0000000400000001");
+    let explicit = hex("0000000400000001ffffffff");
+
+    let mut older = elem("ftk", Value::BigInt(1), omitted.clone());
+    older.timestamp = 100;
+    let mut newer = elem("ftk", Value::BigInt(2), explicit.clone());
+    newer.timestamp = 200;
+
+    for (label, cells) in [
+        ("newer last", vec![older.clone(), newer.clone()]),
+        // Arrival order must not decide it: the winner is the TIMESTAMP winner.
+        ("newer first", vec![newer.clone(), older.clone()]),
+    ] {
+        let out =
+            assemble_read_cells_with_udts(cells, &schema(), None, registry()).expect("assembles");
+        let value = out
+            .iter()
+            .find(|(n, _)| &**n == "ftk")
+            .map(|(_, v)| v.clone())
+            .expect("ftk present");
+        let Value::Map(entries) = value else {
+            panic!("{label}: ftk must be a Map, got {value:?}");
+        };
+        assert_eq!(
+            entries.len(),
+            1,
+            "{label}: one LOGICAL key must yield ONE entry — an omitted and an explicit \
+             all-null suffix are comparator-equal, so emitting both is an invalid CQL \
+             map (issue #2339, roborev job 117). Got: {entries:?}"
+        );
+        assert_eq!(
+            entries[0].1,
+            Value::BigInt(2),
+            "{label}: the LATER timestamp (200) must win, per the shared \
+             reconcile_rules::cell_wins rule"
+        );
+    }
+}
+
 fn an_omitted_tuple_suffix_compares_equal_to_an_explicit_all_null_suffix() {
     let cmp = ComparatorType::Tuple(vec![ComparatorType::Text, ComparatorType::Int]);
     let decode =
