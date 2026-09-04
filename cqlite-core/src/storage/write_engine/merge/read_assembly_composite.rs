@@ -62,6 +62,7 @@
 
 #![cfg(feature = "write-support")]
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 
 use crate::storage::sstable::reader::parsing::comparator_value_parsing::parse_value_with_comparator;
@@ -388,22 +389,53 @@ pub(super) fn compare_composite(
 /// this guard is deleted with it (the `#[ignore]`d tripwire test says so too).
 ///
 /// Dispatch is on the DECLARED comparator, never on the runtime value (#28).
-fn divergent_leaf(cmp: &ComparatorType) -> Option<(&'static str, &'static str)> {
+fn divergent_leaf(cmp: &ComparatorType) -> Option<(Cow<'_, str>, &'static str)> {
     match cmp {
         ComparatorType::Varint => Some((
-            "varint",
+            Cow::Borrowed("varint"),
             "IntegerType (signed two's-complement magnitude), where compare_varint is raw \
              unsigned byte order",
         )),
         ComparatorType::Decimal => Some((
-            "decimal",
+            Cow::Borrowed("decimal"),
             "DecimalType (numeric across scales), where compare_decimal falls back to a \
              formatted-string comparison for unequal scales",
         )),
         ComparatorType::Uuid => Some((
-            "uuid/timeuuid",
+            Cow::Borrowed("uuid/timeuuid"),
             "UUIDType (version, then v1 timestamp, then tail), where compare_uuid is raw \
              byte order",
+        )),
+        // `Custom` is the SAME defect class arriving by a different door, and the
+        // decode-side guard cannot catch it. `first_unresolved_custom` deliberately
+        // ADMITS every name `decode_custom_scalar` can decode — `time`, `inet` AND
+        // `json` — so a `json` leaf decodes, passes that guard, and reaches here.
+        // `custom::compare` then handles only `inet`/`time` and falls to a
+        // DISPLAY-STRING comparison for everything else, which is the same
+        // "string comparison for now" shape refused above for `decimal`.
+        //
+        // The predicate is `supports_ordering()`, not a name list, because that IS
+        // the codebase's own answer to "does this type order?" — it reports FALSE
+        // for `json` while this path was ordering it anyway. Deriving the refusal
+        // from it means a future `decode_custom_scalar` arm cannot silently become
+        // orderable: it starts REFUSING until someone gives it a real comparator,
+        // which is the direction `first_unresolved_custom`'s own doc asks for.
+        // `inet`/`time` report TRUE (fixture-backed by the Cassandra-written
+        // `test_comparator_order` corpus) and are unaffected.
+        ComparatorType::Custom(name) if !cmp.supports_ordering() => Some((
+            Cow::Owned(format!("custom '{name}'")),
+            "no implemented ordering at all — `custom::compare` falls back to a \
+             DISPLAY-STRING comparison for this name, and `ComparatorType::\
+             supports_ordering` reports false for it",
+        )),
+        // The `Json` VARIANT is the same string-comparison defect one enum arm over
+        // (`compare_json` serialises both sides and compares the strings). No
+        // `CqlType` maps to it today, so this arm is defence in depth rather than a
+        // reachable case — cheap, and it cannot become reachable silently.
+        ComparatorType::Json => Some((
+            Cow::Borrowed("json"),
+            "no Cassandra ordering — `compare_json` compares serialised JSON \
+             strings",
         )),
         _ => None,
     }
@@ -414,7 +446,7 @@ fn divergent_leaf(cmp: &ComparatorType) -> Option<(&'static str, &'static str)> 
 /// Names the COLUMN, the offending LEAF TYPE and issue #4063, in the same style as
 /// this module's decode-side refusals, so an operator can tell which column and
 /// which type to look at without reading source.
-fn divergent_leaf_error(column: &str, (leaf, citation): (&'static str, &'static str)) -> Error {
+fn divergent_leaf_error(column: &str, (leaf, citation): (Cow<'_, str>, &'static str)) -> Error {
     Error::unsupported_format(format!(
         "column '{column}': refusing to ORDER a composite collection key/element \
          whose '{leaf}' leaf has no Cassandra-compatible ordering yet — the central \

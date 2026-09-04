@@ -970,6 +970,60 @@ fn varint_composite_element_fails_closed_through_the_merged_read_path() {
     );
 }
 
+/// **A `json` CUSTOM leaf must fail closed too — the under-inclusive-guard case.**
+///
+/// This is the SAME defect class as `varint`/`decimal`/`uuid` arriving by a different
+/// door, and the decode-side guard provably cannot catch it. Three sets in this
+/// codebase disagree, and the disagreement is the bug:
+///
+/// * `first_unresolved_custom` ADMITS `time`, `inet`, `json` — deliberately, because
+///   it mirrors `decode_custom_scalar`, which really does decode all three.
+/// * `custom::compare` HANDLES only `inet` and `time`; every other name falls to a
+///   `format!("{}", ..)` DISPLAY-STRING comparison.
+/// * `ComparatorType::supports_ordering` reports `false` for `json`.
+///
+/// So before the `Custom` arm of `divergent_leaf`, a `json` leaf decoded, passed the
+/// fail-closed decode guard, and was then ORDERED BY DISPLAY STRING — while the
+/// codebase's own public API said it does not order. That is the
+/// plausible-looking-wrong-order class #28 forbids.
+///
+/// RED BEFORE THE FIX: returned `Ok(..)` from the display-string fallback.
+#[test]
+fn json_custom_leaf_of_a_composite_fails_closed() {
+    let cmp = ComparatorType::Tuple(vec![ComparatorType::Custom("json".to_string())]);
+    let left = Value::Tuple(vec![Value::Text("a".into())]);
+    let right = Value::Tuple(vec![Value::Text("b".into())]);
+
+    let err = composite::compare_composite("jcol", &left, &right, &cmp)
+        .expect_err("a json custom leaf has no Cassandra ordering and must be REFUSED");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("jcol") && msg.contains("json") && msg.contains("#4063"),
+        "the refusal must name the column, the leaf type and #4063, got: {msg}"
+    );
+}
+
+/// `inet` and `time` are NOT refused: they are fixture-backed by the Cassandra-written
+/// `test_comparator_order` corpus and `supports_ordering` reports true for both. This
+/// is the positive control for the arm above — a guard keyed on `Custom` as a whole,
+/// rather than on `supports_ordering()`, would red here.
+#[test]
+fn inet_and_time_custom_leaves_are_still_ordered_not_refused() {
+    for name in ["inet", "time"] {
+        let cmp = ComparatorType::Tuple(vec![ComparatorType::Custom(name.to_string())]);
+        let a = Value::Tuple(vec![Value::Inet(vec![1, 2, 3, 4].into())]);
+        let b = Value::Tuple(vec![Value::Inet(vec![1, 2, 3, 5].into())]);
+        // Either an Ok ordering or a TYPE-MISMATCH error is acceptable here; what must
+        // NOT happen is the #4063 refusal, which would mean the guard over-reached.
+        if let Err(e) = composite::compare_composite("c", &a, &b, &cmp) {
+            assert!(
+                !e.to_string().contains("#4063"),
+                "'{name}' is fixture-backed and must NOT be refused as unorderable: {e}"
+            );
+        }
+    }
+}
+
 /// **roborev job 52 / G2 — the NESTED unresolved UDT must fail closed too.**
 ///
 /// The guard used to test only the comparator `unwrap_frozen_comparator` returns,
