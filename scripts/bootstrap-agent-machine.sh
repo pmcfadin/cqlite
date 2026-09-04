@@ -122,6 +122,21 @@
 #                                                      #   CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 is the
 #                                                      #   env spelling, for harnesses that drive
 #                                                      #   bootstrap on a fixed command line.
+#   bash scripts/bootstrap-agent-machine.sh --skip-object-store-sweep  # skip ONLY section
+#                                                      #   5d (the `git fsck` rehash of this
+#                                                      #   box's SHARED git object store, #3749).
+#                                                      #   Same posture as --skip-push-probe /
+#                                                      #   --skip-gate-pin: it emits
+#                                                      #   `object-store: OPT-OUT` as a [warn], so
+#                                                      #   it withholds "All checks green." and can
+#                                                      #   never buy a vacuous green. The sweep
+#                                                      #   costs 13-24s warm and 47-80s cold on
+#                                                      #   this fleet's 366M store, so the
+#                                                      #   sibling self-suites (which drive
+#                                                      #   bootstrap dozens of times against the
+#                                                      #   real checkout) opt out via
+#                                                      #   CQLITE_BOOTSTRAP_SKIP_OBJECT_STORE_SWEEP=1,
+#                                                      #   the env spelling.
 #   bash scripts/bootstrap-agent-machine.sh --skip-smoke   # skip the final GATE run (section 6).
 #                                                      #   DISTINCT from --skip-push-probe: this
 #                                                      #   one is about the gate fmt smoke, that
@@ -152,6 +167,27 @@ SKIP_GATE_PIN_HOW=""
 if [ "${CQLITE_BOOTSTRAP_SKIP_GATE_PIN:-0}" = 1 ]; then
   SKIP_GATE_PIN=1; SKIP_GATE_PIN_HOW="CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1"
 fi
+# --skip-object-store-sweep / CQLITE_BOOTSTRAP_SKIP_OBJECT_STORE_SWEEP=1 (issue #3749):
+# skip section 5d, the `git fsck` rehash of this box's SHARED git object store. A
+# FOURTH subject, so a fourth switch — the one-flag-per-subject rule the three above
+# already follow. LOUD and NON-PASSING (an `object-store: OPT-OUT` [warn]), so it
+# withholds "All checks green." and --strict still exits 1: an opt-out that returned `ok`
+# would be a switch for buying a vacuous green, and a vacuously-green integrity sweep is
+# worse than none because it invites reliance it cannot support.
+#
+# THE ENV SPELLING IS NOT A CONVENIENCE, IT IS WHAT KEEPS THE SELF-SUITES USABLE.
+# scripts/tests/test_bootstrap_agent_machine.sh drives this script ~37 times against the
+# REAL checkout, whose shared store measures 13-24s per sweep warm and 47-80s cold or
+# under concurrent gates (two independent measurement sets, 366M store, git 2.43.0) —
+# i.e. roughly 8 to 45 MINUTES added to a MANDATORY gate component for a property those
+# cases are not about. The single "19.83s" an earlier revision quoted was one warm run
+# and understated the cold case by 2.5-4x. They export the variable once; the cases that
+# ARE about this section unset it and run against their own small scratch repos.
+SKIP_OBJ_SWEEP=0
+SKIP_OBJ_SWEEP_HOW=""
+if [ "${CQLITE_BOOTSTRAP_SKIP_OBJECT_STORE_SWEEP:-0}" = 1 ]; then
+  SKIP_OBJ_SWEEP=1; SKIP_OBJ_SWEEP_HOW="CQLITE_BOOTSTRAP_SKIP_OBJECT_STORE_SWEEP=1"
+fi
 # --fix-gate-pin (issue #3414): perform section 5b's /etc/environment write WITHOUT --yes,
 # and nothing else. A SIBLING of --fix-credentials, deliberately not a widening of it:
 # that flag documents itself as running section 3b's auto-fix "and NOTHING else", and
@@ -174,6 +210,7 @@ for arg in "$@"; do
     --skip-smoke) SKIP_SMOKE=1 ;;
     --skip-push-probe) SKIP_PUSH_PROBE=1 ;;
     --skip-gate-pin) SKIP_GATE_PIN=1; SKIP_GATE_PIN_HOW="--skip-gate-pin" ;;
+    --skip-object-store-sweep) SKIP_OBJ_SWEEP=1; SKIP_OBJ_SWEEP_HOW="--skip-object-store-sweep" ;;
     --fix-gate-pin) FIX_GATE_PIN=1 ;;
     --fix-credentials) FIX_CREDENTIALS=1 ;;
     --strict) STRICT=1 ;;
@@ -3119,6 +3156,182 @@ else
   fi
 fi
 
+# ---- 5d. Shared object-store integrity (issue #3749) ----
+#
+# PLACED AFTER 5c, NOT BETWEEN 5b AND 5c, AND THAT IS DELIBERATE: block 11i of
+# scripts/tests/test_bootstrap_agent_machine.sh asserts STRUCTURALLY that section 5b
+# contains exactly ONE `ok` call (its VERIFIED verdict), reading the range
+# `/^# ---- 5b\./,/^# ---- 5c\./` out of this file. A new section with its own `ok`
+# inside that range would red that guard — so this one lives outside it rather than the
+# guard being widened to accommodate it.
+#
+# WHY THIS SECTION EXISTS. Every lane on this box is a `git worktree` of ONE shared
+# `.git`, and git does not rehash an object against the id it was asked for on an
+# ordinary read. So the gate's component-set pre-flight — which reads origin/main's
+# committed manifest and HEAD's committed component declaration THROUGH that store — is
+# trusting content nothing verified, and a corrupt store can change ANY gate's verdict on
+# this box. #3749's owner ruling scoped the in-model subject to ACCIDENTAL corruption
+# (bit rot, a torn pack write, a SIGKILLed gc); DELIBERATE peer forgery is invoker-class
+# and out of model per the #3312 triage rule. This is the bootstrap half of the control;
+# the recurring half is scripts/local/worker-supervisor.sh's throttled sweep.
+#
+# ONE IMPLEMENTATION, TWO CALLERS: both go through scripts/check-object-store-integrity.sh,
+# because a second implementation is a second place for the verdict to drift.
+#
+# VERIFIED IS THE ONLY [ok] — CLAUDE.md's recorded lesson from #3414 verbatim: scoping a
+# case out is not the same as passing it, and an [ok] is what --strict reads, so an [ok]
+# on an unmeasured host is a false certification.
+hdr "Shared object-store integrity (git fsck, issue #3749)"
+OBJ_SWEEP_SH="$REPO_ROOT/scripts/check-object-store-integrity.sh"
+# The sweep bounds its own fsck; this outer bound is belt, and it is LOOSER than the inner
+# one on purpose — a wrapper that expires first would report "the sweep produced no
+# verdict" for a run the sweep was about to classify itself.
+#
+# THE INNER BOUND IS PER WALK, AND THE SWEEP CAN TAKE THREE (MAX_SWEEP_WALKS in the sweep
+# script: the sweep, the reproduction discriminator when walk 1 is not clean, and the
+# `--no-reflogs` reachability-cause discriminator when both walks report ERROR_REACHABLE
+# — #3749 review round 4), so the outer one has to clear 3x the inner one plus process
+# overhead — sized from a MEASURED range (13-24s warm, 47-80s cold on this fleet's 366M
+# store), not from the single warm number an earlier revision quoted. A wrapper that
+# expired first would report "the sweep produced no verdict" for a run the sweep was
+# about to classify itself, which is why it is the LOOSER of the two.
+OBJ_SWEEP_INNER_BOUND=600
+OBJ_SWEEP_OUTER_BOUND=1980
+OBJ_STORE_CORRUPT=0
+OBJ_STORE_UNSWEEPABLE=0
+if [ "$SKIP_OBJ_SWEEP" = 1 ]; then
+  warn "object-store: OPT-OUT ($SKIP_OBJ_SWEEP_HOW) — this box's SHARED git object store was NOT swept"
+  info "this run cannot certify that the store every lane here reads is intact; drop the opt-out to measure it"
+elif ! have git; then
+  warn "object-store: UNMEASURED (git is not installed — nothing to rehash the store with)"
+elif [ ! -r "$OBJ_SWEEP_SH" ]; then
+  warn "object-store: UNMEASURED (no scripts/check-object-store-integrity.sh under $REPO_ROOT — the sanctioned sweep is not in this checkout)"
+else
+  obj_out=""
+  obj_rc=0
+  obj_out=$(bounded "$OBJ_SWEEP_OUTER_BOUND" bash "$OBJ_SWEEP_SH" \
+    --repo "$REPO_ROOT" --timeout "$OBJ_SWEEP_INNER_BOUND" 2>&1) || obj_rc=$?
+  # THE VERDICT IS READ FROM THE ANCHORED `verdict ` LINE *AND* THE EXIT STATUS, both
+  # required. The line alone is text (and the sweep prints repository-controlled paths
+  # verbatim, so an unanchored match could land on one); the status alone cannot
+  # distinguish a sweep that classified itself from a wrapper that killed it. Every match
+  # below is anchored on `OBJECT-STORE: verdict `, which is the sweep's own control token
+  # and a position no dynamic field of its output can reach.
+  #
+  # THE TWO ACTIONABLE VERDICTS REQUIRE THE TWO CHANNELS TO AGREE; THE NON-PASSING ONES DO
+  # NOT, AND THE ASYMMETRY IS DELIBERATE (#3749 review round 4, item 2). CORRUPT was `||`
+  # while this comment already asserted the conjunction, so an exit 4 with no verdict line
+  # — or a stray `CORRUPT` line under any other status — reported CORRUPT here and, in the
+  # sibling supervisor, created a persistent box-wide latch that halts every lane until an
+  # operator clears it by hand. A disjunction that can only reach a NON-PASSING branch
+  # cannot manufacture a verdict, so the UNMEASURED test below stays `||`: every path it
+  # does not take lands on the final `else`, which also warns.
+  # `{ grep || true; }` throughout: a grep with no match exits 1 and `pipefail` is on, so
+  # a bare pipeline or an assignment from such a substitution would carry a non-zero status
+  # — and "no match" is reachable (a sweep killed at its bound prints no verdict line). This
+  # file has no `errexit`, so the cost here is only a misleading status, but the sibling
+  # caller in scripts/local/worker-supervisor.sh DOES run under `set -e`, where the same
+  # shape killed the loop. Same shape, same guard, so nobody has to remember which file has
+  # which options (#3749).
+  obj_verdict=$(printf '%s\n' "$obj_out" | { grep '^OBJECT-STORE: verdict ' || true; } | head -1)
+  obj_verdict=${obj_verdict#OBJECT-STORE: verdict }
+  obj_verdict=${obj_verdict%% *}
+  if [ "$obj_rc" -eq 0 ] && [ "$obj_verdict" = VERIFIED ]; then
+    # The ONE affirmative branch. `git fsck` rehashed every object in the shared store and
+    # found nothing damaged — a POINT-IN-TIME sweep, which the message says so nobody reads
+    # it as a per-read guarantee.
+    ok "object-store: VERIFIED ($(printf '%s\n' "$obj_out" | { grep '^OBJECT-STORE: measured ' || true; } | head -1 | sed 's/^OBJECT-STORE: measured //')) — a point-in-time full rehash, not a per-read guarantee"
+  elif [ "$obj_rc" -eq 4 ] && [ "$obj_verdict" = CORRUPT ]; then
+    # CORRUPT FAILS LOUDLY AND NAMES THE OBJECTS. Not a hard exit: this script's contract
+    # is that every section runs and the verdicts accumulate (a mid-script exit would
+    # silently skip sections 5c/6 and change what a caller sees). What makes it loud is
+    # three things instead — the [warn] (which withholds "All checks green." and fails
+    # --strict), the verbatim fsck findings, and a restatement in the summary banner.
+    OBJ_STORE_CORRUPT=1
+    warn "object-store: CORRUPT — the SHARED git object store on this box holds damaged objects. NO GATE RUN HERE CAN BE TRUSTED."
+    printf '%s\n' "$obj_out" | { grep -E '^OBJECT-STORE: (finding|object) ' || true; } | head -20 | while IFS= read -r obj_line; do
+      info "$obj_line"
+    done
+    # THE REMEDY IS QUOTED FROM THE SWEEP, NOT RESTATED HERE (#3749 review round 9, item
+    # 2). This section used to carry its own paraphrase, and it said `git fetch --force
+    # origin` — which repairs nothing: `--force` only permits non-fast-forward REF updates
+    # and re-downloads no objects, so an operator who followed it exactly kept the
+    # corruption and believed it fixed. A remedy duplicated in three files is a remedy
+    # that will be corrected in one of them, and this file already carries the ruling for
+    # exactly that (#3369: a diagnostic improved in one file and thrown away by its
+    # consumer is a defect this repo has paid for). So the sweep owns the text, where the
+    # measurements that justify it live beside it, and this consumer prints it verbatim.
+    obj_remedy=$(printf '%s\n' "$obj_out" | { grep '^OBJECT-STORE: verdict-detail ' || true; } | head -40)
+    if [ -n "$obj_remedy" ]; then
+      printf '%s\n' "$obj_remedy" | while IFS= read -r obj_line; do
+        info "$obj_line"
+      done
+    else
+      # FAIL-CLOSED ON THE DIAGNOSTIC: an older, newer or stubbed sweep may print no
+      # guidance at all, and a stopped box must never be left with none.
+      info "REMEDY: this sweep printed no operator guidance (an older or stubbed check-object-store-integrity.sh)."
+      info "  Re-run it by hand for the full remedy:  bash scripts/check-object-store-integrity.sh"
+      info "  A LOCAL 'git gc'/'git repack' CANNOT repair this — escalate rather than improvising (#3749)."
+    fi
+  elif [ "$obj_rc" -eq 6 ] && [ "$obj_verdict" = UNSWEEPABLE ]; then
+    # THE STORE COULD NOT BE SWEPT TO AN AFFIRMATIVE VERDICT (#3749 review round 10, item
+    # 1; two causes since round 11, item 1 — a reproducible fatal death, or a store whose
+    # own config sets fsck.* keys, in which case no walk is run at all). A [warn] like
+    # CORRUPT — it withholds "All checks green.", fails --strict and is restated in the
+    # banner — but it CLAIMS NO DAMAGE, and the difference is the whole point of the
+    # verdict: "the probe could not START" (UNMEASURED, below, permissive because it is a
+    # fact about this box's tooling) and "no affirmative sweep of this store is obtainable"
+    # are different facts. Nothing was established about the objects here, so this branch
+    # asserts no mechanism of its own and quotes the sweep's own guidance instead.
+    OBJ_STORE_UNSWEEPABLE=1
+    warn "object-store: UNSWEEPABLE — the sweep could NOT obtain an affirmative verdict for the SHARED git object store on this box, so its integrity is UNKNOWN, not ok. NO GATE RUN HERE CAN BE TRUSTED. No damage was established; the sweep's own lines below name the cause."
+    printf '%s\n' "$obj_out" | { grep -E '^OBJECT-STORE: (finding|object) ' || true; } | head -20 | while IFS= read -r obj_line; do
+      info "$obj_line"
+    done
+    obj_remedy=$(printf '%s\n' "$obj_out" | { grep '^OBJECT-STORE: verdict-detail ' || true; } | head -40)
+    if [ -n "$obj_remedy" ]; then
+      printf '%s\n' "$obj_remedy" | while IFS= read -r obj_line; do
+        info "$obj_line"
+      done
+    else
+      # FAIL-CLOSED ON THE DIAGNOSTIC, and deliberately WITHOUT a repair instruction: this
+      # verdict established no cause, so naming one would be the round-9 defect (a printed
+      # remedy that does not match what was measured).
+      info "REMEDY: this sweep printed no operator guidance (an older or stubbed check-object-store-integrity.sh)."
+      info "  Re-run it by hand and act on what THAT run reports:  bash scripts/check-object-store-integrity.sh"
+    fi
+  elif [ "$obj_rc" -eq 4 ] || [ "$obj_rc" -eq 6 ] || [ "$obj_verdict" = CORRUPT ] || [ "$obj_verdict" = UNSWEEPABLE ]; then
+    # EXACTLY ONE CHANNEL SAYS CORRUPT (the conjunction above has already failed), so this
+    # run neither established damage nor ruled it out. NAMED rather than folded into the
+    # generic UNMEASURED message below, which would read as an ordinary missing line — and
+    # deliberately NOT escalated to CORRUPT: see the conjunction note above for why an
+    # unrecognised or incomplete sweep must not be able to produce that verdict.
+    warn "object-store: UNMEASURED — INCONSISTENT sweep result (rc=$obj_rc verdict='${obj_verdict:-<none>}'): exactly ONE of the exit status and the anchored verdict line reports a STOPPING verdict, or the two name different ones, so nothing was established nor ruled out"
+    printf '%s\n' "$obj_out" | { grep -E '^OBJECT-STORE: (unmeasured-cause|finding|object) ' || true; } | head -8 | while IFS= read -r obj_line; do
+      info "$obj_line"
+    done
+    info "investigate the sweep itself, then re-run by hand:  bash scripts/check-object-store-integrity.sh"
+  elif [ "$obj_rc" -eq 5 ] || [ "$obj_verdict" = UNMEASURED ]; then
+    # UNMEASURED IS A [warn] NAMING WHAT COULD NOT BE MEASURED — never an [ok]. The
+    # sweep's own `unmeasured-cause` lines are quoted rather than re-worded: a diagnostic
+    # improved in one file and thrown away by its consumer is a defect this repo has
+    # already paid for (#3369).
+    warn "object-store: UNMEASURED — the shared store was NOT rehashed, so its integrity is UNKNOWN, not ok"
+    printf '%s\n' "$obj_out" | { grep '^OBJECT-STORE: unmeasured-cause ' || true; } | head -8 | while IFS= read -r obj_line; do
+      info "$obj_line"
+    done
+    info "verify by hand once the cause is cleared:  bash scripts/check-object-store-integrity.sh"
+  else
+    # NO RECOGNISED VERDICT AT ALL: the sweep was killed by the outer bound, died before it
+    # could classify itself, or emitted something this reader does not know. Unknown is
+    # never ok.
+    warn "object-store: UNMEASURED (the sweep produced no recognised verdict, rc=$obj_rc — integrity is UNKNOWN, not ok)"
+    printf '%s\n' "$obj_out" | head -4 | while IFS= read -r obj_line; do
+      [ -n "$obj_line" ] && info "$obj_line"
+    done
+  fi
+fi
+
 # ---- 6. Health check: gate fmt + authoritative accelerators line ----
 hdr "Health check (gate fmt + accelerators line)"
 if [ "$SKIP_SMOKE" = 1 ]; then
@@ -3137,6 +3350,21 @@ fi
 
 # ---- Summary ----
 hdr "Bootstrap summary"
+# RESTATED HERE BECAUSE ONE [warn] AMONG MANY IS MISSABLE, and this one means every gate
+# verdict on this box is untrustworthy (#3749). It changes no exit status — the [warn]
+# already withholds green and fails --strict; this is the loudness half.
+if [ "${OBJ_STORE_CORRUPT:-0}" = 1 ]; then
+  printf '  \033[31mSHARED OBJECT STORE CORRUPT.\033[0m Do NOT run a gate on this box until it is resolved (section 5d above, #3749).\n'
+fi
+# ITS OWN LINE, NOT FOLDED INTO THE ONE ABOVE (#3749 review round 10, item 1): the store
+# could not be SWEPT and NO DAMAGE was established, so claiming damage in the banner would
+# be exactly the confidently-wrong text this verdict exists to avoid. It says "no damage"
+# rather than "no cause" because since round 11, item 1 this verdict has TWO causes and one
+# of them — the store's own `fsck.*` config — IS named; what holds for both is that nothing
+# was rehashed, so no damage was found either way.
+if [ "${OBJ_STORE_UNSWEEPABLE:-0}" = 1 ]; then
+  printf '  \033[31mSHARED OBJECT STORE COULD NOT BE SWEPT.\033[0m Its integrity is UNKNOWN and NO damage was established: do NOT run a gate on this box until it is resolved (section 5d above, #3749).\n'
+fi
 if [ "$WARNINGS" -eq 0 ]; then
   printf '  \033[32mAll checks green.\033[0m This machine is ready for CQLite agent work.\n'
 else

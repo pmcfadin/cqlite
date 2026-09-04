@@ -90,6 +90,7 @@ operator-metrics-doc
 kit-dashboard-drift
 binding-unwind-profile
 pub-surface
+dep-duplicates
 tooling-tests
 minimal-build
 all-features-check

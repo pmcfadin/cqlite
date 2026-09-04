@@ -45,6 +45,12 @@ impl<'a> TimestampPolicy<'a> {
             emitted_clustering_row: false,
         }
     }
+
+    /// How this policy names the partition in a report. The driver decodes ONE
+    /// partition per call, so the key is the only identifier available here.
+    fn partition(&self) -> String {
+        format!("key 0x{}", hex::encode(self.partition_key.as_bytes()))
+    }
 }
 
 #[cfg(test)]
@@ -125,12 +131,36 @@ impl SlidingPartitionPolicy for TimestampPolicy<'_> {
                 .parse_range_tombstone_marker_full(data, offset, schema)
             {
                 Ok((bv, bk, dp, ds, next_offset)) => {
-                    if sh.feed_range_marker(bv, bk, dp, ds).is_err() {
-                        return MarkerOutcome::Stop;
+                    // Issue #3721: the marker PARSED (`next_offset` is bound, so the
+                    // partition body continues there) and the FSM refuses only an
+                    // unrepresentable bound kind. Reporting that as `Stop` — the
+                    // framing terminator a marker PARSE failure earns — made the
+                    // driver `flush_and_emitted!(offset, false)`, i.e. `Ok` with the
+                    // tombstone and every later row of the partition gone. The two
+                    // halves stay distinguished: see `MarkerOutcome`.
+                    if let Err(e) = sh.feed_range_marker(bv, bk, dp, ds) {
+                        return MarkerOutcome::Refused(range_marker_error::range_marker_refused(
+                            e,
+                            &self.partition(),
+                            offset,
+                            next_offset,
+                        ));
                     }
                     MarkerOutcome::Advanced(next_offset)
                 }
-                Err(_) => MarkerOutcome::Stop,
+                // Issue #3721 (roborev job 78): a marker that cannot be PARSED is
+                // NOT a framing terminator, and calling it one made the FINAL
+                // chunk complete the partition SUCCESSFULLY with the tombstone
+                // and every later row gone from a `SELECT`. The cause is
+                // PRESERVED and the FINAL-vs-non-final decision is left to
+                // `drive_partition_sliding`, the only holder of the chunking
+                // state — a non-final chunk may simply have cut the marker body
+                // in half, the one explanation a refill can fix. Nothing here
+                // inspects bytes to guess whether more data exists (issue #28).
+                // Reasoning + authority: `range_marker_error`'s module docs.
+                Err(cause) => MarkerOutcome::Unparseable(
+                    range_marker_error::range_marker_unparseable(cause, &self.partition(), offset),
+                ),
             }
         } else {
             match self
@@ -138,7 +168,12 @@ impl SlidingPartitionPolicy for TimestampPolicy<'_> {
                 .skip_range_tombstone_marker(data, offset, schema)
             {
                 Ok(next_offset) => MarkerOutcome::Advanced(next_offset),
-                Err(_) => MarkerOutcome::Stop,
+                // Same decision on the PHYSICAL path: a marker whose framing
+                // cannot be skipped is corrupt or truncated data, and reporting
+                // it as end-of-partition truncated the read and said `Ok`.
+                Err(cause) => MarkerOutcome::Unparseable(
+                    range_marker_error::range_marker_unparseable(cause, &self.partition(), offset),
+                ),
             }
         }
     }

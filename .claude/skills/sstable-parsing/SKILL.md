@@ -96,7 +96,8 @@ When implementing parsers:
 Current implementation in `cqlite-core/src/storage/sstable/reader/parsing/`:
 - **`row_decoder/`** — the main V5 row/partition decoder, a **directory of ~30 files**
   (split out of the former single-file parser by epic #1116). Start at
-  `row_decoder/mod.rs` for the flag constants and the parser entry point; then
+  `row_decoder/row_flags.rs` for the flag constants and `row_decoder/mod.rs` for the
+  parser entry point; then
   `row_framing.rs` (row/partition framing), `row_data.rs`, `cell_value_scalar.rs` /
   `cell_value_complex.rs` (cell decode), `complex_column.rs` (non-frozen collections),
   `frozen.rs` (frozen collections), `udt.rs`, `partition_driver.rs`.
@@ -137,9 +138,9 @@ Current implementation in `cqlite-core/src/storage/sstable/reader/parsing/`:
 |-------|------|---------|
 | `0x01` | `EXTENDED_IS_STATIC` | Static row — has **NO** clustering prefix |
 
-> **Citations**: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/mod.rs:709-715`
+> **Citations**: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/row_flags.rs:12-18`
 > (`ROW_HAS_TIMESTAMP`/`TTL`/`DELETION`/`ALL_COLUMNS`/`COMPLEX_DELETION`/`EXTENDED_FLAGS`),
-> `:820` (`END_OF_PARTITION = 0x01`), `:821` (`IS_MARKER = 0x02`), `:825`
+> `:24` (`END_OF_PARTITION = 0x01`), `:26` (`IS_MARKER = 0x02`), `:31`
 > (`EXTENDED_IS_STATIC = 0x01`). Guide: `appendix-b-encodings-cheat-sheet.md:206-212`.
 > Cassandra: `UnfilteredSerializer.java:102-109` (flags) and `:114-122` (extended flags).
 

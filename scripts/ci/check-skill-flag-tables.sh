@@ -29,7 +29,22 @@
 #
 # Sources of truth (CQLite code = authority for what CQLite does; Cassandra 5.0.8 =
 # authority for the format itself):
-#   .../row_decoder/mod.rs         — row flags + extended flags
+#   .../row_decoder/row_flags.rs   — row flags + extended flags. RESOLVED, not
+#                                    hard-coded: the campsite-rule splits of epic #1116
+#                                    move constants between files (these left
+#                                    `row_decoder/mod.rs` in the #3631 split), and a
+#                                    hard-coded path silently became a file holding NONE
+#                                    of its subject. Every candidate in
+#                                    ROW_SRC_CANDIDATES is searched, the ones that
+#                                    actually DECLARE row/extended flag constants are
+#                                    used, and finding them in NONE is a named FAILURE
+#                                    listing the candidates and the anchors — never a
+#                                    pass over an empty subject set. The candidate list
+#                                    is deliberately scoped to the row_decoder
+#                                    directory: the writer, the commitlog and the merge
+#                                    path each keep their own copy of these constants,
+#                                    and pinning an agent-facing READ-path table to a
+#                                    WRITE-path copy would be the wrong authority.
 #   .../row_decoder/cell_value.rs  — CELL_* flags, from the PRODUCTION cell decoder
 #                                    (`parse_cell_value_schema_order`). NOTE: row_data.rs
 #                                    has a `#[cfg(test)]` mirror carrying only 4 of the 5
@@ -48,8 +63,15 @@ set -euo pipefail
 REPO_ROOT="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
 DECODER_DIR="$REPO_ROOT/cqlite-core/src/storage/sstable/reader/parsing/row_decoder"
-ROW_SRC="$DECODER_DIR/mod.rs"
 CELL_SRC="$DECODER_DIR/cell_value.rs"
+
+# Where the row + extended flag constants may live. Ordered current-home-first; every
+# existing candidate is searched, so a split that spreads them across two files is
+# handled and a future move only needs its new home added here.
+ROW_SRC_CANDIDATES=(
+  "$DECODER_DIR/row_flags.rs"
+  "$DECODER_DIR/mod.rs"
+)
 
 SKILL_FILES=(
   ".claude/skills/sstable-parsing/SKILL.md"
@@ -63,9 +85,7 @@ MIN_EXPECTED_FLAGS=12
 
 fail() { echo "::error::check-skill-flag-tables: $*"; exit 1; }
 
-for f in "$ROW_SRC" "$CELL_SRC"; do
-  [ -f "$f" ] || fail "decoder source not found at $f (a source split may have moved it — retarget this check AND the skill citations; refusing to pass vacuously)"
-done
+[ -f "$CELL_SRC" ] || fail "decoder source not found at $CELL_SRC (a source split may have moved it — retarget this check AND the skill citations; refusing to pass vacuously)"
 
 # ---- 1. Harvest the real constants ----------------------------------------
 # Matches e.g. `const ROW_HAS_TIMESTAMP: u8 = 0x04;`,
@@ -88,19 +108,57 @@ harvest() {
 # the row byte, EXTENDED_IS_STATIC in the extended byte, and IS_DELETED in a cell byte.
 expected=""
 
+# ---- 1a. RESOLVE the row-flag source ---------------------------------------
+# A hard-coded path is how this check broke: the constants moved to `row_flags.rs`
+# under the campsite rule and the check kept reading a `mod.rs` that no longer held
+# any of them, reporting drift against a file with an EMPTY subject set. So the
+# candidates are SEARCHED, and a candidate counts as a row-flag source only if it
+# actually DECLARES one of the names the classifier below recognizes. Anything else
+# — no candidate present, none declaring a flag — is a named failure.
+ROW_SRCS=()
+row_candidates_present=""
+for cand in "${ROW_SRC_CANDIDATES[@]}"; do
+  [ -f "$cand" ] || continue
+  row_candidates_present+=" $cand"
+  # Capture first, then match on a here-string. `grep -q` closes the pipe on its first
+  # hit, and under `pipefail` the resulting SIGPIPE on the upstream stage would make a
+  # MATCHING candidate look like a non-match — the permissive direction.
+  cand_names="$(harvest "$cand" | awk '{print $1}')"
+  if grep -qE '^(EXTENDED_[A-Z0-9_]*|ROW_HAS_[A-Z0-9_]*|END_OF_PARTITION|IS_MARKER)$' <<<"$cand_names"; then
+    ROW_SRCS+=("$cand")
+  fi
+done
+
+if [ "${#ROW_SRCS[@]}" -eq 0 ]; then
+  fail "row-flag decoder source not found: NONE of the searched candidates declares a row/extended flag constant (expected at least one of ROW_HAS_*, END_OF_PARTITION, IS_MARKER, EXTENDED_*). Candidates searched: ${ROW_SRC_CANDIDATES[*]}. Present on disk:${row_candidates_present:- <none>}. A source split may have moved them again — add the new home to ROW_SRC_CANDIDATES AND update the skill citations; refusing to pass vacuously over an empty subject set (#3054)."
+fi
+
+ROW_SRC_DESC="${ROW_SRCS[*]}"
+
 # Row + extended flag constants. An UNCLASSIFIED u8 constant FAILs rather than being
 # silently skipped — a hand-maintained allow-list is how a newly added flag (e.g.
 # Cassandra's extended-byte HAS_SHADOWABLE_DELETION 0x02) would become exempt from the
 # "documented somewhere" assertion. Use the `flag-table-lint-ignore` marker for a
 # genuine non-flag constant.
-while read -r name val; do
-  [ -z "$name" ] && continue
-  case "$name" in
-    EXTENDED_*)                          expected+="extended $name $val"$'\n' ;;
-    ROW_HAS_*|END_OF_PARTITION|IS_MARKER) expected+="row $name $val"$'\n' ;;
-    *) fail "unclassified u8 constant '$name' ($val) in $ROW_SRC — this check cannot tell which flag byte it belongs to, so it cannot require the skill tables to document it. Classify it here (row/extended/cell) and document it in the skill tables, or mark the constant line 'flag-table-lint-ignore' if it is not an on-disk flag (#3054)." ;;
-  esac
-done <<<"$(harvest "$ROW_SRC")"
+row_flag_count=0
+for row_src in "${ROW_SRCS[@]}"; do
+  while read -r name val; do
+    [ -z "$name" ] && continue
+    case "$name" in
+      EXTENDED_*)                          expected+="extended $name $val"$'\n'; row_flag_count=$((row_flag_count + 1)) ;;
+      ROW_HAS_*|END_OF_PARTITION|IS_MARKER) expected+="row $name $val"$'\n'; row_flag_count=$((row_flag_count + 1)) ;;
+      *) fail "unclassified u8 constant '$name' ($val) in $row_src — this check cannot tell which flag byte it belongs to, so it cannot require the skill tables to document it. Classify it here (row/extended/cell) and document it in the skill tables, or mark the constant line 'flag-table-lint-ignore' if it is not an on-disk flag (#3054)." ;;
+    esac
+  done <<<"$(harvest "$row_src")"
+done
+
+# Per-source floor, not just the combined one below: the cell source alone can clear a
+# combined floor, so without this a row-flag source that resolved to a nearly-empty file
+# could still pass. Cassandra 5.0 defines 6 ROW_HAS_* + END_OF_PARTITION + IS_MARKER +
+# EXTENDED_IS_STATIC = 9 today; deliberately below 9 so ADDING one never trips it.
+MIN_EXPECTED_ROW_FLAGS=7
+[ "$row_flag_count" -ge "$MIN_EXPECTED_ROW_FLAGS" ] \
+  || fail "harvested only $row_flag_count row/extended flag constant(s) (floor $MIN_EXPECTED_ROW_FLAGS) from $ROW_SRC_DESC — the row-flag source resolved to a file holding almost none of its subject, which is the #3631 split's failure mode. Fix the harvest regex or add the constants' real home to ROW_SRC_CANDIDATES (#3054)."
 
 # CELL_* constants: the skill tables document them WITHOUT the `CELL_` prefix
 # (Cassandra's own Cell.java names), so strip it for comparison.
@@ -117,7 +175,7 @@ expected="$(grep -v '^[[:space:]]*$' <<<"$expected" | sort -u || true)"
 
 expected_count="$(grep -c . <<<"$expected" || true)"
 [ "$expected_count" -ge "$MIN_EXPECTED_FLAGS" ] \
-  || fail "harvested only $expected_count flag constants (floor $MIN_EXPECTED_FLAGS) from $ROW_SRC + $CELL_SRC — a half-broken parse must not pass. Fix the harvest regex or retarget the sources (#3054)."
+  || fail "harvested only $expected_count flag constants (floor $MIN_EXPECTED_FLAGS) from $ROW_SRC_DESC + $CELL_SRC — a half-broken parse must not pass. Fix the harvest regex or retarget the sources (#3054)."
 
 # A shifted table is only caught if the anchors are present. Require the flags whose
 # mis-assignment caused #3054, each in its expected namespace.
@@ -197,7 +255,7 @@ for rel in "${SKILL_FILES[@]}"; do
       else
         echo "::error::check-skill-flag-tables: $rel:$lineno documents flag '$name' ($doc_val) which is NOT a constant in the decoder source."
         echo "         Either it is INVENTED (e.g. the pre-#3054 HAS_IS_MARKER / HAS_NULL_VALUE / EXTENDED_FLAG) or the constant was renamed."
-        echo "         Authority: $ROW_SRC and $CELL_SRC."
+        echo "         Authority: $ROW_SRC_DESC and $CELL_SRC."
       fi
       errors=$((errors + 1))
       continue

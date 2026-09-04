@@ -41,6 +41,46 @@ python3 scripts/perf/ws0_quiescence.py judge \
   --window-start 2026-08-28T16:15:00Z --window-end 2026-08-28T16:25:00Z
 ```
 
+## Recording a timeseries the judge will accept (#3551)
+
+The **boundary** sampler (`sample`) and the **in-window** judge (`judge --timeseries`) use
+different schemas, and until #3551 no committed subcommand produced the second one — so the two
+halves of this one gate did not compose. Use `sample-loop`:
+
+```bash
+python3 scripts/perf/ws0_quiescence.py sample-loop \
+  --out /data/ws0-<issue>/sampler/box-load.jsonl   # OUTSIDE every worktree; see below
+# optional: --cadence 10 (default SAMPLER_CADENCE_S), --samples N (0 = until signalled)
+```
+
+Detach it (`setsid`/`nohup`) so it outlives the session that started it, and judge against the
+file it appends. One JSON object per line, flushed per tick, so `tail -f` works. Every record
+carries `ts`, flat `load1/load5/load15`, `runnable`, the authoritative `competing_count`, a
+count per census rule (`rustc`, `cargo`, `cc1`, `cc1plus`, `ld`, `lld`, `mold`, `gate`), the
+census entries themselves — each naming the **argv element that matched** — and a per-CPU
+`/proc/stat` jiffy snapshot. All of it comes from the **same `census()`** the boundary sampler
+uses, so the two halves cannot disagree about what "competing" means.
+
+`--out` is **required and has no default**, and is **refused inside any git worktree**: see the
+two reasons in the next section, both learned by hitting them. It is also refused when worktree
+membership cannot be *measured* — an unmeasurable answer is not a clean one.
+
+## What a ZERO CENSUS bounds, and what it does not (#3551)
+
+Measured 2026-09-02 on the delivery box: **91 consecutive samples reported
+`competing_count=0` while `load1` reached 6.39 with 9 runnable tasks**, and the four CPUs the
+measurement pins measured a **median 8% and a max 86% busy** with foreign work under that zero
+census. `COMPETING_COMMS` is compilers and linkers plus one named script, so a peer lane running
+node, jest, python, git or a shell suite is **invisible** to it, and in-window `load1` is
+explicitly context rather than a gate.
+
+The census is **not** widened in response — this repo has the measurement for why (including
+`sccache` "refused a perfectly quiet box", and a guard that cries wolf on the normal state of
+every box is the guard people delete). Instead every verdict now carries a `census_scope` field
+that says so in words, derived from the record's own sample count so it cannot be softened, and
+the per-CPU snapshot makes the contamination visible. **Read `census_scope` and the per-CPU
+column before treating a QUIESCENT verdict as "the box was idle".**
+
 ## Note on where the LIVE sampler runs, which is not here
 
 The live sampler writes **outside any worktree** (`/data/ws0-3248/sampler/box-load.jsonl`), for two

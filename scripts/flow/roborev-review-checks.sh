@@ -216,7 +216,24 @@ roborev_check_prompt_content() {
           # merely "no waiver line exists" re-checks their SYNTAX — not the shape of the comment or the
           # channel — and concludes the mechanism is broken. Both rules are load-bearing and both are
           # invisible from a syntactically perfect marker, so the diagnostic states them.
-          none) WAIVER_REPORT="NONE (no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — a marker inside prose, a code fence, a quote or a review body is not read)" ;;
+          # THE `none` CAUSE ALSO DECLARES WHETHER THE LINKED-ISSUE THREAD WAS CHECKED (#3759).
+          # `NONE` used to be silent about it, so "checked and the marker is not there either" and
+          # "never checked" read identically — the same shape as a lane that omits coverage
+          # silently being indistinguishable from one that covers it. The declaration comes from
+          # the probe's CLOSED rendering set; the `:-` fallback is itself a could-not-check
+          # rendering, so a path that reached `none` without running the probe says so rather than
+          # implying a completed check.
+          none) WAIVER_REPORT="NONE (no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — a marker inside prose, a code fence, a quote or a review body is not read; ${ROBOREV_WAIVER_DETAIL:-the linked-issue thread could NOT be checked: the probe was not reached on this path})" ;;
+          # ===== A DEDICATED ARM, NOT A FALL-THROUGH (#3759) =====
+          # The generic `*)` arm below would render a syntactically correct `MISPLACED (<detail>)`
+          # and NO REMEDY — and this state's entire value IS its remedy. A remedy is not something
+          # to leave to a fall-through, so the arm is written out. It names (1) the issue the
+          # marker was found on (carried in the detail the probe built), (2) that it GRANTS NOTHING
+          # and the FAIL STANDS, and (3) the one operator action that fixes it. No part of either
+          # marker stem and no fillable field skeleton appears here — the exact form lives in
+          # `--help` only, because summary blocks get pasted into PR comments as a matter of course
+          # and an artifact that DESCRIBED the escape hatch became it once already (#3312 job 23).
+          misplaced) WAIVER_REPORT="MISPLACED (${ROBOREV_WAIVER_DETAIL:-an authorization for this review was found on a linked issue thread rather than on the pull request}. IT GRANTS NOTHING AND THIS FAIL STANDS — only an authorization on the PULL REQUEST is read. REMEDY: the authorizer re-posts the IDENTICAL line as a TOP-LEVEL COMMENT ON THE PR, as the sole nonblank content of that comment, then verifies with 'gh pr view <PR> --json comments' that it is there; run 'bash scripts/flow/roborev-review.sh --help' for the exact form, which is deliberately not printed here)" ;;
           *) WAIVER_REPORT="$(printf '%s' "$ROBOREV_WAIVER_STATE" | tr '[:lower:]' '[:upper:]') (${ROBOREV_WAIVER_DETAIL:-cause not established})" ;;
         esac
         # ===== LAYER 3 (roborev job 23): THIS DIAGNOSTIC MUST NOT BE A CREDENTIAL =====
@@ -635,7 +652,15 @@ roborev_check_findings_deferral() {
       # "no authorization exists" re-checks their SYNTAX — not the shape of the comment or the channel
       # — and concludes the mechanism is broken. Both rules are load-bearing and both are invisible
       # from a syntactically perfect marker, so the diagnostic states them.
-      none) DEFERRAL_REPORT="NONE (no findings-deferral comment for this review: the authorization must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — one inside prose, a code fence, a quote or a review body is not read)" ;;
+      # AND IT DECLARES WHETHER THE LINKED-ISSUE THREAD WAS CHECKED (#3759) — see the waiver's
+      # `none` arm for why a silent `NONE` is the defect. Same closed rendering set, same
+      # could-not-check fallback.
+      none) DEFERRAL_REPORT="NONE (no findings-deferral comment for this review: the authorization must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — one inside prose, a code fence, a quote or a review body is not read; ${ROBOREV_DEFERRAL_DETAIL:-the linked-issue thread could NOT be checked: the probe was not reached on this path})" ;;
+      # ===== A DEDICATED ARM, NOT A FALL-THROUGH (#3759) — see the waiver's arm for the reason ====
+      # The detail additionally records that the issue-disposition legs are NOT run issue-side and
+      # still apply once the marker is on the PR, so the rendering claims "would have been ACCEPTED
+      # BY THE CHANNEL" and never "would have granted".
+      misplaced) DEFERRAL_REPORT="MISPLACED (${ROBOREV_DEFERRAL_DETAIL:-an authorization for this review was found on a linked issue thread rather than on the pull request}. IT GRANTS NOTHING AND THIS FAIL STANDS — only an authorization on the PULL REQUEST is read. REMEDY: the authorizer re-posts the IDENTICAL line as a TOP-LEVEL COMMENT ON THE PR, as the sole nonblank content of that comment, then verifies with 'gh pr view <PR> --json comments' that it is there; run 'bash scripts/flow/roborev-review.sh --help' for the exact form, which is deliberately not printed here)" ;;
       *) DEFERRAL_REPORT="$(printf '%s' "$ROBOREV_DEFERRAL_STATE" | tr '[:lower:]' '[:upper:]') (${ROBOREV_DEFERRAL_DETAIL:-cause not established})" ;;
     esac
     # THE EXACT MARKER FORM IS NOT PRINTED HERE, and not even its prefix — summary blocks are pasted

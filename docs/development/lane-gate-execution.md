@@ -254,8 +254,12 @@ the same axis is where that stops being true.
 
 `RESULT: INCOMPLETE (gate did not finish)` is written into the summary file **once**, at
 launch, before the #1825 slot is even granted (#3041). It is therefore the artifact of
-three states at once — queued, running, killed — and the correct completion probe
-(`grep -qE 'RESULT: (PASS|FAIL)'`) reports "not finished" for all three. Resolving them
+three states at once — queued, running, killed — and the correct completion probe (the RECORD
+grammar, `grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'`) reports "not finished" for all three.
+An `--only` run needs the ONLY grammar instead (`…|PARTIAL)…`), a **`--delta` run needs the DELTA
+grammar** (`…|PARTIAL|ERROR|REFUSED)…` — it is the only mode that can terminate `ERROR` or `REFUSED`,
+so the record grammar hangs on a terminal outcome there), and a component verdict is a separate
+read — see #3750. Resolving them
 needed a human running `ps` on the box, which is what made one actor the fleet's only
 gate-runner.
 
@@ -1282,7 +1286,8 @@ the same incomplete mental model that caused the break.
 
 The launcher needs to know whether a gate already reached a terminal verdict (a preflight
 refusal or a very short `--only` run finishes before any beat). It asks `gate-liveness.sh
---run-id <this run>` and accepts only exit 0. Its own earlier version grepped
+--run-id <this run>` and accepts only exit 0 — which is also why the launcher was unaffected by
+#3750: it never carried a mode-specific text grammar to get wrong. Its own earlier version grepped
 `^RESULT: (PASS|FAIL|…)` with no end anchor and no framing validation, so `RESULT: PASSENGER` or
 a truncated block made the **launcher** report success while the reader would answer `UNKNOWN` —
 the prefix-matching defect from the first review round, reproduced in a second implementation of
