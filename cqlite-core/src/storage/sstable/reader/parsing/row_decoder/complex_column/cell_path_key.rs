@@ -737,7 +737,9 @@ impl V5CompressedLegacyParser {
     /// `decoded`, which turned an inspection into a presentation change and is the
     /// shape of roborev round 8's finding — parity is now the shared key-type
     /// rule's job (`map_key_type_for_decode`), never this function's.
-    fn peeled_for_inspection(value: &Value) -> &Value {
+    pub(in crate::storage::sstable::reader::parsing::row_decoder) fn peeled_for_inspection(
+        value: &Value,
+    ) -> &Value {
         let mut v = value;
         while let Value::Frozen(inner) = v {
             v = inner;
