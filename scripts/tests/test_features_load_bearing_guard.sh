@@ -455,7 +455,20 @@ EOF
 
 run_guard() { # <dir> ; captures combined output, returns guard rc
   local d="$1"
-  ( cd "$d" && bash "$d/scripts/ci/check-features-load-bearing.sh" ) >"$TMPROOT/out.txt" 2>&1
+  # HERMETIC AGAINST THE AMBIENT TARGET DIRECTORY. The guard prunes the target
+  # directory cargo REPORTS, which is correct behaviour — so a fixture that plants a
+  # file under `<fixture>/target/` and expects it PRUNED is only right while cargo
+  # reports that path. Under the full gate CARGO_TARGET_DIR is set, cargo reports the
+  # gate's shared directory instead, `<fixture>/target/` becomes ordinary source, and
+  # case 44b inverted: `expected the guard to FAIL, it PASSED`. That is the
+  # environment-dependent tooling-tests failure class (#3706) — green in a developer
+  # shell, red in the gate of record, and the gate is the run that counts.
+  # Scrubbed for EVERY case, not just 44b: any fixture reasoning about the target
+  # directory needs cargo's default, and a per-case fix would leave the next one to
+  # rediscover this. CARGO_BUILD_TARGET_DIR is the `build.target-dir` config key's env
+  # spelling and is scrubbed for the same reason.
+  ( cd "$d" && unset CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR \
+      && bash "$d/scripts/ci/check-features-load-bearing.sh" ) >"$TMPROOT/out.txt" 2>&1
 }
 
 expect_green() { # <dir> <label>
