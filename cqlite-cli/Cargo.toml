@@ -244,11 +244,11 @@ required-features = ["cli-helpers"]
 
 [features]
 # M2+ production defaults: Interactive REPL with query engine
-default = ["interactive", "tui", "cli-helpers"]
-interactive = []
+# `interactive` was deleted in #1698: it had zero cfg sites, so enabling it (even
+# from `default`) changed nothing. The REPL is unconditional in src/.
+default = ["tui", "cli-helpers"]
 tui = ["ratatui", "crossterm"]
 benchmarks = []
-ci_zero_tolerance = []
 integration-tests = []
 # Issue #1581: gates the dhat-based bounded-memory query allocation test
 # (tests/issue_1581_query_stream_memory.rs). Off by default so the dhat global

@@ -37,10 +37,12 @@
 //! a `text` value is compared as an exact string.
 
 use super::schema::{Column, ColumnKind, CqlType, TableSchema};
-use super::{canon_scalar, canon_typed, csv_container, Canon, Depth, Egress, Kinding, Row};
+use super::{
+    canon_scalar, canon_typed, container, csv_container, Canon, Depth, Egress, Kinding, Row, Side,
+};
 // The declared-gap bookkeeping lives with the divergence it books (see [`gap`]).
 use gap::{Gap, Observed, SkipPaths, Suppressions};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 
@@ -153,6 +155,17 @@ struct At<'s, 'p> {
     suppressions: &'s Suppressions,
     /// The declared gap this position is INSIDE, if any (see [`ActiveGap`]).
     gap: Option<ActiveGap>,
+    /// WHICH CASSANDRA WRITER spelled this position's map keys, if it is a map
+    /// (see [`container::MapKeySpelling`]).
+    ///
+    /// A COLUMN-level, DDL-derived fact — `schema::Column::is_multicell()` — carried
+    /// here rather than inferred from a key's text, because it decides which of
+    /// `sstabledump`'s two writers produced the golden's object keys and a value
+    /// cannot be asked that. Forced to [`container::MapKeySpelling::ToJsonString`]
+    /// one level in ([`At::field`], [`At::index`]): CQL requires a map key, and every
+    /// collection nested inside another, to be frozen, so a map reached by recursion
+    /// always lives in one value cell.
+    map_key_spelling: container::MapKeySpelling,
 }
 
 /// The declared gap whose subtree the walk is currently inside.
@@ -177,6 +190,7 @@ impl<'s, 'p> At<'s, 'p> {
     fn column(
         name: &str,
         kinding: Kinding,
+        map_key_spelling: container::MapKeySpelling,
         skips: &'s SkipPaths<'p>,
         refusals: &'s Refusals,
         suppressions: &'s Suppressions,
@@ -189,6 +203,7 @@ impl<'s, 'p> At<'s, 'p> {
             refusals,
             suppressions,
             gap: None,
+            map_key_spelling,
         }
     }
 
@@ -207,6 +222,7 @@ impl<'s, 'p> At<'s, 'p> {
             refusals: self.refusals,
             suppressions: self.suppressions,
             gap: self.gap.clone(),
+            map_key_spelling: container::MapKeySpelling::ToJsonString,
         }
     }
 
@@ -221,6 +237,31 @@ impl<'s, 'p> At<'s, 'p> {
             refusals: self.refusals,
             suppressions: self.suppressions,
             gap: self.gap.clone(),
+            map_key_spelling: container::MapKeySpelling::ToJsonString,
+        }
+    }
+
+    /// One map ENTRY'S KEY, as its own position.
+    ///
+    /// Unlike [`At::index`] and [`At::field`] this PRESERVES `map_key_spelling`, because a
+    /// key node is the ONE child whose spelling is still the column's — it IS the thing the
+    /// column's writer spelled. Everything else one level in is a frozen value cell (see
+    /// the field's doc), which is why the other two force `ToJsonString`.
+    ///
+    /// Exists so that an UNPAIRABLE key can be reported as a divergence AT ITS OWN NODE
+    /// rather than aborting the whole map: the gap matcher is asked at every node of a
+    /// gap's subtree, so a key-scoped divergence lets the entry VALUES still be walked
+    /// (issue #3726, roborev job 28).
+    fn map_key(&self, index: usize) -> Self {
+        At {
+            depth: Depth::Inside,
+            kinding: Kinding::Natural,
+            path: format!("{}[key {index}]", self.path),
+            skips: self.skips,
+            refusals: self.refusals,
+            suppressions: self.suppressions,
+            gap: self.gap.clone(),
+            map_key_spelling: self.map_key_spelling,
         }
     }
 
@@ -441,6 +482,7 @@ pub fn compare_rows(
             let at = At::column(
                 name,
                 column_kinding(column),
+                map_key_spelling(column),
                 &skips,
                 &refusals,
                 &suppressions,
@@ -584,8 +626,15 @@ fn row_order_divergence(
                 Kinding::Natural
             };
             let value = r.get(*name).unwrap_or(&Value::Null);
-            let canon = canon_typed(value, egress, &column.ty, Depth::TopLevel, kinding)
-                .map_err(|why| format!("key column `{name}`: {why}"))?;
+            let canon = canon_typed(
+                value,
+                egress,
+                &column.ty,
+                Depth::TopLevel,
+                kinding,
+                if golden_side { Side::Golden } else { Side::Cli },
+            )
+            .map_err(|why| format!("key column `{name}`: {why}"))?;
             parts.push(((*name).to_string(), canon));
         }
         Ok(parts)
@@ -707,6 +756,30 @@ fn undeclared_columns(
 /// from the DDL (`Column::is_multicell`), so a `frozen<set<int>>` (one value cell,
 /// golden `[-2,-1]`) is correctly held to kind equality while the non-frozen
 /// `set<int>` beside it is not.
+/// WHICH CASSANDRA WRITER spelled this column's map keys, from the committed DDL.
+///
+/// A MULTICELL map is one cell per entry and its key is the cell PATH, written
+/// `writeString(ct.nameComparator().getString(...))`; a FROZEN map is one value cell
+/// whose keys come from `MapType.toJSONString`. `sstabledump` picks between those two
+/// writers on exactly this property, so the lane reads it from the same place
+/// Cassandra does — the schema — and never from the key text (see
+/// [`container::MapKeySpelling`] for why inferring it from a value is unsound in the
+/// permissive direction).
+///
+/// Answered for EVERY column, not just maps: it is a property of the cell layout, and
+/// a non-map column simply never asks. Deliberately separate from [`column_kinding`]
+/// rather than folded into it — [`Kinding`] states a value's JSON KIND, this states
+/// which writer produced a key, and the two coincide only for scalars; folding them
+/// would also change `csv_container`'s root kinding, a wider blast radius than the
+/// fact being recorded.
+fn map_key_spelling(column: &Column) -> container::MapKeySpelling {
+    if column.is_multicell() {
+        container::MapKeySpelling::GetString
+    } else {
+        container::MapKeySpelling::ToJsonString
+    }
+}
+
 fn column_kinding(column: &Column) -> Kinding {
     let is_partition_key = column.kind == ColumnKind::Partition;
     let is_multicell_set = column.is_multicell() && matches!(column.ty, CqlType::Set(_));
@@ -894,9 +967,17 @@ fn compare_value_at(
     // subtree, because that is where the divergence lives: the `set<double>` gap
     // is declared on the column and diverges at three of its seven members.
     if !refused_here
-        && gap
-            .divergence
-            .matched(golden, cli, ty, egress, at.depth, at.kinding)
+        && gap.divergence.matched(
+            golden,
+            cli,
+            gap::Position {
+                ty,
+                egress,
+                depth: at.depth,
+                kinding: at.kinding,
+                map_key_spelling: at.map_key_spelling,
+            },
+        )
     {
         at.skips.observe(&gap.root, Observed::Suppressed);
         at.suppressions.record(&gap.root);
@@ -1044,7 +1125,9 @@ fn compare_value_body(
         // map: object in the dump, array of {"key","value"} pairs in the CLI (and
         // the CSV decoder produces that same pair spelling).
         CqlType::Map(key_ty, value_ty) => match (golden, cli) {
-            (Value::Object(g), Value::Array(c)) => compare_map(g, c, egress, key_ty, value_ty, at),
+            (Value::Object(g), Value::Array(c)) => {
+                map::compare_map(g, c, egress, key_ty, value_ty, at)
+            }
             _ => Err(shape_error("map", golden, cli, egress)),
         },
         CqlType::Udt(udt) => match golden {
@@ -1070,8 +1153,8 @@ fn compare_value_body(
         // asymmetry to a map KEY: the golden's object key is stringified by the
         // format, the CLI's `{"key","value"}` key is not (finding N1).
         _ => {
-            let g = canon_typed(golden, egress, ty, at.depth, at.kinding)?;
-            let c = canon_typed(cli, egress, ty, at.depth, Kinding::Natural)?;
+            let g = canon_typed(golden, egress, ty, at.depth, at.kinding, Side::Golden)?;
+            let c = canon_typed(cli, egress, ty, at.depth, Kinding::Natural, Side::Cli)?;
             if g == c {
                 Ok(())
             } else {
@@ -1143,7 +1226,11 @@ fn shape_error(expected: &str, golden: &Value, cli: &Value, egress: Egress) -> S
 /// `"0"` compared equal to an incorrectly emitted JSON numeric key `0` — defeating
 /// the typed comparison in the one place a map most needs it (issue #1491 review
 /// finding F2).
-fn pair(entry: &Value, egress: Egress) -> Result<(&Value, &Value), String> {
+///
+/// `pub` so `super::container` reads the SAME entry spelling when it canonicalizes a
+/// map (issue #3726): a second `{key,value}` reader would be a second notion of what
+/// the egress's map entry is, and the two could then disagree about a malformed one.
+pub fn pair(entry: &Value, egress: Egress) -> Result<(&Value, &Value), String> {
     let object = entry.as_object().ok_or_else(|| {
         format!(
             "cli map entry is not an object: {}",
@@ -1166,139 +1253,6 @@ fn pair(entry: &Value, egress: Egress) -> Result<(&Value, &Value), String> {
             brief(&describe(entry, egress))
         )),
     }
-}
-
-/// Is this a type whose values are single scalars? Map keys are paired by their
-/// canonical scalar form, so a container key has no pairing rule here.
-fn is_scalar_type(ty: &CqlType) -> bool {
-    !matches!(
-        ty,
-        CqlType::List(_) | CqlType::Set(_) | CqlType::Map(..) | CqlType::Tuple(_) | CqlType::Udt(_)
-    )
-}
-
-/// Compare a map: golden object vs the CLI's `{key,value}` pair list, IN EMITTED
-/// ORDER, each key canonicalized UNDER THE DECLARED KEY TYPE — so a `map<int,…>`
-/// matches the golden's `"-5"` with the CLI's `-5`, while a `map<text,…>` compares
-/// its keys exactly AND by JSON kind, so a numeric key `0` does not satisfy the
-/// golden's `"0"`.
-///
-/// # Emitted order, because a map's order is not free
-///
-/// Cassandra stores a map's entries sorted by the key's comparator — a multicell
-/// map's cells are keyed by `CellPath`, and a frozen map is serialized in that
-/// same order — and `sstabledump` emits them in that on-disk order, which the
-/// golden reader preserves (`serde_json`'s `preserve_order` is on workspace-wide,
-/// and a multicell map is rebuilt cell by cell in dump order). A reader walking
-/// the same SSTable therefore has no licence to emit a different order, so a
-/// reordering is a DIVERGENCE.
-///
-/// Sorting both sides by canonicalized key before comparing (the previous rule)
-/// discarded exactly that: reversing the CLI's entries compared equal, while the
-/// CSV decoder's own documentation claimed member order was compared against the
-/// golden (issue #1491 review finding N2). The sibling [`compare_sequence`] has
-/// always compared list/set members positionally for the same reason, so nothing
-/// in this walk is order-insensitive now.
-///
-/// The golden's keys are JSON object keys, hence always strings; the CLI's keep
-/// whatever kind the egress gave them. Both go through `canon_typed(…, key_ty, …)`
-/// — the golden's under [`Kinding::Stringified`], the CLI's under
-/// [`Kinding::Natural`] — which is what makes the kind comparison possible.
-fn compare_map(
-    golden: &Map<String, Value>,
-    cli: &[Value],
-    egress: Egress,
-    key_ty: &CqlType,
-    value_ty: &CqlType,
-    at: &At<'_, '_>,
-) -> Result<(), String> {
-    if !is_scalar_type(key_ty) {
-        return Err(format!(
-            "the schema declares the map key type `{}`, which is not a scalar — this lane \
-             pairs map keys by their canonical scalar form and has no rule for a container \
-             key",
-            key_ty.describe()
-        ));
-    }
-    // A key canonicalization FAILURE is propagated, never swallowed into the
-    // comparison key: a `<reason>` string would still meet an identical
-    // `<reason>` on the other side and compare equal.
-    //
-    // ASYMMETRIC, exactly as for a cell value (finding M1) and for the same
-    // reason. A JSON object's key can only be a string, so the GOLDEN's map key
-    // is stringified BY THE FORMAT and says nothing about kind: it is read with
-    // `Kinding::Stringified`. The CLI is under no such constraint — it spells a
-    // map as an ARRAY of `{"key":…,"value":…}` objects, whose `key` keeps the JSON
-    // kind of its declared type — so the CLI key is held to `Kinding::Natural`,
-    // i.e. to the kind its declared key type implies. Relaxing BOTH sides made a
-    // regression from the `map<int,…>` key `-5` to the string `"-5"` compare equal
-    // (issue #1491 review finding N1).
-    //
-    // The key is the `Canon` VALUE, never `Canon::describe()`: `describe` is the
-    // DIAGNOSTIC rendering, and a rendering used as a comparison key can only be as
-    // faithful as its spelling happens to be — the same class as finding DD1, where
-    // the row-order key's `brief(&canon.describe())` made two long distinct keys
-    // equal. Here the pair is compared as the structured value and rendered only
-    // into the message below.
-    let canon_golden_key = |v: &Value| -> Result<Canon, String> {
-        canon_typed(v, egress, key_ty, Depth::Inside, Kinding::Stringified)
-    };
-    let canon_cli_key = |v: &Value| -> Result<Canon, String> {
-        canon_typed(v, egress, key_ty, Depth::Inside, Kinding::Natural)
-    };
-    let mut g: Vec<(Canon, &Value)> = Vec::with_capacity(golden.len());
-    for (k, v) in golden {
-        g.push((canon_golden_key(&Value::String(k.clone()))?, v));
-    }
-    let mut c: Vec<(Canon, &Value)> = Vec::with_capacity(cli.len());
-    for entry in cli {
-        let (key, value) = pair(entry, egress)?;
-        c.push((canon_cli_key(key)?, value));
-    }
-    if g.len() != c.len() {
-        return Err(format!("map size golden {} vs cli {}", g.len(), c.len()));
-    }
-    for (i, ((gk, gv), (ck, cv))) in g.iter().zip(c.iter()).enumerate() {
-        if gk != ck {
-            return Err(format!(
-                "map key at emitted position {i}: golden {} vs cli {} — a map's \
-                 entries are compared in EMITTED order, which is the key-comparator \
-                 order both the dump and a reader of the same SSTable see (golden \
-                 keys [{}], cli keys [{}])",
-                brief(&gk.describe()),
-                brief(&ck.describe()),
-                keys_of(&g),
-                keys_of(&c)
-            ));
-        }
-        // A map VALUE is the cell value (`writeRawValue`), so it keeps its natural
-        // JSON kind even when the key beside it was stringified.
-        //
-        // The PATH takes the key UNTRUNCATED: a declared gap is matched against it by
-        // exact string (see [`gap::SkipPaths::declared`]), so truncating it here would
-        // silently merge the paths of two long keys — DD1 again, one level down. Only
-        // the message prefix is truncated.
-        let key_text = gk.describe();
-        let entry = at.index(&key_text, Kinding::Natural);
-        compare_value_at(gv, cv, egress, value_ty, &entry)
-            .map_err(|why| format!("[{}] {why}", brief(&key_text)))?;
-    }
-    Ok(())
-}
-
-/// The canonical keys of one side of a map, in emitted order, for the ordering
-/// diagnostic above — a bare "golden X vs cli Y" at position 3 does not say
-/// whether the entry is missing, extra or merely moved.
-///
-/// Each key is rendered through [`brief`] because a map key may be a 4 KiB blob and
-/// this line lists EVERY key. That truncation is confined to this message: the keys
-/// themselves are compared as `Canon` values (see [`compare_map`] and finding DD1).
-fn keys_of(entries: &[(Canon, &Value)]) -> String {
-    entries
-        .iter()
-        .map(|(k, _)| brief(&k.describe()))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 // ===========================================================================
@@ -1393,6 +1347,12 @@ pub fn cli_csv_rows(text: &str) -> Result<Vec<Row>, String> {
 
 #[path = "golden_value_compare_udt.rs"]
 mod udt;
+
+/// Pairing a MAP's entries — the one value shape the two sides spell differently by
+/// construction (a dump object vs a `{key,value}` array). Split out under the
+/// campsite rule when container keys landed (issue #3726).
+#[path = "golden_value_compare_map.rs"]
+mod map;
 
 // ===========================================================================
 // Declared-gap divergences

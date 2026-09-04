@@ -1,0 +1,63 @@
+issue #1698 — features-are-load-bearing guard: THE RED DEMONSTRATION
+
+Acceptance criterion 2 of #1698 requires the guard to FAIL on pre-delete main,
+naming exactly the censused dead feature set. Captured BEFORE any deletion, at
+commit 9da235a6c (tree identical to origin/main for every
+manifest under test; the only additions are the guard and its self-test).
+
+$ bash scripts/ci/check-features-load-bearing.sh; echo "EXIT=$?"
+
+
+❌ features-load-bearing: 13 declared feature(s) are DEAD — enabling them changes nothing that is compiled, linked or selected:
+
+    cqlite-cli/Cargo.toml:226  ci_zero_tolerance   [cqlite-cli]
+    cqlite-cli/Cargo.toml:223  interactive   [cqlite-cli]
+    cqlite-core/Cargo.toml:505  ci_zero_tolerance   [cqlite-core]
+    cqlite-core/Cargo.toml:509  events   [cqlite-core]
+    cqlite-core/Cargo.toml:537  test-coverage-tracking   [cqlite-core]
+    cqlite-core/Cargo.toml:536  test-property-testing   [cqlite-core]
+    cqlite-core/Cargo.toml:538  test-quality-gates   [cqlite-core]
+    cqlite-core/Cargo.toml:535  test-schema-validation   [cqlite-core]
+    cqlite-core/Cargo.toml:519  unit-tests-only   [cqlite-core]
+    tests/Cargo.toml:157  ci_zero_tolerance   [cqlite-integration-tests]
+    tests/Cargo.toml:163  sstable-writer   [cqlite-integration-tests]
+    tools/format-validator/Cargo.toml:45  ci_zero_tolerance   [format-validator]
+    tools/sstabledump-validator/Cargo.toml:41  ci_zero_tolerance   [sstabledump-validator]
+
+    Each has NO effect anywhere in its own closure: no cfg reference site in its
+    DECLARING package's sources, no optional dependency, no external dependency
+    feature, and no target's required-features names it. Being NAMED confers nothing:
+    an aggregator that lists a leaf, a workflow `--features` argument, the gate's
+    clippy enumerations and a doc table all name features without enabling anything.
+
+    Remedy, one of:
+      * DELETE the feature from its manifest (and every enumeration that names it:
+        the gate's clippy feature lists in scripts/agent-gate.sh, workflow
+        `--features` arguments, the CLAUDE.md feature table, docs); or
+      * GIVE it an effect: a `#[cfg(feature = "...")]` site in the declaring
+        package's sources, an optional dependency, or a target `required-features`.
+
+    Issue #1698 (epic #1685, config honesty).
+EXIT=1
+
+13 dead features named, matching the census exactly:
+  events                  (cqlite-core)                  x1
+  ci_zero_tolerance       (core, cli, tests, format-validator, sstabledump-validator) x5
+  test-schema-validation / test-property-testing / test-coverage-tracking /
+  test-quality-gates      (cqlite-core, the 4 leaves of test-infrastructure) x4
+  sstable-writer          (cqlite-integration-tests)      x1
+  interactive             (cqlite-cli, and it sat in default) x1
+  unit-tests-only         (cqlite-core only; the cqlite-integration-tests
+                           feature of the same name has 25 real cfg sites) x1
+
+NOT named, and why (each has a real effect, so the predicate is not over-broad):
+  test-infrastructure — kept: a real cfg site at cqlite-core/tests/common/mod.rs:16.
+  duckdb-tests        — kept: E2 dep:duckdb, plus E3 required-features on three
+                        cqlite-cli test targets.
+  all-compression     — kept: an aggregator credited THROUGH lz4/snappy/deflate/
+                        zstd, each of which pulls a dependency and has cfg sites.
+  wasm                — kept BY THE PREDICATE (E2: it enables three optional
+                        dependencies), and deleted anyway under #1698 part 3 for a
+                        different reason: the flag gates no code, so those three
+                        dependencies buy nothing. The guard's subject is 'does
+                        enabling it change the build', which pulling a dep does.

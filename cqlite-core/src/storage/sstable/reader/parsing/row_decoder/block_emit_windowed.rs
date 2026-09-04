@@ -1,6 +1,14 @@
+use super::buffer_extent::HeaderTolerance;
 use super::*;
 
 use range_marker_error::unparseable_marker_in_buffered_block as unparseable;
+
+// Issue #3928: the partition-HEADER arm, split out when it gained a tolerance
+// DECISION (campsite rule, epic #1116). Declared here rather than in the parent
+// `mod.rs` because it is used by this walk alone — the two sliding drivers reach
+// the same decision from their own `at_final_chunk`.
+pub(super) mod partition_header_arm;
+use partition_header_arm::HeaderStep;
 
 impl V5CompressedLegacyParser {
     /// Within-partition clustering-slice variant of [`parse_block_emit`] (Issue
@@ -93,16 +101,19 @@ impl V5CompressedLegacyParser {
         let now_secs = self.now_secs;
         let table_id = TableId::new(format!("{}.{}", self.keyspace, self.table_name));
 
-        // Cassandra partition key size limits (used in header validation)
-        // - CASSANDRA_MAX_KEY_SIZE: 64KB limit per Apache Cassandra specification
-        // - FORMAT_MAX_KEY_SIZE: u8 max value - V5CompressedLegacy format limitation
-        const CASSANDRA_MAX_KEY_SIZE: usize = 65536; // 64KB per Cassandra spec
-        const FORMAT_MAX_KEY_SIZE: usize = 255; // u8 max value - format limitation
-
         // Parse ALL partitions in block (Issue #2 fix: previously only parsed one partition)
         let mut partition_index = 0;
         let mut skipped_partitions = 0;
-        while offset < data.len() {
+        // Issue #3928 (finding C2): the ONE header-tolerance state for this
+        // walk. It starts ATTRIBUTABLE — including on a call that supplied a
+        // `row_body_window`, because a window is not yet an uncertainty; it
+        // becomes one only when its endpoint is REACHED, which is where
+        // `bounded_out()` is called. Before that, partition 0's own header is as
+        // attributable as on an unbounded walk.
+        let tolerance = HeaderTolerance::for_extent(extent);
+        // Issue #3928 (finding B1): LABELLED so the row-body bound can terminate
+        // the WHOLE walk, not just the row loop — see the bound check below.
+        'partitions: while offset < data.len() {
             // Cooperative cancellation (issue #2264): an uncompressed, index-less
             // SSTable is returned to the scan as ONE contiguous block, so this loop
             // is the 400k+-partition hot loop that the compaction streaming read
@@ -122,71 +133,15 @@ impl V5CompressedLegacyParser {
                 data.len()
             );
 
-            // CRITICAL FIX (Issue #164): Validate partition header format before attempting parse
-            //
-            // Most compressed blocks contain EXACTLY ONE partition. After parsing the first
-            // partition's row data and trailing VInt, we should NOT assume there's another
-            // partition just because offset < data.len().
-            //
-            // Partition header format validation:
-            // - Byte 0: Flags (typically 0x00, sometimes has partition-level flags)
-            // - Byte 1: Partition key length (u8, typically 16 for UUID)
-            // - Bytes 2+: Partition key data
-            //
-            // If we don't see a valid partition header structure, we've reached the end
-            // of partitions in this block (remaining bytes are likely padding or metadata).
-            if offset >= data.len() {
-                break; // End of block
-            }
-
-            // Check if this looks like a partition header (flags byte + reasonable key length)
-            // Partition keys can be up to 64KB per Cassandra spec (composite keys, text, etc.)
-            if offset + 2 > data.len() {
-                tracing::debug!(
-                    "V5CompressedLegacy: Not enough bytes for partition header at offset {} (need 2, have {}), stopping",
-                    offset,
-                    data.len() - offset
-                );
-                break;
-            }
-
-            let flags = data[offset];
-            let key_len = data[offset + 1] as usize;
-
-            // Validate partition header:
-            // - Key length must be non-zero and within format's limit (u8 max = 255 bytes)
-            //   Note: Cassandra spec allows 64KB keys, but V5CompressedLegacy format uses u8 length
-            // - Must have enough bytes for the header (size depends on format version)
-            //
-            // VG3: oa format (hasUIntDeletionTime) uses a compact DeletionTime:
-            //   LIVE = 1 byte; DELETED = 12 bytes.  The minimum is therefore 1 byte.
-            // nb format always uses 12 bytes (4 + 8).
-            // NOTE: No heuristic validation of flags (Issue #258, #28 no-heuristics mandate)
-            let deletion_time_min = if self.has_uint_deletion_time() { 1 } else { 12 };
-            let header_min_size = 1 + 1 + key_len + deletion_time_min;
-            if key_len == 0
-                || key_len > FORMAT_MAX_KEY_SIZE.min(CASSANDRA_MAX_KEY_SIZE)
-                || offset + header_min_size > data.len()
-            {
-                tracing::warn!(
-                    "V5CompressedLegacy: Skipping malformed partition header at offset {} \
-                     (flags=0x{:02x}, key_len={}, need {} bytes, have {}, partition={}): header validation failed",
-                    offset,
-                    flags,
-                    key_len,
-                    header_min_size,
-                    data.len() - offset,
-                    partition_index
-                );
-                // Try to skip to next potential partition boundary
-                skipped_partitions += 1;
-                offset += 1; // Minimal forward progress to avoid infinite loop
-                continue; // Skip this partition, try next
-            }
-
-            // Try to parse partition header
-            match self.parse_partition_header_full(data, offset) {
-                Ok((partition_key, new_offset, partition_deletion)) => {
+            // Issue #3928: the partition-HEADER arm — bounds, the issue-#164
+            // structural validation, and the real parse — lives in ONE place
+            // (`partition_header_arm.rs`), because on a PROVEN-COMPLETE buffer it
+            // must REFUSE rather than skip a byte and resynchronise: the resync
+            // both drops the partition and can invent one out of misaligned
+            // bytes. `?` propagates that refusal; `Resync`/`EndOfBlock` are only
+            // reachable on a `BufferExtent::Window`.
+            match self.block_partition_header(data, offset, tolerance, partition_index)? {
+                HeaderStep::Parsed(partition_key, new_offset, partition_deletion) => {
                     let header_size = new_offset - offset;
                     offset = new_offset;
 
@@ -328,7 +283,34 @@ impl V5CompressedLegacyParser {
                         // block-granularity over-read within the window).
                         if let Some(body_end) = row_body_end {
                             if offset >= body_end {
-                                break;
+                                // Issue #3928 (finding B1): TERMINATE THE WHOLE
+                                // WALK, not just this row loop.
+                                //
+                                // The bound is the end of what the caller ASKED
+                                // to read (the row-index block extent the
+                                // authoritative BTI/promoted index resolved for
+                                // the requested clustering range). Reaching it
+                                // used to break only the inner loop, so the outer
+                                // partition loop then walked the unrequested
+                                // remainder byte-by-byte as candidate headers.
+                                // That both read partitions nobody asked for and
+                                // could FABRICATE one from misaligned row payload
+                                // — AC2's own subject — and on a wide partition it
+                                // could rescan the same remainder per call.
+                                //
+                                // Measured on the PRISTINE BIG fixture with a
+                                // window ending at offset 62: the walk emitted 99
+                                // FOREIGN partition keys, i.e. the whole table,
+                                // for a request scoped to ~32 bytes. Pinned by
+                                // `a_bounded_walk_stops_at_its_bound_and_reads_no_further_partition`.
+                                //
+                                // Nothing after this point in the arm is owed to
+                                // the caller: the #3095 static-only emission
+                                // below is already gated on
+                                // `row_body_end.is_none()`, and a bounded read's
+                                // rows are trimmed by the post-scan clustering
+                                // backstop either way.
+                                break 'partitions;
                             }
                         }
 
@@ -375,6 +357,9 @@ impl V5CompressedLegacyParser {
                                             // continues at `next_offset`) with an
                                             // unrepresentable bound kind; `break`
                                             // dropped every later row and said `Ok`.
+                                            // #3928 (I2) a fortiori: a `return`
+                                            // reaches no header arm — see that arm,
+                                            // "Reconciling #3721 and #3928".
                                             return Err(range_marker_error::range_marker_refused(
                                                 e,
                                                 &partition_index,
@@ -413,6 +398,12 @@ impl V5CompressedLegacyParser {
                                     // discriminator (matching the message text would violate the
                                     // no-heuristics rule, issue #28), so it is left as a named
                                     // residual rather than invented here.
+                                    //
+                                    // Issue #3928 (I2) a fortiori: a `return` ends the walk at
+                                    // every extent, so the header arm is never re-entered with
+                                    // the cursor ON the marker. That reconciliation, and the
+                                    // SECOND residual it leaves, are recorded in
+                                    // `partition_header_arm.rs`, "Reconciling #3721 and #3928".
                                     Err(cause) => {
                                         return Err(unparseable(cause, &partition_index, offset))
                                     }
@@ -423,7 +414,10 @@ impl V5CompressedLegacyParser {
                                     offset = next_offset;
                                     continue;
                                 }
-                                // Same decision on the PHYSICAL path (no shadowing).
+                                // Same decision, and the same two residuals, on the
+                                // PHYSICAL path (no shadowing); #3928's I2 invariant
+                                // holds here for the same reason (a `return` ends the
+                                // walk at every extent).
                                 Err(cause) => {
                                     return Err(unparseable(cause, &partition_index, offset))
                                 }
@@ -662,7 +656,17 @@ impl V5CompressedLegacyParser {
                                     row_count,
                                     offset,
                                 )?;
-                                break; // End of valid data in partition
+                                // Issue #3928 round 5 (I2): END THE WALK. `Ok` from
+                                // `end_of_partition_or_bail` establishes only "not
+                                // `Error::ColumnDecode`" and consumed nothing, so the
+                                // cursor still sits where the failed row parse STARTED —
+                                // the only exit here leaving it UNCONFIRMED (both boundary
+                                // exits set `partition_complete`), reachable only when
+                                // `!extent.is_complete()`, i.e. MID-ROW under the straddle
+                                // protocol. How this composes with #3721 above, and the
+                                // measurement in BOTH directions:
+                                // `partition_header_arm.rs`, "Reconciling #3721 and #3928".
+                                break 'partitions; // End of valid data in partition
                             }
                         }
                     }
@@ -736,18 +740,11 @@ impl V5CompressedLegacyParser {
                         break;
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        "V5CompressedLegacy: Failed to parse partition header at offset {} \
-                         (partition={}): {}. Attempting to continue to next partition.",
-                        offset,
-                        partition_index,
-                        e
-                    );
-                    // Try to skip forward to find next partition
+                HeaderStep::EndOfBlock => break,
+                HeaderStep::Resync => {
                     skipped_partitions += 1;
-                    offset += 1;
-                    continue; // Skip this partition, try next
+                    offset += 1; // Minimal forward progress to avoid an infinite loop
+                    continue; // Skip this partition, try the next offset
                 }
             }
         }

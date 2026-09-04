@@ -1,0 +1,145 @@
+issue #1698 — PRE-EXISTING main-red in `cqlite-integration-tests --lib`, with its
+falsifying control
+
+WHAT HAPPENED. #1698 deletes two dead features from `tests/Cargo.toml`
+(`ci_zero_tolerance`, `sstable-writer`) and stops `unit-tests-only` forwarding to
+cqlite-core's deleted twin. That puts `cqlite-integration-tests` in `--lite`'s
+BLAST RADIUS, so `--lite` ran `cargo test -p cqlite-integration-tests --lib` — and
+per the #3522 census that suite's 206 lib tests execute in NO gate component and no
+CI job, i.e. this is the FIRST execution of them in this repository's gate history.
+Six of them fail. This is exactly the #1716 precedent recorded in CLAUDE.md:
+"expect latent failures the first time you touch a long-unwired crate".
+
+THE CONTROL — measured, not argued. A clean `git worktree add --detach origin/main`
+(9da235a6c, the branch point) with its own CARGO_TARGET_DIR, same command, same
+datasets root:
+
+  origin/main 9da235a6c : test result: FAILED. 123 passed; 6 failed; 16 ignored
+  issue-1698  cd2e60622 : test result: FAILED. 123 passed; 6 failed; 16 ignored
+
+IDENTICAL counts and IDENTICAL failure set:
+
+  cli_integration_tests::tests::test_cli_error_handling
+  cli_integration_tests::tests::test_cli_integration_basic
+  integration::cli_tests::tests::test_cli_help
+  integration::cli_tests::tests::test_cli_version
+  issue_28a_heuristics_removal_tests::test_row_cell_state_machine_no_blob_fallback_modern
+  parser_validation::vint_validation_tests::test_vint_length_parsing
+
+WHY NONE OF THEM CAN BE CAUSED BY THIS DIFF.
+  * The four CLI ones panic in assert_cmd with "`CARGO_BIN_EXE_cqlite` is unset —
+    if this is running within a unit test, move it to an integration test". That
+    env var is set by cargo only for INTEGRATION-test targets, so these four can
+    NEVER pass in a `--lib` run, under any feature set. Structural, not featural.
+  * `issue_28a…no_blob_fallback_modern` asserts "BIG v5 format should fail instead
+    of falling back to blob" — a no-heuristics expectation, evaluated with the
+    `legacy-heuristics` feature OFF on both sides.
+  * `parser_validation…test_vint_length_parsing` is a bare `assert_eq!(2, 1)`-shaped
+    length assertion with no cfg in its path.
+  None of the deleted features had a single cfg site anywhere (that is the whole
+  criterion of #1698's guard), so no deletion here can change any code path.
+
+DISPOSITION. Not fixed in #1698, deliberately: the four CLI ones need moving from
+the crate's LIB into integration-test targets, and the other two are substantive
+expectations (a no-heuristics assertion and a VInt length) each worth its own
+investigation. Doing any of that inside a dead-feature-flag cleanup would be a
+different change wearing this one's number. Filed as ISSUE #3856; #1698's own
+`--lite` FAIL is cited against it rather than papered over.
+
+================================================================================
+RE-MEASURED 2026-09-03 against CURRENT origin/main (not the branch point)
+================================================================================
+
+WHY RE-MEASURE. The control above was taken at the branch point (9da235a6c).
+Two things changed since, and either could have invalidated it:
+
+  * issue #3856 — which tracks exactly these 6 reds — was CLOSED as **COMPLETED**
+    on 2026-09-01T20:42:53Z (cross-referenced PR #3836). A completed fix on main
+    absent from this branch's base is #3650's shape: the red would then be BASE
+    STALENESS, curable by a rebase, not a main-red.
+  * `scripts/flow/base-staleness.sh` reports this base **behind 46** commits,
+    **21 of them in blast radius** (CLAUDE.md, scripts/ci/**, scripts/tests/**).
+
+Citing a control measured 46 commits ago to excuse a red today is deriving a pass
+from a stale observation. So it was re-run.
+
+THE MEASUREMENT. `git worktree add --detach origin/main` (045a6e28f), its own
+CARGO_TARGET_DIR, CQLITE_DATASETS_ROOT=/data/datasets (the root the fetch script's
+own --verify-only prints), CARGO_TERM_COLOR=never:
+
+  cargo test -p cqlite-integration-tests --lib
+
+  origin/main 045a6e28f : test result: FAILED. 123 passed; 6 failed; 16 ignored
+  issue-1698  47e81c88a : test result: FAILED. 123 passed; 6 failed; 16 ignored
+
+IDENTICAL counts, IDENTICAL failure set, same six names as above, same two
+panic messages verbatim ("BIG v5 format should fail instead of falling back to
+blob"; `assertion left == right failed, left: 2, right: 1`).
+
+CONCLUSION. Still pre-existing on main TODAY. Not caused by this branch, and NOT
+curable by rebasing — the 46 commits do not contain a fix. The base-staleness
+advisory is therefore information here, not a remedy.
+
+DISCREPANCY TO REPORT, NOT TO RESOLVE HERE. #3856 is closed COMPLETED while the
+six reds it names still fail on main. Either it was closed prematurely, or #3836
+addressed a different half of it (e.g. the #3522 execution hole rather than the
+assertions). Issue state is not this worker's to change, so it is reported to the
+lead rather than reopened.
+
+SCOPE OF THIS RED, stated precisely. It surfaces in `--lite`'s `scoped-tests`
+because #1698's deletions in tests/Cargo.toml put `cqlite-integration-tests` in
+the blast radius. NO FULL-GATE COMPONENT EXECUTES `cqlite-integration-tests
+--lib` (the #3522 census records `integration-tests` as COMPILING the package
+`--no-run` and then running 6 NAMED targets, leaving the lib's 206 tests
+unexecuted). So the gate of record neither runs nor certifies these tests, and a
+full-gate PASS alongside this lite FAIL is not a contradiction — it is the
+documented coverage hole. This is disclosed in the PR rather than waived: the
+#3042 cite-and-waive does NOT apply, because this diff touches scripts/ and
+`scripts/ci/classify-docs-only.sh` fails it closed.
+
+================================================================================
+RE-MEASUREMENT 2026-09-04, AFTER MERGING origin/main — THE SET SHRANK 6 -> 2
+================================================================================
+Everything above measured SIX failures. That is no longer the count, and the
+correction is recorded here rather than by editing the earlier record, because
+the earlier record was true when it was taken.
+
+Measured at merged head 8f6538a33 (this branch + origin/main at 4bd0d1cf6),
+`cargo test -p cqlite-integration-tests --lib`, read from the `--lite` run's
+own scoped-tests component log (run-id /tmp/agent-gate.CEHumB):
+
+    running 145 tests
+    test result: FAILED. 127 passed; 2 failed; 16 ignored; 0 measured
+
+The two that remain, both previously in the six:
+    issue_28a_heuristics_removal_tests::test_row_cell_state_machine_no_blob_fallback_modern
+      tests/src/issue_28a_heuristics_removal_tests.rs:203 — "BIG v5 format
+      should fail instead of falling back to blob"
+    parser_validation::vint_validation_tests::test_vint_length_parsing
+      tests/src/parser_validation.rs:317 — assert left==right, left: 2, right: 1
+
+The FOUR that now PASS, all four of the CLI ones:
+    cli_integration_tests::tests::test_cli_error_handling
+    cli_integration_tests::tests::test_cli_integration_basic
+    integration::cli_tests::tests::test_cli_help
+    integration::cli_tests::tests::test_cli_version
+They were fixed by commits on main between 045a6e28f and 4bd0d1cf6, not by
+anything on this branch: this branch's only changes since the previous
+measurement are scripts/agent-gate.sh (four progress lines) and this file.
+
+WHAT THIS RE-MEASUREMENT DOES *NOT* ESTABLISH, stated because the distinction
+is the whole value of the record. It was taken at THIS BRANCH'S head, not on a
+clean origin/main checkout, so by itself it cannot attribute the two survivors
+to main. The attribution rests on the EARLIER measurement in this file, which
+did run against a clean origin/main (045a6e28f) and named both survivors among
+its six. A clean-main re-measurement of just those two was deliberately NOT run
+this round: it needs a fresh worktree with its own target dir, i.e. a full
+parallel compile, and the standing fleet rule is ONE gate per box — a second
+concurrent cargo build degrades the gate of record that has to run on this same
+machine. If the two ever need re-attributing, do it on an idle box, not
+alongside a gate.
+
+The SCOPE paragraph above is unchanged and still governs: no full-gate
+component executes `cqlite-integration-tests --lib` (#3522), so the gate of
+record neither runs nor certifies these two, and a full-gate PASS beside a lite
+FAIL here remains the documented coverage hole rather than a contradiction.
