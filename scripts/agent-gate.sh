@@ -11125,8 +11125,16 @@ _recorded_component_rows_block() {
   for _c in $(_tree_mode_components); do
     _rf="$LOG_DIR/$_c.result"
     [ -f "$_rf" ] || continue
-    _st=""; _secs=""
-    read -r _st _secs < "$_rf" || true
+    # #3800 x #3625 (merge of 2026-09-04): the ONE reader, not a private two-field read.
+    # #3625 correctly routed the tree-boundary block through `_fm_summary_line` but left its own
+    # funnel traversals reading verdicts privately -- and a private read RECORDS NOTHING, so an
+    # absent/unreadable/MALFORMED `.result` (what an ENOSPC write leaves) renders as a BLANK CELL
+    # in this table while the `disk-exhaustion:` scan reports clean over a subject it never read.
+    # `_disk_verdict_read_aggregate` reads the same two fields, records the unreadability as an
+    # UNMEASURED subject, and normalises to a synthetic `FAIL 0`. `|| true` because this is a
+    # RENDERER: it must not own the verdict (the aggregations do).
+    _disk_verdict_read_aggregate "$_c" "$_rf" || true
+    _st="$DISK_VERDICT_ST"; _secs="$DISK_VERDICT_SECS"
     _rows="$_rows$(_fm_summary_line "$_c" "$_st" "${_secs}s")
 "
     _pairs="$_pairs $_c $_st"
@@ -11140,8 +11148,16 @@ _recorded_component_rows_block() {
     [ -f "$_rf" ] || continue
     _c="${_rf##*/}"; _c="${_c%.result}"
     case "$_seen" in *" $_c "*) continue ;; esac
-    _st=""; _secs=""
-    read -r _st _secs < "$_rf" || true
+    # #3800 x #3625 (merge of 2026-09-04): the ONE reader, not a private two-field read.
+    # #3625 correctly routed the tree-boundary block through `_fm_summary_line` but left its own
+    # funnel traversals reading verdicts privately -- and a private read RECORDS NOTHING, so an
+    # absent/unreadable/MALFORMED `.result` (what an ENOSPC write leaves) renders as a BLANK CELL
+    # in this table while the `disk-exhaustion:` scan reports clean over a subject it never read.
+    # `_disk_verdict_read_aggregate` reads the same two fields, records the unreadability as an
+    # UNMEASURED subject, and normalises to a synthetic `FAIL 0`. `|| true` because this is a
+    # RENDERER: it must not own the verdict (the aggregations do).
+    _disk_verdict_read_aggregate "$_c" "$_rf" || true
+    _st="$DISK_VERDICT_ST"; _secs="$DISK_VERDICT_SECS"
     _rows="$_rows$(_fm_summary_line "$_c" "$_st" "${_secs}s")
 "
     _pairs="$_pairs $_c $_st"

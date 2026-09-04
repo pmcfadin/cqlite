@@ -797,10 +797,33 @@ table_verdicts() {
 
 tr_n=$(table_renderers | cut -f1)
 tr_names=$(table_renderers | cut -f2)
-if [ "${tr_n:-0}" -ge 2 ]; then
-  ok "14-renderers: derived $tr_n component-row RENDERER(s) from the row FORMAT, not from a name ($tr_names)"
+# THE FLOOR IS ONE, NOT TWO, SINCE THE #3625 MERGE (2026-09-04) -- and the reason matters, because
+# lowering a floor is normally how a guard rots. #3800 raised this derivation from "one renderer's
+# NAME" to "the row FORMAT" precisely because a SECOND renderer (the tree-integrity boundary block)
+# had shipped invisible to the census. #3625 then reached the same conclusion independently and
+# fixed it at the source: it ROUTED that block through `_fm_summary_line` and deleted the second
+# printf. So exactly one renderer is now the CORRECT state, and asserting >= 2 would red on
+# correct input -- the guard agents learn to waive.
+#
+# The PROPERTY is unchanged and is what the planted control below now carries: renderers are
+# discovered BY FORMAT, so a new one cannot escape the census by not being named here. With the
+# real second renderer gone, that property is only testable by PLANTING one -- which is strictly
+# better evidence than the old assert, which depended on a second renderer existing by accident.
+if [ "${tr_n:-0}" -ge 1 ]; then
+  ok "14-renderers: derived $tr_n component-row RENDERER(s) from the row FORMAT, not from a name ($tr_names) -- one is correct since #3625 consolidated the boundary block through _fm_summary_line"
 else
-  bad "14-renderers: derived only ${tr_n:-0} component-row renderer(s) ($tr_names) -- the row-format derivation no longer matches the script, so the table census would be blind again"
+  bad "14-renderers: derived NO component-row renderer ($tr_names) -- the row-format derivation no longer matches the script at all, so the table census is blind"
+fi
+# PLANTED-RENDERER CONTROL: a second function carrying the canonical row format must be DISCOVERED.
+# This is what stops the derivation quietly regressing to "whatever _fm_summary_line is called".
+_pr_ctl="$tmp/planted-renderer.sh"
+{ cat "$GATE"; printf '\n_planted_row_renderer() {\n  printf %s "$1:" "$2" "$3"\n}\n' "'%-18s %s (%ss)\\n'"; } > "$_pr_ctl"
+_pr_n=$(table_renderers "$_pr_ctl" | cut -f1)
+_pr_names=$(table_renderers "$_pr_ctl" | cut -f2)
+if [ "${_pr_n:-0}" -eq $(( ${tr_n:-0} + 1 )) ] && case "$_pr_names" in *_planted_row_renderer*) true ;; *) false ;; esac; then
+  ok "14-renderers-control: a PLANTED second renderer carrying the canonical row format is discovered by name-free derivation ($_pr_n renderers: $_pr_names) -- so a new component-row emitter cannot escape the table census the way the tree-integrity boundary block once did"
+else
+  bad "14-renderers-control: the planted renderer was NOT discovered (found ${_pr_n:-0}: $_pr_names, expected $(( ${tr_n:-0} + 1 )) including _planted_row_renderer) -- the derivation is effectively hard-coded and would go blind on a real new renderer"
 fi
 tv_out=$(table_verdicts)
 tbl_n=$(printf '%s\n' "$tv_out" | grep -c '	')
@@ -820,10 +843,12 @@ fi
 # Both renderers must actually be REPRESENTED in the derived set. Counting 7 sites proves
 # nothing if all 7 came through one renderer -- that is the blind spot restated as a number.
 tv_vias=$(printf '%s\n' "$tv_out" | cut -f4 | sort -u | grep -c .)
-if [ "$tv_vias" -ge 2 ]; then
-  ok "14-tables: the derived sites reach the census through $tv_vias DISTINCT renderers -- the second renderer is represented, not merely counted"
+# Floor 1, not 2, since #3625 consolidated the boundary block -- see 14-renderers for the full
+# reasoning and the planted control that carries the multi-renderer property instead.
+if [ "$tv_vias" -ge 1 ]; then
+  ok "14-tables: the derived sites reach the census through $tv_vias DISTINCT renderer(s) -- one since #3625 routed the boundary block through _fm_summary_line; the planted-renderer control above is what proves a SECOND would be represented rather than merely counted"
 else
-  bad "14-tables: every derived table site came through ONE renderer ($(printf '%s\n' "$tv_out" | cut -f4 | sort -u | tr '\n' ' ')) -- the derivation is single-renderer again"
+  bad "14-tables: NO derived table site reaches the census through any renderer ($(printf '%s\n' "$tv_out" | cut -f4 | sort -u | tr '\n' ' ')) -- the site-to-renderer mapping is broken"
 fi
 
 # POSITIVE CONTROLS, both directions. A guard that has not been shown to fail on a planted
@@ -1425,9 +1450,14 @@ fi
 # (19h) ONE READER. A second, private `read -r <st> <secs> < <a .result>` anywhere in the
 # shipped script is a reader that records nothing -- exactly how this family keeps
 # regenerating. Derived from source: every such read must be inside _disk_verdict_read.
+# COMMENT LINES ARE EXCLUDED. Without that, this guard matches the PROSE THAT DESCRIBES IT -- the
+# merge comment explaining why main's private read was replaced quotes the forbidden literal, so
+# the guard reported a defect that was not there. Same trap as 25d-no-pipe, one guard over: a
+# structural assert whose subject set includes its own documentation.
 raw_reads=$(awk '
   /^_disk_verdict_read\(\) \{/ { inb=1 }
   inb && /^\}$/ { inb=0; next }
+  /^[ \t]*#/ { next }
   !inb && /read -r [A-Za-z_]+ [A-Za-z_]+ < / { print FILENAME ":" FNR ": " $0 }
 ' "$GATE")
 if [ -z "$raw_reads" ]; then
