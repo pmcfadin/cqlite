@@ -1010,22 +1010,81 @@ fn the_csv_boolean_kind_accepts_only_true_and_false() {
     assert!(ask(&json!([true]), Egress::Json), "…which this is");
 }
 
-/// THE OTHER RETIREMENT AXIS: a golden whose keys ARE decoded.
+/// A `getString` key that COINCIDENTALLY parses as the declared type's
+/// `toJSONString` document is STILL this gap (roborev job 106, issue #3726).
 ///
-/// The gap's golden half requires every key to be UNDECODED — not a document the
-/// declared key type's `toJSONString` could have produced. That conjunct sits AFTER
-/// the DDL check and can only NARROW the gap, so it cannot reproduce the defect
-/// `a_frozen_column_with_an_unparseable_golden_key_is_not_this_gap` pins, where a
-/// parse result stood in for the multicell fact and widened the gap onto frozen
-/// columns.
+/// The DDL decides which writer spelled the key, and a VALUE cannot overrule it:
+/// `map_key_spelling` is `GetString` here because the column is multicell, so
+/// `cassandra-5.0.8 JsonTransformer.serializeCell` wrote this key with
+/// `writeString(ct.nameComparator().getString(...))` — flat text, whatever that text
+/// happens to look like.
 ///
-/// What it covers is the case the egress axis cannot: were `sstabledump` to start
-/// decoding a multicell map's cell path, the gap would otherwise go on suppressing a
-/// column whose golden side had improved.
+/// The two languages OVERLAP, which is why no value-level test can separate them:
+/// `TupleType.getString` on a one-component `tuple<text>` emits that component's text
+/// verbatim, so a component whose value is `[]` is spelled `[]` — and `[]` is also a
+/// well-formed `toJSONString` document for the same declared type. Tightening the
+/// parse would not help: a component whose value is `["[]"]` is spelled `["[]"]`,
+/// which is a well-formed, correctly-kinded, correctly-sized one-element tuple
+/// document too.
+const COINCIDENTAL_JSON_KEY_DDL: &str =
+    "CREATE TABLE t (id int PRIMARY KEY, m map<frozen<tuple<text>>, int>);";
+
 #[test]
-fn the_multicell_map_key_gap_does_not_match_a_decoded_golden() {
+fn a_getstring_key_that_parses_as_the_declared_document_is_still_this_gap() {
+    let schema = schema_of(COINCIDENTAL_JSON_KEY_DDL, "t");
+    for coincidence in ["[]", "[\"[]\"]"] {
+        let golden = vec![row(&[("id", json!(1)), ("m", json!({ coincidence: 80 }))])];
+        // The key's own serialized bytes: a one-component tuple is `[len][bytes]`.
+        let key_hex = format!(
+            "0x{:08x}{}",
+            coincidence.len(),
+            coincidence
+                .as_bytes()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
+        let report = compare_rows(
+            &golden,
+            &multicell_map_cli(json!([{"key": key_hex, "value": 80}])),
+            &schema,
+            &["id"],
+            &[],
+            &MULTICELL_MAP_GAP,
+            Egress::Json,
+        );
+        assert!(
+            report.diffs.is_empty(),
+            "{coincidence}: the DDL says the golden is getString text, so this is the \
+             declared gap and not a diff: {:?}",
+            report.diffs
+        );
+        assert!(
+            report.stale_skips.is_empty(),
+            "{coincidence}: the gap must be APPLIED, not stale: {:?}",
+            report.stale_skips
+        );
+    }
+}
+
+/// The INVERSE of the case `17f081264` pinned, and it supersedes it (roborev job 106).
+///
+/// That commit answered a finding asking the gap to require the golden's keys to be
+/// UNDECODED, so that a `sstabledump` which began decoding a multicell cell path would
+/// retire the declaration instead of suppressing an improved golden. It implemented the
+/// requirement as a PARSE, and a parse cannot carry it: the same input is reachable as
+/// genuine `getString` text, which is the case above.
+///
+/// The DDL answers the same question for the pinned oracle and cannot be wrong — a
+/// multicell container-keyed column IS one whose cell path `JsonTransformer` wrote with
+/// `getString` (`cassandra-5.0.8`) — so a golden that merely LOOKS decoded is still this
+/// gap. The retirement axis that remains is the EGRESS
+/// (`the_multicell_map_key_gap_retires_when_the_egress_decodes_the_key`); the golden axis
+/// is a declared residual, stated at the matcher.
+#[test]
+fn a_document_shaped_golden_on_a_multicell_column_is_still_this_gap() {
     let schema = schema_of(MULTICELL_MAP_DDL, "t");
-    let decoded_golden = vec![row(&[
+    let document_shaped = vec![row(&[
         ("id", json!(1)),
         (
             "m",
@@ -1033,7 +1092,7 @@ fn the_multicell_map_key_gap_does_not_match_a_decoded_golden() {
         ),
     ])];
     let report = compare_rows(
-        &decoded_golden,
+        &document_shaped,
         &multicell_map_cli(json!([
             {"key": "0x0000001300000007636861726c696500000004000000030000000400000008", "value": 80}
         ])),
@@ -1043,10 +1102,10 @@ fn the_multicell_map_key_gap_does_not_match_a_decoded_golden() {
         &MULTICELL_MAP_GAP,
         Egress::Json,
     );
-    assert_eq!(
-        report.stale_skips.len(),
-        1,
-        "a decoded golden must retire the gap: {:?}",
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+    assert!(
+        report.stale_skips.is_empty(),
+        "the DDL decides, so the gap is APPLIED: {:?}",
         report.stale_skips
     );
 }

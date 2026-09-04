@@ -38,7 +38,7 @@
 //! now produce an ordinary diff naming the column, the declared gap and what was
 //! actually seen (see `super::compare_value_at`).
 
-use super::super::container::{golden_map_key_value, is_container_type, MapKeySpelling};
+use super::super::container::{is_container_type, MapKeySpelling};
 use super::super::schema::CqlType;
 // `is_blob_hex` — the ONE predicate for what a CQL blob literal is. It moved to
 // `scalar_spelling` when `container::canon_matches_declared_kinds` needed the same
@@ -230,12 +230,17 @@ pub enum Divergence {
     /// `writeString(ct.nameComparator().getString(...))` — `getString`, not
     /// `toJSONString` — so the golden carries `TupleType.getString`'s colon-joined,
     /// escaped spelling (`"charlie\:3:8"` in the committed golden) and no JSON
-    /// document at all. That is why the golden side of this variant is stated as
-    /// "every object key is NOT the declared key type's `toJSONString` spelling",
-    /// asked through the same `container::golden_map_key_value` the comparison pairs
-    /// with: a golden that DID decode (i.e. a future `sstabledump` writing the
-    /// toJSONString form, or a frozen column mis-declared here) is not this gap and
-    /// is compared normally.
+    /// document at all. THAT FOLLOWS FROM THE DDL, so the golden side of this variant
+    /// is stated from the DDL and reads no value beyond requiring a JSON string:
+    /// multicell + a container key type IS "the dump wrote getString text here", the
+    /// same fact `super::map::compare_map` pairs on and the same one
+    /// `container::golden_map_key_value` refuses on. A conjunct asking whether the
+    /// text ALSO parses as the `toJSONString` form used to sit in the matcher and was
+    /// removed (roborev job 106): the two languages overlap — `TupleType.getString`
+    /// emits a one-component `tuple<text>` verbatim, so the component `[]` is spelled
+    /// `[]`, a well-formed document for that same type — so the parse reported a
+    /// legitimate divergence as a hard FAIL. See the matcher for the full argument and
+    /// for the retirement axis that conjunct was carrying.
     ///
     /// EGRESS SHAPE: the `{key,value}` array both formats produce — the JSON egress
     /// directly, the CSV lane through `csv_container`'s decode — every entry of
@@ -245,10 +250,11 @@ pub enum Divergence {
     /// against that same golden entry. The ENTRY COUNTS must agree too, which is
     /// cheap and removes one item from the list below.
     ///
-    /// NOT COVERED: a null on either side, a golden whose keys DO parse, an egress
-    /// that decoded the key (or rendered anything else — text, a number, an object)
-    /// at it, a malformed `{key,value}` entry, and a differing entry COUNT. Each of
-    /// those is reported as an ordinary diff naming this gap.
+    /// NOT COVERED: a null on either side, a golden that is not a JSON string at all,
+    /// an egress that decoded the key (or rendered anything else — text, a number, an
+    /// object) at it, a malformed `{key,value}` entry, and a differing entry COUNT.
+    /// Each of those is reported as an ordinary diff naming this gap. A golden whose
+    /// text happens to PARSE is deliberately NOT in that list any more — see above.
     ///
     /// DECLARED RESIDUAL, and it is the whole of what this gap costs: the KEY's
     /// CONTENT is not compared, because neither side's key is a value this lane can
@@ -632,14 +638,44 @@ impl Divergence {
                 if map_key_spelling != MapKeySpelling::GetString {
                     return false;
                 }
-                // GOLDEN: `getString`'s flat text — a plain string that is NOT the declared
-                // container's `toJSONString` document. Asked through the one function the
-                // comparison pairs with, so the gap and the pairing cannot disagree about
-                // what the golden key is.
-                let Value::String(golden_key) = golden else {
-                    return false;
-                };
-                if golden_map_key_value(golden_key, ty, MapKeySpelling::ToJsonString).is_ok() {
+                // GOLDEN: the `getString` text, which at this node is simply a JSON
+                // STRING. That is ALL that is read of it — WHICH WRITER SPELLED IT IS
+                // ALREADY SETTLED, by the two DDL checks above and by nothing else.
+                //
+                // A PARSE GUARD USED TO SIT HERE AND IS GONE (roborev job 106). It asked
+                // `golden_map_key_value(.., MapKeySpelling::ToJsonString)` — under the very
+                // spelling the DDL has just said is NOT in play — and refused the gap when
+                // the text happened to parse. That decides a STRUCTURAL fact by INSPECTING A
+                // VALUE, the move this lane forbids most explicitly (issue #3500, roborev
+                // jobs 302/305/306), and it is unsound because THE TWO LANGUAGES OVERLAP:
+                // `cassandra-5.0.8 TupleType.getString` on a one-component `tuple<text>`
+                // emits that component's text verbatim, so a component whose value is `[]` is
+                // spelled `[]` — which is also a well-formed `toJSONString` document for the
+                // same declared type. A legitimate declared divergence was therefore reported
+                // as a hard FAIL. Tightening the parse cannot separate them: `["[]"]` is a
+                // correctly-sized, correctly-kinded one-element tuple document AND that
+                // component's own getString spelling. Both are pinned by
+                // `a_getstring_key_that_parses_as_the_declared_document_is_still_this_gap`.
+                //
+                // WHAT IT WAS FOR, so nobody re-adds it from `17f081264` read in isolation.
+                // It was the ORACLE retirement axis: were `sstabledump` to start decoding a
+                // multicell map's cell path, the gap should stop suppressing a column whose
+                // golden side had improved. The DDL SUBSUMES that for the pinned oracle and
+                // cannot be wrong — `cassandra-5.0.8 JsonTransformer.serializeCell` writes a
+                // cell path with `writeString(ct.nameComparator().getString(...))`, so on a
+                // MULTICELL container-keyed column the golden is undecoded BY CONSTRUCTION.
+                // It is the same fact `compare::map` pairs on (`unpairable_keys`, DDL only)
+                // and the same one `golden_map_key_value` refuses on, so dropping the guard
+                // is what makes the gap and the pairing AGREE about what the golden key is.
+                //
+                // DECLARED RESIDUAL: a FUTURE oracle that decoded the cell path would no
+                // longer retire this declaration on the golden axis, and no value-level test
+                // can restore that without the false FAIL above. Bounded, and stated rather
+                // than implied: the CLI half below is what guards a CQLite regression, and
+                // such a column would still genuinely diverge (a decoded document against
+                // blob hex), so what would go stale is the declaration's REASON, not its
+                // truth.
+                if !matches!(golden, Value::String(_)) {
                     return false;
                 }
                 // EGRESS: a CQL blob literal — the raw key bytes, undecoded. Anything else
