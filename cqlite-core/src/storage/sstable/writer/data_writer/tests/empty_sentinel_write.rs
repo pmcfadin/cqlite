@@ -322,8 +322,25 @@ fn the_real_complex_map_writer_reaches_the_schema_aware_gate() {
 /// `counter` is absent because CQL forbids a `counter` collection element
 /// (`cql3/CQL3Type.java:827-828`), so `map<counter,…>` is not declarable.
 const CANDIDATE_KEY_TYPES: &[&str] = &[
-    "int", "bigint", "float", "double", "timestamp", "uuid", "timeuuid", "boolean", "inet",
-    "decimal", "varint", "tinyint", "smallint", "date", "time", "text", "ascii", "varchar", "blob",
+    "int",
+    "bigint",
+    "float",
+    "double",
+    "timestamp",
+    "uuid",
+    "timeuuid",
+    "boolean",
+    "inet",
+    "decimal",
+    "varint",
+    "tinyint",
+    "smallint",
+    "date",
+    "time",
+    "text",
+    "ascii",
+    "varchar",
+    "blob",
     "duration",
 ];
 
@@ -422,7 +439,9 @@ fn the_type_aware_writer_refuses_the_sentinel_nested_too() {
     ] {
         let err = serializer
             .serialize_value(&value, declared)
-            .expect_err(&format!("{declared} carrying a nested sentinel must be refused"));
+            .expect_err(&format!(
+                "{declared} carrying a nested sentinel must be refused"
+            ));
         assert!(
             err.to_string().contains("#3805"),
             "the nested refusal for {declared} must name #3805; got: {err}"

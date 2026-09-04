@@ -8,6 +8,14 @@ use crate::schema::CqlType;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 
+/// CRATE-WIDE census of every value-serializing entry point and its disposition
+/// toward this sentinel (issue #3805). roborev jobs 448, 449 and 452 were three
+/// instances of ONE class, each found after the previous round patched one file
+/// and enumerated nothing; the census DERIVES its subject set from source at
+/// test time and asserts that exactly one position admits the sentinel.
+#[cfg(all(test, feature = "write-support"))]
+mod write_surface_census_tests;
+
 /// Declared CQL type of a [`Value::Empty`] sentinel — the type families for which
 /// Cassandra treats the EMPTY BUFFER as a legal, meaningless-valued encoding
 /// (issue #3805).
