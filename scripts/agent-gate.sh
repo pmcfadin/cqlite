@@ -18264,6 +18264,23 @@ run_tooling_tests() {
   # it is the suite that pins #3436 AC5/AC6 — so leaving it in the post-python3 chain meant
   # the AC5/AC6 coverage silently did not run on a python3-less host. That is verbatim the
   # rationale used to place the two suites above ahead of this gate.
+  # finalize teardown guard (#3436): pins that finalize-cleanup.sh RELEASES the lane lock
+  # lease-checked before removing the worktree, and REFUSES (exit 6) when the lock holds a
+  # different incarnation than --lane-lease named. Needs bash + coreutils only — no python3,
+  # no git, no network — so it sits above the python3 gate with its siblings. finalize-cleanup
+  # had NO suite at all before this; the orphaned-lock bug it covers was invisible.
+  echo ">>> [$name] bash scripts/tests/test_finalize_cleanup_lane_lock.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_finalize_cleanup_lane_lock.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (finalize teardown lane-lock release #3436); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   echo ">>> [$name] bash scripts/tests/test_claim_lock.sh"
   if ! bash "$REPO_ROOT/scripts/tests/test_claim_lock.sh" >>"$log" 2>&1; then
     status=FAIL
