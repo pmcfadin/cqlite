@@ -180,7 +180,6 @@ rustc_version = "0.4"
 rstest = "0.18"                 # Parameterized tests
 mockall = "0.11"                # Mocking framework
 test-case = "3.0"               # Test case generation
-wiremock = "0.5"                # HTTP mocking
 insta = "1.34"                  # Snapshot testing
 fake = "2.8"                    # Fake data generation
 quickcheck = "1.0"              # Property-based testing
