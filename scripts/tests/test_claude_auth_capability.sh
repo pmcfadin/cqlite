@@ -2946,6 +2946,221 @@ else
 fi
 
 # =====================================================================================
+# 46. THE REPAIR DISPATCH IS A CLOSED SET, AND `*)` IS A FAILURE (#3733).
+#     THE DEFECT: section 5c's `--fix-claude-auth` dispatch had exactly two arms — the four
+#     SERVER-* states that seed, and a `*)` catch-all printing "has nothing to seed in state
+#     $CLAUDE_TMUX_V" through `info`. So an EXPLICITLY REQUESTED repair was reported as
+#     SUCCESSFUL (no `warn`, therefore `--strict` exits 0) for every state in which SERVER
+#     PRESENCE IS UNKNOWN: `UNMEASURED` (an unresolvable tmux identity, no hard-bounded
+#     `timeout` capability, a wedged server, an unrecognised tmux failure) and `NO-SERVER`
+#     (the live read said "no server" AND the isolated cold-start probe could not run
+#     either). "There is nothing to seed" is a POSITIVE STATEMENT, and it was being derived
+#     from the ABSENCE of a measurement on a TWELVE-state signal where every unmeasured
+#     state inherited the permissive branch — this repo's standing shape, one dispatch over.
+#     WHY THIS IS A CLASS FIX AND NOT A FOURTH PATCH: it is the FOURTH instance of one family
+#     on this branch (a discarded pipeline status; a half-done seed; a repair that could not
+#     be ATTEMPTED, section 42; and now a repair reported as nothing-to-do on a
+#     non-measurement). Every previous round fixed the CITED SITE, which is exactly why there
+#     was a fourth. So the dispatch is now exhaustive by construction, each arm STATES what
+#     established its disposition, and `*)` warns instead of excusing.
+#     THE TOKEN SET IS DERIVED FROM COMMITTED SOURCE AT RUN TIME, never copied out of prose:
+#     a hand-kept list in a test is the same curation the gate's feature lanes exist to
+#     avoid, and CLAUDE.md's own token list is prose that decays. The derivation reads the
+#     two producer functions in the capability script and collects every literal they can
+#     assign to the verdict out-variable.
+#     SCOPE, STATED SO IT IS NOT READ AS MORE: the subject is the REPAIR dispatch alone. The
+#     two other `case "$CLAUDE_TMUX_V"` blocks in 5c — the `--yes` decline and the
+#     observation-line REMEDY table — are deliberately NOT exhaustive and must not be: the
+#     remedy table omits SERVER-CARRIES-BOTH and COLD-START-DELIVERS-BOTH because a healthy
+#     state has no remedy, and neither block makes a claim about a requested action, so an
+#     unnamed state there prints nothing rather than something false. An exhaustiveness
+#     assert over them would red on correct input.
+# =====================================================================================
+# derive_tmux_tokens <capability-file> -> the verdict tokens, one per line, sorted.
+# FAIL-CLOSED BY CONSTRUCTION: it prints nothing and returns non-zero if either producer
+# function cannot be located, so a refactor that renames or reflows them is a FAIL naming
+# the derivation rather than a silent fallback to an empty set — which would excuse every
+# token at once, the vacuous green this whole section exists to prevent.
+derive_tmux_tokens() {
+  local cf="$1" fn found=0
+  for fn in claude_tmux_env_verdict_into__untraced claude_tmux_cold_verdict_into; do
+    grep -qE "^${fn}\(\) \{" "$cf" || return 1
+    found=$((found + 1))
+  done
+  [ "$found" -eq 2 ] || return 1
+  # ONE PASS, BODY-SCOPED: `^<name>() {` opens a body and the next column-zero `}` closes
+  # it, which is this file's layout for every function in it. Tokens are read only from
+  # inside those two bodies, so `claude_auth_verdict_into`'s OWN states (PROBE-ANSWERED and
+  # friends — a different line, a different set) cannot leak in.
+  awk '
+    /^claude_tmux_env_verdict_into__untraced\(\) \{/ { inb = 1; next }
+    /^claude_tmux_cold_verdict_into\(\) \{/          { inb = 1; next }
+    inb && /^\}/                                     { inb = 0; next }
+    inb                                              { print }
+  ' "$cf" \
+    | grep -oE "claude_auth_set_var \"\\\$__ov\" '[A-Z][A-Z-]*'" \
+    | sed "s/.*'\\(.*\\)'/\\1/" \
+    | sort -u
+}
+# dispatch_arm_labels <bootstrap-file> -> the arm labels of the REPAIR dispatch, one per
+# line. Located STRUCTURALLY: the `case "$CLAUDE_TMUX_V" in` whose enclosing `if` tests
+# FIX_CLAUDE_AUTH, i.e. the first such `case` following that condition with only comments
+# and blanks between them. Returns non-zero if that shape is not found.
+dispatch_arm_labels() {
+  awk '
+    /^[[:space:]]*if \[ "\$FIX_CLAUDE_AUTH" = 1 \]; then$/ { armed = 1; next }
+    armed && /^[[:space:]]*(#|$)/                          { next }
+    armed && /^[[:space:]]*case "\$CLAUDE_TMUX_V" in$/     { inc = 1; armed = 0; next }
+    armed                                                  { armed = 0 }
+    inc && /^[[:space:]]*esac$/                            { inc = 0; exit }
+    # An arm label is a line of alternation words and a closing paren, nothing else.
+    # Comment lines are excluded first: one of them legitimately ends in `)`.
+    inc && /^[[:space:]]*#/                                { next }
+    inc && /^[[:space:]]*[A-Z*][A-Z*|-]*\)[[:space:]]*$/ {
+      gsub(/^[[:space:]]*|\)[[:space:]]*$/, "")
+      n = split($0, parts, "|")
+      for (i = 1; i <= n; i++) print parts[i]
+    }
+  ' "$1"
+}
+# unhandled_tokens <capability-file> <bootstrap-file>: derived tokens named by no arm.
+unhandled_tokens() {
+  local toks labels t out=''
+  toks=$(derive_tmux_tokens "$1") || return 1
+  [ -n "$toks" ] || return 1
+  labels=$(dispatch_arm_labels "$2") || return 1
+  [ -n "$labels" ] || return 1
+  while IFS= read -r t; do
+    [ -n "$t" ] || continue
+    grep -qxF "$t" <<<"$labels" || out="$out$t "
+  done <<<"$toks"
+  printf '%s' "$out"
+}
+tok46=$(derive_tmux_tokens "$CAPLIB") || tok46=''
+lab46=$(dispatch_arm_labels "$BOOTSTRAP") || lab46=''
+tok46n=$(printf '%s\n' "$tok46" | grep -c . || true)
+# (a) THE DERIVATION MUST HAVE WORKED. A SANITY CHECK ON THE DERIVATION, not a curated
+#     expectation of the whole set: the four SEED states are named in the dispatch itself,
+#     so a derivation that cannot find them is broken however many other names it produced.
+if [ "$tok46n" -gt 0 ] \
+   && grep -qxF SERVER-MISSING <<<"$tok46" && grep -qxF SERVER-STALE <<<"$tok46" \
+   && grep -qxF SERVER-INCOMPLETE <<<"$tok46" && grep -qxF SERVER-CONFIG-STALE <<<"$tok46"; then
+  ok "repair dispatch: the verdict token set DERIVES from the capability script ($tok46n tokens)"
+else
+  bad "repair dispatch: the token derivation FAILED (found $tok46n: $(tr '\n' ' ' <<<"$tok46")) — a derivation that cannot answer must never fall back to an empty set"
+fi
+# (b) THE DISPATCH ARMS MUST HAVE BEEN LOCATED, and `*)` must be among them: the fix's whole
+#     shape is "closed set PLUS a failing default", so an absent default is a regression even
+#     if every token happens to be named.
+if grep -qxF '*' <<<"$lab46"; then
+  ok "repair dispatch: the FIX_CLAUDE_AUTH dispatch was located structurally and carries a default arm"
+else
+  bad "repair dispatch: no default arm was found in the FIX_CLAUDE_AUTH dispatch (labels: $(tr '\n' ' ' <<<"$lab46")) — an untaught state would fall through silently"
+fi
+# (c) EXHAUSTIVENESS. Every state the producer can emit is named by an arm.
+miss46=$(unhandled_tokens "$CAPLIB" "$BOOTSTRAP") || miss46='DERIVATION-FAILED'
+if [ -z "$miss46" ]; then
+  ok "repair dispatch: EVERY derived verdict token is named by an arm of the repair dispatch"
+else
+  bad "repair dispatch: these verdict tokens reach the repair dispatch under no named arm: $miss46 — add an arm with its disposition stated, do not rely on the default"
+fi
+# (d) THE POSITIVE CONTROL. An exhaustiveness assert that matches nothing greens the file
+#     vacuously, so it is shown FINDING a real gap: a synthetic state is planted in a COPY of
+#     the capability script and the assert must both DERIVE it and NAME it as unhandled. A
+#     bare "the assert red" is not evidence either — an unrelated derivation failure produces
+#     the same non-empty result — so the planted name itself must appear.
+ctl46="$tmp/cap-ctl46.sh"
+awk '
+  { print }
+  /^claude_tmux_env_verdict_into__untraced\(\) \{/ {
+    print "  claude_auth_set_var \"$__ov\" '\''SERVER-SYNTHETIC-CONTROL'\''"
+  }
+' "$CAPLIB" >"$ctl46"
+ctl46toks=$(derive_tmux_tokens "$ctl46") || ctl46toks=''
+ctl46miss=$(unhandled_tokens "$ctl46" "$BOOTSTRAP") || ctl46miss=''
+if grep -qxF SERVER-SYNTHETIC-CONTROL <<<"$ctl46toks" \
+   && grep -q 'SERVER-SYNTHETIC-CONTROL' <<<"$ctl46miss"; then
+  ok "repair dispatch: the exhaustiveness assert FINDS a synthetic new producer state (positive control)"
+else
+  bad "repair dispatch: a planted new verdict state was NOT reported unhandled (derived=$(tr '\n' ' ' <<<"$ctl46toks") unhandled=$ctl46miss) — the assert would green over a real gap"
+fi
+# ...and the control must be the ONLY thing it reports, or it is not attributable: a copy
+# that differs from the real file in one planted line must otherwise be exhaustively handled.
+if [ "$(printf '%s\n' $ctl46miss | grep -c .)" -eq 1 ]; then
+  ok "repair dispatch: the control isolates exactly the planted state (and the real file is otherwise complete)"
+else
+  bad "repair dispatch: the control reported more than the planted state: $ctl46miss"
+fi
+
+# ---- BEHAVIOURAL: the three dispositions, through bootstrap's own reporter -------------
+# THE STATUS IS ASSERTED BY WARN-COUNT DELTA, section 42's idiom and for its reason: in
+# bootstrap `warn()` IS the mechanism `--strict` reads (it increments the counter `--strict`
+# exits 1 on), while a bare `--strict` exit code is not attributable here — this sandbox has
+# ambient warnings (an origin-less root, the push-probe opt-out) that red it either way. The
+# delta is taken over the SAME sandbox and the SAME fixture, with and without
+# `--fix-claude-auth`, so the only difference is the requested repair.
+bs46_warns() { bs_marked "$1" 'ok|warn' '.' 2>/dev/null | grep -c '\[warn\]' || true; }
+# fixture, expected verdict, expected warn delta, what established the disposition
+for spec46 in \
+  'broken:UNMEASURED:1:the live read produced no answer at all' \
+  'probefail:NO-SERVER:1:the cold-start probe could not run either' \
+  'no-server:COLD-START-DELIVERS-BOTH:0:no server is running, MEASURED by the cold probe' \
+  'complete:SERVER-CARRIES-BOTH:0:the running server already carries both values'
+do
+  m46=${spec46%%:*}; r46=${spec46#*:}; v46=${r46%%:*}; r46=${r46#*:}
+  dl46=${r46%%:*}; why46=${r46#*:}
+  d46=$(mkshim "$tmp/s46-$m46"); plant_bootstrap_quiet_stubs "$d46"
+  plant_claude_probe_env "$d46"; plant_tmux "$d46" "$m46"
+  bs46fix=$(run_bootstrap_in "$d46" "$ef2" --skip-smoke --skip-push-probe --fix-claude-auth)
+  bs46no=$(run_bootstrap_in "$d46" "$ef2" --skip-smoke --skip-push-probe)
+  printf '%s\n%s\n' "$bs46fix" "$bs46no" >>"$TRANSCRIPT"
+  # THE FIXTURE MUST HAVE REACHED THE STATE, asserted first: a case whose verdict is not the
+  # one it was written for tests a different arm and passes for the wrong reason.
+  if grep -q "claude-tmux-env: $v46\$\|claude-tmux-env: $v46 " <<<"$bs46fix"; then
+    ok "repair dispatch [$m46]: the fixture really produces $v46"
+  else
+    bad "repair dispatch [$m46]: the fixture did not produce $v46, so this case tests nothing: $(printf '%s' "$bs46fix" | grep 'claude-tmux-env:')"
+  fi
+  w46f=$(bs46_warns "$bs46fix"); w46n=$(bs46_warns "$bs46no")
+  if [ "$w46f" -eq "$((w46n + dl46))" ]; then
+    if [ "$dl46" -eq 1 ]; then
+      ok "repair dispatch [$m46]: an unmeasurable server state adds EXACTLY ONE [warn] ($w46f vs $w46n) — --strict reds on a repair that neither happened nor was shown unnecessary"
+    else
+      ok "repair dispatch [$m46]: nothing-to-seed is affirmatively established ($why46), so it adds NO [warn] — --strict cannot red on it"
+    fi
+  else
+    bad "repair dispatch [$m46]: warn delta is $((w46f - w46n)), expected $dl46 (requested=$w46f not-requested=$w46n) — the status does not follow the disposition"
+  fi
+  # THE LINE MUST SAY WHICH OF THE TWO THINGS HAPPENED. A `warn` that reds without saying the
+  # repair did not happen sends an operator looking for a health problem, and an `info` that
+  # says "nothing to seed" without saying what established it is the defect itself.
+  if [ "$dl46" -eq 1 ]; then
+    if bs_marked "$bs46fix" warn 'claude-auth-repair:' >/dev/null \
+       && grep -qi 'CANNOT say it was unnecessary' <<<"$bs46fix"; then
+      ok "repair dispatch [$m46]: the [warn] states BOTH facts — not performed, and not shown unnecessary"
+    else
+      bad "repair dispatch [$m46]: the unmeasurable state produced no attributable claude-auth-repair [warn]: $(printf '%s' "$bs46fix" | grep 'claude-auth-repair:' | head -3)"
+    fi
+  else
+    if grep -q 'claude-auth-repair:.*nothing' <<<"$bs46fix" \
+       && ! bs_marked "$bs46fix" warn 'claude-auth-repair:' >/dev/null; then
+      ok "repair dispatch [$m46]: nothing-to-seed is REPORTED and carries no [warn]"
+    else
+      bad "repair dispatch [$m46]: a state with nothing to seed reported nothing, or warned: $(printf '%s' "$bs46fix" | grep 'claude-auth-repair:' | head -3)"
+    fi
+  fi
+  # AND A REQUESTED REPAIR MUST NOT HAVE TOUCHED THE SERVER in any of these four states:
+  # `tmux setenv -g` needs a running server, and firing it blind on an UNKNOWN state would
+  # print a failure that says nothing about the box while overwriting whatever a server that
+  # DOES exist happens to hold.
+  if [ ! -f "$d46/tmux-calls.log" ] || ! grep -q '^setenv ' "$d46/tmux-calls.log"; then
+    ok "repair dispatch [$m46]: no seed was attempted (a blind 'setenv -g' would overwrite an unknown state)"
+  else
+    bad "repair dispatch [$m46]: the run seeded a server in state $v46: $(cat "$d46/tmux-calls.log")"
+  fi
+done
+
+# =====================================================================================
 # 37. ROOT MUST CREATE EVERYTHING IT OWNS **BEFORE** IT TRANSFERS THE DIRECTORY (#3733,
 #     was LIMITATION 4 of 5, now FIXED).
 #     WHY THIS ONE IS NOT COVERED BY THE "IT IS ONLY A REPORT" RULING. The other four
@@ -3264,18 +3479,23 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # that could not be ATTEMPTED is an action failure) and section 43 (opt-out plus
 # --fix-claude-auth is already decided both ways, and says which intent lost) and section 44
 # (the substitution capability is REMOVED, not detected) and section 45 (output-variable
-# assignment never goes through `eval`, with the surviving eval a closed set of one).
-# 183 cases run, and there are
+# assignment never goes through `eval`, with the surviving eval a closed set of one) and
+# section 46 (the repair dispatch is a CLOSED SET derived from the producer, `*)` is a
+# FAILURE, and the three dispositions are pinned behaviourally by warn-count delta).
+# 204 cases run, and there are
 # TWO legitimately skippable cases, not one: the real-tmux isolation case (3 assertions) and
 # section 44's OS-mechanism case, which cannot measure "a non-owner is refused" when the
 # suite itself runs as root. The floor therefore excludes both — it is the count that runs on
 # EVERY host, and a floor that included a case skippable on a legitimate host is a floor that
 # reds on correct input.
 # THE FIGURE IS MEASURED, NOT COUNTED BY EYE, AND IT IS RE-MEASURED WHENEVER IT MOVES:
-# forcing the tmux block's `command -v tmux` test to `true` in a throwaway `git worktree`
-# reports 179/0/2 with BOTH skippable branches forced. The value in this file is the authority — a figure quoted in a commit
+# forcing the tmux block's `command -v tmux` test to `true` AND section 44(a)'s
+# root-owned-directory guard to `false` in a throwaway `git worktree` reports 200/0/2 with
+# BOTH skippable branches forced (179 -> 200 by section 46's 21 cases: the derivation, the
+# structural location, the exhaustiveness assert, its positive control and the control's
+# isolation, plus four fixtures x four assertions). The value in this file is the authority — a figure quoted in a commit
 # message is a snapshot of the run that produced it and does not follow later edits.
-CASE_FLOOR=179
+CASE_FLOOR=200
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1

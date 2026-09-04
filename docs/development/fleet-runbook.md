@@ -1144,8 +1144,8 @@ They are two lines because they observe different things and the operator action
 | `claude-tmux-env: COLD-START-MISSING` | No server is running, and a throwaway one started from the persisted environment handed its pane **no token**. The next real server will not either. | Provision the token (below). |
 | `claude-tmux-env: COLD-START-INCOMPLETE` | A new server would deliver the token but **no `CLAUDE_CONFIG_DIR`** — `/etc/profile.d` never reaches a spawned pane (fact 5). | Add a `CLAUDE_CONFIG_DIR=` line to `/etc/environment`. |
 | `claude-tmux-env: COLD-START-NODIR` | A new server would deliver both, but that config directory does not exist. | Create it, or correct the `/etc/environment` line. |
-| `claude-tmux-env: NO-SERVER` | No server is running **and** the isolated cold-start probe could not run (no `timeout`/`gtimeout` able to enforce a **hard** bound — one that escalates to SIGKILL via `--kill-after=` or `-k` — no private working directory, no `sha256sum`/`shasum` to compare the delivered credential BY VALUE, the directory could not be handed to the invoking agent, tmux would not start), **or** the pane received a token that is not the persisted one. **UNMEASURED-class.** | Resolve the named cause and re-run. |
-| `claude-tmux-env: UNMEASURED` | Nothing could be read: no `tmux`, no enforceable hard bound for the read, the server did not answer within its bound, **or the tmux server to inspect could not be identified** (see the sudo note below). **Never a fall back to whichever UID the process happens to be.** | Resolve the named cause and re-run. |
+| `claude-tmux-env: NO-SERVER` | No server is running **and** the isolated cold-start probe could not run (no `timeout`/`gtimeout` able to enforce a **hard** bound — one that escalates to SIGKILL via `--kill-after=` or `-k` — no private working directory, no `sha256sum`/`shasum` to compare the delivered credential BY VALUE, the directory could not be handed to the invoking agent, tmux would not start), **or** the pane received a token that is not the persisted one. **UNMEASURED-class.** | Resolve the named cause and re-run. `--fix-claude-auth` does **not** seed here and reports a `[warn]` (so `--strict` reds): nothing was repaired, and this run cannot say a repair was unnecessary. |
+| `claude-tmux-env: UNMEASURED` | Nothing could be read: no `tmux`, no enforceable hard bound for the read, the server did not answer within its bound, **or the tmux server to inspect could not be identified** (see the sudo note below). **Never a fall back to whichever UID the process happens to be.** | Resolve the named cause and re-run. `--fix-claude-auth` does **not** seed here and reports a `[warn]` (so `--strict` reds) — see the note under NO-SERVER. |
 
 **WHOSE tmux SERVER? THE INVOKING AGENT'S.** A tmux client with no `-S`/`-L` talks to the
 **current UID's** default server, and bootstrap both documents and prints
@@ -1169,7 +1169,14 @@ root's access and not the agent's.
 **A box with no tmux server is measured, not excused.** That is the normal state of a freshly
 provisioned machine at the moment `.agent-ami/profile.yaml` runs bootstrap with `--strict`, so a
 blanket non-pass there would red this check on its primary use case with no way out
-(`--fix-claude-auth` deliberately excludes the serverless states — there is no server to seed).
+(`--fix-claude-auth` deliberately excludes the four `COLD-START-*` states — no server is
+running, **measured**, so there is nothing to seed; it reports that and carries no `[warn]`).
+**That exclusion is not the same as the two UNMEASURED-class states** (`UNMEASURED`,
+`NO-SERVER`), where server presence is UNKNOWN: a requested repair there is reported as a
+`[warn]` — it neither happened nor was shown unnecessary — because "there is nothing to seed"
+would be a positive statement derived from the absence of a measurement (#3733). The dispatch is
+a **closed set** over every verdict the capability script can emit, and an unrecognised one is a
+`[warn]` naming it as an unhandled bootstrap state, never a silent fallback.
 Instead the
 answerable question is asked: *would a newly created server deliver the credential to a pane?* A
 throwaway tmux server is started **on a private socket inside a private working directory**, from

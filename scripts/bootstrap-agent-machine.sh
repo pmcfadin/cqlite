@@ -3349,10 +3349,75 @@ if [ "$CLAUDE_AUTH_SECTION_OK" = 1 ]; then
         if [ "$claude_fix_rc" -ne 0 ]; then
           warn "claude-auth-repair: the repair you requested with --fix-claude-auth did NOT complete (rc=$claude_fix_rc; the cause is on the claude-auth: fix line above). The tmux server was left as found, or seeded only in part — re-read the claude-tmux-env: line below for what it holds now"
         fi ;;
+      # ---- NOTHING TO SEED, AND EACH ARM SAYS WHAT ESTABLISHED THAT ------------------
+      # A CLOSED SET, NOT A CATCH-ALL, and that is the whole fix (#3733). This case used to
+      # be these four SEED states plus a `*)` that printed "has nothing to seed in state
+      # $CLAUDE_TMUX_V" — so an explicitly requested repair was reported as SUCCESSFUL
+      # (no `warn`, so `--strict` exits 0) for states where SERVER PRESENCE IS UNKNOWN.
+      # `UNMEASURED` and `NO-SERVER` are exactly that: a positive statement ("there is
+      # nothing to seed") derived from the ABSENCE of a measurement, on a signal with
+      # twelve states, where every unmeasured one inherited the permissive branch.
+      #
+      # FOURTH INSTANCE OF ONE FAMILY ON THIS BRANCH, which is why the DISPATCH changed
+      # shape instead of the cited state being added to a list: a discarded pipeline
+      # status, a half-done seed, a repair that could not be attempted at all, and now a
+      # repair reported as nothing-to-do on a NON-MEASUREMENT. Every previous round fixed
+      # the site it was handed. `*)` is what regenerates the family, so it is now a
+      # FAILURE rather than a fallback.
+      #
+      # THE TOKEN SET IS THE PRODUCER'S, and it is asserted rather than trusted:
+      # `scripts/tests/test_claude_auth_capability.sh` section 46 DERIVES every token
+      # `claude_tmux_env_verdict_into` / `claude_tmux_cold_verdict_into` can emit from
+      # committed source at run time and reds if one is named by no arm here. Do not add a
+      # state to the capability script without an arm below; the guard will say so.
+      SERVER-CARRIES-BOTH)
+        # ESTABLISHED: a server IS running and its global table already carries BOTH
+        # variables, matching the persisted values. There is nothing deficient to repair,
+        # so this is a completed request and not an unperformed one.
+        info "claude-auth-repair: --fix-claude-auth has nothing to seed — the running tmux server already carries both variables and they MATCH the persisted values ($CLAUDE_TMUX_V). Nothing was changed" ;;
+      SERVER-CONFIG-NODIR)
+        # ESTABLISHED: a server IS running, its CLAUDE_CONFIG_DIR MATCHes the persisted
+        # value, and that directory does not exist — so seeding provably cannot help; it
+        # would write the same missing path back. The remedy (provision the directory) is
+        # printed by this state's own arm on the observation line below.
+        info "claude-auth-repair: --fix-claude-auth has nothing useful to seed in state $CLAUDE_TMUX_V — re-seeding writes the same MISSING directory back, so it cannot help; the remedy is named below" ;;
+      COLD-START-DELIVERS-BOTH|COLD-START-MISSING|COLD-START-INCOMPLETE|COLD-START-NODIR)
+        # ESTABLISHED BY MEASUREMENT: reaching a COLD-START-* state means the live read
+        # affirmatively identified "no server running"/"no socket" and the isolated
+        # cold-start probe then RAN. So there is no server to seed — a measured fact here,
+        # not an unknown — and `tmux setenv -g` would have nothing to talk to. Whatever the
+        # cold probe found about the PERSISTED source is a disk-provisioning matter that
+        # seeding cannot address; its remedy is on the observation line below.
+        info "claude-auth-repair: --fix-claude-auth has nothing to seed in state $CLAUDE_TMUX_V — no tmux server is running (MEASURED, not assumed: the cold-start probe ran), and 'tmux setenv -g' needs one. The remedy for this state is named below" ;;
+      # ---- CANNOT TELL: THE REQUEST WAS NEITHER PERFORMED NOR SHOWN UNNECESSARY --------
+      UNMEASURED|NO-SERVER)
+        # `warn`, so `--strict` reds — and it is the ONE warn in this dispatch that is not
+        # about a failed action, because it is not a claim about the credential either. Two
+        # facts, and the line states both: the repair did NOT happen, and this run cannot
+        # say it was unnecessary. In `UNMEASURED` the live read never produced an answer (an
+        # unresolvable tmux identity, no hard-bounded `timeout` capability, a wedged server,
+        # an unrecognised tmux failure); in `NO-SERVER` the live read said "no server" and
+        # then the cold-start probe could not run either, so even "no server to seed" is
+        # unestablished. Either way "nothing to seed" would be a positive statement derived
+        # from a non-measurement.
+        #
+        # THE SEED IS DELIBERATELY NOT ATTEMPTED HERE, and that reasoning is unchanged from
+        # the version this replaces: `tmux setenv -g` needs a running server, and firing it
+        # blind would print a failure that says nothing about the box while overwriting
+        # whatever a server that DOES exist happens to hold. Reporting the gap is strictly
+        # better than acting on an unknown.
+        warn "claude-auth-repair: the repair you requested with --fix-claude-auth was NOT performed, and this run CANNOT say it was unnecessary — the tmux server state is $CLAUDE_TMUX_V, i.e. whether a server is running (and what it holds) was not measured. Nothing was changed on this box"
+        info "claude-auth-repair: resolve the cause named on the claude-tmux-env: line below and re-run with --fix-claude-auth; read the state by hand with:  bash scripts/claude-auth-capability.sh --tmux-env" ;;
       *)
+        # A FAILURE, NEVER A FALLBACK — this arm IS the finding. An unrecognised token means
+        # the capability script grew a state this dispatch has not been taught, and the only
+        # safe disposition for an untaught state in a REPAIR dispatch is loud: we can say
+        # neither that a seed happened nor that it was unnecessary. Section 46's derivation
+        # is what normally catches this before a box does; if it fires here, that guard was
+        # bypassed or the derivation was defeated.
         # NO BACKTICKS INSIDE THIS DOUBLE-QUOTED STRING: they are LIVE command
         # substitution here, and the first draft of this line really did run `tmux`.
-        info "claude-auth-repair: --fix-claude-auth has nothing to seed in state $CLAUDE_TMUX_V — 'tmux setenv -g' needs a RUNNING server, and the remedy for this state is named below" ;;
+        warn "claude-auth-repair: the repair you requested with --fix-claude-auth was NOT performed — the tmux server state '$CLAUDE_TMUX_V' is NOT A STATE THIS DISPATCH RECOGNISES, so it can be classified neither as repairable nor as needing no repair. This is a bug in bootstrap (an unhandled scripts/claude-auth-capability.sh verdict), not a finding about your box. Nothing was changed" ;;
     esac
   elif [ "$AUTO_YES" = 1 ]; then
     case "$CLAUDE_TMUX_V" in
