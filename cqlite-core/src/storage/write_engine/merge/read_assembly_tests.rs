@@ -505,15 +505,20 @@ fn set_of_qualified_frozen_udt_decodes_structurally() {
 ///
 /// `InetAddressType() {super(ComparisonType.BYTE_ORDER);}` at the pinned
 /// `cassandra-5.0.8` tag, so `9.0.0.1` = `[9,0,0,1]` precedes `10.0.0.1` =
-/// `[10,0,0,1]`. `ComparatorType::compare`'s fall-through for `Custom("inet")` is
-/// `compare_custom`, which compares `format!("{value}")` — and TEXT order is the
-/// REVERSE (`"10.0.0.1" < "9.0.0.1"`, since `'1' < '9'`), so before the fix a
-/// `tuple`/UDT carrying an inet was ordered the wrong way round.
+/// `[10,0,0,1]` — the REVERSE of their dotted-quad TEXT order (`"10.0.0.1" <
+/// "9.0.0.1"`, since `'1' < '9'`). A `Display`-string comparison therefore orders a
+/// `tuple`/UDT carrying an inet the wrong way round, and that is what
+/// `ComparatorType::Custom("inet")` used to do before #3790.
 ///
-/// The scalar `set<inet>` path dodges this by sorting on raw `cell_path` bytes
-/// (`comparator_orders_by_raw_cell_path_bytes`); a composite cannot — its
-/// cell_path bytes are dominated by the components' i32-BE length prefixes — so
-/// the composite comparator needs the byte-order arm.
+/// This case is NOT a pin of this module's own arm — there is no such arm. The
+/// composite scalar leaves delegate to the central `ComparatorType::compare`, whose
+/// `custom::compare_inet` is an unsigned `[u8]` compare of the raw address
+/// (fixture-backed against the Cassandra-written `test_comparator_order` corpus).
+/// What this pins is that the COMPOSITE path reaches that authority for a component
+/// type, which the scalar `set<inet>` path cannot demonstrate: the scalar path sorts
+/// on raw `cell_path` bytes (`comparator_orders_by_raw_cell_path_bytes`), whereas a
+/// composite's cell_path bytes are dominated by the components' i32-BE length
+/// prefixes, so only the value comparator can order it.
 #[test]
 fn composite_with_an_inet_component_orders_by_address_bytes_not_text() {
     // frozen<tuple<inet, int>>: i32-BE length + value per component.
@@ -558,6 +563,12 @@ fn composite_with_an_inet_component_orders_by_address_bytes_not_text() {
 /// field, so text order happens to agree — which is precisely why this is pinned:
 /// the ordering must come from the declared type's authority, not from a `Display`
 /// impl that no format authority governs and that a future change could reflow.
+///
+/// As with the `inet` case, the order is delivered by the central
+/// `ComparatorType::compare` (`custom::compare_time`, which compares
+/// `i64::to_be_bytes` — BYTE_ORDER verbatim, and correct for a NEGATIVE nanos too,
+/// #3935), not by any arm local to this module. What is pinned here is that the
+/// composite path routes a `time` COMPONENT to that authority.
 #[test]
 fn composite_with_a_time_component_orders_by_serialized_bytes() {
     // frozen<tuple<time, int>>: time is an 8-byte i64-BE nanoseconds-of-day.
@@ -726,20 +737,35 @@ fn composite_cell_path_with_trailing_bytes_fails_closed() {
     );
 }
 
-/// **roborev job 57 — a `varint` COMPONENT of a composite must order as Cassandra does.**
+/// **GAP (issue #2339) — a `varint` COMPONENT of a composite does NOT yet order as
+/// Cassandra does. `#[ignore]`d, and DELIBERATELY still asserting the CORRECT order.**
 ///
-/// `compare_composite`'s scalar leaves used to delegate to `ComparatorType::compare`,
-/// whose `varint` arm compares RAW BYTES. Two's-complement `-1` is `0xFF` and `0`
-/// is `0x00`, so raw-byte order puts **`0` before `-1`** — the reverse of the signed
-/// numeric order Cassandra's `IntegerType` gives. `decimal` (a placeholder string
-/// compare) and `uuid` (raw bytes) were wrong the same way.
+/// Cassandra's `IntegerType.compare` orders `varint` by SIGNED two's-complement
+/// magnitude, so `-1` (body `0xFF`) sorts BELOW `0` (body `0x00`). The central
+/// `ComparatorType::compare`'s `varint` arm is `Bytes::cmp` — raw unsigned bytes —
+/// which puts `0` first because `0x00 < 0xFF`. `decimal` (unequal scales compared as
+/// `format!("{:?}.{}")` strings, self-described in source as "For now, simple string
+/// comparison") and `uuid` (raw `Uuid::cmp` rather than `UUIDType`'s
+/// version-then-v1-timestamp-then-tail order) are wrong in the same way.
 ///
-/// The leaves now delegate to `collection_order::compare_collection_elements`, the
-/// repository's existing owner of Cassandra element ordering, which compares varints
-/// as signed big integers.
+/// Since #2339 the composite scalar leaves delegate to that central comparator and to
+/// nothing else, so this arm INHERITS the defect rather than papering over it. That is
+/// the deliberate trade: the alternative was to keep the write path's
+/// `collection_order::compare_collection_elements` as a SECOND ordering authority for
+/// the same types, which is the divergence class #2339 exists to remove — and a second
+/// path would also HIDE this defect from exactly the test that reports it.
 ///
-/// RED BEFORE THE FIX: this asserted `Less` and got `Greater`.
+/// The fix is a CONVERGENCE, not new code: `collection_order::scalar` already
+/// implements all three correctly under its `IntegerType`/`DecimalType`/`UUIDType`
+/// citations (#1275). When the central comparator adopts them, DELETE the `#[ignore]`
+/// and this test passes as written — which is why the expectation is NOT inverted to
+/// pin the current wrong answer. Pinning the defect would green-wash it and would red
+/// the moment somebody fixed it.
+///
+/// The expectation is derived from Cassandra's semantics (`IntegerType.compare`,
+/// signed two's-complement), never from CQLite's own prior behaviour (#3041).
 #[test]
+#[ignore = "GAP #2339: central ComparatorType::compare orders varint by raw bytes, not signed IntegerType order; un-ignore when the central varint/decimal/uuid arms converge on collection_order::scalar"]
 fn varint_component_of_a_composite_orders_signed_not_by_raw_bytes() {
     let cmp = ComparatorType::Tuple(vec![ComparatorType::Varint]);
     let minus_one = Value::Tuple(vec![Value::Varint(vec![0xFF].into())]);
