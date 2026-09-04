@@ -414,28 +414,6 @@ impl V5CompressedLegacyParser {
                     return Err(e);
                 }
             };
-        // #3747's OPAQUE POLICY, DOOR 2 — THE DECODE SUCCEEDED, WITH `Null`.
-        //
-        // This is the door #3847 opened, and getting here cost a red `core-tests`.
-        // The policy used to live ONLY on the `Err` arm above, which was sound just
-        // while the shared decoder REFUSED an empty fixed-width buffer. #3847 made
-        // `parse_value_from_raw_bytes` admit `{n, 0}` and answer `Value::Null`, so
-        // the decode now SUCCEEDS and the old arm stopped being reached — handing
-        // back a NULL KEY, which Cassandra cannot express and which loses the key
-        // #3747 exists to preserve.
-        //
-        // KEYED ON THE DECODE'S ANSWER, NOT ON THE WIDTH TABLE. The first fix here
-        // tested `data.is_empty() && allowed.contains(&0)` BEFORE the decode, which
-        // is too broad and broke `inet`: `inet` admits `[0, 4, 16]` and an empty
-        // `inet` DECODES to a real `Value::Inet(empty)` — Cassandra's
-        // `InetAddressSerializer.validate` returns early on empty — so it must be
-        // returned, not made opaque. `Null` is the precise signal that the decoder
-        // had no value to give: `{n, 0}` -> `null` is the VALUE path's rule
-        // (`deserialize()`), and a key cannot take that answer.
-        if data.is_empty() && matches!(decoded, Value::Null) {
-            *opaque_out = true;
-            return Ok(Value::blob(Vec::new()));
-        }
         // A PEELED VIEW FOR THE CHECKS ONLY — the value itself is returned exactly
         // as the shared decoder produced it (see the return, and the module header's
         // parity section). A `frozen<absent_udt>` key can come back as
@@ -445,6 +423,35 @@ impl V5CompressedLegacyParser {
         // becoming a presentation change, which is the defect roborev round 8 found
         // one nesting level down.
         let probe = Self::peeled_for_inspection(&decoded);
+        // #3747's OPAQUE POLICY, DOOR 2 — THE DECODE SUCCEEDED, WITH `Null`.
+        //
+        // This is the door #3847 opened, and reaching it cost a red `core-tests`.
+        // The policy used to live ONLY on the `Err` arm above, which was sound just
+        // while the shared decoder REFUSED an empty fixed-width buffer. #3847 made
+        // `parse_value_from_raw_bytes` admit `{n, 0}` and answer `Value::Null`, so
+        // the decode now SUCCEEDS and the old arm stopped being reached — handing
+        // back a NULL KEY, which Cassandra cannot express and which loses the key
+        // #3747 exists to preserve.
+        //
+        // KEYED ON THE DECODE'S ANSWER, NOT ON THE WIDTH TABLE. An earlier attempt
+        // tested `data.is_empty() && allowed.contains(&0)` BEFORE the decode, which
+        // is too broad and broke `inet`: `inet` admits `[0, 4, 16]` and an empty
+        // `inet` DECODES to a real `Value::Inet(empty)` — Cassandra's
+        // `InetAddressSerializer.validate` returns early on empty — so it must be
+        // returned, not made opaque. `Null` is the precise signal that the decoder
+        // had no value to give.
+        //
+        // AND READ THROUGH THE WRAPPER, which is why this sits BELOW `probe` rather
+        // than beside the decode (roborev job 152): `frozen<int>` decodes to
+        // `Frozen(Box::new(Null))`, so a `matches!(decoded, Value::Null)` test falls
+        // through a frozen-spelled key and returns the invalid null map key anyway.
+        // `peeled_for_inspection` LOOPS, so nesting is covered. The `Blob`
+        // diagnostic below learned this same lesson in #3612 round 8 — a sibling
+        // check added one level up has to use the peeled view too.
+        if data.is_empty() && matches!(probe, Value::Null) {
+            *opaque_out = true;
+            return Ok(Value::blob(Vec::new()));
+        }
         // THE EXACTNESS RULE. For a cell path the whole slice IS the key, so a
         // decoder that stopped short read a PREFIX and two distinct byte strings
         // would collapse to one logical key. Where the decoder can say how far it

@@ -1069,6 +1069,43 @@ fn an_empty_key_of_an_n_or_zero_type_is_preserved_opaquely() {
     }
 }
 
+/// A FROZEN-SPELLED empty fixed-width key gets the SAME opaque answer — the check
+/// must look THROUGH the wrapper.
+///
+/// roborev job 152 (Medium) on this branch. `frozen<int>` decodes to
+/// `Value::Frozen(Box::new(Value::Null))`, so a `matches!(decoded, Value::Null)`
+/// test — which is what the first version of door 2 used — sees a `Frozen` and
+/// falls through, returning an invalid logical NULL map key. The peeled `probe`
+/// already exists three lines below for exactly this reason (the `Blob` diagnostic
+/// learned it in #3612 round 8), and door 2 has to use it too.
+///
+/// `peeled_for_inspection` loops, so NESTING is covered rather than just one layer.
+#[test]
+fn an_empty_frozen_spelled_fixed_width_key_is_also_preserved_opaquely() {
+    let p = parser();
+    #[rustfmt::skip]
+    let types = [
+        "frozen<int>", "frozen<bigint>", "frozen<uuid>", "frozen<boolean>",
+        "frozen<frozen<int>>",
+    ];
+    for type_str in types {
+        let mut opaque = false;
+        let decoded = p
+            .parse_cell_path_key_reporting(&[], type_str, "k", &mut opaque)
+            .unwrap_or_else(|e| panic!("{type_str}: Cassandra accepts empty; keep it: {e}"));
+        assert_eq!(
+            decoded,
+            Value::blob(Vec::new()),
+            "{type_str}: a frozen-spelled empty key must be preserved opaquely, \
+             never returned as a null map key"
+        );
+        assert!(
+            opaque,
+            "{type_str}: opaque_out must be raised through the frozen wrapper"
+        );
+    }
+}
+
 /// The STRICT family — Short, Byte, SimpleDate, Time: a 0-byte key IS refused by
 /// the WIDTH TABLE, because these four serializers alone have no `isEmpty`
 /// allowance. This is the half that makes the three-way split load-bearing rather
