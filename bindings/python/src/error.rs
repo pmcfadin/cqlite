@@ -385,6 +385,10 @@ mod tests {
             // === Variants with no closer Python class: the base exception ===
             Error::Serialization { .. } => PyExceptionClass::Cqlite,
             Error::Corruption(_) => PyExceptionClass::Cqlite,
+            // Issue #3721: a column whose value could not be decoded — the same
+            // class as `Corruption` for a caller (undecodable data reaching them),
+            // so it takes the same Python class and the same `PARSE` code on Node.
+            Error::ColumnDecode { .. } => PyExceptionClass::Cqlite,
             Error::InvalidFormat(_) => PyExceptionClass::Cqlite,
             Error::UnsupportedFormat(_) => PyExceptionClass::Cqlite,
             Error::UnsupportedVersion { .. } => PyExceptionClass::Cqlite,

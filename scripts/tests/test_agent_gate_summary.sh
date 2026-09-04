@@ -1554,7 +1554,8 @@ mkdir -p "$ds_corpus/sstables/test_basic/simple_table-0001"
 #      (it exits at the preflight). The recovery file must show the FAIL-CLOSED marker
 #      + RESULT: FAIL and never RESULT: PASS. Cap disabled so the run never queues.
 full_fail="$tmp/2078-full-fail.txt"
-CQLITE_GATE_DISABLE_CAP=1 CQLITE_DATASETS_ROOT="$ds_nocorpus" \
+# #3755: bar pinned to 0 — this case's subject is the #2078 fixture preflight, not disk.
+CQLITE_GATE_DISABLE_CAP=1 CQLITE_GATE_MIN_FREE_GB=0 CQLITE_DATASETS_ROOT="$ds_nocorpus" \
   AGENT_GATE_SUMMARY_FILE="$full_fail" bash "$GATE" >/dev/null 2>&1
 full_fail_rc=$?
 if [ "$full_fail_rc" -ne 0 ] \

@@ -1,5 +1,11 @@
 use super::*;
 
+// Issue #3721: the per-column decode-failure policy lives in `column_decode_error`.
+use super::column_decode_error::{
+    column_decode_failure, dispatch_type, pure_tombstone_extent_check, row_body_exhausted,
+    row_body_reconcile, row_bound_check, walk_end_column,
+};
+
 impl V5CompressedLegacyParser {
     /// Parse row data (header + cells) and return cells with new offset
     ///
@@ -232,12 +238,21 @@ impl V5CompressedLegacyParser {
         //   next_position = row_size_value + position_after_reading_row_size_vint
         let after_row_offset =
             (row_metadata_offset + row_header.row_size_vint_len) + row_size as usize;
-        // Cell data (if any) begins right after the row header. When that start
-        // reaches the row boundary there are no cells — a pure row tombstone.
+        // Cell data (if any) begins right after the row header. `<` = cells coexist
+        // with the deletion (#932); `==` = a genuine pure row tombstone; `>` = the
+        // declared extent ends INSIDE the metadata, which the fast path must REFUSE
+        // rather than return as `Ok` — see `pure_tombstone_extent_check` (#3721).
         let cell_data_start = row_metadata_offset + row_header.header_size;
         let has_cell_bytes = cell_data_start < after_row_offset;
 
         if row_header.local_deletion_time.is_some() && !has_cell_bytes {
+            let extent = (
+                row_metadata_offset,
+                cell_data_start,
+                after_row_offset,
+                data.len(),
+            );
+            pure_tombstone_extent_check(extent, row_size)?;
             tracing::debug!(
                 "V5CompressedLegacy: Pure row tombstone (deletion_time={:?}), skipping cell parsing",
                 row_header.local_deletion_time
@@ -370,6 +385,12 @@ impl V5CompressedLegacyParser {
         // #3094: PRESENCE of a tombstone cell — never a timestamp (`has_shadow_evidence`).
         let mut agg_has_deleted_cell = false;
 
+        // Issue #3809: on-disk index of the LAST column whose decoder ran — the column
+        // the reconciliation below names as where the walk ENDED, which is NOT an
+        // attribution of a deficit (see `row_body_under_consumed`). An index, not a
+        // name/type pair, so the hot path allocates nothing.
+        let mut last_decoded_idx: Option<usize> = None;
+
         for (col_idx, ctp) in columns_in_order.iter().enumerate() {
             // Skip columns marked MISSING by the row's bitmap (inline, no per-row
             // allocation). `col_idx` is the ON-DISK column index — exactly what the
@@ -416,16 +437,38 @@ impl V5CompressedLegacyParser {
             // type, so this resolves identically either way.
             let complex_type: &str = header_type.unwrap_or(&column.data_type);
 
-            if offset >= data.len() {
-                tracing::debug!(
-                    "V5CompressedLegacy: Reached end of data at column {} ('{}'), parsed {}/{} on-disk cells",
-                    col_idx,
-                    column.name,
-                    cells.len(),
-                    columns_in_order.len()
-                );
-                break;
+            // Issue #3721: bytes exhausted with a column the row declares PRESENT still
+            // outstanding is TRUNCATION, never a row boundary — see `row_body_exhausted`,
+            // which also states why the bound is THIS ROW's end (#3809) and not
+            // `data.len()`, the length of the whole parse unit.
+            if offset >= after_row_offset {
+                return Err(row_body_exhausted(
+                    column,
+                    header_type,
+                    (offset, after_row_offset, data.len()),
+                    (col_idx, columns_in_order.len(), cells.len()),
+                ));
             }
+
+            // Issue #3721 (roborev job 75): hand the decoders THIS ROW's bytes, not the
+            // whole parse unit. `row_bound_check` below still reconciles the returned
+            // offset, but it can only judge a value ALREADY decoded — so a `row_size`
+            // corrupted downward let a decoder parse, and ALLOCATE from, later rows'
+            // bytes (up to the collection/value limits) before the result was thrown
+            // away. Bounding the input means those bytes are not reachable in the first
+            // place, and the reconciliation stays as defence in depth.
+            //
+            // `min` rather than a refusal: `after_row_offset` beyond the buffer is
+            // AMBIGUOUS — corruption when buffered, a chunk boundary mid-row when
+            // streaming — and only the caller holds the chunking state needed to tell
+            // them apart (the same reasoning as the marker path's `Err` arm, and
+            // issue #28: nothing here inspects bytes to guess which it is). Clamping
+            // preserves today's behaviour exactly in that case: the bound becomes
+            // `data.len()`, and whichever of the guards above and below applies still
+            // fires. Slicing unclamped would PANIC, since this path — unlike the pure
+            // tombstone branch — never validated `after_row_offset` against `data.len()`.
+            let row_data_bound = after_row_offset.min(data.len());
+            let row_bytes = &data[..row_data_bound];
 
             // Issue #221: Branch based on column type - complex columns need special parsing
             // Issue #693: simple columns return 4-tuple including cell timestamp / expiration;
@@ -444,7 +487,7 @@ impl V5CompressedLegacyParser {
                     let row_ts = row_header.timestamp.unwrap_or(0);
                     let mut element_buf = Vec::new();
                     self.parse_complex_column_inner(
-                        data,
+                        row_bytes,
                         offset,
                         column,
                         complex_type,
@@ -503,7 +546,7 @@ impl V5CompressedLegacyParser {
                         row_ttl_seconds: row_header.ttl,
                     });
                     self.parse_complex_column(
-                        data,
+                        row_bytes,
                         offset,
                         column,
                         complex_type,
@@ -514,6 +557,16 @@ impl V5CompressedLegacyParser {
                 };
                 match parse_result {
                     Ok((value, new_offset, col_meta)) => {
+                        // Issue #3809: a decode whose returned offset ESCAPED this row
+                        // read the next row's bytes, so the value it just produced is
+                        // not this row's data — see `row_bound_check`.
+                        row_bound_check(
+                            column,
+                            Some(complex_type),
+                            (offset, new_offset, after_row_offset),
+                            (col_idx, columns_in_order.len()),
+                        )?;
+                        last_decoded_idx = Some(col_idx);
                         tracing::debug!(
                             "V5CompressedLegacy:   ✓ Complex column {} '{}' = {:?}, consumed {} bytes",
                             col_idx, column.name, value, new_offset - offset
@@ -606,11 +659,11 @@ impl V5CompressedLegacyParser {
                         offset = new_offset;
                     }
                     Err(e) => {
-                        tracing::debug!(
-                            "V5CompressedLegacy:   ✗ Complex column {} '{}' at offset {} FAILED: {}",
-                            col_idx, column.name, offset, e
-                        );
-                        break;
+                        // Issue #3721: PROPAGATE (rule: `column_decode_error`); the
+                        // two arms above share it, so compaction sees it too.
+                        let n = &column.name;
+                        let ty = dispatch_type(&column.data_type, Some(complex_type));
+                        return Err(column_decode_failure(n, &ty, offset, e));
                     }
                 }
             } else {
@@ -618,8 +671,12 @@ impl V5CompressedLegacyParser {
                 // to detect USE_ROW_TTL (0x10), which makes a cell with no explicit
                 // expiry inherit the ROW's expiry rather than being live-forever.
                 let cell_flags = data.get(offset).copied().unwrap_or(0);
+                // Issue #3721: there is NO end-of-cells sentinel, so a flags byte
+                // that is not a cell's is a DECODE FAILURE, not a loop exit — see
+                // `column_decode_error`, "The cell-flags byte: NOT a terminator"
+                // (authority, and the rejected mask-to-`0x1F` alternative).
                 match self.parse_cell_value_schema_order(
-                    data,
+                    row_bytes,
                     offset,
                     column,
                     header_type,
@@ -629,6 +686,16 @@ impl V5CompressedLegacyParser {
                     reader,
                 ) {
                     Ok((value, cell_own_ts, cell_exp, new_offset)) => {
+                        // Issue #3809: a decode whose returned offset ESCAPED this row
+                        // read the next row's bytes, so the value it just produced is
+                        // not this row's data — see `row_bound_check`.
+                        row_bound_check(
+                            column,
+                            header_type,
+                            (offset, new_offset, after_row_offset),
+                            (col_idx, columns_in_order.len()),
+                        )?;
+                        last_decoded_idx = Some(col_idx);
                         tracing::debug!(
                             "V5CompressedLegacy:   ✓ Column {} '{}' ({}) = {:?}, consumed {} bytes",
                             col_idx,
@@ -768,18 +835,11 @@ impl V5CompressedLegacyParser {
                         offset = new_offset;
                     }
                     Err(e) => {
-                        tracing::debug!(
-                            "V5CompressedLegacy:   ✗ Column {} '{}' ({}) at offset {} FAILED: {}",
-                            col_idx,
-                            column.name,
-                            column.data_type,
-                            offset,
-                            e
-                        );
-                        // CRITICAL FIX: Stop parsing remaining columns when we hit an error
-                        // The offset doesn't advance here, but we exit the loop cleanly
-                        // rather than continuing with invalid offset
-                        break;
+                        // Issue #3721: PROPAGATE (see `column_decode_error`); the
+                        // `break` this replaces described only its mechanism, and a
+                        // clean loop exit IS a truncated row.
+                        let ty = dispatch_type(&column.data_type, header_type);
+                        return Err(column_decode_failure(&column.name, &ty, offset, e));
                     }
                 }
             }
@@ -825,6 +885,21 @@ impl V5CompressedLegacyParser {
                 "V5CompressedLegacy: Not enough bytes for row data at offset {} (need {}, have {})",
                 row_size_counted_from, row_size, remaining
             )));
+        }
+
+        // Issue #3809/#3721: RECONCILE the column walk against the row's authoritative
+        // extent (`after_cells_offset` is `after_row_offset` above, recomputed where the
+        // return offset is formed). All THREE outcomes are named and each RETURNS a
+        // value — short, exact, long — in `row_body_reconcile`; none is asserted,
+        // because a malformed SSTable must produce an `Err`, never a panic. The `!=`
+        // guard keeps the hot path clear of the failure path's column lookup.
+        if offset != after_cells_offset {
+            let last = walk_end_column(columns_in_order, last_decoded_idx);
+            row_body_reconcile(
+                last.as_ref().map(|(n, t)| (&**n, t.as_str())),
+                (offset, after_cells_offset),
+                (columns_in_order.len(), cells.len()),
+            )?;
         }
 
         // No trailing field - next partition/row starts immediately

@@ -33,6 +33,7 @@ use crate::parser::types::{parse_cql_value, CqlTypeId};
 use crate::parser::vint::parse_vuint;
 use crate::schema::{CqlType, TableSchema};
 use crate::storage::sstable::promoted_index_reader::{DecodedIndexInfo, DecodedPromotedIndex};
+use crate::storage::sstable::reader::parsing::row_decoder::column_decode_error;
 use crate::storage::sstable::reader::parsing::BufferExtent;
 use crate::types::{ScanRow, Value};
 use crate::{Error, Result, RowKey};
@@ -397,7 +398,7 @@ impl SSTableReader {
                 .min(avail);
             let mut block_rows: Vec<ScanRow> = Vec::new();
             // #3782: a chunk-covering partition window; its tail may cut a row.
-            parser.parse_block_emit_windowed(
+            let walk = parser.parse_block_emit_windowed(
                 &window[within..],
                 BufferExtent::Window,
                 Some(schema),
@@ -409,7 +410,15 @@ impl SSTableReader {
                     }
                     Ok(std::ops::ControlFlow::Continue(()))
                 },
-            )?;
+            );
+            if let Err(e) = walk {
+                // Issue #3721: this INDEX-POSITIONED walk may not answer with the
+                // rows collected so far — see `indexed_walk_falls_back`.
+                if column_decode_error::indexed_walk_falls_back(&e) {
+                    return Ok(None);
+                }
+                return Err(e);
+            }
             // Per-iteration memory high-water mark + block-walk evidence (#1184).
             crate::storage::sstable::work_counters::observe_reverse_block_rows(
                 block_rows.len() as u64
@@ -423,59 +432,6 @@ impl SSTableReader {
             }
         }
         Ok(Some(out))
-    }
-
-    /// Decode the rows of a single BIG (`nb`) wide partition bounded to a
-    /// clustering-slice block window (Issue #1184). Resolves the partition's
-    /// decompressed window, then runs the windowed parser over only the selected
-    /// block extent (`row_body_window`), collecting the target partition's rows.
-    ///
-    /// The target partition is identified by a partition-key-bytes equality check
-    /// only — the reader is already scoped to a single table by the manager, so
-    /// (exactly as the full-scan `scan().retain(matches_key)` fallback does) no
-    /// table-id match is applied. This decodes SSTables whose serialization-header
-    /// keyspace/table differ from a fully-qualified query id. Returns `Ok(None)`
-    /// when the partition window cannot be resolved (caller falls back to the full
-    /// scan).
-    pub(super) async fn big_decode_clustering_window(
-        &self,
-        partition_key: &[u8],
-        offset: u64,
-        end_bound: Option<usize>,
-        row_body_window: Option<(usize, usize)>,
-        schema: Option<&TableSchema>,
-    ) -> Result<Option<Vec<(RowKey, ScanRow)>>> {
-        let Some((window, within)) = self
-            .decompress_partition_window(offset as usize, end_bound)
-            .await?
-        else {
-            return Ok(None);
-        };
-        let parser = self.build_v5_parser(true);
-        let key = RowKey::from(partition_key.to_vec());
-        let avail = window.len().saturating_sub(within);
-        let clamped = row_body_window.map(|(s, e)| (s.min(avail), e.min(avail)));
-        let mut rows: Vec<(RowKey, ScanRow)> = Vec::new();
-        // #3782: a chunk-covering partition window; its tail may cut a row.
-        parser.parse_block_emit_windowed(
-            &window[within..],
-            BufferExtent::Window,
-            schema,
-            self,
-            clamped,
-            |(_tid, entry_key, entry_value)| {
-                if entry_key.as_bytes() == partition_key {
-                    if self.filter_tombstone(&entry_value) {
-                        rows.push((key.clone(), entry_value));
-                    }
-                    Ok(std::ops::ControlFlow::Continue(()))
-                } else {
-                    // First row of the next partition — stop.
-                    Ok(std::ops::ControlFlow::Break(()))
-                }
-            },
-        )?;
-        Ok(Some(rows))
     }
 
     /// Decompress exactly the chunk window covering the partition `[offset,
@@ -495,7 +451,7 @@ impl SSTableReader {
     /// preserved: `read_compressed_chunk_at` verifies each compressed chunk's inline
     /// CRC32 before it is decompressed, and the uncompressed arm verifies the covering
     /// `CRC.db` chunk(s) before returning bytes.
-    async fn decompress_partition_window(
+    pub(super) async fn decompress_partition_window(
         &self,
         offset: usize,
         end_bound: Option<usize>,
