@@ -213,6 +213,10 @@ fn variant(v: &Value) -> &'static str {
         Value::Frozen(_) => "Frozen",
         Value::Tombstone(_) => "Tombstone",
         Value::Inet(_) => "Inet",
+        // #3805 added this variant to `Value` after this file was written. The helper's
+        // contract is the VARIANT NAME ONLY, so the type tag is deliberately dropped here
+        // exactly as every arm above drops its payload.
+        Value::Empty(_) => "Empty",
     }
 }
 
