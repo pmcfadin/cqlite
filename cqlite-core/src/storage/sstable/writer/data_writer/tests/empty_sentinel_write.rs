@@ -442,11 +442,15 @@ fn the_marshal_and_cql_spellings_of_one_declaration_agree() {
             .is_ok();
             for qualified in [true, false] {
                 let declared = marshal_map_of(key_class, qualified);
-                let via_marshal =
-                    serialize_map_cell_path_key_into(&Value::Empty(tag), &declared, &mut Vec::new())
-                        .is_ok();
+                let via_marshal = serialize_map_cell_path_key_into(
+                    &Value::Empty(tag),
+                    &declared,
+                    &mut Vec::new(),
+                )
+                .is_ok();
                 assert_eq!(
-                    via_marshal, via_cql,
+                    via_marshal,
+                    via_cql,
                     "{declared} and map<{cql_key}, int> must give the SAME answer for \
                      Empty({}) — recognising the marshal spelling must not change what \
                      is ADMITTED",
