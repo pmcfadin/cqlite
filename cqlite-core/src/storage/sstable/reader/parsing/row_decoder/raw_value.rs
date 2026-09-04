@@ -30,6 +30,24 @@ mod issue_3847_empty_fixed_width_tests;
 #[cfg(all(test, feature = "write-support"))]
 mod issue_3811_cell_site_tests;
 
+// Issue #3723: the width property #3811's composed rule (`require_fixed_width`
+// + `require_fully_consumed`) enforces, pinned at EVERY nesting position
+// for every fixed-width type. Registered here because these cases exercise this
+// module's bounded entry point; read that file's header for why #3723 added no
+// guard of its own.
+#[cfg(test)]
+mod nested_fixed_width_length_tests;
+
+// Issue #3723: CHARACTERISATION of the #1741 per-element shadow/TTL filter in
+// `complex_column`'s multicell loop, and of the width gap it leaves open
+// (#3778). Registered HERE, not in `complex_column.rs`, for the same reason
+// `issue_3811_cell_site_tests` is registered in this file: `complex_column.rs`
+// is far over the campsite file-size ceiling and the ratchet FAILs on any
+// growth there. The cases reach `parse_complex_column_inner`, whose element
+// decode is this module's bounded entry point.
+#[cfg(test)]
+mod dropped_element_tests;
+
 impl V5CompressedLegacyParser {
     /// Map a PRIMITIVE Cassandra marshal type (e.g.
     /// `org.apache.cassandra.db.marshal.Int32Type`) to the canonical CQL short
