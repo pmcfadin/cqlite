@@ -184,11 +184,17 @@ pub(crate) fn serialize_collection_element_into(
 /// so the sentinel's tag can be checked against it.
 ///
 /// # The admission check is NOT written twice
-/// It is [`crate::types::EmptyValueType::check_admits`], the same call the
-/// type-aware writer (`storage/serialization/types.rs`) makes. That rule is
-/// derived from the tag table, which is derived from Cassandra's `validate()`;
-/// a second copy here would be a second opinion able to drift from it (roborev
-/// job 449 finding D asked for exactly this reuse).
+/// It is [`crate::types::EmptyValueType::check_admits`], which lives beside the
+/// tag table it is derived from, which is derived from Cassandra's `validate()`;
+/// a copy here would be a second opinion able to drift from it (roborev job 449
+/// finding D asked for exactly this reuse). That check answers the TYPE half
+/// only. The FRAMING half — that a zero-length buffer is expressible here and
+/// means an empty KEY — is supplied by THIS position and by no other, which is
+/// why this is the only value-serializing function in the crate that admits the
+/// sentinel (roborev job 452; the type-aware writer
+/// `storage/serialization/types.rs` has the type and not the framing, so it
+/// refuses). Pinned by the write-surface census in
+/// `crate::types::empty_value`'s `write_surface_census_tests`.
 ///
 /// # An UNAVAILABLE declared type is a REFUSAL, never a guess (#28)
 /// `map_data_type` is the COLUMN's declared type, e.g. `map<int, int>`. When it

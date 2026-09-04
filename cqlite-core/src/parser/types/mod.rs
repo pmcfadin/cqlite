@@ -689,10 +689,21 @@ fn serialize_value_without_type_prefix(value: &Value) -> Result<Vec<u8>> {
 /// Inventing a decodable TAGGED form for the sentinel instead would mean
 /// inventing an encoding no Cassandra authority defines, which the
 /// no-heuristics mandate forbids (issue #28); the sentinel's write-side
-/// representation is a declared fail-closed residual, issue #4072. The surface
-/// that CAN write it is the type-aware writer
-/// (`crate::storage::serialization::types`), where the declared column type
-/// supplies the framing this format lacks.
+/// representation is a declared fail-closed residual, issue #4072.
+///
+/// # The surface that CAN write it — CORRECTED (roborev job 452)
+/// It is the multicell MAP CELL PATH in the SSTable writer,
+/// `storage::sstable::writer::data_writer::encoding::serialize_map_cell_path_key_into`,
+/// and ONLY that. An earlier revision of this comment named the type-aware
+/// writer (`crate::storage::serialization::types`) on the ground that a declared
+/// column type "supplies the framing this format lacks" — which was WRONG, and
+/// citing it made this rationale point at a site that now refuses. A declared
+/// type says only that an empty buffer would be LEGAL for that type; the framing
+/// question is separate and is what the cell path supplies (an unsigned-VInt
+/// length in the enclosing collection, `db/marshal/CollectionType.java:361-382`,
+/// so a zero-length path is expressible and MEANS an empty key). The type-aware
+/// writer has the type and NOT the framing, so it refuses too — see
+/// `TypeSerializer`'s `refuse_empty_sentinel_cell_value`.
 fn refuse_empty_sentinel(ty: crate::types::EmptyValueType) -> Error {
     Error::invalid_operation(format!(
         "Value::Empty({}) cannot be serialized via the legacy tagged CQL value \

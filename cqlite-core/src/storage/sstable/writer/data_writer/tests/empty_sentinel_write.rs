@@ -24,13 +24,17 @@
 //! (no-heuristics, issue #28): refusing beats writing bytes that read back as
 //! something else.
 //!
-//! # ONE admission rule, not two
-//! Both legal writers — `TypeSerializer::serialize_value` and
-//! `serialize_map_cell_path_key_into` — call
-//! [`crate::types::EmptyValueType::check_admits`], which is derived from the tag
-//! table, which is derived from Cassandra's `validate()`. The last test here pins
-//! that the two agree family-for-family, because a second implementation's
-//! agreement is only knowable by testing it.
+//! # ONE LEGAL WRITER, not two (roborev job 452)
+//! An earlier revision of this file called `TypeSerializer::serialize_value` a
+//! second legal writer, because it validates the tag against the declared type
+//! via [`crate::types::EmptyValueType::check_admits`]. That was wrong: a
+//! declared type is only the TYPE half of the admission, and
+//! `TypeSerializer::serialize_value` is the general CELL-VALUE API, whose
+//! positions supply no framing in which zero bytes mean an empty key — so it
+//! refuses. `serialize_map_cell_path_key_into` is the only value-serializing
+//! function in the crate that admits the sentinel. The last test here pins BOTH
+//! halves of that: the type-aware writer refuses every family, and the map cell
+//! path admits exactly the families the shared `check_admits` admits.
 
 use super::super::*;
 use super::support::*;
@@ -308,55 +312,120 @@ fn the_real_complex_map_writer_reaches_the_schema_aware_gate() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// THE TWO LEGAL WRITERS SHARE ONE RULE — pinned, not assumed
+// EXACTLY ONE LEGAL WRITER — pinned in BOTH directions (roborev job 452)
 // ───────────────────────────────────────────────────────────────────────────
 
-/// DIFFERENTIAL: `TypeSerializer::serialize_value` (the type-aware writer) and
-/// `serialize_map_cell_path_key_into` (the map cell path) must agree on
-/// ADMISSION for every family, because they call the same
-/// `EmptyValueType::check_admits`. They are two call sites of one rule, and the
-/// only way to know two implementations agree is to test them against each other
-/// — a second copy of this rule is what this test exists to catch.
+/// The families a `map<K, int>` key type may legally carry the sentinel for,
+/// derived from the shared admission rule rather than restated: a type is
+/// admitted iff [`EmptyValueType::for_cql_type`] names a tag for it.
+///
+/// `counter` is absent because CQL forbids a `counter` collection element
+/// (`cql3/CQL3Type.java:827-828`), so `map<counter,…>` is not declarable.
+const CANDIDATE_KEY_TYPES: &[&str] = &[
+    "int", "bigint", "float", "double", "timestamp", "uuid", "timeuuid", "boolean", "inet",
+    "decimal", "varint", "tinyint", "smallint", "date", "time", "text", "ascii", "varchar", "blob",
+    "duration",
+];
+
+/// DIRECTION 1 — the map cell path admits EXACTLY the families the shared
+/// [`crate::types::EmptyValueType::check_admits`] admits, derived from
+/// [`EmptyValueType::for_cql_type`] rather than from a second hand-written list
+/// (a restated expectation is a second opinion able to drift from the tag
+/// table).
 #[test]
-fn both_legal_writers_admit_exactly_the_same_families() {
-    let serializer = crate::storage::serialization::types::TypeSerializer::new();
+fn the_map_cell_path_admits_exactly_the_tag_tables_families() {
     let tag = EmptyValueType::Int;
-    for key_type in [
-        "int",
-        "bigint",
-        "float",
-        "double",
-        "timestamp",
-        "uuid",
-        "timeuuid",
-        "boolean",
-        "inet",
-        "decimal",
-        "varint",
-        "tinyint",
-        "smallint",
-        "date",
-        "time",
-        "text",
-        "ascii",
-        "varchar",
-        "blob",
-        "duration",
-    ] {
-        let type_aware = serializer
-            .serialize_value(&Value::Empty(tag), key_type)
-            .is_ok();
+    for key_type in CANDIDATE_KEY_TYPES {
+        let declared = crate::schema::CqlType::parse(key_type)
+            .unwrap_or_else(|e| panic!("{key_type} must parse as a CqlType: {e}"));
+        let expected = EmptyValueType::for_cql_type(&declared) == Some(tag);
+
         let mut out = Vec::new();
-        let cell_path = serialize_map_cell_path_key_into(
+        let admitted = serialize_map_cell_path_key_into(
             &Value::Empty(tag),
             &format!("map<{key_type}, int>"),
             &mut out,
         )
         .is_ok();
+
         assert_eq!(
-            type_aware, cell_path,
-            "{key_type}: the type-aware writer and the map cell path disagree about \
-             admitting Empty(int) — they must be two call sites of ONE rule"
+            admitted, expected,
+            "map<{key_type}, int>: the cell path's admission of Empty(int) disagrees \
+             with the tag table it is supposed to be derived from"
+        );
+        if admitted {
+            assert!(
+                out.is_empty(),
+                "map<{key_type}, int>: an admitted sentinel must write ZERO bytes, wrote {}",
+                out.len()
+            );
+        }
+    }
+}
+
+/// DIRECTION 2 — the type-aware writer refuses EVERY family, admitted or not.
+///
+/// This is the property roborev job 452 found missing. `TypeSerializer` knows the
+/// declared type, so it can answer the TYPE half of the admission — and a
+/// declared type is not sufficient, because a cell value supplies no framing in
+/// which zero bytes mean an empty key (`db/rows/Cell.java:264`: they read back as
+/// `null`). A refusal that held for `tinyint` and not for `int` would not be a
+/// refusal, so every candidate key type is asserted, and the diagnostic must
+/// name the issue AND the one legal route so a caller is not left guessing.
+#[test]
+fn the_type_aware_writer_refuses_every_family_as_a_cell_value() {
+    let serializer = crate::storage::serialization::types::TypeSerializer::new();
+    let tag = EmptyValueType::Int;
+    for key_type in CANDIDATE_KEY_TYPES {
+        let err = serializer
+            .serialize_value(&Value::Empty(tag), key_type)
+            .expect_err(&format!(
+                "TypeSerializer::serialize_value must refuse Empty(int) for `{key_type}`: it is \
+                 the general CELL-VALUE API and zero bytes there read back as null"
+            ));
+        let msg = err.to_string();
+        for needle in ["#3805", "serialize_map_cell_path_key_into"] {
+            assert!(
+                msg.contains(needle),
+                "the refusal for `{key_type}` must name {needle}; got: {msg}"
+            );
+        }
+    }
+}
+
+/// DIRECTION 2, NESTED — the same refusal reaches a COLLECTION ELEMENT, a TUPLE
+/// FIELD and a UDT FIELD, which are the type-aware writer's other positions.
+///
+/// Before job 452's fix these already failed, but with a per-type "Cannot
+/// serialize Empty(int) as Int" mismatch that named neither the reason nor the
+/// legal route; the assertion is on the NAMED refusal, so a future refactor that
+/// re-admits the sentinel nested cannot pass by producing some other error.
+#[test]
+fn the_type_aware_writer_refuses_the_sentinel_nested_too() {
+    let serializer = crate::storage::serialization::types::TypeSerializer::new();
+    let sentinel = Value::Empty(EmptyValueType::Int);
+    for (value, declared) in [
+        (Value::List(vec![sentinel.clone()]), "list<int>"),
+        (Value::Set(vec![sentinel.clone()]), "set<int>"),
+        (
+            Value::Map(vec![(sentinel.clone(), Value::Integer(1))]),
+            "map<int, int>",
+        ),
+        (
+            Value::Map(vec![(Value::Integer(1), sentinel.clone())]),
+            "map<int, int>",
+        ),
+        (
+            Value::Tuple(vec![Value::Integer(1), sentinel.clone()]),
+            "tuple<int, int>",
+        ),
+    ] {
+        let err = serializer
+            .serialize_value(&value, declared)
+            .expect_err(&format!("{declared} carrying a nested sentinel must be refused"));
+        assert!(
+            err.to_string().contains("#3805"),
+            "the nested refusal for {declared} must name #3805; got: {err}"
         );
     }
 }

@@ -72,25 +72,34 @@ impl TypeSerializer {
     pub fn serialize_value(&self, value: &Value, data_type: &str) -> Result<Vec<u8>> {
         match value {
             Value::Null => Ok(Vec::new()), // NULL cells have no data
-            // EMPTY-BUFFER SENTINEL (issue #3805): zero bytes — but ONLY where
-            // the DECLARED type admits an empty buffer, and only where the
-            // sentinel's own tag agrees with it. Both mismatches are refused
-            // rather than silently written: for `tinyint`/`smallint`/`date`/
-            // `time` an empty buffer is CORRUPTION on Cassandra's own terms
-            // (bare `!= N` validate — `serializers/ByteSerializer.java:40-44`
-            // and siblings; `schema/ColumnMetadata.java:457-467` would reject
-            // it), and a tag/column disagreement is a caller bug, not something
-            // to paper over by inferring from the bytes (no-heuristics, #28).
-            Value::Empty(tag) => {
-                // ONE admission rule, shared with the SSTable writer's map
-                // cell-path path (`data_writer::encoding`) — see
-                // `EmptyValueType::check_admits`. A second copy here would be a
-                // second opinion that can drift from the tag table it is derived
-                // from.
-                let cql_type = CqlType::parse(data_type)?;
-                tag.check_admits(&cql_type, data_type)?;
-                Ok(Vec::new())
-            }
+            // EMPTY-BUFFER SENTINEL (issue #3805): REFUSED HERE (roborev job
+            // 452). This is the GENERAL CELL-VALUE API — its return is
+            // documented as "suitable for SSTable cell values" — and a declared
+            // TYPE is not what the sentinel needs. It needs a FRAMING context in
+            // which a ZERO-LENGTH buffer is both expressible and MEANS "empty",
+            // and no position this serializer writes is one:
+            //
+            //  * as a regular CELL VALUE, zero bytes plus `HAS_EMPTY_VALUE_MASK`
+            //    (`db/rows/Cell.java:264` at `cassandra-5.0.8`) read back as
+            //    `Value::Null`, so the value would silently CHANGE TYPE across
+            //    the round trip;
+            //  * inside a length-prefixed COLLECTION element, TUPLE field or UDT
+            //    field, a zero-length component is the EMPTY VALUE of that
+            //    component's own declared type — which nothing in this crate
+            //    reads back as the sentinel.
+            //
+            // Knowing the declared type says only that an empty buffer would be
+            // LEGAL for that type; it does not say that this position means an
+            // empty MAP KEY. That is the whole gap: this writer has the type and
+            // not the framing context. The ONE write position where both are
+            // present — the length carried by the enclosing framing (an unsigned
+            // VInt, `db/marshal/CollectionType.java:361-382`) and the declared
+            // KEY type available to validate the tag — is a MULTICELL map's CELL
+            // PATH, which has its own schema-aware entry point,
+            // `storage::sstable::writer::data_writer::encoding::serialize_map_cell_path_key_into`.
+            // Refusing beats writing bytes that read back as something else
+            // (no-heuristics, issue #28).
+            Value::Empty(tag) => Err(refuse_empty_sentinel_cell_value(*tag)),
             _ => {
                 let cql_type = CqlType::parse(data_type)?;
                 self.serialize_typed_value(value, &cql_type)
@@ -100,6 +109,17 @@ impl TypeSerializer {
 
     /// Serialize a value with a parsed CqlType
     fn serialize_typed_value(&self, value: &Value, cql_type: &CqlType) -> Result<Vec<u8>> {
+        // The sentinel is refused at EVERY position this serializer writes, not
+        // only the top-level cell value: this function is also the RECURSION
+        // POINT for collection elements, tuple fields and UDT fields. Those
+        // nested positions already refused, but by falling through to a
+        // per-type "Cannot serialize Empty(int) as Int" mismatch that names
+        // neither the reason nor the one legal position — see
+        // [`refuse_empty_sentinel_cell_value`], which is the single wording both
+        // arms return.
+        if let Value::Empty(tag) = value {
+            return Err(refuse_empty_sentinel_cell_value(*tag));
+        }
         match cql_type {
             // Primitive types
             CqlType::Boolean
@@ -607,6 +627,40 @@ impl TypeSerializer {
 
         Ok(buf)
     }
+}
+
+/// The ONE refusal [`TypeSerializer`] returns for the empty-buffer sentinel
+/// (issue #3805, roborev job 452), shared by the top-level cell-value entry
+/// point and the nested recursion point so the two cannot drift into two
+/// different explanations of one rule.
+///
+/// # Why this writer refuses even though it KNOWS the declared type
+/// The sentinel needs two things to be serializable, and this writer supplies
+/// only the first: a declared type that ADMITS an empty buffer, and a FRAMING
+/// context in which a zero-length buffer both is expressible and MEANS "empty".
+/// Every position reachable from here fails the second — a cell value's zero
+/// bytes read back as `null` (`db/rows/Cell.java:264` at `cassandra-5.0.8`), and
+/// a length-prefixed collection/tuple/UDT component's zero length is that
+/// component's own empty value. The single position that supplies both is a
+/// MULTICELL map's CELL PATH, whose schema-aware entry point is
+/// [`crate::storage::sstable::writer::data_writer::encoding`]'s
+/// `serialize_map_cell_path_key_into` — and that is the ONLY value-serializing
+/// function in this crate licensed to admit the sentinel, pinned by
+/// `crate::types::empty_value`'s write-surface census.
+fn refuse_empty_sentinel_cell_value(tag: crate::types::EmptyValueType) -> Error {
+    Error::InvalidInput(format!(
+        "an empty-buffer sentinel (`{}`, issue #3805) has no cell-value \
+         serialization: a declared type says only that an empty buffer would be \
+         LEGAL for it, never that this position means an empty MAP KEY — as a \
+         cell value zero bytes read back as `null` \
+         (`db/rows/Cell.java:264`), and inside a length-prefixed \
+         collection/tuple/UDT component they read back as that component's own \
+         empty value. It is legal ONLY on a multicell map's cell path, via \
+         `data_writer::encoding::serialize_map_cell_path_key_into`, where the \
+         length is carried by the enclosing framing and the declared key type \
+         can validate the tag (issue #28)",
+        tag.cql_name()
+    ))
 }
 
 #[cfg(test)]

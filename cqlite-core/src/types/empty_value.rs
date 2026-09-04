@@ -222,12 +222,24 @@ impl EmptyValueType {
     /// `{:?}` of it is not what the operator wrote in their schema.
     ///
     /// # Why this lives here and not at a call site
-    /// There are TWO write paths that may legally emit the zero-byte form (the
-    /// type-aware [`crate::storage::serialization::types::TypeSerializer`] and
-    /// the multicell MAP CELL PATH in the SSTable writer), and a second copy of
-    /// this rule is a second opinion that can drift from the tag table it is
-    /// derived from — the same "one fact written twice" shape this repository
-    /// removes elsewhere. Both call THIS.
+    /// It lives beside the tag TABLE it is derived from, which is derived from
+    /// Cassandra's `validate()`; a copy at a call site would be a second opinion
+    /// able to drift from that table — the "one fact written twice" shape this
+    /// repository removes elsewhere.
+    ///
+    /// # Exactly ONE write path may legally emit the zero-byte form
+    /// The multicell MAP CELL PATH in the SSTable writer
+    /// (`storage::sstable::writer::data_writer::encoding::serialize_map_cell_path_key_into`),
+    /// and nothing else — pinned by the write-surface census in
+    /// `write_surface_census_tests`, which requires exactly one admitting
+    /// disposition across every value-serializing function in the crate. An
+    /// earlier revision of this comment named a SECOND path, the type-aware
+    /// [`crate::storage::serialization::types::TypeSerializer`]; that was the
+    /// defect roborev job 452 found. A declared type is necessary and NOT
+    /// sufficient: the sentinel also needs a framing context in which a
+    /// zero-length buffer means "empty", which a cell value (and a
+    /// length-prefixed collection/tuple/UDT component) does not supply. So this
+    /// check answers only the TYPE half; the caller owns the framing half.
     pub fn check_admits(self, declared: &CqlType, declared_spelling: &str) -> Result<()> {
         match EmptyValueType::for_cql_type(declared) {
             Some(admitted) if admitted == self => Ok(()),
