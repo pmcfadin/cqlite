@@ -60,6 +60,11 @@ report?" but "what does the report say?".
   you were re-spawned with. **Since round 10 that is enforced at the merge point, not merely
   wasted effort**: `premerge-assert.sh` requires the verdict it accepts to name the generation it
   validated, so a verdict read from a superseded generation REFUSES the merge outright.
+  **And a verdict you deliver LATE is neither lost nor ignored (#3751 rounds 15 and 22).** If your
+  `result: FINDINGS` lands while a substitute is being recorded, it is SUPERSEDED rather than
+  destroyed — it stays on disk in its own generation — and since round 22 the merge point CENSUSES
+  every generation of the stage and REFUSES to merge over it, naming your generation. So write your
+  verdict even if you are late; do NOT overwrite a report you were not handed.
 
 # Compaction Parity Auditor
 

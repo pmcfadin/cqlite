@@ -361,7 +361,9 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   `RESULT: PASS`" is not a verdict about C: measured on #3751's own branch, a sibling `code-review`
   stage's PASS line satisfied `--c-verdict`, and a truncated capture with no
   `elapsed=`/`agent=`/`report=` did too. Only
-  `PASS` and `AUTHOR-PERFORMED` proceed, and the second prints **under its own token on a
+  `PASS` and `AUTHOR-PERFORMED` proceed — and under `AUTO` the second is additionally refused when a
+  SUPERSEDED generation of the stage records `result: FINDINGS` (#3751 round 22, AB1; see the
+  `record-author-performed` paragraph below for what that check does NOT close) — and the second prints **under its own token on a
   `PREMERGE: C-VERDICT` line, never folded into `PREMERGE: OK`** — the same reason the roborev wrapper's
   `WAIVED` is distinct from `PASS`: a reader must be able to see that the intent audit was performed by
   the diff's author.
@@ -954,6 +956,35 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   both proceed. **The transferable rule: "we rejected a lock here" is a ruling about a COUNTERPARTY,
   not about locks** — re-ask it whenever the parties change, and record which party the earlier ruling
   was about.
+  **AND A PRESERVED BLOCKING VERDICT WAS READ BY NOBODY — SO THE WINDOW'S *OUTCOME* IS REFUSED AT THE
+  MERGE POINT, WHERE NOTHING IS RACING (#3751 round 22, AB1).** U1 stopped the late `FINDINGS` being
+  DESTROYED and AA1 shut our own publisher out of that span; **neither made the preserved verdict
+  MATTER.** The substitute still becomes the PUBLISHED verdict, so `verdict` reports
+  `AUTHOR-PERFORMED`, the blocking independent audit sits in its own generation read by nothing, and
+  the merge proceeds — with no `--force` and no `replaced-verdict:` trace, because nothing in
+  `record-author-performed` ever saw it. Measured on the shipped scripts with the late write planted at
+  the last instant before publication: `PREMERGE: OK <sha>` at exit 0 beside `PREMERGE: C-VERDICT
+  AUTHOR-PERFORMED`. **The fix is NOT a fifth check inside the window**: no compare-and-swap rename is
+  reachable from a shell, so "publish only if the report is still the one I read" is UNEXPRESSIBLE and
+  every added check can only narrow it again. `premerge-assert.sh` runs long after the reviewer has
+  stopped writing, so under `--c-verdict AUTO` it censuses EVERY generation of the stage when the
+  published token is the substitute and REFUSES the merge, naming the generation and its nonce so the
+  superseded verdict is readable. **This is a CONSUMER-SIDE check, which this repository ordinarily
+  rejects** (*a check placed after a harmful effect can only report it*) **and it is sufficient HERE
+  for one specific reason: the harm is a MIS-PUBLISHED VERDICT and nothing else, because round 15 kept
+  the bytes** — the evidence is still on disk to be read, and the only thing that had to be prevented
+  is a MERGE resting on it. `record-author-performed` is **not** made atomic by any of this and **no
+  site may say the window is closed**; what changed is that its outcome cannot certify a merge. Two
+  properties worth carrying: **it is asked of `AUTHOR-PERFORMED` ALONE**, because no subcommand
+  publishes a `PASS` (so a published PASS is always an independent reviewer's own report, and a
+  superseded `FINDINGS` beneath one is the SANCTIONED REMEDIATION FLOW — fix, re-open, re-audit —
+  INDISTINGUISHABLE on disk, so refusing it would red on correct input); and **the blocking set is
+  CLOSED at `FINDINGS`**, since `NOT-RUN` at a superseded generation is the ABSENT audit a substitute
+  stands in for, `PASS` there is a stronger verdict, and `AUTHOR-PERFORMED` there is another
+  substitute. Two declared residuals: an EXPLICIT `--c-verdict <path>` is NOT censused (that mode never
+  learns an issue number, so there is no generation set — invoker-class, and `AUTO` is the mandated
+  form), and there is deliberately **no break-glass**, because the ordinary remedy (fix it or get the
+  lead's ruling, then RE-RUN THE STAGE) clears the check by construction.
   **AND "COULD NOT READ IT" IS NOT "NOTHING IS RECORDED" (#3751 round 13, S1)**: round 12's
   single-observation classifier introduced an UNREADABLE state, and this guard branched on the
   TOKEN — where that state arrives as `NOT-RUN`, the REPLACEABLE side — so a report whose recorded

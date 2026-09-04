@@ -507,6 +507,16 @@
 #         a hung one is refused by name (`reason=stage-lock-timeout`). READERS TAKE NO LOCK, so
 #         `verdict`/`status` can never be blocked by a publisher. See `lock_stage` for why a
 #         lock is right for THIS window when rounds 6 and 9/15 rejected one for theirs.
+#         THE REMAINING OCCUPANT OF THAT WINDOW IS A LATE REVIEWER, AND ITS OUTCOME CAN NO
+#         LONGER CERTIFY A MERGE (#3751 round 22, AB1). A reviewer writing its own report takes
+#         no lock and cannot be made to, so a `result: FINDINGS` landing after the final
+#         comparison is SUPERSEDED — preserved in its own generation, never destroyed (round
+#         15) — while the substitute becomes the published verdict. That is a mis-published
+#         verdict, and it is REFUSED AT THE MERGE POINT, where nothing is racing:
+#         `premerge-assert.sh --c-verdict AUTO` censuses EVERY generation of the stage when the
+#         published token is `AUTHOR-PERFORMED` and refuses, naming the generation and its
+#         nonce. THIS SUBCOMMAND IS NOT MADE ATOMIC BY THAT and no site may say the window is
+#         closed; what changed is that its outcome cannot clear a merge.
 #         AND AN UNREADABLE PRIOR REPORT IS *UNKNOWN*, NOT *ABSENT* (#3751 round 13, S1):
 #         the guard branched on the TOKEN, where an unreadable report arrives as `NOT-RUN`,
 #         i.e. on the REPLACEABLE side, so a possibly-blocking verdict nobody could read was
@@ -3706,6 +3716,13 @@ cmd_record_author_performed() {
   # no `--force`, no `replaced-verdict:`, and the blocking `result: FINDINGS` GONE FROM DISK
   # ENTIRELY (`grep -r` across the stage directory found nothing).
   #
+  # WHAT U1 DID NOT DO, AND ROUND 22 (AB1) DID. Preserving the late verdict stopped it being
+  # DESTROYED; it did not stop the substitute becoming the PUBLISHED one, so the blocking verdict
+  # was preserved and IGNORED and the merge proceeded. That half is closed at the MERGE POINT —
+  # `premerge-assert.sh`'s `c_assert_no_superseded_blocking_verdict` — because there is no
+  # compare-and-swap rename in a shell and a fifth check inside this window would only narrow it
+  # again.
+  #
   # SO THE OVERWRITE IS MADE STRUCTURALLY IMPOSSIBLE INSTEAD OF NARROWED. This uses the generation
   # machinery that already exists — round 6's nonce and round 12's atomic reservation: the
   # substitute is written to a FRESHLY RESERVED report path, and the stage record (the publication
@@ -3903,6 +3920,17 @@ cmd_record_author_performed() {
   # it; that declaration is WITHDRAWN, because the harm was the overwrite and the overwrite is
   # gone. The window itself is not closed, and no site may claim a lost verdict is still possible
   # here.
+  #
+  # AND SINCE ROUND 22 (AB1) ITS OUTCOME CANNOT CERTIFY A MERGE. What a late reviewer leaves here
+  # is a MIS-PUBLISHED VERDICT and nothing else — the blocking report is intact in its own
+  # generation — so the harm is fully recoverable from artifacts still on disk, and the only thing
+  # that had to be prevented is a MERGE resting on it. `premerge-assert.sh`
+  # (`c_assert_no_superseded_blocking_verdict`) censuses EVERY generation of this stage when the
+  # published token is `AUTHOR-PERFORMED` and refuses the merge naming the generation and its
+  # nonce. That is a CONSUMER-SIDE check, which this repository ordinarily rejects — a check after
+  # the harm can only report it — and it is sufficient HERE precisely because round 15 kept the
+  # evidence: the check reads what the window produced rather than trying to have prevented it.
+  # NOTHING HERE IS MADE ATOMIC BY IT.
   local now_obs now_cls now_rec_obs
   now_obs="$(report_bytes "$STAGE_REPORT")"
   if [ "$now_obs" != "$prior_obs" ]; then

@@ -163,7 +163,12 @@ never gate stdout or review churn.
    `reason=stage-lock-timeout` (another `review-stage.sh` publisher for THIS stage held the lock for
    the whole bounded wait — find it and re-run once, never in a loop) and
    `reason=stage-lock-unavailable` (this box has no `flock`, which is a broken box to fix, not a
-   condition to work around). `verdict`/`status` take NO lock, so a READ can never be blocked; and since round 10 the merge point REFUSES a verdict that names any
+   condition to work around). `verdict`/`status` take NO lock, so a READ can never be blocked; and since **round 22** the merge
+   point CENSUSES every generation of the stage when the published verdict is `AUTHOR-PERFORMED`
+   and REFUSES to merge over a SUPERSEDED `result: FINDINGS`, naming the generation — a late
+   reviewer's blocking verdict is neither destroyed (round 15) nor ignored, and the remedy is to
+   fix it or get the lead's ruling and re-open the stage, never to re-record the substitute;
+   and since round 10 the merge point REFUSES a verdict that names any
    OTHER generation, so writing to a stale path now blocks the merge rather than merely wasting the
    round; and since round 16 the merge point RE-VALIDATES the whole C check immediately before
    arming the merge, so a `--force` landing while `premerge-assert.sh` runs REFUSES too), or read

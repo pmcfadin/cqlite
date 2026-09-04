@@ -1493,6 +1493,37 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   both proceed). The transferable rule: **"we rejected a lock here" is a ruling about a
   COUNTERPARTY, not about locks** — re-ask it whenever the parties change, and record which party
   the earlier ruling was about.
+  **AND A PRESERVED BLOCKING VERDICT WAS READ BY NOBODY — SO THE WINDOW'S *OUTCOME* IS REFUSED AT
+  THE MERGE POINT, WHERE NOTHING IS RACING (#3751 round 22, AB1).** U1 stopped the late `FINDINGS`
+  being DESTROYED and AA1 shut our own publisher out of the span; **neither made the preserved
+  verdict MATTER.** The substitute still becomes the PUBLISHED verdict, so `verdict` reports
+  `AUTHOR-PERFORMED`, the blocking independent audit sits on disk in its own generation read by
+  nothing, and the merge proceeds — with no `--force` and no `replaced-verdict:` trace, because
+  nothing in `record-author-performed` ever saw it. Measured on the shipped scripts with the late
+  write planted at the last instant before publication: `PREMERGE: OK <sha>` at exit 0 beside
+  `PREMERGE: C-VERDICT AUTHOR-PERFORMED`. **The fix is NOT a fifth check inside the window** —
+  there is no compare-and-swap rename in a shell, so "publish only if the report is still the one
+  I read" is UNEXPRESSIBLE and every added check can only narrow it again. `premerge-assert.sh`
+  runs long after the reviewer has stopped writing, so under `--c-verdict AUTO` it censuses EVERY
+  generation of the stage when the published token is the substitute and REFUSES the merge, naming
+  the generation and its nonce so the superseded verdict is readable. **This is a CONSUMER-SIDE
+  check, which this repository ordinarily rejects** (*a check placed after a harmful effect can
+  only report it*) **and it is sufficient HERE for one specific reason: the harm is a MIS-PUBLISHED
+  VERDICT and nothing else, because round 15 kept the bytes** — so the evidence is still on disk
+  to be read, and the only thing that had to be prevented is a MERGE resting on it. `record-author-performed` is **not** made
+  atomic by any of this and **no site may say the window is closed**; what changed is that its
+  outcome cannot certify a merge. Two properties worth carrying: **it is asked of
+  `AUTHOR-PERFORMED` ALONE**, because no subcommand publishes a `PASS` (so a published PASS is
+  always an independent reviewer's own report, and a superseded `FINDINGS` beneath one is the
+  SANCTIONED REMEDIATION FLOW — fix, re-open, re-audit — which is INDISTINGUISHABLE on disk, so
+  refusing it would red on correct input); and **the blocking set is CLOSED at `FINDINGS`**, since
+  `NOT-RUN` at a superseded generation is the ABSENT audit a substitute exists to stand in for,
+  `PASS` there is a stronger verdict, and `AUTHOR-PERFORMED` there is another substitute. Two
+  declared residuals: an EXPLICIT `--c-verdict <path>` is NOT censused (that mode never learns an
+  issue number, so there is no generation set — invoker-class, and `AUTO` is what the doctrine
+  mandates), and there is deliberately **no break-glass** — a recorded independent `FINDINGS` is
+  not waivable by an author's own audit, and the ordinary remedy (fix it or get the lead's ruling,
+  then RE-RUN THE STAGE) clears the check by construction.
   **AND "COULD NOT READ IT" IS NOT "NOTHING IS RECORDED"
   (#3751 round 13, S1).** Round 12's single-observation classifier introduced an UNREADABLE state,
   and this guard branched on the TOKEN — where that state arrives as `NOT-RUN`, i.e. on the
@@ -2474,7 +2505,12 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   and `AUTHOR-PERFORMED`
   proceed; the second is printed **under its own token on a `PREMERGE: C-VERDICT` line and is NEVER
   folded into `PREMERGE: OK`**, for the same reason the roborev wrapper's `WAIVED` is distinct from
-  `PASS` — a reader must be able to see that the intent audit was performed by the diff's author. **The third argument is
+  `PASS` — a reader must be able to see that the intent audit was performed by the diff's author.
+  **AND UNDER `AUTO` A SUBSTITUTE MAY NOT STAND OVER A BLOCKING INDEPENDENT VERDICT (#3751 round
+  22, AB1)**: every generation of the stage is censused and the merge REFUSES, naming the
+  generation and its nonce, if a SUPERSEDED one records `result: FINDINGS` — see the
+  `record-author-performed` paragraph above for why that check lives at the merge point and what it
+  does NOT close. **The third argument is
   REQUIRED, and that is the #3465 mechanism**: verifying the head against a *claimed* certified sha never verified that a
   certified sha EXISTS. **Two distinct escapes, one mechanism.** #3408 = **no gate at all** (merged on
   22 `--lite` PASSes and not one full `scripts/agent-gate.sh` run, because nothing in the merge path

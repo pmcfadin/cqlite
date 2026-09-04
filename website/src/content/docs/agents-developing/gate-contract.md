@@ -121,7 +121,15 @@ carry).
   `diff.relative` governs the OUTPUT path prefix, not pathspec interpretation, so both pins are
   needed and neither substitutes for the other. An `UNMEASURED`
   measurement is treated as REQUIRED, and only `PASS` and `AUTHOR-PERFORMED` proceed — the second under its
-  own `PREMERGE: C-VERDICT` token, never folded into `PREMERGE: OK`. Three bindings tie the verdict to the
+  own `PREMERGE: C-VERDICT` token, never folded into `PREMERGE: OK`, **and under `AUTO` refused outright
+  when a SUPERSEDED generation of that stage records `result: FINDINGS` (#3751 round 22)**: a review
+  landing its verdict inside `record-author-performed`'s publish window is SUPERSEDED rather than
+  destroyed, so the blocking audit survives on disk — and was read by nobody, while the substitute
+  became the published verdict and the merge proceeded with no `--force` and no trace. That window
+  cannot be closed in a shell (no compare-and-swap rename) and `premerge-assert.sh` races nobody, so
+  the check lives at the merge point; it makes the window's OUTCOME uncertifiable and does **not**
+  make the recording atomic. Asked of the substitute ALONE — a published `PASS` over a superseded
+  `FINDINGS` is the sanctioned remediation flow and is indistinguishable from anything else on disk. Three bindings tie the verdict to the
   merge (#3751 rounds 1 and 3): under `AUTO` this worktree's `HEAD` must EQUAL the certified commit before a
   locally-located stage is trusted — every lane here is a worktree of ONE shared `.git`, so a peer lane's
   certified commit resolves from any lane and **resolvability is not provenance** (#3616's class); the stage

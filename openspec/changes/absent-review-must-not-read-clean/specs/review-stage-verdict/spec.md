@@ -853,6 +853,64 @@ audit trail naming the WRONG predecessor. A falsified trail is a worse outcome t
 - **AND** a publisher added later in a new subcommand SHALL therefore FAIL the census rather than
   join the set unlocked
 
+### Requirement: A SUPERSEDED blocking verdict SHALL NOT certify a merge
+
+The publish lock above excludes this tool's OTHER publisher from `record-author-performed`'s
+recheck-and-publish span. The party that REMAINS is a LATE REVIEWER writing its own report with its
+own tooling, which takes no lock and cannot be made to. What it leaves is a blocking verdict that is
+SUPERSEDED rather than destroyed — preserved in its own generation, and read by NOTHING — while the
+substitute becomes the PUBLISHED verdict and the merge proceeds with no `--force` and no
+`replaced-verdict:` trace. A shell has no compare-and-swap rename, so the window cannot be closed
+and a further re-verification inside it can only narrow it again; the merge point races nobody, so
+the window's OUTCOME is refused THERE. This makes a mis-published verdict uncertifiable; it does NOT
+make the recording atomic, and no artifact may state that it does.
+
+#### Scenario: a substitute published over a superseded blocking verdict SHALL NOT certify
+- **WHEN** `--c-verdict AUTO` reads a stage whose published verdict is `AUTHOR-PERFORMED` and one of
+  whose SUPERSEDED generations records `result: FINDINGS`
+- **THEN** the merge SHALL be REFUSED, naming the published generation, the blocking generation and
+  its nonce, and what that generation records — so the superseded verdict is readable rather than
+  merely asserted to disagree
+- **AND** the refusal SHALL NOT depend on the recording having used `--force` or having left any
+  trace: the state on disk is the same either way, and either way an independent audit blocked
+
+#### Scenario: an ordinary substitute with no blocking generation SHALL proceed (the control)
+- **WHEN** the same read finds an `AUTHOR-PERFORMED` stage whose superseded generations record only
+  the NOT-RUN sentinel
+- **THEN** the merge SHALL PROCEED under the substitute's own distinct token, exactly as before: a
+  check that refuses correct input is the check its callers learn to waive
+
+#### Scenario: a published PASS over a superseded FINDINGS SHALL proceed (the remediation flow)
+- **WHEN** a stage records `FINDINGS`, is re-opened with `--force`, is re-audited, and publishes
+  `PASS` at the fresh generation
+- **THEN** the merge SHALL PROCEED: no subcommand publishes a `PASS`, so a published `PASS` is always
+  an independent reviewer's own report, and this shape is the sanctioned remedy for FINDINGS
+- **AND** this state SHALL NOT be distinguished from any other published `PASS`, because on disk it
+  is not distinguishable
+
+#### Scenario: a superseded generation that cannot be READ SHALL refuse
+- **WHEN** a superseded generation is a symlink, is not a regular file, cannot be read, or holds a
+  byte no text record may contain
+- **THEN** the merge SHALL be REFUSED under a cause naming that generation and the reason it could
+  not be read, because "could not be read" is not "records nothing blocking"
+- **AND** the leaf symlink test SHALL precede every predicate that dereferences the path, since a
+  DANGLING link answers such a predicate with the permissive absent state
+
+#### Scenario: the census SHALL NOT be more permissive than the report classifier
+- **WHEN** both readers are driven over one shared table of adversarial report bodies
+- **THEN** for every body the report classifier reports as `FINDINGS`, the census SHALL report
+  blocking — the only direction in which a divergence can produce a false pass
+- **AND** the census MAY be STRICTER (a body carrying several column-zero `result:` lines is
+  AMBIGUOUS to the classifier and blocking to the census), and SHALL NOT strip ANSI, since neither
+  reader does and stripping would manufacture a token the file does not hold
+
+#### Scenario: the enumeration SHALL be proved to have reached the stage directory
+- **WHEN** the census enumerates the generations of a stage
+- **THEN** it SHALL require the PUBLISHED generation to be among them, and SHALL refuse as a tool
+  failure otherwise: an enumeration that never saw the file the verdict was read from proves nothing
+  by its silence, and a zero count of superseded generations is an ordinary measurement rather than
+  the same fact
+
 #### Scenario: readers SHALL NOT take the lock
 - **WHEN** `verdict` or `status` runs while a publisher holds the lock
 - **THEN** it SHALL complete PROMPTLY and report the stage's verdict: a publisher SHALL NEVER block

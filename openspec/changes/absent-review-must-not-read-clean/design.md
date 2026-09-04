@@ -261,6 +261,17 @@ premerge-assert.sh <pr> <certified-sha> <gate-summary> [<delta-summary>] --c-ver
   see that the intent audit was performed by the diff's author.
 - A missing `--c-verdict` is exit 3 (usage), which breaks a caller loudly and on purpose — the #3465
   precedent. Silently defaulting to "not required" would reproduce the defect in the enforcer.
+- **Under `AUTO`, an `AUTHOR-PERFORMED` verdict is additionally refused when a SUPERSEDED generation of
+  that stage records `result: FINDINGS` (round 22, AB1).** §4's recording SUPERSEDES rather than
+  destroys, so a review landing its verdict inside the publish window survives on disk — and was read
+  by nobody, while the substitute became the published verdict. The window cannot be closed in a shell
+  (no compare-and-swap rename) and this consumer races nobody, so the check lives here: it makes the
+  window's OUTCOME uncertifiable and does **not** make the recording atomic. Asked of the substitute
+  ALONE, because a published `PASS` over a superseded `FINDINGS` is the sanctioned remediation flow and
+  is indistinguishable from it on disk. The blocking set is closed at `FINDINGS`; an unreadable
+  generation is a named non-measurement and refuses. Two declared residuals: an explicit
+  `--c-verdict <path>` is not censused (that mode consults no stage), and there is no break-glass,
+  because the ordinary remedy — fix it or get the lead's ruling, then re-run the stage — clears it.
 
 ## §4 — `record-author-performed` (AC4)
 

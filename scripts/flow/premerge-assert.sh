@@ -250,6 +250,22 @@
 # token REFUSE, naming the stage and the cause. The token is reduced to its FIRST
 # WORD and matched by STRING EQUALITY, never a prefix test (#3544).
 #
+# AND `AUTHOR-PERFORMED` MAY NOT STAND OVER A BLOCKING INDEPENDENT VERDICT (#3751
+# round 22, AB1). Under `AUTO`, when the published token is the substitute, EVERY
+# generation of that stage is censused and the merge is REFUSED — naming the
+# generation and its nonce — if one records `result: FINDINGS`. review-stage.sh
+# SUPERSEDES a report rather than destroying it, so a blocking verdict landing in
+# `record-author-performed`'s publish window survives on disk and was read by
+# nobody: the substitute became the published verdict and the merge proceeded with
+# no `--force` and no `replaced-verdict:` trace. That window cannot be closed in a
+# shell (no compare-and-swap rename), and this script races nobody, so the check
+# lives HERE. It is asked of the substitute ALONE: a published `PASS` over a
+# superseded `FINDINGS` is the SANCTIONED REMEDIATION FLOW (fix, re-open, re-audit)
+# and is indistinguishable from anything else on disk, so refusing it would red on
+# correct input. See `c_assert_no_superseded_blocking_verdict` for the closed
+# blocking set, the two declared residuals, and why a consumer-side check is
+# sufficient here when this repository ordinarily rejects one.
+#
 # ONE DECLARED RESIDUAL. With an explicit `--c-verdict <path>` this script verifies
 # the verdict's GRAMMAR (including that the stage KIND is `c`) and TOKEN, not that
 # the stage it came from belongs to THIS issue: the verdict line carries a kind, an

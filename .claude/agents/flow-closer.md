@@ -60,6 +60,11 @@ report?" but "what does the report say?".
   you were re-spawned with. **Since round 10 that is enforced at the merge point, not merely
   wasted effort**: `premerge-assert.sh` requires the verdict it accepts to name the generation it
   validated, so a verdict read from a superseded generation REFUSES the merge outright.
+  **And a verdict you deliver LATE is neither lost nor ignored (#3751 rounds 15 and 22).** If your
+  `result: FINDINGS` lands while a substitute is being recorded, it is SUPERSEDED rather than
+  destroyed — it stays on disk in its own generation — and since round 22 the merge point CENSUSES
+  every generation of the stage and REFUSES to merge over it, naming your generation. So write your
+  verdict even if you are late; do NOT overwrite a report you were not handed.
   **And since round 16 it is re-checked immediately before the merge is armed (#3751 V1):** the
   whole C evaluation runs TWICE — once early and offline, once after the advisory and the `gh`
   call — so a stage superseded WHILE you are arming the merge REFUSES, naming what changed. The
@@ -292,6 +297,14 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    substitute lands in a fresh generation and the stage record publishes it, so a verdict that
    arrives at any instant is still on disk in its own generation, named by
    `supersedes-report-nonce:` on the `RECORD-OK` line. Read it there before deciding anything.
+   **AND SINCE ROUND 22 THAT IS ENFORCED, NOT ADVICE (#3751 AB1):** `premerge-assert.sh
+   --c-verdict AUTO` censuses EVERY generation of the stage when the published token is
+   `AUTHOR-PERFORMED`, and REFUSES the merge — naming the generation and its nonce — if one records
+   `result: FINDINGS`. So a substitute recorded over a blocking audit (whether it landed in the
+   publish window or you forced it) does NOT reach a merge. The remedy is never to re-record: FIX
+   the findings, or get the lead's ruling, then RE-OPEN the stage and let an audit record its own
+   verdict — a published `PASS` clears the census by construction. There is deliberately no
+   break-glass, so do not look for a flag.
    **Two of this tool's subcommands PUBLISH, and they are now SERIALISED against each other (#3751
    round 21):** `open` and `record-author-performed` each hold a per-stage lock across their
    recheck-and-publish span, so a peer publisher WAITS rather than slipping a generation in between.

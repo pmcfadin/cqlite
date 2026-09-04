@@ -1001,7 +1001,11 @@ driven at that instant: `RECORD-OK … result=AUTHOR-PERFORMED` at exit 0, no `-
 stage directory found nothing). After it, the same interleaving leaves that `FINDINGS` readable in its own
 generation while the published verdict is the substitute. **The window is not closed; DESTRUCTION is** —
 what lands in it is SUPERSEDED, and the new report names the generation it took over from
-(`supersedes-report-nonce:`) so the surviving verdict is findable.
+(`supersedes-report-nonce:`) so the surviving verdict is findable. **AND SINCE ROUND 22 (AB1) THE
+SURVIVING VERDICT IS ALSO *READ*:** preserving it stopped it being destroyed and did NOT stop the
+substitute becoming the PUBLISHED verdict, so a blocking audit was preserved and IGNORED and the merge
+proceeded. That half is closed at the merge point — see *A superseded blocking verdict cannot certify a
+merge* below.
 
 Four consequences worth knowing. (1) Whether the command may PROCEED over a prior verdict is a SEPARATE
 question and keeps its rule — refuse without `--force`; under `--force` record `replaced-verdict:` **plus**
@@ -1091,7 +1095,103 @@ Properties of the lock, because a lock is a new failure surface:
 
 **Why a lock and not a third re-verification.** A shell has no compare-and-swap rename, so any number of
 re-reads leaves a span between the last one and the rename. Rounds 9 and 15 each narrowed that span and
-declared the remainder; narrowing it again would be the fourth carve in one place.
+declared the remainder; narrowing it again would be the fourth carve in one place. **Round 22 (AB1) did
+not carve it a fourth time either** — it moved the question to the CONSUMER; see the next section.
+
+### A superseded blocking verdict cannot certify a merge (#3751 round 22, AB1)
+
+**The finding (roborev job 435, High, `review-stage.sh:3920-3926`).** A reviewer can record
+`result: FINDINGS` AFTER `record-author-performed`'s final report comparison and BEFORE the `rename(2)`
+that publishes the substitute. U1 made that outcome non-destructive and AA1 shut this tool's other
+publisher out of the span. **Neither made the preserved verdict MATTER.** The substitute still becomes
+the PUBLISHED verdict, so `verdict` reports `AUTHOR-PERFORMED`, the blocking independent audit sits in
+its own generation read by nothing, and the merge proceeds — with no `--force` and no
+`replaced-verdict:`, because nothing in the recording ever saw it.
+
+**Measured on the shipped scripts**, with one line injected into a scratch copy of `review-stage.sh`
+immediately before the LAST `commit_write "$sfile" stage-record` (the publication inside
+`cmd_record_author_performed`) — a SIMULATED interleave, not a race: nothing concurrent, no timing
+dependence, the artifact substituted rather than a settable seam:
+
+```
+$ bash late.sh record-author-performed c --issue 3751 --reason … --evidence … --performed-by author
+REVIEW-STAGE: RECORD-OK … result=AUTHOR-PERFORMED … report-nonce=hiZZOFgPiV
+  supersedes-report-nonce=lJVNMHScZJ                              # no --force, no replaced-verdict:
+$ head -1 .review-stage/issue-3751/c.lJVNMHScZJ.md   ->  result: FINDINGS
+# BEFORE (premerge-assert.sh at feb955023)
+PREMERGE: OK d91feb7c2df8be94f9684195c99133adf8606a2c
+PREMERGE: C-VERDICT AUTHOR-PERFORMED stage: c source: AUTO issue=3751 …   rc=0
+# AFTER
+PREMERGE: NO-C-VERDICT — REFUSING TO MERGE
+  The 'c' stage reports AUTHOR-PERFORMED, and 1 of the 1 SUPERSEDED generation(s) of this stage
+  record a BLOCKING verdict (result: FINDINGS) that the published substitute does not account for:
+    published generation:   c.hiZZOFgPiV.md (AUTHOR-PERFORMED)
+    blocking generation(s): lJVNMHScZJ                                    rc=2
+```
+
+**Why the fix is at the merge point and not in the window.** Bash has no compare-and-swap rename —
+coreutils `mv` exposes neither `RENAME_EXCHANGE` nor `RENAME_NOREPLACE` — so *"publish only if the
+report is still the one I read"* is **not expressible**, and a fifth check inside the window would only
+narrow it again. `premerge-assert.sh` runs long after the reviewer has stopped writing, so a check
+there races nobody: under `--c-verdict AUTO`, when the published token is `AUTHOR-PERFORMED`, it
+censuses EVERY generation of that stage (`c_assert_no_superseded_blocking_verdict`) and refuses the
+merge naming the generation and its nonce.
+
+**The shape of the argument, stated because this repository ordinarily rejects it.** *A check placed
+AFTER a harmful effect can only REPORT it, never PREVENT it.* What makes a consumer-side check
+**sufficient** here rather than a fig leaf is that the harm is a **mis-published verdict and nothing
+else** — no bytes were destroyed, *because round 15 kept them* — so the evidence is still on disk to be
+read, and the only thing that had to be prevented is a MERGE resting on it. **`record-author-performed`
+is not made atomic by any of this, and no site may say the window is closed;** what changed is that its
+outcome cannot certify a merge.
+
+**Asked of `AUTHOR-PERFORMED` alone, and the `PASS` case is not reachable as a defect.** No subcommand
+publishes a `PASS`: `open`/`open --force` publish a fresh generation carrying the NON-VERDICT sentinel,
+and `record-author-performed` publishes its own distinct token. So a published `PASS` is always a report
+an independent reviewer wrote, at a generation whose `head-sha:` binds the certified tree — and a
+superseded `FINDINGS` beneath it is the **sanctioned remediation flow** this very script prints as its
+remedy (findings recorded, fixed, stage re-opened, re-audited, `PASS`). The two shapes are
+**indistinguishable on disk**, so refusing there would red on correct input — the guard agents learn to
+waive — and there is *nothing to check* rather than something left unchecked.
+
+**The blocking set is closed at `FINDINGS`.** `NOT-RUN` at a superseded generation is an ABSENT audit,
+which is the exact state a disclosed substitute exists to stand in for; `PASS` there is a STRONGER
+verdict than the substitute and lets nothing through that it would not have; `AUTHOR-PERFORMED` there is
+another substitute. Only `FINDINGS` is an independent audit that said NO.
+
+**Reads route through the boundaries that already exist, because a new reader is a new bypass** (rounds
+14 and 20 were both exactly that). `[ -L ]` on the generation FIRST — `-e`/`-f` answer about the TARGET,
+and are FALSE for a dangling link, which is the permissive `absent` state — then
+`c_record_bytes`, so the census inherits the NUL mapping (`c_capture_map_nul`) and the two-signal
+complete-read assert rather than adding a second reader of file bytes. The generations' PARENT
+components are the stage record's own, and the head-sha binding has already read that record
+successfully by the time this runs. An unreadable generation is one of five NAMED
+`unmeasurable-*` causes and REFUSES — *"I could not read this generation" is not "this generation
+records nothing blocking"* — and the permissive verdict is keyed on the affirmative flag value with a
+fail-closed arm.
+
+**The census reader is a SECOND reader of the `result:` grammar, and the licence for that is
+one-directional.** Where it diverges from `classify_report` it diverges toward REFUSING: several
+column-zero `result:` lines are AMBIGUOUS/`NOT-RUN` at `classify_report` and `blocking` here if any of
+them carries the token, which is round 3's G2 defect (a stale `result: PASS` followed by an APPENDED
+`result: FINDINGS`) read the safe way. It is never MORE PERMISSIVE about `FINDINGS`, which is the only
+direction that can produce a false pass, and that property is pinned as a **differential over one
+shared 10-row table** driving the SHIPPED reader (extracted from the artifact) against
+`classify_report` — because a second implementation's agreement is only knowable by testing it. ANSI is
+deliberately NOT stripped, for round 15's U2 reason: `classify_report` does not strip it either, so a
+CSI-spliced or CSI-bracketed token is not `FINDINGS` at EITHER reader, and stripping here would
+MANUFACTURE a token the file does not hold.
+
+**Two declared residuals.** (1) An EXPLICIT `--c-verdict <path>` is **not** censused: that mode
+consults no stage and never learns an issue number, so there is no generation set to enumerate. A
+caller supplying a file instead of `AUTO` is choosing the evidence, which is invoker-class and out of
+that script's model; `AUTO` is what `flow-closer`'s doctrine mandates, and the boundary is PINNED as a
+case rather than left as prose. (2) There is deliberately **no break-glass**: a recorded independent
+`FINDINGS` is not waivable by an author's own audit, because CLAUDE.md's remedy for FINDINGS is to fix
+it or get the lead's ruling and RE-RUN THE STAGE, and a re-run recording `PASS` clears this check by
+construction. An authorization channel was NOT invented — that is a whole mechanism (#3312's rules on
+who may grant, through which channel, bound to what) and it is not needed for a state whose remedy is
+ordinary and always available.
 
 **AND "COULD NOT READ IT" IS NOT "NOTHING IS RECORDED" (#3751 round 13, S1).** Round 12's R2 gave
 `classify_report` an UNREADABLE observation state, and this guard branched on the classified TOKEN
