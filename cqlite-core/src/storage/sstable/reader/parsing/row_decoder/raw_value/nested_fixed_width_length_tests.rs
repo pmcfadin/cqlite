@@ -675,14 +675,18 @@ fn wrong_width_udt_field_of_five_types_is_refused_since_3631() {
         }
         for w in wrong {
             let body = framed(&vec![0x11u8; w]);
-            let err = p
-                .parse_inline_udt_value(&body, "t", &one_field_udt(ft.clone()), 0)
-                .expect_err(&format!(
+            // `expect_err(&format!(..))` would trip clippy's `expect_fun_call` under
+            // the gate's `-D warnings`; match instead, which also lets the message
+            // carry the value that was wrongly accepted.
+            let err = match p.parse_inline_udt_value(&body, "t", &one_field_udt(ft.clone()), 0) {
+                Ok(v) => panic!(
                     "a {w}-byte `{name}` UDT field must be refused (Cassandra admits \
-                     {width} only). If this now decodes, #3631's width check has been \
-                     relaxed — update this test, this module's header and \
+                     {width} only), got {v:?}. If this now decodes, #3631's width check \
+                     has been relaxed — update this test, this module's header and \
                      `complex_column/cell_path_key.rs`'s note together"
-                ));
+                ),
+                Err(e) => e,
+            };
             assert!(
                 is_declared_width_error(&err),
                 "{name} ({w} bytes): expected the declared-width refusal from \
