@@ -497,8 +497,12 @@ fn legal_short_and_absent_encodings_stay_legal() {
 /// (see its declaration) — nothing here notices an arm ADDED or RENAMED in
 /// `raw_value::reporting`, so such an arm leaves this test GREEN. What it does
 /// assert is that every name the list DOES carry still behaves exactly as its
-/// pinned serializer requires; the trailing loop asserts only that four NAMED
-/// variable-width types are not width-constrained.
+/// pinned serializer requires; the trailing loop asserts only that the names it
+/// SPELLS (`text`, `blob`, `varint`) are not width-constrained. `inet` was in that
+/// loop and is deliberately NOT — it is width-constrained in Cassandra, and its own
+/// case below measures the divergence. The names are spelled rather than counted:
+/// this doc said "four" after that removal, which is the drifting-count defect this
+/// PR already fixed once (roborev r20 / job 113, and r10 before it).
 #[test]
 fn admissible_widths_match_the_pinned_serializers() {
     let p = parser();
