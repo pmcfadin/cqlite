@@ -128,8 +128,12 @@ fn float32_renders_shortest_decimal_that_round_trips_the_f32() {
         // and two are equidistant. The dump (Cassandra `Float.toString`) rounds the
         // tie to an even last digit; Rust's `Display` rounds away from zero and
         // emits `36.601563`. Measured on the real `test_timeseries.sensor_data`
-        // `temperature` cell that the AD2 lane compares.
-        (36.6015625, "36.601562"),
+        // `temperature` cell that the AD2 lane compares. Written as the exact
+        // fraction 4685/128 because the decimal literal `36.6015625` trips
+        // `clippy::excessive_precision` (an f32 literal may carry no more digits
+        // than the f32 needs, and this value's shortest form is 8 of its 9) —
+        // the same reason the spread test below spells it that way.
+        (4685.0 / 128.0, "36.601562"),
         // Integral and zero spellings.
         (0.0, "0.0"),
         (-0.0, "-0.0"),
