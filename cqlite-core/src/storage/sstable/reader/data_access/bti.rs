@@ -28,6 +28,11 @@ use crate::Error;
 #[cfg(not(feature = "tombstones"))]
 use tracing::debug;
 
+// Issue #3721: the seek's decode step + its ONE fallback. Declared HERE, and gated
+// exactly like `scan_single_partition_clustering` below, which is its only caller.
+#[cfg(not(feature = "tombstones"))]
+mod clustering_seek_decode;
+
 impl SSTableReader {
     /// Current value of the test-only `scan_for_key` invocation counter.
     ///
@@ -166,63 +171,35 @@ impl SSTableReader {
             )
             .await?;
 
-        // Issue #1184: an engaged BIG clustering narrowing decodes the selected block
-        // window via `big_promoted.rs` (partition-key-bytes guard, not the BTI strict
-        // table-id match that rejects writer-header SSTables). BTI keeps its decoder.
-        if !is_bti && clustering_engaged {
-            if let Some(rows) = self
-                .big_decode_clustering_window(
-                    partition_key,
-                    offset,
-                    decode_end_bound,
-                    row_body_window,
-                    schema_opt.as_ref(),
-                )
-                .await?
-            {
-                if !rows.is_empty() {
-                    super::super::super::work_counters::add_partition_decoded();
-                }
-                return Ok(Some((rows, true)));
-            }
-        }
-
-        // 2. Decode ONLY the target partition at the resolved offset, using the
-        //    SAME parser the scan path uses. `bti_decompress_and_parse_target_all`
-        //    chunk-targets the decompression (decodes just the chunk window that
-        //    holds the partition) and re-verifies the decoded key, so this is
-        //    O(1) PARTITIONS decoded regardless of the SSTable's partition count.
-        //
-        //    Issue #953 correctness fix: this collects EVERY clustering row of the
-        //    one target partition (bounded by the authoritative successor offset /
-        //    data-section length), not just the first row, so a `WHERE pk = ?`
-        //    over a multi-clustering-row
-        //    partition returns all rows — byte-identical to filtering the full
-        //    scan down to `partition_key`. The single-row `*_target` decoder is
-        //    still used by the `get()` point-lookup path, which returns one Value.
-        //
-        //    Issue #954: when `row_body_window` is set, the parse is bounded to the
-        //    clustering slice's row-index block extent so only O(slice) rows are
-        //    decoded (the post-scan backstop trims the block-granularity slack).
-        let parser = self.build_v5_parser(true);
+        // 2. Decode ONLY the target partition at the resolved offset. Issue #3721:
+        //    the decode step lives in `clustering_seek_decode` because a per-column
+        //    decode failure under an INDEX-POSITIONED narrowing must retract that
+        //    narrowing and re-read the full partition — a decision that needs BOTH
+        //    the narrowed and the authoritative bounds, which only this call has.
+        //    `clustering_engaged` comes back FALSE when the narrowing was retracted,
+        //    so the caller's reported `AccessPath` stays honest.
         let key = RowKey::from(partition_key.to_vec());
-        let decoded_rows = match self
-            .bti_decompress_and_parse_target_all(
-                offset as usize,
-                decode_end_bound,
-                // Issue #3890: the UN-narrowed successor offset — `decode_end_bound`
-                // may point INSIDE the partition, which is right for the
-                // DECOMPRESSION and wrong for the PARSE.
-                end_bound,
-                row_body_window,
-                &key,
+        let (decoded, clustering_engaged) = self
+            .decode_clustering_seek_target(
                 table_id,
+                partition_key,
+                &key,
+                is_bti,
                 fully_qualified_match,
+                offset,
+                // Issue #3890 x #3721: the UN-narrowed successor offset is BOTH
+                // the retraction bound and the authoritative PARSE bound —
+                // `decode_end_bound` may point INSIDE the partition, which is
+                // right for the DECOMPRESSION and wrong for the PARSE. Passed
+                // ONCE, as `full_end_bound`, so the two uses cannot drift apart.
+                end_bound,
+                decode_end_bound,
+                row_body_window,
+                clustering_engaged,
                 schema_opt.as_ref(),
-                &parser,
             )
-            .await?
-        {
+            .await?;
+        let decoded_rows = match decoded {
             // Authoritatively bounded decode (rows may be empty for an absent key).
             Some(rows) => rows,
             // The seek could not bound the target partition authoritatively (the

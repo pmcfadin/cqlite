@@ -46,8 +46,21 @@
 # driver's measurement loop, AFTER every argument check, the topology verification, the corpus
 # and schema verification and the session pin. They read driver globals — `$SERVER_CPUS`,
 # `$CLIENT_CPUS`, `$BIN`, `$CORPUS`, `$OUT_DIR`, `$PORT`, `$FLIGHT_ENDPOINT`, `$TICKET_TEMPLATE`,
-# `$SCAN_PASSES`, `$STEP_DURATION`, `$COLD_STEP_DURATION`, `$SERVER_PID` — and call `perf_stat_c`,
-# `drop_caches_if_cold`, `stop_server`, `require_port_free` and `await_server_ready`.
+# `$SCAN_PASSES`, `$STEP_DURATION`, `$COLD_STEP_DURATION`, `$SERVER_PID`, and since #3551
+# `$FLIGHT_SERVER_CPUS`, `$FLIGHT_ALLOCATOR`, `$FLIGHT_ALLOCATOR_LIB` and
+# `$FLIGHT_ALLOCATOR_LIB_BASENAME` — and call `perf_stat_c`, `drop_caches_if_cold`,
+# `stop_server`, `require_port_free`, `await_server_ready` and (since #3551)
+# `verify_flight_allocator_mapping`, which lives in `scripts/perf/lib-flight-arm.sh` with the
+# rest of the flight-arm difference rather than here: this file owns HOW a rep is executed, that
+# one owns WHAT differs between the arms and whether it was verified.
+#
+# They also WRITE two driver globals, which is why both are listed rather than left implicit:
+# `$SERVER_PID` (as they always have) and, since #3551, `$PERF_COUNT_CPUS` — the CPU-WIDE
+# counting domain, which each leg sets to the CPUs ITS OWN server ran on. That assignment lives
+# in the leg rather than in the driver's loop deliberately: the perf window and the `taskset`
+# that decides where the work runs are three lines apart HERE, so they cannot drift out of
+# agreement, whereas a loop-side assignment is one refactor away from counting the other arm's
+# cores. The driver initialises it before any leg runs, so it is never unset.
 #
 # `$FLIGHT_ENDPOINT` (#3272 round 14, F2) is the ONE spelling of the measured server: the driver
 # derives it from the validated `$PORT` and stamps it into the session manifest before rep 1, and
@@ -79,6 +92,11 @@ WS0_MEASURE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ---------------------------------------------------------------------------
 measure_scan() {
   local temp="$1" rep="$2" tag="scan-$temp-$rep"
+  # THE DRIFT CONTROL MUST BE UNPERTURBED, AND THAT IS ASSERTED RATHER THAN INTENDED (#3551).
+  # This leg's three `ws0-scan-bench` launches inherit THIS shell's environment, so the check is
+  # against that environment, immediately before them: nothing can change between the two, since
+  # it is the same process. An affirmative measurement of the thing the child will receive.
+  assert_scan_env_unperturbed "$tag" || exit 1
   drop_caches_if_cold "$temp"
 
   # --- untimed PREWARM (warm arm only) -----------------------------------------
@@ -145,6 +163,15 @@ measure_scan() {
   fi
   printf '%s\n' "$prewarm_status" > "$OUT_DIR/$tag.prewarm.status"
 
+  # THE COUNTING DOMAIN, SET IMMEDIATELY BEFORE THE WINDOW (#3551). The bare scan always runs
+  # on `$SERVER_CPUS` — that is what makes it a pin-identical drift control across arms that
+  # differ only in the FLIGHT pin — so this is the value it has always had. It is assigned HERE,
+  # on the line before the wrapper call rather than once at the top of the function, because the
+  # wrapper VALIDATES the pairing (counted list vs the `taskset -c` list of the command it
+  # brackets) against the pins this session verified: the assignment and the thing it must agree
+  # with are then one line apart and cannot drift. There is no default in the wrapper — an unset
+  # value is a named refusal, not an inherited `$SERVER_CPUS`.
+  PERF_COUNT_CPUS="$SERVER_CPUS"
   # Setup-only leg: the corpus open + schema ingest, under its OWN perf window,
   # so its cycles can be SUBTRACTED from the full run (spec R2).
   perf_stat_c "$OUT_DIR/perf-$tag-setup.csv" \
@@ -153,6 +180,7 @@ measure_scan() {
     > "$OUT_DIR/$tag-setup.json" 2> "$OUT_DIR/$tag-setup.err"
 
   drop_caches_if_cold "$temp"
+  PERF_COUNT_CPUS="$SERVER_CPUS"
   perf_stat_c "$OUT_DIR/perf-$tag.csv" \
     taskset -c "$SERVER_CPUS" "$BIN/ws0-scan-bench" \
       --corpus "$CORPUS" --passes "$SCAN_PASSES" \
@@ -172,12 +200,57 @@ measure_flight() {
   stop_server
   require_port_free "before $tag"
   drop_caches_if_cold "$temp"
-
-  CQLITE_FLIGHT_MERGE_PATH="$arm" taskset -c "$SERVER_CPUS" "$BIN/cqlite-flight" \
-    --data-dir "$CORPUS" --listen "127.0.0.1:$PORT" \
-    > "$OUT_DIR/$tag.server.log" 2>&1 &
+  # `LD_PRELOAD` IS ALWAYS SET, AND ON THE SYSTEM ARM IT IS SET TO EMPTY (#3551).
+  #
+  # Two facts in one line. On the jemalloc arm it preloads the resolved library into the SERVER
+  # PROCESS ONLY — the binary is byte-identical across arms, which is the whole reason to do this
+  # with a preload rather than a build flag. On the system arm it EMPTIES any value inherited
+  # from the operator's environment, rather than trusting it to be unset: a control arm quietly
+  # running jemalloc does not merely add noise, it INVERTS the comparison. What it was set to is
+  # recorded in pinning-verification.json, and the outcome is OBSERVED below rather than assumed.
+  # ONLY THIS PROCESS, and that is the whole method (#3551). Exporting either variable before
+  # `ws0-baseline.sh` would reach `ws0-scan-bench` too (this file launches it three times, at the
+  # prewarm, the setup-only leg and the timed scan), putting the BARE-SCAN DRIFT CONTROL on a
+  # different allocator in arm C than in arms A/B — which breaks method §3b step 3, the one
+  # property these flags exist to provide. So the injection is per-process, on this line, and the
+  # bare-scan path ASSERTS it received neither (see `assert_scan_env_unperturbed`).
+  local preload=""
+  [[ "$FLIGHT_ALLOCATOR" == "jemalloc" ]] && preload="$FLIGHT_ALLOCATOR_LIB"
+  # TWO LAUNCH FORMS, because an ABSENT `MALLOC_ARENA_MAX` is not the same as an empty one and
+  # this rig may not guess which glibc does what with a zero/empty value. `LD_PRELOAD` is set on
+  # BOTH — to the library on the jemalloc arm, to EMPTY on the system arm, where an empty value
+  # preloads nothing AND neutralises anything inherited. An ambient one is refused before the
+  # first rep, so this is belt and braces rather than the only control.
+  if [[ -n "$FLIGHT_MALLOC_ARENA_MAX" ]]; then
+    CQLITE_FLIGHT_MERGE_PATH="$arm" LD_PRELOAD="$preload" MALLOC_ARENA_MAX="$FLIGHT_MALLOC_ARENA_MAX" taskset -c "$FLIGHT_SERVER_CPUS" "$BIN/cqlite-flight" \
+      --data-dir "$CORPUS" --listen "127.0.0.1:$PORT" \
+      > "$OUT_DIR/$tag.server.log" 2>&1 &
+  else
+    CQLITE_FLIGHT_MERGE_PATH="$arm" LD_PRELOAD="$preload" taskset -c "$FLIGHT_SERVER_CPUS" "$BIN/cqlite-flight" \
+      --data-dir "$CORPUS" --listen "127.0.0.1:$PORT" \
+      > "$OUT_DIR/$tag.server.log" 2>&1 &
+  fi
   SERVER_PID=$!
   await_server_ready "$tag"
+
+  # ...AND THE ALLOCATOR IS VERIFIED FROM THE RUNNING PROCESS, PER REP (#3551).
+  # AFTER `await_server_ready`, because a process that has not finished starting has not yet
+  # mapped its libraries. FATAL either way: an unmet expectation means this rep measured an arm
+  # other than the one it is labelled, which is worse than no rep.
+  local alloc_status=""
+  # ONE LINE deliberately, the same trap the prewarm calls above record: split across a `\`
+  # continuation, the next line's first token would be a bare `"$VAR"`, which
+  # `lib-perf-lint.sh`'s fail-closed layer 1 classifies as a POSSIBLE perf invocation (an
+  # unresolvable command word could be anything, including perf). Measured, at this very call.
+  if ! alloc_status="$(verify_flight_server_allocator "/proc/$SERVER_PID/maps" "/proc/$SERVER_PID/environ" "$FLIGHT_ALLOCATOR" "$FLIGHT_ALLOCATOR_LIB" "$FLIGHT_MALLOC_ARENA_MAX" "$tag")"; then
+    printf '%s\n' "FAILED-$FLIGHT_ALLOCATOR-allocator-UNVERIFIED" > "$OUT_DIR/$tag.allocator.status"
+    stop_server
+    echo "FATAL: the allocator this rep was LABELLED with was not the one the server process" >&2
+    echo "       is running ($tag, --flight-allocator $FLIGHT_ALLOCATOR). See the refusal" >&2
+    echo "       above and $OUT_DIR/$tag.server.log." >&2
+    exit 1
+  fi
+  printf '%s\n' "$alloc_status" > "$OUT_DIR/$tag.allocator.status"
 
   # Prewarm OUTSIDE the perf window (warm arm only): opens the readers and fills
   # the warm-handle registry, so the measured window is steady-state scan work
@@ -247,6 +320,16 @@ measure_flight() {
   fi
   printf '%s\n' "$prewarm_status" > "$OUT_DIR/$tag.prewarm.status"
 
+  # THE COUNTING DOMAIN IS WHERE THIS SERVER ACTUALLY RUNS (#3551), assigned on the line before
+  # the window for the reason `measure_scan` states. `perf stat -C` counts the SERVER's CPUs
+  # while this window brackets the LOAD GENERATOR on the client set — deliberately, so the
+  # client's own cost stays outside the counted domain — so the counted list and the argv's
+  # `taskset -c` list MUST differ here, and the wrapper's pairing table has an entry for exactly
+  # that. With a flight pin that differed from `$SERVER_CPUS` the OLD domain would have counted
+  # cores that served nothing and divided their idle by this rep's rows: fewer cycles for the
+  # same rows, i.e. a fabricated win. Equal to `$SERVER_CPUS` whenever the flight pin is
+  # defaulted, so the argv is unchanged for every pre-#3551 invocation.
+  PERF_COUNT_CPUS="$FLIGHT_SERVER_CPUS"
   perf_stat_c "$OUT_DIR/perf-$tag.csv" \
     taskset -c "$CLIENT_CPUS" "$BIN/flight-loadgen" \
       --endpoint "$FLIGHT_ENDPOINT" --ticket-template "$TICKET_TEMPLATE" \

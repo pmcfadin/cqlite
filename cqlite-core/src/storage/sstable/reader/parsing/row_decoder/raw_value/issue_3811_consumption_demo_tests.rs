@@ -39,7 +39,7 @@
 //! `parse_value_from_raw_bytes` is documented as bounded — "The entire `data`
 //! slice IS the value" — and is now a thin wrapper over
 //! `parse_value_from_raw_bytes_reporting`, which threads a real consumption
-//! count out of EVERY arm, plus `require_fully_consumed_raw`. The two UDT arms
+//! count out of EVERY arm, plus `require_fully_consumed`. The two UDT arms
 //! it used to discard the count on:
 //!
 //! - the **marshal-form arm** (`other if Self::is_udt_type`), reached with an
@@ -56,7 +56,7 @@
 //! Every case below carries an explicit label:
 //!
 //! - **DISCRIMINATING** — it FAILS if the defect is reintroduced (i.e. if the
-//!   `require_fully_consumed_raw` call in `raw_value.rs` is removed).
+//!   `require_fully_consumed` call in `raw_value.rs` is removed).
 //! - **CONTROL / NON-DISCRIMINATING** — it passes before AND after, and exists to
 //!   prove the fix is not over-strict. `*_case1_*` and `*_case4_*` are these; they
 //!   are the guard against the "all declared fields must be present" mis-fix.
@@ -341,7 +341,7 @@ fn marshal_arm_case1_exact_decodes_ok() {
 /// Before #3811 CQLite ACCEPTED this — the marshal arm returned a short
 /// `current_offset` and `raw_value.rs` discarded it with
 /// `let (val, _offset) = …`. It is now refused by the wrapper's
-/// `require_fully_consumed_raw`.
+/// `require_fully_consumed`.
 #[test]
 fn marshal_arm_case2_trailing_garbage_is_refused() {
     assert_refused_short(

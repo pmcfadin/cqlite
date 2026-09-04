@@ -407,9 +407,9 @@ fn key_is_opaque_composite(cmp: &ComparatorType) -> bool {
 /// actually diverged (roborev job 67):
 ///   * `inet` (`InetAddressType`): raw address bytes — `9.0.0.1` = `[9,0,0,1]`
 ///     precedes `10.0.0.1`, the REVERSE of string order: a real misordering.
-///   * `time` (`TimeType`): big-endian nanos-of-day, always non-negative, so byte
-///     order == numeric; and `fmt_time` zero-pads, so over the VALID range string
-///     order EQUALS it — the old comparator was already right (no counterexample).
+///   * `time` (`TimeType`): nanos-of-day, BYTE_ORDER — raw `cell_path` bytes ARE
+///     Cassandra's order for EVERY 8-byte value, negatives included (#3935 refuted
+///     the "always non-negative" premise; citations in `custom::compare_time`).
 ///
 /// Branches on the DECLARED type only (no-heuristics, issue #28); recurses through
 /// `Frozen` defensively though neither inet nor time is ever frozen here.

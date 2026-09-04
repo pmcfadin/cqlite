@@ -7,8 +7,11 @@ use super::*;
 // composite key and ~10 scalar families. Its only caller is the map branch
 // below, so it nests here rather than beside the whole-value decoders.
 mod cell_path_key;
+
 #[cfg(test)]
 mod cell_path_key_tests;
+#[cfg(test)]
+mod regression_3747_empty_map_key_tests;
 // Issue #3612 (R3-F1): the guarded component-length conversion, shared with the
 // UDT field loops in `udt.rs` / `raw_type_value.rs` (see that module's header for
 // why it lives here).
@@ -768,28 +771,31 @@ impl V5CompressedLegacyParser {
                 // Decode the map key (from cell_path) up front so it can be both
                 // recorded on the per-element compaction entry and used to build
                 // the collapsed `Value::Map`.
-                let decoded_key = if !cell.path_bytes.is_empty() {
-                    tracing::debug!(
-                        "V5CompressedLegacy: Parsing map key for column '{}', key_type='{}', path_len={}",
-                        column.name,
-                        key_type,
-                        cell.path_bytes.len()
-                    );
-                    // For cell path keys, parse directly without expecting length prefixes
-                    let mut opaque = false;
-                    let decoded = self.parse_cell_path_key_reporting(
-                        &cell.path_bytes,
-                        &key_type,
-                        &column.name,
-                        &mut opaque,
-                    )?;
-                    if opaque {
-                        opaque_key_entries += 1;
-                    }
-                    Some(decoded)
-                } else {
-                    None
-                };
+                //
+                // ISSUE #3747 — DECODED UNCONDITIONALLY. A map cell's cell path IS its key,
+                // so a ZERO-LENGTH path is an EMPTY KEY (`{'': 1}` is valid CQL; empty is
+                // DISTINCT from null), never "no key" — the old `!is_empty()` guard dropped
+                // it. Which empties are legal: #3612's `cell_path_key_allowed_widths`.
+                // Errors propagate, deliberately. `cell_path_key`'s committed error-budget
+                // rule draws the line at CASSANDRA: `Err` only where Cassandra's own
+                // `validate`/`split` throws (a wrong fixed width, a non-4/16 `inet`,
+                // trailing composite bytes) — so an empty `tinyint`/`date`/`decimal` key is
+                // corruption and must refuse, exactly as a malformed NON-empty key does. An
+                // empty key that Cassandra ACCEPTS but this reader cannot type never reaches
+                // here as an `Err`: that module preserves it opaquely instead. Row
+                // assembly's swallow of this `Err` into a truncated row is a PRE-EXISTING
+                // defect of `row_data.rs`, tracked separately, not a reason to hide
+                // corruption at this site.
+                let mut opaque = false;
+                let decoded_key = self.parse_cell_path_key_reporting(
+                    &cell.path_bytes,
+                    &key_type,
+                    &column.name,
+                    &mut opaque,
+                )?;
+                if opaque {
+                    opaque_key_entries += 1;
+                }
 
                 // Epic #899: surface the map entry to the compaction path keyed
                 // by its cell_path (the map key bytes); value is the map value
@@ -799,19 +805,13 @@ impl V5CompressedLegacyParser {
                     &mut elements_out,
                     &cell,
                     cell.value.clone(),
-                    decoded_key.clone(),
+                    Some(decoded_key.clone()),
                     row_timestamp,
                 );
 
-                if let Some(key_value) = decoded_key {
-                    // Add non-null entries to the map
-                    if let Some(val) = cell.value {
-                        entries.push((key_value, val));
-                    } else {
-                        // Map entry with null value (tombstone for that key)
-                        entries.push((key_value, Value::Null));
-                    }
-                }
+                // Every DECODED entry reaches the map (post-#3747, representable empties
+                // included). `None` cell value stays (key, Null) — issue #493.
+                entries.push((decoded_key, cell.value.unwrap_or(Value::Null)));
             }
 
             // ONE line per column per row, carrying the COUNT. Content unchanged

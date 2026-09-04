@@ -1,0 +1,23 @@
+{
+  "fields": {
+    "arena_max": "2",
+    "arm_flags.A": "--flight-server-cpus 2,10 --flight-pin-mode siblings --flight-allocator system",
+    "arm_flags.B": "--flight-server-cpus 2,3 --flight-pin-mode distinct-cores --flight-allocator system",
+    "arm_flags.C": "--flight-server-cpus 2,3 --flight-pin-mode distinct-cores --flight-allocator jemalloc",
+    "arm_flags.C0": "--flight-server-cpus 2,3 --flight-pin-mode distinct-cores --flight-allocator system --flight-malloc-arena-max 2",
+    "arms": "A B C0 C",
+    "bin_dir": "/data/ws0-3551/bins",
+    "binary_sha256.cqlite-flight": "bfe0b302c55b569a806ed283460a986504ea03ab121334ae2b02b074e6d37b15",
+    "binary_sha256.flight-loadgen": "c8cb57a0cd5b2a121848ef0f84e0d5c0e9a1eeb1cca87df534bd692934b48af3",
+    "binary_sha256.ws0-scan-bench": "11c274503161258679ec96522a8de9ad38085c61b4fd645ec77b1dd559faeacf",
+    "corpus_data_db_sha256": "4a903f6fa27c04dbf87a44fddf78615aed73fcd379ecaee6669f6b0d9bbae269",
+    "corpus_path": "/data/ws0-3096",
+    "corpus_rows": "4000000",
+    "jemalloc_lib": "",
+    "port": "18815",
+    "step_duration": "45s"
+  },
+  "issue": "#3551",
+  "note": "the RUN FINGERPRINT of this A/B/C set, written by the first invocation and VERIFIED field-by-field by every later one. A differing field is a REFUSAL: sessions measured under different treatments are not a paired experiment.",
+  "rounds_excluded": "--rounds is deliberately NOT a field here. Extending a set from 3 rounds to 5 over the same --out is a legitimate resume \u2014 the same experiment with more pairs \u2014 and refusing it would red correct input."
+}

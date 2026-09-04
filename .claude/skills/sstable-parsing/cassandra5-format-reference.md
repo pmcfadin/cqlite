@@ -32,11 +32,11 @@ Extracted from Apache Cassandra 5.0 source code (UnfilteredSerializer.java, Cell
 |-------|------|---------|
 | `0x01` | `EXTENDED_IS_STATIC` | Static row — carries **NO** clustering prefix |
 
-> **Citations**: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/mod.rs:709-715`
+> **Citations**: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/row_flags.rs:12-18`
 > (`ROW_HAS_TIMESTAMP` `0x04`, `ROW_HAS_TTL` `0x08`, `ROW_HAS_DELETION` `0x10`,
 > `ROW_HAS_ALL_COLUMNS` `0x20`, `ROW_HAS_COMPLEX_DELETION` `0x40`,
-> `ROW_HAS_EXTENDED_FLAGS` `0x80`), `:820` (`END_OF_PARTITION = 0x01`), `:821`
-> (`IS_MARKER = 0x02`), `:825` (`EXTENDED_IS_STATIC = 0x01`). Guide:
+> `ROW_HAS_EXTENDED_FLAGS` `0x80`), `:24` (`END_OF_PARTITION = 0x01`), `:26`
+> (`IS_MARKER = 0x02`), `:31` (`EXTENDED_IS_STATIC = 0x01`). Guide:
 > `docs/sstables-definitive-guide/chapters/appendix-b-encodings-cheat-sheet.md:206-212`.
 > Cassandra: `UnfilteredSerializer.java:102-109` and `:114-122`.
 
@@ -235,12 +235,12 @@ All 18 cells present in schema order
 
 1. **Partition boundary FIRST**: a flag byte of `0x01` (`END_OF_PARTITION`) ends the
    partition — nothing follows it. Check it before interpreting any other bit
-   (`row_decoder/mod.rs:820`).
+   (`row_decoder/row_flags.rs:24`).
 2. **Markers are not rows**: `0x02` (`IS_MARKER`) means a RangeTombstoneMarker, not a Row
-   (`row_decoder/mod.rs:821`).
+   (`row_decoder/row_flags.rs:26`).
 3. **Clustering Prefix**: MUST check if `clustering_types.is_empty()` before reading; a
    static row (`EXTENDED_IS_STATIC` = `0x01` of the **extended** byte) has no clustering
-   prefix at all (`row_decoder/mod.rs:825`).
+   prefix at all (`row_decoder/row_flags.rs:31`).
 4. **Column Bitmap**: Only read if HAS_ALL_COLUMNS (0x20) **not** set
 5. **Delta Encoding**: All timestamps/TTLs are deltas, not absolute values
 6. **Cell Empty Flag**: Logic is **inverted** - flag set = empty, flag clear = has value
@@ -288,8 +288,10 @@ The V5 row/partition decoder lives in the
 `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/` **directory** (~30 files).
 Entry points:
 
-- `row_decoder/mod.rs` — flag constants (`END_OF_PARTITION`, `IS_MARKER`,
-  `ROW_HAS_*`, `EXTENDED_IS_STATIC`) and the parser struct.
+- `row_decoder/row_flags.rs` — the row + extended flag constants
+  (`END_OF_PARTITION`, `IS_MARKER`, `ROW_HAS_*`, `EXTENDED_IS_STATIC`); they left
+  `mod.rs` in a campsite-rule split (epic #1116). `row_decoder/mod.rs` — the parser
+  struct and entry point.
 - `row_decoder/row_framing.rs` — row/partition framing and boundary detection.
 - `row_decoder/cell_value.rs` — the production cell decoder + the five `CELL_*` flag
   constants (`:49-53`). `row_data.rs`, `cell_value_scalar.rs`, `cell_value_complex.rs` —

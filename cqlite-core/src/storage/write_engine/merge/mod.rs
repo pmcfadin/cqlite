@@ -9511,8 +9511,8 @@ mod issue_912_row_tombstone_clustering_identity {
         );
     }
 
-    /// A tombstone with no captured clustering (unclustered table / partial
-    /// prefix) keeps the pre-#912 `None`-bucket behavior.
+    /// A tombstone with no captured clustering (a static row, or an unclustered
+    /// table; a PARTIAL prefix is refused upstream, #3809) keeps the `None` bucket.
     #[test]
     fn tombstone_without_clustering_falls_into_none_bucket() {
         let schema = clustered_schema();

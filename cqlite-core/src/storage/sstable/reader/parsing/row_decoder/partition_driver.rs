@@ -47,13 +47,180 @@ pub(super) fn row_write_timestamp(row_header_opt: &Option<RowHeader>) -> i64 {
 }
 
 /// How the driver should advance after a policy handled a range-tombstone marker.
+///
+/// `Unparseable` and `Refused` are two of the three states ONE signal used to
+/// conflate (issue #3721), and the distinction between them is a FRAMING one,
+/// decided from state the caller already holds — never a severity judgement and
+/// never a byte pattern:
+///
+/// * `Unparseable` — the marker could not be PARSED, so there is no resume
+///   offset, and the cause is PRESERVED: `NeedMore` on a non-final chunk (a
+///   refill may still complete the marker) and the preserved error propagated on
+///   the FINAL chunk, where no refill is coming and completing the partition
+///   would report success with the marker — and every later row — missing.
+///
+///   The third state, `Stop`, is GONE (roborev job 78). It expressed "this parse
+///   failure IS a framing terminator", which let the FINAL chunk complete the
+///   partition SUCCESSFULLY without the marker: a silently truncated `SELECT` on
+///   the read path, and a dropped tombstone in WRITTEN output on the compaction
+///   path (roborev job 16). Both policies produced it and the meaning was wrong
+///   for both, so the variant is REMOVED rather than left available — a variant a
+///   future policy can reach for is how this defect came to be written twice. See
+///   `range_marker_error`'s module docs for the two facts that settle it and the
+///   Cassandra authority.
+/// * `Refused` — the marker WAS parsed (a resume offset exists and the partition
+///   body continues there) and the policy cannot represent it. Corruption with a
+///   valid resume point, which no refill can fix; reporting it as `Stop` truncated
+///   the partition and returned `Ok`. Both policies produce it: the timestamps
+///   policy when the read-side shadow FSM refuses a bound kind, and the compaction
+///   policy for an unrecognised bound kind of its own (#3808) — where a SKIP is
+///   worse still, because that policy's rows are written to a new SSTable.
 pub(super) enum MarkerOutcome {
     /// The marker was consumed; continue the row loop at this offset.
     Advanced(usize),
-    /// The marker could not be represented/parsed faithfully — terminate the
-    /// partition (the driver flushes buffered rows on the final chunk, else
-    /// returns `NeedMore`), mirroring the pre-K1 `break`/`NeedMore` behaviour.
-    Stop,
+    /// The marker could not be PARSED — no resume offset exists — and the parse
+    /// error is carried here rather than discarded (issue #3721).
+    ///
+    /// The driver, which is the only holder of the chunking state, then decides
+    /// on a FRAMING fact and never on a byte pattern:
+    ///
+    /// * **non-final chunk** — the marker body may simply straddle the window
+    ///   boundary, which is the one explanation a refill can fix, so this is
+    ///   `NeedMore` — the behaviour the removed `Stop` variant had on a non-final
+    ///   chunk, the one half of its meaning that was right;
+    /// * **final chunk** — no further bytes can arrive, so "cannot parse this
+    ///   marker" is corrupt or truncated data and NOT a boundary. The preserved
+    ///   cause is propagated instead of being converted into a successful
+    ///   partition completion.
+    ///
+    /// EVERY policy produces this from its marker-PARSE-failure arm, and the harm
+    /// it prevents is NOT scoped to written output:
+    ///
+    /// * `timestamp_policy` — the USER-FACING read. Completing the partition here
+    ///   returns `Ok` with the tombstone and every later row of the partition
+    ///   missing, and nothing downstream rejects it (`block_emit`'s
+    ///   `partition_complete` flag gates only the #3095 static-only emission). A
+    ///   silently truncated `SELECT` is this issue's PRIMARY harm (roborev job 78).
+    /// * `compaction::CompactionPolicy` — the same omission in output that is
+    ///   WRITTEN, so the rows the dropped tombstone shadowed come back durably, on
+    ///   disk (roborev job 16) — the same harm as the unrecognised bound kind
+    ///   [`MarkerOutcome::Refused`] covers (#3808), for a parse failure instead of
+    ///   an unrepresentable kind.
+    Unparseable(Error),
+    /// The marker was PARSED but cannot be represented faithfully (issue #3721):
+    /// corruption at a known resume point. Propagated to the caller of the read —
+    /// see [`super::range_marker_error::range_marker_refused`].
+    Refused(Error),
+}
+
+/// Issue #3809 (Finding 1) — the DISCRIMINATED outcome of a data-row policy hook.
+///
+/// # Why one `Err` channel was not enough
+///
+/// Issue #3782 gave [`SlidingPartitionPolicy::on_data_row`] an error channel
+/// meaning *the row FAILED TO DECODE*, and made the DRIVER — never the policy —
+/// decide tolerance from its authoritative `at_final_chunk`: at the final chunk no
+/// further bytes can arrive, so the failure is truncation/corruption and is
+/// refused; mid-window it is the ordinary straddling-row case and is answered with
+/// `NeedMore`. That is exactly right for its subject, which is a
+/// BYTES-AVAILABILITY question.
+///
+/// Issue #3809 needs the opposite disposition for a different subject. Its
+/// clustering-identity check
+/// (`CompactionRowData::require_tombstone_clustering_identity`) fires only AFTER
+/// the row DECODED successfully: a row deletion reached the builder having
+/// recovered fewer clustering values than its table declares, so emitting it would
+/// hand the merge a deletion that identifies no row. **No amount of refilling can
+/// make a short clustering become full-arity**, so "maybe more bytes will arrive"
+/// is not merely unhelpful there, it is semantically inapplicable — and on every
+/// entry point that declares [`BufferExtent::Window`](super::BufferExtent::Window)
+/// (the point and promoted readers, the block-by-block scans, the windowed emit)
+/// `at_final_chunk` is `false`, so a single undiscriminated `Err` channel would
+/// convert the refusal into a refill request and silently truncate the read: the
+/// very tolerant-tail data loss both issues exist to remove.
+///
+/// # Why a distinct OUTCOME rather than a kind test at the driver
+///
+/// Two shapes were available. A kind test at the driver (`if err.is_refusal()`)
+/// would need a discriminable marker on [`crate::error::Error`], i.e. either a new
+/// public variant — a public-surface change nothing in this repo detects the drift
+/// of (#3366), and one that would retitle #3809's deliberately-chosen
+/// `Corruption` telemetry bucket — or a message-text test, which the no-heuristics
+/// mandate (#28) forbids outright.
+///
+/// A distinct outcome fits this trait instead, for three reasons:
+///
+/// * This module ALREADY owns a policy-outcome enum of exactly this shape
+///   ([`MarkerOutcome`]), where the policy reports what it found and the driver
+///   decides how to advance.
+/// * It makes the data-losing default UNREPRESENTABLE, which is the argument
+///   [`BufferExtent`](super::BufferExtent) itself is built on. Had the hook kept a
+///   `Result`, a future `?` inside a policy body — the most natural thing to write
+///   — would route a refusal into the TOLERATED channel silently, and that is the
+///   defaulted-flag defect #3782 removed, reintroduced one layer up. With no
+///   `Result` in the signature, `?` does not compile and every failure site must
+///   NAME which of the two it is.
+/// * Both dispositions stay literally true and are readable side by side, so the
+///   trait no longer carries two contracts on one channel.
+///
+/// The cost is stated rather than hidden: a policy that acquires a genuine
+/// plumbing error (neither a decode failure nor a refusal) has no `Err` to return
+/// and must classify it. No policy has one today — all three route a
+/// `parse_row_data_*` `Result` and nothing else — and being forced to choose is
+/// the point.
+#[derive(Debug)]
+pub(super) enum DataRowOutcome {
+    /// The row decoded and was handled; continue the row loop at this offset.
+    Decoded(usize),
+    /// The policy DECLINES the row with no error to report. Unchanged pre-#3782
+    /// behaviour: end-of-partition on the final chunk, else `NeedMore`.
+    ///
+    /// `dead_code`-EXPECTED, and the reason is worth recording rather than
+    /// silencing: NO production policy declines TODAY. Both classify their one
+    /// failure since #3782 (`DecodeFailed`), so the decline path is reached only by
+    /// the driver's `StubPolicy` test harness. That was
+    /// already true on `main` and merely INVISIBLE there, because the hook returned
+    /// `Option<usize>` and `None` is a std variant no lint can call unconstructed.
+    /// It is kept because the DRIVER's disposition of it is load-bearing contract —
+    /// distinct from both failures, pinned by test (f) — and deleting the variant
+    /// would delete that behaviour along with its test.
+    ///
+    /// `#[expect]` rather than `#[allow]` so the allowance is SELF-RETIRING: an
+    /// `expect` that is never triggered is itself a `-D warnings` error, so this
+    /// reds the moment a policy DOES start constructing the variant — i.e. exactly
+    /// when the reason recorded above stops being true.
+    ///
+    /// The `cfg_attr` predicate is REQUIRED and was measured, not guessed: with no
+    /// attribute at all, `dead_code` fires in three of the four configurations and
+    /// stays SILENT in exactly one — cqlite-core's own `--lib` test build WITH
+    /// `write-support`, where the `StubPolicy` harness (itself `write-support`-gated)
+    /// is the sole constructor. A bare `#[expect(dead_code)]` is therefore
+    /// UNFULFILLED there and FAILS the gate of record's `core-tests`
+    /// (`-D unfulfilled-lint-expectations`, implied by `-D warnings`) — measured.
+    /// So the expectation is asserted precisely where the variant IS unconstructed,
+    /// which also makes the predicate a second statement of the reason above: if the
+    /// harness ever stops being the only (or a `write-support`-gated) constructor,
+    /// this reds too, naming the lint rather than failing silently.
+    #[cfg_attr(
+        not(all(test, feature = "write-support")),
+        expect(
+            dead_code,
+            reason = "no production policy declines today; constructed only by the \
+                      driver's StubPolicy test harness, whose disposition of it is \
+                      pinned by test (f)"
+        )
+    )]
+    Declined,
+    /// The row FAILED TO DECODE, with the decoder's error preserved (issue #3782).
+    /// A BYTES-AVAILABILITY answer: the policy does NOT decide tolerance, the
+    /// driver does, from `at_final_chunk` — refused at a proven-complete buffer,
+    /// tolerated as a straddling row mid-window.
+    DecodeFailed(Error),
+    /// The row DECODED but MUST NOT be emitted (issue #3809): a semantic refusal.
+    /// The driver propagates it UNCONDITIONALLY — `at_final_chunk` is not
+    /// consulted, because the question is not about bytes and refilling the window
+    /// cannot change the answer.
+    Refused(Error),
 }
 
 /// Per-consumer policy for the bounded sliding-window partition skeleton
@@ -94,19 +261,58 @@ pub(super) trait SlidingPartitionPolicy {
     ) -> MarkerOutcome;
 
     /// Decode and handle one data row at `offset`, pushing any emitted row into
-    /// `pending`.
+    /// `pending`. Reports which of FOUR things happened via [`DataRowOutcome`];
+    /// the distinction between the last two is load-bearing and is the ONE place
+    /// issue #3782's contract and issue #3809's are reconciled.
     ///
-    /// Three outcomes, and the distinction is load-bearing (issue #3782):
-    /// * `Ok(Some(next_offset))` — the row decoded; continue at `next_offset`.
-    /// * `Ok(None)` — the policy DECLINES the row with no error to report. The
-    ///   driver treats it exactly as it always has: end-of-partition on the final
-    ///   chunk, else `NeedMore`.
-    /// * `Err(e)` — the row FAILED TO DECODE, with `e` preserved. The policy does
-    ///   NOT decide tolerance; the driver does, from `at_final_chunk`.
+    /// * [`DataRowOutcome::Decoded(next_offset)`](DataRowOutcome::Decoded) — the
+    ///   row decoded; continue at `next_offset`.
+    /// * [`DataRowOutcome::Declined`] — the policy declines the row with no error
+    ///   to report. The driver treats it exactly as it always has:
+    ///   end-of-partition on the final chunk, else `NeedMore`.
+    /// * [`DataRowOutcome::DecodeFailed(e)`](DataRowOutcome::DecodeFailed) — the
+    ///   row FAILED TO DECODE, with `e` preserved (issue #3782) — typically a
+    ///   COLUMN inside it ([`crate::Error::ColumnDecode`], #3721). Serving the row
+    ///   without that column, or ending the partition early, are both silent data
+    ///   loss. The policy does NOT decide tolerance; the DRIVER does, from
+    ///   `at_final_chunk`.
+    /// * [`DataRowOutcome::Refused(e)`](DataRowOutcome::Refused) — the row DECODED
+    ///   and must not be emitted (issue #3809). The driver propagates `e`
+    ///   UNCONDITIONALLY and never consults `at_final_chunk`.
+    ///
+    /// # Which failures the driver may tolerate under a [`BufferExtent::Window`],
+    /// and why the line is drawn at SEMANTICS rather than byte availability
+    ///
+    /// A `Window` caller (the point and promoted readers, the block-by-block
+    /// scans, the windowed emit) drives this loop with `at_final_chunk == false`,
+    /// where a `DecodeFailed` becomes `ParseStep::NeedMore` — the straddling-row
+    /// refill protocol those readers depend on. That is CORRECT for `DecodeFailed`
+    /// and ONLY for it: the question a decode failure asks is *were all this row's
+    /// bytes present?*, more bytes can still arrive, and the answer may genuinely
+    /// change on the next chunk. Measured over 42 well-formed corpus tables
+    /// (10913 rows) that path fires 614 times, ALL with
+    /// `at_final_chunk == false`.
+    ///
+    /// A `Refused` outcome asks nothing about bytes. The decode already returned
+    /// `Ok`; the row is fully framed and structurally complete, and the policy has
+    /// judged its CONTENT unrepresentable — a row deletion that recovered fewer
+    /// clustering values than its table declares, and so identifies no row
+    /// (`CompactionRowData::require_tombstone_clustering_identity`, #3809). No
+    /// amount of refilling can make a short clustering become full-arity, so
+    /// "maybe more bytes will arrive" is not a weaker answer there, it is an
+    /// INAPPLICABLE one — and answering it that way would turn the refusal into a
+    /// refill request on every `Window` entry point, silently truncating the read.
+    /// A refusal is therefore NEVER tolerated, at any extent.
     ///
     /// Before #3782 this returned `Option<usize>`, so a decode error and "no row
     /// here" were the same value and every error was silently swallowed as
-    /// end-of-partition.
+    /// end-of-partition — which is #3721's defect at this layer, and the same
+    /// contract both issues arrived at independently. Before #3809 the two FAILURES were the same value, so a
+    /// refusal inherited the decode failure's tolerance. There is deliberately no
+    /// `Result` in the signature: a `?` inside a policy body is the most natural
+    /// thing to write and would route a refusal into the tolerated channel
+    /// silently — the data-losing default [`BufferExtent`] exists to make
+    /// unrepresentable. Each failure site must NAME which one it is.
     fn on_data_row(
         &mut self,
         data: &[u8],
@@ -115,7 +321,7 @@ pub(super) trait SlidingPartitionPolicy {
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         resolution: &RowColumnResolution,
         pending: &mut Vec<Self::Row>,
-    ) -> Result<Option<usize>>;
+    ) -> DataRowOutcome;
 
     /// Called once per partition, AFTER its last row, on every `Emitted` return —
     /// immediately before `pending` is flushed to the external emit. A
@@ -133,8 +339,9 @@ pub(super) trait SlidingPartitionPolicy {
     ///   yielded no clustering row" is NOT knowable.
     ///
     /// Since #3782 a row DECODE ERROR at the final chunk no longer reaches here at
-    /// all: the driver returns that error instead of flushing a partial partition.
-    /// The three `complete == false` cases above are unchanged.
+    /// all, and since #3809 nor does a row REFUSAL at any extent: the driver
+    /// returns that error instead of flushing a partial partition. The three
+    /// `complete == false` cases above are unchanged.
     ///
     /// Exists for Cassandra's static-content-on-an-empty-partition rule
     /// (`SelectStatement.processPartition()`, issue #3095): a partition whose
@@ -161,9 +368,12 @@ impl V5CompressedLegacyParser {
     /// `parse_one_partition_for_compaction` bodies this replaces.
     ///
     /// `at_final_chunk` flips a mid-partition parse failure between a refill
-    /// request (`NeedMore`) and a terminal flush, exactly as before — EXCEPT for a
-    /// row DECODE ERROR, which at the final chunk is returned to the caller
-    /// (issue #3782: no further bytes can arrive, so it is data loss, not framing).
+    /// request (`NeedMore`) and a terminal flush, exactly as before — with two
+    /// exceptions, both of which return the error to the caller:
+    /// * a row DECODE ERROR at the FINAL chunk (issue #3782: no further bytes can
+    ///   arrive, so it is data loss, not framing);
+    /// * a row REFUSAL at ANY extent (issue #3809: the row decoded and its content
+    ///   is unrepresentable, so `at_final_chunk` is not consulted at all).
     pub(super) fn drive_partition_sliding<P, F>(
         &self,
         data: &[u8],
@@ -277,45 +487,60 @@ impl V5CompressedLegacyParser {
                         offset = next_offset;
                         continue;
                     }
-                    MarkerOutcome::Stop => {
+                    // Issue #3721 (roborev jobs 16 + 78): a marker parse failure.
+                    // A non-final chunk may simply have cut the marker body in
+                    // half, so a refill is still the right answer; the FINAL chunk
+                    // has nothing left to arrive, so completing the partition here
+                    // would report success with a tombstone missing. Propagate the
+                    // preserved cause instead.
+                    MarkerOutcome::Unparseable(cause) => {
                         if at_final_chunk {
-                            // Unrepresentable marker: body only partly observed.
-                            return flush_and_emitted!(offset, false);
+                            return Err(range_marker_error::unparseable_marker_at_final_chunk(
+                                cause,
+                            ));
                         }
                         return Ok(ParseStep::NeedMore);
                     }
+                    // Issue #3721: the marker parsed and the body continues past
+                    // it, so no refill can help and truncating the partition would
+                    // report `Ok` with rows missing. Propagate.
+                    MarkerOutcome::Refused(e) => return Err(e),
                 }
             }
 
-            let decoded =
-                match policy.on_data_row(data, offset, schema, reader, &resolution, &mut pending) {
-                    Ok(v) => v,
-                    // Issue #3782: the DRIVER decides tolerance, never the policy,
-                    // and `at_final_chunk` is the discriminator — an authoritative
-                    // property of the sliding window, not a guess about the bytes.
-                    //
-                    // At the final chunk NO FURTHER BYTES CAN ARRIVE, so a decode
-                    // error can never be a row straddling a chunk boundary: it is
-                    // truncation or corruption, and both are DATA LOSS. Swallowing
-                    // it made a corrupt clustering value read 23 of 100 rows and
-                    // made compaction emit 102 rows while LOSING 2 real partitions
-                    // and FABRICATING 3 — a loss compaction would then write back
-                    // to disk, invisible to any count-based check.
-                    //
-                    // Mid-stream the SAME error is the ordinary straddling-row case
-                    // and stays tolerant. Measured over 42 well-formed corpus
-                    // tables (10913 rows) the tolerant path fires 614 times, ALL of
-                    // them with `at_final_chunk == false` and ZERO with `true`, so
-                    // refusing here costs no well-formed read.
-                    Err(e) => {
-                        if at_final_chunk {
-                            return Err(e);
-                        }
-                        return Ok(ParseStep::NeedMore);
+            match policy.on_data_row(data, offset, schema, reader, &resolution, &mut pending) {
+                // Issue #3809: a REFUSAL bypasses `at_final_chunk` entirely. The
+                // row DECODED; the policy judged its CONTENT unrepresentable, which
+                // is not a question about byte availability, so no refill can
+                // change the answer. Tolerating it here would convert the refusal
+                // into `NeedMore` on every `BufferExtent::Window` entry point —
+                // the tolerant-tail truncation both #3782 and #3809 remove.
+                DataRowOutcome::Refused(e) => return Err(e),
+                // Issue #3782: for a DECODE FAILURE the DRIVER decides tolerance,
+                // never the policy, and `at_final_chunk` is the discriminator — an
+                // authoritative property of the sliding window, not a guess about
+                // the bytes.
+                //
+                // At the final chunk NO FURTHER BYTES CAN ARRIVE, so a decode
+                // error can never be a row straddling a chunk boundary: it is
+                // truncation or corruption, and both are DATA LOSS. Swallowing
+                // it made a corrupt clustering value read 23 of 100 rows and
+                // made compaction emit 102 rows while LOSING 2 real partitions
+                // and FABRICATING 3 — a loss compaction would then write back
+                // to disk, invisible to any count-based check.
+                //
+                // Mid-stream the SAME error is the ordinary straddling-row case
+                // and stays tolerant. Measured over 42 well-formed corpus
+                // tables (10913 rows) the tolerant path fires 614 times, ALL of
+                // them with `at_final_chunk == false` and ZERO with `true`, so
+                // refusing here costs no well-formed read.
+                DataRowOutcome::DecodeFailed(e) => {
+                    if at_final_chunk {
+                        return Err(e);
                     }
-                };
-            match decoded {
-                Some(next_offset) => {
+                    return Ok(ParseStep::NeedMore);
+                }
+                DataRowOutcome::Decoded(next_offset) => {
                     offset = next_offset;
                     if offset >= data.len() {
                         // End of the buffer without an explicit END_OF_PARTITION:
@@ -330,12 +555,12 @@ impl V5CompressedLegacyParser {
                         return flush_and_emitted!(offset, true);
                     }
                 }
-                None => {
+                DataRowOutcome::Declined => {
                     // The policy DECLINED the row with no error to report (#3782:
-                    // an actual decode error takes the `Err` arm above). Mid-stream
-                    // that may be a row straddling the chunk boundary, so request
-                    // more bytes unless this is the final chunk (where it is
-                    // end-of-partition).
+                    // an actual decode error takes the `DecodeFailed` arm above,
+                    // #3809: a refusal the `Refused` arm). Mid-stream that may be a
+                    // row straddling the chunk boundary, so request more bytes
+                    // unless this is the final chunk (where it is end-of-partition).
                     if at_final_chunk {
                         // Body only partly observed.
                         return flush_and_emitted!(offset, false);
@@ -348,428 +573,5 @@ impl V5CompressedLegacyParser {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Build a `RowHeader` fixture with only the fields the #932 row-timestamp
-    /// rule reads populated; everything else is a benign default.
-    fn hdr(
-        timestamp: Option<i64>,
-        local_deletion_time: Option<i32>,
-        marked_for_delete_at: Option<i64>,
-    ) -> RowHeader {
-        RowHeader {
-            timestamp,
-            ttl: None,
-            liveness_expires_at_seconds: None,
-            local_deletion_time,
-            marked_for_delete_at,
-            header_size: 0,
-            row_size_vint_len: 0,
-            missing_columns_bitmap: None,
-            max_data_cell_timestamp: None,
-            max_data_cell_expires_at: None,
-            has_live_forever_data_cell: false,
-            has_deleted_data_cell: false,
-        }
-    }
-
-    /// Issue #1640 / #932 lockstep guard.
-    ///
-    /// Both sliding-window emit paths (streaming-scan timestamps and per-element
-    /// compaction) now resolve a row's write timestamp through the single
-    /// [`row_write_timestamp`] helper, so this asserts THE one decision site.
-    /// On `main` the rule was hand-copied into both loops, making this
-    /// un-writable as a single-site assertion (the point of K1).
-    #[test]
-    fn row_write_timestamp_coexistence_prefers_liveness() {
-        // A HAS_DELETION row that ALSO carries a liveness timestamp (surviving
-        // cells written strictly AFTER the row deletion): the row timestamp is
-        // the liveness ts (2000), NOT the older markedForDeleteAt (1000). Both
-        // the user-scan and compaction paths call the same helper, so they agree
-        // by construction — a future divergence would fail HERE.
-        let coexistence = Some(hdr(Some(2000), Some(5), Some(1000)));
-        assert_eq!(row_write_timestamp(&coexistence), 2000);
-    }
-
-    #[test]
-    fn row_write_timestamp_pure_tombstone_uses_marked_for_delete_at() {
-        // A PURE row tombstone (HAS_DELETION, no HAS_TIMESTAMP): fall back to
-        // markedForDeleteAt (1000), never epoch 0 (which would lose LWW ordering).
-        let pure_tombstone = Some(hdr(None, Some(5), Some(1000)));
-        assert_eq!(row_write_timestamp(&pure_tombstone), 1000);
-    }
-
-    #[test]
-    fn row_write_timestamp_live_row_uses_liveness() {
-        // A live row with no deletion: the liveness timestamp.
-        let live = Some(hdr(Some(3000), None, None));
-        assert_eq!(row_write_timestamp(&live), 3000);
-    }
-
-    #[test]
-    fn row_write_timestamp_absent_header_is_zero() {
-        assert_eq!(row_write_timestamp(&None), 0);
-    }
-
-    #[test]
-    fn row_write_timestamp_pure_tombstone_without_mfda_promotes_seconds() {
-        // Defensive: a deletion recorded with only localDeletionTime (seconds) —
-        // promoted to microseconds so ordering stays non-zero and monotonic.
-        let odd = Some(hdr(None, Some(7), None));
-        assert_eq!(row_write_timestamp(&odd), 7 * 1_000_000);
-    }
-
-    // -----------------------------------------------------------------------
-    // Driver-level framing tests (issue #1640, roborev K1 test-depth finding).
-    //
-    // The correctness-critical logic this refactor centralizes is
-    // `drive_partition_sliding`'s framing skeleton — the previously-duplicated
-    // loop whose divergence "manufactures parity regressions". These tests drive
-    // that skeleton directly with a STUB `SlidingPartitionPolicy` over a SYNTHETIC
-    // byte buffer, so the framing contract (buffer-then-flush, no-double-emit on a
-    // mid-partition `NeedMore`, marker-Stop termination) is pinned independently of
-    // any real row decode, schema, or on-disk fixture.
-    //
-    // `write-support` is a DEFAULT feature; the gate is only so the minimal
-    // `--no-default-features` build (no synthetic-reader writer) still compiles.
-    // -----------------------------------------------------------------------
-
-    /// A synthetic byte the stub treats as exactly ONE data row: it carries
-    /// neither the END_OF_PARTITION bit (0x01) nor the IS_MARKER bit (0x02), so
-    /// the driver routes it to `on_data_row`.
-    #[cfg(feature = "write-support")]
-    const STUB_ROW_BYTE: u8 = 0xa0;
-
-    /// The IS_MARKER flag byte (0x02, END_OF_PARTITION bit clear): the driver
-    /// routes it to `on_range_marker`.
-    #[cfg(feature = "write-support")]
-    const STUB_MARKER_BYTE: u8 = 0x02;
-
-    /// A body byte the stub policy answers with a DECODE ERROR (issue #3782),
-    /// distinct from a byte it simply declines. Not a marker and not
-    /// END_OF_PARTITION, so the driver routes it to `on_data_row`.
-    #[cfg(feature = "write-support")]
-    const STUB_ERR_BYTE: u8 = 0x7C;
-
-    /// The text the stub's decode error carries, asserted verbatim so a test proves
-    /// the POLICY's error reached the caller rather than some other failure.
-    #[cfg(feature = "write-support")]
-    const STUB_ERR_TEXT: &str = "stub row decode failure (#3782)";
-
-    /// A body byte the stub policy DECLINES with no error (`Ok(None)`) — the
-    /// pre-#3782 tolerant path, kept distinct from [`STUB_ERR_BYTE`] so a test can
-    /// prove the two are treated differently. Also free of the 0x01/0x02 bits.
-    #[cfg(feature = "write-support")]
-    const STUB_DECLINE_BYTE: u8 = 0xa4;
-
-    /// A carrier row the stub policy buffers into the driver-owned `pending` vec.
-    #[cfg(feature = "write-support")]
-    #[derive(Debug, PartialEq, Eq)]
-    struct StubRow(u8);
-
-    /// Test-only [`SlidingPartitionPolicy`] over a synthetic buffer. It exercises
-    /// the driver's framing skeleton WITHOUT any real row decode: each
-    /// [`STUB_ROW_BYTE`] is one row (buffered into `pending`, consuming 1 byte),
-    /// [`STUB_ERR_BYTE`] is a row that FAILS TO DECODE (`Err`, issue #3782), any
-    /// other byte DECLINES with no error (`Ok(None)`), any range-tombstone marker
-    /// is answered with [`MarkerOutcome::Stop`], and `buffered` records how many
-    /// rows were pushed into `pending` — so a test can prove a row WAS buffered
-    /// even when the driver forwards ZERO rows.
-    #[cfg(feature = "write-support")]
-    struct StubPolicy {
-        /// Count of rows the policy pushed into the driver-owned `pending` vec.
-        buffered: usize,
-    }
-
-    #[cfg(feature = "write-support")]
-    impl SlidingPartitionPolicy for StubPolicy {
-        type Row = StubRow;
-
-        fn on_partition_open(
-            &mut self,
-            _partition_key: RowKey,
-            _partition_deletion: Option<(i64, i32)>,
-            _schema: &TableSchema,
-            _pending: &mut Vec<Self::Row>,
-        ) {
-            // No synthetic partition-delete row for these framing tests.
-        }
-
-        fn on_range_marker(
-            &mut self,
-            _data: &[u8],
-            _offset: usize,
-            _schema: &TableSchema,
-            _pending: &mut Vec<Self::Row>,
-        ) -> MarkerOutcome {
-            // Mirror the pre-K1 `break`/`NeedMore` behaviour: a marker the policy
-            // cannot represent faithfully terminates the partition.
-            MarkerOutcome::Stop
-        }
-
-        fn on_data_row(
-            &mut self,
-            data: &[u8],
-            offset: usize,
-            _schema: &TableSchema,
-            _reader: &crate::storage::sstable::reader::types::SSTableReader,
-            _resolution: &RowColumnResolution,
-            pending: &mut Vec<Self::Row>,
-        ) -> Result<Option<usize>> {
-            match data.get(offset) {
-                Some(&b) if b == STUB_ROW_BYTE => {
-                    pending.push(StubRow(b));
-                    self.buffered += 1;
-                    Ok(Some(offset + 1))
-                }
-                // A genuine DECODE ERROR (#3782): the driver, not the policy,
-                // decides whether to tolerate it.
-                Some(&b) if b == STUB_ERR_BYTE => Err(Error::corruption(STUB_ERR_TEXT)),
-                // Anything else: the policy DECLINES with no error — the driver
-                // treats this as end-of-partition on the final chunk, else
-                // `NeedMore`, exactly as before #3782.
-                _ => Ok(None),
-            }
-        }
-    }
-
-    /// A minimal single-partition-key schema `t(pk int, v text)`. The concrete
-    /// columns are irrelevant to the framing under test (the stub never consults
-    /// the schema, reader, or resolution), but a valid schema is required to build
-    /// [`RowColumnResolution`].
-    #[cfg(feature = "write-support")]
-    fn stub_schema() -> crate::schema::TableSchema {
-        use crate::schema::{Column, KeyColumn, TableSchema};
-        let col = |name: &str, ty: &str, nullable: bool| Column {
-            name: name.to_string(),
-            data_type: ty.to_string(),
-            nullable,
-            default: None,
-            is_static: false,
-        };
-        TableSchema {
-            keyspace: "test_ks".to_string(),
-            table: "test_tbl".to_string(),
-            partition_keys: vec![KeyColumn {
-                name: "pk".to_string(),
-                data_type: "int".to_string(),
-                position: 0,
-            }],
-            clustering_keys: vec![],
-            columns: vec![col("pk", "int", false), col("v", "text", true)],
-            comments: std::collections::HashMap::new(),
-            dropped_columns: std::collections::HashMap::new(),
-        }
-    }
-
-    /// Build a synthetic **nb**-format partition: a LIVE header (no partition
-    /// tombstone) followed by `body` bytes. The parser built by
-    /// [`V5CompressedLegacyParser::new`] uses the nb-compatible gates
-    /// (`has_uint_deletion_time == false`), so the header is:
-    /// `flags(1) + key_len(1) + key(1) + nb DeletionTime` where the nb
-    /// DeletionTime is a 4-byte localDeletionTime (`i32::MAX` == LIVE sentinel) +
-    /// 8-byte markedForDeleteAt (0). Fixed bytes only — no wall-clock input.
-    #[cfg(feature = "write-support")]
-    fn synthetic_partition(body: &[u8]) -> Vec<u8> {
-        let mut buf = vec![0x00, 0x01, 0x42]; // flags, key_len=1, key=[0x42]
-        buf.extend_from_slice(&i32::MAX.to_be_bytes()); // LIVE localDeletionTime
-        buf.extend_from_slice(&0i64.to_be_bytes()); // markedForDeleteAt
-        buf.extend_from_slice(body);
-        buf
-    }
-
-    /// Drive one synthetic partition through the real `drive_partition_sliding`
-    /// skeleton with the [`StubPolicy`]. Returns the [`ParseStep`], the number of
-    /// rows the policy buffered into `pending`, and the rows the driver actually
-    /// forwarded to the external `emit` closure.
-    ///
-    /// The `&SSTableReader` is a genuine (dataset-independent) synthetic handle
-    /// reused from the decoder-lockstep net; its bytes are never consulted here —
-    /// the stub ignores the reader and resolution entirely.
-    #[cfg(feature = "write-support")]
-    async fn drive(data: &[u8], at_final_chunk: bool) -> (ParseStep, usize, Vec<StubRow>) {
-        let (step, buffered, collected) = drive_result(data, at_final_chunk).await;
-        let step = step.expect("drive_partition_sliding should not error on this input");
-        (step, buffered, collected)
-    }
-
-    /// As [`drive`], but hands back the driver's `Result` so a test can assert the
-    /// #3782 refusal (and the error it carries) rather than unwrapping it.
-    #[cfg(feature = "write-support")]
-    async fn drive_result(
-        data: &[u8],
-        at_final_chunk: bool,
-    ) -> (Result<ParseStep>, usize, Vec<StubRow>) {
-        let reader = super::super::decoder_lockstep_tests::open_reader()
-            .await
-            .expect("write-support synthetic reader is always available");
-        let parser = V5CompressedLegacyParser::new(
-            "test_ks".to_string(),
-            "test_tbl".to_string(),
-            0,
-            0,
-            None,
-        );
-        let schema = stub_schema();
-        let mut policy = StubPolicy { buffered: 0 };
-        let mut collected: Vec<StubRow> = Vec::new();
-        let step = parser.drive_partition_sliding(
-            data,
-            &schema,
-            &reader,
-            at_final_chunk,
-            &mut policy,
-            |row| {
-                collected.push(row);
-                Ok(std::ops::ControlFlow::Continue(()))
-            },
-        );
-        (step, policy.buffered, collected)
-    }
-
-    /// (a) Issue-#827 no-double-emit invariant: a truncated partition on a
-    /// NON-final chunk returns `NeedMore` and forwards ZERO rows — *even though*
-    /// the policy already buffered a row into `pending`. Discarding `pending` on a
-    /// mid-partition `NeedMore` is what makes a refill-and-re-parse from the
-    /// partition start safe (a forwarded row here would be duplicated on re-parse).
-    #[cfg(feature = "write-support")]
-    #[tokio::test]
-    async fn truncated_non_final_chunk_buffers_but_emits_zero() {
-        // Header + one row byte, no END_OF_PARTITION: the buffer ends mid-partition.
-        let data = synthetic_partition(&[STUB_ROW_BYTE]);
-        let (step, buffered, collected) = drive(&data, false).await;
-        assert_eq!(
-            step,
-            ParseStep::NeedMore,
-            "a mid-partition end-of-buffer on a non-final chunk must request more bytes"
-        );
-        assert_eq!(
-            buffered, 1,
-            "the row WAS buffered into the driver-owned pending vec"
-        );
-        assert!(
-            collected.is_empty(),
-            "NeedMore must DISCARD pending and forward zero rows so a re-parse cannot \
-             double-emit (issue #827)"
-        );
-    }
-
-    /// (b) The SAME buffer with `at_final_chunk = true` flushes the buffered row:
-    /// on the final chunk an end-of-buffer is end-of-partition, so `pending` is
-    /// forwarded exactly once.
-    #[cfg(feature = "write-support")]
-    #[tokio::test]
-    async fn same_buffer_final_chunk_flushes_pending() {
-        let data = synthetic_partition(&[STUB_ROW_BYTE]);
-        let (step, buffered, collected) = drive(&data, true).await;
-        assert!(
-            matches!(step, ParseStep::Emitted(_)),
-            "the final chunk treats end-of-buffer as end-of-partition and flushes"
-        );
-        assert_eq!(buffered, 1, "the same single row is buffered");
-        assert_eq!(
-            collected,
-            vec![StubRow(STUB_ROW_BYTE)],
-            "the buffered row is forwarded exactly once on the final chunk"
-        );
-    }
-
-    /// (c) A range-tombstone marker the policy answers with `MarkerOutcome::Stop`
-    /// on a NON-final chunk yields `NeedMore` with NO emission — mirroring the
-    /// pre-K1 `break`/`NeedMore` terminate-partition behaviour — and discards any
-    /// rows already buffered before the marker.
-    #[cfg(feature = "write-support")]
-    #[tokio::test]
-    async fn marker_stop_non_final_chunk_needmore_no_emit() {
-        // One row, then a marker byte (IS_MARKER set, END_OF_PARTITION clear).
-        let data = synthetic_partition(&[STUB_ROW_BYTE, STUB_MARKER_BYTE]);
-        let (step, buffered, collected) = drive(&data, false).await;
-        assert_eq!(
-            step,
-            ParseStep::NeedMore,
-            "on_range_marker -> Stop on a non-final chunk requests more bytes"
-        );
-        assert_eq!(buffered, 1, "the pre-marker row was buffered into pending");
-        assert!(
-            collected.is_empty(),
-            "a marker Stop discards pending and forwards nothing"
-        );
-    }
-
-    /// (d) Issue #3782, the refusal: a row that FAILS TO DECODE on the FINAL chunk
-    /// returns the decode error, KIND PRESERVED, instead of flushing a partial
-    /// partition and reporting `Emitted`. No further bytes can arrive at the final
-    /// chunk, so the error is truncation/corruption — data loss — never framing.
-    #[cfg(feature = "write-support")]
-    #[tokio::test]
-    async fn final_chunk_row_decode_error_is_returned_not_swallowed() {
-        // One good row, then a row the policy cannot decode.
-        let data = synthetic_partition(&[STUB_ROW_BYTE, STUB_ERR_BYTE]);
-        let (step, buffered, collected) = drive_result(&data, true).await;
-        let err = match step {
-            Err(e) => e,
-            Ok(step) => panic!(
-                "a decode error at the final chunk must be REFUSED, not flushed as a partial \
-                 partition: got {step:?} with {} rows forwarded",
-                collected.len()
-            ),
-        };
-        // KIND first: a re-wrap that forwarded the text would satisfy the message
-        // check below while destroying the property AC1 is about.
-        assert!(
-            matches!(err, Error::Corruption(_)),
-            "the POLICY's error KIND must reach the caller unchanged, got: {err:?}"
-        );
-        assert!(
-            err.to_string().contains(STUB_ERR_TEXT),
-            "the POLICY's error must reach the caller unchanged, got: {err}"
-        );
-        assert_eq!(buffered, 1, "the pre-error row was buffered");
-        assert!(
-            collected.is_empty(),
-            "a refused partition forwards nothing: {collected:?}"
-        );
-    }
-
-    /// (e) Issue #3782, the TOLERANT half — the property that must not regress.
-    /// The SAME decode error MID-STREAM is an ordinary row straddling the chunk
-    /// boundary: request more bytes, forward nothing, and never surface an error.
-    /// Measured over the well-formed corpus this is where 100% of the 614
-    /// tolerations occur.
-    #[cfg(feature = "write-support")]
-    #[tokio::test]
-    async fn non_final_chunk_row_decode_error_still_requests_more_bytes() {
-        let data = synthetic_partition(&[STUB_ROW_BYTE, STUB_ERR_BYTE]);
-        let (step, buffered, collected) = drive_result(&data, false).await;
-        assert!(
-            matches!(step, Ok(ParseStep::NeedMore)),
-            "a mid-stream decode error must stay tolerant (NeedMore), got {step:?}"
-        );
-        assert_eq!(buffered, 1, "the pre-error row was buffered");
-        assert!(
-            collected.is_empty(),
-            "NeedMore discards pending so a re-parse cannot double-emit (#827)"
-        );
-    }
-
-    /// (f) Issue #3782 did NOT change the DECLINE path: a policy that returns
-    /// `Ok(None)` still ends the partition on the final chunk and still flushes the
-    /// rows buffered before it. Only a genuine `Err` refuses.
-    #[cfg(feature = "write-support")]
-    #[tokio::test]
-    async fn final_chunk_policy_decline_still_flushes_as_before() {
-        let data = synthetic_partition(&[STUB_ROW_BYTE, STUB_DECLINE_BYTE]);
-        let (step, buffered, collected) = drive(&data, true).await;
-        assert!(
-            matches!(step, ParseStep::Emitted(_)),
-            "a declined row on the final chunk is end-of-partition, got {step:?}"
-        );
-        assert_eq!(buffered, 1, "the pre-decline row was buffered");
-        assert_eq!(
-            collected,
-            vec![StubRow(STUB_ROW_BYTE)],
-            "the buffered row is still forwarded exactly once"
-        );
-    }
-}
+#[path = "partition_driver_tests.rs"]
+mod tests;

@@ -62,7 +62,8 @@ import math
 import os
 import pathlib
 import sys
-from typing import Dict, List, Optional
+import time
+from typing import Dict, List, Optional, Tuple
 
 # Comm names that mean another lane is compiling or gating on this box. Matched against
 # /proc/<pid>/comm EXACTLY. `comm` is capped at 15 characters by the kernel, so a longer
@@ -87,10 +88,9 @@ from typing import Dict, List, Optional
 # happening now.
 COMPETING_COMMS = ("rustc", "cargo", "cc1", "cc1plus", "ld", "lld", "mold")
 
-# Substrings searched in /proc/<pid>/cmdline. Needed for things whose comm is `bash` or
-# `python3` and therefore indistinguishable from anything else by comm alone.
-# Substrings searched in /proc/<pid>/cmdline, for things whose `comm` is `bash` or `python3`
-# and therefore indistinguishable from anything else by comm alone.
+# Script names matched against the ARGV ELEMENTS of /proc/<pid>/cmdline (basename equality, see
+# `census`). Needed for things whose `comm` is `bash` or `python3` and therefore
+# indistinguishable from anything else by comm alone.
 #
 # `cargo build` / `cargo test` / `cargo nextest` ARE DELIBERATELY ABSENT. They were here and
 # caused a FALSE REFUSAL of a quiet box: the shell ORCHESTRATING the measurement had
@@ -100,6 +100,29 @@ COMPETING_COMMS = ("rustc", "cargo", "cc1", "cc1plus", "ld", "lld", "mold")
 # shell that merely MENTIONS the command. This is the same defect family as `pgrep -f` matching
 # its own invocation, one level out: a cmdline substring match sees anything that talks about a
 # process, not only the process.
+#
+# `agent-gate.sh` WAS LEFT WITH THE IDENTICAL FLAW AND IT FIRED (#3551/#3552 defect 2, MEASURED
+# on this box 2026-09-02). It was tested as `if needle in cmdline` -- a substring of the WHOLE
+# joined cmdline -- so every agent tool-call shell
+# (`/bin/bash -c source /data/auth/claude/shell-snapshots/snapshot-....sh ...`) that merely
+# MENTIONS the string was counted as competing load, inflating the census to 15 on a box where
+# no gate was running. It is a FALSE REFUSAL, so no published number is affected; it is still
+# the failure mode that gets a guard deleted.
+#
+# THE REMEDY #3552 PROPOSED DOES NOT WORK, AND THAT IS WORTH STATING WHERE THE FIX LIVES. Both
+# the report and the deferred-defect comment in `census()` said to "exclude by IDENTITY -- self
+# PID plus an ancestor walk, which this file already does elsewhere". `census()` ALREADY DOES
+# that walk (below), and it cannot help: the offending shells belong to OTHER agent sessions,
+# and a `setsid`-detached sampler's ancestor chain is init, so every peer lane's shell is a
+# legitimate NON-ancestor and gets counted. Identity exclusion answers "is this me?"; the
+# question here is "is this process EXECUTING the gate, or talking about it?".
+#
+# SO THE MATCH IS OVER AN ARGV ELEMENT, NOT OVER THE JOINED STRING. /proc/<pid>/cmdline is
+# NUL-separated; it is split into elements and an element matches when its BASENAME equals the
+# needle. A shell EXECUTING the gate carries `.../scripts/agent-gate.sh` as an argv element of
+# its own; a shell merely mentioning it carries the name INSIDE a `-c` script-text element,
+# whose basename is the whole script text. `--flag=/path/agent-gate.sh` does not match either,
+# so the census cannot be spoofed by an option VALUE.
 COMPETING_CMDLINE = ("agent-gate.sh",)
 
 DEFAULT_MAX_LOAD1 = 2.0
@@ -112,6 +135,116 @@ DEFAULT_MAX_LOAD1_MOVEMENT = 0.5
 # this gate exists to prevent, inside the gate itself.
 SAMPLER_CADENCE_S = 10.0
 MAX_SAMPLE_GAP_S = 30.0
+
+# THE CENSUS FIELDS AND THE RULE FOR READING THEM — MODULE LEVEL SO THERE IS ONE COPY.
+#
+# These were locals of `window_census_clean`, which made the rule unimportable: the two
+# report-producing tools in `docs/reports/ws0-3551-artifacts/` had each written their own
+# `r.get("competing_count")` instead, and an absent, malformed or false-valued field read there
+# as ZERO CONTAMINATION — a published "clean" derived from a field nobody could read (roborev
+# #3551 round 3 F2). The rule now lives here, beside the bound those tools already import, and
+# `window_census_clean` uses it too, so the judge and the tools cannot drift into two opinions
+# about what a readable census record is.
+CENSUS_FIELDS = ("rustc", "cargo", "gate")
+FULL_CENSUS_FIELD = "competing_count"
+
+
+def is_census_count(value: object) -> bool:
+    """Is this an affirmative census COUNT — a non-negative int?
+
+    `bool` IS an `int` in Python and is REJECTED: `competing_count: true` would otherwise be a
+    count of 1 and `false` a count of 0, i.e. a schema error read as a measurement. This repo
+    has been bitten by exactly that, which is why the bool test comes first.
+    """
+    return not isinstance(value, bool) and isinstance(value, int) and value >= 0
+
+
+def census_record_defect(rec: Dict[str, object], *,
+                         require_full_census: bool) -> Tuple[str, str]:
+    """Can this sample support a CLEAN verdict? `(state, reason)`, three-valued.
+
+    `("ok", "")`         every census field present and readable, `competing_count` included.
+    `("narrow", "")`     the narrow fields are readable and `competing_count` is ABSENT. Only
+                         reachable with `require_full_census=False`.
+    `("unusable", why)`  a field is absent or is not a non-negative integer count. `why` is a
+                         sentence whose subject is the sample, so a caller renders it as
+                         `the sample at <ts> <why>`.
+
+    THE TWO POLICIES, and why they differ. `window_census_clean` passes
+    `require_full_census=False`: a timeseries recorded before `competing_count` existed carries
+    the narrow census only, and the judge ACCEPTS it while RECORDING that narrowness
+    (`census_breadth`), so its verdict never implies coverage it does not have. The artifact
+    tools pass `True`, because their published verdict is the word "clean" with no breadth field
+    beside it — for them an absent `competing_count` is a census they cannot read, and a
+    positive verdict requires an affirmative measurement.
+    """
+    for field in CENSUS_FIELDS:
+        if field not in rec:
+            return ("unusable",
+                    f"carries no {field!r} field. An absent census field is falsy and would"
+                    " read as CLEAN, so a timeseries missing it cannot establish that the"
+                    " window was uncontaminated.")
+        if not is_census_count(rec[field]):
+            return ("unusable",
+                    f"has {field}={rec[field]!r}, which is not a non-negative integer count.")
+    if FULL_CENSUS_FIELD not in rec or rec[FULL_CENSUS_FIELD] is None:
+        if require_full_census:
+            return ("unusable",
+                    f"carries no readable {FULL_CENSUS_FIELD!r}. That field is the FULL census"
+                    " (the whole COMPETING_COMMS set, not just rustc/cargo/gate), and an"
+                    " absent one is falsy: reading it as zero contamination would certify a"
+                    " window on a census that was never taken.")
+        return ("narrow", "")
+    if not is_census_count(rec[FULL_CENSUS_FIELD]):
+        return ("unusable",
+                f"has {FULL_CENSUS_FIELD}={rec[FULL_CENSUS_FIELD]!r}, which is not a"
+                " non-negative integer count.")
+    return ("ok", "")
+
+
+def census_observed_competitor(rec: Dict[str, object]) -> bool:
+    """Did this sample OBSERVE a competing process? Only READABLE fields are counted.
+
+    Every value is passed through `is_census_count` before it is believed, so a malformed one is
+    never counted as a competitor by its truthiness (`"0"` is a non-empty string) and never as a
+    zero either: an unreadable record is `census_record_defect`'s `unusable` state, and this
+    predicate reports what the readable records said.
+
+    The NARROW fields are read as well as `competing_count`. `competing_count` is the superset in
+    every timeseries this rig has produced — it is computed from the same `COMPETING_COMMS` list —
+    so this costs one `any()` and asserts that relationship instead of assuming it.
+
+    `window_census_clean` deliberately does NOT call this, and the reason is a behaviour it must
+    keep: its own equivalent test is INTERLEAVED with the `load1` requirement, so a record whose
+    `competing_count` is non-zero is reported CONTAMINATED without also being required to carry a
+    readable `load1` (`continue`, before that check). Collapsing the two would turn a contaminated
+    sample with no `load1` into a SCHEMA refusal — a different named cause for the same box. The
+    part that must not drift is the FIELD RULE, and that is `is_census_count`, called here and
+    there. The two report-producing tools in `docs/reports/ws0-3551-artifacts/` have no such
+    interleaving and both call this.
+    """
+    if is_census_count(rec.get(FULL_CENSUS_FIELD)) and rec[FULL_CENSUS_FIELD]:
+        return True
+    return any(is_census_count(rec.get(field)) and rec[field] for field in CENSUS_FIELDS)
+
+
+def first_unusable_census_record(rows: List[Dict[str, object]], *,
+                                 require_full_census: bool = True) -> Optional[str]:
+    """The FIRST sample in `rows` that cannot support a clean verdict, rendered for a report.
+
+    `None` when every row is readable. Returned as `the sample at <ts> <reason>` so a caller can
+    print it verbatim: a verdict that says a record is unusable without NAMING it sends its
+    reader to look through a thousand samples.
+
+    Both artifact tools call this rather than looping themselves — the loop is trivial and the
+    RULE is what must not be duplicated, but two copies of the loop are two places for the
+    policy flag to be passed differently.
+    """
+    for rec in rows:
+        state, reason = census_record_defect(rec, require_full_census=require_full_census)
+        if state == "unusable":
+            return f"the sample at {rec.get('ts')!r} {reason}"
+    return None
 
 
 class NotQuiescent(Exception):
@@ -160,14 +293,112 @@ def _parse_ts(label: str, raw: object) -> datetime.datetime:
         ) from exc
 
 
-def _read_loadavg() -> Dict[str, float]:
-    text = pathlib.Path("/proc/loadavg").read_text().split()
+def _read_loadavg(proc_root: str = "/proc") -> Dict[str, float]:
+    text = (pathlib.Path(proc_root) / "loadavg").read_text().split()
     return {"load1": float(text[0]), "load5": float(text[1]), "load15": float(text[2]),
             "runnable": text[3]}
 
 
-def census(self_pid: Optional[int] = None) -> List[Dict[str, str]]:
-    """Every competing process on this box, by comm OR cmdline.
+def percpu_jiffies(proc_root: str = "/proc") -> Dict[str, Dict[str, int]]:
+    """Per-CPU cumulative busy/idle jiffies from /proc/stat. DIAGNOSTIC CONTEXT, NOT A GATE.
+
+    WHY IT IS RECORDED (#3551 defect 3, and it is not in #3552). A ZERO CENSUS IS NOT A QUIET
+    BOX. COMPETING_COMMS is compilers and linkers plus one named script, so a peer lane running
+    node, jest, python, git or a shell suite is INVISIBLE to it. MEASURED on this box
+    2026-09-02: 91 consecutive samples reported `competing_count=0` while `load1` reached 6.39
+    with 9 runnable tasks, and the four CPUs this issue pins measured a median 8% and a MAX 86%
+    busy with foreign work under that zero census. In-window `load1` is explicitly "recorded as
+    context, not a gate", so such a window is CERTIFIABLE today.
+
+    WHY THE ANSWER IS NOT TO WIDEN THE CENSUS. This file records that including `sccache`
+    "refused a perfectly quiet box", and that "a guard that cries wolf on the normal state of
+    every box in the fleet is the guard people learn to delete". On a ten-lane box a broad comm
+    list refuses every window. So the residual is DECLARED (see `census_scope_note`) and made
+    VISIBLE here, rather than silently widened or silently left invisible.
+
+    IT MUST NOT REACH THE VERDICT. These are cumulative counters, so a single snapshot is not a
+    utilisation; a reader differences two of them. Nothing in `judge()` or `window_census_clean`
+    reads this field, and a test pins that swapping a quiet snapshot for a busy one leaves the
+    verdict unchanged -- a diagnostic that quietly became a gate would be a threshold nobody
+    chose.
+    """
+    out: Dict[str, Dict[str, int]] = {}
+    for line in (pathlib.Path(proc_root) / "stat").read_text().splitlines():
+        if not line.startswith("cpu") or line.startswith("cpu "):
+            continue  # `cpu ` (with the space) is the ALL-CPU aggregate, not a per-CPU line
+        fields = line.split()
+        label = fields[0][len("cpu"):]
+        if not label.isdigit():
+            continue
+        try:
+            values = [int(x) for x in fields[1:]]
+        except ValueError:
+            continue
+        if len(values) < 4:
+            continue
+        # idle + iowait, per proc(5). iowait is absent on very old kernels, hence the guard.
+        idle = values[3] + (values[4] if len(values) > 4 else 0)
+        out[label] = {"total": sum(values), "idle": idle}
+    return out
+
+
+def _matched_tail(element: str, limit: int = 200) -> str:
+    """Truncate an argv element KEEPING ITS TAIL, so the recorded text contains the match.
+
+    The needle matches the element's BASENAME, which is at its END. The pre-fix record kept
+    `cmdline[:160]` while matching against the FULL cmdline, so every contaminated record this
+    lane produced carried the verdict `cmdline~agent-gate.sh` with NO OCCURRENCE of
+    `agent-gate.sh` anywhere in its own recorded text -- the false positive was undiagnosable
+    from the artifact. A head truncation here would reproduce that exactly.
+    """
+    if len(element) <= limit:
+        return element
+    return "..." + element[-limit:]
+
+
+def _element_names_script(element: str, needle: str) -> bool:
+    """Does ONE argv element name the script `needle` as a path a launcher would execute?
+
+    BASENAME EQUALITY ALONE IS NOT ENOUGH, AND MEASURING IT IS HOW THAT WAS FOUND. `os.path`
+    splits at the last `/` and knows nothing about shell grammar, so BOTH of these have the
+    basename `agent-gate.sh`:
+
+        --flag=/path/agent-gate.sh                        (an option VALUE, executing nothing)
+        source /x/snap.sh && bash /y/agent-gate.sh        (a `-c` SCRIPT TEXT)
+
+    The second is the exact family this fix exists to close -- an agent tool-call shell whose
+    `-c` text merely MENTIONS the gate -- so it would have walked straight back in one layer
+    down. Hence three structural guards, each keyed on a property a plain executed path cannot
+    have:
+
+      * a leading `-` means an OPTION, and an option cannot be the thing being executed;
+      * an `=` means an option value or a `VAR=/path` assignment, neither of which executes;
+      * WHITESPACE means several words in one argv element, which is the signature of a script
+        text (`-c "..."`), never of a single path a launcher exec'd.
+
+    DECLARED RESIDUAL, in the false-NEGATIVE direction, which is the direction that matters
+    because an uncounted competitor can certify a contaminated box: an executed path CONTAINING
+    WHITESPACE is not recognised. Accepted knowingly -- no fleet lane path contains whitespace
+    (`/data/lanes/lane-<issue>/scripts/agent-gate.sh`), and the alternative admits every `-c`
+    script text that happens to END at the needle, i.e. the measured false-refusal family. If a
+    checkout path ever gains a space, this rule needs the shell-grammar model it deliberately
+    avoids, not a wider match.
+    """
+    if not element or element.startswith("-") or "=" in element:
+        return False
+    if any(ch.isspace() for ch in element):
+        return False
+    return os.path.basename(element) == needle
+
+
+def _cmdline_elements(cmdline_bytes: bytes) -> List[str]:
+    """The argv of a process, as ELEMENTS. /proc/<pid>/cmdline is NUL-separated."""
+    return [part.decode("utf-8", "replace")
+            for part in cmdline_bytes.split(b"\0") if part]
+
+
+def census(self_pid: Optional[int] = None, proc_root: str = "/proc") -> List[Dict[str, str]]:
+    """Every competing process on this box, by comm OR argv element.
 
     Read from /proc directly and NOT via `pgrep -f`: a `-f` pattern matches the census
     command's OWN cmdline and inflates the very count it is measuring. That defect was
@@ -185,13 +416,14 @@ def census(self_pid: Optional[int] = None) -> List[Dict[str, str]]:
             break
         excluded.add(probe)
         try:
-            stat_fields = pathlib.Path(f"/proc/{probe}/stat").read_text().rsplit(")", 1)[1]
+            stat_fields = (pathlib.Path(proc_root) / str(probe) / "stat"
+                           ).read_text().rsplit(")", 1)[1]
             probe = int(stat_fields.split()[1])
         except (OSError, IndexError, ValueError):
             break
 
     found: List[Dict[str, str]] = []
-    for entry in pathlib.Path("/proc").iterdir():
+    for entry in pathlib.Path(proc_root).iterdir():
         if not entry.name.isdigit():
             continue
         pid = int(entry.name)
@@ -202,50 +434,261 @@ def census(self_pid: Optional[int] = None) -> List[Dict[str, str]]:
         except OSError:
             continue  # the process exited between listdir and read; not a competitor
         try:
-            cmdline = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(
-                "utf-8", "replace").strip()
+            raw_cmdline = (entry / "cmdline").read_bytes()
         except OSError:
-            cmdline = ""
-        # Never count THIS tool or its own parent shell as a competitor.
+            raw_cmdline = b""
+        elements = _cmdline_elements(raw_cmdline)
+        cmdline = " ".join(elements).strip()
+        # THE `if "ws0_quiescence" in cmdline: continue` SELF-EXCLUSION IS GONE (#3551).
         #
-        # DEFERRED DEFECT, MEASURED: THIS SUBSTRING TEST ALSO SWALLOWS GENUINE COMPETITORS.
-        # (#3248 roborev job 84 F3; follow-up https://github.com/pmcfadin/cqlite/issues/3469
-        # family 5.)
+        # It was the SAME substring-over-a-shared-namespace defect as the one above, in the
+        # other direction: it fired BEFORE the `comm` check, so `cargo test ws0_quiescence` was
+        # SKIPPED even though `cargo` is explicitly in COMPETING_COMMS -- a genuine competitor
+        # swallowed by the observer's own name (#3248 roborev job 84 F3; #3469 family 5, where
+        # the measured impact was recorded as none on any published run).
         #
-        # It fires BEFORE the `comm` check below, so a process such as `cargo test ws0_quiescence`
-        # is skipped even though `cargo` is explicitly in COMPETING_COMMS -- which would let a
-        # contaminated window be certified quiet.
-        #
-        # MEASURED IMPACT: none on any published run -- all 7 verdicts carrying
-        # `competing_samples` recorded 0, and no such invocation exists in the #3248 delivery (the
-        # suites are bash and run directly). Deferred on that basis.
-        #
-        # THIS IS THE OBSERVER-IN-ITS-OWN-MEASUREMENT SHAPE, which this delivery hit three times
-        # already (`pgrep -f` self-inflation, `pgrep -x` defeated by the 15-char `comm` cap, and a
-        # `pkill -f` that killed its own shell). The fix is the same each time: exclude by IDENTITY
-        # -- self PID plus an ancestor walk, which this file already does elsewhere -- rather than
-        # by a substring over a namespace the competitor also occupies.
-        if "ws0_quiescence" in cmdline:
-            continue
+        # WHY REMOVING IT IS SAFE, stated rather than asserted, because a removal that
+        # reintroduces a false refusal is worse than the swallow it fixes:
+        #   * SELF AND EVERY ANCESTOR are already excluded by IDENTITY, above -- which is the
+        #     legitimate case this test was written for, and the only one it could serve.
+        #   * A PEER's copy of this tool is not a competitor by either rule: its `comm` is
+        #     `python3` (not in COMPETING_COMMS) and no argv element of it is named
+        #     `agent-gate.sh`. So it was never counted, with or without this line.
+        #   * The false-positive route the exclusion was compensating for -- a command that
+        #     mentions BOTH this tool and the gate script -- is closed AT SOURCE now that the
+        #     cmdline rule matches an argv ELEMENT rather than a substring of the whole string.
+        # Covered by a case that plants `comm=cargo` with `ws0_quiescence` in its cmdline and
+        # requires it to be COUNTED.
         why = ""
+        evidence = ""
         if comm in COMPETING_COMMS:
             why = f"comm={comm}"
+            evidence = f"comm={comm} (argv not consulted: the comm rule matched first)"
         else:
             for needle in COMPETING_CMDLINE:
-                if needle in cmdline:
-                    why = f"cmdline~{needle}"
+                for index, element in enumerate(elements):
+                    if _element_names_script(element, needle):
+                        why = f"argv={needle}"
+                        # THE MATCHED ELEMENT IS RECORDED, so the verdict is SELF-EVIDENCING.
+                        # See `_matched_tail`: the pre-fix record could not show why it fired.
+                        evidence = f"argv[{index}]={_matched_tail(element)}"
+                        break
+                if why:
                     break
         if why:
             found.append({"pid": str(pid), "comm": comm, "why": why,
-                          "cmdline": cmdline[:160]})
+                          "evidence": evidence, "cmdline": cmdline[:160]})
     return found
 
 
-def sample(self_pid: Optional[int] = None) -> Dict[str, object]:
-    """One quiescence observation: load + the competing-process census."""
-    load = _read_loadavg()
-    comp = census(self_pid)
+def sample(self_pid: Optional[int] = None, proc_root: str = "/proc") -> Dict[str, object]:
+    """One BOUNDARY observation: load + the competing-process census.
+
+    The shape is fixed by two consumers -- `judge()` and `ws0_quiescence_evidence.FIELDS` --
+    so it is deliberately NOT the flat in-window schema. `sample_record` produces that one, from
+    the SAME `census()`.
+    """
+    load = _read_loadavg(proc_root)
+    comp = census(self_pid, proc_root=proc_root)
     return {"load": load, "competing_count": len(comp), "competing": comp}
+
+
+def census_counts(entries: List[Dict[str, str]]) -> Dict[str, int]:
+    """One census, COUNTED per rule, in the flat field names `judge --timeseries` requires.
+
+    Derived by counting the entries `census()` already returned -- never by a second scan of
+    /proc -- so the in-window census and the boundary census cannot disagree about what
+    "competing" means. That disagreement is the defect #3248 finding 5 recorded (the boundary
+    sampler counted cc1/ld/lld/mold while the in-window schema had rustc/cargo/gate only).
+
+    `gate` is the count of ARGV-ELEMENT matches, i.e. of COMPETING_CMDLINE as a whole. Adding a
+    second script to that tuple widens what `gate` counts and needs no schema change; a NEW comm
+    added to COMPETING_COMMS appears here as its own key automatically.
+    """
+    counts: Dict[str, int] = {comm: 0 for comm in COMPETING_COMMS}
+    counts["gate"] = 0
+    for entry in entries:
+        why = entry.get("why", "")
+        if why.startswith("comm="):
+            key = why[len("comm="):]
+            counts[key] = counts.get(key, 0) + 1
+        elif why.startswith("argv="):
+            counts["gate"] += 1
+    return counts
+
+
+def sample_record(self_pid: Optional[int] = None, proc_root: str = "/proc",
+                  now: Optional[datetime.datetime] = None) -> Dict[str, object]:
+    """ONE in-window timeseries record, in the schema `judge --timeseries` actually requires.
+
+    THE TWO HALVES OF THIS GATE DID NOT COMPOSE (#3551/#3552 defect 1), IN THREE LAYERS.
+    `sample()` returns `{load: {load1..}, competing_count, competing}`; `judge --timeseries`
+    requires, per record, a parseable `ts`, the census fields `rustc`/`cargo`/`gate` as
+    non-negative ints, AND a FLAT `load1`. Feeding the committed sampler's output to the
+    committed judge refuses at the first layer:
+
+        QUIESCENCE_TIMESERIES_MALFORMED: record has no usable ts field
+
+    #3552 records only that layer and says supplying `ts` "advances the judge to its coverage
+    check, which is sound". IT DOES NOT: measured, it advances to the CENSUS-FIELD check and
+    refuses again --
+
+        QUIESCENCE_TIMESERIES_SCHEMA: the sample at '...' carries no 'rustc' field
+
+    -- and with `ts` and the census fields supplied but no flat `load1`, a third time. So a rig
+    following the committed instructions could not produce an acceptable timeseries at all, and
+    the frozen `box-load-frozen.jsonl` example was in a third schema no committed code emits.
+    This function IS that schema, and `test_ws0_quiescence_guards.sh` pins the composition end to
+    end so the halves cannot drift apart again.
+    """
+    load = _read_loadavg(proc_root)
+    comp = census(self_pid, proc_root=proc_root)
+    stamp = now or datetime.datetime.now(datetime.timezone.utc)
+    rec: Dict[str, object] = {
+        # The ISO spelling `_parse_ts` accepts, UTC, one-second resolution (the sampler cadence
+        # is 10 s, so sub-second precision would be noise in the artifact).
+        "ts": stamp.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "load1": load["load1"],
+        "load5": load["load5"],
+        "load15": load["load15"],
+        "runnable": load["runnable"],
+        # AUTHORITATIVE: the full census, which is what makes `census_breadth` read FULL.
+        "competing_count": len(comp),
+        # The entries themselves, so a contaminated record NAMES what contaminated it -- each
+        # carries the `evidence` field (the matched argv element, or the comm rule).
+        "competing": comp,
+        # DIAGNOSTIC CONTEXT, NOT A GATE. See `percpu_jiffies`.
+        "percpu": percpu_jiffies(proc_root),
+        # Declared, so a timeseries read from a synthetic root is VISIBLE in the artifact rather
+        # than inferred. The only non-`/proc` caller is this module's own test suite.
+        "census_proc_root": proc_root,
+    }
+    rec.update(census_counts(comp))
+    return rec
+
+
+def _refuse_bad_out_path(out: str) -> pathlib.Path:
+    """Refuse an `--out` inside a git worktree, and refuse when that cannot be MEASURED.
+
+    BOTH REASONS WERE LEARNED BY HITTING THEM (docs/reports/ws0-3248-artifacts/quiescence/
+    README.md):
+
+      1. A worktree file APPENDED EVERY 10 s trips the gate's `tree-integrity` check MID-RUN
+         (#2926) -- the first version of this instrument failed a `--lite` gate with
+         `tree-mutated-midrun; changed: .ws0-3248/box-load.jsonl`.
+      2. A WORKTREE IS DELETED AT FINALIZE, and this sampler is meant to outlive the issue.
+
+    There is deliberately NO DEFAULT `--out` and no override flag. Inventing a default would
+    guess at a machine layout this module cannot know; an override could only ever buy back the
+    two failures above. A path whose worktree membership CANNOT BE MEASURED is a REFUSAL, not a
+    pass: a positive verdict requires an affirmative measurement.
+    """
+    path = pathlib.Path(out)
+    try:
+        resolved = path.expanduser().resolve()
+    except OSError as exc:
+        raise NotQuiescent(
+            "QUIESCENCE_SAMPLER_OUT_UNMEASURABLE",
+            f"--out {out!r} could not be resolved to an absolute path ({exc}), so whether it"
+            " lies inside a git worktree could not be measured. Refused rather than guessed.",
+        ) from exc
+    for parent in [resolved.parent, *resolved.parent.parents]:
+        marker = parent / ".git"
+        try:
+            # A WORKTREE's `.git` is a FILE, a checkout's is a DIRECTORY, and a broken symlink
+            # is neither but still means someone put one there -- `exists()` alone returns False
+            # for a dangling link, so it is asked with `is_symlink()` beside it.
+            present = marker.exists() or marker.is_symlink()
+        except OSError as exc:
+            raise NotQuiescent(
+                "QUIESCENCE_SAMPLER_OUT_UNMEASURABLE",
+                f"could not read {marker} while checking whether --out {out!r} lies inside a"
+                f" git worktree ({exc}). An unmeasurable answer is not a clean one.",
+            ) from exc
+        if present:
+            raise NotQuiescent(
+                "QUIESCENCE_SAMPLER_OUT_IN_WORKTREE",
+                f"--out {out!r} resolves to {resolved}, inside the git tree rooted at {parent}."
+                " A file appended every cadence tick trips the gate's tree-integrity check"
+                " mid-run (#2926) and is DELETED when the worktree is finalized. Write outside"
+                " every worktree (the fleet convention is /data/ws0-<issue>/sampler/).",
+            )
+    return resolved
+
+
+def sample_loop(out: str, cadence: float, samples: int = 0,
+                self_pid: Optional[int] = None, proc_root: str = "/proc",
+                sleeper=None) -> int:
+    """Append one `sample_record` per `cadence` seconds, flushed per line so a reader can tail.
+
+    `samples=0` runs until the process is signalled, which is the production shape (the sampler
+    outlives the measurement session). A positive `samples` bounds the run, which is what makes
+    this path testable hermetically -- an unbounded loop in a test suite is a hang, and the thing
+    that notices a hang is the gate's stall watchdog minutes later.
+    """
+    if sleeper is None:
+        sleeper = time.sleep
+    target = _refuse_bad_out_path(out)
+    cadence = _finite("--cadence", cadence)
+    if cadence <= 0.0:
+        raise NotQuiescent(
+            "QUIESCENCE_SAMPLER_CADENCE_INVALID",
+            f"--cadence {cadence!r} is not positive. A non-positive cadence either spins or"
+            " never samples, and both produce a timeseries that covers nothing.",
+        )
+    if samples < 0:
+        raise NotQuiescent(
+            "QUIESCENCE_SAMPLER_SAMPLES_INVALID",
+            f"--samples {samples!r} is negative; pass 0 to run until signalled.",
+        )
+    written = 0
+    while True:
+        rec = sample_record(self_pid=self_pid, proc_root=proc_root)
+        # Opened per record ON PURPOSE: an append+flush+close per tick is what makes the file
+        # tailable, and it costs nothing at a 10 s cadence.
+        with open(target, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, sort_keys=True) + "\n")
+            fh.flush()
+        written += 1
+        if samples and written >= samples:
+            return written
+        sleeper(cadence)
+
+
+def census_scope_note(samples: int) -> str:
+    """WHAT A ZERO CENSUS BOUNDS, AND WHAT IT DOES NOT -- stated in the verdict, in words.
+
+    #3551 defect 3, and it is NOT in #3552's write-up. A ZERO CENSUS IS NOT A QUIET BOX.
+    COMPETING_COMMS is compilers and linkers plus one named script, so a peer lane running node,
+    jest, python, git or a shell suite is INVISIBLE. MEASURED on this box 2026-09-02: 91
+    consecutive samples reported `competing_count=0` while `load1` reached 6.39 with 9 runnable
+    tasks, and the four CPUs this issue pins measured a MEDIAN 8% and a MAX 86% busy with
+    foreign work under that zero census. In-window `load1` is "recorded as context, not a gate",
+    so such a window is CERTIFIABLE.
+
+    THE ANSWER IS NOT TO WIDEN THE CENSUS, and this file already records why: including
+    `sccache` "refused a perfectly quiet box", and "a guard that cries wolf on the normal state
+    of every box in the fleet is the guard people learn to delete". On a ten-lane box a broad
+    comm list refuses every window, and the guard gets deleted. So the residual is DECLARED
+    where a reader of the verdict will see it -- the same idiom `census_breadth` already uses
+    for the narrow/full distinction -- and made visible by the per-sample `percpu` record.
+
+    It is DERIVED from the record it describes (the in-window sample count), so a verdict whose
+    scope note disagrees with its own sample count is refused by
+    `ws0_quiescence_evidence.P2_DERIVATIONS`, exactly as a mis-stated `census_breadth` is. A
+    curated string nobody recomputes is a claim, not a measurement.
+    """
+    return (
+        f"BOUNDED, NOT SILENT: a zero census across {samples} in-window record(s) bounds"
+        f" COMPILERS AND LINKERS ({', '.join(COMPETING_COMMS)}) plus the named script(s)"
+        f" ({', '.join(COMPETING_CMDLINE)}) and NOTHING ELSE. It does NOT bound total foreign"
+        " load: a peer lane running node, jest, python, git or a shell suite is INVISIBLE to"
+        " this census, so this is 0 RECOGNISED competing processes, never 'nothing was"
+        " running'. MEASURED (#3551): 91 consecutive samples read competing_count=0 while load1"
+        " reached 6.39 with 9 runnable tasks and the pinned CPUs measured a median 8% / max 86%"
+        " busy with foreign work. In-window load1 and the per-sample `percpu` jiffy snapshot"
+        " are CONTEXT, NOT GATES -- read them before trusting this verdict."
+    )
 
 
 def window_census_clean(timeseries: str, start: str, end: str) -> Dict[str, object]:
@@ -337,40 +780,28 @@ def window_census_clean(timeseries: str, start: str, end: str) -> Dict[str, obje
     # is authoritative when present. The individual fields remain accepted for a timeseries
     # recorded before that field existed — but such a record is explicitly a NARROWER census,
     # and the verdict says so rather than implying full coverage.
-    CENSUS_FIELDS = ("rustc", "cargo", "gate")
+    # THE RULE IS THE MODULE-LEVEL `census_record_defect`, not a copy of it here (roborev #3551
+    # round 3 F2). It was inline, and therefore unimportable, and the two report-producing tools
+    # in `docs/reports/ws0-3551-artifacts/` had each grown their own weaker version. The policy
+    # flag is the ONE difference between this caller and those: `require_full_census=False`
+    # accepts a pre-`competing_count` timeseries as a NARROW census and RECORDS the narrowness
+    # below, so this verdict never implies coverage it does not have.
     narrow_census_records = 0
     dirty = []
     for rec in rows:
-        counts = {}
-        for field in CENSUS_FIELDS:
-            if field not in rec:
-                raise NotQuiescent(
-                    "QUIESCENCE_TIMESERIES_SCHEMA",
-                    f"the sample at {rec.get('ts')!r} carries no {field!r} field. An absent"
-                    " census field is falsy and would read as CLEAN, so a timeseries missing"
-                    " it cannot establish that the window was uncontaminated.",
-                )
-            value = rec[field]
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise NotQuiescent(
-                    "QUIESCENCE_TIMESERIES_SCHEMA",
-                    f"the sample at {rec.get('ts')!r} has {field}={value!r}, which is not a"
-                    " non-negative integer count.",
-                )
-            counts[field] = value
+        state, reason = census_record_defect(rec, require_full_census=False)
+        if state == "unusable":
+            raise NotQuiescent(
+                "QUIESCENCE_TIMESERIES_SCHEMA",
+                f"the sample at {rec.get('ts')!r} {reason}",
+            )
+        counts = {field: rec[field] for field in CENSUS_FIELDS}
         # `competing_count` is the FULL census when the sampler provides it. Its absence is
         # recorded, never silently treated as equivalent coverage.
-        full = rec.get("competing_count")
-        if full is None:
+        if state == "narrow":
             narrow_census_records += 1
         else:
-            if isinstance(full, bool) or not isinstance(full, int) or full < 0:
-                raise NotQuiescent(
-                    "QUIESCENCE_TIMESERIES_SCHEMA",
-                    f"the sample at {rec.get('ts')!r} has competing_count={full!r}, which is"
-                    " not a non-negative integer count.",
-                )
-            if full:
+            if rec[FULL_CENSUS_FIELD]:
                 dirty.append(rec)
                 continue
         # LOAD1 IS REQUIRED AND MUST BE FINITE (finding 4). Without this, a census-complete
@@ -413,6 +844,9 @@ def window_census_clean(timeseries: str, start: str, end: str) -> Dict[str, obje
         # Nonzero means this verdict rests on a census of rustc/cargo/gate alone, not the full
         # COMPETING_COMMS set that boundary sampling uses (#3248 finding 5).
         "narrow_census_records": narrow_census_records,
+        # WHAT A ZERO CENSUS DOES NOT COVER, in the verdict rather than in a doc nobody opens
+        # (#3551 defect 3). Derived from `samples`, so it cannot be edited into a reassurance.
+        "census_scope": census_scope_note(len(rows)),
         "census_breadth": (
             "FULL (competing_count present on every in-window record)"
             if narrow_census_records == 0
@@ -544,6 +978,32 @@ def main(argv: Optional[list] = None) -> int:
     p_s = sub.add_parser("sample", help="write one boundary sample")
     p_s.add_argument("--out", required=True)
 
+    # THE SUBCOMMAND THAT MAKES THE TWO HALVES OF THIS GATE COMPOSE (#3551 defect 1). See
+    # `sample_record`: the boundary `sample` schema is NOT the schema `judge --timeseries`
+    # requires, and before this existed no committed code could produce one.
+    p_l = sub.add_parser(
+        "sample-loop",
+        help="append the in-window timeseries `judge --timeseries` consumes, one JSON object"
+             " per line, until signalled")
+    p_l.add_argument("--out", required=True,
+                     help="JSONL path, APPENDED. REQUIRED and deliberately without a default:"
+                          " it must lie OUTSIDE every git worktree (a file appended each tick"
+                          " trips the gate's tree-integrity check, #2926, and a worktree is"
+                          " deleted at finalize), and this tool cannot guess a machine layout."
+                          " The fleet convention is /data/ws0-<issue>/sampler/box-load.jsonl.")
+    p_l.add_argument("--cadence", type=float, default=SAMPLER_CADENCE_S,
+                     help=f"seconds between samples (default {SAMPLER_CADENCE_S:.0f};"
+                          f" MAX_SAMPLE_GAP_S is {MAX_SAMPLE_GAP_S:.0f}, so a slower cadence"
+                          " makes the judge refuse the window as undercovered)")
+    p_l.add_argument("--samples", type=int, default=0,
+                     help="stop after N records; 0 (the default) runs until signalled, which is"
+                          " the production shape")
+    p_l.add_argument("--proc-root", default="/proc",
+                     help="the procfs to read (default /proc). Recorded in EVERY record as"
+                          " `census_proc_root`, so a timeseries taken from a synthetic root is"
+                          " visible in the artifact rather than inferred. Only this module's"
+                          " own test suite passes anything else.")
+
     p_j = sub.add_parser("judge", help="accept or refuse a rep from two boundary samples")
     p_j.add_argument("--before", required=True)
     p_j.add_argument("--after", required=True)
@@ -570,6 +1030,23 @@ def main(argv: Optional[list] = None) -> int:
         load = rec["load"]
         print(f"ws0_quiescence: sampled load1={load['load1']} "
               f"competing={rec['competing_count']}")
+        return 0
+
+    if args.cmd == "sample-loop":
+        if args.proc_root != "/proc":
+            # Loud, because a synthetic census can only ever make a box look quieter.
+            print(f"ws0_quiescence: WARNING: reading a SYNTHETIC procfs {args.proc_root!r};"
+                  " every record declares it as `census_proc_root`", file=sys.stderr)
+        try:
+            written = sample_loop(args.out, args.cadence, samples=args.samples,
+                                  proc_root=args.proc_root)
+        except NotQuiescent as exc:
+            print(f"ws0_quiescence: REFUSED: {exc.cause}: {exc.detail}", file=sys.stderr)
+            return 2
+        except KeyboardInterrupt:
+            print("ws0_quiescence: sample-loop interrupted", file=sys.stderr)
+            return 0
+        print(f"ws0_quiescence: sample-loop wrote {written} record(s) to {args.out}")
         return 0
 
     # The knobs may only TIGHTEN. A looser threshold is the escape hatch a measurement guard
@@ -638,6 +1115,10 @@ def main(argv: Optional[list] = None) -> int:
               f" [{w['window']['start']} .. {w['window']['end']}]")
         print(f"  in-window load1:  min={w['load1_min']} max={w['load1_max']}"
               f" mean={w['load1_mean']:.2f}  (recorded as context, not a gate)")
+        # THE SCOPE OF THAT ZERO, PRINTED. A reader of this block is the reader who decides
+        # whether to trust the verdict, so the residual belongs here and not only in the JSON.
+        print(f"  census breadth:   {w['census_breadth']}")
+        print(f"  census SCOPE:     {w['census_scope']}")
     print(f"  load1 before: {rec['load1_before']} (bounded <= {args.max_load1})")
     print(f"  load1 after:  {rec['load1_after']} — {rec['load1_after_note']}")
     return 0

@@ -49,49 +49,6 @@
 // One level deeper than `raw_value.rs`, so the `row_decoder` glob is `super::super`.
 use super::super::*;
 
-/// Assert a bounded decode consumed its entire slice (issue #3811).
-///
-/// `consumed` is what the decoder reports it read; `len` is the exact extent the
-/// caller handed it. Anything short is `TupleType.split` rule 2 or rule 4 — a
-/// partial component-length prefix, or trailing bytes after the last declared
-/// component — and Cassandra throws `MarshalException` for both.
-///
-/// NOTE (#3820): PR #3820 adds `typed_value.rs::require_fully_consumed`, the
-/// same rule over `&CqlType` rather than over the type STRING dispatch. There
-/// must be ONE implementation of this rule, not two: when #3820 lands, this
-/// function becomes a one-line delegation to it (or is deleted in favour of it)
-/// and the two error message classes are unified. Fold in at the same time
-/// `cell_path_key.rs`'s now-redundant `duration` consumption check, which this
-/// assert reaches first.
-impl V5CompressedLegacyParser {
-    pub(in crate::storage::sstable::reader::parsing::row_decoder) fn require_fully_consumed_raw(
-        consumed: usize,
-        len: usize,
-        column_name: &str,
-        type_str: &str,
-    ) -> Result<()> {
-        if consumed == len {
-            return Ok(());
-        }
-        if consumed < len {
-            // Wording deliberately SHARED with `cell_path_key.rs`'s existing
-            // consumption refusal ("decoded only N of M byte(s)"): it is the same
-            // rule, and a caller matching on the message must not have to know which
-            // of the two layers refused. #3820 folds the two into one function.
-            return Err(Error::corruption(format!(
-                "Bounded value '{}' of type '{}' decoded only {} of {} byte(s); the whole \
-             slice must be the value (trailing bytes, or a partial trailing component \
-             header, are corruption — Cassandra TupleType.split rules 2 and 4)",
-                column_name, type_str, consumed, len
-            )));
-        }
-        Err(Error::corruption(format!(
-        "Bounded value '{}' (type '{}'): decoder reported {} bytes consumed but only {} were available",
-        column_name, type_str, consumed, len
-    )))
-    }
-}
-
 impl V5CompressedLegacyParser {
     /// Consumption-reporting form of
     /// [`Self::parse_value_from_raw_bytes`](super::V5CompressedLegacyParser::parse_value_from_raw_bytes):
@@ -521,7 +478,7 @@ impl V5CompressedLegacyParser {
         if actual_end == blob_end {
             return Ok(());
         }
-        // Symmetric with `require_fully_consumed_raw` above: an OVER-read is
+        // Symmetric with `require_fully_consumed` above: an OVER-read is
         // unreachable today (every element loop is bounded by `blob_end`), but a
         // `saturating_sub` would render it as "0 extraneous byte(s)", which is a
         // false statement in a corruption message rather than a missing one.
@@ -553,7 +510,7 @@ impl V5CompressedLegacyParser {
     /// The OVER-width half of finding D is enforced by the caller's consumption
     /// assert, not here: these arms report their exact width `n`, so a slice of
     /// `n + k` bytes leaves `k` unconsumed and
-    /// [`require_fully_consumed_raw`] refuses it. That is what stops a 5-byte
+    /// [`require_fully_consumed`] refuses it. That is what stops a 5-byte
     /// declared `int` decoding from its first four bytes.
     ///
     /// **What the COMPOSED rule actually is — stated rather than inferred from
