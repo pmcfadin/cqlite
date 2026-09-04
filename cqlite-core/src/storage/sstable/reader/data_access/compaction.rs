@@ -161,15 +161,16 @@ impl SSTableReader {
         &self,
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<super::super::compaction_row::CompactionRow>> {
-        // Issue #2372: BTI (`da`) is chunk-compressed with the SAME V5 row layout
-        // as nb (why `bti_scan_with_metadata` stitches+parses it with the V5
-        // parser), but `requires_chunk_stitching()` gates on `is_nb_format()` and
-        // EXCLUDES BTI — so without this branch a BTI table fell into the
-        // block-by-block `parse_block_entries` fallback below and errored ("Blob
-        // fallback not allowed … V5_0Bti"): the compaction path had no BTI branch,
-        // unlike `get_all_entries`/`scan`. Route BTI through the SAME stitch path.
-        // Otherwise only V5CompressedLegacy NB is supported here; other formats
-        // fall back to iterate_all_partitions with timestamp 0 (LWW by run_index).
+        let _scan = self.begin_scan(); // #3853 (no-op: merge readers are buffered)
+                                       // Issue #2372: BTI (`da`) is chunk-compressed with the SAME V5 row layout
+                                       // as nb (why `bti_scan_with_metadata` stitches+parses it with the V5
+                                       // parser), but `requires_chunk_stitching()` gates on `is_nb_format()` and
+                                       // EXCLUDES BTI — so without this branch a BTI table fell into the
+                                       // block-by-block `parse_block_entries` fallback below and errored ("Blob
+                                       // fallback not allowed … V5_0Bti"): the compaction path had no BTI branch,
+                                       // unlike `get_all_entries`/`scan`. Route BTI through the SAME stitch path.
+                                       // Otherwise only V5CompressedLegacy NB is supported here; other formats
+                                       // fall back to iterate_all_partitions with timestamp 0 (LWW by run_index).
         if self.requires_chunk_stitching() || self.bti_partitions_db.is_some() {
             // We need schema; retrieve it once.
             // `schema` is Option<&TableSchema>; clone it into an owned value so we
@@ -249,6 +250,7 @@ impl SSTableReader {
     /// the partition key in `key` (partition-granular). No schema is required
     /// from the caller: the parser resolves it via the reader's header/registry.
     pub async fn distinct_partition_keys(&self) -> Result<Vec<Vec<u8>>> {
+        let _scan = self.begin_scan(); // #3853 (no-op: merge readers are buffered)
         use std::collections::HashSet;
 
         let cursor = self.new_scan_cursor().await?;
@@ -299,6 +301,7 @@ impl SSTableReader {
     /// The stitch/parse strategy mirrors [`Self::distinct_partition_keys`]; only
     /// the parser entry point differs (it threads the partition-start offset).
     pub async fn distinct_partition_keys_with_positions(&self) -> Result<Vec<(u64, Vec<u8>)>> {
+        let _scan = self.begin_scan(); // #3853 (no-op: merge readers are buffered)
         use std::collections::HashSet;
 
         let cursor = self.new_scan_cursor().await?;
@@ -357,6 +360,7 @@ impl SSTableReader {
     ///
     /// [`parse_partition_header_full`]: crate::storage::sstable::reader::parsing::V5CompressedLegacyParser::parse_partition_header_full
     pub async fn partition_verify_scan(&self) -> Result<Vec<(Vec<u8>, Option<i32>)>> {
+        let _scan = self.begin_scan(); // #3853 (no-op: merge readers are buffered)
         use std::collections::HashSet;
 
         let cursor = self.new_scan_cursor().await?;
@@ -440,6 +444,7 @@ impl SSTableReader {
     pub async fn partition_clustering_verify_scan(
         &self,
     ) -> Result<Vec<(usize, Vec<Vec<crate::types::Value>>)>> {
+        let _scan = self.begin_scan(); // #3853 (no-op: merge readers are buffered)
         use crate::types::Value;
         use std::collections::BTreeMap;
 
@@ -589,8 +594,9 @@ impl SSTableReader {
     where
         F: FnMut(super::super::compaction_row::CompactionRow) -> Result<std::ops::ControlFlow<()>>,
     {
-        // Reset chunk reader to the start of the data section (mirrors
-        // iterate_all_partitions_for_compaction) using an own per-scan cursor.
+        let _scan = self.begin_scan(); // #3853 (no-op: merge readers are buffered)
+                                       // Reset chunk reader to the start of the data section (mirrors
+                                       // iterate_all_partitions_for_compaction) using an own per-scan cursor.
         let cursor = self.new_scan_cursor().await?;
         let header_size = self.calculate_header_size();
         {

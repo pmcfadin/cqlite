@@ -107,6 +107,7 @@ impl SSTableReader {
         limit: Option<usize>,
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(RowKey, ScanRow)>> {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
         tracing::debug!("SSTableReader::scan - Starting scan");
         tracing::debug!("SSTableReader::scan - File path: {:?}", self.file_path());
         tracing::debug!("SSTableReader::scan - Table ID: {}", table_id);
@@ -282,10 +283,11 @@ impl SSTableReader {
     /// `Value::Tombstone` entries (with their authoritative deletion timestamps)
     /// so that tombstone-shadowing semantics can be applied during the merge.
     pub async fn get_all_entries(&self) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
-        // Issue #660: BTI ("da") tables have no Index.db; route through the
-        // whole-Data.db BTI scan, which resolves schema via get_table_schema
-        // (header/registry) and decodes every partition. It mints its own
-        // per-scan cursor, as does the non-BTI path below (issue #815).
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
+                                       // Issue #660: BTI ("da") tables have no Index.db; route through the
+                                       // whole-Data.db BTI scan, which resolves schema via get_table_schema
+                                       // (header/registry) and decodes every partition. It mints its own
+                                       // per-scan cursor, as does the non-BTI path below (issue #815).
         if self.bti_partitions_db.is_some() {
             let table_id = TableId::new(format!(
                 "{}.{}",
@@ -490,6 +492,7 @@ impl SSTableReader {
         schema: Option<&crate::schema::TableSchema>,
         scan_cancel: &ScanCancel,
     ) -> Result<Vec<(RowKey, ScanRow)>> {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
         tracing::debug!(
             "SSTableReader::sequential_scan - starting: table_id={table_id}, has_schema={}",
             schema.is_some()
@@ -774,6 +777,7 @@ impl SSTableReader {
         )>,
     > {
         tracing::debug!("SSTableReader::scan_with_cell_metadata - Starting");
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
 
         // Issue #660: BTI ("da") metadata scan — same whole-Data.db walk as the
         // plain BTI scan, but surfaces per-cell write metadata for WRITETIME/TTL.

@@ -533,6 +533,7 @@ impl SSTableReader {
             std::collections::HashMap<String, CellWriteMetadata>,
         )>,
     > {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
         self.bti_scan_with_metadata_cancellable(
             start_key,
             end_key,
@@ -579,6 +580,7 @@ impl SSTableReader {
             std::collections::HashMap<String, CellWriteMetadata>,
         )>,
     > {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
         scan_cancel.check()?;
         let cursor = self.new_scan_cursor().await?;
 
@@ -748,32 +750,33 @@ impl SSTableReader {
         now_secs: Option<i64>,
         out: &WindowedOut,
     ) -> Result<()> {
-        // #1695 (roborev raised this in rounds 12, 14 and 15): race the
-        // materialization against OUR consumer's departure.
-        //
-        // `bti_scan_with_metadata` materializes the WHOLE table into `entries` before
-        // the first send below, so the send-failure checks in the arms are reached
-        // only after all the work is done. Its internal `scan_cancel.checkpoint(idx)`
-        // polls the READER-WIDE token, which #2264 trips on a Flight disconnect and
-        // #2361 on adapter teardown — but nothing trips when a timed-out streaming
-        // query drops its iterator. So a timed-out query kept decoding and sorting a
-        // whole BTI table.
-        //
-        // Racing the scan FUTURE is what fixes it, and it needs no new cancellation
-        // plumbing: the checkpoints inside are await points, so dropping the future
-        // there abandons the scan within one checkpoint interval. Crucially the
-        // reader-wide token is still passed through untouched, so #2264 and #2361 keep
-        // working — nothing is traded away for this. (An earlier attempt added a
-        // "derive a per-stream token from the reader's" API for the same purpose; it
-        // was removed once the race proved to give the same semantics with no new
-        // surface. Do not reintroduce it without a caller the race cannot serve.)
-        //
-        // `biased` so an already-departed consumer wins over a ready scan.
-        //
-        // RESIDUAL, deliberately: `sort_by_token_order_with_meta` after the loop is
-        // SYNCHRONOUS, so a departure during the sort is not observed until it ends.
-        // That is bounded by one sort rather than a whole table walk, and is the same
-        // uninterruptible-post-scan-stage limit documented at the chokepoint.
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
+                                       // #1695 (roborev raised this in rounds 12, 14 and 15): race the
+                                       // materialization against OUR consumer's departure.
+                                       //
+                                       // `bti_scan_with_metadata` materializes the WHOLE table into `entries` before
+                                       // the first send below, so the send-failure checks in the arms are reached
+                                       // only after all the work is done. Its internal `scan_cancel.checkpoint(idx)`
+                                       // polls the READER-WIDE token, which #2264 trips on a Flight disconnect and
+                                       // #2361 on adapter teardown — but nothing trips when a timed-out streaming
+                                       // query drops its iterator. So a timed-out query kept decoding and sorting a
+                                       // whole BTI table.
+                                       //
+                                       // Racing the scan FUTURE is what fixes it, and it needs no new cancellation
+                                       // plumbing: the checkpoints inside are await points, so dropping the future
+                                       // there abandons the scan within one checkpoint interval. Crucially the
+                                       // reader-wide token is still passed through untouched, so #2264 and #2361 keep
+                                       // working — nothing is traded away for this. (An earlier attempt added a
+                                       // "derive a per-stream token from the reader's" API for the same purpose; it
+                                       // was removed once the race proved to give the same semantics with no new
+                                       // surface. Do not reintroduce it without a caller the race cannot serve.)
+                                       //
+                                       // `biased` so an already-departed consumer wins over a ready scan.
+                                       //
+                                       // RESIDUAL, deliberately: `sort_by_token_order_with_meta` after the loop is
+                                       // SYNCHRONOUS, so a departure during the sort is not observed until it ends.
+                                       // That is bounded by one sort rather than a whole table walk, and is the same
+                                       // uninterruptible-post-scan-stage limit documented at the chokepoint.
         let scan = self.bti_scan_with_metadata(start_key, end_key, None, schema, true, now_secs);
         let entries = match out {
             WindowedOut::PerRow(tx) => tokio::select! {

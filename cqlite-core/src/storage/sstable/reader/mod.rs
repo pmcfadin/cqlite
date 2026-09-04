@@ -49,9 +49,10 @@ mod prefetch_window;
 // sync-fallback registry-schema pre-resolution (issue #1692)
 #[cfg(feature = "state_machine")]
 mod registry_schema;
+// Reader-scoped scan-lifetime madvise seam (issue #3853).
+mod scan_lifetime;
 // Windowed streaming-scan driver (issue #1143); `pub` ONLY under non-default
 // `scan-offload-probe` so the #1143 guard reaches its probe, else private.
-mod scan_lifetime;
 #[cfg(not(feature = "scan-offload-probe"))]
 pub(crate) mod scan_stream_windowed;
 #[cfg(feature = "scan-offload-probe")]
@@ -316,9 +317,7 @@ impl SSTableReader {
         // contract that removes the BTI per-lookup `open(2)`. Every non-mmap
         // backend degrades gracefully to a plain positioned fd if the faster
         // backend is refused, mirroring `build_block_sources`.
-        // #3853: the mapping the POINT plane ended up on, recorded so
-        // `scan_lifetime::resolve` can `Arc::ptr_eq`-test whether it is the SAME
-        // allocation as the scan mapping (it is, below 8 MiB) — see that function.
+        // #3853: the mapping the POINT plane landed on (see `scan_lifetime::resolve`).
         #[cfg(unix)]
         let mut point_plane_mmap: Option<Arc<memmap2::Mmap>> = None;
         let point_source: Arc<dyn read_at::ReadAt> = match &scan_source {
@@ -329,9 +328,7 @@ impl SSTableReader {
                 #[cfg(not(unix))]
                 let point_mmap = mmap.clone();
                 #[cfg(unix)]
-                {
-                    point_plane_mmap = Some(point_mmap.clone());
-                }
+                let _prev = point_plane_mmap.replace(point_mmap.clone()); // #3853
                 Arc::new(read_at::MmapReadAt::new(point_mmap))
             }
             #[cfg(unix)]
@@ -364,8 +361,7 @@ impl SSTableReader {
             ScanSource::Buffered { .. } => point_source.clone(),
         };
 
-        // Reader-scoped scan-lifetime madvise seam (issue #3853). Gate conditions
-        // and the reason each exists: `scan_lifetime::resolve`.
+        // #3853 scan-lifetime madvise seam; every gate condition: `scan_lifetime::resolve`.
         #[cfg(unix)]
         let scan_lifetime =
             scan_lifetime::resolve(&scan_source, prefetch, point_plane_mmap.as_ref());
@@ -848,12 +844,10 @@ impl SSTableReader {
                         path.display(),
                         file_size
                     );
-                    // Best-effort OPEN-TIME read-ahead advice (Unix-only;
-                    // madvise has no Windows equivalent here). Failure is
-                    // non-fatal. `WillNeed` is deliberately NOT applied here
-                    // any more — it moved to SCAN START (issue #3853, see
-                    // `reader::scan_lifetime`), so an opened-but-never-scanned
-                    // reader pays no full-file read-ahead.
+                    // Best-effort OPEN-TIME read-ahead advice (Unix-only; madvise
+                    // has no Windows equivalent). Non-fatal. `WillNeed` is NOT
+                    // applied here any more: it moved to SCAN START (#3853, see
+                    // `reader::scan_lifetime`).
                     #[cfg(unix)]
                     if let Some(advice) = mmap_open_advice_for(prefetch) {
                         if let Err(e) = mmap.advise(advice) {
