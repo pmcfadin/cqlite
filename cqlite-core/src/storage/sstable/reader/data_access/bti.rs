@@ -533,6 +533,7 @@ impl SSTableReader {
             std::collections::HashMap<String, CellWriteMetadata>,
         )>,
     > {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
         self.bti_scan_with_metadata_cancellable(
             start_key,
             end_key,
@@ -579,6 +580,7 @@ impl SSTableReader {
             std::collections::HashMap<String, CellWriteMetadata>,
         )>,
     > {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
         scan_cancel.check()?;
         let cursor = self.new_scan_cursor().await?;
 
@@ -748,6 +750,8 @@ impl SSTableReader {
         now_secs: Option<i64>,
         out: &WindowedOut,
     ) -> Result<()> {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
+
         // #1695 (roborev raised this in rounds 12, 14 and 15): race the
         // materialization against OUR consumer's departure.
         //
