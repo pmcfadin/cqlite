@@ -8,7 +8,16 @@
 //! Every entry point is TOTAL and FAILS CLOSED: a text outside the accepted
 //! grammar, a digit count or exponent beyond the stated bounds, or any comparison
 //! that cannot be decided yields `None`/`false` — "I cannot tell" — which the
-//! caller must treat as "not this gap".
+//! caller must treat as "not this gap". A PANIC is not `None`, so nothing here may
+//! overflow on a legal-looking input: `1e-9223372036854775808` parses to a real
+//! `i64` whose `abs()` does not exist, and it used to abort a debug build instead
+//! of being refused (roborev job 96).
+//!
+//! And no allocation is unbounded, which is the other half of that rule
+//! ("never materialize `10^scale` with an unbounded exponent"): every power of ten
+//! or five taken below is bounded by [`MAX_SCALE`], i.e. by the mantissa-digit and
+//! exponent bounds together — 464 digits' worth at the very worst, checked at BOTH
+//! the parse and the comparison rather than assumed from the other.
 
 use num_bigint::BigInt;
 
@@ -41,11 +50,16 @@ pub struct ExactDecimal {
 /// The accepted grammar, deliberately narrow: `-?<digits>[.<digits>][eE[+-]<digits>]`,
 /// ASCII digits only, at least one mantissa digit, and no leading `+` (neither
 /// formatter emits one). Anything else is refused rather than guessed at.
-const MAX_MANTISSA_DIGITS: usize = 64;
+const MAX_MANTISSA_DIGITS: u32 = 64;
 /// A finite f32 lives within roughly `1e-45 .. 1e39`, so no formatter spelling of
 /// one needs an exponent anywhere near this. The bound exists so a hostile or
 /// corrupt text cannot make this predicate allocate a `10^huge`.
-const MAX_ABS_EXPONENT: i64 = 400;
+const MAX_ABS_EXPONENT: u32 = 400;
+/// The largest scale the two bounds above can produce: every fraction digit and
+/// every negative exponent step adds one. Asserted at the COMPARISON too, so the
+/// arithmetic's boundedness does not rest on the parser having been the only way
+/// an `ExactDecimal` was built.
+const MAX_SCALE: u32 = MAX_MANTISSA_DIGITS + MAX_ABS_EXPONENT;
 
 impl ExactDecimal {
     /// Read a decimal text EXACTLY, or refuse. `None` is "I cannot decide this",
@@ -59,7 +73,14 @@ impl ExactDecimal {
             Some((m, e)) => {
                 let e = e.strip_prefix('+').unwrap_or(e);
                 let parsed: i64 = e.parse().ok()?;
-                if parsed.abs() > MAX_ABS_EXPONENT {
+                // `i64::MIN` has NO positive counterpart, so `parsed.abs()` panics
+                // on the perfectly legal-looking `1e-9223372036854775808` — a
+                // panic where this module promises `None` (roborev job 96). The
+                // refusal is spelled out rather than left to a wrapping `abs`.
+                let Some(magnitude) = parsed.checked_abs() else {
+                    return None;
+                };
+                if magnitude > i64::from(MAX_ABS_EXPONENT) {
                     return None;
                 }
                 (m, parsed)
@@ -72,7 +93,7 @@ impl ExactDecimal {
         };
         let all_digits = format!("{int_part}{frac_part}");
         if all_digits.is_empty()
-            || all_digits.len() > MAX_MANTISSA_DIGITS
+            || all_digits.len() > MAX_MANTISSA_DIGITS as usize
             || !all_digits.bytes().all(|b| b.is_ascii_digit())
         {
             return None;
@@ -107,6 +128,12 @@ impl ExactDecimal {
     /// exact integers.
     pub fn is_exact_midpoint_of(&self, other: &Self, v: f32) -> Option<bool> {
         let k = self.scale.max(other.scale);
+        if k > MAX_SCALE {
+            // Undecidable rather than a `10^k` this module never sized: nothing
+            // `parse` can build exceeds `MAX_SCALE`, and the bound is re-checked
+            // HERE so the allocation stays bounded whatever built the operands.
+            return None;
+        }
         let lifted = |d: &Self| -> BigInt { &d.digits * BigInt::from(10u8).pow(k - d.scale) };
         let (a, b) = (lifted(self), lifted(other));
         if a == b {

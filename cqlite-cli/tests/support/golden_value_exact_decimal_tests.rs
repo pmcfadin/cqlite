@@ -67,14 +67,14 @@ fn parse_reads_an_accepted_spelling_exactly() {
 
     // The digit BOUND is inclusive at the limit and refused one past it, so the
     // bound is a stated rule rather than an accident of some other check.
-    let at_limit = "1".repeat(MAX_MANTISSA_DIGITS);
+    let at_limit = "1".repeat(MAX_MANTISSA_DIGITS as usize);
     assert_eq!(
         parsed(&at_limit),
         Some((at_limit.clone(), 0)),
         "a mantissa of exactly MAX_MANTISSA_DIGITS digits is decidable"
     );
     assert_eq!(
-        parsed(&"1".repeat(MAX_MANTISSA_DIGITS + 1)),
+        parsed(&"1".repeat(MAX_MANTISSA_DIGITS as usize + 1)),
         None,
         "one digit past the bound is refused"
     );
@@ -83,20 +83,40 @@ fn parse_reads_an_accepted_spelling_exactly() {
 /// Spellings OUTSIDE the grammar. Each must be REFUSED — `None`, "I cannot decide
 /// this" — never guessed at, because a guess here is a suppression.
 const REFUSED: &[&str] = &[
-    "", "-", ".", "+1",  // no leading `+`: neither formatter emits one
+    "",
+    "-",
+    ".",
+    "+1",  // no leading `+`: neither formatter emits one
     "--1", // a doubled sign
-    "1-2", "abc", "NaN", "Infinity", "1.2.3", "1 ", // trailing space
-    " 1", "1_000", // Rust's own literal separator is not decimal text
-    "0x10", "1e", // an exponent with no digits
-    "1e+", "1e1e1", "1e401", // past MAX_ABS_EXPONENT
+    "1-2",
+    "abc",
+    "NaN",
+    "Infinity",
+    "1.2.3",
+    "1 ", // trailing space
+    " 1",
+    "1_000", // Rust's own literal separator is not decimal text
+    "0x10",
+    "1e", // an exponent with no digits
+    "1e+",
+    "1e1e1",
+    "1e401", // past MAX_ABS_EXPONENT
     "1e-401",
+    // The i64 BOUNDARY, from both directions. `1e-9223372036854775808` is a real
+    // `i64` exponent whose `abs()` does not exist, so it used to PANIC in a debug
+    // build where the module promises a refusal (roborev job 96); its positive
+    // twin and one step past the type are refused by the `i64` parse itself, and
+    // all three must read the same from outside.
+    "1e-9223372036854775808",
+    "1e9223372036854775807",
+    "1e-9223372036854775809",
 ];
 
 #[test]
 fn parse_refuses_a_spelling_outside_the_grammar() {
     assert!(
-        REFUSED.len() >= 18,
-        "case floor: at least eighteen refusals must be exercised"
+        REFUSED.len() >= 22,
+        "case floor: at least twenty-two refusals must be exercised"
     );
     for text in REFUSED {
         assert_eq!(parsed(text), None, "{text} must be refused, not guessed at");
@@ -295,6 +315,51 @@ fn an_undecidable_input_is_never_a_tie() {
         tie_to_even.is_exact_midpoint_of(&away, 1.0),
         Some(false),
         "a decided NO is Some(false), distinct from an undecidable None"
+    );
+
+    // And the arithmetic's own `None` is REACHABLE, not decorative: a scale past
+    // `MAX_SCALE` is refused rather than sizing a `10^k` the module never bounded.
+    // Nothing `parse` accepts can reach it — hence the hand-built operand, which
+    // only this child module can construct — but the guard is what makes the
+    // boundedness local to the arithmetic.
+    let past_the_bound = ExactDecimal {
+        digits: BigInt::from(1u8),
+        scale: MAX_SCALE + 1,
+    };
+    assert_eq!(
+        past_the_bound.is_exact_midpoint_of(&away, value),
+        None,
+        "a scale past MAX_SCALE is undecidable, not an unbounded allocation"
+    );
+    assert_eq!(
+        away.is_exact_midpoint_of(&past_the_bound, value),
+        None,
+        "the bound holds whichever operand carries the scale"
+    );
+}
+
+/// The WORST case `parse` can build is inside the stated bound and still decides —
+/// so the bound is a real ceiling on the arithmetic, not a limit that refuses legal
+/// input. A 64-digit mantissa at the most negative accepted exponent is the largest
+/// scale reachable from text; it must parse, and comparing it must terminate with an
+/// answer rather than a panic or a `10^huge`.
+#[test]
+fn the_largest_scale_reachable_from_text_still_decides() {
+    let fraction = "1".repeat(MAX_MANTISSA_DIGITS as usize - 1);
+    let text = format!("0.{fraction}e-{MAX_ABS_EXPONENT}");
+    let long = ExactDecimal::parse(&text).expect("the worst case is still decidable");
+    assert_eq!(
+        long.scale,
+        MAX_MANTISSA_DIGITS - 1 + MAX_ABS_EXPONENT,
+        "the worst reachable scale"
+    );
+    assert!(long.scale <= MAX_SCALE, "and it is inside the stated bound");
+
+    let other = ExactDecimal::parse("36.601563").expect("decidable");
+    assert_eq!(
+        long.is_exact_midpoint_of(&other, 4685.0 / 128.0),
+        Some(false),
+        "a decided answer at the worst reachable scale"
     );
 }
 
