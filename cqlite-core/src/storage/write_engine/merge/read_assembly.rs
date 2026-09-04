@@ -89,6 +89,10 @@ mod composite;
 
 // Re-exported through `merge/mod.rs` as the ONE authority the bypass arm asks
 // "can the merged arm order this composite?" (#4063, roborev job 116 F1).
+//
+// Gated to match `composite`'s own inner `#![cfg(feature = "write-support")]`, so the
+// re-export cannot outlive the items it names.
+#[cfg(feature = "write-support")]
 pub use composite::first_unorderable_leaf;
 
 /// One column's accumulated cells while grouping a row's flat cell list.
