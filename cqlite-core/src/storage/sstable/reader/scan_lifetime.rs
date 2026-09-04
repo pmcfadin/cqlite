@@ -54,6 +54,39 @@
 //! [`Exempt`](super::scan_stream_windowed::scan_admission::ScanAdmission::Exempt),
 //! which exists because a bounded SEMAPHORE can hold-and-wait on itself; a
 //! counter cannot, so every site can be wired unconditionally.
+//!
+//! # What is guarded, and what is NOT (issue #3853 fix round 1)
+//!
+//! An earlier account of this seam claimed that *every* whole-`Data.db` walk
+//! reachable on [`SSTableReader`] holds a guard. That claim was FALSE when it
+//! was written — a sweep of every reachable function that mints a scan cursor or
+//! drives `stitch_all_chunks*` found EIGHT unguarded sites of nineteen, two of
+//! them real entry points (`prepare_delta_scan`, `scan_for_key`). A wrong
+//! invariant in a doc comment is worse than no invariant, because it is what
+//! stops the next person looking. The TRUE rule, stated as what is actually
+//! enforced:
+//!
+//! **A whole-data-section walk holds a guard if it is one of the enumerated
+//! entry points, OR if it reaches the data through the
+//! `stitch_all_chunks_cancellable` funnel.** Nothing else is guaranteed.
+//!
+//! Neither half is a closure, and the residual is NAMED rather than implied:
+//!
+//! - The entry-point set is CURATED. A new `pub`/`pub(super)` walk added
+//!   tomorrow is not guarded until someone wires it, and no mechanism reds when
+//!   they do not. Re-run the sweep (segment each `data_access/*.rs` and
+//!   `partition_lookup.rs` by `fn`, and for every body containing
+//!   `new_scan_cursor()` or `stitch_all_chunks*(` check whether the body also
+//!   contains `begin_scan()`) rather than trusting this list.
+//! - The funnel covers only walks that GO THROUGH it. A **raw block-loop walk**
+//!   — the shape `get_all_entries`' and `scan_for_key`'s non-stitching branches
+//!   already have, `while let Some(block) = self.read_next_block(..)` — bypasses
+//!   the funnel entirely. Such a walk added in future is NOT automatically
+//!   guarded. The funnel guard is a narrowing of the hole, not a closure.
+//!
+//! Consequence of being unguarded, for scale: the seam is a resident-set
+//! control, so a missed site means that walk's pages are not advised in and not
+//! released after — an RSS and read-ahead regression, never a correctness one.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -243,8 +276,12 @@ impl Drop for ScanLifetimeGuard {
 impl SSTableReader {
     /// Register this scan with the reader's scan-lifetime seam (issue #3853).
     ///
-    /// Called at the top of every scan entry point; the returned guard must be
-    /// bound for the scan's whole duration (`let _scan = self.begin_scan();`).
+    /// Called at the top of each ENUMERATED scan entry point, and inside the
+    /// `stitch_all_chunks_cancellable` funnel; the returned guard must be bound
+    /// for the scan's whole duration (`let _scan = self.begin_scan();`).
+    /// The set of guarded walks is CURATED, not exhaustive — see the module
+    /// docs' "What is guarded, and what is NOT" for the true rule and its
+    /// residual.
     /// A no-op for every reader whose seam is disabled — which is every reader
     /// that is not mmap-backed at an explicit `PrefetchMode::WillNeed` with a
     /// dedicated point mapping.
