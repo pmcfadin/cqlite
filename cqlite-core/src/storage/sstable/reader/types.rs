@@ -478,4 +478,26 @@ pub struct SSTableReader {
     /// the `Data.db` could not be `stat`ed at open (the cache is then bypassed rather
     /// than fabricating an identity — no-heuristics #28).
     pub(crate) generation_identity: Option<crate::storage::cache::GenerationIdentity>,
+    /// Reader-scoped scan-lifetime `madvise` seam (issue #3853): an in-flight
+    /// scan counter that advises the SCAN mapping `MADV_WILLNEED` when the first
+    /// scan on this reader begins and `MADV_DONTNEED` when the last one ends.
+    /// Resolved ONCE at open by
+    /// [`scan_lifetime::resolve`](super::scan_lifetime::resolve) and DISABLED for
+    /// every reader that is not mmap-backed at an explicit
+    /// [`PrefetchMode::WillNeed`](crate::config::PrefetchMode::WillNeed) whose
+    /// point plane holds its own mapping. The default
+    /// [`Auto`](crate::config::PrefetchMode::Auto) therefore still issues no
+    /// madvise at all (issue #1143).
+    ///
+    /// The mapping this seam advises is ALSO aliased by [`Self::file`] (the legacy
+    /// positioned/point helper on the mmap backend) and by
+    /// [`Self::scan_positional_source`] (issue #2876). Both of those are
+    /// scan-plane / integrity users for whom a released page costs a REFAULT and
+    /// never a content change (`MAP_SHARED` file-backed; see the module docs), so
+    /// aliasing them is safe. The guarantee the third gate condition buys is
+    /// specifically that the issue #2210 `MADV_RANDOM` **point** mapping is a
+    /// DIFFERENT allocation — when it is not (a sub-8-MiB file, or a failed
+    /// dedicated map) the seam is disabled outright rather than releasing pages
+    /// the point plane is reading through.
+    pub(crate) scan_lifetime: Arc<super::scan_lifetime::ScanLifetime>,
 }
