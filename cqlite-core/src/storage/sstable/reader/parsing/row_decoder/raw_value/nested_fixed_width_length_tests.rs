@@ -688,8 +688,7 @@ fn one_field_udt(ft: CqlType) -> Vec<(String, CqlType)> {
 /// The case fails in BOTH directions: if any of the five stops refusing a
 /// non-zero wrong width, and if a correct width stops decoding to its declared
 /// type or a zero-length field stops being `Null` (a real behaviour change that
-/// must update this test, this module's header and
-/// `complex_column/cell_path_key.rs`'s note in the same commit).
+/// must update this test and this module's header in the same commit).
 #[test]
 fn wrong_width_udt_field_of_five_types_is_refused_since_3631() {
     let p = parser();
@@ -726,8 +725,8 @@ fn wrong_width_udt_field_of_five_types_is_refused_since_3631() {
                 Ok(v) => panic!(
                     "a {w}-byte `{name}` UDT field must be refused (Cassandra admits \
                      {width} only), got {v:?}. If this now decodes, #3631's width check \
-                     has been relaxed — update this test, this module's header and \
-                     `complex_column/cell_path_key.rs`'s note together"
+                     has been relaxed — update this test and this module's header \
+                     together"
                 ),
                 Err(e) => e,
             };
@@ -802,9 +801,17 @@ fn wrong_width_udt_field_of_five_types_is_refused_since_3631() {
 ///
 /// `duration` is fixed-FORM rather than fixed-WIDTH: its extent is whatever its
 /// three VInts occupy, so no `require_fixed_width` arm can express it. The
-/// refusal therefore comes from #3811's consumption assert alone
-/// (`raw_value/reporting.rs:67`), which is exactly why the pin matters — this is
-/// the one class where the composed rule reduces to a single check.
+/// refusal therefore comes from #3811's consumption assert alone — the
+/// `require_fully_consumed` that `parse_value_from_raw_bytes` reaches through its
+/// reporting twin, named rather than cited by line so this claim cannot decay —
+/// which is exactly why the pin matters: this is the one class where the composed
+/// rule reduces to a single check.
+///
+/// SCOPE, so this cannot be read as contradicting #3778: the refusal measured here
+/// is on the BOUNDED SCALAR path. #3778 Option A separately DECIDED that a
+/// `duration` nested in a frozen collection (`raw_type_value.rs`) and a plain
+/// top-level cell (`cell_value_scalar.rs`) are TOLERATED as parity-correct. Those
+/// are different call sites; both statements are true of the sites they name.
 ///
 /// The exact form is the CONTROL: without it, a refusal of the trailing-byte
 /// form would prove only that the decoder rejects something.
