@@ -729,9 +729,18 @@ impl V5CompressedLegacyParser {
                         tracing::debug!("Frozen UDT field '{}' is null", field_def.name);
                         None
                     } else if field_len == 0 {
-                        // Empty field
+                        // A ZERO-LENGTH field is decoded from its DECLARED TYPE (issue
+                        // #3631) — `create_empty_value_for_type`'s `_ =>` arm was an
+                        // empty BLOB, so this arm degraded an empty `int`, an empty
+                        // `tuple` and an empty nested UDT exactly as criterion 5
+                        // forbids. The Cassandra rule lives once, in
+                        // `typed_value.rs::empty_is_a_value`.
                         tracing::debug!("Frozen UDT field '{}' is empty", field_def.name);
-                        Some(Self::create_empty_value_for_type(&field_def.field_type))
+                        Some(self.parse_simple_udt_field_value_at(
+                            &[],
+                            &field_def.field_type,
+                            depth,
+                        )?)
                     } else {
                         // Field with data. Routed through the shared guard (issue
                         // #3612, R3-F1/N1) so this loop cannot drift from the other
@@ -754,135 +763,22 @@ impl V5CompressedLegacyParser {
                             field_def.field_type
                         );
 
-                        // Parse field value - handle nested UDTs specially (Issue #238)
-                        let value = if let Some(ref registry) = self.udt_registry {
-                            match &field_def.field_type {
-                                CqlType::Custom(nested_type_name) => {
-                                    // `get_udt_qualified` owns "udt:" + keyspace-
-                                    // qualifier normalization (Issue #239 / #2807).
-                                    if let Some(nested_udt) =
-                                        registry.get_udt_qualified(&self.keyspace, nested_type_name)
-                                    {
-                                        self.parse_nested_udt_from_registry(
-                                            field_data, nested_udt, registry,
-                                        )?
-                                    } else {
-                                        Self::parse_simple_udt_field_value(
-                                            field_data,
-                                            &field_def.field_type,
-                                        )?
-                                    }
-                                }
-                                CqlType::Udt(udt_name, inline_fields) => {
-                                    // Prefer registry, fall back to inline fields (Issue #239)
-                                    if let Some(nested_udt) =
-                                        registry.get_udt_qualified(&self.keyspace, udt_name)
-                                    {
-                                        self.parse_nested_udt_from_registry(
-                                            field_data, nested_udt, registry,
-                                        )?
-                                    } else if !inline_fields.is_empty() {
-                                        self.parse_inline_udt_value(
-                                            field_data,
-                                            udt_name,
-                                            inline_fields,
-                                            1,
-                                        )?
-                                    } else {
-                                        Self::parse_simple_udt_field_value(
-                                            field_data,
-                                            &field_def.field_type,
-                                        )?
-                                    }
-                                }
-                                CqlType::Frozen(inner) => match inner.as_ref() {
-                                    CqlType::Custom(nested_type_name) => {
-                                        // `get_udt_qualified` owns "udt:" + keyspace-
-                                        // qualifier normalization (Issue #239 / #2807).
-                                        if let Some(nested_udt) = registry
-                                            .get_udt_qualified(&self.keyspace, nested_type_name)
-                                        {
-                                            let inner_value = self.parse_nested_udt_from_registry(
-                                                field_data, nested_udt, registry,
-                                            )?;
-                                            Value::Frozen(Box::new(inner_value))
-                                        } else {
-                                            Self::parse_simple_udt_field_value(
-                                                field_data,
-                                                &field_def.field_type,
-                                            )?
-                                        }
-                                    }
-                                    CqlType::Udt(udt_name, inline_fields) => {
-                                        // Prefer registry, fall back to inline fields (Issue #239)
-                                        if let Some(nested_udt) =
-                                            registry.get_udt_qualified(&self.keyspace, udt_name)
-                                        {
-                                            let inner_value = self.parse_nested_udt_from_registry(
-                                                field_data, nested_udt, registry,
-                                            )?;
-                                            Value::Frozen(Box::new(inner_value))
-                                        } else if !inline_fields.is_empty() {
-                                            let inner_value = self.parse_inline_udt_value(
-                                                field_data,
-                                                udt_name,
-                                                inline_fields,
-                                                1,
-                                            )?;
-                                            Value::Frozen(Box::new(inner_value))
-                                        } else {
-                                            Self::parse_simple_udt_field_value(
-                                                field_data,
-                                                &field_def.field_type,
-                                            )?
-                                        }
-                                    }
-                                    _ => Self::parse_simple_udt_field_value(
-                                        field_data,
-                                        &field_def.field_type,
-                                    )?,
-                                },
-                                _ => Self::parse_simple_udt_field_value(
-                                    field_data,
-                                    &field_def.field_type,
-                                )?,
-                            }
-                        } else {
-                            // No registry - check for inline UDT definitions (Issue #239)
-                            match &field_def.field_type {
-                                CqlType::Udt(udt_name, inline_fields)
-                                    if !inline_fields.is_empty() =>
-                                {
-                                    self.parse_inline_udt_value(
-                                        field_data,
-                                        udt_name,
-                                        inline_fields,
-                                        1,
-                                    )?
-                                }
-                                CqlType::Frozen(inner) => match inner.as_ref() {
-                                    CqlType::Udt(udt_name, inline_fields)
-                                        if !inline_fields.is_empty() =>
-                                    {
-                                        let inner_value = self.parse_inline_udt_value(
-                                            field_data,
-                                            udt_name,
-                                            inline_fields,
-                                            1,
-                                        )?;
-                                        Value::Frozen(Box::new(inner_value))
-                                    }
-                                    _ => Self::parse_simple_udt_field_value(
-                                        field_data,
-                                        &field_def.field_type,
-                                    )?,
-                                },
-                                _ => Self::parse_simple_udt_field_value(
-                                    field_data,
-                                    &field_def.field_type,
-                                )?,
-                            }
-                        };
+                        // ONE per-field entry (issue #3631). This was the THIRD and FOURTH copy of the
+                        // same ~100-line dispatch: a registry-present match and a
+                        // no-registry match, each with its own nested-UDT resolution,
+                        // its own `frozen` wrapping and its own `Value::Blob`
+                        // fallback. `parse_simple_udt_field_value_at` expresses all of
+                        // it once, threads `depth`, routes through the single
+                        // exhaustion assert, and returns an explicit `Error` naming a
+                        // UDT it cannot resolve instead of silently degrading (#3631
+                        // criterion 5). The registry/no-registry split is redundant:
+                        // it consulted the very `self.udt_registry` the delegate
+                        // consults.
+                        let value = self.parse_simple_udt_field_value_at(
+                            field_data,
+                            &field_def.field_type,
+                            depth,
+                        )?;
                         Some(value)
                     };
 
@@ -955,10 +851,13 @@ impl V5CompressedLegacyParser {
                                 // Null field
                                 None
                             } else if field_len == 0 {
-                                // Empty field - parse with empty data
-                                let value =
-                                    Self::parse_simple_udt_field_value(&[], &field_def.field_type)?;
-                                Some(value)
+                                // Zero-length: decoded from the DECLARED type, see
+                                // `typed_value.rs::empty_is_a_value` (issue #3631).
+                                Some(self.parse_simple_udt_field_value_at(
+                                    &[],
+                                    &field_def.field_type,
+                                    depth,
+                                )?)
                             } else {
                                 let field_len = Self::checked_component_len(
                                     field_len,
@@ -971,99 +870,22 @@ impl V5CompressedLegacyParser {
                                     &udt_data[current_offset..current_offset + field_len];
                                 current_offset += field_len;
 
-                                // Parse field value - handle nested UDTs specially (including FROZEN<udt>)
-                                let value = match &field_def.field_type {
-                                    CqlType::Custom(nested_type_name) => {
-                                        // `get_udt_qualified` owns "udt:" + keyspace-
-                                        // qualifier normalization (Issue #239 / #2807).
-                                        if let Some(nested_udt) = registry
-                                            .get_udt_qualified(&self.keyspace, nested_type_name)
-                                        {
-                                            // Recursively parse nested UDT
-                                            self.parse_nested_udt_from_registry(
-                                                field_data, nested_udt, registry,
-                                            )?
-                                        } else {
-                                            // Unknown custom type - parse as blob
-                                            Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(field_data))
-                                        }
-                                    }
-                                    CqlType::Udt(udt_name, inline_fields) => {
-                                        // Prefer registry, fall back to inline fields (Issue #239)
-                                        if let Some(nested_udt) =
-                                            registry.get_udt_qualified(&self.keyspace, udt_name)
-                                        {
-                                            self.parse_nested_udt_from_registry(
-                                                field_data, nested_udt, registry,
-                                            )?
-                                        } else if !inline_fields.is_empty() {
-                                            self.parse_inline_udt_value(
-                                                field_data,
-                                                udt_name,
-                                                inline_fields,
-                                                1,
-                                            )?
-                                        } else {
-                                            Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(field_data))
-                                        }
-                                    }
-                                    CqlType::Frozen(inner) => {
-                                        // Handle FROZEN<udt_type> - the inner type may be a UDT
-                                        match inner.as_ref() {
-                                            CqlType::Custom(nested_type_name) => {
-                                                // Issue #239: Handle "udt:" prefix from schema parsing
-                                                let lookup_name = nested_type_name
-                                                    .strip_prefix("udt:")
-                                                    .unwrap_or(nested_type_name);
-                                                if let Some(nested_udt) = registry
-                                                    .get_udt_qualified(&self.keyspace, lookup_name)
-                                                {
-                                                    let inner_value = self
-                                                        .parse_nested_udt_from_registry(
-                                                            field_data, nested_udt, registry,
-                                                        )?;
-                                                    Value::Frozen(Box::new(inner_value))
-                                                } else {
-                                                    Value::Frozen(Box::new(Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(field_data))))
-                                                }
-                                            }
-                                            CqlType::Udt(udt_name, inline_fields) => {
-                                                // Prefer registry, fall back to inline fields (Issue #239)
-                                                if let Some(nested_udt) = registry
-                                                    .get_udt_qualified(&self.keyspace, udt_name)
-                                                {
-                                                    let inner_value = self
-                                                        .parse_nested_udt_from_registry(
-                                                            field_data, nested_udt, registry,
-                                                        )?;
-                                                    Value::Frozen(Box::new(inner_value))
-                                                } else if !inline_fields.is_empty() {
-                                                    let inner_value = self.parse_inline_udt_value(
-                                                        field_data,
-                                                        udt_name,
-                                                        inline_fields,
-                                                        1,
-                                                    )?;
-                                                    Value::Frozen(Box::new(inner_value))
-                                                } else {
-                                                    Value::Frozen(Box::new(Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(field_data))))
-                                                }
-                                            }
-                                            _ => {
-                                                // Other frozen types - parse as simple value
-                                                let inner_value =
-                                                    Self::parse_simple_udt_field_value(
-                                                        field_data, inner,
-                                                    )?;
-                                                Value::Frozen(Box::new(inner_value))
-                                            }
-                                        }
-                                    }
-                                    _ => Self::parse_simple_udt_field_value(
-                                        field_data,
-                                        &field_def.field_type,
-                                    )?,
-                                };
+                                // ONE per-field entry (issue #3631). This was the FIFTH copy of the
+                                // same ~100-line dispatch: a registry-present match and a
+                                // no-registry match, each with its own nested-UDT resolution,
+                                // its own `frozen` wrapping and its own `Value::Blob`
+                                // fallback. `parse_simple_udt_field_value_at` expresses all of
+                                // it once, threads `depth`, routes through the single
+                                // exhaustion assert, and returns an explicit `Error` naming a
+                                // UDT it cannot resolve instead of silently degrading (#3631
+                                // criterion 5). The registry/no-registry split is redundant:
+                                // it consulted the very `self.udt_registry` the delegate
+                                // consults.
+                                let value = self.parse_simple_udt_field_value_at(
+                                    field_data,
+                                    &field_def.field_type,
+                                    depth,
+                                )?;
                                 Some(value)
                             };
 

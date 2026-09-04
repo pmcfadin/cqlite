@@ -421,10 +421,49 @@ RESULT: INCOMPLETE (gate did not finish)
 
 It is overwritten with `RESULT: PASS` / `RESULT: FAIL` only at the terminal emit. The sentinel is deliberate and load-bearing: it is what makes a killed/orphaned/queued gate detectable (and since #2926 it also carries `tree-start:`, so a killed run still records the tree it began on).
 
-**Consequence for every poller: `INCOMPLETE` is a liveness placeholder, not a verdict.** A bare `grep -q` on the bare `RESULT:` token is satisfied the instant the gate launches, so an agent polling that way can read a **just-launched or still-queued** gate as a finished one, treat the placeholder as its gate of record, and advance toward merge on a verdict that does not exist — silently voiding the only run that counts. The single correct completion predicate, in agents, skills, docs, and any helper that polls a summary file, is:
+**Consequence for every poller: `INCOMPLETE` is a liveness placeholder, not a verdict.** A bare `grep -q` on the bare `RESULT:` token is satisfied the instant the gate launches, so an agent polling that way can read a **just-launched or still-queued** gate as a finished one, treat the placeholder as its gate of record, and advance toward merge on a verdict that does not exist — silently voiding the only run that counts. There is one correct completion predicate PER RUN MODE — never one for both (#3750) — and in agents, skills, docs, and any helper that polls a summary file they are:
 
 ```bash
-grep -qE 'RESULT: (PASS|FAIL)' "$AGENT_GATE_SUMMARY_FILE"   # a VERDICT ⇒ gate finished
+# RECORD grammar — full / --lite. Anchored + token-terminated, and it MUST keep refusing PARTIAL
+# (and ERROR and REFUSED). Widening it would weaken the gate-of-record probe for nothing.
+grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE"   # a VERDICT ⇒ gate finished
+
+# ONLY grammar — `--only <component>` ONLY, and NEVER on the gate of record (#3750). `--only` demotes a
+# SUCCESSFUL run to `RESULT: PARTIAL`, so the record grammar above spins on green. Prefer the EXIT STATUS
+# (3 = completed PARTIAL); this is the fallback for a detached run whose exit code you never see.
+grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE"
+
+# DELTA grammar — `--delta <anchor>` ONLY, and it is the one that bites (#3750 round 3). `run_delta` can
+# terminate with ERROR (4 emit sites) or REFUSED (3 more, via `emit_summary "$(_tree_result REFUSED)"` —
+# which is why grepping `emit_summary REFUSED` finds nothing and the token looks unemitted; it IS
+# emitted, and gate-liveness.sh's comment enumerating it is accurate, not stale). All seven are inside
+# `run_delta`, so a --delta poller on the RECORD grammar HANGS on a terminal outcome. This set is
+# gate-liveness.sh's own enumerated terminal set token for token — ONE source of truth, not a second
+# list — hence PARTIAL (unemittable by --delta; that is the --only demotion) and the defensive REFUSED.
+grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE"
+
+# Widening a COMPLETION grammar is safe here and would NOT have been before #3750 split completion from
+# verdict: matching ERROR/REFUSED cannot create a false pass, because the verdict is now a separate
+# affirmative read (the PASS token exactly, or the component's own line). Three grammars are therefore
+# not three chances to be wrong. Better than any of them: ask gate-liveness.sh, the single source of
+# truth executable rather than transcribed.
+
+# And COMPLETION IS NOT A VERDICT: `PARTIAL` says the run ENDED, not that your component passed. Read the
+# component's OWN line, as a separate assertion. A completed run whose component SKIPped is NOT a pass.
+bash scripts/gate-component-verdict.sh "$AGENT_GATE_SUMMARY_FILE" \
+     --mode only --component tooling-tests --run-id <id>
+# 0 PASS / 1 NOT-PASS / 4 COULD-NOT-MEASURE (no verdict available, whatever the reason) / 64 USAGE.
+# It REFUSES a LITE/DELTA block (4). A block whose `tree-integrity:` token is FAIL returns NOT-PASS (1)
+# — an AFFIRMATIVE reading, because the gate itself declared that run non-certifying and that
+# invalidates every component in the block; SKIP/PENDING/absent/unrecognised return 4, because tree
+# stability was then never measured. Either way it never answers PASS about such a run.
+#
+# NOT A COMPLETION PROBE, AND NO OPINION ABOUT LIVENESS — NEVER IN A LOOP. Establish completion with
+# one of the two probes above (or the exit status); `gate-liveness.sh` is the three-valued liveness
+# authority and the only one that may be polled. A retryability taxonomy here was DESCOPED (#3750):
+# `--no-wait` makes the reader's STALLED unreachable, so a LIVE gate whose beat is merely stale
+# arrives as UNKNOWN and was reported permanent — and a lane obeying that relaunches a live gate,
+# putting two gates on one summary path.
 ```
 
 Corollaries:
@@ -455,7 +494,11 @@ in this order:
   machine you may not be on. Act on it like this: the gate relaunches its beater at every
   component boundary, so a live gate whose beater alone died recovers to `RUNNING` within one
   component; re-read before acting, and if it is still `STALLED` after a component's worth of
-  time (the longest is ~850s) treat the gate as gone and relaunch it. Pass `--run-id` whenever
+  time treat the gate as gone and relaunch it — and read that duration OFF THE COMPONENT TABLE IN
+  YOUR OWN SUMMARY (`<name>: PASS (<n>s)`), never off a figure in prose. The figure that used to sit
+  here, "~850s", was understated by 2.4x (`tooling-tests` measured **2073s**, #3473), and acting on
+  an understated bound is exactly what makes a closer declare a LIVE gate gone and relaunch it —
+  putting two gates on one summary path. Pass `--run-id` whenever
   you know it; a concurrent peer's beat on a shared default path otherwise answers about the
   peer's gate (#2874). A **missing** beat is `UNKNOWN`, never `STALLED` — an older gate simply
   has no beat.

@@ -375,6 +375,78 @@ pub(super) fn table_header_consistent_for_seek(
     }
 }
 
+/// What the BTI point-lookup loop may do with a partition-parse `Err` (issue
+/// #3721, roborev job 80) — the sibling of [`bti_lookup_step`] for the state that
+/// decision cannot see: the parse having FAILED.
+///
+/// The loop's catch-all conflated three states — an `Err`, the emit closure never
+/// firing, and a partition decoding to a FOREIGN key — and answered all three with
+/// the straddle retry or, out of bytes, with absence. Only the first can be a
+/// decode failure, and **a decode failure is not absence**: a BTI trie hit is NOT
+/// followed by a scan, so `Ok(None)` tells the caller the key does not exist and
+/// nothing downstream can tell that apart from a genuine miss. The comment this
+/// replaced said so out loud — "could not be parsed" is not "absent".
+///
+/// # The two classes that cannot mean absence
+///
+/// A VARIANT match, never a message test (issue #28); both are `ErrorCategory::Data`:
+///
+/// * [`Error::ColumnDecode`] — a framed row whose column would have been dropped;
+/// * [`Error::Corruption`] — the range-marker refusals reach the same parser
+///   (`parse_block_emit` delegates to `parse_block_emit_windowed`, whose marker
+///   arms propagate since roborev job 78), as does any other structural refusal.
+///
+/// Everything ELSE keeps the caller's prior behaviour, deliberately. The one that
+/// matters is [`Error::Schema`]: a reader with no schema for the queried table
+/// CANNOT serve the key, and that soft-miss is what lets the caller try the next
+/// reader — the same distinction `super::sequential::is_parse_soft_miss` draws on
+/// the BIG point path. Propagating it would hard-fail a multi-reader `get()` that
+/// must fall back.
+///
+/// # Why this takes `more_bytes_may_arrive`
+///
+/// The #1572 chunk-straddle retry is why this is not a bare `matches!`. A row cut
+/// by the window boundary reports `row body exhausted`, which is ITSELF an
+/// `Error::ColumnDecode`, so refusing on sight would hard-fail a PRESENT key whose
+/// body merely straddles a chunk. While chunks remain the failure is therefore only
+/// REMEMBERED and the retry is UNCHANGED; the memory is answered where the bytes
+/// run out, by [`point_read_absence_or_remembered`].
+///
+/// Returns `Err` only when the caller has every byte it will ever have.
+pub(super) fn point_read_remember_or_bail(
+    parse_result: crate::Result<()>,
+    more_bytes_may_arrive: bool,
+    undecodable: &mut Option<crate::Error>,
+) -> crate::Result<()> {
+    let Err(e) = parse_result else {
+        return Ok(());
+    };
+    if !matches!(
+        e,
+        crate::Error::ColumnDecode { .. } | crate::Error::Corruption(_)
+    ) {
+        return Ok(());
+    }
+    if more_bytes_may_arrive {
+        *undecodable = Some(e);
+        return Ok(());
+    }
+    Err(e)
+}
+
+/// The verdict where a point read runs out of bytes: propagate a REMEMBERED
+/// undecodable-partition failure rather than reporting the key ABSENT (issue #3721,
+/// roborev job 80). With nothing remembered the caller's prior `Ok(None)` stands,
+/// so a genuinely unparseable or absent tail is unchanged.
+pub(super) fn point_read_absence_or_remembered<T>(
+    undecodable: &mut Option<crate::Error>,
+) -> crate::Result<Option<T>> {
+    match undecodable.take() {
+        Some(e) => Err(e),
+        None => Ok(None),
+    }
+}
+
 /// Per-iteration decision for the BTI chunk-targeted point-lookup loop.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum BtiLookupStep {

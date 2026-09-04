@@ -123,10 +123,26 @@ def counting_note_lines() -> list[str]:
         "--setup-only perf window); the Flight arm's setup is outside its window. "
         "BOTH counters were observed — an absent or uncounted perf event is fatal, "
         "never a 0 (#3272).",
-        "  * `cycles` is summed over BOTH SMT siblings of the pinned physical core, "
-        "so cycles/row is a per-physical-core figure counted on two hardware threads.",
-        "    Both arms are counted identically, so the ratio and the arm-to-arm "
-        "delta are unaffected.",
+        # REWRITTEN FOR #3551, because the old wording became FALSE the moment the two arms
+        # could be pinned differently. It read: "`cycles` is summed over BOTH SMT siblings of the
+        # pinned physical core, so cycles/row is a per-physical-core figure ... Both arms are
+        # counted identically, so the ratio and the arm-to-arm delta are unaffected." Under
+        # `--flight-pin-mode distinct-cores` the counted pair is NOT one core's siblings and the
+        # two arms are NOT counted identically — so the sentence had to become true in BOTH
+        # configurations rather than be deleted. The quantity is stated in the terms that hold
+        # either way (hardware-thread cycles over the counted list, printed beside every figure),
+        # and the distinct-core case is named as the PROPERTY UNDER TEST rather than as a caveat.
+        "  * `cycles` is summed over EVERY hardware thread in the counted list, which is "
+        "printed beside each arm's figures ('counted on cpus ...'): cycles/row is "
+        "hardware-thread cycles over that list per row.",
+        "    Both arms count TWO hardware threads. When both lists are one physical core's "
+        "siblings (the default) each arm's figure is a per-physical-core one and the two are "
+        "counted identically, so the ratio and the arm-to-arm delta are directly comparable.",
+        "    Under --flight-pin-mode distinct-cores the Flight arm's two threads sit on "
+        "DIFFERENT physical cores and therefore do NOT share a core's execution resources. "
+        "That is the PROPERTY UNDER TEST (#3551), not a nuisance: read the arm-to-arm delta as "
+        "being about it, and note the two arms are then no longer counted over equivalent "
+        "hardware — the bare scan remains the pin-identical drift control.",
         "  * every rep of BOTH arms records its PREWARM outcome in results.json "
         "(prewarm/prewarm_all_ok); a degraded prewarm is flagged above, never swallowed.",
         "    A warm rep is prewarmed by an UNTIMED full pass outside its perf window; "

@@ -356,22 +356,21 @@ const CASES: &[Case] = &[
         pk: &["id"],
         ck: &[],
         multicell: &[],
-        // MEASURED DIVERGENCE, not a normalization: `employee.home` is a
-        // `frozen<address>` nested inside a `frozen<employee>`. The golden decodes
-        // it (`{"street": "1 Navy Way", …}`); both CLI egress formats emit the
-        // inner UDT's RAW BYTES as blob hex
-        // (`0x0000000a31204e617679205761790000000941726c696e67746f6e…`).
+        // NO DECLARED GAP — and the absence is the assertion. `employee.home` is a
+        // `frozen<address>` nested inside a `frozen<employee>`; until #3631 both
+        // egress formats emitted the inner UDT's RAW BYTES as blob hex where the
+        // golden decodes an object (`{"street": "1 Navy Way", …}`), carried here as
+        // a FIELD-scoped `e.home` skip for
+        // `Divergence::NestedFrozenUdtRendersAsBlobHex`.
         //
-        // The exclusion is FIELD-scoped (`e.home`, not `e`) so the sibling fields
-        // `e.name` and `e.level` are still value-compared. Excluding the whole
-        // column left this case comparing nothing but its primary key while the
-        // comment claimed otherwise (review finding F5).
-        skips: &[Skip {
-            path: "e.home",
-            formats: BOTH,
-            divergence: Divergence::NestedFrozenUdtRendersAsBlobHex,
-            why: "nested frozen UDT renders as blob hex, not a decoded object",
-        }],
+        // #3631 made that value decode and the gap RETIRED ITSELF, which is what
+        // `Report::stale_skips` is for: with the skip still declared BOTH lanes
+        // FAILed — "the two sides AGREE at that path now, so the exclusion
+        // suppresses nothing and is holding back recovered coverage". Removing it
+        // is the only sound response, and `e.home` is now value-compared in both
+        // formats against the Cassandra-written `sstabledump` golden — a third
+        // oracle for #3631, independent of the unit and integration coverage.
+        skips: &[],
     },
     // test-data/schemas/signed-collection-parity.cql — NON-frozen and frozen
     // collections of signed numerics: the "path is a JSON string, CLI element is a

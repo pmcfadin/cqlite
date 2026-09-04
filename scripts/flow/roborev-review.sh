@@ -121,7 +121,15 @@
 #                     snapshot-delivered diff and a vacuous review that received nothing are IDENTICAL
 #                     to the machine. A human plus the review's token accounting distinguishes them.
 #   waiver            GRANTED (author=@<login> sha=<40-hex> reason=<why>) | NONE (...) | STALE (...) |
-#                     MALFORMED (...) | UNAVAILABLE (...)
+#                     MALFORMED (...) | UNAUTHORIZED (...) | MISPLACED (...) | UNAVAILABLE (...)
+#                     MISPLACED (#3759) is NON-GRANTING and purely INFORMATIONAL: when no marker is
+#                     on the PR, the PR's LINKED ISSUE(s) are scanned with the SAME scanner and the
+#                     SAME scope, and one there that WOULD have been accepted by the channel is
+#                     reported `MISPLACED (found on linked issue #N …)` with the remedy — re-post it
+#                     as a TOP-LEVEL PR COMMENT. It GRANTS NOTHING and the absence FAIL stands;
+#                     only a marker on the PULL REQUEST grants. A `NONE` additionally DECLARES
+#                     whether that probe ran, so "checked and it is not there either" and "never
+#                     checked" can never read alike.
 #                     PRESENT ONLY WHEN THE ABSENCE BRANCH RAN, so it is absent rather than
 #                     placeholdered on a run that had nothing to waive. INFORMATIONAL: it is not in the
 #                     verdict scan and cannot make anything pass by itself. The waiver is a DEDICATED,
@@ -156,7 +164,12 @@
 #                     head=<…> job=<id> reason=<why>) | NONE (...) | STALE (...) |
 #                     MALFORMED (...) | UNAUTHORIZED (...) | COUNT-MISMATCH (...) |
 #                     ISSUE-ABSENT (...) | ISSUE-CLOSED (...) | ISSUE-UNVERIFIABLE (...) |
-#                     UNAVAILABLE (...)
+#                     MISPLACED (...) | UNAVAILABLE (...)
+#                     MISPLACED (#3759) is NON-GRANTING and purely INFORMATIONAL, exactly as on
+#                     `waiver:` and served by the same probe: an authorization on the PR's LINKED
+#                     ISSUE that would have been accepted by the channel is NAMED, with the remedy,
+#                     while `findings:` stays exactly as measured — never DEFERRED, never NONE. A
+#                     `NONE` here declares whether the probe ran, too.
 #                     PRESENT ONLY WHEN THE FINDINGS BRANCH HAD A DEFERRAL TO LOOK FOR (a
 #                     `--recheck-job` over an affirmatively measured `PRESENT (n)`), so it is
 #                     absent rather than placeholdered otherwise. INFORMATIONAL, exactly like
@@ -584,8 +597,21 @@ SHAPE AND CHANNEL, both load-bearing:
     fence skipping, fence-state tracking): deciding "data or control?" inside a grammar
     the author controls is unbounded, and no quoting construct can be the ONLY thing in
     a comment, so quoting cannot grant.
-  * THE COMMENT MUST BE TOP-LEVEL. Markers inside a review body or a review-thread
-    reply are not read (fail-closed, but it looks like the waiver was ignored).
+  * THE COMMENT MUST BE TOP-LEVEL, AND ON THE PULL REQUEST. Three locations are not
+    read: the PR's LINKED ISSUE thread — THE MOST PROBABLE MISPLACEMENT, because that
+    is where lane/lead coordination lives — a review body, and a review-thread reply.
+    None of them applies (fail-closed, but it looks like the authorization was
+    ignored). MEASURED: for PR #3710 both markers were granted, field-perfect, on
+    issue #3544, and the run reported NONE for both; a six-PR queue idled ~8 hours.
+    SINCE #3759 THE LINKED-ISSUE CASE IS DIAGNOSED: on a 'none', the PR's linked
+    issue(s) are scanned with the SAME scanner and scope, and a marker there that
+    would have been accepted is reported 'waiver: MISPLACED (...)' /
+    'deferral: MISPLACED (...)' naming the issue. It GRANTS NOTHING and the FAIL
+    stands — only a marker on the PULL REQUEST grants, and moving it there is the
+    authorizer's own act.
+  * AFTER POSTING EITHER MARKER, VERIFY IT IS ON THE PR, with
+    'gh pr view <the-PR-number> --json comments'. A grant is only granted once it is
+    readable by the scanner that reads it.
 
 THE AUTHOR MUST BE ON AN EXPLICIT ALLOWLIST (see ROBOREV_WAIVER_AUTHORS in
 roborev-review-oracles.sh). This is a PUBLIC repository and a failing block PRINTS the
