@@ -578,6 +578,18 @@ fn a_wrong_width_dropped_element_is_not_validated_today_known_gap_3778() {
 ///   header in the same commit);
 /// * if the well-formed controls stop filtering (the #1741 filter no longer
 ///   reaches the list arm, which would make the refusals below vacuous).
+///
+/// # Falsification, measured rather than asserted
+///
+/// A test that pins an absence has to be shown to red when the absence ends.
+/// MEASURED on this commit: replace `&element_type` with `"blob"` in the list
+/// arm's `parse_complex_cell_value` call in `complex_column.rs` — which is the
+/// #3778 shape, a list element decode deferred past the `continue` — and all
+/// FIVE list cases in this module fail (`9 passed; 5 failed`), this one on its
+/// `live-path control` line, because the element type is what carries the width
+/// rule on BOTH paths: deferring the decode removes the live refusal too. So
+/// the mutation is a check on vacuity, not a per-arm isolation; the dropped-path
+/// `panic!` arm's own wording is what a genuine one-sided change would print.
 #[test]
 fn a_wrong_width_dropped_list_element_is_still_refused_unlike_set_map_and_udt() {
     // Anti-vacuity control: the SAME cell shape with a WELL-FORMED 4-byte value
