@@ -359,7 +359,7 @@ die_usage()  { verdict USAGE; printf '%s USAGE %s\n' "$P" "$*" >&2; exit 64; }
 # `tr`'s OWN stderr is suppressed: a diagnostic from the tool that exists to PROTECT the
 # anchor would be the one line breaking it (roborev job 26 F2).
 sane() {
-  printf '%s' "${1:-}" | LC_ALL=C tr -c '\040-\176\200-\377' '?' 2>/dev/null
+  printf '%s' "${1:-}" 2>/dev/null | LC_ALL=C tr -c '\040-\176\200-\377' '?' 2>/dev/null
 }
 
 # verdict <TOKEN> — contract (c): the ONE verdict line, one closed-set token, nothing else.
@@ -584,7 +584,7 @@ register_tmp() { TMP_FILES+=("$1"); }
 # failure inside a command substitution kills the script with no verdict line at all.
 sanitize_field() {
   local s
-  s="$(printf '%s' "${1:-}" | LC_ALL=C tr -c 'A-Za-z0-9._:/#-' '-' 2>/dev/null | LC_ALL=C sed -e 's/--*/-/g' -e 's/^-//' -e 's/-$//' 2>/dev/null)"
+  s="$(printf '%s' "${1:-}" 2>/dev/null | LC_ALL=C tr -c 'A-Za-z0-9._:/#-' '-' 2>/dev/null | LC_ALL=C sed -e 's/--*/-/g' -e 's/^-//' -e 's/-$//' 2>/dev/null)"
   s="$(LC_ALL=C printf '%.120s' "$s")"
   s="${s%-}"
   [ -n "$s" ] || s="unspecified"
@@ -1423,7 +1423,7 @@ assert_assembled_marker() {
     WRITE_ERR="the assembled marker's stamp prologue could not be EXTRACTED from $(sane "$tmp"), so its required fields are UNMEASURED — refusing to commit; nothing was written"; return 1; }
   for k in issue machine worktree session session-pid session-pid-start-earliest \
            session-pid-start-latest actor ts; do
-    n="$(printf '%s\n' "$pro" | count_matching_lines "^$k: .")" || {
+    n="$(printf '%s\n' "$pro" 2>/dev/null | count_matching_lines "^$k: .")" || {
       WRITE_ERR="the assembled marker's stamp prologue could not be SCANNED for the required '$k:' field, so it is UNMEASURED — refusing to commit; nothing was written"; return 1; }
     if [ "$n" -ne 1 ]; then
       WRITE_ERR="the assembled marker records $n non-empty '$k:' line(s) in its stamp prologue (exactly one is required) — an incomplete stamp is not a weaker stamp, it is NO stamp, and every later read would refuse it, bricking this lane. The usual cause is a helper this writer depends on (date, tr, hostname) failing. NOTHING was written."
@@ -1801,7 +1801,7 @@ assert_reason() {
   if [ "$tok" = unspecified ] || [ "${#tok}" -lt 3 ]; then
     die_usage "adopt: --reason must carry at least 3 recordable characters ([A-Za-z0-9._:/#-]); '$(sane "$raw")' records as '$(sane "$tok")', which is indistinguishable from no reason at all"
   fi
-  case "$(printf '%s' "$tok" | LC_ALL=C tr 'A-Z' 'a-z' 2>/dev/null)" in
+  case "$(printf '%s' "$tok" 2>/dev/null | LC_ALL=C tr 'A-Z' 'a-z' 2>/dev/null)" in
     why | reason | todo | tbd | tba | xxx | xxxx | placeholder | fixme | none | foo | bar | baz | n/a)
       die_usage "adopt: --reason '$(sane "$raw")' records as the PLACEHOLDER '$(sane "$tok")' — as uninformative as no reason at all. Say what the resume IS, e.g. --reason cron-reinvoke:writer-pid-gone" ;;
   esac
