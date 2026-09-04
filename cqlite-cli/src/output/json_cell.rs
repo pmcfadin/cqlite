@@ -169,6 +169,87 @@ fn numeric_cell(value: &Value) -> JsonCell {
     }
 }
 
+/// Serialize a CQL `float` as the shortest decimal that round-trips the **f32**.
+///
+/// Issue #3777. `Number::from_f64(f as f64)` widens the f32 to its
+/// exact-but-imprecise f64 first, so the emitted decimal is the shortest one
+/// round-tripping THAT f64 (`1.6699999570846558`) instead of the f32 (`1.67`).
+/// The oracle is `sstabledump`, whose `float` cells carry the f32 spelling
+/// (Cassandra `FloatSerializer` -> `Float.toString`); the CSV and table writers
+/// already agree with it via `ValueFormatter::format_float32`.
+///
+/// # Why this and not `serde_json`'s `float_roundtrip`
+///
+/// MEASURED, not assumed (see
+/// `issue_3777_json_float_spelling.rs::serde_json_value_from_f32_still_widens_so_the_fix_must_be_local`):
+/// `float_roundtrip` is a DESERIALIZATION feature — it appears only in
+/// serde_json's `src/de.rs` and `src/value/de.rs`, never in `ser.rs`/`number.rs` —
+/// so it cannot reach this arm at all. And `serde_json::Number` stores an `f64`
+/// unconditionally (`Number::from_f32` is itself `N::Float(f as f64)`), so no
+/// `Number`/`Value` constructor can carry f32 precision. Only the streaming
+/// `Serializer::serialize_f32` path preserves it, and a [`JsonCell::Plain`]
+/// carries a `JsonValue`. So the conversion is done here, locally, with no new
+/// dependency and no feature flag whose absence would silently change release
+/// output.
+///
+/// # How the shortest f32 form is obtained, and why not `f32::to_string`
+///
+/// Via serde_json's OWN f32 serializer (`serde_json::to_string(&f32)`, which is the
+/// only path in the crate that formats an f32 as an f32), then re-parsed as `f64`
+/// for the `Number`. Rust's `Display` was tried first and is WRONG against the
+/// oracle on an exact tie: for `36.6015625f32` (exactly representable, and a real
+/// `test_timeseries.sensor_data` `temperature`) four 8-digit decimals round-trip
+/// and two are equidistant, so the tie-break decides. Measured —
+///
+/// ```text
+/// f32 36.6015625:  Display -> 36.601563     serde_json -> 36.601562
+/// sstabledump golden (Cassandra Float.toString): 36.601562
+/// ```
+///
+/// — serde_json rounds the tie to an EVEN last digit, which is what `Float.toString`
+/// specifies and what the committed dump carries, while `Display` rounds away from
+/// zero. This is the same "Rust float formatting is not Java's" family as
+/// `total_cmp` vs `Float.compare` (CLAUDE.md self-check list), and the AD2 lane's
+/// `test_timeseries.sensor_data` case is what caught it.
+///
+/// Re-parsing that text as `f64` is lossless: the text carries at most 9
+/// significant digits, f64 recovers any decimal of up to 15, so the nearest f64 to
+/// it is the only f64 whose own shortest form is that same text. Verified over a
+/// spread of values by
+/// `issue_3777_json_float_spelling.rs::float32_json_round_trips_through_f32_for_a_spread_of_values`.
+///
+/// The cost is one short `String` per `float` cell — the same order as this
+/// module's blob, timestamp and decimal arms, all of which render through a
+/// `String` already — in exchange for not adding a formatting dependency and not
+/// depending on a cargo feature whose absence would silently change release output.
+fn float32_cell(f: f32) -> JsonCell {
+    // Non-finite floats stay JSON `null`: JSON has no literal for NaN or
+    // +/-Infinity, matching `cassandra-5.0.8:.../marshal/FloatType.java:115-124`
+    // exactly as the `Value::Float` arm below does. That is also a DECLARED
+    // cross-binding divergence (CLAUDE.md `bindings/parity` gap 4, AD2's
+    // `Divergence::NonFiniteFloatRendersAsJsonNull`), deliberately NOT changed
+    // here — pinned by
+    // `issue_3777_json_float_spelling.rs::nonfinite_float_renders_as_json_null_unchanged`.
+    if !f.is_finite() {
+        return JsonCell::Plain(JsonValue::Null);
+    }
+    // serde_json's f32 serializer, NOT `f32::to_string` — see the tie-break
+    // measurement above. `serialize_f32` cannot fail for a finite f32 (it writes
+    // into a `Vec<u8>`), but the error is mapped rather than unwrapped: no
+    // `unwrap()`/`expect()` in this crate.
+    let Ok(shortest) = serde_json::to_string(&f) else {
+        return JsonCell::Plain(JsonValue::Null);
+    };
+    match shortest.parse::<f64>() {
+        Ok(widened) => JsonCell::Plain(
+            serde_json::Number::from_f64(widened)
+                .map(JsonValue::Number)
+                .unwrap_or(JsonValue::Null),
+        ),
+        Err(_) => JsonCell::Plain(JsonValue::Null),
+    }
+}
+
 impl JsonCell {
     /// Convert a CQLite [`Value`] to its JSON egress rendering.
     ///
@@ -194,11 +275,10 @@ impl JsonCell {
                     .map(JsonValue::Number)
                     .unwrap_or(JsonValue::Null),
             ),
-            Value::Float32(f) => JsonCell::Plain(
-                serde_json::Number::from_f64(*f as f64)
-                    .map(JsonValue::Number)
-                    .unwrap_or(JsonValue::Null),
-            ),
+            // The shortest decimal that round-trips the **f32**, NOT the widened
+            // f64's (issue #3777) — see [`float32_cell`]. Non-finite handling is
+            // the same as the `Value::Float` arm above and lives in that helper.
+            Value::Float32(f) => float32_cell(*f),
             Value::Text(s) => {
                 JsonCell::Plain(JsonValue::String(String::from_utf8_lossy(s).into_owned()))
             }

@@ -162,7 +162,19 @@ pub(super) const fn direct_io_available() -> bool {
 }
 
 /// Resolve a [`PrefetchMode`] into the concrete advice the mmap backend should
-/// issue, or `None` for "no advice".
+/// issue **AT OPEN**, or `None` for "no advice".
+///
+/// OPEN-TIME only, and that is the whole contract (issue #3853): every mode
+/// except [`PrefetchMode::Sequential`] now yields `None` here.
+/// [`PrefetchMode::WillNeed`] used to map to [`memmap2::Advice::WillNeed`] and
+/// be applied at reader open, which meant a reader that was opened and never
+/// scanned paid a full-file read-ahead and never had it withdrawn. That advice
+/// moved to SCAN START, where it is paired with a `MADV_DONTNEED` when the last
+/// in-flight scan on the reader ends — see [`super::scan_lifetime`]. It is NOT a
+/// policy change for any other mode: `Auto` still issues nothing (#1143) and
+/// `Sequential` keeps its open-time advice, because that mode is an explicit
+/// opt-in to read-ahead WITH drop-behind for a one-shot scan, a different
+/// contract from `WillNeed`'s "make it resident while I am scanning".
 ///
 /// `memmap2::Advice` / `Mmap::advise` (madvise) are Unix-only, so this and its
 /// single call site are gated to `#[cfg(unix)]`. On non-Unix targets the mmap
@@ -181,7 +193,7 @@ pub(super) const fn direct_io_available() -> bool {
 /// drop-behind behaviour can still request `Sequential` explicitly
 /// (`CQLITE_PREFETCH=sequential` / [`StorageConfig::prefetch`]).
 #[cfg(unix)]
-pub(super) fn mmap_advice_for(prefetch: PrefetchMode) -> Option<memmap2::Advice> {
+pub(super) fn mmap_open_advice_for(prefetch: PrefetchMode) -> Option<memmap2::Advice> {
     match prefetch {
         // No madvise: rely on the kernel's default read-ahead. Chosen for `Auto`
         // to avoid `MADV_SEQUENTIAL` drop-behind evicting hot pages under
@@ -191,6 +203,8 @@ pub(super) fn mmap_advice_for(prefetch: PrefetchMode) -> Option<memmap2::Advice>
         // one-shot full scan that will not be re-read and should not pin the
         // whole file in the page cache.
         PrefetchMode::Sequential => Some(memmap2::Advice::Sequential),
-        PrefetchMode::WillNeed => Some(memmap2::Advice::WillNeed),
+        // Issue #3853: no OPEN-time advice. `MADV_WILLNEED` for this mode is
+        // issued by `scan_lifetime` when the first scan on the reader begins.
+        PrefetchMode::WillNeed => None,
     }
 }
