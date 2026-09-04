@@ -82,20 +82,14 @@ impl TypeSerializer {
             // it), and a tag/column disagreement is a caller bug, not something
             // to paper over by inferring from the bytes (no-heuristics, #28).
             Value::Empty(tag) => {
+                // ONE admission rule, shared with the SSTable writer's map
+                // cell-path path (`data_writer::encoding`) — see
+                // `EmptyValueType::check_admits`. A second copy here would be a
+                // second opinion that can drift from the tag table it is derived
+                // from.
                 let cql_type = CqlType::parse(data_type)?;
-                match crate::types::EmptyValueType::for_cql_type(&cql_type) {
-                    Some(admitted) if admitted == *tag => Ok(Vec::new()),
-                    Some(admitted) => Err(Error::InvalidInput(format!(
-                        "empty-buffer sentinel declares type `{}` but column type is `{}` \
-                         (issue #3805)",
-                        tag.cql_name(),
-                        admitted.cql_name()
-                    ))),
-                    None => Err(Error::InvalidInput(format!(
-                        "type `{data_type}` does not admit an empty buffer, so an \
-                         empty-buffer sentinel cannot be serialized for it (issue #3805)"
-                    ))),
-                }
+                tag.check_admits(&cql_type, data_type)?;
+                Ok(Vec::new())
             }
             _ => {
                 let cql_type = CqlType::parse(data_type)?;

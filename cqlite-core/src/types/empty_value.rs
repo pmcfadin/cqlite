@@ -5,6 +5,7 @@
 //! arms, stay beside the rest of `Value`.
 
 use crate::schema::CqlType;
+use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 
 /// Declared CQL type of a [`Value::Empty`] sentinel — the type families for which
@@ -196,6 +197,50 @@ impl EmptyValueType {
             | CqlType::Udt(_, _)
             | CqlType::Frozen(_)
             | CqlType::Custom(_) => None,
+        }
+    }
+
+    /// THE ONE ADMISSION CHECK every WRITE path shares: may a sentinel tagged
+    /// `self` be serialized (as zero bytes) into a position whose DECLARED type
+    /// is `declared`?
+    ///
+    /// Two refusals, both of them a caller bug rather than something to paper
+    /// over by inferring from the bytes (no-heuristics, issue #28):
+    ///
+    ///  * the declared type does not admit an empty buffer at all — for
+    ///    `tinyint`/`smallint`/`date`/`time` an empty buffer is CORRUPTION on
+    ///    Cassandra's own terms (bare `!= N` validate,
+    ///    `serializers/ByteSerializer.java:40-44` and siblings;
+    ///    `schema/ColumnMetadata.java:457-467` would reject it), and for
+    ///    `text`/`blob` an empty buffer is a MEANINGFUL native value that must
+    ///    never be spelled as a sentinel;
+    ///  * the sentinel's own tag DISAGREES with the declared type, which would
+    ///    write bytes that read back as a different type.
+    ///
+    /// `declared_spelling` is the caller's own rendering of the declared type,
+    /// used only in the diagnostic — [`CqlType`] has no `Display`, and a
+    /// `{:?}` of it is not what the operator wrote in their schema.
+    ///
+    /// # Why this lives here and not at a call site
+    /// There are TWO write paths that may legally emit the zero-byte form (the
+    /// type-aware [`crate::storage::serialization::types::TypeSerializer`] and
+    /// the multicell MAP CELL PATH in the SSTable writer), and a second copy of
+    /// this rule is a second opinion that can drift from the tag table it is
+    /// derived from — the same "one fact written twice" shape this repository
+    /// removes elsewhere. Both call THIS.
+    pub fn check_admits(self, declared: &CqlType, declared_spelling: &str) -> Result<()> {
+        match EmptyValueType::for_cql_type(declared) {
+            Some(admitted) if admitted == self => Ok(()),
+            Some(admitted) => Err(Error::InvalidInput(format!(
+                "empty-buffer sentinel declares type `{}` but the declared type \
+                 `{declared_spelling}` admits only `{}` (issue #3805)",
+                self.cql_name(),
+                admitted.cql_name()
+            ))),
+            None => Err(Error::InvalidInput(format!(
+                "type `{declared_spelling}` does not admit an empty buffer, so an \
+                 empty-buffer sentinel cannot be serialized for it (issue #3805)"
+            ))),
         }
     }
 }

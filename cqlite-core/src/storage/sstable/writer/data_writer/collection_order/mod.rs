@@ -154,12 +154,17 @@ pub(crate) fn compare_collection_elements(a: &Value, b: &Value) -> Ordering {
         // frozen<set<int>> element is Frozen(Set(..)) → unwraps to the Set arm).
         (Value::Frozen(x), other) => compare_collection_elements(x, other),
         (x, Value::Frozen(y)) => compare_collection_elements(x, y),
-        // EMPTY-BUFFER SENTINEL (issue #3805) — an empty MAP KEY. Stated
-        // explicitly rather than left to the byte fallback below: that fallback
-        // would in fact agree (`serialize_value(Empty)` is zero bytes, and an
-        // empty byte string sorts first), but the rule is Cassandra's
-        // comparator contract and not a coincidence of the encoding, so it is
-        // written where the other comparator rules are.
+        // EMPTY-BUFFER SENTINEL (issue #3805) — an empty MAP KEY. These arms are
+        // LOAD-BEARING, not merely explicit: since roborev job 449 finding D the
+        // type-blind `serialize_value` REFUSES a sentinel (it has no declared
+        // type to validate the tag against, and zero bytes mean something
+        // different in every generic context), so the byte fallback below would
+        // reach its `_ => Ordering::Equal` arm and collapse every sentinel with
+        // every other value — a NON-TOTAL order, i.e. a wrong sort rather than a
+        // wrong verdict. An earlier revision of this comment said the fallback
+        // "would in fact agree" because `serialize_value(Empty)` was zero bytes;
+        // that is no longer true, and the rule below never depended on it — it is
+        // Cassandra's comparator contract.
         //
         // `db/marshal/Int32Type.java:61-71` at `cassandra-5.0.8`: when EITHER
         // side is empty the result is `Boolean.compare(right.isEmpty,

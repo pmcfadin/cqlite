@@ -173,6 +173,58 @@ pub(crate) fn serialize_collection_element_into(
     serialize_value_into(value, out)
 }
 
+/// Serialize a MULTICELL map's CELL PATH (its serialized KEY) into `out`.
+///
+/// This is the ONE write-path position where the empty-buffer sentinel
+/// (`Value::Empty`, issue #3805) may legally be serialized, and the only reason
+/// it may is that BOTH of the things [`serialize_value_into`] lacks are present
+/// here: the length is carried by the enclosing framing (an unsigned VInt, so a
+/// zero-length path is expressible and means an EMPTY KEY —
+/// `db/marshal/CollectionType.java:361-382`), and the DECLARED KEY TYPE is known,
+/// so the sentinel's tag can be checked against it.
+///
+/// # The admission check is NOT written twice
+/// It is [`crate::types::EmptyValueType::check_admits`], the same call the
+/// type-aware writer (`storage/serialization/types.rs`) makes. That rule is
+/// derived from the tag table, which is derived from Cassandra's `validate()`;
+/// a second copy here would be a second opinion able to drift from it (roborev
+/// job 449 finding D asked for exactly this reuse).
+///
+/// # An UNAVAILABLE declared type is a REFUSAL, never a guess (#28)
+/// `map_data_type` is the COLUMN's declared type, e.g. `map<int, int>`. When it
+/// does not parse as a CQL `map<K,V>` — a Cassandra MARSHAL spelling
+/// (`org.apache.cassandra.db.marshal.MapType(…)`), which [`CqlType::parse`] does
+/// not model and yields as `Custom`, or any other shape — there is no declared
+/// KEY type to validate the tag against, so a sentinel is refused. Refusing beats
+/// writing bytes that read back as something else. Every NON-sentinel key is
+/// unaffected and goes straight to [`serialize_value_into`], so an unparsed
+/// declared type costs nothing on any path that does not carry a sentinel.
+pub(crate) fn serialize_map_cell_path_key_into(
+    key: &Value,
+    map_data_type: &str,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    let Value::Empty(tag) = key else {
+        return serialize_value_into(key, out);
+    };
+    let key_type = match CqlType::parse(map_data_type) {
+        Ok(CqlType::Map(k, _)) => *k,
+        _ => {
+            return Err(Error::InvalidInput(format!(
+                "an empty-buffer sentinel (`{}`, issue #3805) needs the DECLARED map key \
+                 type to be validated against, and `{map_data_type}` does not parse as a \
+                 CQL `map<K,V>`; refusing rather than guessing (issue #28)",
+                tag.cql_name()
+            )))
+        }
+    };
+    tag.check_admits(&key_type, map_data_type)?;
+    // The whole encoding: NOTHING. `out` is deliberately left untouched — the
+    // length lives in the caller's unsigned VInt, so a zero-length cell path IS
+    // the empty key.
+    Ok(())
+}
+
 /// Serialize a Value to bytes for cell storage.
 ///
 /// Thin wrapper over [`serialize_value_into`], preserving the owned-`Vec`
@@ -197,14 +249,44 @@ pub(crate) fn serialize_value(value: &Value) -> Result<Vec<u8>> {
 pub(crate) fn serialize_value_into(value: &Value, out: &mut Vec<u8>) -> Result<()> {
     match value {
         Value::Null => {}
-        // EMPTY-BUFFER SENTINEL (issue #3805): appends NOTHING, so the value's
-        // serialized form is a ZERO-LENGTH buffer — byte-exactly what Cassandra
-        // wrote and what a zero-length cell path / empty cell value means. The
-        // length is carried by the enclosing framing (an unsigned VInt for a
-        // cell path, `db/marshal/CollectionType.java:361-382`; the
-        // `HAS_EMPTY_VALUE_MASK` flag bit for a cell value, `db/rows/Cell.java:264`),
-        // never by these bytes, so writing nothing is the whole encoding.
-        Value::Empty(_) => {}
+        // EMPTY-BUFFER SENTINEL (issue #3805): REFUSED HERE.
+        //
+        // This function is TYPE-BLIND — it takes a `Value` and no declared type
+        // — and it is reached from every generic write context: a regular cell
+        // value, a list/set element, a frozen collection's key/value/element, a
+        // tuple field, a UDT member, and the comparator's byte fallback. In NONE
+        // of those does writing zero bytes mean what the sentinel means
+        // (roborev job 449 finding D):
+        //
+        //  * as a CELL VALUE, zero bytes plus `HAS_EMPTY_VALUE_MASK`
+        //    (`db/rows/Cell.java:264`) reads back as `Value::Null`, not as the
+        //    sentinel — the value would silently change type on the round trip;
+        //  * in a length-prefixed COLLECTION element or TUPLE field, a
+        //    zero-length element is the empty value of the ELEMENT'S declared
+        //    type, which for `text`/`blob` is a legal MEANINGFUL empty and for
+        //    the four strict families (`tinyint`/`smallint`/`date`/`time`) is
+        //    CORRUPTION Cassandra's own `validate` throws on. This function
+        //    cannot tell which, because it never sees the declared type;
+        //  * and there is nowhere to check the sentinel's TAG against anything,
+        //    so a mismatched tag would be written as if it agreed.
+        //
+        // Where the declared type is NOT available, REFUSE rather than guess
+        // (no-heuristics, issue #28): refusing beats writing bytes that read back
+        // as something else. The ONE legal position — a MULTICELL map's CELL
+        // PATH, where the length IS carried by the enclosing framing (an unsigned
+        // VInt, `db/marshal/CollectionType.java:361-382`) and the declared key
+        // type IS known — has its own schema-aware entry point,
+        // [`serialize_map_cell_path_key_into`].
+        Value::Empty(tag) => {
+            return Err(Error::InvalidInput(format!(
+                "an empty-buffer sentinel (`{}`, issue #3805) has no type-blind \
+                 serialization: zero bytes mean a different thing in every generic \
+                 context, so it is legal only on a MULTICELL map's cell path via \
+                 `serialize_map_cell_path_key_into`, where the declared key type is \
+                 known and the tag can be validated against it (issue #28)",
+                tag.cql_name()
+            )))
+        }
         Value::Boolean(b) => out.push(if *b { 1 } else { 0 }),
         Value::TinyInt(n) => out.push(*n as u8),
         Value::SmallInt(n) => out.extend_from_slice(&n.to_be_bytes()),
