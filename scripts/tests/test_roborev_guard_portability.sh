@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# PORTABILITY GUARD for the roborev review-guard code path (issue #3296).
+# PORTABILITY GUARD for an ENUMERATED set of macOS-sensitive shell files (issues #3296, #3756).
+# It began as, and still is, the guard for the roborev review-guard code path; #3756 added
+# `scripts/bootstrap-agent-machine.sh` and its suite. The AUTHORITATIVE statement of what a run
+# covered is the `==== PORTABILITY LINT SCOPE ====` block it PRINTS — not this comment, and not
+# the file's name. See SCOPE OF THIS SCANNER below.
 #
 # WHY THIS FILE EXISTS. `scripts/tests/test_roborev_review_guard.sh` gates a merge (it runs
 # inside the gate's `roborev-lints` component, in --lite AND in the full gate of record). At
@@ -53,9 +57,13 @@ set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
+# Anchored on REPO_ROOT rather than spelled with `..` segments: these paths are PRINTED in the
+# scope declaration below and COMPARED against `git ls-files` output, and a `scripts/tests/../flow`
+# spelling is neither readable to a human nor equal to the tracked path (#3756 — an unnormalised
+# member silently counted as UNSCANNED, overstating the gap by 4).
 GUARD="$SCRIPT_DIR/test_roborev_review_guard.sh"
-GATE="$SCRIPT_DIR/../agent-gate.sh"
-FLOW_DIR="$SCRIPT_DIR/../flow"
+GATE="$REPO_ROOT/scripts/agent-gate.sh"
+FLOW_DIR="$REPO_ROOT/scripts/flow"
 
 PASS=0
 FAIL=0
@@ -130,7 +138,22 @@ trap 'rm -rf "$tmp"' EXIT
 #     tally epilogue — but NOT under the shims, so they are not portability coverage.) Everything
 #     else in the scanned files — the whole of the rest of test_roborev_review_guard.sh, all of
 #     scripts/flow/roborev-review*.sh, and roborev-job-facts.py — is covered by the ENUMERATED
-#     SCANNER ALONE.
+#     SCANNER ALONE, and so are BOTH bootstrap files added by #3756, which have no behavioural
+#     probe in this file at all.
+#   * AND THE SUBJECT SET IS ITSELF A COVERAGE CLAIM (#3756). The list below is ENUMERATED, so a
+#     file absent from it is not covered however green this run is — which is not hypothetical:
+#     `xargs -0 -r` shipped in test_bootstrap_agent_machine.sh's tree-identity digest while THIS
+#     FILE carried the `xargs -r` rule verbatim, because that file was never scanned. A full
+#     derivation over all tracked `scripts/**/*.sh` was MEASURED and rejected (10 of 15 rules red
+#     across ~40 sites, mostly other portability lints' own rule TABLES and deliberate
+#     GNU-first/BSD-fallback pairs — a cross-cutting cleanup with its own review surface, which
+#     would red `roborev-lints` in every lane's --lite). So the set stays enumerated and DECLARES
+#     ITSELF AT RUN TIME rather than claiming a completeness it does not have.
+#     AND THE BOOTSTRAP PAIR IS ADDED HERE AND NOT ALSO TO test_agent_gate_tree_portability.sh,
+#     which carries its own `xargs-r` rule and named neither file either. One owner, deliberately:
+#     two lints scanning one file means two rule tables to keep in step and two identical findings
+#     for one defect, and this is the lint whose table the #3708 incident construct came from.
+#     That sibling's subject set is the GATE's tree-integrity functions and stays that.
 #   * SO THE COVERAGE CLAIM IS NARROW, AND THIS IS ITS HONEST FORM (#3296 round-9 finding 2, which
 #     CORRECTS the round-8 wording here — the earlier text called a missed spelling a "BOUNDED
 #     FALSE NEGATIVE with a backstop underneath it" without qualification, and that was WRONG):
@@ -138,9 +161,10 @@ trap 'rm -rf "$tmp"' EXIT
 #         catches the defect whatever the spelling, because it runs the code under BSD semantics.
 #       - ANYWHERE ELSE in the scanned files there is NO backstop. An unenumerated spelling
 #         introduced there — `$SED -i`, an alias, `eval`, a quoted metacharacter inside the option
-#         run — is an UNCOVERED false negative: this file reports the code path clean and nothing
+#         run — is an UNCOVERED false negative: this file reports the scanned set clean and nothing
 #         in it will contradict that. See residual 5 below, which states it as a residual rather
-#         than leaving it to be rediscovered.
+#         than leaving it to be rediscovered. The two bootstrap files are wholly in this second
+#         category: nothing in THIS file executes them under a shim.
 #   * WHY THIS STILL SURVIVES WHERE THE DELETED LINT DID NOT — and the difference is NOT "it has a
 #     backstop everywhere", which is the claim just retracted. It is that the deleted lint's misses
 #     were false PASSES about the property it was the SOLE check for, and its false-PASS count GREW
@@ -161,6 +185,8 @@ trap 'rm -rf "$tmp"' EXIT
 # banned constructs, in two places only — its BSD-emulation fixtures and its positive controls —
 # and each such LINE carries a `portability-lint-allow` marker naming why, so the exemption is
 # visible in the diff and every other line of this file is scanned like any other target.
+BOOTSTRAP_SH="$REPO_ROOT/scripts/bootstrap-agent-machine.sh"
+BOOTSTRAP_TEST="$SCRIPT_DIR/test_bootstrap_agent_machine.sh"
 SCAN_FILES=(
   "$GUARD"
   "$SCRIPT_DIR/$(basename "$0")"
@@ -168,7 +194,49 @@ SCAN_FILES=(
   "$FLOW_DIR/roborev-review-checks.sh"
   "$FLOW_DIR/roborev-review-oracles.sh"
   "$FLOW_DIR/roborev-job-facts.py"
+  "$BOOTSTRAP_SH"
+  "$BOOTSTRAP_TEST"
 )
+
+# THE SCOPE IS DECLARED AT RUN TIME, NOT ONLY IN THIS COMMENT (#3756 AC2). A reader of a green
+# run learns which files it covered and — affirmatively, as a MEASURED count and not a constant
+# that decays — how many tracked shell scripts it did NOT. `NOT MEASURED` is its own third state:
+# a census that could not be taken is never rendered as a number, because a number in a scope
+# declaration reads as authority.
+_scope_unscanned_line() { # _scope_unscanned_line <repo-root>
+  local _root="$1" _tracked _n_tracked=0 _n_unscanned=0 _f _rel _hit
+  _tracked=$(cd "$_root" 2>/dev/null && git ls-files 'scripts/*.sh' 'scripts/**/*.sh' 2>/dev/null) || {
+    printf 'unscanned: NOT MEASURED (the tracked-script census could not be taken under %s)\n' "$_root"; return 0; }
+  [ -n "$_tracked" ] || {
+    printf 'unscanned: NOT MEASURED (the tracked-script census returned nothing under %s)\n' "$_root"; return 0; }
+  while IFS= read -r _rel; do
+    [ -n "$_rel" ] || continue
+    _n_tracked=$((_n_tracked + 1))
+    _hit=no
+    for _f in "${SCAN_FILES[@]}"; do
+      [ "$_f" = "$_root/$_rel" ] && _hit=yes
+    done
+    [ "$_hit" = no ] && _n_unscanned=$((_n_unscanned + 1))
+  done <<EOF_SCOPE
+$_tracked
+EOF_SCOPE
+  printf 'unscanned: %d of %d tracked scripts/**/*.sh are NOT scanned by this lint\n' \
+    "$_n_unscanned" "$_n_tracked"
+}
+emit_scope_declaration() {
+  local _scope_f
+  printf '==== PORTABILITY LINT SCOPE ====\n'
+  printf 'This lint is an ENUMERATED subject set, not a derived one. A PASS below says nothing\n'
+  printf 'about any file absent from this list.\n'
+  for _scope_f in "${SCAN_FILES[@]}"; do
+    printf 'scanned:   %s\n' "${_scope_f#"$REPO_ROOT/"}"
+  done
+  _scope_unscanned_line "$REPO_ROOT"
+  printf '================================\n'
+}
+printf '\n'
+emit_scope_declaration
+printf '\n'
 
 # Three parallel arrays: the ERE, why it is not portable, and a sample violation the ERE
 # MUST detect (the positive control that keeps the pattern honest).
@@ -294,13 +362,103 @@ add_construct '(^|[^[:alnum:]_-])(sed|grep)[[:space:]]+-[a-zA-Z]*z([[:space:]]|$
 add_construct '\-printf[[:space:]]' \
   'find -printf is GNU-only — use -exec or -print with a shell loop' \
   "  find . -printf '%p\\\\n'" # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
-add_construct '(^|[^[:alnum:]_-])xargs[[:space:]]+(-[a-zA-Z]*r|--)' \
+# NAMED because the #3756 bootstrap-scope controls below assert about this rule SPECIFICALLY —
+# an index reference would silently retarget when a row is inserted above it.
+#
+# `-r` DOES NOT HAVE TO SIT NEXT TO `xargs`, AND THE INCIDENT'S OWN SPELLING DID NOT (#3756
+# roborev round 1). This rule required the flag to be the FIRST token, so it matched
+# `xargs -r` and MISSED `xargs -0 -r` and `xargs -0r` — and `xargs -0 -r` is exactly what PR
+# #3708 shipped, i.e. the rule never detected the construct this whole issue is about. A plant
+# control using the spelling the rule already caught would have reported coverage that did not
+# exist, which is why the plants below use the INCIDENT spelling.
+#
+# THE OPTION RUN HERE IS NARROWER THAN THE SED ONE, DELIBERATELY. `_OPT_RUN` skips ARBITRARY
+# tokens, which is right for sed (its expression is an operand that can look like anything) and
+# WRONG for xargs, whose operand is A COMMAND WITH ITS OWN FLAGS: `find . | xargs rm -rf` would
+# be read as an xargs `-r` and red the gate on the single most common xargs idiom there is. So
+# the run admits OPTION TOKENS ONLY (each must start with `-`), which stops at the command name.
+#
+# A LONG OPTION MUST HAVE A NAME (#3756 roborev round 2). The `--` branch was inherited
+# unbounded, so it also matched the BARE end-of-options delimiter — and `xargs -- rm` is
+# portable (every getopt honours `--`), so the rule red on correct code. `--[a-zA-Z]` keeps
+# `--no-run-if-empty` flagged and lets the delimiter through; both pinned by controls.
+# THE RUN MUST NOT SWALLOW A BARE `--` (#3756 roborev round 9). After the end-of-options
+# delimiter the next word is the COMMAND, so `xargs -- -r` runs a command NAMED `-r` and is
+# portable — but a run that accepts any `-`-leading token consumed the `--` and then matched the
+# command as an option, i.e. the rule did NOT "stop at the command name" as claimed one comment
+# down. A run element is therefore a SHORT option (second character not `-`) or a LONG option
+# (at least one character after `--`); the bare delimiter is neither. Measured 8/8 positives,
+# 0/10 false positives including `xargs -- -r` and `xargs -0 -- -r`.
+_XARGS_OPT_RUN='([[:space:]]+(-[^-[:space:]|;&<>()][^[:space:]|;&<>()]*|--[^[:space:]|;&<>()]+))*'
+# AND THE SHORT-OPTION MATCH ENDS AT A TOKEN BOUNDARY (#3756 roborev round 5). Without one,
+# `-[a-zA-Z0-9]*r` matched the `-Ir` PREFIX of `xargs -Ireplace echo` — a portable ATTACHED
+# option argument — so the lint red on correct code. The boundary keeps `-r`, `-0r` and `-0 -r`
+# and drops the prefix match; measured, false positives 2 -> 1 with positives unchanged at 5/5.
+# The one that remains is an attached argument that itself ENDS in `r` (`-Eerror`), which needs
+# option arity to tell from a real `-r` — the same ambiguity residual 4a records.
+# AND `r` NEED NOT BE LAST IN THE CLUSTER (#3756 roborev round 7). `xargs -r0` is a valid GNU
+# spelling and evaded a rule anchored on a trailing `r`. The cluster is now spelled as the
+# ARGUMENT-FREE xargs short options with an `r` somewhere among them.
+#
+# THIS IS NOT THE OPTION-ARITY TABLE RESIDUAL 4a REFUSES, and the difference is which way it
+# fails. That table would have to be COMPLETE to avoid false positives; this set only has to be
+# CONSERVATIVE — every letter in it takes no argument, so a letter wrongly LEFT OUT costs a miss
+# and a letter that takes an argument simply is not here, which is why `-Ireplace` and `-Eerror`
+# cannot match however they are spelled. It errs toward misses, never toward reddening correct
+# code. Measured: 7 of 7 real spellings (including `-r0`, `-0r`, `-tr0`) FLAGGED, 0 of 8
+# attached-argument / command-carries-r / bare-`--` forms flagged.
+_XARGS_ARGFREE='[0oprtx]'
+RE_XARGS_R='(^|[^[:alnum:]_-])xargs'"$_XARGS_OPT_RUN"'[[:space:]]+(-'"$_XARGS_ARGFREE"'*r'"$_XARGS_ARGFREE"'*([[:space:]]|$)|--[a-zA-Z])'
+add_construct "$RE_XARGS_R" \
   'xargs -r (and GNU long options) are not in BSD xargs; BSD already skips an empty input line only with -0' \
-  '  printf "" | xargs -r rm' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
+  '  printf "" | xargs -0 -r rm' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
 add_construct '(^|[^[:alnum:]_-])base64[[:space:]]+-w' \
   'base64 -w is GNU-only (BSD/macOS base64 has no wrap flag; use -b or fold)' \
   '  base64 -w0 <f' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
-add_construct '(^|[^[:alnum:]_-])timeout[[:space:]]+[0-9]' \
+# THE DURATION MUST BE A COMPLETE TOKEN (#3756). `[0-9]` alone matched the `2` of
+# `command -v timeout 2>/dev/null` — which is not an invocation of timeout(1) at all, it is the
+# very GUARD this rule's own message tells you to write. A lint that reds on the remedy it
+# recommends is the lint agents learn to waive, and it fired on three real call sites. So the
+# duration is now `[0-9]+` plus an optional GNU suffix, and it must END the token: a digit
+# followed by `>` or `<` is a REDIRECTION's file descriptor, never a duration.
+# A DURATION MAY BE FRACTIONAL (#3756 roborev round 1). coreutils parses the duration with
+# strtod, so `timeout 0.5 cmd` and `timeout .5 cmd` are real invocations — and the ORIGINAL
+# `[0-9]` form caught `0.5`, so requiring an integer would have NARROWED the rule while fixing
+# its false positive. A false-positive fix that loses a true positive is not a fix.
+# ...AND THE NUMERIC GRAMMAR IS GONE, BECAUSE ENUMERATING IT DID NOT CONVERGE (#3756 roborev
+# rounds 1-3). Three consecutive rounds each named another duration spelling the pattern did not
+# model — fractional (`0.5`), leading-dot (`.5`), exponent (`1e2`, `1.5e2s`), trailing-dot
+# (`1.`) — and coreutils parses the duration with strtod, whose accepted syntax is wider than
+# anything worth restating here. That is this file's own documented non-convergence, in the rule
+# it was documented about: a fifth numeric epicycle buys a sixth finding.
+#
+# So the rule stops modelling NUMBERS and models the one thing the false positive was ever about.
+# The original `[0-9]` was right except that it also matched the `2` of
+# `command -v timeout 2>/dev/null`, where the digit is a REDIRECTION'S FILE DESCRIPTOR. A
+# duration is therefore any token that STARTS with a digit or a dot, CONTAINS no redirection or
+# command metacharacter, and is terminated by whitespace or end of line; `2>` fails because `>`
+# can neither be inside the token nor end it. Measured: 9 of 9 real spellings FLAGGED —
+# including all four named across those three rounds — and 5 of 5 guard/redirection/assignment
+# forms CLEAN. Widening the numeric syntax again is impossible by construction, because no
+# numeric syntax is written down any more.
+#
+# AND THE DURATION DOES NOT HAVE TO SIT NEXT TO `timeout` (#3756 roborev round 4). The rule
+# required it to be the FIRST token, so `timeout -s KILL 300 …` was invisible — and there was
+# one, UNGUARDED, in a file this very issue had just brought into scope
+# (test_bootstrap_agent_machine.sh, the notify-root helper). The widening's own promise was
+# therefore not being kept for a real instance sitting inside the newly scanned set.
+#
+# The run admits an option token plus, optionally, ONE following non-option token (its argument),
+# which is what reaches the duration in `-s KILL 300` and `-k 5 30`. That shape is safe HERE and
+# is deliberately NOT what residual 4a refuses for xargs: timeout's operand after the options is
+# a DURATION, recognisable by shape, whereas xargs's is a COMMAND that looks like anything — so
+# `xargs -0 rm -rf` is ambiguous and `timeout -s KILL 300` is not. Measured: 7 of 7 option-bearing
+# and bare spellings FLAGGED, 0 of 7 guard/redirection/assignment/prose forms flagged, and a sweep
+# of the whole scanned set surfaced exactly three real sites — the one roborev named plus two in
+# bootstrap that ARE correctly guarded by `have timeout` and now say so with a marker.
+_TIMEOUT_OPT_RUN='([[:space:]]+-[^[:space:]|;&<>()]+([[:space:]]+[^-[:space:]|;&<>()][^[:space:]|;&<>()]*)?)*'
+RE_TIMEOUT_UNGUARDED='(^|[^[:alnum:]_-])timeout'"$_TIMEOUT_OPT_RUN"'[[:space:]]+[0-9.][^[:space:]|;&<>()]*([[:space:]]|$)'
+add_construct "$RE_TIMEOUT_UNGUARDED" \
   'timeout(1) is NOT installed on stock macOS — guard it with `command -v timeout` or restructure' \
   '  timeout 30 some-command' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
 add_construct '(^|[^[:alnum:]_-])(mapfile|readarray)([[:space:]]|$)|declare[[:space:]]+-A|\$\{[A-Za-z_][A-Za-z_0-9]*,,\}' \
@@ -333,6 +491,27 @@ fi
 #      quiet direction — noise here would be worse than a miss, per the negative controls).
 #   4. A construct built by string concatenation or eval (`cmd="sed -"; cmd="$cmd i"`).
 #
+#   4a. AN xargs OPTION WITH A SEPARATED ARGUMENT (#3756 roborev round 2). `xargs -n 1 -r cmd`
+#      and `xargs -I '{}' -r cmd` are NOT detected: the option run admits only tokens that begin
+#      with `-`, so it stops at `1` / `'{}'` and never reaches the `-r` beyond. Symmetrically,
+#      `xargs -I -r echo` — where `-r` is the replace-STRING, i.e. `-I`'s argument — IS flagged,
+#      a (pathological) false positive with the usual per-line marker as its escape.
+#      THE OBVIOUS WIDENING IS WORSE, AND THAT IS MEASURED RATHER THAN ARGUED. Letting each run
+#      element carry one following non-option token does catch both missed spellings — and it
+#      ALSO flags `find . -print0 | xargs -0 rm -rf`, because nothing here can tell `-n 1`
+#      (option + argument) from `-0 rm` (option + COMMAND). Measured before/after on those three
+#      lines: `. . X` -> `X X X`. Trading a miss for a red on the single most common xargs idiom
+#      there is makes it the lint agents learn to waive, which is strictly worse than the miss.
+#      Telling them apart needs xargs's option-arity table, i.e. a second implementation of an
+#      option grammar — the route this file already refuses two paragraphs above, for the reason
+#      recorded there. So: KNOWN NOT COVERED, by choice, like 1-4.
+#      NARROWED IN ROUND 7, and recorded because the earlier text here is no longer true: the
+#      attached-argument false positives (`-Ireplace`, `-I{}`, and `-Eerror`, which round 5 left
+#      standing because its argument ENDS in `r`) are all gone, because a cluster is now spelled
+#      from the ARGUMENT-FREE options alone and an argument-taking letter cannot appear in one.
+#      What remains uncovered is only the SEPARATED form above — `-n 1 -r`, `-I '{}' -r` — where
+#      the argument is its own token and telling it from a command still needs arity.
+#
 #   5. THE BACKSTOP DOES NOT COVER THE WHOLE SCANNED SET, AND 1-4 ARE UNCOVERED OUTSIDE IT
 #      (#3296 round-9 finding 2 — this bullet CORRECTS an earlier claim made right here, that the
 #      shim differential "is the backstop that catches what the text scan cannot see", full stop).
@@ -340,10 +519,12 @@ fi
 #      `sed_inplace_verified`, `summary_key_order` — under BSD `sed -i` / BSD `paste` semantics.
 #      For code INSIDE those three, residuals 1-4 are bounded: the probe runs the code and a defect
 #      surfaces as a failing case whatever the spelling. For every OTHER line of the scanned set —
-#      the rest of test_roborev_review_guard.sh, all four scripts/flow/roborev-review* files —
-#      the enumerated scanner is the ONLY mechanism in this file, so a spelling from 1-4 introduced
-#      THERE is an UNCOVERED false negative: the scan reports the code path clean and no probe
-#      contradicts it.
+#      the rest of test_roborev_review_guard.sh, all four scripts/flow/roborev-review* files, and
+#      BOTH #3756 bootstrap files — the enumerated scanner is the ONLY mechanism in this file, so a
+#      spelling from 1-4 introduced THERE is an UNCOVERED false negative: the scan reports the
+#      scanned set clean and no probe contradicts it. (The bootstrap pair does have a behavioural
+#      probe, but it is test_bootstrap_agent_machine.sh's own cases 6o-6q under a BSD `readlink`
+#      shim, it covers ONE call site, and it backstops nothing else in those 7300 lines.)
 #      This is a KNOWN REDUCTION IN COVERAGE, accepted and recorded, not argued away. It is NOT
 #      closed by adding "parsing-based validation": a bash re-implementation of shell word
 #      splitting is a second implementation of a grammar, and a second implementation's correctness
@@ -590,9 +771,9 @@ for _ci in "${!CONSTRUCT_RE[@]}"; do
     : # a target could not be scanned: the cause is already a counted FAILURE, and a
       # "free of this construct" verdict over a partially-scanned set would be vacuous.
   elif [ -z "$_hits" ]; then
-    ok "structural: the roborev code path is free of this construct — $_why"
+    ok "structural: the scanned set is free of this construct — $_why"
   else
-    bad "structural: GNU-only construct in the roborev code path ($_why):$_hits"
+    bad "structural: GNU-only construct in the scanned set ($_why):$_hits"
   fi
 done
 
@@ -882,6 +1063,261 @@ printf '%s\n' "  sed -i 's/a/b/' \"\$f\"" >>"$tmp/self-unmarked.sh" # portabilit
 assert_flagged 'an UNMARKED violation appended to a COPY of this file (so the self-scan is a real scan, not a blanket exemption)' "$tmp/self-unmarked.sh"
 awk '{ gsub(/portability-lint-allow/, "portability-lint-NEUTRALISED"); print }' "$_self" >"$tmp/self-nomarker.sh"
 assert_flagged "this file with its exemption markers NEUTRALISED (proving the markers are load-bearing — the rules really do match this file's own deliberate fixtures)" "$tmp/self-nomarker.sh"
+
+# ---------------------------------------------------------------------------
+# THE BOOTSTRAP PAIR IS IN SCOPE, AND THE RULE THAT MISSED IT IS PROVED TO FIRE THERE (#3756).
+#
+# `xargs -0 -r` shipped in test_bootstrap_agent_machine.sh's tree-identity digest and was caught
+# by a human reviewer, not by this lint — which has carried the `xargs -r` rule verbatim since
+# #3296. The rule was fine; the SUBJECT SET was the gap, and an enumerated set that declares its
+# own non-exhaustiveness is honest without being coverage. Both files are in SCAN_FILES now, and
+# both halves of that are asserted here rather than assumed:
+#   (i)  MEMBERSHIP — dropping either file from SCAN_FILES must FAIL, the same shape as the
+#        self-scan above. Without it a future edit could quietly restore the gap.
+#   (ii) THE RULE ACTUALLY FIRES THERE — membership proves the file is passed to `grep`, not that
+#        the incident's own construct would be caught in it. So the incident construct is PLANTED
+#        into a throwaway COPY of each file and the scan must flag it AND NAME it: a bare "some
+#        rule matched" is not evidence, since the copy is 3000+ lines of real script and an
+#        unrelated rule firing would produce an identical verdict.
+# The pristine copies are asserted CLEAN of the same rule first — otherwise the planted verdict
+# could be inherited from a pre-existing hit and the plant would prove nothing.
+# ---------------------------------------------------------------------------
+_bs_i=0
+for _bs_f in "$BOOTSTRAP_SH" "$BOOTSTRAP_TEST"; do
+  _bs_i=$((_bs_i + 1))
+  _bs_name=$(basename "$_bs_f")
+  _bs_member=no
+  for _sf in "${SCAN_FILES[@]}"; do
+    [ "$_sf" = "$_bs_f" ] && _bs_member=yes
+  done
+  if [ "$_bs_member" = yes ]; then
+    ok "bootstrap-scope: $_bs_name is one of the SCAN_FILES — the #3756 gap (a GNU-only idiom this lint already knows about, shipped because the file was never scanned) cannot silently reopen"
+  else
+    bad "bootstrap-scope: $_bs_name is NOT in SCAN_FILES — this is the #3756 gap, reopened"
+    continue
+  fi
+  if [ ! -f "$_bs_f" ]; then
+    bad "bootstrap-scope: $_bs_name does not exist at $_bs_f — the plant control below has no subject, so its verdict would be unearned"
+    continue
+  fi
+  # (a) the pristine file must be CLEAN of the incident rule, or (b) proves nothing.
+  scan_found "$RE_XARGS_R" "$_bs_f"
+  case $? in
+    1) ok "bootstrap-scope: $_bs_name is clean of the \`xargs -r\` rule today — so the planted hit below is attributable to the plant and not inherited" ;; # portability-lint-allow: the rule NAME in a diagnostic string, not an invocation
+    0) bad "bootstrap-scope: $_bs_name already matches the \`xargs -r\` rule ($(scan_all_hits)) — fix it; until then the plant control below cannot attribute its hit"; continue ;; # portability-lint-allow: the rule NAME in a diagnostic string, not an invocation
+    *) continue ;; # already counted by scan_found
+  esac
+  # (b) plant the INCIDENT construct into a copy and require the scan to NAME it.
+  _bs_copy="$tmp/bootstrap-planted-$_bs_i.sh"
+  cat "$_bs_f" >"$_bs_copy"
+  # A blank line FIRST: a source file with no trailing newline would otherwise join the plant
+  # onto its last physical line, where an enclosing quote or comment could hide it — the plant
+  # would go undetected and this control would report a hole that does not exist.
+  printf '\n' >>"$_bs_copy"
+  # THE INCIDENT'S OWN SPELLING, not a simpler one the rule already caught: PR #3708 shipped
+  # `xargs -0 -r`, and planting bare `xargs -r` would have certified a rule that MISSED it.
+  printf '%s\n' '  printf "" | xargs -0 -r rm' >>"$_bs_copy" # portability-lint-allow: plants the #3756 incident construct into a THROWAWAY COPY on purpose
+  scan_found "$RE_XARGS_R" "$_bs_copy"
+  case $? in
+    0)
+      _bs_hit=$(scan_first_hit)
+      case "$_bs_hit" in
+        *"xargs -0 -r"*) # portability-lint-allow: the planted construct as a MATCH PATTERN, not an invocation
+          ok "bootstrap-scope: the \`xargs -r\` rule FIRES on a copy of $_bs_name and NAMES the planted line ($_bs_hit) — the #3756 incident construct would now red the gate instead of a reviewer" ;; # portability-lint-allow: the rule NAME in a diagnostic string, not an invocation
+        *)
+          bad "bootstrap-scope: a hit was reported on the planted copy of $_bs_name but it does not name the planted construct ($_bs_hit) — a bare red is not evidence, an unrelated match produces the same verdict" ;;
+      esac ;;
+    1) bad "bootstrap-scope: the \`xargs -r\` rule does NOT fire on a copy of $_bs_name carrying the #3756 construct — membership without detection is the gap wearing a scan's clothes" ;; # portability-lint-allow: the rule NAME in a diagnostic string, not an invocation
+    *) : ;; # already counted by scan_found
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# THE SCOPE DECLARATION IS ASSERTED, NOT JUST PRINTED (#3756 AC2). A declaration nothing
+# checks is a comment that happens to reach stdout: delete it, mis-spell a member's path, or
+# let the census silently degrade, and no test would notice. Three properties, each the one
+# that makes the declaration mean something:
+#   (i)   EVERY member is named. A scanned file missing from the declaration understates the
+#         scope, which is the safe direction for a reader but still a lie about what ran.
+#   (ii)  THE ARITHMETIC IS CONSISTENT. `unscanned` + the `.sh` members of SCAN_FILES must
+#         equal the tracked total. This is the control that would have caught the real defect
+#         found while writing it: members spelled `scripts/tests/../flow/x.sh` compared
+#         unequal to the tracked path, so four scanned files counted as UNSCANNED and the
+#         declaration OVERSTATED the gap by 4 while looking entirely plausible.
+#   (iii) AN UNTAKEABLE CENSUS SAYS SO. The count is the one number a reader will quote, so
+#         "could not measure" must never render as a number — the standing rule against
+#         deriving a verdict from the absence of a signal, applied to a scope line.
+# ---------------------------------------------------------------------------
+emit_scope_declaration >"$tmp/scope.txt" 2>&1
+_scope_missing=''
+for _scope_f in "${SCAN_FILES[@]}"; do
+  grep -qF -- "scanned:   ${_scope_f#"$REPO_ROOT/"}" "$tmp/scope.txt" \
+    || _scope_missing="$_scope_missing ${_scope_f#"$REPO_ROOT/"}"
+done
+if [ -z "$_scope_missing" ]; then
+  ok "scope: the run-time declaration names every one of the ${#SCAN_FILES[@]} SCAN_FILES members — a reader of a green run learns exactly what it covered"
+else
+  bad "scope: the run-time declaration omits scanned file(s):$_scope_missing — a declaration that understates its own subject set is not a scope statement"
+fi
+_scope_unscanned=$(grep -c '^unscanned: ' "$tmp/scope.txt")
+if [ "${_scope_unscanned:-0}" = 1 ]; then
+  ok 'scope: exactly one unscanned: line is emitted (a reader has one number to quote, not zero and not several)'
+else
+  bad "scope: the declaration emitted ${_scope_unscanned:-0} unscanned: lines — it must emit exactly one"
+fi
+_scope_line=$(grep '^unscanned: ' "$tmp/scope.txt" | head -1)
+case "$_scope_line" in
+  'unscanned: NOT MEASURED'*)
+    skip "scope: the tracked-script census could not be taken on this host, so the arithmetic control below has no subject ($_scope_line)" ;;
+  *)
+    _scope_n=$(printf '%s\n' "$_scope_line" | awk '{ print $2 }')
+    _scope_m=$(printf '%s\n' "$_scope_line" | awk '{ print $4 }')
+    # Count the SCAN_FILES members that the census could possibly have enumerated: tracked,
+    # under scripts/, and ending .sh. Anything else (roborev-job-facts.py) is outside the
+    # census's own subject and must NOT be expected to reduce the unscanned count.
+    _scope_sh=0
+    for _scope_f in "${SCAN_FILES[@]}"; do
+      case "${_scope_f#"$REPO_ROOT/"}" in
+        scripts/*.sh) _scope_sh=$((_scope_sh + 1)) ;;
+      esac
+    done
+    if [ "$((_scope_n + _scope_sh))" = "$_scope_m" ]; then
+      ok "scope: the census arithmetic is consistent — $_scope_n unscanned + $_scope_sh scanned .sh members = $_scope_m tracked, so no member is being miscounted through a path-spelling mismatch"
+    else
+      bad "scope: the census arithmetic does NOT close — $_scope_n unscanned + $_scope_sh scanned .sh members != $_scope_m tracked. A member whose path spelling differs from the tracked path counts as UNSCANNED, overstating the gap while reading as plausible"
+    fi ;;
+esac
+# (iii) the untakeable census renders as NOT MEASURED, never as a number.
+# THE "NOT A REPO" CONTROL MUST REALLY NOT BE IN A REPO (#3756 roborev round 12). A bare
+# subdirectory of $tmp is not enough: git DISCOVERS the enclosing repository by walking upward, so
+# on a host whose TMPDIR sits inside the checkout the census would succeed and return a NUMBER —
+# a spurious FAIL on a correct tree, which is the shape this whole file exists to keep out.
+# GIT_CEILING_DIRECTORIES stops the upward walk at $tmp, and a nonexistent GIT_DIR removes the
+# other way in; both are set, because a control that depends on where TMPDIR happens to live is
+# not a control.
+#
+# MEASURED, and the real defect was subtler than "it would return a number": `git ls-files`
+# pathspecs are CWD-RELATIVE, so from a subdirectory of the checkout `scripts/*.sh` matches
+# NOTHING and the command SUCCEEDS with empty output — 0 files, exit 0. The control therefore
+# still rendered NOT MEASURED and still PASSED, but through the "census returned nothing" branch
+# instead of the "census could not be taken" branch it claims to exercise: the right verdict for
+# the wrong reason, which is indistinguishable from coverage until the day it is not. So the cause
+# is now asserted too, not just the verdict.
+mkdir -p "$tmp/not-a-repo"
+_scope_nm=$(GIT_CEILING_DIRECTORIES="$tmp" GIT_DIR="$tmp/no-such-git-dir" \
+  _scope_unscanned_line "$tmp/not-a-repo")
+case "$_scope_nm" in
+  *'NOT MEASURED'*)
+    case "$_scope_nm" in
+      *' of '*' tracked '*) bad "scope control: an untakeable census printed NOT MEASURED but ALSO a count ($_scope_nm) — the number is what a reader quotes" ;;
+      *'could not be taken'*) ok 'scope control: a census that CANNOT be taken renders NOT MEASURED, emits no number, AND names the command failure as its cause — so the control exercises the unrunnable-census branch rather than passing through the empty-result branch for the wrong reason' ;;
+      *) bad "scope control: NOT MEASURED was rendered, but NOT for the reason this control exercises — it reports '$_scope_nm' rather than an unrunnable census, i.e. the right verdict from the wrong branch" ;;
+    esac ;;
+  *) bad "scope control: a census taken outside any repository still produced a numeric scope line ($_scope_nm) — that is a fabricated measurement" ;;
+esac
+
+# CONTROLS FOR THE WIDENED xargs RULE (#3756 roborev round 1). Both directions, because the
+# option run is what makes the true positives reachable AND is the only thing that could make
+# `xargs rm -rf` a false positive.
+printf '%s\n' \
+  '  printf "" | xargs -0 -r rm' \
+  '  printf "" | xargs -0r rm' \
+  '  printf "" | xargs -r rm' \
+  '  find . -print0 | xargs -0 --no-run-if-empty rm' \
+  '  git ls-files -z | xargs -0 -I{} -r echo {}' \
+  '  printf "" | xargs --no-run-if-empty rm' \
+  '  printf "" | xargs -r0 rm' \
+  '  printf "" | xargs -tr0 rm' \
+  '  printf "" | xargs -0 --no-run-if-empty rm' >"$tmp/xargs-bad.sh" # portability-lint-allow: deliberate fixtures: the unportable spellings this control must DETECT
+_xargs_missed=''
+_xargs_broke=0
+while IFS= read -r _xl; do
+  [ -n "$_xl" ] || continue
+  printf '%s\n' "$_xl" >"$tmp/xargs-one.sh"
+  scan_found "$RE_XARGS_R" "$tmp/xargs-one.sh"
+  case $? in
+    0) ;;
+    1) _xargs_missed="$_xargs_missed [$_xl]" ;;
+    *) _xargs_broke=1 ;;
+  esac
+done <"$tmp/xargs-bad.sh"
+if [ "$_xargs_broke" -eq 1 ]; then
+  : # already counted by scan_found; a MISS/no-MISS verdict here would be unmeasured
+elif [ -z "$_xargs_missed" ]; then
+  ok 'structural control: every GNU-only xargs spelling is detected — the `-0 -r` and `-0r` forms PR #3708 actually shipped (missed entirely by the first-token-only rule) and the clusters where `r` is NOT last (`-r0`, `-tr0`)'
+else
+  bad "structural control: the xargs rule MISSES:$_xargs_missed — a rule that does not detect the incident's own spelling reports coverage it does not have"
+fi
+printf '%s\n' \
+  '  find . -name x | xargs rm -rf' \
+  '  find . -print0 | xargs -0 rm -rf' \
+  '  printf "" | xargs -n1 rm -r' \
+  '  git ls-files -z | xargs -0 sh -c '"'"'grep -r foo "$@"'"'"' _' \
+  '  printf "" | xargs -- rm' \
+  '  git ls-files -z | xargs -Ireplace echo replace' \
+  '  git ls-files -z | xargs -I{} echo {}' \
+  '  printf "" | xargs -Eerror echo' \
+  '  printf "" | xargs -- -r' \
+  '  printf "" | xargs -0 -- -r' >"$tmp/xargs-ok.sh"
+scan_found "$RE_XARGS_R" "$tmp/xargs-ok.sh"
+case $? in
+  1) ok 'structural control: an xargs whose COMMAND carries -r (`xargs rm -rf`, `xargs -0 rm -rf`, `xargs -n1 rm -r`, `xargs -0 sh -c "grep -r …"`), the BARE end-of-options `xargs -- rm`, a command NAMED like an option after it (`xargs -- -r`, `xargs -0 -- -r`), and ATTACHED option arguments (`-Ireplace`, `-I{}`, `-Eerror`) are NOT flagged — the option run stops at the command name, a long option must have a name, and a cluster is spelled from the ARGUMENT-FREE options only, so an argument-taking option can never carry an `r` into a match' ;;
+  0) bad "structural control: the widened xargs rule flags an xargs whose COMMAND carries -r — a lint that reds on correct input is the lint agents learn to waive: $(scan_all_hits)" ;;
+  *) : ;; # already counted by scan_found
+esac
+
+# NEGATIVE CONTROL for the timeout rule (#3756): `command -v timeout` is the REMEDY this rule's
+# own message recommends, and the old `[0-9]` form matched the `2` of its `2>/dev/null`. Both
+# directions are pinned — the guard must be clean, the real invocation must still be flagged —
+# because a false-positive fix that also loses the true positive is not a fix.
+printf '%s\n' \
+  '  bound=$(command -v timeout 2>/dev/null || true)' \
+  '  if [ "$(command -v timeout 2>/dev/null)" != "" ]; then' \
+  '  exec 2>/dev/null' \
+  '  x=$(command -v timeout 2>&1)' \
+  '  timeout=5' \
+  '  B=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)' \
+  '  run=${pin_ax_timeout:+"$pin_ax_timeout" -s KILL 120}' \
+  '  echo "timeout after 30s"' >"$tmp/timeout-ok.sh"
+scan_found "$RE_TIMEOUT_UNGUARDED" "$tmp/timeout-ok.sh"
+case $? in
+  1) ok 'structural control: the guards this rule RECOMMENDS (`command -v timeout 2>/dev/null`, the `|| command -v gtimeout` fallback, a `${var:+"$var" -s KILL 120}` expansion), a bare `exec 2>/dev/null`, a `timeout=5` ASSIGNMENT and prose (`echo "timeout after 30s"`) are not flagged — a digit that begins a REDIRECTION is not a duration, and neither is a word' ;;
+  0) bad "structural control: the timeout rule flags its own recommended guard — a lint that reds on the remedy it prints is the lint agents learn to waive: $(scan_all_hits)" ;;
+  *) : ;; # already counted by scan_found
+esac
+printf '%s\n' \
+  '  timeout 30 some-command' \
+  '  timeout 5m other-command' \
+  '  timeout 180 bash "$GATE"' \
+  '  timeout 0.5 flaky-command' \
+  '  timeout .5 flaky-command' \
+  '  timeout 1.5s flaky-command' \
+  '  timeout 1e2 flaky-command' \
+  '  timeout 1.5e2s flaky-command' \
+  '  timeout 1. flaky-command' \
+  '  t=$(timeout 20 bash -c x)' \
+  '  timeout -s KILL 300 "$PIN_BS" run' \
+  '  timeout -k 5 30 cmd' \
+  '  timeout --preserve-status 30 cmd' >"$tmp/timeout-bad.sh" # portability-lint-allow: deliberate fixtures: the unportable spellings this control must DETECT
+_timeout_missed=''
+_timeout_broke=0
+while IFS= read -r _tl; do
+  [ -n "$_tl" ] || continue
+  printf '%s\n' "$_tl" >"$tmp/timeout-one.sh"
+  scan_found "$RE_TIMEOUT_UNGUARDED" "$tmp/timeout-one.sh"
+  case $? in
+    0) ;;
+    1) _timeout_missed="$_timeout_missed [$_tl]" ;;
+    *) _timeout_broke=1 ;;
+  esac
+done <"$tmp/timeout-bad.sh"
+if [ "$_timeout_broke" -eq 1 ]; then
+  : # already counted by scan_found
+elif [ -z "$_timeout_missed" ]; then
+  ok 'structural control: every real `timeout <duration> cmd` spelling is FLAGGED — bare and OPTION-BEARING (-s KILL 300, -k 5 30, --preserve-status 30), plus the FRACTIONAL / LEADING-DOT / EXPONENT / TRAILING-DOT forms (0.5, .5, 1.5s, 1e2, 1.5e2s, 1.) named across three review rounds, which the original [0-9] rule caught and a numeric grammar kept losing. Asserted per SPELLING, not over the whole fixture: a single scan of the file would go green on one hit and hide the others'
+else
+  bad "structural control: the timeout rule no longer detects:$_timeout_missed — the false-positive fix narrowed it past its subject, which is a coverage loss dressed as a fix"
+fi
 
 # ===========================================================================
 # (2) THE BSD SHIMS, and the controls that prove they reproduce the reported defects.

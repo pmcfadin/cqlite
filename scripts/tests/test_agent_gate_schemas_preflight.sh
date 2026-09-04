@@ -19,6 +19,10 @@ set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 GATE="$SCRIPT_DIR/../agent-gate.sh"
+
+# #3755: this test's subject is not disk. Pin the admission bar to 0 so a box that
+# happens to be low on space cannot red a component whose subject is something else.
+export CQLITE_GATE_MIN_FREE_GB=0
 REPO="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # #2751 defense-in-depth: never let an inherited summary path be clobbered — every

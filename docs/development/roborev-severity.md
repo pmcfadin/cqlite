@@ -41,6 +41,14 @@ safety net for a mis-graded blocker that was waved through as cosmetic.
 - **Nits**: never trigger a re-verify round. All nits from one PR's roborev pass are
   batched into **one** linked follow-up issue (labeled, referencing the PR) opened at
   merge time, not fixed inline and not re-reviewed.
+- **Scripts and harnesses — two-round cap (owner ruling 2026-09-01, #3893)**: for diffs whose
+  code is `scripts/**`, `.claude/**`, `.github/**` or `docs/reports/*-artifacts/**`, the
+  fix → `--lite` → re-review loop runs at most **two** rounds. Round-3 findings are disposed
+  (one follow-up issue per PR + a `roborev-defer` marker requested on the merits), not fixed —
+  except a **hang** or a **false verdict**, which are always fixed regardless of round count.
+  Rationale: bash has no compiler, so fix rounds seed the next round's findings (22/25/32
+  findings over 7–12 rounds on three harness PRs in one day). Product code (`cqlite-*/src`,
+  bindings) keeps the uncapped blocker rule above.
 
 ## Telemetry
 

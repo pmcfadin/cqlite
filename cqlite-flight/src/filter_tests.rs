@@ -6,6 +6,9 @@
 
 use super::*;
 use crate::testutil::{clustering_schema, simple_schema, uuid_schema};
+// Issue #3742 admission tests: the aggregation half of the ticket, which
+// `filter.rs` itself does not name.
+use crate::ticket::{AggFunc, AggregateSpec, Aggregation};
 use serde_json::json;
 
 fn ticket_with(predicates: Vec<Predicate>) -> FlightTicket {
@@ -603,4 +606,149 @@ fn from_ticket_derives_wraparound_and_ignores_an_inconsistent_wire_flag() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #3742 — output-column ADMISSION.
+//
+// `ScanSpec::from_ticket` is the one place every `do_get` route passes through
+// before a producer, an Arrow schema or a response stream exists
+// (`service.rs:481`), so a request that would emit ZERO output columns is
+// refused here. These pin the predicate as **total output columns**, in both
+// directions: the shapes that must be REFUSED, and — just as load-bearing — the
+// live shapes that must still be ADMITTED.
+// ---------------------------------------------------------------------------
+
+/// Route 1: an explicitly empty `columns` list resolves to no output columns.
+#[test]
+fn an_empty_projection_list_is_refused_at_spec_admission() {
+    let t = FlightTicket {
+        columns: Some(vec![]),
+        ..ticket_with(vec![])
+    };
+    let err = ScanSpec::from_ticket(&t, &simple_schema()).unwrap_err();
+    assert!(
+        matches!(err, FilterError::EmptyProjection),
+        "expected EmptyProjection, got {err:?}"
+    );
+}
+
+/// Route 2: a projection naming ONLY columns the table does not have used to be
+/// silently emptied by `MergeProducer::with_spec`'s `retain` (which cannot
+/// fail). It is now refused, and the error NAMES the offending columns.
+#[test]
+fn a_projection_of_only_unknown_columns_is_refused_and_names_them() {
+    let t = FlightTicket {
+        columns: Some(vec!["no_such_col".into(), "also_missing".into()]),
+        ..ticket_with(vec![])
+    };
+    let err = ScanSpec::from_ticket(&t, &simple_schema()).unwrap_err();
+    match &err {
+        FilterError::UnknownProjectionColumns(names) => {
+            assert_eq!(names, &["no_such_col".to_string(), "also_missing".into()]);
+        }
+        other => panic!("expected UnknownProjectionColumns, got {other:?}"),
+    }
+    let msg = err.to_string();
+    for name in ["no_such_col", "also_missing"] {
+        assert!(
+            msg.contains(name),
+            "the message must NAME the offending column {name}: {msg}"
+        );
+    }
+}
+
+/// A projection that resolves to at least one real column is admitted — the
+/// unknown name is dropped by `retain` exactly as before. Only a projection
+/// resolving to NOTHING is a bad request; this pins that the admission did not
+/// quietly widen into "reject any unknown projected column".
+#[test]
+fn a_projection_mixing_known_and_unknown_columns_is_still_admitted() {
+    let t = FlightTicket {
+        columns: Some(vec!["name".into(), "no_such_col".into()]),
+        ..ticket_with(vec![])
+    };
+    let spec = ScanSpec::from_ticket(&t, &simple_schema()).expect("must be admitted");
+    assert_eq!(
+        spec.projection.as_deref(),
+        Some(&["name".to_string(), "no_such_col".into()][..]),
+        "the projection is carried verbatim; narrowing stays with `with_spec`"
+    );
+}
+
+/// No projection at all (`columns: null`) means ALL columns — never zero.
+#[test]
+fn an_absent_projection_is_admitted() {
+    let spec = ScanSpec::from_ticket(&ticket_with(vec![]), &simple_schema()).expect("admitted");
+    assert!(spec.projection.is_none());
+}
+
+fn agg_ticket(group_by: Vec<&str>, aggregates: Vec<AggregateSpec>) -> FlightTicket {
+    FlightTicket {
+        aggregation: Some(Aggregation {
+            group_by: group_by.into_iter().map(String::from).collect(),
+            aggregates,
+        }),
+        ..ticket_with(vec![])
+    }
+}
+
+/// Route 4: an aggregation with neither group-by keys nor aggregates has an
+/// empty output column set (`agg.rs::partial_columns` builds it from
+/// `group_by + aggregates`).
+#[test]
+fn an_aggregation_with_no_group_by_and_no_aggregates_is_refused() {
+    let err = ScanSpec::from_ticket(&agg_ticket(vec![], vec![]), &simple_schema()).unwrap_err();
+    assert!(
+        matches!(err, FilterError::EmptyAggregation),
+        "expected EmptyAggregation, got {err:?}"
+    );
+}
+
+/// THE TRAP THIS TEST EXISTS TO PREVENT (#3742): the admission predicate is
+/// "zero total OUTPUT columns", **never** "the `aggregates` list is empty".
+///
+/// `SELECT DISTINCT c` reaches Trino's `applyAggregation` with
+/// `groupingKeys=[c]` and `aggregations={}`, and the connector emits
+/// `{"group_by": ["c"], "aggregates": []}` verbatim
+/// (`CqliteFlightMetadata.java:569`). That is a LIVE, LEGITIMATE wire shape with
+/// ONE output column: a predicate keyed on an empty `aggregates` array would
+/// reject working `SELECT DISTINCT` queries.
+#[test]
+fn a_distinct_shaped_aggregation_with_empty_aggregates_is_admitted() {
+    ScanSpec::from_ticket(&agg_ticket(vec!["name"], vec![]), &simple_schema())
+        .expect("group_by with an empty aggregates list has ONE output column and must be served");
+}
+
+/// The mirror shape: a global `count(*)` has no group_by and one aggregate.
+#[test]
+fn a_global_count_aggregation_with_no_group_by_is_admitted() {
+    let count = AggregateSpec {
+        func: AggFunc::Count,
+        column: None,
+        output: "c".into(),
+    };
+    ScanSpec::from_ticket(&agg_ticket(vec![], vec![count]), &simple_schema())
+        .expect("a global count(*) has ONE output column and must be served");
+}
+
+/// With an aggregation present the OUTPUT columns are `group_by + aggregates`,
+/// so the projection does not contribute and an empty one is NOT zero-output.
+/// Refusing it here would reject a request whose output column set is
+/// non-empty — the exact over-rejection the "total output columns" predicate
+/// exists to avoid. (The shipped connector never sends this pairing:
+/// `CqliteFlightAggregatePageSource.java:113` passes `Optional.empty()`.)
+#[test]
+fn an_empty_projection_alongside_an_aggregation_is_admitted() {
+    let count = AggregateSpec {
+        func: AggFunc::Count,
+        column: None,
+        output: "c".into(),
+    };
+    let t = FlightTicket {
+        columns: Some(vec![]),
+        ..agg_ticket(vec![], vec![count])
+    };
+    ScanSpec::from_ticket(&t, &simple_schema())
+        .expect("the aggregation defines the output columns; the projection is not consulted");
 }

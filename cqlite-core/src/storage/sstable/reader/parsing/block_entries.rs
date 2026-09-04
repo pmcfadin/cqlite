@@ -4,6 +4,7 @@
 //! including modern Cassandra 5+ format parsing with state machine integration
 //! and legacy format support.
 
+use super::BufferExtent;
 use crate::{
     parser::vint::parse_vint_length, types::TableId, Error, Result, RowKey, ScanRow, Value,
 };
@@ -314,7 +315,10 @@ impl SSTableReader {
             // Get schema using four-tier lookup (provided -> header -> registry -> fallback)
             let table_schema = self.get_table_schema(schema);
 
-            return parser.parse_block(&data, table_schema.as_ref(), self);
+            // #3782: `data` is a decompressed BLOCK read by the block-by-block
+            // scans, whose tail may cut a row that continues in the next block,
+            // so the tolerant break is the correct straddle behaviour here.
+            return parser.parse_block(&data, BufferExtent::Window, table_schema.as_ref(), self);
         }
 
         // Enhanced partition data parsing for legacy formats

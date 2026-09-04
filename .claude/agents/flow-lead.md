@@ -52,14 +52,24 @@ back into one.
 ## Autonomy: arm `--auto`, GitHub merges on green (default, #2667)
 
 - **Default:** the moment **local certification** is met — `agent-gate.sh` PASS + **C** PASS
-  (design-driven) + roborev clean — the closer runs `bash scripts/flow/premerge-assert.sh <pr>
-  <certified-sha> <gate-summary-file>` — the third argument is REQUIRED and is the FULL gate's own
-  summary file, so a merge with NO gate of record is now mechanically refused (#3465) — re-reads for
+  (design-driven) + roborev clean — the closer runs the pre-merge assert in one of its **two call
+  shapes** — the third argument is REQUIRED and is the FULL gate's own summary file, so a merge with
+  NO gate of record is mechanically refused (#3465) — re-reads for
   a fresh `HOLD:` order, then **arms `gh pr merge --auto --squash
   --delete-branch`** and `flow-finalize`s. GitHub owns the CI-green wait — the `required` check
   (#2433, enforced for admins too via `enforce_admins`) lands the PR the instant it passes; **never
   `ScheduleWakeup`-poll a PR's own CI** (#2667). Do NOT wait for the owner. **Seam 1 (spec approval)
   is the ONLY standing human gate.**
+  ```bash
+  # CASE A — the usual shape: the full gate ran on the head being merged.
+  bash scripts/flow/premerge-assert.sh <pr> <certified-sha> /tmp/gate-<N>.txt
+  # CASE B — the #1892 post-gate-polish route: a full PASS at anchor X, then a
+  # test/docs-only diff re-certified with `--delta X` (never a repeat full gate).
+  # Arg 3 is the ANCHOR's full summary, arg 4 the delta block; the anchor must
+  # also be an ANCESTOR of <certified-sha>, checked fail-closed (#3653).
+  bash scripts/flow/premerge-assert.sh <pr> <certified-sha> /tmp/gate-<N>.txt /tmp/delta-<N>.txt
+  ```
+  (`.claude/agents/flow-closer.md` carries the full contract for both shapes.)
 - **Escalate and HOLD the merge ONLY for:** a genuine design-call roborev finding, a scope/product
   question, an unmet/uncovered requirement, work outside the issue, or an explicit `HOLD: merge after
   #N` order — obey it. Everything else merges autonomously.
@@ -221,9 +231,13 @@ near-independent issues instead of running one to done before starting the next:
   the Autonomy section: **never `ScheduleWakeup`-poll a PR's own CI**). Scheduled wakeups are for a *later
   confirmation* that an armed PR reached `state=MERGED`, or a genuinely external wait you do not control —
   not for the green itself. For a long local gate, poll its summary file with a cheap
-  `grep -qE 'RESULT: (PASS|FAIL)'` at <5-min intervals rather than idling — **never a bare `grep -q` on the
-  bare `RESULT:` token**, which also matches the startup `RESULT: INCOMPLETE (gate did not finish)`
-  **liveness placeholder** (not a verdict) and so false-fires the instant the gate launches (#3041).
+  **RECORD grammar** `grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'` at <5-min intervals rather than idling —
+  **never a bare `grep -q` on the bare `RESULT:` token**, which also matches the startup
+  `RESULT: INCOMPLETE (gate did not finish)` **liveness placeholder** (not a verdict) and so false-fires the
+  instant the gate launches (#3041). That grammar is for full and `--lite` ONLY; an **`--only <component>`**
+  run demotes success to `RESULT: PARTIAL`, so it spins on green there (#3750) — poll exit status `3`, or
+  `grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'`, and read the component's verdict SEPARATELY via
+  `scripts/gate-component-verdict.sh --mode only --component <name>`. `--delta` is a THIRD mode with a THIRD set — it alone can terminate `ERROR` or `REFUSED`, so polling it with the record grammar hangs on a terminal outcome: `grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)'` (#3750).
   Never a silent wait either (a **queued gate ≠ hung gate**: under load it first prints
   `waiting for gate slot (N in use)…`, and its summary file already holds the `INCOMPLETE` placeholder).
 

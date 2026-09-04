@@ -569,9 +569,17 @@ pub(crate) fn encode_partition_key_for_bti_trie_uncounted(raw_key_bytes: &[u8]) 
 /// layout (`[0x40] ++ be8(token ^ 0x8000_0000_0000_0000)`).
 ///
 /// This lets a caller that already holds the 128-bit hash words derive the trie
-/// key without re-hashing the raw key (issue #1681): `token` must be
-/// `cassandra_murmur3_normalize_token(h1)`, so the output is byte-identical to
-/// [`encode_partition_key_for_bti_trie`] over the same raw bytes.
+/// key without re-hashing the raw key (issue #1681).
+///
+/// **`token` is the key's TOKEN, which is not always `normalize(h1)`.** For a
+/// NON-EMPTY key, pass `cassandra_murmur3_normalize_token(h1)` and the output is
+/// byte-identical to [`encode_partition_key_for_bti_trie`] over the same raw
+/// bytes. For an EMPTY key, `normalize(h1) == 0` but the token is
+/// `CASSANDRA_MINIMUM_TOKEN`, so a caller passing `normalize(h1)` there encodes
+/// at token 0 and its leaf becomes unreachable by every reader probe, which is
+/// exactly the defect fixed in issue #3633. Callers on this single-pass route
+/// MUST carry their own `is_empty()` guard; the safe route is
+/// `cassandra_murmur3_token`, which already does.
 pub fn encode_bti_trie_key_from_token(token: i64) -> [u8; 9] {
     let bc: u64 = (token as u64) ^ 0x8000_0000_0000_0000u64;
     let bc_bytes = bc.to_be_bytes();

@@ -54,6 +54,44 @@ fn ty_of(decl: &str) -> CqlType {
     }
 }
 
+/// The `CqlType` variant a declared type parses to. TOTAL, with no `_` arm, so a
+/// new variant is a compile error here exactly as it is in
+/// [`member_can_render_empty`] and [`stringified_csv_text`] — which is what keeps
+/// the [`VARIANTS`] census honest for every test that takes one.
+fn tag(ty: &CqlType) -> &'static str {
+    match ty {
+        CqlType::Numeric(_) => "numeric",
+        CqlType::Text(_) => "text",
+        CqlType::Boolean => "boolean",
+        CqlType::Blob => "blob",
+        CqlType::Timestamp => "timestamp",
+        CqlType::Opaque(_) => "opaque",
+        CqlType::List(_) => "list",
+        CqlType::Set(_) => "set",
+        CqlType::Map(..) => "map",
+        CqlType::Tuple(_) => "tuple",
+        CqlType::Udt(_) => "udt",
+    }
+}
+
+/// Every tag [`tag`] can return. A test that censuses declared types requires each
+/// entry to be REACHED by one of its cases, so a variant with no case FAILS rather
+/// than being silently unmeasured; `tag`'s total match is the other half (a new
+/// variant cannot compile without an arm, and the author then lands here).
+const VARIANTS: &[&str] = &[
+    "numeric",
+    "text",
+    "boolean",
+    "blob",
+    "timestamp",
+    "opaque",
+    "list",
+    "set",
+    "map",
+    "tuple",
+    "udt",
+];
+
 // --- the refusal valve, per NODE ---------------------------------------
 //
 // There is ONE refusal predicate, asked per NODE, because the whole content of
@@ -520,38 +558,6 @@ fn an_empty_rendering_is_possible_only_for_text() {
     use cqlite_core::types::{UdtField, UdtValue, Value};
     use cqlite_core::util::value_fmt::ValueFormatter;
     use std::collections::BTreeSet;
-
-    /// The `CqlType` variant a declared type parses to. TOTAL, with no `_` arm, so
-    /// a new variant is a compile error here exactly as it is in
-    /// `member_can_render_empty` — which is what keeps the census below honest.
-    fn tag(ty: &CqlType) -> &'static str {
-        match ty {
-            CqlType::Numeric(_) => "numeric",
-            CqlType::Text(_) => "text",
-            CqlType::Boolean => "boolean",
-            CqlType::Blob => "blob",
-            CqlType::Timestamp => "timestamp",
-            CqlType::Opaque(_) => "opaque",
-            CqlType::List(_) => "list",
-            CqlType::Set(_) => "set",
-            CqlType::Map(..) => "map",
-            CqlType::Tuple(_) => "tuple",
-            CqlType::Udt(_) => "udt",
-        }
-    }
-    const VARIANTS: &[&str] = &[
-        "numeric",
-        "text",
-        "boolean",
-        "blob",
-        "timestamp",
-        "opaque",
-        "list",
-        "set",
-        "map",
-        "tuple",
-        "udt",
-    ];
 
     let cases: Vec<(&str, Value)> = vec![
         // The one type whose rendering CAN be empty: `Value::Text` is the single
@@ -1242,3 +1248,6 @@ fn a_udt_entry_key_is_still_a_verbatim_field_name() {
         ])
     );
 }
+
+#[path = "golden_csv_container_spelling_tests.rs"]
+mod spelling;

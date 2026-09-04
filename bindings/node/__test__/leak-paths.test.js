@@ -121,6 +121,7 @@
  * class (#2642).
  */
 const { Database } = require('../lib/index.js');
+const { assertDatasetsAvailable } = require('./helpers.js');
 
 const DIR = global.testPaths.SSTABLES_DIR;
 const SCHEMA = global.testPaths.SCHEMA_WIDE_ROWS;
@@ -933,11 +934,7 @@ describe('exception-path / abandoned-iterator leak budgets (issue #1465)', () =>
   beforeAll(async () => {
     // FAIL LOUDLY, never skip: a missing/empty corpus must red this lane, since
     // a skipped leak budget is indistinguishable from a passing one.
-    if (!global.DATASETS_AVAILABLE) {
-      throw new Error(
-        'Test data not available. Set CQLITE_DATASETS_ROOT or run fetch-datasets.sh'
-      );
-    }
+    assertDatasetsAvailable();
     // Budget measurement is meaningless without gc control; FAIL, do not skip.
     if (typeof global.gc !== 'function') {
       throw new Error(
