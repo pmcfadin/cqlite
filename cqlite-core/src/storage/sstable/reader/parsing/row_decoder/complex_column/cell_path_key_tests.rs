@@ -1132,19 +1132,29 @@ fn an_empty_key_of_a_strict_type_is_refused_by_the_width_table() {
 ///
 /// `InetAddressSerializer.validate` RETURNS EARLY on empty
 /// (`if (accessor.isEmpty(value)) return;`) and only then delegates to
-/// `getByAddress`, so an empty `inet` is legal to Cassandra — and CQLite's inet
-/// arm borrows the whole slice with no minimum, so it round-trips as an empty
-/// `Value::Inet`. Pinned because THREE places in this diff previously called inet
-/// "the fifth strict case", on the strength of a grep whose output line ran the
-/// `isEmpty` test together with the `throw` from the `catch (UnknownHostException)`
-/// block below it. Read whole methods, not greps of their `if`s.
+/// `getByAddress`, so an empty `inet` is legal to Cassandra. Pinned because THREE
+/// places in this diff previously called inet "the fifth strict case", on the
+/// strength of a grep whose output line ran the `isEmpty` test together with the
+/// `throw` from the `catch (UnknownHostException)` block below it. Read whole
+/// methods, not greps of their `if`s.
+///
+/// # The VALUE moved to the sentinel; the LEGALITY claim did not change
+/// This asserted `Value::Inet(b"")` — the family's own native empty spelling —
+/// until roborev job 449 finding C. `EmptyValueType::for_cql_type(&Inet)` is
+/// `Some(Inet)`, so the empty buffer already had a canonical spelling and the
+/// native one was a SECOND spelling of it (#4079), rejected outright by both
+/// bindings (`cqlite_ffi_common::inet::inet_kind` admits only 4 and 16). The
+/// admission gate now runs BEFORE the decode, so an empty `inet` key is
+/// `Value::Empty(Inet)`. Everything else on this row — legality, the corrected
+/// `[0, 4, 16]` width set, and the refusal of every other length — is unchanged
+/// and is still pinned below.
 #[test]
 fn an_empty_inet_key_decodes_and_is_reachable_by_a_read() {
     let p = parser();
     assert_eq!(
         p.parse_cell_path_key(&[], "inet", "k").unwrap(),
-        Value::Inet(Vec::new().into()),
-        "Cassandra returns early on an empty inet, so it is a legal value"
+        Value::Empty(crate::types::EmptyValueType::Inet),
+        "an empty inet is legal to Cassandra AND is the typed sentinel (#4079)"
     );
     // The two NON-empty widths still work, and nothing between or beyond does.
     assert!(p.parse_cell_path_key(&[127, 0, 0, 1], "inet", "k").is_ok());

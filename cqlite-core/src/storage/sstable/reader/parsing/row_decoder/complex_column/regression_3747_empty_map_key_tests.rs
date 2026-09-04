@@ -106,11 +106,22 @@ fn zero_length_blob_key_is_a_legal_empty_key() {
 /// DELEGATION, the `empty is LEGAL` direction — MEASURED, and the case that proves
 /// an earlier revision of this fix was wrong about `inet`.
 ///
-/// These five decode an empty key to an empty value. An earlier revision of #3747
-/// REFUSED `inet`, reasoning from `custom_scalar.rs` (which rejects any inet length
-/// but 4/16). roborev flagged that and was right: `InetAddressSerializer.validate`
-/// returns early on empty, #3612's width table admits `[0,4,16]`, and the decoder
-/// really does produce `Inet(b"")`.
+/// These four decode an empty key to an empty value of their own family. An
+/// earlier revision of #3747 REFUSED `inet`, reasoning from `custom_scalar.rs`
+/// (which rejects any inet length but 4/16). roborev flagged that and was right:
+/// `InetAddressSerializer.validate` returns early on empty and #3612's width
+/// table admits `[0,4,16]`, so an empty `inet` key is LEGAL DATA. That finding
+/// stands unchanged.
+///
+/// # `varint` and `inet` LEFT this list, and the reason is REPRESENTATION only
+/// They were here asserting `Varint(b"")` / `Inet(b"")`. The empty buffer is
+/// still just as LEGAL for them — nothing about the delegation changed — but the
+/// VALUE the reader now produces is the typed sentinel, because they are the two
+/// families in this list the tag table ADMITS (roborev job 449 finding C,
+/// #4079). Their pin lives in
+/// [`varint_and_inet_empty_keys_are_the_typed_sentinel_closing_4079`]; what stays
+/// here is the set for which an empty buffer is a MEANINGFUL native value, which
+/// is a different claim and needs its own case.
 #[test]
 fn empty_key_decodes_for_the_families_that_admit_it() {
     let cases: &[(&str, Value)] = &[
@@ -118,8 +129,6 @@ fn empty_key_decodes_for_the_families_that_admit_it() {
         ("ascii", Value::text("")),
         ("varchar", Value::text("")),
         ("blob", Value::blob(Vec::new())),
-        ("varint", Value::varint(Vec::new())),
-        ("inet", Value::inet(Vec::new())),
     ];
     for (ty, want) in cases {
         let map_type = format!("map<{ty},int>");
@@ -443,36 +452,102 @@ fn no_other_empty_width_family_becomes_a_sentinel() {
     );
 }
 
-/// `varint` and `inet` are the two families the tag table ADMITS and this arm can
-/// never reach — a DECLARED GAP, owed by slice 1's residual 2, not a decision.
+/// `varint` and `inet` empty keys are the TYPED SENTINEL — issue **#4079 is
+/// CLOSED by this test's flip** (roborev job 449, finding C).
 ///
-/// MEASURED: an empty `varint` key decodes to `Varint(b"")` and an empty `inet`
-/// key to `Inet(b"")`, both SUCCESSFULLY, so they take the `Ok` arm and the
-/// sentinel gate is never consulted — while
-/// `EmptyValueType::for_cql_type` returns `Some(Varint)`/`Some(Inet)` for them.
-/// So those two families have TWO spellings of one empty buffer, and this arm
-/// cannot close that: it fires only where the decoder FAILED. Converting a
-/// SUCCESSFUL empty decode into a sentinel is a change to the `Ok` path with its
-/// own oracle question (an empty `Inet` is not obviously meaningless the way an
-/// empty `int` is), and it is deliberately NOT bundled here.
+/// # What this replaces, and why the previous pin was a signpost and not a claim
+/// This test used to be
+/// `varint_and_inet_keep_their_native_empty_spelling_declared_gap`, pinning
+/// `Varint(b"")` / `Inet(b"")` as a DECLARED GAP. The mechanism it recorded is
+/// still exactly right and is worth keeping: both families DECODE an empty
+/// buffer successfully (`IntegerSerializer.java:31-34` — validate's whole body
+/// is the comment `// no invalid integers.`; `InetAddressSerializer.java:52-55`
+/// — `if (accessor.isEmpty(value)) return;`), so they took the decoder's `Ok`
+/// arm and an admission gate consulted ONLY on a decode FAILURE could never
+/// reach them. The gate is now consulted for EVERY empty cell path, before the
+/// decode, so it does.
 ///
-/// This test pins the CURRENT, unchanged behaviour so the gap is mechanical rather
-/// than remembered: when the `Ok` path is fixed, this test REDS and names itself.
+/// # Why it became a defect rather than an inconsistency
+/// `EmptyValueType::for_cql_type` returns `Some(Varint)`/`Some(Inet)`, so those
+/// families already had a canonical empty spelling and the native one was a
+/// SECOND spelling of one value. What decided it is a PUBLIC-SURFACE fact:
+/// both bindings REJECT a zero-length `Inet` outright —
+/// `cqlite_ffi_common::inet::inet_kind` maps any length other than 4 or 16 to
+/// `InetError` ("Invalid inet address length: 0 (expected 4 or 16)"), which
+/// Python raises as `ParseError` (`bindings/python/src/value.rs::inet_to_py`)
+/// and Node as a thrown error (`bindings/node/src/value.rs::inet_to_string_js`),
+/// with no passthrough branch by #28 mandate. So on data Cassandra accepts and
+/// writes, a `SELECT` through either binding FAILED. `Value::Empty(_)` renders
+/// as `""` on both (`value.rs:52` / `value.rs:217`), which is what `sstabledump`
+/// and `SELECT JSON` emit.
 #[test]
-fn varint_and_inet_keep_their_native_empty_spelling_declared_gap() {
-    let cases: &[(&str, Value)] = &[
-        ("varint", Value::varint(Vec::new())),
-        ("inet", Value::inet(Vec::new())),
+fn varint_and_inet_empty_keys_are_the_typed_sentinel_closing_4079() {
+    let cases: &[(&str, EmptyValueType)] = &[
+        ("varint", EmptyValueType::Varint),
+        ("inet", EmptyValueType::Inet),
     ];
-    for (ty, want) in cases {
+    for (ty, tag) in cases {
         let map_type = format!("map<{ty},int>");
         let decoded = decode(&map_type, b"", &7i32.to_be_bytes())
-            .unwrap_or_else(|e| panic!("an empty {ty} key decodes today: {e}"));
+            .unwrap_or_else(|e| panic!("an empty {ty} key must decode: {e}"));
         assert_eq!(
             decoded,
+            Value::Map(vec![(Value::Empty(*tag), Value::Integer(7))]),
+            "{ty}: the empty key must be the TYPED sentinel, not a second native \
+             spelling of the same empty buffer (#4079)"
+        );
+    }
+    // The NON-empty sibling is untouched: normalization is a property of the
+    // EMPTY cell path, never of the family.
+    assert_eq!(
+        decode("map<inet,int>", &[10, 0, 0, 1], &1i32.to_be_bytes())
+            .expect("a 4-byte inet key still decodes natively"),
+        Value::Map(vec![(Value::inet(vec![10, 0, 0, 1]), Value::Integer(1))]),
+        "a NON-empty inet key keeps its native spelling"
+    );
+    assert_eq!(
+        decode("map<varint,int>", &[0x2a], &1i32.to_be_bytes())
+            .expect("a 1-byte varint key still decodes natively"),
+        Value::Map(vec![(Value::varint(vec![0x2a]), Value::Integer(1))]),
+        "a NON-empty varint key keeps its native spelling"
+    );
+}
+
+/// THE BOUND on finding C's normalization, in the direction that matters most:
+/// `text`/`ascii`/`varchar`/`blob` MUST keep their NATIVE empty spelling.
+///
+/// An empty buffer is a legal, MEANINGFUL value for those families — Cassandra
+/// OVERRIDES `isNull` precisely to say so (`serializers/BytesSerializer.java:57-62`,
+/// *"is not \"null\" for bytes types, it is byte[0]"*, and
+/// `serializers/AbstractTextSerializer.java:72-77`) — so a sentinel there would
+/// be the very "two spellings of one value" defect #4079 is about, inverted.
+///
+/// The gate that excludes them is `EmptyValueType::for_cql_type` returning
+/// `None`, and this test ASSERTS that rather than trusting it: the decoder's
+/// behaviour and the table it delegates to are pinned in the same place, so a
+/// widening of the table cannot silently widen the decoder.
+#[test]
+fn text_and_blob_empty_keys_keep_their_native_spelling_and_the_table_says_so() {
+    use crate::schema::CqlType;
+    let cases: &[(&str, CqlType, Value)] = &[
+        ("text", CqlType::Text, Value::text("")),
+        ("ascii", CqlType::Ascii, Value::text("")),
+        ("varchar", CqlType::Varchar, Value::text("")),
+        ("blob", CqlType::Blob, Value::blob(Vec::new())),
+    ];
+    for (ty, cql, want) in cases {
+        assert_eq!(
+            EmptyValueType::for_cql_type(cql),
+            None,
+            "{ty}: the ADMISSION TABLE must not admit a text/blob family — an empty \
+             buffer is a MEANINGFUL value there, never a sentinel"
+        );
+        let map_type = format!("map<{ty},int>");
+        assert_eq!(
+            decode(&map_type, b"", &7i32.to_be_bytes())
+                .unwrap_or_else(|e| panic!("an empty {ty} key must decode: {e}")),
             Value::Map(vec![(want.clone(), Value::Integer(7))]),
-            "{ty}: the DECODE succeeds, so this arm is never reached — the sentinel \
-             spelling is owed by slice 1's residual 2, not by this gate"
+            "{ty}: the empty key stays NATIVE, never Value::Empty"
         );
     }
 }
