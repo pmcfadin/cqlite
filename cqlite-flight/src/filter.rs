@@ -49,6 +49,32 @@ pub enum FilterError {
         /// What went wrong.
         message: String,
     },
+    /// Issue #3742: the ticket carried an explicitly EMPTY projection list, so
+    /// the request has no output columns at all.
+    #[error(
+        "projection selects no columns: 'columns' is an empty list. \
+         A request must select at least one output column; omit 'columns' \
+         (JSON null) to select them all"
+    )]
+    EmptyProjection,
+    /// Issue #3742: every name in the projection is absent from the table
+    /// schema, so the resolved projection is empty. The offending names are
+    /// carried so the client is told WHICH ones (`retain` used to drop them
+    /// silently).
+    #[error(
+        "projection selects no columns: none of the projected columns exist in \
+         the table schema: {}",
+        .0.iter().map(|c| format!("'{c}'")).collect::<Vec<_>>().join(", ")
+    )]
+    UnknownProjectionColumns(Vec<String>),
+    /// Issue #3742: the ticket carried an aggregation with neither group-by
+    /// keys nor aggregates, whose output column set (`group_by` + `aggregates`)
+    /// is therefore empty.
+    #[error(
+        "aggregation produces no output columns: 'group_by' and 'aggregates' \
+         are both empty"
+    )]
+    EmptyAggregation,
 }
 
 /// Token-range membership test for one split.
@@ -308,6 +334,15 @@ impl ScanSpec {
             }
         }
 
+        // Issue #3742: ADMIT the request's OUTPUT COLUMN SET here, before any
+        // producer, Arrow schema or response stream exists. Every `do_get` route
+        // reaches this function through `CqliteFlightService::build_producer`
+        // (`service.rs:481`), so a request that would emit zero output columns is
+        // refused as `InvalidArgument` with no message on the wire, instead of
+        // reaching `RecordBatch::try_new(<zero-field schema>, vec![])` and
+        // surfacing arrow's refusal as a mid-stream `Status::Internal`.
+        admit_output_columns(ticket, schema)?;
+
         let filter = ticket
             .effective_filter()
             .map(|expr| lower_predicate_expr(&expr, schema))
@@ -385,9 +420,17 @@ fn lower_children(
         .collect()
 }
 
-/// Resolve a column's CQL type from the schema (searches all column lists).
-fn column_cql_type(schema: &TableSchema, column: &str) -> Result<CqlType, FilterError> {
-    let type_str = schema
+/// Locate a column's declared CQL type STRING in the schema, searching the same
+/// three lists, in the same order, that `producer::schema_columns` builds the
+/// emitted column set from (partition keys, then clustering keys, then the
+/// remaining columns).
+///
+/// ONE lookup, used by both the predicate lowering below and the issue #3742
+/// projection admission above: a second membership rule could disagree with the
+/// `retain` that actually narrows the emitted columns, which is precisely the
+/// disagreement #3742 exists to remove.
+fn find_column_type_str<'a>(schema: &'a TableSchema, column: &str) -> Option<&'a String> {
+    schema
         .partition_keys
         .iter()
         .find(|c| c.name == column)
@@ -406,6 +449,56 @@ fn column_cql_type(schema: &TableSchema, column: &str) -> Result<CqlType, Filter
                 .find(|c| c.name == column)
                 .map(|c| &c.data_type)
         })
+}
+
+/// Reject a ticket whose request would emit ZERO OUTPUT COLUMNS (issue #3742).
+///
+/// The predicate is **total output columns**, never "the `aggregates` list is
+/// empty":
+///
+/// * With an aggregation, the output columns are `group_by` + `aggregates`
+///   (`agg.rs::partial_columns`), and the projection does not contribute — so
+///   the aggregation is rejected only when BOTH halves are empty.
+///   `{"group_by": ["c"], "aggregates": []}` is a LIVE wire shape: Trino lowers
+///   `SELECT DISTINCT c` to `groupingKeys=[c], aggregations={}` and the
+///   connector emits it verbatim (`CqliteFlightMetadata.java:569`). It has one
+///   output column and MUST be admitted.
+/// * Without an aggregation, the output columns are the resolved projection —
+///   `MergeProducer::with_spec` keeps the schema columns whose name appears in
+///   `spec.projection` — so the projection is rejected exactly when no projected
+///   name matches a schema column. `columns: null` (all columns) is unaffected.
+///
+/// A projection mixing known and unknown names still resolves to a non-empty
+/// set and is admitted unchanged; only names in a projection that resolves to
+/// NOTHING are reported, which is the state that used to be silently emptied.
+fn admit_output_columns(ticket: &FlightTicket, schema: &TableSchema) -> Result<(), FilterError> {
+    if let Some(aggregation) = &ticket.aggregation {
+        if aggregation.group_by.is_empty() && aggregation.aggregates.is_empty() {
+            return Err(FilterError::EmptyAggregation);
+        }
+        // The aggregation defines the output; the projection is not consulted.
+        return Ok(());
+    }
+
+    let Some(projection) = &ticket.columns else {
+        // `None` emits all columns (`ticket.rs:256`).
+        return Ok(());
+    };
+    if projection.is_empty() {
+        return Err(FilterError::EmptyProjection);
+    }
+    if projection
+        .iter()
+        .any(|name| find_column_type_str(schema, name).is_some())
+    {
+        return Ok(());
+    }
+    Err(FilterError::UnknownProjectionColumns(projection.clone()))
+}
+
+/// Resolve a column's CQL type from the schema (searches all column lists).
+fn column_cql_type(schema: &TableSchema, column: &str) -> Result<CqlType, FilterError> {
+    let type_str = find_column_type_str(schema, column)
         .ok_or_else(|| FilterError::UnknownColumn(column.to_string()))?;
 
     CqlType::parse(type_str).map_err(|source| FilterError::InvalidType {

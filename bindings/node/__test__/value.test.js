@@ -21,13 +21,13 @@
  */
 
 const { Database } = require('../lib/index.js');
-const { skipIfNoDatasets } = require('./helpers.js');
+const { assertDatasetsAvailable } = require('./helpers.js');
 
 describe('Value Type Conversion Tests (Issue #302)', () => {
   let db = null;
 
   beforeAll(async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     console.log(`Test data root: ${global.testPaths.TEST_DATA_ROOT}`);
     console.log(`SSTables dir: ${global.testPaths.SSTABLES_DIR}`);
     console.log(`Schema file: ${global.testPaths.SCHEMA_BASIC_TYPES}`);
@@ -405,7 +405,7 @@ describe('Set/Map constructor caching (#1448)', () => {
   let db = null;
 
   beforeAll(async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     db = await Database.open(global.testPaths.SSTABLES_DIR, {
       schema: global.testPaths.SCHEMA_COLLECTIONS,
     });

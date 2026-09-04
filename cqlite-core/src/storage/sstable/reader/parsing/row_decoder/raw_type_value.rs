@@ -41,18 +41,16 @@ impl V5CompressedLegacyParser {
                         column_name, e
                     ))
                 })?;
-                let text_len = text_len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if offset + text_len > data.len() {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': need {} bytes for text, only {} available",
-                        column_name,
-                        text_len,
-                        data.len() - offset
-                    )));
-                }
+                let text_len = checked_vuint_length(
+                    text_len,
+                    data.len() - offset,
+                    "Frozen element",
+                    column_name,
+                    "text",
+                )?;
 
                 let text_bytes = &data[offset..offset + text_len];
                 std::str::from_utf8(text_bytes)
@@ -103,18 +101,16 @@ impl V5CompressedLegacyParser {
                         column_name, e
                     ))
                 })?;
-                let text_len = text_len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if offset + text_len > data.len() {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': need {} bytes for text, only {} available",
-                        column_name,
-                        text_len,
-                        data.len() - offset
-                    )));
-                }
+                let text_len = checked_vuint_length(
+                    text_len,
+                    data.len() - offset,
+                    "Frozen element",
+                    column_name,
+                    "text",
+                )?;
 
                 let text_bytes = &data[offset..offset + text_len];
                 std::str::from_utf8(text_bytes).map_err(|e| {
@@ -245,21 +241,25 @@ impl V5CompressedLegacyParser {
                         column_name, e
                     ))
                 })?;
-                let date_len = date_len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if date_len != 4 {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': expected date length 4, got {}",
-                        column_name, date_len
-                    )));
-                }
+                // #3848: compare the RAW `u64` against the required width. A
+                // `date_len as usize` first would let `(1 << 32) + 4` pass the
+                // `== 4` test on a 32-bit target (truncation is chosen, not random).
+                let date_len = checked_vuint_exact_length(
+                    date_len,
+                    &[4],
+                    "Frozen element",
+                    column_name,
+                    "date",
+                )?;
 
-                if offset + 4 > data.len() {
+                if date_len > data.len().saturating_sub(offset) {
                     return Err(Error::corruption(format!(
-                        "Frozen element '{}': need 4 bytes for date, only {} available",
+                        "Frozen element '{}': need {} bytes for date, only {} available",
                         column_name,
+                        date_len,
                         data.len() - offset
                     )));
                 }
@@ -284,21 +284,23 @@ impl V5CompressedLegacyParser {
                         column_name, e
                     ))
                 })?;
-                let time_len = time_len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if time_len != 8 {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': expected time length 8, got {}",
-                        column_name, time_len
-                    )));
-                }
+                // #3848: raw-`u64` width check before the narrowing (see `date`).
+                let time_len = checked_vuint_exact_length(
+                    time_len,
+                    &[8],
+                    "Frozen element",
+                    column_name,
+                    "time",
+                )?;
 
-                if offset + 8 > data.len() {
+                if time_len > data.len().saturating_sub(offset) {
                     return Err(Error::corruption(format!(
-                        "Frozen element '{}': need 8 bytes for time, only {} available",
+                        "Frozen element '{}': need {} bytes for time, only {} available",
                         column_name,
+                        time_len,
                         data.len() - offset
                     )));
                 }
@@ -325,18 +327,16 @@ impl V5CompressedLegacyParser {
                         column_name, e
                     ))
                 })?;
-                let duration_len = duration_len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if offset + duration_len > data.len() {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': need {} bytes for duration, only {} available",
-                        column_name,
-                        duration_len,
-                        data.len() - offset
-                    )));
-                }
+                let duration_len = checked_vuint_length(
+                    duration_len,
+                    data.len() - offset,
+                    "Frozen element",
+                    column_name,
+                    "duration",
+                )?;
 
                 // Parse three VInt components from the duration_len bytes
                 let duration_bytes = &data[offset..offset + duration_len];
@@ -400,18 +400,19 @@ impl V5CompressedLegacyParser {
                         column_name, e
                     ))
                 })?;
-                let len = len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if len != 4 && len != 16 {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': invalid inet length {}, expected 4 or 16",
-                        column_name, len
-                    )));
-                }
+                // #3848: raw-`u64` width check before the narrowing (see `date`).
+                let len = checked_vuint_exact_length(
+                    len,
+                    &[4, 16],
+                    "Frozen element",
+                    column_name,
+                    "inet",
+                )?;
 
-                if offset + len > data.len() {
+                if len > data.len().saturating_sub(offset) {
                     return Err(Error::corruption(format!(
                         "Frozen element '{}': need {} bytes for inet, only {} available",
                         column_name,
@@ -435,18 +436,16 @@ impl V5CompressedLegacyParser {
                         column_name, e
                     ))
                 })?;
-                let blob_len = blob_len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if offset + blob_len > data.len() {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': need {} bytes for blob, only {} available",
-                        column_name,
-                        blob_len,
-                        data.len() - offset
-                    )));
-                }
+                let blob_len = checked_vuint_length(
+                    blob_len,
+                    data.len() - offset,
+                    "Frozen element",
+                    column_name,
+                    "blob",
+                )?;
 
                 let blob_bytes = crate::storage::sstable::reader::value_borrow::borrow_active(
                     &data[offset..offset + blob_len],
@@ -491,18 +490,16 @@ impl V5CompressedLegacyParser {
                         column_name, e
                     ))
                 })?;
-                let varint_len = varint_len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if offset + varint_len > data.len() {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': need {} bytes for varint, only {} available",
-                        column_name,
-                        varint_len,
-                        data.len() - offset
-                    )));
-                }
+                let varint_len = checked_vuint_length(
+                    varint_len,
+                    data.len() - offset,
+                    "Frozen element",
+                    column_name,
+                    "varint",
+                )?;
 
                 let varint_bytes = crate::storage::sstable::reader::value_borrow::borrow_active(
                     &data[offset..offset + varint_len],
@@ -519,18 +516,16 @@ impl V5CompressedLegacyParser {
                         column_name, e
                     ))
                 })?;
-                let total_len = total_len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if offset + total_len > data.len() {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': need {} bytes for decimal, only {} available",
-                        column_name,
-                        total_len,
-                        data.len() - offset
-                    )));
-                }
+                let total_len = checked_vuint_length(
+                    total_len,
+                    data.len() - offset,
+                    "Frozen element",
+                    column_name,
+                    "decimal",
+                )?;
 
                 if total_len < 4 {
                     return Err(Error::corruption(format!(
@@ -734,9 +729,18 @@ impl V5CompressedLegacyParser {
                         tracing::debug!("Frozen UDT field '{}' is null", field_def.name);
                         None
                     } else if field_len == 0 {
-                        // Empty field
+                        // A ZERO-LENGTH field is decoded from its DECLARED TYPE (issue
+                        // #3631) — `create_empty_value_for_type`'s `_ =>` arm was an
+                        // empty BLOB, so this arm degraded an empty `int`, an empty
+                        // `tuple` and an empty nested UDT exactly as criterion 5
+                        // forbids. The Cassandra rule lives once, in
+                        // `typed_value.rs::empty_is_a_value`.
                         tracing::debug!("Frozen UDT field '{}' is empty", field_def.name);
-                        Some(Self::create_empty_value_for_type(&field_def.field_type))
+                        Some(self.parse_simple_udt_field_value_at(
+                            &[],
+                            &field_def.field_type,
+                            depth,
+                        )?)
                     } else {
                         // Field with data. Routed through the shared guard (issue
                         // #3612, R3-F1/N1) so this loop cannot drift from the other
@@ -759,135 +763,22 @@ impl V5CompressedLegacyParser {
                             field_def.field_type
                         );
 
-                        // Parse field value - handle nested UDTs specially (Issue #238)
-                        let value = if let Some(ref registry) = self.udt_registry {
-                            match &field_def.field_type {
-                                CqlType::Custom(nested_type_name) => {
-                                    // `get_udt_qualified` owns "udt:" + keyspace-
-                                    // qualifier normalization (Issue #239 / #2807).
-                                    if let Some(nested_udt) =
-                                        registry.get_udt_qualified(&self.keyspace, nested_type_name)
-                                    {
-                                        self.parse_nested_udt_from_registry(
-                                            field_data, nested_udt, registry,
-                                        )?
-                                    } else {
-                                        Self::parse_simple_udt_field_value(
-                                            field_data,
-                                            &field_def.field_type,
-                                        )?
-                                    }
-                                }
-                                CqlType::Udt(udt_name, inline_fields) => {
-                                    // Prefer registry, fall back to inline fields (Issue #239)
-                                    if let Some(nested_udt) =
-                                        registry.get_udt_qualified(&self.keyspace, udt_name)
-                                    {
-                                        self.parse_nested_udt_from_registry(
-                                            field_data, nested_udt, registry,
-                                        )?
-                                    } else if !inline_fields.is_empty() {
-                                        self.parse_inline_udt_value(
-                                            field_data,
-                                            udt_name,
-                                            inline_fields,
-                                            1,
-                                        )?
-                                    } else {
-                                        Self::parse_simple_udt_field_value(
-                                            field_data,
-                                            &field_def.field_type,
-                                        )?
-                                    }
-                                }
-                                CqlType::Frozen(inner) => match inner.as_ref() {
-                                    CqlType::Custom(nested_type_name) => {
-                                        // `get_udt_qualified` owns "udt:" + keyspace-
-                                        // qualifier normalization (Issue #239 / #2807).
-                                        if let Some(nested_udt) = registry
-                                            .get_udt_qualified(&self.keyspace, nested_type_name)
-                                        {
-                                            let inner_value = self.parse_nested_udt_from_registry(
-                                                field_data, nested_udt, registry,
-                                            )?;
-                                            Value::Frozen(Box::new(inner_value))
-                                        } else {
-                                            Self::parse_simple_udt_field_value(
-                                                field_data,
-                                                &field_def.field_type,
-                                            )?
-                                        }
-                                    }
-                                    CqlType::Udt(udt_name, inline_fields) => {
-                                        // Prefer registry, fall back to inline fields (Issue #239)
-                                        if let Some(nested_udt) =
-                                            registry.get_udt_qualified(&self.keyspace, udt_name)
-                                        {
-                                            let inner_value = self.parse_nested_udt_from_registry(
-                                                field_data, nested_udt, registry,
-                                            )?;
-                                            Value::Frozen(Box::new(inner_value))
-                                        } else if !inline_fields.is_empty() {
-                                            let inner_value = self.parse_inline_udt_value(
-                                                field_data,
-                                                udt_name,
-                                                inline_fields,
-                                                1,
-                                            )?;
-                                            Value::Frozen(Box::new(inner_value))
-                                        } else {
-                                            Self::parse_simple_udt_field_value(
-                                                field_data,
-                                                &field_def.field_type,
-                                            )?
-                                        }
-                                    }
-                                    _ => Self::parse_simple_udt_field_value(
-                                        field_data,
-                                        &field_def.field_type,
-                                    )?,
-                                },
-                                _ => Self::parse_simple_udt_field_value(
-                                    field_data,
-                                    &field_def.field_type,
-                                )?,
-                            }
-                        } else {
-                            // No registry - check for inline UDT definitions (Issue #239)
-                            match &field_def.field_type {
-                                CqlType::Udt(udt_name, inline_fields)
-                                    if !inline_fields.is_empty() =>
-                                {
-                                    self.parse_inline_udt_value(
-                                        field_data,
-                                        udt_name,
-                                        inline_fields,
-                                        1,
-                                    )?
-                                }
-                                CqlType::Frozen(inner) => match inner.as_ref() {
-                                    CqlType::Udt(udt_name, inline_fields)
-                                        if !inline_fields.is_empty() =>
-                                    {
-                                        let inner_value = self.parse_inline_udt_value(
-                                            field_data,
-                                            udt_name,
-                                            inline_fields,
-                                            1,
-                                        )?;
-                                        Value::Frozen(Box::new(inner_value))
-                                    }
-                                    _ => Self::parse_simple_udt_field_value(
-                                        field_data,
-                                        &field_def.field_type,
-                                    )?,
-                                },
-                                _ => Self::parse_simple_udt_field_value(
-                                    field_data,
-                                    &field_def.field_type,
-                                )?,
-                            }
-                        };
+                        // ONE per-field entry (issue #3631). This was the THIRD and FOURTH copy of the
+                        // same ~100-line dispatch: a registry-present match and a
+                        // no-registry match, each with its own nested-UDT resolution,
+                        // its own `frozen` wrapping and its own `Value::Blob`
+                        // fallback. `parse_simple_udt_field_value_at` expresses all of
+                        // it once, threads `depth`, routes through the single
+                        // exhaustion assert, and returns an explicit `Error` naming a
+                        // UDT it cannot resolve instead of silently degrading (#3631
+                        // criterion 5). The registry/no-registry split is redundant:
+                        // it consulted the very `self.udt_registry` the delegate
+                        // consults.
+                        let value = self.parse_simple_udt_field_value_at(
+                            field_data,
+                            &field_def.field_type,
+                            depth,
+                        )?;
                         Some(value)
                     };
 
@@ -960,10 +851,13 @@ impl V5CompressedLegacyParser {
                                 // Null field
                                 None
                             } else if field_len == 0 {
-                                // Empty field - parse with empty data
-                                let value =
-                                    Self::parse_simple_udt_field_value(&[], &field_def.field_type)?;
-                                Some(value)
+                                // Zero-length: decoded from the DECLARED type, see
+                                // `typed_value.rs::empty_is_a_value` (issue #3631).
+                                Some(self.parse_simple_udt_field_value_at(
+                                    &[],
+                                    &field_def.field_type,
+                                    depth,
+                                )?)
                             } else {
                                 let field_len = Self::checked_component_len(
                                     field_len,
@@ -976,99 +870,22 @@ impl V5CompressedLegacyParser {
                                     &udt_data[current_offset..current_offset + field_len];
                                 current_offset += field_len;
 
-                                // Parse field value - handle nested UDTs specially (including FROZEN<udt>)
-                                let value = match &field_def.field_type {
-                                    CqlType::Custom(nested_type_name) => {
-                                        // `get_udt_qualified` owns "udt:" + keyspace-
-                                        // qualifier normalization (Issue #239 / #2807).
-                                        if let Some(nested_udt) = registry
-                                            .get_udt_qualified(&self.keyspace, nested_type_name)
-                                        {
-                                            // Recursively parse nested UDT
-                                            self.parse_nested_udt_from_registry(
-                                                field_data, nested_udt, registry,
-                                            )?
-                                        } else {
-                                            // Unknown custom type - parse as blob
-                                            Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(field_data))
-                                        }
-                                    }
-                                    CqlType::Udt(udt_name, inline_fields) => {
-                                        // Prefer registry, fall back to inline fields (Issue #239)
-                                        if let Some(nested_udt) =
-                                            registry.get_udt_qualified(&self.keyspace, udt_name)
-                                        {
-                                            self.parse_nested_udt_from_registry(
-                                                field_data, nested_udt, registry,
-                                            )?
-                                        } else if !inline_fields.is_empty() {
-                                            self.parse_inline_udt_value(
-                                                field_data,
-                                                udt_name,
-                                                inline_fields,
-                                                1,
-                                            )?
-                                        } else {
-                                            Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(field_data))
-                                        }
-                                    }
-                                    CqlType::Frozen(inner) => {
-                                        // Handle FROZEN<udt_type> - the inner type may be a UDT
-                                        match inner.as_ref() {
-                                            CqlType::Custom(nested_type_name) => {
-                                                // Issue #239: Handle "udt:" prefix from schema parsing
-                                                let lookup_name = nested_type_name
-                                                    .strip_prefix("udt:")
-                                                    .unwrap_or(nested_type_name);
-                                                if let Some(nested_udt) = registry
-                                                    .get_udt_qualified(&self.keyspace, lookup_name)
-                                                {
-                                                    let inner_value = self
-                                                        .parse_nested_udt_from_registry(
-                                                            field_data, nested_udt, registry,
-                                                        )?;
-                                                    Value::Frozen(Box::new(inner_value))
-                                                } else {
-                                                    Value::Frozen(Box::new(Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(field_data))))
-                                                }
-                                            }
-                                            CqlType::Udt(udt_name, inline_fields) => {
-                                                // Prefer registry, fall back to inline fields (Issue #239)
-                                                if let Some(nested_udt) = registry
-                                                    .get_udt_qualified(&self.keyspace, udt_name)
-                                                {
-                                                    let inner_value = self
-                                                        .parse_nested_udt_from_registry(
-                                                            field_data, nested_udt, registry,
-                                                        )?;
-                                                    Value::Frozen(Box::new(inner_value))
-                                                } else if !inline_fields.is_empty() {
-                                                    let inner_value = self.parse_inline_udt_value(
-                                                        field_data,
-                                                        udt_name,
-                                                        inline_fields,
-                                                        1,
-                                                    )?;
-                                                    Value::Frozen(Box::new(inner_value))
-                                                } else {
-                                                    Value::Frozen(Box::new(Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(field_data))))
-                                                }
-                                            }
-                                            _ => {
-                                                // Other frozen types - parse as simple value
-                                                let inner_value =
-                                                    Self::parse_simple_udt_field_value(
-                                                        field_data, inner,
-                                                    )?;
-                                                Value::Frozen(Box::new(inner_value))
-                                            }
-                                        }
-                                    }
-                                    _ => Self::parse_simple_udt_field_value(
-                                        field_data,
-                                        &field_def.field_type,
-                                    )?,
-                                };
+                                // ONE per-field entry (issue #3631). This was the FIFTH copy of the
+                                // same ~100-line dispatch: a registry-present match and a
+                                // no-registry match, each with its own nested-UDT resolution,
+                                // its own `frozen` wrapping and its own `Value::Blob`
+                                // fallback. `parse_simple_udt_field_value_at` expresses all of
+                                // it once, threads `depth`, routes through the single
+                                // exhaustion assert, and returns an explicit `Error` naming a
+                                // UDT it cannot resolve instead of silently degrading (#3631
+                                // criterion 5). The registry/no-registry split is redundant:
+                                // it consulted the very `self.udt_registry` the delegate
+                                // consults.
+                                let value = self.parse_simple_udt_field_value_at(
+                                    field_data,
+                                    &field_def.field_type,
+                                    depth,
+                                )?;
                                 Some(value)
                             };
 
@@ -1100,18 +917,16 @@ impl V5CompressedLegacyParser {
                                 column_name, e
                             ))
                         })?;
-                        let blob_len = blob_len as usize;
                         let bytes_consumed = data[offset..].len() - remaining.len();
                         offset += bytes_consumed;
 
-                        if offset + blob_len > data.len() {
-                            return Err(Error::corruption(format!(
-                                "Frozen element '{}': need {} bytes for unknown type, only {} available",
-                                column_name,
-                                blob_len,
-                                data.len() - offset
-                            )));
-                        }
+                        let blob_len = checked_vuint_length(
+                            blob_len,
+                            data.len() - offset,
+                            "Frozen element",
+                            column_name,
+                            "unknown type",
+                        )?;
 
                         let blob_bytes =
                             crate::storage::sstable::reader::value_borrow::borrow_active(
@@ -1134,18 +949,16 @@ impl V5CompressedLegacyParser {
                             column_name, e
                         ))
                     })?;
-                    let blob_len = blob_len as usize;
                     let bytes_consumed = data[offset..].len() - remaining.len();
                     offset += bytes_consumed;
 
-                    if offset + blob_len > data.len() {
-                        return Err(Error::corruption(format!(
-                            "Frozen element '{}': need {} bytes for unknown type, only {} available",
-                            column_name,
-                            blob_len,
-                            data.len() - offset
-                        )));
-                    }
+                    let blob_len = checked_vuint_length(
+                        blob_len,
+                        data.len() - offset,
+                        "Frozen element",
+                        column_name,
+                        "unknown type",
+                    )?;
 
                     let blob_bytes = crate::storage::sstable::reader::value_borrow::borrow_active(
                         &data[offset..offset + blob_len],

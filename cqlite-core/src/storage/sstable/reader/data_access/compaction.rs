@@ -10,6 +10,7 @@ use super::super::source::ScanCursor;
 use super::super::window_cursor::WindowCursor;
 use super::super::SSTableReader;
 use crate::storage::scan_cancel::ScanCancel;
+use crate::storage::sstable::reader::parsing::BufferExtent;
 use crate::{Error, Result};
 use std::io::SeekFrom;
 use tokio::io::AsyncSeekExt;
@@ -121,7 +122,13 @@ impl SSTableReader {
             reader_schema.as_ref()
         };
 
-        let entries = parser.parse_block_for_compaction(&stitched_buffer, table_schema, self)?;
+        // #3782: `stitched_buffer` drained EVERY chunk from the cursor above.
+        let entries = parser.parse_block_for_compaction(
+            &stitched_buffer,
+            BufferExtent::Complete,
+            table_schema,
+            self,
+        )?;
         tracing::debug!(
             "stitch_and_parse_all_chunks_for_compaction: parsed {} entries",
             entries.len()
@@ -254,7 +261,14 @@ impl SSTableReader {
 
         let effective_schema = self.get_table_schema(None);
         let parser = self.build_v5_parser(false);
-        let rows = parser.parse_block_for_compaction(&whole, effective_schema.as_ref(), self)?;
+        // #3782: `whole` is the entire data section (fresh cursor, seeked to the
+        // data-section start, every chunk stitched).
+        let rows = parser.parse_block_for_compaction(
+            &whole,
+            BufferExtent::Complete,
+            effective_schema.as_ref(),
+            self,
+        )?;
 
         let mut seen: HashSet<Vec<u8>> = HashSet::new();
         let mut keys: Vec<Vec<u8>> = Vec::new();
@@ -304,8 +318,10 @@ impl SSTableReader {
         // order and is the only place the position is read back.
         let mut seen: HashSet<Vec<u8>> = HashSet::new();
         let mut result: Vec<(u64, Vec<u8>)> = Vec::new();
+        // #3782: `whole` is the entire data section (see above).
         parser.parse_block_for_compaction_emit_with_offset(
             &whole,
+            BufferExtent::Complete,
             effective_schema.as_ref(),
             self,
             |partition_start, row| {
@@ -370,8 +386,10 @@ impl SSTableReader {
         // partition-start — including a duplicated key — reach the classifier.
         let mut seen: HashSet<usize> = HashSet::new();
         let mut starts: Vec<usize> = Vec::new();
+        // #3782: `whole` is the entire data section (see above).
         parser.parse_block_for_compaction_emit_with_offset(
             &whole,
+            BufferExtent::Complete,
             effective_schema.as_ref(),
             self,
             |partition_start, _row| {
@@ -453,8 +471,10 @@ impl SSTableReader {
         // partition boundary and preserves on-disk partition order.
         let mut by_partition: BTreeMap<usize, Vec<Vec<Value>>> = BTreeMap::new();
         let schema = effective_schema.as_ref();
+        // #3782: `whole` is the entire data section (see above).
         parser.parse_block_for_compaction_emit_with_offset(
             &whole,
+            BufferExtent::Complete,
             schema,
             self,
             |partition_start, row| {

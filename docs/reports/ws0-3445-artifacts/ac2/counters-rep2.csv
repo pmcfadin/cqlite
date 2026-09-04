@@ -1,0 +1,6 @@
+50684959158,,cycles,25025489497,100.00,,
+129344492920,,instructions,25004665843,100.00,2.55,insn per cycle
+13771199038,,cycle_activity.stalls_total,25004692215,100.00,,
+3428661806,,cycle_activity.stalls_l1d_miss,25004693662,100.00,,
+54497376048,,idq_uops_not_delivered.core,25004687064,100.00,,
+1122077430,,int_misc.recovery_cycles,25004663697,100.00,,

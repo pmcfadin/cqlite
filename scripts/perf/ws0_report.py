@@ -55,7 +55,11 @@ from ws0_collect import (  # noqa: E402  (path set above; stdlib-only, no deps)
 # ARM B lives in its own module since #3272's F2 split: one file per MEASUREMENT ARM, which is
 # the seam the rig is built around (the two arms are separate claims measured through different
 # surfaces with different contracts).
-from ws0_flight_arm import collect_flight  # noqa: E402
+from ws0_flight_arm import collect_flight, flight_rep_tag  # noqa: E402
+# DID EVERY FLIGHT REP RUN UNDER THE SAME ADMISSION CEILING — #3551 item 10. The ceiling is
+# DERIVED from available_parallelism, which respects the CPU affinity mask, so it moves with
+# --flight-server-cpus: two arms could differ in the pin AND in how much work the server admits.
+from ws0_flight_admission import verify_flight_admission  # noqa: E402
 # THE ARROW-VOLUME CAVEAT, BESIDE THE FIGURES (#3272 round 20). Rounds 18/19 stated the withdrawal
 # in `results.json` and in ONE bullet at the bottom of the NOTES; a reader of the summary's numbers
 # and its PASS / BELOW TARGET verdicts saw nothing. Imported from the module that owns the claim's
@@ -124,7 +128,15 @@ from ws0_boundary_observations import (  # noqa: E402
 
 TEMPS_ALLOWED = ("warm", "cold")
 ARMS_ALLOWED = ("bypass", "merge")
-def fmt(label: str, block: dict) -> str:
+def fmt(label: str, block: dict, counted_cpus: str) -> str:
+    """One arm's figures, WITH THE CPUS THEY WERE COUNTED ON (#3551).
+
+    `counted_cpus` is REQUIRED rather than defaulted: since the two arms can be pinned
+    differently, "cycles/row" means "hardware-thread cycles on THESE cpus per row", and the two
+    arms may legitimately name different lists. A default here would let one arm's figure be
+    printed under the other arm's counted list, which is the #3551 defect wearing a report's
+    clothes.
+    """
     rps, cpr = block["rows_per_sec"], block["cycles_per_row"]
     return (
         f"  {label:<34} {rps['median']:>12,.0f} rows/s  "
@@ -132,7 +144,7 @@ def fmt(label: str, block: dict) -> str:
         f"{cpr['median']:>10,.0f} cycles/row "
         f"[{cpr['min']:,.0f}..{cpr['max']:,.0f}, {cpr['spread_pct_of_median']:.1f}%]   "
         f"IPC {block['ipc']['median']:.2f}   rows={block['row_denominator_total']:,} "
-        f"(n={rps['n']})"
+        f"(n={rps['n']})   counted on cpus {counted_cpus}"
     )
 
 
@@ -279,6 +291,13 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     arms = config["arms"]
     server_cpus = config["server_cpus"]
     client_cpus = config["client_cpus"]
+    # WHERE THE FLIGHT SERVER RAN (#3551) — read from the manifest for the same reason as
+    # everything else here, and tied to the driver's recorded verification below.
+    flight_server_cpus = config["flight_server_cpus"]
+    # THE ENVIRONMENT THIS SESSION RAN IN (#3551 item 8) — ambient and injected, separately,
+    # because with one binary set across all arms it is the only thing that distinguishes them.
+    env_ambient = config["env_ambient"]
+    env_injected = config["env_injected"]
     step_duration = config["step_duration"]
     # WHICH COUNTERS AND WHICH BINARIES (#3248). Read from the manifest for the same reason as
     # everything above: a value that cannot be supplied cannot disagree. Promoted to the report's
@@ -573,7 +592,9 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     # the check that DID run was against the driver's argv and nothing tied the two together, so
     # a manifest edited to `99,99` printed "verified physical-core siblings" and exited 0. This
     # REQUIRES the driver's recorded sibling verification and requires it to be ABOUT these lists.
-    pinning_verification = verify_pinning_record(d, server_cpus, client_cpus)
+    pinning_verification = verify_pinning_record(
+        d, server_cpus, client_cpus, flight_server_cpus
+    )
     # WHICH BINARIES PRODUCED THIS RATIO (#3272 round 10, M2). `--no-build` accepts any executable
     # already under target/release and nothing recorded the revision or any digest, so a stale
     # artifact could be measured and reported as a result for the current checkout. REQUIRED here;
@@ -650,10 +671,49 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         # the build mode and every measured binary's digest, observed by the driver before the first
         # rep. This rig's output is a ratio between two binaries, so this is provenance.
         "binary_provenance": binary_provenance,
+        # THE ENVIRONMENT, AS MEASURED AND AS INJECTED (#3551 item 8). At the TOP LEVEL rather
+        # than inside `pinning`, because it is a property of the whole session and because a
+        # reader comparing two results.json files for a reproduction has to find it without
+        # knowing which subsection the rig happened to file it under (ws0-3552 §4).
+        "environment": {
+            "ambient": env_ambient,
+            "injected": env_injected,
+            "note": (
+                "AMBIENT is the driver's own environment as MEASURED before the first rep;"
+                " INJECTED is what the rig set, on the flight server's launch line ONLY. They"
+                " are separate fields because a stray operator variable and a deliberate"
+                " injection are different facts. An ambient LD_PRELOAD or MALLOC_* is REFUSED by"
+                " the driver, because ws0-scan-bench would inherit it and the bare scan is the"
+                " drift control (#3551)."
+            ),
+        },
         "pinning": {
             "server_cpus": server_cpus,
             "client_cpus": client_cpus,
-            "counter_mode": f"perf stat -C {server_cpus} (CPU-WIDE; never -p)",
+            # THE FLIGHT ARM'S OWN PIN AND ALLOCATOR (#3551), each carrying what was VERIFIED
+            # rather than what was requested. `flight_pin_claim` is derived from the record's
+            # closed mode set by ws0_pinning, so this document can never describe a
+            # distinct-cores pin in the sibling vocabulary.
+            "flight_server_cpus": flight_server_cpus,
+            # WHAT EACH ARM'S CYCLES WERE COUNTED ON (#3551 item 6), as a mapping rather than
+            # only inside the prose of `counter_mode`: a machine reader comparing two arms needs
+            # to know that "cycles/row" is per-hardware-thread-set and that the two sets may
+            # differ. Derived from the same two values the driver's verified pairing table is.
+            "counted_cpus_by_arm": {"scan": server_cpus, "flight": flight_server_cpus},
+            "flight_pin_mode": pinning_verification["flight_pin_mode"],
+            "flight_pin_claim": pinning_verification["flight_pin_claim"],
+            "flight_allocator": pinning_verification["flight_allocator"],
+            "flight_allocator_lib": pinning_verification["flight_allocator_lib"],
+            "flight_malloc_arena_max": pinning_verification["flight_malloc_arena_max"],
+            # THE COUNTING DOMAIN IS PER ARM since the flight pin became separable: the bare
+            # scan is counted over the server set and the flight arm over the flight set, which
+            # is where its server actually ran. Stated as two entries rather than one, because a
+            # single `-C {server_cpus}` string was FALSE for the flight arm the moment the two
+            # pins could differ.
+            "counter_mode": (
+                f"perf stat -C {server_cpus} for the bare-scan arm and"
+                f" -C {flight_server_cpus} for the Flight arm (CPU-WIDE; never -p)"
+            ),
             # THE RECORDED OBSERVATION, not the word "verified" over a module name (#3272 F6).
             # This used to read `"verified": "thread_siblings_list, fail-closed
             # (scripts/perf/lib-cpu.sh)"` — an unconditional string, printed about CPU lists the
@@ -853,7 +913,36 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         f" {pinning_verification['server_siblings_expanded'].split('(')[-1].rstrip(')')} verified"
         f" on {pinning_verification['host']} pre-measurement, recorded in"
         f" {pathlib.Path(pinning_verification['source']).name}), client {client_cpus}",
-        f"counters     : perf stat -C {server_cpus}  [CPU-WIDE; no -p anywhere]"
+        # THE FLIGHT ARM'S PIN, IN ITS OWN VOCABULARY (#3551). The claim word comes from
+        # `ws0_pinning.FLIGHT_PIN_CLAIM[mode]`, so a `distinct-cores` pin can NEVER be printed as
+        # `physical-core siblings`: the two are mutually exclusive properties and the report says
+        # which one was actually read out of thread_siblings_list. The expanded sets are the
+        # driver's own echo, sliced the same way the server line slices its own.
+        f"flight pin   : flight server {flight_server_cpus}"
+        f" (verified {pinning_verification['flight_pin_claim']} pre-measurement, recorded in"
+        f" {pathlib.Path(pinning_verification['source']).name})"
+        + ("   [SAME PIN AS THE BARE-SCAN ARM]" if flight_server_cpus == server_cpus
+           else "   [DIFFERENT PIN FROM THE BARE-SCAN ARM — the bare scan is the pin-identical"
+                " drift control; read the flight/scan difference as being about this pin]"),
+        # The driver's OWN echo, verbatim — the expanded sibling sets it read out of sysfs for
+        # each pinned CPU. Printed whole rather than sliced: for `distinct-cores` the substance is
+        # one set PER CPU (that they are pairwise different is the property), so any slice that
+        # showed a single set would be showing less than was verified.
+        f"  read       : {pinning_verification['flight_pin_verified']}",
+        # ...AND THE ALLOCATOR, WITH ITS EVIDENCE (#3551). Never the bare word `jemalloc`: the
+        # preload FAILS OPEN (glibc ignores an unloadable object and continues with system
+        # malloc), so the only thing worth printing is what was OBSERVED in the running process.
+        f"allocator    : flight server ran under {pinning_verification['flight_allocator']}"
+        f" (library: {pinning_verification['flight_allocator_lib']})",
+        f"  arena      : {pinning_verification['flight_malloc_arena_max']}",
+        f"  evidence   : {pinning_verification['flight_allocator_verification']}",
+        # THE ENVIRONMENT, immediately after the allocator lines it explains and before the
+        # counters: `env injected` is WHERE the allocator above came from, and `env ambient` is
+        # the fact a reproduction has to compare (ws0-3552 §4).
+        f"env ambient  : {env_ambient}",
+        f"env injected : {env_injected}",
+        f"counters     : perf stat -C {server_cpus} (bare scan) /"
+        f" -C {flight_server_cpus} (Flight)  [CPU-WIDE; no -p anywhere]"
         f"   events: {','.join(events)}",
         # EVERY FIELD THAT CHANGES HOW A NUMBER SHOULD BE READ, IN THE PRINTED REPORT (#3248,
         # roborev job 80 finding 3). These four were added to results.json and NEVER to the human
@@ -934,7 +1023,7 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         )
         results["measurements"].append(scan)
         lines.append(f"[{temp.upper()}]")
-        lines.append(fmt("bare scan (execute_streaming)", scan))
+        lines.append(fmt("bare scan (execute_streaming)", scan, server_cpus))
         lines += prewarm_warning(scan, "bare-scan", temp)
         for arm in arms:
             fl = collect_flight(
@@ -954,7 +1043,7 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
             # * Read from `fl["requested_merge_path"]`, so the summary and results.json cannot
             #   disagree: a rename on one side that missed the other would raise a KeyError here
             #   rather than print a label the JSON does not support.
-            lines.append(fmt(f"flight do_get ({fl['requested_merge_path']} requested)", fl))
+            lines.append(fmt(f"flight do_get ({fl['requested_merge_path']} requested)", fl, flight_server_cpus))
             lines += prewarm_warning(fl, f"flight/{arm}", temp)
             # THE ARROW-VOLUME CAVEAT, DIRECTLY UNDER THE FIGURE IT QUALIFIES (#3272 round 20).
             # Beside the number, not appended once at the bottom — a caveat eleven bullets below
@@ -1040,8 +1129,36 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         recorded_rounds[temp] = collect_recorded_round_metadata(temp, arms_meta)
         lines.append("")
 
+    # DID EVERY FLIGHT REP ADMIT THE SAME AMOUNT OF WORK (#3551 item 10)? Read back from each
+    # rep's own server log rather than pinned: pinning --max-concurrent-scans would change the
+    # configuration #3248 measured and would hide exactly this drift.
+    #
+    # AFTER THE COLLECTION LOOP, deliberately, and that ORDER is a correctness property rather
+    # than a preference: the collectors above refuse an ABSENT or malformed rep with a diagnostic
+    # naming what is wrong with THAT rep ("collected 0 of 1", "carries 2 step records"), and
+    # running this first PREEMPTED all of them — measured, it turned six other suites' specific
+    # refusals into "carries no server log", blaming the artifact this check happens to read
+    # first. A check that fires before the more specific one makes every diagnostic downstream of
+    # it unreachable. By here every selected rep has been established to exist, so an absent
+    # server log is genuinely about the log.
+    flight_admission = verify_flight_admission(d, temps, arms, reps, flight_rep_tag)
+    # WHAT THE FLIGHT SERVER ADMITTED, per rep and agreed. Recorded rather than merely asserted:
+    # a reader comparing two sessions needs the ceiling AND its input (available_parallelism),
+    # because the ceiling is a FUNCTION of the pin. Assigned here rather than in the results
+    # literal above for the ordering reason stated at the call — the value does not exist until
+    # the collectors have run, and the collectors must run first.
+    results["flight_admission"] = flight_admission
     results["recorded_round_metadata"] = recorded_rounds
     lines += [
+        # THE ADMISSION CEILING, printed with the tail rather than the header block — the value
+        # cannot exist up there, because this check must run AFTER the collectors whose specific
+        # refusals it would otherwise preempt (see the call above).
+        f"admission    : max_concurrent_scans={flight_admission['max_concurrent_scans']}"
+        f" (source {flight_admission['max_concurrent_scans_source']},"
+        f" available_parallelism={flight_admission['available_parallelism']}) —"
+        f" OBSERVED IDENTICAL across all {flight_admission['reps_agreeing']} flight rep(s),"
+        " read back from each server log; deliberately NOT pinned",
+        "",
         "NOTES",
         "  * warm and cold are SEPARATE claims above; nothing here is blended.",
     ]

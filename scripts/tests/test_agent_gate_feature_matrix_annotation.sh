@@ -88,6 +88,15 @@ trap _fm_on_exit EXIT
 
 [ -r "$GATE" ] || { echo "FAIL - cannot read $GATE"; exit 1; }
 
+# THE CENSUS CLOSURE IS EXTRACTED TOO (#3625, roborev job 376 finding 1). run_scoped_tests
+# gained calls to _census_scoped_record / _census_finalize / _status_is_nonfailing, and this
+# harness extracted neither them nor their transitive helpers — so inside py_run they were
+# `command not found`, the errors went to `2>&1 >/dev/null`, and (no `set -e` in that
+# subshell) the cases PASSED anyway. A test passing without executing what it claims to,
+# with the evidence redirected away, is the defect class this whole issue exists to close,
+# sitting in the fix's own harness. EXTRACTED, not stubbed: a stub is a second
+# implementation whose agreement with the original is only knowable by testing it.
+#
 # The annotation functions are EXTRACTED OUT OF THE SHIPPED GATE SCRIPT, never copied
 # here — the repo's existing idiom (test_agent_gate_jest_guards.sh,
 # test_cargo_output_parsers.sh): a test that re-implements its subject can only prove that
@@ -101,6 +110,12 @@ for fn in _fm_active _fm_sidecar _fm_note _fm_indirect_desc _fm_unobservable_des
           cargo env \
           _fm_component_class _fm_render _fm_annotate _fm_summary_line \
           _fm_note_if_no_cargo_observed _fm_note_driver _fm_note_maturin_rc \
+          _ansi_stripped_log \
+          _census_sidecar _census_kind _census_write _census_read _census_declare \
+          _census_libtest_tally _census_compile_tally _census_driver_tally \
+          _census_classify _census_measure_kind _census_measure _census_status_for _census_finalize \
+          _census_record _census_annotate _census_scoped_record _python_tier_ran \
+          _status_is_nonfailing \
           run_scoped_tests run_python_bindings; do
   src=$(sed -n "/^$fn() {/,/^}$/p" "$GATE")
   if [ -z "$src" ]; then
@@ -148,13 +163,29 @@ else
   # Derived, so a FUTURE dynamic append joins this check with no edit here. Only literal
   # appends are derivable; the `NAMES+=("$var")` sites are the COMPONENTS-driven paths already
   # covered by comps_arr, so nothing is silently dropped.
-  dyn_names=$(grep -oE 'NAMES\+=\("[a-z0-9][a-z0-9-]*"\)' "$GATE" \
-    | sed -E 's/.*\("(.*)"\)/\1/' | sort -u)
+  # TWO DERIVED SOURCES, because the emit path has two — and this table was widened to
+  # match the census guard's, which had already been corrected (roborev job 401).
+  #   (1) the run_delta_* helpers' `NAMES+=("<literal>")` appends;
+  #   (2) any `record_result "<literal>"` call, from a NON-COMMENT line.
+  # Enumerating only (1) is how `tree-selftest` — the #2926 hook, which reaches a row through
+  # record_result and appears in NEITHER static set — stayed undeclared here and rendered
+  # [UNCLASSIFIED] once #3625 routed the boundary block through _fm_summary_line. The census
+  # guard hit the identical defect in its own domain and fixed it; the tables then DRIFTED,
+  # because only one of two derivations over the same name space had been widened. The
+  # asymmetry was the defect, not either table.
+  #
+  # Kept SPELLED THE SAME WAY as scripts/tests/test_agent_gate_census.sh's derivation, so a
+  # future widening is visibly one edit in two places rather than two different ideas.
+  dyn_names=$( { grep -oE 'NAMES\+=\("[a-z0-9][a-z0-9-]*"\)' "$GATE" | sed -E 's/.*\("(.*)"\)/\1/'
+                 grep -E '^[^#]*record_result "[a-z0-9][a-z0-9-]*"' "$GATE" \
+                   | sed -E 's/.*record_result "([a-z0-9][a-z0-9-]*)".*/\1/'; } | sort -u)
   dyn_n=$(printf '%s\n' "$dyn_names" | grep -c . || true)
-  # Fail-closed on a broken derivation: an empty set would silently shrink the domain back to
-  # COMPONENTS and re-open exactly this finding. There are 3 such names today.
-  if [ "${dyn_n:-0}" -lt 1 ]; then
-    bad "A0b: derivation of the dynamic summary-name set from $GATE yielded ${dyn_n:-0} names — the domain would silently collapse to COMPONENTS (this is how job 277 F2 escaped)"
+  # Fail-closed on a broken derivation: an empty — or merely SHRUNKEN — set would silently
+  # narrow the domain back toward COMPONENTS and re-open exactly this finding. Floor of 4,
+  # the same discipline and the same number as the census guard: node-tests, scoped-tests,
+  # shell-selftests, tree-selftest.
+  if [ "${dyn_n:-0}" -lt 4 ]; then
+    bad "A0b: derivation of the dynamic summary-name set from $GATE yielded ${dyn_n:-0} names (expected at least the 4 known: node-tests, scoped-tests, shell-selftests, tree-selftest) — the domain would silently narrow toward COMPONENTS, which is how job 277 F2 escaped and how job 401 escaped again"
   else
     ok "A0b: dynamic summary-name set DERIVED from the emit path: ${dyn_n} name(s) [$(printf '%s' "$dyn_names" | tr '\n' ' ')]"
   fi
@@ -194,18 +225,32 @@ fi
 # ---------------------------------------------------------------------------
 # (B) UNIFORMITY across the six emit sites
 # ---------------------------------------------------------------------------
-n_raw=$(grep -c "printf '%-18s %s (%s)'" "$GATE")
+# THE NEEDLE IS THE `%-18s` NAME FIELD, NOT A WHOLE FORMAT STRING (#3625, roborev job 360
+# finding 2). This used to grep for the exact literal `printf '%-18s %s (%s)'`, and the
+# tree-integrity BOUNDARY printer spelled its format `printf '%-18s %s (%ss)\n'` — one
+# character different — so an entire emit path rendered component rows with NO feature
+# matrix and this guard reported zero raw sites. A near-miss in a format string must not be
+# able to hide an emit path, so the needle is now the field that MAKES it a component row.
+# Comment-blind (`^[^#]*`): a comment quoting the format — the boundary printer now carries
+# one explaining this very defect — must not be counted, or an artifact DESCRIBING the rule
+# would become a violation of it.
+# The renderer's OWN definition is the single legitimate occurrence, so the expected count
+# is exactly 1 and anything above it is a bypass.
+n_pf=$(grep -cE "^[^#]*printf '%-18s" "$GATE")
 n_render=$(grep -c '_fm_summary_line "' "$GATE")
-if [ "$n_raw" -eq 0 ]; then
-  ok "B1: no per-component SUMMARY line is emitted by a raw printf (all route through _fm_summary_line)"
+if [ "$n_pf" -eq 1 ]; then
+  ok "B1: the ONLY non-comment 'printf %-18s' in the gate is _fm_summary_line's own definition — no mode emits a component row that bypasses the renderer"
 else
-  bad "B1: $n_raw raw per-component printf site(s) remain — that mode's block would carry NO feature matrix"
+  bad "B1: $n_pf non-comment 'printf %-18s' site(s) (expected exactly 1, the renderer's definition) — a mode's block would carry NO feature matrix; run: grep -nE \"^[^#]*printf '%-18s\" $GATE"
 fi
-# 6 emit sites + the definition itself is not matched (it uses positional args).
-if [ "$n_render" -ge 6 ]; then
-  ok "B2: $n_render _fm_summary_line call sites (>= the 6 known emit sites: full, lite, 2x delta, lite-agg selftest, emit-summary-selftest)"
+# The renderer's own definition uses positional args, so it is not matched by this needle.
+# SEVEN emit sites now: full, lite, 2x delta, lite-agg selftest, emit-summary-selftest, and
+# the tree-integrity boundary printer (whose truncated table has TWO call sites, one per
+# loop) — hence a floor of 8 CALL SITES over 7 blocks.
+if [ "$n_render" -ge 8 ]; then
+  ok "B2: $n_render _fm_summary_line call sites (>= the 8 known: full, lite, 2x delta, lite-agg selftest, emit-summary-selftest, and the boundary printer's 2 loops)"
 else
-  bad "B2: only $n_render _fm_summary_line call site(s); expected at least 6 — a mode is un-annotated"
+  bad "B2: only $n_render _fm_summary_line call site(s); expected at least 8 — a mode is un-annotated"
 fi
 # The observer functions must NOT be exported: exporting them makes every bash
 # DESCENDANT record, so tooling-tests (which runs nested agent-gate self-tests) would
@@ -683,8 +728,11 @@ if AGENT_GATE_SUMMARY_FILE="$selftest_sum" bash "$GATE" --emit-summary-selftest 
     case "$line" in
       *'[UNDECLARED]'*|*UNCLASSIFIED*) missing+=("$line") ;;
     esac
-  done < <(grep -E '^(fmt|clippy|core-tests|smoke): +(PASS|FAIL|SKIP)' "$selftest_sum")
-  n_annot=$(grep -cE '^(fmt|clippy|core-tests|smoke): +(PASS|FAIL|SKIP) \([0-9]+s\)  \[.+\]' "$selftest_sum")
+  # FIVE tokens: #3625 added VACUOUS and #3402 added OPT-OUT, independently, on the same
+  # reasoning — a hard-coded subset stops SEEING the rows it does not name. The union is the
+  # vocabulary; neither issue's token may be dropped when the other lands.
+  done < <(grep -E '^(fmt|clippy|core-tests|smoke): +(PASS|FAIL|SKIP|VACUOUS|OPT-OUT)' "$selftest_sum")
+  n_annot=$(grep -cE '^(fmt|clippy|core-tests|smoke): +(PASS|FAIL|SKIP|VACUOUS|OPT-OUT) \([0-9]+s\)  \[.+\]' "$selftest_sum")
   if [ "$n_annot" -eq 4 ] && [ "${#missing[@]}" -eq 0 ]; then
     ok "B4: --emit-summary-selftest emits 4 annotated component lines, none UNDECLARED"
   else
@@ -826,6 +874,14 @@ describe_shim_log() {
 # invoker can set (#3312 job 27's corollary), and the caller here is this file.
 # FM_LAST_EXEC_COUNT is set to the number of cargo invocations the shim actually saw, so a
 # caller can prove a short-circuit happened instead of assuming it.
+# fm_strip_census <annotation-tail>: remove the #3625 component-census suffix, which
+# _fm_summary_line appends AFTER the feature-matrix annotation (`…]  {verified: N tests}`).
+# This file's subject is the FEATURE MATRIX, so the census must not enter its comparisons —
+# and it must not be matched by the `*UNDECLARED*` screens below either, since the census
+# has an UNDECLARED state of its own that means something different. `%` (shortest match
+# from the END) so a `{` inside a feature descriptor could not truncate the annotation.
+fm_strip_census() { printf '%s' "${1%  \{*}"; }
+
 FM_LAST_EXEC_COUNT=0
 run_differential() { # <component> <mode EXACT|CONTAINS> [why-not-exact] [shim-dir] [tag]
   local c="$1" mode="$2" why="${3:-}" use_shim="${4:-$shim_dir}" tag="${5:-}"
@@ -838,12 +894,19 @@ run_differential() { # <component> <mode EXACT|CONTAINS> [why-not-exact] [shim-d
   PATH="$use_shim:$PATH" \
     bash "$GATE" --only "$c" > "$log" 2>&1
   local line ann
-  line=$(grep -E "^$c: +(PASS|FAIL|SKIP)" "$sum" 2>/dev/null | head -1)
+  # The component-status token SET, not a subset (#3625's VACUOUS + #3402's OPT-OUT). Stated
+  # precisely rather than overclaimed: `file-size` is class `no-cargo`, so this loop — which
+  # iterates cargo-class components only — cannot reach an OPT-OUT row TODAY. The tokens are
+  # read here because this grep decides "no component line emitted" (a `bad`), and a
+  # name-keyed reader that knows a SUBSET answers that question wrongly the day the set grows
+  # again — which it just did, twice, from two issues at once.
+  line=$(grep -E "^$c: +(PASS|FAIL|SKIP|VACUOUS|OPT-OUT)" "$sum" 2>/dev/null | head -1)
   if [ -z "$line" ]; then
     bad "C-$c$tag: no '$c:' component line in the emitted block"
     return
   fi
   ann=${line#*\[}; ann="[${ann}"
+  ann=$(fm_strip_census "$ann")
   case "$ann" in
     '[UNDECLARED]'|*UNCLASSIFIED*|'[]') bad "C-$c$tag: annotation is '$ann'"; return ;;
   esac
@@ -982,6 +1045,14 @@ done
 # runs) rather than to this function's argument — the routing then silently fell through to
 # the default `cqlite-core --lib` and all four cases below failed for a reason that had
 # nothing to do with the subject (it did, first try).
+# Shared collection points for the definedness/stderr evidence every py_run call produces
+# (the assert is a separate case below, so a single call cannot silently be the only one
+# checked). Truncated here, appended to by each call.
+FMQ_UNDEFINED="$tmp/py-undefined-fns.txt"
+FMQ_CHECKED="$tmp/py-checked-fns.txt"
+FMQ_NOTFOUND="$tmp/py-command-not-found.txt"
+: > "$FMQ_UNDEFINED"; : > "$FMQ_CHECKED"; : > "$FMQ_NOTFOUND"
+
 py_run() { # <plan-lines> <build-verify-rc> ; prints the rendered scoped-tests annotation
   local py_plan_in="$1" rc="$2"
   # A FRESH scratch (and therefore a fresh sidecar) per call: two calls sharing one
@@ -1018,7 +1089,32 @@ FAKESELF
     export AGENT_GATE_FM_DIR="$scratch/side"
     PATH="$shim_dir:$PATH" FM_SHIM_LOG="$scratch/argv.log"
     export FM_SHIM_LOG="$scratch/argv.log"
-    run_scoped_tests >/dev/null 2>&1
+    # THE DEFINEDNESS CHECK RUNS HERE, inside the subshell, because this is the only scope
+    # where BOTH the top-level extractions and py_run's own stubs are visible. It is
+    # DERIVED, not a list: every top-level function name in the shipped gate that the
+    # shipped run_scoped_tests BODY mentions must resolve to a function here. So a FUTURE
+    # helper added to run_scoped_tests and left unextracted reds this suite — including on
+    # a code path this case never executes, which the stderr capture below cannot see.
+    # Word membership against a known name set; no shell parsing, and comment lines are
+    # stripped so a name mentioned only in prose does not count.
+    _fmq_body=$(sed -n '/^run_scoped_tests() {/,/^}$/p' "$GATE" | sed 's/#.*$//')
+    _fmq_checked=0
+    : > "$scratch/undefined-fns"
+    while IFS= read -r _fmq_fn; do
+      [ -n "$_fmq_fn" ] || continue
+      [ "$_fmq_fn" = run_scoped_tests ] && continue
+      grep -qw -- "$_fmq_fn" <<<"$_fmq_body" || continue
+      _fmq_checked=$((_fmq_checked + 1))
+      [ "$(type -t "$_fmq_fn" 2>/dev/null)" = function ] \
+        || printf '%s\n' "$_fmq_fn" >> "$scratch/undefined-fns"
+    done <<<"$(grep -oE '^[A-Za-z_][A-Za-z0-9_]*\(\) \{' "$GATE" | sed 's/() {$//' | sort -u)"
+    printf '%s\n' "$_fmq_checked" > "$scratch/checked-fns"
+    # STDERR IS CAPTURED, NOT DISCARDED: `command not found` from an unextracted helper is
+    # the evidence, and throwing it away is what let this pass for a round.
+    run_scoped_tests >/dev/null 2>"$scratch/stderr"
+    cp "$scratch/undefined-fns" "$FMQ_UNDEFINED" 2>/dev/null || true
+    cp "$scratch/checked-fns"   "$FMQ_CHECKED"   2>/dev/null || true
+    grep -F 'command not found' "$scratch/stderr" >> "$FMQ_NOTFOUND" 2>/dev/null || true
     _fm_annotate scoped-tests
   )
 }
@@ -1072,6 +1168,54 @@ case "$got" in
   *) bad "P5: got '$got'" ;;
 esac
 
+# (P6) THE HARNESS REALLY RAN WHAT IT CLAIMS TO — roborev job 376, finding 1.
+#
+# THE DEFECT this pins: run_scoped_tests gained three census calls, this file extracted
+# none of them, `2>&1 >/dev/null` swallowed the `command not found`, and with no `set -e` in
+# py_run's subshell every P-case above still PASSED. A test that passes without executing
+# its subject, with the evidence redirected away, is exactly what #3625 exists to remove —
+# so the property is asserted, not merely repaired for three names.
+#
+# TWO INDEPENDENT HALVES, because neither alone is enough:
+#   * DEFINEDNESS (derived, covers code paths this run never takes): every top-level gate
+#     function the shipped run_scoped_tests body mentions must resolve to a function inside
+#     py_run's subshell — extracted from the gate, or explicitly stubbed there.
+#   * STDERR (behavioural, covers what actually executed): no `command not found` may reach
+#     stderr, which catches an unfound EXTERNAL command too, and anything the derivation's
+#     word-membership rule cannot see.
+if [ ! -s "$FMQ_CHECKED" ]; then
+  bad "P6: no py_run invocation recorded a definedness census — the check did not run, so a green here would certify nothing"
+else
+  p6_checked=$(sort -n "$FMQ_CHECKED" | tail -1)
+  p6_undef=$(sort -u "$FMQ_UNDEFINED" 2>/dev/null | grep -c . || true)
+  p6_nf=$(grep -c . "$FMQ_NOTFOUND" 2>/dev/null || true)
+  # A FLOOR on the derivation itself: run_scoped_tests references 11 gate functions today,
+  # and a derivation that suddenly found 0 or 1 would report "no undefined names" having
+  # examined almost nothing — the vacuous shape one level up.
+  if [ "${p6_checked:-0}" -lt 8 ]; then
+    bad "P6: the definedness derivation examined only ${p6_checked:-0} gate function(s) referenced by run_scoped_tests (floor 8) — it is not deriving the name set, so 'none undefined' means nothing"
+  elif [ "${p6_undef:-0}" -ne 0 ]; then
+    bad "P6: run_scoped_tests references gate function(s) this harness neither extracts nor stubs, so py_run does not faithfully execute it: $(sort -u "$FMQ_UNDEFINED" | tr '\n' ' ')"
+  elif [ "${p6_nf:-0}" -ne 0 ]; then
+    bad "P6: py_run's stderr carries $p6_nf 'command not found' line(s) — the harness is passing while part of its subject does not run: $(head -3 "$FMQ_NOTFOUND" | tr '\n' ' ')"
+  else
+    ok "P6: py_run executes run_scoped_tests with all $p6_checked referenced gate function(s) DEFINED (extracted from the shipped gate, or stubbed here) and NO 'command not found' on its stderr"
+  fi
+fi
+# The census closure specifically must be EXTRACTED, not stubbed — a stub is a second
+# implementation whose agreement with the original is only knowable by testing it, and
+# these three are the ones job 376 found missing.
+p6_missing=()
+for fn in _census_scoped_record _census_finalize _status_is_nonfailing; do
+  [ "$(type -t "$fn" 2>/dev/null)" = function ] || p6_missing+=("$fn")
+  grep -q "^ *$fn\b" <<<"$(sed -n "/^$fn() {/,/^}\$/p" "$GATE")" 2>/dev/null || true
+done
+if [ "${#p6_missing[@]}" -eq 0 ]; then
+  ok "P6b: the three census helpers job 376 named are extracted from the SHIPPED gate into this harness, not re-implemented as stubs"
+else
+  bad "P6b: not defined in this harness: ${p6_missing[*]}"
+fi
+
 # ---------------------------------------------------------------------------
 # (PB) THE PYTHON-BINDINGS DRIVER RECORD, DRIVEN END TO END — roborev job 273, F3
 # ---------------------------------------------------------------------------
@@ -1105,7 +1249,13 @@ FAKESELF
     LOG_DIR="$scratch"
     REPO_ROOT="$scratch"
     GATE_SELF="$scratch/fake-gate-self"
-    record_result() { _fm_note_if_no_cargo_observed "$1" "$2"; }
+    # The stub must honour record_result's PUBLISHED CONTRACT, not just the one thing this
+    # case needs from it. Since #3625 (roborev job 368) record_result also publishes the
+    # FINALIZED status in RECORDED_STATUS, which every caller's progress line then prints —
+    # including run_python_bindings' — so a stub that omits it aborts the real function
+    # under `set -u` before this case can read its annotation. An incomplete double is a
+    # test that stops measuring its subject and says nothing about why.
+    record_result() { RECORDED_STATUS="$2"; _fm_note_if_no_cargo_observed "$1" "$2"; }
     export AGENT_GATE_FM_DIR="$scratch/side"
     AGENT_GATE_FM_COMPONENT=python-bindings
     run_python_bindings >/dev/null 2>&1
@@ -1189,10 +1339,11 @@ for c in "${e2_cargo[@]+"${e2_cargo[@]}"}"; do
   AGENT_GATE_ALLOW_MISSING_FIXTURES=1 \
   PATH="$shim_dir:$PATH" \
     bash "$GATE" --only "$c" > "$e2_log" 2>&1
-  e2_line=$(grep -E "^$c: +(PASS|FAIL|SKIP)" "$e2_sum" 2>/dev/null | head -1)
+  e2_line=$(grep -E "^$c: +(PASS|FAIL|SKIP|VACUOUS|OPT-OUT)" "$e2_sum" 2>/dev/null | head -1)
   if [ -z "$e2_line" ]; then e2_missing+=("$c"); continue; fi
   e2_ran=$((e2_ran + 1))
   e2_ann=${e2_line#*\[}; e2_ann="[$e2_ann"
+  e2_ann=$(fm_strip_census "$e2_ann")
   case "$e2_ann" in
     *UNDECLARED*|*UNCLASSIFIED*|'[]') e2_bad+=("$c=$e2_ann") ;;
     *'no cargo build/test invoked'*)  ;;   # a NAMED terminal state, not a gap

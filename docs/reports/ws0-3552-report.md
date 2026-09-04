@@ -23,24 +23,61 @@ post-hoc-groups already-materialized rows, so the seam does not reach it.
 measurement window**. Throughout the delivery window two peer lanes held 88–96 GB of `target/` and
 were building. No window existed.
 
-Two rig defects surfaced while trying. **Both fail CLOSED** (false refusals, never false
-certifications), so no published number is affected:
+Two rig defects surfaced while trying, and **this section's description of BOTH was incomplete**
+— corrected in place on 2026-09-03 (#3551), with a third defect added that nobody had recorded.
+**All three fail CLOSED** (false refusals, or a residual that is now declared, never a false
+certification), so no published number is affected:
 
 1. **The committed sampler and the committed judge do not compose.** `ws0_quiescence.py sample`
    emits `{competing, competing_count, load}` with **no `ts` field**; `judge --timeseries` requires
    one and refuses with `QUIESCENCE_TIMESERIES_MALFORMED: record has no usable ts field`. The
    frozen example in `ws0-3248-artifacts/quiescence/box-load-frozen.jsonl` has a *third*, flat
    schema (`ts/load1/load5/load15/runnable/rustc/cargo/...`) that the current sampler cannot
-   produce. Supplying `ts` by hand advances the judge to its coverage check (≤10 s cadence, no
-   unobserved stretch >30 s), which is sound.
+   produce.
+
+   **CORRECTION (#3551): the schema mismatch has THREE layers, not one, and the sentence that
+   stood here — "supplying `ts` by hand advances the judge to its coverage check, which is
+   sound" — is wrong.** Measured: supplying `ts` advances the judge to its **census-field**
+   check, which refuses again (`QUIESCENCE_TIMESERIES_SCHEMA: the sample at '...' carries no
+   'rustc' field`), and supplying `ts` plus the census fields refuses a third time on the
+   missing **flat `load1`**. Only with all three does the judge return QUIESCENT with
+   `census_breadth: FULL`. So the gap was wider than recorded: a measurer following the
+   committed instructions could not produce an acceptable timeseries at all. Fixed by the
+   `sample-loop` subcommand, which emits that schema from the same `census()` the boundary
+   sampler uses; the composition is pinned end to end in
+   `scripts/tests/test_ws0_quiescence_guards.sh`, and each of the three layers is pinned on its
+   own diagnostic (all three share an exit code, which is how one layer came to be recorded as
+   the whole defect).
 2. **`COMPETING_CMDLINE = ("agent-gate.sh",)` matches any process that merely MENTIONS the
    string.** Diagnostic `grep`/`pgrep` commands run *by the operator taking the measurement* are
    counted as competing load — observed inflating the census to 15. The file's own comment two
    lines above documents this exact family for `cargo`, says it *"caused a FALSE REFUSAL of a quiet
    box"*, and removed `cargo` for that reason (it is caught by `comm`, "which cannot be spoofed by
    a shell that merely MENTIONS the command"). `agent-gate.sh` was left with the identical flaw and
-   no `comm` backstop. Its own stated remedy applies: exclude by identity (self PID + ancestor
-   walk), which the file already does elsewhere.
+   no `comm` backstop.
+
+   **CORRECTION (#3551): the remedy this paragraph proposed — "exclude by identity (self PID +
+   ancestor walk), which the file already does elsewhere" — DOES NOT WORK, and neither does the
+   same suggestion in the file's own deferred-defect comment.** `census()` already performs that
+   ancestor walk, and it cannot help: the offending processes are **other agent sessions'** shells,
+   and a `setsid`-detached sampler's ancestor chain is `init`, so every peer lane's shell is a
+   legitimate non-ancestor and gets counted. Identity exclusion answers *"is this me?"*; the
+   question here is *"is this process EXECUTING the gate, or talking about it?"*. Fixed by matching
+   an **argv ELEMENT** (`/proc/<pid>/cmdline` is NUL-separated; an element matches when its
+   basename equals the needle and it is not an option, an assignment, or multi-word script text) —
+   plus recording **the element that matched**, because the pre-fix record kept `cmdline[:160]`
+   while matching the whole cmdline, so a contaminated record carried the verdict
+   `cmdline~agent-gate.sh` with no occurrence of `agent-gate.sh` in its own text.
+
+3. **NEW, recorded by neither this report nor the tool: a ZERO CENSUS IS NOT A QUIET BOX.**
+   Measured, 91 consecutive samples with `competing_count=0` while `load1` reached 6.39 with 9
+   runnable tasks, and the four pinned CPUs at a median 8% / max 86% busy with foreign work.
+   `COMPETING_COMMS` is compilers and linkers plus one named script, so a peer lane running node,
+   jest, python, git or a shell suite is invisible, and in-window `load1` is "recorded as context,
+   not a gate" — so such a window is **certifiable**. NOT fixed by widening the census (this repo
+   has the measurement for why: `sccache` "refused a perfectly quiet box"). The residual is
+   DECLARED in every verdict as `census_scope`, and a per-sample per-CPU `/proc/stat` snapshot
+   makes the contamination visible; nothing in the verdict path reads it.
 
 ### 2b. A measurement run is a building run
 

@@ -330,6 +330,83 @@ verify_sibling_pair() {
   echo "$label CPUs: $spec -> verified siblings of one physical core ($want)"
 }
 
+# FAIL CLOSED unless every CPU in `$1` lies on a PAIRWISE DISTINCT physical core (#3551).
+#
+# # This is NOT a relaxation of `verify_sibling_pair` — it is the OTHER affirmative assertion
+#
+# `verify_sibling_pair` answers "are these CPUs the two hyperthreads of ONE physical core?".
+# The SMT-unpin trial (#3551) needs the opposite pin for the Flight server — one thread per
+# physical core, so the server's two threads do not share an execution core — and the wrong way
+# to get it is to WEAKEN the sibling check, because then nothing is asserted at all and the run
+# measures whatever CPU numbering the operator guessed. So the two modes are two REQUIREMENTS,
+# each read from the same real `thread_siblings_list`, and `--flight-pin-mode` selects WHICH
+# property must hold rather than WHETHER one must.
+#
+# Both directions therefore fail closed, and each is the other's negative case:
+#
+#     verify_distinct_cores 2,10  =>  REFUSED (2 and 10 are one core's siblings)
+#     verify_sibling_pair   2,3   =>  REFUSED (2 and 3 are different cores)
+#
+# # A ONE-CPU LIST IS REFUSED, not vacuously accepted
+#
+# "Pairwise distinct" over a single element is trivially true, so a 1-CPU list would satisfy this
+# function while expressing NOTHING about the property the caller asked for — the vacuous pass
+# this rig's whole guard set exists to refuse (a check that iterates over nothing and returns
+# success). It gets its OWN diagnostic rather than the generic one, because the remedy differs:
+# the operator has to name a second CPU, not a different one.
+#
+# # IT ECHOES THE SIBLING SETS IT READ, because that echo IS the verification
+#
+# Same contract as `verify_sibling_pair`: the driver CAPTURES this line into
+# `pinning-verification.json`, so the report's claim rests on the sysfs ANSWER rather than on a
+# restatement of the argument (#3272 round 9, F6). A line that merely repeated the argument would
+# be a claim nothing backs.
+verify_distinct_cores() {
+  local spec="$1" label="${2:-pinned}" want cpu got i j n=0 read_out=""
+  local -a cpus=() sets=()
+  # A REFUSED spec fails HERE with the grammar's own diagnostic already on stderr (#3272 B3),
+  # never as an empty `want` reported as some other cause.
+  want="$(cpu_list_expand "$spec" "$label CPUs")" || return 1
+  [[ -n "$want" ]] || { echo "FATAL: $label CPU list is empty" >&2; return 1; }
+  for cpu in $want; do
+    cpus+=("$cpu")
+    n=$((n + 1))
+  done
+  if ((n < 2)); then
+    echo "FATAL: $label CPU set '$spec' (expanded: $want) names only $n CPU." >&2
+    echo "       --flight-pin-mode distinct-cores asserts that the pinned CPUs lie on PAIRWISE" >&2
+    echo "       DISTINCT physical cores, and that property is VACUOUS over a single CPU: the" >&2
+    echo "       loop below would compare nothing and return success, which is the" >&2
+    echo "       0-comparisons pass this rig refuses everywhere else (#3551)." >&2
+    echo "       Name at least two CPUs, one per physical core (see the pairs listed by --help:" >&2
+    echo "       pick ONE member of two DIFFERENT pairs)." >&2
+    return 1
+  fi
+  for ((i = 0; i < n; i++)); do
+    # An unreadable/garbage `thread_siblings_list` FAILS here (`cpu_siblings_of` propagates), so
+    # "the topology could not be read" never becomes "the cores are distinct".
+    got="$(cpu_siblings_of "${cpus[$i]}")" || return 1
+    sets+=("$got")
+    read_out+="cpu${cpus[$i]}=($got) "
+    for ((j = 0; j < i; j++)); do
+      if [[ "${sets[$j]}" == "$got" ]]; then
+        echo "FATAL: $label CPU set '$spec' (expanded: $want) puts cpu${cpus[$j]} and" >&2
+        echo "       cpu${cpus[$i]} on the SAME physical core — their thread_siblings_list is" >&2
+        echo "       '$got' for both." >&2
+        echo "       --flight-pin-mode distinct-cores was requested, which asserts one thread" >&2
+        echo "       per physical core (the SMT-unpin arm of #3551). A set that is really one" >&2
+        echo "       core's hyperthreads measures the pin this mode exists to be the CONTRAST" >&2
+        echo "       to, and nothing in the output would say so." >&2
+        echo "       Either name one CPU from each of two different sibling pairs, or use" >&2
+        echo "       --flight-pin-mode siblings, which is what this set satisfies." >&2
+        return 1
+      fi
+    done
+  done
+  echo "$label CPUs: $spec -> verified pairwise DISTINCT physical cores ($want);" \
+       "thread_siblings_list read: ${read_out% }"
+}
+
 # --- IS ONE LOGICAL CPU PRESENT AND ONLINE? (#3272 round 21) --------------------------------
 #
 # THREE states, deliberately distinguished rather than collapsed into a boolean, because the

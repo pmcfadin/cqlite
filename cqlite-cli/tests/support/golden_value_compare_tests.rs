@@ -744,8 +744,11 @@ const PERSON_DDL: &str = "CREATE TYPE person (first_name text, last_name text, a
 
 /// The `udt_nested` shape, transcribed from the committed
 /// `test-data/schemas/compaction-parity-udt.cql`: a frozen UDT with a frozen UDT
-/// field, which is the subject of this lane's `e.home` gap — the one declared gap
-/// whose divergence is a UDT FIELD's rather than a whole column's.
+/// field. It was the subject of this lane's `e.home` gap — the one declared gap
+/// whose divergence was a UDT FIELD's rather than a whole column's — until #3631
+/// made the nested frozen UDT decode and the gap retired itself. The DDL and the
+/// fixtures below stay: they are how the FIELD-scoped machinery is covered, and
+/// that machinery is what retired the gap.
 const NESTED_UDT_DDL: &str = "CREATE TYPE address (street text, city text, zip text); \
      CREATE TYPE employee (name text, home frozen<address>, level int); \
      CREATE TABLE t (id int PRIMARY KEY, e frozen<employee>);";
@@ -1100,8 +1103,10 @@ fn an_empty_csv_member_does_not_satisfy_a_null_udt_field() {
 
 /// The `udt_nested` golden's `e` value, with `home` decoded as `sstabledump`
 /// decodes it. The CLI's spelling of the same value carries the same declared
-/// fields (issue #3629 removed the injected type key) and, until the `e.home`
-/// gap closes, blob hex for `home`.
+/// fields (issue #3629 removed the injected type key); the blob-hex spelling for
+/// `home` used below is the PRE-#3631 rendering, kept as a synthetic divergence so
+/// the field-scoped machinery still has a subject now that the real `e.home` gap
+/// has retired.
 fn nested_udt_golden() -> Vec<Row> {
     vec![row(&[
         ("id", json!(1)),
@@ -1118,8 +1123,9 @@ fn nested_udt_golden() -> Vec<Row> {
 /// compared. Excluding the whole column instead left `udt_nested` comparing
 /// nothing but its primary key while its comment claimed otherwise.
 ///
-/// The real `e.home` configuration, divergence included: the excluded field
-/// arrives as blob hex, which is what that gap declares.
+/// The `e.home` configuration as it stood before #3631, divergence included: the
+/// excluded field arrives as blob hex, which is what that gap declared. Synthetic
+/// since #3631 — no case declares this gap any more.
 #[test]
 fn a_field_scoped_skip_still_compares_the_sibling_fields() {
     let schema = schema_of(NESTED_UDT_DDL, "t");
