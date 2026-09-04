@@ -487,10 +487,7 @@ fn is_exact_f32_tie_with_both_formatter_spellings(golden: &Value, cli: &Value) -
         return false;
     }
     // And the tie, in exact arithmetic over the two spellings as written.
-    let (Some(d1), Some(d2)) = (ExactDecimal::parse(&g_text), ExactDecimal::parse(&c_text)) else {
-        return false;
-    };
-    d1.is_exact_midpoint_of(&d2, g) == Some(true)
+    exact_decimal::is_exact_tie(&g_text, &c_text, g)
 }
 
 // ===========================================================================
@@ -504,8 +501,6 @@ fn is_exact_f32_tie_with_both_formatter_spellings(golden: &Value, cli: &Value) -
 
 #[path = "golden_value_exact_decimal.rs"]
 mod exact_decimal;
-
-use exact_decimal::ExactDecimal;
 
 /// CQL's blob literal: `0x` and an EVEN number of hex digits (a byte string), and
 /// nothing else. `0x` alone is a legal empty blob and is accepted; the point of the

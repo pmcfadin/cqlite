@@ -12,6 +12,21 @@
 
 use num_bigint::BigInt;
 
+/// THE decision the declared gap asks for: are these two decimal TEXTS two
+/// DIFFERENT exact decimals whose exact arithmetic mean is `v`?
+///
+/// One entry point, so the caller has no arithmetic of its own and the unit tests
+/// exercise the same path the gap does — including the fail-closed one: a text
+/// outside [`ExactDecimal::parse`]'s grammar, or a comparison
+/// [`ExactDecimal::is_exact_midpoint_of`] cannot decide, is `false`, "not this
+/// gap", never a suppression.
+pub fn is_exact_tie(a: &str, b: &str, v: f32) -> bool {
+    match (ExactDecimal::parse(a), ExactDecimal::parse(b)) {
+        (Some(a), Some(b)) => a.is_exact_midpoint_of(&b, v) == Some(true),
+        _ => false,
+    }
+}
+
 /// An exact decimal, as an integer significand and a base-10 scale: the value is
 /// `digits * 10^-scale`, with NO rounding anywhere. `num_bigint::BigInt` because
 /// the quantities genuinely do not fit a machine integer: an f32's dyadic
@@ -130,3 +145,7 @@ fn f32_as_dyadic(v: f32) -> (BigInt, i32) {
     let m = BigInt::from(magnitude);
     (if negative { -m } else { m }, exponent)
 }
+
+#[cfg(test)]
+#[path = "golden_value_exact_decimal_tests.rs"]
+mod tests;
