@@ -67,6 +67,22 @@ TEST_SELF="$SCRIPT_DIR/$(basename "$0")"
 # than through the wrapper. `WRAPPER` is reassigned later by the gate-mock cases; these are not.
 CHECKS_SRC="$SCRIPT_DIR/../flow/roborev-review-checks.sh"
 ORACLES_SRC="$SCRIPT_DIR/../flow/roborev-review-oracles.sh"
+LIB_SRC="$SCRIPT_DIR/../flow/lib/roborev-findings-count.sh"
+
+# copy_flow_lib <dir> — lay the SHARED findings-count recogniser (#4050) beside a scratch
+# copy of the wrapper. `roborev-review-checks.sh` resolves `lib/roborev-findings-count.sh`
+# from its OWN directory with no override (#3312's rule: the constrained party must not
+# choose its own enforcer), so a scratch copy WITHOUT the library cannot define
+# `roborev_findings_count` and the wrapper fails closed on it — a SETUP failure that looks
+# exactly like the mutation under test having worked, which is why every mutant case runs
+# its unpatched CONTROL first. Failing loudly here rather than letting the control absorb it.
+copy_flow_lib() {
+  mkdir -p "$1/lib" && cp "$LIB_SRC" "$1/lib/" || {
+    bad "scratch setup: could not lay $LIB_SRC beside the copied checks file in $1"
+    return 1
+  }
+  return 0
+}
 BLOCK_HEADER="==== ROBOREV REVIEW SUMMARY ===="
 
 if [ ! -f "$WRAPPER_REAL" ]; then
@@ -2567,6 +2583,7 @@ _gm_dir="$tmp/grammar-mutant"
 mkdir -p "$_gm_dir"
 cp "$WRAPPER_REAL" "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" \
   "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$_gm_dir/"
+copy_flow_lib "$_gm_dir"
 if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
   cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_gm_dir/"
 fi
@@ -4535,6 +4552,7 @@ cp "$WRAPPER_REAL" "$noscan/roborev-review.sh"
 cp "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" "$noscan/"
 cp "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$noscan/"
 cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$noscan/"
+copy_flow_lib "$noscan"
 # ...and deliberately NOT roborev-waiver-scan.py.
 STUB_ANNOUNCE_SHA="$w_head"
 STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
@@ -5241,6 +5259,7 @@ _dfr_dir="$tmp/deferral-retrievability"
 mkdir -p "$_dfr_dir"
 cp "$WRAPPER_REAL" "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" \
   "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$SCAN_TOOL" "$_dfr_dir/"
+copy_flow_lib "$_dfr_dir"
 if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
   cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_dfr_dir/"
 fi
@@ -5308,6 +5327,7 @@ _dfc_dir="$tmp/deferral-closed"
 mkdir -p "$_dfc_dir"
 cp "$WRAPPER_REAL" "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" \
   "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$SCAN_TOOL" "$_dfc_dir/"
+copy_flow_lib "$_dfc_dir"
 if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
   cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_dfc_dir/"
 fi
@@ -5870,6 +5890,7 @@ _df_dir="$tmp/deferral-mutant"
 mkdir -p "$_df_dir"
 cp "$WRAPPER_REAL" "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" \
   "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$SCAN_TOOL" "$_df_dir/"
+copy_flow_lib "$_df_dir"
 if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
   cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_df_dir/"
 fi
@@ -5940,6 +5961,7 @@ _dfk_dir="$tmp/deferral-confinement"
 mkdir -p "$_dfk_dir"
 cp "$WRAPPER_REAL" "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" \
   "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$SCAN_TOOL" "$_dfk_dir/"
+copy_flow_lib "$_dfk_dir"
 if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
   cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_dfk_dir/"
 fi
@@ -6519,6 +6541,7 @@ for _mp16_state in 'unrecognised:totally-unknown-state' 'empty:' ; do
   _mp16_dir="$tmp/scanner-state-${_mp16_state%%:*}"
   mkdir -p "$_mp16_dir"
   cp "$WRAPPER_REAL" "$ORACLES_SRC" "$CHECKS_SRC" "$_mp16_dir/"
+  copy_flow_lib "$_mp16_dir"
   if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
     cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_mp16_dir/"
   fi
@@ -6766,6 +6789,7 @@ reset_stub
 _mp_dir="$tmp/misplaced-mutant"
 mkdir -p "$_mp_dir"
 cp "$WRAPPER_REAL" "$ORACLES_SRC" "$CHECKS_SRC" "$SCAN_TOOL" "$_mp_dir/"
+copy_flow_lib "$_mp_dir"
 if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
   cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_mp_dir/"
 fi
@@ -6797,6 +6821,7 @@ reset_stub
 _mp2_dir="$tmp/misplaced-mutant-2"
 mkdir -p "$_mp2_dir"
 cp "$WRAPPER_REAL" "$ORACLES_SRC" "$CHECKS_SRC" "$SCAN_TOOL" "$_mp2_dir/"
+copy_flow_lib "$_mp2_dir"
 if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
   cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_mp2_dir/"
 fi
