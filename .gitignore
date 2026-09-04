@@ -397,3 +397,9 @@ bindings/parity/out/
 .lane-lock
 .lane-locks/
 **/.lane-locks/
+# Same class again, fifth instance (#3853): a lane's per-slice scratch directory — the
+# lead's implementation spec and the implementer's terminal verdict. Inputs to and
+# hand-offs about the work, never artifacts of it, so shipping them puts one lane's
+# scratch in the repo; and untracked-but-not-ignored stamps `dirty: yes` on every
+# certification block the lane emits (and a mid-run write is `tree-integrity: FAIL`).
+.lane/

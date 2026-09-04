@@ -52,6 +52,15 @@ mod compaction_cancel_tests;
 // `write-support` to synthesize the range-tombstone SSTable bytes.
 #[cfg(all(test, feature = "write-support"))]
 mod compaction_range_marker_resume_tests;
+// Issue #3853 fix round 1: in-crate proof that the three whole-data-section
+// walks the integration suite structurally cannot reach — `prepare_delta_scan`
+// (feature-gated), `scan_for_key` (`pub(super)`) and the
+// `stitch_all_chunks_cancellable` funnel (`pub(super)` on `reader`) — each hold
+// a scan-lifetime guard. Needs crate-internal visibility AND the `delta-scan`
+// case must be a LIB test to execute at all (#3522), so it cannot live in
+// `tests/`. See the module docs for which lane executes which case.
+#[cfg(all(test, feature = "write-support"))]
+mod scan_lifetime_wiring_tests;
 // BIG ("nb"/uncompressed) point lookup: raw-key Index.db resolve + covering-chunk
 // seek (issue #1572), replacing the whole-file scan_for_key fallback.
 mod big_point;
@@ -330,6 +339,31 @@ impl SSTableReader {
         scan_cancel: &crate::storage::scan_cancel::ScanCancel,
     ) -> Result<Vec<u8>> {
         use crate::storage::sstable::compression::Compression;
+
+        // #3853 scan-lifetime madvise seam, DEFENCE IN DEPTH — deliberate
+        // belt-and-braces, not a substitute for the entry-point guards.
+        //
+        // This function is the SINGLE funnel every stitched whole-section read
+        // passes through (`stitch_all_chunks` delegates here;
+        // `stitch_and_parse_all_chunks{,_with_metadata}` reach it through one of
+        // the two), so a guard here means a FUTURE caller is covered without
+        // anyone remembering to wire it. Under an already-guarded caller it is
+        // free: the count goes 1 -> 2 on begin and 2 -> 1 on drop, neither of
+        // which is an advice transition, so no syscall is issued and nothing is
+        // released early.
+        //
+        // It does NOT make the entry-point guards redundant. An entry point may
+        // do index/Summary work BEFORE the stitch and hold borrows into the
+        // mapping AFTER it, and the guard should cover that whole span; a guard
+        // that begins and ends inside the stitch would release while the caller
+        // is still reading.
+        //
+        // Its LIMIT, stated honestly: this closes only walks that go THROUGH
+        // this funnel. A raw block-loop walk — the shape `get_all_entries`' and
+        // `scan_for_key`'s non-stitching branches already have — bypasses it
+        // entirely and still needs its own guard. This is a NARROWING of the
+        // hole, not a closure of it.
+        let _scan = self.begin_scan();
 
         // Pre-allocate buffer for ~2.5MB (estimated max size for test data)
         let mut stitched_buffer = Vec::with_capacity(2_500_000);
@@ -968,6 +1002,17 @@ impl SSTableReader {
         &self,
     ) -> Result<(Vec<u8>, super::parsing::V5CompressedLegacyParser)> {
         use tokio::io::AsyncSeekExt;
+
+        // #3853 scan-lifetime madvise seam. This function reads the WHOLE data
+        // section (seek past the header, then stitch every chunk), so by the
+        // seam's own definition it is a scan and holds a guard.
+        //
+        // The guard's scope is THIS BODY, deliberately, and not the caller's
+        // (`delta_scan::scan.rs`): the return value is an OWNED `Vec<u8>` plus a
+        // parser, and the caller parses that owned buffer — no borrow into the
+        // mapping survives the return. So releasing when the stitch completes is
+        // the RSS control working, not a premature release.
+        let _scan = self.begin_scan();
 
         // Seek the per-scan cursor to the start of the data section.
         let cursor = self.new_scan_cursor().await?;

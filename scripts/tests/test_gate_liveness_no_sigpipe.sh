@@ -1,0 +1,547 @@
+#!/usr/bin/env bash
+# test_gate_liveness_no_sigpipe.sh — structural guard for issue #3803.
+#
+# THE DEFECT
+# ----------
+# `tooling-tests` FAILed the full gate of record on PR #3794 with 2 of 257 cases red in
+# scripts/tests/test_gate_liveness.sh, both with the expected verdict CAUSE text replaced by:
+#
+#     scripts/gate-liveness.sh: line 338: printf: write error: Broken pipe
+#
+# The shape was `printf '%s\n' "$text" | grep -m1 "^$k: "`. `grep -m1` EXITS ON ITS FIRST MATCH,
+# closing the read end while bash's BUILTIN `printf` may still be writing. bash does not die on
+# SIGPIPE the way an external command does — it reports the failed write on stderr — so the
+# diagnostic string a caller was about to read is replaced by shell noise. Under `set -o pipefail`
+# (which scripts/gate-liveness.sh sets) it is worse than cosmetic: the pipeline's status becomes
+# 141 even though grep matched, so `... || return 0` fires on a SUCCESSFUL read.
+#
+# It is timing-dependent: it fires under gate load and not on an idle box, so A GREEN RUN OF THE
+# BEHAVIOURAL SUITE IS NOT EVIDENCE OF A FIX. That is why this guard is STRUCTURAL. It asserts the
+# channel is GONE (#3312: remove the shared channel, do not pick a rarer delimiter) rather than
+# trying to lose a race on purpose.
+#
+# THE RULE (BROAD FORM — lead ruling on REQUEST-3803-B, 2026-09-03)
+# ------------------------------------------------------------------
+# In scripts/gate-liveness.sh, a bash BUILTIN writer (`printf`/`echo`) with a pipe after it on the
+# same line is a FAIL. Full stop. No quote tracking, no command splitting, no recognised-reader
+# set, no stage ordering. Every reader in that file is a herestring (`reader <<<"$text"`), which
+# bash implements with a temp file: there is no writer left to take EPIPE at all.
+#
+# WHY NOT A NARROWER RULE. The narrow recogniser did not converge: six review rounds produced NINE
+# findings in a ~50-line matcher with the per-round count RISING (1,1,1,2,2,3), and FOUR of the
+# nine were false NEGATIVES — a quoted `;` splitting a command and hiding a real hazard, an escaped
+# quote desynchronising the scanner, an unquoted backslash doing the same, and `echo|head` missed
+# for want of whitespace. Each fix opened the next hole, because it was a recogniser over
+# bash-as-written: a grammar the author controls, so the residual set never closes (#3312).
+#
+# THE ASYMMETRY THAT DECIDES IT (#3229). A guard with documented false-PASSes is worse than no
+# guard — it hides defects while reading green. A guard with loud false POSITIVES costs NOISE, not
+# blindness. So this guard deliberately REPORTS several correct shapes; that set is enumerated in
+# violations() and in the run-time DECLARED SCOPE block, and pinned as cases 6,7,8,9,9e,9i.
+# Narrowing any of them is issue #3992.
+#
+# WHAT IT STILL DOES NOT ASSERT (false-NEGATIVE direction, both declared at run time):
+#   * The scan is LEXICAL and PER-LINE: a writer split across a line continuation, hidden behind a
+#     function, or fed from a process substitution is not recognised.
+#   * Only `printf` and `echo` count as writers. Any other builtin that can take EPIPE is not.
+#   Note an EXTERNAL writer (grep, sed) is out of scope by design, not by oversight: an external
+#   command takes SIGPIPE's default disposition and dies silently, emitting nothing onto the
+#   channel this file's callers read. Only a bash builtin narrates its own failed write.
+#
+# The guard scans the SHIPPED file (never a copy or a model of it), so unrouting one site reds this
+# suite instead of greening it — the idiom of scripts/tests/test_cargo_output_parsers.sh.
+set -uo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
+SUBJECT="$REPO_ROOT/scripts/gate-liveness.sh"
+
+# Case floor (CLAUDE.md, #3544): a span-replacing edit that silently deletes cases yields a green
+# tally over a shrunken suite. This is ENFORCED (exit 1), not merely printed, and may only go DOWN
+# with a stated reason.
+CASE_FLOOR=33
+
+pass=0; fail=0; cases=0
+ok()   { cases=$((cases+1)); pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
+bad()  { cases=$((cases+1)); fail=$((fail+1)); printf 'FAIL %s\n' "$1"; [ $# -gt 1 ] && printf '     %s\n' "$2"; return 0; }
+
+# ---------------------------------------------------------------------------
+# DECLARED SCOPE — printed on EVERY run, pass or fail.
+#
+# CLAUDE.md: "a narrowed lane DECLARES the narrowing at run time" — a lane that omits coverage
+# silently is indistinguishable from one that covers it. This guard is narrowed on TWO axes: to ONE
+# FILE (a scope decision on #3803), and to a LITERAL printf/echo COMMAND WORD (residuals b and c).
+# It is NOT narrowed by a reader set: that axis existed in an earlier design and was DELETED, along
+# with quote tracking and stage ordering, when the recogniser failed to converge (nine findings in
+# six rounds, four of them false NEGATIVES). Do not reintroduce one -- see #3992 and the lead
+# ruling on REQUEST-3803-B. Both surviving narrowings, and the residual each buys, are named
+# below, and the accepted false-POSITIVE classes each have a pinned case.
+# ---------------------------------------------------------------------------
+declare -a UNGUARDED=(
+  "scripts/flow/claim.sh"
+  "scripts/flow/roborev-review-oracles.sh"
+)
+print_scope() {
+  # Derived at run time FROM THE SHIPPED MATCHER, so the figure can never drift from the rule
+  # actually enforced; a hard-coded number would decay like a comment. Fail-closed: if the
+  # matcher is not callable the field says so rather than rendering a bare 0, which would read
+  # as a measured all-clear from a scan that never ran.
+  local SHAPE_FILE_COUNT
+  if ! declare -F violations >/dev/null 2>&1; then
+    SHAPE_FILE_COUNT="COULD NOT MEASURE (matcher unavailable at declaration time)"
+  else
+    # Counted in the loop and emitted once, rather than piping into `grep -c`: under this
+    # file's `set -o pipefail`, a loop whose LAST iteration ends on a false test makes the whole
+    # pipeline non-zero, which silently turned the census into COULD NOT MEASURE.
+    SHAPE_FILE_COUNT=$(
+      cd "$REPO_ROOT" 2>/dev/null || { printf ''; exit 0; }
+      _n=0
+      while IFS= read -r f; do
+        [ -r "$f" ] || continue
+        if [ "$(violations "$f" | grep -c . || true)" -gt 0 ]; then _n=$((_n+1)); fi
+      done < <(git ls-files 'scripts/*.sh' 'scripts/**/*.sh' 2>/dev/null)
+      printf '%s' "$_n"
+    )
+    [ -n "$SHAPE_FILE_COUNT" ] || SHAPE_FILE_COUNT="COULD NOT MEASURE (census failed)"
+  fi
+  printf '\n==== DECLARED SCOPE (test_gate_liveness_no_sigpipe.sh, #3803) ====\n'
+  printf 'guarded:   scripts/gate-liveness.sh (ONE file)\n'
+  printf 'THE RULE:  a bash BUILTIN writer (printf/echo) with a pipe after it on the same line\n'
+  printf '           is a FAIL. No quote tracking, no command splitting, no reader set, no stage\n'
+  printf '           ordering. Lead ruling on REQUEST-3803-B, 2026-09-03.\n'
+  printf 'DECLARED FALSE POSITIVES -- correct code this guard REPORTS. Accepted noise, because a\n'
+  printf '           guard with false-PASSes hides defects while a guard with loud false POSITIVES\n'
+  printf '           only costs noise (#3229). Remedy is always: restructure the line.\n'
+  printf '           1. pipe inside a format string       printf %%s "a | b"\n'
+  printf '           2. pipe inside a quoted argument     echo "col1|col2"\n'
+  printf '           3. pipe in a trailing comment        printf %%s "$x"   # see: cmd | head\n'
+  printf '           4. unrelated later pipeline          v=$(printf %%s "$x"); other | grep -q y\n'
+  printf '           5. quoted option-looking pattern     printf %%s "$t" | grep -e "text -q"\n'
+  printf '           6. run-to-EOF reader                 printf %%s "$t" | grep -c foo\n'
+  printf '           Pinned as cases 6,7,8,9,9e,9i. Narrowing any of them is issue #3992.\n'
+  printf 'RESIDUALS of the broad form (all false-NEGATIVE direction, all declared):\n'
+  printf '           a. The scan is LEXICAL and PER-LINE. A writer split across a line\n'
+  printf '              continuation, hidden behind a function, or fed from a process\n'
+  printf '              substitution is NOT recognised.\n'
+  printf '           b. Only printf and echo count as writers. Any other bash builtin that can\n'
+  printf '              take EPIPE is not recognised.\n'
+  printf '           c. The COMMAND WORD is matched LITERALLY, so a spelling bash resolves to\n'
+  printf '              the builtin only AFTER expansion is missed: p\\rintf (escaped), $cmd\n'
+  printf '              (variable), $(echo printf) (substitution). All three run the builtin --\n'
+  printf '              measured, not assumed -- and each keeps the EPIPE hazard. The last two\n'
+  printf '              are UNRECOGNISABLE BY ANY LEXICAL SCAN, since the command name need not\n'
+  printf '              appear in the file at all, so this residual is declared and is NOT\n'
+  printf '              narrowable to zero. A QUOTED spelling ("printf") IS reported, because a\n'
+  printf '              quote is a word-boundary character -- pinned as 9u so that stays true.\n'
+  printf '              Case 9t pins the escaped miss, so a later fix must update this\n'
+  printf '              declaration rather than silently outgrow it. See #3992.\n'
+  printf 'GUARDED SET IS ONE FILE, AND THE SHAPE IS PERVASIVE. Measured across git-tracked\n'
+  printf '           scripts/**/*.sh: %s files contain at least one line matching this rule.\n' "$SHAPE_FILE_COUNT"
+  printf '           That is a count of SHAPE MATCHES, NOT of hazards -- most are presumably the\n'
+  printf '           declared false-positive classes above, and this guard makes NO claim about\n'
+  printf '           how many are real. Two are named below because they produce verdicts the\n'
+  printf '           merge gate consumes, so they were the deliberate scope decision on #3803:\n'
+  local f
+  for f in "${UNGUARDED[@]}"; do printf '           - %s\n' "$f"; done
+  printf '           The sibling issue #3969 records MEASURED live instances of this family in\n'
+  printf '           OTHER scripts (a broken pipe turning the NEXT assertion into a bogus FAIL),\n'
+  printf '           so the unguarded set is emphatically NOT just those two. VERIFIED INSTANCE:\n'
+  printf '           #3969 instance 3 failed at scripts/flow/drive-issue-state.sh:587, and THIS\n'
+  printf '           RULE FLAGS THAT LINE -- 4 sites in that one file, line 587 among them. So the\n'
+  printf '           broad rule is known to catch a construct that produced a real field failure,\n'
+  printf '           which is stronger evidence than any synthetic case in this suite. That file is\n'
+  printf '           NOT guarded here: extending the subject set is #3992, and note #3969 may fix\n'
+  printf '           its family at the REPORTER instead, since its early-closing reader is a tr\n'
+  printf '           shim installed on purpose -- nothing to convert to a herestring.\n'
+  printf '==== END DECLARED SCOPE ====\n\n'
+}
+
+# ---------------------------------------------------------------------------
+# The matcher. Emits "<lineno>:<text>" per offending line; nothing when clean.
+#
+# WHAT IT ACTUALLY DOES, stated so the comment cannot outrun the code (an earlier revision claimed
+# a trailing-comment strip that was never implemented):
+#   1. Skips WHOLE-LINE comments only. Nothing else is stripped, and no attempt is made to know
+#      what is inside a quote.
+#   2. Requires a bash builtin writer token (`printf`/`echo`) on the line.
+#   3. Masks `||` so a logical OR is never read as a pipe, then splits the line on `|`.
+#   (The numbered narrow recipe that used to be here — segment splitting plus a recognised-reader
+#   set — described the design that was removed. See THE RULE at the top of this file.)
+#
+violations() {
+  local file="$1"
+  awk '
+    # THE BROAD FORM (lead ruling on REQUEST-3803-B, 2026-09-03). A bash BUILTIN writer
+    # (printf/echo) with a pipe anywhere after it on the same line is a FAIL. Full stop. No quote
+    # tracking, no command-segment splitting, no recognised-reader set, no stage ordering.
+    #
+    # WHY THE NARROW FORM WAS ABANDONED. Six review rounds produced NINE findings in a ~50-line
+    # matcher and the per-round count ROSE (1,1,1,2,2,3). Three of the nine were false NEGATIVES:
+    # a quoted semicolon splitting a command and hiding a real hazard; an escaped quote
+    # desynchronising the scanner and masking a real pipe; an unquoted backslash doing the same;
+    # `echo|head` missed for want of whitespace after the builtin. Each fix to the recogniser
+    # opened the next hole, because it was a recogniser over bash-as-written -- a grammar the
+    # author controls, so the residual set never closes (#3312).
+    #
+    # THE ASYMMETRY THAT DECIDES IT (#3229). A guard with documented false-PASSes is worse than no
+    # guard: it hides defects while reading green. A guard with loud false POSITIVES costs NOISE,
+    # not blindness -- it fails in the direction someone notices and fixes. The broad form catches
+    # every hazard raised across all six rounds, including the four false negatives above.
+    #
+    # THE DECLARED FALSE-POSITIVE SET -- accepted noise, not oversight. Each of these is CORRECT
+    # code that this guard REPORTS. The remedy is always the same: restructure the line (move the
+    # pipe off it, or split the statement). None occurs in the subject today.
+    #   1. a pipe inside a format string        printf %s "a | b"
+    #   2. a pipe inside a quoted argument      echo "col1|col2"
+    #   3. a pipe in a trailing comment         printf %s "$x"   # see: cmd | head
+    #   4. an unrelated later pipeline          v=$(printf %s "$x"); other | grep -q y
+    #   5. a quoted option-looking pattern      printf %s "$t" | grep -e "text -q"
+    #   6. a run-to-EOF reader                  printf %s "$t" | grep -c foo
+    # NOT in this set, because the broad form gets it RIGHT: a writer in the LAST pipeline stage
+    # (`producer | grep -q x | printf %s done`) feeds nothing and is correctly NOT reported.
+    # Narrowing any of these is issue #3992, whose acceptance criteria are the nine findings.
+    #
+    # First `|` that is a pipe rather than half of `||`.
+    # Searches from `from`, so the pipe found is one the WRITER could feed. Taking the first
+    # pipe on the whole line instead was a FALSE NEGATIVE I shipped and caught by test:
+    # `producer | printf %s "$x" | grep -q y` has a pipe BEFORE the writer, and skipping on
+    # that comparison dropped a real hazard.
+    function first_pipe(s, from,   i, c, n) {
+      n = length(s)
+      if (from < 1) from = 1
+      for (i = from; i <= n; i++) {
+        c = substr(s, i, 1)
+        if (c != "|") continue
+        if (substr(s, i + 1, 1) == "|") { i++; continue }
+        if (i > 1 && substr(s, i - 1, 1) == "|") continue
+        return i
+      }
+      return 0
+    }
+    { line = $0 }
+    line ~ /^[[:space:]]*#/ { next }
+    {
+      # The writer token boundary is ANY non-word character or end of line, not just whitespace
+      # or a pipe. Narrowing it to those two was a FALSE NEGATIVE (roborev job 110): bash accepts
+      # a redirection immediately after the builtin, so `printf<<<"$t"|head -1`, `echo>&1|head -1`
+      # and `printf>/dev/null|head -1` are all valid, all hazardous, and all evaded the guard.
+      # Verified valid with `bash -n`. Excluding alnum/_/- from the boundary is what still keeps
+      # `printfoo | head` and `echoes | head` out -- those are different words, not writers.
+      # The two boundary classes are IDENTICAL on purpose. They were asymmetric -- `.` and `/`
+      # excluded before the writer but accepted after it -- so `printf.local | head` and
+      # `echo/tool | head` were reported as builtins (roborev job 116, undeclared false
+      # positives). A boundary rule that differs by side is a rule nobody can state in one
+      # sentence, which is how the asymmetry survived three rounds of review.
+      if (!match(line, /(^|[^[:alnum:]_.\/-])(printf|echo)([^[:alnum:]_.\/-]|$)/)) next
+      # Scan for the pipe from just past the WRITER WORD, not from RSTART. match() may consume a
+      # LEADING boundary character, and if that character is itself a pipe then starting at RSTART
+      # finds it and treats the writer as upstream of it -- reporting `producer|printf %s done`,
+      # where the builtin is the FINAL stage and cannot take EPIPE (roborev job 115, an UNDECLARED
+      # false positive that also contradicted case 9c). Equally, the scan must NOT start past the
+      # TRAILING boundary character, because for `echo|head` that character IS the pipe and
+      # skipping it would drop a real hazard. So: end of the writer word, then scan.
+      wpos = RSTART
+      if (substr(line, wpos, 1) !~ /[pe]/) wpos = wpos + 1   # a leading boundary char was consumed
+      wlen = (substr(line, wpos, 1) == "p") ? 6 : 4          # printf | echo
+      p = first_pipe(line, wpos + wlen)
+      if (p == 0) next
+      printf "%d:%s\n", NR, line
+    }
+  ' "$file"
+}
+
+# Invoked AFTER violations() is defined, so the shape census in the declaration can actually
+# run. Called earlier it rendered 0 from an unmeasured scan.
+print_scope
+
+n_violations() { violations "$1" | grep -c . ; }
+
+# ---------------------------------------------------------------------------
+# 1. The subject must EXIST and be READABLE. Never derive a pass from a scan that did not happen.
+# ---------------------------------------------------------------------------
+if [ -r "$SUBJECT" ]; then
+  ok "1 subject is readable: $SUBJECT"
+else
+  bad "1 subject is readable" "REFUSING: $SUBJECT is absent or unreadable — the scan could not be performed"
+  printf '\npassed=%d failed=%d cases=%d\n' "$pass" "$fail" "$cases"
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# 2. The subject must be NON-EMPTY, and the count is REPORTED — a guard that reports zero
+#    violations over an empty subject greens vacuously (CLAUDE.md's ruling on the descoped lint).
+# ---------------------------------------------------------------------------
+subject_lines=$(wc -l <"$SUBJECT" | tr -d ' ')
+subject_code=$(grep -cv '^[[:space:]]*\(#\|$\)' "$SUBJECT")
+printf 'subject: %s (%s lines, %s non-comment non-blank)\n' "$SUBJECT" "$subject_lines" "$subject_code"
+if [ "${subject_lines:-0}" -gt 100 ] && [ "${subject_code:-0}" -gt 100 ]; then
+  ok "2 subject is non-empty (${subject_lines} lines, ${subject_code} code lines)"
+else
+  bad "2 subject is non-empty" "REFUSING: only ${subject_lines} lines / ${subject_code} code lines — this is not the shipped reader"
+fi
+
+tmp=$(mktemp -d) || { printf 'FAIL could not mktemp\n'; exit 1; }
+trap 'rm -rf "$tmp"' EXIT
+
+# ---------------------------------------------------------------------------
+# 3. POSITIVE CONTROL for the matcher. Without this, "0 violations" is indistinguishable from
+#    "the matcher matches nothing at all". It must red on the EXACT shape #3803 reported.
+# ---------------------------------------------------------------------------
+cat >"$tmp/pos.sh" <<'POS'
+#!/usr/bin/env bash
+_field() {
+  local text="$1" k="$2" line
+  line=$(printf '%s\n' "$text" | grep -m1 "^$k: ") || return 0
+  printf '%s' "${line#"$k": }"
+}
+POS
+pos_out=$(violations "$tmp/pos.sh")
+pos_n=$(grep -c . <<<"$pos_out")
+if [ "$pos_n" -eq 1 ] && grep -q 'grep -m1' <<<"$pos_out"; then
+  ok "3 positive control: the matcher NAMES the #3803 shape (line ${pos_out%%:*})"
+else
+  bad "3 positive control" "matcher found $pos_n site(s) in a fixture containing exactly one; the scan cannot be trusted"
+fi
+
+# ---------------------------------------------------------------------------
+# 4. Second positive control: the two-hop `... | head -1` form, where the early exit is head's and
+#    the builtin takes EPIPE at the far end of the pipeline. The token right after the pipe here is
+#    `grep -nxF` / `sed -n`, NEITHER of which short-circuits — the hazard is downstream, so the
+#    (broad form: there are no segments; retained because the SHAPE it pins is still a hazard)
+# ---------------------------------------------------------------------------
+cat >"$tmp/pos2.sh" <<'POS2'
+#!/usr/bin/env bash
+open_ln=$(printf '%s\n' "$t" | grep -nxF 'X' | head -1 | cut -d: -f1)
+_bp=$(printf '%s\n' "$1" | sed -n 's/^beater-pid: //p' | head -1)
+POS2
+pos2_n=$(n_violations "$tmp/pos2.sh")
+if [ "$pos2_n" -eq 2 ]; then
+  ok "4 positive control: the matcher NAMES both two-hop (| head -1) forms"
+else
+  bad "4 positive control (two-hop)" "expected 2 sites, matcher found $pos2_n"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. NEGATIVE CONTROL: the herestring form is the FIX and must NOT be flagged, and `||` is not a
+#    pipe. A matcher that reds on correct input is the guard agents learn to waive.
+# ---------------------------------------------------------------------------
+cat >"$tmp/neg.sh" <<'NEG'
+#!/usr/bin/env bash
+_field() {
+  local text="$1" k="$2" line
+  line=$(grep -m1 "^$k: " <<<"$text") || return 0
+  printf '%s' "${line#"$k": }"
+}
+open_ln=$(grep -nxF 'X' <<<"$t" | head -1 | cut -d: -f1)
+verdict() { echo "gate-liveness: $1 ($3)"; }
+if [ "$a" = "b" ] || [ "$c" = "d" ]; then printf 'x\n'; fi
+NEG
+neg_n=$(n_violations "$tmp/neg.sh")
+if [ "$neg_n" -eq 0 ]; then
+  ok "5 negative control: herestrings and \`||\` are NOT flagged (0 RECOGNISED)"
+else
+  bad "5 negative control" "matcher flagged $neg_n site(s) in a clean fixture — false positives"
+fi
+
+# ---------------------------------------------------------------------------
+# 6-9. NEGATIVE CONTROLS for the measured FALSE-POSITIVE CLASS (roborev job 20).
+#
+# The first matcher treated ANY `|` after a builtin as a pipeline, so all four shapes below were
+# reported. scripts/gate-liveness.sh contains none of them TODAY, so the guard was green BY LUCK:
+# anyone adding one would have redded the MANDATORY tooling-tests component on CORRECT code. These
+# four cases are the regression pins. Each is a SEPARATE case so a fix that repairs three of them
+# cannot hide behind an aggregate.
+# ---------------------------------------------------------------------------
+# DECLARED FALSE POSITIVE. The broad form REPORTS these shapes, which are correct code. That is
+# the accepted cost of the lead ruling on REQUEST-3803-B: loud noise instead of silent blindness
+# (#3229). Each is pinned so the accepted set is EXPLICIT and cannot drift silently -- if one of
+# these stops being reported the matcher has been narrowed, which is issue #3992 and needs the
+# declaration in violations() updated in the same change.
+_declared_fp() { # _declared_fp <n> <label> <line-of-bash>
+  local n="$1" label="$2" body="$3" got
+  printf '%s\n' '#!/usr/bin/env bash' >"$tmp/fp$n.sh"
+  printf '%s\n' "$body" >>"$tmp/fp$n.sh"
+  got=$(n_violations "$tmp/fp$n.sh")
+  if [ "$got" -ge 1 ]; then
+    ok "$n DECLARED false positive (accepted noise): $label — reported, remedy is to restructure the line"
+  else
+    bad "$n DECLARED false positive: $label" "expected the broad form to REPORT this shape and it did not — the matcher has been narrowed; see #3992 and update the declaration in violations()"
+  fi
+}
+_declared_fp 6 "a pipe inside the FORMAT STRING"        "printf 'a | b\\n'"
+_declared_fp 7 "a pipe inside a TRAILING COMMENT"       'printf '"'"'%s\n'"'"' "x"   # comment with | pipes in it'
+_declared_fp 8 "a pipe inside a QUOTED ARGUMENT"        'echo "col1|col2"'
+# NOTE: the reader here is DELIBERATELY a recognised one (`grep -q`). With a non-reader such as
+# `thing` this case passes on the reader requirement alone and never exercises the `;` handling it
+# claims to test -- a case passing for the wrong reason.
+_declared_fp 9 "an UNRELATED later pipeline, same line" 'v=$(printf '"'"'%s'"'"' "$x"); other | grep -q x'
+
+# ---------------------------------------------------------------------------
+# 9b. CONVERSE CONTROL. Cases 6-9 assert the matcher stays QUIET on correct code; alone they are
+#    satisfiable by a matcher that has stopped matching anything. This asserts the other
+#    direction on the same shapes: a quoted pipe, and a `;`, must NOT MASK a genuine
+#    builtin-into-pipe on the same line.
+# ---------------------------------------------------------------------------
+printf '#!/usr/bin/env bash\n%s\n%s\n' 'echo "col1|col2" | grep -q x' 'printf %s "$v"; :; printf %s\n "$t" | head -1' >"$tmp/conv.sh"
+conv_n=$(violations "$tmp/conv.sh" | grep -c .)
+if [ "$conv_n" -eq 2 ]; then
+  ok "9b converse control: neither a quoted pipe nor a \`;\` masks a real hazardous pipeline"
+else
+  bad "9b converse control" "expected 2 real sites, matcher found $conv_n — the narrowing in cases 6-9 has gone too far and is now hiding genuine #3803 sites"
+fi
+
+# ---------------------------------------------------------------------------
+# 9c. The writer must be UPSTREAM of the reader. A builtin at the END of a pipeline feeds nothing
+#    that can short-circuit, so it cannot take EPIPE; reporting it reds the mandatory component on
+#    safe code (roborev job 22). Paired with a positive half so this cannot be satisfied by a
+#    matcher that simply stopped looking.
+# ---------------------------------------------------------------------------
+printf '#!/usr/bin/env bash\n%s\n' 'producer | grep -q x | printf %s done' >"$tmp/down.sh"
+printf '#!/usr/bin/env bash\n%s\n' 'printf %s "$t" | grep -q x' >"$tmp/up.sh"
+if [ "$(violations "$tmp/down.sh" | grep -c .)" -eq 0 ] && [ "$(violations "$tmp/up.sh" | grep -c .)" -eq 1 ]; then
+  ok "9c a builtin DOWNSTREAM of the reader is safe (0 RECOGNISED); upstream is still flagged"
+else
+  bad "9c writer/reader ordering" "expected down=0 up=1, got down=$(violations "$tmp/down.sh" | grep -c .) up=$(violations "$tmp/up.sh" | grep -c .)"
+fi
+
+# ---------------------------------------------------------------------------
+# 9d-9g. REGRESSION PINS for roborev job 36 (two Mediums, both mine). Each is asserted in the
+#    direction the finding named, and 9d/9f are the FALSE-NEGATIVE half -- the worse direction,
+#    because a missed site means the #3803 channel can be reintroduced under a green gate.
+# ---------------------------------------------------------------------------
+_pin() { # _pin <id> <expected-count> <label> <line-of-bash>
+  local id="$1" want="$2" label="$3" body="$4" got
+  printf '#!/usr/bin/env bash\n%s\n' "$body" >"$tmp/pin_$id.sh"
+  got=$(violations "$tmp/pin_$id.sh" | grep -c .)
+  if [ "$got" -eq "$want" ]; then
+    ok "$id $label (${got}/${want})"
+  else
+    bad "$id $label" "expected $want RECOGNISED, got $got — job 36 finding regressing"
+  fi
+}
+
+# finding 1, false-NEGATIVE half: a quoted `;` must not hide a real hazard.
+_pin 9d 1 "a quoted semicolon does NOT hide a real hazard" 'printf '"'"'x;y\n'"'"' | grep -q x'
+# finding 1, false-POSITIVE half: a quoted `|` is not a pipe.
+_pin 9e 1 "DECLARED noise: a quoted pipe IS reported (accepted; #3992)"        'printf '"'"'x | grep -q y\n'"'"''
+# finding 2 (job 36): these long-option forms were once unrecognised; the broad form catches
+# them because it does not inspect options at all.
+_pin 9f 3 "grep long options --quiet/--silent/--max-count are recognised" 'printf %s "$t" | grep --quiet a
+printf %s "$t" | grep --silent a
+printf %s "$t" | grep --max-count=1 a'
+# and the sed quit form, which the destructuring had to be taught about explicitly.
+_pin 9g 1 "sed quit inside quotes is still recognised"     'printf %s "$t" | sed -n '"'"'p;q'"'"''
+
+# ---------------------------------------------------------------------------
+# 9h-9i. REGRESSION PINS for roborev job 74 (two Mediums, both consequences of the quote
+#    handling added for job 36). 9h is the false-NEGATIVE half again: an escaped quote
+#    desynchronised the quote state and MASKED a real pipe, which is how the #3803 channel
+#    could have come back under a green gate.
+# ---------------------------------------------------------------------------
+_pin 9h 1 "an escaped double quote does NOT mask a real pipe" 'printf "%s\n" "a\"b" | grep -q a'
+_pin 9i 1 "DECLARED noise: a quoted arg containing the word printf IS reported (accepted; #3992)" 'grep -F "printf value" "$file" | grep -q value'
+
+# ---------------------------------------------------------------------------
+# 9j-9k. The two hazards the BROAD form exists to catch that EVERY narrow revision missed.
+#    9j is `echo|head` -- missed for want of whitespace after the builtin (job 76).
+#    9k is a writer preceded by an UNRELATED pipe -- a false negative I shipped in the broad
+#    form itself and caught by test: taking the first pipe on the whole LINE rather than the
+#    first pipe after the WRITER skipped it. Both are false-negative direction, which is the
+#    direction this whole design change exists to eliminate.
+# ---------------------------------------------------------------------------
+_pin 9j 1 "no-argument writer: echo|head is caught (every narrow revision missed it)" 'echo|head -n 0'
+_pin 9k 1 "a writer preceded by an unrelated pipe is still caught" 'producer | printf %s "$x" | grep -q y'
+
+# ---------------------------------------------------------------------------
+# 9l-9n. Redirection immediately after the writer (roborev job 110, false-NEGATIVE direction).
+#    All three are valid bash (checked with `bash -n`) and all three evaded the first broad
+#    draft, which required whitespace or a pipe right after the builtin.
+# 9o-9p. And the words that must still NOT be writers, so widening the boundary cannot be
+#    satisfied by matching any identifier that merely starts with printf/echo.
+# ---------------------------------------------------------------------------
+_pin 9l 1 "herestring straight after the writer: printf<<<...|head" 'printf<<<"$text"|head -1'
+_pin 9m 1 "fd dup straight after the writer: echo>&1|head"          'echo>&1|head -1'
+_pin 9n 1 "redirect straight after the writer: printf>/dev/null|head" 'printf>/dev/null|head -1'
+_pin 9o 0 "printfoo is NOT the printf builtin"                       'printfoo | head -1'
+_pin 9p 0 "echoes is NOT the echo builtin"                           'echoes | head -1'
+
+# ---------------------------------------------------------------------------
+# 9q. A final-stage writer with NO surrounding whitespace (roborev job 115). Case 9c pins the
+#    same property WITH whitespace, which is why 9c passed while this shape was reported: the
+#    leading `|` was consumed by match() and then found by the pipe scan. An UNDECLARED false
+#    positive is worse than a declared one -- it contradicts the rule the guard prints.
+# ---------------------------------------------------------------------------
+_pin 9q 0 "final-stage writer, no whitespace: producer|printf is NOT a hazard" 'producer|printf %s done'
+
+# ---------------------------------------------------------------------------
+# 9r-9s. Command names that merely BEGIN with a builtin name (roborev job 116). The boundary
+#    classes are symmetric so these are not writers. 9o/9p pin the alnum case; these pin the
+#    punctuation case that the asymmetry let through.
+# ---------------------------------------------------------------------------
+_pin 9r 0 "printf.local is NOT the printf builtin" 'printf.local | head -1'
+_pin 9s 0 "echo/tool is NOT the echo builtin"      'echo/tool | head -1'
+
+# Case 9t pins a DECLARED MISS (residual c), not a success: bash DOES run the builtin for the
+# escaped spelling, so it IS a real EPIPE hazard this guard does not report. Expected count is 0
+# BY DECLARATION -- if a later change detects it, this case REDS, which is the point: the
+# declaration may not silently outgrow the code. Case 9u is its control and the reason the
+# residual is scoped to expansion-time spellings: a QUOTED command word is already reported,
+# because a quote is a word-boundary character. Measured, both ways, rather than reasoned about;
+# an earlier draft of residual (c) claimed the quoted form was missed and 9u falsified it.
+# The $cmd / $(echo printf) spellings cannot be pinned at all -- no lexical scan expresses them.
+_pin 9t 0 "DECLARED MISS (residual c): escaped command word p\\rintf is NOT detected (#3992)" 'p\rintf %s "$text" | grep -m1 x'
+_pin 9u 1 "a QUOTED command word IS detected (a quote is a boundary char)" '"printf" %s "$text" | grep -m1 x'
+
+# ---------------------------------------------------------------------------
+# 10. THE ASSERTION. Scan the SHIPPED reader.
+# ---------------------------------------------------------------------------
+sub_out=$(violations "$SUBJECT")
+sub_n=$(grep -c . <<<"$sub_out")
+if [ "$sub_n" -eq 0 ]; then
+  ok "10 scripts/gate-liveness.sh: builtin-writer-into-pipe sites: 0 RECOGNISED"
+else
+  bad "10 scripts/gate-liveness.sh: builtin-writer-into-pipe sites" "$sub_n RECOGNISED — each can emit \`printf: write error: Broken pipe\` onto a verdict a caller reads (#3803). Use a herestring:"
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    printf '     %s:%s\n' "$SUBJECT" "$v"
+  done <<<"$sub_out"
+fi
+
+# ---------------------------------------------------------------------------
+# 11. NON-VACUITY of case 10: the shipped file must actually CONTAIN the converted form. Without
+#     this, deleting every reader from the file would satisfy case 10. The floor is a case floor,
+#     not a target — it may only go DOWN with a stated reason.
+# ---------------------------------------------------------------------------
+HERESTRING_FLOOR=20
+here_n=$(grep -c '<<<"\$' "$SUBJECT")
+if [ "${here_n:-0}" -ge "$HERESTRING_FLOOR" ]; then
+  ok "11 non-vacuity: $here_n herestring reader(s) present (floor $HERESTRING_FLOOR)"
+else
+  bad "11 non-vacuity" "only $here_n herestring reader(s) found, floor is $HERESTRING_FLOOR — case 10's clean verdict is not evidence of anything"
+fi
+
+# ---------------------------------------------------------------------------
+# 12. The specific site named in #3803 must be the herestring form, by name.
+# ---------------------------------------------------------------------------
+if grep -q 'grep -m1 "\^\$k: " <<<"\$text"' "$SUBJECT"; then
+  ok "12 the #3803 site (_field) reads via a herestring"
+else
+  bad "12 the #3803 site (_field)" "_field's reader is not the expected herestring form; #3803's own site is unpinned"
+fi
+
+# ---------------------------------------------------------------------------
+# 13. The subject must still be syntactically valid bash after the conversions.
+# ---------------------------------------------------------------------------
+if bash -n "$SUBJECT" 2>"$tmp/syn.err"; then
+  ok "13 subject parses (bash -n)"
+else
+  bad "13 subject parses (bash -n)" "$(cat "$tmp/syn.err")"
+fi
+
+printf '\npassed=%d failed=%d cases=%d (floor %d)\n' "$pass" "$fail" "$cases" "$CASE_FLOOR"
+if [ "$cases" -lt "$CASE_FLOOR" ]; then
+  printf 'FAIL case-floor: ran %d cases, floor is %d — a green tally over a shrunken suite is not a pass\n' "$cases" "$CASE_FLOOR"
+  exit 1
+fi
+[ "$fail" -eq 0 ] || exit 1
+exit 0

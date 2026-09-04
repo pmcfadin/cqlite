@@ -620,29 +620,42 @@ mod tests {
     /// not timing), so it reliably fails if the drop-behind is reintroduced —
     /// unlike a wall-clock tail guard, which cannot force page-cache reclaim on
     /// the tiny vendored fixtures. `Off` also issues no advice; explicit
-    /// `Sequential`/`WillNeed` remain the caller's opt-in to those hints.
+    /// `Sequential` remains the caller's opt-in to that hint.
+    ///
+    /// Issue #3853 changed this function's CONTRACT — it is now open-time advice
+    /// ONLY, and `WillNeed` therefore yields `None` here too. That is not a
+    /// relaxation of #1143: `WillNeed`'s `MADV_WILLNEED` moved to SCAN START
+    /// (`reader::scan_lifetime`, asserted by its own unit tests and by
+    /// `tests/issue_3853_scan_lifetime_advice.rs`), so the open-time site issues
+    /// nothing for it and an opened-but-never-scanned reader pays no read-ahead.
+    /// `Auto` and `Off` are UNCHANGED and are what #1143 pinned.
     #[cfg(unix)]
     #[test]
     fn test_mmap_advice_for_auto_is_no_madvise() {
-        use super::super::backend_resolve::mmap_advice_for;
+        use super::super::backend_resolve::mmap_open_advice_for;
         use crate::config::PrefetchMode;
 
         // The fix under guard: Auto must NOT emit Sequential (drop-behind).
         assert_eq!(
-            mmap_advice_for(PrefetchMode::Auto),
+            mmap_open_advice_for(PrefetchMode::Auto),
             None,
             "issue #1143 REGRESSION: Auto prefetch re-emitting madvise \
              (MADV_SEQUENTIAL drop-behind) — read p99 tail will regress under write load"
         );
-        assert_eq!(mmap_advice_for(PrefetchMode::Off), None);
-        // Explicit opt-ins are preserved.
+        assert_eq!(mmap_open_advice_for(PrefetchMode::Off), None);
+        // `Sequential` — read-ahead WITH drop-behind, a one-shot-scan opt-in —
+        // keeps its OPEN-time advice.
         assert_eq!(
-            mmap_advice_for(PrefetchMode::Sequential),
+            mmap_open_advice_for(PrefetchMode::Sequential),
             Some(memmap2::Advice::Sequential)
         );
+        // #3853: `WillNeed` no longer advises at OPEN. The advice is issued when
+        // the first scan begins and withdrawn when the last one ends.
         assert_eq!(
-            mmap_advice_for(PrefetchMode::WillNeed),
-            Some(memmap2::Advice::WillNeed)
+            mmap_open_advice_for(PrefetchMode::WillNeed),
+            None,
+            "issue #3853: WillNeed must issue NO open-time advice — it is a \
+             scan-lifetime advice now (reader::scan_lifetime)"
         );
     }
 

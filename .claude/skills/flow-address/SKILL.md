@@ -103,6 +103,16 @@ Resolve them in the worktree and reply per thread.
    # never a repeat full gate; pass BOTH the anchor's full summary AND the delta summary:
    bash scripts/flow/premerge-assert.sh <pr> <certified-sha> <anchor-full-summary> <delta-summary>
    ```
+   **A CODE FIX ALSO VOIDS THE ROBOREV ROUND, not just the gate (#3752).** Re-review AFTER the
+   new gate — a roborev round changes no bytes, so it can never invalidate a gate PASS, while a
+   rebase or a src fix changes bytes and invalidates both — and post the new
+   `==== ROBOREV REVIEW SUMMARY ====` block as a top-level PR comment, because
+   `premerge-assert`'s `review-binding` leg reads the job id from the PR and refuses a merge whose
+   recorded review does not cover the certified head. Its `hold-check` leg refuses on a column-zero
+   `HOLD:` COMMENT on the PR or the issue it closes (a comment, never the PR description — a body is
+   editable with no per-edit attribution, so it is not an authorization channel), and on a lead
+   disarm inside 30 minutes; a lead clears
+   one with a column-zero `GO:` or `RELEASE:` line.
    The third argument is REQUIRED and must always be a FULL-gate `RESULT: PASS` block; `--lite` is
    refused by name everywhere, and a `--delta` block is accepted ONLY as the optional fourth argument
    (where the script checks that its `delta-anchor:` names the third argument's block and that its own

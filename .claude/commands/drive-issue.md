@@ -153,10 +153,17 @@ alone. If something exists only in your window, write it down before ending the 
 
 claim → route (Seam 1 if design-driven, via Delta 3) → `flow-implement` (subagent TDD, `--lite`
 each round, rust-reviewer + sanctioned roborev on the lite-green diff BEFORE any full gate) → open
-PR → `flow-closer` endgame (ONE full gate of record → C intent audit → final roborev →
-`premerge-assert` → `gh pr merge --auto --squash --delete-branch`) → `flow-finalize` (archive,
+PR → `flow-closer` endgame (rebase FIRST → ONE full gate of record → C intent audit → **roborev
+LAST** → `premerge-assert` → `gh pr merge --auto --squash --delete-branch`) → `flow-finalize` (archive,
 telemetry PR, worktree/branch/claim cleanup) → `CronDelete` → closing comment on the issue with the
 terminal packet (verdicts + PR + residuals).
+
+**ROBOREV LAST, and a later rebase VOIDS the roborev round (#3752).** A roborev round changes no
+bytes, so reviewing after gating costs nothing and cannot invalidate a gate PASS; a rebase changes
+bytes, so gating or reviewing before it certifies the wrong tree. Post the terminal
+`==== ROBOREV REVIEW SUMMARY ====` block as a top-level PR comment — `premerge-assert`'s
+`review-binding` leg reads the job id from there and refuses the merge when nothing on the PR binds
+a review to the tree about to merge.
 
 ## Red flags — STOP and re-read the matching delta
 
