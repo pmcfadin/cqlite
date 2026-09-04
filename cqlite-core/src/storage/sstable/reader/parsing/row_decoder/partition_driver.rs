@@ -47,13 +47,70 @@ pub(super) fn row_write_timestamp(row_header_opt: &Option<RowHeader>) -> i64 {
 }
 
 /// How the driver should advance after a policy handled a range-tombstone marker.
+///
+/// `Unparseable` and `Refused` are two of the three states ONE signal used to
+/// conflate (issue #3721), and the distinction between them is a FRAMING one,
+/// decided from state the caller already holds — never a severity judgement and
+/// never a byte pattern:
+///
+/// * `Unparseable` — the marker could not be PARSED, so there is no resume
+///   offset, and the cause is PRESERVED: `NeedMore` on a non-final chunk (a
+///   refill may still complete the marker) and the preserved error propagated on
+///   the FINAL chunk, where no refill is coming and completing the partition
+///   would report success with the marker — and every later row — missing.
+///
+///   The third state, `Stop`, is GONE (roborev job 78). It expressed "this parse
+///   failure IS a framing terminator", which let the FINAL chunk complete the
+///   partition SUCCESSFULLY without the marker: a silently truncated `SELECT` on
+///   the read path, and a dropped tombstone in WRITTEN output on the compaction
+///   path (roborev job 16). Both policies produced it and the meaning was wrong
+///   for both, so the variant is REMOVED rather than left available — a variant a
+///   future policy can reach for is how this defect came to be written twice. See
+///   `range_marker_error`'s module docs for the two facts that settle it and the
+///   Cassandra authority.
+/// * `Refused` — the marker WAS parsed (a resume offset exists and the partition
+///   body continues there) and the policy cannot represent it. Corruption with a
+///   valid resume point, which no refill can fix; reporting it as `Stop` truncated
+///   the partition and returned `Ok`. Both policies produce it: the timestamps
+///   policy when the read-side shadow FSM refuses a bound kind, and the compaction
+///   policy for an unrecognised bound kind of its own (#3808) — where a SKIP is
+///   worse still, because that policy's rows are written to a new SSTable.
 pub(super) enum MarkerOutcome {
     /// The marker was consumed; continue the row loop at this offset.
     Advanced(usize),
-    /// The marker could not be represented/parsed faithfully — terminate the
-    /// partition (the driver flushes buffered rows on the final chunk, else
-    /// returns `NeedMore`), mirroring the pre-K1 `break`/`NeedMore` behaviour.
-    Stop,
+    /// The marker could not be PARSED — no resume offset exists — and the parse
+    /// error is carried here rather than discarded (issue #3721).
+    ///
+    /// The driver, which is the only holder of the chunking state, then decides
+    /// on a FRAMING fact and never on a byte pattern:
+    ///
+    /// * **non-final chunk** — the marker body may simply straddle the window
+    ///   boundary, which is the one explanation a refill can fix, so this is
+    ///   `NeedMore` — the behaviour the removed `Stop` variant had on a non-final
+    ///   chunk, the one half of its meaning that was right;
+    /// * **final chunk** — no further bytes can arrive, so "cannot parse this
+    ///   marker" is corrupt or truncated data and NOT a boundary. The preserved
+    ///   cause is propagated instead of being converted into a successful
+    ///   partition completion.
+    ///
+    /// EVERY policy produces this from its marker-PARSE-failure arm, and the harm
+    /// it prevents is NOT scoped to written output:
+    ///
+    /// * `timestamp_policy` — the USER-FACING read. Completing the partition here
+    ///   returns `Ok` with the tombstone and every later row of the partition
+    ///   missing, and nothing downstream rejects it (`block_emit`'s
+    ///   `partition_complete` flag gates only the #3095 static-only emission). A
+    ///   silently truncated `SELECT` is this issue's PRIMARY harm (roborev job 78).
+    /// * `compaction::CompactionPolicy` — the same omission in output that is
+    ///   WRITTEN, so the rows the dropped tombstone shadowed come back durably, on
+    ///   disk (roborev job 16) — the same harm as the unrecognised bound kind
+    ///   [`MarkerOutcome::Refused`] covers (#3808), for a parse failure instead of
+    ///   an unrepresentable kind.
+    Unparseable(Error),
+    /// The marker was PARSED but cannot be represented faithfully (issue #3721):
+    /// corruption at a known resume point. Propagated to the caller of the read —
+    /// see [`super::range_marker_error::range_marker_refused`].
+    Refused(Error),
 }
 
 /// Issue #3809 (Finding 1) — the DISCRIMINATED outcome of a data-row policy hook.
@@ -214,8 +271,11 @@ pub(super) trait SlidingPartitionPolicy {
     ///   to report. The driver treats it exactly as it always has:
     ///   end-of-partition on the final chunk, else `NeedMore`.
     /// * [`DataRowOutcome::DecodeFailed(e)`](DataRowOutcome::DecodeFailed) — the
-    ///   row FAILED TO DECODE, with `e` preserved (issue #3782). The policy does
-    ///   NOT decide tolerance; the DRIVER does, from `at_final_chunk`.
+    ///   row FAILED TO DECODE, with `e` preserved (issue #3782) — typically a
+    ///   COLUMN inside it ([`crate::Error::ColumnDecode`], #3721). Serving the row
+    ///   without that column, or ending the partition early, are both silent data
+    ///   loss. The policy does NOT decide tolerance; the DRIVER does, from
+    ///   `at_final_chunk`.
     /// * [`DataRowOutcome::Refused(e)`](DataRowOutcome::Refused) — the row DECODED
     ///   and must not be emitted (issue #3809). The driver propagates `e`
     ///   UNCONDITIONALLY and never consults `at_final_chunk`.
@@ -246,7 +306,8 @@ pub(super) trait SlidingPartitionPolicy {
     ///
     /// Before #3782 this returned `Option<usize>`, so a decode error and "no row
     /// here" were the same value and every error was silently swallowed as
-    /// end-of-partition. Before #3809 the two FAILURES were the same value, so a
+    /// end-of-partition — which is #3721's defect at this layer, and the same
+    /// contract both issues arrived at independently. Before #3809 the two FAILURES were the same value, so a
     /// refusal inherited the decode failure's tolerance. There is deliberately no
     /// `Result` in the signature: a `?` inside a policy body is the most natural
     /// thing to write and would route a refusal into the tolerated channel
@@ -426,13 +487,24 @@ impl V5CompressedLegacyParser {
                         offset = next_offset;
                         continue;
                     }
-                    MarkerOutcome::Stop => {
+                    // Issue #3721 (roborev jobs 16 + 78): a marker parse failure.
+                    // A non-final chunk may simply have cut the marker body in
+                    // half, so a refill is still the right answer; the FINAL chunk
+                    // has nothing left to arrive, so completing the partition here
+                    // would report success with a tombstone missing. Propagate the
+                    // preserved cause instead.
+                    MarkerOutcome::Unparseable(cause) => {
                         if at_final_chunk {
-                            // Unrepresentable marker: body only partly observed.
-                            return flush_and_emitted!(offset, false);
+                            return Err(range_marker_error::unparseable_marker_at_final_chunk(
+                                cause,
+                            ));
                         }
                         return Ok(ParseStep::NeedMore);
                     }
+                    // Issue #3721: the marker parsed and the body continues past
+                    // it, so no refill can help and truncating the partition would
+                    // report `Ok` with rows missing. Propagate.
+                    MarkerOutcome::Refused(e) => return Err(e),
                 }
             }
 

@@ -1015,18 +1015,18 @@ fn a_minus_one_component_length_is_still_a_null_field() {
 // `!= N` (issue #3612 round 3 addendum)
 // ---------------------------------------------------------------------------
 //
-// !! REACHABILITY: THE EMPTY-KEY CASES BELOW ARE UNIT-ONLY. A READ CANNOT REACH
-// !! THEM (issue #3612, R6-F2(a)).
+// !! REACHABILITY: THE EMPTY-KEY CASES BELOW ARE NOW REACHED BY A REAL READ
+// !! (issue #3747). This note previously said the opposite; do not restore it.
 //
-// The sole production caller decodes a key only `if !cell.path_bytes.is_empty()`
-// (`complex_column.rs`, the multicell map branch), so a zero-length cell path
-// never reaches `parse_cell_path_key` at all — and, worse, that branch drops the
-// whole entry rather than surfacing it, because the `if let Some(key_value) =
-// decoded_key` below it never fires. So these cases pin what the FUNCTION does
-// with an empty slice, which is what makes the width table a faithful mirror of
-// Cassandra's serializers; they do NOT evidence end-to-end support for an empty
-// map key, and must not be cited as such (CLAUDE.md wiring evidence: a feature is
-// done only when its public surface exercises it).
+// #3612 wrote them as UNIT-ONLY and that was accurate THEN: the sole production
+// caller decoded a key only `if !cell.path_bytes.is_empty()`, so a zero-length
+// path never reached `parse_cell_path_key` — and that branch DROPPED the entry,
+// because `if let Some(key_value) = decoded_key` never fired. #3612 filed the
+// swallow as #3747 instead of fixing it. #3747 removed the guard, so these cases
+// now describe behaviour a `SELECT` and a compaction read exercise. They are the
+// function-level half only: the wiring evidence is
+// `cqlite-core/tests/issue_3747_empty_map_key.rs`, against a Cassandra-written
+// fixture and its golden (a unit test is not wiring evidence on its own).
 //
 // That filter is PRE-EXISTING, not part of #3612, and it means a legal empty
 // `text`/`blob` map key is silently dropped from query and compaction results —
@@ -1039,32 +1039,32 @@ fn a_minus_one_component_length_is_still_a_null_field() {
 // so inet is `0/4/16`. Both directions of the asymmetry are pinned below, because
 // only the pair is evidence.
 
-/// The `N`-or-`0` family: a 0-byte key passes the WIDTH table AND now DECODES,
-/// to `Value::Null`. EXPECTATION INVERTED BY #3847: it asserted `Err` plus "the message did not
-/// come from the width table", because the shared decoder's own `< n` guard
-/// refused every empty buffer, making the `0` here a pure fidelity fix. That
-/// decoder now admits Cassandra's `deserialize` set `{n, 0}`.
-/// UNIT-ONLY: see the REACHABILITY note above — no read reaches an empty key.
+/// The `N`-or-`0` family: a 0-byte key passes the WIDTH table (Cassandra's
+/// serializer accepts an empty buffer) and is now PRESERVED, opaquely.
+///
+/// #3612 asserted an `Err` here and called the `0` allowance "a fidelity fix, not a
+/// behaviour change" — true then: the decoder's length guard refused what the table
+/// admitted. **#3747 changed that on purpose** — losing a key Cassandra accepts is
+/// the data loss it exists to stop, and an untypeable key already had a policy:
+/// opaque bytes plus `opaque_out`. The STRICT sibling alone now carries the other half.
 #[test]
-fn an_empty_key_of_an_n_or_zero_type_decodes_to_null() {
+fn an_empty_key_of_an_n_or_zero_type_is_preserved_opaquely() {
     let p = parser();
-    for type_str in [
-        "int",
-        "bigint",
-        "float",
-        "double",
-        "uuid",
-        "timeuuid",
-        "timestamp",
-        "counter",
-        "boolean",
-    ] {
+    #[rustfmt::skip]
+    let types = ["int","bigint","float","double","uuid","timeuuid","timestamp","counter","boolean"];
+    for type_str in types {
+        let mut opaque = false;
+        let decoded = p
+            .parse_cell_path_key_reporting(&[], type_str, "k", &mut opaque)
+            .unwrap_or_else(|e| panic!("{type_str}: Cassandra accepts empty; keep it: {e}"));
         assert_eq!(
-            p.parse_cell_path_key(&[], type_str, "k")
-                .unwrap_or_else(|e| panic!("{type_str}: empty is legal (#3847), got Err: {e}")),
-            Value::Null,
-            "{type_str}: Cassandra's serializer ACCEPTS an empty buffer for this \
-             type and deserializes it to null"
+            decoded,
+            Value::blob(Vec::new()),
+            "{type_str}: preserved opaquely"
+        );
+        assert!(
+            opaque,
+            "{type_str}: opaque_out must be raised (gap goes to the log)"
         );
     }
 }
@@ -1073,12 +1073,9 @@ fn an_empty_key_of_an_n_or_zero_type_decodes_to_null() {
 /// the WIDTH TABLE, because these four serializers alone have no `isEmpty`
 /// allowance. This is the half that makes the three-way split load-bearing rather
 /// than decorative. (`inet` is NOT one of them — see
-/// `an_empty_inet_key_decodes_at_the_function_unreachable_by_a_read`.)
-///
-/// DECLARED DIVERGENCE, opened by #3847 and NOT closed by it — this table's
-/// oracle is `validate()` and the decoder's is now `deserialize()`; stated in
-/// full, with its reason, in `raw_value/fixed_width.rs`.
-/// UNIT-ONLY: see the REACHABILITY note above — no read reaches an empty key.
+/// `an_empty_inet_key_decodes_and_is_reachable_by_a_read`.)
+/// Reached by a real read since #3747 removed the caller's empty-path guard;
+/// see the REACHABILITY note above.
 #[test]
 fn an_empty_key_of_a_strict_type_is_refused_by_the_width_table() {
     let p = parser();
@@ -1103,14 +1100,12 @@ fn an_empty_key_of_a_strict_type_is_refused_by_the_width_table() {
 /// `inet` is NOT a fifth strict case, and it is the ONE family where the empty
 /// buffer decodes rather than merely passing the width table.
 ///
-/// UNIT-ONLY, and this one needs saying loudest because its NAME reads like a
-/// capability claim: "is legal and decodes" is a statement about THIS FUNCTION,
-/// not about a read. No `SELECT` or compaction read can reach it — the caller
-/// filters an empty `path_bytes` and drops the entry (see the REACHABILITY note
-/// above, issue #3612 R6-F2(a)). Kept rather than deleted because it is the only
-/// thing pinning the corrected `[0, 4, 16]` row against the three places that
-/// previously called `inet` "the fifth strict case"; renamed so the name states
-/// the scope.
+/// This carried the loudest UNIT-ONLY warning in the file, because its name reads
+/// like a capability claim and no read could reach it. **No longer true**: #3747
+/// removed the caller's empty-path guard, so a `SELECT` over `map<inet,…>` with an
+/// empty key does reach this arm and does return an empty `Value::Inet`. Renamed
+/// accordingly — a name asserting unreachability is worse than none once the code
+/// has moved. It remains the only thing pinning the corrected `[0, 4, 16]` row.
 ///
 /// `InetAddressSerializer.validate` RETURNS EARLY on empty
 /// (`if (accessor.isEmpty(value)) return;`) and only then delegates to
@@ -1121,7 +1116,7 @@ fn an_empty_key_of_a_strict_type_is_refused_by_the_width_table() {
 /// `isEmpty` test together with the `throw` from the `catch (UnknownHostException)`
 /// block below it. Read whole methods, not greps of their `if`s.
 #[test]
-fn an_empty_inet_key_decodes_at_the_function_unreachable_by_a_read() {
+fn an_empty_inet_key_decodes_and_is_reachable_by_a_read() {
     let p = parser();
     assert_eq!(
         p.parse_cell_path_key(&[], "inet", "k").unwrap(),

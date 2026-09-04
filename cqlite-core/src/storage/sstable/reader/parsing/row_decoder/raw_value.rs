@@ -36,75 +36,32 @@ impl V5CompressedLegacyParser {
     /// form (`"int"`) understood by [`parse_value_from_raw_bytes`]'s match
     /// (issue #1081). Returns `None` for any non-primitive marshal form
     /// (UserType / collection / tuple / reversed / frozen / custom), so the
-    /// caller leaves those to the dedicated arms. The suffix set is a *superset*
-    /// of the authoritative marshal→`CqlType` mapping in
-    /// [`parse_cassandra_type_with_depth`] (no heuristics — issue #28): in
-    /// addition to the scalars that mapping enumerates, this also normalizes a
-    /// few marshal forms that `parse_cassandra_type_with_depth` routes to
-    /// `Custom` (`VarcharType`, `CounterColumnType`, `LexicalUUIDType`,
-    /// `ShortType`, `ByteType`). Those extra mappings are required so we can
-    /// decode the corresponding scalar UDT field values — e.g. `ShortType`/
-    /// `ByteType` are needed to read `smallint`/`tinyint` UDT fields, which
-    /// otherwise fall through to the blob default.
+    /// caller leaves those to the dedicated arms.
+    ///
+    /// # ONE marshal-name table (issue #3631, roborev job 68)
+    /// This USED to be a second, independently-maintained suffix table, documented
+    /// as a deliberate *superset* of `parse_cassandra_type_with_depth`'s — and that
+    /// drift was the defect: the names this one had and that one lacked
+    /// (`VarcharType`, `CounterColumnType`, `LexicalUUIDType`, `ShortType`,
+    /// `ByteType`, and `TupleType`) are exactly the marshal-form UDT fields the
+    /// `CqlType` decoder then mis-routed to the nested-UDT decoder. So the table is
+    /// gone: this is now a projection of
+    /// [`Self::native_marshal_to_cql_type`] (the single marshal-name authority,
+    /// keyed on `cassandra-5.0.8`'s `CQL3Type.Native`) through
+    /// [`Self::cql_scalar_short_form`], and a name can no longer be known to one
+    /// side and unknown to the other.
+    ///
+    /// Two consequences of inheriting that table's rules, both intended:
+    /// `CounterColumnType` now normalizes to `"counter"` rather than `"bigint"`
+    /// (identical decode — the value arm is `"bigint" | "counter"` and the
+    /// cell-path width table gives both `[0, 8]`), and matching is EXACT on the
+    /// simple class name, so a third-party `com.acme.MyBytesType` is no longer
+    /// normalized to `blob` by a suffix match (it falls to the caller's
+    /// unknown-type path, as it always should have).
     pub(super) fn primitive_marshal_to_cql_short(marshal_type: &str) -> Option<&'static str> {
-        // Composite marshal forms carry a `(` after the type name; primitives do
-        // not. Reject anything parameterised so we never misread a collection /
-        // UDT as a scalar.
-        if marshal_type.contains('(') {
-            return None;
-        }
-        let s = marshal_type;
-        let short = if s.ends_with("UTF8Type") || s.ends_with("VarcharType") {
-            "text"
-        } else if s.ends_with("AsciiType") {
-            "ascii"
-        } else if s.ends_with("Int32Type") {
-            "int"
-        } else if s.ends_with("LongType") || s.ends_with("CounterColumnType") {
-            "bigint"
-        } else if s.ends_with("FloatType") {
-            "float"
-        } else if s.ends_with("DoubleType") {
-            "double"
-        } else if s.ends_with("BooleanType") {
-            "boolean"
-        } else if s.ends_with("TimeUUIDType") {
-            "timeuuid"
-        } else if s.ends_with("UUIDType") || s.ends_with("LexicalUUIDType") {
-            "uuid"
-        } else if s.ends_with("SimpleDateType") {
-            // CQL `date` (`SimpleDateType`) is a 4-byte unsigned days-since-epoch
-            // value. This is distinct from the legacy `DateType` handled below.
-            "date"
-        } else if s.ends_with("DateType") {
-            // Legacy Cassandra `DateType` is an 8-byte millis-since-epoch value —
-            // the same wire format as `TimestampType`. Mapping it to `date` would
-            // wrongly decode only the first 4 bytes, so route it to `timestamp`.
-            // NOTE: this `ends_with` arm must follow the `SimpleDateType` arm above
-            // because `SimpleDateType` also ends with `DateType`.
-            "timestamp"
-        } else if s.ends_with("TimestampType") {
-            "timestamp"
-        } else if s.ends_with("TimeType") {
-            "time"
-        } else if s.ends_with("DecimalType") {
-            "decimal"
-        } else if s.ends_with("IntegerType") {
-            "varint"
-        } else if s.ends_with("DurationType") {
-            "duration"
-        } else if s.ends_with("ShortType") {
-            "smallint"
-        } else if s.ends_with("ByteType") {
-            "tinyint"
-        } else if s.ends_with("InetAddressType") {
-            "inet"
-        } else if s.ends_with("BytesType") {
-            "blob"
-        } else {
-            return None;
-        };
-        Some(short)
+        Self::native_marshal_to_cql_type(marshal_type)
+            .as_ref()
+            .and_then(Self::cql_scalar_short_form)
     }
 
     /// Parse a value from a complete, bounded byte slice.
@@ -117,7 +74,7 @@ impl V5CompressedLegacyParser {
     /// [`Self::parse_value_from_raw_bytes_reporting`], which threads a REAL
     /// consumption count out of every arm; the wrapper then requires the decode to
     /// have consumed every byte of `data`
-    /// ([`Self::require_fully_consumed_raw`]). The rule is
+    /// ([`Self::require_fully_consumed`]). The rule is
     /// `cassandra-5.0.8` `TupleType.split`: a genuinely SHORT encoding leaves
     /// `position == length` and is legal, while trailing bytes (rule 4) and a
     /// partial 1-3 byte component-length prefix (rule 2) both leave it short and
@@ -140,7 +97,7 @@ impl V5CompressedLegacyParser {
     ) -> Result<Value> {
         let (value, consumed) =
             self.parse_value_from_raw_bytes_reporting(data, type_str, column_name, depth)?;
-        Self::require_fully_consumed_raw(consumed, data.len(), column_name, type_str)?;
+        Self::require_fully_consumed(consumed, data.len(), column_name, type_str)?;
         Ok(value)
     }
 }

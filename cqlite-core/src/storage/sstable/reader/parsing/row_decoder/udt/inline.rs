@@ -80,9 +80,9 @@ impl V5CompressedLegacyParser {
                 // Null field
                 None
             } else if field_len == 0 {
-                // Empty value
-                let value = Self::parse_simple_udt_field_value(&[], field_type)?;
-                Some(value)
+                // Zero-length: decoded from the DECLARED type, see
+                // `typed_value.rs::empty_is_a_value` (issue #3631).
+                Some(self.parse_simple_udt_field_value_at(&[], field_type, depth)?)
             } else {
                 let field_len =
                     Self::checked_component_len(field_len, field_name, current_offset, data.len())?;
@@ -90,38 +90,14 @@ impl V5CompressedLegacyParser {
                 let field_data = &data[current_offset..current_offset + field_len];
                 current_offset += field_len;
 
-                // Handle nested UDTs using inline field definitions (Issue #239)
-                let value = match field_type {
-                    CqlType::Udt(nested_name, nested_fields) if !nested_fields.is_empty() => {
-                        // Recursively parse nested UDT using its inline fields
-                        self.parse_inline_udt_value(
-                            field_data,
-                            nested_name,
-                            nested_fields,
-                            depth + 1,
-                        )?
-                    }
-                    CqlType::Frozen(inner) => match inner.as_ref() {
-                        CqlType::Udt(nested_name, nested_fields) if !nested_fields.is_empty() => {
-                            // Frozen nested UDT - unwrap and parse
-                            let inner_value = self.parse_inline_udt_value(
-                                field_data,
-                                nested_name,
-                                nested_fields,
-                                depth + 1,
-                            )?;
-                            Value::Frozen(Box::new(inner_value))
-                        }
-                        _ => {
-                            // Other frozen types - parse as simple value
-                            let inner_value =
-                                Self::parse_simple_udt_field_value(field_data, inner)?;
-                            Value::Frozen(Box::new(inner_value))
-                        }
-                    },
-                    _ => Self::parse_simple_udt_field_value(field_data, field_type)?,
-                };
-                Some(value)
+                // ONE per-field entry (issue #3631). This was the THIRD copy of the
+                // dispatch: its own nested-UDT recursion, its own `frozen` wrapping,
+                // and a `Value::Blob` fallback for everything else.
+                // `parse_simple_udt_field_value_at` expresses all of it once —
+                // including the registry-then-inline preference, which this copy did
+                // not have at all (it went straight to inline, so a nested UDT that
+                // WAS in the registry decoded from the possibly-staler inline list).
+                Some(self.parse_simple_udt_field_value_at(field_data, field_type, depth)?)
             };
 
             fields.push(UdtField {
@@ -133,7 +109,7 @@ impl V5CompressedLegacyParser {
         // Issue #3811 (census finding C): `data` IS the whole UDT value, so the
         // field loop must have reached its end. See the module header for why this
         // is here and not at the 14 call sites, and for why rule 1 still passes.
-        Self::require_fully_consumed_raw(current_offset, data.len(), type_name, "inline UDT")?;
+        Self::require_fully_consumed(current_offset, data.len(), type_name, "inline UDT")?;
         Ok(Value::Udt(Box::new(UdtValue {
             type_name: type_name.to_string(),
             keyspace: self.keyspace.clone(),
