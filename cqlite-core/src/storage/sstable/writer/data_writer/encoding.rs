@@ -173,6 +173,57 @@ pub(crate) fn serialize_collection_element_into(
     serialize_value_into(value, out)
 }
 
+/// The DECLARED KEY type of a multicell map column, from its declared type
+/// string in EITHER spelling — `None` when the string denotes no map type at
+/// all (issue #3805, roborev job 453).
+///
+/// # Why two spellings, and why this is not a relaxation
+/// A column's declared type reaches the writer as a CQL `map<K,V>` when it came
+/// from a CQL schema, and as Cassandra's MARSHAL form
+/// `org.apache.cassandra.db.marshal.MapType(Int32Type,Int32Type)` when it came
+/// from a `SerializationHeader` — which is why `write_complex_column` dispatches
+/// on both forms, and why the READ path decodes both
+/// (`row_decoder::complex_column::extract_map_types`). A gate that understood
+/// only the CQL spelling therefore refused a sentinel that a schema-less read
+/// had legitimately DECODED, on a rewrite (compaction) of the very SSTable it
+/// came from. Recognising the second spelling widens what the gate can SEE; the
+/// admission itself is unchanged and is still
+/// [`crate::types::EmptyValueType::check_admits`], so a key type that does not
+/// admit an empty buffer is refused in either spelling.
+///
+/// # NEITHER resolution is written here (one fact, one parser)
+///  * the CQL spelling is [`CqlType::parse`];
+///  * the marshal spelling is
+///    [`V5CompressedLegacyParser::parse_cassandra_type`], whose name table is
+///    derived arm-by-arm from `cql3/CQL3Type.java`'s `Native` enum at
+///    `cassandra-5.0.8` and which enforces the marshal PACKAGE rule (a
+///    third-party `com.acme.Int32Type` is refused, not read as `int`).
+///
+/// The string->string `convert_marshal_type_to_cql` in
+/// `parser::enhanced_statistics_parser` is deliberately NOT used: it maps
+/// `IntegerType` to `int` where Cassandra binds it to `varint`, and a one-argument
+/// `MapType(V)` to `map<text, V>`, so reusing it would decide an admission
+/// against a key type Cassandra does not agree with.
+///
+/// # What stays refused, on purpose
+/// A `FrozenType(MapType(K,V))` resolves to [`CqlType::Frozen`] and NOT to
+/// [`CqlType::Map`], so it is refused here: a frozen map is ONE inline
+/// length-prefixed cell with no CellPath at all, so its empty key is the
+/// inline-element case owned by `require_fixed_width` (#3847/#4071), not this
+/// one. A non-map declaration, a foreign-package class, and a spelling neither
+/// parser models are all refused for the reason this function exists.
+fn resolve_declared_map_key_type(map_data_type: &str) -> Option<CqlType> {
+    if let Ok(CqlType::Map(key, _)) = CqlType::parse(map_data_type) {
+        return Some(*key);
+    }
+    match crate::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser::parse_cassandra_type(
+        map_data_type,
+    ) {
+        Ok(CqlType::Map(key, _)) => Some(*key),
+        _ => None,
+    }
+}
+
 /// Serialize a MULTICELL map's CELL PATH (its serialized KEY) into `out`.
 ///
 /// This is the ONE write-path position where the empty-buffer sentinel
@@ -196,15 +247,19 @@ pub(crate) fn serialize_collection_element_into(
 /// refuses). Pinned by the write-surface census in
 /// `crate::types::empty_value`'s `write_surface_census_tests`.
 ///
-/// # An UNAVAILABLE declared type is a REFUSAL, never a guess (#28)
-/// `map_data_type` is the COLUMN's declared type, e.g. `map<int, int>`. When it
-/// does not parse as a CQL `map<K,V>` — a Cassandra MARSHAL spelling
-/// (`org.apache.cassandra.db.marshal.MapType(…)`), which [`CqlType::parse`] does
-/// not model and yields as `Custom`, or any other shape — there is no declared
-/// KEY type to validate the tag against, so a sentinel is refused. Refusing beats
-/// writing bytes that read back as something else. Every NON-sentinel key is
-/// unaffected and goes straight to [`serialize_value_into`], so an unparsed
-/// declared type costs nothing on any path that does not carry a sentinel.
+/// # BOTH declared SPELLINGS are recognised; an UNRESOLVABLE one is still a
+/// REFUSAL, never a guess (#28)
+/// `map_data_type` is the COLUMN's declared type, and it arrives in EITHER of
+/// two spellings — a CQL `map<int, int>` or Cassandra's MARSHAL form
+/// `org.apache.cassandra.db.marshal.MapType(Int32Type,Int32Type)` — because
+/// `write_complex_column` dispatches on both (`complex.rs`, the
+/// `org.apache.cassandra.db.marshal.maptype(` arm) and a schema-less read yields
+/// the marshal one. [`resolve_declared_map_key_type`] resolves both; where it
+/// cannot, the sentinel is REFUSED, because there is then no declared KEY type
+/// to validate the tag against and refusing beats writing bytes that read back
+/// as something else. Every NON-sentinel key is unaffected and goes straight to
+/// [`serialize_value_into`], so an unresolved declared type costs nothing on any
+/// path that does not carry a sentinel.
 pub(crate) fn serialize_map_cell_path_key_into(
     key: &Value,
     map_data_type: &str,
@@ -213,16 +268,15 @@ pub(crate) fn serialize_map_cell_path_key_into(
     let Value::Empty(tag) = key else {
         return serialize_value_into(key, out);
     };
-    let key_type = match CqlType::parse(map_data_type) {
-        Ok(CqlType::Map(k, _)) => *k,
-        _ => {
-            return Err(Error::InvalidInput(format!(
-                "an empty-buffer sentinel (`{}`, issue #3805) needs the DECLARED map key \
-                 type to be validated against, and `{map_data_type}` does not parse as a \
-                 CQL `map<K,V>`; refusing rather than guessing (issue #28)",
-                tag.cql_name()
-            )))
-        }
+    let Some(key_type) = resolve_declared_map_key_type(map_data_type) else {
+        return Err(Error::InvalidInput(format!(
+            "an empty-buffer sentinel (`{}`, issue #3805) needs the DECLARED map key \
+             type to be validated against, and `{map_data_type}` resolves to a map \
+             type in neither the CQL spelling (`map<K,V>`) nor the Cassandra marshal \
+             one (`org.apache.cassandra.db.marshal.MapType(K,V)`); refusing rather \
+             than guessing (issue #28)",
+            tag.cql_name()
+        )));
     };
     tag.check_admits(&key_type, map_data_type)?;
     // The whole encoding: NOTHING. `out` is deliberately left untouched — the

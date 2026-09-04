@@ -24,6 +24,20 @@
 //! (no-heuristics, issue #28): refusing beats writing bytes that read back as
 //! something else.
 //!
+//! # BOTH DECLARED SPELLINGS, one admission (roborev job 453)
+//! The gate reads the declared map type in EITHER spelling — CQL `map<K,V>` or
+//! Cassandra's marshal `org.apache.cassandra.db.marshal.MapType(K,V)` — because
+//! `write_complex_column` dispatches a multicell map on both and a schema-less
+//! read yields the marshal one, so a sentinel this crate legitimately DECODED
+//! from a marshal-declared column had been unwritable on a rewrite of that same
+//! SSTable. An earlier revision of this file listed the marshal spelling among
+//! the REFUSALS and a residual called that unreachable; it is not — the read path
+//! branches on that spelling and compaction rewrites what it read. What did NOT
+//! change is the admission: `check_admits` decides it, so the two spellings must
+//! give the SAME answer, which
+//! [`the_marshal_and_cql_spellings_of_one_declaration_agree`] pins in both
+//! directions.
+//!
 //! # ONE LEGAL WRITER, not two (roborev job 452)
 //! An earlier revision of this file called `TypeSerializer::serialize_value` a
 //! second legal writer, because it validates the tag against the declared type
@@ -103,15 +117,11 @@ fn the_map_cell_path_leaves_every_non_sentinel_key_alone() {
         .expect("an ordinary key still serializes");
     assert_eq!(out, 42i32.to_be_bytes().to_vec());
 
-    // A declared type the gate cannot parse as `map<K,V>` is IRRELEVANT unless a
-    // sentinel is actually being written.
+    // A declared type the gate cannot resolve to a map type AT ALL is IRRELEVANT
+    // unless a sentinel is actually being written.
     let mut out = Vec::new();
-    serialize_map_cell_path_key_into(
-        &Value::Integer(7),
-        "org.apache.cassandra.db.marshal.MapType(Int32Type,Int32Type)",
-        &mut out,
-    )
-    .expect("an ordinary key does not need the declared key type");
+    serialize_map_cell_path_key_into(&Value::Integer(7), "com.acme.NotAType(x)", &mut out)
+        .expect("an ordinary key does not need the declared key type");
     assert_eq!(out, 7i32.to_be_bytes().to_vec());
 }
 
@@ -166,17 +176,37 @@ fn the_map_cell_path_refuses_a_key_type_that_does_not_admit_an_empty_buffer() {
     }
 }
 
-/// A declared type the gate cannot resolve to a CQL `map<K,V>` is a REFUSAL, not
-/// a guess (#28). The Cassandra MARSHAL spelling is the realistic instance —
-/// `CqlType::parse` does not model it and yields `Custom` — and a
-/// non-map declaration is the degenerate one.
+/// A declared type the gate cannot resolve to a map type IN EITHER SPELLING is a
+/// REFUSAL, not a guess (#28).
+///
+/// The Cassandra MARSHAL map spelling used to be listed here, because
+/// `CqlType::parse` does not model it; roborev job 453 showed that to be the
+/// DEFECT rather than the rule (a schema-less read decodes such a column, so a
+/// rewrite of it must be able to write what it read), so it now lives in
+/// [`the_map_cell_path_accepts_a_marshal_spelled_map_declaration`]. What is left
+/// here is what genuinely resolves to no map type at all:
+///
+///  * a non-map CQL declaration, and a non-map MARSHAL declaration;
+///  * a marshal map class in a FOREIGN package — `com.acme.MapType(...)` is an
+///    unknown class whose byte layout CQLite knows nothing about, and reading it
+///    as Cassandra's `MapType` because the simple name matches is the heuristic
+///    the package rule exists to refuse (roborev job 76);
+///  * `FrozenType(MapType(K,V))` — a frozen map is ONE inline length-prefixed
+///    cell with no CellPath at all, so its empty key is the inline-element case
+///    `require_fixed_width` owns (#3847/#4071), not this position;
+///  * a `MapType` with the wrong arity, and a spelling neither parser models.
 #[test]
 fn the_map_cell_path_refuses_when_the_declared_key_type_is_unavailable() {
     for declared in [
-        "org.apache.cassandra.db.marshal.MapType(Int32Type,Int32Type)",
         "int",
         "list<int>",
         "",
+        "org.apache.cassandra.db.marshal.Int32Type",
+        "org.apache.cassandra.db.marshal.ListType(Int32Type)",
+        "com.acme.MapType(Int32Type,Int32Type)",
+        "org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.MapType(Int32Type,Int32Type))",
+        "org.apache.cassandra.db.marshal.MapType(Int32Type)",
+        "org.apache.cassandra.db.marshal.MapType(Int32Type,Int32Type",
     ] {
         let mut out = Vec::new();
         let err = serialize_map_cell_path_key_into(
@@ -193,6 +223,292 @@ fn the_map_cell_path_refuses_when_the_declared_key_type_is_unavailable() {
         );
         assert!(out.is_empty(), "a refusal writes nothing: {out:?}");
     }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// THE MARSHAL SPELLING OF THE SAME DECLARATION (roborev job 453)
+// ───────────────────────────────────────────────────────────────────────────
+
+/// The two spellings of ONE declared map key type: CQL, and the Cassandra
+/// marshal class the `SerializationHeader` carries.
+///
+/// The pairing is `cql3/CQL3Type.java`'s `Native` enum at `cassandra-5.0.8`, one
+/// row per constant that can be a map key, plus the `VarcharType` alias
+/// (`TypeParser` resolves it to `UTF8Type`). `counter` is absent because CQL
+/// forbids a `counter` collection element (`cql3/CQL3Type.java:827-828`).
+///
+/// `varint`/`IntegerType` is the row that decides WHICH parser this gate may
+/// reuse: Cassandra binds `IntegerType` to `varint`, and the string->string
+/// `convert_marshal_type_to_cql` in `parser::enhanced_statistics_parser` maps it
+/// to `int` — so a gate reusing that converter would admit an `Empty(int)` tag
+/// for a `varint` column and refuse the correct `Empty(varint)` one. This table
+/// pins the pairing so that substitution reds instead of shipping.
+const MARSHAL_KEY_SPELLINGS: &[(&str, &str)] = &[
+    ("int", "Int32Type"),
+    ("bigint", "LongType"),
+    ("float", "FloatType"),
+    ("double", "DoubleType"),
+    ("timestamp", "TimestampType"),
+    ("uuid", "UUIDType"),
+    ("timeuuid", "TimeUUIDType"),
+    ("boolean", "BooleanType"),
+    ("inet", "InetAddressType"),
+    ("decimal", "DecimalType"),
+    ("varint", "IntegerType"),
+    ("tinyint", "ByteType"),
+    ("smallint", "ShortType"),
+    ("date", "SimpleDateType"),
+    ("time", "TimeType"),
+    ("text", "UTF8Type"),
+    ("text", "VarcharType"),
+    ("ascii", "AsciiType"),
+    ("blob", "BytesType"),
+    ("duration", "DurationType"),
+];
+
+/// The marshal spelling of a `map<K, int>` declaration.
+///
+/// The OUTER `MapType(` is always FULLY QUALIFIED, for two independent reasons
+/// that agree: the crate's marshal parser deliberately requires the qualified
+/// package for every STRUCTURAL form (`marshal_name.rs`'s
+/// `qualified_marshal_simple_name`, roborev jobs 1359/1361 — supporting a bare
+/// `ListType(`/`MapType(` at one site only recreates the partial-bare-support
+/// inconsistency they closed), and `write_complex_column` itself dispatches a
+/// multicell map on `org.apache.cassandra.db.marshal.maptype(` alone, so a bare
+/// outer spelling never reaches this position as a map at all. That refusal is
+/// pinned by [`the_map_cell_path_refuses_a_bare_outer_marshal_map_spelling`].
+///
+/// `qualified` selects the INNER key class's spelling, where the package rule
+/// accepts both a bare simple name and the qualified one.
+fn marshal_map_of(key_class: &str, qualified: bool) -> String {
+    let key = if qualified {
+        format!("org.apache.cassandra.db.marshal.{key_class}")
+    } else {
+        key_class.to_string()
+    };
+    format!(
+        "org.apache.cassandra.db.marshal.MapType({key},\
+         org.apache.cassandra.db.marshal.Int32Type)"
+    )
+}
+
+/// The BARE outer spelling `MapType(K,V)` is REFUSED, and that is the crate's
+/// deliberate rule rather than a gap in this gate: every structural marshal form
+/// requires the qualified package (roborev jobs 1359/1361), and
+/// `write_complex_column` dispatches a multicell map only on
+/// `org.apache.cassandra.db.marshal.maptype(`, so a bare outer spelling is not a
+/// declaration this position can ever be reached with.
+#[test]
+fn the_map_cell_path_refuses_a_bare_outer_marshal_map_spelling() {
+    let mut out = Vec::new();
+    let err = serialize_map_cell_path_key_into(
+        &Value::Empty(EmptyValueType::Int),
+        "MapType(Int32Type,Int32Type)",
+        &mut out,
+    )
+    .expect_err("a bare outer MapType spelling must be refused, never guessed");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("#3805") && msg.contains("#28"),
+        "the refusal must cite the sentinel issue and the no-heuristics mandate: {msg}"
+    );
+    assert!(out.is_empty(), "a refusal writes nothing: {out:?}");
+}
+
+/// THE FINDING (roborev job 453): a column declared in the MARSHAL spelling
+/// accepts a matching sentinel and writes zero bytes, exactly as the CQL
+/// spelling does.
+///
+/// Why this is not a hypothetical: the READ path decodes a marshal-declared
+/// multicell map (`row_decoder::complex_column::extract_map_types` branches on
+/// `org.apache.cassandra.db.marshal.maptype(`), `write_complex_column` DISPATCHES
+/// on that same spelling, and this crate rewrites SSTables during compaction —
+/// so decode-then-write over a marshal-declared column is an ordinary flow, and
+/// refusing there made a legitimately decoded sentinel unwritable.
+#[test]
+fn the_map_cell_path_accepts_a_marshal_spelled_map_declaration() {
+    for (cql_key, key_class) in MARSHAL_KEY_SPELLINGS {
+        let cql_type = crate::schema::CqlType::parse(cql_key)
+            .unwrap_or_else(|e| panic!("{cql_key} must parse as a CqlType: {e}"));
+        let Some(tag) = EmptyValueType::for_cql_type(&cql_type) else {
+            continue; // non-admitting families are the next test's subject
+        };
+        for qualified in [true, false] {
+            let declared = marshal_map_of(key_class, qualified);
+            let mut out = vec![0xAAu8; 3]; // pre-existing bytes must be untouched
+            serialize_map_cell_path_key_into(&Value::Empty(tag), &declared, &mut out)
+                .unwrap_or_else(|e| {
+                    panic!("{declared}: a matching sentinel must be accepted: {e}")
+                });
+            assert_eq!(
+                out,
+                vec![0xAAu8; 3],
+                "{declared}: the sentinel's whole encoding is NOTHING — the length \
+                 lives in the caller's VInt"
+            );
+        }
+    }
+}
+
+/// RECOGNITION was widened; ADMISSION was not. A marshal-spelled declaration
+/// whose KEY type does not admit an empty buffer is still REFUSED — the four
+/// strict families (corruption on Cassandra's own terms) and the text/blob
+/// families (where an empty buffer is a legal MEANINGFUL value) — with the
+/// diagnostic naming the declared type.
+#[test]
+fn the_map_cell_path_refuses_a_marshal_spelled_key_type_that_does_not_admit() {
+    let mut refused = 0usize;
+    for (cql_key, key_class) in MARSHAL_KEY_SPELLINGS {
+        let cql_type = crate::schema::CqlType::parse(cql_key)
+            .unwrap_or_else(|e| panic!("{cql_key} must parse as a CqlType: {e}"));
+        if EmptyValueType::for_cql_type(&cql_type).is_some() {
+            continue;
+        }
+        for qualified in [true, false] {
+            let declared = marshal_map_of(key_class, qualified);
+            let mut out = Vec::new();
+            // The tag is deliberately a VALID one: what is refused is the
+            // DECLARED type, so this cannot pass for the wrong reason.
+            let err = serialize_map_cell_path_key_into(
+                &Value::Empty(EmptyValueType::Int),
+                &declared,
+                &mut out,
+            )
+            .expect_err("a non-admitting marshal-spelled key type must be refused");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("does not admit an empty buffer") && msg.contains(&declared),
+                "{declared}: the refusal must name the declared type and say why: {msg}"
+            );
+            assert!(out.is_empty(), "a refusal writes nothing: {out:?}");
+            refused += 1;
+        }
+    }
+    assert!(
+        refused >= 16,
+        "the non-admitting half of the marshal table must be non-trivial; refused {refused}"
+    );
+}
+
+/// A tag that DISAGREES with the marshal-spelled declared key type is refused
+/// naming BOTH types, exactly as under the CQL spelling.
+#[test]
+fn the_map_cell_path_refuses_a_disagreeing_tag_under_a_marshal_declaration() {
+    let declared = marshal_map_of("LongType", true);
+    let mut out = Vec::new();
+    let err =
+        serialize_map_cell_path_key_into(&Value::Empty(EmptyValueType::Int), &declared, &mut out)
+            .expect_err("an Empty(int) key in a MapType(LongType,…) must be refused");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("`int`") && msg.contains("`bigint`") && msg.contains("#3805"),
+        "the refusal must name BOTH types and the issue: {msg}"
+    );
+    assert!(out.is_empty(), "a refusal writes nothing: {out:?}");
+}
+
+/// THE DIFFERENTIAL, and the property that makes this change a widening of
+/// RECOGNITION and not of ACCEPTANCE: for every declared key type and every tag
+/// tried, the CQL spelling and the marshal spelling give the SAME answer, and
+/// that shared answer is the one the tag table dictates.
+///
+/// The expectation is DERIVED from [`EmptyValueType::for_cql_type`] rather than
+/// restated, so it cannot drift from the table it is supposed to agree with; the
+/// deliberate mismatch tags are what stop the equality passing vacuously (an
+/// always-refuse gate would satisfy equality alone).
+#[test]
+fn the_marshal_and_cql_spellings_of_one_declaration_agree() {
+    let mut admitted_total = 0usize;
+    for (cql_key, key_class) in MARSHAL_KEY_SPELLINGS {
+        let cql_type = crate::schema::CqlType::parse(cql_key)
+            .unwrap_or_else(|e| panic!("{cql_key} must parse as a CqlType: {e}"));
+        let matching = EmptyValueType::for_cql_type(&cql_type);
+        // The matching tag (when there is one) plus three deliberate mismatches.
+        let mut tags = vec![
+            EmptyValueType::Int,
+            EmptyValueType::BigInt,
+            EmptyValueType::Varint,
+        ];
+        if let Some(tag) = matching {
+            tags.push(tag);
+        }
+        for tag in tags {
+            let expected = matching == Some(tag);
+            let via_cql = serialize_map_cell_path_key_into(
+                &Value::Empty(tag),
+                &format!("map<{cql_key}, int>"),
+                &mut Vec::new(),
+            )
+            .is_ok();
+            for qualified in [true, false] {
+                let declared = marshal_map_of(key_class, qualified);
+                let via_marshal =
+                    serialize_map_cell_path_key_into(&Value::Empty(tag), &declared, &mut Vec::new())
+                        .is_ok();
+                assert_eq!(
+                    via_marshal, via_cql,
+                    "{declared} and map<{cql_key}, int> must give the SAME answer for \
+                     Empty({}) — recognising the marshal spelling must not change what \
+                     is ADMITTED",
+                    tag.cql_name()
+                );
+            }
+            assert_eq!(
+                via_cql,
+                expected,
+                "map<{cql_key}, int> with Empty({}): admission must follow the tag table",
+                tag.cql_name()
+            );
+            if expected {
+                admitted_total += 1;
+            }
+        }
+    }
+    assert!(
+        admitted_total >= 11,
+        "the differential must actually ADMIT in some cells, or the equality is \
+         vacuous; admitted {admitted_total}"
+    );
+}
+
+/// WIRING EVIDENCE for the marshal spelling: the gate is reached through the REAL
+/// complex column writer with a column declared exactly as a `SerializationHeader`
+/// spells it — a matching sentinel becomes a ZERO-LENGTH cell path, and a
+/// mismatched one fails the whole column write.
+#[test]
+fn the_real_complex_map_writer_reaches_the_gate_through_a_marshal_declaration() {
+    let writer = DataWriter::new(create_test_stats());
+    let declared = marshal_map_of("Int32Type", true);
+    let col = column("m", &declared);
+    let value = Value::Map(vec![
+        (Value::Empty(EmptyValueType::Int), Value::Integer(7)),
+        (Value::Integer(42), Value::Integer(1)),
+    ]);
+
+    let mut buf = Vec::new();
+    writer
+        .write_complex_column(&mut buf, &col, &value, 1_000, None, TEST_NOW_SECONDS)
+        .unwrap_or_else(|e| panic!("{declared} with an Empty(int) key must write: {e}"));
+    let (_del_ts, _del_ldt, cells) = decode_complex_column(&buf);
+    let paths: Vec<Vec<u8>> = cells.iter().map(|c| c.cell_path.clone()).collect();
+    assert_eq!(
+        paths,
+        vec![Vec::<u8>::new(), 42i32.to_be_bytes().to_vec()],
+        "the empty key must be a ZERO-LENGTH cell path, sorted FIRST, with the \
+         4-byte sibling path after it"
+    );
+
+    // MISMATCH under the same spelling: the write fails rather than emitting a
+    // path that reads back as another type.
+    let bad = column("m", &marshal_map_of("LongType", true));
+    let mut buf = Vec::new();
+    let err = writer
+        .write_complex_column(&mut buf, &bad, &value, 1_000, None, TEST_NOW_SECONDS)
+        .expect_err("an Empty(int) key under MapType(LongType,…) must fail the write");
+    assert!(
+        err.to_string().contains("#3805"),
+        "the refusal must reach the caller verbatim: {err}"
+    );
 }
 
 // ───────────────────────────────────────────────────────────────────────────
