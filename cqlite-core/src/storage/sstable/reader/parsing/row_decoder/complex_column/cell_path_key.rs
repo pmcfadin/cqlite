@@ -392,20 +392,13 @@ impl V5CompressedLegacyParser {
         let (decoded, consumed) =
             match self.decode_reporting_consumption(data, type_str, column_name, 0) {
                 Ok(v) => v,
-                Err(e) => {
-                    // #3747's OPAQUE POLICY, DOOR 1: the width table ADMITTED this
-                    // empty buffer but the decoder has no `Value` for an empty scalar
-                    // of this type. Preserve the key as opaque bytes and tell the
-                    // caller (typed: #3805) rather than dropping a key Cassandra
-                    // accepts. Defence in depth since #3847: every family the KEY
-                    // table admits at width 0 now decodes, so this door is reached
-                    // only by a type whose decoder still refuses an empty buffer.
-                    if data.is_empty() && allowed.contains(&0) {
-                        *opaque_out = true;
-                        return Ok(Value::blob(Vec::new()));
-                    }
-                    return Err(e);
+                // #3747's DOOR 1: the table ADMITTED this empty buffer but the
+                // decoder has no `Value` for an empty scalar. Typed: #3805.
+                Err(_) if data.is_empty() && allowed.contains(&0) => {
+                    *opaque_out = true;
+                    return Ok(Value::blob(Vec::new()));
                 }
+                Err(e) => return Err(e),
             };
         // A PEELED VIEW FOR THE CHECKS ONLY — the value itself is returned exactly
         // as the shared decoder produced it (see the return, and the module header's
@@ -416,31 +409,9 @@ impl V5CompressedLegacyParser {
         // becoming a presentation change, which is the defect roborev round 8 found
         // one nesting level down.
         let probe = Self::peeled_for_inspection(&decoded);
-        // #3747's OPAQUE POLICY, DOOR 2 — THE DECODE SUCCEEDED, WITH `Null`.
-        //
-        // This is the door #3847 opened, and reaching it cost a red `core-tests`.
-        // The policy used to live ONLY on the `Err` arm above, which was sound just
-        // while the shared decoder REFUSED an empty fixed-width buffer. #3847 made
-        // `parse_value_from_raw_bytes` admit `{n, 0}` and answer `Value::Null`, so
-        // the decode now SUCCEEDS and the old arm stopped being reached — handing
-        // back a NULL KEY, which Cassandra cannot express and which loses the key
-        // #3747 exists to preserve.
-        //
-        // KEYED ON THE DECODE'S ANSWER, NOT ON THE WIDTH TABLE. An earlier attempt
-        // tested `data.is_empty() && allowed.contains(&0)` BEFORE the decode, which
-        // is too broad and broke `inet`: `inet` admits `[0, 4, 16]` and an empty
-        // `inet` DECODES to a real `Value::Inet(empty)` — Cassandra's
-        // `InetAddressSerializer.validate` returns early on empty — so it must be
-        // returned, not made opaque. `Null` is the precise signal that the decoder
-        // had no value to give.
-        //
-        // AND READ THROUGH THE WRAPPER, which is why this sits BELOW `probe` rather
-        // than beside the decode (roborev job 152): `frozen<int>` decodes to
-        // `Frozen(Box::new(Null))`, so a `matches!(decoded, Value::Null)` test falls
-        // through a frozen-spelled key and returns the invalid null map key anyway.
-        // `peeled_for_inspection` LOOPS, so nesting is covered. The `Blob`
-        // diagnostic below learned this same lesson in #3612 round 8 — a sibling
-        // check added one level up has to use the peeled view too.
+        // #3747's DOOR 2: the decode SUCCEEDED with `Null`. Keyed on the PEELED
+        // answer, never the width table (`inet` admits 0 and decodes) and never a
+        // byte length. Full argument + the four defects it caused: `frozen_map`.
         if data.is_empty() && matches!(probe, Value::Null) {
             *opaque_out = true;
             return Ok(Value::blob(Vec::new()));
@@ -730,9 +701,7 @@ impl V5CompressedLegacyParser {
     /// `decoded`, which turned an inspection into a presentation change and is the
     /// shape of roborev round 8's finding — parity is now the shared key-type
     /// rule's job (`map_key_type_for_decode`), never this function's.
-    pub(in crate::storage::sstable::reader::parsing::row_decoder) fn peeled_for_inspection(
-        value: &Value,
-    ) -> &Value {
+    pub(crate) fn peeled_for_inspection(value: &Value) -> &Value {
         let mut v = value;
         while let Value::Frozen(inner) = v {
             v = inner;
