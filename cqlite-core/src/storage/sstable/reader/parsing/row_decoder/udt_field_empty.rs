@@ -119,10 +119,19 @@ impl V5CompressedLegacyParser {
             // Fixing it here also covers collection ELEMENTS, which never reach
             // the field normalizer at all. A non-null inner value keeps its
             // `Frozen(...)` wrapper.
-            CqlType::Frozen(inner) => match self.parse_udt_field_value(&[], inner, depth + 1)? {
-                Value::Null => Ok(Value::Null),
-                decoded => Ok(Value::Frozen(Box::new(decoded))),
-            },
+            CqlType::Frozen(inner) => {
+                // No wildcard match arm: this function carries
+                // `#[deny(clippy::wildcard_enum_match_arm)]` for its `CqlType`
+                // totality, and that deny covers every match in it — including one
+                // on `Value`. An `if` keeps the null check without adding a
+                // wildcard the guard would (correctly) refuse.
+                let decoded = self.parse_udt_field_value(&[], inner, depth + 1)?;
+                if matches!(decoded, Value::Null) {
+                    Ok(Value::Null)
+                } else {
+                    Ok(Value::Frozen(Box::new(decoded)))
+                }
+            }
 
             // `Custom` now means what it says: a type string this reader could not
             // resolve. It no longer carries primitive marshal forms, because
