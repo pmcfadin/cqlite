@@ -362,7 +362,7 @@ required-features = ["observability-testing", "delta-scan", "lz4"]
 # and all three gates are load-bearing: `cli-helpers` (which implies
 # `state_machine`) for the `ingestion`/`Database` surface the lanes drive, and
 # `lz4` because EVERY fixture they read is an LZ4-compressed Cassandra 5.0
-# SSTable — `support/corrupt_clustering_fixture.rs` asserts the algorithm before
+# SSTable — `support/corrupt_byte_fixture.rs` asserts the algorithm before
 # mutating, and without the feature `Compressor::decompress` answers
 # `Err("LZ4 compression not available")`. Declaring only the first two let
 # `cargo test -p cqlite-core --no-default-features --features cli-helpers` RUN
@@ -390,6 +390,21 @@ required-features = ["state_machine", "cli-helpers", "lz4"]
 
 [[test]]
 name = "point_vs_full_differential"
+required-features = ["state_machine", "cli-helpers", "lz4"]
+
+# Corrupt partition-HEADER refusal lane (issue #3928, the header-arm residual of
+# #3782). Same `#![cfg]` and the same three load-bearing gates as the three
+# targets above, for the same reasons, and executed by the same lanes
+# (`core-tests` and the diff-scoped `--lite` blast radius).
+[[test]]
+name = "issue_3928_corrupt_header_refusal"
+required-features = ["state_machine", "cli-helpers", "lz4"]
+
+# The TRUNCATED-header half of the same issue, split out at the 1500-line test
+# threshold (campsite rule, #1135). Same `#![cfg]` and the same three
+# load-bearing gates as its sibling, and executed by the same lanes.
+[[test]]
+name = "issue_3928_truncated_header_refusal"
 required-features = ["state_machine", "cli-helpers", "lz4"]
 
 [[bench]]

@@ -866,3 +866,8 @@ mod regression_3848_frozen_preamble_overflow_tests;
 // the value silently degrades to `Blob`.
 #[cfg(test)]
 mod regression_2807_qualified_udt_decode_tests;
+
+// Issue #3778: `duration` trailing-byte tolerance is PARITY-CORRECT, not a bug —
+// the oracle and the ruling are in that module's own header. Read it before "fixing".
+#[cfg(test)]
+mod issue_3778_duration_parity_tests;

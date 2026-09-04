@@ -62,6 +62,18 @@ FAIL=0
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
+# THREE-VALUED FILE PROBES (#3752, lane-3752 audit). A `grep -q` over a FILE
+# inside an `if/else` answers a three-valued question two-valued: "matched",
+# "did not match" and "could not be read" are three facts, and the two-valued
+# form folds the third onto whichever branch was written second. Every fixture
+# non-vacuity check below reads a file this suite wrote milliseconds earlier, so
+# a failed WRITE and a wrong SHAPE used to be one verdict under the shape's
+# message — and one of them (the absent-`dirty:` check) folded the unreadable
+# case onto `ok`. The library also has no pipeline: under `set -o pipefail` a
+# `producer | grep -q` reports the producer's SIGPIPE when the consumer matches
+# and exits early, which was MEASURED as a false FAIL in the sibling suite.
+. "$SCRIPT_DIR/lib/tristate-file-probe.bash"
+
 # THE SCRATCH DIR IS VALIDATED BEFORE ANY PATH IS BUILT FROM IT (#3650 review
 # B5). An unchecked `mktemp` leaves `$T` EMPTY, after which every `"$T/..."` in
 # this suite resolves to an ABSOLUTE path at the ROOT — `/all-output.txt` and
@@ -149,10 +161,38 @@ if [ "${MOCK_GH_FAIL:-0}" = "1" ]; then
   echo "gh: could not connect" >&2
   exit 1
 fi
+# The #3752 legs ask gh for STRUCTURED payloads, not the two-token head/state
+# line, so the mock answers by CALL SHAPE. Only the shipped-wiring case reaches
+# these branches (every other case runs against the neutral binding stub), and
+# each is driven by its own env var so a case can substitute a payload.
+case "$*" in
+  *closingIssuesReferences*)
+    printf '%s\n' "${MOCK_GH_HOLD_JSON:-{\"body\":\"\",\"comments\":[],\"closingIssuesReferences\":[]\}}"
+    exit 0 ;;
+  *baseRefName*)
+    printf '%s\n' "${MOCK_GH_PR_JSON:-{\"baseRefName\":\"main\",\"body\":\"\",\"comments\":[]\}}"
+    exit 0 ;;
+esac
+case "$1" in
+  api) printf '%s\n' "${MOCK_GH_TIMELINE_JSON:-[]}"; exit 0 ;;
+esac
 printf '%s\n' "${MOCK_GH_OUT:-}"
 exit 0
 MOCK
 chmod +x "$BIN/gh"
+
+# A `roborev` mock: the #3752 review-binding leg derives the reviewed head from
+# the JOB RECORD, never from stdout prose, so this emits the real payload shape
+# (the job row NESTED under a "job" key, measured in issue #2964).
+cat >"$BIN/roborev" <<'RBMOCK'
+#!/usr/bin/env bash
+[ -n "${MOCK_ROBOREV_JSON:-}" ] || exit 1
+case "$1" in
+  show | list) printf '%s\n' "$MOCK_ROBOREV_JSON" ;;
+  *) exit 1 ;;
+esac
+RBMOCK
+chmod +x "$BIN/roborev"
 
 # REAL_TO — the HOST's own supported timeout runner, resolved by the SAME
 # algorithm the script under test uses (`timeout` THEN `gtimeout`, each PROBED
@@ -255,6 +295,39 @@ if ! cp "$SCRIPT_DIR/../flow/review-stage.sh" "$NEUTRAL_DIR/review-stage.sh"; th
   printf 'FAIL - could not copy review-stage.sh into the neutral scratch copy\n' >&2
   exit 1
 fi
+
+# THE #3752 REVIEW-BINDING / HOLD LEGS ALSO NEED A NEUTRAL STUB. They are
+# resolved from the assert's OWN directory with no override (#3312's enforcer
+# rule), so substituting the ARTIFACT is the only way to keep these cases about
+# what they are about. An ABSENT helper is a TOOL-FAILURE by design — which is
+# exactly what every success-path case here would become without this stub.
+# Their own subject is owned by scripts/tests/test_premerge_review_binding.sh.
+NEUTRAL_BINDING='#!/usr/bin/env bash
+case "$1" in
+  review-binding) printf "PREMERGE: REVIEW-BINDING neutral immediate stub\n"
+                  printf "PREMERGE: REVIEW-BINDING verdict NOT-APPLICABLE\n" ;;
+  hold-check)     printf "PREMERGE: HOLD-CHECK neutral immediate stub\n"
+                  printf "PREMERGE: HOLD-CHECK verdict NO-HOLD-RECOGNISED\n" ;;
+  *) exit 3 ;;
+esac
+exit 0'
+printf '%s\n' "$NEUTRAL_BINDING" >"$NEUTRAL_DIR/premerge-review-binding.sh"
+chmod +x "$NEUTRAL_DIR/premerge-review-binding.sh"
+
+# install_neutral_binding <dir> — stage that stub beside ANY scratch copy of the assert.
+# ONE SPELLING, DELIBERATELY. Seven of this suite's scratch copies were written for #3751
+# before #3752 landed, and each of them broke the same way once the assert began REQUIRING
+# premerge-review-binding.sh beside itself: exit 3 TOOL-FAILURE where the case wanted 0 or 2
+# (measured on this merge: 7 assertions red, all of them controls asserting that correct input
+# still certifies). A per-site copy of the two lines above would be seven places for the stub
+# to drift from the artifact it stands in for, so the fixtures share this one function — the
+# same reasoning `c_inject_into` records for the `--c-verdict` flag one merge ago. Returns
+# non-zero on failure so a caller's `|| <ok>=0` still fires.
+install_neutral_binding() {
+  printf '%s\n' "$NEUTRAL_BINDING" >"$1/premerge-review-binding.sh" 2>/dev/null || return 1
+  chmod +x "$1/premerge-review-binding.sh" 2>/dev/null || return 1
+  return 0
+}
 NEUTRAL_ASSERT="$NEUTRAL_DIR/premerge-assert.sh"
 
 # run <expected-exit> <description> <args...> — invokes the NEUTRAL COPY of the
@@ -689,11 +762,10 @@ refused "no tree-start: line -> refuse" "$T/no-tstart.txt" "no 'tree-start:' lin
 { full_block "$C7" "$C12" PASS FAIL
   full_block "$C7" "$C12" PASS PASS
 } >"$T/two-blocks.txt"
-if [ "$(grep -c -x -F "$FULL_S" "$T/two-blocks.txt")" -eq 2 ]; then
-  ok "two-blocks fixture: the file really does hold TWO full-gate start markers"
-else
-  bad "two-blocks fixture: expected 2 start markers in the fixture"
-fi
+assert_count \
+  "two-blocks fixture: the file really does hold TWO full-gate start markers" \
+  "two-blocks fixture: expected 2 start markers in the fixture, saw %s" \
+  "$T/two-blocks.txt" line-exact "$FULL_S" 2
 refused "two full-gate blocks -> refuse as AMBIGUOUS" "$T/two-blocks.txt" "2 full-gate blocks"
 if [ "${OUT#*"take the last block"}" != "$OUT" ]; then
   ok "two-blocks: refusal explains why 'take the last one' is unsafe"
@@ -735,11 +807,10 @@ refused "prose quoting the markers -> counted as ZERO blocks" \
 
 # A real block AFTER prose that quotes the markers still parses as exactly one.
 { cat "$T/prose-only.txt"; full_block; } >"$T/prose-then-block.txt"
-if [ "$(grep -c -x -F "$FULL_S" "$T/prose-then-block.txt")" -eq 1 ]; then
-  ok "prose+block fixture: exactly one whole-line-exact start marker, plus quoted ones"
-else
-  bad "prose+block fixture: expected exactly 1 whole-line-exact start marker"
-fi
+assert_count \
+  "prose+block fixture: exactly one whole-line-exact start marker, plus quoted ones" \
+  "prose+block fixture: expected exactly 1 whole-line-exact start marker, saw %s" \
+  "$T/prose-then-block.txt" line-exact "$FULL_S" 1
 if run 0 "prose quoting the markers + ONE real block -> exit 0" \
   2421 "$CERTIFIED" "$T/prose-then-block.txt"; then
   ok "anchoring: quoted/indented markers are inert; the one real block certifies"
@@ -757,11 +828,10 @@ sed -e "s/RESULT: PASS/${ESC}[32mRESULT${ESC}[0m: ${ESC}[1;32mPASS${ESC}[0m/" \
     -e "s/tree-integrity: PASS/tree-integrity: ${ESC}[32mPASS${ESC}[0m/" \
     -e "s/^${FULL_S}\$/${ESC}[1m${FULL_S}${ESC}[0m/" \
     "$GOOD" >"$T/coloured.txt"
-if grep -q "$ESC" "$T/coloured.txt"; then
-  ok "colour fixture: the fixture really does contain ANSI escapes"
-else
-  bad "colour fixture: expected ANSI escapes in the fixture"
-fi
+assert_src_present_fixed \
+  "colour fixture: the fixture really does contain ANSI escapes" \
+  "colour fixture: expected ANSI escapes in the fixture" \
+  "$T/coloured.txt" "$ESC"
 if run 0 "ANSI-coloured full summary -> still parsed -> exit 0" \
   2421 "$CERTIFIED" "$T/coloured.txt"; then
   ok "ansi: escapes are stripped before marker/verdict matching (#3400)"
@@ -829,11 +899,15 @@ esac
 # 25(c) ABSENT `dirty:` field -> REFUSE. Never skipped, never read as clean:
 # the same discipline as a non-hex commit:/tree-start: placeholder.
 full_summary "$T/dirty-absent.txt" "$C7" "$C12" PASS PASS -
-if grep -q '^commit: .* dirty:' "$T/dirty-absent.txt"; then
-  bad "dirty fixture: the absent-field fixture still carries a dirty: on commit:"
-else
-  ok "dirty fixture: the absent-field fixture really omits dirty: from commit:"
-fi
+# THE ONE THAT FOLDED ONTO `ok` (#3752, lane-3752). An ABSENCE assert whose
+# subject cannot be read used to CERTIFY the absence: an unwritable scratch file
+# would have reported "the fixture really omits dirty:" about a file with
+# nothing in it, and the refusal below would then have fired on the empty file
+# rather than on the shape it names.
+assert_src_absent \
+  "dirty fixture: the absent-field fixture really omits dirty: from commit:" \
+  "dirty fixture: the absent-field fixture still carries a dirty: on commit:" \
+  "$T/dirty-absent.txt" '^commit: .* dirty:'
 refused "commit: line with NO dirty: field -> refuse (nothing was measured)" \
   "$T/dirty-absent.txt" "records NO 'dirty:' value"
 
@@ -846,21 +920,19 @@ refused "commit: line with NO dirty: field -> refuse (nothing was measured)" \
 # fire BEFORE the `= no` compare, so a trailing clean value cannot short-circuit.
 full_summary "$T/dirty-dup.txt"
 sed -i 's/^\(commit: .* dirty: no\)$/\1 dirty: yes/' "$T/dirty-dup.txt"
-if grep -qE '^commit: .* dirty: no dirty: yes$' "$T/dirty-dup.txt"; then
-  ok "dirty fixture: the duplicate-field fixture really carries TWO dirty: tokens"
-else
-  bad "dirty fixture: expected two dirty: tokens on the commit: line"
-fi
+assert_src_present \
+  "dirty fixture: the duplicate-field fixture really carries TWO dirty: tokens" \
+  "dirty fixture: expected two dirty: tokens on the commit: line" \
+  "$T/dirty-dup.txt" '^commit: .* dirty: no dirty: yes$'
 refused "commit: line with TWO dirty: fields -> refuse (AMBIGUOUS, not last-wins)" \
   "$T/dirty-dup.txt" "AMBIGUOUS"
 # And the mirror image: a clean value LAST must not rescue a dirty value first.
 full_summary "$T/dirty-dup-clean-last.txt" "$C7" "$C12" PASS PASS yes
 sed -i 's/^\(commit: .* dirty: yes\)$/\1 dirty: no/' "$T/dirty-dup-clean-last.txt"
-if grep -qE '^commit: .* dirty: yes dirty: no$' "$T/dirty-dup-clean-last.txt"; then
-  ok "dirty fixture: the clean-last fixture is dirty FIRST, clean LAST"
-else
-  bad "dirty fixture: expected 'dirty: yes dirty: no' on the commit: line"
-fi
+assert_src_present \
+  "dirty fixture: the clean-last fixture is dirty FIRST, clean LAST" \
+  "dirty fixture: expected 'dirty: yes dirty: no' on the commit: line" \
+  "$T/dirty-dup-clean-last.txt" '^commit: .* dirty: yes dirty: no$'
 refused "commit: dirty: yes then dirty: no -> refuse (a trailing clean value cannot rescue it)" \
   "$T/dirty-dup-clean-last.txt" "AMBIGUOUS"
 
@@ -874,28 +946,24 @@ refused "commit: dirty: yes then dirty: no -> refuse (a trailing clean value can
 # defect one capture down. BOTH captures must read clean.
 full_summary "$T/dirty-start-only.txt" "$C7" "$C12" \
   "PASS (lockfile-settled: Cargo.lock)" PASS no yes
-if grep -qE '^tree-start: .* dirty: yes ' "$T/dirty-start-only.txt" \
-   && grep -qE '^commit: .* dirty: no$' "$T/dirty-start-only.txt"; then
-  ok "dirty fixture: the lockfile-settled fixture is dirty at START, clean at commit:"
-else
-  bad "dirty fixture: expected tree-start dirty: yes with commit: dirty: no"
-fi
-if grep -q 'tree-integrity: PASS (lockfile-settled' "$T/dirty-start-only.txt"; then
-  ok "dirty fixture: the lockfile-settled fixture carries the NON-FATAL integrity PASS"
-else
-  bad "dirty fixture: expected a lockfile-settled tree-integrity PASS"
-fi
+assert_src_present_all \
+  "dirty fixture: the lockfile-settled fixture is dirty at START, clean at commit:" \
+  "dirty fixture: expected tree-start dirty: yes with commit: dirty: no" \
+  "$T/dirty-start-only.txt" '^tree-start: .* dirty: yes ' '^commit: .* dirty: no$'
+assert_src_present_fixed \
+  "dirty fixture: the lockfile-settled fixture carries the NON-FATAL integrity PASS" \
+  "dirty fixture: expected a lockfile-settled tree-integrity PASS" \
+  "$T/dirty-start-only.txt" 'tree-integrity: PASS (lockfile-settled'
 refused "tree-start: dirty: yes with a clean commit: -> refuse (lockfile-settled run)" \
   "$T/dirty-start-only.txt" "tree-start:"
 
 # 25(d) PRESENT KEY, EMPTY VALUE -> REFUSE. Distinct from an absent field: the
 # gate said something and it reduced to nothing.
 full_summary "$T/dirty-empty.txt" "$C7" "$C12" PASS PASS ""
-if grep -q '^commit: .* dirty:$' "$T/dirty-empty.txt"; then
-  ok "dirty fixture: the empty-value fixture ends its commit: line at the bare key"
-else
-  bad "dirty fixture: expected a bare trailing 'dirty:' on the commit: line"
-fi
+assert_src_present \
+  "dirty fixture: the empty-value fixture ends its commit: line at the bare key" \
+  "dirty fixture: expected a bare trailing 'dirty:' on the commit: line" \
+  "$T/dirty-empty.txt" '^commit: .* dirty:$'
 refused "commit: dirty: with an EMPTY value -> refuse" \
   "$T/dirty-empty.txt" "records NO 'dirty:' value"
 
@@ -934,11 +1002,10 @@ refused "dirty: unverified (the gate's own not-measured value) -> refuse on its 
 # two-valued read of a multi-state signal one layer down: it is neither `no` nor
 # absent, so it must REFUSE, naming what it actually found.
 full_summary "$T/dirty-next-key.txt" "$C7" "$C12" PASS PASS "digest: a7743efe8d80"
-if grep -q "^commit: .* dirty: digest: a7743efe8d80" "$T/dirty-next-key.txt"; then
-  ok "dirty fixture: the following-key fixture puts another key where the value goes"
-else
-  bad "dirty fixture: expected 'dirty: digest: ...' on the commit: line"
-fi
+assert_src_present \
+  "dirty fixture: the following-key fixture puts another key where the value goes" \
+  "dirty fixture: expected 'dirty: digest: ...' on the commit: line" \
+  "$T/dirty-next-key.txt" '^commit: .* dirty: digest: a7743efe8d80'
 refused "dirty: followed by another KEY -> refuse (a key is not a value)" \
   "$T/dirty-next-key.txt" "records 'dirty: digest:'"
 
@@ -954,29 +1021,24 @@ refused "dirty: followed by another KEY -> refuse (a key is not a value)" \
 # behaviour that already existed, and is recorded as such rather than counted as
 # evidence for the new enforcement.
 full_summary "$T/selftest-block.txt" selftest selftest "PASS (selftest)" PASS no
-if grep -q '^commit: selftest ' "$T/selftest-block.txt" &&
-   grep -q '^tree-integrity: PASS (selftest)' "$T/selftest-block.txt" &&
-   grep -q '^RESULT: PASS' "$T/selftest-block.txt"; then
-  ok "selftest fixture: the block really is a PASS with the selftest placeholders"
-else
-  bad "selftest fixture: expected a selftest-shaped PASS block"
-fi
+assert_src_present_all \
+  "selftest fixture: the block really is a PASS with the selftest placeholders" \
+  "selftest fixture: expected a selftest-shaped PASS block" \
+  "$T/selftest-block.txt" \
+  '^commit: selftest ' '^tree-integrity: PASS \(selftest\)$' '^RESULT: PASS'
 refused "a SELFTEST-shaped full block -> refuse (it certifies the gate, not this PR)" \
   "$T/selftest-block.txt" "is not lowercase hex"
 
 # 25(f) The check reads the `commit:` line, NOT the clean-looking `tree-start:`
 # one below it. The 25(b) fixture disagrees between the two on purpose.
-if grep -q '^tree-start: .* dirty: yes' "$T/dirty-yes.txt"; then
-  ok "dirty: the refused fixture's tree-start: mirrors yes (the gate's real shape)"
-else
-  bad "dirty: expected the yes fixture's tree-start: to mirror the value"
-fi
-if grep -q '^tree-start: .* dirty: no' "$T/dirty-maybe.txt" &&
-   grep -q "^commit: .* dirty: maybe" "$T/dirty-maybe.txt"; then
-  ok "dirty: an unrecognised commit: value refuses despite a clean tree-start: line"
-else
-  bad "dirty: the sentinel fixture should disagree between commit: and tree-start:"
-fi
+assert_src_present \
+  "dirty: the refused fixture's tree-start: mirrors yes (the gate's real shape)" \
+  "dirty: expected the yes fixture's tree-start: to mirror the value" \
+  "$T/dirty-yes.txt" '^tree-start: .* dirty: yes'
+assert_src_present_all \
+  "dirty: an unrecognised commit: value refuses despite a clean tree-start: line" \
+  "dirty: the sentinel fixture should disagree between commit: and tree-start:" \
+  "$T/dirty-maybe.txt" '^tree-start: .* dirty: no' '^commit: .* dirty: maybe'
 
 # --- Case 26: the mutated-path commit: parenthetical parses ------------------
 # On the #2926 mutation path `commit:` carries a trailing parenthetical; token
@@ -1318,11 +1380,10 @@ fi
 refused_pair "a LITE summary passed as the fourth argument -> refuse" \
   "$ANCHORFULL" "$T/lite-only.txt" "holds ZERO delta blocks"
 { delta_block; delta_block; } >"$T/two-deltas.txt"
-if [ "$(grep -c -x -F "$DELTA_S" "$T/two-deltas.txt")" -eq 2 ]; then
-  ok "two-deltas fixture: the file really does hold TWO delta start markers"
-else
-  bad "two-deltas fixture: expected 2 delta start markers"
-fi
+assert_count \
+  "two-deltas fixture: the file really does hold TWO delta start markers" \
+  "two-deltas fixture: expected 2 delta start markers, saw %s" \
+  "$T/two-deltas.txt" line-exact "$DELTA_S" 2
 refused_pair "TWO delta blocks in the fourth argument -> refuse as AMBIGUOUS" \
   "$ANCHORFULL" "$T/two-deltas.txt" "holds 2 delta blocks"
 refused_pair "fourth-argument file absent -> refuse" \
@@ -1429,12 +1490,10 @@ refused_pair "anchor block dirty: yes -> refuse even with a clean delta re-cert"
 # tree-start: independently, with commit: clean so the refusal cannot be its.
 delta_summary "$T/delta-start-only.txt" "$ANCHOR" "$C7" "$C12" \
   "PASS (lockfile-settled: Cargo.lock)" PASS "$DELTA_MODE" "(full-gate PASS commit)" no yes
-if grep -qE '^tree-start: .* dirty: yes ' "$T/delta-start-only.txt" \
-   && grep -qE '^commit: .* dirty: no$' "$T/delta-start-only.txt"; then
-  ok "dirty fixture (delta): dirty at START, clean at commit: -- values are INDEPENDENT"
-else
-  bad "dirty fixture (delta): expected tree-start dirty: yes with commit: dirty: no"
-fi
+assert_src_present_all \
+  "dirty fixture (delta): dirty at START, clean at commit: -- values are INDEPENDENT" \
+  "dirty fixture (delta): expected tree-start dirty: yes with commit: dirty: no" \
+  "$T/delta-start-only.txt" '^tree-start: .* dirty: yes ' '^commit: .* dirty: no$'
 refused_pair "delta tree-start: dirty: yes with a clean commit: -> refuse" \
   "$ANCHORFULL" "$T/delta-start-only.txt" "tree-start:"
 
@@ -1538,6 +1597,14 @@ if ! cp "$ASSERT" "$MUTDIR/premerge-assert.sh"; then
 else
   printf '%s\n' "$NEUTRAL_ADV" >"$MUTDIR/base-staleness.sh"
   chmod +x "$MUTDIR/base-staleness.sh"
+  # #3752: the assert now REQUIRES premerge-review-binding.sh beside it and exits 3
+  # TOOL-FAILURE when it is absent — correctly, since a guard that silently does not
+  # run is worse than no guard. A scratch copy of the ARTIFACT must therefore stage
+  # the helper too, or this non-vacuity control measures the MISSING HELPER instead
+  # of the neutered ancestry call: the mutant would exit 3 and the case would report
+  # that 44(b) proves nothing, when in fact the fixture was incomplete.
+  printf '%s\n' "$NEUTRAL_BINDING" >"$MUTDIR/premerge-review-binding.sh"
+  chmod +x "$MUTDIR/premerge-review-binding.sh"
   # The call site, replaced by the assignment it would have made on success.
   # shellcheck disable=SC2016  # a LITERAL line of another script; it must not expand here
   MUT_FROM='  assert_anchor_on_history "$delta_anchor" "$certified"'
@@ -2572,11 +2639,14 @@ to_shape=0
 if [ -n "$REAL_TO" ] && mkdir -p "$TOFLOW" && cp "$ASSERT" "$TOFLOW/premerge-assert.sh"; then
   printf '%s\n' "$NEUTRAL_ADV" >"$TOFLOW/base-staleness.sh"
   chmod +x "$TOFLOW/base-staleness.sh"
+  to_bind=1
+  install_neutral_binding "$TOFLOW" || to_bind=0   # #3752
   # ONLY the two constants change. sed on the exact assignment lines, then verify.
   sed -e 's/^ADVISORY_TIMEOUT_SECS=60$/ADVISORY_TIMEOUT_SECS=2/' \
       -e 's/^ADVISORY_KILL_GRACE=5$/ADVISORY_KILL_GRACE=1/' \
       "$TOFLOW/premerge-assert.sh" >"$TOFLOW/x" && mv "$TOFLOW/x" "$TOFLOW/premerge-assert.sh"
-  if grep -q -x -F 'ADVISORY_TIMEOUT_SECS=2' "$TOFLOW/premerge-assert.sh" &&
+  if [ "$to_bind" -eq 1 ] &&
+     grep -q -x -F 'ADVISORY_TIMEOUT_SECS=2' "$TOFLOW/premerge-assert.sh" &&
      grep -q -x -F 'ADVISORY_KILL_GRACE=1' "$TOFLOW/premerge-assert.sh" &&
      ! grep -q -x -F 'ADVISORY_TIMEOUT_SECS=60' "$TOFLOW/premerge-assert.sh" &&
      ! grep -q -x -F 'ADVISORY_KILL_GRACE=5' "$TOFLOW/premerge-assert.sh"; then
@@ -3056,11 +3126,10 @@ fi
   printf 'RESULT: PARTIAL\n'
   printf '%s\n' "$FULL_E"
 } >"$T/only-partial.txt"
-if grep -q -x -F 'mode: PARTIAL (--only file-size) - does NOT count as the gate' "$T/only-partial.txt"; then
-  ok "--only fixture: carries the LOWERCASE mode: PARTIAL line the gate really emits"
-else
-  bad "--only fixture: expected the verbatim lowercase mode: PARTIAL line"
-fi
+assert_src_present_line \
+  "--only fixture: carries the LOWERCASE mode: PARTIAL line the gate really emits" \
+  "--only fixture: expected the verbatim lowercase mode: PARTIAL line" \
+  "$T/only-partial.txt" 'mode: PARTIAL (--only file-size) - does NOT count as the gate'
 refused "a real --only summary (RESULT: PARTIAL) -> refuse" \
   "$T/only-partial.txt" "RESULT verdict token in the full-gate block is 'PARTIAL'"
 case "$OUT" in
@@ -3177,6 +3246,10 @@ flow_copy() {
     printf '%s\n' "$body" >"$d/base-staleness.sh"
     chmod +x "$d/base-staleness.sh"
   fi
+  # The #3752 legs get the neutral stub in EVERY scratch copy: their absence is
+  # a TOOL-FAILURE by design, and these cases are about the advisory.
+  printf '%s\n' "$NEUTRAL_BINDING" >"$d/premerge-review-binding.sh"
+  chmod +x "$d/premerge-review-binding.sh"
   if [ ! -f "$d/premerge-assert.sh" ]; then
     bad "flow_copy($name): the scratch copy is missing after cp"
     return 1
@@ -3759,8 +3832,22 @@ if [ "$wire_shape" -eq 1 ]; then
   WIREGOOD="$T/wiring-full-pass.txt"
   emit_summary_block "$FULL_S" "$FULL_E" "-" \
     "$(printf '%.7s' "$WIRE_SHA")" "$(printf '%.12s' "$WIRE_SHA")" PASS PASS >"$WIREGOOD"
+  # The shipped #3752 legs run for real here too, so the case is given the
+  # payloads they need: a PR body recording a roborev block, and a job record
+  # whose git_ref head IS this fixture's certified sha. That makes this the one
+  # case where BOTH shipped helpers are exercised end to end.
+  #
+  # The record carries the structured CLEAN verdict letter, and it must: since
+  # roborev job 59 finding 1 a range match ALONE no longer binds — the job
+  # RECORD has to say affirmatively that its review concluded cleanly (or carry
+  # an authorized deferral). A record with no readable verdict deliberately
+  # reaches UNMEASURED, so omitting it here would red this case on correct
+  # input.
+  WIRE_BASE=$(git -C "$WIRE_REPO" rev-parse refs/remotes/origin/main 2>/dev/null)
   WIRE_OUT=$(cd "$WIRE_REPO" &&
     PATH="$BIN:$PATH" MOCK_GH_OUT="$WIRE_SHA OPEN" MOCK_GH_FAIL=0 \
+    MOCK_GH_PR_JSON="{\"baseRefName\":\"mainline\",\"body\":\"==== ROBOREV REVIEW SUMMARY ====\\njob: 7\\n==== END ROBOREV REVIEW SUMMARY ====\",\"comments\":[]}" \
+    MOCK_ROBOREV_JSON="{\"id\":7,\"job\":{\"id\":7,\"git_ref\":\"$WIRE_BASE..$WIRE_SHA\",\"status\":\"done\",\"verdict\":\"P\"}}" \
     bash "$ASSERT" 2421 "$WIRE_SHA" "$WIREGOOD" --c-verdict "$C_PASS_FILE" 2>&1)
   WIRE_RC=$?
   if [ "$WIRE_RC" -ne 0 ]; then
@@ -3850,16 +3937,10 @@ SUITE_SELF="${BASH_SOURCE[0]}"
 _shipped_a='bash "$AS'
 _shipped_b='SERT"'
 SHIPPED_NEEDLE="$_shipped_a$_shipped_b"
-if [ -r "$SUITE_SELF" ]; then
-  shipped_calls=$(grep -c -F -- "$SHIPPED_NEEDLE" "$SUITE_SELF" | tr -d ' ')
-  if [ "$shipped_calls" = 1 ]; then
-    ok "no-ambient-scan: exactly ONE invocation of the shipped assert exists (the wiring case)"
-  else
-    bad "no-ambient-scan: $shipped_calls invocations of the shipped assert — only the wiring case may run it against a synthetic repo (#3650 R5 F2)"
-  fi
-else
-  bad "no-ambient-scan: could not read this suite's own source ($SUITE_SELF) to check the invocation count"
-fi
+assert_count \
+  "no-ambient-scan: exactly ONE invocation of the shipped assert exists (the wiring case)" \
+  "no-ambient-scan: %s invocations of the shipped assert — only the wiring case may run it against a synthetic repo (#3650 R5 F2)" \
+  "$SUITE_SELF" contains "$SHIPPED_NEEDLE" 1
 
 # --- Case 40: the three exit-3 causes are DISTINGUISHABLE (nit 8) ------------
 # Exit 3 covers a usage error, a tool failure and a gh failure. The CODES are
@@ -3914,6 +3995,8 @@ chmod +x "$ORDBIN/gh"
 if ! cp "$ASSERT" "$ORDFLOW/premerge-assert.sh"; then
   bad "order: could not build the scratch copy of premerge-assert.sh"
 else
+  printf '%s\n' "$NEUTRAL_BINDING" >"$ORDFLOW/premerge-review-binding.sh"
+  chmod +x "$ORDFLOW/premerge-review-binding.sh"
   cat >"$ORDFLOW/base-staleness.sh" <<'ORDADV'
 #!/usr/bin/env bash
 printf 'ADV\n' >>"$PREMERGE_ORDER_LOG"
@@ -3933,7 +4016,13 @@ ORDADV
   else
     ok "order: the ordering case runs the success path"
     # Non-vacuity: BOTH tokens must be present, or an absent stub would "pass".
-    if ! grep -qx 'ADV' "$ORDER_LOG" || ! grep -qx 'GH' "$ORDER_LOG"; then
+    # Whole-line-exact, as the `grep -qx` this replaces was: the log holds one
+    # bare token per line and a substring test would be a looser question.
+    order_adv=$(probe_count "$ORDER_LOG" line-exact 'ADV') || order_adv=""
+    order_gh=$(probe_count "$ORDER_LOG" line-exact 'GH') || order_gh=""
+    if [ -z "$order_adv" ] || [ -z "$order_gh" ]; then
+      bad "order: UNMEASURED -- the order log could not be read ($PROBE_WHY), so neither the non-vacuity nor the ordering was tested"
+    elif [ "$order_adv" -eq 0 ] || [ "$order_gh" -eq 0 ]; then
       bad "order: NON-VACUITY -- expected both ADV and GH to be recorded (got: $(tr '\n' ',' <"$ORDER_LOG"))"
     else
       ok "order: non-vacuity -- both the advisory and gh were actually invoked"
@@ -5317,6 +5406,7 @@ cp "$ASSERT" "$N2_DIR/premerge-assert.sh" 2>/dev/null || n2_ok=0
 cp "$SCRIPT_DIR/../flow/review-stage.sh" "$N2_DIR/review-stage.sh" 2>/dev/null || n2_ok=0
 printf '%s\n' "$NEUTRAL_ADV" >"$N2_DIR/base-staleness.sh" 2>/dev/null || n2_ok=0
 chmod +x "$N2_DIR/base-staleness.sh" 2>/dev/null || true
+install_neutral_binding "$N2_DIR" || n2_ok=0   # #3752
 # Every list travels through ENVIRON: `awk -v` performs ESCAPE PROCESSING on its value, which
 # round 7 measured turning a `\n` in an injected line into a real newline.
 N2_ANCHOR='out=$(bash "$rs" verdict "$C_STAGE_KIND" --issue "$issue"'
@@ -5521,6 +5611,7 @@ cp "$ASSERT" "$P2_DIR/premerge-assert.sh" 2>/dev/null || p2_ok=0
 cp "$SCRIPT_DIR/../flow/review-stage.sh" "$P2_DIR/review-stage.sh" 2>/dev/null || p2_ok=0
 printf '%s\n' "$NEUTRAL_ADV" >"$P2_DIR/base-staleness.sh" 2>/dev/null || p2_ok=0
 chmod +x "$P2_DIR/base-staleness.sh" 2>/dev/null || true
+install_neutral_binding "$P2_DIR" || p2_ok=0   # #3752
 # Every injected line travels through ENVIRON, never `awk -v`, which performs ESCAPE PROCESSING
 # on its value (round 7 measured a `\n` in an injected line becoming a real newline).
 P2_ANCHOR='out=$(bash "$rs" verdict "$C_STAGE_KIND" --issue "$issue"'
@@ -5710,6 +5801,7 @@ if [ -n "$P2_REPO" ]; then
   cp "$ASSERT" "$P2_STUB_DIR/premerge-assert.sh" 2>/dev/null || p2_stub_ok=0
   printf '%s\n' "$NEUTRAL_ADV" >"$P2_STUB_DIR/base-staleness.sh" 2>/dev/null || p2_stub_ok=0
   chmod +x "$P2_STUB_DIR/base-staleness.sh" 2>/dev/null || true
+install_neutral_binding "$P2_STUB_DIR" || p2_stub_ok=0   # #3752
   # p2_stub <report-value> — a callee that reports PASS with exactly that `report=` field.
   p2_stub() {
     printf '#!/usr/bin/env bash\nprintf "REVIEW-STAGE: c RESULT: PASS elapsed=1 deadline=3600 agent=spec-auditor report=%%s\\n" %s\nexit 0\n' \
@@ -6093,7 +6185,8 @@ Q3_STUB_DIR="$T/q3stub/flow"
 Q3_STUB_OK=0
 if [ "$Q3_OK" -eq 1 ] && [ -n "$Q3_NONCE" ] && mkdir -p "$Q3_STUB_DIR" &&
   cp "$ASSERT" "$Q3_STUB_DIR/premerge-assert.sh" 2>/dev/null &&
-  printf '%s\n' "$NEUTRAL_ADV" >"$Q3_STUB_DIR/base-staleness.sh" 2>/dev/null; then
+  printf '%s\n' "$NEUTRAL_ADV" >"$Q3_STUB_DIR/base-staleness.sh" 2>/dev/null &&
+  install_neutral_binding "$Q3_STUB_DIR"; then   # #3752: the helper is part of the fixture
   chmod +x "$Q3_STUB_DIR/base-staleness.sh" 2>/dev/null || true
   Q3_STUB_OK=1
   ok "q3/stub: a scratch assert plus a substitutable callee was built"
@@ -6600,6 +6693,7 @@ cp "$ASSERT" "$V1_DIR/premerge-assert.sh" 2>/dev/null || v1_ok=0
 cp "$SCRIPT_DIR/../flow/review-stage.sh" "$V1_DIR/review-stage.sh" 2>/dev/null || v1_ok=0
 printf '%s\n' "$NEUTRAL_ADV" >"$V1_DIR/base-staleness.sh" 2>/dev/null || v1_ok=0
 chmod +x "$V1_DIR/base-staleness.sh" 2>/dev/null || true
+install_neutral_binding "$V1_DIR" || v1_ok=0   # #3752
 V1_REPO=$(c_repo v1 design) || V1_REPO=""
 # v1_restore — back to "opened at HEAD, current report records PASS", re-asserted per case: a case
 # that leaves a superseded generation installed makes the next one refuse for the PREVIOUS case's
@@ -6845,6 +6939,7 @@ cp "$ASSERT" "$X1_FLOW/premerge-assert.sh" 2>/dev/null || x1_ok=0
 cp "$SCRIPT_DIR/../flow/review-stage.sh" "$X1_FLOW/review-stage.sh" 2>/dev/null || x1_ok=0
 printf '%s\n' "$NEUTRAL_ADV" >"$X1_FLOW/base-staleness.sh" 2>/dev/null || x1_ok=0
 chmod +x "$X1_FLOW/base-staleness.sh" 2>/dev/null || true
+install_neutral_binding "$X1_FLOW" || x1_ok=0   # #3752
 
 # x1_repo <outvar> <dirname> — a synthetic DESIGN-ROUTED repository at a LITERAL directory name,
 # ASSIGNED to <outvar>. `c_repo` above PRINTS its path, so it carries the very defect under test
@@ -8616,10 +8711,35 @@ fi
 # 10-row table and asserts the one-directional property that matters — the census is never MORE
 # PERMISSIVE than the reader it defers to.
 #
+# --- NO VERDICT MAY RIDE ON A PIPE INTO AN EARLY-EXITING GREP (#3752) --------
+# The structural half of a MEASURED false FAIL in the sibling suite: under
+# `set -o pipefail` a `producer | grep -q` reports the PRODUCER's SIGPIPE when
+# the consumer matches and exits before the producer has finished writing, so a
+# CORRECT file reds intermittently. The construct itself is the defect and its
+# absence is the property. The needle is assembled so this guard cannot match
+# its own line.
+_pipe_a='| grep -'
+_pipe_b='q'
+assert_src_absent_fixed \
+  "pipeline: no verdict in this suite is derived from a pipe into an early-exiting grep" \
+  "pipeline: a pipe into an early-exiting grep is back — under pipefail such a pipeline reports the PRODUCER's SIGPIPE" \
+  "${BASH_SOURCE[0]}" "$_pipe_a$_pipe_b" code
+
+# ONE FLOOR, NOT TWO — #3752's own `CASE_FLOOR=205` IS FOLDED IN HERE, NOT DELETED.
+# The two sides of this merge each committed a #3544 case floor over the SAME metric
+# (`PASS + FAIL`): this one at 629 and #3752's at 205. Keeping both would put two
+# constants and two verdict lines on one fact, so the next person raising one would
+# leave the other stale — the shape #3544 exists to catch, one level up. The
+# STRONGER constant wins (629 strictly implies 205 on the merged suite), and the
+# affirmative `ok` branch #3752's block contributed is ADOPTED below, because a
+# floor that only ever speaks when it is violated cannot be told apart from a floor
+# that was never reached.
 ASSERT_FLOOR=629
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"
+else
+  ok "CASE FLOOR: $EXECUTED assertions executed, at or above the committed floor of $ASSERT_FLOOR (which subsumes #3752's own CASE_FLOOR=205, folded in here)"
 fi
 
 # --- summary -----------------------------------------------------------------

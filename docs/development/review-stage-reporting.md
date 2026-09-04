@@ -723,7 +723,12 @@ Three further declared limits of the mechanism itself:
   hand costs the audit trail and nothing else.
   The operational consequence for a lane: **paste the path `open` PRINTS, never a remembered one**
   — and it cannot be reconstructed from the kind and the issue, so where no path was named, ask
-  `review-stage.sh status <kind> --issue <N>`, whose `report=` field is the authority.
+  `review-stage.sh verdict <kind> --issue <N>`, whose `report=` field is the authority. **NOT
+  `status`'s**, which this file's own round-16 (V2) residual above says displays a `~`-substituted
+  path on a `=`-bearing checkout: the exemption from the `=` map is confined to the VERDICT line's
+  `report=`, so `status`'s value can name a file that does not exist (measured at `.../eq=path/lane`:
+  `verdict`'s path opens, `status`'s `eq~path` spelling is absent). The two channels that promise the
+  real path are `open`'s raw line and the verdict line, exactly as stated there.
 - **The report path is DERIVED, and `--report` is GONE (round 4, H2/H3).** It is always
   `<repo-root>/.review-stage/issue-<N>/<kind>.<nonce>.md` (a bare `<kind>.md` only for a record
   written before the nonce existed), computed the same way by `open` and by every reader — so nothing a caller passes, and nothing written in a data file, can redirect a reader to

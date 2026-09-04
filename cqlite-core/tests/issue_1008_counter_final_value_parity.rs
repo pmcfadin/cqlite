@@ -51,9 +51,12 @@
 //! - The deleted counter (pk1) is asserted ABSENT/shadowed — never masked with
 //!   `unwrap_or(0)`.
 //! - The multi-SSTable merge ACTUALLY reads BOTH generations and merges them.
-//! - SKIP cleanly when `CQLITE_DATASETS_ROOT` is unset or the binary Data.db is
-//!   absent; FAIL loudly when a committed sidecar/golden carries facts but none
-//!   were matched.
+//! - SKIP when `CQLITE_DATASETS_ROOT` is unset or the binary Data.db is absent —
+//!   UNLESS `CQLITE_REQUIRE_FIXTURES=1`, under which an absence is a hard, NAMED
+//!   failure (issue #3725: this target is executed by the merge-gating
+//!   `feature-iso-delta-scan` lane, which exports that flag on the full gate, and a
+//!   target that ignored it could gate a merge having compared nothing). FAIL loudly
+//!   when a committed sidecar/golden carries facts but none were matched.
 
 #![cfg(feature = "delta-scan")]
 
@@ -72,6 +75,33 @@ use canonical_jsonl::{load_golden_document, CanonicalValue};
 // ===========================================================================
 // Dataset path helpers
 // ===========================================================================
+
+/// `CQLITE_REQUIRE_FIXTURES=1` turns a fixture absence into a hard failure.
+///
+/// The `feature-iso-delta-scan` lane (issue #3725) exports it on the FULL gate, because a
+/// target that skip-passes with its corpus absent can merge-gate as "passed" having compared
+/// nothing. Mirrors `issue_1007_complex_type_parity`'s helper of the same name.
+fn require_fixtures_strict() -> bool {
+    std::env::var("CQLITE_REQUIRE_FIXTURES")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+/// Skip an absent fixture — or FAIL by name under strict mode.
+///
+/// `subject` NAMES the keyspace and table: the gate's #2078 preflight probes only the
+/// CANONICAL keyspace (`test_basic`), so a generic "fixtures absent" would send the reader
+/// to a remedy that is already satisfied. These fixtures live in `test_types`.
+fn skip_or_fail(subject: &str, reason: &str) {
+    if require_fixtures_strict() {
+        panic!(
+            "CQLITE_REQUIRE_FIXTURES=1 but {subject} fixture unavailable: {reason}. \
+             Remedy: bash test-data/scripts/fetch-datasets.sh (then export the \
+             CQLITE_DATASETS_ROOT it prints)."
+        );
+    }
+    println!("[SKIP] {subject}: {reason}");
+}
 
 fn datasets_root() -> Option<PathBuf> {
     let root = std::env::var("CQLITE_DATASETS_ROOT").ok()?;
@@ -478,13 +508,16 @@ fn golden_raw_value_set(fixture_dir: &Path) -> BTreeSet<i128> {
 /// taken from the sidecar.
 async fn run_fixture(manifest_id: &str, prefix: &str) {
     let Some(dir) = find_table_dir(prefix) else {
-        println!("[SKIP {manifest_id}] fixture {prefix} not found under datasets root");
+        skip_or_fail(
+            &format!("test_types.{prefix}"),
+            &format!("[{manifest_id}] table directory not found under the datasets root"),
+        );
         return;
     };
     if !has_binary_data_db(&dir) {
-        println!(
-            "[SKIP {manifest_id}] {prefix}: no binary Data.db (JSONL-only checkout); \
-             run fetch-datasets.sh"
+        skip_or_fail(
+            &format!("test_types.{prefix}"),
+            &format!("[{manifest_id}] no binary Data.db (JSONL-only checkout)"),
         );
         return;
     }
@@ -653,11 +686,17 @@ async fn counters_canonical_jsonl_value() {
     // Use the single-SSTable fixture (one golden, unambiguous mapping).
     let prefix = "ct_single_sstable";
     let Some(dir) = find_table_dir(prefix) else {
-        println!("[SKIP {manifest}] fixture {prefix} not found");
+        skip_or_fail(
+            &format!("test_types.{prefix}"),
+            &format!("[{manifest}] table directory not found under the datasets root"),
+        );
         return;
     };
     if !has_binary_data_db(&dir) {
-        println!("[SKIP {manifest}] {prefix}: no binary Data.db");
+        skip_or_fail(
+            &format!("test_types.{prefix}"),
+            &format!("[{manifest}] no binary Data.db (JSONL-only checkout)"),
+        );
         return;
     }
 

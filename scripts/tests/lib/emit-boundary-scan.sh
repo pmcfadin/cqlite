@@ -165,6 +165,12 @@ C_TOKEN_REPORT|appears only as the TEST of a `${var:+…}` expansion; the value 
 C_ROUTING_DETAIL|the same: the TEST of a `${var:+…}` expansion whose printed value is routed
 C_ROUTING|a script-authored closed token set: REQUIRED / NOT-APPLICABLE / UNMEASURED
 advisory_script|a path derived from this script's own directory, not from any input
+REVIEW_BINDING_TOOL|the same: $self_dir/premerge-review-binding.sh, derived from this script's own directory (#3752)
+LEG_OUT|premerge-review-binding.sh's output, sanitized at ITS emit boundary; every line carries its own leg prefix (the base-staleness.sh anchor contract, reused verbatim) -- and it is MULTI-LINE, so routing it through c_safe_display (which flattens newlines to spaces) would MANGLE the report rather than protect it, exactly as for advisory_out
+review_binding_out|a copy of LEG_OUT, for the same reason
+hold_check_out|a copy of LEG_OUT, for the same reason
+sub|a script-authored literal at every call site of run_binding_leg ('review-binding', 'hold-check')
+marker|a script-authored literal at every call site of run_binding_leg ('PREMERGE: REVIEW-UNBOUND', 'PREMERGE: HOLD')
 adv_rc|the advisory's exit status, an integer
 ADVISORY_TIMEOUT_SECS|a numeric script constant
 ADVISORY_KILL_GRACE|a numeric script constant

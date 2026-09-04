@@ -450,12 +450,20 @@
 #         base-staleness report, #3650 slice 1 — it NEVER changes this exit
 #         code), "PREMERGE: GATE-OF-RECORD ..." and "PREMERGE: C-VERDICT ..."
 #         (plus "PREMERGE: DELTA-RECERT ... anchor-ancestry: BOUND ..." in Case B,
-#          the affirmative record that the #3653 ancestry binding RAN, and
-#          "PREMERGE: C-VERDICT-NOTE ..." when the C token is AUTHOR-PERFORMED)
+#          the affirmative record that the #3653 ancestry binding RAN,
+#          "PREMERGE: C-VERDICT-NOTE ..." when the C token is AUTHOR-PERFORMED,
+#          and the two #3752 legs' own anchored reports:
+#          "PREMERGE: REVIEW-BINDING ..." (the recorded roborev round is bound to
+#          the certified head) and "PREMERGE: HOLD-CHECK ..." (no stop order was
+#          recognised))
 #   2   no/invalid gate of record (INCLUDING a Case B anchor that is NOT on the
 #       certified sha's history, #3653), OR no/invalid C verdict where C is
-#       required (#3751), OR head moved (mismatch), OR PR closed/merged
-#       — LOUD multi-line refusal
+#       required (#3751), OR head moved (mismatch), OR PR closed/merged, OR the
+#       recorded roborev round does not cover the certified head (#3752
+#       `PREMERGE: REVIEW-UNBOUND`), OR a stop order is in force (#3752
+#       `PREMERGE: HOLD`) — LOUD multi-line refusal. An UNMEASURED leg refuses
+#       here too: a positive verdict requires a positive measurement, so
+#       "could not tell" is the bad verdict, never a clearance.
 #   3   gh/network failure, a required TOOL failing, an UNMEASURABLE anchor
 #       ancestry, or a usage error (which now INCLUDES omitting --c-verdict,
 #       #3751) — fail closed, never merge on uncertainty. The four are
@@ -4577,7 +4585,131 @@ c_evaluate
 #
 # Cost, accepted: on a refusal path the 65s is already spent. Correctness of the
 # approval beats latency of a refusal, and nothing is printed on those paths.
+
+# ---------------------------------------------------------------------------
+# THE REVIEW/HEAD BINDING AND THE HOLD RE-READ (#3752)
+# ---------------------------------------------------------------------------
+# This assert bound the merge to the GATE of record at the certified head.
+# Nothing bound it to the ROBOREV round, and a rebase rewrites the reviewed
+# commit — so a PR could truthfully record "roborev: PASS" about a commit that
+# no longer exists on the branch being merged (measured: PR #3735, job 304 at
+# `d3812f59`, two unreviewed commits after the reviewed content, one of them a
+# semantic rebase-conflict fix). Both legs live in a SOURCED-SIBLING SCRIPT
+# rather than here: this file is already over the campsite size guidance, and
+# the legs are a separable responsibility.
+#
+# ORDERING, and it is the same argument as the advisory's. The gh head/state
+# check must remain the LAST thing before OK (job 250), so both legs run BEFORE
+# it. The HOLD leg runs LAST of the three measurements — after the advisory's
+# 65s bound — because it is the most time-sensitive: a two-minute-old blocking
+# comment is exactly what it exists to catch.
+#
+# ONE CORRECTION FROM THE #3751 MERGE, so this paragraph is not read as false:
+# the gh head/state check is no longer literally the last thing before OK —
+# `c_revalidate` (#3751 round 16, V1) runs after it, for the same job-290 reason
+# these legs run before it. What this paragraph constrains is unchanged and is
+# honoured: BOTH legs run BEFORE the head check, and nothing network-touching or
+# time-consuming — these legs included — may be moved AFTER `c_revalidate`.
+#
+# Resolved from THIS script's own directory with no env override and no
+# `${...:-...}` fallback (#3312's enforcer rule), exactly like the advisory. An
+# ABSENT helper is a TOOL-FAILURE, never a skip: a guard that silently does not
+# run is worse than no guard.
+if [ -n "$self_dir" ]; then
+  REVIEW_BINDING_TOOL="$self_dir/premerge-review-binding.sh"
+else
+  REVIEW_BINDING_TOOL=""
+fi
+
+# BOUNDED WHERE A BOUND IS AVAILABLE, AND DECLARED WHERE IT IS NOT — never
+# SKIPPED. The advisory may skip itself when no `--kill-after`-capable runner
+# exists, because it changes no verdict; these legs DO change the verdict, so
+# skipping them would be the silent hole they exist to close. On a host with no
+# such runner they run UNBOUNDED and say so on their own anchored line.
+BINDING_TIMEOUT_SECS=120
+BINDING_KILL_GRACE=5
+
+# run_binding_leg <subcommand> <marker> <args...> — MEASURES one leg, leaving
+# its anchored report in the global LEG_OUT, and REFUSES on any non-zero exit.
+# 4 and 5 are both refusals: a positive verdict requires a positive
+# measurement, so an UNMEASURED leg is the bad verdict, never a clearance.
+#
+# CALLED DIRECTLY, NEVER INSIDE `$( )`, AND THE RESULT TRAVELS IN A GLOBAL.
+# `exit 2` inside a command substitution exits only the SUBSHELL: the script
+# would then terminate on `set -e` with the SUBSHELL's status (2 by luck, 3 or 5
+# by the same luck on another path), and the leg's anchored report — captured by
+# that same substitution — would be SWALLOWED, under a refusal message that says
+# it is above. Two defects from one shape: a documented exit code that was an
+# accident, and a diagnostic that named evidence it had just discarded.
+#
+# ON THE REFUSAL PATH THE REPORT GOES TO STDERR, beside the refusal block, so
+# the two cannot be separated by a caller redirecting only one of them.
+run_binding_leg() {
+  local sub="$1" marker="$2"
+  shift 2
+  local rc=0 bind_to
+  LEG_OUT=""
+  # `|| rc=$?` IS LOAD-BEARING, NOT STYLE. Under `set -e` a bare
+  # `LEG_OUT=$(cmd)` whose command exits non-zero terminates the script AT THE
+  # ASSIGNMENT, with the leg's own exit code and none of the handling below —
+  # measured: 4 and 5 would both leave the script, never reaching the refusal
+  # block that translates them into the documented exit 2 and prints the report.
+  # An `||` list is one of the contexts `set -e` does not act on.
+  if bind_to=$(resolve_advisory_timeout); then
+    LEG_OUT=$("$bind_to" --kill-after="$BINDING_KILL_GRACE" "$BINDING_TIMEOUT_SECS" \
+      bash "$REVIEW_BINDING_TOOL" "$sub" "$@" 2>&1) || rc=$?
+  else
+    LEG_OUT=$(bash "$REVIEW_BINDING_TOOL" "$sub" "$@" 2>&1) || rc=$?
+    LEG_OUT="$LEG_OUT
+PREMERGE: REVIEW-BINDING unbounded no \`timeout\`/\`gtimeout\` supporting --kill-after is on
+PREMERGE: REVIEW-BINDING unbounded PATH, so this leg ran with NO time bound. It is NOT skipped:
+PREMERGE: REVIEW-BINDING unbounded it changes the verdict, and skipping it would be the silent
+PREMERGE: REVIEW-BINDING unbounded hole it exists to close (#3752)."
+  fi
+  case "$rc" in
+    0) return 0 ;;
+    3)
+      [ -n "$LEG_OUT" ] && printf '%s\n' "$LEG_OUT" >&2
+      printf '========================================================\n' >&2
+      printf 'PREMERGE: TOOL-FAILURE\n' >&2
+      printf '  premerge-review-binding.sh %s was called wrongly (exit 3).\n' "$sub" >&2
+      printf '  Refusing to merge (fail closed).\n' >&2
+      printf '========================================================\n' >&2
+      exit 3
+      ;;
+    *)
+      [ -n "$LEG_OUT" ] && printf '%s\n' "$LEG_OUT" >&2
+      printf '========================================================\n' >&2
+      printf '%s — REFUSING TO MERGE\n' "$marker" >&2
+      printf '  premerge-review-binding.sh %s exited %s.\n' "$sub" "$rc" >&2
+      printf '  Its anchored report is immediately above (stderr); the verdict is\n' >&2
+      printf '  on its `verdict ` line. Exit 4 is an affirmative refusal; exit 5\n' >&2
+      printf '  means the check could not be measured, which is ALSO a refusal.\n' >&2
+      printf '========================================================\n' >&2
+      exit 2
+      ;;
+  esac
+}
+
+if [ -z "$REVIEW_BINDING_TOOL" ] || [ ! -f "$REVIEW_BINDING_TOOL" ]; then
+  printf '========================================================\n' >&2
+  printf 'PREMERGE: TOOL-FAILURE\n' >&2
+  printf '  premerge-review-binding.sh is ABSENT at %s.\n' \
+    "${REVIEW_BINDING_TOOL:-<unresolvable script directory>/premerge-review-binding.sh}" >&2
+  printf '  The review/head binding (#3752) could not be checked, and a guard that\n' >&2
+  printf '  silently does not run is worse than no guard. Fix the checkout and\n' >&2
+  printf '  re-run this assert. Refusing to merge (fail closed).\n' >&2
+  printf '========================================================\n' >&2
+  exit 3
+fi
+
+run_binding_leg review-binding 'PREMERGE: REVIEW-UNBOUND' "$pr" "$repo" "$certified"
+review_binding_out="$LEG_OUT"
+
 advisory_out=$(print_base_staleness_advisory)
+
+run_binding_leg hold-check 'PREMERGE: HOLD' "$pr" "$repo"
+hold_check_out="$LEG_OUT"
 
 # ---------------------------------------------------------------------------
 # PR HEAD + STATE (#2456)
@@ -4635,6 +4767,19 @@ fi
 # LAST, deliberately: after everything that can consume time (the advisory measurement above, the
 # `gh pr view` round trip) and BEFORE the first byte a reader can take as certification. See
 # `c_revalidate` for the defect, the job-290 precedent it follows, and the residual it declares.
+#
+# ORDERING INVARIANT FOR ANY FUTURE MERGE RESOLVER — DO NOT REORDER THIS SILENTLY.
+# `c_revalidate` MUST remain the LAST statement before `printf 'PREMERGE: OK'`, and it MUST run
+# AFTER both #3752 legs (`run_binding_leg review-binding` and `run_binding_leg hold-check`, each of
+# which shells out to `gh` through premerge-review-binding.sh) as well as after the advisory
+# measurement and the `gh pr view` head/state check. Anything that consumes time or touches the
+# network placed BETWEEN this call and the OK line re-opens exactly the staleness window this call
+# exists to close — roborev job 290's ruling, "a check must be inside the window it certifies, not
+# before it". The two sides' comments were reconciled at this merge rather than one being taken:
+# #3752's paragraph above `run_binding_leg` reads "the gh head/state check must remain the LAST
+# thing before OK", which was true of #3752's own tree and is superseded here by V1's trade (a
+# local, sub-second C re-read after it) — the LEGS' position relative to the head check is what
+# that paragraph constrains, and it is honoured.
 c_revalidate
 
 printf 'PREMERGE: OK %s\n' "$certified"
@@ -4650,8 +4795,14 @@ printf 'PREMERGE: SCOPE composes this diff with main tip, which no gate here has
 printf 'PREMERGE: SCOPE the PREMERGE: ADVISORY lines below measure that gap (non-blocking, #3650 slice 1).\n'
 # Printed here, MEASURED earlier (see the note above the head check): the
 # advisory's 65s bound must not sit between the head check and OK.
+if [ -n "$review_binding_out" ]; then
+  printf '%s\n' "$review_binding_out"
+fi
 if [ -n "$advisory_out" ]; then
   printf '%s\n' "$advisory_out"
+fi
+if [ -n "$hold_check_out" ]; then
+  printf '%s\n' "$hold_check_out"
 fi
 # EVERY DATA VALUE ON AN EMITTED LINE GOES THROUGH THE ONE BOUNDARY (#3751 round 7, L1).
 # `commit:`/`tree-start:`/`dirty:` are hex- and closed-token-validated before this point and

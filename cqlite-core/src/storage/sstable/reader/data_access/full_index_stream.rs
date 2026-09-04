@@ -157,6 +157,7 @@ impl SSTableReader {
     where
         F: FnMut((RowKey, ScanRow)) -> Result<ControlFlow<()>>,
     {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
         let Some(index_reader) = &self.index_reader else {
             return Ok(FullIndexStreamOutcome::FellBack);
         };
@@ -429,6 +430,7 @@ impl SSTableReader {
     where
         F: FnMut((RowKey, ScanRow)) -> Result<ControlFlow<()>>,
     {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
         if self.index_reader.is_some() && self.bti_partitions_db.is_none() {
             match self
                 .stream_all_partitions_via_full_index(scan_cancel, None, caller_schema, &mut emit)

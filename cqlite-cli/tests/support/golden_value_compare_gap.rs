@@ -235,6 +235,45 @@ pub enum Divergence {
     /// canonicalization — tracked as the container-key comparison follow-up. When it
     /// lands, `compare_map` no longer refuses, these skips suppress nothing, and
     /// `Report::stale_skips` FAILS the lane until they are removed.
+    /// A `float` whose shortest decimal has an EXACT TIE is spelled with the
+    /// away-from-zero digit by the CSV/table egress where the oracle rounds the tie
+    /// to an EVEN last digit. The two spellings denote the SAME f32.
+    ///
+    /// ORACLE: Cassandra `FloatSerializer` renders a `float` through
+    /// `Float.toString`, whose contract is "the shortest decimal that round-trips,
+    /// and if two are equally close, the one whose least significant digit is
+    /// even". The committed corpus has exactly one such cell —
+    /// `test_timeseries.sensor_data`'s `temperature` for
+    /// `sensor_id=bc9e0632-1319-472a-a38e-ff5b54cf7ef8` — whose f32 is exactly
+    /// 36.6015625, where four 8-digit decimals round-trip and `36.601562` /
+    /// `36.601563` are equidistant. The golden carries `36.601562`.
+    ///
+    /// EGRESS SHAPE: the FORMATTER PAIR for one f32 — the golden side is exactly
+    /// serde_json's f32 rendering (tie-to-even, `Float.toString`'s rule) and the CSV
+    /// side exactly Rust's `f32` `Display` (tie away from zero, what
+    /// `format_float32` renders through), both DERIVED from the parsed f32 and both
+    /// parsing to identical f32 bits. Pinning the PAIR rather than mere f32-equality
+    /// is what keeps the gap from covering the whole cell: a third decimal inside
+    /// the same rounding interval (`36.6015624`) is not a spelling either formatter
+    /// emits, so it is reported. Nothing is lost, only the tie-break digit differs,
+    /// because `cqlite_core::util::value_fmt::ValueFormatter::format_float32` renders
+    /// through Rust's `f32` `Display`, which rounds a tie away from zero. This is the
+    /// same "Rust float formatting is not Java's" family as `total_cmp` vs
+    /// `Float.compare` (CLAUDE.md self-check list).
+    ///
+    /// CSV-SCOPED, and the scope is load-bearing: the JSON egress renders the
+    /// oracle's spelling since issue #3777 (it formats the f32 as an f32 through
+    /// serde_json's own Ryū-family formatter, which breaks ties to even), so
+    /// declaring this for JSON too would drop a column from the format that is
+    /// right. The shared CSV/table formatter is the remaining half and is tracked
+    /// separately — when it is fixed this gap goes stale and FAILS the lane, which
+    /// is what removes it.
+    ///
+    /// NOT COVERED: a DIFFERENT f32 (the two sides must parse to identical bits, so
+    /// every genuine value error is an ordinary diff), a non-finite token (that is
+    /// [`Divergence::NonFiniteFloatRendersAsJsonNull`]'s subject), a `double`, any
+    /// non-numeric spelling, and the JSON lane.
+    Float32TieBreakSpellingDiffersFromJava,
     ContainerMapKeyNotPairableByThisLane,
     /// AN IPv6 `inet` IS SPELLED IN CASSANDRA'S EXPANDED FORM IN THE GOLDEN AND IN
     /// RFC 5952 COMPRESSED FORM BY THE EGRESS — the SAME address, two spellings.
@@ -328,6 +367,12 @@ impl Divergence {
                  UNDECODED as a flat scalar (raw bytes as hex for a collection, \
                  colon-joined text for a tuple) while the egress decodes it into a \
                  structure"
+            }
+            Divergence::Float32TieBreakSpellingDiffersFromJava => {
+                "the golden spells a `float` whose shortest decimal is an exact TIE with \
+                 an EVEN last digit (Float.toString's rule) while the CSV egress spells \
+                 the SAME f32 with the away-from-zero digit — both parse to identical \
+                 f32 bits, so nothing but the tie-break digit differs"
             }
             Divergence::InetIpv6RendersCompressed => {
                 "the golden spells an IPv6 inet in Cassandra's expanded \
@@ -448,6 +493,18 @@ impl Divergence {
                 // here is NOT this gap and is reported as an ordinary diff.
                 matches!(cli, Value::Array(_))
             }
+            Divergence::Float32TieBreakSpellingDiffersFromJava => {
+                // CSV lane, DDL-declared `float` (never `double`: the tie-break the
+                // shared formatter gets wrong is `Float.toString`'s, and a `double`
+                // cell diverging is a different, unmeasured claim), and the two
+                // spellings must denote the SAME f32. Depth and kinding are not
+                // read: a `float` is a scalar, and the equality below is stated
+                // over the two RENDERINGS rather than over a canonical form.
+                let _ = (depth, kinding);
+                egress == Egress::Csv
+                    && matches!(ty, CqlType::Numeric(name) if name == "float")
+                    && is_exact_f32_tie_with_both_formatter_spellings(golden, cli)
+            }
             Divergence::InetIpv6RendersCompressed => {
                 // Same address, different spelling — PROVEN, not assumed.
                 if !matches!(ty, CqlType::Opaque(name) if name == "inet") {
@@ -484,6 +541,96 @@ impl Divergence {
         }
     }
 }
+
+/// Is this pair an EXACT TIE — the two spellings the two formatters produce for one
+/// and the same f32, which that f32 sits exactly MIDWAY between?
+///
+/// Three claims, each of which cost a review round to get right (issue #3777):
+///
+/// 1. **f32-equality alone is not enough.** Accepting it made the gap a blind spot
+///    for the whole cell: `36.6015624` and `36.601564` also parse to 36.6015625,
+///    and neither is a spelling either formatter can emit, so suppressing them
+///    would excuse a regression the gap can never legitimately describe.
+/// 2. **The formatter PAIR is not enough either.** Both spellings are DERIVED from
+///    the parsed f32 rather than hard-coded, so the predicate travels to any other
+///    tie cell unchanged — but "the two formatters disagree here" is a strictly
+///    weaker claim than "this is a tie". roborev's counterexample: for `-0.0`
+///    serde_json emits `-0.0` and Rust `Display` emits `-0`, same bits, each its
+///    own formatter's output — an unrelated discrepancy the gap would have
+///    silently swallowed.
+/// 3. So the tie itself is PROVEN, in exact arithmetic: the two texts must denote
+///    two DIFFERENT exact decimals, and the f32 must be exactly their arithmetic
+///    mean, `v == (d1 + d2) / 2`, with no floating-point tolerance anywhere.
+///    Comparing f64 error magnitudes would not do: each parsed decimal carries its
+///    own representation error, so that equality is not reliable, and a tolerance
+///    would be the same fudge in another spelling.
+///
+/// `-0.0` falls out of claim 3 for a reason worth stating: `-0.0` and `-0` BOTH
+/// denote the value exactly, so the two decimals are equal, neither is an
+/// approximation, and there is no tie to break. The same disposes of `1.0` vs `1`
+/// and of every other purely cosmetic formatter disagreement.
+///
+/// The two formatters, for the record:
+///
+///   * the CLI/CSV side must equal Rust's `f32` `Display` of that f32 — what
+///     `cqlite_core::util::value_fmt::ValueFormatter::format_float32` renders
+///     through, and the half that rounds a tie away from zero; and
+///   * the golden side must equal serde_json's f32 rendering of that same f32 —
+///     the Ryū-family tie-to-EVEN form, which is `Float.toString`'s rule and so
+///     what `sstabledump` writes.
+///
+/// Plus the guards that were already here: the two texts must DIFFER, both must be
+/// finite (a `NaN` never equals itself, and a non-finite token is a different
+/// variant's subject), and both must parse to identical f32 BITS — so every genuine
+/// value error stays an ordinary diff.
+///
+/// Everything FAILS CLOSED. A text that is not an exact decimal this module can
+/// read, a spelling outside the accepted grammar, a digit count or exponent beyond
+/// the stated bounds, an undecidable comparison — every one returns `false`, "not
+/// this gap", which costs a diff to read and never a silent suppression.
+fn is_exact_f32_tie_with_both_formatter_spellings(golden: &Value, cli: &Value) -> bool {
+    let text = |v: &Value| match v {
+        Value::Number(n) => Some(n.to_string()),
+        Value::String(s) => Some(s.clone()),
+        _ => None,
+    };
+    let (Some(g_text), Some(c_text)) = (text(golden), text(cli)) else {
+        return false;
+    };
+    if g_text == c_text {
+        return false;
+    }
+    let (Ok(g), Ok(c)) = (g_text.parse::<f32>(), c_text.parse::<f32>()) else {
+        return false;
+    };
+    if !g.is_finite() || !c.is_finite() || g.to_bits() != c.to_bits() {
+        return false;
+    }
+    // The two formatters' own output for THIS f32. serde_json's f32 serializer is
+    // the only path in that crate which formats an f32 as an f32 (its `Number`
+    // stores an f64); an error there — unreachable for a finite f32 — is treated as
+    // "not this gap" rather than unwrapped.
+    let Ok(tie_to_even) = serde_json::to_string(&g) else {
+        return false;
+    };
+    if g_text != tie_to_even || c_text != g.to_string() {
+        return false;
+    }
+    // And the tie, in exact arithmetic over the two spellings as written.
+    exact_decimal::is_exact_tie(&g_text, &c_text, g)
+}
+
+// ===========================================================================
+// Exact decimal arithmetic
+// ===========================================================================
+//
+// Split into its own file under the campsite rule and reached as
+// `exact_decimal::ExactDecimal`: whether an f32 is exactly the midpoint of two
+// decimal spellings is an arithmetic question with no notion of a `Value`, a
+// schema or an egress, and this file only asks it.
+
+#[path = "golden_value_exact_decimal.rs"]
+mod exact_decimal;
 
 /// CQL's blob literal: `0x` and an EVEN number of hex digits (a byte string), and
 /// nothing else. `0x` alone is a legal empty blob and is accepted; the point of the

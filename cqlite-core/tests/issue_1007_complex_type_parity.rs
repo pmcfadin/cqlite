@@ -442,9 +442,16 @@ fn binary_data_db_present(dir: &Path, prefix: &str) -> bool {
     dir.join(format!("{prefix}-Data.db")).exists()
 }
 
-/// `CQLITE_REQUIRE_FIXTURES=1` makes a missing fixture a HARD failure (the
-/// nightly_docker lane regenerates the corpus and sets this so a skipped
-/// comparison can never be mistaken for a passing `mirrored` parity run).
+/// `CQLITE_REQUIRE_FIXTURES=1` makes a missing fixture a HARD failure, so a skipped
+/// comparison can never be mistaken for a passing `mirrored` parity run.
+///
+/// TWO lanes set it, and naming only the first is what #3725 was filed about: the
+/// `parity-regen-matrix.yml` cql-type leg regenerates the corpus and sets it, but
+/// that workflow is EXEMPT from `required`, so it executed these 6 cases without
+/// gating any merge. Since #3725 the local gate's `feature-iso-delta-scan`
+/// component also exports it on the FULL gate, and that component IS the
+/// merge-gating executor for this file.
+///
 /// Without it the test skips cleanly (fresh checkout, binaries absent).
 fn require_fixtures_strict() -> bool {
     std::env::var("CQLITE_REQUIRE_FIXTURES")

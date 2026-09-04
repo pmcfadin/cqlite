@@ -284,8 +284,14 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    reads true, and publishes the report under a FRESH NONCE — carry the path it PRINTS in the new
    NEEDS-SPAWN packet, because the previous file is no longer read and the new name cannot be
    guessed, so the idle auditor that resumes and writes there certifies nothing, #3751 rounds 5-6),
-   or use `status` to report how long it has produced nothing (its `report=` field is the authority
-   for the path when you do not have the clause). If no independent audit can be obtained, the SANCTIONED
+   or use `status` to report how long it has produced nothing — but read the PATH off
+   `review-stage.sh verdict <kind> --issue <N>`, whose `report=` field is the authority. **NOT
+   `status`'s (#3751 round 16, V2):** `report=` is EXEMPT from the `=`->`~` map on the verdict line
+   ALONE (it is the one field read as the line remainder), so on a checkout whose root contains `=`
+   `status` displays a `~`-substituted path that DOES NOT EXIST — measured at
+   `.../eq=path/lane`, where `verdict`'s path opens and `status`'s (`eq~path`) is absent. `open`'s
+   own raw second line is the other channel that promises the real path.
+   If no independent audit can be obtained, the SANCTIONED
    FALLBACK — never a hand-asserted pass — is to record the substitute WITH ITS WORKING:
    ```bash
    bash scripts/flow/review-stage.sh record-author-performed c --issue <N> \
@@ -326,8 +332,30 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    has no `flock` on PATH, which is a broken box (fix the box, exactly as with a missing `mv -T`) and
    never something to work around. `verdict` and `status` take NO lock, so a read can never be
    blocked by a publisher — if a read hangs, it is not this.
-3. **Final roborev confirmation pass — this GATES arming auto-merge.** Because review-first
-   already ran, this should converge to **clean-on-arrival**. Run the ONLY sanctioned
+3. **Final roborev confirmation pass — ROBOREV LAST, and this GATES arming auto-merge.**
+
+   **ENDGAME ORDER: rebase → gate of record → C → roborev → `premerge-assert` → arm.** The
+   reason is a BYTE ASYMMETRY, and it decides the order by itself: **a roborev round changes
+   no bytes, so reviewing after gating costs nothing and cannot invalidate a gate PASS. A
+   rebase changes bytes, so gating or reviewing before it certifies the wrong tree.**
+   Review-after-gate is free; gate-after-review is not.
+
+   **A LATER REBASE VOIDS THE ROBOREV ROUND.** This is what nothing used to say. A rebase
+   REWRITES the reviewed commit, so the PR's recorded "roborev: PASS" becomes a true statement
+   about a commit that is no longer on the branch. Measured (#3752): PR #3735 held a genuine
+   PASS — job 304 at `d3812f59`, `findings: NONE`, 1.07M input tokens — and after the lane's
+   (correct) rebase `git cat-file -t d3812f59` reported the object does not exist, with TWO
+   unreviewed commits after the reviewed content, one of them a semantic rebase-conflict fix
+   in the single file that overlapped `main` — the most review-worthy commit on the branch.
+   So if you rebase at step 5, you are back at step 1: re-gate, then re-review, then re-assert.
+
+   **RECORD THE BLOCK ON THE PR.** Post the terminal `==== ROBOREV REVIEW SUMMARY ====` block
+   as a **top-level PR comment** (or in the PR body). `premerge-assert.sh`'s `review-binding`
+   leg reads the job id from there and refuses the merge when nothing on the PR binds a review
+   to the tree about to merge. Recording it is no longer a courtesy; it is how the merge gate
+   knows a review happened at all.
+
+   Because review-first already ran, this should converge to **clean-on-arrival**. Run the ONLY sanctioned
    invocation (#2964), with the certified tip **PUSHED** (the wrapper asserts it) and **BOTH**
    `--agent` and `--model` (#2433 — one alone inherits the `.roborev.toml`-pinned model and
    hard-400s as a silent-looking outage):
@@ -391,9 +419,17 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
      gate at the new head.
 5. **Merge on green (worker-merges-own-PR model).** When gate PASS + C PASS (design) +
    roborev clean (a terminal `RESULT: PASS` from the wrapper — never `NOTHING-TO-REVIEW`)
-   all hold on the final tree: beat the heartbeat, rebase on `origin/main`
-   (resolve conflicts in the worktree — a rebase re-invalidates the gate per step 4),
-   `git push` the certified tip, open the nits follow-up issue if any, then — **before** arming
+   all hold on the final tree: beat the heartbeat, and — **if a rebase is still owed, do it
+   FIRST and go back to step 1** (a rebase re-invalidates the gate per step 4 **and VOIDS the
+   roborev round per step 3**; `premerge-assert`'s `review-binding` leg will refuse the merge
+   otherwise). **A non-empty semantic overlap with `main` means git can merge CLEANLY and
+   still be WRONG**: after any rebase, compute the overlap as
+   `comm -12 <(git diff --name-only $(git merge-base origin/main HEAD)...HEAD | sort)
+   <(git diff --name-only $(git merge-base origin/main HEAD)..origin/main | sort)` — the range
+   is `merge-base..origin/main`, **never `HEAD..origin/main`**, which includes reverting your
+   own work (measured 16 files vs the correct 3) — re-run the tests touching every overlapping
+   file, and EXPECT a fix. Any such fix is new code, so it invalidates the gate AND the review.
+   Then `git push` the certified tip, open the nits follow-up issue if any, then — **before** arming
    `gh pr merge --auto` — run the two mechanical pre-merge guards:
 
    **(a) Scripted pre-merge SHA + gate-of-record assert (#2456/#2668/#3465).** Never merge a
@@ -485,6 +521,23 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    rule covers the stage record, so a coloured `head-sha:` can never normalise into a clean sha and
    bind the stage to a tree the record does not name. A coloured GATE SUMMARY is still fine (#3400) —
    that reader is deliberately looser, and only these two artifacts are held to the raw comparison.
+
+   The assert now also runs the two #3752 legs before its head check —
+   `PREMERGE: REVIEW-BINDING` (the recorded roborev round must cover the certified head) and
+   `PREMERGE: HOLD-CHECK` (a column-zero `HOLD:` COMMENT on the PR or the issue it closes — a
+   comment, never the PR description, which the leg does not scan — or a lead disarm inside 30
+   minutes). Both fail closed, and an `UNMEASURED` leg is a REFUSAL, not
+   a clearance.
+
+   **HOW A LEAD ACTUALLY STOPS A MERGE (#3752 AC7).** The sanctioned stop is **converting the
+   PR to draft** — `gh pr ready --undo <pr>` — which GitHub itself enforces against merging, or
+   a per-tier `ci:` state. **`gh pr merge --disable-auto` alone is NOT a stop**: it removes the
+   auto-merge REQUEST and a plain `gh pr merge --squash` succeeds immediately afterward
+   (measured: PR #3735 merged three minutes after the lead disarmed it). A column-zero `HOLD:`
+   comment is now ALSO mechanical, because this assert reads it — but a draft is the only stop
+   GitHub enforces on its own, so use it when the stop must hold without the lane's
+   cooperation. A lead clears a `HOLD:` with a column-zero `GO:` or `RELEASE:` line.
+
    The third argument is **REQUIRED** (an optional one would leave the convention
    honour-system): it is the `AGENT_GATE_SUMMARY_FILE` you already hold from step 1's full
    gate. A `--lite` summary is never acceptable anywhere, and a `--delta` summary is never
