@@ -304,7 +304,11 @@ derive_findings_count() {
     return 1
   }
   if [ ! -s "$review" ]; then
-    DERIVED_FINDINGS_COUNT_CAUSE="the job record's review text is EMPTY (roborev exposes it as \`output\`/\`verdict_text\`), so no findings count could be DERIVED from it"
+    # ABSENT AND ALL-WHITESPACE ARE INDISTINGUISHABLE HERE, AND THE CAUSE SAYS SO RATHER THAN
+    # PICKING ONE. `roborev-job-facts.py` writes an EMPTY file for both an absent
+    # `output`/`verdict_text` field and one that is only whitespace, so naming just one of them
+    # would send an operator looking for a field that may never have been there.
+    DERIVED_FINDINGS_COUNT_CAUSE="the job record carries no usable review text — an EMPTY one was written for it, which is what BOTH an absent and an all-whitespace \`output\`/\`verdict_text\` produce — so no findings count could be DERIVED from it"
     return 1
   fi
   count=$(roborev_findings_count "$review" "$block") || {

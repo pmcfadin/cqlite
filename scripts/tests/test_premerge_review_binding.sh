@@ -2086,6 +2086,15 @@ if run_binding 5 "result: FINDINGS + an authorized deferral over a record with N
       ok "result: the good authorization is still REPORTED, so the remedy is not 're-post the marker'" ;;
     *) bad "result: the cause did not record that an authorization was found (got: $OUT)" ;;
   esac
+  # ...and the cause must name the DERIVATION as what failed. A record with NO `output` field
+  # and one carrying only whitespace are INDISTINGUISHABLE at this layer (the shared parser
+  # writes an empty file for both), so the cause names both rather than picking one — pinned
+  # here on the absent-field fixture and in 4050(c) on the whitespace one.
+  case "$OUT" in
+    *"no usable review text"*)
+      ok "result: the cause names the absent review text as what stopped the derivation" ;;
+    *) bad "result: the cause did not name the missing review text (got: $OUT)" ;;
+  esac
   case "$OUT" in
     *"count= half is NOT re-verified here"*)
       bad "result: the stale DECLARATION of the count gap survived (got: $OUT)" ;;
@@ -2189,10 +2198,17 @@ if run_binding 5 "4050(c): an EMPTY recorded review text is UNMEASURED, never a 
       ok "4050(c): a record whose review text is unusable cannot be counted, so it cannot clear" ;;
     *) bad "4050(c): an empty review text was not UNMEASURED (got: $OUT)" ;;
   esac
+  # DISCRIMINATING, not merely "some derivation failed": the EMPTY arm must be the one that
+  # fired, or the case could pass on the contradiction arm and prove nothing about this input.
   case "$OUT" in
-    *"no findings count could be DERIVED"*)
-      ok "4050(c): the cause says the count could not be DERIVED — not that no count 'exists'" ;;
-    *) bad "4050(c): the cause did not name the derivation as what failed (got: $OUT)" ;;
+    *"no usable review text"*"no findings count could be DERIVED"*)
+      ok "4050(c): the cause names the unusable review text and says the count could not be DERIVED — not that no count 'exists'" ;;
+    *) bad "4050(c): the cause did not name an unusable review text as what failed (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"count exists"*)
+      bad "4050(c): the cause still claims no count 'exists' — the record HAS no count field, but what failed here is the DERIVATION (got: $OUT)" ;;
+    *) ok "4050(c): the corrected wording holds — nothing claims a count does not exist" ;;
   esac
   case "$OUT" in
     *"AUTHORIZED by @pmcfadin"*)
@@ -2510,7 +2526,7 @@ fi
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.
-CASE_FLOOR=165
+CASE_FLOOR=167
 TOTAL=$((PASSED + FAILED))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"
