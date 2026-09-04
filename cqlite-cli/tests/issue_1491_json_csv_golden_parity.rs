@@ -357,27 +357,16 @@ const CASES: &[Case] = &[
         ck: &[],
         multicell: &[],
         // MEASURED DIVERGENCE, not a normalization: `employee.home` is a
-        // NO SKIPS — and the removal of the one that was here is COVERAGE
-        // RECOVERED, not a relaxation.
-        //
-        // `e.home` is a `frozen<address>` nested inside a `frozen<employee>`. This
-        // case used to exclude that path because the golden decoded it
-        // (`{"street": "1 Navy Way", …}`) while both CLI egress formats emitted the
-        // inner UDT's RAW BYTES as blob hex. That was one instance of the defect
-        // #3722 fixed: two divergent UDT-field decoders both fell through to
-        // `_ => Value::Blob`, so a nested frozen UDT field never decoded.
-        //
-        // With one decoder that is total over `CqlType`, the two sides AGREE at
-        // `e.home`, and THIS LANE IS WHAT CAUGHT IT: it refuses to let an exclusion
-        // that suppresses no divergence keep standing, on the grounds that such a
-        // gap holds back recovered coverage. Its message named exactly that. So
-        // `e.home` is now value-compared like its `e.name` and `e.level` siblings.
-        //
-        // `Divergence::NestedFrozenUdtRendersAsBlobHex` is deliberately KEPT: it is
-        // still used as fixture data by the gap machinery's own unit tests
-        // (`support/golden_value_compare_gap_tests.rs`,
-        // `support/golden_value_compare_udt_tests.rs`), which exercise the
-        // exclusion MECHANISM rather than claiming anything about live behaviour.
+        // NO SKIPS, and removing the one that was here is COVERAGE RECOVERED.
+        // `e.home` (a frozen<address> inside a frozen<employee>) was excluded
+        // because the golden decoded it while both CLI formats emitted the inner
+        // UDT's raw bytes as blob hex — one instance of the two-divergent-decoder
+        // defect #3722 fixed. The sides now AGREE, and THIS LANE caught the stale
+        // exclusion: it refuses one that suppresses no divergence. So `e.home` is
+        // value-compared like its `e.name`/`e.level` siblings.
+        // `Divergence::NestedFrozenUdtRendersAsBlobHex` is KEPT — still fixture
+        // data for the gap machinery's own unit tests, which exercise the
+        // exclusion MECHANISM, not live behaviour.
         skips: &[],
     },
     // test-data/schemas/signed-collection-parity.cql — NON-frozen and frozen
