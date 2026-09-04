@@ -22,14 +22,14 @@ This document defines the mock usage policy implemented to satisfy Issue #80 req
 
 #### Cargo.toml Configuration
 ```toml
-# cqlite-core/Cargo.toml
+# tests/Cargo.toml — the flag lives HERE, where its 25 cfg sites are
 [features]
 unit-tests-only = []  # Enables mock/synthetic data usage for unit tests
-
-# tests/Cargo.toml
-[features]
-unit-tests-only = ["cqlite-core/unit-tests-only"]
 ```
+
+> The matching `cqlite-core` declaration (and this feature's forward to it) were
+> deleted in #1698: core had **zero** `cfg(feature = "unit-tests-only")` sites, so
+> enabling it there changed nothing.
 
 #### Protected Mock Functions
 - `tests/src/real_sstable_test_fixtures.rs:783` - `write_mock_sstable()`
