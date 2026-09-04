@@ -567,16 +567,37 @@ fn admissible_widths_match_the_pinned_serializers() {
 /// Cassandra oracle and a corpus measurement — the same bar the five-type UDT
 /// field carve-out had to clear before #3631 closed it.
 ///
-/// Fails in BOTH directions: if `inet` gains a width check (update this case and
-/// the control above together), or if a currently-admissible width stops decoding.
+/// TWO divergences live here, and they are separate: (1) WIDTH — Cassandra admits 4
+/// or 16 bytes only, this decoder admits any length; (2) EMPTY — Cassandra reads an
+/// empty value as NULL, this decoder returns an empty `Value::Inet`. Neither is
+/// closed by #3811 or #3631, whose mechanisms are consumption and declared width.
+///
+/// Fails in BOTH directions: if `inet` gains a width check, if a currently-admissible
+/// width stops decoding, or if the empty case starts returning `Null` (update this
+/// case, its doc and the width-unconstrained control above together).
 #[test]
 fn inet_is_width_unconstrained_here_but_not_in_cassandra_declared_divergence() {
     let p = parser();
-    // Zero is the EMPTY disposition, not part of the divergence: Cassandra reads an
-    // empty `inet` as null rather than throwing, so its acceptance here is not a
-    // widening. Asserted separately so the width claims below stay about widths.
-    p.parse_value_from_raw_bytes(&[], "inet", "col", 0)
-        .unwrap_or_else(|e| panic!("inet: an EMPTY value must decode, got {e:?}"));
+    // Zero is a SECOND, separate divergence and is asserted by VALUE, not merely by
+    // "it decoded" — Cassandra reads an empty `inet` as NULL, and this decoder returns
+    // an empty `Value::Inet` instead. Both are tolerant rather than throwing, so this
+    // is not a width widening, but they are not the same value and the earlier wording
+    // ("the empty/null disposition") glossed that. Pinned exactly so a change to either
+    // side is caught (roborev r19 / job 112).
+    match p
+        .parse_value_from_raw_bytes(&[], "inet", "col", 0)
+        .unwrap_or_else(|e| panic!("inet: an EMPTY value must decode, got {e:?}"))
+    {
+        Value::Inet(b) => assert!(
+            b.is_empty(),
+            "inet: an empty value decodes to an EMPTY Inet today, got Inet({b:?})"
+        ),
+        Value::Null => panic!(
+            "inet: an empty value now decodes to Null — that CLOSES the empty-vs-null \
+             divergence with Cassandra. Update this case and its doc together"
+        ),
+        other => panic!("inet: expected an empty Inet (today's behaviour), got {other:?}"),
+    }
     // Cassandra-admissible widths must decode — the anti-vacuity half.
     for len in [4usize, 16] {
         p.parse_value_from_raw_bytes(&vec![0x31u8; len], "inet", "col", 0)
