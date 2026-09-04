@@ -262,12 +262,21 @@ need_file() {
 # whether a human authorized this deferral. Called from inside `cmd_review_binding`, AFTER
 # `P` is set, so the diagnostic carries this leg's anchor; sourcing inside a function still
 # defines the functions globally.
+# NON-FATAL BY CONTRACT (roborev job 126). It returns 1 and sets
+# FINDINGS_COUNT_LIB_CAUSE; it must NEVER exit the process, because its only caller runs
+# INSIDE `record_covering`, whose contract is RECORD, DO NOT DECIDE. Exiting there
+# discarded the whole scan: an OLDER findings round examined before a NEWER CLEAN one made
+# the run globally UNMEASURED, even though the deciding latest clean round binds through
+# the structured-verdict path and needs no count at all. That is job 78 finding F2's defect
+# — a newer favourable result lost to an earlier record — arriving through a process exit
+# instead of a `break`.
+FINDINGS_COUNT_LIB_CAUSE=""
 load_findings_count_lib() {
-  { [ -f "$ROBOREV_FINDINGS_COUNT_LIB" ] && [ -r "$ROBOREV_FINDINGS_COUNT_LIB" ]; } ||
-    unmeasured "the shared findings-count recogniser at $(sane "$ROBOREV_FINDINGS_COUNT_LIB")" \
-      "cannot be read as a regular file, so the count a findings deferral must match could" \
-      "not be derived. It is resolved from this script's OWN directory with no override" \
-      "(#3312), so an absent or non-regular artifact is a broken checkout."
+  FINDINGS_COUNT_LIB_CAUSE=""
+  if ! { [ -f "$ROBOREV_FINDINGS_COUNT_LIB" ] && [ -r "$ROBOREV_FINDINGS_COUNT_LIB" ]; }; then
+    FINDINGS_COUNT_LIB_CAUSE="the shared findings-count recogniser at $(sane "$ROBOREV_FINDINGS_COUNT_LIB") cannot be read as a regular file, so the count a findings deferral must match could not be derived. It is resolved from this script's OWN directory with no override (#3312), so an absent or non-regular artifact is a broken checkout."
+    return 1
+  fi
   # SOURCED IN A CONDITIONAL, AND THE REASON IS *NOT* THE ONE THAT APPLIES TO
   # roborev-review-checks.sh — measured, because a false rationale is worse than none
   # (roborev job 123, whose finding named both files and is only right about the other).
@@ -289,13 +298,14 @@ load_findings_count_lib() {
   # it only runs if sourcing RETURNED, which under a caller that DID set `-e` it would not.
   # shellcheck source=lib/roborev-findings-count.sh
   if ! . "$ROBOREV_FINDINGS_COUNT_LIB"; then
-    unmeasured "$(sane "$ROBOREV_FINDINGS_COUNT_LIB") could not be SOURCED (it is readable" \
-      "but did not load — most likely a syntax error from a truncated or corrupt file), so" \
-      "the count a findings deferral must match could not be derived."
+    FINDINGS_COUNT_LIB_CAUSE="$(sane "$ROBOREV_FINDINGS_COUNT_LIB") could not be SOURCED (it is readable but did not load — most likely a syntax error from a truncated or corrupt file), so the count a findings deferral must match could not be derived."
+    return 1
   fi
-  [ "$(type -t roborev_findings_count)" = function ] ||
-    unmeasured "$(sane "$ROBOREV_FINDINGS_COUNT_LIB") did not define roborev_findings_count," \
-      "so the findings count cannot be derived. The file is truncated or corrupt."
+  if [ "$(type -t roborev_findings_count)" != function ]; then
+    FINDINGS_COUNT_LIB_CAUSE="$(sane "$ROBOREV_FINDINGS_COUNT_LIB") did not define roborev_findings_count, so the findings count cannot be derived. The file is truncated or corrupt."
+    return 1
+  fi
+  return 0
 }
 
 # derive_findings_count <review-text-file> <scratch-block-file> — THREE-VALUED.
@@ -1031,7 +1041,20 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
         # LOADED HERE, LAZILY (#4090): this is the only arm that needs the recogniser, so
         # a broken checkout refuses THIS question and leaves the code-free and clean-record
         # answers alone. Reached only for a record whose structured verdict is FINDINGS.
-        load_findings_count_lib
+        #
+        # AND A FAILURE IS *THIS RECORD'S* RESULT, NOT THE RUN'S VERDICT (roborev job 126).
+        # `record_covering` collects per-record outcomes and decides once, afterwards, from
+        # the LATEST covering round — so exiting here threw away rounds not yet examined and
+        # made an older findings record outrank a newer CLEAN one, which is job 78's F2
+        # defect through a different door. `authz_unmeasured` is the right class: the
+        # authorization oracle could not be consulted, and nothing about the deferral was
+        # refused. If the deciding round turns out to be this one, the run still ends
+        # UNMEASURED — which is the only outcome that was ever correct here.
+        if ! load_findings_count_lib; then
+          RESULT_NOTE="record verdict is FINDINGS and its deferral could NOT BE EVALUATED: $FINDINGS_COUNT_LIB_CAUSE"
+          RESULT_UNMEASURED=1
+          return 1
+        fi
         local rpb_observed=""
         if derive_findings_count "$tmp/review" "$tmp/findings-block"; then
           rpb_observed="$DERIVED_FINDINGS_COUNT"

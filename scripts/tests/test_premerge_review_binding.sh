@@ -2504,6 +2504,48 @@ else
 fi
 reset_stub 2>/dev/null || true
 
+# --- (j) #4050 job 126: an OLDER findings round must not sink a NEWER CLEAN one ------
+# THE DEFECT THE LAZY LOAD INTRODUCED. `record_covering` collects per-record outcomes and
+# decides ONCE afterwards from the LATEST covering round, so anything that EXITS mid-scan
+# discards rounds not yet examined. The lazy `load_findings_count_lib` did exactly that:
+# with the recogniser absent, an OLDER FINDINGS record examined first killed the process,
+# and a NEWER CLEAN round — which binds through the structured verdict and needs no count —
+# never got to decide. That is job 78's F2 defect (a newer favourable result lost to an
+# earlier record) arriving through a process exit instead of a `break`.
+#
+# THE DECIDING ROUND HERE NEEDS NO RECOGNISER, so the absent library must not matter:
+# expected BIND (exit 0), through `$FLOW_NOLIB`.
+if [ "$nolib_still_sib" -eq 1 ] && [ "$nolib_still_gone" -eq 1 ]; then
+  # Two covering rounds at the SAME head, ordered by `started_at`: 650 FINDINGS (older),
+  # 651 CLEAN (newer). Both blocks on the PR so both are discovered.
+  pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main \
+    "$(roborev_block 650)
+$(roborev_block 651)" pmcfadin "no marker needed"
+  roborev_job 650 "$MB_MAIN" "$HEAD_AFTER" F done 2026-09-02T10:00:00Z "$FC_REVIEW2"
+  roborev_job 651 "$MB_MAIN" "$HEAD_AFTER" P done 2026-09-02T11:00:00Z
+  J_OUT=$(cd "$WORK" && PATH="$BIN:$PATH" bash "$FLOW_NOLIB/premerge-review-binding.sh" \
+    review-binding 1 o/r "$HEAD_AFTER" 2>&1)
+  J_RC=$?
+  if [ "$J_RC" -ne 0 ]; then
+    bad "4050(j): an older FINDINGS round sank a newer CLEAN one when the recogniser was absent (exit $J_RC, wanted 0): $J_OUT"
+  else
+    ok "4050(j): the newer CLEAN round still decides and BINDS (exit 0) with the recogniser absent"
+  fi
+  # AFFIRMATIVE: the older findings round must be REPORTED as examined-and-nonbinding, not
+  # silently skipped. If it never appears the fixture did not exercise the ordering at all.
+  case "$J_OUT" in
+    *"job 650"*) ok "4050(j): the older FINDINGS round WAS examined — the ordering is genuinely exercised" ;;
+    *) bad "4050(j): job 650 is absent from the output, so the mixed-ordering path was not exercised (got: $J_OUT)" ;;
+  esac
+  case "$J_OUT" in
+    *"affirmatively CLEAN"*) ok "4050(j): and it binds on the structured CLEAN verdict, which needs no count" ;;
+    *) bad "4050(j): the bind did not cite the structured CLEAN verdict (got: $J_OUT)" ;;
+  esac
+else
+  bad "4050(j): \$FLOW_NOLIB was not in the expected state, so the mixed-ordering case did not run"
+fi
+reset_stub 2>/dev/null || true
+
 # --- G3: an authorized deferral naming a CLOSED issue must NOT bind -----------
 # `gh issue view` EXITS 0 for a closed issue, so a number-only test made "the
 # finding is tracked" satisfiable by an issue closed as a duplicate weeks ago —
@@ -2740,7 +2782,7 @@ fi
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.
-CASE_FLOOR=184
+CASE_FLOOR=187
 TOTAL=$((PASSED + FAILED))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"
