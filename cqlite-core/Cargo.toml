@@ -47,6 +47,11 @@ readme = "../README.md"
 exclude = [
     "tests/issue_3358_bti_query_token_bound.rs",
     "tests/issue_3747_empty_map_key.rs",
+    # issue_3805_empty_fixedwidth_map_key.rs joins that class for the identical
+    # reason: it resolves `test-data/fixtures/issue_3805/` CHECKOUT-relative and
+    # fails CLOSED (a committed fixture is `must_run`), so a packaged copy without
+    # the fixture would always panic.
+    "tests/issue_3805_empty_fixedwidth_map_key.rs",
 ]
 
 # docs.rs build: document the commonly used features. Deliberately excludes
