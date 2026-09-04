@@ -384,6 +384,17 @@ pub struct MergeProducer {
     /// not `Result` — and fail-soft there would silently keep the stale binding,
     /// i.e. the defect this exists to remove.
     original_cql_types: HashMap<String, Option<CqlType>>,
+    /// The same snapshot for PARTIAL (aggregate output) columns, kept in a SEPARATE
+    /// map (issue #3960, roborev job 121).
+    ///
+    /// One name-keyed map for both sets is unsound: an aggregate output may REUSE a
+    /// base table column's name, and the two have unrelated types. Sharing the map
+    /// meant a `count(*)` output aliased to a UDT column's name would be reset to that
+    /// column's declared UDT and re-resolved into a `Struct` while the emitted array
+    /// holds integers — a silent Arrow schema/array disagreement, which is the exact
+    /// class the surrounding code exists to prevent. Two maps make the collision
+    /// unexpressible rather than merely unlikely.
+    original_partial_cql_types: HashMap<String, Option<CqlType>>,
     /// Authoritative UDT registry resolved from the ticket DDL's `CREATE TYPE`
     /// statements (issue #2349). When present it is threaded onto every merge
     /// reader (cold [`KWayMerger::new_with_gc_and_registry_cancellable`] and the
@@ -511,6 +522,7 @@ impl MergeProducer {
             udt_registry: None,
             udt_keyspace: None,
             original_cql_types,
+            original_partial_cql_types: HashMap::new(),
             // Issue #2374/#2789: capture the read-time reconciliation clock once.
             now_secs: Self::reconciliation_now_secs(),
         })
@@ -594,7 +606,7 @@ impl MergeProducer {
             Self::reset_columns_to_declared(&self.original_cql_types, &mut self.columns);
             Self::resolve_columns_udts(&registry, &keyspace, &mut self.columns);
             if let Some(partial) = self.partial_columns.as_mut() {
-                Self::reset_columns_to_declared(&self.original_cql_types, partial);
+                Self::reset_columns_to_declared(&self.original_partial_cql_types, partial);
                 Self::resolve_columns_udts(&registry, &keyspace, partial);
             }
         }
@@ -760,11 +772,16 @@ impl MergeProducer {
         // same reason as the full-row set (issue #3960): `with_udt_keyspace` running
         // after this must be able to reset them to the declaration and re-bind.
         // `partial_columns` derives from the RAW schema, so these ARE declarations.
-        for column in &partial {
-            self.original_cql_types
-                .entry(column.name.clone())
-                .or_insert_with(|| column.cql_type.clone());
-        }
+        //
+        // Into the PARTIAL-scoped map, and INSERTED rather than `or_insert_with`
+        // (roborev job 121): an aggregate output can reuse a base column's NAME with an
+        // unrelated type, so keeping the first-seen entry would reset this column to the
+        // OTHER set's declaration. Rebuilding the map each time `with_aggregation` runs
+        // also means a second call cannot inherit the first plan's columns.
+        self.original_partial_cql_types = partial
+            .iter()
+            .map(|c| (c.name.clone(), c.cql_type.clone()))
+            .collect();
         // Production order is `with_udt_registry(...)` THEN `with_aggregation(...)`
         // (service.rs). `plan.partial_columns` derives from the RAW schema, so a
         // UDT-typed group-by column would carry `Custom("udt:X")` while its emitted
@@ -3421,6 +3438,59 @@ mod tests {
         assert!(
             row.is_none(),
             "a fully-tombstoned marker-less row must stay hidden"
+        );
+    }
+
+    /// **Issue #3960 / roborev job 121 — an aggregate output ALIASED to a base column's
+    /// name must keep the AGGREGATE's type through `with_udt_keyspace`.**
+    ///
+    /// The declared-type snapshot used ONE name-keyed map for both the full-row and the
+    /// partial (aggregate output) column sets, filled with `or_insert_with`. An
+    /// aggregate output may reuse a base column's NAME with an unrelated type, so the
+    /// first-seen entry won and resetting the partial columns replaced the aggregate's
+    /// own type with the base column's — here `count(*) AS name` would be reset to
+    /// `text` instead of staying `BigInt`, while the emitted array holds integers. That
+    /// is the silent Arrow schema/array disagreement the surrounding code exists to
+    /// prevent.
+    ///
+    /// RED BEFORE THE FIX: `Utf8` for the `name` output column.
+    #[test]
+    fn an_aggregate_aliased_to_a_base_column_name_keeps_its_own_type() {
+        use cqlite_core::schema::udt_registry_from_cql;
+
+        let schema = simple_schema();
+        assert!(
+            schema.columns.iter().any(|c| c.name == "name"),
+            "precondition: `name` is a base TEXT column, which is what makes the alias \
+             collide"
+        );
+        // `count(id) AS name` — the output deliberately shadows the base text column.
+        let agg = Aggregation {
+            group_by: vec![],
+            aggregates: vec![agg_on(AggFunc::Count, "id", "name")],
+        };
+        let registry = udt_registry_from_cql(
+            "CREATE TYPE contact_info (email text, phone text);",
+            &schema.keyspace,
+        );
+
+        // with_aggregation BEFORE with_udt_keyspace: the order that triggers the reset.
+        let producer = MergeProducer::with_spec(schema, 1024, ScanSpec::default())
+            .unwrap()
+            .with_udt_registry(registry)
+            .with_aggregation(&agg)
+            .expect("aggregation plan")
+            .with_udt_keyspace("some_keyspace");
+
+        let arrow = producer.arrow_schema().expect("arrow schema");
+        assert_eq!(
+            arrow
+                .field_with_name("name")
+                .expect("aggregate output column")
+                .data_type(),
+            &arrow::datatypes::DataType::Int64,
+            "a count(*) output aliased to a TEXT base column must stay Int64 — resetting \
+             it to the base column's declaration is issue #3960 / roborev job 121"
         );
     }
 
