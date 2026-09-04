@@ -399,14 +399,43 @@ impl V5CompressedLegacyParser {
         let (decoded, consumed) =
             match self.decode_reporting_consumption(data, type_str, column_name, 0) {
                 Ok(v) => v,
-                // #3747: the table ADMITTED this empty buffer but no `Value` carries an
-                // empty fixed-width scalar — same OPAQUE policy as below. Typed: #3805.
-                Err(_) if data.is_empty() && allowed.contains(&0) => {
-                    *opaque_out = true;
-                    return Ok(Value::blob(Vec::new()));
+                Err(e) => {
+                    // #3747's OPAQUE POLICY, DOOR 1: the width table ADMITTED this
+                    // empty buffer but the decoder has no `Value` for an empty scalar
+                    // of this type. Preserve the key as opaque bytes and tell the
+                    // caller (typed: #3805) rather than dropping a key Cassandra
+                    // accepts. Defence in depth since #3847: every family the KEY
+                    // table admits at width 0 now decodes, so this door is reached
+                    // only by a type whose decoder still refuses an empty buffer.
+                    if data.is_empty() && allowed.contains(&0) {
+                        *opaque_out = true;
+                        return Ok(Value::blob(Vec::new()));
+                    }
+                    return Err(e);
                 }
-                Err(e) => return Err(e),
             };
+        // #3747's OPAQUE POLICY, DOOR 2 — THE DECODE SUCCEEDED, WITH `Null`.
+        //
+        // This is the door #3847 opened, and getting here cost a red `core-tests`.
+        // The policy used to live ONLY on the `Err` arm above, which was sound just
+        // while the shared decoder REFUSED an empty fixed-width buffer. #3847 made
+        // `parse_value_from_raw_bytes` admit `{n, 0}` and answer `Value::Null`, so
+        // the decode now SUCCEEDS and the old arm stopped being reached — handing
+        // back a NULL KEY, which Cassandra cannot express and which loses the key
+        // #3747 exists to preserve.
+        //
+        // KEYED ON THE DECODE'S ANSWER, NOT ON THE WIDTH TABLE. The first fix here
+        // tested `data.is_empty() && allowed.contains(&0)` BEFORE the decode, which
+        // is too broad and broke `inet`: `inet` admits `[0, 4, 16]` and an empty
+        // `inet` DECODES to a real `Value::Inet(empty)` — Cassandra's
+        // `InetAddressSerializer.validate` returns early on empty — so it must be
+        // returned, not made opaque. `Null` is the precise signal that the decoder
+        // had no value to give: `{n, 0}` -> `null` is the VALUE path's rule
+        // (`deserialize()`), and a key cannot take that answer.
+        if data.is_empty() && matches!(decoded, Value::Null) {
+            *opaque_out = true;
+            return Ok(Value::blob(Vec::new()));
+        }
         // A PEELED VIEW FOR THE CHECKS ONLY — the value itself is returned exactly
         // as the shared decoder produced it (see the return, and the module header's
         // parity section). A `frozen<absent_udt>` key can come back as

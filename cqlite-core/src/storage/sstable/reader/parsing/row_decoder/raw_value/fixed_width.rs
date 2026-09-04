@@ -74,21 +74,47 @@
 //! column loop on a failing column, so the failing column AND every later one
 //! silently became null.
 //!
-//! # DECLARED DIVERGENCE, opened by #3847 and NOT closed by it
+//! # THE CELL-PATH KEY: this rule REACHES it by delegation, and the key path
+//! # answers for itself
 //!
-//! `complex_column/cell_path_key.rs`'s `cql_short_allowed_widths` is a separate
-//! WIDTH-ADMISSIBILITY table in front of this decoder, and its oracle is
-//! `validate()`: it admits `{n, 0}` for the eight permissive families but only
-//! `{n}` for `smallint`, `tinyint`, `date` and `time`. Those four now disagree
-//! with this rule, and the stricter table wins — an empty MAP KEY of those four
-//! types is refused before the decoder sees it. Left alone deliberately: #3847's
-//! subject is the value decoder, and relaxing what a map KEY may be is its own
-//! behaviour change needing its own corpus measurement. Recorded here, and
-//! pointed at from `cell_path_key_tests.rs`, rather than left to be rediscovered.
-//! (Reachability caveat, from #3612 R6-F2(a): no READ reaches an empty cell path
-//! at all — the multicell map caller filters `path_bytes.is_empty()` — so the
-//! divergence is unit-observable only, which is why it is a residual and not a
-//! defect.)
+//! `complex_column/cell_path_key.rs` has a separate WIDTH-ADMISSIBILITY table whose
+//! oracle is `validate()`: it admits `{n, 0}` for the eight permissive families but
+//! only `{n}` for `smallint`, `tinyint`, `date` and `time`, and the stricter table
+//! wins for those four. That much is unchanged.
+//!
+//! **TWO CLAIMS THAT USED TO STAND HERE WERE FALSE, and each cost something:**
+//!
+//! 1. *"No READ reaches an empty cell path — the multicell map caller filters
+//!    `path_bytes.is_empty()` — so the divergence is unit-observable only, a
+//!    residual and not a defect."* **#3747 REMOVED that caller guard on purpose**;
+//!    its tests now carry `!! REACHABILITY: THE EMPTY-KEY CASES BELOW ARE NOW
+//!    REACHED BY A REAL READ`. A stale reachability argument is the worst kind of
+//!    comment: it reads as a licence to stop looking.
+//! 2. *"This rule is about VALUES and does not reach the key path."* **It reaches it
+//!    by DELEGATION** — `cell_path_key.rs` decodes through
+//!    `parse_value_from_raw_bytes`. Widening this rule therefore changed KEY
+//!    decoding, and it was not a residual: #3747's opaque policy sat on the
+//!    decoder's `Err` branch and stopped firing once the decode began SUCCEEDING
+//!    with `Null`, so `an_empty_key_of_an_n_or_zero_type_is_preserved_opaquely`
+//!    FAILED in the gate of record. Grepping `cell_path_key.rs` for this module's
+//!    symbols found nothing and looked like proof of no coupling; the coupling is
+//!    through the shared decoder, not through a name.
+//!
+//! **What is true now:** `{n, 0}` -> `null` is the rule for a VALUE. A KEY cannot
+//! take that answer — Cassandra has no null map key — so `cell_path_key.rs` applies
+//! #3747's empty -> OPAQUE answer (empty blob plus `opaque_out`) for itself, KEYED ON
+//! THIS DECODER'S ANSWER: it delegates, and when an empty buffer comes back `Null` it
+//! substitutes the opaque key. It does NOT inherit this rule, and it no longer depends
+//! on the decode FAILING (the door #3847 shut).
+//!
+//! **A third correction, from the fix round itself:** the first attempt put that check
+//! BEFORE the delegation, gated on the key table admitting width 0. That is too broad
+//! and broke `inet`, which admits `[0, 4, 16]` and whose empty buffer decodes to a real
+//! `Value::Inet(empty)` (`InetAddressSerializer.validate` returns early on empty). The
+//! width table says what is ADMISSIBLE; only the decode says whether a value could be
+//! PRODUCED — so the policy has to read the answer, not the table. Three false
+//! statements have now stood in this one header; each was a claim about code that had
+//! moved underneath it.
 //!
 //! # Why this rule lives under `raw_value`
 //!
