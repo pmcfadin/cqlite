@@ -28,7 +28,14 @@
 //! Tests are gated on:
 //! - `#[cfg(feature = "delta-scan")]` — the feature must be enabled
 //! - `CQLITE_DATASETS_ROOT` environment variable pointing to the datasets directory
-//! - Presence of `Data.db` binary files in `test_deltas/` (skipped in CI until published)
+//! - Presence of `Data.db` binary files in `test_deltas/`. They ARE in the published
+//!   bundle (measured 2026-09-01: 9 `*-Data.db` under
+//!   `<CQLITE_DATASETS_ROOT>/sstables/test_deltas`, extracted from the pinned
+//!   `datasets-v3` / `cassandra5-small-full-v3.5.tar.gz` asset), so an absence is a
+//!   MISCONFIGURED ROOT, not an unpublished fixture. The previous wording here
+//!   ("skipped in CI until published") was stale, and it is what made the strict-flag gap
+//!   below look intentional. Under `CQLITE_REQUIRE_FIXTURES=1` an absence is a hard,
+//!   named failure; without it these cases print `[SKIP]` and pass.
 //!
 //! Run with:
 //! ```bash
@@ -98,6 +105,11 @@ struct JsonlLivenessInfo {
     /// Microseconds since Unix epoch, parsed from ISO-8601 with fractional seconds.
     tstamp_micros: i64,
     expires_at_micros: Option<i64>,
+    /// The row liveness TTL in SECONDS, exactly as sstabledump printed it
+    /// (`JsonTransformer.serializeRow`, cassandra-5.0.8). This — not `expires_at` — is the
+    /// authoritative value in Cassandra's per-cell suppression rule, which compares
+    /// `cell.ttl() != liveInfo.ttl()`.
+    ttl_secs: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -394,9 +406,11 @@ fn parse_liveness_info(v: &JsonValue) -> Option<JsonlLivenessInfo> {
         .get("expires_at")
         .and_then(|s| s.as_str())
         .and_then(iso8601_to_micros);
+    let ttl_secs = v.get("ttl").and_then(|t| t.as_i64());
     Some(JsonlLivenessInfo {
         tstamp_micros,
         expires_at_micros,
+        ttl_secs,
     })
 }
 
@@ -410,14 +424,42 @@ fn parse_deletion_info(v: &JsonValue) -> Option<JsonlDeletionInfo> {
 
 fn parse_cell(v: &JsonValue) -> Option<JsonlCell> {
     let name = v.get("name")?.as_str()?.to_string();
-    let tstamp_micros = v
-        .get("tstamp")
-        .and_then(|s| s.as_str())
-        .and_then(iso8601_to_micros);
-    let expires_at_micros = v
-        .get("expires_at")
-        .and_then(|s| s.as_str())
-        .and_then(iso8601_to_micros);
+    // ABSENT AND PRESENT-BUT-UNDECODABLE ARE DIFFERENT FACTS (roborev round 6). An
+    // `.and_then` chain collapses three states — field absent, field present but not a
+    // string, field present and a string that will not parse — onto ONE `None`. The
+    // suppression check downstream reads `None` as AUTHORITATIVE EVIDENCE that sstabledump
+    // omitted the field, which is what licenses the whole `(Some, None)` tolerance. So
+    // malformed golden data would have opened the suppression path and been ACCEPTED: a
+    // silent false accept, driven by a corrupt oracle rather than by real divergence.
+    //
+    // Absent stays `None` (the only state that may license suppression); present-but-
+    // undecodable PANICS by name. A test whose oracle it cannot read must not proceed on a
+    // guess about what the oracle said.
+    let decode_micros = |field: &str| -> Option<i64> {
+        match v.get(field) {
+            // ONLY A MISSING KEY IS ABSENCE (roborev round 7). The previous cut also mapped an
+            // explicit `null` to `None`, which is the SAME collapse this closure exists to
+            // prevent, one value over: sstabledump expresses "field omitted" by NOT EMITTING
+            // THE KEY, so `"tstamp": null` is not something the oracle produces — it is
+            // malformed data, and admitting it as absence re-opens the suppression path this
+            // whole check gates. A present `null` is therefore rejected like any other
+            // present-but-undecodable value.
+            None => None,
+            Some(raw) => {
+                let text = raw.as_str().unwrap_or_else(|| {
+                    panic!("{name}: golden field `{field}` is present but not a string: {raw}")
+                });
+                Some(iso8601_to_micros(text).unwrap_or_else(|| {
+                    panic!(
+                        "{name}: golden field `{field}` is present but not decodable as an \
+                         ISO-8601 instant: {text:?}"
+                    )
+                }))
+            }
+        }
+    };
+    let tstamp_micros = decode_micros("tstamp");
+    let expires_at_micros = decode_micros("expires_at");
     let deletion_info = v.get("deletion_info").and_then(parse_deletion_info);
 
     // Skip cells with a "path" key — these are sub-element entries for collections
@@ -659,6 +701,45 @@ async fn try_collect_delta_records(
 }
 
 // ============================================================================
+// Fixture presence: SKIP by default, HARD FAIL under CQLITE_REQUIRE_FIXTURES=1
+// ============================================================================
+
+/// `CQLITE_REQUIRE_FIXTURES=1` makes a missing fixture a HARD failure.
+///
+/// WHY THIS FILE NEEDED IT (roborev round 1 on #3725, High). Every fixture-absence path
+/// below used to `println!("[SKIP] …"); return`, unconditionally — so with `test_deltas`
+/// absent this target reported `14 passed` in 0.00s having compared NOTHING, and once
+/// #3725 gave it a merge-gating executor that vacuous run would have gated a merge. It is
+/// the same defect #3725 closed for `issue_1007_complex_type_parity` one target over, and
+/// the lane exports the strict flag on the full gate, so honouring it here is what makes a
+/// corpus-absent run FAIL by name instead of passing. Note the lane does NOT verify per
+/// target that the flag is honoured — that scan was DESCOPED by lead ruling on #3725 and
+/// #3789 owns its replacement — so this is load-bearing, not optional decoration.
+fn require_fixtures_strict() -> bool {
+    std::env::var("CQLITE_REQUIRE_FIXTURES")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+/// Skip when a fixture is absent — unless strict mode is on, in which case FAIL loudly.
+///
+/// `subject` NAMES the keyspace and table (or the whole keyspace) that could not be
+/// opened, deliberately: the gate's #2078 preflight probes only the CANONICAL keyspace
+/// (`test_basic`), so a generic "fixtures absent" sends the reader to a remedy that is
+/// already satisfied. The remedy for every case here is the same fetch, and it is in the
+/// message so nobody has to look it up.
+fn skip_or_fail(subject: &str, reason: &str) {
+    if require_fixtures_strict() {
+        panic!(
+            "CQLITE_REQUIRE_FIXTURES=1 but {subject} fixture unavailable: {reason}. \
+             Remedy: bash test-data/scripts/fetch-datasets.sh (then export the \
+             CQLITE_DATASETS_ROOT it prints). These binaries ARE in the pinned bundle."
+        );
+    }
+    println!("[SKIP] {subject}: {reason}");
+}
+
+// ============================================================================
 // Parity assertion helpers
 // ============================================================================
 
@@ -678,12 +759,150 @@ fn assert_writetime(context: &str, actual_micros: i64, expected_micros: i64) {
     );
 }
 
-/// Assert optional expiry times match.
+// FILE-SIZE NOTE (#1135, campsite rule): MEASURED at HEAD this file is 2085 lines against
+// a 1500-line test threshold — 585 over. #3725 grew it from origin/main's 1715, i.e. by
+// 370 lines, NOT the 40 an earlier draft of this note claimed: the figure was written when
+// only the oracle fix was in, and three later rounds (the fixture-posture cases, the
+// three-valued parse_cell, the suppression-rule assertions) each added to it without the
+// note being re-measured. Splitting it — the JSONL parsing half (~450 lines) is the
+// obvious seam — is #1135's scope, not a parity fix's, so the gate of record for #3725
+// runs with CQLITE_ALLOW_FILE_GROWTH=1, which is the file-size component's own documented
+// remedy. That is the THIRD consecutive override on this file and the split is now
+// genuinely owed; #1135 owns it. Do not add to it without splitting, and if you must,
+// RE-MEASURE this note in the same edit rather than carrying the number forward.
+
+/// Assert optional expiry times match, honouring Cassandra's per-cell SUPPRESSION rule.
 ///
-/// sstabledump rounds `expires_at` to the nearest second (epoch-seconds * 1e6),
-/// while scan_delta also uses epoch-seconds * 1_000_000.  Both should agree
-/// within 1 second (1_000_000 µs) to allow for any off-by-one in the display.
-fn assert_expires_at(context: &str, actual: Option<i64>, expected: Option<i64>) {
+/// sstabledump rounds `expires_at` to the nearest second (epoch-seconds * 1e6), as does
+/// scan_delta, so a printed pair must agree within 1s.
+///
+/// `row` is the enclosing row's liveness as sstabledump printed it, or `None` when the
+/// subject IS the row liveness. `cell_tstamp_printed` says whether sstabledump printed a
+/// per-cell `tstamp` — which is load-bearing, see below.
+///
+/// ORACLE — `JsonTransformer` at the pinned tag `cassandra-5.0.8`:
+///   * `:501` `if (cell.isExpiring() && (liveInfo.isEmpty() || cell.ttl() != liveInfo.ttl()))`
+///     guards the per-cell `ttl`/`expires_at`/`expired` fields, so a cell copy is OMITTED
+///     exactly when the cell's TTL EQUALS the row's primary-key liveness TTL — the ordinary
+///     case for `INSERT ... USING TTL`, where every cell inherits the row TTL.
+///   * `:497` `if (liveInfo.isEmpty() || cell.timestamp() != liveInfo.timestamp())` guards
+///     the per-cell `tstamp` by the identical rule. So an ABSENT cell `tstamp` is
+///     sstabledump telling us, authoritatively, that the cell's writetime EQUALS the row
+///     liveness writetime.
+///
+/// WHY THE CHECK IS SHAPED LIKE THIS — three rounds went round a circle here, and the
+/// resolution is a PRECONDITION, not another derivation (lead ruling on roborev R2-F1):
+///   1. The original code compared cell `expires_at` against row `expires_at`. roborev
+///      round 1 (F3): wrong, Cassandra compares TTL.
+///   2. That was replaced by a derived `ttl = expires_at_secs - writetime_secs`. roborev
+///      round 2 (R2-F1): also wrong — Cassandra computes expiration from coordinator
+///      wall-clock while `USING TIMESTAMP` sets the writetime independently, so the
+///      subtraction yields a bogus TTL for any fixture using an explicit timestamp.
+///   3. All three observations are correct. The missing piece is that the AUTHORITATIVE
+///      value is not available: `CellDelta` (delta_scan/model.rs) carries `value`,
+///      `writetime`, `expires_at` and `replaced` and NO `ttl_seconds`, while
+///      `types.rs::CellExpiration` has it and the delta model discards it. Adding a field
+///      to a production model to serve a test is out of this issue's scope and REJECTED by
+///      the lead; it is proposed as a follow-up.
+///
+/// WHAT THIS CHECK ACTUALLY VERIFIES — corrected (roborev round 4, F2). An earlier
+/// revision of this comment claimed `expires_at ≈ writetime + ttl`, and therefore that
+/// equal writetimes make expiry equality EQUIVALENT to TTL equality. **That was false**,
+/// and the pinned source says so directly:
+///
+///   * `BufferCell.java:79-82` — `expiring(column, timestamp, ttl, nowInSec, …)` builds the
+///     cell with `computeLocalExpirationTime(nowInSec, ttl)`. `timestamp` is a SEPARATE
+///     parameter and is not an input to the expiry at all.
+///   * `LivenessInfo.java:68-72` — the row liveness is built the same way, from the same
+///     helper.
+///   * `ExpirationDateOverflowHandling.java:120-125` — that helper is
+///     `min(nowInSec + ttl, cellMaxDeletionTime)`.
+///
+/// So `expires_at` is a function of the WRITE STATEMENT's wall clock and the TTL, never of
+/// the writetime. What this check verifies is therefore cell/row expiry CONSISTENCY — a
+/// real property of the decoded data — and that coincides with Cassandra's TTL-equality
+/// rule under a precondition about the WRITE, not about the timestamp: when the cell and
+/// the row liveness were written by the SAME operation they share one `nowInSec`, and then
+/// expiry equality is exactly TTL equality.
+///
+/// THE GATE IS THE ABSENT CELL `tstamp`, AND ITS TWO DIRECTIONS ARE DIFFERENT:
+///   * SOUND DIRECTION — one operation always yields equal timestamps, so an absent cell
+///     `tstamp` (`:497`) admits EVERY same-operation cell. The check never over-refuses a
+///     cell that Cassandra's own rule covers.
+///   * RESIDUAL — equal timestamps are NECESSARY but not SUFFICIENT for one operation. Two
+///     writes carrying the SAME explicit `USING TIMESTAMP` at different wall-clock times,
+///     with the same TTL, are suppressed by Cassandra (TTLs equal) yet carry DIFFERENT
+///     expiries here, so this comparison would FAIL on a VALID SSTable. That is a false
+///     FAIL, it is loud and named rather than silent, and it is unreachable in the current
+///     corpus: no fixture uses `USING TIMESTAMP`, and the measurement below found ZERO
+///     cells where a suppressed expiry accompanies a printed cell `tstamp`.
+///   * SECOND RESIDUAL, and the WORSE direction because it is SILENT: the
+///     `min(…, cellMaxDeletionTime)` clamp means two DIFFERENT TTLs that both saturate
+///     produce EQUAL expiries, which this check would ACCEPT. The clamp is version-
+///     dependent — `Cell.MAX_DELETION_TIME` = `CassandraUInt.MAX_VALUE_LONG - 2`
+///     (4294967293 s, ≈2106) when the cluster is all ≥ 5.0, else
+///     `MAX_DELETION_TIME_2038_LEGACY_CAP` = `Integer.MAX_VALUE - 1` (2147483646 s, ≈2038)
+///     — see `Cell.java:51-57` and `getVersionedMaxDeletiontionTime` at `:91-100`.
+///     MEASURED, not assumed: of the 768 suppressed expiring cells in the corpus, ZERO
+///     render an `expires_at` at either clamp value, and ZERO render one materially below
+///     their own `tstamp + ttl` (the general signature of clamping); the largest expiry
+///     anywhere in the corpus is 1782428346 s (2026-06-25), nine decades short. So it is
+///     unreachable here — but note this residual was missed by two review rounds and by
+///     the ruling that set up this comment, which is why the list below is scoped rather
+///     than closed.
+///
+/// THESE ARE THE RESIDUALS **RECOGNISED**, not a completeness claim. The clamp's
+/// interaction with the suppression rule was reasoned about here, not enumerated
+/// systematically, and a shape nobody has thought of is absent from this list rather than
+/// marked in it. Treat it the way the gate treats its own censuses (`0 RECOGNISED`, never a
+/// bare zero): evidence about what was looked for, never evidence that nothing else exists.
+///
+/// The authoritative fix is to carry `ttl_seconds` through the delta model so the TTLs
+/// themselves can be compared; that is a public-type change, and it is FILED AS #3787
+/// (P2) rather than made here — lead ruling on #3725, which took the scoped option
+/// deliberately rather than widening a test-execution-gating PR into `cqlite-core`'s
+/// public delta model. #3787 carries the expensive prerequisite: a CASSANDRA-WRITTEN
+/// fixture with an explicit `USING TIMESTAMP` and a TTL, without which neither residual
+/// below is reachable and the fix cannot be demonstrated. Until it lands, this comment is the record of what the check does and
+/// does not establish — do NOT re-derive it, and do not widen the tolerance to silence the
+/// residual, which would trade a loud false FAIL for a silent false PASS.
+///
+/// MEASURED, at two scopes, because the number that matters is scope-sensitive and a bare
+/// count next to a test that reads a fraction of the corpus would mislead:
+///   * THIS TARGET'S OWN SUBJECT — the `test_deltas` fixtures that have a binary `Data.db`
+///     plus the four corpus tables `check_corpus_table` names: 27 goldens, 51048 live
+///     cells, **30** suppressed expiring cells (all in the one `ttl_cells` generation that
+///     ships binaries), **0** undecidable.
+///   * THE WHOLE COMMITTED CORPUS, as a wider check: 162 goldens, 75016 live cells, 768
+///     suppressed expiring cells across 8 ttl-bearing goldens, **0** undecidable.
+///
+/// So the refusal branch is known-DEFENSIVE rather than dead, and the comparison it guards
+/// is EXACT for every cell this target actually compares. Reaching the refusal needs an
+/// `UPDATE ... USING TTL` (or `USING TIMESTAMP`) touching individual columns of a row at a
+/// different write time; no fixture does that. It is nonetheless PINNED at the unit level
+/// by `suppression_rule_requires_equal_writetimes_or_refuses` below, which drives the path
+/// with two synthetic values and needs no fixture — so "defensive" does not mean
+/// "unexercised".
+///
+/// One incidental fact from the same measurement, recorded because it bounds what the
+/// `(Some, Some)` cell arm is ever exercised by: **ZERO** cells in the entire corpus print
+/// their own `ttl`/`expires_at`. Every expiring cell there is suppressed, so the suppression
+/// path is the only one real data drives.
+///
+/// `(None, Some(_))` stays STRICT: an expiry sstabledump DID print and scan_delta did not
+/// is a real divergence, never a suppression. Do not loosen it.
+///
+/// Wrong until #3725: this is one of the 13 crate-level `delta-scan`-gated targets that
+/// executed in no merge-gating lane, so `test_delta_parity_ttl_cells` FAILED against the
+/// real corpus and PASSED against an absent one. Every expectation here is derived from the
+/// Cassandra source above, never from CQLite's own output.
+fn assert_expires_at(
+    context: &str,
+    actual: Option<i64>,
+    expected: Option<i64>,
+    row: Option<&JsonlLivenessInfo>,
+    cell_tstamp_printed: bool,
+) {
     const TTL_TOLERANCE_MICROS: i64 = 1_000_000; // 1 second
     match (actual, expected) {
         (Some(a), Some(e)) => {
@@ -698,15 +917,151 @@ fn assert_expires_at(context: &str, actual: Option<i64>, expected: Option<i64>) 
             );
         }
         (None, None) => {}
-        (Some(a), None) => panic!(
-            "{}: scan_delta has expires_at={}µs but sstabledump does not",
-            context, a
-        ),
+        (Some(a), None) => {
+            let Some(r) = row else {
+                panic!(
+                    "{}: scan_delta has expires_at={}µs, sstabledump printed no cell copy, and \
+                     there is no row liveness for it to have been suppressed against",
+                    context, a
+                )
+            };
+            if cell_tstamp_printed {
+                panic!(
+                    "{}: SUPPRESSION NOT VERIFIABLE — sstabledump omitted this cell's \
+                     expires_at (so per JsonTransformer:501 the cell TTL equals the row TTL \
+                     of {:?}s), but it PRINTED the cell's tstamp, so per :497 the cell and \
+                     row-liveness timestamps DIFFER — which means they may not come from one \
+                     write operation, and expiry equality only tracks TTL equality within \
+                     one operation (BufferCell:79-82 computes the expiry from nowInSec, not \
+                     from the timestamp). The authoritative cell TTL is not available: \
+                     CellDelta carries expires_at={}µs but no ttl_seconds. Refusing to \
+                     decide (#3725; surfacing ttl_seconds on the delta model is escalated).",
+                    context, r.ttl_secs, a
+                );
+            }
+            match r.expires_at_micros {
+                // Same-operation cells share one `nowInSec`, so their expiries agree iff
+                // their TTLs do. The absent cell `tstamp` admits every same-operation cell
+                // (necessary, not sufficient — see the residual in the doc comment).
+                Some(row_e) if (a - row_e).abs() <= TTL_TOLERANCE_MICROS => {}
+                Some(row_e) => panic!(
+                    "{}: scan_delta has cell expires_at={}µs and sstabledump printed no cell \
+                     copy, but the row liveness expiry is {}µs (row TTL {:?}s) — with equal \
+                     writetimes those must agree, since sstabledump omits only a cell copy \
+                     whose TTL equals the row's (JsonTransformer:501, cassandra-5.0.8)",
+                    context, a, row_e, r.ttl_secs
+                ),
+                None => panic!(
+                    "{}: scan_delta has cell expires_at={}µs and sstabledump printed neither a \
+                     cell copy nor a row liveness expiry (row TTL {:?}s)",
+                    context, a, r.ttl_secs
+                ),
+            }
+        }
         (None, Some(e)) => panic!(
             "{}: sstabledump has expires_at={}µs but scan_delta does not",
             context, e
         ),
     }
+}
+
+/// The suppression rule's own regression cases, corpus-free.
+///
+/// Each negative case asserts the panic NAMES its reason, not merely that something
+/// panicked: an unrelated panic produces an identical `catch_unwind` error and would make
+/// this suite green for the wrong reason.
+#[test]
+fn suppression_rule_requires_equal_writetimes_or_refuses() {
+    let sec = 1_000_000i64;
+    let row = |ttl: Option<i64>, exp: Option<i64>| JsonlLivenessInfo {
+        tstamp_micros: 1_000 * sec,
+        expires_at_micros: exp,
+        ttl_secs: ttl,
+    };
+    // `catch_unwind` + a marker: "it panicked" is not evidence about WHY.
+    // NO PANIC-HOOK SURGERY (roborev round 6). An earlier cut swapped the PROCESS-GLOBAL
+    // hook to silence the expected panic's backtrace. That is shared mutable state: this
+    // target runs its cases on multiple threads, so the window could swallow an UNRELATED
+    // test's panic diagnostics, or restore a stale hook if two cases overlapped — trading a
+    // little stderr noise for the loss of exactly the diagnostics a failure needs. The
+    // expected panic now prints; `catch_unwind` still captures the payload, which is the
+    // only thing asserted on.
+    fn refuses(marker: &str, f: impl FnOnce() + std::panic::UnwindSafe) {
+        let err = std::panic::catch_unwind(f);
+        let payload = err.expect_err("expected a refusal, got success");
+        let msg = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("<non-string panic payload>")
+            .to_string();
+        assert!(
+            msg.contains(marker),
+            "refused for the wrong reason: expected {marker:?} in {msg:?}"
+        );
+    }
+
+    // GATE OPEN (cell tstamp absent => equal timestamps, so the cell may come from the
+    // row's own write operation) and the expiries agree: the ordinary
+    // `INSERT ... USING TTL` shape, 30 of them in this target's subject.
+    let r = row(Some(3600), Some(4600 * sec));
+    assert_expires_at(
+        "case/suppressed-equal",
+        Some(4600 * sec),
+        None,
+        Some(&r),
+        false,
+    );
+
+    // GATE CLOSED (cell printed its own tstamp => the timestamps differ, so the two may
+    // not share one write operation and the expiries need not track the TTLs): the check
+    // must REFUSE BY NAME rather than compare. No corpus fixture reaches this today; the
+    // authoritative fix is a `ttl_seconds` on the delta model, which is escalated.
+    let r = row(Some(3600), Some(4600 * sec));
+    refuses("SUPPRESSION NOT VERIFIABLE", || {
+        assert_expires_at(
+            "case/differing-writetime",
+            Some(4605 * sec),
+            None,
+            Some(&r),
+            true,
+        )
+    });
+
+    // Gate open but the expiries disagree. Within one write operation that cannot happen
+    // (one nowInSec, equal TTLs => equal expiries), so no suppression may be claimed.
+    let r = row(Some(3600), Some(4600 * sec));
+    refuses("row liveness expiry", || {
+        assert_expires_at(
+            "case/suppressed-mismatch",
+            Some(8200 * sec),
+            None,
+            Some(&r),
+            false,
+        )
+    });
+
+    // A row with no liveness expiry cannot have suppressed anything.
+    let r = row(None, None);
+    refuses("neither a cell copy nor a row liveness expiry", || {
+        assert_expires_at(
+            "case/no-row-expiry",
+            Some(4600 * sec),
+            None,
+            Some(&r),
+            false,
+        )
+    });
+
+    // No row liveness at all.
+    refuses("no row liveness", || {
+        assert_expires_at("case/no-row", Some(4600 * sec), None, None, false)
+    });
+
+    // The strict direction, unchanged.
+    refuses("but scan_delta does not", || {
+        assert_expires_at("case/strict-none-some", None, Some(4600 * sec), None, false)
+    });
 }
 
 // ============================================================================
@@ -932,6 +1287,8 @@ async fn check_fixture_parity(fixture_dir: &Path, table_name: &str) -> ParityRes
                                     &format!("{}.expires_at", ctx_lv),
                                     dl.expires_at,
                                     jl.expires_at_micros,
+                                    None,  // the subject IS the row liveness
+                                    false, // …so the cell-tstamp precondition is moot
                                 );
                                 result.liveness_ok += 1;
                             }
@@ -1009,8 +1366,18 @@ async fn check_fixture_parity(fixture_dir: &Path, table_name: &str) -> ParityRes
                                     if let Some(expected_wt) = jcell.tstamp_micros {
                                         assert_writetime(&ctx, cd.writetime, expected_wt);
                                     }
-                                    // TTL / expires_at.
-                                    assert_expires_at(&ctx, cd.expires_at, jcell.expires_at_micros);
+                                    // TTL / expires_at. The ROW's liveness expiry goes in
+                                    // because sstabledump suppresses a cell copy equal to it.
+                                    assert_expires_at(
+                                        &ctx,
+                                        cd.expires_at,
+                                        jcell.expires_at_micros,
+                                        r.liveness_info.as_ref(),
+                                        // sstabledump prints a cell tstamp ONLY when it
+                                        // differs from the row liveness (:497), so its
+                                        // ABSENCE certifies equal writetimes.
+                                        jcell.tstamp_micros.is_some(),
+                                    );
                                     result.cells_ok += 1;
                                 }
                                 None => {
@@ -1297,19 +1664,18 @@ async fn test_scan_delta_parity_all_test_deltas() {
     let datasets_root = match datasets_root() {
         Some(r) => r,
         None => {
-            println!(
-                "[SKIP] CQLITE_DATASETS_ROOT not set — skipping scan_delta parity.\n\
-                 Set CQLITE_DATASETS_ROOT=$PWD/test-data/datasets and run:\n\
-                 bash test-data/scripts/generate-deltas.sh"
+            skip_or_fail(
+                "test_deltas (all fixtures)",
+                "CQLITE_DATASETS_ROOT is not set",
             );
             return;
         }
     };
 
     if !datasets_root.exists() {
-        println!(
-            "[SKIP] {:?} does not exist — skipping scan_delta parity tests.",
-            datasets_root
+        skip_or_fail(
+            "test_deltas (all fixtures)",
+            &format!("datasets root {datasets_root:?} does not exist"),
         );
         return;
     }
@@ -1317,10 +1683,13 @@ async fn test_scan_delta_parity_all_test_deltas() {
     let fixtures = find_delta_fixtures_with_data(&datasets_root);
 
     if fixtures.is_empty() {
-        println!(
-            "[SKIP] No test_deltas fixtures with Data.db found under {:?}.\n\
-             Run: bash test-data/scripts/generate-deltas.sh",
-            datasets_root
+        // `datasets_root()` ALREADY ends in `sstables/test_deltas` (see its definition), so
+        // appending that subpath again printed a doubled, NONEXISTENT location. This message
+        // is the remedy an operator follows, so a wrong path in it is worse than no path.
+        // roborev round 3.
+        skip_or_fail(
+            "test_deltas (all fixtures)",
+            &format!("no fixture with a binary Data.db under {datasets_root:?}"),
         );
         return;
     }
@@ -1381,19 +1750,18 @@ macro_rules! delta_fixture_test {
             let root = match datasets_root() {
                 Some(r) => r,
                 None => {
-                    println!(
-                        "[SKIP] CQLITE_DATASETS_ROOT not set — skipping {}",
-                        stringify!($test_name)
+                    skip_or_fail(
+                        concat!("test_deltas.", $table),
+                        "CQLITE_DATASETS_ROOT is not set",
                     );
                     return;
                 }
             };
 
             if !root.exists() {
-                println!(
-                    "[SKIP] {:?} not found — skipping {}",
-                    root,
-                    stringify!($test_name)
+                skip_or_fail(
+                    concat!("test_deltas.", $table),
+                    &format!("datasets root {root:?} does not exist"),
                 );
                 return;
             }
@@ -1404,10 +1772,9 @@ macro_rules! delta_fixture_test {
             {
                 Some(d) => d,
                 None => {
-                    println!(
-                        "[SKIP] No Data.db for table '{}' — run: \
-                         bash test-data/scripts/generate-deltas.sh",
-                        $table
+                    skip_or_fail(
+                        concat!("test_deltas.", $table),
+                        "no binary Data.db for this table",
                     );
                     return;
                 }
@@ -1466,9 +1833,9 @@ async fn check_corpus_table(keyspace: &str, table: &str, schema: TableSchema) {
     let root_env = match std::env::var("CQLITE_DATASETS_ROOT") {
         Ok(v) => PathBuf::from(v),
         Err(_) => {
-            println!(
-                "[SKIP] CQLITE_DATASETS_ROOT not set — skipping corpus parity for {}.{}",
-                keyspace, table
+            skip_or_fail(
+                &format!("{keyspace}.{table}"),
+                "CQLITE_DATASETS_ROOT is not set",
             );
             return;
         }
@@ -1476,7 +1843,10 @@ async fn check_corpus_table(keyspace: &str, table: &str, schema: TableSchema) {
 
     let ks_dir = root_env.join("sstables").join(keyspace);
     if !ks_dir.exists() {
-        println!("[SKIP] {:?} not found", ks_dir);
+        skip_or_fail(
+            &format!("{keyspace}.{table}"),
+            &format!("keyspace directory {ks_dir:?} does not exist"),
+        );
         return;
     }
 
@@ -1495,9 +1865,9 @@ async fn check_corpus_table(keyspace: &str, table: &str, schema: TableSchema) {
     }) {
         Some(Ok(e)) => e.path(),
         _ => {
-            println!(
-                "[SKIP] No directory for {}.{} under {:?}",
-                keyspace, table, ks_dir
+            skip_or_fail(
+                &format!("{keyspace}.{table}"),
+                &format!("no table directory under {ks_dir:?}"),
             );
             return;
         }
@@ -1505,9 +1875,9 @@ async fn check_corpus_table(keyspace: &str, table: &str, schema: TableSchema) {
 
     // Ensure Data.db exists.
     if find_data_db(&fixture).is_none() {
-        println!(
-            "[SKIP] No Data.db for {}.{} — run: bash test-data/scripts/fetch-datasets.sh",
-            keyspace, table
+        skip_or_fail(
+            &format!("{keyspace}.{table}"),
+            "no binary Data.db (JSONL-only checkout)",
         );
         return;
     }
@@ -1515,9 +1885,9 @@ async fn check_corpus_table(keyspace: &str, table: &str, schema: TableSchema) {
     let jsonl = match find_jsonl(&fixture) {
         Some(j) => j,
         None => {
-            println!(
-                "[SKIP] No JSONL golden for {}.{} in {:?}",
-                keyspace, table, fixture
+            skip_or_fail(
+                &format!("{keyspace}.{table}"),
+                &format!("no JSONL golden in {fixture:?}"),
             );
             return;
         }

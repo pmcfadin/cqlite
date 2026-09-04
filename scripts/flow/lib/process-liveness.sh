@@ -73,7 +73,7 @@ process_start_window() {
       *)   d=0;           hms="$et" ;;
     esac
     case "$hms" in
-      *:*:*) h="${hms%%:*}"; m="$(printf '%s' "$hms" | cut -d: -f2 2>/dev/null)"; sec="${hms##*:}" ;;
+      *:*:*) h="${hms%%:*}"; m="$(printf '%s' "$hms" 2>/dev/null | cut -d: -f2 2>/dev/null)"; sec="${hms##*:}" ;;
       *:*)   h=0;            m="${hms%%:*}";                          sec="${hms##*:}" ;;
       *)     return 0 ;;
     esac

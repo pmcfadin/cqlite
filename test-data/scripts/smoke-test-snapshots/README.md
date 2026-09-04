@@ -45,6 +45,14 @@ grep -o '{"name":"height","value":[^,}]*' \
 right and the golden was the stale side. Had it gone the other way, the golden
 would stand and the CLI would be the bug.
 
+The same oracle settled the JSON side in issue #3777: `select_simple_json.golden`
+carried the widened f64 spelling (`1.6699999570846558`) because the JSON writer
+widened the f32 before serializing. The writer was the wrong side; it now renders
+the shortest f32 round-trip like CSV and table, and the golden was regenerated.
+The AD2 parity lane (`cqlite-cli/tests/issue_1491_json_csv_golden_parity.rs`) now
+carries a `FLOAT`-bearing case (`test_timeseries.sensor_data`), so a regression
+there fails a test rather than living in this README.
+
 ## Generating Snapshots
 
 **Only regenerate once you have adjudicated against the oracle above.**
@@ -100,22 +108,6 @@ When the CLI output changes intentionally:
 `cqlite_core::util::value_fmt::ValueFormatter`; the JSON writer does not. A
 change to the shared formatter moves CSV *and* table together, and it is easy to
 update one and leave the other stale — which is exactly what happened in #3689.
-
-## Known divergence from the oracle (not yet fixed)
-
-`select_simple_json.golden` deliberately still carries the widened spelling
-`1.6699999570846558` for `height`. That is not staleness — it is what the JSON
-writer actually emits, because `cqlite-cli/src/output/json.rs` widens an f32 to
-f64 (`Number::from_f64(*f as f64)`) before serializing, while CSV and table
-render the f32 directly.
-
-So CQLite's JSON egress disagrees with `sstabledump` on every `FLOAT` column.
-This golden pins the current behaviour so the divergence stays visible and
-counted; do not "align" CSV and table up to it. Fixing it is an egress
-behavioural change and is tracked separately — see the #3689 thread and #3644
-(AD2 declared divergences). Note the AD2 parity lane
-(`cqlite-cli/tests/issue_1491_json_csv_golden_parity.rs`) cannot catch this: none
-of its cases covers a table with a `FLOAT` column.
 
 ## Snapshot Format Notes
 
