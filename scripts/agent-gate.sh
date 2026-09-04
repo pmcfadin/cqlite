@@ -2313,11 +2313,18 @@ apply_fixture_preflight() {
       echo "agent-gate: remedy: bash test-data/scripts/fetch-datasets.sh  (or point CQLITE_DATASETS_ROOT at a checkout that has it)" >&2
       echo "agent-gate: intentional opt-out (SKIP, stamped in the SUMMARY): AGENT_GATE_ALLOW_MISSING_FIXTURES=1" >&2
       _tree_meta_array   # #2926: every emitted block carries the tree provenance
+      # #3800 (roborev jobs 358, 365): this block is emitted AFTER `run_file_size`, so a verdict
+      # may already be recorded and the old "no component has run" exemption was false. The
+      # decision is over ALL THREE subject kinds, taken in ONE shell context (so a note recorded
+      # while gathering survives), and it lives in `_disk_preflight_meta` rather than being copied
+      # to each of the three pre-flight sites.
+      _disk_preflight_meta
       emit_summary FAIL \
         "preflight: FAIL (canonical corpus $CANONICAL_FIXTURE_KEYSPACE absent under $CQLITE_DATASETS_ROOT/sstables — only committed byte-parity refs present)" \
         "missing-fixtures: FAIL-CLOSED (#2078) — dataset-dependent components would SKIP; overall verdict FAIL" \
         "$(_component_set_meta)" \
         "${TREE_META_LINES[@]}" \
+        "${DISK_PREFLIGHT_META[@]+"${DISK_PREFLIGHT_META[@]}"}" \
         "hint: bash test-data/scripts/fetch-datasets.sh  (opt-out: AGENT_GATE_ALLOW_MISSING_FIXTURES=1 restores SKIP + stamps this block)"
       exit 1 ;;
   esac
@@ -2746,11 +2753,18 @@ apply_schemas_preflight() {
       return 1
     fi
     _tree_meta_array   # #2926
+    # #3800 (roborev jobs 358, 365): this block is emitted AFTER `run_file_size`, so a verdict
+    # may already be recorded and the old "no component has run" exemption was false. The
+    # decision is over ALL THREE subject kinds, taken in ONE shell context (so a note recorded
+    # while gathering survives), and it lives in `_disk_preflight_meta` rather than being copied
+    # to each of the three pre-flight sites.
+    _disk_preflight_meta
     emit_summary FAIL \
       "preflight: FAIL ($reject)" \
       "$marker" \
       "$(_component_set_meta)" \
       "${TREE_META_LINES[@]}" \
+      "${DISK_PREFLIGHT_META[@]+"${DISK_PREFLIGHT_META[@]}"}" \
       "hint: export a clean ABSOLUTE CQLITE_SCHEMAS_ROOT, or unset it to use $root"
     exit 1
   fi
@@ -2774,11 +2788,18 @@ apply_schemas_preflight() {
         return 1
       fi
       _tree_meta_array   # #2926: every emitted block carries the tree provenance
+      # #3800 (roborev jobs 358, 365): this block is emitted AFTER `run_file_size`, so a verdict
+      # may already be recorded and the old "no component has run" exemption was false. The
+      # decision is over ALL THREE subject kinds, taken in ONE shell context (so a note recorded
+      # while gathering survives), and it lives in `_disk_preflight_meta` rather than being copied
+      # to each of the three pre-flight sites.
+      _disk_preflight_meta
         emit_summary FAIL \
         "preflight: FAIL (committed CQL schema fixtures unreadable under $root — missing: $missing)" \
         "missing-schemas: FAIL-CLOSED (#3148) — dataset-backed components would panic on an absent .cql; overall verdict FAIL" \
         "$(_component_set_meta)" \
         "${TREE_META_LINES[@]}" \
+        "${DISK_PREFLIGHT_META[@]+"${DISK_PREFLIGHT_META[@]}"}" \
         "hint: expected $root/${missing%% *} — unset CQLITE_SCHEMAS_ROOT, or: git -C $REPO_ROOT restore --source=HEAD -- test-data/schemas"
       exit 1 ;;
   esac
@@ -5991,6 +6012,7 @@ apply_component_set_preflight() {
   # assert (the #3148 trap, recorded so it is not re-sprung).
   [ "$report_only" -eq 1 ] && return 1
   _tree_meta_array   # #2926: every emitted block carries the tree provenance
+  # disk-exhaustion-exempt: #3544 component-set pre-flight FAIL, emitted at the MODE DISPATCH -- before the #1825 slot and before any component -- so nothing has run to attribute; component-set: already names the cause
   emit_summary FAIL \
     "$why_summary" \
     "$COMPONENT_SET_LINE" \
@@ -6540,7 +6562,869 @@ INHERITED_PARENT_RUN_ID="${AGENT_GATE_PARENT_RUN_ID:-}"
 EXPLICIT_SUMMARY_FILE=0
 [ -n "${AGENT_GATE_SUMMARY_FILE:-}" ] && EXPLICIT_SUMMARY_FILE=1
 
+# ==== BEGIN disk-exhaustion attribution (#3800) ====
+# A full gate that dies because the DISK filled reports, in the ONE artifact agents are
+# told to retain, `minimal-build: FAIL (611s)` beside 36/37 PASS and `tree-integrity: PASS`.
+# Doctrine forbids reading gate.log, so the reader debugs a minimal-features build that was
+# never broken. Measured on #3800: `lane-3634/target` at 101G mid-full-gate peaking at 143G
+# on a 295G disk shared with two other active lanes, 0 bytes free at the failure; a re-run on
+# the SAME tree at the SAME sha PASSed once a peer freed space.
+#
+# This block adds ONE `disk-exhaustion:` line to every SUMMARY block THAT CARRIES A COMPONENT
+# TABLE, on the `missing-fixtures: FAIL-CLOSED (#2078)` / `missing-schemas: FAIL-CLOSED (#3148)`
+# precedent: a distinct, textually-separable marker key carrying a CLOSED value set.
+#
+# THE SCOPE IS "COULD A VERDICT ALREADY BE RECORDED", NOT "IS TERMINAL" AND NOT "CARRIES A
+# TABLE" (#3800, roborev jobs 299 and 358). Of the script's 25
+# `emit_summary`/`_emit_terminal_summary` call sites, 11 append this line: the 7 that render a
+# component table, plus the 4 PRE-FLIGHT blocks reachable AFTER `run_file_size` (#2078 fixtures,
+# #3148 schemas x2, and the `--only` zero-Data.db block -- reachable via e.g.
+# `--only file-size,core-tests`).
+# Those three were exempt on the stated ground that "no component has run" -- and that was
+# FALSE: `run_file_size` executes BEFORE both preflights, deliberately, since it needs no
+# dataset and those guards exit when the corpus is absent. So a `file-size` that died of ENOSPC
+# was named by neither the block nor any attribution, which is this issue's opening defect
+# inside an exemption written for this issue. They now attribute over whatever
+# `_disk_recorded_pairs` has, and omit the line only when that set is EMPTY -- the one part of
+# the old rationale that survives, since an empty subject set could render only a vacuous
+# `0 RECOGNISED ... (0/0 PASS)`.
+#
+# The remaining 14 -- the #3544 component-set FAIL, the two summary-integrity FAILs, the shared
+# forwarder, the five self-test hooks, the four --delta usage ERRORs, the two --delta
+# refused-BEFORE-EXECUTION blocks -- are emitted before ANY component can have recorded a
+# verdict (or, for the integrity FAILs, carry no table and name a concurrent peer as their
+# cause). Each of those 14 therefore carries a `# disk-exhaustion-exempt: <reason>` comment, and
+# `scripts/tests/test_agent_gate_disk_exhaustion.sh` censuses EVERY emit site as
+# MARKED / EXEMPT / GAP -- a new emit site with neither REDS that suite. An earlier wording of
+# this contract claimed "every terminal block", which was false and which the then-structural
+# test could not see: it derived its subject set from sites containing `_fm_summary_line`, i.e.
+# only the sites already compliant.
+#
+# THAT CIRCULARITY HAD A SECOND LEVEL, AND IT COST THE 7th SITE (#3800, final round). Narrowing
+# the contract to "carries a component table" fixed the CLAIM but left the census deriving its
+# table-bearing subset from `_fm_summary_line` alone -- so the ONE block that renders a
+# component table with its own `printf '%-18s %s (%ss)'`, the #2926 tree-integrity
+# COMPONENT-BOUNDARY FAIL (_tree_boundary_meta_lines), was invisible to the derivation and was
+# exempted on reasoning that does not hold. `tree-integrity: FAIL` has a SECOND cause that IS
+# disk exhaustion: a capture whose manifest -- written into $LOG_DIR -- cannot be written or
+# validated stamps TREE_CAPTURE_FAIL_REASON, a FIXED CONSTANT reading
+# `tree-capture-failed; the tree cannot be proven unchanged`. An ENOSPC on the logs filesystem
+# therefore produces a verdict that CAN NEVER NAME DISK and that reads as a git/worktree
+# problem -- a worse instance of this issue's own defect than the `minimal-build: FAIL` that
+# opened it. That block now carries the line, and the census recognises BOTH row renderers,
+# derived from the row FORMAT rather than from either renderer's name.
+#
+# That site is the one MID-RUN emit, and the line declares it: DISK_MIDRUN=1 relabels the
+# free-space pair `start->boundary, MID-RUN PARTIAL WINDOW` and states that the scan's subject
+# set is only the components recorded by that boundary. Partial and labelled beats omitted.
+#
+# IT IS AN ATTRIBUTION, NEVER A VERDICT. Nothing here reads, sets or influences OVERALL /
+# RESULT, in any mode. Turning a FAIL green because the cause LOOKS environmental would be
+# unsound twice over -- the component genuinely did not pass, and a matched signature is
+# evidence about the HOST, never proof the diff is innocent -- and this slice does not own the
+# verdict. Naming the cause in the retained artifact is the whole deliverable.
+#
+# The capacity-management half (a disk-aware slot cap, a per-lane disk budget, a shared
+# per-box CARGO_TARGET_DIR, refusing/queueing a gate on low free space) is DELIBERATELY NOT
+# here: it is consolidated under #3434 / #3763 / #3755 pending an owner ruling. Do not add it
+# to this block.
+#
+# The whole scan runs ONCE, at TERMINAL-EMIT time, from the parent shell -- not inside the
+# component runners. Three reasons, each measured against this script's actual shape:
+#   * `run_component` is one of ~12 runners (`run_core_tests`, `run_python_bindings`,
+#     `run_node_bindings`, `run_flight_tests`, `run_scoped_tests`, ...) that each duplicate the
+#     verdict-recording shape; a per-runner hook would have to be added ~12 times and a 13th
+#     runner would silently opt out.
+#   * Full-gate components run in BACKGROUNDED SUBSHELLS (#1737) and cannot mutate the parent's
+#     arrays, and `$LOG_DIR/<name>.result` is a HARD two-field format (`<STATUS> <SECONDS>`,
+#     read back with `read -r _st _secs`) that must not grow a third field.
+#   * Component logs are never deleted -- there is no `rm -rf "$LOG_DIR"` anywhere in this
+#     script, and `$LOG_DIR` is retained deliberately as the `logs:` bundle -- so every
+#     `<component>.log` is still on disk at the terminal emit, whichever runner wrote it.
+#
+# THE SUBJECT SET IS DECLARED AND CLOSED, AND THAT IS A BOUNDARY, NOT A CARVE SERIES
+# (#3800, roborev job 304). The scan can only see what reaches one of THREE channels:
+#   (a) the LOG of a non-PASS component;
+#   (b) an IN-MEMORY capture-failure subject the gate recorded for itself
+#       (DISK_MEM_SUBJECTS, added for the tree-identity manifest write);
+#   (c) a component whose `.result` VERDICT could not be READ (DISK_UNREAD_VERDICTS).
+# Any OTHER gate-internal write that fails under ENOSPC has its error text land somewhere
+# none of the three looks, and is a DECLARED FALSE NEGATIVE of this marker. The known ones,
+# named so the boundary is checkable rather than a hedge: the `_fm_*` feature-matrix
+# sidecars, `node-bindings.leak-lane`, the `summary-integrity.fail` publish, and the #3473
+# heartbeat file.
+#
+# WHY DECLARED RATHER THAN CHASED. Three consecutive review rounds each found a DIFFERENT
+# unwatched writer -- the component log (covered from the start), the tree-identity manifest
+# (round 3, the in-memory channel), the `.result` verdict (round 4, this channel) -- and the
+# standing ruling on a repeatedly-carved guard is to CONSOLIDATE and STATE THE BOUNDARY
+# rather than patch the next instance. A marker that names its own blind spots is worth more
+# than one implying a completeness it does not have; the emitted `scan:` field carries the
+# same declaration, so a reader of the pasted block sees it without reading this file.
+#
+# The CLOSED signature set: `<our-name>|<literal phrase>`, checked in this order.
+# A bare `ENOSPC` token is DELIBERATELY EXCLUDED: it occurs in this repository's own test
+# names, comments and doctrine, so it would fire on a log that merely MENTIONS the class.
+DISK_EXHAUSTION_SIGNATURES=(
+  'no-space-left-on-device|No space left on device'
+  'os-error-28|os error 28'
+  'disk-quota-exceeded|Disk quota exceeded'
+)
+
+# THE SECOND KIND OF SUBJECT: IN-MEMORY CAPTURE-FAILURE TEXT (#3800, roborev job 301).
+#
+# ADDING A MARKER TO A BLOCK DOES NOT MAKE THAT BLOCK'S CAUSE OBSERVABLE TO THE MARKER.
+# That is the transferable lesson of this round, and it is worth stating before the code.
+# The scan's subject set was NON-PASS COMPONENT LOGS. The tree-integrity COMPONENT-BOUNDARY
+# block was then given the attribution BECAUSE a `tree-integrity: FAIL` is reachable from
+# ENOSPC -- and on that very path the evidence CANNOT REACH THE SUBJECT SET: _tree_identity
+# fails independently of any component, the manifest write's error text lands in NO component
+# log, and the components themselves are typically still PASS. So the block would have emitted
+# an affirmative `0 RECOGNISED` on precisely the path the line was added for -- a FALSE CLEAN
+# READING, and this repository's standing anti-pattern (a positive verdict keyed on the ABSENCE
+# of a bad signal in a subject set that cannot contain it). When you extend a diagnostic to a
+# new failure path, ask what the SUBJECT SET is ON THAT PATH and whether the evidence can
+# physically land in it -- not merely whether the line is emitted.
+#
+# IT IS IN MEMORY, NOT A FILE, AND THAT IS THE WHOLE POINT -- the same reasoning that keeps
+# this scanner off `_ansi_stripped_log`. This is a DISK-EXHAUSTION diagnostic: under ENOSPC a
+# spill file cannot be written, so a file-backed subject would be EMPTY exactly on the run
+# that had the answer.
+#
+# Entries are "<subject-label>|<text>", split on the FIRST `|`. The LABEL is OURS -- a fixed
+# string chosen at the recording site, from this file's own vocabulary. The TEXT is
+# OS/libc/git-controlled and is NEVER interpolated into the emitted line: it is scanned and
+# discarded, exactly like a component log (#3312).
+DISK_MEM_SUBJECTS=()
+
+# _disk_note_capture_failure <subject-label> <text>
+#
+# Record one in-memory subject. <text> MAY be empty: that is an HONEST record of a failure
+# whose text was not captured, and it renders UNMEASURED naming the subject -- never a clean
+# reading. Appending is unconditional and cheap; the scan decides what it means.
+_disk_note_capture_failure() {
+  DISK_MEM_SUBJECTS+=("${1:-<unnamed subject>}|${2:-}")
+}
+
+# THE THIRD KIND OF SUBJECT: A COMPONENT WHOSE `.result` VERDICT COULD NOT BE READ
+# (#3800, roborev job 304).
+#
+# `record_result` writes `$LOG_DIR/<component>.result`. Under ENOSPC that write fails, its
+# error text goes to GATE STDERR -- which is neither a component log nor an in-memory
+# subject -- and the parent's fail-closed missing-result guard then synthesises `FAIL 0` for
+# a component whose OWN log is CLEAN (it may genuinely have succeeded). Both subject
+# channels are therefore empty and the scan rendered an affirmative `0 RECOGNISED`: the same
+# false-clean shape as the tree-capture case one round earlier.
+#
+# THE FIX IS STRICTLY MORE GENERAL THAN THE ENOSPC CASE, ON PURPOSE. A verdict the gate could
+# not actually READ -- absent file, unreadable file, or content that is not the two-field
+# `<STATUS> <SECONDS>` shape record_result writes -- is an UNMEASURED SUBJECT of this scan
+# whatever caused it, and can never contribute to a clean `0 RECOGNISED`. That keys the clean
+# branch on the AFFIRMATIVE fact (every subject was READ) instead of on the ABSENCE of a bad
+# signal, which is this repository's standing rule.
+#
+# Entries are "<component>|<why>". BOTH halves are OURS: the component name comes from the
+# gate's own COMPONENTS array / SELECTED_* lists, and <why> is a fixed string chosen at the
+# call site from this file's vocabulary. Nothing file-derived is recorded, so nothing
+# file-derived can reach the emitted line (#3312).
+DISK_UNREAD_VERDICTS=()
+DISK_VERDICT_ST=""     # last _disk_verdict_read status token (its two out-params)
+DISK_VERDICT_SECS=""
+
+# _disk_note_unread_verdict <component> <why>
+_disk_note_unread_verdict() {
+  DISK_UNREAD_VERDICTS+=("${1:-<unnamed component>}|${2:-unspecified}")
+}
+
+# _disk_verdict_read <component> <result-file>
+#
+# THE ONE READER of a per-component `.result`. Every site that reads one calls this, so the
+# "could the verdict be read" question has a single answer and a single recording point --
+# the consolidation this round chose over a fourth private carve.
+#
+# Sets DISK_VERDICT_ST / DISK_VERDICT_SECS. rc 0 = read AND well-formed; rc 1 = present but
+# unreadable or MALFORMED (RECORDED); rc 2 = ABSENT (NOT recorded).
+#
+# ABSENCE IS DELIBERATELY NOT THIS FUNCTION'S CALL, and the reason is double-recording rather
+# than taste. Every reader below skips an absent `.result` because absence there means "the
+# component was not selected", which is not a measurement failure. The ONE site where absence
+# IS an error -- the fail-closed guard over SELECTED_MAIN/SELECTED_SIDE -- is asserting
+# PRESENCE, not reading, and records through the shared `_disk_note_unread_verdict` itself; if
+# this function recorded absence too, a component could be noted once by the guard and again
+# by the reconstruction pass and appear twice in the UNMEASURED census.
+#
+# The STATUS token is validated against the closed set record_result can write
+# (PASS/FAIL/SKIP) and the seconds field against an integer (a leading `-` is admitted so a
+# backwards clock is not reported as a measurement failure). An ENOSPC write typically leaves
+# the file CREATED and EMPTY -- open+truncate succeeds, the write does not -- so the empty
+# and short-write shapes are exactly what this catches.
+#
+# THE SECONDS CHECK IS ITS OWN FUNCTION BECAUSE THE OBVIOUS INLINE SPELLING IS WRONG (roborev
+# job 316). `case $v in ''|*[!0-9-]*) malformed ;; esac` reads as "digits, minus admitted" and
+# in fact admits `-`, `--`, `1-2` and `-1-`: a character-class complement cannot express WHERE
+# the minus may appear, so a partially-written duration passed as well-formed and its component
+# was omitted from the unread-verdict subject set -- the one place this whole channel exists to
+# populate. Exactly one LEADING minus, then at least one digit, and nothing else. Every real
+# `record_result` third argument is `$((end - start))` or a literal `0`, so nothing legitimate
+# is newly refused (audited: 117 arithmetic + 17 literal call sites).
+_disk_secs_is_int() {
+  local v="${1-}"
+  case "$v" in
+    ''|-) return 1 ;;
+    -*) v="${v#-}" ;;
+  esac
+  case "$v" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  return 0
+}
+
+_disk_verdict_read() {
+  local comp="${1:-}" rf="${2:-}"
+  DISK_VERDICT_ST=""; DISK_VERDICT_SECS=""
+  [ -f "$rf" ] || return 2
+  if [ ! -r "$rf" ]; then
+    _disk_note_unread_verdict "$comp" "verdict file UNREADABLE"
+    return 1
+  fi
+  # #3800 (roborev job 319): THE TERMINATOR IS PART OF THE VERDICT, and ignoring `read`'s status
+  # was a false PASS on the most likely ENOSPC shape of all. `record_result` writes
+  # `printf '%s %s\n'`; a short write truncating that mid-flight can land ON A FIELD BOUNDARY --
+  # `PASS 12` losing its newline, or `PASS 1` being all that reached the disk of `PASS 12`. Both
+  # parse as a perfectly well-formed two-field verdict (the second even has a VALID integer, just
+  # the wrong number), so every content check passes and the only remaining evidence that the
+  # write failed is the MISSING NEWLINE -- which `read` reports as a nonzero status and this line
+  # discarded. Trailing content is refused for the same reason: what is on disk must be exactly
+  # the one terminated line the writer emits, or the verdict was not fully written.
+  #
+  # THE FIX IS ON THE READ SIDE, DELIBERATELY, AND "DELETE THE PARTIAL FILE" WOULD BE UNSOUND.
+  # The tempting repair -- have `record_result` unlink the `.result` when its write fails -- is
+  # wrong for the aggregations whose loops treat an ABSENT `.result` as "this component was not
+  # selected" and `continue` past it (`--lite`/`--delta` under `--only`). There, deleting the file
+  # makes the component VANISH from the table without failing anything, which is worse than the
+  # partial file: the partial file is the EVIDENCE, and rejecting it on read is what converts it
+  # into a named UNMEASURED subject plus a synthetic FAIL.
+  local _rd_term=0 _rd_extra="" _rd_more=1
+  {
+    read -r DISK_VERDICT_ST DISK_VERDICT_SECS || _rd_term=$?
+    read -r _rd_extra || _rd_more=$?
+  } < "$rf"
+  if [ "$_rd_term" -ne 0 ]; then
+    _disk_note_unread_verdict "$comp" "verdict file MALFORMED"; return 1
+  fi
+  # A second line at all -- terminated (rc 0) or not (rc != 0 but non-empty) -- means the file
+  # holds more than the one verdict `record_result` writes.
+  if [ "$_rd_more" -eq 0 ] || [ -n "$_rd_extra" ]; then
+    _disk_note_unread_verdict "$comp" "verdict file MALFORMED"; return 1
+  fi
+  case "$DISK_VERDICT_ST" in
+    # THE CLOSED SET IS FIVE TOKENS, AND TWO OF THEM WERE MEASURED FALSE REDS (merge of
+    # 2026-09-04). Both were found the same way -- by reading what `record_result` can actually
+    # WRITE, not by reasoning about what a verdict "should" be:
+    #   * VACUOUS (#3625) -- a PASS whose measured subject count was zero.
+    #   * OPT-OUT (#3402) -- file-size's verdict under `CQLITE_ALLOW_FILE_GROWTH=1`, which is a
+    #     SANCTIONED escape documented in CLAUDE.md, so this one reds any lane using it.
+    # With either omitted, that token read as MALFORMED, became an unread verdict, and was
+    # normalised to a synthetic `FAIL 0` that forced OVERALL -- a false RED on correct input.
+    # Two instances in one merge is why the set is now covered by a DERIVED assert in
+    # `scripts/tests/test_agent_gate_disk_exhaustion.sh`: it takes the union of the tokens the
+    # shipped `_status_is_nonfailing` and `_census_status_for` can produce and requires this set to
+    # cover it, so a SIXTH token reds that suite instead of reappearing here as a false red in the
+    # gate of record. Do not add a token here without that assert seeing it.
+    # `_census_status_for` can return **VACUOUS** -- a PASS whose measured subject count was zero
+    # -- described by #3625 as "a distinct non-passing token in the gate's PASS/FAIL/SKIP
+    # vocabulary", so a component that verified nothing can never report PASS (its AC2). Omitting
+    # it here was MEASURED to be a false RED on correct input: `VACUOUS 12` read as MALFORMED,
+    # became an unread verdict, and was normalised to a synthetic `FAIL 0` that forced OVERALL --
+    # i.e. every VACUOUS component would have failed the gate of record. VACUOUS is therefore a
+    # VALID verdict here and is passed through UNCHANGED; whether it passes the RUN is #3625's
+    # business, not this reader's. Converting it to FAIL would both mislabel it and destroy the
+    # distinction #3625 exists to draw.
+    PASS|FAIL|SKIP|OPT-OUT|VACUOUS) ;;
+    *) _disk_note_unread_verdict "$comp" "verdict file MALFORMED"; return 1 ;;
+  esac
+  _disk_secs_is_int "$DISK_VERDICT_SECS" || {
+    _disk_note_unread_verdict "$comp" "verdict file MALFORMED"; return 1
+  }
+  return 0
+}
+
+# THE AGGREGATION WRAPPER -- and the reason it exists is a FALSE `RESULT: PASS` (roborev job 316).
+#
+# Round 4 gave the gate a reader that DETECTS an unreadable `.result` and made it an UNMEASURED
+# subject of the `disk-exhaustion:` line. It did NOT touch what the SUMMARY does with that
+# component, and the three aggregation loops keyed `OVERALL=FAIL` on the status token being
+# exactly `FAIL`. So a present-but-malformed verdict -- the EMPTY file an ENOSPC write leaves
+# behind, a truncated `PAS`, or a valid `PASS` with a truncated seconds field -- was recorded as
+# unmeasured by the marker and simultaneously left `OVERALL` untouched: the gate of record could
+# emit `RESULT: PASS` for a run in which a SELECTED component's verdict was never read. The
+# marker said UNMEASURED and the verdict said certified, which is worse than either alone,
+# because the verdict is what a closer reads.
+#
+# It is the standing rule one layer in from where round 4 applied it: a positive verdict requires
+# an AFFIRMATIVE measurement, and "the status token was not the string FAIL" is the absence of a
+# bad signal, not the presence of a good one. So an UNREAD verdict is normalised to a synthetic
+# `FAIL 0` HERE, once, and the caller forces `OVERALL=FAIL` -- the same disposition the
+# fail-closed presence guard already gives an ABSENT `.result`, for the same reason: a component
+# whose verdict cannot be read may have succeeded, and a gate may not certify a maybe.
+#
+# rc mirrors `_disk_verdict_read`: 0 = read, 1 = present but UNREAD (recorded; ST/SECS
+# normalised), 2 = ABSENT (each caller decides -- for the full gate's reconstruction absence
+# means "not selected", for `--delta`'s two components it is a measurement failure).
+_disk_verdict_read_aggregate() {
+  local comp="${1:-}" rf="${2:-}" rc=0
+  _disk_verdict_read "$comp" "$rf" || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  # ANY nonzero rc leaves a usable pair, so no caller can render a blank status line; the rc
+  # is returned unchanged so absence stays distinguishable from unreadability.
+  DISK_VERDICT_ST=FAIL; DISK_VERDICT_SECS=0
+  return "$rc"
+}
+
+# Startup free-space capture (populated immediately after LOG_DIR is created).
+#
+# DISK_MIDRUN -- THE SCAN WINDOW, declared rather than assumed. 0 (the default) means a
+# TERMINAL emit, where `start->emit` spans the whole run and the recorded verdicts are every
+# verdict there will be. 1 is set for the ONE MID-RUN emit site -- the #2926 tree-integrity
+# COMPONENT-BOUNDARY FAIL, which publishes a block from inside a run that has NOT finished.
+# There BOTH halves of the line cover a partial window: the free-space pair is a
+# start->boundary reading of a window still open, and the log scan's subject set is only the
+# components whose verdict was recorded BY that boundary. The line SAYS both, because a
+# partial measurement that does not declare its partiality is indistinguishable from a
+# complete one -- the same reason the closed signature set declares its own non-exhaustiveness.
+DISK_MIDRUN=0
+DISK_TARGET_PATH=""
+DISK_LOGS_PATH=""
+DISK_FREE_START_TARGET=""   # "<avail_kb> <mountpoint>", or "" when unmeasurable
+DISK_FREE_START_LOGS=""
+
+# _disk_safe <value> -- strip control characters from ANY value interpolated into the line.
+#
+# #3312 (control and data must not share a channel): a component log is compiler- and
+# test-controlled text, and a `df` mount point can legitimately contain characters we do not
+# choose. NOTHING log-derived reaches the emitted line -- see _disk_exhaustion_line -- but the
+# component name, the log BASENAME and the mount point are still dynamic, and a newline in any
+# of them would break the block frame and could forge a `RESULT: PASS` or a second
+# `==== AGENT-GATE SUMMARY ====` marker inside the block. Neutralised at the ONE emit boundary
+# (the final printf), never per interpolation site: a per-site escape is a list to keep complete.
+_disk_safe() {
+  printf '%s' "${1:-}" | LC_ALL=C tr -d '\000-\037\177'
+}
+
+# _disk_abbrev <csv> <max-items> -- bound a name list so one line stays one readable line.
+_disk_abbrev() {
+  local csv="${1:-}" max="${2:-6}" out="" n=0 item rest="${1:-}"
+  [ -n "$csv" ] || { printf ''; return 0; }
+  while [ -n "$rest" ]; do
+    case "$rest" in *,*) item="${rest%%,*}"; rest="${rest#*,}" ;; *) item="$rest"; rest="" ;; esac
+    n=$(( n + 1 ))
+    if [ "$n" -le "$max" ]; then out="${out:+$out,}$item"; fi
+  done
+  if [ "$n" -gt "$max" ]; then printf '%s,+%s more' "$out" "$(( n - max ))"; else printf '%s' "$out"; fi
+}
+
+# _disk_df_probe <path> -- print "<avail_kb> <mountpoint>" for the filesystem holding <path>,
+# or nothing (and rc 1) when it cannot be measured.
+#
+# `df -Pk` is the POSIX form and the ONLY correct one here: `df -h`'s output differs between
+# GNU and BSD and macOS is a first-class gate host, and `-P` is what guarantees one
+# unwrapped line per filesystem so field positions mean what they say.
+_disk_df_probe() {
+  local p="${1:-}" out a bs mp
+  [ -n "$p" ] || return 1
+  # Walk up to the first EXISTING ancestor: the cargo target dir legitimately does not exist
+  # on a clean checkout, and `df` on a missing path is an ERROR, not a free-space of zero.
+  # Bounded by the loop below shortening `p` every iteration.
+  while [ -n "$p" ] && [ "$p" != / ] && [ ! -e "$p" ]; do
+    case "$p" in */*) p="${p%/*}"; [ -n "$p" ] || p=/ ;; *) p="." ;; esac
+  done
+  [ -e "$p" ] || return 1
+  # PREFER `stat`, AND THE REASON IS A MEASURED CROSS-FEATURE REGRESSION, not tidiness.
+  #
+  # This probe used to invoke the `df` BINARY unconditionally. #3755's disk-admission suite
+  # PATH-shims `df` and asserts on the NUMBER and the OPERANDS of every df call in the run -- and
+  # its shim answers from a SEQUENCED script. So the two calls `_disk_capture_start` makes (target
+  # + logs) broke 25 of its cases three ways at once: they inflated exact counts (`expected 1
+  # measurement, got 3`), introduced a foreign operand (a LOG DIR) into `df_operands_all`, and
+  # CONSUMED the shim's scripted answers, so cases expecting a df-timeout or a specific mount got
+  # someone else's reading. They even fired on non-full-gate runs, where the admission probe is
+  # supposed to measure nothing at all. #3755 landed FIRST, so absorbing this is #3800's job.
+  #
+  # `stat` reads the same statvfs data WITHOUT executing `df`, so the shim cannot see this probe
+  # and the non-interference is STRUCTURAL rather than negotiated. Verified numerically on this
+  # fleet: `stat -f -c '%a' * '%S' / 1024` equals `df -Pk` avail to the byte.
+  #
+  # DECLARED RESIDUAL: `stat -f -c` and `stat -c %m` are GNU. On a BSD/macOS host -- and macOS is a
+  # first-class gate host -- this falls back to `df` and the interference RETURNS there. The
+  # durable fix is for #3755's assertions to be scoped to the ADMISSION WINDOW rather than to every
+  # df call in the process, so that ANY future filesystem measurement cannot red them. That is a
+  # change to another lane's tests, so it is DECLARED to the coordinator, not made from here.
+  if a=$(stat -f -c '%a' "$p" 2>/dev/null) \
+     && bs=$(stat -f -c '%S' "$p" 2>/dev/null) \
+     && mp=$(stat -c '%m' "$p" 2>/dev/null); then
+    case "$a"  in ''|*[!0-9]*) a="" ;; esac
+    case "$bs" in ''|*[!0-9]*) bs="" ;; esac
+    case "$mp" in ''|'?') mp="" ;; esac
+    if [ -n "$a" ] && [ -n "$bs" ] && [ -n "$mp" ]; then
+      printf '%s %s' "$(( a * bs / 1024 ))" "$mp"
+      return 0
+    fi
+  fi
+  command -v df >/dev/null 2>&1 || return 1
+  # Mount points may contain spaces, so avail is $4 and the mount point is $6..NF.
+  out=$(df -Pk "$p" 2>/dev/null | awk 'NR>1 {a=$4; m=$6; for(i=7;i<=NF;i++) m=m" "$i; print a" "m; exit}')
+  case "$out" in ''|[!0-9]*) return 1 ;; esac
+  printf '%s' "$out"
+}
+
+# _disk_capture_start -- take the START-of-run free-space reading. Called once, right after
+# LOG_DIR is created, so the emitted field can be a DELTA rather than an instantaneous read.
+_disk_capture_start() {
+  DISK_TARGET_PATH="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+  DISK_LOGS_PATH="${LOG_DIR:-}"
+  DISK_FREE_START_TARGET="$(_disk_df_probe "$DISK_TARGET_PATH" 2>/dev/null)"
+  DISK_FREE_START_LOGS="$(_disk_df_probe "$DISK_LOGS_PATH" 2>/dev/null)"
+}
+
+# _disk_gib <kb> -- render KiB as "<n>.<d>G". `?` when the input is not a measurement.
+_disk_gib() {
+  case "${1:-}" in ''|*[!0-9]*) printf '?' ; return 0 ;; esac
+  printf '%s.%sG' "$(( $1 / 1048576 ))" "$(( ( $1 % 1048576 ) * 10 / 1048576 ))"
+}
+
+# _disk_free_leg <label> <start "kb mount"> <now "kb mount">
+_disk_free_leg() {
+  local label="${1:-}" st="${2:-}" nw="${3:-}"
+  if [ -z "$st" ]; then printf '%s UNMEASURED' "$label"; return 0; fi
+  printf '%s %s %s->%s' "$label" "${st#* }" "$(_disk_gib "${st%% *}")" "$(_disk_gib "${nw%% *}")"
+}
+
+# _disk_free_field -- the `<free-field>` of the emitted line: a DELTA, never an instantaneous
+# read.
+#
+# WHY A DELTA. Peers free space between the failing component and the terminal emit -- that is
+# literally #3800's own re-run evidence (same tree, same sha, opposite verdicts) -- so an
+# emit-time number alone is actively misleading: it can read "plenty free" on the run that died
+# of ENOSPC. The pair start->emit is what shows the collapse.
+#
+# The two facts are kept INDEPENDENT of the log scan on purpose: an unmeasurable `df` renders
+# `free: UNMEASURED (...)` and does NOT by itself make the whole line UNMEASURED, because the
+# log scan is the primary oracle and reporting it as unmeasured would discard a real finding.
+#
+# AND IT NAMES ITS OWN WINDOW (#3800). At a terminal emit the pair is `start->emit` and the
+# window is the whole run. At the ONE mid-run site (DISK_MIDRUN=1) it is `start->boundary` and
+# the window is still OPEN, so it is labelled PARTIAL: read as a terminal figure it would
+# understate a collapse that had not finished happening. Labelled, never omitted -- the
+# reading is still the most useful disk fact the block can carry.
+_disk_free_field() {
+  local st_t="${DISK_FREE_START_TARGET:-}" st_l="${DISK_FREE_START_LOGS:-}"
+  local now_t="" now_l="" lbl='free(start->emit)'
+  [ "${DISK_MIDRUN:-0}" = 1 ] && lbl='free(start->boundary, MID-RUN PARTIAL WINDOW: the run had NOT finished)'
+  [ -n "${DISK_TARGET_PATH:-}" ] && now_t="$(_disk_df_probe "$DISK_TARGET_PATH" 2>/dev/null)"
+  [ -n "${DISK_LOGS_PATH:-}" ] && now_l="$(_disk_df_probe "$DISK_LOGS_PATH" 2>/dev/null)"
+  if [ -z "$st_t" ] && [ -z "$st_l" ]; then
+    printf 'free: UNMEASURED (no startup df capture)'
+    return 0
+  fi
+  if [ -n "$st_t" ] && [ -n "$st_l" ] && [ "${st_t#* }" = "${st_l#* }" ]; then
+    # Same filesystem -- report it ONCE.
+    printf '%s: %s' "$lbl" "$(_disk_free_leg 'target+logs fs' "$st_t" "$now_t")"
+    return 0
+  fi
+  printf '%s: %s; %s' "$lbl" \
+    "$(_disk_free_leg 'target fs' "$st_t" "$now_t")" \
+    "$(_disk_free_leg 'logs fs' "$st_l" "$now_l")"
+}
+
+# _disk_scan_field -- the `<scan-field>`: the scan DECLARES its own non-exhaustiveness, the
+# same way the base-staleness advisory and the legacy-heuristics lane declare theirs. A scan
+# that omits coverage silently is indistinguishable from one that covers it.
+#
+# At the ONE mid-run site (DISK_MIDRUN=1) the subject set is partial as well -- only the
+# components whose verdict was RECORDED BY that boundary exist to be scanned -- and that is
+# stated in the same field rather than left for the reader to infer from `components-completed:`.
+_disk_scan_field() {
+  local partial=''
+  [ "${DISK_MIDRUN:-0}" = 1 ] && partial='; SUBJECT SET ALSO PARTIAL -- only the components whose verdict was RECORDED BY THIS BOUNDARY are scanned; the components that had not run are not subjects and their absence is NOT a clean reading'
+  # THE SUBJECT SET IS DECLARED, EXACTLY AS THE SIGNATURE SET IS (#3800, roborev job 304).
+  # Three consecutive review rounds each found a DIFFERENT gate-internal write whose error
+  # text reaches neither channel, so the honest artifact is a stated subject set rather than
+  # the pretence that the next instance will be the last. The line therefore names its three
+  # kinds AND names the gate-internal writers known to sit outside them, so the boundary is a
+  # fact a reader can check rather than a hedge. See the block header for the full list and
+  # the reasoning.
+  printf 'scan: CLOSED signature set {no-space-left-on-device, os-error-28, disk-quota-exceeded} over a DECLARED SUBJECT SET: (a) logs of non-PASS components, (b) the gate OWN in-memory capture-failure subjects (%s recorded this run), (c) components whose .result verdict could NOT be read (%s this run); NON-EXHAUSTIVE by construction ON BOTH AXES -- a disk-full failure worded any other way, or one whose error text reaches none of (a)(b)(c), is a DECLARED false negative; gate-internal writers OUTSIDE the subject set: _fm_* sidecars, node-bindings.leak-lane, summary-integrity.fail, heartbeat file%s' \
+    "${#DISK_MEM_SUBJECTS[@]}" "${#DISK_UNREAD_VERDICTS[@]}" "$partial"
+}
+
+# _disk_exhaustion_line <name> <status> [<name> <status> ...]
+#
+# Renders the single `disk-exhaustion:` SUMMARY line. Pure with respect to the run: it reads
+# component logs and `df`, and mutates no gate state. Positional pairs rather than a bash
+# nameref, because this script supports bash < 4.3 (macOS ships 3.2) in places.
+#
+# SUBJECT SET = THE NON-PASS COMPONENTS ONLY (#3800). Scanning a PASSing component's log would
+# report a signature that explains nothing -- a build that recovered, a test fixture whose text
+# quotes the phrase -- and invite exactly the false positive that makes a marker ignorable.
+#
+# LOG MATCHING IS PER COMPONENT AND EXACT: `$LOG_DIR/<name>.log` plus `$LOG_DIR/<name>.*.log`
+# (several components write extra per-subject logs, e.g.
+# `binding-rust-tests.cqlite-ffi-common.log`). Deliberately NOT `<name>*.log`, which would
+# cross component boundaries and attribute a peer component's failure to this one.
+#
+# THIS DELIBERATELY DOES NOT USE `_ansi_stripped_log`, AND THAT IS THE POINT.
+# That helper materialises a sibling `<log>.ansi-stripped` FILE. A disk-exhaustion diagnostic
+# that needs free disk in order to run is useless on exactly the run it exists for: under
+# ENOSPC the sibling write fails, the helper fails closed, and this scanner would report
+# UNMEASURED on the one run that had the answer. So the RAW log is read, by REDIRECTION.
+#
+# That is safe under #3400 for a reason that is NOT visible in the code, which is why it is
+# written here: cargo colours the STATUS WORD and emits the reset IMMEDIATELY after it
+# (`Running<ESC>[0m tests/foo.rs`), so a pattern spanning `<status> <payload>` matches nothing
+# under CARGO_TERM_COLOR. These three signatures are pure PAYLOAD -- they come from libc
+# `strerror`, from LLVM/`ld`, and from Rust's `io::Error` Display -- never from a cargo status
+# word, so they carry no escape bytes and no status-word boundary to be split at.
+# `scripts/tests/test_agent_gate_disk_exhaustion.sh` plants an ANSI-COLOURED log and proves
+# detection survives, so this claim is measured rather than asserted.
+#
+# GREP'S EXIT STATUS IS THREE-VALUED and is read as such: 0 = matched, 1 = READ and did not
+# match, >=2 = could NOT be read. Collapsing >=2 onto "no match" is the two-valued-predicate
+# defect this repository keeps finding -- it always picks the permissive answer. The clean
+# verdict is keyed on the AFFIRMATIVE fact (every subject was READ), never on `!= matched`.
+
+# _disk_scan_subject <kind> <payload> -- THE ONE signature loop, over EITHER kind of subject.
+# There is deliberately no second matching implementation: a component log and an in-memory
+# capture-failure text differ only in how the bytes reach grep, and two loops would be two
+# places for the closed set to drift.
+#   <kind> = file  -> <payload> is a PATH, read by REDIRECTION (never through a sibling temp
+#                     file -- see the note above).
+#   <kind> = text  -> <payload> is IN-MEMORY text, fed to grep through a PIPE.
+#
+# A HERE-STRING (`<<<`) IS DELIBERATELY NOT USED for the text kind: bash materialises a
+# here-string as a TEMPORARY FILE, which under ENOSPC is exactly what cannot be written --
+# reintroducing the disk dependency this scanner exists to survive. A pipe is safe here where
+# the read-by-redirection rule governs files, because NOTHING is accumulated in the subshell:
+# only grep's own exit status is consumed, and grep is the last element of the pipeline.
+#
+# Sets DISK_SCAN_SIG (our signature NAME) and DISK_SCAN_LN (an integer). rc 0 = matched,
+# 1 = READ and did not match, 2 = could NOT be read.
+_disk_scan_subject() {
+  local kind="$1" payload="$2" entry sig phrase hit rc
+  DISK_SCAN_SIG=""; DISK_SCAN_LN=0
+  for entry in "${DISK_EXHAUSTION_SIGNATURES[@]}"; do
+    sig="${entry%%|*}"; phrase="${entry#*|}"
+    # `-a` so a subject carrying stray binary bytes is still searched rather than reported
+    # as "binary file matches" with no line number.
+    #
+    # `-o` on the FILE branch, and what it does and does NOT bound is stated rather than implied
+    # (roborev jobs 348, 353). `grep -n` alone emits the WHOLE matching line, so the typical
+    # capture was one arbitrary log line; with `-m1 -o` the typical capture is ONE ~20-byte phrase
+    # from our own closed signature set. That also strengthens #3312 from "no log-derived text
+    # reaches the block" to "no log-derived text is even READ IN" -- all this function keeps is a
+    # line NUMBER.
+    #
+    # DECLARED RESIDUAL, because the honest bound is not the flattering one: `-m1` stops after the
+    # first matching LINE, but `-o` prints every OCCURRENCE on it, so the file-branch capture is
+    # O(length of the first matching line) either way -- ~1.25x that line in the pathological case
+    # of a single line packed with copies of a signature, against ~1.0x before `-o`. So `-o` moved
+    # the TYPICAL case from one log line to twenty bytes and left the worst case at one log line.
+    #
+    # Two ways to bound it unconditionally were considered and REFUSED ON MEASUREMENT, which is why
+    # this is declared rather than carved a fourth time:
+    #   * pipe grep into a first-record consumer -- that is EXACTLY the `printf | grep` pipeline
+    #     just deleted from the in-memory branch below, whose pipefail/SIGPIPE interaction produced
+    #     a measured wrong verdict. Re-adding it here to save a fraction of one log line trades a
+    #     real defect for a hypothetical one.
+    #   * `awk 'index($0,p){print NR; exit}'` -- one process, one short record, no pipe. Measured
+    #     and rejected: awk exits **0 on a DIRECTORY** (a two-valued collapse -- "no match" over a
+    #     subject it never read, this issue's own central defect), where grep exits 2 and this
+    #     function routes 2 to UNMEASURED; and NUL handling, which `-a` exists for, varies by awk
+    #     implementation while this script must run under BSD awk too.
+    # One log line is a quantity this gate already holds in many places, so the residual is
+    # accepted and named. The in-memory branch, whose bound was genuinely ABSENT (every occurrence
+    # in the whole payload), is fixed below instead.
+    if [ "$kind" = file ]; then
+      # THE FILE IS AN OPERAND, NOT A REDIRECTION (roborev job 348). With `< "$payload"`, a failed
+      # OPEN is reported by BASH as status 1 -- indistinguishable from grep's "no match" -- so a
+      # subject that passed the `-r` test and then could not be opened (a race, a revoked
+      # permission, an unmounted filesystem) read as a CLEAN scan. Handing grep the path makes the
+      # open ITS problem, and grep reports an unopenable or unreadable operand as rc 2, which this
+      # function already routes to UNMEASURED. `--` because a component name could in principle
+      # produce a leading dash; with a single operand grep prints no filename prefix, so the
+      # `<lineno>:` parse below is unchanged.
+      hit="$(LC_ALL=C grep -n -o -a -m1 -F -e "$phrase" -- "$payload" 2>/dev/null)"; rc=$?
+    else
+      # THE IN-MEMORY BRANCH READS **GREP'S OWN** STATUS, NOT THE PIPELINE'S (roborev job 353).
+      # Two earlier spellings of this branch each failed, and both failures were MEASURED, so both
+      # are recorded -- the second one is mine.
+      #
+      #   1. `printf | grep -n -o -m1` reading the PIPELINE status: this gate runs under
+      #      `set -o pipefail`, and with `-m1` grep exits at the first match, so `printf` writes
+      #      into a closed pipe, dies of SIGPIPE, and pipefail hands the pipeline printf's 141
+      #      even though grep MATCHED. On a 400 KB payload whose first line matches: rc=141 with
+      #      `-m1`, rc=0 without. A genuine RECOGNISED became "could not read", and only once the
+      #      payload was big -- i.e. exactly when a capture is most likely to run out of space.
+      #      That is why `-m1` was dropped here, which then made the capture O(every occurrence in
+      #      the WHOLE payload).
+      #   2. Doing the search in pure bash instead, to have no pipe at all. It has no capture and
+      #      cannot SIGPIPE, and it is 1000x TOO SLOW: `case "$payload" in *"$phrase"*` backtracks
+      #      once per occurrence, so a 1.5 MB line packed with the signature took **157 SECONDS**
+      #      (against 165 ms for the same size with no match). This runs on the path to the
+      #      TERMINAL EMIT, so that is worse than the unbounded capture it removed -- and the shape
+      #      that triggers it is precisely the one a disk-exhaustion log has. Measured, then
+      #      reverted.
+      #
+      # What both attempts were really working around is that a PIPELINE status is the wrong
+      # question: printf's fate is not evidence about the scan. `PIPESTATUS[1]` is grep's OWN
+      # status, and `set +o pipefail` inside this command substitution is scoped to its subshell,
+      # so printf dying of SIGPIPE becomes irrelevant instead of being avoided. That lets `-m1`
+      # come back: grep does the matching in C (fast), stops at the first matching line (bounded),
+      # and its three-valued rc reaches the caller unaltered. The residual is then the same one the
+      # FILE branch declares above -- occurrences on a single line -- rather than the whole
+      # payload.
+      hit="$(
+        set +o pipefail
+        printf '%s\n' "$payload" | LC_ALL=C grep -n -o -m1 -a -F -e "$phrase" 2>/dev/null
+        exit "${PIPESTATUS[1]}"
+      )"; rc=$?
+    fi
+    if [ "$rc" -eq 0 ]; then
+      DISK_SCAN_SIG="$sig"
+      case "${hit%%:*}" in ''|*[!0-9]*) DISK_SCAN_LN=0 ;; *) DISK_SCAN_LN="${hit%%:*}" ;; esac
+      return 0
+    elif [ "$rc" -ne 1 ]; then
+      return 2                       # grep ERROR: could not tell. NEVER "no signature".
+    fi
+  done
+  return 1
+}
+
+# _disk_recorded_pairs: the `<name> <status>` pairs for every verdict recorded SO FAR, in canonical
+# COMPONENTS order. It exists for the FULL-gate PRE-FLIGHT blocks, whose exemptions used to claim
+# "no component has run" (roborev job 358). That claim was FALSE: `run_file_size` executes BEFORE
+# `apply_fixture_preflight` and `apply_schemas_preflight` -- deliberately, since it needs no dataset
+# and those guards exit when the corpus is missing -- so by the time either emits its FAIL block,
+# file-size has recorded a verdict, and a `file-size` that died of ENOSPC was reported by neither
+# the block's component list nor any attribution. That is this issue's opening defect inside the
+# exemption written for this issue.
+#
+# It reads through the ONE aggregation wrapper, and disposes with `|| true` because these blocks
+# are ALREADY FAIL and a renderer must not own a verdict.
+#
+# IT FILLS AN ARRAY AND PRINTS NOTHING, WHICH IS NOT A STYLE CHOICE (roborev job 365). The first
+# version echoed the pairs, so every call site ran it inside `$( )` -- a SUBSHELL -- and any
+# `_disk_note_unread_verdict` it recorded on the way (an absent, unreadable or MALFORMED `.result`
+# is exactly what ENOSPC leaves) was LOST at the subshell boundary before `_disk_exhaustion_line`
+# ran. The gate has this same lesson recorded for `record_result`'s SIDE-lane note; it applies to
+# any helper whose job is partly to RECORD.
+DISK_RECORDED_PAIRS=()
+DISK_PREFLIGHT_META=()
+_disk_recorded_pairs() {
+  DISK_RECORDED_PAIRS=()
+  local c rf
+  for c in "${COMPONENTS[@]+"${COMPONENTS[@]}"}"; do
+    rf="${LOG_DIR:-}/$c.result"
+    [ -f "$rf" ] || continue
+    _disk_verdict_read_aggregate "$c" "$rf" || true
+    DISK_RECORDED_PAIRS+=("$c" "$DISK_VERDICT_ST")
+  done
+}
+
+# _disk_preflight_meta: the pre-flight blocks' one decision, in ONE place instead of three copies.
+#
+# THE TEST IS "IS THERE ANY SUBJECT", NOT "ARE THERE COMPONENT PAIRS" (roborev job 365). Gating on
+# the pairs alone was a FALSE NEGATIVE on this issue's own headline scenario: if ENOSPC stops
+# `file-size.result` from being CREATED there are no pairs at all, while `record_result` has
+# already recorded its write failure on the in-memory channel -- so the attribution was omitted
+# from precisely the run that had the answer. All three subject kinds count, which is the same rule
+# the emitted `scan:` field already declares. An empty set of ALL THREE still appends nothing,
+# since a vacuous "0 RECOGNISED ... (0/0 PASS)" is worse than silence.
+_disk_preflight_meta() {
+  DISK_PREFLIGHT_META=()
+  _disk_recorded_pairs
+  local n=$(( ${#DISK_RECORDED_PAIRS[@]} + ${#DISK_MEM_SUBJECTS[@]} + ${#DISK_UNREAD_VERDICTS[@]} ))
+  # `case` on the SUBJECT COUNT, never an `if`/`&&` around the CALL: the attribution must not sit
+  # inside a conditional whose value could influence a verdict, and 15-attribution enforces that.
+  case "$n" in
+    0) ;;
+    *) DISK_PREFLIGHT_META+=("$(_disk_exhaustion_line "${DISK_RECORDED_PAIRS[@]+"${DISK_RECORDED_PAIRS[@]}"}")") ;;
+  esac
+}
+
+_disk_exhaustion_line() {
+  local total=0 nonpass=0 read_ok=0 unread=0 matched=0
+  local nonpass_names="" unread_names="" mem_names=""
+  local mem_total=0 mem_read=0
+  local m_kind=log m_sig="" m_comp="" m_status="" m_log="" m_ln="" m_label=""
+  local n s log rc found_any ment mlabel mtext subj what out extra vent vcomp vwhy
+  local ldir="${LOG_DIR:-}"
+
+  while [ "$#" -ge 2 ]; do
+    n="$1"; s="$2"; shift 2
+    total=$(( total + 1 ))
+    [ "$s" = PASS ] && continue
+    nonpass=$(( nonpass + 1 ))
+    nonpass_names="${nonpass_names:+$nonpass_names,}$n"
+    found_any=0
+    if [ -n "$ldir" ]; then
+      for log in "$ldir/$n.log" "$ldir/$n."*".log"; do
+        # `<name>.*.log` never matches `<log>.ansi-stripped` (wrong suffix), so the sibling
+        # files _ansi_stripped_log leaves behind for OTHER guards are structurally excluded.
+        [ -e "$log" ] || continue
+        found_any=1
+        # #3800 (roborev job 343): REGULAR FILES ONLY, because `grep` on a FIFO or a character
+        # device BLOCKS FOREVER and this scan runs on the path to the TERMINAL EMIT -- so a
+        # non-regular match would hang the gate with no verdict at all, which is a worse outcome
+        # than the misattribution the line exists to prevent. `-e` and `-r` are both TRUE for a
+        # FIFO and for a symlink to `/dev/zero`, so neither of the guards already here excludes
+        # one. `-f` FOLLOWS symlinks, so a symlink to a regular log (which the gate's own helpers
+        # create) is still scanned; only the non-regular shapes are refused.
+        #
+        # Refused, NOT skipped: a silently-skipped subject is indistinguishable from one that was
+        # read and matched nothing, which is the false-clean shape this whole line is built
+        # against. It counts toward UNMEASURED and names itself in our own vocabulary.
+        if [ ! -f "$log" ]; then
+          unread=$(( unread + 1 ))
+          unread_names="${unread_names:+$unread_names,}${log##*/}(not-a-regular-file)"
+          continue
+        fi
+        if [ ! -r "$log" ]; then
+          unread=$(( unread + 1 ))
+          unread_names="${unread_names:+$unread_names,}${log##*/}(unreadable)"
+          continue
+        fi
+        _disk_scan_subject file "$log"; rc=$?
+        if [ "$rc" -eq 0 ]; then
+          read_ok=$(( read_ok + 1 ))
+          if [ "$matched" -eq 0 ]; then
+            m_kind=log; m_sig="$DISK_SCAN_SIG"; m_comp="$n"; m_status="$s"
+            m_log="${log##*/}"; m_ln="$DISK_SCAN_LN"
+          fi
+          matched=$(( matched + 1 ))
+        elif [ "$rc" -eq 1 ]; then
+          read_ok=$(( read_ok + 1 ))
+        else
+          unread=$(( unread + 1 ))
+          unread_names="${unread_names:+$unread_names,}${log##*/}(unreadable)"
+        fi
+      done
+    fi
+    if [ "$found_any" -eq 0 ]; then
+      # A non-PASS component with NO log is an absent subject, never a clean one.
+      unread=$(( unread + 1 ))
+      unread_names="${unread_names:+$unread_names,}$n(no log)"
+    fi
+  done
+
+  # THE IN-MEMORY SUBJECTS (#3800, roborev job 301). Scanned with the SAME closed set,
+  # through the SAME loop, and COUNTED IN THE CENSUS -- so `0 RECOGNISED` can only ever be
+  # claimed on a run where they were read too.
+  for ment in ${DISK_MEM_SUBJECTS[@]+"${DISK_MEM_SUBJECTS[@]}"}; do
+    mlabel="${ment%%|*}"; mtext="${ment#*|}"
+    mem_total=$(( mem_total + 1 ))
+    if [ -z "$mtext" ]; then
+      # RECORDED but EMPTY: the failure happened and produced no text we captured. That is
+      # UNMEASURED naming the subject -- an absent measurement is never a clean one.
+      unread=$(( unread + 1 ))
+      unread_names="${unread_names:+$unread_names,}$mlabel(no text captured)"
+      continue
+    fi
+    _disk_scan_subject text "$mtext"; rc=$?
+    if [ "$rc" -eq 0 ]; then
+      mem_read=$(( mem_read + 1 ))
+      mem_names="${mem_names:+$mem_names,}$mlabel"
+      if [ "$matched" -eq 0 ]; then
+        m_kind=mem; m_sig="$DISK_SCAN_SIG"; m_label="$mlabel"
+      fi
+      matched=$(( matched + 1 ))
+    elif [ "$rc" -eq 1 ]; then
+      mem_read=$(( mem_read + 1 ))
+      mem_names="${mem_names:+$mem_names,}$mlabel"
+    else
+      unread=$(( unread + 1 ))
+      unread_names="${unread_names:+$unread_names,}$mlabel(unscannable)"
+    fi
+  done
+
+  # THE THIRD KIND OF SUBJECT (#3800, roborev job 304): a component whose `.result` verdict
+  # the gate could NOT read. There is nothing to SCAN -- the evidence of the failed write went
+  # to gate stderr, and the component's own log is typically CLEAN because the component may
+  # genuinely have succeeded -- so the honest contribution is UNMEASURED NAMING IT. Counting
+  # it here is what stops the synthetic `FAIL 0` such a component receives from being scanned
+  # against a clean log and reported as an affirmative `0 RECOGNISED`.
+  for vent in ${DISK_UNREAD_VERDICTS[@]+"${DISK_UNREAD_VERDICTS[@]}"}; do
+    vcomp="${vent%%|*}"; vwhy="${vent#*|}"
+    unread=$(( unread + 1 ))
+    unread_names="${unread_names:+$unread_names,}$vcomp($vwhy)"
+  done
+
+  # THE CROSS-CHECK, from a signal this scanner does not set. TREE_CAPTURE_FAILED is raised by
+  # the START capture's own failure branch. Set with NOTHING on the in-memory channel, the
+  # capture's failure text was never recorded -- an older path, or a path added without wiring
+  # the recorder -- and the honest verdict is UNMEASURED NAMING THAT, never `0 RECOGNISED`.
+  if [ "${TREE_CAPTURE_FAILED:-0}" = 1 ] && [ "$mem_total" -eq 0 ]; then
+    mem_total=$(( mem_total + 1 ))
+    unread=$(( unread + 1 ))
+    unread_names="${unread_names:+$unread_names,}tree-identity capture(failure text NOT RECORDED)"
+  fi
+
+  case "$m_ln" in ''|*[!0-9]*) m_ln=0 ;; esac
+
+  if [ "$matched" -gt 0 ]; then
+    # RECOGNISED. NOTHING SUBJECT-DERIVED IS INTERPOLATED: only OUR signature NAME from the
+    # closed set, the component name (which comes from the gate's own COMPONENTS array, not
+    # from the log), the log BASENAME (component name + a fixed suffix), an integer line
+    # number, and -- for an in-memory subject -- OUR OWN fixed subject LABEL. The matched TEXT
+    # is never echoed: a component log is compiler- and test-controlled and a capture's stderr
+    # is OS-controlled, and a newline in either would break the block frame and could forge a
+    # RESULT line (#3312). An in-memory subject is named in OUR vocabulary and carries NO
+    # `<log>:<line>`, because it has none to report.
+    #
+    # IT REPORTS EVIDENCE, NEVER A CONCLUSION (#3800, roborev job 299). An earlier wording said
+    # "NOT a defect in the diff", which is an assertion this scan cannot support and which
+    # contradicts this marker's own doctrine ("a matched signature is evidence about the HOST,
+    # not proof the diff is innocent"). Two ways it is false: a failing test may legitimately
+    # PRINT one of the signatures into its own log, and a diff CAN itself drive disk usage (a
+    # new feature-matrix lane, a large fixture, a runaway build). So the line says what was
+    # OBSERVED and what to DO about it, and explicitly declines to clear the diff.
+    if [ "$m_kind" = mem ]; then
+      subj="signature '$m_sig' in IN-MEMORY subject '$m_label' (the gate's OWN capture, which reaches NO component log)"
+      what="this tree-capture failure"
+    else
+      subj="signature '$m_sig' in component '$m_comp' (status $m_status) at $m_log:$m_ln"
+      what="this $m_status"
+    fi
+    extra=""
+    [ "$matched" -gt 1 ] && extra="$extra ($matched subject(s) matched; first reported)."
+    [ "$unread" -gt 0 ] && extra="$extra ($unread further subject(s) could NOT be read: $(_disk_abbrev "$unread_names" 4))."
+    out="disk-exhaustion: RECOGNISED (#3800) -- $subj; CONSISTENT WITH disk exhaustion on this HOST: free space and re-run before treating $what as a defect in the diff. EVIDENCE, NOT PROOF -- the diff is NOT thereby cleared (a test can print the phrase, and a diff can itself drive disk usage). This is an ATTRIBUTION and does NOT change RESULT.$extra $(_disk_free_field). $(_disk_scan_field)"
+  elif [ "$unread" -gt 0 ]; then
+    # UNMEASURED IS NEVER PERMISSIVE. A subject that could not be read is never reported as
+    # "no signature": that is a pass derived from the ABSENCE of a bad signal.
+    #
+    # ORDER MATTERS, and it changed with the third subject kind (#3800, roborev job 304): an
+    # UNREAD VERDICT can exist on a run where EVERY recorded component PASSed and nothing is
+    # on the in-memory channel, so the "no non-PASS component to scan" branch below must not
+    # get first refusal -- it would render the affirmative clean reading over an unmeasured
+    # subject, which is this issue's own defect.
+    out="disk-exhaustion: UNMEASURED (#3800) -- $unread of $(( read_ok + mem_read + unread )) subject(s) could NOT be read ($(_disk_abbrev "$unread_names" 4)); a subject that could NOT be read is never reported as 'no signature'. $(_disk_free_field). $(_disk_scan_field)"
+  elif [ "$nonpass" -eq 0 ] && [ "$mem_total" -eq 0 ]; then
+    out="disk-exhaustion: 0 RECOGNISED (#3800) -- no non-PASS component to scan ($total/$total PASS). $(_disk_free_field). $(_disk_scan_field)"
+  else
+    out="disk-exhaustion: 0 RECOGNISED (#3800) -- scanned $read_ok non-PASS component log(s) ($(_disk_abbrev "${nonpass_names:-<none>}" 6)) and $mem_read in-memory subject(s) ($(_disk_abbrev "${mem_names:-<none>}" 4)); every subject was READ and no signature from the CLOSED set matched. $(_disk_free_field). $(_disk_scan_field)"
+  fi
+
+  # ONE emit boundary, ONE sanitisation: the rendered line is guaranteed to be exactly one
+  # line before it can reach a SUMMARY_META element.
+  printf '%s\n' "$(_disk_safe "$out")"
+}
+# ==== END disk-exhaustion attribution (#3800) ====
+
 LOG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate.XXXXXX")
+# #3800: the START-of-run free-space reading, taken the moment LOG_DIR exists so the
+# terminal `disk-exhaustion:` line can report a start->emit DELTA rather than an
+# instantaneous emit-time read (peers free space between the failure and the emit).
+_disk_capture_start
 # ==== BEGIN feature-matrix annotation (#3453) ====
 # The SUMMARY feature-matrix annotation. INLINE here, not a sourced sibling, on purpose:
 # eight hermetic self-tests build a synthetic repo by copying THIS ONE FILE into
@@ -8859,10 +9743,29 @@ _tree_identity() {
   done
 
   # ONE batched `git hash-object --stdin-paths` (no -w) for every ordinary file.
+  #
+  # #3800 (roborev job 301): this write, and the manifest write below, are the TWO places a
+  # capture dies under ENOSPC -- and their error text is the ONLY evidence such a run will
+  # ever produce, because it reaches no component log. It is accumulated IN MEMORY (never a
+  # spill file, which is precisely what cannot be written when the disk is full) and handed
+  # back on the rc-2 channel for the caller to record as a scan subject. Nothing here reads
+  # or renders it.
+  #
+  # SIZE and COST, so neither is a surprise. The text is bounded by the SAME manifest this
+  # function already holds in memory (at most ~2 write errors per recorded path), so it adds
+  # no new order of magnitude and is deliberately NOT truncated -- a cap would introduce a
+  # "did we drop the evidence" question for no measured benefit. On the SUCCESS path it is
+  # EMPTY, and the only cost is one extra fork per capture.
   local -a hashes=()
+  local _capdiag=""
   if [ "${#batch[@]}" -gt 0 ]; then
-    printf '%s\n' "${batch[@]}" \
-      | git --no-optional-locks hash-object --no-filters --stdin-paths > "$out.hashes" 2>/dev/null
+    # `2>&1 >file` -- ORDER IS LOAD-BEARING: fd2 is pointed at the command substitution's
+    # PIPE first, and only then is fd1 pointed at the hash list. The reverse order would
+    # write the error text INTO the data file.
+    _capdiag="$(
+      printf '%s\n' "${batch[@]}" \
+        | git --no-optional-locks hash-object --no-filters --stdin-paths 2>&1 >"$out.hashes"
+    )"
     while IFS= read -r h; do hashes+=("$h"); done < "$out.hashes"
     rm -f "$out.hashes" 2>/dev/null || true
     if [ "${#hashes[@]}" -ne "${#batch[@]}" ]; then
@@ -8891,6 +9794,15 @@ _tree_identity() {
   # and _tree_render_path adds the fourth member (`\s` = space) at RENDER time, where the
   # space is the character that would forge a list boundary.
   local i k=0 esc escv tab=$'\t'
+  # #3800: the manifest write's own stderr, captured IN MEMORY (see the note at the
+  # hash-object batch above). Same fd ordering rule: `2>&1` FIRST, so the error text goes to
+  # the command substitution's pipe and never into the manifest it is complaining about.
+  # The subshell is harmless -- this block writes files and sets no variable used afterwards.
+  # The separator is `$nl`, never a literal newline inside the expansion: a line starting
+  # with `}` at column zero would truncate every structural scan of this function's body
+  # (`fn_body` in scripts/tests/test_agent_gate_tree_integrity.sh stops at `^\}`), silently
+  # hiding the validation calls below from the checks that assert they exist.
+  _capdiag="${_capdiag:+$_capdiag$nl}$(
   {
     printf 'H\t%s\0' "$head"
     printf 'H\t%s\n' "$head" >&3
@@ -8904,18 +9816,44 @@ _tree_identity() {
     done
     printf 'N\t%s\0' "${#paths[@]}"
     printf 'N\t%s\n' "${#paths[@]}" >&3
-  } > "$out" 3> "$out.report"
+  } 2>&1 > "$out" 3> "$out.report"
+  )"
 
   [ "${#paths[@]}" -gt 0 ] && dirty=yes
 
   # Validate our OWN output before anyone can compare it (#2926 review B1/C2): header,
   # trailer and body count, on BOTH views. A truncated manifest is rejected here.
   local digest
-  _tree_manifest_ok "$out" nul "$head" "${#paths[@]}" || return 2
-  _tree_manifest_ok "$out.report" nl "$head" "${#paths[@]}" || return 2
-  digest=$(_tree_digest_file "$out") || return 2
-  _tree_digest_ok "$digest" || return 2
+  # #3800: EVERY rc-2 exit carries the captured failure text on stdout FIRST. The channel is
+  # disjoint by RETURN CODE, which the text cannot influence: on rc 0 the identity line is
+  # printed and nothing else, on rc 1 nothing at all, and only on rc 2 -- where no caller
+  # parses stdout as an identity -- is the diagnostic present. The caller records it as an
+  # in-memory scan subject and NEVER renders it (#3312).
+  _tree_manifest_ok "$out" nul "$head" "${#paths[@]}" || { _tree_emit_capture_diag "$_capdiag"; return 2; }
+  _tree_manifest_ok "$out.report" nl "$head" "${#paths[@]}" || { _tree_emit_capture_diag "$_capdiag"; return 2; }
+  digest=$(_tree_digest_file "$out") || { _tree_emit_capture_diag "$_capdiag"; return 2; }
+  _tree_digest_ok "$digest" || { _tree_emit_capture_diag "$_capdiag"; return 2; }
   printf '%s\t%s\t%s\t%s\n' "$head" "$dirty" "$digest" "$fallbacks"
+}
+
+# _tree_emit_capture_diag <text> -- print a capture's own failure text on the rc-2 channel,
+# and nothing when there is none (an EMPTY capture is a real state the caller must be able to
+# distinguish from a captured one: it renders UNMEASURED, never clean).
+_tree_emit_capture_diag() {
+  [ -n "${1:-}" ] || return 0
+  printf '%s\n' "$1"
+}
+
+# _tree_note_capture_failure <subject-label> <rc> <diag> -- the ONE piece of caller glue that
+# turns a failed capture into a scan subject for the `disk-exhaustion:` attribution (#3800,
+# roborev job 301). Only the rc-2 channel carries text (see _tree_identity); every other
+# failure shape records the subject with NO text, which reads UNMEASURED naming it. Called
+# from the PARENT shell at each capture-failure site, because `id=$(_tree_identity ...)` is a
+# subshell and a global set inside it would not survive.
+_tree_note_capture_failure() {
+  local label="${1:-tree-identity capture}" rc="${2:-}" diag="${3:-}"
+  [ "$rc" = 2 ] || diag=""
+  _disk_note_capture_failure "$label" "$diag"
 }
 
 # _tree_mtime <path> -> mtime (sub-second where the platform's stat offers it, else whole
@@ -8988,6 +9926,12 @@ _tree_capture_start() {
   # tree can never be proven unchanged from here, so the run is doomed to FAIL — it is
   # NOT downgraded to SKIP, which is reserved for "there is no git worktree" (#2926 B1).
   if [ "$rc" -ne 0 ] || ! _tree_split_identity "$id"; then
+    # #3800: the capture's OWN failure text becomes an in-memory scan subject BEFORE anything
+    # else, so the `disk-exhaustion:` attribution on the block this failure produces has an
+    # evidence source at all. TREE_CAPTURE_FAIL_REASON is a FIXED CONSTANT that can never name
+    # disk, and the manifest lives in $LOG_DIR -- so an ENOSPC here is exactly the case the
+    # attribution exists for, and it reaches NO component log.
+    _tree_note_capture_failure "tree-identity manifest write (start capture)" "$rc" "$id"
     TREE_GUARDED=1
     TREE_CAPTURE_FAILED=1
     TREE_START_HEAD=""; TREE_START_DIRTY=""; TREE_START_DIGEST=""
@@ -9868,6 +10812,7 @@ _assert_summary_integrity() {
   # terminal capture inside _tree_meta_lines means a run that is BOTH clobbered AND
   # mutated emits BOTH named lines under a single RESULT: FAIL.
   _tree_meta_array
+  # disk-exhaustion-exempt: #2874 summary-integrity FAIL: a live PEER clobbered the pinned summary path. This block carries no component table, its cause is a concurrent peer rather than this host disk, and summary-integrity: already names it
   emit_summary FAIL \
     "summary-integrity: FAIL ($reason)" \
     "detected-after-component: $comp" \
@@ -9926,6 +10871,7 @@ _emit_terminal_summary() {
     _publish_integrity_fail "$reason" "$comp" ${@+"$@"}   # ${@+"$@"}: empty-safe under set -u on bash 3.2
     return 1
   fi
+  # disk-exhaustion-exempt: forwarder, not a site of its own -- the shared no-clobber publish path appends nothing, and every CALLER of it is classified by this same census
   # component-set-exempt: forwarder — this is the shared no-clobber publish path; it stamps nothing of its own and every CALLER is checked by this same census
   emit_summary "$result" "$@"
 }
@@ -10194,6 +11140,10 @@ _assert_tree_integrity() {
     # rc 1 = git momentarily unavailable: the authoritative terminal capture decides.
     # rc 2 / an unvalidatable identity = fail closed here.
     [ "$rc" -eq 1 ] && return 0
+    # #3800: record the capture's own failure text as an in-memory scan subject before the
+    # block is published. On a SIDE lane this global dies with the subshell, which is why
+    # _apply_tree_integrity_marker records its own (text-less) subject on the drain path.
+    _tree_note_capture_failure "tree-identity manifest write (boundary capture after $comp)" "$rc" "$id"
     _tree_boundary_fail "$comp" "$TREE_CAPTURE_FAIL_REASON" capture-failed
     return $?
   fi
@@ -10280,8 +11230,16 @@ _recorded_component_rows_block() {
   for _c in $(_tree_mode_components); do
     _rf="$LOG_DIR/$_c.result"
     [ -f "$_rf" ] || continue
-    _st=""; _secs=""
-    read -r _st _secs < "$_rf" || true
+    # #3800 x #3625 (merge of 2026-09-04): the ONE reader, not a private two-field read.
+    # #3625 correctly routed the tree-boundary block through `_fm_summary_line` but left its own
+    # funnel traversals reading verdicts privately -- and a private read RECORDS NOTHING, so an
+    # absent/unreadable/MALFORMED `.result` (what an ENOSPC write leaves) renders as a BLANK CELL
+    # in this table while the `disk-exhaustion:` scan reports clean over a subject it never read.
+    # `_disk_verdict_read_aggregate` reads the same two fields, records the unreadability as an
+    # UNMEASURED subject, and normalises to a synthetic `FAIL 0`. `|| true` because this is a
+    # RENDERER: it must not own the verdict (the aggregations do).
+    _disk_verdict_read_aggregate "$_c" "$_rf" || true
+    _st="$DISK_VERDICT_ST"; _secs="$DISK_VERDICT_SECS"
     _rows="$_rows$(_fm_summary_line "$_c" "$_st" "${_secs}s")
 "
     _pairs="$_pairs $_c $_st"
@@ -10295,8 +11253,16 @@ _recorded_component_rows_block() {
     [ -f "$_rf" ] || continue
     _c="${_rf##*/}"; _c="${_c%.result}"
     case "$_seen" in *" $_c "*) continue ;; esac
-    _st=""; _secs=""
-    read -r _st _secs < "$_rf" || true
+    # #3800 x #3625 (merge of 2026-09-04): the ONE reader, not a private two-field read.
+    # #3625 correctly routed the tree-boundary block through `_fm_summary_line` but left its own
+    # funnel traversals reading verdicts privately -- and a private read RECORDS NOTHING, so an
+    # absent/unreadable/MALFORMED `.result` (what an ENOSPC write leaves) renders as a BLANK CELL
+    # in this table while the `disk-exhaustion:` scan reports clean over a subject it never read.
+    # `_disk_verdict_read_aggregate` reads the same two fields, records the unreadability as an
+    # UNMEASURED subject, and normalises to a synthetic `FAIL 0`. `|| true` because this is a
+    # RENDERER: it must not own the verdict (the aggregations do).
+    _disk_verdict_read_aggregate "$_c" "$_rf" || true
+    _st="$DISK_VERDICT_ST"; _secs="$DISK_VERDICT_SECS"
     _rows="$_rows$(_fm_summary_line "$_c" "$_st" "${_secs}s")
 "
     _pairs="$_pairs $_c $_st"
@@ -10309,7 +11275,10 @@ _recorded_component_rows_block() {
 }
 
 _tree_boundary_meta_lines() {
-  local _c _s _rf _st _secs _done=0 _sel=0 _seen=" " _cen_names="" _rows=""
+  # MERGED (#3800 x #3625): main's row-buffering/census locals plus this issue's
+  # disk-exhaustion pair accumulator. Both traversals below feed all three.
+  local _c _s _rf _st _secs _done=0 _sel=0 _seen=" " _cen_names="" _rows="" _de_prev
+  local -a _de_pairs=()
   _tree_commit_meta_render
   printf '%s\n' "$TREE_COMMIT_LINE"
   if [ -n "${DATA_COUNT:-}" ]; then
@@ -10358,14 +11327,28 @@ _tree_boundary_meta_lines() {
   # near-miss in a format string was enough to hide a whole emit path. The rows are buffered
   # rather than printed inline because the aggregate `census:` line goes ABOVE the table (as
   # it does in every other block) and its subject set is only known once both loops are done.
+  #
+  # MERGE NOTE (#3800 x #3625, 2026-09-04). #3625 reached the SAME conclusion this issue did --
+  # that this block was a SECOND, un-routed component-row emitter -- and fixed it BETTER, by
+  # routing through the one renderer instead of teaching a census to recognise a second format.
+  # Main's design is kept wholesale. The ONE substitution: main's loop read the verdict with a
+  # private `read -r _st _secs < "$_rf"`, which is exactly the two-field read #3800's
+  # `19h-one-reader` guard forbids, because such a read RECORDS NOTHING and so renders an
+  # unreadable verdict as a blank cell that scans clean. It goes through
+  # `_disk_verdict_read_aggregate` instead: same two fields, but an absent/unreadable/malformed
+  # verdict is recorded as an UNMEASURED subject and normalised to a synthetic `FAIL 0`.
+  # `|| true` because OVERALL is deliberately NOT decided from these loops -- this is a renderer
+  # inside a block that is ALREADY a `tree-integrity: FAIL` emit, and a renderer that owns a
+  # verdict is the coupling the aggregation wrapper exists to prevent.
   for _c in $(_tree_mode_components); do
     _rf="$LOG_DIR/$_c.result"
     [ -f "$_rf" ] || continue
-    _st=""; _secs=""
-    read -r _st _secs < "$_rf" || true
+    _disk_verdict_read_aggregate "$_c" "$_rf" || true
+    _st="$DISK_VERDICT_ST"; _secs="$DISK_VERDICT_SECS"
     _rows="$_rows$(_fm_summary_line "$_c" "$_st" "${_secs}s")
 "
     _cen_names="$_cen_names $_c $_st"
+    _de_pairs+=("$_c" "$_st")
     _seen="$_seen $_c "
     _done=$(( _done + 1 ))
   done
@@ -10373,11 +11356,15 @@ _tree_boundary_meta_lines() {
     [ -f "$_rf" ] || continue
     _c="${_rf##*/}"; _c="${_c%.result}"
     case "$_seen" in *" $_c "*) continue ;; esac
-    _st=""; _secs=""
-    read -r _st _secs < "$_rf" || true
+    # MERGE (#3800 x #3625): the ONE reader, not a private two-field read -- see the
+    # first loop above for why (a private read records nothing, so an unreadable
+    # verdict would render as a blank cell that scans clean).
+    _disk_verdict_read_aggregate "$_c" "$_rf" || true
+    _st="$DISK_VERDICT_ST"; _secs="$DISK_VERDICT_SECS"
     _rows="$_rows$(_fm_summary_line "$_c" "$_st" "${_secs}s")
 "
     _cen_names="$_cen_names $_c $_st"
+    _de_pairs+=("$_c" "$_st")
     _done=$(( _done + 1 ))
   done
   # The aggregate census line, over exactly the components this truncated table names.
@@ -10388,6 +11375,37 @@ _tree_boundary_meta_lines() {
   # shellcheck disable=SC2086  # intentional word-split over the name/STATUS pairs
   printf '%s\n' "$(census_summary_line $_cen_names)"
   [ -n "$_rows" ] && printf '%s' "$_rows"
+
+  # #3800: this BOUNDARY block DOES carry the `disk-exhaustion:` attribution, and the
+  # reasoning that once exempted it was WRONG. The exemption said the cause was already named
+  # -- a mid-run tree mutation (#2926). But `tree-integrity: FAIL` has a SECOND cause that IS
+  # disk exhaustion: when _tree_identity cannot write or validate its manifest, the block is
+  # stamped with TREE_CAPTURE_FAIL_REASON, a FIXED CONSTANT reading
+  # `tree-capture-failed; the tree cannot be proven unchanged`, and that manifest is written
+  # into $LOG_DIR -- so an ENOSPC on the logs filesystem produces exactly that verdict. The
+  # constant CAN NEVER NAME DISK, and it reads as a git/worktree problem, which makes this
+  # block a WORSE instance of #3800's defect than the `minimal-build: FAIL` that opened it.
+  # This is also the one block that carries a component table WITHOUT going through
+  # _fm_summary_line, which is why the census could not see it (its subject set was derived
+  # from that one renderer -- the same circularity, one level down).
+  #
+  # The pairs come from the SAME traversal that printed the table above -- one loop, two
+  # outputs -- so the attribution and the table can never disagree about which components are
+  # non-PASS. DISK_MIDRUN=1 makes BOTH halves of the line declare their partial window; it is
+  # saved and restored because this renderer must leave no state behind for the terminal emit.
+  #
+  # AND MARKING THIS BLOCK WAS NOT ENOUGH ON ITS OWN (#3800, roborev job 301). The component
+  # pairs below CANNOT carry the evidence for the cause named above: on the ENOSPC path
+  # _tree_identity fails independently of any component, its write-error text lands in no
+  # component log, and the components are typically still PASS -- so the line would have
+  # rendered an affirmative `0 RECOGNISED` on precisely the path it was added for. The
+  # evidence reaches the scan through the IN-MEMORY subject channel (DISK_MEM_SUBJECTS),
+  # recorded by _tree_note_capture_failure at each capture-failure site; _disk_exhaustion_line
+  # reads it from that global, so no extra argument is threaded through here.
+  _de_prev="${DISK_MIDRUN:-0}"
+  DISK_MIDRUN=1
+  _disk_exhaustion_line ${_de_pairs[@]+"${_de_pairs[@]}"}
+  DISK_MIDRUN="$_de_prev"
   #
   # #3402: this path keeps its OWN traversal, deliberately. The emit FUNNEL has a second one
   # (`_recorded_component_rows_block`) for the ordinary blocks that carry no table of their
@@ -10420,7 +11438,96 @@ _tree_boundary_fail() {
   if [ "${BASHPID:-$$}" != "$$" ]; then
     # APPEND (never truncate): two concurrent SIDE-lane detections must not corrupt
     # each other, and the reader consumes only the FIRST complete line.
-    printf '%s\t%s\t%s\n' "$kind" "$comp" "$reason" >> "$LOG_DIR/tree-integrity.fail" 2>/dev/null || true
+    #
+    # #3800 (roborev job 319): AND THE MARKER CHANNEL IS ITSELF A FILE ON THE FILESYSTEM THAT
+    # MAY BE FULL. This is the SIDE-lane half of the ENOSPC path #3800 exists for, and it was
+    # fail-OPEN: `tree-integrity: FAIL` is reachable from a capture failure, a capture failure is
+    # reachable from ENOSPC on the logs filesystem, and the escalation from a SIDE-lane component
+    # is an append to another file on THAT SAME filesystem, whose failure this line swallowed
+    # with `|| true`. With no marker written the post-drain consumer sees nothing, and if space
+    # frees before the terminal capture the parent reads this component's already-written PASS
+    # and CERTIFIES the run. The in-memory channel cannot help: it is lost at the subshell
+    # boundary. A comment in `record_result` used to claim this path was "covered by (1) instead,
+    # the missing/malformed `.result`" -- it was NOT, because the `.result` here is a complete,
+    # well-formed PASS written before the disk filled.
+    #
+    # THE FALLBACK NEEDS NO DISK: truncate this component's OWN verdict. `> file` on an existing
+    # file allocates nothing -- O_TRUNC is metadata -- so it succeeds precisely where the append
+    # failed, and an EMPTY `.result` is the shape round 4 already made a first-class UNREAD
+    # verdict: the parent's reconstruction renders a synthetic `FAIL 0`, forces `OVERALL=FAIL`
+    # (job 316) and names the component on the `disk-exhaustion:` line as UNMEASURED. The run
+    # fails closed with the disk attribution, which is the whole point of the issue.
+    #
+    # It trades SPECIFICITY for soundness, and says so: the block reports the component's verdict
+    # as unreadable rather than reporting `tree-integrity: FAIL`, because the only channel that
+    # could carry the reason is the one that just failed. A less specific FAIL beats a false PASS.
+    local _tbf_rc=0 _tbf_v="$LOG_DIR/$comp.result"
+    printf '%s\t%s\t%s\n' "$kind" "$comp" "$reason" >> "$LOG_DIR/tree-integrity.fail" 2>/dev/null || _tbf_rc=$?
+    if [ "$_tbf_rc" -ne 0 ]; then
+      echo "⚠️ agent-gate: tree-integrity FAIL after [$comp] ($reason) — the SIDE-lane marker write FAILED (rc $_tbf_rc; the logs filesystem may be full), so this component's own verdict is being INVALIDATED instead: the parent will report it as an unread verdict and FAIL the run (#3800)" >&2
+      # #3800 (roborev job 319 round 2): AND A SPECIFIED CONTROL MUST BE REQUIRED TO HAVE WORKED.
+      # The first version of this fallback ended `: > "$_tbf_v" 2>/dev/null || true`, which is the
+      # same shape it was written to remove: if BOTH the marker append and the truncation fail,
+      # the original well-formed `PASS` survives and the parent certifies. So the escalation is a
+      # LADDER, each rung needing strictly less of the filesystem than the last, and each rung
+      # VERIFIED by observing the filesystem rather than by trusting an exit status.
+      #
+      #   1. the marker append          — carries the REASON; already failed to get us here
+      #   2. TRUNCATE our own verdict   — allocates nothing (O_TRUNC is metadata); an empty
+      #                                   `.result` is a first-class unread verdict ⇒ FAIL
+      #   3. UNLINK our own verdict     — needs no space either and FREES some; for a SELECTED
+      #                                   SIDE-lane component an absent `.result` is the parent's
+      #                                   fail-closed presence guard ⇒ FAIL. (Unlink is sound
+      #                                   HERE and not in `record_result`: absence means "not
+      #                                   selected" only to the `--lite`/`--delta` loops, and the
+      #                                   SIDE lane exists only in the full gate.)
+      #   4. SIGKILL the gate itself    — the last disk-free channel there is. The run then
+      #                                   publishes NO verdict: its summary keeps the launch
+      #                                   sentinel `RESULT: INCOMPLETE`, which doctrine defines
+      #                                   as "still running, died, or queued" and NEVER as
+      #                                   certified, and `premerge-assert.sh` requires
+      #                                   `RESULT: PASS` token-exactly. Drastic, and bounded by
+      #                                   a state in which the gate cannot produce a trustworthy
+      #                                   verdict anyway: the logs filesystem is full, the marker
+      #                                   channel failed, and we could neither empty nor remove
+      #                                   our own verdict file. `$$` is the top-level gate even
+      #                                   in this subshell (bash keeps `$$`; `BASHPID` is what
+      #                                   differs, which is the lane discriminator above).
+      #
+      # RUNG 4 SENDS EXACTLY ONE SIGNAL, AND IT IS SIGKILL. Two rounds landed here and the second
+      # falsified the reasoning written for the first, so both are recorded.
+      #
+      # Round 4 of job 319: `kill` SUCCEEDING IS NOT THE TARGET DYING -- `kill -TERM` returns 0 on
+      # mere DELIVERY, and an ignored TERM disposition inherited by the gate's shell SURVIVES into
+      # bash and cannot be un-ignored, so a TERM-only rung resumes here with the original
+      # well-formed `PASS` intact. That produced a TERM-then-sleep-then-KILL sequence.
+      #
+      # Round 5 of job 319: THAT SEQUENCE REOPENED THE PID-REUSE HAZARD, and the comment written
+      # for it asserted the hazard was absent -- "`$$` is our ancestor, alive by construction".
+      # True BEFORE the first signal and FALSE AFTER it: once TERM is delivered the gate may exit
+      # and be reaped during the sleep, and the pid can be reassigned. On a four-lane box the most
+      # likely new owner is a PEER LANE'S GATE, which this repository already has an incident for.
+      #
+      # The fix is a DELETION, which is the tell that it is the right one: no TERM, no sleep, no
+      # second signal -- one SIGKILL, delivered to a pid that is still our own live ancestor at the
+      # instant we signal it, so there is no window in which it can be reaped and reused. SIGKILL
+      # cannot be ignored or handled, so the "did it work" question does not arise, and it
+      # guarantees the EXIT trap does not run, leaving the summary on its INCOMPLETE sentinel
+      # rather than emitting anything at all. Cleanup is forgone deliberately: the gate is
+      # unrecoverable here (the logs filesystem is full, the marker channel failed, and its own
+      # verdict could be neither emptied nor removed), and a cleanup that needs to write has
+      # nowhere to write. Anything that re-adds a first signal re-adds the reuse window with it.
+      : > "$_tbf_v" 2>/dev/null || true
+      if [ -s "$_tbf_v" ]; then
+        echo "⚠️ agent-gate: [$comp] verdict TRUNCATION also failed — attempting to REMOVE the verdict instead (#3800)" >&2
+        rm -f "$_tbf_v" 2>/dev/null || true
+      fi
+      if [ -e "$_tbf_v" ] && [ -s "$_tbf_v" ]; then
+        echo "⚠️ agent-gate: [$comp] verdict could be neither emptied nor removed, and the marker channel is unavailable — there is no disk-free way left to fail this run from a SIDE-lane subshell, so the GATE is being terminated: it will publish no verdict at all (RESULT stays the INCOMPLETE launch sentinel, which is never a certification) (#3800)" >&2
+        kill -KILL "$$" 2>/dev/null || true
+      fi
+      return 1
+    fi
     echo "⚠️ agent-gate: tree-integrity FAIL after [$comp] ($reason) — recorded for post-drain fail-close (#2926)" >&2
     return 1
   fi
@@ -10452,6 +11559,10 @@ _tree_boundary_fail() {
   # _emit_meta_lines will see it.
   _SUMMARY_ROWS_BUILT=1
   _meta+=("detected-after-component: $comp")
+  # #3800: MARKED, not exempt. The block's component table AND its `disk-exhaustion:` line are
+  # both rendered by _tree_boundary_meta_lines above, from one traversal of the recorded
+  # verdicts. See the note at that call for why a tree-integrity FAIL is itself an ENOSPC
+  # symptom (TREE_CAPTURE_FAIL_REASON is a fixed constant that cannot name disk).
   _emit_terminal_summary FAIL "${_meta[@]}" || true
   exit 1
 }
@@ -10472,6 +11583,13 @@ _apply_tree_integrity_marker() {
   kind=${m%%$'\t'*};   rest=${m#*$'\t'}
   comp=${rest%%$'\t'*}; reason=${rest#*$'\t'}
   TREE_MARKER_SEEN=1
+  # #3800: a SIDE-lane capture failure recorded its in-memory subject inside a BACKGROUNDED
+  # subshell, so that text is gone by the time the parent drains the marker. Record the
+  # subject here WITHOUT text rather than say nothing: it renders UNMEASURED naming the
+  # subject, which is the honest reading -- the alternative is a `0 RECOGNISED` that means
+  # "nobody looked".
+  [ "$kind" = capture-failed ] \
+    && _disk_note_capture_failure "tree-identity capture (SIDE lane, component $comp)" ""
   _tree_detection_mark "$kind" "$comp" "$reason"
   echo "agent-gate: tree-integrity FAIL recorded by a SIDE-lane component '$comp' ($reason) (#2926)" >&2
   return 0
@@ -10520,6 +11638,9 @@ _tree_finalize() {
   # rc 1 (no git) AND rc 2 (capture ran but could not be validated) BOTH land here: the
   # tree cannot be proven unchanged, so the run fails closed either way.
   if [ "$rc" -ne 0 ] || ! _tree_split_identity "$id"; then
+    # #3800: same recording as the start and boundary captures -- the terminal capture's
+    # manifest is written into $LOG_DIR too, so ENOSPC reaches it identically.
+    _tree_note_capture_failure "tree-identity manifest write (terminal capture)" "$rc" "$id"
     TREE_END_LINE="tree-end: (terminal capture failed)"
     TREE_END_DIGEST="unavailable"
     _tree_fail_closed "<terminal>" "terminal capture failed — the tree cannot be proven unchanged"
@@ -10753,6 +11874,12 @@ if [ "$SELFTEST" -eq 1 ]; then
     meta+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
     _SUMMARY_ROWS_BUILT=1   # #3402/job 74: EXPLICIT, never inferred from rendered text
   done
+  # #3800: the disk-exhaustion ATTRIBUTION line, driven through the REAL emit path so the
+  # self-test asserts the line as the block actually carries it (the #2078 marker below uses
+  # the same hook for the same reason). It NEVER changes RESULT: this hook emits PASS.
+  _de_pairs=()
+  for _de_i in "${!NAMES[@]}"; do _de_pairs+=("${NAMES[$_de_i]}" "${STATUSES[$_de_i]}"); done
+  meta+=("$(_disk_exhaustion_line ${_de_pairs[@]+"${_de_pairs[@]}"})")
   # #2078: when the opt-out is engaged, drive the visible missing-fixtures marker
   # through the real emit path so the self-test can assert it lands in the block.
   if [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" = 1 ] && [ "$(_fixture_status)" = OPTOUT ]; then
@@ -10844,6 +11971,7 @@ case "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" in
     # the very "emit sites nobody enumerated" shape this change set out to close (review
     # H3). _tree_meta_array finalizes in the CURRENT shell (never a subshell, B2).
     _tree_meta_array
+    # disk-exhaustion-exempt: #2874 summary-integrity self-test hook (marker) -- pre-dispatch, synthetic block; no component has run and the run-id it publishes is a fixture
     # component-set-exempt: #2874 summary-integrity self-test hook — pre-dispatch, synthetic block
     _emit_terminal_summary "$OVERALL" "commit: selftest branch: selftest dirty: no" \
       ${SUMMARY_INTEGRITY_LINE:+"$SUMMARY_INTEGRITY_LINE"} \
@@ -10869,6 +11997,7 @@ case "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" in
     _term_rc=0
     # Threaded for the same reason as the `marker` hook above (#2926 review H3).
     _tree_meta_array
+    # disk-exhaustion-exempt: #2874 summary-integrity self-test hook (terminal-nomarker) -- pre-dispatch, synthetic block; no component has run
     # component-set-exempt: #2874 summary-integrity self-test hook — pre-dispatch, synthetic block
     _emit_terminal_summary "$OVERALL" "commit: selftest branch: selftest dirty: no" \
       "${TREE_META_LINES[@]}" || _term_rc=$?
@@ -10918,7 +12047,46 @@ record_result() { # <name> <status> <seconds>
   # terminal paths) reassign their own `$status` from _census_finalize and are correct
   # without it.
   RECORDED_STATUS="$_rr_status"
-  printf '%s %s\n' "$_rr_status" "$3" > "$LOG_DIR/$1.result"
+  # #3800 (roborev job 304): THE VERDICT WRITE ITSELF CAN FAIL, AND ITS ERROR TEXT USED TO GO
+  # NOWHERE THE SCAN LOOKS. Under ENOSPC this redirect fails (or the write does), bash/printf
+  # reports it on GATE STDERR -- neither a component log nor a scan subject -- and the parent's
+  # fail-closed guard then synthesises `FAIL 0` for a component whose own log is CLEAN. Both
+  # subject channels were empty, so the block rendered an affirmative `0 RECOGNISED`.
+  #
+  # The stderr is captured IN MEMORY and noted on the EXISTING channel (round 3's
+  # _disk_note_capture_failure) -- never a spill file, which under ENOSPC is exactly what
+  # cannot be written. Bounded to a few hundred bytes at the source: bash's own redirect
+  # diagnostic and printf's write error are one short line each, and the scan discards the
+  # text after matching it (#3312), so nothing here reaches the emitted line.
+  #
+  # SUBSHELL BOUNDARY, STATED RATHER THAN IMPLIED. This note reaches the parent only for
+  # components that run in the PARENT shell -- the serial MAIN lane, and every --lite/--delta
+  # component. A SIDE-lane component runs in a backgrounded subshell (#1737), where this
+  # append is LOST at the subshell boundary, and under ENOSPC the marker-file idiom
+  # _apply_tree_integrity_marker uses is unavailable BY CONSTRUCTION (there is no space to
+  # write a marker).
+  #
+  # #3800 (roborev job 319) CORRECTS WHAT THIS COMMENT USED TO CLAIM. It said that path was
+  # "covered by the THIRD subject kind instead: the missing or malformed `.result`". It was NOT:
+  # on the SIDE-lane tree-capture route the `.result` is a COMPLETE, WELL-FORMED PASS written
+  # before the disk filled, so there was nothing malformed for the parent to catch and the run
+  # could certify. The coverage is now real rather than asserted, because `_tree_boundary_fail`'s
+  # SIDE branch INVALIDATES this component's verdict (a zero-allocation truncate) when its own
+  # marker write fails -- see the reasoning there. Partial and declared beats a false clean; a
+  # claim of coverage that is merely stated is worse than either.
+  # MERGE (#3800 x #3625, 2026-09-04): #3625 decides WHAT is written (`_rr_status`, which may be
+  # VACUOUS); #3800 owns what happens when the WRITE ITSELF FAILS. Both are needed, and the
+  # capture wraps main's censused value rather than the raw `$2` -- writing `$2` here would
+  # discard the census and let a component that verified nothing report PASS (#3625 AC2).
+  local _rr_err _rr_rc
+  _rr_err="$( { printf '%s %s\n' "$_rr_status" "$3" > "$LOG_DIR/$1.result"; } 2>&1 )"; _rr_rc=$?
+  if [ "$_rr_rc" -ne 0 ]; then
+    _disk_note_capture_failure "component verdict write ($1.result)" "$_rr_err"
+    # Attributing the write failure is not disposing of it: this shell knows the verdict never
+    # reached disk, so it fails the run here. Lost at a SIDE-lane subshell boundary (#1737),
+    # where the cover is the parent's presence guard over the absent/empty `.result`.
+    OVERALL=FAIL
+  fi
   # #3453: two whitespace fields ONLY — ~60 call sites and a 2-field `read -r _st _secs`
   # reader, which would silently absorb a third into $_secs. The feature matrix rides a
   # per-component SIDECAR instead. A SKIP — or a FAIL that died before its first cargo
@@ -11048,6 +12216,7 @@ if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
       # capture-derived `commit:` line the full/lite/delta emits publish.
       _tree_commit_meta
       _tree_meta_array
+      # disk-exhaustion-exempt: #2926 tree-integrity self-test hook (clean|boundary|terminal) -- pre-dispatch, synthetic block; the only recorded verdict is the hook own tree-selftest fixture
       # component-set-exempt: #2926 tree-integrity self-test hook — pre-dispatch, synthetic block
       _emit_terminal_summary "$(_tree_result "$OVERALL")" \
         "$TREE_COMMIT_LINE" "${TREE_META_LINES[@]}" || true
@@ -11064,6 +12233,7 @@ if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
       _tree_selftest_mutate
       _tree_commit_meta
       _tree_meta_array
+      # disk-exhaustion-exempt: #2926 tree-integrity self-test hook (postfinalize) -- pre-dispatch, synthetic block; no real component has run
       # component-set-exempt: #2926 tree-integrity self-test hook — pre-dispatch, synthetic block
       _emit_terminal_summary "$(_tree_result "$OVERALL")" \
         "$TREE_COMMIT_LINE" "${TREE_META_LINES[@]}" || true
@@ -11083,6 +12253,7 @@ if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
       _tree_finalize || true
       _tree_commit_meta
       _tree_meta_array
+      # disk-exhaustion-exempt: #2926 tree-integrity self-test hook (side) -- pre-dispatch, synthetic block; no real component has run
       # component-set-exempt: #2926 tree-integrity self-test hook — pre-dispatch, synthetic block
       _emit_terminal_summary "$(_tree_result "$OVERALL")" \
         "$TREE_COMMIT_LINE" "${TREE_META_LINES[@]}" || true
@@ -17455,6 +18626,43 @@ run_dep_duplicates() {
 # deliberately: this suite runs HERE, so a suite that red on a legitimate ADVISORY-INCREASE
 # would fail the full gate and defeat the component's advisory contract. It carries its own
 # case FLOOR. Offline; SKIP-aware where cargo or `git worktree` is unavailable.
+# Also runs scripts/tests/test_agent_gate_disk_exhaustion.sh (#3800), the pin for the
+# `disk-exhaustion:` SUMMARY marker. A full gate died of ENOSPC and the ONE artifact agents
+# retain said `minimal-build: FAIL (611s)` beside 36/37 PASS and `tree-integrity: PASS`, so
+# the reader debugged a minimal-features build that was never broken. 60+ cases EXTRACT the
+# shipped `_disk_exhaustion_line` + helpers out of this file and run them: each signature of
+# the CLOSED set; an ANSI-COLOURED log (the payload carries no escapes, #3400) plus the proof
+# that the scan materialises NO sibling file — a diagnostic needing free disk is useless under
+# ENOSPC, which is why it does NOT use `_ansi_stripped_log`; the literal `0 RECOGNISED` rather
+# than a bare `0`; a PASSing component's log never scanned, with a status-flip positive control;
+# grep's THREE-valued rc, so an unreadable subject is UNMEASURED and never "no signature"; the
+# mixed cases in both directions; a hostile log carrying a forged `RESULT: PASS` and SUMMARY
+# marker proving no log text is interpolated; per-component sub-logs in and cross-boundary logs
+# out; the RECOGNISED line reporting EVIDENCE rather than the diff's innocence (roborev job
+# 299), with a NEGATIVE case pinning the retired claim out; and a CENSUS that derives EVERY
+# emit site from this file -- MARKED / EXEMPT / GAP, with a positive control on each arm --
+# rather than hard-coding a count. Its table-bearing subset is derived from the component-row
+# FORMAT (`%-18s %s (%s`) rather than from one renderer's NAME, because deriving it from
+# `_fm_summary_line` alone hid the 7th site -- the #2926 tree-integrity BOUNDARY block, which
+# renders its table with its own printf and whose `tree-capture-failed` reason is a fixed
+# constant that cannot name an ENOSPC on $LOG_DIR. A third control plants into that second
+# renderer specifically.
+#   AND MARKING THAT BLOCK DID NOT COVER IT (roborev job 301). ADDING A MARKER TO A BLOCK DOES
+# NOT MAKE THE BLOCK'S CAUSE OBSERVABLE TO THE MARKER: the scan's subject set was NON-PASS
+# COMPONENT LOGS, and on the tree-capture ENOSPC path _tree_identity fails independently of any
+# component, its write-error text reaches NO component log, and the components stay PASS -- so
+# the block would have affirmed `0 RECOGNISED` on exactly the path the line was added for. The
+# capture's stderr is now an IN-MEMORY scan subject (never a spill file: under ENOSPC that is
+# what cannot be written), scanned through the SAME closed set by the SAME loop. Two more case
+# groups pin it: one host-independent, injecting through the shipped recorder with EVERY
+# component PASSING plus a NEGATIVE control, an empty capture, the never-recorded cross-check
+# and both #3312 injection halves; and one that induces a REAL ENOSPC at /dev/full through the
+# shipped `_tree_identity`, asserts fixture provenance first, then the attributed verdict, then
+# a mutation control showing the same run collapses to the false `0 RECOGNISED` without the new
+# subject. /dev/full is Linux-only and macOS is a first-class gate host, so that group DECLARES
+# its skip rather than dropping silently. Hermetic: temp dirs, one throwaway `git init`, and the
+# two hidden selftest hooks — no cargo, no python3, no datasets, no network — so it is
+# registered ABOVE the python3 SKIP branch and never SKIPs.
 run_tooling_tests() {
   local name=tooling-tests
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -19300,6 +20508,31 @@ run_tooling_tests() {
     return 0
   fi
 
+  # disk-exhaustion attribution guard (#3800): hermetic (temp dirs + the two hidden
+  # selftest hooks; no cargo/python3/datasets/network, ~1s). A full gate killed by ENOSPC
+  # reported only `minimal-build: FAIL (611s)` in the ONE artifact doctrine retains, so the
+  # reader debugged a build that was never broken. This pins the `disk-exhaustion:` marker's
+  # CLOSED value set, its three-valued grep handling, the no-log-text-in-the-block rule and
+  # the derived emit-site set -- whose table-bearing subset is derived from the component-row
+  # FORMAT, not from one renderer's name (that narrower derivation hid the 7th site, the #2926
+  # tree-integrity BOUNDARY block).
+  #
+  # Registered HERE, as its own guard ABOVE the python3 branch, and NOT inside the
+  # `&&`-chain below: that chain is behind `command -v python3`, and folding a suite that
+  # needs nothing beyond bash into a SKIP-aware lane would be a coverage hole wearing a
+  # SKIP's clothes (#3522's rule). It never SKIPs. Same shape as the file-size log guard.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_disk_exhaustion.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_disk_exhaustion.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (disk-exhaustion attribution guard #3800); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   if ! command -v python3 >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no python3 on PATH; selftest truncation reader needs it)"
@@ -20153,10 +21386,25 @@ aggregate_lite_components() {
   local c rf st secs i
   for c in file-size fmt clippy roborev-lints; do
     rf="$LOG_DIR/$c.result"
-    [ -f "$rf" ] || continue   # not run (e.g. --only skip) — do not add, do not fail
-    st=""; secs=""
-    read -r st secs < "$rf" || true
-    [ -n "$st" ] || { st=FAIL; secs=0; }
+    # #3800 (roborev job 319 round 3): "absent" was read as "--only skipped it", which is only
+    # ONE of its two causes -- the other is that the component RAN and its verdict never reached
+    # the disk (ENOSPC), and that one was silently dropped from the table AND from OVERALL. The
+    # discriminator is not the file, it is the SELECTION: `_pool_selected` is the same predicate
+    # `run_file_size`/`run_component` early-return on, so a component this run did not select is
+    # still skipped, and one it DID select owes a readable verdict.
+    if [ ! -f "$rf" ]; then
+      _pool_selected "$c" || continue
+      _disk_note_unread_verdict "$c" "verdict file ABSENT"
+      LN+=("$c"); LS+=(FAIL); LT+=("0s"); OVERALL=FAIL
+      continue
+    fi
+    # #3800 (job 304): the ONE reader, so a `.result` this lane could not READ becomes an
+    # UNMEASURED subject of the `disk-exhaustion:` line. #3800 (job 316): via the aggregation
+    # wrapper, so it ALSO fails the run. The `[ -n "$st" ]` belt that stood here covered only
+    # the EMPTY shape and left a truncated-but-non-empty one (`PAS`, or `PASS abc`) rendering as
+    # a non-FAIL status over an unread verdict; the wrapper normalises every unread shape.
+    _disk_verdict_read_aggregate "$c" "$rf" || OVERALL=FAIL
+    st="$DISK_VERDICT_ST"; secs="$DISK_VERDICT_SECS"
     LN+=("$c"); LS+=("$st"); LT+=("${secs}s")
     _status_is_nonfailing "$st" || OVERALL=FAIL   # #3625: affirmative closed set
   done
@@ -20245,6 +21493,11 @@ run_lite() {
     SUMMARY_META+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
     _SUMMARY_ROWS_BUILT=1   # #3402/job 74: EXPLICIT, never inferred from rendered text
   done
+  # #3800: the disk-exhaustion ATTRIBUTION line -- names an environmental ENOSPC cause in the
+  # ONE artifact agents retain. It NEVER changes OVERALL/RESULT (append-only to SUMMARY_META).
+  local _de_i; local -a _de_pairs=()
+  for _de_i in "${!NAMES[@]}"; do _de_pairs+=("${NAMES[$_de_i]}" "${STATUSES[$_de_i]}"); done
+  SUMMARY_META+=("$(_disk_exhaustion_line ${_de_pairs[@]+"${_de_pairs[@]}"})")
   # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
   # (falls through to emit_summary when no live peer owns the path; forces FAIL + non-zero exit
   # via SUMMARY_WRITE_FAILED when one does).
@@ -20388,6 +21641,7 @@ run_delta() {
     echo "--- [delta] ERROR: anchor '$anchor' does not resolve to a commit." >&2
     echo "    Pass the commit the full gate PASSed at (a sha, tag, or ref)." >&2
     _tree_meta_array   # #2926
+    # disk-exhaustion-exempt: --delta usage ERROR: the anchor does not resolve to a commit. Emitted before any delta component runs, so there is no log to scan; delta-anchor: (UNRESOLVED) already names the cause
     emit_summary ERROR \
       "delta-anchor: $anchor (UNRESOLVED)" \
       "$(accelerators_line)" \
@@ -20406,6 +21660,7 @@ run_delta() {
     if [ ! -f "$DELTA_ANCHOR_SUMMARY_FILE" ]; then
       echo "--- [delta] ERROR: --anchor-summary-file '$DELTA_ANCHOR_SUMMARY_FILE' not found." >&2
       _tree_meta_array   # #2926
+      # disk-exhaustion-exempt: --delta usage ERROR: --anchor-summary-file not found. Emitted before any delta component runs; the error: line already names the cause
       emit_summary ERROR \
         "delta-anchor: $anchor_sha" \
         "$(accelerators_line)" \
@@ -20420,6 +21675,7 @@ run_delta() {
       echo "--- [delta] ERROR: --anchor-summary-file is not a FULL-gate SUMMARY block." >&2
       echo "    A delta re-cert must anchor to a full agent-gate.sh PASS, not a lite/delta run." >&2
       _tree_meta_array   # #2926
+      # disk-exhaustion-exempt: --delta usage ERROR: the anchor summary is not a FULL-gate SUMMARY block. Emitted before any delta component runs; the error: line already names the cause
       emit_summary ERROR \
         "delta-anchor: $anchor_sha" \
         "$(accelerators_line)" \
@@ -20432,6 +21688,7 @@ run_delta() {
       echo "--- [delta] ERROR: --anchor-summary-file did not record RESULT: PASS." >&2
       echo "    A delta re-cert must anchor to a full-gate PASS." >&2
       _tree_meta_array   # #2926
+      # disk-exhaustion-exempt: --delta usage ERROR: the anchor summary did not record RESULT: PASS. Emitted before any delta component runs; the error: line already names the cause
       emit_summary ERROR \
         "delta-anchor: $anchor_sha" \
         "$(accelerators_line)" \
@@ -20527,6 +21784,7 @@ run_delta() {
     _tree_finalize || true   # #2926
     _tree_commit_meta; anchor_meta[0]="$TREE_COMMIT_LINE"   # #2926 review C1
     _tree_meta_array
+    # disk-exhaustion-exempt: --delta REFUSED BEFORE EXECUTION (the diff carries files --delta cannot re-certify). Its own delta-scope: line reads "NOT RUN -- refused before execution", so no component log exists to scan
     emit_summary "$(_tree_result REFUSED)" \
       "${anchor_meta[@]}" \
       "delta-scope: file-size fmt scoped-tests node-tests shell-selftests (NOT RUN — refused before execution)" \
@@ -20554,6 +21812,7 @@ run_delta() {
     _tree_finalize || true   # #2926
     _tree_commit_meta; anchor_meta[0]="$TREE_COMMIT_LINE"   # #2926 review C1
     _tree_meta_array
+    # disk-exhaustion-exempt: --delta REFUSED BEFORE EXECUTION (bindings/node/__test__ changed, native module not built). Its own delta-scope: line reads "NOT RUN -- refused before execution", so no component log exists to scan
     emit_summary "$(_tree_result REFUSED)" \
       "${anchor_meta[@]}" \
       "delta-scope: file-size fmt scoped-tests node-tests shell-selftests (NOT RUN — refused before execution)" \
@@ -20589,15 +21848,23 @@ run_delta() {
   local -a DN=() DS=() DT=()
   local -a _cen_args=()
   local c rf st secs _ci
+  # #3800 (job 304): the ONE reader here too. Both shapes are measurement failures in THIS
+  # loop -- unlike the full gate's reconstruction, an absent `.result` for file-size/fmt means
+  # the component did not reach record_result, which is already treated as a synthetic FAIL --
+  # so absence is recorded explicitly beside the reader's malformed recording, and the
+  # `disk-exhaustion:` line reports the component as UNMEASURED rather than scanning a clean
+  # log and claiming `0 RECOGNISED`.
   for c in file-size fmt; do
     rf="$LOG_DIR/$c.result"
     if [ -f "$rf" ]; then
-      st=""; secs=""
-      read -r st secs < "$rf" || true
-      [ -n "$st" ] || { st=FAIL; secs=0; }
+      # #3800 (job 316): through the aggregation wrapper, so an unread verdict fails the
+      # delta re-cert instead of rendering a non-FAIL status beside a certified RESULT.
+      _disk_verdict_read_aggregate "$c" "$rf" || OVERALL=FAIL
+      st="$DISK_VERDICT_ST"; secs="$DISK_VERDICT_SECS"
       DN+=("$c"); DS+=("$st"); DT+=("${secs}s")
       _status_is_nonfailing "$st" || OVERALL=FAIL   # #3625: affirmative closed set
     else
+      _disk_note_unread_verdict "$c" "verdict file ABSENT"
       DN+=("$c"); DS+=(FAIL); DT+=("0s"); OVERALL=FAIL
     fi
   done
@@ -20661,6 +21928,13 @@ run_delta() {
       SUMMARY_META+=("$(_fm_summary_line "${DN[$i]}" "${DS[$i]}" "${DT[$i]}")")
       _SUMMARY_ROWS_BUILT=1   # #3402/job 74: EXPLICIT, never inferred from rendered text
     done
+    # #3800: the delta REFUSED path gets the line too. It is a TERMINAL emit an agent
+    # retains, its component table can carry a non-PASS row (file-size/fmt/scoped-tests
+    # run BEFORE the refusal), and a refusal caused by a disk-starved tier is exactly the
+    # confusion this marker exists to remove -- so "inapplicable" would be a guess.
+    local _de_i; local -a _de_pairs=()
+    for _de_i in "${!DN[@]}"; do _de_pairs+=("${DN[$_de_i]}" "${DS[$_de_i]}"); done
+    SUMMARY_META+=("$(_disk_exhaustion_line ${_de_pairs[@]+"${_de_pairs[@]}"})")
     SUMMARY_META+=("refusal: python tier skipped — cannot re-certify changed bindings/python/tests/* files; run the full gate (scripts/agent-gate.sh)")
     emit_summary "$(_tree_result REFUSED)" "${SUMMARY_META[@]}"
     [ "$SUMMARY_WRITE_FAILED" -eq 0 ] || { echo "agent-gate: exiting non-zero because the summary file could not be written (#1175)" >&2; exit 1; }
@@ -20716,6 +21990,11 @@ run_delta() {
     SUMMARY_META+=("$(_fm_summary_line "${DN[$i]}" "${DS[$i]}" "${DT[$i]}")")
     _SUMMARY_ROWS_BUILT=1   # #3402/job 74: EXPLICIT, never inferred from rendered text
   done
+  # #3800: the disk-exhaustion ATTRIBUTION line -- names an environmental ENOSPC cause in the
+  # ONE artifact agents retain. It NEVER changes OVERALL/RESULT (append-only to SUMMARY_META).
+  local _de_i; local -a _de_pairs=()
+  for _de_i in "${!DN[@]}"; do _de_pairs+=("${DN[$_de_i]}" "${DS[$_de_i]}"); done
+  SUMMARY_META+=("$(_disk_exhaustion_line ${_de_pairs[@]+"${_de_pairs[@]}"})")
   # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
   # (falls through to emit_summary when no live peer owns the path; forces FAIL + non-zero exit
   # via SUMMARY_WRITE_FAILED when one does).
@@ -22157,6 +23436,13 @@ _gate_disk_admission_refuse() {
   # Routed through the shared no-clobber terminal contract (#2874), not a bare
   # emit_summary: a refusal is a TERMINAL block and must obey the same live-peer rules
   # as every other one.
+  # disk-exhaustion-exempt: #3755 disk-admission REFUSAL. VERIFIED, not assumed (the #3800 job-358
+  # lesson): all four refusal moments precede `run_file_size` -- the three call sites at LAUNCH /
+  # after-the-queue and the SLOT-GRANT one -- so no component can have recorded a verdict and there
+  # is nothing to attribute. It is also the ONE block whose cause IS disk BY CONSTRUCTION and which
+  # already names it affirmatively in `disk-admission:` with its own bar and remedy, so a second
+  # disk marker here would be redundant rather than informative -- the opposite of every other
+  # marked site, where the existing text CANNOT name disk.
   _emit_terminal_summary FAIL "${_da_meta[@]}" || true
   if [ "$SUMMARY_WRITE_FAILED" -ne 0 ]; then
     echo "agent-gate: exiting non-zero because the summary file could not be written (#1175)" >&2
@@ -22377,6 +23663,11 @@ if [ "$LITE_AGG_SELFTEST" -eq 1 ]; then
     SUMMARY_META+=("$(_fm_summary_line "${NAMES[$_i]}" "${STATUSES[$_i]}" "${TIMES[$_i]}")")
     _SUMMARY_ROWS_BUILT=1   # #3402/job 74: EXPLICIT, never inferred from rendered text
   done
+  # #3800: the disk-exhaustion ATTRIBUTION line -- names an environmental ENOSPC cause in the
+  # ONE artifact agents retain. It NEVER changes OVERALL/RESULT (append-only to SUMMARY_META).
+  _de_pairs=()
+  for _de_i in "${!NAMES[@]}"; do _de_pairs+=("${NAMES[$_de_i]}" "${STATUSES[$_de_i]}"); done
+  SUMMARY_META+=("$(_disk_exhaustion_line ${_de_pairs[@]+"${_de_pairs[@]}"})")
   # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
   # (falls through to emit_summary when no live peer owns the path; forces FAIL + non-zero exit
   # via SUMMARY_WRITE_FAILED when one does).
@@ -22579,10 +23870,18 @@ if selected_needs_datasets; then
     # stale PASS survives; this makes the early exit explicit for a caller reading
     # the recovery path.
     _tree_meta_array   # #2926
+    # #3800 (roborev job 370): the FOURTH post-`run_file_size` block, and the one the previous round
+    # missed by fixing three INSTANCES instead of sweeping the CLASS. `--only file-size,core-tests`
+    # runs file-size, records its verdict, and can then reach this block -- so the exemption's "no
+    # component log exists" was false here for exactly the same reason it was false at the fixtures
+    # and schemas blocks. The census now DERIVES this class (see case 27) rather than trusting the
+    # comment, which is what would have caught all four at once.
+    _disk_preflight_meta
     emit_summary FAIL \
       "preflight: FAIL (no Data.db files under $CQLITE_DATASETS_ROOT/sstables)" \
       "$(_component_set_meta)" \
       "${TREE_META_LINES[@]}" \
+      "${DISK_PREFLIGHT_META[@]+"${DISK_PREFLIGHT_META[@]}"}" \
       "hint: bash test-data/scripts/fetch-datasets.sh"
     exit 1
   fi
@@ -23243,7 +24542,18 @@ launch_components() {
   local -a main_lane=() side_lane=()
   local c
   for c in "${COMPONENTS[@]}"; do
-    [ "$c" = file-size ] && continue
+    if [ "$c" = file-size ]; then
+      # #3800 (roborev job 319 round 3): file-size ALREADY RAN inline (before the dataset
+      # preflight, which exits early when data is missing), so it must not be dispatched again --
+      # but it was `continue`d before reaching SELECTED_MAIN, which made it the ONE selected
+      # component the post-drain fail-closed presence guard did not cover. The reconstruction loop
+      # then skips an absent `.result` as "not selected", so an ENOSPC that stopped
+      # `file-size.result` being created omitted the component from a gate reporting
+      # `RESULT: PASS` -- a component silently missing from a certification, which is a worse
+      # form of this issue's own opening defect. Recorded as selected, still not dispatched.
+      _pool_selected "$c" && SELECTED_MAIN+=("$c")
+      continue
+    fi
     _pool_selected "$c" || continue
     if is_side_component "$c"; then side_lane+=("$c"); SELECTED_SIDE+=("$c")
     else main_lane+=("$c"); SELECTED_MAIN+=("$c"); fi
@@ -23321,9 +24631,17 @@ launch_components
 # Also check the SIDE lane's exit status. Bash-3.2-safe empty-array guard (#1841,
 # same hazard as launch_components above): a `--only <main-only-component>` run
 # leaves SELECTED_SIDE empty, and vice versa.
+#
+# #3800 (roborev job 304): the synthetic FAIL stays -- it is the fail-CLOSED half and is not
+# in question -- but it is NOT a measurement. The component's own log is typically CLEAN
+# (the component may genuinely have succeeded and died on the WRITE), and under ENOSPC the
+# write error went to gate stderr, so the `disk-exhaustion:` scan would have had a non-PASS
+# component with a clean log and rendered an affirmative `0 RECOGNISED`. Recording the
+# component as an UNREAD VERDICT makes it an UNMEASURED subject instead.
 for _sc in "${SELECTED_SIDE[@]+"${SELECTED_SIDE[@]}"}"; do
   [ -f "$LOG_DIR/$_sc.result" ] || {
     echo "agent-gate: SIDE-lane component '$_sc' SELECTED but has no result file (crashed/exited early)" >&2
+    _disk_note_unread_verdict "$_sc" "verdict file ABSENT"
     NAMES+=("$_sc"); STATUSES+=(FAIL); TIMES+=("0s")
     OVERALL=FAIL
   }
@@ -23331,6 +24649,7 @@ done
 for _mc in "${SELECTED_MAIN[@]+"${SELECTED_MAIN[@]}"}"; do
   [ -f "$LOG_DIR/$_mc.result" ] || {
     echo "agent-gate: MAIN-lane component '$_mc' SELECTED but has no result file (crashed/exited early)" >&2
+    _disk_note_unread_verdict "$_mc" "verdict file ABSENT"
     NAMES+=("$_mc"); STATUSES+=(FAIL); TIMES+=("0s")
     OVERALL=FAIL
   }
@@ -23356,8 +24675,14 @@ _apply_tree_integrity_marker
 for _c in "${COMPONENTS[@]}"; do
   _rf="$LOG_DIR/$_c.result"
   [ -f "$_rf" ] || continue
-  _st=""; _secs=""
-  read -r _st _secs < "$_rf" || true
+  # #3800 (job 304): the ONE reader records an unreadable/malformed verdict as an UNMEASURED
+  # subject of the `disk-exhaustion:` line. #3800 (job 316): and the AGGREGATION acts on it --
+  # an unread verdict becomes a synthetic `FAIL 0` and forces OVERALL, because the comment that
+  # stood here ("still fail-closed -- an unrecognised status is not PASS") was true of the TABLE
+  # and false of the VERDICT: the status merely was not the string FAIL, so `RESULT: PASS` was
+  # emitted over a component whose verdict was never read.
+  _disk_verdict_read_aggregate "$_c" "$_rf" || OVERALL=FAIL
+  _st="$DISK_VERDICT_ST"; _secs="$DISK_VERDICT_SECS"
   NAMES+=("$_c"); STATUSES+=("$_st"); TIMES+=("${_secs}s")
   # #3625: AFFIRMATIVE, not `!= FAIL`. Only PASS and SKIP are non-failing; VACUOUS, an
   # unrecognised token and an empty/truncated result file all fail the run.
@@ -23432,6 +24757,11 @@ for i in "${!NAMES[@]}"; do
   SUMMARY_META+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
   _SUMMARY_ROWS_BUILT=1   # #3402/job 74: EXPLICIT, never inferred from rendered text
 done
+# #3800: the disk-exhaustion ATTRIBUTION line -- names an environmental ENOSPC cause in the
+# ONE artifact agents retain. It NEVER changes OVERALL/RESULT (append-only to SUMMARY_META).
+_de_pairs=()
+for _de_i in "${!NAMES[@]}"; do _de_pairs+=("${NAMES[$_de_i]}" "${STATUSES[$_de_i]}"); done
+SUMMARY_META+=("$(_disk_exhaustion_line ${_de_pairs[@]+"${_de_pairs[@]}"})")
 # #1465: node-bindings' leak lane is skippable under the #2078 opt-out, so the block states
 # which of RAN / SKIPPED / NOT-RUN happened. Absent file = the component was not selected,
 # which the component table above already shows.

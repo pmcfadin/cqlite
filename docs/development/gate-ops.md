@@ -232,11 +232,132 @@ mode (both path seams mandatory, no production fallback).
 
 ## Disk hygiene for multi-worktree gates (issue #1848)
 
-Each active worktree owns its own ~25–30GB `target/` dir. Several concurrent
-worktrees can exhaust the disk mid-gate (a confusing hard failure). `flow-finalize`
-removes a finished issue's worktree; additionally prune stale worktrees' `target/`
-dirs and size the shared cache with `SCCACHE_CACHE_SIZE` (recommend `30G` on the
-10-core machine).
+**A full gate's `target/` dir is ~100–145GB per active worktree, NOT the ~25–30GB
+this section claimed until #3800.** That figure was 4–5x low and is exactly what made
+current fleet capacity look adequate. Measured, twice, on two different boxes:
+
+- **#3800, `ip-172-31-1-216`** (295G `/data`): `lane-3634/target` at **101G mid-full-gate,
+  peaking at 143G**, with two other active lanes at **68G** and **57G** — **0 bytes free**
+  at the failure.
+- **2026-09-01, `ip-172-31-6-169`** (independent corroboration): `lane-3731/target` at
+  **108G**, alongside a 15G `/data/sccache`. Broken down, that one lane is `debug` **89G** plus
+  `agent-gate-side` **20G**.
+- **#3724, `box7`, 2026-09-01 — a COLD gate that COMPLETED**: `target/` grew to **102G**
+  mid-run and **peaked at 105G** at completion. Quote this one for a cold single lane; the
+  101–143G figures above are warm trees carrying earlier runs' profiles.
+
+**AND ONLY A RUN THAT COMPLETES THE BUILD CAN MEASURE THE BUILD (#3724, lead measurement).**
+An **~80G** figure circulated before this and was wrong for a reason worth naming: every run it
+came from **died before finishing the build**, so it measured how far cargo got, not what a full
+gate needs. A peak read off an aborted or ENOSPC-killed run is a **lower bound on the lower
+bound** — the failure truncates exactly the components that were about to allocate most. Never
+quote a disk peak from a run with no terminal `RESULT: PASS|FAIL`.
+
+**Corollary for capacity, which is the ruling's input and not a ruling:** at ~102G per cold
+gate a 295G volume supports **two lanes gating serially with reserve — not four lanes with
+independent trees**. What the slot cap should actually COUNT is #3434/#3763/#3755 under one
+owner design ruling, deliberately not this section.
+
+**The longest component is `tooling-tests`, and its measured figure has been understated three
+times running: ~850s → 2073s (#3473 gate of record #4) → 2417s / 40.3 min (#3724, 2026-09-01).**
+That matters here because a lane sizing a disk-pressure window — or deciding a `STALLED` gate is
+dead — off the longest component must derive the bound **from the component table in its own
+SUMMARY**, never from a figure in prose like this one. Three successive corrections are the
+evidence that prose figure will be low again.
+
+**What moved it:** the feature-matrix lanes. `feature-iso-parquet`, `feature-iso-delta-scan`,
+`legacy-heuristics`, `all-features-check` and the `--all-features` clippy matrix each compile
+a **distinct feature profile**, and cargo never evicts a stale profile's artifacts — so the
+per-worktree peak grew with the component set while this paragraph did not. A **second,
+separately-named mechanism** rides on top and the breakdown above measures it directly: #2657's
+2-lane split gives every SIDE-lane component its **own isolated `CARGO_TARGET_DIR`** under
+`target/agent-gate-side`, deliberately, to stop it thrashing MAIN's shared dir. That is a whole
+extra profile tree per worktree — 20G of the 108G above — so widening the SIDE lane raises the
+disk peak even when no new feature is compiled.
+
+**The consequence to plan around:** three concurrent full gates need roughly **430G** of
+`target/` on a **295G** disk. They do not fit. `flow-finalize` removes a finished issue's
+worktree; additionally prune stale worktrees' `target/` dirs and size the shared cache with
+`SCCACHE_CACHE_SIZE` (recommend `30G` on the 10-core machine).
+
+**When it happens anyway, the SUMMARY now says so (#3800).** ENOSPC used to surface as a
+bare `minimal-build: FAIL (611s)` beside 36/37 PASS and `tree-integrity: PASS` — and since
+doctrine retains ONLY the SUMMARY and forbids reading `gate.log`, the reader debugged a
+minimal-features build that was never broken. Every SUMMARY block **that carries a component
+table**, plus the three FULL-gate pre-flight blocks — 10 of the script's 25 emit sites — now carries a `disk-exhaustion:` line naming a
+recognised signature, the component and the log line, plus a start→emit free-space delta; see
+the gate section of `CLAUDE.md` for its closed value set. (The pre-flight blocks were exempt
+until #3800/job 358, on the stated ground that no component had run — false, because
+`run_file_size` executes before them, so a file-size that died of ENOSPC was named nowhere.) The other 15, emitted before any
+component runs (the pre-flight FAIL-CLOSED blocks, the `--delta` usage errors and
+refused-before-execution blocks, the self-test hooks), are **declared exempt at the site** and
+already name their own cause. It is an **attribution, never a verdict**: it never changes
+`RESULT`, and a matched signature is evidence about the host, not proof the diff is innocent.
+
+**Read `tree-integrity: FAIL (tree-capture-failed; …)` as a possible ENOSPC too.** That reason
+string is a **fixed constant** — `tree-capture-failed; the tree cannot be proven unchanged` —
+and it is stamped whenever `_tree_identity` cannot write or validate its capture manifest, which
+is written into `$LOG_DIR`. A full logs filesystem therefore produces a verdict that reads as a
+git/worktree problem and **can never name disk**. That is why the #2926 component-BOUNDARY FAIL
+block (the 7th table-bearing site) carries the attribution, having been wrongly exempted for a
+round on the grounds that "its cause is already named". It is the one MID-RUN emit, so both
+halves of its line declare a partial window (`start->boundary, MID-RUN PARTIAL WINDOW`, and
+`SUBJECT SET ALSO PARTIAL` — only the components recorded by that boundary are scanned).
+
+**Marking that block was not the same as covering it (roborev job 301) — the lesson to carry:
+adding a marker to a block does NOT make the block's CAUSE observable to that marker.** The
+scan's subject set was *non-PASS component logs*. On the tree-capture ENOSPC path
+`_tree_identity` fails independently of any component, its write-error text reaches **no**
+component log, and the components are typically **still PASS** — so the block would have
+emitted an affirmative `0 RECOGNISED` on precisely the path the line was added for. When you
+extend a diagnostic to a new failure path, ask what the SUBJECT SET is **on that path** and
+whether the evidence can physically land in it. The fix gives the scan a **second kind of
+subject**: the capture's own stderr, carried back on `_tree_identity`'s rc-2 channel and held
+**in memory** (never a spill file — under ENOSPC that is what cannot be written), scanned by
+the same closed signature set through the same loop and counted in the same census. So on a
+logs-filesystem ENOSPC the block now reads `RECOGNISED … in IN-MEMORY subject 'tree-identity
+manifest write (…)'` even though every component PASSed. A capture whose text was not recorded
+reads `UNMEASURED` naming that — never clean.
+
+**A THIRD subject kind, then a DECLARED boundary (roborev job 304).** `record_result` writes
+`$LOG_DIR/<component>.result`; under ENOSPC that write fails, its error text goes to gate
+**stderr** — neither a component log nor an in-memory subject — and the parent's fail-closed
+guard then synthesises `FAIL 0` for a component whose own log is CLEAN. Both channels empty ⇒
+the same false `0 RECOGNISED`, one writer over. Three consecutive rounds each found a
+*different* unwatched writer, so rather than carve a fourth time the scan now takes a **third
+kind of subject** — a `.result` verdict the gate could not READ, whether absent, unreadable or
+**malformed** — and the emitted `scan:` field **declares its SUBJECT set** the way it already
+declared its signature set, naming the gate-internal writers known to sit outside it:
+`NON-EXHAUSTIVE by construction ON BOTH AXES`. **When a diagnostic's subject set has been
+extended three times, publish the boundary** — a marker that names its own blind spots is worth
+more than one implying a completeness it does not have.
+
+**And marking a subject UNMEASURED is not DISPOSING of it (roborev job 316).** That third kind
+was wired to the marker and not to the **verdict**: the aggregation loops keyed `OVERALL=FAIL`
+on the status token being exactly `FAIL`, so an unreadable `.result` was reported UNMEASURED by
+the line while the run still emitted `RESULT: PASS` — a certified gate over a component whose
+verdict was never read. An unread verdict now becomes a synthetic `FAIL 0` and fails the run,
+because **a component whose verdict cannot be read may have succeeded, and a gate may not
+certify a maybe**. That is not a breach of "an attribution, never a verdict": what fails the run
+is the aggregation's handling of a file it could not read, which would be correct if this line
+did not exist.
+
+**And the SIDE lane's escalation channel was itself on the full filesystem (roborev job 319).**
+A SIDE-lane component that detects a tree-capture failure escalates by appending to a marker file
+under `$LOG_DIR` — on the same filesystem that just filled — and that append was `|| true`, while
+its in-memory note dies at the subshell boundary and its own `.result` is a complete, well-formed
+`PASS` written before the disk filled. If space freed before the terminal capture, the run
+certified. The escalation now needs no disk: the SIDE branch **truncates its own verdict**, which
+allocates nothing, and an empty `.result` is already an unread verdict — synthetic `FAIL 0`,
+`OVERALL=FAIL`, named UNMEASURED. Two rules came out of it that generalise past this script: **a
+stated coverage is worse than a declared gap** (a comment claimed this path was covered by the
+third subject kind, and it was not), and **when the failure you are reporting is "the disk is
+full", every channel in the report path must be checked for needing disk.**
+
+**This is a diagnostic, not the fix.** Nothing here makes the slot cap disk-aware, refuses or
+queues a gate on low free space, budgets disk per lane, or shares one `CARGO_TARGET_DIR` per
+box. That capacity-management work is tracked under **#3434 / #3763 / #3755** — do not read
+this section as solved.
 
 **A single `--lite` round can be the thing that exhausts the disk.** Measured by
 another lane and reported in issue #3764: one `--lite` on a `cqlite-core/src/` diff
