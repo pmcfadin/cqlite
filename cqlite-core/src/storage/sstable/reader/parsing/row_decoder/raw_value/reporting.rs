@@ -548,8 +548,10 @@ impl V5CompressedLegacyParser {
     /// `deserialize()` rather than `validate()` governs a read path, is
     /// `docs/round-artifacts/issue-3847-cassandra-oracle.md` (pinned
     /// `cassandra-5.0.8`), restated in
-    /// [`super::fixed_width`] — which is also the ONE place the width rule now
-    /// lives, shared with `udt.rs`'s two scalar field decoders.
+    /// [`super::fixed_width`] — this path's table for that rule. Note it is ONE OF
+    /// TWO in the repository: the typed/UDT path answers the same question from
+    /// `typed_value/scalar_rules.rs::empty_is_a_value` since #3631. See that
+    /// module's SCOPE note; nothing enforces the two staying in agreement.
     ///
     /// Relaxing this guard ALONE would be a defect and not the fix: the arm would
     /// then index `data[0]` on an empty slice, and would report `n` consumed

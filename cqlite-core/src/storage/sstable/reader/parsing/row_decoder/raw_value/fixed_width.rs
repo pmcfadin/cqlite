@@ -1,5 +1,32 @@
-//! Issue #3847 — the ONE place that says which byte widths a fixed-width CQL
-//! scalar admits on the READ path, and what an EMPTY buffer means there.
+//! Issue #3847 — which byte widths a fixed-width CQL scalar admits on the
+//! `raw_value` READ path, and what an EMPTY buffer means there.
+//!
+//! # SCOPE: this is ONE OF TWO independent tables. It is NOT the only one.
+//!
+//! An earlier revision of this header called it "the ONE place" and said the UDT
+//! field decoders were reconciled TO it. **That was true of this branch before it
+//! merged `origin/main`, and it is false now** (roborev job 149). #3631/PR#3820
+//! moved the UDT field decoders to `row_decoder/typed_value.rs`, which answers the
+//! same question from its OWN table:
+//! `typed_value/scalar_rules.rs::empty_is_a_value`. So the repository currently has
+//! **two independent answers** to "what does an empty buffer mean for this type":
+//!
+//! | path | authority |
+//! |---|---|
+//! | `parse_value_from_raw_bytes` (`raw_value/reporting.rs`) | THIS module |
+//! | typed / UDT field decode (`typed_value.rs`) | `typed_value/scalar_rules.rs::empty_is_a_value` |
+//!
+//! **The drift risk is therefore REAL and NOT prevented by this module** — stating
+//! that plainly, because the previous wording advertised a guarantee that no longer
+//! exists, and a false claim of drift-prevention is worse than an acknowledged gap:
+//! it tells the next reader to stop looking. The two agree TODAY on the shape that
+//! matters (empty ⇒ null at consumed `0` for the fixed-width family); nothing
+//! enforces that they keep agreeing.
+//!
+//! Unifying them is deliberately NOT done here. It would mean editing
+//! `typed_value/` — code #3631 landed hours ago — under an issue whose subject is
+//! the `raw_value` path, and #3847's corpus census measured only this path. It is
+//! proposed as a follow-up on the issue thread (`REQ-3847-04`).
 //!
 //! # The oracle, and why it is `deserialize()` and not `validate()`
 //!
@@ -65,10 +92,11 @@
 //!
 //! # Why this rule lives under `raw_value`
 //!
-//! It is shared by `raw_value/reporting.rs` (the `parse_value_from_raw_bytes`
-//! path, #3847's named subject) and by `udt.rs`'s two scalar field decoders,
-//! which this change reconciles TO it — one rule, one place, so the two families
-//! cannot drift into two opinions about a width again. It is a child of
+//! Its sole caller is `raw_value/reporting.rs` (the `parse_value_from_raw_bytes`
+//! path, #3847's named subject). It was ALSO used by this branch's own UDT field
+//! decoders until the `origin/main` merge; #3631 superseded those with
+//! `typed_value.rs`, so the UDT half is no longer this module's business — see the
+//! SCOPE note at the top. It is a child of
 //! `raw_value` rather than a sibling registered in `mod.rs` because `mod.rs` is
 //! over the campsite file-size ratchet ceiling and cannot take a new line
 //! (epic #1116).

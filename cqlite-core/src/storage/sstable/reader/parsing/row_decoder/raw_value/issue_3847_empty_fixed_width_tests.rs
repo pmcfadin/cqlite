@@ -216,15 +216,18 @@ fn an_empty_duration_is_still_refused_declared_residual_of_3847() {
 // ---------------------------------------------------------------------------
 // roborev job 96 (Low): the FOURTH and FIFTH framing sites.
 //
-// The three tests in `udt/issue_3847_empty_fixed_width_tests.rs` drive
-// `parse_udt_value`, `parse_nested_udt_from_registry` and
-// `parse_inline_udt_value` DIRECTLY. `raw_type_value.rs` has two more
-// zero-length branches, reachable only THROUGH `parse_value_from_raw_bytes`,
-// and they use DIFFERENT routing helpers — the marshal/inline arm calls
-// `create_empty_value_for_type` while the registry arm calls
-// `parse_simple_udt_field_value(&[], …)`. Two helpers, so two ways to diverge,
-// which is exactly how rounds 1 and 2 of this review found real defects. Kept
-// end-to-end rather than helper-level on the wiring-evidence rule: green
+// NOTE (roborev job 149): this block once also cited three sibling tests in
+// `udt/issue_3847_empty_fixed_width_tests.rs`. That file is GONE — #3631/PR#3820
+// superseded this branch's UDT field decoders with `row_decoder/typed_value.rs`,
+// and the tests went with the code they pinned. Left as a pointer rather than
+// deleted, because the REASON these two cases exist is unchanged.
+//
+// `raw_type_value.rs` has two zero-length branches reachable only THROUGH
+// `parse_value_from_raw_bytes`, and they use DIFFERENT routing helpers — the
+// marshal/inline arm calls `create_empty_value_for_type` while the registry arm
+// calls a field decoder with an explicit `&[]`. Two helpers, so two ways to
+// diverge, which is exactly how rounds 1 and 2 of this review found real defects.
+// Kept end-to-end rather than helper-level on the wiring-evidence rule: green
 // helper-only unit tests are not sufficient.
 // ---------------------------------------------------------------------------
 
@@ -300,18 +303,24 @@ fn a_zero_length_field_of_a_registry_resolved_udt_decodes_to_null() {
 // ---------------------------------------------------------------------------
 // roborev job 97 (Medium): the tests above were INVARIANT TO THE REAL DEFECT.
 //
-// They build `CqlType::SmallInt` / `CqlType::TinyInt` by hand. Production does
-// not: a marshal-form UDT field arrives as a STRING and
-// `udt.rs::parse_cassandra_type_with_depth` resolves it, and that resolver had no
-// `ShortType` / `ByteType` / `CounterColumnType` arm — so those fields became
-// `CqlType::Custom("…ShortType")`, `fixed_width::width_of` answered `None`, the
-// #3847 empty rule never fired, and a zero-length `smallint` field still decoded
-// to an EMPTY BLOB on the only path a real SSTable takes.
+// They built `CqlType::SmallInt` / `CqlType::TinyInt` by hand. Production does
+// not: a marshal-form UDT field arrives as a STRING and a resolver maps it, and
+// that resolver had no `ShortType` / `ByteType` / `CounterColumnType` arm — so
+// those fields became `CqlType::Custom("…ShortType")`, this issue's empty rule
+// never fired, and a zero-length `smallint` field still decoded to an EMPTY BLOB
+// on the only path a real SSTable takes.
 //
 // This is #3042's blind-spot class inside this issue's own test suite: a test that
 // cannot fail for the defect it exists to pin. The cases below therefore drive the
-// MARSHAL STRING, never a hand-built `CqlType`, and one of them asserts the
-// resolver directly so the two halves cannot drift apart again.
+// MARSHAL STRING, never a hand-built `CqlType`.
+//
+// UPDATE (roborev job 149): the RESOLVER half of that fix is now MAIN'S. #3631
+// rewrote the marshal-name table in `udt/type_string.rs` as an EXACT match on the
+// simple name — superseding the six `ends_with` arms this branch had added, and
+// additionally fixing `TimeUUIDType` -> TimeUuid and `DateType` -> Timestamp. The
+// companion assertion that compared the two resolvers is removed with the arms it
+// guarded; `parse_cassandra_type` is private on main. What remains below is the
+// end-to-end case, which is the part that pins THIS path.
 // ---------------------------------------------------------------------------
 
 /// `nums(s smallint, t tinyint)` in MARSHAL form — the production spelling.
