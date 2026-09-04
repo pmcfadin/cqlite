@@ -20034,7 +20034,7 @@ run_scoped_tests() {
     # scoped-tests line with no census record at all.
     status=$(_census_finalize "$name" "$status")
     NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
-    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    echo ">>> [$name] $status ($((end - start))s)"
     return
   fi
 
