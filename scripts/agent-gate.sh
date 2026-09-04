@@ -264,6 +264,38 @@
 #                      opt-out. Source-only: no cargo, sub-second, offline, no
 #                      datasets.
 #                      SKIP-aware (loud): SKIPs only when cqlite-core is absent.
+#   dep-duplicates     ADVISORY DUPLICATE-DEPENDENCY RATCHET
+#                      (scripts/ci/check-dep-duplicates.sh, issue #1700 AH7).
+#                      Measures `cargo tree -d --workspace --target all` — the
+#                      audit's own invocation; the BARE `cargo tree -d` reads the
+#                      ROOT PACKAGE only and reports a small fraction of it, and
+#                      without `--target all` cargo measures the HOST target, so a
+#                      COMMITTED baseline would mean different things on a Linux
+#                      lane and a macOS one — and compares the
+#                      duplicate-instance / duplicated-crate counts against the
+#                      committed baseline scripts/ci/dep-duplicates-baseline.txt
+#                      (a generated file; one documented regeneration command,
+#                      `bash scripts/ci/check-dep-duplicates.sh --regenerate`).
+#                      ADVISORY BY MANDATE (#1700 AC2): an INCREASE is recorded PASS
+#                      and never fails the gate — a legitimate new dependency can add
+#                      a duplicate no local decision can collapse, and a lane that
+#                      reds on correct input is the lane agents learn to waive — but
+#                      it prints a LOUD, textually distinct ADVISORY-INCREASE block
+#                      naming the delta AND the crates that grew / became newly
+#                      duplicated. Never a bare number, in either direction: a clean
+#                      result prints `0 INCREASE RECOGNISED`.
+#                      …and never a VACUOUS pass: THREE states, not two. A run that
+#                      could not MEASURE (no cargo, `cargo tree` non-zero, a bounded
+#                      timeout, output the parser does not recognise) or could not
+#                      read the BASELINE (missing/garbage) is a SKIP NAMING THE CAUSE,
+#                      never a PASS — a pass may not rest on an unmeasured state.
+#                      "cargo tree printed nothing" (a legitimate zero) is kept
+#                      distinct from "printed something unparseable". Colour-immune
+#                      (#3400): parses an ANSI-stripped copy by redirection, never a
+#                      pipe. No datasets, no network, no build — a metadata probe.
+#                      This component emits no FAIL at all, by design; its own
+#                      self-test (which DOES fail on a broken guard) is in
+#                      tooling-tests.
 #   tooling-tests      shell-tooling regression tests (fast, no datasets/network):
 #                      scripts/tests/test_workspace_test_disposition.sh (+ its
 #                      self-test): the PACKAGE-granular #3522 census — every cargo
@@ -6171,7 +6203,7 @@ _python_build_verify_venv() {
   return 3
 }
 
-COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan python-bindings node-bindings binding-rust-tests delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface tooling-tests minimal-build all-features-check smoke)
+COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan python-bindings node-bindings binding-rust-tests delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface dep-duplicates tooling-tests minimal-build all-features-check smoke)
 
 # _component_lane <name> (issues #1737, #2657): SINGLE SOURCE OF TRUTH for the
 # MAIN-vs-SIDE lane split. Defined early (before the arg-parse dispatch) so the
@@ -7667,6 +7699,19 @@ _fm_component_class() {
     # cargo argv passes through this shell. Naming the DRIVER is structural (it is the
     # command the component runs); the feature set is NOT claimed.
     python-bindings) printf 'indirect:maturin' ;;
+    # dep-duplicates: `cargo tree -d --workspace --target all` runs inside
+    # scripts/ci/check-dep-duplicates.sh — a CHILD PROCESS — and the interceptors above
+    # are deliberately unexported, so class `cargo` would be an unexercisable claim of
+    # observability (the roborev job 273 F2 defect) and would render UNDECLARED. There IS
+    # one nameable driver whose reach is recordable from an EXPLICIT signal (the guard
+    # prints `dep-duplicates: probe cargo tree -d --workspace --target all INVOKED
+    # (rc N)` before any
+    # verdict, and run_dep_duplicates records reach from THAT line, never from the
+    # terminal status), so this is `indirect:`, not `unobservable:`. The driver text names
+    # the probe AND that it compiles nothing, because `cargo tree` is a metadata query:
+    # _fm_describe_cargo rejects such invocations by design, so there is no feature set
+    # anybody could have observed here even in the gate's own shell.
+    dep-duplicates)  printf 'indirect:check-dep-duplicates.sh (cargo tree -d --workspace --target all; a metadata probe, compiles nothing)' ;;
     node-bindings)   printf 'indirect:npm run build (napi)' ;;
     fmt|clippy|core-tests|tombstones-scan|scan-offload-guard|work-counters-guard) printf 'cargo' ;;
     byte-budget-guard|arrow-parity-guard|memory-budget|integration-tests) printf 'cargo' ;;
@@ -8294,7 +8339,7 @@ _census_kind() {
     # selected `.rs` file cannot be read — changes the RATCHET's failure semantics for every
     # diff, which is its own decision with its own risk of reddening correct input. Doing
     # `emitted` properly requires settling that first. Tracked in #3162.
-    file-size|pub-surface|roborev-lints|binding-unwind-profile|delivery-telemetry|tooling-tests)
+    file-size|pub-surface|roborev-lints|binding-unwind-profile|delivery-telemetry|tooling-tests|dep-duplicates)
                     printf 'gap:shell/python guard prints no AGENT-GATE-CENSUS contract line yet (#3162)' ;;
     *) return 1 ;;
   esac
@@ -17612,6 +17657,184 @@ run_pub_surface() {
   echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
+# dep-duplicates: the ADVISORY DUPLICATE-DEPENDENCY RATCHET (issue #1700 AH7).
+# scripts/ci/check-dep-duplicates.sh measures `cargo tree -d --workspace --target all`
+# and compares the duplicate-instance / duplicated-crate counts against the committed
+# baseline scripts/ci/dep-duplicates-baseline.txt. BOTH flags are load-bearing:
+# `--workspace` because the bare `cargo tree -d` reads the ROOT PACKAGE only (this
+# workspace HAS a root package, so cargo's default member set is that one package) and a
+# ratchet over the bare form would be blind to most of the subject; `--target all`
+# because `cargo tree` otherwise measures the HOST target, so the COMMITTED baseline
+# would mean a different thing on a Linux lane than on a macOS one and each would report
+# a phantom advisory delta against the other's numbers.
+#
+# THE PROBE IS RUN READ-ONLY (`--locked --offline`), AND THAT PROTECTS THIS GATE. Without
+# `--locked` cargo will UPDATE `Cargo.lock` whenever it decides the manifests need it —
+# a TRACKED file — and a component that rewrites one mid-run trips this gate's own
+# mid-run tree-mutation check (#2926, `tree-integrity: FAIL (tree-mutated-midrun; …)`).
+# That would be an ADVISORY component, which may never emit a FAIL, reddening the gate of
+# record from a mutation it caused itself. `--offline` removes the registry access. A
+# failure under either flag is UNMEASURABLE ⇒ SKIP naming the cause; the guard
+# deliberately does NOT retry without them, since that would restore the mutability
+# silently.
+#
+# THIS COMPONENT NEVER EMITS FAIL, and that is a mandate rather than an oversight
+# (#1700 AC2). An increase in duplication is a signal to a human: a legitimate new
+# dependency can add a duplicate that no local decision can collapse, `[patch]` and pins
+# that fight upstream ecosystems are explicitly out of scope, and a lane that reds on
+# correct input is the lane agents learn to waive. So an increase is recorded PASS with a
+# LOUD, textually distinct ADVISORY-INCREASE block echoed into the gate log, naming the
+# delta and the crates responsible.
+#
+# IT ALSO NEVER PASSES VACUOUSLY, which is the other half and the harder one. "Advisory"
+# is not a licence to green on nothing (CLAUDE.md: a positive verdict requires an
+# affirmative measurement), so PASS is keyed on THREE AFFIRMATIVE SIGNALS TOGETHER, never
+# on the absence of an error: the guard's `verdict NO-INCREASE|ADVISORY-INCREASE` line,
+# its `probe … INVOKED` line (cargo really ran) and its `MEASURED …` line (a census was
+# really published). The verdict ALONE is not enough — a stale log, a replayed or
+# hard-coded verdict line, or a guard that returned a verdict having measured nothing all
+# reach it, and keying on it alone once permitted the self-contradictory
+# `PASS [never reached …]`. Every other outcome is a SKIP NAMING THE CAUSE: the guard absent
+# from the checkout, no cargo on PATH, no `timeout(1)` accepting `-k` with which to BOUND
+# the probe (the guard then does not run it at all — an unbounded `cargo tree` could hang
+# this component with no verdict, and a missing capability must not inherit the permissive
+# branch), `cargo tree` non-zero or timed out, output the
+# parser does not recognise, a missing or ungrammatical baseline, an unexpected exit
+# status, a zero exit with NO verdict line (a guard that returned early measured
+# nothing, and that is a SKIP, not a pass), or a verdict unaccompanied by the probe or
+# the MEASURED line. A SKIP is visible in the SUMMARY and is not a
+# certification; the component's own self-test — which DOES fail, on all of those paths —
+# lives in tooling-tests.
+#
+# No datasets, no network, no build: `cargo tree` is a metadata probe. It is therefore
+# NOT in DATASET_COMPONENTS.
+run_dep_duplicates() {
+  local name=dep-duplicates
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local guard="scripts/ci/check-dep-duplicates.sh"
+  local log="$LOG_DIR/$name.log"
+  local start end status cause="" drv
+  start=$(date +%s)
+  # ONE SPELLING of the driver text, taken from the declaration site itself rather than
+  # retyped here, so the class-based rendering (empty sidecar) and the recorded reach can
+  # never read as two different states.
+  drv="$(_fm_component_class "$name" 2>/dev/null || printf 'indirect:%s' "$guard")"
+  drv="${drv#indirect:}"
+  if [ ! -f "$REPO_ROOT/$guard" ]; then
+    status=SKIP
+    echo ">>> [$name] SKIP (cause=guard-absent: $guard is not in this checkout, so nothing was measured)"
+    _fm_note_driver "$name" "$drv" not-reached "the guard script is absent from this checkout"
+    record_result "$name" "$status" 0
+    echo ">>> [$name] $RECORDED_STATUS (0s)"
+    return 0
+  fi
+  echo ">>> [$name] bash $guard"
+  local rc=0
+  bash "$REPO_ROOT/$guard" >"$log" 2>&1 || rc=$?
+
+  # ANSI-STRIPPED, READ BY REDIRECTION (#3400). The guard's own lines carry no escapes,
+  # but cargo's stderr shares this log and colour SURVIVES redirection to a file — and a
+  # parse routed through the shared idiom cannot rot into the one that is not.
+  local src verdict="" probe="" measured="" unmeas=""
+  src=$(_ansi_stripped_log "$log" 2>/dev/null) || src=""
+  if [ -n "$src" ] && [ -r "$src" ]; then
+    local line
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        'dep-duplicates: verdict '*)            [ -n "$verdict" ] || verdict="${line#dep-duplicates: verdict }" ;;
+        'dep-duplicates: probe '*' INVOKED '*)  [ -n "$probe" ] || probe="$line" ;;
+        'dep-duplicates: MEASURED '*)           [ -n "$measured" ] || measured="$line" ;;
+        'dep-duplicates: SKIP-UNMEASURABLE '*)  [ -n "$unmeas" ] || unmeas="${line#dep-duplicates: SKIP-UNMEASURABLE }" ;;
+        'dep-duplicates: SKIP-BASELINE-UNUSABLE '*) [ -n "$unmeas" ] || unmeas="${line#dep-duplicates: SKIP-BASELINE-UNUSABLE }" ;;
+      esac
+    done <"$src"
+  else
+    # A log we could not normalise is a log we did not read: say so rather than deriving a
+    # verdict from a file the parse failed on.
+    unmeas="cause=log-unreadable detail=could not normalise $log for parsing"
+    rc=99
+  fi
+
+  # THE DRIVER'S REACH, from an EXPLICIT SIGNAL (#3453, roborev job 273 F3): the guard
+  # prints `probe <cmd> INVOKED (rc N)` immediately after invoking cargo, before any
+  # verdict. Reach is read from THAT line and never inferred from the terminal status —
+  # the guard can exit 3 having never reached cargo at all (cargo absent), and claiming
+  # an invocation that did not happen is exactly the defect this recording exists to fix.
+  if [ -n "$probe" ]; then
+    _fm_note_driver "$name" "$drv" reached
+  else
+    _fm_note_driver "$name" "$drv" not-reached "no 'probe … INVOKED' line in $log"
+  fi
+
+  case "$rc" in
+    0)
+      case "$verdict" in
+        NO-INCREASE*|ADVISORY-INCREASE*)
+          # A VERDICT IS NOT A MEASUREMENT (roborev round 3, #1700). PASS requires the
+          # verdict AND BOTH affirmative signals that a census was actually taken: the
+          # guard's `probe … INVOKED` line (cargo really ran) and its `MEASURED …` line
+          # (a census was really published). Keying PASS on the verdict alone permitted
+          # the self-contradictory `PASS [never reached …]` — this component certifying a
+          # duplicate census beside its own record that cargo was never invoked — and let
+          # a stale, replayed or hard-coded verdict line manufacture exactly the vacuous
+          # pass the component exists to prevent. Absent either signal it is a SKIP naming
+          # WHICH one was missing; this component may never FAIL, so SKIP is how it says
+          # "nothing was measured".
+          if [ -z "$probe" ]; then
+            status=SKIP
+            cause="cause=verdict-without-probe detail=$guard printed 'verdict $verdict' but NO 'probe … INVOKED' line, so no cargo invocation is evidenced and the verdict rests on nothing measured here"
+          elif [ -z "$measured" ]; then
+            status=SKIP
+            cause="cause=verdict-without-measurement detail=$guard printed 'verdict $verdict' but NO 'MEASURED …' line, so no duplicate census was published for that verdict to be about"
+          else
+            status=PASS
+            # Echo the guard's OWN statements so a pasted gate log shows the ratchet RAN
+            # over real numbers, and so an increase is loud where a human will see it.
+            local l
+            while IFS= read -r l || [ -n "$l" ]; do
+              case "$l" in
+                'dep-duplicates: 0 INCREASE RECOGNISED'*|'dep-duplicates: ADVISORY-INCREASE'*|'dep-duplicates: RATCHET-LOOSE'*|'dep-duplicates: MEASURED '*|'dep-duplicates: verdict '*) echo "$l" ;;
+              esac
+            done <"$src"
+          fi
+          ;;
+        *)
+          # Exit 0 with no verdict: the guard returned early, so NOTHING was compared.
+          # A pass may not rest on an unmeasured state, and this component may not FAIL —
+          # so it is a SKIP that names exactly that.
+          status=SKIP
+          cause="guard-exited-0-without-a-verdict"
+          ;;
+      esac
+      ;;
+    3|4)
+      status=SKIP
+      cause="${unmeas:-cause=unnamed detail=the guard exited $rc without naming a cause}"
+      ;;
+    *)
+      status=SKIP
+      cause="cause=unexpected-rc detail=$guard exited $rc"
+      [ -n "$unmeas" ] && cause="$unmeas"
+      ;;
+  esac
+  if [ "$status" = SKIP ]; then
+    echo ">>> [$name] SKIP ($cause)"
+    echo "    ADVISORY component (#1700): a SKIP here is NOT a pass and NOT a failure — it"
+    echo "    records that no duplicate-count comparison was made. Remedy depends on the"
+    echo "    cause above (install cargo / fix the lockfile / restore or regenerate"
+    echo "    scripts/ci/dep-duplicates-baseline.txt with"
+    echo "    \`bash scripts/ci/check-dep-duplicates.sh --regenerate\`)."
+    echo "--- last 40 lines of $log ---"
+    tail -40 "$log" 2>/dev/null || true
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+}
+
 # tooling-tests: fast shell-tooling regression tests that have no Rust target and
 # no dataset/network needs. Currently scripts/tests/test_agent_gate_summary.sh,
 # which verifies the SUMMARY block survives non-foreground capture (#1175), and
@@ -17714,6 +17937,16 @@ run_pub_surface() {
 # two defects landed inside the two prior fix rounds — the #3229 `census-exclusion:` precedent),
 # so this file measures BEHAVIOUR against real code and nothing here depends on it; mechanization
 # is #3499. Hermetic: temp dir only, no cargo, no datasets, no network, never invokes the gate.
+# Also runs scripts/tests/test_dep_duplicates_ratchet.sh (#1700), the non-vacuity proof
+# for the ADVISORY dep-duplicates component: its cases drive
+# scripts/ci/check-dep-duplicates.sh over PLANTED cargo-tree output (shim `cargo` +
+# scratch copy of the guard, no test seam) and assert the emitted TOKENS, and its G1/G2
+# cases substitute a stub guard in a detached worktree to prove the COMPONENT records PASS
+# for BOTH affirmative verdicts and SKIP — never PASS — when nothing was measured. Its ONE
+# live case accepts either affirmative verdict and reports an unmeasurable host as SKIPPED,
+# deliberately: this suite runs HERE, so a suite that red on a legitimate ADVISORY-INCREASE
+# would fail the full gate and defeat the component's advisory contract. It carries its own
+# case FLOOR. Offline; SKIP-aware where cargo or `git worktree` is unavailable.
 # Also runs scripts/tests/test_agent_gate_disk_exhaustion.sh (#3800), the pin for the
 # `disk-exhaustion:` SUMMARY marker. A full gate died of ENOSPC and the ONE artifact agents
 # retain said `minimal-build: FAIL (611s)` beside 36/37 PASS and `tree-integrity: PASS`, so
@@ -19262,7 +19495,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -19289,6 +19522,35 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_pub_surface_guard.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (pub-surface guard self-test #1712); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # dep-duplicates ratchet self-test (#1700). Proves the ADVISORY guard actually FIRES,
+  # which for an always-non-failing guard is the harder property: its cases drive
+  # scripts/ci/check-dep-duplicates.sh over PLANTED cargo-tree output (a shim `cargo` on
+  # PATH and a scratch copy of the guard — there is no test seam) and assert the emitted
+  # TOKENS, not exit statuses: NO-INCREASE / ADVISORY-INCREASE naming who grew /
+  # RATCHET-LOOSE / colour-immunity with a positive control that the fixture really carries
+  # escapes / an empty-but-legitimate ZERO kept distinct from an unparseable read / every
+  # UNMEASURABLE and baseline-garbage refusal / the --regenerate round trip / a MIXED delta
+  # where one metric grows while the other shrinks. Its G1/G2 cases substitute a stub guard
+  # in a detached scratch worktree and assert the GATE COMPONENT records PASS for a clean
+  # measurement AND for an ADVISORY-INCREASE (naming the crates), and SKIP — never PASS —
+  # for an unmeasurable exit, a zero exit with no verdict line, and an unexpected status:
+  # the vacuous-pass guard for the one component that may never FAIL. Its ONE live case (G3)
+  # accepts either affirmative verdict and reports an unmeasurable host SKIPPED, so this
+  # component cannot red on correct input. Cheap and offline (the only cargo is a warm metadata probe); it
+  # SKIPs its live/gate cases where cargo or `git worktree` is unavailable. A failure FAILs
+  # the component, mirroring the guards above.
+  echo ">>> [$name] bash scripts/tests/test_dep_duplicates_ratchet.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_dep_duplicates_ratchet.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (dep-duplicates ratchet self-test #1700); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
@@ -19539,7 +19801,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -23376,6 +23638,7 @@ dispatch_component() {
     kit-dashboard-drift) run_kit_dashboard_drift ;;
     binding-unwind-profile) run_component binding-unwind-profile bash "$REPO_ROOT/scripts/tests/test_binding_unwind_profile.sh" ;;
     pub-surface) run_pub_surface ;;
+    dep-duplicates) run_dep_duplicates ;;
     tooling-tests) run_tooling_tests ;;
     minimal-build)
       # #3453: the minimal lane's DEFINING property is --no-default-features, so the
