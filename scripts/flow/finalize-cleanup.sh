@@ -45,8 +45,11 @@
 #   3  refused: target worktree is dirty / has unpushed commits
 #   4  refused: target branch tip not contained in main (use --confirm-unmerged)
 #   5  refused: remote query (ls-remote) failed — fail closed, changed nothing
-#   6  refused: the lane lock holds a DIFFERENT incarnation than --lane-lease named
-#      (#3436) — a live peer may be in that lane, so nothing is released or removed
+#   6  refused: the lane lock's incarnation is not the one being finalized (#3436). TWO
+#      causes, both meaning a live peer may be in that lane, and in both nothing is released
+#      and the worktree is NOT removed:
+#        - Guard 5: the on-disk lease differs from --lane-lease (detected before any mutation)
+#        - the release itself failed: the incarnation changed between Guard 5 and the release
 #   64 usage error
 #
 # ---END-HELP---
@@ -305,7 +308,10 @@ fi
 LANE_LOCK_SH="$(dirname -- "$0")/lane-lock.sh"
 LANE_LEASE_TO_RELEASE=""
 LANE_LEASE_BASIS=""
-if [ -x "$LANE_LOCK_SH" ] || [ -r "$LANE_LOCK_SH" ]; then
+# `-r`, not `-x || -r`: this invokes `bash "$LANE_LOCK_SH"`, which READS the file — the execute
+# bit is irrelevant and an OR admits an executable-but-unreadable script that bash then cannot
+# run, turning a declared skip into a confusing failure.
+if [ -r "$LANE_LOCK_SH" ]; then
   lane_probe="$(bash "$LANE_LOCK_SH" probe "$ISSUE" 2>/dev/null || true)"
   lane_cur="$(printf '%s' "$lane_probe" | tr ' ' '\n' | sed -n 's/^lease=//p' | head -1)"
   if [ -n "$lane_cur" ]; then
