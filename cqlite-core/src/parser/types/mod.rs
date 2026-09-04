@@ -397,15 +397,10 @@ pub fn serialize_cql_value(value: &Value) -> Result<Vec<u8>> {
             result.push(CqlTypeId::Uuid as u8);
             result.extend_from_slice(uuid);
         }
-        // EMPTY-BUFFER SENTINEL (issue #3805): the declared type's id followed
-        // by ZERO payload bytes. Every family this tag admits is either
-        // fixed-width (so, exactly like the `Integer`/`BigInt`/`Uuid` arms
-        // above, no length is written) or self-delimiting, and the payload of
-        // the empty buffer is nothing at all — so the round trip is
-        // byte-exact: type byte in, type byte out, zero value bytes either way.
-        Value::Empty(ty) => {
-            result.push(map_empty_value_type_to_cql_type(*ty) as u8);
-        }
+        // EMPTY-BUFFER SENTINEL (issue #3805): REFUSED, never encoded.
+        // See `refuse_empty_sentinel` for why this format has no
+        // representation that reads back as the sentinel.
+        Value::Empty(ty) => return Err(refuse_empty_sentinel(*ty)),
         Value::Json(json) => {
             // Store JSON as text
             let json_str = json.to_string();
@@ -663,17 +658,49 @@ fn serialize_value_without_type_prefix(value: &Value) -> Result<Vec<u8>> {
         Value::Inet(bytes) => Ok(bytes.to_vec()),
         Value::SmallInt(i) => Ok(i.to_be_bytes().to_vec()),
         Value::Float32(f) => Ok(f.to_be_bytes().to_vec()),
-        // EMPTY-BUFFER SENTINEL (issue #3805): the BARE serialized form is the
-        // empty buffer — zero bytes. Written explicitly rather than left to the
-        // strip-the-type-byte fallback below, so the byte-exactness is a stated
-        // property and not a consequence of slicing a 1-byte vector.
-        Value::Empty(_) => Ok(Vec::new()),
+        // EMPTY-BUFFER SENTINEL (issue #3805): REFUSED, never encoded. A
+        // collection element written as `len=0` is read back through
+        // `parse_cql_value_raw`, which (measured, all 12 admitted families)
+        // rejects a zero-length payload. See `refuse_empty_sentinel`.
+        Value::Empty(ty) => Err(refuse_empty_sentinel(*ty)),
         // For complex types, fall back to full serialization and strip type byte
         _ => {
             let full_bytes = serialize_cql_value(value)?;
             Ok(full_bytes[1..].to_vec()) // Skip the type byte
         }
     }
+}
+
+/// The error both serializers in this module return for the empty-buffer
+/// sentinel (issue #3805).
+///
+/// This format's wire shape is `[type byte][payload]`, and `[type byte]` with
+/// no payload does NOT read back as `Value::Empty(_)`. MEASURED against this
+/// module's own readers, over all 12 families the tag admits: BOTH
+/// [`parse_cql_value`] and [`parse_cql_value_raw`] return `Eof` for a
+/// zero-length payload — `inet` and `decimal`/`varint` included, since their
+/// arms here read a length or a scale first. So a bare type byte does not
+/// decode to a different `Value`; it does not decode at all, and an encoder
+/// emitting it would be writing bytes its own reader rejects. That is why this
+/// is an `Err` and not an encoding, and it is pinned rather than asserted by
+/// `cqlite-core/tests/issue_3805_empty_value_sentinel.rs`
+/// (`no_tagged_form_of_the_sentinel_reads_back_as_the_sentinel`).
+///
+/// Inventing a decodable TAGGED form for the sentinel instead would mean
+/// inventing an encoding no Cassandra authority defines, which the
+/// no-heuristics mandate forbids (issue #28); the sentinel's write-side
+/// representation is a declared fail-closed residual, issue #4072. The surface
+/// that CAN write it is the type-aware writer
+/// (`crate::storage::serialization::types`), where the declared column type
+/// supplies the framing this format lacks.
+fn refuse_empty_sentinel(ty: crate::types::EmptyValueType) -> Error {
+    Error::invalid_operation(format!(
+        "Value::Empty({}) cannot be serialized via the legacy tagged CQL value \
+         binary format: no byte string in this format reads back as the \
+         empty-buffer sentinel (issue #4072), and inventing one has no \
+         Cassandra oracle (issue #28)",
+        ty.cql_name()
+    ))
 }
 
 fn map_value_to_cql_type(value: &Value) -> CqlTypeId {
@@ -706,7 +733,8 @@ fn map_value_to_cql_type(value: &Value) -> CqlTypeId {
         Value::Decimal { .. } => CqlTypeId::Decimal,
         Value::Duration { .. } => CqlTypeId::Duration,
         // The sentinel reports its DECLARED type, not a synthetic one
-        // (issue #3805).
+        // (issue #3805). This is a TYPE-ID lookup, not an encoding: the value
+        // itself is refused by both serializers above.
         Value::Empty(ty) => map_empty_value_type_to_cql_type(*ty),
     }
 }

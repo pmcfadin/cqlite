@@ -362,18 +362,119 @@ fn the_type_aware_serializer_refuses_a_tag_column_mismatch() {
     );
 }
 
-/// The tagged `parser::types` framing writes the declared type's id and then
-/// ZERO payload bytes — exactly one byte total, the same shape the fixed-width
-/// arms use (they write no length either).
+/// REGRESSION, roborev job 448 finding A. The legacy tagged `parser::types`
+/// serializer used to emit the declared type's id and no payload for the
+/// sentinel, under a comment claiming a byte-exact round trip. The bytes were
+/// byte-exact and the VALUE was not: nothing in that format reads back as
+/// `Value::Empty(_)` (pinned by the next test), so it REFUSES instead of
+/// writing bytes its own reader cannot decode. Every admitted family, because
+/// a refusal that holds for `int` and not `varint` is not a refusal.
 #[test]
-fn the_tagged_serializer_writes_a_type_byte_and_no_payload() {
+fn the_tagged_serializer_refuses_the_sentinel_for_every_admitted_family() {
     for (ty, name, _) in admitted_families() {
-        let bytes = cqlite_core::parser::types::serialize_cql_value(&Value::Empty(ty))
-            .unwrap_or_else(|e| panic!("serializing Empty({name}) failed: {e}"));
-        assert_eq!(
-            bytes.len(),
-            1,
-            "Empty({name}) produced {bytes:?}; expected a lone type byte and no payload"
+        let err = cqlite_core::parser::types::serialize_cql_value(&Value::Empty(ty))
+            .expect_err(&format!(
+                "Empty({name}) was serialized by the legacy tagged format, which has \
+                 no representation that reads back as the sentinel"
+            ));
+        let msg = err.to_string();
+        for needle in ["4072", "28", name] {
+            assert!(
+                msg.contains(needle),
+                "the refusal of Empty({name}) must name {needle}; got: {msg}"
+            );
+        }
+    }
+}
+
+/// THE MEASUREMENT BEHIND THAT REFUSAL, pinned so the rationale cannot rot into
+/// the false claim it replaced. For every family the tag admits, the tagged
+/// form the old arm would have written is `[type byte]` with no payload — and
+/// BOTH of this module's readers reject a zero-length payload, so that byte
+/// string decodes to nothing at all, let alone to the sentinel.
+///
+/// If a future change makes any of these decode, this test reds and the
+/// serializer's refusal has to be re-argued rather than silently outlived.
+#[test]
+fn no_tagged_form_of_the_sentinel_reads_back_as_the_sentinel() {
+    use cqlite_core::parser::types::{parse_cql_value, parse_cql_value_raw, CqlTypeId};
+
+    // The wire type id this format uses for each family, declared here rather
+    // than read out of the (private) mapping the serializer used, so the test
+    // carries its own oracle.
+    let wire_ids: Vec<(EmptyValueType, &str, CqlTypeId)> = vec![
+        (EmptyValueType::Int, "int", CqlTypeId::Int),
+        (EmptyValueType::BigInt, "bigint", CqlTypeId::BigInt),
+        (EmptyValueType::Counter, "counter", CqlTypeId::Counter),
+        (EmptyValueType::Float, "float", CqlTypeId::Float),
+        (EmptyValueType::Double, "double", CqlTypeId::Double),
+        (EmptyValueType::Timestamp, "timestamp", CqlTypeId::Timestamp),
+        (EmptyValueType::Uuid, "uuid", CqlTypeId::Uuid),
+        (EmptyValueType::TimeUuid, "timeuuid", CqlTypeId::Timeuuid),
+        (EmptyValueType::Boolean, "boolean", CqlTypeId::Boolean),
+        (EmptyValueType::Inet, "inet", CqlTypeId::Inet),
+        (EmptyValueType::Decimal, "decimal", CqlTypeId::Decimal),
+        (EmptyValueType::Varint, "varint", CqlTypeId::Varint),
+    ];
+    // The table must cover exactly the admitted set — neither a family that
+    // silently escapes the check nor a stale row (#3544 floor + ceiling).
+    let admitted: Vec<EmptyValueType> = admitted_families().into_iter().map(|f| f.0).collect();
+    assert_eq!(
+        wire_ids.len(),
+        admitted.len(),
+        "the wire-id table has {} rows for {} admitted families",
+        wire_ids.len(),
+        admitted.len()
+    );
+    for (ty, name, _) in &wire_ids {
+        assert!(
+            admitted.contains(ty),
+            "{name} is in the wire-id table but is not an admitted family"
+        );
+    }
+
+    for (_, name, id) in &wire_ids {
+        for (reader, outcome) in [
+            ("parse_cql_value", parse_cql_value(&[], *id)),
+            ("parse_cql_value_raw", parse_cql_value_raw(&[], *id)),
+        ] {
+            match outcome {
+                Err(_) => {}
+                Ok((_, v)) => panic!(
+                    "{reader} decoded a payload-free {name} into {v:?}; the tagged \
+                     serializer's refusal is argued on this being undecodable"
+                ),
+            }
+        }
+    }
+}
+
+/// The refusal must also hold for a sentinel NESTED in a collection, which is
+/// the surface #3805 exists for (a map KEY). That path runs through the private
+/// bare-element serializer — the second of the two sites the finding named — so
+/// it needs its own coverage: a fix confined to the top-level arm would leave a
+/// zero-length element on the wire.
+#[test]
+fn the_tagged_serializer_refuses_a_sentinel_nested_in_a_collection() {
+    let sentinel = Value::Empty(EmptyValueType::Int);
+    let cases: Vec<(&str, Value)> = vec![
+        (
+            "map key",
+            Value::Map(vec![(sentinel.clone(), Value::Integer(1))]),
+        ),
+        (
+            "map value",
+            Value::Map(vec![(Value::Integer(1), sentinel.clone())]),
+        ),
+        ("list element", Value::List(vec![sentinel.clone()])),
+        ("set element", Value::Set(vec![sentinel.clone()])),
+        ("tuple field", Value::Tuple(vec![sentinel.clone()])),
+        ("frozen inner", Value::Frozen(Box::new(sentinel.clone()))),
+    ];
+    for (what, value) in cases {
+        assert!(
+            cqlite_core::parser::types::serialize_cql_value(&value).is_err(),
+            "a sentinel as a {what} must be refused, not written as a zero-length element"
         );
     }
 }
