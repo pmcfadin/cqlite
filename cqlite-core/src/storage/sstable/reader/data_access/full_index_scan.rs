@@ -78,6 +78,7 @@ impl SSTableReader {
         &self,
         scan_cancel: &crate::storage::scan_cancel::ScanCancel,
     ) -> Result<Option<Vec<(RowKey, ScanRow)>>> {
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
         let Some(index_reader) = &self.index_reader else {
             return Ok(None);
         };
