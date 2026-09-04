@@ -252,11 +252,23 @@ pub fn assemble_read_cells_with_udts(
             // divergent physical side, tracked separately (issue #2336 family). Do
             // NOT "fix" this to preserve `(key, Null)` here — that would corrupt the
             // merger read-shape a `do_get` returns.
-            if cell.is_deleted || matches!(cell.value, Value::Tombstone(_)) {
-                continue;
-            }
-            // Fail closed if this column already accumulated a simple cell (mixed
-            // shape — impossible for a consistent na+ schema; see `ColumnAccum`).
+            // TOMBSTONES ARE RETAINED HERE AND DROPPED LATER (issue #2339, roborev
+            // job 119, High). They USED to be skipped at this point, which resurrected
+            // data: a NEWER tombstone whose composite cell path is comparator-EQUAL to
+            // an OLDER live cell's — an explicit all-null suffix versus an omitted one
+            // — was discarded before it could reach `cell_wins`, so the older value
+            // survived. Reproduced: ts-200 tombstone + ts-100 live yielded
+            // `Map([(Tuple([1]), BigInt(1))])` where Cassandra returns an EMPTY map.
+            //
+            // `reconcile.rs` cannot prevent it either, because it keys cells by RAW
+            // `cell_path` and the two encodings are different bytes.
+            //
+            // The DROP still happens — `assemble_complex` does it, either before
+            // assembly for a non-composite identity (byte-identical behaviour to
+            // skipping here, since nothing coalesces those) or AFTER comparator-equal
+            // reconciliation for a composite one, where the tombstone must be present
+            // to win. The adjudication below is unchanged: a deleted entry is OMITTED
+            // from the reassembled collection, never surfaced as `(key, Null)`.
             let elems = register_complex(&mut order, &mut index, &mut accums, name)?;
             elems.push(cell);
         } else {
@@ -285,8 +297,15 @@ pub fn assemble_read_cells_with_udts(
         match accum {
             ColumnAccum::Simple(value) => out.push((name, value)),
             ColumnAccum::Complex(elements) => {
-                let value = assemble_complex(&name, elements, schema, udts)?;
-                out.push((name, value));
+                // `None` = the column is ABSENT: every element it accumulated was a
+                // deletion, so an empty non-frozen collection reads as null (the
+                // pre-existing invariant `all_deleted_collection_is_absent` pins).
+                // Absence is decided INSIDE `assemble_complex` because tombstones now
+                // survive accumulation and, for a composite identity, are only
+                // resolved after comparator-equal reconciliation (roborev job 119).
+                if let Some(value) = assemble_complex(&name, elements, schema, udts)? {
+                    out.push((name, value));
+                }
             }
         }
     }
@@ -330,7 +349,7 @@ fn assemble_complex(
     mut elements: Vec<CellData>,
     schema: &TableSchema,
     udts: Option<UdtScope<'_>>,
-) -> Result<Value> {
+) -> Result<Option<Value>> {
     // Resolve the declared collection type. An undeclared column (the Flight
     // producer builds cells for every on-disk column, even ones the caller did
     // not declare) has no type here; such columns are never emitted to Arrow, so
@@ -343,9 +362,33 @@ fn assemble_complex(
 
     let cql_type = match declared {
         Some(dt) => CqlType::parse(dt)?,
-        None => return Ok(last_value(elements)),
+        None => {
+            drop_tombstones(&mut elements);
+            return Ok(absent_if_empty(&elements).map(|()| last_value(elements)));
+        }
     };
     let cql_type = unwrap_frozen(&cql_type);
+
+    // WHERE THE TOMBSTONE DROP LIVES (issue #2339, roborev job 119). Accumulation now
+    // RETAINS tombstones so a composite identity can reconcile them; everything whose
+    // identity is NOT a comparator-compared composite drops them right here, which is
+    // byte-identical to the previous skip-at-accumulation because nothing coalesces
+    // those paths. A composite identity keeps them through `sort_composite` and drops
+    // the losers afterwards, in `drop_tombstone_winners`.
+    let identity_is_composite = match &cql_type {
+        CqlType::Set(inner) => key_is_opaque_composite(&element_comparator(inner, udts)?),
+        CqlType::Map(key_type, _) => key_is_opaque_composite(&element_comparator(key_type, udts)?),
+        _ => false,
+    };
+    if !identity_is_composite {
+        drop_tombstones(&mut elements);
+        // Everything it had was a deletion => the column is absent. Checked here so
+        // the non-composite paths behave EXACTLY as they did when the skip happened
+        // at accumulation time.
+        if elements.is_empty() {
+            return Ok(None);
+        }
+    }
 
     match cql_type {
         // A set's element identity IS its `cell_path`; order by the declared
@@ -363,25 +406,30 @@ fn assemble_complex(
                 // see the `composite` module for why raw `cell_path` byte order
                 // is NOT Cassandra's order for a composite).
                 let keyed = decode_composite_elements(name, "set element", elements, &elem_cmp)?;
-                return Ok(Value::Set(
-                    sort_composite(name, keyed, &elem_cmp)?
-                        .into_iter()
-                        .map(|(v, _)| v)
-                        .collect(),
-                ));
+                let survivors = drop_tombstone_winners(sort_composite(name, keyed, &elem_cmp)?);
+                if survivors.is_empty() {
+                    return Ok(None);
+                }
+                return Ok(Some(Value::Set(
+                    survivors.into_iter().map(|(v, _)| v).collect(),
+                )));
             }
             // A set's element identity IS its `cell_path`; order by the declared
             // element comparator so a set spanning multiple SSTables reconstructs
             // in the SAME order a single-generation `SELECT` returns.
             sort_elements_by_cell_path(&mut elements, &elem_cmp)?;
-            Ok(Value::Set(elements.into_iter().map(|e| e.value).collect()))
+            Ok(Some(Value::Set(
+                elements.into_iter().map(|e| e.value).collect(),
+            )))
         }
         // A list element's `cell_path` is its position timeuuid, which orders by
         // raw byte comparison — sort by `cell_path` bytes so multi-SSTable list
         // elements land in authoritative position order, not arrival order.
         CqlType::List(_) => {
             elements.sort_by(|a, b| cell_path_bytes(a).cmp(cell_path_bytes(b)));
-            Ok(Value::List(elements.into_iter().map(|e| e.value).collect()))
+            Ok(Some(Value::List(
+                elements.into_iter().map(|e| e.value).collect(),
+            )))
         }
         CqlType::Map(key_type, _) => {
             let key_cmp = element_comparator(key_type, udts)?;
@@ -390,12 +438,16 @@ fn assemble_complex(
                 // structurally, then order entries with Cassandra's own type
                 // comparator over the DECODED keys (issue #2339).
                 let keyed = decode_composite_elements(name, "map key", elements, &key_cmp)?;
-                return Ok(Value::Map(
-                    sort_composite(name, keyed, &key_cmp)?
+                let survivors = drop_tombstone_winners(sort_composite(name, keyed, &key_cmp)?);
+                if survivors.is_empty() {
+                    return Ok(None);
+                }
+                return Ok(Some(Value::Map(
+                    survivors
                         .into_iter()
                         .map(|(key, cell)| (key, cell.value))
                         .collect(),
-                ));
+                )));
             }
             // Order entries by the declared scalar key comparator so a map spanning
             // multiple SSTables reconstructs in authoritative key order — done on
@@ -409,12 +461,12 @@ fn assemble_complex(
                 let key = deserialize_value_bytes(key_bytes, &key_cmp)?;
                 entries.push((key, e.value));
             }
-            Ok(Value::Map(entries))
+            Ok(Some(Value::Map(entries)))
         }
         // A non-collection complex column (e.g. non-frozen top-level UDT):
         // reassembly of those shapes is out of this issue's scope. Keep the last
         // element's value (prior behaviour) so nothing regresses.
-        _ => Ok(last_value(elements)),
+        _ => Ok(Some(last_value(elements))),
     }
 }
 
@@ -731,6 +783,42 @@ fn unwrap_frozen(cql: &CqlType) -> &CqlType {
 /// The last element's value, or `Value::Null` when there are none — the safe
 /// fallback for a column whose collection type cannot be resolved.
 #[cfg(feature = "write-support")]
+/// A deleted collection element is OMITTED from the reassembled value, never
+/// surfaced as `(key, Null)` — the #2324 / roborev-1628 adjudication, unchanged.
+/// Only the POINT at which it is dropped moved (issue #2339, roborev job 119).
+#[cfg(feature = "write-support")]
+fn drop_tombstones(elements: &mut Vec<CellData>) {
+    elements.retain(|c| !is_tombstone_cell(c));
+}
+
+/// Drop reconciliation WINNERS that are tombstones, after comparator-equal
+/// coalescing (issue #2339, roborev job 119).
+///
+/// A tombstone that LOST is already gone — `cell_wins` replaced it. A tombstone that
+/// WON means the newest write for that logical key was a delete, so the entry is
+/// omitted, which is what a Cassandra `SELECT` returns. Doing this before coalescing
+/// is the resurrection bug: the tombstone has to be present to win.
+#[cfg(feature = "write-support")]
+fn drop_tombstone_winners(keyed: Vec<(Value, CellData)>) -> Vec<(Value, CellData)> {
+    keyed
+        .into_iter()
+        .filter(|(_, cell)| !is_tombstone_cell(cell))
+        .collect()
+}
+
+/// `Some(())` when at least one element survived, `None` when the column is absent.
+/// Expressed as an Option so each call site reads as "absent unless something is left".
+#[cfg(feature = "write-support")]
+fn absent_if_empty(elements: &[CellData]) -> Option<()> {
+    (!elements.is_empty()).then_some(())
+}
+
+/// ONE spelling of "this cell is a deletion", so the retain/filter pair cannot drift.
+#[cfg(feature = "write-support")]
+fn is_tombstone_cell(cell: &CellData) -> bool {
+    cell.is_deleted || matches!(cell.value, Value::Tombstone(_))
+}
+
 fn last_value(elements: Vec<CellData>) -> Value {
     elements
         .into_iter()

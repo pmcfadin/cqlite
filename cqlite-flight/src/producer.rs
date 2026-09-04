@@ -1153,7 +1153,14 @@ impl MergeProducer {
         // Cassandra returns it. Scan the full cells for any live (non-tombstone,
         // non-deleted-element) cell whose column is not a primary-key column —
         // mirroring the drop logic `assemble_read_cells` applies.
-        let has_live_data_cell = cells.iter().any(|c| {
+        // A CHEAP NECESSARY condition only — it is no longer the verdict (issue #2339,
+        // roborev job 119). A raw cell can LOOK live and still lose reconciliation: a
+        // composite cell path written with an omitted trailing component is
+        // comparator-EQUAL to one written with an explicit null, so a NEWER tombstone
+        // in the other encoding supersedes it. Deciding visibility from raw cells then
+        // emits a PHANTOM key-only row for a row whose only content is that superseded
+        // element. The verdict is taken below, from the RECONCILED winners.
+        let any_raw_live_data_cell = cells.iter().any(|c| {
             !c.is_deleted
                 && !matches!(c.value, cqlite_core::Value::Tombstone(_))
                 && !self.is_primary_key_column(&c.column)
@@ -1178,14 +1185,36 @@ impl MergeProducer {
         // its cell_path instead of failing closed. Without it an all-lowercase UDT
         // name stays a bare `CqlType::Custom` with no field list and the path
         // (correctly) still fails closed.
-        let row_cells: RowCells =
+        // Assembled UNPROJECTED, then filtered to `needed` below — deliberately, and
+        // in ONE pass (issue #2339, roborev job 119). Visibility must be decided from
+        // the FULL pre-projection column set (#2374/#2789: an `UPDATE`-written row
+        // carries a live `v` and no PK liveness marker, so a PK-only projection or a
+        // `count(*)` would otherwise hide a row Cassandra returns) AND from RECONCILED
+        // winners rather than raw cells. Assembling unprojected satisfies both without
+        // a second reassembly per row; the projection is only a column filter, so
+        // applying it afterwards changes no value.
+        let assembled: RowCells =
             cqlite_core::storage::write_engine::merge::assemble_read_cells_with_udts(
                 cells,
                 &self.schema,
-                needed,
+                None,
                 self.udt_scope(),
             )
             .map_err(ProducerError::Merge)?;
+
+        // The VERDICT: a data column that actually SURVIVED reconciliation.
+        let has_live_data_cell = any_raw_live_data_cell
+            && assembled
+                .iter()
+                .any(|(name, _)| !self.is_primary_key_column(name));
+
+        let row_cells: RowCells = match needed {
+            Some(needed) => assembled
+                .into_iter()
+                .filter(|(name, _)| needed.contains(&**name))
+                .collect(),
+            None => assembled,
+        };
 
         // Issue #2374/#2789: Cassandra row-visibility rule for the READ path. A
         // reconciled row is visible to a `SELECT` iff it has at least one

@@ -638,6 +638,80 @@ fn composite_with_a_time_component_orders_by_serialized_bytes() {
 /// Byte encodings, not hand-built values: the decoder is what turns an omitted
 /// suffix into a SHORTER `Value::Tuple`, and that is half of the property.
 #[test]
+/// **Issue #2339 / roborev job 119 (High) — a NEWER tombstone at a comparator-EQUAL
+/// encoding must SUPPRESS the older live cell, not be discarded before it can win.**
+///
+/// Tombstones used to be skipped at accumulation, before composite decoding, sorting
+/// and comparator-equal coalescing. So a delete written as an explicit all-null suffix
+/// never reached `cell_wins` against a live cell written with the omitted suffix, and
+/// the older value was RESURRECTED. `reconcile.rs` cannot catch it either: it keys
+/// cells by RAW `cell_path` and the two encodings are different bytes.
+///
+/// RED BEFORE THE FIX (measured): `Map([(Frozen(Tuple([Integer(1)])), BigInt(1))])` —
+/// the ts-100 live value surviving a ts-200 delete. Cassandra returns an EMPTY map,
+/// so the column reads ABSENT here (`all_deleted_collection_is_absent`'s invariant).
+#[test]
+fn a_newer_tombstone_suppresses_a_comparator_equal_older_live_cell() {
+    let omitted = hex("0000000400000001");
+    let explicit = hex("0000000400000001ffffffff");
+
+    for (label, cells) in [
+        ("tombstone last", vec![(100i64, false), (200, true)]),
+        // Arrival order must not decide it.
+        ("tombstone first", vec![(200i64, true), (100, false)]),
+    ] {
+        let built: Vec<_> = cells
+            .into_iter()
+            .map(|(ts, deleted)| {
+                let path = if deleted {
+                    explicit.clone()
+                } else {
+                    omitted.clone()
+                };
+                let mut c = elem("ftk", Value::BigInt(if deleted { 0 } else { 1 }), path);
+                c.timestamp = ts;
+                c.is_deleted = deleted;
+                c
+            })
+            .collect();
+        let out =
+            assemble_read_cells_with_udts(built, &schema(), None, registry()).expect("assembles");
+        assert_eq!(
+            get(&out, "ftk"),
+            None,
+            "{label}: the NEWER delete wins the comparator-equal key, so the only entry \
+             is deleted and the collection reads ABSENT — anything else resurrects the \
+             older value (issue #2339, roborev job 119)"
+        );
+    }
+}
+
+/// The control that keeps the test above honest: an OLDER tombstone must NOT suppress
+/// a NEWER live cell. Without this, "always drop the entry when any tombstone is
+/// present" would pass the resurrection test while losing live data.
+#[test]
+fn an_older_tombstone_does_not_suppress_a_comparator_equal_newer_live_cell() {
+    let omitted = hex("0000000400000001");
+    let explicit = hex("0000000400000001ffffffff");
+
+    let mut old_tomb = elem("ftk", Value::BigInt(0), explicit);
+    old_tomb.timestamp = 100;
+    old_tomb.is_deleted = true;
+    let mut new_live = elem("ftk", Value::BigInt(7), omitted);
+    new_live.timestamp = 200;
+
+    let out = assemble_read_cells_with_udts(vec![old_tomb, new_live], &schema(), None, registry())
+        .expect("assembles");
+    assert_eq!(
+        get(&out, "ftk"),
+        Some(&Value::Map(vec![(
+            Value::Frozen(Box::new(Value::Tuple(vec![Value::Integer(1)]))),
+            Value::BigInt(7)
+        )])),
+        "the NEWER live write must survive an older comparator-equal delete"
+    );
+}
+
 /// **Issue #2339 / roborev job 117 — comparator-EQUAL cell paths must COALESCE to one
 /// logical cell, by timestamp.**
 ///
@@ -657,6 +731,26 @@ fn composite_with_a_time_component_orders_by_serialized_bytes() {
 ///
 /// RED BEFORE THE FIX: two entries (measured, and quoted above verbatim).
 #[test]
+/// **Issue #2339 / roborev job 117 — comparator-EQUAL cell paths must COALESCE to one
+/// logical cell, by timestamp.**
+///
+/// `reconcile.rs` keys cells by `(column, RAW cell_path)`, so two generations carrying
+/// two DIFFERENT byte encodings of the SAME logical key both survive reconciliation.
+/// Before the fix, assembly emitted BOTH as separate map entries:
+///
+/// ```text
+/// Map([(Frozen(Tuple([Integer(1)])),       BigInt(1)),
+///      (Frozen(Tuple([Integer(1), Null])), BigInt(2))])
+/// ```
+///
+/// which is not a valid CQL map. The pair is comparator-equal by
+/// `an_omitted_tuple_suffix_compares_equal_to_an_explicit_all_null_suffix` above, so
+/// exactly ONE must survive: the later timestamp, per the SHARED
+/// `reconcile_rules::cell_wins` rule.
+///
+/// RED BEFORE THE FIX: two entries (measured, and quoted above verbatim).
+#[test]
+
 fn comparator_equal_cell_paths_coalesce_to_the_timestamp_winner() {
     // ftk = map<frozen<tuple<int, text>>, bigint>: an omitted trailing component
     // vs an explicit null one — same logical key, different bytes.
