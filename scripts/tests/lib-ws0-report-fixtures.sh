@@ -103,6 +103,19 @@ make_flight_rep() {
   printf '%s\n' "${body//__ENDPOINT__/$WS0_FIXTURE_ENDPOINT}" > "$d/$tag.jsonl"
   perf_csv "$d/perf-$tag.csv" 8000000 16000000
   printf '%s\n' "$4" > "$d/$tag.prewarm.status"
+  # ...and the SERVER LOG the reporter reads the admission ceiling back from (#3551 item 10).
+  # The reporter REQUIRES it — the ceiling is DERIVED from available_parallelism, which respects
+  # the CPU affinity mask, so it moves with --flight-server-cpus and a session whose reps
+  # disagree differed in a SECOND property besides the one under test — so every OTHER case would
+  # die here rather than reaching its own subject. A case whose SUBJECT is the log (absent, empty,
+  # unparseable, disagreeing) removes or rewrites it EXPLICITLY.
+  #
+  # WRITTEN WITH THE REAL LOG'S ANSI ESCAPES, deliberately: `cqlite-flight` colours the field
+  # NAME and puts the reset BETWEEN the name and its `=` (measured on a real smoke log: 88 escape
+  # sequences, and a parse of the UNSTRIPPED text matches NOTHING). A plain-text fixture would let
+  # every healthy case pass while the shipped parser was keyed on a presentation property — the
+  # #3400 class — so the healthy path here exercises the strip.
+  ws0_write_server_log "$d/$tag.server.log" 4 derived 2
   [ "$2" != "warm" ] || ws0_make_preflight "$d" "$tag" "$WS0_PREFLIGHT_BYTES_PER_SCAN"
   # ...and the flight arm takes the OTHER position, mirroring the driver.
   make_round "$d" "$tag" "$3" "$(ws0_alternating_position "$3" flight)"
@@ -135,6 +148,9 @@ make_session() {
 run_report() { # run_report <dir> <corpus> [extra args…]
   local d="$1" c="$2"; shift 2
   [[ -e "$d/session-corpus-pin.json" ]] || ws0_pin_session_corpus "$d" "$c"
+  # ...and the per-rep SERVER LOG the reporter now requires, IF ABSENT — same standing-in-for-the
+  # driver reasoning as the pin above (#3551 item 10).
+  ws0_stamp_missing_server_logs "$d"
   # ONLY the two paths: reps/temps/arms/scan-passes and the CPU pins are READ FROM the
   # session manifest since #3272 F1, so passing them here would be an argparse error.
   python3 "$REPORT" --dir "$d" --corpus "$c" "$@" 2>&1
@@ -158,6 +174,7 @@ run_report_args() {
   shift 6 2>/dev/null || shift $#
   rm -f "$d/session-corpus-pin.json"
   ws0_pin_session_corpus "$d" "$c" "$reps" "$temps" "$arms" "$passes"
+  ws0_stamp_missing_server_logs "$d"
   python3 "$REPORT" --dir "$d" --corpus "$c" "$@" 2>&1
 }
 

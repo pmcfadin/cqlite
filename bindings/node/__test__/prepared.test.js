@@ -3,12 +3,12 @@
  *
  * Issue #338: Implement Database.prepare() method for Node.js bindings.
  */
-const { skipIfNoDatasets, openDatabase, withDatabase } = require('./helpers');
+const { assertDatasetsAvailable, openDatabase, withDatabase } = require('./helpers');
 const { Database, PreparedStatement } = require('../lib/index.js');
 
 describe('PreparedStatement', () => {
   beforeAll(() => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
   });
 
   describe('PreparedStatement export (Issue #352)', () => {

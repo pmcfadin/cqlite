@@ -367,14 +367,36 @@ case "$nb_next" in
   'npm run build'*) ;;
   *) b11+=("node-bindings-recorder-is-not-immediately-before-npm-run-build(next-line:'${nb_next:-<none>}')") ;;
 esac
-# …and every `indirect:` class declared must have SOME recording site naming its component,
-# derived from the class table rather than a list typed here.
-for _ic in python-bindings node-bindings; do
-  case "$(_fm_component_class "$_ic")" in
-    indirect:*)
-      grep -qE "(_fm_observe_driver $_ic|_fm_note_maturin_rc \"\\\$name\")" "$GATE" \
-        || b11+=("$_ic-declares-a-driver-but-records-no-reach") ;;
+# …and every `indirect:` class declared must have SOME reach-recording site attributable
+# to it. THE SET IS DERIVED FROM COMPONENTS + the extracted class table, never typed here,
+# so a NEW indirect component is covered with no edit to this file — which is what the
+# comment above this loop used to CLAIM while iterating a two-name literal (#1700: a third
+# indirect component joined and was structurally unchecked).
+#
+# ATTRIBUTION, not merely existence: a recorder call somewhere in an 18k-line script says
+# nothing about THIS component, so the site must either NAME the component
+# (`_fm_observe_driver <name>`) or live INSIDE that component's own runner
+# (`run_<name-with-underscores>`), whose body is extracted here. Existence-anywhere is the
+# permissive answer, and a guard that accepts it green-lights the next unrecorded driver.
+_b11_runner_body() { # <component> -> the body of run_<component>, or nothing
+  awk -v fn="run_$(printf '%s' "$1" | tr '-' '_')" '
+    $0 ~ "^" fn "\\(\\) \\{" { inside = 1; next }
+    inside && /^}/ { exit }
+    inside { print }
+  ' "$GATE"
+}
+for _ic in "${comps_arr[@]}"; do
+  case "$(_fm_component_class "$_ic" 2>/dev/null)" in
+    indirect:*) ;;
+    *) continue ;;
   esac
+  if grep -qE "_fm_observe_driver $_ic" "$GATE"; then
+    continue
+  fi
+  if _b11_runner_body "$_ic" | grep -qE '_fm_note_driver "\$name"|_fm_note_maturin_rc "\$name"'; then
+    continue
+  fi
+  b11+=("$_ic-declares-a-driver-but-records-no-reach-attributable-to-it")
 done
 if [ "${#b11[@]}" -eq 0 ]; then
   ok "B11: every indirect component records its driver's reach from an explicit signal (rc 0/2/3 for both maturin callers; an in-body recorder immediately before node's napi build)"
@@ -728,8 +750,11 @@ if AGENT_GATE_SUMMARY_FILE="$selftest_sum" bash "$GATE" --emit-summary-selftest 
     case "$line" in
       *'[UNDECLARED]'*|*UNCLASSIFIED*) missing+=("$line") ;;
     esac
-  done < <(grep -E '^(fmt|clippy|core-tests|smoke): +(PASS|FAIL|SKIP|VACUOUS)' "$selftest_sum")
-  n_annot=$(grep -cE '^(fmt|clippy|core-tests|smoke): +(PASS|FAIL|SKIP|VACUOUS) \([0-9]+s\)  \[.+\]' "$selftest_sum")
+  # FIVE tokens: #3625 added VACUOUS and #3402 added OPT-OUT, independently, on the same
+  # reasoning — a hard-coded subset stops SEEING the rows it does not name. The union is the
+  # vocabulary; neither issue's token may be dropped when the other lands.
+  done < <(grep -E '^(fmt|clippy|core-tests|smoke): +(PASS|FAIL|SKIP|VACUOUS|OPT-OUT)' "$selftest_sum")
+  n_annot=$(grep -cE '^(fmt|clippy|core-tests|smoke): +(PASS|FAIL|SKIP|VACUOUS|OPT-OUT) \([0-9]+s\)  \[.+\]' "$selftest_sum")
   if [ "$n_annot" -eq 4 ] && [ "${#missing[@]}" -eq 0 ]; then
     ok "B4: --emit-summary-selftest emits 4 annotated component lines, none UNDECLARED"
   else
@@ -891,7 +916,13 @@ run_differential() { # <component> <mode EXACT|CONTAINS> [why-not-exact] [shim-d
   PATH="$use_shim:$PATH" \
     bash "$GATE" --only "$c" > "$log" 2>&1
   local line ann
-  line=$(grep -E "^$c: +(PASS|FAIL|SKIP|VACUOUS)" "$sum" 2>/dev/null | head -1)
+  # The component-status token SET, not a subset (#3625's VACUOUS + #3402's OPT-OUT). Stated
+  # precisely rather than overclaimed: `file-size` is class `no-cargo`, so this loop — which
+  # iterates cargo-class components only — cannot reach an OPT-OUT row TODAY. The tokens are
+  # read here because this grep decides "no component line emitted" (a `bad`), and a
+  # name-keyed reader that knows a SUBSET answers that question wrongly the day the set grows
+  # again — which it just did, twice, from two issues at once.
+  line=$(grep -E "^$c: +(PASS|FAIL|SKIP|VACUOUS|OPT-OUT)" "$sum" 2>/dev/null | head -1)
   if [ -z "$line" ]; then
     bad "C-$c$tag: no '$c:' component line in the emitted block"
     return
@@ -1330,7 +1361,7 @@ for c in "${e2_cargo[@]+"${e2_cargo[@]}"}"; do
   AGENT_GATE_ALLOW_MISSING_FIXTURES=1 \
   PATH="$shim_dir:$PATH" \
     bash "$GATE" --only "$c" > "$e2_log" 2>&1
-  e2_line=$(grep -E "^$c: +(PASS|FAIL|SKIP|VACUOUS)" "$e2_sum" 2>/dev/null | head -1)
+  e2_line=$(grep -E "^$c: +(PASS|FAIL|SKIP|VACUOUS|OPT-OUT)" "$e2_sum" 2>/dev/null | head -1)
   if [ -z "$e2_line" ]; then e2_missing+=("$c"); continue; fi
   e2_ran=$((e2_ran + 1))
   e2_ann=${e2_line#*\[}; e2_ann="[$e2_ann"

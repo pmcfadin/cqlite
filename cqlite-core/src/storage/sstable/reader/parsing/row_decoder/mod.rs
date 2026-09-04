@@ -706,13 +706,9 @@ pub(crate) struct ComplexColumnMeta {
     pub shadow_filtered_element_count: usize,
 }
 
-// Row header flag constants
-const ROW_HAS_TIMESTAMP: u8 = 0x04;
-const ROW_HAS_TTL: u8 = 0x08;
-const ROW_HAS_DELETION: u8 = 0x10;
-const ROW_HAS_ALL_COLUMNS: u8 = 0x20;
-const ROW_HAS_COMPLEX_DELETION: u8 = 0x40; // Issue #221: Row contains complex column with deletion info
-const ROW_HAS_EXTENDED_FLAGS: u8 = 0x80;
+// Cassandra `UnfilteredSerializer` row-header / marker flag bits (epic #1116 split).
+mod row_flags;
+use row_flags::*;
 
 // Issue #3095 / epic #1116: the row DISPLAY + static-merge helpers
 // (`row_has_non_key_cell`, `merge_static_cells`, `build_display_row`,
@@ -731,19 +727,6 @@ use timestamp_policy::TimestampPolicy;
 // its `CQLITE_TTL_NOW_OVERRIDE_SECS` test seam) lives in `now_clock` — split
 // out to keep this module under the file-size ratchet (epic #1116).
 use now_clock::now_epoch_secs;
-
-// Unfiltered marker constants (from Cassandra UnfilteredSerializer.java lines 102-109)
-// Issue #229: These markers were being misinterpreted as row data, causing parsing failures
-const END_OF_PARTITION: u8 = 0x01; // Signal end of partition - nothing follows this flag byte
-const IS_MARKER: u8 = 0x02; // Range tombstone marker (not a data row)
-
-// Extended flags constants (from Cassandra UnfilteredSerializer.java lines 114-122)
-// These are in the SECOND byte when ROW_HAS_EXTENDED_FLAGS (0x80) is set
-const EXTENDED_IS_STATIC: u8 = 0x01; // Static row - has NO clustering prefix
-
-// NOTE: V5CompressedLegacy format has NO trailing field after row data.
-// The next partition/row starts immediately after row_size bytes.
-// (Previous ROW_TRAILING_FIELD_SIZE constant was removed as part of Issue #237 fix)
 
 /// Parser for V5CompressedLegacy format decompressed blocks
 pub struct V5CompressedLegacyParser {
@@ -787,11 +770,15 @@ pub struct V5CompressedLegacyParser {
 
 mod block_emit;
 mod block_emit_windowed;
+// Issue #3782: the explicit buffer-extent contract the block-emit parses take.
+mod buffer_extent;
+// `pub` only so it is RE-EXPORTABLE beside the parser (module is `pub(crate)`).
+pub use buffer_extent::BufferExtent;
 mod cell_kind;
 mod cell_value;
-// campsite split of `cell_value` (issue #1795): scalar arms + complex ladder.
-mod cell_value_complex;
-mod cell_value_scalar;
+mod cell_value_complex; // campsite split of `cell_value` (#1795): complex ladder
+mod cell_value_scalar; // campsite split of `cell_value` (#1795): scalar arms
+pub(in crate::storage::sstable::reader) mod column_decode_error; // issue #3721 policy (COLUMN level)
 mod compaction;
 mod compaction_stream; // issue #2299 (split of `compaction`, campsite #1116)
 pub(in crate::storage::sstable::reader) use compaction_stream::{
@@ -805,10 +792,14 @@ pub(crate) mod now_clock;
 mod parser_construction;
 mod partition_driver;
 pub(crate) mod partition_shadow;
+// Issue #3721 sibling policy modules — COLUMN level above, MARKER level here. Each
+// `mod` line grows this over-threshold glue file; acknowledged under epic #1116.
+mod range_marker_error; // issue #3721 policy (MARKER level)
 mod raw_type_value;
 mod raw_value;
 mod row_data;
 mod row_framing;
+mod typed_value;
 mod udt;
 mod vuint_length;
 

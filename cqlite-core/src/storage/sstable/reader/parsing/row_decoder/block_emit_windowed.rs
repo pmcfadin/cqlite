@@ -1,5 +1,7 @@
 use super::*;
 
+use range_marker_error::unparseable_marker_in_buffered_block as unparseable;
+
 impl V5CompressedLegacyParser {
     /// Within-partition clustering-slice variant of [`parse_block_emit`] (Issue
     /// #954, Epic #951).
@@ -33,6 +35,7 @@ impl V5CompressedLegacyParser {
     pub fn parse_block_emit_windowed<F>(
         &self,
         data: &[u8],
+        extent: BufferExtent,
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         row_body_window: Option<(usize, usize)>,
@@ -348,12 +351,7 @@ impl V5CompressedLegacyParser {
                         //
                         // Per Cassandra's UnfilteredSerializer.java (lines 103, 735-738):
                         // When IS_MARKER (0x02) is set, this is a range tombstone boundary, not a row.
-                        // We skip these markers for now (full implementation would parse deletion ranges).
                         if offset < data.len() && Self::is_range_tombstone_marker(data[offset]) {
-                            tracing::debug!(
-                                "V5CompressedLegacy: Range tombstone marker at offset {} (partition {}), skipping",
-                                offset, partition_index
-                            );
                             // Issue #1741: when read-side shadowing is active, decode
                             // the marker (bounds + deletion time) and feed the
                             // range-tombstone FSM so covered rows are shadowed;
@@ -373,21 +371,50 @@ impl V5CompressedLegacyParser {
                                             del_primary,
                                             del_secondary,
                                         ) {
-                                            tracing::debug!(
-                                                "V5CompressedLegacy: range tombstone FSM error at offset {}: {}",
-                                                offset, e
-                                            );
-                                            break; // Unrepresentable marker, end partition
+                                            // Issue #3721: FRAMED marker (body
+                                            // continues at `next_offset`) with an
+                                            // unrepresentable bound kind; `break`
+                                            // dropped every later row and said `Ok`.
+                                            return Err(range_marker_error::range_marker_refused(
+                                                e,
+                                                &partition_index,
+                                                offset,
+                                                next_offset,
+                                            ));
                                         }
                                         offset = next_offset;
                                         continue; // Continue to next row/marker
                                     }
-                                    Err(e) => {
-                                        tracing::debug!(
-                                            "V5CompressedLegacy: Failed to parse range tombstone marker at offset {}: {}",
-                                            offset, e
-                                        );
-                                        break; // Can't parse marker, end partition
+                                    // Issue #3721 (job 78): corruption, never a
+                                    // terminator (`range_marker_error` docs). The
+                                    // cause used to be dropped into `debug!`.
+                                    //
+                                    // Issue #3782 x #3721 (job 98): DELIBERATELY UNCONDITIONAL,
+                                    // and the alternative was MEASURED to be worse.
+                                    //
+                                    // roborev job 98 is right that an index-NARROWED window can
+                                    // legitimately end inside a valid marker, and that this
+                                    // refusal is `Error::Corruption`, which
+                                    // `indexed_walk_falls_back` does not recognise (it matches
+                                    // `is_column_decode` only) — so such a read fails instead of
+                                    // retracting. That is a real, conservative false refusal.
+                                    //
+                                    // But gating this on `extent.is_complete()` REINTRODUCED
+                                    // #3721's defect on the SELECT path: the scan passes `Window`
+                                    // even with the whole partition buffered, so all three
+                                    // `d9_select_marker_parse_failure` cases went back to
+                                    // returning `Ok` with the marker and every later row silently
+                                    // dropped. A false refusal on a narrowed read is recoverable;
+                                    // a silent short answer from `SELECT` is the defect itself.
+                                    //
+                                    // The correct fix is a RETRACTION SIGNAL the indexed walk can
+                                    // recognise — not tolerance, which would merely make the
+                                    // narrowed read silently short instead. That needs a TYPED
+                                    // discriminator (matching the message text would violate the
+                                    // no-heuristics rule, issue #28), so it is left as a named
+                                    // residual rather than invented here.
+                                    Err(cause) => {
+                                        return Err(unparseable(cause, &partition_index, offset))
                                     }
                                 }
                             }
@@ -396,12 +423,9 @@ impl V5CompressedLegacyParser {
                                     offset = next_offset;
                                     continue;
                                 }
-                                Err(e) => {
-                                    tracing::debug!(
-                                        "V5CompressedLegacy: Failed to skip range tombstone marker at offset {}: {}",
-                                        offset, e
-                                    );
-                                    break;
+                                // Same decision on the PHYSICAL path (no shadowing).
+                                Err(cause) => {
+                                    return Err(unparseable(cause, &partition_index, offset))
                                 }
                             }
                         }
@@ -603,6 +627,41 @@ impl V5CompressedLegacyParser {
                                         partition_index, offset, e
                                     );
                                 }
+                                // Issue #3782: on a PROVEN-complete buffer no further
+                                // bytes can finish this row, so the failure is
+                                // truncation/corruption — DATA LOSS — and is reported;
+                                // swallowing it made a SELECT over a fixture with ONE
+                                // corrupted clustering byte return 23 of 100 rows.
+                                // Otherwise the tolerant break STAYS: a chunk-covering
+                                // window can legitimately cut a row at its tail. See
+                                // `BufferExtent`.
+                                // Issue #3721 composes INSIDE that gate: on a complete
+                                // buffer the failure is authoritative, but it is still
+                                // two different facts — a per-column decode failure
+                                // (propagate, naming the column) versus the ordinary
+                                // end-of-partition-body signal (break). Only
+                                // `column_decode_error` can tell them apart, so returning
+                                // `Err(e)` unconditionally here would report a normal
+                                // partition end as corruption.
+                                // #3782 FIRST and unconditionally: on a proven-complete
+                                // buffer ANY failure is data loss, whatever its kind.
+                                if extent.is_complete() {
+                                    return Err(e);
+                                }
+                                // #3721 for the incomplete case: a per-column decode
+                                // failure must STILL reach the caller, because the caller
+                                // owns the tolerance decision (the BTI point read remembers
+                                // it and retries with more bytes; the driver uses
+                                // `at_final_chunk`). Gating this on `is_complete()` put that
+                                // decision back INSIDE the parse — contradicting #3782's own
+                                // rule — and silently reintroduced job 80's phantom absence,
+                                // caught by `issue_3721_bti_point_read_absence`.
+                                column_decode_error::end_of_partition_or_bail(
+                                    e,
+                                    partition_index,
+                                    row_count,
+                                    offset,
+                                )?;
                                 break; // End of valid data in partition
                             }
                         }
@@ -671,6 +730,11 @@ impl V5CompressedLegacyParser {
                     }
 
                     partition_index += 1;
+                    // Issue #3721: `column_decode_error`, "Where an
+                    // INDEX-POSITIONED walk must stop".
+                    if row_body_window.is_some() {
+                        break;
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -880,7 +944,7 @@ impl V5CompressedLegacyParser {
 
         let schema = schema.ok_or_else(|| {
             Error::schema(format!(
-                "V5CompressedLegacy (compaction) format requires schema for {}.{}",
+                "V5CompressedLegacy format requires schema for {}.{}",
                 self.keyspace, self.table_name
             ))
         })?;
@@ -939,7 +1003,7 @@ impl V5CompressedLegacyParser {
 
         if skipped_partitions > 0 {
             tracing::warn!(
-                "V5CompressedLegacy (compaction): skipped {} malformed partitions",
+                "V5CompressedLegacy: skipped {} malformed partitions",
                 skipped_partitions
             );
         }
@@ -994,7 +1058,7 @@ impl V5CompressedLegacyParser {
 
         let schema = schema.ok_or_else(|| {
             Error::schema(format!(
-                "V5CompressedLegacy (compaction) format requires schema for {}.{}",
+                "V5CompressedLegacy format requires schema for {}.{}",
                 self.keyspace, self.table_name
             ))
         })?;

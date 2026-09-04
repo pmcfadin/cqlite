@@ -39,7 +39,7 @@
 //! actually seen (see `super::compare_value_at`).
 
 use super::super::schema::CqlType;
-use super::{canon_typed, csv_container, is_scalar_type, Depth, Egress, Kinding};
+use super::{csv_container, is_scalar_type, Depth, Egress, Kinding};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -78,11 +78,24 @@ pub enum Divergence {
     /// A frozen UDT nested inside another frozen UDT renders as its RAW BYTES in
     /// CQL blob-hex spelling instead of a decoded object.
     ///
+    /// **NO CASE DECLARES THIS GAP SINCE #3631**, which made the nested frozen UDT
+    /// decode: the `udt_nested` skip that used to carry it was retired by
+    /// [`Report::stale_skips`] the moment the two sides agreed at `e.home`. The
+    /// variant is KEPT rather than deleted for two reasons that are not about this
+    /// lane's current corpus — it is the subject the FIELD-scoped and CSV
+    /// staleness machinery is covered with (three suites in
+    /// `golden_value_compare*_tests.rs`), and it is the named OPPOSITE direction of
+    /// [`Divergence::NestedFrozenValueLeftUndecodedByGolden`], which those docs
+    /// rely on to say declaring the wrong one matches nothing. A regression that
+    /// reintroduced blob hex here would be reported as an ordinary diff, NOT
+    /// suppressed: a variant that exists suppresses nothing until a case declares
+    /// it at a path.
+    ///
     /// ORACLE: `sstabledump` decodes the nested value —
     /// `cassandra-5.0.8 UserType.toJSONString` walks the declared field list and
     /// writes each field — so the golden carries a JSON OBJECT there
     /// (`{"street":"1 Navy Way","city":"Arlington","zip":"22201"}` in the
-    /// committed `udt_nested` golden).
+    /// committed `udt_nested` golden — which the egress now MATCHES).
     ///
     /// EGRESS SHAPE: a blob literal and nothing else — `0x` followed by an EVEN
     /// number of hex digits, which is CQL's spelling of a byte string.
@@ -115,29 +128,51 @@ pub enum Divergence {
     /// ordinary members: JSON can spell them, so losing one is data loss with no
     /// format excuse.
     NonFiniteFloatRendersAsJsonNull,
-    /// A `decimal` renders as a JSON STRING where the oracle emits an unquoted
-    /// number.
+    /// A `decimal` whose digits exceed a `double`'s precision cannot be compared
+    /// EXACTLY in this lane's JSON comparison, because this lane's JSON PARSE
+    /// cannot carry them.
     ///
-    /// ORACLE: `cassandra-5.0.8 DecimalType.toJSONString` returns
-    /// `BigDecimal.toString()` with no quotes, i.e. a JSON NUMBER.
+    /// A LIMITATION OF THIS COMPARATOR, NOT A DISAGREEMENT between the two sides —
+    /// the same family as [`Divergence::ContainerMapKeyNotPairableByThisLane`],
+    /// and NOT a defect awaiting an egress fix.
     ///
-    /// EGRESS SHAPE: a JSON string, in the JSON lane only, whose NUMERIC VALUE is
-    /// the golden's. That last clause is what makes this variant narrow: the two
-    /// sides are canonicalized under the declared type and must come out EQUAL, so
-    /// the only thing suppressed is the JSON KIND. A `decimal` whose digits differ
-    /// from the golden's — the 30-digit exactness this lane exists to check — is
-    /// NOT this gap and is reported.
+    /// ORACLE: `cassandra-5.0.8 DecimalType.toJSONString` (`DecimalType.java:314-317`)
+    /// returns `Objects.toString(getSerializer().deserialize(buffer), "\"\"")`, an
+    /// UNQUOTED `BigDecimal.toString()`, deliberately overriding the quoting form at
+    /// `AbstractType.java:186-189`. So an unquoted JSON NUMBER is what the CLI is
+    /// SUPPOSED to emit, and since issue #3644 it does
+    /// (`cqlite-cli/src/output/json_cell.rs`).
     ///
-    /// This is the ONE place the CLI side is read with [`Kinding::Stringified`],
-    /// the relaxation reserved for the golden (`super::compare_value_body` holds
-    /// the CLI to [`Kinding::Natural`] at every position — finding M1). It is
-    /// scoped to deciding THIS gap's own question, "is the kind the only
-    /// difference?", and it decides nothing else: a non-match here becomes an
-    /// ordinary diff, compared under the normal asymmetry.
+    /// WHY A GAP REMAINS. A `decimal`'s unscaled value is a Java `BigInteger`, so
+    /// its rendering is arbitrarily long — the committed
+    /// `signed_special_collections` fixture carries 33 significant digits — while
+    /// `super::super::strict_json` parses a JSON number into a `serde_json::Value`,
+    /// i.e. an `i64`/`u64`/`f64` and nothing wider (`arbitrary_precision` is
+    /// deliberately not enabled in this crate; see `cqlite-cli/Cargo.toml`). The
+    /// digits are therefore gone before the comparator sees them. The GOLDEN's copy
+    /// survives (`sstabledump` writes a multicell cell PATH with
+    /// `writeString(getString(v))` — `JsonTransformer.java:452` — so it arrives as
+    /// text), which is exactly why the two sides can no longer be equated here.
     ///
-    /// NOT COVERED: a different number, a null, a non-numeric string, and the CSV
-    /// lane (where every cell is text and the 30-digit values match exactly).
-    DecimalRendersAsJsonString,
+    /// WHAT IS STILL CHECKED, so this gap suppresses as little as possible:
+    /// * the two must be THE SAME `double` — bit for bit, the golden's text parsed
+    ///   exactly against the CLI's parsed number — so a sign error, a wrong
+    ///   magnitude, a lost leading digit, a null or a non-numeric token is NOT this
+    ///   gap and is reported; only sub-`double` digits are excused; and
+    ///   the CLI must have emitted a NUMBER, so a regression back to the #3644
+    ///   quoted string fails here too.
+    /// * the same 33 digits ARE compared exactly in the CSV lane (every cell is
+    ///   text there), which is why this variant refuses to match under
+    ///   [`Egress::Csv`].
+    /// * the JSON egress's own digits are pinned, against this same golden, by
+    ///   `cqlite-cli/tests/issue_3644_json_decimal_unquoted.rs`, which reads the
+    ///   `sd` cell paths out of the `*-Data.db.jsonl` and requires each to appear
+    ///   in the emitted JSON TEXT, unquoted and digit for digit.
+    ///
+    /// Carrying the lexeme through this lane's JSON parse (the `RawValue`
+    /// preservation `tests/support/parquet_parity/golden_text.rs` does for the
+    /// #1490 lane) would close it; that is a comparator change, not an egress one.
+    ExactDecimalNotCarriedByThisLanesJsonParse,
     /// A frozen value nested inside a multi-cell collection is left UNDECODED by
     /// the golden as a flat scalar, while the egress decodes it into a structure.
     ///
@@ -201,6 +236,63 @@ pub enum Divergence {
     /// lands, `compare_map` no longer refuses, these skips suppress nothing, and
     /// `Report::stale_skips` FAILS the lane until they are removed.
     ContainerMapKeyNotPairableByThisLane,
+    /// AN IPv6 `inet` IS SPELLED IN CASSANDRA'S EXPANDED FORM IN THE GOLDEN AND IN
+    /// RFC 5952 COMPRESSED FORM BY THE EGRESS — the SAME address, two spellings.
+    ///
+    /// sstabledump renders `inet` through `InetAddressType`, whose `toString` is
+    /// `InetAddress.getHostAddress()`, and that never elides a zero run: a golden
+    /// carries `0:0:0:0:0:0:0:1` and `2001:db8:0:0:0:0:0:1`. The CLI egress renders
+    /// the compressed form (`::1`, `2001:db8::1`). IPv4 is unaffected — both sides
+    /// spell it as a dotted quad, so a v4 mismatch is a real defect.
+    ///
+    /// **THE MATCHER PROVES THE TWO ARE THE SAME ADDRESS RATHER THAN TRUSTING THE
+    /// SHAPE.** Both sides are parsed as [`std::net::IpAddr`] and the gap applies
+    /// only when they compare EQUAL, are both v6, and their TEXT actually differs.
+    /// So a wrong address, a null, a non-address string and a mixed v4/v6 pair are
+    /// all still failures — unlike a shape-only rule this cannot hide a value
+    /// defect. It also cannot excuse an ORDER difference: elements are compared by
+    /// position, so a reordered collection still fails even when every element is
+    /// individually excused here. That distinction is the point for issue #3790,
+    /// whose subject is ordering.
+    ///
+    /// DECLARED RESIDUAL: the exact TEXT is not compared at this position, so a
+    /// later change to the egress's IPv6 spelling would not be caught here. The
+    /// egress divergence is itself a real difference from Cassandra's rendering and
+    /// is filed separately; when it is resolved this skip goes stale and
+    /// `SkipPaths::stale` FAILS the lane until it is removed.
+    InetIpv6RendersCompressed,
+    /// THIS LANE CANNOT PAIR THE ENTRIES OF A MAP KEYED BY `inet`, so the whole
+    /// column is skipped. **A LANE LIMITATION, NOT A VALUE DISAGREEMENT, AND IT
+    /// DELIBERATELY OVER-SKIPS** — the same shape, and the same resolution, as
+    /// [`Divergence::ContainerMapKeyNotPairableByThisLane`].
+    ///
+    /// Map entries are paired and reported by their key's canonical form. For an
+    /// IPv6 `inet` key the two sides spell the SAME address differently — the
+    /// golden in Cassandra's expanded `getHostAddress()` form, the egress in RFC
+    /// 5952 compressed form — so the keys never pair and the mismatch surfaces as a
+    /// key-POSITION difference, which is a different class from the value
+    /// divergence [`Divergence::InetIpv6RendersCompressed`] declares. That gap
+    /// therefore cannot reach this position, and a
+    /// [`SkipPaths`] entry is PATH-SCOPED TO A COLUMN, so it cannot express
+    /// "compare everything about this map EXCEPT the key spelling".
+    ///
+    /// **DDL-ONLY, and it over-skips two ways, stated rather than discovered.** It
+    /// reads no values, so it also suppresses a null, a malformed `{key,value}`
+    /// array and a wrong entry COUNT in the column. And it is keyed on the DECLARED
+    /// key type, so it applies even to an inet-keyed map whose keys are all IPv4
+    /// and would have compared exactly. Over-skipping is honest and visible in the
+    /// artifact; a claim that misdescribes its own subject is not.
+    ///
+    /// The ORDER this column exists to pin (issue #3790) is NOT lost — it is
+    /// asserted directly against the same golden by
+    /// `cqlite-core/tests/issue_3790_collection_order_cassandra_golden.rs`, which
+    /// compares the cell-path sequence rather than the egress text. What this skip
+    /// costs is the CLI egress's rendering of that column, not the ordering.
+    ///
+    /// The real fix is for the egress and Cassandra to agree on IPv6 spelling, or
+    /// for key pairing to compare addresses rather than text; either retires this
+    /// skip and [`SkipPaths::stale`] FAILS the lane until it is removed.
+    InetMapKeyIpv6SpellingNotPairableByThisLane,
 }
 
 impl Divergence {
@@ -222,16 +314,30 @@ impl Divergence {
                 "the golden carries a non-finite float token (`NaN`/`Infinity`/`-Infinity`) \
                  which JSON has no literal for, and the JSON egress renders null"
             }
-            Divergence::DecimalRendersAsJsonString => {
-                "the golden's decimal is an unquoted JSON number (DecimalType.toJSONString \
-                 returns BigDecimal.toString()) while the JSON egress quotes the SAME \
-                 number as a JSON string"
+            Divergence::ExactDecimalNotCarriedByThisLanesJsonParse => {
+                "both sides carry the SAME decimal but this lane's JSON parse holds a \
+                 number as an f64 (no arbitrary precision), so digits beyond a double's \
+                 precision cannot be compared here — a limitation of this comparator, NOT \
+                 a disagreement between the two sides: the two are still required to be \
+                 the same double, the CSV lane compares the same digits exactly, and the \
+                 JSON egress's digits are pinned by \
+                 tests/issue_3644_json_decimal_unquoted.rs"
             }
             Divergence::NestedFrozenValueLeftUndecodedByGolden => {
                 "the golden leaves a frozen value nested in a multi-cell collection \
                  UNDECODED as a flat scalar (raw bytes as hex for a collection, \
                  colon-joined text for a tuple) while the egress decodes it into a \
                  structure"
+            }
+            Divergence::InetIpv6RendersCompressed => {
+                "the golden spells an IPv6 inet in Cassandra's expanded \
+                 getHostAddress() form while the egress spells the SAME address in \
+                 RFC 5952 compressed form (verified equal as parsed addresses)"
+            }
+            Divergence::InetMapKeyIpv6SpellingNotPairableByThisLane => {
+                "the declared map key type is `inet`, whose IPv6 values the golden \
+                 and the egress spell differently, so this lane cannot pair the \
+                 entries and the whole column is skipped"
             }
             Divergence::ContainerMapKeyNotPairableByThisLane => {
                 "the declared map KEY type is a container, which this lane has no rule \
@@ -292,24 +398,24 @@ impl Divergence {
                     && matches!(golden, Value::String(token) if is_non_finite(token))
                     && matches!(cli, Value::Null)
             }
-            Divergence::DecimalRendersAsJsonString => {
+            Divergence::ExactDecimalNotCarriedByThisLanesJsonParse => {
                 if egress != Egress::Json || !is_decimal_type(ty) {
                     return false;
                 }
-                let Value::String(_) = cli else {
+                // The GOLDEN kept its digits (a stringified cell path) and the CLI
+                // emitted a JSON NUMBER, which is what `DecimalType.toJSONString`
+                // requires. A CLI string here is the #3644 defect, not this gap.
+                let (Value::String(golden_text), Value::Number(cli_number)) = (golden, cli) else {
                     return false;
                 };
-                // The ONLY difference may be the JSON kind: read the CLI's string
-                // with the relaxation the golden gets at a stringified position and
-                // require the two canonical values to be EQUAL. A decimal whose
-                // digits differ fails here and is reported as an ordinary diff.
-                match (
-                    canon_typed(golden, egress, ty, depth, kinding),
-                    canon_typed(cli, egress, ty, depth, Kinding::Stringified),
-                ) {
-                    (Ok(g), Ok(c)) => g == c,
-                    _ => false,
-                }
+                // Excuse ONLY the digits the parse could not carry: both sides must
+                // be the SAME double, bit for bit. `str::parse::<f64>` and
+                // `serde_json`'s number parse both round to nearest, so this is the
+                // strongest statement available once the CLI's digits are gone.
+                let (Ok(g), Some(c)) = (golden_text.parse::<f64>(), cli_number.as_f64()) else {
+                    return false;
+                };
+                g.to_bits() == c.to_bits()
             }
             Divergence::NestedFrozenValueLeftUndecodedByGolden => {
                 // The GOLDEN side: a flat scalar STRING at a position the committed
@@ -341,6 +447,30 @@ impl Divergence {
                 // `{key,value}` objects), so an object, a scalar, a null or a number
                 // here is NOT this gap and is reported as an ordinary diff.
                 matches!(cli, Value::Array(_))
+            }
+            Divergence::InetIpv6RendersCompressed => {
+                // Same address, different spelling — PROVEN, not assumed.
+                if !matches!(ty, CqlType::Opaque(name) if name == "inet") {
+                    return false;
+                }
+                let (Value::String(g), Value::String(c)) = (golden, cli) else {
+                    return false;
+                };
+                match (g.parse::<std::net::IpAddr>(), c.parse::<std::net::IpAddr>()) {
+                    // Both v6, equal as addresses, and genuinely spelled
+                    // differently. A v4 pair, an unequal pair, or an unparsable
+                    // side is NOT this gap.
+                    (Ok(ga), Ok(ca)) => ga == ca && ga.is_ipv6() && g != c,
+                    _ => false,
+                }
+            }
+            Divergence::InetMapKeyIpv6SpellingNotPairableByThisLane => {
+                // DDL ONLY, exactly like the container-key case below: reading
+                // values here would invite the same unbounded sequence of shape
+                // assertions. The over-skip is the accepted, documented cost.
+                let _ = (golden, cli, egress, depth, kinding);
+                matches!(ty, CqlType::Map(key_ty, _)
+                    if matches!(&**key_ty, CqlType::Opaque(n) if n == "inet"))
             }
             Divergence::ContainerMapKeyNotPairableByThisLane => {
                 // DDL ONLY. No value is read — deliberately, and this is the whole

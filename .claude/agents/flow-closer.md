@@ -166,7 +166,19 @@ from `RUNNING` — both leave the same `INCOMPLETE` text (#3041) — which is wh
 summary file alone once made one human the fleet's only gate-runner. Keep the `grep` below
 only as the fallback when the heartbeat is absent (`UNKNOWN`, e.g. an older gate):
 ```bash
-grep -qE 'RESULT: (PASS|FAIL)' /tmp/gate-<N>.txt && echo done   # a VERDICT ⇒ gate finished
+# RECORD grammar — full and --lite ONLY. It must keep REFUSING PARTIAL, ERROR and REFUSED.
+grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)' /tmp/gate-<N>.txt && echo done   # a VERDICT ⇒ gate finished
+
+# DELTA grammar — for the Case B `--delta` re-cert YOU run at step 4a. `run_delta` can
+# terminate with ERROR or REFUSED, which the RECORD grammar above does not match, so polling a
+# --delta re-cert with it SPINS FOREVER on a terminal outcome (#3750). This set is
+# gate-liveness.sh's own enumerated terminal set, token for token.
+grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)' /tmp/delta-<N>.txt
+
+# ONLY grammar — `--only <component>` ONLY, never the gate of record. And completion is not a
+# verdict: read the component's own line separately with
+# `scripts/gate-component-verdict.sh "$SUM" --mode only --component <name>` (#3750).
+grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)' /tmp/only-<N>.txt
 ```
 **Only `PASS`/`FAIL` is a verdict.** `agent-gate.sh` writes
 `RESULT: INCOMPLETE (gate did not finish)` into the summary file **at launch** (via its EXIT

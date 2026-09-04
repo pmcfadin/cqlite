@@ -6,8 +6,12 @@
 # ----------------------
 # `RESULT: INCOMPLETE (gate did not finish)` is written into the summary file ONCE, at
 # launch, before the #1825 slot is even granted (#3041). It is therefore the artifact
-# of THREE states at once — queued, running, killed — and the correct completion probe
-# (`grep -qE 'RESULT: (PASS|FAIL)'`) says "not finished" for all three. A lane whose
+# of THREE states at once — queued, running, killed — and the correct completion probe (the
+# RECORD grammar, `grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'`) says "not finished" for all
+# three. An `--only` run needs the ONLY grammar instead (`…|PARTIAL)…`) because it demotes success
+# to `RESULT: PARTIAL`, and its component VERDICT is a separate assertion —
+# scripts/gate-component-verdict.sh, which delegates ITS completion question to this reader (#3750).
+# A lane whose
 # gate was reaped at the #3473 ceiling and a lane whose gate is 30 minutes from a PASS
 # read IDENTICAL text. Resolving them required a human running `ps` on the box, which
 # is exactly what made the coordination lead the fleet's only gate-runner.

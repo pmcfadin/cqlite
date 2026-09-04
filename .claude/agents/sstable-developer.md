@@ -168,8 +168,13 @@ AGENT_GATE_SUMMARY_FILE=/tmp/lite-<N>.txt \
   bash scripts/agent-gate.sh --lite > /tmp/lite-<N>.log 2>&1 < /dev/null
 cat /tmp/lite-<N>.txt   # the complete ==== AGENT-GATE LITE SUMMARY ==== block
 ```
-The correct liveness probe on a summary file is `grep -qE 'RESULT: (PASS|FAIL)'` — a bare `INCOMPLETE`
-is the start-of-run placeholder written by the EXIT trap, **not** a verdict (#3041).
+The correct liveness probe on a full or `--lite` summary file is the **RECORD grammar**
+`grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'` — a bare `INCOMPLETE` is the start-of-run placeholder
+written by the EXIT trap, **not** a verdict (#3041). An **`--only <component>`** run demotes success to
+`RESULT: PARTIAL`, so that grammar spins on green (#3750): poll its **exit status `3`** or
+`grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'`, then read the component's verdict SEPARATELY —
+`bash scripts/gate-component-verdict.sh "$SUM" --mode only --component <name>` — because a completed run
+whose component SKIPped is not a pass. `--delta` is a THIRD mode with a THIRD set — it alone can terminate `ERROR` or `REFUSED`, so polling it with the record grammar hangs on a terminal outcome: `grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)'` (#3750).
 (If you omit `AGENT_GATE_SUMMARY_FILE`, `--lite`'s default recovery file is
 `.agent-gate-lite-summary.txt`.) **Rule: never read raw gate stdout / `*.log` into a persistent context** —
 the SUMMARY block is the only gate text you retain.
