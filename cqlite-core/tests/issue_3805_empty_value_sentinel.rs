@@ -325,32 +325,52 @@ fn sorting_a_key_column_puts_the_sentinel_first() {
 }
 
 // ---------------------------------------------------------------------------
-// (3) BYTE-EXACT ROUND TRIP — a ZERO-LENGTH buffer
+// (3) WRITE-SIDE ADMISSION — exactly ONE position, and it is not a cell value
 // ---------------------------------------------------------------------------
 
-/// The write path's cell-value serializer must append NOTHING: the sentinel's
-/// serialized form is the empty buffer, and the length lives in the enclosing
-/// framing (an unsigned VInt for a cell path,
-/// `db/marshal/CollectionType.java:361-382`; the `HAS_EMPTY_VALUE_MASK` flag bit
-/// for a cell value, `db/rows/Cell.java:264`) — never in these bytes.
+/// THE PUBLIC CELL-VALUE API REFUSES THE SENTINEL, for every admitted family
+/// (roborev job 452).
+///
+/// An earlier revision of this test asserted the opposite — that
+/// `TypeSerializer::serialize_value` emits exactly zero bytes for the sentinel —
+/// and that was the defect. This is the general CELL-VALUE surface: its zero
+/// bytes are read back through `HAS_EMPTY_VALUE_MASK` (`db/rows/Cell.java:264` at
+/// `cassandra-5.0.8`) as `null`, and inside a length-prefixed
+/// collection/tuple/UDT component as that component's own empty value. A
+/// declared type answers only whether an empty buffer would be LEGAL for the
+/// type; it does not supply a framing in which zero bytes MEAN an empty key. So
+/// a caller could silently serialize the sentinel into a different value.
+///
+/// The sentinel's zero-byte form remains legal on exactly ONE position, a
+/// multicell map's CELL PATH — `serialize_map_cell_path_key_into`, which is
+/// `pub(crate)` and therefore pinned in-crate
+/// (`data_writer::tests::empty_sentinel_write`) rather than here. The property
+/// THIS public-surface test owns is the refusal, and that the refusal names both
+/// the issue and the legal route.
 #[test]
-fn the_type_aware_serializer_emits_exactly_zero_bytes() {
+fn the_public_cell_value_api_refuses_the_sentinel_for_every_admitted_family() {
     let serializer = cqlite_core::storage::serialization::types::TypeSerializer::new();
     for (ty, name, _) in admitted_families() {
-        let bytes = serializer
+        let err = serializer
             .serialize_value(&Value::Empty(ty), name)
-            .unwrap_or_else(|e| panic!("serializing Empty({name}) failed: {e}"));
-        assert!(
-            bytes.is_empty(),
-            "Empty({name}) serialized to {} bytes, expected 0",
-            bytes.len()
-        );
+            .expect_err(&format!(
+                "Empty({name}) must be refused by the general cell-value API: zero bytes \
+                 in a cell-value position read back as null, not as the sentinel"
+            ));
+        let msg = err.to_string();
+        for needle in ["#3805", "serialize_map_cell_path_key_into"] {
+            assert!(
+                msg.contains(needle),
+                "the refusal of Empty({name}) must name {needle}; got: {msg}"
+            );
+        }
     }
 }
 
-/// A sentinel whose declared type DISAGREES with the column's type is refused,
-/// not silently written — a caller bug is never papered over by inferring from
-/// bytes (no-heuristics, issue #28).
+/// A sentinel whose declared type DISAGREES with the column's type is refused
+/// too — kept as its own case because the refusal above must not be reachable
+/// only for a matching tag. Both directions are a caller bug and neither is
+/// papered over by inferring from bytes (no-heuristics, issue #28).
 #[test]
 fn the_type_aware_serializer_refuses_a_tag_column_mismatch() {
     let serializer = cqlite_core::storage::serialization::types::TypeSerializer::new();
