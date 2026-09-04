@@ -252,6 +252,10 @@ fn list_cell(value: &[u8]) -> Vec<u8> {
 /// `[flags][timestamp][localDeletionTime][ttl][path_len][path][value_len][value]`
 fn expiring_list_cell(value: &[u8]) -> Vec<u8> {
     let path = list_element_path();
+    assert!(
+        path.len() < 0x80 && value.len() < 0x80,
+        "single-byte VUInt only"
+    );
     let mut buf = vec![0x02u8, 0x00, 0x01, 0x01, path.len() as u8];
     buf.extend_from_slice(&path);
     buf.push(value.len() as u8);
@@ -266,6 +270,7 @@ fn expiring_list_cell(value: &[u8]) -> Vec<u8> {
 /// `a_zero_length_shadowed_list_element_filters_only_under_has_empty_value`.
 fn empty_value_list_cell() -> Vec<u8> {
     let path = list_element_path();
+    assert!(path.len() < 0x80, "single-byte VUInt only");
     let mut buf = vec![0x04u8, 0x00, path.len() as u8];
     buf.extend_from_slice(&path);
     buf
@@ -401,6 +406,7 @@ fn only_the_shadowed_element_is_filtered_from_a_mixed_list() {
     // the path, because a list element lives in the cell VALUE.
     let live = {
         let path = list_element_path();
+        assert!(path.len() < 0x80, "single-byte VUInt only");
         let mut c = vec![0x08u8, path.len() as u8];
         c.extend_from_slice(&path);
         c.push(0x04);
