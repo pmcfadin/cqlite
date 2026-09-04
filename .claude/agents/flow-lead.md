@@ -52,7 +52,10 @@ back into one.
 ## Autonomy: arm `--auto`, GitHub merges on green (default, #2667)
 
 - **Default:** the moment **local certification** is met — `agent-gate.sh` PASS + **C** PASS
-  (design-driven) + roborev clean — the closer runs the pre-merge assert in one of its **two call
+  (design-driven) + roborev clean — and with the endgame run in the #3752 order
+  (**rebase → gate of record → C → ROBOREV LAST → premerge-assert → arm**, because a roborev round
+  changes no bytes while a rebase does, so a rebase VOIDS every review taken before it) — the closer
+  runs the pre-merge assert in one of its **two call
   shapes** — the third argument is REQUIRED and is the FULL gate's own summary file, so a merge with
   NO gate of record is mechanically refused (#3465) — re-reads for
   a fresh `HOLD:` order, then **arms `gh pr merge --auto --squash
@@ -73,6 +76,15 @@ back into one.
 - **Escalate and HOLD the merge ONLY for:** a genuine design-call roborev finding, a scope/product
   question, an unmet/uncovered requirement, work outside the issue, or an explicit `HOLD: merge after
   #N` order — obey it. Everything else merges autonomously.
+- **When YOU need to stop a merge, use the mechanism that GitHub enforces (#3752 AC7):** convert the
+  PR to draft (`gh pr ready --undo <pr>`) or set a per-tier `ci:` state. **`gh pr merge --disable-auto`
+  alone is NOT a stop** — it removes the auto-merge REQUEST only, and a plain `gh pr merge --squash`
+  succeeds immediately afterward (measured: PR #3735 merged three minutes after a lead disarmed it).
+  A column-zero `HOLD:` **COMMENT** on the PR or on the issue it closes is mechanical too, since
+  `premerge-assert`'s `hold-check` leg refuses on it (and on a disarm inside 30 minutes); clear it with
+  a column-zero `GO:` or `RELEASE:` line. It must be a **COMMENT, never the PR DESCRIPTION** — a body is
+  editable by anyone with write access with no per-edit attribution, so the leg scans comments only
+  (#3312); a `HOLD:` in the description is silently unenforced. Only a draft holds without the lane's cooperation.
 - **Always escalate to a NEEDS-YOU list, never decide:** product decisions, scope/title changes, and
   **epic closes**. (Comment/label/assign and closing a fully-done non-epic issue with a merged PR stay
   yours; merging follows the default above.)
@@ -231,9 +243,13 @@ near-independent issues instead of running one to done before starting the next:
   the Autonomy section: **never `ScheduleWakeup`-poll a PR's own CI**). Scheduled wakeups are for a *later
   confirmation* that an armed PR reached `state=MERGED`, or a genuinely external wait you do not control —
   not for the green itself. For a long local gate, poll its summary file with a cheap
-  `grep -qE 'RESULT: (PASS|FAIL)'` at <5-min intervals rather than idling — **never a bare `grep -q` on the
-  bare `RESULT:` token**, which also matches the startup `RESULT: INCOMPLETE (gate did not finish)`
-  **liveness placeholder** (not a verdict) and so false-fires the instant the gate launches (#3041).
+  **RECORD grammar** `grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'` at <5-min intervals rather than idling —
+  **never a bare `grep -q` on the bare `RESULT:` token**, which also matches the startup
+  `RESULT: INCOMPLETE (gate did not finish)` **liveness placeholder** (not a verdict) and so false-fires the
+  instant the gate launches (#3041). That grammar is for full and `--lite` ONLY; an **`--only <component>`**
+  run demotes success to `RESULT: PARTIAL`, so it spins on green there (#3750) — poll exit status `3`, or
+  `grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'`, and read the component's verdict SEPARATELY via
+  `scripts/gate-component-verdict.sh --mode only --component <name>`. `--delta` is a THIRD mode with a THIRD set — it alone can terminate `ERROR` or `REFUSED`, so polling it with the record grammar hangs on a terminal outcome: `grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)'` (#3750).
   Never a silent wait either (a **queued gate ≠ hung gate**: under load it first prints
   `waiting for gate slot (N in use)…`, and its summary file already holds the `INCOMPLETE` placeholder).
 

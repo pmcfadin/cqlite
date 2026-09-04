@@ -479,25 +479,9 @@ fn marshal_outer_column() -> Column {
     column(format!("frozen<{}>", vectors::MARSHAL_OUTER))
 }
 
-/// The refusal must come from a PER-FIELD consumption guard rather than the
-/// enclosing frozen-UDT one: the outer component prefix counts the nested bytes
-/// exactly, so the outer `frozen UDT` check is satisfied and only a field-level
-/// guard can refuse.
-///
-/// #3722 CHANGED WHICH field-level guard fires, without changing the property.
-/// This originally required `type 'nested UDT'` (`udt.rs`). #3722 routed
-/// `parse_inline_udt_value`'s fall-through through the ONE consolidated UDT-field
-/// decoder instead of the deleted `parse_simple_udt_field_value`, so this input
-/// now reaches the `inline UDT` guard first and is refused there. Both are
-/// per-field full-consumption checks enforcing the same TupleType.split rules 2
-/// and 4, so either satisfies what this test exists to prove — and
-/// `assert_refused_short` below still pins the exact consumed/expected counts, so
-/// widening the accepted SOURCE does not weaken the assertion about the OUTCOME.
-///
-/// DECLARED, not asserted: whether the `nested UDT` guard is still reachable on
-/// some other input is not established here. If it is not, it is dead code rather
-/// than a lost check — the refusal is unconditional either way — but that is worth
-/// confirming separately rather than assumed by this test.
+/// The refusal must be the NESTED-field guard's, not the enclosing frozen-UDT
+/// one: the outer component prefix counts the nested bytes exactly, so the outer
+/// `frozen UDT` check is satisfied and only `udt.rs:669` can refuse.
 fn assert_refused_by_the_nested_udt_guard(
     result: Result<Value>,
     expected_consumed: usize,
@@ -507,9 +491,8 @@ fn assert_refused_by_the_nested_udt_guard(
     if let Err(e) = &result {
         let msg = e.to_string();
         assert!(
-            msg.contains("type 'nested UDT'") || msg.contains("type 'inline UDT'"),
-            "{ctx}: the refusal must come from a PER-FIELD consumption check \
-             (nested UDT or inline UDT), not the enclosing frozen-UDT one, got: {msg}"
+            msg.contains("type 'nested UDT'"),
+            "{ctx}: the refusal must come from the NESTED-field consumption check, got: {msg}"
         );
     }
     vectors::assert_refused_short(result, expected_consumed, expected_len, ctx);

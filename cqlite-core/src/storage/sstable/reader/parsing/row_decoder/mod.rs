@@ -706,41 +706,27 @@ pub(crate) struct ComplexColumnMeta {
     pub shadow_filtered_element_count: usize,
 }
 
-// Row header flag constants
-const ROW_HAS_TIMESTAMP: u8 = 0x04;
-const ROW_HAS_TTL: u8 = 0x08;
-const ROW_HAS_DELETION: u8 = 0x10;
-const ROW_HAS_ALL_COLUMNS: u8 = 0x20;
-const ROW_HAS_COMPLEX_DELETION: u8 = 0x40; // Issue #221: Row contains complex column with deletion info
-const ROW_HAS_EXTENDED_FLAGS: u8 = 0x80;
+// Cassandra `UnfilteredSerializer` row-header / marker flag bits (epic #1116 split).
+mod row_flags;
+use row_flags::*;
 
-// Issue #3095 / epic #1116: the row DISPLAY + static-merge helpers live in `display_row`
-// (`row_has_non_key_cell`, `merge_static_cells`, `build_display_row`, `extract_clustering_values`).
+// Issue #3095 / epic #1116: the row DISPLAY + static-merge helpers
+// (`row_has_non_key_cell`, `merge_static_cells`, `build_display_row`,
+// `extract_clustering_values`) live in `display_row`.
 mod display_row;
 use display_row::{
     build_display_row, build_display_row_read_path, extract_clustering_values, merge_static_cells,
     row_is_visible,
 };
-mod timestamp_policy; // campsite split of `block_emit_windowed` (#1116): SlidingPartitionPolicy
+// campsite split of `block_emit_windowed` (epic #1116): the streaming-scan
+// `SlidingPartitionPolicy`.
+mod timestamp_policy;
 use timestamp_policy::TimestampPolicy;
 
 // Issue #1741 / #1853: `now_epoch_secs()` (the read-time TTL "now" clock, with
 // its `CQLITE_TTL_NOW_OVERRIDE_SECS` test seam) lives in `now_clock` — split
 // out to keep this module under the file-size ratchet (epic #1116).
 use now_clock::now_epoch_secs;
-
-// Unfiltered marker constants (from Cassandra UnfilteredSerializer.java lines 102-109)
-// Issue #229: These markers were being misinterpreted as row data, causing parsing failures
-const END_OF_PARTITION: u8 = 0x01; // Signal end of partition - nothing follows this flag byte
-const IS_MARKER: u8 = 0x02; // Range tombstone marker (not a data row)
-
-// Extended flags constants (from Cassandra UnfilteredSerializer.java lines 114-122)
-// These are in the SECOND byte when ROW_HAS_EXTENDED_FLAGS (0x80) is set
-const EXTENDED_IS_STATIC: u8 = 0x01; // Static row - has NO clustering prefix
-
-// NOTE: V5CompressedLegacy format has NO trailing field after row data.
-// The next partition/row starts immediately after row_size bytes.
-// (Previous ROW_TRAILING_FIELD_SIZE constant was removed as part of Issue #237 fix)
 
 /// Parser for V5CompressedLegacy format decompressed blocks
 pub struct V5CompressedLegacyParser {
@@ -792,6 +778,7 @@ mod cell_kind;
 mod cell_value;
 mod cell_value_complex; // campsite split of `cell_value` (#1795): complex ladder
 mod cell_value_scalar; // campsite split of `cell_value` (#1795): scalar arms
+pub(in crate::storage::sstable::reader) mod column_decode_error; // issue #3721 policy (COLUMN level)
 mod compaction;
 mod compaction_stream; // issue #2299 (split of `compaction`, campsite #1116)
 pub(in crate::storage::sstable::reader) use compaction_stream::{
@@ -799,27 +786,27 @@ pub(in crate::storage::sstable::reader) use compaction_stream::{
 };
 mod complex_column;
 mod frozen;
-mod frozen_framing; // #3722: element-decoder-parameterized frozen/tuple framing
 mod frozen_preamble;
 mod marshal_element;
 pub(crate) mod now_clock;
 mod parser_construction;
 mod partition_driver;
 pub(crate) mod partition_shadow;
+// Issue #3721 sibling policy modules — COLUMN level above, MARKER level here. Each
+// `mod` line grows this over-threshold glue file; acknowledged under epic #1116.
+mod range_marker_error; // issue #3721 policy (MARKER level)
 mod raw_type_value;
 mod raw_value;
 mod row_data;
 mod row_framing;
+mod typed_value;
 mod udt;
-mod udt_field; // #3722: THE single UDT-field value decoder (split of `udt`, #1116)
-mod udt_field_collection; // #3722: `udt_field`'s collection/tuple arms (#1116)
-mod udt_field_empty; // #3722: `udt_field`'s zero-length arm (#1116)
-mod udt_field_tests; // #3722: `udt_field`'s unit cases (#1135)
 mod vuint_length;
 
 use partition_driver::{row_write_timestamp, MarkerOutcome, SlidingPartitionPolicy};
-// Per-column decode dispatch tag (Epic J / issue #1635). Imported into this module's
-// namespace so the `use super::*` siblings (`cell_value`, `row_data`) can name it.
+// Per-column decode dispatch tag (Epic J / issue #1635). Imported into this
+// module's namespace so the `use super::*` sibling modules (`cell_value`,
+// `row_data`) can name it via `super::*`.
 use cell_kind::CellKind;
 use partition_shadow::{clustering_reversed_flags, PartitionShadow};
 // #1741: shared partition-header need-more classifier used by both sliding
@@ -879,3 +866,8 @@ mod regression_3848_frozen_preamble_overflow_tests;
 // the value silently degrades to `Blob`.
 #[cfg(test)]
 mod regression_2807_qualified_udt_decode_tests;
+
+// Issue #3778: `duration` trailing-byte tolerance is PARITY-CORRECT, not a bug —
+// the oracle and the ruling are in that module's own header. Read it before "fixing".
+#[cfg(test)]
+mod issue_3778_duration_parity_tests;

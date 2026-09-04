@@ -15,8 +15,18 @@ OpenSpec change `<slug>` (design-driven only).
 ## The loop (one design, read it end-to-end)
 
 `implement (TDD) → lite (each round) → rust-reviewer + roborev on the lite-green diff (review-first,
-DEFAULT) → fix (lite re-cert, scoped targets — never a full gate) → open PR → flow-closer {FULL gate
-ONCE → C → final roborev → merge-on-green → finalize}`
+DEFAULT) → fix (lite re-cert, scoped targets — never a full gate) → open PR → flow-closer {rebase →
+FULL gate ONCE → C → ROBOREV LAST → premerge-assert → arm → finalize}`
+
+**ROBOREV LAST inside the closer, and a later rebase VOIDS the roborev round (#3752).** The reason is
+a **byte asymmetry**: a roborev round changes no bytes, so reviewing after gating costs nothing and
+cannot invalidate a gate PASS; a rebase changes bytes, so gating or reviewing before it certifies the
+wrong tree. A rebase REWRITES the reviewed commit, so a PR can truthfully record "roborev: PASS" about
+a commit that no longer exists on the branch being merged (measured on PR #3735: job 304 at
+`d3812f59`, genuine, and after the rebase `git cat-file -t` reports no such object with two unreviewed
+commits after it). **Post the terminal `==== ROBOREV REVIEW SUMMARY ====` block as a top-level PR
+comment** — `premerge-assert.sh`'s `review-binding` leg reads the job id from there and refuses the
+merge when nothing on the PR binds a review to the tree about to merge.
 
 Review runs **before** the first full gate (issue #2086), so the ONE full gate of record certifies
 already-reviewed code exactly once, immediately pre-merge (issue #2087). Roborev fix rounds re-certify with
@@ -114,8 +124,17 @@ never gate stdout or review churn.
       `run-id` mismatch, read the sibling `/tmp/lite-<N>.txt.integrity-fail.*` / `logs:` bundle instead.
       **And only `PASS`/`FAIL` is a verdict (#3041):** the gate stamps
       `RESULT: INCOMPLETE (gate did not finish)` at launch, so if you poll rather than wait for exit,
-      use `grep -qE 'RESULT: (PASS|FAIL)'` — a bare `grep -q` on the bare `RESULT:` token matches that **liveness
-      placeholder** and would read a just-launched run as a finished one.
+      use the **RECORD grammar** `grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'` — a bare `grep -q` on the
+      bare `RESULT:` token matches that **liveness placeholder** and would read a just-launched run as a
+      finished one, and an UNANCHORED form matches `RESULT: PASSENGER`. That grammar is for full and
+      `--lite` ONLY: an **`--only <component>`** run demotes success to `RESULT: PARTIAL`, so polling it with
+      the record grammar SPINS ON GREEN (#3750) — there the exit status (**3**) is primary, the fallback is
+      `grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'`, and the component's VERDICT is a SEPARATE read
+      (`bash scripts/gate-component-verdict.sh "$SUM" --mode only --component <name>`), because a completed run
+      whose component SKIPped is not a pass. And **`--delta` is a THIRD mode with a THIRD set** — it
+      alone can terminate `ERROR` or `REFUSED`, so polling a `--delta` re-cert with the record grammar
+      hangs on a terminal outcome:
+      `grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)'` (#3750).
       Lite's components are exactly `file-size fmt clippy roborev-lints scoped-tests` (the
       `scripts/agent-gate.sh` `LITE_COMPONENTS` array), where clippy is **per-package scoped** (#1844) and
       `scoped-tests` is blast-radius (touched package `--lib` + the diff's new `--test` targets). It is the
@@ -202,7 +221,8 @@ never gate stdout or review churn.
       src-design blockers respawn a fresh `sstable-developer`; nits batched into the follow-up issue.
       **Any src change after the full gate INVALIDATES it** — the gate of record must postdate the final
       src change AND the final rebase, so the closer re-runs the full gate if either happened.
-   4. After the pre-merge SHA assert + `HOLD` re-read, **arms auto-merge
+   4. After the pre-merge SHA assert (which since #3752 also runs the fail-closed
+      `PREMERGE: REVIEW-BINDING` and `PREMERGE: HOLD-CHECK` legs) + `HOLD` re-read, **arms auto-merge
       (`gh pr merge --auto --squash --delete-branch`) so GitHub owns the CI-green wait** (#2667; safe
       because #2433's `required` check + `enforce_admins` are live) — obeying any open `HOLD: merge
       after #N` — then runs `flow-finalize` (in-session when the required check is already green at arm

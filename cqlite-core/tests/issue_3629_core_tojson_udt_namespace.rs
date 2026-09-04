@@ -205,17 +205,12 @@ async fn plain_udt_renders_declared_fields_and_nothing_else() {
 /// `unhashable_fields` (`label text, m frozen<map<text,int>>`) declares no
 /// `_type`. Golden: `[[{"label": "unhashable", "m": {"a": 1}}, 30]]`.
 ///
-/// FORMER DECODE GAP, CLOSED BY #3722: a COLLECTION field inside a FROZEN UDT
-/// used to decode to `Value::Blob`, so `m` rendered as base64 instead of the
-/// golden's `{"a": 1}`. There was one UDT-field decoder per route and both ended
-/// in `_ => Value::Blob`; there is now ONE, total over `CqlType`, so `m` is a
-/// decoded map.
-///
-/// RESIDUAL, pre-existing and orthogonal to BOTH #3629 and #3722: cqlite-core's
-/// `ToJson` stringifies MAP KEYS through `Display for Value`, which QUOTES text
-/// (`'a'`), so the key spelling still differs from the golden's `a`. That
-/// convention applies to every map cqlite-core renders — not just a UDT field —
-/// and is asserted here as measured, with the golden's map VALUE pinned exactly.
+/// The decode gap this case used to characterize — a COLLECTION field inside a
+/// FROZEN UDT degrading to `Value::Blob` — is CLOSED by issue #3631, so `m` is
+/// now asserted as the decoded map. The property under test here is still the
+/// FIELD NAMESPACE; the `m` assertion is a second, deliberate check that the two
+/// fixes hold together, since #3629's own mechanism (the injected `_type`) and
+/// #3631's (the unread declared type) both live in this one value.
 #[tokio::test]
 async fn nested_udt_in_tuple_in_set_renders_declared_fields_and_nothing_else() {
     let rows = rows_by_id("udt_hashable_shapes").await;
@@ -240,34 +235,31 @@ async fn nested_udt_in_tuple_in_set_renders_declared_fields_and_nothing_else() {
         Some(&json!(30)),
         "the tuple's second element is the golden's 30"
     );
-    // #3722: `m` is a DECODED map, no longer the frozen map's serialized bytes.
+    // The `m` field (`frozen<map<text,int>>`) is now DECODED FROM ITS DECLARED
+    // TYPE, not handed back as bytes (issue #3631). Until #3631 this assertion
+    // read `is_string` and carried a "known gap" message, because
+    // `parse_simple_udt_field_value` fell through to `Value::Blob` for every
+    // collection-shaped field type while the declared `CqlType` was its own match
+    // scrutinee — #28's silent degradation. The golden's value is `{"a": 1}`
+    // (`nb-1-big-Data.db.jsonl`, `udt_hashable_shapes` row 3).
+    //
+    // The KEY spelling is `'a'`, not `a`, and that is NOT part of this issue: the
+    // core `Map` arm stringifies every key with `Display` (`format!("{}", k)`),
+    // which quotes a `Value::Text` — the same pre-existing rendering the sibling
+    // `..._frozen_map_udt_key_is_display_stringified` case in this file
+    // characterizes for a UDT key. The CLI half of this pair renders the same
+    // decoded value as `[{"key": "a", "value": 1}]`, which is the other
+    // pre-existing map renderer. What #3631 changed is that the field is a MAP at
+    // all; how each surface spells a map is out of scope here.
     let m = udt
         .get("m")
-        .unwrap_or_else(|| panic!("`m` must be present, got {udt}"));
-    assert!(
-        !m.is_string(),
-        "#3722 closed the blob gap: a collection field inside a frozen UDT must \
-         no longer render as a base64/blob string; got {m:?}"
-    );
-    let entries = m
-        .as_object()
-        .unwrap_or_else(|| panic!("`m` is `frozen<map<text,int>>`, expected an object, got {m:?}"));
+        .unwrap_or_else(|| panic!("`m` field must be present, got {udt}"));
     assert_eq!(
-        entries.len(),
-        1,
-        "golden `{{\"a\": 1}}` has exactly one entry, got {m:?}"
-    );
-    let (key, value) = entries
-        .iter()
-        .next()
-        .expect("the single entry was just counted");
-    // The map VALUE is pinned to the golden exactly; the KEY carries the
-    // pre-existing `Display`-quoting residual described in the doc comment.
-    assert_eq!(value, &json!(1), "golden map value");
-    assert_eq!(
-        key.trim_matches('\''),
-        "a",
-        "golden map key (modulo the pre-existing ToJson map-key quoting): {key:?}"
+        m,
+        &json!({"'a'": 1}),
+        "the `m` field must decode from its declared `frozen<map<text,int>>` \
+         (golden `{{\"a\": 1}}`, core `Display`-stringified key), never a blob; \
+         got {m}"
     );
 }
 

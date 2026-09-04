@@ -60,7 +60,7 @@ OUTPUT_TOKEN_KEYS = (
     "completionTokens",
 )
 TOKEN_CONTAINER_KEYS = ("token_usage", "tokenUsage", "usage", "token_counts")
-STRING_FACTS = ("git_ref", "status", "model", "requested_model", "verdict")
+STRING_FACTS = ("git_ref", "status", "model", "requested_model", "verdict", "started_at")
 
 
 def objects(node):
@@ -80,10 +80,13 @@ def find_job(data, want):
     # `roborev show <id> --json` returns a REVIEW row whose top level carries
     # [agent, closed, created_at, id, job, job_id, output, prompt, uuid, verdict_bool]
     # and nests the JOB row — git_ref, status, model, requested_model, token_usage,
-    # verdict — under a "job" key. Both objects answer to the same id, so returning the
-    # FIRST id match handed back the review row, which has none of the fields the
-    # asserts need. Prefer an id match that actually carries git_ref (measured, issue
-    # #2964 round 6); fall back to the first match only if none does.
+    # verdict — under a "job" key. Both objects ANSWER TO the requested id, though by
+    # DIFFERENT keys: the nested job row through its own `id`, the review row through
+    # `job_id` (its top-level `id` is the review row's own sequence and need NOT equal
+    # the job — measured over ten records on v0.61.2, #3654). So returning the FIRST
+    # match handed back the review row, which has none of the fields the asserts need.
+    # Prefer an id match that actually carries git_ref (measured, issue #2964 round 6);
+    # fall back to the first match only if none does.
     matches = []
     for obj in objects(data):
         for key in ("id", "job_id", "job"):

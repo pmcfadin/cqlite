@@ -51,21 +51,6 @@ impl V5CompressedLegacyParser {
         }
 
         let mut current_offset = 0;
-        // Issue #3722: enforce the field-count cap BEFORE allocating. `parse_udt_value`
-        // has always checked this; when #3722 made the `CqlType::Udt` arm call
-        // `parse_inline_udt_value` directly, that check stopped covering the inline
-        // route — so a hostile SerializationHeader could declare an unbounded field
-        // list and drive both the loop and this allocation (roborev job 127). The cap
-        // lives here rather than at the call site because this function owns the
-        // allocation, and a call-site check would have to be repeated at each of them.
-        if inline_fields.len() > MAX_UDT_FIELD_COUNT {
-            return Err(Error::corruption(format!(
-                "Inline UDT '{}': field count {} exceeds maximum {}",
-                type_name,
-                inline_fields.len(),
-                MAX_UDT_FIELD_COUNT
-            )));
-        }
         let mut fields = Vec::with_capacity(inline_fields.len());
 
         for (field_name, field_type) in inline_fields {
@@ -95,14 +80,9 @@ impl V5CompressedLegacyParser {
                 // Null field
                 None
             } else if field_len == 0 {
-                // Empty value, through THE ONE UDT-field decoder (#3722). This used to
-                // call `parse_simple_udt_field_value`, one of the two divergent decoders
-                // that issue removed, whose fallback answered most types with an opaque
-                // `Value::Blob`. `udt_field_value` then collapses a decoded
-                // `Value::Null` to `None`, so a 0-length null and a -1 null are ONE
-                // representation.
-                let value = self.parse_udt_field_value(&[], field_type, depth)?;
-                Self::udt_field_value(value)
+                // Zero-length: decoded from the DECLARED type, see
+                // `typed_value.rs::empty_is_a_value` (issue #3631).
+                Some(self.parse_simple_udt_field_value_at(&[], field_type, depth)?)
             } else {
                 let field_len =
                     Self::checked_component_len(field_len, field_name, current_offset, data.len())?;
@@ -110,46 +90,14 @@ impl V5CompressedLegacyParser {
                 let field_data = &data[current_offset..current_offset + field_len];
                 current_offset += field_len;
 
-                // Handle nested UDTs using inline field definitions (Issue #239)
-                let value = match field_type {
-                    CqlType::Udt(nested_name, nested_fields) if !nested_fields.is_empty() => {
-                        // Recursively parse nested UDT using its inline fields
-                        self.parse_inline_udt_value(
-                            field_data,
-                            nested_name,
-                            nested_fields,
-                            depth + 1,
-                        )?
-                    }
-                    CqlType::Frozen(inner) => match inner.as_ref() {
-                        CqlType::Udt(nested_name, nested_fields) if !nested_fields.is_empty() => {
-                            // Frozen nested UDT - unwrap and parse. `depth + 2`: this
-                            // manual unwrap consumes BOTH the `Frozen` and the `Udt`,
-                            // which is what the consolidated decoder charges when it
-                            // walks the same shape itself (roborev, #3722).
-                            let inner_value = self.parse_inline_udt_value(
-                                field_data,
-                                nested_name,
-                                nested_fields,
-                                depth + 2,
-                            )?;
-                            Value::Frozen(Box::new(inner_value))
-                        }
-                        _ => {
-                            // Other frozen types, through THE ONE decoder (#3722).
-                            // `depth + 1`, NOT + 2: only the `Frozen` is consumed here.
-                            // The inner type is a NON-UDT handed to the consolidated
-                            // decoder, which charges its own levels. Charging two
-                            // rejected otherwise-valid values one level early, and was
-                            // my own error porting this during the main merge (roborev).
-                            let inner_value =
-                                self.parse_udt_field_value(field_data, inner, depth + 1)?;
-                            Value::Frozen(Box::new(inner_value))
-                        }
-                    },
-                    _ => self.parse_udt_field_value(field_data, field_type, depth)?,
-                };
-                Self::udt_field_value(value)
+                // ONE per-field entry (issue #3631). This was the THIRD copy of the
+                // dispatch: its own nested-UDT recursion, its own `frozen` wrapping,
+                // and a `Value::Blob` fallback for everything else.
+                // `parse_simple_udt_field_value_at` expresses all of it once —
+                // including the registry-then-inline preference, which this copy did
+                // not have at all (it went straight to inline, so a nested UDT that
+                // WAS in the registry decoded from the possibly-staler inline list).
+                Some(self.parse_simple_udt_field_value_at(field_data, field_type, depth)?)
             };
 
             fields.push(UdtField {
@@ -161,7 +109,7 @@ impl V5CompressedLegacyParser {
         // Issue #3811 (census finding C): `data` IS the whole UDT value, so the
         // field loop must have reached its end. See the module header for why this
         // is here and not at the 14 call sites, and for why rule 1 still passes.
-        Self::require_fully_consumed_raw(current_offset, data.len(), type_name, "inline UDT")?;
+        Self::require_fully_consumed(current_offset, data.len(), type_name, "inline UDT")?;
         Ok(Value::Udt(Box::new(UdtValue {
             type_name: type_name.to_string(),
             keyspace: self.keyspace.clone(),

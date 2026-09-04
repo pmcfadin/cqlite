@@ -121,13 +121,15 @@ impl V5CompressedLegacyParser {
 
                 // Parse UDT value from the blob
                 let udt_data = &data[off..off + blob_len];
-                // `0` is the type-nesting depth: this is a top-level frozen UDT
-                // column value (#3722).
+                // The trailing `0` is the ROOT nesting depth, written here on purpose:
+                // this is a COLUMN-level decode, so it genuinely starts the count.
+                // `parse_udt_value` has no zero-depth overload precisely so that a
+                // caller INSIDE a decode cannot pick one by accident (issue #3631).
                 let (udt_value, n) = self.parse_udt_value(udt_data, 0, &udt_def, column, 0)?;
                 // #3811 (finding C): `parse_udt_value` REPORTS; this caller dropped it,
                 // so a frozen UDT blob with trailing bytes or a partial trailing field
                 // header was accepted where the collection and tuple paths refuse.
-                Self::require_fully_consumed_raw(n, udt_data.len(), &column.name, "frozen UDT")?;
+                Self::require_fully_consumed(n, udt_data.len(), &column.name, "frozen UDT")?;
                 off += blob_len;
 
                 (udt_value, off)
@@ -175,13 +177,15 @@ impl V5CompressedLegacyParser {
                 }
 
                 let udt_data = &data[off..off + blob_len];
-                // `0` is the type-nesting depth: this is a top-level frozen UDT
-                // column value (#3722).
+                // The trailing `0` is the ROOT nesting depth, written here on purpose:
+                // this is a COLUMN-level decode, so it genuinely starts the count.
+                // `parse_udt_value` has no zero-depth overload precisely so that a
+                // caller INSIDE a decode cannot pick one by accident (issue #3631).
                 let (udt_value, n) = self.parse_udt_value(udt_data, 0, &udt_def, column, 0)?;
                 // #3811 (finding C): `parse_udt_value` REPORTS; this caller dropped it,
                 // so a frozen UDT blob with trailing bytes or a partial trailing field
                 // header was accepted where the collection and tuple paths refuse.
-                Self::require_fully_consumed_raw(n, udt_data.len(), &column.name, "frozen UDT")?;
+                Self::require_fully_consumed(n, udt_data.len(), &column.name, "frozen UDT")?;
                 off += blob_len;
 
                 (udt_value, off)

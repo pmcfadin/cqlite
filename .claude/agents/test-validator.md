@@ -92,8 +92,13 @@ never reads gate stdout. **Never invoke the full gate yourself**: a subagent idl
 full gate gets killed by the 600s stall watchdog and takes its child gate process down with it.
 **Queued gate ≠ hung gate:** under load the full gate may queue for a #1825 slot (prints `waiting for gate
 slot (N in use)…` once) — use a long timeout or `run_in_background`, never assume a hang. The correct
-liveness probe on a summary file is `grep -qE 'RESULT: (PASS|FAIL)'` — a bare `INCOMPLETE` is the
-start-of-run placeholder, **not** a verdict (#3041).
+liveness probe on a full or `--lite` summary file is the **RECORD grammar**
+`grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'` — a bare `INCOMPLETE` is the start-of-run placeholder,
+**not** a verdict (#3041). An **`--only <component>`** run is different: it demotes success to
+`RESULT: PARTIAL`, so the record grammar spins on green (#3750) — use its **exit status `3`**, or
+`grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'`, and then read the component's verdict SEPARATELY
+with `bash scripts/gate-component-verdict.sh "$SUM" --mode only --component <name>` (a SKIPped component
+is not a pass). `--delta` is a THIRD mode with a THIRD set — it alone can terminate `ERROR` or `REFUSED`, so polling it with the record grammar hangs on a terminal outcome: `grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)'` (#3750).
 
 Likewise you never invoke roborev: the closer runs it through the only sanctioned invocation,
 `bash scripts/flow/roborev-review.sh --agent <agent> --model <model>` (#2964; both flags required). Its

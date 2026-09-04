@@ -220,13 +220,33 @@ impl V5CompressedLegacyParser {
                     }
                     return Ok(PartitionStreamStep::Consumed(next_offset));
                 }
-                MarkerOutcome::Stop => {
+                // Issue #3721 (roborev job 16): the marker could not be PARSED.
+                // On a NON-final chunk that may be nothing worse than a marker
+                // body straddling the window boundary, which is exactly what
+                // `NeedMore` is for. On the FINAL chunk no refill is coming, so
+                // reporting `PartitionDone` — a SUCCESSFUL partition completion —
+                // silently dropped a corrupt or truncated tombstone from output
+                // that is WRITTEN, resurrecting the rows it shadowed. Propagate
+                // the preserved parse error instead. `at_final_chunk` is the
+                // caller's own chunking state; no bytes are inspected to guess
+                // whether more data exists (issue #28).
+                MarkerOutcome::Unparseable(cause) => {
                     if at_final_chunk {
-                        state.reset();
-                        return Ok(PartitionStreamStep::PartitionDone(0));
+                        return Err(
+                            super::range_marker_error::unparseable_marker_at_final_chunk(cause),
+                        );
                     }
                     return Ok(PartitionStreamStep::NeedMore);
                 }
+                // Issue #3721/#3808: a marker that PARSED but cannot be
+                // represented is corruption at a known resume point — no refill
+                // fixes it, and ending the partition here would report `Ok` with
+                // rows missing. `CompactionPolicy::on_range_marker` produces this
+                // for an unrecognised bound kind (#3808): the kind byte is real
+                // in-window on-disk data whenever the marker parsed at all, so a
+                // larger window cannot change it, and this policy's rows are
+                // WRITTEN — skipping the marker resurrects what it shadowed.
+                MarkerOutcome::Refused(e) => return Err(e),
             }
         }
 

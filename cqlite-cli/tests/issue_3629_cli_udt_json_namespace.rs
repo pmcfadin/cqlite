@@ -194,17 +194,13 @@ async fn plain_udt_renders_declared_fields_and_nothing_else() {
 /// `unhashable_fields` (`label text, m frozen<map<text,int>>`) declares no
 /// `_type`. Golden: `[[{"label": "unhashable", "m": {"a": 1}}, 30]]`.
 ///
-/// FORMER DECODE GAP, CLOSED BY #3722: a COLLECTION field inside a FROZEN UDT
-/// used to decode to `Value::Blob`, so `m` rendered as the CLI's `0x…` hex
-/// instead of the golden's `{"a": 1}`. There was one UDT-field decoder per route
-/// and both ended in `_ => Value::Blob`; there is now ONE, total over `CqlType`,
-/// so `m` is a decoded map.
-///
-/// RESIDUAL, pre-existing and orthogonal to BOTH #3629 and #3722: this CLI
-/// writer renders a map as an ARRAY of `{"key":…,"value":…}` objects rather than
-/// the golden's JSON object, for every map it writes — not just a UDT field. The
-/// key and value are therefore pinned to the golden's `a`/`1` THROUGH that
-/// container shape, which is asserted as measured.
+/// The decode gap this case used to characterize — a COLLECTION field inside a
+/// FROZEN UDT degrading to `Value::Blob`, rendered here as the CLI's `0x…` hex —
+/// is CLOSED by issue #3631, so `m` is now asserted as the decoded map. The
+/// property under test here is still the FIELD NAMESPACE; the `m` assertion is a
+/// second, deliberate check that the two fixes hold together, since #3629's own
+/// mechanism (the injected `_type`) and #3631's (the unread declared type) both
+/// live in this one value.
 #[tokio::test]
 async fn nested_udt_in_tuple_in_set_renders_declared_fields_and_nothing_else() {
     let rows = rows_by_id("udt_hashable_shapes").await;
@@ -229,22 +225,29 @@ async fn nested_udt_in_tuple_in_set_renders_declared_fields_and_nothing_else() {
         Some(&json!(30)),
         "the tuple's second element is the golden's 30"
     );
-    // #3722: `m` is a DECODED map, no longer the frozen map's bytes as CLI hex.
+    // The `m` field (`frozen<map<text,int>>`) is now DECODED FROM ITS DECLARED
+    // TYPE (issue #3631). Until then this assertion required `m` to be a hex
+    // STRING and carried a "known gap" message, because
+    // `parse_simple_udt_field_value` fell through to `Value::Blob` for every
+    // collection-shaped field type while the declared `CqlType` was its own match
+    // scrutinee — #28's silent degradation. Golden value: `{"a": 1}`
+    // (`nb-1-big-Data.db.jsonl`, `udt_hashable_shapes` row 3).
+    //
+    // The SPELLING is the CLI's own pre-existing map renderer — an ARRAY of
+    // `{"key": …, "value": …}` entries, which is what lets a non-string key
+    // round-trip through JSON at all, and which the sibling
+    // `..._frozen_map_udt_key_is_json_rendered` case in this file characterizes
+    // for a UDT key. cqlite-core's `ToJson` renders the same decoded value as
+    // `{"'a'": 1}` (a `Display`-stringified key). What #3631 changed is that the
+    // field is a MAP at all; how each surface spells a map is out of scope here.
     let m = udt
         .get("m")
-        .unwrap_or_else(|| panic!("`m` must be present, got {udt}"));
-    assert!(
-        m.as_str().map(|s| s.starts_with("0x")) != Some(true),
-        "#3722 closed the blob gap: a collection field inside a frozen UDT must \
-         no longer render as CLI hex; got {m:?}"
-    );
-    // The CLI's map shape is an array of {"key":…,"value":…} entries (residual
-    // described in the doc comment); the golden's single `a -> 1` entry is
-    // pinned through it.
+        .unwrap_or_else(|| panic!("`m` field must be present, got {udt}"));
     assert_eq!(
         m,
         &json!([{"key": "a", "value": 1}]),
-        "golden map entry `a -> 1`, in this writer's key/value-array map shape"
+        "the `m` field must decode from its declared `frozen<map<text,int>>` \
+         (golden `{{\"a\": 1}}`, CLI entry-array rendering), never a blob; got {m}"
     );
 }
 

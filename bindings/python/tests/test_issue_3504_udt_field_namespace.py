@@ -766,41 +766,61 @@ def test_a_full_scan_of_the_shapes_table_reads_every_row():
     assert isinstance(by_id[2]["ssu"], list) and len(by_id[2]["ssu"]) == 1
 
 
-def test_a_udt_with_a_collection_field_projects_and_its_field_decodes():
-    """The GAP RECORDED HERE IS CLOSED (#3722), and this is the promised red.
+def test_a_udt_with_a_collection_field_decodes_that_field_structurally():
+    """#3631: a `map`-typed UDT field decodes to a `dict`, and the projection
+    STILL SUCCEEDS — which falsifies the prediction #3631 itself made.
 
-    This test used to pin a decode-level gap: CQLite decoded a collection field
-    inside a frozen UDT as `Value::Blob`, so a `frozen<map<text,int>>` field
-    arrived as `bytes` (hashable, hence projectable) instead of `{"a": 1}`. It
-    said a future fix "will red HERE, with this comment attached" — #3722 is that
-    fix (one UDT-field decoder, total over `CqlType`, no `_ => Value::Blob`), and
-    this is the updated pin: the field now arrives as a `dict`.
+    This test used to pin the opposite. It asserted `isinstance(udt.fields["m"],
+    bytes)` as CHARACTERIZATION of a decode gap: `parse_simple_udt_field_value`
+    fell through to `Value::Blob` for every collection-shaped field type while the
+    declared `CqlType` was its own match scrutinee, so the field arrived as
+    hashable `bytes` and the row projected. #3631 closed that arm, so `m` is now
+    the golden's `{"a": 1}`.
 
-    The projection still succeeds, for a reason that is NOT the field's type and
-    so is worth stating: `stn` is a UDT-bearing set, so `set_to_py` takes its
-    #804 `list` branch (see the routing table above) and never hashes the `Udt`.
-    A `dict` field value would be unhashable if it ever reached `__hash__`.
+    #3631's own acceptance criterion 9 predicted that once `m` became a `dict`
+    "that shape becomes genuinely unhashable again, so the #3500 boundary moves".
+    MEASURED ON THIS TREE, the COLUMN is unchanged: it still projects, and still to
+    a `list`. The reason is #3500's container rule, not this fix — `contains_udt`
+    traverses the tuple, so `set_to_py` takes its #804 `list` branch for the whole
+    column, and a `list` hashes nothing. The criterion required a measurement and
+    the measurement contradicted the assumption behind it.
 
-    That `Udt.__hash__` residual is real all the same, and is asserted on a
-    HAND-BUILT value because no decoder path currently reaches it: a `Udt` whose
-    field value genuinely is unhashable still propagates `TypeError`.
+    WHAT DID MOVE, and it is the sharper fact: `Udt.__hash__`'s `TypeError` is now
+    REACHABLE FROM DECODED DATA. Before #3631 no decoder path produced a `Udt` with
+    an unhashable field value, so that residual could only be shown on a hand-built
+    value (as the last assertion in this test still does, kept as the direct
+    statement of the property). Now `hash(stn[0])` and `hash(stn[0][0])` both raise
+    — asserted below. Any FUTURE shape that reaches `value_to_hashable_key` with
+    this UDT inside it — a `map` KEYED on `frozen<unhashable_fields>`, which no
+    committed fixture declares — WILL raise, where before #3631 it would not have.
     """
     stn = _shapes_row(3)["stn"]
-    # `list`, not `frozenset`: the same #3500 container change as the `stu`
-    # column above (contains_udt traverses the tuple). The GAP this test pins is
-    # the FIELD's decode, which the container change does not touch.
+    # `list`, not `frozenset`: #3500's container rule (`contains_udt` traverses the
+    # tuple, so `set_to_py` takes the #804 `list` branch). Unchanged by #3631.
     assert isinstance(stn, list) and len(stn) == 1
     udt, position = stn[0]
     assert position == 30
     assert udt.type_name == "unhashable_fields"
     assert udt.fields["label"] == "unhashable"
-    # #3722: the decoded map, not the frozen map's bytes.
-    assert udt.fields["m"] == {"a": 1}, (
-        f"expected the decoded map {{'a': 1}} (#3722), got "
-        f"{udt.fields['m']!r} of type {type(udt.fields['m']).__name__}"
+    # #3631: the golden's `{"a": 1}`, decoded from the declared
+    # `frozen<map<text,int>>`, not its 17 serialized bytes. Golden:
+    # test-data/fixtures/issue_3504/.../udt_hashable_shapes-*/nb-1-big-Data.db.jsonl
+    # renders `"m":{"a":1}`.
+    m = udt.fields["m"]
+    assert m == {"a": 1}, (
+        f"expected the golden's {{'a': 1}}, decoded from the declared "
+        f"frozen<map<text,int>>; got {m!r} ({type(m).__name__}). A `bytes` here is "
+        "the #3631 blob fallback come back."
     )
 
-    # The residual, at the only layer that can reach it today.
+    # THE MOVED BOUNDARY, measured rather than predicted: the residual is now
+    # reachable from real decoded data, not only from a hand-built value.
+    with pytest.raises(TypeError, match=r"unhashable type: 'dict'"):
+        hash(udt)
+    with pytest.raises(TypeError, match=r"unhashable type: 'dict'"):
+        hash(stn[0])
+
+    # The residual stated directly, independently of any decode path.
     with pytest.raises(TypeError, match=r"unhashable type: 'dict'"):
         hash(cqlite.Udt("t", "k", {"m": {"a": 1}}))
 

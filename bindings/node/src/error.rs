@@ -494,7 +494,11 @@ mod tests {
             | Error::UnsupportedVersion { .. }
             // CommitLog reader (#2389) — not bound yet (v1 is library+CLI only).
             | Error::UnsupportedCommitLogVersion { .. }
-            | Error::CorruptCommitLogFrame(_) => "PARSE",
+            | Error::CorruptCommitLogFrame(_)
+            // Issue #3721: a column whose value could not be decoded is
+            // undecodable DATA reaching the caller — same identity as
+            // `Corruption`, hence the same `PARSE` code (and Python's `Cqlite`).
+            | Error::ColumnDecode { .. } => "PARSE",
             // Query execution budget elapsed (issue #1695): the SAME `TIMEOUT` code as
             // its sibling `Timeout`, so a JS caller checking for `TIMEOUT` catches
             // both. Deliberately NOT `QUERY`, even though its `ErrorCategory` IS

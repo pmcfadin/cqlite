@@ -574,10 +574,22 @@ async fn ttl_cells_mixed_expiring_and_live() {
     );
 
     let records = collect_upserts(&dir, ttl_cells_schema()).await;
-    if records.is_empty() {
-        println!("[SKIP] {name}: scan_delta produced 0 records (Data.db absent at scan time?)");
-        return;
-    }
+    // 0-ROWS-WHEN-PRESENT IS A FAILURE, UNCONDITIONALLY (roborev round 5 on #3725).
+    // This used to print `[SKIP] … (Data.db absent at scan time?)` and return SUCCESSFULLY.
+    // That guess was provably wrong and the skip was a vacuous pass: `skip_or_panic` above
+    // has ALREADY verified `test_deltas/ttl_cells`'s Data.db is present, and the golden was
+    // just asserted to mix expiring and live rows. So zero scanned records here cannot mean
+    // an absent fixture — it means the READER produced nothing from real data, i.e. a
+    // decoder regression, which is exactly what this parity target exists to catch. It is
+    // NOT routed through `skip_or_panic`: that helper is for an ABSENT fixture and would
+    // let this pass in the default (non-strict) mode, where a decoder regression is just as
+    // real. CLAUDE.md: "never let a dataset-dependent test pass on an empty dataset
+    // (0-rows-when-present = failure)".
+    assert!(
+        !records.is_empty(),
+        "{name}: scan_delta produced 0 records from a fixture whose Data.db is present and \
+         whose golden has rows — a decoder regression, not a missing fixture"
+    );
     let decoded = decode_rows(&records);
 
     let mut expiring_matched = 0usize;
@@ -721,10 +733,15 @@ async fn gc_before_boundary_local_deletion_times() {
         .unwrap_or_else(|| panic!("{name}: golden missing the no-TTL row"));
 
     let records = collect_upserts(&dir, gc_before_boundary_schema()).await;
-    if records.is_empty() {
-        println!("[SKIP] {name}: scan_delta produced 0 records");
-        return;
-    }
+    // 0-ROWS-WHEN-PRESENT IS A FAILURE (roborev round 5 on #3725) — see the sibling guard
+    // above for the full reasoning. The fixture's Data.db is already verified present and
+    // the golden already validated, so zero records is a decoder regression, and skipping
+    // on it was a vacuous pass in a target the merge gate now executes.
+    assert!(
+        !records.is_empty(),
+        "{name}: scan_delta produced 0 records from a fixture whose Data.db is present and \
+         whose golden has rows — a decoder regression, not a missing fixture"
+    );
     let decoded = decode_rows(&records);
 
     let d_86400 = find_decoded(&decoded, g_86400)

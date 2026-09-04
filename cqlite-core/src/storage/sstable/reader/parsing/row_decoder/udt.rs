@@ -3,6 +3,13 @@ use super::*;
 // Issue #3811: the inline-field UDT decoder, split out under the campsite rule
 // and carrying the consumption contract census finding C left open.
 mod inline;
+// Issue #3631 / roborev job 76: the ONE package rule for a marshal class name
+// (`org.apache.cassandra.db.marshal.X` or a bare `X`, and nothing else), plus the
+// single `UserType(` locator and structural dispatcher built on it.
+mod marshal_name;
+// Issue #3631: the marshal TYPE-STRING parser (`UserType(...)` -> `UdtTypeDef`,
+// marshal name -> `CqlType`), split out under the same rule.
+mod type_string;
 
 impl V5CompressedLegacyParser {
     /// Issue #1080: is this on-disk SerializationHeader marshal type a TOP-LEVEL
@@ -81,10 +88,11 @@ impl V5CompressedLegacyParser {
         }
 
         let udt_data = &data[offset..offset + blob_len];
-        // `0` is the type-nesting depth: a top-level frozen UDT column value (#3722).
+        // ROOT nesting depth: this is a COLUMN-level decode (issue #3631; see
+        // `parse_udt_value`, which deliberately offers no zero-depth overload).
         let (udt_value, n) = self.parse_udt_value(udt_data, 0, &udt_def, column, 0)?;
         // #3811 (finding C): `parse_udt_value` REPORTS; this caller used to drop it.
-        Self::require_fully_consumed_raw(n, udt_data.len(), &column.name, "frozen UDT")?;
+        Self::require_fully_consumed(n, udt_data.len(), &column.name, "frozen UDT")?;
         offset += blob_len;
 
         Ok((udt_value, offset))
@@ -147,336 +155,25 @@ impl V5CompressedLegacyParser {
             .any(|w| w.iter().zip(TARGET).all(|(a, b)| a.eq_ignore_ascii_case(b)))
     }
 
-    /// Parse a UDT type string to extract the UDT definition.
-    /// Cassandra encodes UDTs as:
-    /// `UserType(keyspace,hex_name,field1_hex:type1,field2_hex:type2,...)`
-    ///
-    /// Example:
-    /// ```text
-    /// org.apache.cassandra.db.marshal.UserType(
-    ///   test_collections,
-    ///   616464726573735f74797065,    // hex("address_type")
-    ///   737472656574:UTF8Type,        // street:UTF8Type
-    ///   63697479:UTF8Type,            // city:UTF8Type
-    ///   ...
-    /// )
-    /// ```
-    pub(super) fn parse_udt_type_definition(type_str: &str) -> Result<UdtTypeDef> {
-        Self::parse_udt_type_definition_with_depth(type_str, 0)
-    }
-
-    /// Internal implementation of parse_udt_type_definition with recursion depth tracking.
-    fn parse_udt_type_definition_with_depth(type_str: &str, depth: usize) -> Result<UdtTypeDef> {
-        // Check recursion depth to prevent stack overflow
-        if depth > MAX_TYPE_NESTING_DEPTH {
-            return Err(Error::schema(format!(
-                "UDT nesting depth {} exceeds maximum {}. Type string: {}",
-                depth,
-                MAX_TYPE_NESTING_DEPTH,
-                type_str.chars().take(100).collect::<String>()
-            )));
-        }
-
-        // Find the UserType(...) portion (case-insensitive). Match ONLY the
-        // fully-qualified marshal marker — the single shape real SerializationHeaders
-        // carry, and the same marker the nested-field decoder
-        // (`parse_cassandra_type_with_depth`) keys on. Keeping top-level and nested
-        // parsing on the same qualified marker avoids the partial-bare-support
-        // inconsistency that would blob nested UDT fields (roborev jobs 1359/1361).
-        let start_marker = "org.apache.cassandra.db.marshal.UserType(";
-        let type_lower = type_str.to_lowercase();
-        let start_marker_lower = start_marker.to_lowercase();
-        let start_idx = type_lower
-            .find(&start_marker_lower)
-            .ok_or_else(|| Error::schema(format!("Not a UserType: {}", type_str)))?;
-
-        // Find the matching close paren (handling nested types)
-        let inner_start = start_idx + start_marker.len();
-        let mut paren_depth = 1;
-        let mut end_idx = inner_start;
-        let chars: Vec<char> = type_str[inner_start..].chars().collect();
-
-        for (i, c) in chars.iter().enumerate() {
-            match c {
-                '(' => paren_depth += 1,
-                ')' => {
-                    paren_depth -= 1;
-                    if paren_depth == 0 {
-                        end_idx = inner_start + i;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        if paren_depth != 0 {
-            return Err(Error::schema(format!(
-                "Unbalanced parentheses in UserType: {}",
-                type_str
-            )));
-        }
-
-        let inner = &type_str[inner_start..end_idx];
-
-        // Split by comma, but respect nested parentheses
-        let parts = Self::split_type_args(inner)?;
-        if parts.len() < 2 {
-            return Err(Error::schema(format!(
-                "UserType requires at least keyspace and name: {}",
-                inner
-            )));
-        }
-
-        // First part is keyspace
-        let keyspace = parts[0].trim();
-        if keyspace.is_empty() {
-            return Err(Error::schema("UDT keyspace cannot be empty"));
-        }
-        let keyspace = keyspace.to_string();
-
-        // Second part is hex-encoded type name
-        let udt_name = Self::decode_hex_name(parts[1].trim())?;
-
-        // Remaining parts are field definitions: hex_name:type
-        let mut udt_def = UdtTypeDef::new(keyspace, udt_name);
-        for field_def in parts.iter().skip(2) {
-            let field_def = field_def.trim();
-            if field_def.is_empty() {
-                continue;
-            }
-
-            // Split on first colon (field name is before, type is after)
-            if let Some(colon_idx) = field_def.find(':') {
-                let field_name_hex = &field_def[..colon_idx];
-                let field_type_str = &field_def[colon_idx + 1..];
-
-                let field_name = Self::decode_hex_name(field_name_hex)?;
-                // Use depth-aware version to track recursion through UDT fields
-                let field_type = Self::parse_cassandra_type_with_depth(field_type_str, depth)?;
-
-                udt_def = udt_def.with_field(field_name, field_type, true);
-            } else {
-                return Err(Error::schema(format!(
-                    "Invalid UDT field definition (missing colon): {}",
-                    field_def
-                )));
-            }
-        }
-
-        Ok(udt_def)
-    }
-
-    /// Split type arguments by comma, respecting nested parentheses.
-    fn split_type_args(s: &str) -> Result<Vec<String>> {
-        let mut parts = Vec::new();
-        let mut current = String::new();
-        let mut depth = 0;
-
-        for c in s.chars() {
-            match c {
-                '(' => {
-                    depth += 1;
-                    current.push(c);
-                }
-                ')' => {
-                    depth -= 1;
-                    current.push(c);
-                }
-                ',' if depth == 0 => {
-                    parts.push(current.clone());
-                    current.clear();
-                }
-                _ => current.push(c),
-            }
-        }
-
-        if !current.is_empty() {
-            parts.push(current);
-        }
-
-        Ok(parts)
-    }
-
-    /// Decode a hex-encoded name (e.g., "616464726573735f74797065" -> "address_type")
-    fn decode_hex_name(hex: &str) -> Result<String> {
-        let bytes = hex::decode(hex)
-            .map_err(|e| Error::schema(format!("Invalid hex-encoded UDT name '{}': {}", hex, e)))?;
-        String::from_utf8(bytes)
-            .map_err(|e| Error::schema(format!("Invalid UTF-8 in UDT name '{}': {}", hex, e)))
-    }
-
-    /// Parse a Cassandra type string into a CqlType.
-    /// Handles: UTF8Type, Int32Type, ListType(...), SetType(...), MapType(...), UserType(...), FrozenType(...)
-    #[allow(dead_code)]
-    pub(super) fn parse_cassandra_type(type_str: &str) -> Result<CqlType> {
-        Self::parse_cassandra_type_with_depth(type_str, 0)
-    }
-
-    /// Internal implementation of parse_cassandra_type with recursion depth tracking.
-    fn parse_cassandra_type_with_depth(type_str: &str, depth: usize) -> Result<CqlType> {
-        // Check recursion depth to prevent stack overflow
-        if depth > MAX_TYPE_NESTING_DEPTH {
-            return Err(Error::schema(format!(
-                "Type nesting depth {} exceeds maximum {}. Type string: {}",
-                depth,
-                MAX_TYPE_NESTING_DEPTH,
-                type_str.chars().take(100).collect::<String>()
-            )));
-        }
-
-        let type_str = type_str.trim();
-
-        // Handle FrozenType wrapper
-        if type_str.starts_with("org.apache.cassandra.db.marshal.FrozenType(") {
-            let inner_start = "org.apache.cassandra.db.marshal.FrozenType(".len();
-            let inner = Self::extract_inner_parens(&type_str[inner_start..])?;
-            let inner_type = Self::parse_cassandra_type_with_depth(&inner, depth + 1)?;
-            return Ok(CqlType::Frozen(Box::new(inner_type)));
-        }
-
-        // Handle UserType (nested UDT)
-        if type_str.starts_with("org.apache.cassandra.db.marshal.UserType(") {
-            let udt_def = Self::parse_udt_type_definition_with_depth(type_str, depth + 1)?;
-            let fields: Vec<(String, CqlType)> = udt_def
-                .fields
-                .into_iter()
-                .map(|f| (f.name, f.field_type))
-                .collect();
-            return Ok(CqlType::Udt(udt_def.name, fields));
-        }
-
-        // Handle collection types
-        if type_str.starts_with("org.apache.cassandra.db.marshal.ListType(") {
-            let inner_start = "org.apache.cassandra.db.marshal.ListType(".len();
-            let inner = Self::extract_inner_parens(&type_str[inner_start..])?;
-            let elem_type = Self::parse_cassandra_type_with_depth(&inner, depth + 1)?;
-            return Ok(CqlType::List(Box::new(elem_type)));
-        }
-
-        if type_str.starts_with("org.apache.cassandra.db.marshal.SetType(") {
-            let inner_start = "org.apache.cassandra.db.marshal.SetType(".len();
-            let inner = Self::extract_inner_parens(&type_str[inner_start..])?;
-            let elem_type = Self::parse_cassandra_type_with_depth(&inner, depth + 1)?;
-            return Ok(CqlType::Set(Box::new(elem_type)));
-        }
-
-        if type_str.starts_with("org.apache.cassandra.db.marshal.MapType(") {
-            let inner_start = "org.apache.cassandra.db.marshal.MapType(".len();
-            let inner = Self::extract_inner_parens(&type_str[inner_start..])?;
-            let parts = Self::split_type_args(&inner)?;
-            if parts.len() != 2 {
-                return Err(Error::schema(format!(
-                    "MapType requires exactly 2 type arguments: {}",
-                    type_str
-                )));
-            }
-            let key_type = Self::parse_cassandra_type_with_depth(&parts[0], depth + 1)?;
-            let val_type = Self::parse_cassandra_type_with_depth(&parts[1], depth + 1)?;
-            return Ok(CqlType::Map(Box::new(key_type), Box::new(val_type)));
-        }
-
-        // Handle primitive types
-        Ok(match type_str {
-            s if s.ends_with("UTF8Type") => CqlType::Text,
-            s if s.ends_with("AsciiType") => CqlType::Ascii,
-            s if s.ends_with("Int32Type") => CqlType::Int,
-            s if s.ends_with("LongType") => CqlType::BigInt,
-            s if s.ends_with("FloatType") => CqlType::Float,
-            s if s.ends_with("DoubleType") => CqlType::Double,
-            s if s.ends_with("BooleanType") => CqlType::Boolean,
-            s if s.ends_with("UUIDType") || s.ends_with("TimeUUIDType") => CqlType::Uuid,
-            s if s.ends_with("TimestampType") => CqlType::Timestamp,
-            s if s.ends_with("DateType") || s.ends_with("SimpleDateType") => CqlType::Date,
-            s if s.ends_with("TimeType") => CqlType::Time,
-            s if s.ends_with("DecimalType") => CqlType::Decimal,
-            s if s.ends_with("IntegerType") => CqlType::Varint,
-            s if s.ends_with("BytesType") => CqlType::Blob,
-            s if s.ends_with("InetAddressType") => CqlType::Inet,
-            // Issue #3722: these four resolved to `Custom` and were the ROOT of a
-            // recurring defect family, not a cosmetic gap.
-            //
-            // On a schema-less read the field types come from the marshal header,
-            // so a `smallint` field's type was `Custom("…ShortType")` while under
-            // the CQL-short spelling it was `CqlType::SmallInt`. The two SPELLINGS
-            // therefore became DIFFERENT `CqlType`s before any decoder ran, and
-            // every decode site had to re-normalize — which is where three
-            // separate roborev findings landed across two review rounds (the empty
-            // path diverging, the non-empty path taking the lenient decoder, and a
-            // suffix-normalization workaround misclassifying a registry UDT named
-            // `udt:ShortType`). Naming the types here makes both spellings the SAME
-            // `CqlType` before dispatch and removes the need for any normalization
-            // at a decode site, so the family is eliminated rather than narrowed.
-            //
-            // `BytesType` does NOT shadow `ByteType` and vice versa (neither string
-            // ends with the other), so arm order is not load-bearing here.
-            s if s.ends_with("ShortType") => CqlType::SmallInt,
-            s if s.ends_with("ByteType") => CqlType::TinyInt,
-            s if s.ends_with("VarcharType") => CqlType::Text,
-            s if s.ends_with("DurationType") => CqlType::Duration,
-            // DELIBERATELY NOT `CounterColumnType`, which also falls through to
-            // `Custom`. A counter cell stores a CounterContext, not a raw i64 (see
-            // `parse_counter_context`), so resolving it to `CqlType::Counter` here
-            // could make a schema-less counter COLUMN read 8 raw bytes instead of
-            // parsing the context — a behaviour change on a path this issue does
-            // not touch, for no benefit: Cassandra refuses `counter` as a UDT
-            // field outright ("A user type cannot contain counters", measured
-            // against 5.0.2), so it is unreachable as a UDT field type.
-            //
-            // `LexicalUUIDType` is likewise absent because it is NOT missing: it
-            // ends with `UUIDType` and so already resolves to `CqlType::Uuid` on
-            // the arm above. Stated because an earlier count of this gap said
-            // "six" and the real number is four.
-            _ => CqlType::Custom(type_str.to_string()),
-        })
-    }
-
-    /// Extract the contents inside parentheses, respecting nesting.
-    fn extract_inner_parens(s: &str) -> Result<String> {
-        let mut depth = 1;
-        let mut end_idx = 0;
-        let chars: Vec<char> = s.chars().collect();
-
-        for (i, c) in chars.iter().enumerate() {
-            match c {
-                '(' => depth += 1,
-                ')' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end_idx = i;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        if depth != 0 {
-            return Err(Error::schema(format!(
-                "Unbalanced parentheses in type: {}",
-                s
-            )));
-        }
-
-        Ok(s[..end_idx].to_string())
-    }
-
     /// Parse a UDT value from binary data using the given UDT definition.
     /// UDT binary format (frozen):
     /// - For each field in schema order:
     ///   - [4 bytes BE i32]: field length (-1 = null, 0 = empty, >0 = data length)
     ///   - [N bytes]: field data (if length > 0)
-    ///
-    /// The `depth` parameter counts CQL TYPE nesting, not the byte `offset`, and
-    /// bounds the field decodes below. It exists because those decodes previously
-    /// passed a literal 0, which restarted `MAX_TYPE_NESTING_DEPTH` on every UDT
-    /// hop — the defect family roborev found at a new site in five consecutive
-    /// rounds on issue #3722. The four production callers are genuine top-level
-    /// entries (a UDT column value) and legitimately pass 0.
     // NOTE: this UDT decoder is purely structural — it reads the i32-length-prefixed
     // field layout using only the [`UdtTypeDef`] field types. It does NOT need an
     // [`SSTableReader`] (the previous `reader` param was threaded through but never
     // dereferenced), so it is reader-free and unit-testable in isolation (issue #1080).
+    ///
+    /// `depth` is the CURRENT type-nesting level, threaded from the caller rather
+    /// than restarted here (issue #3631). This function recurses back into itself
+    /// through `parse_simple_udt_field_value_at`, so a `0` written here would make
+    /// `MAX_TYPE_NESTING_DEPTH` bound nothing across alternating collection/UDT
+    /// layers: each frozen-UDT hop would reset the counter and a cyclic
+    /// `UdtRegistry` — which the registry type permits even though CQL does not —
+    /// would recurse until the stack is exhausted. A caller genuinely at the root
+    /// (a column-level decode, or a test) writes the `0` at its own call site, where
+    /// a reviewer can see it.
     pub(super) fn parse_udt_value(
         &self,
         data: &[u8],
@@ -544,21 +241,20 @@ impl V5CompressedLegacyParser {
                 tracing::debug!("V5CompressedLegacy: UDT field '{}' is null", field_def.name);
                 None
             } else if field_len == 0 {
-                // Empty field: through THE decoder, at length 0 (issue #3722).
-                // It used to call a `create_empty_value_for_type` helper whose
-                // fallback arm was `Value::Blob`, so an empty `varint`,
-                // `decimal`, `time`, `inet`, `tuple` or nested `udt` field came
-                // back an opaque blob. See `udt_field_empty` for the semantics
-                // and their Cassandra sources.
+                // Empty field - create empty value based on type
                 tracing::debug!(
                     "V5CompressedLegacy: UDT field '{}' is empty",
                     field_def.name
                 );
-                Self::udt_field_value(self.parse_udt_field_value(
-                    &[],
-                    &field_def.field_type,
-                    depth,
-                )?)
+                // A ZERO-LENGTH field is decoded from its DECLARED TYPE, exactly like
+                // a field WITH data (issue #3631). `create_empty_value_for_type`'s
+                // `_ =>` arm was an empty BLOB, so an empty `int`, an empty `tuple`
+                // and an empty nested UDT all surfaced as `Blob([])` — the same
+                // silent degradation as the non-empty arms, one length apart. The
+                // Cassandra rule (`isEmptyValueMeaningless` and, more precisely, the
+                // per-serializer `accessor.isEmpty(value) ? null : …` guard) is
+                // stated once, in `typed_value.rs::empty_is_a_value`.
+                Some(self.parse_simple_udt_field_value_at(&[], &field_def.field_type, depth)?)
             } else {
                 // Field with data. `checked_component_len` owns BOTH the negative
                 // rejection and the bounds test, so no loop can have one without
@@ -579,8 +275,16 @@ impl V5CompressedLegacyParser {
                     field_len
                 );
 
-                // Parse field value based on its type
-                let value = self.parse_udt_field_value(field_data, &field_def.field_type, depth)?;
+                // ONE per-field entry (issue #3631). `parse_udt_field_value` used to
+                // live below with its own ~140-line dispatch, a `Value::Blob` `_ =>`
+                // arm for every collection/tuple type, a `date` arm missing
+                // Cassandra's `SimpleDateType` epoch offset, and a nested-UDT arm that
+                // called back into this function with a hard `0` depth.
+                // `parse_simple_udt_field_value_at` expresses all of it once, threads
+                // `depth`, routes through the single exhaustion assert, and returns an
+                // explicit `Error` naming a type it cannot decode (#3631 criterion 5).
+                let value =
+                    self.parse_simple_udt_field_value_at(field_data, &field_def.field_type, depth)?;
                 Some(value)
             };
 
@@ -737,23 +441,42 @@ impl V5CompressedLegacyParser {
 
     /// Parse a nested UDT from registry definition (Issue #238)
     /// Used when parsing UDT fields that are themselves UDTs
-    /// `depth` counts CQL type nesting and is checked on ENTRY, because this
-    /// function recurses into itself for a registry-resolved nested UDT. Without
-    /// it a chain of registry types recursed until stack exhaustion — reachable
-    /// from a schema-less read of hostile bytes, since the chain comes from the
-    /// marshal header (roborev round 4 on #3722; the same class as the reset-to-0
-    /// defect round 2 found in the inline-UDT arm).
+    ///
+    /// # ONE per-field dispatch (issue #3631)
+    /// The per-field `match` this function used to carry was the SECOND copy of the
+    /// same ~100-line dispatch: it resolved a nested UDT name itself, wrapped
+    /// `frozen` itself, and had FOUR `Value::Blob` arms for a name it could not
+    /// resolve plus a `_ =>` that degraded every collection-typed field. All of it
+    /// is now one call to `parse_simple_udt_field_value_at`, which resolves through
+    /// the very same `self.udt_registry`, threads `depth`, and returns an explicit
+    /// `Error` naming an unresolvable type instead of silently handing back bytes
+    /// (#3631 criterion 5).
+    ///
+    /// The old `registry: &UdtRegistry` parameter is GONE: every caller passed
+    /// `self.udt_registry`'s contents, and the one delegate resolves through that
+    /// same field, so threading it was a second path to one fact.
+    ///
+    /// `depth` is threaded, never restarted: this function is re-entered through the
+    /// delegate above, so a hard `0`/`1` here is what let a chain of frozen-UDT hops
+    /// reset `MAX_TYPE_NESTING_DEPTH` indefinitely.
     pub(super) fn parse_nested_udt_from_registry(
         &self,
         data: &[u8],
         udt_def: &crate::types::UdtTypeDef,
-        registry: &UdtRegistry,
         depth: usize,
     ) -> Result<Value> {
         if depth > MAX_TYPE_NESTING_DEPTH {
             return Err(Error::corruption(format!(
                 "Nested UDT '{}': type nesting depth {} exceeds maximum {}",
                 udt_def.name, depth, MAX_TYPE_NESTING_DEPTH
+            )));
+        }
+        if udt_def.fields.len() > MAX_UDT_FIELD_COUNT {
+            return Err(Error::schema(format!(
+                "UDT '{}' has {} fields, exceeds maximum {}",
+                udt_def.name,
+                udt_def.fields.len(),
+                MAX_UDT_FIELD_COUNT
             )));
         }
         let mut current_offset = 0;
@@ -785,14 +508,9 @@ impl V5CompressedLegacyParser {
             let field_value = if field_len == -1 {
                 None
             } else if field_len == 0 {
-                // `depth`, NOT 0: a literal here restarted the nesting budget, so a
-                // chain UDT -> collection<UDT> -> collection<UDT> recursed without
-                // limit even with this function's own entry guard in place
-                // (roborev round 5 on #3722 — the THIRD round to find an
-                // un-threaded site in this family, which is why the guard is now a
-                // behavioural deep-chain test and not per-site trust).
-                let value = self.parse_udt_field_value(&[], &field_def.field_type, depth)?;
-                Self::udt_field_value(value)
+                // Zero-length: decoded from the DECLARED type, see
+                // `typed_value.rs::empty_is_a_value` (issue #3631).
+                Some(self.parse_simple_udt_field_value_at(&[], &field_def.field_type, depth)?)
             } else {
                 let field_len = Self::checked_component_len(
                     field_len,
@@ -804,120 +522,11 @@ impl V5CompressedLegacyParser {
                 let field_data = &data[current_offset..current_offset + field_len];
                 current_offset += field_len;
 
-                // Handle deeply nested UDTs (including FROZEN<udt> types)
-                let value = match &field_def.field_type {
-                    CqlType::Custom(nested_type_name) => {
-                        // `get_udt_qualified` owns "udt:" + keyspace-qualifier
-                        // normalization (Issue #239 / #2807).
-                        if let Some(nested_udt) =
-                            registry.get_udt_qualified(&self.keyspace, nested_type_name)
-                        {
-                            self.parse_nested_udt_from_registry(
-                                field_data,
-                                nested_udt,
-                                registry,
-                                depth + 1,
-                            )?
-                        } else {
-                            Value::Blob(
-                                crate::storage::sstable::reader::value_borrow::borrow_active(
-                                    field_data,
-                                ),
-                            )
-                        }
-                    }
-                    CqlType::Udt(udt_name, inline_fields) => {
-                        // Inline UDT type - prefer registry, fall back to inline fields (Issue #239)
-                        if let Some(nested_udt) =
-                            registry.get_udt_qualified(&self.keyspace, udt_name)
-                        {
-                            self.parse_nested_udt_from_registry(
-                                field_data,
-                                nested_udt,
-                                registry,
-                                depth + 1,
-                            )?
-                        } else if !inline_fields.is_empty() {
-                            // Issue #239: Use inline field definitions for nested UDTs
-                            self.parse_inline_udt_value(
-                                field_data,
-                                udt_name,
-                                inline_fields,
-                                depth + 1,
-                            )?
-                        } else {
-                            Value::Blob(
-                                crate::storage::sstable::reader::value_borrow::borrow_active(
-                                    field_data,
-                                ),
-                            )
-                        }
-                    }
-                    CqlType::Frozen(inner) => {
-                        // `depth + 2` at every inner decode below: a manual
-                        // `Frozen<Udt>` unwrap consumes BOTH levels. The merge
-                        // from main reverted this to + 1 (roborev, #3722).
-                        // Handle FROZEN<udt_type> - the inner type may be a UDT
-                        match inner.as_ref() {
-                            CqlType::Custom(nested_type_name) => {
-                                // `get_udt_qualified` owns "udt:" + keyspace-qualifier
-                                // normalization (Issue #239 / #2807).
-                                if let Some(nested_udt) =
-                                    registry.get_udt_qualified(&self.keyspace, nested_type_name)
-                                {
-                                    let inner_value = self.parse_nested_udt_from_registry(
-                                        field_data,
-                                        nested_udt,
-                                        registry,
-                                        depth + 2,
-                                    )?;
-                                    Value::Frozen(Box::new(inner_value))
-                                } else {
-                                    Value::Frozen(Box::new(Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(field_data))))
-                                }
-                            }
-                            CqlType::Udt(udt_name, inline_fields) => {
-                                // Prefer registry, fall back to inline fields (Issue #239)
-                                if let Some(nested_udt) =
-                                    registry.get_udt_qualified(&self.keyspace, udt_name)
-                                {
-                                    let inner_value = self.parse_nested_udt_from_registry(
-                                        field_data,
-                                        nested_udt,
-                                        registry,
-                                        depth + 2,
-                                    )?;
-                                    Value::Frozen(Box::new(inner_value))
-                                } else if !inline_fields.is_empty() {
-                                    // Issue #239: Use inline field definitions
-                                    let inner_value = self.parse_inline_udt_value(
-                                        field_data,
-                                        udt_name,
-                                        inline_fields,
-                                        depth + 2,
-                                    )?;
-                                    Value::Frozen(Box::new(inner_value))
-                                } else {
-                                    Value::Frozen(Box::new(Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(field_data))))
-                                }
-                            }
-                            _ => {
-                                // Other frozen types - parse as simple value
-                                let inner_value =
-                                    self.parse_udt_field_value(field_data, inner, depth + 1)?;
-                                Value::Frozen(Box::new(inner_value))
-                            }
-                        }
-                    }
-                    // `depth`, NOT 0. This fall-through is the arm a COLLECTION field
-                    // type takes, and it was the last reset in this family: a chain
-                    // `UDT -> frozen<list<frozen<UDT>>> -> ...` decoded 30 levels deep
-                    // against a budget of 10 until this literal was replaced. Caught by
-                    // `a_collection_mediated_udt_chain_deeper_than_the_budget_errors`,
-                    // which is why that guard is behavioural rather than per-site.
-                    _ => self.parse_udt_field_value(field_data, &field_def.field_type, depth)?,
-                };
-                Some(value)
+                Some(self.parse_simple_udt_field_value_at(
+                    field_data,
+                    &field_def.field_type,
+                    depth,
+                )?)
             };
 
             fields.push(UdtField {
@@ -931,7 +540,11 @@ impl V5CompressedLegacyParser {
         // must have reached its end. Trailing bytes and a partial component-length
         // header both leave `current_offset` short; TupleType.split rule 1 (a
         // genuinely short encoding) leaves it EQUAL and stays accepted.
-        Self::require_fully_consumed_raw(current_offset, data.len(), &udt_def.name, "nested UDT")?;
+        //
+        // #3631: this is ALSO what makes `typed_value.rs::parse_typed_udt` able to
+        // report `data.len()` as the consumed count — an `Ok` here is a proof of it,
+        // not an assumption.
+        Self::require_fully_consumed(current_offset, data.len(), &udt_def.name, "nested UDT")?;
         Ok(Value::Udt(Box::new(UdtValue {
             type_name: udt_def.name.clone(),
             keyspace: udt_def.keyspace.clone(),
@@ -1000,45 +613,13 @@ impl V5CompressedLegacyParser {
     /// [`parse_udt_type_definition`]; the two differ only in that this preserves
     /// the raw type string instead of converting it to a `CqlType`.
     pub(super) fn udt_field_marshal_types(type_str: &str) -> Result<Vec<(String, String)>> {
-        let start_marker = "org.apache.cassandra.db.marshal.UserType(";
-        let type_lower = type_str.to_lowercase();
-        let start_marker_lower = start_marker.to_lowercase();
-        let start_idx = type_lower
-            .find(&start_marker_lower)
-            .ok_or_else(|| Error::schema(format!("Not a UserType: {}", type_str)))?;
-
-        let inner_start = start_idx + start_marker.len();
-        let mut paren_depth = 1;
-        let mut end_idx = inner_start;
-        let chars: Vec<char> = type_str[inner_start..].chars().collect();
-        for (i, c) in chars.iter().enumerate() {
-            match c {
-                '(' => paren_depth += 1,
-                ')' => {
-                    paren_depth -= 1;
-                    if paren_depth == 0 {
-                        end_idx = inner_start + i;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        if paren_depth != 0 {
-            return Err(Error::schema(format!(
-                "Unbalanced parentheses in UserType: {}",
-                type_str
-            )));
-        }
-
-        let inner = &type_str[inner_start..end_idx];
-        let parts = Self::split_type_args(inner)?;
-        if parts.len() < 2 {
-            return Err(Error::schema(format!(
-                "UserType requires at least keyspace and name: {}",
-                inner
-            )));
-        }
+        // The ONE `UserType(` locator + argument split (`udt/marshal_name.rs`),
+        // shared with `parse_udt_type_definition_with_depth`. This used to carry an
+        // independent copy of the find-and-walk-parens code, and so an independent
+        // copy of its package-SUFFIX hole: a substring `find` of the qualified
+        // marker accepted `my.org.apache.cassandra.db.marshal.UserType(…)`
+        // (roborev job 76).
+        let parts = Self::marshal_user_type_args(type_str)?;
 
         let mut fields = Vec::with_capacity(parts.len().saturating_sub(2));
         for field_def in parts.iter().skip(2) {
@@ -1511,152 +1092,5 @@ mod tests {
         let (ks, name) = V5CompressedLegacyParser::udt_keyspace_and_name(marshal).unwrap();
         assert_eq!(ks, "test_ks");
         assert_eq!(name, "person");
-    }
-
-    /// A `UserType(test_ks, wide_u, i int, vi varint)` marshal string, plus the
-    /// bytes of a value whose `i` is 7 and whose `vi` is ZERO LENGTH.
-    fn udt_with_an_empty_field() -> (String, Vec<u8>) {
-        let type_str = format!(
-            "org.apache.cassandra.db.marshal.UserType(test_ks,{},{}:org.apache.cassandra.db.marshal.Int32Type,{}:org.apache.cassandra.db.marshal.IntegerType)",
-            hex::encode("wide_u"),
-            hex::encode("i"),
-            hex::encode("vi")
-        );
-        let mut data = 4i32.to_be_bytes().to_vec();
-        data.extend_from_slice(&7i32.to_be_bytes());
-        data.extend_from_slice(&0i32.to_be_bytes());
-        (type_str, data)
-    }
-
-    fn assert_empty_varint_field_is_null(value: &Value, ctx: &str) {
-        match value {
-            Value::Udt(udt) => {
-                assert_eq!(udt.fields[0].value, Some(Value::Integer(7)), "{ctx}: i");
-                // `None`, NOT `Some(Value::Null)`. An empty varint IS null
-                // (IntegerSerializer.java:33) and never an opaque Value::Blob
-                // (#3722 AC1) — and `UdtField::value`'s `None` is what null MEANS
-                // here, so a 0-length null and a -1 null must be ONE
-                // representation. This assertion originally expected
-                // `Some(Value::Null)`, which roborev round 7 showed made the two
-                // hash and compare differently under derived `UdtValue` equality.
-                assert_eq!(
-                    udt.fields[1].value, None,
-                    "{ctx}: an EMPTY varint field is null (IntegerSerializer.java:33) \
-                     and must use the SAME `None` spelling a -1 field uses, never \
-                     `Some(Value::Null)` and never an opaque Value::Blob (#3722 AC1)"
-                );
-            }
-            other => panic!("{ctx}: expected a Udt, got {other:?}"),
-        }
-    }
-
-    /// BLOCKER B (roborev, #3722): a field of length 0 bypassed THE decoder at
-    /// BOTH UDT call sites, answering from a `create_empty_value_for_type`
-    /// helper whose fallback arm was `Value::Blob`. These two cases pin the CALL
-    /// SITES (the helper's own per-type semantics are pinned in
-    /// `udt_field_empty`), because a total empty-value arm nothing routes to
-    /// would leave the defect exactly where it was.
-    #[test]
-    fn empty_fields_route_through_the_decoder_at_both_udt_call_sites() {
-        let parser = V5CompressedLegacyParser::new(
-            "test_ks".to_string(),
-            "test_table".to_string(),
-            0,
-            0,
-            None,
-        );
-        let (type_str, data) = udt_with_an_empty_field();
-        let udt_def = V5CompressedLegacyParser::parse_udt_type_definition(&type_str)
-            .expect("UserType marshal string must parse");
-
-        // Site 1 — `udt.rs::parse_udt_value` (the frozen-UDT column reader).
-        let column = crate::schema::Column {
-            name: "c".to_string(),
-            data_type: "udt".to_string(),
-            nullable: true,
-            default: None,
-            is_static: false,
-        };
-        let (value, _) = parser
-            .parse_udt_value(&data, 0, &udt_def, &column, 0)
-            .expect("UDT with an empty field must decode");
-        assert_empty_varint_field_is_null(&value, "parse_udt_value");
-
-        // Site 2 — `raw_type_value.rs`'s frozen-UDT arm.
-        let (value, _) = parser
-            .parse_raw_type_value(&data, 0, &type_str, "c", 0)
-            .expect("UDT with an empty field must decode");
-        assert_empty_varint_field_is_null(&value, "parse_raw_type_value");
-    }
-
-    /// `udt{f: udt{f: ...}}` nested `levels` deep, with the matching bytes:
-    /// each level frames its single field as `[i32 BE len][bytes]`.
-    fn nested_udt_type_and_bytes(levels: usize) -> (CqlType, Vec<u8>) {
-        let mut ty = CqlType::Int;
-        let mut data = 7i32.to_be_bytes().to_vec();
-        for _ in 0..levels {
-            ty = CqlType::Udt("u".to_string(), vec![("f".to_string(), ty)]);
-            let mut framed = (data.len() as i32).to_be_bytes().to_vec();
-            framed.extend_from_slice(&data);
-            data = framed;
-        }
-        (ty, data)
-    }
-
-    /// BLOCKER A (roborev, #3722): the `CqlType::Udt` field arm re-entered the
-    /// UDT reader at depth **0**, so a UDT nested inside a UDT restarted the
-    /// nesting budget and the guard never fired however deep the nesting went.
-    /// Past the bound this must ERROR, not recurse.
-    #[test]
-    fn nested_udt_field_recursion_is_depth_bounded() {
-        let p = V5CompressedLegacyParser::new(
-            "test_ks".to_string(),
-            "test_table".to_string(),
-            0,
-            0,
-            None,
-        );
-        // Well WITHIN the budget: decodes, so the error below is the BOUND
-        // firing and not nested UDTs failing in general.
-        let (ok_ty, ok_data) = nested_udt_type_and_bytes(MAX_TYPE_NESTING_DEPTH - 2);
-        assert!(p.parse_udt_field_value(&ok_data, &ok_ty, 0).is_ok());
-
-        let (ty, data) = nested_udt_type_and_bytes(MAX_TYPE_NESTING_DEPTH + 2);
-        let err = V5CompressedLegacyParser::new(
-            "test_ks".to_string(),
-            "test_table".to_string(),
-            0,
-            0,
-            None,
-        )
-        .parse_udt_field_value(&data, &ty, 0)
-        .expect_err("nesting past the bound must error, not recurse");
-        assert!(err.to_string().contains("depth"), "got: {err}");
-    }
-
-    /// The same arm built its `Value::Udt` with an EMPTY keyspace, so a UDT
-    /// reached through a UDT field had a different public identity (`_keyspace`
-    /// in the bindings; part of `Udt` equality and hashing, #3504) from the same
-    /// UDT nested directly. It must carry the reader's keyspace.
-    #[test]
-    fn nested_udt_field_carries_the_real_keyspace() {
-        let (ty, data) = nested_udt_type_and_bytes(1);
-        let value = V5CompressedLegacyParser::new(
-            "real_ks".to_string(),
-            "test_table".to_string(),
-            0,
-            0,
-            None,
-        )
-        .parse_udt_field_value(&data, &ty, 0)
-        .expect("one level of nesting must decode");
-        match value {
-            Value::Udt(udt) => {
-                assert_eq!(udt.keyspace, "real_ks", "nested UDT keyspace");
-                assert_eq!(udt.type_name, "u");
-                assert_eq!(udt.fields[0].value, Some(Value::Integer(7)));
-            }
-            other => panic!("expected a Udt, got {other:?}"),
-        }
     }
 }

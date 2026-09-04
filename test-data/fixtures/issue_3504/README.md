@@ -184,10 +184,13 @@ in either decode path makes the two disagree.
 
 ## Table 2: `udt_hashable_shapes` — the projection totality boundary (R1-2)
 
-**THIS SECTION HAS BEEN RE-MEASURED TWICE, AND THE HISTORY IS THE POINT.** The
-boundary moved under #3504 and again under #3500, in different ways, so anything
-here stated as a mechanism decays fast. The column below labelled `now` was
-measured against THIS tree; the two earlier columns are kept as record.
+**THIS SECTION HAS BEEN RE-MEASURED THREE TIMES, AND THE HISTORY IS THE POINT.**
+The boundary moved under #3504, again under #3500, and again under #3631, each in
+a different way, so anything here stated as a mechanism decays fast. The
+right-most column below was measured against THIS tree; the earlier columns are
+kept as record. A column is ADDED per re-measurement rather than the table being
+rewritten — the value of this table is precisely that the successive answers
+disagree.
 
 When #3504 landed, `value_to_hashable_key` had arms for `List`, `Map`, `Frozen`
 and `Udt` only, while `Tuple` and `Set` had **none** and fell through to
@@ -207,12 +210,12 @@ raised while converting a row, so a row holding both would hide the projectable
 cell. That is also why the Python suite reads this table by primary key rather
 than scanning it.
 
-| row | column | type | before #3504 | after #3504 | now (`+#3500`, measured on this tree) |
-|---|---|---|---|---|---|
-| 1 | `stu` | `frozen<set<frozen<tuple<frozen<collide>,int>>>>` | `TypeError: unhashable type: 'dict'` | `frozenset({(Udt, 10)})` | `list[tuple[Udt(collide), 10]]` |
-| 1 | `mtu` | `frozen<map<frozen<tuple<frozen<collide>,int>>,int>>` | `TypeError: unhashable type: 'dict'` | `{(Udt, 20): 5}` | `dict{tuple[Udt(collide), 20]: 5}` |
-| 2 | `ssu` | `frozen<set<frozen<set<frozen<collide>>>>>` | `TypeError: unhashable type: 'list'` | still raises | `list[list[Udt(collide)]]` — **no longer raises** |
-| 3 | `stn` | `frozen<set<frozen<tuple<frozen<unhashable_fields>,int>>>>` | `TypeError: unhashable type: 'dict'` | `frozenset({(Udt, 30)})` | `list[tuple[Udt(unhashable_fields), 30]]` |
+| row | column | type | before #3504 | after #3504 | `+#3500` | now (`+#3631`, measured on this tree) |
+|---|---|---|---|---|---|---|
+| 1 | `stu` | `frozen<set<frozen<tuple<frozen<collide>,int>>>>` | `TypeError: unhashable type: 'dict'` | `frozenset({(Udt, 10)})` | `list[tuple[Udt(collide), 10]]` | unchanged |
+| 1 | `mtu` | `frozen<map<frozen<tuple<frozen<collide>,int>>,int>>` | `TypeError: unhashable type: 'dict'` | `{(Udt, 20): 5}` | `dict{tuple[Udt(collide), 20]: 5}` | unchanged |
+| 2 | `ssu` | `frozen<set<frozen<set<frozen<collide>>>>>` | `TypeError: unhashable type: 'list'` | still raises | `list[list[Udt(collide)]]` — **no longer raises** | unchanged |
+| 3 | `stn` | `frozen<set<frozen<tuple<frozen<unhashable_fields>,int>>>>` | `TypeError: unhashable type: 'dict'` | `frozenset({(Udt, 30)})` | `list[tuple[Udt(unhashable_fields), 30]]`, field `m` = **17 `bytes`** | same container, field `m` = **`{'a': 1}`**; `hash()` of the element or of the UDT now **raises** |
 
 Three things to read off it, none of which is what the pre-#3500 text said:
 
@@ -229,21 +232,34 @@ Three things to read off it, none of which is what the pre-#3500 text said:
   `list` is unhashable in the outer set — the error text said `'list'`, not
   `'dict'`). #3500 made the OUTER set take the `list` branch too, so there is no
   longer a set to hash it into.
-- `stn`'s decode gap **is CLOSED by #3722**, and this bullet is the correction. The
-  text here previously read "the decode gap survives and is still the interesting
-  fact", on the measurement that CQLite decoded a collection field inside a frozen
-  UDT as `Value::Blob`, so `m` arrived as
-  `b'\x00\x00\x00\x01\x00\x00\x00\x01a\x00\x00\x00\x04\x00\x00\x00\x01'`
-  — the serialized form of the golden's `{"a": 1}` rather than the value. #3722
-  consolidated the two UDT-field decoders into one that is total over `CqlType`, so
-  `m` now decodes to `{"a": 1}` and the pin in
-  `bindings/python/tests/test_issue_3504_udt_field_namespace.py` was updated
-  accordingly — it had promised it would "red HERE, with this comment attached", and
-  it did. What has NOT changed is why the column succeeds: that is the container
-  (`set_to_py`'s #804 `list` branch), not the field's type, so this bullet is no
-  longer the interesting fact about `stn` at all. `Udt.__hash__` does still
-  propagate `TypeError` for a genuinely unhashable field value, asserted on a
-  hand-built value.
+- **`stn`'s decode gap is CLOSED by #3631, and this re-measurement is the
+  interesting one, because #3631's own prediction was WRONG.** The gap was: CQLite
+  decoded a collection field inside a frozen UDT as `Value::Blob`, so `m` arrived
+  as the 17 hashable bytes
+  `b'\x00\x00\x00\x01\x00\x00\x00\x01a\x00\x00\x00\x04\x00\x00\x00\x01'` —
+  the serialized form of the golden's `{"a": 1}`. #3631 made the decoder read the
+  declared `frozen<map<text,int>>`, so `m` is now `{'a': 1}`.
+
+  #3631's acceptance criterion 9 predicted that this would make the shape
+  "genuinely unhashable again, so the #3500 boundary moves". **At the COLUMN level
+  it does not, and requiring a measurement is what caught that**: `stn` still
+  projects, and still to a `list`, because the container rule in the bullet above
+  is #3500's and has nothing to do with the field's type — `contains_udt`
+  traverses the tuple, `set_to_py` takes its #804 `list` branch for the whole
+  column, and a `list` hashes nothing. The prediction assumed something would hash
+  the value. Nothing does.
+
+  **What DID move is one level in:** `Udt.__hash__`'s `TypeError` is now
+  REACHABLE FROM DECODED DATA. The paragraph this replaced said the residual "is
+  asserted on a hand-built value" because *no decoder path reached it*; that is no
+  longer true. Measured on this tree: `hash(stn[0][0])` and `hash(stn[0])` both
+  raise `unhashable type: 'dict'`, and both are asserted in
+  `bindings/python/tests/test_issue_3504_udt_field_namespace.py`. So a shape that
+  DOES reach `value_to_hashable_key` carrying this UDT — a `map` KEYED on
+  `frozen<unhashable_fields>`, which no committed fixture declares — will now
+  raise where before #3631 it would not have. That is the boundary; it is STATED
+  rather than demonstrated, because adding such a column needs a regenerated
+  fixture (Docker + `cassandra:5.0.2`, which the gate does not have).
 
 The Node binding has no analogous boundary: it builds a real JS `Set`/`Map`,
 which need no hashable projection at all.

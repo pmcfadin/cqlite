@@ -26,7 +26,7 @@ middle; you sit in one standing seat (spec approval — merge is autonomous on g
 |------|--------------|
 | `flow-groom` | rough idea → one scoped issue (one `P0`–`P3`, `status:ready`, testable criteria); decides oracle vs design |
 | `flow-activate` | worktree + branch + `opsx:propose`; renders spec + design inline; **STOPS at Seam 1** |
-| `flow-implement` | implement (TDD) → review-first (`rust-reviewer` + roborev on the lite-green diff) → open PR → spawn `flow-closer` for the endgame (full gate → **C** → final roborev → merge → finalize) |
+| `flow-implement` | implement (TDD) → review-first (`rust-reviewer` + roborev on the lite-green diff) → open PR → spawn `flow-closer` for the endgame (rebase → full gate → **C** → **roborev LAST** → `premerge-assert` → merge → finalize) |
 | `flow-address` | resolves PR review comments; re-verifies; pushes; replies |
 | `flow-finalize` | `opsx:archive` + **stamp the telemetry ledger** + remove worktree/branch + close issue (post-merge) |
 | `flow-board` | status across in-flight work + drives the one item waiting on you |
@@ -130,6 +130,47 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   which asserts the PR is
   OPEN and its `headRefOid` **equals the locally-certified tip**, exiting non-zero (and printing a
   loud refusal) on a moved head, a closed/merged PR, or a gh failure.
+  **Since #3752 it also runs two fail-closed legs BEFORE the head check, both refusing on
+  `UNMEASURED`** (a positive verdict requires a positive measurement): `PREMERGE: REVIEW-BINDING`
+  asserts that a roborev job RECORDED ON THE PR has a reviewed head that is an ANCESTOR of the certified
+  sha, with no reviewable code after it. `git merge-base --is-ancestor` is the load-bearing test and runs
+  FIRST — `git cat-file -t` is a DIAGNOSTIC ONLY, because a rebase leaves the old commit dangling and
+  reflog-reachable so it still answers `commit`, and an object-validity-first check gives a reassuring
+  answer that never fires. The reviewed head comes from the JOB RECORD's `git_ref` (`<base40>..<head40>`),
+  never from the `Enqueued job <N> for <sha>` line, which for a range review names only the BASE. A
+  code-free PR diff is a loudly DECLARED `NOT-APPLICABLE`, because a code-free diff cannot be
+  roborev-certified at all.
+  **A RANGE MATCH ALONE DOES NOT BIND.** The leg's first draft reported the recorded verdict and
+  derived nothing from it — a false-green route in a merge gate, since a block naming an
+  in-progress, FAILED or findings-bearing job whose range happened to match bound the merge. It is
+  an ACCIDENT route before a hostile one: a lane pasting its own first FAILING round certifies
+  itself. A job binds only when the JOB RECORD's structured verdict — never the PR block's
+  self-reported one, which is untrusted text — says `clean`, or says `findings` AND an allowlisted
+  human authorized deferring them for that exact base/head/job. The verdict is three-valued and an
+  unreadable one is `UNMEASURED`: a range match is not a review. The deferral route exists because
+  roborev RE-REPORTS a lead-deferred finding on every later round, so a record stays `findings`
+  forever once findings were deferred and requiring `clean` outright would make such a merge
+  unobtainable. That authorization is re-verified through the SAME scanner the wrapper uses, under a
+  deliberately narrow kind returning a DISTINCT state, so nothing is decided from the block's text —
+  and the marker's `count=` half is deliberately NOT re-verified, which the output SAYS rather than
+  implies: it is matched against the count OBSERVED BY THE REVIEW, which this leg never ran.
+  `PREMERGE: HOLD-CHECK` re-reads the PR thread and the issue it closes for a
+  column-zero `HOLD:` order, and the PR timeline for a lead disarm inside 30 minutes.
+  **The threads are read with `gh api --paginate`, every page decoded before any verdict.**
+  `--json comments` is a BOUNDED connection, so a persistent `HOLD:` outside the first page produced
+  a false `NO-HOLD-RECOGNISED` on the very artifact a lead posts a stop order in. One normalised
+  stream feeds both job discovery and the hold scan, and the REST-vs-GraphQL spelling difference
+  (`user.login`/`created_at` vs `author.login`/`createdAt`) is reconciled once at the fetch
+  boundary: read the wrong one and every author is EMPTY, which silently stops honouring an
+  allowlisted release — fail-closed, and wrong on correct input. An unrecognised payload shape
+  refuses rather than yielding a shorter comment list, because a short thread is indistinguishable
+  from a quiet one. **Markers are ordered by `updatedAt`, not `createdAt`**: what a reader sees is
+  the current text, so an old comment EDITED to carry `HOLD:` must not lose to a `GO:` posted before
+  that edit.
+  **How a lead actually stops a merge (AC7):** convert the PR to draft (`gh pr ready --undo`), which
+  GitHub enforces, or set a per-tier `ci:` state. **`gh pr merge --disable-auto` alone is NOT a stop** —
+  it removes the auto-merge REQUEST and a plain `gh pr merge --squash` succeeds immediately afterward
+  (measured: #3735 merged three minutes after the lead disarmed it).
   **The third argument is REQUIRED (#3465), and it closes TWO distinct escapes with one mechanism.**
   Verifying the head against a *claimed* certified sha never verified that a certified sha EXISTS.
   **#3408 = no gate at all**: it merged on 22 `--lite` PASSes and no full `scripts/agent-gate.sh` run,
@@ -614,9 +655,23 @@ Inside `flow-implement` the loop is ONE coherent design, not three patches:
 ```
 implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lite-green diff
   (review-first, DEFAULT) → fix (lite re-cert + diff-scoped targets, NEVER a full gate)
-  → open PR → flow-closer { FULL gate ONCE → C → final roborev → merge-on-green → finalize }
+  → open PR → flow-closer { rebase → FULL gate ONCE → C → ROBOREV LAST → premerge-assert
+                            → arm → finalize }
 ```
 
+- **ROBOREV LAST, and a later rebase VOIDS the roborev round (issue #3752).** The endgame order is
+  **rebase → gate of record → C → roborev → `premerge-assert` → arm**, and a **byte asymmetry** decides
+  it: a roborev round changes no bytes, so reviewing after gating costs nothing and cannot invalidate a
+  gate PASS; a rebase changes bytes, so gating or reviewing before it certifies the wrong tree.
+  Review-after-gate is free; gate-after-review is not. Measured on PR #3735: a genuine PASS (job 304 at
+  `d3812f59`, `findings: NONE`, 1.07M input tokens) survived the lane's correct rebase as a true
+  statement about a commit `git cat-file -t` reports does not exist — with two unreviewed commits after
+  the reviewed content, one of them the semantic rebase-conflict fix in the only file overlapping `main`.
+  Post the terminal `==== ROBOREV REVIEW SUMMARY ====` block as a top-level PR comment: the merge gate's
+  `review-binding` leg reads the job id from there. And a **non-empty semantic overlap means git can
+  merge cleanly and still be wrong** — compute it over `merge-base..origin/main`, never
+  `HEAD..origin/main` (measured 16 files vs the correct 3), re-run the tests touching every overlapping
+  file, and expect a fix; any such fix invalidates both the gate and the review.
 - **Review-first is the default (issue #2086).** `rust-reviewer` + roborev run on the **lite-green** diff
   **before** the first full gate, so review discovers fixable problems before we pay for the 12–25 min gate.
   Skip only for a genuinely mechanical diff (no `pub`-item change AND single call site AND no new surface).
@@ -634,8 +689,13 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   spawns a per-issue `flow-closer` that runs the ONE full `scripts/agent-gate.sh` of record (via
   `run_in_background` + the summary-file pattern — it **never idle-waits**, which would trip the #1855 stall
   watchdog and orphan the gate; polling the summary file is mandatory on a hard 45-min deadline, with
-  `grep -qE 'RESULT: (PASS|FAIL)'` — never a bare `grep -q` on the bare `RESULT:` token, which also matches the startup
-  `RESULT: INCOMPLETE` liveness placeholder and would accept a just-launched gate as a verdict, #3041),
+  the anchored **RECORD grammar** `grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'` — never a bare `grep -q` on the
+  bare `RESULT:` token, which also matches the startup `RESULT: INCOMPLETE` liveness placeholder and would accept
+  a just-launched gate as a verdict, #3041; and never that grammar on an `--only` run, which demotes success to
+  `RESULT: PARTIAL` and so spins on green, and never that grammar on the **`--delta`** re-cert it also runs,
+  which alone can terminate `ERROR`/`REFUSED` and needs
+  `grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)'` — see #3750 for the per-mode grammars and the separate component-verdict
+  read),
   the **C**
   intent audit, the final roborev pass, then merges on green and `flow-finalize`s. The closer has **no
   `Agent` tool**, so it never spawns directly: for **C** (and any src-design fix) it emits a structured

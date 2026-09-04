@@ -6,8 +6,12 @@
 # ----------------------
 # `RESULT: INCOMPLETE (gate did not finish)` is written into the summary file ONCE, at
 # launch, before the #1825 slot is even granted (#3041). It is therefore the artifact
-# of THREE states at once — queued, running, killed — and the correct completion probe
-# (`grep -qE 'RESULT: (PASS|FAIL)'`) says "not finished" for all three. A lane whose
+# of THREE states at once — queued, running, killed — and the correct completion probe (the
+# RECORD grammar, `grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'`) says "not finished" for all
+# three. An `--only` run needs the ONLY grammar instead (`…|PARTIAL)…`) because it demotes success
+# to `RESULT: PARTIAL`, and its component VERDICT is a separate assertion —
+# scripts/gate-component-verdict.sh, which delegates ITS completion question to this reader (#3750).
+# A lane whose
 # gate was reaped at the #3473 ceiling and a lane whose gate is 30 minutes from a PASS
 # read IDENTICAL text. Resolving them required a human running `ps` on the box, which
 # is exactly what made the coordination lead the fleet's only gate-runner.
@@ -208,14 +212,14 @@ _snap_of() {
 BEAT_ERR=""
 _beat_valid() {
  local t="$1" n_start n_end open_ln close_ln pc iv ep sq ln
-  n_start=$(printf '%s\n' "$t" | grep -cxF '==== AGENT-GATE HEARTBEAT ====')
-  n_end=$(printf '%s\n' "$t" | grep -cxF '==== END AGENT-GATE HEARTBEAT ====')
+  n_start=$(grep -cxF '==== AGENT-GATE HEARTBEAT ====' <<<"$t")
+  n_end=$(grep -cxF '==== END AGENT-GATE HEARTBEAT ====' <<<"$t")
   if [ "$n_start" -ne 1 ] || [ "$n_end" -ne 1 ]; then
     BEAT_ERR="heartbeat-not-a-single-block; found $n_start opener(s) and $n_end closer(s) — a beat is published by atomic rename, so anything but exactly one of each means this is not one coherent beat"
     return 1
   fi
-  open_ln=$(printf '%s\n' "$t" | grep -nxF '==== AGENT-GATE HEARTBEAT ====' | head -1 | cut -d: -f1)
-  close_ln=$(printf '%s\n' "$t" | grep -nxF '==== END AGENT-GATE HEARTBEAT ====' | head -1 | cut -d: -f1)
+  open_ln=$(grep -nxF '==== AGENT-GATE HEARTBEAT ====' <<<"$t" | head -1 | cut -d: -f1)
+  close_ln=$(grep -nxF '==== END AGENT-GATE HEARTBEAT ====' <<<"$t" | head -1 | cut -d: -f1)
   if [ "$open_ln" -ge "$close_ln" ]; then
     BEAT_ERR="heartbeat-out-of-order; the closer (line $close_ln) does not follow the opener (line $open_ln)"
     return 1
@@ -242,7 +246,7 @@ _beat_valid() {
   # Either way a DUPLICATE is fatal for both groups, because the first occurrence would be trusted.
   local f cnt
   for f in run-id beat-seq beat-epoch interval parent-check; do
-    cnt=$(printf '%s\n' "$t" | grep -c "^$f: ")
+    cnt=$(grep -c "^$f: " <<<"$t")
     if [ "$cnt" -ne 1 ]; then
       BEAT_ERR="heartbeat-field-count; '$f' appears $cnt time(s) and must appear exactly once — no value is attributable to a single beat otherwise"
       return 1
@@ -259,7 +263,7 @@ _beat_valid() {
   # reason. My own test for it asserted only the exit code, so it passed while the cause was EMPTY —
   # the "assert the message, not just the code" lesson from 4b.76, not propagated to a test written one
   # round later.
-  _bp=$(printf '%s\n' "$1" | sed -n 's/^beater-pid: //p' | head -1)
+  _bp=$(sed -n 's/^beater-pid: //p' <<<"$1" | head -1)
   if [ -n "$_bp" ]; then
     case "$_bp" in
       *[!0-9]*)
@@ -275,15 +279,15 @@ _beat_valid() {
     fi
   fi
   for f in host beater-pid; do
-    cnt=$(printf '%s\n' "$t" | grep -c "^$f: ")
+    cnt=$(grep -c "^$f: " <<<"$t")
     if [ "$cnt" -gt 1 ]; then
       BEAT_ERR="heartbeat-field-count; '$f' appears $cnt times and must appear at most once — the first occurrence would be trusted"
       return 1
     fi
   done
   for f in run-id beat-seq beat-epoch interval parent-check host beater-pid; do
-    printf '%s\n' "$t" | grep -q "^$f: " || continue
-    ln=$(printf '%s\n' "$t" | grep -n "^$f: " | head -1 | cut -d: -f1)
+    grep -q "^$f: " <<<"$t" || continue
+    ln=$(grep -n "^$f: " <<<"$t" | head -1 | cut -d: -f1)
     if [ "$ln" -lt "$open_ln" ] || [ "$ln" -gt "$close_ln" ]; then
       BEAT_ERR="heartbeat-field-outside-block; '$f' (line $ln) lies outside the block (lines $open_ln..$close_ln)"
       return 1
@@ -294,13 +298,13 @@ _beat_valid() {
   # instead of returning its documented UNKNOWN — and an unbounded digit string can overflow a
   # comparison. So each field is length-bounded (rejecting absurd values outright) and every later
   # use goes through base-10 arithmetic.
-  ep=$(printf '%s\n' "$t" | grep -m1 '^beat-epoch: '); ep="${ep#beat-epoch: }"
+  ep=$(grep -m1 '^beat-epoch: ' <<<"$t"); ep="${ep#beat-epoch: }"
   case "$ep" in ''|*[!0-9]*) BEAT_ERR="heartbeat-unparseable-epoch; 'beat-epoch: $ep' is not an integer"; return 1 ;; esac
   [ "${#ep}" -le 12 ] || { BEAT_ERR="heartbeat-epoch-out-of-range; 'beat-epoch: $ep' has ${#ep} digits, which is not a plausible unix time"; return 1; }
-  sq=$(printf '%s\n' "$t" | grep -m1 '^beat-seq: '); sq="${sq#beat-seq: }"
+  sq=$(grep -m1 '^beat-seq: ' <<<"$t"); sq="${sq#beat-seq: }"
   case "$sq" in ''|*[!0-9]*) BEAT_ERR="heartbeat-unparseable-seq; 'beat-seq: $sq' is not an integer"; return 1 ;; esac
   [ "${#sq}" -le 12 ] || { BEAT_ERR="heartbeat-seq-out-of-range; 'beat-seq: $sq' has ${#sq} digits"; return 1; }
-  iv=$(printf '%s\n' "$t" | grep -m1 '^interval: '); iv="${iv#interval: }"
+  iv=$(grep -m1 '^interval: ' <<<"$t"); iv="${iv#interval: }"
   case "$iv" in ''|*[!0-9]*) BEAT_ERR="heartbeat-unparseable-interval; 'interval: $iv' is not an integer"; return 1 ;; esac
   [ "${#iv}" -le 6 ] || { BEAT_ERR="heartbeat-interval-out-of-range; 'interval: $iv' has ${#iv} digits"; return 1; }
   # Normalise to base 10 NOW, so no later comparison can trip over an octal reading.
@@ -310,7 +314,7 @@ _beat_valid() {
     BEAT_ERR="heartbeat-interval-too-long; 'interval: ${iv}s' exceeds the 60s this reader can observe (its confirmation window is capped at 65s to bound a hostile artifact), so a live beat might not advance inside it and STALLED would be a false death"
     return 1
   fi
-  pc=$(printf '%s\n' "$t" | grep -m1 '^parent-check: '); pc="${pc#parent-check: }"
+  pc=$(grep -m1 '^parent-check: ' <<<"$t"); pc="${pc#parent-check: }"
   case "$pc" in
     starttime|lstart) : ;;
     kill0) BEAT_ERR="heartbeat-no-gate-identity; the beater reports 'parent-check: kill0', meaning it could NOT establish any identity for its gate — so a recycled pid would keep it publishing for an unrelated process. Counter progression would only prove the BEATER is alive, not the gate, so no RUNNING claim is supportable from this beat"; return 1 ;;
@@ -335,7 +339,7 @@ _has_nul() {
 # _field <text> <key> — first "key: value" line's value in <text>, or empty.
 _field() {
   local text="$1" k="$2" line
-  line=$(printf '%s\n' "$text" | grep -m1 "^$k: ") || return 0
+  line=$(grep -m1 "^$k: " <<<"$text") || return 0
   printf '%s' "${line#"$k": }"
 }
 
@@ -520,12 +524,12 @@ SUM_TEXT=$(_slurp "$_SUM_SNAP")
 # Settle-retry: incomplete framing may mean we caught a write in progress. Re-SNAPSHOT once and
 # prefer the completed copy — re-snapshotting rather than re-reading is what keeps the NUL check
 # and the parse on the same bytes.
-if ! printf '%s\n' "$SUM_TEXT" | grep -qE '^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$'; then
+if ! grep -qE '^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$' <<<"$SUM_TEXT"; then
   sleep 0.2
   _SUM_SNAP2=$(_snap_of "$SUMMARY" summary2) || _SUM_SNAP2=""
   if [ -n "$_SUM_SNAP2" ] && ! _has_nul "$_SUM_SNAP2"; then
     _t2=$(_slurp "$_SUM_SNAP2")
-    if printf '%s\n' "$_t2" | grep -qE '^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$'; then
+    if grep -qE '^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$' <<<"$_t2"; then
       SUM_TEXT="$_t2"
     fi
   fi
@@ -536,10 +540,10 @@ fi
 # had no right to trust. More than one of any element means the file holds fragments of more
 # than one write, and then NOTHING in it can be attributed to a single run — including the
 # run-id used moments later to decide whether this artifact is even ours.
-_n_start=$(printf '%s\n' "$SUM_TEXT" | grep -cE '^==== AGENT-GATE( LITE| DELTA)? SUMMARY ====$')
-_n_end=$(printf '%s\n' "$SUM_TEXT" | grep -cE '^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$')
-_n_res=$(printf '%s\n' "$SUM_TEXT" | grep -c '^RESULT: ')
-_n_rid=$(printf '%s\n' "$SUM_TEXT" | grep -c '^run-id: ')
+_n_start=$(grep -cE '^==== AGENT-GATE( LITE| DELTA)? SUMMARY ====$' <<<"$SUM_TEXT")
+_n_end=$(grep -cE '^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$' <<<"$SUM_TEXT")
+_n_res=$(grep -c '^RESULT: ' <<<"$SUM_TEXT")
+_n_rid=$(grep -c '^run-id: ' <<<"$SUM_TEXT")
 if [ "$_n_start" -gt 1 ] || [ "$_n_end" -gt 1 ] || [ "$_n_res" -gt 1 ] || [ "$_n_rid" -gt 1 ]; then
   _summary_refusal_or_defer "the summary at this path is not one single block" "summary-not-a-single-block; found $_n_start openers / $_n_rid run-id / $_n_res RESULT / $_n_end closers — more than one of any means the file holds fragments of more than one write, so no field can be attributed to a single run" || break
 fi
@@ -561,13 +565,13 @@ fi
 # The three dialects are the gate's own (full / --lite / --delta) and CLAUDE.md keeps them
 # DISTINCT so no block can ever be pasted as another; a reader that accepts a mismatched pair
 # throws that distinction away.
-_open_line=$(printf '%s\n' "$SUM_TEXT" | grep -nE '^==== AGENT-GATE( LITE| DELTA)? SUMMARY ====$' | head -1)
+_open_line=$(grep -nE '^==== AGENT-GATE( LITE| DELTA)? SUMMARY ====$' <<<"$SUM_TEXT" | head -1)
 _open_ln="${_open_line%%:*}"
 _open_txt="${_open_line#*:}"
 _dialect="${_open_txt#'==== AGENT-GATE'}"
 _dialect="${_dialect%' SUMMARY ===='}"
 _want_close="==== END AGENT-GATE${_dialect} SUMMARY ===="
-_close_ln=$(printf '%s\n' "$SUM_TEXT" | grep -nxF "$_want_close" | head -1 | cut -d: -f1)
+_close_ln=$(grep -nxF "$_want_close" <<<"$SUM_TEXT" | head -1 | cut -d: -f1)
 # ENFORCED HERE, for every path (roborev job 176, Medium): a valid OPENER must exist and the
 # fields must be ORDERED, whatever the RESULT says. The previous split enforced neither on the
 # INCOMPLETE path, and that is not merely untidy — when the caller omits `--run-id` this reader
@@ -579,8 +583,8 @@ _close_ln=$(printf '%s\n' "$SUM_TEXT" | grep -nxF "$_want_close" | head -1 | cut
 # exception: a mid-write read is missing its TAIL. A missing closer is truncation and still
 # falls through to the heartbeat; a MISMATCHED closer or out-of-order fields are not truncation,
 # they are two writes spliced, and those are refused everywhere.
-_res_ln=$(printf '%s\n' "$SUM_TEXT" | grep -n '^RESULT: ' | head -1 | cut -d: -f1)
-_rid_ln=$(printf '%s\n' "$SUM_TEXT" | grep -n '^run-id: ' | head -1 | cut -d: -f1)
+_res_ln=$(grep -n '^RESULT: ' <<<"$SUM_TEXT" | head -1 | cut -d: -f1)
+_rid_ln=$(grep -n '^run-id: ' <<<"$SUM_TEXT" | head -1 | cut -d: -f1)
 # Ordering: opener first, closer last, RESULT and (when present) run-id between them. A missing
 # run-id is tolerated here and judged on its own terms further down.
 # The closer may legitimately be ABSENT (a truncated mid-write read), so every comparison
@@ -646,7 +650,7 @@ if [ -n "$WANT_RUN_ID" ]; then
     _summary_refusal_or_defer "the summary at this path belongs to a different run" "summary-run-id-mismatch; $SUMMARY carries run-id '$SUM_RUN_ID', not '$WANT_RUN_ID' — a live peer owns that path" || break
   fi
 fi
-RESULT_LINE=$(printf '%s\n' "$SUM_TEXT" | grep -m1 '^RESULT: ' || true)
+RESULT_LINE=$(grep -m1 '^RESULT: ' <<<"$SUM_TEXT" || true)
 # The TERMINAL verdict set, enumerated from agent-gate.sh rather than assumed to be
 # two values. `PARTIAL` (an --only run), `ERROR` and `REFUSED` (a --delta entry
 # refusal) are every bit as terminal as PASS/FAIL: the gate reached a decision and

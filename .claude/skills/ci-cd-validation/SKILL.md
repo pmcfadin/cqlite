@@ -25,8 +25,28 @@ from this script's summary (between the `AGENT-GATE SUMMARY` markers, ending in 
 `RESULT: INCOMPLETE (gate did not finish)` into the summary file **at launch** and overwrites it on
 completion, so `INCOMPLETE` is a **liveness placeholder, not a verdict**. If you poll a summary file
 instead of waiting for the process to exit, the predicate is
-`grep -qE 'RESULT: (PASS|FAIL)' "$AGENT_GATE_SUMMARY_FILE"` — a bare `grep -q` on the bare `RESULT:` token fires the
-instant the gate starts and would accept a just-launched (or still-queued) gate as certified.
+the **RECORD grammar** `grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE"` — a bare
+`grep -q` on the bare `RESULT:` token fires the instant the gate starts and would accept a just-launched (or
+still-queued) gate as certified, and an unanchored form matches `RESULT: PASSENGER`.
+
+**COMPLETION AND VERDICT ARE TWO ASSERTIONS (#3750).** The record grammar above is for full and `--lite`
+ONLY, and must keep **REFUSING** `PARTIAL`, `ERROR` and `REFUSED`. An **`--only <component>`** run demotes success to `RESULT: PARTIAL`, so
+that grammar spins on green there. Poll `--only` by **EXIT STATUS** (`3` = completed PARTIAL) where you can
+observe it, else by the **ONLY grammar** `grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'`. **`--delta`
+is a THIRD mode with a THIRD set** — it alone can terminate `ERROR` or `REFUSED` (7 emit sites, all in
+`run_delta`; `REFUSED` arrives via `emit_summary "$(_tree_result REFUSED)"`, so it looks unemitted and is
+not), so a `--delta` poller on the record grammar **hangs on a terminal outcome**:
+`grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)'` — `gate-liveness.sh`'s own
+enumerated terminal set, token for token, so "what is terminal" is decided in ONE place. Then read the
+component's verdict SEPARATELY, from its own line:
+`bash scripts/gate-component-verdict.sh "$SUM" --mode only --component <name> --run-id <id>` (exit 0 PASS /
+1 NOT-PASS / 4 COULD-NOT-MEASURE, no verdict available whatever the reason / 64 USAGE). It is **NOT a
+completion probe and has no opinion about liveness — never call it in a loop**: establish completion
+first with the grammars above or `gate-liveness.sh`, which is the three-valued liveness authority and
+the only one of the two that may be polled (#3750 descoped a retryability taxonomy here, because it
+told a lane a LIVE gate was permanently unmeasurable and an obedient lane relaunches it). A
+completed run whose component **SKIPped or is absent is NOT a pass** —
+and a SKIPping component still exits 3, so exit 3 is completion and never a green.
 
 **Every invocation — full, lite, and `--only` — MUST use the summary-file redirect** (#1175/#2079). The
 summary block is the only gate text an agent retains; never stream raw gate stdout into a persistent

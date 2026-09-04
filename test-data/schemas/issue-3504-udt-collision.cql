@@ -38,9 +38,10 @@
 --   * plain        — no colliding field name: the contrast case, where reading
 --                    `_type` out of the field namespace must FAIL.
 --   * unhashable_fields
---                  — a UDT with a `map` field, i.e. whose Python rendering is
---                    NOT hashable: the subject for the still-failing half of the
---                    projection-totality boundary (second table below).
+--                  — a UDT with a `map` field. Since #3631 that field DECODES to
+--                    a Python `dict`, so the UDT itself is not hashable: the
+--                    subject for the projection-totality boundary (second table
+--                    below), which #3631 moved again — see the `stn` note there.
 --
 -- Table `udt_collide` columns:
 --   * c  frozen<collide>            — site 3 (the rendered UDT value).
@@ -131,11 +132,23 @@ CREATE TYPE IF NOT EXISTS plain (
     real_field int
 );
 
--- unhashable_fields: a UDT declaring a `map`-typed field — the shape that WOULD
--- be unhashable in Python if the field decoded to a `dict`. It exists for the
+-- unhashable_fields: a UDT declaring a `map`-typed field. It exists for the
 -- SECOND table below, as the subject that turned a prediction into a
--- MEASUREMENT: it projects successfully today only because a collection field
--- inside a frozen UDT decodes to `Value::Blob` (roborev R1-2).
+-- MEASUREMENT — TWICE, in opposite directions, which is why the note is this
+-- long.
+--
+-- Under #3504 it projected successfully, and the recorded reason was that a
+-- collection field inside a frozen UDT decoded to `Value::Blob`, so the field
+-- arrived as hashable `bytes` (roborev R1-2). #3631 CLOSED that decode gap: `m`
+-- now decodes to `{'a': 1}` from its declared `frozen<map<text, int>>`.
+--
+-- #3631 predicted that would make the shape unprojectable again. MEASURED: it
+-- does NOT. `stn` still projects, because #3500's container rule renders a
+-- UDT-bearing set as a Python `list`, and a `list` hashes nothing — so the
+-- original "projects only because of the blob" attribution was itself wrong by
+-- the time #3631 tested it. What DID change is that `Udt.__hash__`'s `TypeError`
+-- is now reachable from decoded data at all. Full table:
+-- test-data/fixtures/issue_3504/README.md, "Table 2".
 CREATE TYPE IF NOT EXISTS unhashable_fields (
     label text,
     m     frozen<map<text, int>>
@@ -200,15 +213,21 @@ CREATE TABLE IF NOT EXISTS udt_collide (
 --                      for CLI parity (#804), and a list is unhashable in the
 --                      outer set. Unchanged by #3504.
 --   * stn frozen<set<frozen<tuple<frozen<unhashable_fields>, int>>>>
---                    — MEASURED: also SUCCEEDS, contradicting the obvious
---                      prediction. `Udt.__hash__` does hash its field values, and
---                      a `dict` would be unhashable — but CQLite decodes a
---                      collection field inside a FROZEN UDT as `Value::Blob`, so
---                      the field arrives as `bytes`, which is hashable. That
---                      decode gap is orthogonal to #3504 and is pinned as
---                      characterization by the Python suite, together with the
---                      real residual (a hand-built `cqlite.Udt` with a `dict`
---                      field still raises).
+--                    — MEASURED (pre-#3500): also SUCCEEDS, contradicting the
+--                      obvious prediction. The reason RECORDED at the time was
+--                      that CQLite decoded a collection field inside a FROZEN UDT
+--                      as `Value::Blob`, so the field arrived as hashable
+--                      `bytes`.
+--
+--                      SUPERSEDED BY #3631, which closed that decode gap — `m`
+--                      is now `{'a': 1}` — and by the re-measurement that came
+--                      with it: the column STILL succeeds, so the recorded
+--                      attribution above was already wrong. #3500's container
+--                      rule (a UDT-bearing set renders as a Python `list`) is
+--                      what makes it succeed, and a `list` hashes nothing. The
+--                      Python suite now pins the decoded `dict` AND the fact
+--                      that `hash()` of the element or of the UDT raises, which
+--                      before #3631 no decoder path could reach.
 --
 -- Each shape lives in its OWN ROW (`stu`+`mtu` in row 1, `ssu` in row 2, `stn` in
 -- row 3): the `TypeError` is raised while CONVERTING a row, so a row carrying

@@ -162,24 +162,72 @@ impl V5CompressedLegacyParser {
     /// Called when parsing nested collections inside an already-bounded frozen
     /// blob.  There is NO VUInt cell-value-length prefix — the caller has
     /// already bounded the data slice.  `as_set = true` produces `Value::Set`.
-    ///
-    /// The byte framing lives ONCE, in
-    /// [`Self::parse_frozen_sequence_raw_with`] (issue #3722); this is a thin
-    /// wrapper passing the element decode this entry point has always used, so
-    /// every caller is BIT-IDENTICAL to the pre-#3722 inline loop — same bounds
-    /// checks, same error messages, same returned offset, same `depth`.
     fn parse_frozen_sequence_value_raw(
         &self,
         data: &[u8],
-        offset: usize,
+        mut offset: usize,
         element_type: &str,
         column_name: &str,
         as_set: bool,
         depth: usize,
     ) -> Result<(Value, usize)> {
-        self.parse_frozen_sequence_raw_with(data, offset, column_name, as_set, &|elem_data| {
-            self.parse_value_from_raw_bytes(elem_data, element_type, column_name, depth)
-        })
+        let kind = if as_set { "set" } else { "list" };
+        let count = Self::read_frozen_count(data, &mut offset, data.len(), kind, column_name)?;
+
+        tracing::debug!(
+            "V5CompressedLegacy: Parsing frozen {} '{}' with {} elements (raw)",
+            kind,
+            column_name,
+            count
+        );
+
+        let mut elements = Vec::with_capacity(count);
+        for i in 0..count {
+            // Each element in a frozen collection: [i32 BE len][element bytes]
+            if offset + 4 > data.len() {
+                return Err(Error::corruption(format!(
+                    "Frozen {} '{}': not enough bytes for element {} length",
+                    kind, column_name, i
+                )));
+            }
+            let elem_len_i32 = i32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]);
+            if elem_len_i32 < 0 {
+                return Err(Error::corruption(format!(
+                    "Frozen {} '{}': negative element {} length {}",
+                    kind, column_name, i, elem_len_i32
+                )));
+            }
+            let elem_len = elem_len_i32 as usize;
+            offset += 4;
+
+            if offset + elem_len > data.len() {
+                return Err(Error::corruption(format!(
+                    "Frozen {} '{}': element {} needs {} bytes but only {} available",
+                    kind,
+                    column_name,
+                    i,
+                    elem_len,
+                    data.len() - offset
+                )));
+            }
+
+            let elem_data = &data[offset..offset + elem_len];
+            let elem_value =
+                self.parse_value_from_raw_bytes(elem_data, element_type, column_name, depth)?;
+            elements.push(elem_value);
+            offset += elem_len;
+        }
+
+        if as_set {
+            Ok((Value::Set(elements), offset))
+        } else {
+            Ok((Value::List(elements), offset))
+        }
     }
 
     /// Parse frozen list value (raw version without Column parameter).
@@ -207,26 +255,101 @@ impl V5CompressedLegacyParser {
     }
 
     /// Parse frozen map value (raw version without Column parameter).
-    ///
-    /// Thin wrapper over [`Self::parse_frozen_map_raw_with`] — see
-    /// `parse_frozen_sequence_value_raw` for why this is bit-identical to the
-    /// pre-#3722 inline loop.
     pub(super) fn parse_frozen_map_value_raw(
         &self,
         data: &[u8],
-        offset: usize,
+        mut offset: usize,
         key_type: &str,
         value_type: &str,
         column_name: &str,
         depth: usize,
     ) -> Result<(Value, usize)> {
-        self.parse_frozen_map_raw_with(
-            data,
-            offset,
+        let count = Self::read_frozen_count(data, &mut offset, data.len(), "map", column_name)?;
+
+        tracing::debug!(
+            "V5CompressedLegacy: Parsing frozen map '{}' with {} entries (raw)",
             column_name,
-            &|key_data| self.parse_value_from_raw_bytes(key_data, key_type, column_name, depth),
-            &|val_data| self.parse_value_from_raw_bytes(val_data, value_type, column_name, depth),
-        )
+            count
+        );
+
+        let mut entries = Vec::with_capacity(count);
+        for i in 0..count {
+            // Key: [i32 BE len][key bytes]
+            if offset + 4 > data.len() {
+                return Err(Error::corruption(format!(
+                    "Frozen map '{}': not enough bytes for key {} length",
+                    column_name, i
+                )));
+            }
+            let key_len_i32 = i32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]);
+            if key_len_i32 < 0 {
+                return Err(Error::corruption(format!(
+                    "Frozen map '{}': negative key {} length {}",
+                    column_name, i, key_len_i32
+                )));
+            }
+            let key_len = key_len_i32 as usize;
+            offset += 4;
+
+            if offset + key_len > data.len() {
+                return Err(Error::corruption(format!(
+                    "Frozen map '{}': key {} needs {} bytes but only {} available",
+                    column_name,
+                    i,
+                    key_len,
+                    data.len() - offset
+                )));
+            }
+            let key_data = &data[offset..offset + key_len];
+            let key_value =
+                self.parse_value_from_raw_bytes(key_data, key_type, column_name, depth)?;
+            offset += key_len;
+
+            // Value: [i32 BE len][value bytes]
+            if offset + 4 > data.len() {
+                return Err(Error::corruption(format!(
+                    "Frozen map '{}': not enough bytes for value {} length",
+                    column_name, i
+                )));
+            }
+            let val_len_i32 = i32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]);
+            if val_len_i32 < 0 {
+                return Err(Error::corruption(format!(
+                    "Frozen map '{}': negative value {} length {}",
+                    column_name, i, val_len_i32
+                )));
+            }
+            let val_len = val_len_i32 as usize;
+            offset += 4;
+
+            if offset + val_len > data.len() {
+                return Err(Error::corruption(format!(
+                    "Frozen map '{}': value {} needs {} bytes but only {} available",
+                    column_name,
+                    i,
+                    val_len,
+                    data.len() - offset
+                )));
+            }
+            let val_data = &data[offset..offset + val_len];
+            let val_value =
+                self.parse_value_from_raw_bytes(val_data, value_type, column_name, depth)?;
+            offset += val_len;
+
+            entries.push((key_value, val_value));
+        }
+
+        Ok((Value::Map(entries), offset))
     }
 
     /// Parse tuple value from binary data at the cell level.
@@ -304,10 +427,6 @@ impl V5CompressedLegacyParser {
     /// Element types are taken from `element_types` in order (schema-aware).
     ///
     /// `blob_end` is the exclusive upper byte index bounding the tuple data.
-    ///
-    /// Thin wrapper over [`Self::parse_tuple_elements_raw_with`] — see
-    /// `parse_frozen_sequence_value_raw` for why this is bit-identical to the
-    /// pre-#3722 inline loop.
     pub(super) fn parse_tuple_elements_raw(
         &self,
         data: &[u8],
@@ -317,22 +436,65 @@ impl V5CompressedLegacyParser {
         column_name: &str,
         depth: usize,
     ) -> Result<Vec<Value>> {
-        self.parse_tuple_elements_raw_with(
-            data,
-            offset,
-            blob_end,
-            element_types.len(),
-            column_name,
-            &|idx, elem_data, elem_desc| {
-                // `idx < element_types.len()` by construction (that length IS
-                // the element count passed above); indexed defensively so this
-                // stays panic-free.
-                let elem_type = element_types.get(idx).ok_or_else(|| {
-                    Error::corruption(format!("{}: element index out of range", elem_desc))
-                })?;
-                self.parse_value_from_raw_bytes(elem_data, elem_type, elem_desc, depth + 1)
-            },
-        )
+        let mut elements = Vec::with_capacity(element_types.len());
+
+        for (idx, elem_type) in element_types.iter().enumerate() {
+            let elem_desc = format!("tuple '{}' element {}", column_name, idx);
+
+            // Need at least 4 bytes for the element length
+            if *offset + 4 > blob_end {
+                // Trailing elements are implicitly null (matches UDT behaviour)
+                tracing::debug!(
+                    "Tuple '{}': element {} beyond blob_end, treating as null",
+                    column_name,
+                    idx
+                );
+                elements.push(Value::Null);
+                continue;
+            }
+
+            // Read element length (4-byte big-endian i32)
+            let elem_len_i32 = i32::from_be_bytes([
+                data[*offset],
+                data[*offset + 1],
+                data[*offset + 2],
+                data[*offset + 3],
+            ]);
+            *offset += 4;
+
+            if elem_len_i32 == -1 {
+                // Null element
+                elements.push(Value::Null);
+                continue;
+            }
+
+            if elem_len_i32 < -1 {
+                return Err(Error::corruption(format!(
+                    "{}: invalid negative element length {}",
+                    elem_desc, elem_len_i32
+                )));
+            }
+
+            let elem_len = elem_len_i32 as usize;
+
+            if *offset + elem_len > blob_end {
+                return Err(Error::corruption(format!(
+                    "{}: needs {} bytes but only {} available in blob",
+                    elem_desc,
+                    elem_len,
+                    blob_end - *offset
+                )));
+            }
+
+            let elem_data = &data[*offset..*offset + elem_len];
+            let value =
+                self.parse_value_from_raw_bytes(elem_data, elem_type, &elem_desc, depth + 1)?;
+            *offset += elem_len;
+
+            elements.push(value);
+        }
+
+        Ok(elements)
     }
 
     /// Extract tuple element types from a `tuple<T1, T2, ...>` (CQL short) or

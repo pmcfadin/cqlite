@@ -1,0 +1,1530 @@
+# Issue #3649 — what is established in-lane, and what is not
+
+This file records the facts a rig session should not have to re-derive, each with
+the citation it rests on and the command that verified it. It contains **no
+throughput measurement**, because none was taken: the rig and the corpus are both
+absent from this lane, and a number produced here would be exactly the phantom
+[#3649](https://github.com/pmcfadin/cqlite/issues/3649) warns about.
+
+Verified in lane `/data/lanes/lane-3649` at `d23403d1e`, 2026-09-01.
+
+---
+
+## 1. The AC's triage step passes: the #2820 mechanism is intact
+
+The acceptance criteria say *"if the measured effect is below target, triage
+**before** filing a regression: confirm the send-reduction oracle still passes (it
+isolates the mechanism from the served path)."* That step was run, and it passes,
+**before** any measurement — so a below-target rig result cannot be read as
+evidence of a broken mechanism.
+
+```
+$ cargo test -p cqlite-core --test issue_2820_merge_fanin_batch
+running 2 tests
+test the_merge_fan_in_sends_one_message_per_batch_and_loses_no_row ... ok
+test a_sub_batch_merge_delivers_every_row_without_waiting_for_a_full_batch ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+**No regression is indicated and none is being filed.** #2820 is a correct change;
+this issue measures its served-path effect, and a null or small result is a valid
+outcome, not a defect report.
+
+Arms, resolved in this checkout:
+
+| arm | ref | commit | subject |
+|---|---|---|---|
+| HEAD | `cfa93fe99` | `cfa93fe99` | `perf(#2820): batch the k-way merge egress fan-in (L1), co-designed with #2765 (#3659)` |
+| BASE | `cfa93fe99^` | `674cffa9d` | `chore(#3549): delivery telemetry record for PR #3660 (#3671)` |
+
+Note the BASE arm is a **telemetry-only commit**, so `cfa93fe99^` is a clean
+pre-#2820 tree with no unrelated code change riding in it.
+
+---
+
+## 2. Why the measurement cannot run in this lane
+
+Two independent disqualifiers. Either one is sufficient.
+
+### 2a. The host is the excluded class
+
+Measured 2026-09-01T16:30Z on this box:
+
+| fact | value |
+|---|---|
+| instance type | `c7i.4xlarge` (from `/sys/devices/virtual/dmi/id/product_name`) |
+| vCPU | 16 (`nproc`) |
+| RAM | 30 GiB (`/proc/meminfo` `MemTotal` 32,308,512 kB) |
+| storage | EBS root — **no instance-store NVMe** |
+| load average | `19.75 29.84 38.09` at the census; **`81.60 66.10 38.69`** ~20 minutes earlier |
+| concurrent lanes | 9 (`/data/lanes/lane-*`) sharing one 16-vCPU box and one `.git` object store |
+
+The AC names the **field i4i narrow rig, not a lane box**, for exactly this
+reason. A 1-minute load average that moved from 81.6 to 19.8 inside twenty
+minutes is not a host on which a 1.1–1.25× effect is separable from the
+neighbours, and no amount of interleaving fixes a co-tenancy swing of that
+amplitude within a single replicate.
+
+### 2b. The corpus is four hundred times too small
+
+| root | `*-Data.db` files | **total bytes** | largest single file |
+|---|--:|--:|--:|
+| `/data/datasets` (the exported `CQLITE_DATASETS_ROOT`) | 155 | **2,405,118** | 647,164 |
+| `<checkout>/test-data/datasets` | 34 | 864,735 | 263,327 |
+
+The **entire** fetched corpus is 2.4 MB across 155 tables. `flight-loadgen
+--shape full` against a 647 KB table measures request setup and gRPC framing,
+not the read path — which is the AC's own point (*"the ~2 MB / ~1k-row lane
+tables are not [meaningful]"*). The driver's `--min-corpus-bytes` floor is
+268,435,456 (256 MiB); the largest thing available here is **0.24% of it**.
+
+### 2c. The rig cannot be provisioned from here
+
+No `aws` CLI, no `agent-ami`, no ssh alias to a persistent rig. Rig spend is
+owner-authorized. The i4i rigs in this program's history (#3224, M0/#2818) were
+provisioned fresh, run, and terminated; **there is no standing rig to attach
+to.**
+
+---
+
+## 3. TWO quantities, verdicted differently — the issue's warning box collapses them
+
+**Target: ~1.1–1.25× narrow single-stream, ~1.05–1.1× wide.**
+`docs/research/phase2-verify-row-engine.md` §3.2 line 107:
+
+> **Revised: ~1.1–1.25× narrow single-stream, ~1.05–1.1× wide** — and flagged
+> unmeasured
+
+**1.5–1.9× is NOT a throughput target.** Same section, line 115:
+
+> Keep 1.5–1.9× as a **rig-narrow ceiling**, not a field figure (§8).
+
+and line 111 identifies what it is a ceiling *of*: **utilization** — "an
+aggregate-CPU-headroom upper bound realized as throughput **only** because that
+tax is what collapses `C(N)`". §3.2's own heading calls the whole slice
+"over-quoted and unmeasured".
+
+### They are different measurements and they are reported separately
+
+| quantity | how it is run | how it is verdicted |
+|---|---|---|
+| **single-stream** | `--ramp 1` | against the **~1.1–1.25× narrow / ~1.05–1.1× wide** band |
+| **utilization** | a concurrency ramp | as a **direction with an interval** — "rises measurably" |
+
+The plan of record states the M2 acceptance criterion as util throughput
+*"rises measurably toward the 1.5–1.9× ceiling"*
+(`docs/architecture/throughput-program-2026-07.md` line 371, verified). "Toward"
+is the whole of it: the criterion is a **direction**, not an attainment.
+
+The harness therefore emits **two sections and two verdict lines**
+(`verdict single-stream <TOKEN>` / `verdict utilization <TOKEN>`) with disjoint
+affirmative token sets, and:
+
+- 1.5–1.9× is **named on every run of both sections** and **tested against in
+  neither**;
+- `ab_stats.decide_utilization(ci_low, ci_high)` **is not given a threshold
+  argument at all**, so a comparison against the ceiling is not expressible —
+  which is stronger than a promise not to make one;
+- `selftest-analyze.sh` asserts that no ceiling-attainment token appears in
+  either section, that the utilization section cannot emit a band token, and that
+  the single-stream section cannot emit a direction token.
+
+A single-stream interval landing in the 1.5–1.9× region renders `ABOVE-TARGET`
+**against the 1.10–1.25 band**, with the ceiling merely named.
+
+---
+
+## 4. `flight-loadgen` throughput is a point estimate — hence the replicate design
+
+Per ramp step, `flight-loadgen` emits a full latency histogram
+(`p50`/`p95`/`p99`/`max`, `hdrhistogram`) but computes throughput as
+`count / duration_s`:
+
+```rust
+// tools/flight-loadgen/src/record.rs
+let per_s = |n: u64| { if duration_s > 0.0 { n as f64 / duration_s } else { 0.0 } };
+...
+qps: per_s(self.ok),
+rows_per_s: per_s(self.rows_total),
+bytes_per_s: per_s(self.bytes_total),
+```
+
+There is **one throughput number per step and no interval anywhere in the tool**.
+Three consequences, all of which the instrument is built around:
+
+1. Dispersion has to come from **repeated runs**. Hence replicates, and hence the
+   analyzer's refusal to bootstrap below `--min-pairs`.
+2. The runs must be **interleaved** (`base, head, base, head, …`), because
+   running one arm to completion then the other aliases session-long host drift
+   onto the second arm. This is the failure mode that made the proxy bench
+   uninterpretable.
+3. All reported dispersion is **between-replicate**. Within-step variance is not
+   observable from this JSONL and is not modelled — the analyzer declares that on
+   every run as one of its `NON-EXHAUSTIVE` lines rather than leaving a reader to
+   assume otherwise.
+
+The rejected proxy bench, for the record: `compaction/narrow`, separate
+`--target-dir` per commit, base **78.6 ms [69.5, 88.4]** vs HEAD **66.5 ms
+[54.5, 83.2]** — a ~15% point difference with heavily overlapping intervals. It
+was correctly **not** reported as AC-2 satisfied. `selftest-analyze.sh` carries
+that shape as a case: a fixture whose point estimate is ~1.16× — *inside* the
+target band — and whose interval is [0.97, 1.40] must render `INCONCLUSIVE`, not
+`MEETS-TARGET`.
+
+---
+
+## 5. The corpus constraint the rig session inherits
+
+The field is **LZ4-compressed** (`docs/architecture/throughput-program-2026-07.md`
+line 21: "RF=3, LZ4, ~1.9M partitions/node, 4-vCPU pods"), and that document
+repeatedly flags *uncompressed* as a **known artifact** of the WS0 loopback
+measurements, not a neutral choice — line 23 ("**uncompressed**, loopback … a
+server-direct ceiling for that shape, **not** a field prediction"), line 56, and
+line 69 ("warm + uncompressed + loopback artifacts — real in the field").
+
+**`tools/ws0-corpus-gen` cannot supply a compressed corpus**, and says so in its
+own module documentation (`tools/ws0-corpus-gen/src/lib.rs:36-41`, verified):
+
+```
+//! # Uncompressed by construction (issue #1406)
+//!
+//! CQLite's production write surface emits UNCOMPRESSED SSTables only and never
+//! a `CompressionInfo.db`. The generator asserts the absence of that component
+//! rather than assuming it.
+```
+
+This is the #1406 claim boundary, not a gap in the generator. So the rig needs a
+**real Cassandra** to generate the corpus, or the corpus transported to it. See
+`RUNBOOK.md` §2.
+
+Why it matters *for this particular ratio*, beyond comparability with M0: #2820's
+lever is the merge fan-in park/wake tax as a **fraction of total server CPU**.
+Removing LZ4 decompression removes real CPU from the denominator, so an
+uncompressed corpus **inflates** the measured ratio relative to the field. An
+uncompressed rig run would bias toward the target, in the direction that is
+hardest to notice.
+
+---
+
+## 6. The trap that would have wasted the rig session: #3058's single-source bypass
+
+**Found while building the instrument, not previously recorded on #3649.**
+
+`cqlite-flight` has a single-source fast path on the `do_get` row route, added by
+[#3058](https://github.com/pmcfadin/cqlite/issues/3058) in `680abd0d2`
+(2026-07-29, "single-SSTable merge bypass on the Flight do_get data plane —
+3.32x"). When a request has **one** post-prune source and no static column, no
+`dropped_columns`, and no aggregation, the request **never enters the k-way
+merger** — and the k-way merger's egress fan-in is the entire subject of #2820.
+
+`680abd0d2` predates **both** arms (verified: `cqlite-flight/src/bypass.rs` is
+present at `cfa93fe99^` and at `cfa93fe99`). So on a **single-SSTable** corpus:
+
+> both arms take the fast path, neither arm executes the code #2820 changed, and
+> the measured ratio is **1.0 by construction** — a `BELOW-TARGET` verdict that
+> looks exactly like a measured no-effect and is in fact a measurement of
+> nothing.
+
+Two mechanical guards close it, and both are exercised by the self-test:
+
+1. **`ab-throughput.sh` pins the merge arm.** `--merge-path` defaults to `merge`
+   and is exported as `CQLITE_FLIGHT_MERGE_PATH` into **both** arms' servers.
+   `merge` is documented as absolute — "never take the fast path"
+   (`cqlite-flight/src/bypass.rs`). It is recorded in the manifest, printed by
+   the analyzer, and anything other than `merge` produces a disclosure line
+   beside the verdict.
+2. **`ab-throughput.sh` refuses a corpus below `--min-sstables` (default 2)**,
+   cause `corpus-too-few-sstables`, and **`analyze-ab.py` refuses**, cause
+   `merge-path-bypassed`, when the manifest records fewer than two `*-Data.db`
+   files *and* the merge arm was not pinned. Fewer than two files on disk means
+   at most one source, so that refusal is sound in the direction it fires; with
+   two or more the arm cannot be settled from the manifest, so the unpinned case
+   is disclosed rather than refused.
+
+Note the asymmetry that makes this worth guarding twice: `bypass` is documented
+as *"`auto` with an explicit, assertable name"* — it never overrides a
+correctness precondition — so only `merge` actually guarantees the path under
+test is the path that ran.
+
+---
+
+## 7. Admission control (#2420) will confound the ramp unless it is pinned
+
+`cqlite-flight` admits a bounded number of concurrent `do_get` scans
+(`cqlite-flight/src/cli.rs:59-73`, verified). Past the ceiling a request waits
+`--admission-wait-timeout-ms` (`DEFAULT_WAIT_TIMEOUT_MS = 30_000`,
+`cqlite-flight/src/admission.rs:84`) and is then **shed with gRPC `UNAVAILABLE`**
+— which `flight-loadgen` counts separately as `requests_unavailable`
+(`tools/flight-loadgen/src/record.rs`).
+
+**Unset, the ceiling is DERIVED** from the parallelism the process may use
+(`clamp(2 × hardware threads, 2, 64)`, #3225, honouring the affinity mask and the
+cgroup quota). On a 4-vCPU `i4i.xlarge` that is 8 — and pinning the server to two
+hardware threads with `taskset` changes it again. So unpinned it is a property of
+*the box and the pinning*, not of the experiment.
+
+**The failure mode is not a visible error.** A ramp step above the ceiling
+measures *the admission ceiling*, and it presents as a **plateau** — exactly the
+shape someone would read as saturation and attribute to the engine.
+
+Three mechanical responses, all exercised by the self-test:
+
+1. `ab-throughput.sh` **requires** `--max-concurrent-scans`, pins it on both
+   arms, and **refuses a `--ramp` topping out above it**.
+2. It reads the resolved value **and its provenance** back from the server's own
+   startup line — `cli::log_startup` logs `max_concurrent_scans` and
+   `max_concurrent_scans_source` (`flag` | `env` | `derived` | `derived-fallback`,
+   `cqlite-flight/src/admission.rs:183-193`) — and dies on `admission-mismatch`
+   or `admission-provenance`. A value we passed and a value the server resolved
+   are different facts; only the second is a measurement. An unreadable line is
+   `NOT-OBSERVED` and is disclosed beside the verdict, never assumed to agree.
+3. `analyze-ab.py` refuses `admission-mismatch` across arms; refuses any shed at
+   single-stream concurrency (`run-shed`); and in the utilization section
+   **excludes** each shed step, **reports every exclusion as an explicit fact**
+   (`excluded-step …` plus `excluded-steps N RECOGNISED`, affirmative at zero),
+   and requires the two arms of a pair to have the **same surviving ladder**
+   (`ramp-steps-not-comparable`) — a peak taken over different ladders is not a
+   ratio.
+
+`--batch-size` (default 8192 rows per Arrow record batch,
+`cqlite-flight/src/cli.rs:56-57`) is pinned and recorded on both arms for the
+same reason in miniature: it is the record-batch row cap, so it interacts
+directly with the egress batching #2820 changed.
+
+---
+
+## 8. What this lane delivered instead
+
+| artifact | what it is |
+|---|---|
+| `ab-throughput.sh` | the interleaved paired A/B driver — two worktrees, two target dirs, pinned merge arm and admission ceiling, fail-closed pre-flight, per-run validation, a manifest rewritten after every completed run |
+| `analyze-ab.py` | the CLI and the two-section report, anchored so it cannot be pasted as a certification |
+| `ab_stats.py` | the statistics and **both** verdict rules, with their citations beside them |
+| `ab_input.py` | manifest/JSONL loading and every named refusal, including the admission handling |
+| `ab_common.py` | the anchored, sanitized emission every module writes through |
+| `ab_driver_support.py` | the driver's ramp/record validators and startup parser, as an **executable file** so they can be tested without a rig |
+| `selftest-analyze.sh` | 348 deterministic cases, including complete two-arm sessions — measurement and sensitivity control — run end to end under PATH shims |
+| `RUNBOOK.md` | the metered-rig procedure: pre-flight, positive control, the run, the termination contract, and the AC checklist |
+
+**Not delivered, and deliberately so: a number.** The AC is discharged by a rig
+session, not by this lane.
+
+---
+
+## 9. Acceptance-criteria disposition — 1 of 5 met
+
+*This is the section the pull request quotes. It lives here rather than in a
+standalone file because a committed copy of a PR body decays the moment the PR
+merges and nothing updates it — a decaying claim in a committed file, which is
+the class this lane spent its time removing — and because a third copy of the
+declared gaps would be a third place for them to drift. Every "declared gap"
+below is a **transcription** of what the artifacts themselves print, not a
+summary of them. Re-derive by running
+`bash docs/reports/issue-3649-artifacts/selftest-analyze.sh` and
+`python3 analyze-ab.py --single-stream <manifest>`.*
+
+### What this PR ships
+
+The **instrument and the runbook** for issue #3649, not the measurement. No rig
+was available and none is provisioned here; the measurement is co-scheduled into
+#3855's bare-metal window. #3649 stays **open** under `blocked-on-hardware`.
+
+### Acceptance criteria: 1 of 5 met
+
+**AC-1 — `flight-loadgen --shape full` server-direct on the field i4i narrow rig:
+NOT RUN.** No rig, no session, no number. Per the lead's R1 ruling this PR ships
+the instrument and the criterion is discharged by the rig session when #3855's
+window opens.
+
+**AC-2 — report util throughput with dispersion: NOT MET.** The criterion is
+about a *report of a measurement*, and there is no measurement. What exists is
+the machinery and a test of it: paired per-replicate ratios, a seeded percentile
+bootstrap over the pairs, each arm's own interval, and a refusal
+(`bootstrap-degenerate`) when the computed interval is merely the observed range.
+That is a claim about the instrument. It is not this criterion.
+
+**AC-3 — corpus large enough, and state the corpus size used: NOT MET.** No
+corpus was used. The driver censuses the *served* directory the way the server
+enumerates it, enforces documented floors (256 MiB, 2 SSTables) that a
+measurement may not lower, records the census in the manifest and prints it on
+every report. Capability, tested; not the criterion.
+
+**AC-4 — verdict recorded against ~1.1–1.25× narrow / ~1.05–1.1× wide, with
+1.5–1.9× named as a ceiling: NOT MET.** No verdict has been recorded, because no
+session has run. The rule exists and the ceiling is structurally untestable — the
+utilization rule takes no threshold argument, so an attainment claim is not
+expressible — and the self-test asserts no ceiling-endorsing token can appear.
+Again: the instrument, not the criterion.
+
+**AC-5 — triage the send-reduction oracle before filing a regression: MET.** This
+is the one criterion that needs no rig.
+`cargo test -p cqlite-core --test issue_2820_merge_fanin_batch` → **2 passed**,
+recorded with its output in `FINDINGS.md` §1. The #2820 mechanism is intact and
+**no regression is indicated or filed.**
+
+**Read the four NOT-MET verdicts as verdicts.** An instrument built to satisfy a
+criterion has not satisfied it; if a criterion needs a number and there is no
+number, it is not met however good the machinery is. This issue exists because a
+point estimate with overlapping intervals was nearly rounded into a verdict, and
+rounding *capability* into *compliance* is the same error one level up.
+
+### Declared gaps
+
+#### Printed by the self-test on every run
+
+```
+DECLARED GAP 1: the real cargo build, cqlite-flight and flight-loadgen are
+        exercised by nothing here -- these cases prove the DRIVER's logic only.
+DECLARED GAP 2: the stub is MORE PERMISSIVE than the real binary. It
+        parses its own argv, so an argument line Clap would REJECT still runs
+        here -- a duplicated option, an unknown flag, a bad value. That class
+        is covered structurally instead (the server-argv cases above assert no
+        option is emitted twice); nothing in this suite can reproduce Clap.
+```
+
+On a host with passwordless sudo the suite also prints:
+
+```
+cold fail-closed case skipped: this box HAS passwordless sudo, so the refusal
+cannot be provoked (declared, not assumed)
+```
+
+— so on such a host the cold-session refusal is **not** exercised. A genuine cold
+session (page-cache drop) is exercised nowhere.
+
+#### Printed by the analyzer beside every verdict
+
+```
+NON-EXHAUSTIVE this compares two commits on ONE host, ONE corpus, ONE workload
+  shape and ONE admission setting; nothing here generalises to another shape,
+  another row width, or another concurrency regime
+NON-EXHAUSTIVE flight-loadgen reports throughput as a SINGLE point estimate per
+  step, so all dispersion here is BETWEEN-replicate; within-step variance is not
+  observable from its JSONL and is not modelled
+NON-EXHAUSTIVE the interval is a percentile bootstrap over N pairs; with a pair
+  count this small the interval is itself imprecise, and a wider interval is the
+  honest reading, never a tighter one
+NON-EXHAUSTIVE a difference measured here is a difference between two commits,
+  not evidence about the mechanism; the mechanism oracle is
+  cqlite-core/tests/issue_2820_merge_fanin_batch.rs and it is a separate check
+NON-EXHAUSTIVE no attribution is performed: this script does not decompose the
+  delta into send-count, syscall or cache terms
+```
+
+#### Recorded elsewhere in this document
+
+- **The disposition tables close "added later and forgotten", not "never
+  imagined".** They prove every field that *exists* on either side is reconciled
+  or excused; neither can know about a constraint nobody thought of.
+- **The wide profile has no fixture.** `--profile wide` tests the 1.05–1.10 band,
+  but no wide-row corpus exists in this repository's test data, so that band is
+  exercised by the band-selection logic only and by no data.
+- **`--merge-path` cannot be corroborated.** `cqlite-flight` does not log it, so
+  the pin is recorded and disclosed but never read back — unlike the admission
+  ceiling, batch size and wait timeout, which are.
+- **Percentile bootstrap under-covers at small n.** The degeneracy refusal removes
+  the pathological case (where the interval *is* the observed range); it does not
+  remove small-sample optimism. Treat a marginal `MEETS-TARGET` at n = 5
+  accordingly.
+
+### What is verified
+
+`bash docs/reports/issue-3649-artifacts/selftest-analyze.sh` — **319 cases, floor
+319**, green in-repo and from a copy outside any git checkout. Includes complete
+two-arm sessions — a measurement and the step-4 sensitivity control — run end to
+end against stub `cargo`/`cqlite-flight`/`flight-loadgen` on `PATH`, subject to
+the two declared gaps above.
+
+---
+
+## 10. The tenth lesson: a documented requirement that nothing checks
+
+Round 12 found a different kind of defect from the eleven before it. Not a
+mechanism that could be satisfied without evidence — **a domain requirement we
+established ourselves and never wired to a check.**
+
+§5 (the corpus constraint the rig session inherits) records, with citations,
+that the corpus must be **compressed**: the field is LZ4, the plan of record flags *uncompressed* as a
+known artifact of the WS0 loopback measurements, and `ws0-corpus-gen` cannot
+supply one because CQLite's write surface is uncompressed by construction
+(#1406). The runbook tells the operator so. **The census asked about size and
+count and never about compression**, so an uncompressed corpus cleared every
+floor.
+
+**And the failure was in the favourable direction, which is what makes it worth
+its own lesson.** Removing LZ4 decode removes real CPU from the denominator, so
+an uncompressed corpus **inflates** the measured ratio — toward the target. A
+well-meaning operator pointing at the wrong corpus would have got a number that
+looked like success. A guard whose absence fails conservatively gets found; one
+whose absence flatters the result does not.
+
+**The rule: a requirement you write down is a requirement you must wire to a
+check, or it is a preference.** Both halves are now enforced — the census
+requires every served SSTable to have a non-empty `CompressionInfo.db` (an empty
+one reads as absent, because this repository records that an empty one makes
+`SELECT` return 0 rows silently), and the analyzer re-checks the manifest for the
+usual reason: it does not get to assume which driver produced it.
+
+### The sweep, and what could NOT honestly be enforced
+
+Asked to look for other stated-but-unchecked requirements, four candidates came
+out of the runbook. Two are now enforced, and **two can only be disclosed — which
+is worth recording as a result rather than a shortfall**:
+
+| requirement | disposition |
+|---|---|
+| compressed corpus | **enforced**, driver and analyzer |
+| required ticket fields (`version`, `keyspace`, `table`, `ddl`) | **enforced** at pre-flight, mirrored from `ticket.rs:225-256` |
+| corpus on local NVMe, not network storage | **enforced on AWS, declared elsewhere** — an affirmative match on the device model; the driver warns at pre-flight and the analyzer refuses any verdict not known to be `LOCAL` |
+| an uncontended box | **disclosed** — measured against `nproc/2` and reported beside the verdict |
+| the `i4i` label itself | **declared** — not derivable from a host string, and the two properties it stood for are checked directly instead |
+
+**The sweep is CURATED, not derived, and that is its one weakness.** All five
+requirements above are dispositioned, so the answer to *"what does the runbook
+promise that nothing checks?"* is **"nothing that this sweep found"** — which is
+not the same as "nothing". The candidates came from reading the runbook by hand,
+and a hand reading cannot prove it enumerated every requirement the document
+states, still less every requirement a reader would reasonably infer from it.
+Compare the option-disposition guard — §13 (guard the VALUE, and enumerate the
+SET) — which derives its subject set from
+the driver's own dispatch and therefore reds when an option is added: nothing
+equivalent exists for prose, so a sixth requirement added to the runbook later
+joins the unchecked set silently. Declared rather than left implicit, on the same
+grounds as every other non-exhaustive claim in this instrument.
+
+**Check the property the label stood for, not the label.** The first pass of
+this table disclosed "the field i4i rig" and stopped there, on the reasoning that
+a rig class cannot be derived from a hostname. That reasoning is correct and the
+conclusion did not follow: the acceptance criteria do not care about the string
+`i4i` — they care about what it stood for, and the load-bearing parts are
+**measurable**. The corpus's backing device is a stable fact (`lsblk` on this
+lane's host returns *Amazon Elastic Block Store*, which is precisely what
+disqualified it), so it is enforced. What survives as a disclosure is the label,
+which is the part that genuinely cannot be measured — and that is a much smaller
+gap than the row it replaced.
+
+**The two are dispositioned differently on evidence, not on how important each
+feels.** Contention was implemented as a refusal first and withdrawn: `loadavg1`
+is a *decaying* one-minute average, so it reports load the session has already
+finished causing — the driver builds three worktrees itself, and on a 4-core rig
+an operator's second attempt would be refused for the load of the first. It also
+made this deterministic test suite flaky, crossing the limit between two cases of
+a single run. A guard that reds on correct input is the guard an operator waives
+at 2am on a metered box, and the escape (`--control`) disclaims the whole
+verdict, so the refusal would have cost the session and bought nothing.
+
+**What the storage check depends on, stated so nobody re-derives it.** The
+signal is the NVMe **vendor model string** — `Amazon Elastic Block Store` versus
+`Amazon EC2 NVMe Instance Storage` — and that is a fair objection, because a
+vendor string is the same *kind* of evidence as a hostname. The reason it is
+used anyway is that **nothing else discriminates**, measured rather than assumed
+on an EBS-backed lane box:
+
+| candidate signal | on EBS here | on instance storage | discriminates? |
+|---|---|---|---|
+| `queue/rotational` | `0` | `0` | no |
+| filesystem type | `ext4` | `ext4`/`xfs` | no |
+| device name | `nvme0n1` | `nvme1n1` | no — Nitro presents EBS as NVMe *by design* |
+| IMDS `block-device-mapping/` | empty here | varies | not available |
+| device model | `Amazon Elastic Block Store` | `Amazon EC2 NVMe Instance Storage` | **yes** |
+
+On Nitro, EBS is deliberately presented as an NVMe device, so network-attached
+block storage and instance storage are indistinguishable at every layer below
+the device identity. **So this property is measurable on AWS and not portably** —
+and that is the honest scope, recorded here rather than left implicit.
+
+It is still worth more than the hostname check it replaces, for two reasons that
+are not about brittleness: the string is reported **by the device** and names the
+storage service directly, rather than describing the machine class and leaving
+the storage to be inferred; and **both verdicts are affirmative matches**. The
+first version was not — it returned `LOCAL` for any model that was not EBS, so an
+NFS-backed loop device or another cloud's network volume passed as a local disk.
+That is a pass derived from the absence of a bad signal, in the one check added
+to stop exactly that, and it is why there is a fourth token: `UNRECOGNISED` is
+disclosed as *not known to be local*, distinctly from `NOT-MEASURABLE`.
+
+**A CENSUS OF PROPERTIES IS ONLY AS GOOD AS THE PROPERTY STATEMENTS IN IT, AND
+THOSE STATEMENTS ARE PROSE.** The round-20 enumeration was built specifically to
+close the analyzer's trust boundary, and it did not prevent round 23's two
+findings — because it enumerated the right SUBJECTS with the WRONG PREDICATES:
+
+| the enumeration said | the property actually is |
+|---|---|
+| "enough replicates completed" — a **floor** | exact conformance to the declared sampling plan |
+| "the records describe this session" — **internal** consistency | session-local **provenance** |
+
+Both weaker, neither stronger, which is a bias and not a coincidence: a
+predicate written from the check in front of you inherits the check's strength.
+**The census inherited the very class it was built to close** — prose beside
+code, describing something adjacent to what the code does.
+
+**Two of twenty were weak; the larger problem was the entry set.** Re-reading
+the other eighteen turned up no further weak predicates — a useful negative —
+but the reverse direction had gone unmeasured: **37 raised causes against 18
+entries.** Round 20 declared "the list can be wrong by omission" and nothing
+measured it, so four rounds of new refusals accumulated unlisted while the
+census went on reporting twenty properties. *A declared gap that nobody measures
+is a gap that grows.*
+
+**Closing it BY SET rather than BY PROSE is the whole point.** Every refusal must
+now be classified verdict-gating or input-integrity, and an unclassified one
+reds. Forty more property sentences would have been forty more chances to state
+a property more weakly than the check enforces; **set membership carries no claim
+about what a cause enforces**, only that someone decided which kind it is. The
+staleness half then caught my own error on its first run — seven driver-side
+causes I had classified, which this census cannot see because its subject is the
+analyzer's surface.
+
+**And writing the cases moved the fix.** Renumbering a replicate red as a
+*parity* violation, because the ordering check ran first — so the diagnostic told
+the operator the wrong thing about the wrong problem. Whether the pairs ARE the
+declared plan is prior to whether they ran in the declared order, and the set
+check moved ahead of it. The cases did not merely verify the fix; they showed it
+was in the wrong place.
+
+**A PLANT THAT SILENTLY FAILS TO APPLY IS INDISTINGUISHABLE FROM A FIX THAT
+WORKS.** Twice in one round I concluded a guard had no coverage because a plant
+produced no red — and both times the plant had never applied: `str.replace` with
+a needle whose indentation was wrong changes nothing and reports nothing. The
+run was green because the code was unmodified, which looks exactly like the run
+being green because the code is correct.
+
+The fix is the one already applied to every patch script in this lane and never
+to the plants: **assert the mutation landed.** `assert old in s` before
+replacing. Planting is the verification method this lane relies on most, and it
+was the one step performing no verification of itself — the shape it exists to
+find, one level up.
+
+**AND THE FALSE CONCLUSION IS THE WORSE HALF.** On the strength of a plant that
+did nothing, I recorded that the driver's digest checks were uncovered and wrote
+a structural guard for them. The guard is worth having and it does fire — but the
+finding that motivated it was an artifact of my own tooling, and had I not
+re-planted with an assertion it would have entered the record as a real coverage
+gap. *A measurement that cannot fail is not evidence, and a plant that cannot
+apply is a measurement that cannot fail.*
+
+**THE MOST DANGEROUS SHAPE IN THIS LANE: THE COMMENT STATES THE CORRECT
+PROPERTY AND THE CHECK BESIDE IT IMPLEMENTS A WEAKER ONE.** Five instances, and
+what makes it worse than an unchecked requirement is that **a reviewer reads the
+sentence as the behaviour** — every one of the five was signed off by someone
+looking straight at it:
+
+| the prose said | the check did |
+|---|---|
+| "`nproc` is the property, and it is recorded" | measured the *process's* CPUs |
+| a docstring naming the pinned commit | nothing enforced it |
+| "the same pair reversed … would be authoritative about something it did not measure" | a **prefix** test on the head, and the base unpinned |
+| "an unreadable `/proc` is UNVERIFIABLE, never 'pinned correctly'" | `return 0` — success |
+| "a requested pin that nothing established is a claim" | read the wrong manifest block, so it could never fire |
+
+The last is mine, written *in the round about this shape*, which is the best
+evidence available that noticing the class does not immunise you against it.
+
+**The census recognises three shapes and says so, because the general question
+is undecidable.** "Does the prose match the code" cannot be decided
+mechanically, so the guard does not pretend to: it detects a never/must-not
+comment beside a bare success, an exactness claim beside a prefix test, and an
+object id named in prose that nothing in the module's code can reach — the three
+that produced the five. **A sixth instance of an unrecognised shape is invisible
+to it**, declared as its own line in the output rather than left to be assumed.
+
+Two details worth keeping. Shape C resolves **names**, not just literals, or it
+would red on correct code — the analyzer enforces the pin through an imported
+constant, so the docstring's claim is backed without the literal appearing in
+the file. And its single exemption is a **list of one, not a rule**, because
+what distinguishes that hit is semantic: the comment quotes a malformed value as
+an *example* rather than claiming enforcement, and nothing mechanical separates
+those. Recorded as the human judgement it is.
+
+**AND THE FIXTURES INSTANTIATED THE DEFECT AGAIN.** The arm cases used
+`cfa93fe98…`/`cfa93fe99…`, which passed *because* the check was a prefix test —
+so the cases meant to prove the arm gate could not have failed. Second time in
+this lane after the 512-zero-byte `CompressionInfo.db`: **a fixture that
+satisfies a weaker check than the one shipped proves nothing about the shipped
+check**, and the way to notice is to ask what the fixture would have to look
+like if the check were as strong as its description.
+
+**THE DRIVER'S REFUSALS PROTECT ONLY SESSIONS THE DRIVER CREATED.** Three
+consecutive rounds found one boundary from three angles — the ticket recorded
+but not pinned, the arms pinned in the driver and unchecked in the analyzer, the
+workload validated at pre-flight and trusted at analysis — and each was patched
+where it was shown. The analyzer treats manifests as untrusted data everywhere
+*except* for the properties a driver was told to enforce, so a hand-made or
+edited manifest walked straight past them: `grep -c ticket_content
+analyze-ab.py` was **0**, and the file's only mention of the pinned commit was
+its own **docstring**. A requirement stated in prose with no check behind it —
+the same shape as the `nproc` comment, one file over.
+
+The fix is an **enumeration** rather than two patches: every property that gates
+a verdict, each required to have an analyzer-side refusal. Twenty of them, and
+the enumeration found no members nobody had thought of, which is itself the
+result worth recording — the boundary was systematic, the omissions were not.
+
+**The list is curated and says so.** There is no mechanical way to derive *the
+set of properties a verdict depends on* from source, so it can be wrong by
+OMISSION; what **is** derived is whether each named property still has a
+refusal, so it can never be wrong by staleness. That is the honest half of a
+guard whose subject cannot be computed, and stating which half is which is the
+difference between a census and a claim.
+
+**AND THE PLANTS FOUND THAT ALL THREE FIXES HAD NO CASES AT ALL.** Fixed,
+green, and untested — the suite passed unchanged with every fix reverted. That
+is the second consecutive round where planting found a gap in the coverage
+rather than in the code, and it is the argument for planting over re-reading: a
+fix and its case feel like one act while writing them, and only reverting the
+fix distinguishes them.
+
+**THE SHARPEST INSTANCE OF THE LABEL-VERSUS-PROPERTY CLASS IS THE ONE THAT
+LOOKED LIKE ITS FIX.** The narrow-rig gate began as an instance-type string;
+that was correctly rejected as a *label* and replaced with `nproc`, described in
+the code as "the property, and it is recorded". It was not. **`nproc` reports
+the CPUs available to the PROCESS, not the size of the machine** — measured on a
+16-CPU box, `nproc` → 16, `taskset -c 0-3 nproc` → 4, while
+`/sys/devices/system/cpu/online` → `0-15` under both. So a large rig pinned to
+four CPUs satisfied a guard whose own refusal text said pinning must not qualify
+it. The code contradicted its own stated requirement.
+
+**Every property that guard had was true, and none was the one that mattered.**
+It was measured, recorded, non-attestable, self-consistent, and derived from the
+machine rather than from a name — and it answered a question nobody had asked.
+The mistake is one level in from the original: *"this is a measurement"* is not
+*"this is a measurement of the thing the requirement is about."* Rejecting a
+label does not, by itself, get you the property; it only gets you a measurement,
+and which subject that measurement is of is a separate question that has to be
+asked out loud.
+
+**The fix reads the machine's online CPU set, with no fallback to `nproc`** —
+falling back to the value whose wrongness *is* the defect would reintroduce it
+exactly where nobody would look for it — and records `process_cpus` separately,
+because the affinity-limited count is a real and different fact rather than a
+substitute. The manifest key was renamed from `nproc`, since the old name is
+what invited the mistake.
+
+**AND THE CASES COULD NOT HAVE CAUGHT IT EITHER.** Every rig-profile case set
+the hardware and process counts *equal*, so a gate reading the wrong one is
+invisible to all of them. The detecting shape is the defect scenario itself — a
+large machine under a mask — and it existed nowhere until the plant for the fix
+passed green and forced the question. **A case suite that only ever presents
+inputs where two fields agree cannot detect which field is read.**
+
+**A VERDICT MUST NOT BE A FUNCTION OF AN ANALYSIS-TIME FLAG.** `--profile`
+selected the target band when the report was *written*, defaulting to `narrow`,
+so the same data produced different verdicts under different flags and a
+wide-row session analysed with the default was silently scored against a band
+derived for narrow rows. This is the label-versus-property family's last
+instance and the one that was hardest to see: `nproc` binds the MACHINE,
+`rig-profile-mismatch` binds the MACHINE, and **nothing bound the WORKLOAD the
+ratio is actually about**.
+
+**It cannot be derived, and that was checked rather than assumed.** The band's
+own source — `docs/research/phase2-verify-row-engine.md` line 107 — says
+"~1.1–1.25× narrow single-stream, ~1.05–1.1× wide" and defines narrow and wide
+**nowhere**. There is no published bytes-per-row or row-count boundary. So
+deriving from the data would need a threshold nobody has authority for — *a
+fabricated constant is worse than a flag, because it looks like a measurement* —
+and deriving from the table name is the label mistake again. The declaration is
+irreducibly human.
+
+**TWO NUMBERS IN THIS REPOSITORY LOOK LIKE THAT BOUNDARY AND NEITHER IS ONE —
+this paragraph exists to stop the next person wiring one in.** Searching for a
+definition turns up `"150 rows in single partition (wide row)"` — in
+`docs/research/M5-Stage0-Integration-Tests-Summary.md:24` *and again* in
+`docs/research/M5-Stage0-Test-Report.md:32`, so a search returns it twice and it
+reads as corroborated — and `"a 1 KB wide row"` in
+`docs/research/phase1-5-transport-ingest.md:196`. A reader who finds either will
+reasonably conclude that a boundary *was* published and that this instrument
+simply failed to look, and will "fix" it by wiring the number in. **They measure
+different quantities — row COUNT versus BYTES PER ROW.** Choosing between them is
+not reading a specification; it is writing one. So what is missing is not a
+constant but a *definition*: which quantity the word "wide" ranges over has never
+been decided, and until it is, any threshold an implementer picks is their
+legislation wearing the authority of a citation.
+
+That is the general shape, and it is worth more than this instance: when a
+derivation looks blocked only by a missing number, check whether the candidates
+you find are even commensurable. If they are not, the gap is a definition, and no
+amount of care inside the code supplies one.
+
+**What was wrong was WHEN, and HOW MANY TIMES.** It is declared once, at
+measurement time: the driver *requires* `--profile` with **no default** (a
+default is precisely the defect; the precedent is `--max-concurrent-scans`,
+required here for the same reason), records it in the manifest, and the analyzer
+reads it from there. `--profile` at the analyzer demotes from **selector** to
+optional **assertion** — it may confirm the declaration, may never overrule it,
+and cannot supply one a session never made. A wrong `--profile` is therefore
+*observable* rather than silently effective. One resolver serves both the
+refusal path and the report, because two resolutions of one question is how they
+come to disagree.
+
+**VALIDATE-THEN-REREAD IS A TOCTOU ON THE MEASUREMENT INPUT.** The ticket
+template was validated once, before the builds, and then re-read from its
+original **mutable** path for every prewarm and every measured run — so an edit
+mid-session makes the arms execute different filters, projections or token
+ranges while every record still reports shape `full`. An invalid band verdict
+that looks clean. The driver already applied the opposite principle everywhere
+else (per-session immutable directories, one `flight-loadgen` built from
+`--loadgen-ref`); this was the hole in it. The copy is taken **first** and the
+**copy** is validated — copying after validation leaves the same window, one
+step narrower.
+
+**And the first three cases I wrote for that freeze all passed under a plant
+that defeated it.** They asserted the *artifact*: a frozen copy exists, it does
+not follow an edit to the original, it matches its recorded digest. All three
+remain true when every run reads the original instead, because the copy is still
+made. Even the source grep passed — the plant redirected the *variable*, not the
+literal the grep looked for. The property was never "a frozen copy exists", it
+was **"every run READ the frozen copy"**, and only the invocation can answer
+that: the load-generator shim now records every `--ticket-template` it is handed
+and the case requires each to be inside a session directory.
+
+**THE REQUIREMENT WAS THE ALGORITHM AND THE CHECK TESTED EXISTENCE — with the
+requirement written in the comment directly above it.** Round 12 enforced *"a
+non-empty `CompressionInfo.db` exists"* under a comment reading *"the field is
+LZ4"*, so Snappy, Deflate, Zstd, **`NoopCompressor`** and any corrupt-but-
+non-empty file passed as the required corpus. `NoopCompressor` is the sharpest:
+it is metadata for *no compression at all*, so it satisfied `compressed: true`
+while removing every byte of decode work — **the flattering direction again**,
+which is why it survived three rounds of review. A ratio measured against
+different decompression is not comparable to an LZ4-derived band.
+
+The parser is written from the definitive guide's layout
+(`appendix-g-compression-chunk-formats.md` 34–70, whose authority is
+`CompressionMetadata.java` at `cassandra-5.0.8`) and **never from CQLite's own
+reader** — a CQLite `file:line` is evidence of what CQLite does, never of what
+is correct. It is **four-valued, and the fourth state earned itself**: `LZ4` /
+`OTHER` (a compressor we know is not LZ4) / `UNRECOGNISED` (parses, names
+something we do not know) / `UNPARSEABLE`. Three refusals, three different
+operator actions — regenerate with the right compressor, look at this name, this
+file is damaged — and collapsing them hands one remedy to three problems.
+*An unknown compressor and a corrupt file are different things, and only the
+first is safely describable in the manifest*: recording a name we read is a
+fact, recording anything from bytes we could not parse would be inventing one.
+
+**And this suite's own fixtures were the defect, in five places.** The e2e corpus
+and four driver corpora used **512 zero bytes** as `CompressionInfo.db` — which
+satisfied the existence check while being a corrupt file. The test suite
+contained a working example of the bug it existed to catch. They are real LZ4
+headers now, generated from the guide's layout, so they are documents the parser
+has to read.
+
+**THE NARROW RIG IS A PROPERTY, AND `i4i.xlarge` IS WHAT AWS CALLS IT.** The
+band is defined for the M0 profile — 4 vCPU (§RUNBOOK line 9) — and
+`startswith("i4i")` let the whole *family* through: an `i4i.32xlarge` scored a
+clean band verdict on **128 vCPU**. The tempting fix, requiring the instance type
+to equal `i4i.xlarge`, enforces the *name*; it is the label-versus-property
+mistake this instrument had already removed for storage, reappearing one field
+over. So the refusal is on `nproc` and the label is a disclosure — two properties,
+each checked where it is measurable, with `c7i.4xlarge` still refused by the
+*storage* check because 4 vCPU on network storage fails for a different reason
+and should say so.
+
+**Declared residual, in the refusal text itself:** `nproc` honours the affinity
+mask, so pinning a 128-core box to 4 cores still reports the host count and is
+refused. That is **correct for the band** — cache and memory-bandwidth behaviour
+on a pinned large machine is not the M0 machine — but it will read as a false red
+to someone who believes they configured the narrow profile, so the refusal says
+so rather than leaving them to guess.
+
+**CLEANUP REGISTRATION PRECEDES RESOURCE CREATION — the fourth instance in this
+repository and the first in this file.** The session lock was acquired ~80 lines
+before the trap that frees it, so any failure in between left `.session-lock`
+behind and blocked *every later session permanently*; on a metered rig that ends
+with an operator deleting a lock file they do not understand, which is the worst
+possible remedy for a guard whose whole job is stopping two sessions sharing a
+box. The comment directly beneath the acquisition asserted the very ordering the
+code violated — **a comment is not a check**, which is this lane's own recurring
+finding pointed at itself.
+
+**The sweep the family warranted, with verdicts rather than a fix count.** Four
+documented instances each fixed at a single site is the strongest available
+evidence that single-site fixes do not work on this family, so every resource
+the driver creates was checked for the same ordering:
+
+| resource | verdict |
+|---|---|
+| session lock | **was defective** — acquired ~80 lines before the trap; fixed |
+| server process | sound — the trap is armed long before launch, and the identity is captured on the statement after `&`; the residual window leaks an unreaped child rather than signalling a stranger, which is the safe direction |
+| build worktrees | **deliberately persistent**, not an ordering defect — they are reused across sessions to avoid rebuilds, disclosed at session end with the exact `git worktree remove` command, and every early-failure `die` names the path |
+| manifest `.tmp` | sound by construction — the atomic write's residue lands inside the session's own directory, so it cannot affect another session |
+| run/log directories | the session's output, deliberately kept |
+
+**The obvious fix is wrong, and it has its own case.** With the trap armed
+first, `cleanup` also runs on the path where acquisition *failed because a peer
+holds the directory* — so keying the removal on the directory existing would
+delete the **peer's** lock, turning a leak into a silent mutual-exclusion
+failure. Strictly worse, and invisible. The release is conditional on a flag set
+only by the branch that created the directory. And the case that proves the fix
+is not "the directory is gone" but "the next session actually runs", because
+that is the property an operator has.
+
+**A FOUR-STATE CLASSIFIER IS ONLY AS GOOD AS THE FOUR-WAY DISPOSITION DOWNSTREAM
+OF IT.** The classifier was fixed to stop calling a SAN LUN `LOCAL`; the analyzer
+then handed that correctly-labelled `UNRECOGNISED` device a verdict anyway,
+because only the affirmative `NETWORK` value was refused one layer down. The
+producer was fixed and verified across all five tokens, and the consumer was
+assumed — so the defect survived its own fix, wearing the fix as evidence.
+
+The rule that follows: **the acceptance criteria require local NVMe, and "we
+could not tell" does not satisfy a requirement.** `NOT-MEASURABLE` and
+`UNRECOGNISED` refuse. The earlier reasoning — that a probe which could not run
+is a gap and should be disclosed rather than refused — is right about
+*disclosure* and wrong about a *verdict*, and the distinction is the finding.
+
+**`--attest-local-storage` covers IGNORANCE, NEVER EVIDENCE.** An operator may
+assert that an unrecognised device is local; nobody may assert that an
+*identified* network device is not. Without that asymmetry the override would
+turn off precisely the thing the check exists to refuse — so the attestation is
+consulted only *after* the `NETWORK` refusal and can never reach it, in the
+driver and again in the analyzer. It is recorded in the manifest, its reason is
+placeholder-refused, and it prints beside the verdict saying the local-NVMe
+requirement was **not independently verified** — so the attestation travels with
+the number rather than sitting in a file nobody opens.
+
+**The refusal belongs where the false claim would be made, and finding that out
+was the useful part.** It was written into the driver's pre-flight first, and the
+end-to-end sessions stayed green — but only because `df` reports `/dev/root` on
+this lane box, which has no `/sys/block/root`, so the probe answered
+`NOT-MEASURABLE` and the sessions were never refused. On a box naming a real
+device they would all have refused, and the harness would have been correct here
+and broken elsewhere **for a reason having nothing to do with the code under
+test**. So the driver warns at pre-flight — before the builds, naming the exact
+refusal — and the analyzer refuses the verdict. That also stops the instrument's
+own testability depending on where its scratch directory happens to live, and
+it is pinned structurally, since the behavioural case cannot be written without
+a network-backed path to point at.
+
+**And a property that cannot be measured is reported as itself.**
+`storage: NOT-MEASURABLE` and `storage: LOCAL` are different facts; only the
+second is a verified local disk, and only the first is a gap. Both tokens are
+*required* in the manifest and drawn from a closed set, so a manifest that never
+asked refuses rather than passing as one that asked and could not tell — the
+sentinel rule this lane keeps re-learning, applied to the record itself. Fixing
+this turned up one more instance in the analyzer's own predecessor check, which
+read `NOT-RECORDED` as a quiet box (`except ValueError: busy = False`).
+
+Two further stated preferences — CPU pinning and an even replicate count — remain
+disclosed rather than enforced, for the reason the label row now carries alone.
+
+The analyzer also states **which quantities it covers and which it does not**,
+naming the missing one, before *and* after the verdicts. A report covering one
+quantity and silent about the other is how an incomplete session gets read as a
+complete answer — the same class as a PR body over-claiming — and a reader who
+scrolls to the verdict should not have to remember a header.
+
+---
+
+## 11. The ninth lesson: isolate ONE variable, and know which things may differ
+
+Round 10's headline is the only finding in this series that would have produced a
+**confounded number rather than a refusal**: each arm built and used **its own
+`flight-loadgen`**, so the client varied with the server commit. A client-side
+change between `cfa93fe99^` and `cfa93fe99` would have been attributed to server
+throughput — and nothing downstream could have revealed it, because both arms
+would have been internally consistent and the dispersion would have looked fine.
+**An instrument that produces a confounded number is worse than no instrument,
+because the number would be believed.**
+
+The root of it is a phrase carried forward without being questioned. The issue
+said *"separate `--target-dir` per commit"*, which is correct and necessary — and
+neither of us asked **which binaries legitimately differ per arm.** Only the
+server does. One load generator is now built from a pinned ref, used by both
+arms, recorded in the manifest and **per run**, and the analyzer refuses a
+manifest whose runs name more than one — because a manifest is data and this
+analyzer does not get to assume which driver produced it.
+
+**The transferable question: for any A/B, list what differs between the arms and
+require a reason for each. Anything on that list without one is a confound.**
+
+**A ruling revised, and the qualifier that hid the gap.** Partial admission
+corroboration was accepted as a disclosure rather than a refusal, on the grounds
+that the binding protection is affirmative and independent — the driver dies on
+any per-run mismatch *it can read*. That qualifier was doing more work than it
+looked: **when nothing can be read, it protects nothing**, and batch size,
+admission provenance and the merge-path pin are all unverified while the verdict
+stays decisive behind a disclosure. So `none` is now `UNMEASURED`; `partial`
+stays disclosed, because there the observed runs genuinely constrain the
+unobserved ones. The earlier reasoning was incomplete rather than wrong, and the
+lesson is about where it stopped: **when an argument for permissiveness contains
+a qualifier, check what happens at the qualifier's boundary.**
+
+**And a two-state variable that took three passes to get right.** `SRV_PID` was
+cleared first (round 2, for re-entrancy), then deliberately left set on one path
+(round 5), and then clearing-too-early bit again during the shutdown wait —
+`cleanup` saw no server, skipped the kill, and released the session lock with the
+child still running. Three passes at "when is the pid still ours" means the
+variable was the problem. There is now **one release point**, after the process
+is confirmed gone, and the reap is idempotent: `kill` on a dead pid is a no-op and
+the identity check added in round 5 makes signalling a reused pid impossible —
+which is precisely what made the clear-first trick unnecessary. **A fix that was
+load-bearing under an older design can become the thing preventing the simple
+one; when a guard is revised twice, check whether a later guard has subsumed it.**
+
+**AND THE FOURTH STUB-FIDELITY FAILURE WAS A FORMAT, WHICH IS A DIFFERENT KIND OF
+QUESTION.** `tracing-subscriber`'s fmt layer has ANSI **on by default**, and this
+repository already records from #3400 that **colour survives redirection to a
+file** — so the real server's log is coloured even captured with `> file 2>&1`,
+and tracing styles the field NAME and the `=`, which makes a `name=value` pattern
+match nothing. Left unfixed this was **total**: every startup field
+`NOT-OBSERVED`, corroboration `none`, and — after the `none` ruling — **every
+real rig session refused as UNMEASURED.** The instrument would have refused every
+session it was ever pointed at.
+
+The first three stub-fidelity failures were a missing field, a permissive argv
+and an ignored `-p`: all things **enumerable from `cli.rs`**. This one is not in
+`cli.rs` at all. **You only get it by asking what the real thing's output looks
+like ON THE WIRE** — which is a different question from "what does the producer
+declare", and the one a stub author is least likely to ask, because the stub
+author writes the output they intend to parse.
+
+Fixed at the parse site (`_ansi_stripped`, this repository's own idiom), with
+`NO_COLOR=1` in the server environment as a **verified** second control —
+tracing-subscriber 0.3.23 reads it in `Layer::default()`, checked in the locked
+source rather than assumed — and the stripping is still the fix, because the env
+var depends on a crate version and a construction path this harness does not own.
+A coloured-log end-to-end case now runs a stub that emits real escape sequences,
+and asserts the captured log **actually contains them** before asserting the
+readback survives: a colour case whose log is not coloured proves nothing.
+
+**Two stub-fidelity failures in the previous round, both found by an assertion I
+wrote against the real behaviour.** The stub `cargo` ignored `-p` and produced both
+binaries whatever was asked for, which made "each arm builds its own client"
+indistinguishable from "one shared client" on disk; and the misnamed cold case
+ran `--temperature warm` into a directory called `e2e-cold` and inspected the
+warm session, so cold handling and `prewarm: false` were untested behind a name
+that asserted coverage. **Fifth case in this lane that did not test what it
+claimed.** The cold case now asserts the property that is actually testable
+without privileges — that a cold session which cannot drop the page cache
+**fails closed** rather than running warm — and declares the rest.
+
+---
+
+## 12. The eighth lesson: make there be ONE path, not a guard on each path
+
+Three of round 9's four findings were the same shape, and it is the shape round 8
+only half-closed: **a value with more than one source, guarded at one source
+instead of at the value.**
+
+- the batch-size floor was checked on `--batch-size`; per-arm extras were a
+  second route (round 8, fixed for that one value);
+- the corpus floors were checked in the driver; an operator lowering
+  `--min-sstables` was a second route, and the analyzer trusted the number the
+  session under test reported — **the third separate way #3058's single-source
+  bypass has been reachable**, after the recursive census and the symlinked
+  decoy;
+- `--max-concurrent-scans` was declared per-arm overridable and validated
+  globally, so any effective override failed at run time.
+
+Guarding each resolved value one at a time is the same trap as reconciling
+record fields one at a time — §13 (guard the VALUE, and enumerate the SET) — so
+the fix is the same move that closed the
+sharing class: **make there be one path.** A single `resolve-session` step takes
+every raw input, applies every rule, and emits the complete resolved
+configuration; the driver reads nothing else. A new option cannot route around a
+guard because nothing else produces the values, and a structural case asserts
+every declared resolver input is an option the driver accepts.
+
+**And the guard's own subject set is DERIVED, not curated — which is what makes
+it a completeness property rather than a list.** `RESOLVER_INPUTS` alone would be
+a second place to forget an option, i.e. the exact failure the resolver exists to
+remove, reintroduced inside its own guard. So the self-test reads every
+`--option)` arm out of the driver's **own dispatch** and requires each one to
+carry a disposition — `resolver-input` or `not-server-config`, each with a
+reason. Adding an option without deciding whether it reaches the resolver reds,
+naming the option. RED-verified by adding a plausible `--new-server-knob`.
+
+Same standard as the record/workload disposition tables — §13 (guard the VALUE,
+and enumerate the SET) — **the list may be curated; the completeness must be
+checked against the real thing.**
+
+**And the analyzer enforces the floors independently.** A verdict must not derive
+its validity from a number its own subject chose, so the documented minimums live
+in `ab_common.py` and the analyzer checks *those*, ignoring the manifest's own
+`min_*_required`. Lowerable only under a control label, where the verdict is
+already disclaimed. Same reason the shape is re-checked rather than trusted.
+
+**The `eval`, and where it came from.** Per-arm values were resolved with
+`eval "VAR=\"$(...)\""`, which executes a command substitution embedded in an
+operator-supplied flag value. It was introduced *by the fix* for round 7's argv
+problem — the remedy for a parse defect created an execution defect, which is
+#3312's rule (control and data must not share a channel) arriving in the driver.
+Removed rather than sanitised: associative arrays carry the values, and the
+resolver's output is read as data. **Sanitising and keeping the `eval` would have
+been the "rarer delimiter" move this repository has a standing ruling against.**
+
+**One honest note about the case I wrote for it.** My first injection case
+asserted only that no side effect appeared — and with the resolver in place a
+dangerous payload is refused before it could reach any interpreter, so that
+assertion **cannot fail however the code is written**. It was a case that could
+not fail, written into the round whose subject is guards that do not bind. It now
+asserts the refusal (behavioural, can fail) *and* the absence of side effects
+(which would catch an `eval` placed upstream of validation, exactly where the
+original was), with the split stated in the case itself.
+
+---
+
+## 13. The seventh lesson: guard the VALUE, and enumerate the SET
+
+Round 8's three findings are three shapes this lane keeps producing, and two of
+them were fixed by changing *where* a rule lives rather than adding another rule.
+
+**Guard the resolved value, not the entry point.** The batch-size floor was added
+in round 6 on the `--batch-size` flag. Per-arm extras are a second route to the
+same value, and **symmetric** extras (`--base-server-extra '--batch-size 0'` and
+the same on head) need no control label — so the floor was bypassable, the server
+clamped both arms to one row per batch, and the analyzer would have rendered a
+measurement verdict for a configuration nothing recorded. That is the fifth time
+a guard on one entry point has been reachable around through a route added later.
+The fix is not a second guard: the check now lives on the **resolved** value,
+computed in one place, so every present and future caller inherits it because
+there is only one place the resolved value exists.
+
+**Enumerate the set, or keep finding its members one at a time.** Ten fields
+appear in both the manifest and the step records, and nine had been reconciled
+individually, each after a review found it missing — `target_concurrency`,
+`duration_s`, `rows_total`, `round`, the admission ceiling, `max_batch_bytes`,
+the wait timeout, the CPU affinity, the pair order. The tenth was `shape`, and by
+then the pattern was the finding. So the set is now **enumerated in two
+committed tables** (`RECORD_FIELD_DISPOSITION`, `WORKLOAD_DISPOSITION`), every
+entry carrying `reconciled` / `checked` / `excused` with a reason, and the
+self-test asserts that **every key of a real step record and a real manifest
+appears in them**. A field added to either side is reconciled or explicitly
+excused; it cannot join quietly.
+
+**Declared residual, because the completeness is only as good as its direction:**
+these prove every field that *exists* is accounted for. Neither can know about a
+constraint nobody thought of — a manifest field that *should* bound a record but
+was never conceived of is invisible to both. The tables close the "added later
+and forgotten" hole, not the "never imagined" one.
+
+**And a defect that only appears after the expensive step is worth its own
+category.** A relative `--work-dir` broke both builds: `CARGO_TARGET_DIR` is read
+after the driver has `cd`-ed into the worktree, so cargo wrote beneath the
+worktree while the driver checked the original-relative path and died
+`build-incomplete`. Same economics as the round-5 exit-127 defect — both arms
+compile, on a box billed by the hour, and *then* it fails. Note why the harness
+missed it: every end-to-end case passes an **absolute** path, which is the
+natural thing to write and therefore precisely the input a harness will not cover
+by accident. **When a defect's cost is concentrated after an expensive step, ask
+what input your harness writes by habit rather than by choice.**
+
+---
+
+## 14. The sixth lesson: two correct rules can compose into an unusable whole
+
+Round 6's High was that **the runbook's own sensitivity control could not be
+analyzed**. Round 2 required the analyzer to refuse cross-arm server-config
+differences. Round 5 required asymmetric per-arm flags to carry `--control`. Both
+were right. Nothing reconciled them — so the control that deliberately sets the
+head arm's `--max-batch-bytes 1` was refused as `server-config-mismatch` before
+the control label was even considered.
+
+**What makes this worse than an ordinary defect is which check it disabled.** The
+sensitivity control is what tells an operator whether an `INCONCLUSIVE` means
+"there is no effect" or "this box cannot measure one". Losing it does not corrupt
+a number; it removes the ability to interpret the number you get.
+
+**The fix is a declared, structured expectation instead of a blanket rule with an
+exception.** The driver computes each arm's effective configuration once
+(`effective-flag`), records it in the manifest as data, and the analyzer permits
+**exactly** the declared differences, under a control label, only where the
+observed values match the declared ones. An undeclared difference is still a
+refusal, and so is an observation that does not match its own declaration.
+
+Two things worth carrying:
+
+- **`NOT-REQUESTED` is a value, not an absence.** The first version collapsed
+  "this arm takes the server default" to "unknown", which made the sensitivity
+  control's difference *undeclared* — the base arm requests nothing and the head
+  arm overrides.
+
+  **This is the fourth sentinel bug in this lane, and it bit in the OPPOSITE
+  direction from the other three**, which is what turns the observation into a
+  rule. The earlier ones read *unobserved* as agreement — permissive, admitting
+  something unproven. This one read *not requested* as unknown — restrictive,
+  refusing something legitimate. Same root, inverted consequence, depending only
+  on which branch the sentinel silently falls into. So the rule is stronger than
+  "do not read absence as agreement": **a sentinel needs its own branch, because
+  whichever default it silently inherits will be wrong in one direction or the
+  other.**
+
+  That is also the tri-state lint (`1699-find-tristate`, pinned in
+  `scripts/tests/test_agent_gate_summary.sh`) arriving from the other end: the
+  lint catches a three-valued *shell predicate* collapsed into two — `[ -z
+  "$(find …)" ]` folding "the scan FAILED" onto "no match" — and this lane found
+  three-valued *data* (`NOT-OBSERVED`, `NOT-REQUESTED`, `UNMEASURED`,
+  `could-not-tell`) collapsed the same way. Predicate and payload, one rule.
+  **Declared gap: the lint covers the predicate half mechanically and the payload
+  half not at all** — those four sentinels are conventions in prose, checked by
+  review. Whether that is worth mechanising is an open question, and this
+  repository's history with guards whose false-PASS count climbs across rounds
+  argues against it; what is not open is that the gap should be stated rather
+  than implied away by the citation.
+- **Only execution finds this class.** Two individually-correct rules, each with
+  its own passing tests, composed into an unusable whole. The case that catches
+  it runs the control end to end under the shims — and it exists because
+  §15 (the driver was never executed) had already made that possible.
+
+**The EIGHTH instance was wrong in BOTH directions at once, and that pairing is
+the diagnosis.** The ticket validator demanded `version` — which carries
+`#[serde(default = "default_ticket_version")]`, so the consumer accepts a ticket
+without it — while letting `"predicates": {}` through to fail after all three
+release builds. Too strict and too loose simultaneously, which is exactly what a
+validator written from *a reading of the field list* rather than *the
+deserialiser's behaviour* produces: the four fields someone looked at were
+over-constrained and the nine they did not look at were unconstrained. The fix is
+the whole struct, field for field from `ticket.rs:225-290`, with serde-equivalent
+defaults, `PredicateOp`'s variant set, and unknown fields **ignored** because
+`FlightTicket` is not `deny_unknown_fields` — rejecting one would refuse a newer
+connector's ticket that the server reads fine.
+
+**The too-strict half matters more than its severity suggests**, and it is the
+half a reviewer is least likely to file: it reds a *correct* ticket, and on a
+metered rig the available waiver is `--control`, which disclaims the verdict. A
+guard that reds on correct input is the guard an operator waives — and here
+waiving it costs the session's whole purpose.
+
+**It also separated two checks that had been fused.** The schema half mirrors the
+deserialiser and applies to *every* session including controls — a control that
+cannot be deserialised wastes the same three builds — while the full-ring
+restriction is the target band's own and applies only to measurements. The
+control branch had been checking merely that the file was JSON, which widened the
+gap the schema check exists to close.
+
+**THE NINTH INSTANCE WAS THE SAME DEFECT ONE FIELD OVER, WHICH IS THE REAL
+LESSON OF THE EIGHTH.** Round 13 fixed `predicates: {}`; round 14 found
+`filter: {}` and `aggregation: {}` still checked only for *being objects*. **A
+fix that does not generalise to its siblings is half a fix** — so the mirror is
+now the whole tagged grammar (`PredicateExpr` is `#[serde(tag = "type")]` with
+six variants, validated recursively so a malformed leaf inside a well-formed
+tree is caught; `Aggregation`/`AggregateSpec`/`AggFunc` likewise), depth-bounded
+so a deep tree is a named refusal rather than a `RecursionError`.
+
+**AND THE FIX THAT ENDS THE CLASS IS THE ONE THAT CHECKS ITS OWN COMPLETENESS.**
+Validating `filter` and `aggregation` would have been the third careful reading
+of the same struct, and a fourth field would go unvalidated the same way — so
+`TICKET_SCHEMA`'s field set is now **derived from `ticket.rs` at test time** and
+asserted **bidirectionally**: a field `FlightTicket` declares and the schema
+does not validate is a FAIL, and so is a schema entry the struct no longer
+declares. Same standard as `OPTION_DISPOSITION` deriving its options from the
+driver's own dispatch — *the list may be curated; the completeness must be
+checked against the real thing.*
+
+That check is **three-valued**, because these artifacts are also run copied out
+of the repository: no `cqlite-flight` directory anywhere above means `ticket.rs`
+is genuinely unreachable and the case reports `DECLARED-NOT-MEASURABLE` rather
+than claiming a coverage it did not measure — while a `cqlite-flight` directory
+that exists *without* that file means the struct MOVED, which is a FAIL. A
+two-valued version would have hidden exactly the second case. (The first draft
+of the wrapper printed the success line on the unmeasurable path — a pass the
+run had not earned, caught before commit.)
+
+It also caught a fixture *this lane wrote one round earlier*: the "well-formed"
+filter narrowing was `{"Compare": {…}}`, serde's **externally** tagged spelling,
+written from a guess at the representation instead of a reading of it. The same
+mistake the finding is about, inside the test for the finding.
+
+**AND THE STRUCTURAL FIX FOR A DUPLICATE VALIDATOR IS TO DELETE ONE, NOT TO
+CORRECT BOTH.** The driver's replicate check and the analyzer's record check
+were two implementations of one schema; the driver's looked at five fields, so
+it accepted records the analyzer refuses, and a malformed `latency_ms` reached
+`.get` on a non-dict and produced an unanchored traceback. The obvious repair —
+add the missing checks to the driver — would have been *correct today and wrong
+in two rounds*, because the drift presents exactly as the symptom being fixed.
+So the analyzer's validators are public and the driver **calls** them, carrying
+the analyzer's own cause into its message so the operator sees the exact refusal
+the analysis would give while the rig is still up. The cases assert **agreement**
+rather than a list of rejections, because agreement is the property; a
+structural guard pins that the schema constant and the percentile names are not
+re-derived. Same move as one duration grammar, one resolver, one canonical
+findings section.
+
+**A validator that disagrees with its consumer is now FIVE instances, and the
+count is the argument.** The duration grammar, the census enumeration, the census
+containment, the per-arm argv construction, and the full-ring ticket check —
+every one fixed the same way: read what actually consumes the value, mirror it,
+and cite where you read it. The recurrence is why the rule is *check the
+consumer's source first*, not *write the obvious validator and find out in
+review*. The fifth was instructive twice over: the reviewer's summary of the
+server's token semantics was itself partly wrong (it said `wraparound=true`
+should be accepted because the server treats it a certain way; the source says
+the flag is **not consulted at all** since #3634), so reading `ticket.rs` beat
+taking a correct-sounding description — which is the same rule applied one level
+up.
+
+**And a sweep, not just a fix.** Findings 1, 3 and 4 were all fallout from the
+round-4 restructure: a new rule colliding with an old one, a manifest field
+recording the requested value instead of the effective one (`prewarm: true` on a
+cold session), and help text pointing at a path the driver no longer writes. So
+the restructure's whole surface got swept — and the sweep found **two self-test
+cases that had been passing vacuously since round 4**, both asserting things
+about `<work-dir>/results/`, a directory the driver stopped writing. A
+restructure that closes a class reliably leaves its own debris, and the debris is
+shallower but not less real. **When a restructure lands, sweep every path,
+default and doc string that named the old design — the cost of that sweep is
+lower than one review round.**
+
+**And the sweep has to be a standing step, because of HOW those cases were
+found.** Three self-test cases in this lane have been green for the wrong reason,
+and **not one was found by the case failing** — they were found by sweeping, or by
+fixing something adjacent that forced the quiet one to actually run. A case that
+cannot fail is invisible to precisely the signal everything else relies on, so
+the only thing that finds it is deliberately going to look. That is what makes
+the sweep an argument rather than hygiene: "tidy up after a restructure" gets
+skipped under time pressure; "the signal you would normally trust is structurally
+blind here" does not.
+
+---
+
+## 15. The fifth lesson, and the one that closes the class: the driver was never executed
+
+Round 5's High finding was that **`ab-throughput.sh` did not run at all**. A
+helper had been extracted into `ab_driver_support.py` and one call site was left
+invoking it as a bare shell command, so under `set -e` every session died with
+`command not found` **during its first replicate, after both release builds**. A
+second finding in the same round: the corpus census was computed and never
+exported, so every manifest recorded it as zero — the corpus size the acceptance
+criteria explicitly require be stated.
+
+**Neither was subtle, and neither was visible to anything we had.** `bash -n`
+cannot see a missing command or an unexported variable, and the self-test covered
+the analyzer and the *extracted* helpers. 265 cases were green over a program
+that could not complete a single session.
+
+This is the FIFTH instance of one class in this lane — the dead utilization path,
+ten environment-coupled cases, the silent passer among them, the inline parity
+rule, and now the driver itself. §19 (a green suite over an unexecuted subject)
+states the class; §16 (when one mechanism keeps producing findings) says that when a
+mechanism keeps producing findings you remove the reason it can. **The reason was
+that the session loop needed a rig, so nothing could run it.** So it no longer
+needs one:
+
+- `cargo`, `cqlite-flight` and `flight-loadgen` are replaced by **PATH shims** —
+  the idiom this repository's own gate self-tests already use — with **no source
+  seam and no test-only flag** a real invoker could trip over.
+- The stub server **binds a real socket** and prints a realistic configuration
+  line and a real post-bind readiness line; the stub load generator **connects to
+  the endpoint it is handed**, so a wrong or stale address fails the run instead
+  of passing quietly.
+- A case runs a **complete five-pair, two-arm session** and asserts the manifest,
+  the ten replicate files, the census, the per-arm builds, the reaped servers —
+  **and that the analyzer reads the driver's own output and renders a verdict**,
+  which no fixture can establish because it is the property of the two halves
+  meeting.
+
+RED-verified: reintroducing the two findings reds 11 cases and 1 case
+respectively.
+
+**DECLARED GAP, stated in the suite's own output rather than only here: the real
+cargo build, the real `cqlite-flight` and the real `flight-loadgen` are exercised
+by nothing.** These cases prove the driver's logic — ordering, plumbing,
+recording, promotion — not that the server works.
+
+**One thing the harness taught immediately, worth keeping.** The first version of
+the stub load generator emitted a constant rate per arm, so every pair's ratio
+was identical, the bootstrap interval had zero width, and the analyzer refused the
+session as `bootstrap-degenerate`. That was **the guard working correctly on a
+defective fixture** — and it is the failure mode a synthetic harness invites: a
+stub simple enough to be obviously right is often too simple to be realistic, and
+the difference surfaces as a false red against real code. The stub now carries a
+deterministic per-replicate jitter, derived from `crc32` rather than `hash()`,
+which is salted per process and would have made the suite non-deterministic.
+
+---
+
+## 16. The fourth lesson: when one mechanism keeps producing findings, delete the mechanism
+
+Four review rounds produced findings in the driver's session lifecycle — the
+work directory, the port, readiness, the census — roughly seven of the last
+eight. Each round's fix was correct about the instance in front of it and left
+the next layer:
+
+| round | the fix | what it left |
+|---|---|---|
+| 2 | truncate the ledger only after the lock is held | the *sequential* case: a failed re-use still truncated |
+| 3 | don't write until pre-flight passes and both arms build | the port could be taken *during* the builds |
+| 4 | stage the manifest and promote it atomically | the replicate JSONLs it references were never staged |
+
+Three fixes, three approximations of one property. The fourth attempt stopped
+improving the sequencing and **removed the shared resource instead**:
+
+- **The work directory.** Every session writes to `<work-dir>/run-<session-id>/`,
+  a name no other session can produce. Nothing is promoted, truncated or
+  overwritten, so *"a manifest never references a file from another session"* is
+  true **by construction** rather than by ordering — the manifest and the files
+  it names are the only things in a directory one process owns.
+- **The port.** `--port` defaults to 0; each server binds an ephemeral port and
+  the driver reads the real one from **that server's own** post-bind line. A
+  probe could only ever establish that *something* answered, which on a nine-lane
+  box is how the loser of a race measures the winner's binary while its own
+  configuration asserts all pass against its own pre-bind log. With no shared
+  port there is no race to detect.
+
+**The rule: when successive findings land in one mechanism, the mechanism is the
+defect.** Not the sequencing around it, not the guard in front of it. Ask what
+resource is being shared and whether it needs to be shared at all — the fix that
+ends the series is usually a deletion. Same shape as removing the second duration
+grammar rather than widening it -- §18 (a parameter accepted without being
+checked) -- one level up.
+
+**And a second instance of the mirroring rule from §18 (a parameter accepted
+without being checked).** The corpus census
+scanned the whole data root recursively while the server reads **one** resolved
+directory, flat. So both size gates could pass on files that are never served —
+including the ≥2-SSTable gate that exists to stop the #3058 single-source bypass,
+i.e. the guard against this harness's own headline phantom could be satisfied by
+files the measurement never touches. The census now mirrors `DirSource::resolve`
+and the producer's flat enumeration. **A validator must mirror the grammar *and
+the scope* of whatever consumes the value.**
+
+**A third instance of partial-observation-as-agreement closed the per-field
+approach too.** Rounds 2, 3 and 4 each found one field where an observation was
+counted, dropped or compared over a subset. They are now one `Corroboration`
+type carrying observed/total and a state, constructed for every readback field,
+so a new field cannot be added without inheriting the partial case — there is
+nowhere else to decide it.
+
+---
+
+## 17. The third lesson: the dangerous defect is the one no test would have failed on
+
+Round 3's headline finding was that **every pair ran BASE before HEAD**.
+Interleaving across replicates — which the design called for and which was
+implemented correctly — controls drift *between* pairs. It does nothing about a
+gradient *within* one, and a monotonic drift over the ~2 minutes of a pair (a
+thermal ramp, a clock adjustment, a neighbour's job starting) lands on the second
+arm in **every** pair. That is a systematic bias in the exact estimator the paired
+design exists to de-bias, and it would have arrived **with a tight confidence
+interval**, which is worse than a noisy one because it looks trustworthy.
+
+Two things about it are worth keeping.
+
+**It would have produced a confident wrong answer, and no test would have
+failed.** Every statistical case would still pass; the analyzer would still
+render `MEETS-TARGET`; the self-test tally would still read green. There is no
+coverage metric that finds this — only someone asking what the design controls
+for and what it does not.
+
+**And the rule was, at the time, the one piece of driver logic nothing executed**
+— three lines inline in a session loop that needs a rig. So the fix is not only
+to alternate the order but to move the rule into `ab_driver_support.py`, where the
+self-test runs it and RED-verifies it: reverting it to always-base-first now reds
+two cases. That is round 1's lesson applied to the highest-stakes line in the
+file, and the ordering principle worth carrying is: **of the code you cannot
+easily test, find the part whose failure is a wrong ANSWER rather than an ERROR,
+and make that part executable first.**
+
+The counterbalancing is also **counted from the record, not assumed from the
+rule**: each run stores the position it actually ran in, and the analyzer refuses
+a session where the counts differ by more than the one pair an odd replicate
+count forces.
+
+---
+
+## 18. The second lesson: a parameter accepted without being checked against the claim
+
+Round 1's review asked whether the instrument *works*. Round 2's asked whether it
+measures *the right thing*, and three of its five findings were one shape: **an
+option accepted because it parsed, never checked against the claim the report
+would go on to make about it.**
+
+- `--shape limit-k` with a `limit`-bearing ticket was accepted because the file
+  was valid JSON — and would then have been scored against a band defined for
+  `--shape full`.
+- `--batch-size 0` was accepted as a non-negative integer; the server clamps it
+  to one row per batch, so the manifest would have recorded a value that never
+  ran — of the Arrow batch row cap, which is the very mechanism #2820 changed.
+- `--step-duration 60` was accepted by the driver and **refused by the analyzer
+  afterwards**, because the analyzer had grown a second, stricter duration
+  grammar. That one fails in the expensive direction: both arms built, every
+  replicate run, a metered rig — declined over a missing unit suffix, on input
+  that cannot be regenerated.
+
+The fix in each case is the same question asked earlier: *what will the report
+claim about this value, and has anything checked that the claim is true?* Hence
+the ticket-content check, the batch-size floor, and one canonical duration
+normalised at pre-flight through the load generator's own grammar. A fourth
+finding — corroboration counting values without provenance — is the same shape
+one level up: `agreed` is a claim about where the ceiling came from, made by
+code that was only checking what it was.
+
+**And the transferable rule: a validator must mirror the grammar of whatever will
+consume the value, and it must run before the expensive step.** Stricter than the
+consumer rejects completed work; looser lets a bad value through to fail later.
+Both are worse than the same grammar, applied early.
+
+---
+
+## 19. The first lesson: a green suite over an unexecuted subject
+
+Two independent reviews found that the **utilization half of the instrument had
+no producer** — `ab-throughput.sh`'s inline record validator hard-coded a SINGLE
+step record while the driver advertised `--ramp <list>` and the runbook
+instructed `--ramp 1,2,4,8`. Every utilization session would have died
+`replicate-invalid` **after two release builds, a prewarm and a full measurement
+pass**.
+
+A 110-case self-test was green throughout, and could not have been otherwise:
+`run_one` needs a rig, so **nothing executed the validator** — it lived as an
+inline `python3 - <<'EOF'` heredoc inside a function no test could call. The
+suite measured completeness of the *analyzer* and said nothing about the
+*driver*, while reading, from its tally, as though it covered both.
+
+This is the repository's own standing question one directory over — *which lane
+EXECUTES this?* — and the answer here was **none**. The fix is structural, not
+another case: both helpers moved into `ab_driver_support.py` as an **executable
+file with subcommands**, and the self-test now drives them with real input,
+including the four-step replicate that would have caught it on the first run.
+
+Two rules worth carrying:
+
+- **A helper that cannot be run on its own cannot be tested on its own.** An
+  inline heredoc inside a rig-only function is unexecutable by construction, and
+  no amount of care around it substitutes for being able to call it.
+- **A case count is evidence about the subject it executes, and about nothing
+  else.** 110/110 was true and it was not evidence that the driver worked.
+
+---
+
+## 20. A process finding: cadence, not partition
+
+*The sections above are about the artifact. This one is about how we sequenced
+the work that produced it, and it is recorded here because this is where the next
+person building a measurement harness will be looking.*
+
+This deliverable reached **+5890 lines across three review rounds**, at which point
+roborev began delivering the diff by snapshot path — which makes `prompt-content`
+FAIL on every round from there and puts the merge behind an owner waiver. Worth
+recording how it got that big, because the obvious conclusion is the wrong one.
+
+**The obvious split would have been actively harmful.** Splitting by layer —
+analyzer first, driver second — ships a manifest schema that nothing produces.
+That is not a missed test; it is a design that *guarantees* an unexecuted subject,
+which is precisely the hole §19 (a green suite over an unexecuted subject)
+describes. Reflexively partitioning by layer
+makes the round-1 defect structural rather than accidental.
+
+**There was one real seam, and it was a requirement-sequencing error rather than
+a partitioning one.** The single-stream / utilization split is a genuine seam:
+each half is independently useful and each has a producer and a consumer. But the
+second quantity arrived as a **requirement change from the lead after the first
+build was complete and reviewed**, so it landed as a retrofit into a finished
+artifact — and that retrofit is where the dead-producer defect came from. Had
+both quantities been in the original brief, "PR 1: single-stream end to end;
+PR 2: utilization" would have been clean.
+
+**And a large share of the size is evidence the process worked.** Of the 5890
+lines, **1860 are the self-test**, and it roughly tripled across the three rounds
+— growth that is a *response* to review and could not have existed in a smaller
+first PR. Anyone auditing this by line count should know that before concluding
+the deliverable was too big.
+
+**The fix is cadence, not partition.** Get the instrument reviewed once it is
+**end-to-end runnable but thin** — one quantity, minimal tests — so review rounds
+land on a small diff. This is the repository's review-first doctrine pushed one
+step earlier: it already says review before the first full gate; this says review
+before the artifact is *complete*. Note what it would have caught here: the four
+highest-value findings (the dead utilization path, the #3058 bypass, the
+within-pair ordering bias, the ledger ordering) are all **cross-cutting** — they
+live in the interaction between driver, analyzer and runbook, so they need the
+whole thing present to be visible at all. Reviewing a thin whole finds them;
+reviewing a thick layer does not.
