@@ -652,6 +652,12 @@ impl MergeProducer {
     /// cell paths — so the row is visible with no comparator and no decode.
     ///
     /// `any_raw_live` is the pre-#2339 answer, kept as the last-resort tier.
+    ///
+    /// TWO LINEAR PASSES, never a rescan per cell (roborev job 122). The first draft
+    /// re-scanned every cell to find its column's maximum tombstone timestamp, which is
+    /// O(n^2) exactly when the early exit does NOT fire — a wide collection row whose
+    /// live cells are all accompanied by newer tombstones — i.e. quadratic in the hot
+    /// read path for the very case this check exists to handle.
     fn raw_visibility_signal(
         &self,
         cells: &[cqlite_core::storage::write_engine::merge::CellData],
@@ -659,6 +665,19 @@ impl MergeProducer {
         let is_tomb = |c: &cqlite_core::storage::write_engine::merge::CellData| {
             c.is_deleted || matches!(c.value, cqlite_core::Value::Tombstone(_))
         };
+        // Pass 1: the maximum tombstone timestamp per column.
+        let mut max_tomb: HashMap<&str, i64> = HashMap::new();
+        for cell in cells.iter().filter(|c| is_tomb(c)) {
+            max_tomb
+                .entry(cell.column.as_str())
+                .and_modify(|t| {
+                    if cell.timestamp > *t {
+                        *t = cell.timestamp;
+                    }
+                })
+                .or_insert(cell.timestamp);
+        }
+        // Pass 2: evaluate the live cells against it.
         let mut any_raw_live = false;
         let mut outranks_every_tombstone = false;
         for cell in cells {
@@ -666,12 +685,10 @@ impl MergeProducer {
                 continue;
             }
             any_raw_live = true;
-            let max_tomb = cells
-                .iter()
-                .filter(|o| o.column == cell.column && is_tomb(o))
-                .map(|o| o.timestamp)
-                .max();
-            if max_tomb.is_none_or(|t| cell.timestamp > t) {
+            if max_tomb
+                .get(cell.column.as_str())
+                .is_none_or(|t| cell.timestamp > *t)
+            {
                 outranks_every_tombstone = true;
                 break;
             }
