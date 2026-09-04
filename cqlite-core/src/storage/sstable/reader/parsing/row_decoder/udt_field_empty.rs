@@ -110,11 +110,19 @@ impl V5CompressedLegacyParser {
             // all-null UDT with its DECLARED fields is the right answer here, not
             // a UDT with no fields at all.
             CqlType::Udt(name, _) => self.resolve_named_udt_value(&[], name, depth),
-            CqlType::Frozen(inner) => Ok(Value::Frozen(Box::new(self.parse_udt_field_value(
-                &[],
-                inner,
-                depth + 1,
-            )?))),
+            // A zero-length `frozen<T>` whose INNER type reads empty as null is
+            // NULL — not `Frozen(Null)`. Propagated here, at the value, rather
+            // than special-cased in the field normalizer: `Frozen(Null)` would
+            // otherwise survive as `Some(Frozen(Null))` while a `-1` field is
+            // `None`, which is the very equality/hash inconsistency #3722's null
+            // normalization exists to remove (roborev, at the certified head).
+            // Fixing it here also covers collection ELEMENTS, which never reach
+            // the field normalizer at all. A non-null inner value keeps its
+            // `Frozen(...)` wrapper.
+            CqlType::Frozen(inner) => match self.parse_udt_field_value(&[], inner, depth + 1)? {
+                Value::Null => Ok(Value::Null),
+                decoded => Ok(Value::Frozen(Box::new(decoded))),
+            },
 
             // `Custom` now means what it says: a type string this reader could not
             // resolve. It no longer carries primitive marshal forms, because

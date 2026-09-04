@@ -776,4 +776,45 @@ mod tests {
              hostile header drives unbounded work: {got:?}"
         );
     }
+
+    /// roborev at the certified head: a ZERO-LENGTH `frozen<int>` field and a `-1`
+    /// `frozen<int>` field must be the SAME representation.
+    ///
+    /// #3722's null normalization collapsed a top-level `Value::Null` to `None`,
+    /// but a zero-length `frozen<T>` produced `Frozen(Null)`, which is not
+    /// top-level — so it survived as `Some(Frozen(Null))` while `-1` gave `None`,
+    /// preserving the equality/hash inconsistency the normalization was added to
+    /// remove. Fixed by propagating the inner null at the value.
+    #[test]
+    fn a_zero_length_frozen_field_is_the_same_null_as_a_minus_one_field() {
+        let p = parser();
+        let frozen_int = CqlType::Frozen(Box::new(CqlType::Int));
+
+        // Zero-length: decodes, and must NOT be a Frozen(Null).
+        let zero_len = p
+            .parse_udt_field_value(&[], &frozen_int, 0)
+            .expect("a zero-length frozen<int> must decode");
+        assert_eq!(
+            zero_len,
+            Value::Null,
+            "a zero-length frozen<int> is NULL, not Frozen(Null) — otherwise the \
+             field normalizer cannot collapse it and it diverges from a -1 field"
+        );
+        assert_eq!(
+            V5CompressedLegacyParser::udt_field_value(zero_len),
+            None,
+            "and it must therefore reach UdtField::value as None, the SAME spelling \
+             a -1 null field uses"
+        );
+
+        // Control: a NON-null inner value keeps its Frozen wrapper.
+        let populated = p
+            .parse_udt_field_value(&7i32.to_be_bytes(), &frozen_int, 0)
+            .expect("a populated frozen<int> must decode");
+        assert!(
+            matches!(populated, Value::Frozen(_)),
+            "a non-null inner value must KEEP its Frozen wrapper — collapsing every \
+             frozen value would be a different bug: {populated:?}"
+        );
+    }
 }
