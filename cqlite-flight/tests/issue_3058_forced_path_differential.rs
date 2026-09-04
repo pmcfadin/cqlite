@@ -851,7 +851,6 @@ async fn assert_undeclared_static_column_is_refused_on_disk(failures: &mut Vec<S
         &schema,
         ForcedMergePath::Auto,
         false,
-        None,
     );
     if reason != BypassReason::StaticColumns {
         failures.push(format!(

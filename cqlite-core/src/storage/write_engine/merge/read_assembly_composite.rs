@@ -389,6 +389,44 @@ pub(super) fn compare_composite(
 /// this guard is deleted with it (the `#[ignore]`d tripwire test says so too).
 ///
 /// Dispatch is on the DECLARED comparator, never on the runtime value (#28).
+/// The first leaf ANYWHERE in `cmp`'s tree whose ordering the merged read path
+/// REFUSES (issue #4063), or `None` when every leaf is orderable.
+///
+/// **Why this is public, and why the bypass arm MUST ask it rather than keep its own
+/// list (issue #3058 + roborev job 116 F1).** `compare_composite` refuses these leaves,
+/// so a MERGED read of such a collection fails closed — while a one-source read that
+/// BYPASSES merging would decode and return it, succeeding. The same query would then
+/// start failing the moment a second SSTable appeared, which is a worse failure than
+/// either arm's own behaviour: it is arm-dependent and therefore unpredictable.
+///
+/// The bypass predicate keys its divergence check on this function so there is ONE
+/// authority for "can the merged arm order this?". A second copy of the leaf list in
+/// `cqlite-flight` is exactly the two-ordering-authorities divergence #2339 exists to
+/// remove, one crate over.
+///
+/// Recursive for the same reason `first_unresolved_custom` is: a refused leaf can sit
+/// at any depth, and a top-level-only check was a real silent-wrong-value bug here
+/// (roborev job 52, G2).
+pub fn first_unorderable_leaf(cmp: &ComparatorType) -> Option<String> {
+    if let Some((leaf, _)) = divergent_leaf(cmp) {
+        return Some(leaf.into_owned());
+    }
+    match cmp {
+        ComparatorType::Frozen(inner) => first_unorderable_leaf(inner),
+        ComparatorType::List(elem) | ComparatorType::Set(elem) => first_unorderable_leaf(elem),
+        ComparatorType::Map(key, val) => {
+            first_unorderable_leaf(key).or_else(|| first_unorderable_leaf(val))
+        }
+        ComparatorType::Tuple(fields) => fields.iter().find_map(first_unorderable_leaf),
+        ComparatorType::Udt {
+            field_comparators, ..
+        } => field_comparators
+            .iter()
+            .find_map(|(_, c)| first_unorderable_leaf(c)),
+        _ => None,
+    }
+}
+
 fn divergent_leaf(cmp: &ComparatorType) -> Option<(Cow<'_, str>, &'static str)> {
     match cmp {
         ComparatorType::Varint => Some((

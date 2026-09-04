@@ -38,7 +38,7 @@ fn forced_path_parse_is_total() {
 fn empty_reader_set_is_not_a_single_source() {
     let schema = crate::testutil::simple_schema();
     assert_eq!(
-        bypass_reason(&[], &schema, ForcedMergePath::Auto, false, None),
+        bypass_reason(&[], &schema, ForcedMergePath::Auto, false),
         BypassReason::MultipleSources
     );
 }
@@ -49,7 +49,7 @@ fn empty_reader_set_is_not_a_single_source() {
 fn aggregating_request_never_selects_the_fast_path() {
     let schema = crate::testutil::simple_schema();
     assert_eq!(
-        bypass_reason(&[], &schema, ForcedMergePath::Auto, true, None),
+        bypass_reason(&[], &schema, ForcedMergePath::Auto, true),
         BypassReason::Aggregating
     );
 }
@@ -75,7 +75,7 @@ fn a_declared_static_column_no_longer_forces_the_merge_arm() {
     let (_temp, readers) = open_readers(vec![vec![write_row(1, "a", 10, 100)]]);
     let mut schema = simple_schema();
     assert_eq!(
-        bypass_reason(&readers, &schema, ForcedMergePath::Auto, false, None),
+        bypass_reason(&readers, &schema, ForcedMergePath::Auto, false),
         BypassReason::Selected,
         "control: without the static column this request takes the fast path"
     );
@@ -83,7 +83,7 @@ fn a_declared_static_column_no_longer_forces_the_merge_arm() {
         c.is_static = true;
     }
     assert_eq!(
-        bypass_reason(&readers, &schema, ForcedMergePath::Auto, false, None),
+        bypass_reason(&readers, &schema, ForcedMergePath::Auto, false),
         BypassReason::Selected,
         "issue #3095: a static column the schema DECLARES is not refused for BEING \
          static; issue #3140: nor is the file refused for declaring a deletion"
@@ -137,13 +137,7 @@ fn one_source_with_a_clean_schema_selects_the_fast_path() {
     let (_temp, readers) = open_readers(vec![vec![write_row(1, "a", 10, 100)]]);
     assert_eq!(readers.len(), 1, "the fixture is exactly one generation");
     assert_eq!(
-        bypass_reason(
-            &readers,
-            &simple_schema(),
-            ForcedMergePath::Auto,
-            false,
-            None
-        ),
+        bypass_reason(&readers, &simple_schema(), ForcedMergePath::Auto, false,),
         BypassReason::Selected
     );
 }
@@ -158,13 +152,7 @@ fn two_sources_take_the_merge_arm() {
     ]);
     assert_eq!(readers.len(), 2, "the fixture is two generations");
     assert_eq!(
-        bypass_reason(
-            &readers,
-            &simple_schema(),
-            ForcedMergePath::Auto,
-            false,
-            None
-        ),
+        bypass_reason(&readers, &simple_schema(), ForcedMergePath::Auto, false,),
         BypassReason::MultipleSources
     );
 }
@@ -180,7 +168,7 @@ fn a_non_empty_dropped_columns_map_takes_the_merge_arm() {
         .dropped_columns
         .insert("gone".to_string(), 1_700_000_000_000_000);
     assert_eq!(
-        bypass_reason(&readers, &schema, ForcedMergePath::Auto, false, None),
+        bypass_reason(&readers, &schema, ForcedMergePath::Auto, false),
         BypassReason::DroppedColumns
     );
 }
@@ -195,13 +183,7 @@ fn forced_bypass_never_overrides_a_correctness_precondition() {
         vec![write_row(2, "b", 20, 200)],
     ]);
     assert_eq!(
-        bypass_reason(
-            &readers,
-            &simple_schema(),
-            ForcedMergePath::Bypass,
-            false,
-            None
-        ),
+        bypass_reason(&readers, &simple_schema(), ForcedMergePath::Bypass, false,),
         BypassReason::MultipleSources
     );
 }
@@ -279,7 +261,7 @@ fn a_composite_keyed_collection_forces_the_merge_arm() {
     let (_temp, readers) = open_readers(vec![vec![write_row(1, "a", 10, 100)]]);
     let base = simple_schema();
     assert_eq!(
-        bypass_reason(&readers, &base, ForcedMergePath::Auto, false, None),
+        bypass_reason(&readers, &base, ForcedMergePath::Auto, false),
         BypassReason::Selected,
         "control: the plain schema WOULD take the fast path"
     );
@@ -307,7 +289,7 @@ fn a_composite_keyed_collection_forces_the_merge_arm() {
             c.data_type = refused.to_string();
         }
         assert_eq!(
-            bypass_reason(&readers, &schema, ForcedMergePath::Auto, false, None),
+            bypass_reason(&readers, &schema, ForcedMergePath::Auto, false),
             BypassReason::MulticellArmDivergence,
             "`{refused}` must take the merge arm"
         );
@@ -330,7 +312,7 @@ fn a_composite_keyed_collection_forces_the_merge_arm() {
             c.data_type = allowed.to_string();
         }
         assert_eq!(
-            bypass_reason(&readers, &schema, ForcedMergePath::Auto, false, None),
+            bypass_reason(&readers, &schema, ForcedMergePath::Auto, false),
             BypassReason::Selected,
             "`{allowed}` is served identically by both arms and must stay on \
              the fast path"
@@ -340,6 +322,75 @@ fn a_composite_keyed_collection_forces_the_merge_arm() {
 
 /// Issue #2339: the composite-SET-element clause is REGISTRY-AWARE.
 ///
+/// **Issue #4063 / roborev job 116 F1 — a composite whose LEAF the merged arm refuses
+/// to order must NOT take the fast path.**
+///
+/// Since #4063 `compare_composite` REFUSES to order a composite containing a
+/// `varint`/`decimal`/`uuid` leaf, because the central comparator's arms for those
+/// diverge from Cassandra. A one-source read that bypassed merging would decode and
+/// RETURN such a collection, so the identical query would begin FAILING the moment a
+/// second SSTable appeared. Arm-dependent success is worse than either arm's own
+/// behaviour: it makes correctness a function of how many files happen to be on disk.
+///
+/// This is the resolvable case on purpose — the element resolves fine, so the
+/// pre-existing resolvability veto does NOT fire and only the ordering veto can
+/// refuse it. `text`/`text` is the positive control: same shape, orderable leaves,
+/// still selected. Without both, a blanket refusal of every composite would pass.
+///
+/// RED BEFORE THE FIX: `Selected` for the uuid-leaved element.
+#[test]
+fn a_composite_whose_leaf_the_merge_arm_cannot_order_is_refused() {
+    use crate::testutil::{simple_schema, write_row};
+    use cqlite_core::schema::udt_registry_from_cql;
+    use cqlite_core::storage::write_engine::merge::UdtScope;
+
+    let (_temp, readers) = open_readers(vec![vec![write_row(1, "a", 10, 100)]]);
+    let base = simple_schema();
+    // Two same-shaped UDTs: one with an UNORDERABLE leaf, one entirely orderable.
+    let registry = udt_registry_from_cql(
+        "CREATE TYPE has_uuid (id uuid, label text); \
+         CREATE TYPE all_text (a text, label text);",
+        &base.keyspace,
+    );
+    let scope = Some(UdtScope {
+        registry: &registry,
+        keyspace: &base.keyspace,
+    });
+
+    let with_type = |ty: &str| {
+        let mut schema = base.clone();
+        if let Some(c) = schema.columns.iter_mut().find(|c| c.name == "name") {
+            c.data_type = ty.to_string();
+        }
+        schema
+    };
+
+    assert_eq!(
+        bypass_reason_with_udts(
+            &readers,
+            &with_type("set<frozen<has_uuid>>"),
+            ForcedMergePath::Auto,
+            false,
+            scope
+        ),
+        BypassReason::MulticellArmDivergence,
+        "a `uuid` leaf is REFUSED by compare_composite (#4063), so the fast path must \
+         not serve it either — otherwise this query works on one SSTable and fails on two"
+    );
+    assert_eq!(
+        bypass_reason_with_udts(
+            &readers,
+            &with_type("set<frozen<all_text>>"),
+            ForcedMergePath::Auto,
+            false,
+            scope
+        ),
+        BypassReason::Selected,
+        "positive control: the SAME shape with orderable leaves must still select the \
+         fast path, so the ordering veto is proved specific rather than a blanket refusal"
+    );
+}
+
 /// Both arms decode a composite set element structurally now, but they resolve
 /// the element TYPE from different places: the merge arm from the ticket DDL's
 /// `UdtScope`, the single-generation decoder from the SSTable's OWN marshal type.
@@ -384,17 +435,17 @@ fn a_resolvable_composite_set_element_selects_the_fast_arm() {
 
     let udt_set = with_type("set<frozen<contact_info>>");
     assert_eq!(
-        bypass_reason(&readers, &udt_set, ForcedMergePath::Auto, false, resolving),
+        bypass_reason_with_udts(&readers, &udt_set, ForcedMergePath::Auto, false, resolving),
         BypassReason::Selected,
         "a RESOLVABLE composite set element is decoded by both arms (issue #2339)"
     );
     assert_eq!(
-        bypass_reason(&readers, &udt_set, ForcedMergePath::Auto, false, None),
+        bypass_reason(&readers, &udt_set, ForcedMergePath::Auto, false),
         BypassReason::MulticellArmDivergence,
         "control: without a scope the merge arm cannot resolve it, so refuse"
     );
     assert_eq!(
-        bypass_reason(
+        bypass_reason_with_udts(
             &readers,
             &udt_set,
             ForcedMergePath::Auto,
@@ -407,7 +458,7 @@ fn a_resolvable_composite_set_element_selects_the_fast_arm() {
 
     // An UNKNOWN UDT name is unresolvable even WITH a registry.
     assert_eq!(
-        bypass_reason(
+        bypass_reason_with_udts(
             &readers,
             &with_type("set<frozen<not_registered>>"),
             ForcedMergePath::Auto,
@@ -424,7 +475,7 @@ fn a_resolvable_composite_set_element_selects_the_fast_arm() {
     // `cx_nested_frozen_collections` case.
     for structural in ["set<frozen<list<int>>>", "set<frozen<map<text,int>>>"] {
         assert_eq!(
-            bypass_reason(
+            bypass_reason_with_udts(
                 &readers,
                 &with_type(structural),
                 ForcedMergePath::Auto,
@@ -442,7 +493,7 @@ fn a_resolvable_composite_set_element_selects_the_fast_arm() {
         "map<frozen<tuple<int, text>>, text>",
     ] {
         assert_eq!(
-            bypass_reason(
+            bypass_reason_with_udts(
                 &readers,
                 &with_type(map_key),
                 ForcedMergePath::Auto,
@@ -526,7 +577,7 @@ fn the_bypass_predicate_and_the_merge_arm_agree_on_a_qualified_udt_reference() {
     for (declared, expect_served) in cases {
         let schema = with_type(declared);
         let predicate_selects =
-            bypass_reason(&readers, &schema, ForcedMergePath::Auto, false, scope())
+            bypass_reason_with_udts(&readers, &schema, ForcedMergePath::Auto, false, scope())
                 == BypassReason::Selected;
 
         let element = CellData {
@@ -653,7 +704,7 @@ fn progress_accounting_difference_between_the_arms_is_the_documented_one() {
 fn forced_merge_is_absolute() {
     let schema = crate::testutil::simple_schema();
     assert_eq!(
-        bypass_reason(&[], &schema, ForcedMergePath::Merge, false, None),
+        bypass_reason(&[], &schema, ForcedMergePath::Merge, false),
         BypassReason::ForcedMerge
     );
 }

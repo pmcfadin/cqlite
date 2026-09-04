@@ -67,9 +67,9 @@ use cqlite_core::storage::scan_cancel::ScanCancel;
 use cqlite_core::storage::sstable::reader::{
     QueryRowBatch, QueryRowStream, SSTableReader, ScanTokenBound,
 };
-use cqlite_core::storage::write_engine::merge::UdtScope;
+use cqlite_core::storage::write_engine::merge::{first_unorderable_leaf, UdtScope};
 use cqlite_core::storage::write_engine::DecoratedKey;
-use cqlite_core::types::ScanRow;
+use cqlite_core::types::{ComparatorType, ScanRow};
 use cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token;
 use cqlite_core::RowKey;
 
@@ -208,7 +208,28 @@ impl BypassReason {
 /// `readers` MUST be the POST-prune reader set (`prune_readers`), so token
 /// pruning that leaves one source selects the fast path and a pre-prune count of
 /// 2 does not veto it.
+///
+/// **PUBLIC ARITY IS PRESERVED (roborev job 116 F2).** `cqlite_flight::bypass` is a
+/// public module, so adding a required parameter here is a breaking change for
+/// downstream callers even though every in-tree caller was updated. The
+/// registry-aware form is a SEPARATE name, exactly as #2339 already did for
+/// `assemble_read_cells` / `assemble_read_cells_with_udts` in `cqlite-core`.
+///
+/// Passing no UDT scope is fail-CLOSED, not a silent downgrade: an unresolvable
+/// composite element counts as divergent and vetoes the fast path.
 pub fn bypass_reason(
+    readers: &[Arc<SSTableReader>],
+    schema: &TableSchema,
+    forced: ForcedMergePath,
+    aggregating: bool,
+) -> BypassReason {
+    bypass_reason_with_udts(readers, schema, forced, aggregating, None)
+}
+
+/// [`bypass_reason`] plus the ticket's UDT scope, which lets a RESOLVABLE composite
+/// set element select the fast path (issue #2339). Separate name so the public
+/// four-argument signature above keeps compiling for downstream callers.
+pub fn bypass_reason_with_udts(
     readers: &[Arc<SSTableReader>],
     schema: &TableSchema,
     forced: ForcedMergePath,
@@ -321,6 +342,23 @@ fn declares_composite_keyed_collection(data_type: &str, udts: Option<UdtScope<'_
         // ticket registry. So an UNRESOLVABLE composite element still diverges and
         // is still refused.
         CqlType::Set(inner) => {
+            // ARM-DEPENDENT SUCCESS IS WORSE THAN EITHER ARM'S OWN BEHAVIOUR
+            // (roborev job 116 F1). Since #4063 the merged arm REFUSES to order a
+            // composite whose leaf has no Cassandra-compatible ordering
+            // (`varint`/`decimal`/`uuid`/`timeuuid`, and a `Custom` name with no
+            // implemented ordering). A one-source read that bypassed merging would
+            // decode and RETURN such a collection, so the very same query would
+            // begin failing the moment a second SSTable appeared. Veto the fast
+            // path so both arms fail closed identically and the behaviour does not
+            // depend on how many files happen to be on disk.
+            //
+            // The leaf set is NOT restated here: `first_unorderable_leaf` is
+            // cqlite-core's own predicate, so the bypass arm and the merged arm
+            // cannot drift into two answers — the divergence class #2339 exists to
+            // remove, one crate over.
+            if merged_arm_refuses_ordering(&inner, udts) {
+                return true;
+            }
             is_opaque_composite(&inner) && !merge_arm_resolves_composite(&inner, udts)
         }
         // A composite MAP KEY is still divergent, in the opposite direction from
@@ -381,6 +419,35 @@ fn is_opaque_composite(ty: &CqlType) -> bool {
 ///
 /// No scope ⇒ nothing can resolve ⇒ `false` (refuse the fast arm), which is the
 /// fail-closed direction.
+/// True when the MERGED arm would refuse to ORDER `ty` because a leaf has no
+/// Cassandra-compatible ordering (issue #4063), asked of cqlite-core's
+/// `first_unorderable_leaf` so there is ONE authority for that question.
+///
+/// **Asked on the RESOLVED type, and deliberately NOT an answer about resolvability.**
+/// The two refusals are different and must not be conflated: an UNRESOLVED UDT name
+/// is a bare `Custom("contact_info")`, for which `supports_ordering()` is false, so
+/// asking this on the raw declaration would refuse every unresolved composite as
+/// "unorderable" — over-broad, and it reds the resolvable-element fast path #2339
+/// exists to enable. Resolvability already has its own veto
+/// (`!merge_arm_resolves_composite`), and the merged arm has its own separate
+/// fail-closed path for it (`first_unresolved_custom`).
+///
+/// So when the type cannot be resolved here this returns FALSE and defers — which is
+/// not a hole: the caller's resolvability veto fires on exactly that case, and the
+/// merged arm refuses it independently.
+fn merged_arm_refuses_ordering(ty: &CqlType, udts: Option<UdtScope<'_>>) -> bool {
+    let Some(udts) = udts else {
+        return false;
+    };
+    let resolved = udts.registry.resolve_type(ty, udts.keyspace);
+    match ComparatorType::from_cql_type(&resolved) {
+        Ok(cmp) => first_unorderable_leaf(&cmp).is_some(),
+        // A comparator that cannot be BUILT is not an ordering verdict; the
+        // resolvability veto owns that case.
+        Err(_) => false,
+    }
+}
+
 fn merge_arm_resolves_composite(ty: &CqlType, udts: Option<UdtScope<'_>>) -> bool {
     let Some(udts) = udts else {
         return false;

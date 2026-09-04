@@ -103,6 +103,10 @@ pub use model::{CellData, ComplexDeletion, MergeEntry, MergeStats, MergeStep, Ro
 /// collapse per-element collection cells back into a single `Value::List` /
 /// `Value::Set` / `Value::Map` for read consumers that key cells by column name.
 mod read_assembly;
+/// ONE authority for "can the merged arm ORDER this composite?" — the bypass
+/// divergence predicate in `cqlite-flight` asks this rather than keeping its own leaf
+/// list, so the two arms cannot disagree (#4063, roborev job 116 F1).
+pub use read_assembly::first_unorderable_leaf;
 #[cfg(feature = "write-support")]
 pub use read_assembly::{assemble_read_cells, assemble_read_cells_with_udts, UdtScope};
 

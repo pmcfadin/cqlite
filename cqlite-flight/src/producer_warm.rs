@@ -29,7 +29,7 @@ use cqlite_core::storage::write_engine::{
     build_single_partition_merger_from_readers, KWayMerger, PointAccessRecording,
 };
 
-use crate::bypass::{bypass_reason, ForcedMergePath, ScanRowSource};
+use crate::bypass::{bypass_reason_with_udts, ForcedMergePath, ScanRowSource};
 use crate::cancel::CancelFlag;
 use crate::producer::{BatchSink, CollectSink, MergeProducer, ProducerError};
 use crate::scan_progress::ScanProgress;
@@ -130,7 +130,7 @@ impl MergeProducer {
             !self.is_aggregating(),
             "the aggregate route returns above; the bypass site is unreachable for it"
         );
-        let reason = bypass_reason(
+        let reason = bypass_reason_with_udts(
             &readers,
             &self.schema,
             ForcedMergePath::from_env(),

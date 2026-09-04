@@ -87,6 +87,10 @@ use super::model::CellData;
 #[path = "read_assembly_composite.rs"]
 mod composite;
 
+// Re-exported through `merge/mod.rs` as the ONE authority the bypass arm asks
+// "can the merged arm order this composite?" (#4063, roborev job 116 F1).
+pub use composite::first_unorderable_leaf;
+
 /// One column's accumulated cells while grouping a row's flat cell list.
 ///
 /// The two shapes are mutually exclusive for any one column: in Cassandra 5.0
