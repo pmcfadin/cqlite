@@ -254,6 +254,27 @@ fn list_element_path_2() -> Vec<u8> {
     ]
 }
 
+/// A multicell list cell carrying an EXPLICIT element timestamp — `ts_delta` is
+/// an unsigned VInt delta from `min_timestamp`, which [`parser`] sets to 0, so
+/// the absolute write ts IS `ts_delta`.
+///
+/// Prefer this over `USE_ROW_TIMESTAMP` (0x08) for a LIVE element in a
+/// multi-element fixture: that flag means "inherit the row's timestamp", so it
+/// is only producible alongside a row timestamp — and `element_dropped`'s own
+/// comment records that the read path ALWAYS sets `row_ts` from the row header.
+/// A cell carrying the flag while the filter supplies `row_ts: None` is
+/// therefore a state Cassandra cannot write, and a per-element filtering claim
+/// resting on it would rest on unreachable input (roborev job 164).
+fn list_cell_at_ts(path: &[u8], ts_delta: u64, value: &[u8]) -> Vec<u8> {
+    let mut buf = vec![0x00u8];
+    encode_unsigned(ts_delta, &mut buf);
+    encode_unsigned(path.len() as u64, &mut buf);
+    buf.extend_from_slice(path);
+    encode_unsigned(value.len() as u64, &mut buf);
+    buf.extend_from_slice(value);
+    buf
+}
+
 /// One live multicell list element carrying `value` in the cell VALUE, with an
 /// EXPLICIT timestamp delta of 0 (so [`shadow_everything`] shadows it — an
 /// element that instead carried `USE_ROW_TIMESTAMP` would have no
@@ -417,22 +438,17 @@ fn a_well_formed_ttl_expired_list_element_still_filters_with_the_same_accounting
 /// the whole column.
 #[test]
 fn only_the_shadowed_element_is_filtered_from_a_mixed_list() {
-    // The live element carries USE_ROW_TIMESTAMP (0x08) with `row_ts = None` in
-    // the filter, so it has no authoritative write ts and is NEVER shadowed
-    // (no-heuristics, #1741). Unlike the set fixture its value still follows
-    // the path, because a list element lives in the cell VALUE.
-    let live = {
-        // Cell 2's path, NOT cell 1's: a real multicell list gives every
-        // element a unique TimeUUID, so reusing one path would make this
-        // fixture unrepresentable on disk and the two-element claim untestable.
-        let path = list_element_path_2();
-        assert!(path.len() < 0x80, "single-byte VUInt only");
-        let mut c = vec![0x08u8, path.len() as u8];
-        c.extend_from_slice(&path);
-        c.push(0x04);
-        c.extend_from_slice(&9i32.to_be_bytes());
-        c
-    };
+    // Both elements are producible on disk, which is the whole point of this
+    // fixture: each carries its OWN explicit timestamp (no USE_ROW_TIMESTAMP,
+    // which would need an inherited row ts the filter here does not supply —
+    // see [`list_cell_at_ts`]), and each carries a DISTINCT real TimeUUID path
+    // in the order Cassandra wrote them.
+    //
+    // `shadow_everything`'s cover is 100 and `parser`'s `min_timestamp` is 0,
+    // so an absolute ts of 200 is NOT shadowed while `list_cell`'s delta of 0
+    // is. Unlike the set fixture the value still follows the path, because a
+    // list element lives in the cell VALUE.
+    let live = list_cell_at_ts(&list_element_path_2(), 200, &9i32.to_be_bytes());
     let shadowed = list_cell(&7i32.to_be_bytes());
 
     assert_eq!(
