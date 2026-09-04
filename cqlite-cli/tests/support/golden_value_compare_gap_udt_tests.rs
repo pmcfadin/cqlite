@@ -29,8 +29,8 @@
 //! than quietly restoring the suppression.
 
 use super::super::super::container::MapKeySpelling;
-use super::super::gap::Position;
 use super::super::super::schema::CqlType;
+use super::super::gap::Position;
 use super::*;
 use serde_json::json;
 
