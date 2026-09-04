@@ -1080,6 +1080,26 @@ for name, rec in members.items():
         if not sp:
             fail("target '%s' of member '%s' has no src_path in cargo metadata. Refusing to derive source ownership from an unreadable target." % (target.get("name"), name))
         sp = os.path.realpath(sp)
+        # FAIL CLOSED ON AN OUT-OF-REPOSITORY TARGET SOURCE (roborev job 160). Cargo
+        # accepts an explicit target `path` containing `..`, so a workspace member can
+        # register a source file outside this checkout. The walk is REPO_ROOT-anchored
+        # and would never scan it, so a feature gated only there would be reported DEAD —
+        # a false FAIL, and the contract's no-false-fail claim covers a #[cfg] in a
+        # RECOGNISED spelling wherever cargo says the source is. Refusing is the SAME
+        # rule this guard already applies to an out-of-repository symlinked directory and
+        # file, applied at the third entry point: a declared target path. Not a new
+        # policy — a missing application of an existing one, which is why it is fixed
+        # here rather than declared like the symlinked-target-ROOT residual (#4075):
+        # this needs no design, only the refusal the guard already knows how to make.
+        if not (sp == REPO_ROOT or sp.startswith(REPO_ROOT + os.sep)):
+            fail("target '%s' of member '%s' has a source path that resolves OUTSIDE this "
+                 "repository, to %s. This scan is anchored at the checkout, so a feature "
+                 "gated only in that file would be INVISIBLE to it and reported dead. "
+                 "Reading source from outside the checkout is not an option in a mandatory "
+                 "gate component, and skipping it silently is what this refusal replaces, "
+                 "so NO verdict is available. Remedy: move the file inside the repository, "
+                 "or declare the target in the package that owns it."
+                 % (target.get("name"), name, sp))
         exact_owners.setdefault(sp, set()).add(name)
         if set(kinds) & TREELESS_KINDS:
             buildscript_members.add(name)

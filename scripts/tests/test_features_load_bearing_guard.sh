@@ -1770,13 +1770,45 @@ _enforced=$(grep -oE '^CASE_COUNT_EXPECTED=[0-9]+' "$SUITE_SELF" | grep -oE '[0-
   || fail_case "case 63: scripts/agent-gate.sh documents $_doc_counts cases but this suite enforces $_enforced — update the prose in the SAME diff as the count (roborev jobs 154, 158)"
 ok "THE TWO-PLACE INVARIANT: the gate's documented case count equals this suite's enforced count, checked affirmatively (a missing or ambiguous doc count FAILS rather than passing vacuously)"
 
+# --- 64. RED: an OUT-OF-REPOSITORY target src_path is a NAMED refusal ---------
+# roborev job 160. Cargo accepts an explicit target `path` containing `..`, so a member
+# can register source outside the checkout. The walk is REPO_ROOT-anchored and would
+# never scan it, so a feature gated only there read DEAD — a false FAIL. FIXED rather
+# than declared (unlike #4075) because it needs no design: it is the SAME refusal the
+# guard already makes for an out-of-repo symlinked directory and file, applied to a
+# third entry point.
+#
+# A BARE NON-ZERO EXIT IS NOT EVIDENCE, so the case requires the diagnostic to NAME the
+# path and to NOT report the feature dead — reporting dead over a tree it admits it
+# cannot read is exactly the failure being closed.
+OUTSIDE_T="$TMPROOT/outside-target-src"
+mkdir -p "$OUTSIDE_T"
+cat >"$OUTSIDE_T/offsite_lib.rs" <<'EOF'
+#[cfg(feature = "offsitetargetfeat")]
+pub fn gated_outside_the_repo() {}
+EOF
+D="$(fixture out-of-repo-target-src)"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'offsitetargetfeat = []'
+cat >>"$D/a/Cargo.toml" <<EOF
+
+[[bin]]
+name = "offsite"
+path = "$OUTSIDE_T/offsite_lib.rs"
+EOF
+run_guard "$D" && { cat "$TMPROOT/out.txt"; fail_case "case 64: a target whose src_path resolves OUTSIDE the repository was ACCEPTED — the walk cannot see that file, so a feature gated only there would be reported dead"; }
+grep -q 'resolves OUTSIDE this repository' "$TMPROOT/out.txt" \
+  || { cat "$TMPROOT/out.txt"; fail_case "case 64: the guard refused but did not NAME the out-of-repository source path — a bare non-zero exit is not evidence"; }
+grep -q 'declared feature(s) are DEAD' "$TMPROOT/out.txt" \
+  && { cat "$TMPROOT/out.txt"; fail_case "case 64: the guard reported features DEAD over a tree it cannot fully read — a refusal was required instead"; }
+ok "a target src_path resolving OUTSIDE the repository is a NAMED refusal, not a silent skip and not a DEAD verdict"
+
 # --- CASE COUNT: EXACT, not a floor ------------------------------------------
 # #3544's lesson is this suite's own subject: a span-replacing edit once deleted four
 # cases from a suite and it reported "failed: 0" over the shrunken remainder. A FLOOR
 # below the real count tolerates exactly that — one case can be deleted and the guard
 # still greens (roborev job 50, finding 5) — so the count is pinned EXACTLY. Adding a
 # case means changing this number in the same diff, deliberately.
-CASE_COUNT_EXPECTED=63
+CASE_COUNT_EXPECTED=64
 [ "$CASES" -eq "$CASE_COUNT_EXPECTED" ] \
   || fail_case "CASE COUNT: $CASES cases ran, expected EXACTLY $CASE_COUNT_EXPECTED. Cases were deleted, skipped or added without updating this assertion; a green tally over a changed suite certifies nothing."
 
