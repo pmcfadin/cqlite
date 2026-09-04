@@ -538,14 +538,53 @@ fn admissible_widths_match_the_pinned_serializers() {
         }
     }
 
-    // Names that are NOT fixed-width must accept a length no fixed-width arm
-    // would — proving they do not silently share one of the arms above.
-    for t in ["text", "blob", "varint", "inet"] {
+    // Names that are genuinely NOT width-constrained must accept a length no
+    // fixed-width arm would — proving they do not silently share one of the arms
+    // above. `inet` is deliberately NOT in this list: see the divergence case
+    // below, which measures it instead of asserting it is unconstrained.
+    for t in ["text", "blob", "varint"] {
         assert!(
             p.parse_value_from_raw_bytes(&[0x31u8; 17], t, "col", 0)
                 .is_ok(),
             "{} must not be width-constrained",
             t
+        );
+    }
+}
+
+/// DECLARED DIVERGENCE, characterised not endorsed: `inet` is width-constrained
+/// in Cassandra and unconstrained here.
+///
+/// Cassandra 5.0.8's `InetAddressSerializer.validate` admits a non-empty value of
+/// EXACTLY 4 or 16 bytes and throws otherwise. CQLite's `inet` arm applies no
+/// width rule at all — MEASURED below at 0, 4, 5, 16 and 17 bytes, every one of
+/// which decodes. This is NOT one of the nesting positions #3723 is about and is
+/// NOT closed by #3811 or #3631, whose mechanisms are consumption and declared
+/// width; an arm that consumes everything at any length is invisible to both.
+///
+/// It is recorded here rather than fixed because refusing 5 and 17 bytes is a
+/// TIGHTENING that turns today-accepted bytes into errors, which needs its own
+/// Cassandra oracle and a corpus measurement — the same bar the five-type UDT
+/// field carve-out had to clear before #3631 closed it.
+///
+/// Fails in BOTH directions: if `inet` gains a width check (update this case and
+/// the control above together), or if a currently-admissible width stops decoding.
+#[test]
+fn inet_is_width_unconstrained_here_but_not_in_cassandra_declared_divergence() {
+    let p = parser();
+    // Cassandra-admissible widths must decode — the anti-vacuity half.
+    for len in [4usize, 16] {
+        p.parse_value_from_raw_bytes(&vec![0x31u8; len], "inet", "col", 0)
+            .unwrap_or_else(|e| panic!("inet: {len} bytes is Cassandra-legal, got {e:?}"));
+    }
+    // The divergence: widths Cassandra REFUSES are accepted here.
+    for len in [5usize, 17] {
+        let got = p.parse_value_from_raw_bytes(&vec![0x31u8; len], "inet", "col", 0);
+        assert!(
+            got.is_ok(),
+            "inet: {len} bytes is TOLERATED today (Cassandra admits 4 or 16 only); \
+             if this now refuses, the divergence is closed — update this case and \
+             the width-unconstrained control above together, got {got:?}"
         );
     }
 }
