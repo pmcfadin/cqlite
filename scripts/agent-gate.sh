@@ -17461,7 +17461,7 @@ run_features_load_bearing() {
     echo "    This component never SKIPs, so an absent guard is breakage, not an"
     echo "    excusable environment."
     record_result "$name" "$status" 0
-    echo ">>> [$name] $status (0s)"
+    echo ">>> [$name] $RECORDED_STATUS (0s)"
     return 0
   fi
   # DECLARED PREREQUISITES, checked HERE so the diagnostic names the real cause rather
@@ -17487,7 +17487,7 @@ run_features_load_bearing() {
     echo "    fallback derivation for either, and this component never SKIPs — a verdict"
     echo "    it did not measure is not a verdict. Remedy: install the missing tool."
     record_result "$name" "$status" 0
-    echo ">>> [$name] $status (0s)"
+    echo ">>> [$name] $RECORDED_STATUS (0s)"
     return 0
   fi
   echo ">>> [$name] bash $guard"
@@ -17570,7 +17570,7 @@ run_features_load_bearing() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # tooling-tests: fast shell-tooling regression tests that have no Rust target and
@@ -19397,7 +19397,7 @@ run_tooling_tests() {
       echo "--- end of $name output ---"
       end=$(date +%s)
       record_result "$name" "$status" "$((end - start))"
-      echo ">>> [$name] $status ($((end - start))s)"
+      echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
       return 0
     fi
   else
