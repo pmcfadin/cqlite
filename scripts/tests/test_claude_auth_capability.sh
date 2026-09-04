@@ -3069,6 +3069,14 @@ fi
 #     the capability script and the assert must both DERIVE it and NAME it as unhandled. A
 #     bare "the assert red" is not evidence either — an unrelated derivation failure produces
 #     the same non-empty result — so the planted name itself must appear.
+#     THE COPY IS SCANNED, NEVER SOURCED OR RUN, which is why the planted line may sit above
+#     the function's own `local` declarations: the subject is what the DERIVATION can see in
+#     committed text, and a control that had to be executable would constrain where a real
+#     new state is allowed to appear.
+#     RED-VERIFIED AGAINST THE REAL DEFECT TOO, out of band and recorded here because the
+#     case cannot carry a second copy of bootstrap: run against the PRE-FIX
+#     scripts/bootstrap-agent-machine.sh (47417d2be, the two-arm dispatch) this assert reports
+#     8 unhandled tokens including both cited ones (UNMEASURED, NO-SERVER); post-fix, none.
 ctl46="$tmp/cap-ctl46.sh"
 awk '
   { print }
