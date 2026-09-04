@@ -44,13 +44,21 @@ readme = "../README.md"
 # fixture is `must_run`), so a packaged copy without the fixture would always panic.
 # Excluded narrowly, matching the scoping decision above rather than pre-empting
 # #3677's class-wide call.
+# issue_3722_udt_field_type_fidelity.rs JOINS the same class for the same reason, and is
+# the third instance: it resolves `test-data/fixtures/issue_3722/` from
+# `CARGO_MANIFEST_DIR`'s PARENT and panics on an unreadable keyspace dir (the committed
+# fixture is `must_run`, #3220), so a packaged copy without the fixture would always
+# panic. Four instances in four lanes says the narrow per-file key is a pattern each
+# lane pays for and not a fix; #3677 still owns the class-wide call.
 exclude = [
     "tests/issue_3358_bti_query_token_bound.rs",
     "tests/issue_3747_empty_map_key.rs",
+    "tests/issue_3722_udt_field_type_fidelity.rs",
     # issue_3805_empty_fixedwidth_map_key.rs joins that class for the identical
     # reason: it resolves `test-data/fixtures/issue_3805/` CHECKOUT-relative and
     # fails CLOSED (a committed fixture is `must_run`), so a packaged copy without
-    # the fixture would always panic.
+    # the fixture would always panic. It is the FOURTH instance; the comment above
+    # counted three because this entry and #3722's landed in the same window.
     "tests/issue_3805_empty_fixedwidth_map_key.rs",
 ]
 
