@@ -248,11 +248,12 @@ fn a_frozen_spelled_fixed_width_empty_key_reaches_the_tag() {
 ///
 /// `cell_path_key`'s error-budget rule is explicit and it decides both halves:
 ///   * **`Err` only where Cassandra's own `validate`/`split` THROWS.** `tinyint`/
-///     `smallint`/`date`/`time` are spelled with a strict `!= N` check and `decimal`
-///     needs >= 4 bytes, so an empty buffer is corrupt ON CASSANDRA'S OWN TERMS.
-///     Refusing adds no availability risk for data Cassandra would have read.
+///     `smallint`/`date`/`time` are spelled with a strict `!= N` check, so an empty
+///     buffer is corrupt ON CASSANDRA'S OWN TERMS. Refusing adds no availability
+///     risk for data Cassandra would have read.
 ///   * **NEVER `Err` merely because CQLITE cannot model the type** — that is the
-///     opaque case in the test above.
+///     typed case above and the opaque case this module's arm keeps for a family
+///     with no sentinel.
 ///
 /// An earlier revision of this fix swallowed these into a dropped entry, reasoning
 /// that a propagated `Err` costs more (row assembly `break`s, so the column and every
@@ -260,28 +261,154 @@ fn a_frozen_spelled_fixed_width_empty_key_reaches_the_tag() {
 /// the swallow is a PRE-EXISTING `row_data.rs` defect the module doc tracks
 /// separately, and hiding corruption here to compensate would make an empty malformed
 /// key behave differently from a non-empty one — the inconsistency roborev flagged.
+///
+/// # `decimal` WAS IN THIS LIST AND IS NOT CORRUPT — the claim was wrong
+/// #3747 asserted `decimal` here, and #3805 REQ-3805-02 measured the source and
+/// found the claim FALSE: `DecimalSerializer.java:31-34` returns `null` for an
+/// empty buffer and `:58-63` throws only `if (!accessor.isEmpty(value) &&
+/// accessor.size(value) < 4)`, with the message *"Expected 0 or at least 4
+/// bytes"* — zero is named as LEGAL in the message of the very check said to
+/// reject it. Corroborated on the write side (`blobAsDecimal(0x)` is ACCEPTED by
+/// cqlsh against cassandra:5.0.2) and by the Cassandra-WRITTEN fixture, which
+/// carries an empty `m_dec` key. Slice 1's `EmptyValueType::Decimal` variant
+/// records the same correction. So it moved to
+/// [`an_empty_decimal_key_is_typed_because_cassandra_admits_it`], and this list
+/// keeps only the families whose `validate` really is a bare `!= N`.
+///
+/// `duration` JOINS the list, from a MEASUREMENT rather than an assumption: it is
+/// variable-width so the width table admits any length, its empty key fails to
+/// decode (`failed to parse duration months … Eof`), and
+/// `EmptyValueType::for_cql_type(&CqlType::Duration)` is `None` — so the empty
+/// buffer stays a refusal. It is here to pin the direction of the gate move: a
+/// gate keyed on "the buffer is empty" ALONE would have turned this `Err` into an
+/// opaque blob, i.e. accepted bytes nothing admits.
 #[test]
 fn a_cassandra_invalid_empty_key_is_refused_like_any_other_corruption() {
-    for ty in ["tinyint", "smallint", "date", "time", "decimal"] {
+    for ty in ["tinyint", "smallint", "date", "time", "duration"] {
         let map_type = format!("map<{ty},int>");
         match decode(&map_type, b"", &7i32.to_be_bytes()) {
             Err(_) => {}
             Ok(v) => panic!(
-                "Cassandra's {ty} serializer throws on an empty buffer, so an empty {ty} \
-                 key is corruption and must be refused, not decoded; got {v:?}"
+                "an empty {ty} key is corruption on Cassandra's own terms and must be \
+                 refused, not decoded; got {v:?}"
             ),
         }
     }
 }
 
-/// A WRONG-LENGTH (3-byte) `map<int,int>` key must still error — the fix must not
-/// turn a genuine decode failure into a silent drop or a success. Behaviour is
-/// UNCHANGED by the fix (the removed guard never applied to a non-empty path); the
-/// case is here so the empty-key success stays distinguishable from a real failure.
+/// The family the gate move exists for: an empty `decimal` key is LEGAL DATA and
+/// must reach the read as `Empty(Decimal)`.
+///
+/// RED-VERIFIED against the previous guard (`allowed.contains(&0)`): this returned
+/// `Err(Data corruption: Frozen element 'm': decimal too short (0 bytes))`, because
+/// `cql_short_allowed_widths("decimal")` is the EMPTY slice — `decimal` is
+/// VARIABLE-width (`{0} ∪ [4, ∞)`, which a width table cannot express), so the
+/// width table could not admit the empty buffer and the arm was never entered.
+/// The ORACLE is `DecimalSerializer` at `cassandra-5.0.8` (see the note on the
+/// refusal test above) plus the Cassandra-WRITTEN fixture's `m_dec` column, never
+/// CQLite's own prior output — which was the refusal.
 #[test]
-fn wrong_length_int_key_still_errors() {
-    match decode("map<int,int>", &[0x01, 0x02, 0x03], &7i32.to_be_bytes()) {
-        Err(_) => {}
-        Ok(v) => panic!("a 3-byte int key is corruption and must error; got {v:?}"),
+fn an_empty_decimal_key_is_typed_because_cassandra_admits_it() {
+    let decoded = decode("map<decimal,int>", b"", &7i32.to_be_bytes()).expect(
+        "Cassandra's DecimalSerializer accepts the empty buffer: 'Expected 0 or at least 4 bytes'",
+    );
+    assert_eq!(
+        decoded,
+        Value::Map(vec![(
+            Value::Empty(EmptyValueType::Decimal),
+            Value::Integer(7)
+        )]),
+        "an empty decimal key is legal data and carries the Decimal tag"
+    );
+}
+
+/// THE BOUND ON THE GATE MOVE. Every OTHER type whose allowed-width slice is
+/// EMPTY — so which now reaches the arm's guard — must NOT become a sentinel.
+///
+/// This is the assertion that makes "the tag table is the gate" safe rather than
+/// permissive: `for_cql_type` is `None` for `duration`, for every composite
+/// (`list`/`set`/`map`/`tuple`/UDT/`frozen<collection>`) and for an unmodelled
+/// custom type, so each keeps EXACTLY the behaviour it had before the move —
+/// whatever that was. The cases are split by MEASURED outcome rather than
+/// asserted uniformly, because the two groups are refused for different reasons
+/// and collapsing them would hide a change in either:
+///
+///   * REFUSED (the decoder needs bytes it does not have): `duration`,
+///     `list<int>`, `set<int>`, `map<int,int>`, `frozen<list<int>>`.
+///   * DECODED, and NOT as a sentinel: `tuple<int,int>` yields
+///     `Tuple([Null, Null])` — legal per `TupleType.split` at `cassandra-5.0.8`,
+///     where an encoding whose components are simply omitted leaves
+///     `position == length` — and an unregistered UDT name yields the
+///     pre-existing opaque `Blob(b"")`. Both take the `Ok` arm, so the guard is
+///     never even reached for them.
+#[test]
+fn no_other_empty_width_family_becomes_a_sentinel() {
+    for ty in [
+        "duration",
+        "list<int>",
+        "set<int>",
+        "map<int,int>",
+        "frozen<list<int>>",
+    ] {
+        let map_type = format!("map<{ty},int>");
+        match decode(&map_type, b"", &7i32.to_be_bytes()) {
+            Err(_) => {}
+            Ok(v) => panic!(
+                "an empty {ty} key is admitted by NO authority — neither the width table \
+                 nor the tag table — so it must stay refused, never a sentinel and never \
+                 an opaque blob; got {v:?}"
+            ),
+        }
+    }
+    for (ty, want) in [
+        (
+            "tuple<int,int>",
+            Value::Tuple(vec![Value::Null, Value::Null]),
+        ),
+        ("unregistered_udt_name", Value::blob(Vec::new())),
+    ] {
+        let map_type = format!("map<{ty},int>");
+        let decoded = decode(&map_type, b"", &7i32.to_be_bytes())
+            .unwrap_or_else(|e| panic!("an empty {ty} key decoded before the gate move: {e}"));
+        assert_eq!(
+            decoded,
+            Value::Map(vec![(want, Value::Integer(7))]),
+            "{ty}: takes the Ok arm, so the gate is never reached and the value is \
+             UNCHANGED by the move"
+        );
+    }
+}
+
+/// `varint` and `inet` are the two families the tag table ADMITS and this arm can
+/// never reach — a DECLARED GAP, owed by slice 1's residual 2, not a decision.
+///
+/// MEASURED: an empty `varint` key decodes to `Varint(b"")` and an empty `inet`
+/// key to `Inet(b"")`, both SUCCESSFULLY, so they take the `Ok` arm and the
+/// sentinel gate is never consulted — while
+/// `EmptyValueType::for_cql_type` returns `Some(Varint)`/`Some(Inet)` for them.
+/// So those two families have TWO spellings of one empty buffer, and this arm
+/// cannot close that: it fires only where the decoder FAILED. Converting a
+/// SUCCESSFUL empty decode into a sentinel is a change to the `Ok` path with its
+/// own oracle question (an empty `Inet` is not obviously meaningless the way an
+/// empty `int` is), and it is deliberately NOT bundled here.
+///
+/// This test pins the CURRENT, unchanged behaviour so the gap is mechanical rather
+/// than remembered: when the `Ok` path is fixed, this test REDS and names itself.
+#[test]
+fn varint_and_inet_keep_their_native_empty_spelling_declared_gap() {
+    let cases: &[(&str, Value)] = &[
+        ("varint", Value::varint(Vec::new())),
+        ("inet", Value::inet(Vec::new())),
+    ];
+    for (ty, want) in cases {
+        let map_type = format!("map<{ty},int>");
+        let decoded = decode(&map_type, b"", &7i32.to_be_bytes())
+            .unwrap_or_else(|e| panic!("an empty {ty} key decodes today: {e}"));
+        assert_eq!(
+            decoded,
+            Value::Map(vec![(want.clone(), Value::Integer(7))]),
+            "{ty}: the DECODE succeeds, so this arm is never reached — the sentinel \
+             spelling is owed by slice 1's residual 2, not by this gate"
+        );
     }
 }

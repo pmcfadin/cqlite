@@ -399,7 +399,7 @@ impl V5CompressedLegacyParser {
                 // ("Typed: #3805"). #3805 slice 1 added the typed sentinel, and this
                 // is slice 2 spending it.
                 //
-                // TWO facts decide the two branches, and neither is this call site's
+                // TWO facts decide the branches, and neither is this call site's
                 // to invent:
                 //
                 //  * The ADMISSION GATE is [`EmptyValueType::for_cql_type`] — the ONE
@@ -413,13 +413,34 @@ impl V5CompressedLegacyParser {
                 //    it set would emit a `warn!` per column per row for correct data,
                 //    which is the misleading-diagnostic half of #3612.
                 //
-                // `None` keeps the opaque fallback verbatim — fail-safe, and it
-                // documents that a family this reader has no sentinel for is still
-                // preserved rather than dropped or refused. The four STRICT families
-                // (`tinyint`/`smallint`/`date`/`time`) never reach here at all: the
-                // width check above refuses their empty buffer, exactly as Cassandra's
-                // bare `!= N` `validate` does.
-                Err(_) if data.is_empty() && allowed.contains(&0) => {
+                // # THE GATE IS THE TAG TABLE, NOT THE WIDTH TABLE — and that is a
+                // # correction, not a widening
+                // The guard was `data.is_empty() && allowed.contains(&0)`, i.e. it
+                // asked the WIDTH table whether the empty buffer was legal. Those are
+                // two authorities answering two DIFFERENT questions, and they disagree
+                // on exactly one family: `cql_short_allowed_widths` returns the EMPTY
+                // slice for `decimal` because it is VARIABLE-width (Cassandra accepts
+                // `0` or `>= 4`), so `allowed.contains(&0)` was FALSE and a legal
+                // empty `decimal` key was REFUSED — while `for_cql_type` admits it
+                // from `DecimalSerializer.java:31-34,58-63`, whose own message reads
+                // *"Expected 0 or at least 4 bytes"* (issue #3805 REQ-3805-02; the
+                // committed claim that an empty `decimal` is corrupt was WRONG, and
+                // `empty_value.rs`'s `Decimal` variant says so too). A width table
+                // cannot express `{0} ∪ [4, ∞)`, so it is the wrong oracle for this
+                // question; the tag table is the right one.
+                //
+                // MEASURED, which is what bounds the change: `decimal` is the ONLY
+                // family that both (a) FAILS to decode an empty buffer and (b) has a
+                // tag. `varint`/`inet`/`text`/`ascii`/`varchar`/`blob` DECODE an empty
+                // buffer successfully, so they take the `Ok` arm and never arrive
+                // here; `duration`, every composite (`list`/`set`/`map`/`tuple`/UDT/
+                // `frozen<collection>`) and `custom` all resolve to `None`; and
+                // `tinyint`/`smallint`/`date`/`time` are refused by the width check
+                // ABOVE this match (they have a non-empty `allowed` excluding `0`),
+                // exactly as Cassandra's bare `!= N` `validate` does — and would
+                // resolve to `None` here even if they arrived. So this gate move types
+                // `decimal` and provably nothing else.
+                Err(e) if data.is_empty() => {
                     if let Some(tag) = self
                         .cell_path_key_cql_type(type_str)
                         .as_ref()
@@ -427,8 +448,23 @@ impl V5CompressedLegacyParser {
                     {
                         return Ok(Value::Empty(tag));
                     }
-                    *opaque_out = true;
-                    return Ok(Value::blob(Vec::new()));
+                    // NOT admitted by the tag table. Behaviour here is EXACTLY what
+                    // it was before #3805 slice 2, which is what makes the gate move
+                    // above a strict ADDITION rather than a widening:
+                    //   * the WIDTH table admitted the empty buffer but no sentinel
+                    //     speaks for the family -> the pre-existing opaque policy.
+                    //     Unreachable today (every `0`-admitting width family has a
+                    //     tag, MEASURED) and kept because the width table and the tag
+                    //     table are two authorities that could diverge again.
+                    //   * otherwise -> the decoder's OWN error, verbatim. That is what
+                    //     keeps `duration` (`for_cql_type` -> `None`, empty key
+                    //     `Err`, MEASURED) and every composite refused instead of
+                    //     silently becoming an opaque blob.
+                    if allowed.contains(&0) {
+                        *opaque_out = true;
+                        return Ok(Value::blob(Vec::new()));
+                    }
+                    return Err(e);
                 }
                 Err(e) => return Err(e),
             };
