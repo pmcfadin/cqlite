@@ -7507,6 +7507,31 @@ _logdir_is_launch_artifact() {
   if [ -n "${HEARTBEAT_FILE:-}" ]; then
     [ "$e" = "$HEARTBEAT_FILE" ] && return 0
   fi
+  # #3755 INTERACTION. That feature writes its ADMISSION bookkeeping into this run's own
+  # $LOG_DIR before any component runs: `gate-slot.ready` (the slot holder's flag) and the
+  # `disk-admission*` family (`-cargo-metadata.json` plus the `.bcap.{out,err,rc}` capture
+  # triple). All of it is launch-time, so it is not evidence — and until it was allowlisted
+  # EVERY exit-0 run kept its bundle, silently disabling the removal this issue exists to
+  # deliver (measured: the logdir suite went 161/0 -> 155/6 on the merge).
+  #
+  # ANCHORED ON THIS RUN'S OWN DIRECTORY, and matched as a FAMILY rather than file by file,
+  # for two measured reasons. (1) The owning globals are set INSIDE COMMAND SUBSTITUTIONS
+  # (`_gate_resolve_target_dir`, `_gate_admission_capture_open`), so their values never reach
+  # this EXIT-trap context — deriving from them is not available here, and `_DA_CAP_OWNER`
+  # being 0 in the main shell is also why `_gate_admission_capture_close` cannot drop the
+  # triple. (2) Naming them one at a time already failed twice in this one merge; a family
+  # rule means a future capture file cannot silently re-break removal.
+  # DECLARED RESIDUAL: this is the one place here that matches a NAME rather than a resolved
+  # path. It is bounded by the $GATE_LOGDIR_CREATED anchor (never a bare basename, never a
+  # peer's directory) and by admission running before any component by construction. The
+  # hermetic survivor-enumeration case in test_agent_gate_logdir_cleanup.sh is what catches
+  # drift here, and it is what caught this.
+  if [ -n "${GATE_LOGDIR_CREATED:-}" ]; then
+    case "$e" in
+      "$GATE_LOGDIR_CREATED"/gate-slot.ready) return 0 ;;
+      "$GATE_LOGDIR_CREATED"/disk-admission*) return 0 ;;
+    esac
+  fi
   return 1
 }
 
