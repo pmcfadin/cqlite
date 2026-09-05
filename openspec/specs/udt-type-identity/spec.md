@@ -200,9 +200,17 @@ pinned in both directions, and not the live contract. Re-derived from
   the shapes above were resolved INCIDENTALLY by the UDT becoming hashable rather than by adding an
   arm — the distinction #3504 recorded, and the one #3500 closed.)*
 - **AND** `Udt.__hash__` SHALL still propagate `TypeError` for a genuinely unhashable field value.
-  No decoder path reaches that today — a collection field inside a frozen UDT decodes to
-  `Value::Blob`, i.e. hashable `bytes` — so it is asserted on a constructed value, and the decode gap
-  is pinned as characterization.
+  *(Justification corrected by #3722; the requirement itself is unchanged. It previously read "No
+  decoder path reaches that today — a collection field inside a frozen UDT decodes to `Value::Blob`,
+  i.e. hashable `bytes`". #3722 closed that decode gap, so a collection field now decodes to
+  `List`/`Set`/`Map`/`Tuple` and the old justification no longer holds. MEASURED against the #3722
+  fixture through the built binding: a decoder-produced `Udt` carrying a collection field IS now
+  genuinely unhashable — `hash()` on the `frozen<udt>` column's value raises
+  `TypeError: unhashable type: 'list'`. No READ raises, however, because `value_to_hashable_key` is
+  total over `Value` (#3500) and projects a collection field to a hashable form wherever the UDT sits
+  in a hashable position — measured on a `frozen<map<frozen<udt>, int>>` KEY, where `list`→`tuple`,
+  `map`→tuple-of-pairs and `set`→`frozenset`, and hashing succeeds. So the `TypeError` remains
+  unreachable through a read, and the hand-built assertion remains how it is pinned.)*
 
 ### Requirement: Declared stubs match the runtime surface
 
