@@ -834,3 +834,9 @@ fn brief(s: &str) -> String {
 #[cfg(test)]
 #[path = "golden_value_canon_container_tests.rs"]
 mod tests;
+
+// The LEAF question `canon_matches_declared_kinds` answers, in a suite of its own:
+// it had no direct coverage at all and is now a SECOND caller's rule (issue #3846).
+#[cfg(test)]
+#[path = "golden_value_canon_kinds_tests.rs"]
+mod kinds_tests;

@@ -392,8 +392,8 @@ impl V5CompressedLegacyParser {
         let (decoded, consumed) =
             match self.decode_reporting_consumption(data, type_str, column_name, 0) {
                 Ok(v) => v,
-                // #3747: the table ADMITTED this empty buffer but no `Value` carries an
-                // empty fixed-width scalar — same OPAQUE policy as below. Typed: #3805.
+                // #3747's DOOR 1: the table ADMITTED this empty buffer but the
+                // decoder has no `Value` for an empty scalar. Typed: #3805.
                 Err(_) if data.is_empty() && allowed.contains(&0) => {
                     *opaque_out = true;
                     return Ok(Value::blob(Vec::new()));
@@ -409,6 +409,13 @@ impl V5CompressedLegacyParser {
         // becoming a presentation change, which is the defect roborev round 8 found
         // one nesting level down.
         let probe = Self::peeled_for_inspection(&decoded);
+        // #3747's DOOR 2: the decode SUCCEEDED with `Null`. Keyed on the PEELED
+        // answer, never the width table (`inet` admits 0 and decodes) and never a
+        // byte length. Full argument + the four defects it caused: `frozen_map`.
+        if data.is_empty() && matches!(probe, Value::Null) {
+            *opaque_out = true;
+            return Ok(Value::blob(Vec::new()));
+        }
         // THE EXACTNESS RULE. For a cell path the whole slice IS the key, so a
         // decoder that stopped short read a PREFIX and two distinct byte strings
         // would collapse to one logical key. Where the decoder can say how far it
@@ -694,7 +701,7 @@ impl V5CompressedLegacyParser {
     /// `decoded`, which turned an inspection into a presentation change and is the
     /// shape of roborev round 8's finding — parity is now the shared key-type
     /// rule's job (`map_key_type_for_decode`), never this function's.
-    fn peeled_for_inspection(value: &Value) -> &Value {
+    pub(crate) fn peeled_for_inspection(value: &Value) -> &Value {
         let mut v = value;
         while let Value::Frozen(inner) = v {
             v = inner;

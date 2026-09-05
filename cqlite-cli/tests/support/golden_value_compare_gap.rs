@@ -108,7 +108,15 @@ pub enum Divergence {
     /// number of hex digits, which is CQL's spelling of a byte string.
     ///
     /// NOT COVERED: arbitrary text at that position, a decoded object whose
-    /// content differs, a null, a number. DECLARED RESIDUAL: what the bytes behind
+    /// content differs, a null, a number — and, on the ORACLE side, a golden
+    /// object that is not a DECODE of the declared UDT at all: a field name the
+    /// `CREATE TYPE` does not declare, a declared field left out, another field
+    /// order, or a leaf that is not a value of its declared type. Object-ness
+    /// used to stand in for the premise "the golden decoded it" (issue #3846), so
+    /// a malformed oracle was suppressed alongside the egress's blob hex; the
+    /// matcher now canonicalizes the golden under the declared type, exactly as
+    /// [`Divergence::NestedFrozenValueLeftUndecodedByGolden`] does on its egress
+    /// side. DECLARED RESIDUAL: what the bytes behind
     /// the hex DECODE to is not compared — those bytes are the nested UDT's
     /// serialization, so recovering the content would mean re-implementing
     /// Cassandra's UDT value serializer here, which this gap does not do. The gap
@@ -514,11 +522,64 @@ impl Divergence {
                 }
             }
             Divergence::NestedFrozenUdtRendersAsBlobHex => {
-                // The golden decoded an object at a position the DDL declares a
-                // UDT, and the egress rendered a blob literal there.
-                matches!(golden, Value::Object(_))
-                    && matches!(ty, CqlType::Udt(_))
-                    && matches!(cli, Value::String(text) if is_blob_hex(text))
+                // The DDL declares a UDT here, the golden DECODED it, and the egress
+                // rendered a blob literal instead.
+                if !matches!(ty, CqlType::Udt(_)) {
+                    return false;
+                }
+                // EGRESS: a blob literal and nothing else — `0x` and an EVEN number of
+                // hex digits, CQL's spelling of a byte string. Arbitrary text, a decoded
+                // object, a null or a number here is a DIFFERENT divergence.
+                if !matches!(cli, Value::String(text) if is_blob_hex(text)) {
+                    return false;
+                }
+                // GOLDEN: A DECODE OF THE DECLARED UDT, NOT MERELY AN OBJECT (issue
+                // #3846).
+                //
+                // This was `matches!(golden, Value::Object(_))`, so object-ness stood in
+                // for "the golden decoded the nested frozen UDT" — which is this gap's
+                // whole premise, and the only side that could carry an expectation at a
+                // position where the egress is undecoded (#3042). An object whose field
+                // NAMES, field ORDER or leaf KINDS are not the committed `CREATE TYPE`'s
+                // satisfied it anyway, so a MALFORMED oracle was suppressed alongside the
+                // egress's blob hex — strictly more than the gap says it covers.
+                //
+                // Same weakness, same answer, as the sibling
+                // [`Divergence::NestedFrozenValueLeftUndecodedByGolden`] closed on its
+                // EGRESS side (roborev job 32 for the structure, job 38 for the leaf
+                // kinds, job 105 for the per-type spellings): CANONICALIZE the side whose
+                // decode the premise asserts, under the declared type, and read
+                // `canon_typed`'s OWN OUTPUT back. `canon_udt` IS this lane's structural
+                // authority — every declared field present, no undeclared name, declared
+                // ORDER — quoting `cassandra-5.0.8 UserType.toJSONString`, which walks the
+                // declared field list and writes every field (`null` when its buffer is
+                // absent); `container::canon_matches_declared_kinds` adds the leaf
+                // question and nothing else, because `canon_typed(...).is_ok()` is not a
+                // validity test (it accepts a string where an `int` is declared on
+                // PURPOSE, leaving the inequality to the comparison — and here there is no
+                // other side left to report it).
+                //
+                // NOT the strict type validator #3846 rules out and #3500 abandoned: no
+                // parsing, no calendar or range logic, no arity or field-set logic of its
+                // own. It reads back what the canonicalizer already decided.
+                //
+                // The position's OWN `kinding` is passed rather than a fixed
+                // [`Kinding::Natural`]: at a STRINGIFIED position `sstabledump` spells a
+                // whole frozen UDT as one flat `getString` string, so an object there is
+                // not a rendering that writer produces, and `canon_container` refuses it —
+                // the fail-closed direction, and the same latitude the golden is given
+                // everywhere else in this lane. A UDT FIELD, which is every position a
+                // case has ever declared this gap at, is [`Kinding::Natural`]
+                // (`compare::At::field`).
+                if !matches!(golden, Value::Object(_)) {
+                    return false;
+                }
+                match super::canon_typed(golden, egress, ty, depth, kinding, Side::Golden) {
+                    Ok(canon) => {
+                        super::super::container::canon_matches_declared_kinds(&canon, ty, egress)
+                    }
+                    Err(_) => false,
+                }
             }
             Divergence::NonFiniteFloatRendersAsJsonNull => {
                 egress == Egress::Json
