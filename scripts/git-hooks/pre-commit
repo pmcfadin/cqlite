@@ -37,18 +37,44 @@ set -uo pipefail
 
 # NO-OP OUTSIDE A LANE. This is load-bearing, not tidiness: core.hooksPath is repo-wide, so this
 # same hook runs in the ROOT checkout, in the `telemetry-<N>` worktrees flow-finalize creates, and
-# in anything else checked out from this repository. Only /data/lanes/lane-<N> is a lane. Tests
-# that commit in scratch `git init` repositories are unaffected anyway (their own config has no
-# hooksPath), but the root checkout and telemetry worktrees are real and must stay untouched.
+# in anything else checked out from this repository. Tests that commit in scratch `git init`
+# repositories are unaffected anyway (their own config has no hooksPath), but the root checkout
+# and telemetry worktrees are real and must stay untouched.
+#
+# TWO LAYOUTS, NOT ONE (roborev job 456). This used to hard-code `/data/lanes/lane-<N>` alone, so
+# it SILENTLY no-opped in the layout the repository's own live instructions direct agents to —
+# `.claude/worktrees/issue-<N>-<slug>` (`.claude/skills/flow-implement/SKILL.md:12,98`,
+# `.claude/agents/flow-closer.md:22`). A guard that exits 0 in a sanctioned lane gives no
+# protection there while looking installed, which is the false-assurance class this file exists to
+# avoid. It also ignored `LANE_ROOT`, which `lane-lock.sh` itself honours
+# (`${LANE_ROOT:-/data/lanes}/lane-<issue>`), so the lock and its own enforcement point disagreed
+# about where lanes live.
+#
+# THE PATH DECIDES, NEVER THE BRANCH. The reviewer suggested deriving the issue from the checked-out
+# `issue-<N>-*` branch. That is REJECTED deliberately: the root checkout can have an `issue-<N>-…`
+# branch checked out (doctrine forbids working there, but it happens), and a branch-keyed hook would
+# then police the ROOT CHECKOUT — the exact thing the paragraph above forbids. Keying on the path
+# keeps "is this a lane" a property of WHERE you are, which is what the lock records anyway.
 wt="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+issue=""
 case "$wt" in
-  /data/lanes/lane-[0-9]*) : ;;
+  "${LANE_ROOT:-/data/lanes}"/lane-[0-9]*)
+    # $LANE_ROOT/lane-<N> — the fleet layout, and the lock's own default.
+    issue="${wt##*/lane-}" ;;
+  */.claude/worktrees/issue-[0-9]*)
+    # <root>/.claude/worktrees/issue-<N>-<slug> — the layout flow-implement/flow-closer direct.
+    issue="${wt##*/worktrees/issue-}"; issue="${issue%%-*}" ;;
   *) exit 0 ;;
 esac
-issue="${wt##*/lane-}"
 case "$issue" in
-  ''|*[!0-9]*) exit 0 ;;   # lane-<something-not-a-number>: not ours to police
+  ''|*[!0-9]*) exit 0 ;;   # a lane-shaped name whose issue is not a number: not ours to police
 esac
+
+# DECLARED SCOPE, so a reader is never misled about coverage: these TWO layouts are policed and no
+# others. A worktree somewhere else (e.g. `~/projects/cqlite-wt/issue-<N>`, which appears in notes
+# and one archived change but in no live instruction) is NOT policed and exits silently above —
+# there is no bounded way to recognise an arbitrary directory as a lane, and guessing would either
+# miss lanes or police the root checkout. Point `LANE_ROOT` at such a root, or use one of the two.
 
 ll="$wt/scripts/flow/lane-lock.sh"
 [ -r "$ll" ] || exit 0     # a checkout without the script cannot be policed by it

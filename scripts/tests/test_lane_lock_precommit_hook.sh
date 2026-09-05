@@ -39,7 +39,8 @@ mkdir -p "$T" || { echo "cannot create $T"; exit 1; }
 LANE="$LANEROOT/lane-99$$"; LANE="${LANE:0:24}"
 rm -rf "$LANE"; mkdir -p "$LANE"
 ISSUE="${LANE##*/lane-}"
-cleanup() { for p in $SLEEPERS; do kill "$p" 2>/dev/null || true; done; rm -rf "$T" "$LANE"; rm -f "$LANEROOT/.lane-locks/lane-$ISSUE".*; }
+ISSUE2=$(( ${ISSUE} + 1 ))   # a DISTINCT issue for the second-layout fixture (TEST 7)
+cleanup() { for p in $SLEEPERS; do kill "$p" 2>/dev/null || true; done; rm -rf "$T" "$LANE"; rm -f "$LANEROOT/.lane-locks/lane-$ISSUE".* "$LANEROOT/.lane-locks/lane-$ISSUE2".*; }
 trap cleanup EXIT
 
 # A git repo AT the lane path, carrying the scripts the hook needs.
@@ -197,6 +198,60 @@ else
   bad "the hook refused the TRUE OWNER because the actor differed: rc=$rc6
 $out6"
 fi
+
+# ---------------------------------------------------------------------------
+echo "TEST 7: the .claude/worktrees/issue-<N>-<slug> layout is POLICED too (roborev job 456)"
+# ---------------------------------------------------------------------------
+# The hook used to hard-code /data/lanes/lane-<N>, so it exited 0 — silently — in the layout the
+# repository's OWN live instructions direct agents to (.claude/skills/flow-implement/SKILL.md:12,98
+# and .claude/agents/flow-closer.md:22). A guard that no-ops in a sanctioned lane gives no
+# protection there while looking installed. TEST 1 proves the fleet layout refuses; without this
+# case that proof said nothing about the other half of the sanctioned surface.
+WT2="$T/root/.claude/worktrees/issue-$ISSUE2-machine-local-lane-lock"
+mkdir -p "$WT2"
+( cd "$WT2" && git init -q . && git config user.email t@t && git config user.name t )
+mkdir -p "$WT2/scripts/flow" "$WT2/.git/hooks"
+cp "$REPO/scripts/flow/lane-lock.sh" "$WT2/scripts/flow/"
+[ -d "$REPO/scripts/flow/lib" ] && { mkdir -p "$WT2/scripts/flow/lib"; cp "$REPO/scripts/flow/lib/"*.sh "$WT2/scripts/flow/lib/" 2>/dev/null; }
+cp "$HOOK" "$WT2/.git/hooks/pre-commit"; chmod +x "$WT2/.git/hooks/pre-commit"
+
+# A REAL live peer holds that lane, exactly as TEST 1 does for the fleet layout.
+sleeper; PEER2="$REPLY_SLEEPER"
+LANE_LOCK_PID=$PEER2 bash "$REPO/scripts/flow/lane-lock.sh" acquire "$ISSUE2" --lane-dir "$WT2" >/dev/null 2>&1
+before2="$( git -C "$WT2" rev-list --count HEAD 2>/dev/null || echo 0 )"
+out7="$( cd "$WT2" && printf 'x-%s\n' "$RANDOM" > f.txt && git add f.txt && git commit -q -m layout2 2>&1 )"; rc7=$?
+after2="$( git -C "$WT2" rev-list --count HEAD 2>/dev/null || echo 0 )"
+if [ "$rc7" -ne 0 ] && printf '%s' "$out7" | grep -q 'REFUSED' && [ "$before2" = "$after2" ]; then
+  ok "a peer-held .claude/worktrees lane REFUSES the commit — the second layout is policed"
+else
+  bad "the .claude/worktrees layout was NOT policed: rc=$rc7 before=$before2 after=$after2
+$out7"
+fi
+bash "$REPO/scripts/flow/lane-lock.sh" release "$ISSUE2" --force >/dev/null 2>&1
+
+# CONTROL: the same layout, lane FREE -> the commit proceeds. Without this, TEST 7 would pass for
+# a hook that refused every commit in that layout, which is worse than not policing it.
+out7b="$( cd "$WT2" && printf 'y-%s\n' "$RANDOM" > f.txt && git add f.txt && git commit -q -m layout2free 2>&1 )"; rc7b=$?
+if [ "$rc7b" -eq 0 ]; then
+  ok "CONTROL: a FREE .claude/worktrees lane still commits — the layout is not bricked"
+else
+  bad "the hook blocked a FREE .claude/worktrees lane: rc=$rc7b
+$out7b"
+fi
+bash "$REPO/scripts/flow/lane-lock.sh" release "$ISSUE2" --force >/dev/null 2>&1
+
+# CONTROL: a NON-NUMERIC issue in that layout is not ours to police.
+WT3="$T/root/.claude/worktrees/issue-notanumber-slug"
+mkdir -p "$WT3"; ( cd "$WT3" && git init -q . && git config user.email t@t && git config user.name t )
+mkdir -p "$WT3/.git/hooks"; cp "$HOOK" "$WT3/.git/hooks/pre-commit"; chmod +x "$WT3/.git/hooks/pre-commit"
+out7c="$( cd "$WT3" && echo z > a.txt && git add a.txt && git commit -q -m nonnum 2>&1 )"; rc7c=$?
+if [ "$rc7c" -eq 0 ] && ! printf '%s' "$out7c" | grep -q 'lane-lock'; then
+  ok "CONTROL: issue-<non-numeric> in that layout is silent and unpoliced"
+else
+  bad "the hook acted on a non-numeric issue in the .claude/worktrees layout: rc=$rc7c
+$out7c"
+fi
+cd "$LANE" || true
 
 echo "==== lane-lock pre-commit hook: passed=$PASS failed=$FAIL ===="
 [ "$FAIL" -eq 0 ] || exit 1
