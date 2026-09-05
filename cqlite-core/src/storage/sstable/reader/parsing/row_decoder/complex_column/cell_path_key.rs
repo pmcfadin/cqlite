@@ -463,9 +463,12 @@ impl V5CompressedLegacyParser {
         let (decoded, consumed) =
             match self.decode_reporting_consumption(data, type_str, column_name, 0) {
                 Ok(v) => v,
-                // An empty buffer the ADMISSION GATE above did NOT admit. Behaviour
-                // here is EXACTLY what it was before #3805 slice 2, which is what
-                // makes the gate a strict ADDITION rather than a widening:
+                // #3747's DOOR 1 — an empty buffer the ADMISSION GATE above did
+                // NOT admit. (DOOR 2 is the decode-succeeded-with-`Null` case
+                // below; the two labels are the file's own cross-reference and
+                // both are kept.) Behaviour here is EXACTLY what it was before
+                // #3805 slice 2, which is what makes the gate a strict ADDITION
+                // rather than a widening:
                 //   * the WIDTH table admitted the empty buffer but no sentinel
                 //     speaks for the family -> the pre-existing opaque policy.
                 //     Unreachable today (every `0`-admitting width family has a
@@ -490,6 +493,13 @@ impl V5CompressedLegacyParser {
         // becoming a presentation change, which is the defect roborev round 8 found
         // one nesting level down.
         let probe = Self::peeled_for_inspection(&decoded);
+        // #3747's DOOR 2: the decode SUCCEEDED with `Null`. Keyed on the PEELED
+        // answer, never the width table (`inet` admits 0 and decodes) and never a
+        // byte length. Full argument + the four defects it caused: `frozen_map`.
+        if data.is_empty() && matches!(probe, Value::Null) {
+            *opaque_out = true;
+            return Ok(Value::blob(Vec::new()));
+        }
         // THE EXACTNESS RULE. For a cell path the whole slice IS the key, so a
         // decoder that stopped short read a PREFIX and two distinct byte strings
         // would collapse to one logical key. Where the decoder can say how far it
@@ -808,7 +818,7 @@ impl V5CompressedLegacyParser {
     /// `decoded`, which turned an inspection into a presentation change and is the
     /// shape of roborev round 8's finding — parity is now the shared key-type
     /// rule's job (`map_key_type_for_decode`), never this function's.
-    fn peeled_for_inspection(value: &Value) -> &Value {
+    pub(crate) fn peeled_for_inspection(value: &Value) -> &Value {
         let mut v = value;
         while let Value::Frozen(inner) = v {
             v = inner;

@@ -48,6 +48,9 @@
 
 // One level deeper than `raw_value.rs`, so the `row_decoder` glob is `super::super`.
 use super::super::*;
+// Issue #3847: the ONE statement of which widths a fixed-width scalar admits and
+// what an EMPTY buffer means. Shared with `udt.rs`'s two scalar field decoders.
+use super::fixed_width::{self, FixedWidthCell};
 
 impl V5CompressedLegacyParser {
     /// Consumption-reporting form of
@@ -133,81 +136,97 @@ impl V5CompressedLegacyParser {
                 Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(data)),
                 data.len(),
             )),
-            "int" => {
-                Self::require_fixed_width(data, 4, "int", column_name)?;
-                Ok((
+            "int" => match Self::require_fixed_width(data, 4, "int", column_name)? {
+                FixedWidthCell::Null => Ok((Value::Null, 0)),
+                FixedWidthCell::Bytes => Ok((
                     Value::Integer(i32::from_be_bytes([data[0], data[1], data[2], data[3]])),
                     4,
-                ))
-            }
+                )),
+            },
             "bigint" | "counter" => {
-                Self::require_fixed_width(data, 8, "bigint", column_name)?;
-                Ok((
-                    Value::BigInt(i64::from_be_bytes([
-                        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                    ])),
-                    8,
-                ))
+                match Self::require_fixed_width(data, 8, "bigint", column_name)? {
+                    FixedWidthCell::Null => Ok((Value::Null, 0)),
+                    FixedWidthCell::Bytes => Ok((
+                        Value::BigInt(i64::from_be_bytes([
+                            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                        ])),
+                        8,
+                    )),
+                }
             }
-            "boolean" => {
-                Self::require_fixed_width(data, 1, "boolean", column_name)?;
-                Ok((Value::Boolean(data[0] != 0), 1))
-            }
+            "boolean" => match Self::require_fixed_width(data, 1, "boolean", column_name)? {
+                FixedWidthCell::Null => Ok((Value::Null, 0)),
+                FixedWidthCell::Bytes => Ok((Value::Boolean(data[0] != 0), 1)),
+            },
             "uuid" | "timeuuid" => {
-                Self::require_fixed_width(data, 16, "UUID", column_name)?;
-                let uuid: [u8; 16] = data[..16]
-                    .try_into()
-                    .map_err(|_| Error::corruption("UUID byte conversion failed"))?;
-                Ok((Value::Uuid(uuid), 16))
+                match Self::require_fixed_width(data, 16, "UUID", column_name)? {
+                    FixedWidthCell::Null => Ok((Value::Null, 0)),
+                    FixedWidthCell::Bytes => {
+                        let uuid: [u8; 16] = data[..16]
+                            .try_into()
+                            .map_err(|_| Error::corruption("UUID byte conversion failed"))?;
+                        Ok((Value::Uuid(uuid), 16))
+                    }
+                }
             }
-            "float" => {
-                Self::require_fixed_width(data, 4, "float", column_name)?;
-                // CQL `float` is `Value::Float32`, not the f64 `Value::Float`; the column
-                // path and both UDT field decoders already agree (roborev round 10 F1).
-                let f = f32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                Ok((Value::Float32(f), 4))
-            }
-            "double" => {
-                Self::require_fixed_width(data, 8, "double", column_name)?;
-                Ok((
+            "float" => match Self::require_fixed_width(data, 4, "float", column_name)? {
+                FixedWidthCell::Null => Ok((Value::Null, 0)),
+                FixedWidthCell::Bytes => {
+                    // CQL `float` is `Value::Float32`, not the f64 `Value::Float`; the column
+                    // path and both UDT field decoders already agree (roborev round 10 F1).
+                    let f = f32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                    Ok((Value::Float32(f), 4))
+                }
+            },
+            "double" => match Self::require_fixed_width(data, 8, "double", column_name)? {
+                FixedWidthCell::Null => Ok((Value::Null, 0)),
+                FixedWidthCell::Bytes => Ok((
                     Value::Float(f64::from_be_bytes([
                         data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
                     ])),
                     8,
-                ))
-            }
+                )),
+            },
             "smallint" | "short" => {
-                Self::require_fixed_width(data, 2, "smallint", column_name)?;
-                Ok((Value::SmallInt(i16::from_be_bytes([data[0], data[1]])), 2))
+                match Self::require_fixed_width(data, 2, "smallint", column_name)? {
+                    FixedWidthCell::Null => Ok((Value::Null, 0)),
+                    FixedWidthCell::Bytes => {
+                        Ok((Value::SmallInt(i16::from_be_bytes([data[0], data[1]])), 2))
+                    }
+                }
             }
             "tinyint" | "byte" => {
-                Self::require_fixed_width(data, 1, "tinyint", column_name)?;
-                Ok((Value::TinyInt(data[0] as i8), 1))
+                match Self::require_fixed_width(data, 1, "tinyint", column_name)? {
+                    FixedWidthCell::Null => Ok((Value::Null, 0)),
+                    FixedWidthCell::Bytes => Ok((Value::TinyInt(data[0] as i8), 1)),
+                }
             }
-            "timestamp" => {
-                Self::require_fixed_width(data, 8, "timestamp", column_name)?;
-                Ok((
+            "timestamp" => match Self::require_fixed_width(data, 8, "timestamp", column_name)? {
+                FixedWidthCell::Null => Ok((Value::Null, 0)),
+                FixedWidthCell::Bytes => Ok((
                     Value::Timestamp(i64::from_be_bytes([
                         data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
                     ])),
                     8,
-                ))
-            }
-            "date" => {
-                Self::require_fixed_width(data, 4, "date", column_name)?;
-                let stored = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                let days_since_epoch = stored.wrapping_add(i32::MIN as u32) as i32;
-                Ok((Value::Date(days_since_epoch), 4))
-            }
-            "time" => {
-                Self::require_fixed_width(data, 8, "time", column_name)?;
-                Ok((
+                )),
+            },
+            "date" => match Self::require_fixed_width(data, 4, "date", column_name)? {
+                FixedWidthCell::Null => Ok((Value::Null, 0)),
+                FixedWidthCell::Bytes => {
+                    let stored = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                    let days_since_epoch = stored.wrapping_add(i32::MIN as u32) as i32;
+                    Ok((Value::Date(days_since_epoch), 4))
+                }
+            },
+            "time" => match Self::require_fixed_width(data, 8, "time", column_name)? {
+                FixedWidthCell::Null => Ok((Value::Null, 0)),
+                FixedWidthCell::Bytes => Ok((
                     Value::Time(i64::from_be_bytes([
                         data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
                     ])),
                     8,
-                ))
-            }
+                )),
+            },
             "duration" => {
                 // Issue #1081: in this function the entire `data` slice IS the value
                 // (the element/cell length prefix already bounded it) — there is NO
@@ -504,8 +523,10 @@ impl V5CompressedLegacyParser {
         )))
     }
 
-    /// Issue #3811 (census finding D): a fixed-width scalar needs at least its
-    /// own width.
+    /// Issue #3811 (census finding D): a fixed-width scalar needs its own width
+    /// — or nothing at all.
+    ///
+    /// # The composed rule, which is not readable from this function alone
     ///
     /// The OVER-width half of finding D is enforced by the caller's consumption
     /// assert, not here: these arms report their exact width `n`, so a slice of
@@ -513,32 +534,44 @@ impl V5CompressedLegacyParser {
     /// [`require_fully_consumed`] refuses it. That is what stops a 5-byte
     /// declared `int` decoding from its first four bytes.
     ///
-    /// **What the COMPOSED rule actually is — stated rather than inferred from
-    /// this function alone (issue #3847).** An earlier revision of this comment
-    /// claimed the `<` (rather than `!=`) spelling avoids falsely refusing a legal
-    /// empty value. Composed with the caller's consumption assert, that is FALSE:
-    /// `len == 0` → `0 < n` → `Err` here; `len == n` → `Ok`; `len == n + k` →
-    /// consumed `n` ≠ `n + k` → `Err` there. The accepted set is exactly `{n}`.
+    /// Composed, the accepted set is therefore `{n, 0}`: `len == 0` ⇒
+    /// [`FixedWidthCell::Null`] here and the arm reports **`0`** consumed, so the
+    /// consumption assert passes; `len == n` ⇒ the value; `len` in `1..n` ⇒ `Err`
+    /// here; `len == n + k` ⇒ consumed `n` ≠ `n + k` ⇒ `Err` there.
     ///
-    /// Cassandra's is `{n, 0}` — `Int32Serializer.deserialize` accepts an EMPTY
-    /// buffer (`cassandra-5.0.8:src/java/org/apache/cassandra/serializers/Int32Serializer.java:42-43`,
-    /// `size(value) != 4 && !isEmpty(value)`). So CQLite REFUSES a legal empty
-    /// value on this path, by the under-width half above. That is **pre-existing
-    /// and unchanged by #3811** (the `< n` guard predates it, and the corpus
-    /// census measured no behaviour change); widening it is a behaviour change with
-    /// its own oracle and its own corpus measurement: **issue #3847**. Do not
-    /// "fix" it by relaxing this guard alone — the arm must also report
-    /// `data.len()` when empty, or the consumption assert would then reject it.
-    fn require_fixed_width(data: &[u8], n: usize, what: &str, column_name: &str) -> Result<()> {
-        if data.len() < n {
-            return Err(Error::corruption(format!(
+    /// # Issue #3847: the `0` is Cassandra's, and BOTH halves are load-bearing
+    ///
+    /// Until #3847 the composed set was exactly `{n}` — this guard was
+    /// `data.len() < n`, which refuses the empty buffer, and the empty buffer is a
+    /// LEGAL fixed-width value meaning `null` for every one of the twelve
+    /// fixed-width scalars. The oracle, with its per-type table and the reason
+    /// `deserialize()` rather than `validate()` governs a read path, is
+    /// `docs/round-artifacts/issue-3847-cassandra-oracle.md` (pinned
+    /// `cassandra-5.0.8`), restated in
+    /// [`super::fixed_width`] — this path's table for that rule. Note it is ONE OF
+    /// TWO in the repository: the typed/UDT path answers the same question from
+    /// `typed_value/scalar_rules.rs::empty_is_a_value` since #3631. See that
+    /// module's SCOPE note; nothing enforces the two staying in agreement.
+    ///
+    /// Relaxing this guard ALONE would be a defect and not the fix: the arm would
+    /// then index `data[0]` on an empty slice, and would report `n` consumed
+    /// against a `0`-length slice, so the consumption assert would refuse the
+    /// value just admitted. Every caller of this function MUST short-circuit
+    /// [`FixedWidthCell::Null`] to `(Value::Null, 0)`.
+    fn require_fixed_width(
+        data: &[u8],
+        n: usize,
+        what: &str,
+        column_name: &str,
+    ) -> Result<FixedWidthCell> {
+        fixed_width::admissible_at_least(data, n).ok_or_else(|| {
+            Error::corruption(format!(
                 "Frozen element '{}': need {} byte(s) for {}, got {}",
                 column_name,
                 n,
                 what,
                 data.len()
-            )));
-        }
-        Ok(())
+            ))
+        })
     }
 }

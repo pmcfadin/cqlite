@@ -53,7 +53,9 @@
 //!
 //! Both halves report `Error::Corruption`, with two distinct wordings — the
 //! under-width one from `require_fixed_width` and the over-width one from
-//! `require_fully_consumed` — and [`is_width_error`] below matches either.
+//! `require_fully_consumed` — and the two matchers below cover those halves
+//! SEPARATELY, so a case cannot pass on the wrong one. (The composed either-half
+//! matcher went with #3847: zero length is no longer an error at all.)
 //!
 //! ## What is COVERED, and what is NOT
 //!
@@ -235,10 +237,6 @@ fn is_over_width_error(err: &Error) -> bool {
     matches!(err, Error::Corruption(msg) if msg.contains("decoded only"))
 }
 
-fn is_width_error(err: &Error) -> bool {
-    is_under_width_error(err) || is_over_width_error(err)
-}
-
 /// The THIRD width wording, from a THIRD layer: `parse_typed_value`'s scalar
 /// branch (`row_decoder/typed_value/scalar_rules.rs`'s allowed-width set), which
 /// refuses a declared type's framed value whose length is outside that set —
@@ -246,7 +244,7 @@ fn is_width_error(err: &Error) -> bool {
 /// the framed value is <len> bytes; … (issue #3631)"`.
 ///
 /// It is matched SEPARATELY from the two above, and never folded into
-/// [`is_width_error`], because the layer is what the UDT-field case is evidence
+/// an either-half matcher, because the layer is what the UDT-field case is evidence
 /// ABOUT: a case that accepted any of the three wordings could pass on #3811's
 /// consumption assert firing at the enclosing frame instead of the field's own
 /// declared width being checked.
@@ -312,37 +310,106 @@ fn wrong_declared_length_is_refused_at_every_nesting_position() {
     }
 }
 
-/// AC2: a ZERO-length fixed-width element is refused at each of the five
-/// nesting positions [`nesting_positions`] enumerates. A zero-length UDT FIELD
-/// is NOT refused — it decodes to `Value::Null`, a separate PRE-EXISTING
-/// disposition that #3631 did not change; see
-/// `wrong_width_udt_field_of_five_types_is_refused_since_3631`.
+/// AC2, POST-#3847: a ZERO-length fixed-width element DECODES TO NULL at the four
+/// VALUE positions — it is no longer refused.
 ///
-/// The four strict serializers (`smallint`, `tinyint`, `date`, `time`) refuse it
-/// per the pinned source. The "or 0" family is refused because `require_fixed_width`
-/// is `data.len() < n` — a PRE-EXISTING divergence from Cassandra, tracked as
-/// **#3847**; this case characterises it, it does not endorse it.
+/// **This replaces a characterisation test #3723 deliberately did not endorse.**
+/// Its own comment read: *"The 'or 0' family is refused because
+/// `require_fixed_width` is `data.len() < n` — a PRE-EXISTING divergence from
+/// Cassandra, tracked as #3847; this case characterises it, it does not endorse
+/// it."* #3847 closed that divergence, so the expectation FLIPS here rather than
+/// the test being deleted: #3723's coverage (all fifteen types x every nesting
+/// position) is kept and only the asserted answer moves. The old name asserted a
+/// refusal, so it could not survive the flip — a name is a claim about behaviour.
+///
+/// Oracle: `deserialize()`, uniformly, at the pinned `cassandra-5.0.8` tag — every
+/// fixed-width `TypeSerializer` maps an EMPTY buffer to null, the wire spelling of
+/// null. `validate()` is the WRITE path and is NON-uniform (`smallint`, `tinyint`,
+/// `date`, `time` reject empty there); that asymmetry is why the cell-path KEY
+/// table stays strict while this VALUE path does not.
+///
+/// The MAP KEY position is excluded and has its own case below.
 #[test]
-fn zero_length_fixed_width_element_is_refused_at_every_nesting_position() {
+fn zero_length_fixed_width_element_decodes_to_null_at_the_four_value_positions() {
     let p = parser();
-    for (t, width) in FIXED_WIDTH_TYPES {
+    for (t, _width) in FIXED_WIDTH_TYPES {
         for (label, type_str, build) in nesting_positions(t) {
+            if label.contains("key") || label.contains("set<") {
+                continue; // KEY-LIKE positions (map key, set member) are the sibling case
+            }
             let body = build(&[]);
-            let err = p
+            let decoded = p
                 .parse_value_from_raw_bytes(&body, &type_str, "col", 0)
-                .err()
-                .unwrap_or_else(|| {
-                    panic!(
-                        "{} at {}: a 0-byte element must be refused (admits {} only)",
-                        t, label, width
-                    )
+                .unwrap_or_else(|e| {
+                    panic!("{t} at {label}: #3847 admits a 0-byte element; got {e:?}")
                 });
-            assert!(
-                is_width_error(&err),
-                "{} at {} (0 bytes): expected the under-width refusal, got {:?}",
-                t,
-                label,
-                err
+            let element = match &decoded {
+                Value::List(xs) | Value::Set(xs) | Value::Tuple(xs) => xs
+                    .first()
+                    .unwrap_or_else(|| panic!("{t} at {label}: container empty"))
+                    .clone(),
+                Value::Map(kv) => kv
+                    .first()
+                    .unwrap_or_else(|| panic!("{t} at {label}: map empty"))
+                    .1
+                    .clone(),
+                other => panic!("{t} at {label}: unexpected container {other:?}"),
+            };
+            assert_eq!(
+                element,
+                Value::Null,
+                "{t} at {label}: an empty fixed-width element is NULL, not a refusal"
+            );
+        }
+    }
+}
+
+/// AC2's sibling: a ZERO-length fixed-width KEY-LIKE member — a MAP KEY or a SET
+/// MEMBER — is preserved OPAQUELY and is NEVER null (#3847, roborev jobs 153/170).
+///
+/// Cassandra stores a `set<T>` member in the CELL PATH, exactly as it stores a map
+/// key, so a set member IS a key: `Set([Null])` is as unexpressible as a null map
+/// key. An earlier revision of THIS test asserted `Null` for the set position and
+/// was wrong; job 170 caught it.
+///
+/// `Value::Null` is the right answer for a VALUE and an impossible one for a KEY —
+/// Cassandra cannot express a null map key — so the key path applies #3747's opaque
+/// answer instead of inheriting the value rule. The rule, and the four defects one
+/// root cause produced, are documented in `row_decoder::frozen_map`.
+#[test]
+fn zero_length_fixed_width_key_like_member_is_opaque_never_null() {
+    let p = parser();
+    for (t, _width) in FIXED_WIDTH_TYPES {
+        for (label, type_str, build) in nesting_positions(t) {
+            if !(label.contains("key") || label.contains("set<")) {
+                continue;
+            }
+            let body = build(&[]);
+            let decoded = p
+                .parse_value_from_raw_bytes(&body, &type_str, "col", 0)
+                .unwrap_or_else(|e| {
+                    panic!("{t} at {label}: the entry must be kept, not dropped: {e:?}")
+                });
+            let key = match &decoded {
+                Value::Map(kv) => {
+                    &kv.first()
+                        .unwrap_or_else(|| panic!("{t} at {label}: map empty"))
+                        .0
+                }
+                Value::Set(xs) => xs
+                    .first()
+                    .unwrap_or_else(|| panic!("{t} at {label}: set empty")),
+                other => panic!("{t} at {label}: expected a map or set, got {other:?}"),
+            };
+            assert_ne!(
+                *key,
+                Value::Null,
+                "{t} at {label}: a key-like member must NEVER be null"
+            );
+            assert_eq!(
+                *key,
+                Value::blob(Vec::new()),
+                "{t} at {label}: preserved opaquely, as the cell-path key is"
             );
         }
     }
