@@ -112,49 +112,36 @@ const KEYSPACE: &str = "test_empty_fixedwidth_key";
 const TABLE: &str = "empty_fixedwidth_map_key";
 const SCHEMA: &str = "issue-3805-empty-fixedwidth-map-key.cql";
 
-/// THE DECLARED BLOCKER — the ONE remaining out-of-scope decode refusal that
-/// makes this fixture unreadable through EVERY public read surface, with the
-/// issue that owns it.
-///
-/// # Why this list exists instead of a silently-skipped test
-/// Both are HARD `ColumnDecode` errors out of `Database::execute` (NOT the
-/// `row_data.rs` complex-column swallow), so they fail the WHOLE `SELECT` and no
-/// projection avoids them — MEASURED on both `Database::execute` and
-/// `SSTableReader::iterate_all_partitions_for_compaction`. Neither is caused by
-/// the cell-path arm slice 2 changed, and neither may be fixed here:
-///
-///   * **m_frozen** `frozen<map<int,int>>` — its empty key is an INLINE
-///     length-prefixed element with no CellPath at all, refused by
-///     `row_decoder/raw_value/reporting.rs::require_fixed_width`. That
-///     function's own docblock states the refusal is pre-existing and that
-///     widening it "is a behaviour change with its own oracle and its own corpus
-///     measurement: **issue #3847**. Do not 'fix' it by relaxing this guard
-///     alone." Tracked for the frozen/inline path as **#4071**.
-///
-/// # m_dec WAS the second blocker and is CLOSED
-/// `decimal`'s allowed widths are the EMPTY slice (it is variable-width:
-/// Cassandra accepts `{0} ∪ [4, ∞)`), so the cell-path arm's original guard
-/// `allowed.contains(&0)` was false and `decimal` never reached it — measured as
-/// `Corruption("Frozen element 'm_dec': decimal too short (0 bytes)")`, which
-/// failed the whole SELECT. Slice 2 moved that arm's ADMISSION GATE from the
-/// WIDTH table to the TAG table (`for_cql_type`, derived from `validate()`), so
-/// the empty `m_dec` key now decodes to `Empty(Decimal)` and is asserted below.
-///
-/// # How this list is spent, post-roborev-job-448-finding-B
-/// It is NOT an excusing arm inside the subject test any more — that shape
-/// returned `Ok` before every assertion, so the lane stayed green even with the
-/// decoder change reverted, i.e. it had no active regression coverage at all.
-/// Instead: the SUBJECT lane reads the fixture with this ONE column re-declared
-/// in a throwaway copy of the schema and asserts the full golden on every run,
-/// and a SEPARATE lane asserts that the COMMITTED declaration still fails with
-/// exactly this blocker — so the list reds the moment #3847/#4071 lands, which
-/// is what forces the substitution to be removed rather than remembered.
-const DECLARED_BLOCKERS: &[(&str, &str, &str)] = &[(
-    "m_frozen",
-    "need 4 byte(s) for int, got 0",
-    "#3847/#4071 — inline frozen element, require_fixed_width refuses a legal \
-     empty fixed-width value",
-)];
+// THE DECLARED-BLOCKER MACHINERY IS GONE, and its REMOVAL is the point.
+//
+// Until #3847 landed, `m_frozen`'s empty key — an INLINE length-prefixed
+// element with no CellPath at all — was refused by
+// `row_decoder/raw_value/reporting.rs::require_fixed_width` with a HARD
+// `ColumnDecode` that failed the WHOLE `SELECT`, so no projection avoided it and
+// no lane could reach a single per-column assertion under the COMMITTED schema.
+// This file therefore carried three pieces of machinery: a `DECLARED_BLOCKERS`
+// table naming that ONE refusal by column AND message substring, a
+// throwaway-schema substitution (`m_frozen frozen<map<int, int>>` →
+// `frozen<map<blob, int>>`, which routed the column away from the fixed-width
+// guard while keeping the row layout) so the subject lane could assert the seven
+// MULTICELL columns anyway, and a SIGNPOST test asserting that the committed
+// declaration still failed with exactly that blocker — so this file would RED
+// the moment the blocker was fixed.
+//
+// It did. #3847 (merged as PR #4017, `a5171a5ba`) widened `require_fixed_width`
+// to admit a legal empty fixed-width value; the signpost fired, and the
+// substitution was therefore REMOVED rather than remembered — the only outcome
+// the signpost existed to force. The subject lane below now reads the COMMITTED
+// schema, unsubstituted. `m_dec` was the other blocker (its allowed widths are
+// the EMPTY slice, so the WIDTH table could never admit its empty buffer) and
+// slice 2 closed it by moving the cell-path arm's admission gate from the width
+// table to the TAG table (`for_cql_type`, derived from `validate()`); both
+// columns are now read at the type the oracle declares.
+//
+// The `m_inet` → `varint` substitution that SURVIVES has a different and
+// unrelated justification — no committed Cassandra-written fixture in this
+// repository carries a `map<varint, …>` column, see [`INET_DECL_AS_VARINT`]. It
+// is not a blocker workaround and nothing about it was obsoleted by #3847.
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -193,48 +180,10 @@ fn schema_path() -> PathBuf {
     })
 }
 
-/// THE ONE DECLARED SUBSTITUTION the active lane applies to a COPY of the
-/// committed schema — never to the committed schema itself, which is this
-/// fixture's oracle and is never edited to make a test pass.
-///
-/// `m_frozen` is a FROZEN map: ONE inline length-prefixed cell with no CellPath
-/// at all, decoded by `row_decoder/raw_value/reporting.rs::require_fixed_width`,
-/// which refuses its legal empty key. That refusal is out of scope here
-/// (#3847/#4071, the standing [`DECLARED_BLOCKERS`] entry) and it is a HARD
-/// `ColumnDecode` that fails the WHOLE `SELECT`, so no projection avoids it and
-/// a lane reading the committed declaration cannot reach ANY per-column
-/// assertion.
-///
-/// Re-declaring that ONE column's KEY TYPE as `blob` — while KEEPING it
-/// `frozen<…>` — routes it away from the fixed-width guard (a `blob` key has no
-/// width to require), so the seven MULTICELL columns, the actual subject of
-/// #3805, can be asserted today. `m_dec` is deliberately left as the real
-/// `decimal`, so the admission-gate move is asserted against the COMMITTED
-/// declaration and not a convenient one.
-///
-/// # STAYING `frozen` IS LOAD-BEARING, and this was MEASURED not reasoned
-/// The substitution recorded during the previous implementation round was the
-/// NON-frozen `map<blob, int>`, and it does NOT work: dropping `frozen` moves
-/// the column from the row's SIMPLE-cell group to its COMPLEX-cell group, so the
-/// declaration no longer describes the bytes on disk and the read fails
-/// elsewhere entirely — measured as
-/// `ColumnDecode { column: "m_text", … "Bounded value 'm_text' of type 'int'
-/// decoded only 4 of 7 byte(s)" }`, i.e. a failure attributed to a column the
-/// substitution never touched. Keeping `frozen<…>` and changing only the KEY
-/// TYPE preserves the row layout and is the minimal edit that clears the
-/// blocker.
-///
-/// WHAT THIS COSTS, stated rather than implied: under the substituted
-/// declaration `m_frozen`'s own bytes are read as something the fixture does not
-/// mean, so this lane asserts NOTHING about that column's value. The committed
-/// declaration keeps its own lane below.
-#[cfg(feature = "cli-helpers")]
-const FROZEN_DECL_COMMITTED: &str = "m_frozen frozen<map<int, int>>";
-#[cfg(feature = "cli-helpers")]
-const FROZEN_DECL_SUBSTITUTED: &str = "m_frozen frozen<map<blob, int>>";
-
-/// THE SECOND DECLARED SUBSTITUTION, used by ONE lane: `m_inet` re-declared as
-/// `map<varint, int>`.
+/// THE ONE REMAINING DECLARED SUBSTITUTION, used by ONE lane: `m_inet`
+/// re-declared as `map<varint, int>`. It is applied to a COPY of the committed
+/// schema — never to the committed schema itself, which is this fixture's oracle
+/// and is never edited to make a test pass.
 ///
 /// # Why a substitution rather than a fixture column
 /// `varint` is the OTHER family roborev job 449 finding C normalizes (#4079),
@@ -301,20 +250,14 @@ fn schema_with_substitutions(dir: &Path, subs: &[(&str, &str)]) -> PathBuf {
     path
 }
 
-/// The frozen-blocker substitution alone — what every lane needs before it can
-/// read this fixture at all.
-#[cfg(feature = "cli-helpers")]
-fn schema_with_the_frozen_blocker_stepped_past(dir: &Path) -> PathBuf {
-    schema_with_substitutions(dir, &[(FROZEN_DECL_COMMITTED, FROZEN_DECL_SUBSTITUTED)])
-}
-
 /// `(id, column) -> Value` for every fixture row via the PUBLIC
 /// `Database::execute` SELECT surface, or the decode error verbatim.
 ///
 /// The schema is a PARAMETER because `IngestionConfig::schema_paths` is a
-/// per-read input: the active lane below hands it a throwaway copy rather than
-/// setting the process-wide `CQLITE_SCHEMAS_ROOT`, so two tests in this binary
-/// can read the same fixture under different declarations without racing.
+/// per-read input: the subject lane below hands it the COMMITTED schema while
+/// the `varint` lane hands it a throwaway copy, rather than either setting the
+/// process-wide `CQLITE_SCHEMAS_ROOT`, so two tests in this binary can read the
+/// same fixture under different declarations without racing.
 #[cfg(feature = "cli-helpers")]
 async fn select_star(schema: PathBuf) -> Result<Vec<(i32, HashMap<String, Value>)>, String> {
     let config = IngestionConfig {
@@ -429,15 +372,6 @@ fn assert_column_set(rows: &[(i32, HashMap<String, Value>)]) {
     }
 }
 
-/// Which declared blocker (if any) this decode error is, by NAMED column AND
-/// message substring — never by column alone, so a DIFFERENT failure of the same
-/// column is not excused.
-fn declared_blocker(err: &str) -> Option<&'static (&'static str, &'static str, &'static str)> {
-    DECLARED_BLOCKERS
-        .iter()
-        .find(|(col, needle, _)| err.contains(col) && err.contains(needle))
-}
-
 // ════════════════════════════════════════════════════════════════════════════
 // THE SUBJECT — the empty fixed-width key through the public SELECT surface
 // ════════════════════════════════════════════════════════════════════════════
@@ -448,15 +382,21 @@ fn declared_blocker(err: &str) -> Option<&'static (&'static str, &'static str, &
 /// complete in both directions.
 ///
 /// It reads the committed Cassandra-written fixture through the public
-/// `Database::execute` surface with ONE declared substitution —
-/// [`FROZEN_DECL_COMMITTED`] → [`FROZEN_DECL_SUBSTITUTED`], applied to a COPY in
-/// a per-test temp dir — because `m_frozen`'s inline empty key is refused by a
-/// DIFFERENT decoder (#3847/#4071) with a HARD error that fails the whole
-/// `SELECT`. Before that split this file's only fixture lane RETURNED `Ok` on
-/// that blocker, so not one per-column assertion executed and reverting the
-/// decoder change left it green: no active coverage at all. `m_dec` is left as
-/// the real `decimal`, so the admission-gate move is asserted on the committed
-/// declaration.
+/// `Database::execute` surface under the COMMITTED schema, with NO substitution
+/// of any kind: every column — `m_dec` and `m_frozen` alike — is read at the
+/// type the oracle declares, so the admission-gate move is asserted against the
+/// committed declaration and not a convenient one.
+///
+/// That was impossible until #3847 (PR #4017) widened `require_fixed_width`:
+/// before it, `m_frozen`'s inline empty key was a HARD `ColumnDecode` that
+/// failed the whole `SELECT`, and this lane stepped past it with a throwaway
+/// re-declaration of that ONE key type. Earlier still, this file's only fixture
+/// lane RETURNED `Ok` on that blocker, so not one per-column assertion executed
+/// and reverting the decoder change left it green: no active coverage at all.
+/// What this lane claims about `m_frozen` is exactly what it asserts — that the
+/// column is PRESENT in the decoded row (`assert_column_set`, so the committed
+/// read is whole); the inline frozen path's own values are #3847's subject and
+/// have their own oracle there.
 ///
 /// MEASURED post-fix through this same surface:
 /// `m_int = Map([(Empty(Int), 7), (Integer(42), 1)])`,
@@ -472,13 +412,10 @@ fn declared_blocker(err: &str) -> Option<&'static (&'static str, &'static str, &
 #[cfg(feature = "cli-helpers")]
 #[tokio::test]
 async fn an_empty_fixed_width_map_key_reads_as_the_typed_sentinel() {
-    let dir = tempfile::tempdir().expect("a temp dir for the substituted schema");
-    let schema = schema_with_the_frozen_blocker_stepped_past(dir.path());
-    // FAIL-CLOSED: this lane has no excusing arm at all. Any error — including
-    // the declared m_frozen blocker, which the substitution routes away from
-    // this read — is a failure, because an arm that returns `Ok` on a blocker is
-    // exactly the defect this lane replaces.
-    let rows = select_star(schema)
+    // FAIL-CLOSED: this lane has no excusing arm at all, and now no
+    // substitution either. Any error is a failure, because an arm that returns
+    // `Ok` on a blocker is exactly the defect this lane replaces.
+    let rows = select_star(schema_path())
         .await
         .unwrap_or_else(|err| panic!("the committed fixture failed to read: {err}"));
 
@@ -628,13 +565,8 @@ async fn an_empty_fixed_width_map_key_reads_as_the_typed_sentinel() {
 #[tokio::test]
 async fn an_empty_varint_map_key_reads_as_the_typed_sentinel() {
     let dir = tempfile::tempdir().expect("a temp dir for the substituted schema");
-    let schema = schema_with_substitutions(
-        dir.path(),
-        &[
-            (FROZEN_DECL_COMMITTED, FROZEN_DECL_SUBSTITUTED),
-            (INET_DECL_COMMITTED, INET_DECL_AS_VARINT),
-        ],
-    );
+    let schema =
+        schema_with_substitutions(dir.path(), &[(INET_DECL_COMMITTED, INET_DECL_AS_VARINT)]);
     // FAIL-CLOSED: no excusing arm. Any error is a failure.
     let rows = select_star(schema)
         .await
@@ -671,106 +603,6 @@ async fn an_empty_varint_map_key_reads_as_the_typed_sentinel() {
     assert!(
         !contrast.keys().any(|k| k.starts_with("Empty(")),
         "row id=2 m_inet-as-varint: the CONTRAST row has no empty key: {contrast:?}"
-    );
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// The COMMITTED declaration keeps its own lane — ONE claim, and it is the thing
-// that REDS when the out-of-scope blocker lands
-// ════════════════════════════════════════════════════════════════════════════
-
-/// ONE claim: read with the COMMITTED schema, this fixture still fails with
-/// EXACTLY the one declared blocker.
-///
-/// It asserts no per-column value on purpose. A single lane that both excused
-/// the blocker and carried the assertions is precisely the shape roborev job
-/// 448 finding B rejected: its `Ok`-on-the-blocker arm returned before every
-/// assertion, so reverting the decoder change left it green. Splitting it gives
-/// one lane that ALWAYS asserts the subject (above, on a substituted `m_frozen`)
-/// and one that asserts only the blocker's continued existence (here).
-///
-/// When #3847/#4071 lands this test REDS, which is what forces the substitution
-/// to be removed rather than remembered.
-#[cfg(feature = "cli-helpers")]
-#[tokio::test]
-async fn the_committed_declaration_is_still_blocked_by_exactly_the_declared_blocker() {
-    let err = match select_star(schema_path()).await {
-        Err(err) => err,
-        Ok(_) => panic!(
-            "the committed schema now reads WHOLE — the declared blocker (m_frozen, \
-             #3847/#4071) has landed. Re-point the active lane at `schema_path()`, delete \
-             the substitution constants and the helper, and remove the DECLARED_BLOCKERS \
-             entry."
-        ),
-    };
-    let Some((column, needle, owner)) = declared_blocker(&err) else {
-        panic!(
-            "the committed fixture failed to read with an UNDECLARED error — this is not the \
-             one known out-of-scope blocker (m_frozen, #3847/#4071), so it is a regression: \
-             {err}"
-        );
-    };
-    // Naming the matched entry in the failure text of a PASSING assert would be
-    // noise, so state the positive fact instead: the error is that column's, and
-    // it carries that message. Both were already required by the matcher; this
-    // is the readable record of WHICH entry fired.
-    assert!(
-        err.contains(column) && err.contains(needle),
-        "matched blocker {column}/{needle} ({owner}) must be the error's own text: {err}"
-    );
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// The declared-blocker list is itself asserted, so it cannot rot into an excuse
-// ════════════════════════════════════════════════════════════════════════════
-
-/// A blocker entry must NAME a column and a message substring and cite an owner,
-/// and the list must stay SHORT — an entry is an admission that this fixture's
-/// read is incomplete, so the set is pinned by a FLOOR *and* a CEILING (#3544's
-/// case-floor lesson: a green tally over a shrunken table is no evidence).
-///
-/// This needs no fixture and no features, so it executes in every lane that runs
-/// this package.
-#[test]
-fn the_declared_blocker_list_is_specific_and_bounded() {
-    assert_eq!(
-        DECLARED_BLOCKERS.len(),
-        1,
-        "exactly ONE blocker is declared: m_frozen (#3847/#4071, the inline frozen \
-         path). m_dec was the second and slice 2 CLOSED it by moving the arm's \
-         admission gate to the tag table. ADDING an entry is an admission that this \
-         lane covers LESS; REMOVING this one means the read now works and every \
-         assertion in the subject test must be turned on."
-    );
-    for (column, needle, owner) in DECLARED_BLOCKERS {
-        assert!(
-            column.starts_with("m_"),
-            "a blocker must name a fixture COLUMN, got {column:?}"
-        );
-        assert!(
-            needle.len() > 10,
-            "a blocker's message substring must be specific enough that a DIFFERENT \
-             failure of the same column is not excused, got {needle:?}"
-        );
-        assert!(
-            owner.contains('#'),
-            "a blocker must cite the issue that owns it, got {owner:?}"
-        );
-    }
-    // The matcher requires BOTH the column and the message; a column name alone
-    // must never excuse a failure.
-    assert!(
-        declared_blocker("ColumnDecode { column: \"m_frozen\", source: Corruption(\"boom\") }")
-            .is_none(),
-        "a DIFFERENT failure of a declared column must NOT be excused"
-    );
-    assert!(
-        declared_blocker(
-            "ColumnDecode { column: \"m_frozen\", source: Corruption(\"Frozen element \
-             'map 'm_frozen' key 0': need 4 byte(s) for int, got 0\") }"
-        )
-        .is_some(),
-        "the real m_frozen blocker must be recognised"
     );
 }
 
