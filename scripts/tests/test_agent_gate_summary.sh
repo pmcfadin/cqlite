@@ -1246,6 +1246,52 @@ else
 fi
 assert_accelerators "sccache-cap-measured" "$scc_cap"
 
+# 9c-v-c. A LEADING-ZERO HOOK VALUE MUST NOT REACH `$(( ))` (issue #3727 roborev job 457, f1).
+#         The hook parser accepted any all-digits string verbatim, and shell arithmetic reads a
+#         leading-zero literal as OCTAL: measured, `x=08; echo $(( x + 0 ))` aborts with
+#         `value too great for base`, so a hook value like `08` did not render a wrong number —
+#         it KILLED summary generation. `_scc_uint_fits_i64` cannot catch it either, because
+#         that guard is deliberately LEXICAL and `08` is a well-formed digit string to it.
+#         Normalised at the ONE ingress (`_sccache_hook_uint`), not by base-prefixing each
+#         arithmetic site, because the hook is the only source that can produce a non-canonical
+#         digit string — sccache's own JSON numbers cannot carry a leading zero.
+#         The assertion is that the leading-zero pair renders EXACTLY what the canonical pair
+#         above renders: a bare red would also be produced by an unrelated breakage, and `08`
+#         appears nowhere in the expected output, so naming the rendering is what makes this a
+#         detection rather than a membership check.
+scc_lz="$tmp/scc-leading-zero.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_lz" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=032212254720 AGENT_GATE_TEST_SCCACHE_USED_BYTES=0001375141619 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_lz" sccache-cap '32212254720' \
+   && accel_token_is "$scc_lz" sccache-used '1375141619(4%)'; then
+  ok "sccache hooks: leading-zero byte counts normalise to canonical decimal (no octal abort, same rendering as the canonical pair)"
+else
+  bad "sccache hooks: a leading-zero hook value did not render as canonical decimal" \
+      "expected cap 32212254720 and used 1375141619(4%) from 032212254720 / 0001375141619"
+  grep '^accelerators:' "$scc_lz" 2>/dev/null || cat "$scc_lz"
+fi
+assert_accelerators "sccache-leading-zero" "$scc_lz"
+
+# 9c-v-d. AND AN ALL-ZEROS HOOK IS A REAL ZERO, NOT AN EMPTY READING. Stripping the leading run
+#         of zeros from `000` leaves the empty string, and empty is this parser's REFUSAL value
+#         (it models an unreadable reading), so a naive strip would have converted a measured
+#         zero-byte cache into `unmeasured`. The cap is deliberately nonzero here so the subject
+#         is the USED side; a zero cap has its own named `cap-zero` rendering (9c-viii).
+scc_z0="$tmp/scc-zero-used.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_z0" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=32212254720 AGENT_GATE_TEST_SCCACHE_USED_BYTES=000 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_z0" sccache-used '0(0%)'; then
+  ok "sccache hooks: an all-zeros used value stays a MEASURED 0(0%), never the parser's empty/unmeasured refusal"
+else
+  bad "sccache hooks: an all-zeros used hook did not render 0(0%)"
+  grep '^accelerators:' "$scc_z0" 2>/dev/null || cat "$scc_z0"
+fi
+assert_accelerators "sccache-zero-used" "$scc_z0"
+
 # 9c-v-b. THE PERCENTAGE MUST NOT OVERFLOW (issue #3727 roborev round 10, f3). `used * 100`
 #         overflows a signed 64-bit shell integer above ~92 PiB, which silently produced a
 #         NEGATIVE percentage. 4 EiB in both, so the multiplication is over the bound and the

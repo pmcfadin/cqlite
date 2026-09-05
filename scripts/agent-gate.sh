@@ -1377,11 +1377,24 @@ _SCC_USED_WHY=""
 # anything else, INCLUDING empty, clears the outvar and returns 1 — so a fixture word
 # like `unmeasured` or `null` models an unreadable reading rather than a numeric 0.
 _sccache_hook_uint() {
-  local __raw="$1" __out="$2"
+  local __raw="$1" __out="$2" __norm
   case "$__raw" in
     ''|*[!0-9]*) eval "$__out=" ; return 1 ;;
   esac
-  eval "$__out=\$__raw"
+  # LEADING ZEROS ARE STRIPPED HERE, AT THE ONE INGRESS, because every downstream
+  # consumer reads these values with `$(( ))` and shell arithmetic treats a
+  # leading-zero literal as OCTAL: measured, `x=08; echo $(( x + 0 ))` aborts with
+  # `value too great for base`, which would kill summary generation outright rather
+  # than render a wrong number. `_scc_uint_fits_i64` cannot catch it — that guard is
+  # deliberately LEXICAL, so `08` passes it as a well-formed digit string.
+  # Normalised at the PARSER rather than by base-prefixing each arithmetic site: this
+  # is the only source that can produce a non-canonical digit string (sccache's own
+  # JSON numbers cannot carry a leading zero), so fixing it here removes the class
+  # instead of enumerating its consumers.
+  # Pure parameter expansion, no arithmetic — the arithmetic is what breaks.
+  __norm="${__raw#"${__raw%%[!0]*}"}"   # drop the leading run of zeros
+  [ -n "$__norm" ] || __norm=0          # an all-zeros value is a real zero, not empty
+  eval "$__out=\$__norm"
   return 0
 }
 

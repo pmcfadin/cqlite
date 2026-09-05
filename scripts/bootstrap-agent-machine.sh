@@ -92,10 +92,17 @@
 #      NOT-SYSTEM-WIDE / NOT-HONOURED / FAILED / UNMEASURED — and NONE of them is an [ok],
 #      because this section measures ONE context (a non-login PAM session) while #3727's own
 #      root cause lives in another (a LOGIN shell runs /etc/profile.d after pam_env). Even the
-#      best state, every link measured and agreeing, is SCOPED-NON-LOGIN: a [warn] that reports
-#      what was measured and DECLARES that the cap a gate gets is not established. So
-#      `--strict` does not go green on this section until #3946 measures the launch contexts;
-#      that is deliberate — a partial result is UNKNOWN, never an [ok] (#3414's rule).
+#      best state, every link measured and agreeing, is SCOPED-NON-LOGIN: a **[gap]** that reports
+#      what was measured and DECLARES that the cap a gate gets is not established — a partial
+#      result is UNKNOWN, never an [ok] (#3414's rule).
+#      IT IS A [gap] AND NOT A [warn], AND `--strict` THEREFORE STILL GOES GREEN (round 428). A
+#      [warn] counts toward WARNINGS and `--strict` fails on any warning, so emitting this
+#      verdict as one made `verify.run` unable to print `All checks green.` on ANY host, forever,
+#      including a perfectly provisioned one — no action on any box clears a limit of what this
+#      script MEASURES, and a check that always fails gets waived, which is strictly worse than
+#      the false [ok] it replaced. So a healthy box reaches green WITH this [gap] line printed
+#      beside it: green means nothing on THIS box needs attention, never that every property was
+#      established. Closing the gap itself is #3946.
 #      NOT-HONOURED reports BOTH byte counts and prints NO remedy: the advice layer (which server
 #      to stop, in which context, in which direction) was REMOVED by lead ruling req-3727-w4 and is
 #      the follow-up issue's subject. The value->bytes
@@ -4633,8 +4640,11 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
     # LOGIN shell can see a different value from a non-login PAM session
     # (/etc/profile.d/20-agent-ami.sh sources ~/.agent-ami/worker-env.sh AFTER pam_env applies
     # /etc/environment — measured on box3, and it is #3727's own root cause). This section does
-    # not measure that, so the best state it can reach is SCOPED-NON-LOGIN: a [warn] carrying
-    # every measured fact AND the statement that the cap a gate gets is not established. It was
+    # not measure that, so the best state it can reach is SCOPED-NON-LOGIN: a [gap] carrying
+    # every measured fact AND the statement that the cap a gate gets is not established. A [gap]
+    # is as loud as a [warn] and is never a success token, but it counts toward GAPS rather than
+    # WARNINGS, so `--strict` still goes green on a healthy box (round 428) — see the section
+    # header for why an always-failing preflight is worse than the false [ok] it replaced. It was
     # an [ok] VERIFIED for one commit, which was a false certification of this section's own
     # subject (roborev round 426) — the residual is now in the TOKEN and the verdict text, not
     # only in a scope note a grep for the verdict never sees.
