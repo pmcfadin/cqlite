@@ -763,9 +763,11 @@ fn wrong_width_direct_map_key_is_tolerated_today_known_gap_3778() {
 // Zero-length and tolerated-class elements on the dropped path.
 // ---------------------------------------------------------------------------
 
-/// A dropped UDT field whose value is ZERO-length is filtered silently. #3811's
-/// composed rule refuses a zero-length `int` on the live path (`#3847` records
-/// that this is narrower than Cassandra), but the dropped path never asks.
+/// A dropped UDT field whose value is ZERO-length is filtered silently, and the
+/// dropped path never asks about widths at all. (Post-#3847 the live path no
+/// longer refuses a zero-length `int` either: #3811's composed rule now accepts
+/// Cassandra's `{4, 0}`, so this case's silence is no longer the only reason a
+/// zero-length field survives.)
 #[test]
 fn a_zero_length_shadowed_udt_field_still_filters_silently() {
     let (value, filtered) = decode_udt(&[cell(&field_path(0), &[])], Some(shadow_everything()))
@@ -788,23 +790,23 @@ fn a_zero_length_shadowed_set_member_still_filters_silently() {
     );
 }
 
-/// A dropped LIST element that is ZERO-LENGTH filters silently ONLY when the
-/// cell carries `HAS_EMPTY_VALUE`; an explicit `value_len = 0` is refused on
-/// both paths (issue #4034).
+/// A dropped LIST element that is ZERO-LENGTH filters silently under BOTH
+/// encodings of "empty" — post-#3847 (issue #4034 pinned the pre-#3847 split).
 ///
-/// The two are DIFFERENT encodings of "empty" and the flag is what decides,
-/// because `HAS_EMPTY_VALUE` makes `parse_complex_cell_value` skip its eager
-/// value decode entirely (`value = None`), so nothing looks at the bytes and
-/// the `continue` is reached — while an explicit zero length still reaches
-/// #3811's composed rule, whose accepted set for `int` is exactly `{4}`
-/// (`#3847` records that Cassandra's is `{4, 0}`, i.e. the LIVE-path refusal
-/// here is narrower than Cassandra's — that is a separate, pre-existing gap and
-/// not this module's subject).
+/// The two remain DIFFERENT encodings and they still reach the answer by
+/// different routes, which is why both are asserted rather than collapsed:
+/// `HAS_EMPTY_VALUE` makes `parse_complex_cell_value` skip its eager value
+/// decode entirely (`value = None`), so nothing looks at the bytes; an explicit
+/// zero length still reaches #3811's composed rule, whose accepted set for
+/// `int` #3847 widened from `{4}` to `{4, 0}` — Cassandra's own set, per
+/// `deserialize()` at the pinned `cassandra-5.0.8` tag.
 ///
-/// So the LIST counterpart of
-/// [`a_zero_length_shadowed_udt_field_still_filters_silently`] holds for one
-/// framing and not the other, which is worth pinning precisely rather than
-/// forcing into the other branches' shape.
+/// #4034 recorded that narrower live-path refusal as "a separate, pre-existing
+/// gap and not this module's subject", naming #3847 as its owner. #3847 has now
+/// closed it, so the expectation flips here rather than the case being deleted:
+/// the LIST counterpart of
+/// [`a_zero_length_shadowed_udt_field_still_filters_silently`] now holds for
+/// BOTH framings.
 #[test]
 fn a_zero_length_shadowed_list_element_filters_only_under_has_empty_value() {
     // (a) HAS_EMPTY_VALUE: no value bytes exist, so the drop is silent.
@@ -821,28 +823,27 @@ fn a_zero_length_shadowed_list_element_filters_only_under_has_empty_value() {
         "the element is filtered and counted, and no error escapes"
     );
 
-    // (b) An EXPLICIT `value_len = 0` for a declared `int` is refused, dropped
-    // path included — the same divergence as the wrong-width case above, for
-    // the same reason.
+    // (b) POST-#3847: an EXPLICIT `value_len = 0` for a declared `int` is now
+    // ACCEPTED and decodes to `Value::Null`, on the live path and the dropped
+    // path alike. This case previously asserted the refusal and instructed, in
+    // its own panic message, that the test and the module header be updated
+    // together if it ever changed — #3847 changed it, so both are updated here.
     let explicit_zero = list_cell(&[]);
-    assert!(
-        decode_list(std::slice::from_ref(&explicit_zero), None).is_err(),
-        "live-path control: an explicitly zero-length `int` element IS refused"
+    assert_eq!(
+        decode_list(std::slice::from_ref(&explicit_zero), None)
+            .expect("post-#3847 the live path ACCEPTS a 0-byte `int` element"),
+        (Value::List(vec![Value::Null]), 0),
+        "live path: an explicitly zero-length `int` element decodes to null, not a refusal"
     );
-    match decode_list(
-        std::slice::from_ref(&explicit_zero),
-        Some(shadow_everything()),
-    ) {
-        Err(Error::Corruption(msg)) => assert!(
-            msg.contains("need 4 byte(s) for int, got 0"),
-            "the shadowed zero-length element must still be refused: {msg}"
-        ),
-        other => panic!(
-            "an explicitly zero-length `int` list element is refused on the DROPPED \
-             path too today. If this changed, update this test and the module header \
-             together. Got {other:?}"
-        ),
-    }
+    assert_eq!(
+        decode_list(
+            std::slice::from_ref(&explicit_zero),
+            Some(shadow_everything()),
+        )
+        .expect("the shadowed 0-byte element must not fail the read either"),
+        (Value::List(vec![]), 1),
+        "dropped path: the element is filtered and counted, and no error escapes"
+    );
 }
 
 /// A dropped SET member whose path fails for a NON-width reason (invalid UTF-8
