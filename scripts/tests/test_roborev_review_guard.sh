@@ -9109,6 +9109,90 @@ else
 fi
 reset_stub
 
+# CASE (part4050): a library that SOURCES CLEANLY but is INCOMPLETE must not be used
+# (roborev job 129, MEASURED — and the consequence is a false GREEN, not a refusal).
+#
+# THE MIRROR OF late4050, AND THE CASE BOTH IT AND cor4050 MISS. Those two are about a
+# source that RETURNS NON-ZERO; this one returns ZERO. A library holding the entry point
+# and not its helpers — a stub, or a hand-edit that dropped one — loads with rc 0, so
+# `_rfc_lib_loaded` is 1 and a check on `roborev_findings_count` ALONE passes. The
+# recogniser then returns 1 emitting an unanchored `command not found`, the wrapper's
+# audited `:-0` folds that unmeasured answer to 0 markers, and 0 markers makes `findings:`
+# read NONE — which since #3564 is the PERMISSIVE value for the terminal verdict. So a
+# findings-bearing review reaches PASS. Measured on the real library's own tail: rc 0, only
+# roborev_findings_count defined, rc 1 and empty output from the call.
+work=$(make_fixture case_part4050 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+# The library's REAL TAIL from `roborev_findings_count`'s definition onward, taken FROM THE
+# REPO (late4050's lesson: the scratch copy is mutated by earlier cases). Derived from the
+# definition line rather than a hard-coded offset, so moving the function does not silently
+# turn this into a different fixture.
+mkdir -p "$_fl_dir/lib"
+_part_src="$SCRIPT_DIR/../flow/lib/roborev-findings-count.sh"
+_part_start=$(grep -n '^roborev_findings_count()' "$_part_src" | head -1 | cut -d: -f1)
+if [ -n "$_part_start" ]; then
+  sed -n "${_part_start},\$p" "$_part_src" > "$_fl_dir/lib/roborev-findings-count.sh.part"
+  mv "$_fl_dir/lib/roborev-findings-count.sh.part" "$_fl_dir/lib/roborev-findings-count.sh"
+fi
+# AFFIRM THE FIXTURE IS THIS CASE'S STATE, in a SUBSHELL, in BOTH directions: sourcing must
+# SUCCEED, the entry point must be DEFINED, and a helper must be ABSENT. A fixture that
+# merely fails to source would silently re-run cor4050.
+_part_src_ok=0
+_part_entry=0
+_part_helper_absent=0
+if [ -n "$_part_start" ]; then
+  ( . "$_fl_dir/lib/roborev-findings-count.sh" ) >/dev/null 2>&1 && _part_src_ok=1
+  _part_p1=$( ( . "$_fl_dir/lib/roborev-findings-count.sh" >/dev/null 2>&1; type -t roborev_findings_count ) 2>/dev/null )
+  [ "$_part_p1" = function ] && _part_entry=1
+  _part_p2=$( ( . "$_fl_dir/lib/roborev-findings-count.sh" >/dev/null 2>&1; type -t roborev_findings_block ) 2>/dev/null )
+  [ "$_part_p2" != function ] && _part_helper_absent=1
+fi
+if [ "$_part_src_ok" -eq 1 ] && [ "$_part_entry" -eq 1 ] && [ "$_part_helper_absent" -eq 1 ]; then
+  ok 'case (part4050) fixture: the library SOURCES CLEANLY, defines roborev_findings_count, and is MISSING roborev_findings_block — the state a clean-load flag and an entry-point check both call healthy'
+  run_wrapper --wrapper "$_fl_dir/roborev-review.sh" "$work"
+  assert_verdict 'case (part4050) an INCOMPLETE shared recogniser FAILs the wrapper instead of folding to a permissive findings: NONE' FAIL 1
+  # MEMBERSHIP IS NOT DETECTION: a bare red is produced identically by any other rule in a
+  # suite this size, so the run must NAME the function it found missing.
+  assert_says 'case (part4050) the diagnostic NAMES the missing function, not merely the library'     'roborev_findings_block'
+  assert_lacks 'case (part4050) it never reaches PASS with an incomplete recogniser' '^RESULT: PASS'
+  assert_lacks 'case (part4050) and it never reports the findings count as NONE off an unmeasurable recogniser' '^findings: NONE'
+else
+  bad "case (part4050) fixture: not in the expected state (start-line='$_part_start' sources=$_part_src_ok entry-defined=$_part_entry helper-absent=$_part_helper_absent), so the clean-but-incomplete path was never exercised"
+fi
+reset_stub
+
+# STRUCTURAL (part4050): THE DECLARED REQUIRED SET MUST EQUAL THE LIBRARY'S OWN DEFINITIONS.
+# The shipped check is a deliberately dumb literal list in each consumer (#3893: clever
+# machinery in these files has produced a finding per round). What keeps the two lists honest
+# is DERIVATION HERE: every top-level function the library defines must appear in each
+# consumer's required set, so adding a fourth helper reds this case instead of silently
+# leaving a partial load undetectable.
+_ps_lib="$SCRIPT_DIR/../flow/lib/roborev-findings-count.sh"
+if [ -r "$_ps_lib" ]; then
+  _ps_defined=$(grep -oE '^roborev_findings_[a-z_]+\(\)' "$_ps_lib" | sed 's/()$//' | sort -u)
+  if [ -z "$_ps_defined" ]; then
+    bad "structural (part4050): no top-level roborev_findings_* definitions found in $_ps_lib, so the required-set agreement could not be checked"
+  else
+    for _ps_consumer in "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$SCRIPT_DIR/../flow/premerge-review-binding.sh"; do
+      if [ ! -r "$_ps_consumer" ]; then
+        bad "structural (part4050): $_ps_consumer is unreadable, so the required-set agreement could not be checked"
+        continue
+      fi
+      _ps_miss=""
+      for _ps_fn in $_ps_defined; do
+        grep -q "$_ps_fn" "$_ps_consumer" || _ps_miss="$_ps_miss $_ps_fn"
+      done
+      if [ -z "$_ps_miss" ]; then
+        ok "structural (part4050): $(basename "$_ps_consumer") names every function the shared library defines, so a partial load of any of them is detectable"
+      else
+        bad "structural (part4050): $(basename "$_ps_consumer") does not name$_ps_miss — a library missing that function would load 'cleanly' and go undetected"
+      fi
+    done
+  fi
+else
+  bad "structural (part4050): $_ps_lib is unreadable, so the required-set agreement could not be checked"
+fi
+
 # ===========================================================================
 # STRUCTURAL (cor4050): NEITHER CONSUMER MAY SOURCE THE SHARED LIBRARY BARE.
 # The behavioural case above covers the wrapper. The merge-point consumer's own

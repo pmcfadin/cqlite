@@ -301,10 +301,21 @@ load_findings_count_lib() {
     FINDINGS_COUNT_LIB_CAUSE="$(sane "$ROBOREV_FINDINGS_COUNT_LIB") could not be SOURCED (it is readable but did not load — most likely a syntax error from a truncated or corrupt file), so the count a findings deferral must match could not be derived."
     return 1
   fi
-  if [ "$(type -t roborev_findings_count)" != function ]; then
-    FINDINGS_COUNT_LIB_CAUSE="$(sane "$ROBOREV_FINDINGS_COUNT_LIB") did not define roborev_findings_count, so the findings count cannot be derived. The file is truncated or corrupt."
-    return 1
-  fi
+  # THE CHECK IS OVER THE WHOLE SET, NOT THE ENTRY POINT (roborev job 129, MEASURED).
+  # A library defining roborev_findings_count and NOT its two helpers sources with rc 0, so
+  # the two refusals above do not fire and a check on the entry point alone PASSES. Calling
+  # it then returns non-zero with an unanchored `command not found`, and at THIS call site
+  # derive_findings_count's failure is reported as UNMEASURED — fail-closed here, unlike the
+  # review-time consumer where the same partial load folds onto a permissive `findings: NONE`.
+  # Both consumers are corrected anyway: the two ends must agree byte for byte about what a
+  # usable recogniser IS, or the argument that they run the SAME code over IDENTICAL bytes
+  # stops holding, and that argument is this issue's whole soundness case.
+  for _prb_fn in roborev_findings_block roborev_findings_marker_count roborev_findings_count; do
+    if [ "$(type -t "$_prb_fn" 2>/dev/null)" != function ]; then
+      FINDINGS_COUNT_LIB_CAUSE="$(sane "$ROBOREV_FINDINGS_COUNT_LIB") loaded but did not define $_prb_fn, so the findings count cannot be derived. The file is truncated, corrupt, or a partial stub."
+      return 1
+    fi
+  done
   return 0
 }
 

@@ -2290,6 +2290,71 @@ if run_binding 5 "4050(e): an AUTHORIZED deferral over an uncountable record is 
   esac
 fi
 
+# --- (l) a CLEAN-LOADING but INCOMPLETE recogniser is UNMEASURED and NAMES the gap
+# roborev job 129's other half. The review-time consumer folded this state onto a permissive
+# `findings: NONE` (measured: RESULT PASS, exit 0 — a false green); HERE the consequence was
+# always a refusal, because derive_findings_count's failure routes to UNMEASURED. Both ends
+# are fixed anyway, and the reason is this issue's soundness case: the two must agree byte
+# for byte about what a usable recogniser IS, or "the same code over identical bytes" stops
+# holding. What this case adds over (f) is that the CAUSE must name the MISSING FUNCTION —
+# "the library did not load" sends an operator to a file that loads perfectly well.
+FLOW_PARTLIB="$T/scripts/flow-partlib"
+mkdir -p "$FLOW_PARTLIB/lib"
+partlib_ready=1
+for f in premerge-review-binding.sh premerge-pr-scan.py roborev-job-facts.py \
+  roborev-waiver-scan.py roborev-review-oracles.sh base-staleness.sh; do
+  cp "$FLOW/$f" "$FLOW_PARTLIB/$f" || partlib_ready=0
+done
+chmod +x "$FLOW_PARTLIB"/*.sh "$FLOW_PARTLIB"/*.py 2>/dev/null
+# The REAL library's tail from the entry point onward: sources cleanly, entry point defined,
+# helpers absent. Start line DERIVED, so moving the function cannot silently restage this.
+partlib_start=$(grep -n '^roborev_findings_count()' "$FLOW/lib/roborev-findings-count.sh" | head -1 | cut -d: -f1)
+if [ -n "$partlib_start" ]; then
+  sed -n "${partlib_start},\$p" "$FLOW/lib/roborev-findings-count.sh" > "$FLOW_PARTLIB/lib/roborev-findings-count.sh"
+fi
+# AFFIRM ALL THREE HALVES, in a subshell: sources OK, entry point present, helper absent.
+partlib_src=0; partlib_entry=0; partlib_helper_absent=0
+if [ -s "$FLOW_PARTLIB/lib/roborev-findings-count.sh" ]; then
+  ( . "$FLOW_PARTLIB/lib/roborev-findings-count.sh" ) >/dev/null 2>&1 && partlib_src=1
+  [ "$( ( . "$FLOW_PARTLIB/lib/roborev-findings-count.sh" >/dev/null 2>&1; type -t roborev_findings_count ) 2>/dev/null )" = function ] && partlib_entry=1
+  [ "$( ( . "$FLOW_PARTLIB/lib/roborev-findings-count.sh" >/dev/null 2>&1; type -t roborev_findings_block ) 2>/dev/null )" != function ] && partlib_helper_absent=1
+fi
+if [ "$partlib_ready" -ne 1 ]; then
+  bad "recogniser-partial fixture: could not stage the substitute flow directory"
+elif [ "$partlib_src" -eq 1 ] && [ "$partlib_entry" -eq 1 ] && [ "$partlib_helper_absent" -eq 1 ]; then
+  ok "recogniser-partial fixture: the library SOURCES CLEANLY, defines the entry point, and is MISSING roborev_findings_block"
+  pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 646)" pmcfadin \
+    "$(defer_marker 3602,3613 2 "$MB_MAIN" "$HEAD_AFTER" 646 'both filed and lead-deferred')"
+  roborev_job 646 "$MB_MAIN" "$HEAD_AFTER" F done 2026-09-02T10:00:00Z "$FC_REVIEW2"
+  PL_OUT=$(cd "$WORK" && PATH="$BIN:$PATH" bash "$FLOW_PARTLIB/premerge-review-binding.sh" \
+    review-binding 1 o/r "$HEAD_AFTER" 2>&1)
+  PL_RC=$?
+  if [ "$PL_RC" -ne 5 ]; then
+    bad "4050(l): an INCOMPLETE shared recogniser did not refuse UNMEASURED (exit $PL_RC, wanted 5): $PL_OUT"
+  else
+    ok "4050(l): an INCOMPLETE shared recogniser is UNMEASURED (exit 5)"
+    # THE ASSERTION MUST BE ANCHORED, AND MEASURING THAT COST A ROUND. A bare substring
+    # test for the function name PASSED WITH THE FIX REVERTED: the unfixed path calls the
+    # missing helper, and bash's OWN unanchored `roborev_findings_block: command not found`
+    # lands in this captured output — so the assertion was satisfied by the DEFECT'S NOISE
+    # rather than by the leg's diagnosis. That is #3400's lesson at a test site: key on the
+    # narrowest thing that makes it OURS. `say` prefixes every line with `PREMERGE:
+    # REVIEW-BINDING`, which bash's stderr can never produce, so the anchored form
+    # discriminates the two states where the substring cannot.
+    if grep -qE '^PREMERGE:.*roborev_findings_block' <<<"$PL_OUT"; then
+      ok "4050(l): the leg's OWN anchored cause NAMES the missing function, so the operator is not sent to a library that loads fine"
+    else
+      bad "4050(l): no anchored PREMERGE: line named the missing function (got: $PL_OUT)"
+    fi
+    case "$PL_OUT" in
+      *BOUND*) bad "4050(l): a run with an incomplete recogniser still BOUND (got: $PL_OUT)" ;;
+      *) ok "4050(l): no bind is possible with an incomplete recogniser" ;;
+    esac
+  fi
+else
+  bad "recogniser-partial fixture: not in the expected state (start='$partlib_start' src=$partlib_src entry=$partlib_entry helper-absent=$partlib_helper_absent)"
+fi
+
 # --- (f) an ABSENT shared recogniser is UNMEASURED, never a bind and never a skip
 # The library is resolved from this script's OWN `lib/` directory with no override, so the
 # case SUBSTITUTES THE ARTIFACT in a scratch flow copy rather than pointing a variable
@@ -2782,7 +2847,7 @@ fi
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.
-CASE_FLOOR=187
+CASE_FLOOR=191
 TOTAL=$((PASSED + FAILED))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"

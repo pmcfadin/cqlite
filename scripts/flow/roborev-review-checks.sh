@@ -68,10 +68,37 @@ ROBOREV_FINDINGS_COUNT_LIB="$_rfc_dir/lib/roborev-findings-count.sh"
 # in its TAIL leaves the functions already defined (roborev job 124, measured), which is
 # precisely why that `unset -f` exists. Read the two halves together; neither is complete
 # on its own, and without the unset this sentence would be false.
+# THE REQUIRED SET, DECLARED ONCE AND USED FOR BOTH THE CHECK AND THE UNSET. Two lists
+# would be two places to forget a fourth helper; the agreement between THIS list and the
+# library's own definitions is pinned structurally in test_roborev_review_guard.sh rather
+# than restated here.
+ROBOREV_FINDINGS_COUNT_FUNCS=(roborev_findings_block roborev_findings_marker_count roborev_findings_count)
 _rfc_lib_loaded=0
+_rfc_missing_fn=""
 if { [ -f "$ROBOREV_FINDINGS_COUNT_LIB" ] && [ -r "$ROBOREV_FINDINGS_COUNT_LIB" ]; }; then
   # shellcheck source=lib/roborev-findings-count.sh
   if . "$ROBOREV_FINDINGS_COUNT_LIB"; then _rfc_lib_loaded=1; fi
+fi
+# A CLEAN LOAD IS NOT A COMPLETE ONE (roborev job 129, MEASURED). The late-fail case above
+# is the one where sourcing returns NON-zero with definitions already in effect; this is its
+# mirror and the comment below used to reason only about the first. A library that defines
+# the ENTRY POINT and not its helpers — a stub, or a hand-edit that removed one — sources
+# with rc 0, so `_rfc_lib_loaded` is 1 and a check on `roborev_findings_count` ALONE passes.
+# Measured on the real library's tail: rc 0, only roborev_findings_count defined, and calling
+# it returns 1 while emitting an UNANCHORED `command not found`. The consumer at the
+# `block_marker_count` site then folds that unmeasured answer onto 0 through its audited
+# `:-0`, 0 markers makes `findings:` read NONE, and since #3564 NONE is the PERMISSIVE value
+# for the terminal verdict — so a findings-bearing review would have reached PASS. That is a
+# false green in a merge gate, which is why the completeness check is over the WHOLE set and
+# not over the function this file happens to call.
+if [ "$_rfc_lib_loaded" -eq 1 ]; then
+  for _rfc_fn in "${ROBOREV_FINDINGS_COUNT_FUNCS[@]}"; do
+    if [ "$(type -t "$_rfc_fn" 2>/dev/null)" != function ]; then
+      _rfc_lib_loaded=0
+      _rfc_missing_fn="$_rfc_fn"
+      break
+    fi
+  done
 fi
 if [ "$_rfc_lib_loaded" -eq 1 ]; then
   :
@@ -93,8 +120,12 @@ else
   # while one event populates both, and evaporates in the first mode where it does not.
   # Undefining is also robust to what this file may grow later — trailing state, a fourth
   # helper — which a flag consulted at one call site is not.
-  unset -f roborev_findings_block roborev_findings_marker_count roborev_findings_count 2>/dev/null || true
-  printf '%s\n' "roborev-review-checks.sh: cannot read or source $ROBOREV_FINDINGS_COUNT_LIB (the shared findings-count recogniser, #4050 — absent, non-regular, unreadable, or corrupt) — the findings count CANNOT be measured; the wrapper's required-function check will fail closed on roborev_findings_count" >&2
+  unset -f "${ROBOREV_FINDINGS_COUNT_FUNCS[@]}" 2>/dev/null || true
+  if [ -n "$_rfc_missing_fn" ]; then
+    printf '%s\n' "roborev-review-checks.sh: $ROBOREV_FINDINGS_COUNT_LIB (the shared findings-count recogniser, #4050) loaded but is INCOMPLETE — it does not define $_rfc_missing_fn (roborev job 129) — the findings count CANNOT be measured; every function of the set has been undefined so the wrapper's required-function check will fail closed on roborev_findings_count" >&2
+  else
+    printf '%s\n' "roborev-review-checks.sh: cannot read or source $ROBOREV_FINDINGS_COUNT_LIB (the shared findings-count recogniser, #4050 — absent, non-regular, unreadable, or corrupt) — the findings count CANNOT be measured; the wrapper's required-function check will fail closed on roborev_findings_count" >&2
+  fi
 fi
 
 roborev_check_review_completed() {
