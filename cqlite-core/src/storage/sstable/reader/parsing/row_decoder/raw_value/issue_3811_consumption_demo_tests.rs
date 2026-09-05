@@ -1208,6 +1208,65 @@ fn cell_frozen_set_with_bytes_stranded_inside_the_blob_is_refused() {
     );
 }
 
+/// **DISCRIMINATING for the CELL-LEVEL wiring of #3847's never-null KEY rule.**
+///
+/// roborev job 171 (Low): the rule was guarded at FOUR call sites — the two RAW
+/// decoders and the two VUInt-prefixed CELL-LEVEL ones — but only the raw pair was
+/// covered, so a regression at `parse_frozen_map_value` / `parse_frozen_set_value`
+/// would have passed the suite. These two cases close that, and they belong here
+/// because this file already owns the cell-level (`vuint_cell`) route.
+///
+/// An empty fixed-width MAP KEY is preserved OPAQUELY, never as `Value::Null`:
+/// Cassandra has no way to express a null map key.
+#[test]
+fn cell_frozen_map_empty_fixed_width_key_is_opaque_never_null() {
+    let mut body = 1i32.to_be_bytes().to_vec();
+    body.extend(component(&[])); // the KEY: zero-length `int`
+    body.extend(component(&7i32.to_be_bytes()));
+    let (v, _) = parser()
+        .parse_frozen_map_value(
+            &vuint_cell(&body, 0),
+            0,
+            "int",
+            "int",
+            &cell_column("m", "frozen<map<int,int>>"),
+        )
+        .expect("post-#3847 an empty fixed-width key is ADMITTED, not refused");
+    let Value::Map(kv) = &v else {
+        panic!("expected a map, got {v:?}");
+    };
+    assert_ne!(kv[0].0, Value::Null, "a map key must NEVER be null");
+    assert_eq!(
+        kv[0].0,
+        Value::blob(Vec::new()),
+        "the cell-level map path applies the opaque key rule too"
+    );
+}
+
+/// The SET counterpart: a set member is a KEY (Cassandra stores it in the cell
+/// path), so an empty fixed-width member is opaque and never `Value::Null`.
+#[test]
+fn cell_frozen_set_empty_fixed_width_member_is_opaque_never_null() {
+    let body = seq_body(&[&[]]);
+    let (v, _) = parser()
+        .parse_frozen_set_value(
+            &vuint_cell(&body, 0),
+            0,
+            "int",
+            &cell_column("s", "frozen<set<int>>"),
+        )
+        .expect("post-#3847 an empty fixed-width member is ADMITTED, not refused");
+    let Value::Set(xs) = &v else {
+        panic!("expected a set, got {v:?}");
+    };
+    assert_ne!(xs[0], Value::Null, "a set member must NEVER be null");
+    assert_eq!(
+        xs[0],
+        Value::blob(Vec::new()),
+        "the cell-level set path applies the opaque key rule too"
+    );
+}
+
 /// **CONTROL / NON-DISCRIMINATING** — a well-formed frozen `map<text,int>` cell.
 #[test]
 fn cell_frozen_map_exact_decodes_ok() {
