@@ -108,10 +108,12 @@ never idle-waits into a watchdog kill. A queued gate ≠ a hung gate.
 The merge-blocking rules — each one FAILs closed, and the full mechanism for every one of them is in
 `docs/development/gate-ops.md`:
 
-- **Completion and verdict are two assertions.** Probe completion with
-  `grep -qE 'RESULT: (PASS|FAIL)'`; `INCOMPLETE` is a liveness placeholder written at launch, not a
-  verdict. And read a **component's OWN line**, never the terminal token — `PARTIAL` says the *run*
-  was partial, not that your component failed.
+- **Completion and verdict are two assertions.** Probe completion with the terminal-token grammar
+  for the mode you ran — full, `--lite`/`--only`, and `--delta` each have their own, published ONLY
+  in `docs/development/gate-ops.md` (this file deliberately quotes none of them, so it cannot teach
+  a partial set). `INCOMPLETE` is a liveness placeholder written at launch, not a verdict. And read
+  a **component's OWN line**, never the terminal token — `PARTIAL` says the *run* was partial, not
+  that your component failed.
 - **A gate script behind `origin/main` cannot certify.** Rebase before the gate of record.
 - **A worktree that mutates mid-run cannot certify.** Verify `tree-integrity:` and `dirty: no`
   alongside `RESULT:`, and verify the `run-id:` matches the run you launched — a foreign `run-id`
