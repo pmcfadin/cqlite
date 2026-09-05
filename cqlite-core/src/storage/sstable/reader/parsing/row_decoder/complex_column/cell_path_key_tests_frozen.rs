@@ -6,44 +6,26 @@
 //! cannot call it. The rule these cases pin, and the four defects one root cause
 //! produced, are documented in `row_decoder::frozen_map`.
 
-#[cfg(test)]
-mod tests {
-    use super::super::*;
-
-    /// A FROZEN-SPELLED empty fixed-width key gets the SAME opaque answer — the check
-    /// must look THROUGH the wrapper.
-    ///
-    /// roborev job 152 (Medium) on this branch. `frozen<int>` decodes to
-    /// `Value::Frozen(Box::new(Value::Null))`, so a `matches!(decoded, Value::Null)`
-    /// test — which is what the first version of door 2 used — sees a `Frozen` and
-    /// falls through, returning an invalid logical NULL map key. The peeled `probe`
-    /// already exists three lines below for exactly this reason (the `Blob` diagnostic
-    /// learned it in #3612 round 8), and door 2 has to use it too.
-    ///
-    /// `peeled_for_inspection` loops, so NESTING is covered rather than just one layer.
-    #[test]
-    fn an_empty_frozen_spelled_fixed_width_key_is_also_preserved_opaquely() {
-        let p = V5CompressedLegacyParser::new("ks".to_string(), "t".to_string(), 0, 0, None);
-        #[rustfmt::skip]
-        let types = [
-            "frozen<int>", "frozen<bigint>", "frozen<uuid>", "frozen<boolean>",
-            "frozen<frozen<int>>",
-        ];
-        for type_str in types {
-            let mut opaque = false;
-            let decoded = p
-                .parse_cell_path_key_reporting(&[], type_str, "k", &mut opaque)
-                .unwrap_or_else(|e| panic!("{type_str}: Cassandra accepts empty; keep it: {e}"));
-            assert_eq!(
-                decoded,
-                Value::blob(Vec::new()),
-                "{type_str}: a frozen-spelled empty key must be preserved opaquely, \
-                 never returned as a null map key"
-            );
-            assert!(
-                opaque,
-                "{type_str}: opaque_out must be raised through the frozen wrapper"
-            );
-        }
-    }
-}
+// #3805/#4017 CROSS-LANE COLLISION, RULED BY THE LEAD ON PR #4033: this module's
+// only case (`an_empty_frozen_spelled_fixed_width_key_is_also_preserved_opaquely`,
+// asserting `Blob(b"")` + `opaque_out`) and #3805's opposite pin (asserting
+// `Empty(Int)`) were BOTH DELETED. The module is kept as the record, because this
+// is where a reader looking for the frozen-spelled key cases will come.
+//
+// The oracle is Cassandra's GRAMMAR, not its bytes. `CQL3Type.Raw::freeze()` throws
+// "frozen<> is only allowed on collections, tuples, and user-defined types"
+// (cassandra-5.0.8:src/java/org/apache/cassandra/cql3/CQL3Type.java:647-651), and
+// only RawCollection/RawTuple/RawUT override it — so no table can carry
+// `frozen<int>`, no serialization header can spell `FrozenType(Int32Type)`, and no
+// Cassandra-written bytes for this input exist BY CONSTRUCTION. Under #28, where
+// Cassandra has no behaviour CQLite must not invent one, so BOTH answers were
+// inventions and the correct behaviour is REFUSAL.
+//
+// The refusal is its own oracle-driven fix, **#4104** (refuse `frozen<scalar>` at
+// schema-parse and header-parse), deliberately NOT bundled into #4033.
+//
+// WHAT SURVIVES UNTOUCHED: #4017's DOOR-2 fix itself — keying the
+// decode-succeeded-with-`Null` check on the PEELED probe rather than on `decoded`.
+// That is still load-bearing for every family the tag table does NOT admit, which
+// #3805's admission gate never intercepts. Its argument, and the four defects one
+// root cause produced, are documented in `row_decoder::frozen_map`.

@@ -224,33 +224,24 @@ fn the_marshal_spelling_of_an_empty_key_reaches_the_same_tag() {
     }
 }
 
-/// The `frozen<…>` SPELLING of a fixed-width key type must also reach the tag.
-///
-/// `cell_path_key_allowed_widths` PEELS `frozen<…>` before classifying (that peel
-/// is load-bearing — see its doc comment), so the sentinel lookup must peel the
-/// same way or a frozen-spelled key would keep the opaque fallback while the width
-/// table admitted it: a spelling cannot be handled in one helper and assumed
-/// impossible in the other.
-///
-/// # The result is UNWRAPPED, and that is PRE-EXISTING, not a new opinion
-/// This arm is the fallback taken when the decoder REFUSED the slice, so no
-/// decoder produced a `Value::Frozen` wrapper to preserve — and it already
-/// returned a BARE `Blob(b"")` for this spelling before #3805 slice 2. The
-/// sentinel keeps that shape exactly. Introducing a `Frozen(…)` wrapper here
-/// would be a presentation change with no oracle behind it (`frozen<int>` is not
-/// a legal CQL map-key type, so no Cassandra-written bytes can settle it), and it
-/// is deliberately NOT bundled into this fix.
-#[test]
-fn a_frozen_spelled_fixed_width_empty_key_reaches_the_tag() {
-    let decoded = decode("map<frozen<int>,int>", b"", &7i32.to_be_bytes())
-        .expect("a frozen-spelled empty int key is admitted by the same width table");
-    assert_eq!(
-        decoded,
-        Value::Map(vec![(Value::Empty(EmptyValueType::Int), Value::Integer(7))]),
-        "the frozen spelling reaches the same tag, in this arm's pre-existing \
-         UNWRAPPED shape"
-    );
-}
+// #3805/#4017 CROSS-LANE COLLISION, RULED BY THE LEAD ON PR #4033: the pin that
+// stood here (`a_frozen_spelled_fixed_width_empty_key_reaches_the_tag`, asserting
+// `Empty(Int)`) and #4017's opposite pin (`an_empty_frozen_spelled_fixed_width_key_
+// is_also_preserved_opaquely`, asserting `Blob(b"")`) were BOTH DELETED.
+//
+// The oracle this file's own prose said did not exist DOES, one level up — it is
+// Cassandra's GRAMMAR rather than its bytes. `CQL3Type.Raw::freeze()` throws
+// "frozen<> is only allowed on collections, tuples, and user-defined types"
+// (cassandra-5.0.8:src/java/org/apache/cassandra/cql3/CQL3Type.java:647-651) and
+// only RawCollection/RawTuple/RawUT override it. So no table can carry
+// `frozen<int>`, no serialization header can spell `FrozenType(Int32Type)`, and no
+// Cassandra-written bytes for this input exist BY CONSTRUCTION.
+//
+// Under #28, where Cassandra has no behaviour CQLite must not invent one:
+// `Empty(Int)` and `Blob(b"")` are both inventions. The correct behaviour is
+// REFUSAL, and that is its own oracle-driven fix — **#4104** (refuse
+// `frozen<scalar>` at schema-parse and header-parse) — deliberately NOT bundled
+// here. No frozen-scalar branch was added in either direction.
 
 /// CASSANDRA-INVALID — REFUSED, because that is where the module's committed rule
 /// draws the line, and this is the one place three review rounds disagreed.
