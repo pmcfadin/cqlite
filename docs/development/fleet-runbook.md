@@ -2403,6 +2403,40 @@ orphan nothing".
   is why `claim.sh claim` now *reports* the lane-lock state on its verdict line rather than relying on
   every session having taken it.
 
+  **THE ENFORCEMENT POINT IS A GIT HOOK, AND IT IS THE ONLY ONE (C intent audit, #3436).**
+  Everything above describes `lane-lock.sh acquire`, which is what an agent is *instructed* to
+  run — instructions, not enforcement. The thing that actually stops the #3436 damage is
+  `scripts/git-hooks/pre-commit`: on every commit in a `/data/lanes/lane-<N>` worktree it probes
+  the lock and, if a DIFFERENT LIVE process holds the lane, **refuses the commit** (`exit 1`)
+  naming the occupant. That refusal is the only place a second entrant is stopped by code rather
+  than by an agent reading a paragraph, and doctrine failed to mention it at all until now —
+  every surface presented `acquire` as the mechanism, so a reader reasonably concluded the lock
+  was advisory-only.
+
+  **Check whether the box you are on is actually protected** — the hook is inert until git is
+  told where to look, and only `scripts/bootstrap-agent-machine.sh` step 5e sets that:
+
+  ```bash
+  git config --get core.hooksPath     # want: scripts/git-hooks ; EMPTY = NOT PROTECTED
+  ```
+
+  Four residuals, stated because a guard read as covering more than it does is its own
+  false-clean:
+
+  - **It fires at COMMIT time, not at lane entry.** Two sessions can both write into one
+    worktree; what is prevented is the *commit* that launders a peer's work. When the hook
+    acquires a lane that had no record it says so — `DECLARED GAP 1 RECOGNISED` — because that
+    acquisition cannot retroactively exclude a peer who was already writing during the unlocked
+    window. Acquiring at entry is #4056; lanes that never acquire at all are #4024.
+  - **`git commit --no-verify` bypasses it**, as it bypasses every hook. Nothing in git can
+    prevent that.
+  - **An `UNKNOWN-*` holder WARNS and allows.** Refusing on an unmeasurable holder would brick a
+    lane whose holder merely cannot be read, which is strictly worse than the hole.
+  - **Its activation is not covered by a test** — the hook itself is pinned by
+    `scripts/tests/test_lane_lock_precommit_hook.sh` (which installs into `.git/hooks/`
+    directly), but nothing asserts that bootstrap step 5e sets `core.hooksPath`. Verify it by
+    reading the config, per the command above.
+
 
 - **`flow-lead`** orchestrates (opt-in: `claude --agent flow-lead`; plain sessions are default Claude) — it spawns
   and sequences the specialists + roborev + the gate, and writes no production code. Verbs:
