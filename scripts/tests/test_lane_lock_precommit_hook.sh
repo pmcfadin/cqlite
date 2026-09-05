@@ -40,7 +40,33 @@ LANE="$LANEROOT/lane-99$$"; LANE="${LANE:0:24}"
 rm -rf "$LANE"; mkdir -p "$LANE"
 ISSUE="${LANE##*/lane-}"
 ISSUE2=$(( ${ISSUE} + 1 ))   # a DISTINCT issue for the second-layout fixture (TEST 7)
-cleanup() { for p in $SLEEPERS; do kill "$p" 2>/dev/null || true; done; rm -rf "$T" "$LANE"; rm -f "$LANEROOT/.lane-locks/lane-$ISSUE".* "$LANEROOT/.lane-locks/lane-$ISSUE2".*; }
+
+# CLEAN THE DIR-GUARD MUTEX TOO, NOT JUST THE PER-ISSUE RECORD. `acquire` holds TWO locks: the
+# per-issue record (`lane-<issue>.*`) and a directory mutex named from the lane DIRECTORY
+# (`dir_mutex()`, lane-lock.sh:1045). Removing only the former leaks one `dir-*.flock` into the
+# SHARED lock root per run — measured on this box: 28 strays from this suite's own fixture lane
+# plus one more per TEST 7 run, for directories that no longer exist. They accumulate without
+# bound and `same_dir_other_issue()` walks the whole lock root, so the leak taxes every acquire.
+#
+# DERIVED EXACTLY, NEVER GLOBBED. The name is computed the way dir_mutex() computes it — the
+# readable `/`->`_` form AND the >255-byte cksum fallback — because a loose glob like
+# `dir-*t-hook*` could delete a CONCURRENTLY RUNNING copy of this suite's mutex (two gates do
+# run this file at once), and over-deletion here is a real collision, not a tidy-up.
+dirmutex_rm() {
+  local canon="$1" key sum tail_
+  [ -n "$canon" ] || return 0
+  key="$(printf '%s' "$canon" | tr '/' '_')"
+  rm -f "$LANEROOT/.lane-locks/dir-${key}.flock"
+  sum="$(printf '%s' "$canon" | cksum | awk '{print $1}')"
+  tail_="$(printf '%s' "$key" | tail -c 180)"
+  rm -f "$LANEROOT/.lane-locks/dir-x${sum}-${tail_}.flock"
+}
+cleanup() {
+  for p in $SLEEPERS; do kill "$p" 2>/dev/null || true; done
+  rm -f "$LANEROOT/.lane-locks/lane-$ISSUE".* "$LANEROOT/.lane-locks/lane-$ISSUE2".*
+  dirmutex_rm "$LANE"; dirmutex_rm "${WT2:-}"; dirmutex_rm "${WT3:-}"
+  rm -rf "$T" "$LANE"
+}
 trap cleanup EXIT
 
 # A git repo AT the lane path, carrying the scripts the hook needs.
