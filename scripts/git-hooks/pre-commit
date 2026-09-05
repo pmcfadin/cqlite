@@ -99,6 +99,36 @@ case "$liveness" in
     }
     lease="$(printf '%s' "$out" | tr ' ' '\n' | sed -n 's/^lease=//p' | head -1)"
     [ -n "$lease" ] && echo "lane-lock: acquired lane $issue for this session (lease $lease)" >&2
+
+    # DECLARED GAP, NOT A REFUSAL (#3436, roborev job 450 finding 1). Acquiring HERE makes this
+    # hook the PRIMARY acquisition point, and a commit is far too late to be one: the lane was
+    # UNLOCKED for every moment of this session up to now, so nothing recorded whether a PEER
+    # session was already writing in this worktree during that window. This acquisition makes us
+    # the owner from HERE ON; it cannot retroactively exclude that peer, and the staged tree it
+    # is about to commit may already carry that peer's work — which is #3436 itself.
+    #
+    # ONLY ON NO-RECORD. A DEAD-* holder DID record itself, so that lane was locked and its
+    # previous owner is known and provably dead — there was no unlocked window, and printing
+    # this there would be an affirmatively false claim.
+    #
+    # WHY DECLARED AND NOT FATAL: the refusing form was measured and REJECTED at
+    # lane-lock.sh:648 — "refuse if the resolved ancestor has an in-lane child outside my own
+    # chain" fires on an ORDINARY single session, and a refusing acquire BRICKS the lane (FIX
+    # 5/14), which is strictly worse than the hole; the ancestry identity cannot express
+    # siblings, so no refinement of that walk closes it. What IS a defect is staying SILENT: a
+    # lane that omits coverage silently is indistinguishable from one that covers it, so the gap
+    # is stated affirmatively at the moment it is taken on, in the `N RECOGNISED` form this repo
+    # uses for a census that declares its own non-exhaustiveness.
+    if [ "$liveness" = "NO-RECORD" ]; then
+      echo "lane-lock: DECLARED GAP 1 RECOGNISED — this lock was taken at COMMIT time, not at" >&2
+      echo "lane-lock:   lane entry, so an UNLOCKED window preceded it. A peer session already" >&2
+      echo "lane-lock:   writing in this worktree during that window is NOT excluded by this" >&2
+      echo "lane-lock:   acquisition, and may own work in the tree about to be committed." >&2
+      echo "lane-lock:   Close it by acquiring at lane ENTRY — from inside the lane, run" >&2
+      echo "lane-lock:   'bash scripts/flow/lane-lock.sh acquire $issue --lane-dir \"\$PWD\"'" >&2
+      echo "lane-lock:   worker.md and drive-issue Delta 4 already mandate that; this hook is" >&2
+      echo "lane-lock:   the FALLBACK, never the primary acquisition point." >&2
+    fi
     ;;
   SELF)
     : ;;   # ours already; the common path, silent by design

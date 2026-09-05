@@ -100,6 +100,20 @@ else
 $out2"
 fi
 
+# The acquisition is REAL but it is LATE, and that is job 450 finding 1: nothing at commit time
+# can exclude a peer that was already writing during the unlocked window that preceded it. The
+# hook cannot CLOSE that (the refusing form bricks the lane — lane-lock.sh:648), so it must
+# DECLARE it. Assert the CONTENT, not merely that something was printed: a bare "did it warn"
+# passes for any unrelated warning the hook might emit, which is membership, not detection.
+if printf '%s' "$out2" | grep -q 'DECLARED GAP 1 RECOGNISED' &&
+   printf '%s' "$out2" | grep -q 'COMMIT time' &&
+   printf '%s' "$out2" | grep -q 'UNLOCKED window'; then
+  ok "a commit-time acquisition DECLARES the unlocked-window gap it cannot close"
+else
+  bad "a commit-time acquisition did not declare the unlocked window (job 450 finding 1):
+$out2"
+fi
+
 # ---------------------------------------------------------------------------
 echo "TEST 3: CONTROL — a lane already held by THIS session commits normally"
 # ---------------------------------------------------------------------------
@@ -152,6 +166,17 @@ if [ "$rc5" -eq 0 ] && [ "$lv5" = "SELF" ]; then
 else
   bad "after a DEAD holder the lane is '$lv5' (want SELF), commit rc=$rc5
 $out5"
+fi
+
+# CONTROL for the declaration asserted in TEST 2. A DEAD-* holder DID record itself, so that
+# lane WAS locked and its owner is known — there was no unlocked window, and declaring one here
+# would be affirmatively false. This case is what makes the TEST 2 assertion a measurement of
+# the NO-RECORD path rather than of "the hook prints it unconditionally".
+if printf '%s' "$out5" | grep -q 'DECLARED GAP'; then
+  bad "a DEAD-holder reclaim falsely declared an unlocked window (that lane was locked):
+$out5"
+else
+  ok "a DEAD-holder reclaim does NOT declare an unlocked window — that lane was never unlocked"
 fi
 
 # ---------------------------------------------------------------------------
