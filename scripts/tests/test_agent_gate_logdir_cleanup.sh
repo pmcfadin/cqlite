@@ -87,6 +87,17 @@
 #        newline-bearing `$TMPDIR` adds only the 2 pre-existing DECLARED lines (`run-id:`,
 #        `logs:`), and a value carrying the probe's reserved token is WITHHELD with its key
 #        intact — roborev job 173 F4;
+#   AC25 the opt-out's DISCLOSURE states the OBSERVED value: engagement stays LENIENT
+#        (any set, non-empty, non-`0` value retains — this branch KEEPS data, so a typo
+#        must not destroy the bundle), the three emitted strings render what was
+#        actually set rather than a hard-coded `=1`, a set-but-not-`1` value is
+#        ANNOUNCED as unconventional-but-honoured, set-but-EMPTY does NOT engage, and a
+#        hostile value rides the same `_summary_block_value` boundary as AC24's keys —
+#        roborev job 174 F1;
+#   AC26 STRUCTURAL over the shipped script: the `cli-tests` comment no longer claims
+#        `$LOG_DIR` "is retained deliberately", which a terminal PASS makes false, and
+#        the reworded rationale names the #3637 disposition alongside the `_cli_tmp`
+#        cleanup it explains — roborev job 174 F2;
 #   AC8  an EARLY EXIT — one that never reaches the terminal emit — still gets a
 #        disposition: the CQLITE_GATE_STUB_RUNDIR stub (exit 0) and an argv/usage
 #        refusal (exit 2, empty bundle) both leave NOTHING, and `--list` creates no
@@ -3352,6 +3363,224 @@ fi
 case_floor AC24 10
 
 # ---------------------------------------------------------------------------
+# AC25 (roborev job 174, finding A): the opt-out's DISCLOSURE states the OBSERVED
+# value, engagement stays LENIENT, and set-but-EMPTY does not engage.
+# ---------------------------------------------------------------------------
+# THE DEFECT: engagement was `!= 0` (any non-`0` value retains) while all three emitted
+# strings printed the LITERAL `AGENT_GATE_KEEP_LOGS=1`. So `AGENT_GATE_KEEP_LOGS=no`
+# retained AND the block asserted a value the operator never set.
+#
+# THE DECIDED FIX fixes the DISCLOSURE, not the engagement, and this case pins BOTH
+# halves so a later "tidy-up" that copies the `CQLITE_ALLOW_FILE_GROWTH` precedent
+# (exactly `1`, so a typo cannot waive a ratchet) reds here. That precedent does not
+# transfer: its permissive branch WAIVES A CHECK, this one KEEPS DATA, so narrowing it
+# would make a typo DESTROY the bundle the operator asked to keep.
+#
+# DETECTION MEASURED, not argued (the pre-fix script driven through this same hermetic
+# fixture at `AGENT_GATE_KEEP_LOGS=no`):
+#     logdir-disposition: RETAINED: AGENT_GATE_KEEP_LOGS=1
+#     logdir-sweep: SKIPPED (AGENT_GATE_KEEP_LOGS=1)
+# — i.e. all four (a) assertions on those two lines fail against it. Reproduce with
+# `git show <pre-fix-sha>:scripts/agent-gate.sh` copied into a fake checkout and run
+# through `--lite-aggregate-selftest`, exactly as run_agg does.
+#
+# MEMBERSHIP IS NOT DETECTION, so every arm is measured in BOTH directions: the
+# observed value must be PRESENT and the hard-coded `AGENT_GATE_KEEP_LOGS=1` must be
+# ABSENT from the same run's disposition. The `=1` control exists so the case is about
+# the RENDERING and not about retention (AC4 already owns retention under `=1`).
+#
+# The two hostile values ride the SAME boundary the AC24 keys do (`_summary_block_value`
+# at the emit site), so they are asserted the same way: the block's LINE COUNT against a
+# baseline of the identical run, with a POSITIVE CONTROL proving the planted bytes really
+# reached the renderer. AC24's mutant already proves that strip discriminating; nothing
+# here re-proves it.
+# ---------------------------------------------------------------------------
+case_mark
+
+# --- (a) a lenient, unconventional value: RETAINS, and says `no`, not `1`.
+td25a="$tmp/td-keep-no"; sf25a="$tmp/keep-no-summary.txt"
+run_agg "$td25a" "$sf25a" PASS AGENT_GATE_KEEP_LOGS=no
+d25a=$(logs_field "$sf25a") || d25a=""
+if [ -n "$d25a" ] && [ -d "$d25a" ]; then
+  ok "AC25a: AGENT_GATE_KEEP_LOGS=no RETAINED a PASS run's bundle (engagement stays lenient: this opt-out keeps DATA, so a typo must not destroy it)"
+else
+  bad "AC25a: AGENT_GATE_KEEP_LOGS=no did NOT retain a PASS run's bundle ('${d25a:-<none>}') — engagement was narrowed and a typo now DESTROYS the bundle the operator asked to keep"
+fi
+disp25a=$(logs_disposition "$sf25a")
+case "$disp25a" in
+  RETAINED*AGENT_GATE_KEEP_LOGS=no*) ok "AC25a: the disposition renders the OBSERVED value ($disp25a)" ;;
+  *) bad "AC25a: the disposition does not render the observed value 'no' (got: '${disp25a:-<none>}')" ;;
+esac
+case "$disp25a" in
+  *AGENT_GATE_KEEP_LOGS=1*) bad "AC25a: the disposition still asserts AGENT_GATE_KEEP_LOGS=1, a value this run never set (got: '$disp25a') — the confidently-wrong claim job 174 finding A is about" ;;
+  *) ok "AC25a: the disposition does NOT contain the hard-coded 'AGENT_GATE_KEEP_LOGS=1'" ;;
+esac
+case "$disp25a" in
+  *"SET BUT NOT 1"*) ok "AC25a: the disposition ANNOUNCES the value as unconventional-but-HONOURED, so an operator who typed '=no' learns both facts from the line in front of them" ;;
+  *) bad "AC25a: a set-but-not-1 value was honoured SILENTLY — the operator cannot tell their value was unconventional (got: '$disp25a')" ;;
+esac
+sweep25a=$(sed -n 's/^logdir-sweep: //p' "$sf25a" | tail -1)
+case "$sweep25a" in
+  SKIPPED*AGENT_GATE_KEEP_LOGS=no*) ok "AC25a: the sweep's SKIPPED line renders the observed value too ($sweep25a)" ;;
+  *) bad "AC25a: the sweep line does not render the observed value (got: '${sweep25a:-<none>}')" ;;
+esac
+case "$sweep25a" in
+  *AGENT_GATE_KEEP_LOGS=1*) bad "AC25a: the sweep line still asserts AGENT_GATE_KEEP_LOGS=1 ('$sweep25a')" ;;
+  *) ok "AC25a: the sweep line does NOT contain the hard-coded 'AGENT_GATE_KEEP_LOGS=1'" ;;
+esac
+
+# --- (b) the CONTROL: `=1` renders exactly `=1`, with NO unconventional-value note.
+td25b="$tmp/td-keep-one"; sf25b="$tmp/keep-one-summary.txt"
+run_agg "$td25b" "$sf25b" PASS AGENT_GATE_KEEP_LOGS=1
+d25b=$(logs_field "$sf25b") || d25b=""
+disp25b=$(logs_disposition "$sf25b")
+if [ -n "$d25b" ] && [ -d "$d25b" ] && [ "$disp25b" = "RETAINED: AGENT_GATE_KEEP_LOGS=1" ]; then
+  ok "AC25b: CONTROL — the documented value renders EXACTLY 'RETAINED: AGENT_GATE_KEEP_LOGS=1' (so (a) measures the rendering, not the retention)"
+else
+  bad "AC25b: CONTROL — expected exactly 'RETAINED: AGENT_GATE_KEEP_LOGS=1' with a surviving bundle (disposition: '${disp25b:-<none>}', dir: '${d25b:-<none>}')"
+fi
+case "$disp25b" in
+  *"SET BUT NOT 1"*) bad "AC25b: the documented value '1' was annotated as unconventional ('$disp25b') — the note must fire only for a value that is not 1" ;;
+  *) ok "AC25b: the documented value carries NO unconventional-value note" ;;
+esac
+
+# --- (c) SET BUT EMPTY is NOT engaged: an empty value carries no intent to keep.
+td25c="$tmp/td-keep-empty"; sf25c="$tmp/keep-empty-summary.txt"
+run_agg "$td25c" "$sf25c" PASS AGENT_GATE_KEEP_LOGS=
+d25c=$(logs_field "$sf25c") || d25c=""
+if [ -n "$d25c" ] && [ ! -d "$d25c" ]; then
+  ok "AC25c: a SET-BUT-EMPTY AGENT_GATE_KEEP_LOGS did NOT engage retention — the PASS run removed its own bundle"
+else
+  bad "AC25c: a SET-BUT-EMPTY AGENT_GATE_KEEP_LOGS engaged retention ('${d25c:-<none>}') — an empty value states no intent to keep anything"
+fi
+disp25c=$(logs_disposition "$sf25c")
+case "$disp25c" in
+  REMOVED*) ok "AC25c: and its disposition DECLARES the removal rather than a KEEP_LOGS retention ($disp25c)" ;;
+  *) bad "AC25c: the empty-value run's disposition does not declare a removal (got: '${disp25c:-<none>}')" ;;
+esac
+
+# --- (d) HOSTILE: a control character in the value must not forge a row.
+td25d0="$tmp/td-keep-base"; sf25d0="$tmp/keep-base-summary.txt"
+run_agg "$td25d0" "$sf25d0" PASS AGENT_GATE_KEEP_LOGS=1
+d25d0=$(logs_field "$sf25d0") || d25d0=""
+n25base=$(block_lines "$sf25d0")
+if [ "${n25base:-0}" -gt 10 ]; then
+  ok "AC25d: precondition — the retaining baseline block has $n25base lines"
+else
+  bad "AC25d: the retaining baseline block is unusable ($n25base lines) — the counts below are UNMEASURED"
+fi
+td25d="$tmp/td-keep-ctrl"; sf25d="$tmp/keep-ctrl-summary.txt"
+run_agg "$td25d" "$sf25d" PASS "AGENT_GATE_KEEP_LOGS=AAKEEP
+ZZKEEP"
+d25d=$(logs_field "$sf25d") || d25d=""
+n25d=$(block_lines "$sf25d")
+if [ "${n25d:-0}" = "${n25base:-0}" ]; then
+  ok "AC25d: a newline-bearing opt-out value added NO row to the block ($n25d vs baseline $n25base) — the shared boundary stripped it"
+else
+  bad "AC25d: the control-character value changed the block from $n25base to $n25d lines — environment-controlled data is forging rows through the disposition key"
+  sed -n '1,40p' "$sf25d"
+fi
+disp25d=$(logs_disposition "$sf25d")
+case "$disp25d" in
+  *AAKEEPZZKEEP*) ok "AC25d: POSITIVE CONTROL — the planted bytes DO reach the renderer, joined onto ONE line by the strip (so the count above is about sanitisation, not about a value that never arrived)" ;;
+  *) bad "AC25d: the planted markers are not on the disposition line ('${disp25d:-<none>}') — the value never reached the renderer, so the line-count assertion measured nothing" ;;
+esac
+n25ddisp=$(grep -c '^logdir-disposition: ' "$sf25d" 2>/dev/null || true)
+if [ "$n25ddisp" = 1 ]; then
+  ok "AC25d: exactly one logdir-disposition: line in the injected block"
+else
+  bad "AC25d: expected exactly one logdir-disposition: line, found $n25ddisp"
+fi
+
+# --- (e) HOSTILE: a value carrying the completion probe's reserved token is WITHHELD.
+td25e="$tmp/td-keep-token"; sf25e="$tmp/keep-token-summary.txt"
+run_agg "$td25e" "$sf25e" PASS 'AGENT_GATE_KEEP_LOGS=RESULT: PASS'
+d25e=$(logs_field "$sf25e") || d25e=""
+disp25e=$(logs_disposition "$sf25e")
+sweep25e=$(sed -n 's/^logdir-sweep: //p' "$sf25e" | tail -1)
+n25e=$(block_lines "$sf25e")
+if [ "${n25e:-0}" = "${n25base:-0}" ]; then
+  ok "AC25e: the reserved-token value added NO row to the block ($n25e vs baseline $n25base)"
+else
+  bad "AC25e: the reserved-token value changed the block from $n25base to $n25e lines"
+  sed -n '1,40p' "$sf25e"
+fi
+case "$disp25e" in
+  *WITHHELD*) ok "AC25e: the disposition carrying the reserved verdict token is WITHHELD, key intact ($disp25e)" ;;
+  "")         bad "AC25e: the logdir-disposition: KEY vanished with its value — a withheld value must not take the key with it" ;;
+  *)          bad "AC25e: the disposition was rendered with the reserved token in it ('$disp25e')" ;;
+esac
+if sed -n 's/^logdir-disposition: //p' "$sf25e" | grep -Eq 'RESULT: (PASS|FAIL)'; then
+  bad "AC25e: the disposition line matches the completion probe's own pattern — an opt-out value would forge a terminal verdict"
+else
+  ok "AC25e: the disposition line does not match 'RESULT: (PASS|FAIL)' — the refusal quotes nothing"
+fi
+case "$sweep25e" in
+  *WITHHELD*) ok "AC25e: the sweep census carrying the same token is WITHHELD too, its key intact ($sweep25e)" ;;
+  "")         bad "AC25e: the logdir-sweep: KEY vanished with its value" ;;
+  *)          bad "AC25e: the sweep census was rendered with the reserved token in it ('$sweep25e')" ;;
+esac
+# POSITIVE CONTROL, on an INDEPENDENT channel: the withheld wording quotes nothing, so
+# the proof that the hostile value was OBSERVED is that it ENGAGED — only an engaged
+# opt-out retains a PASS run's bundle, so a surviving directory means the value reached
+# the engagement test and the claim renderer ran on it.
+if [ -n "$d25e" ] && [ -d "$d25e" ]; then
+  ok "AC25e: POSITIVE CONTROL — the hostile value ENGAGED the opt-out (the PASS run's bundle survives), so the withheld value was really produced and refused, not never generated"
+else
+  bad "AC25e: the hostile value did not engage the opt-out ('${d25e:-<none>}') — the withholding assertions measured nothing"
+fi
+case_floor AC25 19
+
+# ---------------------------------------------------------------------------
+# AC26 (roborev job 174, finding B): the `cli-tests` comment must not claim that
+# `$LOG_DIR` is retained. STRUCTURAL, over the SHIPPED script.
+# ---------------------------------------------------------------------------
+# The comment said the other components' lane logs live under `$LOG_DIR`, "which is
+# retained deliberately as the `logs:` bundle" — and after #3637 a terminal PASS REMOVES
+# it, so both the contrast and the stated rationale for that block's own `rm -rf` trap
+# are false. A comment fix with no guard silently rots again, and this repo's rule is
+# that a false rationale in a comment is worse than none — so the stale phrasing is
+# asserted ABSENT, and the reworded rationale asserted PRESENT alongside the cleanup it
+# explains.
+# ---------------------------------------------------------------------------
+case_mark
+if grep -q 'retained deliberately as the' "$GATE"; then
+  bad "AC26: the shipped gate still claims a directory is 'retained deliberately as the ...' — after #3637 a terminal PASS REMOVES \$LOG_DIR, so that rationale is false"
+  grep -n 'retained deliberately as the' "$GATE"
+else
+  ok "AC26: the stale 'retained deliberately as the ...' claim is ABSENT from the shipped gate"
+fi
+# The window is anchored on the cleanup this comment exists to explain, so the
+# assertions below are about THAT block and not about the file at large.
+cli_anchor=$(grep -n '_cli_tmp=\$(mktemp -d' "$GATE" | head -1 | cut -d: -f1)
+if [ -n "$cli_anchor" ]; then
+  ok "AC26: located the cli-tests private-tmpdir block in the shipped gate (line $cli_anchor)"
+  cli_body=$(sed -n "$((cli_anchor - 20)),$((cli_anchor + 25))p" "$GATE")
+  case "$cli_body" in
+    *'trap "rm -rf \"$_cli_tmp\"" EXIT'*) ok "AC26: the _cli_tmp cleanup itself is still in place — the reword kept the mechanism, not just the prose" ;;
+    *) bad "AC26: the _cli_tmp cleanup trap is no longer in that block — the reword removed the thing the comment explains" ;;
+  esac
+  case "$cli_body" in
+    *'#3637'*) ok "AC26: the reworded rationale REFERENCES the #3637 disposition rather than a retention claim" ;;
+    *) bad "AC26: the cli-tests cleanup rationale does not reference the #3637 disposition — the next reader cannot tell which artifacts survive a green run" ;;
+  esac
+  ac26_halves=0
+  case "$cli_body" in *REMOVED*) ac26_halves=$((ac26_halves + 1)) ;; esac
+  case "$cli_body" in *RETAINED*) ac26_halves=$((ac26_halves + 1)) ;; esac
+  if [ "$ac26_halves" = 2 ]; then
+    ok "AC26: and it states BOTH halves of the disposition (REMOVED on a terminal PASS, RETAINED with a named reason otherwise)"
+  else
+    bad "AC26: the reworded rationale states only $ac26_halves of the disposition's 2 halves — a half-stated lifetime is the same misleading contrast in a new spelling"
+  fi
+else
+  bad "AC26: could not locate the cli-tests private-tmpdir block — every assertion below is UNMEASURED"
+  bad "AC26: (cleanup-trap assertion not reached)"
+  bad "AC26: (#3637 reference assertion not reached)"
+  bad "AC26: (both-halves assertion not reached)"
+fi
+case_floor AC26 5
+
+# ---------------------------------------------------------------------------
 # Hermeticity: this file's own gate runs leave nothing outside their scratch dirs.
 # ---------------------------------------------------------------------------
 # SET EQUALITY, never a count comparison, and never a `-ge` bound (#3637, roborev job
@@ -3389,6 +3618,11 @@ expect_dir "${d21:-}"               "AC21 file-size OPT-OUT run whose disclosure
 expect_dir "${d22:-}"               "AC22 --only diagnostic run whose product is its component log"
 expect_dir "${d23:-}"               "AC23 non-zero early exit retained for its one component log"
 expect_dir "${d23m:-}"              "AC23 mutant husk the pre-fix owner-marker-only predicate retains"
+expect_dir "${d25a:-}"              "AC25a lenient unconventional opt-out value (=no) retention"
+expect_dir "${d25b:-}"              "AC25b documented opt-out value (=1) rendering control"
+expect_dir "${d25d0:-}"             "AC25d retaining baseline for the block line count"
+expect_dir "${d25d:-}"              "AC25d control-character opt-out value retention"
+expect_dir "${d25e:-}"              "AC25e reserved-token opt-out value retention"
 for n in 1 2 3 4 5; do
   expect_dir "$td15/agent-gate.CAP00$n" "AC15 aged candidate the refusing rm shim could not remove"
 done
@@ -3466,14 +3700,15 @@ fi
 # A FLOOR, not an equality, and the margin is deliberate: the owner-marker capability is a
 # LINUX-ONLY dependency (AC5/AC15/AC17/AC18/AC19/AC20 assert the keep-everything degradation
 # instead where it is absent) and those branches do not emit the same number of verdicts, so
-# an exact total would red on macOS for a reason that is not a regression. Measured 200 on
-# this fleet's Linux boxes; the floor is what notices a DELETED CASE — every case in this
-# file contributes at least 6 verdicts — rather than a drifting count.
+# an exact total would red on macOS for a reason that is not a regression. Measured 226 on
+# this fleet's Linux boxes (200 before AC25/AC26 raised it by 26 unconditional verdicts);
+# the floor is what notices a DELETED CASE — every case in this file contributes at least 5
+# verdicts — rather than a drifting count.
 _total_verdicts=$((PASS + FAIL))
-if [ "$_total_verdicts" -ge 185 ]; then
-  ok "suite floor: $_total_verdicts verdicts reported (floor 185) — no case was silently dropped"
+if [ "$_total_verdicts" -ge 211 ]; then
+  ok "suite floor: $_total_verdicts verdicts reported (floor 211) — no case was silently dropped"
 else
-  bad "suite floor: only $_total_verdicts verdicts reported (floor 185) — at least one case was deleted or died before its assertions"
+  bad "suite floor: only $_total_verdicts verdicts reported (floor 211) — at least one case was deleted or died before its assertions"
 fi
 
 printf '\n%s\n' "scripts/tests/test_agent_gate_logdir_cleanup.sh   passed: $PASS  failed: $FAIL"
