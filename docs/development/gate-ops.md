@@ -1057,6 +1057,16 @@ made the recency habit above wrong so reliably. Two mechanisms now bound it:
   where the permissive branch starts deleting from a directory the box could not read. `find … |
   head -n <cap>` is worse than lost: it SIGPIPEs find, so a healthy large population and an
   unreadable parent report the same non-zero status.
+  **The scan runs `find -H`, which resolves the START POINT and nothing else (#3637, roborev
+  job 177).** `GATE_LOGDIR_PARENT` is lexical by rule, so under find's default `-P` a
+  `$TMPDIR` naming a **symlink to a directory** — macOS's `/tmp` -> `/private/tmp`, or any
+  operator-provided symlinked temp root — was neither dereferenced nor descended into: find
+  listed nothing, exited 0, and the block printed the affirmative `0 REMOVED of 0 aged`, a
+  MEASURED zero emitted where nothing was measured. Not `-L`, which would dereference
+  DESCENDANTS and let a symlinked child be listed by a path whose real subject sits outside
+  the parent, escaping the containment guards; and not realpath on the variable, which is
+  the same mistake one level up. Pinned by AC30 in three legs (the shipped form, a `-P`
+  mutant that prints the false all-clear, and a real-directory positive control).
 
   **Two declared residuals.** (1) **The cap bounds EXAMINATION and MATERIALIZATION, never
   TRAVERSAL.** Finding the aged subset means READING the directory, so the depth-1 scan is O(N) in
@@ -1090,6 +1100,42 @@ made the recency habit above wrong so reliably. Two mechanisms now bound it:
   one-time out-of-band cleanup, and is deliberately NOT guessed at: "markerless AND older than N days
   is probably legacy" is the heuristic reasoning this repo forbids, and being wrong about it means
   destroying a live peer's post-mortem bundle. An honest declared residual beats a heuristic.
+
+**DECLARED RESIDUAL: the `$TMPDIR`-containment rollout across the sibling self-tests is
+PARTIAL, and the hermetic enumeration cannot see it (#3637, roborev job 177 finding 2).**
+`$TMPDIR` containment was added to the ~10 harnesses this issue touched, so their child gates
+create and reclaim their run directories inside a scratch root the harness removes. But
+roughly a dozen OTHER `tooling-tests` harnesses also spawn real child gates and were left on
+the **ambient** temp root — measured: `test_agent_gate_component_set.sh`,
+`test_agent_gate_census.sh`, `test_agent_gate_oom_audit.sh`,
+`test_agent_gate_schemas_preflight.sh`, `test_agent_gate_disk_admission.sh`,
+`test_agent_gate_parity_report.sh`, `test_agent_gate_python_bindings_determinism.sh`,
+`test_agent_gate_feature_matrix_annotation.sh`, `test_gate_cpu_budget.sh`,
+`test_gate_liveness.sh`, `test_roborev_guard_portability.sh` (two of them —
+`component_set` and `disk_admission` — scope `TMPDIR` for ONE invocation each and not
+harness-wide, which is the same residual). Their child gates that end non-PASS now
+**correctly** retain their bundles, in the shared `/tmp` — i.e. into the very population this
+issue exists to drain. **Nothing measures that.** The hermetic survivor enumeration at the end
+of `scripts/tests/test_agent_gate_logdir_cleanup.sh` is set-equality over ITS OWN scratch
+root, so a sibling harness leaking into `/tmp` is invisible to it, and no gate component
+counts `agent-gate.*` under the ambient parent. Read this as PARTIAL, never as closed.
+Re-enumerate before acting on the list above — it is a **SUPERSET that needs triage**, not an
+answer: it matches harnesses that only NAME the gate in a lint or a grep (no child gate at
+all), and it misses harnesses that scope `TMPDIR` per-invocation on the `env` line rather than
+with an `export` (`test_agent_gate_logdir_cleanup.sh` itself does exactly that, and is
+contained). Read each hit before counting it.
+
+```bash
+grep -lE 'bash "\$(GATE|FAKE_GATE)"|agent-gate\.sh' scripts/tests/*.sh \
+  | xargs grep -L 'export TMPDIR='
+```
+
+The remedy idiom, for whoever completes it, is the one the contained harnesses already use —
+`export TMPDIR="$tmp/tmpdir"` (with `mkdir -p`) against the `$tmp` the harness already
+validated fail-closed and already reclaims from its existing `trap … EXIT`, so the necessary
+scratch root cannot itself become the leak. Retrofitting them was deliberately NOT done here:
+it is a dozen unrelated harnesses past this issue's convergence point, and a partial rollout
+DECLARED is honest where an undeclared one reads as closed.
 
 **`AGENT_GATE_KEEP_LOGS=1` suppresses both halves** — the per-run removal and the sweep. Set it
 whenever you need to read `<dir>/<component>.log` after a PASSing or nested run; five gate
