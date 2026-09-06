@@ -745,7 +745,13 @@ cargo build --release -p cqlite-flight --features jemalloc
 # Which allocator a built binary ACTUALLY installed — reported by the binary, from
 # the same cfg as the installation, so it cannot disagree with what was linked:
 ./target/release/cqlite-flight --version | grep '^allocator: '   # -> jemalloc | system
-# The startup `info` line carries the same value as `allocator=<value>`.
+# The startup `info` line carries the same value, rendered by tracing as a QUOTED
+# string field: `allocator="jemalloc"` / `allocator="system"`. `fmt::layer()` leaves
+# ANSI escapes in even when stdout is a file, so strip them before matching —
+# a raw `grep 'allocator="system"'` finds NOTHING on a perfectly good binary (#3400,
+# in a new place). Both surfaces derive from ONE const, so they cannot disagree, and
+# `scripts/tests/test_flight_allocator_link.sh` asserts that AGREEMENT rather than
+# each surface against a literal.
 
 # The gate-enforcing guard for the above (a `tooling-tests` component). Builds BOTH
 # arms and asserts they DISCRIMINATE — jemalloc symbols present + `allocator: jemalloc`

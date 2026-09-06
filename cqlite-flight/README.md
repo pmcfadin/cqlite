@@ -411,8 +411,16 @@ cqlite-flight --version
 # cqlite-flight 0.16.1
 # allocator: system          <- or `jemalloc`
 
-# and on the startup `info` line:
-#   cqlite-flight starting ... allocator=system
+# and on the startup `info` line (tracing renders a string field QUOTED, and
+# `fmt::layer()` colours it even when redirected to a file — so strip ANSI before
+# grepping, or a correct binary looks silent):
+#   cqlite-flight starting ... allocator="system"
+```
+
+```bash
+# Reading it back from a redirected log, ANSI stripped:
+sed -e "s/$(printf '\033')\[[0-9;]*m//g" server.log | grep -o 'allocator=[^ ]*'
+# -> allocator="system"
 ```
 
 To build with it (Linux only — the dependency is declared under a
