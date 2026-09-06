@@ -62,6 +62,35 @@ opentelemetry = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
 tracing-opentelemetry = { workspace = true, optional = true }
 
+# jemalloc as the process-wide allocator for the SERVER BINARY ONLY, behind the
+# non-default `jemalloc` feature (issue #3997). LINUX-ONLY BY PLACEMENT: the
+# allocator is a Linux-production concern (the #3551 rig, the Trino/Helm
+# deployment), and jemalloc's C source is compiled from scratch by
+# `tikv-jemalloc-sys`' build script — so keeping the dependency under a target
+# `cfg` means a macOS/Windows developer build never pays for a C toolchain it
+# has no use for. The `#[global_allocator]` use site in `src/main.rs` is
+# ADDITIONALLY cfg-gated on `target_os = "linux"`, so an off-Linux build with
+# `--features jemalloc` is inert rather than broken.
+#
+# Pinned to the `0.6` line deliberately, because the pin has to match the
+# jemalloc version #3551 MEASURED. VERIFIED, not assumed: this resolves
+# `tikv-jemallocator 0.6.1` -> `tikv-jemalloc-sys
+# 0.6.1+5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7`, whose `+` build
+# metadata names the vendored jemalloc release, and the vendored tree confirms
+# it independently (`jemalloc/ChangeLog`'s newest release entry is
+# `5.3.0 (May 6, 2022)`, and `build.rs` passes that same metadata to jemalloc's
+# `configure --with-version`). #3551 measured `LD_PRELOAD` of the rig's distro
+# `libjemalloc.so.2`, which is **5.3.0** — so this is the same major.minor, as
+# task 0.3 requires. The newer `0.7` line bundles 5.3.1; taking it would make
+# the linked build a different allocator release from the one the `LD_PRELOAD`
+# baseline was measured against. Bump this only alongside a re-measurement.
+#
+# NOT in `default` here: the default posture is decided by the linked-build
+# A-vs-E measurement (requirement R3), not by this manifest. The feature exists
+# and is off.
+[target.'cfg(target_os = "linux")'.dependencies]
+tikv-jemallocator = { version = "0.6", optional = true }
+
 [features]
 # Off by default: the Flight server is normally run without an OTLP collector,
 # and enabling OTel pulls in the exporter stack. Turn it on explicitly with
@@ -111,6 +140,18 @@ test-util = []
 # test binary (issue #1494, AD5) so it can observe the Flight producer's total/peak
 # allocation. Never in defaults — it stays confined to that one gated test binary.
 dhat-heap = []
+# Link jemalloc as the process-wide `#[global_allocator]` of the `cqlite-flight`
+# BINARY (issue #3997, requirement R1). Off by default until the arm-A-vs-arm-E
+# measurement on the #3551 rig says otherwise (requirement R3); build with
+# `cargo build -p cqlite-flight --features jemalloc`. The dependency is declared
+# under a `cfg(target_os = "linux")` target section above, and the install site
+# in `src/main.rs` repeats that `cfg`, so this feature is a no-op off Linux —
+# `cqlite-flight --version` then reports `allocator: system`, which is the truth.
+# Confined to the BIN target by construction: `main.rs` is compiled into the
+# binary only, so the library target that `tools/flight-loadgen`, the benches and
+# every integration test link never carries an allocator
+# (`scripts/tests/test_flight_allocator_confinement.sh` pins this structurally).
+jemalloc = ["dep:tikv-jemallocator"]
 
 [dev-dependencies]
 # Enable cqlite-core's SHARED Arrow row-shape corpus (issue #2932) for TESTS
