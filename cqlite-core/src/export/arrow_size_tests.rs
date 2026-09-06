@@ -210,7 +210,10 @@ fn the_conservatism_property_catches_a_content_only_estimator() {
     /// this is test-only scaffolding, not the production walk.
     fn content_only(v: &Value) -> usize {
         match v {
-            Value::Null | Value::Tombstone(_) => 0,
+            // `Value::Empty` renders as `""` and carries no content bytes
+            // (issue #3805) — same as `Null` for this deliberately
+            // content-only estimator.
+            Value::Null | Value::Tombstone(_) | Value::Empty(_) => 0,
             Value::Boolean(_) | Value::TinyInt(_) => 1,
             Value::SmallInt(_) => 2,
             Value::Integer(_) | Value::Float32(_) | Value::Date(_) => 4,

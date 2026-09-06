@@ -237,6 +237,9 @@ fn content_floor(m: &Mutation) -> usize {
 fn value_content_bytes(v: &Value) -> usize {
     match v {
         Value::Null => 0,
+        // The empty-buffer sentinel's payload IS the empty buffer, so it has
+        // zero content bytes (issue #3805).
+        Value::Empty(_) => 0,
         Value::Boolean(_) | Value::TinyInt(_) => 1,
         Value::SmallInt(_) => 2,
         Value::Integer(_) | Value::Float32(_) | Value::Date(_) => 4,

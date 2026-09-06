@@ -2,6 +2,10 @@
 //! Shared fixtures live in `support`; tests are grouped by file.
 
 mod collection_order_serialize;
+/// WRITE-SIDE admission of the empty-buffer sentinel (issue #3805, roborev job
+/// 449 finding D): legal ONLY on a multicell map's cell path with the tag
+/// validated against the declared key type; refused in every type-blind context.
+mod empty_sentinel_write;
 /// Correctness proof for `IncrementalPartitionWriter` (issue #1668, stage
 /// 5c-iv part 1) against today's whole-slice `write_partition_with_index_blocks`.
 mod incremental_partition;

@@ -153,6 +153,10 @@ fn variant_name(v: &Value) -> &'static str {
         Value::Frozen(_) => "Frozen",
         Value::Tombstone(_) => "Tombstone",
         Value::Inet(_) => "Inet",
+        // Issue #3805. Not currently produced by any fixture in this corpus —
+        // the decoder wiring that emits it for a zero-length cell path is a
+        // separate slice — so it appears in no `required_variants` list above.
+        Value::Empty(_) => "Empty",
     }
 }
 

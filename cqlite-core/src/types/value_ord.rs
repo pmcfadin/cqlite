@@ -40,6 +40,42 @@ impl PartialOrd for Value {
             (Value::Null, _) => Some(Ordering::Less),
             (_, Value::Null) => Some(Ordering::Greater),
 
+            // EMPTY-BUFFER SENTINEL (issue #3805). `Int32Type.compareCustom`
+            // (`db/marshal/Int32Type.java:61-71` at `cassandra-5.0.8`) is
+            //
+            //     if (accessorL.isEmpty(left) || accessorR.isEmpty(right))
+            //         return Boolean.compare(accessorR.isEmpty(right), accessorL.isEmpty(left));
+            //
+            // so with only the LEFT empty: `Boolean.compare(false, true) == -1`.
+            // An empty buffer therefore sorts strictly BEFORE every non-empty
+            // value of its type, INCLUDING `Integer.MIN_VALUE`, and two empties
+            // are Equal (both branches empty ⇒ `Boolean.compare(true, true)`
+            // == 0). Measured on real Cassandra-5.0.2 bytes for four independent
+            // key types — the empty key is FIRST in every column
+            // (`docs/round-artifacts/issue-3805-cassandra-oracle.md` §4b.4).
+            //
+            // These arms sit immediately after the `Null` arms so `Null` keeps
+            // its existing first position (`Null` is not a key Cassandra admits
+            // at all, so no Cassandra ordering is being contradicted) and
+            // BEFORE the per-variant arms, so a sentinel can never fall through
+            // to the `to_string()` fallback below.
+            (Value::Empty(a), Value::Empty(b)) => {
+                // Same type ⇒ the same (empty) bytes ⇒ Equal, exactly as
+                // `compareCustom` reports for two empty buffers. Different
+                // declared types is a cross-type comparison, which Cassandra
+                // never performs (a map has ONE key type); ordering by the tag
+                // keeps this total and deterministic rather than arbitrary.
+                // That tag ordering is a TOTALITY requirement of this impl and
+                // NOT a claim that the pair is comparable: the diagnosing
+                // comparator refuses it (`select_executor::value_ops::
+                // try_compare_values` decides `(Empty, Empty)` itself, above
+                // its discriminant test, and errors on mismatched tags —
+                // roborev job 451).
+                Some(a.cmp(b))
+            }
+            (Value::Empty(_), _) => Some(Ordering::Less),
+            (_, Value::Empty(_)) => Some(Ordering::Greater),
+
             (Value::Boolean(a), Value::Boolean(b)) => a.partial_cmp(b),
             (Value::Integer(a), Value::Integer(b)) => a.partial_cmp(b),
             (Value::BigInt(a), Value::BigInt(b)) => a.partial_cmp(b),

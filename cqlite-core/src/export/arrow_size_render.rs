@@ -68,6 +68,12 @@ impl<'a> Estimator<'a> {
         };
         match super::unwrap_frozen_value(value) {
             Value::Null => self.add(RENDER_NULL_BYTES),
+            // EMPTY-BUFFER SENTINEL (issue #3805): renders as the EMPTY STRING
+            // (`ValueFormatter::format_value` → `""`, matching
+            // `sstabledump`'s `"path" : [ "" ]`), so it contributes ZERO
+            // rendered content bytes. Charging 0 is exact here, not optimistic:
+            // the rendering has no length that can vary.
+            Value::Empty(_) => {}
             Value::Boolean(_) => self.add(RENDER_BOOL_BYTES),
             Value::TinyInt(_)
             | Value::SmallInt(_)

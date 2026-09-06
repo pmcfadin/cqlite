@@ -32,6 +32,10 @@ fn hash_one_value<H: Hasher>(v: &Value, h: &mut H) {
     std::mem::discriminant(v).hash(h);
     match v {
         Value::Null => {}
+        // Hash the TYPE TAG, so `Empty(int)` and `Empty(bigint)` land in
+        // different groups (issue #3805). The discriminant hashed above already
+        // separates `Empty` from `Null` and from every typed zero.
+        Value::Empty(ty) => ty.hash(h),
         Value::Boolean(b) => b.hash(h),
         Value::Integer(x) => x.hash(h),
         Value::BigInt(x) | Value::Counter(x) | Value::Timestamp(x) | Value::Time(x) => x.hash(h),

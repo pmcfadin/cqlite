@@ -340,7 +340,10 @@ pub(crate) fn value_to_hashable_key(py: Python<'_>, value: &Value) -> PyResult<P
         // `ipaddress.IPv4Address`/`IPv6Address`; `Duration` to the
         // `#[pyclass(frozen, eq, hash)]` [`crate::value::Duration`] class; and `Null` /
         // `Tombstone` to `None`.
-        Value::Null
+        // Issue #3805: the empty-buffer sentinel projects like any other
+        // scalar — `value_to_py` renders it as the (hashable) empty `str`.
+        Value::Empty(_)
+        | Value::Null
         | Value::Boolean(_)
         | Value::TinyInt(_)
         | Value::SmallInt(_)
@@ -511,6 +514,9 @@ pub(crate) fn contains_udt(value: &Value) -> bool {
         | Value::Duration { .. }
         | Value::Json(_)
         | Value::Inet(_)
+        // Issue #3805: a scalar sentinel; it cannot contain a UDT. Named
+        // explicitly, because `false` here must be an ANSWER and not a default.
+        | Value::Empty(_)
         | Value::Tombstone(_) => false,
     }
 }

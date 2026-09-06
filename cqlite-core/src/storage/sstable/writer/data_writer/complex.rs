@@ -348,7 +348,14 @@ impl DataWriter {
         } else if dt.starts_with("map<")
             || dt.starts_with("org.apache.cassandra.db.marshal.maptype(")
         {
-            self.write_map_complex_cells(buf, value, timestamp_micros, ttl_seconds, now_seconds)?;
+            self.write_map_complex_cells(
+                buf,
+                value,
+                &column.data_type,
+                timestamp_micros,
+                ttl_seconds,
+                now_seconds,
+            )?;
         } else if dt.starts_with("list<")
             || dt.starts_with("org.apache.cassandra.db.marshal.listtype(")
         {
@@ -643,10 +650,21 @@ impl DataWriter {
     ///
     /// MAP entries: cell_path = serialized key, cell value = serialized value.
     /// Entries are sorted by their serialized key byte representation for Cassandra compatibility.
+    ///
+    /// `map_data_type` is the COLUMN's DECLARED type (e.g. `map<int, int>`) and
+    /// is threaded down for ONE reason: the cell path is the only write-path
+    /// position where an empty-buffer sentinel is legal (issue #3805), and
+    /// legality there depends on the declared KEY type, which a bare `Value`
+    /// cannot supply (roborev job 449 finding D). See
+    /// [`serialize_map_cell_path_key_into`]. The cell VALUE deliberately keeps
+    /// the type-blind [`serialize_value_into`], which REFUSES a sentinel: a
+    /// zero-byte map VALUE is not a sentinel, it is the empty value of the
+    /// value type — or, with `HAS_EMPTY_VALUE`, a null.
     pub(super) fn write_map_complex_cells(
         &self,
         buf: &mut Vec<u8>,
         value: &Value,
+        map_data_type: &str,
         timestamp_micros: i64,
         ttl_seconds: Option<u32>,
         now_seconds: i32,
@@ -682,9 +700,11 @@ impl DataWriter {
             // Cell header: flags + optional TTL fields
             self.write_complex_cell_header(buf, 0, timestamp_micros, ttl_seconds, now_seconds)?;
 
-            // Cell path: serialized key
+            // Cell path: serialized key. SCHEMA-AWARE, because this is the one
+            // position an empty-buffer sentinel may occupy (issue #3805) and its
+            // tag must be validated against the DECLARED key type.
             key_scratch.clear();
-            serialize_value_into(key, &mut key_scratch)?;
+            serialize_map_cell_path_key_into(key, map_data_type, &mut key_scratch)?;
             encode_unsigned(key_scratch.len() as u64, buf);
             buf.extend_from_slice(&key_scratch);
 

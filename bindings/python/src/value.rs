@@ -31,6 +31,25 @@ use cqlite_core::Value;
 pub fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
     match value {
         Value::Null => Ok(py.None()),
+        // EMPTY-BUFFER SENTINEL (issue #3805) → the empty Python `str`.
+        //
+        // `""` is Cassandra's own rendering of an empty fixed-width buffer:
+        // `sstabledump` prints `"path" : [ "" ]`
+        // (`tools/JsonTransformer.java:444-458` →
+        // `db/marshal/AbstractType.java:146-156` →
+        // `serializers/Int32Serializer.java:46-49`, whose `toString(null)` is
+        // `""`) and `SELECT JSON` yields `{"": v}`
+        // (`db/marshal/MapType.java:362-388`), both at `cassandra-5.0.8`.
+        //
+        // NOT `None`: the entry is PRESENT and its key is DISTINCT from null (a
+        // null map key is illegal CQL — `cql3/Maps.java:342-343`). The
+        // distinctness lives in the core `Value` type; every SURFACE renders
+        // `""` so the three bindings agree (cross-binding parity, issue #1455).
+        // DECLARED RESIDUAL: the Python DRIVER hands back its own `EmptyValue`
+        // sentinel object here; CQLite does not mirror that (it would need a new
+        // Python type and would break 3-way surface agreement), so the type is
+        // recoverable from the schema, not from this object.
+        Value::Empty(_) => Ok("".into_pyobject(py)?.into_any().unbind()),
         Value::Boolean(b) => Ok(b.into_pyobject(py)?.to_owned().into_any().unbind()),
         Value::TinyInt(i) => Ok((*i as i64).into_pyobject(py)?.into_any().unbind()),
         Value::SmallInt(i) => Ok((*i as i64).into_pyobject(py)?.into_any().unbind()),

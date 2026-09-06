@@ -250,6 +250,11 @@ impl SizeAcc {
 
             match v {
                 Value::Null => {}
+                // Zero HEAP bytes: the sentinel's payload is the empty buffer
+                // and its 1-byte type tag is inline in the `Value` slot, which
+                // this estimator counts through the enclosing container
+                // (issue #3805).
+                Value::Empty(_) => {}
                 Value::Boolean(_) | Value::TinyInt(_) => self.add(1),
                 Value::SmallInt(_) => self.add(2),
                 Value::Integer(_) | Value::Float32(_) | Value::Date(_) => self.add(4),
