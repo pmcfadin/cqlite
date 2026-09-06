@@ -11,17 +11,22 @@
 //! `smallint`, `tinyint`, `date` and `time` — gates writes, not reads, and is not
 //! this path's oracle. See `raw_value/fixed_width.rs` for the full statement.
 //!
-//! # What these cases pin, and why the THREE widths are one test each
+//! # What these cases pin, and why each width that matters is its own test
 //!
 //! Before #3847 the composed accepted set of this path was exactly `{n}`: the
 //! width guard refused `len < n` and the arm's reported consumption `n` made the
 //! caller's fully-consumed assert refuse `len > n`. It is now `{n, 0}`, and the
 //! `0` half only works because the arm reports `0` CONSUMED — report `n` there
 //! and the fully-consumed assert refuses the value the width guard just admitted.
-//! So each type is driven at all four widths that matter: `0` (⇒ `Null`), the
+//! So each type is driven at every width that matters — `0` (⇒ `Null`), the
 //! under-widths `1..n` (still refused), exactly `n` (⇒ the value), and `n + 1`
-//! (still refused, by consumption). Widening one half without the other is a
-//! defect that a `0`-only case cannot see.
+//! (still refused, by consumption) — one test per width, each named for the
+//! width it drives: `an_empty_buffer_decodes_to_null_for_every_fixed_width_scalar`,
+//! `a_partial_buffer_is_still_refused`,
+//! `an_exactly_n_byte_buffer_still_decodes_to_a_value` and
+//! `an_over_width_buffer_is_still_refused_by_the_consumption_assert`. The names are
+//! spelled rather than counted, so this paragraph cannot decay against the file.
+//! Widening one half without the other is a defect that a `0`-only case cannot see.
 //!
 //! Driven through `parse_value_from_raw_bytes` — the bounded entry point that
 //! CARRIES the fully-consumed assert — never through the reporting twin, because
@@ -194,8 +199,10 @@ fn an_empty_component_of_a_tuple_decodes_to_null() {
 /// DECLARED RESIDUAL — `duration` is NOT in #3847's scope and is NOT widened
 /// here, and this case pins that so the gap is measured rather than assumed.
 ///
-/// `duration` is variable-width (three signed VInts), so it is not one of the 11
-/// fixed-width arms. Cassandra splits on it: `DurationSerializer.validate` is
+/// `duration` is variable-width (three signed VInts), so it is not a fixed-width
+/// arm at all — it appears nowhere in the `FIXED_WIDTH` table above, whose extent
+/// is pinned by `the_fixed_width_table_covers_every_arm` rather than restated in
+/// prose here. Cassandra splits on it: `DurationSerializer.validate` is
 /// `< 3` and REJECTS empty, while `DurationSerializer.deserialize:61-63` returns
 /// `null` for empty like every other type. By this path's own oracle
 /// (`deserialize`, not `validate`) an empty `duration` should therefore decode to
@@ -226,25 +233,33 @@ fn an_empty_duration_is_still_refused_declared_residual_of_3847() {
 // deleted, because the REASON these two cases exist is unchanged.
 //
 // `raw_type_value.rs` has two zero-length branches reachable only THROUGH
-// `parse_value_from_raw_bytes`, and they use DIFFERENT routing helpers — the
-// marshal/inline arm calls `create_empty_value_for_type` while the registry arm
-// calls a field decoder with an explicit `&[]`. Two helpers, so two ways to
-// diverge, which is exactly how rounds 1 and 2 of this review found real defects.
+// `parse_value_from_raw_bytes` — the marshal/inline UDT arm and the
+// registry-resolved arm — and each one carries its OWN separately-written
+// field-header loop. Both hand the zero-length field to the SAME delegate today,
+// `typed_value.rs::parse_simple_udt_field_value_at`, with an explicit `&[]`; what
+// differs is the dispatch that reaches it, so a loop widened in one arm and not the
+// other is exactly how rounds 1 and 2 of this review found real defects.
+//
+// (An earlier revision of this note named `create_empty_value_for_type` as the
+// marshal arm's route. No such function exists any more — #3631/PR#3820 replaced it,
+// and the per-type rule it used to carry now lives once, in
+// `typed_value/scalar_rules.rs::empty_is_a_value`. The two-route reasoning above is
+// unchanged; only the name was stale.)
 // Kept end-to-end rather than helper-level on the wiring-evidence rule: green
 // helper-only unit tests are not sufficient.
 // ---------------------------------------------------------------------------
 
 /// `pair(a int, b int)` in MARSHAL form. Field names are hex: `70616972` =
 /// "pair", `61` = "a", `62` = "b". Reaches `raw_type_value.rs`'s marshal/inline
-/// UDT arm, whose zero-length branch routes through
-/// `create_empty_value_for_type`.
+/// UDT arm, whose zero-length branch delegates to
+/// `parse_simple_udt_field_value_at` with an explicit `&[]`.
 const MARSHAL_PAIR: &str = "org.apache.cassandra.db.marshal.UserType(issue_3847_ks,70616972,\
 61:org.apache.cassandra.db.marshal.Int32Type,\
 62:org.apache.cassandra.db.marshal.Int32Type)";
 
 /// A parser whose registry resolves the BARE name `pair` — the route to
-/// `raw_type_value.rs`'s registry arm, whose zero-length branch calls
-/// `parse_simple_udt_field_value` with an explicit `&[]`.
+/// `raw_type_value.rs`'s registry arm, whose own field-header loop calls that same
+/// `parse_simple_udt_field_value_at` with an explicit `&[]`.
 fn parser_with_pair_registry() -> V5CompressedLegacyParser {
     let mut reg = crate::schema::UdtRegistry::new();
     reg.register_udt(
@@ -291,7 +306,8 @@ fn a_zero_length_field_of_a_marshal_form_udt_decodes_to_null() {
 }
 
 /// FIFTH site: the registry-resolved arm, end to end. Distinct from the fourth
-/// because it routes through a DIFFERENT helper.
+/// because it reaches the shared delegate through a DIFFERENT dispatch arm, with its
+/// own field-header loop.
 #[test]
 fn a_zero_length_field_of_a_registry_resolved_udt_decodes_to_null() {
     let value = parser_with_pair_registry()

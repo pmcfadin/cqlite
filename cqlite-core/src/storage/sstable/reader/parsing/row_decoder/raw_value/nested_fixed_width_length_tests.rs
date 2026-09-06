@@ -834,12 +834,15 @@ fn one_field_udt(ft: CqlType) -> Vec<(String, CqlType)> {
 /// `zero_length_fixed_width_element_decodes_to_null_at_the_three_value_positions`.
 /// Those are two of THREE INDEPENDENT answers to the empty-fixed-width question,
 /// and nothing enforces that they keep agreeing: this bounded path's uniform
-/// `{n, 0}` RULE (`raw_value/fixed_width.rs`'s `admissible_at_least` — one rule for
-/// every type, not a per-type table), the typed/UDT path's `empty_is_a_value` table
-/// (`row_decoder/typed_value/scalar_rules.rs`), and the cell-path KEY's own
-/// `validate()`-oracle table (`row_decoder/complex_column/cell_path_key.rs`), which
-/// stays `{n}` for the four strict types. The SCOPE note in
-/// `raw_value/fixed_width.rs` states that coupling.
+/// `{n, 0}` RULE (`raw_value/fixed_width.rs`'s `admissible_at_least`, which admits the
+/// same two widths for every type), the typed/UDT path's `empty_is_a_value`
+/// (`row_decoder/typed_value/scalar_rules.rs` — also uniform, a `matches!` over the
+/// spellings for which an empty buffer is a real value rather than null), and the
+/// cell-path KEY's `validate()`-oracle table
+/// (`row_decoder/complex_column/cell_path_key.rs::cql_short_allowed_widths` — the one
+/// that genuinely IS per-type), which stays `{n}` for the four strict types. The SCOPE
+/// note in `raw_value/fixed_width.rs` names two of those answers; the third is stated
+/// separately, in that same file's `THE CELL-PATH KEY` section.
 ///
 /// The case fails in BOTH directions: if any of the five stops refusing a
 /// non-zero wrong width, and if a correct width stops decoding to its declared
