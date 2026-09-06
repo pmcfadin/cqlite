@@ -478,3 +478,38 @@ fn a_refused_key_still_requires_its_frame_and_its_body_emptiness() {
         report.diffs
     );
 }
+
+/// THE STATED RESIDUAL: when EVERY key of a node is refused, the entries' EMITTED
+/// ORDER is not compared either (issue #3815, rust-reviewer round 2).
+///
+/// The positional pairing is sound as a PAIRING — it is the rule Cassandra's
+/// key-comparator order gives both sides — but it is not a CHECK: with every key
+/// suppressed nothing distinguishes entry i from entry j, so a reorder that this
+/// lane calls a divergence passes. MEASURED here, not argued: two 1-member keys make
+/// `body_emptiness_bound` assert nothing and the values are equal, so the swap
+/// yields ZERO diffs.
+///
+/// It is NOT a regression — the whole node was refused before, so the reorder was
+/// invisible then too, and behind a COARSER census entry. And it is not SILENT: both
+/// refused keys are named by path in the census, which is what makes this a declared
+/// narrowing rather than a blind spot. Asserted directly so a future strengthening
+/// has to come and change it.
+#[test]
+fn the_emitted_order_of_wholly_refused_keys_is_a_declared_residual() {
+    let golden = json!({"[\"a, b\"]": 5, "[\"c, d\"]": 5});
+    let reordered = json!("{[c, d]: 5, [a, b]: 5}");
+    let report = report_of(MAP_LIST_TEXT, golden, reordered, Egress::Csv);
+    assert!(
+        report.diffs.is_empty(),
+        "THE RESIDUAL: with every key refused, the order is not compared. If this now \
+         fails, the order became decidable — state the new rule and delete this: {:?}",
+        report.diffs
+    );
+    // …and the narrowing is DECLARED at run time, per key, which is the half that
+    // keeps it from being a blind spot.
+    assert_eq!(report.ambiguous_container_cells, 1);
+    let reasons = report.ambiguity_reasons.join("; ");
+    for path in ["c[key 0]", "c[key 1]"] {
+        assert!(reasons.contains(path), "{reasons}");
+    }
+}

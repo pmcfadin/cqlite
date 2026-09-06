@@ -1252,19 +1252,21 @@ fn a_key_refusal_is_asked_of_the_keys_whole_value_tree() {
     assert_eq!(node_refusal(&json!([["a, b"]]), Some(&outer)), None);
 }
 
-/// ONE UNRENDERABLE KEY MUST NOT COST ITS SIBLINGS THEIR REFUSAL — the fail-open
-/// round 2 closed (roborev job 444, issue #3815).
+/// ONE UNRENDERABLE KEY MUST NOT COST ITS SIBLINGS THEIR REFUSAL (roborev job 444,
+/// issue #3815 round 2).
 ///
 /// A MIXED node: entry 0's key is not a `toJSONString` document at all (the
-/// `getString` cell-path shape), entries 1 and 2 render ALIKE. The whole-map bail
-/// this replaces answered "no refusal at any reach" for the whole node, so the
-/// colliding pair was canonicalized and PAIRED — and the decoder resolved both to
-/// the FIRST of them, which is how #1491 finding T1 reported correct CLI egress as
-/// divergent. The refusal exists precisely to stop that.
+/// `getString` cell-path shape), entries 1 and 2 render ALIKE. Abstaining at entry 0
+/// is correct and intended — a golden key contradicting the DDL is a divergence for
+/// the comparison to report, never a format limit — and the defect was applying that
+/// abstention to the whole MAP: the colliding pair then got no refusal at any reach,
+/// was canonicalized and PAIRED, and the decoder resolved both to the FIRST of them,
+/// which is how #1491 finding T1 reported correct CLI egress as divergent.
 ///
-/// The bail was on `origin/main` too, at the head of `decode_does_not_recover`'s
-/// object arm one line above the duplicate check it gated, so this closes a
-/// pre-existing hole rather than one #3815 opened.
+/// PINS NEW BEHAVIOUR, and does not recover old: `origin/main` was already fail-open
+/// here (its whole-map bail sits one line above the duplicate check it gates) and
+/// this issue's first round carried the same bail into the new function. So there is
+/// no earlier state this restores.
 #[test]
 fn one_unrenderable_key_does_not_cost_its_siblings_their_refusal() {
     let ty = ty_of("frozen<map<frozen<key_part>, int>>");
@@ -1326,12 +1328,14 @@ fn one_unrenderable_key_does_not_cost_its_siblings_their_refusal() {
 
 /// …and the node-level answer for that same mixed shape is a REFUSAL, not `None`.
 ///
-/// This is the fail-open guard: `decode_does_not_recover` reaches the key-scoped
-/// question by TWO routes, and the second one — where the body causes cannot be
-/// evaluated because a key does not render — used to return `None`. VERIFIED to RED
-/// against that bug: restoring either whole-map bail (the
-/// `collect::<Option<Vec<_>>>()` in `map_key_refusals`, or `?` on the object arm's
-/// `keys`) makes this case answer `None` and this test fail.
+/// The guard for the property above, at the level the decoder and the comparator both
+/// read — and, like it, pinning NEW behaviour rather than recovering any.
+///
+/// NOT VACUOUS, verified by mutation rather than asserted: restoring the whole-map
+/// bail in `map_key_refusals` REDs this and its sibling, and restoring `None` at
+/// `decode_does_not_recover`'s `golden_rendering` branch REDs this one. (Restoring it
+/// at the object arm's `keys` branch reds NOTHING — that branch is subsumed by the
+/// `golden_rendering` one; its own comment records the measurement.)
 #[test]
 fn a_mixed_key_node_does_not_fail_open() {
     let ty = ty_of("frozen<map<frozen<key_part>, int>>");

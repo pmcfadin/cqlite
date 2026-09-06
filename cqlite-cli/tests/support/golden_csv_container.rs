@@ -293,9 +293,9 @@
 //!   and its body's emptiness, so the entry COUNT, the pair SHAPE and every VALUE
 //!   went uncompared; measured, a value corrupted 20 -> 999 inside such a cell was
 //!   invisible. Exactly the defect roborev job 28 found in `compare_map`'s multicell
-//!   path, and the same answer works: the entries pair POSITIONALLY (emitted order,
-//!   which both sides preserve and which `compare_map` already compares on) with
-//!   only the ambiguous KEYS suppressed;
+//!   path, and the same answer works: the entries pair POSITIONALLY — the
+//!   key-comparator order both sides see, though see the residual below on what that
+//!   pairing does NOT check — with only the ambiguous KEYS suppressed;
 //! * **a `, ` inside a scalar member of a key** refused NOTHING. A `list<text>` key
 //!   holding `["a, b"]` renders `[a, b]`, whose separator sits at bracket depth 1, so
 //!   the map node's entry split and its [`entry_cut`] both survive and the node
@@ -309,7 +309,15 @@
 //! `compare_map` canonicalizes a key as one value and never walks its members —
 //! there is no per-member position there to report. At a refused key exactly what
 //! survives at any other refused node survives: the bracket FRAME (required by the
-//! decoder's [`strip`], whose error is propagated) and the body's EMPTINESS. And a
+//! decoder's [`strip`], whose error is propagated) and the body's EMPTINESS. A THIRD
+//! item joins those two when EVERY key of a node is refused: the entries' emitted
+//! ORDER is then not compared either, because nothing distinguishes entry i from
+//! entry j once no key is. Positional pairing is the right PAIRING — it is the
+//! key-comparator order both sides see — but it is not a CHECK. Measured and
+//! asserted by
+//! `compare::map::tests::the_emitted_order_of_wholly_refused_keys_is_a_declared_residual`;
+//! not new, since a wholly-ambiguous node was refused WHOLE before and its order was
+//! invisible then too, behind a coarser census entry. And a
 //! key is never RESOLVED, which is the point of refusing rather than guessing: two
 //! keys sharing one spelling make either reading self-consistent, so picking one
 //! reports correct egress as a divergence for whichever entry guessed wrong (#1491
@@ -477,15 +485,14 @@ pub enum Reach {
     /// The cause sits at bracket depth >= 1 inside a key, or is an ambiguity BETWEEN
     /// two keys — either way it cannot move this node's own separators.
     ///
-    /// WHAT IT DOES AND DOES NOT ASSERT, because the difference cost a review round.
-    /// It says the body is NOT REFUSED; it does not say the body's recoverability was
-    /// VERIFIED. On the route where every key renders, the three body checks really
-    /// did run and decline. On the route where one key does NOT render, they could
-    /// not be evaluated at all — and that state was already NOT a refusal (`None`),
-    /// under which the decoder splits the node anyway. So `MapKeys` grants the
-    /// decoder exactly the licence `None` grants it and no more; the only difference
-    /// is that `decode_object` suppresses the ambiguous KEYS instead of resolving one
-    /// of them by guess (#3815 round 2).
+    /// WHAT IT DOES AND DOES NOT ASSERT, because the difference cost a review round:
+    /// the body is NOT REFUSED, which is weaker than "the body's recoverability was
+    /// VERIFIED". Where every key renders, the three body checks did run and decline.
+    /// Where one key does NOT, they could not be evaluated — and that state was
+    /// already `None`, under which the decoder splits the node anyway. So `MapKeys`
+    /// grants the decoder exactly the licence `None` does and no more; the only
+    /// difference is that `decode_object` suppresses the ambiguous KEYS instead of
+    /// resolving one by guess (#3815 round 2).
     MapKeys,
 }
 
@@ -564,15 +571,24 @@ pub fn node_refusal_reach(
 /// and never a format limit (exactly as [`node_refusal`]'s `ty` note says). It is
 /// `None` at ITS index and says NOTHING about its siblings.
 ///
-/// This used to be a whole-MAP bail (`collect::<Option<Vec<_>>>()`), and that was a
-/// FAIL-OPEN: one unrenderable key cost every OTHER key of the same map its
-/// key-scoped refusal, so a MIXED node — one `getString` key beside two keys that
-/// render ALIKE — got no refusal at ANY reach, the colliding pair was canonicalized
-/// and paired, and the wrong decode guide was selected. That is #1491 finding T1,
-/// which the refusal exists to prevent. (The same whole-map bail sits at the head of
-/// [`decode_does_not_recover`]'s object arm on `origin/main`, one line above the
-/// duplicate check it gates, so the fail-open predates this issue; it is closed in
-/// both places.)
+/// THE ABSTENTION IS PER-KEY BY INTENT; THE DEFECT WAS APPLYING IT TO THE WHOLE MAP.
+/// The intent is `origin/main`'s own, stated there verbatim — "the 'a key that does
+/// not render' case is decided in one place (here, by returning `None`: no refusal,
+/// because the golden's key is not a spelling of this declared type at all)". The
+/// spelling was a whole-map `collect::<Option<Vec<_>>>()`, so ONE unrenderable key
+/// cost every OTHER key of the same map its key-scoped refusal.
+///
+/// What that costs: a MIXED node — one `getString` key beside two keys that render
+/// ALIKE — gets no refusal at ANY reach, the colliding pair is canonicalized and
+/// paired, and the decoder resolves both to the first of them. That is #1491 finding
+/// T1, the false divergence the refusal exists to prevent.
+///
+/// NOT A REGRESSION AND NOT A RESTORATION — the one place this repository states
+/// that, so it cannot rot in four: main was already fail-open here (its whole-map bail
+/// sits one line above the duplicate check it gates) and this issue's first round
+/// carried the same bail into this new function. Fail-closed at this node is NEW
+/// behaviour this change establishes. Fixed here because the function is new code this
+/// change owns and the fix is local; severity Medium.
 ///
 /// The vector is ALWAYS the golden's own length for a map, so `rendered[i]` and the
 /// answer at `i` are both indexed BY GOLDEN ENTRY — never by a compacted list of the
@@ -790,20 +806,15 @@ fn decode_does_not_recover(
                 // refusal, per the note above, and the KEY-SCOPED question survives
                 // it per key (#3815 round 2).
                 //
-                // SUBSUMED TODAY, and MEASURED to be: `golden_rendering`'s object
-                // arm renders every key through `entry_key_rendering` and propagates
-                // its `None`, so a key that does not render already took the branch
-                // at the head of this function. Confirmed by mutation — replacing
-                // THIS branch with `None` leaves
-                // `tests::a_mixed_key_node_does_not_fail_open` and
-                // `tests::one_unrenderable_key_does_not_cost_its_siblings_their_refusal`
-                // both GREEN, while doing the same to either of the other two whole-map
-                // bails REDs them. So this branch is unreachable rather than untested,
-                // and it is stated that way instead of implying coverage it has none of.
-                //
-                // Kept, at that price, because the two routes then give the SAME answer
-                // and cannot disagree: narrowing `golden_rendering`'s key requirement
-                // later cannot silently reintroduce the fail-open here.
+                // SUBSUMED TODAY, and MEASURED to be: `golden_rendering` renders
+                // every key through `entry_key_rendering` and propagates its `None`,
+                // so a key that does not render already took the branch at the head of
+                // this function. Confirmed by mutation — replacing THIS branch with
+                // `None` reds NOTHING, while doing the same to either other whole-map
+                // bail reds `tests::a_mixed_key_node_does_not_fail_open`. Unreachable
+                // rather than untested, and stated that way rather than implying
+                // coverage it has none of. Kept anyway so the two routes give the SAME
+                // answer and cannot disagree.
                 return key_scoped_refusal(fields, ty);
             };
             let want = fields

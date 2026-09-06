@@ -138,6 +138,13 @@ pub(super) fn compare_map(
     // sides preserve it. So each key is reported at its OWN node — where a gap declared on
     // the column is still active, because the matcher is asked at every node of the gap's
     // subtree — and the values beside them are compared like any other.
+    //
+    // PAIRING IS NOT CHECKING, and the difference is a residual worth stating (#3815,
+    // rust-reviewer): positional pairing gives each entry the counterpart the
+    // key-comparator order says it has, but where the KEYS are not compared nothing
+    // distinguishes entry i from entry j — so a REORDER of unpairable entries passes
+    // whenever their values happen to agree. What the enclosing walk still gets is the
+    // entry COUNT and every VALUE, which the column-scoped abort threw away entirely.
     let unpairable_keys = container::is_container_type(key_ty)
         && at.map_key_spelling == container::MapKeySpelling::GetString;
     if unpairable_keys {
@@ -185,7 +192,13 @@ pub(super) fn compare_map(
     //
     // A refused key is recorded at its OWN node and compared only where the refusal
     // leaves something decidable: the bracket FRAME (already required by the
-    // decoder's `strip`, whose error it propagates) and the body's EMPTINESS. The
+    // decoder's `strip`, whose error it propagates) and the body's EMPTINESS — and,
+    // when EVERY key of the node is refused, NOT the entries' emitted ORDER either,
+    // because nothing then distinguishes entry i from entry j. That third item is a
+    // declared residual, measured and asserted by
+    // `tests::the_emitted_order_of_wholly_refused_keys_is_a_declared_residual`, and
+    // it is not new: a wholly-ambiguous node was refused WHOLE before, so the order
+    // was invisible then too and behind a coarser census entry. The
     // key is never RESOLVED — two keys sharing one spelling make either reading
     // self-consistent, so picking one would report correct egress as a divergence for
     // whichever entry guessed wrong (#1491 finding T1). An UNREFUSED key beside a
@@ -204,10 +217,17 @@ pub(super) fn compare_map(
         Egress::Json => Vec::new(),
     };
     if key_refused.iter().any(Option::is_some) {
-        // FAIL CLOSED if the two functions ever drift: `map_key_refusals` answers per
-        // GOLDEN entry, so `key_refused[i]` below is total. Without this an answer
-        // covering fewer entries would read as "not refused" at the uncovered ones —
-        // i.e. the loop would canonicalize a key the module just said it cannot.
+        // FAIL CLOSED on a SHORT NON-EMPTY answer, and that is ALL it detects — stated
+        // exactly, because the pushed commit message for it claimed something broader
+        // (rust-reviewer, #3815 round 2). It sits inside `.any(Option::is_some)`, so an
+        // answer that abstains ENTIRELY (an empty vector) never reaches it; guarding
+        // against that is `map_key_refusals`'s own job, which is why it now renders per
+        // ENTRY and always answers at the golden's own length.
+        //
+        // What this catches: a future `map_key_refusals` that answers for FEWER entries
+        // than the golden has. Without it the uncovered indices would read as "not
+        // refused" and the loop would canonicalize a key the module just said it cannot.
+        // It cannot fire today.
         if key_refused.len() != golden.len() {
             return Err(format!(
                 "the key-refusal answer covers {} of the golden's {} map entries",
@@ -231,6 +251,17 @@ pub(super) fn compare_map(
                     // What survives at a refused position, asked of the ONE function
                     // that answers it for every other refused node — so a key node
                     // is not a second notion of "what a refusal still decides".
+                    //
+                    // The `?` is UNREACHABLE today, by a three-case argument recorded
+                    // here rather than left to be re-derived (the sibling
+                    // `canon_container.rs` records its own the same way): a CONTAINER
+                    // key under `GetString` took the `unpairable_keys` return above; a
+                    // SCALAR key is always `Ok` (the text is the key); and a CONTAINER
+                    // key under `ToJsonString` already parsed inside
+                    // `map_key_refusals`, which is what put this index in `key_refused`
+                    // at all. It is propagated rather than defaulted because if it ever
+                    // broke, an unrecoverable golden key would surface as a row DIFF —
+                    // the exact finding-2 shape this issue exists to remove.
                     let golden_key =
                         container::golden_map_key_value(gk, key_ty, at.map_key_spelling)?;
                     csv_container::decidable_despite_node_refusal(&golden_key, ck)
