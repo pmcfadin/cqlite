@@ -7,6 +7,8 @@
 //! of that module, so the shared `row`/`schema_of` helpers and its imports are
 //! reached through `use super::*` and are stated once.
 
+use super::super::super::container::MapKeySpelling;
+use super::super::gap::Position;
 use super::*;
 
 // =======================================================================
@@ -662,16 +664,31 @@ fn the_undecoded_golden_gap_requires_the_cli_array_spelling() {
         gap.matched(
             &golden_hex,
             cli,
-            ty,
-            Egress::Json,
-            Depth::TopLevel,
-            Kinding::Natural,
+            Position {
+                ty,
+                egress: Egress::Json,
+                depth: Depth::TopLevel,
+                kinding: Kinding::Natural,
+                map_key_spelling: MapKeySpelling::ToJsonString,
+            },
         )
     };
 
+    // A WELL-FORMED decode of the declared element type. This used to pass
+    // `[{"label": "alpha"}]` against `set<text>` — an OBJECT inside a text set, which is
+    // not a decode of that type at all and was only ever a stand-in for "some array".
+    // Since roborev job 32 the matcher canonicalizes the egress side under the declared
+    // type, so the stand-in no longer qualifies — correctly: a malformed decode is not
+    // "the golden left it undecoded WHILE THE EGRESS DECODED IT". Replaced with the shape
+    // the real `s_set_udt` column actually produces.
     assert!(
-        ask(&json!([{"label": "alpha"}]), &inner_set),
+        ask(&json!(["alpha"]), &inner_set),
         "an undecoded golden scalar against a DECODED CLI array is the declared gap"
+    );
+    assert!(
+        !ask(&json!([{"label": "alpha"}]), &inner_set),
+        "…but an array whose MEMBERS do not decode to the declared element type is a \
+         malformed decode, not this gap (roborev job 32)"
     );
     for not_an_array in [
         json!({"label": "alpha"}),
@@ -684,4 +701,790 @@ fn the_undecoded_golden_gap_requires_the_cli_array_spelling() {
             "only the CLI's ARRAY spelling is this gap: {not_an_array:?}"
         );
     }
+}
+
+// =======================================================================
+// #3726: the MULTICELL map key neither side decodes
+// =======================================================================
+//
+// The retired `ContainerMapKeyNotPairableByThisLane` read NO values at all — it
+// matched from the DDL alone — so it also suppressed a null, a malformed
+// `{key,value}` array, a wrong entry count and a wrong tuple arity in FOUR columns.
+// Its replacement is stated from the two sides' MEASURED shapes, so each of those
+// is now an ordinary diff. Both directions are pinned, per shape.
+
+/// `m_tuple_udt` as declared by the committed
+/// `test-data/schemas/nested-udt-keys.cql`: the one NON-frozen map of the four.
+const MULTICELL_MAP_DDL: &str = "CREATE TYPE key_part (label text, rank int); \
+     CREATE TABLE t (id int PRIMARY KEY, \
+     m map<frozen<tuple<frozen<key_part>, int>>, int>);";
+
+const MULTICELL_MAP_GAP: [(&str, Divergence); 1] = [(
+    "m",
+    Divergence::MulticellMapKeyUndecodedByGoldenRendersAsBlobHex,
+)];
+
+/// The golden's own `m_tuple_udt` cell for the fixture's row `id=1`: two multicell
+/// cells whose PATHS are `TupleType.getString`'s colon-joined text
+/// (`JsonTransformer.serializeCell` writes a cell path with `writeString`).
+fn multicell_map_golden() -> Vec<Row> {
+    vec![row(&[
+        ("id", json!(1)),
+        ("m", json!({"charlie\\:3:8": 80, "delta\\:4:9": 90})),
+    ])]
+}
+
+/// The CLI's own rendering of it, MEASURED with `export --format json`: the key's
+/// raw serialized bytes as a CQL blob literal.
+fn multicell_map_cli(m: Value) -> Vec<Row> {
+    vec![row(&[("id", json!(1)), ("m", m)])]
+}
+
+fn measured_cli_map() -> Value {
+    json!([
+        {"key": "0x0000001300000007636861726c696500000004000000030000000400000008", "value": 80},
+        {"key": "0x000000110000000564656c746100000004000000040000000400000009", "value": 90}
+    ])
+}
+
+#[test]
+fn the_multicell_map_key_gap_suppresses_exactly_the_measured_shapes() {
+    let schema = schema_of(MULTICELL_MAP_DDL, "t");
+    // Each side's OWN measured rendering: the JSON egress's `{key,value}` array, and
+    // the CSV egress's flat cell — which `csv_container` decodes into that same
+    // array (the `0x…` text does not invert the declared tuple's grammar, so the key
+    // is left as raw text), which is why one gap covers both formats.
+    let measured_csv = json!(
+        "{0x0000001300000007636861726c696500000004000000030000000400000008: 80, \
+         0x000000110000000564656c746100000004000000040000000400000009: 90}"
+    );
+    for (egress, cli) in [
+        (Egress::Json, measured_cli_map()),
+        (Egress::Csv, measured_csv),
+    ] {
+        let report = compare_rows(
+            &multicell_map_golden(),
+            &multicell_map_cli(cli),
+            &schema,
+            &["id"],
+            &[],
+            &MULTICELL_MAP_GAP,
+            egress,
+        );
+        assert!(report.diffs.is_empty(), "{egress:?}: {:?}", report.diffs);
+        assert!(
+            report.stale_skips.is_empty(),
+            "{egress:?}: the gap must be APPLIED, not stale: {:?}",
+            report.stale_skips
+        );
+    }
+}
+
+/// Every shape the retired whole-column skip used to swallow. Each must now be
+/// reported as an ordinary diff naming the column and the declared gap.
+#[test]
+fn the_multicell_map_key_gap_covers_nothing_else() {
+    let schema = schema_of(MULTICELL_MAP_DDL, "t");
+    let undeclared: &[(&str, Value)] = &[
+        // A NULL where the golden has two entries: the column was rendered, but
+        // empty of everything.
+        ("a null", Value::Null),
+        // The entry COUNT: one of the two entries dropped.
+        (
+            "a dropped entry",
+            json!([{
+                "key": "0x0000001300000007636861726c696500000004000000030000000400000008",
+                "value": 80
+            }]),
+        ),
+        // A malformed `{key,value}` array — read through the lane's one pair reader.
+        ("a malformed pair", json!([{"key": "0x00"}, {"value": 90}])),
+        // The key DECODED, which is what closing the CQLite-side defect looks like:
+        // then this gap is stale and the two sides are compared normally (the golden
+        // still carries getString text, so a diff is the honest outcome).
+        (
+            "a decoded key",
+            json!([
+                {"key": [{"label": "charlie", "rank": 3}, 8], "value": 80},
+                {"key": [{"label": "delta", "rank": 4}, 9], "value": 90}
+            ]),
+        ),
+        // A key that is not a CQL blob literal: arbitrary text, an odd digit count,
+        // a non-hex body.
+        (
+            "arbitrary text as the key",
+            json!([
+                {"key": "charlie:3:8", "value": 80},
+                {"key": "delta:4:9", "value": 90}
+            ]),
+        ),
+        (
+            "an odd-length blob literal",
+            json!([
+                {"key": "0xabc", "value": 80},
+                {"key": "0xdef", "value": 90}
+            ]),
+        ),
+    ];
+    for (name, cli) in undeclared {
+        let report = compare_rows(
+            &multicell_map_golden(),
+            &multicell_map_cli(cli.clone()),
+            &schema,
+            &["id"],
+            &[],
+            &MULTICELL_MAP_GAP,
+            Egress::Json,
+        );
+        assert_eq!(
+            report.diffs.len(),
+            1,
+            "{name} must be reported under this gap: {:?}",
+            report.diffs
+        );
+        assert!(
+            report.diffs[0].contains("NOT the divergence"),
+            "{name}: the diff must name the declared gap: {:?}",
+            report.diffs
+        );
+    }
+    assert_eq!(undeclared.len(), 6, "the case floor for this bounding");
+}
+
+/// THE GAP COVERS THE KEY, NOT THE MAP — a corrupted VALUE beside an unpairable key is
+/// still REPORTED (roborev job 28, issue #3726).
+///
+/// The declaration used to match at the COLUMN node and suppress the entry values with the
+/// keys. Measured before the fix: this exact input produced **zero** diffs, so arbitrary
+/// value corruption passed. Both sides preserve emitted order and the values are ordinary
+/// cells, so they are comparable without decoding the keys at all — the keys' unpairability
+/// is not a reason to stop looking at anything else in the map.
+#[test]
+fn a_corrupted_value_beside_an_unpairable_key_is_reported() {
+    let schema = schema_of(MULTICELL_MAP_DDL, "t");
+    // The measured CLI spelling with the SECOND entry's value corrupted 90 -> 999.
+    let corrupted = json!([
+        {"key": "0x0000001300000007636861726c696500000004000000030000000400000008", "value": 80},
+        {"key": "0x000000110000000564656c746100000004000000040000000400000009", "value": 999}
+    ]);
+    let report = compare_rows(
+        &multicell_map_golden(),
+        &multicell_map_cli(corrupted),
+        &schema,
+        &["id"],
+        &[],
+        &MULTICELL_MAP_GAP,
+        Egress::Json,
+    );
+    assert_eq!(
+        report.diffs.len(),
+        1,
+        "the corrupted value must be reported: {:?}",
+        report.diffs
+    );
+    assert!(
+        report.diffs[0].contains("999"),
+        "the diff must name the offending value: {:?}",
+        report.diffs
+    );
+    // And the gap is still APPLIED — it suppressed the two unpairable KEYS, which is all it
+    // ever claimed. A stale report here would mean the key half stopped being covered.
+    assert!(
+        report.stale_skips.is_empty(),
+        "the key-scoped gap must still be applied: {:?}",
+        report.stale_skips
+    );
+}
+
+/// The control: with the values AGREEING, the same column is clean and the gap is applied.
+/// Without this, the case above could pass because everything diverges.
+#[test]
+fn an_unpairable_key_alone_is_suppressed_and_the_values_agree() {
+    let schema = schema_of(MULTICELL_MAP_DDL, "t");
+    let report = compare_rows(
+        &multicell_map_golden(),
+        &multicell_map_cli(measured_cli_map()),
+        &schema,
+        &["id"],
+        &[],
+        &MULTICELL_MAP_GAP,
+        Egress::Json,
+    );
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+    assert!(report.stale_skips.is_empty(), "{:?}", report.stale_skips);
+}
+
+/// A member of the right SHAPE but the WRONG KIND is REPORTED, not suppressed (roborev job
+/// 38, issue #3726).
+///
+/// This test replaces a HOLE MARKER. Until the leaf-kind check landed, the matcher read
+/// `canon_typed(...).is_ok()` as "the egress produced a well-formed value of this type" — and
+/// the canonicalizer accepts a string where an `int` is declared ON PURPOSE, so
+/// `"not-an-int"` inside a declared `set<int>` was suppressed. The previous version of this
+/// test asserted that hole deliberately, with a message saying a red meant a validator had
+/// landed and the test should be deleted. It red. This is the deletion, and it is the argument
+/// for writing residuals as tests rather than as prose: the paragraph would still be sitting
+/// there claiming a limitation that no longer exists.
+#[test]
+fn the_undecoded_golden_gap_reports_a_wrong_kind_member() {
+    let gap = Divergence::NestedFrozenValueLeftUndecodedByGolden;
+    let inner = CqlType::Set(Box::new(CqlType::Numeric("int".into())));
+    let golden_hex = json!("000000020000001100000005616c706861");
+    let ask = |cli: &Value| {
+        gap.matched(
+            &golden_hex,
+            cli,
+            Position {
+                ty: &inner,
+                egress: Egress::Json,
+                depth: Depth::TopLevel,
+                kinding: Kinding::Natural,
+                map_key_spelling: MapKeySpelling::ToJsonString,
+            },
+        )
+    };
+    assert!(
+        !ask(&json!(["not-an-int"])),
+        "a member whose KIND is not the declared one is not a decode of this type, so it is \
+         NOT this gap and must be reported"
+    );
+    // The control: the same shape with a correctly-kinded member IS the gap. Without it this
+    // case could pass because the matcher had stopped matching anything at all.
+    assert!(
+        ask(&json!([7])),
+        "a correctly-kinded decoded member against an undecoded golden IS the declared gap"
+    );
+    // A NULL COLLECTION ELEMENT is malformed, not excusable (roborev job 60). CQL does not
+    // permit a null inside a collection — a `set<int>` cannot hold one, and a null map value
+    // DELETES the entry rather than storing one — so it is not a decode of this type and must
+    // be REPORTED. Nulls stay legal at a tuple SLOT and a UDT FIELD, which is where the
+    // committed fixture carries them (`rank:null`, `label:null`); measured on the golden,
+    // ZERO nulls appear directly in a collection array.
+    assert!(
+        !ask(&json!([null])),
+        "CQL forbids a null collection element, so it is malformed output and not this gap"
+    );
+}
+
+/// CSV's boolean text form is EXACTLY `true`/`false` — arbitrary text does not qualify as a
+/// decoded boolean (roborev job 72, issue #3726).
+///
+/// `Canon::for_csv` renders a boolean as `Canon::Text(b.to_string())`, so the text form is
+/// legal under CSV and NOT under JSON. Accepting every `Canon::Text` there let `"not-a-bool"`
+/// pass as a well-formed boolean and be suppressed by the undecoded-golden gap. Authority for
+/// the pair: `cassandra-5.0.8 BooleanSerializer.toString` returns `value.toString()`, and
+/// `for_csv` uses Rust's `bool::to_string` — the same two words.
+#[test]
+fn the_csv_boolean_kind_accepts_only_true_and_false() {
+    let gap = Divergence::NestedFrozenValueLeftUndecodedByGolden;
+    let inner = CqlType::Set(Box::new(CqlType::Boolean));
+    let golden_hex = json!("000000020000001100000005616c706861");
+    let ask = |cli: &Value, egress: Egress| {
+        gap.matched(
+            &golden_hex,
+            cli,
+            Position {
+                ty: &inner,
+                egress,
+                depth: Depth::TopLevel,
+                kinding: Kinding::Natural,
+                map_key_spelling: MapKeySpelling::ToJsonString,
+            },
+        )
+    };
+    assert!(
+        ask(&json!(["true"]), Egress::Csv),
+        "CSV renders a boolean as its text spelling, so `true` IS a decoded boolean"
+    );
+    assert!(
+        !ask(&json!(["not-a-bool"]), Egress::Csv),
+        "arbitrary text is not a spelling `bool::to_string` can produce, so it is malformed \
+         output and must be reported rather than suppressed"
+    );
+    // And the JSON lane never accepts the text form at all — a boolean column keeps its
+    // declared type's JSON kind there.
+    assert!(
+        !ask(&json!(["true"]), Egress::Json),
+        "JSON requires the raw boolean"
+    );
+    assert!(ask(&json!([true]), Egress::Json), "…which this is");
+}
+
+/// A `getString` key that COINCIDENTALLY parses as the declared type's
+/// `toJSONString` document is STILL this gap (roborev job 106, issue #3726).
+///
+/// The DDL decides which writer spelled the key, and a VALUE cannot overrule it:
+/// `map_key_spelling` is `GetString` here because the column is multicell, so
+/// `cassandra-5.0.8 JsonTransformer.serializeCell` wrote this key with
+/// `writeString(ct.nameComparator().getString(...))` — flat text, whatever that text
+/// happens to look like.
+///
+/// The two languages OVERLAP, which is why no value-level test can separate them:
+/// `TupleType.getString` on a one-component `tuple<text>` emits that component's text
+/// verbatim, so a component whose value is `[]` is spelled `[]` — and `[]` is also a
+/// well-formed `toJSONString` document for the same declared type. Tightening the
+/// parse would not help: a component whose value is `["[]"]` is spelled `["[]"]`,
+/// which is a well-formed, correctly-kinded, correctly-sized one-element tuple
+/// document too.
+const COINCIDENTAL_JSON_KEY_DDL: &str =
+    "CREATE TABLE t (id int PRIMARY KEY, m map<frozen<tuple<text>>, int>);";
+
+#[test]
+fn a_getstring_key_that_parses_as_the_declared_document_is_still_this_gap() {
+    let schema = schema_of(COINCIDENTAL_JSON_KEY_DDL, "t");
+    for coincidence in ["[]", "[\"[]\"]"] {
+        let golden = vec![row(&[("id", json!(1)), ("m", json!({ coincidence: 80 }))])];
+        // The key's own serialized bytes: a one-component tuple is `[len][bytes]`.
+        let key_hex = format!(
+            "0x{:08x}{}",
+            coincidence.len(),
+            coincidence
+                .as_bytes()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
+        let report = compare_rows(
+            &golden,
+            &multicell_map_cli(json!([{"key": key_hex, "value": 80}])),
+            &schema,
+            &["id"],
+            &[],
+            &MULTICELL_MAP_GAP,
+            Egress::Json,
+        );
+        assert!(
+            report.diffs.is_empty(),
+            "{coincidence}: the DDL says the golden is getString text, so this is the \
+             declared gap and not a diff: {:?}",
+            report.diffs
+        );
+        assert!(
+            report.stale_skips.is_empty(),
+            "{coincidence}: the gap must be APPLIED, not stale: {:?}",
+            report.stale_skips
+        );
+    }
+}
+
+/// The INVERSE of the case `17f081264` pinned, and it supersedes it (roborev job 106).
+///
+/// That commit answered a finding asking the gap to require the golden's keys to be
+/// UNDECODED, so that a `sstabledump` which began decoding a multicell cell path would
+/// retire the declaration instead of suppressing an improved golden. It implemented the
+/// requirement as a PARSE, and a parse cannot carry it: the same input is reachable as
+/// genuine `getString` text, which is the case above.
+///
+/// The DDL answers the same question for the pinned oracle and cannot be wrong — a
+/// multicell container-keyed column IS one whose cell path `JsonTransformer` wrote with
+/// `getString` (`cassandra-5.0.8`) — so a golden that merely LOOKS decoded is still this
+/// gap. The retirement axis that remains is the EGRESS
+/// (`the_multicell_map_key_gap_retires_when_the_egress_decodes_the_key`); the golden axis
+/// is a declared residual, stated at the matcher.
+#[test]
+fn a_document_shaped_golden_on_a_multicell_column_is_still_this_gap() {
+    let schema = schema_of(MULTICELL_MAP_DDL, "t");
+    let document_shaped = vec![row(&[
+        ("id", json!(1)),
+        (
+            "m",
+            json!({"[{\"label\": \"charlie\", \"rank\": 3}, 8]": 80}),
+        ),
+    ])];
+    let report = compare_rows(
+        &document_shaped,
+        &multicell_map_cli(json!([
+            {"key": "0x0000001300000007636861726c696500000004000000030000000400000008", "value": 80}
+        ])),
+        &schema,
+        &["id"],
+        &[],
+        &MULTICELL_MAP_GAP,
+        Egress::Json,
+    );
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+    assert!(
+        report.stale_skips.is_empty(),
+        "the DDL decides, so the gap is APPLIED: {:?}",
+        report.stale_skips
+    );
+}
+
+/// THE RETIREMENT AXIS IS THE EGRESS, and it is the only one that can move.
+///
+/// The gap's DDL half (a multicell column with a container key type) is fixed by the
+/// committed schema and the golden's `getString` spelling follows from it, so neither
+/// can change while the fixture does not. What CAN change is CQLite: when it decodes
+/// a multicell map's cell path instead of handing back the raw key bytes, the CLI
+/// half stops matching, the gap suppresses nothing and `Report::stale_skips` FAILS
+/// the lane until the declaration is removed or re-scoped.
+///
+/// Worth stating because it is NOT obvious and it bounds the follow-up: fixing the
+/// egress alone does not make this column AGREE. The golden leaves the key undecoded
+/// too, so the pair becomes an ordinary reported divergence — a golden-side rule for
+/// `getString`-spelled container keys is a separate piece of work.
+#[test]
+fn the_multicell_map_key_gap_retires_when_the_egress_decodes_the_key() {
+    let schema = schema_of(MULTICELL_MAP_DDL, "t");
+    let cli = multicell_map_cli(json!([
+        {"key": [{"label": "charlie", "rank": 3}, 8], "value": 80},
+        {"key": [{"label": "delta", "rank": 4}, 9], "value": 90}
+    ]));
+    let report = compare_rows(
+        &multicell_map_golden(),
+        &cli,
+        &schema,
+        &["id"],
+        &[],
+        &MULTICELL_MAP_GAP,
+        Egress::Json,
+    );
+    assert_eq!(
+        report.stale_skips.len(),
+        1,
+        "a decoded egress must retire the gap: {:?}",
+        report.stale_skips
+    );
+}
+
+/// THE REGRESSION TEST FOR THE PERMISSIVE DIRECTION.
+///
+/// An earlier revision of this matcher decided the multicell case by asking whether
+/// the golden's keys FAILED to parse as JSON. That is unsound the permissive way:
+/// "the keys did not parse" is not "this column is multicell". A FROZEN map whose
+/// golden key is malformed is an ORACLE fault the comparison must REPORT, and under
+/// that revision this gap SUPPRESSED it instead.
+///
+/// The matcher now reads the multicellness from the committed DDL
+/// (`schema::Column::is_multicell()`, carried as `container::MapKeySpelling`), so the
+/// same golden and the same egress under a FROZEN declaration are NOT this gap.
+#[test]
+fn a_frozen_column_with_an_unparseable_golden_key_is_not_this_gap() {
+    let frozen_ddl = "CREATE TYPE key_part (label text, rank int); \
+         CREATE TABLE t (id int PRIMARY KEY, \
+         m frozen<map<frozen<tuple<frozen<key_part>, int>>, int>>);";
+    let schema = schema_of(frozen_ddl, "t");
+    let report = compare_rows(
+        &multicell_map_golden(),
+        &multicell_map_cli(measured_cli_map()),
+        &schema,
+        &["id"],
+        &[],
+        &MULTICELL_MAP_GAP,
+        Egress::Json,
+    );
+    assert_eq!(
+        report.stale_skips.len(),
+        1,
+        "a FROZEN column is not the multicell gap, so the declaration must go stale: {:?}",
+        report.stale_skips
+    );
+    assert_eq!(
+        report.diffs.len(),
+        1,
+        "and the oracle fault must be REPORTED, not suppressed: {:?}",
+        report.diffs
+    );
+}
+
+/// And an EMPTY golden map exhibits no key spelling at all, so there is nothing
+/// measured for the gap to suppress: it must not match, and the gap is stale.
+#[test]
+fn the_multicell_map_key_gap_does_not_match_an_empty_map() {
+    let schema = schema_of(MULTICELL_MAP_DDL, "t");
+    let golden = vec![row(&[("id", json!(1)), ("m", json!({}))])];
+    let report = compare_rows(
+        &golden,
+        &multicell_map_cli(json!([])),
+        &schema,
+        &["id"],
+        &[],
+        &MULTICELL_MAP_GAP,
+        Egress::Json,
+    );
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+    assert_eq!(report.stale_skips.len(), 1, "{:?}", report.stale_skips);
+}
+
+/// The `temperature` gap declares an exact-TIE `float` spelled with the
+/// away-from-zero digit where `Float.toString` breaks the tie to EVEN — the SAME
+/// f32, only the tie-break digit differing. So it may suppress nothing else: a
+/// DIFFERENT f32 at that position is a value error, which is what this lane exists
+/// to catch, and it is reported as an ordinary diff.
+///
+/// CSV-scoped by declaration and by the divergence itself: the JSON egress renders
+/// the oracle's spelling (issue #3777), so a JSON-lane match would excuse a real
+/// regression there.
+#[test]
+fn the_float_tie_break_gap_does_not_cover_a_different_f32() {
+    let schema = schema_of(
+        "CREATE TABLE t (id int PRIMARY KEY, temperature float);",
+        "t",
+    );
+    let gap = [(
+        "temperature",
+        Divergence::Float32TieBreakSpellingDiffersFromJava,
+    )];
+    // The real divergent cell: f32 36.6015625, whose two equidistant 8-digit
+    // spellings both round-trip.
+    let golden = vec![row(&[("id", json!(1)), ("temperature", json!(36.601562))])];
+
+    // DECLARED: the away-from-zero spelling of the same f32, as a CSV field.
+    let declared = vec![row(&[
+        ("id", json!(1)),
+        ("temperature", json!("36.601563")),
+    ])];
+    let report = compare_rows(&golden, &declared, &schema, &["id"], &[], &gap, Egress::Csv);
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+    assert!(report.stale_skips.is_empty(), "{:?}", report.stale_skips);
+
+    // UNDECLARED: a DIFFERENT f32 (one ulp away, and a wholly wrong value), a
+    // non-numeric spelling, and a null. None of these is a tie-break spelling.
+    for wrong in [
+        json!("36.60156"),
+        json!("36.605"),
+        json!("not-a-number"),
+        json!(null),
+    ] {
+        let cli = vec![row(&[("id", json!(1)), ("temperature", wrong.clone())])];
+        let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &gap, Egress::Csv);
+        assert_eq!(
+            report.diffs.len(),
+            1,
+            "a different f32 must still be compared under the tie-break gap ({wrong}): {:?}",
+            report.diffs
+        );
+    }
+
+    // FORMAT SCOPE: the same pair in the JSON lane is NOT this gap — the JSON
+    // egress spells the oracle's tie-to-even form since #3777, so a JSON mismatch
+    // here is a regression and must be reported.
+    let json_cli = vec![row(&[("id", json!(1)), ("temperature", json!(36.601563))])];
+    let report = compare_rows(
+        &golden,
+        &json_cli,
+        &schema,
+        &["id"],
+        &[],
+        &gap,
+        Egress::Json,
+    );
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+}
+
+/// Decimals inside the SAME f32 rounding interval that NEITHER formatter produces
+/// (roborev, issue #3777). 36.6015625's interval spans roughly
+/// (36.6015606, 36.6015644), so each of these parses to the same f32 as the real
+/// pair — and none of them is Rust `Display`'s `36.601563` or serde_json's
+/// `36.601562`, so the tie-break gap must NOT suppress them.
+///
+/// A named const with a floor asserted below, not an inline list: a span-replacing
+/// edit that deletes cases leaves a green run over a shrunken set (#3544).
+const NON_FORMATTER_TIE_SPELLINGS: &[&str] = &["36.6015624", "36.601564", "36.601561"];
+
+/// f32-equality is NOT the gap: the two sides must be the SPELLINGS THE TWO
+/// FORMATTERS PRODUCE. A third decimal in the same rounding interval is a value
+/// nothing on either side of this comparison can emit, so suppressing it would make
+/// the gap a blind spot for the whole cell instead of the declared Java-vs-Rust
+/// tie-break.
+#[test]
+fn the_float_tie_break_gap_rejects_a_spelling_neither_formatter_produces() {
+    assert!(
+        NON_FORMATTER_TIE_SPELLINGS.len() >= 3,
+        "case floor: at least three non-formatter spellings must be exercised"
+    );
+    let schema = schema_of(
+        "CREATE TABLE t (id int PRIMARY KEY, temperature float);",
+        "t",
+    );
+    let gap = [(
+        "temperature",
+        Divergence::Float32TieBreakSpellingDiffersFromJava,
+    )];
+    let golden = vec![row(&[("id", json!(1)), ("temperature", json!(36.601562))])];
+    // 36.6015625 exactly, written as the fraction 4685/128 (both operands are
+    // exactly representable, so the division is exact). A decimal literal here
+    // trips `clippy::excessive_precision`, whose suggested truncation is
+    // `36.601563` — one of the two spellings UNDER TEST — which would make the
+    // fixture read as the Display side rather than as the exact f32.
+    let tie: f32 = 4685.0 / 128.0;
+
+    for spelling in NON_FORMATTER_TIE_SPELLINGS {
+        // The case data is self-checked: each spelling really is the SAME f32, so
+        // the only thing making it an ordinary diff is that no formatter emits it.
+        let parsed: f32 = spelling
+            .parse()
+            .unwrap_or_else(|e| panic!("{spelling} is not an f32: {e}"));
+        assert_eq!(
+            parsed.to_bits(),
+            tie.to_bits(),
+            "{spelling} must lie in 36.6015625's rounding interval, or it tests \
+             nothing about the formatter pair"
+        );
+        assert_ne!(*spelling, tie.to_string(), "that IS Display's spelling");
+        assert_ne!(
+            *spelling,
+            serde_json::to_string(&tie).expect("serialize f32"),
+            "that IS serde_json's spelling"
+        );
+
+        let cli = vec![row(&[("id", json!(1)), ("temperature", json!(spelling))])];
+        let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &gap, Egress::Csv);
+        assert_eq!(
+            report.diffs.len(),
+            1,
+            "{spelling} is not a formatter spelling and must be reported: {:?}",
+            report.diffs
+        );
+        assert!(
+            report.diffs[0].contains("NOT the divergence"),
+            "{:?}",
+            report.diffs
+        );
+    }
+}
+
+/// Formatter disagreements that are NOT ties, so the gap may NOT claim them
+/// (roborev, issue #3777). Each entry is `(value, golden spelling, CLI spelling)`
+/// for ONE f32, each side being exactly what its own formatter emits — so the
+/// FORMATTER-PAIR half of the predicate matches and only the exact-tie proof
+/// rejects them.
+///
+/// `-0.0` is roborev's own counterexample: serde_json writes `-0.0`, Rust
+/// `Display` writes `-0`. Both denote the value EXACTLY, so nothing is being
+/// approximated and there is no tie to break. `1.0` vs `1` and `-7.0` vs `-7` are
+/// the same shape at an integral value.
+///
+/// A named const with a floor asserted below, not an inline list: a span-replacing
+/// edit that deletes cases leaves a green run over a shrunken set (#3544).
+const NON_TIE_FORMATTER_DISAGREEMENTS: &[(f32, &str, &str)] = &[
+    (-0.0, "-0.0", "-0"),
+    (1.0, "1.0", "1"),
+    (-7.0, "-7.0", "-7"),
+];
+
+/// The gap's own predicate, asked DIRECTLY (`Divergence::matched`) rather than
+/// through `compare_rows`, and that level is the point: these three pairs are
+/// numerically EQUAL to the comparator, so no divergence arises at that position
+/// and there is no diff either way. What would be wrong is the gap CLAIMING them —
+/// a declared gap that answers "yes" to a pair it was never measured on is a
+/// standing licence to suppress whatever lands there next, which is exactly what
+/// this module's doc forbids.
+#[test]
+fn the_float_tie_break_gap_rejects_a_formatter_disagreement_that_is_not_a_tie() {
+    assert!(
+        NON_TIE_FORMATTER_DISAGREEMENTS.len() >= 3,
+        "case floor: at least three non-tie formatter disagreements must be exercised"
+    );
+    let gap = Divergence::Float32TieBreakSpellingDiffersFromJava;
+    let float_ty = CqlType::Numeric("float".into());
+
+    for (value, golden_spelling, cli_spelling) in NON_TIE_FORMATTER_DISAGREEMENTS {
+        // Self-checked case data: each side really IS its formatter's own output
+        // for this f32, so the pair-equality half of the predicate is satisfied and
+        // the refusal can only come from the exact-tie proof.
+        assert_eq!(
+            &serde_json::to_string(value).expect("serialize f32"),
+            golden_spelling,
+            "the golden side must be serde_json's spelling"
+        );
+        assert_eq!(
+            &value.to_string(),
+            cli_spelling,
+            "the CLI side must be Display's spelling"
+        );
+        assert_eq!(
+            golden_spelling.parse::<f32>().expect("f32").to_bits(),
+            cli_spelling.parse::<f32>().expect("f32").to_bits(),
+            "both spellings must be the SAME f32, or the pair tests nothing"
+        );
+
+        assert!(
+            !gap.matched(
+                &json!(*golden_spelling),
+                &json!(*cli_spelling),
+                Position {
+                    ty: &float_ty,
+                    egress: Egress::Csv,
+                    depth: Depth::TopLevel,
+                    kinding: Kinding::Natural,
+                    // A scalar `float` column is never multicell, so this is the
+                    // spelling `compare::map_key_spelling` derives for it; the
+                    // tie-break matcher does not read it.
+                    map_key_spelling: MapKeySpelling::ToJsonString,
+                },
+            ),
+            "{golden_spelling} vs {cli_spelling} is not a TIE and is not this gap"
+        );
+    }
+
+    // And the pair really is a non-event for the comparator: declaring the gap over
+    // it suppresses nothing, so the walk reports the gap as unapplied rather than
+    // silently carrying it.
+    let schema = schema_of(
+        "CREATE TABLE t (id int PRIMARY KEY, temperature float);",
+        "t",
+    );
+    let declared = [(
+        "temperature",
+        Divergence::Float32TieBreakSpellingDiffersFromJava,
+    )];
+    let golden = vec![row(&[("id", json!(1)), ("temperature", json!("-0.0"))])];
+    let cli = vec![row(&[("id", json!(1)), ("temperature", json!("-0"))])];
+    let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &declared, Egress::Csv);
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+    assert_eq!(
+        report.stale_skips.len(),
+        1,
+        "a gap that suppressed nothing must be reported stale: {:?}",
+        report.stale_skips
+    );
+}
+
+/// The MEASURED tie still applies after the exact-midpoint proof was added — the
+/// property the census depends on (CSV 15999 / JSON 16000 cells for
+/// `test_timeseries.sensor_data`). 36.6015625 is exactly the mean of the two
+/// decimals `36.601562` and `36.601563`, which is what makes this pair a tie and
+/// the pairs above not.
+///
+/// Written as the fraction 4685/128 (both operands exactly representable, so the
+/// division is exact): a decimal literal trips `clippy::excessive_precision`, whose
+/// suggested truncation is `36.601563` — one of the two spellings UNDER TEST.
+#[test]
+fn the_float_tie_break_gap_still_covers_the_measured_exact_tie() {
+    let tie: f32 = 4685.0 / 128.0;
+    let golden_spelling = serde_json::to_string(&tie).expect("serialize f32");
+    let cli_spelling = tie.to_string();
+    assert_eq!(golden_spelling, "36.601562");
+    assert_eq!(cli_spelling, "36.601563");
+
+    let schema = schema_of(
+        "CREATE TABLE t (id int PRIMARY KEY, temperature float);",
+        "t",
+    );
+    let gap = [(
+        "temperature",
+        Divergence::Float32TieBreakSpellingDiffersFromJava,
+    )];
+    let golden = vec![row(&[
+        ("id", json!(1)),
+        ("temperature", json!(golden_spelling)),
+    ])];
+    let cli = vec![row(&[
+        ("id", json!(1)),
+        ("temperature", json!(cli_spelling)),
+    ])];
+    let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &gap, Egress::Csv);
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+    assert!(report.stale_skips.is_empty(), "{:?}", report.stale_skips);
+
+    // And a DIFFERENT f32 at the same position — one ulp up, spelled by the same
+    // two formatters — is a value error, not this gap.
+    let next = f32::from_bits(tie.to_bits() + 1);
+    let wrong = vec![row(&[
+        ("id", json!(1)),
+        ("temperature", json!(next.to_string())),
+    ])];
+    let report = compare_rows(&golden, &wrong, &schema, &["id"], &[], &gap, Egress::Csv);
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
 }

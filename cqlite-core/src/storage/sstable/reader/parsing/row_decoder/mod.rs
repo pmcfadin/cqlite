@@ -786,6 +786,7 @@ pub(in crate::storage::sstable::reader) use compaction_stream::{
 };
 mod complex_column;
 mod frozen;
+mod frozen_map; // campsite split of `frozen` (#1116): frozen MAP decoding + the never-null key rule (#3847)
 mod frozen_preamble;
 mod marshal_element;
 pub(crate) mod now_clock;
@@ -866,3 +867,8 @@ mod regression_3848_frozen_preamble_overflow_tests;
 // the value silently degrades to `Blob`.
 #[cfg(test)]
 mod regression_2807_qualified_udt_decode_tests;
+
+// Issue #3778: `duration` trailing-byte tolerance is PARITY-CORRECT, not a bug —
+// the oracle and the ruling are in that module's own header. Read it before "fixing".
+#[cfg(test)]
+mod issue_3778_duration_parity_tests;

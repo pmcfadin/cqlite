@@ -1343,7 +1343,6 @@ dependencies = [
  "futures",
  "hex",
  "insta",
- "js-sys",
  "libc",
  "lru 0.16.4",
  "lz4_flex",
@@ -1383,8 +1382,6 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "wait-timeout",
- "wasm-bindgen",
- "web-sys",
  "zstd",
 ]
 

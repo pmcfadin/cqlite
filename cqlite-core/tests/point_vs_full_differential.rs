@@ -63,7 +63,7 @@
     feature = "cli-helpers",
     // `issue_3782_corrupt_agreement` (submodule, unconditionally compiled into
     // this target) stages the LZ4-compressed #3782 fixture through
-    // `support/corrupt_clustering_fixture.rs`, whose control leg cannot decode
+    // `support/corrupt_byte_fixture.rs`, whose control leg cannot decode
     // without the production `lz4` decoder — see the note on
     // `issue_3782_corrupt_row_refusal.rs` (roborev job 59 finding 2, #3950).
     // Kept in step with `Cargo.toml`'s `required-features`.

@@ -197,6 +197,7 @@ impl SSTableReader {
             ScanAdmission::Acquire => Some(scan_admission::admit().await),
             ScanAdmission::Exempt => None,
         };
+        let _scan = self.begin_scan(); // #3853 scan-lifetime madvise seam
 
         let cursor = self.open_batched_scan_cursor().await?;
 
