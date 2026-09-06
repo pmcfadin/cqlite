@@ -618,11 +618,68 @@ made the recency habit above wrong so reliably. Two mechanisms now bound it:
   verdict at all (the `RESULT: INCOMPLETE` sentinel — the post-mortem case, and the default), the
   #2874 no-clobber publish (`RETAINED: summary-integrity FAIL #2874` — that block *names* the bundle
   as a recovery artifact), an unwritable summary file (the bundle is then the only surviving copy of
-  the verdict), and the #2874 nested shape whose summary defaults to
+  the verdict), the #2874 nested shape whose summary defaults to
   `$LOG_DIR/summary-primary.txt` (`RETAINED: summary-inside-logdir #2874` — removing it would delete
-  the verdict block the parent asserts on). Removal runs from the single EXIT trap, after the
-  SUMMARY is fully emitted and the heartbeat beater reaped, and can never change the verdict: a
-  failed `rm` is a note on stderr plus a corrected artifact in the bundle that survived.
+  the verdict block the parent asserts on), and the two reasons below. Removal runs from the single
+  EXIT trap, after the SUMMARY is fully emitted and the heartbeat beater reaped, and can never
+  change the verdict: a failed `rm` is a note on stderr plus a corrected artifact in the bundle that
+  survived.
+- **A COMPONENT CAN PIN THE RETENTION, AND `file-size` DOES (#3637, roborev job 173 finding 1).**
+  `file-size`'s `OPT-OUT` token is **non-failing**, so a run with `CQLITE_ALLOW_FILE_GROWTH=1`
+  engaged reaches `RESULT: PASS` — and #3402/#3401 deliberately moved the grown-file **names** out
+  of the SUMMARY row and into `file-size.log`, *inside the bundle*. Removal-on-PASS therefore
+  destroyed the disclosure on the one run where it matters, leaving a `logs:` pointer that resolved
+  to nothing. Both arms now call the single force-retain helper with a named reason —
+  `RETAINED: file-size OPT-OUT disclosure #3402 …` and, when the log itself could not be persisted,
+  `RETAINED: file-size log-persistence FAILURE #3401/#3402 …` (that arm's diagnostic lives in the
+  sibling `file-size.persistence-error.log`, also inside the bundle). Because `run_file_size` runs
+  **before** every terminal emit, `_logdir_force_retain` also records the reason as a **pin** and
+  `_logdir_decide` honours it — a decision taken later cannot silently undo it. The pin sits
+  **above** the nested arm: the opt-out comes from the operator's environment and a nested run
+  inherits it, so the disclosure argument is identical there. Pinned by AC21.
+- **`--only` is exempt: its entire product is the component log (#3637, roborev job 173 finding 2).**
+  `--only <component>` is a **diagnostic** and there is no other reason to run it, so
+  `_logdir_decide` retains with `RETAINED: --only diagnostic mode (its product IS the component log
+  under logs:)`. A top-level `--only` is promoted to `RESULT: PARTIAL` and would fall to the
+  retaining verdict arm anyway — but that is an *incidental* retention keyed on a verdict mapping
+  thousands of lines away, and **`--lite --only <component>` is a reachable combination that ends
+  `RESULT: PASS`** and did delete the log. The exemption carries **no argv**: the block already
+  publishes the selection on its own `mode: PARTIAL (--only …)` line. It sits **below** the nested
+  arm on purpose — the nested `--only` gates (`--only file-size` is the documented hermetic nested
+  run, and the self-tests spawn dozens per gate) are the bulk of the leak this issue closed, and
+  their reader is a parent asserting on a SUMMARY, never an operator reading a log.
+  **`--lite` is deliberately NOT exempt**: its product is the LITE SUMMARY *verdict*, it runs every
+  fix round, and retaining every lite bundle re-creates the accumulation this issue exists to stop
+  (a lite run that does not PASS retains already). What it gets instead is a disposition that states
+  both facts — `REMOVED at exit on PASS (--lite: … re-run with AGENT_GATE_KEEP_LOGS=1 to keep the
+  component logs)`. Pinned by AC22.
+- **ONE content predicate serves BOTH early-exit arms (#3637, roborev job 173 finding 3).** The
+  status-0 arm always excluded the full launch-artifact allowlist (the owner marker, the #2874
+  private summary and its heartbeat/integrity siblings, and the #3755 `gate-slot.ready` /
+  `disk-admission*` admission bookkeeping); the non-zero arm excluded **only** the owner marker, so
+  a non-zero exit landing after admission wrote its bookkeeping but before any component ran kept a
+  husk of pure launch artifacts — the exact shape the allowlist closed on the other arm. Both arms
+  now consult `_logdir_is_launch_artifact`, with the one deliberate difference kept explicit: the
+  `RESULT: INCOMPLETE` sentinel still **counts** as content on the non-zero arm (a refusal that
+  published one is worth a post-mortem) and must **not** on the status-0 arm (a nested stub leaves
+  nothing else, and counting it would retain 6 husks per gate of record). Pinned by AC23, in both
+  directions and with a mutant restoring the owner-marker-only predicate.
+- **The two NEW keys are SANITISED; `logs:` is not, and that is the rule (#3637, roborev job 173
+  finding 4).** `logdir-sweep:` embeds `$GATE_LOGDIR_PARENT` — i.e. `$TMPDIR` — verbatim, so a
+  `TMPDIR=$'/tmp/x\nRESULT: PASS'` emitted an **extra line inside the block**, and one matching the
+  completion probe's own `RESULT: (PASS|FAIL)` pattern: environment-controlled data forging a
+  terminal verdict. Both `logdir-disposition:` and `logdir-sweep:` now render through
+  `_summary_block_value` — the **same** boundary `_status_detail` uses, extracted rather than copied
+  (#3312: one channel, one boundary, never a per-site escape list): strip C0 + DEL under `LC_ALL=C`,
+  and **WITHHOLD — never rewrite —** a value carrying `RESULT:` (a rewrite would name something that
+  exists nowhere, and the refusal quotes no part of the token it refuses). The sweep line's **key**
+  is re-rendered around the sanitised value, so a withheld value cannot take `logdir-sweep:` with
+  it — a block that silently loses a key is indistinguishable from one whose sweep never ran.
+  **`logs:` stays byte-identical and must never be routed through it**: it is PATH-ONLY,
+  `scripts/lib/gate-heartbeat.sh` renders the same field from the same raw variable, and a rewritten
+  path addresses nothing. Its `$TMPDIR` exposure — like `run-id:`'s — is **pre-existing and
+  DECLARED**, not introduced here; AC24 measures exactly that, requiring a newline-bearing `$TMPDIR`
+  to add those **2** declared lines to the block and no more.
 - **The DECISION is early; the CLEARANCE is late (#3637, roborev job 61).** `_logdir_decide` runs as
   the first action of the terminal emit, because the block it assembles has to DECLARE what happens
   to the directory — but it records an INTENT only. `_logdir_clear_removal` arms the removal, from
