@@ -206,8 +206,30 @@ ALLOCATOR_SURFACE_RE='^allocator: (jemalloc|system)$'
 # require_reported_allocator <label> <binary> <expected> — fail CLOSED on every unmeasurable
 # state, each naming its own cause, because "the binary did not say" and "the binary said the
 # other thing" are different operator actions (rebuild vs. point --bin-dir-e somewhere else).
+# _echo_version_streams <stdout> <stderr> — reprint what the binary said, WITH THE STREAM NAMED.
+# Every refusal shows both, because stderr is where a binary that cannot start explains itself;
+# they are LABELLED because an unlabelled dump is the merge this round removed, one layer up in
+# the reader's head — a reader who cannot tell which stream carried the `allocator:` line cannot
+# check the diagnosis. An EMPTY stream says so affirmatively rather than printing nothing, since
+# "printed nothing on stdout" is the whole finding in the stderr-only case.
+_echo_version_streams() {
+  local o="$1" e="$2"
+  if [[ -n "$o" ]]; then
+    echo "       stdout (the ONLY stream R2.1's line may come from):" >&2
+    printf '%s\n' "$o" | sed 's/^/         stdout | /' >&2
+  else
+    echo "       stdout: EMPTY — nothing was printed on the only stream that can satisfy R2.1." >&2
+  fi
+  if [[ -n "$e" ]]; then
+    echo "       stderr (DIAGNOSTIC ONLY — it can satisfy nothing):" >&2
+    printf '%s\n' "$e" | sed 's/^/         stderr | /' >&2
+  else
+    echo "       stderr: EMPTY." >&2
+  fi
+}
+
 require_reported_allocator() {
-  local label="$1" bin="$2" expect="$3" rc=0 out n
+  local label="$1" bin="$2" expect="$3" rc=0 out err n stream_dir
   local -a matched
   if [[ ! -f "$bin" ]]; then
     echo "FATAL: $label '$bin' is not a file, so its allocator could not be READ." >&2
@@ -223,7 +245,27 @@ require_reported_allocator() {
     exit 2
   fi
   if command -v timeout >/dev/null 2>&1; then
-    out="$(timeout -k 5 60 "$bin" --version 2>&1)" || rc=$?
+    # THE TWO STREAMS ARE CAPTURED SEPARATELY, AND ONLY STDOUT IS MATCHED (#3997, roborev round
+    # 3, job 133). This function is the oracle of LAST RESORT for arm E's premise — it exists
+    # because a digest difference and an empty `/proc/<pid>/maps` can both be satisfied by
+    # something that is not jemalloc — so an oracle that accepts a CONTRACT VIOLATION is not a
+    # weaker oracle, it is a differently-shaped hole in the same place. R2.1 puts the
+    # `allocator:` line on STDOUT; a `2>&1` merge accepted a binary that printed it only on
+    # stderr, i.e. exactly the malformed build this precondition exists to reject.
+    #
+    # stderr is still CAPTURED and REPRINTED in every refusal below — a binary that cannot start
+    # explains itself there and that is the operator's next action — but it is LABELLED as
+    # stderr and it can satisfy nothing.
+    if ! stream_dir="$(mktemp -d)"; then
+      echo "FATAL: could not create a temporary directory, so \`$label --version\` could not be" >&2
+      echo "       run with its streams SEPARATED — and merging them would let a stderr-only" >&2
+      echo "       allocator line satisfy R2.1's stdout contract. UNMEASURED, refused." >&2
+      exit 2
+    fi
+    timeout -k 5 60 "$bin" --version >"$stream_dir/out" 2>"$stream_dir/err" || rc=$?
+    out="$(cat "$stream_dir/out")"
+    err="$(cat "$stream_dir/err")"
+    rm -rf "$stream_dir"
   else
     # A missing bound must not inherit the permissive branch, and an unbounded `--version` on a
     # wrong or wedged binary would hang the whole set with no verdict — which blocks the
@@ -236,8 +278,7 @@ require_reported_allocator() {
   if [[ $rc -ne 0 ]]; then
     echo "FATAL: \`$bin --version\` exited $rc, so its allocator is UNMEASURED." >&2
     echo "       R2.1 requires --version to short-circuit before argument validation and exit 0." >&2
-    echo "       Its output follows:" >&2
-    printf '%s\n' "$out" | sed 's/^/         | /' >&2
+    _echo_version_streams "$out" "$err"
     exit 2
   fi
   mapfile -t matched < <(printf '%s\n' "$out" | grep -E "$ALLOCATOR_SURFACE_RE") || true
@@ -246,8 +287,10 @@ require_reported_allocator() {
     echo "FATAL: \`$bin --version\` printed $n line(s) matching '$ALLOCATOR_SURFACE_RE';" >&2
     echo "       R2.1's contract is EXACTLY ONE. Neither 0 nor 2+ is read as either allocator:" >&2
     echo "       an unrecognised or absent line is UNMEASURED, and defaulting either way is how" >&2
-    echo "       a glibc build would be measured as the jemalloc arm. Its output follows:" >&2
-    printf '%s\n' "$out" | sed 's/^/         | /' >&2
+    echo "       a glibc build would be measured as the jemalloc arm. NOTE the count is taken" >&2
+    echo "       from STDOUT ALONE: a line on stderr is not one of R2.1's lines, so it neither" >&2
+    echo "       satisfies the grammar nor raises this count." >&2
+    _echo_version_streams "$out" "$err"
     exit 2
   fi
   if [[ "${matched[0]}" != "allocator: $expect" ]]; then
@@ -259,6 +302,7 @@ require_reported_allocator() {
     echo "       cannot see a statically linked allocator, so this surface is the only thing" >&2
     echo "       that can tell the two apart. Remedy: build --bin-dir-e's $ARM_E_BINARY with" >&2
     echo "       --features jemalloc (and --bin-dir's without it), or drop --bin-dir-e." >&2
+    _echo_version_streams "$out" "$err"
     exit 2
   fi
   echo "arm $ARM_E precondition: $label '$bin' reports '${matched[0]}' (R2.1)"
