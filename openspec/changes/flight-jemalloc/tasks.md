@@ -5,41 +5,41 @@ Ordered. Groups 1–2 are the mechanism (small), 3 is the measurement (the expen
 
 ## 0. Premises — re-confirm on the box, STOP if false
 
-- [ ] 0.1 No `#[global_allocator]` in any non-test production file (`git grep global_allocator -- '*.rs'`
+- [x] 0.1 No `#[global_allocator]` in any non-test production file (`git grep global_allocator -- '*.rs'`
       shows only `cfg(test)` core sites, dhat test binaries, examples). Design rests on this.
-- [ ] 0.2 `bindings/**/Cargo.toml` and `cqlite-core/Cargo.toml` do not depend on `cqlite-flight`.
-- [ ] 0.3 `libjemalloc.so.2` used by #3551 is jemalloc 5.3 (`ldconfig -p`, or the report's recorded
+- [x] 0.2 `bindings/**/Cargo.toml` and `cqlite-core/Cargo.toml` do not depend on `cqlite-flight`.
+- [x] 0.3 `libjemalloc.so.2` used by #3551 is jemalloc 5.3 (`ldconfig -p`, or the report's recorded
       version) — the `tikv-jemallocator` pin must match the major measured.
 
 ## 1. Mechanism (R1, R2) — surface: `cqlite-flight` binary
 
-- [ ] 1.1 `cqlite-flight/Cargo.toml`: `tikv-jemallocator = { version = "0.6", optional = true }`,
+- [x] 1.1 `cqlite-flight/Cargo.toml`: `tikv-jemallocator = { version = "0.6", optional = true }`,
       feature `jemalloc = ["dep:tikv-jemallocator"]`. **`default` stays `[]` in this group.**
-- [ ] 1.2 `cqlite-flight/src/main.rs`: `#[cfg(all(feature = "jemalloc", target_os = "linux"))]
+- [x] 1.2 `cqlite-flight/src/main.rs`: `#[cfg(all(feature = "jemalloc", target_os = "linux"))]
       #[global_allocator] static GLOBAL: tikv_jemallocator::Jemalloc = …;` plus one
       `const ALLOCATOR: &str` derived from the same cfg.
-- [ ] 1.3 `--version` prints `allocator: <ALLOCATOR>`; startup info line gains `allocator=`.
-- [ ] 1.4 Test `cqlite-flight/tests/issue_3997_allocator_surface.rs` (R2.1): runs the built binary
+- [x] 1.3 `--version` prints `allocator: <ALLOCATOR>`; startup info line gains `allocator=`.
+- [x] 1.4 Test `cqlite-flight/tests/issue_3997_allocator_surface.rs` (R2.1): runs the built binary
       with `--version` under the active feature set and asserts the line. Must pass in BOTH states.
-- [ ] 1.5 `scripts/tests/test_flight_allocator_link.sh` (R1.1/R1.2): symbol check on Linux;
+- [x] 1.5 `scripts/tests/test_flight_allocator_link.sh` (R1.1/R1.2): symbol check on Linux;
       SKIP-with-reason off-Linux (never a vacuous PASS — print the platform).
-- [ ] 1.6 `--lite` green; commit.
+- [x] 1.6 `--lite` green; commit.
 
 ## 2. Confinement (R4, R5) — surface: `tooling-tests`
 
-- [ ] 2.1 `scripts/tests/test_flight_allocator_confinement.sh`: exactly-one-production-site assert
+- [x] 2.1 `scripts/tests/test_flight_allocator_confinement.sh`: exactly-one-production-site assert
       + no `tikv-jemallocator` in core/cli/bindings manifests + dependents link the lib target.
       Register it where `tooling-tests` discovers scripts; confirm it is EXECUTED (census line).
-- [ ] 2.2 `--lite` green; commit; open the PR (draft) so the rig work below has a head to certify.
+- [x] 2.2 `--lite` green; commit; open the PR (draft) so the rig work below has a head to certify.
 
 ## 3. Measurement (R3.1, R3.3, R6.1) — rig `ip-172-31-7-163`, #3551 method
 
 - [ ] 3.1 Build two release binaries from the SAME commit: `--no-default-features` (arm A) and
       `--features jemalloc` (arm E); record both sha256 in the round metadata.
-- [ ] 3.2 `scripts/perf/ws0-3551-abc.sh`: add arm `E` (= arm A flags + `--flight-binary <E>`);
+- [x] 3.2 `scripts/perf/ws0-3551-abc.sh`: add arm `E` (= arm A flags + `--flight-binary <E>`);
       `ws0_abc_aggregate.py`: allow E as the single permitted cross-arm binary exception (R3.3 test
       in `test_ws0_abc_driver_guards.sh`).
-- [ ] 3.3 `ws0_flight_arm.py`: sample `VmHWM`/`VmRSS` of the server pid at scan end; add both to the
+- [x] 3.3 `ws0_flight_arm.py`: sample `VmHWM`/`VmRSS` of the server pid at scan end; add both to the
       aggregate tables.
 - [ ] 3.4 Run ≥3 interleaved sets of A/E at N=1 (pin `2,10`, quiescence-gated as #3551) and ≥3 pairs
       at the admission ceiling. Quiescence + pair-control rules unchanged.
@@ -57,10 +57,45 @@ Ordered. Groups 1–2 are the mechanism (small), 3 is the measurement (the expen
 
 ## 5. Doctrine + endgame
 
-- [ ] 5.1 `docs/development/dev-cookbook.md`: how to build with/without the allocator; how to read
+- [x] 5.1 `docs/development/dev-cookbook.md`: how to build with/without the allocator; how to read
       `allocator:` in `--version`. `docs/observability/` if the startup line is documented there.
-- [ ] 5.2 Helm/Trino deployment notes: state that the release binary carries the allocator; nothing
+- [x] 5.2 Helm/Trino deployment notes: state that the release binary carries the allocator; nothing
       to configure.
 - [ ] 5.3 Full gate ONCE (`AGENT_GATE_SUMMARY_FILE` redirect) → C intent audit vs this spec →
       roborev (`scripts/flow/roborev-review.sh --agent … --model …`) clean → `premerge-assert` →
       `gh pr merge --auto --squash --delete-branch` → flow-finalize (telemetry via PR-in-worktree).
+
+---
+
+## Lane status (worker lane `ip-172-31-5-53`, worktree `/data/lanes/lane-3997`)
+
+**Done here:** groups 0, 1, 2, 5, and tasks **3.2/3.3** (the driver arm + the RSS sampling,
+including the sampler's CALL SITE in `scripts/perf/lib-measure.sh` — it landed as a collector
+with nothing calling it, which left R6.1 undecidable).
+
+**NOT done, and NOT doable here — `3.1`, `3.4`, `3.5` and group `4`.** They require the #3551
+rig `ip-172-31-7-163`; this lane is on `ip-172-31-5-53` and the rig is unreachable from it
+(`ssh` → `Permission denied (publickey)`). So **R3.1, R3.2 and R6.1 are UNMET in this change**
+and a `spec-auditor` (C) run against this spec must report them so. `default` stays `[]`, so
+nothing ships the allocator to anyone: the feature is opt-in and inert until the rig verdict.
+
+**Deviation from 3.2 as written, recorded deliberately.** The driver flag is `--bin-dir-e DIR`,
+not `--flight-binary <E>`. No `--flight-binary` exists anywhere in the rig, and the digest the
+aggregate reads for its cross-arm invariant is derived from `--bin-dir`
+(`ws0_binaries.record_binary_provenance` off `$BIN`) — so a per-binary override would launch one
+program and record another's digest, granting R3.3's exception against the wrong bytes. R3.3
+names no flag, so this deviates from the task wording only, not from the requirement.
+
+**Rig recipe for whoever picks up 3.1/3.4/3.5:** build `bins-A/` (all three binaries,
+`--no-default-features`), then `bins-E/` = the `--features jemalloc` `cqlite-flight` plus
+hardlinks/copies of `bins-A`'s `ws0-scan-bench` and `flight-loadgen`; the driver refuses the set
+otherwise (that two-sided precondition is what earns arm E its exception). With `--bin-dir-e` the
+set is **6 arms/round** (A,B,C0,C,D,E), not A/E only — there is no `--arms` selector on the
+driver; the aggregate is then run `--arms A,E --baseline A`, and the driver prints that command.
+
+**Rig-only confirmations nobody has made yet** (reasoned, not measured — do not treat as done):
+a `tikv-jemallocator`-linked binary leaves **no** `libjemalloc` mapping, which is what lets arm E
+run under `--flight-allocator system` and still pass `verify_flight_server_allocator`'s per-rep
+`/proc/<pid>/{environ,maps}` check; real `VmHWM`/`VmRSS` magnitudes under load; the digest
+precondition against real cargo output; and that `refuse_binaries_older_than_head` accepts two
+separately-built bin dirs.
