@@ -21,6 +21,19 @@
 #     denotes everywhere else in this rig, where it is a ROWS/S ratio (`ws0_report.py`,
 #     `ws0-baseline.sh`'s printed line, `ws0-3248-artifacts/ac0/DELTA-TABLE.md`).
 #
+# # Parts 5 and 6 — issue #3997's two additions to the same two files
+#
+#   * PART 5 (R3.3) arm `E` measures a `cqlite-flight` that LINKS its allocator, so it is the
+#     FIRST arm that legitimately runs different bytes from arm A — the single permitted
+#     exception to the cross-arm identical-bytes invariant. Every case there is paired: the
+#     exception is asserted to be ACCEPTED for arm E and STILL REFUSED for another arm id,
+#     another binary, another pair of arms while E is present, and arm E versus itself between
+#     rounds. A one-directional test cannot tell a narrow exception from a deleted check.
+#   * PART 6 (R6.1) the Flight server's scan-end `VmHWM`/`VmRSS`, per arm, and the property that
+#     an UNMEASURED figure and a genuinely small one do not read alike — a marker naming its
+#     cause, a ratio that reads NOT MEASURABLE, and a refusal for a zero, an absent key or a
+#     string that is not a marker.
+#
 # # The bar, per #3249 (a hardcoded `_PERF_STATE="ok"` survived 118/118 tests)
 #
 # OBSERVED TO FIRE, and observed to fire ON THE PLANTED THING:
@@ -78,6 +91,12 @@ if [ "$NARMS" -lt 2 ]; then
   exit 1
 fi
 AGG="$REPO_ROOT/scripts/perf/ws0_abc_aggregate.py"
+# The COLLECTOR that produces the per-arm RSS fields the aggregator consumes (#3997,
+# R6.1). Read here only to PIN the two sides' UNMEASURED marker prefix against each other
+# — see case 5h. The aggregator imports no sibling module, so the string is restated there
+# and a silent divergence would send every unmeasured figure down the refusal branch
+# instead of the UNMEASURED column.
+FLIGHT_ARM="$REPO_ROOT/scripts/perf/ws0_flight_arm.py"
 
 fails=0
 # `checks` counts what actually RAN (incremented by pass/fail themselves), so the floor at the
@@ -86,7 +105,7 @@ checks=0
 pass() { checks=$((checks + 1)); echo "ok   - $1"; }
 fail() { checks=$((checks + 1)); echo "FAIL - $1"; fails=$((fails + 1)); }
 
-for f in "$ABC_DRIVER" "$AGG"; do
+for f in "$ABC_DRIVER" "$AGG" "$FLIGHT_ARM"; do
   [ -f "$f" ] || { echo "FAIL - missing $f"; exit 1; }
 done
 # python3 is a HARD REQUIREMENT of this rig (`ws0-baseline.sh` refuses to run without it, and
@@ -122,16 +141,32 @@ import sys
 p = pathlib.Path(sys.argv[1])
 doc = json.loads(p.read_text())
 keys = sys.argv[2].split(".")
+
+
+def step(container, key):
+    """One path element, addressing a LIST by index and an OBJECT by name.
+
+    The list arm arrived with #3997: R6.1's two fields live on ONE ELEMENT of `measurements`,
+    so `measurements.1.server_vm_hwm_kb` has to reach into an array. `container["1"]` raises
+    TypeError on a list, which would have made every RSS case fail for a reason unrelated to
+    its subject.
+    """
+    if isinstance(container, list):
+        return int(key)
+    return key
+
+
 cur = doc
 for k in keys[:-1]:
-    cur = cur[k]
+    cur = cur[step(cur, k)]
+last = step(cur, keys[-1])
 if sys.argv[3] == "__DELETE__":
-    del cur[keys[-1]]
+    del cur[last]
 else:
     try:
-        cur[keys[-1]] = json.loads(sys.argv[3])
+        cur[last] = json.loads(sys.argv[3])
     except ValueError:
-        cur[keys[-1]] = sys.argv[3]
+        cur[last] = sys.argv[3]
 p.write_text(json.dumps(doc))
 PY
 
@@ -1121,6 +1156,411 @@ else
   fail "4g. the validation scope must be the pairable rounds only (rc=$rc, out: $(sed -n 3p <<<"$out"))"
 fi
 
+# ===========================================================================
+# PART 5 — ARM E's CROSS-ARM BINARY EXCEPTION, BOTH DIRECTIONS (#3997, R3.3)
+# ===========================================================================
+# THE SUBJECT. Every #3551 arm varied the allocator by LD_PRELOAD into ONE binary, so the
+# aggregator could require every arm to have measured IDENTICAL BYTES — and #3248 WITHDREW a
+# machine-code sub-claim for violating exactly that. #3997 ships the allocator LINKED as the
+# binary's `#[global_allocator]`, so arm E is the first arm that legitimately runs a different
+# `cqlite-flight` from arm A, and R3.3 makes it the SINGLE PERMITTED EXCEPTION.
+#
+# WHY BOTH DIRECTIONS, AND WHY SO MANY REFUSAL ARMS. A one-directional test cannot tell a NARROW
+# exception from a DISABLED CHECK: "arm E's differing binary is accepted" is satisfied just as
+# well by deleting the invariant. So the accept direction is paired with a refusal arm for every
+# way the exception could have been made wider than R3.3 says — another ARM ID, another BINARY,
+# another PAIR of arms while E is present, and arm E differing from ITSELF between rounds.
+ESET="$TMP/set-E"
+mkset "$ESET" 3 A,E 400000 250000 20000 25000
+# `mut_all_rounds <root> <arm> <field> <value>` — the same mutation in EVERY round of one arm,
+# which is what makes a mutation a CROSS-ARM difference rather than a within-arm one. Mutating a
+# single round would trip the per-arm stability check first and the case would pass on the wrong
+# refusal.
+mut_all_rounds() {
+  local root="$1" arm="$2" field="$3" value="$4" r
+  for r in 1 2 3; do mut "$root/r$r-$arm/results.json" "$field" "$value"; done
+}
+E_SHA="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+B_SHA="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+# --- 5a. THE ACCEPT DIRECTION. Arm E's differing cqlite-flight is ACCEPTED — and the report
+# SAYS SO, naming both digests in full. A permitted exception that is invisible in the output is
+# indistinguishable, to a reader, from an invariant that held.
+EREPORT="$TMP/report-E.md"
+out=$(python3 "$AGG" --root "$ESET" --arms A,E --baseline A --out "$EREPORT"); rc=$?
+if [ "$rc" -eq 0 ]; then
+  pass "5a. arm E's DIFFERING cqlite-flight is ACCEPTED — the exception exists and the set aggregates"
+else
+  fail "5a. an A/E set must aggregate (rc=$rc, out: $(tail -3 <<<"$out"))"
+fi
+if grep -q "ARM E RAN A DIFFERENT \`cqlite-flight\` BINARY" <<<"$out" \
+   && grep -q "ONE permitted exception" <<<"$out"; then
+  pass "5a. ...and the report DECLARES the exception out loud, naming the arm and the binary"
+else
+  fail "5a. the report must declare arm E's binary exception (out: $(head -14 <<<"$out"))"
+fi
+if grep -qF "$E_SHA" <<<"$out" && grep -qF "$B_SHA" <<<"$out"; then
+  pass "5a. ...and it names BOTH sha256s IN FULL — arm E's and the one every other arm shared"
+else
+  fail "5a. both digests must appear in full (out: $(head -14 <<<"$out"))"
+fi
+if grep -q "STILL ENFORCED" <<<"$out" && grep -q "Any other cross-arm binary difference is still a REFUSAL" <<<"$out"; then
+  pass "5a. ...and it states what the exception does NOT waive, rather than leaving the scope to be inferred"
+else
+  fail "5a. the declaration must state what is still enforced"
+fi
+if grep -q "NOT COVERED BY IT" <<<"$out" && grep -q "Read the digest table, not the allocator column" <<<"$out"; then
+  pass "5a. ...and it warns that arm E's allocator column reads 'system' — the linked allocator leaves no flag to show"
+else
+  fail "5a. the declaration must warn that the allocator column cannot show arm E's treatment"
+fi
+got=$(cell "$EREPORT" "binary, per arm" E "sha256")
+if [ "$got" = "$E_SHA" ]; then
+  pass "5a. the per-arm digest TABLE prints arm E's own sha256, read back from its sessions"
+else
+  fail "5a. the digest table must print arm E's sha256, got '$got'"
+fi
+got=$(cell "$EREPORT" "binary, per arm" A "sha256")
+if [ "$got" = "$B_SHA" ]; then
+  pass "5a. ...and arm A's, so a reader compares two printed digests rather than trusting a sentence"
+else
+  fail "5a. the digest table must print arm A's sha256, got '$got'"
+fi
+got=$(cell "$EREPORT" "binary, per arm" E "relation to the other arms")
+if [ "$got" = "PERMITTED EXCEPTION (#3997 R3.3) — linked allocator, a DIFFERENT binary" ]; then
+  pass "5a. ...and arm E's row is LABELLED a permitted exception, not left as an unexplained difference"
+else
+  fail "5a. arm E's row must be labelled a permitted exception, got '$got'"
+fi
+got=$(cell "$EREPORT" "binary, per arm" A "relation to the other arms")
+if [ "$got" = "the shared binary" ]; then
+  pass "5a. ...and every other arm's row says it is THE SHARED BINARY — the invariant, stated as data"
+else
+  fail "5a. arm A's row must read 'the shared binary', got '$got'"
+fi
+
+# --- 5b. THE REFUSAL DIRECTION, ARM ID. The exception is keyed on the arm `E` and on NO OTHER
+# arm id. The IDENTICAL digest difference, moved to arm D, must still REFUSE — otherwise what
+# was implemented is "one arm may differ", which is not what R3.3 grants.
+DSET="$TMP/set-D-differs"
+mkset "$DSET" 3 A,D 400000 250000 20000 25000
+mut_all_rounds "$DSET" D binary_provenance.binaries.cqlite-flight "{\"sha256\":\"$E_SHA\"}"
+agg_refuses_naming_arms "5b. the SAME differing cqlite-flight on arm D (not E) is still REFUSED — the exception is keyed on the ARM ID" \
+  "$DSET" A,D A "CROSS-ARM INVARIANTS" "binary_sha256.cqlite-flight" "$E_SHA" "$B_SHA"
+
+# --- 5c. THE REFUSAL DIRECTION, BINARY. The exception is keyed on `cqlite-flight`. Arm E's
+# ws0-scan-bench IS the drift control: if it differs there is nothing left to read the treatment
+# against, so arm E gets no more latitude there than any other arm.
+SBSET="$TMP/set-E-scanbench"
+mkset "$SBSET" 3 A,E 400000 250000 20000 25000
+mut_all_rounds "$SBSET" E binary_provenance.binaries.ws0-scan-bench '{"sha256":"9999"}'
+agg_refuses_naming_arms "5c. arm E with a DIFFERING ws0-scan-bench is REFUSED — the exception does not reach the drift control's binary" \
+  "$SBSET" A,E A "CROSS-ARM INVARIANTS" "binary_sha256.ws0-scan-bench" "'9999'" "DRIFT CONTROL IS GONE"
+
+LGSET="$TMP/set-E-loadgen"
+mkset "$LGSET" 3 A,E 400000 250000 20000 25000
+mut_all_rounds "$LGSET" E binary_provenance.binaries.flight-loadgen '{"sha256":"8888"}'
+agg_refuses_naming_arms "5c. arm E with a DIFFERING flight-loadgen is REFUSED — nor does it reach the client apparatus" \
+  "$LGSET" A,E A "CROSS-ARM INVARIANTS" "binary_sha256.flight-loadgen" "'8888'"
+
+# --- 5d. THE REFUSAL DIRECTION WITH THE EXCEPTION ACTIVE. This is the case that separates a
+# NARROW exception from a DISABLED CHECK: arm E is in the set, so the held-out field is held out
+# — and a cqlite-flight difference between two OTHER arms must STILL refuse. Implemented by
+# comparing that field among the non-E arms, which is a check that exists only because the
+# cross-arm one no longer covers it.
+BSET="$TMP/set-E-plus-B"
+mkset "$BSET" 3 A,B,E 400000 250000 20000 25000
+mut_all_rounds "$BSET" B binary_provenance.binaries.cqlite-flight '{"sha256":"7777"}'
+agg_refuses_naming_arms "5d. with arm E PRESENT, a differing cqlite-flight between arms A and B is STILL REFUSED — the exception did not disable the check" \
+  "$BSET" A,B,E A "cqlite-flight digest DIFFERS between arms other than E" "'7777'" \
+  "Arm E is the ONE permitted exception" "#3248 WITHDREW"
+
+# --- 5e. AND ARM E MAY NOT DIFFER FROM ITSELF. Its digest is out of the cross-arm comparison, so
+# nothing else would notice a rebuild between rounds — and a per-round delta computed across two
+# of arm E's binaries is not one arm's delta. The check is added WITH the exception, not implied
+# by it.
+XSET="$TMP/set-E-rebuilt"
+mkset "$XSET" 3 A,E 400000 250000 20000 25000
+mut "$XSET/r2-E/results.json" binary_provenance.binaries.cqlite-flight '{"sha256":"6666"}'
+agg_refuses_naming_arms "5e. arm E's OWN cqlite-flight changing between rounds is REFUSED — the exception permits differing from the other arms, not from itself" \
+  "$XSET" A,E A "arm E's cqlite-flight changed within the set" "'6666'" "$E_SHA" "r2-E"
+
+# --- 5f. AN ABSENT DIGEST IS COULD-NOT-MEASURE, EVEN FOR THE EXCEPTION ARM. The one field the
+# exception holds out is the one field nothing else would notice missing, so it is `_require`d
+# rather than read with a default.
+NSET="$TMP/set-E-nodigest"
+mkset "$NSET" 3 A,E 400000 250000 20000 25000
+mut "$NSET/r1-E/results.json" binary_provenance.binaries.cqlite-flight __DELETE__
+agg_refuses_naming_arms "5f. arm E with NO recorded cqlite-flight digest is REFUSED naming the field — not waved through by the exception" \
+  "$NSET" A,E A "binary_sha256.cqlite-flight" "NOT RECORDED"
+
+# --- 5g. THE OTHER STATE OF THE DECLARATION. With arm E absent the report must SAY the exception
+# is not in play. Silence would leave a reader unable to tell "it did not apply" from "this build
+# has no exception", and the whole risk of a permitted exception is being read as an invariant.
+out=$(python3 "$AGG" --root "$SET" --arms A,B,C0,C --baseline A); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "exception for arm E (#3997 R3.3) is NOT IN PLAY" <<<"$out" \
+   && grep -q "EVERY arm was required to have measured identical bytes and did" <<<"$out"; then
+  pass "5g. with arm E ABSENT the report DECLARES the exception NOT IN PLAY and the full invariant enforced"
+else
+  fail "5g. the exception's absence must be declared (rc=$rc, out: $(head -14 <<<"$out"))"
+fi
+if ! grep -q "ARM E RAN A DIFFERENT" <<<"$out"; then
+  pass "5g. ...and it does NOT claim an exception nothing used"
+else
+  fail "5g. a set without arm E must not declare the exception applied"
+fi
+
+# --- 5h. THE THREE FILES NAME THE SAME ARM AND THE SAME BINARY. The exception is implemented on
+# one side and granted on the other; two sides silently naming different arms is precisely how a
+# narrow exception becomes a disabled check, and neither file can detect it alone.
+drv_arm=$(grep -oE '^ARM_E="[^"]*"' "$ABC_DRIVER" | head -1 | cut -d'"' -f2)
+drv_bin=$(grep -oE '^ARM_E_BINARY="[^"]*"' "$ABC_DRIVER" | head -1 | cut -d'"' -f2)
+agg_arm=$(grep -oE '^BINARY_EXCEPTION_ARM = "[^"]*"' "$AGG" | head -1 | cut -d'"' -f2)
+agg_bin=$(grep -oE '^BINARY_EXCEPTION_BINARY = "[^"]*"' "$AGG" | head -1 | cut -d'"' -f2)
+if [ -n "$drv_arm" ] && [ "$drv_arm" = "$agg_arm" ]; then
+  pass "5h. the driver's ARM_E ('$drv_arm') and the aggregator's BINARY_EXCEPTION_ARM name the SAME arm"
+else
+  fail "5h. driver ARM_E='$drv_arm' vs aggregator BINARY_EXCEPTION_ARM='$agg_arm' — the exception is granted to a different arm than it is built for"
+fi
+if [ -n "$drv_bin" ] && [ "$drv_bin" = "$agg_bin" ]; then
+  pass "5h. ...and the SAME binary ('$drv_bin'), so the driver's precondition and the aggregator's exception are about one program"
+else
+  fail "5h. driver ARM_E_BINARY='$drv_bin' vs aggregator BINARY_EXCEPTION_BINARY='$agg_bin'"
+fi
+arm_mod_marker=$(grep -oE '^RSS_UNMEASURED = "[^"]*"' "$FLIGHT_ARM" | head -1 | cut -d'"' -f2)
+agg_marker=$(grep -oE '^RSS_UNMEASURED_PREFIX = "[^"]*"' "$AGG" | head -1 | cut -d'"' -f2)
+if [ -n "$arm_mod_marker" ] && [ "$arm_mod_marker" = "$agg_marker" ]; then
+  pass "5h. ...and the UNMEASURED marker prefix is the same string in the producer and the consumer ('$agg_marker')"
+else
+  fail "5h. ws0_flight_arm RSS_UNMEASURED='$arm_mod_marker' vs aggregator RSS_UNMEASURED_PREFIX='$agg_marker' — an unmeasured RSS would land in the wrong branch"
+fi
+
+# --- 5i. THE DRIVER SIDE. Arm E is OPT-IN, dispatched against its OWN --bin-dir, and its binary
+# set is CHECKED on both edges before a rep runs. The stub log is the oracle: it records the argv
+# of every session the driver launched, so which --bin-dir each arm received is MEASURED here
+# rather than read off the source.
+BINS_E="$TMP/bins-e"
+make_bins_e "$BINS_E" "$BINS" jem
+E_OUT="$TMP/out-arm-e"
+out=$(run_abc "$TMP/d-base" --corpus "$CORPUS" --bin-dir "$BINS" --bin-dir-e "$BINS_E" \
+        --out "$E_OUT" --rounds 1); rc=$?
+n=$(stub_invocations)
+if [ "$rc" -eq 0 ] && [ "$n" -eq "$((NARMS + 1))" ]; then
+  pass "5i. --bin-dir-e ADDS arm E: round 1 ran $n sessions, one more than the $NARMS arms the driver declares"
+else
+  fail "5i. --bin-dir-e must add exactly one arm (rc=$rc, invocations=$n, out: $(tail -5 <<<"$out"))"
+fi
+if grep -q "r1-E" "$ABC_STUB_LOG"; then
+  pass "5i. ...and the extra session is arm E's (--out .../r1-E)"
+else
+  fail "5i. arm E's session must be launched (log: $(tr '\n' ' ' < "$ABC_STUB_LOG" | cut -c1-200))"
+fi
+if grep 'r1-E' "$ABC_STUB_LOG" | grep -qF -- "--bin-dir $BINS_E"; then
+  pass "5i. ...and arm E was dispatched against --bin-dir-e's OWN binary set, which is the treatment"
+else
+  fail "5i. arm E must receive --bin-dir-e's directory ($(grep 'r1-E' "$ABC_STUB_LOG"))"
+fi
+if grep 'r1-A' "$ABC_STUB_LOG" | grep -qF -- "--bin-dir $BINS" \
+   && ! grep 'r1-A' "$ABC_STUB_LOG" | grep -qF -- "--bin-dir $BINS_E"; then
+  pass "5i. ...while every other arm still measures --bin-dir's set — arm A got $BINS and not the E one"
+else
+  fail "5i. arm A must still receive --bin-dir (log: $(grep 'r1-A' "$ABC_STUB_LOG"))"
+fi
+# ARM E'S FLAGS ARE ARM A'S FLAGS. Not a nit: `--flight-allocator jemalloc` here would ALSO set
+# LD_PRELOAD, making arm E a preload-AND-link arm — two changes at once, which is the confound
+# arm D was added to break.
+a_flags=$(grep 'r1-A' "$ABC_STUB_LOG" | grep -oE -- '--flight-server-cpus.*$')
+e_flags=$(grep 'r1-E' "$ABC_STUB_LOG" | grep -oE -- '--flight-server-cpus.*$')
+if [ -n "$a_flags" ] && [ "$a_flags" = "$e_flags" ]; then
+  pass "5i. ...and arm E's flight FLAGS are arm A's character for character ('$e_flags') — the binary is the only difference"
+else
+  fail "5i. arm E's flags must equal arm A's (A: '$a_flags' vs E: '$e_flags')"
+fi
+for field in bin_dir_e binary_sha256_e.cqlite-flight binary_sha256_e.ws0-scan-bench \
+             binary_sha256_e.flight-loadgen arm_flags.E; do
+  if grep -q "\"$field\"" "$E_OUT/abc-run.json"; then
+    pass "5i. the run fingerprint records $field, so an arm-E set cannot resume as a different one"
+  else
+    fail "5i. the fingerprint must record $field (have: $(tr -d '\n' < "$E_OUT/abc-run.json"))"
+  fi
+done
+
+# --- 5j. THE DRIVER'S TWO-SIDED PRECONDITION. The aggregator refuses a bad arm-E set too, but
+# only AFTER the set has run — hours on a shared box — so the same facts are established up front
+# from the same digests. Both edges, because an exception with one edge checked is not narrow.
+SAME_E="$TMP/bins-e-same"
+make_bins "$SAME_E" one   # identical bytes to $BINS: cqlite-flight does NOT differ
+refuses_naming "5j. an arm-E binary set whose cqlite-flight is the SAME BYTES is REFUSED — identical bytes make arm E a second LABEL for arm A" \
+  "$TMP/d-base" "SAME BYTES" "cqlite-flight" "second LABEL" -- \
+  --corpus "$CORPUS" --bin-dir "$BINS" --bin-dir-e "$SAME_E" --out "$TMP/out-e-same" --rounds 1
+BAD_E="$TMP/bins-e-bad"
+make_bins "$BAD_E" two    # every binary differs, including the drift control's
+refuses_naming "5j. an arm-E binary set whose ws0-scan-bench ALSO differs is REFUSED — only cqlite-flight may differ" \
+  "$TMP/d-base" "ws0-scan-bench' differs from" "Only cqlite-flight may differ" "drift control" -- \
+  --corpus "$CORPUS" --bin-dir "$BINS" --bin-dir-e "$BAD_E" --out "$TMP/out-e-bad" --rounds 1
+refuses_naming "5j. --bin-dir-e pointing at a NON-DIRECTORY is REFUSED before anything runs" \
+  "$TMP/d-base" "--bin-dir-e" "is not a directory" -- \
+  --corpus "$CORPUS" --bin-dir "$BINS" --bin-dir-e "$TMP/no-such-dir" --out "$TMP/out-e-nodir" --rounds 1
+
+# --- 5k. AND THE DEFAULT IS UNCHANGED. Omitting --bin-dir-e must leave the arm set and the
+# fingerprint exactly as they were before #3997 — an opt-in that silently changes the default is
+# not opt-in, and every case in parts 0-4 rests on that.
+if ! grep -q '"bin_dir_e"' "$OUT/abc-run.json" && ! grep -q '"binary_sha256_e' "$OUT/abc-run.json" \
+   && ! grep -q '"arm_flags.E"' "$OUT/abc-run.json"; then
+  pass "5k. WITHOUT --bin-dir-e the fingerprint carries NO arm-E field, so a pre-#3997 set still resumes"
+else
+  fail "5k. an arm-E-less set must not record arm-E fingerprint fields (have: $(tr -d '\n' < "$OUT/abc-run.json"))"
+fi
+
+# ===========================================================================
+# PART 6 — THE SERVER'S SCAN-END RSS: R6.1's INPUT (#3997)
+# ===========================================================================
+# `VmHWM` is the kernel's PEAK-RSS high-water mark, so a scan-end read IS the rep's peak and is
+# what R6.1's `<= 1.10x arm A` ceiling is about. `VmRSS` at scan end is ONE INSTANTANEOUS SAMPLE.
+# The fixture's arm-E VmHWM is EXACTLY 1.10x arm A's, so the printed ratio has one right answer.
+got=$(cell "$EREPORT" "Server RSS" A "VmHWM kB (median)")
+if [ "$got" = "100,000" ]; then
+  pass "6a. the RSS table prints arm A's VmHWM median (100,000 kB), read from the session's own record"
+else
+  fail "6a. arm A's VmHWM must be 100,000, got '$got'"
+fi
+got=$(cell "$EREPORT" "Server RSS" E "VmHWM kB (median)")
+if [ "$got" = "110,000" ]; then
+  pass "6a. ...and arm E's (110,000 kB)"
+else
+  fail "6a. arm E's VmHWM must be 110,000, got '$got'"
+fi
+got=$(cell "$EREPORT" "Server RSS" E "paired VmHWM vs A")
+if [ "$got" = "1.1000x" ]; then
+  pass "6a. ...and the PAIRED VmHWM ratio vs arm A is 1.1000x — R6.1's figure, read straight off the table"
+else
+  fail "6a. the paired VmHWM ratio must be 1.1000x, got '$got'"
+fi
+# THE TWO QUANTITIES ARE NOT THE SAME COLUMN. The fixture separates them (100,000 vs 80,000), so
+# a swapped or duplicated column is detectable rather than invisible.
+got=$(cell "$EREPORT" "Server RSS" A "VmRSS kB (median, ONE sample per rep)")
+if [ "$got" = "80,000" ]; then
+  pass "6b. VmRSS is its OWN quantity (80,000 kB for arm A), not a second printing of VmHWM"
+else
+  fail "6b. arm A's VmRSS must be 80,000, got '$got'"
+fi
+got=$(cell "$EREPORT" "Server RSS" E "VmRSS kB (median, ONE sample per rep)")
+if [ "$got" = "88,000" ]; then
+  pass "6b. ...and 88,000 kB for arm E"
+else
+  fail "6b. arm E's VmRSS must be 88,000, got '$got'"
+fi
+if grep -q "ONE INSTANTANEOUS SAMPLE" "$EREPORT" && grep -q "do not read it as an average" "$EREPORT"; then
+  pass "6b. ...and the table SAYS VmRSS is one instantaneous sample and not an average, where a reader will see it"
+else
+  fail "6b. the RSS table must state that VmRSS is a single sample"
+fi
+if grep -q "0 UNMEASURED RECOGNISED" "$EREPORT"; then
+  pass "6c. a fully measured set reports an AFFIRMATIVE ZERO ('0 UNMEASURED RECOGNISED'), not a bare 0 or silence"
+else
+  fail "6c. the RSS section must affirm zero unmeasured figures"
+fi
+if grep -q "NOT applied here" "$EREPORT" && grep -q "states no verdict" "$EREPORT"; then
+  pass "6c. ...and the section states the thresholds WITHOUT computing a verdict — the criterion is joint with two terms this tool cannot see"
+else
+  fail "6c. the RSS section must state that it applies no verdict"
+fi
+
+# --- 6d. AN UNMEASURED FIGURE IS A NAMED MARKER, NOT A ZERO AND NOT AN OMISSION. This is the
+# case the whole design is for: an unmeasured RSS and a genuinely tiny RSS must not read alike.
+USET="$TMP/set-E-unmeasured"
+mkset "$USET" 3 A,E 400000 250000 20000 25000
+mut "$USET/r2-E/results.json" measurements.1.server_vm_hwm_kb \
+  "UNMEASURED — /proc/4242/status could not be READ ([Errno 2] No such file or directory)"
+UREPORT="$TMP/report-E-unmeasured.md"
+out=$(python3 "$AGG" --root "$USET" --arms A,E --baseline A --out "$UREPORT"); rc=$?
+if [ "$rc" -eq 0 ]; then
+  pass "6d. one round's UNMEASURED VmHWM does not abort the report — the throughput half of the set is still readable"
+else
+  fail "6d. an unmeasured RSS must not abort the aggregate (rc=$rc, out: $(tail -3 <<<"$out"))"
+fi
+got=$(cell "$UREPORT" "Server RSS" E "VmHWM kB (median)")
+if [ "$got" = "UNMEASURED (2 of 3 round(s) observed)" ]; then
+  pass "6d. arm E's VmHWM cell reads 'UNMEASURED (2 of 3 round(s) observed)' — the count says it is PARTIAL, not merely absent"
+else
+  fail "6d. the partial cell must name its count, got '$got'"
+fi
+case "$got" in
+  ''|*[!0-9,]*) pass "6d. ...and it is NOT a number: no median over the observed subset stands in for a paired figure the set cannot supply" ;;
+  *) fail "6d. the unmeasured cell rendered as a NUMBER ('$got') — an unmeasured RSS and a measured one must not read alike" ;;
+esac
+got=$(cell "$UREPORT" "Server RSS" E "paired VmHWM vs A")
+if [ "$got" = "NOT MEASURABLE (1 round(s) of E, 0 of A unobserved)" ]; then
+  pass "6d. ...and R6.1's ratio reads 'NOT MEASURABLE', naming how many rounds of each arm were unobserved"
+else
+  fail "6d. the ratio must be NOT MEASURABLE with its counts, got '$got'"
+fi
+got=$(cell "$UREPORT" "Server RSS" E "VmHWM spread")
+if [ "$got" = "n/a (unmeasured)" ]; then
+  pass "6d. ...and its spread is 'n/a (unmeasured)', never a measured-looking 0.00% over the rounds that survived"
+else
+  fail "6d. the spread of a partial series must read n/a (unmeasured), got '$got'"
+fi
+if grep -qF "arm E \`server_vm_hwm_kb\` r2: UNMEASURED — /proc/4242/status could not be READ" "$UREPORT"; then
+  pass "6d. ...and the CAUSE the sampler recorded is printed IN FULL, per round — the remedy is entirely determined by it"
+else
+  fail "6d. the recorded cause must be printed (RSS section: $(sed -n '/## Server RSS/,/^## /p' "$UREPORT" | tail -6 | tr '\n' ' '))"
+fi
+if ! grep -q "0 UNMEASURED RECOGNISED" "$UREPORT"; then
+  pass "6d. ...and the affirmative-zero line is GONE — it cannot be printed by a set that has an unmeasured figure"
+else
+  fail "6d. a set with an unmeasured figure must not claim 0 unmeasured"
+fi
+
+# --- 6e. AN UNMEASURED BASELINE POISONS THE RATIO TOO, in the other direction: the ceiling is a
+# ratio, so a missing DENOMINATOR is just as fatal as a missing numerator.
+BSET2="$TMP/set-E-baseline-unmeasured"
+mkset "$BSET2" 3 A,E 400000 250000 20000 25000
+mut "$BSET2/r1-A/results.json" measurements.1.server_vm_hwm_kb \
+  "UNMEASURED — the pid was gone before the sample"
+out=$(python3 "$AGG" --root "$BSET2" --arms A,E --baseline A --out "$TMP/report-bu.md"); rc=$?
+got=$(cell "$TMP/report-bu.md" "Server RSS" E "paired VmHWM vs A")
+if [ "$rc" -eq 0 ] && [ "$got" = "NOT MEASURABLE (0 round(s) of E, 1 of A unobserved)" ]; then
+  pass "6e. an unmeasured BASELINE round makes arm E's ratio NOT MEASURABLE too — a ceiling with no denominator is not a ceiling"
+else
+  fail "6e. an unmeasured baseline must poison the ratio (rc=$rc, got '$got')"
+fi
+
+# --- 6f. A ZERO IS REFUSED, NOT READ AS A TINY RSS. Zero is precisely the value that satisfies
+# every ratio ceiling there is, so it is the one number that must never reach the table.
+ZSET="$TMP/set-E-zero"
+mkset "$ZSET" 3 A,E 400000 250000 20000 25000
+mut "$ZSET/r1-A/results.json" measurements.1.server_vm_hwm_kb 0
+agg_refuses_naming_arms "6f. a ZERO VmHWM is REFUSED naming the field — zero satisfies every ratio ceiling, so it may not be read as a tiny RSS" \
+  "$ZSET" A,E A "server_vm_hwm_kb" "not usable as a divisor" "satisfy any ceiling"
+
+# --- 6g. AN ABSENT KEY IS COULD-NOT-MEASURE AND IS REFUSED WITH THE FIELD NAMED. The collector
+# writes both keys unconditionally — an unobserved figure is the MARKER — so a session lacking
+# them is one this tool does not model, and a skipped comparison is how R6.1 would go unmeasured
+# behind a green report.
+ASET="$TMP/set-E-absent"
+mkset "$ASET" 3 A,E 400000 250000 20000 25000
+mut "$ASET/r3-E/results.json" measurements.1.server_vm_rss_kb __DELETE__
+agg_refuses_naming_arms "6g. an ABSENT server_vm_rss_kb is REFUSED naming the field, not silently skipped" \
+  "$ASET" A,E A "server_vm_rss_kb" "NOT RECORDED" "Refused rather than skipped"
+
+# --- 6h. A STRING THAT IS NOT A MARKER IS REFUSED. "the record says something else" and "the
+# record says it could not measure" are different states, and only one of them may be published
+# as an absence.
+SSET="$TMP/set-E-badstring"
+mkset "$SSET" 3 A,E 400000 250000 20000 25000
+mut "$SSET/r2-A/results.json" measurements.1.server_vm_hwm_kb "n/a"
+agg_refuses_naming_arms "6h. a VmHWM string that is not an UNMEASURED marker is REFUSED — classified as neither an observation nor an absence" \
+  "$SSET" A,E A "server_vm_hwm_kb" "'n/a'" "is not an"
+
+# --- 6i. THE CLEAN A/E SET ONCE MORE, so no case above passed by leaving a fixture broken.
+out=$(python3 "$AGG" --root "$ESET" --arms A,E --baseline A); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "0 UNMEASURED RECOGNISED" <<<"$out"; then
+  pass "6i. the untouched A/E set is still accepted with every RSS figure observed — every RED arm above differed from THIS control"
+else
+  fail "6i. the clean A/E control must still pass (rc=$rc, out: $(tail -3 <<<"$out"))"
+fi
+
 # ==========================================================================
 # A MINIMUM CHECK COUNT — this file has no `set -e`
 # ==========================================================================
@@ -1130,8 +1570,10 @@ fi
 # case cannot red the suite. RE-DERIVE IT BY RUNNING THE SUITE at each addition, never by
 # counting the source — the loops and helpers multiply, and a source estimate understated a
 # floor by 29 elsewhere in this repo's history.
-# MEASURED: 98 (fingerprint + provenance + configuration + ratio), 105 (+ the F1 fingerprint-absent cases).
-MIN_CHECKS=100
+# MEASURED: 98 (fingerprint + provenance + configuration + ratio), 105 (+ the F1
+# fingerprint-absent cases), 159 (+ #3997's parts 5 and 6 — arm E's cross-arm binary exception in
+# BOTH directions, and the scan-end server RSS R6.1 is read from).
+MIN_CHECKS=150
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
@@ -1142,7 +1584,7 @@ fi
 
 echo
 if [ "$fails" -eq 0 ]; then
-  echo "PASS - all $checks WS0 A/B/C (run fingerprint / session provenance / configuration / ratio) checks fired as specified"
+  echo "PASS - all $checks WS0 A/B/C (run fingerprint / session provenance / configuration / ratio / arm-E binary exception / server RSS) checks fired as specified"
   exit 0
 fi
 echo "FAIL - $fails of $checks check(s) failed"
