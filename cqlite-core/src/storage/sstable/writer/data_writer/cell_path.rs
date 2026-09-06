@@ -55,6 +55,7 @@
 //! not carry a sentinel.
 
 use super::*;
+use crate::types::EmptyValueType;
 
 /// Which component of a multicell collection's declared type a cell path holds.
 ///
@@ -135,25 +136,29 @@ fn resolve_declared_cell_path_type(
     }
 }
 
-/// The shared body of the two entry points below: admit a sentinel against the
-/// DECLARED component type, or hand a non-sentinel to `ordinary`.
+/// The ADMISSION, shared by the two entry points below.
 ///
-/// `ordinary` is the serializer the caller would have used anyway — the type-blind
-/// [`super::serialize_value_into`] for a map key, and
-/// [`super::serialize_collection_element_into`] for a set element (which also
-/// keeps that path's pre-existing "SET elements cannot be null" refusal). Taking
-/// it as a parameter is what lets ONE admission live here without changing what
-/// either caller does with every other value.
-fn serialize_cell_path_component_into(
-    value: &Value,
+/// Takes no [`Value`] and writes no bytes — deliberately, and not only for
+/// tidiness: the write-surface census (`crate::types::empty_value`'s
+/// `write_surface_census_tests`) derives its subject set from any function
+/// taking `&Value` AND producing bytes, and its rule is that a function whose
+/// disposition is a claim about the SENTINEL must carry its own `Value::Empty`
+/// arm. Factoring the arm itself out would leave both entry points looking
+/// arm-free while their delegate admitted, i.e. the census would report a
+/// refusal where there is an admission. So the arm stays at each entry point and
+/// only what happens AFTER it is shared.
+///
+/// Two refusals, both a caller bug rather than something to paper over
+/// (no-heuristics, #28): a declared type that resolves to no collection of this
+/// kind (nothing to validate the tag against), and — inside
+/// [`EmptyValueType::check_admits`] — a declared component type that does not
+/// admit an empty buffer, or one that admits a DIFFERENT family than the tag
+/// names.
+fn admit_empty_cell_path(
+    tag: EmptyValueType,
     declared: &str,
     component: CellPathComponent,
-    out: &mut Vec<u8>,
-    ordinary: impl Fn(&Value, &mut Vec<u8>) -> Result<()>,
 ) -> Result<()> {
-    let Value::Empty(tag) = value else {
-        return ordinary(value, out);
-    };
     let Some(component_type) = resolve_declared_cell_path_type(declared, component) else {
         return Err(Error::InvalidInput(format!(
             "an empty-buffer sentinel (`{}`, issue #3805) needs the DECLARED component \
@@ -163,11 +168,10 @@ fn serialize_cell_path_component_into(
             component.declared_shapes()
         )));
     };
-    tag.check_admits(&component_type, declared)?;
-    // The whole encoding: NOTHING. `out` is deliberately left untouched — the
-    // length lives in the caller's unsigned VInt, so a zero-length cell path IS
-    // the empty component.
-    Ok(())
+    tag.check_admits(&component_type, declared)
+    // The whole encoding: NOTHING. The caller's `out` is deliberately left
+    // untouched — the length lives in its unsigned VInt, so a zero-length cell
+    // path IS the empty component.
 }
 
 /// Serialize a MULTICELL map's CELL PATH (its serialized KEY) into `out`.
@@ -180,13 +184,10 @@ pub(crate) fn serialize_map_cell_path_key_into(
     map_data_type: &str,
     out: &mut Vec<u8>,
 ) -> Result<()> {
-    serialize_cell_path_component_into(
-        key,
-        map_data_type,
-        CellPathComponent::MapKey,
-        out,
-        |v, o| serialize_value_into(v, o),
-    )
+    let Value::Empty(tag) = key else {
+        return serialize_value_into(key, out);
+    };
+    admit_empty_cell_path(*tag, map_data_type, CellPathComponent::MapKey)
 }
 
 /// Serialize a MULTICELL set's CELL PATH (its serialized ELEMENT) into `out`.
@@ -214,11 +215,8 @@ pub(crate) fn serialize_set_cell_path_element_into(
     set_data_type: &str,
     out: &mut Vec<u8>,
 ) -> Result<()> {
-    serialize_cell_path_component_into(
-        element,
-        set_data_type,
-        CellPathComponent::SetElement,
-        out,
-        |v, o| serialize_collection_element_into(v, "SET", o),
-    )
+    let Value::Empty(tag) = element else {
+        return serialize_collection_element_into(element, "SET", out);
+    };
+    admit_empty_cell_path(*tag, set_data_type, CellPathComponent::SetElement)
 }

@@ -18,24 +18,38 @@
 //!
 //! # The invariant
 //!
-//! The sentinel's zero-byte form is legal at exactly ONE position in this crate —
-//! a MULTICELL map's CELL PATH — because that is the only position supplying BOTH
-//! halves of the admission: a DECLARED KEY TYPE to validate the tag against
+//! The sentinel's zero-byte form is legal only on a MULTICELL collection's CELL
+//! PATH, because that is the only position supplying BOTH halves of the
+//! admission: a DECLARED COMPONENT TYPE to validate the tag against
 //! ([`crate::types::EmptyValueType::check_admits`]) and a FRAMING in which a
-//! zero-length buffer is expressible and MEANS "empty" (the enclosing collection's
-//! unsigned-VInt length, `db/marshal/CollectionType.java:361-382` at
+//! zero-length buffer is expressible and MEANS "empty" (the enclosing
+//! collection's unsigned-VInt length, `db/marshal/CollectionType.java:361-382` at
 //! `cassandra-5.0.8`). Everywhere else, refuse rather than guess — refusing beats
 //! writing bytes that read back as something else (no-heuristics, issue #28).
 //!
-//! So: **exactly one entry in this census may ADMIT the sentinel**, and that is
-//! asserted, not assumed.
+//! **The admitting set is EXACTLY the cell-path serializers — TWO of them, one
+//! per collection kind that HAS a declared-type cell path** (a map's KEY, a set's
+//! ELEMENT), and that is asserted BY NAME, not by a count. It read "exactly ONE"
+//! until issue #4106: Cassandra decides both kinds with the SAME line
+//! (`schema/ColumnMetadata.java:457-467` validates
+//! `nameComparator().validate(path.get(0))`, which is the keys type of a
+//! `MapType` and the elements type of a `SetType`) and frames both with the SAME
+//! `CollectionType.cellPathSerializer`, so a set's empty element is legal
+//! Cassandra data for exactly the reasons a map's empty key is. The SET route had
+//! no schema-aware entry point at all and routed through the type-blind writer,
+//! which correctly refuses — so a set CQLite had legitimately DECODED from
+//! Cassandra-written bytes could not be written back.
+//!
+//! A LIST is NOT in that set and never will be: its cell path is a generated
+//! 16-byte TimeUUID, not a component of the declared type, so there is no
+//! declared type for a tag to be validated against.
 //!
 //! # What each check measures
 //!
 //! * [`the_derived_census_matches_the_committed_dispositions`] — the derived set
 //!   and the table agree both ways, so a NEW value serializer FAILs until it is
 //!   given a disposition, and a DELETED one FAILs a stale row.
-//! * [`exactly_one_census_entry_admits_the_sentinel`] — the invariant above.
+//! * [`exactly_the_cell_path_positions_admit_the_sentinel`] — the invariant above.
 //! * [`every_disposition_is_structurally_true_of_its_function`] — a
 //!   `RefusesNoSentinelArm` function's body must contain NO `Value::Empty`
 //!   pattern, and the two dispositions that DO may only be reached by a row that
@@ -76,9 +90,23 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Disposition {
-    /// The ONE position that may write the sentinel: a multicell map's cell
-    /// path, tag validated against the declared key type.
-    AdmitsMapCellPath,
+    /// A CELL PATH of a multicell collection — a map's KEY or a set's ELEMENT —
+    /// with the tag validated against the declared component type.
+    ///
+    /// These are the only positions that may write the sentinel, because they
+    /// are the only ones supplying BOTH halves of the admission (a declared
+    /// component type AND a framing in which a zero-length buffer means
+    /// "empty"). Cassandra treats the two as one case:
+    /// `schema/ColumnMetadata.java:457-467` validates every collection's cell
+    /// path with `nameComparator().validate(...)`, which is the keys type of a
+    /// `MapType` and the elements type of a `SetType`
+    /// (`db/marshal/SetType.java:101-104`), and ONE
+    /// `CollectionType.cellPathSerializer` frames both
+    /// (`db/marshal/CollectionType.java:55`, `:361-382`). The variant was
+    /// `AdmitsMapCellPath` until issue #4106 added the set half — the SET route
+    /// had been routing through the type-blind writer, so a set CQLite had
+    /// legitimately DECODED could not be written back.
+    AdmitsCellPath,
     /// Carries its OWN `Value::Empty` arm, which REFUSES. Must be behaviourally
     /// pinned: a refusing arm is a runtime claim.
     RefusesExplicit,
@@ -88,7 +116,7 @@ enum Disposition {
     RefusesNoSentinelArm,
 }
 
-use Disposition::{AdmitsMapCellPath, RefusesExplicit, RefusesNoSentinelArm};
+use Disposition::{AdmitsCellPath, RefusesExplicit, RefusesNoSentinelArm};
 
 /// One row per DERIVED value-serializing function, keyed
 /// `(path relative to cqlite-core/src, function name)`.
@@ -173,12 +201,19 @@ const DISPOSITIONS: &[(&str, &str, Disposition)] = &[
         "serialize_udt",
         RefusesNoSentinelArm,
     ),
-    // ── the SSTable writer's type-blind encoder (roborev job 449) ──
+    // ── the schema-aware CELL-PATH serializers: the ONLY admitting positions ──
+    // (roborev job 449 for the map half; issue #4106 for the set half)
     (
-        "storage/sstable/writer/data_writer/encoding.rs",
+        "storage/sstable/writer/data_writer/cell_path.rs",
         "serialize_map_cell_path_key_into",
-        AdmitsMapCellPath,
+        AdmitsCellPath,
     ),
+    (
+        "storage/sstable/writer/data_writer/cell_path.rs",
+        "serialize_set_cell_path_element_into",
+        AdmitsCellPath,
+    ),
+    // ── the SSTable writer's type-blind encoder (roborev job 449) ──
     (
         "storage/sstable/writer/data_writer/encoding.rs",
         "serialize_value_into",
@@ -240,13 +275,16 @@ const DISPOSITIONS: &[(&str, &str, Disposition)] = &[
         "write_list_complex_cells",
         RefusesNoSentinelArm,
     ),
+    // The SET and MAP cell writers moved to their own module under the campsite
+    // rule (#1116) when #4106 grew the set one. Both still DELEGATE — each
+    // routes its cell path through `cell_path.rs` above, which owns the arm.
     (
-        "storage/sstable/writer/data_writer/complex.rs",
+        "storage/sstable/writer/data_writer/complex_collections.rs",
         "write_set_complex_cells",
         RefusesNoSentinelArm,
     ),
     (
-        "storage/sstable/writer/data_writer/complex.rs",
+        "storage/sstable/writer/data_writer/complex_collections.rs",
         "write_map_complex_cells",
         RefusesNoSentinelArm,
     ),
@@ -332,9 +370,14 @@ const BEHAVIOURALLY_PINNED: &[(&str, &str, &str)] = &[
         "the_type_aware_writer_refuses_the_sentinel (via serialize_value on list<int>)",
     ),
     (
-        "storage/sstable/writer/data_writer/encoding.rs",
+        "storage/sstable/writer/data_writer/cell_path.rs",
         "serialize_map_cell_path_key_into",
-        "the_one_admitting_position_admits_and_writes_zero_bytes (direct)",
+        "the_cell_path_positions_admit_and_write_zero_bytes (direct)",
+    ),
+    (
+        "storage/sstable/writer/data_writer/cell_path.rs",
+        "serialize_set_cell_path_element_into",
+        "the_cell_path_positions_admit_and_write_zero_bytes (direct)",
     ),
     (
         "storage/sstable/writer/data_writer/encoding.rs",
@@ -727,22 +770,30 @@ fn the_derived_census_matches_the_committed_dispositions() {
 // ───────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn exactly_one_census_entry_admits_the_sentinel() {
+fn exactly_the_cell_path_positions_admit_the_sentinel() {
     let admitting: Vec<_> = DISPOSITIONS
         .iter()
-        .filter(|(_, _, d)| *d == AdmitsMapCellPath)
+        .filter(|(_, _, d)| *d == AdmitsCellPath)
         .map(|(f, n, _)| (*f, *n))
         .collect();
     assert_eq!(
         admitting,
-        vec![(
-            "storage/sstable/writer/data_writer/encoding.rs",
-            "serialize_map_cell_path_key_into"
-        )],
-        "the sentinel's zero-byte form is legal at exactly ONE position — a multicell map's \
-         cell path, the only one supplying BOTH a declared key type and a framing in which a \
-         zero-length buffer means an empty key. Admitting it anywhere else is roborev jobs \
-         448/449/452 happening a fourth time."
+        vec![
+            (
+                "storage/sstable/writer/data_writer/cell_path.rs",
+                "serialize_map_cell_path_key_into"
+            ),
+            (
+                "storage/sstable/writer/data_writer/cell_path.rs",
+                "serialize_set_cell_path_element_into"
+            ),
+        ],
+        "the sentinel's zero-byte form is legal ONLY on a multicell collection's cell path — \
+         the only position supplying BOTH a declared component type and a framing in which a \
+         zero-length buffer means an empty component. The set BY NAME, so a third admitting \
+         position cannot ride in on a count: adding one is roborev jobs 448/449/452 happening \
+         a fourth time, and a LIST cell path (a generated TimeUUID, no declared type) can \
+         never join."
     );
 }
 
@@ -770,10 +821,10 @@ fn every_disposition_is_structurally_true_of_its_function() {
                 !has_arm,
                 "{file} :: {name} is declared `RefusesNoSentinelArm` but its body PATTERN-MATCHES \
                  or CONSTRUCTS `Value::Empty`. Either it now handles the sentinel — in which case \
-                 relabel it (`RefusesExplicit`, or `AdmitsMapCellPath` if it really is the map \
-                 cell path) AND pin it behaviourally — or remove the arm."
+                 relabel it (`RefusesExplicit`, or `AdmitsCellPath` if it really is a \
+                 collection cell path) AND pin it behaviourally — or remove the arm."
             ),
-            RefusesExplicit | AdmitsMapCellPath => {
+            RefusesExplicit | AdmitsCellPath => {
                 assert!(
                     has_arm,
                     "{file} :: {name} is declared `{disposition:?}`, which claims its own \
@@ -870,23 +921,55 @@ fn tag_is_accounted_for(tag: EmptyValueType) {
     }
 }
 
-/// PIN for `serialize_map_cell_path_key_into` — the ONE admitting position:
-/// admits a matching tag and writes exactly ZERO bytes.
+/// PIN for BOTH admitting positions: each admits a matching tag and writes
+/// exactly ZERO bytes, and each REFUSES a tag the declared component type does
+/// not admit.
+///
+/// The refusal half is what makes this a pin on the ADMISSION rather than on a
+/// zero-byte write: a function that wrote nothing and checked nothing would pass
+/// the first assertion. `set<tinyint>`/`map<tinyint,int>` are the check — an
+/// empty `tinyint` is corruption on Cassandra's own terms (bare `!= N` validate,
+/// `serializers/ByteSerializer.java:40-44`).
 #[test]
-fn the_one_admitting_position_admits_and_writes_zero_bytes() {
-    use crate::storage::sstable::writer::data_writer::serialize_map_cell_path_key_into;
-    let mut out = Vec::new();
-    serialize_map_cell_path_key_into(
-        &Value::Empty(EmptyValueType::Int),
-        "map<int, int>",
-        &mut out,
-    )
-    .expect("map<int,int> must admit an Empty(int) cell path key");
-    assert!(
-        out.is_empty(),
-        "the admitted sentinel must write ZERO bytes, wrote {}",
-        out.len()
-    );
+fn the_cell_path_positions_admit_and_write_zero_bytes() {
+    use crate::storage::sstable::writer::data_writer::{
+        serialize_map_cell_path_key_into, serialize_set_cell_path_element_into,
+    };
+    type Serializer = fn(&Value, &str, &mut Vec<u8>) -> crate::Result<()>;
+    // (what it serializes, the fn, an ADMITTING declaration, a REFUSING one)
+    let positions: &[(&str, Serializer, &str, &str)] = &[
+        (
+            "map key",
+            serialize_map_cell_path_key_into,
+            "map<int, int>",
+            "map<tinyint, int>",
+        ),
+        (
+            "set element",
+            serialize_set_cell_path_element_into,
+            "set<int>",
+            "set<tinyint>",
+        ),
+    ];
+    for (what, serialize, admitting, refusing) in positions {
+        let mut out = vec![0xAAu8; 3]; // pre-existing bytes must be untouched
+        serialize(&Value::Empty(EmptyValueType::Int), admitting, &mut out)
+            .unwrap_or_else(|e| panic!("{admitting} must admit an Empty(int) {what}: {e}"));
+        assert_eq!(
+            out,
+            vec![0xAAu8; 3],
+            "{admitting}: the admitted sentinel's whole encoding is NOTHING — the length \
+             lives in the caller's VInt"
+        );
+        let mut out = Vec::new();
+        let err = serialize(&Value::Empty(EmptyValueType::Int), refusing, &mut out)
+            .expect_err("a component type that admits no empty buffer must be REFUSED");
+        assert!(
+            err.to_string().contains("#3805"),
+            "{refusing}: the refusal must name #3805: {err}"
+        );
+        assert!(out.is_empty(), "a refused write must append nothing");
+    }
 }
 
 /// PIN for `serialize_value_into` — the type-blind writer refuses every family.
