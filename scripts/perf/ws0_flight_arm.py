@@ -381,31 +381,67 @@ def read_server_rss(d: pathlib.Path, tag: str) -> dict:
     return record
 
 
+# THE PUBLISHED ARM-LEVEL RSS FIELD PER /proc FIELD, and the per-field census key beside it.
+# Spelled as ONE table because the two must not drift: a published figure whose census counts a
+# DIFFERENT field is a completeness claim about something other than the number it sits next to,
+# which is half of this issue's own defect. The census keys deliberately do NOT begin
+# `server_vm` — `test_ws0_abc_driver_guards.sh` case 5h derives the PUBLISHED field set by that
+# prefix and pins it against the aggregator's `RSS_FIELDS`, so a census key sharing the prefix
+# would join a set it is not a member of.
+RSS_PUBLISHED_FIELDS = (
+    # (published field, per-rep record key, /proc field, per-field census key)
+    ("server_vm_hwm_kb", "vm_hwm_kb", "VmHWM", "server_rss_reps_measured_vm_hwm_kb"),
+    ("server_vm_rss_kb", "vm_rss_kb", "VmRSS", "server_rss_reps_measured_vm_rss_kb"),
+)
+
+
 def server_rss_block(samples: list[dict], temp: str, arm: str) -> dict:
-    """The arm-level RSS the aggregate reads, plus the census that keeps it honest.
+    """The arm-level RSS the aggregate reads, plus the per-field census that keeps it honest.
 
-    The two published figures are MEDIANS OVER THE REPS THAT WERE MEASURED, and the number of
-    reps behind each one is published beside it — a median over 1 of 3 reps and a median over
-    3 of 3 are different claims, and the abc driver runs `--reps 1`, so this is routinely a
-    single observation and must not read as more.
+    A FIGURE IS PUBLISHED ONLY WHEN EVERY REP SUPPLIED THAT FIELD. Anything less is the
+    `UNMEASURED — <cause>` marker, with the counts in the cause. This used to publish a median
+    over whichever reps happened to be measured, so 1 of 3 reps yielded a number
+    indistinguishable from a complete measurement, and nothing downstream could tell: the
+    aggregator refuses a partial series ACROSS ROUNDS but reads this one value PER ROUND, so a
+    rep-level hole arrived as a clean observation and R6.1's ceiling — a RATIO ceiling, which an
+    unrepresentative low median silently satisfies — was applied to a series that was never
+    measured. Doctrine, and the reason this is a refusal rather than a caveat: an unmeasured
+    quantity and a cleanly measured one must never read alike, and no partial series may be
+    averaged or ratioed as if it were complete.
 
-    If NO rep of this arm was measured, the figure is the MARKER, never a median of an empty
-    list and never a 0. `statistics.median([])` raises, which would abort the whole report for
-    a quantity that is merely absent; and a 0 would satisfy R6.1's ceiling outright.
+    Note the counts stay MEANINGFUL rather than merely absent — a median over 1 of 3 reps and no
+    sample at all are different remedies (a rep to re-run vs a driver that never sampled), so the
+    cause names how many of how many, and the per-rep `server_rss.status` carries the why.
+
+    THE CENSUS IS PER FIELD, NEVER ONE SHARED COUNT. `VmHWM` and `VmRSS` are read from the same
+    `/proc/<pid>/status` but fail independently (a kernel that exports one and not the other, a
+    parse that recognised one line), and a single count derived from `VmHWM` alone was affirming
+    a completeness that did not hold for `VmRSS`. The old shared `server_rss_reps_measured` key
+    is GONE rather than kept beside the per-field ones: two sources of truth for one fact is the
+    thing being removed, not a compatibility surface (nothing read it).
+
+    With NO rep at all the figure is the MARKER too, never a median of an empty list — an empty
+    `all(...)` is vacuously true, so the total is tested explicitly; `statistics.median([])`
+    raises, which would abort the whole report for a quantity that is merely absent, and a 0
+    would satisfy R6.1's ceiling outright.
     """
-    hwm = [s["vm_hwm_kb"] for s in samples if rss_is_measured(s["vm_hwm_kb"])]
-    rss = [s["vm_rss_kb"] for s in samples if rss_is_measured(s["vm_rss_kb"])]
-    absent = rss_unmeasured(
-        f"no rep of {arm} ({temp}) yielded a scan-end sample; see each rep's own"
-        " `server_rss.status` for the cause"
-    )
-    return {
-        "server_vm_hwm_kb": statistics.median(hwm) if hwm else absent,
-        "server_vm_rss_kb": statistics.median(rss) if rss else absent,
-        "server_rss_reps_measured": len(hwm),
-        "server_rss_reps_total": len(samples),
-        "server_rss_sample_timing": RSS_SAMPLE_TIMING_NOTE,
-    }
+    total = len(samples)
+    out = {"server_rss_reps_total": total}
+    for field, key, proc_field, census_key in RSS_PUBLISHED_FIELDS:
+        observed = [s[key] for s in samples if rss_is_measured(s[key])]
+        out[census_key] = len(observed)
+        if total and len(observed) == total:
+            out[field] = statistics.median(observed)
+        else:
+            out[field] = rss_unmeasured(
+                f"{len(observed)} of {total} rep(s) of {arm} ({temp}) yielded a scan-end"
+                f" {proc_field}; a median over a SUBSET of the reps is not this arm's figure —"
+                " R6.1 is a RATIO CEILING, which an unrepresentative median can satisfy without"
+                " ever having been measured. See each rep's own `server_rss.status` for the"
+                " cause of the missing one(s)."
+            )
+    out["server_rss_sample_timing"] = RSS_SAMPLE_TIMING_NOTE
+    return out
 
 
 def _cli_sample_server_rss(argv: list[str]) -> int:
