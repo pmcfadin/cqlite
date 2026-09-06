@@ -218,30 +218,167 @@ fn text_and_blob_empty_members_keep_their_native_spelling() {
 /// CASSANDRA-INVALID — REFUSED, so the gate is an ADMISSION and not a blanket
 /// "the buffer is empty, therefore fine".
 ///
-/// `tinyint`/`smallint`/`date`/`time` are spelled with a bare `!= N` validate
-/// (`serializers/ByteSerializer.java:40-44` and siblings), so an empty cell path
-/// is corruption ON CASSANDRA'S OWN TERMS and `validateCellPath` would throw on
-/// it. `duration` is refused for a different reason and both are worth pinning
-/// together: it is variable-width, its decode of the empty buffer FAILS, and
-/// `for_cql_type` names no tag for it — so it must stay refused rather than
-/// becoming a sentinel. (CQL forbids `duration` in a set at all,
-/// `cql3/CQL3Type.java:830-831`; it is exercised here only as the shape of a
-/// family the gate must decline.)
+/// Two DIFFERENT refusal routes, asserted on the MESSAGE so the test measures
+/// WHICH one each family takes rather than merely that something failed:
+///
+///  * `tinyint`/`smallint`/`date`/`time` are spelled with a bare `!= N` validate
+///    (`serializers/ByteSerializer.java:40-44` and siblings), so an empty cell
+///    path is corruption ON CASSANDRA'S OWN TERMS and `validateCellPath`
+///    (`schema/ColumnMetadata.java:457-467`) throws on it. Their SHARED value
+///    decoder nonetheless answers `Value::Null` — correctly, because its oracle
+///    is `deserialize()`, which maps empty to null for all twelve fixed-width
+///    scalars (#3847) — and a cell-path component can never be null, so
+///    `decode_set_cell_path_member` refuses. This is the SAME outcome the map
+///    route already has for the same declared type (there the width table
+///    refuses it first), so the two spellings of one empty component agree.
+///  * `duration` never reaches that branch: it is variable-width, `for_cql_type`
+///    names no tag for it, and its DECODE of the empty buffer FAILS — so the
+///    error is the decoder's OWN, byte-unchanged. It is here to pin the
+///    direction of the gate: a gate keyed on "the buffer is empty" ALONE would
+///    have turned this `Err` into an accepted value. (CQL forbids `duration` in
+///    a set at all, `cql3/CQL3Type.java:830-831`.)
 ///
 /// Errors PROPAGATE. Mapping them to a dropped member is what #3811 (roborev F1)
 /// removed for the non-empty case, and re-introducing it for the empty one would
 /// make an empty malformed member behave differently from a non-empty one.
 #[test]
 fn a_cassandra_invalid_empty_member_is_refused_like_any_other_corruption() {
-    for ty in ["tinyint", "smallint", "date", "time", "duration"] {
+    // (declared element type, a substring identifying WHICH refusal fired)
+    let refused: &[(&str, &str)] = &[
+        ("tinyint", "issue #4106"),
+        ("smallint", "issue #4106"),
+        ("date", "issue #4106"),
+        ("time", "issue #4106"),
+        ("duration", "failed to parse duration months"),
+    ];
+    for (ty, needle) in refused {
         match decode(&format!("set<{ty}>"), &[b""]) {
-            Err(_) => {}
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains(needle),
+                    "{ty}: expected the {needle:?} refusal route; got: {msg}"
+                );
+            }
             Ok(v) => panic!(
                 "an empty {ty} member is corruption on Cassandra's own terms and must be \
                  refused, not decoded and not dropped; got {v:?}"
             ),
         }
     }
+}
+
+/// THE INVARIANT, over every element type a set can declare: an empty cell path
+/// is EITHER the typed sentinel (exactly when the shared table admits it), OR a
+/// meaningful native value, OR a refusal — and NEVER `Value::Null`, never
+/// silently absent.
+///
+/// This is the census the other tests are instances of, and it is what makes
+/// "the tag table is the gate" safe rather than permissive. Two failure modes it
+/// exists to catch, both of which a per-family test can miss:
+///
+///  * a member that VANISHES (`Set([])`) — the #4106 defect itself, and the one
+///    that leaves no trace;
+///  * a member decoded as `Value::Null` — which no CQL set can hold and which
+///    Cassandra cannot write (`cql3/Sets.java:407` puts the element IN the path).
+///    This is the state the naive fix produced: removing the guard alone made
+///    `set<tinyint>` decode to `Set([Null])`, MEASURED in this lane before the
+///    `Null`-refusal branch was added.
+///
+/// The per-family expectation is DERIVED from [`EmptyValueType::for_cql_type`],
+/// never restated (see the module header).
+#[test]
+fn an_empty_member_is_never_null_and_never_silently_absent() {
+    use crate::schema::CqlType;
+    const CANDIDATES: &[&str] = &[
+        "int",
+        "bigint",
+        "float",
+        "double",
+        "timestamp",
+        "uuid",
+        "timeuuid",
+        "boolean",
+        "inet",
+        "decimal",
+        "varint",
+        "tinyint",
+        "smallint",
+        "date",
+        "time",
+        "text",
+        "ascii",
+        "varchar",
+        "blob",
+        "duration",
+        "frozen<list<int>>",
+        "frozen<set<int>>",
+        "frozen<map<int,int>>",
+        "frozen<tuple<int,int>>",
+        "unregistered_udt_name",
+    ];
+    let mut admitted = 0usize;
+    let mut refused = 0usize;
+    let mut native = 0usize;
+    for ty in CANDIDATES {
+        let expected_tag = CqlType::parse(ty)
+            .ok()
+            .as_ref()
+            .and_then(EmptyValueType::for_cql_type);
+        match decode(&format!("set<{ty}>"), &[b""]) {
+            Ok(v) => {
+                let got = members(v);
+                assert_eq!(
+                    got.len(),
+                    1,
+                    "{ty}: the member must be PRESENT — a set one member short is the \
+                     #4106 defect and it leaves no other trace"
+                );
+                assert!(
+                    !matches!(got[0], Value::Null),
+                    "{ty}: a set member can never be Value::Null — CQL forbids it and \
+                     Cassandra cannot write it"
+                );
+                match expected_tag {
+                    Some(tag) => {
+                        assert_eq!(
+                            got[0],
+                            Value::Empty(tag),
+                            "{ty}: the shared table admits this family, so the member must \
+                             be the TYPED sentinel"
+                        );
+                        admitted += 1;
+                    }
+                    None => native += 1,
+                }
+            }
+            Err(_) => {
+                assert_eq!(
+                    expected_tag, None,
+                    "{ty}: the shared table admits this family, so the member must NOT be \
+                     refused"
+                );
+                refused += 1;
+            }
+        }
+    }
+    // AFFIRMATIVE COUNTS: a census whose three buckets are not all populated is
+    // measuring less than it claims to.
+    println!(
+        "#4106 empty-set-member census over {} candidate element types: \
+         {admitted} TYPED SENTINEL, {native} NATIVE value, {refused} REFUSED",
+        CANDIDATES.len()
+    );
+    assert_eq!(
+        admitted + native + refused,
+        CANDIDATES.len(),
+        "every candidate must land in exactly one bucket"
+    );
+    assert!(
+        admitted >= 11 && native >= 5 && refused >= 5,
+        "each bucket must be populated, or this census proves less than it claims: \
+         {admitted} sentinel / {native} native / {refused} refused"
+    );
 }
 
 /// THE BOUND: a composite element type whose empty buffer NO authority admits
@@ -305,9 +442,7 @@ fn a_non_empty_member_is_decoded_exactly_as_before() {
         vec![Value::text("k")]
     );
     assert_eq!(
-        members(
-            decode("set<inet>", &[&[10u8, 0, 0, 1]]).expect("a 4-byte inet member decodes")
-        ),
+        members(decode("set<inet>", &[&[10u8, 0, 0, 1]]).expect("a 4-byte inet member decodes")),
         vec![Value::inet(vec![10, 0, 0, 1])],
         "a NON-empty inet member keeps its native spelling: normalization is a property \
          of the EMPTY cell path, never of the family"

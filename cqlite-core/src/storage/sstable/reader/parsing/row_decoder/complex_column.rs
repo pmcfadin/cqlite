@@ -7,6 +7,10 @@ use super::*;
 // composite key and ~10 scalar families. Its only caller is the map branch
 // below, so it nests here rather than beside the whole-value decoders.
 mod cell_path_key;
+// Issues #3747/#4106: the empty-buffer admission gate a zero-length CELL PATH
+// goes through, shared by the MAP key and SET member routes because Cassandra
+// decides both with one `validateCellPath` line. See its header.
+mod cell_path_empty;
 
 #[cfg(test)]
 mod cell_path_key_tests;
@@ -622,29 +626,25 @@ impl V5CompressedLegacyParser {
                     continue;
                 }
 
-                // For sets: the path bytes ARE the element value (cell value is always empty).
-                // If cell.value is Some (unusual case where a set cell has a non-empty value),
-                // use it. Otherwise parse the path bytes as the element type.
-                let set_member: Option<Value> = if let Some(val) = cell.value.clone() {
-                    Some(val)
-                } else if !cell.path_bytes.is_empty() {
-                    // Path bytes are the set element — parse them as the element type
-                    // Issue #3811 (roborev F1): PROPAGATE. This used to map the error
-                    // to `None`, which silently DROPPED the member — so a set cell whose
-                    // path bytes carry trailing garbage produced a set with one fewer
-                    // element instead of a refusal, and two distinct serialized cells
-                    // stayed indistinguishable. That is AC4's collapse wearing a smaller
-                    // set, and it is strictly worse than the wrong value it replaced,
-                    // because a dropped member leaves no trace at all. Verified against
-                    // the 144-file corpus census: no table decodes differently.
-                    Some(self.parse_value_from_raw_bytes(
+                // For sets the path bytes ARE the member (a live set cell carries
+                // HAS_EMPTY_VALUE, so `cell.value` is `None`); a set cell with a
+                // non-empty VALUE is unusual and its value wins.
+                // ISSUE #4106 — DECODED UNCONDITIONALLY. A ZERO-LENGTH path is the
+                // EMPTY MEMBER, never "no member": the old `!path_bytes.is_empty()`
+                // guard yielded `None` and DROPPED it, returning a set one member
+                // short with no error and no log line. Which empties are legal is
+                // `decode_set_cell_path_member`'s delegated call to the shared
+                // cell-path admission gate (`cell_path_empty`), the SAME authority
+                // the map-key route uses (#3747) — never a decision at this site.
+                // Errors PROPAGATE (#3811, roborev F1): mapping them to `None`
+                // dropped the member and left no trace at all.
+                let set_member = match cell.value.clone() {
+                    Some(val) => val,
+                    None => self.decode_set_cell_path_member(
                         &cell.path_bytes,
                         &element_type,
                         &column.name,
-                        0,
-                    )?)
-                } else {
-                    None
+                    )?,
                 };
 
                 // Epic #899: surface the live set element (decoded member value)
@@ -652,14 +652,12 @@ impl V5CompressedLegacyParser {
                 record_element(
                     &mut elements_out,
                     &cell,
-                    set_member.clone(),
+                    Some(set_member.clone()),
                     None,
                     row_timestamp,
                 );
 
-                if let Some(val) = set_member {
-                    elements.push(val);
-                }
+                elements.push(set_member);
             }
 
             Value::Set(elements)

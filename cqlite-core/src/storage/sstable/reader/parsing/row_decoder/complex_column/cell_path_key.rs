@@ -326,7 +326,6 @@
 //! to the frozen/set routes is out of #3612's scope.
 
 use super::*;
-use crate::types::EmptyValueType;
 
 impl V5CompressedLegacyParser {
     /// Parse a MULTICELL map's cell-path key, DISCARDING the undecodable-key
@@ -391,70 +390,19 @@ impl V5CompressedLegacyParser {
         // ═══ THE EMPTY-BUFFER ADMISSION GATE ═══
         //
         // Consulted for EVERY empty cell path, BEFORE the decode — never only on
-        // a decode FAILURE. That placement is the whole content of roborev job
-        // 449 finding C: a gate that fires only in the `Err` arm cannot reach a
-        // family whose decoder ACCEPTS the empty buffer, so `varint` and `inet`
-        // — both ADMITTED by the tag table — kept a SECOND spelling of the empty
-        // buffer (`Varint(b"")` / `Inet(b"")`) beside the canonical
-        // `Value::Empty(tag)`. Issue #4079; CLOSED here.
+        // a decode FAILURE. The gate, its Cassandra derivation, its placement
+        // (roborev job 449 finding C / #4079), why it is the TAG table and not
+        // the WIDTH table, and the exact set of families it does NOT reach all
+        // live in ONE place: `cell_path_empty`'s module header. It is shared with
+        // the SET member route (#4106), because `validateCellPath` decides both
+        // with one line. Do not restate any of it here.
         //
-        // TWO facts decide this, and neither is this call site's to invent:
-        //
-        //  * The ADMISSION GATE is [`EmptyValueType::for_cql_type`] — the ONE
-        //    place the legal/corruption line is drawn, on Cassandra's
-        //    `validate()` rather than on decodability. A `Some` tag means
-        //    `cassandra-5.0.8`'s serializer for that family accepts the empty
-        //    buffer AND maps it to null (see that function's membership rule),
-        //    so the key is PRESENT, TYPED and MEANINGLESS-VALUED. Because the
-        //    gate is drawn on `validate()` and not on decodability, it is
-        //    CORRECT to consult it without regard to what the decoder would have
-        //    done — which is exactly what moving it above the decode expresses.
-        //  * `opaque_out` stays UNSET on the typed branch. The flag exists to
-        //    diagnose a key this reader CANNOT MODEL, and it now can; leaving it
-        //    set would emit a `warn!` per column per row for correct data, which
-        //    is the misleading-diagnostic half of #3612.
-        //
-        // # THE GATE IS THE TAG TABLE, NOT THE WIDTH TABLE
-        // The guard was `data.is_empty() && allowed.contains(&0)`, i.e. it asked
-        // the WIDTH table whether the empty buffer was legal. Those are two
-        // authorities answering two DIFFERENT questions, and they disagree on
-        // exactly one family: `cql_short_allowed_widths` returns the EMPTY slice
-        // for `decimal` because it is VARIABLE-width (Cassandra accepts `0` or
-        // `>= 4`), so `allowed.contains(&0)` was FALSE and a legal empty
-        // `decimal` key was REFUSED — while `for_cql_type` admits it from
-        // `DecimalSerializer.java:31-34,58-63`, whose own message reads
-        // *"Expected 0 or at least 4 bytes"* (issue #3805 REQ-3805-02; the
-        // committed claim that an empty `decimal` is corrupt was WRONG, and
-        // `empty_value.rs`'s `Decimal` variant says so too). A width table cannot
-        // express `{0} ∪ [4, ∞)`, so it is the wrong oracle for this question;
-        // the tag table is the right one.
-        //
-        // # WHAT THE GATE DOES *NOT* REACH — the bound, MEASURED not reasoned
-        //  * `text`/`ascii`/`varchar`/`blob`: `for_cql_type` is `None`, because an
-        //    empty buffer is a legal, MEANINGFUL value there
-        //    (`AbstractTextSerializer.java:72-77`, `BytesSerializer.java:57-62`
-        //    override `isNull` to say so). They keep `Text(b"")`/`Blob(b"")`, and
-        //    `regression_3747_empty_map_key_tests::text_and_blob_empty_keys_keep_
-        //    their_native_spelling_and_the_table_says_so` asserts BOTH halves —
-        //    the table's `None` and the decode result — rather than trusting the
-        //    table.
-        //  * `tinyint`/`smallint`/`date`/`time`: refused by the WIDTH check above
-        //    (their `allowed` excludes `0`, exactly as Cassandra's bare `!= N`
-        //    `validate` does), and `for_cql_type` is `None` for them anyway, so
-        //    this gate is reached only for a spelling the width table did not
-        //    classify and then declines it.
-        //  * `duration`, every composite (`list`/`set`/`map`/`tuple`/UDT/
-        //    `frozen<collection>`) and `custom`: `for_cql_type` is `None`, so
-        //    they fall through to the decode and keep their existing outcome —
-        //    an `Err` for `duration` and the collections, a structural decode for
-        //    `tuple`, an opaque blob for an unresolvable UDT name. Pinned by
-        //    `no_other_empty_width_family_becomes_a_sentinel`.
+        // `opaque_out` stays UNSET on the typed branch: the flag exists to
+        // diagnose a key this reader CANNOT MODEL, and it now can. Leaving it set
+        // would emit a `warn!` per column per row for correct data, which is the
+        // misleading-diagnostic half of #3612.
         if data.is_empty() {
-            if let Some(tag) = self
-                .cell_path_key_cql_type(type_str)
-                .as_ref()
-                .and_then(EmptyValueType::for_cql_type)
-            {
+            if let Some(tag) = self.cell_path_empty_sentinel(type_str) {
                 return Ok(Value::Empty(tag));
             }
         }
@@ -735,7 +683,7 @@ impl V5CompressedLegacyParser {
     /// `CqlType::Custom`, for which `EmptyValueType::for_cql_type` is `None` — so
     /// an unmodelled type reaches the caller's opaque fallback rather than a
     /// guessed family (#28).
-    fn cell_path_key_cql_type(&self, type_str: &str) -> Option<CqlType> {
+    pub(super) fn cell_path_key_cql_type(&self, type_str: &str) -> Option<CqlType> {
         let peeled = self.peel_frozen_spellings(type_str);
         if peeled.contains("org.apache.cassandra.db.marshal.") {
             return Self::native_marshal_to_cql_type(&peeled);
