@@ -233,6 +233,13 @@ arm_flags() {
 # built to refuse. A second `--bin-dir` needs no new plumbing anywhere and keeps every digest
 # truthful. Build it as: the jemalloc `cqlite-flight` plus HARDLINKS (or copies) of --bin-dir's
 # own `ws0-scan-bench` and `flight-loadgen`, whose sameness is checked below.
+#
+# THE `*)` BRANCH IS TOTAL, NOT A PERMISSIVE DEFAULT. The question this function answers has
+# exactly two answers by construction — arm E measures --bin-dir-e's set, every other arm
+# measures --bin-dir's — so there is no unknown-arm case for it to swallow: `$BIN_DIR` is the
+# CORRECT answer for any arm id that is not E, including one that should never have been asked
+# for. Enumerating the arms here instead would duplicate `arm_flags`'s table for no gain, and
+# `arm_flags` already refuses an unknown arm by name.
 arm_bin_dir() {
   case "$1" in
     E) printf '%s\n' "$BIN_DIR_E" ;;
