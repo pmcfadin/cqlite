@@ -1296,23 +1296,48 @@ impl MergeProducer {
         // comparator pass needs them. Bounded by construction: an unambiguous row clones
         // nothing (roborev job 128; the O(n^2) lesson of job 122 is why this is not a
         // blanket clone).
+        // ONE pass over `cells`, not one pass PER ambiguous column (roborev job 132).
+        // The previous form filtered the whole cell list for each ambiguous column, i.e.
+        // O(columns x cells) — the same quadratic class job 122 already paid for, one
+        // level out, and reachable on exactly the rows this path exists for: a wide
+        // collection whose elements are all outranked contributes many cells AND many
+        // ambiguous columns at once.
+        //
+        // Equivalent to the filter form by construction, not by inspection:
+        // `ambiguous_columns` is DEDUPLICATED where it is built (`raw_visibility_signal`
+        // pushes a column only if absent), so keying by name loses no entry; the buckets
+        // are pre-seeded so a column with NO matching cell still yields its empty vec
+        // exactly as the filter did; cells are appended in `cells` order, so each
+        // column's cell order is unchanged; and the result is rebuilt in
+        // `ambiguous_columns` order.
         let ambiguous_cells: Vec<(
             String,
             Vec<cqlite_core::storage::write_engine::merge::CellData>,
-        )> = visibility
-            .ambiguous_columns
-            .iter()
-            .map(|col| {
-                (
-                    col.clone(),
-                    cells
-                        .iter()
-                        .filter(|c| &c.column == col)
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect();
+        )> = {
+            let mut grouped: HashMap<
+                &str,
+                Vec<cqlite_core::storage::write_engine::merge::CellData>,
+            > = visibility
+                .ambiguous_columns
+                .iter()
+                .map(|col| (col.as_str(), Vec::new()))
+                .collect();
+            for cell in &cells {
+                if let Some(bucket) = grouped.get_mut(cell.column.as_str()) {
+                    bucket.push(cell.clone());
+                }
+            }
+            visibility
+                .ambiguous_columns
+                .iter()
+                .map(|col| {
+                    (
+                        col.clone(),
+                        grouped.remove(col.as_str()).unwrap_or_default(),
+                    )
+                })
+                .collect()
+        };
         let row_cells: RowCells =
             cqlite_core::storage::write_engine::merge::assemble_read_cells_with_udts(
                 cells,
@@ -1610,6 +1635,12 @@ fn flat_data_type(cql: &CqlType) -> DataType {
         | CqlType::Custom(_) => DataType::Text,
     }
 }
+
+/// The dedup invariant the tier-3 ambiguous-cell grouping depends on (roborev job 132).
+/// A CHILD module, so it can see the private `raw_visibility_signal`/`RawVisibility`.
+#[cfg(test)]
+#[path = "producer_visibility_invariant_tests.rs"]
+mod producer_visibility_invariant_tests;
 
 #[cfg(test)]
 mod tests {
