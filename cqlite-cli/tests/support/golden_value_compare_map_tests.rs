@@ -442,3 +442,39 @@ fn a_value_beside_a_separator_carrying_key_is_still_compared() {
     assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
     assert!(report.diffs[0].contains("999"), "{:?}", report.diffs);
 }
+
+/// A refused key does NOT accept anything: what survives at it is the bracket FRAME
+/// and the body's EMPTINESS, the same two properties that survive at every other
+/// refused node.
+///
+/// The golden key here is a `key_part` with TWO fields, and two or more members
+/// cannot render as an empty body (members are `, `-separated even when each is
+/// empty) — so `{}` at that key is a divergence the ambiguity does not cover. Pinned
+/// because "the key is suppressed" must not quietly mean "the key is unchecked".
+#[test]
+fn a_refused_key_still_requires_its_frame_and_its_body_emptiness() {
+    // An EMPTY key body where the golden key holds two fields.
+    let emptied = json!("{{}: 10, {label: null, rank: 1}: 20}");
+    let report = report_of(MAP_UDT_KEY, golden_colliding_keys(), emptied, Egress::Csv);
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+    assert!(
+        report.diffs[0].contains("[key 0]") && report.diffs[0].contains("cannot render as"),
+        "the diff must name the key node and the emptiness rule: {:?}",
+        report.diffs
+    );
+    // And the FRAME: a key rendered with LIST brackets where the declared type is a
+    // UDT is an unparseable rendering, not an ambiguity.
+    let wrong_frame = json!("{[label: null, rank: 1]: 10, {label: null, rank: 1}: 20}");
+    let report = report_of(
+        MAP_UDT_KEY,
+        golden_colliding_keys(),
+        wrong_frame,
+        Egress::Csv,
+    );
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+    assert!(
+        report.diffs[0].contains("opening"),
+        "the diff must name the required bracket: {:?}",
+        report.diffs
+    );
+}

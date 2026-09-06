@@ -9,9 +9,11 @@
 //! the golden carries EMPTY, i.e. EMPTY-CONTAINER. The committed tier alone
 //! reports `0 REFUSED`, and no container member anywhere in the committed or
 //! fetched corpus carries a `, `, a bracket, a `: ` in a map key, or an empty
-//! scalar member. So every other shape the derived cause covers, and every
-//! strictness rule, is exercised only here — which is what makes a census `0` mean
-//! "the scan ran and found none" rather than "the scan may not work".
+//! scalar member. Nor does any container map KEY collide with another or carry a
+//! separator inside a member, so both KEY-SCOPED causes (`map_key_refusals`, issue
+//! #3815) are unit-only too. So every other shape the derived cause covers, and
+//! every strictness rule, is exercised only here — which is what makes a census `0`
+//! mean "the scan ran and found none" rather than "the scan may not work".
 //!
 //! Inputs are renderings in the grammar `ValueFormatter` documents; expected
 //! outputs are the GOLDEN-side shapes `sstabledump` produces. Nothing here is
