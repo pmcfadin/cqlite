@@ -14,6 +14,8 @@ mod cell_path_key_tests;
 mod cell_path_key_tests_frozen; // campsite split of cell_path_key_tests (#1135)
 #[cfg(test)]
 mod regression_3747_empty_map_key_tests;
+#[cfg(test)]
+mod regression_4106_empty_set_member_tests;
 // Issue #3612 (R3-F1): the guarded component-length conversion, shared with the
 // UDT field loops in `udt.rs` / `raw_type_value.rs` (see that module's header for
 // why it lives here).
