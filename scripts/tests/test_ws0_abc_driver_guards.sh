@@ -31,7 +31,11 @@
 #     rounds. A one-directional test cannot tell a narrow exception from a deleted check.
 #     Case 5m is the OTHER half of arm E's premise, and it is not a digest question at all: a
 #     digest difference proves DIFFERENT BYTES and never `jemalloc`, so both binaries are ASKED
-#     for R2.1's `allocator:` line and every unmeasurable answer is a named refusal.
+#     for R2.1's `allocator:` line and every unmeasurable answer is a named refusal — INCLUDING
+#     a well-formed line on the WRONG STREAM. R2.1 puts it on stdout; the first version of that
+#     precondition captured `2>&1` and accepted a stderr-only claim, so the stream is now part
+#     of the contract and is pinned with stdout empty, stdout noisy, and the line split across
+#     the two.
 #   * PART 6 (R6.1) the Flight server's scan-end `VmHWM`/`VmRSS`, per arm, and the property that
 #     an UNMEASURED figure and a genuinely small one do not read alike — a marker naming its
 #     cause, a ratio that reads NOT MEASURABLE, and a refusal for a zero, an absent key or a
@@ -406,6 +410,15 @@ write_flight_stub() {
       __NO_LINE__)   printf '  printf "cqlite-flight 0.0.0-fixture\\n"\n' ;;
       __TWO_LINES__) printf '  printf "allocator: jemalloc\\nallocator: system\\n"\n' ;;
       __NONZERO__)   printf '  printf "allocator: jemalloc\\n"; exit 3\n' ;;
+      # THE STREAM-DISCIPLINE PLANTS (#3997 roborev round 3). R2.1 puts the line on STDOUT;
+      # these three put a perfectly well-formed one where it must NOT count. The first two
+      # differ only in whether stdout is EMPTY or merely innocent, because a fix that keyed on
+      # "stdout was empty" rather than on "stdout carried no matching line" would pass one and
+      # fail the other. The third splits the line ACROSS the streams, which is the shape an
+      # anchored grammar over a merged capture would still have accepted.
+      __STDERR_ONLY__)  printf '  printf "allocator: jemalloc\\n" >&2\n' ;;
+      __STDERR_NOISE__) printf '  printf "cqlite-flight 0.0.0-fixture\\nbuild: fixture\\n"\n  printf "allocator: jemalloc\\n" >&2\n' ;;
+      __SPLIT__)        printf '  printf "allocator: "\n  printf "jemalloc\\n" >&2\n' ;;
       *)             printf '  printf "cqlite-flight 0.0.0-fixture\\nallocator: %s\\n"\n' "$alloc" ;;
     esac
     printf '  exit 0\nfi\nexit 0\n'
@@ -1652,6 +1665,54 @@ chmod -x "$E_NOX/cqlite-flight"
 refuses_naming "5m. a NON-EXECUTABLE arm-E binary is REFUSED naming that cause — a digest can be taken of a file that cannot be asked anything" \
   "$TMP/d-base" "is not EXECUTABLE" "UNMEASURED" "chmod +x" -- \
   --corpus "$CORPUS" --bin-dir "$BINS" --bin-dir-e "$E_NOX" --out "$TMP/out-e-nox" --rounds 1
+
+# THE ALLOCATOR LINE MUST COME FROM STDOUT (#3997 roborev round 3, job 133). The precondition
+# captured `--version` with `2>&1`, so a binary printing a perfectly well-formed
+# `allocator: jemalloc` ONLY on stderr was ACCEPTED — R2.1's contract, and the real CLI, put
+# that line on stdout. This function is the oracle of last resort for arm E's premise, so an
+# oracle that accepts a contract violation is not a weaker oracle: it is the same hole in a
+# different shape, and it admits exactly the malformed build the precondition exists to reject.
+E_STDERR="$TMP/bins-e-stderr-only"
+make_bins_e "$E_STDERR" "$BINS" stderronly __STDERR_ONLY__
+refuses_naming "5m. an arm-E binary printing 'allocator: jemalloc' ONLY ON STDERR is REFUSED — stderr can satisfy nothing, whatever it says" \
+  "$TMP/d-base" "printed 0 line(s) matching" "stdout: EMPTY" "DIAGNOSTIC ONLY" -- \
+  --corpus "$CORPUS" --bin-dir "$BINS" --bin-dir-e "$E_STDERR" --out "$TMP/out-e-stderr" --rounds 1
+# ...AND WITH STDOUT NON-EMPTY, which is the case that separates a real fix from one keyed on
+# "stdout was empty": the question is whether stdout carried a MATCHING line, not whether it
+# printed anything.
+E_STDERR2="$TMP/bins-e-stderr-noise"
+make_bins_e "$E_STDERR2" "$BINS" stderrnoise __STDERR_NOISE__
+refuses_naming "5m. ...and still REFUSED when stdout carries unrelated output, so the check is 'no MATCHING line on stdout' and not 'stdout was empty'" \
+  "$TMP/d-base" "printed 0 line(s) matching" "build: fixture" "stderr | allocator: jemalloc" -- \
+  --corpus "$CORPUS" --bin-dir "$BINS" --bin-dir-e "$E_STDERR2" --out "$TMP/out-e-stderr2" --rounds 1
+# ...AND A LINE SPLIT ACROSS THE TWO STREAMS is refused, which is the shape an anchored grammar
+# over a MERGED capture would have accepted: `allocator: ` on stdout, `jemalloc` on stderr.
+E_SPLIT="$TMP/bins-e-split-streams"
+make_bins_e "$E_SPLIT" "$BINS" split __SPLIT__
+refuses_naming "5m. ...and a line SPLIT across stdout and stderr is REFUSED — the two streams are never rejoined, so neither half completes the other" \
+  "$TMP/d-base" "printed 0 line(s) matching" "stdout | allocator: " -- \
+  --corpus "$CORPUS" --bin-dir "$BINS" --bin-dir-e "$E_SPLIT" --out "$TMP/out-e-split" --rounds 1
+# AND THE CONTROL SIDE IS ASKED WITH THE SAME DISCIPLINE — a stderr-only answer from --bin-dir
+# is no more an answer than one from --bin-dir-e. The check is a property of the function, and
+# the function is called twice.
+CTRL_STDERR="$TMP/bins-control-stderr"
+make_bins "$CTRL_STDERR" one __STDERR_ONLY__
+E_FOR_CS="$TMP/bins-e-for-ctrl-stderr"
+make_bins_e "$E_FOR_CS" "$CTRL_STDERR" cs
+refuses_naming "5m. a CONTROL whose allocator line is on STDERR is refused too — stream discipline is a property of the function, which is called for both sides" \
+  "$TMP/d-base" "--bin-dir cqlite-flight" "printed 0 line(s) matching" "stdout: EMPTY" -- \
+  --corpus "$CORPUS" --bin-dir "$CTRL_STDERR" --bin-dir-e "$E_FOR_CS" --out "$TMP/out-ctrl-stderr" --rounds 1
+# AND THE DIAGNOSTIC NAMES THE STREAM, which is what makes the refusal actionable: a reader who
+# cannot tell which stream carried the line cannot check the diagnosis, and an unlabelled dump
+# is the `2>&1` merge again, one layer up.
+out=$(run_abc "$TMP/d-base" --corpus "$CORPUS" --bin-dir "$BINS" --bin-dir-e "$E_STDERR" \
+        --out "$TMP/out-e-stderr-lbl" --rounds 1); rc=$?
+if [ "$rc" -ne 0 ] && grep -qE '^ +stderr \| allocator: jemalloc$' <<<"$out" \
+   && ! grep -qE '^ +stdout \| allocator: jemalloc$' <<<"$out"; then
+  pass "5m. ...and the refusal REPRINTS the stderr line LABELLED as stderr, never as stdout — the operator can see where the claim came from"
+else
+  fail "5m. the diagnostic must label the stream (rc=$rc, out: $(grep -E 'stdout|stderr' <<<"$out" | head -4))"
+fi
 
 # AND THE CHECK IS PART OF THE OPT-IN, NOT OF THE DEFAULT. Without --bin-dir-e no allocator is
 # asked of anything, so a pre-#3997 A/B/C0/C/D set behaves exactly as it did — the same property

@@ -276,7 +276,7 @@ require_reported_allocator() {
     exit 2
   fi
   if [[ $rc -ne 0 ]]; then
-    echo "FATAL: \`$bin --version\` exited $rc, so its allocator is UNMEASURED." >&2
+    echo "FATAL: $label — \`$bin --version\` exited $rc, so its allocator is UNMEASURED." >&2
     echo "       R2.1 requires --version to short-circuit before argument validation and exit 0." >&2
     _echo_version_streams "$out" "$err"
     exit 2
@@ -284,7 +284,8 @@ require_reported_allocator() {
   mapfile -t matched < <(printf '%s\n' "$out" | grep -E "$ALLOCATOR_SURFACE_RE") || true
   n=${#matched[@]}
   if [[ $n -ne 1 ]]; then
-    echo "FATAL: \`$bin --version\` printed $n line(s) matching '$ALLOCATOR_SURFACE_RE';" >&2
+    echo "FATAL: $label — \`$bin --version\` printed $n line(s) matching" >&2
+    echo "       '$ALLOCATOR_SURFACE_RE' on STDOUT;" >&2
     echo "       R2.1's contract is EXACTLY ONE. Neither 0 nor 2+ is read as either allocator:" >&2
     echo "       an unrecognised or absent line is UNMEASURED, and defaulting either way is how" >&2
     echo "       a glibc build would be measured as the jemalloc arm. NOTE the count is taken" >&2
