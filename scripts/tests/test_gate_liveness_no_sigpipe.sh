@@ -285,7 +285,7 @@ fi
 # the accepted cost of the lead ruling on REQUEST-3803-B: loud noise instead of silent blindness
 # (#3229). Each is pinned so the accepted set is EXPLICIT and cannot drift silently -- if one of
 # these stops being reported the matcher has been narrowed, which is issue #3992 and needs the
-# declaration in violations() updated in the same change.
+# declaration in scripts/tests/lib/sigpipe-matcher.sh updated in the same change.
 _declared_fp() { # _declared_fp <n> <label> <line-of-bash>
   local n="$1" label="$2" body="$3" got
   printf '%s\n' '#!/usr/bin/env bash' >"$tmp/fp$n.sh"
