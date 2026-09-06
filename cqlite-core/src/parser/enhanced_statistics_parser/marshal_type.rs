@@ -375,7 +375,8 @@ mod tests {
             "org.apache.cassandra.db.marshal.ReversedType(org.apache.cassandra.db.marshal.Int32Type)".to_string(),
         ];
 
-        let cols = build_clustering_key_columns(&clustering_types);
+        let cols = build_clustering_key_columns(&clustering_types)
+            .expect("every type here is one Cassandra writes");
         assert_eq!(cols.len(), 3);
 
         // DESC columns flag clustering_reversed; inner CQL type is preserved.
@@ -401,7 +402,8 @@ mod tests {
             "[org.apache.cassandra.db.marshal.ReversedType(org.apache.cassandra.db.marshal.TimestampType)"
                 .to_string(),
         ];
-        let cols = build_clustering_key_columns(&clustering_types);
+        let cols = build_clustering_key_columns(&clustering_types)
+            .expect("every type here is one Cassandra writes");
         assert_eq!(cols.len(), 1);
         assert!(
             cols[0].clustering_reversed,

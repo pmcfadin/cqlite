@@ -885,19 +885,37 @@ async fn test_1632_frozen_depth_schema_path_symmetric_with_block_path() {
         return; // SKIP: fixture absent (message already logged).
     };
 
-    // Any body works: frozen recurses without consuming bytes; an int leaf is 4B.
-    let data = vec![0x00, 0x00, 0x00, 0x2A];
+    // # THE LEAF IS `list<int>`, NOT `int`, AND THE BOUNDARY IS UNCHANGED (#4104)
+    //
+    // `frozen<int>` is not declarable CQL — `CQL3Type.Raw::freeze()` throws for
+    // every non-collection/tuple/UDT (`cassandra-5.0.8:src/java/org/apache/
+    // cassandra/cql3/CQL3Type.java:647-651`) — so the schema path now refuses that
+    // spelling at `CqlType::parse` and this test can no longer probe depth with it.
+    // A frozen COLLECTION is the legal witness for the same property.
+    //
+    // The boundary does not move, and that is arithmetic rather than luck: `Frozen`
+    // consumes no bytes and recurses at `depth + 1`, so `Frozen^n(List(Int))`
+    // reaches the `List` arm at depth `n` on both paths — exactly where
+    // `Frozen^n(Int)` reached the `Int` arm. A ZERO-COUNT list body is used so the
+    // element decode (which would recurse to `n + 1`) is never entered and the
+    // frozen layers remain the only thing being counted.
+    //
+    // Body: one VInt `0x00` = element count 0. Frozen consumes nothing, so the same
+    // byte serves at every nesting level.
+    let data = vec![0x00];
 
-    // Build the equivalent block-path comparator for `n` frozen layers over int.
+    // Build the equivalent block-path comparator for `n` frozen layers over
+    // `list<int>`.
     let frozen_comparator = |n: usize| -> ComparatorType {
-        let mut c = ComparatorType::Int;
+        let mut c = ComparatorType::List(Box::new(ComparatorType::Int));
         for _ in 0..n {
             c = ComparatorType::Frozen(Box::new(c));
         }
         c
     };
-    // The type string `frozen<...<int>...>` for the schema path.
-    let frozen_type_string = |n: usize| -> String { "frozen<".repeat(n) + "int" + &">".repeat(n) };
+    // The type string `frozen<...<list<int>>...>` for the schema path.
+    let frozen_type_string =
+        |n: usize| -> String { "frozen<".repeat(n) + "list<int>" + &">".repeat(n) };
 
     // MAX_VALUE_NESTING_DEPTH is 10: 10 frozens is the last allowed depth, 11 exceeds it.
     for (n, expect_ok) in [(10usize, true), (11usize, false)] {

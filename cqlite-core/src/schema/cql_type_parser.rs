@@ -333,9 +333,13 @@ mod tests {
     /// nesting must NOT stack-overflow (which under `panic = "abort"` aborts the
     /// whole process). It must return `Err` instead. The recursion is bounded at
     /// [`MAX_NESTING_DEPTH`], so this errors long before the stack is exhausted.
+    ///
+    /// The leaf is `list<int>` so the `Err` can only be the DEPTH guard: a
+    /// `frozen<int>` leaf would also error, but from the #4104 frozen-scalar
+    /// refusal, which would make this test pass without testing the guard.
     #[test]
     fn test_adversarial_deep_nesting_returns_err_not_abort() {
-        let s = "frozen<".repeat(50_000) + "int" + &">".repeat(50_000);
+        let s = "frozen<".repeat(50_000) + "list<int>" + &">".repeat(50_000);
         assert!(
             CqlType::parse(&s).is_err(),
             "pathological nesting must return Err, not abort"
@@ -346,12 +350,22 @@ mod tests {
     /// (i.e. `MAX_NESTING_DEPTH` levels of `frozen<...>` around a leaf) is the
     /// last allowed depth and must still parse to the identical `CqlType` it did
     /// before the guard existed; one level deeper must error.
+    ///
+    /// # The leaf is `list<int>`, and it has to be (#4104)
+    /// `frozen<int>` is not declarable CQL (`CQL3Type.Raw::freeze()` throws —
+    /// `cassandra-5.0.8:src/java/org/apache/cassandra/cql3/CQL3Type.java:647-651`)
+    /// and is refused by this parser, so a frozen-scalar leaf would make BOTH
+    /// halves of this test pass for the wrong reason. `list<int>` is a legal frozen
+    /// inner, and the collection itself costs one level — so `MAX_NESTING_DEPTH - 1`
+    /// frozen layers put the `int` leaf at exactly `MAX_NESTING_DEPTH`, the last
+    /// allowed depth.
     #[test]
     fn test_nesting_depth_boundary_is_exact() {
-        // 32 levels of frozen nesting: last allowed. Must parse and produce the
-        // unchanged nested structure (Frozen x32 around Int).
+        // The leaf `int` lands at depth MAX_NESTING_DEPTH: last allowed. Must parse
+        // and produce the unchanged nested structure (Frozen x31 around List(Int)).
         let depth = MAX_NESTING_DEPTH; // 32 — the last allowed nesting level.
-        let ok_str = "frozen<".repeat(depth) + "int" + &">".repeat(depth);
+        let frozens = depth - 1; // the `list<...>` level costs the 32nd.
+        let ok_str = "frozen<".repeat(frozens) + "list<int>" + &">".repeat(frozens);
         let mut parsed =
             CqlType::parse(&ok_str).expect("nesting at the depth bound must still parse");
 
@@ -360,11 +374,17 @@ mod tests {
             parsed = *inner;
             frozen_levels += 1;
         }
-        assert_eq!(frozen_levels, depth, "all frozen levels must be preserved");
-        assert_eq!(parsed, CqlType::Int, "the leaf type must be unchanged");
+        assert_eq!(frozen_levels, frozens, "all frozen levels must be preserved");
+        assert_eq!(
+            parsed,
+            CqlType::List(Box::new(CqlType::Int)),
+            "the leaf type must be unchanged"
+        );
 
-        // 33 levels: one past the bound. Must error with a clear message.
-        let bad_str = "frozen<".repeat(depth + 1) + "int" + &">".repeat(depth + 1);
+        // One level deeper: the leaf lands at MAX_NESTING_DEPTH + 1. Must error with
+        // a clear message, and the message is what distinguishes the DEPTH guard
+        // from any other refusal.
+        let bad_str = "frozen<".repeat(frozens + 1) + "list<int>" + &">".repeat(frozens + 1);
         let err = CqlType::parse(&bad_str).expect_err("one level past the bound must error");
         let msg = err.to_string();
         assert!(
