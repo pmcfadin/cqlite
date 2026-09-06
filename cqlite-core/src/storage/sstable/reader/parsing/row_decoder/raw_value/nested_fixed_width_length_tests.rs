@@ -41,10 +41,16 @@
 //! Issue **#3811** landed first and made that guard unnecessary: every bounded
 //! caller reaches `parse_value_from_raw_bytes`, a thin wrapper over
 //! `raw_value::reporting`'s consumption-reporting twin plus
-//! `require_fully_consumed`. Composed with each arm's own
-//! `require_fixed_width` (`data.len() < n`), the ACCEPTED SET IS EXACTLY `{n}`:
-//! `len == 0` and `len < n` are refused under-width, while `len > n` leaves
-//! `len - n` bytes unconsumed and is refused by the caller's assert. The property
+//! `require_fully_consumed`. **UNTIL #3847** each arm's own `require_fixed_width`
+//! guard was `data.len() < n`, and the composed accepted set WAS exactly `{n}`:
+//! `len == 0` and `len < n` were both refused under-width. **THAT IS NO LONGER
+//! TRUE OF EITHER HALF.** #3847 replaced the guard with `admissible_at_least`
+//! (`raw_value/fixed_width.rs`), which maps an EMPTY slice to
+//! `FixedWidthCell::Null` and reports `0` consumed, so the composed accepted set
+//! is now `{n, 0}` — see the ZERO-LENGTH note at the end of this header for the
+//! oracle and the key-like exception. What is unchanged: `len` in `1..n` is
+//! refused under-width, and `len > n` leaves `len - n` bytes unconsumed and is
+//! refused by the caller's assert. The property
 //! AC1 and AC3 assert is therefore enforced on THAT PATH by #3811's mechanism,
 //! and these cases pin it for every fixed-width type at the five nesting
 //! positions [`nesting_positions`] enumerates — coverage #3811's own tests
@@ -90,12 +96,13 @@
 //!
 //! The ZERO-length case is NO LONGER a narrowing. The table above is `validate()`,
 //! the WRITE rule and non-uniform; this is a READ path, whose oracle is
-//! `deserialize()` — uniform across all twelve, where an EMPTY buffer IS the wire
+//! `deserialize()` — uniform across every serializer in that table, where an
+//! EMPTY buffer IS the wire
 //! spelling of `null` (`docs/round-artifacts/issue-3847-cassandra-oracle.md`, read
 //! at the pinned tag). **#3847 (`a5171a5ba`) made this path match it**, the four
 //! `validate()`-strict types included, so the accepted set at the VALUE positions is
 //! `{n, 0}`, pinned by
-//! `zero_length_fixed_width_element_decodes_to_null_at_the_four_value_positions`.
+//! `zero_length_fixed_width_element_decodes_to_null_at_the_three_value_positions`.
 //! What remains is not a width difference: a KEY-LIKE member (map key, set member)
 //! accepts `0` too, but can never answer `Null` — Cassandra has no null map key — so
 //! it is kept OPAQUELY as an empty blob (#3747), pinned by
@@ -317,16 +324,16 @@ fn wrong_declared_length_is_refused_at_every_nesting_position() {
     }
 }
 
-/// AC2, POST-#3847: a ZERO-length fixed-width element DECODES TO NULL at the four
-/// VALUE positions — it is no longer refused.
+/// AC2, POST-#3847: a ZERO-length fixed-width element DECODES TO NULL at the
+/// THREE non-key-like positions — it is no longer refused.
 ///
 /// **This replaces a characterisation test #3723 deliberately did not endorse.**
 /// Its own comment read: *"The 'or 0' family is refused because
 /// `require_fixed_width` is `data.len() < n` — a PRE-EXISTING divergence from
 /// Cassandra, tracked as #3847; this case characterises it, it does not endorse
 /// it."* #3847 closed that divergence, so the expectation FLIPS here rather than
-/// the test being deleted: #3723's coverage (all fifteen types x every nesting
-/// position) is kept and only the asserted answer moves. The old name asserted a
+/// the test being deleted: #3723's coverage (every type in [`FIXED_WIDTH_TYPES`] x
+/// every nesting position) is kept and only the asserted answer moves. The old name asserted a
 /// refusal, so it could not survive the flip — a name is a claim about behaviour.
 ///
 /// Oracle: `deserialize()`, uniformly, at the pinned `cassandra-5.0.8` tag — every
@@ -335,11 +342,18 @@ fn wrong_declared_length_is_refused_at_every_nesting_position() {
 /// `date`, `time` reject empty there); that asymmetry is why the cell-path KEY
 /// table stays strict while this VALUE path does not.
 ///
-/// The MAP KEY position is excluded and has its own case below.
+/// TWO of the positions [`nesting_positions`] enumerates are excluded, not one:
+/// the MAP KEY **and the SET MEMBER**, because Cassandra stores a set member in the
+/// CELL PATH exactly as it stores a map key. Both have their own case below. That
+/// leaves the three the name states — the list element, the map VALUE and the tuple
+/// field — and those three are PINNED BY NAME at the end of the loop rather than
+/// counted in prose, so this count cannot decay (it did: the name said "four" while
+/// the predicate skipped two, roborev job 134).
 #[test]
-fn zero_length_fixed_width_element_decodes_to_null_at_the_four_value_positions() {
+fn zero_length_fixed_width_element_decodes_to_null_at_the_three_value_positions() {
     let p = parser();
     for (t, _width) in FIXED_WIDTH_TYPES {
+        let mut ran: Vec<String> = Vec::new();
         for (label, type_str, build) in nesting_positions(t) {
             if label.contains("key") || label.contains("set<") {
                 continue; // KEY-LIKE positions (map key, set member) are the sibling case
@@ -351,7 +365,10 @@ fn zero_length_fixed_width_element_decodes_to_null_at_the_four_value_positions()
                     panic!("{t} at {label}: #3847 admits a 0-byte element; got {e:?}")
                 });
             let element = match &decoded {
-                Value::List(xs) | Value::Set(xs) | Value::Tuple(xs) => xs
+                // No `Value::Set` arm: the SET position is key-like and excluded
+                // above, so it is unreachable here — the `other` arm below panics
+                // if that ever changes.
+                Value::List(xs) | Value::Tuple(xs) => xs
                     .first()
                     .unwrap_or_else(|| panic!("{t} at {label}: container empty"))
                     .clone(),
@@ -367,7 +384,22 @@ fn zero_length_fixed_width_element_decodes_to_null_at_the_four_value_positions()
                 Value::Null,
                 "{t} at {label}: an empty fixed-width element is NULL, not a refusal"
             );
+            ran.push(label);
         }
+        // I1: the enumeration is PINNED BY NAME, not merely counted. Without this
+        // the label predicate above (or a label string in `nesting_positions`)
+        // could drift, the loop skip EVERY position, and the case still pass green
+        // having compared nothing — the "assert per case" rule one level in.
+        // MEASURED, not assumed: three positions run, the two KEY-LIKE ones do not.
+        assert_eq!(
+            ran,
+            vec![
+                format!("frozen<list<{t}>>"),
+                format!("frozen<map<text,{t}>> value"),
+                format!("tuple<{t},text>"),
+            ],
+            "{t}: exactly the three NON-key-like positions must run, in order"
+        );
     }
 }
 
@@ -387,6 +419,7 @@ fn zero_length_fixed_width_element_decodes_to_null_at_the_four_value_positions()
 fn zero_length_fixed_width_key_like_member_is_opaque_never_null() {
     let p = parser();
     for (t, _width) in FIXED_WIDTH_TYPES {
+        let mut ran: Vec<String> = Vec::new();
         for (label, type_str, build) in nesting_positions(t) {
             if !(label.contains("key") || label.contains("set<")) {
                 continue;
@@ -418,7 +451,21 @@ fn zero_length_fixed_width_key_like_member_is_opaque_never_null() {
                 Value::blob(Vec::new()),
                 "{t} at {label}: preserved opaquely, as the cell-path key is"
             );
+            ran.push(label);
         }
+        // I1, as in the value case: pinned BY NAME so the predicate cannot drift
+        // into skipping everything. These two sets PARTITION the positions
+        // [`nesting_positions`] enumerates, so a position added there, removed, or
+        // relabelled fails one of the two cases — which is what keeps the "five"
+        // in that helper's doc from decaying into a stale hand-maintained count.
+        assert_eq!(
+            ran,
+            vec![
+                format!("frozen<set<{t}>>"),
+                format!("frozen<map<{t},text>> key"),
+            ],
+            "{t}: exactly the two KEY-LIKE positions must run, in order"
+        );
     }
 }
 
@@ -781,9 +828,15 @@ fn one_field_udt(ft: CqlType) -> Vec<(String, CqlType)> {
 /// reads as null via `accessor.isEmpty(value) ? null : …`. It is the same
 /// disposition `empty_is_a_value` encodes, and since #3847 (`a5171a5ba`) the
 /// bounded `raw_value` path AGREES with it rather than diverging — see
-/// `zero_length_fixed_width_element_decodes_to_null_at_the_four_value_positions`.
-/// The two answers still come from two INDEPENDENT tables (the SCOPE note in
-/// `raw_value/fixed_width.rs`); nothing enforces that they keep agreeing.
+/// `zero_length_fixed_width_element_decodes_to_null_at_the_three_value_positions`.
+/// Those are two of THREE INDEPENDENT answers to the empty-fixed-width question,
+/// and nothing enforces that they keep agreeing: this bounded path's uniform
+/// `{n, 0}` RULE (`raw_value/fixed_width.rs`'s `admissible_at_least` — one rule for
+/// every type, not a per-type table), the typed/UDT path's `empty_is_a_value` table
+/// (`row_decoder/typed_value/scalar_rules.rs`), and the cell-path KEY's own
+/// `validate()`-oracle table (`row_decoder/complex_column/cell_path_key.rs`), which
+/// stays `{n}` for the four strict types. The SCOPE note in
+/// `raw_value/fixed_width.rs` states that coupling.
 ///
 /// The case fails in BOTH directions: if any of the five stops refusing a
 /// non-zero wrong width, and if a correct width stops decoding to its declared

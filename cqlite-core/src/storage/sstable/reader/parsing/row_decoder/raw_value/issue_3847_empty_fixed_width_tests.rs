@@ -5,7 +5,7 @@
 //!
 //! `docs/round-artifacts/issue-3847-cassandra-oracle.md`, read at the pinned
 //! `cassandra-5.0.8` tag: `TypeSerializer.deserialize` maps an empty buffer to
-//! `null` for all twelve fixed-width scalars, with no per-type exceptions, and
+//! `null` for every fixed-width scalar, with no per-type exceptions, and
 //! `BooleanSerializer.serialize(null)` emits `EMPTY_BYTE_BUFFER`, so empty is the
 //! on-the-wire spelling of null. `validate()` — which DOES reject empty for
 //! `smallint`, `tinyint`, `date` and `time` — gates writes, not reads, and is not
@@ -64,16 +64,19 @@ const FIXED_WIDTH: &[(&str, usize)] = &[
     ("time", 8),
 ];
 
-/// The table above must cover all ELEVEN `require_fixed_width` call sites named
-/// in #3847 — a case floor, so a span-replacing edit that silently drops rows
-/// reds instead of reporting a green tally over a shrunken table (#3544's
-/// lesson). 15 spellings over 11 arms.
+/// The table above must cover EVERY `require_fixed_width` call site in
+/// `raw_value/reporting.rs`, the arm set #3847 names — a case floor, so a
+/// span-replacing edit that silently drops rows reds instead of reporting a green
+/// tally over a shrunken table (#3544's lesson). The arm count is deliberately
+/// not restated in prose: a hand-maintained census decays (it did, twice, in the
+/// sibling `nested_fixed_width_length_tests.rs`). The one number below is
+/// admissible because the assertion PINS it — it cannot drift silently.
 #[test]
 fn the_fixed_width_table_covers_every_arm() {
     assert_eq!(
         FIXED_WIDTH.len(),
         15,
-        "the table must carry all 15 spellings of the 11 fixed-width arms"
+        "the table must carry all 15 spellings the fixed-width arms accept"
     );
     let widths: Vec<usize> = FIXED_WIDTH.iter().map(|(_, n)| *n).collect();
     for n in [1usize, 2, 4, 8, 16] {
