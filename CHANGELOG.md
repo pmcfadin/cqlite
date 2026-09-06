@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (public API, source-level): `cqlite-core`'s `Value` enum gains a
+  `Value::Empty(EmptyValueType)` variant (#3805)** — it carries the DECLARED CQL
+  type of a zero-length multicell map cell-path key, renders as `""` at every
+  egress surface and `EMPTY(<type>)` in `Display`, is refused fail-closed on
+  write, and is a public-surface ADDITION, so any consumer with an exhaustive
+  `match` over `Value` gains a required arm (it broke one in-fleet test,
+  `cqlite-core/tests/issue_3722_udt_field_type_fidelity.rs`, until that arm was
+  added).
+
 - **BREAKING (CLI `--format json`, observable): a `decimal` and a `varint` render
   as UNQUOTED JSON NUMBERS, not as quoted strings (#3644).** Same egress and the
   same class as the #3629 entry below. `JsonCell::from_value`
