@@ -513,3 +513,50 @@ fn the_emitted_order_of_wholly_refused_keys_is_a_declared_residual() {
         assert!(reasons.contains(path), "{reasons}");
     }
 }
+
+/// THE ROUND-3 RESIDUAL, at the public surface: a MIXED node — one unrenderable key
+/// beside two that render ALIKE — is refused at the CELL, so its entry COUNT and
+/// values go uncompared (issue #3815, roborev job 445).
+///
+/// The unit half names the reach (`csv_container::tests::key_refusal`); this half
+/// shows what the reach MEANS to a reader of the census: the refusal is attributed to
+/// `c`, the cell's own node, and NOT to `c[key 1]`/`c[key 2]`, so nobody can read the
+/// census as saying the entries beside those keys were checked.
+///
+/// Why that is the chosen answer and not a defect: `Reach::MapKeys` would tell the
+/// decoder it may split this node, and the body checks that decide whether it may
+/// cannot run without a synthesizable rendering. `origin/main` made no such promise
+/// and also compared nothing here, so this loses no check main had.
+#[test]
+fn a_mixed_key_node_is_refused_at_the_cell_and_the_census_says_so() {
+    let golden = json!({
+        "charlie\\:3:8": 80,
+        "{\"label\": null, \"rank\": 1}": 10,
+        "{\"label\": \"null\", \"rank\": 1}": 20
+    });
+    // A correct rendering of that cell, in the grammar `ValueFormatter` documents.
+    let csv = json!("{charlie:3:8: 80, {label: null, rank: 1}: 10, {label: null, rank: 1}: 20}");
+    let report = report_of(MAP_UDT_KEY, golden, csv, Egress::Csv);
+    assert_eq!(
+        report.ambiguous_container_cells, 1,
+        "the node must be REFUSED, not paired: {:?}",
+        report.diffs
+    );
+    let reasons = report.ambiguity_reasons.join("; ");
+    assert!(
+        reasons.contains("cannot be synthesized") && reasons.contains("SAME key text"),
+        "the census must name both halves of the cause: {reasons}"
+    );
+    assert!(
+        report
+            .ambiguity_reasons
+            .iter()
+            .any(|reason| reason.starts_with("c (")),
+        "attributed to the CELL, which is what a Body reach means: {reasons}"
+    );
+    assert!(
+        !reasons.contains("[key "),
+        "and NOT to the key nodes — claiming key-granularity here would imply the \
+         entries beside them were compared, which a Body refusal did not do: {reasons}"
+    );
+}

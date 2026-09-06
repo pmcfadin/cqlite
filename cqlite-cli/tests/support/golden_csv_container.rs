@@ -323,6 +323,26 @@
 //! reports correct egress as a divergence for whichever entry guessed wrong (#1491
 //! finding T1).
 //!
+//! A THIRD RESIDUAL, and the one this issue's round 3 chose deliberately: where the
+//! golden's own rendering CANNOT BE SYNTHESIZED — some key or member is not a spelling
+//! the declared type has — a key-scoped cause found there is reported at
+//! [`Reach::Body`] rather than [`Reach::MapKeys`], because the three body checks that
+//! decide whether the entries may be split cannot run without that rendering. So such
+//! a node loses its positional entry/value pairing: its entry COUNT and values go
+//! uncompared, and only the frame and the body's emptiness survive.
+//!
+//! That is OVER-REFUSAL, which this module treats as a real cost rather than as
+//! conservatism — and it is chosen over the alternative, which is telling the decoder
+//! it may split a node whose splittability was never checked. The concrete cost of
+//! that false promise: a node with one unrenderable key, two colliding sibling keys
+//! and a text VALUE carrying a depth-0 `, ` would be split, OVER-split, and reported
+//! as a divergence the CLI did not cause. `origin/main` has neither the pairing nor
+//! the promise here (it refuses nothing, splits, and over-splits on that same input),
+//! so this is fail-CLOSED against main and not a regression from it.
+//! [`unsynthesizable_rendering`] owns the reasoning; recovering the pairing needs a
+//! way to ask a body question with no rendering to ask it of, which is real new
+//! analysis and is deferred.
+//!
 //! NEITHER CAUSE IS REACHED BY THE CORPUS, so both are pinned by unit cases and by
 //! `compare::map::tests` rather than by a fixture. MEASURED on the corpus when this
 //! was written: no container map key anywhere in it carries a `, `, a `: ` or a
