@@ -89,8 +89,20 @@ pub(super) fn parse_minimal_encoding_stats<'a>(
         }
     };
 
+    // Gate 2 of #4104: the key comparators reach `build_column_infos` as RAW
+    // marshal strings (the DESC `ReversedType(..)` signal is derived there), so
+    // this is where a frozen-scalar KEY type is refused. Fail-closed.
     let (partition_key_columns, clustering_key_columns) =
-        build_column_infos(&partition_types, &clustering_types);
+        match build_column_infos(&partition_types, &clustering_types) {
+            Ok(cols) => cols,
+            Err(e) => {
+                tracing::error!("Refusing SerializationHeader key types: {e}");
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::Verify,
+                )));
+            }
+        };
 
     Ok((
         input,
@@ -184,8 +196,20 @@ fn parse_encoding_stats_fallback<'a>(
     // Fall back to marker-based header search for schema
     let (_, (partition_types, clustering_types, columns)) = parse_serialization_header(rest)?;
 
+    // Gate 2 of #4104: the key comparators reach `build_column_infos` as RAW
+    // marshal strings (the DESC `ReversedType(..)` signal is derived there), so
+    // this is where a frozen-scalar KEY type is refused. Fail-closed.
     let (partition_key_columns, clustering_key_columns) =
-        build_column_infos(&partition_types, &clustering_types);
+        match build_column_infos(&partition_types, &clustering_types) {
+            Ok(cols) => cols,
+            Err(e) => {
+                tracing::error!("Refusing SerializationHeader key types: {e}");
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::Verify,
+                )));
+            }
+        };
 
     Ok((
         input,
