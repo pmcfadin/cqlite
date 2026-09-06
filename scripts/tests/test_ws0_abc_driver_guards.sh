@@ -1865,7 +1865,8 @@ fi
 # BOTH directions, and the scan-end server RSS R6.1 is read from), 183 (+ the two #3997 roborev
 # blockers: case 5l, arm E's binary must actually DIFFER from the shared one, and cases 6j-6n,
 # the REP-level completeness of each RSS field with its own per-field census), 184 (+ the
-# all-reps-failed cause and the arm-E-only declaration), 185.
+# all-reps-failed cause, distinct from the no-rep-recorded one), 185 (+ the arm-E-only set's
+# declaration that the differ-assertion was SKIPPED).
 MIN_CHECKS=170
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
