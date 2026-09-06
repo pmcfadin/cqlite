@@ -401,8 +401,30 @@ fi
 # writing — and then the very next line deletes its LIVE worktree. Guard 5 cannot see that
 # peer, because it ran before the release created the opening.
 #
-# Holding the lock across the removal closes the window: a peer's `acquire` returns OCCUPIED
-# for as long as the directory is being deleted, so it never adopts a lane that is going away.
+# Holding the lock across the removal NARROWS that window; it does NOT close it, and this
+# comment said "closes" until roborev job 463 (High) corrected it. The distinction is
+# load-bearing, so it is stated rather than glossed:
+#
+#   * WHAT IS EXCLUDED. A peer whose `acquire` finds our record with a LIVE holder is told
+#     OCCUPIED and does not adopt the lane. That covers the ordinary case, and it is the
+#     whole of the old unconditional window — before this reordering the lane read FREE for
+#     the entire removal, so ANY peer acquire in the gap destroyed live work.
+#
+#   * WHAT REMAINS (DECLARED GAP). Leaving the record present is not the same as holding a
+#     MUTEX across the removal. Nothing here serialises against `lane-lock.sh`'s own per-issue
+#     mutex, so if the RECORDED HOLDER EXITS while `git worktree remove` is still running, a
+#     peer's acquire may legitimately classify the record as DEAD-*, reclaim it (exactly what
+#     AC3's auto-reclaim is for) and begin working in a directory that is being deleted
+#     underneath it. The lease mismatch below then detects the race only AFTER the damage.
+#     The residual therefore needs the holder to die DURING the removal — a seconds-long
+#     window, not the unconditional one — but it is a real hole and not a theoretical one.
+#
+#   * WHY IT IS NOT CLOSED HERE. Closing it means running the removal INSIDE lane-lock.sh's
+#     per-issue mutex, which needs a capability that script does not expose today (a
+#     `with-lock <issue> -- <cmd>` form). Re-deriving the mutex path in this file instead
+#     would duplicate a derivation that already has a mangling/cksum fallback, and a
+#     second copy of that is how two writers disagree about one lock. That is new surface,
+#     so it is proposed as a follow-up rather than smuggled into this change.
 #
 # The old justification for release-first was READABILITY ("a release after the lane is gone
 # reads like an afterthought") plus keeping the lane diagnosable if the release failed. That

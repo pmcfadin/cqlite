@@ -337,5 +337,24 @@ else
   bad "the release-failure text does not tell the operator the worktree is already gone"
 fi
 
+# CONTROL: the comment must not OVERCLAIM the guarantee. It said "closes the window" until
+# roborev job 463 (High) pointed out that leaving the record present is not holding a mutex:
+# if the recorded holder exits mid-removal a peer may legitimately DEAD-* reclaim the lane and
+# start working in a directory being deleted. Reordering NARROWS the window (the old one was
+# unconditional) but does not close it, and a teardown comment that overstates a lock's
+# guarantee is how the next incident gets reasoned into being. Same shape as the pre-commit
+# hook's DECLARED GAP assertion in test_lane_lock_precommit_hook.sh: the disclosure is pinned
+# by a test, not left to whoever edits the file next.
+if grep -q 'closes the window' "$FC"; then
+  bad "the ordering comment claims it 'closes the window'; leaving the record present is not a mutex — job 463's residual (holder exits mid-removal -> peer DEAD-* reclaims) is still open"
+else
+  ok "(control) the ordering comment does not claim to CLOSE the window"
+fi
+if grep -q 'WHAT REMAINS (DECLARED GAP)' "$FC" && grep -q 'DEAD-\*' "$FC"; then
+  ok "(control) the residual is DECLARED in the file and names its mechanism (holder exits mid-removal -> peer DEAD-* reclaim)"
+else
+  bad "the file narrows the window without DECLARING the residual that remains"
+fi
+
 echo "==== finalize-cleanup lane-lock: passed=$PASS failed=$FAIL ===="
 [ "$FAIL" -eq 0 ] || exit 1
