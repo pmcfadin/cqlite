@@ -29,6 +29,9 @@
 #     exception is asserted to be ACCEPTED for arm E and STILL REFUSED for another arm id,
 #     another binary, another pair of arms while E is present, and arm E versus itself between
 #     rounds. A one-directional test cannot tell a narrow exception from a deleted check.
+#     Case 5m is the OTHER half of arm E's premise, and it is not a digest question at all: a
+#     digest difference proves DIFFERENT BYTES and never `jemalloc`, so both binaries are ASKED
+#     for R2.1's `allocator:` line and every unmeasurable answer is a named refusal.
 #   * PART 6 (R6.1) the Flight server's scan-end `VmHWM`/`VmRSS`, per arm, and the property that
 #     an UNMEASURED figure and a genuinely small one do not read alike — a marker naming its
 #     cause, a ratio that reads NOT MEASURABLE, and a refusal for a zero, an absent key or a
@@ -37,13 +40,16 @@
 #     each field's observation count is its OWN — asserted in both directions of the asymmetry,
 #     because one shared count cannot report 2 for one field and 3 for the other.
 #
-# Two roborev blockers on #3997 added case 5l and cases 6j-6n. Both were the same failure mode:
-# a rig that can publish a measurement it did not make. 5l — the exception checked that arm E's
-# digest was STABLE and that the others were SHARED, never that the two DIFFER, so a `bins-E/`
-# copied from the control passed every check and the report attributed run-to-run noise to the
-# allocator. 6j-6n — a partially sampled arm published a median over whichever reps survived,
-# and R6.1 is a RATIO CEILING, which an unrepresentative low median satisfies without having
-# been measured.
+# Three roborev blockers on #3997 added cases 5l, 5m and 6j-6n. All three were the same failure
+# mode: a rig that can publish a measurement it did not make. 5l — the exception checked that arm
+# E's digest was STABLE and that the others were SHARED, never that the two DIFFER, so a
+# `bins-E/` copied from the control passed every check and the report attributed run-to-run noise
+# to the allocator. 5m — its complement: ANY unrelated rebuild satisfies "differs", and neither
+# the `system` flag nor the `/proc/<pid>/maps` check can see a statically linked allocator, so a
+# glibc build could be measured as the jemalloc arm; the allocator is now read off each binary's
+# own `--version` surface, which is derived from the same cfg that installs it. 6j-6n — a
+# partially sampled arm published a median over whichever reps survived, and R6.1 is a RATIO
+# CEILING, which an unrepresentative low median satisfies without having been measured.
 #
 # # The bar, per #3249 (a hardcoded `_PERF_STATE="ok"` survived 118/118 tests)
 #
@@ -1557,6 +1563,109 @@ else
   fail "5l. an arm-E-only set must declare the assertion skipped (rc=$rc, out: $(head -16 <<<"$out"))"
 fi
 
+# --- 5m. AND THE ALLOCATOR IS ASKED OF THE BINARY, NOT INFERRED FROM ITS BYTES (#3997 R2.1,
+# roborev round 2 job 132). Case 5j asserts that arm E's binary DIFFERS from the control's; that
+# proves DIFFERENT BYTES and never `jemalloc`. Any unrelated rebuild — another feature set, a
+# stale binary from another branch — satisfies it while still linking glibc malloc, and nothing
+# downstream catches it: arm E runs under `--flight-allocator system` by construction and the
+# per-rep `/proc/<pid>/maps` check CANNOT see a statically linked jemalloc, which is the very
+# property that lets arm E carry the `system` label. So both binaries are asked for R2.1's
+# `allocator:` line before anything runs. Every state below is a REFUSAL naming its own cause,
+# because "the binary said the other thing" and "the binary did not say" are different remedies.
+E_OK="$TMP/bins-e-alloc-ok"
+make_bins_e "$E_OK" "$BINS" ok
+E_ALLOC_OUT="$TMP/out-e-alloc-ok"
+out=$(run_abc "$TMP/d-base" --corpus "$CORPUS" --bin-dir "$BINS" --bin-dir-e "$E_OK" \
+        --out "$E_ALLOC_OUT" --rounds 1); rc=$?
+# THE ACCEPT DIRECTION, AND IT IS AFFIRMATIVE. `rc=0` alone would also be produced by a check
+# that never ran, which is this repo's vacuous pass; the driver PRINTS what each binary reported,
+# so the oracle is the two printed lines and not the absence of a refusal.
+if [ "$rc" -eq 0 ] \
+   && grep -qF "reports 'allocator: system' (R2.1)" <<<"$out" \
+   && grep -qF "reports 'allocator: jemalloc' (R2.1)" <<<"$out"; then
+  pass "5m. the correct pair is ACCEPTED and the driver PRINTS both reported allocators — observed to have ASKED, not merely to have not refused"
+else
+  fail "5m. the correct pair must be accepted with both allocators printed (rc=$rc, out: $(grep -i alloc <<<"$out" | head -4))"
+fi
+if grep -qF -- "--bin-dir cqlite-flight" <<<"$out" && grep -qF -- "--bin-dir-e cqlite-flight" <<<"$out"; then
+  pass "5m. ...and it names WHICH binary each answer came from, so a reader is not left guessing which side was asked"
+else
+  fail "5m. each printed line must name its binary set (out: $(grep -i alloc <<<"$out" | head -4))"
+fi
+
+# THE FINDING'S OWN FAILURE SCENARIO: arm E's binary DIFFERS in bytes (so case 5j's digest
+# precondition is satisfied) and is still a `system` build. This is the input that used to be
+# accepted and measured as the linked-allocator arm.
+E_SYS="$TMP/bins-e-reports-system"
+make_bins_e "$E_SYS" "$BINS" rebuild-only system
+refuses_naming "5m. arm E's binary DIFFERING in bytes but reporting 'allocator: system' is REFUSED — the finding's own scenario: a rebuild that links glibc, measured as the jemalloc arm" \
+  "$TMP/d-base" "--bin-dir-e cqlite-flight" "reports 'allocator: system'" \
+  "expected 'allocator: jemalloc'" "different bytes" -- \
+  --corpus "$CORPUS" --bin-dir "$BINS" --bin-dir-e "$E_SYS" --out "$TMP/out-e-sys" --rounds 1
+# ...AND THE REFUSAL PRECEDES THE FIRST SIDE EFFECT, which is why the check sits with the
+# argument checks: `--out` must not even exist afterwards.
+if [ ! -e "$TMP/out-e-sys" ]; then
+  pass "5m. ...and it refuses BEFORE the first side effect — --out was never created, let alone fingerprinted"
+else
+  fail "5m. the refusal must precede mkdir -p \$OUT (found $(ls -A "$TMP/out-e-sys" | tr '\n' ' '))"
+fi
+
+# THE OTHER SIDE IS ASKED TOO. E reporting jemalloc while the CONTROL also links it is not an
+# allocator delta either — it is one treatment under two labels, the same defect from the other
+# end — so a control that reports `jemalloc` is refused with arm E's binary blameless.
+CTRL_JEM="$TMP/bins-control-jemalloc"
+make_bins "$CTRL_JEM" one jemalloc
+E_FOR_CTRL="$TMP/bins-e-for-ctrl"
+make_bins_e "$E_FOR_CTRL" "$CTRL_JEM" ctrl
+refuses_naming "5m. a CONTROL --bin-dir reporting 'allocator: jemalloc' is REFUSED — both sides are asked, because E-vs-jemalloc-control is not an allocator delta" \
+  "$TMP/d-base" "--bin-dir cqlite-flight" "reports 'allocator: jemalloc'" \
+  "expected 'allocator: system'" -- \
+  --corpus "$CORPUS" --bin-dir "$CTRL_JEM" --bin-dir-e "$E_FOR_CTRL" --out "$TMP/out-ctrl-jem" --rounds 1
+
+# EVERY UNMEASURABLE STATE, EACH NAMING ITS CAUSE. An absent line, an unrecognised value, two
+# lines, a non-zero exit and a non-executable file are all "the allocator is UNMEASURED", and
+# defaulting any of them either way is exactly how a glibc build gets measured as the jemalloc
+# arm.
+E_NOLINE="$TMP/bins-e-no-line"
+make_bins_e "$E_NOLINE" "$BINS" noline __NO_LINE__
+refuses_naming "5m. an arm-E binary whose --version prints NO allocator line is REFUSED as UNMEASURED, not defaulted to either allocator" \
+  "$TMP/d-base" "printed 0 line(s) matching" "EXACTLY ONE" "UNMEASURED" -- \
+  --corpus "$CORPUS" --bin-dir "$BINS" --bin-dir-e "$E_NOLINE" --out "$TMP/out-e-noline" --rounds 1
+E_UNKNOWN="$TMP/bins-e-unknown-alloc"
+make_bins_e "$E_UNKNOWN" "$BINS" unknown tcmalloc
+refuses_naming "5m. an UNRECOGNISED allocator value ('tcmalloc') is REFUSED by the anchored grammar — not read as 'some allocator', and not as jemalloc" \
+  "$TMP/d-base" "printed 0 line(s) matching" "^allocator: (jemalloc|system)\$" -- \
+  --corpus "$CORPUS" --bin-dir "$BINS" --bin-dir-e "$E_UNKNOWN" --out "$TMP/out-e-unknown" --rounds 1
+E_TWO="$TMP/bins-e-two-lines"
+make_bins_e "$E_TWO" "$BINS" two __TWO_LINES__
+refuses_naming "5m. TWO matching lines are REFUSED — R2.1's contract is EXACTLY ONE, and 'at least one' would let a binary claim both allocators" \
+  "$TMP/d-base" "printed 2 line(s) matching" "EXACTLY ONE" -- \
+  --corpus "$CORPUS" --bin-dir "$BINS" --bin-dir-e "$E_TWO" --out "$TMP/out-e-two" --rounds 1
+E_RC="$TMP/bins-e-nonzero"
+make_bins_e "$E_RC" "$BINS" rc __NONZERO__
+refuses_naming "5m. a NON-ZERO --version exit is REFUSED even though the output carried the right line — an answer from a failed invocation is not an answer" \
+  "$TMP/d-base" "exited 3" "UNMEASURED" -- \
+  --corpus "$CORPUS" --bin-dir "$BINS" --bin-dir-e "$E_RC" --out "$TMP/out-e-rc" --rounds 1
+E_NOX="$TMP/bins-e-not-executable"
+make_bins_e "$E_NOX" "$BINS" nox
+chmod -x "$E_NOX/cqlite-flight"
+refuses_naming "5m. a NON-EXECUTABLE arm-E binary is REFUSED naming that cause — a digest can be taken of a file that cannot be asked anything" \
+  "$TMP/d-base" "is not EXECUTABLE" "UNMEASURED" "chmod +x" -- \
+  --corpus "$CORPUS" --bin-dir "$BINS" --bin-dir-e "$E_NOX" --out "$TMP/out-e-nox" --rounds 1
+
+# AND THE CHECK IS PART OF THE OPT-IN, NOT OF THE DEFAULT. Without --bin-dir-e no allocator is
+# asked of anything, so a pre-#3997 A/B/C0/C/D set behaves exactly as it did — the same property
+# case 5k asserts of the fingerprint. This is the scope the driver DECLARES rather than leaves to
+# be discovered: a linked-jemalloc --bin-dir would make arms A/B/C0/C/D silently jemalloc arms,
+# which this check does not cover and nothing else does either.
+out=$(run_abc "$TMP/d-base" --corpus "$CORPUS" --bin-dir "$CTRL_JEM" \
+        --out "$TMP/out-no-e-jem" --rounds 1); rc=$?
+if [ "$rc" -eq 0 ] && ! grep -q "(R2.1)" <<<"$out"; then
+  pass "5m. WITHOUT --bin-dir-e no allocator is asked at all — even of a jemalloc-reporting control, so the pre-#3997 default is unchanged (declared scope, not a closed hole)"
+else
+  fail "5m. an arm-E-less set must not ask any binary its allocator (rc=$rc, out: $(grep -i 'alloc\|R2.1' <<<"$out" | head -3))"
+fi
+
 # ===========================================================================
 # PART 6 — THE SERVER'S SCAN-END RSS: R6.1's INPUT (#3997)
 # ===========================================================================
@@ -1909,8 +2018,10 @@ fi
 # blockers: case 5l, arm E's binary must actually DIFFER from the shared one, and cases 6j-6n,
 # the REP-level completeness of each RSS field with its own per-field census), 184 (+ the
 # all-reps-failed cause, distinct from the no-rep-recorded one), 185 (+ the arm-E-only set's
-# declaration that the differ-assertion was SKIPPED).
-MIN_CHECKS=170
+# declaration that the differ-assertion was SKIPPED), 196 (+ case 5m, the reported-allocator
+# precondition: the accept direction printed affirmatively, both wrong-value directions, and the
+# five unmeasurable states).
+MIN_CHECKS=185
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
