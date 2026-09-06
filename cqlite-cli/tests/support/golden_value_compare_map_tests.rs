@@ -259,3 +259,186 @@ fn a_frozen_maps_non_tojsonstring_golden_key_is_refused_and_names_the_oracle() {
         "{diffs:?}"
     );
 }
+
+// =======================================================================
+// KEY-SCOPED REFUSAL (issue #3815)
+// =======================================================================
+//
+// A container map KEY the flat CSV rendering cannot be read back at is refused AT
+// ITS OWN NODE, so the entries still pair POSITIONALLY and everything beside the
+// key — the entry COUNT, the pair SHAPE and every VALUE — keeps being compared.
+//
+// Both shapes below are UNREACHED BY THE CORPUS and are therefore constructed
+// here: #3726 measured that no container map key anywhere in it carries a `, `, a
+// `: ` or a bracket inside a member, and none collide. The goldens are built the
+// way the lane's own oracle would spell them (`MapType.toJSONString` writes the
+// key value's own `toJSONString` document) and the CSV inputs in the grammar
+// `ValueFormatter` documents — nothing here is taken from CQLite's output as an
+// EXPECTATION.
+
+/// The map type whose KEY is a `list<text>`, i.e. a container key whose member can
+/// itself carry the `, ` separator (the shape of the second finding below).
+const MAP_LIST_TEXT: &str = "frozen<map<frozen<list<text>>, int>>";
+
+/// Everything `compare_rows` measured for one golden/CLI pair — the diffs AND the
+/// refusal census, because a key-scoped refusal must be VISIBLE (a silent
+/// suppression is the failure mode that hid the second finding for a year).
+fn report_of(cql_type: &str, golden: Value, cli: Value, egress: Egress) -> super::super::Report {
+    let schema = schema_for(cql_type);
+    compare_rows(
+        &[row_of(golden)],
+        &[row_of(cli)],
+        &schema,
+        &["id"],
+        &[],
+        &[],
+        egress,
+    )
+}
+
+/// The map type whose key is a UDT, and the two DISTINCT keys that render ALIKE.
+const MAP_UDT_KEY: &str = "frozen<map<frozen<key_part>, int>>";
+
+/// A `key_part` whose `label` is NULL and one whose `label` is the TEXT `"null"`:
+/// two distinct values, one CSV spelling (`{label: null, rank: 1}`). The keys are
+/// spelled as `MapType.toJSONString` writes them.
+fn golden_colliding_keys() -> Value {
+    json!({
+        "{\"label\": null, \"rank\": 1}": 10,
+        "{\"label\": \"null\", \"rank\": 1}": 20
+    })
+}
+
+/// FINDING 1 — a duplicate KEY rendering must not cost the entry VALUES.
+///
+/// The whole-node refusal this replaces returned the un-split body, so NOTHING
+/// inside was compared: not the entry count, not the pair shape, not the values. A
+/// value corrupted 20 -> 999 inside such a cell was invisible (measured, and
+/// pinned executably as a hole by #3726's
+/// `a_duplicate_rendering_refusal_also_costs_the_entry_values`, which this
+/// replaces).
+#[test]
+fn a_corrupted_value_beside_a_duplicate_rendered_key_is_caught() {
+    // The CONTROL first: the correct rendering of that same cell must produce NO
+    // diff, so the assertion below cannot pass merely because everything fails.
+    let correct = json!("{{label: null, rank: 1}: 10, {label: null, rank: 1}: 20}");
+    let report = report_of(MAP_UDT_KEY, golden_colliding_keys(), correct, Egress::Csv);
+    assert!(
+        report.diffs.is_empty(),
+        "a correct rendering of an ambiguously-keyed map must not diverge: {:?}",
+        report.diffs
+    );
+    // The SECOND entry's value is corrupted 20 -> 999.
+    let corrupted = json!("{{label: null, rank: 1}: 10, {label: null, rank: 1}: 999}");
+    let report = report_of(MAP_UDT_KEY, golden_colliding_keys(), corrupted, Egress::Csv);
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+    assert!(
+        report.diffs[0].contains("999"),
+        "the diff must name the corrupted value: {:?}",
+        report.diffs
+    );
+}
+
+/// …and the entry COUNT and pair SHAPE beside it, which the whole-node refusal
+/// also threw away.
+#[test]
+fn an_entry_count_beside_a_duplicate_rendered_key_is_caught() {
+    let dropped = json!("{{label: null, rank: 1}: 10}");
+    let report = report_of(MAP_UDT_KEY, golden_colliding_keys(), dropped, Egress::Csv);
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+    assert!(
+        report.diffs[0].contains("map size golden 2 vs cli 1"),
+        "{:?}",
+        report.diffs
+    );
+}
+
+/// The ambiguous KEY itself stays SUPPRESSED — never resolved — and the
+/// suppression is NAMED in the census at the key's own node.
+///
+/// This is the property #3726's `two_container_keys_that_render_alike_are_refused`
+/// closed and this issue must not reopen: two keys sharing one spelling cannot
+/// select a decode guide, so accepting either reading would report correct egress
+/// as a divergence for whichever entry guessed wrong (#1491 finding T1).
+#[test]
+fn a_duplicate_rendered_key_is_refused_at_its_own_node_and_named() {
+    let correct = json!("{{label: null, rank: 1}: 10, {label: null, rank: 1}: 20}");
+    let report = report_of(MAP_UDT_KEY, golden_colliding_keys(), correct, Egress::Csv);
+    assert_eq!(
+        report.ambiguous_container_cells, 1,
+        "the refusal must be COUNTED: {:?}",
+        report.ambiguity_reasons
+    );
+    let reasons = report.ambiguity_reasons.join("; ");
+    for path in ["c[key 0]", "c[key 1]"] {
+        assert!(
+            reasons.contains(path),
+            "the census must name the refused KEY node `{path}`: {reasons}"
+        );
+    }
+    assert!(
+        reasons.contains("SAME key text"),
+        "and the cause: {reasons}"
+    );
+    assert!(
+        !report
+            .ambiguity_reasons
+            .iter()
+            .any(|reason| reason.starts_with("c (")),
+        "the refusal must be scoped to the KEY nodes, never attributed to the whole \
+         map node — that whole-node attribution is what cost the entry values: {reasons}"
+    );
+}
+
+/// FINDING 2 — a `, ` inside a SCALAR MEMBER of a container key was a FALSE
+/// DIVERGENCE, reported with nothing in the census marking it.
+///
+/// The map node is NOT refused: the `, ` sits at bracket depth 1, so the entry
+/// split and the key/value cut both survive. The KEY node is refused, so
+/// `decode_shape` left the raw text there — and `compare_map` then canonicalized
+/// that string as a container, failed, and propagated the failure as a DIFF. A
+/// wrong verdict on CORRECT egress, and `ambiguous_container_cells` stayed 0.
+#[test]
+fn a_separator_inside_a_scalar_member_of_a_key_is_refused_not_a_divergence() {
+    // The golden's object key is the key value's own `toJSONString` document.
+    let golden = json!({"[\"a, b\"]": 5});
+    // The JSON leg pins the premise: the two sides really do agree about this cell,
+    // so any CSV diff below would be the lane's own, not the egress's.
+    let json_cli = json!([{"key": ["a, b"], "value": 5}]);
+    assert!(
+        report_of(MAP_LIST_TEXT, golden.clone(), json_cli, Egress::Json)
+            .diffs
+            .is_empty(),
+        "premise: golden and CLI agree about this cell"
+    );
+    // `ValueFormatter` renders the key `["a, b"]` as `[a, b]` — unquoted, which is
+    // exactly why the key cannot be read back.
+    let csv = json!("{[a, b]: 5}");
+    let report = report_of(MAP_LIST_TEXT, golden, csv, Egress::Csv);
+    assert!(
+        report.diffs.is_empty(),
+        "correct CSV egress must not be reported as a divergence: {:?}",
+        report.diffs
+    );
+    assert_eq!(
+        report.ambiguous_container_cells, 1,
+        "and the narrowing must be DECLARED, not silent: {:?}",
+        report.ambiguity_reasons
+    );
+    let reasons = report.ambiguity_reasons.join("; ");
+    assert!(
+        reasons.contains("c[key 0]"),
+        "the census must name the refused KEY node: {reasons}"
+    );
+}
+
+/// …and the VALUE beside such a key is still compared, which is the whole point of
+/// scoping the refusal to the key.
+#[test]
+fn a_value_beside_a_separator_carrying_key_is_still_compared() {
+    let golden = json!({"[\"a, b\"]": 5});
+    let corrupted = json!("{[a, b]: 999}");
+    let report = report_of(MAP_LIST_TEXT, golden, corrupted, Egress::Csv);
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+    assert!(report.diffs[0].contains("999"), "{:?}", report.diffs);
+}
