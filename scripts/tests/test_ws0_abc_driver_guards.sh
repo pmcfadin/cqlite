@@ -1447,6 +1447,44 @@ else
   fail "5k. an arm-E-less set must not record arm-E fingerprint fields (have: $(tr -d '\n' < "$OUT/abc-run.json"))"
 fi
 
+# --- 5l. AND THE EXCEPTION'S OWN PREMISE: ARM E'S BINARY MUST ACTUALLY DIFFER. Cases 5a–5f
+# establish that the non-E arms share one digest and that arm E's own is stable between rounds;
+# NEITHER establishes that the two are DIFFERENT, which is the one fact the exception is granted
+# for. `bins-E/` populated by copying the control `cqlite-flight` instead of the
+# `--features jemalloc` build satisfies every check above, makes arm E a silent duplicate of arm
+# A, and the report then attributes pure run-to-run noise to the allocator — #3248's own defect
+# class. The driver's dispatch-time precondition (case 5j) is NOT this check: this tool is run
+# STANDALONE over a session directory some other invocation produced, so the property has to be
+# established from the sessions themselves.
+SAMESET="$TMP/set-E-same-binary"
+mkset "$SAMESET" 3 A,E 400000 250000 20000 25000
+mut_all_rounds "$SAMESET" E binary_provenance.binaries.cqlite-flight "{\"sha256\":\"$B_SHA\"}"
+agg_refuses_naming_arms "5l. arm E whose cqlite-flight is the SAME BYTES as every other arm's is REFUSED — the exception grants a DIFFERENT binary, and an identical one is arm A under a second label" \
+  "$SAMESET" A,E A "SAME BYTES" "second LABEL for arm A" "$B_SHA" \
+  "would be run-to-run noise" "--bin-dir-e"
+# THE ACCEPT DIRECTION IS THE UNTOUCHED A/E SET (case 5a), asserted here AGAIN against the SAME
+# tokens this refusal is matched on, so this case cannot be passing because the aggregator refuses
+# every A/E set: the control differs from the RED arm in exactly one property, arm E's digest.
+out=$(python3 "$AGG" --root "$ESET" --arms A,E --baseline A 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && ! grep -qF "SAME BYTES" <<<"$out"; then
+  pass "5l. ...while a GENUINELY DIFFERING arm-E digest is still ACCEPTED and says nothing about identical bytes — the check is the equality, not the comparison"
+else
+  fail "5l. the differing-digest control must still be accepted (rc=$rc, out: $(tail -3 <<<"$out"))"
+fi
+if grep -q "the two digests above are asserted to DIFFER" <<<"$out"; then
+  pass "5l. ...and the declaration SAYS the difference is asserted, so a reader is not left inferring it from two printed strings"
+else
+  fail "5l. the declaration must state that the digests are asserted to differ (out: $(head -16 <<<"$out"))"
+fi
+# AND IT IS KEYED ON THE EXCEPTION ARM, not on "two arms share a digest": arms A and B sharing
+# one is the INVARIANT, and reddening on it would break every set in parts 0-4.
+out=$(python3 "$AGG" --root "$SET" --arms A,B,C0,C --baseline A 2>&1); rc=$?
+if [ "$rc" -eq 0 ]; then
+  pass "5l. ...and arms that SHARE a digest with no arm E present are still accepted — sharing is the invariant, and only arm E's sharing is the defect"
+else
+  fail "5l. an arm-E-less set of shared digests must still aggregate (rc=$rc, out: $(tail -3 <<<"$out"))"
+fi
+
 # ===========================================================================
 # PART 6 — THE SERVER'S SCAN-END RSS: R6.1's INPUT (#3997)
 # ===========================================================================

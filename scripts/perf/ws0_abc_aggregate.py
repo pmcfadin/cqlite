@@ -447,6 +447,40 @@ def validate_configuration(sessions, complete, arms) -> list[str]:
             f"The exception permits arm {BINARY_EXCEPTION_ARM} to differ from the OTHER ARMS,"
             " not from ITSELF: a treatment that changed mid-set is not one arm.",
         )
+        # DIRECTION 3 — ARM E's BINARY MUST ACTUALLY DIFFER FROM THE SHARED ONE. Directions 1
+        # and 2 establish that the non-E arms share one digest and that arm E's own is stable;
+        # NEITHER establishes that the two are DIFFERENT, and the exception's whole premise is
+        # that they are. Without this, `bins-E/` built by copying the control `cqlite-flight`
+        # instead of the `--features jemalloc` one passes every check above, arm E is silently a
+        # duplicate of arm A, and the report announces a linked-allocator comparison while
+        # attributing pure run-to-run noise to the allocator — the #3248 defect class, whose
+        # machine-code sub-claim was WITHDRAWN for exactly this.
+        #
+        # The driver has a two-sided precondition that refuses identical bytes at dispatch time.
+        # That is not a substitute: this tool is run STANDALONE over a session directory some
+        # other invocation produced, so the property has to be established from the sessions
+        # themselves.
+        others = [a for a in arms if a != BINARY_EXCEPTION_ARM]
+        if others:
+            e_digest = sessions[(complete[0], BINARY_EXCEPTION_ARM)][
+                "invariants"][BINARY_EXCEPTION_FIELD]
+            shared_digest = sessions[(complete[0], others[0])][
+                "invariants"][BINARY_EXCEPTION_FIELD]
+            if e_digest == shared_digest:
+                raise Unreadable(
+                    f"arm {BINARY_EXCEPTION_ARM}'s {BINARY_EXCEPTION_BINARY} is the SAME BYTES"
+                    f" as every other arm's: arm {BINARY_EXCEPTION_ARM} recorded"
+                    f" {e_digest!r} and arm {others[0]} recorded {shared_digest!r}."
+                    f" Arm {BINARY_EXCEPTION_ARM} exists to measure the build that LINKS its"
+                    " allocator, so an IDENTICAL digest means it measured the CONTROL"
+                    f" program — arm {BINARY_EXCEPTION_ARM} is then a second LABEL for arm"
+                    f" {others[0]}, not a second treatment, and every figure attributed to the"
+                    " linked allocator below would be run-to-run noise. Most likely cause:"
+                    " `--bin-dir-e` was populated by copying the control"
+                    f" `{BINARY_EXCEPTION_BINARY}` rather than the `--features jemalloc` build."
+                    " REFUSED rather than reported: #3248 WITHDREW a machine-code sub-claim for"
+                    " exactly an arm that did not run what its label said."
+                )
     _refuse_unless_identical(
         "the set's ADMISSION TRIPLE is not identical across arms",
         [(tag, s["admission"]) for tag, s in every],
@@ -487,6 +521,11 @@ def validate_configuration(sessions, complete, arms) -> list[str]:
             str(sessions[(r, a)]["invariants"][BINARY_EXCEPTION_FIELD])
             for r in complete for a in arms if a != BINARY_EXCEPTION_ARM
         })
+        # The peer arm NAMED in the differ-assertion below. An arm-E-only set has no peer, and
+        # the assertion is skipped there rather than compared against nothing, so this sentence
+        # must not index an empty list to say so.
+        peer_arms = [a for a in arms if a != BINARY_EXCEPTION_ARM]
+        peer_label = peer_arms[0] if peer_arms else "any other arm (there is none in this set)"
         lines += [
             f"* **ARM {BINARY_EXCEPTION_ARM} RAN A DIFFERENT `{BINARY_EXCEPTION_BINARY}` BINARY"
             " — the ONE permitted exception to the identical-bytes invariant (#3997 R3.3).**"
@@ -502,6 +541,11 @@ def validate_configuration(sessions, complete, arms) -> list[str]:
             " generator — is identical in EVERY session, arm"
             f" {BINARY_EXCEPTION_ARM} included. Any other cross-arm binary difference is still a"
             " REFUSAL.",
+            "    * AND ENFORCED IN THE OTHER DIRECTION: the two digests above are asserted to"
+            f" DIFFER. Equal digests would mean arm {BINARY_EXCEPTION_ARM} measured the SAME"
+            f" program as every other arm — a second LABEL for arm"
+            f" {peer_label}, not a second treatment —"
+            " so that set is REFUSED rather than reported as a linked-allocator comparison.",
             f"    * NOT COVERED BY IT: arm {BINARY_EXCEPTION_ARM}'s recorded `flight_allocator`"
             " reads `system` — nothing is preloaded, because the allocator is linked — so the"
             " configuration table CANNOT show the allocator difference and the binary digest is"
