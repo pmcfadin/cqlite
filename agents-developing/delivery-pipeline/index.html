@@ -223,10 +223,36 @@ human authorized deferring them for that exact base/head/job. The verdict is thr
 unreadable one is <code dir="auto">UNMEASURED</code>: a range match is not a review. The deferral route exists because
 roborev RE-REPORTS a lead-deferred finding on every later round, so a record stays <code dir="auto">findings</code>
 forever once findings were deferred and requiring <code dir="auto">clean</code> outright would make such a merge
-unobtainable. That authorization is re-verified through the SAME scanner the wrapper uses, under a
-deliberately narrow kind returning a DISTINCT state, so nothing is decided from the block’s text —
-and the marker’s <code dir="auto">count=</code> half is deliberately NOT re-verified, which the output SAYS rather than
-implies: it is matched against the count OBSERVED BY THE REVIEW, which this leg never ran.
+unobtainable. That authorization is re-verified through the SAME scanner the wrapper uses, so nothing
+is decided from the block’s text — and since issue #4050 that includes the marker’s <code dir="auto">count=</code> half,
+the field tying a deferral to the findings it defers. The job record carries no findings-count
+FIELD but it DOES carry the review TEXT, so the count is DERIVED from that daemon-recorded text by
+the ONE shared recogniser <code dir="auto">scripts/flow/lib/roborev-findings-count.sh</code> — the same code the
+review-time gate runs, guarded in both consumers by the identical <code dir="auto">-f</code>+<code dir="auto">-r</code> test, since <code dir="auto">-r</code> alone
+is true for a FIFO and the <code dir="auto">.</code> would then block forever with no verdict — and the same judge is
+then asked the full question, binding only on <code dir="auto">granted</code>. A <code dir="auto">count-mismatch</code> is a MEASURED refusal
+(exit 4) named as its own state. Every unmeasurable state keeps the earlier refusal exactly (no
+review text, empty text, an untakeable census, or ZERO severity markers on a record whose verdict
+is affirmatively <code dir="auto">findings</code>, which is a contradiction and not a count), so the change adds a BOUND
+path and widens nothing else. The soundness argument, leading with the strongest part: the two
+ends run the <strong>same code over identical bytes, by construction</strong>. A findings deferral is grantable
+only on the <code dir="auto">--recheck-job</code> path (<code dir="auto">roborev_check_findings_deferral</code> returns before consulting
+anything unless <code dir="auto">RECHECK_JOB</code> is set), and on that path the transcript IS the record’s review text
+— the wrapper copies <code dir="auto">$RECORD_OUTPUT_FILE</code>, filled from the same <code dir="auto">roborev-job-facts.py</code>
+review-output path the merge point asks for, over <code dir="auto">$LOG</code> before any text check runs. So the
+recogniser’s known non-closure over prose cannot produce a review-vs-merge disagreement and cannot
+widen what review time already granted; that follows from the recheck-only restriction rather than
+from luck, because a deferral is never granted off a LIVE reviewer transcript — the one input that
+could have diverged from the stored record. Where the merge point cannot obtain those bytes it
+refuses as unmeasured, so the failure mode is a refusal, never a disagreement. Second, it never
+derives CLEANLINESS from prose — <code dir="auto">clean</code> stays reachable only from the structured verdict letter.
+It does not make the count tamper-proof against a party who can write roborev’s database — also
+the only way those bytes could differ between the two reads; that actor is invoker-class and out
+of model. Both halves of the byte-identity premise are PINNED in
+<code dir="auto">scripts/tests/test_roborev_review_guard.sh</code>, because a claim about another file decays exactly
+like a comment. Before #4050 this half was DECLARED unverifiable and
+a validly deferred PR was permanently unmergeable — three at once — which is why the measurement
+was supplied rather than the declaration restored.
 <code dir="auto">PREMERGE: HOLD-CHECK</code> re-reads the PR thread and the issue it closes for a
 column-zero <code dir="auto">HOLD:</code> order, and the PR timeline for a lead disarm inside 30 minutes.
 <strong>The threads are read with <code dir="auto">gh api --paginate</code>, every page decoded before any verdict.</strong>
