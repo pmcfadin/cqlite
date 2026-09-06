@@ -143,7 +143,9 @@ impl V5CompressedLegacyParser {
         let decoded = self.parse_value_from_raw_bytes(path_bytes, element_type, column_name, 0)?;
         if path_bytes.is_empty() && matches!(Self::peeled_for_inspection(&decoded), Value::Null) {
             return Err(Error::corruption(format!(
-                "Set member '{column_name}' of type '{element_type}': a zero-length cell                  path decodes to no value for this type, and Cassandra's own                  `validateCellPath` rejects it (issue #4106)"
+                "Set member '{column_name}' of type '{element_type}': a zero-length \
+                 cell path decodes to no value for this type, and Cassandra's own \
+                 `validateCellPath` rejects it (issue #4106)"
             )));
         }
         Ok(decoded)
