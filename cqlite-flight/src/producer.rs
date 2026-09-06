@@ -572,6 +572,16 @@ impl MergeProducer {
         // consults `udt_scope`, the same effective keyspace) now emits a structured
         // `Value::Udt`: a silent Arrow schema/array disagreement.
         let keyspace = self.effective_udt_keyspace().to_string();
+        // RESET TO THE DECLARATION FIRST (issue #2339, roborev job 131), for the same
+        // reason `with_udt_keyspace` does it: `UdtRegistry::resolve_type` is idempotent
+        // on an already-resolved node, so resolving in place cannot REBIND a column.
+        // This is a PUBLIC setter, so a caller may supply a REPLACEMENT registry — and
+        // `self.udt_registry` below (which merged-read decoding and `udt_scope` consult)
+        // is replaced unconditionally. Without the reset the Arrow metadata would stay
+        // bound to the SUPERSEDED registry's definitions while the emitted values follow
+        // the new one: for same-named UDTs with different shapes, a silent schema/array
+        // disagreement. The reset makes the two registries' answers agree by construction.
+        Self::reset_columns_to_declared(&self.original_cql_types, &mut self.columns);
         Self::resolve_columns_udts(&registry, &keyspace, &mut self.columns);
         // If aggregation was already attached (a caller that chained
         // `with_aggregation` BEFORE `with_udt_registry`), the PARTIAL output columns
@@ -580,7 +590,9 @@ impl MergeProducer {
         // resolved, a silent schema/array disagreement (roborev job 1924 blocker 1).
         // The PRODUCTION order (`with_udt_registry` THEN `with_aggregation`) is
         // covered symmetrically in `with_aggregation` (roborev job 1925 item 1).
+        // They take the reset too, from their OWN declared-type snapshot.
         if let Some(partial) = self.partial_columns.as_mut() {
+            Self::reset_columns_to_declared(&self.original_partial_cql_types, partial);
             Self::resolve_columns_udts(&registry, &keyspace, partial);
         }
         self.udt_registry = Some(registry);

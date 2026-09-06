@@ -202,3 +202,107 @@ CREATE TYPE ks_b.contact_info (email text, phone text, note text);";
         );
     }
 }
+
+/// **Issue #2339 (roborev job 131) — a REPLACEMENT registry must rebind, not no-op.**
+///
+/// `with_udt_keyspace` gained a reset-to-declared under issue #3960 for exactly one
+/// reason: `UdtRegistry::resolve_type` is IDEMPOTENT on an already-resolved node, so
+/// re-resolution alone can never change a binding. `with_udt_registry` — a PUBLIC
+/// setter — kept resolving in place, so chaining it a second time with a different
+/// registry replaced `self.udt_registry` (which merged-read decoding consults) while
+/// leaving the Arrow metadata bound to the FIRST registry's definitions. Same-named
+/// UDTs with different shapes then give a schema/value mismatch.
+///
+/// Both registries are keyed under the SCHEMA's own keyspace on purpose: the first
+/// resolution must SUCCEED, or the second one legitimately changes the binding and
+/// the defect is masked — the same precondition `conflicting_same_named_udt` states.
+///
+/// The discriminator is again the STRUCT FIELD COUNT (1 vs 3), so a stale binding is
+/// unambiguous rather than a judgement call.
+///
+/// RED BEFORE THE FIX: 1 field instead of 3.
+mod replacement_registry_rebinds {
+    use super::*;
+    use crate::ticket::Aggregation;
+
+    const TABLE_DDL: &str = "\
+CREATE TABLE ks_a.collections_with_udts (\
+id int PRIMARY KEY, \
+contacts set<frozen<contact_info>>);";
+
+    const ONE_FIELD_DDL: &str = "CREATE TYPE ks_a.contact_info (email text);";
+    const THREE_FIELD_DDL: &str =
+        "CREATE TYPE ks_a.contact_info (email text, phone text, note text);";
+
+    const KS: &str = "ks_a";
+
+    fn base_in_ks_a() -> MergeProducer {
+        let schema = parse_cql_schema(TABLE_DDL).expect("qualified ticket DDL parses");
+        assert_eq!(
+            schema.keyspace, KS,
+            "precondition: the schema keyspace must be the one BOTH registries key \
+             their UDT under, so the FIRST resolution succeeds"
+        );
+        MergeProducer::with_spec(schema, 64, ScanSpec::default()).expect("producer")
+    }
+
+    fn element_field_count(producer: &MergeProducer) -> usize {
+        match contacts_element(producer) {
+            DataType::Struct(fields) => fields.len(),
+            other => panic!("the frozen UDT element must resolve to a Struct, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_second_registry_rebinds_the_full_row_columns() {
+        let producer = base_in_ks_a()
+            .with_udt_registry(udt_registry_from_cql(ONE_FIELD_DDL, KS))
+            .with_udt_registry(udt_registry_from_cql(THREE_FIELD_DDL, KS));
+        assert_eq!(
+            element_field_count(&producer),
+            3,
+            "the SECOND registry is the one self.udt_registry keeps and merged-read \
+             decoding uses, so the Arrow metadata must describe ITS definition; \
+             keeping 1 means resolution no-oped on the first registry's already- \
+             resolved node and the promised schema disagrees with the emitted values"
+        );
+    }
+
+    /// The first registry establishing the binding is what makes this a REBIND test:
+    /// a single registry must reach the same answer, or the assertion above could be
+    /// satisfied by resolution simply never having happened.
+    #[test]
+    fn the_replacement_agrees_with_applying_it_alone() {
+        let replaced = base_in_ks_a()
+            .with_udt_registry(udt_registry_from_cql(ONE_FIELD_DDL, KS))
+            .with_udt_registry(udt_registry_from_cql(THREE_FIELD_DDL, KS));
+        let only = base_in_ks_a().with_udt_registry(udt_registry_from_cql(THREE_FIELD_DDL, KS));
+        assert_eq!(
+            contacts_element(&replaced),
+            contacts_element(&only),
+            "replacing a registry must be indistinguishable from having applied the \
+             replacement alone"
+        );
+    }
+
+    /// The PARTIAL (aggregate) columns take the same reset, so an aggregation
+    /// attached BEFORE the replacement cannot keep the superseded definition.
+    #[test]
+    fn a_second_registry_rebinds_the_partial_columns() {
+        let agg = Aggregation {
+            group_by: vec!["contacts".to_string()],
+            aggregates: vec![],
+        };
+        let producer = base_in_ks_a()
+            .with_aggregation(&agg)
+            .expect("group-by on the UDT collection column must plan")
+            .with_udt_registry(udt_registry_from_cql(ONE_FIELD_DDL, KS))
+            .with_udt_registry(udt_registry_from_cql(THREE_FIELD_DDL, KS));
+        assert_eq!(
+            element_field_count(&producer),
+            3,
+            "the partial/aggregate Arrow schema must follow the REPLACEMENT registry \
+             too — otherwise the aggregate schema promises the first registry's shape"
+        );
+    }
+}
