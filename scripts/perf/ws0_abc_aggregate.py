@@ -730,7 +730,7 @@ def rss_table(sessions, complete, arms, baseline) -> list[str]:
         " beside it because the shape of peak-vs-end is what separates \"the allocator retains"
         " more\" from \"the allocator peaked higher once\"; do not read it as an average.",
         "",
-        f"The pre-registered thresholds, for reference and NOT applied here: VmHWM <= 1.10x arm"
+        "The pre-registered thresholds, for reference and NOT applied here: VmHWM <= 1.10x arm"
         f" {baseline} for SHIP-default, <= 1.25x for SHIP-opt-in, above that DO-NOT-SHIP. The"
         " criterion is JOINT with throughput and with the dhat producer budget, neither of which"
         " this tool can see, so it prints the ratio and states no verdict.",

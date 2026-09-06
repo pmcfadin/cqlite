@@ -1315,8 +1315,32 @@ fi
 # narrow exception becomes a disabled check, and neither file can detect it alone.
 drv_arm=$(grep -oE '^ARM_E="[^"]*"' "$ABC_DRIVER" | head -1 | cut -d'"' -f2)
 drv_bin=$(grep -oE '^ARM_E_BINARY="[^"]*"' "$ABC_DRIVER" | head -1 | cut -d'"' -f2)
-agg_arm=$(grep -oE '^BINARY_EXCEPTION_ARM = "[^"]*"' "$AGG" | head -1 | cut -d'"' -f2)
-agg_bin=$(grep -oE '^BINARY_EXCEPTION_BINARY = "[^"]*"' "$AGG" | head -1 | cut -d'"' -f2)
+# THE PYTHON SIDES ARE DERIVED BY IMPORT, not by grepping their source: the producer's field
+# names come from the dict `server_rss_block` actually RETURNS and the consumer's from the tuple
+# it actually READS, so a rename that a source-text scan would miss (a computed key, a moved
+# constant) still moves these values. The driver is shell and has no such surface, so its two
+# constants are read from source — the one place here where that is the only option.
+_py=$(cd "$REPO_ROOT/scripts/perf" && python3 -c '
+import ws0_abc_aggregate as agg
+import ws0_flight_arm as arm
+print(agg.BINARY_EXCEPTION_ARM)
+print(agg.BINARY_EXCEPTION_BINARY)
+print(arm.RSS_UNMEASURED)
+print(agg.RSS_UNMEASURED_PREFIX)
+print(" ".join(sorted(k for k in arm.server_rss_block([], "warm", "x") if k.startswith("server_vm"))))
+print(" ".join(sorted(agg.RSS_FIELDS)))
+') || _py=""
+if [ -n "$_py" ]; then
+  pass "5h. (setup) both python sides IMPORT cleanly, so the constants below are the ones the code uses"
+else
+  fail "5h. (setup) the aggregator and the flight-arm collector must import — the derivations below are vacuous otherwise"
+fi
+agg_arm=$(sed -n 1p <<<"$_py")
+agg_bin=$(sed -n 2p <<<"$_py")
+arm_mod_marker=$(sed -n 3p <<<"$_py")
+agg_marker=$(sed -n 4p <<<"$_py")
+prod_fields=$(sed -n 5p <<<"$_py")
+agg_fields=$(sed -n 6p <<<"$_py")
 if [ -n "$drv_arm" ] && [ "$drv_arm" = "$agg_arm" ]; then
   pass "5h. the driver's ARM_E ('$drv_arm') and the aggregator's BINARY_EXCEPTION_ARM name the SAME arm"
 else
@@ -1327,12 +1351,23 @@ if [ -n "$drv_bin" ] && [ "$drv_bin" = "$agg_bin" ]; then
 else
   fail "5h. driver ARM_E_BINARY='$drv_bin' vs aggregator BINARY_EXCEPTION_BINARY='$agg_bin'"
 fi
-arm_mod_marker=$(grep -oE '^RSS_UNMEASURED = "[^"]*"' "$FLIGHT_ARM" | head -1 | cut -d'"' -f2)
-agg_marker=$(grep -oE '^RSS_UNMEASURED_PREFIX = "[^"]*"' "$AGG" | head -1 | cut -d'"' -f2)
 if [ -n "$arm_mod_marker" ] && [ "$arm_mod_marker" = "$agg_marker" ]; then
   pass "5h. ...and the UNMEASURED marker prefix is the same string in the producer and the consumer ('$agg_marker')"
 else
   fail "5h. ws0_flight_arm RSS_UNMEASURED='$arm_mod_marker' vs aggregator RSS_UNMEASURED_PREFIX='$agg_marker' — an unmeasured RSS would land in the wrong branch"
+fi
+# ...AND THE FIELD NAMES, from the dict the producer RETURNS and the tuple the consumer READS. A
+# rename on one side alone makes every session refuse with `NOT RECORDED` — loud, but the wrong
+# failure, and one nobody would attribute to a rename.
+if [ -n "$prod_fields" ] && [ "$prod_fields" = "$agg_fields" ]; then
+  pass "5h. ...and the RSS field NAMES agree between producer and consumer ('$agg_fields'), derived from the objects themselves"
+else
+  fail "5h. ws0_flight_arm publishes '$prod_fields' while the aggregator reads '$agg_fields'"
+fi
+if [ "$prod_fields" = "server_vm_hwm_kb server_vm_rss_kb" ]; then
+  pass "5h. ...and they are the two /proc fields R6.1 names — VmHWM (the peak) and VmRSS (the scan-end sample)"
+else
+  fail "5h. the published RSS fields must be server_vm_hwm_kb + server_vm_rss_kb, got '$prod_fields'"
 fi
 
 # --- 5i. THE DRIVER SIDE. Arm E is OPT-IN, dispatched against its OWN --bin-dir, and its binary
@@ -1571,7 +1606,7 @@ fi
 # counting the source — the loops and helpers multiply, and a source estimate understated a
 # floor by 29 elsewhere in this repo's history.
 # MEASURED: 98 (fingerprint + provenance + configuration + ratio), 105 (+ the F1
-# fingerprint-absent cases), 159 (+ #3997's parts 5 and 6 — arm E's cross-arm binary exception in
+# fingerprint-absent cases), 162 (+ #3997's parts 5 and 6 — arm E's cross-arm binary exception in
 # BOTH directions, and the scan-end server RSS R6.1 is read from).
 MIN_CHECKS=150
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
