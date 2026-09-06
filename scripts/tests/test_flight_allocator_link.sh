@@ -50,7 +50,17 @@
 # inode changed). So the well-known path is refreshed by each arm; the residual
 # exposure it leaves is a CONCURRENT build in the same target directory
 # overwriting it between our build and our read, and the private copy plus the
-# inode check is what closes that.
+# inode check NARROWS that — it does not eliminate it, because a read and a copy
+# are two operations.
+#
+# THAT RESIDUAL CAN ONLY PRODUCE A FALSE RED, NEVER A FALSE PASS, and the reason
+# is structural rather than hopeful. The positive arm passes only on a binary with
+# jemalloc symbols AND `allocator: jemalloc`; the negative arm only on one with
+# neither. Since `ALLOCATOR` is derived from the SAME cfg that installs the
+# allocator, a binary satisfying either arm IS a binary of that arm's
+# configuration. So a cross-arm mix-up — the negative arm reading the positive
+# arm's binary, or the reverse — makes the arm find the WRONG symbol state and
+# FAIL. There is no substitution that passes while measuring nothing.
 #
 # WHY DEBUG, NOT RELEASE. Two reasons, both load-bearing. (1) Cost: the gate's
 # other components already build this crate in debug, so the negative arm is warm
