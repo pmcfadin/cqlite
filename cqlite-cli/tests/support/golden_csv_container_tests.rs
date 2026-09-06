@@ -1326,16 +1326,30 @@ fn one_unrenderable_key_does_not_cost_its_siblings_their_refusal() {
     }
 }
 
-/// …and the node-level answer for that same mixed shape is a REFUSAL, not `None`.
+/// …and the node-level answer for that same mixed shape is a REFUSAL, not `None` —
+/// at [`Reach::Body`], because no split may be PROMISED here (roborev job 445).
 ///
 /// The guard for the property above, at the level the decoder and the comparator both
 /// read — and, like it, pinning NEW behaviour rather than recovering any.
 ///
+/// TWO assertions, and they are independent:
+///
+///   * REFUSED AT ALL. Round 2's purpose: without this the colliding pair is
+///     canonicalized and paired and the decoder resolves both to the first of them
+///     (#1491 finding T1).
+///   * REFUSED AT `Body`, NOT `MapKeys`. `MapKeys` tells the decoder it may split
+///     this node's entries, and the three body checks that decide whether it may
+///     cannot have run — they consume a rendering that could not be synthesized.
+///     Round 2 answered `MapKeys` and so contradicted the dominance invariant this
+///     very function documents. See [`super::unsynthesizable_rendering`] for the
+///     residual that widening costs.
+///
 /// NOT VACUOUS, verified by mutation rather than asserted: restoring the whole-map
-/// bail in `map_key_refusals` REDs this and its sibling, and restoring `None` at
-/// `decode_does_not_recover`'s `golden_rendering` branch REDs this one. (Restoring it
-/// at the object arm's `keys` branch reds NOTHING — that branch is subsumed by the
-/// `golden_rendering` one; its own comment records the measurement.)
+/// bail in `map_key_refusals` REDs this and its sibling; restoring `None` at
+/// `decode_does_not_recover`'s site 1 REDs this one; and switching the reach back to
+/// `MapKeys` REDs the second assertion below. (Restoring `None` at site 3 reds
+/// NOTHING — that site is subsumed by site 1; `unsynthesizable_rendering`'s own doc
+/// records the measurement.)
 #[test]
 fn a_mixed_key_node_does_not_fail_open() {
     let ty = ty_of("frozen<map<frozen<key_part>, int>>");
@@ -1351,8 +1365,15 @@ fn a_mixed_key_node_does_not_fail_open() {
              keys, so the colliding pair would be paired and mis-guided (#1491 T1)"
         ),
     };
-    assert_eq!(reach, Reach::MapKeys, "{why}");
-    assert!(why.contains("SAME key text"), "{why}");
+    assert_eq!(
+        reach,
+        Reach::Body,
+        "a split that could not be CHECKED must not be PROMISED: {why}"
+    );
+    assert!(
+        why.contains("SAME key text") && why.contains("cannot be synthesized"),
+        "the reason must name BOTH the key cause and why the reach is widened: {why}"
+    );
     // The CONTROL: the same unrenderable key with NO colliding siblings is still not
     // refused at all — so this narrows rather than refusing every mixed node.
     let no_collision = json!({

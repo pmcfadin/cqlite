@@ -715,6 +715,13 @@ fn subtree_refusal(golden: &Value, ty: &CqlType, kinding: Kinding) -> Option<Str
 /// entries, and the three checks above are precisely the ones that decide whether it
 /// may.
 ///
+/// SO `MapKeys` IS REPORTED ONLY WHERE THOSE THREE CHECKS ACTUALLY RAN. Where the
+/// golden's own rendering cannot be SYNTHESIZED they cannot run at all — they consume
+/// it — and a key-scoped cause found in that state is widened to [`Reach::Body`] by
+/// [`unsynthesizable_rendering`], which is the only thing this function may honestly
+/// say there. Round 2 returned `MapKeys` on that route and so promised a split it had
+/// never checked, contradicting this very paragraph (roborev job 445).
+///
 /// It is deliberately NOT the stronger question "could another value have rendered
 /// the same bytes". That question is unusable here: CSV members are unquoted, so a
 /// `list<text>` holding `["a", "b"]` and one holding `["a, b"]` render the SAME
@@ -737,26 +744,10 @@ fn decode_does_not_recover(
     }
     // An undeclared type is not refused: see the note on `node_refusal`'s `ty`.
     let ty = ty?;
+    // SITE 1 of 4 — and the only LIVE one, since `golden_rendering` recursively
+    // performs the very calls the other three re-derive.
     let Some(rendering) = golden_rendering(golden, Some(ty), kinding) else {
-        // THE GOLDEN'S OWN RENDERING CANNOT BE SYNTHESIZED AT ALL, because some
-        // member or key is not a spelling the declared type has. Deliberately NOT a
-        // refusal — the shape disagreement is a divergence for the comparison to
-        // report, not a limit of the flat format.
-        //
-        // But the KEY-SCOPED question is PER KEY and survives it (#3815 round 2).
-        // This is the OUTERMOST of the three whole-map bails that used to swallow it
-        // — it dominates the object arm below, so fixing only the inner two left the
-        // fail-open in place and the guard test
-        // `tests::a_mixed_key_node_does_not_fail_open` still RED. With one key
-        // unrenderable, two SIBLING keys that render ALIKE went unrefused at any
-        // reach, the colliding pair was canonicalized and paired, and the decoder
-        // resolved both to the first of them — #1491 finding T1, the false
-        // divergence this refusal exists to prevent.
-        return match golden {
-            Value::Object(fields) => key_scoped_refusal(fields, ty),
-            // An array has no keys, so it has no key-scoped cause.
-            _ => None,
-        };
+        return unsynthesizable_rendering(golden, ty);
     };
     let parts = match members(&rendering, ty) {
         Ok(parts) => parts,
@@ -781,43 +772,32 @@ fn decode_does_not_recover(
     };
     match golden {
         Value::Array(items) => {
-            let want = items
+            // SITE 2 of 4 (see [`unsynthesizable_rendering`]).
+            let Some(want) = items
                 .iter()
                 .enumerate()
                 .map(|(i, item)| {
                     golden_rendering(item, member_type(Some(ty), i), member_kinding(ty, kinding))
                 })
-                .collect::<Option<Vec<String>>>()?;
+                .collect::<Option<Vec<String>>>()
+            else {
+                return unsynthesizable_rendering(golden, ty);
+            };
             split_mismatch(&rendering, "member", &parts, &want).map(|why| (Reach::Body, why))
         }
         Value::Object(fields) => {
             // The keys are rendered ONCE and reused below, so the split check and
             // the key-cut check cannot ask two different questions about the same
-            // key — and so the "a key that does not render" case is decided in one
-            // place (here, by returning `None`: no refusal, because the golden's
-            // key is not a spelling of this declared type at all, which is a
-            // divergence for the comparison to report and not a format limit).
+            // key. SITE 3 of 4 (see [`unsynthesizable_rendering`]).
             let Some(keys) = fields
                 .keys()
                 .map(|key| entry_key_rendering(ty, key))
                 .collect::<Option<Vec<String>>>()
             else {
-                // A key that is not a spelling of this declared type at all: not a
-                // refusal, per the note above, and the KEY-SCOPED question survives
-                // it per key (#3815 round 2).
-                //
-                // SUBSUMED TODAY, and MEASURED to be: `golden_rendering` renders
-                // every key through `entry_key_rendering` and propagates its `None`,
-                // so a key that does not render already took the branch at the head of
-                // this function. Confirmed by mutation — replacing THIS branch with
-                // `None` reds NOTHING, while doing the same to either other whole-map
-                // bail reds `tests::a_mixed_key_node_does_not_fail_open`. Unreachable
-                // rather than untested, and stated that way rather than implying
-                // coverage it has none of. Kept anyway so the two routes give the SAME
-                // answer and cannot disagree.
-                return key_scoped_refusal(fields, ty);
+                return unsynthesizable_rendering(golden, ty);
             };
-            let want = fields
+            // SITE 4 of 4 (see [`unsynthesizable_rendering`]).
+            let Some(want) = fields
                 .iter()
                 .zip(keys.iter())
                 .map(|((key, value), rendered_key)| {
@@ -827,7 +807,10 @@ fn decode_does_not_recover(
                     golden_rendering(value, field_type(Some(ty), key), Kinding::Natural)
                         .map(|value| format!("{rendered_key}: {value}"))
                 })
-                .collect::<Option<Vec<String>>>()?;
+                .collect::<Option<Vec<String>>>()
+            else {
+                return unsynthesizable_rendering(golden, ty);
+            };
             if let Some(why) = split_mismatch(&rendering, "entry", &parts, &want) {
                 return Some((Reach::Body, why));
             }
@@ -877,6 +860,73 @@ fn decode_does_not_recover(
         // container the two arms cover.
         _ => None,
     }
+}
+
+/// THE ONE ANSWER to "the golden's own rendering of this node cannot be SYNTHESIZED",
+/// for the four sites in [`decode_does_not_recover`] that can discover it (#3815
+/// round 3).
+///
+/// # Why one answer, and not a guard per site
+///
+/// Four sites ask the same question, because each needs a piece of the synthesized
+/// rendering: the whole node's text (site 1, [`golden_rendering`]), an array's member
+/// texts (2), an object's key texts (3), an object's entry texts (4). Round 2 closed
+/// three of them ONE AT A TIME and gave two of them a DIFFERENT answer from the
+/// third, which is how the ordering violation below got in. So the answer lives here
+/// and the sites only route to it: a fifth site can be wrong about WHEN to ask, but
+/// not about WHAT to say.
+///
+/// SITES 2, 3 and 4 ARE SUBSUMED BY SITE 1, and measured to be: `golden_rendering`
+/// builds the node's text by making the very calls those three re-derive — the same
+/// `entry_key_rendering` for a key, the same `golden_rendering` for a member or
+/// value — so any of them failing means site 1 already returned. Mutation-confirmed:
+/// replacing site 3 with `None` reds NOTHING, while doing the same to site 1 reds
+/// `tests::a_mixed_key_node_does_not_fail_open`. They are kept, routed here, so the
+/// four cannot disagree if `golden_rendering`'s requirements are ever narrowed.
+///
+/// # The answer: [`Reach::Body`], and NOT `MapKeys`
+///
+/// Unsynthesizability ALONE is not a refusal — a golden key or member contradicting
+/// the DDL is a divergence for the comparison to report, not a limit of the flat
+/// format — so `None` unless the node ALSO carries a key-scoped cause.
+///
+/// When it does, that cause's natural reach is [`Reach::MapKeys`], and reporting it
+/// would be a FALSE PROMISE: `MapKeys` tells the decoder it may split this node's
+/// entries, and the three body checks that decide whether it may CANNOT HAVE RUN
+/// here — they consume the rendering that does not exist. Round 2 promised it anyway
+/// (roborev job 445). The concrete cost: a node with one unrenderable key, two
+/// colliding sibling keys and a text VALUE carrying a depth-0 `, ` would be split,
+/// over-split, and reported as a divergence the CLI did not cause.
+///
+/// So the reach is WIDENED to `Body`. That is over-refusal, which this module treats
+/// as a real cost and not as conservatism — see the module doc's residual — but it is
+/// the only honest answer available without a way to ask a body question with no
+/// rendering to ask it of. Recovering that is the deferred follow-up; it is genuinely
+/// new analysis and does not belong in this change.
+///
+/// WHAT IS PRESERVED, which was round 2's whole purpose: the node is still REFUSED,
+/// so the decoder never splits it and never resolves a colliding key to the first of
+/// its spelling — #1491 finding T1 stays closed. WHAT IS LOST is this mixed node's
+/// positional entry/value pairing, i.e. its entry COUNT and values. `origin/main`
+/// did not have those either (it refused nothing here, split, over-split on the input
+/// above and reported a false divergence), so this is fail-CLOSED against main rather
+/// than a regression against it.
+fn unsynthesizable_rendering(golden: &Value, ty: &CqlType) -> Option<(Reach, String)> {
+    // An array has no keys, so it has no key-scoped cause.
+    let Value::Object(fields) = golden else {
+        return None;
+    };
+    // The reach is DISCARDED and replaced deliberately: `key_scoped_refusal` answers
+    // `MapKeys`, which is exactly what cannot be promised here.
+    let (_, why) = key_scoped_refusal(fields, ty)?;
+    Some((
+        Reach::Body,
+        format!(
+            "the golden's own rendering of this node cannot be synthesized, so no body \
+             cause could be evaluated and no entry split can be promised — and this node \
+             also carries a key-scoped cause: {why}"
+        ),
+    ))
 }
 
 /// The FIRST key-scoped refusal of an object node, as a [`Reach::MapKeys`] answer —
@@ -1100,212 +1150,8 @@ fn map_entry_key_rendering(key_ty: &CqlType, key: &str) -> Option<String> {
     golden_rendering(&value, Some(key_ty), Kinding::Natural)
 }
 
-/// The text a scalar carries inside the golden's own rendering, translated to the
-/// CSV spelling where the golden's own spelling at THIS position is not it.
-///
-/// An untyped position is left verbatim: no translation can be derived without a
-/// declared type, and the shape disagreement belongs to the comparison.
-fn scalar_csv_text(scalar: &Value, ty: Option<&CqlType>, kinding: Kinding) -> String {
-    let text = scalar_text(scalar);
-    match (kinding, ty) {
-        (Kinding::Stringified, Some(ty)) => stringified_csv_text(text, ty),
-        _ => text,
-    }
-}
-
-/// The CSV text a golden scalar at a [`Kinding::Stringified`] position denotes.
-///
-/// # The two sides, and which authority each comes from
-///
-/// A stringified golden is `writeString(type.getString(v))` — the GOLDEN side, read
-/// from the pin `cassandra-5.0.8` (the per-type census is in [`Kinding`]'s doc).
-/// The CSV side is a question about CQLite's OWN output shape, so it is read from
-/// `cqlite_core::util::value_fmt::ValueFormatter::format_value`, which is
-/// legitimate for the same reason [`member_can_render_empty`] states at length.
-///
-/// # Why only `blob` is TRANSLATED
-///
-/// Walked over every type that can occupy a stringified position (a partition-key
-/// component, a multicell set's element, a map key). `getString` is
-/// `serializer.toString(deserialize(v))`:
-///
-///   * **`blob` — DIFFERS, and MATERIALLY.** `BytesSerializer.toString` is
-///     `ByteBufferUtil.bytesToHex`, the BARE lowercase hex, so the empty blob is
-///     `""`; `ValueFormatter` renders `format!("0x{hex}")`, so the empty blob is
-///     `0x`. Left untranslated, a sole empty blob member synthesized an EMPTY body
-///     and the node was refused as unrecoverable — and a refused one-member node
-///     accepts any framed body at all, so the member went uncompared. Translated
-///     by [`super::stringified_blob_spelling`], the one place this repository
-///     states the rule;
-///   * **`timestamp` — differs, IMMATERIALLY.** `FORMATTER_UTC`'s
-///     `yyyy-MM-dd'T'HH:mm:ss.SSSX` against `ValueFormatter::format_timestamp`'s
-///     `YYYY-MM-DD HH:MM:SS.fff+0000`. That is the lane's DECLARED timestamp
-///     narrowing and this function does not close it; it cannot move a `, `, a
-///     `: ` (the pattern's colons are digit-flanked) or a bracket, and neither
-///     spelling is ever empty, so the structural question is unaffected;
-///   * **`duration` — DIFFERS, and MATERIALLY.** MEASURED, not reasoned:
-///     Cassandra's `Duration.toString()` decomposes into `y/mo/w/d/h/m/s/ms/us/ns`
-///     — the committed `test_basic.simple_table` golden carries `"12h58m22s"` and
-///     `"1h20m44s"` — while `ValueFormatter::format_duration` prints
-///     months/days/NANOS only, i.e. `46702000000000ns` for that same value. Same
-///     value, materially different text. This function does NOT translate it, so a
-///     `duration` at a stringified position is compared untranslated and will
-///     diverge. The sibling #1490 lane records the same divergence
-///     (`tests/support/parquet_parity/spelling.rs`, module doc). Correcting
-///     `format_duration` is a follow-up, not this lane's business; what belongs
-///     here is that the census says so rather than claiming a match it does not
-///     have;
-///   * **`counter` — CANNOT OCCUPY THIS POSITION, and is therefore not part of
-///     the walk above.** Stated because it is a `CqlType::Numeric` and would
-///     otherwise be read as covered by "the integer family": Cassandra's
-///     `CounterColumnType.getString` is `accessor.toHex(value)`
-///     (`cassandra-5.0.8:.../marshal/CounterColumnType.java:74-77`), i.e. BARE
-///     HEX like a blob's, which this function does NOT translate. That would be a
-///     material divergence if a golden could carry it, and none can: every
-///     stringified position is barred to a counter by Cassandra itself — a
-///     PRIMARY KEY column (`CreateTableStatement.java:231-232`, "counter type is
-///     not supported for PRIMARY KEY column"), a multicell set element and a map
-///     key (`CQL3Type.java:825-836`, "Counters are not allowed inside
-///     collections"). The spelling differential records it as the one DECLARED
-///     UNREACHABLE position rather than pinning a spelling no golden has;
-///   * **every other type — IDENTICAL text.** `boolean` is `Boolean.toString()` on
-///     both sides; the integer family is `String.valueOf` / `BigInteger.toString(10)`
-///     against `to_string()`; `float`/`double`/`decimal` differ only in the
-///     narrowings this lane already declares (trailing zeros, exponent form), which
-///     like the timestamp cannot carry a separator, a bracket or an empty spelling;
-///     `text`/`varchar`/`ascii`, `uuid`/`timeuuid`, `date`, `time` and `inet` are
-///     spelled by the same function on both sides.
-///
-/// A CONTAINER type cannot be reached: this is called for a scalar golden only,
-/// and a frozen container at a stringified position is the case [`Kinding`] names
-/// as NOT COVERED (`getString` spells the whole value as one string, which the
-/// comparison reports as a shape divergence).
-///
-/// TOTAL over `CqlType` with no wildcard, for the reason
-/// [`member_can_render_empty`] gives: a new variant must have its answer
-/// established here rather than inherited from whichever side a wildcard sat on.
-fn stringified_csv_text(text: String, ty: &CqlType) -> String {
-    match ty {
-        CqlType::Blob => stringified_blob_spelling(&text).unwrap_or(text),
-        CqlType::Numeric(_)
-        | CqlType::Text(_)
-        | CqlType::Boolean
-        | CqlType::Timestamp
-        | CqlType::Opaque(_)
-        | CqlType::List(_)
-        | CqlType::Set(_)
-        | CqlType::Map(..)
-        | CqlType::Tuple(_)
-        | CqlType::Udt(_) => text,
-    }
-}
-
-/// The text a scalar carries inside the golden's own rendering
-/// ([`golden_rendering`]).
-/// `Value::Null` renders as the `null` token (NULL-TOKEN in the module doc), which
-/// is a text a `text` member can also produce — resolved by [`decode_shape`] from
-/// the golden's own type, and deliberately not a refusal.
-fn scalar_text(scalar: &Value) -> String {
-    match scalar {
-        Value::Null => "null".to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        Value::String(s) => s.clone(),
-        _ => String::new(),
-    }
-}
-
 fn is_scalar(v: &Value) -> bool {
     !matches!(v, Value::Array(_) | Value::Object(_))
-}
-
-/// Is an EMPTY golden array of this declared type genuinely unrecoverable?
-///
-/// Only for a `list`/`set` whose ELEMENT can render as the empty string. A
-/// `tuple` is exempt because its member count comes from the DDL, so the
-/// comparison's arity check sees a dropped member; every other type does not
-/// describe an array at all, and refusing there would hide the shape divergence
-/// the comparison exists to report.
-fn empty_container_is_ambiguous(ty: Option<&CqlType>) -> bool {
-    match ty {
-        Some(CqlType::List(element)) | Some(CqlType::Set(element)) => {
-            member_can_render_empty(element)
-        }
-        _ => false,
-    }
-}
-
-/// Can a value of this declared type render as the EMPTY string?
-///
-/// # Why asking CQLite's own formatter is legitimate here
-///
-/// This is the one question in this lane whose answer comes from
-/// `cqlite_core::util::value_fmt::ValueFormatter` rather than from an external
-/// oracle, and the distinction is worth stating: it does not ask what a value of
-/// this type SHOULD render as — that is the `sstabledump` golden's answer, and
-/// taking it from CQLite would be circular (CLAUDE.md, #3042) — it asks what
-/// SHAPE this egress's own output can take, i.e. whether the CSV rendering of SOME
-/// value of this type can be zero-length. Nothing outside the formatter can answer
-/// that, and the answer only ever decides whether an EMPTY container is refused;
-/// every value the comparison then makes is still the golden's.
-///
-/// # The answer, per type, from that formatter's branches
-///
-/// `ValueFormatter::format_value` has exactly one branch that passes its payload
-/// straight through — `Value::Text(s)` renders `String::from_utf8_lossy(s)` — so
-/// `text`/`varchar`/`ascii` are the ONLY types with an empty rendering. Every other
-/// branch emits at least one character on every path it can take, including its
-/// emptiest and its invalid inputs:
-///
-///   * integers/floats render through `to_string()`, a `{:e}`/`{}` format, or the
-///     tokens `NaN`/`Infinity`/`-Infinity`; a zero-length `varint` renders `0`, and
-///     a zero-length or over-ceiling `decimal` renders `0` or
-///     `<corrupt-decimal:…>`;
-///   * `boolean` is `true`/`false`;
-///   * `blob` is `format!("0x{hex}")`, so an EMPTY blob is `0x` — 2 characters, not
-///     none. This is the type the earlier deny-list got wrong;
-///   * `timestamp`/`date`/`time` render a fixed-width `chrono` pattern, or an
-///     `<invalid-…:{value}>` marker;
-///   * `uuid`/`timeuuid` render 36 characters; `inet` renders an
-///     `Ipv4Addr`/`Ipv6Addr` display or `<invalid-inet:N-bytes>`; a `duration`
-///     whose every component is zero renders `0ns`;
-///   * a container renders its bracket pair, so an empty one is `[]`/`{}`/`()`.
-///
-/// A NULL member does not widen any of these: `Value::Null` renders as the `null`
-/// token (the module doc's NULL-TOKEN), which is 4 characters.
-///
-/// `tests::an_empty_rendering_is_possible_only_for_text` runs that formatter over
-/// each type's emptiest value and requires this function to agree with it, so the
-/// claim above is measured rather than asserted in prose.
-///
-/// # Exhaustive on purpose, and why the DEFAULT matters
-///
-/// Written as a total match with no `_` arm. The earlier form was a deny-list —
-/// "answer `false` for these variants, `true` for everything else" — which
-/// answered `true` for `blob`, `timestamp` and every opaque scalar, so an empty
-/// collection of any of them was refused and dropped from the coverage counts
-/// (review round 19, finding Y2). Over-refusal is a BLIND SPOT and not
-/// conservatism: a refused node keeps only [`body_emptiness_bound`], so refusing a
-/// recoverable position makes it unchecked. A wildcard would also decide a FUTURE
-/// `CqlType` variant's answer silently, in whichever direction the wildcard
-/// happens to sit; with the match total, a new variant is a compile error whose
-/// fix is to establish that type's answer from the formatter, here.
-fn member_can_render_empty(ty: &CqlType) -> bool {
-    match ty {
-        // The one pass-the-payload-through branch: an empty string renders as
-        // nothing at all, which is what makes `{}` ambiguous for a `set<text>`.
-        CqlType::Text(_) => true,
-        CqlType::Numeric(_)
-        | CqlType::Boolean
-        | CqlType::Blob
-        | CqlType::Timestamp
-        | CqlType::Opaque(_)
-        | CqlType::List(_)
-        | CqlType::Set(_)
-        | CqlType::Map(..)
-        | CqlType::Tuple(_)
-        | CqlType::Udt(_) => false,
-    }
 }
 
 /// The declared type of member `i` of an array position, or `None` when the
@@ -1442,6 +1288,16 @@ fn body_emptiness_bound(members: usize, body: &str, rendering: &str) -> Result<(
     }
     Ok(())
 }
+
+/// The per-type SPELLING half of this module — what text a value of a declared type
+/// carries, and whether it can be empty (issue #3815 round 3 split it out under the
+/// campsite rule; that file's module doc states the seam). Re-exported so no call
+/// site changes.
+#[path = "golden_csv_spelling.rs"]
+mod spelling_half;
+use spelling_half::{
+    empty_container_is_ambiguous, member_can_render_empty, scalar_csv_text, stringified_csv_text,
+};
 
 /// Inverting the rendering — the DECODE half of this module (issue #3726 split it
 /// out under the campsite rule). Re-exported so no call site changes.
