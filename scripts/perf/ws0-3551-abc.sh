@@ -31,6 +31,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CORPUS=""
 BIN_DIR=""
+# ARM E's OWN BINARY SET (#3997). Empty = arm E is not part of this set, and the arm list below
+# does not carry it. See `arm_bin_dir` for why arm E is a second --bin-dir rather than a
+# per-binary override, and for the invariant this driver enforces on it up front.
+BIN_DIR_E=""
 OUT=""
 ROUNDS=3
 STEP_DURATION="45s"
@@ -52,6 +56,18 @@ PIN_B="2,3"
 # would buy nothing but a second failure mode.
 MEASURED_BINARIES=(ws0-scan-bench cqlite-flight flight-loadgen)
 
+# ARM E (#3997) — THE ONE ARM THAT MEASURES DIFFERENT BYTES, AND THE ONE THAT IS OPT-IN.
+#
+# Its id and its differing binary are named ONCE here because three places must agree on them:
+# this driver (which arm gets which --bin-dir), `ws0_abc_aggregate.py` (whose cross-arm binary
+# invariant grants this arm — and only this arm, on this binary — a NAMED exception), and
+# `scripts/tests/test_ws0_abc_driver_guards.sh` (which asserts BOTH directions of that
+# exception). The aggregator states the same pair in its own constants; the guard suite reads
+# both and refuses a disagreement, because two sides of one exception silently naming different
+# arms is how a narrow exception becomes a disabled check.
+ARM_E="E"
+ARM_E_BINARY="cqlite-flight"
+
 usage() {
   cat <<EOF
 ws0-3551-abc.sh — issue #3551 interleaved SMT-unpin + allocator trial
@@ -60,7 +76,15 @@ ws0-3551-abc.sh — issue #3551 interleaved SMT-unpin + allocator trial
   --bin-dir DIR      ONE frozen binary set measured by EVERY arm. REQUIRED, and required to be
                      one directory: the arms must not differ in their binaries (#3248 withdrew a
                      machine-code claim for exactly that reason), so this is deliberately not
-                     per-arm.
+                     per-arm. ARM E is the ONE exception, and it is opt-in — see --bin-dir-e.
+  --bin-dir-e DIR    OPTIONAL, and giving it is what ADDS ARM E to this set (#3997). A SECOND
+                     frozen binary set whose $ARM_E_BINARY is a DIFFERENT build — the linked
+                     jemalloc #[global_allocator] — and whose other measured binaries are the
+                     SAME BYTES as --bin-dir's. Both halves are CHECKED from the digests before
+                     anything is measured: an identical $ARM_E_BINARY would publish two labels
+                     for one treatment, and a differing ws0-scan-bench or flight-loadgen would
+                     move the drift control or the client apparatus, which is a second treatment.
+                     Omit it and the set is A/B/C0/C/D exactly as before.
   --out DIR          Where the r<N>-<arm>/ session dirs go. REQUIRED. A (round, arm) that
                      already holds a results.json is SKIPPED, so an interrupted set resumes
                      instead of starting over — which matters on a shared box. The resume is
@@ -84,6 +108,17 @@ what is attributable; arm C differs from arm A in BOTH axes and on its own is no
   1 phys core $PIN_A     A            D
   2 phys cores $PIN_B    B            C
   C0 = B + MALLOC_ARENA_MAX=$ARENA_MAX (#3217 partC F1-AC2's pre-registered arena experiment)
+  E  = arm A's FLAGS EXACTLY, measured against --bin-dir-e's binary set (#3997, R3.1/R3.3).
+       Present only when --bin-dir-e is given. Arms A/B/C0/C/D vary the allocator by
+       LD_PRELOAD into one binary, which is what let #3551 hold every arm's bytes identical;
+       arm E is the SHIPPED form — jemalloc LINKED as the binary's #[global_allocator] — so it
+       is the first arm that legitimately runs different bytes from arm A. Its flags say
+       --flight-allocator system because nothing is preloaded: the per-rep check then asserts
+       an EMPTY LD_PRELOAD and no jemalloc *mapping*, both of which a statically linked
+       allocator satisfies. So the allocator column of the aggregate's configuration table
+       reads 'system' for arm E too, and the allocator difference is visible ONLY as the
+       binary digest — which is why the aggregate prints those digests per arm rather than
+       leaving arm E's treatment to be inferred from a flag that cannot show it.
 
 \$OUT/abc-run.json is this set's RUN FINGERPRINT: the corpus path AND its recorded Data.db
 sha256 + row count, the --bin-dir path AND a digest of every measured binary in it, the arm set
@@ -101,6 +136,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --corpus) CORPUS="${2:-}"; shift 2 ;;
     --bin-dir) BIN_DIR="${2:-}"; shift 2 ;;
+    --bin-dir-e) BIN_DIR_E="${2:-}"; shift 2 ;;
     --out) OUT="${2:-}"; shift 2 ;;
     --rounds) ROUNDS="${2:-}"; shift 2 ;;
     --step-duration) STEP_DURATION="${2:-}"; shift 2 ;;
@@ -124,6 +160,14 @@ done
 mkdir -p "$OUT"
 
 ARMS=(A B C0 C D)
+
+# Arm E joins the set only when its binary set is supplied — see --bin-dir-e in the usage text
+# and `arm_bin_dir` below. Omitted, this driver's arm set and every fingerprint field it writes
+# are byte-identical to the pre-#3997 ones.
+if [[ -n "$BIN_DIR_E" ]]; then
+  [[ -d "$BIN_DIR_E" ]] || { echo "FATAL: --bin-dir-e '$BIN_DIR_E' is not a directory" >&2; exit 2; }
+  ARMS+=("$ARM_E")
+fi
 
 arm_flags() {
   # The one place an arm's identity is defined. Printed into the run record below AND read back
@@ -151,7 +195,45 @@ arm_flags() {
     # and (C-D)-(B-A) is the interaction — which is the quantity the SMT hypothesis is actually
     # about. Measuring only A/B/C leaves the headline attributable to either variable.
     D)  printf '%s\n' --flight-server-cpus "$PIN_A" --flight-pin-mode siblings --flight-allocator jemalloc ;;
+    # ARM E IS ARM A'S FLAG LIST, CHARACTER FOR CHARACTER, and that is the whole design (#3997).
+    # The treatment is carried entirely by `arm_bin_dir` below: arm E measures a binary that
+    # LINKS jemalloc as its `#[global_allocator]`, so there is nothing to preload and no knob to
+    # turn — `--flight-allocator jemalloc` here would set LD_PRELOAD and make arm E a
+    # preload-AND-link arm, i.e. two changes at once, which is the confound arm D was added to
+    # break. `system` is therefore the correct and honest value: it is what the SERVER'S
+    # ENVIRONMENT will hold, it is what `lib-flight-arm.sh` verifies per rep from
+    # /proc/<pid>/{environ,maps}, and a statically linked jemalloc leaves no `libjemalloc`
+    # MAPPING for that check to trip on.
+    #
+    # Consequence, stated because it is the reason R3.3 exists: arms A and E record an IDENTICAL
+    # treatment, so NOTHING in the recorded flags distinguishes them. The distinguishing fact is
+    # the `cqlite-flight` digest in each session's own `binary_provenance`, which is why the
+    # aggregator prints it per arm.
+    E)  printf '%s\n' --flight-server-cpus "$PIN_A" --flight-pin-mode siblings --flight-allocator system ;;
     *)  echo "FATAL: unknown arm '$1'" >&2; return 2 ;;
+  esac
+}
+
+# arm_bin_dir <arm> — WHICH FROZEN BINARY SET THIS ARM MEASURES (#3997).
+#
+# The one place that answer is given, mirroring `arm_flags` deliberately rather than being
+# folded into it: `arm_flags` output is FINGERPRINTED as an arm's flag list and read back out of
+# each session's recorded pinning, while the binary set is fingerprinted as digests and read
+# back out of each session's `binary_provenance`. Two different records, two different refusals.
+#
+# WHY A SECOND --bin-dir AND NOT A PER-BINARY OVERRIDE. `ws0-baseline.sh` derives the session's
+# whole `binary_provenance` block from `--bin-dir` (`ws0_binaries.py`), and that block is the
+# ONLY thing the aggregator can read the measured bytes out of. A `--flight-binary <path>`
+# override — the shape #3997's task list sketched — would launch one binary while the session
+# recorded the digest of another, so R3.3's exception would be granted against a digest that
+# named the wrong program: exactly the unobserved-treatment defect the rest of this file is
+# built to refuse. A second `--bin-dir` needs no new plumbing anywhere and keeps every digest
+# truthful. Build it as: the jemalloc `cqlite-flight` plus HARDLINKS (or copies) of --bin-dir's
+# own `ws0-scan-bench` and `flight-loadgen`, whose sameness is checked below.
+arm_bin_dir() {
+  case "$1" in
+    E) printf '%s\n' "$BIN_DIR_E" ;;
+    *) printf '%s\n' "$BIN_DIR" ;;
   esac
 }
 
@@ -301,6 +383,56 @@ for b in "${MEASURED_BINARIES[@]}"; do
   digest="$(sha256_of "$BIN_DIR/$b")" || exit 2
   fp+=("binary_sha256.$b=$digest")
 done
+# ARM E'S BINARY SET, AND THE TWO-SIDED PRECONDITION THAT EARNS ITS EXCEPTION (#3997, R3.3).
+#
+# `ws0_abc_aggregate.py` grants arm E a NAMED exception to the cross-arm "every arm ran the same
+# bytes" invariant. An exception is only narrow if BOTH of its edges are checked, so both are
+# checked HERE, from the digests, before a single rep runs:
+#
+#   * $ARM_E_BINARY MUST DIFFER. Identical bytes would make arm E a second label for arm A's
+#     treatment, and the aggregate would publish a "linked jemalloc" row measured from the
+#     glibc binary — a permitted exception used to hide the absence of the thing under test.
+#   * EVERY OTHER MEASURED BINARY MUST BE THE SAME BYTES. `ws0-scan-bench` IS the drift control
+#     and `flight-loadgen` is the client apparatus; moving either makes arm E differ from arm A
+#     in two properties, which is the confound arm D exists to break. The aggregate refuses
+#     these on its own too — that is the "still FAILs on any other cross-arm binary difference"
+#     half of R3.3 — but a refusal AFTER a multi-hour set has run is a refusal that costs the
+#     rig its window, so the same facts are established up front from the same digests.
+#
+# These fields are recorded ONLY when arm E is in the set, so a set started before #3997 (or
+# without --bin-dir-e) resumes against a byte-identical fingerprint. Switching arm E on or off
+# over one --out is caught by the `arms` field, which changes with it.
+if [[ -n "$BIN_DIR_E" ]]; then
+  fp+=("bin_dir_e=$BIN_DIR_E")
+  for b in "${MEASURED_BINARIES[@]}"; do
+    digest="$(sha256_of "$BIN_DIR/$b")" || exit 2
+    digest_e="$(sha256_of "$BIN_DIR_E/$b")" || exit 2
+    fp+=("binary_sha256_e.$b=$digest_e")
+    if [[ "$b" == "$ARM_E_BINARY" ]]; then
+      if [[ "$digest" == "$digest_e" ]]; then
+        echo "FATAL: --bin-dir-e '$BIN_DIR_E/$b' is the SAME BYTES as --bin-dir '$BIN_DIR/$b'" >&2
+        echo "       (sha256 $digest). Arm $ARM_E exists to measure a DIFFERENT $ARM_E_BINARY —" >&2
+        echo "       the build that LINKS jemalloc as its #[global_allocator]. Identical bytes" >&2
+        echo "       make arm $ARM_E a second LABEL for arm A's treatment, and the aggregate" >&2
+        echo "       would then publish a linked-allocator row measured from the control binary." >&2
+        echo "       Remedy: build --bin-dir-e's $ARM_E_BINARY with the jemalloc feature, or drop" >&2
+        echo "       --bin-dir-e and run the A/B/C0/C/D set." >&2
+        exit 2
+      fi
+    elif [[ "$digest" != "$digest_e" ]]; then
+      echo "FATAL: --bin-dir-e '$BIN_DIR_E/$b' differs from --bin-dir '$BIN_DIR/$b'" >&2
+      echo "         --bin-dir   $digest" >&2
+      echo "         --bin-dir-e $digest_e" >&2
+      echo "       Only $ARM_E_BINARY may differ between arm $ARM_E and the other arms." >&2
+      echo "       ws0-scan-bench IS the drift control and flight-loadgen is the client" >&2
+      echo "       apparatus, so a differing one makes arm $ARM_E differ from arm A in TWO" >&2
+      echo "       properties and its delta attributable to neither." >&2
+      echo "       Remedy: hardlink or copy --bin-dir's $b into --bin-dir-e rather than" >&2
+      echo "       rebuilding it, so the bytes are the same bytes by construction." >&2
+      exit 2
+    fi
+  done
+fi
 for arm in "${ARMS[@]}"; do
   mapfile -t af < <(arm_flags "$arm")
   fp+=("arm_flags.$arm=${af[*]}")
@@ -580,7 +712,12 @@ for ((r = 1; r <= ROUNDS; r++)); do
     # the line `perf-lint-allow` would have silenced a lint that was reasoning correctly; the
     # array makes the leading word the literal `bash` instead. Second, an empty optional value
     # cannot become an empty positional argument this way.
-    local_args=(--corpus "$CORPUS" --bin-dir "$BIN_DIR" --out "$dir"
+    # THE BINARY SET IS PER-ARM, and for every arm but E it is the one `--bin-dir` names — see
+    # `arm_bin_dir`. Resolved through the function rather than branched here so there is exactly
+    # one place that answers "which bytes did this arm measure", the same way `arm_flags`
+    # answers "under which flags".
+    arm_bins="$(arm_bin_dir "$arm")"
+    local_args=(--corpus "$CORPUS" --bin-dir "$arm_bins" --out "$dir"
                 --reps 1 --temp warm --arm bypass
                 --step-duration "$STEP_DURATION" --port "$PORT")
     if [[ -n "$QUIESCENCE_TS" ]]; then
@@ -626,3 +763,13 @@ echo
 _arms_csv=$(IFS=,; echo "${ARMS[*]}")
 echo "all rounds complete. aggregate with:"
 echo "  python3 $HERE/ws0_abc_aggregate.py --root $OUT --arms $_arms_csv --baseline ${ARMS[0]}"
+# ...and, when arm E is in the set, the TWO-ARM aggregate #3997's kill criterion is read from.
+# Printed as a SECOND command rather than replacing the one above: the whole-set table is still
+# what makes each arm's delta readable against the others, and R3.1 asks for the A/E pair
+# specifically (median Δrows/s, Δcycles/row, IPC, VmHWM and VmRSS per arm). Derived from the
+# arm ids, never a literal — the line above was a literal once and arm D's arrival silently
+# made it wrong (roborev, #3551 round 2).
+if [[ -n "$BIN_DIR_E" ]]; then
+  echo "and, for #3997's pre-registered A/$ARM_E kill criterion, the two-arm table:"
+  echo "  python3 $HERE/ws0_abc_aggregate.py --root $OUT --arms ${ARMS[0]},$ARM_E --baseline ${ARMS[0]}"
+fi
