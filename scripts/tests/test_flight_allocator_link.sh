@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# cqlite-flight linked-allocator guard (issue #3997, requirements R1.1, R1.2, R2.1).
+# cqlite-flight linked-allocator guard (issue #3997, requirements R1.1, R1.2, R1.3,
+# R2.1, R2.2).
 #
 # THE GATE-ENFORCING SURFACE for the jemalloc mechanism. It exists because the
 # cargo-native test that expresses the same contract
@@ -13,11 +14,31 @@
 # TWO ARMS, WHICH ARE EACH OTHER'S CONTROL. That is the whole design:
 #
 #   positive  `cargo build -p cqlite-flight --features jemalloc`
-#             -> the binary MUST carry jemalloc symbols, and `--version` MUST say
-#                `allocator: jemalloc`.
+#             -> the binary MUST carry jemalloc symbols, `--version` MUST say
+#                `allocator: jemalloc`, and the STARTUP LOG LINE must say
+#                `allocator=jemalloc` in AGREEMENT with that `--version`.
 #   negative  `cargo build -p cqlite-flight` (default features; `default = []`)
-#             -> the binary MUST carry NONE, and `--version` MUST say
-#                `allocator: system`.
+#             -> the binary MUST carry NONE, and both surfaces MUST say
+#                `system`, again in agreement.
+#
+# THREE ASSERTIONS PER ARM, AND THE THIRD IS AN AGREEMENT RATHER THAN A THIRD
+# LITERAL (R2.2). `design.md:41` claims the two externally observable surfaces
+# cannot disagree, because both are threaded from one `ALLOCATOR` const; the log
+# assertion is therefore made against the value `--version` was just proved to
+# print. Asserting each against its own literal would pass with one of them
+# hard-coded. R2.2 had NO exercising test from any surface before this: its only
+# other coverage would be a `cqlite-flight` integration target, which under #3384
+# no gate component executes, and the one target that captures the event
+# (`issue_3225_admission_provenance.rs`) passes a PLACEHOLDER allocator and says
+# in its own doc comment that it asserts nothing about it — while
+# `cqlite-flight/README.md` shows the line to operators.
+#
+# PLUS ONE WHOLE-SUITE ASSERTION AFTER THE ARMS (R1.3): `cargo test -p
+# cqlite-flight --features jemalloc --lib --bins`. "The allocator is not in any
+# test binary" was true by rustc's compilation model and MEASURED BY NOTHING — no
+# gate invocation enabled `jemalloc` for a `cargo test` — so it was a design
+# argument. Two `#[global_allocator]`s is a compile error, so if the allocator
+# ever escaped the bin target this invocation stops building.
 #
 # A single arm proves nothing: a symbol matcher that matches everything satisfies
 # the positive arm, and one that matches nothing satisfies the negative arm. Only
@@ -248,6 +269,110 @@ check_version_line() {
   return 0
 }
 
+# ANSI, STRIPPED AT THE PARSE SITE (CLAUDE.md #3400). MEASURED on this tree, not assumed:
+# `tracing_subscriber`'s `fmt::layer()` has ANSI on by DEFAULT and the escapes SURVIVE
+# REDIRECTION TO A FILE — a captured startup line reads
+# `…allocator<ESC>[2m=<ESC>[0m"system"`, so a `grep 'allocator="system"'` on the raw capture
+# matches NOTHING while the binary is behaving perfectly. Neither `NO_COLOR` nor a tty check is
+# relied on: the strip is at the point of the read, which is the only place that cannot be
+# bypassed by how the caller is invoked. ESC is built with `printf` rather than written as a
+# `\x1b` escape, which is a GNU-sed extension.
+ESC=$(printf '\033')
+strip_ansi() { sed "s/${ESC}\[[0-9;]*[a-zA-Z]//g"; }
+
+# R2.2 — THE STARTUP `info` LINE CARRIES `allocator=<value>`, AND IT AGREES WITH `--version`.
+#
+# `$1` = the snapshotted binary, `$2` = arm label, `$3` = the allocator value this arm's
+# `--version` reported (NOT a literal: see below).
+#
+# WHY THIS IS HERE AND NOT IN A CARGO TEST. R2.2's only other coverage would be a
+# `cqlite-flight` integration target, and under #3384 NO gate component executes those — the
+# same reason this whole guard exists. `issue_3225_admission_provenance.rs` captures this very
+# event and passes a PLACEHOLDER allocator, asserting nothing about it, so the field was
+# claimed to operators by `cqlite-flight/README.md` with no assertion anywhere behind it.
+#
+# WHAT IS ASSERTED IS THE AGREEMENT, not two separate values. `design.md:41` claims the two
+# surfaces cannot disagree because both derive from one `ALLOCATOR` const; the caller passes in
+# the value `--version` ACTUALLY printed, and this function requires the log field to equal it.
+# Asserting each against its own literal would pass even if one of them were hard-coded.
+#
+# KEYED ON THE NAMED EVENT, NOT ON "THE FIRST LINE". R2.2's wording says the first `info` line,
+# and under default configuration `cqlite-flight starting` genuinely is first — but
+# `main.rs:85` calls `log_observability_status` BEFORE `log_startup`, and that emits an `info`
+# line when `CQLITE_OTEL_ENABLED` is set. Keying on `cqlite-flight starting` makes the
+# assertion independent of an env var rather than hostage to one; it is not a defect in the code.
+#
+# `--listen 127.0.0.1:0` so the kernel picks a free port: this runs inside a gate component on a
+# box with up to four peer lanes and a real server, and a fixed port would make the guard fail
+# on contention rather than on the property. `RUST_LOG=info` is set EXPLICITLY because the
+# subscriber's filter is `EnvFilter::try_from_default_env()` — an inherited `RUST_LOG=warn`
+# would suppress the line and make a correct binary look silent.
+#
+# THE CHILD IS ALWAYS REAPED, on every path including the refusals: this function never calls
+# `fail` (which would `exit` with a server still holding a port). It reaps, then returns
+# non-zero after printing `verdict-detail`, exactly as `check_version_line` does.
+check_startup_allocator_line() {
+  local path="$1" label="$2" expect="$3"
+  local dir="$SCRATCH/$label.startup" pid rc_local waited=0 line n logged
+  mkdir -p "$dir/data" 2>/dev/null || {
+    say "verdict-detail arm $label (R2.2): cannot create a scratch --data-dir; nothing was measured"
+    return 1
+  }
+  # Streams captured SEPARATELY (the round-3 lesson one file over): the line is on STDOUT,
+  # measured, and a merged capture would let a future stderr-only regression pass unnoticed.
+  RUST_LOG=info "$path" --data-dir "$dir/data" --listen 127.0.0.1:0 \
+    >"$dir/out" 2>"$dir/err" &
+  pid=$!
+  # BOUNDED POLL, never a spin: 60 x 0.25s = 15s for a process whose only job before this line
+  # is parsing argv. Each pass also checks the child is still ALIVE, so a binary that dies of a
+  # bind failure or a panic is diagnosed as that rather than waited out to the full bound.
+  while [ "$waited" -lt 60 ]; do
+    if grep -q 'cqlite-flight starting' "$dir/out" 2>/dev/null; then
+      break
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      break
+    fi
+    sleep 0.25
+    waited=$((waited + 1))
+  done
+  kill "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  rc_local=$?
+  logged=$(strip_ansi < "$dir/out" 2>/dev/null)
+  n=$(printf '%s\n' "$logged" | grep -c 'cqlite-flight starting')
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  if [ "$n" -eq 0 ]; then
+    say "verdict-detail arm $label (R2.2): the binary printed NO \`cqlite-flight starting\` line on stdout within the bound (child exited $rc_local). The startup line is the surface \`cqlite-flight/README.md\` shows to operators, so its absence is a FAIL and not an unmeasurable host. stdout and stderr follow, ANSI-stripped:"
+    printf '%s\n' "$logged" | sed "s/^/${P}    stdout | /"
+    strip_ansi < "$dir/err" 2>/dev/null | sed "s/^/${P}    stderr | /"
+    return 1
+  fi
+  if [ "$n" -ne 1 ]; then
+    say "verdict-detail arm $label (R2.2): $n \`cqlite-flight starting\` lines on stdout; R2.2 describes ONE startup line, and a second would mean two configurations were logged in one process — neither can be read as the configuration this arm measured."
+    printf '%s\n' "$logged" | sed "s/^/${P}    stdout | /"
+    return 1
+  fi
+  line=$(printf '%s\n' "$logged" | grep 'cqlite-flight starting' | head -1)
+  # BOTH RENDERINGS of the field are accepted — `allocator="system"` (tracing's own quoting for
+  # a `&str` field, which is what it emits today, measured) and a bare `allocator=system` (what
+  # a `%allocator` Display field would print, and what the README shows). Quoting is a
+  # rendering choice of the subscriber; the VALUE is the contract, and it is compared exactly.
+  local got
+  got=$(printf '%s\n' "$line" | sed -n 's/.*[[:space:]]allocator="\([^"]*\)".*/\1/p' | head -1)
+  [ -n "$got" ] || got=$(printf '%s\n' "$line" | sed -n 's/.*[[:space:]]allocator=\([^ 	"]*\).*/\1/p' | head -1)
+  if [ -z "$got" ]; then
+    say "verdict-detail arm $label (R2.2): the \`cqlite-flight starting\` line carries NO \`allocator=\` field, so the value the README shows operators is not being logged at all. Line as read (ANSI-stripped): $line"
+    return 1
+  fi
+  if [ "$got" != "$expect" ]; then
+    say "verdict-detail arm $label (R2.2): the startup line reports allocator='$got' while this arm's own \`--version\` reported '$expect'. The two surfaces are threaded from ONE \`ALLOCATOR\` const (design.md:41), so a disagreement means one of them is no longer derived from what was linked — which is the failure the pair of surfaces exists to make impossible. Line as read: $line"
+    return 1
+  fi
+  say "arm $label: startup log line reports allocator='$got', AGREEING with its own --version (R2.2, read from stdout)"
+  return 0
+}
+
 # Resolve the artifact THIS arm's build produced, from that build's own JSON.
 # Echoes `<executable-path>\t<comma-separated features>`; returns non-zero when
 # the message stream holds no single recognisable bin artifact.
@@ -366,6 +491,11 @@ run_arm() {
   check_version_line "$bin" "$expect_alloc" \
     || fail "arm $label (R2.1): \`cqlite-flight --version\` did not report 'allocator: $expect_alloc' as its single allocator line (detail above)"
   say "arm $label: --version reports 'allocator: $expect_alloc'"
+  # R2.2 — the OTHER externally observable surface, asserted to AGREE with the one above. The
+  # value passed in is the one `--version` was just proved to report, so this is the agreement
+  # `design.md:41` claims and not two independent literals.
+  check_startup_allocator_line "$bin" "$label" "$expect_alloc" \
+    || fail "arm $label (R2.2): the startup \`cqlite-flight starting\` info line did not report \`allocator=$expect_alloc\` in agreement with its own \`--version\` (detail above). This is the surface cqlite-flight/README.md shows operators."
   say "arm $label VERDICT PASS"
 }
 
@@ -374,4 +504,19 @@ run_arm() {
 run_arm positive '--features jemalloc' present jemalloc
 run_arm negative ''                    absent  system
 
-pass "both arms discriminated: --features jemalloc links jemalloc and reports it, the default build links none and reports 'system' (issue #3997, R1.1/R1.2/R2.1)"
+# --- R1.3, MEASURED RATHER THAN ARGUED. "The allocator is not in any test binary" was true by
+# --- rustc's compilation model — a `#[global_allocator]` in `main.rs` is not linked into a
+# --- `--lib`/`--test` target — but NO gate invocation ever enabled `jemalloc` for a
+# --- `cargo test`, so the claim rested on a design argument and nothing executed it. One
+# --- invocation converts that from `partial` to `satisfied`: if the allocator ever escaped the
+# --- bin target, this is where it would collide (two `#[global_allocator]`s is a compile
+# --- error), and the unit suite would fail to build rather than silently link two.
+say "R1.3: cargo test -p cqlite-flight --features jemalloc --lib --bins"
+r13_err="$SCRATCH/r13.err"
+timeout -k 30 1500 cargo test -p cqlite-flight --features jemalloc --lib --bins \
+  >"$SCRATCH/r13.out" 2>"$r13_err"
+rc=$?
+[ "$rc" -eq 0 ] || fail "R1.3: \`cargo test -p cqlite-flight --features jemalloc --lib --bins\` exited $rc. The feature must not reach any test binary: a second \`#[global_allocator]\` is a COMPILE error, and a runtime failure here is the allocator perturbing the crate's own unit suite. Either way this is a broken tree, not an unmeasurable host. Remedy: run that exact command by hand. Last lines of its stderr: $(tail -5 "$r13_err" 2>/dev/null | tr '\n' '|')"
+say "R1.3: the unit suite BUILDS AND PASSES with the jemalloc feature on — the allocator does not reach a test binary (MEASURED, not inferred from rustc's model)"
+
+pass "both arms discriminated: --features jemalloc links jemalloc and reports it on BOTH surfaces (--version and the startup log line, in agreement), the default build links none and reports 'system' on both, and the unit suite builds and passes with the feature on (issue #3997, R1.1/R1.2/R1.3/R2.1/R2.2)"
