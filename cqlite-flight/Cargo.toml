@@ -27,7 +27,13 @@ futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-clap = { workspace = true }
+# `string`: clap's owned-`String` builder APIs. Needed because `--version`'s text
+# is composed AT RUNTIME from the linked allocator name (issue #3997, R2.1) —
+# `Command::long_version` otherwise takes only a `&'static str`, and the allocator
+# is a value threaded in from `main.rs` rather than a literal available here. The
+# feature adds `impl From<String> for clap::builder::Str` and nothing else; it
+# pulls in no new crate.
+clap = { workspace = true, features = ["string"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
