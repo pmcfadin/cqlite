@@ -154,6 +154,29 @@ TREATMENT = {
     "B": ("2,3", "distinct-cores", "system", None),
     "C0": ("2,3", "distinct-cores", "system", 2),
     "C": ("2,3", "distinct-cores", "jemalloc", None),
+    "D": ("2,10", "siblings", "jemalloc", None),
+    # ARM E RECORDS ARM A'S TREATMENT, CHARACTER FOR CHARACTER (#3997). That is not a fixture
+    # shortcut — it is the property R3.3 exists for: arm E's allocator is LINKED, so nothing is
+    # preloaded, `--flight-allocator system` is what the driver passes and `system` is what the
+    # session records. NOTHING in the recorded treatment distinguishes arm E from arm A, and the
+    # binary digest below is the only place the difference appears.
+    "E": ("2,10", "siblings", "system", None),
+}
+
+# THE `cqlite-flight` DIGEST PER ARM. Arm E's DIFFERS by construction, which is the whole
+# subject of R3.3; every other arm shares one. A case that needs the other shape mutates it.
+FLIGHT_SHA = {"E": "e" * 64}
+
+# THE SCAN-END RSS PER ARM (#3997, R6.1), distinct per arm so a swapped column or a
+# median-of-the-wrong-arm is detectable, and chosen so arm E's VmHWM is EXACTLY 1.10x arm A's —
+# the SHIP-default threshold, i.e. the one ratio a reader of this table has to get right.
+RSS = {
+    "A": (100000, 80000),
+    "B": (101000, 81000),
+    "C0": (102000, 82000),
+    "C": (103000, 83000),
+    "D": (104000, 84000),
+    "E": (110000, 88000),
 }
 for rnd in range(1, rounds + 1):
     for arm in arms:
@@ -169,7 +192,11 @@ for rnd in range(1, rounds + 1):
                 {"temperature": "warm", "arm": "flight_bypass", "reps": [{}],
                  "rows_per_sec": {"median": flight_rps, "spread_pct_of_median": 2.0, "n": 1},
                  "cycles_per_row": {"median": flight_cpr}, "ipc": {"median": 1.36},
-                 "row_denominator_total": 2000},
+                 "row_denominator_total": 2000,
+                 # R6.1's two figures, on the FLIGHT leg only — the bare scan starts no server.
+                 "server_vm_hwm_kb": RSS[arm][0],
+                 "server_vm_rss_kb": RSS[arm][1],
+                 "server_rss_reps_measured": 1, "server_rss_reps_total": 1},
             ],
             "pinning": {
                 "server_cpus": "2,10", "client_cpus": "4,12",
@@ -181,7 +208,7 @@ for rnd in range(1, rounds + 1):
             "corpus_identity": {"data_db_sha256": "abc123", "rows": 1000},
             "binary_provenance": {"binaries": {
                 "ws0-scan-bench": {"sha256": "a" * 64},
-                "cqlite-flight": {"sha256": "b" * 64},
+                "cqlite-flight": {"sha256": FLIGHT_SHA.get(arm, "b" * 64)},
                 "flight-loadgen": {"sha256": "c" * 64}}},
             "flight_admission": {"max_concurrent_scans": 4,
                                  "max_concurrent_scans_source": "derived",
@@ -300,6 +327,17 @@ make_bins() {
   for b in ws0-scan-bench cqlite-flight flight-loadgen; do
     printf 'ELF-ish %s %s\n' "$b" "$tag" > "$dir/$b"
   done
+}
+# make_bins_e <dir> <src-dir> <tag> — arm E's binary set: the SAME BYTES as <src-dir> for every
+# measured binary EXCEPT cqlite-flight, which is a different build. The shape the driver's
+# two-sided precondition ACCEPTS, so the RED arms below can each break exactly one half of it.
+make_bins_e() {
+  local dir="$1" src="$2" tag="$3" b
+  mkdir -p "$dir"
+  for b in ws0-scan-bench cqlite-flight flight-loadgen; do
+    cp "$src/$b" "$dir/$b"
+  done
+  printf 'ELF-ish cqlite-flight LINKED-JEMALLOC %s\n' "$tag" > "$dir/cqlite-flight"
 }
 # Mark a (round, arm) session dir MEASURED: a results.json plus the window record the driver
 # writes. Both, because either alone is one of the states this suite refuses.
@@ -752,6 +790,29 @@ agg_refuses_naming() {
   local -a expect=("$@")
   local out rc missing="" token
   out=$(python3 "$AGG" --root "$root" --arms A,B,C0,C --baseline A 2>&1); rc=$?
+  if [ "$rc" -eq 0 ]; then
+    fail "$label: must REFUSE, exited 0"
+    return
+  fi
+  for token in "${expect[@]}"; do
+    grep -qF -- "$token" <<<"$out" || missing="$missing [$token]"
+  done
+  if [ -n "$missing" ]; then
+    fail "$label: refused but did not NAME$missing (out: $(tail -3 <<<"$out"))"
+    return
+  fi
+  pass "$label"
+}
+
+# agg_refuses_naming_arms <label> <root> <arms-csv> <baseline> <token>… — `agg_refuses_naming`
+# for a set whose arm list is not the default four. Added by #3997 because R3.3's cases are
+# ABOUT the arm list: whether arm E is present is what switches the exception on, so a helper
+# that hardcodes `A,B,C0,C` cannot express either direction of it.
+agg_refuses_naming_arms() {
+  local label="$1" root="$2" arms_csv="$3" base="$4"; shift 4
+  local -a expect=("$@")
+  local out rc missing="" token
+  out=$(python3 "$AGG" --root "$root" --arms "$arms_csv" --baseline "$base" 2>&1); rc=$?
   if [ "$rc" -eq 0 ]; then
     fail "$label: must REFUSE, exited 0"
     return
