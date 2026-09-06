@@ -140,15 +140,36 @@ impl V5CompressedLegacyParser {
     /// entry point genuinely at the root — a test, or a column-level decode — writes the
     /// `0` at the call site, where a reviewer can see it.
     ///
-    /// The scalar arms below are kept BYTE-FOR-BYTE as they were before #3631 (they
-    /// encode measured, shipped behaviour — e.g. `CqlType::Float` surfaces
-    /// `Value::Float32`, which the type-string decoder spells as a widened
-    /// `Value::Float`; unifying the two is a separate change). Each validates its exact
-    /// width, so each consumes the whole slice. What #3631 replaced is the trailing
-    /// `_ =>` arm, which used to hand back `Value::Blob` for EVERY remaining type —
-    /// including a `frozen<map<text,int>>` field whose declared type was in hand and
-    /// unread. That silent degradation is what #28 forbids, and it made a value HASHABLE
-    /// in the Python binding that should not have been (#3500).
+    /// # ONE decoder for the whole field type (issue #4070)
+    /// This function used to keep its OWN arms for `Text`/`Ascii`, `Int`, `BigInt`,
+    /// `Boolean`, `Float`, `Double`, `Uuid`/`TimeUuid`, `Timestamp` and `Blob`, so one
+    /// scalar set had two decoders and a type fix had to land in both or the paths
+    /// silently diverged. #4070 DELETED them: the whole field type — scalar, collection,
+    /// tuple and nested UDT alike — now routes through [`Self::parse_typed_value`].
+    ///
+    /// The deletion is OBSERVATIONALLY NEUTRAL on the decoded `Value`, which is why it
+    /// was allowed to be a deletion rather than a behaviour change: each removed arm was
+    /// diffed against its `parse_typed_value` counterpart and agreed on the returned
+    /// variant, the admissible width, borrow-vs-allocate (`Text` and `Blob` both reach
+    /// `value_borrow::borrow_active` on either side), `Boolean` truthiness (`!= 0`),
+    /// `Timestamp` units (millis), the `Uuid`/`TimeUuid` collapse (there is no
+    /// `Value::TimeUuid`) and `Blob` framing (the whole slice, never VInt-framed). The
+    /// only differences were the REFUSAL MESSAGE strings, which are now the declared-width
+    /// wording from the one width gate.
+    ///
+    /// In particular the float SPELLING is unchanged: a `float` field is `Value::Float32`
+    /// on both sides — the widening the old comment here described was removed during
+    /// #3811's review (`b2132fb2c`) and this comment outlived it. `Value::Float32` is the
+    /// spelling format authority requires; it is pinned by
+    /// `a_float_udt_field_decodes_to_float32_not_a_widened_double` in
+    /// `regression_3631_typed_value_tests.rs`, which carries the citation.
+    ///
+    /// What #3631 replaced, and what must never come back, is the trailing `_ =>` arm
+    /// that handed back `Value::Blob` for EVERY remaining type — including a
+    /// `frozen<map<text,int>>` field whose declared type was in hand and unread. That
+    /// silent degradation is what #28 forbids, it made a value HASHABLE in the Python
+    /// binding that should not have been (#3500), and the delegate's own boundary is an
+    /// explicit `Error` naming the type instead (#3722 closed the last copies of it).
     ///
     /// Depth is checked on entry and threaded outward: a field reached from INSIDE a
     /// collection, tuple or another UDT must not restart the counter, because the UDT
@@ -169,108 +190,17 @@ impl V5CompressedLegacyParser {
         }
         // An EMPTY field (`[i32 0]`, i.e. `ByteBufferUtil.EMPTY_BYTE_BUFFER`) is decided
         // by ONE rule, in the typed decoder — see `empty_is_a_value`, which carries the
-        // pinned-tag citations. The arms below each require their exact width, so
-        // without this redirect an empty `int` field ERRORED here while Cassandra reads
-        // it as null. Text, blob and the collections keep their own empty semantics,
-        // which the typed decoder spells identically (`Text("")`, empty blob, empty
-        // collection).
-        if data.is_empty() {
-            return self.parse_typed_value(data, field_type, "UDT field", depth);
-        }
-        match field_type {
-            CqlType::Text | CqlType::Ascii => {
-                std::str::from_utf8(data)
-                    .map_err(|e| Error::corruption(format!("Invalid UTF-8 in UDT field: {}", e)))?;
-                Ok(Value::Text(
-                    crate::storage::sstable::reader::value_borrow::borrow_active(data),
-                ))
-            }
-            CqlType::Int => {
-                if data.len() != 4 {
-                    return Err(Error::corruption(format!(
-                        "Int field requires 4 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let v = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                Ok(Value::Integer(v))
-            }
-            CqlType::BigInt => {
-                if data.len() != 8 {
-                    return Err(Error::corruption(format!(
-                        "BigInt field requires 8 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let v = i64::from_be_bytes([
-                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                ]);
-                Ok(Value::BigInt(v))
-            }
-            CqlType::Boolean => {
-                if data.len() != 1 {
-                    return Err(Error::corruption(format!(
-                        "Boolean field requires 1 byte, got {}",
-                        data.len()
-                    )));
-                }
-                Ok(Value::Boolean(data[0] != 0))
-            }
-            CqlType::Float => {
-                if data.len() != 4 {
-                    return Err(Error::corruption(format!(
-                        "Float field requires 4 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let bits = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                Ok(Value::Float32(f32::from_bits(bits)))
-            }
-            CqlType::Double => {
-                if data.len() != 8 {
-                    return Err(Error::corruption(format!(
-                        "Double field requires 8 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let bits = u64::from_be_bytes([
-                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                ]);
-                Ok(Value::Float(f64::from_bits(bits)))
-            }
-            CqlType::Uuid | CqlType::TimeUuid => {
-                if data.len() != 16 {
-                    return Err(Error::corruption(format!(
-                        "UUID field requires 16 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let uuid_bytes: [u8; 16] = data[0..16]
-                    .try_into()
-                    .map_err(|_| Error::corruption("UUID byte conversion failed"))?;
-                Ok(Value::Uuid(uuid_bytes))
-            }
-            CqlType::Timestamp => {
-                if data.len() != 8 {
-                    return Err(Error::corruption(format!(
-                        "Timestamp field requires 8 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let millis = i64::from_be_bytes([
-                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                ]);
-                Ok(Value::Timestamp(millis))
-            }
-            CqlType::Blob => Ok(Value::Blob(
-                crate::storage::sstable::reader::value_borrow::borrow_active(data),
-            )),
-            // Issue #3631: every remaining declared type is decoded from that
-            // declared type — collections, tuples and nested UDTs structurally, the
-            // remaining scalars through the shared type-string decoder — or reported
-            // as an explicit `Error` naming the type. NEVER a silent `Value::Blob`.
-            other => self.parse_typed_value(data, other, "UDT field", depth),
-        }
+        // pinned-tag citations: NULL for every scalar whose Cassandra serializer guards
+        // `accessor.isEmpty(value) ? null : …`, and the empty string / empty blob /
+        // empty collection for the types where emptiness IS the value.
+        //
+        // Until #4070 that rule needed an explicit `if data.is_empty()` REDIRECT here,
+        // because the scalar arms this function used to carry each demanded their exact
+        // width and so ERRORED on an empty `int` that Cassandra reads as null. With the
+        // arms gone the redirect and the fall-through became the same call with the same
+        // arguments, so it is folded in rather than written twice; the empty rule is
+        // unchanged and still lives in exactly one place.
+        self.parse_typed_value(data, field_type, "UDT field", depth)
     }
 
     /// Read the `[i32 BE]` at `pos`, bounds-checked.
