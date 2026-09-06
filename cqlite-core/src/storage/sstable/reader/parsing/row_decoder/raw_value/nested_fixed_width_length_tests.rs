@@ -225,7 +225,8 @@ fn nesting_positions(t: &str) -> Vec<NestingPosition> {
 
 /// Did `err` come from one of the TWO halves of #3811's composed width rule?
 ///
-/// * UNDER-width (including zero): `reporting::require_fixed_width` —
+/// * UNDER-width — a length in `1..n`, since #3847 admits `0` as null:
+///   `reporting::require_fixed_width` —
 ///   `"Frozen element '<col>': need <n> byte(s) for <what>, got <len>"`.
 /// * OVER-width: `require_fully_consumed` —
 ///   `"Bounded value '<col>' of type '<t>' decoded only <n> of <len> byte(s)"`.
