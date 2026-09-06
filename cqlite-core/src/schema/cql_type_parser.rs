@@ -4,6 +4,7 @@
 //! the small inherent accessors (`fixed_size`, `is_collection`). Extracted from
 //! `schema/mod.rs` (issue #1134, source-split doctrine) with no behavior change.
 
+use super::frozen_scalar::{frozen_inner_supports_freezing, refuse_frozen_scalar_cql};
 use super::CqlType;
 use crate::error::{Error, Result};
 
@@ -87,13 +88,25 @@ impl CqlType {
                 .map(|_| &s[prefix.len()..])
         }
 
-        // Handle frozen types
+        // ═══ GATE 1 OF 2: `frozen<>` IS NOT DECLARABLE OVER A SCALAR ═══
+        //
+        // `CQL3Type.Raw::freeze()` is the base implementation and does nothing but
+        // throw ("frozen<> is only allowed on collections, tuples, and user-defined
+        // types"), and the grammar routes every `frozen<…>` through it — so a
+        // `frozen<scalar>` column, map key, element or UDT field cannot exist and
+        // there are no Cassandra-written bytes for one. The rule, its citation and
+        // the corpus census live in ONE place (`schema::frozen_scalar`), shared with
+        // the SerializationHeader gate; issue #4104.
+        //
+        // Sited HERE, at the metadata entry point, and never in a decoder: the
+        // refusal is upstream of decode by design.
         if let Some(inner) = strip_prefix_ci(type_str, "frozen<") {
             if let Some(inner) = inner.strip_suffix('>') {
-                return Ok(CqlType::Frozen(Box::new(Self::parse_with_depth(
-                    inner,
-                    depth + 1,
-                )?)));
+                let parsed = Self::parse_with_depth(inner, depth + 1)?;
+                if !frozen_inner_supports_freezing(&parsed) {
+                    return Err(refuse_frozen_scalar_cql(type_str, inner.trim()));
+                }
+                return Ok(CqlType::Frozen(Box::new(parsed)));
             }
         }
 

@@ -7,7 +7,7 @@
 
 use super::super::super::header::ColumnInfo;
 use super::super::super::vint::parse_vuint;
-use super::super::marshal_type::convert_marshal_type_to_cql;
+use super::super::marshal_type::convert_marshal_type_to_cql_checked;
 use super::super::SerializationHeaderResult;
 use nom::{bytes::complete::take, IResult};
 
@@ -39,7 +39,21 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
 
     let (input, pk_type_bytes) = take(pk_type_len as usize)(input)?;
     let partition_key_type = match std::str::from_utf8(pk_type_bytes) {
-        Ok(s) => convert_marshal_type_to_cql(s),
+        // Gate 2 of #4104: a header type that freezes a scalar is not writable by
+        // Cassandra, so refuse the HEADER rather than read a type it cannot have
+        // recorded. The nom channel carries no message, so the refusal — which does
+        // carry the `CQL3Type.java:647-651` citation — is logged before it is
+        // discarded.
+        Ok(s) => match convert_marshal_type_to_cql_checked(s) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("Refusing SerializationHeader partition key type: {e}");
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::Verify,
+                )));
+            }
+        },
         Err(_) => {
             tracing::debug!("Invalid UTF-8 in partition key type");
             return Err(nom::Err::Error(nom::error::Error::new(
@@ -176,7 +190,17 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
 
         let (remaining, type_bytes) = take(type_len as usize)(remaining)?;
         let cql_type = match std::str::from_utf8(type_bytes) {
-            Ok(s) => convert_marshal_type_to_cql(s),
+            // Gate 2 of #4104 — see the partition-key site for the reasoning.
+            Ok(s) => match convert_marshal_type_to_cql_checked(s) {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::error!("Refusing SerializationHeader static column {i} type: {e}");
+                    return Err(nom::Err::Error(nom::error::Error::new(
+                        input,
+                        nom::error::ErrorKind::Verify,
+                    )));
+                }
+            },
             Err(_) => {
                 tracing::debug!("Invalid UTF-8 in static column type {}", i);
                 return Err(nom::Err::Error(nom::error::Error::new(
@@ -265,7 +289,17 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
 
         let (remaining, type_bytes) = take(type_len as usize)(remaining)?;
         let cql_type = match std::str::from_utf8(type_bytes) {
-            Ok(s) => convert_marshal_type_to_cql(s),
+            // Gate 2 of #4104 — see the partition-key site for the reasoning.
+            Ok(s) => match convert_marshal_type_to_cql_checked(s) {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::error!("Refusing SerializationHeader regular column {i} type: {e}");
+                    return Err(nom::Err::Error(nom::error::Error::new(
+                        input,
+                        nom::error::ErrorKind::Verify,
+                    )));
+                }
+            },
             Err(_) => {
                 tracing::debug!("Invalid UTF-8 in regular column type {}", i);
                 return Err(nom::Err::Error(nom::error::Error::new(

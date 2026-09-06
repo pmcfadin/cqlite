@@ -14,7 +14,7 @@ pub(in crate::parser::enhanced_statistics_parser) use schema::parse_serializatio
 
 use super::super::header::ColumnInfo;
 use super::super::vint::parse_vuint;
-use super::marshal_type::convert_marshal_type_to_cql;
+use super::marshal_type::convert_marshal_type_to_cql_checked;
 use super::SerializationHeaderResult;
 use nom::IResult;
 use sequential::{parse_serialization_header_at_offset, parse_serialization_header_sequential};
@@ -465,8 +465,23 @@ fn parse_regular_columns(input: &[u8]) -> IResult<&[u8], (Vec<String>, Vec<Colum
                 };
                 pos += type_len;
 
-                // Convert Cassandra marshal type to CQL type
-                let cql_type = convert_marshal_type_to_cql(&internal_type);
+                // Convert Cassandra marshal type to CQL type, refusing a
+                // `FrozenType(<scalar>)` no Cassandra writer can emit (gate 2 of
+                // #4104). Fail-closed for the WHOLE header, matching the
+                // UTF-8-failure arm above.
+                let cql_type = match convert_marshal_type_to_cql_checked(&internal_type) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::error!(
+                            "Refusing SerializationHeader column {} ('{}') type: {}",
+                            col_idx,
+                            column_name,
+                            e
+                        );
+                        parse_success = false;
+                        break;
+                    }
+                };
 
                 parsed_columns.push(ColumnInfo {
                     name: column_name,
@@ -634,7 +649,22 @@ fn fallback_parse_serialization_header_ascii(
                         }
                     };
 
-                    let cql_type = convert_marshal_type_to_cql(&internal_type);
+                    // Gate 2 of #4104. This is the marker-search FALLBACK parser
+                    // and it has no per-column error arm, so a refused type fails
+                    // the whole header (`None`) rather than silently dropping the
+                    // column — dropping it would hide the refusal behind a schema
+                    // that merely looks short.
+                    let cql_type = match convert_marshal_type_to_cql_checked(&internal_type) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            tracing::error!(
+                                "Refusing SerializationHeader column '{}' type: {}",
+                                column_name,
+                                e
+                            );
+                            return None;
+                        }
+                    };
                     columns.push(ColumnInfo {
                         name: column_name,
                         column_type: cql_type,
