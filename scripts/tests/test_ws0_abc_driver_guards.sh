@@ -32,7 +32,18 @@
 #   * PART 6 (R6.1) the Flight server's scan-end `VmHWM`/`VmRSS`, per arm, and the property that
 #     an UNMEASURED figure and a genuinely small one do not read alike — a marker naming its
 #     cause, a ratio that reads NOT MEASURABLE, and a refusal for a zero, an absent key or a
-#     string that is not a marker.
+#     string that is not a marker. Cases 6j-6n carry the same property one level down, at the
+#     REP: a field only SOME reps supplied is a marker and not a median over the survivors, and
+#     each field's observation count is its OWN — asserted in both directions of the asymmetry,
+#     because one shared count cannot report 2 for one field and 3 for the other.
+#
+# Two roborev blockers on #3997 added case 5l and cases 6j-6n. Both were the same failure mode:
+# a rig that can publish a measurement it did not make. 5l — the exception checked that arm E's
+# digest was STABLE and that the others were SHARED, never that the two DIFFER, so a `bins-E/`
+# copied from the control passed every check and the report attributed run-to-run noise to the
+# allocator. 6j-6n — a partially sampled arm published a median over whichever reps survived,
+# and R6.1 is a RATIO CEILING, which an unrepresentative low median satisfies without having
+# been measured.
 #
 # # The bar, per #3249 (a hardcoded `_PERF_STATE="ok"` survived 118/118 tests)
 #
@@ -231,7 +242,11 @@ for rnd in range(1, rounds + 1):
                  # R6.1's two figures, on the FLIGHT leg only — the bare scan starts no server.
                  "server_vm_hwm_kb": RSS[arm][0],
                  "server_vm_rss_kb": RSS[arm][1],
-                 "server_rss_reps_measured": 1, "server_rss_reps_total": 1},
+                 # THE CENSUS IS PER FIELD (#3997 roborev): one shared count derived from
+                 # VmHWM alone affirmed a completeness that need not hold for VmRSS.
+                 "server_rss_reps_measured_vm_hwm_kb": 1,
+                 "server_rss_reps_measured_vm_rss_kb": 1,
+                 "server_rss_reps_total": 1},
             ],
             "pinning": {
                 "server_cpus": "2,10", "client_cpus": "4,12",
@@ -1626,6 +1641,185 @@ mut "$SSET/r2-A/results.json" measurements.1.server_vm_hwm_kb "n/a"
 agg_refuses_naming_arms "6h. a VmHWM string that is not an UNMEASURED marker is REFUSED — classified as neither an observation nor an absence" \
   "$SSET" A,E A "server_vm_hwm_kb" "'n/a'" "is not an"
 
+# --- 6j–6n. THE REP LEVEL, WHICH IS A DIFFERENT HOLE FROM THE ROUND LEVEL. Cases 6d–6e are
+# about a ROUND whose figure is a marker; these are about the ARM figure that becomes that
+# value. `server_rss_block` used to median whichever REPS happened to be measured, so 1 of 3
+# reps published a number the aggregator could not tell from a complete measurement — and R6.1
+# is a RATIO CEILING, which an unrepresentative low median satisfies without ever having been
+# measured. The subject is the COLLECTOR, driven BY IMPORT rather than through a fabricated
+# results.json, because the property is a property of that function and a fixture would only
+# restate whatever it returned.
+cat > "$TMP/rssblock.py" <<'RSSPY'
+import json
+import pathlib
+import sys
+
+# The collector is imported from the SHIPPED path, so no case below can pass against a copy.
+sys.path.insert(0, str(pathlib.Path(sys.argv[1])))
+import ws0_flight_arm as arm  # noqa: E402
+
+
+def value(token):
+    """One rep's field: an integer of kB, or `X` for a field that rep did not supply.
+
+    The unmeasured token is built with the collector's OWN `rss_unmeasured`, never a hand-typed
+    string — a marker this suite spelled itself would keep matching after the real spelling
+    moved.
+    """
+    if token == "X":
+        return arm.rss_unmeasured("planted: this rep supplied no sample")
+    return int(token)
+
+
+hwm = sys.argv[2].split(",") if sys.argv[2] else []
+rss = sys.argv[3].split(",") if sys.argv[3] else []
+if len(hwm) != len(rss):
+    sys.stderr.write("the two specs must name the same number of reps\n")
+    raise SystemExit(3)
+samples = [{"vm_hwm_kb": value(h), "vm_rss_kb": value(r)} for h, r in zip(hwm, rss)]
+block = arm.server_rss_block(samples, "warm", "flight_do_get_E")
+if len(sys.argv) > 4 and sys.argv[4] != "__ALL__":
+    key = sys.argv[4]
+    # AN ABSENT KEY IS REPORTED AFFIRMATIVELY, never as an empty line: case 6k asserts that the
+    # old shared census key is GONE, and "" would be indistinguishable from a key holding "".
+    print(block[key] if key in block else "__ABSENT__")
+    raise SystemExit(0)
+print(json.dumps(block, sort_keys=True))
+RSSPY
+rssblock() { python3 "$TMP/rssblock.py" "$REPO_ROOT/scripts/perf" "$@"; }
+
+# --- 6j. THE ACCEPT DIRECTION. Every rep supplied both fields, so both are published as
+# NUMBERS — the median over the reps — and the per-field census says 3 of 3. Without this
+# control a collector that markered everything would pass every case below.
+got=$(rssblock "100,200,300" "80,90,100" server_vm_hwm_kb)
+if [ "$got" = "200" ]; then
+  pass "6j. every rep supplying VmHWM publishes the MEDIAN over the reps (200 of 100/200/300)"
+else
+  fail "6j. a complete VmHWM series must publish its median (got '$got')"
+fi
+got=$(rssblock "100,200,300" "80,90,100" server_vm_rss_kb)
+if [ "$got" = "90" ]; then
+  pass "6j. ...and VmRSS its own median (90), taken from its own reps rather than VmHWM's"
+else
+  fail "6j. a complete VmRSS series must publish its median (got '$got')"
+fi
+got=$(rssblock "100,200,300" "80,90,100" __ALL__)
+if grep -q '"server_rss_reps_measured_vm_hwm_kb": 3' <<<"$got" \
+   && grep -q '"server_rss_reps_measured_vm_rss_kb": 3' <<<"$got" \
+   && grep -q '"server_rss_reps_total": 3' <<<"$got"; then
+  pass "6j. ...and the census reports 3 of 3 reps PER FIELD, so each figure carries its own completeness"
+else
+  fail "6j. the per-field census must report 3 of 3 for both fields (got '$got')"
+fi
+
+# --- 6k. THE REFUSAL DIRECTION, AND THE PER-FIELD ASYMMETRY. One rep's VmHWM is missing while
+# every rep's VmRSS is present: the VmHWM figure must become a MARKER while VmRSS stays a
+# NUMBER. A single shared observation count cannot express that state, which is the second half
+# of the finding — the census affirmed a completeness that held for one field only.
+got=$(rssblock "100,200,X" "80,90,100" server_vm_hwm_kb)
+case "$got" in
+  UNMEASURED*"2 of 3 rep(s)"*VmHWM*)
+    pass "6k. a VmHWM missing on 1 of 3 reps publishes an UNMEASURED marker naming the COUNT and the /proc field, not a median over the 2 survivors" ;;
+  *) fail "6k. a partial VmHWM must be an UNMEASURED marker with its counts (got '$got')" ;;
+esac
+case "$got" in
+  ''|*[!0-9.]*) pass "6k. ...and it is NOT a number, so a partial series and a complete one cannot read alike" ;;
+  *) fail "6k. the partial VmHWM rendered as a NUMBER ('$got')" ;;
+esac
+if grep -qF "RATIO CEILING" <<<"$got"; then
+  pass "6k. ...and the cause says WHY a subset median is refused — R6.1's ceiling is satisfiable by an unrepresentative one"
+else
+  fail "6k. the cause must state why a subset median is refused (got '$got')"
+fi
+got=$(rssblock "100,200,X" "80,90,100" server_vm_rss_kb)
+if [ "$got" = "90" ]; then
+  pass "6k. ...while VmRSS, which EVERY rep supplied, is still published (90) — the refusal is per FIELD, not per arm"
+else
+  fail "6k. a complete VmRSS must survive an incomplete VmHWM (got '$got')"
+fi
+got=$(rssblock "100,200,X" "80,90,100" __ALL__)
+if grep -q '"server_rss_reps_measured_vm_hwm_kb": 2' <<<"$got" \
+   && grep -q '"server_rss_reps_measured_vm_rss_kb": 3' <<<"$got"; then
+  pass "6k. ...and the census records 2 for VmHWM and 3 for VmRSS — two counts, because the two fields fail independently"
+else
+  fail "6k. the census must differ per field (got '$got')"
+fi
+got=$(rssblock "100,200,X" "80,90,100" server_rss_reps_measured)
+if [ "$got" = "__ABSENT__" ]; then
+  pass "6k. ...and the old SHARED server_rss_reps_measured key is GONE, not kept beside them — one fact, one source"
+else
+  fail "6k. the shared census key must be removed (got '$got')"
+fi
+
+# --- 6l. THE OTHER DIRECTION OF THE SAME ASYMMETRY, as an EXACT MIRROR of 6k — same rep count,
+# same values, the hole moved to the other field. The pair is what shows the two counts are not
+# two spellings of one number: a single shared count cannot be 2 and 3 at once, so whichever
+# field it was derived from, one of these two cases had to fail before this change.
+got=$(rssblock "100,200,300" "80,90,X" server_vm_hwm_kb)
+if [ "$got" = "200" ]; then
+  pass "6l. a VmRSS missing on 1 of 3 reps leaves VmHWM published (200) — the fields are read independently"
+else
+  fail "6l. a complete VmHWM must survive an incomplete VmRSS (got '$got')"
+fi
+got=$(rssblock "100,200,300" "80,90,X" server_vm_rss_kb)
+case "$got" in
+  UNMEASURED*"2 of 3 rep(s)"*VmRSS*)
+    pass "6l. ...and VmRSS is the marker, naming VmRSS and 2 of 3 — the marker says WHICH field went unmeasured" ;;
+  *) fail "6l. a partial VmRSS must be an UNMEASURED marker naming its own field (got '$got')" ;;
+esac
+got=$(rssblock "100,200,300" "80,90,X" __ALL__)
+if grep -q '"server_rss_reps_measured_vm_hwm_kb": 3' <<<"$got" \
+   && grep -q '"server_rss_reps_measured_vm_rss_kb": 2' <<<"$got"; then
+  pass "6l. ...and the census inverts with it (3 VmHWM, 2 VmRSS) — the exact inverse of 6k's 2/3, which one shared count could not report"
+else
+  fail "6l. the census must invert with the asymmetry (got '$got')"
+fi
+
+# --- 6m. NO REP AT ALL. `all(...)` over an empty sequence is vacuously TRUE, so the total is
+# tested explicitly: a zero-rep arm must reach the marker and not `statistics.median([])`, which
+# raises and would abort the whole report for a quantity that is merely absent.
+got=$(rssblock "" "" server_vm_hwm_kb); rc=$?
+case "$got" in
+  UNMEASURED*"0 of 0 rep(s)"*)
+    pass "6m. a ZERO-rep arm publishes the marker naming 0 of 0 — never a crash, and never a 0 kB that would satisfy R6.1's ceiling" ;;
+  *) fail "6m. a zero-rep arm must publish the marker (rc=$rc, got '$got')" ;;
+esac
+
+# --- 6n. THE TWO SIDES, END TO END. The marker in case 6d is one this suite typed; this one is
+# the string the COLLECTOR actually produced for a partial rep set, planted into a session and
+# read by the AGGREGATOR. That is what pins the contract: a producer marker the consumer
+# classified as "a string that is not a marker" would REFUSE (6h) instead of reporting
+# UNMEASURED, and one it classified as a number would publish a ratio over a rep set nobody
+# measured.
+REAL_MARKER=$(rssblock "100,200,X" "80,90,100" server_vm_hwm_kb)
+PSET="$TMP/set-E-partial-reps"
+mkset "$PSET" 3 A,E 400000 250000 20000 25000
+mut "$PSET/r2-E/results.json" measurements.1.server_vm_hwm_kb "$REAL_MARKER"
+PREPORT="$TMP/report-E-partial-reps.md"
+out=$(python3 "$AGG" --root "$PSET" --arms A,E --baseline A --out "$PREPORT" 2>&1); rc=$?
+if [ "$rc" -eq 0 ]; then
+  pass "6n. the collector's OWN partial-rep marker is accepted by the aggregator as an absence — not refused as an unclassifiable string"
+else
+  fail "6n. the real marker must be classified as an absence (rc=$rc, out: $(tail -3 <<<"$out"))"
+fi
+got=$(cell "$PREPORT" "Server RSS" E "VmHWM kB (median)")
+if [ "$got" = "UNMEASURED (2 of 3 round(s) observed)" ]; then
+  pass "6n. ...and arm E's VmHWM cell reads UNMEASURED with its round count, so a REP-level hole is visible at the ARM level"
+else
+  fail "6n. the partial-rep round must render UNMEASURED (got '$got')"
+fi
+got=$(cell "$PREPORT" "Server RSS" E "paired VmHWM vs A")
+if [ "$got" = "NOT MEASURABLE (1 round(s) of E, 0 of A unobserved)" ]; then
+  pass "6n. ...and R6.1's ratio reads NOT MEASURABLE — the ceiling is not applied to a series a rep never supplied"
+else
+  fail "6n. R6.1's ratio must be NOT MEASURABLE for a partial-rep arm (got '$got')"
+fi
+if grep -qF "$REAL_MARKER" "$PREPORT"; then
+  pass "6n. ...and the collector's cause is reprinted IN FULL, counts included — the remedy is a rep to re-run, and only the cause says so"
+else
+  fail "6n. the collector's cause must reach the report (RSS section: $(sed -n '/## Server RSS/,/^## /p' "$PREPORT" | tail -5 | tr '\n' ' '))"
+fi
+
 # --- 6i. THE CLEAN A/E SET ONCE MORE, so no case above passed by leaving a fixture broken.
 out=$(python3 "$AGG" --root "$ESET" --arms A,E --baseline A); rc=$?
 if [ "$rc" -eq 0 ] && grep -q "0 UNMEASURED RECOGNISED" <<<"$out"; then
@@ -1645,8 +1839,10 @@ fi
 # floor by 29 elsewhere in this repo's history.
 # MEASURED: 98 (fingerprint + provenance + configuration + ratio), 105 (+ the F1
 # fingerprint-absent cases), 162 (+ #3997's parts 5 and 6 — arm E's cross-arm binary exception in
-# BOTH directions, and the scan-end server RSS R6.1 is read from).
-MIN_CHECKS=150
+# BOTH directions, and the scan-end server RSS R6.1 is read from), 183 (+ the two #3997 roborev
+# blockers: case 5l, arm E's binary must actually DIFFER from the shared one, and cases 6j-6n,
+# the REP-level completeness of each RSS field with its own per-field census).
+MIN_CHECKS=170
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
