@@ -6717,6 +6717,77 @@ GATE_LOGDIR_FINALIZED=0
 # that states its own state rather than a blank.
 GATE_LOGDIR_SWEEP_LINE="logdir-sweep: UNMEASURED (sweep did not run)"
 
+# ---------------------------------------------------------------------------
+# THE OPT-OUT: its ENGAGEMENT rule and its DISCLOSURE, in two helpers (#3637,
+# roborev job 174 finding A).
+#
+# THE DEFECT. The engagement test was `[ "${AGENT_GATE_KEEP_LOGS:-0}" != 0 ]` — ANY
+# non-`0` value retains — while all three emitted strings printed the LITERAL
+# `AGENT_GATE_KEEP_LOGS=1`. So `AGENT_GATE_KEEP_LOGS=no` retained AND the block
+# asserted a value the operator never set: a confidently-wrong claim in an artifact
+# people paste into PRs.
+#
+# THE FIX IS THE DISCLOSURE, NOT THE ENGAGEMENT, and that is deliberate — the
+# `CQLITE_ALLOW_FILE_GROWTH` precedent (its `OPT-OUT` token is emitted only for
+# exactly `1`, so a typo cannot waive the ratchet) DOES NOT TRANSFER here, because the
+# two permissive branches point in OPPOSITE harm directions:
+#   * CQLITE_ALLOW_FILE_GROWTH's permissive branch WAIVES A CHECK. A typo that engaged
+#     it would silently switch off a ratchet, so it must demand exactly `1`.
+#   * AGENT_GATE_KEEP_LOGS's permissive branch KEEPS DATA. A typo that FAILED to engage
+#     it would DESTROY the bundle the operator was trying to keep — the post-mortem
+#     evidence, gone for good. Demanding exactly `1` here would trade a false
+#     disclosure (recoverable: the value is right there to re-read) for data loss (not
+#     recoverable at all), which is the worse of the two.
+# So engagement stays LENIENT and the LINE is made true instead.
+#
+# EMPTY IS NOT ENGAGED, and that is STATED rather than inherited: `${VAR:-0}` maps
+# UNSET to `0`, and `:-` treats SET-BUT-EMPTY identically, so `AGENT_GATE_KEEP_LOGS=`
+# reads as not engaged. The `''` arm below is therefore redundant by construction and
+# kept anyway, because the rule a reader needs is "empty means NOT engaged" and a rule
+# that survives only while someone remembers `:-`'s empty-vs-unset behaviour is one the
+# next edit can lose. An empty value carries no intent to keep anything — it is the
+# shape a shell leaves behind when an export is cleared.
+_logdir_keep_logs_engaged() {
+  case "${AGENT_GATE_KEEP_LOGS:-0}" in
+    ''|0) return 1 ;;
+    *)    return 0 ;;
+  esac
+}
+
+# _logdir_keep_logs_claim: the ONE renderer of the engaged opt-out's disclosure, so the
+# three sites that state it (the sweep's SKIPPED line, `_logdir_decide`'s retention and
+# `_logdir_decide_early_exit`'s) cannot drift apart. Called ONLY from the engaged
+# branch, where the value is by construction neither empty nor `0`.
+#
+# It prints the OBSERVED value, so the line states what was actually set. A value that
+# is not `1` is additionally ANNOUNCED as unconventional-but-honoured, because an
+# operator who typed `=no` needs BOTH facts from the line already in front of them:
+# their value was not the documented one, AND it was honoured anyway (their bundle is
+# here). A bare `AGENT_GATE_KEEP_LOGS=no` would leave them guessing which.
+#
+# THE VALUE IS ENVIRONMENT-CONTROLLED DATA, and it reaches the SUMMARY block through
+# `GATE_LOGDIR_DISPOSITION` / `GATE_LOGDIR_SWEEP_LINE` — both of which `_logdir_lines`
+# already renders through `_summary_block_value`, THE one boundary (#3637, roborev job
+# 173 finding 4): strip C0+DEL under LC_ALL=C, and WITHHOLD — never rewrite — a value
+# carrying the completion probe's `RESULT:` token. Nothing is escaped here: there is
+# exactly one boundary and this is not it. `_summary_block_value` is also defined ~1300
+# lines BELOW this point while `_logdir_sweep` runs above it, so sanitising at this
+# setter is not even available — which is precisely why the boundary lives at the emit
+# site rather than at each writer.
+#
+# The bundle's own `logdir-disposition.txt` keeps the value VERBATIM, as it keeps every
+# other field: that artifact is not a SUMMARY block, carries no verdict grammar, and
+# ALREADY records environment-controlled data verbatim on its own `logs:` and `run-id:`
+# lines (both derive from `$TMPDIR`). So this adds no new property to it.
+_logdir_keep_logs_claim() {
+  local v="${AGENT_GATE_KEEP_LOGS-}"
+  if [ "$v" = 1 ]; then
+    printf 'AGENT_GATE_KEEP_LOGS=%s' "$v"
+  else
+    printf 'AGENT_GATE_KEEP_LOGS=%s (SET BUT NOT 1 — unconventional value HONOURED: this opt-out KEEPS data, so any value that is neither 0 nor empty retains rather than destroying the bundle you asked to keep)' "$v"
+  fi
+}
+
 # Age floor for the startup sweep, in days. 7 is deliberately two orders of
 # magnitude clear of any LIVE gate: the longest run observed on this fleet is a
 # ~1h31m queued full gate (#3414), so the sweep can never take a running peer's
@@ -7283,8 +7354,8 @@ _logdir_sweep_unmeasured() {
 # bare zero in a gate log reads as a verified all-clear. The owner census rides the
 # same line, so a run that reclaimed nothing says WHY.
 _logdir_sweep() {
-  if [ "${AGENT_GATE_KEEP_LOGS:-0}" != 0 ]; then
-    GATE_LOGDIR_SWEEP_LINE="logdir-sweep: SKIPPED (AGENT_GATE_KEEP_LOGS=1)"
+  if _logdir_keep_logs_engaged; then
+    GATE_LOGDIR_SWEEP_LINE="logdir-sweep: SKIPPED ($(_logdir_keep_logs_claim))"
     return 0
   fi
   local removed=0 total=0 examined=0 attempted=0 declined=0 deferred=0 dead=0 live=0 unverifiable=0 capnote="" d
@@ -7460,7 +7531,9 @@ _logdir_artifact_inside() {
 
 # _logdir_decide <result>: choose this run's disposition at the terminal emit. The
 # order is the precedence order: the opt-out beats everything, then the fail-safe
-# retention, then the verdict.
+# retention, then the verdict. The opt-out's engagement rule and the observed-value
+# disclosure it renders are both at _logdir_keep_logs_engaged /
+# _logdir_keep_logs_claim (#3637, roborev job 174 finding A).
 #
 # It records an INTENT and never arms the removal itself: GATE_LOGDIR_REMOVE is left
 # at 0 here and set only by _logdir_clear_removal, after the summary is confirmed
@@ -7469,10 +7542,10 @@ _logdir_artifact_inside() {
 _logdir_decide() {
   local result="${1%% *}"
   GATE_LOGDIR_DECIDED=1
-  if [ "${AGENT_GATE_KEEP_LOGS:-0}" != 0 ]; then
+  if _logdir_keep_logs_engaged; then
     GATE_LOGDIR_REMOVE=0
     GATE_LOGDIR_REMOVE_INTENT=0
-    GATE_LOGDIR_DISPOSITION="RETAINED: AGENT_GATE_KEEP_LOGS=1"
+    GATE_LOGDIR_DISPOSITION="RETAINED: $(_logdir_keep_logs_claim)"
     return 0
   fi
   if _logdir_artifact_inside; then
@@ -7733,7 +7806,11 @@ EOF
 # is driven 6x by test_gate_concurrency_cap.sh inside tooling-tests).
 #
 # THE RULE, in precedence order:
-#   1. AGENT_GATE_KEEP_LOGS=1 -> RETAIN. The opt-out beats everything.
+#   1. AGENT_GATE_KEEP_LOGS engaged (set, non-empty, not `0`) -> RETAIN. The opt-out
+#      beats everything, and the disposition RENDERS THE OBSERVED VALUE rather than a
+#      hard-coded `=1` (#3637, roborev job 174 finding A) -- see
+#      _logdir_keep_logs_engaged / _logdir_keep_logs_claim for why engagement is
+#      deliberately lenient here and the DISCLOSURE is what was fixed.
 #   2. exit status 0 -> RETAIN iff the bundle holds EVIDENCE, meaning anything beyond
 #      this run's own LAUNCH artifacts (the #2874 private summary that a nested run
 #      defaults INSIDE its log dir, and that file's heartbeat/integrity siblings).
@@ -7783,9 +7860,9 @@ EOF
 _logdir_decide_early_exit() {
   local rc="${1:-0}"
   GATE_LOGDIR_DECIDED=1
-  if [ "${AGENT_GATE_KEEP_LOGS:-0}" != 0 ]; then
+  if _logdir_keep_logs_engaged; then
     GATE_LOGDIR_REMOVE=0
-    GATE_LOGDIR_DISPOSITION="RETAINED: AGENT_GATE_KEEP_LOGS=1"
+    GATE_LOGDIR_DISPOSITION="RETAINED: $(_logdir_keep_logs_claim)"
     return 0
   fi
   if [ "$rc" -eq 0 ] 2>/dev/null; then
@@ -24868,9 +24945,17 @@ dispatch_component() {
   # parse a stripped COPY that _ansi_stripped_log writes beside the log, so cleaning
   # only the originals leaks two files per gate run into TMPDIR. NOTE: no apostrophes in
   # this comment — the cli-tests component body is a single-quoted `bash -c` string, so one
-  # would terminate it (it did, first try). The lane logs of the other components
-  # live under $LOG_DIR, which is retained deliberately as the `logs:` bundle; these
-  # two bare mktemps are the only ones nobody else collects.
+  # would terminate it (it did, first try). The lane logs of the other components live
+  # under $LOG_DIR, whose lifetime is the #3637 disposition: REMOVED at exit on a
+  # terminal PASS, RETAINED with a NAMED reason on its own `logdir-disposition:` key
+  # otherwise (every non-PASS verdict, no terminal verdict at all, the file-size
+  # OPT-OUT/persistence disclosures, --only, the opt-out). Either way $LOG_DIR is
+  # ACCOUNTED FOR by that mechanism and these two bare mktemps are not: they sit
+  # OUTSIDE it, in the shared tmp, so nothing collects them and nothing removes them
+  # -- which is why this block cleans up after itself. The rationale is the ABSENCE of
+  # an owner, not a contrast with a retained bundle (#3637, roborev job 174 finding B:
+  # the previous wording claimed $LOG_DIR "is retained deliberately", which a terminal
+  # PASS now makes false, and a false rationale in a comment is worse than none).
   trap "rm -rf \"$_cli_tmp\"" EXIT
 
   _fm_observe_child cli-tests test --package '"$ct_pkg"'
