@@ -274,6 +274,43 @@ case_floor() {
   fi
 }
 
+# _age_dir_apply <dir> — THE ONE mtime-synthesis mechanism in this file (#3637, roborev job
+# 175 finding 3). rc 0 iff <dir> now reads as older than the sweep's 7-day floor. It prints
+# NOTHING, so the same definition serves this file's `ok`/`bad` protocol AND the four
+# driver scripts, each of which reports through its own `say OK|BAD` channel (it is
+# `export -f`d for them, the same idiom `plant_owner_marker` already uses).
+#
+# WHY ONE HELPER AND NOT A LINE PER SITE: three fixtures — AC4's `aged_keep`, AC5's
+# `notours` and `foreign` — synthesised their age with a bare
+# `touch -d … 2>/dev/null || touch -t … 2>/dev/null` in which BOTH forms were allowed to
+# fail SILENTLY. All three assert "must SURVIVE the sweep", so a fixture that was never
+# aged survives TRIVIALLY and the case reports a pass having measured nothing. That is the
+# vacuous green this file's own `plant_owner_marker` self-verification exists to prevent,
+# one fixture over — and the per-site form means the NEXT fixture has to remember. One
+# boundary cannot be forgotten.
+#
+# SELF-VERIFYING, not merely error-checked, for the same reason `plant_owner_marker` reads
+# the state back through the gate's own probe: `touch` can SUCCEED while setting a time the
+# sweep does not consider aged (a `touch -t` clamped by a filesystem with a narrow time
+# range, a timestamp the kernel truncates). The verdict that decides whether the fixture is
+# in the intended state is the SWEEP's, so the check is the sweep's own predicate —
+# `find -mtime +${GATE_LOGDIR_SWEEP_AGE_DAYS}`, whose shipped floor is 7 days.
+_age_dir_apply() {
+  local d="${1:-}"
+  [ -n "$d" ] && [ -e "$d" ] || return 1
+  touch -d '30 days ago' "$d" 2>/dev/null || touch -t 202001010000 "$d" 2>/dev/null || return 1
+  [ -n "$(find "$d" -maxdepth 0 -mtime +7 2>/dev/null)" ]
+}
+export -f _age_dir_apply
+
+# age_dir <dir> <case-label> — `_age_dir_apply` plus THIS suite's reporting: a failure is a
+# named `bad`, never a silent continue. Every main-scope aged fixture goes through it.
+age_dir() {
+  _age_dir_apply "$1" && return 0
+  bad "${2:-mtime synthesis}: could not synthesise an aged mtime for '$1' — neither touch -d nor touch -t produced a time the sweep's own find -mtime +7 accepts, so the fixture is NOT aged and every assertion about it below would hold trivially"
+  return 1
+}
+
 # The owner-marker machinery, EXTRACTED FROM THE SHIPPED GATE rather than
 # reimplemented (the repo idiom — see test_agent_gate_jest_guards.sh and
 # test_agent_gate_feature_matrix_annotation.sh). A second implementation of the
@@ -545,7 +582,7 @@ td4="$tmp/td-keep"; sf4="$tmp/keep-summary.txt"
 mkdir -p "$td4"
 aged_keep="$td4/agent-gate.AGEDKP"
 mkdir -p "$aged_keep"
-touch -d '30 days ago' "$aged_keep" 2>/dev/null || touch -t 202001010000 "$aged_keep"
+age_dir "$aged_keep" AC4
 run_agg "$td4" "$sf4" PASS AGENT_GATE_KEEP_LOGS=1
 d4=$(logs_field "$sf4") || d4=""
 if [ -n "$d4" ] && [ -d "$d4" ]; then
@@ -615,13 +652,14 @@ else
   ac5_degraded_survivor="$aged"
 fi
 for aged_path in "$aged" "$aged_live" "$aged_unk"; do
-  if ! touch -d '30 days ago' "$aged_path" 2>/dev/null; then
-    touch -t 202001010000 "$aged_path" 2>/dev/null \
-      || bad "AC5: could not synthesise an aged mtime with touch -d or -t ($aged_path)"
-  fi
+  age_dir "$aged_path" AC5
 done
-touch -d '30 days ago' "$notours" 2>/dev/null || touch -t 202001010000 "$notours" 2>/dev/null
-touch -d '30 days ago' "$foreign"  2>/dev/null || touch -t 202001010000 "$foreign"  2>/dev/null
+# THE SAME BOUNDARY for the two must-SURVIVE decoys (#3637, roborev job 175 finding 3):
+# their age used to be synthesised by a bare `touch … || touch …` with both forms
+# silenced, and "the sweep left it alone" is exactly the assertion an un-aged fixture
+# satisfies for free.
+age_dir "$notours" AC5
+age_dir "$foreign" AC5
 run_agg "$td5" "$sf5" PASS
 if [ "$OWNER_MARKER_CAPABLE" = 1 ]; then
   if [ ! -d "$aged" ]; then
@@ -1437,7 +1475,7 @@ for n in 1 2 3 4 5; do
   if [ "$OWNER_MARKER_CAPABLE" = 1 ]; then
     if plant_owner_marker "$d" dead; then cap_planted=$((cap_planted + 1)); fi
   fi
-  touch -d '30 days ago' "$d" 2>/dev/null || touch -t 202001010000 "$d" 2>/dev/null
+  age_dir "$d" AC15
 done
 if [ "$OWNER_MARKER_CAPABLE" != 1 ]; then
   # SKIPPED BY NAME, with the safe degradation asserted in its place: the attempt
@@ -1737,7 +1775,8 @@ for n in 1 2 3 4 5; do
   d="$parent/agent-gate.ROT00$n"
   mkdir -p "$d" || continue
   if plant_owner_marker "$d" dead; then planted=$((planted + 1)); fi
-  touch -d '30 days ago' "$d" 2>/dev/null || touch -t 202001010000 "$d" 2>/dev/null
+  # THE one mtime boundary, exported into this driver (#3637, roborev job 175 finding 3).
+  _age_dir_apply "$d" || say BAD "AC17: could not synthesise an aged mtime for $d — that candidate is not aged, so the sweep never sees it and the rotation accounting below is short one subject"
 done
 if [ "$planted" = 5 ]; then
   say OK "AC17: precondition — all 5 aged candidates read verified-dead, so each is a removal the sweep WOULD attempt"
@@ -1923,7 +1962,7 @@ if [ "$OWNER_MARKER_CAPABLE" != 1 ]; then
   for n in 1 2 3 4 5; do
     d="$rot_parent/agent-gate.ROT00$n"
     mkdir -p "$d"
-    touch -d '30 days ago' "$d" 2>/dev/null || touch -t 202001010000 "$d" 2>/dev/null
+    age_dir "$d" AC17
   done
   if bash -c '
       set -uo pipefail
@@ -2034,7 +2073,7 @@ while [ "$n" -lt "$pop" ]; do
   d=$(printf '%s/agent-gate.EXM%03d' "$parent" "$n")
   mkdir -p "$d" || continue
   # NO owner marker: this is the pre-#3637 legacy shape, verbatim.
-  touch -d '30 days ago' "$d" 2>/dev/null || touch -t 202001010000 "$d" 2>/dev/null
+  _age_dir_apply "$d" || say BAD "AC18: could not synthesise an aged mtime for $d — that candidate is not aged, so the examination accounting below is short one subject"
 done
 # The shipped probe, renamed, then wrapped: the wrapper LOGS the candidate and
 # DELEGATES, so what is counted is the real probe and its real answer.
@@ -2262,7 +2301,7 @@ while [ "$n" -lt "$pop" ]; do
   n=$((n + 1))
   d=$(printf '%s/agent-gate.SCN%03d' "$parent" "$n")
   mkdir -p "$d" || continue
-  touch -d '30 days ago' "$d" 2>/dev/null || touch -t 202001010000 "$d" 2>/dev/null
+  _age_dir_apply "$d" || say BAD "AC19: could not synthesise an aged mtime for $d — that candidate is not aged, so the scan accounting below is short one subject"
 done
 # The owner half is not this case's subject: a constant verified-dead makes every
 # candidate one the sweep WOULD remove, which is what makes a permissive branch
@@ -2619,7 +2658,9 @@ GATE_LOGDIR_SWEEP_CAP=1000
 GATE_LOGDIR_SWEEP_AGE_DAYS=7
 GATE_LOGDIR_CREATED="$parent/agent-gate.RUN001"
 
-age_it() { touch -d '30 days ago' "$1" 2>/dev/null || touch -t 202001010000 "$1" 2>/dev/null; }
+# THE one mtime boundary, exported into this driver (#3637, roborev job 175 finding 3):
+# `age_it` keeps its name and its call sites, and delegates.
+age_it() { _age_dir_apply "$1" || say BAD "AC20: could not synthesise an aged mtime for $1 — the candidate is not aged, so the sweep never reaches the identity re-check this case measures"; }
 
 # ---- PHASE A: the substitution, through the REAL sweep ---------------------------
 sub="$parent/agent-gate.SUB001"
@@ -3225,19 +3266,48 @@ case_floor AC23 6
 # rewrite — a value carrying `RESULT:`).
 #
 # ASSERTED ON THE BLOCK'S LINE COUNT, against a clean-TMPDIR baseline of the identical run,
-# because that is the property: a keyed line must stay ONE line. TWO pre-existing,
-# DECLARED channels remain and are named in the expected delta — `run-id:` and `logs:` are
-# both the raw LOG_DIR path and are byte-identical by design (#3637/#3312: `logs:` must
-# match the heartbeat's own `logs:`), so the injected block is baseline + EXACTLY 2. It was
-# baseline + 3 before this fix, and the MUTANT below re-proves that rather than asserting it.
+# because that is the property: a keyed line must stay ONE line. TWO channels remain and are
+# named in the expected delta — `run-id:` and `logs:` are both the raw LOG_DIR path and are
+# byte-identical by design (#3637/#3312: `logs:` must match the heartbeat's own `logs:`), so
+# the injected block is baseline + EXACTLY 2. It was baseline + 3 before this fix, and the
+# MUTANT below re-proves that rather than asserting it.
+#
+# RUN AGAINST A REFUSAL-DEFEATED COPY OF THE GATE, and that is the point (#3637, roborev job
+# 175 finding 1). Those 2 remaining channels used to be a DECLARED residual; they are now
+# closed WHERE THE VALUE ENTERS — the shipped gate REFUSES a control-bearing `$TMPDIR` at the
+# LOG_DIR creation site, before `mktemp -d`, so no shipped run can carry one as far as this
+# renderer (AC27 owns that refusal, in both directions). The `_summary_block_value` boundary
+# STAYS regardless, as defence in depth for the next writer of a free-text SUMMARY value —
+# and a defence nothing can measure is one that rots, so this case keeps measuring it through
+# a copy whose refusal has been defeated by ONE VERIFIED mutation and nothing else.
 #
 # WITH A POSITIVE CONTROL, because a value that never reached the renderer would also add
 # no line: the sweep line must CARRY both halves of the planted marker, joined, on ONE line.
 # ---------------------------------------------------------------------------
 case_mark
-# Baseline: the same hermetic run under an ordinary TMPDIR.
+# The refusal-defeated copy. ONE line changed, and the change is VERIFIED both ways (the
+# refusal's own predicate is gone; the strip it shares a definition with is untouched).
+gate24d="$tmp/ac24-defeated-gate.sh"
+if awk '
+    { l = $0; sub(/^[[:space:]]+/, "", l) }
+    !done && l == "if [ \"$(_gate_cntrl_strip \"$GATE_LOGDIR_PARENT\")\" != \"$GATE_LOGDIR_PARENT\" ]; then" {
+      done = 1
+      print "if false; then   # AC24: creation-site refusal DEFEATED for this copy only"
+      next
+    }
+    { print }
+    END { if (!done) exit 3 }
+  ' "$GATE" >"$gate24d" \
+   && ! grep -qF '_gate_cntrl_strip "$GATE_LOGDIR_PARENT"' "$gate24d" \
+   && grep -qF "LC_ALL=C tr -d '[:cntrl:]'" "$gate24d"; then
+  ok "AC24: the copy under test really lost the creation-site refusal and kept the strip (one verified mutation)"
+else
+  bad "AC24: could not defeat the creation-site refusal in a copy of the gate — every assertion below would measure a REFUSED run instead of the boundary the fix is defence in depth for"
+  cp "$GATE" "$gate24d"
+fi
+# Baseline: the same hermetic run, same copy, under an ordinary TMPDIR.
 td24a="$tmp/ac24-clean"; sf24a="$tmp/ac24-clean.txt"
-run_agg "$td24a" "$sf24a" PASS
+run_agg_gate "$gate24d" "$td24a" "$sf24a" PASS
 n24a=$(block_lines "$sf24a")
 if [ "${n24a:-0}" -gt 10 ]; then
   ok "AC24: precondition — the clean-TMPDIR baseline block has $n24a lines"
@@ -3252,11 +3322,11 @@ inj24_ok=0
 mkdir -p "$td24b" 2>/dev/null && inj24_ok=1
 if [ "$inj24_ok" = 1 ]; then
   ok "AC24: precondition — a \$TMPDIR containing a newline really exists on this filesystem"
-  run_agg "$td24b" "$sf24b" PASS
+  run_agg_gate "$gate24d" "$td24b" "$sf24b" PASS
   n24b=$(block_lines "$sf24b")
   exp24=$(( ${n24a:-0} + 2 ))
   if [ "${n24b:-0}" = "$exp24" ]; then
-    ok "AC24: the newline-bearing \$TMPDIR added EXACTLY the 2 declared pre-existing lines (run-id:, logs:) — $n24b vs baseline $n24a; neither NEW key forged a row"
+    ok "AC24: the newline-bearing \$TMPDIR added EXACTLY the 2 raw-path channels (run-id:, logs:) and nothing else — $n24b vs baseline $n24a; neither NEW key forged a row (and on the SHIPPED gate those 2 are unreachable too: AC27's creation-site refusal)"
   else
     bad "AC24: the injected block has $n24b lines, expected $exp24 (baseline $n24a + the 2 declared run-id:/logs: channels) — a new key is emitting environment-controlled rows"
     sed -n '1,40p' "$sf24b"
@@ -3284,17 +3354,20 @@ if [ "$inj24_ok" = 1 ]; then
   fi
   # THE MUTANT: unpin the strip at the boundary and the extra row comes back. Without it
   # "the count did not grow" is a property of this fixture, not of the fix.
+  # Built FROM the refusal-defeated copy, so the mutant differs from the run above by the
+  # strip and by nothing else. The target is `_gate_cntrl_strip`'s body — THE one definition
+  # of the class the boundary strips with and the refusal compares against (#3637, job 175).
   mut24="$tmp/ac24-mutant-gate.sh"
   if awk '
       { l = $0; sub(/^[[:space:]]+/, "", l) }
-      !done && l == "_bv_v=$(printf '"'"'%s'"'"' \"${1-}\" | LC_ALL=C tr -d '"'"'[:cntrl:]'"'"')" {
+      !done && l == "printf '"'"'%s'"'"' \"${1-}\" | LC_ALL=C tr -d '"'"'[:cntrl:]'"'"'" {
         done = 1
-        print substr($0, 1, match($0, /[^[:space:]]/) - 1) "_bv_v=\"${1-}\""
+        print substr($0, 1, match($0, /[^[:space:]]/) - 1) "printf '"'"'%s'"'"' \"${1-}\""
         next
       }
       { print }
       END { if (!done) exit 3 }
-    ' "$GATE" >"$mut24"; then
+    ' "$gate24d" >"$mut24"; then
     td24m="$tmp/ac24-mut-AAMARK
 ZZMARK/td"; sf24m="$tmp/ac24-mut.txt"
     if mkdir -p "$td24m" 2>/dev/null; then
@@ -3310,7 +3383,7 @@ ZZMARK/td"; sf24m="$tmp/ac24-mut.txt"
       bad "AC24 mutant: could not create the mutant's newline TMPDIR — the mutant is vacuous"
     fi
   else
-    bad "AC24 mutant: the strip at _summary_block_value was not found — the mutant is vacuous"
+    bad "AC24 mutant: the strip at _gate_cntrl_strip was not found — the mutant is vacuous"
   fi
   # The newline-bearing fixture is removed HERE, after its assertions: the survivor
   # accounting at the end of this file compares NEWLINE-SEPARATED sets of paths, which
@@ -3360,7 +3433,7 @@ else
   bad "AC24: (probe-pattern assertion not reached)"
   bad "AC24: (withhold positive control not reached)"
 fi
-case_floor AC24 10
+case_floor AC24 11
 
 # ---------------------------------------------------------------------------
 # AC25 (roborev job 174, finding A): the opt-out's DISCLOSURE states the OBSERVED
