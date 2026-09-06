@@ -700,7 +700,8 @@ made the recency habit above wrong so reliably. Two mechanisms now bound it:
   mechanism rather than a scatter of call sites: a LOG_DIR-only `EXIT` trap is armed the moment the
   machinery exists (the later `_gate_atexit` arming supersedes it, deliberately — it is a strict
   superset), and that at-exit handler **supplies** the disposition when nothing decided one. The
-  rule, stated at the decision site: `AGENT_GATE_KEEP_LOGS=1` retains; **exit status 0** keeps the
+  rule, stated at the decision site: an ENGAGED `AGENT_GATE_KEEP_LOGS` retains (the contract is
+  below); **exit status 0** keeps the
   bundle iff it holds EVIDENCE, meaning anything beyond this run's own launch artifacts (the #2874
   private summary and its heartbeat/integrity siblings), and removes it otherwise; a **non-zero**
   exit keeps the bundle iff it holds ANY content, an empty husk being removed because a husk informs
@@ -893,7 +894,36 @@ made the recency habit above wrong so reliably. Two mechanisms now bound it:
 **`AGENT_GATE_KEEP_LOGS=1` suppresses both halves** — the per-run removal and the sweep. Set it
 whenever you need to read `<dir>/<component>.log` after a PASSing or nested run; five gate
 self-tests already do — and each of those five also points `TMPDIR` at a scratch directory it
-removes, so the necessary opt-out cannot itself become the leak. Removal itself is fail-closed: the parent is recorded at the creation site
+removes, so the necessary opt-out cannot itself become the leak.
+
+**The opt-out's ACTUAL contract, and why it is not the `CQLITE_ALLOW_FILE_GROWTH` one (#3637, roborev
+job 174 finding A).** Engagement is **LENIENT**: any value that is SET, NON-EMPTY and not `0` retains
+— `=1`, `=true`, `=no`, a typo, all of them. That is deliberate and it is the OPPOSITE of the
+`CQLITE_ALLOW_FILE_GROWTH` rule (which is emitted as `OPT-OUT` for the value **exactly `1`** and
+FAILs otherwise), because the two permissive branches point in opposite harm directions: that one's
+permissive branch **waives a check**, so a typo must not engage it; this one's **keeps data**, so a
+typo must not *fail* to engage it — demanding exactly `1` here would DESTROY the post-mortem bundle
+the operator was trying to keep, trading a recoverable false disclosure for unrecoverable data loss.
+Do not "align" the two. What follows from that leniency:
+
+- **The disclosure states the OBSERVED value, never a hard-coded `=1`.** All three emitted strings —
+  the sweep's `logdir-sweep: SKIPPED (…)` and the retentions decided at the terminal emit and at an
+  early exit — render what was actually set, from ONE renderer, so a run under `=no` reads
+  `RETAINED: AGENT_GATE_KEEP_LOGS=no …`. Before this the block asserted `AGENT_GATE_KEEP_LOGS=1` for
+  any engaging value: a confidently-wrong claim in an artifact people paste into PRs.
+- **A set-but-not-`1` value is ANNOUNCED, not silently honoured**: the disposition adds a short
+  `SET BUT NOT 1 — unconventional value HONOURED …` note, so an operator who typed `=no` learns both
+  facts (their value was not the documented one; it was honoured anyway) from the line already in
+  front of them.
+- **SET BUT EMPTY does NOT engage.** `AGENT_GATE_KEEP_LOGS=` reads exactly like unset — an empty
+  value states no intent to keep anything.
+- **The observed value is environment-controlled data, so it crosses the SAME sanitisation boundary
+  as the two keys themselves** (`_summary_block_value`: strip C0+DEL under `LC_ALL=C`, WITHHOLD —
+  never rewrite — a value carrying `RESULT:`). There is no second escaper: the boundary is at the
+  emit site, which is also the only place it *can* be, since the sweep runs above the point where
+  that function is defined. The bundle's own `logdir-disposition.txt` keeps the value verbatim, as it
+  already keeps the `$TMPDIR`-derived `logs:`/`run-id:` fields — that artifact is not a SUMMARY block
+  and carries no verdict grammar. Pinned by AC25. Removal itself is fail-closed: the parent is recorded at the creation site
 (so `$TMPDIR` is respected and `/tmp` is never hard-coded) and a path is removed only if it is a
 real directory, a direct child of that exact parent, and named `agent-gate.` plus the six
 alphanumerics `mktemp -d` produces. Pinned by `scripts/tests/test_agent_gate_logdir_cleanup.sh`
