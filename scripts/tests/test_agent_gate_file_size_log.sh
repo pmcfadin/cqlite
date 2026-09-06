@@ -635,8 +635,26 @@ else
   # suffix, so matrix and detail are no longer adjacent. Asserted as an ORDERED pattern rather
   # than a literal: the three suffixes must appear in that order, and a future fourth cannot
   # silently displace the disclosure without this failing.
+  #
+  # THE ELAPSED FIELD IS `[0-9]+s`, NEVER THE LITERAL `0s` — and that is a MEASURED
+  # correction, not a relaxation for convenience. This is the suite's one REAL full-gate
+  # run, so unlike every other case here its duration is a genuine wall-clock reading:
+  # `run_file_size` brackets itself with `start=$(date +%s)` / `end=$(date +%s)`, whose
+  # SECOND-GRANULARITY truncation makes `end - start` read 1 whenever the component
+  # straddles a second boundary, however short it is. Instrumented with `date +%s.%N` in
+  # this very fixture, the component takes ~0.02s idle and ~0.13s under 16-way CPU load
+  # (the normal state of a gate box, since this suite runs INSIDE the gate's tooling-tests
+  # component) — and 1 run in 8 under that load rendered `OPT-OUT (1s)`, which a `\(0s\)`
+  # pin reports as "the disclosure is missing from the block". That is a false FAIL about a
+  # property this case does not own: #3402's subject is the OPT-OUT token, the matrix
+  # annotation, the override NAME and the grown COUNT, none of which is a duration. Every
+  # sibling row assert in this file (cases 2, 4, 4c, 11) already reads `\([0-9]+s\)` for
+  # exactly this reason; case 4i was the lone outlier. The field is still PINNED as an
+  # integer-seconds field in that exact position with those exact delimiters, so a row that
+  # lost or malformed it still fails — what is no longer asserted is its VALUE, which no
+  # requirement names and no run can guarantee. Do not re-pin it to `0s`.
   has_re "case4i (#3402): the preflight-FAIL block carries the OPT-OUT row, its matrix and its detail" \
-      "$pf_sum" '^file-size: +OPT-OUT \(0s\)  \[no-cargo\].*CQLITE_ALLOW_FILE_GROWTH=1 \(ratchet NOT enforced\); 1 over-threshold file\(s\) grown'
+      "$pf_sum" '^file-size: +OPT-OUT \([0-9]+s\)  \[no-cargo\].*CQLITE_ALLOW_FILE_GROWTH=1 \(ratchet NOT enforced\); 1 over-threshold file\(s\) grown'
   # The count must AGREE with the rows printed. It did not: the helper assigns its count
   # inside a command substitution, so the caller read 0 beside one row — a count
   # contradicting its own table, which is the invariant
