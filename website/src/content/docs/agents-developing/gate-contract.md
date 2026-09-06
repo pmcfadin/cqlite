@@ -1344,7 +1344,7 @@ On **Linux** the line additionally carries a `mold=` token and a `perf=` token
 (byte-identical / no tokens on macOS — both are Linux-only):
 
 ```
-accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked perf=ok
+accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212254720 sccache-used=1375141619(4%) mold=linked perf=ok
 cpu-budget: wrapper=nice ncpu=16 max-concurrency=1(pinned) cores-per-gate=16 build-jobs=16(derived) test-threads=16
 ```
 
@@ -1387,6 +1387,33 @@ disabled via `CQLITE_DISABLE_SCCACHE` / `CQLITE_DISABLE_NEXTEST` / `AGENT_GATE_J
 `off`, never `absent`. This exists because a machine silently ran ~3x slower for weeks
 with sccache and nextest both un-installed and no signal. If a pasted SUMMARY shows
 `absent`, install the tool — the state is visible in the block, not just scrollback.
+
+Two further tokens carry the sccache **capacity** facts (issue #3727):
+`sccache-cap=<bytes>` and `sccache-used=<bytes>(<N>%)` — **measured bytes, with no provenance
+classifier** (lead ruling `req-3727-w4`: reporting stays, interpreting goes; the 7-state source
+suffix, the value-grammar map and the remediation WARNs were removed, and their state-combination
+knowledge lives in the follow-up issue). Each has an explicit `unmeasured(<why>)` /
+`na(sccache-not-in-use)` rendering, so a byte count is always an affirmative measurement.
+
+The cap is read from the **running server's** JSON and **attributed to a server by a differential**,
+which is the one thing you must not skip when reading a `--show-stats` number: with no server
+running, `--show-stats` does not start one and answers `max_cache_size` from the CLIENT's own
+environment, and a null `cache_size` does **not** tell the two apart (a running server with an empty
+cache reports null too). A running server's answer does not move when the client's
+`SCCACHE_CACHE_SIZE` changes; a client's does. Unattributed therefore renders
+`unmeasured(no-running-server)` or `unmeasured(unattributed)` — never a byte count.
+
+sccache reads `SCCACHE_CACHE_SIZE` **once, at server startup**, so raising the value has no effect
+until `sccache --stop-server`. Measured trap: `30G` is 30 GiB but **`30GiB` and `30GB` are SILENTLY
+DISCARDED** to sccache's 10 GiB default, and a bare integer means BYTES — with no diagnostic
+anywhere. **`sccache-health` cannot answer any of this**: it is the sum of four ERROR counters with
+no capacity input, so a `warn` there can never be cleared by raising the cap and a permanently-full,
+thrashing cache reads `ok`. Persist and verify the cap with
+`bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap`, which correlates the
+`/etc/environment` line, the value a fresh non-login PAM session sees, that value in bytes (its own
+isolated sccache oracle) and the bytes the running server enforces. **Declared residual:** a LOGIN
+shell can see a different value (on this fleet `/etc/profile.d` runs after `pam_env`) and that
+context is no longer measured, so the verdict is scoped to the non-login session in its own output.
 
 ## Machine-wide concurrency cap (issue #1825)
 

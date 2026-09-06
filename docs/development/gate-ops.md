@@ -32,7 +32,7 @@ The gate auto-enables sccache if it's on `$PATH`. To customize:
 export SCCACHE_DIR=/custom/cache/path
 
 # Set size limit (default 10 GiB; raise for multi-worktree teams)
-export SCCACHE_CACHE_SIZE=50G
+export SCCACHE_CACHE_SIZE=50G   # <digits>[KkMmGgTt] ONLY — see the grammar warning below
 
 # Disable sccache for a single gate run (if needed for diagnostics)
 CQLITE_DISABLE_SCCACHE=1 bash scripts/agent-gate.sh
@@ -80,7 +80,7 @@ auto-disable. Every SUMMARY's `accelerators:` line now carries a trailing
 `sccache-health=` token:
 
 ```
-accelerators: sccache=on nextest=on lanes=on sccache-health=ok
+accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212254720 sccache-used=1375141619(4%)
 ```
 
 - `sccache-health=na`   — sccache not in use (nothing to probe).
@@ -89,6 +89,165 @@ accelerators: sccache=on nextest=on lanes=on sccache-health=ok
   the count and pointing at `sccache --show-stats`. Caching stays **ENABLED** and
   the gate does **not** fail — the WARN is a signal to inspect the cache, not a
   blind kill switch.
+
+### `SCCACHE_CACHE_SIZE`: the grammar is narrower than it looks, and violations are SILENT (issue #3727)
+
+Measured on sccache 0.17.0, against a throwaway isolated sccache:
+
+| you write | the server enforces |
+|---|---|
+| `30G`, `30g`, `500M`, `1T`, `30K` | 30 GiB, 30 GiB, 500 MiB, 1 TiB, 30 KiB (the suffix is **binary** despite `G`) |
+| **`30GiB`**, **`30GB`**, `30 G` | **10 GiB — the value is SILENTLY DISCARDED** |
+| `abc`, empty, `-5G`, 21 digits | 10 GiB — silently discarded |
+| `100` (no suffix) | **100 BYTES**, not 100 GiB |
+| `0`, `0G` | 0 bytes (the cache is effectively off) |
+
+There is **no diagnostic** for a discard: with `SCCACHE_LOG=debug` the server logs only
+`Init disk cache with dir "...", size 10737418240` — the *fallback*, with no mention that anything was
+rejected. And the human-readable `Max cache size` line is **rounded** (`1536M` prints as `2 GiB`), so
+never verify a cap by reading it; `sccache --show-stats --stats-format json` carries `max_cache_size`
+and `cache_size` as exact byte integers.
+
+### The cap is read ONCE, by the SERVER, at startup (issue #3727)
+
+Whichever process first starts the sccache server fixes the cap for that server's whole lifetime; no
+later client can change it. Measured: with a server up, `--show-stats` reports the same
+`max_cache_size` whether the client exports `30G`, `7G` or nothing. Two consequences:
+
+* raising the value has **no effect until `sccache --stop-server`** (the next compile restarts it);
+* an env var being *visible* proves nothing about the cap in force — which is why every SUMMARY now
+  carries `sccache-cap=<bytes>` read from the **running server**, and why
+  `bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap` correlates the `/etc/environment`
+  line, the value a fresh **non-login PAM session** sees, what sccache makes of that value in
+  **bytes** (its own isolated oracle), and the **bytes the running server enforces**. With all four
+  measured and agreeing it reports `sccache-cap: SCOPED-NON-LOGIN` — its **strongest** verdict, a
+  **`[gap]`**, and **never an `[ok]`** (#3727 roborev rounds 426 + 428), because all four were
+  measured in ONE launch context: a **login** shell additionally runs `/etc/profile.d` and can
+  export a different value, no disagreement between the two is detected, and so **the cap a gate
+  actually gets is not established**. Measured, same box and same tree: a detached gate reported
+  `sccache-cap=32212254720` while a lane-shell `--lite` reported `53687091200` — an `[ok]` there
+  would certify one cap while a real gate ran against another.
+  **`[gap]` IS A THIRD STATUS CLASS, AND IT IS NOT A `[warn]`.** A `[warn]` is a defect of THIS
+  box that an operator can clear on it; a `[gap]` is a declared limit of what bootstrap can
+  **measure**, identical on every correctly provisioned host and clearable only by landing the
+  issue it names. Round 426 emitted this verdict as a `[warn]`, which counted it toward
+  `WARNINGS` and so made **`--strict` — and therefore `.agent-ami/profile.yaml`'s `verify.run`
+  — fail on EVERY host forever, including a perfectly configured one**; that is strictly worse
+  than the false `[ok]` it replaced, because an alarm that always fires is one operators waive
+  and then nothing is checked at all. So `--strict` keys on `WARNINGS` **alone**, gaps are
+  counted and named separately in the summary (`N declared gap(s) RECOGNISED`, and `0
+  RECOGNISED` when there are none), and a healthy box reaches `All checks green.` **with the
+  `[gap]` line still printed beside it** — green means nothing on this box needs attention, not
+  that every property was established. `--fix-sccache-cap` never rewrites an existing value; a box
+  deliberately running a different cap keeps it. Before writing, it resolves **its own** fleet
+  literal through that oracle and refuses to persist anything that resolves to sccache's default —
+  a shape test cannot do that job, because a 21-digit value passes every shape rule and measures as
+  the default (#3727).
+
+**One measured context, and it says so (lead ruling `req-3727-w4`).** An earlier form of this
+section compared a non-login PAM session, a login shell and (briefly) the invoking shell, and
+classified their disagreements (`CONFLICTING-SOURCES`, unclassified-routing `UNMEASURED`, binary
+agreement, non-participant contexts). That comparison layer is **removed**: ten review rounds landed
+in it, and the follow-up issue carries its state-combination knowledge. **Declared residual, and it
+is #3727's own root cause:** on this fleet a LOGIN shell can see a different value from a non-login
+PAM session (`/etc/profile.d/20-agent-ami.sh` sources `~/.agent-ami/worker-env.sh` AFTER `pam_env`
+applies `/etc/environment`), and nothing now measures that context — so a `VERIFIED` is a statement
+about the non-login session that was measured, which is what the verdict's own scope note says.
+
+A third fact, measured while building that check and worth knowing before you read any
+`--show-stats` output: **with NO server running, `--show-stats` does not start one** (nothing listens
+afterwards, the `SCCACHE_DIR` stays empty, a following `--stop-server` reports "couldn't connect")
+**and it answers `max_cache_size` from the CLIENT's own env** — `SCCACHE_CACHE_SIZE=7G` reads
+`7516192768` with no server anywhere. So a cap read out of `--show-stats` is not necessarily a cap in
+force.
+
+**`"cache_size":null` is NOT how you tell.** Measured: a *running* server with an *empty* cache
+reports a null size too — a field-by-field diff of a no-server read against a freshly-started-at-40G
+read differs only in the values themselves. What distinguishes them is that **a running server
+ignores the client's environment**: read the cap twice, the second time with `SCCACHE_CACHE_SIZE` set
+to a sentinel whose bytes differ from the first reading. Two equal readings ⇒ a server answered;
+a reading that moves ⇒ the client resolved your own variable and nothing is enforcing it. Both the
+gate token and `--fix-sccache-cap` decide attribution that way.
+
+### `sccache-cap=` / `sccache-used=` on the accelerators line (issue #3727)
+
+```
+accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212254720 sccache-used=1375141619(4%) mold=linked perf=ok
+```
+
+Both tokens report **measured bytes**, and nothing else. There is deliberately **no provenance
+classifier**: the 7-state suffix (`pinned`/`default`/`inherited`/`stale`/`invalid`/`invalid-stale`/
+`unattributed`), the value-grammar map that computed it, the probed default and the four
+remediation `WARN`s were **removed** by lead ruling `req-3727-w4` — reporting stays, interpreting
+goes. Read the number, and read `sccache-cap: SCOPED-NON-LOGIN` from
+`bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap` for the correlation — remembering
+that it is a `[gap]` scoped to one launch context — loud, counted separately from warnings, and
+not a certification of the cap this gate will get (#3946).
+
+- `sccache-cap=<bytes>` — the cap the **running server** enforces, in bytes.
+- `sccache-cap=unmeasured(<why>)` — **no cap may be claimed.** The two attribution causes are the
+  ones to know: `no-running-server` (a number WAS read and the differential proved it was the
+  client's own environment) and `unattributed` (the differential could not be taken). The rest are
+  read failures: `no-binary`, `no-stats`, `unparsed`, `not-unique`, `no-size`.
+- `sccache-cap=na(sccache-not-in-use)` — sccache is not in use on this box, the same input
+  `sccache-health` renders `na` for.
+- `sccache-used=<bytes>(<N>%)` — occupancy, and the fill against the enforced cap. `(cap-zero)`
+  where the cap is a legal 0; `pct-<why>` where the occupancy is real but the ratio is not
+  available — including `pct-inexact-overflow`, where the ratio cannot be taken EXACTLY in 64-bit
+  shell arithmetic (a cap above ~184 PiB filled somewhere in its middle). The percentage is
+  **exact or named, never approximated**: an earlier overflow branch divided by `floor(cap / 100)`
+  and over-reported (at a 4 EiB cap with `used = cap - 1` it read `100%` where the exact value is
+  99%), which contradicts the token's own premise of measured bytes honestly reported. It does **not** claim eviction is happening: sccache exposes no eviction counter, so
+  that would be an inference, not a measurement (#3727 — this issue's own title made exactly that
+  inference), and the near-capacity WARN that used to say so is gone with the rest of the advice.
+
+**Which sccache the gate runs, and why bootstrap must agree.** `cargo install sccache` — the
+install bootstrap documents — writes to `~/.cargo/bin`, and the gate's PATH prepend fires only when
+**`cargo` itself** is absent. So on a box with a SYSTEM cargo and sccache only in `~/.cargo/bin`,
+bootstrap's two-stage `scc_resolve_binary` resolved that binary, started its server and reported
+`VERIFIED` while the gate reported it ABSENT — a false `[ok]` for a binary the gate would not run.
+The gate now resolves sccache through ONE helper (`_gate_sccache_bin`): PATH first, then
+`$HOME/.cargo/bin/sccache`, and every site that answers *"is sccache available"* — the
+`RUSTC_WRAPPER` detection, the health probe and the capacity probe — consults it, so the three
+cannot drift into three answers. PATH is **not** touched: widening the `cargo` prepend would change
+which cargo/toolchain a gate uses. `RUSTC_WRAPPER` carries the ABSOLUTE path when the fallback is
+what found it (a bare `sccache` is unrunnable exactly then). **Declared residual:** neither side
+honours a non-default `CARGO_HOME`; both look in `~/.cargo/bin` (#3955).
+
+**And bootstrap must agree WITH ITSELF (#3727 job 413).** Bootstrap asks the same question in two
+contexts, and until this round two of its sites answered a third way: section 2's accelerator
+report and section 5b2's precondition were plain PATH checks. On that same system-cargo +
+`~/.cargo/bin` box a NON-root run therefore **skipped cap persistence and verification entirely**,
+and a root run recorded a false `sccache MISSING` `[warn]` — which is what `--strict` reads, so
+`verify.run` failed a healthy machine. Both now call ONE resolver, `sccache_bin`, with the gate's
+two stages. **The home is the crux:** under the documented
+`sudo bash scripts/bootstrap-agent-machine.sh` bootstrap's own `$HOME` is ROOT's, so
+`$HOME/.cargo/bin` evaluated in that process is the wrong directory. The session-probed
+`scc_resolve_binary` sidesteps it by leaving `$HOME` single-quoted for the SESSION to expand; the
+in-process checks resolve the invoking account's home from the **passwd database**, keyed on a
+validated `SUDO_UID` (`getent`, then `/etc/passwd`, never an assumed `/home/<user>`), with no
+privileged call — section 2 and the precondition both run before privilege is resolved, and a
+declared test-mode run must make none. **Three outcomes, not two:** only *"both locations checked
+and neither holds one"* licenses the MISSING warning; an unidentifiable home is reported as
+UNKNOWN and never stops the section, because a refusal derived from a measurement that could not be
+taken is exactly what that section may not do. The census is a **checked claim**, not a commit
+message: `test_bootstrap_agent_machine.sh` (12c) derives every presence-decision site from the
+shipped script at run time and FAILs on one it cannot account for, and the gate suite does the same
+for `_gate_sccache_bin`.
+
+**The percentage's operands are range-checked BEFORE any arithmetic, lexically (#3727 job 413).**
+sccache reports both readings as JSON UNSIGNED integers while every `$(( ))` is signed 64-bit, so a
+cap above 2^63-1 wraps NEGATIVE on its first use: a 12 EiB cap holding 4 EiB rendered `-100%`.
+Both arithmetic alternatives are wrong, measured on bash 5.2.21 rather than reasoned about —
+`(( v <= MAX ))` **wraps silently** and so accepts the value it exists to refuse, while
+`[ "$v" -le MAX ]` **errors** (rc 2 plus a bash diagnostic on stderr) rather than answering, which
+in the natural `if [ "$v" -gt MAX ]; then refuse; fi` direction means the refusal never fires. So
+the check is lexical: digit length, then a two-half comparison of the one ambiguous length. Out of
+range renders the same `pct-inexact-overflow`; no new state, and no percentage is ever approximated.
+
+**`sccache-health` cannot answer any of this.** It is the sum of four ERROR counters with **no**
+capacity, occupancy or eviction input, so a `warn` there can never be cleared by raising the cap, and
+a permanently-full cache reports `sccache-health=ok`. Different questions, different remedies.
 
 The counter sum is probed via `sccache --show-stats` only at SUMMARY emission
 (memoized; never in the latency-sensitive classify hooks). On a `warn`, inspect
@@ -125,7 +284,7 @@ Every SUMMARY block (full **and** `--lite`) carries a **machine-checkable
 scrollback:
 
 ```
-accelerators: sccache=on nextest=absent lanes=serial sccache-health=ok
+accelerators: sccache=on nextest=absent lanes=serial sccache-health=ok sccache-cap=32212254720 sccache-used=1375141619(4%)
 ```
 
 State values: `on` (detected & used) · `absent` (missing → WARN) · `off`
@@ -151,7 +310,7 @@ ld-prime is already the fastest linker on macOS, so a permanent `n/a` token woul
 churn every existing summary parser for zero signal):
 
 ```
-accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked
+accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212254720 sccache-used=1375141619(4%) mold=linked
 ```
 
 State values (Linux only):
@@ -187,7 +346,7 @@ After `mold=`, a Linux `accelerators:` line carries a `perf=` token answering *c
 box be profiled at all?*
 
 ```
-accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked perf=ok
+accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212254720 sccache-used=1375141619(4%) mold=linked perf=ok
 ```
 
 It is a **free** read of `/proc/sys/kernel/{perf_event_paranoid,kptr_restrict}` through
@@ -235,7 +394,10 @@ mode (both path seams mandatory, no production fallback).
 Each active worktree owns its own ~25–30GB `target/` dir. Several concurrent
 worktrees can exhaust the disk mid-gate (a confusing hard failure). `flow-finalize`
 removes a finished issue's worktree; additionally prune stale worktrees' `target/`
-dirs and size the shared cache with `SCCACHE_CACHE_SIZE` (recommend `30G` on the
+dirs and size the shared cache with `SCCACHE_CACHE_SIZE` (`50G` on the fleet
+boxes — derived from a measured working set, see `.agent-ami/profile.yaml`; persist it with
+`bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap`, because a value only in a launcher
+profile reaches launcher-created processes alone — #3727) (previously `30G` on the
 10-core machine).
 
 **A single `--lite` round can be the thing that exhausts the disk.** Measured by
