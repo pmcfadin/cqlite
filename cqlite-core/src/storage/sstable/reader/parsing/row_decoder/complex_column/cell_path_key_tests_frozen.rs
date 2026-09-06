@@ -69,7 +69,8 @@
 //! type string, so these run in every build and lane and cannot pass vacuously on
 //! an empty corpus.
 
-use crate::schema::{validate_marshal_frozen, CqlType};
+use crate::schema::cql_type_parser::frozen_scalar::validate_marshal_frozen;
+use crate::schema::CqlType;
 
 const MARSHAL: &str = "org.apache.cassandra.db.marshal";
 

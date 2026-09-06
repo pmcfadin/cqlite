@@ -85,8 +85,8 @@
 //! refusal belongs upstream of decode, at the metadata boundary, so that no decoder
 //! ever has to hold an opinion about bytes that cannot exist.
 
-use super::{is_udt_identifier, CqlType};
 use crate::error::{Error, Result};
+use crate::schema::{is_udt_identifier, CqlType};
 
 /// The one wording, carrying the one citation. Kept as a `const` so the CQL and
 /// marshal refusals cannot drift into two different explanations of one rule.

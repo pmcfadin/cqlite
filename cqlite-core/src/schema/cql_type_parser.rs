@@ -4,9 +4,9 @@
 //! the small inherent accessors (`fixed_size`, `is_collection`). Extracted from
 //! `schema/mod.rs` (issue #1134, source-split doctrine) with no behavior change.
 
-use super::frozen_scalar::{frozen_inner_supports_freezing, refuse_frozen_scalar_cql};
 use super::CqlType;
 use crate::error::{Error, Result};
+use frozen_scalar::{frozen_inner_supports_freezing, refuse_frozen_scalar_cql};
 
 /// Maximum allowed CQL type nesting depth. Mirrors
 /// [`crate::parser::complex_types::ComplexTypeParser`] (`max_depth = 32`).
@@ -19,6 +19,22 @@ use crate::error::{Error, Result};
 /// reached at exactly depth 32 (i.e. 32 levels of collection/frozen nesting) is
 /// therefore the last allowed depth; a 33rd level returns `Err`.
 const MAX_NESTING_DEPTH: usize = 32;
+
+/// The `frozen<T>` FREEZABILITY rule — one rule, both spellings (issue #4104).
+///
+/// A CHILD of this module rather than a sibling under `schema`, and the reason is
+/// the campsite ratchet, not taxonomy: `schema/mod.rs` is 1627 lines — 827 OVER
+/// the 800-line source threshold — so it may not grow by even the one `mod` line,
+/// and splitting it is out of scope for #4104 (epic #1116). The siting is not
+/// arbitrary either: [`CqlType::parse`] is the rule's first consumer and the CQL
+/// half of the gate, so the rule sits with the parser that enforces it. Its second
+/// consumer, the `Statistics.db` SerializationHeader type parser, reaches it as
+/// `crate::schema::cql_type_parser::frozen_scalar::validate_marshal_frozen` —
+/// which is why `schema/mod.rs` declares this module `pub(crate)` (a MODIFIED
+/// line, not an added one). Precedent for restructuring rather than opting out of
+/// the ratchet: `row_decoder::frozen_map`'s header.
+#[path = "frozen_scalar.rs"]
+pub(crate) mod frozen_scalar;
 
 impl CqlType {
     fn split_top_level_types(type_str: &str) -> Result<Vec<&str>> {

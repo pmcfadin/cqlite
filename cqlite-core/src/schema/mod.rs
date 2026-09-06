@@ -14,18 +14,12 @@ pub mod registry;
 // doctrine). They add inherent impls on the types defined here and own the
 // `UdtRegistry` type; the `pub use` below preserves the `schema::UdtRegistry`
 // public path.
-mod cql_type_parser;
-mod frozen_scalar;
+pub(crate) mod cql_type_parser;
 mod key_ordering;
 mod schema_comparator;
 mod udt_registry;
 
 pub use udt_registry::{split_qualified_udt, udt_registry_from_cql, UdtRegistry};
-
-// The `frozen<scalar>` refusal (#4104) is ONE rule with TWO spellings, so the
-// marshal-form gate lives beside the CQL-form one and is re-exported for the
-// SerializationHeader parser (`parser::enhanced_statistics_parser`) to call.
-pub(crate) use frozen_scalar::validate_marshal_frozen;
 
 /// Test-only work counters for the derived-comparator caching path (issue #1709).
 ///
