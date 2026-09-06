@@ -26,8 +26,8 @@
 //!
 //! 1. the gate of record's `core-tests` red — the cell-path key's opaque policy sat
 //!    on the decoder's `Err` arm and stopped firing once the decode SUCCEEDED;
-//! 2. roborev job 152 — `frozen<int>` decodes to `Frozen(Null)`, so a test against
-//!    the RAW value fell through a frozen-spelled key;
+//! 2. roborev job 152 — a frozen-spelled key decodes to `Frozen(<inner>)`, so a
+//!    test against the RAW value fell through it;
 //! 3. roborev job 153 — BOTH frozen-map key paths (`read_frozen_element`, used by
 //!    `parse_frozen_map_value`, AND `parse_frozen_map_value_raw`) could yield a
 //!    null key, and only the second was reported;
@@ -42,8 +42,22 @@
 //!   that has not got one. `read_frozen_element` is exactly such a caller.
 //! * IT REUSES THE ONE PEEL HELPER (`peeled_for_inspection`, widened to
 //!   `pub(in ...row_decoder)`) rather than adding a second. That helper LOOPS, so
-//!   nesting (`frozen<frozen<int>>`) is covered. A second peel implementation would
-//!   be a second place for the `Frozen(Null)` case to regress independently.
+//!   a legally re-frozen inner (`frozen<frozen<list<int>>>`, which
+//!   `RawCollection::freeze` permits) is covered. A second peel implementation
+//!   would be a second place for the `Frozen(Null)` case to regress independently.
+//!
+//! # THE PEEL IS A VALUE-SIDE PEEL, AND IT IS NOT WHAT #4104 REMOVED
+//!
+//! An earlier revision of this header justified the peel with "`frozen<int>`
+//! decodes to `Frozen(Null)`". That spelling is now REFUSED at both metadata entry
+//! points (`schema::frozen_scalar`; `CQL3Type.Raw::freeze()` throws —
+//! `cassandra-5.0.8:src/java/org/apache/cassandra/cql3/CQL3Type.java:647-651`), so
+//! it can no longer be the reason. The peel stays because it is stated over the
+//! VALUE and the LEGAL frozen families reach it: a `frozen<absent_udt>` key comes
+//! back as `Frozen(Blob)`, and a `Frozen(..)` wrapper must not hide an invalid
+//! inner from a check keyed on the inner. What #4104 removed is the TYPE-STRING
+//! peel in `complex_column::cell_path_key`, which could only ever change an answer
+//! for a frozen scalar.
 
 use super::*;
 
@@ -93,8 +107,10 @@ impl V5CompressedLegacyParser {
     /// Stated over the VALUE, not over the byte length: `Null` is not a legal key
     /// however it arose, so this needs no length argument and cannot miss a caller
     /// that has none. It PEELS first, via the same helper the cell-path `Blob`
-    /// diagnostic uses (`frozen<int>` decodes to `Frozen(Null)`, just as invalid),
-    /// and that helper LOOPS, so nesting is covered.
+    /// diagnostic uses — a `Frozen(Null)` is exactly as unexpressible as a bare
+    /// `Null`, and a legal frozen key type (collection/tuple/UDT) is precisely what
+    /// puts the wrapper there — and that helper LOOPS, so a re-frozen inner is
+    /// covered.
     pub(super) fn frozen_key_never_null(&self, key: Value, desc: &str) -> Value {
         if matches!(Self::peeled_for_inspection(&key), Value::Null) {
             tracing::warn!(

@@ -374,7 +374,10 @@ mod tests {
             parsed = *inner;
             frozen_levels += 1;
         }
-        assert_eq!(frozen_levels, frozens, "all frozen levels must be preserved");
+        assert_eq!(
+            frozen_levels, frozens,
+            "all frozen levels must be preserved"
+        );
         assert_eq!(
             parsed,
             CqlType::List(Box::new(CqlType::Int)),
