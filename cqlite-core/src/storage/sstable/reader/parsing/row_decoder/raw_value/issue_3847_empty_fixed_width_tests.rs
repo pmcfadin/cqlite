@@ -239,14 +239,14 @@ fn an_empty_duration_is_still_refused_declared_residual_of_3847() {
 // `typed_value.rs::parse_simple_udt_field_value_at`, with an explicit `&[]`; what
 // differs is the dispatch that reaches it, so a loop widened in one arm and not the
 // other is exactly how rounds 1 and 2 of this review found real defects.
+// Kept end-to-end rather than helper-level on the wiring-evidence rule: green
+// helper-only unit tests are not sufficient.
 //
 // (An earlier revision of this note named `create_empty_value_for_type` as the
 // marshal arm's route. No such function exists any more — #3631/PR#3820 replaced it,
 // and the per-type rule it used to carry now lives once, in
 // `typed_value/scalar_rules.rs::empty_is_a_value`. The two-route reasoning above is
 // unchanged; only the name was stale.)
-// Kept end-to-end rather than helper-level on the wiring-evidence rule: green
-// helper-only unit tests are not sufficient.
 // ---------------------------------------------------------------------------
 
 /// `pair(a int, b int)` in MARSHAL form. Field names are hex: `70616972` =
