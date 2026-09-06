@@ -192,6 +192,7 @@ SCAN_FILES=(
   "$SCRIPT_DIR/$(basename "$0")"
   "$FLOW_DIR/roborev-review.sh"
   "$FLOW_DIR/roborev-review-checks.sh"
+  "$FLOW_DIR/lib/roborev-findings-count.sh"
   "$FLOW_DIR/roborev-review-oracles.sh"
   "$FLOW_DIR/roborev-job-facts.py"
   "$BOOTSTRAP_SH"
@@ -362,7 +363,7 @@ add_construct '(^|[^[:alnum:]_-])(sed|grep)[[:space:]]+-[a-zA-Z]*z([[:space:]]|$
 add_construct '\-printf[[:space:]]' \
   'find -printf is GNU-only — use -exec or -print with a shell loop' \
   "  find . -printf '%p\\\\n'" # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
-# NAMED because the #3756 bootstrap-scope controls below assert about this rule SPECIFICALLY —
+# NAMED because the #3756 scan-scope controls below assert about this rule SPECIFICALLY —
 # an index reference would silently retarget when a row is inserted above it.
 #
 # `-r` DOES NOT HAVE TO SIT NEXT TO `xargs`, AND THE INCIDENT'S OWN SPELLING DID NOT (#3756
@@ -1065,7 +1066,9 @@ awk '{ gsub(/portability-lint-allow/, "portability-lint-NEUTRALISED"); print }' 
 assert_flagged "this file with its exemption markers NEUTRALISED (proving the markers are load-bearing — the rules really do match this file's own deliberate fixtures)" "$tmp/self-nomarker.sh"
 
 # ---------------------------------------------------------------------------
-# THE BOOTSTRAP PAIR IS IN SCOPE, AND THE RULE THAT MISSED IT IS PROVED TO FIRE THERE (#3756).
+# THE BOOTSTRAP PAIR — AND THE SHARED RECOGNISER LIB — ARE IN SCOPE, AND THE RULE THAT MISSED
+# THEM IS PROVED TO FIRE THERE (#3756, then #4050). The assert label is `scan-scope:` because the
+# subject set is no longer only the bootstrap pair; the properties are unchanged.
 #
 # `xargs -0 -r` shipped in test_bootstrap_agent_machine.sh's tree-identity digest and was caught
 # by a human reviewer, not by this lint — which has carried the `xargs -r` rule verbatim since
@@ -1082,8 +1085,16 @@ assert_flagged "this file with its exemption markers NEUTRALISED (proving the ma
 # The pristine copies are asserted CLEAN of the same rule first — otherwise the planted verdict
 # could be inherited from a pre-existing hit and the plant would prove nothing.
 # ---------------------------------------------------------------------------
+#
+# THE SAME TWO PROPERTIES ARE ASSERTED FOR `lib/roborev-findings-count.sh` (#4050), which joined
+# SCAN_FILES with the same reasoning one file over: it is the shared recogniser that
+# `roborev-review-checks.sh` — already scanned, and running inside the macOS-sensitive
+# `roborev-lints` component — now SOURCES, so a GNU-only construct in it would reach exactly the
+# lane the scanned file was enrolled to protect, while being invisible because the SUBJECT SET
+# stopped at the file that used to hold the code. That is #3756's own defect: the rule was fine,
+# the subject set was the gap.
 _bs_i=0
-for _bs_f in "$BOOTSTRAP_SH" "$BOOTSTRAP_TEST"; do
+for _bs_f in "$BOOTSTRAP_SH" "$BOOTSTRAP_TEST" "$FLOW_DIR/lib/roborev-findings-count.sh"; do
   _bs_i=$((_bs_i + 1))
   _bs_name=$(basename "$_bs_f")
   _bs_member=no
@@ -1091,20 +1102,20 @@ for _bs_f in "$BOOTSTRAP_SH" "$BOOTSTRAP_TEST"; do
     [ "$_sf" = "$_bs_f" ] && _bs_member=yes
   done
   if [ "$_bs_member" = yes ]; then
-    ok "bootstrap-scope: $_bs_name is one of the SCAN_FILES — the #3756 gap (a GNU-only idiom this lint already knows about, shipped because the file was never scanned) cannot silently reopen"
+    ok "scan-scope: $_bs_name is one of the SCAN_FILES — the #3756 gap (a GNU-only idiom this lint already knows about, shipped because the file was never scanned) cannot silently reopen"
   else
-    bad "bootstrap-scope: $_bs_name is NOT in SCAN_FILES — this is the #3756 gap, reopened"
+    bad "scan-scope: $_bs_name is NOT in SCAN_FILES — this is the #3756 gap, reopened"
     continue
   fi
   if [ ! -f "$_bs_f" ]; then
-    bad "bootstrap-scope: $_bs_name does not exist at $_bs_f — the plant control below has no subject, so its verdict would be unearned"
+    bad "scan-scope: $_bs_name does not exist at $_bs_f — the plant control below has no subject, so its verdict would be unearned"
     continue
   fi
   # (a) the pristine file must be CLEAN of the incident rule, or (b) proves nothing.
   scan_found "$RE_XARGS_R" "$_bs_f"
   case $? in
-    1) ok "bootstrap-scope: $_bs_name is clean of the \`xargs -r\` rule today — so the planted hit below is attributable to the plant and not inherited" ;; # portability-lint-allow: the rule NAME in a diagnostic string, not an invocation
-    0) bad "bootstrap-scope: $_bs_name already matches the \`xargs -r\` rule ($(scan_all_hits)) — fix it; until then the plant control below cannot attribute its hit"; continue ;; # portability-lint-allow: the rule NAME in a diagnostic string, not an invocation
+    1) ok "scan-scope: $_bs_name is clean of the \`xargs -r\` rule today — so the planted hit below is attributable to the plant and not inherited" ;; # portability-lint-allow: the rule NAME in a diagnostic string, not an invocation
+    0) bad "scan-scope: $_bs_name already matches the \`xargs -r\` rule ($(scan_all_hits)) — fix it; until then the plant control below cannot attribute its hit"; continue ;; # portability-lint-allow: the rule NAME in a diagnostic string, not an invocation
     *) continue ;; # already counted by scan_found
   esac
   # (b) plant the INCIDENT construct into a copy and require the scan to NAME it.
@@ -1123,11 +1134,11 @@ for _bs_f in "$BOOTSTRAP_SH" "$BOOTSTRAP_TEST"; do
       _bs_hit=$(scan_first_hit)
       case "$_bs_hit" in
         *"xargs -0 -r"*) # portability-lint-allow: the planted construct as a MATCH PATTERN, not an invocation
-          ok "bootstrap-scope: the \`xargs -r\` rule FIRES on a copy of $_bs_name and NAMES the planted line ($_bs_hit) — the #3756 incident construct would now red the gate instead of a reviewer" ;; # portability-lint-allow: the rule NAME in a diagnostic string, not an invocation
+          ok "scan-scope: the \`xargs -r\` rule FIRES on a copy of $_bs_name and NAMES the planted line ($_bs_hit) — the #3756 incident construct would now red the gate instead of a reviewer" ;; # portability-lint-allow: the rule NAME in a diagnostic string, not an invocation
         *)
-          bad "bootstrap-scope: a hit was reported on the planted copy of $_bs_name but it does not name the planted construct ($_bs_hit) — a bare red is not evidence, an unrelated match produces the same verdict" ;;
+          bad "scan-scope: a hit was reported on the planted copy of $_bs_name but it does not name the planted construct ($_bs_hit) — a bare red is not evidence, an unrelated match produces the same verdict" ;;
       esac ;;
-    1) bad "bootstrap-scope: the \`xargs -r\` rule does NOT fire on a copy of $_bs_name carrying the #3756 construct — membership without detection is the gap wearing a scan's clothes" ;; # portability-lint-allow: the rule NAME in a diagnostic string, not an invocation
+    1) bad "scan-scope: the \`xargs -r\` rule does NOT fire on a copy of $_bs_name carrying the #3756 construct — membership without detection is the gap wearing a scan's clothes" ;; # portability-lint-allow: the rule NAME in a diagnostic string, not an invocation
     *) : ;; # already counted by scan_found
   esac
 done

@@ -26,6 +26,108 @@
 #   cannot see when it lints this fragment standalone. Lint the set together with
 #   `shellcheck -x scripts/flow/roborev-review.sh`.
 
+# --- the SHARED findings-count recogniser (sourced) ---------------------------
+# ONE definition of "how many findings does this review text report", shared with
+# scripts/flow/premerge-review-binding.sh (issue #4050): #3626's deferral grants only
+# when the marker's `count=` EQUALS the count the review observed, and that equality is
+# asserted at BOTH ends — so a second implementation of the recogniser would be a second
+# place for the two ends to disagree, and a disagreement there is an authorization bypass
+# in one direction or the other.
+#
+# `-f` AS WELL AS `-r`, and the guard is the SAME predicate premerge-review-binding.sh
+# uses on this SAME library (pinned byte-identical by scripts/tests/test_roborev_review_guard.sh).
+# `.` on a FIFO would BLOCK FOREVER waiting for a writer and `-r` is TRUE for one —
+# measured elsewhere in this repo as `timeout 10` -> rc 124 with NO diagnostic at all,
+# i.e. a verdict-less stall. A socket, a device or a directory is the same class and `-f`
+# is false for every one of them, so ONE predicate covers the class rather than a list of
+# types to keep complete. Both predicates FOLLOW a symlink, which is deliberate: a
+# symlinked checkout is a legitimate layout. THIS EXPOSURE IS NEW WITH THE EXTRACTION —
+# before it the recogniser was inline here and there was no `source` to guard (#3822
+# clause 12).
+#
+# A FAILURE TO LOAD IT IS FAIL-CLOSED THROUGH AN EXISTING MECHANISM, AND DELIBERATELY
+# DOES NOT `return`: the wrapper runs under `set -e`, so a non-zero source would abort it
+# with exit 1 and NO summary block at all — a verdict-less exit, which is the one thing
+# this repo's gate scripts may never do. Instead the cause is named on stderr and
+# `roborev_findings_count` simply stays undefined; the wrapper already refuses to proceed
+# unless every required function exists and that name is enrolled in the same list, so the
+# result is a named ERROR + `finish FAIL 1` before any review is enqueued — never a
+# silently no-op findings check.
+# THE RESOLUTION CANNOT ABORT THE WRAPPER. It runs under `set -e`, where an assignment whose
+# command substitution fails is FATAL — and a fatal exit here is a verdict-less exit, with no
+# summary block at all. So a failed `cd` degrades to an EMPTY directory, whose guard then fails
+# and routes to the named, block-emitting refusal below.
+_rfc_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || _rfc_dir=""
+ROBOREV_FINDINGS_COUNT_LIB="$_rfc_dir/lib/roborev-findings-count.sh"
+# THE SOURCE ITSELF IS CONDITIONAL, not just the readability probe (roborev job 123):
+# a readable-but-CORRUPT library makes `.` return non-zero, and a bare `.` under a
+# caller's `set -e` would kill the wrapper before its required-function check could fail
+# closed. Both failures land on the SAME diagnostic and the remedy is identical, so one
+# wording covers both causes. They can share it because the failed-load branch below
+# UNDEFINES the recogniser — BY CONSTRUCTION, NOT BY NATURE: a corrupt library that fails
+# in its TAIL leaves the functions already defined (roborev job 124, measured), which is
+# precisely why that `unset -f` exists. Read the two halves together; neither is complete
+# on its own, and without the unset this sentence would be false.
+# THE REQUIRED SET, DECLARED ONCE AND USED FOR BOTH THE CHECK AND THE UNSET. Two lists
+# would be two places to forget a fourth helper; the agreement between THIS list and the
+# library's own definitions is pinned structurally in test_roborev_review_guard.sh rather
+# than restated here.
+ROBOREV_FINDINGS_COUNT_FUNCS=(roborev_findings_block roborev_findings_marker_count roborev_findings_count)
+_rfc_lib_loaded=0
+_rfc_missing_fn=""
+if { [ -f "$ROBOREV_FINDINGS_COUNT_LIB" ] && [ -r "$ROBOREV_FINDINGS_COUNT_LIB" ]; }; then
+  # shellcheck source=lib/roborev-findings-count.sh
+  if . "$ROBOREV_FINDINGS_COUNT_LIB"; then _rfc_lib_loaded=1; fi
+fi
+# A CLEAN LOAD IS NOT A COMPLETE ONE (roborev job 129, MEASURED). The late-fail case above
+# is the one where sourcing returns NON-zero with definitions already in effect; this is its
+# mirror and the comment below used to reason only about the first. A library that defines
+# the ENTRY POINT and not its helpers — a stub, or a hand-edit that removed one — sources
+# with rc 0, so `_rfc_lib_loaded` is 1 and a check on `roborev_findings_count` ALONE passes.
+# Measured on the real library's tail: rc 0, only roborev_findings_count defined, and calling
+# it returns 1 while emitting an UNANCHORED `command not found`. The consumer at the
+# `block_marker_count` site then folds that unmeasured answer onto 0 through its audited
+# `:-0`, 0 markers makes `findings:` read NONE, and since #3564 NONE is the PERMISSIVE value
+# for the terminal verdict — so a findings-bearing review would have reached PASS. That is a
+# false green in a merge gate, which is why the completeness check is over the WHOLE set and
+# not over the function this file happens to call.
+if [ "$_rfc_lib_loaded" -eq 1 ]; then
+  for _rfc_fn in "${ROBOREV_FINDINGS_COUNT_FUNCS[@]}"; do
+    if [ "$(type -t "$_rfc_fn" 2>/dev/null)" != function ]; then
+      _rfc_lib_loaded=0
+      _rfc_missing_fn="$_rfc_fn"
+      break
+    fi
+  done
+fi
+if [ "$_rfc_lib_loaded" -eq 1 ]; then
+  :
+else
+  # A PARTIAL LOAD MUST NOT LEAVE A CALLABLE RECOGNISER (roborev job 124, High).
+  # Bash executes a sourced file INCREMENTALLY, so a file that defines these functions and
+  # THEN fails — a syntax error or a failing command in its tail — returns non-zero with the
+  # definitions already in effect. `roborev_findings_count` is defined LAST (line ~137), so
+  # every function exists in exactly the case where the file did not finish loading, and the
+  # wrapper's required-function check — which tests only that the function EXISTS — would
+  # PASS. Measured: `. late-fail.sh` returns 2 while `type -t` reports `function` and the
+  # function returns its value.
+  #
+  # SO THE FLAG IS NOT MADE A SECOND AUTHORITY; the FIRST one is made truthful instead. The
+  # wrapper already fails closed on "the recogniser is not defined", so a failed load
+  # UNDEFINES it and that one check keeps deciding. Requiring the wrapper to consult
+  # `_rfc_lib_loaded` AS WELL would be two sources of truth for one question, and #3564 is
+  # what happens when a key's failure is delegated to its neighbour: the coupling holds only
+  # while one event populates both, and evaporates in the first mode where it does not.
+  # Undefining is also robust to what this file may grow later — trailing state, a fourth
+  # helper — which a flag consulted at one call site is not.
+  unset -f "${ROBOREV_FINDINGS_COUNT_FUNCS[@]}" 2>/dev/null || true
+  if [ -n "$_rfc_missing_fn" ]; then
+    printf '%s\n' "roborev-review-checks.sh: $ROBOREV_FINDINGS_COUNT_LIB (the shared findings-count recogniser, #4050) loaded but is INCOMPLETE — it does not define $_rfc_missing_fn (roborev job 129) — the findings count CANNOT be measured; every function of the set has been undefined so the wrapper's required-function check will fail closed on roborev_findings_count" >&2
+  else
+    printf '%s\n' "roborev-review-checks.sh: cannot read or source $ROBOREV_FINDINGS_COUNT_LIB (the shared findings-count recogniser, #4050 — absent, non-regular, unreadable, or corrupt) — the findings count CANNOT be measured; the wrapper's required-function check will fail closed on roborev_findings_count" >&2
+  fi
+fi
+
 roborev_check_review_completed() {
   # --- step 6a: review-completed — POSITIVE evidence that a review HAPPENED ------
   # The allow-list of terminal verdict markers. A review that finished emits either a
@@ -274,20 +376,20 @@ roborev_check_findings() {
   #      DOES carry severity markers is an INCONSISTENT state. It fails the run and, being
   #      neither PRESENT nor NONE, cannot exempt tier 1 either.
   FINDINGS_BLOCK_FILE="$LOG.findings"
-  # The block runs from a Findings heading/label to the Summary heading/label — the
-  # measured real shapes. Everything outside it (a quoted "[Low]" in prose, a severity
-  # word inside a Problem sentence) is ignored. The terminator must be a LINE-INITIAL
-  # Summary label: matched mid-sentence it closed the block early when a finding's own
-  # prose contained the word, under-counting the findings. (Under-counting is the
-  # fail-closed direction for the tier-1 gate — fewer markers make a vacuity claim MORE
-  # likely to fail — but the count is reported to a human, so it should be right.)
-  { awk 'BEGIN { inblock = 0 }
-         tolower($0) ~ /^[[:space:]]*#{1,4}[[:space:]]*(review[[:space:]]+)?findings?/ { inblock = 1; next }
-         tolower($0) ~ /^[[:space:]]*findings?[[:space:]]*:/ { inblock = 1; next }
-         tolower($0) ~ /^[[:space:]]*#{1,4}[[:space:]]*summary/ { inblock = 0 }
-         tolower($0) ~ /^[[:space:]]*summary[[:space:]]*:/ { inblock = 0 }
-         inblock { print }' "$LOG" 2>/dev/null || true; } >"$FINDINGS_BLOCK_FILE"
-  block_marker_count=$({ grep -oiE '\*\*severity\*\*[[:space:]]*:[[:space:]]*(critical|high|medium|low)|\[(critical|high|medium|low)\]|(^|[^[:alnum:]])(critical|high|medium|low): ' "$FINDINGS_BLOCK_FILE" 2>/dev/null || true; } | wc -l | tr -d '[:space:]')
+  # THE RECOGNISER LIVES IN lib/roborev-findings-count.sh (#4050) — extracted VERBATIM,
+  # comments included, so the merge-gate leg can derive the SAME count from the SAME
+  # daemon-recorded review text by running the SAME CODE. Read that file for what the
+  # block boundaries and the marker set are and why (the terminator must stay
+  # LINE-INITIAL; under-counting is the fail-closed direction for the tier-1 gate).
+  #
+  # THE `|| block_marker_count=""` PRESERVES THIS SITE'S BEHAVIOUR EXACTLY. The library is
+  # THREE-VALUED — it returns 1 and echoes nothing where the old inline pipeline would
+  # have yielded 0 through its `|| true` — and the `:-0` default immediately below is
+  # where that unmeasured answer is folded onto 0, which is documented there as the
+  # STRICT direction for every consumer of this key. The fold is deliberately kept AT that
+  # audited default rather than moved into the library, whose OTHER caller must NOT fold.
+  block_marker_count=$(roborev_findings_count "$LOG" "$FINDINGS_BLOCK_FILE") ||
+    block_marker_count=""
   # THE `:-0` DEFAULT IS THE FAIL-CLOSED DIRECTION, verified rather than assumed (#3229
   # round-10 sweep audit of every `${VAR:-default}` in these three files). A fail-open default
   # masking a failed measurement is exactly how the `${_census_end:-$_census_start}` bound
