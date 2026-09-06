@@ -111,7 +111,9 @@ pub(super) fn is_reversed_comparator(marshal_type: &str) -> bool {
 /// non-collection/tuple/UDT, so no such column can have been declared. Refusing it
 /// fail-closed is the no-heuristics answer (#28) — see [`validate_marshal_frozen`]
 /// for the citation, the override set, and the corpus census. Issue #4104.
-pub(super) fn convert_marshal_type_to_cql_checked(marshal_type: &str) -> crate::error::Result<String> {
+pub(super) fn convert_marshal_type_to_cql_checked(
+    marshal_type: &str,
+) -> crate::error::Result<String> {
     validate_marshal_frozen(marshal_type)?;
     Ok(convert_marshal_type_to_cql(marshal_type))
 }

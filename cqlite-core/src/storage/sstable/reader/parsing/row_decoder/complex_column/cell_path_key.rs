@@ -569,10 +569,12 @@ impl V5CompressedLegacyParser {
     /// varint and inet (each borrows the whole slice), and decimal (scale from
     /// `data[..4]`, unscaled from `data[4..]`). Fixed-width scalars also return
     /// `None`, and for them exactness comes from the caller's ALLOWED-width table
-    /// instead — which is why that table must be consulted on the PEELED type
-    /// (finding B1: while it classified the raw string, a `frozen<int>` reached
-    /// this `None` with no width pinned anywhere). The opaque `Value::Blob`
-    /// default likewise borrows all of `data`.
+    /// instead. Finding B1 was that a `frozen<int>` reached this `None` with no
+    /// width pinned anywhere, and it was answered by making that table peel the
+    /// frozen wrapper; #4104 answers it upstream instead, by REFUSING the spelling
+    /// at both metadata entry points, so the table no longer peels (see
+    /// `cell_path_key_allowed_widths`). The opaque `Value::Blob` default likewise
+    /// borrows all of `data`.
     ///
     /// # Dispatch must mirror `parse_value_from_raw_bytes`
     /// The guards below are the same predicates, in the same ORDER (frozen before
@@ -717,11 +719,6 @@ impl V5CompressedLegacyParser {
     /// parser, because a second opinion about a type spelling is the drift this
     /// module's header calls out by name:
     ///
-    ///   * `frozen<…>` / `FrozenType(…)` is peeled by
-    ///     [`Self::peel_frozen_spellings`], the SAME unwrapper
-    ///     [`Self::cell_path_key_allowed_widths`] and
-    ///     [`Self::cell_path_key_declares_blob`] use, so all three form one opinion
-    ///     about which spellings are frozen.
     ///   * a MARSHAL name goes through [`Self::native_marshal_to_cql_type`] — the
     ///     crate's one marshal-class-to-[`CqlType`] table, and the very table
     ///     `primitive_marshal_to_cql_short` (which the width classifier consults)
@@ -735,12 +732,21 @@ impl V5CompressedLegacyParser {
     /// `CqlType::Custom`, for which `EmptyValueType::for_cql_type` is `None` — so
     /// an unmodelled type reaches the caller's opaque fallback rather than a
     /// guessed family (#28).
+    /// # NO FROZEN PEEL — the frozen-scalar spelling is REFUSED UPSTREAM (#4104)
+    /// This used to peel `frozen<…>`/`FrozenType(…)` before classifying, and the
+    /// peel could only ever change the answer for a frozen SCALAR: for every LEGAL
+    /// frozen inner the peeled and unpeeled strings classify identically (a peeled
+    /// `set<int>`/`SetType(…)`/`address_type` has no empty-buffer tag, and neither
+    /// does `Frozen(..)`). A frozen scalar is not declarable CQL
+    /// (`CQL3Type.Raw::freeze()` throws — `cassandra-5.0.8:src/java/org/apache/
+    /// cassandra/cql3/CQL3Type.java:647-651`) and both metadata entry points now
+    /// refuse it, so the peel was dead. `cell_path_key_tests_frozen` pins the
+    /// reachability claim that makes it dead.
     fn cell_path_key_cql_type(&self, type_str: &str) -> Option<CqlType> {
-        let peeled = self.peel_frozen_spellings(type_str);
-        if peeled.contains("org.apache.cassandra.db.marshal.") {
-            return Self::native_marshal_to_cql_type(&peeled);
+        if type_str.contains("org.apache.cassandra.db.marshal.") {
+            return Self::native_marshal_to_cql_type(type_str);
         }
-        CqlType::parse(&peeled).ok()
+        CqlType::parse(type_str).ok()
     }
 
     /// Whether `type_str` DECLARES a blob key, i.e. whether `Value::Blob` is the
@@ -748,14 +754,20 @@ impl V5CompressedLegacyParser {
     ///
     /// The distinction cannot be made from the RESULT — a declared `blob` key and
     /// an undecodable key both yield `Value::Blob` — so it is made from the
-    /// DECLARED type. `frozen<…>`/`FrozenType(…)` is peeled first: CQL does not
-    /// permit `frozen<blob>` as a map key, but a blob is still a blob under any
-    /// spelling and must not be misdiagnosed as undecoded.
+    /// DECLARED type.
+    ///
+    /// # NO FROZEN PEEL — `frozen<blob>` is REFUSED UPSTREAM (#4104)
+    /// This used to peel `frozen<…>`/`FrozenType(…)` so that `frozen<blob>` was
+    /// recognised as a declared blob. `frozen<blob>` is not declarable CQL — a
+    /// blob is a `RawType`, which does not override the throwing base
+    /// `CQL3Type.Raw::freeze()` (`cassandra-5.0.8:src/java/org/apache/cassandra/
+    /// cql3/CQL3Type.java:647-651`) — and both metadata entry points now refuse it,
+    /// so the peel was dead: no LEGAL frozen inner (collection, tuple, UDT) is a
+    /// blob, so peeling one could never change this answer either.
     pub(super) fn cell_path_key_declares_blob(&self, type_str: &str) -> bool {
-        let t = self.peel_frozen_spellings(type_str);
         // CQL spells a CUSTOM type as a SINGLE-QUOTED marshal class name
         // (`'org.apache.cassandra.db.marshal.BytesType'`), so strip the quotes.
-        let t = t.trim_matches('\'').trim();
+        let t = type_str.trim().trim_matches('\'').trim();
 
         // EXACT NAMES ONLY — never a suffix match, and never a synthesised package
         // prefix (issue #3612, roborev round 9 finding 2).
@@ -786,26 +798,6 @@ impl V5CompressedLegacyParser {
             return true;
         }
         matches!(t.to_ascii_lowercase().as_str(), "blob" | "bytes")
-    }
-
-    /// Strip every `frozen<T>` / `FrozenType(T)` layer off a DECLARED TYPE STRING.
-    ///
-    /// Shared by the width classifier and the declared-blob test so the two cannot
-    /// form different opinions about which spellings are frozen — they did, and the
-    /// disagreement was finding B1: the blob test peeled and the width classifier
-    /// did not. Peels via the ONE existing unwrapper
-    /// (`extract_frozen_inner_type`, which accepts both spellings
-    /// case-insensitively); `Err` simply means "not frozen". Bounded by the
-    /// decoder's own nesting limit so a pathological string cannot spin.
-    fn peel_frozen_spellings(&self, type_str: &str) -> String {
-        let mut t = type_str.trim().to_string();
-        for _ in 0..MAX_TYPE_NESTING_DEPTH {
-            match self.extract_frozen_inner_type(&t) {
-                Ok(inner) => t = inner.trim().to_string(),
-                Err(_) => break,
-            }
-        }
-        t
     }
 
     /// A BORROWED view of `value` with any `Value::Frozen` wrappers seen through,
@@ -839,26 +831,26 @@ impl V5CompressedLegacyParser {
     /// several families admit more than one width: every `N`-or-`0` type admits
     /// the empty buffer, and `inet` admits 4 (IPv4) or 16 (IPv6) as well.
     ///
-    /// # The declared type is PEELED of `frozen<…>` first, and that is load-bearing
-    /// Classifying the RAW string sent every frozen-spelled FIXED-WIDTH key down
-    /// the "variable width" branch (`frozen<int>` contains `'<'`;
-    /// `FrozenType(Int32Type)` makes `primitive_marshal_to_cql_short` return `None`
-    /// on the `(`). `decode_reporting_consumption` then takes its frozen arm,
-    /// recurses on `"int"`, matches no composite guard and returns `None`
-    /// consumption — so a 5-byte `frozen<int>` cell path decoded
-    /// `Value::Integer` from `data[0..4]` with NO width check, NO consumption
-    /// check and NO `warn!`: exactly the two-distinct-byte-strings-one-key defect
-    /// this module exists to close. `frozen<inet>` accepted a 5-byte address the
-    /// same way.
+    /// # NO FROZEN PEEL — the frozen-scalar spelling is REFUSED UPSTREAM (#4104)
+    /// This used to peel `frozen<…>` before classifying, and finding B1 is why: a
+    /// RAW `frozen<int>` took the "contains `'<'` => variable width" branch, the
+    /// dispatcher's frozen arm recursed on `"int"`, matched no composite guard and
+    /// reported `None` consumption — so a 5-byte `frozen<int>` cell path decoded
+    /// `Value::Integer` from `data[0..4]` with no width check, no consumption check
+    /// and no `warn!`.
     ///
-    /// "`frozen<int>` is not legal CQL" is not a defence, and was not treated as
-    /// one: `cell_path_key_declares_blob` two functions below already peels frozen
-    /// so `frozen<blob>` is recognised, and the tests pin all three of its
-    /// spellings. A spelling cannot be handled in one helper and assumed
-    /// impossible in the other.
+    /// B1 was answered by peeling because at the time "`frozen<int>` is not legal
+    /// CQL" was correctly rejected as a DEFENCE — a spelling handled in one helper
+    /// cannot be assumed impossible in another. #4104 makes it a REFUSAL instead of
+    /// a defence: `CQL3Type.Raw::freeze()` throws for every non-collection/tuple/UDT
+    /// (`cassandra-5.0.8:src/java/org/apache/cassandra/cql3/CQL3Type.java:647-651`),
+    /// and BOTH metadata entry points now reject the spelling, so it cannot arrive
+    /// here at all — pinned by `cell_path_key_tests_frozen`. The peel is dead for
+    /// every LEGAL frozen inner too: peeled or not, `frozen<set<int>>`,
+    /// `FrozenType(SetType(..))` and `frozen<address_type>` all classify as
+    /// variable-width.
     fn cell_path_key_allowed_widths(&self, type_str: &str) -> &'static [usize] {
-        let peeled = self.peel_frozen_spellings(type_str);
-        let type_str: &str = &peeled;
+        let type_str: &str = type_str.trim();
         let short: &str = if type_str.contains("org.apache.cassandra.db.marshal.") {
             match Self::primitive_marshal_to_cql_short(type_str) {
                 Some(s) => s,
