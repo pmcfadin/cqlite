@@ -6622,6 +6622,32 @@ INHERITED_PARENT_RUN_ID="${AGENT_GATE_PARENT_RUN_ID:-}"
 EXPLICIT_SUMMARY_FILE=0
 [ -n "${AGENT_GATE_SUMMARY_FILE:-}" ] && EXPLICIT_SUMMARY_FILE=1
 
+# _gate_cntrl_strip <value> -> <value> with every C0 control and DEL removed, under a
+# PINNED `LC_ALL=C` (`[:cntrl:]` is evaluated in the CURRENT locale, so the locale is pinned
+# rather than assumed).
+#
+# THE ONE DEFINITION of "control character" for SUMMARY-block text and for the LOG_DIR
+# creation-site refusal below (#3637, roborev job 175 finding 1). TWO consumers, ONE
+# definition, deliberately:
+#   * `_summary_block_value` — THE boundary every free-text value rendered into a SUMMARY
+#     block passes through — STRIPS with it;
+#   * the LOG_DIR creation site REFUSES with it: a `$TMPDIR` whose stripped form differs
+#     from itself carries a control character, and the run is refused before `mktemp -d`.
+# A second spelling of the class would let the refusal and the strip disagree about what a
+# control character IS, which is the per-site drift #3312 rules against (one channel, one
+# boundary, never an escape list to keep complete).
+#
+# NOT the same predicate as `_gate_has_control_char` above, and the difference is deliberate:
+# that one is the `CQLITE_SCHEMAS_ROOT` override's Unicode-Cc predicate and also rejects C1
+# (U+0080-U+009F), because the node binding's `/\p{Cc}/u` does and the gate must not certify
+# a root the binding will refuse. The property HERE is "cannot forge a line inside a block,
+# and cannot smuggle ANSI into text pasted into a PR comment", which is a C0+DEL property;
+# the C1 residual is DECLARED not covered, exactly as `_summary_block_value`'s own block
+# records it.
+_gate_cntrl_strip() {
+  printf '%s' "${1-}" | LC_ALL=C tr -d '[:cntrl:]'
+}
+
 # ===========================================================================
 # #3637: PER-RUN LOG_DIR LIFECYCLE (creation, startup sweep, disposition, removal)
 #
@@ -7908,10 +7934,18 @@ _logdir_decide_early_exit() {
 #
 # `logs:` is deliberately UNCHANGED and must stay so: it is PATH-ONLY and byte-identical to
 # its pre-#3637 form, `scripts/lib/gate-heartbeat.sh` renders the same field from the same
-# raw variable, and its `$TMPDIR` exposure is pre-existing and DECLARED. Scrubbing it here
-# would give one field name two grammars — the ambiguity #3637 exists to remove — and would
-# break the recovery path a reader needs most (a path that has been rewritten addresses
-# nothing). Pinned by AC7/AC9 of scripts/tests/test_agent_gate_logdir_cleanup.sh.
+# raw variable. Scrubbing it here would give one field name two grammars — the ambiguity
+# #3637 exists to remove — and would break the recovery path a reader needs most (a path that
+# has been rewritten addresses nothing). Pinned by AC7/AC9 of
+# scripts/tests/test_agent_gate_logdir_cleanup.sh.
+#
+# ITS $TMPDIR EXPOSURE IS NOW CLOSED AT THE INPUT, not here (#3637, roborev job 175
+# finding 1): the LOG_DIR creation site REFUSES a parent path carrying a control character,
+# so no run reaching this renderer can hold one — one sanitised line beside a verbatim one
+# was a block a reader would reasonably read as safe from a class it was not. The refusal
+# guards the hostile INPUT for `logs:`, `run-id:`, the heartbeat's `logs:` and
+# `logdir-disposition.txt` at once; the boundary below stays for the FREE-TEXT keys as
+# defence in depth.
 _logdir_lines() {
   printf 'logs: %s\n' "$LOG_DIR"
   printf 'logdir-disposition: %s\n' \
@@ -8037,6 +8071,40 @@ _logdir_cleanup() {
 # idiom the rest of this file already uses at its checked mktemp sites. Aborting here
 # is the only safe answer: the gate cannot log, and a run that cannot log cannot
 # certify.
+# CONTROL-CHARACTER REFUSAL, at the CREATION SITE — not at the render sites (#3637,
+# roborev job 175 finding 1).
+#
+# THE VECTOR: `TMPDIR=$'/tmp/x\nRESULT: PASS'`. This parent is a PREFIX of every path this
+# run publishes — the SUMMARY's `logs:` and `run-id:`, the heartbeat's own `logs:`, and the
+# bundle's `logdir-disposition.txt` — so a newline in it emits an extra LINE inside the
+# SUMMARY block, and one matching the completion probe's own `RESULT: (PASS|FAIL)` pattern:
+# environment-controlled data forging a terminal verdict.
+#
+# WHY THE INPUT IS REFUSED RATHER THAN THE RENDER SANITISED. `logs:` is PATH-ONLY and
+# byte-identical to its pre-#3637 form BY RULE (#3637/#3312: `scripts/lib/gate-heartbeat.sh`
+# renders the same field name from the same raw variable, and one field name must not carry
+# two grammars). A rewritten path addresses nothing, so scrubbing that line would trade a
+# forged row for a path naming no directory — and it would break the rule the rest of this
+# section rests on. Refusing the hostile INPUT closes the class for `logs:`, for the
+# heartbeat's `logs:`, for `run-id:` and for `logdir-disposition.txt` in ONE place, and it
+# PRESERVES the byte-identical rule instead of carving an exception into it.
+#
+# THE `_summary_block_value` BOUNDARY ON THE TWO NEW KEYS STAYS, as defence in depth: the
+# next writer of a free-text SUMMARY value must not inherit an unsanitised renderer merely
+# because today's input is guarded. AC24 of
+# scripts/tests/test_agent_gate_logdir_cleanup.sh measures that boundary against a copy of
+# this script with THIS refusal defeated, so guarding the input did not make it unmeasurable.
+#
+# Same fail-closed direction as the `mktemp -d` check below: a gate that cannot write a
+# TRUSTWORTHY log path cannot certify, and refusing is strictly better than emitting a block
+# whose own `logs:` line can fake a verdict.
+#
+# The offending value is NOT echoed: a diagnostic reproducing it would forge the very line
+# this refuses — the refuse-don't-quote rule `_summary_block_value` already follows.
+if [ "$(_gate_cntrl_strip "$GATE_LOGDIR_PARENT")" != "$GATE_LOGDIR_PARENT" ]; then
+  echo "agent-gate: REFUSED — the per-run log directory's parent (\$TMPDIR, absolutised) contains a control character, so every path derived from it would forge lines inside the SUMMARY block and could fake a terminal verdict; refusing to run rather than emit a block that cannot be trusted (#3637). REMEDY: unset TMPDIR, or point it at a path with no control characters. The value is deliberately not echoed here — reproducing it would forge the very line this refuses; inspect it with: printf '%s' \"\$TMPDIR\" | od -c" >&2
+  exit 1
+fi
 LOG_DIR=$(mktemp -d "$GATE_LOGDIR_PARENT/agent-gate.XXXXXX" 2>/dev/null) || LOG_DIR=""
 if [ -z "$LOG_DIR" ] || [ ! -d "$LOG_DIR" ]; then
   echo "agent-gate: FAIL-CLOSED — could not create a per-run log directory under $GATE_LOGDIR_PARENT (mktemp -d failed); refusing to run rather than derive child paths from an empty value (#3637)" >&2
@@ -8654,13 +8722,16 @@ _record_status_detail() {
 # What it deliberately does NOT touch: the `logs:` line. That field is PATH-ONLY and
 # byte-identical to its pre-#3637 form by design (#3637/#3312, pinned by AC7/AC9 of
 # scripts/tests/test_agent_gate_logdir_cleanup.sh, and the heartbeat's own `logs:` must stay
-# identical to it) — its `$TMPDIR` exposure is pre-existing and DECLARED, and scrubbing it
-# here would give one field name two grammars, which is the ambiguity #3637 removed.
+# identical to it), and scrubbing it here would give one field name two grammars, which is
+# the ambiguity #3637 removed. Its `$TMPDIR` exposure is closed WHERE THE VALUE ENTERS
+# instead — the LOG_DIR creation-site refusal (roborev job 175 finding 1) rejects a
+# control-bearing parent before `mktemp -d`, using `_gate_cntrl_strip`, THE same
+# control-character definition this boundary strips with.
 # Nor does it touch `<log-dir>/logdir-disposition.txt`: that artifact is not inside a SUMMARY
 # block, and its job is to record VERBATIM what this run decided about the bundle in hand.
 _summary_block_value() {
   local _bv_v
-  _bv_v=$(printf '%s' "${1-}" | LC_ALL=C tr -d '[:cntrl:]')
+  _bv_v=$(_gate_cntrl_strip "${1-}")
   case "$_bv_v" in
     *RESULT:*) printf '%s' "[${2:-value} WITHHELD: it carries the completion probe's reserved verdict token (#2908), which on this ${3:-row} would forge a terminal verdict — ${4:-see the component log}]" ;;
     *)         printf '%s' "$_bv_v" ;;
@@ -9355,10 +9426,17 @@ _census_measure_kind() {
       fi
       bins=${ctally%% *}; cargo_status=${ctally##* } ;;
   esac
-  # The derived `<log>.ansi-stripped` sibling is a full COPY of the component log, and
-  # core-tests' runs to tens of MB — retained, it would silently double the size of the
-  # `logs:` bundle every gate keeps. Removed as soon as both tallies are taken; a failed
-  # removal is not the census's business.
+  # The derived `<log>.ansi-stripped` sibling is a DERIVED DUPLICATE — a full copy of the
+  # component log, tens of MB for core-tests — consumed by the two tallies above and read by
+  # NOTHING afterwards. Removed as soon as both are taken; a failed removal is not the
+  # census's business.
+  #
+  # This used to say "it would silently double the size of the `logs:` bundle every gate
+  # keeps", which is FALSE since #3637: a terminal `RESULT: PASS` REMOVES the bundle (see
+  # `_logdir_decide`), so on the common disposition there is no kept bundle to double. Same
+  # stale-rationale class as the `cli-tests` comment corrected in roborev job 174. The
+  # SURVIVING rationale holds on BOTH dispositions and is the one stated above: retained, the
+  # bundle would carry two copies of every log; removed, the copy was never read by anyone.
   rm -f "$src" 2>/dev/null || true
   case "$kind" in
     libtest)
