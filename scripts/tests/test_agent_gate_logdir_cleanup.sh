@@ -299,9 +299,23 @@ case_floor() {
 # SELF-VERIFYING, not merely error-checked, for the same reason `plant_owner_marker` reads
 # the state back through the gate's own probe: `touch` can SUCCEED while setting a time the
 # sweep does not consider aged (a `touch -t` clamped by a filesystem with a narrow time
-# range, a timestamp the kernel truncates). The verdict that decides whether the fixture is
-# in the intended state is the SWEEP's, so the check is the sweep's own predicate —
-# `find -mtime +${GATE_LOGDIR_SWEEP_AGE_DAYS}`, whose shipped floor is 7 days.
+# range, a timestamp the kernel truncates). So it re-reads the fixture through a
+# `find -mtime +7` of its own before returning 0.
+#
+# THAT FLOOR IS HARDCODED, NOT DERIVED, and this comment used to claim otherwise (#3637,
+# roborev job 177 finding 3). `7` is a literal here that currently EQUALS the shipped
+# `GATE_LOGDIR_SWEEP_AGE_DAYS`; nothing reads that variable — it is defined ABOVE the
+# `GATE_LOGDIR_OWNER_BASENAME=` anchor the `owner_lib` extraction starts at, so the shipped
+# value is not even in scope for this helper. Saying "the sweep's own predicate" asserted a
+# derivation the code does not have, which is the stale-rationale class AC26 and AC29 exist
+# for, one file over.
+#
+# WHY THE LITERAL IS SAFE ANYWAY: the ageing offset is 30 days, so raising the shipped floor
+# past 30 makes every fixture fail this check, `age_dir` `bad`s by name and the whole suite
+# REDS. The failure direction is CLOSED — a floor change can cost a confusing red, never a
+# vacuous green, which is the only direction that would let an un-aged fixture satisfy a
+# must-SURVIVE assertion for free. Extracting the shipped constant was the alternative and
+# was declined deliberately: it is more surface for a value whose drift already fails closed.
 _age_dir_apply() {
   local d="${1:-}"
   [ -n "$d" ] && [ -e "$d" ] || return 1
@@ -3866,9 +3880,9 @@ else
   bad "AC28: POSITIVE CONTROL FAILED — age_dir could not age a fixture on this host, so every aged fixture in this file is unmeasured"
 fi
 if [ -n "$(find "$probe28b" -maxdepth 0 -mtime +7 2>/dev/null)" ]; then
-  ok "AC28: and the aged fixture really READS as aged through the sweep's OWN predicate (find -mtime +7)"
+  ok "AC28: and the aged fixture really READS as aged through a find -mtime +7 of its own (a hardcoded floor equal to the shipped one, not derived from it)"
 else
-  bad "AC28: the 'aged' fixture does not satisfy find -mtime +7 — the helper's verification is not the sweep's predicate"
+  bad "AC28: the 'aged' fixture does not satisfy find -mtime +7 — the helper's own verification does not hold, so nothing it ages is measurably aged"
 fi
 # (c) STRUCTURAL, over the SHIPPED test source: ONE mtime site, and the three fixtures the
 # finding named all route through it.
@@ -3889,6 +3903,34 @@ if [ -f "$SELF" ]; then
   else
     bad "AC28: _age_dir_apply does not hold the mtime synthesis — the helper is not where it happens"
   fi
+  # (d) THE HEADER MUST NOT CLAIM A DERIVATION IT DOES NOT HAVE (#3637, roborev job 177
+  # finding 3). It said the self-check was "the sweep's own predicate —
+  # `find -mtime +${GATE_LOGDIR_SWEEP_AGE_DAYS}`" while the body hardcodes `+7`, and the
+  # shipped constant is defined ABOVE the `GATE_LOGDIR_OWNER_BASENAME=` anchor `owner_lib`
+  # extracts from, so this helper cannot read it at all. A comment fix with no guard rots
+  # back (AC26/AC29's lesson), so the claim is asserted ABSENT and the honest replacement —
+  # a hardcoded floor whose drift fails CLOSED — asserted PRESENT.
+  hdr28=$(sed -n '/^# _age_dir_apply <dir>/,/^_age_dir_apply() {/p' "$SELF")
+  if [ -n "$hdr28" ]; then
+    ok "AC28: located the _age_dir_apply header block for the derivation-claim guard"
+  else
+    bad "AC28: could not read the _age_dir_apply header block — the derivation-claim guard is UNMEASURED"
+  fi
+  if printf '%s' "$hdr28" | grep -q 'GATE_LOGDIR_SWEEP_AGE_DAYS'; then
+    if printf '%s' "$hdr28" | grep -q 'HARDCODED, NOT DERIVED'; then
+      ok "AC28: the header names GATE_LOGDIR_SWEEP_AGE_DAYS only to say the floor is HARDCODED, not read from it"
+    else
+      bad "AC28: the _age_dir_apply header claims its self-check uses GATE_LOGDIR_SWEEP_AGE_DAYS — the body hardcodes +7 and the shipped constant is out of scope here, so that is a derivation the code does not have"
+      printf '%s' "$hdr28" | grep -n 'GATE_LOGDIR_SWEEP_AGE_DAYS'
+    fi
+  else
+    ok "AC28: the _age_dir_apply header makes no GATE_LOGDIR_SWEEP_AGE_DAYS derivation claim"
+  fi
+  if printf '%s' "$hdr28" | grep -q 'CLOSED' && printf '%s' "$hdr28" | grep -q '30'; then
+    ok "AC28: and it records WHY the literal is safe — a floor raised past the 30-day offset fails CLOSED (the suite reds; no vacuous green)"
+  else
+    bad "AC28: the header does not record why the hardcoded floor is safe, so the next reader has no reason not to 'fix' it back into a derivation"
+  fi
   for fx28 in aged_keep notours foreign; do
     if grep -qE "^[[:space:]]*age_dir \"\\\$$fx28\"" "$SELF"; then
       ok "AC28: the '$fx28' fixture (a must-SURVIVE assertion) is aged through age_dir"
@@ -3900,11 +3942,14 @@ else
   bad "AC28: could not read this suite's own source at $SELF — the structural half is UNMEASURED"
   bad "AC28: (one-site assertion not reached)"
   bad "AC28: (inside-helper assertion not reached)"
+  bad "AC28: (header-block location not reached)"
+  bad "AC28: (derivation-claim assertion not reached)"
+  bad "AC28: (fail-closed-rationale assertion not reached)"
   bad "AC28: (aged_keep route not reached)"
   bad "AC28: (notours route not reached)"
   bad "AC28: (foreign route not reached)"
 fi
-case_floor AC28 10
+case_floor AC28 13
 
 # ---------------------------------------------------------------------------
 # AC29 (roborev job 175, finding 2): the census's `.ansi-stripped` removal no longer
@@ -4252,16 +4297,17 @@ fi
 # A FLOOR, not an equality, and the margin is deliberate: the owner-marker capability is a
 # LINUX-ONLY dependency (AC5/AC15/AC17/AC18/AC19/AC20 assert the keep-everything degradation
 # instead where it is absent) and those branches do not emit the same number of verdicts, so
-# an exact total would red on macOS for a reason that is not a regression. Measured 271 on
-# this fleet's Linux boxes (261 before AC30 raised it by 10 unconditional verdicts, 226
+# an exact total would red on macOS for a reason that is not a regression. Measured 274 on
+# this fleet's Linux boxes (271 before AC28's derivation-claim guard raised it by 3, 261
+# before AC30 raised it by 10 unconditional verdicts, 226
 # before AC27/AC28/AC29 raised it by 34, 200 before AC25/AC26 raised it by 26); the floor is
 # what notices a DELETED CASE — every
 # case in this file contributes at least 5 verdicts — rather than a drifting count.
 _total_verdicts=$((PASS + FAIL))
-if [ "$_total_verdicts" -ge 256 ]; then
-  ok "suite floor: $_total_verdicts verdicts reported (floor 256) — no case was silently dropped"
+if [ "$_total_verdicts" -ge 259 ]; then
+  ok "suite floor: $_total_verdicts verdicts reported (floor 259) — no case was silently dropped"
 else
-  bad "suite floor: only $_total_verdicts verdicts reported (floor 256) — at least one case was deleted or died before its assertions"
+  bad "suite floor: only $_total_verdicts verdicts reported (floor 259) — at least one case was deleted or died before its assertions"
 fi
 
 printf '\n%s\n' "scripts/tests/test_agent_gate_logdir_cleanup.sh   passed: $PASS  failed: $FAIL"
