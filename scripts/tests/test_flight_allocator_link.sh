@@ -25,6 +25,33 @@
 # the feature being wired to a `#[global_allocator]` that is never installed, or
 # `--version` reporting a string that disagrees with what was linked.
 #
+# EACH ARM ASSERTS ON A PRIVATE SNAPSHOT OF THE BINARY IT ITSELF BUILT, NEVER ON
+# THE WELL-KNOWN PATH. This is the ordering hazard the guard is most likely to
+# have, so it is closed by mechanism rather than by argument: the positive and the
+# negative arm both uplift to the SAME `target/debug/cqlite-flight`, so an
+# assertion made against that path is an assertion about whatever last wrote it.
+# Instead each arm builds with `--message-format=json`, finds the
+# `compiler-artifact` message for the `cqlite-flight` BIN target, and takes TWO
+# things from it:
+#
+#   * `"features":[...]` — cargo's OWN statement of the feature set the artifact
+#     was built with. The arm asserts its identity against that, so "this is the
+#     jemalloc build" is attested by cargo rather than inferred from the flags we
+#     passed. A mismatch is a FAIL, not a skip.
+#   * `"executable"` — the artifact path, which is then COPIED to a per-arm
+#     private file, with the source's device+inode+size checked either side of the
+#     copy. Every symbol and `--version` assertion runs against that private copy.
+#
+# Two measurements this rests on, both taken on this tree rather than assumed:
+# cargo emits the artifact message even for a FULLY FRESH build (the warm case the
+# gate hits), and a no-op `cargo build` RE-UPLIFTS — a jemalloc-bearing binary
+# planted at `target/debug/cqlite-flight` was replaced by the correct
+# default-features one by a build that recompiled nothing (`Finished` in 0.17s,
+# inode changed). So the well-known path is refreshed by each arm; the residual
+# exposure it leaves is a CONCURRENT build in the same target directory
+# overwriting it between our build and our read, and the private copy plus the
+# inode check is what closes that.
+#
 # WHY DEBUG, NOT RELEASE. Two reasons, both load-bearing. (1) Cost: the gate's
 # other components already build this crate in debug, so the negative arm is warm
 # and free, and the positive arm adds one cqlite-flight recompile plus jemalloc's
@@ -94,6 +121,13 @@ case "${1-}" in
 esac
 [ "$#" -le 1 ] || { usage >&2; printf '%s\n' "${P}verdict FAIL — too many arguments ($#)" >&2; exit 2; }
 
+# Per-run scratch, for the private per-arm artifact snapshots. Created before any
+# arm runs and removed on EXIT (`|| true`, because a failing command in a bash
+# EXIT trap under `set -e` would replace the exit status; this script does not set
+# -e, but the habit is cheap and the trap must never change a verdict).
+SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/flightalloclink.XXXXXX") || { printf '%s\n' "${P}verdict SKIP — cannot create a scratch directory for the per-arm artifact snapshots; nothing was measured" >&2; exit 0; }
+trap 'rm -rf "$SCRATCH" || true' EXIT
+
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # Resolved from this script's OWN location, with no env override: an override is
 # settable by the party the guard constrains (CLAUDE.md #3312).
@@ -150,8 +184,7 @@ rc=$?
 [ "$rc" -eq 0 ] || fail "\`cargo metadata\` exited $rc — the workspace manifests do not read, which is a broken tree rather than an unmeasurable host. Remedy: fix the manifest, then re-run."
 TARGET_DIR=$(printf '%s' "$metadata" | tr ',' '\n' | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' | head -1)
 [ -n "$TARGET_DIR" ] || skip "could not read \`target_directory\` out of \`cargo metadata\`'s output — the reader did not recognise it, so nothing was measured (a cargo JSON shape change, or a target path holding an escaped character)"
-BIN="$TARGET_DIR/debug/cqlite-flight"
-say "target-dir $TARGET_DIR"
+say "target-dir $TARGET_DIR (reported for diagnosis only — NO arm asserts on \$TARGET_DIR/debug/cqlite-flight; see the header)"
 
 # Count jemalloc symbols and TOTAL symbols in one read, so a zero jemalloc count
 # is always accompanied by the evidence that the tool produced a symbol table at
@@ -205,43 +238,122 @@ check_version_line() {
   return 0
 }
 
+# Resolve the artifact THIS arm's build produced, from that build's own JSON.
+# Echoes `<executable-path>\t<comma-separated features>`; returns non-zero when
+# the message stream holds no single recognisable bin artifact.
+#
+# The filter requires ALL of: a compiler-artifact message, the `cqlite-flight`
+# name, `"crate_types":["bin"]`, and a non-null `executable`. EXACTLY ONE such
+# message must be present — zero means we cannot say what we built, and more than
+# one means the stream is not the shape this parser was written against; either
+# way, refusing beats picking.
+resolve_arm_artifact() {
+  local json="$1" lines n exe feats
+  lines=$(grep '"reason":"compiler-artifact"' "$json" 2>/dev/null \
+          | grep '"name":"cqlite-flight"' \
+          | grep '"crate_types":\["bin"\]' \
+          | grep -o '{.*"executable":"[^"]*".*}')
+  n=$(printf '%s\n' "$lines" | grep -c .)
+  case "$n" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$n" -eq 1 ] || return 1
+  exe=$(printf '%s\n' "$lines" | sed -n 's/.*"executable":"\([^"]*\)".*/\1/p')
+  feats=$(printf '%s\n' "$lines" | sed -n 's/.*"features":\[\([^]]*\)\].*/\1/p' | tr -d '"')
+  [ -n "$exe" ] || return 1
+  printf '%s\t%s\n' "$exe" "$feats"
+}
+
+# The identity of a file, as a value that changes when the file is REPLACED.
+# `%d:%i` (device:inode) plus size: cargo uplifts by hardlink, so a re-uplift or a
+# peer's overwrite lands on a NEW inode. Prints nothing on failure.
+file_identity() {
+  stat -c '%d:%i:%s' -- "$1" 2>/dev/null
+}
+
+# Snapshot `$1` into the per-arm private file `$2`, refusing if the source was
+# replaced across the copy. Returns 0 = snapshot taken, 1 = could not, 2 = the
+# source changed under us.
+snapshot_artifact() {
+  local src="$1" dst="$2" id_before id_after
+  id_before=$(file_identity "$src")
+  [ -n "$id_before" ] || return 1
+  cp -- "$src" "$dst" 2>/dev/null || return 1
+  id_after=$(file_identity "$src")
+  [ -n "$id_after" ] || return 1
+  [ "$id_before" = "$id_after" ] || return 2
+  [ -s "$dst" ] || return 1
+  chmod u+x -- "$dst" 2>/dev/null || return 1
+  return 0
+}
+
 # One arm. `$1` = arm label, `$2` = extra cargo args (may be empty), `$3` =
 # `present` | `absent`, `$4` = the expected `--version` allocator value.
 run_arm() {
-  local label="$1" extra="$2" expect_syms="$3" expect_alloc="$4" rc_local counts jem total
+  local label="$1" extra="$2" expect_syms="$3" expect_alloc="$4"
+  local rc_local counts jem total resolved exe feats bin
+  local json="$SCRATCH/$label.json" err="$SCRATCH/$label.err"
   say "arm $label: cargo build -p cqlite-flight ${extra:-<default features>}"
   # 25 min with a 30s SIGKILL escalation: the positive arm compiles jemalloc's
   # vendored C source cold, and the negative arm is the feature set the gate's other
   # components already built, so it is warm.
+  # JSON on stdout (the artifact record this arm asserts against), human-readable
+  # progress and diagnostics on stderr (kept for the failure message).
   # shellcheck disable=SC2086  # $extra is a deliberate word-split of our own literal flags
-  timeout -k 30 1500 cargo build -p cqlite-flight $extra >/dev/null 2>&1
+  timeout -k 30 1500 cargo build -p cqlite-flight $extra --message-format=json >"$json" 2>"$err"
   rc_local=$?
-  [ "$rc_local" -eq 0 ] || fail "arm $label: \`cargo build -p cqlite-flight ${extra:-(default features)}\` exited $rc_local. This is a BROKEN BUILD, not an unmeasurable host. Remedy: run that exact command by hand and fix what it reports."
-  [ -f "$BIN" ] || fail "arm $label: the build reported success but $BIN does not exist — refusing to assert anything about a binary that is not there"
+  [ "$rc_local" -eq 0 ] || fail "arm $label: \`cargo build -p cqlite-flight ${extra:-(default features)}\` exited $rc_local. This is a BROKEN BUILD, not an unmeasurable host. Remedy: run that exact command by hand and fix what it reports. Last lines of its stderr: $(tail -5 "$err" 2>/dev/null | tr '\n' '|')"
 
-  counts=$(read_symbols "$BIN")
+  # --- resolve the artifact from THIS build, never from the well-known path.
+  resolved=$(resolve_arm_artifact "$json")
   rc_local=$?
-  [ "$rc_local" -eq 0 ] || skip "arm $label: \`$SYMTOOL\` could not be read for $BIN (non-zero exit, timeout, or output this script cannot parse) — nothing was measured"
+  [ "$rc_local" -eq 0 ] || skip "arm $label: the build succeeded but its \`--message-format=json\` stream holds no single recognisable \`cqlite-flight\` bin artifact record, so this arm cannot say WHICH binary it produced — nothing was measured (a cargo JSON shape change). Refusing to fall back to \$TARGET_DIR/debug/cqlite-flight: both arms uplift to that path, so an assertion against it is an assertion about whatever last wrote it."
+  exe=${resolved%%	*}
+  feats=${resolved##*	}
+
+  # --- the arm's IDENTITY, attested by cargo rather than inferred from our flags.
+  case "$expect_syms" in
+    present)
+      printf '%s\n' "$feats" | tr ',' '\n' | grep -qx 'jemalloc' \
+        || fail "arm $label: cargo reports this artifact was built with features [$feats], which does NOT include \`jemalloc\` — the positive arm did not build the binary it thinks it did, so any symbol verdict from it would be meaningless" ;;
+    absent)
+      printf '%s\n' "$feats" | tr ',' '\n' | grep -qx 'jemalloc' \
+        && fail "arm $label: cargo reports this artifact was built with features [$feats], which DOES include \`jemalloc\` — the negative arm is not measuring a default-features build. \`default = []\`, so the allocator feature must not be reachable from a plain \`cargo build -p cqlite-flight\`" ;;
+  esac
+  say "arm $label: cargo attests features [${feats:-<none>}] for $exe"
+
+  # --- private snapshot. Every assertion below runs on this copy, so a concurrent
+  # --- build overwriting the uplifted path cannot change what we measured.
+  bin="$SCRATCH/$label.bin"
+  snapshot_artifact "$exe" "$bin"
+  rc_local=$?
+  case "$rc_local" in
+    0) : ;;
+    2) fail "arm $label: $exe was REPLACED while being snapshotted (its device:inode:size changed across the copy) — another build in this target directory is racing this one, so nothing measured here would be attributable to this arm's build. Re-run when no concurrent cargo build shares \$TARGET_DIR." ;;
+    *) skip "arm $label: cannot snapshot the built artifact $exe into this run's scratch directory — nothing was measured" ;;
+  esac
+
+  counts=$(read_symbols "$bin")
+  rc_local=$?
+  [ "$rc_local" -eq 0 ] || skip "arm $label: \`$SYMTOOL\` could not be read for the snapshot of $exe (non-zero exit, timeout, or output this script cannot parse) — nothing was measured"
   jem=${counts%% *}
   total=${counts##* }
   # AFFIRMATIVE MEASUREMENT: a zero jemalloc count is only meaningful if the tool
   # produced a symbol table. Zero total symbols means the read told us nothing —
   # a stripped binary or a silently-empty tool — which must never read as clean.
-  [ "$total" -gt 0 ] || skip "arm $label: \`$SYMTOOL\` produced ZERO symbol lines for $BIN, so a zero jemalloc count would be UNMEASURED rather than clean (a stripped binary, or a symbol reader that emitted nothing)"
+  [ "$total" -gt 0 ] || skip "arm $label: \`$SYMTOOL\` produced ZERO symbol lines for the snapshot of $exe, so a zero jemalloc count would be UNMEASURED rather than clean (a stripped binary, or a symbol reader that emitted nothing)"
 
   case "$expect_syms" in
     present)
-      [ "$jem" -gt 0 ] || fail "arm $label (R1.1): expected jemalloc symbols in $BIN and found 0 JEMALLOC SYMBOLS RECOGNISED out of $total symbol lines read. The \`jemalloc\` feature is declared but nothing was linked — check that src/main.rs's #[global_allocator] cfg matches the feature name and that the dependency is not cfg'd out on this target."
+      [ "$jem" -gt 0 ] || fail "arm $label (R1.1): expected jemalloc symbols in the artifact cargo built at $exe and found 0 JEMALLOC SYMBOLS RECOGNISED out of $total symbol lines read. The \`jemalloc\` feature is declared but nothing was linked — check that src/main.rs's #[global_allocator] cfg matches the feature name and that the dependency is not cfg'd out on this target."
       say "arm $label: $jem JEMALLOC SYMBOLS RECOGNISED (of $total symbol lines read)"
       ;;
     absent)
-      [ "$jem" -eq 0 ] || fail "arm $label (R1.2): expected NO jemalloc symbols in the default-features binary and found $jem of $total symbol lines read. The allocator has escaped its feature gate — the default build must use the system allocator."
+      [ "$jem" -eq 0 ] || fail "arm $label (R1.2): expected NO jemalloc symbols in the default-features artifact cargo built at $exe and found $jem of $total symbol lines read. The allocator has escaped its feature gate — the default build must use the system allocator."
       say "arm $label: 0 JEMALLOC SYMBOLS RECOGNISED (of $total symbol lines read — the reader produced a symbol table, so this zero is MEASURED)"
       ;;
     *) fail "internal: unknown symbol expectation '$expect_syms'" ;;
   esac
 
-  check_version_line "$BIN" "$expect_alloc" \
+  check_version_line "$bin" "$expect_alloc" \
     || fail "arm $label (R2.1): \`cqlite-flight --version\` did not report 'allocator: $expect_alloc' as its single allocator line (detail above)"
   say "arm $label: --version reports 'allocator: $expect_alloc'"
   say "arm $label VERDICT PASS"

@@ -394,12 +394,67 @@ table = reader.read_all()
 print(table.to_pandas())
 ```
 
+## Allocator (`jemalloc` feature, issue #3997)
+
+**The released binary and the published image use the SYSTEM allocator. There is nothing
+to configure, and nothing to configure it with.** `jemalloc` is a non-default Cargo feature
+of this crate; `default = []`, so every ordinary build — including the GHCR image, which
+builds `--features observability` and nothing else — links glibc `malloc` exactly as it
+always has. No `LD_PRELOAD` was ever deployed, so nothing has been removed either.
+
+Which allocator a binary actually installed is reported by the binary itself, in two places,
+both derived from the same `cfg` as the installation so they cannot disagree with what was
+linked:
+
+```bash
+cqlite-flight --version
+# cqlite-flight 0.16.1
+# allocator: system          <- or `jemalloc`
+
+# and on the startup `info` line:
+#   cqlite-flight starting ... allocator=system
+```
+
+To build with it (Linux only — the dependency is declared under a
+`cfg(target_os = "linux")` target section and the install site is cfg-gated to match, so the
+feature is inert, not broken, elsewhere):
+
+```bash
+cargo build --release -p cqlite-flight --features jemalloc
+```
+
+**Why it is off by default, and what would change that.** #3551 measured **+29.21% rows/s**
+on the served path from swapping glibc `malloc` for jemalloc at the pinning the measurement
+rig has always used (`docs/reports/ws0-3551-report.md`, 31 clean within-round pairs, worst
+pair-control 2.41%). That measurement used **`LD_PRELOAD` on one binary**, deliberately — which
+is a different artifact from a linked `#[global_allocator]`, differing in initialization order,
+in static-vs-dynamic symbol resolution, and in what runs before `main`. **That number is
+therefore NOT a claim about this feature.** The linked A-vs-E measurement, with peak and
+steady-state RSS against the <128 MB target, is issue #3997's remaining work and runs on the
+#3551 rig; a pre-registered kill criterion in
+`openspec/changes/flight-jemalloc/proposal.md` decides whether `default` flips, stays opt-in,
+or the feature is removed and the null recorded. Until that verdict lands, do not quote a
+speedup for this flag.
+
+The allocator is confined to **this crate's binary target** and is structurally pinned there
+by `scripts/tests/test_flight_allocator_confinement.sh` (a `tooling-tests` gate component). A
+`#[global_allocator]` is process-global and there can be exactly one, so a library that
+declares one imposes it on every embedder with no way to override — and CQLite is embedded via
+PyO3, napi-rs and (M6) WASM inside host runtimes that own their own allocator. `cqlite-core`,
+`cqlite-cli` and every binding therefore keep the system allocator, and the library target of
+this crate — what `tools/flight-loadgen`, the benches and every integration test link — carries
+no allocator at all.
+
 ## Building & testing
 
 ```bash
 cargo build -p cqlite-flight
 cargo test  -p cqlite-flight
 env RUSTFLAGS="-D warnings" cargo clippy -p cqlite-flight --all-targets
+
+# with the non-default linked allocator (Linux only, see "Allocator" above)
+cargo build -p cqlite-flight --features jemalloc
+bash scripts/tests/test_flight_allocator_link.sh   # asserts both arms discriminate
 ```
 
 Tests build real SSTables in-process via the write engine (no external test data),
