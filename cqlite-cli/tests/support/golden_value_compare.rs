@@ -69,8 +69,10 @@ pub struct Report {
     /// A refusal is decided at the NARROWEST node it destroys, so its reach is
     /// that node and not the cell: every unambiguous sibling and every enclosing
     /// level keeps being compared, and a divergence there is an ordinary diff
-    /// (finding N3, at member granularity since finding P2). AT the refused node
-    /// itself, exactly two things survive — the bracket frame and the body's
+    /// (finding N3, at member granularity since finding P2, and at MAP-KEY
+    /// granularity since issue #3815 — a `col[key 2]` entry is one ambiguous key of
+    /// a map whose entry count and values were compared in full). AT the refused
+    /// node itself, exactly two things survive — the bracket frame and the body's
     /// EMPTINESS — and WHICH members the body holds does not; `csv_container`'s
     /// module doc states that residual exactly, having previously implied more
     /// (finding Q1). The CELL is not counted as compared coverage, because only
@@ -92,11 +94,12 @@ pub struct Report {
 /// The CSV positions this table's walk REFUSED, in walk order, each with its
 /// fully-qualified path and cause.
 ///
-/// Recorded at the granularity the walk itself has — per member, per depth — so an
-/// indistinguishable NESTED member is refused where it lives while its siblings,
-/// its container's member count and its bracket frame keep being compared (issue
-/// #1491 review finding P2). Deciding it one node up is what let a golden `[[]]`
-/// accept a CLI `[]`.
+/// Recorded at the granularity the walk itself has — per member, per depth, and per
+/// map KEY — so an indistinguishable NESTED member is refused where it lives while
+/// its siblings, its container's member count and its bracket frame keep being
+/// compared (issue #1491 review finding P2). Deciding it one node up is what let a
+/// golden `[[]]` accept a CLI `[]`, and what let an ambiguous map key cost its own
+/// map's entry count, pair shape and every value (issue #3815).
 ///
 /// A separate channel from the value tree on purpose: a refusal is CONTROL
 /// information about a position, and putting it into the decoded `Value` as a

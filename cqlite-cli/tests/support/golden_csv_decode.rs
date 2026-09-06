@@ -8,7 +8,9 @@
 //!     `decode_does_not_recover`, `golden_rendering`, and the spellings those rest
 //!     on. That is a question about the GOLDEN and the format.
 //!   * this file performs the read — `decode` and the grammar helpers under it. It
-//!     runs only where the parent has already declined to refuse.
+//!     runs only where the parent has already declined to refuse THIS NODE'S BODY;
+//!     a `Reach::MapKeys` refusal (#3815) leaves the node splittable and suppresses
+//!     the ambiguous KEYS alone, inside `decode_object`.
 //!
 //! No surface change: `decode`, `decode_at` and `Excluded` are re-exported by the
 //! parent, so every call site is unchanged.
@@ -274,9 +276,13 @@ fn decode_object<'t>(
         //
         //   * by RENDERED TEXT — cheap, and exact where both sides spell the value the
         //     same way, which is the overwhelmingly common case. It is unambiguous by
-        //     PRECONDITION: `decode_shape` asks `node_refusal` first, and that refuses a
-        //     node whose golden keys do not all render DISTINCTLY, so this cannot be the
-        //     "first of several identical spellings" it would otherwise be.
+        //     PRECONDITION: colliding renderings are a KEY-SCOPED refusal
+        //     (`map_key_refusals`), and this branch is not taken at a node that has one
+        //     — `keys_refused_here` resolves the golden entry positionally instead — so
+        //     this can never be the "first of several identical spellings" it would
+        //     otherwise be. Until #3815 that precondition was enforced one level
+        //     coarser, by refusing the whole node, which cost the node's entry count,
+        //     pair shape and values.
         //   * by CANONICAL VALUE — for keys the two sides legitimately SPELL differently.
         //     `entry_key_rendering` translates the spellings this lane knows
         //     (`stringified_csv_text` handles `blob`) and deliberately leaves the rest

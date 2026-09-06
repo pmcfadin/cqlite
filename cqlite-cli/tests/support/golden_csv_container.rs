@@ -276,26 +276,52 @@
 //! GOLDEN and the committed DDL alone, so it can never be caused by the very
 //! defect under test.
 //!
-//! ## A SECOND declared residual: no refusal is asked at a MAP KEY node (#3726)
+//! ## A refusal at a MAP KEY is scoped to the KEY (issue #3815)
 //!
 //! Every position the COMPARISON walks is asked [`node_refusal`], because
 //! `compare::compare_value_at` asks it at each node it visits. A map KEY is not
 //! such a node: `compare::compare_map` PAIRS keys (it canonicalizes them) rather
-//! than recursing into them, so there is nowhere in that path to record a refusal.
+//! than recursing into them. So a cause that reaches a KEY and nothing else has its
+//! own channel — [`map_key_refusals`], reported as [`Reach::MapKeys`] — and
+//! `compare_map` records it at the key's own node.
 //!
-//! What that costs, exactly. At the map NODE, [`decode_does_not_recover`] does
-//! verify a container key's recoverability twice over — the entry split must give
-//! the golden's entries back, and [`entry_cut`] must give each rendered KEY back —
-//! so a `, ` or a `: ` that would move either cut IS refused. What it does not
-//! reach is the key's OWN member split: a `, ` inside a scalar member of the key
-//! (a `list<text>` key holding `["a, b"]`, rendering `{a, b}`) leaves both of those
-//! cuts intact and yet decodes into two members where the golden has one — which
-//! this lane would report as a divergence the CLI did not cause. Bounding it means
-//! `compare_map` asking [`node_refusal`] at the key node and recording it, which is
-//! a code path no committed fixture reaches; it is declared here instead. MEASURED
-//! on the corpus: no container map key anywhere in it carries a `, `, a `: ` or a
-//! bracket inside a member — `test_nested_udt_keys.nested_udt_keys`'s keys are
-//! `key_part` UDTs whose `label`s are plain identifiers, an empty string or null.
+//! It is the module's blast-radius rule applied one place it had not reached, and
+//! the two causes it covers had OPPOSITE symptoms, which is why both are named here:
+//!
+//! * **two keys that render ALIKE** used to refuse the whole map NODE. That was
+//!   FAIL-CLOSED — it produced no wrong verdict — but the node kept only its frame
+//!   and its body's emptiness, so the entry COUNT, the pair SHAPE and every VALUE
+//!   went uncompared; measured, a value corrupted 20 -> 999 inside such a cell was
+//!   invisible. Exactly the defect roborev job 28 found in `compare_map`'s multicell
+//!   path, and the same answer works: the entries pair POSITIONALLY (emitted order,
+//!   which both sides preserve and which `compare_map` already compares on) with
+//!   only the ambiguous KEYS suppressed;
+//! * **a `, ` inside a scalar member of a key** refused NOTHING. A `list<text>` key
+//!   holding `["a, b"]` renders `[a, b]`, whose separator sits at bracket depth 1, so
+//!   the map node's entry split and its [`entry_cut`] both survive and the node
+//!   recovers. The KEY did not: [`decode`] left raw text there and `compare_map` then
+//!   failed to canonicalize a string as a container and propagated THAT as a diff —
+//!   CORRECT egress reported as a divergence, with `Report::ambiguous_container_cells`
+//!   staying 0 so nothing in the census marked it. A wrong verdict, and a silent one.
+//!
+//! THE RESIDUAL THAT REMAINS, narrowed to what is still true: a cause inside a key
+//! is attributed to the WHOLE key rather than to the node within it, because
+//! `compare_map` canonicalizes a key as one value and never walks its members —
+//! there is no per-member position there to report. At a refused key exactly what
+//! survives at any other refused node survives: the bracket FRAME (required by the
+//! decoder's [`strip`], whose error is propagated) and the body's EMPTINESS. And a
+//! key is never RESOLVED, which is the point of refusing rather than guessing: two
+//! keys sharing one spelling make either reading self-consistent, so picking one
+//! reports correct egress as a divergence for whichever entry guessed wrong (#1491
+//! finding T1).
+//!
+//! NEITHER CAUSE IS REACHED BY THE CORPUS, so both are pinned by unit cases and by
+//! `compare::map::tests` rather than by a fixture. MEASURED on the corpus when this
+//! was written: no container map key anywhere in it carries a `, `, a `: ` or a
+//! bracket inside a member, and none collide — `test_nested_udt_keys.nested_udt_keys`'s
+//! keys are `key_part` UDTs whose `label`s are plain identifiers, an empty string or
+//! null. The CSV census is unchanged by this change (66 container cells compared, 1
+//! refused), which is what says the scoping cost the corpus no coverage.
 
 use super::schema::CqlType;
 use super::{
@@ -387,9 +413,16 @@ pub fn empty_rendering(ty: &CqlType) -> Option<String> {
     brackets(ty).map(|(open, close)| format!("{open}{close}"))
 }
 
-/// Is the golden AT THIS NODE unrecoverable from the flat rendering, for a reason
-/// whose blast radius is THIS node's member split? `Some(reason)` means the node's
-/// contents and count are refused — and nothing else is (review finding P2).
+/// Is the golden AT THIS NODE unrecoverable from the flat rendering? `Some(reason)`
+/// means something at this node is refused — see [`node_refusal_reach`] for HOW FAR,
+/// which is [`Reach::Body`] (the node's contents and count, and nothing else — review
+/// finding P2) for every cause but one: a MAP node's KEY-scoped cause reaches only
+/// its keys (issue #3815).
+///
+/// This is the REASON-ONLY form, for the callers that need to know THAT a node is
+/// refused and not how far it reaches — the gap composition in
+/// `compare::compare_value_at` (a gap whose subject could not be measured is not a
+/// measured gap, whatever the reach) and [`subtree_refusal`].
 ///
 /// NON-RECURSIVE by construction: every cause it reports is a property of this
 /// node's own body, so a nested position's refusal is reported when the walk
@@ -620,6 +653,16 @@ fn subtree_refusal(golden: &Value, ty: &CqlType, kinding: Kinding) -> Option<Str
 ///   R2);
 /// * a BALANCED bracket pair in a member does not move the depth-zero split, so
 ///   it is recovered and COMPARED (finding R1).
+///
+/// # The [`Reach`] travels with the reason (issue #3815)
+///
+/// Every cause above is about THIS node's BODY, so each is [`Reach::Body`]. A MAP
+/// node has one further class of cause, asked LAST and reported [`Reach::MapKeys`]:
+/// [`map_key_refusals`], for a key that cannot be read back while the ENTRY split
+/// and the emitted ORDER still can. Order matters and is not stylistic — a body
+/// cause DOMINATES, because `MapKeys` promises the decoder it may split this node's
+/// entries, and the three checks above are precisely the ones that decide whether it
+/// may.
 ///
 /// It is deliberately NOT the stronger question "could another value have rendered
 /// the same bytes". That question is unusable here: CSV members are unquoted, so a
