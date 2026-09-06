@@ -523,10 +523,21 @@ fn the_emitted_order_of_wholly_refused_keys_is_a_declared_residual() {
 /// `c`, the cell's own node, and NOT to `c[key 1]`/`c[key 2]`, so nobody can read the
 /// census as saying the entries beside those keys were checked.
 ///
-/// Why that is the chosen answer and not a defect: `Reach::MapKeys` would tell the
-/// decoder it may split this node, and the body checks that decide whether it may
-/// cannot run without a synthesizable rendering. `origin/main` made no such promise
-/// and also compared nothing here, so this loses no check main had.
+/// Why that is the chosen answer: `Reach::MapKeys` would tell the decoder it may
+/// split this node, and the body checks that decide whether it may cannot run without
+/// a synthesizable rendering.
+///
+/// AND WHAT IT COSTS, measured against `origin/main` (f3bd49f25) rather than argued —
+/// an earlier draft of this paragraph said "this loses no check main had", and running
+/// it proved that false. On this exact input main reports a DIFF naming the
+/// unparseable golden key, correctly: `charlie\\:3:8` genuinely is not the
+/// `toJSONString` document a FROZEN map's key must be, and
+/// [`a_frozen_maps_non_tojsonstring_golden_key_is_refused_and_names_the_oracle`] above
+/// exists to assert that report. Refusing the node SUPPRESSES it. The second
+/// assertion block below is the control that confines the loss: without the collision
+/// the report still arrives, so the suppression needs BOTH an oracle fault and an
+/// ambiguity in one map. `super::super::csv_container::unsynthesizable_rendering`
+/// carries the full measurement table and the other direction of the trade.
 #[test]
 fn a_mixed_key_node_is_refused_at_the_cell_and_the_census_says_so() {
     let golden = json!({
@@ -567,5 +578,28 @@ fn a_mixed_key_node_is_refused_at_the_cell_and_the_census_says_so() {
         !reasons.contains("[key "),
         "and NOT to the key nodes — claiming key-granularity here would imply the \
          entries beside them were compared, which a Body refusal did not do: {reasons}"
+    );
+
+    // THE CONTROL, and the boundary of the loss above: the SAME unparseable golden key
+    // with NO colliding sibling is still REPORTED, exactly as `origin/main` reports it
+    // (measured identical on both trees). So the widening silences that report only
+    // where an oracle fault and a key ambiguity coincide in one map — it does not put
+    // a hole under every unparseable key.
+    let control = json!({
+        "charlie\\:3:8": 80,
+        "{\"label\": \"a\", \"rank\": 1}": 10
+    });
+    let control_csv = json!("{charlie:3:8: 80, {label: a, rank: 1}: 10}");
+    let report = report_of(MAP_UDT_KEY, control, control_csv, Egress::Csv);
+    assert_eq!(
+        report.ambiguous_container_cells, 0,
+        "no ambiguity, so nothing to refuse: {:?}",
+        report.ambiguity_reasons
+    );
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+    assert!(
+        report.diffs[0].contains("does not parse as JSON"),
+        "the oracle fault must still be NAMED when no ambiguity hides it: {:?}",
+        report.diffs
     );
 }

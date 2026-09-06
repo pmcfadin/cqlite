@@ -336,12 +336,14 @@
 //! it may split a node whose splittability was never checked. The concrete cost of
 //! that false promise: a node with one unrenderable key, two colliding sibling keys
 //! and a text VALUE carrying a depth-0 `, ` would be split, OVER-split, and reported
-//! as a divergence the CLI did not cause. `origin/main` has neither the pairing nor
-//! the promise here (it refuses nothing, splits, and over-splits on that same input),
-//! so this is fail-CLOSED against main and not a regression from it.
-//! [`unsynthesizable_rendering`] owns the reasoning; recovering the pairing needs a
-//! way to ask a body question with no rendering to ask it of, which is real new
-//! analysis and is deferred.
+//! as a divergence the CLI did not cause.
+//!
+//! IT IS A TRADE AGAINST `origin/main` AND NOT A WIN, measured rather than argued:
+//! main over-splits that input and reports a false divergence, which this removes —
+//! but main also REPORTS the unparseable golden key of a mixed node, which this
+//! SUPPRESSES. [`unsynthesizable_rendering`] carries the measurement table and both
+//! directions. Recovering the pairing needs a way to ask a body question with no
+//! rendering to ask it of, which is real new analysis and is deferred.
 //!
 //! NEITHER CAUSE IS REACHED BY THE CORPUS, so both are pinned by unit cases and by
 //! `compare::map::tests` rather than by a fixture. MEASURED on the corpus when this
@@ -954,11 +956,44 @@ fn decode_does_not_recover(
 ///
 /// WHAT IS PRESERVED, which was round 2's whole purpose: the node is still REFUSED,
 /// so the decoder never splits it and never resolves a colliding key to the first of
-/// its spelling — #1491 finding T1 stays closed. WHAT IS LOST is this mixed node's
-/// positional entry/value pairing, i.e. its entry COUNT and values. `origin/main`
-/// did not have those either (it refused nothing here, split, over-split on the input
-/// above and reported a false divergence), so this is fail-CLOSED against main rather
-/// than a regression against it.
+/// its spelling — #1491 finding T1 stays closed.
+///
+/// # WHAT IT COSTS AGAINST `origin/main` — MEASURED, and it is a TRADE, not a win
+///
+/// An earlier draft of this paragraph claimed this route was "fail-CLOSED against
+/// main rather than a regression against it". That was ARGUED, and running it proved
+/// it half wrong. Measured on a detached worktree at `origin/main` (f3bd49f25) and on
+/// this branch, same inputs, `compare_rows` with NO declared gaps:
+///
+/// | input | `origin/main` | here |
+/// |---|---|---|
+/// | mixed: one unparseable golden key + two colliding keys | DIFF naming the unparseable key | NO diff, node REFUSED |
+/// | the same, plus a text VALUE carrying a depth-0 `, ` | DIFF: `entry `y` has no top-level `: `` — the over-split artifact | NO diff, node REFUSED |
+/// | control: one unparseable golden key, NO collision | DIFF naming the unparseable key | IDENTICAL |
+///
+/// So: on the second input this route REMOVES a false divergence main produced by
+/// over-splitting a rendering it should never have split. On the first it SUPPRESSES a
+/// divergence main reported CORRECTLY — the golden key genuinely is not a
+/// `toJSONString` document, which is an oracle fault worth reporting, and
+/// `compare::map::tests::a_frozen_maps_non_tojsonstring_golden_key_is_refused_and_names_the_oracle`
+/// exists to assert exactly that. Adding a key collision to such a map now silences
+/// it.
+///
+/// THE LOSS IS CONFINED TO THE MIXED CASE (the control row: without a collision the
+/// two trees are identical), and it is over-refusal suppressing a GENUINE divergence,
+/// which this module's doctrine calls a blind spot rather than conservatism. It is
+/// declared here and pinned by
+/// `compare::map::tests::a_mixed_key_node_is_refused_at_the_cell_and_the_census_says_so`
+/// rather than left to be rediscovered.
+///
+/// ONE MORE MEASURED FACT, because it bears on whether the widening is the right
+/// trade at all: on main the collision in a mixed node can never produce a WRONG
+/// verdict, because `compare_map` canonicalizes the golden's keys in order and aborts
+/// on the unparseable one before any key is PAIRED. So round 2's `None` here lost a
+/// check, and this `Body` loses a different one; neither produced a wrong verdict on
+/// the inputs above. Choosing between them is a judgement about which check matters
+/// more, and it is recorded as such instead of being presented as a strict
+/// improvement.
 fn unsynthesizable_rendering(golden: &Value, ty: &CqlType) -> Option<(Reach, String)> {
     // An array has no keys, so it has no key-scoped cause.
     let Value::Object(fields) = golden else {
