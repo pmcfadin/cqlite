@@ -71,16 +71,17 @@ enum CellPathComponent {
 }
 
 impl CellPathComponent {
-    /// The declared-type spelling this component expects, for a diagnostic.
+    /// The two declared-type spellings this component is resolvable from, for a
+    /// diagnostic — the message tells the caller exactly what would have worked.
     fn declared_shapes(self) -> &'static str {
         match self {
             CellPathComponent::MapKey => {
-                "`map<K,V>` nor the Cassandra marshal one \
-                 (`org.apache.cassandra.db.marshal.MapType(K,V)`)"
+                "the CQL spelling `map<K,V>` nor the Cassandra marshal one \
+                 `org.apache.cassandra.db.marshal.MapType(K,V)`"
             }
             CellPathComponent::SetElement => {
-                "`set<T>` nor the Cassandra marshal one \
-                 (`org.apache.cassandra.db.marshal.SetType(T)`)"
+                "the CQL spelling `set<T>` nor the Cassandra marshal one \
+                 `org.apache.cassandra.db.marshal.SetType(T)`"
             }
         }
     }
@@ -162,8 +163,8 @@ fn admit_empty_cell_path(
     let Some(component_type) = resolve_declared_cell_path_type(declared, component) else {
         return Err(Error::InvalidInput(format!(
             "an empty-buffer sentinel (`{}`, issue #3805) needs the DECLARED component \
-             type to be validated against, and `{declared}` resolves to a type in \
-             neither the CQL spelling ({}); refusing rather than guessing (issue #28)",
+             type to be validated against, and `{declared}` resolves to neither {}; \
+             refusing rather than guessing (issue #28)",
             tag.cql_name(),
             component.declared_shapes()
         )));
