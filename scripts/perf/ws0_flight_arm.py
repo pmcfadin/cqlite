@@ -423,7 +423,10 @@ def server_rss_block(samples: list[dict], temp: str, arm: str) -> dict:
     With NO rep at all the figure is the MARKER too, never a median of an empty list — an empty
     `all(...)` is vacuously true, so the total is tested explicitly; `statistics.median([])`
     raises, which would abort the whole report for a quantity that is merely absent, and a 0
-    would satisfy R6.1's ceiling outright.
+    would satisfy R6.1's ceiling outright. That state has TWO causes with DIFFERENT remedies —
+    reps ran and none supplied the field (the box or the kernel) versus no rep was recorded at
+    all (the driver never sampled) — so they get different sentences rather than one that
+    describes a subset median over reps that do not exist.
     """
     total = len(samples)
     out = {"server_rss_reps_total": total}
@@ -432,13 +435,30 @@ def server_rss_block(samples: list[dict], temp: str, arm: str) -> dict:
         out[census_key] = len(observed)
         if total and len(observed) == total:
             out[field] = statistics.median(observed)
-        else:
+        elif observed:
             out[field] = rss_unmeasured(
                 f"{len(observed)} of {total} rep(s) of {arm} ({temp}) yielded a scan-end"
                 f" {proc_field}; a median over a SUBSET of the reps is not this arm's figure —"
                 " R6.1 is a RATIO CEILING, which an unrepresentative median can satisfy without"
                 " ever having been measured. See each rep's own `server_rss.status` for the"
                 " cause of the missing one(s)."
+            )
+        elif total:
+            # EVERY rep ran and none supplied this field — a different remedy from the partial
+            # case (the box or the kernel, not one rep to re-run), so it is a different sentence
+            # rather than the subset-median wording, which would describe a subset that does not
+            # exist. A cause that misdescribes its own state is what stops the next person
+            # looking.
+            out[field] = rss_unmeasured(
+                f"0 of {total} rep(s) of {arm} ({temp}) yielded a scan-end {proc_field}; there"
+                " is nothing to median, and a 0 would satisfy R6.1's ratio ceiling outright."
+                " See each rep's own `server_rss.status` for the cause."
+            )
+        else:
+            out[field] = rss_unmeasured(
+                f"0 of 0 rep(s) of {arm} ({temp}) yielded a scan-end {proc_field}: this arm"
+                " recorded NO rep at all, so nothing was sampled — the driver did not run the"
+                " arm, or ran it without the scan-end sampler."
             )
     out["server_rss_sample_timing"] = RSS_SAMPLE_TIMING_NOTE
     return out

@@ -1784,6 +1784,15 @@ case "$got" in
     pass "6m. a ZERO-rep arm publishes the marker naming 0 of 0 — never a crash, and never a 0 kB that would satisfy R6.1's ceiling" ;;
   *) fail "6m. a zero-rep arm must publish the marker (rc=$rc, got '$got')" ;;
 esac
+# ...AND THE OTHER ZERO STATE, which has a different remedy: every rep RAN and none supplied
+# the field (the box or the kernel) is not "the driver never sampled", so the two must not share
+# one sentence. Both are markers; only the cause differs, and the cause is the whole value.
+got=$(rssblock "X,X" "X,X" server_vm_hwm_kb)
+case "$got" in
+  UNMEASURED*"0 of 2 rep(s)"*VmHWM*)
+    pass "6m. ...and an arm whose 2 reps ALL failed reads '0 of 2', distinct from '0 of 0' — reps that ran and failed are a different remedy from reps that never ran" ;;
+  *) fail "6m. an all-failed arm must publish a marker naming 0 of 2 (got '$got')" ;;
+esac
 
 # --- 6n. THE TWO SIDES, END TO END. The marker in case 6d is one this suite typed; this one is
 # the string the COLLECTOR actually produced for a partial rep set, planted into a session and
@@ -1841,7 +1850,8 @@ fi
 # fingerprint-absent cases), 162 (+ #3997's parts 5 and 6 — arm E's cross-arm binary exception in
 # BOTH directions, and the scan-end server RSS R6.1 is read from), 183 (+ the two #3997 roborev
 # blockers: case 5l, arm E's binary must actually DIFFER from the shared one, and cases 6j-6n,
-# the REP-level completeness of each RSS field with its own per-field census).
+# the REP-level completeness of each RSS field with its own per-field census), 184 (+ the
+# all-reps-failed cause, distinct from the no-rep-recorded one).
 MIN_CHECKS=170
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
