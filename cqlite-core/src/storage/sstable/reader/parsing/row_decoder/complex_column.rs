@@ -2642,10 +2642,10 @@ mod tests {
     /// set in cell flags), not the cell value.
     ///
     /// **Without the fix** `parse_complex_column` (the set branch) only checked
-    /// `if let Some(val) = cell_value { elements.push(val) }` and silently
-    /// discarded the path bytes, so the set appeared empty.
-    /// **With the fix** the `else if !path_bytes.is_empty()` branch decodes the
-    /// path bytes and adds them to the set.
+    /// `if let Some(val) = cell_value {...}`, discarding the path bytes entirely.
+    /// **With the fix** the branch decoding the path bytes adds them to the set.
+    /// (It was `else if !path_bytes.is_empty()` until #4106 made it
+    /// UNCONDITIONAL — the guard dropped an EMPTY member.)
     #[test]
     fn test_regression_481_set_elements_from_cell_path() {
         let parser =
