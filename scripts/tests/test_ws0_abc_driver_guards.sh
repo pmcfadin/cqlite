@@ -1394,6 +1394,47 @@ print(arm.RSS_UNMEASURED)
 print(agg.RSS_UNMEASURED_PREFIX)
 print(" ".join(sorted(k for k in arm.server_rss_block([], "warm", "x") if k.startswith("server_vm"))))
 print(" ".join(sorted(agg.RSS_FIELDS)))
+# THE FULL MARKER FORM FROM EACH SIDE, and then the two PREDICATES driven over one table of
+# values (#3997 roborev round 4). The two readers are INDEPENDENT by design — the aggregator
+# imports no sibling module — so what has to be pinned is not one implementation but their
+# AGREEMENT, in BOTH directions: one strict reader and one loose one is the state that would let
+# a corrupt session through whichever tool happened to read it. Driven by IMPORT, never by
+# comparing source text: a predicate can be rewritten without its spelling changing.
+print(arm.RSS_UNMEASURED_MARKER)
+print(agg.RSS_UNMEASURED_MARKER)
+CASES = [
+    ("bare-word", arm.RSS_UNMEASURED, False),
+    ("word-plus-garbage", arm.RSS_UNMEASURED + "garbage", False),
+    ("prefix-no-space-no-cause", arm.RSS_UNMEASURED + " —", False),
+    ("prefix-empty-cause", arm.RSS_UNMEASURED_MARKER, False),
+    ("prefix-whitespace-cause", arm.RSS_UNMEASURED_MARKER + "   ", False),
+    ("hyphen-not-em-dash", arm.RSS_UNMEASURED + " - a cause", False),
+    ("not-a-marker", "n/a", False),
+    ("well-formed", arm.rss_unmeasured("the pid was gone before the sample"), True),
+]
+def verdict_word(flag, yes, no):
+    return yes if flag else no
+
+
+verdicts = []
+for name, value, expect in CASES:
+    a_says = arm._rss_marker(value)
+    g_says = agg.is_unmeasured_marker(value)
+    verdicts.append(
+        name
+        + ":" + verdict_word(a_says, "ACCEPT", "REJECT")
+        + "/" + verdict_word(g_says, "ACCEPT", "REJECT")
+        + "/" + verdict_word(a_says == g_says, "AGREE", "DISAGREE")
+        + "/" + verdict_word(a_says == expect and g_says == expect, "AS-SPECIFIED", "WRONG")
+    )
+print(" ".join(verdicts))
+# AND THE PRODUCER CANNOT MINT WHAT ITS READER REFUSES: a causeless cause is refused at the
+# source, so the two sides cannot disagree by way of a value one of them created.
+try:
+    arm.rss_unmeasured("   ")
+    print("MINT-ACCEPTED-EMPTY-CAUSE")
+except ValueError:
+    print("MINT-REFUSES-EMPTY-CAUSE")
 ') || _py=""
 if [ -n "$_py" ]; then
   pass "5h. (setup) both python sides IMPORT cleanly, so the constants below are the ones the code uses"
@@ -1406,6 +1447,10 @@ arm_mod_marker=$(sed -n 3p <<<"$_py")
 agg_marker=$(sed -n 4p <<<"$_py")
 prod_fields=$(sed -n 5p <<<"$_py")
 agg_fields=$(sed -n 6p <<<"$_py")
+arm_marker_form=$(sed -n 7p <<<"$_py")
+agg_marker_form=$(sed -n 8p <<<"$_py")
+marker_verdicts=$(sed -n 9p <<<"$_py")
+mint_verdict=$(sed -n 10p <<<"$_py")
 if [ -n "$drv_arm" ] && [ "$drv_arm" = "$agg_arm" ]; then
   pass "5h. the driver's ARM_E ('$drv_arm') and the aggregator's BINARY_EXCEPTION_ARM name the SAME arm"
 else
@@ -1433,6 +1478,48 @@ if [ "$prod_fields" = "server_vm_hwm_kb server_vm_rss_kb" ]; then
   pass "5h. ...and they are the two /proc fields R6.1 names — VmHWM (the peak) and VmRSS (the scan-end sample)"
 else
   fail "5h. the published RSS fields must be server_vm_hwm_kb + server_vm_rss_kb, got '$prod_fields'"
+fi
+
+# ...AND THE MARKER'S FULL FORM, plus the two PREDICATES' agreement in BOTH DIRECTIONS (#3997
+# roborev round 4). `startswith("UNMEASURED")` accepted a bare word, an arbitrary suffix and an
+# EMPTY CAUSE as legitimate absences, so a corrupt session read as one that merely did not
+# measure. The two readers stay independent by design, so what is pinned here is their
+# AGREEMENT: a strict reader beside a loose one would let a corrupt session through whichever
+# tool happened to read it.
+if [ -n "$arm_marker_form" ] && [ "$arm_marker_form" = "$agg_marker_form" ]; then
+  pass "5h. ...and the FULL marker form is the same string on both sides ('$agg_marker_form') — em dash AND trailing space, not just the word"
+else
+  fail "5h. marker form differs: collector '$arm_marker_form' vs aggregator '$agg_marker_form'"
+fi
+case "$arm_marker_form" in
+  "UNMEASURED "*) pass "5h. ...and it is the word followed by a SEPARATOR AND A SPACE, so a bare 'UNMEASURED' cannot match it" ;;
+  *) fail "5h. the marker form must extend the word with a separator, got '$arm_marker_form'" ;;
+esac
+# EVERY CASE, BOTH READERS, AND THE EXPECTED VERDICT — one table, so a reader can see that the
+# accept direction is in it. A tightened check that refused legitimate markers would turn every
+# genuinely-unmeasured arm into a hard refusal, i.e. break the rig on exactly the runs it exists
+# to describe, so `well-formed:ACCEPT/ACCEPT` matters as much as the seven rejections.
+for _case in $marker_verdicts; do
+  _name=${_case%%:*}
+  _verdict=${_case#*:}
+  case "$_verdict" in
+    */AGREE/AS-SPECIFIED)
+      pass "5h. marker grammar '$_name': both readers answer as specified and AGREE ($_verdict)" ;;
+    *DISAGREE*)
+      fail "5h. marker grammar '$_name': the two readers DISAGREE ($_verdict) — one strict, one loose" ;;
+    *)
+      fail "5h. marker grammar '$_name': answered against the contract ($_verdict)" ;;
+  esac
+done
+if [ "$(printf '%s\n' $marker_verdicts | grep -c .)" -eq 8 ]; then
+  pass "5h. ...and all 8 grammar cases ran — including the ACCEPT case, so the tightening is pinned against over-refusal too"
+else
+  fail "5h. the grammar table must contribute 8 verdicts, got '$marker_verdicts'"
+fi
+if [ "$mint_verdict" = "MINT-REFUSES-EMPTY-CAUSE" ]; then
+  pass "5h. ...and the PRODUCER refuses to MINT a causeless marker, so neither side can be handed a value the other's reader rejects"
+else
+  fail "5h. rss_unmeasured() must refuse an empty cause (got '$mint_verdict')"
 fi
 
 # --- 5i. THE DRIVER SIDE. Arm E is OPT-IN, dispatched against its OWN --bin-dir, and its binary
@@ -2056,6 +2143,52 @@ else
   fail "6n. the collector's cause must reach the report (RSS section: $(sed -n '/## Server RSS/,/^## /p' "$PREPORT" | tail -5 | tr '\n' ' '))"
 fi
 
+# --- 6o. A MALFORMED MARKER IS A CORRUPT ARTIFACT, NOT AN HONEST ABSENCE (#3997 roborev round
+# 4). Case 6h refuses a string that is not a marker at all; these carry the `UNMEASURED` WORD
+# without its FORM — a bare word, an arbitrary suffix, an empty cause — which
+# `startswith("UNMEASURED")` accepted as a legitimate unmeasured figure. No published number was
+# ever at risk (a marker is printed, never medianed), so what this restores is the distinction
+# between "refuse this session" and "this figure was not measured", and the CAUSE is the whole
+# value of a marker because it is what decides the operator's next action. The ACCEPT direction
+# is case 6d, which carries a well-formed marker through to an UNMEASURED cell end to end.
+for _bad in UNMEASURED UNMEASUREDgarbage; do
+  MSET="$TMP/set-E-malformed-$_bad"
+  mkset "$MSET" 3 A,E 400000 250000 20000 25000
+  mut "$MSET/r2-E/results.json" measurements.1.server_vm_hwm_kb "$_bad"
+  agg_refuses_naming_arms "6o. a marker of '$_bad' — the word without its form — is REFUSED as a CORRUPT record, not counted as an unmeasured figure" \
+    "$MSET" A,E A "server_vm_hwm_kb" "but is NOT the" "CORRUPT record" "non-empty" "CAUSE"
+done
+# THE EMPTY-CAUSE FORMS: the exact prefix, then nothing (or only whitespace). These are the
+# closest thing to a legitimate marker that is still not one, and the prefix check alone passed
+# them both.
+ESET_EMPTY="$TMP/set-E-empty-cause"
+mkset "$ESET_EMPTY" 3 A,E 400000 250000 20000 25000
+mut "$ESET_EMPTY/r1-E/results.json" measurements.1.server_vm_rss_kb "UNMEASURED — "
+agg_refuses_naming_arms "6o. the exact prefix with an EMPTY cause is REFUSED — a marker whose cause is missing tells an operator nothing to act on" \
+  "$ESET_EMPTY" A,E A "server_vm_rss_kb" "CORRUPT record" "CAUSE"
+WSET="$TMP/set-E-whitespace-cause"
+mkset "$WSET" 3 A,E 400000 250000 20000 25000
+mut "$WSET/r3-E/results.json" measurements.1.server_vm_hwm_kb "UNMEASURED —    "
+agg_refuses_naming_arms "6o. ...and a WHITESPACE-ONLY cause too, which a non-empty-string test would have accepted" \
+  "$WSET" A,E A "server_vm_hwm_kb" "CORRUPT record"
+# AND A HYPHEN IS NOT AN EM DASH. The producer writes 'UNMEASURED — <cause>'; a value spelled
+# with an ASCII hyphen was written by something else, and the two refusals must not be one
+# message: 'this artifact is corrupt' and 'this session is not one this tool models' are
+# different remedies.
+HSET="$TMP/set-E-hyphen"
+mkset "$HSET" 3 A,E 400000 250000 20000 25000
+mut "$HSET/r2-E/results.json" measurements.1.server_vm_hwm_kb "UNMEASURED - the pid was gone"
+agg_refuses_naming_arms "6o. a HYPHEN in place of the em dash is REFUSED — the marker's separator is part of its form, not a rendering choice" \
+  "$HSET" A,E A "server_vm_hwm_kb" "CORRUPT record"
+# THE TWO REFUSALS ARE DISTINCT, which is the whole point of splitting them: a value that never
+# claimed to be a marker gets the 'not modelled' message and NOT the corrupt-record one.
+out=$(python3 "$AGG" --root "$SSET" --arms A,E --baseline A 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && grep -qF "is not an" <<<"$out" && ! grep -qF "CORRUPT record" <<<"$out"; then
+  pass "6o. ...while 'n/a' — a string that never claimed to be a marker — still gets the OTHER refusal, so the two causes stay distinguishable"
+else
+  fail "6o. a non-marker string must not be reported as a corrupt marker (rc=$rc, out: $(tail -3 <<<"$out"))"
+fi
+
 # --- 6i. THE CLEAN A/E SET ONCE MORE, so no case above passed by leaving a fixture broken.
 out=$(python3 "$AGG" --root "$ESET" --arms A,E --baseline A); rc=$?
 if [ "$rc" -eq 0 ] && grep -q "0 UNMEASURED RECOGNISED" <<<"$out"; then
@@ -2081,8 +2214,12 @@ fi
 # all-reps-failed cause, distinct from the no-rep-recorded one), 185 (+ the arm-E-only set's
 # declaration that the differ-assertion was SKIPPED), 196 (+ case 5m, the reported-allocator
 # precondition: the accept direction printed affirmatively, both wrong-value directions, and the
-# five unmeasurable states).
-MIN_CHECKS=185
+# five unmeasurable states), 201 (+ 5m's STREAM DISCIPLINE: a well-formed allocator line on
+# stderr — stdout empty, stdout noisy, split across the two, and on the control side — plus the
+# stream-labelled diagnostic), 219 (+ the UNMEASURED marker GRAMMAR: case 5h's 8-case
+# accept/reject table driven over BOTH readers by import plus the producer's causeless-mint
+# refusal, and case 6o's malformed markers end to end).
+MIN_CHECKS=205
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
