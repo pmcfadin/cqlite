@@ -7731,10 +7731,35 @@ _logdir_decide_early_exit() {
 # repo's standing ruling (#3312) is to REMOVE the channel rather than pick a rarer
 # delimiter: a separate key needs no delimiter at all, and every existing `logs:`
 # consumer keeps working unchanged.
+#
+# THE TWO NEW KEYS ARE SANITISED; `logs:` IS NOT (#3637, roborev job 173 finding 4).
+# `logdir-sweep:` embeds `$GATE_LOGDIR_PARENT` — i.e. `$TMPDIR` — VERBATIM, so a
+# `TMPDIR=$'/tmp/x\nRESULT: PASS'` emitted an extra LINE inside the block, and one that
+# matched the completion probe's own pattern: environment-controlled data forging a terminal
+# verdict. `logdir-disposition:` carries gate-authored wording today, but it is free text on
+# a keyed line and gets the same treatment as defence in depth rather than by audit. Both go
+# through `_summary_block_value`, the SAME boundary `_status_detail` uses (strip C0+DEL under
+# LC_ALL=C; WITHHOLD — never rewrite — a value carrying `RESULT:`).
+#
+# `logs:` is deliberately UNCHANGED and must stay so: it is PATH-ONLY and byte-identical to
+# its pre-#3637 form, `scripts/lib/gate-heartbeat.sh` renders the same field from the same
+# raw variable, and its `$TMPDIR` exposure is pre-existing and DECLARED. Scrubbing it here
+# would give one field name two grammars — the ambiguity #3637 exists to remove — and would
+# break the recovery path a reader needs most (a path that has been rewritten addresses
+# nothing). Pinned by AC7/AC9 of scripts/tests/test_agent_gate_logdir_cleanup.sh.
 _logdir_lines() {
   printf 'logs: %s\n' "$LOG_DIR"
-  printf 'logdir-disposition: %s\n' "$GATE_LOGDIR_DISPOSITION"
-  printf '%s\n' "$GATE_LOGDIR_SWEEP_LINE"
+  printf 'logdir-disposition: %s\n' \
+    "$(_summary_block_value "$GATE_LOGDIR_DISPOSITION" 'logdir-disposition value' line \
+         'the bundle, if it survives, carries the same value in its own logdir-disposition.txt')"
+  # The sweep global carries its OWN key, so the KEY is re-rendered here and only the VALUE
+  # is passed through the boundary: a WITHHELD value must not take `logdir-sweep:` with it —
+  # a block that silently loses a key is indistinguishable from one whose sweep never ran.
+  # The `#` strip is a no-op if a future setter ever omits the key, so the line is still
+  # keyed exactly once either way.
+  printf 'logdir-sweep: %s\n' \
+    "$(_summary_block_value "${GATE_LOGDIR_SWEEP_LINE#logdir-sweep: }" 'logdir-sweep census' line \
+         'the swept parent is the directory containing the path on the logs: line')"
 }
 
 # _logdir_publish_disposition: write this run's chosen disposition INTO the bundle,
@@ -8439,6 +8464,44 @@ _record_status_detail() {
 # LENGTH is NOT capped here: a cap would be a SILENT truncation of a disclosure, which is
 # the defect this issue removes. Bounding the value is the WRITER's job, and today's writers
 # need no bound — every detail is a fixed sentence plus a count and a log path.
+# _summary_block_value <text> <noun> <line-kind> <pointer> (#3637, roborev job 173
+# finding 4): THE ONE boundary every FREE-TEXT value rendered into a SUMMARY block passes
+# through. Extracted from _status_detail rather than reimplemented beside it: the #3637
+# `logdir-disposition:` and `logdir-sweep:` keys need exactly this treatment (the sweep line
+# embeds `$GATE_LOGDIR_PARENT`, i.e. `$TMPDIR`, VERBATIM), and a second escaper is a second
+# place for the rule to drift — #3312's ruling is one channel, one boundary, not a per-site
+# escape list to keep complete.
+#
+# TWO OPERATIONS, in this order, and the reasoning for each is in the long block above:
+#   1. STRIP C0 + DEL under LC_ALL=C (`tr -d '[:cntrl:]'`). LF/CR forge rows inside the block
+#      and ESC puts ANSI into text that gets pasted into PR comments; all three are C0. The
+#      C1 residual (U+0080-U+009F) is declared NOT covered, as above.
+#   2. WITHHOLD — never rewrite — a value carrying the completion probe's `RESULT:` token.
+#      A substitution edits the token wherever it occurs, including inside a legitimate
+#      environment-derived path, and would then NAME something that exists nowhere; the
+#      refusal quotes NO part of the token it refuses, because a diagnostic reproducing it
+#      would forge the very line it prevents.
+#
+# The caller supplies the NOUN, the LINE-KIND and the POINTER so the refusal can send the
+# reader somewhere that exists for that field. It supplies no other text: the refusal wording
+# itself stays here, at the boundary, so no call site can weaken it.
+#
+# What it deliberately does NOT touch: the `logs:` line. That field is PATH-ONLY and
+# byte-identical to its pre-#3637 form by design (#3637/#3312, pinned by AC7/AC9 of
+# scripts/tests/test_agent_gate_logdir_cleanup.sh, and the heartbeat's own `logs:` must stay
+# identical to it) — its `$TMPDIR` exposure is pre-existing and DECLARED, and scrubbing it
+# here would give one field name two grammars, which is the ambiguity #3637 removed.
+# Nor does it touch `<log-dir>/logdir-disposition.txt`: that artifact is not inside a SUMMARY
+# block, and its job is to record VERBATIM what this run decided about the bundle in hand.
+_summary_block_value() {
+  local _bv_v
+  _bv_v=$(printf '%s' "${1-}" | LC_ALL=C tr -d '[:cntrl:]')
+  case "$_bv_v" in
+    *RESULT:*) printf '%s' "[${2:-value} WITHHELD: it carries the completion probe's reserved verdict token (#2908), which on this ${3:-row} would forge a terminal verdict — ${4:-see the component log}]" ;;
+    *)         printf '%s' "$_bv_v" ;;
+  esac
+}
+
 _status_detail() {
   local f
   f=$(_status_detail_file "$1")
@@ -8468,17 +8531,16 @@ _status_detail() {
   # here (pollers outside this repo read these blocks). The cost of the broad trigger is a
   # withheld detail on a pathological filename; the cost of a narrow one is a forged verdict
   # for a consumer nobody surveyed. Only one of those is recoverable by reading the log.
-  local _sd_v
-  _sd_v=$(head -1 "$f" 2>/dev/null | LC_ALL=C tr -d '[:cntrl:]')
   # CHECKED, not assumed. The gate-authored contract above is a property of today's four
   # call sites; a fifth could interpolate something, and this boundary is the one place that
   # notices. It cannot fire on any writer shipping today, which is why its coverage is a
   # SEEDED case in scripts/tests/test_agent_gate_tree_provenance.sh (phase B3) rather than a
   # filename fixture — an untestable guard is one nobody can trust.
-  case "$_sd_v" in
-    *RESULT:*) printf '%s' "[detail WITHHELD: it carries the completion probe's reserved verdict token (#2908), which on this row would forge a terminal verdict — see the component log]" ;;
-    *)         printf '%s' "$_sd_v" ;;
-  esac
+  #
+  # BOTH operations now live in _summary_block_value, the ONE boundary the #3637 logdir keys
+  # share (roborev job 173 finding 4). The rendering for this field is unchanged: same strip,
+  # same refusal, same wording — only the site is shared.
+  _summary_block_value "$(head -1 "$f" 2>/dev/null)" detail row "see the component log"
 }
 
 # _fm_summary_line <name> <status> <time>: the ONE renderer for a SUMMARY component

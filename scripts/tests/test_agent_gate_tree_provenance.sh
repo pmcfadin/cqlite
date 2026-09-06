@@ -588,10 +588,18 @@ else
     ok "B3 (#3402): the row does not match 'RESULT: (PASS|FAIL)' — the refusal quotes nothing"
   fi
   # The mutant: pass the value straight through, which is what the guard prevents.
+  #
+  # THE TARGET MOVED, and the target is the BOUNDARY, not the caller (#3637, roborev job 173
+  # finding 4): the strip-and-withhold pair was extracted out of `_status_detail` into
+  # `_summary_block_value`, which the #3637 `logdir-disposition:`/`logdir-sweep:` keys now
+  # share. The rendering for this row is unchanged (same strip, same refusal, same wording),
+  # so every assertion above still reads the same bytes — only the line this mutant rewrites
+  # is one function over, and rewriting it there mutates the boundary for EVERY field that
+  # uses it, which is the stronger mutant.
   mut="$tmp/gate-mutant-withhold.sh"
   if gate_replace_line "$GATE" "$mut" \
-       "*RESULT:*) printf '%s' \"[detail WITHHELD: it carries the completion probe's reserved verdict token (#2908), which on this row would forge a terminal verdict — see the component log]\" ;;" \
-       "*RESULT:*) printf '%s' \"\$_sd_v\" ;;"; then
+       "*RESULT:*) printf '%s' \"[\${2:-value} WITHHELD: it carries the completion probe's reserved verdict token (#2908), which on this \${3:-row} would forge a terminal verdict — \${4:-see the component log}]\" ;;" \
+       "*RESULT:*) printf '%s' \"\$_bv_v\" ;;"; then
     r_b3m=$(mkrepo_from b3-withhold-mutant-repo "$mut")
     sum="$tmp/b3-withhold-mutant.txt"; out="$tmp/b3-withhold-mutant.out"
     ( cd "$r_b3m" && PATH="$seedbin:$STUBBIN:$PATH" env SEED_DETAIL="$b3_detail" \
