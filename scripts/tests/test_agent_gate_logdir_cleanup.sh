@@ -72,6 +72,21 @@
 #        " (", the exact value the withdrawn shared-channel design truncated (#3312);
 #   AC9  the SUMMARY's `logs:` and the heartbeat file's `logs:` are byte-identical:
 #        ONE field name must not carry two grammars (STRUCTURAL — see the case);
+#   AC21 a terminal PASS does NOT destroy the `file-size` OPT-OUT disclosure: the
+#        component's own arm PINS the retention (its `OPT-OUT` token is NON-FAILING, so
+#        `CQLITE_ALLOW_FILE_GROWTH=1` reaches `RESULT: PASS`, and #3402/#3401 put the
+#        grown-file NAMES in `file-size.log` INSIDE the bundle) — roborev job 173 F1;
+#   AC22 `--only <component>` RETAINS, by a reason that NAMES the mode: the entire product
+#        of that diagnostic is the component log under `logs:`. `--lite` is deliberately
+#        NOT exempted and its disposition states the removal AND the KEEP_LOGS remedy —
+#        roborev job 173 F2;
+#   AC23 ONE content predicate serves BOTH early-exit arms: a non-zero exit whose bundle
+#        holds only this run's LAUNCH artifacts (incl. the #3755 admission family) leaves
+#        no husk, and the same bundle plus one component log IS retained — job 173 F3;
+#   AC24 the two NEW keys carry no $TMPDIR-derived control characters into the block: a
+#        newline-bearing `$TMPDIR` adds only the 2 pre-existing DECLARED lines (`run-id:`,
+#        `logs:`), and a value carrying the probe's reserved token is WITHHELD with its key
+#        intact — roborev job 173 F4;
 #   AC8  an EARLY EXIT — one that never reaches the terminal emit — still gets a
 #        disposition: the CQLITE_GATE_STUB_RUNDIR stub (exit 0) and an argv/usage
 #        refusal (exit 2, empty bundle) both leave NOTHING, and `--list` creates no
@@ -201,6 +216,51 @@ one_logdir() {
 # is keyed, one value per line, and a test that trims would hide a re-appended clause.
 artifact_field() {
   sed -n "s/^$2: //p" "$1/logdir-disposition.txt" 2>/dev/null | tail -1
+}
+
+# block_lines <summary-file> -> the number of lines in that file's SUMMARY block, both
+# markers included. Written for AC24, where a keyed line MUST stay ONE line: an injected
+# newline is invisible to every per-field assertion (each key still parses) and shows up
+# only in the block's own line count.
+#
+# The LITE markers, because every counting case here drives the hermetic
+# `--lite-aggregate-selftest`. A file with no block yields 0, which every caller treats as
+# a measurement failure rather than as a small block.
+block_lines() {
+  awk '/^==== AGENT-GATE LITE SUMMARY ====$/,/^==== END AGENT-GATE LITE SUMMARY ====$/' \
+    "$1" 2>/dev/null | grep -c . || true
+}
+
+# run_agg_gate <gate-script> <scratch-tmpdir> <summary-file> <scoped-status> [env=value ...]
+# -- run_agg against an ARBITRARY gate script, so a MUTANT copy can be driven through the
+# identical fixture. A mutant can then differ from the real run by nothing but the mutation.
+run_agg_gate() {
+  local gate="$1" td="$2" sf="$3" scoped="$4"; shift 4
+  mkdir -p "$td"
+  env -u AGENT_GATE_PARENT_RUN_ID \
+      TMPDIR="$td" \
+      AGENT_GATE_SUMMARY_FILE="$sf" \
+      AGENT_GATE_TEST_LITE_SCOPED="$scoped" \
+      AGENT_GATE_TEST_LITE_RESULTS="file-size:PASS fmt:PASS clippy:PASS" \
+      "$@" \
+      bash "$gate" --lite-aggregate-selftest >"$td.out" 2>&1
+}
+
+# case_mark / case_floor <label> <min> — the PER-CASE FLOOR idiom this file already applies
+# to its four driver-based cases (AC17/AC18/AC19/AC20), available to the INLINE cases too.
+# Same lesson (#3544): a case that dies partway through would otherwise report a green
+# SUBSET of itself, and the counters are the only thing that can see it. `case_mark` at the
+# top of a case, `case_floor` at the bottom; the floor is itself a verdict, so a deleted
+# floor is visible in the suite-wide floor at the end of this file.
+CASE_MARK=0
+case_mark() { CASE_MARK=$((PASS + FAIL)); }
+case_floor() {
+  local n=$((PASS + FAIL - CASE_MARK))
+  if [ "$n" -ge "$2" ]; then
+    ok "$1: the case reported all $n of its verdicts (case floor $2)"
+  else
+    bad "$1: the case reported only $n verdicts (case floor $2) — a truncated case, not a pass"
+  fi
 }
 
 # The owner-marker machinery, EXTRACTED FROM THE SHIPPED GATE rather than
@@ -2722,6 +2782,576 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# AC21 (roborev job 173, finding 1): a PASS must not destroy the `file-size`
+# OPT-OUT disclosure.
+# ---------------------------------------------------------------------------
+# `file-size`'s `OPT-OUT` token is NON-FAILING (`_status_is_nonfailing` accepts it), so a
+# run with `CQLITE_ALLOW_FILE_GROWTH=1` engaged reaches `RESULT: PASS` — and #3637 removes
+# the bundle on a terminal PASS. The row's whole disclosure is a POINTER: #3402/#3401
+# deliberately moved the grown-file NAMES out of the SUMMARY row and into `file-size.log`
+# INSIDE that bundle. So on the one run where the disclosure matters, the pointer dangled:
+# `logs:` resolved to nothing and the names were gone from every reachable artifact.
+#
+# TWO HALVES, because no hermetic mode reaches a terminal PASS *through* `run_file_size`
+# (the no-cargo `--only file-size` run is promoted to `RESULT: PARTIAL`, and `--lite` needs
+# a real cargo):
+#   (a) THE COMPONENT ARM, end to end on the real gate: a real growth fixture + the real
+#       opt-out really does PIN the retention, and the reason really does NAME `file-size`
+#       — asserted by observing the pin OUTRANK the `--only` exemption, which is the arm
+#       directly below it and the reason this run would otherwise carry;
+#   (b) THE DECISION, on the SHIPPED `_logdir_decide`, driven at `PASS` with a control that
+#       proves an unpinned PASS still arms the removal. Membership is not detection: (a)
+#       alone would pass with the pin ignored at emit time, and (b) alone would pass with
+#       the component never setting one.
+# ---------------------------------------------------------------------------
+case_mark
+fs_repo="$tmp/ac21-growth"
+fs_td="$tmp/ac21-tmpdir"
+d21=""
+mkdir -p "$fs_repo/scripts" "$fs_repo/cqlite-core/src" "$fs_td"
+cp "$GATE" "$fs_repo/scripts/agent-gate.sh"
+# The fixture: an over-threshold .rs file committed at 900 lines and GROWN to 950 in the
+# worktree, which is the only shape that reaches the ratchet's growth arm at all. Line
+# counts are RE-MEASURED (the file-size suite's rule): a fixture that is not what the case
+# claims makes the verdict below meaningless.
+awk 'BEGIN { for (i = 1; i <= 900; i++) print "// filler line " i }' >"$fs_repo/cqlite-core/src/big.rs"
+printf 'target/\n*.log\n' >"$fs_repo/.gitignore"
+fs_fixture_ok=0
+if ( cd "$fs_repo" && git "${GIT_CFG[@]}" init -q -b main . \
+     && git "${GIT_CFG[@]}" add -A && git "${GIT_CFG[@]}" commit -qm init ) >/dev/null 2>&1; then
+  awk 'BEGIN { for (i = 1; i <= 950; i++) print "// filler line " i }' >"$fs_repo/cqlite-core/src/big.rs"
+  fs_base_n=$( cd "$fs_repo" && git show HEAD:cqlite-core/src/big.rs 2>/dev/null | wc -l | tr -d ' ' )
+  fs_head_n=$(wc -l <"$fs_repo/cqlite-core/src/big.rs" 2>/dev/null | tr -d ' ')
+  [ "${fs_base_n:-0}" = 900 ] && [ "${fs_head_n:-0}" = 950 ] && fs_fixture_ok=1
+fi
+if [ "$fs_fixture_ok" = 1 ]; then
+  ok "AC21: precondition — the growth fixture really commits 900 lines and grows to 950"
+else
+  bad "AC21: the growth fixture is not what the case claims (committed '${fs_base_n:-<none>}', worktree '${fs_head_n:-<none>}') — the OPT-OUT arm is UNMEASURED"
+fi
+if [ "$fs_fixture_ok" = 1 ]; then
+  ( cd "$fs_repo" && env -u AGENT_GATE_PARENT_RUN_ID \
+      TMPDIR="$fs_td" \
+      AGENT_GATE_SUMMARY_FILE="$tmp/ac21-optout.txt" \
+      CQLITE_ALLOW_FILE_GROWTH=1 \
+      bash "$fs_repo/scripts/agent-gate.sh" --only file-size ) >"$tmp/ac21-optout.out" 2>&1
+  sf21="$tmp/ac21-optout.txt"
+  # The row really is OPT-OUT — without this the retention below could be about anything.
+  if grep -qE '^file-size: +OPT-OUT \(' "$sf21"; then
+    ok "AC21: precondition — the engaged opt-out really produced a file-size: OPT-OUT row"
+  else
+    bad "AC21: no 'file-size: OPT-OUT' row in the block — the opt-out arm never ran, so the retention is UNMEASURED"
+    grep -E '^file-size: ' "$sf21" 2>/dev/null
+  fi
+  d21=$(logs_field "$sf21") || d21=""
+  if [ -n "$d21" ] && [ -d "$d21" ]; then
+    ok "AC21: the OPT-OUT run RETAINED its bundle — the logs: pointer resolves"
+  else
+    bad "AC21: the OPT-OUT run's bundle is GONE ('${d21:-<none>}') — the #3402 disclosure the row points at was destroyed"
+  fi
+  # …and the artifact the row NAMES is in it, carrying the grown file. The pointer is the
+  # disclosure, so a retained-but-empty bundle would satisfy the directory check and none
+  # of the property.
+  if [ -n "$d21" ] && [ -s "$d21/file-size.log" ] \
+     && grep -q 'cqlite-core/src/big.rs' "$d21/file-size.log" 2>/dev/null; then
+    ok "AC21: the retained bundle's file-size.log NAMES the grown file — the disclosure #3402/#3401 moved there survives"
+  else
+    bad "AC21: the retained bundle has no file-size.log naming the grown file — the pointer resolves to nothing"
+  fi
+  # THE REASON NAMES THE COMPONENT, and the pin is proved by which arm won: this is an
+  # `--only` run, whose exemption (AC22) sits directly BELOW the pin in `_logdir_decide`,
+  # so a disposition naming `file-size` can only have come from the pin.
+  disp21=$(logs_disposition "$sf21")
+  case "$disp21" in
+    RETAINED:*file-size*OPT-OUT*)
+      ok "AC21: the retention NAMES file-size's OPT-OUT ($disp21)" ;;
+    RETAINED:*--only*)
+      bad "AC21: the retention is attributed to the --only exemption, not to the file-size pin — the pin did not fire ('$disp21')" ;;
+    *)
+      bad "AC21: the retention does not name the file-size OPT-OUT disclosure (got: '${disp21:-<none>}')" ;;
+  esac
+else
+  bad "AC21: (retention assertion not reached — fixture failed)"
+  bad "AC21: (bundle-content assertion not reached — fixture failed)"
+  bad "AC21: (named-reason assertion not reached — fixture failed)"
+  bad "AC21: (OPT-OUT row assertion not reached — fixture failed)"
+fi
+
+# (b) THE DECISION ITSELF, at PASS, on the SHIPPED function.
+#
+# EXTRACTED FROM THE GATE, never reimplemented — the same rule the owner-marker helpers
+# above follow. A second copy of `_logdir_decide` would be a second place for the
+# precedence order to drift, and a harness that re-implements the decision measures the
+# harness.
+decide_lib="$tmp/decide-lib.sh"
+awk '/^# _logdir_artifact_inside:/,/^# _logdir_has_content <dir>:/' "$GATE" | sed '$d' >"$decide_lib"
+if grep -q '^_logdir_decide() {' "$decide_lib" && grep -q '^_logdir_force_retain() {' "$decide_lib"; then
+  ok "AC21: the disposition decider was extracted from the shipped gate"
+  # shellcheck disable=SC1090
+  . "$decide_lib"
+  # decide_reset <log-dir>: the INPUTS the decider reads, all of them, set explicitly so
+  # each assertion below states its own premise. Nothing after this case reads these
+  # globals (it is the last case before the survivor accounting).
+  decide_reset() {
+    GATE_LOGDIR_CREATED="$1"
+    GATE_LOGDIR_DISPOSITION="RETAINED: no terminal verdict (post-mortem)"
+    GATE_LOGDIR_REMOVE=0
+    GATE_LOGDIR_REMOVE_INTENT=0
+    GATE_LOGDIR_RETAIN_PIN=""
+    GATE_LOGDIR_SUPERSEDED_CLAIM=""
+    GATE_LOGDIR_DECIDED=0
+    SUMMARY_FILE="$tmp/decide-summary-outside.txt"
+    HEARTBEAT_FILE="$SUMMARY_FILE.heartbeat"
+    INHERITED_PARENT_RUN_ID=""
+    ONLY=""
+    LITE=0
+    AGENT_GATE_KEEP_LOGS=0
+  }
+  decide_dir="$tmp/ac21-decide"; mkdir -p "$decide_dir"
+  # 1. PINNED + PASS -> RETAIN, with the pin's own reason.
+  decide_reset "$decide_dir"
+  _logdir_force_retain "file-size OPT-OUT disclosure #3402 (test-supplied reason)"
+  _logdir_decide PASS
+  if [ "$GATE_LOGDIR_REMOVE_INTENT" = 0 ] && [ "$GATE_LOGDIR_REMOVE" = 0 ]; then
+    case "$GATE_LOGDIR_DISPOSITION" in
+      RETAINED:*file-size*OPT-OUT*)
+        ok "AC21: a terminal PASS over a PINNED bundle RETAINS and keeps the pin's reason ($GATE_LOGDIR_DISPOSITION)" ;;
+      *)
+        bad "AC21: a PASS over a pinned bundle retained under the WRONG reason ('$GATE_LOGDIR_DISPOSITION')" ;;
+    esac
+  else
+    bad "AC21: a terminal PASS ARMED the removal over a PINNED bundle (intent=$GATE_LOGDIR_REMOVE_INTENT remove=$GATE_LOGDIR_REMOVE) — the #3402 disclosure is destroyed"
+  fi
+  # 2. THE CONTROL: without the pin the same PASS still arms the removal. Without this the
+  #    assertion above passes for a gate that never removes anything at all.
+  decide_reset "$decide_dir"
+  _logdir_decide PASS
+  if [ "$GATE_LOGDIR_REMOVE_INTENT" = 1 ]; then
+    ok "AC21: CONTROL — an UNPINNED PASS still declares the removal, so the assertion above is about the pin and not about a gate that keeps everything"
+  else
+    bad "AC21: CONTROL FAILED — an unpinned PASS did not declare a removal (intent=$GATE_LOGDIR_REMOVE_INTENT); the pinned case proves nothing"
+  fi
+  # 3. The pin sits ABOVE the nested arm: the opt-out is engaged by the OPERATOR's
+  #    environment and a nested run inherits it, so the disclosure argument is identical.
+  decide_reset "$decide_dir"
+  INHERITED_PARENT_RUN_ID="/tmp/agent-gate.PARENTFAKE"
+  _logdir_force_retain "file-size OPT-OUT disclosure #3402 (test-supplied reason)"
+  _logdir_decide PASS
+  if [ "$GATE_LOGDIR_REMOVE_INTENT" = 0 ]; then
+    ok "AC21: a NESTED run's pinned bundle is retained too — the opt-out is inherited from the operator's environment, and the nested arm does not outrank it"
+  else
+    bad "AC21: the nested arm removed a PINNED bundle (intent=$GATE_LOGDIR_REMOVE_INTENT) — an inherited opt-out loses its disclosure"
+  fi
+else
+  bad "AC21: could not extract the disposition decider from the shipped gate — the PASS half is UNMEASURED"
+  bad "AC21: (pinned-PASS assertion not reached)"
+  bad "AC21: (control not reached)"
+  bad "AC21: (nested-pin assertion not reached)"
+fi
+case_floor AC21 9
+
+# ---------------------------------------------------------------------------
+# AC22 (roborev job 173, finding 2): `--only` must not destroy its own product.
+# ---------------------------------------------------------------------------
+# `--only <component>` is a DIAGNOSTIC whose entire product is that component's log under
+# `logs:` — there is no other reason to run it. `_logdir_decide` exempted only
+# AGENT_GATE_KEEP_LOGS, the #2874 summary-inside-logdir shape and nested runs.
+#
+# Asserted in the two places it can go wrong, and NOT on the incidental route: a top-level
+# `--only` is promoted to `RESULT: PARTIAL`, so the retaining verdict arm would keep the
+# bundle anyway — which is exactly why the exemption is stated where the disposition is
+# DECIDED and asserted by NAME here. `--lite --only <component>` is the reachable
+# combination that ends `RESULT: PASS`, and the decision half below drives it.
+#
+# --lite is deliberately NOT exempted (its product is the LITE SUMMARY verdict and it runs
+# every fix round; retaining every lite bundle re-creates the accumulation this issue
+# closed), so the control asserts what it gets INSTEAD: a disposition that states the
+# removal AND the AGENT_GATE_KEEP_LOGS=1 remedy.
+# ---------------------------------------------------------------------------
+case_mark
+only_td="$tmp/ac22-tmpdir"; mkdir -p "$only_td"
+sf22="$tmp/ac22-only.txt"
+env -u AGENT_GATE_PARENT_RUN_ID \
+    TMPDIR="$only_td" \
+    AGENT_GATE_SUMMARY_FILE="$sf22" \
+    bash "$FAKE_GATE" --only file-size >"$tmp/ac22-only.out" 2>&1
+if grep -q '^RESULT: PARTIAL' "$sf22"; then
+  ok "AC22: precondition — the --only run reached its own terminal token (RESULT: PARTIAL)"
+else
+  bad "AC22: precondition failed — the --only run left no PARTIAL verdict; the disposition below is UNMEASURED"
+  sed -n '1,20p' "$tmp/ac22-only.out"
+fi
+d22=$(logs_field "$sf22") || d22=""
+if [ -n "$d22" ] && [ -d "$d22" ]; then
+  ok "AC22: the --only run RETAINED its bundle"
+else
+  bad "AC22: the --only run's bundle is GONE ('${d22:-<none>}') — the diagnostic destroyed its own product"
+fi
+# The PRODUCT, not merely the directory: the selected component's log.
+if [ -n "$d22" ] && [ -s "$d22/file-size.log" ]; then
+  ok "AC22: the retained bundle holds the selected component's log — the thing the mode exists to produce"
+else
+  bad "AC22: the retained bundle holds no file-size.log — the diagnostic's product is missing"
+fi
+disp22=$(logs_disposition "$sf22")
+case "$disp22" in
+  RETAINED:*--only*)
+    ok "AC22: the retention NAMES the only-mode ($disp22)" ;;
+  RETAINED:*)
+    bad "AC22: the bundle was retained but the reason does not name the only-mode ('$disp22') — an incidental retention keyed on the verdict mapping, not a decision about the mode" ;;
+  *)
+    bad "AC22: no RETAINED disposition for the --only run (got: '${disp22:-<none>}')" ;;
+esac
+# The reason must carry no caller text: `$ONLY` is argv, and the block already publishes
+# the selection on its own `mode: PARTIAL (--only …)` line.
+case "$disp22" in
+  *file-size*)
+    bad "AC22: the disposition interpolates the --only SELECTION ('$disp22') — argv on a keyed SUMMARY line is a channel this issue removes, not one it adds" ;;
+  *)
+    ok "AC22: the disposition names the MODE and interpolates no argv" ;;
+esac
+# THE PASS SHAPE, on the shipped decider: `--lite --only <component>` ends RESULT: PASS,
+# which is the case the verdict arm does NOT cover.
+if grep -q '^_logdir_decide() {' "$decide_lib" 2>/dev/null; then
+  decide_reset "$decide_dir"
+  ONLY=clippy; LITE=1
+  _logdir_decide PASS
+  if [ "$GATE_LOGDIR_REMOVE_INTENT" = 0 ]; then
+    case "$GATE_LOGDIR_DISPOSITION" in
+      RETAINED:*--only*) ok "AC22: --lite --only <component> at RESULT: PASS RETAINS, named ($GATE_LOGDIR_DISPOSITION)" ;;
+      *) bad "AC22: the only-mode PASS retained under the wrong reason ('$GATE_LOGDIR_DISPOSITION')" ;;
+    esac
+  else
+    bad "AC22: an --only run at RESULT: PASS still ARMED the removal (intent=$GATE_LOGDIR_REMOVE_INTENT) — the component log the operator ran it for is deleted"
+  fi
+  # THE CONTROL, which is also the --lite requirement: same PASS with no --only selection
+  # REMOVES, and says so with the remedy.
+  decide_reset "$decide_dir"
+  LITE=1
+  _logdir_decide PASS
+  if [ "$GATE_LOGDIR_REMOVE_INTENT" = 1 ]; then
+    ok "AC22: CONTROL — a plain --lite PASS still declares the removal, so --only was not widened to --lite"
+  else
+    bad "AC22: CONTROL FAILED — a plain --lite PASS retained (intent=$GATE_LOGDIR_REMOVE_INTENT); every fix round now leaks a bundle"
+  fi
+  case "$GATE_LOGDIR_DISPOSITION" in
+    REMOVED*--lite*AGENT_GATE_KEEP_LOGS=1*)
+      ok "AC22: --lite's own disposition states the removal AND the AGENT_GATE_KEEP_LOGS=1 remedy ($GATE_LOGDIR_DISPOSITION)" ;;
+    *)
+      bad "AC22: --lite's disposition does not state both the removal and the KEEP_LOGS remedy ('$GATE_LOGDIR_DISPOSITION')" ;;
+  esac
+  # …and the nested arm still outranks the only-mode exemption: the nested `--only` gates
+  # (the documented hermetic `--only file-size` run) are the bulk of the leak #3637 closed,
+  # and their reader is a parent asserting on a SUMMARY, never an operator reading a log.
+  decide_reset "$decide_dir"
+  ONLY=file-size
+  INHERITED_PARENT_RUN_ID="/tmp/agent-gate.PARENTFAKE"
+  _logdir_decide PASS
+  if [ "$GATE_LOGDIR_REMOVE_INTENT" = 1 ]; then
+    ok "AC22: a NESTED --only run is still REMOVED — the exemption did not re-open the dozens-per-gate self-test population"
+  else
+    bad "AC22: a nested --only run is now retained (intent=$GATE_LOGDIR_REMOVE_INTENT) — the leak this issue closed is back"
+  fi
+else
+  bad "AC22: the decider was not extracted — the PASS-shape half is UNMEASURED"
+  bad "AC22: (--lite control not reached)"
+  bad "AC22: (--lite remedy assertion not reached)"
+  bad "AC22: (nested --only assertion not reached)"
+fi
+case_floor AC22 9
+
+# ---------------------------------------------------------------------------
+# AC23 (roborev job 173, finding 3): ONE content predicate for both early-exit arms.
+# ---------------------------------------------------------------------------
+# Arm 2 (exit status 0) excludes the FULL launch-artifact allowlist
+# (`_logdir_is_launch_artifact`: the owner marker, the #2874 private summary and its
+# heartbeat/integrity siblings, and the #3755 `gate-slot.ready` / `disk-admission*`
+# admission bookkeeping — that last family had to be added mid-merge, after every exit-0
+# run silently kept its bundle). Arm 3 (non-zero) excluded ONLY the owner marker, so a
+# non-zero exit landing AFTER admission wrote its bookkeeping but BEFORE any component ran
+# retained a husk of pure launch artifacts: the exact shape the allowlist closed on the
+# other arm, one arm over.
+#
+# Driven END TO END on the real non-zero exit (the argv/usage refusal AC8 uses), with the
+# launch artifacts PLANTED into the LOG_DIR by a `mktemp` shim as it is created — the
+# seeding idiom scripts/tests/test_agent_gate_tree_provenance.sh already uses. The shim
+# writes a RECEIPT naming the directory it planted into, because "the directory is gone"
+# is also what a shim that planted NOTHING would produce.
+#
+# BOTH DIRECTIONS, from one fixture: launch artifacts alone -> REMOVED (a husk informs
+# nobody), the same set plus ONE component log -> RETAINED (there is a post-mortem).
+# Plus a MUTANT restoring the owner-marker-only predicate, which must retain the husk —
+# otherwise the husk direction is a case that cannot fail.
+# ---------------------------------------------------------------------------
+case_mark
+d23=""; d23m=""
+ac23_real_mktemp=$(command -v mktemp 2>/dev/null) || ac23_real_mktemp=""
+if [ -z "$ac23_real_mktemp" ]; then
+  bad "AC23: no mktemp on PATH — the launch-artifact husk case CANNOT be exercised"
+  bad "AC23: (husk direction not reached)"
+  bad "AC23: (content direction not reached)"
+  bad "AC23: (mutant not reached)"
+else
+  ac23_bin="$tmp/ac23-bin"; mkdir -p "$ac23_bin"
+  cat >"$ac23_bin/mktemp" <<AC23STUB
+#!/usr/bin/env bash
+d=\$("$ac23_real_mktemp" "\$@") || exit 1
+case "\$d" in
+  */agent-gate.*)
+    if [ -d "\$d" ] && [ -n "\${AC23_PLANT:-}" ]; then
+      case "\$AC23_PLANT" in
+        launch)
+          : >"\$d/gate-slot.ready"
+          printf '{}\n' >"\$d/disk-admission-cargo-metadata.json"
+          printf 'probe\n' >"\$d/disk-admission.bcap.out"
+          ;;
+        component)
+          : >"\$d/gate-slot.ready"
+          printf '{}\n' >"\$d/disk-admission-cargo-metadata.json"
+          printf 'warning: something\n' >"\$d/clippy.log"
+          ;;
+      esac
+      printf '%s\n' "\$d" >>"\${AC23_RECEIPT:-/dev/null}"
+    fi
+    ;;
+esac
+printf '%s\n' "\$d"
+AC23STUB
+  chmod +x "$ac23_bin/mktemp"
+  # ac23_run <gate-script> <plant-kind> <tmpdir> <receipt> — the argv/usage refusal, which
+  # exits 2 AFTER the LOG_DIR exists and BEFORE any component runs: the window the finding
+  # is about. Top-level (no parent run id) and with the summary file OUTSIDE the bundle, so
+  # the `RESULT: INCOMPLETE` sentinel — the ONE deliberate content exception — is not in it.
+  ac23_run() {
+    mkdir -p "$3"
+    : >"$4"
+    env -u AGENT_GATE_PARENT_RUN_ID \
+        PATH="$ac23_bin:$PATH" \
+        TMPDIR="$3" \
+        AGENT_GATE_SUMMARY_FILE="$4.summary" \
+        AC23_PLANT="$2" \
+        AC23_RECEIPT="$4" \
+        AGENT_GATE_INTEGRITY_SELFTEST=not-a-valid-selector \
+        bash "$1" >"$4.out" 2>&1
+    return 0
+  }
+  # (a) HUSK: launch artifacts only.
+  td23a="$tmp/ac23-husk"; rcpt23a="$tmp/ac23-husk.receipt"
+  ac23_run "$FAKE_GATE" launch "$td23a" "$rcpt23a"
+  planted23a=$(head -1 "$rcpt23a" 2>/dev/null)
+  if [ -n "$planted23a" ]; then
+    ok "AC23: precondition — the shim really planted this run's launch artifacts into $planted23a"
+  else
+    bad "AC23: the shim planted NOTHING — 'the husk was removed' would pass having measured nothing"
+  fi
+  if [ -n "$planted23a" ] && [ "$(count_logdirs "$td23a")" = 0 ]; then
+    ok "AC23: a non-zero exit whose bundle holds ONLY launch artifacts left NO husk"
+  else
+    bad "AC23: the non-zero exit RETAINED $(count_logdirs "$td23a") husk directory/ies holding nothing but launch artifacts — the #3755 family is content on this arm"
+    find "$td23a" -maxdepth 2 2>/dev/null | head -8
+  fi
+  # (b) CONTENT: the same launch set plus ONE component log.
+  td23b="$tmp/ac23-content"; rcpt23b="$tmp/ac23-content.receipt"
+  ac23_run "$FAKE_GATE" component "$td23b" "$rcpt23b"
+  planted23b=$(head -1 "$rcpt23b" 2>/dev/null)
+  if [ -n "$planted23b" ]; then
+    ok "AC23: precondition — the shim planted a component log beside the same launch artifacts"
+  else
+    bad "AC23: the shim planted nothing for the content direction — UNMEASURED"
+  fi
+  d23=$(one_logdir "$td23b") || d23=""
+  if [ -n "$d23" ] && [ -d "$d23" ] && [ -s "$d23/clippy.log" ]; then
+    ok "AC23: the SAME non-zero exit RETAINED the bundle once it held one component log"
+    disp23=$(artifact_field "$d23" logdir-disposition)
+    case "$disp23" in
+      RETAINED:*content*) ok "AC23: the retention names the diagnostic content ($disp23)" ;;
+      RETAINED:*) bad "AC23: the retention's reason is not the content arm's ('$disp23')" ;;
+      *) bad "AC23: the retained husk-plus-content bundle published no reason (got: '${disp23:-<none>}')" ;;
+    esac
+  else
+    bad "AC23: a non-zero exit whose bundle held a component log left NOTHING — the predicate now removes real post-mortem evidence"
+    d23=""
+    bad "AC23: (reason assertion not reached)"
+  fi
+  # (c) THE MUTANT: restore the owner-marker-only exclusion — the pre-fix predicate — and
+  #     the husk must come back. Only the FIRST occurrence is rewritten: the identical line
+  #     in `_logdir_has_evidence` belongs to arm 2, which this case is not about.
+  mut23="$tmp/ac23-mutant-gate.sh"
+  if awk '
+      { l = $0; sub(/^[[:space:]]+/, "", l) }
+      !done && l == "_logdir_is_launch_artifact \"$e\" && continue" {
+        done = 1
+        print substr($0, 1, match($0, /[^[:space:]]/) - 1) "if [ -n \"${GATE_LOGDIR_OWNER_FILE:-}\" ] && [ \"$e\" = \"$GATE_LOGDIR_OWNER_FILE\" ]; then continue; fi"
+        next
+      }
+      { print }
+      END { if (!done) exit 3 }
+    ' "$GATE" >"$mut23"; then
+    chmod +x "$mut23"
+    td23m="$tmp/ac23-mutant"; rcpt23m="$tmp/ac23-mutant.receipt"
+    ac23_run "$mut23" launch "$td23m" "$rcpt23m"
+    d23m=$(one_logdir "$td23m") || d23m=""
+    if [ -n "$d23m" ]; then
+      ok "AC23 mutant: the owner-marker-only predicate DOES retain the pure-launch husk (proved discriminating)"
+    else
+      bad "AC23 mutant: the pre-fix predicate left no husk either — the husk direction above is a case that cannot fail"
+    fi
+  else
+    bad "AC23 mutant: the launch-artifact skip was not found in _logdir_has_content — the mutant is vacuous"
+  fi
+fi
+case_floor AC23 6
+
+# ---------------------------------------------------------------------------
+# AC24 (roborev job 173, finding 4): the two NEW keys carry no $TMPDIR-derived
+# control characters into the block.
+# ---------------------------------------------------------------------------
+# `logdir-sweep:` embeds `$GATE_LOGDIR_PARENT` — i.e. `$TMPDIR` — VERBATIM, so a
+# `TMPDIR=$'/tmp/x\nRESULT: PASS'` emitted an EXTRA LINE inside the block, and one matching
+# the completion probe's own `RESULT: (PASS|FAIL)` pattern: environment-controlled data
+# forging a terminal verdict. Both new keys now render through `_summary_block_value`, the
+# SAME boundary `_status_detail` uses (strip C0+DEL under LC_ALL=C; WITHHOLD — never
+# rewrite — a value carrying `RESULT:`).
+#
+# ASSERTED ON THE BLOCK'S LINE COUNT, against a clean-TMPDIR baseline of the identical run,
+# because that is the property: a keyed line must stay ONE line. TWO pre-existing,
+# DECLARED channels remain and are named in the expected delta — `run-id:` and `logs:` are
+# both the raw LOG_DIR path and are byte-identical by design (#3637/#3312: `logs:` must
+# match the heartbeat's own `logs:`), so the injected block is baseline + EXACTLY 2. It was
+# baseline + 3 before this fix, and the MUTANT below re-proves that rather than asserting it.
+#
+# WITH A POSITIVE CONTROL, because a value that never reached the renderer would also add
+# no line: the sweep line must CARRY both halves of the planted marker, joined, on ONE line.
+# ---------------------------------------------------------------------------
+case_mark
+# Baseline: the same hermetic run under an ordinary TMPDIR.
+td24a="$tmp/ac24-clean"; sf24a="$tmp/ac24-clean.txt"
+run_agg "$td24a" "$sf24a" PASS
+n24a=$(block_lines "$sf24a")
+if [ "${n24a:-0}" -gt 10 ]; then
+  ok "AC24: precondition — the clean-TMPDIR baseline block has $n24a lines"
+else
+  bad "AC24: the baseline block is unusable ($n24a lines) — every count below is UNMEASURED"
+fi
+# The injection: a $TMPDIR whose LEAF NAME carries a newline between two markers. Legal on
+# every filesystem this gate runs on, and reached by the ordinary route.
+td24b="$tmp/ac24-inj-AAMARK
+ZZMARK/td"; sf24b="$tmp/ac24-inj.txt"
+inj24_ok=0
+mkdir -p "$td24b" 2>/dev/null && inj24_ok=1
+if [ "$inj24_ok" = 1 ]; then
+  ok "AC24: precondition — a \$TMPDIR containing a newline really exists on this filesystem"
+  run_agg "$td24b" "$sf24b" PASS
+  n24b=$(block_lines "$sf24b")
+  exp24=$(( ${n24a:-0} + 2 ))
+  if [ "${n24b:-0}" = "$exp24" ]; then
+    ok "AC24: the newline-bearing \$TMPDIR added EXACTLY the 2 declared pre-existing lines (run-id:, logs:) — $n24b vs baseline $n24a; neither NEW key forged a row"
+  else
+    bad "AC24: the injected block has $n24b lines, expected $exp24 (baseline $n24a + the 2 declared run-id:/logs: channels) — a new key is emitting environment-controlled rows"
+    sed -n '1,40p' "$sf24b"
+  fi
+  # POSITIVE CONTROL: the planted bytes really do reach the renderer, and the strip JOINED
+  # them rather than dropping the value.
+  sweep24=$(grep -c '^logdir-sweep: ' "$sf24b" 2>/dev/null || true)
+  if [ "$sweep24" = 1 ]; then
+    ok "AC24: exactly one logdir-sweep: line in the injected block"
+  else
+    bad "AC24: expected exactly one logdir-sweep: line, found $sweep24"
+  fi
+  if grep -q '^logdir-sweep: .*AAMARKZZMARK' "$sf24b"; then
+    ok "AC24: POSITIVE CONTROL — the planted \$TMPDIR bytes DO reach the sweep line, joined onto ONE line by the strip (so the count above is about sanitisation, not about a value that never arrived)"
+  else
+    bad "AC24: the planted markers are not on the sweep line — the value never reached the renderer, so the line-count assertion measured nothing"
+    grep '^logdir-sweep: ' "$sf24b" 2>/dev/null
+  fi
+  # And exactly one disposition line, same rule (it is free text on a keyed line too).
+  n24disp=$(grep -c '^logdir-disposition: ' "$sf24b" 2>/dev/null || true)
+  if [ "$n24disp" = 1 ]; then
+    ok "AC24: exactly one logdir-disposition: line in the injected block"
+  else
+    bad "AC24: expected exactly one logdir-disposition: line, found $n24disp"
+  fi
+  # THE MUTANT: unpin the strip at the boundary and the extra row comes back. Without it
+  # "the count did not grow" is a property of this fixture, not of the fix.
+  mut24="$tmp/ac24-mutant-gate.sh"
+  if awk '
+      { l = $0; sub(/^[[:space:]]+/, "", l) }
+      !done && l == "_bv_v=$(printf '"'"'%s'"'"' \"${1-}\" | LC_ALL=C tr -d '"'"'[:cntrl:]'"'"')" {
+        done = 1
+        print substr($0, 1, match($0, /[^[:space:]]/) - 1) "_bv_v=\"${1-}\""
+        next
+      }
+      { print }
+      END { if (!done) exit 3 }
+    ' "$GATE" >"$mut24"; then
+    td24m="$tmp/ac24-mut-AAMARK
+ZZMARK/td"; sf24m="$tmp/ac24-mut.txt"
+    if mkdir -p "$td24m" 2>/dev/null; then
+      run_agg_gate "$mut24" "$td24m" "$sf24m" PASS
+      n24m=$(block_lines "$sf24m")
+      if [ "${n24m:-0}" -gt "$exp24" ]; then
+        ok "AC24 mutant: without the strip the newline DOES forge an extra row ($n24m vs $exp24) — proved discriminating"
+      else
+        bad "AC24 mutant: the unstripped boundary emitted $n24m lines, not more than $exp24 — the assertion above cannot fail"
+      fi
+      rm -rf "${td24m%/td}"
+    else
+      bad "AC24 mutant: could not create the mutant's newline TMPDIR — the mutant is vacuous"
+    fi
+  else
+    bad "AC24 mutant: the strip at _summary_block_value was not found — the mutant is vacuous"
+  fi
+  # The newline-bearing fixture is removed HERE, after its assertions: the survivor
+  # accounting at the end of this file compares NEWLINE-SEPARATED sets of paths, which
+  # cannot represent a path that contains a newline. The removal above is asserted, so
+  # nothing is being hidden — an unexpected survivor would already have failed the count.
+  rm -rf "${td24b%/td}"
+else
+  bad "AC24: could not create a newline-bearing \$TMPDIR — the injection route is UNMEASURED"
+  bad "AC24: (line-count assertion not reached)"
+  bad "AC24: (positive control not reached)"
+  bad "AC24: (one-sweep-line assertion not reached)"
+  bad "AC24: (one-disposition-line assertion not reached)"
+  bad "AC24 mutant: (not reached)"
+fi
+# THE WITHHOLD HALF: a $TMPDIR carrying the completion probe's reserved token. The value is
+# WITHHELD rather than rewritten (a rewrite would name a path that exists nowhere), the KEY
+# survives — a block that silently loses a key is indistinguishable from one whose sweep
+# never ran — and the line does not match the probe's pattern.
+td24c="$tmp/ac24-RESULT: PASS/td"; sf24c="$tmp/ac24-hostile.txt"
+if mkdir -p "$td24c" 2>/dev/null; then
+  ok "AC24: precondition — a \$TMPDIR literally containing 'RESULT: PASS' really exists"
+  run_agg "$td24c" "$sf24c" PASS
+  sweep24c=$(sed -n 's/^logdir-sweep: //p' "$sf24c" | tail -1)
+  case "$sweep24c" in
+    *WITHHELD*) ok "AC24: the sweep census carrying the reserved verdict token is WITHHELD ($sweep24c)" ;;
+    "")         bad "AC24: the logdir-sweep: KEY vanished with its value — a withheld value must not take the key with it" ;;
+    *)          bad "AC24: the sweep census was rendered with the reserved token in it ('$sweep24c')" ;;
+  esac
+  if sed -n 's/^logdir-sweep: //p' "$sf24c" | grep -Eq 'RESULT: (PASS|FAIL)'; then
+    bad "AC24: the sweep line matches the completion probe's own pattern — it would forge a terminal verdict"
+  else
+    ok "AC24: the sweep line does not match 'RESULT: (PASS|FAIL)' — the refusal quotes nothing"
+  fi
+  # POSITIVE CONTROL, on an INDEPENDENT channel: the hostile TMPDIR really did reach this
+  # block. `logs:` is PATH-ONLY and byte-identical by design (#3637/#3312, AC7/AC9), so its
+  # exposure is pre-existing and DECLARED — and it is the proof that the withheld sweep
+  # value was withheld rather than never produced.
+  if grep -q '^logs: .*RESULT: PASS' "$sf24c"; then
+    ok "AC24: POSITIVE CONTROL — the hostile \$TMPDIR did reach the block on the DECLARED path-only logs: channel, so the withheld sweep value was really produced and refused"
+  else
+    bad "AC24: the hostile \$TMPDIR never reached the block at all — the withholding assertions measured nothing"
+    grep -E '^(run-id|logs): ' "$sf24c" 2>/dev/null
+  fi
+  rm -rf "${td24c%/td}"
+else
+  bad "AC24: could not create the hostile 'RESULT: PASS' \$TMPDIR — the withholding route is UNMEASURED"
+  bad "AC24: (probe-pattern assertion not reached)"
+  bad "AC24: (withhold positive control not reached)"
+fi
+case_floor AC24 10
+
+# ---------------------------------------------------------------------------
 # Hermeticity: this file's own gate runs leave nothing outside their scratch dirs.
 # ---------------------------------------------------------------------------
 # SET EQUALITY, never a count comparison, and never a `-ge` bound (#3637, roborev job
@@ -2755,6 +3385,10 @@ expect_dir "$d11"                   "AC11a run whose summary write failed"
 expect_dir "${d11b:-}"              "AC11b SIGTERMed run's post-mortem bundle"
 expect_dir "${d11c:-}"              "AC11c run whose removal was refused by the rm shim"
 expect_dir "${d9b:-}"               "AC8 AGENT_GATE_KEEP_LOGS early-exit retention"
+expect_dir "${d21:-}"               "AC21 file-size OPT-OUT run whose disclosure pins the retention"
+expect_dir "${d22:-}"               "AC22 --only diagnostic run whose product is its component log"
+expect_dir "${d23:-}"               "AC23 non-zero early exit retained for its one component log"
+expect_dir "${d23m:-}"              "AC23 mutant husk the pre-fix owner-marker-only predicate retains"
 for n in 1 2 3 4 5; do
   expect_dir "$td15/agent-gate.CAP00$n" "AC15 aged candidate the refusing rm shim could not remove"
 done
@@ -2819,6 +3453,27 @@ EOF
 $missing
 EOF
   fi
+fi
+
+# ---------------------------------------------------------------------------
+# SUITE-WIDE CASE FLOOR (#3544's lesson, applied to the whole file).
+# ---------------------------------------------------------------------------
+# The per-case floors above each live INSIDE the case they bound, so a span-replacing edit
+# that deletes a case deletes its floor with it and the suite reports a green SUBSET of
+# itself — the same defect one level up. This assertion lives at the TALLY, which is the one
+# place such an edit cannot remove without being obvious.
+#
+# A FLOOR, not an equality, and the margin is deliberate: the owner-marker capability is a
+# LINUX-ONLY dependency (AC5/AC15/AC17/AC18/AC19/AC20 assert the keep-everything degradation
+# instead where it is absent) and those branches do not emit the same number of verdicts, so
+# an exact total would red on macOS for a reason that is not a regression. Measured 200 on
+# this fleet's Linux boxes; the floor is what notices a DELETED CASE — every case in this
+# file contributes at least 6 verdicts — rather than a drifting count.
+_total_verdicts=$((PASS + FAIL))
+if [ "$_total_verdicts" -ge 185 ]; then
+  ok "suite floor: $_total_verdicts verdicts reported (floor 185) — no case was silently dropped"
+else
+  bad "suite floor: only $_total_verdicts verdicts reported (floor 185) — at least one case was deleted or died before its assertions"
 fi
 
 printf '\n%s\n' "scripts/tests/test_agent_gate_logdir_cleanup.sh   passed: $PASS  failed: $FAIL"
