@@ -469,11 +469,23 @@ pub enum Reach {
     /// bracket FRAME and the body's EMPTINESS survive
     /// ([`decidable_despite_node_refusal`]).
     Body,
-    /// A MAP node's entry KEYS, and nothing else. The entry BOUNDARIES and the
-    /// EMITTED ORDER are still recoverable — the cause sits at bracket depth >= 1
-    /// inside a key, or is an ambiguity BETWEEN two keys — so the entries pair
-    /// POSITIONALLY, the entry COUNT and every VALUE keep being compared, and only
-    /// the ambiguous keys are suppressed. [`map_key_refusals`] says WHICH.
+    /// A MAP node's entry KEYS, and nothing else: the node's BODY is not refused, so
+    /// the entries pair POSITIONALLY, the entry COUNT and every VALUE keep being
+    /// compared, and only the ambiguous keys are suppressed. [`map_key_refusals`]
+    /// says WHICH.
+    ///
+    /// The cause sits at bracket depth >= 1 inside a key, or is an ambiguity BETWEEN
+    /// two keys — either way it cannot move this node's own separators.
+    ///
+    /// WHAT IT DOES AND DOES NOT ASSERT, because the difference cost a review round.
+    /// It says the body is NOT REFUSED; it does not say the body's recoverability was
+    /// VERIFIED. On the route where every key renders, the three body checks really
+    /// did run and decline. On the route where one key does NOT render, they could
+    /// not be evaluated at all — and that state was already NOT a refusal (`None`),
+    /// under which the decoder splits the node anyway. So `MapKeys` grants the
+    /// decoder exactly the licence `None` grants it and no more; the only difference
+    /// is that `decode_object` suppresses the ambiguous KEYS instead of resolving one
+    /// of them by guess (#3815 round 2).
     MapKeys,
 }
 
@@ -542,31 +554,54 @@ pub fn node_refusal_reach(
 /// the comparison's own granularity does — which is the same rule the rest of this
 /// module follows, applied to a walk that happens to be one node deep.
 ///
-/// An EMPTY vector means NO key-scoped refusal: not a map, or a key that is not a
-/// spelling of the declared type at all (the MULTICELL shape, whose `getString` key
-/// the declared `MulticellMapKeyUndecodedByGoldenRendersAsBlobHex` gap covers — a
-/// golden key contradicting the DDL is a divergence to report, never a format
-/// limit, exactly as [`node_refusal`]'s `ty` note says).
+/// # EVERY answer is PER KEY, and the one that is not a refusal is `None` AT ITS OWN
+/// INDEX (issue #3815 round 2)
+///
+/// A key that is not a spelling of the declared type at all — the MULTICELL shape,
+/// whose `getString` key the declared
+/// `MulticellMapKeyUndecodedByGoldenRendersAsBlobHex` gap covers — is left
+/// UNREFUSED, because a golden key contradicting the DDL is a divergence to report
+/// and never a format limit (exactly as [`node_refusal`]'s `ty` note says). It is
+/// `None` at ITS index and says NOTHING about its siblings.
+///
+/// This used to be a whole-MAP bail (`collect::<Option<Vec<_>>>()`), and that was a
+/// FAIL-OPEN: one unrenderable key cost every OTHER key of the same map its
+/// key-scoped refusal, so a MIXED node — one `getString` key beside two keys that
+/// render ALIKE — got no refusal at ANY reach, the colliding pair was canonicalized
+/// and paired, and the wrong decode guide was selected. That is #1491 finding T1,
+/// which the refusal exists to prevent. (The same whole-map bail sits at the head of
+/// [`decode_does_not_recover`]'s object arm on `origin/main`, one line above the
+/// duplicate check it gates, so the fail-open predates this issue; it is closed in
+/// both places.)
+///
+/// The vector is ALWAYS the golden's own length for a map, so `rendered[i]` and the
+/// answer at `i` are both indexed BY GOLDEN ENTRY — never by a compacted list of the
+/// renderable ones, which would misname the entries in the reason a reader is given.
+/// An EMPTY vector therefore means only "not a map".
 pub fn map_key_refusals(golden: &Map<String, Value>, key_ty: &CqlType) -> Vec<Option<String>> {
     // Rendered ONCE, for the same reason `decode_object` renders once: a container
-    // key's rendering parses a JSON document.
-    let Some(rendered) = golden
+    // key's rendering parses a JSON document. PER ENTRY, and kept at full length —
+    // see the index note above.
+    let rendered: Vec<Option<String>> = golden
         .keys()
         .map(|key| map_entry_key_rendering(key_ty, key))
-        .collect::<Option<Vec<String>>>()
-    else {
-        return Vec::new();
-    };
+        .collect();
     golden
         .keys()
         .zip(rendered.iter())
         .enumerate()
         .map(|(i, (source, text))| {
-            // BETWEEN two keys.
+            // A key with NO rendering has no text to be ambiguous WITH and no
+            // recoverable value tree to ask about, so neither cause below can be
+            // decided for it: it is not refused, and the comparison reports it.
+            let text = text.as_ref()?;
+            // BETWEEN two keys — among the RENDERED ones only (an unrenderable key
+            // has no text, so it collides with nothing), and reported with the
+            // GOLDEN's entry indices.
             if let Some(other) = rendered
                 .iter()
                 .enumerate()
-                .find(|(j, candidate)| *j != i && *candidate == text)
+                .find(|(j, candidate)| *j != i && candidate.as_ref() == Some(text))
                 .map(|(j, _)| j)
             {
                 return Some(format!(
@@ -726,10 +761,27 @@ fn decode_does_not_recover(
             // place (here, by returning `None`: no refusal, because the golden's
             // key is not a spelling of this declared type at all, which is a
             // divergence for the comparison to report and not a format limit).
-            let keys = fields
+            let Some(keys) = fields
                 .keys()
                 .map(|key| entry_key_rendering(ty, key))
-                .collect::<Option<Vec<String>>>()?;
+                .collect::<Option<Vec<String>>>()
+            else {
+                // A key that is not a spelling of this declared type at all. The
+                // node's BODY causes cannot be EVALUATED — each is asked of the
+                // golden's own rendering, which needs every key — and that is
+                // deliberately NOT a refusal, per the note above.
+                //
+                // THE KEY-SCOPED QUESTION SURVIVES IT, PER KEY (#3815 round 2).
+                // Returning `None` here instead was a FAIL-OPEN: two SIBLING keys
+                // that render alike went unrefused at any reach, so the decoder
+                // resolved both to the first of them and reported correct egress as
+                // divergent (#1491 finding T1). It grants the decoder no new licence
+                // either — a node that is not BODY-refused is split whether the
+                // answer is `MapKeys` or `None`, and the only difference is that
+                // `decode_object` suppresses the ambiguous KEYS instead of guessing
+                // one.
+                return key_scoped_refusal(fields, ty);
+            };
             let want = fields
                 .iter()
                 .zip(keys.iter())
@@ -784,17 +836,31 @@ fn decode_does_not_recover(
             // A UDT reaches this arm too, and has no key-scoped cause: its entry
             // keys are FIELD NAMES rather than values, so `map_key_ty` answers
             // `None` and nothing fires.
-            let key_ty = map_key_ty(ty)?;
-            map_key_refusals(fields, key_ty)
-                .into_iter()
-                .flatten()
-                .next()
-                .map(|why| (Reach::MapKeys, why))
+            key_scoped_refusal(fields, ty)
         }
         // Unreachable: the scalar case returned above and every other shape is a
         // container the two arms cover.
         _ => None,
     }
+}
+
+/// The FIRST key-scoped refusal of an object node, as a [`Reach::MapKeys`] answer —
+/// the one place [`decode_does_not_recover`]'s object arm asks [`map_key_refusals`].
+///
+/// Factored out because that arm reaches it by TWO routes, and a second spelling of
+/// it would be a second notion of what a key-scoped refusal is: once after the body
+/// causes have all been evaluated and declined, and once when they CANNOT be
+/// evaluated because a key does not render (#3815 round 2, where returning `None` on
+/// the second route was a fail-open).
+///
+/// `None` for a UDT, whose entry keys are FIELD NAMES rather than values.
+fn key_scoped_refusal(fields: &Map<String, Value>, ty: &CqlType) -> Option<(Reach, String)> {
+    let key_ty = map_key_ty(ty)?;
+    map_key_refusals(fields, key_ty)
+        .into_iter()
+        .flatten()
+        .next()
+        .map(|why| (Reach::MapKeys, why))
 }
 
 /// The refusal reason for a split that did not give the golden's own members back,
