@@ -9,9 +9,11 @@
 //! the golden carries EMPTY, i.e. EMPTY-CONTAINER. The committed tier alone
 //! reports `0 REFUSED`, and no container member anywhere in the committed or
 //! fetched corpus carries a `, `, a bracket, a `: ` in a map key, or an empty
-//! scalar member. So every other shape the derived cause covers, and every
-//! strictness rule, is exercised only here — which is what makes a census `0` mean
-//! "the scan ran and found none" rather than "the scan may not work".
+//! scalar member. Nor does any container map KEY collide with another or carry a
+//! separator inside a member, so both KEY-SCOPED causes (`map_key_refusals`, issue
+//! #3815) are unit-only too. So every other shape the derived cause covers, and
+//! every strictness rule, is exercised only here — which is what makes a census `0`
+//! mean "the scan ran and found none" rather than "the scan may not work".
 //!
 //! Inputs are renderings in the grammar `ValueFormatter` documents; expected
 //! outputs are the GOLDEN-side shapes `sstabledump` produces. Nothing here is
@@ -1134,56 +1136,8 @@ fn a_multicell_container_keyed_maps_values_are_guided_positionally() {
     assert_eq!(decoded[1]["value"], json!("word"), "{decoded}");
 }
 
-/// THE DUPLICATE-RENDERING REFUSAL IS WHOLE-NODE, AND THAT COSTS THE ENTRY VALUES —
-/// pinned executably as a known hole (roborev job 34, issue #3726).
-///
-/// When two container keys render alike the node is refused, `decode_shape` returns the
-/// un-split body, and NOTHING inside is compared: not the entry count, not the pair shape,
-/// not the values. Measured — a value corrupted 20 -> 999 inside such a cell is invisible.
-///
-/// It is the same shape as the gap that suppressed a whole map (fixed earlier in this
-/// issue), one module over, and the same answer would work: entry boundaries and emitted
-/// order ARE still recoverable, so the entries could be paired POSITIONALLY with only the
-/// ambiguous KEY suppressed.
-///
-/// NOT FIXED HERE, and the reasons are worth stating rather than implying:
-///   * this refusal was itself the FIX for a false divergence (two keys sharing a spelling
-///     used to select the wrong decode guide), so the current behaviour trades coverage for
-///     the FAIL-CLOSED direction — it loses checks, it does not produce wrong verdicts;
-///   * no committed fixture has colliding container-key renderings, so nothing in the
-///     corpus exercises it;
-///   * doing it properly needs KEY-SCOPED suppression inside `csv_container`'s refusal
-///     model, which is a design change in a module already at its size ceiling.
-///
-/// This test asserts the hole ON PURPOSE. When key-scoped refusal lands it will RED, and
-/// that is the signal to delete it — a residual that reds beats a paragraph nobody re-reads.
-#[test]
-fn a_duplicate_rendering_refusal_also_costs_the_entry_values() {
-    let ty = ty_of("frozen<map<frozen<key_part>, int>>");
-    let golden = json!({
-        "{\"label\": null, \"rank\": 1}": 10,
-        "{\"label\": \"null\", \"rank\": 1}": 20
-    });
-    // The SECOND entry's value is corrupted 20 -> 999.
-    let csv = "{{label: null, rank: 1}: 10, {label: null, rank: 1}: 999}";
-    assert!(
-        node_refusal(&golden, Some(&ty)).is_some(),
-        "premise: colliding renderings refuse the node"
-    );
-    let decoded = match decode(&golden, csv, &ty) {
-        Ok(decoded) => decoded,
-        Err(why) => panic!("a refused node decodes to its un-split body, not an error: {why}"),
-    };
-    assert!(
-        decoded.is_string(),
-        "KNOWN HOLE: the whole cell comes back as raw text, so the corrupted value is never \
-         compared. If this now fails, key-scoped refusal has landed — delete this test and \
-         update the residual note on `decode_does_not_recover`."
-    );
-}
-
-/// TWO DISTINCT CONTAINER KEYS THAT RENDER ALIKE make the node unrecoverable, so it
-/// is REFUSED rather than decoded against the wrong guide (roborev finding, #3726).
+/// TWO DISTINCT CONTAINER KEYS THAT RENDER ALIKE are REFUSED rather than decoded
+/// against the wrong guide (roborev finding, #3726).
 ///
 /// CSV is unquoted, so a `key_part` whose `label` is NULL and one whose `label` is
 /// the TEXT `"null"` both render `{label: null, rank: 1}`. The decoder looks a CSV
@@ -1196,6 +1150,16 @@ fn a_duplicate_rendering_refusal_also_costs_the_entry_values() {
 /// lookup single-valued. It is the EMPTY-CONTAINER refusal's sibling: an OBSERVED
 /// ambiguity between two keys actually present in this golden, not the general
 /// "could another value have rendered these bytes", which the module doc declines.
+///
+/// WHAT IT NO LONGER REFUSES IS THE NODE (issue #3815). This doc used to say the
+/// cause made "the node unrecoverable, so IT is refused", and that was the whole-node
+/// blast radius #3815 replaced: the body is no longer refused for this cause — only
+/// the ambiguous KEYS are, so the entry COUNT, the pair SHAPE and every VALUE keep
+/// being compared. The case below is unchanged and still correct, because it calls the
+/// REASON-ONLY [`node_refusal`] and so asserts only THAT the cause fires; the reach it
+/// now fires at is asserted by
+/// `key_refusal::a_duplicate_rendering_refusal_is_scoped_to_the_keys`. Nothing tests a
+/// doc comment, which is exactly why this paragraph had to be corrected by hand.
 #[test]
 fn two_container_keys_that_render_alike_are_refused() {
     let ty = ty_of("frozen<map<frozen<key_part>, int>>");
@@ -1251,3 +1215,8 @@ fn a_udt_entry_key_is_still_a_verbatim_field_name() {
 
 #[path = "golden_csv_container_spelling_tests.rs"]
 mod spelling;
+
+/// The KEY-SCOPED refusal cases — the [`Reach`] decision (issue #3815). That file's
+/// module doc states the seam.
+#[path = "golden_csv_key_refusal_tests.rs"]
+mod key_refusal;

@@ -259,3 +259,451 @@ fn a_frozen_maps_non_tojsonstring_golden_key_is_refused_and_names_the_oracle() {
         "{diffs:?}"
     );
 }
+
+// =======================================================================
+// KEY-SCOPED REFUSAL (issue #3815)
+// =======================================================================
+//
+// A container map KEY the flat CSV rendering cannot be read back at is refused AT
+// ITS OWN NODE, so the entries still pair POSITIONALLY and everything beside the
+// key — the entry COUNT, the pair SHAPE and every VALUE — keeps being compared.
+//
+// Both shapes below are UNREACHED BY THE CORPUS and are therefore constructed
+// here: #3726 measured that no container map key anywhere in it carries a `, `, a
+// `: ` or a bracket inside a member, and none collide. The goldens are built the
+// way the lane's own oracle would spell them (`MapType.toJSONString` writes the
+// key value's own `toJSONString` document) and the CSV inputs in the grammar
+// `ValueFormatter` documents — nothing here is taken from CQLite's output as an
+// EXPECTATION.
+
+/// The map type whose KEY is a `list<text>`, i.e. a container key whose member can
+/// itself carry the `, ` separator (the shape of the second finding below).
+const MAP_LIST_TEXT: &str = "frozen<map<frozen<list<text>>, int>>";
+
+/// Everything `compare_rows` measured for one golden/CLI pair — the diffs AND the
+/// refusal census, because a key-scoped refusal must be VISIBLE (a silent
+/// suppression is the failure mode that hid the second finding for a year).
+fn report_of(cql_type: &str, golden: Value, cli: Value, egress: Egress) -> super::super::Report {
+    let schema = schema_for(cql_type);
+    compare_rows(
+        &[row_of(golden)],
+        &[row_of(cli)],
+        &schema,
+        &["id"],
+        &[],
+        &[],
+        egress,
+    )
+}
+
+/// The map type whose key is a UDT, and the two DISTINCT keys that render ALIKE.
+const MAP_UDT_KEY: &str = "frozen<map<frozen<key_part>, int>>";
+
+/// A `key_part` whose `label` is NULL and one whose `label` is the TEXT `"null"`:
+/// two distinct values, one CSV spelling (`{label: null, rank: 1}`). The keys are
+/// spelled as `MapType.toJSONString` writes them.
+fn golden_colliding_keys() -> Value {
+    json!({
+        "{\"label\": null, \"rank\": 1}": 10,
+        "{\"label\": \"null\", \"rank\": 1}": 20
+    })
+}
+
+/// FINDING 1 — a duplicate KEY rendering must not cost the entry VALUES.
+///
+/// The whole-node refusal this replaces returned the un-split body, so NOTHING
+/// inside was compared: not the entry count, not the pair shape, not the values. A
+/// value corrupted 20 -> 999 inside such a cell was invisible (measured, and
+/// pinned executably as a hole by #3726's
+/// `a_duplicate_rendering_refusal_also_costs_the_entry_values`, which this
+/// replaces).
+#[test]
+fn a_corrupted_value_beside_a_duplicate_rendered_key_is_caught() {
+    // The CONTROL first: the correct rendering of that same cell must produce NO
+    // diff, so the assertion below cannot pass merely because everything fails.
+    let correct = json!("{{label: null, rank: 1}: 10, {label: null, rank: 1}: 20}");
+    let report = report_of(MAP_UDT_KEY, golden_colliding_keys(), correct, Egress::Csv);
+    assert!(
+        report.diffs.is_empty(),
+        "a correct rendering of an ambiguously-keyed map must not diverge: {:?}",
+        report.diffs
+    );
+    // The SECOND entry's value is corrupted 20 -> 999.
+    let corrupted = json!("{{label: null, rank: 1}: 10, {label: null, rank: 1}: 999}");
+    let report = report_of(MAP_UDT_KEY, golden_colliding_keys(), corrupted, Egress::Csv);
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+    assert!(
+        report.diffs[0].contains("999"),
+        "the diff must name the corrupted value: {:?}",
+        report.diffs
+    );
+}
+
+/// …and the entry COUNT and pair SHAPE beside it, which the whole-node refusal
+/// also threw away.
+#[test]
+fn an_entry_count_beside_a_duplicate_rendered_key_is_caught() {
+    let dropped = json!("{{label: null, rank: 1}: 10}");
+    let report = report_of(MAP_UDT_KEY, golden_colliding_keys(), dropped, Egress::Csv);
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+    assert!(
+        report.diffs[0].contains("map size golden 2 vs cli 1"),
+        "{:?}",
+        report.diffs
+    );
+}
+
+/// The ambiguous KEY itself stays SUPPRESSED — never resolved — and the
+/// suppression is NAMED in the census at the key's own node.
+///
+/// This is the property #3726's `two_container_keys_that_render_alike_are_refused`
+/// closed and this issue must not reopen: two keys sharing one spelling cannot
+/// select a decode guide, so accepting either reading would report correct egress
+/// as a divergence for whichever entry guessed wrong (#1491 finding T1).
+#[test]
+fn a_duplicate_rendered_key_is_refused_at_its_own_node_and_named() {
+    let correct = json!("{{label: null, rank: 1}: 10, {label: null, rank: 1}: 20}");
+    let report = report_of(MAP_UDT_KEY, golden_colliding_keys(), correct, Egress::Csv);
+    assert_eq!(
+        report.ambiguous_container_cells, 1,
+        "the refusal must be COUNTED: {:?}",
+        report.ambiguity_reasons
+    );
+    let reasons = report.ambiguity_reasons.join("; ");
+    for path in ["c[key 0]", "c[key 1]"] {
+        assert!(
+            reasons.contains(path),
+            "the census must name the refused KEY node `{path}`: {reasons}"
+        );
+    }
+    assert!(
+        reasons.contains("SAME key text"),
+        "and the cause: {reasons}"
+    );
+    assert!(
+        !report
+            .ambiguity_reasons
+            .iter()
+            .any(|reason| reason.starts_with("c (")),
+        "the refusal must be scoped to the KEY nodes, never attributed to the whole \
+         map node — that whole-node attribution is what cost the entry values: {reasons}"
+    );
+}
+
+/// FINDING 2 — a `, ` inside a SCALAR MEMBER of a container key was a FALSE
+/// DIVERGENCE, reported with nothing in the census marking it.
+///
+/// The map node is NOT refused: the `, ` sits at bracket depth 1, so the entry
+/// split and the key/value cut both survive. The KEY node is refused, so
+/// `decode_shape` left the raw text there — and `compare_map` then canonicalized
+/// that string as a container, failed, and propagated the failure as a DIFF. A
+/// wrong verdict on CORRECT egress, and `ambiguous_container_cells` stayed 0.
+#[test]
+fn a_separator_inside_a_scalar_member_of_a_key_is_refused_not_a_divergence() {
+    // The golden's object key is the key value's own `toJSONString` document.
+    let golden = json!({"[\"a, b\"]": 5});
+    // The JSON leg pins the premise: the two sides really do agree about this cell,
+    // so any CSV diff below would be the lane's own, not the egress's.
+    let json_cli = json!([{"key": ["a, b"], "value": 5}]);
+    assert!(
+        report_of(MAP_LIST_TEXT, golden.clone(), json_cli, Egress::Json)
+            .diffs
+            .is_empty(),
+        "premise: golden and CLI agree about this cell"
+    );
+    // `ValueFormatter` renders the key `["a, b"]` as `[a, b]` — unquoted, which is
+    // exactly why the key cannot be read back.
+    let csv = json!("{[a, b]: 5}");
+    let report = report_of(MAP_LIST_TEXT, golden, csv, Egress::Csv);
+    assert!(
+        report.diffs.is_empty(),
+        "correct CSV egress must not be reported as a divergence: {:?}",
+        report.diffs
+    );
+    assert_eq!(
+        report.ambiguous_container_cells, 1,
+        "and the narrowing must be DECLARED, not silent: {:?}",
+        report.ambiguity_reasons
+    );
+    let reasons = report.ambiguity_reasons.join("; ");
+    assert!(
+        reasons.contains("c[key 0]"),
+        "the census must name the refused KEY node: {reasons}"
+    );
+}
+
+/// …and the VALUE beside such a key is still compared, which is the whole point of
+/// scoping the refusal to the key.
+#[test]
+fn a_value_beside_a_separator_carrying_key_is_still_compared() {
+    let golden = json!({"[\"a, b\"]": 5});
+    let corrupted = json!("{[a, b]: 999}");
+    let report = report_of(MAP_LIST_TEXT, golden, corrupted, Egress::Csv);
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+    assert!(report.diffs[0].contains("999"), "{:?}", report.diffs);
+}
+
+/// A refused key does NOT accept anything: what survives at it is the bracket FRAME
+/// and the body's EMPTINESS, the same two properties that survive at every other
+/// refused node.
+///
+/// The golden key here is a `key_part` with TWO fields, and two or more members
+/// cannot render as an empty body (members are `, `-separated even when each is
+/// empty) — so `{}` at that key is a divergence the ambiguity does not cover. Pinned
+/// because "the key is suppressed" must not quietly mean "the key is unchecked".
+#[test]
+fn a_refused_key_still_requires_its_frame_and_its_body_emptiness() {
+    // An EMPTY key body where the golden key holds two fields.
+    let emptied = json!("{{}: 10, {label: null, rank: 1}: 20}");
+    let report = report_of(MAP_UDT_KEY, golden_colliding_keys(), emptied, Egress::Csv);
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+    assert!(
+        report.diffs[0].contains("[key 0]") && report.diffs[0].contains("cannot render as"),
+        "the diff must name the key node and the emptiness rule: {:?}",
+        report.diffs
+    );
+    // And the FRAME: a key rendered with LIST brackets where the declared type is a
+    // UDT is an unparseable rendering, not an ambiguity.
+    let wrong_frame = json!("{[label: null, rank: 1]: 10, {label: null, rank: 1}: 20}");
+    let report = report_of(
+        MAP_UDT_KEY,
+        golden_colliding_keys(),
+        wrong_frame,
+        Egress::Csv,
+    );
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+    assert!(
+        report.diffs[0].contains("opening"),
+        "the diff must name the required bracket: {:?}",
+        report.diffs
+    );
+}
+
+/// THE STATED RESIDUAL: when EVERY key of a node is refused, the entries' EMITTED
+/// ORDER is not compared either (issue #3815, rust-reviewer round 2).
+///
+/// The positional pairing is sound as a PAIRING — it is the rule Cassandra's
+/// key-comparator order gives both sides — but it is not a CHECK: with every key
+/// suppressed nothing distinguishes entry i from entry j, so a reorder that this
+/// lane calls a divergence passes. MEASURED here, not argued: two 1-member keys make
+/// `body_emptiness_bound` assert nothing and the values are equal, so the swap
+/// yields ZERO diffs.
+///
+/// It is NOT a regression — the whole node was refused before, so the reorder was
+/// invisible then too, and behind a COARSER census entry. And it is not SILENT: both
+/// refused keys are named by path in the census, which is what makes this a declared
+/// narrowing rather than a blind spot. Asserted directly so a future strengthening
+/// has to come and change it.
+#[test]
+fn the_emitted_order_of_wholly_refused_keys_is_a_declared_residual() {
+    let golden = json!({"[\"a, b\"]": 5, "[\"c, d\"]": 5});
+    let reordered = json!("{[c, d]: 5, [a, b]: 5}");
+    let report = report_of(MAP_LIST_TEXT, golden, reordered, Egress::Csv);
+    assert!(
+        report.diffs.is_empty(),
+        "THE RESIDUAL: with every key refused, the order is not compared. If this now \
+         fails, the order became decidable — state the new rule and delete this: {:?}",
+        report.diffs
+    );
+    // …and the narrowing is DECLARED at run time, per key, which is the half that
+    // keeps it from being a blind spot.
+    assert_eq!(report.ambiguous_container_cells, 1);
+    let reasons = report.ambiguity_reasons.join("; ");
+    for path in ["c[key 0]", "c[key 1]"] {
+        assert!(reasons.contains(path), "{reasons}");
+    }
+}
+
+/// THE ROUND-3 RESIDUAL, at the public surface: a MIXED node — one unrenderable key
+/// beside two that render ALIKE — is refused at the CELL, so its entry COUNT and
+/// values go uncompared (issue #3815, roborev job 445).
+///
+/// The unit half names the reach (`csv_container::tests::key_refusal`); this half
+/// shows what the reach MEANS to a reader of the census: the refusal is attributed to
+/// `c`, the cell's own node, and NOT to `c[key 1]`/`c[key 2]`, so nobody can read the
+/// census as saying the entries beside those keys were checked.
+///
+/// Why that is the chosen answer: `Reach::MapKeys` would tell the decoder it may
+/// split this node, and the body checks that decide whether it may cannot run without
+/// a synthesizable rendering.
+///
+/// AND WHAT IT COSTS, measured against `origin/main` (f3bd49f25) rather than argued —
+/// an earlier draft of this paragraph said "this loses no check main had", and running
+/// it proved that false. On this exact input main reports a DIFF naming the
+/// unparseable golden key, correctly: `charlie\\:3:8` genuinely is not the
+/// `toJSONString` document a FROZEN map's key must be, and
+/// [`a_frozen_maps_non_tojsonstring_golden_key_is_refused_and_names_the_oracle`] above
+/// exists to assert that report. Refusing the node SUPPRESSES it. The second
+/// assertion block below is the control that confines the loss: without the collision
+/// the report still arrives, so the suppression needs BOTH an oracle fault and an
+/// ambiguity in one map. `super::super::csv_container::unsynthesizable_rendering`
+/// carries the full measurement table and the other direction of the trade.
+#[test]
+fn a_mixed_key_node_is_refused_at_the_cell_and_the_census_says_so() {
+    let golden = json!({
+        "charlie\\:3:8": 80,
+        "{\"label\": null, \"rank\": 1}": 10,
+        "{\"label\": \"null\", \"rank\": 1}": 20
+    });
+    // A correct rendering of that cell, in the grammar `ValueFormatter` documents.
+    let csv = json!("{charlie:3:8: 80, {label: null, rank: 1}: 10, {label: null, rank: 1}: 20}");
+    let report = report_of(MAP_UDT_KEY, golden, csv, Egress::Csv);
+    // The premise is a CORRECT rendering, so a refusal must not come WITH a diff —
+    // every sibling case in this file asserts this and this one was an assertion
+    // short of its own claim. What it guards: the emptiness bound is still applied at
+    // a Body-refused node, and on a 3-member body it must accept a non-empty one.
+    assert!(
+        report.diffs.is_empty(),
+        "a correct rendering of a refused node must not also diverge: {:?}",
+        report.diffs
+    );
+    assert_eq!(
+        report.ambiguous_container_cells, 1,
+        "the node must be REFUSED, not paired: {:?}",
+        report.diffs
+    );
+    let reasons = report.ambiguity_reasons.join("; ");
+    assert!(
+        reasons.contains("cannot be synthesized") && reasons.contains("SAME key text"),
+        "the census must name both halves of the cause: {reasons}"
+    );
+    assert!(
+        report
+            .ambiguity_reasons
+            .iter()
+            .any(|reason| reason.starts_with("c (")),
+        "attributed to the CELL, which is what a Body reach means: {reasons}"
+    );
+    assert!(
+        !reasons.contains("[key "),
+        "and NOT to the key nodes — claiming key-granularity here would imply the \
+         entries beside them were compared, which a Body refusal did not do: {reasons}"
+    );
+
+    // THE CONTROL, and the boundary of the loss above: the SAME unparseable golden key
+    // with NO colliding sibling is still REPORTED, exactly as `origin/main` reports it
+    // (measured identical on both trees). So the widening silences that report only
+    // where an oracle fault and a key ambiguity coincide in one map — it does not put
+    // a hole under every unparseable key.
+    let control = json!({
+        "charlie\\:3:8": 80,
+        "{\"label\": \"a\", \"rank\": 1}": 10
+    });
+    let control_csv = json!("{charlie:3:8: 80, {label: a, rank: 1}: 10}");
+    let report = report_of(MAP_UDT_KEY, control, control_csv, Egress::Csv);
+    assert_eq!(
+        report.ambiguous_container_cells, 0,
+        "no ambiguity, so nothing to refuse: {:?}",
+        report.ambiguity_reasons
+    );
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+    assert!(
+        report.diffs[0].contains("does not parse as JSON"),
+        "the oracle fault must still be NAMED when no ambiguity hides it: {:?}",
+        report.diffs
+    );
+}
+
+/// THE HEADLINE PROPERTY, as a DISCRIMINATOR: an UNREFUSED key beside a REFUSED one
+/// is compared NORMALLY — the scoping is per KEY, not per node (issue #3815, C).
+///
+/// Every other committed case has either ALL keys refused or a `Reach::Body` reach, so
+/// this issue's central claim — "only the ambiguous key is suppressed" — was asserted
+/// in a module comment and exercised nowhere. A comment is not a discriminator: it
+/// passes whether the scoping is per key or per node.
+///
+/// THE INPUT REACHES THE `None` ARM of `compare_map`'s key-refused block, which is the
+/// code under test. `map_key_refusals` answers `[Some, None]` here: the key `["a, b"]`
+/// carries the `, ` separator inside its sole scalar member, while `["c"]` does not,
+/// and the two render DISTINCTLY (`[a, b]` vs `[c]`) so there is no collision. The map
+/// node's own rendering IS synthesizable, so the reach is genuinely `MapKeys` and not
+/// the widened `Body` — which is what puts the entries on the positional path with the
+/// per-key verdict.
+///
+/// FIVE CASES, and they only mean something TOGETHER: the last one is the cost that
+/// makes the other four a scoping rather than a blanket pass.
+#[test]
+fn an_unrefused_key_beside_a_refused_one_is_compared_normally() {
+    // Golden keys are `MapType.toJSONString` documents; entry 0's key is the one the
+    // flat rendering cannot be read back at.
+    let golden = || json!({"[\"a, b\"]": 10, "[\"c\"]": 20});
+
+    // (1) CONTROL — the correct rendering diverges nowhere, and the census names the
+    // REFUSED key and ONLY it. Without this the four below could pass by everything
+    // failing.
+    let report = report_of(
+        MAP_LIST_TEXT,
+        golden(),
+        json!("{[a, b]: 10, [c]: 20}"),
+        Egress::Csv,
+    );
+    assert!(
+        report.diffs.is_empty(),
+        "correct egress must not diverge: {:?}",
+        report.diffs
+    );
+    assert_eq!(report.ambiguous_container_cells, 1);
+    let reasons = report.ambiguity_reasons.join("; ");
+    assert!(reasons.contains("c[key 0]"), "the refused key: {reasons}");
+    assert!(
+        !reasons.contains("c[key 1]"),
+        "the UNREFUSED sibling must not be suppressed — that is the per-KEY scoping, \
+         and a per-NODE refusal would name it here too: {reasons}"
+    );
+
+    // (2) The UNREFUSED key's own TEXT is corrupted `[c]` -> `[d]`. This is the
+    // property the `None` arm exists for: that key is canonicalized and compared like
+    // any other, so the corruption is CAUGHT and named at its emitted position.
+    let report = report_of(
+        MAP_LIST_TEXT,
+        golden(),
+        json!("{[a, b]: 10, [d]: 20}"),
+        Egress::Csv,
+    );
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+    assert!(
+        report.diffs[0].contains("emitted position 1"),
+        "the diff must name the unrefused key's position: {:?}",
+        report.diffs
+    );
+
+    // (3) …and that key's VALUE, 20 -> 999.
+    let report = report_of(
+        MAP_LIST_TEXT,
+        golden(),
+        json!("{[a, b]: 10, [c]: 999}"),
+        Egress::Csv,
+    );
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+    assert!(report.diffs[0].contains("999"), "{:?}", report.diffs);
+
+    // (4) The value beside the REFUSED key, 10 -> 999 — suppressing a key must not
+    // suppress what sits next to it, which is the whole of finding 1.
+    let report = report_of(
+        MAP_LIST_TEXT,
+        golden(),
+        json!("{[a, b]: 999, [c]: 20}"),
+        Egress::Csv,
+    );
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+    assert!(report.diffs[0].contains("999"), "{:?}", report.diffs);
+
+    // (5) THE COST, asserted so the four above are a SCOPING and not a blanket pass:
+    // the REFUSED key's own text `[a, b]` -> `[x, y]` is NOT reported. It cannot be —
+    // that key is exactly the one no reading of the rendering recovers, so only its
+    // frame and its body's emptiness survive, and a 1-member golden key asserts no
+    // emptiness at all. If this ever starts failing the suppression has narrowed and
+    // this expectation, not the code, is what to revisit.
+    let report = report_of(
+        MAP_LIST_TEXT,
+        golden(),
+        json!("{[x, y]: 10, [c]: 20}"),
+        Egress::Csv,
+    );
+    assert!(
+        report.diffs.is_empty(),
+        "the refused key is SUPPRESSED, not compared: {:?}",
+        report.diffs
+    );
+    assert_eq!(report.ambiguous_container_cells, 1);
+}

@@ -8,7 +8,9 @@
 //!     `decode_does_not_recover`, `golden_rendering`, and the spellings those rest
 //!     on. That is a question about the GOLDEN and the format.
 //!   * this file performs the read — `decode` and the grammar helpers under it. It
-//!     runs only where the parent has already declined to refuse.
+//!     runs only where the parent has already declined to refuse THIS NODE'S BODY;
+//!     a `Reach::MapKeys` refusal (#3815) leaves the node splittable and suppresses
+//!     the ambiguous KEYS alone, inside `decode_object`.
 //!
 //! No surface change: `decode`, `decode_at` and `Excluded` are re-exported by the
 //! parent, so every call site is unchanged.
@@ -87,8 +89,16 @@ fn decode_shape(
     //
     // The comparator asks `node_refusal` at the same node, on the same golden and
     // the same declared type, so it expects exactly what is left here.
-    if node_refusal(golden, Some(ty), kinding).is_some() {
-        return Ok(Value::String(strip(text, ty)?.to_string()));
+    match node_refusal_reach(golden, Some(ty), kinding) {
+        Some((Reach::Body, _)) => return Ok(Value::String(strip(text, ty)?.to_string())),
+        // A MAP node whose KEYS ALONE are refused is SPLIT and decoded (issue
+        // #3815): the entry boundaries and the emitted order are recoverable — that
+        // is what `Reach::MapKeys` promises, and the checks that decide it are the
+        // ones `decode_does_not_recover` runs BEFORE reaching the key-scoped cause.
+        // Returning the un-split body here instead is what cost such a cell its
+        // entry COUNT, its pair SHAPE and every VALUE in it. `decode_object`
+        // suppresses the ambiguous KEYS and nothing else.
+        Some((Reach::MapKeys, _)) | None => {}
     }
     // The declared TYPE decides the structure — including which bracket is
     // required — and the golden decides the member shapes underneath it. When the
@@ -211,6 +221,20 @@ fn decode_object<'t>(
         CqlType::Map(key_ty, _) if container::is_container_type(key_ty) => Some(&**key_ty),
         _ => None,
     };
+    // WHICH of this node's entry KEYS are refused (issue #3815). Computed once, for
+    // the same reason the renderings below are, and asked of the SAME function the
+    // comparator asks — so what the decoder leaves at a key is exactly what
+    // `compare::compare_map` expects to find there.
+    let key_refused: Vec<Option<String>> = match (fields, map_key_ty(ty)) {
+        (Some(g), Some(key_ty)) => map_key_refusals(g, key_ty),
+        _ => Vec::new(),
+    };
+    // A key-scoped refusal makes the by-RENDERING lookup below multi-valued — that
+    // ambiguity IS the refusal — so the golden entry is resolved POSITIONALLY
+    // instead. Not a fallback but the rule the comparison runs on: a map's entries
+    // are compared in EMITTED order, which both sides preserve, and
+    // `compare::compare_map` pairs this node's entries by exactly that.
+    let keys_refused_here = key_refused.iter().any(Option::is_some);
     // The golden's keys AS RENDERED, computed ONCE: a container key's rendering
     // parses a JSON document, and doing that per (entry x golden key) would be
     // quadratic in parses rather than in string compares. A golden key that does not
@@ -252,9 +276,13 @@ fn decode_object<'t>(
         //
         //   * by RENDERED TEXT — cheap, and exact where both sides spell the value the
         //     same way, which is the overwhelmingly common case. It is unambiguous by
-        //     PRECONDITION: `decode_shape` asks `node_refusal` first, and that refuses a
-        //     node whose golden keys do not all render DISTINCTLY, so this cannot be the
-        //     "first of several identical spellings" it would otherwise be.
+        //     PRECONDITION: colliding renderings are a KEY-SCOPED refusal
+        //     (`map_key_refusals`), and this branch is not taken at a node that has one
+        //     — `keys_refused_here` resolves the golden entry positionally instead — so
+        //     this can never be the "first of several identical spellings" it would
+        //     otherwise be. Until #3815 that precondition was enforced one level
+        //     coarser, by refusing the whole node, which cost the node's entry count,
+        //     pair shape and values.
         //   * by CANONICAL VALUE — for keys the two sides legitimately SPELL differently.
         //     `entry_key_rendering` translates the spellings this lane knows
         //     (`stringified_csv_text` handles `blob`) and deliberately leaves the rest
@@ -271,40 +299,61 @@ fn decode_object<'t>(
         // spelled two ways. An AMBIGUOUS canonical match (two golden keys of equal
         // canonical value, e.g. a numeric `1` and `1.0`) selects NOTHING — a guide is
         // never guessed at.
-        let golden_key = rendered_golden_keys
-            .iter()
-            .find(|(rendered, _)| rendered == key)
-            .map(|(_, golden_key)| *golden_key)
-            .or_else(|| {
-                let key_ty = map_key_ty(ty)?;
-                let mut hit = None;
-                for (canon_golden, guide, golden_key) in &canonical_golden_keys {
-                    // ASK THE QUESTION THE OTHER WAY ROUND. Canonicalizing the CSV text
-                    // on its own and comparing cannot work, and the reason is a
-                    // circularity worth stating: reading that text needs the very guide
-                    // we are trying to choose. With no guide the token `null` reads as
-                    // `Null`, so a golden slot holding the TEXT `"null"` never matches
-                    // its own entry. (A first attempt did exactly that and could not fix
-                    // this case.)
-                    //
-                    // So each CANDIDATE is tried AS the guide: does this CSV text, read
-                    // under candidate `g`, denote `g`? A candidate that answers yes is a
-                    // consistent reading of the entry; one that answers no is not.
-                    if canonical_cli_key(key, key_ty, guide, excluded).as_ref()
-                        == Some(canon_golden)
-                    {
-                        if hit.is_some() {
-                            return None;
+        let golden_key = if keys_refused_here {
+            fields.and_then(|g| g.keys().nth(index))
+        } else {
+            rendered_golden_keys
+                .iter()
+                .find(|(rendered, _)| rendered == key)
+                .map(|(_, golden_key)| *golden_key)
+                .or_else(|| {
+                    let key_ty = map_key_ty(ty)?;
+                    let mut hit = None;
+                    for (canon_golden, guide, golden_key) in &canonical_golden_keys {
+                        // ASK THE QUESTION THE OTHER WAY ROUND. Canonicalizing the CSV text
+                        // on its own and comparing cannot work, and the reason is a
+                        // circularity worth stating: reading that text needs the very guide
+                        // we are trying to choose. With no guide the token `null` reads as
+                        // `Null`, so a golden slot holding the TEXT `"null"` never matches
+                        // its own entry. (A first attempt did exactly that and could not fix
+                        // this case.)
+                        //
+                        // So each CANDIDATE is tried AS the guide: does this CSV text, read
+                        // under candidate `g`, denote `g`? A candidate that answers yes is a
+                        // consistent reading of the entry; one that answers no is not.
+                        if canonical_cli_key(key, key_ty, guide, excluded).as_ref()
+                            == Some(canon_golden)
+                        {
+                            if hit.is_some() {
+                                return None;
+                            }
+                            hit = Some(*golden_key);
                         }
-                        hit = Some(*golden_key);
                     }
-                }
-                hit
-            });
+                    hit
+                })
+        };
         let mut entry = Map::new();
         entry.insert(
             "key".to_string(),
             match container_key_ty {
+                // A REFUSED key leaves its stripped BODY, exactly as
+                // [`decode_shape`] leaves any refused node — so the comparator
+                // receives at this position the one thing it can still decide there,
+                // the body's EMPTINESS, and never a key value that would have to be
+                // GUESSED (issue #3815). Guessing is precisely what the ambiguity
+                // forbids: two golden keys sharing one spelling make EITHER reading
+                // self-consistent, so accepting one would report CORRECT egress as a
+                // divergence for whichever entry guessed wrong (#1491 finding T1,
+                // which #3726's refusal closed and this must not reopen).
+                //
+                // The FRAME is still required, at this node's own depth, by the same
+                // `strip` and with its error PROPAGATED — a wrong bracket here is a
+                // divergence, not an ambiguity, and `compare_map` cannot see it once
+                // the frame is gone.
+                Some(key_ty) if key_refused.get(index).is_some_and(Option::is_some) => {
+                    Value::String(strip(key, key_ty)?.to_string())
+                }
                 Some(key_ty) => {
                     // The golden's own parsed key guides the decode where there is
                     // one; a key the golden does not have is decoded from the
