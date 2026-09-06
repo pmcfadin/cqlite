@@ -392,27 +392,30 @@ fi
 # Guard 1: remove ONLY the merged-branch worktree (never a glob). The success
 # `note` is suppressed in --dry-run (the DRY-RUN: line already states the action),
 # so dry-run never reports work as done that was only previewed.
-# Release the lane lock BEFORE the worktree goes (#3436). Order matters for the reader more
-# than for the file — the lock lives outside the worktree — but a release that runs after the
-# lane is gone reads like an afterthought, and if it ever failed the lane would already be
-# unrecoverable for diagnosis.
-if [ -n "$LANE_LEASE_TO_RELEASE" ]; then
-  note "lane lock: releasing issue #$ISSUE, lease basis: $LANE_LEASE_BASIS"
-  if ! run bash "$LANE_LOCK_SH" release "$ISSUE" --force --expect "$LANE_LEASE_TO_RELEASE"; then
-    # ABORT. This was a `note` and a fall-through, which is the defect roborev job 439 called
-    # High — and it was right: Guard 5 validated the incarnation, then a mismatch HERE (a peer
-    # acquired the lane in between, or the record changed) merely logged a line and the very
-    # next block removed that peer's WORKTREE. Guarding the validation and leaving the
-    # execution unguarded is the same "a check placed before the harmful effect must PREVENT
-    # it, not report it" rule this repo keeps relearning; a lease check whose failure is
-    # non-fatal checks nothing.
-    echo "$prog: REFUSED — the lane lock for issue #$ISSUE could not be released at the lease" >&2
-    echo "  Guard 5 validated ($LANE_LEASE_TO_RELEASE). The incarnation changed underneath us," >&2
-    echo "  which means a peer session may now hold this lane. NOT removing the worktree." >&2
-    exit 6
-  fi
-fi
-
+#
+# THE WORKTREE GOES FIRST, AND THE LANE LOCK IS STILL HELD WHILE IT DOES (#3436, roborev
+# job 462, High). The previous order released the lock here and removed the worktree
+# afterwards, which opens a window that destroys exactly what this issue exists to protect:
+# once the CAS release succeeds the lane reads FREE while its directory still EXISTS, so a
+# peer session with a cwd inside the lane can `acquire` it, be told it owns the lane, start
+# writing — and then the very next line deletes its LIVE worktree. Guard 5 cannot see that
+# peer, because it ran before the release created the opening.
+#
+# Holding the lock across the removal closes the window: a peer's `acquire` returns OCCUPIED
+# for as long as the directory is being deleted, so it never adopts a lane that is going away.
+#
+# The old justification for release-first was READABILITY ("a release after the lane is gone
+# reads like an afterthought") plus keeping the lane diagnosable if the release failed. That
+# is not worth an irreversible loss of a peer's work, and it was also unnecessary: releasing
+# after the removal is fully supported. `cmd_release` takes the lane directory from the
+# RECORD (`parse_record` -> `REC_LANE_DIR`), never from the cwd — lane-lock.sh:1834-1841
+# documents this once-broken case in as many words ("once that worktree was REMOVED the cwd
+# identity walk had nothing to match") — and the `--force` this call passes resolves NO
+# identity at all, so nothing on that path can refuse for want of a directory.
+#
+# What this trades into is strictly smaller and recoverable: if the removal succeeds and the
+# release then fails, the record is ORPHANED (it names a lane directory that is gone) rather
+# than a peer's work being deleted. That is clearable with `release --force`.
 if [ -n "$target_wt" ]; then
   run git_root worktree remove "$target_wt"
   [ "$DRY_RUN" -eq 1 ] || note "removed worktree $target_wt"
@@ -421,6 +424,30 @@ elif [ "$stale_wt" -eq 1 ]; then
   [ "$DRY_RUN" -eq 1 ] || note "pruned stale worktree entry for '$MERGED_BRANCH'"
 else
   note "no worktree checked out on '$MERGED_BRANCH' — skipping worktree removal"
+fi
+
+if [ -n "$LANE_LEASE_TO_RELEASE" ]; then
+  note "lane lock: releasing issue #$ISSUE, lease basis: $LANE_LEASE_BASIS"
+  if ! run bash "$LANE_LOCK_SH" release "$ISSUE" --force --expect "$LANE_LEASE_TO_RELEASE"; then
+    # ABORT, STILL. This was once a `note` and a fall-through, which roborev job 439 called
+    # High and was right about: a lease check whose failure is non-fatal checks nothing.
+    # The reason to abort is now different, and the message says so rather than inheriting
+    # the old one. Guard 5 validated this incarnation; a mismatch HERE means the record
+    # changed underneath us, so the lane may have been reclaimed (a DEAD-* verdict against
+    # our own holder) while we were removing the worktree. We do not force past it: the
+    # remaining teardown deletes BRANCHES, and a lane whose ownership is in doubt is not a
+    # lane to keep tearing down unattended.
+    echo "$prog: REFUSED — the lane lock for issue #$ISSUE could not be released at the lease" >&2
+    echo "  Guard 5 validated ($LANE_LEASE_TO_RELEASE). The incarnation changed underneath us," >&2
+    echo "  which means this lane's ownership is no longer the one finalization started with." >&2
+    echo "  The worktree HAS already been removed (it is deleted while the lock is still held," >&2
+    echo "  so no peer could have adopted this lane mid-removal); the lock RECORD may now be" >&2
+    echo "  orphaned, naming a directory that is gone. No branch was deleted." >&2
+    echo "  Remedy: inspect it, then clear it explicitly:" >&2
+    echo "    bash $LANE_LOCK_SH probe $ISSUE" >&2
+    echo "    bash $LANE_LOCK_SH release $ISSUE --force" >&2
+    exit 6
+  fi
 fi
 
 # Delete the origin lock (only the merged branch). Non-fatal: a TOCTOU race (ref

@@ -247,5 +247,95 @@ else
 $out6c"
 fi
 
+# ---------------------------------------------------------------------------
+echo "TEST 7: the worktree is removed BEFORE the lane lock is released (job 462, High)"
+# ---------------------------------------------------------------------------
+# THE DEFECT: releasing first makes the lane read FREE while its directory still EXISTS, so a
+# peer with a cwd inside the lane can `acquire`, be told it owns the lane, start writing — and
+# the next line deletes its LIVE worktree. Guard 5 cannot see that peer; it ran before the
+# release created the opening. Holding the lock across the removal makes the peer's acquire
+# return OCCUPIED for the whole window.
+#
+# [STRUCTURAL], and deliberately so — the same idiom test_worker_supervisor.sh uses to pin
+# "the ownership token is recorded BEFORE the start time". Observing the two operations
+# behaviourally would need a real repo with a real worktree checked out on the merged branch
+# AND a held lock, i.e. reconstructing most of PHASE 1 to watch two adjacent lines; the
+# property here is an ORDER IN THE SOURCE and that is what is asserted. It is not a substring
+# search over raw text: COMMENTS ARE STRIPPED FIRST, because this file's comments discuss both
+# operations at length (they name `git worktree remove` while explaining the release), and a
+# naive grep would match the prose and pin nothing.
+order_of() {
+  # -> "<remove-index> <release-index>" over the COMMENT-STRIPPED executable lines of $1
+  awk '
+    { line = $0; sub(/^[[:space:]]+/, "", line) }
+    line ~ /^#/ { next }
+    line == ""  { next }
+    { n++
+      if (line ~ /worktree remove "\$target_wt"/) rm = n
+      if (line ~ /release "\$ISSUE" --force --expect/) rel = n }
+    END { printf "%s %s", (rm ? rm : "0"), (rel ? rel : "0") }
+  ' "$1"
+}
+
+set -- $(order_of "$FC")
+rm_idx="$1"; rel_idx="$2"
+if [ "$rm_idx" != 0 ] && [ "$rel_idx" != 0 ]; then
+  ok "(construction) both operations were located in the shipped script (remove #$rm_idx, release #$rel_idx) — the assert below is not vacuous"
+else
+  bad "(construction) could not locate both operations (remove=$rm_idx release=$rel_idx); the order assert would be vacuous"
+fi
+if [ "$rm_idx" != 0 ] && [ "$rel_idx" != 0 ] && [ "$rm_idx" -lt "$rel_idx" ]; then
+  ok "[STRUCTURAL] the worktree removal (#$rm_idx) precedes the lane-lock release (#$rel_idx) — the lock is still HELD while the directory is deleted, so a peer cannot adopt a lane that is going away"
+else
+  bad "[STRUCTURAL] the lane lock is released at #$rel_idx, BEFORE the worktree removal at #$rm_idx — job 462's window is open: a peer can acquire the freed lane and have its live worktree deleted"
+fi
+
+# RED ARM: the same check against a copy with the two blocks SWAPPED BACK must FAIL, or the
+# assertion above has no power. Built by moving the release block ahead of the removal block
+# with python (never a hand-retyped fixture, which could drift from the real shape).
+red="$T/fc-order-red.sh"
+python3 - "$FC" "$red" <<'RED'
+import re, sys
+src = open(sys.argv[1], encoding='utf-8').read()
+# ANCHOR ON THE PHASE 2 BLOCKS, not on the `if` condition alone: PHASE 1 opens its own
+# `if [ -n "$target_wt" ]; then` (Guard 3's containment check) some 13KB earlier, and matching
+# the condition picked THAT block up, swapped the wrong thing and dropped the real removal
+# line — a RED artifact that failed for a construction reason instead of the property. The
+# `run git_root worktree remove` line appears once and only in the block under test.
+rel = re.search(r'\nif \[ -n "\$LANE_LEASE_TO_RELEASE" \]; then\n.*?\nfi\n', src, re.S)
+wt  = re.search(r'\nif \[ -n "\$target_wt" \]; then\n  run git_root worktree remove.*?\nfi\n', src, re.S)
+assert rel and wt, "could not locate the PHASE 2 blocks"
+assert wt.start() < rel.start(), "unexpected shipped order"
+assert src.count('run git_root worktree remove') == 1, "removal line is not unique"
+swapped = src[:wt.start()] + rel.group(0) + wt.group(0) + src[rel.end():]
+open(sys.argv[2], 'w', encoding='utf-8').write(swapped)
+RED
+if [ -s "$red" ] && bash -n "$red" 2>/dev/null; then
+  ok "(construction) the RED artifact was written and parses as bash"
+else
+  bad "(construction) the RED artifact is missing or does not parse — the arm below proves nothing"
+fi
+set -- $(order_of "$red")
+red_rm="$1"; red_rel="$2"
+if [ "$red_rm" != 0 ] && [ "$red_rel" != 0 ] && [ "$red_rel" -lt "$red_rm" ]; then
+  ok "(RED arm) the order check FAILS on the swapped copy (release #$red_rel before remove #$red_rm) — it detects the defect it exists for"
+else
+  bad "(RED arm) the swapped copy still read as correctly ordered (remove=$red_rm release=$red_rel); the check cannot see the defect"
+fi
+
+# CONTROL: the refusal text must not claim the worktree survived — after the swap it has
+# already been removed, and a message saying otherwise would be false at the one moment an
+# operator reads it.
+if grep -q 'NOT removing the worktree' "$FC"; then
+  bad "the release-failure text still claims 'NOT removing the worktree', which is false once removal runs first"
+else
+  ok "(control) the release-failure text no longer claims the worktree survived"
+fi
+if grep -q 'The worktree HAS already been removed' "$FC"; then
+  ok "(control) the release-failure text states the worktree is already gone and names the orphaned-record remedy"
+else
+  bad "the release-failure text does not tell the operator the worktree is already gone"
+fi
+
 echo "==== finalize-cleanup lane-lock: passed=$PASS failed=$FAIL ===="
 [ "$FAIL" -eq 0 ] || exit 1
