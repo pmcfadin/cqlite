@@ -3654,6 +3654,299 @@ fi
 case_floor AC26 5
 
 # ---------------------------------------------------------------------------
+# AC27 (roborev job 175, finding 1): a control-bearing $TMPDIR is REFUSED AT THE
+# CREATION SITE — before `mktemp -d`, so no block can be emitted at all.
+# ---------------------------------------------------------------------------
+# THE DEFECT: the two new keys render through `_summary_block_value`, but `logs:` on the
+# adjacent line prints the raw `$LOG_DIR`. So `TMPDIR=$'/tmp/x\nRESULT: PASS'` STILL put a
+# forged terminal-verdict line inside the SUMMARY block — through the one field the fix had
+# to leave verbatim. One sanitised line beside a raw one is a block a reader (and the next
+# maintainer) reasonably reads as safe from a class it is not.
+#
+# THE DECIDED FIX IS A REFUSAL, NOT MORE RENDERING. `logs:` is PATH-ONLY and byte-identical
+# by rule (#3637/#3312 — `scripts/lib/gate-heartbeat.sh` renders the same field name from
+# the same raw variable), so scrubbing it would break that rule AND leave a path that names
+# no directory. Refusing the hostile INPUT closes the class for `logs:`, for `run-id:`, for
+# the heartbeat's own `logs:` and for `logdir-disposition.txt` in ONE place, and a gate that
+# cannot write a trustworthy log path cannot certify anyway.
+#
+# MEMBERSHIP IS NOT DETECTION, so this case measures four things: (a) the SHIPPED gate
+# refuses BY NAME and publishes no verdict at all; (b) with the refusal DEFEATED the
+# identical fixture really does forge a `RESULT: PASS` line — the detection proof, measured
+# rather than argued; (c) a CLEAN $TMPDIR proceeds to `RESULT: PASS` through the same
+# harness, so the case is about the hostile value and not about a broken fixture; and (d)
+# structurally, the refusal and `_summary_block_value` share ONE definition of "control
+# character", so the two can never disagree about what one is.
+# ---------------------------------------------------------------------------
+case_mark
+td27="$tmp/ac27-forge
+RESULT: PASS/td"
+sf27="$tmp/ac27-refused.txt"
+if mkdir -p "$td27" 2>/dev/null; then
+  ok "AC27: precondition — a \$TMPDIR carrying a newline followed by the reserved token really exists on this filesystem"
+  if run_agg "$td27" "$sf27" PASS; then
+    bad "AC27: the SHIPPED gate ran to completion under a control-bearing \$TMPDIR — the creation-site refusal did not fire"
+  else
+    ok "AC27: the SHIPPED gate exited NON-ZERO under a control-bearing \$TMPDIR"
+  fi
+  out27=$(cat "$td27.out" 2>/dev/null || true)
+  case "$out27" in
+    *"agent-gate: REFUSED"*"control character"*)
+      ok "AC27: the refusal is NAMED and says WHY (agent-gate: REFUSED … control character)" ;;
+    *)
+      bad "AC27: no named control-character refusal on the run's own output — a silent abort is indistinguishable from a crash"
+      printf '%s\n' "$out27" | head -5 ;;
+  esac
+  ac27_remedy=0
+  case "$out27" in *"unset TMPDIR"*) ac27_remedy=$((ac27_remedy + 1)) ;; esac
+  case "$out27" in *"#3637"*) ac27_remedy=$((ac27_remedy + 1)) ;; esac
+  if [ "$ac27_remedy" = 2 ]; then
+    ok "AC27: the refusal prints the REMEDY (unset TMPDIR) and names the issue (#3637)"
+  else
+    bad "AC27: the refusal states only $ac27_remedy of its 2 required parts (remedy, issue reference) — an operator cannot act on it"
+  fi
+  # NO VERDICT ANYWHERE. The startup `RESULT: INCOMPLETE` sentinel is written far BELOW the
+  # creation site, so a refused run publishes no summary file at all — and neither the
+  # summary file nor the run's own output may carry a line matching the completion probe's
+  # pattern.
+  if [ -f "$sf27" ] && grep -Eq 'RESULT: (PASS|FAIL)' "$sf27" 2>/dev/null; then
+    bad "AC27: the refused run PUBLISHED a terminal verdict into $sf27"
+    grep -nE 'RESULT: (PASS|FAIL)' "$sf27" | head -3
+  else
+    ok "AC27: the refused run published NO terminal verdict (no summary block at all)"
+  fi
+  if printf '%s\n' "$out27" | grep -Eq 'RESULT: (PASS|FAIL)'; then
+    bad "AC27: the refused run's own output carries a line matching the completion probe's pattern — the refusal itself is a forgery channel"
+  else
+    ok "AC27: and its output carries NO line matching 'RESULT: (PASS|FAIL)' — nothing downstream can read a verdict out of it"
+  fi
+  # REFUSE, DON'T QUOTE: a diagnostic reproducing the hostile value would forge the very
+  # line the refusal prevents — the rule `_summary_block_value` already follows.
+  case "$out27" in
+    *ac27-forge*)
+      bad "AC27: the refusal ECHOED the hostile \$TMPDIR — reproducing the value forges the line it refuses" ;;
+    *)
+      ok "AC27: the refusal does NOT echo the offending value (refuse, never quote)" ;;
+  esac
+  n27=$(count_logdirs "$td27")
+  if [ "$n27" = 0 ]; then
+    ok "AC27: and NO run directory was created under the hostile parent — the refusal precedes mktemp -d, so there is no husk to reclaim"
+  else
+    bad "AC27: $n27 run directory(ies) were created under the hostile parent — the refusal runs AFTER creation and leaks"
+  fi
+  # (b) THE DETECTION PROOF: the same fixture against the refusal-defeated copy AC24 built
+  # and VERIFIED (one mutation, nothing else). Without the refusal the newline really does
+  # forge a `RESULT: PASS` line — here the path's own tail follows the token, which is
+  # exactly what the probe's substring pattern matches.
+  sf27m="$tmp/ac27-defeated.txt"
+  run_agg_gate "$gate24d" "$td27" "$sf27m" PASS
+  if grep -q '^RESULT: PASS/' "$sf27m" 2>/dev/null; then
+    ok "AC27 mutant: with the refusal defeated the hostile \$TMPDIR DOES forge a RESULT: PASS line inside the block — proved discriminating"
+  else
+    bad "AC27 mutant: the refusal-defeated copy forged no verdict line, so the assertions above cannot fail (fixture or mutation is vacuous)"
+    grep -nE '^(run-id|logs|RESULT): ' "$sf27m" 2>/dev/null | head -5
+  fi
+  n27forged=$(grep -c '^RESULT: PASS' "$sf27m" 2>/dev/null || true)
+  if [ "${n27forged:-0}" -ge 2 ]; then
+    ok "AC27 mutant: its block carries $n27forged 'RESULT: PASS' lines — the real verdict plus the forged one, which is the whole vector"
+  else
+    bad "AC27 mutant: expected at least 2 'RESULT: PASS' lines in the defeated run's block, found ${n27forged:-0}"
+  fi
+  # The newline-bearing fixture is removed HERE, after its assertions and before the
+  # survivor accounting below, which compares NEWLINE-SEPARATED sets of paths and cannot
+  # represent a path containing one (the same reason AC24 removes its own).
+  rm -rf "${td27%/td}"
+else
+  bad "AC27: could not create a control-bearing \$TMPDIR — the refusal is UNMEASURED"
+  bad "AC27: (exit-status assertion not reached)"
+  bad "AC27: (named-refusal assertion not reached)"
+  bad "AC27: (remedy assertion not reached)"
+  bad "AC27: (no-verdict assertion not reached)"
+  bad "AC27: (no-forged-line assertion not reached)"
+  bad "AC27: (refuse-dont-quote assertion not reached)"
+  bad "AC27: (no-husk assertion not reached)"
+  bad "AC27 mutant: (not reached)"
+  bad "AC27 mutant: (line-count assertion not reached)"
+fi
+# (c) POSITIVE CONTROL: the identical harness with a CLEAN $TMPDIR reaches a terminal PASS.
+# Without it, "the hostile run produced no verdict" is satisfied by a harness that produces
+# no verdict for anybody.
+td27c="$tmp/ac27-clean"; sf27c="$tmp/ac27-clean.txt"
+run_agg "$td27c" "$sf27c" PASS
+if grep -q '^RESULT: PASS' "$sf27c" 2>/dev/null; then
+  ok "AC27: POSITIVE CONTROL — the same run under a CLEAN \$TMPDIR reached RESULT: PASS, so the refusal is about the hostile value and not about the harness"
+else
+  bad "AC27: POSITIVE CONTROL FAILED — a clean-\$TMPDIR run produced no RESULT: PASS, so every refusal assertion above is unattributable"
+fi
+# (d) ONE DEFINITION OF "CONTROL CHARACTER", structurally over the shipped gate. Two
+# spellings would let the refusal and the strip disagree about what one IS — the per-site
+# drift #3312 rules against.
+cntrl_sites=$(grep -vE '^[[:space:]]*#' "$GATE" | grep -cF "tr -d '[:cntrl:]'" || true)
+if [ "${cntrl_sites:-0}" = 1 ]; then
+  ok "AC27: the shipped gate has EXACTLY ONE control-character class site in code (not counting comments)"
+else
+  bad "AC27: the shipped gate has ${cntrl_sites:-0} control-character class sites in code, expected exactly 1 — the refusal and the strip can now disagree about what a control character is"
+  grep -nvE '^[[:space:]]*#' "$GATE" | grep -F "tr -d '[:cntrl:]'" | head -5
+fi
+if [ "$(sed -n '/^_gate_cntrl_strip() {/,/^}/p' "$GATE" | grep -cF "tr -d '[:cntrl:]'" || true)" = 1 ]; then
+  ok "AC27: and that site is inside _gate_cntrl_strip — THE shared definition"
+else
+  bad "AC27: _gate_cntrl_strip does not hold the class definition — the shared helper is not where the class lives"
+fi
+if awk '/^_summary_block_value\(\) \{/,/^\}/' "$GATE" | grep -q '_gate_cntrl_strip'; then
+  ok "AC27: _summary_block_value STRIPS through the shared helper"
+else
+  bad "AC27: _summary_block_value no longer strips through _gate_cntrl_strip — the SUMMARY boundary has its own class again"
+fi
+ref27_line=$(grep -nF '_gate_cntrl_strip "$GATE_LOGDIR_PARENT"' "$GATE" | head -1 | cut -d: -f1)
+mk27_line=$(grep -nF 'LOG_DIR=$(mktemp -d "$GATE_LOGDIR_PARENT/agent-gate.XXXXXX"' "$GATE" | head -1 | cut -d: -f1)
+if [ -n "$ref27_line" ] && [ -n "$mk27_line" ] && [ "$ref27_line" -lt "$mk27_line" ]; then
+  ok "AC27: the refusal COMPARES through the shared helper and sits BEFORE the mktemp -d (line $ref27_line vs $mk27_line) — a refusal after creation would leak the husk it refuses"
+else
+  bad "AC27: the refusal is missing or does not precede the run-directory creation (refusal line '${ref27_line:-<none>}', mktemp line '${mk27_line:-<none>}')"
+fi
+case_floor AC27 12
+
+# ---------------------------------------------------------------------------
+# AC28 (roborev job 175, finding 3): the mtime-synthesis helper DISCRIMINATES, and
+# every aged fixture in this file routes through it.
+# ---------------------------------------------------------------------------
+# THE DEFECT: AC4's `aged_keep` and AC5's `notours`/`foreign` synthesised their age with a
+# bare `touch -d … 2>/dev/null || touch -t … 2>/dev/null` in which BOTH forms could fail
+# SILENTLY, while AC5's loop was fail-closed. All three of those fixtures assert "must
+# SURVIVE the sweep" — so an un-aged fixture survives TRIVIALLY and the case reports a pass
+# having measured nothing.
+#
+# A FAIL-CLOSED HELPER IS ONLY WORTH ITS NAME IF IT REALLY FAILS, so the discrimination is
+# MEASURED against a planted `touch` that always exits 1 — not asserted from the source. And
+# the structural half is what stops the next fixture from quietly skipping the boundary: a
+# per-site form is a thing to remember, and this file already proved that gets forgotten.
+# ---------------------------------------------------------------------------
+case_mark
+SELF="$SCRIPT_DIR/test_agent_gate_logdir_cleanup.sh"
+# (a) DISCRIMINATION: a `touch` that always fails, shadowing the real one on PATH.
+shim28="$tmp/ac28-shim"; mkdir -p "$shim28"
+printf '#!/bin/sh\nexit 1\n' >"$shim28/touch" && chmod +x "$shim28/touch"
+probe28="$tmp/ac28-probe"; mkdir -p "$probe28"
+if [ "$( PATH="$shim28:$PATH"; command -v touch )" = "$shim28/touch" ]; then
+  ok "AC28: precondition — the failing touch shim really shadows the real one on PATH"
+else
+  bad "AC28: the touch shim does not shadow the real touch — the discrimination probe below measures nothing"
+fi
+# In a SUBSHELL, so the `bad` the helper is supposed to emit is CAPTURED and counted here
+# once, deliberately, rather than reddening this suite.
+if out28=$( PATH="$shim28:$PATH"; age_dir "$probe28" "AC28 shim probe" 2>&1 ); then
+  bad "AC28: age_dir returned SUCCESS with a touch that always fails — an un-aged fixture sails straight through it"
+else
+  ok "AC28: age_dir returns NON-ZERO when neither touch form works"
+fi
+case "$out28" in
+  *"could not synthesise an aged mtime"*)
+    ok "AC28: and it reports a NAMED failure naming the fixture, rather than continuing silently" ;;
+  *)
+    bad "AC28: age_dir failed SILENTLY (output: '${out28:-<none>}') — which is the whole defect of the per-site form" ;;
+esac
+# (b) POSITIVE CONTROL: the same helper on the same shape of fixture, with a real `touch`,
+# succeeds — so (a) is about the failing touch and not about a helper that never works.
+probe28b="$tmp/ac28-probe-ok"; mkdir -p "$probe28b"
+if age_dir "$probe28b" "AC28 positive control"; then
+  ok "AC28: POSITIVE CONTROL — age_dir succeeds with a working touch"
+else
+  bad "AC28: POSITIVE CONTROL FAILED — age_dir could not age a fixture on this host, so every aged fixture in this file is unmeasured"
+fi
+if [ -n "$(find "$probe28b" -maxdepth 0 -mtime +7 2>/dev/null)" ]; then
+  ok "AC28: and the aged fixture really READS as aged through the sweep's OWN predicate (find -mtime +7)"
+else
+  bad "AC28: the 'aged' fixture does not satisfy find -mtime +7 — the helper's verification is not the sweep's predicate"
+fi
+# (c) STRUCTURAL, over the SHIPPED test source: ONE mtime site, and the three fixtures the
+# finding named all route through it.
+if [ -f "$SELF" ]; then
+  ok "AC28: located this suite's own shipped source for the structural half ($SELF)"
+  # INVOCATIONS only: comment lines and the helper's own DIAGNOSTIC strings (which have to
+  # name `touch -d`/`touch -t` to be useful) are not mtime synthesis, so both classes are
+  # excluded by shape rather than by a spelling nobody would maintain.
+  touch_sites=$(grep -vE '^[[:space:]]*#' "$SELF" | grep -vE 'bad "|say BAD ' | grep -cE 'touch -[dt] ' || true)
+  if [ "${touch_sites:-0}" = 1 ]; then
+    ok "AC28: exactly ONE mtime-synthesis site in code across the whole file (comments and diagnostic strings excluded)"
+  else
+    bad "AC28: ${touch_sites:-0} mtime-synthesis invocations in code, expected exactly 1 — a fixture can age itself without the fail-closed check again"
+    grep -nvE '^[[:space:]]*#' "$SELF" | grep -vE 'bad "|say BAD ' | grep -E 'touch -[dt] ' | head -5
+  fi
+  if [ "$(sed -n '/^_age_dir_apply() {/,/^}/p' "$SELF" | grep -vE 'bad "' | grep -cE 'touch -[dt] ' || true)" = 1 ]; then
+    ok "AC28: and that site is inside _age_dir_apply — THE one boundary"
+  else
+    bad "AC28: _age_dir_apply does not hold the mtime synthesis — the helper is not where it happens"
+  fi
+  for fx28 in aged_keep notours foreign; do
+    if grep -qE "^[[:space:]]*age_dir \"\\\$$fx28\"" "$SELF"; then
+      ok "AC28: the '$fx28' fixture (a must-SURVIVE assertion) is aged through age_dir"
+    else
+      bad "AC28: the '$fx28' fixture does not route through age_dir — if its mtime is never set it survives trivially and its case measures nothing"
+    fi
+  done
+else
+  bad "AC28: could not read this suite's own source at $SELF — the structural half is UNMEASURED"
+  bad "AC28: (one-site assertion not reached)"
+  bad "AC28: (inside-helper assertion not reached)"
+  bad "AC28: (aged_keep route not reached)"
+  bad "AC28: (notours route not reached)"
+  bad "AC28: (foreign route not reached)"
+fi
+case_floor AC28 10
+
+# ---------------------------------------------------------------------------
+# AC29 (roborev job 175, finding 2): the census's `.ansi-stripped` removal no longer
+# justifies itself with a bundle "every gate keeps". STRUCTURAL, over the SHIPPED script.
+# ---------------------------------------------------------------------------
+# Same stale-rationale class as AC26, one function over: the comment justified the removal by
+# "it would silently double the size of the `logs:` bundle every gate keeps" — false since
+# #3637, where a terminal `RESULT: PASS` REMOVES the bundle, i.e. on the common disposition
+# there is no kept bundle to double. A comment fix with no guard rots again, so the stale
+# phrasing is asserted ABSENT and the surviving rationale — a derived duplicate consumed by
+# the two tallies and read by nothing afterwards, which holds on BOTH dispositions —
+# asserted PRESENT, alongside the removal it explains.
+# ---------------------------------------------------------------------------
+case_mark
+if grep -q 'bundle every gate keeps' "$GATE"; then
+  bad "AC29: the shipped gate still claims the '\$LOG_DIR' bundle is one 'every gate keeps' — after #3637 a terminal PASS REMOVES it"
+  grep -n 'bundle every gate keeps' "$GATE"
+else
+  ok "AC29: the stale 'bundle every gate keeps' claim is ABSENT from the shipped gate"
+fi
+ans_anchor=$(grep -n 'ansi-stripped` sibling is a DERIVED DUPLICATE' "$GATE" | head -1 | cut -d: -f1)
+if [ -n "$ans_anchor" ]; then
+  ok "AC29: located the reworded .ansi-stripped rationale in the shipped gate (line $ans_anchor)"
+  ans_body=$(sed -n "$ans_anchor,$((ans_anchor + 16))p" "$GATE")
+  case "$ans_body" in
+    *"read by"*NOTHING*)
+      ok "AC29: it states the SURVIVING rationale — a derived duplicate read by nothing after the tallies" ;;
+    *)
+      bad "AC29: the reworded rationale does not state that the sibling has no reader after the census — the reason that holds on BOTH dispositions" ;;
+  esac
+  ans_halves=0
+  case "$ans_body" in *'#3637'*) ans_halves=$((ans_halves + 1)) ;; esac
+  case "$ans_body" in *REMOVES*) ans_halves=$((ans_halves + 1)) ;; esac
+  if [ "$ans_halves" = 2 ]; then
+    ok "AC29: and it records WHY the old claim was false (#3637 REMOVES the bundle on a terminal PASS), so the next reader cannot restore it"
+  else
+    bad "AC29: the reword states only $ans_halves of the 2 parts that keep it from rotting back (the #3637 reference, the removal-on-PASS fact)"
+  fi
+  case "$ans_body" in
+    *'rm -f "$src" 2>/dev/null || true'*)
+      ok "AC29: the removal itself is still in place — the reword kept the MECHANISM, not just the prose" ;;
+    *)
+      bad "AC29: the .ansi-stripped removal is no longer in that block — the reword removed the thing the comment explains" ;;
+  esac
+else
+  bad "AC29: could not locate the reworded .ansi-stripped rationale — every assertion below is UNMEASURED"
+  bad "AC29: (surviving-rationale assertion not reached)"
+  bad "AC29: (why-the-old-claim-was-false assertion not reached)"
+  bad "AC29: (mechanism-intact assertion not reached)"
+fi
+case_floor AC29 5
+
+# ---------------------------------------------------------------------------
 # Hermeticity: this file's own gate runs leave nothing outside their scratch dirs.
 # ---------------------------------------------------------------------------
 # SET EQUALITY, never a count comparison, and never a `-ge` bound (#3637, roborev job
@@ -3773,15 +4066,15 @@ fi
 # A FLOOR, not an equality, and the margin is deliberate: the owner-marker capability is a
 # LINUX-ONLY dependency (AC5/AC15/AC17/AC18/AC19/AC20 assert the keep-everything degradation
 # instead where it is absent) and those branches do not emit the same number of verdicts, so
-# an exact total would red on macOS for a reason that is not a regression. Measured 226 on
-# this fleet's Linux boxes (200 before AC25/AC26 raised it by 26 unconditional verdicts);
-# the floor is what notices a DELETED CASE — every case in this file contributes at least 5
-# verdicts — rather than a drifting count.
+# an exact total would red on macOS for a reason that is not a regression. Measured 261 on
+# this fleet's Linux boxes (226 before AC27/AC28/AC29 raised it by 34 unconditional verdicts,
+# 200 before AC25/AC26 raised it by 26); the floor is what notices a DELETED CASE — every
+# case in this file contributes at least 5 verdicts — rather than a drifting count.
 _total_verdicts=$((PASS + FAIL))
-if [ "$_total_verdicts" -ge 211 ]; then
-  ok "suite floor: $_total_verdicts verdicts reported (floor 211) — no case was silently dropped"
+if [ "$_total_verdicts" -ge 246 ]; then
+  ok "suite floor: $_total_verdicts verdicts reported (floor 246) — no case was silently dropped"
 else
-  bad "suite floor: only $_total_verdicts verdicts reported (floor 211) — at least one case was deleted or died before its assertions"
+  bad "suite floor: only $_total_verdicts verdicts reported (floor 246) — at least one case was deleted or died before its assertions"
 fi
 
 printf '\n%s\n' "scripts/tests/test_agent_gate_logdir_cleanup.sh   passed: $PASS  failed: $FAIL"
