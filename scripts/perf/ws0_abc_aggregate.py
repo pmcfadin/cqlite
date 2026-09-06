@@ -116,6 +116,30 @@ BINARY_EXCEPTION_FIELD = f"binary_sha256.{BINARY_EXCEPTION_BINARY}"
 RSS_FIELDS = ("server_vm_hwm_kb", "server_vm_rss_kb")
 RSS_UNMEASURED_PREFIX = "UNMEASURED"
 
+# THE MARKER IS A GRAMMAR, NOT A PREFIX (#3997, roborev round 4), and this side stays
+# INDEPENDENT of the collector's. `startswith(RSS_UNMEASURED_PREFIX)` accepted a bare
+# "UNMEASURED", an "UNMEASUREDgarbage" and an empty-cause marker as legitimate absences, so a
+# CORRUPT session read as one that merely did not measure. The prefix stays RESTATED rather than
+# imported for the reason above — and the two implementations are now pinned in BOTH directions
+# (accept AND reject) by `test_ws0_abc_driver_guards.sh` case 5h, which drives them by import
+# rather than comparing source text. One strict reader and one loose one is the state that would
+# be indefensible; two strict independent ones, pinned against each other, is not.
+RSS_UNMEASURED_MARKER = f"{RSS_UNMEASURED_PREFIX} \u2014 "
+
+
+def is_unmeasured_marker(value) -> bool:
+    """True for a WELL-FORMED `UNMEASURED — <cause>` marker, and for nothing else.
+
+    The exact prefix — em dash and trailing space, as `ws0_flight_arm.rss_unmeasured` writes it
+    — plus a cause that is not empty or whitespace-only. The cause is the whole value of a
+    marker: it decides the operator's next action (a vanished pid is a rep to re-run, an
+    unreadable `/proc` is a box to fix), so a marker without one is a corrupt record and not an
+    honest absence.
+    """
+    if not isinstance(value, str) or not value.startswith(RSS_UNMEASURED_MARKER):
+        return False
+    return bool(value[len(RSS_UNMEASURED_MARKER):].strip())
+
 # The corpus's identity, as the session recorded it. The PATH is deliberately not compared here:
 # the driver's run fingerprint pins the path, and this tool's subject is the bytes that were
 # measured -- two sessions reading the same corpus through different mount paths are comparable,
@@ -202,14 +226,28 @@ def read_rss_fields(raw: dict, flight_arm: str, p: pathlib.Path) -> dict:
             block, field, f"{p}: warm measurement {flight_arm!r}",
             "R6.1 compares arm E's PEAK RSS against arm A's, so an unrecorded one is a"
             " comparison that cannot be made — and ws0_flight_arm writes an explicit"
-            f" '{RSS_UNMEASURED_PREFIX} - <cause>' marker rather than omitting the key, so an"
+            f" '{RSS_UNMEASURED_MARKER}<cause>' marker rather than omitting the key, so an"
             " absent key is a session this tool does not model",
         )
         if isinstance(value, str):
-            if not value.startswith(RSS_UNMEASURED_PREFIX):
+            if not is_unmeasured_marker(value):
+                # TWO CAUSES, TWO MESSAGES. A value CARRYING the marker word without its form is
+                # a CORRUPT record — something wrote a marker and lost its cause — while an
+                # arbitrary string is a session this tool does not model. Both are refusals, and
+                # the remedies differ, so they are not folded into one sentence.
+                if value.startswith(RSS_UNMEASURED_PREFIX):
+                    raise Unreadable(
+                        f"{p}: warm {flight_arm} records {field}={value!r}, which carries the"
+                        f" {RSS_UNMEASURED_PREFIX!r} word but is NOT the"
+                        f" '{RSS_UNMEASURED_MARKER}<cause>' form (exact prefix, then a non-empty"
+                        " CAUSE). A causeless or mangled marker is a CORRUPT record, not an"
+                        " honest absence: the cause is the whole value of a marker, because it"
+                        " is what decides the operator's next action. Refused rather than"
+                        " counted as an unmeasured figure."
+                    )
                 raise Unreadable(
                     f"{p}: warm {flight_arm} records {field}={value!r}, a string that is not an"
-                    f" '{RSS_UNMEASURED_PREFIX} - <cause>' marker. Refused rather than"
+                    f" '{RSS_UNMEASURED_MARKER}<cause>' marker. Refused rather than"
                     " classified as either an observation or an absence."
                 )
             out[field] = value

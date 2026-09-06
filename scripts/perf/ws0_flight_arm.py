@@ -136,6 +136,15 @@ MERGE_PATH_OBSERVABILITY_NOTE = (
 # a number — the same shape `CONTENT_VOLUME_NO_ORACLE` uses one module over.
 RSS_UNMEASURED = "UNMEASURED"
 
+# THE MARKER'S FULL FORM, and it is a GRAMMAR rather than a prefix (#3997, roborev round 4).
+# `startswith(RSS_UNMEASURED)` accepted a bare "UNMEASURED", an "UNMEASUREDgarbage", and a
+# marker whose cause was empty or whitespace-only — so a CORRUPT artifact read as an ordinary
+# missing measurement. Neither reader ever turns a marker into a number (it is carried through
+# and printed, never medianed or ratioed), so this could not satisfy R6.1's ceiling; what it
+# destroyed is the distinction between "refuse this artifact" and "we did not measure this",
+# and the cause IS the value here because the operator's next action is determined by it.
+RSS_UNMEASURED_MARKER = f"{RSS_UNMEASURED} \u2014 "
+
 # The AFFIRMATIVE status, spelled once. The sampler writes it and `read_server_rss` requires
 # exactly it or a marker — a status it cannot classify is a refusal, because "the record says
 # something else" and "the record says it could not measure" are different states.
@@ -162,8 +171,19 @@ def rss_unmeasured(cause: str) -> str:
     the operator's next action is entirely determined by the why — a vanished pid is a rep to
     re-run, a `/proc` that could not be read is a box to fix, an absent `VmHWM` is a kernel
     that does not export it. So the cause is part of the value.
+
+    A causeless marker cannot be MINTED either: `rss_unmeasured("")` would build a value this
+    module's own reader refuses, which is a producer and a consumer disagreeing about one
+    contract. Refused at the source instead, where the caller that lost its cause is named.
     """
-    return f"{RSS_UNMEASURED} — {cause}"
+    text = cause.strip() if isinstance(cause, str) else ""
+    if not text:
+        raise ValueError(
+            "rss_unmeasured() requires a non-empty CAUSE: the marker's whole value is why the"
+            f" figure is absent, and {RSS_UNMEASURED_MARKER!r} with nothing after it is the"
+            " corrupt form this module's reader refuses."
+        )
+    return f"{RSS_UNMEASURED_MARKER}{cause}"
 
 
 def rss_is_measured(value: object) -> bool:
@@ -178,8 +198,18 @@ def rss_is_measured(value: object) -> bool:
 
 
 def _rss_marker(value: object) -> bool:
-    """True for an explicit `rss_unmeasured(...)` marker, and for nothing else."""
-    return isinstance(value, str) and value.startswith(RSS_UNMEASURED)
+    """True for a WELL-FORMED `rss_unmeasured(...)` marker, and for nothing else.
+
+    The exact `RSS_UNMEASURED_MARKER` prefix — em dash and trailing space, as the producer
+    writes it — plus a cause that is not empty or whitespace-only. Deliberately NOT
+    `startswith(RSS_UNMEASURED)`, which accepted a bare word and an arbitrary suffix and so
+    classified a corrupt value as an honest absence. A malformed marker now reaches
+    `read_server_rss`'s "a value this reader cannot classify" refusal, which is the correct
+    answer for it: that record was written by something this module does not model.
+    """
+    if not isinstance(value, str) or not value.startswith(RSS_UNMEASURED_MARKER):
+        return False
+    return bool(value[len(RSS_UNMEASURED_MARKER):].strip())
 
 
 def parse_proc_status_rss(text: str, where: str) -> dict:
