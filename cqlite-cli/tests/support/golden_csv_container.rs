@@ -790,13 +790,20 @@ fn decode_does_not_recover(
                 // refusal, per the note above, and the KEY-SCOPED question survives
                 // it per key (#3815 round 2).
                 //
-                // SUBSUMED TODAY, and kept anyway: `golden_rendering`'s object arm
-                // renders every key through `entry_key_rendering` and propagates its
-                // `None`, so a key that does not render already took the branch at
-                // the head of this function. The two routes are given the SAME
-                // answer so they cannot disagree — and so that narrowing
-                // `golden_rendering`'s key requirement later cannot silently
-                // reintroduce the fail-open here.
+                // SUBSUMED TODAY, and MEASURED to be: `golden_rendering`'s object
+                // arm renders every key through `entry_key_rendering` and propagates
+                // its `None`, so a key that does not render already took the branch
+                // at the head of this function. Confirmed by mutation — replacing
+                // THIS branch with `None` leaves
+                // `tests::a_mixed_key_node_does_not_fail_open` and
+                // `tests::one_unrenderable_key_does_not_cost_its_siblings_their_refusal`
+                // both GREEN, while doing the same to either of the other two whole-map
+                // bails REDs them. So this branch is unreachable rather than untested,
+                // and it is stated that way instead of implying coverage it has none of.
+                //
+                // Kept, at that price, because the two routes then give the SAME answer
+                // and cannot disagree: narrowing `golden_rendering`'s key requirement
+                // later cannot silently reintroduce the fail-open here.
                 return key_scoped_refusal(fields, ty);
             };
             let want = fields
