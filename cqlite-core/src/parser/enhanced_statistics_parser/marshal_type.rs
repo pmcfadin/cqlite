@@ -5,7 +5,7 @@
 //! Statistics.db) into CQL type names, and build the partition/clustering
 //! `ColumnInfo` vectors used by schema discovery.
 
-use crate::schema::validate_marshal_frozen;
+use crate::schema::cql_type_parser::frozen_scalar::validate_marshal_frozen;
 
 /// Extract inner type from parameterized type string with proper parenthesis matching
 ///
@@ -116,6 +116,25 @@ pub(super) fn convert_marshal_type_to_cql_checked(
 ) -> crate::error::Result<String> {
     validate_marshal_frozen(marshal_type)?;
     Ok(convert_marshal_type_to_cql(marshal_type))
+}
+
+/// [`convert_marshal_type_to_cql_checked`] for the two callers whose error channel
+/// is an `Option`: it LOGS the refusal (which carries the
+/// `CQL3Type.java:647-651` citation) and answers `None`.
+///
+/// The marker-search SerializationHeader parsers in `serialization_header::mod`
+/// have no per-column error type to carry a message, and both already treat "this
+/// offset does not hold a readable header" as a single outcome. Giving them a
+/// one-expression form keeps the gate at the SAME site as the UTF-8 check instead
+/// of adding a second failure ladder beside it. Issue #4104.
+pub(super) fn convert_marshal_type_to_cql_logged(marshal_type: &str) -> Option<String> {
+    match convert_marshal_type_to_cql_checked(marshal_type) {
+        Ok(t) => Some(t),
+        Err(e) => {
+            tracing::error!("Refusing SerializationHeader type '{marshal_type}': {e}");
+            None
+        }
+    }
 }
 
 /// Convert Cassandra internal marshal type to CQL type name.
