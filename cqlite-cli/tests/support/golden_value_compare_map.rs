@@ -190,6 +190,13 @@ pub(super) fn compare_map(
     // self-consistent, so picking one would report correct egress as a divergence for
     // whichever entry guessed wrong (#1491 finding T1). An UNREFUSED key beside a
     // refused one is compared normally: the scoping is per KEY, not per node.
+    //
+    // AND, unlike the multicell block above, a refused key does NOT go through
+    // `compare_value_at`, so no DECLARED GAP is matched there. That is the same
+    // composition `compare_value_at` itself applies and not an omission: a refusal
+    // wins over a gap match, because no verdict taken at a position only partly
+    // decided is a measurement — so a gap declared at such a path would be reported
+    // as suppressing nothing (a failure), which is the honest outcome.
     let key_refused: Vec<Option<String>> = match egress {
         Egress::Csv => csv_container::map_key_refusals(golden, key_ty),
         // JSON carries its own structure and needs no decoding, so it has no flat
@@ -197,6 +204,17 @@ pub(super) fn compare_map(
         Egress::Json => Vec::new(),
     };
     if key_refused.iter().any(Option::is_some) {
+        // FAIL CLOSED if the two functions ever drift: `map_key_refusals` answers per
+        // GOLDEN entry, so `key_refused[i]` below is total. Without this an answer
+        // covering fewer entries would read as "not refused" at the uncovered ones —
+        // i.e. the loop would canonicalize a key the module just said it cannot.
+        if key_refused.len() != golden.len() {
+            return Err(format!(
+                "the key-refusal answer covers {} of the golden's {} map entries",
+                key_refused.len(),
+                golden.len()
+            ));
+        }
         if golden.len() != cli.len() {
             return Err(format!(
                 "map size golden {} vs cli {}",
