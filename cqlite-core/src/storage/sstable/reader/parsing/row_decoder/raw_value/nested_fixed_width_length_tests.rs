@@ -88,12 +88,18 @@
 //! typed decoder, whose `empty_is_a_value` reads Cassandra's
 //! `accessor.isEmpty(value) ? null : …` guard. The same case characterises it.
 //!
-//! CQLite is therefore NARROWER than Cassandra for every `… or 0` row of the table above,
-//! whose `validate` admits an EMPTY buffer (`Int32Serializer.java`
-//! `size(value) != 4 && !isEmpty(value)`, deserializing to Java `null`). That
-//! divergence PREDATES both issues, is deliberate, and is tracked as **#3847**;
-//! `zero_length_fixed_width_element_is_refused_at_every_nesting_position` below
-//! characterises it rather than endorsing it.
+//! The ZERO-length case is NO LONGER a narrowing. The table above is `validate()`,
+//! the WRITE rule and non-uniform; this is a READ path, whose oracle is
+//! `deserialize()` — uniform across all twelve, where an EMPTY buffer IS the wire
+//! spelling of `null` (`docs/round-artifacts/issue-3847-cassandra-oracle.md`, read
+//! at the pinned tag). **#3847 (`a5171a5ba`) made this path match it**, the four
+//! `validate()`-strict types included, so the accepted set at the VALUE positions is
+//! `{n, 0}`, pinned by
+//! `zero_length_fixed_width_element_decodes_to_null_at_the_four_value_positions`.
+//! What remains is not a width difference: a KEY-LIKE member (map key, set member)
+//! accepts `0` too, but can never answer `Null` — Cassandra has no null map key — so
+//! it is kept OPAQUELY as an empty blob (#3747), pinned by
+//! `zero_length_fixed_width_key_like_member_is_opaque_never_null`.
 
 use super::*;
 
@@ -772,10 +778,11 @@ fn one_field_udt(ft: CqlType) -> Vec<(String, CqlType)> {
 /// that is not part of what #3631 closed: an empty field carries
 /// `ByteBufferUtil.EMPTY_BYTE_BUFFER`, which every one of those serializers
 /// reads as null via `accessor.isEmpty(value) ? null : …`. It is the same
-/// disposition `empty_is_a_value` encodes, and it is the OPPOSITE of the
-/// bounded-path treatment `zero_length_fixed_width_element_is_refused_at_every_nesting_position`
-/// characterises under #3847 — the asymmetry is real and is asserted here so it
-/// cannot change unnoticed.
+/// disposition `empty_is_a_value` encodes, and since #3847 (`a5171a5ba`) the
+/// bounded `raw_value` path AGREES with it rather than diverging — see
+/// `zero_length_fixed_width_element_decodes_to_null_at_the_four_value_positions`.
+/// The two answers still come from two INDEPENDENT tables (the SCOPE note in
+/// `raw_value/fixed_width.rs`); nothing enforces that they keep agreeing.
 ///
 /// The case fails in BOTH directions: if any of the five stops refusing a
 /// non-zero wrong width, and if a correct width stops decoding to its declared
