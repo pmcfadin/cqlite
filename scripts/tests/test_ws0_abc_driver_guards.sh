@@ -1500,6 +1500,20 @@ else
   fail "5l. an arm-E-less set of shared digests must still aggregate (rc=$rc, out: $(tail -3 <<<"$out"))"
 fi
 
+# AND THE DECLARATION IS DERIVED FROM WHETHER THE ASSERTION RAN, not from the exception being
+# active: an arm-E-ONLY set has no shared digest to differ from, so the comparison is SKIPPED —
+# and a sentence claiming it held there would assert a check that did not happen (a label must
+# be derived from the state it renders, never from an assumption about which states reach it).
+EONLY="$TMP/set-E-only"
+mkset "$EONLY" 2 E 400000 250000 20000 25000
+out=$(python3 "$AGG" --root "$EONLY" --arms E --baseline E 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "NOT ASSERTED HERE" <<<"$out" \
+   && ! grep -q "the two digests above are asserted to DIFFER" <<<"$out"; then
+  pass "5l. ...and an arm-E-ONLY set says the differ-assertion was SKIPPED rather than claiming it held — there is no other arm to differ from"
+else
+  fail "5l. an arm-E-only set must declare the assertion skipped (rc=$rc, out: $(head -16 <<<"$out"))"
+fi
+
 # ===========================================================================
 # PART 6 — THE SERVER'S SCAN-END RSS: R6.1's INPUT (#3997)
 # ===========================================================================
@@ -1851,7 +1865,7 @@ fi
 # BOTH directions, and the scan-end server RSS R6.1 is read from), 183 (+ the two #3997 roborev
 # blockers: case 5l, arm E's binary must actually DIFFER from the shared one, and cases 6j-6n,
 # the REP-level completeness of each RSS field with its own per-field census), 184 (+ the
-# all-reps-failed cause, distinct from the no-rep-recorded one).
+# all-reps-failed cause and the arm-E-only declaration), 185.
 MIN_CHECKS=170
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo

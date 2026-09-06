@@ -460,21 +460,28 @@ def validate_configuration(sessions, complete, arms) -> list[str]:
         # That is not a substitute: this tool is run STANDALONE over a session directory some
         # other invocation produced, so the property has to be established from the sessions
         # themselves.
-        others = [a for a in arms if a != BINARY_EXCEPTION_ARM]
-        if others:
+        # ONE ROUND IS ENOUGH, and only because directions 1 and 2 ran FIRST: they establish
+        # that arm E's digest is identical in every round and that the other arms share one in
+        # every session, so round `complete[0]` is representative of both sides. Read this as
+        # ordered, not as three independent checks. (`peer_arms` rather than `others`: the
+        # declaration block below binds that name to a set of DIGESTS, and two meanings for one
+        # name in one function is how a later edit picks the wrong one.)
+        peer_arms = [a for a in arms if a != BINARY_EXCEPTION_ARM]
+        if peer_arms:
             e_digest = sessions[(complete[0], BINARY_EXCEPTION_ARM)][
                 "invariants"][BINARY_EXCEPTION_FIELD]
-            shared_digest = sessions[(complete[0], others[0])][
+            shared_digest = sessions[(complete[0], peer_arms[0])][
                 "invariants"][BINARY_EXCEPTION_FIELD]
             if e_digest == shared_digest:
                 raise Unreadable(
                     f"arm {BINARY_EXCEPTION_ARM}'s {BINARY_EXCEPTION_BINARY} is the SAME BYTES"
                     f" as every other arm's: arm {BINARY_EXCEPTION_ARM} recorded"
-                    f" {e_digest!r} and arm {others[0]} recorded {shared_digest!r}."
+                    f" {e_digest!r} and arm {peer_arms[0]} recorded {shared_digest!r}."
                     f" Arm {BINARY_EXCEPTION_ARM} exists to measure the build that LINKS its"
                     " allocator, so an IDENTICAL digest means it measured the CONTROL"
                     f" program — arm {BINARY_EXCEPTION_ARM} is then a second LABEL for arm"
-                    f" {others[0]}, not a second treatment, and every figure attributed to the"
+                    f" {peer_arms[0]}, not a second treatment, and every figure attributed to"
+                    " the"
                     " linked allocator below would be run-to-run noise. Most likely cause:"
                     " `--bin-dir-e` was populated by copying the control"
                     f" `{BINARY_EXCEPTION_BINARY}` rather than the `--features jemalloc` build."
@@ -521,11 +528,28 @@ def validate_configuration(sessions, complete, arms) -> list[str]:
             str(sessions[(r, a)]["invariants"][BINARY_EXCEPTION_FIELD])
             for r in complete for a in arms if a != BINARY_EXCEPTION_ARM
         })
-        # The peer arm NAMED in the differ-assertion below. An arm-E-only set has no peer, and
-        # the assertion is skipped there rather than compared against nothing, so this sentence
-        # must not index an empty list to say so.
-        peer_arms = [a for a in arms if a != BINARY_EXCEPTION_ARM]
-        peer_label = peer_arms[0] if peer_arms else "any other arm (there is none in this set)"
+        # THE DIFFER-ASSERTION IS REPORTED FROM WHETHER IT RAN, not from the fact that the
+        # exception is active — it is skipped for an arm-E-only set, which has no peer digest to
+        # differ from, and a sentence claiming it held there would assert a check that did not
+        # happen. Derived from the SAME `peer_arms` the assertion used, so the sentence cannot
+        # name an arm the check did not compare.
+        if peer_arms:
+            differ_line = (
+                "    * AND ENFORCED IN THE OTHER DIRECTION: the two digests above are asserted"
+                f" to DIFFER. Equal digests would mean arm {BINARY_EXCEPTION_ARM} measured the"
+                " SAME program as every other arm — a second LABEL for arm"
+                f" {peer_arms[0]}, not a second treatment — so that set is REFUSED rather than"
+                " reported as a linked-allocator comparison."
+            )
+        else:
+            differ_line = (
+                "    * NOT ASSERTED HERE: arm"
+                f" {BINARY_EXCEPTION_ARM} is the ONLY arm in this set, so there is no shared"
+                " digest for its own to be compared against and the differ-assertion was"
+                " SKIPPED. Nothing below rests on arm"
+                f" {BINARY_EXCEPTION_ARM} having measured a different program from any other"
+                " arm, because no other arm was measured."
+            )
         lines += [
             f"* **ARM {BINARY_EXCEPTION_ARM} RAN A DIFFERENT `{BINARY_EXCEPTION_BINARY}` BINARY"
             " — the ONE permitted exception to the identical-bytes invariant (#3997 R3.3).**"
@@ -541,11 +565,7 @@ def validate_configuration(sessions, complete, arms) -> list[str]:
             " generator — is identical in EVERY session, arm"
             f" {BINARY_EXCEPTION_ARM} included. Any other cross-arm binary difference is still a"
             " REFUSAL.",
-            "    * AND ENFORCED IN THE OTHER DIRECTION: the two digests above are asserted to"
-            f" DIFFER. Equal digests would mean arm {BINARY_EXCEPTION_ARM} measured the SAME"
-            f" program as every other arm — a second LABEL for arm"
-            f" {peer_label}, not a second treatment —"
-            " so that set is REFUSED rather than reported as a linked-allocator comparison.",
+            differ_line,
             f"    * NOT COVERED BY IT: arm {BINARY_EXCEPTION_ARM}'s recorded `flight_allocator`"
             " reads `system` — nothing is preloaded, because the allocator is linked — so the"
             " configuration table CANNOT show the allocator difference and the binary digest is"
