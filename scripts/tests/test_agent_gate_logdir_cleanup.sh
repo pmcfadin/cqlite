@@ -98,6 +98,13 @@
 #        `$LOG_DIR` "is retained deliberately", which a terminal PASS makes false, and
 #        the reworded rationale names the #3637 disposition alongside the `_cli_tmp`
 #        cleanup it explains — roborev job 174 F2;
+#   AC30 the aged scan SEES a symlinked $TMPDIR: `GATE_LOGDIR_PARENT` is deliberately
+#        LEXICAL, so find's default `-P` mode neither dereferenced nor descended into a
+#        symlinked start point — it listed nothing, exited 0, and the block printed the
+#        MEASURED all-clear `0 REMOVED of 0 aged`, a measured zero where nothing was
+#        measured (roborev job 177 finding 1). Three legs: the shipped `-H` form over a
+#        symlinked parent, the `-P` MUTANT that reports the false zero, and a real-directory
+#        positive control;
 #   AC8  an EARLY EXIT — one that never reaches the terminal emit — still gets a
 #        disposition: the CQLITE_GATE_STUB_RUNDIR stub (exit 0) and an argv/usage
 #        refusal (exit 2, empty bundle) both leave NOTHING, and `--list` creates no
@@ -3951,6 +3958,175 @@ fi
 case_floor AC29 5
 
 # ---------------------------------------------------------------------------
+# AC30 (roborev job 177, finding 1): the aged scan must SEE a symlinked $TMPDIR.
+# ---------------------------------------------------------------------------
+# THE DEFECT, and it was a LIVE FALSE VERDICT rather than a missed cleanup:
+# `_logdir_scan_aged` ran `find "$GATE_LOGDIR_PARENT" …` in find's DEFAULT `-P` MODE, and
+# `GATE_LOGDIR_PARENT` is deliberately LEXICAL (no realpath — the removal site's containment
+# and parent-equality guards compare it TEXTUALLY). So when `$TMPDIR` names a SYMLINK to a
+# directory — macOS's `/tmp` -> `/private/tmp`, or any operator-provided symlinked temp
+# root — find neither dereferenced that start point nor descended into it: it listed NOTHING
+# and exited 0. `_logdir_scan_read` then read a MEASURED population of 0 and the block
+# printed the affirmative all-clear `logdir-sweep: 0 REMOVED of 0 aged (>7d) under <parent>
+# (…)`, INDISTINGUISHABLE from a parent that genuinely holds no aged bundles. That is a
+# measured zero emitted where nothing was measured — the exact defect the `0 RECOGNISED`
+# convention exists to prevent, in the one component whose entire product is a population
+# count.
+#
+# THREE LEGS, because a fixture that reports the right number for the wrong reason proves
+# nothing:
+#   (1) the SHIPPED gate over a SYMLINKED parent SEES the aged bundle and removes it;
+#   (2) the MUTANT control — the same fixture, the same gate with `-H` reverted to the
+#       pre-fix `-P` form by ONE VERIFIED substitution and nothing else — reports
+#       `0 REMOVED of 0 aged` and the bundle SURVIVES, so leg 1 DISCRIMINATES;
+#   (3) a POSITIVE control over a REAL, non-symlink parent, so leg 1 is about the SYMLINK
+#       and not about a fixture that would report the same anywhere.
+# Both gates under test are COPIES sitting side by side in the scratch root, so the two
+# runs differ by the mutation and by nothing about where they were read from.
+#
+# The SCAN half — the reported aged POPULATION — is asserted UNCONDITIONALLY: it is find's
+# own answer and owes nothing to the owner probe, which is the whole reason this finding is
+# about a false verdict rather than about a removal. Only the REMOVAL half rides
+# OWNER_MARKER_CAPABLE, and where that capability is absent the same keep-everything
+# degradation AC5 asserts is asserted here in its place.
+# ---------------------------------------------------------------------------
+case_mark
+ac30_survivors=""
+# ac30_plant <real-parent> <case-label> — rc 0 and AC30_BUNDLE set iff an AGED,
+# owner-marked bundle now exists under <real-parent>. Planted through the REAL path, never
+# through a symlink, so the hermeticity enumeration below (a `-P` scan of $tmp, which does
+# not follow the symlink) names any survivor exactly as this case does. Ageing goes through
+# `age_dir` — THE one mtime boundary (AC28) — so an un-aged fixture is a named failure
+# rather than a leg that holds trivially.
+AC30_BUNDLE=""
+ac30_plant() {
+  local real="$1" label="$2" b="$1/agent-gate.SYML01"
+  AC30_BUNDLE=""
+  mkdir -p "$b" && printf 'evidence\n' >"$b/marker" || return 1
+  if [ "$OWNER_MARKER_CAPABLE" = 1 ]; then
+    plant_owner_marker "$b" dead || return 1
+  else
+    # The marker the SHIPPED writer produces on a host with no establishable owner token:
+    # recorded rather than omitted, so the degradation is measured through the real artifact.
+    GATE_LOGDIR_CREATED="$b"
+    GATE_LOGDIR_OWNER_FILE="$b/$GATE_LOGDIR_OWNER_BASENAME"
+    _logdir_write_owner
+  fi
+  age_dir "$b" "$label" || return 1
+  AC30_BUNDLE="$b"
+}
+# The two copies under test, and the ONE substitution. VERIFIED BOTH WAYS: the `-H` form
+# must be GONE from the mutant and the `-P` form present exactly once. An unapplied mutation
+# would make leg 2 agree with leg 1 and the case would report a green pair having compared
+# the shipped gate with itself.
+gate30="$tmp/ac30-gate-H.sh"
+gate30m="$tmp/ac30-gate-P.sh"
+cp "$GATE" "$gate30"
+sed 's/find -H "[$]GATE_LOGDIR_PARENT"/find "$GATE_LOGDIR_PARENT"/' "$gate30" >"$gate30m"
+if [ -s "$gate30m" ] \
+   && ! grep -qF 'find -H "$GATE_LOGDIR_PARENT"' "$gate30m" \
+   && [ "$(grep -cF 'find "$GATE_LOGDIR_PARENT"' "$gate30m")" = 1 ] \
+   && grep -qF 'find -H "$GATE_LOGDIR_PARENT"' "$gate30"; then
+  ok "AC30: the MUTANT copy carries the pre-fix -P form and no -H form, and the shipped copy still carries -H (one verified substitution)"
+else
+  bad "AC30: could not build the -P mutant — leg 2 would compare the shipped gate with itself and this case could not discriminate"
+fi
+# --- LEG 2 FIRST (the mutant), so the discrimination is on record before leg 1 has had any
+#     chance to pass. Its OWN fixture: removal is destructive and the legs must not share one.
+ac30_mreal="$tmp/ac30-mut-real"; ac30_mlink="$tmp/ac30-mut-link"
+mkdir -p "$ac30_mreal"
+ln -s "$ac30_mreal" "$ac30_mlink" 2>/dev/null
+if [ -L "$ac30_mlink" ] && [ -d "$ac30_mlink" ]; then
+  ok "AC30: precondition — the mutant's \$TMPDIR really is a SYMLINK that resolves to a directory"
+else
+  bad "AC30: precondition failed — could not create a symlinked temp parent for the mutant leg; it would measure the non-symlink case"
+fi
+ac30_plant "$ac30_mreal" "AC30 mutant/symlinked" && ac30_maged="$AC30_BUNDLE" || ac30_maged=""
+sf30m="$tmp/ac30-mut-summary.txt"
+run_agg_gate "$gate30m" "$ac30_mlink" "$sf30m" PASS
+sweep30m=$(sed -n 's/^logdir-sweep: //p' "$sf30m" | tail -1)
+case "$sweep30m" in
+  *"0 REMOVED of 0 aged"*)
+    ok "AC30: MUTANT — the pre-fix -P scan prints the affirmative all-clear '0 REMOVED of 0 aged' over a parent that HOLDS an aged bundle ($sweep30m)" ;;
+  *)
+    bad "AC30: MUTANT — the pre-fix -P scan did not report '0 REMOVED of 0 aged' (got: '${sweep30m:-<none>}'), so this case does not discriminate and leg 1 proves nothing" ;;
+esac
+if [ -n "$ac30_maged" ] && [ -d "$ac30_maged" ]; then
+  ok "AC30: MUTANT — and the aged bundle SURVIVED that blind sweep, which is the leak the false all-clear concealed"
+else
+  bad "AC30: MUTANT — the aged bundle is gone, so the -P form was not what hid the population; the mutation measured something else"
+fi
+ac30_survivors="$ac30_survivors ${ac30_maged:-}"
+# --- LEG 1: the SHIPPED copy, same fixture shape, symlinked parent.
+ac30_real="$tmp/ac30-real"; ac30_link="$tmp/ac30-link"
+mkdir -p "$ac30_real"
+ln -s "$ac30_real" "$ac30_link" 2>/dev/null
+if [ -L "$ac30_link" ] && [ -d "$ac30_link" ]; then
+  ok "AC30: precondition — the shipped leg's \$TMPDIR really is a SYMLINK that resolves to a directory"
+else
+  bad "AC30: precondition failed — could not create a symlinked temp parent; leg 1 would measure the non-symlink case"
+fi
+ac30_plant "$ac30_real" "AC30 shipped/symlinked" && ac30_aged="$AC30_BUNDLE" || ac30_aged=""
+sf30="$tmp/ac30-summary.txt"
+run_agg_gate "$gate30" "$ac30_link" "$sf30" PASS
+sweep30=$(sed -n 's/^logdir-sweep: //p' "$sf30" | tail -1)
+case "$sweep30" in
+  ""|*"of 0 aged"*)
+    bad "AC30: the SHIPPED scan reported NO aged population under a SYMLINKED \$TMPDIR (got: '${sweep30:-<none>}') — a MEASURED zero where nothing was measured" ;;
+  *" aged (>7d)"*)
+    ok "AC30: the SHIPPED scan reports a NON-ZERO aged population under a SYMLINKED \$TMPDIR ($sweep30)" ;;
+  *)
+    bad "AC30: the SHIPPED sweep line is missing or malformed under a symlinked \$TMPDIR (got: '${sweep30:-<none>}')" ;;
+esac
+if [ "$OWNER_MARKER_CAPABLE" = 1 ]; then
+  if [ -n "$ac30_aged" ] && [ ! -d "$ac30_aged" ]; then
+    ok "AC30: and the aged, verifiably-dead bundle under the symlink's target was actually REMOVED"
+  else
+    bad "AC30: the aged, verifiably-dead bundle under the symlink's target SURVIVED — the scan saw it but the removal never reached it"
+  fi
+else
+  # The declared platform residual AC5 carries: with no establishable owner token every
+  # candidate reads cannot-tell, so the SCAN is the half this host can measure and
+  # keep-everything is asserted positively in place of the removal.
+  if [ -n "$ac30_aged" ] && [ -d "$ac30_aged" ]; then
+    ok "AC30: DEGRADED — no establishable owner token, so the SEEN candidate reads cannot-tell and is KEPT; the scan half above is what this host measures"
+  else
+    bad "AC30: DEGRADED — a bundle whose owner could not be established was removed; cannot-tell took the permissive branch"
+  fi
+  ac30_survivors="$ac30_survivors ${ac30_aged:-}"
+fi
+# --- LEG 3: the POSITIVE CONTROL on a REAL, non-symlink parent — same fixture, same copy.
+ac30_plain="$tmp/ac30-plain"
+mkdir -p "$ac30_plain"
+ac30_plant "$ac30_plain" "AC30 shipped/real-dir" && ac30_paged="$AC30_BUNDLE" || ac30_paged=""
+sf30p="$tmp/ac30-plain-summary.txt"
+run_agg_gate "$gate30" "$ac30_plain" "$sf30p" PASS
+sweep30p=$(sed -n 's/^logdir-sweep: //p' "$sf30p" | tail -1)
+case "$sweep30p" in
+  ""|*"of 0 aged"*)
+    bad "AC30: POSITIVE CONTROL — the shipped scan reported no aged population over a REAL directory (got: '${sweep30p:-<none>}'), so the fixture itself is unmeasured and the mutant's zero says nothing about symlinks" ;;
+  *" aged (>7d)"*)
+    ok "AC30: POSITIVE CONTROL — the same fixture over a REAL, non-symlink parent also reports a NON-ZERO aged population ($sweep30p)" ;;
+  *)
+    bad "AC30: POSITIVE CONTROL — the sweep line is missing or malformed over a real parent (got: '${sweep30p:-<none>}')" ;;
+esac
+if [ "$OWNER_MARKER_CAPABLE" = 1 ]; then
+  if [ -n "$ac30_paged" ] && [ ! -d "$ac30_paged" ]; then
+    ok "AC30: POSITIVE CONTROL — and that bundle was removed too, so the two parents behave identically once the start point resolves"
+  else
+    bad "AC30: POSITIVE CONTROL — the bundle under a REAL parent survived, so this fixture never exercised the removal path at all"
+  fi
+else
+  if [ -n "$ac30_paged" ] && [ -d "$ac30_paged" ]; then
+    ok "AC30: POSITIVE CONTROL — DEGRADED, kept for the same cannot-tell reason as leg 1, so both parents degrade identically"
+  else
+    bad "AC30: POSITIVE CONTROL — DEGRADED, but the bundle was removed with no verifiable owner"
+  fi
+  ac30_survivors="$ac30_survivors ${ac30_paged:-}"
+fi
+case_floor AC30 9
+
+# ---------------------------------------------------------------------------
 # Hermeticity: this file's own gate runs leave nothing outside their scratch dirs.
 # ---------------------------------------------------------------------------
 # SET EQUALITY, never a count comparison, and never a `-ge` bound (#3637, roborev job
@@ -4025,6 +4201,12 @@ done
 for rv in ${race_survivors:-}; do
   expect_dir "$rv" "AC20 substituted pathname the removal site declined"
 done
+# AC30's survivors: the MUTANT leg's aged bundle, which its pre-fix `-P` scan could not
+# list at all — that invisibility IS the finding — plus, on a host with no establishable
+# owner token, the bundles the shipped legs SAW and correctly declined to remove.
+for sv in ${ac30_survivors:-}; do
+  expect_dir "$sv" "AC30 aged bundle a blind -P scan never listed, or cannot-tell KEPT"
+done
 # The discovered set is UNBOUNDED IN DEPTH on purpose: the AC7 case runs under
 # "$tmp/paren (dir)/td", so its bundle sits at depth 3 and the old -maxdepth 2 scan
 # could not see it — an expected survivor the accounting never looked at.
@@ -4070,15 +4252,16 @@ fi
 # A FLOOR, not an equality, and the margin is deliberate: the owner-marker capability is a
 # LINUX-ONLY dependency (AC5/AC15/AC17/AC18/AC19/AC20 assert the keep-everything degradation
 # instead where it is absent) and those branches do not emit the same number of verdicts, so
-# an exact total would red on macOS for a reason that is not a regression. Measured 261 on
-# this fleet's Linux boxes (226 before AC27/AC28/AC29 raised it by 34 unconditional verdicts,
-# 200 before AC25/AC26 raised it by 26); the floor is what notices a DELETED CASE — every
+# an exact total would red on macOS for a reason that is not a regression. Measured 271 on
+# this fleet's Linux boxes (261 before AC30 raised it by 10 unconditional verdicts, 226
+# before AC27/AC28/AC29 raised it by 34, 200 before AC25/AC26 raised it by 26); the floor is
+# what notices a DELETED CASE — every
 # case in this file contributes at least 5 verdicts — rather than a drifting count.
 _total_verdicts=$((PASS + FAIL))
-if [ "$_total_verdicts" -ge 246 ]; then
-  ok "suite floor: $_total_verdicts verdicts reported (floor 246) — no case was silently dropped"
+if [ "$_total_verdicts" -ge 256 ]; then
+  ok "suite floor: $_total_verdicts verdicts reported (floor 256) — no case was silently dropped"
 else
-  bad "suite floor: only $_total_verdicts verdicts reported (floor 246) — at least one case was deleted or died before its assertions"
+  bad "suite floor: only $_total_verdicts verdicts reported (floor 256) — at least one case was deleted or died before its assertions"
 fi
 
 printf '\n%s\n' "scripts/tests/test_agent_gate_logdir_cleanup.sh   passed: $PASS  failed: $FAIL"
