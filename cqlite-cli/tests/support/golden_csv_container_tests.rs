@@ -1252,6 +1252,117 @@ fn a_key_refusal_is_asked_of_the_keys_whole_value_tree() {
     assert_eq!(node_refusal(&json!([["a, b"]]), Some(&outer)), None);
 }
 
+/// ONE UNRENDERABLE KEY MUST NOT COST ITS SIBLINGS THEIR REFUSAL — the fail-open
+/// round 2 closed (roborev job 444, issue #3815).
+///
+/// A MIXED node: entry 0's key is not a `toJSONString` document at all (the
+/// `getString` cell-path shape), entries 1 and 2 render ALIKE. The whole-map bail
+/// this replaces answered "no refusal at any reach" for the whole node, so the
+/// colliding pair was canonicalized and PAIRED — and the decoder resolved both to
+/// the FIRST of them, which is how #1491 finding T1 reported correct CLI egress as
+/// divergent. The refusal exists precisely to stop that.
+///
+/// The bail was on `origin/main` too, at the head of `decode_does_not_recover`'s
+/// object arm one line above the duplicate check it gated, so this closes a
+/// pre-existing hole rather than one #3815 opened.
+#[test]
+fn one_unrenderable_key_does_not_cost_its_siblings_their_refusal() {
+    let ty = ty_of("frozen<map<frozen<key_part>, int>>");
+    let golden = json!({
+        "charlie\\:3:8": 80,
+        "{\"label\": null, \"rank\": 1}": 10,
+        "{\"label\": \"null\", \"rank\": 1}": 20
+    });
+    let fields = match golden.as_object() {
+        Some(fields) => fields,
+        None => panic!("the golden is an object"),
+    };
+    let key_ty = match &ty {
+        CqlType::Map(key_ty, _) => key_ty,
+        _ => panic!("the declared type is a map"),
+    };
+    // The PREMISE: entry 0's key really does not render, and 1 and 2 really do
+    // render alike. Both halves stated, so a fixture-spelling change cannot make
+    // this test vacuous.
+    let renderings: Vec<Option<String>> = fields
+        .keys()
+        .map(|key| entry_key_rendering(&ty, key))
+        .collect();
+    assert_eq!(
+        renderings[0], None,
+        "premise: entry 0's key does not render"
+    );
+    assert!(
+        renderings[1].is_some() && renderings[1] == renderings[2],
+        "premise: entries 1 and 2 render alike: {renderings:?}"
+    );
+
+    let refusals = map_key_refusals(fields, key_ty);
+    assert_eq!(
+        refusals.len(),
+        3,
+        "the answer is PER GOLDEN ENTRY, at full length: {refusals:?}"
+    );
+    assert_eq!(
+        refusals[0], None,
+        "an unrenderable key is a DIVERGENCE for the comparison to report, not a \
+         refusal — and it says nothing about its siblings"
+    );
+    for i in [1usize, 2] {
+        let why = match &refusals[i] {
+            Some(why) => why,
+            None => panic!("entry {i} of a colliding PAIR must stay suppressed: {refusals:?}"),
+        };
+        assert!(why.contains("SAME key text"), "{why}");
+        // THE INDICES ARE THE GOLDEN'S, not indices into a compacted list of the
+        // renderable keys — which would name entries 0 and 1 and so blame the very
+        // key that is NOT ambiguous.
+        assert!(
+            why.contains("entries 1 and 2 "),
+            "the reason must name the GOLDEN's entry indices: {why}"
+        );
+    }
+}
+
+/// …and the node-level answer for that same mixed shape is a REFUSAL, not `None`.
+///
+/// This is the fail-open guard: `decode_does_not_recover` reaches the key-scoped
+/// question by TWO routes, and the second one — where the body causes cannot be
+/// evaluated because a key does not render — used to return `None`. VERIFIED to RED
+/// against that bug: restoring either whole-map bail (the
+/// `collect::<Option<Vec<_>>>()` in `map_key_refusals`, or `?` on the object arm's
+/// `keys`) makes this case answer `None` and this test fail.
+#[test]
+fn a_mixed_key_node_does_not_fail_open() {
+    let ty = ty_of("frozen<map<frozen<key_part>, int>>");
+    let golden = json!({
+        "charlie\\:3:8": 80,
+        "{\"label\": null, \"rank\": 1}": 10,
+        "{\"label\": \"null\", \"rank\": 1}": 20
+    });
+    let (reach, why) = match super::node_refusal_reach(&golden, Some(&ty), Kinding::Natural) {
+        Some(found) => found,
+        None => panic!(
+            "FAIL-OPEN: an unrenderable key silenced the ambiguity between two OTHER \
+             keys, so the colliding pair would be paired and mis-guided (#1491 T1)"
+        ),
+    };
+    assert_eq!(reach, Reach::MapKeys, "{why}");
+    assert!(why.contains("SAME key text"), "{why}");
+    // The CONTROL: the same unrenderable key with NO colliding siblings is still not
+    // refused at all — so this narrows rather than refusing every mixed node.
+    let no_collision = json!({
+        "charlie\\:3:8": 80,
+        "{\"label\": \"a\", \"rank\": 1}": 10,
+        "{\"label\": \"b\", \"rank\": 1}": 20
+    });
+    assert_eq!(
+        super::node_refusal_reach(&no_collision, Some(&ty), Kinding::Natural),
+        None,
+        "a key that does not render is a divergence to REPORT, never a refusal"
+    );
+}
+
 /// A BODY cause DOMINATES a key-scoped one: a node whose entries cannot be split
 /// must not be reported [`Reach::MapKeys`], because that reach PROMISES the entry
 /// boundaries are recoverable and the decoder splits on that promise (#3815).

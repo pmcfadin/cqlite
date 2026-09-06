@@ -721,7 +721,27 @@ fn decode_does_not_recover(
     }
     // An undeclared type is not refused: see the note on `node_refusal`'s `ty`.
     let ty = ty?;
-    let rendering = golden_rendering(golden, Some(ty), kinding)?;
+    let Some(rendering) = golden_rendering(golden, Some(ty), kinding) else {
+        // THE GOLDEN'S OWN RENDERING CANNOT BE SYNTHESIZED AT ALL, because some
+        // member or key is not a spelling the declared type has. Deliberately NOT a
+        // refusal — the shape disagreement is a divergence for the comparison to
+        // report, not a limit of the flat format.
+        //
+        // But the KEY-SCOPED question is PER KEY and survives it (#3815 round 2).
+        // This is the OUTERMOST of the three whole-map bails that used to swallow it
+        // — it dominates the object arm below, so fixing only the inner two left the
+        // fail-open in place and the guard test
+        // `tests::a_mixed_key_node_does_not_fail_open` still RED. With one key
+        // unrenderable, two SIBLING keys that render ALIKE went unrefused at any
+        // reach, the colliding pair was canonicalized and paired, and the decoder
+        // resolved both to the first of them — #1491 finding T1, the false
+        // divergence this refusal exists to prevent.
+        return match golden {
+            Value::Object(fields) => key_scoped_refusal(fields, ty),
+            // An array has no keys, so it has no key-scoped cause.
+            _ => None,
+        };
+    };
     let parts = match members(&rendering, ty) {
         Ok(parts) => parts,
         // The splitter cannot read the golden's own rendering at all. `members`
@@ -766,20 +786,17 @@ fn decode_does_not_recover(
                 .map(|key| entry_key_rendering(ty, key))
                 .collect::<Option<Vec<String>>>()
             else {
-                // A key that is not a spelling of this declared type at all. The
-                // node's BODY causes cannot be EVALUATED — each is asked of the
-                // golden's own rendering, which needs every key — and that is
-                // deliberately NOT a refusal, per the note above.
+                // A key that is not a spelling of this declared type at all: not a
+                // refusal, per the note above, and the KEY-SCOPED question survives
+                // it per key (#3815 round 2).
                 //
-                // THE KEY-SCOPED QUESTION SURVIVES IT, PER KEY (#3815 round 2).
-                // Returning `None` here instead was a FAIL-OPEN: two SIBLING keys
-                // that render alike went unrefused at any reach, so the decoder
-                // resolved both to the first of them and reported correct egress as
-                // divergent (#1491 finding T1). It grants the decoder no new licence
-                // either — a node that is not BODY-refused is split whether the
-                // answer is `MapKeys` or `None`, and the only difference is that
-                // `decode_object` suppresses the ambiguous KEYS instead of guessing
-                // one.
+                // SUBSUMED TODAY, and kept anyway: `golden_rendering`'s object arm
+                // renders every key through `entry_key_rendering` and propagates its
+                // `None`, so a key that does not render already took the branch at
+                // the head of this function. The two routes are given the SAME
+                // answer so they cannot disagree — and so that narrowing
+                // `golden_rendering`'s key requirement later cannot silently
+                // reintroduce the fail-open here.
                 return key_scoped_refusal(fields, ty);
             };
             let want = fields
