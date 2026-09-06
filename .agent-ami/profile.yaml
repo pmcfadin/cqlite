@@ -39,7 +39,43 @@ env:
   # Both caches live on the DURABLE volume so the golden snapshot captures them;
   # under $HOME they are lost with the instance and every worker rebuilds cold.
   SCCACHE_DIR: "{data_mount}/sccache"
-  SCCACHE_CACHE_SIZE: "30G"
+  # DERIVED AS A BRACKET, NOT A ROUND NUMBER (issue #3727). `50G` sits inside an interval whose
+  # BOTH ENDS WERE MEASURED, not argued:
+  #   LOWER, measured on box3's own production cache: with the cap made non-binding, the fleet's
+  #   real workload pushed the cache PAST the old 10 GiB ceiling within ~19 minutes
+  #   (10380303858 -> 11516555977 bytes, 18:14Z -> 18:29Z 2026-09-01, continuing to 13612750401 by
+  #   18:58Z) — so the working set EXCEEDS 10 GiB, proven on the cache being sized rather than
+  #   inferred from a hit rate.
+  #   UPPER, lane-3358's independent measurement on box2: (10 GiB, ~56 GB], carrying their own
+  #   caveat that thrashing inflates the upper end because an evicted-then-recompiled unit is
+  #   counted twice.
+  # 50G is inside that bracket near the top, leaving headroom not to evict within one gate, and it
+  # is affordable on a 295G device. The previous value was a round `30G` with no derivation.
+  # FALSIFIABLE, which is the point of shipping it this way: lane-3358's criterion is "the cache
+  # never evicts during one full gate", and since #3727 every gate SUMMARY carries
+  # `sccache-used=<bytes>(<pct>%)` beside `sccache-cap=`, so ANY gate can refute it. If a SUMMARY
+  # ever shows sccache-used near 100% of cap, the working set has outgrown this value and the
+  # bracket must be RE-DERIVED — never just raised while declaring victory (issue #3727 AC6).
+  #
+  # WHY THE OLD VALUE WAS INEFFECTIVE, WHICH IS THE WHOLE OF #3727: it was declared HERE and
+  # NEVER PERSISTED. This block's env reaches the commands the LAUNCHER runs, so the variable
+  # existed only inside those processes — measured, a fresh PAM session (`sudo -i`) and
+  # `env -i bash -lc` both reported it UNSET, while SCCACHE_DIR two lines up IS in
+  # /etc/environment — so the fleet-effective cap was sccache's own 10 GiB DEFAULT on boxes
+  # provisioned to hold 50G, and no artifact said so. The persistence that makes it
+  # real is `--fix-sccache-cap` in verify.run below, which writes /etc/environment (read by PAM at
+  # session creation) and then VERIFIES the value against a fresh session AND the running sccache
+  # server. Presence in a config file and visibility to the process that reads it are different
+  # facts (#3414), and here there is a third: the sccache SERVER reads this at STARTUP, so a
+  # server already up keeps its old cap until `sccache --stop-server`.
+  #
+  # THE SPELLING IS PART OF THE VALUE. sccache accepts `<digits>[KkMmGgTt]` (binary multipliers)
+  # and SILENTLY DISCARDS anything else — measured, `30GiB` and `30GB` both yield the 10 GiB
+  # default with no diagnostic, and a bare integer means BYTES. Keep the suffix form.
+  #
+  # This literal must equal SCC_ENV_VALUE in scripts/bootstrap-agent-machine.sh (the single source
+  # of truth for the fleet cap); scripts/tests/test_bootstrap_agent_machine.sh asserts they agree.
+  SCCACHE_CACHE_SIZE: "50G"
   CQLITE_DATASETS_ROOT: "{data_mount}/datasets"
 verify:
   # --fix-credentials --strict (issue #3369). Two independent gaps, both real on a box
@@ -72,7 +108,38 @@ verify:
   # boundary --yes would have crossed. The write is idempotent and NEVER rewrites an existing
   # value, and the verdict still comes from probing a fresh session, so a box that cannot be
   # pinned (no passwordless sudo) stays non-passing and --strict still exits 1.
-  run: "bash scripts/bootstrap-agent-machine.sh --fix-credentials --fix-gate-pin --strict"
+  # --fix-sccache-cap (issue #3727) is the THIRD narrow repair, added for the same reason and in
+  # the same shape as --fix-credentials and --fix-gate-pin above: the env block's
+  # SCCACHE_CACHE_SIZE reaches launcher-created processes only, so without this flag every new
+  # instance arrives with an UNPERSISTED cap and its sccache server enforces the 10 GiB default.
+  # Persisting an env line is not a toolchain install, so verify stays a verification step. The
+  # write is idempotent and NEVER rewrites an existing value, and the verdict still comes from
+  # probing a fresh session AND the running server, so a box that cannot be capped stays
+  # non-passing and --strict still exits 1.
+  #
+  # THIS STEP MUST BE SATISFIABLE ON A HEALTHY BOX, AND FOR ONE ROUND IT WAS NOT (#3727 roborev
+  # rounds 426 + 428). Section 5b2 measures ONE launch context (a non-login PAM session) while a
+  # LOGIN shell runs /etc/profile.d after pam_env and can export a DIFFERENT value -- measured on
+  # box3, same tree: a detached gate reported sccache-cap=32212254720 while a lane-shell --lite
+  # reported 53687091200. An [ok] there certified a cap no gate had to receive, so the section's
+  # strongest verdict is SCOPED-NON-LOGIN and it is NEVER an [ok]. Round 426 got that right and
+  # then emitted it as a [warn] -- and `--strict` fails on any warning, so this command could not
+  # print `All checks green.` or exit 0 on ANY host, forever, including a perfectly provisioned
+  # one, because nothing an operator does on a box clears a limit of what the script MEASURES.
+  # A verification that always fails is one people waive, and a waived preflight checks nothing:
+  # strictly worse than the false [ok] it replaced.
+  # SCOPED-NON-LOGIN is therefore a [gap] -- bootstrap's third status class, as loud as a [warn],
+  # never a success token, counted and NAMED separately in the summary -- and `--strict` keys on
+  # warnings alone. So a healthy box reaches `All checks green.` (the `expect` below matches)
+  # WITH the [gap] line printed beside it: green means nothing on THIS box needs attention, not
+  # that every property was established. The cap a gate actually gets is still NOT certified by
+  # this step; #3946 owns that, the per-run authority is the gate's own
+  # `accelerators: ... sccache-cap=<bytes>` token, and the [gap] line says exactly that on every
+  # run. `expect` is unchanged, and the passability of this exact command is asserted by
+  # scripts/tests/test_bootstrap_agent_machine.sh (case 12b-v), which derives the flags and the
+  # expected text FROM THIS FILE and requires the [gap] to survive the green -- so neither an
+  # always-red contract nor a silent green can ship again.
+  run: "bash scripts/bootstrap-agent-machine.sh --fix-credentials --fix-gate-pin --fix-sccache-cap --strict"
   expect: "All checks green."
 hooks:
   # Deliberately EMPTY (issue #3369). The credential wiring belongs in verify.run above,

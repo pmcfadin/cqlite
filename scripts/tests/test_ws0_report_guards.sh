@@ -125,6 +125,22 @@ fails=0
 checks=0
 pass() { checks=$((checks + 1)); echo "ok   - $1"; }
 fail() { checks=$((checks + 1)); echo "FAIL - $1"; fails=$((fails + 1)); }
+# out_has <text> <grep-args...>: a SIGPIPE-SAFE text predicate — an instance of issue #3862, which
+# this file's `awk … | grep -q` sites hit for real. Under `set -o pipefail` (line 97 above),
+# `<producer> | grep -q PAT` can return **141 WITH THE MATCH PRESENT**: grep -q exits at the first
+# match and CLOSES the pipe, so the producer's next write dies and pipefail promotes that to the
+# pipeline's status. It is therefore a RACE at any payload larger than one stdio flush (~4 KiB), not
+# a size threshold — which is why it is load-sensitive and why the same suite passes on an idle box.
+#
+# MEASURED on this branch: the pair at the #3096 banner check extracts **11,592 bytes** of the
+# driver and is the site that FAILED a 51-minute gate of record (`the driver must print its
+# selection as PARTIAL/FULL up front`), while `scripts/perf/ws0-baseline.sh` demonstrably contains
+# both `PARTIAL MATRIX` and `FULL MATRIX`. The other three extractions measure 590 and 780 bytes —
+# one stdio flush each, so exactly one write occurs and it necessarily precedes any match. They are
+# converted anyway: conversion is free, whereas a bound that has to be re-measured every time
+# `scripts/perf/*.sh` grows is not. A here-string is not a pipeline, so grep's own status is the
+# answer.
+out_has() { local __t="$1"; shift; grep -q "$@" <<< "$__t"; }
 
 [ -f "$DRIVER" ] || { echo "FAIL - missing $DRIVER"; exit 1; }
 [ -f "$REPORT" ] || { echo "FAIL - missing $REPORT"; exit 1; }
@@ -1026,8 +1042,9 @@ expect_report_reject "a PARTIAL collection of a selected arm is FATAL (the origi
 # The DRIVER states the selection too, at the top of the transcript — before any
 # measurement exists to be misread. Structural, because reaching the banner needs a
 # real corpus: the branch must exist and must distinguish the two cases.
-if awk '/^echo "=== issue #3096/,0' "$DRIVER" | grep -q 'PARTIAL MATRIX' \
-  && awk '/^echo "=== issue #3096/,0' "$DRIVER" | grep -q 'FULL MATRIX'; then
+ws0_3096_banner=$(awk '/^echo "=== issue #3096/,0' "$DRIVER")
+if out_has "$ws0_3096_banner" 'PARTIAL MATRIX' \
+  && out_has "$ws0_3096_banner" 'FULL MATRIX'; then
   pass "the driver's banner distinguishes a PARTIAL from a FULL matrix"
 else
   fail "the driver must print its selection as PARTIAL/FULL up front"
@@ -1132,7 +1149,7 @@ expect_driver_accepts "'045s' is accepted for --step-duration (pre-fix: a bash b
   --corpus "$TMP/corpus" --temp warm --step-duration 045s
 # A structural check that no arithmetic path can regress: every multiplication of a
 # parsed duration component must carry `10#`.
-if awk '/^parse_duration_ms\(\)/,/^}/' "$ARGS_LIB" | grep -q '\$((n \* 1000))'; then
+if out_has "$(awk '/^parse_duration_ms\(\)/,/^}/' "$ARGS_LIB")" '\$((n \* 1000))'; then
   fail "parse_duration_ms still multiplies a bare \$n — leading zeros would be octal again"
 else
   pass "parse_duration_ms feeds no bare component into arithmetic (structural)"
@@ -1185,7 +1202,7 @@ else
 fi
 # The cause code must survive the call. `if ! cmd; then … $? …` reads 0 — `!` REPLACES
 # the status — which silently collapsed both causes back into the format branch.
-if awk '/^for _spec in "step-duration/,/^done$/' "$DRIVER" | grep -q '_rc=0 || _rc=\$?'; then
+if out_has "$(awk '/^for _spec in "step-duration/,/^done$/' "$DRIVER")" '_rc=0 || _rc=\$?'; then
   pass "the duration cause code is captured on its own statement (not through \`if !\`)"
 else
   fail "the duration rc must be captured directly; \`if ! cmd\` discards it"
@@ -1212,7 +1229,7 @@ if awk '/^require_positive_int\(\)/,/^}/' "$ARGS_LIB" \
 else
   fail "require_positive_int must test the digit count before any arithmetic"
 fi
-if awk '/^parse_duration_ms\(\)/,/^}/' "$ARGS_LIB" | grep -q 'DURATION_MAX_DIGITS'; then
+if out_has "$(awk '/^parse_duration_ms\(\)/,/^}/' "$ARGS_LIB")" 'DURATION_MAX_DIGITS'; then
   pass "parse_duration_ms caps the digit count (structural)"
 else
   fail "parse_duration_ms must cap the digit count before multiplying"

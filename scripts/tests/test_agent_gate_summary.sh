@@ -65,6 +65,16 @@ bad()  { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 # so it can never be mistaken for a passing assertion (issue #3249 AC3).
 skipped() { printf 'skip - %s\n' "$1"; SKIPPED_TOOLING=$((SKIPPED_TOOLING + 1)); }
 
+# out_has <text> <grep-args...>: a SIGPIPE-SAFE text predicate (issue #3727 / #3862). Under
+# `set -o pipefail`, `out_has "$big" PAT` can return **141 with the match present**:
+# `grep -q` exits at the first match and CLOSES the pipe, so printf's next write dies — which makes
+# it a RACE at any payload above bash's ~4 KiB stdio chunk rather than a clean threshold (measured:
+# 64 KiB always fine, 128 KiB always 141, and a 41 KB whole-function payload in case 52 flaked once
+# under load, reporting `missing: counts` while the pattern was present in the text it printed). A
+# here-string is not a pipeline, so grep's own status is the answer and pipefail has nothing to
+# override. Any flags that followed `-q` are passed through unchanged.
+out_has() { local __t="$1"; shift; grep -q "$@" <<< "$__t"; }
+
 # assert_complete <label> <file>: file must contain start marker, end marker,
 # RESULT line, and a representative stage line.
 assert_complete() {
@@ -115,7 +125,13 @@ trap 'rm -rf "$tmp"' EXIT
 # because that is the order accelerators_line emits them; both are Linux-only and
 # therefore both are optional here, so a Darwin line (which ends at
 # sccache-health) and a Linux line (which carries both) satisfy one grammar.
-ACCEL_LINE_RE='^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial) sccache-health=(na|ok|warn)( mold=(linked|overridden|present-unconfigured|absent))?( perf=(ok|kptr-restricted|absent|unknown|paranoid-[0-9]+))?$'
+# The two #3727 capacity tokens are UNCONDITIONAL and platform-independent, so they are inserted
+# BEFORE the optional Linux-only mold/perf groups rather than appended: that keeps ` perf=` the
+# last token on a Linux line, which is what case 9c-iv's sentinel position depends on, and keeps
+# one grammar serving both a Darwin line (ending at sccache-used) and a Linux one.
+ACCEL_CAP_RE='sccache-cap=([0-9]+|unmeasured\((no-stats|unparsed|not-unique|no-binary|no-size|no-running-server|unattributed)\)|na\(sccache-not-in-use\))'
+ACCEL_USED_RE='sccache-used=([0-9]+\(([0-9]+%|cap-zero|pct-[a-z-]+)\)|unmeasured\((no-stats|unparsed|not-unique|no-binary|no-size)\)|na\(sccache-not-in-use\))'
+ACCEL_LINE_RE="^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial) sccache-health=(na|ok|warn) $ACCEL_CAP_RE $ACCEL_USED_RE( mold=(linked|overridden|present-unconfigured|absent))?( perf=(ok|kptr-restricted|absent|unknown|paranoid-[0-9]+))?$"
 
 # accel_line_of <file>: print the FIRST `accelerators: ` line of <file> (rc 0), or
 # print nothing (rc 1). `grep -m1` + capture-to-a-variable, deliberately with NO
@@ -458,7 +474,7 @@ classify_out=$(printf '%s\n' \
   "cqlite-cli/tests/issue_1388_compact_major_drop.rs" \
   | bash "$GATE" --classify-test-targets 2>/dev/null)
 # Nested helper + module files must be EXCLUDED (testname is the middle field).
-if printf '%s\n' "$classify_out" | grep -qE '\|(data_multi|mod)\|'; then
+if out_has "$classify_out" -E '\|(data_multi|mod)\|'; then
   bad "classify: nested helper (write_read_roundtrip/data_multi.rs or common/mod.rs) wrongly picked as a --test target"
   echo "------- classify output -------"; printf '%s\n' "$classify_out"; echo "-------------------------------"
 else
@@ -466,7 +482,7 @@ else
 fi
 # A real direct integration-test target must still be picked, mapped to its pkg
 # (features field empty for a target with no required-features).
-if printf '%s\n' "$classify_out" | grep -qxF "cqlite-core|compact_command|"; then
+if out_has "$classify_out" -xF "cqlite-core|compact_command|"; then
   ok "classify: real integration-test target (compact_command) picked with correct package"
 else
   bad "classify: real integration-test target compact_command was NOT picked"
@@ -475,8 +491,8 @@ fi
 # Finding 1: a top-level tests/*.rs target is owned by BOTH the workspace-root
 # `cqlite` package AND the cqlite-integration-tests crate; BOTH must be emitted
 # so the root package's target is never silently dropped from --lite selection.
-if printf '%s\n' "$classify_out" | grep -qxF "cqlite|cassandra5_header_tests|" \
-   && printf '%s\n' "$classify_out" | grep -qxF "cqlite-integration-tests|cassandra5_header_tests|"; then
+if out_has "$classify_out" -xF "cqlite|cassandra5_header_tests|" \
+   && out_has "$classify_out" -xF "cqlite-integration-tests|cassandra5_header_tests|"; then
   ok "classify: root-cqlite + integration-tests BOTH emitted for a top-level tests/*.rs target (finding 1)"
 else
   bad "classify: top-level tests/*.rs target did NOT emit both owning packages (root cqlite dropped)"
@@ -484,7 +500,7 @@ else
 fi
 # Finding 2: a target that declares required-features must carry them through so
 # --lite compiles it WITH those features instead of invoking it feature-less.
-if printf '%s\n' "$classify_out" | grep -qxF "cqlite-cli|issue_1388_compact_major_drop|write-support"; then
+if out_has "$classify_out" -xF "cqlite-cli|issue_1388_compact_major_drop|write-support"; then
   ok "classify: required-features (write-support) passed through for a feature-gated target (finding 2)"
 else
   bad "classify: required-features NOT passed through for issue_1388_compact_major_drop"
@@ -510,29 +526,29 @@ owners_out=$(printf '%s\n' \
   "docs/some-doc.md" \
   | bash "$GATE" --classify-package-owners 2>/dev/null)
 # A currently-missed tools/* member must resolve to ITS package (has a lib -> 1).
-if printf '%s\n' "$owners_out" | grep -qxF "format-validator|1"; then
+if out_has "$owners_out" -xF "format-validator|1"; then
   ok "owners: tools/format-validator resolves to its own package (was falling through)"
 else
   bad "owners: tools/format-validator/src/lib.rs did NOT resolve to format-validator"
   echo "------- owners output -------"; printf '%s\n' "$owners_out"; echo "-----------------------------"
 fi
 # A bindings/* member must resolve to its cdylib package (no lib target -> 0).
-if printf '%s\n' "$owners_out" | grep -qxF "cqlite-py|0" \
-   && printf '%s\n' "$owners_out" | grep -qxF "cqlite-node|0"; then
+if out_has "$owners_out" -xF "cqlite-py|0" \
+   && out_has "$owners_out" -xF "cqlite-node|0"; then
   ok "owners: bindings/{python,node} resolve to cqlite-py|0 / cqlite-node|0 (cdylib, no --lib)"
 else
   bad "owners: bindings/* did NOT resolve to their packages with has_lib=0"
   echo "------- owners output -------"; printf '%s\n' "$owners_out"; echo "-----------------------------"
 fi
 # The examples crate must resolve to its own package (has a lib -> 1).
-if printf '%s\n' "$owners_out" | grep -qxF "cqlite-examples|1"; then
+if out_has "$owners_out" -xF "cqlite-examples|1"; then
   ok "owners: examples/ resolves to cqlite-examples (was falling through)"
 else
   bad "owners: examples/basic.rs did NOT resolve to cqlite-examples"
   echo "------- owners output -------"; printf '%s\n' "$owners_out"; echo "-----------------------------"
 fi
 # A nested member (tests/format-compatibility) must win over its parent tests/.
-if printf '%s\n' "$owners_out" | grep -qxF "format-compatibility-tests|0"; then
+if out_has "$owners_out" -xF "format-compatibility-tests|0"; then
   ok "owners: nested tests/format-compatibility wins longest-prefix over tests/"
 else
   bad "owners: tests/format-compatibility did NOT resolve to format-compatibility-tests"
@@ -541,7 +557,7 @@ fi
 # The workspace-root `cqlite` package (manifest dir == repo root) is a degenerate
 # catch-all prefix and must NOT be a path owner — a docs-only change resolves to
 # NO package (falls through to the cqlite-core --lib default), not to root cqlite.
-if printf '%s\n' "$owners_out" | grep -q '^cqlite|'; then
+if out_has "$owners_out" '^cqlite|'; then
   bad "owners: repo-root 'cqlite' package wrongly claimed a path (degenerate catch-all)"
   echo "------- owners output -------"; printf '%s\n' "$owners_out"; echo "-----------------------------"
 else
@@ -587,9 +603,9 @@ fi
 #     message naming the missing tooling. Assert the message (a) names jq AND
 #     python3, and (b) does NOT advertise a narrowed `cqlite-core --lib` run.
 noparser_msg=$(AGENT_GATE_TEST_NO_METADATA_PARSER=1 bash "$GATE" --scoped-noparser-fail-msg 2>/dev/null)
-if printf '%s\n' "$noparser_msg" | grep -qF 'jq' \
-   && printf '%s\n' "$noparser_msg" | grep -qF 'python3' \
-   && ! printf '%s\n' "$noparser_msg" | grep -qF -- '--lib'; then
+if out_has "$noparser_msg" -F 'jq' \
+   && out_has "$noparser_msg" -F 'python3' \
+   && ! out_has "$noparser_msg" -F -- '--lib'; then
   ok "no-parser: FAILS loudly naming jq+python3 (never silently narrows to cqlite-core --lib)"
 else
   bad "no-parser: fail message does not name the missing tools (or still advertises a --lib narrowing)"
@@ -618,14 +634,14 @@ py_only=$(printf '%s\n' \
 # The advertised plan string is COMPOSED from the same PYTHON_LITE_*_CMD component
 # constants the executor eval's (roborev job 1449), so asserting the exact canonical
 # command here pins what actually runs — not a parallel copy that can drift.
-if printf '%s\n' "$py_only" | grep -qxF \
+if out_has "$py_only" -xF \
      "python-tier: maturin develop --profile dev -m bindings/python/Cargo.toml && pytest bindings/python/tests -m 'not slow' -q"; then
   ok "py-route: python-only diff selects the maturin --profile dev + not-slow-pytest tier (exact canonical command)"
 else
   bad "py-route: python-only diff did NOT select the canonical python tier command"
   echo "------- plan -------"; printf '%s\n' "$py_only"; echo "--------------------"
 fi
-if printf '%s\n' "$py_only" | grep -q "^rust-pkg:"; then
+if out_has "$py_only" "^rust-pkg:"; then
   bad "py-route: python-only diff still selected a rust cargo package (cqlite-py run is the always-failing path)"
   echo "------- plan -------"; printf '%s\n' "$py_only"; echo "--------------------"
 else
@@ -637,15 +653,15 @@ mixed=$(printf '%s\n' \
   "bindings/python/src/value.rs" \
   "cqlite-core/src/storage/sstable/reader.rs" \
   | bash "$GATE" --classify-scoped-plan 2>/dev/null)
-if printf '%s\n' "$mixed" | grep -qxF "rust-pkg: cqlite-core" \
-   && printf '%s\n' "$mixed" | grep -q "^python-tier: "; then
+if out_has "$mixed" -xF "rust-pkg: cqlite-core" \
+   && out_has "$mixed" "^python-tier: "; then
   ok "py-route: mixed diff selects BOTH cqlite-core AND the python tier"
 else
   bad "py-route: mixed diff did NOT select both rust + python tier"
   echo "------- plan -------"; printf '%s\n' "$mixed"; echo "--------------------"
 fi
 # cqlite-py must NEVER appear as a rust cargo package in the mixed plan either.
-if printf '%s\n' "$mixed" | grep -q "cqlite-py"; then
+if out_has "$mixed" "cqlite-py"; then
   bad "py-route: mixed diff plan referenced cqlite-py as a cargo package (must be python tier only)"
   echo "------- plan -------"; printf '%s\n' "$mixed"; echo "--------------------"
 else
@@ -656,8 +672,8 @@ fi
 node_only=$(printf '%s\n' \
   "bindings/node/src/database.rs" \
   | bash "$GATE" --classify-scoped-plan 2>/dev/null)
-if printf '%s\n' "$node_only" | grep -qxF "rust-pkg: cqlite-node" \
-   && ! printf '%s\n' "$node_only" | grep -q "^python-tier:"; then
+if out_has "$node_only" -xF "rust-pkg: cqlite-node" \
+   && ! out_has "$node_only" "^python-tier:"; then
   ok "py-route: node diff unaffected (cqlite-node, no python tier)"
 else
   bad "py-route: node diff wrongly triggered the python tier or missed cqlite-node"
@@ -668,8 +684,8 @@ fi
 rust_only=$(printf '%s\n' \
   "cqlite-core/src/storage/sstable/reader.rs" \
   | bash "$GATE" --classify-scoped-plan 2>/dev/null)
-if printf '%s\n' "$rust_only" | grep -qxF "rust-pkg: cqlite-core" \
-   && ! printf '%s\n' "$rust_only" | grep -q "^python-tier:"; then
+if out_has "$rust_only" -xF "rust-pkg: cqlite-core" \
+   && ! out_has "$rust_only" "^python-tier:"; then
   ok "py-route: rust-only diff unchanged (cqlite-core, no python tier)"
 else
   bad "py-route: rust-only diff behavior changed (unexpected python tier or missing cqlite-core)"
@@ -712,8 +728,8 @@ cc_core=$(printf '%s\n' \
   "cqlite-core/src/storage/sstable/reader.rs" \
   | bash "$GATE" --classify-core-dependent-compile-check 2>/dev/null)
 # The two acceptance-named dependent test crates must be compile-checked.
-if printf '%s\n' "$cc_core" | grep -qxF "compile-check-pkg: cqlite-integration-tests" \
-   && printf '%s\n' "$cc_core" | grep -qxF "compile-check-pkg: format-compatibility-tests"; then
+if out_has "$cc_core" -xF "compile-check-pkg: cqlite-integration-tests" \
+   && out_has "$cc_core" -xF "compile-check-pkg: format-compatibility-tests"; then
   ok "core-dep: core-src diff adds --no-run compile-check of integration-tests + format-compatibility-tests"
 else
   bad "core-dep: core-src diff did NOT add the dependent-crate compile-checks"
@@ -721,8 +737,8 @@ else
 fi
 # cqlite-core itself must NOT be in the compile-check set (its --lib already runs),
 # and cdylib bindings (no test targets) must not appear.
-if printf '%s\n' "$cc_core" | grep -qF "compile-check-pkg: cqlite-core" \
-   || printf '%s\n' "$cc_core" | grep -qE 'compile-check-pkg: (cqlite-py|cqlite-node)$'; then
+if out_has "$cc_core" -F "compile-check-pkg: cqlite-core" \
+   || out_has "$cc_core" -E 'compile-check-pkg: (cqlite-py|cqlite-node)$'; then
   bad "core-dep: compile-check set wrongly included cqlite-core or a cdylib binding"
   echo "------- plan -------"; printf '%s\n' "$cc_core"; echo "--------------------"
 else
@@ -951,8 +967,16 @@ for tool in env git python3 sed awk head tail tr sort cut wc stat mkdir rm ln mv
 done
 absent_err="$tmp/absent.stderr"
 absent_rc=0
+# HOME IS OVERRIDDEN TO A SCRATCH DIR, AND THAT IS PART OF THE CONSTRUCTION (#3727 job 411,
+# f1). The gate now resolves sccache from `$HOME/.cargo/bin` as well as from PATH — it has to,
+# because bootstrap does and a system cargo used to hide a cargo-installed sccache from the
+# gate alone. So an ABSENCE case must construct absence on BOTH axes: with the host's real
+# HOME this case would report `sccache=on` (correctly) on every fleet box that ever ran
+# `cargo install sccache`, i.e. it would be host-dependent rather than a pinned assertion.
+accel_home="$tmp/accel-home"
+mkdir -p "$accel_home"
 if [ "$accel_link_fail" -eq 0 ]; then
-  PATH="$accel_bin" AGENT_GATE_SUMMARY_FILE="$tmp/absent.txt" \
+  PATH="$accel_bin" HOME="$accel_home" AGENT_GATE_SUMMARY_FILE="$tmp/absent.txt" \
     "$accel_bin/bash" "$GATE" --emit-summary-selftest >/dev/null 2>"$absent_err" || absent_rc=$?
   # Any 'command not found' means the gate now invokes a tool the allowlist
   # lacks — fail loudly and NAME it so the fix is mechanical (add it above).
@@ -985,6 +1009,141 @@ if [ "$accel_link_fail" -eq 0 ]; then
   else
     bad "accel-absent: missing loud WARN for an absent accelerator"
     echo "------- stderr -------"; cat "$absent_err"; echo "----------------------"
+  fi
+fi
+
+# 9b-ii. THE DIVERGENCE BOOTSTRAP COULD CERTIFY AND THE GATE COULD NOT SEE (#3727 job 411, f1).
+#        `cargo install sccache` — the install bootstrap-agent-machine.sh documents — writes to
+#        ~/.cargo/bin, and the gate's ONLY ~/.cargo/bin prepend fires when `cargo` ITSELF is
+#        absent. So on a box with a SYSTEM cargo and sccache only in ~/.cargo/bin, bootstrap's
+#        two-stage `scc_resolve_binary` resolved that binary, started its server and reported
+#        VERIFIED, while the gate reported it ABSENT: a false [ok] for a binary the gate would
+#        not run, which is worse than the absence it replaced because a false [ok] stops anyone
+#        looking.
+#
+#        THE FIXTURE IS EXACTLY THAT LAYOUT, and it reuses 9b's minimal-PATH bindir — which
+#        links a host `cargo` and deliberately NO sccache — with a HOME whose ~/.cargo/bin
+#        holds one. It is the SAME shape as the bootstrap suite's 12b-f3 fixture
+#        (test_bootstrap_agent_machine.sh), and the two sides must answer with the SAME
+#        absolute path; each side's own behaviour is pinned in its own suite, and the
+#        directory they must agree on is pinned below from bootstrap's source.
+#
+#        THE CONSTRUCTION IS ASSERTED, not assumed (RED-arm doctrine): a fixture whose PATH
+#        happened to carry an sccache, or no cargo, would make the case pass for the wrong
+#        reason — stage 1 would answer and the fallback would never run.
+if [ "$accel_link_fail" -eq 0 ]; then
+  scc_cb_home="$tmp/scc-cargobin-home"
+  mkdir -p "$scc_cb_home/.cargo/bin"
+  printf '#!/bin/sh\necho "Cache read errors 0"\n' > "$scc_cb_home/.cargo/bin/sccache"
+  chmod +x "$scc_cb_home/.cargo/bin/sccache"
+  scc_cb_ok=1
+  if [ ! -x "$accel_bin/cargo" ]; then
+    # cargo is OPTIONAL in 9b's link farm (a host without it is a documented difference), and
+    # without it stage 1's own precondition is missing — the case would then prove nothing
+    # about "system cargo present". Reported, never silently skipped into a green.
+    bad "accel-sccache-cargobin: fixture PATH has no cargo, so the SYSTEM-CARGO half of the divergence is absent (install cargo on this host or link it above)"
+    scc_cb_ok=0
+  fi
+  if PATH="$accel_bin" "$accel_bin/bash" -c 'command -v sccache >/dev/null 2>&1'; then
+    bad "accel-sccache-cargobin: fixture PATH resolves an sccache — stage 1 would answer and the ~/.cargo/bin fallback would never be exercised"
+    scc_cb_ok=0
+  fi
+  if [ "$scc_cb_ok" -eq 1 ]; then
+    ok "accel-sccache-cargobin: fixture constructed — cargo ON PATH, sccache ONLY under \$HOME/.cargo/bin"
+    scc_cb_out="$tmp/scc-cargobin.txt"; scc_cb_err="$tmp/scc-cargobin.stderr"; scc_cb_rc=0
+    PATH="$accel_bin" HOME="$scc_cb_home" AGENT_GATE_SUMMARY_FILE="$scc_cb_out" \
+      "$accel_bin/bash" "$GATE" --emit-summary-selftest >/dev/null 2>"$scc_cb_err" || scc_cb_rc=$?
+    if [ "$scc_cb_rc" -ne 0 ]; then
+      bad "accel-sccache-cargobin: selftest exited $scc_cb_rc under the fixture (want 0)"
+      echo "------- stderr -------"; cat "$scc_cb_err"; echo "----------------------"
+    elif grep -qE '^accelerators: sccache=on ' "$scc_cb_out"; then
+      ok "accel-sccache-cargobin: a cargo-installed sccache invisible to PATH is DETECTED (sccache=on), so the gate no longer disagrees with the bootstrap that certified it"
+    else
+      bad "accel-sccache-cargobin: gate reported sccache NOT on with sccache under \$HOME/.cargo/bin — the bootstrap/gate divergence is back"
+      grep '^accelerators:' "$scc_cb_out" 2>/dev/null || cat "$scc_cb_out"
+    fi
+    # The WRAPPER must be the ABSOLUTE path, not the bare name: a bare `sccache` in
+    # RUSTC_WRAPPER is unrunnable in exactly this layout, so the banner naming the resolved
+    # path is what says the gate will run the binary bootstrap certified.
+    if grep -qF "sccache detected at '$scc_cb_home/.cargo/bin/sccache'" "$scc_cb_err"; then
+      ok "accel-sccache-cargobin: the banner names the ABSOLUTE resolved path used for RUSTC_WRAPPER (the same path bootstrap's 12b-f3 reports)"
+    else
+      bad "accel-sccache-cargobin: the banner does not name the resolved ~/.cargo/bin path — a bare 'sccache' RUSTC_WRAPPER is unrunnable in this layout"
+      echo "------- stderr -------"; cat "$scc_cb_err"; echo "----------------------"
+    fi
+    if grep -q 'WARN: sccache not installed' "$scc_cb_err"; then
+      bad "accel-sccache-cargobin: emitted the absent-WARN for an sccache it went on to use"
+    else
+      ok "accel-sccache-cargobin: no absent-WARN for an sccache that IS present under ~/.cargo/bin"
+    fi
+    # And the CAPACITY/HEALTH probes must use the SAME binary — one resolution, not three. The
+    # stub prints a non-JSON line, so a probe that ran it reports `unparsed`; a probe still
+    # keyed on `command -v` would report `no-binary`, which is how the two are told apart.
+    if accel_token_is "$scc_cb_out" sccache-cap 'unmeasured(unparsed)'; then
+      ok "accel-sccache-cargobin: the capacity probe RAN the fallback binary (unparsed stub payload), rather than reporting no-binary"
+    else
+      bad "accel-sccache-cargobin: the capacity probe did not run the ~/.cargo/bin binary — a second, drifted answer to 'is sccache available'"
+      grep '^accelerators:' "$scc_cb_out" 2>/dev/null || cat "$scc_cb_out"
+    fi
+    if accel_health_token_is "$scc_cb_out" ok; then
+      ok "accel-sccache-cargobin: the health probe RAN the fallback binary (0 error counters -> ok), not na"
+    else
+      bad "accel-sccache-cargobin: the health probe did not run the ~/.cargo/bin binary"
+      grep '^accelerators:' "$scc_cb_out" 2>/dev/null || cat "$scc_cb_out"
+    fi
+    assert_accelerators "accel-sccache-cargobin" "$scc_cb_out"
+  fi
+fi
+# THE DIRECTORY THE TWO SIDES MUST AGREE ON, pinned from bootstrap's own source. Each side's
+# behaviour is pinned behaviourally in its own suite (here, and 12b-f3/12b-f4 there); what no
+# single-suite case can catch is one side later moving the fallback directory. Both must name
+# ~/.cargo/bin.
+scc_boot="$(dirname "$GATE")/bootstrap-agent-machine.sh"
+if [ ! -r "$scc_boot" ]; then
+  bad "accel-sccache-agree: cannot read bootstrap-agent-machine.sh — the agreement assert would pass vacuously"
+elif grep -q 'PATH="\$HOME/.cargo/bin:\$PATH"; command -v sccache' "$scc_boot" \
+     && grep -q '\[ -x "\$HOME/.cargo/bin/sccache" \]' "$GATE"; then
+  ok "accel-sccache-agree: bootstrap's retry stage and the gate's fallback name the SAME directory (~/.cargo/bin)"
+else
+  bad "accel-sccache-agree: bootstrap and the gate no longer name the same fallback directory — one side moved, and the #3727 job-411 divergence returns"
+fi
+# THE THIRD SITE (#3727 job 413). Bootstrap answers this question in TWO contexts — a probed
+# SESSION (`scc_resolve_binary`, above) and its OWN process (`sccache_bin`, which section 2's
+# accelerator report and section 5b2's precondition both call). All three must name ~/.cargo/bin;
+# the in-process one resolves the INVOKING account's home from the passwd database rather than
+# from `$HOME`, because under `sudo bash bootstrap` that variable is root's. Its behaviour is
+# pinned in test_bootstrap_agent_machine.sh (12c); what no single-suite case can catch is one
+# side moving the directory, which is what this asserts.
+if [ ! -r "$scc_boot" ]; then
+  : # already reported above
+elif grep -q 'SCCACHE_FALLBACK_DIR="\$home/.cargo/bin"' "$scc_boot" \
+     && grep -q 'SCCACHE_FALLBACK_DIR="\$HOME/.cargo/bin"' "$scc_boot"; then
+  ok "accel-sccache-agree: bootstrap's IN-PROCESS resolver names the same ~/.cargo/bin, from the passwd home and from \$HOME"
+else
+  bad "accel-sccache-agree: bootstrap's in-process sccache_bin no longer names ~/.cargo/bin — the three sites have drifted apart"
+fi
+# AND THE GATE'S OWN CENSUS IS CLOSED: every line in agent-gate.sh that decides sccache presence
+# must be INSIDE `_gate_sccache_bin`. Counting today's sites proves nothing about tomorrow's, so
+# this is derived at run time and names any line it cannot account for. Comments are excluded
+# (the rationale quotes the idioms) and so are the three `__bin=$(_gate_sccache_bin)` callers,
+# which ASK the resolver rather than deciding.
+scc_gate_fn=$(sed -n '/^_gate_sccache_bin() {/,/^}/p' "$GATE")
+if [ -z "$scc_gate_fn" ]; then
+  bad "accel-sccache-census: could not extract _gate_sccache_bin from the shipped gate — the census would be vacuous"
+else
+  scc_gate_extra=""
+  while IFS= read -r scc_gline; do
+    [ -n "$scc_gline" ] || continue
+    case "$scc_gate_fn" in *"$scc_gline"*) continue ;; esac
+    scc_gate_extra="${scc_gate_extra:+$scc_gate_extra; }$scc_gline"
+  done <<EOF
+$(grep -vE '^[[:space:]]*#' "$GATE" \
+   | grep -E 'command -v sccache|type -P sccache|which sccache|-x "[^"]*sccache"|-f "[^"]*sccache"')
+EOF
+  if [ -z "$scc_gate_extra" ]; then
+    ok "accel-sccache-census: EVERY sccache presence decision in the gate is inside _gate_sccache_bin — no second answer about one box"
+  else
+    bad "accel-sccache-census: an sccache presence decision outside _gate_sccache_bin —$scc_gate_extra"
   fi
 fi
 
@@ -1058,6 +1217,418 @@ else
   bad "sccache-health: expected sccache-health=na when sccache not in use"
   grep '^accelerators:' "$tmp/health-na.txt" 2>/dev/null || cat "$tmp/health-na.txt"
 fi
+
+# 9c-v. THE CAP TOKEN ITSELF (issue #3727). THE TOKEN THIS SUITE EXISTS FOR: the fleet ran for
+#       months with SCCACHE_CACHE_SIZE declared in .agent-ami/profile.yaml, never persisted, and
+#       every gate SUMMARY silent about the cap actually in force. An ATTRIBUTED reading renders
+#       the MEASURED BYTES and nothing else.
+#
+#       REDUCED WITH THE CODE (lead ruling req-3727-w4): the 7-state provenance suffix
+#       (pinned/default/inherited/stale/invalid/invalid-stale/unattributed), the value-grammar
+#       classification, the probed default and the four remediation WARNs are GONE, and the cases
+#       that asserted them are DELETED rather than softened — a test asserting a state that no
+#       longer exists must go, not be weakened into vacuity. What is still pinned here is every
+#       property that is a MEASUREMENT: a byte count only when a running server was proven to
+#       answer it (9c-x), the unmeasurable renderings (9c-vi), `na` (9c-vii), the occupancy and its
+#       overflow-safe percentage (9c-viii, 9c-v-b), the independence of health and capacity (9c-ix),
+#       and that a null size cannot move the cap (9c-xi).
+scc_cap="$tmp/scc-cap-measured.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_cap" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=32212254720 AGENT_GATE_TEST_SCCACHE_USED_BYTES=1375141619 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_cap" sccache-cap '32212254720' \
+   && accel_token_is "$scc_cap" sccache-used '1375141619(4%)'; then
+  ok "sccache-cap: an attributed reading renders the measured bytes, with no provenance suffix"
+else
+  bad "sccache-cap: expected a bare measured byte count (and 4% occupancy)"
+  grep '^accelerators:' "$scc_cap" 2>/dev/null || cat "$scc_cap"
+fi
+assert_accelerators "sccache-cap-measured" "$scc_cap"
+
+# 9c-v-c. A LEADING-ZERO HOOK VALUE MUST NOT REACH `$(( ))` (issue #3727 roborev job 457, f1).
+#         The hook parser accepted any all-digits string verbatim, and shell arithmetic reads a
+#         leading-zero literal as OCTAL: measured, `x=08; echo $(( x + 0 ))` aborts with
+#         `value too great for base`, so a hook value like `08` did not render a wrong number —
+#         it KILLED summary generation. `_scc_uint_fits_i64` cannot catch it either, because
+#         that guard is deliberately LEXICAL and `08` is a well-formed digit string to it.
+#         Normalised at the ONE ingress (`_sccache_hook_uint`), not by base-prefixing each
+#         arithmetic site, because the hook is the only source that can produce a non-canonical
+#         digit string — sccache's own JSON numbers cannot carry a leading zero.
+#         The assertion is that the leading-zero pair renders EXACTLY what the canonical pair
+#         above renders: a bare red would also be produced by an unrelated breakage, and `08`
+#         appears nowhere in the expected output, so naming the rendering is what makes this a
+#         detection rather than a membership check.
+scc_lz="$tmp/scc-leading-zero.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_lz" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=032212254720 AGENT_GATE_TEST_SCCACHE_USED_BYTES=0001375141619 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_lz" sccache-cap '32212254720' \
+   && accel_token_is "$scc_lz" sccache-used '1375141619(4%)'; then
+  ok "sccache hooks: leading-zero byte counts normalise to canonical decimal (no octal abort, same rendering as the canonical pair)"
+else
+  bad "sccache hooks: a leading-zero hook value did not render as canonical decimal" \
+      "expected cap 32212254720 and used 1375141619(4%) from 032212254720 / 0001375141619"
+  grep '^accelerators:' "$scc_lz" 2>/dev/null || cat "$scc_lz"
+fi
+assert_accelerators "sccache-leading-zero" "$scc_lz"
+
+# 9c-v-d. AND AN ALL-ZEROS HOOK IS A REAL ZERO, NOT AN EMPTY READING. Stripping the leading run
+#         of zeros from `000` leaves the empty string, and empty is this parser's REFUSAL value
+#         (it models an unreadable reading), so a naive strip would have converted a measured
+#         zero-byte cache into `unmeasured`. The cap is deliberately nonzero here so the subject
+#         is the USED side; a zero cap has its own named `cap-zero` rendering (9c-viii).
+scc_z0="$tmp/scc-zero-used.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_z0" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=32212254720 AGENT_GATE_TEST_SCCACHE_USED_BYTES=000 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_z0" sccache-used '0(0%)'; then
+  ok "sccache hooks: an all-zeros used value stays a MEASURED 0(0%), never the parser's empty/unmeasured refusal"
+else
+  bad "sccache hooks: an all-zeros used hook did not render 0(0%)"
+  grep '^accelerators:' "$scc_z0" 2>/dev/null || cat "$scc_z0"
+fi
+assert_accelerators "sccache-zero-used" "$scc_z0"
+
+# 9c-v-b. THE PERCENTAGE MUST NOT OVERFLOW (issue #3727 roborev round 10, f3). `used * 100`
+#         overflows a signed 64-bit shell integer above ~92 PiB, which silently produced a
+#         NEGATIVE percentage. 4 EiB in both, so the multiplication is over the bound and the
+#         other branch must run. The near-capacity WARN this case also used to assert is gone
+#         with the rest of the advice text; the arithmetic is a measurement and stays.
+scc_big="$tmp/scc-used-hugecap.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_big" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=4611686018427387904 \
+  AGENT_GATE_TEST_SCCACHE_USED_BYTES=4611686018427387904 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_big" sccache-used '4611686018427387904(100%)'; then
+  ok "sccache-used: a 4 EiB cache at its 4 EiB cap renders 100% (used*100 does not overflow into a negative)"
+else
+  bad "sccache-used: a huge cap produced a wrong percentage"
+  grep '^accelerators:' "$scc_big" 2>/dev/null || cat "$scc_big"
+fi
+assert_accelerators "sccache-used-hugecap" "$scc_big"
+
+# 9c-v-c. THE PERCENTAGE IS EXACT OR IT IS NAMED (#3727 job 411, f2). The overflow branch used
+#         to divide by `cap / 100`, whose own floor OVER-REPORTS: at the 4 EiB cap just above,
+#         with used = cap - 1, it rendered `100%` where the exact value is 99%. This token's
+#         whole premise is measured bytes honestly reported, so an over-reported ratio
+#         contradicts the design — and the honest alternative already lives in this slot
+#         (`cap-zero`). Three cases: the boundary the finding names, the same boundary at
+#         ORDINARY magnitude (the direct multiplication, so the fix is not just a big-number
+#         branch), and a ratio no 64-bit shell arithmetic can take exactly, which must be NAMED
+#         rather than approximated.
+scc_p99="$tmp/scc-used-99-hugecap.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_p99" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=4611686018427387904 \
+  AGENT_GATE_TEST_SCCACHE_USED_BYTES=4611686018427387903 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_p99" sccache-used '4611686018427387903(99%)'; then
+  ok "sccache-used: 4 EiB cap with used = cap-1 renders the EXACT 99%, not the floor(cap/100) division's 100%"
+else
+  bad "sccache-used: expected 4611686018427387903(99%) — an over-reported occupancy at the overflow boundary"
+  grep '^accelerators:' "$scc_p99" 2>/dev/null || cat "$scc_p99"
+fi
+assert_accelerators "sccache-used-99-hugecap" "$scc_p99"
+
+scc_p99s="$tmp/scc-used-99-smallcap.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_p99s" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=10737418240 AGENT_GATE_TEST_SCCACHE_USED_BYTES=10737418239 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_p99s" sccache-used '10737418239(99%)'; then
+  ok "sccache-used: an ordinary 10 GiB cap one byte from full renders 99% (the direct multiplication path, unchanged)"
+else
+  bad "sccache-used: expected 10737418239(99%) at ordinary magnitude"
+  grep '^accelerators:' "$scc_p99s" 2>/dev/null || cat "$scc_p99s"
+fi
+
+# NEITHER SIDE UNDER THE BOUND -> NAMED, NEVER ROUNDED. cap = 2^63-1 filled to 2^62: both
+# `used * 100` and `(cap - used) * 100` overflow a signed 64-bit shell integer, so no exact
+# answer is reachable and the percentage says so. `50%` here would be the removed behaviour
+# (a number produced by an inexact division) and is asserted against explicitly.
+scc_pinx="$tmp/scc-used-inexact.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_pinx" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=9223372036854775807 \
+  AGENT_GATE_TEST_SCCACHE_USED_BYTES=4611686018427387904 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_pinx" sccache-used '4611686018427387904(pct-inexact-overflow)'; then
+  ok "sccache-used: a ratio unreachable in 64-bit shell arithmetic is NAMED pct-inexact-overflow (measured bytes kept, percentage not guessed)"
+else
+  bad "sccache-used: expected 4611686018427387904(pct-inexact-overflow) — an inexact percentage was rendered as a number"
+  grep '^accelerators:' "$scc_pinx" 2>/dev/null || cat "$scc_pinx"
+fi
+if accel_token_is "$scc_pinx" sccache-used '4611686018427387904(50%)'; then
+  bad "sccache-used: rendered an APPROXIMATED percentage (50%) where exactness is unreachable — the f2 defect in the other direction"
+else
+  ok "sccache-used: no approximated numeric percentage where exactness is unreachable"
+fi
+assert_accelerators "sccache-used-inexact" "$scc_pinx"
+
+# 9c-v-d. THE OPERANDS THEMSELVES CAN BE OUT OF RANGE, AND SIGNED ARITHMETIC ON ONE IS THE
+#         DEFECT (#3727 job 413, f2). The previous round bounded the intermediate PRODUCTS and
+#         left the INPUTS unchecked. sccache reports both readings as JSON UNSIGNED integers
+#         while every `$(( ))` here is signed 64-bit, so a cap above 2^63-1 wraps NEGATIVE on
+#         its FIRST use: the finding's own example — a 12 EiB cap holding 4 EiB — rendered
+#         `-100%`, a NUMBER, in a token whose whole premise is measured bytes honestly reported.
+scc_pneg="$tmp/scc-used-12eib.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_pneg" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=13835058055282163712 \
+  AGENT_GATE_TEST_SCCACHE_USED_BYTES=4611686018427387904 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_pneg" sccache-used '4611686018427387904(pct-inexact-overflow)'; then
+  ok "sccache-used: the finding's 12 EiB cap with 4 EiB used is NAMED pct-inexact-overflow (measured bytes kept, no percentage guessed)"
+else
+  bad "sccache-used: expected 4611686018427387904(pct-inexact-overflow) at a cap above 2^63-1"
+  grep '^accelerators:' "$scc_pneg" 2>/dev/null || cat "$scc_pneg"
+fi
+# The SPECIFIC wrong rendering, asserted against by name: a negative percentage is not merely
+# inexact, it is outside the token's grammar, and `-100%` is what this input used to produce.
+if grep -qE '^accelerators:.*sccache-used=[0-9]+\(-[0-9]+%\)' "$scc_pneg"; then
+  bad "sccache-used: rendered a NEGATIVE percentage — the wrapped signed arithmetic is back"
+  grep '^accelerators:' "$scc_pneg"
+else
+  ok "sccache-used: no negative percentage is rendered for an out-of-range cap"
+fi
+assert_accelerators "sccache-used-12eib" "$scc_pneg"
+# And the OTHER operand: an out-of-range USED with an ordinary cap. Both sides are checked, so
+# neither can reach the arithmetic.
+scc_pbigu="$tmp/scc-used-bigused.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_pbigu" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=10737418240 \
+  AGENT_GATE_TEST_SCCACHE_USED_BYTES=18446744073709551615 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_pbigu" sccache-used '18446744073709551615(pct-inexact-overflow)'; then
+  ok "sccache-used: an out-of-range USED reading with an in-range cap is named too (both operands are checked)"
+else
+  bad "sccache-used: an out-of-range used reading was not named"
+  grep '^accelerators:' "$scc_pbigu" 2>/dev/null || cat "$scc_pbigu"
+fi
+assert_accelerators "sccache-used-bigused" "$scc_pbigu"
+
+# 9c-v-e. WHY THE RANGE CHECK IS LEXICAL, MEASURED IN THIS SHELL RATHER THAN ASSERTED IN A
+#         COMMENT — and the first draft of this case got the mechanism WRONG, which is why it is
+#         measured. There are TWO arithmetic alternatives and they fail differently:
+#           * `(( v <= MAX ))` (and every `$(( ))`) WRAPS SILENTLY, so the bound ACCEPTS the very
+#             value it exists to refuse — that is the `-100%` defect;
+#           * `[ "$v" -le MAX ]` does NOT wrap: it ERRORS with rc 2 and a bash diagnostic on
+#             STDERR, so it is not an answer at all — in the natural `if [ "$v" -gt MAX ]; then
+#             refuse; fi` direction the refusal does not fire (fail-OPEN), and in the other it
+#             prints a shell error for a legitimate reading.
+#         Both are measured here, then the shipped `_scc_uint_fits_i64` is driven over the
+#         boundary, so the property is pinned at the helper and not only through the two summary
+#         renderings above.
+scc_wrap=0
+if (( 13835058055282163712 <= 9223372036854775807 )); then scc_wrap=1; fi
+if [ "$scc_wrap" -eq 1 ]; then
+  ok "sccache-pct: (mechanism) shell arithmetic WRAPS — 13835058055282163712 compares as <= 2^63-1, so an arithmetic bound would accept it"
+else
+  # Not a gate failure: it would mean this shell has bignum arithmetic, making the lexical check
+  # merely redundant. Reported so nobody reads the assert above as always-true.
+  skipped "sccache-pct: this shell does not wrap at 2^63 (bignum arithmetic?) — the wrap half of the rationale is unmeasurable here"
+fi
+scc_terr="$tmp/scc-test-builtin.err"
+[ "13835058055282163712" -le 9223372036854775807 ] 2>"$scc_terr"
+scc_trc=$?
+if [ "$scc_trc" -gt 1 ] && [ -s "$scc_terr" ]; then
+  ok "sccache-pct: (mechanism) the test builtin ERRORS (rc $scc_trc) and writes a diagnostic instead of answering — so it is not the fix either"
+else
+  skipped "sccache-pct: the test builtin answered rc $scc_trc with $( [ -s "$scc_terr" ] && echo a || echo no ) diagnostic — that half of the rationale is unmeasurable here"
+fi
+scc_fits_src=$(sed -n '/^_scc_uint_fits_i64() {/,/^}/p' "$GATE")
+if [ -z "$scc_fits_src" ]; then
+  bad "sccache-pct: could not extract _scc_uint_fits_i64 from the shipped gate — the boundary asserts below would be vacuous"
+else
+  scc_fits_h="$tmp/scc-fits-harness.sh"
+  { printf '%s\n' "$scc_fits_src"; echo 'if _scc_uint_fits_i64 "$1"; then echo fits; else echo over; fi'; } >"$scc_fits_h"
+  scc_fits_bad=""
+  scc_fits_noise=""
+  # value:expected — 2^63-1 is the largest that FITS; leading zeros are magnitude, not digits;
+  # a 19-digit value differing only in the LOW half exercises the two-half comparison.
+  for scc_fp in \
+    '0:fits' '1:fits' '10737418240:fits' '999999999999999999:fits' \
+    '1000000000000000000:fits' '9223372036854775806:fits' '9223372036854775807:fits' \
+    '9223372036854775808:over' '9223372036999999999:over' '9223372037000000000:over' \
+    '13835058055282163712:over' '18446744073709551615:over' '99999999999999999999:over' \
+    '0000000000009223372036854775807:fits' '000000000000000000000:fits' \
+    '00009223372036854775808:over' ':over' 'abc:over' '12x:over'; do
+    scc_fv="${scc_fp%%:*}"; scc_fw="${scc_fp##*:}"
+    scc_fg=$(bash "$scc_fits_h" "$scc_fv" 2>"$tmp/scc-fits.err")
+    [ "$scc_fg" = "$scc_fw" ] || scc_fits_bad="${scc_fits_bad:+$scc_fits_bad; }'$scc_fv' -> $scc_fg (want $scc_fw)"
+    # STDERR IS PART OF THE CONTRACT, and it is what distinguishes the `[ … -le … ]` form: that
+    # one returns the right answers (by ERRORING on every out-of-range value) while printing a
+    # bash diagnostic — on the gate's own stderr, for a legitimate reading. A range check that
+    # cannot be asked silently is not a range check.
+    [ -s "$tmp/scc-fits.err" ] \
+      && scc_fits_noise="${scc_fits_noise:+$scc_fits_noise; }'$scc_fv': $(head -1 "$tmp/scc-fits.err")"
+  done
+  if [ -z "$scc_fits_bad" ]; then
+    ok "sccache-pct: the shipped range check is exact at 2^63-1, zero-stripping-correct, and refuses a non-digit — 19 pinned values"
+  else
+    bad "sccache-pct: the range check disagrees with the 64-bit boundary — $scc_fits_bad"
+  fi
+  if [ -z "$scc_fits_noise" ]; then
+    ok "sccache-pct: the range check answers SILENTLY for every one of those values (no shell diagnostic on the gate's stderr)"
+  else
+    bad "sccache-pct: the range check wrote a shell diagnostic — $scc_fits_noise"
+  fi
+fi
+
+# 9c-vi. THE UNMEASURABLE STATE HAS ITS OWN TOKEN, and `0` is not an all-clear. A cap that could
+#        not be read must never render blank, never render 0, and never be mistaken for a measured
+#        value — this repo's standing rule that a positive verdict requires an affirmative
+#        measurement, applied to a token an agent reads out of a pasted block.
+scc_unm="$tmp/scc-cap-unmeasured.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_unm" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=unmeasured AGENT_GATE_TEST_SCCACHE_USED_BYTES=unmeasured \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_unm" sccache-cap 'unmeasured(no-stats)' \
+   && accel_token_is "$scc_unm" sccache-used 'unmeasured(no-stats)'; then
+  ok "sccache-cap: an unreadable probe renders unmeasured(no-stats) for BOTH tokens"
+else
+  bad "sccache-cap: an unreadable probe did not render the explicit unmeasurable token"
+  grep '^accelerators:' "$scc_unm" 2>/dev/null || cat "$scc_unm"
+fi
+scc_wrong_hits=0
+for scc_wrong in 0 '' unknown 'unmeasured' '0(pinned)'; do
+  if accel_token_is "$scc_unm" sccache-cap "$scc_wrong"; then
+    bad "sccache-cap: unmeasurable state wrongly matched sccache-cap=$scc_wrong (0/blank read as a value)"
+    scc_wrong_hits=$((scc_wrong_hits + 1))
+  fi
+done
+if [ "$scc_wrong_hits" = 0 ]; then
+  ok "sccache-cap: unmeasurable state matches NONE of 0/blank/unknown/bare-unmeasured/0(pinned)"
+fi
+assert_accelerators "sccache-cap-unmeasured" "$scc_unm"
+
+# 9c-vii. sccache NOT in use -> both capacity tokens are na, exactly as sccache-health is. A
+#         probe with nothing to probe must say so rather than reporting a cap of 0.
+scc_na="$tmp/scc-cap-na.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_na" AGENT_GATE_TEST_SCCACHE_STATE=off \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_na" sccache-cap 'na(sccache-not-in-use)' \
+   && accel_token_is "$scc_na" sccache-used 'na(sccache-not-in-use)' \
+   && accel_health_token_is "$scc_na" na; then
+  ok "sccache-cap: sccache not in use -> cap/used/health all na"
+else
+  bad "sccache-cap: expected na cap/used/health tokens when sccache is not in use"
+  grep '^accelerators:' "$scc_na" 2>/dev/null || cat "$scc_na"
+fi
+
+# 9c-viii. OCCUPANCY AND THE FILL PERCENTAGE, including the at-capacity marker and the measured
+#          legal cap of 0 (`SCCACHE_CACHE_SIZE=0G` yields `0 bytes`, so a percentage is undefined
+#          there and must be named rather than divided).
+scc_full="$tmp/scc-used-full.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_full" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=10737418240 AGENT_GATE_TEST_SCCACHE_USED_BYTES=10737418240 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/scc-used-full.stderr"
+if accel_token_is "$scc_full" sccache-used '10737418240(100%)'; then
+  ok "sccache-used: a cache at its cap renders 100%"
+else
+  bad "sccache-used: expected sccache-used=10737418240(100%) for a cache at its cap"
+  grep '^accelerators:' "$scc_full" 2>/dev/null || cat "$scc_full"
+fi
+# THE NEAR-CAPACITY WARN IS GONE, DELIBERATELY (lead ruling req-3727-w4): a threshold plus a
+# remedy is an interpretation of the number, and the number is on the line. Asserted the other
+# way round now — the capacity path must emit NO advice — so nobody reintroduces it by reflex.
+if ! grep -q 'WARN:.*sccache' "$tmp/scc-used-full.stderr"; then
+  ok "sccache-used: a full cache reports 100% and emits NO remediation WARN (reporting stays, advising goes)"
+else
+  bad "sccache-used: a capacity remedy WARN is back — the ruling removed the advice layer"
+  echo "------- stderr -------"; cat "$tmp/scc-used-full.stderr"; echo "----------------------"
+fi
+scc_zero="$tmp/scc-used-zero.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_zero" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=0 AGENT_GATE_TEST_SCCACHE_USED_BYTES=0 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_zero" sccache-used '0(cap-zero)'; then
+  ok "sccache-used: a legal zero cap names the undefined percentage instead of dividing"
+else
+  bad "sccache-used: expected sccache-used=0(cap-zero) for a zero cap"
+  grep '^accelerators:' "$scc_zero" 2>/dev/null || cat "$scc_zero"
+fi
+
+# 9c-ix. `sccache-health` IS AN ERROR-COUNTER TOKEN AND CANNOT BE CLEARED BY A CAP RAISE (#3727).
+#        Stated as a TEST rather than only as a comment: the two signals are independent, so a
+#        full cache with zero error counters must report health=ok beside used=100%, and a warn
+#        must survive a generous cap. Anyone who later wires occupancy INTO _sccache_health reds
+#        here, which is the point — the remedies differ (inspect/reset vs raise the cap).
+if accel_health_token_is "$scc_full" ok; then
+  ok "sccache-health: a cache at 100% of its cap with zero error counters is still health=ok (capacity is NOT a health input)"
+else
+  bad "sccache-health: occupancy leaked into the error-counter token (#3727 conflation)"
+fi
+scc_bigwarn="$tmp/scc-health-bigcap.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_bigwarn" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=3 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=32212254720 AGENT_GATE_TEST_SCCACHE_USED_BYTES=1 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_health_token_is "$scc_bigwarn" warn; then
+  ok "sccache-health: a generous cap and an empty cache do NOT clear a non-zero error counter"
+else
+  bad "sccache-health: a cap raise silenced the error-counter token (#3727 conflation)"
+fi
+
+# 9c-x. A CAP NOBODY IS PROVEN TO ENFORCE MAY NOT READ AS `pinned` (issue #3727). MEASURED: with
+#       no sccache server running, `--show-stats` does not start one and answers `max_cache_size`
+#       from the CLIENT's own resolution of SCCACHE_CACHE_SIZE — so the value is echoed straight
+#       back, and calling that `pinned` asserts enforcement by a server that does not exist.
+#       Attribution is decided by a DIFFERENTIAL (a second read with a sentinel value: a running
+#       server's answer does not move, a client's does), forced here by the third hook.
+#       `unknown` must land in the same place as `no`: only an affirmative yes may license the
+#       other labels.
+for scc_attr in no unknown; do
+  scc_unattr="$tmp/scc-cap-unattributed-$scc_attr.txt"
+  AGENT_GATE_SUMMARY_FILE="$scc_unattr" \
+    AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+    AGENT_GATE_TEST_SCCACHE_MAX_BYTES=32212254720 AGENT_GATE_TEST_SCCACHE_USED_BYTES=1375141619 \
+    AGENT_GATE_TEST_SCCACHE_ATTRIBUTED="$scc_attr" \
+    SCCACHE_CACHE_SIZE=30G \
+    bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+  scc_attr_why=unattributed; [ "$scc_attr" = no ] && scc_attr_why=no-running-server
+  if accel_token_is "$scc_unattr" sccache-cap "unmeasured($scc_attr_why)"; then
+    ok "sccache-cap: attribution '$scc_attr' renders unmeasured($scc_attr_why) — a byte count needs a server proven to answer it"
+  else
+    bad "sccache-cap: attribution '$scc_attr' did not render unmeasured($scc_attr_why)"
+    grep '^accelerators:' "$scc_unattr" 2>/dev/null || cat "$scc_unattr"
+  fi
+  # THE FALSE CLAIM THIS EXISTS TO STOP, asserted directly: the number that WAS read must not
+  # appear as the cap. This is the one honesty the ruling kept when it removed the classifier.
+  if grep -q 'sccache-cap=32212254720' "$scc_unattr" 2>/dev/null; then
+    bad "sccache-cap: an unattributed reading was reported as a cap — enforcement asserted with no server proven"
+  fi
+  assert_accelerators "sccache-cap-unattributed-$scc_attr" "$scc_unattr"
+done
+
+# 9c-xi. AND A NULL `cache_size` IS *NOT* AN ATTRIBUTION SIGNAL — the correction that cost a round
+#        (issue #3727). A RUNNING server with an EMPTY cache reports `"cache_size":null` exactly as
+#        a client with no server does; measured by starting a real server at 40G on a private port
+#        and reading it back (cap 42949672960, size null), the two payloads differing only in their
+#        values. So a null size must leave the cap's classification ALONE and show up only in the
+#        occupancy token. A test keyed the other way was green against a stub that shared the
+#        code's premise — which is why this one asserts the two axes move independently.
+scc_nullsize="$tmp/scc-cap-nullsize.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_nullsize" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=32212254720 AGENT_GATE_TEST_SCCACHE_USED_BYTES=null \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_nullsize" sccache-cap '32212254720' \
+   && accel_token_is "$scc_nullsize" sccache-used 'unmeasured(no-size)'; then
+  ok "sccache-cap: a null cache_size on an ATTRIBUTED cap leaves the measured bytes alone and only the occupancy is unmeasured(no-size)"
+else
+  bad "sccache-cap: a null cache_size leaked into the cap's classification (the two axes are collapsed again)"
+  grep '^accelerators:' "$scc_nullsize" 2>/dev/null || cat "$scc_nullsize"
+fi
+assert_accelerators "sccache-cap-nullsize" "$scc_nullsize"
 
 # 9c-iv. Regression guard for the NEXT appended accelerators token (issue #2914).
 #        #2859 appended a Linux-only ` mold=` token and silently reddened three
@@ -3120,7 +3691,7 @@ n_meta_=$(printf '%s\n' "$meta_fns_" | grep -c . || true)
 # The derivation must contain the two helpers this finding was ABOUT. Anything else means the
 # extraction moved and the lint is measuring a set that no longer includes its own subject.
 for must_ in _package_unittest_srcs _package_test_targets_gated; do
-  if printf '%s\n' "$meta_fns_" | grep -qxF "$must_"; then
+  if out_has "$meta_fns_" -xF "$must_"; then
     ok "1699-r18-parser-derive: the derived cargo-metadata helper set includes $must_ ($n_meta_ helpers derived)"
   else
     bad "1699-r18-parser-derive: $must_ is ABSENT from the derived cargo-metadata helper set ($n_meta_ derived) — the derivation is broken, so every assert below it would pass having measured nothing"
@@ -4320,7 +4891,7 @@ else
       ok "1699-cfggate-noleak: the gate text does not leak onto the ungated sibling"
     fi
     # the child is still RESOLVED — the source set must stay complete, only its status is unknown
-    if printf '%s\n' "$cg_out" | grep -q 'gated_child.rs'; then
+    if out_has "$cg_out" 'gated_child.rs'; then
       ok "1699-cfggate-resolved: the gated child is still in the source set (reported, not dropped)"
     else
       bad "1699-cfggate-resolved: the gated child vanished from the source set — dropping it is the SILENT direction this fix exists to close"
@@ -4375,7 +4946,7 @@ else
       ok "1699-cfggate-multileak: the multiline gate does not leak onto the following ungated sibling"
     fi
     # the child must still RESOLVE through its #[path], i.e. the balance rule did not eat the path
-    if printf '%s\n' "$mc_out" | grep -q 'support/datasets_root.rs'; then
+    if out_has "$mc_out" 'support/datasets_root.rs'; then
       ok "1699-cfggate-multipath: the #[path] after a multiline cfg still resolves the child"
     else
       bad "1699-cfggate-multipath: the child did not resolve through its #[path] — the balance rule swallowed the path attribute, shrinking the source set"
@@ -4654,10 +5225,10 @@ else
 fi
 lh_fn48_code=$(printf '%s\n' "$lh_fn48" | sed 's/^[[:space:]]*#.*$//')
 sg_missing=""
-printf '%s\n' "$lh_fn48_code" | grep -qE '_sp_rc1=\$\?' || sg_missing="$sg_missing status-capture-1"
-printf '%s\n' "$lh_fn48_code" | grep -qE '_sp_rc2=\$\?' || sg_missing="$sg_missing status-capture-2"
-printf '%s\n' "$lh_fn48_code" | grep -qE '\[ "\$_sp_rc[12]" -ge 2 \]' || sg_missing="$sg_missing status-test"
-printf '%s\n' "$lh_fn48_code" | grep -qE '\[ ! -s "\$_mt_fatal" \].*\[ ! -s "\$_mt_gaps" \]' || sg_missing="$sg_missing both-empty-test"
+out_has "$lh_fn48_code" -E '_sp_rc1=\$\?' || sg_missing="$sg_missing status-capture-1"
+out_has "$lh_fn48_code" -E '_sp_rc2=\$\?' || sg_missing="$sg_missing status-capture-2"
+out_has "$lh_fn48_code" -E '\[ "\$_sp_rc[12]" -ge 2 \]' || sg_missing="$sg_missing status-test"
+out_has "$lh_fn48_code" -E '\[ ! -s "\$_mt_fatal" \].*\[ ! -s "\$_mt_gaps" \]' || sg_missing="$sg_missing both-empty-test"
 if [ -n "$sg_missing" ]; then
   bad "1699-split-grammar: the closed grammar is not IMPLEMENTED — missing:$sg_missing. Asserted on control flow (comments stripped), because grepping the diagnostic TEXT would stay green if the branch were deleted and its explanation left behind"
 else
@@ -4673,20 +5244,20 @@ fi
 # from its own fix. Asserted on the FUNCTION and on the CALL SITE, comments stripped.
 pol_fn=$(awk '/^_lh_positive_in_closure\(\) \{/,/^\}/' "$GATE" | sed 's/^[[:space:]]*#.*$//')
 pol_missing=""
-printf '%s\n' "$pol_fn" | grep -qE 'return 2' || pol_missing="$pol_missing fn-returns-2"
-printf '%s\n' "$pol_fn" | grep -qE '_pc_rc" -ge 2' || pol_missing="$pol_missing fn-tests-ge2"
-if printf '%s\n' "$pol_fn" | grep -qE "sed -E 's/not"; then
+out_has "$pol_fn" -E 'return 2' || pol_missing="$pol_missing fn-returns-2"
+out_has "$pol_fn" -E '_pc_rc" -ge 2' || pol_missing="$pol_missing fn-tests-ge2"
+if out_has "$pol_fn" -E "sed -E 's/not"; then
   pol_missing="$pol_missing fn-still-strips"
 fi
-printf '%s\n' "$pol_fn" | grep -qE '_pc_allow=' || pol_missing="$pol_missing fn-has-allowlist"
-printf '%s\n' "$pol_fn" | grep -qE '_pc_sites.*-ne.*_pc_allowed' || pol_missing="$pol_missing fn-compares-sites-to-allowed"
-if printf '%s\n' "$pol_fn" | grep -qE '\|[[:space:]]*grep'; then
+out_has "$pol_fn" -E '_pc_allow=' || pol_missing="$pol_missing fn-has-allowlist"
+out_has "$pol_fn" -E '_pc_sites.*-ne.*_pc_allowed' || pol_missing="$pol_missing fn-compares-sites-to-allowed"
+if out_has "$pol_fn" -E '\|[[:space:]]*grep'; then
   pol_missing="$pol_missing fn-uses-a-pipeline"
 fi
 pol_caller=$(awk '/^run_legacy_heuristics\(\) \{/,/^\}/' "$GATE" | sed 's/^[[:space:]]*#.*$//')
-printf '%s\n' "$pol_caller" | grep -qE '_lh_positive_in_closure "\$_mt_closure" "\$cfg_site" \|\| _pol_rc=\$\?' \
+out_has "$pol_caller" -E '_lh_positive_in_closure "\$_mt_closure" "\$cfg_site" \|\| _pol_rc=\$\?' \
   || pol_missing="$pol_missing caller-captures-status"
-printf '%s\n' "$pol_caller" | grep -qE '\[ "\$_pol_rc" -ge 2 \]' || pol_missing="$pol_missing caller-tests-ge2"
+out_has "$pol_caller" -E '\[ "\$_pol_rc" -ge 2 \]' || pol_missing="$pol_missing caller-tests-ge2"
 if [ -n "$pol_missing" ]; then
   bad "1699-polarity-tristate: the polarity scan or its caller collapses 'could not tell' onto 'no positive site' — missing:$pol_missing. A failed scan then routes the target into allow_zero and a positively-gated target can pass with zero tests"
 else
@@ -4805,7 +5376,7 @@ fi
 #        component leaves NO `node-bindings-leak-lane:` line and "no line" becomes
 #        ambiguous between "it ran" and "this gate predates the line".
 # SIGPIPE-FREE MATCH, DELIBERATELY NOT `printf | grep -q` (#3685). Measured at this site:
-#        `printf '%s' "$nll_component" | grep -q PATTERN` under this suite's `set -uo pipefail`
+#        `out_has "$nll_component" PATTERN` under this suite's `set -uo pipefail`
 #        returned **rc=141** in 30 of 80 runs (37.5%) — `grep -q` exits at the first match, closing
 #        the read end, and whichever of `printf`'s write(2) calls lands after that gets EPIPE. Over
 #        those 80 runs `rc=1` occurred ZERO times: the note was present EVERY time, so the pipeline
@@ -5223,11 +5794,11 @@ else
   bad "3453-two-passes: found ${afc_n_cargo:-0} cargo check/clippy invocations, expected 2 — the owner ruling for #3453 is a check AND a clippy pass"
 fi
 afc_bad=""
-printf '%s\n' "$afc_cargo" | grep -q -- '--all-features' || afc_bad="$afc_bad no---all-features"
+out_has "$afc_cargo" -- '--all-features' || afc_bad="$afc_bad no---all-features"
 [ "$(printf '%s\n' "$afc_cargo" | grep -c -- '--all-features' || true)" = 2 ] || afc_bad="$afc_bad not-both---all-features"
 [ "$(printf '%s\n' "$afc_cargo" | grep -c -- '--all-targets' || true)" = 2 ] || afc_bad="$afc_bad not-both---all-targets"
-printf '%s\n' "$afc_cargo" | grep -q -- '--package cqlite-core' || afc_bad="$afc_bad not-package-scoped"
-printf '%s\n' "$afc_cargo" | grep -q -- '--workspace' && afc_bad="$afc_bad uses---workspace"
+out_has "$afc_cargo" -- '--package cqlite-core' || afc_bad="$afc_bad not-package-scoped"
+out_has "$afc_cargo" -- '--workspace' && afc_bad="$afc_bad uses---workspace"
 if [ -z "$afc_bad" ]; then
   ok "3453-invocation: both passes are \`--package cqlite-core --all-features --all-targets\` and neither is --workspace (which would build cqlite-cli's bundled duckdb from source — the #916 cost)"
 else
@@ -5238,17 +5809,17 @@ if [ "$(printf '%s\n' "$afc_cargo" | grep -c '_deny_warnings' || true)" = 2 ]; t
 else
   bad "3453-denywarn: a pass does not go through _deny_warnings — a bare \`env RUSTFLAGS=-D warnings\` is SILENTLY IGNORED when CARGO_ENCODED_RUSTFLAGS is set, even when empty"
 fi
-if printf '%s\n' "$afc_fn" | grep -q '_resolved_package_features cqlite-core --all-features'; then
+if out_has "$afc_fn" '_resolved_package_features cqlite-core --all-features'; then
   ok "3453-subject-derived: the declared feature set is read back from CARGO, not echoed from the flag this function passes"
 else
   bad "3453-subject-derived: run_all_features_check no longer derives its feature set via _resolved_package_features — a lane that prints its own arguments states nothing about the build that happened"
 fi
-if printf '%s\n' "$afc_fn" | grep -qE '^[^#]*status=SKIP'; then
+if out_has "$afc_fn" -E '^[^#]*status=SKIP'; then
   bad "3453-never-skips: run_all_features_check gained a SKIP branch — it needs nothing beyond cargo, and a SKIP here is a coverage hole wearing a SKIP's clothes (#3522)"
 else
   ok "3453-never-skips: run_all_features_check has no SKIP branch (it depends on nothing but cargo)"
 fi
-if printf '%s\n' "$afc_fn" | grep -q 'declaration="\[\$name\] subject:'; then
+if out_has "$afc_fn" 'declaration="\[\$name\] subject:'; then
   ok "3453-declares: the lane emits a subject declaration (package + feature set + targets), not a bare status token"
 else
   bad "3453-declares: the lane no longer declares what it measured — issue #3453's own remedy is 'report a measurement, not a decision'"
@@ -5478,10 +6049,51 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
+# 410 -> 455: the #3727 capacity-token cases (9c-v..9c-xi) add exactly 45 host-independent
+# verdicts — 5 cap-source rows x (token + whole-line grammar) = 10, the unmeasurable state
+# (token + its negative-match sweep + grammar) = 3, the na state, used=100%, its LOUD WARN,
+# used cap-zero, the two health-is-not-capacity asserts, and 9c-x's unattributed pair (token +
+# grammar) = 2, the invalid-stale row + its two axes-kept-apart asserts = 4, and the attribution
+# pair (9c-x's two forced outcomes x2 + 9c-xi's null-size-is-not-attribution pair) = 4. COUNTED FROM
+# A REAL RUN, not from
+# arithmetic over the source (this file's own header records that its hand-kept accounting has
+# been wrong twice): the run that added them reported `accounted: 439`, against 420 before, so
+# the +45 above is a measured difference (the last three: 9c-v-g's probe-isolation assert, its
+# huge-cap percentage+WARN assert and that case's grammar check) and the deliberate ~10 margin is
+# preserved rather than
+# widened. Setting the floor AT the accounted figure would remove that margin, which is what
+# absorbs the host-conditional verdicts enumerated above.
+# 455 -> 429 on the lead's ruling req-3727-w4 (SPLIT, option A). The provenance classifier, the
+# value-grammar map, the probed default and the four remediation WARNs are REMOVED from this PR,
+# and the cases asserting them are DELETED rather than softened. LOWERED DELIBERATELY, and the
+# arithmetic is stated so it cannot be mistaken for accommodating a break: a real run reports
+# `accounted: 439` (was 465), a difference of 26 verdicts, all of them assertions about states
+# that no longer exist — the 5 cap-source rows x2, the invalid label, the direction, the
+# no-hardcoded-default pair, the near-capacity remedy, the unclassifiable-value pair, the
+# probe-isolation assert and their grammar checks. The deliberate ~10 margin below the accounted
+# figure is PRESERVED (439 - 10 = 429), never widened: a floor set AT the count would red on the
+# host-conditional verdicts enumerated above, and a floor further below stops detecting a
+# silently-dying section, which is the only thing it is for.
 # 410 -> 413 on #3402: section 54f adds 3 asserts, host-INDEPENDENT for the same reason as
 # 54 (pure bash grep over an in-suite string, plus two file-presence reads), so the same
 # "raise by exactly the number added" rule applies and the deliberate ~9 margin is kept.
-ASSERT_FLOOR=413
+# 429 + 3 -> 432 ON THE MERGE OF origin/main (this branch has no #3402 lineage of its own). The two
+# paragraphs above are BOTH kept verbatim because they record two independent histories of the same
+# number: this branch's 410 -> 455 -> 429, and main's 410 -> 413. They compose by main's OWN stated
+# rule — raise by exactly the number of host-INDEPENDENT asserts added — because section 54f's three
+# asserts are pure bash over an in-suite string plus two file-presence reads, so they cannot become a
+# declared skip on any of the eight host shapes enumerated above, and they are IN this merged file.
+# Composing the two deltas is the only resolution that keeps both intents: taking 429 would silently
+# drop main's raise, and taking 413 would drop this branch's 45-verdict block.
+#
+# DECLARED, because a floor is worth exactly its margin and this one has drifted: a real run of the
+# MERGED file reports `accounted: 468`, so the margin is 36 rather than the deliberate ~10 the
+# paragraphs above describe. The drift is this branch's, not the merge's — 429 was set when a real
+# run reported 439, and later rounds added ~25 verdicts here without raising it. Re-tightening is a
+# BRANCH decision with its own risk (a floor nearer the count reds on the host-conditional verdicts
+# enumerated above, on a host that is not this one), so it is stated here rather than done inside a
+# merge resolution.
+ASSERT_FLOOR=432
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

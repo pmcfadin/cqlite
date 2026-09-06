@@ -81,6 +81,35 @@
 #      passes, so a freshly launched box is PINNED rather than merely reported unpinned.
 #      PAM reads /etc/environment at session creation, so the probe in the SAME run sees
 #      what the write just persisted — no reboot and no re-login.
+#   5b2. sccache cache-size cap (issue #3727). The SAME defect as 5b, one variable over:
+#      `.agent-ami/profile.yaml` DECLARES SCCACHE_CACHE_SIZE but nothing ever persisted it, so
+#      the value existed only inside launcher-created processes and the fleet-effective cap was
+#      sccache's own 10 GiB default. Persists SCCACHE_CACHE_SIZE into /etc/environment (never
+#      rewriting an existing value) and takes its VERDICT from a fresh profile-free session
+#      PLUS the RUNNING SERVER — because the cap is read by the sccache SERVER at startup and
+#      is therefore fixed by whichever process started it: a visible env var proves nothing
+#      once a server is already up. One greppable `sccache-cap:` line: SCOPED-NON-LOGIN /
+#      NOT-SYSTEM-WIDE / NOT-HONOURED / FAILED / UNMEASURED — and NONE of them is an [ok],
+#      because this section measures ONE context (a non-login PAM session) while #3727's own
+#      root cause lives in another (a LOGIN shell runs /etc/profile.d after pam_env). Even the
+#      best state, every link measured and agreeing, is SCOPED-NON-LOGIN: a **[gap]** that reports
+#      what was measured and DECLARES that the cap a gate gets is not established — a partial
+#      result is UNKNOWN, never an [ok] (#3414's rule).
+#      IT IS A [gap] AND NOT A [warn], AND `--strict` THEREFORE STILL GOES GREEN (round 428). A
+#      [warn] counts toward WARNINGS and `--strict` fails on any warning, so emitting this
+#      verdict as one made `verify.run` unable to print `All checks green.` on ANY host, forever,
+#      including a perfectly provisioned one — no action on any box clears a limit of what this
+#      script MEASURES, and a check that always fails gets waived, which is strictly worse than
+#      the false [ok] it replaced. So a healthy box reaches green WITH this [gap] line printed
+#      beside it: green means nothing on THIS box needs attention, never that every property was
+#      established. Closing the gap itself is #3946.
+#      NOT-HONOURED reports BOTH byte counts and prints NO remedy: the advice layer (which server
+#      to stop, in which context, in which direction) was REMOVED by lead ruling req-3727-w4 and is
+#      the follow-up issue's subject. The value->bytes
+#      map is asked of an ISOLATED throwaway sccache server, never reimplemented here: measured,
+#      `30G` is 30 GiB but `30GiB` and `30GB` are SILENTLY DISCARDED to the 10 GiB default and a
+#      bare integer means BYTES, so a bash reimplementation is exactly where this goes wrong.
+#      Non-Linux hosts get UNMEASURED and never a success (same posture as 5b).
 #   5c. Claude credential reachability (issue #3733, LINUX only). A REPORT, NOT A CHECK —
 #      and unlike every other section here it produces NO [ok] and NO [warn], so `--strict`
 #      neither passes nor fails on it. It used to emit two CERTIFYING verdicts whose
@@ -163,6 +192,21 @@
 #                                                      #   CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 is the
 #                                                      #   env spelling, for harnesses that drive
 #                                                      #   bootstrap on a fixed command line.
+#   bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap  # persist the sccache cache-size
+#                                                      #   cap (section 5b2's /etc/environment
+#                                                      #   write) WITHOUT --yes, and nothing
+#                                                      #   else — the sibling of
+#                                                      #   --fix-credentials / --fix-gate-pin,
+#                                                      #   and what .agent-ami/profile.yaml's
+#                                                      #   verify.run uses. One flag per
+#                                                      #   subject: a cache-size cap is not a
+#                                                      #   gate-slot cap (issue #3727).
+#   bash scripts/bootstrap-agent-machine.sh --skip-sccache-cap # skip ONLY section 5b2. Same
+#                                                      #   posture as --skip-gate-pin: it emits
+#                                                      #   `sccache-cap: OPT-OUT` as a [warn],
+#                                                      #   so it can never buy a vacuous green.
+#                                                      #   CQLITE_BOOTSTRAP_SKIP_SCCACHE_CAP=1
+#                                                      #   is the env spelling.
 #   bash scripts/bootstrap-agent-machine.sh --skip-claude-auth # skip ONLY section 5c (the
 #                                                      #   Claude credential probe AND the tmux
 #                                                      #   observation). The probe makes a real
@@ -270,6 +314,17 @@ fi
 # stays a verification step rather than becoming an installer — the same reasoning that
 # justified --fix-credentials.
 FIX_GATE_PIN=0
+# --fix-sccache-cap / --skip-sccache-cap (issue #3727): section 5b2's own switches. ONE FLAG PER
+# SUBJECT, the rule --skip-push-probe / --skip-smoke / --skip-gate-pin already follow — a cache-size
+# cap and a gate-slot cap are different variables with different consumers and different remedies
+# (`sccache --stop-server` vs editing a value), so folding this into --fix-gate-pin would make that
+# flag's own "and NOTHING else" documentation false, which is the drift this file pays for later.
+FIX_SCCACHE_CAP=0
+SKIP_SCCACHE_CAP=0
+SKIP_SCCACHE_CAP_HOW=""
+if [ "${CQLITE_BOOTSTRAP_SKIP_SCCACHE_CAP:-0}" = 1 ]; then
+  SKIP_SCCACHE_CAP=1; SKIP_SCCACHE_CAP_HOW="CQLITE_BOOTSTRAP_SKIP_SCCACHE_CAP=1"
+fi
 # --skip-claude-auth / CQLITE_BOOTSTRAP_SKIP_CLAUDE_AUTH=1 (issue #3733): skip section 5c
 # entirely — no `claude -p` probe and no tmux server inspection. A FOURTH subject, so a
 # fourth switch, exactly as --skip-gate-pin is separate from --skip-push-probe. It is LOUD.
@@ -327,6 +382,8 @@ for arg in "$@"; do
     --skip-gate-pin) SKIP_GATE_PIN=1; SKIP_GATE_PIN_HOW="--skip-gate-pin" ;;
     --skip-object-store-sweep) SKIP_OBJ_SWEEP=1; SKIP_OBJ_SWEEP_HOW="--skip-object-store-sweep" ;;
     --fix-gate-pin) FIX_GATE_PIN=1 ;;
+    --skip-sccache-cap) SKIP_SCCACHE_CAP=1; SKIP_SCCACHE_CAP_HOW="--skip-sccache-cap" ;;
+    --fix-sccache-cap) FIX_SCCACHE_CAP=1 ;;
     --skip-claude-auth) SKIP_CLAUDE_AUTH=1; SKIP_CLAUDE_AUTH_HOW="--skip-claude-auth" ;;
     --fix-claude-auth) FIX_CLAUDE_AUTH=1 ;;
     --fix-credentials) FIX_CREDENTIALS=1 ;;
@@ -378,6 +435,17 @@ if [ "$FIX_CLAUDE_AUTH" = 1 ] && [ "$SKIP_CLAUDE_AUTH" = 1 ]; then
   SKIP_CLAUDE_AUTH=0; SKIP_CLAUDE_AUTH_HOW=""
 fi
 
+# Same rule, same shape, for 5b2's pair (issue #3727). Resolved after the loop so flag ORDER cannot
+# change the outcome, and an EXPLICIT skip beside an explicit fix is a usage error while the weaker
+# ENV opt-out loses to an explicit --fix-sccache-cap.
+if [ "$FIX_SCCACHE_CAP" = 1 ] && [ "$SKIP_SCCACHE_CAP" = 1 ]; then
+  if [ "$SKIP_SCCACHE_CAP_HOW" = "--skip-sccache-cap" ]; then
+    echo "bootstrap: --skip-sccache-cap and --fix-sccache-cap are contradictory (try --help)" >&2
+    exit 2
+  fi
+  SKIP_SCCACHE_CAP=0; SKIP_SCCACHE_CAP_HOW=""
+fi
+
 # ---- OS + package-manager detection ----
 OS=$(uname -s)
 case "$OS" in
@@ -387,6 +455,14 @@ case "$OS" in
 esac
 
 WARNINGS=0
+# GAPS (issue #3727 roborev round 428) — a SECOND counter, deliberately NOT folded into
+# WARNINGS. A [warn] is a per-box defect an operator can CLEAR on this machine; a [gap] is a
+# DECLARED limit of what this script can measure at all, identical on every correctly
+# provisioned host and clearable only by landing the issue it names. Collapsing the two made
+# `--strict` — and therefore `.agent-ami/profile.yaml`'s verify.run — fail on EVERY host
+# forever, which is the alarm people learn to waive, and then nothing is checked at all. So
+# --strict keys on WARNINGS alone and the summary reports GAPS separately and by name.
+GAPS=0
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # ---- bounded execution (issue #2942) ----
@@ -442,6 +518,12 @@ bounded() {
 }
 ok()   { printf '  \033[32m[ok]\033[0m   %s\n' "$1"; }
 warn() { printf '  \033[33m[warn]\033[0m %s\n' "$1"; WARNINGS=$((WARNINGS + 1)); }
+# gap(): a DECLARED, MEASURED-BUT-INCOMPLETE state — printed as loudly as a [warn], never an
+# [ok], and it can NEVER be a success token. It does not increment WARNINGS because no action on
+# THIS box changes it; the summary names every gap and the issue that would close it. Adding a
+# gap() call for anything an operator could fix on the machine would be a mute button — the one
+# caller today is section 5b2's SCOPED-NON-LOGIN (#3946), and the suite pins that count.
+gap()  { printf '  \033[35m[gap]\033[0m  %s\n' "$1"; GAPS=$((GAPS + 1)); }
 info() { printf '         %s\n' "$1"; }
 hdr()  { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
 
@@ -465,6 +547,200 @@ brew_or_cargo() {
   else
     echo "cargo install $2"
   fi
+}
+
+# ---- ONE ANSWER TO "WHICH sccache DOES THIS BOX HAVE" (issue #3727, roborev job 413) ----
+#
+# EVERY SITE IN THIS SCRIPT THAT DECIDES SCCACHE PRESENCE IN ITS OWN PROCESS CALLS THIS ONE
+# FUNCTION — the section-2 accelerator check and section 5b2's precondition, which were the
+# only two. Job 411 had already found the GATE disagreeing with this script about one box;
+# two more `have sccache` sites in here were the same defect one file over, and the fix for
+# it is one rule per execution context, never a third copy of the rule. Section 5b2's
+# `scc_resolve_binary` is the OTHER context (a probed sudo SESSION, which expands its own
+# `$HOME`) and stays where it is; the rule below is the same two stages, asked here.
+#
+# THE RULE, byte-for-byte agent-gate.sh's `_gate_sccache_bin`: STAGE 1 the ambient PATH;
+# STAGE 2 <the invoking account's home>/.cargo/bin/sccache — where `cargo install sccache`,
+# the install section 2 itself prints, puts the binary, and exactly the directory the gate
+# falls back to. `-f` as well as `-x`, because `[ -x <dir> ]` is TRUE for a directory: a
+# directory named `sccache` must not resolve as a binary. Stage 1 answers the BARE name
+# (what a PATH-resolved call here already runs); stage 2 answers the ABSOLUTE path, the only
+# runnable form in that layout.
+#
+# WHY THE HOME IS RESOLVED AND NOT TAKEN FROM `$HOME` — THIS IS THE CRUX. The documented
+# invocation is `sudo bash scripts/bootstrap-agent-machine.sh`, so this process's own `$HOME`
+# is ROOT's: `$HOME/.cargo/bin` evaluated HERE would probe /root/.cargo/bin and answer about
+# an account nobody runs gates as. `scc_resolve_binary` sidesteps that by leaving `$HOME`
+# SINGLE-QUOTED for the probed session to expand — these two checks run in bootstrap's own
+# process, both BEFORE privilege is resolved, so the home is resolved here instead: from the
+# PASSWD DATABASE, keyed on a VALIDATED SUDO_UID, never by assuming /home/<user>. No
+# privileged call is made (a declared TEST MODE run with no proven sandbox must make none at
+# all, and section 2 runs long before any identity or sudo probe).
+#
+# AND AN UNRESOLVABLE HOME IS ITS OWN ANSWER, NEVER AN ABSENCE. "Both locations were checked
+# and neither holds one" (rc 1) and "stage 2 could not be identified" (rc 2) are different
+# facts, and only the first licenses the MISSING warning `--strict` reads as a failure. That
+# is the whole shape of job 413's finding, one layer up: a PATH-only check reported MISSING
+# for a binary the gate resolves and uses, and the false warning failed the strict verify.
+SCCACHE_BIN=""            # the resolved binary: the bare name, or an absolute path
+SCCACHE_BIN_WHERE=""      # `PATH`, or the directory stage 2 found it in
+SCCACHE_FALLBACK_DIR=""   # the stage-2 directory, whenever it could be identified
+SCCACHE_FALLBACK_WHY=""   # why it could not be, when it could not
+
+# invoker_cargo_bin <euid>: sets SCCACHE_FALLBACK_DIR to the ~/.cargo/bin of the account a
+# gate runs as (rc 0), or rc 1 with SCCACHE_FALLBACK_WHY saying which fact was missing.
+#
+# The EUID is a PARAMETER, not a read: the only caller passes bash's own `$EUID` (never a
+# PATH-resolved `id -u`, which a shim can answer for), and passing it is what lets the tests
+# drive the root branch on a suite that cannot BE root — a readonly `$EUID` cannot be set,
+# and inventing an environment seam for it would hand a real invoker a way to redirect the
+# lookup.
+invoker_cargo_bin() {
+  local euid="$1" uid="" name="" pwline="" home=""
+  SCCACHE_FALLBACK_DIR=""; SCCACHE_FALLBACK_WHY=""
+  case "$euid" in ''|*[!0-9]*) euid="" ;; esac
+  if [ -z "$euid" ]; then
+    SCCACHE_FALLBACK_WHY="\$EUID is unreadable, so the account a gate runs as cannot be established"
+    return 1
+  fi
+  if [ "$euid" != 0 ]; then
+    # We ARE that account, so this process's own $HOME is exactly what the gate's fallback
+    # expands — and preferring it matters: an agent box may run with a HOME that is not the
+    # one passwd records, and the gate would use THAT one.
+    if [ -n "${HOME:-}" ]; then
+      SCCACHE_FALLBACK_DIR="$HOME/.cargo/bin"
+      return 0
+    fi
+    uid="$euid"
+  else
+    # Root: the subject is the INVOKING account. SUDO_UID is the authority and SUDO_USER must
+    # AGREE with it — the identity rule sections 5b/5b2 already resolve by, for the same
+    # reason: a stale or spoofed SUDO_USER would name a different account's home.
+    uid="${SUDO_UID-}"
+    case "$uid" in ''|*[!0-9]*) uid="" ;; esac
+    if [ -z "$uid" ]; then
+      SCCACHE_FALLBACK_WHY="this process is root with no usable SUDO_UID (absent or non-numeric), so the invoking account whose ~/.cargo/bin is in question is unknown"
+      return 1
+    fi
+    if [ "$uid" = 0 ]; then
+      SCCACHE_FALLBACK_WHY="SUDO_UID is 0, so sudo was invoked BY root — there is no invoking user account whose ~/.cargo/bin could be checked"
+      return 1
+    fi
+    name="${SUDO_USER-}"
+    if [ -n "$name" ] && [ "$(id -u "$name" 2>/dev/null || echo none)" != "$uid" ]; then
+      SCCACHE_FALLBACK_WHY="INCONSISTENT sudo metadata — SUDO_USER '$name' does not resolve to SUDO_UID $uid, so whose home to check is ambiguous"
+      return 1
+    fi
+  fi
+  # THE HOME COMES FROM THE PASSWD DATABASE, never from /home/<name>: an account's home is
+  # whatever passwd says it is, and guessing the path would probe a directory that may not be
+  # that account's at all. `getent` first (it answers for NSS-backed accounts too), /etc/passwd
+  # second, and the lookup is BOUNDED — an NSS backend (LDAP, SSSD) can block, and this is boot
+  # path code. Keyed on the UID, which is the authority; the name is only ever cross-checked.
+  if have getent; then
+    pwline=$(bounded 5 getent passwd "$uid" 2>/dev/null || true)
+  fi
+  if [ -z "$pwline" ] && [ -r /etc/passwd ]; then
+    pwline=$(awk -F: -v u="$uid" '$3 == u { print; exit }' /etc/passwd 2>/dev/null || true)
+  fi
+  home=$(printf '%s\n' "$pwline" | awk -F: 'NF >= 6 { print $6; exit }')
+  case "$home" in
+    /*) SCCACHE_FALLBACK_DIR="$home/.cargo/bin"; return 0 ;;
+  esac
+  SCCACHE_FALLBACK_WHY="uid $uid has no absolute home directory in the passwd database (neither getent nor /etc/passwd names one), so the ~/.cargo/bin the gate falls back to cannot be located"
+  return 1
+}
+
+# sccache_bin [<euid>]: THREE outcomes, and a caller may claim an ABSENCE only on rc 1.
+#   rc 0 — SCCACHE_BIN is what to run, SCCACHE_BIN_WHERE says which stage answered.
+#   rc 1 — BOTH locations were checked and neither holds an sccache.
+#   rc 2 — stage 1 found none and stage 2 could not be identified (SCCACHE_FALLBACK_WHY).
+#
+# <euid> defaults to bash's own `$EUID` and NO caller passes it: it is a positional parameter
+# for the reason `invoker_cargo_bin`'s is — a readonly `$EUID` cannot be set, so it is the only
+# way a suite running as an ordinary account can drive the ROOT branch of this resolver at all,
+# and a positional default hands a real invoker nothing (unlike an environment override).
+sccache_bin() {
+  SCCACHE_BIN=""; SCCACHE_BIN_WHERE=""
+  if have sccache; then
+    SCCACHE_BIN=sccache
+    SCCACHE_BIN_WHERE=PATH
+    return 0
+  fi
+  invoker_cargo_bin "${1-${EUID-}}" || return 2
+  if [ -f "$SCCACHE_FALLBACK_DIR/sccache" ] && [ -x "$SCCACHE_FALLBACK_DIR/sccache" ]; then
+    SCCACHE_BIN="$SCCACHE_FALLBACK_DIR/sccache"
+    SCCACHE_BIN_WHERE="$SCCACHE_FALLBACK_DIR"
+    return 0
+  fi
+  return 1
+}
+
+# ---- AND NOTHING RESOLVED FROM A USER-WRITABLE LOCATION IS EVER RUN BY ROOT ----
+# (issue #3727, roborev job 415 — HIGH, introduced by job 413's resolver above.)
+#
+# THE INVARIANT: A BINARY RESOLVED FROM A LOCATION THE INVOKING ACCOUNT CAN WRITE MUST NEVER BE
+# EXECUTED BY THIS PROCESS WHILE IT IS ROOT. The documented invocation is
+# `sudo bash scripts/bootstrap-agent-machine.sh`, so this process is root while stage 2 above
+# names <the invoking account's home>/.cargo/bin/sccache — a path that account can REPLACE.
+# Executing it here is arbitrary code execution as root. On this fleet every lane runs as the
+# same account with a writable home, so the party who can plant that file is a PEER LANE and not
+# the invoker: a NON-INVOKER route, which this repo classifies as a defect rather than an
+# out-of-model invoker capability.
+#
+# WHY REFUSING TO RUN IT BEATS TESTING ITS OWNERSHIP. "Is this file writable by anyone but root"
+# is a TOCTOU race against the exec that follows it, and answering it correctly needs the group
+# and other bits AND every parent directory. Not executing removes the class instead of testing
+# for it. And telling a stage-1 (PATH) hit from a stage-2 (home) hit is that SAME ownership
+# judgement — root's PATH is normally sudo's `secure_path`, but "normally" is not a measurement —
+# so root runs NEITHER. The only thing lost is a cosmetic `--version` line, and its absence is
+# REPORTED rather than printed as an empty `()`.
+#
+# THE OTHER ROUTE TO THE SAME INVARIANT is section 5b2's: it runs the binary INSIDE the
+# already-dropped-privilege session (`scc_session_run`, i.e. `sudo -n -u <the invoking account>`),
+# which is available there because privilege has by then been resolved and probed. That is not
+# available here: section 2 runs long before any identity or sudo probe, and a declared TEST MODE
+# run with no proven sandbox must make no privileged call at all. So here the answer is to run
+# nothing. Those are the ONLY two sanctioned execution routes in this script, and
+# test_bootstrap_agent_machine.sh's `sccache-exec` census FAILS by name on any third one.
+#
+# The euid is a POSITIONAL parameter for `sccache_bin`'s reason: `$EUID` is bash's own readonly,
+# so a suite running as an ordinary account has no other way to drive the root branch, and a
+# positional default hands a real invoker nothing (an environment override would be settable by
+# exactly the party it constrains).
+SCC_SELFRUN_WHY=""
+
+# scc_selfrun_ok <euid>: rc 0 iff running a user-resolved binary in THIS process crosses no
+# privilege boundary. rc 1 with SCC_SELFRUN_WHY naming the reason otherwise. An UNREADABLE euid
+# takes the refusing branch: "cannot tell" must never inherit the permissive answer.
+scc_selfrun_ok() {
+  local euid="$1"
+  SCC_SELFRUN_WHY=""
+  case "$euid" in
+    ''|*[!0-9]*)
+      SCC_SELFRUN_WHY="this process's \$EUID is unreadable, so whether executing it would cross a privilege boundary cannot be established"
+      return 1 ;;
+  esac
+  if [ "$euid" = 0 ]; then
+    SCC_SELFRUN_WHY="this process is ROOT (the documented invocation is 'sudo bash <this script>') and the binary was resolved from a location the invoking account can write, so executing it here would run a user-replaceable file with full privilege"
+    return 1
+  fi
+  return 0
+}
+
+# scc_selfrun <euid> <bin> [args...]: run <bin> ONLY when scc_selfrun_ok says no boundary is
+# crossed. Nothing is executed otherwise. The predicate is asked HERE as well as by the caller
+# (which needs SCC_SELFRUN_WHY for its message) deliberately: one source of truth, enforced at
+# the exec itself, so a future caller that forgets to ask still cannot make root run it.
+scc_selfrun() {
+  local euid="$1" bin="$2"
+  shift 2
+  scc_selfrun_ok "$euid" || return 1
+  if [ -z "$bin" ]; then
+    SCC_SELFRUN_WHY="no binary was resolved, so there is nothing to run"
+    return 1
+  fi
+  "$bin" "$@"
 }
 
 # ---- mold link accelerator helpers (Linux only, issue #2859) ----
@@ -751,11 +1027,37 @@ fi
 # ---- 2. Accelerators (mirror scripts/agent-gate.sh ACCEL_* detection, #1848) ----
 hdr "Gate accelerators (issue #1848)"
 
-# sccache — mirrors agent-gate.sh "sccache auto-detect" (ACCEL_SCCACHE).
-if have sccache; then
-  ok "sccache present ($(sccache --version 2>/dev/null | head -1)) — cross-worktree compile cache"
+# sccache — mirrors agent-gate.sh "sccache auto-detect" (ACCEL_SCCACHE), THROUGH THE ONE
+# TWO-STAGE RESOLVER (issue #3727, roborev job 413). A PATH-only check here reported
+# `sccache MISSING` for the very binary the gate resolves from ~/.cargo/bin and uses — and
+# under `--strict` that false warning failed a healthy machine. The MISSING line is emitted
+# only when BOTH locations were checked and neither holds one; an unidentifiable stage 2 is
+# reported as the UNKNOWN it is, because "not installed" is a claim this run cannot make.
+scc_accel_rc=0
+sccache_bin || scc_accel_rc=$?
+# THE TOOL'S OWN VERSION LINE, AND ONLY WHERE RUNNING IT CROSSES NO PRIVILEGE BOUNDARY (issue
+# #3727, roborev job 415). Under the documented `sudo bash <this script>` this executes NOTHING
+# and the clause below says why — see scc_selfrun. The predicate is asked separately from the run
+# because a command substitution is a SUBSHELL, so SCC_SELFRUN_WHY set inside it would be lost.
+scc_accel_ver=""
+scc_accel_vc=""
+if [ "$scc_accel_rc" -eq 0 ] && scc_selfrun_ok "${EUID-}"; then
+  scc_accel_ver=$(scc_selfrun "${EUID-}" "$SCCACHE_BIN" --version 2>/dev/null | head -1) || true
+  scc_accel_vc=" (${scc_accel_ver:-version line unreadable})"
+elif [ "$scc_accel_rc" -eq 0 ]; then
+  scc_accel_vc=" (version NOT read — $SCC_SELFRUN_WHY)"
+fi
+if [ "$scc_accel_rc" -eq 0 ] && [ "$SCCACHE_BIN_WHERE" = PATH ]; then
+  ok "sccache present$scc_accel_vc — cross-worktree compile cache"
+elif [ "$scc_accel_rc" -eq 0 ]; then
+  ok "sccache present$scc_accel_vc at '$SCCACHE_BIN' — not on this process's PATH, resolved from the invoking account's ~/.cargo/bin, which is the same fallback agent-gate.sh applies before it detects sccache, so a gate WILL use it — cross-worktree compile cache"
+elif [ "$scc_accel_rc" -eq 2 ]; then
+  # NO install line here, and deliberately: `--yes` would RUN it, and installing a tool whose
+  # presence this run could not determine is a side effect taken on an unknown state.
+  warn "sccache UNKNOWN — none on this process's PATH, and the ~/.cargo/bin that agent-gate.sh also falls back to could not be located ($SCCACHE_FALLBACK_WHY), so this run cannot tell an absent sccache from an installed one"
+  info "check by hand as the account gates run as: 'command -v sccache || ls -l ~/.cargo/bin/sccache' — and if it is absent, $(brew_or_cargo sccache sccache)"
 else
-  warn "sccache MISSING — ~25.6% slower fresh builds (gate stamps sccache=absent)"
+  warn "sccache MISSING — ~25.6% slower fresh builds (gate stamps sccache=absent); checked this process's PATH and '$SCCACHE_FALLBACK_DIR/sccache' (where 'cargo install sccache' writes, and the gate's own fallback)"
   # shellcheck disable=SC2046
   run_or_print sccache $(brew_or_cargo sccache sccache)
 fi
@@ -3214,6 +3516,1338 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   fi
 fi
 
+# ---- 5b2. sccache cache-size cap (issue #3727) ----
+# THE SAME DEFECT AS 5b, ONE VARIABLE OVER, and it was live on every box in the fleet.
+# `.agent-ami/profile.yaml` DECLARES SCCACHE_CACHE_SIZE, and nothing ever persisted it:
+# measured, the variable existed only inside the agent process the launcher created — a fresh
+# PAM session (`sudo -i`) and `env -i bash -lc` both reported it UNSET — while SCCACHE_DIR
+# beside it in the same profile block WAS in /etc/environment. So the fleet-effective cap was
+# sccache's own 10 GiB default, on boxes provisioned to hold more, and no artifact said so.
+#
+# AND THERE IS A SECOND HALF 5b DOES NOT HAVE: THE VALUE IS READ BY THE SCCACHE *SERVER* AT
+# STARTUP. It is therefore fixed by whichever process FIRST started the server and NO later
+# client can change it — measured on this fleet: with a server already up, `--show-stats`
+# reports the same `max_cache_size` whether the client exports 30G, 7G or nothing at all. So
+# env-var VISIBILITY IS NOT THE VERDICT here; the authoritative reading is the RUNNING
+# SERVER's max_cache_size, and a stale server is its own state with its own remedy
+# (`sccache --stop-server`, never "edit the value").
+#
+# THE VALUE->BYTES MAP IS ASKED OF SCCACHE, NEVER REIMPLEMENTED (the rule 5b's
+# pin_gate_source_for states: a copy of the resolver is a SECOND IMPLEMENTATION whose
+# correctness is only knowable by differential testing against the original). Measured on
+# sccache 0.17.0, and this grammar is exactly where a careful bash reimplementation goes wrong:
+#     30G -> 30 GiB      30g -> 30 GiB      500M -> 500 MiB     1T -> 1 TiB
+#     30GiB -> DISCARDED (10 GiB default)   30GB -> DISCARDED   "30 G" -> DISCARDED
+#     abc/empty/-5G/21-digits -> DISCARDED  100 -> 100 *BYTES*  0G -> 0 bytes
+# and there is NO diagnostic for a discard: with SCCACHE_LOG=debug the server logs only
+# `Init disk cache with dir "...", size 10737418240`, i.e. the fallback, never a rejection.
+#
+# THE ORACLE STARTS NOTHING, WHICH IS A DEVIATION FROM THIS ISSUE'S OWN PLAN AND IS BASED ON A
+# LATER MEASUREMENT. The plan called for a throwaway isolated SERVER (private port + private
+# SCCACHE_DIR, stopped afterwards under an isolation assert). Measured afterwards: with no
+# server reachable, `sccache --show-stats` DOES NOT START ONE — nothing listens afterwards, the
+# private SCCACHE_DIR stays empty, and a following `--stop-server` reports "couldn't connect" —
+# and it answers `max_cache_size` from the CLIENT's own resolution of SCCACHE_CACHE_SIZE. That
+# client resolution reproduced the server-measured table above on all 11 points (30G, 30g,
+# 30GiB, 30GB, 100, 1536M, 1T, 0G, abc, empty, 21 digits, unset). So the oracle is a bounded
+# READ against a private port and a private, empty SCCACHE_DIR: no child process to own, no
+# port to hold, and — the point — NO `--stop-server` CALL ANYWHERE IN THIS SECTION, so the
+# production server cannot be stopped by a mistake here. The isolation assert survives and is
+# still the load-bearing line: the reported cache_location must contain OUR probe directory,
+# or the reading is a foreign server's and is discarded. (Matched against the RAW JSON: the
+# payload escapes its inner quotes as `"Local disk: \"/dir\""`, so a
+# `"cache_location":"[^"]*` pattern silently matches nothing and every reading then comes from
+# whatever server answered — that mistake was made once while measuring this, and it produced
+# three confident, wrong numbers.)
+#
+# THE PRODUCTION READING IS THE JSON, NOT THE TEXT LINE. `--show-stats` renders the cap for
+# humans and the rendering is LOSSY: measured, 1536M (1610612736 bytes) prints as `2 GiB` and
+# 1025M prints as `1 GiB`, so a text comparison would accept two genuinely different caps as
+# equal. `--stats-format json` carries `max_cache_size` and `cache_size` as exact byte
+# integers. Both sides of every comparison are BYTES; the only raw-string comparison in this
+# section is file-value vs session-value, for the reason 5b states (`1`, `01` and `1 ` are
+# different strings, and normalising here would be a second classifier).
+hdr "sccache cache-size cap (SCCACHE_CACHE_SIZE, issue #3727)"
+
+# The PRODUCTION persistence target, written as a LITERAL here (same rule as 5b: the
+# privileged write can never name anything else).
+SCC_ENV_FILE=/etc/environment
+SCC_ENV_FILE_IS_SEAM=0
+SCC_SECTION_OK=1
+SCC_PERSIST_NOTE=""
+# NO INLINE COMMENT ON THE VALUE LINE (pam_env takes a trailing `# ...` as part of the value) —
+# the same rule 5b's PIN_ENV_COMMENT follows.
+SCC_ENV_COMMENT='# cqlite: sccache object-cache size cap (issue #3727)'
+# THE SINGLE SOURCE OF TRUTH FOR THE FLEET CAP. `.agent-ami/profile.yaml` carries the same
+# literal for the ONBOARD build (its env reaches launcher-created processes, which is precisely
+# why it was never enough on its own), and scripts/tests/test_bootstrap_agent_machine.sh asserts
+# the two agree — two spellings of one number is drift, and a drift check is cheaper than a
+# convention. MUST be a <digits>[KkMmGgTt] form: see the grammar table above.
+# The value is DERIVED AS A BRACKET (see .agent-ami/profile.yaml for the measurement and both
+# bounds). The shape guard below still applies to it: an unusable literal cannot reach
+# /etc/environment — where it would be silently discarded by sccache AND, because this section
+# never rewrites an existing value, would be permanent.
+SCC_ENV_VALUE='50G'
+SCC_ENV_LINE="SCCACHE_CACHE_SIZE=$SCC_ENV_VALUE"
+
+# A CHEAP SHAPE PRE-FILTER ON OUR OWN CONSTANT — AND IT DOES NOT AUTHORIZE THE WRITE (issue #3727
+# roborev round 4, f1). It used to be the only check, which made it a SECOND IMPLEMENTATION of
+# sccache's grammar — the very thing this section refuses to build for arbitrary values, reintroduced
+# for our own literal — and it had the gap that follows from that: MEASURED, `999999999999999999999G`
+# (21 digits plus a suffix) passes every shape rule and resolves to sccache's 10 GiB DEFAULT, so
+# `--fix-sccache-cap` would have persisted an ineffective cap that this section then never rewrites:
+# permanent and invisible, the exact harm the guard exists to prevent.
+#
+# So the shape test survives only as a fast reject for the obvious cases (an unsubstituted
+# placeholder, an empty value, a bare integer meaning BYTES) that need no fork, and the WRITE is
+# authorized by scc_check_literal below, which ASKS SCCACHE.
+SCC_VALUE_USABLE=1
+case "$SCC_ENV_VALUE" in
+  *[!0-9KkMmGgTt]*|''|*[KkMmGgTt]*[KkMmGgTt]*|[KkMmGgTt]*) SCC_VALUE_USABLE=0 ;;
+  *[0-9]) SCC_VALUE_USABLE=0 ;;   # a bare integer means BYTES — never what this fleet wants
+esac
+
+if [ "$SKIP_SCCACHE_CAP" = 1 ]; then
+  warn "sccache-cap: OPT-OUT ($SKIP_SCCACHE_CAP_HOW) — the cap was NOT persisted and neither its visibility nor the running server's enforced cap was measured"
+  info "this run cannot certify that the sccache server enforces the cap this fleet provisions; drop the opt-out to measure it"
+  SCC_SECTION_OK=0
+fi
+
+# PLATFORM: /etc/environment + pam_env is a Linux mechanism, so the file half of the
+# correlation does not exist elsewhere. Same posture as 5b, for the same reason: an
+# `ok "NOT-APPLICABLE"` here would let --strict CERTIFY AN UNCAPPED HOST, which is this
+# issue's own defect wearing a platform label. Non-Linux is UNMEASURED, never a success.
+SCC_PLATFORM_UNMANAGED=0
+if [ "$SCC_SECTION_OK" = 1 ] && [ "$PLATFORM" != linux ]; then
+  SCC_PLATFORM_UNMANAGED=1
+  info "sccache-cap: no PAM-read system-wide env file on this $PLATFORM host, so bootstrap does not MANAGE the cap here — it still MEASURES the running server's enforced cap below"
+fi
+
+# NO SCCACHE ON THIS BOX ⇒ NOTHING TO CAP, AND NOTHING PRIVILEGED TO DO (issue #3727, found by
+# scripts/tests/test_perf_capability_bootstrap.sh — a suite that tests this file and was NOT in the
+# diff, so ten roborev rounds could not see it). This section's every measurement is ultimately a
+# question about sccache: the value->bytes oracle, the running server, the agreed binary. Without
+# the tool there is no question to answer, so the section reports that and stops BEFORE resolving
+# privilege — which is what removes the sudo calls it would otherwise make.
+#
+# WHY THAT ORDER IS THE FIX AND NOT A WORKAROUND. Bootstrap's perf guards assert that a declared
+# TEST MODE run with no proven sandbox makes NO privileged call at all, recorded by a `sudo` shim on
+# a hermetic PATH — and that PATH has no sccache. On `main` the assertion held because the only
+# sudo-using section (5b) is itself disabled there by a missing `agent-gate.sh`; 5b2 has no such
+# dependency and probed anyway, so a run that could never certify anything still asked for root.
+# Establishing the precondition first is what this section already does for `timeout` and `sudo`;
+# sccache was the one prerequisite checked only downstream.
+#
+# AND THE AMBIENT PATH MAY ONLY ANSWER FOR THE CONTEXT IT IS (roborev job 399, f1 — the FOURTH
+# correction on this one axis, after rounds 6, 7 and 9). Under the DOCUMENTED
+# `sudo bash scripts/bootstrap-agent-machine.sh` the ambient PATH is sudo's `secure_path`, which on
+# stock Ubuntu omits the invoking user's ~/.cargo/bin — where `cargo install sccache`, the install
+# this script's own section 2 prints, puts the binary. So on the documented invocation of a standard
+# toolchain box this precondition said "no sccache on this box" and `--fix-sccache-cap` silently
+# repaired nothing: a false ABSENCE, reported about a tool that is installed.
+#
+# THE PRECONDITION NOW ASKS ONLY WHERE IT IS ENTITLED TO. When `$EUID` is numeric and NON-ZERO we
+# ARE the account a gate runs as, so what THIS process can resolve is a sound proxy for "does this
+# box have sccache at all" and a genuine absence stops the section before it resolves privilege —
+# the property test_perf_capability_bootstrap.sh pins. When we are root (or `$EUID` is unreadable)
+# the ambient PATH belongs to a context nobody launches gates from, so availability is decided BY
+# THE SESSIONS, exactly where every other binary question in this section is asked;
+# `scc_resolve_binary` already reports a genuinely absent tool as `unresolved:no launch context
+# resolved an sccache at all`, and an unresolvable identity is UNMEASURED before any probe runs, so
+# the bypass cannot buy a false certification and cannot make a privileged call on a box with no
+# identity to probe.
+#
+# AND "WHAT THIS PROCESS CAN RESOLVE" IS THE TWO-STAGE `sccache_bin`, NOT `have sccache` (roborev
+# job 413, f1 — the FIFTH correction on this axis, and the same defect as job 411's one file over).
+# `have sccache` alone made the non-root branch stop the section on the STANDARD layout — a system
+# cargo plus the documented `cargo install sccache` in the invoking account's ~/.cargo/bin — so a
+# box the gate accelerates had its cap neither persisted nor verified. The shared resolver checks
+# that directory too, resolving the account's home from the passwd database rather than from this
+# process's `$HOME` (which under `sudo bash <this script>` is root's).
+#
+# THE THREE-VALUED RESULT IS LOAD-BEARING: only "both locations checked, neither holds one" (rc 1)
+# is an absence. An UNIDENTIFIABLE stage 2 (rc 2) leaves the section running, because a pass — or a
+# refusal — derived from a measurement that could not be taken is the one thing this section is not
+# allowed to do.
+#
+# DECLARED RESIDUAL, in the fail-closed direction and now NARROWER: a NON-root run that resolves no
+# sccache in either of those two locations, while its `sudo -i` LOGIN session has one somewhere a
+# shell profile puts on PATH, still reports UNMEASURED here. That is a wrong ANSWER, never a wrong
+# CERTIFICATION, and closing it would mean probing before knowing there is anything to probe.
+scc_pre_euid="${EUID-}"
+case "$scc_pre_euid" in ''|*[!0-9]*) scc_pre_euid="" ;; esac
+# THE SAME RESOLVER SECTION 2 USES, not a second `have sccache` (roborev job 413, f1). A
+# PATH-only precondition SKIPPED THIS ENTIRE SECTION — no cap persistence, no verification —
+# on the standard layout where cargo is a system package and sccache is the documented
+# `cargo install sccache` under the invoking account's ~/.cargo/bin: a box the gate happily
+# accelerates, reported here as having no sccache at all.
+scc_pre_rc=0
+# ONE column-0 `fi` in this block, deliberately: the structural guard in
+# test_bootstrap_agent_machine.sh (12b-f1b) slices this precondition with a `sed` range that
+# ENDS at the first one, so a nested column-0 `fi` would truncate the slice and the guard
+# would assert over half the code.
+[ "$SCC_SECTION_OK" = 1 ] && { sccache_bin || scc_pre_rc=$?; }
+if [ "$SCC_SECTION_OK" = 1 ] && [ "$scc_pre_rc" -ne 0 ]; then
+  if [ "$scc_pre_rc" -eq 1 ] && [ -n "$scc_pre_euid" ] && [ "$scc_pre_euid" != 0 ]; then
+    warn "sccache-cap: UNMEASURED (no 'sccache' for the account gates run as — neither on this process's PATH nor at '$SCCACHE_FALLBACK_DIR/sccache' — so there is no cap to verify and nothing to persist for: the value->bytes oracle, the running server and the agreed binary are all questions about a tool that is not installed)"
+    info "install sccache first (section 2 above prints the command); this section makes no privileged call at all when the tool is absent"
+    SCC_SECTION_OK=0
+  elif [ -n "$scc_pre_euid" ] && [ "$scc_pre_euid" != 0 ]; then
+    # rc 2: stage 1 found none and stage 2 could not be IDENTIFIED. That is not an absence,
+    # so it may not stop the section — availability falls to the session probes below, which
+    # is where every other binary question in this section is asked anyway.
+    info "note: no 'sccache' on this process's PATH, and the ~/.cargo/bin fallback could not be located ($SCCACHE_FALLBACK_WHY) — so ABSENCE is NOT established and this section continues; availability is decided by the SESSION contexts below"
+  elif [ "$scc_pre_rc" -eq 1 ]; then
+    info "note: no 'sccache' on THIS process's PATH and none at '$SCCACHE_FALLBACK_DIR/sccache' either, but this process is root${SUDO_UID:+ under sudo from uid $SUDO_UID} — sudo's secure_path routinely omits the invoking user's ~/.cargo/bin, and a login session's PATH can name a directory neither of those two locations covers. So the ambient PATH is NOT authoritative here and availability is decided by the SESSION contexts below; a genuinely absent tool is reported there, by the same check that names which context could not run it"
+  else
+    info "note: no 'sccache' on THIS process's PATH, and the invoking account's ~/.cargo/bin could not be located ($SCCACHE_FALLBACK_WHY) while this process is root${SUDO_UID:+ under sudo from uid $SUDO_UID}. So the ambient PATH is NOT authoritative here and availability is decided by the SESSION contexts below; a genuinely absent tool is reported there, by the same check that names which context could not run it"
+  fi
+fi
+
+# `$EUID` — bash's own readonly — NEVER a PATH-resolved `id`, and a nonnumeric value is
+# UNKNOWN (treated as privileged, so an unreadable identity fails closed). Same reasoning as
+# 5b at the corresponding line; resolved again here because this section must not depend on 5b
+# having run (a --skip-gate-pin run leaves 5b's locals unset).
+SCC_EUID="${EUID-}"
+case "$SCC_EUID" in ''|*[!0-9]*) SCC_EUID="" ;; esac
+
+if [ "$SCC_SECTION_OK" = 1 ] && [ -n "${CQLITE_BOOTSTRAP_ENV_FILE:-}" ] \
+   && { [ "$SCC_EUID" = 0 ] || [ -z "$SCC_EUID" ]; }; then
+  # The seam is REFUSED under root or unknown identity: it could otherwise steer a PRIVILEGED
+  # write at an env-chosen path. Refused rather than made safe — see 5b's full argument.
+  warn "sccache-cap: SKIPPED (CQLITE_BOOTSTRAP_ENV_FILE is set and this process is root or of unknown identity — refusing a seam that could steer a PRIVILEGED write at an env-chosen path)"
+  info "the seam is for unprivileged self-tests only; run them as a normal user"
+  SCC_SECTION_OK=0
+fi
+
+if [ "$SCC_SECTION_OK" = 1 ] && [ -n "${CQLITE_BOOTSTRAP_ENV_FILE:-}" ]; then
+  # TEST-ONLY SEAM — fail-closed, with NO production fallback (the #3249 lesson: a test seam
+  # that degrades to the real path certifies the real path by accident). Same four guards 5b
+  # applies: inert without CQLITE_BOOTSTRAP_TEST_MODE=1, never the production path, never a
+  # symlink, absolute only.
+  if [ "${CQLITE_BOOTSTRAP_TEST_MODE:-0}" != 1 ]; then
+    warn "sccache-cap: SKIPPED (CQLITE_BOOTSTRAP_ENV_FILE is set without CQLITE_BOOTSTRAP_TEST_MODE=1) — refusing to persist the cap at an env-chosen path"
+    SCC_SECTION_OK=0
+  else
+    case "$CQLITE_BOOTSTRAP_ENV_FILE" in
+      /etc/environment)
+        warn "sccache-cap: SKIPPED (the test seam may not name the production /etc/environment)"
+        SCC_SECTION_OK=0 ;;
+      /*)
+        if [ -L "$CQLITE_BOOTSTRAP_ENV_FILE" ]; then
+          warn "sccache-cap: SKIPPED (the test seam path is a SYMLINK — a write would follow it)"
+          SCC_SECTION_OK=0
+        elif [ ! -d "$(dirname "$CQLITE_BOOTSTRAP_ENV_FILE")" ]; then
+          warn "sccache-cap: SKIPPED (the test seam's parent directory does not exist)"
+          SCC_SECTION_OK=0
+        else
+          SCC_ENV_FILE="$CQLITE_BOOTSTRAP_ENV_FILE"; SCC_ENV_FILE_IS_SEAM=1
+        fi ;;
+      *)
+        warn "sccache-cap: SKIPPED (CQLITE_BOOTSTRAP_ENV_FILE must be an ABSOLUTE path)"
+        SCC_SECTION_OK=0 ;;
+    esac
+  fi
+fi
+
+if [ "$SCC_SECTION_OK" = 1 ]; then
+  # ---- (0) resources + cleanup, REGISTERED BEFORE ANYTHING IS CREATED ----
+  # The only resource this section owns is a private, empty SCCACHE_DIR for the oracle: it
+  # starts no server, so there is no child to reap and no port held (see the oracle note in
+  # the header comment — that is why the plan's start-a-server design was replaced).
+  SCC_PROBE_DIRS=()
+  scc_cleanup() {
+    local d
+    for d in ${SCC_PROBE_DIRS[@]+"${SCC_PROBE_DIRS[@]}"}; do
+      # Guarded on the path SHAPE, not on trust in the variable: an rm -rf driven by a
+      # variable is worth one cheap invariant.
+      case "$d" in
+        /tmp/*|/var/tmp/*|"${TMPDIR:-/nonexistent}"/*) rm -rf -- "$d" 2>/dev/null || true ;;
+      esac
+    done
+    SCC_PROBE_DIRS=()
+  }
+  # ONE EXIT trap exists per shell, and section 3's board probe installs one to restore gh's
+  # active account. COMPOSED, not replaced: a bare `trap 'scc_cleanup' EXIT` here would
+  # silently drop that restore and could leave the operator's gh account switched.
+  # restore_board_account is defined unconditionally at top level and returns immediately
+  # unless BOARD_SWITCHED=1, so naming it is safe on every path.
+  trap 'scc_cleanup; restore_board_account' EXIT
+  trap 'scc_cleanup; restore_board_account; exit 130' INT
+  trap 'scc_cleanup; restore_board_account; exit 143' TERM
+  trap 'scc_cleanup; restore_board_account; exit 129' HUP
+
+  # Every SCCACHE_* the caller exported is scrubbed from the oracle's environment, plus
+  # BASH_ENV/ENV (a non-interactive bash SOURCES $BASH_ENV, so leaving them would let an
+  # inherited file re-inject the very variable being measured). Blanket-unset rather than a
+  # named list: an inherited SCCACHE_GHA_ENABLED / SCCACHE_REDIS_* / SCCACHE_WEBDAV_* moves
+  # the "isolated" probe's storage to a shared backend, and a new backend variable in a future
+  # sccache would be missed by any list written today. `env` applies -u before assignments, so
+  # the three values the probe sets afterwards survive the scrub.
+  SCC_ENV_SCRUB=(-u BASH_ENV -u ENV)
+  for scc_n in $(compgen -e 2>/dev/null || true); do
+    case "$scc_n" in SCCACHE_*) SCC_ENV_SCRUB+=(-u "$scc_n") ;; esac
+  done
+  unset scc_n
+
+
+  # THE INVOKING ENVIRONMENT IS NOT COMPARED — MY INSTRUCTION, WITHDRAWN (issue #3727, lead
+  # retraction after roborev round 9). It was added in round 4 on the reasoning that gates are
+  # launched from agent sessions and `scripts/flow/gate-detached.sh` forwards the caller's env, which
+  # is true — but three consecutive findings descended from comparing it, every one a FALSE FAIL on a
+  # correct box: r6 f1 (binary from the ambient PATH), r7 f1 (sudo's `secure_path` breaking the
+  # documented `cargo install` layout) and r9 f1 (under `sudo bash bootstrap` the invoking
+  # environment is ROOT's, so on the first repair run it is legitimately UNSET while the fresh user
+  # sessions already see the persisted value — a false CONFLICTING-SOURCES that also blocks the
+  # server start under --strict). The standing ruling for repeated findings in one mechanism is to
+  # REMOVE it rather than carve it a fourth time, and a check that reds on a correct box buys nothing
+  # while costing everything.
+  #
+  # So there is no local fingerprint helper any more: the two SESSION contexts each compute their own
+  # inside the probe, and nothing reads this shell's SCCACHE_* for comparison.
+  #
+  # DECLARED GAP, not a silent one: an invoking shell whose SCCACHE_* disagree with BOTH sessions is
+  # a real hazard this check does NOT detect. It is stated in the scope note of every verdict.
+  SCC_ORACLE_WHY=""
+  # scc_bytes_for <outvar> [<value>]: the bytes sccache resolves <value> to; omit <value>
+  # entirely (not empty — set-but-empty is a distinct, measured state) to measure sccache's own
+  # compiled-in DEFAULT. rc 0 with <outvar> set, or rc 1 with SCC_ORACLE_WHY naming the cause.
+  scc_bytes_for() {
+    local __out="$1"; shift
+    local __have=0 __v=""
+    if [ "$#" -ge 1 ]; then __have=1; __v="$1"; fi
+    eval "$__out="
+    SCC_ORACLE_WHY=""
+    if [ -z "$SCC_SCCACHE_BIN" ]; then
+      SCC_ORACLE_WHY="the probed session named no sccache on its own PATH, nor did a retry with ~/.cargo/bin prepended, so the value->bytes map cannot be asked of the tool gates actually run"
+      return 1
+    fi
+    if [ -z "$TIMEOUT_BIN" ]; then
+      SCC_ORACLE_WHY="no timeout/gtimeout on PATH — refusing to run an UNBOUNDED sccache probe during bootstrap"
+      return 1
+    fi
+    local __dir __port __json __rc __try
+    __dir=$(mktemp -d "${TMPDIR:-/tmp}/cqlite-sccache-probe.XXXXXX" 2>/dev/null) || {
+      SCC_ORACLE_WHY="a private SCCACHE_DIR could not be created"; return 1; }
+    SCC_PROBE_DIRS+=("$__dir")
+    # THE DIRECTORY IS CREATED HERE AND USED THERE. mktemp gives it to whoever this process is —
+    # root, under the documented invocation — while the probe now runs as the invoking account,
+    # which could then neither read nor write it. Handing it to that account is what keeps the
+    # oracle measurable after the privilege drop above; a chown to one's own uid is permitted, so
+    # this is a successful no-op when bootstrap is already running as that account. Not fatal on
+    # failure: an unusable probe directory surfaces as the named "produced no stats" cause below,
+    # which is a measurement of the probe, not a crash. Cleanup still runs as this process.
+    if [ -n "${SCC_SELF_USER:-}" ] && have chown; then
+      bounded 5 chown "$SCC_SELF_USER" "$__dir" >/dev/null 2>&1 || true
+    fi
+    for __try in 0 1 2; do
+      # A PRIVATE PORT IS REQUIRED even though nothing is started: without it the client
+      # connects to the DEFAULT port, i.e. to the PRODUCTION server, and would report ITS cap
+      # as the answer to a question about our value. A collision with some other server is
+      # caught by the isolation assert below (its cache_location is not our directory), and
+      # retried on a different port rather than trusted.
+      __port=$(( 40000 + (($$ + __try * 997) % 20000) ))
+      __rc=0
+      # THROUGH THE DROPPED-PRIVILEGE SESSION, NEVER IN THIS PROCESS (issue #3727, roborev job
+      # 415 — HIGH). `$SCC_SCCACHE_BIN` is a path the INVOKING ACCOUNT can write (stage 2 of
+      # `scc_resolve_binary` names <that account's home>/.cargo/bin/sccache), and under the
+      # documented `sudo bash <this script>` this process is ROOT — so running it here was
+      # arbitrary code execution as root, plantable by a peer lane sharing that home. It is now
+      # run by the same `sudo -n -u <that account>` session the other three sccache calls in
+      # this section use, and every one of them keeps its own bound. `scc_session_run` applies
+      # SCC_ENV_SCRUB outside sudo, so the scrub is unchanged; the inner `env` sets the probe's
+      # three values INSIDE the session, where they override whatever it sees on its own.
+      #
+      # `-u SCCACHE_CACHE_SIZE` IS LOAD-BEARING IN THE DEFAULT ARM, and only became so with this
+      # change: the session is a PAM session on a box this very section may have PINNED, so it
+      # legitimately sees SCCACHE_CACHE_SIZE from /etc/environment. Left inherited, "sccache's
+      # own default" would measure the persisted value, SEEN would always equal DEFAULT, and
+      # every pinned box would report the declared ambiguity forever.
+      if [ "$__have" = 1 ]; then
+        __json=$(scc_session_run 20 env SCCACHE_DIR="$__dir" \
+          SCCACHE_SERVER_PORT="$__port" SCCACHE_CACHE_SIZE="$__v" \
+          "$SCC_SCCACHE_BIN" --show-stats --stats-format json 2>/dev/null) || __rc=$?
+      else
+        __json=$(scc_session_run 20 env -u SCCACHE_CACHE_SIZE SCCACHE_DIR="$__dir" \
+          SCCACHE_SERVER_PORT="$__port" \
+          "$SCC_SCCACHE_BIN" --show-stats --stats-format json 2>/dev/null) || __rc=$?
+      fi
+      if [ "$__rc" != 0 ] || [ -z "$__json" ]; then
+        SCC_ORACLE_WHY="the isolated sccache probe produced no stats (rc $__rc)"
+        continue
+      fi
+      # THE ISOLATION ASSERT — the single most important line in this section. Matched against
+      # the RAW payload, because the JSON escapes the quotes inside cache_location.
+      case "$__json" in
+        *"$__dir"*) ;;
+        *) SCC_ORACLE_WHY="the isolated probe was answered by a DIFFERENT sccache (its cache location is not the private probe directory), so its cap says nothing about our value"
+           continue ;;
+      esac
+      local __hits __n
+      __hits=$(printf '%s\n' "$__json" | grep -o '"max_cache_size":[0-9][0-9]*' 2>/dev/null)
+      __n=$(printf '%s\n' "$__hits" | grep -c '^' 2>/dev/null)
+      if [ -z "$__hits" ]; then
+        SCC_ORACLE_WHY="the isolated probe's JSON carries no max_cache_size field"
+        continue
+      elif [ "$__n" != 1 ]; then
+        SCC_ORACLE_WHY="the isolated probe's JSON carries $__n max_cache_size fields, so which one answers is ambiguous"
+        continue
+      fi
+      eval "$__out=\${__hits##*:}"
+      SCC_ORACLE_WHY=""
+      return 0
+    done
+    return 1
+  }
+
+  # scc_check_literal: is OUR OWN cap literal a value sccache will actually APPLY? Asked of the
+  # isolated oracle, never decided by a shape test (roborev round 4, f1). Sets SCC_LITERAL_BYTES and
+  # SCC_LITERAL_STATE; rc 0 = accepted, 1 = would be discarded, 2 = could not be measured.
+  #
+  # "RESOLVES TO SCCACHE'S OWN DEFAULT" IS THE REFUSAL CONDITION, and it covers two cases with one
+  # test — a value sccache DISCARDS, and a value that happens to EQUAL the default. Both are refused,
+  # and deliberately: this section's subject is a cap the fleet CHOSE, so a literal that cannot be
+  # shown to differ from what sccache would do anyway pins nothing, whichever it is. That turns the
+  # one ambiguity this section declares elsewhere into a policy instead of a guess.
+  #
+  # AN UNMEASURABLE ORACLE REFUSES THE WRITE TOO. Persisting a value whose effect could not be
+  # established is how the 21-digit case would have shipped; a box that cannot run the oracle also
+  # cannot certify the cap, so it has nothing to lose by not persisting one.
+  #
+  # DECLARED RESIDUAL, measured: sccache's own parse can OVERFLOW rather than fall back —
+  # `9999999999999999999G` (19 digits) resolves to 2484298143374508032 bytes, a wrapped value that is
+  # neither the default nor what anyone typed. This check ACCEPTS that, because it IS the cap sccache
+  # would apply; what stops it shipping unnoticed is that the persist message NAMES the resolved byte
+  # count, so a wrapped literal is visible at the moment it is written.
+  SCC_LITERAL_BYTES=""
+  SCC_LITERAL_STATE=""
+  scc_check_literal() {
+    local __dflt=""
+    SCC_LITERAL_BYTES=""; SCC_LITERAL_STATE=""
+    if ! scc_bytes_for SCC_LITERAL_BYTES "$SCC_ENV_VALUE"; then
+      SCC_LITERAL_STATE="could not be measured: $SCC_ORACLE_WHY"
+      return 2
+    fi
+    if ! scc_bytes_for __dflt; then
+      SCC_LITERAL_STATE="could not be measured: sccache's own default cap was unreadable, so it cannot be told whether this literal has any effect ($SCC_ORACLE_WHY)"
+      return 2
+    fi
+    if [ "$SCC_LITERAL_BYTES" = "$__dflt" ]; then
+      SCC_LITERAL_STATE="resolves to $SCC_LITERAL_BYTES bytes, which is sccache's OWN default cap — so it either is silently DISCARDED or pins exactly what sccache would do anyway"
+      return 1
+    fi
+    SCC_LITERAL_STATE="resolves to $SCC_LITERAL_BYTES bytes"
+    return 0
+  }
+
+  SCC_RUN_CAP=""
+  SCC_RUN_WHY=""
+  SCC_RUN_STATE=""        # ok | no-server | unreadable
+  SCC_SERVER_STARTED=0      # a start was attempted AND the read-back cap is the one we asked for
+  SCC_START_ATTEMPTED=0     # a start was attempted, whatever answered afterwards
+  SCC_SESSION_DIR=""      # the measured session's SCCACHE_DIR, as reported BY that session
+  SCC_SESSION_PORT=""     # ... and its SCCACHE_SERVER_PORT
+  SCC_SESSION_SET=""      # were they set at all (`${VAR+1}`)? empty and unset are different facts
+
+  # THE THING VERIFIED MUST BE THE THING GATES WILL CONTACT (issue #3727 roborev round 2, f2).
+  # The value was read from a fresh, profile-free PAM session; the server probe and the start ran
+  # in BOOTSTRAP's ambient environment — a different environment. sccache's routing is env-driven
+  # (SCCACHE_SERVER_PORT selects WHICH server a client talks to, SCCACHE_DIR which cache it uses),
+  # so an invoking shell that exports either of them made this section inspect — or START — one
+  # server and report VERIFIED about a value that gates, launched from the measured session, would
+  # take to ANOTHER server. Nothing hostile is needed: one exported variable in the caller's shell
+  # is enough. That is *verifying one object and certifying another*, which is the defect class
+  # this whole section exists to remove, so it cannot be left as a caveat.
+  #
+  # FIXED BY MOVING THE MEASUREMENT, NOT BY CAPTURING THE ENVIRONMENT (roborev offered both). Every
+  # server read and the start now run INSIDE the same `sudo -n -u <self>` fresh session that
+  # produced the value, so the routing they use IS the routing that session has — no set of
+  # variables has to be enumerated, and there is no curated list to fall out of date when sccache
+  # adds a routing variable. The alternative (capture the session's SCCACHE_* and re-apply them
+  # here) requires knowing the FULL routing set to be correct, and a partial capture would produce
+  # exactly the false VERIFIED being fixed.
+  #
+  # ONE THING IS DELIBERATELY *NOT* RUN IN THAT CONTEXT: the value->bytes oracle. Its whole point is
+  # ISOLATION — a private port and a private, empty SCCACHE_DIR — because it asks "what does sccache
+  # make of this string", a question about the string and not about this box's cache.
+  #
+  # THE BINARY IS AGREED BY THE THREE CONTEXTS, NOT TAKEN FROM OURS (issue #3727 roborev round 6,
+  # f1 — the third finding in this mechanism, and the INVERSE of round 3's). Round 3 moved the
+  # ROUTING into the measured session and deliberately kept the binary identity ours, reasoning that
+  # sudo replaces PATH with its own `secure_path` so a bare name would resolve against a PATH nobody
+  # checked. Both halves were defensible and together they were inconsistent: "ours" is bootstrap's
+  # AMBIENT PATH, which under the documented `sudo bash scripts/bootstrap-agent-machine.sh` is
+  # ROOT's — so the section could ask a different (or root-only) sccache about a cap and then start
+  # or verify a server with it, while gates use another binary entirely.
+  #
+  # A CONTEXT WITH NO SCCACHE IS A NON-PARTICIPANT, NOT A DISAGREEMENT (roborev round 7, f1 — and
+  # round 6's requirement, as first implemented here, MADE THE STANDARD INSTALL FAIL). The documented
+  # Linux path is `cargo install sccache`, which lands in the user's Cargo bin directory, while sudo
+  # replaces PATH with `secure_path` — so a NON-LOGIN PAM session routinely resolves nothing while
+  # ONE CONTEXT, AND NO AGREEMENT CLASSIFICATION (lead ruling req-3727-w4). The binary is still
+  # asked of the SESSION rather than taken from bootstrap's ambient PATH — that is a measurement,
+  # and it is why this works under the documented `sudo bash <this script>`, where the ambient PATH
+  # is sudo's `secure_path` and omits the ~/.cargo/bin that `cargo install sccache` writes to. What
+  # is REMOVED is the comparison: the login-shell participant, the agree/disagree/non-participant
+  # states and their verdicts. Two outcomes now, and both are measurements: the probed session named
+  # a path, or it did not.
+  #
+  # Round 3's reason survives: what is passed to a session is an ABSOLUTE PATH, so nothing depends
+  # on `secure_path` at use time; it is just the path that session itself named.
+  SCC_SCCACHE_BIN=""
+  # SCC_BIN_PROVENANCE: WHICH of the two resolution stages below named the binary, as ONE FACTUAL
+  # CLAUSE for the operator-facing lines. It is deliberately NOT a verdict state, a classifier or a
+  # grammar (lead ruling req-3727-w4 removed all three from this section): it exists because the
+  # emitted line asserts a provenance, and asserting "named by the probed session on its own PATH"
+  # when the ~/.cargo/bin retry is what answered would be a false sentence in an operator-facing
+  # line — the defect class this section has been bleeding findings on.
+  SCC_BIN_PROVENANCE=""
+  # THE SIBLING OF `sccache_bin` (near the top of this script), which answers the same question for
+  # BOOTSTRAP'S OWN PROCESS — section 2's accelerator check and this section's precondition. Two
+  # contexts, ONE rule (ambient PATH, then ~/.cargo/bin), and neither is a copy of the other's code:
+  # a session cannot be asked from in-process without a privileged call, and an in-process check
+  # cannot expand a session's `$HOME`. What must never diverge is the DIRECTORY, which is pinned
+  # across all three sites (here, `sccache_bin`, and agent-gate.sh's `_gate_sccache_bin`) by
+  # test_agent_gate_summary.sh's `accel-sccache-agree` assert.
+  #
+  # scc_resolve_binary: ask the probed session which sccache it would run. Two bounded sudo calls at
+  # most, deliberately taken BEFORE the persist decision, because the literal oracle that AUTHORIZES
+  # the write must not run on a binary the session does not have.
+  #
+  # TWO STAGES, BECAUSE ONE STAGE CANNOT SEE THE DOCUMENTED INSTALL (roborev job 407, f1). Stage 1
+  # asks the session with the PATH it really gets; stage 2 retries the SAME call with ~/.cargo/bin
+  # prepended. Neither stage is a guess about the box: both are measurements, and the one that
+  # answered is named in the emitted line.
+  scc_resolve_binary() {
+    local __nl=""
+    SCC_SCCACHE_BIN=""; SCC_BIN_PROVENANCE=""
+    if [ -z "$SCC_SELF_USER" ] || [ -z "$TIMEOUT_BIN" ] || ! have sudo; then
+      return 1
+    fi
+    __nl=$(bounded 20 env "${SCC_ENV_SCRUB[@]}" sudo -n -u "$SCC_SELF_USER" \
+      bash -c 'command -v sccache 2>/dev/null || true' 2>/dev/null || true)
+    # Anchored on the LAST non-empty line: a session's stdout can carry noise ahead of the answer,
+    # and taking the first line would report a motd as a binary path.
+    __nl=$(printf '%s\n' "$__nl" | grep -v '^[[:space:]]*$' | tail -1)
+    if [ -n "$__nl" ]; then
+      SCC_SCCACHE_BIN="$__nl"
+      SCC_BIN_PROVENANCE="named by the probed session on its own PATH"
+      return 0
+    fi
+    # STAGE 2 — THE ~/.cargo/bin RETRY. `sudo -n -u <user> bash -c` is NON-LOGIN and
+    # NON-INTERACTIVE, so its PATH is sudo's `secure_path` — measured on this fleet as
+    # /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin — which omits the
+    # ~/.cargo/bin that this script's own documented `cargo install sccache` writes to. agent-gate.sh
+    # prepends exactly that directory before it detects sccache, so stage 1 alone can report ABSENT a
+    # binary gates are successfully USING, and that absence then refuses persistence and reds the
+    # strict verify.run. Same user, same 20s bound, same blanket SCCACHE_* scrub as stage 1 — an
+    # unbounded or unscrubbed retry would be a worse defect than the one it fixes.
+    #
+    # `$HOME` is left SINGLE-QUOTED for the SESSION to expand, so it is that session's own home and
+    # not bootstrap's, which under the documented `sudo bash <this script>` is root's. Round 3's
+    # reason still holds either way: what is passed on to a session later is the ABSOLUTE path this
+    # call printed, so nothing depends on `secure_path` at use time.
+    __nl=$(bounded 20 env "${SCC_ENV_SCRUB[@]}" sudo -n -u "$SCC_SELF_USER" \
+      bash -c 'PATH="$HOME/.cargo/bin:$PATH"; command -v sccache 2>/dev/null || true' 2>/dev/null || true)
+    __nl=$(printf '%s\n' "$__nl" | grep -v '^[[:space:]]*$' | tail -1)
+    [ -n "$__nl" ] || return 1
+    SCC_SCCACHE_BIN="$__nl"
+    SCC_BIN_PROVENANCE="named by the probed session only after ~/.cargo/bin was prepended to its PATH — nothing answered on the PATH that session gets on its own, which is the documented 'cargo install sccache' layout and the same fallback agent-gate.sh applies before it detects sccache"
+    return 0
+  }
+  # The ROUTING variables are scrubbed alongside BASH_ENV/ENV: an SCCACHE_DIR or
+  # SCCACHE_SERVER_PORT exported in the caller's shell must not leak into the session and then be
+  # reported as that session's routing — the same substitution the value scrub prevents, one
+  # variable over. What remains is the session's own routing (pam_env, plus a shell profile for a
+  # login shell), which is what a gate launched from such a session gets.
+  scc_session_run() {
+    local __b="$1"; shift
+    bounded "$__b" env "${SCC_ENV_SCRUB[@]}" \
+      sudo -n -u "$SCC_SELF_USER" "$@"
+  }
+  # scc_running_cap: the cap the RUNNING server is enforcing, in bytes — read INSIDE the measured
+  # session (see the note on scc_session_run: the routing must be the session's, or the verdict is
+  # about a server no gate will contact).
+  #
+  # THE SOUNDNESS OF THE WHOLE VERDICT IS IN TELLING A SERVER'S ANSWER FROM THE CLIENT'S OWN, AND
+  # A NULL `cache_size` DOES NOT DO IT. Measured, in this order, and the second measurement
+  # falsified the first design:
+  #   * with NO server running, `--show-stats` answers max_cache_size from the CLIENT's env
+  #     (SCCACHE_CACHE_SIZE=7G reads 7516192768 with nothing up) and reports `"cache_size":null`;
+  #   * BUT A RUNNING SERVER WITH AN EMPTY CACHE ALSO REPORTS `"cache_size":null` — verified by
+  #     starting a real server at 40G on a private port and reading it back: cap 42949672960,
+  #     size null. The two payloads are otherwise IDENTICAL (a field-by-field diff differs only
+  #     in the values themselves), so "null size" cannot mean "no server", and a check keyed on
+  #     it reported UNMEASURED on a box whose server it had just correctly started.
+  # So attribution is decided by a DIFFERENTIAL, which is affirmative rather than inferred: read
+  # the cap twice, once with the ambient env and once with SCCACHE_CACHE_SIZE forced to a SENTINEL
+  # whose bytes differ from the first reading. A RUNNING server ignores the client's env (measured:
+  # a server started at 40G reports 42949672960 to a client with the variable unset), so the two
+  # readings AGREE ⇒ the number is the server's. With no server, the client resolves our env, so
+  # the second reading moves ⇒ the number is ours, not a cap in force. Two client calls, ~10 ms
+  # each, no mutation, and it needs no knowledge of ports or process tables.
+  scc_running_cap() {
+    SCC_RUN_CAP=""; SCC_RUN_WHY=""; SCC_RUN_STATE=unreadable
+    if [ -z "$SCC_SCCACHE_BIN" ]; then
+      SCC_RUN_WHY="the probed session named no sccache on its own PATH, nor did a retry with ~/.cargo/bin prepended, so no running server can be read with the binary gates use"
+      return 1
+    fi
+    if [ -z "$TIMEOUT_BIN" ]; then
+      SCC_RUN_WHY="no timeout/gtimeout on PATH — refusing an UNBOUNDED sccache probe"
+      return 1
+    fi
+    local json rc=0 hits n
+    json=$(scc_session_run 20 env -u SCCACHE_CACHE_SIZE "$SCC_SCCACHE_BIN" \
+      --show-stats --stats-format json 2>/dev/null) || rc=$?
+    if [ "$rc" != 0 ] || [ -z "$json" ]; then
+      SCC_RUN_WHY="'sccache --show-stats --stats-format json' produced no output (rc $rc)"
+      return 1
+    fi
+    hits=$(printf '%s\n' "$json" | grep -o '"max_cache_size":[0-9][0-9]*' 2>/dev/null)
+    n=$(printf '%s\n' "$hits" | grep -c '^' 2>/dev/null)
+    if [ -z "$hits" ]; then
+      SCC_RUN_WHY="the running server's JSON carries no max_cache_size field"
+      return 1
+    elif [ "$n" != 1 ]; then
+      SCC_RUN_WHY="the running server's JSON carries $n max_cache_size fields, so which one is the cap is ambiguous"
+      return 1
+    fi
+    SCC_RUN_CAP=${hits##*:}
+    # ---- THE ATTRIBUTION DIFFERENTIAL (see the note above) ----
+    # The sentinel is chosen so its bytes CANNOT equal the first reading: 7K = 7168 bytes, and
+    # where the first reading is itself 7168 the sentinel moves to 9K. Without that guard, a box
+    # whose SCCACHE_CACHE_SIZE happens to be 7K with NO server would produce two equal readings
+    # and be reported as server-attributed — the one input that could invert this test.
+    local sentinel=7K sentinel_bytes=7168 json2 rc2=0 cap2=""
+    if [ "$SCC_RUN_CAP" = "$sentinel_bytes" ]; then sentinel=9K; sentinel_bytes=9216; fi
+    json2=$(scc_session_run 20 env SCCACHE_CACHE_SIZE="$sentinel" "$SCC_SCCACHE_BIN" \
+      --show-stats --stats-format json 2>/dev/null) || rc2=$?
+    if [ "$rc2" != 0 ] || [ -z "$json2" ]; then
+      SCC_RUN_CAP=""
+      SCC_RUN_WHY="the attribution differential could not be taken (the second 'sccache --show-stats' produced no output, rc $rc2), so it cannot be established whether $hits is a RUNNING server's cap or this client's own resolution of SCCACHE_CACHE_SIZE"
+      return 1
+    fi
+    # UNIQUENESS IS CHECKED ON BOTH READINGS, NOT JUST THE FIRST (#3727 roborev job 435). This
+    # used to take `head -1`, so a payload carrying DUPLICATE max_cache_size fields whose first
+    # one happened to equal the first reading would compare EQUAL and thereby ESTABLISH server
+    # attribution from an ambiguous payload — a cap reported as IN FORCE on the strength of a
+    # field nothing had disambiguated. The differential is the whole basis for claiming
+    # attribution, so both of its legs answer to the same grammar the first reading does.
+    local hits2 n2
+    hits2=$(printf '%s\n' "$json2" | grep -o '"max_cache_size":[0-9][0-9]*' 2>/dev/null)
+    n2=$(printf '%s\n' "$hits2" | grep -c '^' 2>/dev/null)
+    if [ -z "$hits2" ]; then
+      SCC_RUN_CAP=""
+      SCC_RUN_WHY="the attribution differential could not be taken (the second reading carries no max_cache_size), so it cannot be established whether the cap is a RUNNING server's or this client's own"
+      return 1
+    elif [ "$n2" != 1 ]; then
+      SCC_RUN_CAP=""
+      SCC_RUN_WHY="the attribution differential could not be taken (the second reading carries $n2 max_cache_size fields, so which one to compare is ambiguous), so it cannot be established whether the cap is a RUNNING server's or this client's own"
+      return 1
+    fi
+    cap2=${hits2##*:}
+    if [ "$cap2" != "$SCC_RUN_CAP" ]; then
+      # The reading MOVED with the client's env, so the client is answering: nothing is running.
+      # AFFIRMATIVE, not a catch-all — this is the one branch that KNOWS there is no server, which
+      # is what licenses the starter below. Every other failure stays `unreadable`.
+      SCC_RUN_WHY="no sccache server is answering: the reported cap MOVED when the client's SCCACHE_CACHE_SIZE was changed to $sentinel ($SCC_RUN_CAP -> $cap2), which is what a client resolving its OWN env does — a running server's answer does not move. So there is no cap IN FORCE to compare against"
+      SCC_RUN_CAP=""
+      SCC_RUN_STATE=no-server
+      return 1
+    fi
+    SCC_RUN_STATE=ok
+    return 0
+  }
+
+  # scc_start_server_for <value>: START the production sccache server under <value>.
+  #
+  # THIS IS THE FIX FOR A REAL PROVISIONING FAILURE, AND IT IS A FEATURE RATHER THAN A SOFTENED
+  # VERDICT (issue #3727 roborev finding 2). A freshly launched box has no sccache server until
+  # its first cached compilation, so `cache_size` is null, so the cap IN FORCE is genuinely
+  # unmeasurable — and this section would report UNMEASURED, learning NOTHING about the cap,
+  # immediately after correctly persisting the value. (Since round 426 no state here is an [ok],
+  # so `--strict` is red either way; what the start buys is the difference between a verdict
+  # carrying four measured facts and one carrying none.)
+  #
+  # The mechanism this whole section is about supplies the fix: the cap is fixed by whichever
+  # process starts the server FIRST, and nothing later can change it. So bootstrap deliberately
+  # BECOMES that first starter, under the value a fresh session sees — which is the value every
+  # future gate on this box would have started it with. That makes the cap effective NOW instead
+  # of at some later lane's whim, and it turns a fresh box into a verifiable box in one step.
+  #
+  # NOTE THE ASYMMETRY, WHICH IS DELIBERATE: WE START A SERVER THAT DOES NOT EXIST, AND WE NEVER
+  # STOP ONE THAT DOES. A running server may have a peer lane's gate compiling against it right
+  # now, and killing it mid-build to apply a cap is a fleet-hostile act — so a server enforcing a
+  # different cap keeps its NOT-HONOURED verdict and the `sccache --stop-server` REMEDY, for a
+  # human to run between gates.
+  #
+  # STARTED INSIDE THE MEASURED SESSION (roborev round 2, f2), with SCCACHE_CACHE_SIZE forced to
+  # the value that session sees. So the server is created with the session's OWN routing — its
+  # SCCACHE_DIR and SCCACHE_SERVER_PORT — which is the server gates launched from such a session
+  # will contact, and it is created as the account those gates run as rather than as whoever ran
+  # bootstrap. (That also removes a smaller defect noted before this finding: started ambiently, a
+  # `sudo bootstrap` would have created the server on ROOT's cache directory.) The return code is
+  # REPORTED but never trusted: the verdict comes from re-reading the server, because "start-server
+  # exited 0" and "a server is running with this cap" are different claims — and sccache exits 0
+  # when a server is already up.
+  scc_start_server_for() {
+    local v="$1" rc=0
+    if [ -z "$SCC_SCCACHE_BIN" ]; then
+      SCC_START_WHY="the probed session named no sccache on its own PATH, nor did a retry with ~/.cargo/bin prepended"
+      return 1
+    fi
+    if [ -z "$TIMEOUT_BIN" ]; then
+      SCC_START_WHY="no timeout/gtimeout on PATH — refusing to start a server UNBOUNDED"
+      return 1
+    fi
+    scc_session_run 30 env SCCACHE_CACHE_SIZE="$v" "$SCC_SCCACHE_BIN" \
+      --start-server >/dev/null 2>&1 || rc=$?
+    SCC_START_WHY="'sccache --start-server' exited $rc in the measured session"
+    return 0
+  }
+
+  # ---- (1) the identity to probe, and write privilege ----
+  # Both resolved the way 5b resolves them, and for the same reasons: `id -un` is a PATH lookup
+  # that must map back to $EUID or it names the wrong account; under `sudo bash bootstrap` the
+  # right subject is the INVOKING account (a validated, nonzero SUDO_UID that agrees with
+  # SUDO_USER), never root; anything absent or inconsistent is UNMEASURED rather than a guess.
+  SCC_PROBE_SUBJECT_NOTE=""
+  SCC_PRIV_STATE=unknown
+  SCC_ROOT=()
+  SCC_SELF_USER=$(id -un 2>/dev/null || true)
+  if [ -n "$SCC_SELF_USER" ]; then
+    scc_name_uid=$(id -u "$SCC_SELF_USER" 2>/dev/null || echo none)
+    if [ "$scc_name_uid" != "$SCC_EUID" ]; then
+      SCC_PROBE_SUBJECT_NOTE="'id -un' answered '$SCC_SELF_USER', which resolves to uid $scc_name_uid rather than this process's EUID $SCC_EUID — a shadowed 'id' or a stale NSS mapping, so probing that name would answer about the wrong account"
+      SCC_SELF_USER=""
+    fi
+  fi
+  if [ "$SCC_EUID" = 0 ]; then
+    scc_sudo_uid="${SUDO_UID-}"
+    case "$scc_sudo_uid" in ''|*[!0-9]*) scc_sudo_uid="" ;; esac
+    scc_sudo_name="${SUDO_USER-}"
+    if [ -z "$scc_sudo_uid" ]; then
+      SCC_SELF_USER=""
+      SCC_PROBE_SUBJECT_NOTE="running as root with no usable SUDO_UID (absent or non-numeric), so the account a gate would run as is unknown"
+    elif [ "$scc_sudo_uid" = 0 ]; then
+      SCC_SELF_USER=""
+      SCC_PROBE_SUBJECT_NOTE="SUDO_UID is 0, so sudo was invoked BY root — that tells us nothing about the account a gate runs as"
+    else
+      scc_resolved=$(id -un "$scc_sudo_uid" 2>/dev/null || true)
+      if [ -z "$scc_resolved" ]; then
+        SCC_SELF_USER=""
+        SCC_PROBE_SUBJECT_NOTE="SUDO_UID $scc_sudo_uid does not resolve to an account"
+      elif [ -n "$scc_sudo_name" ] && [ "$(id -u "$scc_sudo_name" 2>/dev/null || echo none)" != "$scc_sudo_uid" ]; then
+        SCC_SELF_USER=""
+        SCC_PROBE_SUBJECT_NOTE="INCONSISTENT sudo metadata — SUDO_USER '$scc_sudo_name' does not resolve to SUDO_UID $scc_sudo_uid, so which account to probe is ambiguous"
+      else
+        SCC_SELF_USER="$scc_resolved"
+        SCC_PROBE_SUBJECT_NOTE="probed as '$scc_resolved' (uid $scc_sudo_uid, the account that invoked sudo), not root — root's session is not the one a gate runs in"
+      fi
+    fi
+  fi
+  if [ -z "$SCC_SELF_USER" ]; then
+    SCC_PRIV_STATE=no-identity
+    [ -n "$SCC_PROBE_SUBJECT_NOTE" ] && SCC_PRIV_STATE=invoker-unresolvable
+  elif ! have sudo; then
+    SCC_PRIV_STATE=no-sudo-binary
+  elif [ -z "$TIMEOUT_BIN" ]; then
+    # Checked BEFORE the first probe: `bounded` DEGRADES to running the command directly, so a
+    # box with no timeout utility would otherwise hang bootstrap while the code claimed it
+    # refuses unbounded session probing (5b's round-10 finding, same shape).
+    SCC_PRIV_STATE=no-timeout-binary
+  elif bounded 10 sudo -n -u "$SCC_SELF_USER" true >/dev/null 2>&1; then
+    SCC_PRIV_STATE=sudo-nopasswd
+  else
+    SCC_PRIV_STATE=sudo-runas-denied
+  fi
+  # WRITE privilege is a SEPARATE question from session-probe privilege (5b's round-10 split):
+  # a root shell with no sudo can persist but not probe; a narrowly-scoped sudoers rule can
+  # probe but not persist. Neither is derived from the other.
+  SCC_WRITE_PRIV=0
+  if [ "$SCC_EUID" = 0 ]; then
+    SCC_WRITE_PRIV=1; SCC_ROOT=()
+  elif have sudo && [ -n "$TIMEOUT_BIN" ] && bounded 10 sudo -n true >/dev/null 2>&1; then
+    SCC_WRITE_PRIV=1; SCC_ROOT=(sudo -n)
+  fi
+  # Test mode never runs a PRIVILEGED write; the sandbox file belongs to the invoking user.
+  if [ "$SCC_ENV_FILE_IS_SEAM" = 1 ]; then SCC_ROOT=(); SCC_WRITE_PRIV=1; fi
+
+  # ---- (2) what the FILE declares ----
+  # pam_env's own de-quoting, reproduced so the value compared below is the value a session
+  # actually RECEIVES: drop a leading `"`/`'` (whether or not it is closed), then a trailing one
+  # of the SAME kind. Measured on this fleet's pam; see 5b's table for the full grid. A
+  # disagreement with a different pam build moves the two compared values APART, never
+  # together, so it can never manufacture a VERIFIED.
+  scc_strip_pam_quotes() {
+    local v="$1" q
+    case "$v" in
+      '"'*) q='"' ;;
+      "'"*) q="'" ;;
+      *) printf '%s' "$v"; return 0 ;;
+    esac
+    v=${v#?}
+    case "$v" in *"$q") v=${v%?} ;; esac
+    printf '%s' "$v"
+  }
+
+  SCC_FILE_HAS_LINE=unknown
+  SCC_FILE_VALUE=""
+  # THE ONE PARSER, callable again after a write or a lost race. Whole-line `#` comments are
+  # skipped; NO inline-comment stripping (pam_env takes a trailing `# …` as part of the value,
+  # which is why this section's own append puts its comment on its own line); the LAST
+  # assignment wins. The SENTINEL PREFIX is what keeps an EMPTY value distinguishable from a
+  # FAILED capture — `SCCACHE_CACHE_SIZE=` is a legitimate (and, measured, silently discarded)
+  # value, while sed producing nothing means the parse failed.
+  scc_read_env_file() {
+    SCC_FILE_HAS_LINE=unknown; SCC_FILE_VALUE=""
+    if [ ! -e "$SCC_ENV_FILE" ]; then
+      SCC_FILE_HAS_LINE=absent-file
+    elif [ ! -L "$SCC_ENV_FILE" ] && [ -r "$SCC_ENV_FILE" ]; then
+      if grep -Eq '^[[:space:]]*SCCACHE_CACHE_SIZE[[:space:]]*=' "$SCC_ENV_FILE" 2>/dev/null; then
+        scc_file_raw=$(sed -n 's/^[[:space:]]*SCCACHE_CACHE_SIZE[[:space:]]*=/VAL:/p' "$SCC_ENV_FILE" 2>/dev/null | tail -1)
+        case "$scc_file_raw" in
+          VAL:*) SCC_FILE_VALUE=$(scc_strip_pam_quotes "${scc_file_raw#VAL:}"); SCC_FILE_HAS_LINE=yes ;;
+          *)     SCC_FILE_HAS_LINE=unparseable ;;
+        esac
+      else
+        SCC_FILE_HAS_LINE=no
+      fi
+    fi
+  }
+  scc_read_env_file
+
+  # WHICH sccache — asked of the PROBED SESSION before anything is written, because the literal
+  # oracle that authorizes the write must run on the binary a gate would use and not on whatever is
+  # on bootstrap's own PATH (roborev round 6, f1). ONE context since the ruling; two outcomes, both
+  # measurements.
+  scc_resolve_binary || true
+  if [ -n "$SCC_SCCACHE_BIN" ]; then
+    info "sccache binary: '$SCC_SCCACHE_BIN' ($SCC_BIN_PROVENANCE, so it is the one a gate launched that way would run)"
+  else
+    info "sccache binary: the probed session named none on its own PATH, and a retry with ~/.cargo/bin prepended named none either, so nothing will be persisted or certified from a binary this run cannot identify"
+  fi
+
+  # ---- (3) persistence: append-if-absent / create-if-absent, NEVER a rewrite ----
+  # Both mirror 5b's hardened forms: check-and-append under `flock` with the re-read INSIDE the
+  # lock (a value added in between — a provisioner's deliberate cap, or a peer bootstrap — must
+  # not be overridden, and pam_env takes the LAST assignment), and create via a staged temp
+  # linked into place (`ln` fails if the destination exists, so exclusivity and completeness
+  # are one operation) with the mode established by umask and VERIFIED on the temp before the
+  # link. rc 3 = another writer won, and the contract wins with it.
+  SCC_CREATE_RESIDUE=""
+  scc_append_env_file() {
+    local -a scc_lock=()
+    command -v flock >/dev/null 2>&1 && scc_lock=(flock "$SCC_ENV_FILE")
+    ${SCC_ROOT[@]+"${SCC_ROOT[@]}"} ${scc_lock[@]+"${scc_lock[@]}"} bash -c '
+      f="$1"; comment="$2"; line="$3"
+      if grep -Eq "^[[:space:]]*SCCACHE_CACHE_SIZE[[:space:]]*=" "$f" 2>/dev/null; then
+        exit 3
+      fi
+      prefix=""
+      if [ -s "$f" ] && [ -n "$(tail -c 1 "$f" 2>/dev/null)" ]; then prefix="
+"; fi
+      printf "%s%s\n%s\n" "$prefix" "$comment" "$line" >> "$f"
+    ' _ "$SCC_ENV_FILE" "$SCC_ENV_COMMENT" "$SCC_ENV_LINE" 2>/dev/null
+  }
+  scc_create_env_file() {
+    local scc_child_rc
+    ${SCC_ROOT[@]+"${SCC_ROOT[@]}"} bash -c '
+      umask 022
+      f="$3"
+      t="$f.cqlite-scc.$$"
+      rm -f "$t" 2>/dev/null
+      printf "%s\n%s\n" "$1" "$2" > "$t" 2>/dev/null || { rm -f "$t" 2>/dev/null; exit 5; }
+      chmod 0644 "$t" 2>/dev/null || true
+      # PORTABLE MODE READ: `stat -c` is GNU-only, `stat -f %Lp` is the BSD spelling.
+      _pm=$(stat -c %a "$t" 2>/dev/null || stat -f %Lp "$t" 2>/dev/null) # portability-lint-allow: GNU `stat -c` PAIRED with the BSD `stat -f` fallback on the same line — the portable spelling, not a GNU-only one (same construct, same marker, as the section 5b copy above)
+      [ "$_pm" = 644 ] || { rm -f "$t" 2>/dev/null; exit 6; }
+      ln "$t" "$f" 2>/dev/null || { rm -f "$t" 2>/dev/null; exit 4; }
+      rm -f "$t" 2>/dev/null
+    ' _ "$SCC_ENV_COMMENT" "$SCC_ENV_LINE" "$SCC_ENV_FILE" 2>/dev/null
+    scc_child_rc=$?
+    if [ "$scc_child_rc" = 4 ]; then scc_create_rc=3; return 3; fi
+    if [ "$scc_child_rc" = 6 ]; then
+      SCC_CREATE_RESIDUE="0644 could not be established on the staged file, so $SCC_ENV_FILE was never created"
+      scc_create_rc=1; return 1
+    fi
+    if [ "$scc_child_rc" != 0 ]; then
+      SCC_CREATE_RESIDUE="the staging write failed (rc $scc_child_rc) before $SCC_ENV_FILE was linked; nothing was written there"
+      scc_create_rc=1; return 1
+    fi
+    scc_create_rc=0; return 0
+  }
+
+  # THE PLACEHOLDER / UNUSABLE-LITERAL REFUSAL. Persisting a value sccache would discard is
+  # worse than persisting nothing: it is silent (there is no diagnostic anywhere), and because
+  # this section never rewrites an existing value it would be permanent. The MEASUREMENT still
+  # runs — a box someone else capped correctly still reaches SCOPED-NON-LOGIN with every link
+  # measured and agreeing.
+  #
+  # PLACED AT THE TWO WRITE SITES, NOT AT THE HEAD OF THE CHAIN. At the head it warned on every
+  # box, including boxes that already carry a cap line and where nothing would be written — a
+  # warning about a write that was never going to happen, which is noise in a section whose
+  # every [warn] is supposed to be actionable (and, concretely, it would have added a warning to
+  # every sandbox in this file's own self-test, the drift that has silently disabled cases here
+  # four times).
+  # scc_refuse_literal [<why>]: with no argument, the shape pre-filter rejected the literal; with
+  # one, the ORACLE did, and its own words are used — a refusal must say which check refused and on
+  # what evidence, not offer one generic sentence for two different findings.
+  scc_refuse_literal() {
+    local __why="${1:-}"
+    if [ -n "$__why" ]; then
+      SCC_PERSIST_NOTE="not persisted (sccache would not apply the fleet cap literal '$SCC_ENV_VALUE': it $__why)"
+      warn "sccache-cap: this checkout's fleet cap literal is '$SCC_ENV_VALUE', and SCCACHE ITSELF (asked through an isolated probe, not a shape test) says it $__why — refusing to persist it, because this section never rewrites an existing value and an ineffective line would be permanent and invisible"
+    else
+      SCC_PERSIST_NOTE="not persisted (the fleet cap literal '$SCC_ENV_VALUE' in this script is not a <digits>[KkMmGgTt] value)"
+      warn "sccache-cap: this checkout's fleet cap literal is '$SCC_ENV_VALUE', which sccache would SILENTLY DISCARD (the accepted form is <digits>[KkMmGgTt], e.g. 30G; a bare integer means BYTES) — refusing to persist it, because this section never rewrites an existing value and a discarded line would be permanent and invisible"
+    fi
+    info "substitute a measured cap into SCC_ENV_VALUE in scripts/bootstrap-agent-machine.sh (and the matching literal in .agent-ami/profile.yaml), then re-run (issue #3727)"
+  }
+  # scc_literal_write_ok: the ONE predicate the two write sites consult. Shape first (cheap, no
+  # fork), then the oracle — and the ORACLE is what authorizes.
+  scc_literal_write_ok() {
+    if [ "$SCC_VALUE_USABLE" != 1 ]; then scc_refuse_literal; return 1; fi
+    scc_check_literal
+    case "$?" in
+      0) return 0 ;;
+      *) scc_refuse_literal "$SCC_LITERAL_STATE"; return 1 ;;
+    esac
+  }
+  if [ "$SCC_PLATFORM_UNMANAGED" = 1 ]; then
+    SCC_PERSIST_NOTE="not persisted (no PAM-read system-wide env file on $PLATFORM)"
+    info "not touching $SCC_ENV_FILE on this $PLATFORM host — pam_env is a Linux mechanism, so writing it would change host state for nothing"
+  elif [ ! -e "$SCC_ENV_FILE" ]; then
+    if [ "$AUTO_YES" != 1 ] && [ "$FIX_SCCACHE_CAP" != 1 ]; then
+      SCC_PERSIST_NOTE="no $SCC_ENV_FILE and no authorisation to create it"
+      info "no $SCC_ENV_FILE on this $PLATFORM host — pass --yes or --fix-sccache-cap and it will be CREATED (root:root 0644) so pam_env can consume it"
+    elif ! scc_literal_write_ok; then
+      : # refused, with the cause already reported by scc_literal_write_ok
+    elif [ "$SCC_WRITE_PRIV" != 1 ]; then
+      SCC_PERSIST_NOTE="no $SCC_ENV_FILE and no privilege to create it ($SCC_PRIV_STATE)"
+      warn "sccache-cap: $SCC_ENV_FILE does not exist and this run cannot create it ($SCC_PRIV_STATE) — the cap was NOT persisted"
+      info "create it as root:  printf '%s\n' '$SCC_ENV_COMMENT' '$SCC_ENV_LINE' > $SCC_ENV_FILE && chmod 0644 $SCC_ENV_FILE"
+    elif scc_create_env_file; then
+      SCC_FILE_HAS_LINE=yes; SCC_FILE_VALUE="$SCC_ENV_VALUE"
+      scc_made=$(ls -ld -- "$SCC_ENV_FILE" 2>/dev/null | awk '{print $1" "$3":"$4}')
+      info "CREATED $SCC_ENV_FILE (${scc_made:-mode/owner unreadable}) carrying '$SCC_ENV_LINE' (sccache ${SCC_LITERAL_STATE:-resolves it to an unrecorded byte count}) — pam_env reads it at session creation, so NEW sessions pick it up"
+    elif [ "${scc_create_rc:-}" = 3 ]; then
+      scc_read_env_file
+      SCC_PERSIST_NOTE="not persisted (another writer created $SCC_ENV_FILE first)"
+      info "$SCC_ENV_FILE was created by something else while this run was working — left EXACTLY as it is, and re-read, so the verdict below uses what the file NOW says"
+    else
+      SCC_PERSIST_NOTE="could not create $SCC_ENV_FILE${SCC_CREATE_RESIDUE:+ ($SCC_CREATE_RESIDUE)}"
+      warn "sccache-cap: could not create $SCC_ENV_FILE — the cap was NOT persisted${SCC_CREATE_RESIDUE:+ ($SCC_CREATE_RESIDUE)}"
+    fi
+  elif [ -L "$SCC_ENV_FILE" ]; then
+    SCC_PERSIST_NOTE="$SCC_ENV_FILE is a SYMLINK"
+    warn "sccache-cap: $SCC_ENV_FILE is a SYMLINK — refusing a privileged write that would follow it; nothing was persisted"
+  elif [ ! -r "$SCC_ENV_FILE" ]; then
+    SCC_PERSIST_NOTE="$SCC_ENV_FILE is unreadable"
+    warn "sccache-cap: cannot read $SCC_ENV_FILE — cannot tell whether the cap is already there, so nothing was written (a blind append could duplicate or contradict an existing line)"
+  elif [ "$SCC_FILE_HAS_LINE" = yes ] || [ "$SCC_FILE_HAS_LINE" = unparseable ]; then
+    # `unparseable` counts as PRESENT: grep DID match a line, so appending would leave two
+    # assignments and pam_env would silently take the last one.
+    info "$SCC_ENV_FILE already carries a SCCACHE_CACHE_SIZE line — left EXACTLY as it is (a box deliberately running a different cap keeps it; bootstrap never rewrites an existing value)"
+  elif [ "$AUTO_YES" != 1 ] && [ "$FIX_SCCACHE_CAP" != 1 ]; then
+    SCC_PERSIST_NOTE="not persisted (neither --yes nor --fix-sccache-cap)"
+    info "persist the cap:  bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap   (appends '$SCC_ENV_LINE' to $SCC_ENV_FILE; --yes does it too)"
+  elif ! scc_literal_write_ok; then
+    : # refused, with the cause already reported by scc_literal_write_ok
+  elif [ "$SCC_WRITE_PRIV" != 1 ]; then
+    SCC_PERSIST_NOTE="no privilege to write $SCC_ENV_FILE ($SCC_PRIV_STATE)"
+    warn "sccache-cap: cannot write $SCC_ENV_FILE ($SCC_PRIV_STATE) — the cap was NOT persisted"
+    info "add these two lines as root:  $SCC_ENV_COMMENT / $SCC_ENV_LINE"
+  elif { [ "$SCC_EUID" = 0 ] || [ -z "$SCC_EUID" ] || [ "${#SCC_ROOT[@]}" -gt 0 ]; } \
+       && [ "$SCC_ENV_FILE" != /etc/environment ]; then
+    # INVARIANT, enforced rather than argued, and keyed on EFFECTIVE PRIVILEGE rather than on
+    # the presence of a sudo prefix (5b's round-5 finding): under EUID 0 the array is empty and
+    # the write is privileged anyway. An unknown EUID counts as privileged.
+    SCC_PERSIST_NOTE="internal invariant refused the write"
+    warn "sccache-cap: INTERNAL — refusing a PRIVILEGED write to a non-production path ($SCC_ENV_FILE)"
+  else
+    scc_append_env_file; scc_append_rc=$?
+    if [ "$scc_append_rc" = 3 ]; then
+      scc_read_env_file
+      SCC_PERSIST_NOTE="not persisted (a concurrent writer added a SCCACHE_CACHE_SIZE line first)"
+      info "$SCC_ENV_FILE gained a SCCACHE_CACHE_SIZE line while this run was working — left EXACTLY as it is, because appending ours would land LAST and pam_env takes the last assignment"
+    elif [ "$scc_append_rc" = 0 ]; then
+      # BOTH halves of the cached parse move together: setting only HAS_LINE would leave the
+      # comparison below reading the pre-write value and reporting a mismatch on a box this
+      # very run just persisted correctly (5b's 11q/11u lesson).
+      SCC_FILE_HAS_LINE=yes
+      SCC_FILE_VALUE="$SCC_ENV_VALUE"
+      info "appended '$SCC_ENV_LINE' to $SCC_ENV_FILE (sccache ${SCC_LITERAL_STATE:-resolves it to an unrecorded byte count}) — PAM reads it at session creation, so NEW sessions pick it up with no reboot and no re-login"
+    else
+      SCC_PERSIST_NOTE="the append to $SCC_ENV_FILE failed"
+      warn "sccache-cap: the append to $SCC_ENV_FILE FAILED — the cap was NOT persisted"
+      info "add these two lines as root:  $SCC_ENV_COMMENT / $SCC_ENV_LINE"
+    fi
+  fi
+
+  # NO SHELL-PROFILE FALLBACK, DELIBERATELY. 5b has one (reported with `info`, never `ok`); this
+  # section does not, because a profile export is worth even less here: the sccache SERVER reads
+  # the value at startup and is normally started by a gate running in a NON-interactive shell,
+  # where a stock ~/.bashrc returns before reaching any export (#3414's own mechanism). Adding
+  # an artifact that cannot affect the fact being measured is how #3727 happened.
+
+  # ---- (4) THE VERDICT ----
+  # scc_scope_note: what the SCOPED-NON-LOGIN verdict does NOT cover, printed with the verdict
+  # rather than buried in a doc — an unqualified success token would read as "every gate on this
+  # box gets this cap", which is why no success token is emitted here at all.
+  scc_scope_note() {
+    info "scope: measured through ONE session type — a NON-LOGIN PAM session (sudo), which is what pam_env applies $SCC_ENV_FILE to. A LOGIN shell additionally runs /etc/profile.d, and on this fleet that is where a DIFFERENT value can come from (#3727's own root cause); that context is NOT measured here and NO disagreement between the two is detected — the mechanism that will cover it is #3946. Whether the service stacks a gate is actually launched from read the same sources is NOT checked here either, and a process tree created WITHOUT PAM (a systemd unit, a container entrypoint) never has $SCC_ENV_FILE applied at all — measured, such a session (env -i) sees the variable UNSET"
+    info "scope: the cap is read by the sccache SERVER at STARTUP, so this verdict is about THIS box's CURRENT server plus FUTURE sessions. A server started later by a session that does NOT see the value will enforce sccache's default instead, and a server already running keeps its cap for its whole lifetime"
+    info "scope: SCOPED-NON-LOGIN asserts that the file SETS this value, that a fresh non-login session SEES that same value, and that the RUNNING server enforces exactly the bytes that value means — it does NOT prove the file is where the session got it, and it does NOT certify the cap a gate will see. Agreement is measured; provenance is not; the login/launcher context is not measured at all"
+    # WHICH SERVER WAS MEASURED, stated rather than assumed: every read and any start ran INSIDE
+    # that session, so its routing decided which server answered. Printed even when unset, because
+    # "sccache's own default location" is itself the answer a reader needs.
+    case "$SCC_SESSION_SET" in
+      *d*|*p*) info "scope: the server measured here is the one THAT SESSION routes to — SCCACHE_DIR='$SCC_SESSION_DIR' SCCACHE_SERVER_PORT='${SCC_SESSION_PORT:-<unset>}' (every read, and any start, ran inside that session, so this is the server a gate launched from such a session will contact)" ;;
+      *)       info "scope: that session sets NEITHER SCCACHE_DIR NOR SCCACHE_SERVER_PORT, so the server measured here is the one at sccache's own default location and port (every read, and any start, ran inside that session)" ;;
+    esac
+    info "the authoritative per-run confirmation is the gate's own SUMMARY line:  accelerators: ... sccache-cap=<bytes>   (an 'unmeasured(...)' there means that gate could not attribute a cap to a RUNNING server, whatever this verdict says)"
+    if [ "${SCC_SERVER_STARTED:-0}" = 1 ]; then
+      info "scope: there was NO server when this run began, so the cap is in force from now on because THIS RUN started it. Anything that stops the server later and does not see the value (a session created before the /etc/environment line existed) will start one at sccache's own default again"
+    fi
+    info "scope: every sccache call here used '$SCC_SCCACHE_BIN', $SCC_BIN_PROVENANCE — so it is the one a gate launched that way would run"
+    [ -n "$SCC_PROBE_SUBJECT_NOTE" ] && info "subject: $SCC_PROBE_SUBJECT_NOTE"
+  }
+  # scc_fix_hint <what-the-flag-would-do>: the ONE place that prints the repair line, because
+  # the repair is NOT `--fix-sccache-cap` while this checkout's cap literal is unusable — the
+  # flag refuses that write (see the shape guard), so printing it would send an operator to run
+  # a command that changes nothing. A remedy the operator has already complied with, or one
+  # that cannot work, is worse than none: it stops them looking.
+  scc_fix_hint() {
+    if [ "$SCC_VALUE_USABLE" != 1 ]; then
+      info "fix (TWO steps, #3727): FIRST substitute the measured cap for the '$SCC_ENV_VALUE' literal in SCC_ENV_VALUE (scripts/bootstrap-agent-machine.sh) and in .agent-ami/profile.yaml — it must be a <digits>[KkMmGgTt] form — THEN run:  bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap"
+      return 0
+    fi
+    info "fix:  bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap   ($1)"
+  }
+
+  SCC_PROBE_BOUND=20
+  if [ "$SCC_PRIV_STATE" = no-timeout-binary ] || [ -z "$TIMEOUT_BIN" ]; then
+    warn "sccache-cap: UNMEASURED (no timeout/gtimeout on PATH — refusing to run an UNBOUNDED session probe during bootstrap; NOTHING was probed)"
+    info "install GNU coreutils so the probe can be bounded (macOS: brew install coreutils), then re-run"
+  elif [ "$SCC_PRIV_STATE" = invoker-unresolvable ]; then
+    warn "sccache-cap: UNMEASURED ($SCC_PROBE_SUBJECT_NOTE — refusing to answer about the wrong user)"
+  elif [ "$SCC_PRIV_STATE" = no-identity ]; then
+    warn "sccache-cap: UNMEASURED ('id -un' reported no identity, so there is no user to open a probe session as — cap visibility is UNKNOWN, not ok)"
+  elif [ "$SCC_PRIV_STATE" = no-sudo-binary ]; then
+    warn "sccache-cap: UNMEASURED (no 'sudo' on this box, so no fresh PAM session can be created — cap visibility is UNKNOWN, not ok)"
+    # The hint mirrors what the probe DOES, and the probe scrubs every exported SCCACHE_* (not the
+    # three named here), so the parenthetical is load-bearing: reproduced with a narrower scrub, an
+    # operator can be shown a value their own shell contributed — the defect this section reports.
+    info "check by hand:  env -u SCCACHE_CACHE_SIZE -u BASH_ENV -u ENV sudo -u \"\$(id -un)\" bash -c 'printf \"[%s]\\n\" \"\${SCCACHE_CACHE_SIZE-UNSET}\"'   (unset any OTHER SCCACHE_* you have exported too — this section scrubs ALL of them, because a caller-only routing variable makes both sessions agree with the CALLER)"
+  elif [ "$SCC_PRIV_STATE" = sudo-runas-denied ]; then
+    warn "sccache-cap: UNMEASURED (sudo will not open a session as '$SCC_SELF_USER' without a password, so no probe session could be created — cap visibility is UNKNOWN, not ok)"
+    info "this needs only a session as YOURSELF, not root — authenticate once and re-run:  sudo -v && bash scripts/bootstrap-agent-machine.sh"
+  else
+    # ONE SESSION TYPE, AND THE MEASUREMENT SAYS WHICH (lead ruling req-3727-w4). The box that
+    # produced #3727 gave two answers — MEASURED on
+    # box3, and it is the root cause of the whole issue rather than a corner case):
+    #     login shell   (sudo -n -u <self> -i ...)  -> 30G   from ~/.agent-ami/worker-env.sh
+    #     non-login PAM (sudo -n -u <self>     ...)  -> 50G   from /etc/environment
+    #     profile-free  (env -i bash -c ...)         -> UNSET
+    # `/etc/profile.d/20-agent-ami.sh` SOURCES `~/.agent-ami/worker-env.sh`, and profile.d runs in
+    # LOGIN shells AFTER pam_env has applied /etc/environment — so for a login shell the profile's
+    # value OVERRIDES the file this section persists to. COMPARING the two contexts — and
+    # classifying which disagreement is a conflict — is the layer the ruling removes; what stays is
+    # the DECLARED RESIDUAL, printed at the verdict and in the scope note, so no reader has to infer
+    # that a VERIFIED covers a launch path nothing measured.
+    #
+    # THE SCRUB IS THE LOAD-BEARING PART of each probe: bootstrap normally runs inside a session
+    # that already inherited the value, so an unscrubbed probe returns it on a box where nothing is
+    # persisted — certifying the very failure this section exists to catch. `BASH_ENV`/`ENV` go
+    # with it because a non-interactive bash SOURCES $BASH_ENV, which can re-export the variable
+    # just scrubbed; the ROUTING variables go with it so the reported routing is the session's own.
+    #
+    # TWO markers per value, because SET-BUT-EMPTY and UNSET are different facts — measured,
+    # sccache silently DISCARDS an empty value, which is a misconfigured box, not an unprovisioned
+    # one.
+    scc_probe_session() {
+      local __out="" __rc=0
+      scc_ps_rc=0; scc_ps_ok=0; scc_ps_set=""; scc_ps_seen=""
+      scc_ps_routing=""; scc_ps_dir=""; scc_ps_port=""
+      # THE `bash -c` BODY IS ONE LINE, deliberately: `sudo -i <cmd>` runs the target's LOGIN SHELL,
+      # which RE-PARSES the command, and a multi-line body did not survive that (measured: the login
+      # probe returned rc=2, a syntax error, while the identical body worked for the direct non-login
+      # exec — so the login half silently became "could not be measured"). Separators are `;`, not
+      # newlines. AND THIS COMMENT LIVES ABOVE THE COMMAND, NOT INSIDE ITS LINE CONTINUATIONS: a `#`
+      # comment placed between two `\`-continued lines TERMINATES the command, which measured as the
+      # worst possible failure — `sudo` ran with no command (rc 1, discarded) and the marker `bash -c`
+      # then ran LOCALLY, so both "sessions" reported bootstrap's OWN environment, agreed with the
+      # invoker by construction, and the section reported FAILED about a box that was pinned. That is
+      # this issue's own defect (certify the wrong context) introduced by a comment.
+      # THE SCRUB IS BLANKET, NOT A LIST (roborev job 399, f2). It used to name three variables,
+      # which left SCCACHE_REDIS / SCCACHE_CONF / SCCACHE_WEBDAV_* / SCCACHE_GHA_* / any FUTURE
+      # SCCACHE_* in the caller's environment. If sudoers `env_keep`s them, BOTH probes inherit the
+      # SAME caller-specific routing, AGREE BECAUSE THEY SHARE OUR CONTAMINATION, and the section
+      # certifies — or starts — a server no ordinary session will ever contact: a false VERIFIED,
+      # which is the exact defect this section exists to catch, in the code that reports it.
+      # SCC_ENV_SCRUB is the array the isolated oracle already uses (BASH_ENV/ENV plus every
+      # exported SCCACHE_*, derived at run time from `compgen -e`), and a derived set is right here
+      # for the reason its own comment gives: a future backend variable is unknowable, so an
+      # enumerated list goes stale SILENTLY. `env` applies every -u before it execs sudo, so what
+      # the target session reports is what PAM and its profile put there.
+      __out=$(bounded "$SCC_PROBE_BOUND" \
+        env "${SCC_ENV_SCRUB[@]}" \
+        sudo -n -u "$SCC_SELF_USER" \
+        bash -c 'printf "cqlite-scc-probe-set=%s\ncqlite-scc-probe=%s\ncqlite-scc-routing-set=%s%s\ncqlite-scc-dir=%s\ncqlite-scc-port=%s\n" "${SCCACHE_CACHE_SIZE+1}" "${SCCACHE_CACHE_SIZE-}" "${SCCACHE_DIR+d}" "${SCCACHE_SERVER_PORT+p}" "${SCCACHE_DIR-}" "${SCCACHE_SERVER_PORT-}"' 2>/dev/null) || __rc=$?
+      scc_ps_rc=$__rc
+      # Anchored on our own markers at line start: a LOGIN shell's stdout can also carry the
+      # profile's own noise (a motd, an `echo` in someone's .bashrc), and a verdict decided by an
+      # unanchored match would be decided by whatever else printed.
+      scc_ps_set=$(printf '%s\n' "$__out" | sed -n 's/^cqlite-scc-probe-set=//p' | head -1)
+      scc_ps_seen=$(printf '%s\n' "$__out" | sed -n 's/^cqlite-scc-probe=//p' | head -1)
+      scc_ps_routing=$(printf '%s\n' "$__out" | sed -n 's/^cqlite-scc-routing-set=//p' | head -1)
+      scc_ps_dir=$(printf '%s\n' "$__out" | sed -n 's/^cqlite-scc-dir=//p' | head -1)
+      scc_ps_port=$(printf '%s\n' "$__out" | sed -n 's/^cqlite-scc-port=//p' | head -1)
+      # #3862'S CLASS, AND THIS ONE WAS OURS (roborev job 393, f2). Under this script's
+      # `set -o pipefail`, `printf … | grep -q PAT` returns 141 when grep matches and closes the
+      # pipe before the producer has flushed — a RACE against bash's stdio buffer, NOT a byte
+      # threshold, so "the payload is small" is no defence, and a LOGIN shell's stdout (a motd,
+      # someone's .bashrc `echo`) is not bounded by us at all. A perfectly good probe would then
+      # read as unmeasured and could fail `--strict` on a correctly-pinned box.
+      # No pipe, no producer to signal: bash's own pattern match, still ANCHORED at line start —
+      # the leading newline is what makes `*\ncqlite-scc-probe-set=*` equivalent to grep's `^`,
+      # including for a match on the very first line.
+      if [ "$__rc" != 124 ] && [ "$__rc" != 137 ]; then
+        case $'\n'"$__out" in
+          *$'\n'cqlite-scc-probe-set=*) scc_ps_ok=1 ;;
+        esac
+      fi
+    }
+
+    scc_probe_session
+    scc_probe_rc=$scc_ps_rc; scc_probe_ok=$scc_ps_ok
+    scc_probe_set=$scc_ps_set; scc_probe_seen=$scc_ps_seen
+    SCC_SESSION_SET=$scc_ps_routing; SCC_SESSION_DIR=$scc_ps_dir; SCC_SESSION_PORT=$scc_ps_port
+    # ONE CONTEXT, MEASURED — the multi-context comparison layer is REMOVED (lead ruling
+    # req-3727-w4). Gone with it: the LOGIN-shell probe, CONFLICTING-SOURCES, the SCCACHE_*
+    # routing diff and its recognised-name set, and the binary-agreement/non-participant
+    # states. Every one of those existed to COMPARE contexts and decide which disagreement
+    # was a conflict; that is the classification layer ten review rounds landed in, and the
+    # knowledge is carried by the follow-up issue instead of by this code.
+    #
+    # WHAT REMAINS IS A CHAIN OF MEASUREMENTS IN ONE CONTEXT: what the FILE declares, what a
+    # fresh NON-LOGIN PAM session SEES, what sccache MAKES of that value in bytes (the
+    # isolated oracle), and what the RUNNING server enforces in bytes. A verdict is only ever
+    # reported when each link was measured; anything else is UNMEASURED and says which link.
+    #
+    # DECLARED RESIDUAL, and it is the reason the removed layer was written: on this fleet a
+    # LOGIN shell can see a different value from a non-login PAM session
+    # (/etc/profile.d/20-agent-ami.sh sources ~/.agent-ami/worker-env.sh AFTER pam_env applies
+    # /etc/environment — measured on box3, and it is #3727's own root cause). This section does
+    # not measure that, so the best state it can reach is SCOPED-NON-LOGIN: a [gap] carrying
+    # every measured fact AND the statement that the cap a gate gets is not established. A [gap]
+    # is as loud as a [warn] and is never a success token, but it counts toward GAPS rather than
+    # WARNINGS, so `--strict` still goes green on a healthy box (round 428) — see the section
+    # header for why an always-failing preflight is worse than the false [ok] it replaced. It was
+    # an [ok] VERIFIED for one commit, which was a false certification of this section's own
+    # subject (roborev round 426) — the residual is now in the TOKEN and the verdict text, not
+    # only in a scope note a grep for the verdict never sees.
+    if [ "$scc_probe_rc" = 124 ] || [ "$scc_probe_rc" = 137 ]; then
+      warn "sccache-cap: UNMEASURED (the non-login session probe exceeded its ${SCC_PROBE_BOUND}s bound and was killed — cap visibility is UNKNOWN, not ok)"
+    elif [ "$scc_probe_ok" != 1 ]; then
+      warn "sccache-cap: UNMEASURED (the non-login probe session produced no cqlite-scc-probe-set= line, rc=$scc_probe_rc — cap visibility is UNKNOWN, not ok)"
+    elif [ -z "$SCC_SCCACHE_BIN" ]; then
+      warn "sccache-cap: UNMEASURED (the probed session resolved no 'sccache' on its own PATH, and none under ~/.cargo/bin either, so neither the value->bytes oracle nor the running server can be read — cap enforcement is UNKNOWN, not ok)"
+    elif [ -n "$scc_probe_set" ]; then
+      # VISIBLE — which is only the FIRST of three facts. EFFECT is asked before ATTRIBUTION,
+      # the same order 5b uses: a value with no effect makes the question of where it came from
+      # moot, and the stale-server state is the one an operator must act on first.
+      SCC_SEEN_BYTES=""; SCC_DEFAULT_BYTES=""
+      if ! scc_bytes_for SCC_SEEN_BYTES "$scc_probe_seen"; then
+        warn "sccache-cap: UNMEASURED (a fresh session sees SCCACHE_CACHE_SIZE='$scc_probe_seen', but what sccache would MAKE of that value could not be measured: $SCC_ORACLE_WHY)"
+      elif ! scc_bytes_for SCC_DEFAULT_BYTES; then
+        warn "sccache-cap: UNMEASURED (a fresh session sees SCCACHE_CACHE_SIZE='$scc_probe_seen' = $SCC_SEEN_BYTES bytes, but sccache's OWN default cap could not be measured, so an accepted value cannot be told from a silently discarded one: $SCC_ORACLE_WHY)"
+      elif [ "$SCC_SEEN_BYTES" = "$SCC_DEFAULT_BYTES" ]; then
+        # THE ONE AMBIGUITY, DECLARED RATHER THAN GUESSED. `30GiB` and `10G` both resolve to
+        # sccache's default, so "accepted" and "silently discarded" are INDISTINGUISHABLE here
+        # without reimplementing the grammar this section refuses to reimplement. A prefix
+        # trick (probe `9$value` and see whether it moves) works and is a grammar inference in
+        # disguise; it is deliberately not done. Operationally free: a cap EQUAL to sccache's
+        # default caps nothing.
+        warn "sccache-cap: UNMEASURED (a fresh session sees SCCACHE_CACHE_SIZE='$scc_probe_seen', which resolves to $SCC_SEEN_BYTES bytes — sccache's OWN default cap — so this check cannot tell an ACCEPTED value from a SILENTLY DISCARDED one)"
+        info "sccache accepts <digits>[KkMmGgTt] with BINARY multipliers and silently discards everything else with NO diagnostic: measured, '30G' is 30 GiB while '30GiB' and '30GB' both fall back to the default, and a bare integer means BYTES"
+        info "set a cap that DIFFERS from sccache's own default ($SCC_DEFAULT_BYTES bytes) and this becomes measurable — a cap equal to the default caps nothing anyway"
+      else
+        # ---- (3) THE CAP IN FORCE — and where there is NONE, become the first starter ----
+        # See scc_start_server_for for why this is the fix rather than a softened verdict, and
+        # for the start-but-never-stop asymmetry. Gated on an explicit authorisation, exactly as
+        # the /etc/environment write is: a default `bootstrap` run mutates no host state, and
+        # `.agent-ami/profile.yaml`'s verify.run passes --fix-sccache-cap, so the provisioning
+        # path this exists for gets it.
+        scc_run_ok=0
+        SCC_START_WHY=""
+        if scc_running_cap; then
+          scc_run_ok=1
+        elif [ "$SCC_RUN_STATE" = no-server ]; then
+          if [ "$AUTO_YES" = 1 ] || [ "$FIX_SCCACHE_CAP" = 1 ]; then
+            info "no sccache server is running on this box, so this run STARTS one under the value a fresh session sees ('$scc_probe_seen') — the cap is fixed by whichever process starts the server first, so being that process is what makes the cap effective NOW rather than whenever some later lane happens to compile"
+            SCC_START_ATTEMPTED=1
+            scc_start_server_for "$scc_probe_seen"
+            if scc_running_cap; then
+              scc_run_ok=1
+              # ATTEMPTED IS NOT OWNED (issue #3727 roborev round 10, f2). On this fleet four lanes
+              # share one server, so losing the start race is ROUTINE: `--start-server` is a no-op
+              # against a server that already exists, and the read-back then describes SOMEBODY
+              # ELSE'S server. Claiming ownership on any successful read made the run assert it had
+              # started a server whose cap it did not choose. So ownership requires the read-back
+              # cap to BE the cap we asked for; anything else is a lost race, REPORTED as the
+              # measured fact it is (the remedy text that used to hang off it is removed with the
+              # rest of the advice layer, lead ruling req-3727-w4).
+              if [ "$SCC_RUN_CAP" = "$SCC_SEEN_BYTES" ]; then
+                SCC_SERVER_STARTED=1
+                info "STARTED the sccache server ($SCC_START_WHY); it now reports a cap of $SCC_RUN_CAP bytes"
+              else
+                info "a start was attempted ($SCC_START_WHY) but the server now answering enforces $SCC_RUN_CAP bytes, NOT the $SCC_SEEN_BYTES this run asked for — most likely a concurrent lane started one first (on this fleet several lanes share a server), so this run does NOT own it and the stale-server remedy below is the right one"
+              fi
+            fi
+          fi
+        fi
+        if [ "$scc_run_ok" != 1 ]; then
+          # ATTEMPTED IS TRACKED SEPARATELY FROM OWNED (roborev round 10, f2), and this is its
+          # consumer: whether a start was tried is a fact about THIS RUN, and inferring it from a
+          # non-empty SCC_START_WHY would hide an attempt whose helper returned before recording a
+          # reason.
+          warn "sccache-cap: UNMEASURED (a fresh session sees SCCACHE_CACHE_SIZE='$scc_probe_seen' = $SCC_SEEN_BYTES bytes, but the cap actually IN FORCE could not be read: $SCC_RUN_WHY$( [ "${SCC_START_ATTEMPTED:-0}" = 1 ] && printf '; a start WAS attempted — %s' "${SCC_START_WHY:-no reason recorded}" ))"
+          info "the value is read by the sccache SERVER at startup, so nothing about a visible variable establishes the cap in force — that is why this half is not assumed"
+          if [ "$SCC_RUN_STATE" = no-server ] && [ "$AUTO_YES" != 1 ] && [ "$FIX_SCCACHE_CAP" != 1 ]; then
+            info "nothing is running to measure, and a default run does not start one:  bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap   starts the server under the persisted value and verifies the cap it enforces (--yes does it too)"
+          fi
+        elif [ "$SCC_RUN_CAP" != "$SCC_SEEN_BYTES" ]; then
+          warn "sccache-cap: NOT-HONOURED (a fresh session sees SCCACHE_CACHE_SIZE='$scc_probe_seen' = $SCC_SEEN_BYTES bytes, but the RUNNING sccache server enforces $SCC_RUN_CAP bytes — it was started by a process that did not see this value, and sccache reads the cap ONCE, at server startup)"
+          # NO REMEDY TEXT (lead ruling req-3727-w4). The two byte counts ARE the finding; which
+          # server to stop, in which context, and in which direction to fix first is the
+          # interpretation layer the ruling removes — it is the follow-up issue's subject.
+        elif [ "$SCC_PLATFORM_UNMANAGED" = 1 ]; then
+          # No PAM-read system-wide file exists to correlate against, so a machine-wide cap
+          # cannot be told from a sudo- or user-scoped one. No verdict that reports a state is
+          # available here, so none is given (5b's round-14 ruling, same shape).
+          warn "sccache-cap: UNMEASURED (a fresh, profile-free session on this $PLATFORM host sees SCCACHE_CACHE_SIZE='$scc_probe_seen' and the running server enforces exactly that ($SCC_RUN_CAP bytes) — but this platform has no PAM-read system-wide file to compare it against, so a machine-wide cap cannot be told apart from a sudo- or user-scoped one that ordinary gate processes never see)"
+          info "on this platform the per-run authority is the gate's own SUMMARY line:  accelerators: ... sccache-cap=<bytes>"
+        else
+          case "$SCC_FILE_HAS_LINE" in
+            yes)
+              # STRING equality on the raw effective value, deliberately not a numeric or
+              # unit-aware one: `30G`, `030G` and `30G ` are different strings and only sccache
+              # decides what each means. Both are already reduced to BYTES for the effect check
+              # above; this half asks a different question — is the session getting THIS FILE's
+              # value — and normalising here would be a second classifier free to disagree.
+              if [ "$SCC_FILE_VALUE" = "$scc_probe_seen" ]; then
+                # THE STRONGEST TOKEN THIS SECTION MAY EMIT IS A SCOPED ONE, AND IT IS NOT AN
+                # [ok] (issue #3727 roborev round 426). Every link above WAS measured — the file
+                # declares the value, a fresh session SEES it, sccache resolves it to N bytes and
+                # the RUNNING server enforces exactly N — but all of it in ONE context, a
+                # NON-LOGIN PAM session, while a LOGIN shell additionally runs /etc/profile.d and
+                # on this fleet that is where a DIFFERENT value comes from (#3727's own root
+                # cause). MEASURED, same box, same tree: a gate launched via gate-detached.sh
+                # reported sccache-cap=32212254720 while `--lite` from a lane shell reported
+                # 53687091200. So an unqualified VERIFIED here would certify the box at one cap
+                # while a real gate ran against another — a FALSE CERTIFICATION of exactly the
+                # property this section exists to establish. The measurement is NOT widened (the
+                # multi-context comparison layer is #3946's, removed by lead ruling req-3727-w4);
+                # the CLAIM is narrowed to what was measured, per #3414's rule that a partial
+                # result is UNKNOWN and never an [ok].
+                #
+                # WHY A DISTINCT TOKEN RATHER THAN AN EXISTING ONE. NOT-SYSTEM-WIDE asserts a
+                # MEASURED disagreement between the file and the session; here the two were
+                # measured to AGREE, so it would be affirmatively false, would make two different
+                # host states indistinguishable in the greppable line, and its remedy would send
+                # an operator to change a correct value. UNMEASURED asserts a link could not be
+                # read; here every link was, and reporting less than was measured is a wrong
+                # ANSWER — the operator would hunt a broken probe on a correctly capped box. The
+                # name deliberately does NOT begin with VERIFIED: a grep for `sccache-cap:
+                # VERIFIED` must not match it (the `PASS*` accepts `PASSthisNeverRan` shape).
+                #
+                # WHERE THIS RUN STARTED THE SERVER ITSELF, SAY SO IN THE VERDICT. The third
+                # fact is then true because bootstrap MADE it true — a provisioning action, not
+                # an independent observation of a server somebody else started — and a reader
+                # who cannot tell those apart would over-read the line. (The read-back is still
+                # a measurement: it is sccache reporting what it actually enforces.)
+                # ONE VERDICT CALL, with the varying phrase in a variable: the self-test's
+                # structural guard requires section 5b2 to contain NO `ok "` at all, and to
+                # reach this state through exactly one `gap "sccache-cap: SCOPED-NON-LOGIN (`
+                # call — two call sites would defeat a guard that exists to stop a future
+                # success token sneaking in for a file write, an exemption or this state.
+                #
+                # IT IS A gap(), NOT A warn() (roborev round 428). Round 426 was right that this
+                # may never be an [ok] and wrong about the counter: as a [warn] it made --strict
+                # — and therefore .agent-ami/profile.yaml's verify.run — fail on EVERY host
+                # forever, including a perfectly provisioned one, because no action on any box
+                # can clear a limit of what this script MEASURES. That is strictly worse than
+                # the false [ok] it replaced: a check that always fails gets waived, and then
+                # nothing is checked. gap() keeps every word of the verdict, prints as loudly,
+                # is still not a success token, and is still counted and named in the summary —
+                # it simply does not accuse THIS box of a defect it does not have.
+                if [ "$SCC_SERVER_STARTED" = 1 ]; then
+                  # "THIS RUN STARTED" is as strong as the evidence allows: there was no server
+                  # when the run began, this run asked for one at this value, and the server now
+                  # answering enforces exactly that. A concurrent lane starting an IDENTICAL one in
+                  # the same window is indistinguishable — and operationally equivalent — so the
+                  # phrase says so rather than asserting sole ownership (roborev round 10, f2).
+                  scc_srv_phrase="the sccache server THIS RUN STARTED under it enforces exactly the $SCC_SEEN_BYTES bytes it means — there was no server before, so this run became the first starter rather than leaving the cap to whichever lane compiled next (a concurrent lane starting one at the SAME value in that window is indistinguishable from this, and equivalent)"
+                else
+                  scc_srv_phrase="the ALREADY-RUNNING sccache server enforces exactly the $SCC_SEEN_BYTES bytes it means"
+                fi
+                gap "sccache-cap: SCOPED-NON-LOGIN ($SCC_ENV_FILE sets SCCACHE_CACHE_SIZE=$SCC_FILE_VALUE, a fresh PAM-created, profile-free session sees that SAME value, and $scc_srv_phrase; this run's own value, BASH_ENV and ENV were scrubbed first) — SCOPED, NOT a certification: that NON-LOGIN PAM session is the ONLY context measured, a LOGIN shell additionally runs /etc/profile.d and can export a DIFFERENT value, and no disagreement between the two is detected here (#3946), so the cap a gate actually gets is NOT established — this verdict is deliberately NOT a success token"
+                scc_scope_note
+              else
+                warn "sccache-cap: NOT-SYSTEM-WIDE ($SCC_ENV_FILE sets SCCACHE_CACHE_SIZE='$SCC_FILE_VALUE' but this session sees '$scc_probe_seen' — a sudo- or user-specific source is OVERRIDING the system-wide file, so ordinary PAM sessions get the file's value and whichever of them starts the sccache server will cap it with THAT, not with the one measured here)"
+                info "fix the VALUE in $SCC_ENV_FILE (bootstrap never rewrites an existing value), or remove the per-user/sudoers override so the two agree"
+              fi
+              ;;
+            unparseable)
+              warn "sccache-cap: UNMEASURED (a fresh session sees SCCACHE_CACHE_SIZE='$scc_probe_seen' and the running server enforces exactly that, but the SCCACHE_CACHE_SIZE assignment in $SCC_ENV_FILE could not be PARSED, so it cannot be compared against what the session saw)"
+              ;;
+            unknown)
+              warn "sccache-cap: UNMEASURED (a fresh session sees SCCACHE_CACHE_SIZE='$scc_probe_seen' and the running server enforces exactly that, but $SCC_ENV_FILE could not be READ, so it cannot be confirmed the value is a system-wide cap rather than a sudo- or user-specific one)"
+              ;;
+            *)
+              warn "sccache-cap: NOT-SYSTEM-WIDE (a fresh session sees SCCACHE_CACHE_SIZE='$scc_probe_seen' and the running server enforces exactly the $SCC_SEEN_BYTES bytes it means, but there is NO SCCACHE_CACHE_SIZE line in $SCC_ENV_FILE — so it is reaching this session from a sudo- or user-specific source (a sudoers env_file, ~/.pam_environment, a launcher-injected env) and a server started outside that source gets sccache's default)"
+              if [ "$SCC_FILE_HAS_LINE" = absent-file ]; then
+                scc_fix_hint "this host has no $SCC_ENV_FILE yet — the flag CREATES it carrying '$SCC_ENV_LINE'; the per-user source stays as it is"
+              else
+                scc_fix_hint "persists '$SCC_ENV_LINE' to $SCC_ENV_FILE, which every PAM session reads — the per-user source stays as it is"
+              fi
+              ;;
+          esac
+        fi
+      fi
+    else
+      # NOT VISIBLE. An affirmative measurement, so no file state can rescue or worsen it — the
+      # file state selects the REMEDY only (5b's table, same rule: an unmeasurable half may only
+      # ever weaken a POSITIVE claim, never soften a negative one).
+      warn "sccache-cap: FAILED (a fresh profile-free session does NOT see SCCACHE_CACHE_SIZE — a gate launched from such a session starts the sccache server with sccache's own default cap, whatever this fleet provisions, #3727)"
+      case "$SCC_FILE_HAS_LINE" in
+        yes)
+          info "the cap IS in $SCC_ENV_FILE and a fresh session still does not see it — this is a PAM condition, NOT a missing line"
+          info "re-running with --yes / --fix-sccache-cap will NOT help: either finds the line already present and changes nothing"
+          info "check the session stack reads it:  grep -n pam_env /etc/pam.d/sudo /etc/pam.d/login /etc/pam.d/sshd   (each needs 'pam_env.so readenv=1')"
+          ;;
+        absent-file)
+          if [ "$SCC_PLATFORM_UNMANAGED" = 1 ]; then
+            info "this $PLATFORM host has no $SCC_ENV_FILE, so bootstrap has nowhere to persist it — set SCCACHE_CACHE_SIZE in this host's own session-startup mechanism (launchd/systemd/the image), NOT in a shell profile"
+          else
+            scc_fix_hint "this $PLATFORM host has no $SCC_ENV_FILE yet — the flag CREATES it carrying '$SCC_ENV_LINE', and pam_env reads it at session creation; --yes does it too"
+          fi
+          ;;
+        *)
+          [ -n "$SCC_PERSIST_NOTE" ] && info "nothing was persisted this run: $SCC_PERSIST_NOTE"
+          scc_fix_hint "appends '$SCC_ENV_LINE' to $SCC_ENV_FILE; --yes does it too"
+          ;;
+      esac
+      info "the gate reports the same fact on its accelerators line as sccache-cap=unmeasured(...) instead of a measured byte count"
+    fi
+  fi
+  # The oracle's private directories are removed here as well as in the trap: a bootstrap run is
+  # long, and leaving them until process exit serves nothing.
+  scc_cleanup
+fi
+
 # ---- 5c. Claude credential reachability — issue #3733 ----
 # TWO INDEPENDENT OBSERVATIONS — AND THEY CERTIFY NOTHING (#3733, lead ruling). This
 # section used to print two VERDICTS whose passing state was `VERIFIED`, reported through
@@ -3799,6 +5433,17 @@ if [ "$WARNINGS" -eq 0 ]; then
 else
   printf '  \033[33m%d warning(s).\033[0m Address the [warn] lines above (or re-run with --yes to auto-install).\n' "$WARNINGS"
 fi
+# DECLARED GAPS ARE REPORTED SEPARATELY, ALWAYS, AND AFFIRMATIVELY AT ZERO (issue #3727 round
+# 428). "All checks green." means nothing on THIS box needs attention; it does not mean every
+# property was established, and a gap outstanding under a green line would be a silent
+# overclaim if it were not printed here. `0 RECOGNISED` rather than a bare 0, and the set is
+# DECLARED non-exhaustive: these are the incompletenesses this script KNOWS it has, not a
+# proof there are no others.
+if [ "$GAPS" -eq 0 ]; then
+  info "declared gaps: 0 RECOGNISED (of the incompletenesses this script knows how to name)"
+else
+  printf '  \033[35m%d declared gap(s) RECOGNISED.\033[0m Measured and reported, NOT clearable on this box — see the [gap] line(s) above and the issue each names. This is not a defect of this machine and --strict does not fail on it.\n' "$GAPS"
+fi
 info "Full doctrine: docs/development/agent-machine-setup.md"
 # Informational bootstrap: DEFAULT is always exit 0 so it composes into setup scripts.
 # That contract is preserved deliberately (issue #3369) — callers rely on it.
@@ -3808,8 +5453,17 @@ info "Full doctrine: docs/development/agent-machine-setup.md"
 # the presence of the literal string "All checks green." in stdout, so any caller that
 # forgot to string-match — or matched it loosely — onboarded a broken box while this
 # script exited 0. An exit code cannot be forgotten by accident.
+#
+# --strict KEYS ON WARNINGS ALONE, NEVER ON GAPS (issue #3727 round 428). A [warn] is a defect
+# of this machine; a [gap] is a declared limit of what this script can measure, identical on
+# every correctly provisioned host. Failing --strict on a gap makes verify.run red on EVERY
+# box forever with no operator action available — an alarm that fires always is one people
+# learn to waive, and a waived preflight checks nothing. The gap stays LOUD in stdout and in
+# the summary above; what it does not do is claim this box is broken.
 if [ "$STRICT" = 1 ] && [ "$WARNINGS" -ne 0 ]; then
-  info "--strict: exiting 1 ($WARNINGS warning(s)) — this machine is NOT certified ready"
+  scc_strict_gapnote=""
+  [ "$GAPS" -ne 0 ] && scc_strict_gapnote="; $GAPS declared gap(s) NOT counted toward this"
+  info "--strict: exiting 1 ($WARNINGS warning(s)$scc_strict_gapnote) — this machine is NOT certified ready"
   exit 1
 fi
 exit 0
