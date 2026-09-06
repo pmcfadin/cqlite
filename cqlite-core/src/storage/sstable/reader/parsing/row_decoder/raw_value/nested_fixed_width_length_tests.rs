@@ -99,9 +99,10 @@
 //! the WRITE rule and non-uniform; this is a READ path, whose oracle is
 //! `deserialize()` — uniform across every serializer in that table, where an EMPTY
 //! buffer IS the wire spelling of `null`
-//! (`docs/round-artifacts/issue-3847-cassandra-oracle.md`, read at the pinned tag). **#3847 (`a5171a5ba`) made this path match it**, the four
-//! `validate()`-strict types included, so the accepted set at the VALUE positions is
-//! `{n, 0}`, pinned by
+//! (`docs/round-artifacts/issue-3847-cassandra-oracle.md`, read at the pinned
+//! tag). **#3847 (`a5171a5ba`) made this path match it**, the four
+//! `validate()`-strict types included, so the accepted set at the VALUE positions
+//! is `{n, 0}`, pinned by
 //! `zero_length_fixed_width_element_decodes_to_null_at_the_three_value_positions`.
 //! What remains is not a width difference: a KEY-LIKE member (map key, set member)
 //! accepts `0` too, but can never answer `Null` — Cassandra has no null map key — so
