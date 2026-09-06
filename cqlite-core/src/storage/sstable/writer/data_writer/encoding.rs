@@ -230,18 +230,20 @@ pub(crate) fn serialize_value_into(value: &Value, out: &mut Vec<u8>) -> Result<(
         //
         // Where the declared type is NOT available, REFUSE rather than guess
         // (no-heuristics, issue #28): refusing beats writing bytes that read back
-        // as something else. The ONE legal position — a MULTICELL map's CELL
-        // PATH, where the length IS carried by the enclosing framing (an unsigned
-        // VInt, `db/marshal/CollectionType.java:361-382`) and the declared key
-        // type IS known — has its own schema-aware entry point,
-        // [`serialize_map_cell_path_key_into`].
+        // as something else. The legal positions — a MULTICELL collection's CELL
+        // PATH (a map's KEY, a set's ELEMENT), where the length IS carried by the
+        // enclosing framing (an unsigned VInt,
+        // `db/marshal/CollectionType.java:361-382`) and the declared component
+        // type IS known — have their own schema-aware entry points in
+        // [`super::cell_path`] (#3805 for the map half, #4106 for the set half).
         Value::Empty(tag) => {
             return Err(Error::InvalidInput(format!(
                 "an empty-buffer sentinel (`{}`, issue #3805) has no type-blind \
                  serialization: zero bytes mean a different thing in every generic \
-                 context, so it is legal only on a MULTICELL map's cell path via \
-                 `serialize_map_cell_path_key_into`, where the declared key type is \
-                 known and the tag can be validated against it (issue #28)",
+                 context, so it is legal only on a MULTICELL collection's cell path \
+                 via `serialize_map_cell_path_key_into` / \
+                 `serialize_set_cell_path_element_into`, where the declared component \
+                 type is known and the tag can be validated against it (issue #28)",
                 tag.cql_name()
             )))
         }

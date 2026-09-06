@@ -196,11 +196,12 @@ impl V5CompressedLegacyParser {
     ///
     /// This is the crate's ONE marshal-string -> [`CqlType`] entry point, and it
     /// is `pub(crate)` because a WRITE path needs it too: the empty-buffer
-    /// sentinel's admission on a multicell map's cell path is decided against the
-    /// DECLARED map key type (issue #3805), and the column's declared type
-    /// arrives in either spelling — a CQL `map<K,V>` or this marshal form, which
+    /// sentinel's admission on a multicell collection's cell path is decided
+    /// against the DECLARED component type — a map's KEY (issue #3805) or a set's
+    /// ELEMENT (issue #4106) — and the column's declared type arrives in either
+    /// spelling: a CQL `map<K,V>`/`set<T>` or this marshal form, both of which
     /// `write_complex_column` explicitly dispatches on. See
-    /// `crate::storage::sstable::writer::data_writer::encoding::serialize_map_cell_path_key_into`.
+    /// `crate::storage::sstable::writer::data_writer::cell_path`.
     /// It is deliberately THIS parser and not the string->string
     /// `convert_marshal_type_to_cql`: the table above is derived name-by-name
     /// from `cql3/CQL3Type.java`'s `Native` enum at `cassandra-5.0.8` and
