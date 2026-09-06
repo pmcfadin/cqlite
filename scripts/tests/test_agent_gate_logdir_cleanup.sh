@@ -2574,7 +2574,11 @@ fi
 # parent — a "quick" unbounded listing added later for some other purpose — would
 # reintroduce both halves of the finding (an O(N) shell array, and a status read from a
 # pipeline) while every case above still passed.
-scan_find_sites=$(grep -c 'find "\$GATE_LOGDIR_PARENT"' "$rot_lib" 2>/dev/null || printf 0)
+# The pattern accepts the `-P` form too (`find "$GATE_LOGDIR_PARENT"`, without `-H`) even
+# though the shipped scan no longer uses it: what is being counted is SCAN SITES, so a
+# reintroduced start-point-blind listing must count as a SECOND site here rather than slip
+# past an over-specific pattern. AC30 owns the `-H` form itself.
+scan_find_sites=$(grep -cE 'find (-H )?"\$GATE_LOGDIR_PARENT"' "$rot_lib" 2>/dev/null || printf 0)
 if [ "$scan_find_sites" = 1 ]; then
   ok "AC19: the shipped sweep slab scans the temp parent in exactly ONE place, so the bound and the in-band status have one implementation to keep true"
 else

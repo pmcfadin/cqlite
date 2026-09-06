@@ -7669,9 +7669,23 @@ GATE_LOGDIR_SCAN_MARK='agent-gate-scan-status'
 # array on EVERY gate start, nested gates included, for a run that would examine at
 # most $GATE_LOGDIR_SWEEP_CAP of them. awk holds one line at a time and forks nothing
 # per entry, so what this shell reads AND holds is bounded by <want>.
+#
+# `-H` DEREFERENCES THE START POINT, AND ONLY THE START POINT (#3637, roborev job 177).
+# `GATE_LOGDIR_PARENT` is deliberately LEXICAL — no realpath, trailing slashes stripped —
+# because the containment and parent-equality guards at the removal site compare against it
+# textually. So when `$TMPDIR` names a SYMLINK to a directory (macOS's `/tmp` ->
+# `/private/tmp`, or any operator-provided symlinked temp root), find's default `-P` mode
+# neither dereferences that start point nor descends into it: it lists NOTHING and exits 0.
+# `_logdir_scan_read` then reads a MEASURED population of 0 and the block prints the
+# affirmative all-clear `logdir-sweep: 0 REMOVED of 0 aged (>7d) under <parent>` — a measured
+# zero emitted where nothing was measured, which is the exact defect the `0 RECOGNISED`
+# convention exists to prevent. `-H` resolves the start point and NOTHING ELSE: `-L` would
+# dereference DESCENDANTS too, and a symlinked child would then be listed by a path whose
+# real subject sits outside the parent, escaping the very lexical guards that keep the
+# removal fail-closed. Normalising the variable itself is the same mistake one level up.
 _logdir_scan_aged() {
   local mode="${1:-count}" total="${2:-0}" start="${3:-0}" want="${4:-0}"
-  { find "$GATE_LOGDIR_PARENT" -maxdepth 1 -type d -name 'agent-gate.*' \
+  { find -H "$GATE_LOGDIR_PARENT" -maxdepth 1 -type d -name 'agent-gate.*' \
          -mtime "+$GATE_LOGDIR_SWEEP_AGE_DAYS" 2>/dev/null
     printf '%s %s\n' "$GATE_LOGDIR_SCAN_MARK" "$?"
   } | awk -v mark="$GATE_LOGDIR_SCAN_MARK" -v mode="$mode" -v total="$total" \
