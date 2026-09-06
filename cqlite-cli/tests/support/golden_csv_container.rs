@@ -357,12 +357,6 @@ use super::{
 };
 use serde_json::{Map, Value};
 
-/// The ONE bracket pair a container of this declared type may be rendered with
-/// (the grammar in the module doc), or `None` for a scalar type.
-///
-/// Taken from the DDL, so each kind is required to use its own bracket: a `set`
-/// rendered `[a, b]` or a `tuple` rendered `[a, b]` is a failure (review finding
-/// R2), where the earlier golden-shape-only rule accepted any of the three.
 /// This type's declared map KEY type, or `None` when it is not a map.
 fn map_key_ty(ty: &CqlType) -> Option<&CqlType> {
     match ty {
@@ -419,6 +413,12 @@ fn canonical_cli_key(
     .ok()
 }
 
+/// The ONE bracket pair a container of this declared type may be rendered with
+/// (the grammar in the module doc), or `None` for a scalar type.
+///
+/// Taken from the DDL, so each kind is required to use its own bracket: a `set`
+/// rendered `[a, b]` or a `tuple` rendered `[a, b]` is a failure (review finding
+/// R2), where the earlier golden-shape-only rule accepted any of the three.
 fn brackets(ty: &CqlType) -> Option<(char, char)> {
     match ty {
         CqlType::List(_) => Some(('[', ']')),
@@ -442,10 +442,13 @@ pub fn empty_rendering(ty: &CqlType) -> Option<String> {
 }
 
 /// Is the golden AT THIS NODE unrecoverable from the flat rendering? `Some(reason)`
-/// means something at this node is refused — see [`node_refusal_reach`] for HOW FAR,
-/// which is [`Reach::Body`] (the node's contents and count, and nothing else — review
-/// finding P2) for every cause but one: a MAP node's KEY-scoped cause reaches only
-/// its keys (issue #3815).
+/// means something at this node is refused — see [`node_refusal_reach`] for HOW FAR.
+/// USUALLY [`Reach::Body`]: the node's contents and count, and nothing else (review
+/// finding P2). [`Reach::MapKeys`] is the one narrower answer, for a MAP node's
+/// KEY-scoped cause — but only where the entry split was CHECKED, so the SAME cause
+/// reaches `Body` when the golden's own rendering could not be synthesized (issue
+/// #3815; [`unsynthesizable_rendering`]). The reach is a property of the cause AND of
+/// what could be verified about the node, never of the cause alone.
 ///
 /// This is the REASON-ONLY form, for the callers that need to know THAT a node is
 /// refused and not how far it reaches — the gap composition in
@@ -505,14 +508,28 @@ pub enum Reach {
     /// The cause sits at bracket depth >= 1 inside a key, or is an ambiguity BETWEEN
     /// two keys — either way it cannot move this node's own separators.
     ///
-    /// WHAT IT DOES AND DOES NOT ASSERT, because the difference cost a review round:
-    /// the body is NOT REFUSED, which is weaker than "the body's recoverability was
-    /// VERIFIED". Where every key renders, the three body checks did run and decline.
-    /// Where one key does NOT, they could not be evaluated — and that state was
-    /// already `None`, under which the decoder splits the node anyway. So `MapKeys`
-    /// grants the decoder exactly the licence `None` does and no more; the only
-    /// difference is that `decode_object` suppresses the ambiguous KEYS instead of
-    /// resolving one by guess (#3815 round 2).
+    /// # WHAT IT ASSERTS — a PROMISE to the decoder, and the strong form
+    ///
+    /// `MapKeys` says THE ENTRY SPLIT WAS CHECKED AND IS SAFE: the golden's own
+    /// rendering was synthesized, [`members`] split it into this node's entries, and
+    /// [`entry_cut`] gave each rendered KEY back. The decoder acts on that — it splits
+    /// this node instead of returning the un-split body — so the promise must never be
+    /// made where those checks did not RUN.
+    ///
+    /// THE INVARIANT THAT ENFORCES IT: a key-scoped cause found where the rendering
+    /// could NOT be synthesized is widened to [`Body`](Reach::Body) by
+    /// [`unsynthesizable_rendering`], because the three checks consume that rendering
+    /// and so cannot have run. [`decode_does_not_recover`] and
+    /// [`unsynthesizable_rendering`] state the same rule; all three must agree.
+    ///
+    /// DO NOT WEAKEN THIS BACK. Round 2 documented `MapKeys` as the weaker "the body
+    /// is not refused", on the argument that the unsynthesizable route already
+    /// answered `None` and the decoder split there anyway — so the promise cost
+    /// nothing. Round 3 rejected that (roborev job 445): the reasoning is about what
+    /// the CALLER happens to do today, not about what the value MEANS, and an
+    /// affirmative false promise is not repaired by a caller that would have been
+    /// wrong anyway. Reading the weaker contract here is what would license widening
+    /// `key_scoped_refusal` back onto that route.
     MapKeys,
 }
 
@@ -896,13 +913,24 @@ fn decode_does_not_recover(
 /// and the sites only route to it: a fifth site can be wrong about WHEN to ask, but
 /// not about WHAT to say.
 ///
-/// SITES 2, 3 and 4 ARE SUBSUMED BY SITE 1, and measured to be: `golden_rendering`
-/// builds the node's text by making the very calls those three re-derive — the same
-/// `entry_key_rendering` for a key, the same `golden_rendering` for a member or
-/// value — so any of them failing means site 1 already returned. Mutation-confirmed:
-/// replacing site 3 with `None` reds NOTHING, while doing the same to site 1 reds
-/// `tests::a_mixed_key_node_does_not_fail_open`. They are kept, routed here, so the
-/// four cannot disagree if `golden_rendering`'s requirements are ever narrowed.
+/// SITES 2, 3 and 4 ARE SUBSUMED BY SITE 1: `golden_rendering` builds the node's text
+/// by making the very calls those three re-derive — the same `entry_key_rendering`
+/// for a key, the same `golden_rendering` for a member or value — so any of them
+/// failing means site 1 already returned.
+///
+/// WHICH OF THAT IS MEASURED, stated apart from what is ARGUED, because "measured"
+/// covered all three here and had earned only one of them: site 3 is MEASURED —
+/// replacing it with `None` reds NOTHING, while doing the same to site 1 reds
+/// `tests::key_refusal::a_mixed_key_node_does_not_fail_open`. Sites 2 and 4 are
+/// ARGUED, from the call-identity above and not from a mutant.
+///
+/// AND THE "CANNOT DISAGREE" BENEFIT COVERS 3 AND 4 ONLY, NOT SITE 2. Site 2 is in
+/// the ARRAY arm, and this function returns `None` for a non-`Object` — so if it ever
+/// fired alone it would answer `None`, which is the fail-open shape, not the widened
+/// refusal. It is correct today for a different reason, the same one the body of this
+/// function gives: an array node HAS no keys, so it has no key-scoped cause to lose.
+/// Routing it here buys uniformity of shape, not a safety property. Give site 2 a
+/// real answer before relying on it for one.
 ///
 /// # The answer: [`Reach::Body`], and NOT `MapKeys`
 ///
@@ -950,13 +978,21 @@ fn unsynthesizable_rendering(golden: &Value, ty: &CqlType) -> Option<(Reach, Str
 }
 
 /// The FIRST key-scoped refusal of an object node, as a [`Reach::MapKeys`] answer —
-/// the one place [`decode_does_not_recover`]'s object arm asks [`map_key_refusals`].
+/// the ONE place [`map_key_refusals`] is consulted for a refusal verdict.
 ///
-/// Factored out because that arm reaches it by TWO routes, and a second spelling of
-/// it would be a second notion of what a key-scoped refusal is: once after the body
-/// causes have all been evaluated and declined, and once when they CANNOT be
-/// evaluated because a key does not render (#3815 round 2, where returning `None` on
-/// the second route was a fail-open).
+/// TWO callers, and the reach they may use it at DIFFERS, which is the whole reason
+/// this is one function:
+///
+///   * [`decode_does_not_recover`]'s object arm, at the END — after every body cause
+///     has been evaluated and declined. `MapKeys` is honest there, so the answer is
+///     used as it stands;
+///   * [`unsynthesizable_rendering`], from any of its four sites — where the body
+///     causes could not be evaluated at all. `MapKeys` is a false promise there, so
+///     that caller DISCARDS this reach and widens it to [`Reach::Body`].
+///
+/// So this function owns WHETHER a key-scoped cause exists, and the callers own what
+/// may be PROMISED about the node it sits in. Keeping the two apart is what stopped
+/// round 3's fix needing a second notion of "is a key refused".
 ///
 /// `None` for a UDT, whose entry keys are FIELD NAMES rather than values.
 fn key_scoped_refusal(fields: &Map<String, Value>, ty: &CqlType) -> Option<(Reach, String)> {

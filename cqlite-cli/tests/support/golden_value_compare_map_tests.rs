@@ -537,6 +537,15 @@ fn a_mixed_key_node_is_refused_at_the_cell_and_the_census_says_so() {
     // A correct rendering of that cell, in the grammar `ValueFormatter` documents.
     let csv = json!("{charlie:3:8: 80, {label: null, rank: 1}: 10, {label: null, rank: 1}: 20}");
     let report = report_of(MAP_UDT_KEY, golden, csv, Egress::Csv);
+    // The premise is a CORRECT rendering, so a refusal must not come WITH a diff —
+    // every sibling case in this file asserts this and this one was an assertion
+    // short of its own claim. What it guards: the emptiness bound is still applied at
+    // a Body-refused node, and on a 3-member body it must accept a non-empty one.
+    assert!(
+        report.diffs.is_empty(),
+        "a correct rendering of a refused node must not also diverge: {:?}",
+        report.diffs
+    );
     assert_eq!(
         report.ambiguous_container_cells, 1,
         "the node must be REFUSED, not paired: {:?}",

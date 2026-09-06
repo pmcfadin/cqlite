@@ -1136,8 +1136,8 @@ fn a_multicell_container_keyed_maps_values_are_guided_positionally() {
     assert_eq!(decoded[1]["value"], json!("word"), "{decoded}");
 }
 
-/// TWO DISTINCT CONTAINER KEYS THAT RENDER ALIKE make the node unrecoverable, so it
-/// is REFUSED rather than decoded against the wrong guide (roborev finding, #3726).
+/// TWO DISTINCT CONTAINER KEYS THAT RENDER ALIKE are REFUSED rather than decoded
+/// against the wrong guide (roborev finding, #3726).
 ///
 /// CSV is unquoted, so a `key_part` whose `label` is NULL and one whose `label` is
 /// the TEXT `"null"` both render `{label: null, rank: 1}`. The decoder looks a CSV
@@ -1150,6 +1150,16 @@ fn a_multicell_container_keyed_maps_values_are_guided_positionally() {
 /// lookup single-valued. It is the EMPTY-CONTAINER refusal's sibling: an OBSERVED
 /// ambiguity between two keys actually present in this golden, not the general
 /// "could another value have rendered these bytes", which the module doc declines.
+///
+/// WHAT IT NO LONGER REFUSES IS THE NODE (issue #3815). This doc used to say the
+/// cause made "the node unrecoverable, so IT is refused", and that was the whole-node
+/// blast radius #3815 replaced: the body is no longer refused for this cause — only
+/// the ambiguous KEYS are, so the entry COUNT, the pair SHAPE and every VALUE keep
+/// being compared. The case below is unchanged and still correct, because it calls the
+/// REASON-ONLY [`node_refusal`] and so asserts only THAT the cause fires; the reach it
+/// now fires at is asserted by
+/// `key_refusal::a_duplicate_rendering_refusal_is_scoped_to_the_keys`. Nothing tests a
+/// doc comment, which is exactly why this paragraph had to be corrected by hand.
 #[test]
 fn two_container_keys_that_render_alike_are_refused() {
     let ty = ty_of("frozen<map<frozen<key_part>, int>>");

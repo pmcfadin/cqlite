@@ -130,8 +130,9 @@ pub(super) fn stringified_csv_text(text: String, ty: &CqlType) -> String {
 /// The text a scalar carries inside the golden's own rendering
 /// ([`golden_rendering`]).
 /// `Value::Null` renders as the `null` token (NULL-TOKEN in the module doc), which
-/// is a text a `text` member can also produce — resolved by [`decode_shape`] from
-/// the golden's own type, and deliberately not a refusal.
+/// is a text a `text` member can also produce — resolved by the parent's
+/// `decode_half::decode_shape` from the golden's own type (private to that module, so
+/// not linkable from here), and deliberately not a refusal.
 pub(super) fn scalar_text(scalar: &Value) -> String {
     match scalar {
         Value::Null => "null".to_string(),
@@ -197,9 +198,10 @@ pub(super) fn empty_container_is_ambiguous(ty: Option<&CqlType>) -> bool {
 /// A NULL member does not widen any of these: `Value::Null` renders as the `null`
 /// token (the module doc's NULL-TOKEN), which is 4 characters.
 ///
-/// `tests::an_empty_rendering_is_possible_only_for_text` runs that formatter over
-/// each type's emptiest value and requires this function to agree with it, so the
-/// claim above is measured rather than asserted in prose.
+/// `super::tests::an_empty_rendering_is_possible_only_for_text` — in the PARENT's test
+/// module, which this file's subject was split out of — runs that formatter over each
+/// type's emptiest value and requires this function to agree with it, so the claim
+/// above is measured rather than asserted in prose.
 ///
 /// # Exhaustive on purpose, and why the DEFAULT matters
 ///

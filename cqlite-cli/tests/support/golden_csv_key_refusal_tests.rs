@@ -32,8 +32,10 @@ use super::*;
 /// delete it when key-scoped refusal landed, which is here.
 ///
 /// The KEY is still suppressed and never resolved — see
-/// [`two_container_keys_that_render_alike_are_refused`] below, which is the reason
-/// the refusal exists at all — so what the decoder leaves at a key node is its
+/// `super::two_container_keys_that_render_alike_are_refused`, which stayed in the
+/// PARENT test module (it predates this file and is held byte-identical to
+/// `origin/main`) and is the reason the refusal exists at all — so what the decoder
+/// leaves at a key node is its
 /// stripped BODY, the same thing it leaves at every other refused node. The
 /// end-to-end verdicts (a corrupted value IS reported, a correct rendering is NOT)
 /// are in `compare::map::tests`, which drives `compare_rows`.
