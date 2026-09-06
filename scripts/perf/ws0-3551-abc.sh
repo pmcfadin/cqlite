@@ -156,6 +156,10 @@ done
 [[ "$ARENA_MAX" =~ ^[1-9][0-9]*$ ]] || { echo "FATAL: --arena-max must be a positive integer, got '$ARENA_MAX'" >&2; exit 2; }
 [[ -d "$CORPUS" ]]  || { echo "FATAL: --corpus '$CORPUS' is not a directory" >&2; exit 2; }
 [[ -d "$BIN_DIR" ]] || { echo "FATAL: --bin-dir '$BIN_DIR' is not a directory" >&2; exit 2; }
+# Checked HERE, with the other argument checks and BEFORE the first side effect below, for this
+# file's standing reason: refusing an impossible configuration AFTER acting on it is the defect.
+[[ -z "$BIN_DIR_E" || -d "$BIN_DIR_E" ]] \
+  || { echo "FATAL: --bin-dir-e '$BIN_DIR_E' is not a directory" >&2; exit 2; }
 
 mkdir -p "$OUT"
 
@@ -165,7 +169,6 @@ ARMS=(A B C0 C D)
 # and `arm_bin_dir` below. Omitted, this driver's arm set and every fingerprint field it writes
 # are byte-identical to the pre-#3997 ones.
 if [[ -n "$BIN_DIR_E" ]]; then
-  [[ -d "$BIN_DIR_E" ]] || { echo "FATAL: --bin-dir-e '$BIN_DIR_E' is not a directory" >&2; exit 2; }
   ARMS+=("$ARM_E")
 fi
 
