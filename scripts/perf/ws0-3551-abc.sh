@@ -527,6 +527,20 @@ if [[ -n "$BIN_DIR_E" ]]; then
     digest_e="$(sha256_of "$BIN_DIR_E/$b")" || exit 2
     fp+=("binary_sha256_e.$b=$digest_e")
     if [[ "$b" == "$ARM_E_BINARY" ]]; then
+      # SHADOWED, AND KEPT ON PURPOSE — DO NOT DELETE THIS BRANCH AS DEAD (#3997, roborev round
+      # 2). `require_reported_allocator` runs EARLIER, with the argument checks, and asks both
+      # binaries for R2.1's `allocator:` line; identical bytes cannot report two different
+      # allocators, so an identical $ARM_E_BINARY is refused up there — naming which binary
+      # reported what — and this refusal cannot fire in the driver today. It is retained as
+      # DEFENCE IN DEPTH against a reordering (the allocator pair sits before the first side
+      # effect precisely so a false premise costs no output directory, and a future edit that
+      # moved it would silently take this property with it), NOT because it is reachable.
+      #
+      # NO TEST ASSERTS THIS TEXT, and that is deliberate rather than an omission: an assertion
+      # that cannot fire is the vacuous pass. The digest-identity refusal's REACHABLE, TESTED
+      # home is `ws0_abc_aggregate.py` — `test_ws0_abc_driver_guards.sh` case 5l — which runs
+      # STANDALONE over a session directory, executes no binaries and therefore has no allocator
+      # oracle available to it at all. The property is enforced at the layer that can enforce it.
       if [[ "$digest" == "$digest_e" ]]; then
         echo "FATAL: --bin-dir-e '$BIN_DIR_E/$b' is the SAME BYTES as --bin-dir '$BIN_DIR/$b'" >&2
         echo "       (sha256 $digest). Arm $ARM_E exists to measure a DIFFERENT $ARM_E_BINARY —" >&2
