@@ -42,15 +42,16 @@
 //! caller reaches `parse_value_from_raw_bytes`, a thin wrapper over
 //! `raw_value::reporting`'s consumption-reporting twin plus
 //! `require_fully_consumed`. **UNTIL #3847** each arm's own `require_fixed_width`
-//! guard was `data.len() < n`, and the composed accepted set WAS exactly `{n}`:
-//! `len == 0` and `len < n` were both refused under-width. **THAT IS NO LONGER
-//! TRUE OF EITHER HALF.** #3847 replaced the guard with `admissible_at_least`
+//! guard was `data.len() < n`, and composed with the consumption assert the
+//! accepted set WAS exactly `{n}` — `len == 0` and `len < n` alike refused
+//! under-width. **NEITHER of those two statements holds today**, and the guard
+//! is the reason: #3847 replaced it with `admissible_at_least`
 //! (`raw_value/fixed_width.rs`), which maps an EMPTY slice to
-//! `FixedWidthCell::Null` and reports `0` consumed, so the composed accepted set
-//! is now `{n, 0}` — see the ZERO-LENGTH note at the end of this header for the
-//! oracle and the key-like exception. What is unchanged: `len` in `1..n` is
-//! refused under-width, and `len > n` leaves `len - n` bytes unconsumed and is
-//! refused by the caller's assert. The property
+//! `FixedWidthCell::Null` and reports `0` consumed, so **the composed accepted
+//! set is now `{n, 0}`** — see the ZERO-LENGTH note at the end of this header for
+//! the oracle and the key-like exception. What is unchanged: `len` in `1..n` is
+//! still refused under-width, and `len > n` still leaves `len - n` bytes
+//! unconsumed and is refused by the caller's assert. The property
 //! AC1 and AC3 assert is therefore enforced on THAT PATH by #3811's mechanism,
 //! and these cases pin it for every fixed-width type at the five nesting
 //! positions [`nesting_positions`] enumerates — coverage #3811's own tests
@@ -96,10 +97,9 @@
 //!
 //! The ZERO-length case is NO LONGER a narrowing. The table above is `validate()`,
 //! the WRITE rule and non-uniform; this is a READ path, whose oracle is
-//! `deserialize()` — uniform across every serializer in that table, where an
-//! EMPTY buffer IS the wire
-//! spelling of `null` (`docs/round-artifacts/issue-3847-cassandra-oracle.md`, read
-//! at the pinned tag). **#3847 (`a5171a5ba`) made this path match it**, the four
+//! `deserialize()` — uniform across every serializer in that table, where an EMPTY
+//! buffer IS the wire spelling of `null`
+//! (`docs/round-artifacts/issue-3847-cassandra-oracle.md`, read at the pinned tag). **#3847 (`a5171a5ba`) made this path match it**, the four
 //! `validate()`-strict types included, so the accepted set at the VALUE positions is
 //! `{n, 0}`, pinned by
 //! `zero_length_fixed_width_element_decodes_to_null_at_the_three_value_positions`.
@@ -333,8 +333,10 @@ fn wrong_declared_length_is_refused_at_every_nesting_position() {
 /// Cassandra, tracked as #3847; this case characterises it, it does not endorse
 /// it."* #3847 closed that divergence, so the expectation FLIPS here rather than
 /// the test being deleted: #3723's coverage (every type in [`FIXED_WIDTH_TYPES`] x
-/// every nesting position) is kept and only the asserted answer moves. The old name asserted a
-/// refusal, so it could not survive the flip — a name is a claim about behaviour.
+/// every nesting position) is kept and only the asserted answer moves. The old
+/// name asserted a refusal, so it could not survive the flip — a name is a claim
+/// about behaviour, which is also why this one had to be renamed again when its
+/// position count turned out to be wrong (roborev job 134).
 ///
 /// Oracle: `deserialize()`, uniformly, at the pinned `cassandra-5.0.8` tag — every
 /// fixed-width `TypeSerializer` maps an EMPTY buffer to null, the wire spelling of
