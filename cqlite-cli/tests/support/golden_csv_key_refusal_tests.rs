@@ -294,4 +294,25 @@ fn a_body_cause_dominates_a_key_scoped_one() {
     };
     assert_eq!(reach, Reach::Body, "the body cause must win: {why}");
     assert!(why.contains("entry(s)"), "{why}");
+    // THE PREMISE, asserted rather than assumed: there really IS a key-scoped cause
+    // here for the body cause to dominate. Without this the case passes with nothing
+    // to dominate, so a regression in collision detection would leave it green — the
+    // same premise `one_unrenderable_key_does_not_cost_its_siblings_their_refusal`
+    // states for its own input.
+    let fields = match golden.as_object() {
+        Some(fields) => fields,
+        None => panic!("the golden is an object"),
+    };
+    let key_ty = match &ty {
+        CqlType::Map(key_ty, _) => key_ty,
+        _ => panic!("the declared type is a map"),
+    };
+    let refusals = map_key_refusals(fields, key_ty);
+    assert!(
+        refusals
+            .iter()
+            .filter_map(Option::as_ref)
+            .any(|why| why.contains("SAME key text")),
+        "premise: the two keys collide, so a key-scoped cause exists: {refusals:?}"
+    );
 }

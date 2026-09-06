@@ -603,3 +603,107 @@ fn a_mixed_key_node_is_refused_at_the_cell_and_the_census_says_so() {
         report.diffs
     );
 }
+
+/// THE HEADLINE PROPERTY, as a DISCRIMINATOR: an UNREFUSED key beside a REFUSED one
+/// is compared NORMALLY — the scoping is per KEY, not per node (issue #3815, C).
+///
+/// Every other committed case has either ALL keys refused or a `Reach::Body` reach, so
+/// this issue's central claim — "only the ambiguous key is suppressed" — was asserted
+/// in a module comment and exercised nowhere. A comment is not a discriminator: it
+/// passes whether the scoping is per key or per node.
+///
+/// THE INPUT REACHES THE `None` ARM of `compare_map`'s key-refused block, which is the
+/// code under test. `map_key_refusals` answers `[Some, None]` here: the key `["a, b"]`
+/// carries the `, ` separator inside its sole scalar member, while `["c"]` does not,
+/// and the two render DISTINCTLY (`[a, b]` vs `[c]`) so there is no collision. The map
+/// node's own rendering IS synthesizable, so the reach is genuinely `MapKeys` and not
+/// the widened `Body` — which is what puts the entries on the positional path with the
+/// per-key verdict.
+///
+/// FIVE CASES, and they only mean something TOGETHER: the last one is the cost that
+/// makes the other four a scoping rather than a blanket pass.
+#[test]
+fn an_unrefused_key_beside_a_refused_one_is_compared_normally() {
+    // Golden keys are `MapType.toJSONString` documents; entry 0's key is the one the
+    // flat rendering cannot be read back at.
+    let golden = || json!({"[\"a, b\"]": 10, "[\"c\"]": 20});
+
+    // (1) CONTROL — the correct rendering diverges nowhere, and the census names the
+    // REFUSED key and ONLY it. Without this the four below could pass by everything
+    // failing.
+    let report = report_of(
+        MAP_LIST_TEXT,
+        golden(),
+        json!("{[a, b]: 10, [c]: 20}"),
+        Egress::Csv,
+    );
+    assert!(
+        report.diffs.is_empty(),
+        "correct egress must not diverge: {:?}",
+        report.diffs
+    );
+    assert_eq!(report.ambiguous_container_cells, 1);
+    let reasons = report.ambiguity_reasons.join("; ");
+    assert!(reasons.contains("c[key 0]"), "the refused key: {reasons}");
+    assert!(
+        !reasons.contains("c[key 1]"),
+        "the UNREFUSED sibling must not be suppressed — that is the per-KEY scoping, \
+         and a per-NODE refusal would name it here too: {reasons}"
+    );
+
+    // (2) The UNREFUSED key's own TEXT is corrupted `[c]` -> `[d]`. This is the
+    // property the `None` arm exists for: that key is canonicalized and compared like
+    // any other, so the corruption is CAUGHT and named at its emitted position.
+    let report = report_of(
+        MAP_LIST_TEXT,
+        golden(),
+        json!("{[a, b]: 10, [d]: 20}"),
+        Egress::Csv,
+    );
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+    assert!(
+        report.diffs[0].contains("emitted position 1"),
+        "the diff must name the unrefused key's position: {:?}",
+        report.diffs
+    );
+
+    // (3) …and that key's VALUE, 20 -> 999.
+    let report = report_of(
+        MAP_LIST_TEXT,
+        golden(),
+        json!("{[a, b]: 10, [c]: 999}"),
+        Egress::Csv,
+    );
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+    assert!(report.diffs[0].contains("999"), "{:?}", report.diffs);
+
+    // (4) The value beside the REFUSED key, 10 -> 999 — suppressing a key must not
+    // suppress what sits next to it, which is the whole of finding 1.
+    let report = report_of(
+        MAP_LIST_TEXT,
+        golden(),
+        json!("{[a, b]: 999, [c]: 20}"),
+        Egress::Csv,
+    );
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+    assert!(report.diffs[0].contains("999"), "{:?}", report.diffs);
+
+    // (5) THE COST, asserted so the four above are a SCOPING and not a blanket pass:
+    // the REFUSED key's own text `[a, b]` -> `[x, y]` is NOT reported. It cannot be —
+    // that key is exactly the one no reading of the rendering recovers, so only its
+    // frame and its body's emptiness survive, and a 1-member golden key asserts no
+    // emptiness at all. If this ever starts failing the suppression has narrowed and
+    // this expectation, not the code, is what to revisit.
+    let report = report_of(
+        MAP_LIST_TEXT,
+        golden(),
+        json!("{[x, y]: 10, [c]: 20}"),
+        Egress::Csv,
+    );
+    assert!(
+        report.diffs.is_empty(),
+        "the refused key is SUPPRESSED, not compared: {:?}",
+        report.diffs
+    );
+    assert_eq!(report.ambiguous_container_cells, 1);
+}
