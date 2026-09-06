@@ -371,23 +371,54 @@ make_identity() {
   mkdir -p "$dir"
   printf '{"data_db_sha256":"%s","rows":%s,"seed":7}\n' "$sha" "$rows" > "$dir/corpus-identity.json"
 }
+# make_bins <dir> <tag> [reported-allocator] — a frozen binary set. Every file is EXECUTABLE
+# and `cqlite-flight` answers `--version` with R2.1's single `allocator: <value>` line, because
+# since #3997's roborev round 2 the driver ASKS the binary rather than inferring its treatment
+# from a digest difference (a digest proves different BYTES, never `jemalloc`). The default is
+# `system`, which is what a --bin-dir control must report; a case needing the other value, or a
+# broken surface, passes its own.
 make_bins() {
-  local dir="$1" tag="$2" b
+  local dir="$1" tag="$2" alloc="${3:-system}" b
   mkdir -p "$dir"
   for b in ws0-scan-bench cqlite-flight flight-loadgen; do
     printf 'ELF-ish %s %s\n' "$b" "$tag" > "$dir/$b"
   done
+  write_flight_stub "$dir/cqlite-flight" "$tag" "$alloc"
+  chmod +x "$dir"/ws0-scan-bench "$dir"/cqlite-flight "$dir"/flight-loadgen
+}
+# write_flight_stub <path> <tag> <allocator-body> — the `cqlite-flight` stand-in. <tag> is what
+# makes its BYTES differ between binary sets (the digest precondition's subject); the third
+# argument is the `--version` body, so a case can plant a WRONG value, NO allocator line, TWO of
+# them, or a non-zero exit — the states the driver must refuse rather than default.
+write_flight_stub() {
+  local path="$1" tag="$2" alloc="$3"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '# ELF-ish cqlite-flight %s\n' "$tag"
+    printf 'if [ "${1:-}" = "--version" ]; then\n'
+    case "$alloc" in
+      __NO_LINE__)   printf '  printf "cqlite-flight 0.0.0-fixture\\n"\n' ;;
+      __TWO_LINES__) printf '  printf "allocator: jemalloc\\nallocator: system\\n"\n' ;;
+      __NONZERO__)   printf '  printf "allocator: jemalloc\\n"; exit 3\n' ;;
+      *)             printf '  printf "cqlite-flight 0.0.0-fixture\\nallocator: %s\\n"\n' "$alloc" ;;
+    esac
+    printf '  exit 0\nfi\nexit 0\n'
+  } > "$path"
+  chmod +x "$path"
 }
 # make_bins_e <dir> <src-dir> <tag> — arm E's binary set: the SAME BYTES as <src-dir> for every
 # measured binary EXCEPT cqlite-flight, which is a different build. The shape the driver's
 # two-sided precondition ACCEPTS, so the RED arms below can each break exactly one half of it.
+# The fourth argument is arm E's REPORTED allocator, defaulting to the `jemalloc` the driver
+# requires of it; a case needing a wrong or broken surface passes its own. Its `cqlite-flight`
+# still DIFFERS in bytes from <src-dir>'s, which is the digest half of the precondition.
 make_bins_e() {
-  local dir="$1" src="$2" tag="$3" b
+  local dir="$1" src="$2" tag="$3" alloc="${4:-jemalloc}" b
   mkdir -p "$dir"
   for b in ws0-scan-bench cqlite-flight flight-loadgen; do
     cp "$src/$b" "$dir/$b"
   done
-  printf 'ELF-ish cqlite-flight LINKED-JEMALLOC %s\n' "$tag" > "$dir/cqlite-flight"
+  write_flight_stub "$dir/cqlite-flight" "LINKED-JEMALLOC $tag" "$alloc"
 }
 # Mark a (round, arm) session dir MEASURED: a results.json plus the window record the driver
 # writes. Both, because either alone is one of the states this suite refuses.
@@ -1440,11 +1471,23 @@ done
 # from the same digests. Both edges, because an exception with one edge checked is not narrow.
 SAME_E="$TMP/bins-e-same"
 make_bins "$SAME_E" one   # identical bytes to $BINS: cqlite-flight does NOT differ
-refuses_naming "5j. an arm-E binary set whose cqlite-flight is the SAME BYTES is REFUSED — identical bytes make arm E a second LABEL for arm A" \
-  "$TMP/d-base" "SAME BYTES" "cqlite-flight" "second LABEL" -- \
+# THE PROPERTY IS UNCHANGED — identical bytes are still REFUSED before anything runs — but the
+# MESSAGE moved, and that is worth stating rather than quietly re-matching: since the #3997
+# roborev round-2 fix the driver ASKS both binaries for their allocator, and that check now
+# precedes the digest one. Identical bytes CANNOT report two different allocators, so this input
+# refuses on the allocator pair and the driver's own SAME-BYTES text is shadowed. The refusal is
+# strictly more informative (it names which binary reported what), the digest-identity refusal
+# remains live and reachable in the AGGREGATOR — which executes no binaries and is asserted by
+# case 5l — and the driver keeps its digest check as defence in depth against a reordering.
+refuses_naming "5j. an arm-E binary set whose cqlite-flight is the SAME BYTES is REFUSED — a copy of the control reports the control's allocator, so arm E would be a second LABEL for arm A" \
+  "$TMP/d-base" "--bin-dir-e cqlite-flight" "reports 'allocator: system'" \
+  "expected 'allocator: jemalloc'" -- \
   --corpus "$CORPUS" --bin-dir "$BINS" --bin-dir-e "$SAME_E" --out "$TMP/out-e-same" --rounds 1
 BAD_E="$TMP/bins-e-bad"
-make_bins "$BAD_E" two    # every binary differs, including the drift control's
+# `jemalloc` so this set PASSES the allocator pair and its refusal is therefore attributable to
+# the ONE property it plants: a differing ws0-scan-bench. A fixture that failed two checks at
+# once would pass this case while proving nothing about the digest half.
+make_bins "$BAD_E" two jemalloc   # every binary differs, including the drift control's
 refuses_naming "5j. an arm-E binary set whose ws0-scan-bench ALSO differs is REFUSED — only cqlite-flight may differ" \
   "$TMP/d-base" "ws0-scan-bench' differs from" "Only cqlite-flight may differ" "drift control" -- \
   --corpus "$CORPUS" --bin-dir "$BINS" --bin-dir-e "$BAD_E" --out "$TMP/out-e-bad" --rounds 1

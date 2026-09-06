@@ -84,6 +84,12 @@ ws0-3551-abc.sh — issue #3551 interleaved SMT-unpin + allocator trial
                      anything is measured: an identical $ARM_E_BINARY would publish two labels
                      for one treatment, and a differing ws0-scan-bench or flight-loadgen would
                      move the drift control or the client apparatus, which is a second treatment.
+                     AND THE ALLOCATOR IS ASKED OF BOTH BINARIES, not inferred from the digests:
+                     \`$ARM_E_BINARY --version\` must report 'allocator: system' in --bin-dir and
+                     'allocator: jemalloc' in --bin-dir-e (R2.1), before anything runs. A digest
+                     difference proves DIFFERENT BYTES and never 'jemalloc' — any unrelated
+                     rebuild satisfies it — and /proc/<pid>/maps cannot see a statically linked
+                     allocator, so this surface is the only thing that can tell them apart.
                      Omit it and the set is A/B/C0/C/D exactly as before.
   --out DIR          Where the r<N>-<arm>/ session dirs go. REQUIRED. A (round, arm) that
                      already holds a results.json is SKIPPED, so an interrupted set resumes
@@ -160,6 +166,108 @@ done
 # file's standing reason: refusing an impossible configuration AFTER acting on it is the defect.
 [[ -z "$BIN_DIR_E" || -d "$BIN_DIR_E" ]] \
   || { echo "FATAL: --bin-dir-e '$BIN_DIR_E' is not a directory" >&2; exit 2; }
+
+# ARM E'S TREATMENT IS ASKED OF THE BINARY, NEVER INFERRED FROM ITS BYTES (#3997, R2.1;
+# roborev round 2, job 132).
+#
+# The digest precondition below establishes that arm E's $ARM_E_BINARY is a DIFFERENT build from
+# the control's. "Different" is not "jemalloc": a rebuild with another feature set, a stale
+# binary from another branch, or any unrelated rebuild satisfies it while still linking glibc
+# malloc — and NOTHING downstream catches that. Arm E runs under `--flight-allocator system` by
+# construction (nothing is preloaded), and `verify_flight_server_allocator`'s
+# `/proc/<pid>/maps` check CANNOT see a statically linked jemalloc — that blindness is exactly
+# what lets arm E carry the `system` label. So the mapping check is structurally silent here,
+# the digest check is satisfied, and the aggregate would then label a glibc-vs-glibc pair a
+# linked-allocator comparison and attribute run-to-run noise to jemalloc.
+#
+# So the allocator is READ OFF THE BINARY'S OWN `--version` SURFACE, which is R2's whole
+# purpose: the reported string is derived from the SAME `cfg` that installs the
+# `#[global_allocator]`, so it cannot disagree with what was linked. This retires the rig-only
+# residual "a tikv-jemallocator-linked binary leaves no libjemalloc mapping" — reasoned, never
+# measured — by removing the need to infer anything.
+#
+# BOTH SIDES ARE ASKED, because either alone is insufficient: E reporting `jemalloc` while the
+# CONTROL also links jemalloc makes the A-vs-E delta not an allocator delta at all.
+#
+# SCOPE, stated because it is a decision: this fires only when `--bin-dir-e` is given, i.e. when
+# arm E is in the set and the linked-allocator claim is being made. A set without arm E is
+# byte-identical in behaviour to the pre-#3997 driver (an opt-in that changes the default is not
+# opt-in), so its control binary is NOT asked — a linked-jemalloc `--bin-dir` would make arms
+# A/B/C0/C/D silently jemalloc arms, which this check does not cover and which nothing else
+# does either. NAMED, not closed.
+#
+# NO SYMBOL READER IS INVOLVED, deliberately. `nm`/`readelf` would be a second oracle for one
+# fact, would need its own three-valued unmeasurable handling, and would make a binutils
+# installation a hard prerequisite of a measurement rig that does not otherwise need one.
+# `--version` decides it, from the same cfg — `scripts/tests/test_flight_allocator_link.sh`
+# owns the symbol-level assertion, at build time, where the toolchain is present by definition.
+ALLOCATOR_SURFACE_RE='^allocator: (jemalloc|system)$'
+
+# require_reported_allocator <label> <binary> <expected> — fail CLOSED on every unmeasurable
+# state, each naming its own cause, because "the binary did not say" and "the binary said the
+# other thing" are different operator actions (rebuild vs. point --bin-dir-e somewhere else).
+require_reported_allocator() {
+  local label="$1" bin="$2" expect="$3" rc=0 out n
+  local -a matched
+  if [[ ! -f "$bin" ]]; then
+    echo "FATAL: $label '$bin' is not a file, so its allocator could not be READ." >&2
+    echo "       Arm $ARM_E's treatment is the LINKED allocator, and R2.1's --version surface is" >&2
+    echo "       the only thing that can state which one was linked." >&2
+    exit 2
+  fi
+  if [[ ! -x "$bin" ]]; then
+    echo "FATAL: $label '$bin' is not EXECUTABLE, so its reported allocator is UNMEASURED." >&2
+    echo "       Refused rather than skipped: a digest difference proves DIFFERENT BYTES and" >&2
+    echo "       never 'jemalloc', so nothing else in this rig can establish arm $ARM_E's" >&2
+    echo "       treatment. Remedy: chmod +x, or point --bin-dir-e at a real build directory." >&2
+    exit 2
+  fi
+  if command -v timeout >/dev/null 2>&1; then
+    out="$(timeout -k 5 60 "$bin" --version 2>&1)" || rc=$?
+  else
+    # A missing bound must not inherit the permissive branch, and an unbounded `--version` on a
+    # wrong or wedged binary would hang the whole set with no verdict — which blocks the
+    # measurement anyway, so refusing now with a named remedy strictly dominates hanging later.
+    echo "FATAL: no timeout(1) on this host, so \`$label --version\` cannot be BOUNDED." >&2
+    echo "       Refused rather than run unbounded: a wedged binary would hang the set with no" >&2
+    echo "       verdict. Remedy: install coreutils' timeout." >&2
+    exit 2
+  fi
+  if [[ $rc -ne 0 ]]; then
+    echo "FATAL: \`$bin --version\` exited $rc, so its allocator is UNMEASURED." >&2
+    echo "       R2.1 requires --version to short-circuit before argument validation and exit 0." >&2
+    echo "       Its output follows:" >&2
+    printf '%s\n' "$out" | sed 's/^/         | /' >&2
+    exit 2
+  fi
+  mapfile -t matched < <(printf '%s\n' "$out" | grep -E "$ALLOCATOR_SURFACE_RE") || true
+  n=${#matched[@]}
+  if [[ $n -ne 1 ]]; then
+    echo "FATAL: \`$bin --version\` printed $n line(s) matching '$ALLOCATOR_SURFACE_RE';" >&2
+    echo "       R2.1's contract is EXACTLY ONE. Neither 0 nor 2+ is read as either allocator:" >&2
+    echo "       an unrecognised or absent line is UNMEASURED, and defaulting either way is how" >&2
+    echo "       a glibc build would be measured as the jemalloc arm. Its output follows:" >&2
+    printf '%s\n' "$out" | sed 's/^/         | /' >&2
+    exit 2
+  fi
+  if [[ "${matched[0]}" != "allocator: $expect" ]]; then
+    echo "FATAL: $label '$bin' reports '${matched[0]}', expected 'allocator: $expect'." >&2
+    echo "       Arm $ARM_E is the LINKED-jemalloc treatment and every other arm selects its" >&2
+    echo "       allocator by LD_PRELOAD into the control binary, so the pair must read" >&2
+    echo "       --bin-dir=system and --bin-dir-e=jemalloc. A digest DIFFERENCE proves only" >&2
+    echo "       different bytes — any unrelated rebuild satisfies it — and /proc/<pid>/maps" >&2
+    echo "       cannot see a statically linked allocator, so this surface is the only thing" >&2
+    echo "       that can tell the two apart. Remedy: build --bin-dir-e's $ARM_E_BINARY with" >&2
+    echo "       --features jemalloc (and --bin-dir's without it), or drop --bin-dir-e." >&2
+    exit 2
+  fi
+  echo "arm $ARM_E precondition: $label '$bin' reports '${matched[0]}' (R2.1)"
+}
+
+if [[ -n "$BIN_DIR_E" ]]; then
+  require_reported_allocator "--bin-dir $ARM_E_BINARY" "$BIN_DIR/$ARM_E_BINARY" system
+  require_reported_allocator "--bin-dir-e $ARM_E_BINARY" "$BIN_DIR_E/$ARM_E_BINARY" jemalloc
+fi
 
 mkdir -p "$OUT"
 
