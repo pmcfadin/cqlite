@@ -380,28 +380,78 @@ that build survives a live round, and vice versa. New round trackers seed from
   RECORD's structured verdict** — never the PR block's self-reported one, which is untrusted text —
   says `clean`. The verdict is THREE-VALUED and an unreadable one is `UNMEASURED`: a range
   match is not a review.
-  **AND A `findings` RECORD CANNOT BIND AT THE MERGE POINT AT ALL — NOT EVEN WITH A PERFECT
-  AUTHORIZATION (roborev job 103). DECLARING THE GAP WAS NOT ENOUGH.** The deferral route exists at
-  REVIEW time because roborev **re-reports** a lead-deferred finding on every later round (#3626), so
+  **A `findings` RECORD BINDS AT THE MERGE POINT ONLY ON A FULLY MEASURED AUTHORIZATION — AND FOR
+  A WHILE IT COULD NOT BIND AT ALL, WHICH WAS ITS OWN DEFECT (roborev job 103, then #4050).**
+  The deferral route exists at REVIEW time because roborev **re-reports** a lead-deferred finding on every later round (#3626), so
   a record stays `findings` forever and requiring `clean` there with no way out would make such a
-  merge UNOBTAINABLE. At the MERGE point the authorization is still re-verified through the SAME
-  scanner the wrapper uses (`roborev-waiver-scan.py findings-deferral-authorization`, a narrow kind
-  returning the DISTINCT state `granted-authorization`) — but a grant now yields **`UNMEASURED`
-  (exit 5), never `BOUND`**. The reason is the one half that kind cannot judge: the marker's
-  **`count=`**, the field that ties a deferral to the findings it defers, is matched against the
-  count OBSERVED BY THE REVIEW, and **no trusted count exists at merge time** — measured, on
-  findings-bearing jobs 78 and 102, `roborev show --json` exposes only `verdict_bool`/`verdict`, a
-  letter and no count, and `--recheck-job` enqueues nothing so it writes no record either. The
-  earlier design DECLARED that gap in the leg's output and bound anyway, which let the merge gate
+  merge UNOBTAINABLE. At the MERGE point the authorization is re-verified through the SAME scanner
+  the wrapper uses, never read off the PR block. **Job 103's finding was about the one half that
+  the narrow authorization-only kind (`roborev-waiver-scan.py findings-deferral-authorization`,
+  returning the DISTINCT state `granted-authorization`) cannot judge: the marker's `count=`**, the
+  field that ties a deferral to the findings it defers, which is matched against the count OBSERVED
+  BY THE REVIEW. No count FIELD exists in the record — measured, on findings-bearing jobs 78 and
+  102, `roborev show --json` exposes only `verdict_bool`/`verdict`, a letter and no count, and
+  `--recheck-job` enqueues nothing so it writes no record either. The pre-103 design DECLARED that
+  gap in the leg's output and bound anyway, which let the merge gate
   honour an authorization **the review-time path would REJECT**: an allowlisted human can post a
   fresh marker after the review carrying any count at all, and nothing at the merge point compared
   it to anything. The actor is a NON-INVOKER and the shape is an ACCIDENT, so by #3312's triage rule
   it is a defect and not an out-of-model bypass — and a declaration is not a control. Fabricating a
   count would be an affirmative assert over an unmeasured value; comparing the marker's count with
-  itself would be a tautology. **So the remedy at merge time is a CLEAN covering round, never a
-  marker** — the leg says exactly that, and the call is kept only to separate "no authorization
-  exists" (a measured refusal, exit 4) from "the authorization is good but unverifiable here"
-  (exit 5), which are different operator actions. **AND THE DEFERRAL PATH IS THREE-VALUED, NOT TWO (roborev job 102): "the
+  itself would be a tautology. So job 103 replaced the declaration with **`UNMEASURED` (exit 5),
+  never `BOUND`**, which was right about the evidence and left NO route to a merge at all.
+  **THAT MADE A VALIDLY DEFERRED PR PERMANENTLY UNMERGEABLE, AND A
+  RULE THAT PUNISHES THE CORRECT BEHAVIOUR WILL NOT SURVIVE CONTACT — SO #4050 SUPPLIED THE MISSING
+  MEASUREMENT RATHER THAN RESTORING THE DECLARATION.** Three PRs (#3859, #3858, #3816) were
+  hard-blocked on it at once, which is #3626's own lesson one stage later in the pipeline. The key
+  fact: the record has no count FIELD but it **DOES carry the review TEXT** (`roborev show <job>
+  --json` → `output`/`verdict_text`; measured on this box's jobs 120/116/115, all `verdict='F'`,
+  `status='done'`, 834/789/835 bytes, still retrievable days after the review). So the merge point
+  DERIVES the count from that daemon-recorded artifact **by running the same code the review-time
+  end runs** — the recogniser is now the ONE shared `scripts/flow/lib/roborev-findings-count.sh`,
+  sourced by both `roborev-review-checks.sh` and `premerge-review-binding.sh` under an identical
+  `-f`+`-r` guard (`-r` alone is TRUE for a FIFO and the `.` then blocks forever, which in a merge
+  gate is a verdict-less stall) — and then asks the SAME judge the full question
+  (`roborev-waiver-scan.py findings-deferral` with the observed count), binding **only** on
+  `granted`. A `count-mismatch` is a MEASURED refusal (exit 4) named as its own state, because
+  "re-triage and re-authorize for the count actually observed" is a different action from "post an
+  authorization at all". **EVERY UNMEASURABLE STATE KEEPS JOB 103's REFUSAL EXACTLY** — no review
+  text, empty text, an untakeable census, a non-integer, or **ZERO markers on a record whose verdict
+  is affirmatively `F`** (a CONTRADICTION, not a count; matching a `count=0` marker against it would
+  clear a findings-bearing record) — so the change is **addition-only in the permissive direction**:
+  it adds a BOUND path where none existed and subtracts a refusal only where a count was
+  affirmatively measured AND the review-time judge granted on it. **THE RESIDUAL, WHICH IS WHERE THE
+  SOUNDNESS ARGUMENT LIVES**: the count comes out of PROSE, and #3564 rules that a recogniser over
+  author-controlled prose never closes. It holds anyway, and the leading reason is **SAME CODE OVER
+  IDENTICAL BYTES, BY CONSTRUCTION — not merely "the same recogniser over comparable inputs"**. A
+  findings deferral is **grantable only on the `--recheck-job` path**:
+  `roborev_check_findings_deferral` returns before consulting anything unless `RECHECK_JOB` is set
+  (*"OUTSIDE RECHECK MODE THERE IS NOTHING TO LOOK FOR"*), and on that path **the transcript IS the
+  record's review text** — `roborev-review.sh` copies `$RECORD_OUTPUT_FILE`, filled from the same
+  `roborev-job-facts.py` review-output path the merge point now asks for, over `$LOG` before any
+  text check runs. So the count a granted marker was matched against at review time was derived, by
+  this same library, from the very `output`/`verdict_text` bytes the merge point reads. The
+  non-closure is therefore inherited IDENTICALLY at both ends and **cannot** produce a
+  review-vs-merge disagreement or widen what review time already granted — and that follows from
+  the recheck-only restriction, **not from luck**: a deferral is never granted off a LIVE reviewer
+  transcript, which is the one input that could have diverged from the stored record. (Where the
+  merge point cannot obtain those bytes — a `roborev list` payload carries JOB rows and no review
+  text — it REFUSES as unmeasured, so the failure mode is a refusal and never a disagreement.) The
+  weaker phrasing, *"an undercount that fools the merge point fooled review time first"*, is still
+  true and is a CONSEQUENCE of this rather than the argument. Second: nothing derives CLEANLINESS
+  from prose — `clean`/`NONE` stays reachable only from the structured verdict letter, and this arm
+  is entered only for a record already affirmatively `F`, so prose supplies only HOW MANY. It does
+  **NOT** make the count tamper-proof against a party who can write roborev's database — also the
+  only way those bytes could differ between the two reads; that actor is invoker-class and out of
+  model, and the code says so rather than claiming a closure it does not deliver. **The first point
+  is a claim about ANOTHER FILE, so it is PINNED, not asserted**:
+  `scripts/tests/test_roborev_review_guard.sh` checks that the recheck-only early return still
+  precedes the granting lookup and that the record-output-becomes-the-transcript copy is still
+  there — a doctrine line naming a mechanism decays exactly like a comment, so if either half is
+  removed that guard reds instead of this argument going quietly false. The
+  authorization-only kind is retained for the unmeasurable case, where it still separates "no
+  authorization exists" (a measured refusal, exit 4) from "the authorization is good but its count
+  is unverifiable here" (exit 5) — different operator actions. **AND THE DEFERRAL PATH IS THREE-VALUED, NOT TWO (roborev job 102): "the
   authorization was evaluated and REFUSED" and "the authorization COULD NOT BE EVALUATED" are
   different states with different REMEDIES, so they get different exits.** A CLOSED or non-existent
   tracking issue is an answer GitHub GAVE ⇒ `UNBOUND` (exit 4); an issue whose state could not be

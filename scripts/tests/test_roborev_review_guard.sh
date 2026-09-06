@@ -67,6 +67,22 @@ TEST_SELF="$SCRIPT_DIR/$(basename "$0")"
 # than through the wrapper. `WRAPPER` is reassigned later by the gate-mock cases; these are not.
 CHECKS_SRC="$SCRIPT_DIR/../flow/roborev-review-checks.sh"
 ORACLES_SRC="$SCRIPT_DIR/../flow/roborev-review-oracles.sh"
+LIB_SRC="$SCRIPT_DIR/../flow/lib/roborev-findings-count.sh"
+
+# copy_flow_lib <dir> — lay the SHARED findings-count recogniser (#4050) beside a scratch
+# copy of the wrapper. `roborev-review-checks.sh` resolves `lib/roborev-findings-count.sh`
+# from its OWN directory with no override (#3312's rule: the constrained party must not
+# choose its own enforcer), so a scratch copy WITHOUT the library cannot define
+# `roborev_findings_count` and the wrapper fails closed on it — a SETUP failure that looks
+# exactly like the mutation under test having worked, which is why every mutant case runs
+# its unpatched CONTROL first. Failing loudly here rather than letting the control absorb it.
+copy_flow_lib() {
+  mkdir -p "$1/lib" && cp "$LIB_SRC" "$1/lib/" || {
+    bad "scratch setup: could not lay $LIB_SRC beside the copied checks file in $1"
+    return 1
+  }
+  return 0
+}
 BLOCK_HEADER="==== ROBOREV REVIEW SUMMARY ===="
 
 if [ ! -f "$WRAPPER_REAL" ]; then
@@ -2567,6 +2583,7 @@ _gm_dir="$tmp/grammar-mutant"
 mkdir -p "$_gm_dir"
 cp "$WRAPPER_REAL" "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" \
   "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$_gm_dir/"
+copy_flow_lib "$_gm_dir"
 if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
   cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_gm_dir/"
 fi
@@ -4535,6 +4552,7 @@ cp "$WRAPPER_REAL" "$noscan/roborev-review.sh"
 cp "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" "$noscan/"
 cp "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$noscan/"
 cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$noscan/"
+copy_flow_lib "$noscan"
 # ...and deliberately NOT roborev-waiver-scan.py.
 STUB_ANNOUNCE_SHA="$w_head"
 STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
@@ -5241,6 +5259,7 @@ _dfr_dir="$tmp/deferral-retrievability"
 mkdir -p "$_dfr_dir"
 cp "$WRAPPER_REAL" "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" \
   "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$SCAN_TOOL" "$_dfr_dir/"
+copy_flow_lib "$_dfr_dir"
 if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
   cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_dfr_dir/"
 fi
@@ -5308,6 +5327,7 @@ _dfc_dir="$tmp/deferral-closed"
 mkdir -p "$_dfc_dir"
 cp "$WRAPPER_REAL" "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" \
   "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$SCAN_TOOL" "$_dfc_dir/"
+copy_flow_lib "$_dfc_dir"
 if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
   cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_dfc_dir/"
 fi
@@ -5870,6 +5890,7 @@ _df_dir="$tmp/deferral-mutant"
 mkdir -p "$_df_dir"
 cp "$WRAPPER_REAL" "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" \
   "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$SCAN_TOOL" "$_df_dir/"
+copy_flow_lib "$_df_dir"
 if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
   cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_df_dir/"
 fi
@@ -5940,6 +5961,7 @@ _dfk_dir="$tmp/deferral-confinement"
 mkdir -p "$_dfk_dir"
 cp "$WRAPPER_REAL" "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" \
   "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$SCAN_TOOL" "$_dfk_dir/"
+copy_flow_lib "$_dfk_dir"
 if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
   cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_dfk_dir/"
 fi
@@ -6519,6 +6541,7 @@ for _mp16_state in 'unrecognised:totally-unknown-state' 'empty:' ; do
   _mp16_dir="$tmp/scanner-state-${_mp16_state%%:*}"
   mkdir -p "$_mp16_dir"
   cp "$WRAPPER_REAL" "$ORACLES_SRC" "$CHECKS_SRC" "$_mp16_dir/"
+  copy_flow_lib "$_mp16_dir"
   if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
     cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_mp16_dir/"
   fi
@@ -6766,6 +6789,7 @@ reset_stub
 _mp_dir="$tmp/misplaced-mutant"
 mkdir -p "$_mp_dir"
 cp "$WRAPPER_REAL" "$ORACLES_SRC" "$CHECKS_SRC" "$SCAN_TOOL" "$_mp_dir/"
+copy_flow_lib "$_mp_dir"
 if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
   cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_mp_dir/"
 fi
@@ -6797,6 +6821,7 @@ reset_stub
 _mp2_dir="$tmp/misplaced-mutant-2"
 mkdir -p "$_mp2_dir"
 cp "$WRAPPER_REAL" "$ORACLES_SRC" "$CHECKS_SRC" "$SCAN_TOOL" "$_mp2_dir/"
+copy_flow_lib "$_mp2_dir"
 if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
   cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_mp2_dir/"
 fi
@@ -8737,6 +8762,576 @@ elif grep -qE 'closingIssuesReferences|ROBOREV_PROBE_|MISPLACED' "$_mpg_gate"; t
 else
   ok 'structural (#3759): the agent gate is untouched by the misplacement probe'
 fi
+
+printf '== (#4050) the SHARED findings-count recogniser is BEHAVIOURALLY IDENTICAL ==\n'
+# ===========================================================================
+# ISSUE #4050 AC1. The recogniser moved out of `roborev_check_findings` into
+# `lib/roborev-findings-count.sh` so the MERGE-GATE leg can derive the same count from the
+# same daemon-recorded review text by running the SAME CODE. A move is only sound if it
+# changed nothing, and "nothing changed" is knowable only by DIFFERENTIAL TESTING against
+# what shipped — so the RETIRED INLINE PIPELINE is reproduced here VERBATIM as the oracle
+# and both are driven over a table of review-text shapes.
+#
+# THE ORACLE IS A COPY, WHICH IS THE ONE PLACE A SECOND IMPLEMENTATION IS CORRECT: it is
+# the artifact under comparison, not a second production path. It is deliberately NOT
+# re-derived from the library (that would share the defect's blind spot — the #3822
+# clause-7 lesson, where a test extracted through the same awk it was verifying).
+#
+# THE TABLE CARRIES THE SHAPES THIS REPO HAS ALREADY BEEN BURNED BY: a HEADERLESS findings
+# review (which `review-completed` deliberately accepts), a findings block whose findings
+# carry NO recognised severity marker, and a finding whose own prose contains "Summary:"
+# MID-SENTENCE — the terminator must stay LINE-INITIAL or the block closes early and the
+# count comes out low.
+_fc_lib="$SCRIPT_DIR/../flow/lib/roborev-findings-count.sh"
+if [ ! -f "$_fc_lib" ] || [ ! -r "$_fc_lib" ]; then
+  bad "structural (#4050): the shared recogniser is not readable at $_fc_lib, so the differential could not run"
+else
+  _fc_dir="$tmp/findings-count-differential"
+  mkdir -p "$_fc_dir"
+  # The RETIRED inline pipeline, verbatim from roborev-review-checks.sh before #4050.
+  cat >"$_fc_dir/reference.sh" <<'FCREF'
+#!/usr/bin/env bash
+# The pre-#4050 inline implementation, copied verbatim. $1 = transcript, $2 = block file.
+LOG="$1"
+FINDINGS_BLOCK_FILE="$2"
+{ awk 'BEGIN { inblock = 0 }
+       tolower($0) ~ /^[[:space:]]*#{1,4}[[:space:]]*(review[[:space:]]+)?findings?/ { inblock = 1; next }
+       tolower($0) ~ /^[[:space:]]*findings?[[:space:]]*:/ { inblock = 1; next }
+       tolower($0) ~ /^[[:space:]]*#{1,4}[[:space:]]*summary/ { inblock = 0 }
+       tolower($0) ~ /^[[:space:]]*summary[[:space:]]*:/ { inblock = 0 }
+       inblock { print }' "$LOG" 2>/dev/null || true; } >"$FINDINGS_BLOCK_FILE"
+block_marker_count=$({ grep -oiE '\*\*severity\*\*[[:space:]]*:[[:space:]]*(critical|high|medium|low)|\[(critical|high|medium|low)\]|(^|[^[:alnum:]])(critical|high|medium|low): ' "$FINDINGS_BLOCK_FILE" 2>/dev/null || true; } | wc -l | tr -d '[:space:]')
+block_marker_count=${block_marker_count:-0}
+printf '%s' "$block_marker_count"
+FCREF
+  # The library under test, driven through a one-line harness so it is exercised exactly as
+  # a consumer exercises it: sourced, then called.
+  cat >"$_fc_dir/subject.sh" <<'FCSUB'
+#!/usr/bin/env bash
+# $1 = library, $2 = transcript, $3 = block file. Prints the count, or `UNMEASURED`.
+. "$1"
+if c=$(roborev_findings_count "$2" "$3"); then printf '%s' "$c"; else printf 'UNMEASURED'; fi
+FCSUB
+  # --- the table: <name>|<review text with \n escapes> ----------------------
+  # `%b` renders the escapes, so each row is one line here and a multi-line transcript there.
+  _fc_rows='severity-heading|## Findings\n- **Severity**: High\n  Problem: x\n## Summary\nall done\n
+severity-lower-heading|### findings\n- **severity**:  medium\n## summary\n
+bracket-marker|## Review Findings\n1. [High] the thing\n2. [low] the other\n## Summary\n
+colon-marker|Findings:\nHigh: the thing\nMedium: the other\n\nSummary: done\n
+headerless-findings-review|The review found problems.\n- **Severity**: High\n\n## Summary\nnot great\n
+findings-block-with-no-severity-marker|## Findings\n1. The count is wrong here.\n2. And here.\n## Summary\ntwo issues\n
+summary-mid-sentence-in-a-finding|## Findings\n- **Severity**: High\n  Problem: the Summary: line is emitted before the count.\n- **Severity**: Low\n  Problem: second one.\n## Summary\ndone\n
+marker-after-the-summary-terminator|## Findings\n- **Severity**: High\n## Summary\nAlso [Critical] was mentioned in passing.\n
+marker-before-any-heading|A quoted [Critical] in the preamble.\n## Findings\n- **Severity**: Low\n## Summary\n
+clean-review|## Summary\nNo issues found.\n
+empty-transcript|
+one-blank-line|\n
+crlf-severity|## Findings\r\n- **Severity**: High\r\n## Summary\r\n'
+  _fc_n=0
+  _fc_bad=0
+  _fc_agree=0
+  _fc_saved_ifs="$IFS"
+  IFS='
+'
+  for _fc_row in $_fc_rows; do
+    IFS="$_fc_saved_ifs"
+    [ -n "$_fc_row" ] || continue
+    _fc_name="${_fc_row%%|*}"
+    _fc_body="${_fc_row#*|}"
+    _fc_n=$((_fc_n + 1))
+    _fc_log="$_fc_dir/log-$_fc_n.txt"
+    printf '%b' "$_fc_body" >"$_fc_log"
+    _fc_want=$(bash "$_fc_dir/reference.sh" "$_fc_log" "$_fc_dir/ref-block-$_fc_n.txt")
+    _fc_got=$(bash "$_fc_dir/subject.sh" "$_fc_lib" "$_fc_log" "$_fc_dir/lib-block-$_fc_n.txt")
+    if [ "$_fc_want" = "$_fc_got" ]; then
+      _fc_agree=$((_fc_agree + 1))
+    else
+      _fc_bad=1
+      bad "structural (#4050) differential '$_fc_name': the extracted library answers '$_fc_got' where the retired inline pipeline answered '$_fc_want' — the move CHANGED behaviour, and both ends of the #3626 count equality now read the same code"
+    fi
+    # The BLOCK the two extract must also match, or an agreeing count is a coincidence.
+    if ! cmp -s "$_fc_dir/ref-block-$_fc_n.txt" "$_fc_dir/lib-block-$_fc_n.txt"; then
+      _fc_bad=1
+      bad "structural (#4050) differential '$_fc_name': the two implementations extracted DIFFERENT findings blocks, so an equal count would be a coincidence"
+    fi
+    IFS='
+'
+  done
+  IFS="$_fc_saved_ifs"
+  # A FLOOR, not just a tally: a span-replacing edit that silently deletes rows leaves a
+  # green `failed: 0` over a shrunken table (#3544's case-floor lesson).
+  if [ "$_fc_n" -lt 13 ]; then
+    bad "structural (#4050): the differential table holds only $_fc_n rows — the committed floor is 13, so rows were deleted and the agreement below is over a shrunken table"
+  elif [ "$_fc_bad" -eq 0 ]; then
+    ok "structural (#4050): the extracted recogniser agrees with the retired inline pipeline on all $_fc_agree table shapes, block bytes included"
+  fi
+
+  # THE THREE-VALUED UPGRADE IS THE ONE DELIBERATE DIFFERENCE, AND IT IS ASSERTED AS SUCH.
+  # The inline pipeline collapsed "could not read the transcript" onto `0` through its
+  # `|| true`; the library returns 1 and echoes NOTHING, because the MERGE-TIME caller must
+  # never read an unmeasurable state as a measurement. The review-time caller still folds it
+  # to 0 at its audited `:-0` default, which is why nothing at that end changed.
+  _fc_missing="$_fc_dir/there-is-no-such-transcript.txt"
+  rm -f "$_fc_missing"
+  _fc_ref_missing=$(bash "$_fc_dir/reference.sh" "$_fc_missing" "$_fc_dir/ref-block-missing.txt")
+  _fc_lib_missing=$(bash "$_fc_dir/subject.sh" "$_fc_lib" "$_fc_missing" "$_fc_dir/lib-block-missing.txt")
+  if [ "$_fc_ref_missing" = "0" ] && [ "$_fc_lib_missing" = "UNMEASURED" ]; then
+    ok 'structural (#4050): an unreadable transcript is UNMEASURED in the library and was 0 inline — the one deliberate difference, and it is the three-valued direction'
+  else
+    bad "structural (#4050): the unreadable-transcript case did not behave as documented (inline '$_fc_ref_missing', library '$_fc_lib_missing') — the library must never answer 0 for a transcript it could not read"
+  fi
+  # ...and the REVIEW-TIME consumer must still fold that unmeasured answer onto 0 at its own
+  # audited default, or this refactor silently changed `findings:` on an unreadable transcript.
+  if grep -q 'block_marker_count=$(roborev_findings_count "$LOG" "$FINDINGS_BLOCK_FILE") ||' "$CHECKS_SRC" &&
+    grep -q 'block_marker_count=${block_marker_count:-0}' "$CHECKS_SRC"; then
+    ok 'structural (#4050): the review-time caller folds the unmeasured answer onto 0 at the audited `:-0` default, so its behaviour is unchanged'
+  else
+    bad 'structural (#4050): the review-time caller no longer routes through roborev_findings_count with the audited `:-0` fold — an unmeasured count would reach `findings:` unfolded'
+  fi
+
+  # POSITIVE CONTROL: the differential must be ABLE to catch a real regression, or its green
+  # says nothing. A scratch copy of the library loses the `^` anchor on the Summary
+  # terminator — the exact defect the mid-sentence row exists for — and the table must
+  # DISAGREE on that row while the anchored original agrees.
+  sed 's|tolower($0) ~ /\^\[\[:space:\]\]\*summary\[\[:space:\]\]\*:/|tolower($0) ~ /[[:space:]]*summary[[:space:]]*:/|' \
+    "$_fc_lib" >"$_fc_dir/mutant.sh"
+  if cmp -s "$_fc_lib" "$_fc_dir/mutant.sh"; then
+    bad 'structural (#4050) control: the un-anchoring mutation did not apply, so the differential was never shown to discriminate (a green table here would prove nothing)'
+  else
+    _fc_ctl_log="$_fc_dir/control-log.txt"
+    printf '%b' '## Findings\n- **Severity**: High\n  Problem: the Summary: line is emitted before the count.\n- **Severity**: Low\n  Problem: second one.\n## Summary\ndone\n' >"$_fc_ctl_log"
+    _fc_ctl_want=$(bash "$_fc_dir/reference.sh" "$_fc_ctl_log" "$_fc_dir/ctl-ref.txt")
+    _fc_ctl_got=$(bash "$_fc_dir/subject.sh" "$_fc_dir/mutant.sh" "$_fc_ctl_log" "$_fc_dir/ctl-mut.txt")
+    if [ "$_fc_ctl_want" = "2" ] && [ "$_fc_ctl_got" != "$_fc_ctl_want" ]; then
+      ok "structural (#4050) control: un-anchoring the Summary terminator makes the mid-sentence row answer '$_fc_ctl_got' instead of 2, so the table really discriminates that defect"
+    else
+      bad "structural (#4050) control: the un-anchored mutant answered '$_fc_ctl_got' against an expected inline answer of 2 (got '$_fc_ctl_want') — the differential cannot see the line-initial-terminator defect it is written for"
+    fi
+  fi
+fi
+
+printf '== (#4050) ONE source guard on the shared recogniser, in BOTH consumers ==\n'
+# ===========================================================================
+# The guard on a `source` cannot itself be sourced — whoever sources the guard would need
+# a guard — so it cannot be deduplicated into an artifact the way the recogniser was. What
+# CAN be deduplicated is the DEFINITION OF RECORD: both consumers must carry the SAME
+# predicate on the SAME variable name, byte for byte, and that identity is asserted here.
+# A guard duplicated by copying is a guard that gets weakened in ONE copy — which is
+# exactly how #3822 clause 12 was found (drive-issue-state.sh guarded `-f`+`-r` while
+# claim-heartbeat.sh guarded `-r` alone, and a FIFO made the `.` block forever with NO
+# diagnostic and NO verdict). Both halves matter: `-r` alone is TRUE for a FIFO, and in a
+# MERGE GATE a verdict-less stall is the worst available failure.
+_fg_checks="$SCRIPT_DIR/../flow/roborev-review-checks.sh"
+_fg_binding="$SCRIPT_DIR/../flow/premerge-review-binding.sh"
+# The predicate, written ONCE here as the expected form. Both files must contain it
+# verbatim; `grep -F` so no character of it is read as a pattern.
+_fg_want='{ [ -f "$ROBOREV_FINDINGS_COUNT_LIB" ] && [ -r "$ROBOREV_FINDINGS_COUNT_LIB" ]; }'
+_fg_ok=1
+for _fg_f in "$_fg_checks" "$_fg_binding"; do
+  if [ ! -f "$_fg_f" ] || [ ! -r "$_fg_f" ]; then
+    bad "structural (#4050): $_fg_f is not readable, so its guard on the shared recogniser could not be checked"
+    _fg_ok=0
+    continue
+  fi
+  if ! grep -Fq "$_fg_want" "$_fg_f"; then
+    bad "structural (#4050): $_fg_f does not carry the shared guard predicate byte-for-byte — the two consumers of lib/roborev-findings-count.sh must apply the IDENTICAL -f AND -r test, or one copy gets weakened and a FIFO makes its \`.\` block forever with no verdict"
+    _fg_ok=0
+  fi
+  # ...and it must be the ONLY shape guarding that source in the file: a second, looser
+  # test beside it would make the identity above true and the behaviour different.
+  if grep -n '\. "\$ROBOREV_FINDINGS_COUNT_LIB"' "$_fg_f" >/dev/null 2>&1; then
+    : # the source exists, which is what the guard is for
+  else
+    bad "structural (#4050): $_fg_f carries the guard but never sources \$ROBOREV_FINDINGS_COUNT_LIB — the guard has no subject, so it greens vacuously"
+    _fg_ok=0
+  fi
+  # NO ENV OVERRIDE AND NO `${...:-...}` FALLBACK on the library path (#3312's second rule:
+  # the constrained party must not choose its own enforcer). A settable library path is a
+  # settable findings COUNT, which is a settable authorization.
+  if grep -nE 'ROBOREV_FINDINGS_COUNT_LIB="?\$\{?ROBOREV_FINDINGS_COUNT_LIB' "$_fg_f" >/dev/null 2>&1 ||
+    grep -nE 'ROBOREV_FINDINGS_COUNT_LIB=.*:-' "$_fg_f" >/dev/null 2>&1; then
+    bad "structural (#4050): $_fg_f resolves the shared recogniser through an environment override or a \`:-\` fallback — the count a deferral must match would then be chosen by the party the check constrains"
+    _fg_ok=0
+  fi
+done
+# The library must be resolved from each consumer's OWN directory, so a scratch copy of the
+# tree carries its own library and no case can reach the ambient checkout's.
+if ! grep -Fq 'ROBOREV_FINDINGS_COUNT_LIB="$OWN_DIR/lib/roborev-findings-count.sh"' "$_fg_binding"; then
+  bad 'structural (#4050): premerge-review-binding.sh does not resolve the shared recogniser from its OWN directory'
+  _fg_ok=0
+fi
+if ! grep -Fq 'BASH_SOURCE[0]' "$_fg_checks"; then
+  bad 'structural (#4050): roborev-review-checks.sh does not resolve the shared recogniser from its own BASH_SOURCE directory'
+  _fg_ok=0
+fi
+if [ "$_fg_ok" -eq 1 ]; then
+  ok 'structural (#4050): both consumers guard the shared recogniser with the IDENTICAL -f AND -r predicate, resolved from their own directory with no override'
+fi
+
+printf '== (#4050) an ABSENT shared recogniser FAILS the wrapper CLOSED, with a verdict ==\n'
+# ===========================================================================
+# The guard names the cause on stderr and deliberately does NOT `return`: the wrapper runs
+# under `set -e`, so a non-zero source would abort it with exit 1 and NO SUMMARY BLOCK — a
+# verdict-less exit, which is the one thing these scripts may never do. Instead
+# `roborev_findings_count` stays undefined and the wrapper's EXISTING required-function loop
+# fails closed with a named ERROR before any review is enqueued. Both halves are asserted,
+# because "it printed a warning" and "the run cannot reach PASS" are different claims and
+# only the second one is the guard.
+#
+# THE CONTROL RUNS FIRST: the same scratch copy WITH the library must reach PASS on the same
+# fixture, or a FAIL below would be satisfied by a copy that was simply staged wrong.
+reset_stub
+_fl_dir="$tmp/flow-without-findings-lib"
+mkdir -p "$_fl_dir"
+cp "$WRAPPER_REAL" "$ORACLES_SRC" "$CHECKS_SRC" "$SCAN_TOOL" "$_fl_dir/"
+if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
+  cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_fl_dir/"
+fi
+copy_flow_lib "$_fl_dir"
+work=$(make_fixture case_fl4050 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper --wrapper "$_fl_dir/roborev-review.sh" "$work"
+assert_verdict 'case (fl4050 control) the copy WITH the shared recogniser reaches PASS' PASS 0
+# ...now remove ONLY the library. The absence is measured AFFIRMATIVELY rather than with a bare
+# `[ ! -f ]`: the SIBLING must still be present (proving the directory reads and the copy ran)
+# while the library is not — the two-valued collapse this suite refuses everywhere else.
+rm -f "$_fl_dir/lib/roborev-findings-count.sh"
+_fl_sib=0
+_fl_gone=0
+[ -f "$_fl_dir/roborev-review-checks.sh" ] && _fl_sib=1
+[ -e "$_fl_dir/lib/roborev-findings-count.sh" ] || _fl_gone=1
+if [ "$_fl_sib" -eq 1 ] && [ "$_fl_gone" -eq 1 ]; then
+  ok 'case (fl4050) fixture: the substitute reads (sibling present) and the shared recogniser is absent'
+  run_wrapper --wrapper "$_fl_dir/roborev-review.sh" "$work"
+  assert_verdict 'case (fl4050) an absent shared recogniser FAILs the wrapper' FAIL 1
+  assert_says 'case (fl4050) the wrapper names the missing function, so the cause is actionable' \
+    'did not define roborev_findings_count'
+  assert_says 'case (fl4050) and it points at the shared library rather than only at the checks file' \
+    'lib/roborev-findings-count\.sh'
+  assert_lacks 'case (fl4050) it never reaches PASS with the findings count unmeasurable' '^RESULT: PASS'
+else
+  bad 'case (fl4050) fixture: could not stage a flow copy with the shared recogniser removed, so the fail-closed path was never exercised'
+fi
+reset_stub
+
+# ===========================================================================
+# CASE (cor4050): READABLE BUT CORRUPT — the case the `-f`/`-r` guard and the
+# required-function check BOTH miss (roborev job 123).
+#
+# A truncated or corrupt library is `-f` AND `-r`, so the readability guard admits it, and
+# `.` then fails on a SYNTAX ERROR. Under `set -e` a BARE source kills the shell at that
+# line: the required-function check below it never runs, no refusal is emitted, and the
+# process exits with a status a caller can mistake for a verdict this wrapper never gave.
+# Measured on bash 5.2: bare `. bad.sh` exits 2 and never reaches the next statement.
+#
+# DISTINCT FROM (fl4050) IN ITS INPUT, IDENTICAL IN ITS REQUIRED OUTCOME: absent and
+# corrupt must both FAIL CLOSED with an anchored verdict. That is why this is a separate
+# case and not a widened assertion — the absent path exercises the `-f` guard, this one
+# exercises the source itself, and only this one can regress to a verdict-less death.
+# THIS CASE HAS MEASURED TEETH: reverting the checks-side conditional makes it go from
+# `RESULT: FAIL` + exit 1 to `RESULT: FAIL` + exit 2 — bash's syntax-error death under the
+# wrapper's `set -e`, with the wrapper's own verdict never emitted. The equivalent case at
+# the premerge end (test_premerge_review_binding.sh 4050(g)) pins the CAUSE WORDING and the
+# refusal, NOT a death: that file sets no `-e` and is executed, so there is no death there
+# to pin, and claiming otherwise would be the false rationale this suite exists to catch.
+work=$(make_fixture case_cor4050 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+# Corrupt it by TRUNCATING an open function body — the realistic corruption (a partial
+# write or a cut-off copy), and a guaranteed bash syntax error.
+printf 'roborev_findings_count() {\n  echo unterminated\n' > "$_fl_dir/lib/roborev-findings-count.sh"
+_cor_readable=0
+_cor_sources=1
+[ -f "$_fl_dir/lib/roborev-findings-count.sh" ] && [ -r "$_fl_dir/lib/roborev-findings-count.sh" ] && _cor_readable=1
+# AFFIRM THE FIXTURE IS THE ONE THIS CASE IS ABOUT: it must pass the readability guard AND
+# fail to source. A file that merely fails to source proves nothing about this path, and one
+# that sources cleanly would make the whole case vacuous.
+( . "$_fl_dir/lib/roborev-findings-count.sh" ) >/dev/null 2>&1 && _cor_sources=0
+if [ "$_cor_readable" -eq 1 ] && [ "$_cor_sources" -eq 1 ]; then
+  ok 'case (cor4050) fixture: the recogniser is readable as a regular file AND fails to source — the state both existing guards miss'
+  run_wrapper --wrapper "$_fl_dir/roborev-review.sh" "$work"
+  assert_verdict 'case (cor4050) a CORRUPT shared recogniser FAILs the wrapper, with a verdict rather than a dead shell' FAIL 1
+  assert_says 'case (cor4050) and it points at the shared library' \
+    'lib/roborev-findings-count\.sh'
+  assert_lacks 'case (cor4050) it never reaches PASS with the findings count unmeasurable' '^RESULT: PASS'
+else
+  bad "case (cor4050) fixture: could not stage a readable-but-unsourceable recogniser (readable=$_cor_readable unsourceable=$_cor_sources), so the corrupt-library path was never exercised"
+fi
+reset_stub
+
+# ===========================================================================
+# CASE (late4050): a library that DEFINES the recogniser and THEN FAILS must not leave it
+# callable (roborev job 124, High).
+#
+# THE CASE cor4050 MISSES, and the reason is mechanical: bash executes a sourced file
+# INCREMENTALLY, so a file whose TAIL fails returns non-zero with every definition already
+# in effect. cor4050 truncates INSIDE the function, so the function never exists and the
+# wrapper's required-function check catches it. Truncate AFTER it and all three functions
+# exist — and `roborev_findings_count` is the LAST one defined, so this is the case where
+# the existence check is MOST likely to pass on a file that did not finish loading.
+# Measured: `. late-fail.sh` returns 2 while `type -t` reports `function`.
+#
+# The fix undefines the functions on a failed load, so the EXISTING fail-closed path keeps
+# deciding rather than a second authority being introduced.
+work=$(make_fixture case_late4050 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+# Append a complete, VALID copy of the real library, then a tail that fails to parse. The
+# real body is kept so the failure is genuinely "defined, then failed" and not "defined
+# something useless" — a stub would not prove the function was the working one.
+# FROM THE REAL LIBRARY IN THE REPO, never from `$_fl_dir`'s copy: the preceding cases in
+# this file DELETE it (fl4050) and OVERWRITE it with a truncated stub (cor4050), so reading
+# the scratch copy here silently produced a file that fails INSIDE the function — which is
+# cor4050's input, not this case's, and the function was then never defined at all. The
+# affirmative fixture check below is what caught that; without it this case would have
+# reported a PASS while exercising the wrong state.
+mkdir -p "$_fl_dir/lib"
+{
+  cat "$SCRIPT_DIR/../flow/lib/roborev-findings-count.sh"
+  printf '\n# planted tail failure, AFTER every definition\nif true; then\n'
+} > "$_fl_dir/lib/roborev-findings-count.sh.late"
+mv "$_fl_dir/lib/roborev-findings-count.sh.late" "$_fl_dir/lib/roborev-findings-count.sh"
+# AFFIRM THE FIXTURE IS THE ONE THIS CASE IS ABOUT, in a SUBSHELL so the definitions cannot
+# leak into this suite: sourcing must FAIL and the recogniser must nonetheless be DEFINED.
+# If either half is untrue the case is testing something else.
+_late_src_failed=0
+_late_defined=0
+( . "$_fl_dir/lib/roborev-findings-count.sh" ) >/dev/null 2>&1 || _late_src_failed=1
+_late_probe=$( ( . "$_fl_dir/lib/roborev-findings-count.sh" >/dev/null 2>&1; type -t roborev_findings_count ) 2>/dev/null )
+[ "$_late_probe" = function ] && _late_defined=1
+if [ "$_late_src_failed" -eq 1 ] && [ "$_late_defined" -eq 1 ]; then
+  ok 'case (late4050) fixture: the library FAILS to source yet still DEFINES roborev_findings_count — the state a function-existence check cannot see'
+  run_wrapper --wrapper "$_fl_dir/roborev-review.sh" "$work"
+  assert_verdict 'case (late4050) a PARTIALLY LOADED recogniser FAILs the wrapper rather than being used' FAIL 1
+  assert_says 'case (late4050) the cause names the shared library' \
+    'lib/roborev-findings-count\.sh'
+  assert_lacks 'case (late4050) it never reaches PASS on a library that did not finish loading' '^RESULT: PASS'
+else
+  bad "case (late4050) fixture: not in the expected state (source-failed=$_late_src_failed still-defined=$_late_defined), so the partial-load path was never exercised"
+fi
+reset_stub
+
+# CASE (part4050): a library that SOURCES CLEANLY but is INCOMPLETE must not be used
+# (roborev job 129, MEASURED — and the consequence is a false GREEN, not a refusal).
+#
+# THE MIRROR OF late4050, AND THE CASE BOTH IT AND cor4050 MISS. Those two are about a
+# source that RETURNS NON-ZERO; this one returns ZERO. A library holding the entry point
+# and not its helpers — a stub, or a hand-edit that dropped one — loads with rc 0, so
+# `_rfc_lib_loaded` is 1 and a check on `roborev_findings_count` ALONE passes. The
+# recogniser then returns 1 emitting an unanchored `command not found`, the wrapper's
+# audited `:-0` folds that unmeasured answer to 0 markers, and 0 markers makes `findings:`
+# read NONE — which since #3564 is the PERMISSIVE value for the terminal verdict. So a
+# findings-bearing review reaches PASS. Measured on the real library's own tail: rc 0, only
+# roborev_findings_count defined, rc 1 and empty output from the call.
+work=$(make_fixture case_part4050 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+# The library's REAL TAIL from `roborev_findings_count`'s definition onward, taken FROM THE
+# REPO (late4050's lesson: the scratch copy is mutated by earlier cases). Derived from the
+# definition line rather than a hard-coded offset, so moving the function does not silently
+# turn this into a different fixture.
+mkdir -p "$_fl_dir/lib"
+_part_src="$SCRIPT_DIR/../flow/lib/roborev-findings-count.sh"
+_part_start=$(grep -n '^roborev_findings_count()' "$_part_src" | head -1 | cut -d: -f1)
+if [ -n "$_part_start" ]; then
+  sed -n "${_part_start},\$p" "$_part_src" > "$_fl_dir/lib/roborev-findings-count.sh.part"
+  mv "$_fl_dir/lib/roborev-findings-count.sh.part" "$_fl_dir/lib/roborev-findings-count.sh"
+fi
+# AFFIRM THE FIXTURE IS THIS CASE'S STATE, in a SUBSHELL, in BOTH directions: sourcing must
+# SUCCEED, the entry point must be DEFINED, and a helper must be ABSENT. A fixture that
+# merely fails to source would silently re-run cor4050.
+_part_src_ok=0
+_part_entry=0
+_part_helper_absent=0
+if [ -n "$_part_start" ]; then
+  ( . "$_fl_dir/lib/roborev-findings-count.sh" ) >/dev/null 2>&1 && _part_src_ok=1
+  _part_p1=$( ( . "$_fl_dir/lib/roborev-findings-count.sh" >/dev/null 2>&1; type -t roborev_findings_count ) 2>/dev/null )
+  [ "$_part_p1" = function ] && _part_entry=1
+  _part_p2=$( ( . "$_fl_dir/lib/roborev-findings-count.sh" >/dev/null 2>&1; type -t roborev_findings_block ) 2>/dev/null )
+  [ "$_part_p2" != function ] && _part_helper_absent=1
+fi
+if [ "$_part_src_ok" -eq 1 ] && [ "$_part_entry" -eq 1 ] && [ "$_part_helper_absent" -eq 1 ]; then
+  ok 'case (part4050) fixture: the library SOURCES CLEANLY, defines roborev_findings_count, and is MISSING roborev_findings_block — the state a clean-load flag and an entry-point check both call healthy'
+  run_wrapper --wrapper "$_fl_dir/roborev-review.sh" "$work"
+  assert_verdict 'case (part4050) an INCOMPLETE shared recogniser FAILs the wrapper instead of folding to a permissive findings: NONE' FAIL 1
+  # MEMBERSHIP IS NOT DETECTION: a bare red is produced identically by any other rule in a
+  # suite this size, so the run must NAME the function it found missing.
+  assert_says 'case (part4050) the diagnostic NAMES the missing function, not merely the library'     'roborev_findings_block'
+  assert_lacks 'case (part4050) it never reaches PASS with an incomplete recogniser' '^RESULT: PASS'
+  assert_lacks 'case (part4050) and it never reports the findings count as NONE off an unmeasurable recogniser' '^findings: NONE'
+else
+  bad "case (part4050) fixture: not in the expected state (start-line='$_part_start' sources=$_part_src_ok entry-defined=$_part_entry helper-absent=$_part_helper_absent), so the clean-but-incomplete path was never exercised"
+fi
+reset_stub
+
+# STRUCTURAL (part4050): THE DECLARED REQUIRED SET MUST EQUAL THE LIBRARY'S OWN DEFINITIONS.
+# The shipped check is a deliberately dumb literal list in each consumer (#3893: clever
+# machinery in these files has produced a finding per round). What keeps the two lists honest
+# is DERIVATION HERE: every top-level function the library defines must appear in each
+# consumer's required set, so adding a fourth helper reds this case instead of silently
+# leaving a partial load undetectable.
+_ps_lib="$SCRIPT_DIR/../flow/lib/roborev-findings-count.sh"
+if [ -r "$_ps_lib" ]; then
+  _ps_defined=$(grep -oE '^roborev_findings_[a-z_]+\(\)' "$_ps_lib" | sed 's/()$//' | sort -u)
+  if [ -z "$_ps_defined" ]; then
+    bad "structural (part4050): no top-level roborev_findings_* definitions found in $_ps_lib, so the required-set agreement could not be checked"
+  else
+    for _ps_consumer in "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$SCRIPT_DIR/../flow/premerge-review-binding.sh"; do
+      if [ ! -r "$_ps_consumer" ]; then
+        bad "structural (part4050): $_ps_consumer is unreadable, so the required-set agreement could not be checked"
+        continue
+      fi
+      _ps_miss=""
+      for _ps_fn in $_ps_defined; do
+        grep -q "$_ps_fn" "$_ps_consumer" || _ps_miss="$_ps_miss $_ps_fn"
+      done
+      if [ -z "$_ps_miss" ]; then
+        ok "structural (part4050): $(basename "$_ps_consumer") names every function the shared library defines, so a partial load of any of them is detectable"
+      else
+        bad "structural (part4050): $(basename "$_ps_consumer") does not name$_ps_miss — a library missing that function would load 'cleanly' and go undetected"
+      fi
+    done
+  fi
+else
+  bad "structural (part4050): $_ps_lib is unreadable, so the required-set agreement could not be checked"
+fi
+
+# ===========================================================================
+# STRUCTURAL (cor4050): NEITHER CONSUMER MAY SOURCE THE SHARED LIBRARY BARE.
+# The behavioural case above covers the wrapper. The merge-point consumer's own
+# corrupt-library path is covered in test_premerge_review_binding.sh, but the INVARIANT
+# — that no consumer sources it outside a conditional — is asserted here over BOTH files,
+# because it is one rule and a per-file assertion is a rule with a copy to lose.
+for _bs_f in "$CHECKS_SRC" "$SCRIPT_DIR/../flow/premerge-review-binding.sh"; do
+  if [ ! -r "$_bs_f" ]; then
+    bad "structural (cor4050): $_bs_f is unreadable, so the bare-source invariant could not be checked"
+    continue
+  fi
+  # A BARE source is a line whose FIRST TOKEN is `.` or `source` AND which carries no
+  # same-line guard operator. Both halves are needed and each was measured against this
+  # repo's own call sites:
+  #   * FIRST TOKEN — so `if . "$LIB"; then` and `if ! . "$LIB"; then` do not match. They
+  #     begin with `if`, and the source is guarded by the `if` itself.
+  #   * NO SAME-LINE `||`/`&&` — so `. "$LIB" || refusal` is accepted. It begins with `.`
+  #     but is guarded, and `||` also suspends `set -e` for the source.
+  # THE SECOND HALF EXISTS BECAUSE THIS RULE RED ON CORRECT INPUT WITHOUT IT: the first
+  # draft flagged a source that was guarded by an `&&` on the PRECEDING line. That is a
+  # multi-line construct a line-oriented rule cannot see, so the CALL SITES are kept
+  # single-line-verifiable and the rule says so — rather than growing a shell parser that
+  # would never close (#3312's ruling on recognisers over author-controlled text). A rule
+  # that reds on correct input is the rule agents learn to waive.
+  _bs_bad=$(grep -nE '^[[:space:]]*(\.|source)[[:space:]]+"?\$(\{)?ROBOREV_FINDINGS_COUNT_LIB' "$_bs_f" \
+    | grep -vE '(\|\||&&)' || true)
+  if [ -z "$_bs_bad" ]; then
+    ok "structural (cor4050): $(basename "$_bs_f") sources the shared recogniser only in a conditional, so a corrupt library cannot kill it under set -e"
+  else
+    bad "structural (cor4050): $(basename "$_bs_f") sources the shared recogniser BARE at line(s) $(printf '%s' "$_bs_bad" | cut -d: -f1 | tr '\n' ',') — in roborev-review-checks.sh that is FATAL (it is sourced under roborev-review.sh's set -e, so a syntax error kills the shell with no verdict); in premerge-review-binding.sh it is not fatal (no -e, and it is executed) but it degrades the cause to 'did not define' for a file that does not parse"
+  fi
+done
+
+printf '== (#4050) the RECHECK-ONLY restriction the merge-point count argument rests on ==\n'
+# ===========================================================================
+# #4050's soundness argument at the merge point is a claim ABOUT THIS FILE PAIR, and a
+# doctrine line naming a mechanism decays exactly like a comment — so it is pinned here
+# rather than trusted. The argument: the count a granted deferral was matched against at
+# review time was derived by the SHARED recogniser from the RECORD's own review text, i.e.
+# from the SAME BYTES premerge-review-binding.sh reads — so the recogniser's known
+# non-closure over prose cannot produce a review-vs-merge disagreement. That rests on TWO
+# properties, both asserted:
+#
+#   (1) A DEFERRAL IS GRANTABLE ONLY ON THE `--recheck-job` PATH.
+#       `roborev_check_findings_deferral` must return before consulting anything unless
+#       `RECHECK_JOB` is set. If it could grant on a LIVE run, the count would come from a
+#       LIVE reviewer transcript, which can diverge from the stored record — exactly the
+#       divergence the byte-identity argument rules out.
+#   (2) ON THAT PATH THE TRANSCRIPT *IS* THE RECORD'S REVIEW TEXT.
+#       roborev-review.sh must copy `$RECORD_OUTPUT_FILE` over `$LOG` under `RECHECK_JOB`,
+#       and `$RECORD_OUTPUT_FILE` must be the review-output path handed to the SAME
+#       `roborev-job-facts.py` the merge point calls. Break this and the two ends read
+#       different bytes while the code still looks correct.
+#
+# These are STRUCTURAL asserts on purpose: the behavioural deferral cases above prove a
+# grant HAPPENS on the recheck path, which is not the same claim as "and it can happen
+# NOWHERE ELSE" — an absence is not observable from a passing case.
+_rc4050_checks="$SCRIPT_DIR/../flow/roborev-review-checks.sh"
+_rc4050_wrapper="$WRAPPER_REAL"
+_rc4050_ok=1
+if [ ! -r "$_rc4050_checks" ] || [ ! -r "$_rc4050_wrapper" ]; then
+  bad 'structural (#4050): the checks file or the wrapper is unreadable, so the recheck-only premise could not be checked'
+  _rc4050_ok=0
+else
+  # (1) the early return, inside `roborev_check_findings_deferral` and BEFORE any lookup.
+  _rc4050_body="$tmp/rc4050-deferral-body.txt"
+  awk '/^roborev_check_findings_deferral\(\) \{/,/^\}$/' "$_rc4050_checks" >"$_rc4050_body"
+  if [ ! -s "$_rc4050_body" ]; then
+    bad 'structural (#4050): roborev_check_findings_deferral could not be extracted from the checks file, so the recheck-only gate has no subject'
+    _rc4050_ok=0
+  elif ! grep -Fq '[ -n "${RECHECK_JOB:-}" ] || return 0' "$_rc4050_body"; then
+    bad 'structural (#4050): roborev_check_findings_deferral no longer returns early outside recheck mode — a deferral grantable on a LIVE run would derive its count from a LIVE reviewer transcript, which can diverge from the stored record, and premerge-review-binding.sh'"'"'s byte-identity argument would be FALSE'
+    _rc4050_ok=0
+  else
+    # ...and it must come BEFORE the lookup that can grant, or the gate is decorative.
+    _rc4050_gate=$(grep -n -F '[ -n "${RECHECK_JOB:-}" ] || return 0' "$_rc4050_body" | head -1 | cut -d: -f1)
+    _rc4050_look=$(grep -n 'roborev_findings_deferral_lookup' "$_rc4050_body" | head -1 | cut -d: -f1)
+    if [ -n "$_rc4050_gate" ] && [ -n "$_rc4050_look" ] && [ "$_rc4050_gate" -lt "$_rc4050_look" ]; then
+      ok 'structural (#4050): a findings deferral is grantable ONLY on the --recheck-job path, and the gate precedes the granting lookup'
+    else
+      bad "structural (#4050): the recheck-only gate does not precede roborev_findings_deferral_lookup (gate line '${_rc4050_gate:-<none>}', lookup line '${_rc4050_look:-<none>}') — a check placed after the effect it guards can only report it"
+      _rc4050_ok=0
+    fi
+  fi
+  # (2) the record's review text BECOMES the transcript on that path.
+  if grep -Fq 'cat "$RECORD_OUTPUT_FILE" >"$LOG"' "$_rc4050_wrapper"; then
+    ok 'structural (#4050): on the recheck path the record'"'"'s own review text is copied over $LOG, so review time counts the SAME bytes the merge point reads'
+  else
+    bad 'structural (#4050): the wrapper no longer makes the record'"'"'s review text the recheck transcript — review time and the merge point would count DIFFERENT inputs while both look correct, and premerge-review-binding.sh'"'"'s byte-identity argument would be FALSE'
+    _rc4050_ok=0
+  fi
+  # ...and that file must be the review-output path of the SAME shared parser, or "the same
+  # field" is an assumption rather than a fact.
+  if grep -Fq 'extract_job_facts "$1" "$json" "$FACTS_FILE" "$PROMPT_FILE" "$RECORD_OUTPUT_FILE"' "$_rc4050_wrapper"; then
+    ok 'structural (#4050): $RECORD_OUTPUT_FILE is the review-output path of the SAME roborev-job-facts.py the merge point calls — one extraction of one field, not two spellings of it'
+  else
+    bad 'structural (#4050): $RECORD_OUTPUT_FILE is no longer filled from the shared roborev-job-facts.py review-output path, so "the same field at both ends" is unsupported'
+    _rc4050_ok=0
+  fi
+  # THE MERGE POINT'S HALF: it must ask for that same optional path, or it reads nothing.
+  _rc4050_binding="$SCRIPT_DIR/../flow/premerge-review-binding.sh"
+  if [ ! -r "$_rc4050_binding" ]; then
+    bad 'structural (#4050): premerge-review-binding.sh is unreadable, so its half of the byte-identity premise could not be checked'
+    _rc4050_ok=0
+  elif grep -Fq 'python3 "$FACTS_TOOL" "$job" "$tmp/facts" "$tmp/prompt" "$tmp/review"' "$_rc4050_binding"; then
+    ok 'structural (#4050): the merge point asks the shared parser for the record'"'"'s review text, which is what makes the two ends read one field'
+  else
+    bad 'structural (#4050): premerge-review-binding.sh no longer requests the review-output path from the shared parser — the merge point would have no bytes to count and the deferral route would be dead again'
+    _rc4050_ok=0
+  fi
+  # AND THE ARGUMENT MUST BE WRITTEN WHERE IT IS RELIED ON. A premise checked here but
+  # unstated at the branch is a guard nobody can trace back to the decision it protects.
+  if [ -r "$_rc4050_binding" ] && grep -Fq 'RECHECK_JOB' "$_rc4050_binding" &&
+    grep -Fq 'IDENTICAL BYTES, BY CONSTRUCTION' "$_rc4050_binding"; then
+    ok 'structural (#4050): the byte-identity argument is stated AT the binding site, naming the recheck-only restriction it rests on'
+  else
+    bad 'structural (#4050): the binding site does not state the byte-identity argument and the recheck-only restriction it rests on — the residual is then relied on without being declared (AC5)'
+    _rc4050_ok=0
+  fi
+fi
+# EACH LOAD-BEARING NEEDLE MUST OCCUR EXACTLY ONCE IN ITS FILE. A `grep -Fq` that matches a
+# COMMENT quoting the construct, or a second copy of the site, is green for the wrong reason —
+# and these greps are the only thing standing between the byte-identity argument and silent
+# decay. Counted rather than asserted present, so a duplicated or relocated site reds.
+_rc4050_uniq() { # _rc4050_uniq <file> <needle> <label>
+  local _n
+  _n=$(grep -F -c -- "$2" "$1" 2>/dev/null) || _n=""
+  case "$_n" in
+    1) ok "structural (#4050) needle: $3 occurs EXACTLY once, so the check above matched the real site" ;;
+    '') bad "structural (#4050) needle: $3 could not be counted in $1 — the check above is unverifiable" ;;
+    *) bad "structural (#4050) needle: $3 occurs $_n times in $1 — a duplicated or quoted occurrence makes the check above green for the wrong reason" ;;
+  esac
+}
+if [ -r "$_rc4050_checks" ] && [ -r "$_rc4050_wrapper" ] && [ -r "$_rc4050_binding" ]; then
+  _rc4050_uniq "$_rc4050_checks" '[ -n "${RECHECK_JOB:-}" ] || return 0' 'the recheck-only early return'
+  _rc4050_uniq "$_rc4050_wrapper" 'cat "$RECORD_OUTPUT_FILE" >"$LOG"' 'the record-output-becomes-the-transcript copy'
+  _rc4050_uniq "$_rc4050_binding" 'python3 "$FACTS_TOOL" "$job" "$tmp/facts" "$tmp/prompt" "$tmp/review"' 'the merge point'"'"'s review-text request'
+fi
+[ "$_rc4050_ok" -eq 1 ] || printf 'NOTICE - structural (#4050): the merge-point count argument rests on the two properties above; treat any FAIL here as invalidating premerge-review-binding.sh'"'"'s AC5 declaration, not merely as a lint\n'
 
 printf '== hermeticity: the wrapper never reaches a real roborev ==\n'
 reset_stub
