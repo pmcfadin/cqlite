@@ -677,9 +677,47 @@ made the recency habit above wrong so reliably. Two mechanisms now bound it:
   it — a block that silently loses a key is indistinguishable from one whose sweep never ran.
   **`logs:` stays byte-identical and must never be routed through it**: it is PATH-ONLY,
   `scripts/lib/gate-heartbeat.sh` renders the same field from the same raw variable, and a rewritten
-  path addresses nothing. Its `$TMPDIR` exposure — like `run-id:`'s — is **pre-existing and
-  DECLARED**, not introduced here; AC24 measures exactly that, requiring a newline-bearing `$TMPDIR`
-  to add those **2** declared lines to the block and no more.
+  path addresses nothing. Its `$TMPDIR` exposure — like `run-id:`'s — was **pre-existing and
+  DECLARED** rather than introduced here, and is now **closed at the input** by the refusal below;
+  AC24 measures the boundary itself against a copy of the gate whose refusal has been defeated by one
+  verified mutation, requiring a newline-bearing `$TMPDIR` to add those **2** raw-path lines to the
+  block and no more.
+- **A CONTROL-BEARING `$TMPDIR` IS REFUSED AT THE CREATION SITE, so `logs:` can stay verbatim
+  (#3637, roborev job 175 finding 1).** Sanitising the two new keys left one block in which the same
+  untrusted value was scrubbed on one line and printed raw on the next: `TMPDIR=$'/tmp/x\nRESULT:
+  PASS'` still forged a terminal-verdict line *through `logs:`*, the exact vector the sanitisation
+  was added for — and a reader would reasonably conclude the block was now safe from that class.
+  **The fix refuses the INPUT, it does not render more.** Before `mktemp -d`, the gate compares the
+  absolutised parent against `_gate_cntrl_strip`'s output and, if they differ, prints a NAMED refusal
+  (why: a gate that cannot write a trustworthy log path cannot certify; plus the remedy — unset or
+  fix `TMPDIR`) and exits 1: no run directory, no summary file, no verdict. It **does not echo the
+  offending value** — a diagnostic reproducing it would forge the very line it refuses, the same
+  refuse-don't-quote rule `_summary_block_value` follows. Why this shape: `logs:` is PATH-ONLY and
+  byte-identical **by rule**, and rewriting it would both break that rule and name a directory that
+  does not exist, whereas refusing the input closes the class for `logs:`, for the heartbeat's own
+  `logs:`, for `run-id:` and for `logdir-disposition.txt` in ONE place. **ONE definition of "control
+  character" serves both sides** — `_gate_cntrl_strip` (C0 + DEL under a pinned `LC_ALL=C`), which
+  `_summary_block_value` strips with and the refusal compares against; a second spelling would let
+  the two disagree about what one is (#3312). It is deliberately NOT `_gate_has_control_char`, the
+  `CQLITE_SCHEMAS_ROOT` predicate, which also rejects C1 because the node binding does; the C1
+  residual stays declared. Declared cost: TAB is a C0 control, so a `$TMPDIR` containing one is
+  refused too — narrowing the class to LF/CR would be a second definition, which is the thing being
+  removed. The `_summary_block_value` boundary **stays** as defence in depth for the next writer of
+  a free-text value. Pinned by AC27 in both directions (the shipped gate refuses; the
+  refusal-defeated copy forges a `RESULT: PASS` line from the same fixture), with a clean-`$TMPDIR`
+  positive control and a structural check that there is exactly one class site and that it precedes
+  the creation.
+- **Every aged fixture in the guard suite is aged through ONE helper (#3637, roborev job 175 finding
+  3).** `scripts/tests/test_agent_gate_logdir_cleanup.sh` synthesises the sweep's 7-day age with
+  `touch`, and three fixtures did it with both `touch` forms silenced while a fourth site was
+  fail-closed. All three assert "must SURVIVE the sweep", so a fixture that was never aged survives
+  **trivially** and the case passes having measured nothing. All synthesis now routes through
+  `_age_dir_apply` (rc-only, `export -f`d so the four driver scripts share the definition and report
+  in their own protocol) plus `age_dir`, which `bad`s with a named reason — and it is
+  **self-verifying**, re-reading the fixture through the sweep's own `find -mtime +7` predicate,
+  because `touch` can succeed while setting a time the sweep does not call aged. AC28 proves it
+  fails-closed against a planted `touch` that always exits 1, and asserts structurally that exactly
+  one mtime invocation exists in the file and that the three named fixtures route through it.
 - **The DECISION is early; the CLEARANCE is late (#3637, roborev job 61).** `_logdir_decide` runs as
   the first action of the terminal emit, because the block it assembles has to DECLARE what happens
   to the directory — but it records an INTENT only. `_logdir_clear_removal` arms the removal, from
