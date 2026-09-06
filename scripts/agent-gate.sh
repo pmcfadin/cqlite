@@ -6693,6 +6693,14 @@ GATE_LOGDIR_REMOVE_INTENT=0
 # the correction. Written only by _logdir_force_retain, read only by
 # _logdir_publish_disposition.
 GATE_LOGDIR_SUPERSEDED_CLAIM=""
+# Non-empty iff a component that RAN has already established that its own bundle is
+# load-bearing whatever this run's verdict turns out to be (#3637, roborev job 173
+# finding 1). Written only by _logdir_force_retain — the ONE force-retain mechanism —
+# and read by _logdir_decide, because the DECISION happens LATER than such a component:
+# `run_file_size` executes before every terminal emit, so a pin it set would otherwise be
+# overwritten by the verdict arm at emit time and the bundle deleted anyway. A pin is
+# always the RETAINING direction, so honouring it can never destroy anything.
+GATE_LOGDIR_RETAIN_PIN=""
 # 0 until SOMETHING has decided this run's disposition on the record — the terminal
 # emit (_logdir_decide) or an emit path that pins retention (_logdir_force_retain).
 # Read ONLY by the at-exit cleanup, which supplies the early-exit disposition when it
@@ -7473,6 +7481,25 @@ _logdir_decide() {
     GATE_LOGDIR_DISPOSITION="RETAINED: summary-inside-logdir #2874"
     return 0
   fi
+  # A COMPONENT THAT RAN HAS ALREADY PINNED THE RETENTION (#3637, roborev job 173
+  # finding 1). `file-size` is the live instance: its `OPT-OUT` token is NON-FAILING, so a
+  # run with `CQLITE_ALLOW_FILE_GROWTH=1` engaged reaches `RESULT: PASS` — and #3402/#3401
+  # deliberately moved the grown-file NAMES out of the SUMMARY row and into `file-size.log`
+  # INSIDE this bundle. Removing it on PASS destroyed the disclosure on the ONE run where
+  # it matters, leaving a `logs:` pointer that resolves to nothing. Same for
+  # `file-size.persistence-error.log`.
+  #
+  # ABOVE the nested arm on purpose: the opt-out is engaged by the OPERATOR's environment
+  # and is inherited by a nested run, so the disclosure argument applies there identically —
+  # and a nested run that pins is one whose parent's environment asked for the ratchet to be
+  # switched off, not one of the dozens of husk-leaving self-test gates the nested arm exists
+  # to reclaim (those pin nothing).
+  if [ -n "${GATE_LOGDIR_RETAIN_PIN:-}" ]; then
+    GATE_LOGDIR_REMOVE=0
+    GATE_LOGDIR_REMOVE_INTENT=0
+    GATE_LOGDIR_DISPOSITION="RETAINED: $GATE_LOGDIR_RETAIN_PIN"
+    return 0
+  fi
   # A nested run's bundle is nobody's evidence: its parent keeps its own, and these
   # are the runs that produced the bulk of the leak (the self-tests spawn dozens per
   # gate). Removed on EITHER verdict — the carve-out above is what protects the one
@@ -7482,10 +7509,43 @@ _logdir_decide() {
     GATE_LOGDIR_DISPOSITION="REMOVED at exit (nested run, $result); AGENT_GATE_KEEP_LOGS=1 retains"
     return 0
   fi
+  # `--only` IS ITS OWN PRODUCT (#3637, roborev job 173 finding 2). The mode is a
+  # DIAGNOSTIC whose entire output is the selected component's log under `logs:`, so a
+  # removal deletes the only thing the operator ran it for. Today a top-level `--only`
+  # is promoted to `RESULT: PARTIAL` and would fall to the retaining arm below anyway —
+  # but that is an INCIDENTAL retention, keyed on a verdict mapping ~14,000 lines away,
+  # and `--lite --only <component>` is a REACHABLE combination that ends `RESULT: PASS`
+  # and did delete the log. The exemption is therefore stated where the disposition is
+  # decided, and NAMED, so the diagnostic's product cannot be lost by a change to how
+  # its verdict is spelled.
+  #
+  # BELOW the nested arm, deliberately: the nested `--only` gates are the bulk of the
+  # leak this issue closed (`--only file-size` is the documented hermetic nested run, and
+  # the tooling self-tests spawn dozens per gate). Their reader is a parent asserting on
+  # a SUMMARY, never an operator reading a component log.
+  #
+  # NO CALLER TEXT: `$ONLY` is argv, and the block already publishes the selection on its
+  # own `mode: PARTIAL (--only …)` line. Fixed wording carries no channel to abuse.
+  if [ -n "${ONLY:-}" ]; then
+    GATE_LOGDIR_REMOVE=0
+    GATE_LOGDIR_REMOVE_INTENT=0
+    GATE_LOGDIR_DISPOSITION="RETAINED: --only diagnostic mode (its product IS the component log under logs:)"
+    return 0
+  fi
   case "$result" in
     PASS)
       GATE_LOGDIR_REMOVE_INTENT=1
-      GATE_LOGDIR_DISPOSITION="REMOVED at exit on PASS; AGENT_GATE_KEEP_LOGS=1 retains" ;;
+      # --lite SAYS SO IN ITS OWN DISPOSITION (#3637, roborev job 173 finding 2). --lite is
+      # deliberately NOT exempted: its product is the LITE SUMMARY verdict, it runs EVERY fix
+      # round, and retaining every lite bundle re-creates the accumulation this issue exists
+      # to stop (a lite run that does not PASS retains already). What it gets instead is a
+      # disposition that states the removal AND the remedy, so an operator who wanted the
+      # component logs learns how to keep them from the block they are already reading.
+      if [ "${LITE:-0}" = 1 ]; then
+        GATE_LOGDIR_DISPOSITION="REMOVED at exit on PASS (--lite: its product is this LITE SUMMARY verdict, not the bundle; re-run with AGENT_GATE_KEEP_LOGS=1 to keep the component logs)"
+      else
+        GATE_LOGDIR_DISPOSITION="REMOVED at exit on PASS; AGENT_GATE_KEEP_LOGS=1 retains"
+      fi ;;
     *)
       # FAIL, PARTIAL, REFUSED, ERROR — every non-PASS verdict is a post-mortem case.
       GATE_LOGDIR_REMOVE=0
@@ -7529,6 +7589,13 @@ _logdir_force_retain() {
   GATE_LOGDIR_REMOVE_INTENT=0
   GATE_LOGDIR_DISPOSITION="RETAINED: ${1:-unspecified}"
   GATE_LOGDIR_DECIDED=1
+  # …and the reason is PINNED, so a decision taken LATER cannot silently undo it (#3637,
+  # roborev job 173 finding 1). Every pre-#173 caller ran at or after the terminal emit,
+  # where `_logdir_decide` has already run and this is redundant; the callers that made it
+  # necessary are the ones inside a COMPONENT (`run_file_size`), which runs before every
+  # emit path in the file. Recorded here rather than at those call sites so there is still
+  # exactly ONE force-retain mechanism.
+  GATE_LOGDIR_RETAIN_PIN="${1:-unspecified}"
 }
 
 # _logdir_has_content <dir>: rc 0 iff the bundle holds anything at all EXCEPT this
@@ -7539,13 +7606,31 @@ _logdir_force_retain() {
 # unmeasured scan is the one that KEEPS the directory. Bounded by construction: this
 # is one depth-1 listing of the gate's own per-run dir.
 #
-# THE ONE EXCLUSION, and why it is not a softening (#3637, roborev job 70 medium 1):
-# the owner marker is written at LAUNCH, by this run, about this run. Counting it as
-# content would have made every non-zero early exit — every argv/usage refusal —
-# "hold diagnostic content" the moment the marker was introduced, retaining an empty
-# husk per refusal and re-opening the exact leak this issue closed. The `RESULT:
-# INCOMPLETE` sentinel is deliberately still counted here: a refusal that published
-# one is worth a post-mortem.
+# THE EXCLUSION IS THE LAUNCH-ARTIFACT ALLOWLIST — THE SAME ONE ARM 2 USES (#3637,
+# roborev job 173 finding 3). It started as the owner marker ALONE (job 70 medium 1):
+# that file is written at LAUNCH, by this run, about this run, so counting it as content
+# would have made every non-zero early exit — every argv/usage refusal — "hold diagnostic
+# content" the moment the marker was introduced, retaining an empty husk per refusal and
+# re-opening the exact leak this issue closed.
+#
+# But that is a ONE-MEMBER copy of a list that already exists and already grew: arm 2 of
+# `_logdir_decide_early_exit` calls `_logdir_has_evidence`, which excludes the FULL family
+# (`_logdir_is_launch_artifact`: the owner marker, the #2874 private summary and its
+# heartbeat/integrity siblings, and the #3755 `gate-slot.ready` / `disk-admission*`
+# admission bookkeeping — the last of which had to be added in the same merge, after every
+# exit-0 run silently kept its bundle). Two arms with two predicates DRIFT, and the drift
+# has a direction: a non-zero exit landing AFTER admission has written its bookkeeping but
+# BEFORE any component ran would retain a husk of pure launch artifacts — the very shape
+# e0a7733 closed on the other arm. ONE predicate now serves both, so a launch artifact
+# added later cannot re-open it on this side.
+#
+# THE ONE DELIBERATE EXCEPTION, which is why this is not simply `_logdir_has_evidence`:
+# the `RESULT: INCOMPLETE` sentinel still COUNTS here. A refusal that published one is
+# worth a post-mortem, and that is precisely the difference between the two arms (arm 2
+# must NOT count it — a nested status-0 stub leaves nothing else, and counting it would
+# retain 6 husks per gate of record). The sentinel is this run's own summary FILE, which
+# is inside the bundle only in the #2874 private-default shape, so it is recognised by
+# that resolved path and by nothing weaker.
 _logdir_has_content() {
   local d="${1:-}" listing rc e
   [ -d "$d" ] || return 1
@@ -7553,9 +7638,12 @@ _logdir_has_content() {
   [ "$rc" -eq 0 ] || return 0     # could not tell -> treat as content -> retain
   while IFS= read -r e; do
     [ -n "$e" ] || continue
-    if [ -n "${GATE_LOGDIR_OWNER_FILE:-}" ] && [ "$e" = "$GATE_LOGDIR_OWNER_FILE" ]; then
-      continue
+    # The sentinel exception FIRST: it is a launch artifact by the allowlist's reckoning,
+    # and on THIS arm it is content.
+    if [ -n "${SUMMARY_FILE:-}" ] && [ "$e" = "$SUMMARY_FILE" ]; then
+      return 0
     fi
+    _logdir_is_launch_artifact "$e" && continue
     return 0
   done <<EOF
 $listing
@@ -21274,6 +21362,14 @@ run_file_size() {
       # that the ratchet was NOT enforced, and over how many files.
       _record_status_detail "$name" \
         "CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); ${#grew[@]} over-threshold file(s) grown — see file-size.log under logs:"
+      # THE BUNDLE IS NOW LOAD-BEARING, SO PIN THE RETENTION (#3637, roborev job 173
+      # finding 1). `OPT-OUT` is NON-FAILING, so this run can and does reach
+      # `RESULT: PASS` — and #3637 removes the bundle on a terminal PASS. The detail above
+      # points at `file-size.log` under `logs:` BECAUSE #3402/#3401 moved the grown-file
+      # NAMES there deliberately, so on the one run where the disclosure matters the pointer
+      # would dangle: `logs:` resolves to nothing and the names are gone from every
+      # reachable artifact. Through the ONE force-retain mechanism, with a NAMED reason.
+      _logdir_force_retain "file-size OPT-OUT disclosure #3402 (the grown-file names live in file-size.log inside this bundle; a removal-on-PASS would delete the only artifact that carries them)"
       _fs_emit "$log" ">>> [$name] ${#grew[@]} over-threshold file(s) grew; ALLOWED via CQLITE_ALLOW_FILE_GROWTH=1:"
       for line in ${grew[@]+"${grew[@]}"}; do
         _fs_emit "$log" "      $line"
@@ -21455,6 +21551,14 @@ run_file_size() {
     # nothing borrowed from the environment.
     local _fs_detail_where=""
     [ "$sib_ok" = 1 ] && _fs_detail_where=" — see file-size.persistence-error.log under logs:"
+    # SAME PIN, SAME REASON, ONE BRANCH OVER (#3637, roborev job 173 finding 1). This arm's
+    # details also point "under logs:", at a sibling that is this failure's ONLY durable
+    # copy — stdout reaches gate.log alone, the file agents are told never to read. `status`
+    # is FAIL here, so today's verdict arm would retain anyway; the pin is what makes that
+    # true BY DECISION rather than as a side effect of the aggregate, and it is what names
+    # the reason in the block. Pinned even when the sibling could NOT be written in full:
+    # what survived is then the most complete copy there is.
+    _logdir_force_retain "file-size log-persistence FAILURE #3401/#3402 (the diagnostic, including the grown-file names, is in file-size.persistence-error.log inside this bundle)"
     if [ "$ratchet_verdict" = FAIL ]; then
       _record_status_detail "$name" \
         "TWO failures: a REAL size-ratchet violation AND a log-persistence failure ($log_persist_err)$_fs_detail_where"
