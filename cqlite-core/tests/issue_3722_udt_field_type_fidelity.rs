@@ -757,6 +757,101 @@ async fn top_level_frozen_udt_column_decodes_every_field_both_spellings() {
     }
 }
 
+/// **Issue #4070 wiring evidence (AC5)**: the exact `Value` variants of the arms
+/// #4070 DELETED, over the same public surface.
+///
+/// # What this case is evidence ABOUT
+///
+/// #4070 deleted the ten scalar arms `parse_simple_udt_field_value_at` carried
+/// (`Text`/`Ascii`, `Int`, `BigInt`, `Boolean`, `Float`, `Double`,
+/// `Uuid`/`TimeUuid`, `Timestamp`, `Blob`) so the whole field type routes through
+/// `parse_typed_value`. That deletion is only safe if the delegate returns the
+/// SAME variant, and a decoder-level unit test cannot show that the public surface
+/// sees it. This case does: it runs the same `Database::execute("SELECT * FROM …")`
+/// route as the rest of this file, over the same **Cassandra-written** committed
+/// fixture (`test-data/fixtures/issue_3722/test_udt_wide_fields/`, provenance at
+/// `test-data/schemas/issue-3722-udt-wide-fields.cql:20-26`), and pins the variant
+/// — not merely the value, and not via a variant-erasing accessor like `as_str` —
+/// of every consolidated type the fixture actually carries.
+///
+/// The path is `cell_value_complex.rs` → `udt.rs` → `parse_simple_udt_field_value_at`,
+/// i.e. the deleted arms' own call site.
+///
+/// # DECLARED GAP: six of the ten arms have NO end-to-end coverage
+///
+/// The `wide` UDT covers only four of the consolidated types: `i` (`int`), `bl`
+/// (`blob`), `tu` (`timeuuid`) and `inner_u.b` (`text`, reached through `nu`).
+/// **`bigint`, `boolean`, `float`, `double`, bare `uuid` and `timestamp` appear in
+/// NO committed UDT fixture at all**, so for those six the deletion is covered by
+/// decoder-level tests only (`regression_3631_typed_value_tests.rs`,
+/// `raw_value/nested_fixed_width_length_tests.rs`) and by the arm-by-arm diff
+/// recorded in `parse_simple_udt_field_value_at`'s doc comment. That gap is NAMED
+/// rather than papered over: a CQLite-WRITTEN fixture is deliberately not invented
+/// to close it, because per #3042 a CQLite-written + CQLite-read round-trip is
+/// invariant to a uniform framing error and could not be the oracle.
+#[tokio::test]
+async fn consolidated_scalar_arms_keep_their_value_variants_end_to_end() {
+    for spelling in [Spelling::CqlShort, Spelling::Marshal] {
+        let rows = rows(spelling).await;
+        let ctx = format!("#4070 consolidated arms, column w, {spelling:?}");
+        let udt = full_udt(&rows, "w", &ctx);
+
+        // ex-`CqlType::Int` arm ⇒ Value::Integer
+        assert!(
+            matches!(peel(field(udt, "i")), Value::Integer(7)),
+            "{ctx}: `i` (int) must stay Value::Integer(7) after #4070 deleted the \
+             Int arm, got {}",
+            variant(field(udt, "i"))
+        );
+        // ex-`CqlType::Blob` arm ⇒ Value::Blob, whole-slice framed (never VInt-framed)
+        match peel(field(udt, "bl")) {
+            Value::Blob(b) => assert_eq!(
+                b.as_ref(),
+                [0xDE, 0xAD, 0xBE, 0xEFu8].as_slice(),
+                "{ctx}: `bl` (blob) must be the WHOLE four-byte slice — a VInt-framed \
+                 read would surface one byte fewer, and the deleted arm was \
+                 whole-slice on both sides"
+            ),
+            other => panic!(
+                "{ctx}: `bl` (blob) must stay Value::Blob, got {}",
+                variant(other)
+            ),
+        }
+        // ex-`CqlType::Uuid | CqlType::TimeUuid` arm ⇒ Value::Uuid. There is no
+        // `Value::TimeUuid`, so the collapse is part of what must not change.
+        match peel(field(udt, "tu")) {
+            Value::Uuid(u) => assert_eq!(
+                u,
+                &[
+                    0x8a, 0xc6, 0xd5, 0x80, 0x6d, 0x4d, 0x11, 0xee, 0xb9, 0x62, 0x02, 0x42, 0xac,
+                    0x12, 0x00, 0x02,
+                ],
+                "{ctx}: `tu` (timeuuid) must stay Value::Uuid carrying the exact \
+                 written bytes"
+            ),
+            other => panic!(
+                "{ctx}: `tu` (timeuuid) must stay Value::Uuid, got {}",
+                variant(other)
+            ),
+        }
+        // ex-`CqlType::Text | CqlType::Ascii` arm ⇒ Value::Text, asserted as the
+        // VARIANT (the sibling assert in `assert_wide_fully_decoded` uses
+        // `as_str`, which any future text-ish variant would also satisfy).
+        let nested = as_udt(field(udt, "nu"), &format!("{ctx}: nested inner_u"));
+        match peel(field(nested, "b")) {
+            Value::Text(t) => assert_eq!(
+                std::str::from_utf8(t).ok(),
+                Some("nested"),
+                "{ctx}: `nu.b` (text) content"
+            ),
+            other => panic!(
+                "{ctx}: `nu.b` (text) must stay Value::Text, got {}",
+                variant(other)
+            ),
+        }
+    }
+}
+
 /// AC3 route 2: the UDT in a FROZEN MAP KEY. A frozen map is one value cell, so
 /// the key really is decoded as a UDT — unlike the multicell cell-path route at
 /// the bottom of this file, which #3612 owns.
@@ -983,6 +1078,8 @@ async fn row3_multi_element_containers_decode_both_distinct_udts() {
 fn every_case_in_this_file_is_still_present() {
     const EXPECTED: &[&str] = &[
         "top_level_frozen_udt_column_decodes_every_field_both_spellings",
+        // Issue #4070 (AC5): the consolidated arms' variants, end-to-end.
+        "consolidated_scalar_arms_keep_their_value_variants_end_to_end",
         "frozen_map_udt_key_decodes_every_field_cql_short_spelling",
         "frozen_set_udt_element_decodes_every_field_cql_short_spelling",
         "null_udt_fields_stay_null_and_populated_siblings_still_decode",
