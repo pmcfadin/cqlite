@@ -1134,52 +1134,140 @@ fn a_multicell_container_keyed_maps_values_are_guided_positionally() {
     assert_eq!(decoded[1]["value"], json!("word"), "{decoded}");
 }
 
-/// THE DUPLICATE-RENDERING REFUSAL IS WHOLE-NODE, AND THAT COSTS THE ENTRY VALUES —
-/// pinned executably as a known hole (roborev job 34, issue #3726).
+/// KEY-SCOPED REFUSAL: two keys that render ALIKE cost the KEYS, and NOT the entry
+/// values, the entry count or the pair shape (issue #3815).
 ///
-/// When two container keys render alike the node is refused, `decode_shape` returns the
-/// un-split body, and NOTHING inside is compared: not the entry count, not the pair shape,
-/// not the values. Measured — a value corrupted 20 -> 999 inside such a cell is invisible.
+/// This replaces #3726's `a_duplicate_rendering_refusal_also_costs_the_entry_values`,
+/// which asserted the opposite ON PURPOSE as an executable residual: the node was
+/// refused whole, `decode_shape` returned the un-split body and a value corrupted
+/// 20 -> 999 inside such a cell was invisible. That test's own instruction was to
+/// delete it when key-scoped refusal landed, which is here.
 ///
-/// It is the same shape as the gap that suppressed a whole map (fixed earlier in this
-/// issue), one module over, and the same answer would work: entry boundaries and emitted
-/// order ARE still recoverable, so the entries could be paired POSITIONALLY with only the
-/// ambiguous KEY suppressed.
-///
-/// NOT FIXED HERE, and the reasons are worth stating rather than implying:
-///   * this refusal was itself the FIX for a false divergence (two keys sharing a spelling
-///     used to select the wrong decode guide), so the current behaviour trades coverage for
-///     the FAIL-CLOSED direction — it loses checks, it does not produce wrong verdicts;
-///   * no committed fixture has colliding container-key renderings, so nothing in the
-///     corpus exercises it;
-///   * doing it properly needs KEY-SCOPED suppression inside `csv_container`'s refusal
-///     model, which is a design change in a module already at its size ceiling.
-///
-/// This test asserts the hole ON PURPOSE. When key-scoped refusal lands it will RED, and
-/// that is the signal to delete it — a residual that reds beats a paragraph nobody re-reads.
+/// The KEY is still suppressed and never resolved — see
+/// [`two_container_keys_that_render_alike_are_refused`] below, which is the reason
+/// the refusal exists at all — so what the decoder leaves at a key node is its
+/// stripped BODY, the same thing it leaves at every other refused node. The
+/// end-to-end verdicts (a corrupted value IS reported, a correct rendering is NOT)
+/// are in `compare::map::tests`, which drives `compare_rows`.
 #[test]
-fn a_duplicate_rendering_refusal_also_costs_the_entry_values() {
+fn a_duplicate_rendering_refusal_is_scoped_to_the_keys() {
     let ty = ty_of("frozen<map<frozen<key_part>, int>>");
     let golden = json!({
         "{\"label\": null, \"rank\": 1}": 10,
         "{\"label\": \"null\", \"rank\": 1}": 20
     });
-    // The SECOND entry's value is corrupted 20 -> 999.
-    let csv = "{{label: null, rank: 1}: 10, {label: null, rank: 1}: 999}";
-    assert!(
-        node_refusal(&golden, Some(&ty)).is_some(),
-        "premise: colliding renderings refuse the node"
+    let csv = "{{label: null, rank: 1}: 10, {label: null, rank: 1}: 20}";
+    let (reach, why) = match super::node_refusal_reach(&golden, Some(&ty), Kinding::Natural) {
+        Some(found) => found,
+        None => panic!("premise: colliding renderings are refused"),
+    };
+    assert_eq!(
+        reach,
+        Reach::MapKeys,
+        "the cause reaches the KEYS and not the body: {why}"
     );
+    // BOTH colliding keys are refused, and the vector says which by INDEX.
+    let refusals = match &ty {
+        CqlType::Map(key_ty, _) => match golden.as_object() {
+            Some(fields) => map_key_refusals(fields, key_ty),
+            None => panic!("the golden is an object"),
+        },
+        _ => panic!("the declared type is a map"),
+    };
+    assert_eq!(refusals.len(), 2, "{refusals:?}");
+    assert!(
+        refusals
+            .iter()
+            .all(|r| r.as_ref().is_some_and(|why| why.contains("SAME key text"))),
+        "both keys of a colliding PAIR are ambiguous: {refusals:?}"
+    );
+    // The node is SPLIT, so the entries and their values come back.
     let decoded = match decode(&golden, csv, &ty) {
         Ok(decoded) => decoded,
-        Err(why) => panic!("a refused node decodes to its un-split body, not an error: {why}"),
+        Err(why) => panic!("a key-scoped refusal must not fail the cell: {why}"),
     };
-    assert!(
-        decoded.is_string(),
-        "KNOWN HOLE: the whole cell comes back as raw text, so the corrupted value is never \
-         compared. If this now fails, key-scoped refusal has landed — delete this test and \
-         update the residual note on `decode_does_not_recover`."
+    assert_eq!(
+        decoded,
+        json!([
+            {"key": "label: null, rank: 1", "value": "10"},
+            {"key": "label: null, rank: 1", "value": "20"}
+        ]),
+        "each entry's VALUE is recovered; each KEY is left as the stripped body a \
+         refused node leaves: {decoded}"
     );
+}
+
+/// A key one of whose SCALAR MEMBERS carries the `, ` separator is refused at the
+/// KEY, while the map node itself recovers (issue #3815, finding 2).
+///
+/// The separator sits at bracket depth 1, so the entry split and [`entry_cut`] both
+/// survive — which is exactly why this could not be seen at the map node, and why
+/// the key used to be left as raw text for `compare::compare_map` to fail to
+/// canonicalize, reporting CORRECT egress as a divergence.
+#[test]
+fn a_separator_inside_a_scalar_member_of_a_key_is_refused_at_the_key() {
+    let ty = ty_of("frozen<map<frozen<list<text>>, int>>");
+    let golden = json!({"[\"a, b\"]": 5});
+    let (reach, why) = match super::node_refusal_reach(&golden, Some(&ty), Kinding::Natural) {
+        Some(found) => found,
+        None => panic!("the key of this map cannot be read back"),
+    };
+    assert_eq!(reach, Reach::MapKeys, "{why}");
+    // The map node's OWN split is intact — the control that makes this key-scoped
+    // rather than a body cause.
+    assert_eq!(
+        members("{[a, b]: 5}", &ty),
+        Ok(vec!["[a, b]: 5"]),
+        "the `, ` sits at depth 1, so the entry split survives"
+    );
+    assert_eq!(entry_cut("[a, b]: 5"), Ok(("[a, b]", "5")));
+    // …and a key whose member carries NO separator is not refused, so this narrows.
+    assert_eq!(
+        super::node_refusal_reach(&json!({"[\"a\", \"b\"]": 5}), Some(&ty), Kinding::Natural),
+        None
+    );
+}
+
+/// The cause INSIDE a key is asked of the key's WHOLE value tree, not just its own
+/// node — because `compare::compare_map` canonicalizes a key as ONE value (#3815).
+///
+/// A `frozen<list<frozen<list<text>>>>` key holding `[["a, b"]]` recovers at its
+/// OUTER node: that `, ` sits at depth 2, so `[[a, b]]` splits back into the one
+/// member `[a, b]`. Only the INNER node loses it. Asking the outer node alone would
+/// have missed this and the false divergence would have stood.
+#[test]
+fn a_key_refusal_is_asked_of_the_keys_whole_value_tree() {
+    let ty = ty_of("frozen<map<frozen<list<frozen<list<text>>>>, int>>");
+    let golden = json!({"[[\"a, b\"]]": 5});
+    let (reach, why) = match super::node_refusal_reach(&golden, Some(&ty), Kinding::Natural) {
+        Some(found) => found,
+        None => panic!("the key's INNER node cannot be read back"),
+    };
+    assert_eq!(reach, Reach::MapKeys, "{why}");
+    // The key's own OUTER node recovers, which is the whole point of recursing.
+    let outer = ty_of("frozen<list<frozen<list<text>>>>");
+    assert_eq!(members("[[a, b]]", &outer), Ok(vec!["[a, b]"]));
+    assert_eq!(node_refusal(&json!([["a, b"]]), Some(&outer)), None);
+}
+
+/// A BODY cause DOMINATES a key-scoped one: a node whose entries cannot be split
+/// must not be reported [`Reach::MapKeys`], because that reach PROMISES the entry
+/// boundaries are recoverable and the decoder splits on that promise (#3815).
+#[test]
+fn a_body_cause_dominates_a_key_scoped_one() {
+    // A map VALUE carrying the separator breaks the ENTRY split, and the two keys
+    // ALSO collide — so both causes are present at once.
+    let ty = ty_of("frozen<map<frozen<key_part>, text>>");
+    let golden = json!({
+        "{\"label\": null, \"rank\": 1}": "x, y",
+        "{\"label\": \"null\", \"rank\": 1}": "z"
+    });
+    let (reach, why) = match super::node_refusal_reach(&golden, Some(&ty), Kinding::Natural) {
+        Some(found) => found,
+        None => panic!("this node cannot be split at all"),
+    };
+    assert_eq!(reach, Reach::Body, "the body cause must win: {why}");
+    assert!(why.contains("entry(s)"), "{why}");
 }
 
 /// TWO DISTINCT CONTAINER KEYS THAT RENDER ALIKE make the node unrecoverable, so it

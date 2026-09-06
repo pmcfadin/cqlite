@@ -14,7 +14,8 @@
 
 use super::super::schema::CqlType;
 use super::{
-    brief, canon_typed, compare_value_at, container, pair, At, Canon, Depth, Egress, Kinding, Side,
+    brief, canon_typed, compare_value_at, container, csv_container, pair, At, Canon, Depth, Egress,
+    Kinding, Side,
 };
 use serde_json::{Map, Value};
 
@@ -157,6 +158,86 @@ pub(super) fn compare_map(
                 .map_err(|why| format!("[key {i}] {why}"))?;
             // The VALUE, compared like any other map value — this is the coverage the
             // column-scoped abort used to throw away.
+            let value_at = at.index(&format!("{i}"), Kinding::Natural);
+            compare_value_at(gv, cv, egress, value_ty, &value_at)
+                .map_err(|why| format!("[{i}] {why}"))?;
+        }
+        return Ok(());
+    }
+    // A KEY-SCOPED CSV REFUSAL — the same shape as the block above, for a cause the
+    // FLAT RENDERING has rather than the two writers (issue #3815).
+    //
+    // `csv_container::map_key_refusals` names the entries whose KEY cannot be read
+    // back from the CSV text: two golden keys that render to the SAME text, or one
+    // key whose own value tree the rendering does not recover (a `list<text>` key
+    // holding `["a, b"]` renders `[a, b]`, whose `, ` sits at bracket depth 1 — so
+    // the map node's entry split survives and only the KEY is lost).
+    //
+    // WHAT IT REPLACES, in both directions:
+    //   * a duplicate rendering used to refuse the whole MAP node, so `decode`
+    //     returned the un-split body and NOTHING inside was compared — measured, a
+    //     value corrupted 20 -> 999 was invisible. Fail-closed, but it lost checks;
+    //   * a `, ` inside a scalar member of a key refused nothing at all here: the
+    //     decoder left raw TEXT at that key, `canon_cli_key` then failed to
+    //     canonicalize a string as a container, and the `?` below propagated that as
+    //     a DIFF — CORRECT egress reported as a divergence, with nothing in the
+    //     census marking it. That one was a WRONG VERDICT, not lost coverage.
+    //
+    // A refused key is recorded at its OWN node and compared only where the refusal
+    // leaves something decidable: the bracket FRAME (already required by the
+    // decoder's `strip`, whose error it propagates) and the body's EMPTINESS. The
+    // key is never RESOLVED — two keys sharing one spelling make either reading
+    // self-consistent, so picking one would report correct egress as a divergence for
+    // whichever entry guessed wrong (#1491 finding T1). An UNREFUSED key beside a
+    // refused one is compared normally: the scoping is per KEY, not per node.
+    let key_refused: Vec<Option<String>> = match egress {
+        Egress::Csv => csv_container::map_key_refusals(golden, key_ty),
+        // JSON carries its own structure and needs no decoding, so it has no flat
+        // rendering to lose a key in.
+        Egress::Json => Vec::new(),
+    };
+    if key_refused.iter().any(Option::is_some) {
+        if golden.len() != cli.len() {
+            return Err(format!(
+                "map size golden {} vs cli {}",
+                golden.len(),
+                cli.len()
+            ));
+        }
+        for (i, ((gk, gv), entry)) in golden.iter().zip(cli.iter()).enumerate() {
+            let (ck, cv) = pair(entry, egress)?;
+            match key_refused.get(i).and_then(Option::as_ref) {
+                Some(why) => {
+                    let key_at = at.map_key(i);
+                    key_at.refuse(why);
+                    // What survives at a refused position, asked of the ONE function
+                    // that answers it for every other refused node — so a key node
+                    // is not a second notion of "what a refusal still decides".
+                    let golden_key =
+                        container::golden_map_key_value(gk, key_ty, at.map_key_spelling)?;
+                    csv_container::decidable_despite_node_refusal(&golden_key, ck)
+                        .map_err(|why| format!("[key {i}] {why}"))?;
+                }
+                None => {
+                    let (want, got) = (canon_golden_key(gk)?, canon_cli_key(ck)?);
+                    if want != got {
+                        return Err(format!(
+                            "map key at emitted position {i}: golden {} vs cli {} — a \
+                             map's entries are compared in EMITTED order, which is the \
+                             key-comparator order both the dump and a reader of the same \
+                             SSTable see (the keys of this map are not all listed here: \
+                             at least one of them is REFUSED, i.e. not canonicalizable \
+                             at all)",
+                            brief(&want.describe()),
+                            brief(&got.describe())
+                        ));
+                    }
+                }
+            }
+            // The VALUE, compared like any other map value — this is the coverage the
+            // whole-node refusal used to throw away. Keyed by POSITION rather than by
+            // the canonical key text the unrefused path uses, for the same reason the
+            // multicell block above is: a refused key has no canonical text to name.
             let value_at = at.index(&format!("{i}"), Kinding::Natural);
             compare_value_at(gv, cv, egress, value_ty, &value_at)
                 .map_err(|why| format!("[{i}] {why}"))?;

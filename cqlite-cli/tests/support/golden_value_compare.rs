@@ -265,6 +265,11 @@ impl<'s, 'p> At<'s, 'p> {
         }
     }
 
+    /// Record a refusal AT THIS position (see [`Refusals`]).
+    fn refuse(&self, why: &str) {
+        self.refusals.record(&self.path, why);
+    }
+
     /// This same position, with the gap DECLARED here made active for its subtree.
     fn under_gap(&self, divergence: gap::Divergence) -> Self {
         At {
@@ -1069,9 +1074,20 @@ fn compare_value_body(
     // bracket kind and every enclosing level keep being compared. It cannot fire
     // for JSON, which carries its own structure and needs no decoding.
     if egress == Egress::Csv {
-        if let Some(why) = csv_container::node_refusal(golden, Some(ty), at.kinding) {
-            at.refusals.record(&at.path, &why);
-            return csv_container::decidable_despite_node_refusal(golden, cli);
+        match csv_container::node_refusal_reach(golden, Some(ty), at.kinding) {
+            Some((csv_container::Reach::Body, why)) => {
+                at.refuse(&why);
+                return csv_container::decidable_despite_node_refusal(golden, cli);
+            }
+            // A MAP node whose KEYS ALONE are refused is NOT refused here (issue
+            // #3815): its entry boundaries and its emitted order ARE recoverable, so
+            // the walk continues and `map::compare_map` records the refusal at each
+            // ambiguous KEY'S OWN node — which is the granularity the cause has.
+            // Taking it here instead left only the frame and the body's emptiness,
+            // so the entry COUNT, the pair SHAPE and every VALUE went uncompared;
+            // measured, a value corrupted 20 -> 999 produced ZERO diffs. Same defect
+            // as roborev job 28's, one module over, and the same answer.
+            Some((csv_container::Reach::MapKeys, _)) | None => {}
         }
     }
     match ty {
