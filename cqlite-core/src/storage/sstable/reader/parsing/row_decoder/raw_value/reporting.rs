@@ -406,8 +406,7 @@ impl V5CompressedLegacyParser {
             // assert then re-checks.
             type_str
                 if type_str.starts_with("vector<")
-                    || type_str
-                        .starts_with("org.apache.cassandra.db.marshal.vectortype(")
+                    || type_str.starts_with("org.apache.cassandra.db.marshal.vectortype(")
                     || type_str.starts_with("vectortype(") =>
             {
                 // Parse from `raw_type_str` (ORIGINAL case), never the lowercased
