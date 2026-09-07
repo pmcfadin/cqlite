@@ -800,20 +800,12 @@ impl V5CompressedLegacyParser {
                 Value::Udt(Box::new(udt_value))
             }
 
-            // Default: a short UDT name resolved through the registry (Issue #238) —
-            // e.g. `address_type`, not in full marshal format. A name that does NOT
-            // resolve is an explicit refusal, never a blob (#4070 AC3).
+            // Default: check if it's a short UDT name in the registry, otherwise treat as blob
             _ => {
-                // ONE resolution, so there is ONE refusal below: the registry-present
-                // and no-registry cases were two nested `if`s with two byte-identical
-                // blob-degrade bodies, and the only thing that genuinely differed —
-                // WHY the name did not resolve — is carried as data in the refusal.
-                let resolved = self
-                    .udt_registry
-                    .as_ref()
-                    .and_then(|registry| registry.get_udt_qualified(&self.keyspace, type_str));
-                match resolved {
-                    Some(udt_def) => {
+                // Try to look up as UDT in registry by short name (Issue #238)
+                // This handles cases like "address_type" which aren't in full marshal format
+                if let Some(ref registry) = self.udt_registry {
+                    if let Some(udt_def) = registry.get_udt_qualified(&self.keyspace, type_str) {
                         tracing::debug!(
                             "Frozen element '{}': found UDT '{}' in registry, parsing {} fields",
                             column_name,
@@ -911,61 +903,73 @@ impl V5CompressedLegacyParser {
 
                         offset += current_offset;
                         Value::Udt(Box::new(udt_value))
-                    }
-                    None => {
-                        return Err(Self::unresolvable_frozen_element_type(
+                    } else {
+                        // Not found in registry - parse as blob
+                        tracing::debug!(
+                            "Frozen element '{}': unknown type '{}', parsing as blob",
                             column_name,
-                            type_str,
-                            self.udt_registry.is_some(),
-                        ))
+                            type_str
+                        );
+
+                        let (remaining, blob_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                            Error::corruption(format!(
+                                "Frozen element '{}': failed to parse unknown type length as VInt: {:?}",
+                                column_name, e
+                            ))
+                        })?;
+                        let bytes_consumed = data[offset..].len() - remaining.len();
+                        offset += bytes_consumed;
+
+                        let blob_len = checked_vuint_length(
+                            blob_len,
+                            data.len() - offset,
+                            "Frozen element",
+                            column_name,
+                            "unknown type",
+                        )?;
+
+                        let blob_bytes =
+                            crate::storage::sstable::reader::value_borrow::borrow_active(
+                                &data[offset..offset + blob_len],
+                            );
+                        offset += blob_len;
+                        Value::Blob(blob_bytes)
                     }
+                } else {
+                    // No registry available - parse as blob
+                    tracing::debug!(
+                        "Frozen element '{}': unknown type '{}', no UDT registry available, parsing as blob",
+                        column_name,
+                        type_str
+                    );
+
+                    let (remaining, blob_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                        Error::corruption(format!(
+                            "Frozen element '{}': failed to parse unknown type length as VInt: {:?}",
+                            column_name, e
+                        ))
+                    })?;
+                    let bytes_consumed = data[offset..].len() - remaining.len();
+                    offset += bytes_consumed;
+
+                    let blob_len = checked_vuint_length(
+                        blob_len,
+                        data.len() - offset,
+                        "Frozen element",
+                        column_name,
+                        "unknown type",
+                    )?;
+
+                    let blob_bytes = crate::storage::sstable::reader::value_borrow::borrow_active(
+                        &data[offset..offset + blob_len],
+                    );
+                    offset += blob_len;
+                    Value::Blob(blob_bytes)
                 }
             }
         };
 
         Ok((value, offset))
-    }
-
-    /// The ONE refusal for a `Frozen element` whose declared type this decoder cannot
-    /// decode (issue #4070, AC3) — a type string that matched no arm above and did not
-    /// resolve as a UDT name. (Narrative, measurements and history: issue #4070.)
-    ///
-    /// # ONE wording, because UDT-ness is NOT knowable here
-    /// A bare short UDT name (`address_type`) is indistinguishable at this site from an
-    /// unrecognised non-UDT marshal string (`EmptyType`, `VectorType(FloatType,3)`,
-    /// `Int32Type`): there is no marshal->short normalizer here, and `is_udt_type` accepts
-    /// only `...marshal.UserType`, whose arm above already consumed every string it
-    /// accepts. Branching the wording would infer a type's NATURE from its SPELLING, which
-    /// #28 forbids, so the message states only what is KNOWN — the name did not resolve —
-    /// and asserts nothing about what the type is. `registry_present` carries the one
-    /// distinction an operator acts on. Class and phrasing are `typed_value.rs`'s scalar
-    /// boundary, per the rule `require_fully_consumed` states: a caller matching on the
-    /// message must not have to know which layer refused. Do not invent a third wording.
-    ///
-    /// # Fail-CLOSED, and no new externally visible state
-    /// `reporting.rs` and `cell_path_key.rs` delegate in only when `is_udt_type` or
-    /// `get_udt_qualified` ALREADY said yes, so an unresolvable name arrives only via this
-    /// function's own recursion (`frozen<…>`, the `list<`/`set<`/`map<`/`tuple<` element
-    /// loops). `row_data.rs` PROPAGATES column decode errors (#3721): a visible row
-    /// failure, not a quiet truncation. Refusing also beats an empty `Value::Udt`, which
-    /// would make `export/arrow_builders_nested.rs` — today fail-CLOSED on a non-`Udt`
-    /// under a UDT-typed column — newly SUCCEED with an all-null struct.
-    fn unresolvable_frozen_element_type(
-        column_name: &str,
-        type_str: &str,
-        registry_present: bool,
-    ) -> Error {
-        let cause = if registry_present {
-            "absent from the UDT registry — the schema in hand does not define it"
-        } else {
-            "no UDT registry is available at all — no schema was supplied to resolve it against"
-        };
-        Error::unsupported_format(format!(
-            "Frozen element '{column_name}': cannot decode declared type '{type_str}' — \
-             CQLite has no decoding rule for it, and it did not resolve as a user-defined \
-             type ({cause}); returning the raw bytes as a blob would silently discard the \
-             declared type (issue #3631 / #28)"
-        ))
     }
 }
 

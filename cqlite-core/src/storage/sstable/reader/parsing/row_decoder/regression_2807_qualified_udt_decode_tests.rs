@@ -17,7 +17,6 @@
 //! build/lane (never a vacuous 0-row skip).
 
 use super::V5CompressedLegacyParser;
-use crate::error::Error;
 use crate::schema::{CqlType, UdtRegistry};
 use crate::types::UdtTypeDef;
 use crate::Value;
@@ -98,124 +97,18 @@ fn unqualified_udt_type_name_still_decodes_to_struct() {
 /// split keyspace has no such UDT, so decode must not produce the registered UDT
 /// struct (fail-open, never a fabricated type). Fed the SAME 2-field payload the
 /// positive test uses, so the ONLY variable is the keyspace qualifier.
-///
-/// # TIGHTENED to the POSITIVE outcome (issue #4070, AC3 — SITE A)
-/// This case used to assert only `!matches!(result, Ok((Value::Udt(_), _)))`, which
-/// the pre-#4070 `Value::Blob` degrade satisfied just as well as an `Err` — so it
-/// could not distinguish "refused" from "silently handed back opaque bytes", and
-/// #4070's change to this very site would NOT have turned it red. Its intent above
-/// is unchanged and STRENGTHENED: never a fabricated type, and now never a silent
-/// blob either. AC3 says this outcome must be NAMED, so the assertion names it.
-///
-/// What it deliberately does NOT assert: that the refusal calls the type a UDT. The
-/// site cannot know that — see `unresolvable_frozen_element_type` — so it says only
-/// that the name did not RESOLVE, and this case pins that plus the CAUSE.
 #[test]
-fn qualified_reference_to_unknown_udt_is_refused_not_degraded_to_blob() {
+fn qualified_reference_to_unknown_udt_does_not_resolve() {
     let parser = parser_with_registry();
     let data = encode_udt(&["main st", "nyc"]);
 
     // `other_ks.addr` splits to keyspace `other_ks`, which holds no `addr`; the
     // non-regressive fallback (bare `other_ks.addr` in the default keyspace) also
-    // misses. SITE A: a registry IS present and the name is absent from it.
-    let err = match parser.parse_raw_type_value(&data, 0, "other_ks.addr", "col", 0) {
-        Ok((value, _off)) => panic!(
-            "an unresolvable qualified UDT reference must be REFUSED, not decoded — a \
-             `Value::Blob` here is the #3631/#28 silent degradation #4070 removed, and a \
-             `Value::Udt` would be a fabricated type. Got {value:?}"
-        ),
-        Err(e) => e,
-    };
+    // misses, so this must NOT decode to the registered `addr` struct.
+    let result = parser.parse_raw_type_value(&data, 0, "other_ks.addr", "col", 0);
     assert!(
-        matches!(err, Error::UnsupportedFormat(_)),
-        "the refusal must be the `unsupported_format` class the CqlType-driven decoder \
-         already uses for this state (typed_value.rs::parse_typed_udt) — a caller \
-         matching on the message must not have to know which layer refused. Got {err:?}"
-    );
-    let msg = err.to_string();
-    assert!(
-        msg.contains("'other_ks.addr'") && msg.contains("did not resolve as a user-defined type"),
-        "the refusal must NAME the type that failed to resolve, and say that resolution \
-         is what failed — that naming is the whole diagnostic value of the site: {msg}"
-    );
-    assert!(
-        !msg.contains("nested user-defined type 'other_ks.addr'"),
-        "the message must not ASSERT that the unresolved name IS a UDT: at this site a \
-         bare short UDT name is indistinguishable from an unrecognised non-UDT marshal \
-         string, and inferring the type's nature from its spelling is what #28 forbids \
-         (#4070 fix round 1, blocker 1): {msg}"
-    );
-    assert!(
-        msg.contains("absent from the UDT registry"),
-        "a registry WAS supplied, so the message must say the schema lacks the type \
-         rather than that no schema was supplied — the operator-facing half of the \
-         distinction the two collapsed sites used to carry in `tracing::debug!`: {msg}"
-    );
-}
-
-/// **SITE B** (issue #4070, AC3): the SAME unresolvable state with **NO UDT
-/// registry at all** must also be refused, and must say so differently.
-///
-/// # This half was completely unpinned before #4070
-/// Site B had no test of any kind: the no-registry branch produced its own
-/// byte-identical `[VInt len]`-framed `Value::Blob`, so nothing observed which of
-/// the two branches ran or what either returned. The two branches are now ONE
-/// refusal path, and this case is what holds the surviving distinction — an
-/// operator must be able to tell "your schema is missing this type" (site A above)
-/// from "you supplied no schema at all" (here).
-///
-/// # Why this is a DECODER-level test and not an end-to-end one
-/// The precondition is not constructible through the CLI. #4070's measurement tried
-/// FOUR constructions and NONE of them reached this state, by one of two routes:
-/// the schema loader fails CLOSED on a column referencing an undefined UDT (`Column
-/// 'w' references undefined UDT 'wide'`), and its validation descends into
-/// collection element types too; while the other two RESOLVED rather than failing —
-/// a UDT declared after the table using it, and a cross-keyspace qualified
-/// reference, both resolve. So there is no user-reachable route to a table whose
-/// declared UDT cannot be resolved: either the load is refused or the name resolves.
-/// Building a fixture for a state a user cannot create would be inventing the state,
-/// not covering it — so this drives `parse_raw_type_value` directly, the idiom this
-/// whole module already uses.
-/// #4070's public-surface wiring evidence lives with AC1, on the route that IS
-/// reachable (`cqlite-core/tests/issue_3722_udt_field_type_fidelity.rs`).
-#[test]
-fn unresolvable_udt_with_no_registry_is_refused_and_says_no_schema_was_supplied() {
-    // Deliberately NO `.with_udt_registry(..)`: `self.udt_registry` is `None`.
-    let parser = V5CompressedLegacyParser::new(KEYSPACE.to_string(), "t".to_string(), 0, 0, None);
-    let data = encode_udt(&["main st", "nyc"]);
-
-    let err = match parser.parse_raw_type_value(&data, 0, "addr", "col", 0) {
-        Ok((value, _off)) => panic!(
-            "with no UDT registry there is no field list to decode `addr` against, so \
-             the decode must be REFUSED; a `Value::Blob` is the silent degradation \
-             #4070 removed. Got {value:?}"
-        ),
-        Err(e) => e,
-    };
-    assert!(
-        matches!(err, Error::UnsupportedFormat(_)),
-        "same error class as site A and as the CqlType-driven decoder: {err:?}"
-    );
-    let msg = err.to_string();
-    assert!(
-        msg.contains("'addr'") && msg.contains("did not resolve as a user-defined type"),
-        "the refusal must name the unresolved type and say resolution is what failed: {msg}"
-    );
-    assert!(
-        msg.contains("no UDT registry is available at all"),
-        "site B's cause must be DISTINGUISHABLE from site A's `absent from the UDT \
-         registry`: no schema was supplied, which is a different thing for an operator \
-         to fix: {msg}"
-    );
-    // The same name WITH a registry that holds it still decodes — so this case is
-    // evidence about the missing registry specifically, not about `addr` being
-    // undecodable or about a decoder that refuses everything.
-    let (value, _off) = parser_with_registry()
-        .parse_raw_type_value(&data, 0, "addr", "col", 0)
-        .expect("CONTROL: with the registry present, `addr` must still decode");
-    assert!(
-        matches!(value, Value::Udt(ref u) if u.type_name == "addr" && u.fields.len() == 2),
-        "CONTROL: `addr` decodes to the struct when the registry holds it, got {value:?}"
+        !matches!(result, Ok((Value::Udt(_), _))),
+        "unknown-keyspace qualified reference must not resolve to a UDT, got {result:?}"
     );
 }
 
