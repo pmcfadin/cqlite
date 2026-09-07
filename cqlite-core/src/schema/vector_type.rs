@@ -312,7 +312,57 @@ pub(crate) fn parse_vector_dimension(raw: &str, type_str: &str) -> Result<usize>
 /// `VectorType.java:94-96`:
 /// `valueLengthIfFixed = elementType.valueLengthIfFixed() * dimension`.
 pub(crate) fn vector_byte_width(element_width: usize, dimension: usize) -> Option<usize> {
+    // `dimension == 0` is REFUSED, not multiplied (issue #4114, roborev job 111).
+    // Cassandra cannot even CONSTRUCT a zero-dimension vector — `VectorType.java:89-90`
+    // throws `InvalidRequestException("vectors may only have positive dimensions")` —
+    // and an empty vector VALUE is `MarshalException("Invalid empty vector value")`
+    // (`:365-368` via `:515-517`). Without this guard `0` multiplied cleanly to a width
+    // of 0 and an EMPTY buffer then decoded as a successful `Value::List([])`: a value
+    // Cassandra says cannot exist, produced without error. `CqlType::Vector` is
+    // publicly constructible, so the string parser's own `n > 0` check is NOT
+    // sufficient — a programmatically built `Vector(Float, 0)` bypasses it entirely,
+    // which is why the guard belongs HERE, at the shared width helper every decode
+    // entry point funnels through, rather than at one caller.
+    if dimension == 0 {
+        return None;
+    }
     element_width.checked_mul(dimension)
+}
+
+/// The width Cassandra's `valueLengthIfFixed()` reports for a vector ELEMENT, or
+/// `None` when that element is variable-length in Cassandra's FRAMING.
+///
+/// Deliberately NOT `CqlType::fixed_size()` (issue #4114, roborev job 111).
+/// `fixed_size()` answers "how many bytes does one logical value occupy", which is a
+/// DIFFERENT question from "does Cassandra frame this without a length prefix", and
+/// it disagrees with the framing authority on five types: it reports `TinyInt(1)`,
+/// `SmallInt(2)`, `Date(4)`, `Time(8)` and `Inet(16)` as fixed, while
+/// `parser/repair_clustering.rs` — whose classification is derived from
+/// `valueLengthIfFixed()` and pinned by tests — treats `InetAddressType`, `TimeType`
+/// and `SimpleDateType` as VARIABLE, and its own tests assert tinyint and date
+/// clusterings are vint-prefixed. (`fixed_size()`'s `Inet` arm even concedes the point
+/// in a comment: IPv4 is 4 bytes, IPv6 is 16.)
+///
+/// That pre-existing disagreement is NOT corrected here — `fixed_size()` has no
+/// callers other than its own recursion, so re-plumbing it is a separate change with
+/// its own blast radius. What this function fixes is the vector arm's DEPENDENCE on
+/// it: a vector must not inherit a framing claim from a method that does not answer
+/// the framing question. Only element types whose Cassandra framing is KNOWN fixed
+/// are listed, so an unlisted element yields `None` (variable) rather than a guess
+/// (#28).
+pub(crate) fn cassandra_fixed_element_width(element: &crate::schema::CqlType) -> Option<usize> {
+    use crate::schema::CqlType as T;
+    match element {
+        T::Boolean => Some(1),
+        T::Int => Some(4),
+        T::Float => Some(4),
+        T::BigInt | T::Counter | T::Double | T::Timestamp => Some(8),
+        T::Uuid | T::TimeUuid => Some(16),
+        // Everything else — including TinyInt, SmallInt, Date, Time and Inet — is
+        // either variable in Cassandra's framing or not a scalar this function
+        // speaks for. `None` means "not known fixed", never "zero width".
+        _ => None,
+    }
 }
 
 fn malformed(type_str: &str, why: &str) -> Error {
@@ -527,5 +577,90 @@ mod tests {
             .expect_err("an empty element type is malformed")
             .to_string();
         assert!(err.contains("element type parameter is empty"), "{err}");
+    }
+
+    // ── roborev job 111 ────────────────────────────────────────────────────────
+
+    /// A zero dimension is REFUSED at the shared width helper, so no decode entry
+    /// point can be reached with it.
+    ///
+    /// `CqlType::Vector` is publicly constructible, so the string parser's `n > 0`
+    /// check does not cover a programmatically built `Vector(Float, 0)`. Before this
+    /// guard, `0` multiplied cleanly to width 0 and an EMPTY buffer decoded as a
+    /// successful `Value::List([])` — a value Cassandra says cannot exist
+    /// (`VectorType.java:89-90` refuses n <= 0 at construction; `:365-368` throws
+    /// `MarshalException("Invalid empty vector value")`).
+    #[test]
+    fn zero_dimension_has_no_width() {
+        assert_eq!(
+            vector_byte_width(4, 0),
+            None,
+            "a zero dimension must have NO width, not a width of 0 — a width of 0 \
+             lets an empty buffer decode as an empty vector"
+        );
+        // Any element width, same answer: the refusal is on the DIMENSION.
+        for w in [1usize, 2, 4, 8, 16] {
+            assert_eq!(vector_byte_width(w, 0), None, "element width {w}, n=0");
+        }
+        // And a positive dimension still computes.
+        assert_eq!(vector_byte_width(4, 1), Some(4));
+        assert_eq!(vector_byte_width(4, 3), Some(12));
+        assert_eq!(vector_byte_width(4, 384), Some(1536));
+        // Overflow still refused (the pre-existing checked_mul contract).
+        assert_eq!(vector_byte_width(4, usize::MAX), None);
+    }
+
+    /// The element width used for a vector's framing is Cassandra's
+    /// `valueLengthIfFixed()`, NOT `CqlType::fixed_size()`.
+    ///
+    /// `fixed_size()` reports TinyInt/SmallInt/Date/Time/Inet as fixed, while the
+    /// framing authority (`parser/repair_clustering.rs`, derived from
+    /// `valueLengthIfFixed()` and pinned by its own tests) treats
+    /// `InetAddressType`/`TimeType`/`SimpleDateType` as VARIABLE and asserts tinyint
+    /// and date clusterings are vint-prefixed. A vector must not inherit a framing
+    /// claim from a method that answers a different question.
+    #[test]
+    fn framing_width_is_not_fixed_size() {
+        use crate::schema::CqlType as T;
+
+        // KNOWN-FIXED elements, with Cassandra's widths.
+        for (ty, want) in [
+            (T::Boolean, 1usize),
+            (T::Int, 4),
+            (T::Float, 4),
+            (T::BigInt, 8),
+            (T::Counter, 8),
+            (T::Double, 8),
+            (T::Timestamp, 8),
+            (T::Uuid, 16),
+            (T::TimeUuid, 16),
+        ] {
+            assert_eq!(
+                cassandra_fixed_element_width(&ty),
+                Some(want),
+                "{ty:?} must be fixed at {want} bytes"
+            );
+        }
+
+        // THE REGRESSION: the five types `fixed_size()` gets wrong for framing.
+        // Each of these returns Some(..) from fixed_size(), so a vector arm built on
+        // that method claimed a fixed width Cassandra does not use.
+        for ty in [T::TinyInt, T::SmallInt, T::Date, T::Time, T::Inet] {
+            assert_eq!(
+                cassandra_fixed_element_width(&ty),
+                None,
+                "{ty:?} is VARIABLE in Cassandra framing and must NOT report a fixed width"
+            );
+            assert!(
+                ty.fixed_size().is_some(),
+                "{ty:?} is expected to still report a logical fixed_size() — this test \
+                 exists precisely because the two answers differ"
+            );
+        }
+
+        // Genuinely variable elements stay None.
+        for ty in [T::Text, T::Blob, T::Decimal, T::Duration, T::Varint] {
+            assert_eq!(cassandra_fixed_element_width(&ty), None, "{ty:?}");
+        }
     }
 }

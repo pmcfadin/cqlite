@@ -266,9 +266,17 @@ impl CqlType {
             // element (e.g. `vector<text, 3>`) inherits
             // `AbstractType.VARIABLE_LENGTH` and is `None` here. `checked_mul` so a
             // declared dimension can never wrap into a plausible-looking width.
-            CqlType::Vector(element, dimension) => element
-                .fixed_size()
-                .and_then(|width| super::vector_type::vector_byte_width(width, *dimension)),
+            // NOTE the element width comes from `cassandra_fixed_element_width`, NOT
+            // from `element.fixed_size()` (roborev job 111): `fixed_size()` answers a
+            // different question and reports TinyInt/SmallInt/Date/Time/Inet as fixed
+            // when Cassandra frames them variable, so deriving a vector's framing from
+            // it made e.g. `vector<tinyint, 3>` claim a fixed width Cassandra would
+            // not use. See that function's header for why the pre-existing
+            // `fixed_size()` disagreement is left alone rather than re-plumbed here.
+            CqlType::Vector(element, dimension) => {
+                super::vector_type::cassandra_fixed_element_width(element)
+                    .and_then(|width| super::vector_type::vector_byte_width(width, *dimension))
+            }
             CqlType::Custom(_) => None,
         }
     }
