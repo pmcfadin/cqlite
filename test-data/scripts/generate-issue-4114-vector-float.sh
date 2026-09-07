@@ -117,11 +117,17 @@ KEYSPACE="test_vector"
 TABLE_PK="vector_pk_only"
 TABLE_CK="vector_clustered"
 TABLE_LAST="vector_last"
+TABLE_EXACT="vector_exact"
 
 # vector_last's first elements are chosen for their LEADING BIG-ENDIAN BYTE, not
 # for their magnitude — see the schema's vector_last block and build_inserts()
 # below. 2^-111 encodes as exactly 0x08000000 (exponent field 127-111 == 16).
 V_LAST_SMALL_EXP="-111"
+
+# vector_exact defeats the row-body ACCOUNTING guard instead of the bounds
+# check: the misreader consumes `1 + len`, so a 12-byte vector balances exactly
+# when len == 11, i.e. leading byte 0x0b. 2^-105 encodes as exactly 0x0b000000.
+V_EXACT_SMALL_EXP="-105"
 
 SCHEMA_FILE="$ROOT/schemas/issue-4114-vector-float.cql"
 
@@ -285,9 +291,11 @@ flush_ks() {
 build_inserts() {
   local out="$1"
   python3 - "$out" "$T_FIXED" "$TABLE_PK" "$TABLE_CK" "$V384_STEP" \
-           "$TABLE_LAST" "$V_LAST_SMALL_EXP" <<'PY'
+           "$TABLE_LAST" "$V_LAST_SMALL_EXP" \
+           "$TABLE_EXACT" "$V_EXACT_SMALL_EXP" <<'PY'
 import struct, sys
-out, tfixed, table_pk, table_ck, step, table_last, small_exp = sys.argv[1:8]
+(out, tfixed, table_pk, table_ck, step, table_last, small_exp,
+ table_exact, exact_exp) = sys.argv[1:10]
 step = float(step)
 n = 384
 
@@ -365,11 +373,32 @@ lines.append(
     % (table_last, repr(small), tfixed)
 )
 lines.append("")
+
+# ---- vector_exact: the EXACT-CONSUMPTION (fully silent) subject -------------
+# 2^-105 -> 0b 00 00 00 -> bogus vint 0x0b = 11 -> the misreader consumes
+# 1 + 11 == 12 == the full vector width, so the row-body accounting balances and
+# nothing fails closed. Asserted, not assumed: the whole table is vacuous if the
+# leading byte is not 0x0b, and vacuous in the OPPOSITE direction (it would just
+# fail closed like vector_last) rather than loudly.
+exact = 2.0 ** int(exact_exp)
+exact_packed = struct.pack(">f", float(repr(exact)))
+if exact_packed != b"\x0b\x00\x00\x00":
+    print("[i4114][ERROR] 2^%s must encode as 0b000000, got %s"
+          % (exact_exp, exact_packed.hex()), file=sys.stderr)
+    sys.exit(1)
+
+for pid, tail in ((1, "1.0, 2.0"), (2, "4.5, -5.0")):
+    lines.append(
+        "INSERT INTO %s (id, v3) VALUES (%d, [%s, %s]) USING TIMESTAMP %s;"
+        % (table_exact, pid, repr(exact), tail, tfixed)
+    )
+lines.append("")
 with open(out, "w") as fh:
     fh.write("\n".join(lines) + "\n")
 print("[i4114]   built %d INSERT statements (v384 dim=%d, step=%g); "
-      "vector_last v3[0] literals 0.0 -> 00000000 and %s -> %s"
-      % (7, n, step, repr(small), packed.hex()))
+      "vector_last v3[0] literals 0.0 -> 00000000 and %s -> %s; "
+      "vector_exact v3[0] literal %s -> %s"
+      % (9, n, step, repr(small), packed.hex(), repr(exact), exact_packed.hex()))
 PY
 }
 
@@ -506,7 +535,7 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   # ONE flush => exactly one Data.db PER TABLE. More than one means the inserts
   # did not land in a single memtable flush and the fixture is not the
   # single-SSTable subject the tests assume.
-  for t in "$TABLE_PK" "$TABLE_CK" "$TABLE_LAST"; do
+  for t in "$TABLE_PK" "$TABLE_CK" "$TABLE_LAST" "$TABLE_EXACT"; do
     tdirs=( "$OUT_DIR/$KEYSPACE/$t"* )
     if [[ ! -d "${tdirs[0]}" ]]; then
       fail "$t: no table directory matched under $OUT_DIR/$KEYSPACE/ \
@@ -562,13 +591,16 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   # ==========================================================================
   log "Verifying the goldens actually carry the inserted vector values..."
   python3 - "$OUT_DIR/$KEYSPACE" "$TABLE_PK" "$TABLE_CK" "$V384_STEP" \
-           "$TABLE_LAST" "$V_LAST_SMALL_EXP" <<'PY' || fail "golden verification FAILED (see above)"
+           "$TABLE_LAST" "$V_LAST_SMALL_EXP" \
+           "$TABLE_EXACT" "$V_EXACT_SMALL_EXP" <<'PY' || fail "golden verification FAILED (see above)"
 import glob, json, os, struct, sys
 
-ks_dir, table_pk, table_ck, step, table_last, small_exp = sys.argv[1:7]
+(ks_dir, table_pk, table_ck, step, table_last, small_exp,
+ table_exact, exact_exp) = sys.argv[1:9]
 step = float(step)
 N = 384
-V_LAST_SMALL = float(repr(2.0 ** int(small_exp)))
+V_LAST_SMALL  = float(repr(2.0 ** int(small_exp)))
+V_EXACT_SMALL = float(repr(2.0 ** int(exact_exp)))
 
 def load(table):
     hits = glob.glob(os.path.join(ks_dir, table + "-*", "*-Data.db.jsonl"))
@@ -706,21 +738,85 @@ for pid, want_v3, want_lead in ((1, [0.0, 1.0, 2.0], 0x00),
         errors.append("%s id=%d: v3 expected a 3-element list, golden has %r"
                       % (table_last, pid, got))
         continue
-    got_f = [float(x) for x in got]
-    if got_f != want_v3:
-        errors.append("%s id=%d: v3 expected %r, golden has %r"
-                      % (table_last, pid, want_v3, got_f))
+    # COMPARE IN BINARY32 SPACE, NOT AS DOUBLES. sstabledump renders a float
+    # with Java's Float.toString, i.e. the shortest decimal that round-trips
+    # through a FLOAT ("3.85186E-34"), which is NOT the shortest decimal that
+    # round-trips through a DOUBLE ("3.851859888774472e-34"). Read as doubles
+    # those two differ, so a `==` on floats would fail on a golden that is
+    # perfectly correct. Re-encoding both sides to big-endian binary32 compares
+    # exactly the bytes on disk, and re-uses the encoding the leading-byte
+    # assertion below already depends on.
+    got_be = [struct.pack(">f", float(x)) for x in got]
+    want_be = [struct.pack(">f", v) for v in want_v3]
+    if got_be != want_be:
+        errors.append("%s id=%d: v3 expected binary32 %s, golden has %s (%r)"
+                      % (table_last, pid,
+                         " ".join(b.hex() for b in want_be),
+                         " ".join(b.hex() for b in got_be), got))
         continue
-    lead = struct.pack(">f", got_f[0])[0]
+    lead = got_be[0][0]
     if lead != want_lead:
         errors.append("%s id=%d: v3[0]=%r must encode with leading byte 0x%02x, got 0x%02x"
-                      % (table_last, pid, got_f[0], want_lead, lead))
+                      % (table_last, pid, got[0], want_lead, lead))
     # vector_last must have NO other regular column: a column after the vector
     # would restore the desync escape hatch this table exists to remove.
     extra = sorted(k for k in seen_last[pid] if k != "v3")
     if extra:
         errors.append("%s id=%d: expected v3 as the ONLY cell, golden also has %r"
                       % (table_last, pid, extra))
+
+# ---- vector_exact ---------------------------------------------------------
+# Same binary32-space comparison and leading-byte assertion as vector_last, but
+# the required leading byte is 0x0b (the EXACT-consumption value) and it is
+# required on EVERY row: one fail-closed row aborts the scan and hides the rest.
+path_exact, parts_exact = load(table_exact)
+seen_exact = {}
+for part in parts_exact:
+    key = part.get("partition", {}).get("key")
+    pid = int(key[0]) if isinstance(key, list) and key else None
+    for row, m in cells(part):
+        seen_exact[pid] = m
+
+for pid, want_v3 in ((1, [V_EXACT_SMALL, 1.0, 2.0]),
+                     (2, [V_EXACT_SMALL, 4.5, -5.0])):
+    if pid not in seen_exact:
+        errors.append("%s: partition id=%d absent from golden" % (table_exact, pid))
+        continue
+    got = seen_exact[pid].get("v3")
+    if not isinstance(got, list) or len(got) != 3:
+        errors.append("%s id=%d: v3 expected a 3-element list, golden has %r"
+                      % (table_exact, pid, got))
+        continue
+    got_be = [struct.pack(">f", float(x)) for x in got]
+    want_be = [struct.pack(">f", v) for v in want_v3]
+    if got_be != want_be:
+        errors.append("%s id=%d: v3 expected binary32 %s, golden has %s (%r)"
+                      % (table_exact, pid,
+                         " ".join(b.hex() for b in want_be),
+                         " ".join(b.hex() for b in got_be), got))
+        continue
+    if got_be[0][0] != 0x0b:
+        errors.append("%s id=%d: v3[0]=%r must encode with leading byte 0x0b "
+                      "(the exact-consumption length), got 0x%02x"
+                      % (table_exact, pid, got[0], got_be[0][0]))
+    extra = sorted(k for k in seen_exact[pid] if k != "v3")
+    if extra:
+        errors.append("%s id=%d: expected v3 as the ONLY cell, golden also has %r"
+                      % (table_exact, pid, extra))
+
+# The two rows must differ in the bytes the MIS-DECODE hands back, otherwise the
+# fixture cannot distinguish a data-derived wrong value from a constant.
+if 1 in seen_exact and 2 in seen_exact:
+    def misread(m):
+        v = m.get("v3")
+        if not isinstance(v, list) or len(v) != 3:
+            return None
+        pay = b"".join(struct.pack(">f", float(x)) for x in v)
+        return pay[1:1 + pay[0]]
+    b1, b2 = misread(seen_exact[1]), misread(seen_exact[2])
+    if b1 is None or b2 is None or b1 == b2 or len(b1) != 11 or len(b2) != 11:
+        errors.append("%s: the two rows must yield DISTINCT 11-byte mis-read "
+                      "blobs; got %r and %r" % (table_exact, b1, b2))
 
 if errors:
     print("[i4114][ERROR] the goldens do NOT carry the subject of issue #4114:", file=sys.stderr)
@@ -734,9 +830,13 @@ print("[i4114]   %s: id=2 both vector columns have NO live value, sentinels live
 print("[i4114]   %s: ck=10 and ck=20 v3 exact, sentinels live (OK)" % table_ck)
 print("[i4114]   %s: id=1 v3=[0,1,2] (lead 0x00) and id=2 v3[0]=%r (lead 0x08), "
       "v3 the only cell (OK)" % (table_last, V_LAST_SMALL))
+print("[i4114]   %s: id=1/id=2 v3[0]=%r (lead 0x0b, exact consumption), "
+      "distinct 11-byte mis-read blobs, v3 the only cell (OK)"
+      % (table_exact, V_EXACT_SMALL))
 print("[i4114]   goldens: %s" % os.path.basename(path_pk))
 print("[i4114]            %s" % os.path.basename(path_ck))
 print("[i4114]            %s" % os.path.basename(path_last))
+print("[i4114]            %s" % os.path.basename(path_exact))
 PY
 
   log "=== $KEYSPACE generation COMPLETE ==="
