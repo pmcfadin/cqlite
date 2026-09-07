@@ -211,6 +211,18 @@ if ! {
     "the one-site self-check fixture could not be written to $_tmp/selfcheck.sh, so the matcher cannot be proved to FIRE — and an unproved matcher's zero is not a measurement" \
     "check TMPDIR=${TMPDIR:-/tmp} for space and permissions"
 fi
+# A BRACE GROUP'S STATUS IS ITS LAST COMMAND'S, so a `printf` that failed EARLIER in the group
+# above would leave a TRUNCATED fixture and still report success. Recount it: exactly the two
+# records written must be there. (Losing the site line would trip `matcher-inert` below, but that
+# would name a plausible and WRONG cause — an inert matcher rather than a short write.)
+if ! _fx_records=$(awk 'END { print NR + 0 }' "$_tmp/selfcheck.sh" 2>"$_tmp/selfcheck.fx.err"); then
+  refuse "selfcheck-write-failed" \
+    "the self-check fixture $_tmp/selfcheck.sh could not be counted, so it is UNKNOWN whether the matcher was given the one-site fixture at all: $(tr '\n' ' ' <"$_tmp/selfcheck.fx.err")" \
+    "check that awk works on this host and that TMPDIR=${TMPDIR:-/tmp} has space"
+fi
+[ "$_fx_records" = 2 ] || refuse "selfcheck-write-failed" \
+  "the one-site self-check fixture holds $_fx_records line(s) rather than the 2 written, so the write was TRUNCATED and the matcher would be proved against the wrong material" \
+  "check TMPDIR=${TMPDIR:-/tmp} for free space and permissions, then re-run"
 # THE MATCHER'S OWN STATUS, not just its output: a matcher that FAILS here emits nothing, and
 # nothing would otherwise be read as "inert" — a plausible but WRONG cause. Both states refuse;
 # they are told apart so the remedy is right.
@@ -261,11 +273,34 @@ while IFS= read -r -d '' f; do
   [ -r "$f" ] || refuse "unreadable-subject" \
     "$f is tracked but not readable, so its site count is UNKNOWN, not zero" \
     "restore file permissions, or remove the file from the index"
-  printf '%s\n' "$f" >>"$_tmp/subjects"
+  # THE APPEND'S OWN STATUS (roborev job 140). It was ignored while N_SUBJECTS was incremented
+  # regardless, so a failed write dropped a subject from the list the CENSUS reads while the
+  # counter — and therefore the non-vacuity floor — still counted it: that file was never scanned
+  # and a new site in it would have read as NO-INCREASE.
+  printf '%s\n' "$f" >>"$_tmp/subjects" || refuse "subject-write-failed" \
+    "$f could not be appended to the subject list $_tmp/subjects, so that file would never be scanned while the enumerated count still counted it" \
+    "check TMPDIR=${TMPDIR:-/tmp} for free space and permissions, then re-run"
   N_SUBJECTS=$((N_SUBJECTS + 1))
 done <"$_tmp/subjects.z"
 printf 'SIGPIPE-SITES: subjects ENUMERATED %d git-tracked scripts/**/*.sh file(s) (floor %d)\n' \
   "$N_SUBJECTS" "$SUBJECT_FLOOR"
+# THE END-TO-END ENUMERATION INVARIANT — and the reason it is not merely the per-append check
+# above (roborev job 140). A COUNTER AND THE FILE IT DESCRIBES CAN DISAGREE, AND NO FLOOR CAN
+# TELL: the floor reads N_SUBJECTS, the census reads the FILE. Any record lost between them — a
+# failed append, a short or partial write, ENOSPC, a truncation or a concurrent clobber AFTER the
+# loop, i.e. causes nobody enumerated — silently shrinks the SCANNED set while every later line
+# still claims the ENUMERATED one. The dropped files are then never scanned, an unscanned file is
+# indistinguishable from a clean one, and a new site in it ships as NO-INCREASE. A per-append
+# check can only catch the causes it was written for; RECOUNTING THE FINISHED LIST catches every
+# cause, so it is done here, before the census reads a single record.
+if ! _subj_records=$(awk 'END { print NR + 0 }' "$_tmp/subjects" 2>"$_tmp/subjcnt.err"); then
+  refuse "subject-count-failed" \
+    "the subject list $_tmp/subjects could not be counted, so the set the census is about to scan is UNKNOWN rather than complete: $(tr '\n' ' ' <"$_tmp/subjcnt.err")" \
+    "check that awk works on this host and that TMPDIR=${TMPDIR:-/tmp} has space"
+fi
+[ "$_subj_records" = "$N_SUBJECTS" ] || refuse "subject-list-truncated" \
+  "the subject list holds $_subj_records record(s) but $N_SUBJECTS subject(s) were enumerated, so the census would scan FEWER files than this verdict claims — and an unscanned file reads CLEAN, so a new site in one of them would ship as NO-INCREASE" \
+  "check TMPDIR=${TMPDIR:-/tmp} for free space, then re-run: the recorded list and the enumerated count must be EQUAL"
 [ "$N_SUBJECTS" -ge "$SUBJECT_FLOOR" ] || refuse "subject-floor" \
   "only $N_SUBJECTS subject(s) enumerated, floor is $SUBJECT_FLOOR — a clean verdict over this set would measure nothing" \
   "check that the git index is populated and the pathspecs still match; lower the floor only with a stated reason"
@@ -311,7 +346,12 @@ while IFS= read -r f; do
     [[ "$h" =~ $HASH_RE ]] || refuse "digest-failed" \
       "\`$DIGEST_CMD\` produced '$h' rather than a 64-character hex digest for $f, so that file's matched-line SET is UNKNOWN — and an unknown set must never read as an unchanged one" \
       "check that $DIGEST_CMD works on this host; an unmeasured comparison is never a pass"
-    printf '%s %s %s\n' "$f" "$n" "$h" >>"$_tmp/now"
+    # Statused for the same reason as the subject-list append (roborev job 140): a lost census
+    # record makes a measured file look ABSENT, and an absent file compares as IMPROVED — a
+    # NON-FAILING observation. The end-to-end recount below catches every other cause of loss.
+    printf '%s %s %s\n' "$f" "$n" "$h" >>"$_tmp/now" || refuse "census-write-failed" \
+      "the census record for $f could not be appended to $_tmp/now, and a file missing from the census compares as IMPROVED rather than failing" \
+      "check TMPDIR=${TMPDIR:-/tmp} for free space and permissions, then re-run"
     CUR_FILES=$((CUR_FILES + 1))
     CUR_SITES=$((CUR_SITES + n))
   fi
@@ -390,8 +430,15 @@ if [ "$MODE" = regenerate ]; then
   [ "$_wrote" = "$CUR_FILES" ] || refuse "baseline-write-failed" \
     "the regenerated baseline holds $_wrote record(s) for $CUR_FILES measured file(s), so the write was TRUNCATED — and a short baseline is read as the truth by the next run" \
     "check free space and permissions on scripts/ci/, then re-run $REGEN_CMD"
-  printf 'SIGPIPE-SITES: REGENERATED %s (%d file(s), %d match(es))\n' "$BASELINE" "$CUR_FILES" "$CUR_SITES"
-  printf 'SIGPIPE-SITES: verdict REGENERATED\n'
+  # THE VERDICT'S OWN EMISSION IS STATUSED TOO (see the pass path at the end of this file): a
+  # caller reads the verdict LINE, and `exit 0` with nothing on stdout is silence read as success.
+  if ! printf 'SIGPIPE-SITES: REGENERATED %s (%d file(s), %d match(es))\n' "$BASELINE" "$CUR_FILES" "$CUR_SITES" \
+     || ! printf 'SIGPIPE-SITES: verdict REGENERATED\n'; then
+    printf 'SIGPIPE-SITES: REFUSING (reason: verdict-unemitted): the REGENERATED verdict could not be written to stdout, so a caller would see a success status with no verdict\n' >&2
+    printf 'SIGPIPE-SITES: REMEDY: re-run with a writable stdout (check the log destination and free space); the baseline itself was already re-counted and is intact\n' >&2
+    printf 'SIGPIPE-SITES: verdict REFUSED\n' >&2
+    exit 3
+  fi
   exit 0
 fi
 
@@ -455,11 +502,41 @@ while IFS= read -r bline || [ -n "$bline" ]; do
         "the duplicate-path probe for $bpath exited $_dup_rc, which is neither found nor not-found, so duplicate paths are UNDETECTED rather than absent: $(tr '\n' ' ' <"$_tmp/dup.err")" \
         "check that grep works on this host; an unmeasured baseline is never a pass" ;;
   esac
-  printf '%s\n' "$bpath" >>"$_tmp/basepaths"
-  printf '%s %s %s\n' "$bpath" "$bcount" "$bhash" >>"$_tmp/base"
+  # BOTH APPENDS ARE STATUSED, AND FOR TWO DIFFERENT FALSE-CLEAN ROUTES (roborev job 140, the
+  # same class as the subject list). A lost `basepaths` record makes a DUPLICATE path undetected
+  # rather than absent; a lost `base` record drops a TOLERATED file from the comparison, and while
+  # that direction currently reds (the census entry then reads as FAIL-NEW), no verdict may depend
+  # on a write nobody checked.
+  printf '%s\n' "$bpath" >>"$_tmp/basepaths" || refuse "baseline-read-failed" \
+    "$bpath could not be appended to the duplicate-detection set $_tmp/basepaths, so duplicate baseline paths would be UNDETECTED rather than absent" \
+    "check TMPDIR=${TMPDIR:-/tmp} for free space and permissions, then re-run"
+  printf '%s %s %s\n' "$bpath" "$bcount" "$bhash" >>"$_tmp/base" || refuse "baseline-read-failed" \
+    "the baseline entry for $bpath could not be appended to $_tmp/base, so the comparison would not see the count and digest this baseline records" \
+    "check TMPDIR=${TMPDIR:-/tmp} for free space and permissions, then re-run"
   B_ENTRIES=$((B_ENTRIES + 1))
   B_SITES=$((B_SITES + bcount))
 done <"$BASELINE"
+# THE SAME END-TO-END INVARIANT AS THE ENUMERATION, for the same reason: B_ENTRIES is an in-shell
+# counter and the comparison reads the FILE, so the two can disagree and the entry FLOOR — which
+# reads the counter — cannot tell. A record lost here removes a TOLERATED site from the reference
+# set the census is compared against, which is a verdict change made by a write nobody measured.
+# Recounting the finished file catches any cause, enumerated or not.
+if ! _base_records=$(awk 'END { print NR + 0 }' "$_tmp/base" 2>"$_tmp/basecnt.err"); then
+  refuse "baseline-read-failed" \
+    "the parsed baseline set $_tmp/base could not be counted, so the reference the census is compared against is UNKNOWN: $(tr '\n' ' ' <"$_tmp/basecnt.err")" \
+    "check that awk works on this host and that TMPDIR=${TMPDIR:-/tmp} has space"
+fi
+[ "$_base_records" = "$B_ENTRIES" ] || refuse "baseline-set-truncated" \
+  "the parsed baseline set holds $_base_records record(s) but $B_ENTRIES entr(y/ies) were read from $BASELINE, so the comparison would use a SHORTER reference set than the one just validated" \
+  "check TMPDIR=${TMPDIR:-/tmp} for free space, then re-run: the recorded set and the parsed count must be EQUAL"
+if ! _bp_records=$(awk 'END { print NR + 0 }' "$_tmp/basepaths" 2>"$_tmp/bpcnt.err"); then
+  refuse "baseline-read-failed" \
+    "the duplicate-detection set $_tmp/basepaths could not be counted, so duplicate baseline paths are UNDETECTED rather than absent: $(tr '\n' ' ' <"$_tmp/bpcnt.err")" \
+    "check that awk works on this host and that TMPDIR=${TMPDIR:-/tmp} has space"
+fi
+[ "$_bp_records" = "$B_ENTRIES" ] || refuse "baseline-set-truncated" \
+  "the duplicate-detection set holds $_bp_records record(s) for $B_ENTRIES parsed entr(y/ies), so a duplicate path could have been missed rather than shown absent" \
+  "check TMPDIR=${TMPDIR:-/tmp} for free space, then re-run: the recorded set and the parsed count must be EQUAL"
 
 printf 'SIGPIPE-SITES: baseline PARSED %d entr%s, %d recorded match(es) (floor %d entries)\n' \
   "$B_ENTRIES" "$([ "$B_ENTRIES" -eq 1 ] && printf 'y' || printf 'ies')" "$B_SITES" "$BASELINE_ENTRY_FLOOR"
@@ -748,7 +825,19 @@ if [ "$FAILING" -gt 0 ] || [ -s "$_tmp/msg.fail" ]; then
   exit 1
 fi
 
-printf 'SIGPIPE-SITES: 0 INCREASE RECOGNISED across %d subject(s) vs %d baseline entr%s\n' \
-  "$N_SUBJECTS" "$B_ENTRIES" "$([ "$B_ENTRIES" -eq 1 ] && printf 'y' || printf 'ies')"
-printf 'SIGPIPE-SITES: verdict NO-INCREASE\n'
+# THE LAST MEMBER OF THE CLASS: THE VERDICT'S OWN EMISSION. Everything above makes an unmeasured
+# state refuse rather than read clean; this makes an UNDELIVERED clean verdict refuse too. A
+# caller keys on the verdict LINE, so a run whose stdout was closed, full or broken would exit 0
+# having printed nothing at all — silence read as a pass, the class's own shape at the output
+# boundary. It is checked HERE and not on the INCREASE path because that path exits 1: a lost
+# diagnostic there is still a failure, while a lost verdict here would be a false clean. The
+# refusal goes to STDERR, since stdout is exactly what has just been shown to be unusable.
+if ! printf 'SIGPIPE-SITES: 0 INCREASE RECOGNISED across %d subject(s) vs %d baseline entr%s\n' \
+     "$N_SUBJECTS" "$B_ENTRIES" "$([ "$B_ENTRIES" -eq 1 ] && printf 'y' || printf 'ies')" \
+   || ! printf 'SIGPIPE-SITES: verdict NO-INCREASE\n'; then
+  printf 'SIGPIPE-SITES: REFUSING (reason: verdict-unemitted): the NO-INCREASE verdict could not be written to stdout, so a caller would see a zero exit status with no verdict — and silence must never be read as a pass\n' >&2
+  printf 'SIGPIPE-SITES: REMEDY: re-run with a writable stdout (check the log destination and free space)\n' >&2
+  printf 'SIGPIPE-SITES: verdict REFUSED\n' >&2
+  exit 3
+fi
 exit 0
