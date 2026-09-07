@@ -36,6 +36,18 @@ pub(crate) enum CellPathComponent {
 impl CellPathComponent {
     /// The two declared-type spellings this component is resolvable from, for a
     /// diagnostic — the message tells the caller exactly what would have worked.
+    ///
+    /// Gated to match its callers, NOT `allow(dead_code)`. Its only caller is
+    /// `writer::data_writer::cell_path`, and `pub mod writer`
+    /// (`storage/sstable/mod.rs`) is itself `#[cfg(feature = "write-support")]`.
+    /// `write-support` is a DEFAULT feature, so it survives every ordinary build
+    /// and vanishes only under `--no-default-features` — which is exactly the
+    /// gate's `feature-iso-parquet` lane
+    /// (`--no-default-features --features all-compression,parquet`), where the
+    /// sole caller disappears and this becomes dead code under `-D warnings`.
+    /// An `allow(dead_code)` would silence the signal instead of expressing the
+    /// invariant: this diagnostic exists only where something can write.
+    #[cfg(feature = "write-support")]
     pub(crate) fn declared_shapes(self) -> &'static str {
         match self {
             CellPathComponent::MapKey => {
