@@ -106,6 +106,10 @@ fn unqualified_udt_type_name_still_decodes_to_struct() {
 /// #4070's change to this very site would NOT have turned it red. Its intent above
 /// is unchanged and STRENGTHENED: never a fabricated type, and now never a silent
 /// blob either. AC3 says this outcome must be NAMED, so the assertion names it.
+///
+/// What it deliberately does NOT assert: that the refusal calls the type a UDT. The
+/// site cannot know that — see `unresolvable_frozen_element_type` — so it says only
+/// that the name did not RESOLVE, and this case pins that plus the CAUSE.
 #[test]
 fn qualified_reference_to_unknown_udt_is_refused_not_degraded_to_blob() {
     let parser = parser_with_registry();
@@ -130,9 +134,16 @@ fn qualified_reference_to_unknown_udt_is_refused_not_degraded_to_blob() {
     );
     let msg = err.to_string();
     assert!(
-        msg.contains("'other_ks.addr'") && msg.contains("field list is not available"),
-        "the refusal must NAME the type that failed to resolve — that naming is the \
-         whole diagnostic value of the site: {msg}"
+        msg.contains("'other_ks.addr'") && msg.contains("did not resolve as a user-defined type"),
+        "the refusal must NAME the type that failed to resolve, and say that resolution \
+         is what failed — that naming is the whole diagnostic value of the site: {msg}"
+    );
+    assert!(
+        !msg.contains("nested user-defined type 'other_ks.addr'"),
+        "the message must not ASSERT that the unresolved name IS a UDT: at this site a \
+         bare short UDT name is indistinguishable from an unrecognised non-UDT marshal \
+         string, and inferring the type's nature from its spelling is what #28 forbids \
+         (#4070 fix round 1, blocker 1): {msg}"
     );
     assert!(
         msg.contains("absent from the UDT registry"),
@@ -187,8 +198,8 @@ fn unresolvable_udt_with_no_registry_is_refused_and_says_no_schema_was_supplied(
     );
     let msg = err.to_string();
     assert!(
-        msg.contains("'addr'") && msg.contains("field list is not available"),
-        "the refusal must name the unresolved type: {msg}"
+        msg.contains("'addr'") && msg.contains("did not resolve as a user-defined type"),
+        "the refusal must name the unresolved type and say resolution is what failed: {msg}"
     );
     assert!(
         msg.contains("no UDT registry is available at all"),

@@ -926,34 +926,30 @@ impl V5CompressedLegacyParser {
         Ok((value, offset))
     }
 
-    /// The ONE refusal for a `Frozen element` whose declared type names a
-    /// user-defined type that cannot be resolved to a field list (issue #4070, AC3).
+    /// The ONE refusal for a `Frozen element` whose declared type this decoder cannot
+    /// decode (issue #4070, AC3) — a type string that matched no arm above and did not
+    /// resolve as a UDT name. (Narrative, measurements and history: issue #4070.)
     ///
-    /// # Convergence on shipped behaviour, not a new invention
-    /// `typed_value.rs`'s `parse_typed_udt` ALREADY refuses exactly this state with
-    /// this error class: a UDT name absent from the registry and carrying no inline
-    /// field list cannot be interpreted, and handing its bytes back as a blob would
-    /// silently discard the declared type (#3631 criterion 5 / #28 no-heuristics —
-    /// and empty-`Udt`-vs-`Blob` is user-visible in both bindings, changing
-    /// hashability in Python, the #3500 class, and the Arrow/Trino column type).
-    /// This site is the type-STRING decoder's copy of that state, degrading to a
-    /// `[VInt len]`-framed `Value::Blob`; refusing brings the two decoders to ONE
-    /// outcome rather than picking a new one. The wording is deliberately the same
-    /// class and phrasing, per the rule `require_fully_consumed` already states: a
-    /// caller matching on the message must not have to know which layer refused.
-    /// Do not invent a third wording here.
+    /// # ONE wording, because UDT-ness is NOT knowable here
+    /// A bare short UDT name (`address_type`) is indistinguishable at this site from an
+    /// unrecognised non-UDT marshal string (`EmptyType`, `VectorType(FloatType,3)`,
+    /// `Int32Type`): there is no marshal->short normalizer here, and `is_udt_type` accepts
+    /// only `...marshal.UserType`, whose arm above already consumed every string it
+    /// accepts. Branching the wording would infer a type's NATURE from its SPELLING, which
+    /// #28 forbids, so the message states only what is KNOWN — the name did not resolve —
+    /// and asserts nothing about what the type is. `registry_present` carries the one
+    /// distinction an operator acts on. Class and phrasing are `typed_value.rs`'s scalar
+    /// boundary, per the rule `require_fully_consumed` states: a caller matching on the
+    /// message must not have to know which layer refused. Do not invent a third wording.
     ///
-    /// # Why the reachable path's outcome does not change
-    /// The bodies this replaces read a `[VInt len]` prefix off `[i32 BE len]`-framed
-    /// UDT bytes, which since #3811 yields a SHORT consumption and so a REFUSED row
-    /// on the `raw_value/reporting.rs` route — already a refusal, just an
-    /// unattributed one blamed on a length that was never a length. Measured over 147
-    /// `*-Data.db` (144 corpus + 3 committed UDT fixtures), registry-absent AND
-    /// -present, neither site fired once while their containing arms ran 303 times.
-    ///
-    /// `registry_present` keeps the distinction the two replaced `tracing::debug!`
-    /// lines carried, as DATA: an operator needs "your schema is missing this type"
-    /// told apart from "you supplied no schema".
+    /// # Fail-CLOSED, and no new externally visible state
+    /// `reporting.rs` and `cell_path_key.rs` delegate in only when `is_udt_type` or
+    /// `get_udt_qualified` ALREADY said yes, so an unresolvable name arrives only via this
+    /// function's own recursion (`frozen<…>`, the `list<`/`set<`/`map<`/`tuple<` element
+    /// loops). `row_data.rs` PROPAGATES column decode errors (#3721): a visible row
+    /// failure, not a quiet truncation. Refusing also beats an empty `Value::Udt`, which
+    /// would make `export/arrow_builders_nested.rs` — today fail-CLOSED on a non-`Udt`
+    /// under a UDT-typed column — newly SUCCEED with an all-null struct.
     fn unresolvable_frozen_element_type(
         column_name: &str,
         type_str: &str,
@@ -965,10 +961,10 @@ impl V5CompressedLegacyParser {
             "no UDT registry is available at all — no schema was supplied to resolve it against"
         };
         Error::unsupported_format(format!(
-            "Frozen element '{column_name}': nested user-defined type '{type_str}' is \
-             declared but its field list is not available ({cause}), so its bytes cannot \
-             be decoded; returning them as a blob would silently discard the declared \
-             type (issue #3631 / #28, refusal converged by #4070)"
+            "Frozen element '{column_name}': cannot decode declared type '{type_str}' — \
+             CQLite has no decoding rule for it, and it did not resolve as a user-defined \
+             type ({cause}); returning the raw bytes as a blob would silently discard the \
+             declared type (issue #3631 / #28)"
         ))
     }
 }
