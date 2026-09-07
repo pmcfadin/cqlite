@@ -22,6 +22,11 @@ use super::schema_refusal::HeaderSchemaError;
 use super::SerializationHeaderResult;
 use sequential::{parse_serialization_header_at_offset, parse_serialization_header_sequential};
 
+/// `(partition_key_types, regular_columns)` — what the backtracking column
+/// scanner recovers when no partition-key/clustering section could be located.
+/// Named so its `Result` stays inside clippy's `type_complexity` budget.
+type RegularColumns = (Vec<String>, Vec<ColumnInfo>);
+
 /// Parse SerializationHeader from Statistics.db (Issue #163)
 ///
 /// This function locates and parses the complete SerializationHeader section including:
@@ -299,9 +304,7 @@ fn extract_partition_key_before_marker(input: &[u8], marker_offset: usize) -> Op
 ///
 /// Returns: (partition_key_types, regular_columns)
 /// Partition key types are extracted via backtracking when found before the column section marker.
-fn parse_regular_columns(
-    input: &[u8],
-) -> Result<(&[u8], (Vec<String>, Vec<ColumnInfo>)), HeaderSchemaError<'_>> {
+fn parse_regular_columns(input: &[u8]) -> Result<(&[u8], RegularColumns), HeaderSchemaError<'_>> {
     let mut search_offset = 0;
     let mut partition_key_types = Vec::new();
 
@@ -547,7 +550,7 @@ fn parse_regular_columns(
 /// accepted empty schema (#4104, roborev job 119).
 fn fallback_parse_serialization_header_ascii(
     input: &[u8],
-) -> Result<Option<(Vec<String>, Vec<String>, Vec<ColumnInfo>)>, HeaderSchemaError<'_>> {
+) -> Result<Option<SerializationHeaderResult>, HeaderSchemaError<'_>> {
     // Helper to find subsequence
     fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         haystack

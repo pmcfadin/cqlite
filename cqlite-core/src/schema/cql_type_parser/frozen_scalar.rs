@@ -190,6 +190,7 @@ const WRITER_CITATION: &str = "only ListType, SetType, MapType and UserType carr
 ///     exists to prevent. The two AGREE today: a well-formed spelling is `true`
 ///     either way, and a malformed one is refused either way (by this predicate
 ///     via `Custom`, or by `cql_vector_kind` before the predicate is reached).
+///
 ///     THE FULL DERIVATION, FACTORY TO GRAMMAR, at the pinned tag — it answers the
 ///     CQL question, so it lives here and not on the writer-side
 ///     [`FROZEN_WRAPPABLE_MARSHAL_SIMPLE_NAMES`]:
@@ -206,6 +207,7 @@ const WRITER_CITATION: &str = "only ListType, SetType, MapType and UserType carr
 ///          routes `K_FROZEN '<' comparatorType '>'` through `freeze()` — so
 ///          `frozen<vector<float, 3>>` raises no `InvalidRequestException` and no
 ///          recognition error.
+///
 ///     Its HEADER spelling is nonetheless the BARE `VectorType(FloatType , 3)`:
 ///     `VectorType.toString` prints no wrapper (`VectorType.java:339-342`).
 ///
