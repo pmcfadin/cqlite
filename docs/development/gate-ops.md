@@ -447,7 +447,8 @@ profile reaches launcher-created processes alone — #3727) (previously `30G` on
 bare `minimal-build: FAIL (611s)` beside 36/37 PASS and `tree-integrity: PASS` — and since
 doctrine retains ONLY the SUMMARY and forbids reading `gate.log`, the reader debugged a
 minimal-features build that was never broken. Every SUMMARY block **that carries a component
-table**, plus the three FULL-gate pre-flight blocks — 10 of the script's 25 emit sites — now carries a `disk-exhaustion:` line naming a
+table**, plus the four FULL-gate pre-flight blocks reachable after `run_file_size` — 11 of the
+script's 26 emit sites — now carries a `disk-exhaustion:` line naming a
 recognised signature, the component and the log line, plus a start→emit free-space delta; see
 the gate section of `CLAUDE.md` for its closed value set. (The pre-flight blocks were exempt
 until #3800/job 358, on the stated ground that no component had run — false, because
@@ -1948,7 +1949,7 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   false reading. `/dev/full` is Linux-only, so that case **declares its skip** and a
   host-independent injected case carries the property everywhere.
   **THE SCOPE IS "COULD A VERDICT ALREADY BE RECORDED", NOT "IS TERMINAL" AND NOT "CARRIES A
-  TABLE" — AND THE EXCLUSIONS ARE DECLARED AT THE SITE.** Of the script's 25
+  TABLE" — AND THE EXCLUSIONS ARE DECLARED AT THE SITE.** Of the script's 26
   `emit_summary`/`_emit_terminal_summary` call sites, **11** append the line: the **7** that
   render a component table, plus the **4 PRE-FLIGHT blocks reachable AFTER `run_file_size`**
   (#2078 fixtures, #3148 schemas ×2, and the `--only` zero-Data.db block — reachable via e.g.

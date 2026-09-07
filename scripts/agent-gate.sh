@@ -2800,7 +2800,7 @@ apply_fixture_preflight() {
       # may already be recorded and the old "no component has run" exemption was false. The
       # decision is over ALL THREE subject kinds, taken in ONE shell context (so a note recorded
       # while gathering survives), and it lives in `_disk_preflight_meta` rather than being copied
-      # to each of the three pre-flight sites.
+      # to each of the four pre-flight sites.
       _disk_preflight_meta
       emit_summary FAIL \
         "preflight: FAIL (canonical corpus $CANONICAL_FIXTURE_KEYSPACE absent under $CQLITE_DATASETS_ROOT/sstables — only committed byte-parity refs present)" \
@@ -3240,7 +3240,7 @@ apply_schemas_preflight() {
     # may already be recorded and the old "no component has run" exemption was false. The
     # decision is over ALL THREE subject kinds, taken in ONE shell context (so a note recorded
     # while gathering survives), and it lives in `_disk_preflight_meta` rather than being copied
-    # to each of the three pre-flight sites.
+    # to each of the four pre-flight sites.
     _disk_preflight_meta
     emit_summary FAIL \
       "preflight: FAIL ($reject)" \
@@ -3275,7 +3275,7 @@ apply_schemas_preflight() {
       # may already be recorded and the old "no component has run" exemption was false. The
       # decision is over ALL THREE subject kinds, taken in ONE shell context (so a note recorded
       # while gathering survives), and it lives in `_disk_preflight_meta` rather than being copied
-      # to each of the three pre-flight sites.
+      # to each of the four pre-flight sites.
       _disk_preflight_meta
         emit_summary FAIL \
         "preflight: FAIL (committed CQL schema fixtures unreadable under $root — missing: $missing)" \
@@ -7058,7 +7058,7 @@ EXPLICIT_SUMMARY_FILE=0
 # precedent: a distinct, textually-separable marker key carrying a CLOSED value set.
 #
 # THE SCOPE IS "COULD A VERDICT ALREADY BE RECORDED", NOT "IS TERMINAL" AND NOT "CARRIES A
-# TABLE" (#3800, roborev jobs 299 and 358). Of the script's 25
+# TABLE" (#3800, roborev jobs 299 and 358). Of the script's 26
 # `emit_summary`/`_emit_terminal_summary` call sites, 11 append this line: the 7 that render a
 # component table, plus the 4 PRE-FLIGHT blocks reachable AFTER `run_file_size` (#2078 fixtures,
 # #3148 schemas x2, and the `--only` zero-Data.db block -- reachable via e.g.
