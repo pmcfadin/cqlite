@@ -195,6 +195,21 @@ impl Damage {
             Damage::TruncatedToOuterHeader => bytes[..20.min(bytes.len())].to_vec(),
         }
     }
+
+    /// A fragment the SURFACED error must contain, distinct per class.
+    ///
+    /// This is AC1's "naming the cause" half, and it is checked per class ON
+    /// PURPOSE: a single shared fragment would pass even if all three refusals
+    /// collapsed back to one indistinguishable message, which is exactly the defect
+    /// the `nom::error::Error`-shaped path had (`code: Verify` plus a hex dump, the
+    /// same text for a corrupt outer header and for an undecodable declared type).
+    fn expected_cause_fragment(self) -> &'static str {
+        match self {
+            Damage::TruncatedStatistics => "SERIALIZATION_HEADER",
+            Damage::RefusedHeaderType => "the partition key type is not valid UTF-8",
+            Damage::TruncatedToOuterHeader => "outer header did not parse",
+        }
+    }
 }
 
 /// Damage `generation`'s `Statistics.db` and MEASURE that the statistics parse now
@@ -270,7 +285,7 @@ async fn manager_from_discovered(root: &Path, table: &str) -> SSTableManager {
 /// Assert `e` is the dedicated, MATCHABLE refusal and that it carries the original
 /// cause — never a message check, which would stay green through a refactor that
 /// re-wrapped the cause in a different variant while forwarding its text.
-fn assert_unreadable(surface: &str, e: &Error, expected_path: &Path) {
+fn assert_unreadable(surface: &str, e: &Error, expected_path: &Path, damage: Damage) {
     match e {
         Error::UnreadableSSTable {
             table,
@@ -294,9 +309,17 @@ fn assert_unreadable(surface: &str, e: &Error, expected_path: &Path) {
             // "naming the cause" half. `source` is walked through the std trait so
             // the assertion is about the error CHAIN, not about our own field.
             let source: &Error = source;
+            let rendered = source.to_string();
             assert!(
-                !source.to_string().is_empty(),
-                "{surface}: the carried cause must be renderable"
+                rendered.contains(damage.expected_cause_fragment()),
+                "{surface}: the carried cause must NAME why the file was refused \
+                 (expected to contain {:?} for {damage:?}); got: {rendered}",
+                damage.expected_cause_fragment()
+            );
+            assert!(
+                !rendered.contains("code: Verify"),
+                "{surface}: the cause must not be the opaque nom `ErrorKind` the old \
+                 path surfaced for every distinct refusal alike; got: {rendered}"
             );
             assert!(
                 std::error::Error::source(e).is_some(),
@@ -460,7 +483,7 @@ async fn assert_every_surface_refuses(damage: Damage) {
                  from an unreadable one.",
                 surface.name
             ),
-            Err(e) => assert_unreadable(surface.name, e, &generation.data),
+            Err(e) => assert_unreadable(surface.name, e, &generation.data, damage),
         }
     }
 }
@@ -536,7 +559,12 @@ async fn a_partially_readable_table_refuses_rather_than_answering_partially() {
             "one readable generation plus one refused one is a PARTIAL answer; returning it \
              under Ok is silent data loss",
         );
-    assert_unreadable("scan (partial)", &e, &second.data);
+    assert_unreadable(
+        "scan (partial)",
+        &e,
+        &second.data,
+        Damage::TruncatedStatistics,
+    );
 }
 
 /// The refusal must be SCOPED: one unreadable table must not render an unrelated
@@ -601,7 +629,12 @@ async fn the_discovered_paths_constructor_refuses_too() {
         .scan(&table_id(TABLE), None, None, None, Some(&schema_for(TABLE)))
         .await
         .expect_err("new_from_discovered_paths must record the refusal too");
-    assert_unreadable("scan (discovered paths)", &e, &generation.data);
+    assert_unreadable(
+        "scan (discovered paths)",
+        &e,
+        &generation.data,
+        Damage::RefusedHeaderType,
+    );
 }
 
 /// A refusal must not be PERMANENT: once the offending generation is gone from

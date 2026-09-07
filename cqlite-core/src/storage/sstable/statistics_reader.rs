@@ -5,7 +5,7 @@
 
 use crate::{
     error::{Error, Result},
-    parser::enhanced_statistics_parser::parse_statistics_with_fallback_detailed,
+    parser::enhanced_statistics_parser::parse_statistics_file,
     parser::statistics::{SSTableStatistics, StatisticsAnalyzer, StatisticsSummary},
     platform::Platform,
 };
@@ -92,13 +92,27 @@ impl StatisticsReader {
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer).await?;
 
-        // `_detailed` keeps the TYPED error, so a SEMANTIC refusal keeps its own
-        // kind and its column-naming message instead of becoming `code: Verify`
-        // relabelled `Corruption` (#4104; `open()` aborts either way). Decided on
-        // the VARIANT, never on message text — rationale on the parser's doc.
-        let statistics = match parse_statistics_with_fallback_detailed(&buffer, gates.as_ref()) {
-            Ok((_, stats)) => stats,
+        // #4159: the `Result`-shaped entry point, so the refusal that reaches the
+        // caller NAMES ITS CAUSE. `parse_statistics_with_fallback` returns a
+        // `nom::error::Error`, which carries only an `ErrorKind` — every distinct
+        // refusal (corrupt outer header, TOC past EOF, undecodable
+        // SerializationHeader type, absurd column count) rendered identically as
+        // `code: Verify`, and #4159's AC1 requires the error to say WHY. The kind is
+        // preserved too: `parse_statistics_file` reports `Error::Corruption`, which
+        // `load_statistics_reader` recognises and re-wraps WITH the component path.
+        let statistics = match parse_statistics_file(&buffer, gates.as_ref()) {
+            Ok(stats) => stats,
+            // #4104's arm, kept through the #4159 rebase: a SEMANTIC refusal keeps
+            // its own KIND and its own column-naming message rather than being
+            // re-labelled as unreadable data. Decided on the VARIANT, never on
+            // message text. This arm is load-bearing only because every layer
+            // beneath it — `parse_serialization_header_schema`,
+            // `parse_minimal_encoding_stats`, `parse_nb_format_statistics_data`,
+            // `parse_statistics_file` — passes `Error::Schema` through unchanged;
+            // coercing the kind at any one of them would deaden it.
             Err(e @ Error::Schema(_)) => return Err(e),
+            // Every other refusal already names its cause upstream, so it is
+            // forwarded with the reader's own context rather than replaced.
             Err(e) => {
                 return Err(Error::corruption(format!(
                     "Failed to parse Statistics.db with enhanced parser: {e}"

@@ -42,14 +42,11 @@
 //! - [`encoding_stats`] — EncodingStats (min timestamp/deletion-time/TTL) decode.
 //! - [`serialization_header`] — table-schema (partition/clustering/static/regular columns).
 //! - [`marshal_type`] — Cassandra marshal-type → CQL conversion + `ColumnInfo` builders.
-//! - [`schema_refusal`] — the schema decoder's typed failure channel: structural
-//!   (a retry may find the header elsewhere) vs semantic (fail-closed, #4104).
 //! - this `mod.rs` — the public entry points that orchestrate the above.
 
 mod encoding_stats;
 mod header;
 mod marshal_type;
-mod schema_refusal;
 mod serialization_header;
 
 pub use header::parse_nb_format_header;
@@ -59,7 +56,6 @@ use crate::error::{Error, Result};
 use crate::parser::repair_metadata::{parse_statistics_toc, StatisticsToc};
 use crate::storage::sstable::version_gate::VersionGates;
 use encoding_stats::parse_minimal_encoding_stats;
-use schema_refusal::HeaderSchemaError;
 
 /// Type alias for EncodingStats parse result to reduce complexity
 type EncodingStatsResult = (
@@ -101,9 +97,17 @@ type SerializationHeaderResult = (Vec<String>, Vec<String>, Vec<super::header::C
 /// # Returns
 ///
 /// Partial statistics with only TimestampStatistics populated from real data.
+///
+/// # The `input` parameter is gone (issue #4159)
+///
+/// This used to take the bytes FOLLOWING the 32-byte outer header as well as
+/// `full_input`. Nothing read them any more once the SerializationHeader marker
+/// search was removed — that scan was their only consumer — so the parameter was a
+/// lie about what the decode needs, and keeping it would have left the impression
+/// that a non-TOC route to the header still exists. The SERIALIZATION_HEADER is
+/// located from `full_input` plus the TOC's `HEADER` offset, and from nothing else.
 #[allow(clippy::type_complexity)]
 pub fn parse_nb_format_statistics_data(
-    input: &[u8],
     header: &StatisticsHeader,
     full_input: &[u8],
     // VG3 plumbing: gates are threaded here so version-sensitive decisions in
@@ -122,7 +126,7 @@ pub fn parse_nb_format_statistics_data(
     // open path (`parse_enhanced_statistics_file`) parses the TOC ONCE and threads
     // it to both this decode and the STATS post-pass (issue #2148).
     let toc = parse_statistics_toc(full_input);
-    parse_nb_format_statistics_data_with_toc(input, header, full_input, &toc, gates)
+    parse_nb_format_statistics_data_with_toc(header, full_input, &toc, gates)
 }
 
 /// [`parse_nb_format_statistics_data`] over a `Statistics.db` TOC that was already
@@ -131,7 +135,6 @@ pub fn parse_nb_format_statistics_data(
 /// TOC exactly once.
 #[allow(clippy::type_complexity)]
 pub(crate) fn parse_nb_format_statistics_data_with_toc(
-    input: &[u8],
     header: &StatisticsHeader,
     full_input: &[u8],
     toc: &StatisticsToc,
@@ -146,20 +149,21 @@ pub(crate) fn parse_nb_format_statistics_data_with_toc(
     // HEADER offset from the shared single TOC parse (Issue #216, #2148).
     let header_offset = toc.header_offset();
 
-    // Parse the EncodingStats section from the data following the header
-    let result = parse_minimal_encoding_stats(input, full_input, header_offset, gates);
+    // Parse the EncodingStats section, located from the TOC's HEADER offset.
+    //
+    // #4159: `input` (the bytes after the 32-byte outer header) is NO LONGER passed
+    // — the decoder used it only to seed the removed marker search, and keeping the
+    // parameter would leave that route reachable.
+    let result = parse_minimal_encoding_stats(full_input, header_offset, gates);
 
     match result {
         Ok((
-            _,
-            (
-                min_timestamp,
-                min_deletion_time,
-                min_ttl,
-                partition_columns,
-                clustering_columns,
-                regular_columns,
-            ),
+            min_timestamp,
+            min_deletion_time,
+            min_ttl,
+            partition_columns,
+            clustering_columns,
+            regular_columns,
         )) => {
             // Populate the authoritative row/partition counts from the STATS
             // component (issue #1325). We reuse the single source of truth added
@@ -292,29 +296,42 @@ pub(crate) fn parse_nb_format_statistics_data_with_toc(
                 regular_columns,
             ))
         }
-        // A SEMANTIC refusal keeps its own message and its own error KIND (#4104
-        // blocker A). The decision is taken on the VARIANT — never on message text
-        // — and the message is propagated verbatim because it is the only place
-        // that names the refused column, the refused type and the Cassandra
-        // citation. Re-wrapping it as `UnsupportedFormat("… {:?}", nom_err)`, as
-        // this arm used to do for both kinds, reduced a deliberate refusal to
-        // `code: Verify` and made it indistinguishable from a truncated file.
-        Err(HeaderSchemaError::Refused(refusal)) => {
-            tracing::error!("Refusing Statistics.db SerializationHeader: {refusal}");
-            Err(refusal)
+        // ═══ STEP 4 of the #4159 rebase ruling: the KIND survives ═══
+        //
+        // A SEMANTIC refusal — the header decoded and DECLARES a type Cassandra
+        // cannot have written (#4104's `frozen<scalar>` gate) — leaves this
+        // function with its OWN kind and its OWN message. It is the only text
+        // that names the refused column, the refused type and the
+        // `CQL3Type.java:647-651` citation, and `Error::Schema` is the kind
+        // `StatisticsReader::open` keys on so a deliberate refusal is never
+        // presented to the user as a garbled file.
+        //
+        // The decision is taken on the VARIANT, never on message text. Coercing
+        // this into the `Corruption` re-wrap below would silently undo #4104:
+        // the refusal would read as data corruption and the `Error::Schema`
+        // branch in `statistics_reader.rs` would go dead.
+        Err(e @ Error::Schema(_)) => {
+            tracing::error!("Refusing Statistics.db SerializationHeader: {e}");
+            Err(e)
         }
-        // STRUCTURAL — unchanged wording and kind: the bytes really are unreadable
-        // here, so the checksum/length diagnostics are the useful ones.
-        Err(HeaderSchemaError::Structural(e)) => {
-            tracing::debug!(
-                "Failed to parse minimal EncodingStats from Statistics.db: {:?}",
-                e
-            );
-            Err(Error::UnsupportedFormat(format!(
-                "Failed to parse minimal nb-format Statistics.db EncodingStats: {:?}. \
-                         This is required for delta-coded timestamp decoding. \
+        Err(e) => {
+            // #4159: the inner refusal already NAMES its cause (which field, why,
+            // and at what byte of the header body), so it is FORWARDED here rather
+            // than replaced. This arm used to render a `nom::error::Error` with
+            // `{:?}`, producing `code: Verify` plus a hex dump of the input — the
+            // same opaque text for every distinct refusal.
+            //
+            // The kind stays `Corruption` (the inner kind), not `UnsupportedFormat`:
+            // `load_statistics_reader` matches on `Error::Corruption` to re-wrap the
+            // refusal WITH the component path, and `UnsupportedFormat` fell through
+            // its catch-all instead, so the surfaced error named neither the
+            // Statistics.db path nor the real cause.
+            Err(Error::corruption(format!(
+                "Statistics.db EncodingStats/SerializationHeader decode refused: {e}. \
+                         This metadata is required for delta-coded timestamp decoding and \
+                         for the authoritative column list. \
                          Header checksum: 0x{:08x}, data_length: {}",
-                e, header.checksum, header.data_length
+                header.checksum, header.data_length
             )))
         }
     }
@@ -342,32 +359,66 @@ pub fn parse_enhanced_statistics_file<'a>(
     input: &'a [u8],
     gates: Option<&VersionGates>,
 ) -> nom::IResult<&'a [u8], SSTableStatistics> {
-    parse_enhanced_statistics_file_detailed(input, gates).map_err(|e| {
-        // The nom channel cannot carry a message. Callers that need one (the
-        // reader, so a refusal reaches the user) use the `_detailed` form.
-        tracing::warn!("Failed to parse nb-format Statistics.db: {e}");
-        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
-    })
+    // The 32-byte header is re-parsed here ONLY to recover `remaining`, which this
+    // nom-shaped signature must return. The decode itself — and the TYPED error it
+    // reports — lives in `parse_statistics_file`.
+    let (remaining, _header) = parse_nb_format_header(input)?;
+    match parse_statistics_file(input, gates) {
+        Ok(statistics) => Ok((remaining, statistics)),
+        Err(e) => {
+            // #4159: the CAUSE is not lost, it is just not EXPRESSIBLE in
+            // `nom::error::Error`, which carries only an `ErrorKind`. Callers that
+            // need to report WHY a Statistics.db was refused call
+            // `parse_statistics_file` directly — `StatisticsReader::open` does.
+            tracing::debug!("Statistics.db decode refused: {e}");
+            Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )))
+        }
+    }
 }
 
-/// [`parse_enhanced_statistics_file`] with the TYPED error preserved (#4104
-/// blocker A).
+/// [`parse_enhanced_statistics_file`] with the REAL error preserved (issue #4159).
 ///
-/// Identical parse; the only difference is the failure channel. The nom form has
-/// to flatten every failure to `ErrorKind::Verify`, which discarded the
-/// SerializationHeader gate's refusal message — the one text that names the
-/// refused column and type and cites `CQL3Type.java`. Use this form wherever the
-/// error reaches a human; use the nom form only inside a nom combinator chain.
-pub fn parse_enhanced_statistics_file_detailed<'a>(
-    input: &'a [u8],
+/// # Why this exists alongside the nom-shaped entry point
+///
+/// `nom::error::Error` carries an input slice and an `ErrorKind` — it cannot carry a
+/// message, a source, or a kind of our own. So the nom-shaped path collapsed every
+/// distinct refusal (a corrupt outer header, a TOC pointing past EOF, an undecodable
+/// SerializationHeader type, an absurd column count) into one indistinguishable
+/// `ErrorKind::Verify`, and `StatisticsReader::open` then rendered
+/// `"Failed to parse Statistics.db with enhanced parser: Error(Error { input: [..],
+/// code: Verify })"`. An operator reading that learns nothing, and issue #4159's AC1
+/// requires the surfaced error to NAME the cause.
+///
+/// This entry point returns the [`Error`](crate::Error) the decode actually produced.
+/// It is a SEPARATE function rather than a signature change because
+/// `parse_statistics_with_fallback`/`parse_enhanced_statistics_file` are public and
+/// called from ~40 test targets plus the compaction merge path, all of which read the
+/// nom tuple; changing their shape would be a mechanical churn with no benefit to
+/// those callers, none of which reports the cause onward.
+pub fn parse_statistics_file(
+    input: &[u8],
     gates: Option<&VersionGates>,
-) -> Result<(&'a [u8], SSTableStatistics)> {
-    // Parse the 32-byte header
-    let (remaining, header) = parse_nb_format_header(input).map_err(|e| {
-        Error::UnsupportedFormat(format!(
-            "Failed to parse the 32-byte nb-format Statistics.db header: {e:?}"
+) -> crate::Result<SSTableStatistics> {
+    let (_remaining, header) = parse_nb_format_header(input).map_err(|e| {
+        crate::Error::corruption(format!(
+            "Statistics.db outer header did not parse ({} byte(s) supplied; the nb/oa \
+             header is a fixed 32 bytes): {e:?}",
+            input.len()
         ))
     })?;
+    parse_statistics_body(input, header, gates)
+}
+
+/// The shared decode body, once, so the nom-shaped and `Result`-shaped entry points
+/// cannot drift.
+fn parse_statistics_body(
+    input: &[u8],
+    header: StatisticsHeader,
+    gates: Option<&VersionGates>,
+) -> crate::Result<SSTableStatistics> {
 
     // Parse the Statistics.db TOC ONCE (issue #2148) and thread it to every
     // downstream consumer — the EncodingStats/row-count decode below and the
@@ -375,9 +426,14 @@ pub fn parse_enhanced_statistics_file_detailed<'a>(
     // never re-walked to relocate an already-resolved component offset.
     let toc = parse_statistics_toc(input);
 
-    // Parse minimal statistics data (EncodingStats + SerializationHeader columns)
-    // Pass full input for TOC-based HEADER offset lookup (Issue #216)
-    let result = parse_nb_format_statistics_data_with_toc(remaining, &header, input, &toc, gates);
+    // Parse minimal statistics data (EncodingStats + SerializationHeader columns).
+    // Pass full input for TOC-based HEADER offset lookup (Issue #216).
+    //
+    // #4159: the `?` here is the whole point of this function — the typed cause is
+    // PROPAGATED. The nom-shaped wrapper used to answer this `Err` with a
+    // `tracing::warn!` and a bare `nom::Err::Error(Verify)`, discarding both the
+    // message and the kind.
+    let result = parse_nb_format_statistics_data_with_toc(&header, input, &toc, gates);
 
     match result {
         Ok((row_stats, mut timestamp_stats, partition_columns, clustering_columns, columns)) => {
@@ -454,10 +510,8 @@ pub fn parse_enhanced_statistics_file_detailed<'a>(
                 tombstone_drop_times,
             };
 
-            Ok((remaining, statistics))
+            Ok(statistics)
         }
-        // Propagated with its kind and message intact — the flattening to a bare
-        // nom error now happens ONLY in the nom wrapper above (#4104 blocker A).
         Err(e) => Err(e),
     }
 }
@@ -514,7 +568,7 @@ mod tests {
         };
 
         let dummy_data = vec![0xFF; 10]; // Too short to parse properly
-        let result = parse_nb_format_statistics_data(&dummy_data, &header, &dummy_data, None);
+        let result = parse_nb_format_statistics_data(&header, &dummy_data, None);
 
         // Should return error because data is too short for VInt parsing
         assert!(result.is_err());
@@ -600,10 +654,10 @@ mod tests {
         let Some(bytes) = real_nb_statistics_db() else {
             return;
         };
-        let (remaining, header) =
+        let (_remaining, header) =
             parse_nb_format_header(&bytes).expect("nb header must parse on a real fixture");
         let (_row, ts_stats, _pk, _ck, _cols) =
-            parse_nb_format_statistics_data(remaining, &header, &bytes, None)
+            parse_nb_format_statistics_data(&header, &bytes, None)
                 .expect("inner EncodingStats parse must succeed on a real fixture");
 
         // A real time-series SSTable records write timestamps, so its min is a
