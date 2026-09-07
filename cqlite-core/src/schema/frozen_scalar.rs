@@ -15,7 +15,7 @@
 //! ```
 //!
 //! and the grammar routes EVERY `frozen<…>` through it
-//! (`cassandra-5.0.8:src/antlr/Parser.g:1853-1859`):
+//! (`cassandra-5.0.8:src/antlr/Parser.g:1853-1860`):
 //!
 //! ```text
 //!     | K_FROZEN '<' f=comparatorType '>'
@@ -28,7 +28,7 @@
 //!       }
 //! ```
 //!
-//! Only four subclasses override it — `RawCollection` (`:777`, list/set/map),
+//! Only four subclasses override it — `RawCollection` (`:773`, list/set/map),
 //! `RawVector` (`:916`), `RawUT` (`:958`) and `RawTuple` (`:1037`). Everything
 //! else, `RawType` (every native scalar) and a `STRING_LITERAL` custom class
 //! included, reaches the base and is a recognition error.
@@ -100,7 +100,7 @@ const CITATION: &str = "frozen<> is only allowed on collections, tuples, and use
 /// `RawCollection` -> [`CqlType::List`]/[`CqlType::Set`]/[`CqlType::Map`],
 /// `RawTuple` -> [`CqlType::Tuple`], `RawUT` -> [`CqlType::Udt`], and an
 /// already-frozen inner ([`CqlType::Frozen`]) because `RawCollection::freeze`
-/// (`CQL3Type.java:777-786`) freezes an already-frozen collection to itself.
+/// (`CQL3Type.java:773-786`) freezes an already-frozen collection to itself.
 ///
 /// [`CqlType::Custom`] carries TWO things `CqlType::parse` cannot model, and both
 /// are legally freezable, so the arm decides between them by SPELLING:
@@ -110,11 +110,18 @@ const CITATION: &str = "frozen<> is only allowed on collections, tuples, and use
 ///     real frozen UDT. Admitted when the name is a plausible UDT identifier
 ///     ([`is_udt_identifier`]).
 ///   * a VECTOR. `CqlType` has no `Vector` variant, so `vector<float, 3>` also
-///     lands in `Custom` — and `RawVector::freeze` (`CQL3Type.java:916-920`)
-///     returns `this`, a vector being implicitly frozen (`isImplicitlyFrozen`,
-///     `:632-635`), so `frozen<vector<float, 3>>` IS declarable CQL. Without this
-///     arm the gate would refuse it, which is why the marshal half's allowlist
-///     naming `VectorType` is not enough on its own: the two spellings must agree.
+///     lands in `Custom` — and `RawVector` DOES override `freeze()`, returning
+///     `this` rather than throwing (`CQL3Type.java:915-919`), so
+///     `frozen<vector<float, 3>>` IS declarable CQL. Without this arm the gate
+///     would refuse declarable CQL, which is why the marshal half's allowlist
+///     naming `VectorType` is not enough on its own: the two spellings are one
+///     rule. Full derivation, factory to grammar, at
+///     [`FREEZABLE_MARSHAL_SIMPLE_NAMES`].
+///
+///     CQLite does not DECODE vectors, and this arm does not claim it does — the
+///     type still lands in `Custom`, exactly as before #4104. A metadata gate's
+///     job is to refuse what Cassandra cannot have written, never to narrow what
+///     it can.
 ///
 /// Everything else in `Custom` is refused, which keeps the quoted custom-class
 /// spelling (`frozen<'org.apache.cassandra.db.marshal.Int32Type'>`) out — Cassandra
@@ -182,10 +189,27 @@ pub(crate) fn refuse_frozen_scalar_cql(spelling: &str, inner: &str) -> Error {
 
 /// The MARSHAL simple names whose `CQL3Type.Raw` counterpart overrides `freeze()`.
 ///
-/// `VectorType` is included because `RawVector::freeze` (`CQL3Type.java:916-920`)
-/// returns `this` — a vector is implicitly frozen (`isImplicitlyFrozen`,
-/// `:632-635`) — so `FrozenType(VectorType(..))` is grammatical even though no
-/// corpus file spells it.
+/// # `VectorType` is in this set, and here is the whole chain at the pinned tag
+/// The one entry not evidenced by the corpus census, so it is derived end to end
+/// rather than assumed — a permission Cassandra does not grant would be the same
+/// no-heuristics defect as an invented decode result, pointed the other way:
+///
+///   1. `Parser.g:1916-1919` — `vector_type : K_VECTOR '<' comparatorType ','
+///      INTEGER '>' { $vt = CQL3Type.Raw.vector(t1, ...); }`
+///   2. `CQL3Type.java:705-708` — `public static Raw vector(..) { return new
+///      RawVector(t, dimension); }`
+///   3. `CQL3Type.java:885` — `private static class RawVector extends Raw`
+///   4. `CQL3Type.java:915-919` — `@Override public Raw freeze() { return this; }`
+///      — it DOES override, and it RETURNS rather than throws. (`:909-913`
+///      `supportsFreezing() -> true`; `:897-901` `isVector() -> true`; base
+///      `:632-635` `isImplicitlyFrozen() -> isTuple() || isVector()`.)
+///   5. `Parser.g:1851` puts `vector_type` in `comparatorType`, and `:1853-1860`
+///      routes `K_FROZEN '<' comparatorType '>'` through `freeze()` — so
+///      `frozen<vector<float, 3>>` raises no `InvalidRequestException` and no
+///      recognition error.
+///
+/// Conclusion: `frozen<vector<..>>` is declarable CQL and `FrozenType(VectorType(..))`
+/// is a grammatical header type, even though no corpus file spells either.
 const FREEZABLE_MARSHAL_SIMPLE_NAMES: &[&str] = &[
     "ListType",
     "SetType",

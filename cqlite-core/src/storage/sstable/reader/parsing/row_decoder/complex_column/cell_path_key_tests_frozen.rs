@@ -19,9 +19,9 @@
 //!         }
 //! ```
 //!
-//! and `cassandra-5.0.8:src/antlr/Parser.g:1853-1859` routes every `frozen<…>`
+//! and `cassandra-5.0.8:src/antlr/Parser.g:1853-1860` routes every `frozen<…>`
 //! through it, turning the `InvalidRequestException` into a recognition error.
-//! Only `RawCollection` (`:777`), `RawVector` (`:916`), `RawUT` (`:958`) and
+//! Only `RawCollection` (`:773`), `RawVector` (`:916`), `RawUT` (`:958`) and
 //! `RawTuple` (`:1037`) override it. So no table can carry `frozen<int>`, no
 //! serialization header can spell `FrozenType(Int32Type)`, and **no
 //! Cassandra-written bytes for this input exist BY CONSTRUCTION.**

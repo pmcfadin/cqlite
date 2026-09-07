@@ -13,7 +13,7 @@
 //! ```
 //!
 //! That is the BASE `CQL3Type.Raw` implementation, and `cassandra-5.0.8:src/antlr/
-//! Parser.g:1853-1859` routes every `frozen<…>` through it:
+//! Parser.g:1853-1860` routes every `frozen<…>` through it:
 //!
 //! ```text
 //!     | K_FROZEN '<' f=comparatorType '>'
@@ -21,7 +21,7 @@
 //! ```
 //!
 //! The overrides — and therefore the entire ACCEPT set asserted here — are
-//! `RawCollection` (`:777`), `RawVector` (`:916`), `RawUT` (`:958`) and `RawTuple`
+//! `RawCollection` (`:773`), `RawVector` (`:916`), `RawUT` (`:958`) and `RawTuple`
 //! (`:1037`). Nothing here records what CQLite used to do; the two lanes that
 //! pinned a *decode result* for `frozen<int>` (#3847/PR #4017 -> `Value::blob(b"")`,
 //! #3805/PR #4033 -> `Value::Empty(Int)`) were both deleted by the `REQ-3805-14`
@@ -98,7 +98,7 @@ fn the_cql_refusal_is_case_insensitive() {
 /// collection element, a tuple field, and nested inside another `frozen<>`.
 ///
 /// Cassandra gets this for free: `comparatorType` is one grammar rule, so the
-/// `freeze()` call is reached identically at every position (`Parser.g:1853-1859`).
+/// `freeze()` call is reached identically at every position (`Parser.g:1853-1860`).
 #[test]
 fn a_frozen_scalar_is_refused_at_every_position() {
     for spelling in [
@@ -124,7 +124,7 @@ fn a_frozen_scalar_is_refused_at_every_position() {
 #[test]
 fn frozen_over_a_collection_tuple_or_udt_still_parses() {
     for spelling in [
-        // RawCollection (`CQL3Type.java:777`)
+        // RawCollection (`CQL3Type.java:773`)
         "frozen<list<int>>",
         "frozen<set<text>>",
         "frozen<map<text, int>>",
@@ -151,7 +151,7 @@ fn frozen_over_a_collection_tuple_or_udt_still_parses() {
 /// A VECTOR is freezable, and `CqlType` cannot model one — so the gate has to
 /// decide it by SPELLING or it refuses declarable CQL.
 ///
-/// `RawVector::freeze` (`CQL3Type.java:916-920`) returns `this`; a vector is
+/// `RawVector::freeze` (`CQL3Type.java:916-919`) returns `this`; a vector is
 /// implicitly frozen (`isImplicitlyFrozen`, `:632-635`). `CqlType` has no `Vector`
 /// variant, so `vector<float, 3>` parses to `Custom` — the same arm that carries an
 /// unresolved UDT reference — and an `is_udt_identifier`-only rule would have
@@ -243,7 +243,7 @@ fn the_membership_set_is_cassandras_override_set() {
         CqlType::Custom("udt:address_type".to_string()),
         CqlType::Custom("address_type".to_string()),
         // A vector: `CqlType` has no variant for it, and `RawVector` overrides
-        // `freeze()` (`CQL3Type.java:916-920`).
+        // `freeze()` (`CQL3Type.java:916-919`).
         CqlType::Custom("vector<float, 3>".to_string()),
     ] {
         assert!(
