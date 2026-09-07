@@ -150,10 +150,36 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   unreadable one is `UNMEASURED`: a range match is not a review. The deferral route exists because
   roborev RE-REPORTS a lead-deferred finding on every later round, so a record stays `findings`
   forever once findings were deferred and requiring `clean` outright would make such a merge
-  unobtainable. That authorization is re-verified through the SAME scanner the wrapper uses, under a
-  deliberately narrow kind returning a DISTINCT state, so nothing is decided from the block's text —
-  and the marker's `count=` half is deliberately NOT re-verified, which the output SAYS rather than
-  implies: it is matched against the count OBSERVED BY THE REVIEW, which this leg never ran.
+  unobtainable. That authorization is re-verified through the SAME scanner the wrapper uses, so nothing
+  is decided from the block's text — and since issue #4050 that includes the marker's `count=` half,
+  the field tying a deferral to the findings it defers. The job record carries no findings-count
+  FIELD but it DOES carry the review TEXT, so the count is DERIVED from that daemon-recorded text by
+  the ONE shared recogniser `scripts/flow/lib/roborev-findings-count.sh` — the same code the
+  review-time gate runs, guarded in both consumers by the identical `-f`+`-r` test, since `-r` alone
+  is true for a FIFO and the `.` would then block forever with no verdict — and the same judge is
+  then asked the full question, binding only on `granted`. A `count-mismatch` is a MEASURED refusal
+  (exit 4) named as its own state. Every unmeasurable state keeps the earlier refusal exactly (no
+  review text, empty text, an untakeable census, or ZERO severity markers on a record whose verdict
+  is affirmatively `findings`, which is a contradiction and not a count), so the change adds a BOUND
+  path and widens nothing else. The soundness argument, leading with the strongest part: the two
+  ends run the **same code over identical bytes, by construction**. A findings deferral is grantable
+  only on the `--recheck-job` path (`roborev_check_findings_deferral` returns before consulting
+  anything unless `RECHECK_JOB` is set), and on that path the transcript IS the record's review text
+  — the wrapper copies `$RECORD_OUTPUT_FILE`, filled from the same `roborev-job-facts.py`
+  review-output path the merge point asks for, over `$LOG` before any text check runs. So the
+  recogniser's known non-closure over prose cannot produce a review-vs-merge disagreement and cannot
+  widen what review time already granted; that follows from the recheck-only restriction rather than
+  from luck, because a deferral is never granted off a LIVE reviewer transcript — the one input that
+  could have diverged from the stored record. Where the merge point cannot obtain those bytes it
+  refuses as unmeasured, so the failure mode is a refusal, never a disagreement. Second, it never
+  derives CLEANLINESS from prose — `clean` stays reachable only from the structured verdict letter.
+  It does not make the count tamper-proof against a party who can write roborev's database — also
+  the only way those bytes could differ between the two reads; that actor is invoker-class and out
+  of model. Both halves of the byte-identity premise are PINNED in
+  `scripts/tests/test_roborev_review_guard.sh`, because a claim about another file decays exactly
+  like a comment. Before #4050 this half was DECLARED unverifiable and
+  a validly deferred PR was permanently unmergeable — three at once — which is why the measurement
+  was supplied rather than the declaration restored.
   `PREMERGE: HOLD-CHECK` re-reads the PR thread and the issue it closes for a
   column-zero `HOLD:` order, and the PR timeline for a lead disarm inside 30 minutes.
   **The threads are read with `gh api --paginate`, every page decoded before any verdict.**
@@ -606,6 +632,136 @@ on a prompt is caught mid-iteration by a log-tail watchdog and paged as `stuck-o
 toward the crash breaker. The parked issue resumes only on a strictly-newer owner reply (the worker reads
 the answer and clears the label); a durable `resume-dont-ask` label is a standing Seam-1 seal `flow-implement`
 honors in place of asking.
+
+### The machine-local half: the lane lock (issue #3436)
+
+The claim ref is a **hard** control **cross-machine** — git arbitrates the push server-side — and a
+**pure advisory locally**. Two things follow, and both were measured in the field:
+
+1. **A session that never runs `claim.sh` simply proceeds.** On 2026-08-28 two Claude sessions worked
+   #3367 in ONE worktree on ONE box for ~20 minutes. Session A claimed the issue and created
+   `/data/lanes/lane-3367`; session B's shell started seven minutes later, held no claim, and committed
+   into A's branch. A's `git add -A` then swept up B's uncommitted work, so a commit landed carrying
+   **B's design under A's reasoning**, and A reported a measurement taken against a tree B had already
+   refactored. The only thing that noticed was `agent-gate.sh`'s `tree-integrity` (#2926), by accident.
+2. **Even a session that *does* consult it is waved through**, because `claim.sh`'s holder identity — and
+   therefore its re-entrancy — is `machine+actor`, and two sessions on one box are both
+   `machine=<box> actor=flow`. That granularity **cannot express** "a different process on the same box".
+
+Each pre-existing control failed for its own reason, and each is still sound for what it *does* cover:
+the supervisor single-instance lock protects supervisor-driven runs and **no supervisor was running**;
+`git worktree add` gives no collision signal, and the `/data/lanes/lane-<N>` convention *guarantees* two
+sessions on one issue choose the same directory; and the board said **`Ready`** throughout, actively
+inviting a third claimant.
+
+So `scripts/flow/lane-lock.sh acquire <N>` takes a **machine-local lock on the lane directory** before the
+first write, and its identity is the **full process identity**:
+
+```
+token = <machine>:<actor>:<pid>:<boot-id-short>:<start-ticks>
+```
+
+Re-entrancy requires **all five** to match, so a same-machine, same-actor, different-live-pid acquire is
+`OCCUPIED` — that single property is the fix, and it must never be relaxed back to `machine+actor`.
+`boot-id` + `start-ticks` (field 22 of `/proc/<pid>/stat`, ticks **since boot**) is also **clock-step
+immune**, which `claim-heartbeat.sh`'s own header names as the unfixed weakness of its `now - elapsed`
+reconstruction: a backward NTP step reads a reused pid as consistent, a forward step reads a live process
+as reused. A new record could record a stable identity at acquire time, and does.
+
+**Liveness is a closed verdict set, and only a `DEAD-*` verdict permits auto-reclaim** — `ALIVE` and every
+`UNKNOWN-*` refuse. That is the affirmative-measurement rule: an unmeasured state must never inherit the
+permissive branch.
+
+The identity is resolved by walking from `$$` up the ancestor chain and taking the outermost ancestor whose
+`/proc/<pid>/cwd` lies **inside the lane directory** — on this fleet the long-lived session process, and
+deliberately **not** the tmux server, whose cwd is the root checkout and which is *shared by every lane on
+the box*, so recording it would make all lanes read mutually-alive forever. **That resolution only succeeds
+when the caller's own cwd is inside the lane**, which is a real constraint on how `acquire` is invoked, not
+an implementation detail: `acquire <N> --lane-dir "$(cd "$wt" && pwd)"` merely computes a *path*, leaves the
+process in the root checkout, and resolves nothing. **So an `acquire` that cannot name a durable owner
+REFUSES** — `ERROR reason=unresolved-identity`, exit 1 — and **writes nothing**, printing its own correction
+(run it with cwd inside the lane, or pass `--pid`). The alternative was measured and is worse: recording the
+tool call's own shell, which exits immediately, leaves a record that reads `UNKNOWN-EPHEMERAL` forever, and
+every `UNKNOWN-*` refuses — **including the owning session's own later acquire**, so a single acquire from
+outside the lane *bricked* the lane on first use. Refusing to **create** an un-re-identifiable record is the
+fail-closed direction; continuing to **evaluate** a pre-existing one as a refusal is a different question and
+is unchanged. Correspondingly, `flow-activate` no longer acquires at worktree-creation time at all: the
+session is acting from the root checkout and is genuinely not in the lane yet, so no durable owner exists to
+record.
+
+A refusal **names the occupant** (pid, start identity, acquire time, age), because a collision diagnosed as
+"directory busy" sends the reader to the wrong problem.
+
+**How a stale lock gets cleared, and by whom** — answered before it was built, because a lock with no
+clearing path is a permanent blocker and *a guard that never permits work is broken, not fail-closed*.
+`DEAD-*` (boot id differs, pid absent, pid reused, zombie) is **auto-reclaimed by the next `acquire`**, with
+the reclaim recorded in the audit log — no human, no flag. **A reboot clears everything**: the boot id
+changes, so every pre-reboot record reads `DEAD-REBOOT`, making a box restart a global un-brick. `UNKNOWN-*`
+is cleared deliberately with `reclaim <N> --expect <lease> --reason <why>` (compare-and-swap, recorded) or
+`release <N> --force`, which only *deletes*, needs no identity of its own and therefore works from anywhere.
+
+**Scope, stated because a lock read as covering more than it does is its own false-clean.** It is
+machine-local and says nothing cross-machine — that remains `refs/claims/issue-<N>`'s job, and the two are
+complements rather than alternatives. It is Linux-`/proc`-specific: on a host without `/proc` no durable
+identity can be resolved, so `acquire` refuses with `reason=unresolved-identity` and writes nothing, and an
+existing record's liveness reads `UNKNOWN-*` and refuses. (Earlier wording here promised
+`UNKNOWN-NO-PROC` on such a host; that verdict exists in the set but is **not** what the resolution
+produces, and a doctrine line naming a verdict the code does not emit is the decay this repo treats as a
+defect.) And **a lane whose session never acquired is invisible to it**, which is why
+`claim.sh claim` now *reports* the lane-lock state on its verdict line instead of assuming every session
+took it.
+
+### Release on finalize, no re-acquire on resume — and the board advertises the gap (issue #3436)
+
+The second measured instance is worse than the first. On 2026-08-29 a #3393 slice shipped, its PR merged,
+the claim ref was **released correctly** and the board set back to **`Ready`** — all proper finalize
+behaviour — and then further work was re-issued on the same branch and ran for **20+ commits holding no
+claim ref while the board advertised the issue as available**. In the first incident a second session had
+to guess a lane path; here **a well-behaved session doing exactly what this page says — read the board,
+take a `Ready` item — would collide**, and the claim ref could not stop it because no ref existed.
+
+The gap was structural, not an oversight: the flow had a release-on-finalize step and **no
+re-acquire-on-resume step**. The rule now:
+
+> The trigger is **"I am about to commit to a branch for an issue I do not currently hold"**, never
+> "the branch is new".
+
+So `claim.sh verify <N>` first whenever work restarts (`flow-implement` step 2, `flow-address` step 4);
+on failure, the documented `adopt` path, never an unguarded create. `claim.sh claim` cannot serve here —
+it refuses with `reason=legacy-branch-lock` because the branch still stands on origin. That refusal was
+right for an abandoned *peer* lane but sent a session resuming **its own** branch to the abandoned-lane
+procedure. That refusal now splits **three ways by name, decided by what each signal PROVES** — not by
+whether any signal fired, which was the first draft's defect:
+
+| verdict | evidence required | remedy |
+|---|---|---|
+| `reason=released-then-resumed` | the lane lock holds **this session's exact five-component token** | your own resumed branch — re-take the claim by the documented `adopt` path |
+| `reason=lane-occupied-by-live-peer` | a live LOCAL holder, **our own identity established**, and a **differing** token | a peer session is in that lane: adopt nothing, reap nothing, find that session |
+| `reason=legacy-branch-lock` | anything else — including worktree-only evidence, and including a live local holder whose relationship to us could **not** be established | confirm abandonment first (`should-reap`, board `Status`, branch author), then the documented procedure |
+
+All three carry `lane-evidence=<tokens>` naming the rungs that were observed, and all three fail closed
+toward the generic verdict. Two properties are load-bearing. A **lane directory on the issue's branch**
+proves neither ownership nor occupancy — a directory existing says nobody is necessarily in it — so it is
+*reported* and decides nothing. And **`lane-occupied-by-live-peer` is an affirmative claim, so it needs
+affirmative evidence**: when `claim` runs from the root checkout (the normal case) it cannot resolve its own
+identity, its token matches nobody, and the lane reads `ALIVE` *whether or not the holder is us* — naming a
+peer there asserts a positive from the **failure to prove its opposite**, and told sessions their own lane
+belonged to someone else. `probe` therefore publishes `our-identity=cwd-match|explicit|UNRESOLVED` and the
+consumer may not distinguish SELF from peer without it; the AC5 warning field follows the same rule, with
+`occupied-alive-unattributed` for "a live holder exists and this run could not establish whether it is you".
+**None of the three prints a runnable resume command** — the #2945 ruling above stands unchanged.
+
+And the machine-visible signature of the window is cheap to sweep for — three facts, no heuristics: board
+`Status=Ready` **and** a pushed `issue-<N>-*` branch **and** no `refs/claims/issue-<N>`.
+
+```bash
+bash scripts/flow/advertised-collision-scan.sh   # exit 3 = at least one row reported
+```
+
+`flow-board` runs it in its reconcile sweep. It is a **detector, not a reaper**: it deletes no ref, moves
+no board item and touches no branch, because only the session on that box knows whether it owns the
+branch. It is **positive-detection only** — exit 1 means "none found *or* not measurable", never a clean
+bill of health, following #3393's split ruling on that fail-open family.
 
 ## Concurrency model
 

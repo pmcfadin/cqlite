@@ -41,7 +41,11 @@ pub const ARG_MAX_CONCURRENT_SCANS: &str = "max_concurrent_scans";
 #[derive(Parser, Debug)]
 #[command(
     name = "cqlite-flight",
-    about = "Arrow Flight server for compacted CQLite SSTables"
+    about = "Arrow Flight server for compacted CQLite SSTables",
+    // `version` here only makes the FLAG exist; the text it prints is replaced
+    // per-invocation by [`command_with_allocator`], because the linked allocator
+    // is known to the BINARY and not to this library (issue #3997, R2.1).
+    version
 )]
 pub struct Args {
     /// Root directory holding `<keyspace>/<table>[-<uuid>]/` SSTable dirs.
@@ -119,6 +123,35 @@ pub struct Args {
     pub max_inflight_egress_bytes: usize,
 }
 
+/// The clap [`Command`](clap::Command) with `--version`'s long form carrying the
+/// allocator this process linked (issue #3997, requirement R2.1).
+///
+/// R2.1's contract is exact: `cqlite-flight --version` stdout contains **exactly
+/// one** line matching `^allocator: (jemalloc|system)$`. clap prints the version
+/// text verbatim after the `<name> ` prefix on the first line, so the allocator
+/// goes on its OWN line — the second — which satisfies the anchored grammar;
+/// embedding it in the first line would not.
+///
+/// BOTH `version` (`-V`) and `long_version` (`--version`) are set to the same
+/// text, deliberately. clap's default is for `-V` to print the short form and
+/// `--version` the long one, which would make the allocator observable through
+/// one flag and not the other — a distinction an operator has no reason to
+/// expect from a two-line version string. R2.1 names `--version`; this makes
+/// `-V` answer identically rather than merely satisfying the letter.
+///
+/// `allocator` is a parameter rather than a constant read here because a linked
+/// `#[global_allocator]` is a property of the BIN target. This library is also
+/// compiled into every integration-test binary, where the `jemalloc` feature can
+/// be on while no allocator is installed at all, so a value derived here would
+/// be able to disagree with what the running process actually uses. The single
+/// source of truth is `main.rs`'s `ALLOCATOR`, adjacent to the install site.
+pub fn command_with_allocator(allocator: &str) -> clap::Command {
+    let version = format!("{}\nallocator: {allocator}", env!("CARGO_PKG_VERSION"));
+    Args::command()
+        .version(version.clone())
+        .long_version(version)
+}
+
 impl Args {
     /// Parse the process command line, returning the typed arguments **and** the
     /// [`ArgMatches`] they came from.
@@ -128,8 +161,13 @@ impl Args {
     /// [`ArgMatches::value_source`] can say whether a value arrived from the
     /// command line, the environment, or nowhere. Exits with clap's usage
     /// message on a parse error, exactly as [`Parser::parse`] does.
-    pub fn parse_with_matches() -> (Self, ArgMatches) {
-        let matches = Self::command().get_matches();
+    ///
+    /// `allocator` is the caller's linked-allocator name; see
+    /// [`command_with_allocator`] for why it is passed in. `--version` and
+    /// `--help` short-circuit inside clap BEFORE required-argument validation,
+    /// so `cqlite-flight --version` works with no `--data-dir`.
+    pub fn parse_with_matches(allocator: &str) -> (Self, ArgMatches) {
+        let matches = command_with_allocator(allocator).get_matches();
         match Self::from_arg_matches(&matches) {
             Ok(args) => (args, matches),
             Err(e) => e.exit(),
@@ -140,12 +178,18 @@ impl Args {
     /// instead of exiting — the entry point the #3225 precedence tests drive, so
     /// they exercise the REAL parser (including its `env =` attributes) rather
     /// than a hand-built configuration.
-    pub fn try_parse_with_matches_from<I, T>(argv: I) -> Result<(Self, ArgMatches), clap::Error>
+    ///
+    /// Takes the same `allocator` string, so a test can drive the exact
+    /// `Command` the binary builds rather than a differently-configured one.
+    pub fn try_parse_with_matches_from<I, T>(
+        allocator: &str,
+        argv: I,
+    ) -> Result<(Self, ArgMatches), clap::Error>
     where
         I: IntoIterator<Item = T>,
         T: Into<std::ffi::OsString> + Clone,
     {
-        let matches = Self::command().try_get_matches_from(argv)?;
+        let matches = command_with_allocator(allocator).try_get_matches_from(argv)?;
         let args = Self::from_arg_matches(&matches)?;
         Ok((args, matches))
     }
@@ -204,11 +248,16 @@ fn explicit_max_concurrent_scans(
 /// * `available_parallelism` is OMITTED (not logged as a placeholder) when the
 ///   oracle returned no answer; `max_concurrent_scans_source` is then
 ///   `derived-fallback`, so the absence is never ambiguous.
+/// * `allocator` is the linked global allocator (issue #3997, requirement
+///   R2.2) — the SAME string `--version` prints, so a log capture and an
+///   out-of-band `--version` can never disagree. Passed in by `main.rs` for the
+///   reason documented on [`command_with_allocator`].
 pub fn log_startup(
     args: &Args,
     scans: &ResolvedMaxConcurrentScans,
     admission_limit: usize,
     max_concurrent_streams: u32,
+    allocator: &str,
 ) {
     let listen = args.listen;
     tracing::info!(
@@ -221,6 +270,7 @@ pub fn log_startup(
         available_parallelism = scans.available_parallelism,
         admission_wait_timeout_ms = args.admission_wait_timeout_ms,
         max_concurrent_streams,
+        allocator,
         "cqlite-flight starting"
     );
 }

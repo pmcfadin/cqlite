@@ -1150,10 +1150,16 @@ fi
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=roborev-review-checks.sh
 . "$CHECKS_FILE"
+# `roborev_findings_count` is NOT defined in the checks file itself: it comes from the
+# shared recogniser `lib/roborev-findings-count.sh`, which the checks file sources under a
+# `-f`+`-r` guard (#4050). It is enrolled HERE, in the SAME completeness loop, because that
+# loop is the existing mechanism that fails closed with a verdict — an unreadable library
+# would otherwise leave the findings count unmeasurable while every key still read PASS.
 for roborev_required_check in roborev_check_review_completed roborev_check_prompt_content \
-  roborev_check_findings roborev_check_tier1 roborev_check_tier2 roborev_check_findings_deferral; do
+  roborev_check_findings roborev_check_tier1 roborev_check_tier2 roborev_check_findings_deferral \
+  roborev_findings_count; do
   if [ "$(type -t "$roborev_required_check")" != function ]; then
-    DETAILS+=("ERROR: '$CHECKS_FILE' did not define $roborev_required_check, so that check cannot run. Failing closed — the file is truncated or corrupt.")
+    DETAILS+=("ERROR: '$CHECKS_FILE' did not define $roborev_required_check (roborev_findings_count comes from the shared recogniser lib/roborev-findings-count.sh that file sources), so that check cannot run. Failing closed — the file is truncated or corrupt, or the shared library is unreadable.")
     finish FAIL 1
   fi
 done

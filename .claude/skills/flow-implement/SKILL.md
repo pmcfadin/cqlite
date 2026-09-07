@@ -59,7 +59,37 @@ never gate stdout or review churn.
    ```
    If `have_project=0`, the `--remove-label` cleanup above is all you can do AND you MUST print the loud
    `⚠️ board unavailable …` warning so the owner knows the board will not reflect this claim.
-2. **Ensure the worktree exists — and that you hold the claim.** Design-driven issues already hold the
+2. **Ensure the worktree exists — and that you hold the claim.**
+   **THE TRIGGER FOR RE-ACQUIRING IS "I AM ABOUT TO COMMIT TO A BRANCH FOR AN ISSUE I DO NOT CURRENTLY
+   HOLD", NEVER "THE BRANCH IS NEW" (#3436).** The flow has a release-on-finalize step and used to have
+   no re-acquire-on-resume step, so `verify` FIRST — unconditionally, on BOTH paths below, including the
+   design-driven one where the worktree already exists. Measured cost of skipping it: #3393 resumed on an
+   already-shipped branch and ran **20+ commits holding no claim ref while the board advertised the issue
+   as `Ready`**, which is a well-behaved second session's invitation to collide.
+   ```bash
+   bash scripts/flow/claim.sh verify <N> || { : "do NOT proceed — see the refusal's reason= below"; }
+   ```
+   **AND TAKE THE BOARD OFF `Ready` IN THE SAME BREATH (#3436 AC6).** Re-acquiring the claim
+   closes the window for a session that reads the *ref*; the board is what a session reads
+   *first*. #3393 ran 20+ commits with no claim ref **while the board advertised the issue as
+   available**, so a well-behaved peer doing exactly what doctrine says — read the board, take a
+   `Ready` item — would have collided, and the claim ref could not stop it because no ref existed.
+   ```bash
+   gh project item-list 1 --owner pmcfadin --query 'status:Ready' --format json -L 100 \
+     --jq '.items[]|select(.content.number==<N>)|.id'      # empty => already off Ready
+   # still Ready? set board Status=In Progress -- board Status ONLY, never a status:* label,
+   # which the #2855 mirror owns and will revert.
+   ```
+   `advertised-collision-scan.sh` reports exactly this shape (Ready + a pushed branch + no claim
+   ref), so leaving it unfixed on resume is a row someone else has to chase.
+   On failure, read the `reason=` — there are THREE and they are NOT interchangeable:
+   **`released-then-resumed`** means the lane lock holds THIS SESSION's own token (your own resumed
+   branch) — take the documented `adopt --expect none --reason <why>` path;
+   **`lane-occupied-by-live-peer`** means a DIFFERENT live process on this box is in that lane — adopt
+   NOTHING and reap NOTHING, find that session (the refusal names its pid) or take another issue;
+   **`legacy-branch-lock`** means a peer's branch outlived its claim — CONFIRM abandonment first (below).
+   Never an unguarded create, never a hand-crafted claim commit.
+   Design-driven issues already hold the
    claim ref + pushed branch (acquired in `flow-activate`); reuse them. Oracle-driven issues skip
    `flow-activate`, so they run the claim protocol (D2) HERE: `claim.sh` is the lock (the slugless
    fixed-name ref `refs/claims/issue-<N>`, #2665 — a slug-named branch is only PR plumbing). Acquire the
@@ -71,6 +101,32 @@ never gate stdout or review churn.
      # design-driven: claim ref + worktree already exist (from flow-activate).
      # Implementation starting IS a stage transition — refresh the heartbeat (#2089).
      bash scripts/flow/claim-heartbeat.sh beat <N>
+     # ...and take the MACHINE-LOCAL lane lock (#3436). The claim ref is a HARD control
+     # cross-machine and only ADVISORY locally: two sessions on one box are both
+     # machine=<box> actor=flow, so claim.sh cannot tell the second from the first's
+     # retry. This lock's identity is the full PROCESS identity, so it can.
+     # RUN IT FROM THE SESSION'S OWN CWD, NOT A SUBSHELL. Two traps, one line apart:
+     #  * `--lane-dir "$(cd "$wt" && pwd)"` only computes a PATH. The acquire's own cwd
+     #    stays the root checkout, no ancestor's cwd is in the lane, and the acquire is
+     #    REFUSED (reason=unresolved-identity, #3436 FIX 5). Loud, and nothing written.
+     #  * `( cd "$wt" && lane-lock.sh acquire <N> )` is WORSE, because it SUCCEEDS and
+     #    protects nothing (#3436 FIX 14). The cwd-matching ancestor it finds is the
+     #    SUBSHELL, which exits when the command returns; the record then reads
+     #    DEAD-NO-PROCESS and the next acquire — a peer's — is granted by auto-reclaim.
+     #    Measured: recorded pid alive=NO immediately after, peer got ACQUIRED
+     #    (reclaimed). A lock that returns ACQUIRED and holds nothing is a FALSE CLEAN.
+     # The cwd test finds a process working in the lane; it does NOT establish that the
+     # process OUTLIVES the command. Only the session's own cwd does that. So `cd` for
+     # the rest of the flow (a real cd, not a subshell), or pass an explicit --pid.
+     cd "$wt" || exit 1
+     bash scripts/flow/lane-lock.sh acquire <N> --lane-dir "$PWD" || {
+       # OCCUPIED names the occupant (pid, start identity, age). liveness=ALIVE or any
+       # UNKNOWN-* REFUSES; only a verifiably DEAD holder is auto-reclaimed. Do NOT
+       # proceed into a lane another live process owns — that is the #3436 incident.
+       # reason=unresolved-identity is a DIFFERENT answer: nothing was written, and the
+       # refusal prints its own correction.
+       exit 0
+     }
    else
      # oracle-driven: acquire the claim ref now. claim.sh does the atomic push +
      # re-read; a UNIQUE root commit means a different-slug or identical-base
@@ -95,6 +151,8 @@ never gate stdout or review churn.
      # CLAIM HELD → worktree + branch (naming/PR plumbing, NOT the lock).
      git -C <repo-root> worktree add "$wt" -b "issue-<N>-<slug>" origin/main
      git -C "$wt" push -u origin "issue-<N>-<slug>"   # PR head — NOT the lock
+     cd "$wt" || exit 1   # a REAL cd, for the rest of the flow — NOT a subshell (#3436 FIX 14)
+     bash scripts/flow/lane-lock.sh acquire <N> --lane-dir "$PWD" || exit 0
      gh issue edit <N> --add-assignee @me
      bash scripts/flow/claim-heartbeat.sh beat <N>   # FIRST beat — establishes the claim heartbeat (#2089)
    fi
@@ -122,6 +180,14 @@ never gate stdout or review churn.
       `RESULT:` confirm its `run-id:` line is the run you launched — the no-clobber guard can leave a
       foreign peer's block on a shared pinned path (unreachable with a unique path, but verify). On a
       `run-id` mismatch, read the sibling `/tmp/lite-<N>.txt.integrity-fail.*` / `logs:` bundle instead.
+      **And a run dir is bound to a gate ONLY by that `run-id:` line (#3637).** Never locate one by
+      `ls -t`, by a glob, or by recency: up to four gates share one `$TMPDIR`, so recency lands on a
+      peer routinely — progress read from an unbound run dir is a peer's progress, and a verdict read
+      from one is a peer's verdict (PR #3616's closer nearly merged on another PR's 33/37 table).
+      Since #3637 a PASSing (or nested) run also REMOVES its dir at exit — as does an early exit
+      that reaches no verdict at all — and says so on its own `logdir-disposition:` line (`logs:`
+      stays PATH-ONLY; never parse a disposition out of it). Export `AGENT_GATE_KEEP_LOGS=1` when
+      you actually need `<logs-dir>/<component>.log` kept.
       **And only `PASS`/`FAIL` is a verdict (#3041):** the gate stamps
       `RESULT: INCOMPLETE (gate did not finish)` at launch, so if you poll rather than wait for exit,
       use the **RECORD grammar** `grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'` — a bare `grep -q` on the

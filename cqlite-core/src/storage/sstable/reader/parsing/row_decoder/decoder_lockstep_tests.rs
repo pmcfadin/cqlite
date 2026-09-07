@@ -814,12 +814,22 @@ mod write_read {
     /// paths share `i32`-BE count/length framing, so write->v5 always
     /// round-trips.
     ///
-    /// On the block side the two structural families split:
-    /// * **frozen collections** — the block `ComparatorType` collection decoder
-    ///   uses **VInt** element framing, so it does NOT reproduce the i32-BE
-    ///   write-side bytes: a DOCUMENTED divergence owned by **J2**.
-    /// * **tuple** — the block tuple decoder already uses `i32`-BE field lengths
-    ///   (`parse_tuple_value_with`), so it CONVERGES with v5 (asserted equal).
+    /// On the block side BOTH structural families now converge:
+    /// * **frozen collections** — CONVERGED by issue #2339 (roborev job 124). The
+    ///   block decoder used **VInt** element framing and so did not reproduce the
+    ///   i32-BE write-side bytes: the divergence formerly DOCUMENTED here and owned
+    ///   by **J2**. Both `ComparatorType::Frozen` arms in `value_parsing.rs` and the
+    ///   one in `comparator_value_parsing.rs` now route through
+    ///   `frozen_value_parsing::parse_frozen_inner_with`, so a frozen collection body
+    ///   is read as i32-BE element-framed on every path.
+    /// * **tuple** — the block tuple decoder already used `i32`-BE field lengths
+    ///   (`parse_tuple_value_with`), so it always CONVERGED.
+    ///
+    /// This test was the TRIPWIRE for that convergence: it asserted the divergence
+    /// was still PRESENT and instructed whoever resolved it to "re-converge the
+    /// structural lockstep", which is what flipping the three `block_converges`
+    /// flags to `true` does. It now pins the convergence in the other direction — a
+    /// regression to VInt framing on any frozen path reds it.
     #[tokio::test]
     async fn codec_lockstep_write_v5_structural() {
         let Some(reader) = open_reader().await else {
@@ -833,17 +843,17 @@ mod write_read {
             (
                 "frozen<list<int>>",
                 Value::List(vec![Value::Integer(1), Value::Integer(2)]),
-                false,
+                true,
             ),
             (
                 "frozen<set<text>>",
                 Value::Set(vec![Value::Text("a".into()), Value::Text("b".into())]),
-                false,
+                true,
             ),
             (
                 "frozen<map<text,int>>",
                 Value::Map(vec![(Value::Text("k".into()), Value::Integer(9))]),
-                false,
+                true,
             ),
             (
                 "tuple<int,text>",

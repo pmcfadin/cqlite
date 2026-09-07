@@ -12,7 +12,7 @@
 //! Measured on `main` @ 1023095ee (2026-09-02), `CQLITE_DATASETS_ROOT=/data/datasets`,
 //! i.e. BEFORE the #3782 fix. The committed regression lane that pins the fixed
 //! behaviour is `issue_3782_corrupt_row_refusal.rs`; both stage the fixture through
-//! the SAME harness (`support/corrupt_clustering_fixture.rs`) so they can never
+//! the SAME harness (`support/corrupt_byte_fixture.rs`) so they can never
 //! measure different mutations. This file stays `#[ignore]`d: it REPORTS numbers,
 //! it asserts almost nothing, and re-running it is how the table above is refreshed.
 //!
@@ -51,7 +51,7 @@ use cqlite_core::Database;
 
 #[path = "support/datasets_root.rs"]
 mod datasets_root;
-#[path = "support/corrupt_clustering_fixture.rs"]
+#[path = "support/corrupt_byte_fixture.rs"]
 mod fixture;
 
 use fixture::{comp_file, FIX_KS, FIX_TABLE, SCHEMA_FILE};
@@ -124,7 +124,7 @@ async fn open_db(data_dir: PathBuf) -> Database {
 
 /// Stage a pristine copy and a single-byte-mutated copy of the fixture, via the
 /// shared harness the committed regression lane uses
-/// (`support/corrupt_clustering_fixture.rs`), so probe and regression can never
+/// (`support/corrupt_byte_fixture.rs`), so probe and regression can never
 /// measure different mutations.
 ///
 /// Returns the WHOLE [`fixture::Staged`], never the paths alone: it owns the

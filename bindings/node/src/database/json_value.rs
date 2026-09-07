@@ -37,6 +37,14 @@ pub(super) fn value_to_json(value: &cqlite_core::types::Value) -> napi::Result<s
 
     let json = match value {
         Value::Null => serde_json::Value::Null,
+        // EMPTY-BUFFER SENTINEL (issue #3805) → the EMPTY JSON STRING, matching
+        // `sstabledump`'s `"path" : [ "" ]`
+        // (`tools/JsonTransformer.java:444-458` →
+        // `db/marshal/AbstractType.java:146-156`, at `cassandra-5.0.8`) and
+        // `SELECT JSON`'s `{"": v}` (`db/marshal/MapType.java:362-388`). NOT
+        // `null` — the entry is present and the key is distinct from null. All
+        // three surfaces render it identically (cross-binding parity, #1455).
+        Value::Empty(_) => serde_json::Value::String(String::new()),
         Value::Boolean(b) => serde_json::Value::Bool(*b),
         Value::Integer(i) => serde_json::Value::Number((*i as i64).into()),
         Value::BigInt(i) => serde_json::Value::Number((*i).into()),

@@ -10,8 +10,15 @@
 //! driver never has to keep a WIDE partition fully resident).
 
 use super::compaction::CompactionPolicy;
-use super::partition_driver::{DataRowOutcome, MarkerOutcome, SlidingPartitionPolicy};
-use super::row_framing::PartitionHeaderReadiness;
+// #3809's `DataRowOutcome` (the ROW arm's four-way disposition) and #3928's
+// `DriverHeader` (the HEADER arm's) are both needed and are independent: one
+// governs a row that decoded-but-is-unrepresentable, the other a header that
+// cannot be decoded at all. `PartitionHeaderReadiness` is NOT imported any more
+// — #3928 moved this driver's readiness classification into the shared header
+// arm, so this file no longer classifies for itself.
+use super::partition_driver::{
+    DataRowOutcome, DriverHeader, MarkerOutcome, SlidingPartitionPolicy,
+};
 use super::{RowColumnResolution, V5CompressedLegacyParser};
 use crate::schema::TableSchema;
 use crate::types::RowKey;
@@ -117,35 +124,21 @@ impl V5CompressedLegacyParser {
         //     already been parsed for this partition (a resumed body call after a
         //     refill) the window front is the body start (offset 0).
         if !state.header_parsed {
-            match self.partition_header_readiness(data) {
-                PartitionHeaderReadiness::Malformed => {
-                    // Skip one byte to resynchronise (matches the buffered driver's
-                    // `Emitted(1)` malformed-header behaviour).
-                    return Ok(PartitionStreamStep::Consumed(1));
-                }
-                PartitionHeaderReadiness::Incomplete => {
-                    return Ok(if at_final_chunk {
-                        PartitionStreamStep::AllDone
-                    } else {
-                        PartitionStreamStep::NeedMore
-                    });
-                }
-                PartitionHeaderReadiness::Ready => {}
-            }
-
-            let (partition_key, after_header, partition_deletion) =
-                match self.parse_partition_header_full(data, 0) {
-                    Ok(v) => v,
-                    Err(_) => {
-                        if !at_final_chunk
-                            && self.partition_header_readiness(data)
-                                == PartitionHeaderReadiness::Incomplete
-                        {
-                            return Ok(PartitionStreamStep::NeedMore);
-                        }
-                        return Ok(PartitionStreamStep::Consumed(1));
-                    }
-                };
+            // Issue #3928: the SAME header arm the buffered `drive_partition_sliding`
+            // uses (`partition_driver/header_arm.rs`) — one definition of the
+            // decision, translated here into this driver's own advance vocabulary.
+            // Its `Consumed(1)` and the buffered driver's `Emitted(1)` are the same
+            // one-byte resync under two names, which is exactly why the choice of
+            // whether to make it must not live in two places. `?` propagates the
+            // final-chunk REFUSAL that replaced the unconditional resync.
+            let (partition_key, after_header, partition_deletion) = match self
+                .driver_partition_header(data, at_final_chunk)?
+            {
+                DriverHeader::Parsed(key, after_header, deletion) => (key, after_header, deletion),
+                DriverHeader::Done => return Ok(PartitionStreamStep::AllDone),
+                DriverHeader::NeedMore => return Ok(PartitionStreamStep::NeedMore),
+                DriverHeader::Resync => return Ok(PartitionStreamStep::Consumed(1)),
+            };
 
             // Emit a partition-level tombstone carrier immediately (issue #1072),
             // via the shared CompactionPolicy hook — same synthetic carrier the

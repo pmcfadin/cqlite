@@ -338,6 +338,30 @@ measure_flight() {
     > "$OUT_DIR/$tag.log" 2>&1 \
     || { stop_server; echo "FATAL: flight rep $tag failed — see $OUT_DIR/$tag.log" >&2; exit 1; }
 
+  # THE FLIGHT SERVER'S SCAN-END RESIDENT SET (issue #3997, R6.1). Sampled HERE and
+  # nowhere else, because this is the last instant at which there is anything to
+  # sample: the counted window has closed, so the read perturbs no measurement, and
+  # `stop_server` on the next line destroys the process whose `/proc` entry is the
+  # only source of these two numbers. Ordering, not preference — moving it below
+  # `stop_server` would sample a pid that no longer exists, and the collector would
+  # correctly record every arm as UNMEASURED.
+  #
+  # `VmHWM` is a HIGH-WATER MARK, so reading it after the load is over is exactly
+  # right: it reports the peak the process ever reached, which is what R6.1's
+  # `≤ 1.10x` ceiling is about. `VmRSS` is ONE INSTANTANEOUS SAMPLE and is recorded
+  # as such — never as a mean over the rep.
+  #
+  # NOT `|| true`, and not `|| :`. A non-zero exit here means the sampler could not
+  # WRITE ITS RECORD AT ALL (an unwritable `$OUT_DIR`), which is a broken rig, not a
+  # missing measurement — an unobservable RSS is reported by the sampler as an
+  # explicit `UNMEASURED — <cause>` record and exits 0. Swallowing the write failure
+  # would turn a broken output directory into a silently RSS-less round.
+  #
+  # Deliberately ONE LINE: a `\`-continuation makes the next token a bare
+  # `"$OUT_DIR/..."`, which `lib-perf-lint.sh`'s `is_var_command` reads as a variable
+  # command and flags.
+  python3 "$WS0_MEASURE_LIB_DIR/ws0_flight_arm.py" sample-server-rss "$SERVER_PID" "$OUT_DIR/$tag.server-rss.json" > /dev/null
+
   stop_server
   echo "  $tag done"
 }

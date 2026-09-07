@@ -154,6 +154,28 @@ pub(crate) fn compare_collection_elements(a: &Value, b: &Value) -> Ordering {
         // frozen<set<int>> element is Frozen(Set(..)) → unwraps to the Set arm).
         (Value::Frozen(x), other) => compare_collection_elements(x, other),
         (x, Value::Frozen(y)) => compare_collection_elements(x, y),
+        // EMPTY-BUFFER SENTINEL (issue #3805) — an empty MAP KEY. These arms are
+        // LOAD-BEARING, not merely explicit: since roborev job 449 finding D the
+        // type-blind `serialize_value` REFUSES a sentinel (it has no declared
+        // type to validate the tag against, and zero bytes mean something
+        // different in every generic context), so the byte fallback below would
+        // reach its `_ => Ordering::Equal` arm and collapse every sentinel with
+        // every other value — a NON-TOTAL order, i.e. a wrong sort rather than a
+        // wrong verdict. An earlier revision of this comment said the fallback
+        // "would in fact agree" because `serialize_value(Empty)` was zero bytes;
+        // that is no longer true, and the rule below never depended on it — it is
+        // Cassandra's comparator contract.
+        //
+        // `db/marshal/Int32Type.java:61-71` at `cassandra-5.0.8`: when EITHER
+        // side is empty the result is `Boolean.compare(right.isEmpty,
+        // left.isEmpty)` — so an empty key sorts strictly FIRST (measured on
+        // real Cassandra-5.0.2 bytes for four key types: the empty key precedes
+        // `"42"`, `"99"`, `"10.0.0.1"` and `"k"` in the dump, oracle §4b.4) and
+        // two empties are Equal. Placed AFTER the `Frozen` arms so a frozen
+        // wrapper is still unwrapped first.
+        (Value::Empty(_), Value::Empty(_)) => Ordering::Equal,
+        (Value::Empty(_), _) => Ordering::Less,
+        (_, Value::Empty(_)) => Ordering::Greater,
         // Everything else falls back to unsigned-lexicographic order over the
         // serialized bytes. Per-type audit vs Cassandra `AbstractType.compare`
         // (issue #1275 convergence audit) — each of these IS unsigned-byte-
@@ -444,6 +466,50 @@ mod tests {
                 Value::text("a".to_string()),
                 Value::text("b".to_string()),
                 Value::text("c".to_string()),
+            ]
+        );
+    }
+
+    /// Issue #3805: an EMPTY map key sorts strictly FIRST, and coexists with
+    /// its non-empty siblings. Oracle: `db/marshal/Int32Type.java:61-71` at
+    /// `cassandra-5.0.8` (`Boolean.compare(right.isEmpty, left.isEmpty)` when
+    /// either side is empty), measured on real Cassandra-5.0.2 bytes for four
+    /// key types (`docs/round-artifacts/issue-3805-cassandra-oracle.md` §4b.4).
+    #[test]
+    fn empty_map_key_sorts_first_and_coexists_with_its_siblings() {
+        use crate::types::EmptyValueType;
+
+        let empty = Value::Empty(EmptyValueType::Int);
+        for other in [
+            Value::Integer(i32::MIN),
+            Value::Integer(-1),
+            Value::Integer(0),
+            Value::Integer(i32::MAX),
+        ] {
+            assert_eq!(compare_collection_elements(&empty, &other), Ordering::Less);
+            assert_eq!(
+                compare_collection_elements(&other, &empty),
+                Ordering::Greater
+            );
+        }
+        assert_eq!(compare_collection_elements(&empty, &empty), Ordering::Equal);
+
+        // The whole key column, sorted: empty first, then signed int order —
+        // and the genuine `0` key is NOT collapsed onto the empty one.
+        let mut keys = vec![
+            Value::Integer(0),
+            Value::Integer(i32::MIN),
+            Value::Empty(EmptyValueType::Int),
+            Value::Integer(7),
+        ];
+        keys.sort_by(compare_collection_elements);
+        assert_eq!(
+            keys,
+            vec![
+                Value::Empty(EmptyValueType::Int),
+                Value::Integer(i32::MIN),
+                Value::Integer(0),
+                Value::Integer(7),
             ]
         );
     }

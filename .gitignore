@@ -363,6 +363,40 @@ bindings/parity/out/
 # Sidecar files of the per-lane drive-issue state marker (#3822): the flock lockfile and
 # the atomic-replace temporaries. The marker itself is ignored above.
 .drive-issue-state.md.*
+
+# Machine-local lane-directory lock (#3436): scripts/flow/lane-lock.sh's files —
+# lane-<N>.lock (the holder record), lane-<N>.flock (the mutex), lane-<N>.log (the
+# append-only audit) and the .lane-lock.tmp.* atomic-rename staging file.
+#
+# THEY LIVE OUTSIDE ANY WORKTREE, in $LANE_ROOT/.lane-locks
+# (a sibling of the lane directories), so this ignore rule is NOT what keeps them out of
+# a gate's untracked set — the path is. Do not read it as the safety mechanism. Two
+# reasons the lock moved out of the lane dir: `git worktree add` refuses a target that
+# exists AT ALL (a dotfile is enough), so a lock under the lane dir makes
+# acquire-before-worktree-add impossible; and agent-gate.sh's tree-integrity capture
+# (#2926) takes its untracked set from `git ls-files --others --exclude-standard`, so an
+# in-tree lock file refreshed mid-gate would trip `tree-mutated-midrun` and VOID a gate
+# of record — this lock would break the very check that caught the #3436 collision.
+#
+# The patterns stay as a BELT for a LANE_ROOT pointed inside a checkout, and for any
+# legacy in-lane record left by the pre-move version. There is deliberately NO lock-root
+# env var (#3312: the constrained party must not choose its own enforcer), so the lock
+# path follows LANE_ROOT and nothing else. These are per-session machine state, never a
+# repo artifact.
+# SCOPED TO THE LOCK DIRECTORY (#3436, roborev round 14). These were basename-only, so they
+# matched at EVERY depth: measured, `docs/reports/lane-123.log` was ignored by the old set and
+# is not by this one. A gitignore that silently swallows an unrelated file is the quiet
+# direction of wrong — nothing errors, the file just never gets committed. The records only
+# ever live in a `.lane-locks/` directory, so say that instead of matching their basenames.
+# `.lane-lock` is EXACT, not `.lane-lock*` (#3436, roborev round 15). The legacy pre-FIX-2
+# record is that literal filename, so the trailing `*` bought nothing and cost reach: it
+# silently ignored anything with that prefix at any depth, e.g. `docs/.lane-lock-review.md`.
+# Round 14 scoped the three `lane-[0-9]*` patterns, wrote a comment saying the set was scoped,
+# and left this one a basename glob — the comment was true of its neighbours and false of the
+# line directly beneath it.
+.lane-lock
+.lane-locks/
+**/.lane-locks/
 # Same class again, fifth instance (#3853): a lane's per-slice scratch directory — the
 # lead's implementation spec and the implementer's terminal verdict. Inputs to and
 # hand-offs about the work, never artifacts of it, so shipping them puts one lane's

@@ -79,6 +79,67 @@ ADMISSION_FIELDS = (
     "available_parallelism",
 )
 
+# THE ONE PERMITTED CROSS-ARM BINARY DIFFERENCE, AND THE ONLY ONE (issue #3997, R3.3).
+#
+# Every arm of #3551 varied the allocator by LD_PRELOAD into ONE binary, deliberately: that is
+# what let the "every arm ran identical bytes" invariant above hold, and #3248's machine-code
+# sub-claim was WITHDRAWN for violating it. #3997 ships the allocator LINKED as the binary's
+# `#[global_allocator]`, which is a different program, so arm E is the first arm that
+# legitimately measures different bytes from arm A.
+#
+# The exception is NAMED and NARROW, and every word of that is load-bearing:
+#
+#   * it applies to arm `E` and to NO other arm id;
+#   * it applies to `cqlite-flight` and to NO other measured binary — `ws0-scan-bench` IS the
+#     drift control and `flight-loadgen` is the client apparatus, so a difference in either
+#     still REFUSES, for arm E as for every other arm;
+#   * arm E's own digest must still be IDENTICAL IN EVERY ROUND of arm E. That check is added
+#     with the exception, not implied by it: removing the field from the cross-arm comparison
+#     would otherwise leave arm E free to change binaries mid-set, unexamined;
+#   * and it is SAID OUT LOUD in the report — the validation block names it and
+#     `binary_table` prints every arm's digest — because a permitted exception that is
+#     invisible in the output is indistinguishable, to a reader, from an invariant that held.
+#
+# With arm E absent from `--arms` this file behaves exactly as it did before: the exception
+# costs an untouched set nothing.
+BINARY_EXCEPTION_ARM = "E"
+BINARY_EXCEPTION_BINARY = "cqlite-flight"
+BINARY_EXCEPTION_FIELD = f"binary_sha256.{BINARY_EXCEPTION_BINARY}"
+
+# THE SERVER-RSS FIELDS `ws0_flight_arm.collect_flight` PUBLISHES PER ARM (issue #3997, R6.1),
+# and the marker prefix it uses for a field that was NOT OBSERVED. The prefix is restated here
+# rather than imported — this tool imports no sibling module, and pulling in the collector would
+# drag the whole reporting path in for one string — so `test_ws0_abc_driver_guards.sh` PINS the
+# two spellings against each other. A silently diverged prefix would make every unmeasured
+# marker land in the "not a number" refusal below instead of the UNMEASURED column, which is a
+# loud failure rather than a quiet one, but it would still be the wrong failure.
+RSS_FIELDS = ("server_vm_hwm_kb", "server_vm_rss_kb")
+RSS_UNMEASURED_PREFIX = "UNMEASURED"
+
+# THE MARKER IS A GRAMMAR, NOT A PREFIX (#3997, roborev round 4), and this side stays
+# INDEPENDENT of the collector's. `startswith(RSS_UNMEASURED_PREFIX)` accepted a bare
+# "UNMEASURED", an "UNMEASUREDgarbage" and an empty-cause marker as legitimate absences, so a
+# CORRUPT session read as one that merely did not measure. The prefix stays RESTATED rather than
+# imported for the reason above — and the two implementations are now pinned in BOTH directions
+# (accept AND reject) by `test_ws0_abc_driver_guards.sh` case 5h, which drives them by import
+# rather than comparing source text. One strict reader and one loose one is the state that would
+# be indefensible; two strict independent ones, pinned against each other, is not.
+RSS_UNMEASURED_MARKER = f"{RSS_UNMEASURED_PREFIX} \u2014 "
+
+
+def is_unmeasured_marker(value) -> bool:
+    """True for a WELL-FORMED `UNMEASURED — <cause>` marker, and for nothing else.
+
+    The exact prefix — em dash and trailing space, as `ws0_flight_arm.rss_unmeasured` writes it
+    — plus a cause that is not empty or whitespace-only. The cause is the whole value of a
+    marker: it decides the operator's next action (a vanished pid is a rep to re-run, an
+    unreadable `/proc` is a box to fix), so a marker without one is a corrupt record and not an
+    honest absence.
+    """
+    if not isinstance(value, str) or not value.startswith(RSS_UNMEASURED_MARKER):
+        return False
+    return bool(value[len(RSS_UNMEASURED_MARKER):].strip())
+
 # The corpus's identity, as the session recorded it. The PATH is deliberately not compared here:
 # the driver's run fingerprint pins the path, and this tool's subject is the bytes that were
 # measured -- two sessions reading the same corpus through different mount paths are comparable,
@@ -133,6 +194,72 @@ def _require(mapping, key, where, why):
     return mapping[key]
 
 
+def read_rss_fields(raw: dict, flight_arm: str, p: pathlib.Path) -> dict:
+    """The Flight arm's two scan-end RSS figures, each THREE-VALUED (#3997, R6.1).
+
+    * a positive finite number -> a real kB observation, usable in R6.1's ratio;
+    * an `UNMEASURED - <cause>` marker string -> the sampler could not observe it (a vanished
+      pid, an unreadable `/proc/<pid>/status`, an absent field, or a driver that never sampled).
+      CARRIED THROUGH, not dropped: the tables print it, and no ratio is computed from it;
+    * an ABSENT key, or a value that is neither -> `Unreadable`, with the field named.
+
+    The absent key is a REFUSAL for the reason every other absent field here is:
+    `ws0_flight_arm.collect_flight` writes both keys UNCONDITIONALLY — an unobserved figure is
+    the marker, never a missing key — so a session lacking them was produced by something this
+    tool does not model, and a skipped comparison is exactly how the divergence this validation
+    exists to catch would pass unexamined. A ZERO is refused for the sharper reason: R6.1 is a
+    RATIO CEILING, and zero is the one value that satisfies every ceiling there is.
+    """
+    measurements = raw.get("measurements") or []
+    block = None
+    for m in measurements:
+        if m.get("temperature") == "warm" and m.get("arm") == flight_arm:
+            block = m
+            break
+    if block is None:
+        raise Unreadable(
+            f"{p}: the warm {flight_arm} measurement could not be re-read for its RSS fields"
+        )
+    out = {}
+    for field in RSS_FIELDS:
+        value = _require(
+            block, field, f"{p}: warm measurement {flight_arm!r}",
+            "R6.1 compares arm E's PEAK RSS against arm A's, so an unrecorded one is a"
+            " comparison that cannot be made — and ws0_flight_arm writes an explicit"
+            f" '{RSS_UNMEASURED_MARKER}<cause>' marker rather than omitting the key, so an"
+            " absent key is a session this tool does not model",
+        )
+        if isinstance(value, str):
+            if not is_unmeasured_marker(value):
+                # TWO CAUSES, TWO MESSAGES. A value CARRYING the marker word without its form is
+                # a CORRUPT record — something wrote a marker and lost its cause — while an
+                # arbitrary string is a session this tool does not model. Both are refusals, and
+                # the remedies differ, so they are not folded into one sentence.
+                if value.startswith(RSS_UNMEASURED_PREFIX):
+                    raise Unreadable(
+                        f"{p}: warm {flight_arm} records {field}={value!r}, which carries the"
+                        f" {RSS_UNMEASURED_PREFIX!r} word but is NOT the"
+                        f" '{RSS_UNMEASURED_MARKER}<cause>' form (exact prefix, then a non-empty"
+                        " CAUSE). A causeless or mangled marker is a CORRUPT record, not an"
+                        " honest absence: the cause is the whole value of a marker, because it"
+                        " is what decides the operator's next action. Refused rather than"
+                        " counted as an unmeasured figure."
+                    )
+                raise Unreadable(
+                    f"{p}: warm {flight_arm} records {field}={value!r}, a string that is not an"
+                    f" '{RSS_UNMEASURED_MARKER}<cause>' marker. Refused rather than"
+                    " classified as either an observation or an absence."
+                )
+            out[field] = value
+            continue
+        out[field] = _positive(
+            value, f"{p}: warm {flight_arm} {field}",
+            "it is a resident-set size in kB and the numerator or denominator of R6.1's peak-RSS"
+            " ratio; a zero or non-finite one would satisfy any ceiling it were compared with",
+        )
+    return out
+
+
 def load_session(d: pathlib.Path) -> dict:
     """One `ws0-baseline.sh` results.json, reduced to the fields this report prints.
 
@@ -169,6 +296,10 @@ def load_session(d: pathlib.Path) -> dict:
     if len(flight) != 1:
         raise Unreadable(f"{p}: expected exactly one warm flight arm, found {flight!r}")
     out["flight_arm"] = flight[0]
+    # THE FLIGHT SERVER'S SCAN-END RSS, read from the FLIGHT leg only (#3997, R6.1). The
+    # bare-scan leg starts no server, so the fields exist on the Flight measurement and nowhere
+    # else — asking for them on the control would be asking a question with no subject.
+    out["warm"][out["flight_arm"]].update(read_rss_fields(raw, out["flight_arm"], p))
     # THE RECORDED CONFIGURATION, every field REQUIRED. Note what is deliberately gone: this
     # used to read `pin.get("flight_server_cpus", pin.get("server_cpus"))`, a FALLBACK that
     # silently substituted the bare-scan pin for a session that never recorded a flight pin --
@@ -297,14 +428,104 @@ def validate_configuration(sessions, complete, arms) -> list[str]:
             " one arm's deltas.",
         )
     every = [(_tag(r, a, sessions[(r, a)]), sessions[(r, a)]) for r in complete for a in arms]
+    # ARM E'S `cqlite-flight` DIGEST IS HELD OUT OF THE CROSS-ARM COMPARISON — AND ONLY IT, AND
+    # ONLY WHEN ARM E IS IN THE SET (#3997, R3.3). Held out of EVERY arm's mapping rather than
+    # deleted from arm E's: `_refuse_unless_identical` refuses a field one record carries and
+    # another does not, so a one-sided removal would red as "NOT RECORDED" and the exception
+    # would be unusable. The held-out field is then checked TWICE below, once per direction.
+    exception_active = BINARY_EXCEPTION_ARM in arms
+    if exception_active:
+        cross_arm = [
+            (tag, {k: v for k, v in s["invariants"].items() if k != BINARY_EXCEPTION_FIELD})
+            for tag, s in every
+        ]
+    else:
+        cross_arm = [(tag, s["invariants"]) for tag, s in every]
     _refuse_unless_identical(
         "the set's CROSS-ARM INVARIANTS are not identical",
-        [(tag, s["invariants"]) for tag, s in every],
+        cross_arm,
         "If the bare-scan pin or the client pin differs between arms the DRIFT CONTROL IS GONE —"
         " the bare scan becomes a second treatment and there is nothing left to read the first"
         " one against; if the corpus identity or a binary digest differs, the arms did not"
         " measure the same thing at all.",
     )
+    if exception_active:
+        # DIRECTION 1 — EVERY OTHER ARM still shares one `cqlite-flight`. This is the half that
+        # keeps the exception NARROW: without it, holding the field out of the comparison above
+        # would have disabled the check for the whole set rather than for one arm.
+        _refuse_unless_identical(
+            f"the set's {BINARY_EXCEPTION_BINARY} digest DIFFERS between arms other than"
+            f" {BINARY_EXCEPTION_ARM}",
+            [(_tag(r, a, sessions[(r, a)]),
+              {BINARY_EXCEPTION_FIELD: _require(
+                  sessions[(r, a)]["invariants"], BINARY_EXCEPTION_FIELD,
+                  f"{_tag(r, a, sessions[(r, a)])}: `invariants`",
+                  "the arms must measure IDENTICAL BYTES; arm"
+                  f" {BINARY_EXCEPTION_ARM} is the ONE named exception (#3997 R3.3) and this"
+                  " session is not it")})
+             for r in complete for a in arms if a != BINARY_EXCEPTION_ARM],
+            f"Arm {BINARY_EXCEPTION_ARM} is the ONE permitted exception to the identical-bytes"
+            " invariant (#3997 R3.3) and it is not this pair. #3248 WITHDREW a machine-code"
+            " sub-claim for exactly this: two arms running different bytes are not one"
+            " comparison.",
+        )
+        # DIRECTION 2 — ARM E's OWN binary did not change mid-set. Its digest is out of the
+        # cross-arm comparison, so nothing else would notice a rebuild between rounds, and a
+        # per-round delta computed across two of arm E's binaries is not one arm's delta.
+        _refuse_unless_identical(
+            f"arm {BINARY_EXCEPTION_ARM}'s {BINARY_EXCEPTION_BINARY} changed within the set",
+            [(_tag(r, BINARY_EXCEPTION_ARM, sessions[(r, BINARY_EXCEPTION_ARM)]),
+              {BINARY_EXCEPTION_FIELD: _require(
+                  sessions[(r, BINARY_EXCEPTION_ARM)]["invariants"], BINARY_EXCEPTION_FIELD,
+                  f"{_tag(r, BINARY_EXCEPTION_ARM, sessions[(r, BINARY_EXCEPTION_ARM)])}:"
+                  " `invariants`",
+                  "it is the ONE digest this set permits to differ from the other arms, so it"
+                  " is the one digest nothing else would notice changing")})
+             for r in complete],
+            f"The exception permits arm {BINARY_EXCEPTION_ARM} to differ from the OTHER ARMS,"
+            " not from ITSELF: a treatment that changed mid-set is not one arm.",
+        )
+        # DIRECTION 3 — ARM E's BINARY MUST ACTUALLY DIFFER FROM THE SHARED ONE. Directions 1
+        # and 2 establish that the non-E arms share one digest and that arm E's own is stable;
+        # NEITHER establishes that the two are DIFFERENT, and the exception's whole premise is
+        # that they are. Without this, `bins-E/` built by copying the control `cqlite-flight`
+        # instead of the `--features jemalloc` one passes every check above, arm E is silently a
+        # duplicate of arm A, and the report announces a linked-allocator comparison while
+        # attributing pure run-to-run noise to the allocator — the #3248 defect class, whose
+        # machine-code sub-claim was WITHDRAWN for exactly this.
+        #
+        # The driver has a two-sided precondition that refuses identical bytes at dispatch time.
+        # That is not a substitute: this tool is run STANDALONE over a session directory some
+        # other invocation produced, so the property has to be established from the sessions
+        # themselves.
+        # ONE ROUND IS ENOUGH, and only because directions 1 and 2 ran FIRST: they establish
+        # that arm E's digest is identical in every round and that the other arms share one in
+        # every session, so round `complete[0]` is representative of both sides. Read this as
+        # ordered, not as three independent checks. (`peer_arms` rather than `others`: the
+        # declaration block below binds that name to a set of DIGESTS, and two meanings for one
+        # name in one function is how a later edit picks the wrong one.)
+        peer_arms = [a for a in arms if a != BINARY_EXCEPTION_ARM]
+        if peer_arms:
+            e_digest = sessions[(complete[0], BINARY_EXCEPTION_ARM)][
+                "invariants"][BINARY_EXCEPTION_FIELD]
+            shared_digest = sessions[(complete[0], peer_arms[0])][
+                "invariants"][BINARY_EXCEPTION_FIELD]
+            if e_digest == shared_digest:
+                raise Unreadable(
+                    f"arm {BINARY_EXCEPTION_ARM}'s {BINARY_EXCEPTION_BINARY} is the SAME BYTES"
+                    f" as every other arm's: arm {BINARY_EXCEPTION_ARM} recorded"
+                    f" {e_digest!r} and arm {peer_arms[0]} recorded {shared_digest!r}."
+                    f" Arm {BINARY_EXCEPTION_ARM} exists to measure the build that LINKS its"
+                    " allocator, so an IDENTICAL digest means it measured the CONTROL"
+                    f" program — arm {BINARY_EXCEPTION_ARM} is then a second LABEL for arm"
+                    f" {peer_arms[0]}, not a second treatment, and every figure attributed to"
+                    " the"
+                    " linked allocator below would be run-to-run noise. Most likely cause:"
+                    " `--bin-dir-e` was populated by copying the control"
+                    f" `{BINARY_EXCEPTION_BINARY}` rather than the `--features jemalloc` build."
+                    " REFUSED rather than reported: #3248 WITHDREW a machine-code sub-claim for"
+                    " exactly an arm that did not run what its label said."
+                )
     _refuse_unless_identical(
         "the set's ADMISSION TRIPLE is not identical across arms",
         [(tag, s["admission"]) for tag, s in every],
@@ -314,20 +535,88 @@ def validate_configuration(sessions, complete, arms) -> list[str]:
         " with the flight pin and a moved ceiling is a second treatment.",
     )
     inv = sessions[(complete[0], arms[0])]
-    return [
+    # THE COUNT IS THE NUMBER ACTUALLY COMPARED ACROSS ARMS, taken from the mapping that was
+    # compared — not from the session's full invariant set. With arm E in the set one field is
+    # held out by the exception, and a line claiming all 7 while 6 were compared would be the
+    # census overstating its own subject.
+    compared = len(cross_arm[0][1]) if cross_arm else len(inv["invariants"])
+    lines = [
         "Configuration VALIDATED over every aggregated (round, arm):"
         f" {len(every)} session(s) = {len(complete)} pairable round(s) x {len(arms)} arm(s).",
         "",
         f"* per-arm TREATMENT stability, all of {', '.join(TREATMENT_FIELDS)}: identical in"
         " every round of each arm.",
-        f"* CROSS-ARM invariants, all {len(inv['invariants'])} of them"
+        f"* CROSS-ARM invariants, all {compared} of them"
         f" ({', '.join(PIN_INVARIANT_FIELDS)}, the corpus identity and every measured binary's"
         " sha256): identical in every session.",
         f"* the ADMISSION TRIPLE ({', '.join(ADMISSION_FIELDS)}): identical in every session.",
         "* SCOPE: the aggregated sessions only. A round dropped as incomplete contributes to no"
         " figure below and is not examined.",
-        "",
     ]
+    # THE EXCEPTION IS DECLARED WHERE THE INVARIANT IS DECLARED, in both states. Saying nothing
+    # when arm E is absent would leave a reader unable to tell "the exception did not apply" from
+    # "this build has no exception", and the whole risk of a permitted exception is that it is
+    # read as an invariant that held.
+    if exception_active:
+        digests = sorted({
+            str(sessions[(r, BINARY_EXCEPTION_ARM)]["invariants"][BINARY_EXCEPTION_FIELD])
+            for r in complete
+        })
+        others = sorted({
+            str(sessions[(r, a)]["invariants"][BINARY_EXCEPTION_FIELD])
+            for r in complete for a in arms if a != BINARY_EXCEPTION_ARM
+        })
+        # THE DIFFER-ASSERTION IS REPORTED FROM WHETHER IT RAN, not from the fact that the
+        # exception is active — it is skipped for an arm-E-only set, which has no peer digest to
+        # differ from, and a sentence claiming it held there would assert a check that did not
+        # happen. Derived from the SAME `peer_arms` the assertion used, so the sentence cannot
+        # name an arm the check did not compare.
+        if peer_arms:
+            differ_line = (
+                "    * AND ENFORCED IN THE OTHER DIRECTION: the two digests above are asserted"
+                f" to DIFFER. Equal digests would mean arm {BINARY_EXCEPTION_ARM} measured the"
+                " SAME program as every other arm — a second LABEL for arm"
+                f" {peer_arms[0]}, not a second treatment — so that set is REFUSED rather than"
+                " reported as a linked-allocator comparison."
+            )
+        else:
+            differ_line = (
+                "    * NOT ASSERTED HERE: arm"
+                f" {BINARY_EXCEPTION_ARM} is the ONLY arm in this set, so there is no shared"
+                " digest for its own to be compared against and the differ-assertion was"
+                " SKIPPED. Nothing below rests on arm"
+                f" {BINARY_EXCEPTION_ARM} having measured a different program from any other"
+                " arm, because no other arm was measured."
+            )
+        lines += [
+            f"* **ARM {BINARY_EXCEPTION_ARM} RAN A DIFFERENT `{BINARY_EXCEPTION_BINARY}` BINARY"
+            " — the ONE permitted exception to the identical-bytes invariant (#3997 R3.3).**"
+            f" Arm {BINARY_EXCEPTION_ARM} measures the build that LINKS its allocator, which is"
+            " a different program by construction; every other arm's flags select an allocator"
+            " by LD_PRELOAD into ONE binary. Both digests, in full:",
+            f"    * arm {BINARY_EXCEPTION_ARM}: `{'`, `'.join(digests)}`",
+            f"    * every other arm ({', '.join(a for a in arms if a != BINARY_EXCEPTION_ARM)}):"
+            f" `{'`, `'.join(others)}`",
+            "    * STILL ENFORCED: that digest is identical in every round of arm"
+            f" {BINARY_EXCEPTION_ARM}; it is identical across all the OTHER arms; and every"
+            " other measured binary — the bare-scan bench (the drift control) and the load"
+            " generator — is identical in EVERY session, arm"
+            f" {BINARY_EXCEPTION_ARM} included. Any other cross-arm binary difference is still a"
+            " REFUSAL.",
+            differ_line,
+            f"    * NOT COVERED BY IT: arm {BINARY_EXCEPTION_ARM}'s recorded `flight_allocator`"
+            " reads `system` — nothing is preloaded, because the allocator is linked — so the"
+            " configuration table CANNOT show the allocator difference and the binary digest is"
+            " the only place it appears. Read the digest table, not the allocator column.",
+        ]
+    else:
+        lines.append(
+            f"* the cross-arm binary exception for arm {BINARY_EXCEPTION_ARM} (#3997 R3.3) is"
+            f" NOT IN PLAY: arm {BINARY_EXCEPTION_ARM} is not in this set, so EVERY arm was"
+            " required to have measured identical bytes and did."
+        )
+    lines.append("")
+    return lines
 
 
 def control_table(sessions, complete, arms) -> list[str]:
@@ -491,6 +780,162 @@ def layer2(sessions, complete, arms, baseline) -> list[str]:
     return lines
 
 
+def _rss_series(sessions, complete, arm, field):
+    """One arm's RSS series over the pairable rounds: (measured values, unmeasured causes).
+
+    A marker goes to the SECOND list carrying its round, never into the first as a zero and
+    never dropped silently. The caller publishes a figure only when the second list is EMPTY —
+    see `rss_table` for why a partial series is refused rather than medianed.
+    """
+    values, unmeasured = [], []
+    for r in complete:
+        s = sessions[(r, arm)]
+        value = s["warm"][s["flight_arm"]][field]
+        if isinstance(value, str):
+            unmeasured.append(f"r{r}: {value}")
+        else:
+            values.append(value)
+    return values, unmeasured
+
+
+def _rss_cell(values, unmeasured, complete):
+    """A published median, or an UNMEASURED cell NAMING how many rounds are missing.
+
+    A MEDIAN OVER A SUBSET OF THE ROUNDS IS NOT PUBLISHED, and that is a decision rather than
+    strictness for its own sake: the whole table is PAIRED BY ROUND, so an arm figure taken over
+    rounds 1 and 3 sitting beside a baseline figure taken over 1, 2 and 3 is not a paired
+    comparison, and R6.1's ceiling would then be applied to two different experiments. The
+    partial state is therefore reported as unmeasured WITH ITS COUNT, so a reader can see the
+    difference between "no sample at all" and "two of three rounds".
+    """
+    if unmeasured:
+        return f"UNMEASURED ({len(values)} of {len(complete)} round(s) observed)"
+    return f"{statistics.median(values):,.0f}"
+
+
+def rss_table(sessions, complete, arms, baseline) -> list[str]:
+    """The server's scan-end RSS per arm — R6.1's input, and only its input (#3997).
+
+    NO VERDICT IS COMPUTED HERE. The pre-registered criterion (proposal.md) is a JOINT one
+    over throughput AND memory, its thresholds differ per outcome (<=1.10x for SHIP-default,
+    <=1.25x for SHIP-opt-in) and the dhat producer budget is a third term this tool never sees.
+    So the thresholds are STATED in the caption and the measured ratio is printed beside them;
+    turning that into a PASS would be this tool asserting a product decision it cannot see two
+    thirds of.
+    """
+    lines = [
+        "## Server RSS at scan end (#3997 R6.1 — the memory half of the kill criterion)",
+        "",
+        "`VmHWM` is the kernel's PEAK-RSS high-water mark for the Flight server process, so a"
+        " scan-end read is the rep's PEAK and the criterion's subject. `VmRSS` is ONE"
+        " INSTANTANEOUS SAMPLE at scan end — not a mean, not a steady-state estimate — printed"
+        " beside it because the shape of peak-vs-end is what separates \"the allocator retains"
+        " more\" from \"the allocator peaked higher once\"; do not read it as an average.",
+        "",
+        "The pre-registered thresholds, for reference and NOT applied here: VmHWM <= 1.10x arm"
+        f" {baseline} for SHIP-default, <= 1.25x for SHIP-opt-in, above that DO-NOT-SHIP. The"
+        " criterion is JOINT with throughput and with the dhat producer budget, neither of which"
+        " this tool can see, so it prints the ratio and states no verdict.",
+        "",
+    ]
+    rows = []
+    for a in arms:
+        hwm, hwm_absent = _rss_series(sessions, complete, a, "server_vm_hwm_kb")
+        rss, rss_absent = _rss_series(sessions, complete, a, "server_vm_rss_kb")
+        base_hwm, base_absent = _rss_series(sessions, complete, baseline,
+                                            "server_vm_hwm_kb")
+        if a == baseline:
+            ratio = "baseline"
+        elif hwm_absent or base_absent:
+            # NOT MEASURABLE, NAMED — never a ratio computed from the rounds that happen to
+            # have both, which would be a paired figure over an unstated pairing.
+            ratio = (
+                f"NOT MEASURABLE ({len(hwm_absent)} round(s) of {a},"
+                f" {len(base_absent)} of {baseline} unobserved)"
+            )
+        else:
+            # PAIRED PER ROUND, then medianed — the same shape as every other delta in this
+            # report, and for the same reason: the pairing is the control for drift.
+            paired = []
+            for r, arm_value, base_value in zip(complete, hwm, base_hwm):
+                divisor = _positive(
+                    base_value,
+                    f"the baseline arm {baseline}'s VmHWM in round {r}",
+                    "it is the divisor of every paired peak-RSS ratio in this table")
+                paired.append(arm_value / divisor)
+            ratio = f"{statistics.median(paired):.4f}x"
+        rows.append([
+            a,
+            _rss_cell(hwm, hwm_absent, complete),
+            fmt_spread(hwm) if not hwm_absent else "n/a (unmeasured)",
+            _rss_cell(rss, rss_absent, complete),
+            fmt_spread(rss) if not rss_absent else "n/a (unmeasured)",
+            ratio,
+        ])
+    lines.append(table(rows, ["arm", "VmHWM kB (median)", "VmHWM spread",
+                              "VmRSS kB (median, ONE sample per rep)", "VmRSS spread",
+                              f"paired VmHWM vs {baseline}"]))
+    lines.append("")
+    # THE CAUSES, IN FULL, WHEN THERE ARE ANY. A cell reading UNMEASURED tells a reader the
+    # figure is absent and nothing about what to do next, and the remedy is entirely determined
+    # by the cause — a vanished pid is a rep to re-run, an unsampled session is a driver that
+    # never called the sampler.
+    causes = []
+    for a in arms:
+        for field in RSS_FIELDS:
+            _, absent = _rss_series(sessions, complete, a, field)
+            causes += [f"* arm {a} `{field}` {c}" for c in absent]
+    if causes:
+        lines.append("Every UNMEASURED figure above, with the cause the sampler recorded:")
+        lines.append("")
+        lines += causes
+        lines.append("")
+    else:
+        lines.append(f"All {len(arms) * len(complete)} session(s) yielded BOTH RSS figures:"
+                     " 0 UNMEASURED RECOGNISED.")
+        lines.append("")
+    return lines
+
+
+def binary_table(sessions, complete, arms) -> list[str]:
+    """Which `cqlite-flight` each arm measured, printed rather than left to the invariant.
+
+    This table exists because of #3997 R3.3: arm E is a NAMED exception to the identical-bytes
+    invariant, and an exception a reader cannot see is one they will assume did not apply. It is
+    printed for EVERY set, arm E present or not — a table that appears only in the exceptional
+    case teaches nobody what the normal case looks like, and the normal case ("one digest, every
+    arm") is the invariant itself, stated as data.
+    """
+    lines = [
+        f"## The measured `{BINARY_EXCEPTION_BINARY}` binary, per arm (#3997 R3.3)",
+        "",
+        "Read back from each session's own `binary_provenance`, never from the driver's"
+        " intention. Every arm shares ONE digest unless arm"
+        f" {BINARY_EXCEPTION_ARM} is present, which is the single permitted exception — its"
+        " allocator is LINKED, so it is a different program and its `flight_allocator` column"
+        " still reads `system`. Any OTHER cross-arm difference, in this binary or in the"
+        " bare-scan bench or the load generator, is a REFUSAL and this report was not produced.",
+        "",
+    ]
+    rows = []
+    reference = None
+    for a in arms:
+        digests = sorted({
+            str(sessions[(r, a)]["invariants"][BINARY_EXCEPTION_FIELD]) for r in complete
+        })
+        if a != BINARY_EXCEPTION_ARM and reference is None:
+            reference = digests[0]
+        rows.append([
+            a,
+            ", ".join(digests),
+            "PERMITTED EXCEPTION (#3997 R3.3) — linked allocator, a DIFFERENT binary"
+            if a == BINARY_EXCEPTION_ARM
+            else ("the shared binary" if digests[0] == reference else "DIFFERS"),
+        ])
+    lines.append(table(rows, ["arm", "sha256", "relation to the other arms"]))
+    lines.append("")
+    return lines
+
 def config_table(sessions, complete, arms) -> list[str]:
     """What each arm actually WAS, read back from its own artifacts.
 
@@ -575,6 +1020,8 @@ def main(argv=None) -> int:
     lines += control_table(sessions, complete, arms)
     lines += layer1(sessions, complete, arms, args.baseline)
     lines += layer2(sessions, complete, arms, args.baseline)
+    lines += rss_table(sessions, complete, arms, args.baseline)
+    lines += binary_table(sessions, complete, arms)
     lines += config_table(sessions, complete, arms)
 
     text = "\n".join(lines)

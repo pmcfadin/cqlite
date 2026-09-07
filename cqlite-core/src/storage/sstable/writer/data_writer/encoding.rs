@@ -145,8 +145,18 @@ pub(crate) fn len_as_i32(len: usize) -> Result<i32> {
 /// Serialize a collection element, rejecting null (CQL semantics: lists/sets cannot contain null).
 ///
 /// Thin wrapper over [`serialize_collection_element_into`] preserving the
-/// owned-`Vec` signature that the comparator fallback (`collection_order`) and
-/// tests depend on.
+/// owned-`Vec` signature the writer's test fixtures depend on for building an
+/// expected SET cell path.
+///
+/// TEST-ONLY since issue #4106, and gated so `-D dead-code` says so honestly:
+/// the last production caller was `write_set_complex_cells`, which now routes
+/// its cell path through the schema-aware
+/// [`super::serialize_set_cell_path_element_into`] (which still delegates every
+/// NON-sentinel element to the `_into` twin, so no bytes changed). Same
+/// treatment, and the same reason, as
+/// `row_decoder::complex_column::cell_path_key::parse_cell_path_key`: an
+/// `#[allow(dead_code)]` would silence a true statement instead of stating it.
+#[cfg(test)]
 pub(crate) fn serialize_collection_element(
     value: &Value,
     collection_kind: &str,
@@ -197,6 +207,46 @@ pub(crate) fn serialize_value(value: &Value) -> Result<Vec<u8>> {
 pub(crate) fn serialize_value_into(value: &Value, out: &mut Vec<u8>) -> Result<()> {
     match value {
         Value::Null => {}
+        // EMPTY-BUFFER SENTINEL (issue #3805): REFUSED HERE.
+        //
+        // This function is TYPE-BLIND — it takes a `Value` and no declared type
+        // — and it is reached from every generic write context: a regular cell
+        // value, a list/set element, a frozen collection's key/value/element, a
+        // tuple field, a UDT member, and the comparator's byte fallback. In NONE
+        // of those does writing zero bytes mean what the sentinel means
+        // (roborev job 449 finding D):
+        //
+        //  * as a CELL VALUE, zero bytes plus `HAS_EMPTY_VALUE_MASK`
+        //    (`db/rows/Cell.java:264`) reads back as `Value::Null`, not as the
+        //    sentinel — the value would silently change type on the round trip;
+        //  * in a length-prefixed COLLECTION element or TUPLE field, a
+        //    zero-length element is the empty value of the ELEMENT'S declared
+        //    type, which for `text`/`blob` is a legal MEANINGFUL empty and for
+        //    the four strict families (`tinyint`/`smallint`/`date`/`time`) is
+        //    CORRUPTION Cassandra's own `validate` throws on. This function
+        //    cannot tell which, because it never sees the declared type;
+        //  * and there is nowhere to check the sentinel's TAG against anything,
+        //    so a mismatched tag would be written as if it agreed.
+        //
+        // Where the declared type is NOT available, REFUSE rather than guess
+        // (no-heuristics, issue #28): refusing beats writing bytes that read back
+        // as something else. The legal positions — a MULTICELL collection's CELL
+        // PATH (a map's KEY, a set's ELEMENT), where the length IS carried by the
+        // enclosing framing (an unsigned VInt,
+        // `db/marshal/CollectionType.java:361-382`) and the declared component
+        // type IS known — have their own schema-aware entry points in
+        // [`super::cell_path`] (#3805 for the map half, #4106 for the set half).
+        Value::Empty(tag) => {
+            return Err(Error::InvalidInput(format!(
+                "an empty-buffer sentinel (`{}`, issue #3805) has no type-blind \
+                 serialization: zero bytes mean a different thing in every generic \
+                 context, so it is legal only on a MULTICELL collection's cell path \
+                 via `serialize_map_cell_path_key_into` / \
+                 `serialize_set_cell_path_element_into`, where the declared component \
+                 type is known and the tag can be validated against it (issue #28)",
+                tag.cql_name()
+            )))
+        }
         Value::Boolean(b) => out.push(if *b { 1 } else { 0 }),
         Value::TinyInt(n) => out.push(*n as u8),
         Value::SmallInt(n) => out.extend_from_slice(&n.to_be_bytes()),
@@ -390,6 +440,9 @@ pub(crate) fn write_cell_value_into(buf: &mut Vec<u8>, column: &str, value: &Val
 pub(crate) fn infer_cql_type_from_value(value: Option<&Value>) -> CqlType {
     match value {
         None | Some(Value::Null) => CqlType::Text, // Default for NULL
+        // The sentinel CARRIES its declared type, so inference is exact here
+        // rather than a `text` fallback (issue #3805).
+        Some(Value::Empty(ty)) => ty.cql_type(),
         Some(Value::Boolean(_)) => CqlType::Boolean,
         Some(Value::TinyInt(_)) => CqlType::TinyInt,
         Some(Value::SmallInt(_)) => CqlType::SmallInt,

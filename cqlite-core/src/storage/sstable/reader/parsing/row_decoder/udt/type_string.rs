@@ -191,10 +191,33 @@ impl V5CompressedLegacyParser {
             .map_err(|e| Error::schema(format!("Invalid UTF-8 in UDT name '{}': {}", hex, e)))
     }
 
-    /// Parse a Cassandra type string into a CqlType.
+    /// Parse a Cassandra MARSHAL type string into a [`CqlType`].
     /// Handles: UTF8Type, Int32Type, ListType(...), SetType(...), MapType(...), UserType(...), FrozenType(...)
-    #[allow(dead_code)]
-    fn parse_cassandra_type(type_str: &str) -> Result<CqlType> {
+    ///
+    /// This is the crate's ONE marshal-string -> [`CqlType`] entry point, and it
+    /// is `pub(crate)` because both the READ and the WRITE side need it: the
+    /// empty-buffer sentinel's admission on a multicell collection's cell path is
+    /// decided against the DECLARED component type — a map's KEY (issue #3805) or
+    /// a set's ELEMENT (issue #4106) — and the column's declared type arrives in
+    /// either spelling, a CQL `map<K,V>`/`set<T>` or this marshal form. Both
+    /// sides reach it through ONE resolver,
+    /// `crate::storage::sstable::cell_path_component::resolve_declared_cell_path_type`.
+    /// It is deliberately THIS parser and not the string->string
+    /// `convert_marshal_type_to_cql`: the table above is derived name-by-name
+    /// from `cql3/CQL3Type.java`'s `Native` enum at `cassandra-5.0.8` and
+    /// enforces the package rule, so `IntegerType` is `varint` (not `int`) and a
+    /// third-party class sharing a native simple name is refused rather than
+    /// decoded as the type it resembles.
+    ///
+    /// # NO `allow(dead_code)`, conditional or otherwise
+    /// It carried `#[cfg_attr(not(feature = "write-support"), allow(dead_code))]`
+    /// while its ONLY caller was the write-side gate. #4106 gave it an
+    /// UNCONDITIONAL caller on the READ path (the set cell-path admission
+    /// resolves from the complete declared type), so the attribute would now
+    /// silence nothing and merely assert something false. Do not restore it: if
+    /// this ever becomes unreachable again, the honest fix is to say so at the
+    /// site that stopped calling it.
+    pub(crate) fn parse_cassandra_type(type_str: &str) -> Result<CqlType> {
         Self::parse_cassandra_type_with_depth(type_str, 0)
     }
 
@@ -280,6 +303,26 @@ impl V5CompressedLegacyParser {
                 components.push(Self::parse_cassandra_type_with_depth(part, depth + 1)?);
             }
             return Ok(CqlType::Tuple(components));
+        }
+
+        // VectorType — STRUCTURAL, so it is PARSED and not name-matched (issue
+        // #4114). Its marshal string is
+        // `getClass().getName() + stringifyVectorParameters(type, dimension)`
+        // (`cassandra-5.0.8` VectorType.java:339-342 / TypeParser.java:239-242),
+        // i.e. `VectorType(<element> , <n>)`. `depth + 1` like every other
+        // structural arm.
+        //
+        // Before this arm the whole type collapsed to `CqlType::Custom`, which the
+        // decoder refuses by name — honest, but it meant a `vector<float, n>` UDT
+        // FIELD could not be read at all. The dimension is carried into
+        // `CqlType::Vector` because the on-disk value has no element count and no
+        // per-element framing for a fixed-width element: `n` is the only thing that
+        // makes it parseable (#28).
+        if let Some(args) = Self::marshal_parameterised_inner(type_str, "VectorType") {
+            let inner = Self::extract_inner_parens(args)?;
+            let parsed = crate::schema::vector_type::split_vector_args(&inner, type_str)?;
+            let element = Self::parse_cassandra_type_with_depth(parsed.element, depth + 1)?;
+            return Ok(CqlType::Vector(Box::new(element), parsed.dimension));
         }
 
         // ReversedType — a COMPARISON wrapper with no layout of its own:

@@ -158,6 +158,36 @@ impl SchemaParser {
             CqlType::Tuple(field_types) => self.parse_tuple(data, field_types, comparator),
             CqlType::Udt(type_name, fields) => self.parse_udt(data, type_name, fields, comparator),
             CqlType::Frozen(inner_type) => self.parse_frozen(data, inner_type, comparator),
+            // `vector<float, n>` — issue #4114, roborev job 117.
+            //
+            // Needed because `comparator_to_cql_type` now RECONSTRUCTS
+            // `CqlType::Vector` (that was job 112's fix), so this function started
+            // RECEIVING vectors it had no arm for and answered
+            // "Unsupported type for schema-driven parsing" from the `_` arm below.
+            // Fixing the comparator without fixing its CONSUMER left
+            // `SchemaParser::parse_column_value` unable to read a vector column.
+            //
+            // It failed CLOSED rather than blobbing, so this was an INCOMPLETE path
+            // and not a mis-decode — but incomplete is still unreadable, which is
+            // exactly what #4114 exists to remove.
+            //
+            // `data` is the whole value here (the caller has already delimited it), so
+            // the EXACT-width rule applies: `4 * n` bytes, no length prefix
+            // (`VectorType.java:94-101`, `:445-460`). Delegates to the ONE shared
+            // decoder rather than re-implementing the framing, and refuses a
+            // non-float element BY NAME first (AC4).
+            CqlType::Vector(element, dimension) => {
+                crate::schema::vector_type::vector_value::require_float_element(
+                    element, *dimension,
+                )?;
+                let value = crate::schema::vector_type::vector_value::decode_framed_float_vector(
+                    data,
+                    element,
+                    *dimension,
+                    "schema-driven vector column",
+                )?;
+                Ok((value, data.len()))
+            }
             _ => Err(Error::Schema(format!(
                 "Unsupported type for schema-driven parsing: {:?}",
                 cql_type
@@ -565,6 +595,13 @@ impl SchemaParser {
                 let inner_type = self.comparator_to_cql_type(inner_comparator)?;
                 Ok(CqlType::Frozen(Box::new(inner_type)))
             }
+            // Round-trips the metadata: element + dimension were carried precisely so
+            // this reconstruction needs no re-derivation (#4114, roborev job 112).
+            ComparatorType::Vector { element, dimension } => Ok(CqlType::Vector(
+                Box::new(self.comparator_to_cql_type(element)?),
+                *dimension,
+            )),
+
             ComparatorType::Custom(type_name) => Ok(CqlType::Custom(type_name.clone())),
         }
     }

@@ -42,4 +42,3 @@ path = "../../cqlite-core"
 [features]
 default = []
 benchmarks = []
-ci_zero_tolerance = []

@@ -117,6 +117,9 @@ impl TypeInferenceEngine {
             Value::Decimal { .. } => "decimal".to_string(),
             Value::Duration { .. } => "duration".to_string(),
             Value::Tombstone(_) => "tombstone".to_string(),
+            // The sentinel carries its declared type, so inference reports the
+            // REAL CQL type name rather than a placeholder (issue #3805).
+            Value::Empty(ty) => ty.cql_name().to_string(),
         }
     }
 

@@ -91,6 +91,7 @@ kit-dashboard-drift
 binding-unwind-profile
 pub-surface
 dep-duplicates
+features-load-bearing
 tooling-tests
 minimal-build
 all-features-check

@@ -103,8 +103,25 @@ pub use model::{CellData, ComplexDeletion, MergeEntry, MergeStats, MergeStep, Ro
 /// collapse per-element collection cells back into a single `Value::List` /
 /// `Value::Set` / `Value::Map` for read consumers that key cells by column name.
 mod read_assembly;
+/// ONE authority for "does this column have a cell that SURVIVES reconciliation?" — the
+/// Flight row-visibility decision asks this for a column whose liveness is ambiguous
+/// from timestamps alone, instead of guessing from raw cells (#2339, roborev job 128).
 #[cfg(feature = "write-support")]
-pub use read_assembly::assemble_read_cells;
+pub use read_assembly::column_has_surviving_live_cell;
+/// ONE authority for "can the merged arm ORDER this composite?" — the bypass
+/// divergence predicate in `cqlite-flight` asks this rather than keeping its own leaf
+/// list, so the two arms cannot disagree (#4063, roborev job 116 F1).
+///
+/// Gated like every sibling re-export in this file. That is REDUNDANT today — both
+/// `storage::write_engine` and this `merge` module are already
+/// `#[cfg(feature = "write-support")]`, so nothing here compiles without it — and it
+/// is kept because the neighbours do it and because the redundancy is what makes the
+/// line survive a change to the enclosing gate (roborev job 118, whose stated
+/// `--no-default-features` compile failure does NOT reproduce for that reason).
+#[cfg(feature = "write-support")]
+pub use read_assembly::first_unorderable_leaf;
+#[cfg(feature = "write-support")]
+pub use read_assembly::{assemble_read_cells, assemble_read_cells_with_udts, UdtScope};
 
 /// Single-partition point-read merge builder (issue #2207): assembles a
 /// [`KWayMerger`] from per-candidate single-partition runs (seeked or key-filtered)

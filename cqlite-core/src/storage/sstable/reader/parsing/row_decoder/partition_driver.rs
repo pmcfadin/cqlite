@@ -24,6 +24,13 @@
 
 use super::*;
 
+// Issue #3928: the partition-HEADER arm SHARED by this driver and
+// `compaction_stream`'s row-granular sibling, split out when it gained a
+// tolerance decision (campsite rule, epic #1116). Re-exported so that sibling
+// can reach the one definition.
+mod header_arm;
+pub(super) use header_arm::DriverHeader;
+
 /// Issue #932 (K1): the single row-write-timestamp coexistence decision.
 ///
 /// A `HAS_DELETION` row may ALSO carry a liveness timestamp (surviving cells
@@ -391,42 +398,18 @@ impl V5CompressedLegacyParser {
             return Ok(ParseStep::Done);
         }
 
-        // #1741 (roborev HIGH): size the header need-more decision correctly for
-        // the oa/da DeletionTime form via the authoritative discriminator peek,
-        // so a deleted header split across a NON-FINAL chunk returns `NeedMore`
-        // instead of being mis-parsed and skipped (which desynced the scan and,
-        // on compaction, dropped a partition tombstone).
-        match self.partition_header_readiness(data) {
-            PartitionHeaderReadiness::Malformed => return Ok(ParseStep::Emitted(1)),
-            PartitionHeaderReadiness::Incomplete => {
-                return Ok(if at_final_chunk {
-                    ParseStep::Done
-                } else {
-                    ParseStep::NeedMore
-                });
-            }
-            PartitionHeaderReadiness::Ready => {}
-        }
-
-        let (partition_key, mut offset, partition_deletion) = match self
-            .parse_partition_header_full(data, 0)
-        {
-            Ok(v) => v,
-            // Defense-in-depth: `Ready` guarantees the DeletionTime is fully
-            // present, so a parse failure here cannot be truncation. On a
-            // non-final chunk only re-request bytes if the header is still
-            // incomplete; otherwise skip a byte to resynchronise (NeedMore on
-            // a complete buffer would loop forever). Under `Ready` this stays
-            // the legacy skip-a-byte resync.
-            Err(_) => {
-                if !at_final_chunk
-                    && self.partition_header_readiness(data) == PartitionHeaderReadiness::Incomplete
-                {
-                    return Ok(ParseStep::NeedMore);
-                }
-                return Ok(ParseStep::Emitted(1));
-            }
-        };
+        // Issue #3928 / #1741: the header arm — readiness classification, the
+        // real parse, and (at the final chunk) the REFUSAL that replaced the
+        // silent byte resync — is shared with the row-granular streaming driver
+        // (`header_arm.rs`). `?` propagates the refusal; the three tolerant
+        // answers are translated into THIS driver's advance vocabulary here.
+        let (partition_key, mut offset, partition_deletion) =
+            match self.driver_partition_header(data, at_final_chunk)? {
+                DriverHeader::Parsed(key, after_header, deletion) => (key, after_header, deletion),
+                DriverHeader::Done => return Ok(ParseStep::Done),
+                DriverHeader::NeedMore => return Ok(ParseStep::NeedMore),
+                DriverHeader::Resync => return Ok(ParseStep::Emitted(1)),
+            };
 
         // Issue #1046: per-PARTITION resolution build (this driver is re-entered
         // once per partition by the sliding-window caller; allocations scale with

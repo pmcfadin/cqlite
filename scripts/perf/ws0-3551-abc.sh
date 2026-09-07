@@ -31,6 +31,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CORPUS=""
 BIN_DIR=""
+# ARM E's OWN BINARY SET (#3997). Empty = arm E is not part of this set, and the arm list below
+# does not carry it. See `arm_bin_dir` for why arm E is a second --bin-dir rather than a
+# per-binary override, and for the invariant this driver enforces on it up front.
+BIN_DIR_E=""
 OUT=""
 ROUNDS=3
 STEP_DURATION="45s"
@@ -52,6 +56,18 @@ PIN_B="2,3"
 # would buy nothing but a second failure mode.
 MEASURED_BINARIES=(ws0-scan-bench cqlite-flight flight-loadgen)
 
+# ARM E (#3997) — THE ONE ARM THAT MEASURES DIFFERENT BYTES, AND THE ONE THAT IS OPT-IN.
+#
+# Its id and its differing binary are named ONCE here because three places must agree on them:
+# this driver (which arm gets which --bin-dir), `ws0_abc_aggregate.py` (whose cross-arm binary
+# invariant grants this arm — and only this arm, on this binary — a NAMED exception), and
+# `scripts/tests/test_ws0_abc_driver_guards.sh` (which asserts BOTH directions of that
+# exception). The aggregator states the same pair in its own constants; the guard suite reads
+# both and refuses a disagreement, because two sides of one exception silently naming different
+# arms is how a narrow exception becomes a disabled check.
+ARM_E="E"
+ARM_E_BINARY="cqlite-flight"
+
 usage() {
   cat <<EOF
 ws0-3551-abc.sh — issue #3551 interleaved SMT-unpin + allocator trial
@@ -60,7 +76,21 @@ ws0-3551-abc.sh — issue #3551 interleaved SMT-unpin + allocator trial
   --bin-dir DIR      ONE frozen binary set measured by EVERY arm. REQUIRED, and required to be
                      one directory: the arms must not differ in their binaries (#3248 withdrew a
                      machine-code claim for exactly that reason), so this is deliberately not
-                     per-arm.
+                     per-arm. ARM E is the ONE exception, and it is opt-in — see --bin-dir-e.
+  --bin-dir-e DIR    OPTIONAL, and giving it is what ADDS ARM E to this set (#3997). A SECOND
+                     frozen binary set whose $ARM_E_BINARY is a DIFFERENT build — the linked
+                     jemalloc #[global_allocator] — and whose other measured binaries are the
+                     SAME BYTES as --bin-dir's. Both halves are CHECKED from the digests before
+                     anything is measured: an identical $ARM_E_BINARY would publish two labels
+                     for one treatment, and a differing ws0-scan-bench or flight-loadgen would
+                     move the drift control or the client apparatus, which is a second treatment.
+                     AND THE ALLOCATOR IS ASKED OF BOTH BINARIES, not inferred from the digests:
+                     \`$ARM_E_BINARY --version\` must report 'allocator: system' in --bin-dir and
+                     'allocator: jemalloc' in --bin-dir-e (R2.1), before anything runs. A digest
+                     difference proves DIFFERENT BYTES and never 'jemalloc' — any unrelated
+                     rebuild satisfies it — and /proc/<pid>/maps cannot see a statically linked
+                     allocator, so this surface is the only thing that can tell them apart.
+                     Omit it and the set is A/B/C0/C/D exactly as before.
   --out DIR          Where the r<N>-<arm>/ session dirs go. REQUIRED. A (round, arm) that
                      already holds a results.json is SKIPPED, so an interrupted set resumes
                      instead of starting over — which matters on a shared box. The resume is
@@ -84,6 +114,17 @@ what is attributable; arm C differs from arm A in BOTH axes and on its own is no
   1 phys core $PIN_A     A            D
   2 phys cores $PIN_B    B            C
   C0 = B + MALLOC_ARENA_MAX=$ARENA_MAX (#3217 partC F1-AC2's pre-registered arena experiment)
+  E  = arm A's FLAGS EXACTLY, measured against --bin-dir-e's binary set (#3997, R3.1/R3.3).
+       Present only when --bin-dir-e is given. Arms A/B/C0/C/D vary the allocator by
+       LD_PRELOAD into one binary, which is what let #3551 hold every arm's bytes identical;
+       arm E is the SHIPPED form — jemalloc LINKED as the binary's #[global_allocator] — so it
+       is the first arm that legitimately runs different bytes from arm A. Its flags say
+       --flight-allocator system because nothing is preloaded: the per-rep check then asserts
+       an EMPTY LD_PRELOAD and no jemalloc *mapping*, both of which a statically linked
+       allocator satisfies. So the allocator column of the aggregate's configuration table
+       reads 'system' for arm E too, and the allocator difference is visible ONLY as the
+       binary digest — which is why the aggregate prints those digests per arm rather than
+       leaving arm E's treatment to be inferred from a flag that cannot show it.
 
 \$OUT/abc-run.json is this set's RUN FINGERPRINT: the corpus path AND its recorded Data.db
 sha256 + row count, the --bin-dir path AND a digest of every measured binary in it, the arm set
@@ -101,6 +142,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --corpus) CORPUS="${2:-}"; shift 2 ;;
     --bin-dir) BIN_DIR="${2:-}"; shift 2 ;;
+    --bin-dir-e) BIN_DIR_E="${2:-}"; shift 2 ;;
     --out) OUT="${2:-}"; shift 2 ;;
     --rounds) ROUNDS="${2:-}"; shift 2 ;;
     --step-duration) STEP_DURATION="${2:-}"; shift 2 ;;
@@ -120,10 +162,168 @@ done
 [[ "$ARENA_MAX" =~ ^[1-9][0-9]*$ ]] || { echo "FATAL: --arena-max must be a positive integer, got '$ARENA_MAX'" >&2; exit 2; }
 [[ -d "$CORPUS" ]]  || { echo "FATAL: --corpus '$CORPUS' is not a directory" >&2; exit 2; }
 [[ -d "$BIN_DIR" ]] || { echo "FATAL: --bin-dir '$BIN_DIR' is not a directory" >&2; exit 2; }
+# Checked HERE, with the other argument checks and BEFORE the first side effect below, for this
+# file's standing reason: refusing an impossible configuration AFTER acting on it is the defect.
+[[ -z "$BIN_DIR_E" || -d "$BIN_DIR_E" ]] \
+  || { echo "FATAL: --bin-dir-e '$BIN_DIR_E' is not a directory" >&2; exit 2; }
+
+# ARM E'S TREATMENT IS ASKED OF THE BINARY, NEVER INFERRED FROM ITS BYTES (#3997, R2.1;
+# roborev round 2, job 132).
+#
+# The digest precondition below establishes that arm E's $ARM_E_BINARY is a DIFFERENT build from
+# the control's. "Different" is not "jemalloc": a rebuild with another feature set, a stale
+# binary from another branch, or any unrelated rebuild satisfies it while still linking glibc
+# malloc — and NOTHING downstream catches that. Arm E runs under `--flight-allocator system` by
+# construction (nothing is preloaded), and `verify_flight_server_allocator`'s
+# `/proc/<pid>/maps` check CANNOT see a statically linked jemalloc — that blindness is exactly
+# what lets arm E carry the `system` label. So the mapping check is structurally silent here,
+# the digest check is satisfied, and the aggregate would then label a glibc-vs-glibc pair a
+# linked-allocator comparison and attribute run-to-run noise to jemalloc.
+#
+# So the allocator is READ OFF THE BINARY'S OWN `--version` SURFACE, which is R2's whole
+# purpose: the reported string is derived from the SAME `cfg` that installs the
+# `#[global_allocator]`, so it cannot disagree with what was linked. This retires the rig-only
+# residual "a tikv-jemallocator-linked binary leaves no libjemalloc mapping" — reasoned, never
+# measured — by removing the need to infer anything.
+#
+# BOTH SIDES ARE ASKED, because either alone is insufficient: E reporting `jemalloc` while the
+# CONTROL also links jemalloc makes the A-vs-E delta not an allocator delta at all.
+#
+# SCOPE, stated because it is a decision: this fires only when `--bin-dir-e` is given, i.e. when
+# arm E is in the set and the linked-allocator claim is being made. A set without arm E is
+# byte-identical in behaviour to the pre-#3997 driver (an opt-in that changes the default is not
+# opt-in), so its control binary is NOT asked — a linked-jemalloc `--bin-dir` would make arms
+# A/B/C0/C/D silently jemalloc arms, which this check does not cover and which nothing else
+# does either. NAMED, not closed.
+#
+# NO SYMBOL READER IS INVOLVED, deliberately. `nm`/`readelf` would be a second oracle for one
+# fact, would need its own three-valued unmeasurable handling, and would make a binutils
+# installation a hard prerequisite of a measurement rig that does not otherwise need one.
+# `--version` decides it, from the same cfg — `scripts/tests/test_flight_allocator_link.sh`
+# owns the symbol-level assertion, at build time, where the toolchain is present by definition.
+ALLOCATOR_SURFACE_RE='^allocator: (jemalloc|system)$'
+
+# require_reported_allocator <label> <binary> <expected> — fail CLOSED on every unmeasurable
+# state, each naming its own cause, because "the binary did not say" and "the binary said the
+# other thing" are different operator actions (rebuild vs. point --bin-dir-e somewhere else).
+# _echo_version_streams <stdout> <stderr> — reprint what the binary said, WITH THE STREAM NAMED.
+# Every refusal shows both, because stderr is where a binary that cannot start explains itself;
+# they are LABELLED because an unlabelled dump is the merge this round removed, one layer up in
+# the reader's head — a reader who cannot tell which stream carried the `allocator:` line cannot
+# check the diagnosis. An EMPTY stream says so affirmatively rather than printing nothing, since
+# "printed nothing on stdout" is the whole finding in the stderr-only case.
+_echo_version_streams() {
+  local o="$1" e="$2"
+  if [[ -n "$o" ]]; then
+    echo "       stdout (the ONLY stream R2.1's line may come from):" >&2
+    printf '%s\n' "$o" | sed 's/^/         stdout | /' >&2
+  else
+    echo "       stdout: EMPTY — nothing was printed on the only stream that can satisfy R2.1." >&2
+  fi
+  if [[ -n "$e" ]]; then
+    echo "       stderr (DIAGNOSTIC ONLY — it can satisfy nothing):" >&2
+    printf '%s\n' "$e" | sed 's/^/         stderr | /' >&2
+  else
+    echo "       stderr: EMPTY." >&2
+  fi
+}
+
+require_reported_allocator() {
+  local label="$1" bin="$2" expect="$3" rc=0 out err n stream_dir
+  local -a matched
+  if [[ ! -f "$bin" ]]; then
+    echo "FATAL: $label '$bin' is not a file, so its allocator could not be READ." >&2
+    echo "       Arm $ARM_E's treatment is the LINKED allocator, and R2.1's --version surface is" >&2
+    echo "       the only thing that can state which one was linked." >&2
+    exit 2
+  fi
+  if [[ ! -x "$bin" ]]; then
+    echo "FATAL: $label '$bin' is not EXECUTABLE, so its reported allocator is UNMEASURED." >&2
+    echo "       Refused rather than skipped: a digest difference proves DIFFERENT BYTES and" >&2
+    echo "       never 'jemalloc', so nothing else in this rig can establish arm $ARM_E's" >&2
+    echo "       treatment. Remedy: chmod +x, or point --bin-dir-e at a real build directory." >&2
+    exit 2
+  fi
+  if command -v timeout >/dev/null 2>&1; then
+    # THE TWO STREAMS ARE CAPTURED SEPARATELY, AND ONLY STDOUT IS MATCHED (#3997, roborev round
+    # 3, job 133). This function is the oracle of LAST RESORT for arm E's premise — it exists
+    # because a digest difference and an empty `/proc/<pid>/maps` can both be satisfied by
+    # something that is not jemalloc — so an oracle that accepts a CONTRACT VIOLATION is not a
+    # weaker oracle, it is a differently-shaped hole in the same place. R2.1 puts the
+    # `allocator:` line on STDOUT; a `2>&1` merge accepted a binary that printed it only on
+    # stderr, i.e. exactly the malformed build this precondition exists to reject.
+    #
+    # stderr is still CAPTURED and REPRINTED in every refusal below — a binary that cannot start
+    # explains itself there and that is the operator's next action — but it is LABELLED as
+    # stderr and it can satisfy nothing.
+    if ! stream_dir="$(mktemp -d)"; then
+      echo "FATAL: could not create a temporary directory, so \`$label --version\` could not be" >&2
+      echo "       run with its streams SEPARATED — and merging them would let a stderr-only" >&2
+      echo "       allocator line satisfy R2.1's stdout contract. UNMEASURED, refused." >&2
+      exit 2
+    fi
+    timeout -k 5 60 "$bin" --version >"$stream_dir/out" 2>"$stream_dir/err" || rc=$?
+    out="$(cat "$stream_dir/out")"
+    err="$(cat "$stream_dir/err")"
+    rm -rf "$stream_dir"
+  else
+    # A missing bound must not inherit the permissive branch, and an unbounded `--version` on a
+    # wrong or wedged binary would hang the whole set with no verdict — which blocks the
+    # measurement anyway, so refusing now with a named remedy strictly dominates hanging later.
+    echo "FATAL: no timeout(1) on this host, so \`$label --version\` cannot be BOUNDED." >&2
+    echo "       Refused rather than run unbounded: a wedged binary would hang the set with no" >&2
+    echo "       verdict. Remedy: install coreutils' timeout." >&2
+    exit 2
+  fi
+  if [[ $rc -ne 0 ]]; then
+    echo "FATAL: $label — \`$bin --version\` exited $rc, so its allocator is UNMEASURED." >&2
+    echo "       R2.1 requires --version to short-circuit before argument validation and exit 0." >&2
+    _echo_version_streams "$out" "$err"
+    exit 2
+  fi
+  mapfile -t matched < <(printf '%s\n' "$out" | grep -E "$ALLOCATOR_SURFACE_RE") || true
+  n=${#matched[@]}
+  if [[ $n -ne 1 ]]; then
+    echo "FATAL: $label — \`$bin --version\` printed $n line(s) matching" >&2
+    echo "       '$ALLOCATOR_SURFACE_RE' on STDOUT;" >&2
+    echo "       R2.1's contract is EXACTLY ONE. Neither 0 nor 2+ is read as either allocator:" >&2
+    echo "       an unrecognised or absent line is UNMEASURED, and defaulting either way is how" >&2
+    echo "       a glibc build would be measured as the jemalloc arm. NOTE the count is taken" >&2
+    echo "       from STDOUT ALONE: a line on stderr is not one of R2.1's lines, so it neither" >&2
+    echo "       satisfies the grammar nor raises this count." >&2
+    _echo_version_streams "$out" "$err"
+    exit 2
+  fi
+  if [[ "${matched[0]}" != "allocator: $expect" ]]; then
+    echo "FATAL: $label '$bin' reports '${matched[0]}', expected 'allocator: $expect'." >&2
+    echo "       Arm $ARM_E is the LINKED-jemalloc treatment and every other arm selects its" >&2
+    echo "       allocator by LD_PRELOAD into the control binary, so the pair must read" >&2
+    echo "       --bin-dir=system and --bin-dir-e=jemalloc. A digest DIFFERENCE proves only" >&2
+    echo "       different bytes — any unrelated rebuild satisfies it — and /proc/<pid>/maps" >&2
+    echo "       cannot see a statically linked allocator, so this surface is the only thing" >&2
+    echo "       that can tell the two apart. Remedy: build --bin-dir-e's $ARM_E_BINARY with" >&2
+    echo "       --features jemalloc (and --bin-dir's without it), or drop --bin-dir-e." >&2
+    _echo_version_streams "$out" "$err"
+    exit 2
+  fi
+  echo "arm $ARM_E precondition: $label '$bin' reports '${matched[0]}' (R2.1)"
+}
+
+if [[ -n "$BIN_DIR_E" ]]; then
+  require_reported_allocator "--bin-dir $ARM_E_BINARY" "$BIN_DIR/$ARM_E_BINARY" system
+  require_reported_allocator "--bin-dir-e $ARM_E_BINARY" "$BIN_DIR_E/$ARM_E_BINARY" jemalloc
+fi
 
 mkdir -p "$OUT"
 
 ARMS=(A B C0 C D)
+
+# Arm E joins the set only when its binary set is supplied — see --bin-dir-e in the usage text
+# and `arm_bin_dir` below. Omitted, this driver's arm set and every fingerprint field it writes
+# are byte-identical to the pre-#3997 ones.
+if [[ -n "$BIN_DIR_E" ]]; then
+  ARMS+=("$ARM_E")
+fi
 
 arm_flags() {
   # The one place an arm's identity is defined. Printed into the run record below AND read back
@@ -151,7 +351,52 @@ arm_flags() {
     # and (C-D)-(B-A) is the interaction — which is the quantity the SMT hypothesis is actually
     # about. Measuring only A/B/C leaves the headline attributable to either variable.
     D)  printf '%s\n' --flight-server-cpus "$PIN_A" --flight-pin-mode siblings --flight-allocator jemalloc ;;
+    # ARM E IS ARM A'S FLAG LIST, CHARACTER FOR CHARACTER, and that is the whole design (#3997).
+    # The treatment is carried entirely by `arm_bin_dir` below: arm E measures a binary that
+    # LINKS jemalloc as its `#[global_allocator]`, so there is nothing to preload and no knob to
+    # turn — `--flight-allocator jemalloc` here would set LD_PRELOAD and make arm E a
+    # preload-AND-link arm, i.e. two changes at once, which is the confound arm D was added to
+    # break. `system` is therefore the correct and honest value: it is what the SERVER'S
+    # ENVIRONMENT will hold, it is what `lib-flight-arm.sh` verifies per rep from
+    # /proc/<pid>/{environ,maps}, and a statically linked jemalloc leaves no `libjemalloc`
+    # MAPPING for that check to trip on.
+    #
+    # Consequence, stated because it is the reason R3.3 exists: arms A and E record an IDENTICAL
+    # treatment, so NOTHING in the recorded flags distinguishes them. The distinguishing fact is
+    # the `cqlite-flight` digest in each session's own `binary_provenance`, which is why the
+    # aggregator prints it per arm.
+    E)  printf '%s\n' --flight-server-cpus "$PIN_A" --flight-pin-mode siblings --flight-allocator system ;;
     *)  echo "FATAL: unknown arm '$1'" >&2; return 2 ;;
+  esac
+}
+
+# arm_bin_dir <arm> — WHICH FROZEN BINARY SET THIS ARM MEASURES (#3997).
+#
+# The one place that answer is given, mirroring `arm_flags` deliberately rather than being
+# folded into it: `arm_flags` output is FINGERPRINTED as an arm's flag list and read back out of
+# each session's recorded pinning, while the binary set is fingerprinted as digests and read
+# back out of each session's `binary_provenance`. Two different records, two different refusals.
+#
+# WHY A SECOND --bin-dir AND NOT A PER-BINARY OVERRIDE. `ws0-baseline.sh` derives the session's
+# whole `binary_provenance` block from `--bin-dir` (`ws0_binaries.py`), and that block is the
+# ONLY thing the aggregator can read the measured bytes out of. A `--flight-binary <path>`
+# override — the shape #3997's task list sketched — would launch one binary while the session
+# recorded the digest of another, so R3.3's exception would be granted against a digest that
+# named the wrong program: exactly the unobserved-treatment defect the rest of this file is
+# built to refuse. A second `--bin-dir` needs no new plumbing anywhere and keeps every digest
+# truthful. Build it as: the jemalloc `cqlite-flight` plus HARDLINKS (or copies) of --bin-dir's
+# own `ws0-scan-bench` and `flight-loadgen`, whose sameness is checked below.
+#
+# THE `*)` BRANCH IS TOTAL, NOT A PERMISSIVE DEFAULT. The question this function answers has
+# exactly two answers by construction — arm E measures --bin-dir-e's set, every other arm
+# measures --bin-dir's — so there is no unknown-arm case for it to swallow: `$BIN_DIR` is the
+# CORRECT answer for any arm id that is not E, including one that should never have been asked
+# for. Enumerating the arms here instead would duplicate `arm_flags`'s table for no gain, and
+# `arm_flags` already refuses an unknown arm by name.
+arm_bin_dir() {
+  case "$1" in
+    E) printf '%s\n' "$BIN_DIR_E" ;;
+    *) printf '%s\n' "$BIN_DIR" ;;
   esac
 }
 
@@ -301,6 +546,70 @@ for b in "${MEASURED_BINARIES[@]}"; do
   digest="$(sha256_of "$BIN_DIR/$b")" || exit 2
   fp+=("binary_sha256.$b=$digest")
 done
+# ARM E'S BINARY SET, AND THE TWO-SIDED PRECONDITION THAT EARNS ITS EXCEPTION (#3997, R3.3).
+#
+# `ws0_abc_aggregate.py` grants arm E a NAMED exception to the cross-arm "every arm ran the same
+# bytes" invariant. An exception is only narrow if BOTH of its edges are checked, so both are
+# checked HERE, from the digests, before a single rep runs:
+#
+#   * $ARM_E_BINARY MUST DIFFER. Identical bytes would make arm E a second label for arm A's
+#     treatment, and the aggregate would publish a "linked jemalloc" row measured from the
+#     glibc binary — a permitted exception used to hide the absence of the thing under test.
+#   * EVERY OTHER MEASURED BINARY MUST BE THE SAME BYTES. `ws0-scan-bench` IS the drift control
+#     and `flight-loadgen` is the client apparatus; moving either makes arm E differ from arm A
+#     in two properties, which is the confound arm D exists to break. The aggregate refuses
+#     these on its own too — that is the "still FAILs on any other cross-arm binary difference"
+#     half of R3.3 — but a refusal AFTER a multi-hour set has run is a refusal that costs the
+#     rig its window, so the same facts are established up front from the same digests.
+#
+# These fields are recorded ONLY when arm E is in the set, so a set started before #3997 (or
+# without --bin-dir-e) resumes against a byte-identical fingerprint. Switching arm E on or off
+# over one --out is caught by the `arms` field, which changes with it.
+if [[ -n "$BIN_DIR_E" ]]; then
+  fp+=("bin_dir_e=$BIN_DIR_E")
+  for b in "${MEASURED_BINARIES[@]}"; do
+    digest="$(sha256_of "$BIN_DIR/$b")" || exit 2
+    digest_e="$(sha256_of "$BIN_DIR_E/$b")" || exit 2
+    fp+=("binary_sha256_e.$b=$digest_e")
+    if [[ "$b" == "$ARM_E_BINARY" ]]; then
+      # SHADOWED, AND KEPT ON PURPOSE — DO NOT DELETE THIS BRANCH AS DEAD (#3997, roborev round
+      # 2). `require_reported_allocator` runs EARLIER, with the argument checks, and asks both
+      # binaries for R2.1's `allocator:` line; identical bytes cannot report two different
+      # allocators, so an identical $ARM_E_BINARY is refused up there — naming which binary
+      # reported what — and this refusal cannot fire in the driver today. It is retained as
+      # DEFENCE IN DEPTH against a reordering (the allocator pair sits before the first side
+      # effect precisely so a false premise costs no output directory, and a future edit that
+      # moved it would silently take this property with it), NOT because it is reachable.
+      #
+      # NO TEST ASSERTS THIS TEXT, and that is deliberate rather than an omission: an assertion
+      # that cannot fire is the vacuous pass. The digest-identity refusal's REACHABLE, TESTED
+      # home is `ws0_abc_aggregate.py` — `test_ws0_abc_driver_guards.sh` case 5l — which runs
+      # STANDALONE over a session directory, executes no binaries and therefore has no allocator
+      # oracle available to it at all. The property is enforced at the layer that can enforce it.
+      if [[ "$digest" == "$digest_e" ]]; then
+        echo "FATAL: --bin-dir-e '$BIN_DIR_E/$b' is the SAME BYTES as --bin-dir '$BIN_DIR/$b'" >&2
+        echo "       (sha256 $digest). Arm $ARM_E exists to measure a DIFFERENT $ARM_E_BINARY —" >&2
+        echo "       the build that LINKS jemalloc as its #[global_allocator]. Identical bytes" >&2
+        echo "       make arm $ARM_E a second LABEL for arm A's treatment, and the aggregate" >&2
+        echo "       would then publish a linked-allocator row measured from the control binary." >&2
+        echo "       Remedy: build --bin-dir-e's $ARM_E_BINARY with the jemalloc feature, or drop" >&2
+        echo "       --bin-dir-e and run the A/B/C0/C/D set." >&2
+        exit 2
+      fi
+    elif [[ "$digest" != "$digest_e" ]]; then
+      echo "FATAL: --bin-dir-e '$BIN_DIR_E/$b' differs from --bin-dir '$BIN_DIR/$b'" >&2
+      echo "         --bin-dir   $digest" >&2
+      echo "         --bin-dir-e $digest_e" >&2
+      echo "       Only $ARM_E_BINARY may differ between arm $ARM_E and the other arms." >&2
+      echo "       ws0-scan-bench IS the drift control and flight-loadgen is the client" >&2
+      echo "       apparatus, so a differing one makes arm $ARM_E differ from arm A in TWO" >&2
+      echo "       properties and its delta attributable to neither." >&2
+      echo "       Remedy: hardlink or copy --bin-dir's $b into --bin-dir-e rather than" >&2
+      echo "       rebuilding it, so the bytes are the same bytes by construction." >&2
+      exit 2
+    fi
+  done
+fi
 for arm in "${ARMS[@]}"; do
   mapfile -t af < <(arm_flags "$arm")
   fp+=("arm_flags.$arm=${af[*]}")
@@ -580,7 +889,12 @@ for ((r = 1; r <= ROUNDS; r++)); do
     # the line `perf-lint-allow` would have silenced a lint that was reasoning correctly; the
     # array makes the leading word the literal `bash` instead. Second, an empty optional value
     # cannot become an empty positional argument this way.
-    local_args=(--corpus "$CORPUS" --bin-dir "$BIN_DIR" --out "$dir"
+    # THE BINARY SET IS PER-ARM, and for every arm but E it is the one `--bin-dir` names — see
+    # `arm_bin_dir`. Resolved through the function rather than branched here so there is exactly
+    # one place that answers "which bytes did this arm measure", the same way `arm_flags`
+    # answers "under which flags".
+    arm_bins="$(arm_bin_dir "$arm")"
+    local_args=(--corpus "$CORPUS" --bin-dir "$arm_bins" --out "$dir"
                 --reps 1 --temp warm --arm bypass
                 --step-duration "$STEP_DURATION" --port "$PORT")
     if [[ -n "$QUIESCENCE_TS" ]]; then
@@ -626,3 +940,13 @@ echo
 _arms_csv=$(IFS=,; echo "${ARMS[*]}")
 echo "all rounds complete. aggregate with:"
 echo "  python3 $HERE/ws0_abc_aggregate.py --root $OUT --arms $_arms_csv --baseline ${ARMS[0]}"
+# ...and, when arm E is in the set, the TWO-ARM aggregate #3997's kill criterion is read from.
+# Printed as a SECOND command rather than replacing the one above: the whole-set table is still
+# what makes each arm's delta readable against the others, and R3.1 asks for the A/E pair
+# specifically (median Δrows/s, Δcycles/row, IPC, VmHWM and VmRSS per arm). Derived from the
+# arm ids, never a literal — the line above was a literal once and arm D's arrival silently
+# made it wrong (roborev, #3551 round 2).
+if [[ -n "$BIN_DIR_E" ]]; then
+  echo "and, for #3997's pre-registered A/$ARM_E kill criterion, the two-arm table:"
+  echo "  python3 $HERE/ws0_abc_aggregate.py --root $OUT --arms ${ARMS[0]},$ARM_E --baseline ${ARMS[0]}"
+fi

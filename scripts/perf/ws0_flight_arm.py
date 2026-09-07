@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import json
 import pathlib
+import statistics
+import sys
 
 from ws0_collect import prewarm_block, read_prewarm, spread, REQUIRED_EVENTS
 from ws0_content_volume import (
@@ -113,6 +115,421 @@ MERGE_PATH_OBSERVABILITY_NOTE = (
     " selected BypassReason per request and REFUSE any rep whose executed arm differs from the"
     " requested one."
 )
+
+
+# ===========================================================================
+# THE SERVER PROCESS'S RSS — R6.1 of the flight-allocator spec (issue #3997)
+# ===========================================================================
+# Two fields of `/proc/<server-pid>/status`, sampled ONCE per rep at scan end. What each one is,
+# and what the scan-end timing does and does not buy, is stated at the field definition below
+# (`RSS_SAMPLE_TIMING_NOTE`) rather than here, so the caveat travels with the value into
+# `results.json` instead of living only in this file.
+#
+# WHY R6.1 EXISTS AT ALL: jemalloc's dirty-page decay is time-based, so a linked jemalloc can
+# win on throughput while holding more resident. #3997's pre-registered criterion is therefore
+# a JOINT one, and a peak-RSS figure that was not observed cannot satisfy half of it.
+#
+# EVERY UNMEASURED STATE IS AN EXPLICIT MARKER NAMING ITS CAUSE, NEVER A ZERO AND NEVER AN
+# ABSENT KEY. A 0 kB resident set and an unreadable `/proc/<pid>/status` must not read alike:
+# the first would satisfy any ratio ceiling and the second is a comparison that was not made.
+# The marker is a STRING, so a downstream reader that averages it raises rather than publishing
+# a number — the same shape `CONTENT_VOLUME_NO_ORACLE` uses one module over.
+RSS_UNMEASURED = "UNMEASURED"
+
+# THE MARKER'S FULL FORM, and it is a GRAMMAR rather than a prefix (#3997, roborev round 4).
+# `startswith(RSS_UNMEASURED)` accepted a bare "UNMEASURED", an "UNMEASUREDgarbage", and a
+# marker whose cause was empty or whitespace-only — so a CORRUPT artifact read as an ordinary
+# missing measurement. Neither reader ever turns a marker into a number (it is carried through
+# and printed, never medianed or ratioed), so this could not satisfy R6.1's ceiling; what it
+# destroyed is the distinction between "refuse this artifact" and "we did not measure this",
+# and the cause IS the value here because the operator's next action is determined by it.
+RSS_UNMEASURED_MARKER = f"{RSS_UNMEASURED} \u2014 "
+
+# The AFFIRMATIVE status, spelled once. The sampler writes it and `read_server_rss` requires
+# exactly it or a marker — a status it cannot classify is a refusal, because "the record says
+# something else" and "the record says it could not measure" are different states.
+RSS_MEASURED = "measured"
+
+RSS_STATUS_FIELDS = ("VmHWM", "VmRSS")
+
+RSS_SAMPLE_TIMING_NOTE = (
+    "Sampled ONCE per rep at SCAN END — after the perf window closed, before the server was"
+    " stopped — from /proc/<server-pid>/status. `VmHWM` is a kernel-maintained HIGH-WATER MARK,"
+    " so a scan-end read yields the PEAK over the whole rep and needs no sampling loop (which"
+    " would perturb a pinned measurement). `VmRSS` is NOT a high-water mark: it is ONE"
+    " INSTANTANEOUS SAMPLE at that moment, NOT a mean, NOT a time-weighted average and NOT a"
+    " steady-state estimate. Do not average it across reps or arms and call the result an"
+    " average RSS; nothing here computes one. An unmeasured field carries an explicit"
+    f" '{RSS_UNMEASURED} — <cause>' marker, never a 0 and never an absent key."
+)
+
+
+def rss_unmeasured(cause: str) -> str:
+    """The one spelling of an unmeasured RSS field: the marker, then the CAUSE.
+
+    A bare sentinel would tell a reader that the number is absent and nothing about why, and
+    the operator's next action is entirely determined by the why — a vanished pid is a rep to
+    re-run, a `/proc` that could not be read is a box to fix, an absent `VmHWM` is a kernel
+    that does not export it. So the cause is part of the value.
+
+    A causeless marker cannot be MINTED either: `rss_unmeasured("")` would build a value this
+    module's own reader refuses, which is a producer and a consumer disagreeing about one
+    contract. Refused at the source instead, where the caller that lost its cause is named.
+    """
+    text = cause.strip() if isinstance(cause, str) else ""
+    if not text:
+        raise ValueError(
+            "rss_unmeasured() requires a non-empty CAUSE: the marker's whole value is why the"
+            f" figure is absent, and {RSS_UNMEASURED_MARKER!r} with nothing after it is the"
+            " corrupt form this module's reader refuses."
+        )
+    return f"{RSS_UNMEASURED_MARKER}{cause}"
+
+
+def rss_is_measured(value: object) -> bool:
+    """True only for a value that is a REAL observation of a resident-set size in kB.
+
+    Keyed on the value being a non-bool integer, never on "it is not the marker string": a
+    future third state would otherwise inherit the measured branch, which is the permissive
+    default this rig refuses everywhere else. `bool` is excluded explicitly because
+    `isinstance(True, int)` is true in Python and `True` is not a kilobyte count.
+    """
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _rss_marker(value: object) -> bool:
+    """True for a WELL-FORMED `rss_unmeasured(...)` marker, and for nothing else.
+
+    The exact `RSS_UNMEASURED_MARKER` prefix — em dash and trailing space, as the producer
+    writes it — plus a cause that is not empty or whitespace-only. Deliberately NOT
+    `startswith(RSS_UNMEASURED)`, which accepted a bare word and an arbitrary suffix and so
+    classified a corrupt value as an honest absence. A malformed marker now reaches
+    `read_server_rss`'s "a value this reader cannot classify" refusal, which is the correct
+    answer for it: that record was written by something this module does not model.
+    """
+    if not isinstance(value, str) or not value.startswith(RSS_UNMEASURED_MARKER):
+        return False
+    return bool(value[len(RSS_UNMEASURED_MARKER):].strip())
+
+
+def parse_proc_status_rss(text: str, where: str) -> dict:
+    """`VmHWM`/`VmRSS` in kB out of a `/proc/<pid>/status` body, each three-valued.
+
+    Returns a dict keyed by the two field names, each value either a positive int (kB) or an
+    `rss_unmeasured(...)` marker naming why that field could not be read. Never raises: the
+    caller is the measurement driver at scan end, and aborting a rep whose throughput was
+    already measured would discard a good observation to report a missing one.
+
+    Refused rather than guessed, field by field:
+
+    * a field ABSENT from the body — some kernels/processes export no `Vm*` lines at all;
+    * a UNIT other than `kB`. `/proc/<pid>/status` has always used kB, so a different unit is a
+      body this parser does not model, and silently treating it as kB would publish a figure
+      1024x wrong against a 1.10x ceiling;
+    * a value that is not a non-negative integer, or is zero — a running server with a zero
+      resident set is not a measurement, and zero is precisely the value that would satisfy any
+      ratio ceiling.
+    """
+    out: dict[str, object] = {}
+    seen: dict[str, str] = {}
+    for line in text.splitlines():
+        name, sep, rest = line.partition(":")
+        if sep and name in RSS_STATUS_FIELDS:
+            seen[name] = rest.strip()
+    for field in RSS_STATUS_FIELDS:
+        if field not in seen:
+            out[field] = rss_unmeasured(
+                f"{where} carries no '{field}:' line, so that field was NOT OBSERVED"
+            )
+            continue
+        parts = seen[field].split()
+        if len(parts) != 2 or parts[1] != "kB":
+            out[field] = rss_unmeasured(
+                f"{where} records '{field}: {seen[field]}', which is not the"
+                " '<integer> kB' shape this parser models — a unit it does not recognise is"
+                " refused rather than read as kB"
+            )
+            continue
+        try:
+            value = int(parts[0])
+        except ValueError:
+            out[field] = rss_unmeasured(
+                f"{where} records '{field}: {seen[field]}', whose value is not an integer"
+            )
+            continue
+        if value <= 0:
+            out[field] = rss_unmeasured(
+                f"{where} records '{field}: {value} kB'; a live server process with a"
+                " non-positive resident set is not an observation, and zero is the one value"
+                " that satisfies every ratio ceiling"
+            )
+            continue
+        out[field] = value
+    return out
+
+
+def sample_server_rss(pid: object, status_path: object = None) -> dict:
+    """ONE rep's scan-end RSS record for the Flight server process.
+
+    `status_path` exists for the tests and for a caller that has already resolved the path; it
+    defaults to `/proc/<pid>/status`. The record ALWAYS carries both fields and a `status`, so a
+    consumer never has to distinguish "absent key" from "unmeasured" — see RSS_UNMEASURED.
+    """
+    record: dict[str, object] = {
+        "pid": pid,
+        "source": None,
+        "sampled_at": "scan-end (perf window closed, server not yet stopped)",
+        "sample_timing": RSS_SAMPLE_TIMING_NOTE,
+    }
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        cause = (
+            f"the driver supplied {pid!r} as the server pid, which is not a positive integer,"
+            " so no process could be read"
+        )
+        record["source"] = RSS_UNMEASURED
+        record["vm_hwm_kb"] = rss_unmeasured(cause)
+        record["vm_rss_kb"] = rss_unmeasured(cause)
+        record["status"] = rss_unmeasured(cause)
+        return record
+    path = pathlib.Path(status_path) if status_path is not None else pathlib.Path(
+        f"/proc/{pid}/status"
+    )
+    record["source"] = str(path)
+    try:
+        text = path.read_text()
+    except OSError as exc:
+        # A VANISHED PID AND AN UNREADABLE /proc ARE ONE STATE HERE, and the errno text names
+        # which: `FileNotFoundError` is the server having already exited (the rep's peak went
+        # with it), anything else is a box that could not be read. Either way the field was not
+        # observed, and the cause is carried rather than collapsed to "unavailable".
+        cause = f"{path} could not be READ ({exc}) — the field was NOT OBSERVED"
+        record["vm_hwm_kb"] = rss_unmeasured(cause)
+        record["vm_rss_kb"] = rss_unmeasured(cause)
+        record["status"] = rss_unmeasured(cause)
+        return record
+    fields = parse_proc_status_rss(text, str(path))
+    record["vm_hwm_kb"] = fields["VmHWM"]
+    record["vm_rss_kb"] = fields["VmRSS"]
+    if rss_is_measured(record["vm_hwm_kb"]) and rss_is_measured(record["vm_rss_kb"]):
+        record["status"] = RSS_MEASURED
+    else:
+        unread = [
+            name for name, key in (("VmHWM", "vm_hwm_kb"), ("VmRSS", "vm_rss_kb"))
+            if not rss_is_measured(record[key])
+        ]
+        record["status"] = rss_unmeasured(
+            f"{', '.join(unread)} not observed from {path} — see the field(s) for the cause"
+        )
+    return record
+
+
+def read_server_rss(d: pathlib.Path, tag: str) -> dict:
+    """Rep `tag`'s scan-end RSS record, or a marker record naming why there is none.
+
+    THREE-VALUED, and the third value is a REFUSAL rather than a marker:
+
+    * the artifact is present and well-formed -> its record, as written at scan end;
+    * the artifact is ABSENT -> a marker record. That is the `read_prewarm` case: the driver
+      predates the sampling, or the rep died before it. R6.1 is then UNMEASURED for that rep,
+      which is reported rather than assumed satisfied;
+    * the artifact is present and MALFORMED -> `Invalid`. An unreadable JSON body, or a field
+      that is neither a positive integer nor an `UNMEASURED — ...` marker, is a CORRUPT
+      artifact, and a corrupt artifact is not an honest absence: something wrote a value this
+      reader cannot classify, and classifying it as absent would hide that.
+    """
+    p = d / f"{tag}.server-rss.json"
+    if not p.exists():
+        cause = (
+            f"no {p.name} beside this rep's artifacts — the server's RSS was not sampled for"
+            " it (a driver that predates R6.1, or a rep that died before scan end)"
+        )
+        return {
+            "pid": RSS_UNMEASURED,
+            "source": RSS_UNMEASURED,
+            "sampled_at": RSS_UNMEASURED,
+            "sample_timing": RSS_SAMPLE_TIMING_NOTE,
+            "vm_hwm_kb": rss_unmeasured(cause),
+            "vm_rss_kb": rss_unmeasured(cause),
+            "status": rss_unmeasured(cause),
+        }
+    try:
+        record = json.loads(p.read_text())
+    except (OSError, ValueError) as exc:
+        raise Invalid(
+            f"flight rep {tag}: {p} exists but could not be read as JSON ({exc}). Refused"
+            " rather than treated as an absent sample: something wrote that file, and calling a"
+            " corrupt record an honest absence would hide it."
+        ) from None
+    if not isinstance(record, dict):
+        raise Invalid(
+            f"flight rep {tag}: {p} must hold a JSON object, got {type(record).__name__}."
+        )
+    for key in ("vm_hwm_kb", "vm_rss_kb", "status"):
+        if key not in record:
+            raise Invalid(
+                f"flight rep {tag}: {p} carries no {key!r}. The sampler writes all three"
+                " unconditionally — an unmeasured field carries an"
+                f" '{RSS_UNMEASURED} — <cause>' marker — so an absent key is a record this"
+                " reader does not model, not an unmeasured sample."
+            )
+    marked = _rss_marker(record["status"])
+    if record["status"] != RSS_MEASURED and not marked:
+        raise Invalid(
+            f"flight rep {tag}: {p} records status={record['status']!r}, which is neither"
+            f" {RSS_MEASURED!r} nor an '{RSS_UNMEASURED} — <cause>' marker. A verdict this"
+            " reader cannot classify is refused rather than assumed to be either one."
+        )
+    for key in ("vm_hwm_kb", "vm_rss_kb"):
+        value = record[key]
+        if rss_is_measured(value) or _rss_marker(value):
+            continue
+        raise Invalid(
+            f"flight rep {tag}: {p} records {key}={value!r}, which is neither a positive"
+            f" integer of kB nor an '{RSS_UNMEASURED} — <cause>' marker. A value this reader"
+            " cannot classify is refused: the one thing it must never become is a number in"
+            " R6.1's peak-RSS ratio."
+        )
+    # ...AND THE STATUS MUST AGREE WITH THE FIELDS IT SUMMARISES. A record claiming
+    # `measured` beside a marker value is not a partially-measured sample: it is a record whose
+    # own verdict contradicts its own data, and the verdict is the field a hurried reader
+    # believes. Both directions, because either alone leaves the other reachable.
+    both = rss_is_measured(record["vm_hwm_kb"]) and rss_is_measured(record["vm_rss_kb"])
+    if record["status"] == RSS_MEASURED and not both:
+        raise Invalid(
+            f"flight rep {tag}: {p} records status={RSS_MEASURED!r} while at least one of"
+            f" vm_hwm_kb/vm_rss_kb carries an {RSS_UNMEASURED} marker. The verdict contradicts"
+            " the data it summarises, so neither is trusted."
+        )
+    if marked and both:
+        raise Invalid(
+            f"flight rep {tag}: {p} records an {RSS_UNMEASURED} status"
+            f" ({record['status']!r}) while BOTH vm_hwm_kb and vm_rss_kb hold real"
+            " observations. The verdict contradicts the data it summarises, so neither is"
+            " trusted."
+        )
+    record.setdefault("sample_timing", RSS_SAMPLE_TIMING_NOTE)
+    return record
+
+
+# THE PUBLISHED ARM-LEVEL RSS FIELD PER /proc FIELD, and the per-field census key beside it.
+# Spelled as ONE table because the two must not drift: a published figure whose census counts a
+# DIFFERENT field is a completeness claim about something other than the number it sits next to,
+# which is half of this issue's own defect. The census keys deliberately do NOT begin
+# `server_vm` — `test_ws0_abc_driver_guards.sh` case 5h derives the PUBLISHED field set by that
+# prefix and pins it against the aggregator's `RSS_FIELDS`, so a census key sharing the prefix
+# would join a set it is not a member of.
+RSS_PUBLISHED_FIELDS = (
+    # (published field, per-rep record key, /proc field, per-field census key)
+    ("server_vm_hwm_kb", "vm_hwm_kb", "VmHWM", "server_rss_reps_measured_vm_hwm_kb"),
+    ("server_vm_rss_kb", "vm_rss_kb", "VmRSS", "server_rss_reps_measured_vm_rss_kb"),
+)
+
+
+def server_rss_block(samples: list[dict], temp: str, arm: str) -> dict:
+    """The arm-level RSS the aggregate reads, plus the per-field census that keeps it honest.
+
+    A FIGURE IS PUBLISHED ONLY WHEN EVERY REP SUPPLIED THAT FIELD. Anything less is the
+    `UNMEASURED — <cause>` marker, with the counts in the cause. This used to publish a median
+    over whichever reps happened to be measured, so 1 of 3 reps yielded a number
+    indistinguishable from a complete measurement, and nothing downstream could tell: the
+    aggregator refuses a partial series ACROSS ROUNDS but reads this one value PER ROUND, so a
+    rep-level hole arrived as a clean observation and R6.1's ceiling — a RATIO ceiling, which an
+    unrepresentative low median silently satisfies — was applied to a series that was never
+    measured. Doctrine, and the reason this is a refusal rather than a caveat: an unmeasured
+    quantity and a cleanly measured one must never read alike, and no partial series may be
+    averaged or ratioed as if it were complete.
+
+    Note the counts stay MEANINGFUL rather than merely absent — a median over 1 of 3 reps and no
+    sample at all are different remedies (a rep to re-run vs a driver that never sampled), so the
+    cause names how many of how many, and the per-rep `server_rss.status` carries the why.
+
+    THE CENSUS IS PER FIELD, NEVER ONE SHARED COUNT. `VmHWM` and `VmRSS` are read from the same
+    `/proc/<pid>/status` but fail independently (a kernel that exports one and not the other, a
+    parse that recognised one line), and a single count derived from `VmHWM` alone was affirming
+    a completeness that did not hold for `VmRSS`. The old shared `server_rss_reps_measured` key
+    is GONE rather than kept beside the per-field ones: two sources of truth for one fact is the
+    thing being removed, not a compatibility surface (nothing read it).
+
+    With NO rep at all the figure is the MARKER too, never a median of an empty list — an empty
+    `all(...)` is vacuously true, so the total is tested explicitly; `statistics.median([])`
+    raises, which would abort the whole report for a quantity that is merely absent, and a 0
+    would satisfy R6.1's ceiling outright. That state has TWO causes with DIFFERENT remedies —
+    reps ran and none supplied the field (the box or the kernel) versus no rep was recorded at
+    all (the driver never sampled) — so they get different sentences rather than one that
+    describes a subset median over reps that do not exist.
+    """
+    total = len(samples)
+    out = {"server_rss_reps_total": total}
+    for field, key, proc_field, census_key in RSS_PUBLISHED_FIELDS:
+        observed = [s[key] for s in samples if rss_is_measured(s[key])]
+        out[census_key] = len(observed)
+        if total and len(observed) == total:
+            out[field] = statistics.median(observed)
+        elif observed:
+            out[field] = rss_unmeasured(
+                f"{len(observed)} of {total} rep(s) of {arm} ({temp}) yielded a scan-end"
+                f" {proc_field}; a median over a SUBSET of the reps is not this arm's figure —"
+                " R6.1 is a RATIO CEILING, which an unrepresentative median can satisfy without"
+                " ever having been measured. See each rep's own `server_rss.status` for the"
+                " cause of the missing one(s)."
+            )
+        elif total:
+            # EVERY rep ran and none supplied this field — a different remedy from the partial
+            # case (the box or the kernel, not one rep to re-run), so it is a different sentence
+            # rather than the subset-median wording, which would describe a subset that does not
+            # exist. A cause that misdescribes its own state is what stops the next person
+            # looking.
+            out[field] = rss_unmeasured(
+                f"0 of {total} rep(s) of {arm} ({temp}) yielded a scan-end {proc_field}; there"
+                " is nothing to median, and a 0 would satisfy R6.1's ratio ceiling outright."
+                " See each rep's own `server_rss.status` for the cause."
+            )
+        else:
+            out[field] = rss_unmeasured(
+                f"0 of 0 rep(s) of {arm} ({temp}) yielded a scan-end {proc_field}: this arm"
+                " recorded NO rep at all, so nothing was sampled — the driver did not run the"
+                " arm, or ran it without the scan-end sampler."
+            )
+    out["server_rss_sample_timing"] = RSS_SAMPLE_TIMING_NOTE
+    return out
+
+
+def _cli_sample_server_rss(argv: list[str]) -> int:
+    """`ws0_flight_arm.py sample-server-rss <pid> <out.json>` — the scan-end sampler.
+
+    Called by the measurement driver at scan end, between the perf window closing and
+    `stop_server`. It ALWAYS writes a record — a measured one or a marker one naming the cause —
+    and exits 0 for both, deliberately: the throughput measurement for that rep is already
+    complete and correct, and aborting it because a peak-RSS read failed would discard a good
+    observation in order to report a missing one. The MISSING half is then reported honestly,
+    by the marker, all the way into the aggregate's table.
+
+    exit 2 is reserved for the one state that is not an unmeasured sample: the record could not
+    be WRITTEN at all. Nothing downstream would then be able to tell this rep from one the
+    driver never sampled, so it is a refusal the caller can see.
+    """
+    if len(argv) != 2:
+        sys.stderr.write(
+            "usage: ws0_flight_arm.py sample-server-rss <server-pid> <out.json>\n"
+        )
+        return 2
+    raw_pid, out = argv
+    try:
+        pid: object = int(raw_pid)
+    except ValueError:
+        pid = raw_pid
+    record = sample_server_rss(pid)
+    try:
+        pathlib.Path(out).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+    except OSError as exc:
+        sys.stderr.write(
+            f"FATAL: the scan-end RSS record could not be WRITTEN to {out} ({exc}). This is the"
+            " one RSS failure that is refused rather than marked: with no record at all, this"
+            " rep is indistinguishable downstream from one that was never sampled.\n"
+        )
+        return 2
+    print(record["status"])
+    return 0
 
 
 def expected_requests(temp: str) -> str:
@@ -290,6 +707,7 @@ def collect_flight(
     per_rep = []
     missing: list[str] = []
     prewarm: list[dict] = []
+    rss_samples: list[dict] = []
     round_meta: dict[int, dict[str, int]] = {}
     for rep in range(1, reps + 1):
         tag = flight_rep_tag(arm, temp, rep)
@@ -445,6 +863,11 @@ def collect_flight(
         )
         # The prewarm outcome for THIS rep, recorded by ws0-baseline.sh.
         prewarm.append({"rep": rep, "status": read_prewarm(d, tag)})
+        # ...and the SERVER PROCESS'S SCAN-END RSS for this rep (#3997, R6.1). Read the same
+        # way the prewarm status is — an absent artifact is an UNMEASURED marker naming its
+        # cause, never a 0 — and carried into the rep below rather than summarised away, so a
+        # reader can see which reps the arm-level median rests on.
+        rss_samples.append(read_server_rss(d, tag))
         # ...and its OBSERVED round + position within that round (#3272 R3).
         meta = collect_round_meta(d, tag, rep)
         round_meta[rep] = meta
@@ -583,6 +1006,10 @@ def collect_flight(
                     }
                 ),
                 "prewarm": prewarm[-1]["status"],
+                # THE SERVER'S SCAN-END RSS, or the NAMED reason it was not observed (#3997,
+                # R6.1). Never absent and never 0: R6.1's criterion is a RATIO against arm A's
+                # peak, and a 0 would satisfy every ceiling it could be compared with.
+                "server_rss": rss_samples[-1],
             }
         )
     require_complete(f"flight do_get {arm} ({temp})", per_rep, reps, missing)
@@ -621,5 +1048,23 @@ def collect_flight(
         # Every rep's outcome is recorded here, and `prewarm_all_ok` is the single
         # field a reader can check.
         **prewarm_block(prewarm, temp),
+        # THE ARM-LEVEL RSS FIGURES R6.1 IS READ FROM, with the rep census beside them (#3997).
+        # `ws0_abc_aggregate.py` reads `server_vm_hwm_kb`/`server_vm_rss_kb` per session and
+        # medians them across rounds; either may be an UNMEASURED marker, which that tool
+        # prints as such instead of computing a ratio from it.
+        **server_rss_block(rss_samples, temp, f"flight_do_get_{arm}"),
         "reps": per_rep,
     }
+
+
+if __name__ == "__main__":
+    # ONE subcommand, and an unrecognised one is a usage refusal rather than a default: this
+    # module is a COLLECTOR that `ws0_report.py` imports, and its only executable surface is the
+    # scan-end sampler the driver calls per rep (#3997, R6.1).
+    if len(sys.argv) >= 2 and sys.argv[1] == "sample-server-rss":
+        sys.exit(_cli_sample_server_rss(sys.argv[2:]))
+    sys.stderr.write(
+        "ws0_flight_arm.py is the Flight arm COLLECTOR, imported by ws0_report.py. Its only"
+        " subcommand is:\n    ws0_flight_arm.py sample-server-rss <server-pid> <out.json>\n"
+    )
+    sys.exit(2)

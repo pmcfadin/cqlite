@@ -6,8 +6,9 @@
 //! The #3782 measurement is `100 → 102 rows, 2 partitions LOST, 3 FABRICATED`:
 //! the count goes UP while real data disappears. **Duplication is one of the
 //! shapes that fabrication takes on this route** — the partition-HEADER arm
-//! resynchronises by advancing one byte (declared gap #3928), so it can re-emit
-//! a partition it has already emitted. A MEMBERSHIP test (`expected.contains(x)`
+//! resynchronised by advancing one byte, so it could re-emit a partition it had
+//! already emitted (that arm now refuses on a buffer proven complete, #3928;
+//! the shape is what justifies the multiset, not the arm that caused it). A MEMBERSHIP test (`expected.contains(x)`
 //! / `BTreeSet::difference`) is blind to exactly that: N duplicate copies of a
 //! legitimate row are all "present in expected", so the check that carries this
 //! change's headline claim would pass over the very defect it is named for.

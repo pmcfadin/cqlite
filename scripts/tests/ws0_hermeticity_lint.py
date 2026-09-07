@@ -410,6 +410,29 @@ EXEMPTIONS: dict[str, str] = {
     "tools/ws0-corpus-gen/tests/scan_bench_ingests_exactly_one_table_dir.rs":
         "rust; cannot invoke a shell script bare — its ws0-baseline.sh mention is prose stating"
         " that the driver runs both the scanning and --setup-only legs per rep",
+    # #4061's SIGPIPE-site ratchet baseline, and it is a NEW EXEMPTION CLASS: the first entry
+    # here that is neither code nor prose but a GENERATED CENSUS. Its "mention" is not a
+    # reference to the driver at all — it is the driver's own PATH appearing as one measured
+    # SUBJECT among 120, because that ratchet enumerates every git-tracked scripts/**/*.sh file
+    # at run time and records `<path> <count> <sha256>` per file. Writing any sibling reason
+    # here would be false: it is not a library, not prose, and not rust.
+    #
+    # It was reported UNCOVERED the moment it became tracked, exactly as every predecessor was,
+    # and for the same reason the `ws0-3551-abc.sh` comment records: this census is CONTENT-based
+    # over git-tracked files, so #4061's own standalone suites passed while the gate's
+    # tooling-tests failed. A guard whose subject set comes from `git` cannot be cleared by a
+    # local run of the thing you changed.
+    #
+    # ONE COUPLING, STATED SO IT IS NOT DISCOVERED THE HARD WAY: this exemption is only valid
+    # while ws0-baseline.sh still HAS piped-builtin-writer matches (6 at time of writing). Fix
+    # them all and the driver leaves the ratchet's baseline, this file stops mentioning it, and
+    # the STALE-EXEMPTION check below will correctly demand this entry's removal. That is the
+    # fail-loud direction, and it is the intended behaviour of both guards, not a defect.
+    "scripts/ci/sigpipe-sites-baseline.txt":
+        "a GENERATED census, not code or prose: the #4061 SIGPIPE-site ratchet records one"
+        " `<path> <count> <sha256>` line per git-tracked scripts/**/*.sh file, so ws0-baseline.sh"
+        " appears as a measured SUBJECT rather than as something this file references or invokes"
+        " — a .txt data file cannot invoke anything",
 }
 # Directory prefixes whose every file is documentation.
 EXEMPT_PREFIXES = ("docs/",)

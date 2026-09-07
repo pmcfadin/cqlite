@@ -387,13 +387,45 @@ impl V5CompressedLegacyParser {
                 data.len()
             )));
         }
+        // ═══ THE EMPTY-BUFFER ADMISSION GATE ═══
+        //
+        // Consulted for EVERY empty cell path, BEFORE the decode — never only on
+        // a decode FAILURE. The gate, its Cassandra derivation, its placement
+        // (roborev job 449 finding C / #4079), why it is the TAG table and not
+        // the WIDTH table, and the exact set of families it does NOT reach all
+        // live in ONE place: `cell_path_empty`'s module header. It is shared with
+        // the SET member route (#4106), because `validateCellPath` decides both
+        // with one line. Do not restate any of it here.
+        //
+        // `opaque_out` stays UNSET on the typed branch: the flag exists to
+        // diagnose a key this reader CANNOT MODEL, and it now can. Leaving it set
+        // would emit a `warn!` per column per row for correct data, which is the
+        // misleading-diagnostic half of #3612.
+        if data.is_empty() {
+            if let Some(tag) = self.cell_path_empty_sentinel(type_str) {
+                return Ok(Value::Empty(tag));
+            }
+        }
         // ONE decode, which also REPORTS what it consumed (see
         // `decode_reporting_consumption`).
         let (decoded, consumed) =
             match self.decode_reporting_consumption(data, type_str, column_name, 0) {
                 Ok(v) => v,
-                // #3747: the table ADMITTED this empty buffer but no `Value` carries an
-                // empty fixed-width scalar — same OPAQUE policy as below. Typed: #3805.
+                // #3747's DOOR 1 — an empty buffer the ADMISSION GATE above did
+                // NOT admit. (DOOR 2 is the decode-succeeded-with-`Null` case
+                // below; the two labels are the file's own cross-reference and
+                // both are kept.) Behaviour here is EXACTLY what it was before
+                // #3805 slice 2, which is what makes the gate a strict ADDITION
+                // rather than a widening:
+                //   * the WIDTH table admitted the empty buffer but no sentinel
+                //     speaks for the family -> the pre-existing opaque policy.
+                //     Unreachable today (every `0`-admitting width family has a
+                //     tag, MEASURED) and kept because the width table and the tag
+                //     table are two authorities that could diverge again.
+                //   * otherwise -> the decoder's OWN error, verbatim. That is what
+                //     keeps `duration` (`for_cql_type` -> `None`, empty key `Err`,
+                //     MEASURED) and every composite refused instead of silently
+                //     becoming an opaque blob.
                 Err(_) if data.is_empty() && allowed.contains(&0) => {
                     *opaque_out = true;
                     return Ok(Value::blob(Vec::new()));
@@ -409,6 +441,13 @@ impl V5CompressedLegacyParser {
         // becoming a presentation change, which is the defect roborev round 8 found
         // one nesting level down.
         let probe = Self::peeled_for_inspection(&decoded);
+        // #3747's DOOR 2: the decode SUCCEEDED with `Null`. Keyed on the PEELED
+        // answer, never the width table (`inet` admits 0 and decodes) and never a
+        // byte length. Full argument + the four defects it caused: `frozen_map`.
+        if data.is_empty() && matches!(probe, Value::Null) {
+            *opaque_out = true;
+            return Ok(Value::blob(Vec::new()));
+        }
         // THE EXACTNESS RULE. For a cell path the whole slice IS the key, so a
         // decoder that stopped short read a PREFIX and two distinct byte strings
         // would collapse to one logical key. Where the decoder can say how far it
@@ -619,6 +658,39 @@ impl V5CompressedLegacyParser {
         ))
     }
 
+    /// The declared KEY type as a [`CqlType`], or `None` when this module's own
+    /// classifiers cannot name it.
+    ///
+    /// Composed from the TWO normalizers already in this decode path — no third
+    /// parser, because a second opinion about a type spelling is the drift this
+    /// module's header calls out by name:
+    ///
+    ///   * `frozen<…>` / `FrozenType(…)` is peeled by
+    ///     [`Self::peel_frozen_spellings`], the SAME unwrapper
+    ///     [`Self::cell_path_key_allowed_widths`] and
+    ///     [`Self::cell_path_key_declares_blob`] use, so all three form one opinion
+    ///     about which spellings are frozen.
+    ///   * a MARSHAL name goes through [`Self::native_marshal_to_cql_type`] — the
+    ///     crate's one marshal-class-to-[`CqlType`] table, and the very table
+    ///     `primitive_marshal_to_cql_short` (which the width classifier consults)
+    ///     is built on. It enforces the package rule, so `com.acme.Int32Type` is
+    ///     `None` here rather than silently CQL `int`.
+    ///   * everything else is a CQL short form and goes through
+    ///     [`CqlType::parse`], the crate's one CQL-type-string parser
+    ///     (case-insensitive, like the decoder's own lowercased matching).
+    ///
+    /// `CqlType::parse` cannot fail for a bare unrecognised name — it yields
+    /// `CqlType::Custom`, for which `EmptyValueType::for_cql_type` is `None` — so
+    /// an unmodelled type reaches the caller's opaque fallback rather than a
+    /// guessed family (#28).
+    pub(super) fn cell_path_key_cql_type(&self, type_str: &str) -> Option<CqlType> {
+        let peeled = self.peel_frozen_spellings(type_str);
+        if peeled.contains("org.apache.cassandra.db.marshal.") {
+            return Self::native_marshal_to_cql_type(&peeled);
+        }
+        CqlType::parse(&peeled).ok()
+    }
+
     /// Whether `type_str` DECLARES a blob key, i.e. whether `Value::Blob` is the
     /// CORRECT decode result rather than the shared opaque default.
     ///
@@ -694,7 +766,7 @@ impl V5CompressedLegacyParser {
     /// `decoded`, which turned an inspection into a presentation change and is the
     /// shape of roborev round 8's finding — parity is now the shared key-type
     /// rule's job (`map_key_type_for_decode`), never this function's.
-    fn peeled_for_inspection(value: &Value) -> &Value {
+    pub(crate) fn peeled_for_inspection(value: &Value) -> &Value {
         let mut v = value;
         while let Value::Frozen(inner) = v {
             v = inner;

@@ -983,9 +983,14 @@ UDT half of the residue is gone — #3504 made the projected UDT the same object
 
 One measurement worth keeping, because it falsified the obvious prediction: a UDT declaring a
 `frozen<map<text,int>>` FIELD also projects successfully, even though `Udt.__hash__` hashes its field
-values and a `dict` would be unhashable. A collection field inside a frozen UDT decodes to
-`Value::Blob`, so it arrives as hashable `bytes`. That decode gap is orthogonal to both issues and is
-pinned as characterization in `bindings/python/tests/test_issue_3504_udt_field_namespace.py`.
+values and a `dict` would be unhashable. **As measured at the time**, a collection field inside a
+frozen UDT decoded to `Value::Blob`, so it arrived as hashable `bytes`.
+
+**That decode gap is CLOSED by #3722** — one UDT-field decoder, total over `CqlType`, with no
+`_ => Value::Blob` — so such a field now decodes to `{"a": 1}`. The projection still succeeds, but on
+different grounds, verified by #3722: the subject column is a UDT-bearing set, so `set_to_py` takes its
+#804 `list` branch and never hashes the `Udt`. The characterization pin in
+`bindings/python/tests/test_issue_3504_udt_field_namespace.py` was updated accordingly.
 
 **MULTICELL map keys were the remaining gap; #3612 CLOSED it.** A non-frozen (multicell)
 `map<K, V>` carries each key in the cell PATH, and `parse_cell_path_key` used to decode cell-path

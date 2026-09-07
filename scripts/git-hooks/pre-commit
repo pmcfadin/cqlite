@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+# pre-commit — THE PRODUCTION ENFORCEMENT POINT FOR THE MACHINE-LOCAL LANE LOCK (#3436).
+#
+# WHY A HOOK, AND WHY NOTHING ELSE WOULD DO. roborev (job 434/436, High, twice at two heads)
+# found the lock had NO production acquire path: 32 invocations in tests, 10 in agent-instruction
+# markdown, and one in a production script that was inside a `note` MESSAGE STRING. claim.sh only
+# ever probed. So the lock was taken by an agent CHOOSING to follow an instruction — and #3436's
+# founding incident was a session that ignored exactly that class of advisory control. CLAUDE.md's
+# wiring-evidence rule ("a named surface + call chain + an end-to-end test; green helper-only unit
+# tests are not sufficient") was unmet, and #3822's own header states the principle: "An
+# instruction to an LLM cannot be tested; a script can."
+#
+# WHY A SCRIPT COULD NOT DO IT EARLIER, AND WHY A HOOK CAN. FIX 5 refuses an acquire that cannot
+# name a durable owner; FIX 14 MEASURED that `( cd "$wt" && lane-lock.sh acquire N )` records the
+# transient SUBSHELL, which exits immediately — "an ACQUIRED that protects nothing", worse than no
+# lock because it reads as success. The resolver walks ancestors for the OUTERMOST whose cwd is
+# inside the lane. A hook is a DESCENDANT of the session (hook -> git -> shell -> ... -> session),
+# so it resolves the session itself. Measured on a live lane from a 3-level-nested child:
+#     our-pid=<the session pid>   our-identity=cwd-match
+# That is the whole reason this placement works where the earlier one did not.
+#
+# IT FIRES AT THE ACT THAT CAUSED THE DAMAGE. #3436's harm was one session's `git add -A`
+# laundering a peer's uncommitted work into its commit. The commit is the moment; refusing it is
+# the narrowest control that actually prevents the incident.
+#
+# TWO RESIDUALS, STATED RATHER THAN IMPLIED:
+#   * `git commit --no-verify` bypasses every hook. Git offers no way to prevent that, so this is
+#     a control against ACCIDENT and DRIFT — a session that simply never took the lock — not
+#     against a determined invoker. That is the same threat model CLAUDE.md records for the
+#     roborev waiver path, and pretending otherwise would be the false assurance this repo
+#     exists to avoid.
+#   * It refuses ONLY on a POSITIVELY established live peer. An UNKNOWN-* liveness cannot be
+#     distinguished from a stale record, and refusing there would brick a lane whose holder is
+#     merely unmeasurable — the guard that reds on correct input, which is the guard agents learn
+#     to waive. Unknown states WARN and allow, and say so.
+set -uo pipefail
+
+# NO-OP OUTSIDE A LANE. This is load-bearing, not tidiness: core.hooksPath is repo-wide, so this
+# same hook runs in the ROOT checkout, in the `telemetry-<N>` worktrees flow-finalize creates, and
+# in anything else checked out from this repository. Tests that commit in scratch `git init`
+# repositories are unaffected anyway (their own config has no hooksPath), but the root checkout
+# and telemetry worktrees are real and must stay untouched.
+#
+# TWO LAYOUTS, NOT ONE (roborev job 456). This used to hard-code `/data/lanes/lane-<N>` alone, so
+# it SILENTLY no-opped in the layout the repository's own live instructions direct agents to —
+# `.claude/worktrees/issue-<N>-<slug>` (`.claude/skills/flow-implement/SKILL.md:12,98`,
+# `.claude/agents/flow-closer.md:22`). A guard that exits 0 in a sanctioned lane gives no
+# protection there while looking installed, which is the false-assurance class this file exists to
+# avoid. It also ignored `LANE_ROOT`, which `lane-lock.sh` itself honours
+# (`${LANE_ROOT:-/data/lanes}/lane-<issue>`), so the lock and its own enforcement point disagreed
+# about where lanes live.
+#
+# THE PATH DECIDES, NEVER THE BRANCH. The reviewer suggested deriving the issue from the checked-out
+# `issue-<N>-*` branch. That is REJECTED deliberately: the root checkout can have an `issue-<N>-…`
+# branch checked out (doctrine forbids working there, but it happens), and a branch-keyed hook would
+# then police the ROOT CHECKOUT — the exact thing the paragraph above forbids. Keying on the path
+# keeps "is this a lane" a property of WHERE you are, which is what the lock records anyway.
+wt="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+issue=""
+case "$wt" in
+  "${LANE_ROOT:-/data/lanes}"/lane-[0-9]*)
+    # $LANE_ROOT/lane-<N> — the fleet layout, and the lock's own default.
+    issue="${wt##*/lane-}" ;;
+  */.claude/worktrees/issue-[0-9]*)
+    # <root>/.claude/worktrees/issue-<N>-<slug> — the layout flow-implement/flow-closer direct.
+    issue="${wt##*/worktrees/issue-}"; issue="${issue%%-*}" ;;
+  *) exit 0 ;;
+esac
+case "$issue" in
+  ''|*[!0-9]*) exit 0 ;;   # a lane-shaped name whose issue is not a number: not ours to police
+esac
+
+# DECLARED SCOPE, so a reader is never misled about coverage: these TWO layouts are policed and no
+# others. A worktree somewhere else (e.g. `~/projects/cqlite-wt/issue-<N>`, which appears in notes
+# and one archived change but in no live instruction) is NOT policed and exits silently above —
+# there is no bounded way to recognise an arbitrary directory as a lane, and guessing would either
+# miss lanes or police the root checkout. Point `LANE_ROOT` at such a root, or use one of the two.
+
+ll="$wt/scripts/flow/lane-lock.sh"
+[ -r "$ll" ] || exit 0     # a checkout without the script cannot be policed by it
+
+# `probe` READS: it never writes, never refuses, and reports its own identity resolution, which is
+# what lets us tell "held by me" from "held by someone I cannot identify".
+probe="$(cd "$wt" && bash "$ll" probe "$issue" 2>/dev/null || true)"
+[ -n "$probe" ] || exit 0  # unmeasurable: allow, same reason as UNKNOWN-* below
+
+field() { printf '%s' "$probe" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -1; }
+liveness="$(field liveness)"
+holder_pid="$(field holder-pid)"
+holder_ticks="$(field holder-start-ticks)"
+our_pid="$(field our-pid)"
+our_ticks="$(field our-start-ticks)"
+our_identity="$(field our-identity)"
+
+# IS THE HOLDER US? ASK ABOUT THE PROCESS, NOT THE VERDICT (roborev job 439). `liveness=SELF`
+# also requires the ACTOR to match, so the SAME process probing under a different
+# LANE_LOCK_ACTOR reports ALIVE and would be refused as a peer — demonstrated live: one process,
+# `probe` -> SELF, `probe --actor otheractor` -> ALIVE. The probe publishes holder-pid,
+# holder-start-ticks, our-pid and our-start-ticks precisely so a caller can compare PROCESSES.
+# start-ticks is carried with the pid because a pid alone is reusable; together they identify
+# one process on one boot.
+holder_is_us=0
+if [ -n "$our_pid" ] && [ "$holder_pid" = "$our_pid" ] && [ "$holder_ticks" = "$our_ticks" ]; then
+  holder_is_us=1
+fi
+
+case "$liveness" in
+  NO-RECORD|DEAD-*)
+    # FREE, or a DEAD holder. Acquire now, from inside the lane, with the session as our
+    # ancestor — this is the "acquire on the lane-entry path before writes begin" the lock
+    # never had.
+    #
+    # DEAD-* BELONGS HERE, NOT IN THE WARN ARM (roborev job 439). It used to warn-and-allow on
+    # the reasoning that this hook should not reclaim on someone else's behalf. That was wrong
+    # about the mechanism: `acquire` AUTO-RECLAIMS a DEAD-* holder by design (only DEAD-*
+    # permits it; every UNKNOWN-* refuses), so declining to call it did not avoid a reclaim —
+    # it left the enforcement PERMANENTLY INACTIVE after any crash, since the hook acquires
+    # only when it sees no record. A crashed session would have disabled the guard for the
+    # life of that lane.
+    out="$(cd "$wt" && bash "$ll" acquire "$issue" --lane-dir "$wt" 2>&1)" || {
+      echo "lane-lock: could not acquire lane $issue before this commit:" >&2
+      printf '%s\n' "$out" >&2
+      echo "lane-lock: refusing the commit — an unlocked lane is how #3436 happened." >&2
+      exit 1
+    }
+    lease="$(printf '%s' "$out" | tr ' ' '\n' | sed -n 's/^lease=//p' | head -1)"
+    [ -n "$lease" ] && echo "lane-lock: acquired lane $issue for this session (lease $lease)" >&2
+
+    # DECLARED GAP, NOT A REFUSAL (#3436, roborev job 450 finding 1). Acquiring HERE makes this
+    # hook the PRIMARY acquisition point, and a commit is far too late to be one: the lane was
+    # UNLOCKED for every moment of this session up to now, so nothing recorded whether a PEER
+    # session was already writing in this worktree during that window. This acquisition makes us
+    # the owner from HERE ON; it cannot retroactively exclude that peer, and the staged tree it
+    # is about to commit may already carry that peer's work — which is #3436 itself.
+    #
+    # ONLY ON NO-RECORD. A DEAD-* holder DID record itself, so that lane was locked and its
+    # previous owner is known and provably dead — there was no unlocked window, and printing
+    # this there would be an affirmatively false claim.
+    #
+    # WHY DECLARED AND NOT FATAL: the refusing form was measured and REJECTED at
+    # lane-lock.sh:648 — "refuse if the resolved ancestor has an in-lane child outside my own
+    # chain" fires on an ORDINARY single session, and a refusing acquire BRICKS the lane (FIX
+    # 5/14), which is strictly worse than the hole; the ancestry identity cannot express
+    # siblings, so no refinement of that walk closes it. What IS a defect is staying SILENT: a
+    # lane that omits coverage silently is indistinguishable from one that covers it, so the gap
+    # is stated affirmatively at the moment it is taken on, in the `N RECOGNISED` form this repo
+    # uses for a census that declares its own non-exhaustiveness.
+    if [ "$liveness" = "NO-RECORD" ]; then
+      echo "lane-lock: DECLARED GAP 1 RECOGNISED — this lock was taken at COMMIT time, not at" >&2
+      echo "lane-lock:   lane entry, so an UNLOCKED window preceded it. A peer session already" >&2
+      echo "lane-lock:   writing in this worktree during that window is NOT excluded by this" >&2
+      echo "lane-lock:   acquisition, and may own work in the tree about to be committed." >&2
+      echo "lane-lock:   Close it by acquiring at lane ENTRY — from inside the lane, run" >&2
+      echo "lane-lock:   'bash scripts/flow/lane-lock.sh acquire $issue --lane-dir \"\$PWD\"'" >&2
+      echo "lane-lock:   worker.md and drive-issue Delta 4 already mandate that; this hook is" >&2
+      echo "lane-lock:   the FALLBACK, never the primary acquisition point." >&2
+    fi
+    ;;
+  SELF)
+    : ;;   # ours already; the common path, silent by design
+  ALIVE)
+    # A LIVE holder that is not us — but only if we could establish who WE are. Without our own
+    # identity, "not us" is a positive claim derived from a failure to prove its opposite, which
+    # is the error this file's own doctrine warns about repeatedly.
+    if [ "$holder_is_us" = "1" ]; then
+      : # same process under a different actor label — ours, not a peer (see holder_is_us)
+    elif [ "$our_identity" = "UNRESOLVED" ]; then
+      echo "lane-lock: WARNING lane $issue has a LIVE holder (pid ${holder_pid:-?}) but this" >&2
+      echo "lane-lock: process could not establish its own identity, so it cannot tell whether" >&2
+      echo "lane-lock: that holder is you. Allowing the commit; verify before you continue." >&2
+    else
+      echo "lane-lock: REFUSED — lane $issue is held by a DIFFERENT LIVE PROCESS on this box" >&2
+      echo "lane-lock:   holder pid: ${holder_pid:-unknown}" >&2
+      echo "lane-lock: Two sessions in one worktree is #3436: the other session's 'git add -A'" >&2
+      echo "lane-lock: launders your uncommitted work into its commit, and yours into its." >&2
+      echo "lane-lock: Find that session and let it finish, or work a DIFFERENT lane." >&2
+      echo "lane-lock: (bash scripts/flow/lane-lock.sh probe $issue names the occupant)" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    # UNKNOWN-* / anything unrecognised. DEAD-* moved to the acquire arm above. An UNKNOWN
+    # holder is UNMEASURABLE, and refusing on one would brick a lane whose holder merely cannot
+    # be read — the guard that reds on correct input. WARN and allow; see the header residual.
+    echo "lane-lock: WARNING lane $issue liveness=${liveness:-unmeasured}; not refusing, but this" >&2
+    echo "lane-lock: commit is NOT protected by the lane lock. 'lane-lock.sh probe $issue' explains." >&2
+    ;;
+esac
+exit 0

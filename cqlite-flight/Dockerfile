@@ -34,6 +34,18 @@ RUN cargo chef prepare --recipe-path recipe.json
 #     are character-for-character identical to the final build (release profile,
 #     -p cqlite-flight, --features observability); a mismatch would cook artifacts
 #     the final build cannot reuse — a silent no-op that recompiles anyway (D3).
+#
+#     ALLOCATOR (issue #3997): `--features observability` is the whole feature set,
+#     so this image links the SYSTEM allocator (glibc malloc). The non-default
+#     `jemalloc` feature is NOT enabled here and there is nothing to configure at
+#     deploy time — the allocator is a compile-time choice and the running image
+#     reports which one it got, on the startup `info` line as `allocator=` and via
+#     `cqlite-flight --version`. Adding `jemalloc` to BOTH lines below (they must
+#     stay character-for-character identical, see D3 above) is what would change
+#     that; do NOT add it to only one. Whether the default flips at all is decided
+#     by the linked-build A/E measurement on the #3551 rig against the
+#     pre-registered kill criterion in openspec/changes/flight-jemalloc/proposal.md
+#     — not here, and not by inheriting #3551's LD_PRELOAD figure.
 FROM chef AS builder
 COPY --from=planner /src/recipe.json recipe.json
 RUN cargo chef cook --release --locked -p cqlite-flight --features observability --recipe-path recipe.json

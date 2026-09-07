@@ -88,6 +88,38 @@ pub(crate) fn resolve_clustering_value_layout(type_name: &str) -> Option<Cluster
     let ctor = inner.split('(').next().unwrap_or(inner);
     let simple = ctor.rsplit('.').next().unwrap_or(ctor);
 
+    // `VectorType(element , n)` — issue #4114. This CANNOT be decided from the
+    // constructor name, which is why listing it below as `Variable` was a BUG:
+    // `VectorType.valueLengthIfFixed()` is `element.valueLengthIfFixed() * n` when
+    // the ELEMENT is fixed, and `VARIABLE_LENGTH` otherwise (VectorType.java:94-96
+    // + AbstractType.java:62,490-493), so `vector<float, 3>` is Fixed(12) while
+    // `vector<text, 3>` is genuinely Variable. One classification cannot cover both,
+    // and the `ctor` computed above DISCARDS the argument list — so the element type
+    // is parsed here and its own layout resolved recursively. That is exactly the
+    // rule this module's AUTHORITY NOTE states: the serialization layer branches
+    // PURELY on `valueLengthIfFixed()`.
+    //
+    // A malformed vector type is `None` (UNKNOWN), never a guessed width: the caller
+    // then reports the trailing repair fields as `Unparsed`, which is the honest
+    // outcome when the skip cannot be computed.
+    // The probe is three-valued: `NotAVector` falls through to the tables below,
+    // while EITHER malformed state (an unextractable parameter list or one that does
+    // not split into (element, dimension)) is `None` — UNKNOWN — never a guessed
+    // width (roborev job 109).
+    match crate::schema::vector_type::marshal_vector_kind(inner).into_args(inner) {
+        Ok(Some(args)) => {
+            return match resolve_clustering_value_layout(args.element)? {
+                ClusteringValueLayout::Fixed(element_width) => {
+                    crate::schema::vector_type::vector_byte_width(element_width, args.dimension)
+                        .map(ClusteringValueLayout::Fixed)
+                }
+                ClusteringValueLayout::Variable => Some(ClusteringValueLayout::Variable),
+            }
+        }
+        Err(_) => return None,
+        Ok(None) => {}
+    }
+
     // Fixed-width comparators (exact `valueLengthIfFixed()` from cassandra-5.0.0).
     let fixed = match simple {
         "BooleanType" => Some(1),
@@ -131,8 +163,9 @@ pub(crate) fn resolve_clustering_value_layout(type_name: &str) -> Option<Cluster
             | "UserType"
             | "FrozenType"
             | "CompositeType"
-            | "DynamicCompositeType"
-            | "VectorType"
+            | "DynamicCompositeType" // NOT "VectorType": it is handled ABOVE, from its ELEMENT's layout.
+                                     // Leaving it here made CQLite read a phantom vint length Cassandra never
+                                     // wrote for every fixed-element vector (issue #4114).
     );
     if variable {
         return Some(ClusteringValueLayout::Variable);
@@ -505,5 +538,108 @@ mod tests {
         let mut c = Buf { b: &bytes, p: 0 };
         assert!(skip_covered_slice(&mut c, &layouts).unwrap());
         assert_eq!(c.p, bytes.len());
+    }
+
+    // ── Issue #4114 AC5: the VectorType width classification ────────────────
+    //
+    // AC5 requires this classification be "confirmed or corrected against
+    // source, with a test either way". It was CORRECTED — `"VectorType"` used to
+    // sit in the `variable` list above, which is wrong for a fixed-width element
+    // — and this is that test. Without it the correction is unpinned and a future
+    // edit could silently restore the bug, whose consequence is not a wrong value
+    // but an unrecoverable DESYNC: a reader treating `vector<float, 3>` as
+    // variable-width consumes `0x3f` (63) — the leading byte of `1.0`'s
+    // big-endian binary32 — as a vint length and then reads 63 bytes for a
+    // 12-byte value.
+    //
+    // AUTHORITY (`cassandra-5.0.8`, per `.drive-issue-4114/format-authority.md`):
+    // `VectorType`'s serializer is chosen FROM THE ELEMENT TYPE
+    // (`VectorType.java:86-101`), so `valueLengthIfFixed()` is
+    // `element.valueLengthIfFixed() * dimension` for a fixed element
+    // (`:94-96`, `:126-131`) and `VARIABLE_LENGTH` otherwise
+    // (`AbstractType.java:62`, `:490-493`). Cell and clustering framing branch
+    // PURELY on that value (`AbstractType.java:535-552`), which is why one
+    // classification cannot cover both element kinds.
+
+    #[test]
+    fn vector_layout_is_the_element_layout_times_the_dimension() {
+        use ClusteringValueLayout::*;
+        const PKG: &str = "org.apache.cassandra.db.marshal.";
+
+        // FIXED element => Fixed(element_width * n). Cassandra writes the elements
+        // packed contiguously with NO length prefix, so the width IS the value.
+        for (element, width, n) in [
+            ("FloatType", 4, 3usize), // the issue's subject: 4*3 = 12
+            ("FloatType", 4, 1),      // n=1 is not a special case
+            ("FloatType", 4, 384),    // a typical embedding width
+            ("DoubleType", 8, 3),     // a different fixed width multiplies too
+            ("Int32Type", 4, 2),
+            ("BooleanType", 1, 5),
+        ] {
+            // Both spellings Cassandra's own TypeParser accepts: it WRITES `" , "`
+            // (`TypeParser.java:239-242`) but tolerates whitespace variation on
+            // read (`skipBlankAndComma`), so a reader must too.
+            for ty in [
+                format!("{PKG}VectorType({PKG}{element} , {n})"),
+                format!("{PKG}VectorType({PKG}{element},{n})"),
+            ] {
+                assert_eq!(
+                    resolve_clustering_value_layout(&ty),
+                    Some(Fixed(width * n)),
+                    "{ty} must be Fixed({}), not variable-width",
+                    width * n
+                );
+            }
+        }
+
+        // VARIABLE element => Variable. This is the half that makes the fix a
+        // CORRECTION rather than a flip: leaving `VectorType` in the variable list
+        // was right here and wrong above, so a test asserting only the fixed case
+        // would license "just move it to the fixed map".
+        for element in ["UTF8Type", "BytesType", "AsciiType", "DecimalType"] {
+            let ty = format!("{PKG}VectorType({PKG}{element} , 3)");
+            assert_eq!(
+                resolve_clustering_value_layout(&ty),
+                Some(Variable),
+                "{ty} must stay Variable — a variable-width element keeps per-element framing"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_vector_layout_is_unknown_never_a_guessed_width() {
+        const PKG: &str = "org.apache.cassandra.db.marshal.";
+        // `None` means UNKNOWN, which makes the caller report the trailing repair
+        // fields as `Unparsed` — the honest outcome when the skip cannot be
+        // computed. A guessed width would desync the row instead.
+        for ty in [
+            format!("{PKG}VectorType({PKG}FloatType , 3"), // unmatched paren
+            format!("{PKG}VectorType({PKG}FloatType)"),    // no dimension
+            format!("{PKG}VectorType({PKG}FloatType , n)"), // non-numeric dimension
+            format!("{PKG}VectorType({PKG}FloatType , 0)"), // n=0: Cassandra rejects n<=0
+            format!("{PKG}VectorType( , 3)"),              // no element type
+        ] {
+            assert_eq!(
+                resolve_clustering_value_layout(&ty),
+                None,
+                "{ty} must resolve to None (unknown), never a guessed width"
+            );
+        }
+    }
+
+    #[test]
+    fn vector_is_not_in_the_blanket_variable_list_anymore() {
+        // The regression guard proper. Before #4114 the constructor NAME alone
+        // decided this, so ANY VectorType answered Variable. If a future edit
+        // reinstates that, the fixed case below flips and this fails.
+        use ClusteringValueLayout::*;
+        const FLOAT3: &str =
+            "org.apache.cassandra.db.marshal.VectorType(org.apache.cassandra.db.marshal.FloatType , 3)";
+        assert_ne!(
+            resolve_clustering_value_layout(FLOAT3),
+            Some(Variable),
+            "a fixed-element vector must NOT be classified variable-width (the #4114 bug)"
+        );
+        assert_eq!(resolve_clustering_value_layout(FLOAT3), Some(Fixed(12)));
     }
 }

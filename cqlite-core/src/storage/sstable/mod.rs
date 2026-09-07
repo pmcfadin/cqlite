@@ -3,6 +3,9 @@
 pub mod bloom;
 pub mod bti;
 pub mod bulletproof_reader;
+/// The cell-path component kinds and their ONE shared resolver (#4106); the
+/// module header carries the reasoning.
+pub(crate) mod cell_path_component;
 pub mod chunk_decompressor;
 pub mod chunk_reader;
 pub mod compression;

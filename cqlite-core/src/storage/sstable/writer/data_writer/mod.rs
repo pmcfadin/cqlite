@@ -245,12 +245,20 @@ pub(super) struct OrderedCols {
     pub(super) is_complex: Vec<bool>,
 }
 
+// Issues #3805/#4106: the two schema-aware CELL-PATH serializers (a multicell
+// map's key, a set's element) — the only write positions that may emit the
+// empty-buffer sentinel. See that module's header.
+mod cell_path;
 mod cells;
 mod collection_order;
 /// Schema-constant ordered column lists memoized once per writer (issue #1674,
 /// R3). See [`column_cache`].
 mod column_cache;
 mod complex;
+// Issue #4106 (campsite #1116): the SET and MAP multicell cell writers, split
+// out of `complex.rs` — the two whose CELL PATH carries a declared-type
+// component. See that module's header.
+mod complex_collections;
 mod encoding;
 /// Incremental partition-write entry point (issue #1668, stage 5c-iv, part
 /// 1 — build + prove, not yet wired). See
@@ -292,6 +300,9 @@ pub use types::PartitionEmitCounts;
 // `normalize_schema_udts`, `resolve_bare_udt_marshal`) keep their
 // `...::data_writer::<name>` paths. Flag/marker constants stay private items of
 // this `mod.rs` and reach the submodules as ancestor privates.
+pub(crate) use cell_path::{
+    serialize_map_cell_path_key_into, serialize_set_cell_path_element_into,
+};
 pub(crate) use collection_order::compare_collection_elements;
 pub(crate) use encoding::*;
 pub(crate) use incremental_partition::IncrementalPartitionWriter;

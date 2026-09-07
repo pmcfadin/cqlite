@@ -64,6 +64,12 @@
 
 set -uo pipefail
 
+# #3637: the gate now REMOVES its per-run log dir on a terminal PASS and on ANY
+# verdict when it is nested (which it is here — this script runs inside the gate's
+# tooling-tests component, so the child gates below inherit AGENT_GATE_PARENT_RUN_ID).
+# These cases READ `<logdir>/<component>.log` AFTER the child exits, so they opt out.
+export AGENT_GATE_KEEP_LOGS=1
+
 REPO_ROOT=$(git rev-parse --show-toplevel) || { echo "not a git checkout" >&2; exit 1; }
 cd "$REPO_ROOT" || exit 1
 
@@ -201,6 +207,18 @@ cleanup() {
   exit "$rc"
 }
 trap 'cleanup' EXIT
+
+# CONTAIN the child gates' per-run LOG_DIRs (#3637). This harness sets
+# AGENT_GATE_KEEP_LOGS=1 because its cases READ `<logdir>/<component>.log` after the
+# child exits — a necessary opt-out, but an opt-out that, left pointing at the shared
+# /tmp, leaks one directory per child gate into exactly the population this issue
+# exists to drain. Redirecting TMPDIR under $WORK (which `cleanup` removes on EXIT,
+# INT and TERM alike) makes the opt-out unable to leak, instead of trading one
+# correctness property for another. The same idiom as
+# scripts/tests/test_agent_gate_file_size_log.sh.
+GATE_TMPDIR="$WORK/tmp"
+mkdir -p "$GATE_TMPDIR" || exit 1
+export TMPDIR="$GATE_TMPDIR"
 trap 'cleanup INT' INT
 trap 'cleanup TERM' TERM
 

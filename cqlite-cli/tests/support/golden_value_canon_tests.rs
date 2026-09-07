@@ -31,7 +31,7 @@ fn canon_natural(v: &Value, ty: &CqlType) -> Canon {
 }
 
 fn canon_at(v: &Value, ty: &CqlType, kinding: Kinding) -> Canon {
-    match canon_typed(v, Egress::Json, ty, Depth::TopLevel, kinding) {
+    match canon_typed(v, Egress::Json, ty, Depth::TopLevel, kinding, Side::Golden) {
         Ok(canon) => canon,
         Err(why) => panic!("{why}"),
     }
@@ -90,8 +90,24 @@ fn a_numeric_cell_outside_a_stringified_position_compares_by_kind_too() {
     // whatever the kinding says.
     for kinding in [Kinding::Natural, Kinding::Stringified] {
         assert_eq!(
-            canon_typed(&json!(1), Egress::Csv, &int(), Depth::TopLevel, kinding).expect("number"),
-            canon_typed(&json!("1"), Egress::Csv, &int(), Depth::TopLevel, kinding).expect("text"),
+            canon_typed(
+                &json!(1),
+                Egress::Csv,
+                &int(),
+                Depth::TopLevel,
+                kinding,
+                Side::Golden
+            )
+            .expect("number"),
+            canon_typed(
+                &json!("1"),
+                Egress::Csv,
+                &int(),
+                Depth::TopLevel,
+                kinding,
+                Side::Golden
+            )
+            .expect("text"),
             "every CSV cell arrives as text, so `1` and `\"1\"` are one value"
         );
     }
@@ -116,8 +132,15 @@ fn a_numeric_cell_outside_a_stringified_position_compares_by_kind_too() {
 fn the_float_special_value_gap_is_a_json_vocabulary_gap_not_a_value_gap() {
     let double = CqlType::Numeric("double".to_string());
     let canon_in = |v: &Value, egress: Egress| {
-        canon_typed(v, egress, &double, Depth::Inside, Kinding::Stringified)
-            .expect("a set<double> element canonicalizes")
+        canon_typed(
+            v,
+            egress,
+            &double,
+            Depth::Inside,
+            Kinding::Stringified,
+            Side::Golden,
+        )
+        .expect("a set<double> element canonicalizes")
     };
     for token in ["Infinity", "-Infinity", "NaN"] {
         // `null` is a DIFFERENT value from the token the golden names, in
@@ -226,6 +249,7 @@ fn a_container_in_a_scalar_position_is_an_error() {
         &int(),
         Depth::TopLevel,
         Kinding::Natural,
+        Side::Golden,
     )
     .expect_err("a container where the DDL says int must not canonicalize");
     assert!(why.contains("int"), "{why}");
@@ -249,7 +273,8 @@ fn the_csv_empty_field_rule_stops_at_the_top_level() {
             Egress::Csv,
             &text(),
             Depth::TopLevel,
-            Kinding::Natural
+            Kinding::Natural,
+            Side::Golden
         )
         .expect("empty text"),
         canon_typed(
@@ -257,7 +282,8 @@ fn the_csv_empty_field_rule_stops_at_the_top_level() {
             Egress::Csv,
             &text(),
             Depth::TopLevel,
-            Kinding::Natural
+            Kinding::Natural,
+            Side::Golden
         )
         .expect("null"),
         "a top-level CSV field has one spelling for both, so they must compare alike"
@@ -268,11 +294,19 @@ fn the_csv_empty_field_rule_stops_at_the_top_level() {
             Egress::Csv,
             &text(),
             Depth::Inside,
-            Kinding::Natural
+            Kinding::Natural,
+            Side::Golden
         )
         .expect("empty member"),
-        canon_typed(&null, Egress::Csv, &text(), Depth::Inside, Kinding::Natural)
-            .expect("null member"),
+        canon_typed(
+            &null,
+            Egress::Csv,
+            &text(),
+            Depth::Inside,
+            Kinding::Natural,
+            Side::Golden
+        )
+        .expect("null member"),
         "inside a container `{{f: }}` and `{{f: null}}` are distinguishable, so an \
          empty member must not canonicalize onto null"
     );
@@ -280,9 +314,24 @@ fn the_csv_empty_field_rule_stops_at_the_top_level() {
     // top-level collapse a format property rather than a lost assertion.
     for depth in [Depth::TopLevel, Depth::Inside] {
         assert_ne!(
-            canon_typed(&empty, Egress::Json, &text(), depth, Kinding::Natural)
-                .expect("empty text"),
-            canon_typed(&null, Egress::Json, &text(), depth, Kinding::Natural).expect("null"),
+            canon_typed(
+                &empty,
+                Egress::Json,
+                &text(),
+                depth,
+                Kinding::Natural,
+                Side::Golden
+            )
+            .expect("empty text"),
+            canon_typed(
+                &null,
+                Egress::Json,
+                &text(),
+                depth,
+                Kinding::Natural,
+                Side::Golden
+            )
+            .expect("null"),
             "JSON distinguishes `\"\"` from `null` at {depth:?}"
         );
     }
@@ -355,6 +404,7 @@ fn the_cli_may_not_spell_a_boolean_as_a_string() {
         &CqlType::Boolean,
         Depth::TopLevel,
         Kinding::Natural,
+        Side::Golden,
     )
     .expect("canonicalizes");
     assert_eq!(cli_string, Canon::Text("true".to_string()));
@@ -407,6 +457,7 @@ fn the_blob_relaxation_does_not_reach_a_cli_csv_cell() {
         &CqlType::Blob,
         Depth::TopLevel,
         Kinding::Natural,
+        Side::Golden,
     )
     .expect("canonicalizes");
     let golden_prefixed = canon_typed(
@@ -415,6 +466,7 @@ fn the_blob_relaxation_does_not_reach_a_cli_csv_cell() {
         &CqlType::Blob,
         Depth::TopLevel,
         Kinding::Natural,
+        Side::Golden,
     )
     .expect("canonicalizes");
     assert_ne!(

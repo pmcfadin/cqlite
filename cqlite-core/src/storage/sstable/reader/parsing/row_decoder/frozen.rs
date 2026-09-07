@@ -5,7 +5,7 @@ impl V5CompressedLegacyParser {
     ///
     /// `blob_end` is the exclusive upper byte index bounding the collection.
     /// `element_desc` appears in error messages (e.g. `"list 'col' element 3"`).
-    fn read_frozen_element(
+    pub(super) fn read_frozen_element(
         &self,
         data: &[u8],
         offset: &mut usize,
@@ -86,7 +86,8 @@ impl V5CompressedLegacyParser {
 
         Self::require_frozen_extent(offset, blob_end, kind, &column.name)?; // #3811 (F)
         if as_set {
-            Ok((Value::Set(elements), blob_end))
+            let xs = self.frozen_set_members_never_null(elements, kind);
+            Ok((Value::Set(xs), blob_end))
         } else {
             Ok((Value::List(elements), blob_end))
         }
@@ -115,46 +116,6 @@ impl V5CompressedLegacyParser {
         column: &crate::schema::Column,
     ) -> Result<(Value, usize)> {
         self.parse_frozen_sequence_value(data, offset, element_type, column, true)
-    }
-
-    /// Parse frozen map value.
-    ///
-    /// The cell layout on disk is:
-    ///   [VUInt blob_len][i32 BE entry_count][i32 BE key_len][key_bytes][i32 BE val_len][val_bytes]...
-    pub(super) fn parse_frozen_map_value(
-        &self,
-        data: &[u8],
-        mut offset: usize,
-        key_type: &str,
-        value_type: &str,
-        column: &crate::schema::Column,
-    ) -> Result<(Value, usize)> {
-        let (count, blob_end) = Self::read_frozen_preamble(data, &mut offset, "map", &column.name)?;
-
-        tracing::debug!(
-            "V5CompressedLegacy: Frozen map '{}' with {} entries, key_type='{}', value_type='{}'",
-            column.name,
-            count,
-            key_type,
-            value_type
-        );
-
-        let mut entries = Vec::with_capacity(count);
-        for i in 0..count {
-            let key_desc = format!("map '{}' key {}", column.name, i);
-            let key_value =
-                self.read_frozen_element(data, &mut offset, blob_end, key_type, &key_desc, 0)?;
-
-            let val_desc = format!("map '{}' value {}", column.name, i);
-            let val_value =
-                self.read_frozen_element(data, &mut offset, blob_end, value_type, &val_desc, 0)?;
-
-            tracing::debug!("Frozen map entry {i}: {key_value:?} -> {val_value:?}");
-            entries.push((key_value, val_value));
-        }
-
-        Self::require_frozen_extent(offset, blob_end, "map", &column.name)?; // #3811 (F)
-        Ok((Value::Map(entries), blob_end))
     }
 
     /// Parse a frozen list or set (raw, nested inside an already-bounded blob).
@@ -224,7 +185,8 @@ impl V5CompressedLegacyParser {
         }
 
         if as_set {
-            Ok((Value::Set(elements), offset))
+            let xs = self.frozen_set_members_never_null(elements, kind);
+            Ok((Value::Set(xs), offset))
         } else {
             Ok((Value::List(elements), offset))
         }
@@ -252,104 +214,6 @@ impl V5CompressedLegacyParser {
         depth: usize,
     ) -> Result<(Value, usize)> {
         self.parse_frozen_sequence_value_raw(data, offset, element_type, column_name, true, depth)
-    }
-
-    /// Parse frozen map value (raw version without Column parameter).
-    pub(super) fn parse_frozen_map_value_raw(
-        &self,
-        data: &[u8],
-        mut offset: usize,
-        key_type: &str,
-        value_type: &str,
-        column_name: &str,
-        depth: usize,
-    ) -> Result<(Value, usize)> {
-        let count = Self::read_frozen_count(data, &mut offset, data.len(), "map", column_name)?;
-
-        tracing::debug!(
-            "V5CompressedLegacy: Parsing frozen map '{}' with {} entries (raw)",
-            column_name,
-            count
-        );
-
-        let mut entries = Vec::with_capacity(count);
-        for i in 0..count {
-            // Key: [i32 BE len][key bytes]
-            if offset + 4 > data.len() {
-                return Err(Error::corruption(format!(
-                    "Frozen map '{}': not enough bytes for key {} length",
-                    column_name, i
-                )));
-            }
-            let key_len_i32 = i32::from_be_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-            ]);
-            if key_len_i32 < 0 {
-                return Err(Error::corruption(format!(
-                    "Frozen map '{}': negative key {} length {}",
-                    column_name, i, key_len_i32
-                )));
-            }
-            let key_len = key_len_i32 as usize;
-            offset += 4;
-
-            if offset + key_len > data.len() {
-                return Err(Error::corruption(format!(
-                    "Frozen map '{}': key {} needs {} bytes but only {} available",
-                    column_name,
-                    i,
-                    key_len,
-                    data.len() - offset
-                )));
-            }
-            let key_data = &data[offset..offset + key_len];
-            let key_value =
-                self.parse_value_from_raw_bytes(key_data, key_type, column_name, depth)?;
-            offset += key_len;
-
-            // Value: [i32 BE len][value bytes]
-            if offset + 4 > data.len() {
-                return Err(Error::corruption(format!(
-                    "Frozen map '{}': not enough bytes for value {} length",
-                    column_name, i
-                )));
-            }
-            let val_len_i32 = i32::from_be_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-            ]);
-            if val_len_i32 < 0 {
-                return Err(Error::corruption(format!(
-                    "Frozen map '{}': negative value {} length {}",
-                    column_name, i, val_len_i32
-                )));
-            }
-            let val_len = val_len_i32 as usize;
-            offset += 4;
-
-            if offset + val_len > data.len() {
-                return Err(Error::corruption(format!(
-                    "Frozen map '{}': value {} needs {} bytes but only {} available",
-                    column_name,
-                    i,
-                    val_len,
-                    data.len() - offset
-                )));
-            }
-            let val_data = &data[offset..offset + val_len];
-            let val_value =
-                self.parse_value_from_raw_bytes(val_data, value_type, column_name, depth)?;
-            offset += val_len;
-
-            entries.push((key_value, val_value));
-        }
-
-        Ok((Value::Map(entries), offset))
     }
 
     /// Parse tuple value from binary data at the cell level.

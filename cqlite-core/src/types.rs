@@ -1,6 +1,7 @@
 //! Core data types for CQLite
 
 pub mod comparator;
+pub mod empty_value;
 // `impl PartialOrd for Value` only — PRIVATE on purpose: a trait impl applies
 // crate-wide regardless of module visibility, so this adds no public surface.
 mod value_ord;
@@ -9,6 +10,7 @@ mod value_ord;
 mod comparator_test;
 
 pub use comparator::ComparatorType;
+pub use empty_value::EmptyValueType;
 
 use crate::schema::CqlType;
 use bytes::Bytes;
@@ -133,6 +135,42 @@ pub enum Value {
     /// IP address (4 bytes for IPv4, 16 bytes for IPv6) — Bytes-backed
     /// zero-copy view (issue #1644).
     Inet(#[serde(with = "bytes_serde")] Bytes),
+    /// The EMPTY BUFFER of a declared scalar type — a present, orderable value
+    /// that is neither `Null` nor the type's zero value (issue #3805).
+    ///
+    /// A non-frozen `map<K, V>` is multicell: each entry's KEY travels in its
+    /// cell's CellPath, framed as `[unsigned VInt length][bare key]`
+    /// (`db/marshal/CollectionType.java:361-382` →
+    /// `utils/ByteBufferUtil.java:356-360`, `:382-389`, at `cassandra-5.0.8`).
+    /// The length is UNSIGNED and `CellPath.create` asserts non-null
+    /// (`db/rows/CellPath.java:44-48`), so that framing cannot spell "absent" or
+    /// "null": a **zero-length cell path means the key's serialized form IS the
+    /// empty buffer**. Cassandra accepts, stores, orders and returns such a key.
+    ///
+    /// NOT `Null`: a null map key is ILLEGAL CQL (`cql3/Maps.java:342-343`,
+    /// `:426-427`, `:510-511`), the comparator gives the empty buffer a UNIQUE
+    /// first position (`db/marshal/Int32Type.java:61-71`), and the driver hands
+    /// back a PRESENT sentinel distinct from `None` (measured — oracle §4b.3).
+    /// The "empty ⇒ null" contract of `TypeSerializer.java:71-74` is a property
+    /// of the VALUE decode path and does not transfer to a key. NOT the type's
+    /// zero value either: `0` has its own 4-byte encoding
+    /// (`serializers/Int32Serializer.java:35-38`) and its own sort position, so
+    /// collapsing empty onto it would COLLIDE with a genuine `0` key — and
+    /// CQLite's scalar variants hold PARSED scalars, so `Integer(_)` cannot
+    /// carry "empty" at all without becoming `Integer(0)`.
+    ///
+    /// Invariants: **orders** strictly before every non-empty value of its type
+    /// (`Int32Type.compareCustom:61-71`; measured on real bytes for four key
+    /// types — oracle §4b.4), **serializes** to a zero-length buffer, and
+    /// **renders** as `""` (`tools/JsonTransformer.java:444-458` →
+    /// `db/marshal/AbstractType.java:146-156`; round-trips via
+    /// `Int32Type.java:85-89`).
+    ///
+    /// Full derivation: `docs/round-artifacts/issue-3805-cassandra-oracle.md`.
+    /// Why the payload is a 1-byte tag rather than a `CqlType` (the
+    /// `size_of::<Value>()` pin below, plus closure of the admitted set):
+    /// [`EmptyValueType`].
+    Empty(EmptyValueType),
 }
 
 // size_of::<Value>() layout pin (issue #1565, Epic A A4 ratchet; tightened by
@@ -656,6 +694,10 @@ impl Value {
             Value::Duration { .. } => CqlType::Duration,
             Value::Tombstone(_) => CqlType::Text, // Tombstones don't have a specific type
             Value::Inet(_) => CqlType::Inet,
+            // The sentinel CARRIES its declared type, which is the whole point of
+            // it (issue #3805): ordering and rendering are decidable without a
+            // schema lookup.
+            Value::Empty(ty) => ty.cql_type(),
         }
     }
 
@@ -925,6 +967,10 @@ impl Value {
             Value::Null => true,
             Value::Blob(b) => b.is_empty(),
             Value::Text(s) => s.is_empty(),
+            // The empty-buffer sentinel's payload IS the empty buffer
+            // (issue #3805). Reported `true` for length, which is what this
+            // predicate answers — NOT "is null": `is_null()` stays `false`.
+            Value::Empty(_) => true,
             _ => false,
         }
     }
@@ -945,6 +991,10 @@ impl Value {
             Value::Uuid(_) => UUID_SIZE,
             Value::Duration { .. } => DURATION_SIZE,
             Value::Tombstone(_) => TOMBSTONE_SIZE,
+            // Zero payload bytes by definition (issue #3805): the serialized
+            // form of the sentinel is the EMPTY buffer, and its length is
+            // carried by the enclosing framing, never by the value.
+            Value::Empty(_) => 0,
 
             // Variable-length types with prefix
             Value::Text(s) => VINT_LENGTH_PREFIX + s.len(),
@@ -1386,6 +1436,12 @@ impl fmt::Display for Value {
             Value::Udt(udt) => Self::fmt_udt(f, udt),
             Value::Frozen(inner) => Self::fmt_typed(f, "FROZEN", &**inner),
             Value::Tombstone(info) => Self::fmt_tombstone(f, info),
+            // DEBUG-facing form, deliberately NOT `""` (note `Text` prints
+            // QUOTED and `Blob` prints `BLOB(n bytes)` here): an unqualified
+            // `""` would be indistinguishable from an empty `text`. The
+            // USER-FACING `""` rendering Cassandra parity requires belongs to
+            // the output layer (`util::value_fmt`, `query::result`).
+            Value::Empty(ty) => Self::fmt_typed(f, "EMPTY", ty.cql_name()),
         }
     }
 }
@@ -1840,6 +1896,10 @@ impl std::hash::Hash for Value {
             Value::Frozen(f) => f.hash(state),
             Value::Tombstone(t) => t.hash(state),
             Value::Inet(i) => i.as_ref().hash(state),
+            // Hashing the type tag keeps `Empty(int)` and `Empty(bigint)` in
+            // different buckets, consistent with `PartialEq` (derived, so it
+            // already distinguishes them) — issue #3805.
+            Value::Empty(ty) => ty.hash(state),
         }
     }
 }

@@ -457,13 +457,26 @@ impl SSTableReader {
                 field_comparators, ..
             } => self.parse_udt_value(value_data, field_comparators, 0),
             ComparatorType::Frozen(inner_comparator) => {
-                // The outer `frozen<...>` layer costs one nesting level, so enter
-                // the inner comparator at depth 1 — symmetric with the block path
-                // (`parse_value_with_comparator_at_depth`'s Frozen arm recurses at
-                // depth+1). Entering at depth 0 would silently allow one extra
-                // nested level past MAX_VALUE_NESTING_DEPTH (#1632, guard-only).
-                let inner_value =
-                    self.parse_value_with_comparator_at_depth(value_data, inner_comparator, 1)?;
+                // Issue #2339 (roborev job 124, High): route through the SAME frozen
+                // dispatcher the comparator decoder uses. A frozen COLLECTION body is
+                // i32-BE element-framed, NOT VInt-framed like a non-frozen collection
+                // cell, so unwrapping `Frozen` and recursing here decoded real frozen
+                // lists/sets/maps with the wrong framing — and this is the PRIMARY
+                // `SSTableReader` path, i.e. ordinary single-generation reads. Fixing
+                // only the comparator decoder left two framing authorities for one
+                // on-disk shape, which is the divergence class #2339 exists to remove.
+                //
+                // The outer `frozen<...>` layer costs one nesting level, so the inner
+                // comparator is entered at depth 1 — symmetric with the block path
+                // below. Entering at depth 0 would silently allow one extra nested
+                // level past MAX_VALUE_NESTING_DEPTH (#1632, guard-only).
+                let inner_value = super::frozen_value_parsing::parse_frozen_inner_with(
+                    value_data,
+                    inner_comparator,
+                    1,
+                    MAX_VALUE_NESTING_DEPTH,
+                    &|d, c, dep| self.parse_value_with_comparator_at_depth(d, c, dep),
+                )?;
                 Ok(Value::Frozen(Box::new(inner_value)))
             }
             _ => decode_scalar_comparator(value_data, &comparator),
@@ -576,10 +589,17 @@ impl SSTableReader {
                 })))
             }
             ComparatorType::Frozen(inner_comparator) => {
-                let inner_value = self.parse_value_with_comparator_at_depth(
+                // Same frozen dispatcher as the entry arm above and as the comparator
+                // decoder (issue #2339, roborev job 124). This is the DEPTH-AWARE
+                // recursion, so the caller's `depth` is carried in and incremented for
+                // the inner type exactly as before — the framing changes, the
+                // recursion-depth accounting does not.
+                let inner_value = super::frozen_value_parsing::parse_frozen_inner_with(
                     value_data,
                     inner_comparator,
                     depth + 1,
+                    MAX_VALUE_NESTING_DEPTH,
+                    &|d, c, dep| self.parse_value_with_comparator_at_depth(d, c, dep),
                 )?;
                 Ok(Value::Frozen(Box::new(inner_value)))
             }

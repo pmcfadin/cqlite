@@ -89,6 +89,14 @@ cp "$REPO_ROOT/ci/classify-docs-only.sh" "$CI/classify-docs-only.sh" || {
   printf 'FAIL - could not copy scripts/ci/classify-docs-only.sh into scratch.\n' >&2
   exit 1
 }
+# THE SHARED FINDINGS-COUNT RECOGNISER (#4050) is resolved from the script's OWN `lib/`
+# directory with no override, so scratch must lay it out identically or the leg refuses
+# UNMEASURED on every case — a setup failure that would look like the leg's own refusal.
+mkdir -p "$FLOW/lib"
+cp "$REPO_ROOT/flow/lib/roborev-findings-count.sh" "$FLOW/lib/" || {
+  printf 'FAIL - could not copy scripts/flow/lib/roborev-findings-count.sh into scratch.\n' >&2
+  exit 1
+}
 # An IMMEDIATE advisory stub, so no case scans the ambient checkout.
 cat >"$FLOW/base-staleness.sh" <<'ADV'
 #!/usr/bin/env bash
@@ -205,7 +213,7 @@ chmod +x "$BIN/roborev"
 # readable verdict no longer binds, so a fixture omitting it would be asserting
 # the unknown-verdict path by accident. Pass `-` for a record carrying NO
 # verdict field at all.
-# roborev_job <id> <base> <head> [<verdict>] [<status>] [<started_at>]
+# roborev_job <id> <base> <head> [<verdict>] [<status>] [<started_at>] [<review-text>]
 #
 # <verdict>    P clean / F findings / - omit the field entirely
 # <status>     the JOB's terminal state; `done` is the observed success token
@@ -213,12 +221,20 @@ chmod +x "$BIN/roborev"
 # <started_at> the F2 chronology key. `-` omits it. Defaults are chosen so every
 #              pre-F2 caller keeps its meaning: one covering record, terminal and
 #              stamped, i.e. unambiguously the latest.
+# <review-text> the RECORD'S OWN REVIEW OUTPUT, on the review row as `output` — the
+#              real shape, measured on this box's jobs 120/116/115 (834/789/835
+#              bytes, retrievable days after the review). Since #4050 the merge
+#              point derives the findings count from it, so a fixture that omits it
+#              is asserting the "no count could be DERIVED" path. It DEFAULTS TO
+#              ABSENT deliberately: that keeps every pre-#4050 caller's meaning
+#              (they all exercise the UNMEASURED path), so a case wanting a
+#              countable record has to say so. `\n` escapes are rendered.
 roborev_job() {
   mkdir -p "$MOCK_ROBOREV_DIR"
   python3 - "$MOCK_ROBOREV_DIR/job-$1.json" "$1" "$2" "$3" "${4:-P}" \
-    "${5:-done}" "${6:-2026-09-02T10:00:00Z}" <<'PYJOB'
+    "${5:-done}" "${6:-2026-09-02T10:00:00Z}" "${7:-}" <<'PYJOB'
 import json, sys
-out, job, base, head, verdict, status, started = sys.argv[1:8]
+out, job, base, head, verdict, status, started, review = sys.argv[1:9]
 row = {"id": int(job), "git_ref": "%s..%s" % (base, head),
        "model": "gpt-5.6-sol",
        "token_usage": json.dumps({"input_tokens": 400000,
@@ -230,9 +246,24 @@ if status != "-":
     row["status"] = status
 if started != "-":
     row["started_at"] = started
-json.dump({"id": int(job), "job_id": int(job), "agent": "codex", "job": row},
-          open(out, "w"))
+payload = {"id": int(job), "job_id": int(job), "agent": "codex", "job": row}
+if review != "":
+    payload["output"] = review.replace("\\n", "\n")
+json.dump(payload, open(out, "w"))
 PYJOB
+}
+
+# findings_review_text <n> — a review transcript reporting exactly <n> findings, in the
+# shape the shared recogniser counts (a `## Findings` heading, one `**Severity**:` marker
+# per finding, a line-initial `## Summary` terminator). Built here rather than hard-coded
+# so a case says how many findings it means and the count is not a magic string.
+findings_review_text() {
+  local n="$1" i=1 out="## Findings"
+  while [ "$i" -le "$n" ]; do
+    out="$out\n- **Severity**: Medium\n  Problem: finding number $i.\n  Fix: address it."
+    i=$((i + 1))
+  done
+  printf '%s\n## Summary\n%s finding(s) reported.' "$out" "$n"
 }
 
 # defer_marker <issues> <count> <base> <head> <job> <reason> — the authorization
@@ -680,6 +711,8 @@ fi
 UNCLS="$T/uncls"
 mkdir -p "$UNCLS/scripts/flow" "$UNCLS/scripts/ci"
 cp "$FLOW"/*.sh "$FLOW"/*.py "$UNCLS/scripts/flow/" 2>/dev/null
+mkdir -p "$UNCLS/scripts/flow/lib"
+cp "$FLOW/lib/roborev-findings-count.sh" "$UNCLS/scripts/flow/lib/" 2>/dev/null
 # The stub must fail ONLY on the SECOND call. An always-failing classifier is
 # consumed by the leg's FIRST use — the PR-diff code-free check — so the case
 # would pass on a different cause than the one it names, which is a test green
@@ -2008,15 +2041,19 @@ if run_binding 5 "status: an unconcluded job does not bind even WITH a deferral"
   esac
 fi
 
-# --- verdict FINDINGS + AUTHORIZED deferral: UNMEASURED, never BOUND ----------
-# roborev job 103. The authorization itself is impeccable here — allowlisted
-# author, sole-content top-level marker, correct base/head/job scope, both
-# tracking issues verified OPEN — and it STILL must not bind, because the
-# marker's `count=` half is matched against the count the REVIEW observed and no
-# trusted count exists at the merge point (the job record carries a verdict
-# LETTER; a recheck writes no row). Declaring that gap and binding anyway let the
-# merge gate honour a marker the review-time path would REJECT: an allowlisted
-# human can post a fresh marker afterwards carrying any count at all.
+# --- FINDINGS + AUTHORIZED deferral, RECORD WITH NO REVIEW TEXT: UNMEASURED ---
+# roborev job 103, and since #4050 this is specifically the NO-DERIVABLE-COUNT
+# path (AC4c): `roborev_job` writes no `output` field, so the record carries no
+# review text and no count can be DERIVED from it. The authorization itself is
+# impeccable — allowlisted author, sole-content top-level marker, correct
+# base/head/job scope, both tracking issues verified OPEN — and it STILL must not
+# bind, because the marker's `count=` half is matched against the count the REVIEW
+# observed. Declaring that gap and binding anyway let the merge gate honour a
+# marker the review-time path would REJECT: an allowlisted human can post a fresh
+# marker afterwards carrying any count at all. The positive control that this is
+# about the MISSING TEXT and not about the authorization is the #4050 case below,
+# where the SAME authorization over a record that DOES carry a countable review
+# binds.
 MB_MAIN=$(cd "$WORK" && git rev-parse main)
 pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 612)" pmcfadin \
   "$(defer_marker 3602,3613 2 "$MB_MAIN" "$HEAD_AFTER" 612 'both filed and lead-deferred')"
@@ -2024,7 +2061,7 @@ roborev_job 612 "$MB_MAIN" "$HEAD_AFTER" F
 # `issues=` names two tracking issues, so BOTH must be OPEN issues GitHub confirms.
 issue_state_fixture 3602 OPEN
 issue_state_fixture 3613 OPEN
-if run_binding 5 "result: FINDINGS + an authorized deferral is UNMEASURED, not BOUND (job 103)" \
+if run_binding 5 "result: FINDINGS + an authorized deferral over a record with NO review text is UNMEASURED, not BOUND (job 103)" \
   review-binding 1 o/r "$HEAD_AFTER"; then
   case "$OUT" in
     *"verdict UNMEASURED"*)
@@ -2049,6 +2086,15 @@ if run_binding 5 "result: FINDINGS + an authorized deferral is UNMEASURED, not B
       ok "result: the good authorization is still REPORTED, so the remedy is not 're-post the marker'" ;;
     *) bad "result: the cause did not record that an authorization was found (got: $OUT)" ;;
   esac
+  # ...and the cause must name the DERIVATION as what failed. A record with NO `output` field
+  # and one carrying only whitespace are INDISTINGUISHABLE at this layer (the shared parser
+  # writes an empty file for both), so the cause names both rather than picking one — pinned
+  # here on the absent-field fixture and in 4050(c) on the whitespace one.
+  case "$OUT" in
+    *"no usable review text"*)
+      ok "result: the cause names the absent review text as what stopped the derivation" ;;
+    *) bad "result: the cause did not name the missing review text (got: $OUT)" ;;
+  esac
   case "$OUT" in
     *"count= half is NOT re-verified here"*)
       bad "result: the stale DECLARATION of the count gap survived (got: $OUT)" ;;
@@ -2060,6 +2106,510 @@ if run_binding 5 "result: FINDINGS + an authorized deferral is UNMEASURED, not B
     *) bad "result: the cause carried no usable remedy (got: $OUT)" ;;
   esac
 fi
+
+# ===========================================================================
+# ISSUE #4050 — A FULLY MEASURED DEFERRAL BINDS, AND EVERY UNMEASURABLE STATE
+# KEEPS TODAY'S REFUSAL.
+# ===========================================================================
+# The record carries no findings-count FIELD, which is what made the case above
+# UNMEASURED — but it DOES carry the review TEXT, and #4050 derives the count from
+# it with the SAME recogniser the review-time gate uses. Before this, no sequence
+# of actions could merge a validly deferred PR: three (#3859, #3858, #3816) were
+# hard-blocked. The cases below pin BOTH directions.
+
+# --- (a) count= EQUALS the derived count: BOUND -------------------------------
+# THE CASE THAT UNBLOCKS THOSE PRs, and the positive control for every refusal
+# below: it differs from them in ONE property at a time (the count, the review
+# text, the marker's presence), so a refusal elsewhere cannot be a setup failure.
+FC_REVIEW2=$(findings_review_text 2)
+pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 640)" pmcfadin \
+  "$(defer_marker 3602,3613 2 "$MB_MAIN" "$HEAD_AFTER" 640 'both filed and lead-deferred')"
+roborev_job 640 "$MB_MAIN" "$HEAD_AFTER" F done 2026-09-02T10:00:00Z "$FC_REVIEW2"
+issue_state_fixture 3602 OPEN
+issue_state_fixture 3613 OPEN
+if run_binding 0 "4050(a): a deferral whose count= EQUALS the DERIVED count BINDS" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  case "$OUT" in
+    *"verdict BOUND"*)
+      ok "4050(a): a fully measured authorized deferral binds — the merge is obtainable again" ;;
+    *) bad "4050(a): a matched deferral did not reach BOUND (got: $OUT)" ;;
+  esac
+  # The bind must SAY it rests on a deferral and name the matched count, or a
+  # reader cannot tell it from a bind on a clean record — which is the whole
+  # reason `findings:` reports DEFERRED and never NONE at review time.
+  case "$OUT" in
+    *"DEFERRED by an authorization from @pmcfadin"*)
+      ok "4050(a): the bind records that it rests on an authorized deferral, not on a clean record" ;;
+    *) bad "4050(a): the BOUND verdict did not disclose the deferral it rests on (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"count= EQUALS the 2 finding(s) DERIVED from job 640"*)
+      ok "4050(a): the note names the equality that was actually measured, and where the count came from" ;;
+    *) bad "4050(a): the bind did not name the measured count equality (got: $OUT)" ;;
+  esac
+fi
+
+# --- (b) a MISMATCHED count= REFUSES, exit 4, NAMED ---------------------------
+# roborev job 103's false green stays closed. ONE property differs from (a): the
+# marker authorizes 1 finding while the record's review reports 2. The refusal
+# must be exit 4 (a MEASURED refusal) and must NAME count-mismatch — folding it
+# into the generic "no authorized deferral covers this job" would send a lead to
+# re-post a marker that was already well-formed, when the action is to re-triage
+# and re-authorize for the count actually observed.
+pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 641)" pmcfadin \
+  "$(defer_marker 3602 1 "$MB_MAIN" "$HEAD_AFTER" 641 'one filed, but the review found two')"
+roborev_job 641 "$MB_MAIN" "$HEAD_AFTER" F done 2026-09-02T10:00:00Z "$FC_REVIEW2"
+if run_binding 4 "4050(b): a MISMATCHED count= is a measured refusal (exit 4), not a bind" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  case "$OUT" in
+    *"verdict UNBOUND"*)
+      ok "4050(b): a count mismatch is UNBOUND — measured and rejected, not unmeasurable" ;;
+    *) bad "4050(b): a mismatched count did not reach UNBOUND (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *COUNT-MISMATCH*)
+      ok "4050(b): the refusal NAMES count-mismatch as its own state" ;;
+    *) bad "4050(b): the count mismatch was not named (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"authorizes 1 finding(s) but this job reports 2"*)
+      ok "4050(b): the scanner's own detail travels, so both counts are visible to the authorizer" ;;
+    *) bad "4050(b): the refusal did not report both counts (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"verdict BOUND"*)
+      bad "4050(b): a mismatched deferral reached BOUND (got: $OUT)" ;;
+    *) ok "4050(b): no mismatched deferral reaches BOUND on any path" ;;
+  esac
+fi
+
+# --- (c) an EMPTY review text REFUSES, exit 5 ---------------------------------
+# The absent-text half is the job-103 case above. This is the other spelling: the
+# record HAS an `output` field and it is empty, which is a non-measurement and not
+# a count of zero. Same authorization as (a), same count, so the only difference
+# is the text.
+pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 642)" pmcfadin \
+  "$(defer_marker 3602,3613 2 "$MB_MAIN" "$HEAD_AFTER" 642 'both filed and lead-deferred')"
+roborev_job 642 "$MB_MAIN" "$HEAD_AFTER" F done 2026-09-02T10:00:00Z '   '
+if run_binding 5 "4050(c): an EMPTY recorded review text is UNMEASURED, never a bind" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  case "$OUT" in
+    *"verdict UNMEASURED"*)
+      ok "4050(c): a record whose review text is unusable cannot be counted, so it cannot clear" ;;
+    *) bad "4050(c): an empty review text was not UNMEASURED (got: $OUT)" ;;
+  esac
+  # DISCRIMINATING, not merely "some derivation failed": the EMPTY arm must be the one that
+  # fired, or the case could pass on the contradiction arm and prove nothing about this input.
+  case "$OUT" in
+    *"no usable review text"*"no findings count could be DERIVED"*)
+      ok "4050(c): the cause names the unusable review text and says the count could not be DERIVED — not that no count 'exists'" ;;
+    *) bad "4050(c): the cause did not name an unusable review text as what failed (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"count exists"*)
+      bad "4050(c): the cause still claims no count 'exists' — the record HAS no count field, but what failed here is the DERIVATION (got: $OUT)" ;;
+    *) ok "4050(c): the corrected wording holds — nothing claims a count does not exist" ;;
+  esac
+  case "$OUT" in
+    *"AUTHORIZED by @pmcfadin"*)
+      ok "4050(c): the good authorization is still reported, so the remedy is not 're-post the marker'" ;;
+    *) bad "4050(c): the cause did not record that an authorization was found (got: $OUT)" ;;
+  esac
+fi
+
+# --- (d) a DERIVED count of 0 on a `verdict=F` record REFUSES, exit 5 ---------
+# The structured verdict affirmatively says FINDINGS while the census over the
+# review text finds no severity marker — a CONTRADICTION, not a measurement of
+# this record's findings (the shape #3564 met twice: a findings review whose
+# findings carry no recognised marker). Matching a marker against that 0 would let
+# an authorization declaring `count=0` clear a findings-bearing record, so the
+# marker below declares exactly that and must NOT bind.
+pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 643)" pmcfadin \
+  "$(defer_marker 3602 0 "$MB_MAIN" "$HEAD_AFTER" 643 'the review text carries no severity marker')"
+roborev_job 643 "$MB_MAIN" "$HEAD_AFTER" F done 2026-09-02T10:00:00Z \
+  '## Findings\n1. Something is wrong, stated in prose with no severity marker.\n## Summary\none issue'
+if run_binding 5 "4050(d): a DERIVED count of 0 on a FINDINGS record is UNMEASURED, never a bind" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  case "$OUT" in
+    *"verdict UNMEASURED"*)
+      ok "4050(d): a zero census against an F verdict is a contradiction, so nothing rests on it" ;;
+    *) bad "4050(d): a zero derived count was not UNMEASURED (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"ZERO severity markers"*)
+      ok "4050(d): the cause names the contradiction rather than reporting a count of zero" ;;
+    *) bad "4050(d): the zero-vs-F contradiction was not named (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"verdict BOUND"*)
+      bad "4050(d): a count=0 marker cleared a findings-bearing record (got: $OUT)" ;;
+    *) ok "4050(d): a count=0 authorization cannot clear a findings-bearing record" ;;
+  esac
+fi
+
+# --- (e) "no authorization" (4) stays DISTINCT from "count unverifiable" (5) --
+# Both refuse the merge, so this is about the DIAGNOSIS: the remedies are
+# different operator actions and collapsing them is the wrong-remedy defect job
+# 102 closed one call over. The record here is COUNTABLE — same review text as
+# (a) — so the only reason it cannot bind is that no marker was posted, which
+# must read as a measured refusal and never as an unmeasurable count.
+pr_payload "$MOCK_GH_DIR/pr.json" main "$(roborev_block 644)"
+roborev_job 644 "$MB_MAIN" "$HEAD_AFTER" F done 2026-09-02T10:00:00Z "$FC_REVIEW2"
+FC_E_RC4=""
+if run_binding 4 "4050(e): a COUNTABLE findings record with NO authorization is UNBOUND (exit 4)" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  FC_E_RC4="$OUT"
+  case "$OUT" in
+    *"no authorized deferral covers this job"*)
+      ok "4050(e): the no-authorization refusal keeps its own wording on a countable record" ;;
+    *) bad "4050(e): the no-authorization refusal was misworded (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"count= half CANNOT BE VERIFIED"* | *"could not be DERIVED"*)
+      bad "4050(e): a missing marker was reported as an unverifiable COUNT — the two diagnoses collapsed (got: $OUT)" ;;
+    *) ok "4050(e): a missing marker is never reported as an unverifiable count" ;;
+  esac
+fi
+# ...and the converse half, re-run here so the two texts are compared in one place
+# rather than across the file. Same job number, same countable-record absence, an
+# authorization present: exit 5 and a DIFFERENT cause.
+pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 645)" pmcfadin \
+  "$(defer_marker 3602,3613 2 "$MB_MAIN" "$HEAD_AFTER" 645 'both filed and lead-deferred')"
+roborev_job 645 "$MB_MAIN" "$HEAD_AFTER" F
+if run_binding 5 "4050(e): an AUTHORIZED deferral over an uncountable record is UNMEASURED (exit 5)" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  if [ -n "$FC_E_RC4" ] && [ "$OUT" != "$FC_E_RC4" ]; then
+    ok "4050(e): the two refusals are numerically (4 vs 5) AND textually distinct"
+  else
+    bad "4050(e): the exit-4 and exit-5 refusals produced identical output, so the operator cannot tell them apart"
+  fi
+  case "$OUT" in
+    *"no authorized deferral covers this job"*)
+      bad "4050(e): an unverifiable count was reported as an unauthorized deferral — job 102's conflation (got: $OUT)" ;;
+    *) ok "4050(e): an unverifiable count is never reported as a missing authorization" ;;
+  esac
+fi
+
+# --- (l) a CLEAN-LOADING but INCOMPLETE recogniser is UNMEASURED and NAMES the gap
+# roborev job 129's other half. The review-time consumer folded this state onto a permissive
+# `findings: NONE` (measured: RESULT PASS, exit 0 — a false green); HERE the consequence was
+# always a refusal, because derive_findings_count's failure routes to UNMEASURED. Both ends
+# are fixed anyway, and the reason is this issue's soundness case: the two must agree byte
+# for byte about what a usable recogniser IS, or "the same code over identical bytes" stops
+# holding. What this case adds over (f) is that the CAUSE must name the MISSING FUNCTION —
+# "the library did not load" sends an operator to a file that loads perfectly well.
+FLOW_PARTLIB="$T/scripts/flow-partlib"
+mkdir -p "$FLOW_PARTLIB/lib"
+partlib_ready=1
+for f in premerge-review-binding.sh premerge-pr-scan.py roborev-job-facts.py \
+  roborev-waiver-scan.py roborev-review-oracles.sh base-staleness.sh; do
+  cp "$FLOW/$f" "$FLOW_PARTLIB/$f" || partlib_ready=0
+done
+chmod +x "$FLOW_PARTLIB"/*.sh "$FLOW_PARTLIB"/*.py 2>/dev/null
+# The REAL library's tail from the entry point onward: sources cleanly, entry point defined,
+# helpers absent. Start line DERIVED, so moving the function cannot silently restage this.
+partlib_start=$(grep -n '^roborev_findings_count()' "$FLOW/lib/roborev-findings-count.sh" | head -1 | cut -d: -f1)
+if [ -n "$partlib_start" ]; then
+  sed -n "${partlib_start},\$p" "$FLOW/lib/roborev-findings-count.sh" > "$FLOW_PARTLIB/lib/roborev-findings-count.sh"
+fi
+# AFFIRM ALL THREE HALVES, in a subshell: sources OK, entry point present, helper absent.
+partlib_src=0; partlib_entry=0; partlib_helper_absent=0
+if [ -s "$FLOW_PARTLIB/lib/roborev-findings-count.sh" ]; then
+  ( . "$FLOW_PARTLIB/lib/roborev-findings-count.sh" ) >/dev/null 2>&1 && partlib_src=1
+  [ "$( ( . "$FLOW_PARTLIB/lib/roborev-findings-count.sh" >/dev/null 2>&1; type -t roborev_findings_count ) 2>/dev/null )" = function ] && partlib_entry=1
+  [ "$( ( . "$FLOW_PARTLIB/lib/roborev-findings-count.sh" >/dev/null 2>&1; type -t roborev_findings_block ) 2>/dev/null )" != function ] && partlib_helper_absent=1
+fi
+if [ "$partlib_ready" -ne 1 ]; then
+  bad "recogniser-partial fixture: could not stage the substitute flow directory"
+elif [ "$partlib_src" -eq 1 ] && [ "$partlib_entry" -eq 1 ] && [ "$partlib_helper_absent" -eq 1 ]; then
+  ok "recogniser-partial fixture: the library SOURCES CLEANLY, defines the entry point, and is MISSING roborev_findings_block"
+  pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 646)" pmcfadin \
+    "$(defer_marker 3602,3613 2 "$MB_MAIN" "$HEAD_AFTER" 646 'both filed and lead-deferred')"
+  roborev_job 646 "$MB_MAIN" "$HEAD_AFTER" F done 2026-09-02T10:00:00Z "$FC_REVIEW2"
+  PL_OUT=$(cd "$WORK" && PATH="$BIN:$PATH" bash "$FLOW_PARTLIB/premerge-review-binding.sh" \
+    review-binding 1 o/r "$HEAD_AFTER" 2>&1)
+  PL_RC=$?
+  if [ "$PL_RC" -ne 5 ]; then
+    bad "4050(l): an INCOMPLETE shared recogniser did not refuse UNMEASURED (exit $PL_RC, wanted 5): $PL_OUT"
+  else
+    ok "4050(l): an INCOMPLETE shared recogniser is UNMEASURED (exit 5)"
+    # THE ASSERTION MUST BE ANCHORED, AND MEASURING THAT COST A ROUND. A bare substring
+    # test for the function name PASSED WITH THE FIX REVERTED: the unfixed path calls the
+    # missing helper, and bash's OWN unanchored `roborev_findings_block: command not found`
+    # lands in this captured output — so the assertion was satisfied by the DEFECT'S NOISE
+    # rather than by the leg's diagnosis. That is #3400's lesson at a test site: key on the
+    # narrowest thing that makes it OURS. `say` prefixes every line with `PREMERGE:
+    # REVIEW-BINDING`, which bash's stderr can never produce, so the anchored form
+    # discriminates the two states where the substring cannot.
+    if grep -qE '^PREMERGE:.*roborev_findings_block' <<<"$PL_OUT"; then
+      ok "4050(l): the leg's OWN anchored cause NAMES the missing function, so the operator is not sent to a library that loads fine"
+    else
+      bad "4050(l): no anchored PREMERGE: line named the missing function (got: $PL_OUT)"
+    fi
+    case "$PL_OUT" in
+      *BOUND*) bad "4050(l): a run with an incomplete recogniser still BOUND (got: $PL_OUT)" ;;
+      *) ok "4050(l): no bind is possible with an incomplete recogniser" ;;
+    esac
+  fi
+else
+  bad "recogniser-partial fixture: not in the expected state (start='$partlib_start' src=$partlib_src entry=$partlib_entry helper-absent=$partlib_helper_absent)"
+fi
+
+# --- (f) an ABSENT shared recogniser is UNMEASURED, never a bind and never a skip
+# The library is resolved from this script's OWN `lib/` directory with no override, so the
+# case SUBSTITUTES THE ARTIFACT in a scratch flow copy rather than pointing a variable
+# somewhere — a path variable would be one more seam a real invoker could set. It must
+# refuse UNMEASURED (an absent library says NOTHING about whether a human authorized the
+# deferral) and it must NAME the library, or the operator cannot act on it.
+FLOW_NOLIB="$T/scripts/flow-nolib"   # beside scripts/ci, which the leg resolves as ../ci
+mkdir -p "$FLOW_NOLIB"
+nolib_ready=1
+for f in premerge-review-binding.sh premerge-pr-scan.py roborev-job-facts.py \
+  roborev-waiver-scan.py roborev-review-oracles.sh base-staleness.sh; do
+  cp "$FLOW/$f" "$FLOW_NOLIB/$f" || nolib_ready=0
+done
+chmod +x "$FLOW_NOLIB"/*.sh "$FLOW_NOLIB"/*.py 2>/dev/null
+# Measured AFFIRMATIVELY: the SIBLING must be present (the copy ran, the directory reads)
+# while the library is not, so an absent verdict cannot come from a mis-staged fixture.
+nolib_sib=0
+nolib_gone=0
+[ -f "$FLOW_NOLIB/premerge-review-binding.sh" ] && nolib_sib=1
+[ -e "$FLOW_NOLIB/lib/roborev-findings-count.sh" ] || nolib_gone=1
+if [ "$nolib_ready" -ne 1 ]; then
+  bad "recogniser-absent fixture: could not stage the substitute flow directory"
+elif [ "$nolib_sib" -eq 1 ] && [ "$nolib_gone" -eq 1 ]; then
+  ok "recogniser-absent fixture: the substitute reads (sibling present) and the shared recogniser is absent"
+  pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 646)" pmcfadin \
+    "$(defer_marker 3602,3613 2 "$MB_MAIN" "$HEAD_AFTER" 646 'both filed and lead-deferred')"
+  roborev_job 646 "$MB_MAIN" "$HEAD_AFTER" F done 2026-09-02T10:00:00Z "$FC_REVIEW2"
+  NL_OUT=$(cd "$WORK" && PATH="$BIN:$PATH" bash "$FLOW_NOLIB/premerge-review-binding.sh" \
+    review-binding 1 o/r "$HEAD_AFTER" 2>&1)
+  NL_RC=$?
+  if [ "$NL_RC" -ne 5 ]; then
+    bad "4050(f): an absent shared recogniser did not refuse UNMEASURED (exit $NL_RC, wanted 5): $NL_OUT"
+  else
+    ok "4050(f): an absent shared recogniser is UNMEASURED (exit 5) — it says nothing about the authorization"
+    case "$NL_OUT" in
+      *"lib/roborev-findings-count.sh"*)
+        ok "4050(f): the cause NAMES the library, so a broken checkout is actionable" ;;
+      *) bad "4050(f): the cause did not name the missing library (got: $NL_OUT)" ;;
+    esac
+    case "$NL_OUT" in
+      *"verdict BOUND"*)
+        bad "4050(f): a run that could not load the recogniser still BOUND (got: $NL_OUT)" ;;
+      *) ok "4050(f): no bind is possible without the recogniser" ;;
+    esac
+  fi
+  # POSITIVE CONTROL, one property different: the SAME fixture through the COMPLETE flow copy
+  # binds. Without it, the refusal above could be caused by anything in the substitute tree.
+  if run_binding 0 "4050(f) control: the same fixture through the COMPLETE flow copy BINDS" \
+    review-binding 1 o/r "$HEAD_AFTER"; then
+    case "$OUT" in
+      *"verdict BOUND"*)
+        ok "4050(f) control: the refusal above is attributable to the missing library alone" ;;
+      *) bad "4050(f) control: the complete copy did not bind, so the refusal is unattributable (got: $OUT)" ;;
+    esac
+  fi
+else
+  bad "recogniser-absent fixture: the substitute was not in the expected state (sibling=$nolib_sib absent=$nolib_gone)"
+fi
+
+# --- (g) a READABLE but CORRUPT shared recogniser is UNMEASURED too -----------
+# THE STATE (f)'s GUARD ADMITS (roborev job 123). A truncated library is `-f` AND `-r`, so
+# the readability guard lets it through, and `.` then fails on a SYNTAX ERROR.
+#
+# WHAT THIS CASE DOES *NOT* CLAIM, because it was measured and is false here: there is no
+# dead-shell hazard at THIS call site. premerge-review-binding.sh sets `-uo pipefail` with
+# no `-e`, and premerge-assert.sh EXECUTES it (`bash "$REVIEW_BINDING_TOOL"`), so a bare
+# source would return non-zero, continue, and be caught downstream. Reverting the
+# conditional leaves every assertion below PASSING — verified — so this case has NO TEETH
+# against that regression and must not be described as if it had. The fatal version of this
+# hazard is real one file over (roborev-review-checks.sh, sourced under roborev-review.sh's
+# `set -e`) and is pinned WITH teeth by case cor4050 in test_roborev_review_guard.sh, which
+# goes from exit 1 to exit 2 when reverted.
+#
+# WHAT IT DOES PIN, and why it is still worth its lines: a corrupt library must refuse
+# UNMEASURED with an ANCHORED verdict that NAMES the library, and must never bind. Those
+# hold whatever the mechanism, so they are the properties a consumer depends on.
+#
+# WHERE THE TEETH ARE, NAMED (lead ruling on #4050 §4). A declaration that says only what
+# it CANNOT detect leaves a reader to conclude the property is uncovered, which is false —
+# so this note must point at its own complement. The bare-source regression IS pinned, with
+# measured teeth, by case `cor4050` in scripts/tests/test_roborev_review_guard.sh: reverting
+# the checks-side conditional moves it from `RESULT: FAIL` + exit 1 to exit 2, bash's
+# syntax-error death under roborev-review.sh's `set -e`, with the wrapper's own verdict
+# never emitted. That file is where the fatal version of this hazard lives, because that
+# consumer is SOURCED under `-e` while this one is EXECUTED without it. Read the two cases
+# as a pair: this one covers the properties, that one covers the death.
+FLOW_CORRUPT="$T/scripts/flow-corruptlib"
+mkdir -p "$FLOW_CORRUPT/lib"
+corrupt_ready=1
+for f in premerge-review-binding.sh premerge-pr-scan.py roborev-job-facts.py \
+  roborev-waiver-scan.py roborev-review-oracles.sh base-staleness.sh; do
+  cp "$FLOW/$f" "$FLOW_CORRUPT/$f" || corrupt_ready=0
+done
+chmod +x "$FLOW_CORRUPT"/*.sh "$FLOW_CORRUPT"/*.py 2>/dev/null
+# Truncate an open function body: the realistic corruption (a partial write, a cut-off
+# copy) and a guaranteed bash syntax error.
+printf 'roborev_findings_count() {\n  echo unterminated\n' > "$FLOW_CORRUPT/lib/roborev-findings-count.sh"
+# AFFIRM THE FIXTURE IS THE ONE THIS CASE IS ABOUT: readable as a regular file AND
+# unsourceable. A file that merely fails to source proves nothing about the guard it must
+# get past, and one that sources cleanly would make the case vacuous.
+corrupt_readable=0
+corrupt_unsourceable=0
+[ -f "$FLOW_CORRUPT/lib/roborev-findings-count.sh" ] && [ -r "$FLOW_CORRUPT/lib/roborev-findings-count.sh" ] && corrupt_readable=1
+( . "$FLOW_CORRUPT/lib/roborev-findings-count.sh" ) >/dev/null 2>&1 || corrupt_unsourceable=1
+if [ "$corrupt_ready" -ne 1 ]; then
+  bad "recogniser-corrupt fixture: could not stage the substitute flow directory"
+elif [ "$corrupt_readable" -eq 1 ] && [ "$corrupt_unsourceable" -eq 1 ]; then
+  ok "recogniser-corrupt fixture: the recogniser is readable as a regular file AND fails to source — the state (f)'s guard admits"
+  pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 647)" pmcfadin \
+    "$(defer_marker 3602,3613 2 "$MB_MAIN" "$HEAD_AFTER" 647 'both filed and lead-deferred')"
+  roborev_job 647 "$MB_MAIN" "$HEAD_AFTER" F done 2026-09-02T10:00:00Z "$FC_REVIEW2"
+  CL_OUT=$(cd "$WORK" && PATH="$BIN:$PATH" bash "$FLOW_CORRUPT/premerge-review-binding.sh" \
+    review-binding 1 o/r "$HEAD_AFTER" 2>&1)
+  CL_RC=$?
+  if [ "$CL_RC" -ne 5 ]; then
+    bad "4050(g): a corrupt shared recogniser did not refuse UNMEASURED (exit $CL_RC, wanted 5): $CL_OUT"
+  else
+    ok "4050(g): a corrupt shared recogniser is UNMEASURED (exit 5) — the refusal a consumer must treat as non-binding"
+  fi
+  # THE ANCHOR IS THE POINT: a shell killed mid-source emits no anchored line at all, so
+  # this is what separates "refused" from "died with a status that looks like a refusal".
+  case "$CL_OUT" in
+    *"PREMERGE: REVIEW-BINDING verdict UNMEASURED"*)
+      ok "4050(g): it emits its ANCHORED verdict, so a consumer keying on the anchor sees a refusal" ;;
+    *) bad "4050(g): no anchored UNMEASURED verdict on a corrupt recogniser (got: $CL_OUT)" ;;
+  esac
+  case "$CL_OUT" in
+    *"lib/roborev-findings-count.sh"*)
+      ok "4050(g): the cause NAMES the library, so a corrupt checkout is actionable" ;;
+    *) bad "4050(g): the cause did not name the library (got: $CL_OUT)" ;;
+  esac
+  case "$CL_OUT" in
+    *"verdict BOUND"*)
+      bad "4050(g): a run that could not load the recogniser still BOUND (got: $CL_OUT)" ;;
+    *) ok "4050(g): no bind is possible with an unsourceable recogniser" ;;
+  esac
+  # POSITIVE CONTROL, one property different: replace the corrupt library with the REAL one
+  # in the SAME substitute tree and require a BIND. Without it the refusal above could be
+  # caused by anything in the copy — the same reason (f) carries one.
+  cp "$FLOW/lib/roborev-findings-count.sh" "$FLOW_CORRUPT/lib/roborev-findings-count.sh" 2>/dev/null
+  CG_OUT=$(cd "$WORK" && PATH="$BIN:$PATH" bash "$FLOW_CORRUPT/premerge-review-binding.sh" \
+    review-binding 1 o/r "$HEAD_AFTER" 2>&1)
+  case "$CG_OUT" in
+    *"verdict BOUND"*)
+      ok "4050(g) control: the same tree with an INTACT recogniser BINDS, so the refusal is attributable to the corruption alone" ;;
+    *) bad "4050(g) control: the repaired tree did not bind, so the refusal is unattributable (got: $CG_OUT)" ;;
+  esac
+else
+  bad "recogniser-corrupt fixture: not in the expected state (readable=$corrupt_readable unsourceable=$corrupt_unsourceable)"
+fi
+
+# --- (h)(i) #4090: an ABSENT recogniser must NOT affect paths that need no count ----
+# LEAD RULING on roborev job 125 (#4050 §5): the recogniser used to load unconditionally in
+# the preflight, so a missing or corrupt library refused questions it was never needed for.
+# It is now loaded LAZILY inside the `findings)` arm. These two cases pin the paths that
+# were wrongly affected; 4050(f) above already pins that the FINDINGS path still refuses.
+#
+# BOTH RUN THROUGH `$FLOW_NOLIB`, the substitute flow copy whose library was removed for
+# case (f). Its state is RE-ASSERTED here rather than assumed: (f) is upstream in this file
+# and a future edit could restore the library, which would make both cases pass while
+# exercising nothing.
+nolib_still_gone=0
+nolib_still_sib=0
+[ -f "$FLOW_NOLIB/premerge-review-binding.sh" ] && nolib_still_sib=1
+[ -e "$FLOW_NOLIB/lib/roborev-findings-count.sh" ] || nolib_still_gone=1
+if [ "$nolib_still_sib" -ne 1 ] || [ "$nolib_still_gone" -ne 1 ]; then
+  bad "4090 fixture: \$FLOW_NOLIB is not in the expected state (sibling=$nolib_still_sib absent=$nolib_still_gone), so neither case below exercised an absent recogniser"
+else
+  ok "4090 fixture: the substitute flow copy still reads and its recogniser is still absent"
+
+  # (h) A CODE-FREE PR diff needs no findings count at all. Its correct answer is the
+  # loudly DECLARED NOT-APPLICABLE, and an absent recogniser must not turn that into
+  # UNMEASURED. Exit 0, same as the library-present case above.
+  pr_payload "$MOCK_GH_DIR/pr.json" main "no review recorded here"
+  H_OUT=$(cd "$WORK" && PATH="$BIN:$PATH" bash "$FLOW_NOLIB/premerge-review-binding.sh" \
+    review-binding 1 pmcfadin/cqlite "$PROSE_ONLY" 2>&1)
+  H_RC=$?
+  if [ "$H_RC" -ne 0 ]; then
+    bad "4090(h): a code-free diff did not stay NOT-APPLICABLE with the recogniser absent (exit $H_RC, wanted 0): $H_OUT"
+  else
+    ok "4090(h): a code-free diff is still NOT-APPLICABLE (exit 0) with the recogniser absent"
+  fi
+  case "$H_OUT" in
+    *"verdict NOT-APPLICABLE"*)
+      ok "4090(h): and it is the DECLARED exemption, not some other exit-0 answer" ;;
+    *) bad "4090(h): expected 'verdict NOT-APPLICABLE' (got: $H_OUT)" ;;
+  esac
+  case "$H_OUT" in
+    *"roborev-findings-count.sh"*)
+      bad "4090(h): a code-free diff still mentions the recogniser, so it is still being loaded on this path (got: $H_OUT)" ;;
+    *) ok "4090(h): the recogniser is not even NAMED on the code-free path — it was never loaded" ;;
+  esac
+
+  # (i) A CLEAN recorded review binds through the STRUCTURED verdict letter and never asks
+  # how many findings there were. An absent recogniser must not turn a legitimate bind into
+  # UNMEASURED. Default verdict for `roborev_job` is `P`, i.e. clean.
+  pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 648)" pmcfadin "irrelevant"
+  roborev_job 648 "$MB_MAIN" "$HEAD_AFTER"
+  I_OUT=$(cd "$WORK" && PATH="$BIN:$PATH" bash "$FLOW_NOLIB/premerge-review-binding.sh" \
+    review-binding 1 o/r "$HEAD_AFTER" 2>&1)
+  I_RC=$?
+  if [ "$I_RC" -ne 0 ]; then
+    bad "4090(i): a CLEAN record did not bind with the recogniser absent (exit $I_RC, wanted 0): $I_OUT"
+  else
+    ok "4090(i): a CLEAN record still BINDS (exit 0) with the recogniser absent — it needs no count"
+  fi
+  case "$I_OUT" in
+    *"affirmatively CLEAN"*)
+      ok "4090(i): and it binds for the right reason — the structured verdict, not a count" ;;
+    *) bad "4090(i): the bind did not cite the structured CLEAN verdict (got: $I_OUT)" ;;
+  esac
+fi
+reset_stub 2>/dev/null || true
+
+# --- (j) #4050 job 126: an OLDER findings round must not sink a NEWER CLEAN one ------
+# THE DEFECT THE LAZY LOAD INTRODUCED. `record_covering` collects per-record outcomes and
+# decides ONCE afterwards from the LATEST covering round, so anything that EXITS mid-scan
+# discards rounds not yet examined. The lazy `load_findings_count_lib` did exactly that:
+# with the recogniser absent, an OLDER FINDINGS record examined first killed the process,
+# and a NEWER CLEAN round — which binds through the structured verdict and needs no count —
+# never got to decide. That is job 78's F2 defect (a newer favourable result lost to an
+# earlier record) arriving through a process exit instead of a `break`.
+#
+# THE DECIDING ROUND HERE NEEDS NO RECOGNISER, so the absent library must not matter:
+# expected BIND (exit 0), through `$FLOW_NOLIB`.
+if [ "$nolib_still_sib" -eq 1 ] && [ "$nolib_still_gone" -eq 1 ]; then
+  # Two covering rounds at the SAME head, ordered by `started_at`: 650 FINDINGS (older),
+  # 651 CLEAN (newer). Both blocks on the PR so both are discovered.
+  pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main \
+    "$(roborev_block 650)
+$(roborev_block 651)" pmcfadin "no marker needed"
+  roborev_job 650 "$MB_MAIN" "$HEAD_AFTER" F done 2026-09-02T10:00:00Z "$FC_REVIEW2"
+  roborev_job 651 "$MB_MAIN" "$HEAD_AFTER" P done 2026-09-02T11:00:00Z
+  J_OUT=$(cd "$WORK" && PATH="$BIN:$PATH" bash "$FLOW_NOLIB/premerge-review-binding.sh" \
+    review-binding 1 o/r "$HEAD_AFTER" 2>&1)
+  J_RC=$?
+  if [ "$J_RC" -ne 0 ]; then
+    bad "4050(j): an older FINDINGS round sank a newer CLEAN one when the recogniser was absent (exit $J_RC, wanted 0): $J_OUT"
+  else
+    ok "4050(j): the newer CLEAN round still decides and BINDS (exit 0) with the recogniser absent"
+  fi
+  # AFFIRMATIVE: the older findings round must be REPORTED as examined-and-nonbinding, not
+  # silently skipped. If it never appears the fixture did not exercise the ordering at all.
+  case "$J_OUT" in
+    *"job 650"*) ok "4050(j): the older FINDINGS round WAS examined — the ordering is genuinely exercised" ;;
+    *) bad "4050(j): job 650 is absent from the output, so the mixed-ordering path was not exercised (got: $J_OUT)" ;;
+  esac
+  case "$J_OUT" in
+    *"affirmatively CLEAN"*) ok "4050(j): and it binds on the structured CLEAN verdict, which needs no count" ;;
+    *) bad "4050(j): the bind did not cite the structured CLEAN verdict (got: $J_OUT)" ;;
+  esac
+else
+  bad "4050(j): \$FLOW_NOLIB was not in the expected state, so the mixed-ordering case did not run"
+fi
+reset_stub 2>/dev/null || true
 
 # --- G3: an authorized deferral naming a CLOSED issue must NOT bind -----------
 # `gh issue view` EXITS 0 for a closed issue, so a number-only test made "the
@@ -2140,6 +2690,8 @@ for f in premerge-review-binding.sh premerge-pr-scan.py roborev-job-facts.py \
   roborev-review-oracles.sh base-staleness.sh; do
   cp "$FLOW/$f" "$FLOW_NOSCAN/$f" || noscan_ready=0
 done
+mkdir -p "$FLOW_NOSCAN/lib"
+cp "$FLOW/lib/roborev-findings-count.sh" "$FLOW_NOSCAN/lib/" || noscan_ready=0
 chmod +x "$FLOW_NOSCAN"/*.sh "$FLOW_NOSCAN"/*.py 2>/dev/null
 # The absence is measured AFFIRMATIVELY, not with a bare `[ ! -f ]`: a plain
 # negative file test folds "the directory is unreadable" onto "the file is
@@ -2295,7 +2847,7 @@ fi
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.
-CASE_FLOOR=148
+CASE_FLOOR=191
 TOTAL=$((PASSED + FAILED))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"

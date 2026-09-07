@@ -109,6 +109,21 @@ impl ValueFormatter {
         match value {
             Value::Null => "null".to_string(),
 
+            // EMPTY-BUFFER SENTINEL (issue #3805): rendered as the EMPTY STRING,
+            // which is what BOTH Cassandra renderers emit for an empty
+            // fixed-width buffer — `sstabledump` prints `"path" : [ "" ]`
+            // (`tools/JsonTransformer.java:444-458` →
+            // `db/marshal/AbstractType.java:146-156` →
+            // `serializers/Int32Serializer.java:46-49`, whose `toString(null)`
+            // is `""`) and `SELECT JSON` yields `{"": v}`
+            // (`db/marshal/MapType.java:362-388` →
+            // `db/marshal/Int32Type.java:126-130`). It also round-trips:
+            // `Int32Type.fromString("")` returns EMPTY
+            // (`db/marshal/Int32Type.java:85-89`). Deliberately NOT `"null"`
+            // and NOT `"0"` — either would diverge from sstabledump, which in
+            // this repository is a parity failure.
+            Value::Empty(_) => String::new(),
+
             // Boolean: lowercase true/false
             Value::Boolean(b) => b.to_string(),
 

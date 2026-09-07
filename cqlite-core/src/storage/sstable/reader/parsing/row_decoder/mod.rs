@@ -786,6 +786,7 @@ pub(in crate::storage::sstable::reader) use compaction_stream::{
 };
 mod complex_column;
 mod frozen;
+mod frozen_map; // campsite split of `frozen` (#1116): frozen MAP decoding + the never-null key rule (#3847)
 mod frozen_preamble;
 mod marshal_element;
 pub(crate) mod now_clock;

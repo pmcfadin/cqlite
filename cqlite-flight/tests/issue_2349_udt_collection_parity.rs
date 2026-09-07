@@ -13,11 +13,13 @@
 //! warm-vs-cold parity the issue requires.
 //!
 //! Partition `e94f10e8-…` carries a two-element `addresses` list; both elements'
-//! five text fields are asserted verbatim against the golden. The set-element
-//! (`contacts SET<FROZEN<contact_info>>`) column is intentionally NOT projected:
-//! a composite SET element is the separate merged-read limitation tracked by
-//! #2339 (a key-position composite the assembler still fails closed on), out of
-//! this issue's value-position-UDT scope.
+//! five text fields are asserted verbatim against the golden.
+//!
+//! Issue #2339 CLOSED the composite SET-element half, so
+//! `contacts SET<FROZEN<contact_info>>` — a NESTED UDT in KEY position, carried in
+//! each element's `cell_path` — is now projected too and asserted against the same
+//! golden, field for field, including the inner `address` struct. It was excluded
+//! while the merged-read assembler failed closed on it.
 //!
 //! Skips (never fails) when `CQLITE_DATASETS_ROOT` is unset or the `Data.db`
 //! binary is absent (a worktree without `fetch-datasets.sh`), but asserts the
@@ -72,6 +74,39 @@ fn golden_addresses() -> Vec<[&'static str; 5]> {
     ]
 }
 
+/// The two `contacts` elements for `TARGET_UUID`, verbatim from the golden JSONL
+/// (issue #2339). Each is a `contact_info` whose third field is a NESTED
+/// `frozen<address_type>`; the element lives entirely in the cell PATH (the cell
+/// value is empty, `"value":""`), which is why this is the KEY-position composite
+/// shape #2339 closed. sstabledump renders the same bytes as
+/// `alyssa23\@example.com:(223)342-2641:423 Michael View Suite 577\:Smithfurt\:…`
+/// — `:` separating `contact_info` fields, `\:` the inner `address_type` fields.
+///
+/// `[email, phone, street, city, state, zip_code, country]`, flattened so the
+/// nested struct is compared field for field rather than as a formatted string.
+fn golden_contacts() -> Vec<[&'static str; 7]> {
+    vec![
+        [
+            "alyssa23@example.com",
+            "(223)342-2641",
+            "423 Michael View Suite 577",
+            "Smithfurt",
+            "CT",
+            "83376",
+            "Northern Mariana Islands",
+        ],
+        [
+            "michaelmartinez@example.com",
+            "542.210.8439",
+            "169 Green Meadows",
+            "Port Stephaniefurt",
+            "TN",
+            "96351",
+            "Moldova",
+        ],
+    ]
+}
+
 fn col(name: &str, ty: &str) -> Column {
     Column {
         name: name.into(),
@@ -104,13 +139,17 @@ fn schema() -> TableSchema {
     }
 }
 
-/// Projection excludes the composite-SET column `contacts` (#2339), keeping the
-/// value-position UDT columns this issue fixes.
+/// Projection covers the value-position UDT column this issue fixes
+/// (`addresses`) AND the KEY-position composite one #2339 closed (`contacts`).
 fn spec() -> ScanSpec {
     ScanSpec {
         token: None,
         filter: None,
-        projection: Some(vec!["user_id".into(), "addresses".into()]),
+        projection: Some(vec![
+            "user_id".into(),
+            "addresses".into(),
+            "contacts".into(),
+        ]),
         limit: None,
     }
 }
@@ -178,19 +217,24 @@ fn producer() -> MergeProducer {
         .with_udt_registry(udt_registry_from_cql(DDL, "test_collections"))
 }
 
-/// Extract the `addresses` `List<Struct{...}>` value for the target partition as a
-/// sorted set of `[street,city,state,zip_code,country]` rows.
-fn decoded_addresses(combined: &RecordBatch, target: &[u8; 16]) -> Vec<[String; 5]> {
+/// The batch row index of `target`'s partition — asserted present, so a corpus
+/// that decoded no rows can never pass vacuously.
+fn target_row(combined: &RecordBatch, target: &[u8; 16]) -> usize {
     let id_idx = combined.schema().index_of("user_id").expect("user_id");
     let ids = combined
         .column(id_idx)
         .as_any()
         .downcast_ref::<FixedSizeBinaryArray>()
         .expect("user_id FixedSizeBinary(16)");
-    let row = (0..combined.num_rows())
+    (0..combined.num_rows())
         .find(|&r| ids.value(r) == target.as_slice())
-        .expect("target partition row present (never a 0-row false pass)");
+        .expect("target partition row present (never a 0-row false pass)")
+}
 
+/// Extract the `addresses` `List<Struct{...}>` value for the target partition as a
+/// sorted set of `[street,city,state,zip_code,country]` rows.
+fn decoded_addresses(combined: &RecordBatch, target: &[u8; 16]) -> Vec<[String; 5]> {
+    let row = target_row(combined, target);
     let addr_idx = combined.schema().index_of("addresses").expect("addresses");
     let list = combined
         .column(addr_idx)
@@ -243,6 +287,71 @@ fn expected_sorted() -> Vec<[String; 5]> {
     want
 }
 
+/// Extract the `contacts` `List<Struct{email,phone,address:Struct{…}}>` value for
+/// the target partition, flattened to `[email, phone, street, city, state,
+/// zip_code, country]` per element, in the order the reader returned them
+/// (issue #2339 — element ORDER is part of the property: Cassandra orders a
+/// composite set element by its TYPE comparator, `UserType.compare`, so
+/// `alyssa23…` precedes `michaelmartinez…`).
+fn decoded_contacts(combined: &RecordBatch, target: &[u8; 16]) -> Vec<[String; 7]> {
+    let row = target_row(combined, target);
+    let idx = combined.schema().index_of("contacts").expect("contacts");
+    let list = combined
+        .column(idx)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("contacts must decode as a List, not opaque bytes (issue #2339)");
+    let structs = list.value(row);
+    let structs = structs
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .expect("contacts elements must be Struct (frozen<UDT> resolved from the cell_path)");
+    let text = |sa: &StructArray, name: &str| -> StringArray {
+        sa.column_by_name(name)
+            .unwrap_or_else(|| panic!("contact_info field '{name}' present"))
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap_or_else(|| panic!("contact_info field '{name}' is Utf8"))
+            .clone()
+    };
+    let email = text(structs, "email");
+    let phone = text(structs, "phone");
+    let address = structs
+        .column_by_name("address")
+        .expect("contact_info.address present")
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .expect("contact_info.address must be a NESTED Struct, not a formatted string")
+        .clone();
+    let (street, city, state, zip, country) = (
+        text(&address, "street"),
+        text(&address, "city"),
+        text(&address, "state"),
+        text(&address, "zip_code"),
+        text(&address, "country"),
+    );
+    (0..structs.len())
+        .map(|i| {
+            [
+                email.value(i).to_string(),
+                phone.value(i).to_string(),
+                street.value(i).to_string(),
+                city.value(i).to_string(),
+                state.value(i).to_string(),
+                zip.value(i).to_string(),
+                country.value(i).to_string(),
+            ]
+        })
+        .collect()
+}
+
+fn expected_contacts() -> Vec<[String; 7]> {
+    golden_contacts()
+        .into_iter()
+        .map(|c| c.map(String::from))
+        .collect()
+}
+
 /// COLD path (`produce_from_paths` → `KWayMerger::new_with_gc_and_registry_cancellable`).
 #[test]
 fn cold_path_decodes_udt_in_collection_matching_golden() {
@@ -266,6 +375,16 @@ fn cold_path_decodes_udt_in_collection_matching_golden() {
         decoded_addresses(&combined, &uuid_bytes(TARGET_UUID)),
         expected_sorted(),
         "cold path: addresses frozen<UDT> list must decode field-for-field to the golden"
+    );
+    // Issue #2339: the KEY-position composite. `produce_from_paths` is the COLD
+    // path, which ALWAYS merges (no bypass_reason call at all), so this asserts the
+    // MERGED-READ assembler decoded the nested `contact_info` — including its inner
+    // `address_type` struct — from each element's cell_path.
+    assert_eq!(
+        decoded_contacts(&combined, &uuid_bytes(TARGET_UUID)),
+        expected_contacts(),
+        "cold path: contacts set<frozen<contact_info>> must decode field-for-field \
+         (nested UDT included) in Cassandra's element order (issue #2339)"
     );
 }
 
@@ -319,6 +438,20 @@ fn warm_path_decodes_udt_in_collection_matching_cold_and_golden() {
         decoded_addresses(&combined, &uuid_bytes(TARGET_UUID)),
         expected_sorted(),
         "warm path: addresses frozen<UDT> list must decode identically to cold + golden"
+    );
+    // Issue #2339, arm honesty: this fixture has ONE generation, and since #2339
+    // made a RESOLVABLE composite set element decodable on both arms, the warm
+    // route's bypass predicate now SELECTS the single-generation fast arm for this
+    // schema. So this assertion pins warm-vs-cold-vs-golden agreement, NOT the
+    // merged-read assembler — that is the cold case above (measured: with composite
+    // decode disabled the cold case fails and this one still passes) and the
+    // unprojected arm differential in `issue_3058_forced_path_differential.rs`,
+    // which forces BOTH arms and asserts the bypass leg built zero mergers.
+    assert_eq!(
+        decoded_contacts(&combined, &uuid_bytes(TARGET_UUID)),
+        expected_contacts(),
+        "warm path: contacts set<frozen<contact_info>> must decode identically to \
+         cold + golden (issue #2339)"
     );
 }
 

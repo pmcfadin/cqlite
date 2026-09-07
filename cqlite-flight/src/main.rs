@@ -1,6 +1,46 @@
 //! `cqlite-flight` — Arrow Flight server exposing on-the-fly compacted SSTable
 //! data. Runs co-located with a Cassandra node and reads its local SSTables.
 
+// ---------------------------------------------------------------------------
+// Global allocator (issue #3997, requirement R1)
+// ---------------------------------------------------------------------------
+//
+// A `#[global_allocator]` is PROCESS-WIDE and there can be exactly one per
+// binary, which is why this lives in `main.rs` and nowhere else: rustc compiles
+// `main.rs` into the **bin** target only, so the **library** target that
+// `tools/flight-loadgen`, the benches and every integration test link never
+// carries an allocator. That is also what keeps it from colliding with the
+// memory ratchets, each of which installs its own allocator in its own TEST
+// binary (`issue_1494_producer_mem_budget`'s `dhat::Alloc`, `cqlite-core`'s
+// `cfg(test)` `CountingAllocator`). `scripts/tests/test_flight_allocator_confinement.sh`
+// pins that confinement structurally, so a later "move it to lib.rs for
+// convenience" fails the gate.
+//
+// Off Linux the `jemalloc` feature is deliberately inert: the dependency is
+// declared under a `cfg(target_os = "linux")` target section in `Cargo.toml`, so
+// the crate does not even exist to name off-Linux.
+#[cfg(all(feature = "jemalloc", target_os = "linux"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+/// The allocator this binary actually installed, as reported by `--version` and
+/// by the startup log line (requirement R2).
+///
+/// **Why this const lives in `main.rs` next to the install site rather than in
+/// the library.** It is derived from the SAME `cfg` predicate as the
+/// `#[global_allocator]` above, which is the only way the reported string and
+/// the linked allocator cannot disagree. Deriving it in the library instead
+/// would be a latent lie: the library sees `feature = "jemalloc"` in a TEST
+/// binary too — where `main.rs` is not compiled and therefore NO global
+/// allocator is installed — so a library-side const would report `jemalloc` for
+/// a process running on the system allocator. Keep the two adjacent.
+#[cfg(all(feature = "jemalloc", target_os = "linux"))]
+const ALLOCATOR: &str = "jemalloc";
+/// See the documented sibling above: the negation of the exact same predicate,
+/// so the two arms are total and cannot both (or neither) apply.
+#[cfg(not(all(feature = "jemalloc", target_os = "linux")))]
+const ALLOCATOR: &str = "system";
+
 use arrow_flight::flight_service_server::FlightServiceServer;
 use tonic::transport::server::TcpIncoming;
 use tonic::transport::Server;
@@ -47,7 +87,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse WITH the `ArgMatches` (issue #3225): the admission ceiling's
     // provenance — flag vs env vs derived — is a property of the parse, and
     // only `ArgMatches::value_source` can report it.
-    let (args, matches) = Args::parse_with_matches();
+    // `ALLOCATOR` is threaded THROUGH the parse because `--version`'s output is
+    // built by clap from the `Command` this call constructs (issue #3997, R2.1):
+    // the binary is the only place that knows which allocator was linked, and
+    // `cli` is the only place that owns the clap `Command`.
+    let (args, matches) = Args::parse_with_matches(ALLOCATOR);
     let listen = args.listen;
     // The effective ceiling and where it came from. With nothing configured this
     // is `clamp(2 x available_parallelism, 2, 64)` (issue #3225) rather than the
@@ -81,7 +125,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .saturating_mul(4)
         .max(1024);
 
-    cli::log_startup(&args, &scans, admission_limit, max_concurrent_streams);
+    cli::log_startup(
+        &args,
+        &scans,
+        admission_limit,
+        max_concurrent_streams,
+        ALLOCATOR,
+    );
     // Saturation instrumentation (issue #2419, WS2): spawn the background sampler
     // that drives the `cqlite.proc.*` OS-resource gauges (thread/fd/RSS) on a ~2s
     // cadence. It takes its OWN `shutdown_signal()` future — the same SIGTERM /
@@ -196,6 +246,21 @@ mod tests {
         // Must never panic regardless of feature state, and there's nothing to
         // assert beyond "it returns" — disabled is the common, silent case.
         log_observability_status(false, "http://localhost:4317");
+    }
+
+    /// The reported allocator name must be exactly what THIS build's cfg says,
+    /// and must be one of the two values requirement R2.1's grammar admits. This
+    /// is the in-binary half; the end-to-end half (the built binary's real
+    /// `--version` stdout) is `tests/issue_3997_allocator_surface.rs`, and the
+    /// link-level half is `scripts/tests/test_flight_allocator_link.sh`.
+    #[test]
+    fn allocator_const_matches_the_cfg_that_installs_the_allocator() {
+        let expected = if cfg!(all(feature = "jemalloc", target_os = "linux")) {
+            "jemalloc"
+        } else {
+            "system"
+        };
+        assert_eq!(ALLOCATOR, expected);
     }
 
     #[test]

@@ -282,6 +282,24 @@ pub(super) fn create_empty_value_for_cql_type(cql_type: &CqlType) -> Result<Valu
             "unknown".to_string(),
         )))),
         CqlType::Frozen(inner) => create_empty_value_for_cql_type(inner),
+        // #4114 (roborev job 109): there is NO empty vector to construct. A
+        // zero-length vector value is an ERROR in Cassandra
+        // (`VectorType.java:365-368`, "Invalid empty vector value"), so this arm must
+        // not fall through to `Value::Null` below — that would turn an invalid value
+        // into a legal-looking one. The refusal comes from the ONE framing rule so
+        // the message matches every other vector site. (A genuinely NULL field is
+        // decided by the outer framing — `length == -1` — and never reaches here; the
+        // collection map path's `length < 0` also lands here, and refusing is the
+        // fail-closed reading: Cassandra permits neither a null nor an empty map
+        // key/value.)
+        CqlType::Vector(element, dimension) => {
+            crate::schema::vector_type::vector_value::decode_framed_float_vector(
+                &[],
+                element,
+                *dimension,
+                "empty framed vector value",
+            )
+        }
         _ => Ok(Value::Null),
     }
 }
@@ -314,6 +332,14 @@ pub(super) fn cql_type_to_type_id(cql_type: &CqlType) -> CqlTypeId {
         CqlType::Tuple(_) => CqlTypeId::Tuple,
         CqlType::Udt(_, _) => CqlTypeId::Udt,
         CqlType::Frozen(_) => CqlTypeId::Blob, // Fallback only; callers should handle Frozen explicitly
+        // #4114: a vector has NO native protocol type id (Cassandra carries it as a
+        // custom type), so this conversion is LOSSY — it discards the element type
+        // and the dimension, and `CqlTypeId::Custom` decodes as a vint-framed blob.
+        // Every caller must therefore intercept `CqlType::Vector` BEFORE reaching a
+        // type id, exactly like the `Frozen` arm above. All three do:
+        // `parse_cql_value_for_type`, `parse_cql_value_for_type_with_registry` (the
+        // one that did NOT, roborev job 109) and `parse_cql_value_with_schema`.
+        CqlType::Vector(_, _) => CqlTypeId::Custom,
         CqlType::Custom(_) => CqlTypeId::Blob, // Custom types as blob
     }
 }
@@ -397,6 +423,10 @@ pub fn serialize_cql_value(value: &Value) -> Result<Vec<u8>> {
             result.push(CqlTypeId::Uuid as u8);
             result.extend_from_slice(uuid);
         }
+        // EMPTY-BUFFER SENTINEL (issue #3805): REFUSED, never encoded.
+        // See `refuse_empty_sentinel` for why this format has no
+        // representation that reads back as the sentinel.
+        Value::Empty(ty) => return Err(refuse_empty_sentinel(*ty)),
         Value::Json(json) => {
             // Store JSON as text
             let json_str = json.to_string();
@@ -654,12 +684,60 @@ fn serialize_value_without_type_prefix(value: &Value) -> Result<Vec<u8>> {
         Value::Inet(bytes) => Ok(bytes.to_vec()),
         Value::SmallInt(i) => Ok(i.to_be_bytes().to_vec()),
         Value::Float32(f) => Ok(f.to_be_bytes().to_vec()),
+        // EMPTY-BUFFER SENTINEL (issue #3805): REFUSED, never encoded. A
+        // collection element written as `len=0` is read back through
+        // `parse_cql_value_raw`, which (measured, all 12 admitted families)
+        // rejects a zero-length payload. See `refuse_empty_sentinel`.
+        Value::Empty(ty) => Err(refuse_empty_sentinel(*ty)),
         // For complex types, fall back to full serialization and strip type byte
         _ => {
             let full_bytes = serialize_cql_value(value)?;
             Ok(full_bytes[1..].to_vec()) // Skip the type byte
         }
     }
+}
+
+/// The error both serializers in this module return for the empty-buffer
+/// sentinel (issue #3805).
+///
+/// This format's wire shape is `[type byte][payload]`, and `[type byte]` with
+/// no payload does NOT read back as `Value::Empty(_)`. MEASURED against this
+/// module's own readers, over all 12 families the tag admits: BOTH
+/// [`parse_cql_value`] and [`parse_cql_value_raw`] return `Eof` for a
+/// zero-length payload — `inet` and `decimal`/`varint` included, since their
+/// arms here read a length or a scale first. So a bare type byte does not
+/// decode to a different `Value`; it does not decode at all, and an encoder
+/// emitting it would be writing bytes its own reader rejects. That is why this
+/// is an `Err` and not an encoding, and it is pinned rather than asserted by
+/// `cqlite-core/tests/issue_3805_empty_value_sentinel.rs`
+/// (`no_tagged_form_of_the_sentinel_reads_back_as_the_sentinel`).
+///
+/// Inventing a decodable TAGGED form for the sentinel instead would mean
+/// inventing an encoding no Cassandra authority defines, which the
+/// no-heuristics mandate forbids (issue #28); the sentinel's write-side
+/// representation is a declared fail-closed residual, issue #4072.
+///
+/// # The surface that CAN write it — CORRECTED (roborev job 452, then #4106)
+/// It is a multicell COLLECTION's CELL PATH in the SSTable writer — a map's KEY
+/// (#3805) or a set's ELEMENT (#4106), both in `data_writer::cell_path` — and
+/// ONLY that. An earlier revision of this comment named the type-aware
+/// writer (`crate::storage::serialization::types`) on the ground that a declared
+/// column type "supplies the framing this format lacks" — which was WRONG, and
+/// citing it made this rationale point at a site that now refuses. A declared
+/// type says only that an empty buffer would be LEGAL for that type; the framing
+/// question is separate and is what the cell path supplies (an unsigned-VInt
+/// length in the enclosing collection, `db/marshal/CollectionType.java:361-382`,
+/// so a zero-length path is expressible and MEANS an empty key). The type-aware
+/// writer has the type and NOT the framing, so it refuses too — see
+/// `TypeSerializer`'s `refuse_empty_sentinel_cell_value`.
+fn refuse_empty_sentinel(ty: crate::types::EmptyValueType) -> Error {
+    Error::invalid_operation(format!(
+        "Value::Empty({}) cannot be serialized via the legacy tagged CQL value \
+         binary format: no byte string in this format reads back as the \
+         empty-buffer sentinel (issue #4072), and inventing one has no \
+         Cassandra oracle (issue #28)",
+        ty.cql_name()
+    ))
 }
 
 fn map_value_to_cql_type(value: &Value) -> CqlTypeId {
@@ -691,6 +769,33 @@ fn map_value_to_cql_type(value: &Value) -> CqlTypeId {
         Value::Varint(_) => CqlTypeId::Varint,
         Value::Decimal { .. } => CqlTypeId::Decimal,
         Value::Duration { .. } => CqlTypeId::Duration,
+        // The sentinel reports its DECLARED type, not a synthetic one
+        // (issue #3805). This is a TYPE-ID lookup, not an encoding: the value
+        // itself is refused by both serializers above.
+        Value::Empty(ty) => map_empty_value_type_to_cql_type(*ty),
+    }
+}
+
+/// The wire type id of an [`EmptyValueType`]'s declared type (issue #3805).
+///
+/// `counter`, `timeuuid` and `varint` map to their own ids; `float`/`double`
+/// follow CQL widths (CQL `float` is 4 bytes = CQLite `Float32`, CQL `double`
+/// is 8 bytes = CQLite `Float`), which is why the tag names them in CQL terms.
+fn map_empty_value_type_to_cql_type(ty: crate::types::EmptyValueType) -> CqlTypeId {
+    use crate::types::EmptyValueType as E;
+    match ty {
+        E::Int => CqlTypeId::Int,
+        E::BigInt => CqlTypeId::BigInt,
+        E::Counter => CqlTypeId::Counter,
+        E::Float => CqlTypeId::Float,
+        E::Double => CqlTypeId::Double,
+        E::Timestamp => CqlTypeId::Timestamp,
+        E::Uuid => CqlTypeId::Uuid,
+        E::TimeUuid => CqlTypeId::Timeuuid,
+        E::Boolean => CqlTypeId::Boolean,
+        E::Inet => CqlTypeId::Inet,
+        E::Decimal => CqlTypeId::Decimal,
+        E::Varint => CqlTypeId::Varint,
     }
 }
 
@@ -792,6 +897,18 @@ pub(super) fn parse_cql_value_with_schema<'a>(
         CqlType::Map(key_type, value_type) => parse_map_with_schema(input, key_type, value_type),
         CqlType::Tuple(_) => parse_tuple(input),
         CqlType::Udt(_, _) => parse_udt(input),
+        // #4114: `vector<float, n>` is `4*n` raw big-endian binary32 bytes with NO
+        // length prefix and no per-element framing (`VectorType.java:94-101`,
+        // `:445-460`), so it consumes a FIXED width off the front of `input` — it is
+        // NOT a collection and must not reach `parse_blob`, which would read the
+        // first float's high byte as a vint length (the #4114 defect).
+        CqlType::Vector(element_type, dimension) => {
+            crate::schema::vector_type::vector_value::parse_float_vector_nom(
+                input,
+                element_type,
+                *dimension,
+            )
+        }
         CqlType::Frozen(inner) => parse_cql_value_with_schema(input, inner),
         CqlType::Custom(_) => {
             // Custom types require additional metadata, parse as blob

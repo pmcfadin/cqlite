@@ -175,6 +175,93 @@ fn zero_key_length_is_malformed() {
     );
 }
 
+/// Issue #3928 (fix round 3, B2) — the BLOCK-EMIT header arm must reach the same
+/// verdict as the classifier above, because #1741's fix is a property of the
+/// SIZING RULE and not of one caller.
+///
+/// The sliding drivers route through `partition_header_readiness`, so the cases
+/// above pin them. The block-emit arm
+/// (`block_emit_windowed/partition_header_arm.rs`) re-derived the rule with a
+/// FLAT minimum — `if has_uint_deletion_time() { 1 } else { 12 }`, with no look
+/// at the discriminator — so a legitimate 12-byte DELETED DeletionTime
+/// straddling a `BufferExtent::Window` passed the 1-byte minimum, failed the
+/// full parse, and returned `Resync`: a discarded byte on HEALTHY data, which
+/// `buffer_extent.rs` records as being as much a defect as a swallow. That is
+/// what drift between two implementations of one rule looks like — the driver
+/// path got #1741's fix and this one did not — so the arm now CALLS the
+/// classifier instead of re-deriving it.
+///
+/// BOTH directions are pinned here, because a fix that over-requires bytes is
+/// the same defect mirrored: the split deleted form must NOT parse, and the
+/// 1-byte LIVE form MUST.
+#[test]
+fn deleted_oa_header_split_at_first_deletion_byte_does_not_resync_the_block_walk() {
+    use super::block_emit_windowed::partition_header_arm::HeaderStep;
+    use super::buffer_extent::HeaderTolerance;
+    use super::BufferExtent;
+
+    let full = deleted_oa_partition_header();
+    let split = &full[..=DELETION_DISCRIMINATOR_OFFSET];
+    // A LIVE header needs only its single 0x80 sentinel byte.
+    let mut live = vec![0x00u8, 0x04];
+    live.extend_from_slice(&42i32.to_be_bytes());
+    live.push(super::row_framing::OA_IS_LIVE_DELETION);
+
+    for parser in [oa_parser(), da_parser()] {
+        // A tolerant WINDOW never refuses, so `?` cannot fire here; the verdict
+        // is which tolerant answer it gives.
+        let tolerant = HeaderTolerance::for_extent(BufferExtent::Window);
+
+        let step = parser
+            .block_partition_header(split, 0, tolerant, 0)
+            .expect("a tolerant window must not refuse");
+        assert!(
+            matches!(step, HeaderStep::EndOfBlock),
+            "a DELETED oa/da header holding only its first deletion byte is INCOMPLETE, so \
+             the tolerant walk must end and let the caller refill — it must not discard a \
+             byte (Resync), which loses a header byte of HEALTHY straddling data"
+        );
+
+        // Control 1: the COMPLETE deleted header parses.
+        match parser.block_partition_header(&full, 0, tolerant, 0) {
+            Ok(HeaderStep::Parsed(..)) => {}
+            other => panic!(
+                "the complete deleted oa/da header must parse, got {}",
+                describe_step(&other)
+            ),
+        }
+
+        // Control 2 (the mirror defect): the 1-byte LIVE form must NOT be
+        // over-required. A fix that simply raised the minimum to 12 would pass
+        // the assertion above and red here.
+        match parser.block_partition_header(&live, 0, tolerant, 0) {
+            Ok(HeaderStep::Parsed(..)) => {}
+            other => panic!(
+                "a LIVE oa/da partition needs only its single 0x80 sentinel byte, got {}",
+                describe_step(&other)
+            ),
+        }
+    }
+}
+
+/// Render a `block_partition_header` outcome for an assertion message.
+fn describe_step(
+    r: &crate::Result<super::block_emit_windowed::partition_header_arm::HeaderStep>,
+) -> String {
+    use super::block_emit_windowed::partition_header_arm::HeaderStep;
+    match r {
+        Ok(HeaderStep::Parsed(k, next, del)) => {
+            format!(
+                "Parsed(key {} bytes, next {next}, deletion {del:?})",
+                k.0.len()
+            )
+        }
+        Ok(HeaderStep::EndOfBlock) => "EndOfBlock".to_string(),
+        Ok(HeaderStep::Resync) => "Resync".to_string(),
+        Err(e) => format!("Err({e})"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Layer 2: end-to-end over the ACTUAL sliding parsers with a real da reader.
 // ---------------------------------------------------------------------------

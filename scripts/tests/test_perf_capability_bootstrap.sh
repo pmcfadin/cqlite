@@ -43,6 +43,10 @@ set -uo pipefail
 # sibling bootstrap suite). Section 5b's own coverage lives in
 # scripts/tests/test_bootstrap_agent_machine.sh.
 export CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1
+# ...and section 5c for the same reasons plus two of its own (issue #3733): it makes a REAL
+# billed `claude -p` network call, and under --yes it seeds the HOST's running tmux server.
+# Both would land in this suite's perf TRIPWIRES and neither is its subject.
+export CQLITE_BOOTSTRAP_SKIP_CLAUDE_AUTH=1
 
 # --- WHOLE-SUITE CAPABILITY GATE (issue #3261, roborev round 6, Medium) ----------------------
 # EVERY case below drives bootstrap's perf section, and that section stages the drop-in through

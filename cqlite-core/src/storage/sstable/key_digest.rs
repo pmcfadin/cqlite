@@ -239,6 +239,21 @@ impl KeyDigestComputer {
                 let days_since_epoch = stored.wrapping_add(i32::MIN as u32) as i32;
                 Ok(Value::Date(days_since_epoch))
             }
+            // Vector is DELIBERATELY NOT in the blob group below (#4114, roborev job
+            // 112). That group returns the raw bytes as a blob, which is the exact
+            // silent-mis-decode this issue exists to remove: a vector's bytes are a
+            // valid-looking blob of the right length, so nothing downstream can tell
+            // it went wrong. #4114 implements reading a vector COLUMN value, not
+            // decoding a vector used as a KEY component — Cassandra permits one
+            // (vectors are frozen and nothing in CreateTableStatement forbids it), so
+            // this is a CQLite boundary and it is declared BY NAME.
+            ComparatorType::Vector { .. } => Err(Error::unsupported_format(
+                "decoding a vector used as a key component is not implemented (issue \
+                 #4114 covers reading vector<float, n> COLUMN values); refused rather \
+                 than returned as a blob, because a blob of the right length is \
+                 indistinguishable from a correct decode"
+                    .to_string(),
+            )),
             // For complex types, we need more sophisticated parsing
             // For now, treat them as blobs to avoid breaking existing functionality
             ComparatorType::List(_)

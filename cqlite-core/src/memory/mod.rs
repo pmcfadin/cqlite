@@ -89,6 +89,9 @@ impl MemoryManager {
 pub(crate) fn estimate_value_size(value: &Value) -> usize {
     match value {
         Value::Null => 1,
+        // Zero content bytes: the sentinel's payload IS the empty buffer
+        // (issue #3805).
+        Value::Empty(_) => 0,
         Value::Boolean(_) => 1,
         Value::Integer(_) => 4,
         Value::BigInt(_) => 8,

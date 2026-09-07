@@ -296,6 +296,68 @@
 #                      This component emits no FAIL at all, by design; its own
 #                      self-test (which DOES fail on a broken guard) is in
 #                      tooling-tests.
+#   features-load-bearing
+#                      FEATURES-ARE-LOAD-BEARING guard
+#                      (scripts/ci/check-features-load-bearing.sh, issue #1698, epic
+#                      #1685). Derives every feature DECLARED by every workspace
+#                      member from `cargo metadata --no-deps` and asserts each one
+#                      changes something: it, or something in its feature CLOSURE,
+#                      has a cfg reference site in its DECLARING package's sources,
+#                      enables an optional dependency, enables a feature of an
+#                      external dependency, or is named in a target's
+#                      required-features. CREDIT FLOWS UP FROM EFFECTS, NEVER DOWN
+#                      FROM A PARENT — a leaf named only by an aggregator is dead,
+#                      which is exactly how four `test-*` leaves survived for
+#                      months while `all-compression` (credited through its four
+#                      dep-pulling leaves) stays green. Being ENUMERATED is not an
+#                      effect: this script's own clippy feature lists, a workflow
+#                      `--features` argument and a doc table all NAME features
+#                      without enabling anything, so deleting a dead flag means
+#                      cleaning those enumerations in the same diff.
+#                      cargo metadata, not a textual manifest sweep: cargo
+#                      SYNTHESISES implicit features from optional deps that no
+#                      [features] block contains (7 here), and a find(1) sweep
+#                      reaches non-member manifests cargo never builds. `fuzz/` is
+#                      its own excluded workspace and out of scope.
+#                      CONTRACT (#1698, roborev jobs 57/60), and it is SCOPED: NO
+#                      FALSE FAIL for a gate written in a RECOGNISED spelling —
+#                      #[cfg], #![cfg], cfg!, cfg_attr (condition AND tail), with
+#                      whitespace and string escapes handled — and explicitly
+#                      INCOMPLETE: a dead feature can escape. A gate OUTSIDE that
+#                      set is NOT SEEN, and the two known such cases (a feature NAME
+#                      produced by macro expansion; a build-script env key built at
+#                      runtime) are named in the line. The unqualified version of
+#                      this claim was tried and RETRACTED: six review rounds each
+#                      produced another valid Rust spelling it did not recognise,
+#                      because Rust admits unboundedly many, so an absolute claim
+#                      recreated the recogniser treadmill one level up. THIS
+#                      COMPONENT REQUIRES that line — a guard that quietly stopped
+#                      declaring its own bounds would imply coverage it lacks. The
+#                      asymmetry is deliberate: a false PASS leaves a dead flag in
+#                      place (the status quo), a false FAIL reds correct input and
+#                      makes this the guard everyone waives.
+#                      Fail-closed and affirmative — a failed `cargo metadata`, an
+#                      unreadable member/feature table, a `pkg/feature` edge naming
+#                      a feature that does not exist, an unreadable source file, a
+#                      zero-file scan or a zero-feature run are each a NAMED FAIL,
+#                      never a fallback to an empty feature or effect set (which
+#                      would silently excuse every flag). NO env opt-out and no
+#                      bypass flag, deliberately: a dead flag is always deletable,
+#                      so an escape hatch could only buy a vacuous green.
+#                      PREREQUISITES: cargo AND python3, both MANDATORY and both
+#                      declared — `cargo metadata` is the only source of truth for
+#                      the feature set, and the reader that parses its JSON and
+#                      lexes Rust is python3. Absent either, this component FAILs
+#                      with a named remedy and NEVER SKIPs: a verdict it did not
+#                      measure is not a verdict, and an escape hatch could only buy
+#                      a vacuous green. (Its SELF-TEST, in the SKIP-aware
+#                      tooling-tests component, does SKIP loudly without python3 —
+#                      its subject cannot run there at all — so this
+#                      never-SKIPping lane is NOT folded into a SKIP-aware one,
+#                      per #3522.)
+#                      `cargo metadata` runs with --locked, so this mandatory
+#                      component can never rewrite Cargo.lock mid-gate and trip
+#                      the tree-integrity check (#2926).
 #   tooling-tests      shell-tooling regression tests (fast, no datasets/network):
 #                      scripts/tests/test_workspace_test_disposition.sh (+ its
 #                      self-test): the PACKAGE-granular #3522 census — every cargo
@@ -326,6 +388,19 @@
 #                      exits before running any component, so there is no recursion.
 #                      SKIP-aware: no python3 -> SKIP (the selftest's truncation
 #                      assertion needs a python reader), never silent PASS.
+#                      Also runs scripts/tests/test_agent_gate_logdir_cleanup.sh
+#                      (#3637) — proves the per-run LOG_DIR is REMOVED on a terminal
+#                      PASS (and on either verdict when nested), RETAINED with a
+#                      NAMED reason on its own `logdir-disposition:` key on every
+#                      non-PASS verdict and on the #2874 no-clobber / private-summary
+#                      shapes, that `logs:` stays PATH-ONLY (asserted through a
+#                      $TMPDIR that itself contains " ("), that an EARLY EXIT which
+#                      never reaches the terminal emit still gets a disposition (the
+#                      stub run, a usage refusal, --list), that
+#                      AGENT_GATE_KEEP_LOGS=1 suppresses removal AND the startup
+#                      sweep, and that the age sweep takes an aged dir while leaving
+#                      a fresh one (mtime synthesised, never waited for). Hermetic:
+#                      its own scratch TMPDIR + fake checkout, no cargo/network.
 #                      Also runs scripts/tests/test_agent_gate_tree_integrity.sh
 #                      (#2926) — proves a gate whose worktree mutates MID-RUN cannot
 #                      certify, and that an unmutated run still does (hermetic fake
@@ -788,6 +863,13 @@
 #                      invisible to a bare `cargo check` — while pulling in none of the
 #                      ~100 integration test files, which assume default features and
 #                      fail here as noise, not leakage. No opt-out.
+#                      Also runs scripts/tests/test_features_load_bearing_guard.sh
+#                      (#1698), the non-vacuity proof for the
+#                      features-load-bearing component: 64 cases over throwaway
+#                      fixture workspaces, each criterion pinned by a green/red
+#                      differential pair, every negative case requiring the
+#                      diagnostic to NAME the planted feature, and an EXACT case
+#                      count (a floor lets one case be deleted silently).
 #                      Also runs scripts/tests/test_pub_surface_guard.sh (#1712),
 #                      the non-vacuity proof for the pub-surface component. 42 cases,
 #                      source-only (no cargo doc since the #1712 descope), each
@@ -1039,7 +1121,13 @@ fi
 # compilation across worktrees. Disabled via CQLITE_DISABLE_SCCACHE=1.
 # Cache location: $SCCACHE_DIR (default ~/.cache/sccache on Linux,
 # ~/Library/Caches/Mozilla.sccache on macOS). Cache size limit:
-# $SCCACHE_CACHE_SIZE (default 10 GiB; raise for multi-user builds).
+# $SCCACHE_CACHE_SIZE (default 10 GiB; raise for multi-user builds) — but RAISING IT
+# IS NOT ENOUGH: sccache reads that variable ONCE, at SERVER STARTUP, so a running
+# server keeps its old cap until `sccache --stop-server`, and the accepted spelling
+# is `<digits>[KkMmGgTt]` (`30GiB`/`30GB` are SILENTLY DISCARDED). The cap actually
+# in force is reported on the accelerators: line as `sccache-cap=<bytes>(<source>)`
+# (issue #3727); persist it with
+# `bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap`.
 # Measurement (issue #1822): 25.6% speedup on fresh worktrees with warm cache.
 #
 # Accelerator state (issue #1848): every optional accelerator the gate depends on
@@ -1050,14 +1138,56 @@ fi
 # the SUMMARY block so degradation is visible in the pasted block, not just
 # scrollback. All WARN/banner text goes to STDERR: hidden hook modes (--classify-*)
 # must keep STDOUT empty, and this detection runs before the hook dispatch.
+# _gate_sccache_bin: THE ONE ANSWER to "which sccache would this gate run", asked by
+# every site that answers "is sccache available" — the detection just below that sets
+# RUSTC_WRAPPER, the health probe (#2641) and the capacity probe (#3727). One helper and
+# never a second copy: three independent `command -v sccache` sites could drift into
+# three different answers about one box.
+#
+# TWO STAGES, BECAUSE PATH ALONE CANNOT SEE THE DOCUMENTED INSTALL (roborev job 411, f1).
+# `cargo install sccache` — the install this repo's own bootstrap documents — writes to
+# ~/.cargo/bin, and the PATH prepend above fires ONLY when `cargo` itself is absent. So a
+# box with a SYSTEM cargo and sccache only in ~/.cargo/bin resolved NOTHING here, while
+# bootstrap-agent-machine.sh's own two-stage resolution (`scc_resolve_binary`) found that
+# binary, started its server and reported VERIFIED — a false certification for a binary
+# this gate would not run, and a false `[ok]` stops anyone looking. The fallback is
+# resolved for sccache SPECIFICALLY and touches PATH not at all: widening the prepend
+# above would change which cargo/toolchain a gate uses, a far larger blast radius than
+# this question owns.
+#
+# STRICTLY ADDITIVE, which is why it cannot move any component's verdict: it can only
+# find an sccache where the gate previously found NONE. Where PATH answers, the answer is
+# unchanged; where it did not, the gate gains an accelerator (nothing loses one) and the
+# capacity/health tokens move from `absent`/`na` to a MEASURED reading of the very server
+# bootstrap certified. No component's pass/fail input is derived from either.
+#
+# On PATH it answers the BARE name, byte-identical to the pre-change behaviour (cargo and
+# the probes both resolve it through the ambient PATH); the ABSOLUTE path is answered only
+# when the fallback is what found it — precisely the case where a bare `sccache` in
+# RUSTC_WRAPPER would be unrunnable. `-f` as well as `-x`, because `[ -x <dir> ]` is TRUE
+# for a directory, so a directory named `sccache` would otherwise resolve as a binary.
+_gate_sccache_bin() {
+  if command -v sccache >/dev/null 2>&1; then
+    printf 'sccache'
+    return 0
+  fi
+  if [ -n "${HOME:-}" ] && [ -f "$HOME/.cargo/bin/sccache" ] \
+     && [ -x "$HOME/.cargo/bin/sccache" ]; then
+    printf '%s' "$HOME/.cargo/bin/sccache"
+    return 0
+  fi
+  return 1
+}
+
 ACCEL_SCCACHE=absent
+_gate_scc_bin=""
 if [ "${CQLITE_DISABLE_SCCACHE:-0}" = 1 ]; then
   ACCEL_SCCACHE=off
-elif command -v sccache >/dev/null 2>&1; then
-  export RUSTC_WRAPPER=sccache
+elif _gate_scc_bin=$(_gate_sccache_bin); then
+  export RUSTC_WRAPPER="$_gate_scc_bin"
   export CARGO_INCREMENTAL=0
   ACCEL_SCCACHE=on
-  echo "agent-gate: sccache detected; using as RUSTC_WRAPPER with CARGO_INCREMENTAL=0 (#1822)" >&2
+  echo "agent-gate: sccache detected at '$_gate_scc_bin'; using as RUSTC_WRAPPER with CARGO_INCREMENTAL=0 (#1822)" >&2
 else
   echo "agent-gate: WARN: sccache not installed — cross-worktree compile caching DISABLED (~25.6% slower fresh builds); install: brew install sccache (#1848)" >&2
 fi
@@ -1154,13 +1284,27 @@ fi
 # States: na (sccache not in use → nothing to probe), ok (all counters 0), warn
 # (any error/timeout counter > 0). Memoized and probed ONLY at SUMMARY emission
 # (accelerators_line); the latency-sensitive classify hooks exit before reaching it.
+#
+# THIS TOKEN IS AN ERROR-COUNTER SIGNAL AND NOT A CAPACITY SIGNAL, AND THE DIFFERENCE IS LOAD-
+# BEARING (issue #3727). It is the SUM OF FOUR COUNTERS — Cache read errors + Cache write errors +
+# Cache errors + Cache timeouts — and it has NO capacity, occupancy or eviction input of any kind.
+# So `sccache-health=warn` CANNOT be cleared by raising SCCACHE_CACHE_SIZE, and a full, thrashing,
+# constantly-evicting cache reports `sccache-health=ok` because eviction is normal operation and
+# increments none of these four. Anyone reading this token as "the cache is healthy" in the
+# capacity sense is reading a claim it does not make. The capacity facts live in the SEPARATE
+# `sccache-cap=` / `sccache-used=` tokens (#3727) on the same line, and the two must never be
+# collapsed: an error counter and an occupancy ratio answer different questions and have different
+# remedies (inspect/reset the cache vs raise the cap or stop a stale server).
 
 # _sccache_error_sum: sum sccache's authoritative failure counters from
 # `sccache --show-stats`. Robust text parse (no jq/python dependency). 0 if sccache
 # is unavailable or stats can't be read (absence is not a health failure).
 _sccache_error_sum() {
-  command -v sccache >/dev/null 2>&1 || { printf 0; return; }
-  sccache --show-stats 2>/dev/null | awk '
+  local __bin=""
+  # The SAME resolution the detection used (#3727 job 411, f1): a binary found only under
+  # ~/.cargo/bin is the one RUSTC_WRAPPER points at, so it must be the one probed too.
+  __bin=$(_gate_sccache_bin) || { printf 0; return; }
+  "$__bin" --show-stats 2>/dev/null | awk '
     /^Cache read errors/  { s += $NF }
     /^Cache write errors/ { s += $NF }
     /^Cache errors/       { s += $NF }
@@ -1196,6 +1340,334 @@ _sccache_health() {
     _SCCACHE_HEALTH=ok
   fi
   printf '%s' "$_SCCACHE_HEALTH"
+}
+
+# ---- sccache cache-size cap + occupancy (issue #3727) -----------------------
+# WHY THIS IS ON THE LINE AT ALL. `.agent-ami/profile.yaml` declared
+# SCCACHE_CACHE_SIZE and nothing ever persisted it, so the fleet's effective cap was
+# sccache's 10 GiB default for months and NO ARTIFACT SAID SO — the same shape as
+# #3414's `max-concurrency=N(pinned|default)`, and the same fix: put the number in
+# the pasted block. Two tokens, and BOTH REPORT MEASURED BYTES:
+#     sccache-cap=<bytes> | unmeasured(<why>) | na(sccache-not-in-use)
+#     sccache-used=<bytes>(<N>%) | unmeasured(<why>) | na(sccache-not-in-use)
+#
+# DELIBERATELY NOT A PROVENANCE CLASSIFIER (lead ruling req-3727-w4, option A). An
+# earlier form of this block appended a 7-state source suffix
+# (pinned/default/inherited/stale/invalid/invalid-stale/unattributed), reimplemented
+# sccache's value grammar to compute it, carried a probed default constant, and
+# emitted four remediation WARNs. All of that INTERPRETED the number rather than
+# reporting it, it is where ten review rounds landed, and it is removed. The
+# state-combination knowledge is preserved in the follow-up issue rather than in
+# code. What survives is the rule that made it worth having: NEVER CLAIM A CAP THAT
+# WAS NOT MEASURED.
+#
+# THAT ONE HONESTY IS LOAD-BEARING AND STAYS (it is a measurement, not a
+# classification — two states, measured or not). Measured: `sccache --show-stats`
+# NEVER STARTS A SERVER, and with no server running the CLIENT answers
+# `max_cache_size` FROM ITS OWN ENVIRONMENT. So a number is only a cap IN FORCE if a
+# running server produced it, and `cache_size: null` cannot tell the two apart (a
+# running server with an empty cache reports null too — measured). Attribution is
+# therefore a DIFFERENTIAL: read the cap twice, the second time with a sentinel
+# SCCACHE_CACHE_SIZE in the client's environment. A running server's answer does not
+# move; a client resolving its own env does. Unattributed => `unmeasured`, never a
+# byte count.
+#
+# Test hooks (self-test, issue #3727): AGENT_GATE_TEST_SCCACHE_MAX_BYTES /
+# AGENT_GATE_TEST_SCCACHE_USED_BYTES substitute the two readings and
+# AGENT_GATE_TEST_SCCACHE_ATTRIBUTED substitutes the differential's verdict, so every
+# rendering is reachable hermetically with no sccache on the box. A hook that is set
+# but not a plain unsigned integer is REFUSED (an `unmeasured(bad-test-hook)`), never
+# silently treated as absent — a typo in a fixture must not look like a real reading.
+_SCC_CAP_KIND=""     # bytes | unmeasured | na
+_SCC_CAP_BYTES=""
+_SCC_CAP_WHY=""
+_SCC_USED_KIND=""
+_SCC_USED_BYTES=""
+_SCC_USED_PCT=""
+_SCC_USED_WHY=""
+
+# _sccache_hook_uint <raw> <outvar>: read one test hook. Digits -> the value (rc 0);
+# anything else, INCLUDING empty, clears the outvar and returns 1 — so a fixture word
+# like `unmeasured` or `null` models an unreadable reading rather than a numeric 0.
+_sccache_hook_uint() {
+  local __raw="$1" __out="$2" __norm
+  case "$__raw" in
+    ''|*[!0-9]*) eval "$__out=" ; return 1 ;;
+  esac
+  # LEADING ZEROS ARE STRIPPED HERE, AT THE ONE INGRESS, because every downstream
+  # consumer reads these values with `$(( ))` and shell arithmetic treats a
+  # leading-zero literal as OCTAL: measured, `x=08; echo $(( x + 0 ))` aborts with
+  # `value too great for base`, which would kill summary generation outright rather
+  # than render a wrong number. `_scc_uint_fits_i64` cannot catch it — that guard is
+  # deliberately LEXICAL, so `08` passes it as a well-formed digit string.
+  # Normalised at the PARSER rather than by base-prefixing each arithmetic site: this
+  # is the only source that can produce a non-canonical digit string (sccache's own
+  # JSON numbers cannot carry a leading zero), so fixing it here removes the class
+  # instead of enumerating its consumers.
+  # Pure parameter expansion, no arithmetic — the arithmetic is what breaks.
+  __norm="${__raw#"${__raw%%[!0]*}"}"   # drop the leading run of zeros
+  [ -n "$__norm" ] || __norm=0          # an all-zeros value is a real zero, not empty
+  eval "$__out=\$__norm"
+  return 0
+}
+
+# _sccache_json_uint <json> <field> <outvar>: extract `"<field>":<digits>` from
+# sccache's own JSON. THREE-VALUED: 0 = one match (the value), 1 = no match, 2 = more
+# than one — because two matches mean the payload is not the shape this parser
+# assumes, and picking the first would be a guess. The leading double-quote in the
+# pattern is load-bearing: without it `max_cache_size` also matches inside a longer
+# key. Not a general JSON parser and does not pretend to be one: a null, absent or
+# duplicated field is a NAMED refusal, never a 0.
+_sccache_json_uint() {
+  local json="$1" field="$2" out="$3" hits="" n=0
+  hits=$(printf '%s\n' "$json" | grep -o "\"$field\":[0-9][0-9]*" 2>/dev/null) || true
+  [ -n "$hits" ] || return 1
+  n=$(printf '%s\n' "$hits" | grep -c '^' 2>/dev/null) || true
+  [ "$n" = 1 ] || return 2
+  hits=${hits##*:}
+  case "$hits" in ''|*[!0-9]*) return 1 ;; esac
+  eval "$out=\$hits"
+  return 0
+}
+
+_SCC_ATTRIBUTED=unknown   # yes | no | unknown — was a RUNNING server proven to answer?
+_SCC_SIZE_NULL=0          # sccache reported `"cache_size":null` (measured state, not a parse fault)
+
+# _SCC_MUL100_MAX: the largest integer that can be multiplied by 100 inside a signed
+# 64-bit shell arithmetic evaluation — 9223372036854775807 / 100. Above it the product
+# wraps NEGATIVE, which is what #3727 round 10 (f3) found in the percentage.
+_SCC_MUL100_MAX=92233720368547758
+
+# _scc_uint_fits_i64 <digits>: rc 0 when the unsigned decimal string is <= 2^63-1
+# (9223372036854775807 — the largest value signed 64-bit shell arithmetic can HOLD, while
+# sccache reports both readings as JSON UNSIGNED integers, so a larger one is representable
+# in the payload and not in `$(( ))`).
+#
+# THE CHECK IS LEXICAL BECAUSE ARITHMETIC ON THE VALUE IS EXACTLY WHAT IS BEING GUARDED
+# (roborev job 413, f2). A `[ "$v" -gt 9223372036854775807 ]` evaluates $v as a shell integer
+# first, so an out-of-range value has ALREADY wrapped negative by the time it is compared
+# and the comparison answers `no, it is smaller` — the guard would license the very
+# arithmetic it exists to refuse. So nothing here evaluates the digits: leading zeros are
+# stripped by string surgery, the MAGNITUDE is the string LENGTH, and the one ambiguous
+# length (19 digits, where 2^63-1 itself lives) is decided by splitting the string into a
+# 10-digit and a 9-digit half, each of which provably fits and can therefore be compared
+# arithmetically. `10#` is explicit so a half carrying leading zeros is never read as octal.
+# A non-digit input is rc 1 as well: no caller can produce one (both readings are validated
+# unsigned), and refusing is the fail-closed answer if one ever did.
+_scc_uint_fits_i64() {
+  local d="$1" hi lo
+  case "$d" in ''|*[!0-9]*) return 1 ;; esac
+  while :; do
+    case "$d" in 0?*) d="${d#0}" ;; *) break ;; esac
+  done
+  if [ "${#d}" -lt 19 ]; then
+    return 0
+  fi
+  if [ "${#d}" -gt 19 ]; then
+    return 1
+  fi
+  hi="${d%?????????}"
+  lo="${d#??????????}"
+  # 9223372036 | 854775807 are the two halves of 9223372036854775807 at that same split.
+  if [ "$(( 10#$hi ))" -lt 9223372036 ]; then
+    return 0
+  fi
+  if [ "$(( 10#$hi ))" -gt 9223372036 ]; then
+    return 1
+  fi
+  [ "$(( 10#$lo ))" -le 854775807 ]
+}
+
+# _sccache_pct <used> <cap>: floor(100 * used / cap) rendered as `<N>%` — EXACTLY, or the
+# named non-measurement `pct-inexact-overflow`. Caller guarantees cap > 0.
+#
+# THE PERCENTAGE IS EXACT OR IT IS NAMED, NEVER APPROXIMATED (roborev job 411, f2). The
+# previous overflow branch divided by `cap / 100`, whose own floor OVER-REPORTS occupancy:
+# measured at the tested 4 EiB cap with used = cap - 1 it rendered `100%` where the exact
+# value is 99%. This token's whole premise is measured bytes honestly reported, so an
+# over-reported ratio contradicts it — and the honest alternative already exists in this
+# slot (`cap-zero`, `pct-<why>`): name it rather than round it. NO third state and no
+# classifier is introduced.
+#
+# THE ARITHMETIC. Split used = whole * cap + rem (shell `/` and `%`, no reimplemented
+# division), so the answer is whole * 100 + floor(100 * rem / cap) with rem < cap. The
+# fractional term is then computed from whichever quantity is PROVABLY under the
+# multiplication bound:
+#   * rem <= _SCC_MUL100_MAX          -> rem * 100 / cap, directly.
+#   * else, with d = cap - rem        -> 100 - ceil(100 * d / cap), the same value read
+#     from the OTHER end (100*rem/cap = 100 - 100*d/cap), which is what makes the
+#     near-capacity case — the one that matters and the one the finding names — exact:
+#     d = 1 gives ceil(100/cap) = 1, hence 99%. The ceiling is taken with a remainder
+#     test rather than `(100*d + cap - 1) / cap`, whose numerator can itself overflow.
+#   * neither side under the bound (both rem and cap-rem above ~92 PiB, i.e. a cap over
+#     ~184 PiB filled somewhere in its middle) -> `pct-inexact-overflow`, because no
+#     exact answer is reachable in 64-bit shell arithmetic and an inexact one is what
+#     was just removed.
+# `whole` is bounded too: whole * 100 + 99 must not wrap, so a `whole` at or above the
+# bound is named rather than multiplied (reachable only for a cap of a handful of bytes).
+_sccache_pct() {
+  local used="$1" cap="$2" whole rem frac d t
+  # THE OPERANDS ARE RANGE-CHECKED BEFORE ANY ARITHMETIC (roborev job 413, f2). Both come
+  # from `sccache --show-stats --stats-format json`, whose byte counts are JSON UNSIGNED
+  # integers, and every `$(( ))` below is SIGNED 64-bit: a cap above 2^63-1 wraps NEGATIVE
+  # on its first use, so a 12 EiB cap holding 4 EiB rendered `-100%` — a number, in a token
+  # whose whole premise is measured bytes honestly reported. The pre-existing bounds guard
+  # intermediate products; this one guards the INPUTS, and it is lexical for the reason
+  # given on _scc_uint_fits_i64. Named with the state that already exists for "no exact
+  # answer is reachable in 64-bit shell arithmetic"; no new state is introduced.
+  if ! _scc_uint_fits_i64 "$used" || ! _scc_uint_fits_i64 "$cap"; then
+    printf 'pct-inexact-overflow'
+    return 0
+  fi
+  whole=$(( used / cap ))
+  rem=$(( used % cap ))
+  if [ "$whole" -ge "$_SCC_MUL100_MAX" ]; then
+    printf 'pct-inexact-overflow'
+    return 0
+  fi
+  if [ "$rem" -le "$_SCC_MUL100_MAX" ]; then
+    frac=$(( rem * 100 / cap ))
+  else
+    d=$(( cap - rem ))
+    if [ "$d" -gt "$_SCC_MUL100_MAX" ]; then
+      printf 'pct-inexact-overflow'
+      return 0
+    fi
+    t=$(( d * 100 / cap ))
+    [ "$(( d * 100 % cap ))" -eq 0 ] || t=$(( t + 1 ))
+    frac=$(( 100 - t ))
+  fi
+  printf '%d%%' "$(( whole * 100 + frac ))"
+}
+
+# _sccache_cap_probe: ONE reading of the running server per SUMMARY emit, into the
+# _SCC_* variables above. Called from accelerators_line's own body so an emit costs
+# one `sccache --show-stats` (plus the differential's second read) and not four; the
+# token renderers below never probe.
+_sccache_cap_probe() {
+  _SCC_CAP_KIND=""; _SCC_CAP_BYTES=""; _SCC_CAP_WHY=""
+  _SCC_USED_KIND=""; _SCC_USED_BYTES=""; _SCC_USED_PCT=""; _SCC_USED_WHY=""
+  _SCC_ATTRIBUTED=unknown; _SCC_SIZE_NULL=0
+
+  # sccache not in use on this box is a MEASURED state, not a failure to measure — and
+  # it is the same input `sccache-health` renders `na` for, read from the same place.
+  case "${AGENT_GATE_TEST_SCCACHE_STATE:-${ACCEL_SCCACHE:-absent}}" in
+    on) : ;;
+    *) _SCC_CAP_KIND=na; _SCC_USED_KIND=na; return 0 ;;
+  esac
+
+  local cap="" used="" why_cap="" why_used="" __bin=""
+  local hook_max="${AGENT_GATE_TEST_SCCACHE_MAX_BYTES:-}"
+  local hook_used="${AGENT_GATE_TEST_SCCACHE_USED_BYTES:-}"
+  if [ -n "$hook_max" ] || [ -n "$hook_used" ]; then
+    # With the cap forced, NO server is contacted, so the differential cannot run:
+    # attribution defaults to `yes` (the hook is standing in for a real server's
+    # answer) and the dedicated hook overrides it. An unrecognised value is `unknown`,
+    # never `yes`.
+    _SCC_ATTRIBUTED="${AGENT_GATE_TEST_SCCACHE_ATTRIBUTED:-yes}"
+    case "$_SCC_ATTRIBUTED" in yes|no|unknown) ;; *) _SCC_ATTRIBUTED=unknown ;; esac
+    _sccache_hook_uint "$hook_max"  cap  || why_cap=no-stats
+    if [ "$hook_used" = null ]; then
+      why_used=no-size; _SCC_SIZE_NULL=1
+    else
+      _sccache_hook_uint "$hook_used" used || why_used=no-stats
+    fi
+  elif ! __bin=$(_gate_sccache_bin); then
+    # Same resolution as the detection and the health probe — one helper, one answer.
+    why_cap=no-binary; why_used=no-binary
+  else
+    local json="" rc=0
+    # CAPTURE, not a pipe: a `sccache … | grep` discards sccache's own rc, so an
+    # unreachable server would be indistinguishable from an empty payload (#3400's
+    # second half, honoured literally).
+    json=$("$__bin" --show-stats --stats-format json 2>/dev/null) || rc=$?
+    if [ "$rc" != 0 ] || [ -z "$json" ]; then
+      why_cap=no-stats; why_used=no-stats
+    else
+      local jrc=0
+      _sccache_json_uint "$json" max_cache_size cap || jrc=$?
+      case "$jrc" in 1) why_cap=unparsed ;; 2) why_cap=not-unique ;; esac
+      jrc=0
+      _sccache_json_uint "$json" cache_size used || jrc=$?
+      case "$jrc" in 1) why_used=unparsed ;; 2) why_used=not-unique ;; esac
+      # A NULL size is its own measured state, not a parse failure: it is what a client
+      # with no running server reports (and what a backend that cannot report a size
+      # reports). Matched on the literal, from the captured payload. It says NOTHING
+      # about the cap — a RUNNING server with an EMPTY cache reports null too
+      # (measured), so it may not move the cap's own verdict.
+      if [ -z "$used" ]; then
+        case "$json" in *'"cache_size":null'*) why_used=no-size; _SCC_SIZE_NULL=1 ;; esac
+      fi
+      # THE ATTRIBUTION DIFFERENTIAL. The sentinel's bytes cannot equal the first
+      # reading: 7K = 7168, and where the first reading IS 7168 the sentinel moves to
+      # 9K — without that guard a box whose own value is 7K with no server would
+      # produce two equal readings and be reported as server-attributed, the one input
+      # that inverts this test.
+      if [ -n "$cap" ]; then
+        local sent=7K sent_bytes=7168 json2="" rc2=0 cap2=""
+        [ "$cap" = "$sent_bytes" ] && { sent=9K; sent_bytes=9216; }
+        json2=$(env SCCACHE_CACHE_SIZE="$sent" "$__bin" --show-stats --stats-format json 2>/dev/null) || rc2=$?
+        if [ "$rc2" = 0 ] && [ -n "$json2" ] && _sccache_json_uint "$json2" max_cache_size cap2; then
+          if [ "$cap2" = "$cap" ]; then _SCC_ATTRIBUTED=yes; else _SCC_ATTRIBUTED=no; fi
+        else
+          _SCC_ATTRIBUTED=unknown
+        fi
+      fi
+    fi
+  fi
+
+  # THE CAP. A number is reported ONLY when a running server was proven to answer it.
+  # `no` and `unknown` land in the SAME place, and that is the whole rule: only an
+  # affirmative yes licenses a byte count, so an absent server can never be read as a
+  # cap in force. The two are distinguished in the WHY, because the operator actions
+  # differ (start/leave alone vs investigate), not in the verdict.
+  if [ -n "$cap" ] && [ "$_SCC_ATTRIBUTED" = yes ]; then
+    _SCC_CAP_KIND=bytes; _SCC_CAP_BYTES="$cap"
+  else
+    _SCC_CAP_KIND=unmeasured
+    if [ -n "$why_cap" ]; then
+      _SCC_CAP_WHY="$why_cap"
+    elif [ "$_SCC_ATTRIBUTED" = no ]; then
+      _SCC_CAP_WHY=no-running-server
+    else
+      _SCC_CAP_WHY=unattributed
+    fi
+  fi
+
+  # THE OCCUPANCY, on its own axis: a null size leaves the cap alone and shows up here.
+  if [ -n "$used" ]; then
+    _SCC_USED_KIND=bytes; _SCC_USED_BYTES="$used"
+    if [ "$_SCC_CAP_KIND" = bytes ] && [ "$_SCC_CAP_BYTES" != 0 ]; then
+      _SCC_USED_PCT=$(_sccache_pct "$used" "$_SCC_CAP_BYTES")
+    elif [ "$_SCC_CAP_KIND" = bytes ]; then
+      # A cap of 0 bytes is LEGAL and measured (`SCCACHE_CACHE_SIZE=0G`), and a
+      # percentage of it is undefined: named, never divided, and never a bare 0%.
+      _SCC_USED_PCT=cap-zero
+    else
+      _SCC_USED_PCT="pct-${_SCC_CAP_WHY:-unmeasured}"
+    fi
+  else
+    _SCC_USED_KIND=unmeasured; _SCC_USED_WHY="${why_used:-no-stats}"
+  fi
+  return 0
+}
+
+# _sccache_cap_token / _sccache_used_token: the two renderings. Both read the
+# variables _sccache_cap_probe set — they never probe — and neither can render blank
+# or a bare 0: every arm carries a parenthesised qualifier.
+_sccache_cap_token() {
+  case "${_SCC_CAP_KIND:-}" in
+    na)    printf 'sccache-cap=na(sccache-not-in-use)' ;;
+    bytes) printf 'sccache-cap=%s' "$_SCC_CAP_BYTES" ;;
+    *)     printf 'sccache-cap=unmeasured(%s)' "${_SCC_CAP_WHY:-no-stats}" ;;
+  esac
+}
+_sccache_used_token() {
+  case "${_SCC_USED_KIND:-}" in
+    na)    printf 'sccache-used=na(sccache-not-in-use)' ;;
+    bytes) printf 'sccache-used=%s(%s)' "$_SCC_USED_BYTES" "$_SCC_USED_PCT" ;;
+    *)     printf 'sccache-used=unmeasured(%s)' "${_SCC_USED_WHY:-no-stats}" ;;
+  esac
 }
 
 # ---- mold link-accelerator state (issue #2859) ------------------------------
@@ -1350,8 +1822,14 @@ _perf_accel_token() { local v; _perf_accel_token_into v; printf '%s' "$v"; }
 
 # accelerators_line: the machine-checkable one-liner stamped into every SUMMARY
 # block (full, lite, and the emission selftest). Values: on|absent|off|serial.
-# See the ACCEL_* detection above (#1848). The trailing sccache-health token
-# (na|ok|warn, issue #2641) surfaces sccache's own corruption counters. On Linux
+# See the ACCEL_* detection above (#1848). The sccache-health token
+# (na|ok|warn, issue #2641) surfaces sccache's own corruption counters — ERROR COUNTERS ONLY,
+# never capacity. The two #3727 tokens after it carry the capacity facts:
+# ` sccache-cap=<bytes>` and ` sccache-used=<bytes>(<N>%)` — MEASURED bytes, with no provenance
+# classifier (lead ruling req-3727-w4: reporting stays, interpreting goes),
+# each with an explicit `unmeasured(<why>)`/`na(sccache-not-in-use)` rendering so a positive
+# reading is always an affirmative measurement. They sit BEFORE the optional Linux-only groups so
+# `perf=` remains the last token on a Linux line. On Linux
 # a ` mold=linked|overridden|present-unconfigured|absent` token follows (issue
 # #2859), then ` perf=ok|paranoid-<N>|kptr-restricted|absent|unknown` (issue
 # #3249); Darwin output is unchanged.
@@ -1361,9 +1839,14 @@ _perf_accel_token() { local v; _perf_accel_token_into v; printf '%s' "$v"; }
 accelerators_line() {
   local perf_tok=""
   _perf_accel_token_into perf_tok
-  printf 'accelerators: sccache=%s nextest=%s lanes=%s sccache-health=%s%s%s' \
+  # ONE probe, in THIS function's own body: both #3727 tokens read the variables it
+  # sets, so a summary emit costs one `sccache --show-stats` and not two (see the
+  # #3727 block above).
+  _sccache_cap_probe
+  printf 'accelerators: sccache=%s nextest=%s lanes=%s sccache-health=%s %s %s%s%s' \
     "${ACCEL_SCCACHE:-unknown}" "${ACCEL_NEXTEST:-unknown}" "${ACCEL_LANES:-unknown}" \
-    "$(_sccache_health)" "$(_mold_accel_token)" "$perf_tok"
+    "$(_sccache_health)" "$(_sccache_cap_token)" "$(_sccache_used_token)" \
+    "$(_mold_accel_token)" "$perf_tok"
 }
 
 # ---- Per-gate core budget (issue #2640) -------------------------------------
@@ -6214,7 +6697,7 @@ _python_build_verify_venv() {
   return 3
 }
 
-COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan python-bindings node-bindings binding-rust-tests delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface dep-duplicates tooling-tests minimal-build all-features-check smoke)
+COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan python-bindings node-bindings binding-rust-tests delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface dep-duplicates features-load-bearing tooling-tests minimal-build all-features-check smoke)
 
 # _component_lane <name> (issues #1737, #2657): SINGLE SOURCE OF TRUTH for the
 # MAIN-vs-SIDE lane split. Defined early (before the arg-parse dispatch) so the
@@ -7420,11 +7903,1566 @@ _disk_exhaustion_line() {
 }
 # ==== END disk-exhaustion attribution (#3800) ====
 
-LOG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate.XXXXXX")
-# #3800: the START-of-run free-space reading, taken the moment LOG_DIR exists so the
-# terminal `disk-exhaustion:` line can report a start->emit DELTA rather than an
-# instantaneous emit-time read (peers free space between the failure and the emit).
+# _gate_cntrl_strip <value> -> <value> with every C0 control and DEL removed, under a
+# PINNED `LC_ALL=C` (`[:cntrl:]` is evaluated in the CURRENT locale, so the locale is pinned
+# rather than assumed).
+#
+# THE ONE DEFINITION of "control character" for SUMMARY-block text and for the LOG_DIR
+# creation-site refusal below (#3637, roborev job 175 finding 1). TWO consumers, ONE
+# definition, deliberately:
+#   * `_summary_block_value` — THE boundary every free-text value rendered into a SUMMARY
+#     block passes through — STRIPS with it;
+#   * the LOG_DIR creation site REFUSES with it: a `$TMPDIR` whose stripped form differs
+#     from itself carries a control character, and the run is refused before `mktemp -d`.
+# A second spelling of the class would let the refusal and the strip disagree about what a
+# control character IS, which is the per-site drift #3312 rules against (one channel, one
+# boundary, never an escape list to keep complete).
+#
+# NOT the same predicate as `_gate_has_control_char` above, and the difference is deliberate:
+# that one is the `CQLITE_SCHEMAS_ROOT` override's Unicode-Cc predicate and also rejects C1
+# (U+0080-U+009F), because the node binding's `/\p{Cc}/u` does and the gate must not certify
+# a root the binding will refuse. The property HERE is "cannot forge a line inside a block,
+# and cannot smuggle ANSI into text pasted into a PR comment", which is a C0+DEL property;
+# the C1 residual is DECLARED not covered, exactly as `_summary_block_value`'s own block
+# records it.
+_gate_cntrl_strip() {
+  printf '%s' "${1-}" | LC_ALL=C tr -d '[:cntrl:]'
+}
+
+# ===========================================================================
+# #3637: PER-RUN LOG_DIR LIFECYCLE (creation, startup sweep, disposition, removal)
+#
+# The gate creates one `mktemp -d "$TMPDIR/agent-gate.XXXXXX"` per invocation —
+# full, --lite, --delta, --only, and every NESTED gate the self-tests spawn — and
+# used to remove NONE of them: 5,697 measured on one lane box, ~61,000 fleet-wide
+# in under three days. Inodes are the smaller half. The larger half is that such a
+# population is what made an `ls -t`-style "find the newest run dir" habit
+# routinely land on a PEER LANE's directory: on PR #3616 a closer read 33 of 37
+# components PASS out of another PR's run dir and nearly merged on that verdict.
+# (The reader-side rule that follows from it — a run dir is bound to a gate ONLY by
+# the `run-id:` line in that gate's own summary file, never by recency — is recorded
+# in docs/development/gate-ops.md and CLAUDE.md.)
+#
+# The PARENT is recorded in one variable and the directory is created UNDER IT, so
+# the removal guard compares against exactly the value the creation used and never
+# re-derives a path at cleanup time. Trailing slashes are normalised first so
+# `${LOG_DIR%/*}` and this variable are directly comparable ($TMPDIR is respected;
+# `/tmp` is never hard-coded).
+GATE_LOGDIR_PARENT="${TMPDIR:-/tmp}"
+# ABSOLUTISED HERE, at the ONE place the relativity can enter (#3637, roborev job 67
+# finding 1). A RELATIVE $TMPDIR gave a relative parent, hence a relative LOG_DIR and
+# GATE_LOGDIR_CREATED — while the nested private summary path is absolutised later
+# (#1175). `_logdir_artifact_inside` then compared a RELATIVE prefix against an
+# ABSOLUTE path, concluded the summary was not inside the log directory, and a nested
+# terminal run DELETED ITS OWN PARENT-READABLE VERDICT: the exact loss AC6 forbids,
+# inside the carve-out that exists to prevent it.
+#
+# Normalised at the CREATION SITE and nowhere else. Absolutising at each comparison
+# would be a list to keep complete, and the next comparison added forgets — so every
+# later consumer (the containment check, the removal guard's parent equality, the
+# sweep's find root, the `logs:` field, the disposition artifact) is like-for-like by
+# construction, whatever $TMPDIR was spelled as.
+#
+# Purely LEXICAL: `$PWD` is prepended, and no realpath/symlink resolution is done.
+# That is deliberate — resolving one operand and not the other is how a containment
+# check breaks on a symlinked temp root (/tmp -> /private/tmp), and the property
+# needed here is that the two strings share a form, not that either is canonical.
+# The cwd is already REPO_ROOT at this point, which is also what `mktemp -d` below
+# would have resolved a relative template against, so the path names the same
+# directory either way.
+case "$GATE_LOGDIR_PARENT" in
+  /*) ;;
+  *)  GATE_LOGDIR_PARENT="$PWD/$GATE_LOGDIR_PARENT" ;;
+esac
+while [ "$GATE_LOGDIR_PARENT" != "/" ] && [ "${GATE_LOGDIR_PARENT%/}" != "$GATE_LOGDIR_PARENT" ]; do
+  GATE_LOGDIR_PARENT="${GATE_LOGDIR_PARENT%/}"
+done
+
+# Disposition of THIS run's directory. The default is RETAIN, and that is the
+# fail-safe direction: a run that never reaches a terminal verdict (SIGKILL, a
+# cgroup teardown, the `RESULT: INCOMPLETE` sentinel path) is exactly the
+# post-mortem case, so its evidence is kept. Only a terminal emit may flip it.
+GATE_LOGDIR_REMOVE=0
+GATE_LOGDIR_DISPOSITION="RETAINED: no terminal verdict (post-mortem)"
+# The INTENT to remove and the CLEARANCE to act on it are TWO DIFFERENT FACTS, and
+# keeping them apart is what stops a removal happening on evidence that was never
+# published (#3637, roborev job 61). `_logdir_decide` runs as the FIRST action of the
+# terminal emit, so the block it is about to assemble can DECLARE what happens to this
+# directory — but at that instant the summary is not on disk yet. So it records the
+# INTENT only; GATE_LOGDIR_REMOVE, the flag the at-exit cleanup reads, stays 0 until
+# `_logdir_clear_removal` runs, and that happens ONLY once the caller-known summary
+# file has been verified to hold THIS run's complete block. Every exit between those
+# two points RETAINS.
+GATE_LOGDIR_REMOVE_INTENT=0
+# Non-empty iff a disposition this run ALREADY PUBLISHED (in the SUMMARY block, or in
+# a partially-written summary file) claimed a removal that then did not happen. A
+# published line cannot be retracted, so the surviving bundle's own artifact carries
+# the correction. Written only by _logdir_force_retain, read only by
+# _logdir_publish_disposition.
+GATE_LOGDIR_SUPERSEDED_CLAIM=""
+# Non-empty iff a component that RAN has already established that its own bundle is
+# load-bearing whatever this run's verdict turns out to be (#3637, roborev job 173
+# finding 1). Written only by _logdir_force_retain — the ONE force-retain mechanism —
+# and read by _logdir_decide, because the DECISION happens LATER than such a component:
+# `run_file_size` executes before every terminal emit, so a pin it set would otherwise be
+# overwritten by the verdict arm at emit time and the bundle deleted anyway. A pin is
+# always the RETAINING direction, so honouring it can never destroy anything.
+GATE_LOGDIR_RETAIN_PIN=""
+# 0 until SOMETHING has decided this run's disposition on the record — the terminal
+# emit (_logdir_decide) or an emit path that pins retention (_logdir_force_retain).
+# Read ONLY by the at-exit cleanup, which supplies the early-exit disposition when it
+# is still 0. That is the whole "a new early exit cannot silently leak" mechanism:
+# the fallback lives in the ONE at-exit handler every exit already runs, so no exit
+# path has to remember to call anything (#3637).
+GATE_LOGDIR_DECIDED=0
+# 0 until the at-exit cleanup has run to completion once. It publishes the
+# in-bundle disposition artifact and performs the removal, and neither is safe to
+# repeat: a second pass over a FAILED removal would write a "REMOVED" reason into a
+# bundle that survived.
+GATE_LOGDIR_FINALIZED=0
+# Always renderable: a SUMMARY emitted before the sweep ran still carries a line
+# that states its own state rather than a blank.
+GATE_LOGDIR_SWEEP_LINE="logdir-sweep: UNMEASURED (sweep did not run)"
+
+# ---------------------------------------------------------------------------
+# THE OPT-OUT: its ENGAGEMENT rule and its DISCLOSURE, in two helpers (#3637,
+# roborev job 174 finding A).
+#
+# THE DEFECT. The engagement test was `[ "${AGENT_GATE_KEEP_LOGS:-0}" != 0 ]` — ANY
+# non-`0` value retains — while all three emitted strings printed the LITERAL
+# `AGENT_GATE_KEEP_LOGS=1`. So `AGENT_GATE_KEEP_LOGS=no` retained AND the block
+# asserted a value the operator never set: a confidently-wrong claim in an artifact
+# people paste into PRs.
+#
+# THE FIX IS THE DISCLOSURE, NOT THE ENGAGEMENT, and that is deliberate — the
+# `CQLITE_ALLOW_FILE_GROWTH` precedent (its `OPT-OUT` token is emitted only for
+# exactly `1`, so a typo cannot waive the ratchet) DOES NOT TRANSFER here, because the
+# two permissive branches point in OPPOSITE harm directions:
+#   * CQLITE_ALLOW_FILE_GROWTH's permissive branch WAIVES A CHECK. A typo that engaged
+#     it would silently switch off a ratchet, so it must demand exactly `1`.
+#   * AGENT_GATE_KEEP_LOGS's permissive branch KEEPS DATA. A typo that FAILED to engage
+#     it would DESTROY the bundle the operator was trying to keep — the post-mortem
+#     evidence, gone for good. Demanding exactly `1` here would trade a false
+#     disclosure (recoverable: the value is right there to re-read) for data loss (not
+#     recoverable at all), which is the worse of the two.
+# So engagement stays LENIENT and the LINE is made true instead.
+#
+# EMPTY IS NOT ENGAGED, and that is STATED rather than inherited: `${VAR:-0}` maps
+# UNSET to `0`, and `:-` treats SET-BUT-EMPTY identically, so `AGENT_GATE_KEEP_LOGS=`
+# reads as not engaged. The `''` arm below is therefore redundant by construction and
+# kept anyway, because the rule a reader needs is "empty means NOT engaged" and a rule
+# that survives only while someone remembers `:-`'s empty-vs-unset behaviour is one the
+# next edit can lose. An empty value carries no intent to keep anything — it is the
+# shape a shell leaves behind when an export is cleared.
+_logdir_keep_logs_engaged() {
+  case "${AGENT_GATE_KEEP_LOGS:-0}" in
+    ''|0) return 1 ;;
+    *)    return 0 ;;
+  esac
+}
+
+# _logdir_keep_logs_claim: the ONE renderer of the engaged opt-out's disclosure, so the
+# three sites that state it (the sweep's SKIPPED line, `_logdir_decide`'s retention and
+# `_logdir_decide_early_exit`'s) cannot drift apart. Called ONLY from the engaged
+# branch, where the value is by construction neither empty nor `0`.
+#
+# It prints the OBSERVED value, so the line states what was actually set. A value that
+# is not `1` is additionally ANNOUNCED as unconventional-but-honoured, because an
+# operator who typed `=no` needs BOTH facts from the line already in front of them:
+# their value was not the documented one, AND it was honoured anyway (their bundle is
+# here). A bare `AGENT_GATE_KEEP_LOGS=no` would leave them guessing which.
+#
+# THE VALUE IS ENVIRONMENT-CONTROLLED DATA, and it reaches the SUMMARY block through
+# `GATE_LOGDIR_DISPOSITION` / `GATE_LOGDIR_SWEEP_LINE` — both of which `_logdir_lines`
+# already renders through `_summary_block_value`, THE one boundary (#3637, roborev job
+# 173 finding 4): strip C0+DEL under LC_ALL=C, and WITHHOLD — never rewrite — a value
+# carrying the completion probe's `RESULT:` token. Nothing is escaped here: there is
+# exactly one boundary and this is not it. `_summary_block_value` is also defined ~1300
+# lines BELOW this point while `_logdir_sweep` runs above it, so sanitising at this
+# setter is not even available — which is precisely why the boundary lives at the emit
+# site rather than at each writer.
+#
+# The bundle's own `logdir-disposition.txt` keeps the value VERBATIM, as it keeps every
+# other field: that artifact is not a SUMMARY block, carries no verdict grammar, and
+# ALREADY records environment-controlled data verbatim on its own `logs:` and `run-id:`
+# lines (both derive from `$TMPDIR`). So this adds no new property to it.
+_logdir_keep_logs_claim() {
+  local v="${AGENT_GATE_KEEP_LOGS-}"
+  if [ "$v" = 1 ]; then
+    printf 'AGENT_GATE_KEEP_LOGS=%s' "$v"
+  else
+    printf 'AGENT_GATE_KEEP_LOGS=%s (SET BUT NOT 1 — unconventional value HONOURED: this opt-out KEEPS data, so any value that is neither 0 nor empty retains rather than destroying the bundle you asked to keep)' "$v"
+  fi
+}
+
+# Age floor for the startup sweep, in days. 7 is deliberately two orders of
+# magnitude clear of any LIVE gate: the longest run observed on this fleet is a
+# ~1h31m queued full gate (#3414), so the sweep can never take a running peer's
+# directory out from under it.
+#
+# The cap bounds the candidates one invocation EXAMINES — not the removals it attempts
+# (#3637, roborev job 116) — so a sweep over a five-figure population of directories
+# that can NEVER be removed (every pre-marker directory reads cannot-tell for ever)
+# still costs at most $GATE_LOGDIR_SWEEP_CAP probes and cannot stall a --lite round;
+# the remainder is examined by later runs, which start at a different offset.
+GATE_LOGDIR_SWEEP_AGE_DAYS=7
+GATE_LOGDIR_SWEEP_CAP=1000
+
+# The basename of the per-run OWNER MARKER every run writes INSIDE its own log
+# directory, naming the process that owns it (#3637, roborev job 70 medium 1).
+#
+# WHY IT EXISTS: the sweep below used to treat AGE as proof of abandonment, and age is
+# proof of nothing — a LIVE gate's directory could in principle be taken out from
+# under it by a peer's startup sweep. The gate already beats
+# `<summary-file>.heartbeat`, but that file lives BESIDE the summary file, and a
+# sweeper holding only the DIRECTORY cannot locate it, so the liveness signal has to
+# live where the sweeper can actually read it: inside the bundle.
+#
+# No run-id field: RUN_ID *is* the log-directory path (`RUN_ID="$LOG_DIR"`), so the
+# directory the sweeper holds already carries it, and a marker written this early —
+# the creation site is ~650 lines above the RUN_ID assignment — could only record a
+# placeholder.
+GATE_LOGDIR_OWNER_BASENAME='gate-owner.txt'
+# Set at the creation site, to "$LOG_DIR/$GATE_LOGDIR_OWNER_BASENAME". Empty until
+# then, and every consumer is written to tolerate that.
+GATE_LOGDIR_OWNER_FILE=""
+# Memoised machine token and the probe's out-parameters. These functions communicate
+# through globals rather than stdout ON PURPOSE: a `$(...)` per candidate would fork
+# once per aged directory, and these boxes have carried ~35,000 of them, so the probe
+# has to be FORK-FREE on the path the sweep drives it down.
+GATE_LOGDIR_MACHINE_TOKEN=""
+GATE_LOGDIR_MACHINE_TOKEN_MEASURED=0
+GATE_LOGDIR_PID_START_TOKEN=""
+GATE_LOGDIR_OWNER_STATE="cannot-tell"
+
+# _logdir_machine_token: set GATE_LOGDIR_MACHINE_TOKEN to the identity of the
+# MACHINE-AND-BOOT-AND-PID-NAMESPACE this process runs in —
+# `boot=<uuid>;pidns=<inode>` — or to the empty string when either half cannot be
+# read. Memoised: the answer cannot change within one process.
+#
+# A pid is only meaningful inside ONE pid namespace, so the marker records this token
+# and the probe requires an EXACT match: a marker written on any other machine, by a
+# PREVIOUS BOOT of this one (whose pids have all been handed out again), or IN ANOTHER
+# PID NAMESPACE, is `cannot-tell` and never `verified-dead`.
+#
+# ALL THREE AXES ARE REQUIRED, AND AN UNREADABLE ONE IS `cannot-tell` — NOT A WEAKER
+# TOKEN (#3637, roborev job 111 medium 1). Two containers can share a boot id AND a
+# temp directory while having SEPARATE PID NAMESPACES, so `boot=` alone made a LIVE
+# peer's pid read as absent (its pid does not exist in our namespace) and its aged
+# bundle `verified-dead` — deleting exactly the live peer's evidence this whole
+# liveness gate exists to protect. The pid namespace is observable on Linux as the
+# nsfs identity behind /proc/self/ns/pid.
+#
+# The `host=<name>` fallback is GONE for the same reason, in the same direction: a
+# hostname cannot be established as unique from inside a process (two boxes routinely
+# share one — the fact that got #3473's death claim descoped) and it does not change
+# across a reboot, so it can never carry pid identity. Nothing is lost on a host that
+# published a boot id; a host that publishes neither now sweeps NOTHING, which is a
+# leaked inode rather than a destroyed bundle — the fail-safe direction, and the only
+# one this probe is allowed to take.
+_logdir_machine_token() {
+  local v boot ns
+  [ "$GATE_LOGDIR_MACHINE_TOKEN_MEASURED" = 1 ] && return 0
+  GATE_LOGDIR_MACHINE_TOKEN_MEASURED=1
+  GATE_LOGDIR_MACHINE_TOKEN=""
+  boot=""
+  if [ -r /proc/sys/kernel/random/boot_id ]; then
+    v=""
+    IFS= read -r v < /proc/sys/kernel/random/boot_id 2>/dev/null
+    case "$v" in
+      ''|*[!0-9a-fA-F-]*) ;;
+      *) boot="$v" ;;
+    esac
+  fi
+  [ -n "$boot" ] || return 0
+  # ONE fork for the whole process (memoised), never one per swept candidate: bash has
+  # no readlink builtin, and `stat` is GNU-vs-BSD incompatible. An unreadable or
+  # unrecognised link is the empty token, i.e. `cannot-tell` for every candidate.
+  command -v readlink >/dev/null 2>&1 || return 0
+  ns=$(readlink /proc/self/ns/pid 2>/dev/null) || return 0
+  case "$ns" in
+    'pid:['*']') ns=${ns#pid:[}; ns=${ns%]} ;;
+    *) return 0 ;;
+  esac
+  case "$ns" in ''|*[!0-9]*) return 0 ;; esac
+  GATE_LOGDIR_MACHINE_TOKEN="boot=$boot;pidns=$ns"
+  return 0
+}
+
+# _logdir_pid_start_token <pid>: set GATE_LOGDIR_PID_START_TOKEN to a token that
+# CHANGES WHEN <pid> IS REUSED, so a bare pid is never treated as identity. Empty when
+# it cannot be read on this platform — for which the caller's answer is `cannot-tell`,
+# never `verified-dead`.
+#
+# The token carries its own KIND (`proc-starttime=` / `ps-lstart=`) because two kinds
+# are never comparable: a marker written where /proc exists and probed where it does
+# not must read `cannot-tell` rather than "the values differ, therefore dead".
+_logdir_pid_start_token() {
+  local pid="${1:-}" raw rest tok
+  GATE_LOGDIR_PID_START_TOKEN=""
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  if [ -r "/proc/$pid/stat" ]; then
+    raw=""
+    IFS= read -r raw < "/proc/$pid/stat" 2>/dev/null
+    [ -n "$raw" ] || return 0
+    # Field 2 (`comm`) is parenthesised and may itself contain spaces and parens, so
+    # the only safe split is after the LAST ')' — the documented proc(5) idiom. What
+    # remains starts at field 3, so starttime (field 22) is the 20th word.
+    rest=${raw##*)}
+    # shellcheck disable=SC2086  # deliberate splitting of a digits-and-spaces record
+    set -- $rest
+    tok="${20:-}"
+    case "$tok" in ''|*[!0-9]*) return 0 ;; esac
+    GATE_LOGDIR_PID_START_TOKEN="proc-starttime=$tok"
+    return 0
+  fi
+  command -v ps >/dev/null 2>&1 || return 0
+  raw=$(ps -o lstart= -p "$pid" 2>/dev/null) || return 0
+  tok=$(printf '%s' "$raw" | tr -s ' \t' ' ' 2>/dev/null) || return 0
+  tok=${tok# }; tok=${tok% }
+  case "$tok" in ''|*[!A-Za-z0-9:\ ]*) return 0 ;; esac
+  GATE_LOGDIR_PID_START_TOKEN="ps-lstart=$tok"
+  return 0
+}
+
+# _logdir_pid_state <pid> -> rc 0 the pid is PRESENT, rc 1 it is VERIFIED ABSENT,
+# rc 2 could not tell. THREE-VALUED for the standing reason (#1699's find-tristate
+# rule): a two-valued predicate has to collapse "cannot tell" onto one answer and
+# always picks the permissive one.
+#
+# `kill -0` is deliberately NOT used: it returns rc 1 for BOTH "no such process" and
+# EPERM, so on any box running more than one uid it reports a live process dead. The
+# existence of /proc/<pid> needs no privilege on a default Linux /proc, and where
+# `hidepid` hides another user's processes the sticky bit on a shared temp parent means
+# we could not have removed that directory anyway.
+_logdir_pid_state() {
+  local pid="${1:-}" out rc
+  case "$pid" in ''|*[!0-9]*) return 2 ;; esac
+  if [ -d /proc/self ]; then
+    [ -e "/proc/$pid" ] && return 0
+    return 1
+  fi
+  command -v ps >/dev/null 2>&1 || return 2
+  out=$(ps -p "$pid" -o pid= 2>/dev/null); rc=$?
+  [ -n "$out" ] && return 0
+  [ "$rc" -ne 0 ] && return 1
+  return 2
+}
+
+# _logdir_owner_state <dir>: set GATE_LOGDIR_OWNER_STATE to exactly one of
+#   live           the owning process is still running
+#   verified-dead  the owning process is provably gone, in THIS pid namespace
+#   cannot-tell    anything else
+#
+# THREE-VALUED, and `cannot-tell` DOES NOT TAKE THE PERMISSIVE BRANCH: the sweep
+# removes on `verified-dead` alone. That is the standing rule against deriving a pass
+# from the absence of a bad signal, and the direction of the cost decides it — an
+# unswept directory is one leaked inode the next sweep may still take, while a
+# wrongly-swept one is a live peer's post-mortem bundle destroyed. So a marker that is
+# missing (every directory created before this marker existed), unreadable, malformed,
+# a symlink, from another machine or boot, or whose pid identity cannot be established
+# on this platform, is KEPT.
+_logdir_owner_state() {
+  local d="${1:-}" f line key val m_pid="" m_machine="" m_start="" n=0 rc
+  GATE_LOGDIR_OWNER_STATE="cannot-tell"
+  # The SUBJECT the state below is about, published so a later removal can confirm it
+  # is still acting on the same one (see _logdir_ident_recheck). Empty for every
+  # `cannot-tell` answer, because there is then no established identity to re-confirm.
+  GATE_LOGDIR_OWNER_IDENT=""
+  [ -n "$d" ] || return 0
+  [ -n "$GATE_LOGDIR_OWNER_BASENAME" ] || return 0
+  f="$d/$GATE_LOGDIR_OWNER_BASENAME"
+  # A symlink is not a marker: it can point anywhere, and this file's whole job is to
+  # be the run's own record of itself.
+  [ -L "$f" ] && return 0
+  [ -f "$f" ] && [ -r "$f" ] || return 0
+  # Bounded read, fork-free: the marker this gate writes is four short lines.
+  while IFS= read -r line; do
+    n=$((n + 1))
+    [ "$n" -gt 20 ] && break
+    case "$line" in *=*) ;; *) continue ;; esac
+    key=${line%%=*}; val=${line#*=}
+    case "$key" in
+      pid) m_pid="$val" ;;
+      machine) m_machine="$val" ;;
+      pid-start) m_start="$val" ;;
+    esac
+  done < "$f"
+  [ -n "$m_pid" ] && [ -n "$m_machine" ] && [ -n "$m_start" ] || return 0
+  case "$m_pid" in *[!0-9]*) return 0 ;; esac
+  _logdir_machine_token
+  [ -n "$GATE_LOGDIR_MACHINE_TOKEN" ] || return 0
+  [ "$GATE_LOGDIR_MACHINE_TOKEN" = "$m_machine" ] || return 0
+  # From here every exit carries a DEFINITE state (live or verified-dead), so the
+  # identity that state is about is established and can be published. It is the
+  # marker's own three fields, verbatim: pid alone is not identity (it is reused), and
+  # pid+start+machine is precisely what the verdict below is derived from.
+  GATE_LOGDIR_OWNER_IDENT="pid=$m_pid;machine=$m_machine;pid-start=$m_start"
+  _logdir_pid_state "$m_pid"; rc=$?
+  if [ "$rc" -eq 1 ]; then
+    # No process holds that pid in this pid namespace, so the recorded owner is gone
+    # whatever its start time was. Sound only BECAUSE the machine-and-boot token
+    # matched above: without it this would be a statement about someone else's pids.
+    GATE_LOGDIR_OWNER_STATE="verified-dead"
+    return 0
+  fi
+  [ "$rc" -eq 0 ] || return 0
+  # The pid is taken. It is the OWNER only if the start token still matches; a
+  # different token means the pid was REUSED, i.e. the owner is gone.
+  _logdir_pid_start_token "$m_pid"
+  [ -n "$GATE_LOGDIR_PID_START_TOKEN" ] || return 0
+  [ "${GATE_LOGDIR_PID_START_TOKEN%%=*}" = "${m_start%%=*}" ] || return 0
+  if [ "$GATE_LOGDIR_PID_START_TOKEN" = "$m_start" ]; then
+    GATE_LOGDIR_OWNER_STATE="live"
+  else
+    GATE_LOGDIR_OWNER_STATE="verified-dead"
+  fi
+  return 0
+}
+
+# _logdir_write_owner: record this run's owner marker inside its own log directory.
+#
+# BEST-EFFORT BY DESIGN: an unwritable marker can never fail the gate. Its only
+# consequence is that this directory reads `cannot-tell` to every future sweep and is
+# therefore KEPT — the fail-safe direction, a leaked directory rather than a destroyed
+# bundle.
+_logdir_write_owner() {
+  local start_tok machine_tok
+  [ -n "${GATE_LOGDIR_OWNER_FILE:-}" ] || return 0
+  [ -d "${GATE_LOGDIR_CREATED:-}" ] || return 0
+  _logdir_machine_token
+  machine_tok="$GATE_LOGDIR_MACHINE_TOKEN"
+  _logdir_pid_start_token "$$"
+  start_tok="$GATE_LOGDIR_PID_START_TOKEN"
+  # `unknown` is recorded rather than omitted: a probe comparing against it can never
+  # match, so an unmeasurable field yields `cannot-tell` by construction instead of
+  # being read as a match by omission.
+  {
+    printf 'pid=%s\n' "$$"
+    printf 'machine=%s\n' "${machine_tok:-unknown}"
+    printf 'pid-start=%s\n' "${start_tok:-unknown}"
+  } >"$GATE_LOGDIR_OWNER_FILE" 2>/dev/null
+  return 0
+}
+
+# _logdir_ident_recheck <dir> <expected-ident>: set GATE_LOGDIR_RECHECK_STATE to
+#   confirmed    <dir> STILL reads `verified-dead` AND still carries the very identity
+#                the earlier probe judged
+#   changed      it reads some OTHER definite state, or a DIFFERENT identity — this
+#                pathname is no longer the subject that was judged
+#   cannot-tell  anything else (no marker yet, unreadable, no establishable token)
+#
+# WHY (#3637, roborev job 132 medium): the sweep probes a directory, and removes it
+# LATER, BY PATHNAME. Between the two, a concurrent cleanup can unlink that directory
+# and `mktemp -d` can hand the very same name to a NEW, LIVE run — whose bundle the
+# sweeper would then destroy, the single worst outcome this change can produce. The
+# probability is astronomically small (a 6-character suffix collision) and that is not
+# the argument: the remedy is cheap and it matches the discipline the rest of this file
+# already runs on — CONFIRM IDENTITY AT THE MOMENT OF USE, never trust a decision made
+# earlier against a name.
+#
+# THREE-VALUED, AND DOUBT ROUTES TO KEEP, exactly as _logdir_owner_state does: only
+# `confirmed` may proceed to an `rm`. A substituted directory reads `cannot-tell` while
+# the new owner has not written its marker yet and `live`/`changed` once it has, so
+# both halves of that race are KEEPs. An unreadable re-check is a KEEP too — a leaked
+# inode, never a destroyed bundle.
+#
+# DECLARED RESIDUAL: this NARROWS the window to the interval between the confirmation
+# and the `rm -rf` on the next line; it cannot close it. Closing it needs a handle to
+# the directory itself (openat/fstat), which POSIX shell has no way to hold, so no
+# pathname-based removal can be atomic with its own identity check. Narrowing a window
+# from "the whole probe-to-removal walk, up to $GATE_LOGDIR_SWEEP_CAP candidates" to
+# "two adjacent statements" is the available improvement, and it is stated rather than
+# overclaimed.
+_logdir_ident_recheck() {
+  local d="${1:-}" expect="${2:-}"
+  GATE_LOGDIR_RECHECK_STATE="cannot-tell"
+  [ -n "$d" ] && [ -n "$expect" ] || return 0
+  # A FRESH read, deliberately: the point is to observe the directory as it is NOW.
+  _logdir_owner_state "$d"
+  case "$GATE_LOGDIR_OWNER_STATE" in
+    verified-dead)
+      if [ -n "$GATE_LOGDIR_OWNER_IDENT" ] && [ "$GATE_LOGDIR_OWNER_IDENT" = "$expect" ]; then
+        GATE_LOGDIR_RECHECK_STATE="confirmed"
+      else
+        GATE_LOGDIR_RECHECK_STATE="changed"
+      fi ;;
+    live)
+      GATE_LOGDIR_RECHECK_STATE="changed" ;;
+    *)
+      GATE_LOGDIR_RECHECK_STATE="cannot-tell" ;;
+  esac
+  return 0
+}
+
+# _logdir_rm_guarded <path> -> rc 0 iff <path> was removed.
+#
+# FAIL-CLOSED, and the default is "do not remove". A bug here deletes something that
+# is not ours, so every condition is AFFIRMATIVE: the path must be non-empty, must be
+# a real directory (never a symlink), must be a DIRECT child of the very parent this
+# run's own mktemp used, and must be named exactly `agent-gate.` plus the six
+# alphanumerics `mktemp -d …XXXXXX` produces. Nothing is inferred from $TMPDIR at
+# call time — the parent comes from GATE_LOGDIR_PARENT, set at the creation site above.
+#
+# <expected-ident> is OPTIONAL and, when non-empty, is re-confirmed as the LAST thing
+# before the `rm` (#3637, roborev job 132 medium): rc 2, and NO removal, when the
+# directory at that pathname is no longer the subject an earlier probe judged. The
+# SWEEP must always pass it — it decided minutes-of-walk earlier and against a name.
+# The per-run cleanup deliberately passes NOTHING: that directory's owner is THIS
+# process, so it reads `live` and an identity re-check there would refuse every
+# legitimate removal-on-PASS.
+_logdir_rm_guarded() {
+  local d="${1:-}" expect="${2:-}" base parent
+  [ -n "$d" ] || return 1
+  [ -L "$d" ] && return 1
+  [ -d "$d" ] || return 1
+  # `${d%/*}` is EMPTY when the parent is the filesystem root — TMPDIR=/ gives
+  # `/agent-gate.ABC123`, whose prefix strips to "" while GATE_LOGDIR_PARENT is "/"
+  # (#3637, roborev job 66 finding 2). The mismatch refused every removal, so both the
+  # per-run cleanup and the sweep leaked on such a box. The failure direction was
+  # fail-SAFE and stays that way: this normalises the DERIVED parent only, and every
+  # other condition below is unchanged.
+  parent="${d%/*}"
+  [ -n "$parent" ] || parent="/"
+  [ "$parent" = "$GATE_LOGDIR_PARENT" ] || return 1
+  base="${d##*/}"
+  case "$base" in agent-gate.??????) ;; *) return 1 ;; esac
+  case "${base#agent-gate.}" in *[!A-Za-z0-9]*) return 1 ;; esac
+  # THE LAST STATEMENT BEFORE THE REMOVAL, so the confirmed subject and the unlinked
+  # pathname are as close together as a shell can put them. Anything other than
+  # `confirmed` — including every state the re-check could not establish — is rc 2 and
+  # a KEEP.
+  if [ -n "$expect" ]; then
+    _logdir_ident_recheck "$d" "$expect"
+    [ "$GATE_LOGDIR_RECHECK_STATE" = "confirmed" ] || return 2
+  fi
+  rm -rf "$d" 2>/dev/null || return 1
+  [ -d "$d" ] && return 1
+  return 0
+}
+
+# _logdir_sweep_start_offset <run-id> <total>: the rotation's starting index — DERIVED
+# deterministically from this run's OWN identity, and persisted NOWHERE. Sets
+# GATE_LOGDIR_SWEEP_OFFSET (0..total-1) and GATE_LOGDIR_SWEEP_OFFSET_SRC, the
+# provenance clause the sweep line prints so the offset is explainable after the fact.
+#
+# WHY NOT $RANDOM (#3637, roborev job 117 medium): a random start guarantees nothing —
+# successive runs can draw the same window repeatedly, so no rotation property can be
+# stated — and it makes the rotation TESTS probabilistic, which is worse than the gap
+# they cover: a probabilistically-failing case in a registered `tooling-tests` suite is
+# a flake generator every lane's gate of record eventually eats.
+#
+# WHY NOT A PERSISTED CURSOR UNDER A LOCK (the finding's suggested remedy, DECLINED by
+# lead ruling): a cursor file under the shared temp parent is cross-process mutable
+# state shared by up to four concurrent lane gates plus dozens of nested self-test
+# gates per suite, so it needs a cross-process lock — and that lock's failure modes
+# (lock ordering, a stale lock, a sweeper that cannot write, register-before-create)
+# are worse than the property it buys, which is only the ORDER in which stale temp
+# directories are reclaimed. This file already carries three findings from exactly that
+# resource-lifetime family. An honest declared limitation beats a mechanism whose
+# correctness cannot be established.
+#
+# The run-id is the source: it is a per-run mktemp path, it differs between runs on one
+# box, it needs no storage, and it is stamped into EVERY SUMMARY as `run-id:` — so the
+# offset is recomputable from a pasted block. Only the six characters `mktemp -d
+# …XXXXXX` produces vary (the parent is constant for a given $TMPDIR), so those are
+# what is hashed; the template guarantees they are `[A-Za-z0-9]`, so the fork-free
+# `printf -v '%d' "'c"` char-code read below can never meet a byte it cannot classify.
+# A run-id NOT carrying that shape is not guessed at: the offset is 0 and the line SAYS
+# the run-id was unusable.
+#
+# Read from GATE_LOGDIR_CREATED, not RUN_ID: the sweep runs ~600 lines BEFORE
+# `RUN_ID="$LOG_DIR"` is assigned, and the two hold the same string by construction, so
+# there is no second source of the run-id to drift.
+_logdir_sweep_start_offset() {
+  local id="${1:-}" total="${2:-0}" suffix h=0 i=0 n=0
+  GATE_LOGDIR_SWEEP_OFFSET=0
+  GATE_LOGDIR_SWEEP_OFFSET_SRC="run-id UNUSABLE, start 0"
+  # No population is not an unusable run-id: say which fact produced the 0.
+  if ! [ "$total" -gt 0 ] 2>/dev/null; then
+    GATE_LOGDIR_SWEEP_OFFSET_SRC="no population, start 0"
+    return 0
+  fi
+  suffix="${id##*/}"
+  case "$suffix" in
+    agent-gate.??????) suffix="${suffix#agent-gate.}" ;;
+    *) return 0 ;;
+  esac
+  case "$suffix" in *[!A-Za-z0-9]*) return 0 ;; esac
+  while [ "$i" -lt 6 ]; do
+    printf -v n '%d' "'${suffix:$i:1}" 2>/dev/null || { GATE_LOGDIR_SWEEP_OFFSET=0; return 0; }
+    # Modulus each step: a large prime keeps the accumulator far inside bash's 64-bit
+    # arithmetic whatever the suffix, so the hash can never overflow into a negative.
+    h=$(( (h * 131 + n) % 4294967291 ))
+    i=$((i + 1))
+  done
+  GATE_LOGDIR_SWEEP_OFFSET=$(( h % total ))
+  GATE_LOGDIR_SWEEP_OFFSET_SRC="derived from run-id suffix $suffix"
+  return 0
+}
+
+# The MARKER RECORD every aged scan below appends to its own output, carrying `find`'s
+# EXIT STATUS in band (#3637, roborev job 121 medium). The scans reduce find's output
+# to a BOUNDED result inside the pipeline, and a pipeline's `$?` is its LAST stage's,
+# so find's own status would otherwise be lost — and a lost status is indistinguishable
+# from an empty listing, which is #1699's find-tristate defect verbatim. `head`-style
+# early termination is worse than lost: it SIGPIPEs find, so a healthy large population
+# and an unreadable directory would report the SAME non-zero status.
+#
+# It cannot be confused with a candidate line: every line find prints here is the start
+# path with `/agent-gate.<suffix>` appended, so it contains a `/` and this marker does
+# not, and the reader additionally requires exactly two fields whose second is numeric.
+# A record failing any of those tests is counted as a candidate and the status then
+# reads `unobserved` — fail-closed, never a status trusted off the wrong line.
+GATE_LOGDIR_SCAN_MARK='agent-gate-scan-status'
+
+# _logdir_scan_aged <count|window> [total] [start] [want]: ONE depth-1 `find` over the
+# temp parent, whose output is reduced to a BOUNDED result before any of it reaches
+# this shell.
+#
+#   count  — emits exactly ONE record: `S <find-rc> <population>`.
+#   window — emits at most <want> `W <k> <path>` records, <k> being the position in the
+#            circular walk that starts at <start>, plus that same trailing `S` record.
+#
+# THE OUTPUT BOUND IS COUNTED, NOT DERIVED FROM `total` (#3637, roborev job 131
+# medium). `k < want` bounds the emission only while n <= total: the modulo REPEATS
+# earlier k values once the listing overruns the counted population, so every further
+# block of `total` entries emitted another <want> records. That is not an edge case on
+# this fleet — up to four lanes plus dozens of nested self-test gates create
+# `agent-gate.*` directories continuously, so the SECOND scan routinely lists MORE
+# entries than the FIRST one counted — and it made the advertised bound false exactly
+# where it matters. So `emitted` is counted here and emission stops at <want>.
+#
+# STOPPING EMISSION IS NOT STOPPING READING, and the difference is the whole tri-state.
+# awk consumes the scan to the END either way: no `exit` and no `nextfile`, because
+# both jump to END BEFORE the in-band status marker has been read, which would report
+# `unobserved` for EVERY window scan (and SIGPIPE find, the reason `find | head -n
+# <cap>` was rejected in the first place). Reading on is also what keeps the trailing
+# `S` record's count the REAL listing length, so the sweep reports `population changed
+# between scans` against the population rather than against its own truncated output.
+#
+# WHY awk AND NOT A BASH LOOP (#3637, roborev job 121 medium): the SELECTION has to see
+# every line find prints — that is what an O(N) enumeration is — but nothing requires
+# BASH to see them. The previous form assigned find's whole output to a shell variable
+# and then built a shell array of every match before applying the cap, so a box
+# carrying ~7,000 stale directories (~61,000 fleet-wide) built a ~7,000-element bash
+# array on EVERY gate start, nested gates included, for a run that would examine at
+# most $GATE_LOGDIR_SWEEP_CAP of them. awk holds one line at a time and forks nothing
+# per entry, so what this shell reads AND holds is bounded by <want>.
+#
+# `-H` DEREFERENCES THE START POINT, AND ONLY THE START POINT (#3637, roborev job 177).
+# `GATE_LOGDIR_PARENT` is deliberately LEXICAL — no realpath, trailing slashes stripped —
+# because the containment and parent-equality guards at the removal site compare against it
+# textually. So when `$TMPDIR` names a SYMLINK to a directory (macOS's `/tmp` ->
+# `/private/tmp`, or any operator-provided symlinked temp root), find's default `-P` mode
+# neither dereferences that start point nor descends into it: it lists NOTHING and exits 0.
+# `_logdir_scan_read` then reads a MEASURED population of 0 and the block prints the
+# affirmative all-clear `logdir-sweep: 0 REMOVED of 0 aged (>7d) under <parent>` — a measured
+# zero emitted where nothing was measured, which is the exact defect the `0 RECOGNISED`
+# convention exists to prevent. `-H` resolves the start point and NOTHING ELSE: `-L` would
+# dereference DESCENDANTS too, and a symlinked child would then be listed by a path whose
+# real subject sits outside the parent, escaping the very lexical guards that keep the
+# removal fail-closed. Normalising the variable itself is the same mistake one level up.
+_logdir_scan_aged() {
+  local mode="${1:-count}" total="${2:-0}" start="${3:-0}" want="${4:-0}"
+  { find -H "$GATE_LOGDIR_PARENT" -maxdepth 1 -type d -name 'agent-gate.*' \
+         -mtime "+$GATE_LOGDIR_SWEEP_AGE_DAYS" 2>/dev/null
+    printf '%s %s\n' "$GATE_LOGDIR_SCAN_MARK" "$?"
+  } | awk -v mark="$GATE_LOGDIR_SCAN_MARK" -v mode="$mode" -v total="$total" \
+          -v start="$start" -v want="$want" '
+      $1 == mark && NF == 2 && $2 ~ /^[0-9]+$/ { rc = $2; seen = 1; next }
+      {
+        n++
+        if (mode == "window" && total > 0 && want > 0 && emitted < want) {
+          k = (n - 1 - start + total) % total
+          if (k < want) { printf "W %d %s\n", k, $0; emitted++ }
+        }
+      }
+      END { printf "S %s %d\n", (seen ? rc : "unobserved"), n + 0 }'
+}
+
+# _logdir_scan_read "S <rc> <n>": THREE-VALUED reading of an aged scan's outcome,
+# because two of the three answers must remove NOTHING (#1699's find-tristate rule).
+#
+#   rc 0                       — MEASURED: the status record was observed AND find
+#                                exited 0, so GATE_LOGDIR_SCAN_COUNT is a population
+#                                this sweep may act on (a count of 0 is a measured
+#                                EMPTY, which is a different fact from a failed scan).
+#   rc 1, SCAN_RC=<n>          — find FAILED: a partial or unreadable listing.
+#   rc 1, SCAN_RC=unobserved   — the status could not be read AT ALL (no awk, a killed
+#                                pipeline, a truncated or malformed record).
+#
+# A positive verdict requires an AFFIRMATIVE reading of BOTH fields — never
+# `!= failed` — so an unparseable record can only ever be the non-permissive answer.
+_logdir_scan_read() {
+  local s="${1:-}" rcv cnt
+  GATE_LOGDIR_SCAN_RC="unobserved"
+  GATE_LOGDIR_SCAN_COUNT=0
+  # The WHOLE record, `S ` prefix included: the prefix is part of the protocol, so a
+  # reader that accepted a bare pair would also accept a truncated or foreign line.
+  case "$s" in "S "*) s="${s#S }" ;; *) return 1 ;; esac
+  case "$s" in *" "*) ;; *) return 1 ;; esac
+  rcv="${s%% *}"
+  cnt="${s##* }"
+  case "$rcv" in ''|*[!0-9]*) return 1 ;; esac
+  case "$cnt" in ''|*[!0-9]*) return 1 ;; esac
+  GATE_LOGDIR_SCAN_RC="$rcv"
+  GATE_LOGDIR_SCAN_COUNT="$cnt"
+  [ "$rcv" = 0 ] || return 1
+  return 0
+}
+
+# _logdir_sweep_unmeasured: the ONE renderer for both non-permissive scan answers, so
+# the two are TEXTUALLY DISTINCT (they are different operator facts: a directory this
+# box cannot read, versus a scan whose outcome could not be established at all) and
+# neither can be mistaken for a sweep that measured an empty population.
+_logdir_sweep_unmeasured() {
+  if [ "${GATE_LOGDIR_SCAN_RC:-unobserved}" = unobserved ]; then
+    GATE_LOGDIR_SWEEP_LINE="logdir-sweep: UNMEASURED (scan status unobserved under $GATE_LOGDIR_PARENT)"
+  else
+    GATE_LOGDIR_SWEEP_LINE="logdir-sweep: UNMEASURED (find rc=$GATE_LOGDIR_SCAN_RC under $GATE_LOGDIR_PARENT)"
+  fi
+}
+
+# _logdir_sweep: TWO bounded-output, depth-1 `find` scans over the temp parent (a
+# counting pass, then a selecting pass), removing only directories that match the
+# gate's own creation shape, are older than the age floor, AND whose owning process is
+# PROVABLY GONE. It can never fail the gate: every failure path is a reported line,
+# never a verdict. Bounded twice over: the cap limits the candidates MATERIALIZED and
+# EXAMINED per run (not merely the removals attempted), so one run's probe-and-remove
+# cost is bounded whatever the probes answer, and the owner probe itself is fork-free.
+#
+# THE CAP BOUNDS EXAMINATION AND MATERIALIZATION, NEVER TRAVERSAL (#3637, roborev job
+# 121 medium, half 2 — DECLARED, not fixed). Finding the aged subset means READING the
+# directory, so a depth-1 scan is O(N) in the entries PRESENT under the temp parent,
+# inherently and unavoidably: the only way not to pay it is not to scan at all, no
+# `find` invocation offers a bounded sample of a directory, and one that did would make
+# coverage of the population unprovable. N does not shrink either, because a markerless
+# legacy directory reads cannot-tell for ever (the residual declared below). So EVERY
+# gate start, nested gates included, pays that traversal — twice, once to size the
+# population and once to select the window, since a rotating walk cannot know which
+# entries its window covers until it knows how many there are. What the cap bounds is
+# what this SHELL reads, holds and probes.
+#
+# AND THE SECOND TRAVERSAL IS MEASURED, NOT ARGUED, because a fix that doubles the
+# very cost the finding names would have to earn it. Over a 7,000-directory parent on
+# this box (comparable to the ~5,697 a real fleet box carried), 10 sweeps each: the
+# previous form 120 ms per sweep, holding a 259 KB string AND a 7,000-element bash
+# array; two bounded-output scans 98 ms per sweep, holding at most $GATE_LOGDIR_SWEEP_CAP
+# records. Both C-side traversals together cost less than interpreting 7,000 lines of
+# shell once, so this is cheaper in time as well as bounded in memory.
+#
+# DECLARED RESIDUAL — THIS SWEEP DOES NOT CLEAN UP THE PRE-#3637 BACKLOG. A directory
+# with no owner marker reads `cannot-tell` for ever and is therefore KEPT for ever, and
+# EVERY directory created before the marker existed is markerless: the ~7,000 on this
+# box and the ~61,000 fleet-wide that #3637 was filed about are not reclaimed here.
+# What converges is the population created FROM NOW ON, which carries markers; what
+# stops NEW accumulation is the removal-on-PASS half. The backlog needs a one-time
+# out-of-band cleanup. It is deliberately NOT guessed at: "markerless AND older than N
+# days is probably legacy" is exactly the heuristic reasoning this repo forbids, and
+# being wrong about it means destroying a live peer's post-mortem bundle. An honest
+# declared residual beats a heuristic.
+#
+# AGE IS NOT PROOF OF ABANDONMENT, which is why the owner probe exists (#3637, roborev
+# job 70 medium 1). The age floor stays, unchanged and load-bearing: a directory's
+# mtime refreshes when an ENTRY IS CREATED (measured: create refreshes, appending to an
+# existing file does not), and the gate creates one `<component>.result` per component,
+# so a live run's mtime refreshes at every component boundary — with the longest
+# component in this repo at ~2073s, seven days is three orders of magnitude of margin.
+# The probe is the second, INDEPENDENT condition, not a replacement for the first.
+#
+# Reported AFFIRMATIVELY in the SUMMARY, and `0 REMOVED` rather than a bare `0` — a
+# bare zero in a gate log reads as a verified all-clear. The owner census rides the
+# same line, so a run that reclaimed nothing says WHY.
+_logdir_sweep() {
+  if _logdir_keep_logs_engaged; then
+    GATE_LOGDIR_SWEEP_LINE="logdir-sweep: SKIPPED ($(_logdir_keep_logs_claim))"
+    return 0
+  fi
+  local removed=0 total=0 examined=0 attempted=0 declined=0 deferred=0 dead=0 live=0 unverifiable=0 capnote="" d
+  local ident="" rmrc=0
+  local start=0 i=0 want=0 observed=0 popnote="" wstatus="" rec k
+  local startnote="not rotated (population within the cap)"
+  local -a cand=()
+  # PASS 1 — the population size, and NOTHING else: two numbers reach this shell
+  # however large the parent is. An UNMEASURED scan removes nothing, because a
+  # permissive branch on a listing this run does not trust is how a sweep starts
+  # deleting from a directory it could not read (#1699: never collapse "the scan
+  # FAILED" onto "no match").
+  if ! _logdir_scan_read "$(_logdir_scan_aged count)"; then
+    _logdir_sweep_unmeasured
+    return 0
+  fi
+  total="$GATE_LOGDIR_SCAN_COUNT"
+  # A CAPPED SWEEP THAT ALWAYS STARTS AT THE SAME PLACE STARVES THE TAIL FOREVER
+  # (#3637, roborev job 111 medium 2). `find`'s order is stable in practice and a
+  # directory this box cannot unlink stays eligible, so a failing prefix consumed the
+  # whole budget on every future sweep and everything a run reported as "deferred to
+  # the next run" was never attempted by ANY run — the leak past position <cap> became
+  # permanent. So the walk is CIRCULAR from a per-run starting offset DERIVED from this
+  # run's run-id (see _logdir_sweep_start_offset): no persistent failure-record or
+  # cursor file is needed — the sweep may be unable to write one, and a file shared by
+  # every gate on the box is cross-process mutable state needing a lock — and the work
+  # bound the cap exists for is untouched, each run still MATERIALIZING and EXAMINING
+  # at most $GATE_LOGDIR_SWEEP_CAP candidates. Rotation only when it can matter: a
+  # population within the cap is walked whole, in find order, exactly as before.
+  #
+  # WHAT THIS DOES AND DOES NOT GUARANTEE, stated exactly (#3637, roborev job 117
+  # medium): successive runs start at DIFFERENT offsets, because their run-ids differ,
+  # so the population is covered OVER TIME — coverage is SPREAD ACROSS RUNS, and there
+  # is NO guarantee of complete coverage within any bounded number of runs (two runs
+  # can land on overlapping windows; nothing sequences them). That is weaker than the
+  # eventual-coverage guarantee a locked persisted cursor would buy, and it is the
+  # honest statement of what an unpersisted derived offset delivers. What IS guaranteed
+  # is the property the starvation defect was about: no window is structurally
+  # privileged, so no entry is excluded for ever by its position in `find`'s order.
+  if [ "$total" -gt "$GATE_LOGDIR_SWEEP_CAP" ]; then
+    _logdir_sweep_start_offset "${GATE_LOGDIR_CREATED:-}" "$total"
+    start="$GATE_LOGDIR_SWEEP_OFFSET"
+    startnote="$GATE_LOGDIR_SWEEP_OFFSET_SRC"
+    want="$GATE_LOGDIR_SWEEP_CAP"
+    # Everything outside this run's window, counted arithmetically and reported —
+    # DEFERRED to a later run's window, never silently dropped.
+    deferred=$(( total - want ))
+  else
+    want="$total"
+  fi
+  # PASS 2 — the window itself, selected inside the pipeline: at most <want> records
+  # reach this shell. Read through a process substitution rather than a pipe, because
+  # the reader assigns shell state and a piped `while read` runs in a subshell whose
+  # assignments are discarded; the scan's status still arrives IN BAND on its own
+  # record, so the three-valued reading below is the same one PASS 1 makes.
+  #
+  # The two passes are separate `find` invocations, so a peer creating or removing
+  # directories between them can change what the second one lists. That is REPORTED
+  # (`population changed between scans`), and it is bounded in consequence: the window
+  # is then some other <=cap subset of real paths, each of which is still owner-probed
+  # before anything is removed. Note the assumption is not new — this file's own
+  # rotation cases already predict the sweep's window from a SEPARATE `find` of the
+  # same parent, so cross-invocation order stability was already load-bearing.
+  if [ "$want" -gt 0 ]; then
+    while IFS= read -r rec; do
+      case "$rec" in
+        "S "*)
+          wstatus="$rec" ;;
+        "W "*)
+          rec="${rec#W }"
+          k="${rec%% *}"
+          case "$k" in ''|*[!0-9]*) continue ;; esac
+          cand[$k]="${rec#* }" ;;
+      esac
+    done < <(_logdir_scan_aged window "$total" "$start" "$want")
+    if ! _logdir_scan_read "$wstatus"; then
+      _logdir_sweep_unmeasured
+      return 0
+    fi
+    observed="$GATE_LOGDIR_SCAN_COUNT"
+    if [ "$observed" != "$total" ]; then
+      popnote="; population changed between scans (counted $total, listed $observed)"
+    fi
+  fi
+  # The walk: the SELECTION above is the work bound, so this loop is over at most
+  # $GATE_LOGDIR_SWEEP_CAP entries by construction rather than by breaking out of a
+  # full one. `examined` counts what is actually probed — a slot the second scan did
+  # not fill (the population shrank between passes) is skipped and reported through
+  # $popnote, never counted as examined.
+  #
+  # THE CAP BOUNDS THE CANDIDATES EXAMINED, NOT THE REMOVALS ATTEMPTED (#3637, roborev
+  # job 116 medium). Two earlier forms each bounded a strictly smaller quantity than
+  # the work: first `removed` (removals that WORKED), then `attempted` (removals
+  # ISSUED). Neither is the work. A live, malformed or MARKERLESS directory reaches no
+  # removal at all, so it incremented neither counter — and since every directory
+  # created before the owner marker existed is markerless, and so `cannot-tell` for
+  # ever, the ~7,000-per-box / ~61,000-fleet-wide legacy population was PROBED IN FULL
+  # by every gate start, for ever, removing none of it. An advertised bound of 1000
+  # with an unbounded probe count is not a bound.
+  while [ "$i" -lt "$want" ]; do
+    d="${cand[$i]:-}"
+    i=$((i + 1))
+    [ -n "$d" ] || continue
+    # Reset per candidate: an identity carried over from a PREVIOUS iteration is the
+    # very confusion this re-check exists to prevent.
+    ident=""
+    examined=$((examined + 1))
+    _logdir_owner_state "$d"
+    case "$GATE_LOGDIR_OWNER_STATE" in
+      live)
+        live=$((live + 1))
+        continue ;;
+      verified-dead)
+        dead=$((dead + 1))
+        # The identity this verdict is ABOUT, carried to the removal site so the `rm`
+        # can confirm it is still acting on this same subject rather than on whatever
+        # now answers to this pathname.
+        ident="${GATE_LOGDIR_OWNER_IDENT:-}" ;;
+      *)
+        # cannot-tell: KEPT. The permissive branch here would be the whole defect.
+        unverifiable=$((unverifiable + 1))
+        continue ;;
+    esac
+    if [ -z "$ident" ]; then
+      # A DEFINITE verdict with no published identity: the shipped probe cannot
+      # produce that today (every path reaching `verified-dead` publishes the marker
+      # triple it derived the verdict from), and if one ever could, the removal would
+      # have nothing to re-confirm. DECLINED, and no `rm` is attempted — doubt is
+      # doubt wherever in this walk it appears, and the permissive branch here is the
+      # whole defect.
+      declined=$((declined + 1))
+      continue
+    fi
+    attempted=$((attempted + 1))
+    rmrc=0
+    _logdir_rm_guarded "$d" "$ident" || rmrc=$?
+    if [ "$rmrc" -eq 0 ]; then
+      removed=$((removed + 1))
+    elif [ "$rmrc" -eq 2 ]; then
+      # DECLINED at the removal site: the pathname stopped being the subject that was
+      # judged. Counted and REPORTED on its own field rather than folded into
+      # `attempted - removed`, which already carries path-guard refusals and failed
+      # unlinks — a candidate this run declined must not read as one it removed.
+      declined=$((declined + 1))
+    fi
+  done
+  if [ "$deferred" -gt 0 ]; then
+    capnote=" REACHED, $deferred deferred to the next run; rotation start $start of $total ($startnote)"
+  fi
+  # BOTH numbers ride the line — examined AND attempted — so the bound the cap
+  # advertises is OBSERVABLE rather than asserted, and the owner census below reads as
+  # a census OF THE EXAMINED SUBSET (never of the whole population, which a capped run
+  # deliberately does not look at).
+  GATE_LOGDIR_SWEEP_LINE="logdir-sweep: $removed REMOVED of $total aged (>${GATE_LOGDIR_SWEEP_AGE_DAYS}d) under $GATE_LOGDIR_PARENT (owner verified-dead $dead, live $live, unverifiable $unverifiable; examined $examined, removals attempted $attempted, declined on identity re-check $declined, cap $GATE_LOGDIR_SWEEP_CAP$capnote$popnote)"
+  return 0
+}
+
+# The sweep is INVOKED further down, immediately AFTER the EXIT trap is armed — see
+# the arming site for why (#3637, roborev job 63 finding 4).
+
+# _logdir_artifact_inside: rc 0 iff an artifact THIS run publishes lives inside its
+# own log dir. Per #2874 a nested run with no explicit AGENT_GATE_SUMMARY_FILE
+# defaults its summary to $LOG_DIR/summary-primary.txt — and the `.heartbeat` and
+# `.integrity-fail.<run-id>` siblings are derived from that same path — so removing
+# the directory would delete the verdict block the PARENT asserts on. Fail-safe:
+# such a run RETAINS, with a NAMED reason on the logdir-disposition: line, never
+# silently.
+_logdir_artifact_inside() {
+  case "${SUMMARY_FILE:-}" in "$GATE_LOGDIR_CREATED"/*) return 0 ;; esac
+  case "${HEARTBEAT_FILE:-}" in "$GATE_LOGDIR_CREATED"/*) return 0 ;; esac
+  return 1
+}
+
+# _logdir_decide <result>: choose this run's disposition at the terminal emit. The
+# order is the precedence order: the opt-out beats everything, then the fail-safe
+# retention, then the verdict. The opt-out's engagement rule and the observed-value
+# disclosure it renders are both at _logdir_keep_logs_engaged /
+# _logdir_keep_logs_claim (#3637, roborev job 174 finding A).
+#
+# It records an INTENT and never arms the removal itself: GATE_LOGDIR_REMOVE is left
+# at 0 here and set only by _logdir_clear_removal, after the summary is confirmed
+# published (#3637, roborev job 61). A retention arm is final either way — there is
+# nothing for the clearance to do.
+_logdir_decide() {
+  local result="${1%% *}"
+  GATE_LOGDIR_DECIDED=1
+  if _logdir_keep_logs_engaged; then
+    GATE_LOGDIR_REMOVE=0
+    GATE_LOGDIR_REMOVE_INTENT=0
+    GATE_LOGDIR_DISPOSITION="RETAINED: $(_logdir_keep_logs_claim)"
+    return 0
+  fi
+  if _logdir_artifact_inside; then
+    GATE_LOGDIR_REMOVE=0
+    GATE_LOGDIR_REMOVE_INTENT=0
+    GATE_LOGDIR_DISPOSITION="RETAINED: summary-inside-logdir #2874"
+    return 0
+  fi
+  # A COMPONENT THAT RAN HAS ALREADY PINNED THE RETENTION (#3637, roborev job 173
+  # finding 1). `file-size` is the live instance: its `OPT-OUT` token is NON-FAILING, so a
+  # run with `CQLITE_ALLOW_FILE_GROWTH=1` engaged reaches `RESULT: PASS` — and #3402/#3401
+  # deliberately moved the grown-file NAMES out of the SUMMARY row and into `file-size.log`
+  # INSIDE this bundle. Removing it on PASS destroyed the disclosure on the ONE run where
+  # it matters, leaving a `logs:` pointer that resolves to nothing. Same for
+  # `file-size.persistence-error.log`.
+  #
+  # ABOVE the nested arm on purpose: the opt-out is engaged by the OPERATOR's environment
+  # and is inherited by a nested run, so the disclosure argument applies there identically —
+  # and a nested run that pins is one whose parent's environment asked for the ratchet to be
+  # switched off, not one of the dozens of husk-leaving self-test gates the nested arm exists
+  # to reclaim (those pin nothing).
+  if [ -n "${GATE_LOGDIR_RETAIN_PIN:-}" ]; then
+    GATE_LOGDIR_REMOVE=0
+    GATE_LOGDIR_REMOVE_INTENT=0
+    GATE_LOGDIR_DISPOSITION="RETAINED: $GATE_LOGDIR_RETAIN_PIN"
+    return 0
+  fi
+  # A nested run's bundle is nobody's evidence: its parent keeps its own, and these
+  # are the runs that produced the bulk of the leak (the self-tests spawn dozens per
+  # gate). Removed on EITHER verdict — the carve-out above is what protects the one
+  # nested shape whose verdict block lives inside the directory.
+  if [ -n "${INHERITED_PARENT_RUN_ID:-}" ]; then
+    GATE_LOGDIR_REMOVE_INTENT=1
+    GATE_LOGDIR_DISPOSITION="REMOVED at exit (nested run, $result); AGENT_GATE_KEEP_LOGS=1 retains"
+    return 0
+  fi
+  # `--only` IS ITS OWN PRODUCT (#3637, roborev job 173 finding 2). The mode is a
+  # DIAGNOSTIC whose entire output is the selected component's log under `logs:`, so a
+  # removal deletes the only thing the operator ran it for. Today a top-level `--only`
+  # is promoted to `RESULT: PARTIAL` and would fall to the retaining arm below anyway —
+  # but that is an INCIDENTAL retention, keyed on a verdict mapping ~14,000 lines away,
+  # and `--lite --only <component>` is a REACHABLE combination that ends `RESULT: PASS`
+  # and did delete the log. The exemption is therefore stated where the disposition is
+  # decided, and NAMED, so the diagnostic's product cannot be lost by a change to how
+  # its verdict is spelled.
+  #
+  # BELOW the nested arm, deliberately: the nested `--only` gates are the bulk of the
+  # leak this issue closed (`--only file-size` is the documented hermetic nested run, and
+  # the tooling self-tests spawn dozens per gate). Their reader is a parent asserting on
+  # a SUMMARY, never an operator reading a component log.
+  #
+  # NO CALLER TEXT: `$ONLY` is argv, and the block already publishes the selection on its
+  # own `mode: PARTIAL (--only …)` line. Fixed wording carries no channel to abuse.
+  if [ -n "${ONLY:-}" ]; then
+    GATE_LOGDIR_REMOVE=0
+    GATE_LOGDIR_REMOVE_INTENT=0
+    GATE_LOGDIR_DISPOSITION="RETAINED: --only diagnostic mode (its product IS the component log under logs:)"
+    return 0
+  fi
+  case "$result" in
+    PASS)
+      GATE_LOGDIR_REMOVE_INTENT=1
+      # --lite SAYS SO IN ITS OWN DISPOSITION (#3637, roborev job 173 finding 2). --lite is
+      # deliberately NOT exempted: its product is the LITE SUMMARY verdict, it runs EVERY fix
+      # round, and retaining every lite bundle re-creates the accumulation this issue exists
+      # to stop (a lite run that does not PASS retains already). What it gets instead is a
+      # disposition that states the removal AND the remedy, so an operator who wanted the
+      # component logs learns how to keep them from the block they are already reading.
+      if [ "${LITE:-0}" = 1 ]; then
+        GATE_LOGDIR_DISPOSITION="REMOVED at exit on PASS (--lite: its product is this LITE SUMMARY verdict, not the bundle; re-run with AGENT_GATE_KEEP_LOGS=1 to keep the component logs)"
+      else
+        GATE_LOGDIR_DISPOSITION="REMOVED at exit on PASS; AGENT_GATE_KEEP_LOGS=1 retains"
+      fi ;;
+    *)
+      # FAIL, PARTIAL, REFUSED, ERROR — every non-PASS verdict is a post-mortem case.
+      GATE_LOGDIR_REMOVE=0
+      GATE_LOGDIR_REMOVE_INTENT=0
+      GATE_LOGDIR_DISPOSITION="RETAINED: $result" ;;
+  esac
+}
+
+# _logdir_clear_removal: the removal is CLEARED TO PROCEED. ONE call site —
+# emit_summary, after the caller-known summary file has been verified to hold THIS
+# run's complete block (write rc 0, end marker present, this run's run-id).
+#
+# WHY THE CLEARANCE IS SEPARATE FROM THE DECISION (#3637, roborev job 61): the
+# decision has to be EARLY so the block can declare it truthfully; the removal has to
+# be LATE so a run whose verdict never reached the caller keeps the only other copy of
+# it. Arming both at once made the reachable ENOSPC case — /dev/root holds every
+# lane's summary file AND its LOG_DIR — delete the post-mortem bundle of a run that
+# had just failed to publish its verdict: both artifacts a reader needs, gone
+# together, in the exact scenario this issue cites as its motivation.
+_logdir_clear_removal() {
+  [ "${GATE_LOGDIR_REMOVE_INTENT:-0}" = 1 ] || return 0
+  GATE_LOGDIR_REMOVE=1
+}
+
+# _logdir_force_retain <reason>: an emit path that has already decided its bundle is
+# load-bearing (the #2874 no-clobber publish, an unwritable summary file, a signal, a
+# removal that failed) pins the retention with its own named reason.
+#
+# It is ALSO the ONE place a superseded claim is recorded (#3637, roborev job 61): if
+# the disposition being replaced was a REMOVAL, this run may already have published
+# that claim — in the SUMMARY block, or in a partially-written summary file — and a
+# published line cannot be retracted. The claim is carried forward so
+# _logdir_publish_disposition can state, inside the surviving bundle, that the SUMMARY
+# is superseded and why. Keyed on the value rather than on a flag so it holds however
+# the disposition was reached.
+_logdir_force_retain() {
+  case "$GATE_LOGDIR_DISPOSITION" in
+    REMOVED*) GATE_LOGDIR_SUPERSEDED_CLAIM="$GATE_LOGDIR_DISPOSITION" ;;
+  esac
+  GATE_LOGDIR_REMOVE=0
+  GATE_LOGDIR_REMOVE_INTENT=0
+  GATE_LOGDIR_DISPOSITION="RETAINED: ${1:-unspecified}"
+  GATE_LOGDIR_DECIDED=1
+  # …and the reason is PINNED, so a decision taken LATER cannot silently undo it (#3637,
+  # roborev job 173 finding 1). Every pre-#173 caller ran at or after the terminal emit,
+  # where `_logdir_decide` has already run and this is redundant; the callers that made it
+  # necessary are the ones inside a COMPONENT (`run_file_size`), which runs before every
+  # emit path in the file. Recorded here rather than at those call sites so there is still
+  # exactly ONE force-retain mechanism.
+  GATE_LOGDIR_RETAIN_PIN="${1:-unspecified}"
+}
+
+# _logdir_has_content <dir>: rc 0 iff the bundle holds anything at all EXCEPT this
+# run's owner marker.
+#
+# THREE-VALUED, not two (#1699's find-tristate rule): an unreadable directory or a
+# failed scan is NOT "empty" — it is unmeasured, and the only safe answer to an
+# unmeasured scan is the one that KEEPS the directory. Bounded by construction: this
+# is one depth-1 listing of the gate's own per-run dir.
+#
+# THE EXCLUSION IS THE LAUNCH-ARTIFACT ALLOWLIST — THE SAME ONE ARM 2 USES (#3637,
+# roborev job 173 finding 3). It started as the owner marker ALONE (job 70 medium 1):
+# that file is written at LAUNCH, by this run, about this run, so counting it as content
+# would have made every non-zero early exit — every argv/usage refusal — "hold diagnostic
+# content" the moment the marker was introduced, retaining an empty husk per refusal and
+# re-opening the exact leak this issue closed.
+#
+# But that is a ONE-MEMBER copy of a list that already exists and already grew: arm 2 of
+# `_logdir_decide_early_exit` calls `_logdir_has_evidence`, which excludes the FULL family
+# (`_logdir_is_launch_artifact`: the owner marker, the #2874 private summary and its
+# heartbeat/integrity siblings, and the #3755 `gate-slot.ready` / `disk-admission*`
+# admission bookkeeping — the last of which had to be added in the same merge, after every
+# exit-0 run silently kept its bundle). Two arms with two predicates DRIFT, and the drift
+# has a direction: a non-zero exit landing AFTER admission has written its bookkeeping but
+# BEFORE any component ran would retain a husk of pure launch artifacts — the very shape
+# e0a7733 closed on the other arm. ONE predicate now serves both, so a launch artifact
+# added later cannot re-open it on this side.
+#
+# THE ONE DELIBERATE EXCEPTION, which is why this is not simply `_logdir_has_evidence`:
+# the `RESULT: INCOMPLETE` sentinel still COUNTS here. A refusal that published one is
+# worth a post-mortem, and that is precisely the difference between the two arms (arm 2
+# must NOT count it — a nested status-0 stub leaves nothing else, and counting it would
+# retain 6 husks per gate of record). The sentinel is this run's own summary FILE, which
+# is inside the bundle only in the #2874 private-default shape, so it is recognised by
+# that resolved path and by nothing weaker.
+_logdir_has_content() {
+  local d="${1:-}" listing rc e
+  [ -d "$d" ] || return 1
+  listing=$(find "$d" -mindepth 1 -maxdepth 1 2>/dev/null); rc=$?
+  [ "$rc" -eq 0 ] || return 0     # could not tell -> treat as content -> retain
+  while IFS= read -r e; do
+    [ -n "$e" ] || continue
+    # The sentinel exception FIRST: it is a launch artifact by the allowlist's reckoning,
+    # and on THIS arm it is content.
+    if [ -n "${SUMMARY_FILE:-}" ] && [ "$e" = "$SUMMARY_FILE" ]; then
+      return 0
+    fi
+    _logdir_is_launch_artifact "$e" && continue
+    return 0
+  done <<EOF
+$listing
+EOF
+  return 1
+}
+
+# _logdir_is_launch_artifact <path>: rc 0 iff <path> is one of THIS run's own
+# launch-time artifacts rather than evidence of anything that ran.
+#
+# DERIVED from the paths this run actually resolved — never a guessed list of
+# basenames. A nested run with no explicit AGENT_GATE_SUMMARY_FILE defaults its summary
+# to $LOG_DIR/summary-primary.txt (#2874), and the `.heartbeat` and
+# `.integrity-fail.<run-id>` siblings hang off that same path; all of them are written
+# BEFORE any component runs, and the block inside is the `RESULT: INCOMPLETE` liveness
+# sentinel, which is explicitly not a verdict (#3041).
+_logdir_is_launch_artifact() {
+  local e="${1:-}"
+  # The OWNER MARKER (#3637, roborev job 70 medium 1) is written at the creation site,
+  # before any component runs, and is this run's own bookkeeping about itself — nobody's
+  # evidence of anything. Derived from the path THIS run resolved, same as the two below.
+  if [ -n "${GATE_LOGDIR_OWNER_FILE:-}" ]; then
+    [ "$e" = "$GATE_LOGDIR_OWNER_FILE" ] && return 0
+  fi
+  if [ -n "${SUMMARY_FILE:-}" ]; then
+    [ "$e" = "$SUMMARY_FILE" ] && return 0
+    case "$e" in "$SUMMARY_FILE".*) return 0 ;; esac
+  fi
+  if [ -n "${HEARTBEAT_FILE:-}" ]; then
+    [ "$e" = "$HEARTBEAT_FILE" ] && return 0
+  fi
+  # #3755 INTERACTION. That feature writes its ADMISSION bookkeeping into this run's own
+  # $LOG_DIR before any component runs: `gate-slot.ready` (the slot holder's flag) and the
+  # `disk-admission*` family (`-cargo-metadata.json` plus the `.bcap.{out,err,rc}` capture
+  # triple). All of it is launch-time, so it is not evidence — and until it was allowlisted
+  # EVERY exit-0 run kept its bundle, silently disabling the removal this issue exists to
+  # deliver (measured: the logdir suite went 161/0 -> 155/6 on the merge).
+  #
+  # ANCHORED ON THIS RUN'S OWN DIRECTORY, and matched as a FAMILY rather than file by file,
+  # for two measured reasons. (1) The owning globals are set INSIDE COMMAND SUBSTITUTIONS
+  # (`_gate_resolve_target_dir`, `_gate_admission_capture_open`), so their values never reach
+  # this EXIT-trap context — deriving from them is not available here, and `_DA_CAP_OWNER`
+  # being 0 in the main shell is also why `_gate_admission_capture_close` cannot drop the
+  # triple. (2) Naming them one at a time already failed twice in this one merge; a family
+  # rule means a future capture file cannot silently re-break removal.
+  # DECLARED RESIDUAL: this is the one place here that matches a NAME rather than a resolved
+  # path. It is bounded by the $GATE_LOGDIR_CREATED anchor (never a bare basename, never a
+  # peer's directory) and by admission running before any component by construction. The
+  # hermetic survivor-enumeration case in test_agent_gate_logdir_cleanup.sh is what catches
+  # drift here, and it is what caught this.
+  if [ -n "${GATE_LOGDIR_CREATED:-}" ]; then
+    case "$e" in
+      "$GATE_LOGDIR_CREATED"/gate-slot.ready) return 0 ;;
+      "$GATE_LOGDIR_CREATED"/disk-admission*) return 0 ;;
+    esac
+  fi
+  return 1
+}
+
+# _logdir_has_evidence <dir>: rc 0 iff the bundle holds anything that is NOT one of
+# this run's launch artifacts.
+#
+# THREE-VALUED for the same reason _logdir_has_content is (#1699's find-tristate rule):
+# an unreadable directory or a failed scan is NOT "no evidence" — it is unmeasured, and
+# the only safe answer to an unmeasured scan is the one that KEEPS the directory.
+_logdir_has_evidence() {
+  local d="${1:-}" listing rc e
+  [ -d "$d" ] || return 1
+  listing=$(find "$d" -mindepth 1 -maxdepth 1 2>/dev/null); rc=$?
+  [ "$rc" -eq 0 ] || return 0     # could not tell -> treat as evidence -> retain
+  while IFS= read -r e; do
+    [ -n "$e" ] || continue
+    _logdir_is_launch_artifact "$e" && continue
+    return 0
+  done <<EOF
+$listing
+EOF
+  return 1
+}
+
+# _logdir_decide_early_exit <exit-status>: the disposition for a run that LEFT
+# BEFORE any terminal emit — the test stub, an argv/usage refusal, a fail-closed
+# pre-flight that exits without emitting, and any early exit added in future. It is
+# reached from the ONE at-exit handler, so it needs no cooperation from the exit
+# path itself; that is what stops a new early exit leaking a directory the way the
+# CQLITE_GATE_STUB_RUNDIR stub did (6 leaked dirs per gate-of-record run, since it
+# is driven 6x by test_gate_concurrency_cap.sh inside tooling-tests).
+#
+# THE RULE, in precedence order:
+#   1. AGENT_GATE_KEEP_LOGS engaged (set, non-empty, not `0`) -> RETAIN. The opt-out
+#      beats everything, and the disposition RENDERS THE OBSERVED VALUE rather than a
+#      hard-coded `=1` (#3637, roborev job 174 finding A) -- see
+#      _logdir_keep_logs_engaged / _logdir_keep_logs_claim for why engagement is
+#      deliberately lenient here and the DISCLOSURE is what was fixed.
+#   2. exit status 0 -> RETAIN iff the bundle holds EVIDENCE, meaning anything beyond
+#      this run's own LAUNCH artifacts (the #2874 private summary that a nested run
+#      defaults INSIDE its log dir, and that file's heartbeat/integrity siblings).
+#      Otherwise REMOVE: no verdict was reached, no component ran, and a husk that
+#      holds nothing but a launch sentinel informs nobody.
+#   3. non-zero -> a refusal or a failure. RETAIN iff the bundle holds ANY content;
+#      here the sentinel itself counts, because a refusal that published one is worth
+#      a post-mortem. An EMPTY husk is removed — that population is what this issue
+#      exists to stop growing.
+#
+# WHY ARM 2 IS NOT AN UNCONDITIONAL REMOVAL, WHICH IS WHAT IT USED TO BE (#3637,
+# roborev job 61). It read "status 0 -> a NORMAL, SUCCESSFUL, NON-CERTIFYING exit;
+# nothing here is anyone's evidence -> REMOVE", resting on the premise recorded in the
+# next paragraph. Measured 2026-09-01 on this fleet's bash (5.2), that premise is
+# false:
+#
+#   trap 'echo "status=$?"' EXIT; sleep 30      # then `kill -TERM` the SCRIPT's pid
+#
+# bash RUNS the EXIT trap for an UNTRAPPED INT, TERM or HUP delivered while it waits on
+# a foreground command — a `$(...)` command substitution included — and `$?` inside
+# that trap is **0**, not 130/143/129. So a SIGNAL-KILLED gate arrives here reporting
+# status 0 and took the unconditional-removal arm: reproduced end to end against this
+# script, a gate SIGTERMed mid-emission lost a bundle holding three components'
+# `.result` files. A signal is the post-mortem case par excellence.
+#
+# The EVIDENCE test rather than the plain content test, because the two populations are
+# separated by exactly that line: the stub and the other status-0 early exits leave a
+# bundle holding at most their own launch sentinel (measured: `summary-primary.txt` and
+# nothing else), while a signalled run leaves whatever had already been written by the
+# components that ran. Reusing arm 3's content test here would retain every nested stub
+# and re-open the leak — 6 directories per gate-of-record run.
+#
+# There is deliberately NO signal trap. Trapping INT/TERM/HUP would make bash DEFER the
+# handler until the current foreground command returns — measured on this script, a
+# gate blocked in its own emission then ignored SIGTERM entirely, where untrapped it
+# died at once — so a `kill` on a stuck gate would wait out a 20-minute component
+# instead of landing. Deciding by evidence needs no handler and cannot change how the
+# gate dies.
+#
+# The #2874 summary-inside-logdir carve-out is deliberately NOT consulted on the
+# exit-0 arm: it protects a terminal VERDICT BLOCK the parent asserts on, and by
+# construction this path emitted none — the file inside holds at most the
+# `RESULT: INCOMPLETE` liveness sentinel, which is explicitly not a verdict (#3041).
+# On the non-zero arm that sentinel makes the bundle non-empty, so a refusal that
+# published one is retained anyway.
+#
+_logdir_decide_early_exit() {
+  local rc="${1:-0}"
+  GATE_LOGDIR_DECIDED=1
+  if _logdir_keep_logs_engaged; then
+    GATE_LOGDIR_REMOVE=0
+    GATE_LOGDIR_DISPOSITION="RETAINED: $(_logdir_keep_logs_claim)"
+    return 0
+  fi
+  if [ "$rc" -eq 0 ] 2>/dev/null; then
+    if _logdir_has_evidence "$GATE_LOGDIR_CREATED"; then
+      GATE_LOGDIR_REMOVE=0
+      GATE_LOGDIR_DISPOSITION="RETAINED: exit reporting status 0 with evidence beyond this run's launch artifacts (post-mortem; a SIGNAL reports status 0 here)"
+    else
+      GATE_LOGDIR_REMOVE=1
+      GATE_LOGDIR_DISPOSITION="REMOVED at exit (early exit, status 0, no verdict and no evidence); AGENT_GATE_KEEP_LOGS=1 retains"
+    fi
+    return 0
+  fi
+  if _logdir_has_content "$GATE_LOGDIR_CREATED"; then
+    GATE_LOGDIR_REMOVE=0
+    GATE_LOGDIR_DISPOSITION="RETAINED: early exit status $rc with diagnostic content (post-mortem)"
+  else
+    GATE_LOGDIR_REMOVE=1
+    GATE_LOGDIR_DISPOSITION="REMOVED at exit (early exit status $rc, empty bundle); AGENT_GATE_KEEP_LOGS=1 retains"
+  fi
+}
+
+# _logdir_lines: the `logs:` line, this run's DISPOSITION, and the startup-sweep
+# report, emitted together by every block-assembling path.
+#
+# `logs:` stays a PATH-ONLY field, byte-identical to the pre-#3637 line in EVERY
+# case, and the disposition goes on its OWN KEYED LINE. A first draft appended
+# ` (REMOVED …)` to the path and told consumers to cut at the first " (" — but a
+# `$TMPDIR` is environment-controlled and may itself contain " (", so
+# `/tmp/build (scratch)/agent-gate.ABC123` truncated to `/tmp/build`. That is a
+# control token and environment-controlled data sharing one channel, and this
+# repo's standing ruling (#3312) is to REMOVE the channel rather than pick a rarer
+# delimiter: a separate key needs no delimiter at all, and every existing `logs:`
+# consumer keeps working unchanged.
+#
+# THE TWO NEW KEYS ARE SANITISED; `logs:` IS NOT (#3637, roborev job 173 finding 4).
+# `logdir-sweep:` embeds `$GATE_LOGDIR_PARENT` — i.e. `$TMPDIR` — VERBATIM, so a
+# `TMPDIR=$'/tmp/x\nRESULT: PASS'` emitted an extra LINE inside the block, and one that
+# matched the completion probe's own pattern: environment-controlled data forging a terminal
+# verdict. `logdir-disposition:` carries gate-authored wording today, but it is free text on
+# a keyed line and gets the same treatment as defence in depth rather than by audit. Both go
+# through `_summary_block_value`, the SAME boundary `_status_detail` uses (strip C0+DEL under
+# LC_ALL=C; WITHHOLD — never rewrite — a value carrying `RESULT:`).
+#
+# `logs:` is deliberately UNCHANGED and must stay so: it is PATH-ONLY and byte-identical to
+# its pre-#3637 form, `scripts/lib/gate-heartbeat.sh` renders the same field from the same
+# raw variable. Scrubbing it here would give one field name two grammars — the ambiguity
+# #3637 exists to remove — and would break the recovery path a reader needs most (a path that
+# has been rewritten addresses nothing). Pinned by AC7/AC9 of
+# scripts/tests/test_agent_gate_logdir_cleanup.sh.
+#
+# ITS $TMPDIR EXPOSURE IS NOW CLOSED AT THE INPUT, not here (#3637, roborev job 175
+# finding 1): the LOG_DIR creation site REFUSES a parent path carrying a control character,
+# so no run reaching this renderer can hold one — one sanitised line beside a verbatim one
+# was a block a reader would reasonably read as safe from a class it was not. The refusal
+# guards the hostile INPUT for `logs:`, `run-id:`, the heartbeat's `logs:` and
+# `logdir-disposition.txt` at once; the boundary below stays for the FREE-TEXT keys as
+# defence in depth.
+_logdir_lines() {
+  printf 'logs: %s\n' "$LOG_DIR"
+  printf 'logdir-disposition: %s\n' \
+    "$(_summary_block_value "$GATE_LOGDIR_DISPOSITION" 'logdir-disposition value' line \
+         'the bundle, if it survives, carries the same value in its own logdir-disposition.txt')"
+  # The sweep global carries its OWN key, so the KEY is re-rendered here and only the VALUE
+  # is passed through the boundary: a WITHHELD value must not take `logdir-sweep:` with it —
+  # a block that silently loses a key is indistinguishable from one whose sweep never ran.
+  # The `#` strip is a no-op if a future setter ever omits the key, so the line is still
+  # keyed exactly once either way.
+  printf 'logdir-sweep: %s\n' \
+    "$(_summary_block_value "${GATE_LOGDIR_SWEEP_LINE#logdir-sweep: }" 'logdir-sweep census' line \
+         'the swept parent is the directory containing the path on the logs: line')"
+}
+
+# _logdir_publish_disposition: write this run's chosen disposition INTO the bundle,
+# as `<log-dir>/logdir-disposition.txt`, immediately before the retention takes
+# effect.
+#
+# WHY AN IN-BUNDLE ARTIFACT AND NOT JUST THE SUMMARY LINE (#3637, roborev job 59):
+# the disposition is decided at exit, and an EARLY EXIT has no terminal emit to
+# carry it — the `RESULT: INCOMPLETE` sentinel in the summary file is written at
+# LAUNCH, before any decision exists, so it holds neither `logs:` nor
+# `logdir-disposition:`. Those runs are exactly the ones that leave a bundle behind,
+# so without this the retention that most needs a reason is the one with none. "A
+# retention is always NAMED, never silent" is the contract; this is what makes it
+# true on every retaining path rather than on the emitting ones only.
+#
+# The bundle is the natural home: it is the artifact the reader has IN HAND, it is
+# owned by this run, and it disappears WITH the directory on a removal, so no
+# orphaned file is ever left beside a deleted bundle.
+#
+# Same field names as the SUMMARY, one value per line, no delimiter to get wrong —
+# `logs:` stays PATH-ONLY here too (#3312), and `run-id:` is included because a run
+# dir is bound to a gate ONLY by that value (#3637/#3616): a bundle located by
+# recency is a PEER's until its run-id says otherwise.
+#
+# It can never change the verdict: an unwritable bundle is a no-op, not an error.
+_logdir_publish_disposition() {
+  [ -d "${GATE_LOGDIR_CREATED:-}" ] || return 0
+  {
+    printf 'run-id: %s\n' "${RUN_ID:-$GATE_LOGDIR_CREATED}"
+    printf 'logs: %s\n' "$GATE_LOGDIR_CREATED"
+    printf 'logdir-disposition: %s\n' "$GATE_LOGDIR_DISPOSITION"
+    # A retention that CONTRADICTS an already-published claim says so IN FULL, on its
+    # own key, quoting the claim it supersedes (#3637, roborev job 61). Without this
+    # the reader holds a bundle whose SUMMARY says REMOVED and whose existence says
+    # otherwise, with nothing in either artifact reconciling them.
+    [ -n "${GATE_LOGDIR_SUPERSEDED_CLAIM:-}" ] && printf 'logdir-disposition-superseded: the SUMMARY block for this run claimed "%s" — that claim is SUPERSEDED: the directory was RETAINED, for the reason on the logdir-disposition: line above\n' "$GATE_LOGDIR_SUPERSEDED_CLAIM"
+  } >"$GATE_LOGDIR_CREATED/logdir-disposition.txt" 2>/dev/null
+  return 0
+}
+
+# _logdir_cleanup <exit-status>: the removal itself, run from the single EXIT trap
+# (_gate_atexit) and therefore AFTER the terminal SUMMARY is fully emitted and the
+# heartbeat beater reaped. It can never change the verdict: a failed removal is a
+# note on stderr.
+#
+# It is ALSO the one place the early-exit disposition is supplied, and that is
+# structural rather than incidental: every exit — terminal emit or not — runs this
+# handler, so a NEW early exit added later inherits a correct disposition without
+# calling anything. Nothing outside this function needs to know the LOG_DIR exists.
+#
+# A gate killed by INT/TERM/HUP DOES still run this handler (measured — see
+# _logdir_decide_early_exit), reporting status 0, and its bundle is then retained by
+# the CONTENT test rather than by the status. There is deliberately no signal trap
+# here, and nothing in this file deletes anything on a signal path.
+# shellcheck disable=SC2329  # invoked indirectly via `trap '_gate_atexit' EXIT`
+_logdir_cleanup() {
+  # A backgrounded `( … ) &` pool subshell runs the inherited EXIT trap on its own
+  # exit and must never remove the parent's directory (same reason as _hb_stop).
+  [ "${BASHPID:-$$}" = "$$" ] || return 0
+  # ONCE ONLY, from the top. The early `trap '_logdir_cleanup "$?"' EXIT` is REPLACED
+  # by the composed `_gate_atexit` (which calls this same function), so a re-entry is
+  # not expected — but a second pass over a FAILED removal would publish a "REMOVED"
+  # artifact into a directory that survived, i.e. a bundle whose own reason is false.
+  [ "${GATE_LOGDIR_FINALIZED:-0}" = 1 ] && return 0
+  GATE_LOGDIR_FINALIZED=1
+  [ "${GATE_LOGDIR_DECIDED:-0}" = 1 ] || _logdir_decide_early_exit "${1:-0}"
+  if [ "${GATE_LOGDIR_REMOVE:-0}" != 1 ]; then
+    # A run that DECLARED a removal and never got the clearance — the summary write
+    # failed after the block was assembled, or an exit landed between the decision and
+    # the confirmation — is retaining under a reason its own block contradicts. Correct
+    # it through the ONE supersede mechanism before the artifact is written.
+    if [ "${GATE_LOGDIR_REMOVE_INTENT:-0}" = 1 ]; then
+      _logdir_force_retain "removal was DECLARED but never CLEARED (the summary publication was not confirmed)"
+    fi
+    # RETAINING. The bundle outlives this process, so it must SAY WHY — including on
+    # the early-exit paths, which have no terminal SUMMARY to say it for them.
+    _logdir_publish_disposition
+    return 0
+  fi
+  GATE_LOGDIR_REMOVE=0     # once only
+  [ -d "${GATE_LOGDIR_CREATED:-}" ] || return 0
+  if ! _logdir_rm_guarded "$GATE_LOGDIR_CREATED"; then
+    # The bundle SURVIVED a removal this run's SUMMARY already declared, and the
+    # once-only guard above means nothing will try again. The published line cannot be
+    # retracted, so the surviving bundle carries the correction itself — the same
+    # artifact and the same mechanism every other retention uses (#3637, roborev job 61).
+    _logdir_force_retain "removal was DECLARED but FAILED (the directory is still here)"
+    _logdir_publish_disposition
+    echo "agent-gate: note: could not remove per-run log dir $GATE_LOGDIR_CREATED (#3637)" >&2
+  fi
+  return 0
+}
+
+# CREATION SITE, deliberately HERE — immediately above the EXIT-trap arming and
+# nothing else (#3637, roborev job 66 finding 1). It used to sit ~470 lines up,
+# before every _logdir_* definition, so an INT/TERM/HUP anywhere in that window left
+# the directory behind with no handler able to dispose of it. Nothing in the moved
+# span reads LOG_DIR or GATE_LOGDIR_CREATED at parse time (only function BODIES do,
+# and those resolve at call time), so the creation moves DOWN to the machinery rather
+# than 450 lines of machinery moving UP. This is the FOURTH instance in this one diff
+# of the register-before-create / resource-lifetime family CLAUDE.md documents by
+# name (roborev job 282: round 9 register-before-create, round 14 cleanup-on-signals,
+# job 63 finding 4 the sweep, and now the creation itself).
+# FAIL-CLOSED before anything is derived from it (#3637, roborev job 63 finding 1).
+# An unchecked `mktemp -d` leaves LOG_DIR EMPTY, after which RUN_ID is empty too and
+# every child path this run writes becomes ROOT-LEVEL — `/summary-primary.txt`,
+# `/<component>.log` — while the removal guard correctly refuses an empty path, so
+# nothing reclaims them. Pre-existing (the same line on origin/main was equally
+# unchecked; this diff only changed which variable supplies the parent), and it is the
+# idiom the rest of this file already uses at its checked mktemp sites. Aborting here
+# is the only safe answer: the gate cannot log, and a run that cannot log cannot
+# certify.
+# CONTROL-CHARACTER REFUSAL, at the CREATION SITE — not at the render sites (#3637,
+# roborev job 175 finding 1).
+#
+# THE VECTOR: `TMPDIR=$'/tmp/x\nRESULT: PASS'`. This parent is a PREFIX of every path this
+# run publishes — the SUMMARY's `logs:` and `run-id:`, the heartbeat's own `logs:`, and the
+# bundle's `logdir-disposition.txt` — so a newline in it emits an extra LINE inside the
+# SUMMARY block, and one matching the completion probe's own `RESULT: (PASS|FAIL)` pattern:
+# environment-controlled data forging a terminal verdict.
+#
+# WHY THE INPUT IS REFUSED RATHER THAN THE RENDER SANITISED. `logs:` is PATH-ONLY and
+# byte-identical to its pre-#3637 form BY RULE (#3637/#3312: `scripts/lib/gate-heartbeat.sh`
+# renders the same field name from the same raw variable, and one field name must not carry
+# two grammars). A rewritten path addresses nothing, so scrubbing that line would trade a
+# forged row for a path naming no directory — and it would break the rule the rest of this
+# section rests on. Refusing the hostile INPUT closes the class for `logs:`, for the
+# heartbeat's `logs:`, for `run-id:` and for `logdir-disposition.txt` in ONE place, and it
+# PRESERVES the byte-identical rule instead of carving an exception into it.
+#
+# THE `_summary_block_value` BOUNDARY ON THE TWO NEW KEYS STAYS, as defence in depth: the
+# next writer of a free-text SUMMARY value must not inherit an unsanitised renderer merely
+# because today's input is guarded. AC24 of
+# scripts/tests/test_agent_gate_logdir_cleanup.sh measures that boundary against a copy of
+# this script with THIS refusal defeated, so guarding the input did not make it unmeasurable.
+#
+# Same fail-closed direction as the `mktemp -d` check below: a gate that cannot write a
+# TRUSTWORTHY log path cannot certify, and refusing is strictly better than emitting a block
+# whose own `logs:` line can fake a verdict.
+#
+# The offending value is NOT echoed: a diagnostic reproducing it would forge the very line
+# this refuses — the refuse-don't-quote rule `_summary_block_value` already follows.
+if [ "$(_gate_cntrl_strip "$GATE_LOGDIR_PARENT")" != "$GATE_LOGDIR_PARENT" ]; then
+  echo "agent-gate: REFUSED — the per-run log directory's parent (\$TMPDIR, absolutised) contains a control character, so every path derived from it would forge lines inside the SUMMARY block and could fake a terminal verdict; refusing to run rather than emit a block that cannot be trusted (#3637). REMEDY: unset TMPDIR, or point it at a path with no control characters. The value is deliberately not echoed here — reproducing it would forge the very line this refuses; inspect it with: printf '%s' \"\$TMPDIR\" | od -c" >&2
+  exit 1
+fi
+LOG_DIR=$(mktemp -d "$GATE_LOGDIR_PARENT/agent-gate.XXXXXX" 2>/dev/null) || LOG_DIR=""
+if [ -z "$LOG_DIR" ] || [ ! -d "$LOG_DIR" ]; then
+  echo "agent-gate: FAIL-CLOSED — could not create a per-run log directory under $GATE_LOGDIR_PARENT (mktemp -d failed); refusing to run rather than derive child paths from an empty value (#3637)" >&2
+  exit 1
+fi
+# The ONE recorded identity of the directory this run created. Every removal is
+# guarded against this value, never against a path recomputed at cleanup time.
+GATE_LOGDIR_CREATED="$LOG_DIR"
+# Derived HERE, from the path this run actually created — never recomputed later, and
+# never guessed from a basename by a consumer.
+GATE_LOGDIR_OWNER_FILE="$GATE_LOGDIR_CREATED/$GATE_LOGDIR_OWNER_BASENAME"
+
+# #3800: the START-of-run free-space reading, taken the moment LOG_DIR exists and is
+# VALIDATED, so the terminal `disk-exhaustion:` line can report a start->emit DELTA rather
+# than an instantaneous emit-time read (peers free space between the failure and the emit).
+# Deliberately BEFORE `_logdir_sweep` below: that sweep may unlink aged peer bundles and so
+# FREES space itself, and a start reading taken after it would understate the collapse.
 _disk_capture_start
+
+# Arm the at-exit disposition THE MOMENT the machinery exists — NOT thousands of
+# lines later where the composed `trap '_gate_atexit' EXIT` is armed (#3637).
+#
+# Measured reason: the composed arming point is ~2000 lines below, and the window
+# between the two holds every argv/usage refusal (the AGENT_GATE_*_SELFTEST
+# validators and their `exit 2`s). Those exits ran NO trap at all, so each left an
+# empty husk — the leak this issue exists to close, in the shape hardest to notice
+# because the directory has nothing in it to notice. The creation itself now sits
+# directly above this line so the unhandled window is straight-line code only.
+#
+# bash traps do not compose: the later `trap '_gate_atexit' EXIT` REPLACES this one.
+# That is correct and deliberate — _gate_atexit is a strict SUPERSET (it stops the
+# beater and releases the slot, then calls this same function last) — and it is the
+# reason this handler must stay callable from both. `$?` is expanded when the trap
+# FIRES, so the handler sees the status the gate is exiting with.
+trap '_logdir_cleanup "$?"' EXIT
+
+# The owner marker, written AFTER the trap that disposes of the directory and BEFORE
+# the sweep that reads other runs' markers — the register-before-create ordering this
+# file already follows for every other resource (#3637, roborev job 70 medium 1). It
+# is what makes THIS run's directory `live` to every peer's sweep, and it is
+# best-effort: an unwritable marker leaves this directory `cannot-tell`, which is
+# KEPT, so a failure here can only ever leak an inode.
+_logdir_write_owner
+
+# ONLY NOW the startup sweep, and the ORDER is the point (#3637, roborev job 63
+# finding 4). The sweep scans the shared temp parent and may examine (and unlink) up to
+# GATE_LOGDIR_SWEEP_CAP aged directories, so it is the longest-running thing between
+# this run's mktemp and its first component. Run BEFORE the trap existed, an INT/TERM
+# arriving inside it left THIS run's own fresh directory behind with no handler to
+# dispose of it — the register-before-create family this repo already documents by
+# name (roborev job 282: "round 9 register-before-create, round 14
+# clean-up-on-signals"). This is its third instance, so the rule is worth restating:
+# a resource's cleanup is registered BEFORE the resource is used, not after.
+#
+# Confirmed, not assumed, against the measured signal behaviour: bash RUNS this EXIT
+# trap for an untrapped INT/TERM/HUP with `$?` == 0, so a signal here lands in
+# _logdir_decide_early_exit's status-0 arm, which retains on EVIDENCE. At this point
+# the bundle holds nothing but (at most) this run's own launch artifacts, so the
+# correct disposition is exactly the one it gets — REMOVED as an empty husk. Nothing
+# retainable can exist yet: no component has run and no summary has been written.
+_logdir_sweep
+
+# ===========================================================================
 # ==== BEGIN feature-matrix annotation (#3453) ====
 # The SUMMARY feature-matrix annotation. INLINE here, not a sourced sibling, on purpose:
 # eight hermetic self-tests build a synthetic repo by copying THIS ONE FILE into
@@ -7772,6 +9810,14 @@ _fm_component_class() {
     # invocation" while a child cargo build had in fact run — affirmatively false (roborev
     # job 273, F2).
     tooling-tests) printf 'unobservable:cargo may run inside ~60 nested test scripts (child processes)' ;;
+    # unobservable, for the SAME reason and NOT `no-cargo` (#1698): the guard is a
+    # separate script, so its ONE `cargo metadata --no-deps` runs in a child process
+    # where the unexported interceptors cannot see it. `no-cargo` would be an
+    # affirmatively false claim (cargo DOES run), and `cargo` would render UNDECLARED
+    # on every PASS — the roborev job 273 F2 defect. There is no nameable DRIVER
+    # either: `cargo metadata` is not a build and enables no features, so
+    # `indirect:<driver>` would promise a feature set that does not exist.
+    features-load-bearing) printf 'unobservable:cargo metadata runs inside scripts/ci/check-features-load-bearing.sh (a child process); it is a metadata read, not a build, and enables no features' ;;
     scoped-tests) printf 'cargo' ;;
     # The DYNAMIC --delta entries (roborev job 277 F2). These reach a SUMMARY line via
     # `NAMES+=("<literal>")` in run_delta_*, NOT via COMPONENTS, so classifying only
@@ -7953,6 +9999,47 @@ _record_status_detail() {
 # LENGTH is NOT capped here: a cap would be a SILENT truncation of a disclosure, which is
 # the defect this issue removes. Bounding the value is the WRITER's job, and today's writers
 # need no bound — every detail is a fixed sentence plus a count and a log path.
+# _summary_block_value <text> <noun> <line-kind> <pointer> (#3637, roborev job 173
+# finding 4): THE ONE boundary every FREE-TEXT value rendered into a SUMMARY block passes
+# through. Extracted from _status_detail rather than reimplemented beside it: the #3637
+# `logdir-disposition:` and `logdir-sweep:` keys need exactly this treatment (the sweep line
+# embeds `$GATE_LOGDIR_PARENT`, i.e. `$TMPDIR`, VERBATIM), and a second escaper is a second
+# place for the rule to drift — #3312's ruling is one channel, one boundary, not a per-site
+# escape list to keep complete.
+#
+# TWO OPERATIONS, in this order, and the reasoning for each is in the long block above:
+#   1. STRIP C0 + DEL under LC_ALL=C (`tr -d '[:cntrl:]'`). LF/CR forge rows inside the block
+#      and ESC puts ANSI into text that gets pasted into PR comments; all three are C0. The
+#      C1 residual (U+0080-U+009F) is declared NOT covered, as above.
+#   2. WITHHOLD — never rewrite — a value carrying the completion probe's `RESULT:` token.
+#      A substitution edits the token wherever it occurs, including inside a legitimate
+#      environment-derived path, and would then NAME something that exists nowhere; the
+#      refusal quotes NO part of the token it refuses, because a diagnostic reproducing it
+#      would forge the very line it prevents.
+#
+# The caller supplies the NOUN, the LINE-KIND and the POINTER so the refusal can send the
+# reader somewhere that exists for that field. It supplies no other text: the refusal wording
+# itself stays here, at the boundary, so no call site can weaken it.
+#
+# What it deliberately does NOT touch: the `logs:` line. That field is PATH-ONLY and
+# byte-identical to its pre-#3637 form by design (#3637/#3312, pinned by AC7/AC9 of
+# scripts/tests/test_agent_gate_logdir_cleanup.sh, and the heartbeat's own `logs:` must stay
+# identical to it), and scrubbing it here would give one field name two grammars, which is
+# the ambiguity #3637 removed. Its `$TMPDIR` exposure is closed WHERE THE VALUE ENTERS
+# instead — the LOG_DIR creation-site refusal (roborev job 175 finding 1) rejects a
+# control-bearing parent before `mktemp -d`, using `_gate_cntrl_strip`, THE same
+# control-character definition this boundary strips with.
+# Nor does it touch `<log-dir>/logdir-disposition.txt`: that artifact is not inside a SUMMARY
+# block, and its job is to record VERBATIM what this run decided about the bundle in hand.
+_summary_block_value() {
+  local _bv_v
+  _bv_v=$(_gate_cntrl_strip "${1-}")
+  case "$_bv_v" in
+    *RESULT:*) printf '%s' "[${2:-value} WITHHELD: it carries the completion probe's reserved verdict token (#2908), which on this ${3:-row} would forge a terminal verdict — ${4:-see the component log}]" ;;
+    *)         printf '%s' "$_bv_v" ;;
+  esac
+}
+
 _status_detail() {
   local f
   f=$(_status_detail_file "$1")
@@ -7982,17 +10069,16 @@ _status_detail() {
   # here (pollers outside this repo read these blocks). The cost of the broad trigger is a
   # withheld detail on a pathological filename; the cost of a narrow one is a forged verdict
   # for a consumer nobody surveyed. Only one of those is recoverable by reading the log.
-  local _sd_v
-  _sd_v=$(head -1 "$f" 2>/dev/null | LC_ALL=C tr -d '[:cntrl:]')
   # CHECKED, not assumed. The gate-authored contract above is a property of today's four
   # call sites; a fifth could interpolate something, and this boundary is the one place that
   # notices. It cannot fire on any writer shipping today, which is why its coverage is a
   # SEEDED case in scripts/tests/test_agent_gate_tree_provenance.sh (phase B3) rather than a
   # filename fixture — an untestable guard is one nobody can trust.
-  case "$_sd_v" in
-    *RESULT:*) printf '%s' "[detail WITHHELD: it carries the completion probe's reserved verdict token (#2908), which on this row would forge a terminal verdict — see the component log]" ;;
-    *)         printf '%s' "$_sd_v" ;;
-  esac
+  #
+  # BOTH operations now live in _summary_block_value, the ONE boundary the #3637 logdir keys
+  # share (roborev job 173 finding 4). The rendering for this field is unchanged: same strip,
+  # same refusal, same wording — only the site is shared.
+  _summary_block_value "$(head -1 "$f" 2>/dev/null)" detail row "see the component log"
 }
 
 # _fm_summary_line <name> <status> <time>: the ONE renderer for a SUMMARY component
@@ -8390,7 +10476,7 @@ _census_kind() {
     # selected `.rs` file cannot be read — changes the RATCHET's failure semantics for every
     # diff, which is its own decision with its own risk of reddening correct input. Doing
     # `emitted` properly requires settling that first. Tracked in #3162.
-    file-size|pub-surface|roborev-lints|binding-unwind-profile|delivery-telemetry|tooling-tests|dep-duplicates)
+    file-size|pub-surface|roborev-lints|binding-unwind-profile|delivery-telemetry|tooling-tests|dep-duplicates|features-load-bearing)
                     printf 'gap:shell/python guard prints no AGENT-GATE-CENSUS contract line yet (#3162)' ;;
     *) return 1 ;;
   esac
@@ -8642,10 +10728,17 @@ _census_measure_kind() {
       fi
       bins=${ctally%% *}; cargo_status=${ctally##* } ;;
   esac
-  # The derived `<log>.ansi-stripped` sibling is a full COPY of the component log, and
-  # core-tests' runs to tens of MB — retained, it would silently double the size of the
-  # `logs:` bundle every gate keeps. Removed as soon as both tallies are taken; a failed
-  # removal is not the census's business.
+  # The derived `<log>.ansi-stripped` sibling is a DERIVED DUPLICATE — a full copy of the
+  # component log, tens of MB for core-tests — consumed by the two tallies above and read by
+  # NOTHING afterwards. Removed as soon as both are taken; a failed removal is not the
+  # census's business.
+  #
+  # This used to say "it would silently double the size of the `logs:` bundle every gate
+  # keeps", which is FALSE since #3637: a terminal `RESULT: PASS` REMOVES the bundle (see
+  # `_logdir_decide`), so on the common disposition there is no kept bundle to double. Same
+  # stale-rationale class as the `cli-tests` comment corrected in roborev job 174. The
+  # SURVIVING rationale holds on BOTH dispositions and is the one stated above: retained, the
+  # bundle would carry two copies of every log; removed, the copy was never read by anyone.
   rm -f "$src" 2>/dev/null || true
   case "$kind" in
     libtest)
@@ -10285,6 +12378,10 @@ _hb_stop() {
 # so arming the slot can never silently drop the heartbeat teardown.
 # shellcheck disable=SC2329  # invoked indirectly via `trap '_gate_atexit' EXIT`
 _gate_atexit() {
+  # FIRST statement: $? here is the status the gate is exiting with, and _hb_stop
+  # below clobbers it. _logdir_cleanup needs it to tell a normal, successful,
+  # non-certifying early exit (REMOVE) from a refusal (post-mortem, RETAIN).
+  local _gate_exit_rc=$?
   _hb_stop
   # `_gate_release_slot` is DEFINED thousands of lines below this trap (beside
   # acquire_gate_slot). bash defines functions as it reads the file, so a run that exits
@@ -10305,13 +12402,24 @@ _gate_atexit() {
   if declare -F _gate_admission_capture_close >/dev/null 2>&1; then
     _gate_admission_capture_close
   fi
+  # #3637 LAST: by here the terminal SUMMARY is fully emitted and the beater reaped,
+  # so removing the bundle can neither race an emit nor lose a live artifact. Guarded
+  # for the same "defined further down the file" reason as _gate_release_slot: every
+  # exit before the LOG_DIR block is read has nothing to remove.
+  if declare -F _logdir_cleanup >/dev/null 2>&1; then
+    _logdir_cleanup "$_gate_exit_rc"
+  fi
 }
 
-# Synthetic-identity modes run against a stubbed rundir and never certify a real tree;
-# they get no beater (nothing would ever read it, and a stray background process in a
-# hermetic self-test is noise).
+# The EXIT trap is armed UNCONDITIONALLY (#3637): the synthetic-identity modes create a
+# LOG_DIR like every other run, so they need the same at-exit disposition. This arming
+# SUPERSEDES the LOG_DIR-only trap armed at the #3637 block above (bash traps do not
+# compose) — deliberately, because _gate_atexit is a strict superset of it. Only the
+# BEATER stays conditional below — those modes run against a stubbed rundir and never
+# certify a real tree, so nothing would ever read their liveness, and a stray background
+# process in a hermetic self-test is noise.
+trap '_gate_atexit' EXIT
 if [ -z "${CQLITE_GATE_STUB_RUNDIR:-}" ]; then
-  trap '_gate_atexit' EXIT
   _hb_start
 fi
 
@@ -10491,6 +12599,12 @@ _emit_meta_lines() {
 
 emit_summary() {
   local result="$1"; shift
+  # #3637: decide this run's LOG_DIR disposition BEFORE the block is assembled, so the
+  # block DECLARES what happens to the directory. This records the INTENT ONLY — the
+  # removal is not armed until `_logdir_clear_removal` below, which runs only once this
+  # summary is verified published; an exit in between (a failed write, a signal) then
+  # RETAINS, and _logdir_cleanup corrects the declaration in the surviving bundle.
+  _logdir_decide "$result"
 
   # ---- SHARED FULL-GATE METADATA ASSEMBLY (issue #3755, roborev job 335) ----------
   #
@@ -10546,7 +12660,7 @@ emit_summary() {
       [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
       [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
       _emit_meta_lines ${@+"$@"}
-      echo "logs: $LOG_DIR"
+      _logdir_lines
       echo "summary-file: $SUMMARY_FILE"
       # #3473: declare the liveness mechanism's state in the block itself. A pasted
       # SUMMARY therefore SHOWS whether the beater ran, the same reason #3148 stamps a
@@ -10582,9 +12696,19 @@ emit_summary() {
   fi
   if [ -n "$reason" ]; then
     SUMMARY_WRITE_FAILED=1
+    # #3637: with the caller-known artifact missing, the private bundle is the ONLY
+    # place this run's verdict survives — never remove it. Set before the fallback
+    # blocks below are assembled, so they carry the corrected disposition.
+    _logdir_force_retain "summary write failed #1175"
     # LOUD, on STDERR (survives better than stdout under non-foreground capture).
     echo "⚠️ agent-gate: could not write complete summary file $SUMMARY_FILE ($reason)" >&2
     echo "⚠️ agent-gate: recovery artifact is MISSING — gate result forced to FAIL (#1175)" >&2
+  else
+    # The caller-known artifact is CONFIRMED on disk for THIS run: write rc 0, complete
+    # block, this run's run-id. Only now may the bundle that duplicates it be removed
+    # (#3637, roborev job 61) — this is the single clearance site, and it is deliberately
+    # downstream of every check above rather than beside the decision.
+    _logdir_clear_removal
   fi
 
   # The RESULT printed in any fallback block MUST match the process exit. Once the
@@ -10615,7 +12739,7 @@ emit_summary() {
       [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
       [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
       _emit_meta_lines ${@+"$@"}
-      echo "logs: $LOG_DIR"
+      _logdir_lines
       echo "summary-file: $SUMMARY_FILE (WRITE FAILED — see stderr)"
       echo "RESULT: $emit_result"
       echo "$SUMMARY_END_MARKER"
@@ -10638,7 +12762,7 @@ emit_summary() {
       [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
       [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
       _emit_meta_lines ${@+"$@"}
-      echo "logs: $LOG_DIR"
+      _logdir_lines
       echo "summary-file: $SUMMARY_FILE (WRITE FAILED — see stderr)"
       echo "RESULT: $emit_result"
       echo "$SUMMARY_END_MARKER"
@@ -10725,7 +12849,7 @@ _integrity_fail_block() {
   # hand-rolled no-clobber publish path), so it threads the disk-admission line itself
   # — the same argument, and the same code shape, as the component-set line above.
   if _emit_wants_disk_admission; then printf '%s\n' "$(_disk_admission_meta)"; fi
-  echo "logs: $LOG_DIR"
+  _logdir_lines
   echo "summary-file: $SUMMARY_FILE (NOT rewritten — live peer owns it)"
   echo "integrity-fail-sibling: $sibling"
   echo "RESULT: FAIL"
@@ -10746,6 +12870,10 @@ _integrity_fail_block() {
 # post-drain terminal path (one shared contract).
 _publish_integrity_fail() {
   local reason="$1" comp="$2"; shift 2   # remaining args = SUMMARY_META lines (job-2107 MED#2)
+  # #3637: this path publishes the verdict to the private log + a non-clobbering
+  # sibling and NAMES the logs bundle as a recovery artifact — so the bundle is
+  # load-bearing and is retained whatever the verdict or nesting would otherwise say.
+  _logdir_force_retain "summary-integrity FAIL #2874"
   # RUN_ID is the unique mktemp LOG DIR *path* — basename it so the sibling filename has no slashes
   # (still unique: mktemp -d basenames don't collide). Sibling sits NEXT TO the contended path.
   local sibling="$SUMMARY_FILE.integrity-fail.$(basename "$RUN_ID")"
@@ -12303,14 +14431,14 @@ run_clippy() {
   #     (the OpenTelemetry stack). Keep this in sync with cqlite-core/Cargo.toml when
   #     features are added; the nightly CQLITE_CLIPPY_FULL=1 pass is the drift guard.
   env RUSTFLAGS="-D warnings" cargo clippy -p cqlite-core --all-targets --features \
-"all-compression,arrow,bench-internals,benchmarks,ci_zero_tolerance,cli-helpers,deflate,delta-scan,dhat-heap,docker-integration,enhanced-index-validation,events,experimental,extended-index-validation,fuzz,legacy-heuristics,lz4,parquet,pest,scan-offload-probe,snappy,state_machine,test-coverage-tracking,test-infrastructure,test-property-testing,test-quality-gates,test-schema-validation,tombstones,unit-tests-only,wasm,work-counters,write-support,zstd" \
+"all-compression,arrow,bench-internals,benchmarks,cli-helpers,deflate,delta-scan,dhat-heap,docker-integration,enhanced-index-validation,experimental,extended-index-validation,fuzz,legacy-heuristics,lz4,parquet,pest,scan-offload-probe,snappy,state_machine,test-infrastructure,tombstones,work-counters,write-support,zstd" \
     || return 1
 
   # (3) cqlite-cli: every feature EXCEPT duckdb-tests + observability. Pulls in
   #     parquet/arrow via state_machine and delta-scan via delta-export, so the
   #     normal-build reachable surface stays linted.
   env RUSTFLAGS="-D warnings" cargo clippy -p cqlite-cli --all-targets --features \
-"benchmarks,ci_zero_tolerance,cli-helpers,delta-export,experimental,integration-tests,interactive,state_machine,tui,write-support" \
+"benchmarks,cli-helpers,delta-export,experimental,integration-tests,state_machine,tui,write-support" \
     || return 1
 
   # (4) cqlite-flight + the Python/Node bindings at their DEFAULT features (none of
@@ -18503,6 +20631,170 @@ run_dep_duplicates() {
   echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
+# features-load-bearing: the FEATURES-ARE-LOAD-BEARING guard (issue #1698, epic #1685
+# "config honesty"). scripts/ci/check-features-load-bearing.sh derives every feature
+# DECLARED by every workspace member from `cargo metadata --no-deps` and asserts each
+# one CHANGES SOMETHING: it, or some feature in its closure, has a cfg reference site in
+# its declaring package's sources, enables an optional dependency, enables a feature of
+# an external dependency, or is named in a target's `required-features`.
+# The defect it exists for: thirteen flags across six manifests — `events`,
+# `ci_zero_tolerance` in five manifests, four `test-*` leaves, `sstable-writer`, a CLI
+# `interactive` that sat in `default`, a `cqlite-core/unit-tests-only` forwarded from
+# another member — had ZERO effect of any kind. Enabling any of them changed nothing
+# that is compiled, linked or run, while reading to every human, every reviewer and
+# THIS SCRIPT'S OWN clippy feature enumerations as a switch that selects behaviour.
+# CREDIT FLOWS UP FROM EFFECTS, NEVER DOWN FROM A PARENT: that asymmetry is what makes
+# a dead leaf detectable while a legitimate aggregator passes. `all-compression` has no
+# effect of its own and is credited THROUGH lz4/snappy/deflate/zstd; the four `test-*`
+# leaves were named by `test-infrastructure` and credited by NOTHING. Under a symmetric
+# "referenced somewhere" rule the aggregator laundered all four, which is precisely how
+# they survived. Being ENUMERATED is likewise not an effect — the clippy lists a few
+# thousand lines up NAME features without enabling anything.
+# PREREQUISITES ARE DECLARED AND MANDATORY: cargo AND python3. This component NEVER
+# SKIPs — not for a missing guard script, not for a missing interpreter — because a
+# coverage hole wearing a SKIP's clothes is still a coverage hole (#3522), and it says so
+# in its own diagnostics with a named remedy. Its SELF-TEST is a different lane: it lives
+# in the SKIP-aware tooling-tests component and SKIPs loudly there when python3 is
+# absent, since the guard it exercises cannot run at all on such a box. That split is
+# deliberate — #3522's rule is that a never-SKIPping lane must not be FOLDED INTO a
+# SKIP-aware one, and these are two components.
+# THIS COMPONENT IS INDEPENDENT OF THE GUARD (the pub-surface precedent, #1712 r6 F2 /
+# r7 F3 / r9 F4): PASS requires the guard's AFFIRMATIVE MEASUREMENT LINE matched WHOLE
+# — never a prefix, which tests a spelling rather than a state — and the two counts in
+# it re-derived here, because `N/M` with N < M would mean the guard reported dead
+# features and exited 0 anyway. A zero exit with no measurement is an early return
+# inside the guard, so it is a NAMED FAIL here instead of a vacuous green.
+# That line also DECLARES the residual of the guard's own method (`cfg-site detection:
+# lexical, NON-EXHAUSTIVE …`) and this component REQUIRES the declaration to be present:
+# a guard whose success text quietly stopped stating what it cannot decide would be
+# implying coverage it does not have.
+run_features_load_bearing() {
+  local name=features-load-bearing
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local guard="scripts/ci/check-features-load-bearing.sh"
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+  if [ ! -f "$REPO_ROOT/$guard" ]; then
+    status=FAIL
+    echo ">>> [$name] FAIL: the guard $guard is MISSING (deleted or renamed)."
+    echo "    This component never SKIPs, so an absent guard is breakage, not an"
+    echo "    excusable environment."
+    record_result "$name" "$status" 0
+    echo ">>> [$name] $RECORDED_STATUS (0s)"
+    return 0
+  fi
+  # DECLARED PREREQUISITES, checked HERE so the diagnostic names the real cause rather
+  # than surfacing as "a feature is dead or the guard refused". Both are mandatory and
+  # neither is a SKIP: python3 is the metadata reader and Rust lexer, cargo is the only
+  # source of truth for the feature set.
+  # `type -P`, which searches PATH for a real executable — NEVER the `command -v` form:
+  # this gate defines a shell FUNCTION named cargo (the feature-matrix observer), and that
+  # form finds functions, so below the observer it always answers "present" and the probe
+  # is vacuous. The gate's own B6 lint enforces this and caught exactly that mistake here.
+  # (B6 greps the script textually, so it also matches the forbidden spelling inside a
+  # COMMENT — hence the circumlocution above. Reported to the lead, not fixed here: it is
+  # another component's lint.)
+  local missing_prereq=""
+  type -P cargo >/dev/null 2>&1 || missing_prereq="cargo"
+  type -P python3 >/dev/null 2>&1 || missing_prereq="${missing_prereq:+$missing_prereq and }python3"
+  if [ -n "$missing_prereq" ]; then
+    status=FAIL
+    echo ">>> [$name] FAIL: $missing_prereq is not on PATH."
+    echo "    Both cargo and python3 are DECLARED MANDATORY prerequisites of this"
+    echo "    component (cargo metadata is the only source of truth for the feature set;"
+    echo "    python3 is the reader that parses its JSON and lexes Rust). There is no"
+    echo "    fallback derivation for either, and this component never SKIPs — a verdict"
+    echo "    it did not measure is not a verdict. Remedy: install the missing tool."
+    record_result "$name" "$status" 0
+    echo ">>> [$name] $RECORDED_STATUS (0s)"
+    return 0
+  fi
+  echo ">>> [$name] bash $guard"
+  if bash "$REPO_ROOT/$guard" >"$log" 2>&1; then
+    # AFFIRMATIVE MEASUREMENT, matched WHOLE. Every element of this line is something
+    # the guard can only know AFTER deriving the member set from cargo, walking the
+    # sources and computing every closure, and the two load-bearing counts must be
+    # NONZERO: "0/0 features load-bearing across 0 manifests; 0 files scanned" is the
+    # vacuous measurement itself.
+    local measured
+    measured="$(grep -m1 -E '^features-load-bearing: [0-9]+/[0-9]+ declared features load-bearing across [1-9][0-9]* workspace manifests \([0-9]+ exempt: [^)]*\); [1-9][0-9]* Rust source files scanned for reference sites$' "$log" || true)"
+    # THE CONTRACT LINE IS REQUIRED TOO (#1698, roborev jobs 57/60). The guard makes a
+    # SCOPED no-false-FAIL claim over an ENUMERATED set of recognised cfg spellings, names
+    # the spellings it does NOT see, and lists the routes by which a dead feature can
+    # escape. A guard whose success text quietly stopped declaring those bounds would be
+    # implying coverage it does not have, so a measurement without a contract line is NOT a
+    # PASS here — and the pattern requires the SCOPED wording, so reverting to an
+    # unqualified soundness claim (retracted on job 60) reds this component.
+    local contract
+    contract="$(grep -m1 -E '^features-load-bearing: CONTRACT: NO FALSE FAIL for a gate written in a RECOGNISED spelling .+ and INCOMPLETE \(.+\)\. A gate written in a spelling OUTSIDE that set is NOT SEEN; .+\. Escape routes: .+$' "$log" || true)"
+    if [ -z "$contract" ]; then
+      echo "❌ [$name] the guard printed its measurement but NOT its CONTRACT line:" >&2
+      echo "    expected \`features-load-bearing: CONTRACT: NO FALSE FAIL for a gate written in a RECOGNISED spelling … and INCOMPLETE (…). A gate written in a spelling OUTSIDE that set is NOT SEEN; …. Escape routes: …\`" >&2
+      echo "    That line is where this guard declares what it cannot decide; without it a" >&2
+      echo "    green implies coverage the guard does not have. Refusing to record PASS." >&2
+      measured=""
+    fi
+    if [ -n "$measured" ]; then
+      # THE SHAPE IS NOT ENOUGH — THE COUNTS MUST COHERE. The guard asserts
+      # load-bearing == asserted before printing, so a line whose numerator differs
+      # from its denominator did not come from the guard (a stub, a truncation, a stale
+      # build) — and it would be reporting dead features under a zero exit. Re-derived
+      # here rather than trusted, because that is what makes this component independent.
+      local flb_n flb_d
+      flb_n="$(printf '%s' "$measured" | sed -E 's|^features-load-bearing: ([0-9]+)/[0-9]+ .*|\1|')"
+      flb_d="$(printf '%s' "$measured" | sed -E 's|^features-load-bearing: [0-9]+/([0-9]+) .*|\1|')"
+      if ! { [ "$flb_d" -gt 0 ] && [ "$flb_n" -eq "$flb_d" ]; }; then
+        echo "❌ [$name] the features-load-bearing measurement line is INCOHERENT:" >&2
+        echo "    $measured" >&2
+        echo "    require: asserted($flb_d) > 0 and load-bearing($flb_n) == asserted($flb_d)." >&2
+        echo "    A line matching the wording but not the arithmetic did not come from the" >&2
+        echo "    guard (stub, truncation or stale build). Refusing to record PASS." >&2
+        measured=""
+      fi
+    fi
+    if [ -n "$measured" ]; then
+      status=PASS
+      # Echo it so a pasted gate log shows the check RAN over a real feature set.
+      echo "$measured"
+    else
+      status=FAIL
+      echo "--- [$name] FAILED: the guard exited 0 but printed NO coherent affirmative"
+      echo "    measurement line (\`features-load-bearing: <N>/<N> declared features"
+      echo "    load-bearing across <M> workspace manifests (<K> exempt: …); <F> Rust source"
+      echo "    files scanned for reference sites; cfg-site detection: lexical,"
+      echo "    NON-EXHAUSTIVE (…)\`), so NOTHING was measured and this is NOT"
+      echo "    a PASS (issue #1698). A zero exit with no measurement is an early return"
+      echo "    inside $guard — a real defect in the guard, not a formatting slip; fix the"
+      echo "    guard (or, if its success wording moved, update BOTH it and this component"
+      echo "    AND scripts/tests/test_features_load_bearing_guard.sh)."
+      echo "--- last 60 lines of $log ---"
+      tail -60 "$log"
+      echo "--- end of $name output ---"
+    fi
+  else
+    status=FAIL
+    echo "--- [$name] FAILED: a feature declared in a workspace manifest is DEAD —"
+    echo "    enabling it changes nothing that is compiled, linked or selected — or the"
+    echo "    guard REFUSED over a derivation it could not complete (issue #1698). The"
+    echo "    diagnostic below names each feature and its manifest line."
+    echo "    Remedy, one of: DELETE the feature (and every enumeration that names it —"
+    echo "    this script's clippy feature lists, workflow \`--features\` arguments, the"
+    echo "    CLAUDE.md feature table, docs), or GIVE it an effect (a cfg site in the"
+    echo "    DECLARING package's sources, an optional dependency, or a target"
+    echo "    \`required-features\`). Being NAMED by an aggregator is not an effect."
+    echo "    There is no opt-out: a dead flag is always deletable."
+    echo "--- last 60 lines of $log ---"
+    tail -60 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+}
+
 # tooling-tests: fast shell-tooling regression tests that have no Rust target and
 # no dataset/network needs. Currently scripts/tests/test_agent_gate_summary.sh,
 # which verifies the SUMMARY block survives non-foreground capture (#1175), and
@@ -18562,6 +20854,25 @@ run_dep_duplicates() {
 # cannot come from a matcher that matches nothing. It DECLARES its narrowing at run time: it
 # guards ONE file, and scripts/flow/claim.sh + scripts/flow/roborev-review-oracles.sh carry the
 # same shape UNGUARDED. Hermetic: no cargo, no datasets, no network, never invokes the gate.
+# Also runs scripts/ci/check-sigpipe-sites.sh (#4061 AC4) — the CLASS RATCHET for that same
+# defect across EVERY git-tracked scripts/**/*.sh, so a NEW `printf | grep -m1` / `| head`
+# site REDS rather than shipping. The subject set is DERIVED AT RUN TIME from the git index
+# (never a curated path list) and the rule is not re-implemented: guard and #3803 suite SOURCE
+# the one matcher in scripts/tests/lib/sigpipe-matcher.sh, which the #3803 suite's 33 cases pin.
+# It is a RATCHET because 113 of 193 subjects already carry >=1 shape match (2340 in all) and
+# most are presumably the matcher's DECLARED false-positive classes, so a hard whole-tree zero
+# would red on largely correct code; the baseline scripts/ci/sigpipe-sites-baseline.txt records
+# PER-FILE COUNTS AND NO LINE NUMBERS (#4061's own pinned site drifted from :3329 to :5392 in two
+# days) and `--regenerate` is the ONLY way an existing site is tolerated. FAILs on an increase or
+# on any match in an unlisted file; every unmeasurable state (no matcher, no git, an INERT
+# matcher, a missing/ungrammatical/truncated baseline, a subject set below the non-vacuity floor)
+# is a REFUSAL naming cause and remedy, never a SKIP and never a pass. No bypass env var.
+# Also runs scripts/tests/test_scripts_sigpipe_ratchet.sh (#4061), that ratchet's self-test with
+# teeth: 26 cases driving every FAIL and REFUSAL path over per-case scratch GIT repos built from
+# the real tracked subject set, including the two negative controls that plant a piped builtin
+# writer and assert the guard exits non-zero AND NAMES THE PLANTED FILE, the converse (a new
+# CLEAN script must pass), and an INERT matcher REFUSING rather than reporting zero sites. It
+# mutates no tracked file. Hermetic: git + awk only, no cargo, no datasets, no network.
 # Also runs scripts/tests/test_gate_component_verdict.sh (#3750), the non-vacuity proof
 # for the split of COMPLETION from VERDICT: 106 cases (per-section floors) over
 # scripts/gate-component-verdict.sh
@@ -18586,6 +20897,12 @@ run_dep_duplicates() {
 # fetch, broken/empty/garbage/absent baseline, deliberate removal, no skew, lite leniency)
 # is planted in a throwaway git repo with a LOCAL bare origin and must be NAMED, not just
 # red. Hermetic: no network (path remote), no cargo, no #1825 slot.
+# Also runs scripts/tests/test_features_load_bearing_guard.sh (#1698), the non-vacuity
+# proof for the features-load-bearing component: 64 cases over throwaway fixture
+# workspaces, each criterion of the predicate pinned by a green/red differential pair,
+# every negative case required to NAME the planted feature, and an EXACT case count (a
+# floor below the real count lets one case be deleted silently — #3544's lesson applied
+# to the suite that is its own subject). It needs cargo and nothing else.
 # Also runs scripts/tests/test_pub_surface_guard.sh (#1712), the non-vacuity proof for
 # the pub-surface component: 42 cases driving scripts/ci/check-pub-surface.sh through
 # 10 greens, 30 reds, the usage case and the kill-safety case, substituting the artifact
@@ -18616,6 +20933,24 @@ run_dep_duplicates() {
 # two defects landed inside the two prior fix rounds — the #3229 `census-exclusion:` precedent),
 # so this file measures BEHAVIOUR against real code and nothing here depends on it; mechanization
 # is #3499. Hermetic: temp dir only, no cargo, no datasets, no network, never invokes the gate.
+# Also runs three #3436 suites, all hermetic and python3-free, so they run BEFORE this
+# component's python3 gate:
+#   * scripts/tests/test_lane_lock.sh                  — the machine-local lane-directory
+#                                                        lock (scripts/flow/lane-lock.sh)
+#   * scripts/tests/test_advertised_collision_scan.sh   — the ADVERTISED-COLLISION SCAN
+#                                                        (the coordination lead's
+#                                                        deliverable 2). It is NOT AC5 and
+#                                                        pins nothing in claim.sh; an
+#                                                        earlier version of this comment
+#                                                        said it did, sending a reader
+#                                                        chasing an AC5 failure to the
+#                                                        wrong suite.
+#   * scripts/tests/test_claim_lock.sh                  — the claim lock, and THE suite that
+#                                                        pins #3436 AC5/AC6 (the
+#                                                        `lane-lock=` warning field and the
+#                                                        three-way legacy-branch refusal).
+#                                                        Moved ahead of the python3 gate for
+#                                                        the same reason as the other two.
 # Also runs scripts/tests/test_dep_duplicates_ratchet.sh (#1700), the non-vacuity proof
 # for the ADVISORY dep-duplicates component: its cases drive
 # scripts/ci/check-dep-duplicates.sh over PLANTED cargo-tree output (shim `cargo` +
@@ -18736,6 +21071,28 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_ci_one_shot_smoke_no_abort.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (ci-one-shot-smoke no-abort guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # #3637: the per-run LOG_DIR lifecycle. Hermetic (its own scratch TMPDIR + a fake
+  # checkout, driving the no-cargo --lite-aggregate-selftest / --emit-summary-selftest /
+  # integrity-selftest paths), no datasets/network/cargo. Pins that a PASS run removes
+  # its bundle, that every non-PASS verdict AND the #2874 no-clobber / private-summary
+  # shapes RETAIN it with a named reason, that AGENT_GATE_KEEP_LOGS=1 suppresses both
+  # halves, and that the startup age sweep removes an aged dir (mtime SYNTHESISED with
+  # touch, never waited for) while leaving a fresh one and any non-gate-shaped name
+  # alone. A weakened assert here means either a five-figure inode leak returns or a
+  # failed gate loses the evidence bundle its own SUMMARY points at. A failure FAILs the
+  # component, mirroring the keyspace-scoping guard.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_logdir_cleanup.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_logdir_cleanup.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (agent-gate LOG_DIR cleanup guard); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
@@ -20186,6 +22543,39 @@ run_tooling_tests() {
     return 0
   fi
 
+  # the #4061 CLASS RATCHET: no NEW piped-builtin-writer site anywhere under scripts/**. The
+  # subject set is derived at run time from the git index and the rule is sourced from the one
+  # matcher the #3803 suite above pins, so this cannot drift from it. FAILs on an increase or on
+  # any match in a file the baseline does not list; an unmeasurable run REFUSES (exit 3) naming
+  # its cause. Needs git + awk only.
+  echo ">>> [$name] bash scripts/ci/check-sigpipe-sites.sh"
+  if ! bash "$REPO_ROOT/scripts/ci/check-sigpipe-sites.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (sigpipe-site class ratchet #4061); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # and that ratchet's SELF-TEST WITH TEETH (#4061): a green ratchet run proves nothing by
+  # itself, so every FAIL and REFUSAL path is driven on PLANTED input in per-case scratch git
+  # repos (no tracked file is mutated). The two central cases assert the guard exits non-zero AND
+  # NAMES the planted file.
+  echo ">>> [$name] bash scripts/tests/test_scripts_sigpipe_ratchet.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_scripts_sigpipe_ratchet.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (sigpipe-site ratchet self-test #4061); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
   # the #3750 split of COMPLETION from VERDICT: scripts/gate-component-verdict.sh plus
   # the two DOCUMENTED text-completion grammars it sits beside. Pins the case the lead
   # named — a COMPLETED `--only` run whose component SKIPped is NOT a pass — and that the
@@ -20260,6 +22650,112 @@ run_tooling_tests() {
     record_result "$name" "$status" "$((end - start))"
     echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
+  fi
+
+  # features-are-load-bearing guard self-test (#1698): needs cargo (which this
+  # component's host always has) and nothing else — no datasets, no network. Proves
+  # scripts/ci/check-features-load-bearing.sh actually FIRES, and fires for the RIGHT
+  # reason: every criterion of its predicate is pinned by a GREEN/RED differential PAIR
+  # over a throwaway fixture workspace (a green alone is satisfiable by a guard that
+  # credits everything, a red alone by one that credits nothing), and every negative
+  # case requires the diagnostic to NAME the planted feature — a bare non-zero exit is
+  # produced just as well by an unrelated silent abort. The incident class it must red
+  # on is a dead LEAF named only by an aggregator, i.e. that credit does not flow DOWN.
+  # Its fixture reproduces in miniature every shape the guard has been wrong about
+  # (roborev job 50): a renamed cross-member dependency key, a weak `dep?/feature` edge
+  # both standalone and alongside its activation, a build script, and a NESTED MEMBER
+  # sitting in the outer member's own tests/ directory — the overlap the real workspace
+  # has between the root package's tests/ and cqlite-integration-tests. Five further
+  # cases (job 52) pin the LEXICAL pass and the ANCHORED cfg heads: a
+  # `doc(cfg(feature = ...))` in a cfg_attr tail, a raw/byte string carrying a whole cfg
+  # attribute, a local `var("CARGO_FEATURE_X")` with no proven `use std::env::var`, and a
+  # redundant dependency-feature edge (external and workspace) each confer NOTHING. Every
+  # one was MEASURED to pass on the pre-fix guard, so each is a real differential rather
+  # than a case that would green either way. Three more (job 55) pin the ANCHORED
+  # build-script env API (a local `mod env`, and `my_env::var`, confer nothing), the
+  # REGRESSION that a non-weak edge to an OPTIONAL dependency stays load-bearing even
+  # when the forwarded feature is already enabled, and the guard's DECLARED orphan-file
+  # residual — that last one asserts the success line NAMES the behaviour it exhibits, so
+  # the declaration cannot drift from the code. Four more (job 57) pin THE CONTRACT: two
+  # SOUNDNESS cases (a build script's helper-module env read, and a non-member path
+  # dependency sharing a member's package name) each MEASURED to FAIL on the previous
+  # guard — those were false FAILs, the direction the contract forbids — plus two more
+  # declared escape routes, each asserting both that the behaviour occurs AND that the
+  # contract line names it. Round 5 (job 58) made the PUBLISHED contract true: eleven
+  # further measured differentials, all of them false FAILs, covering six
+  # `CARGO_FEATURE_*` spellings, a bare `CARGO_FEATURE_` prefix, an out-of-tree
+  # `#[path]` module, a nested-member helper reached by the outer target, and THE
+  # ASYMMETRY itself — three differently-ambiguous files that must all credit, asserted
+  # by count, because "when ownership is ambiguous, CREDIT" is the invariant every other
+  # case rests on and the one a refactor would most easily break. Round 6 (job 60) pins
+  # the three bounded recogniser fixes (a cfg in a cfg_attr TAIL, whitespace in the
+  # attribute head, decoded string escapes), the two NOT-SEEN spellings the scoped claim
+  # names (a macro-expanded feature name, a runtime-built env key — both RED, both
+  # declared), and THE CLAIM ITSELF: the success output must state the scoped
+  # no-false-FAIL claim, ENUMERATE the recognised spellings, say what is NOT SEEN, and
+  # contain no form of the word "sound" — the unqualified soundness claim was retracted
+  # after six rounds of witnesses, and its return is a test failure, not a wording nit.
+  # Rounds 7-8 (jobs 62/64) add the gate-infrastructure cases: anchored/derived directory
+  # pruning (a member's own `target/` is source; cargo's reported target_directory is not),
+  # crediting at the cfg_attr recursion bound, all three `cfg!` delimiters, and a
+  # STRUCTURAL assert that this very invocation stays inside its `command -v python3`
+  # guard. Round 9 (job 65) adds the two fail-closed/soundness cases: an UNREADABLE source
+  # directory is a NAMED refusal rather than a silent omission (os.walk swallowed the
+  # error, so a live feature whose only site lived there was reported dead), and cargo's
+  # env-name normalization is matched exactly, so a punctuation-bearing feature name is
+  # credited. Round 10 (job 71) makes that traversal case EUID-INDEPENDENT — it induced
+  # the error with mode bits, which ROOT IGNORES, so this mandatory suite red in a root
+  # container while the guard was correct; it now exceeds PATH_MAX instead, verified to
+  # behave identically as root and as an unprivileged user. Also: Rust's whitespace set is
+  # Pattern_White_Space, not ASCII's, and each of the six CARGO_FEATURE_* spellings is now
+  # counted as its own case with the LIST asserted, since one shared `ok` let a deleted
+  # spelling escape the exact-count protection. Round 11 (job 72) is the last: the
+  # build-script scan DERIVES each declared name's env spelling from the metadata instead of
+  # parsing a suffix (so a Unicode name is credited, and cargo's grammar is no longer
+  # modelled at all), and dependency activations are tracked as (package, key) PAIRS because
+  # a key is package-local. Job 93 closes the last ownership hole: a `.rs` file that NO
+  # TARGET covers credits EVERY workspace member, not just its containing members — a
+  # shared module outside every member directory had no container and so was credited to
+  # nobody. Still no `#[path]`/`include!` resolution, by design. Job 110 closes the adjacent
+  # silent skip: a symlinked directory resolving OUTSIDE the repository, inside a target's
+  # source tree, is now a NAMED REFUSAL rather than skipped (it could hold a
+  # `#[path]`-included gate) — scoped to target source trees so it cannot red on
+  # `node_modules`, and measured to fire on ZERO of this checkout's 33 symlinks. Job 112
+  # applies that same boundary at the FILE level (a symlinked `.rs` was canonicalized and
+  # opened) and DECLARES the case that is genuinely out of bounds: a module reached by an
+  # explicit out-of-repository `#[path]`/`include!` is never visited, so it joins the
+  # NOT-SEEN spellings on the contract line rather than being resolved. Every fixture is a LOCAL path workspace with no registry dependency and every
+  # in-place edit goes through python3 helpers rather than `sed -i`, so the suite runs
+  # offline (verified under CARGO_NET_OFFLINE=1) and portably — this component is mandatory
+  # and must depend on neither a network nor a GNU userland.
+  # Each case SUBSTITUTES THE ARTIFACT (the guard is COPIED into the fixture's own
+  # scripts/ci/) because the guard has no test-only seam and must never grow one.
+  # SKIP-AWARE, LOUDLY, and that is the point (roborev job 62): this suite drives
+  # scripts/ci/check-features-load-bearing.sh, whose reader IS python3, so on a box
+  # without python3 its SUBJECT cannot run at all and there is nothing to exercise. This
+  # component is documented SKIP-aware for exactly that situation, and hard-FAILing here
+  # converted a SUPPORTED SKIP into a red gate of record for a reason the component
+  # denied. The MANDATORY half lives where it belongs — the `features-load-bearing`
+  # component declares cargo AND python3 as prerequisites and FAILs (never SKIPs)
+  # without them — so the never-SKIPping lane is a SEPARATE component and is not folded
+  # into this SKIP-aware one (#3522).
+  if command -v python3 >/dev/null 2>&1; then
+    echo ">>> [$name] bash scripts/tests/test_features_load_bearing_guard.sh"
+    if ! bash "$REPO_ROOT/scripts/tests/test_features_load_bearing_guard.sh" >>"$log" 2>&1; then
+      status=FAIL
+      echo "--- [$name] FAILED (features-load-bearing guard self-test #1698); last 40 lines of $log ---"
+      tail -40 "$log"
+      echo "--- end of $name output ---"
+      end=$(date +%s)
+      record_result "$name" "$status" "$((end - start))"
+      echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+      return 0
+    fi
+  else
+    echo ">>> [$name] SKIP scripts/tests/test_features_load_bearing_guard.sh (no python3 —"
+    echo "    the guard it exercises is python3-based, so its subject cannot run on this"
+    echo "    box; the features-load-bearing component itself FAILs here with a named"
+    echo "    remedy, which is where that requirement is enforced)"
   fi
 
   # nested/concurrent-gate isolation regression self-test (#2874): the concurrency
@@ -20529,7 +23025,217 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # PLATFORM GATE for the two #3436 suites below (roborev round 28, Medium). macOS is a
+  # FIRST-CLASS gate host — this script carries `Darwin) … taskpolicy -c utility`, a BSD
+  # `stat` branch, a /bin/bash-3.2 floor, and scripts/tests/test_agent_gate_tree_portability.sh
+  # exists solely because a GNU-only construct shipped without a macOS path. The lane lock is
+  # Linux-`/proc`-SPECIFIC BY DESIGN: its holder identity is boot-id + `/proc/<pid>/stat`
+  # start-ticks, and on a host without /proc `acquire` REFUSES with
+  # reason=unresolved-identity. test_lane_lock.sh is WHOLLY that subject — every case asserts
+  # real acquisitions against real /proc identities — so unguarded it would FAIL
+  # `tooling-tests` on every macOS gate host.
+  #
+  # SCOPED TO THIS ONE SUITE (#3436, roborev round 30). An earlier revision also skipped
+  # test_advertised_collision_scan.sh here, but only ONE of its 32 cases touches the lane lock
+  # (TEST 9's lock-record clause); the rest are pure git + filesystem and are exactly the
+  # portability coverage a macOS run exists to provide. That skip deleted all of it, and was
+  # inconsistent with how the same round scoped test_claim_lock.sh to two tests instead of
+  # muting the file. The condition now lives INSIDE that suite, next to the clause it guards.
+  #
+  # THIS IS A SKIP, AND IT IS NOT A COVERAGE HOLE WEARING A SKIP'S CLOTHES. The distinction
+  # CLAUDE.md draws is whether something COVERABLE is being excused: here the subject does not
+  # exist on the platform — the feature is documented as unavailable and its own contract on
+  # such a host is a refusal — so there is no behaviour to cover, as against `node-bindings`,
+  # where the suite would run fine given node. It is DECLARED in the log on every run, for the
+  # same reason flight-tests prints what it does not execute: a lane that omits coverage
+  # silently is indistinguishable from one that covers it.
+  #
+  # Keyed on the gate's OWN `_AGENT_GATE_OS`, which honours AGENT_GATE_TEST_OS — an EXISTING
+  # seam (used by the summary/mold/perf paths), so the guard is exercisable on Linux instead
+  # of being a branch nobody can reach. NOT a bare `[ -d /proc ]` probe: a capability test
+  # that misfires on Linux would silently disable both suites, which is the failure mode this
+  # comment is warning about, and it would be invisible precisely where it matters.
+  if [ "$_AGENT_GATE_OS" != "Linux" ]; then
+    echo ">>> [$name] DECLARED SKIP (#3436): test_lane_lock.sh NOT executed on $_AGENT_GATE_OS"
+    echo ">>> [$name]   the machine-local lane lock is Linux-/proc-specific by design (boot-id + /proc/<pid>/stat"
+    echo ">>> [$name]   start-ticks); on a host without /proc \`acquire\` refuses with reason=unresolved-identity,"
+    echo ">>> [$name]   so there is no behaviour to assert. Every OTHER tooling-tests suite still runs here."
+  else
+
+    # machine-local lane-lock regression suite (#3436): hermetic (mktemp lane roots, real
+    # `sleep` processes for liveness, no python3/cargo/gh/git/network/datasets, seconds).
+    # Pins scripts/flow/lane-lock.sh, the lock that refuses a SECOND LOCAL SESSION in an
+    # occupied lane directory — the collision `refs/claims/issue-<N>` cannot stop, because
+    # its holder identity is machine+actor and two Claude sessions on one box share both.
+    # #3436 AC4 requires coverage of BOTH directions with neither passing by doing
+    # nothing, so the suite asserts the OCCUPIED line names the FIRST holder's pid, that a
+    # reclaim actually REWROTE the record and logged the displaced token + liveness +
+    # reason, and that every UNKNOWN-* refusal left the record BYTE-IDENTICAL (a genuine
+    # byte comparison in every one of those cases since #3436 FIX 13c — this sentence was
+    # written when only the duplicate-key case compared bytes and the rest compared the
+    # holder token, so a refusal that rewrote acquired-ts would have passed). Placed
+    # BEFORE the python3 gate because it needs no python3 and must never be reached only
+    # on hosts that happen to have one. A failure FAILs the component, mirroring the
+    # keyspace-scoping guard.
+    echo ">>> [$name] bash scripts/tests/test_lane_lock.sh"
+    if ! bash "$REPO_ROOT/scripts/tests/test_lane_lock.sh" >>"$log" 2>&1; then
+      status=FAIL
+      echo "--- [$name] FAILED (machine-local lane-lock regression suite #3436); last 40 lines of $log ---"
+      tail -40 "$log"
+      echo "--- end of $name output ---"
+      end=$(date +%s)
+      record_result "$name" "$status" "$((end - start))"
+      echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+      return 0
+    fi
+
+  fi
+
+  # advertised-collision scan guard (#3436, the coordination lead's deliverable 2 --
+  # NOT AC5, which is the `claim.sh claim` lane-lock warning and is pinned by
+  # test_claim_lock.sh): pins scripts/flow/advertised-collision-scan.sh, which reports
+  # the machine-visible signature of an ADVERTISED collision window -- board
+  # Status=Ready AND a pushed issue-<N>-* branch AND no refs/claims/issue-<N>, three
+  # facts ANDed. Measured instance: #3393 ran 20+ commits in exactly that state after a
+  # legitimate release-on-finalize while the board invited a second claimant. The suite
+  # pins each fact's absence separately (a detector firing on two of three facts fails),
+  # every unmeasurable input landing on exit 1 WITH the input named, that the tool never
+  # exits 0, and that it mutates nothing. Same
+  # hermetic, python3-free profile as the lane-lock suite above. A failure FAILs the
+  # component, mirroring the keyspace-scoping guard.
+  echo ">>> [$name] bash scripts/tests/test_advertised_collision_scan.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_advertised_collision_scan.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (advertised-collision scan guard #3436 — the scan, NOT AC5; AC5 is pinned by test_claim_lock.sh); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # claim-lock suite (#3436 FIX 13d): it needs bash + git + coreutils and NO python3, and
+  # it is the suite that pins #3436 AC5/AC6 — so leaving it in the post-python3 chain meant
+  # the AC5/AC6 coverage silently did not run on a python3-less host. That is verbatim the
+  # rationale used to place the two suites above ahead of this gate.
+  # finalize teardown guard (#3436): pins that finalize-cleanup.sh RELEASES the lane lock
+  # lease-checked before removing the worktree, and REFUSES (exit 6) when the lock holds a
+  # different incarnation than --lane-lease named. Needs bash + coreutils only — no python3,
+  # no git, no network — so it sits above the python3 gate with its siblings. finalize-cleanup
+  # had NO suite at all before this; the orphaned-lock bug it covers was invisible.
+  # lane-lock pre-commit hook (#3436): the END-TO-END control the wiring-evidence ruling asked
+  # for — a second entrant is REFUSED at the act that caused the incident. Exercises the REAL
+  # hook against a REAL git repo laid out as a lane with a REAL live peer process; bash + git
+  # only, no python3, so it sits above the python3 gate with its siblings.
+  # PLATFORM GUARD (#3436, roborev job 446 Medium): BOTH suites below drive
+  # scripts/flow/lane-lock.sh, whose identity is boot-id + /proc/<pid> start-ticks, and the
+  # pre-commit suite reads /proc directly. On a host without /proc `acquire` refuses with
+  # reason=unresolved-identity, so there is no behaviour to assert and the suites would red on
+  # correct input — the guard agents learn to waive. Same `_AGENT_GATE_OS` key and same
+  # DECLARED-SKIP idiom as the test_lane_lock.sh guard above, so the narrowing is announced at
+  # run time rather than inferred, and it stays exercisable on Linux via AGENT_GATE_TEST_OS.
+  if [ "$_AGENT_GATE_OS" != "Linux" ]; then
+    echo ">>> [$name] DECLARED SKIP (#3436): test_lane_lock_precommit_hook.sh and test_finalize_cleanup_lane_lock.sh NOT executed on $_AGENT_GATE_OS"
+    echo ">>> [$name]   both drive the Linux-/proc-specific machine-local lane lock; every OTHER tooling-tests suite still runs here."
+  else
+
+  echo ">>> [$name] bash scripts/tests/test_lane_lock_precommit_hook.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_lane_lock_precommit_hook.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (lane-lock pre-commit enforcement #3436); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  echo ">>> [$name] bash scripts/tests/test_finalize_cleanup_lane_lock.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_finalize_cleanup_lane_lock.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (finalize teardown lane-lock release #3436); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  fi
+
+  echo ">>> [$name] bash scripts/tests/test_claim_lock.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_claim_lock.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (claim-lock suite #3436 AC5/AC6); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # cqlite-flight allocator CONFINEMENT guard + its positive control (#3997, R4.1/R5.1).
+  # ABOVE the python3 gate on purpose: both need nothing beyond bash + git + grep, and
+  # folding a never-SKIPping suite into a SKIP-aware block would be a coverage hole
+  # wearing a SKIP's clothes (#3522's ruling). Static source/manifest scan, ~0.3s + ~2s.
+  # What it pins: a `#[global_allocator]` is PROCESS-WIDE, and the whole design of #3997
+  # rests on the one install site living in cqlite-flight/src/main.rs, which rustc compiles
+  # into the BIN target alone — that is what keeps jemalloc out of the library every
+  # embedder, binding and integration test links, and out of the memory ratchets that
+  # install their OWN allocator in their OWN test binaries. Nothing about that is enforced
+  # by the compiler: a later "move it to lib.rs for convenience" would build fine and
+  # silently impose an allocator on every consumer. It also asserts no manifest outside
+  # cqlite-flight names tikv-jemallocator, and that every cqlite-flight dependent links the
+  # LIBRARY target (`artifact`/`bin` refused). Every occurrence is CLASSIFIED, and an
+  # unrecognised shape is a named FAIL rather than a skipped line. The selftest is the
+  # positive control — 21 cases over scratch git trees, 2 green controls so a
+  # refuse-everything guard cannot satisfy the 17 reds, each red required to NAME its
+  # planted defect. A failure FAILs the component, mirroring the guards above.
+  echo ">>> [$name] bash scripts/tests/test_flight_allocator_confinement.sh; bash scripts/tests/test_flight_allocator_confinement_selftest.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_flight_allocator_confinement.sh" >>"$log" 2>&1 ||
+     ! bash "$REPO_ROOT/scripts/tests/test_flight_allocator_confinement_selftest.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (flight allocator confinement #3997); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # cqlite-flight LINKED-allocator guard (#3997, R1.1/R1.2/R2.1). THE gate-enforcing
+  # surface for the jemalloc mechanism, and it is here because nothing else runs it: the
+  # cargo-native test expressing the same contract
+  # (cqlite-flight/tests/issue_3997_allocator_surface.rs) is executed by NO component —
+  # `flight-tests` runs cqlite-flight at `--lib --bins` only and censuses the ~42
+  # integration `--test` targets it does not run (#3384). This guard also covers a property
+  # no cargo test can reach: what is actually LINKED INTO the binary. Two DEBUG builds
+  # (`--features jemalloc`, then default features, which is the feature set other components
+  # already built, so it is warm) and per arm: the symbol table must / must not carry
+  # jemalloc symbols, and `--version` must report the matching `allocator:` line. The arms
+  # are each other's control — a matcher that matches everything satisfies the positive arm
+  # alone, one that matches nothing satisfies the negative arm alone. Internally SKIP-aware
+  # and always NAMING the cause (off-Linux printing the actual `uname -s`; no cargo/cc/make/
+  # symbol tool/bounded `timeout`; unparseable symbol output), while a FAILING cargo build is
+  # a FAIL, not a skip. Measured 5.3s warm on a fleet box. A failure FAILs the component.
+  echo ">>> [$name] bash scripts/tests/test_flight_allocator_link.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_flight_allocator_link.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (flight linked-allocator guard #3997); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -20539,7 +23245,7 @@ run_tooling_tests() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_agent_gate_disk_admission.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/tests/test_drive_issue_state.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_premerge_review_binding.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh; bash scripts/tests/test_agent_gate_census.sh"
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_agent_gate_disk_admission.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claude_auth_capability.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/tests/test_drive_issue_state.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_premerge_review_binding.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh; bash scripts/tests/test_agent_gate_census.sh"
   if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_notify.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_notify_contract.sh" >>"$log" 2>&1 &&
@@ -20549,7 +23255,7 @@ run_tooling_tests() {
      bash "$REPO_ROOT/scripts/tests/test_bootstrap_agent_machine.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_perf_capability.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_perf_capability_bootstrap.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_claim_lock.sh" >>"$log" 2>&1 &&
+     bash "$REPO_ROOT/scripts/tests/test_claude_auth_capability.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_claim_heartbeat.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_drive_issue_state.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/flow/tests/claim-resume.test.sh" >>"$log" 2>&1 &&
@@ -20741,6 +23447,14 @@ run_file_size() {
       # that the ratchet was NOT enforced, and over how many files.
       _record_status_detail "$name" \
         "CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); ${#grew[@]} over-threshold file(s) grown — see file-size.log under logs:"
+      # THE BUNDLE IS NOW LOAD-BEARING, SO PIN THE RETENTION (#3637, roborev job 173
+      # finding 1). `OPT-OUT` is NON-FAILING, so this run can and does reach
+      # `RESULT: PASS` — and #3637 removes the bundle on a terminal PASS. The detail above
+      # points at `file-size.log` under `logs:` BECAUSE #3402/#3401 moved the grown-file
+      # NAMES there deliberately, so on the one run where the disclosure matters the pointer
+      # would dangle: `logs:` resolves to nothing and the names are gone from every
+      # reachable artifact. Through the ONE force-retain mechanism, with a NAMED reason.
+      _logdir_force_retain "file-size OPT-OUT disclosure #3402 (the grown-file names live in file-size.log inside this bundle; a removal-on-PASS would delete the only artifact that carries them)"
       _fs_emit "$log" ">>> [$name] ${#grew[@]} over-threshold file(s) grew; ALLOWED via CQLITE_ALLOW_FILE_GROWTH=1:"
       for line in ${grew[@]+"${grew[@]}"}; do
         _fs_emit "$log" "      $line"
@@ -20922,6 +23636,14 @@ run_file_size() {
     # nothing borrowed from the environment.
     local _fs_detail_where=""
     [ "$sib_ok" = 1 ] && _fs_detail_where=" — see file-size.persistence-error.log under logs:"
+    # SAME PIN, SAME REASON, ONE BRANCH OVER (#3637, roborev job 173 finding 1). This arm's
+    # details also point "under logs:", at a sibling that is this failure's ONLY durable
+    # copy — stdout reaches gate.log alone, the file agents are told never to read. `status`
+    # is FAIL here, so today's verdict arm would retain anyway; the pin is what makes that
+    # true BY DECISION rather than as a side effect of the aggregate, and it is what names
+    # the reason in the block. Pinned even when the sibling could NOT be written in full:
+    # what survived is then the most complete copy there is.
+    _logdir_force_retain "file-size log-persistence FAILURE #3401/#3402 (the diagnostic, including the grown-file names, is in file-size.persistence-error.log inside this bundle)"
     if [ "$ratchet_verdict" = FAIL ]; then
       _record_status_detail "$name" \
         "TWO failures: a REAL size-ratchet violation AND a log-persistence failure ($log_persist_err)$_fs_detail_where"
@@ -24297,9 +27019,17 @@ dispatch_component() {
   # parse a stripped COPY that _ansi_stripped_log writes beside the log, so cleaning
   # only the originals leaks two files per gate run into TMPDIR. NOTE: no apostrophes in
   # this comment — the cli-tests component body is a single-quoted `bash -c` string, so one
-  # would terminate it (it did, first try). The lane logs of the other components
-  # live under $LOG_DIR, which is retained deliberately as the `logs:` bundle; these
-  # two bare mktemps are the only ones nobody else collects.
+  # would terminate it (it did, first try). The lane logs of the other components live
+  # under $LOG_DIR, whose lifetime is the #3637 disposition: REMOVED at exit on a
+  # terminal PASS, RETAINED with a NAMED reason on its own `logdir-disposition:` key
+  # otherwise (every non-PASS verdict, no terminal verdict at all, the file-size
+  # OPT-OUT/persistence disclosures, --only, the opt-out). Either way $LOG_DIR is
+  # ACCOUNTED FOR by that mechanism and these two bare mktemps are not: they sit
+  # OUTSIDE it, in the shared tmp, so nothing collects them and nothing removes them
+  # -- which is why this block cleans up after itself. The rationale is the ABSENCE of
+  # an owner, not a contrast with a retained bundle (#3637, roborev job 174 finding B:
+  # the previous wording claimed $LOG_DIR "is retained deliberately", which a terminal
+  # PASS now makes false, and a false rationale in a comment is worse than none).
   trap "rm -rf \"$_cli_tmp\"" EXIT
 
   _fm_observe_child cli-tests test --package '"$ct_pkg"'
@@ -24349,6 +27079,7 @@ dispatch_component() {
     binding-unwind-profile) run_component binding-unwind-profile bash "$REPO_ROOT/scripts/tests/test_binding_unwind_profile.sh" ;;
     pub-surface) run_pub_surface ;;
     dep-duplicates) run_dep_duplicates ;;
+    features-load-bearing) run_features_load_bearing ;;
     tooling-tests) run_tooling_tests ;;
     minimal-build)
       # #3453: the minimal lane's DEFINING property is --no-default-features, so the

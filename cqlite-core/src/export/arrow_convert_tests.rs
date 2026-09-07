@@ -12,11 +12,13 @@ use super::*;
 use crate::export::arrow_convert_util::{
     checked_binary_offsets, checked_offset, checked_string_offsets, checked_value_bytes,
 };
+use crate::export::arrow_schema::cql_type_to_arrow_data_type;
 use crate::query::{ColumnInfo, QueryRow};
 use crate::schema::CqlType;
 use crate::types::{DataType, Value};
 use crate::RowKey;
 use arrow::array::{Array, Float32Array, Int32Array, StringArray};
+use arrow::datatypes::DataType as ArrowDataType;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -1310,4 +1312,88 @@ fn arrow_refuses_a_zero_column_batch_unless_given_an_explicit_row_count() {
         err.to_string(),
         "Arrow error: Invalid argument error: must either specify a row count or at least one column"
     );
+}
+
+// ── Issue #4114 / roborev job 110: the Arrow dispatch must ROUTE a vector ────
+//
+// `cql_type_to_arrow_field` and `cql_type_to_arrow_data_type`
+// (`arrow_schema.rs:127`, `:222`) DECLARE `vector<float, n>` as
+// `List<Float32>`. `convert_column_to_array` did not list `CqlType::Vector` in
+// its typed-builder arm, so a vector fell through to the flat `DataType`
+// dispatch and was built by a path that does not produce `List<Float32>`. The
+// array then disagreed with the field the SAME module declared for it, which
+// makes the RecordBatch invalid rather than merely oddly-typed.
+//
+// These assert the SCHEMA/ARRAY AGREEMENT, not just "no error": the defect
+// produced a batch, so a test that only checked for `Ok` could not see it. That
+// is the same lesson as the read-path instance, where a wrong-but-right-length
+// blob decoded without error.
+
+/// A `vector<float, n>` column exports as `List<Float32>` — the type the schema
+/// declares — with the element values intact.
+#[test]
+fn issue_4114_vector_column_exports_as_list_of_float32() {
+    let vec_ty = CqlType::Vector(Box::new(CqlType::Float), 3);
+    let columns = vec![col("v", DataType::List, Some(vec_ty.clone()))];
+    let rows = vec![row_one(
+        "v",
+        Value::List(vec![
+            Value::Float32(1.0),
+            Value::Float32(2.5),
+            Value::Float32(-3.75),
+        ]),
+    )];
+
+    let batch = rows_to_record_batch(&columns, &rows).expect("a vector column must export");
+
+    // 1. The DECLARED field, from the schema half.
+    let declared = cql_type_to_arrow_data_type(&vec_ty);
+
+    // 2. The ACTUAL array the conversion half produced.
+    let actual = batch.column(0).data_type().clone();
+
+    assert_eq!(
+        actual, declared,
+        "the produced array type must equal the DECLARED schema type; a mismatch \
+         is an invalid RecordBatch (issue #4114, roborev job 110)"
+    );
+
+    // 3. And it must specifically be List<Float32>, not List<something-else> —
+    //    pinning the element type, since a vector's element type is the thing
+    //    that makes its layout decodable at all (#28).
+    match &actual {
+        ArrowDataType::List(item) => assert_eq!(
+            item.data_type(),
+            &ArrowDataType::Float32,
+            "vector<float, n> elements must be Float32, got {:?}",
+            item.data_type()
+        ),
+        other => panic!("vector must map to an Arrow List, got {other:?}"),
+    }
+
+    assert_eq!(batch.num_rows(), 1, "the row must survive the export");
+}
+
+/// The element type is honoured rather than assumed: a `vector<double, n>`
+/// exports as `List<Float64>`. Without this, an implementation could hard-code
+/// Float32 for every vector and still pass the test above.
+#[test]
+fn issue_4114_vector_element_type_is_honoured_not_hardcoded() {
+    let vec_ty = CqlType::Vector(Box::new(CqlType::Double), 2);
+    let columns = vec![col("v", DataType::List, Some(vec_ty.clone()))];
+    let rows = vec![row_one(
+        "v",
+        Value::List(vec![Value::Float(1.5), Value::Float(-2.25)]),
+    )];
+
+    let batch = rows_to_record_batch(&columns, &rows).expect("a double vector must export");
+    assert_eq!(
+        batch.column(0).data_type(),
+        &cql_type_to_arrow_data_type(&vec_ty),
+        "array type must track the DECLARED element type"
+    );
+    match batch.column(0).data_type() {
+        ArrowDataType::List(item) => assert_eq!(item.data_type(), &ArrowDataType::Float64),
+        other => panic!("expected a List, got {other:?}"),
+    }
 }

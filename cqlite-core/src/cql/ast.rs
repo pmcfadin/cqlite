@@ -773,6 +773,14 @@ impl From<CqlType> for CqlDataType {
                 CqlDataType::Tuple(types.into_iter().map(|t| t.into()).collect())
             }
             CqlType::Udt(name, _) => CqlDataType::Udt(CqlIdentifier::new(name)),
+            // #4114: the AST has no vector node (its scope is the READ path), so the
+            // canonical CQL spelling is preserved verbatim as `Custom` — the same
+            // treatment `varint` gets on this boundary. Nothing is invented, and no
+            // fake `list<float>` is emitted that would render as wrong DDL.
+            CqlType::Vector(element, dimension) => CqlDataType::Custom(format!(
+                "vector<{}, {dimension}>",
+                crate::cql::visitor::cql_data_type_to_string(&CqlDataType::from(*element))
+            )),
             CqlType::Frozen(inner) => CqlDataType::Frozen(Box::new((*inner).into())),
             CqlType::Custom(name) => CqlDataType::Custom(name),
         }

@@ -177,6 +177,22 @@ impl ByteComparableEncoder {
 
         match value {
             Value::Null => self.encode_null(),
+            // EMPTY-BUFFER SENTINEL (issue #3805) — REFUSED here, deliberately
+            // and fail-closed. This encoder builds BTI byte-comparable KEYS
+            // (partition/clustering components); the sentinel arises from a
+            // multicell collection's CELL PATH
+            // (`db/marshal/CollectionType.java:361-382` at `cassandra-5.0.8`),
+            // which is not a byte-comparable key component and never reaches
+            // this encoder. Cassandra's byte-comparable encoding of an empty
+            // value is a separate, unaudited question, so this refuses rather
+            // than inventing a prefix — inferring one would be a heuristic
+            // (issue #28).
+            Value::Empty(ty) => Err(BtiError::InvalidByteComparableKey(format!(
+                "empty-buffer sentinel (declared type `{}`) is not a byte-comparable \
+                 key component (issue #3805)",
+                ty.cql_name()
+            ))
+            .into()),
             Value::Boolean(b) => self.encode_boolean(*b),
             Value::TinyInt(i) => self.encode_tinyint(*i),
             Value::SmallInt(i) => self.encode_smallint(*i),

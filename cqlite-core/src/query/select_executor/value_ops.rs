@@ -78,6 +78,61 @@ pub(super) fn compare_values_ordering(a: &Value, b: &Value) -> std::cmp::Orderin
     try_compare_values(a, b).unwrap_or(std::cmp::Ordering::Equal)
 }
 
+/// Does the empty-buffer sentinel `tag` name the declared type of the NON-EMPTY
+/// value `other` — i.e. are the two the same CQL type, so that "empty sorts
+/// before non-empty" applies (issue #3805)?
+///
+/// # `Value::data_type()` IS LOSSY FOR uuid/timeuuid, AND THAT IS THE WHOLE
+/// REASON THIS FUNCTION EXISTS
+///
+/// CQLite stores BOTH CQL `uuid` and CQL `timeuuid` as `Value::Uuid([u8; 16])`,
+/// and `data_type()` answers `CqlType::Uuid` for both. So a plain
+/// `for_cql_type(&other.data_type()) == Some(tag)` REJECTED
+/// `Empty(TimeUuid)` against every non-empty timeuuid — an ordering that
+/// refuses a legitimate pair (roborev job 438 F2).
+///
+/// The 16-byte pair is therefore admitted **for the EMPTY-vs-NON-EMPTY case
+/// only**, which is sound because of what is being asserted: the answer for
+/// such a pair is `Less` (empty first) **whichever** of the two types it is —
+/// `db/marshal/Int32Type.java:61-71` at `cassandra-5.0.8` returns
+/// `Boolean.compare(right.isEmpty, left.isEmpty)` as soon as EITHER side is
+/// empty, and `TimeUUIDType`/`UUIDType` both inherit that empty short-circuit,
+/// so the type-specific logic below it is never reached. Two things this
+/// deliberately does NOT do:
+///
+/// * it does NOT conflate `uuid` and `timeuuid` in any NON-EMPTY comparison —
+///   those really do differ (`TimeUUIDType` orders by embedded timestamp
+///   first), and this function is only ever consulted when one side IS a
+///   sentinel, so no non-empty ordering can reach it;
+/// * it does NOT change `Value` to preserve uuid/timeuuid identity — that is a
+///   second public-surface change nobody ruled.
+///
+/// # This is the ONLY lossy pair among the admitted families
+///
+/// Checked family by family against `Value::data_type()`: `int`→`Integer`,
+/// `bigint`→`BigInt`, `counter`→`Counter`, `float`→`Float32`,
+/// `double`→`Float`, `timestamp`→`Timestamp`, `boolean`→`Boolean`,
+/// `inet`→`Inet`, `varint`→`Varint`, `decimal`→`Decimal` — each a distinct
+/// `Value` variant mapping to a distinct `CqlType`. Only `uuid`/`timeuuid`
+/// share one variant. (`text`/`ascii`/`varchar` also share `Value::Text`, but
+/// none of them is an admitted family — an empty buffer is a MEANINGFUL value
+/// there, so no sentinel names them; see `EmptyValueType::for_cql_type`.)
+fn empty_tag_matches_operand(tag: crate::types::EmptyValueType, other: &Value) -> bool {
+    use crate::types::EmptyValueType as E;
+    match crate::types::EmptyValueType::for_cql_type(&other.data_type()) {
+        Some(observed) if observed == tag => true,
+        // The uuid/timeuuid pair, in both directions: `Value::Uuid` observes as
+        // `Uuid`, so an `Empty(TimeUuid)` tag must still match it, and an
+        // `Empty(Uuid)` tag must still match a value a caller built as a
+        // timeuuid (also `Value::Uuid`).
+        Some(observed) => matches!(
+            (tag, observed),
+            (E::Uuid | E::TimeUuid, E::Uuid | E::TimeUuid)
+        ),
+        None => false,
+    }
+}
+
 /// Compare two `Value`s for ordering, returning an error when the operand
 /// types are not comparable. Preferred in WHERE-clause evaluation so users see
 /// a real diagnostic rather than a silent equality.
@@ -95,10 +150,80 @@ pub(super) fn try_compare_values(a: &Value, b: &Value) -> Result<std::cmp::Order
             return Ok(crate::float_cmp::cassandra_double_cmp(x, y));
         }
     }
+    // SENTINEL vs SENTINEL — HANDLED HERE, ABOVE the discriminant test, and it
+    // must stay above it (issue #3805; roborev job 451 + lead audit Q3). This
+    // one arm owns BOTH halves of that pair's contract, because every
+    // `Value::Empty` shares ONE discriminant whatever its tag, so neither the
+    // discriminant test below nor the sentinel-vs-non-empty arms under it can
+    // decide the case correctly:
+    //
+    // * DIFFERENT tags are DIFFERENT DECLARED TYPES, and this function's rule
+    //   for those is an ERROR. Left to the discriminant test, the pair reached
+    //   `Value::partial_cmp`, which orders two sentinels BY TAG — it must, being
+    //   a total order (`types::value_ord`) — so a cross-type `WHERE` comparison
+    //   got an ORDERING instead of the type diagnostic. Nothing lossy happens
+    //   here: a sentinel CARRIES its type, so `uuid` vs `timeuuid` is refused
+    //   too, and `empty_tag_matches_operand`'s admission of that pair — which
+    //   exists only because a NON-EMPTY timeuuid is indistinguishable from a
+    //   uuid in `Value` — deliberately does not apply.
+    // * EQUAL tags are the same (empty) bytes ⇒ `Equal`, exactly as
+    //   `Int32Type.compareCustom` reports for two empty buffers
+    //   (`db/marshal/Int32Type.java:61-71` at `cassandra-5.0.8`:
+    //   `Boolean.compare(true, true) == 0`). This is LOAD-BEARING FOR THE `Ord`
+    //   CONTRACT, not a nicety: `compare_values_ordering` feeds `sort_by`, and
+    //   without this arm the pair would fall into the `Less`/`Greater` arms
+    //   below, whose left-hand `if let Value::Empty(tag) = a` matches and
+    //   answers `Less` for a pair that must be `Equal` — breaking reflexivity
+    //   and able to panic the sort.
+    //
+    // So a refactor may NOT move this block below the discriminant test, and
+    // may not narrow it to specific tags; anything that reorders these blocks
+    // has to keep `(Empty, Empty)` decided before either of them.
+    if let (Value::Empty(x), Value::Empty(y)) = (a, b) {
+        return if x == y {
+            Ok(std::cmp::Ordering::Equal)
+        } else {
+            // Data-safety (issue #1694): the tags ARE type names, so they are
+            // safe to log; the values are not, and there are none here.
+            tracing::debug!(
+                "Cannot compare empty-buffer sentinels of incompatible types: {:?} vs {:?}",
+                x,
+                y
+            );
+            Err(Error::query_execution(
+                "Cannot compare incompatible types".to_string(),
+            ))
+        };
+    }
     if std::mem::discriminant(a) == std::mem::discriminant(b) {
         return a.partial_cmp(b).ok_or_else(|| {
             Error::query_execution("Cannot compare incompatible types".to_string())
         });
+    }
+    // EMPTY-BUFFER SENTINEL vs a NON-EMPTY value OF THE SAME DECLARED TYPE
+    // (issue #3805). The discriminants differ — `Value::Empty(Int)` and
+    // `Value::Integer(5)` are different variants — but Cassandra compares them
+    // with ONE comparator and puts the empty buffer strictly first:
+    // `db/marshal/Int32Type.java:61-71` at `cassandra-5.0.8` returns
+    // `Boolean.compare(right.isEmpty, left.isEmpty)` whenever EITHER side is
+    // empty, i.e. `-1` when only the left is. Without this branch the pair
+    // reached the incomparable-types error below, which would drop a legitimate
+    // key from an ORDER BY / WHERE evaluation.
+    //
+    // Comparability is decided by the DECLARED TYPE, never by byte shape
+    // (no-heuristics, #28): the sentinel carries its type, and the other side's
+    // `data_type()` must map back to that same admitted family. A sentinel
+    // against a DIFFERENT type stays incomparable, exactly as two mismatched
+    // scalars do.
+    if let Value::Empty(tag) = a {
+        if empty_tag_matches_operand(*tag, b) {
+            return Ok(std::cmp::Ordering::Less);
+        }
+    }
+    if let Value::Empty(tag) = b {
+        if empty_tag_matches_operand(*tag, a) {
+            return Ok(std::cmp::Ordering::Greater);
+        }
     }
     // Data-safety (issue #1694): log the operand TYPES, never their values.
     tracing::debug!(
@@ -599,5 +724,236 @@ mod tests {
             matches!(zmin, Value::Float(x) if *x == 0.0 && x.is_sign_negative()),
             "MIN of {{-0.0, +0.0}} = -0.0"
         );
+    }
+
+    /// Issue #3805: the empty-buffer sentinel is COMPARABLE against a
+    /// non-empty value of the SAME declared type, and sorts strictly first
+    /// (`db/marshal/Int32Type.java:61-71` at `cassandra-5.0.8`). Its
+    /// discriminant differs, so without the dedicated branch this pair raised
+    /// "Cannot compare incompatible types" and the key would have been dropped
+    /// from an ORDER BY / WHERE evaluation.
+    #[test]
+    fn the_empty_buffer_sentinel_is_comparable_within_its_declared_type() {
+        use crate::types::EmptyValueType;
+        use std::cmp::Ordering;
+
+        let empty = Value::Empty(EmptyValueType::Int);
+        assert_eq!(
+            try_compare_values(&empty, &Value::Integer(i32::MIN)).unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            try_compare_values(&Value::Integer(i32::MIN), &empty).unwrap(),
+            Ordering::Greater
+        );
+        assert_eq!(
+            try_compare_values(&empty, &Value::Empty(EmptyValueType::Int)).unwrap(),
+            Ordering::Equal
+        );
+    }
+
+    /// REGRESSION, roborev job 438 F2. CQLite stores BOTH CQL `uuid` and CQL
+    /// `timeuuid` as `Value::Uuid([u8; 16])`, so `data_type()` answers
+    /// `CqlType::Uuid` for a timeuuid too — and a naive declared-type equality
+    /// check therefore REFUSED `Empty(TimeUuid)` against every non-empty
+    /// timeuuid. An ordering that refuses a legitimate pair breaks the
+    /// "empty sorts strictly before every non-empty value of its type"
+    /// property. Both directions plus antisymmetry, for BOTH spellings of the
+    /// 16-byte pair.
+    #[test]
+    fn the_uuid_timeuuid_pair_compares_despite_a_lossy_data_type() {
+        use crate::types::EmptyValueType;
+        use std::cmp::Ordering;
+
+        // A real v1 (time) UUID and an ordinary one; `Value` cannot tell them
+        // apart, which is the point.
+        let non_empty = [
+            Value::Uuid([0u8; 16]),
+            Value::Uuid([0xff; 16]),
+            Value::Uuid([
+                0x58, 0xe0, 0xa7, 0xd7, 0xee, 0xbc, 0x11, 0xd8, 0x9f, 0x32, 0xf2, 0x80, 0x1f, 0x1b,
+                0x9f, 0xd1,
+            ]),
+        ];
+        for tag in [EmptyValueType::TimeUuid, EmptyValueType::Uuid] {
+            let empty = Value::Empty(tag);
+            for other in &non_empty {
+                let fwd = try_compare_values(&empty, other)
+                    .unwrap_or_else(|e| panic!("Empty({tag:?}) vs {other:?} refused: {e}"));
+                let rev = try_compare_values(other, &empty)
+                    .unwrap_or_else(|e| panic!("{other:?} vs Empty({tag:?}) refused: {e}"));
+                assert_eq!(fwd, Ordering::Less, "Empty({tag:?}) did not sort first");
+                // Antisymmetry: reversing the operands reverses the answer.
+                assert_eq!(rev, Ordering::Greater, "asymmetry broken for {tag:?}");
+                assert_eq!(fwd.reverse(), rev);
+            }
+        }
+    }
+
+    /// …and a sentinel of a DIFFERENT declared type stays INCOMPARABLE, exactly
+    /// as two mismatched scalars do. Comparability is decided by the declared
+    /// type, never by byte shape (no-heuristics, issue #28).
+    #[test]
+    fn a_sentinel_of_another_type_stays_incomparable() {
+        use crate::types::EmptyValueType;
+
+        assert!(try_compare_values(&Value::Empty(EmptyValueType::Int), &Value::BigInt(1)).is_err());
+        // The 16-byte pair admission above must NOT leak into any other
+        // family: a uuid sentinel is still incomparable with a non-uuid.
+        assert!(
+            try_compare_values(&Value::Empty(EmptyValueType::Uuid), &Value::Integer(1)).is_err()
+        );
+        assert!(
+            try_compare_values(&Value::Empty(EmptyValueType::TimeUuid), &Value::BigInt(1)).is_err()
+        );
+        assert!(
+            try_compare_values(&Value::Empty(EmptyValueType::Timestamp), &Value::BigInt(1))
+                .is_err(),
+            "timestamp and bigint are distinct CqlTypes and must stay incomparable"
+        );
+        assert!(try_compare_values(
+            &Value::Empty(EmptyValueType::Int),
+            &Value::text("x".to_string())
+        )
+        .is_err());
+    }
+
+    /// All 12 `EmptyValueType` tags, so a new admitted family joins the
+    /// sentinel-vs-sentinel cases below automatically rather than silently
+    /// staying uncovered. Kept local to these tests: `EmptyValueType` exposes
+    /// no `ALL`, and inventing one would be a public-surface change nobody
+    /// ruled.
+    const ALL_EMPTY_TAGS: [crate::types::EmptyValueType; 12] = {
+        use crate::types::EmptyValueType as E;
+        [
+            E::Int,
+            E::BigInt,
+            E::Counter,
+            E::Float,
+            E::Double,
+            E::Timestamp,
+            E::Uuid,
+            E::TimeUuid,
+            E::Boolean,
+            E::Inet,
+            E::Decimal,
+            E::Varint,
+        ]
+    };
+
+    /// REGRESSION, roborev job 451. Every `Value::Empty` shares ONE
+    /// discriminant whatever its tag, so before the dedicated
+    /// sentinel-vs-sentinel arm the discriminant test routed
+    /// `Empty(Int)` vs `Empty(BigInt)` into `Value::partial_cmp`, which orders
+    /// two sentinels BY TAG (it must: it is a total order). That handed a
+    /// CROSS-TYPE comparison an ORDERING where this function's own rule for two
+    /// different declared types is an ERROR — so a `WHERE` comparison between
+    /// two differently-typed sentinels answered `Less`/`Greater` instead of
+    /// diagnosing the type mismatch.
+    ///
+    /// Both orders for every ordered pair of DISTINCT tags: an error is
+    /// symmetric, so `a` vs `b` and `b` vs `a` must BOTH refuse (an
+    /// error one way and an ordering the other would be the same defect
+    /// wearing one direction).
+    #[test]
+    fn two_sentinels_of_different_declared_types_are_incomparable() {
+        for x in ALL_EMPTY_TAGS {
+            for y in ALL_EMPTY_TAGS {
+                if x == y {
+                    continue;
+                }
+                let (a, b) = (Value::Empty(x), Value::Empty(y));
+                assert!(
+                    try_compare_values(&a, &b).is_err(),
+                    "Empty({x:?}) vs Empty({y:?}) must be incomparable, not ordered"
+                );
+                assert!(
+                    try_compare_values(&b, &a).is_err(),
+                    "Empty({y:?}) vs Empty({x:?}) must be incomparable, not ordered"
+                );
+            }
+        }
+    }
+
+    /// `uuid` and `timeuuid` are DISTINCT declared types, and for two sentinels
+    /// CQLite knows which is which — the tag is carried, so nothing is lossy
+    /// here. The `empty_tag_matches_operand` admission of that pair exists ONLY
+    /// because a NON-EMPTY timeuuid is indistinguishable from a uuid in `Value`
+    /// (`Value::Uuid([u8; 16])` for both); it must NOT leak into the
+    /// sentinel-vs-sentinel case, where no such loss occurs. Pinned separately
+    /// from the sweep above because this is the one pair a future reader is
+    /// most likely to "fix" in the wrong direction.
+    #[test]
+    fn the_uuid_timeuuid_admission_does_not_leak_into_sentinel_vs_sentinel() {
+        use crate::types::EmptyValueType;
+
+        assert!(try_compare_values(
+            &Value::Empty(EmptyValueType::Uuid),
+            &Value::Empty(EmptyValueType::TimeUuid)
+        )
+        .is_err());
+        assert!(try_compare_values(
+            &Value::Empty(EmptyValueType::TimeUuid),
+            &Value::Empty(EmptyValueType::Uuid)
+        )
+        .is_err());
+    }
+
+    /// The OTHER half of the same line, which slice 1's lead audit (Q3)
+    /// established and roborev's finding did not touch: two sentinels of the
+    /// SAME declared type are `Equal`, INCLUDING a value compared with itself.
+    /// `compare_values_ordering` feeds `sort_by`, so a sentinel that did not
+    /// compare `Equal` to itself would break reflexivity and can panic the
+    /// sort. Asserted through BOTH entry points, because the ordering wrapper
+    /// swallows errors and would hide a regression in the `Result` one.
+    #[test]
+    fn matching_sentinel_tags_are_equal_and_reflexive() {
+        use std::cmp::Ordering;
+
+        for tag in ALL_EMPTY_TAGS {
+            let a = Value::Empty(tag);
+            let b = Value::Empty(tag);
+            assert_eq!(
+                try_compare_values(&a, &b)
+                    .unwrap_or_else(|e| panic!("Empty({tag:?}) vs Empty({tag:?}) refused: {e}")),
+                Ordering::Equal
+            );
+            // Reflexivity proper: the SAME value, both entry points.
+            assert_eq!(
+                try_compare_values(&a, &a)
+                    .unwrap_or_else(|e| panic!("Empty({tag:?}) vs itself refused: {e}")),
+                Ordering::Equal
+            );
+            assert_eq!(compare_values_ordering(&a, &a), Ordering::Equal);
+        }
+    }
+
+    /// The sentinel-vs-NON-EMPTY arms BELOW the discriminant test must not be
+    /// weakened by the new arm above it: an empty buffer still sorts strictly
+    /// before every non-empty value of its own declared type
+    /// (`db/marshal/Int32Type.java:61-71` at `cassandra-5.0.8`), and the
+    /// uuid/timeuuid 16-byte admission still holds. Antisymmetry on every pair.
+    #[test]
+    fn sentinel_versus_non_empty_ordering_survives_the_new_arm() {
+        use crate::types::EmptyValueType;
+        use std::cmp::Ordering;
+
+        let pairs = [
+            (EmptyValueType::Int, Value::Integer(5)),
+            (EmptyValueType::Int, Value::Integer(i32::MIN)),
+            (EmptyValueType::BigInt, Value::BigInt(-1)),
+            (EmptyValueType::Uuid, Value::Uuid([0u8; 16])),
+            (EmptyValueType::TimeUuid, Value::Uuid([0xff; 16])),
+        ];
+        for (tag, other) in &pairs {
+            let empty = Value::Empty(*tag);
+            let fwd = try_compare_values(&empty, other)
+                .unwrap_or_else(|e| panic!("Empty({tag:?}) vs {other:?} refused: {e}"));
+            let rev = try_compare_values(other, &empty)
+                .unwrap_or_else(|e| panic!("{other:?} vs Empty({tag:?}) refused: {e}"));
+            assert_eq!(fwd, Ordering::Less, "Empty({tag:?}) did not sort first");
+            assert_eq!(rev, Ordering::Greater, "asymmetry broken for {tag:?}");
+            assert_eq!(fwd.reverse(), rev);
+        }
     }
 }

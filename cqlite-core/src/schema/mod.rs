@@ -18,6 +18,7 @@ mod cql_type_parser;
 mod key_ordering;
 mod schema_comparator;
 mod udt_registry;
+pub(crate) mod vector_type;
 
 pub use udt_registry::{split_qualified_udt, udt_registry_from_cql, UdtRegistry};
 
@@ -289,6 +290,18 @@ pub enum CqlType {
     Tuple(Vec<CqlType>),
     Udt(String, Vec<(String, CqlType)>), // name, fields
     Frozen(Box<CqlType>),
+
+    /// Cassandra 5.0 `vector<element, n>` — a FIXED-arity sequence (issue #4114).
+    ///
+    /// The `usize` is the DECLARED dimension `n`, the only non-type parameter any
+    /// `CqlType` variant carries — and the ONLY thing that makes a fixed-width
+    /// vector value parseable, since the on-disk value has no element count and no
+    /// per-element framing (#28). Cassandra guarantees `n >= 1`
+    /// (`VectorType.java:89-90` rejects `dimension <= 0`), so every parser building
+    /// this variant refuses `0` by name rather than admitting an "empty vector",
+    /// which Cassandra does not have (`VectorType.java:409-414`). Vectors are always
+    /// frozen, so this is never additionally wrapped in [`CqlType::Frozen`].
+    Vector(Box<CqlType>, usize),
 
     // Custom/Unknown
     Custom(String),

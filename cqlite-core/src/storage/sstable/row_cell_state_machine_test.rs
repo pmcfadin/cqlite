@@ -868,11 +868,27 @@ mod tests {
         data.extend_from_slice(&100i64.to_be_bytes());
         data.extend(encode_vuint(2)); // 2 columns
 
-        // Frozen list column
+        // Frozen list column. A frozen collection body is Cassandra's
+        // `CollectionSerializer.pack()`: i32-BE element count + i32-BE
+        // length-prefixed elements (pinned `cassandra-5.0.8`
+        // `serializers/CollectionSerializer.java`) — NOT the VInt framing a
+        // NON-frozen (multicell) collection cell uses. `["A", "B"]`.
+        //
+        // Issue #2339: this used to be 6 fabricated bytes
+        // (`[0x00,0x02,0x41,0x42,0x43,0x44]`, commented "Mock frozen list data")
+        // which are not a frozen list in ANY framing — the old VInt-framed decoder
+        // read `0x00` as "0 elements" and silently ignored the remaining 4 bytes,
+        // so the case passed while asserting nothing about frozen framing. Real
+        // bytes now.
+        let frozen_list_body: &[u8] = &[
+            0, 0, 0, 2, // count = 2
+            0, 0, 0, 1, b'A', // "A"
+            0, 0, 0, 1, b'B', // "B"
+        ];
         data.extend(encode_vuint(11)); // name length: 11
         data.extend_from_slice(b"frozen_list");
-        data.extend(encode_vuint(6)); // value length: 6
-        data.extend_from_slice(&[0x00, 0x02, 0x41, 0x42, 0x43, 0x44]); // Mock frozen list data
+        data.extend(encode_vuint(frozen_list_body.len() as u64));
+        data.extend_from_slice(frozen_list_body);
 
         // Regular list column
         data.extend(encode_vuint(12)); // name length: 12
@@ -903,15 +919,21 @@ mod tests {
         // Verify the actual parsing behavior:
         // - frozen list gets parsed as Frozen<List> type
         // - regular list is parsed as List type (or Frozen if both go through same path)
+        // The frozen list must decode to its actual CONTENT — asserting only the
+        // variant would still pass on an empty list, which is how the fabricated
+        // mock bytes above used to pass (issue #2339).
+        let want = Value::List(vec![Value::Text("A".into()), Value::Text("B".into())]);
         match &row.clustering_rows[0].columns["frozen_list"] {
-            Value::Frozen(inner) => match inner.as_ref() {
-                Value::List(_) => {} // Expected for frozen<list<text>>
-                other => panic!(
-                    "Expected Frozen<List> value for frozen_list, got Frozen<{:?}>",
-                    other
-                ),
-            },
-            Value::List(_) => {} // Also acceptable if Frozen wrapper is stripped
+            Value::Frozen(inner) => assert_eq!(
+                inner.as_ref(),
+                &want,
+                "frozen<list<text>> must decode with i32-BE element framing"
+            ),
+            // Also acceptable if the Frozen wrapper is stripped.
+            got @ Value::List(_) => assert_eq!(
+                got, &want,
+                "frozen<list<text>> must decode with i32-BE element framing"
+            ),
             other => panic!(
                 "Expected Frozen<List> or List value for frozen_list, got {:?}",
                 other

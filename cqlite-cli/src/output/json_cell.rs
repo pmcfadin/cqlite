@@ -258,6 +258,15 @@ impl JsonCell {
     pub(crate) fn from_value(value: &Value) -> JsonCell {
         match value {
             Value::Null => JsonCell::Plain(JsonValue::Null),
+            // EMPTY-BUFFER SENTINEL (issue #3805) -> the EMPTY JSON STRING, never
+            // `Display` (which renders the diagnostic `EMPTY(int)`) and never
+            // `null` (which would report ABSENCE for a value Cassandra treats as
+            // PRESENT and distinct from null). `sstabledump` renders an empty
+            // fixed-width buffer as `""` (`tools/JsonTransformer.java:444-458` ->
+            // `db/marshal/AbstractType.java:146-156`) and `SELECT JSON` as
+            // `{"": v}` (`db/marshal/MapType.java:362-388`), both at
+            // `cassandra-5.0.8`, so `""` is the parity-required rendering.
+            Value::Empty(_) => JsonCell::Plain(JsonValue::String(String::new())),
             Value::Boolean(b) => JsonCell::Plain(JsonValue::Bool(*b)),
             Value::Integer(i) => JsonCell::Plain(JsonValue::Number((*i).into())),
             Value::BigInt(i) => JsonCell::Plain(JsonValue::Number((*i).into())),

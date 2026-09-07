@@ -43,8 +43,28 @@ FAIL=0
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-tree-prov.XXXXXX")
+# FAIL-CLOSED before anything is derived from it: an unchecked `mktemp -d` leaves
+# `tmp` EMPTY, after which every child path becomes root-level and the cleanup trap
+# `rm -rf ""` reclaims none of them — and the $TMPDIR export below is one more such
+# derivation, which would silently fall back to the ambient /tmp.
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-tree-prov.XXXXXX" 2>/dev/null) || tmp=""
+if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
+  printf 'FAIL - could not create a scratch dir under %s — refusing to run\n' "${TMPDIR:-/tmp}"
+  exit 1
+fi
 trap 'rm -rf "$tmp"' EXIT INT TERM
+
+# #3637 (roborev job 111 medium 3): every gate this file spawns creates a per-run
+# LOG_DIR under ITS $TMPDIR. These runs are TOP-LEVEL (AGENT_GATE_PARENT_RUN_ID is
+# unset above) and many of them deliberately end in FAIL — a verdict the gate RETAINS
+# BY DESIGN, and that retention is a property this suite must not weaken: a failed
+# gate's post-mortem bundle is exactly what an operator needs. So the fix belongs at
+# the HARNESS end, as it already does in test_agent_gate_nested_isolation.sh and
+# test_agent_gate_delta.sh: retained under the AMBIENT shared temp those bundles are a
+# leak this harness owns (measured before this change: 16 per run of this file);
+# retained under the harness's own scratch root, the trap above reclaims them.
+export TMPDIR="$tmp/tmpdir"
+mkdir -p "$TMPDIR" || { printf 'FAIL - could not create the scoped TMPDIR %s\n' "$TMPDIR"; exit 1; }
 
 GIT_ID=(-c user.email=gate@example.invalid -c user.name=gate-selftest)
 COMMIT_ENV=(GIT_AUTHOR_NAME=gate GIT_AUTHOR_EMAIL=gate@example.invalid
@@ -568,10 +588,18 @@ else
     ok "B3 (#3402): the row does not match 'RESULT: (PASS|FAIL)' — the refusal quotes nothing"
   fi
   # The mutant: pass the value straight through, which is what the guard prevents.
+  #
+  # THE TARGET MOVED, and the target is the BOUNDARY, not the caller (#3637, roborev job 173
+  # finding 4): the strip-and-withhold pair was extracted out of `_status_detail` into
+  # `_summary_block_value`, which the #3637 `logdir-disposition:`/`logdir-sweep:` keys now
+  # share. The rendering for this row is unchanged (same strip, same refusal, same wording),
+  # so every assertion above still reads the same bytes — only the line this mutant rewrites
+  # is one function over, and rewriting it there mutates the boundary for EVERY field that
+  # uses it, which is the stronger mutant.
   mut="$tmp/gate-mutant-withhold.sh"
   if gate_replace_line "$GATE" "$mut" \
-       "*RESULT:*) printf '%s' \"[detail WITHHELD: it carries the completion probe's reserved verdict token (#2908), which on this row would forge a terminal verdict — see the component log]\" ;;" \
-       "*RESULT:*) printf '%s' \"\$_sd_v\" ;;"; then
+       "*RESULT:*) printf '%s' \"[\${2:-value} WITHHELD: it carries the completion probe's reserved verdict token (#2908), which on this \${3:-row} would forge a terminal verdict — \${4:-see the component log}]\" ;;" \
+       "*RESULT:*) printf '%s' \"\$_bv_v\" ;;"; then
     r_b3m=$(mkrepo_from b3-withhold-mutant-repo "$mut")
     sum="$tmp/b3-withhold-mutant.txt"; out="$tmp/b3-withhold-mutant.out"
     ( cd "$r_b3m" && PATH="$seedbin:$STUBBIN:$PATH" env SEED_DETAIL="$b3_detail" \

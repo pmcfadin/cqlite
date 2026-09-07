@@ -74,6 +74,13 @@
 //!   in EMITTED order, because Cassandra stores a map's entries in key-comparator
 //!   order and both sides read the same SSTable (finding N2). Sorting both sides
 //!   first, which this lane used to do, made a reordering compare equal.
+//!
+//!   A map KEY the DDL declares as a CONTAINER is paired the same way, because
+//!   `cassandra-5.0.8 MapType.toJSONString` spells the golden's object key as the
+//!   key value's own `toJSONString` document: it is parsed and compared as an
+//!   ordinary value of the declared key type (issue #3726, [`container`]). The one
+//!   position that is not a `toJSONString` document is a MULTICELL map's key, which
+//!   is a cell PATH — `writeString(getString(...))` — and is a declared gap.
 //! * **UDT fields.** `sstabledump` renders a UDT as a plain field→value object,
 //!   and since #3629 so does the JSON egress: the `_type` discriminator it used to
 //!   add is GONE, so both sides carry the declared fields and nothing else and
@@ -184,6 +191,17 @@ pub mod committed_set;
 /// (issue #1491 review finding J1).
 #[path = "golden_fixture_root.rs"]
 pub mod fixture_root;
+
+/// CONTAINERS in the canonical value model: the recursive arms of [`canon_typed`]
+/// and the ONE rule for what a golden map key denotes (issue #3726).
+#[path = "golden_value_canon_container.rs"]
+pub mod container;
+
+/// What a WELL-FORMED SPELLING of each non-text scalar type is — one bounded,
+/// authority-quoting predicate per type, shared by `container`'s leaf-kind read-back
+/// and by `compare::gap` (issue #3726, roborev job 105).
+#[path = "golden_value_scalar_spelling.rs"]
+pub mod scalar_spelling;
 
 use schema::CqlType;
 use serde_json::{Map, Value};
@@ -322,7 +340,32 @@ pub enum Kinding {
     Stringified,
 }
 
-/// A canonical scalar: the unit of value equality.
+/// WHICH SIDE of the comparison a value came from.
+///
+/// A structural fact about the CALLER, carried explicitly for the same reason
+/// [`container::MapKeySpelling`] is (issue #3726): the two sides spell a MAP
+/// differently BY CONSTRUCTION — the dump writes a JSON object, the egress a
+/// `{key,value}` array — and inferring which is which from the shape in front of you
+/// is exactly what lets a regression that emitted the OTHER side's spelling
+/// canonicalize equal.
+///
+/// It matters only inside [`container`]: at a whole map COLUMN the comparator's own
+/// `(Value::Object, Value::Array)` match already pins each side, but a map nested
+/// inside a container map KEY is walked by [`canon_typed`] ALONE, so nothing else is
+/// left to catch it there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    /// The `sstabledump` JSONL golden.
+    Golden,
+    /// The CLI's own egress, as read back (CSV containers arrive decoded).
+    Cli,
+}
+
+/// A canonical VALUE: the unit of value equality.
+///
+/// Scalar-only until issue #3726, which added the container variants so that a `map`
+/// whose declared KEY type is a container can be paired at all. The recursive arms
+/// live in [`container`]; the scalar arms stay in [`canon_typed`] below.
 ///
 /// `Ord` is derived so a collection of canonical values can be SORTED — the
 /// row-order check compares the two sides' key multisets that way (see
@@ -337,6 +380,23 @@ pub enum Canon {
     Num(String),
     /// Opaque text: blob hex, UUID, `text`, and a canonicalized timestamp.
     Text(String),
+    /// A list, a set or a tuple: every one of the three is a JSON ARRAY in both the
+    /// dump's spelling and the egress's, so one variant serves all three and the
+    /// DECLARED type — which [`canon_typed`] has already applied to each member —
+    /// is what distinguishes them (issue #3726).
+    Seq(Vec<Canon>),
+    /// A map, IN EMITTED ORDER. Order-sensitive on purpose: Cassandra stores a
+    /// map's entries in key-comparator order and both the dump and a reader of the
+    /// same SSTable see that order, so a canonical form that sorted them would make
+    /// a reordering compare equal — issue #1491 finding N2, which is why
+    /// `compare::compare_map` compares positionally.
+    Entries(Vec<(Canon, Canon)>),
+    /// A UDT, in DECLARED field order (`cassandra-5.0.8 UserType.toJSONString`
+    /// iterates the declared type list). The names are carried for
+    /// [`Canon::describe`]; equality is decided by the whole sequence, and
+    /// `container::canon_udt` has already refused any value whose field set or order
+    /// is not the DDL's.
+    Fields(Vec<(String, Canon)>),
 }
 
 impl Canon {
@@ -353,6 +413,11 @@ impl Canon {
     /// At [`Depth::Inside`] the collapse is NOT applied: a container member has a
     /// distinct `null` spelling, so an empty member and a null member are
     /// different values and must compare as such (review finding F1).
+    /// A CONTAINER is returned unchanged, and that is not an omission: both rules
+    /// above are about a SCALAR's spelling, and every member of a container has
+    /// already been canonicalized — hence projected — at its own [`Depth::Inside`]
+    /// by `container::canon_member`. Collapsing anything at the container level
+    /// would apply a TopLevel rule to a member that is not at the top level.
     fn for_csv(self, depth: Depth) -> Canon {
         match self {
             Canon::Bool(b) => Canon::Text(b.to_string()),
@@ -361,12 +426,21 @@ impl Canon {
         }
     }
 
+    /// The DIAGNOSTIC rendering — and, for a map entry, the PATH a declared gap is
+    /// matched against by exact string (`compare::compare_map` builds the path from
+    /// this). The container arms are therefore INJECTIVE: two distinct values may
+    /// never describe alike, or one gap would silently cover both. See
+    /// `container::escape` for how, and for the trivial collision an unescaped
+    /// rendering has (issue #1491 finding DD1, one level down).
     pub fn describe(&self) -> String {
         match self {
             Canon::Null => "null".to_string(),
             Canon::Bool(b) => format!("bool:{b}"),
             Canon::Num(n) => format!("num:{n}"),
             Canon::Text(t) => format!("text:{t}"),
+            Canon::Seq(items) => container::describe_seq(items),
+            Canon::Entries(entries) => container::describe_entries(entries),
+            Canon::Fields(fields) => container::describe_fields(fields),
         }
     }
 }
@@ -409,7 +483,11 @@ pub fn canon_scalar(v: &Value, egress: Egress) -> Result<Canon, String> {
     })
 }
 
-/// Canonicalize a scalar whose declared CQL type is KNOWN — the comparison path.
+/// Canonicalize a value whose declared CQL type is KNOWN — the comparison path.
+///
+/// A CONTAINER type is dispatched to [`container::canon_container`], which recurses
+/// back through here for each member (issue #3726); everything below this dispatch is
+/// the SCALAR half, and the numeric/kinding rules it states are scalar rules.
 ///
 /// This, not [`canon_scalar`], decides value equality. Two things bound the
 /// numeric normalization, and both are needed:
@@ -433,7 +511,24 @@ pub fn canon_typed(
     ty: &CqlType,
     depth: Depth,
     kinding: Kinding,
+    side: Side,
 ) -> Result<Canon, String> {
+    // A CONTAINER type is canonicalized RECURSIVELY, by [`container`] (issue #3726).
+    // `depth` deliberately does not travel with it: [`Canon::for_csv`] is a rule
+    // about a SCALAR's spelling, and each member is canonicalized — hence projected
+    // — at its own [`Depth::Inside`] by `container::canon_member`, so applying this
+    // position's depth to the container as a whole would apply a TopLevel rule to
+    // values that are not at the top level. The scalar arms below keep the
+    // "container value where the schema declares the scalar type" refusal, which is
+    // now exactly what it says: a container arriving where the DDL declares a
+    // scalar.
+    if container::is_container_type(ty) {
+        return container::canon_container(v, egress, ty, kinding, side);
+    }
+    // A SCALAR has one spelling per side by construction, so `side` says nothing
+    // here: the asymmetry a scalar needs is already carried by `kinding` (only the
+    // GOLDEN is ever given [`Kinding::Stringified`]).
+    let _ = side;
     // May a numeric TEXT be read as a NUMBER here?
     let cross_kind = match egress {
         // CSV carries no JSON kinds at all — the reader hands every cell over as

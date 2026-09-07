@@ -91,7 +91,7 @@ path = "src/bin/complex_type_validation_runner.rs"
 # [[bin]]
 # name = "sstable_test_runner"
 # path = "src/bin/sstable_test_runner.rs"
-# required-features = ["sstable-writer"]
+# required-features = ["sstable-writer"]   # feature deleted in #1698 (gated nothing)
 
 [[bin]]
 name = "property_based_test_runner"
@@ -154,14 +154,12 @@ path = "golden_path_summary_index_integration_tests.rs"
 [features]
 default = []
 benchmarks = []
-ci_zero_tolerance = []
 experimental = ["cqlite-core/experimental"]
 legacy-heuristics = ["cqlite-core/legacy-heuristics"]
-# sstable-writer feature disabled - writer module removed in Issue #176
-# This feature is a placeholder to allow conditional compilation of tests
-# that depend on SSTableWriter until it is re-implemented
-sstable-writer = []
 
-# Issue #80: Mock usage control - unit tests only
-unit-tests-only = ["cqlite-core/unit-tests-only"]  # Enables mock/synthetic data usage for unit tests (disabled in CI integration paths)
+# Issue #80: Mock usage control - unit tests only. Gates mock/synthetic data usage in
+# this crate's own tests (25 cfg sites under src/); it no longer forwards to
+# `cqlite-core/unit-tests-only`, which had zero cfg sites in core and was deleted
+# in #1698.
+unit-tests-only = []
 

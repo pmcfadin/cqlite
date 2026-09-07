@@ -137,7 +137,7 @@ fn one_source_with_a_clean_schema_selects_the_fast_path() {
     let (_temp, readers) = open_readers(vec![vec![write_row(1, "a", 10, 100)]]);
     assert_eq!(readers.len(), 1, "the fixture is exactly one generation");
     assert_eq!(
-        bypass_reason(&readers, &simple_schema(), ForcedMergePath::Auto, false),
+        bypass_reason(&readers, &simple_schema(), ForcedMergePath::Auto, false,),
         BypassReason::Selected
     );
 }
@@ -152,7 +152,7 @@ fn two_sources_take_the_merge_arm() {
     ]);
     assert_eq!(readers.len(), 2, "the fixture is two generations");
     assert_eq!(
-        bypass_reason(&readers, &simple_schema(), ForcedMergePath::Auto, false),
+        bypass_reason(&readers, &simple_schema(), ForcedMergePath::Auto, false,),
         BypassReason::MultipleSources
     );
 }
@@ -183,7 +183,7 @@ fn forced_bypass_never_overrides_a_correctness_precondition() {
         vec![write_row(2, "b", 20, 200)],
     ]);
     assert_eq!(
-        bypass_reason(&readers, &simple_schema(), ForcedMergePath::Bypass, false),
+        bypass_reason(&readers, &simple_schema(), ForcedMergePath::Bypass, false,),
         BypassReason::MultipleSources
     );
 }
@@ -243,11 +243,18 @@ fn dropping_the_scan_source_does_not_poison_the_callers_cancel() {
     );
 }
 
-/// Spec R1 (roborev, issue #3058): a non-frozen collection whose element/key
-/// is a frozen UDT takes the MERGE arm, so `SELECT *` cannot start working
-/// at one generation and erroring at two (#2339 fails the merge arm closed on
-/// exactly these columns). A `list<frozen<udt>>` is NOT affected — its cell
-/// path is a position TimeUUID, and the merge arm serves it.
+/// Spec R1 (roborev, issue #3058): a non-frozen collection whose element/key the
+/// two arms do NOT collapse identically takes the MERGE arm, so `SELECT *` cannot
+/// return one thing at one generation and another at two. A `list<frozen<udt>>` is
+/// NOT affected — its cell path is a position TimeUUID, and the merge arm serves
+/// it.
+///
+/// With NO `UdtScope` (this case) every composite is refused, because the merge
+/// arm resolves UDT references through the ticket registry and cannot decode a
+/// bare `Custom` — the fail-closed direction. Issue #2339's registry-aware
+/// narrowing (a RESOLVABLE composite SET element is served by both arms) is
+/// pinned separately by
+/// [`a_resolvable_composite_set_element_selects_the_fast_arm`].
 #[test]
 fn a_composite_keyed_collection_forces_the_merge_arm() {
     use crate::testutil::{simple_schema, write_row};
@@ -262,8 +269,10 @@ fn a_composite_keyed_collection_forces_the_merge_arm() {
     for refused in [
         "set<frozen<contact_info>>",
         "map<frozen<contact_info>, text>",
-        "set<frozen<tuple<int, text>>>",
         "map<frozen<tuple<int, text>>, text>",
+        // A composite SET element with NO registry scope: the merge arm cannot
+        // resolve it, so the fast arm is refused (issue #2339).
+        "set<frozen<tuple<int, text>>>",
         "set<frozen<list<int>>>",
         // Case-insensitive parse: this is refused by the `Set` arm, exactly
         // like its lowercase spelling.
@@ -307,6 +316,351 @@ fn a_composite_keyed_collection_forces_the_merge_arm() {
             BypassReason::Selected,
             "`{allowed}` is served identically by both arms and must stay on \
              the fast path"
+        );
+    }
+}
+
+/// Issue #2339: the composite-SET-element clause is REGISTRY-AWARE.
+///
+/// **Issue #4063 / roborev job 116 F1 — a composite whose LEAF the merged arm refuses
+/// to order must NOT take the fast path.**
+///
+/// Since #4063 `compare_composite` REFUSES to order a composite containing a
+/// `varint`/`decimal`/`uuid` leaf, because the central comparator's arms for those
+/// diverge from Cassandra. A one-source read that bypassed merging would decode and
+/// RETURN such a collection, so the identical query would begin FAILING the moment a
+/// second SSTable appeared. Arm-dependent success is worse than either arm's own
+/// behaviour: it makes correctness a function of how many files happen to be on disk.
+///
+/// This is the resolvable case on purpose — the element resolves fine, so the
+/// pre-existing resolvability veto does NOT fire and only the ordering veto can
+/// refuse it. `text`/`text` is the positive control: same shape, orderable leaves,
+/// still selected. Without both, a blanket refusal of every composite would pass.
+///
+/// RED BEFORE THE FIX: `Selected` for the uuid-leaved element.
+#[test]
+fn a_composite_whose_leaf_the_merge_arm_cannot_order_is_refused() {
+    use crate::testutil::{simple_schema, write_row};
+    use cqlite_core::schema::udt_registry_from_cql;
+    use cqlite_core::storage::write_engine::merge::UdtScope;
+
+    let (_temp, readers) = open_readers(vec![vec![write_row(1, "a", 10, 100)]]);
+    let base = simple_schema();
+    // Two same-shaped UDTs: one with an UNORDERABLE leaf, one entirely orderable.
+    let registry = udt_registry_from_cql(
+        "CREATE TYPE has_uuid (id uuid, label text); \
+         CREATE TYPE all_text (a text, label text);",
+        &base.keyspace,
+    );
+    let scope = Some(UdtScope {
+        registry: &registry,
+        keyspace: &base.keyspace,
+    });
+
+    let with_type = |ty: &str| {
+        let mut schema = base.clone();
+        if let Some(c) = schema.columns.iter_mut().find(|c| c.name == "name") {
+            c.data_type = ty.to_string();
+        }
+        schema
+    };
+
+    assert_eq!(
+        bypass_reason_with_udts(
+            &readers,
+            &with_type("set<frozen<has_uuid>>"),
+            ForcedMergePath::Auto,
+            false,
+            scope
+        ),
+        BypassReason::MulticellArmDivergence,
+        "a `uuid` leaf is REFUSED by compare_composite (#4063), so the fast path must \
+         not serve it either — otherwise this query works on one SSTable and fails on two"
+    );
+    assert_eq!(
+        bypass_reason_with_udts(
+            &readers,
+            &with_type("set<frozen<all_text>>"),
+            ForcedMergePath::Auto,
+            false,
+            scope
+        ),
+        BypassReason::Selected,
+        "positive control: the SAME shape with orderable leaves must still select the \
+         fast path, so the ordering veto is proved specific rather than a blanket refusal"
+    );
+}
+
+/// Both arms decode a composite set element structurally now, but they resolve
+/// the element TYPE from different places: the merge arm from the ticket DDL's
+/// `UdtScope`, the single-generation decoder from the SSTable's OWN marshal type.
+/// So the fast arm is safe only when the scope can resolve it — otherwise the
+/// merge arm fails closed while the fast arm succeeds, which is exactly the
+/// arm-dependent outcome the guard exists to prevent.
+///
+/// A composite MAP KEY stays refused whatever the scope: the divergence merely
+/// swapped sides (the merge arm decodes it; `parse_cell_path_key` in the
+/// single-generation decoder has no composite arm and falls back to an opaque
+/// `Value::Blob`).
+#[test]
+fn a_resolvable_composite_set_element_selects_the_fast_arm() {
+    use crate::testutil::{simple_schema, write_row};
+    use cqlite_core::schema::udt_registry_from_cql;
+    use cqlite_core::storage::write_engine::merge::UdtScope;
+
+    let (_temp, readers) = open_readers(vec![vec![write_row(1, "a", 10, 100)]]);
+    let base = simple_schema();
+    let registry = udt_registry_from_cql(
+        "CREATE TYPE contact_info (email text, phone text);",
+        &base.keyspace,
+    );
+    let resolving = Some(UdtScope {
+        registry: &registry,
+        keyspace: &base.keyspace,
+    });
+    // A scope whose KEYSPACE does not match the one the registry was built under
+    // resolves NOTHING — the mismatch #2339's `UdtScope` exists to make explicit.
+    let wrong_keyspace = Some(UdtScope {
+        registry: &registry,
+        keyspace: "some_other_keyspace",
+    });
+
+    let with_type = |ty: &str| {
+        let mut schema = base.clone();
+        if let Some(c) = schema.columns.iter_mut().find(|c| c.name == "name") {
+            c.data_type = ty.to_string();
+        }
+        schema
+    };
+
+    let udt_set = with_type("set<frozen<contact_info>>");
+    assert_eq!(
+        bypass_reason_with_udts(&readers, &udt_set, ForcedMergePath::Auto, false, resolving),
+        BypassReason::Selected,
+        "a RESOLVABLE composite set element is decoded by both arms (issue #2339)"
+    );
+    assert_eq!(
+        bypass_reason(&readers, &udt_set, ForcedMergePath::Auto, false),
+        BypassReason::MulticellArmDivergence,
+        "control: without a scope the merge arm cannot resolve it, so refuse"
+    );
+    assert_eq!(
+        bypass_reason_with_udts(
+            &readers,
+            &udt_set,
+            ForcedMergePath::Auto,
+            false,
+            wrong_keyspace
+        ),
+        BypassReason::MulticellArmDivergence,
+        "control: a scope keyed on the WRONG keyspace resolves nothing, so refuse"
+    );
+
+    // An UNKNOWN UDT name is unresolvable even WITH a registry.
+    assert_eq!(
+        bypass_reason_with_udts(
+            &readers,
+            &with_type("set<frozen<not_registered>>"),
+            ForcedMergePath::Auto,
+            false,
+            resolving
+        ),
+        BypassReason::MulticellArmDivergence,
+        "an unresolvable composite set element must still take the merge arm"
+    );
+
+    // A nested frozen COLLECTION element needs no registry at all — it carries its
+    // own structure — so it is served by both arms even with no scope. Pinned
+    // end-to-end on Cassandra bytes by `issue_3058_forced_path_differential.rs`'s
+    // `cx_nested_frozen_collections` case.
+    for structural in ["set<frozen<list<int>>>", "set<frozen<map<text,int>>>"] {
+        assert_eq!(
+            bypass_reason_with_udts(
+                &readers,
+                &with_type(structural),
+                ForcedMergePath::Auto,
+                false,
+                resolving
+            ),
+            BypassReason::Selected,
+            "`{structural}` carries its own structure and is served by both arms"
+        );
+    }
+
+    // A composite MAP KEY behaves EXACTLY like a composite set element (roborev job
+    // 125). This block previously asserted the opposite — "refused regardless of the
+    // scope", justified by the single-generation decoder serving such a key as an
+    // opaque `Blob`. THAT RATIONALE WAS STALE: `issue_3631_structured_values_not_blobs`
+    // records the `map<frozen<udt>, int>` cell-path key case as "FIXED ON MAIN by
+    // #3612 / PR #3736", and `cell_path_key_tests`'
+    // `multicell_and_frozen_sides_present_every_composite_key_type_identically`
+    // asserts the multicell and frozen sides present every composite key type
+    // identically. So the arms agree on the key, and forcing one-source queries
+    // through the merge path was a cost with no divergence behind it.
+    // `needs_registry` is the distinction that makes the controls meaningful: a UDT
+    // NAME must be looked up, while `tuple<int, text>` carries its own structure and
+    // so resolves under ANY scope. Asserting the same controls for both would be
+    // wrong — measured: the tuple key is `Selected` even under `wrong_keyspace`.
+    for (map_key, needs_registry) in [
+        ("map<frozen<contact_info>, text>", true),
+        ("map<frozen<tuple<int, text>>, text>", false),
+    ] {
+        assert_eq!(
+            bypass_reason_with_udts(
+                &readers,
+                &with_type(map_key),
+                ForcedMergePath::Auto,
+                false,
+                resolving
+            ),
+            BypassReason::Selected,
+            "`{map_key}`: a RESOLVABLE, orderable composite map key is served \
+             identically by both arms since #3612, so the fast path must be permitted"
+        );
+        // Control 1: with NO scope at all the merge arm can resolve nothing —
+        // `merge_arm_resolves_composite` returns false without a scope — so BOTH
+        // shapes are refused. This is what stops the flip from being unconditional.
+        assert_eq!(
+            bypass_reason(&readers, &with_type(map_key), ForcedMergePath::Auto, false),
+            BypassReason::MulticellArmDivergence,
+            "`{map_key}`: with NO scope the merge arm cannot resolve it, so refuse"
+        );
+        // Control 2: a scope pointing at the WRONG keyspace resolves no UDT NAME, but
+        // a self-describing tuple is unaffected.
+        let wrong = bypass_reason_with_udts(
+            &readers,
+            &with_type(map_key),
+            ForcedMergePath::Auto,
+            false,
+            wrong_keyspace,
+        );
+        if needs_registry {
+            assert_eq!(
+                wrong,
+                BypassReason::MulticellArmDivergence,
+                "`{map_key}`: a UDT NAME under a scope that resolves NOTHING must refuse"
+            );
+        } else {
+            assert_eq!(
+                wrong,
+                BypassReason::Selected,
+                "`{map_key}`: a tuple carries its own structure, so a useless scope \
+                 does not make it unresolvable"
+            );
+        }
+    }
+
+    // And the #4063 ordering veto applies to a map KEY exactly as to a set element.
+    assert_eq!(
+        bypass_reason_with_udts(
+            &readers,
+            &with_type("map<frozen<tuple<uuid, text>>, text>"),
+            ForcedMergePath::Auto,
+            false,
+            resolving
+        ),
+        BypassReason::MulticellArmDivergence,
+        "a `uuid` leaf in a composite MAP KEY is refused by compare_composite (#4063), \
+         so the fast path must not serve it either"
+    );
+}
+
+/// Roborev F2 (issue #2339): the bypass predicate's "the merge arm can resolve
+/// this" answer and the merge arm's ACTUAL behaviour must agree — including for a
+/// keyspace-QUALIFIED UDT reference (`set<frozen<ks.contact_info>>`), which is how
+/// Cassandra emits a UDT column type and what the CQL parser retains.
+///
+/// The predicate resolves with `UdtRegistry::resolve_type`, which is
+/// qualifier-aware; the merge arm built its comparator with
+/// `ComparatorType::from_cql_type_with_registry`, whose `Custom` arm looks the
+/// reference up by BARE name only. So for a qualified reference the predicate
+/// selected the single-generation arm while a MULTI-generation merged read of the
+/// same table failed closed — a correctness outcome flipping on SSTable
+/// generation count, which is the defect #2339 exists to remove.
+///
+/// This test drives BOTH sides for real (the predicate, and
+/// `assemble_read_cells_with_udts` on a Cassandra-framed `cell_path`) and asserts they
+/// agree, so a future divergence between the two resolvers reds here rather than
+/// only under a two-generation table.
+#[test]
+fn the_bypass_predicate_and_the_merge_arm_agree_on_a_qualified_udt_reference() {
+    use crate::testutil::{simple_schema, write_row};
+    use cqlite_core::schema::udt_registry_from_cql;
+    use cqlite_core::storage::write_engine::merge::{
+        assemble_read_cells_with_udts, CellData, UdtScope,
+    };
+    use cqlite_core::Value;
+
+    let (_temp, readers) = open_readers(vec![vec![write_row(1, "a", 10, 100)]]);
+    let base = simple_schema();
+    let registry = udt_registry_from_cql(
+        "CREATE TYPE contact_info (email text, phone text);",
+        &base.keyspace,
+    );
+    let scope = || {
+        Some(UdtScope {
+            registry: &registry,
+            keyspace: &base.keyspace,
+        })
+    };
+
+    /// `contact_info { email: "a@b", phone: "1" }` in Cassandra's frozen-UDT
+    /// framing: an i32-BE length per field (`TupleType.buildValue`, pinned
+    /// `cassandra-5.0.8`; `UserType extends TupleType`).
+    const CONTACT_PATH: &[u8] = &[
+        0, 0, 0, 3, b'a', b'@', b'b', // email "a@b"
+        0, 0, 0, 1, b'1', // phone "1"
+    ];
+
+    let with_type = |ty: &str| {
+        let mut schema = base.clone();
+        if let Some(c) = schema.columns.iter_mut().find(|c| c.name == "name") {
+            c.data_type = ty.to_string();
+        }
+        schema
+    };
+
+    // (declared type, must BOTH arms serve it?)
+    let cases = [
+        ("set<frozen<contact_info>>", true),
+        // The SAME type by a keyspace-qualified reference.
+        (
+            &format!("set<frozen<{}.contact_info>>", base.keyspace)[..],
+            true,
+        ),
+        // Control: a name in no registry — neither arm may claim it.
+        ("set<frozen<not_registered>>", false),
+    ];
+
+    for (declared, expect_served) in cases {
+        let schema = with_type(declared);
+        let predicate_selects =
+            bypass_reason_with_udts(&readers, &schema, ForcedMergePath::Auto, false, scope())
+                == BypassReason::Selected;
+
+        let element = CellData {
+            column: "name".into(),
+            value: Value::blob(Vec::new()),
+            timestamp: 1,
+            ttl: None,
+            cell_path: Some(CONTACT_PATH.to_vec()),
+            local_deletion_time: None,
+            is_complex_element: true,
+            is_deleted: false,
+            has_empty_value: false,
+        };
+        let merge_arm_decodes =
+            assemble_read_cells_with_udts(vec![element], &schema, None, scope()).is_ok();
+
+        assert_eq!(
+            predicate_selects, merge_arm_decodes,
+            "`{declared}`: the bypass predicate says resolvable={predicate_selects} while \
+             the merged-read arm decodes={merge_arm_decodes} — a disagreement makes \
+             correctness depend on SSTable generation count (issue #2339 F2)"
+        );
+        assert_eq!(
+            merge_arm_decodes, expect_served,
+            "`{declared}`: expected both arms to serve it = {expect_served}"
         );
     }
 }

@@ -722,8 +722,18 @@ def kp_hashable(label, rank) -> cqlite.Udt:
     ``int``, whose two conversions are identical, so for THIS UDT the outputs
     coincide. They would NOT coincide for a UDT with a collection field, where
     only the hashable path projects the field value — a shape this fixture cannot
-    reach, because a collection field inside a frozen UDT decodes to
-    ``Value::Blob`` and arrives as ``bytes`` on both paths (measured on #3504).
+    reach, because ``key_part`` is ``(label text, rank int)`` and declares no
+    collection field at all.
+
+    THE REASON RECORDED HERE USED TO BE A DIFFERENT ONE, and #3722 falsified it:
+    it said the shape was unreachable "because a collection field inside a frozen
+    UDT decodes to ``Value::Blob`` and arrives as ``bytes`` on both paths (measured
+    on #3504)". That is no longer true -- #3722 made the one UDT-field decoder
+    total over ``CqlType``, so a collection field now decodes to
+    ``List``/``Set``/``Map``/``Tuple``. The CONCLUSION survives, but only on the
+    narrower ground above, which is a property of THIS fixture's TYPE rather than
+    of the decoder. Said explicitly because the old wording would now send a reader
+    looking for a decode gap that is closed.
     """
     return kp(label, rank)
 

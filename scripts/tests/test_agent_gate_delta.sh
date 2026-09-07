@@ -75,8 +75,20 @@ else
   METADATA_PARSER=0
 fi
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-delta-test.XXXXXX")
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-delta-test.XXXXXX" 2>/dev/null) || tmp=""
+if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
+  printf 'FAIL - could not create a scratch dir under %s — refusing to run\n' "${TMPDIR:-/tmp}"
+  exit 1
+fi
 trap 'rm -rf "$tmp"' EXIT
+
+# #3637: the fixture runs below invoke real gates with no explicit summary path, so
+# each writes its #2874 private summary INSIDE its own per-run LOG_DIR and the gate
+# RETAINS that directory by design. Point $TMPDIR at this harness's own scratch root
+# so the trap above reclaims them instead of leaving several per run under the shared
+# ambient temp. Validated first — this export is a derivation from $tmp.
+export TMPDIR="$tmp/tmpdir"
+mkdir -p "$TMPDIR" || { printf 'FAIL - could not create the scoped TMPDIR %s\n' "$TMPDIR"; exit 1; }
 
 # shellcheck source=scripts/tests/lib/agent-gate-canonical-pin.bash
 . "$SCRIPT_DIR/lib/agent-gate-canonical-pin.bash"

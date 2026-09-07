@@ -118,9 +118,9 @@ cargo test
 
 # Extended lanes (optional, may fail)
 cargo test --features experimental
-cargo test -p cqlite-core --features antlr
+cargo test -p cqlite-core --features antlr      # feature removed in #1639
 cargo test -p cqlite-core --features state_machine
-cargo test -p cqlite-core --features events
+cargo test -p cqlite-core --features events     # feature removed in #1698 (gated nothing)
 cargo test -p cqlite-core --features tombstones
 ```
 

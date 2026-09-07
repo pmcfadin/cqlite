@@ -695,12 +695,17 @@ impl ValueExt for Value {
             Value::Decimal { .. } => "Decimal".to_string(),
             Value::Duration { .. } => "Duration".to_string(),
             Value::Tombstone(_) => "Tombstone".to_string(),
+            // Diagnostic name: the declared type is what makes the sentinel
+            // meaningful (issue #3805).
+            Value::Empty(ty) => format!("Empty({})", ty.cql_name()),
         }
     }
 
     fn estimate_size(&self) -> usize {
         match self {
             Value::Null => 0,
+            // The empty buffer occupies zero bytes (issue #3805).
+            Value::Empty(_) => 0,
             Value::Text(s) => s.len(),
             Value::Integer(_) => 4,
             Value::BigInt(_) => 8,
