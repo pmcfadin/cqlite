@@ -811,8 +811,7 @@ async fn an_unreadable_directory_leaves_healthy_tables_readable_but_makes_absenc
     std::fs::create_dir_all(&blocked).expect("create lost+found");
     std::fs::write(blocked.join("nb-9-big-Data.db"), b"unreachable")
         .expect("stage a file the walk must not be able to see");
-    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000))
-        .expect("chmod 0");
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).expect("chmod 0");
     let _restore = RestoreMode(blocked.clone());
 
     // MEASURE the capability rather than assuming it (see the doc above).

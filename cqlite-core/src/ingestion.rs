@@ -287,6 +287,33 @@ pub async fn ingest_with_selection(
         }
     })?;
 
+    // Issue #4159: seed every directory the DISCOVERY could not read into the
+    // database. Without this, a keyspace directory the scan could not enumerate
+    // means table directories that were never handed over at all, and a query for
+    // one of those tables would answer an empty SUCCESS — indistinguishable from a
+    // table that does not exist. The manager cannot learn this on its own: it only
+    // ever reads the directories it was given.
+    //
+    // Note this is NOT filtered by `select_table_dirs`: a gap in the enumeration is
+    // a gap regardless of which subset of the RESULT the caller asked to open, and
+    // dropping it for a filtered build would restore the swallow there.
+    for unreadable in &service_summary.unreadable_dirs {
+        database
+            .note_incomplete_discovery(
+                unreadable.path.clone(),
+                Error::Io(std::io::Error::new(
+                    unreadable.kind,
+                    format!(
+                        "SSTable discovery could not read {} directory {}: {}",
+                        unreadable.role,
+                        unreadable.path.display(),
+                        unreadable.message
+                    ),
+                )),
+            )
+            .await;
+    }
+
     // Convert from discovery module's DiscoverySummary to ingestion's DiscoverySummary
     // Use the filtered table directories in the summary
     let discovery_summary = DiscoverySummary {

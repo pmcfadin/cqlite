@@ -235,6 +235,21 @@ impl SSTableManager {
         check(&refused, table_id.name())
     }
 
+    /// Record a directory an EXTERNAL discovery could not read (issue #4159).
+    ///
+    /// `SSTableManager::new_from_discovered_paths` is handed a table-directory list
+    /// that someone else enumerated. If THAT enumeration was incomplete — an
+    /// unreadable keyspace directory, say — this manager cannot find out on its own:
+    /// it only ever reads the directories it was given, so a table that was never
+    /// handed over is indistinguishable from a table that does not exist. Telling it
+    /// closes that gap, and the note SURVIVES `refresh_tables` (which re-walks only
+    /// the given directories and so can never re-observe, or clear, a gap above
+    /// them).
+    pub async fn note_incomplete_discovery(&self, directory: std::path::PathBuf, cause: Error) {
+        let mut incomplete = self.incomplete_walk.write().await;
+        incomplete.note_external(super::discovery_walk::UnreadableDir::new(directory, cause));
+    }
+
     /// `Ok(())` iff the manager may honestly report that `table_id` has NO data.
     ///
     /// Asked ONLY when the resolved reader list came out empty, which is the one
@@ -248,7 +263,7 @@ impl SSTableManager {
     /// implements, and why the fact is NOT recorded as an unattributed refusal.
     pub(crate) async fn ensure_absence_is_knowable(&self, table_id: &TableId) -> Result<()> {
         let incomplete = self.incomplete_walk.read().await;
-        let Some(first) = incomplete.first() else {
+        let Some(first) = incomplete.iter().next() else {
             return Ok(());
         };
         Err(Error::incomplete_discovery(

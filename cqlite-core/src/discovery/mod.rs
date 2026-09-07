@@ -8,5 +8,5 @@ pub mod scanner;
 pub mod service;
 
 pub use coverage::{CoverageBadge, CoverageCalculator, CoverageInfo};
-pub use scanner::{KeyspaceInfo, ScanResult, Scanner, TableInfo};
+pub use scanner::{KeyspaceInfo, ScanResult, Scanner, TableInfo, UnreadableDirectory};
 pub use service::{DiscoveryService, DiscoverySummary};

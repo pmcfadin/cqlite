@@ -132,6 +132,55 @@ impl DirWalk {
     }
 }
 
+/// Everything currently making "this table was not discovered" an unreliable
+/// statement, from BOTH sources — kept apart because they are refreshed
+/// differently.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct IncompleteDiscovery {
+    /// Recorded by this manager's OWN walk. A refresh re-walks the same tree, so it
+    /// replaces this wholesale: a directory that became readable stops counting,
+    /// and one that just became unreadable starts.
+    from_walk: Vec<UnreadableDir>,
+    /// Reported by an EXTERNAL discovery (`DiscoveryService`) that handed this
+    /// manager its table directories.
+    ///
+    /// A refresh with [`DiscoverySource::TableDirs`] re-walks only the directories
+    /// it was GIVEN, so it can never re-observe — and therefore must never clear —
+    /// a gap in the enumeration ABOVE them. An unreadable KEYSPACE directory means
+    /// table directories that were never handed over at all, and a refresh has no
+    /// way to learn they exist. Wiping these on refresh would silently restore the
+    /// swallow.
+    external: Vec<UnreadableDir>,
+}
+
+impl IncompleteDiscovery {
+    /// Every gap, from both sources.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &UnreadableDir> {
+        self.from_walk.iter().chain(self.external.iter())
+    }
+
+    /// How many directories could not be read.
+    pub(crate) fn len(&self) -> usize {
+        self.from_walk.len() + self.external.len()
+    }
+
+    /// Add gaps found by this manager's own walk.
+    pub(crate) fn extend_from_walk(&mut self, dirs: impl IntoIterator<Item = UnreadableDir>) {
+        self.from_walk.extend(dirs);
+    }
+
+    /// Replace this manager's own walk gaps (a refresh re-observed the tree),
+    /// leaving externally-reported ones untouched.
+    pub(crate) fn replace_from_walk(&mut self, dirs: Vec<UnreadableDir>) {
+        self.from_walk = dirs;
+    }
+
+    /// Record a gap an EXTERNAL discovery reported.
+    pub(crate) fn note_external(&mut self, dir: UnreadableDir) {
+        self.external.push(dir);
+    }
+}
+
 /// Wrap `e` for `path`, PRESERVING its [`std::io::ErrorKind`].
 ///
 /// Shared with the manager's own table-directory walk
@@ -192,8 +241,7 @@ impl SSTableManager {
                     Err(e) => {
                         let cause = unreadable_dir_error(&dir, "read an entry of", Error::Io(e));
                         tracing::warn!("SSTable discovery: {cause}");
-                        walk.unreadable
-                            .push(UnreadableDir::new(dir.clone(), cause));
+                        walk.unreadable.push(UnreadableDir::new(dir.clone(), cause));
                         break;
                     }
                 };
@@ -266,8 +314,7 @@ impl SSTableManager {
                             let cause =
                                 unreadable_dir_error(dir, "read discovered table directory", e);
                             tracing::warn!("SSTable discovery: {cause}");
-                            walk.unreadable
-                                .push(UnreadableDir::new(dir.clone(), cause));
+                            walk.unreadable.push(UnreadableDir::new(dir.clone(), cause));
                             continue;
                         }
                     };
@@ -276,10 +323,10 @@ impl SSTableManager {
                             Ok(Some(entry)) => entry,
                             Ok(None) => break,
                             Err(e) => {
-                                let cause = unreadable_dir_error(dir, "read an entry of", Error::Io(e));
+                                let cause =
+                                    unreadable_dir_error(dir, "read an entry of", Error::Io(e));
                                 tracing::warn!("SSTable discovery: {cause}");
-                                walk.unreadable
-                                    .push(UnreadableDir::new(dir.clone(), cause));
+                                walk.unreadable.push(UnreadableDir::new(dir.clone(), cause));
                                 break;
                             }
                         };

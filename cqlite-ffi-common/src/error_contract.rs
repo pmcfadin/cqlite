@@ -201,6 +201,15 @@ ffi_error_contract_table! {
     // `category: Data` MATCHES `Error::classify()` (Corruption) and
     // `recoverable: false` matches `Error::is_recoverable()` for the variant.
     UnreadableSSTable => { py: Cqlite, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
+    // Issue #4159: discovery could not read part of the directory tree, so a table
+    // it did not find cannot be reported as absent. Deliberately NOT the
+    // `UnreadableSSTable` row: nothing here is undecodable data — every file is
+    // fine, the walk simply could not see a directory. It is an I/O condition, and
+    // an ENVIRONMENTAL one, so `code: "IO"`, `category: System` and
+    // `recoverable: true` all MATCH `Error::category()`/`Error::is_recoverable()`
+    // for the variant, and a binding consumer handling an I/O failure (fix the
+    // mount, fix the permissions, retry) already has the right branch.
+    IncompleteDiscovery => { py: Cqlite, code: "IO", category: System, recoverable: true, prefix: Some("IoError"), },
     Schema => { py: Schema, code: "SCHEMA", category: Schema, recoverable: false, prefix: Some("SchemaError"), },
     // (#1451) real PARSE: a CQL syntax failure, not the generic QUERY bucket.
     CqlParse => { py: Parse, code: "PARSE", category: Query, recoverable: false, prefix: Some("ParseError"), },
@@ -268,6 +277,7 @@ pub fn variant_of(err: &Error) -> FfiErrorVariant {
         Error::Corruption(_) => FfiErrorVariant::Corruption,
         Error::ColumnDecode { .. } => FfiErrorVariant::ColumnDecode,
         Error::UnreadableSSTable { .. } => FfiErrorVariant::UnreadableSSTable,
+        Error::IncompleteDiscovery { .. } => FfiErrorVariant::IncompleteDiscovery,
         Error::Schema(_) => FfiErrorVariant::Schema,
         Error::CqlParse(_) => FfiErrorVariant::CqlParse,
         Error::InvalidFormat(_) => FfiErrorVariant::InvalidFormat,
@@ -339,6 +349,15 @@ impl FfiErrorVariant {
                 "/sample/sample_keyspace/sample_table-1/nb-1-big-Data.db",
                 1,
                 std::sync::Arc::new(Error::corruption("sample SSTable open refusal")),
+            ),
+            FfiErrorVariant::IncompleteDiscovery => Error::incomplete_discovery(
+                "sample_keyspace.sample_table",
+                "/sample/lost+found",
+                1,
+                std::sync::Arc::new(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "sample unreadable directory",
+                ))),
             ),
             FfiErrorVariant::Schema => Error::schema("sample schema failure"),
             FfiErrorVariant::CqlParse => Error::cql_parse("sample CQL syntax failure"),

@@ -322,7 +322,7 @@ impl SSTableManager {
         //      one that just became unreadable must start.
         {
             let mut incomplete = self.incomplete_walk.write().await;
-            *incomplete = walk.unreadable.clone();
+            incomplete.replace_from_walk(walk.unreadable.clone());
         }
 
         // 5a. Removal: retain only readers still present on disk. Every

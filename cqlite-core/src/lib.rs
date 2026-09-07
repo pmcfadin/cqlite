@@ -450,6 +450,33 @@ impl Database {
         self.storage.refresh().await
     }
 
+    /// Tell this database that the discovery which enumerated its table
+    /// directories was INCOMPLETE — some directory could not be read (issue #4159).
+    ///
+    /// A `Database` built with [`open_with_discovered_sstables`] only ever reads the
+    /// directories it was HANDED. If the enumeration above them was partial (an
+    /// unreadable keyspace directory, a `lost+found` in the way), a table that was
+    /// never handed over is indistinguishable from a table that does not exist, and
+    /// a query for it would answer an empty SUCCESS — the issue #4159 swallow at
+    /// discovery granularity.
+    ///
+    /// After this call, a query for a table this database holds no SSTables for
+    /// fails closed with [`Error::IncompleteDiscovery`] naming `directory`. A table
+    /// that WAS discovered and opened is unaffected and reads normally, which is what
+    /// keeps a stock root-owned `lost+found` from becoming a whole-database outage.
+    ///
+    /// Callers driving discovery through [`discovery::DiscoveryService`] should pass
+    /// each entry of `DiscoverySummary::unreadable_dirs`; `ingestion` does this
+    /// automatically.
+    ///
+    /// [`open_with_discovered_sstables`]: Database::open_with_discovered_sstables
+    /// [`Error::IncompleteDiscovery`]: crate::Error::IncompleteDiscovery
+    pub async fn note_incomplete_discovery(&self, directory: std::path::PathBuf, cause: Error) {
+        self.storage
+            .note_incomplete_discovery(directory, cause)
+            .await
+    }
+
     /// Execute a SQL query and return the result
     ///
     /// # Arguments

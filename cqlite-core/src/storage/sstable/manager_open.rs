@@ -56,7 +56,7 @@ impl SSTableManager {
         let readers = Arc::new(RwLock::new(HashMap::new()));
         let table_readers = Arc::new(RwLock::new(HashMap::new()));
         let refused = Arc::new(RwLock::new(refusal::RefusalLedger::new()));
-        let incomplete_walk = Arc::new(RwLock::new(Vec::new()));
+        let incomplete_walk = Arc::new(RwLock::new(discovery_walk::IncompleteDiscovery::default()));
 
         let manager = Self {
             base_path,
@@ -162,7 +162,7 @@ impl SSTableManager {
         let readers = Arc::new(RwLock::new(HashMap::new()));
         let table_readers = Arc::new(RwLock::new(HashMap::new()));
         let refused = Arc::new(RwLock::new(refusal::RefusalLedger::new()));
-        let incomplete_walk = Arc::new(RwLock::new(Vec::new()));
+        let incomplete_walk = Arc::new(RwLock::new(discovery_walk::IncompleteDiscovery::default()));
 
         let manager = Self {
             base_path,
@@ -220,19 +220,16 @@ impl SSTableManager {
             let mut dir_entries = match self.platform.fs().read_dir(&table_dir).await {
                 Ok(entries) => entries,
                 Err(e) => {
-                    let cause = discovery_walk::unreadable_dir_error(
-                        &table_dir,
-                        "read table directory",
-                        e,
-                    );
+                    let cause =
+                        discovery_walk::unreadable_dir_error(&table_dir, "read table directory", e);
                     tracing::warn!(
                         "SSTableManager: {cause}. Discovery is INCOMPLETE; queries for \
                          tables not otherwise discovered will fail closed."
                     );
-                    incomplete.push(discovery_walk::UnreadableDir::new(
+                    incomplete.extend_from_walk([discovery_walk::UnreadableDir::new(
                         table_dir.clone(),
                         cause,
-                    ));
+                    )]);
                     continue;
                 }
             };
@@ -255,10 +252,10 @@ impl SSTableManager {
                             crate::Error::Io(e),
                         );
                         tracing::warn!("SSTableManager: {cause}");
-                        incomplete.push(discovery_walk::UnreadableDir::new(
+                        incomplete.extend_from_walk([discovery_walk::UnreadableDir::new(
                             table_dir.clone(),
                             cause,
-                        ));
+                        )]);
                         break;
                     }
                 };
@@ -363,7 +360,7 @@ impl SSTableManager {
 
         {
             let mut incomplete = self.incomplete_walk.write().await;
-            incomplete.extend(walk.unreadable);
+            incomplete.extend_from_walk(walk.unreadable);
         }
 
         if data_files.is_empty() {

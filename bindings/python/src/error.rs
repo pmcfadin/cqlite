@@ -73,7 +73,7 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
 ///
 /// | Rust Variant | Python Exception |
 /// |--------------|------------------|
-/// | `Io` | `IOError` (builtin) |
+/// | `Io`, `IncompleteDiscovery` | `IOError` (builtin) |
 /// | `Schema`, `Table` | `SchemaError` |
 /// | `QueryExecution`, `ResultTooLarge`, `UnsupportedQuery` | `QueryError` |
 /// | `CqlParse` | `ParseError` |
@@ -344,7 +344,7 @@ mod tests {
     ///
     /// | Rust Variant | Python Exception | Notes |
     /// |--------------|------------------|-------|
-    /// | `Io` | `IOError` (builtin) | I/O operations |
+    /// | `Io`, `IncompleteDiscovery` | `IOError` (builtin) | I/O operations; unreadable discovery directory (#4159) |
     /// | `Schema`, `Table` | `SchemaError` | Schema/table validation |
     /// | `QueryExecution`, `ResultTooLarge`, `UnsupportedQuery` | `QueryError` | Query execution |
     /// | `CqlParse` | `ParseError` | CQL syntax errors (Node code `PARSE`, #1451) |
@@ -394,6 +394,13 @@ mod tests {
             // `ColumnDecode` one granularity up (a whole file rather than one cell),
             // so the same Python class and the same `PARSE` code on Node.
             Error::UnreadableSSTable { .. } => PyExceptionClass::Cqlite,
+            // Issue #4159: discovery could not read part of the tree, so absence is
+            // not knowable. NOT the `UnreadableSSTable` row: no data is undecodable
+            // here — every file is fine and the walk simply could not see a
+            // directory. It is an I/O condition (a permissions or mount problem the
+            // caller fixes and retries), so it takes the same builtin `IOError` as
+            // `Error::Io`, matching its `ErrorCategory::System` in core.
+            Error::IncompleteDiscovery { .. } => PyExceptionClass::Io,
             Error::InvalidFormat(_) => PyExceptionClass::Cqlite,
             Error::UnsupportedFormat(_) => PyExceptionClass::Cqlite,
             Error::UnsupportedVersion { .. } => PyExceptionClass::Cqlite,

@@ -492,7 +492,7 @@ pub struct SSTableManager {
     /// four-outcome table.
     ///
     /// [`Error::IncompleteDiscovery`]: crate::Error::IncompleteDiscovery
-    pub(crate) incomplete_walk: Arc<RwLock<Vec<discovery_walk::UnreadableDir>>>,
+    pub(crate) incomplete_walk: Arc<RwLock<discovery_walk::IncompleteDiscovery>>,
 
     /// Platform abstraction
     platform: Arc<Platform>,
