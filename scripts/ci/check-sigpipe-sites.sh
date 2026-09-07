@@ -90,6 +90,36 @@
 # comment saying why its failure cannot be read as clean. There is deliberately no degraded
 # count-only mode: a mode that silently restores the false PASS is worse than the bug.
 #
+# THE CLASS, AND THE WHOLE-FILE AUDIT THAT CLOSED IT (roborev jobs 138/139/140). Three review
+# rounds each found ONE more instance of a SINGLE class: an UNMEASURED OR FAILED OPERATION READ AS
+# A CLEAN RESULT. (138) a SWAP read as clean, because a count cannot see it. (139) a FAILED MATCHER
+# read as clean, because its status was ignored. (140) a FAILED OR TRUNCATED ENUMERATION WRITE read
+# as clean, because the subject-list append was unchecked while the counter was incremented anyway,
+# so the omitted scripts were never scanned and the non-vacuity floor — which reads the COUNTER —
+# could not tell. Patching the third site alone would have invited a fourth round, so this file was
+# audited END TO END for the class, and the audit is the deliverable:
+#
+#   * EVERY PRODUCER'S STATUS IS READ. The shape is `if ! producer >file; then refuse …; fi`.
+#   * EVERY SET FILE IS RECOUNTED AGAINST THE IN-SHELL COUNTER THAT DESCRIBES IT, before anything
+#     reads it: the subject list, the census, the parsed baseline, the duplicate-detection set, the
+#     self-check fixture, the comparison records, the regenerated baseline. THIS IS THE PART THAT
+#     GENERALISES — a counter and the file it describes can disagree for causes nobody enumerated
+#     (a failed append, a short or partial write, ENOSPC, a truncation, a concurrent clobber), and
+#     a per-append check only catches the causes it was written for. Recounting catches all of them.
+#   * EVERY CONSUMER IS ACCOUNTED FOR TOO: the census loop asserts it SCANNED every enumerated
+#     subject, the reader loop asserts it READ every emitted comparison record, and the comparison
+#     itself reports how many records it read from each of its three inputs.
+#   * THE PASS VERDICT'S OWN EMISSION IS STATUSED. `exit 0` with nothing on stdout is silence read
+#     as success — the class at the output boundary. (A FAILING path needs no such check: it exits
+#     non-zero, so a lost message costs explanation, never the failure.)
+#   * WHAT IS NOT STATUSED IS ARGUED, IN PLACE. Ten unstatused operations remain and each carries a
+#     numbered `PROVABLY-SAFE, UNSTATUSED (n)` comment saying why its failure cannot produce a false
+#     clean. Tally, re-derivable from this file with `grep -c 'PROVABLY-SAFE, UNSTATUSED ('` and by
+#     counting the guard sites: 65 status/invariant guards, 10 declared-safe operations.
+#   * ONE RESIDUAL WITH NO INDEPENDENT REFERENCE, DECLARED at its site: `git ls-files` ORIGINATES
+#     the subject set, so nothing here can cross-check its stream — bounded by git's own status and
+#     by SUBJECT_FLOOR.
+#
 # PREREQUISITES: git, awk, a SHA-256 digest tool (`sha256sum`, else `shasum -a 256` — macOS
 # ships the latter), standard text tools. No cargo, no python3, no network, no datasets. It
 # therefore NEVER SKIPs — and an ABSENT digest tool is a REFUSAL naming it, never a skip and
@@ -97,6 +127,10 @@
 # false PASS the digest exists to remove.
 set -uo pipefail
 
+# PROVABLY-SAFE, UNSTATUSED (1): these two `cd && pwd` substitutions. A failure leaves the
+# variable EMPTY, which cannot become a clean verdict — an empty SCRIPT_DIR makes MATCHER_LIB
+# unreadable (refusal `no-matcher`) and an empty REPO_ROOT fails the `cd` below (`no-repo-root`).
+# Neither path can reach a count.
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 MATCHER_LIB="$SCRIPT_DIR/../tests/lib/sigpipe-matcher.sh"
@@ -128,6 +162,13 @@ case "${1:-}" in
     exit 2 ;;
 esac
 
+# PROVABLY-SAFE, UNSTATUSED (2): this function's own three `printf`s. If stdout is unusable the
+# message is lost, but the CHANNEL A CALLER MUST BELIEVE IS THE EXIT STATUS, and `exit 3` is not a
+# write — a refusal can never degrade into a pass. (The converse case, a lost PASS verdict, is not
+# safe and IS statused; see the end of this file.)
+# PROVABLY-SAFE, UNSTATUSED (5): the `$(tr '\n' ' ' <…err)` substitutions that flatten a captured
+# stderr INTO a refusal message. They are evaluated only on a path that is ALREADY refusing (or
+# already FAILing), so a failure there can only shorten a message, never produce a verdict.
 refuse() { # refuse <cause> <what> <remedy>
   printf 'SIGPIPE-SITES: REFUSING (reason: %s): %s\n' "$1" "$2"
   printf 'SIGPIPE-SITES: REMEDY: %s\n' "$3"
@@ -173,6 +214,9 @@ command -v awk >/dev/null 2>&1 || refuse "no-awk" \
 # see the header), whitespace is trimmed and collapsed so a re-indent is not a "change", and
 # the sort makes the material a SORTED MULTISET so intra-file motion is invisible while a swap
 # is not. Lines that normalise to nothing are dropped: they carry no content to hash.
+# The `awk | sort` inside this function is STATUSED AT EVERY CALL SITE: `set -o pipefail` is on
+# (line 98) and `sort` reads to EOF, so the function's status is non-zero if either stage fails,
+# and no caller ignores it. It is not in the provably-safe list — it is checked.
 _norm_sorted() { # _norm_sorted <violations-file>  -> normalised, sorted lines on stdout
   awk '{ sub(/^[0-9]+:/, "", $0)
          sub(/^[[:space:]]+/, "", $0); sub(/[[:space:]]+$/, "", $0)
@@ -201,6 +245,8 @@ HASH_RE='^[0-9a-f]{64}$'
 _tmp=$(mktemp -d 2>/dev/null) || refuse "no-tmpdir" \
   "\`mktemp -d\` failed, so the matcher self-check fixture cannot be written" \
   "check TMPDIR=${TMPDIR:-/tmp}"
+# PROVABLY-SAFE, UNSTATUSED (3): the cleanup trap. A failed `rm -rf` leaks a temp directory and
+# changes no measurement; it runs after the verdict and cannot alter it.
 trap 'rm -rf "$_tmp"' EXIT
 PIPE='|'
 if ! {
@@ -261,9 +307,18 @@ if ! git ls-files -z 'scripts/*.sh' 'scripts/**/*.sh' >"$_tmp/subjects.z" 2>"$_t
     "repair the checkout; an unmeasured subject set is never a pass"
 fi
 
+# THE ONE THING HERE WITH NO INDEPENDENT REFERENCE, DECLARED: `git ls-files` is the ORIGIN of the
+# subject set, so nothing in this file can cross-check its stream — a hypothetical git that exited
+# 0 having written a SHORT stream would under-enumerate. Two things bound it: git's own status is
+# read (above), and SUBJECT_FLOOR refuses any enumeration that collapses. Every stage AFTER this
+# one is cross-checked against the count taken here.
 # BASH 3.2 THROUGHOUT (macOS is a first-class gate host and ships 3.2): no associative arrays
 # anywhere in this file. Every set lives in a sorted temp FILE and the comparison is one awk pass,
 # which is also why the output is deterministically ordered.
+# PROVABLY-SAFE, UNSTATUSED (4): this and every other `: >"$_tmp/…"` truncation in this file. If
+# the create/truncate fails, every append to that file fails too — and each append is either
+# statused directly or covered by the recount that follows it, so the failure surfaces as a named
+# refusal rather than as an empty set read as clean.
 : >"$_tmp/subjects"
 N_SUBJECTS=0
 while IFS= read -r -d '' f; do
@@ -465,10 +520,14 @@ fi
   "the baseline $BASELINE exists but is not readable" \
   "fix its permissions"
 
-# The read redirect below is NOT statused, and cannot be read as clean: if it fails the loop body
-# never runs, B_ENTRIES stays 0 and the entry floor REFUSES. Same for the subjects loop above (a
-# failed read leaves N_SUBJECTS at 0 and trips the subject floor). Both floors are why an
-# unreadable input cannot become a pass.
+# PROVABLY-SAFE, UNSTATUSED (7): the read redirect below. Two independent reasons it cannot be
+# read as clean. (a) A total failure runs the loop body zero times, leaving B_ENTRIES at 0, and the
+# entry floor REFUSES (same for the enumeration loop above and the subject floor). (b) A PARTIAL
+# read fails CLOSED BY DIRECTION: every record lost here removes a TOLERATED file from the
+# reference set, and the comparison treats a census entry with no baseline record as FAIL-NEW. So
+# a short baseline read can only ever RED, never green. The one exception — a lost duplicate-
+# detection record, which WOULD hide a tolerated-count overwrite — is why `basepaths` is recounted
+# below rather than trusted.
 : >"$_tmp/base"
 : >"$_tmp/basepaths"
 B_ENTRIES=0
@@ -549,6 +608,9 @@ fi
   "the duplicate-detection set holds $_bp_records record(s) for $B_ENTRIES parsed entr(y/ies), so a duplicate path could have been missed rather than shown absent" \
   "check TMPDIR=${TMPDIR:-/tmp} for free space, then re-run: the recorded set and the parsed count must be EQUAL"
 
+# PROVABLY-SAFE, UNSTATUSED (6): the `$([ … ] && printf 'y' || printf 'ies')` plural helper used
+# here and in the pass verdict. It renders one English suffix from a counter; a failure yields an
+# empty suffix and cannot change a number, a comparison or a verdict.
 printf 'SIGPIPE-SITES: baseline PARSED %d entr%s, %d recorded match(es) (floor %d entries)\n' \
   "$B_ENTRIES" "$([ "$B_ENTRIES" -eq 1 ] && printf 'y' || printf 'ies')" "$B_SITES" "$BASELINE_ENTRY_FLOOR"
 [ "$B_ENTRIES" -ge "$BASELINE_ENTRY_FLOOR" ] || refuse "baseline-floor" \
@@ -695,6 +757,12 @@ _list_sites() { # _list_sites <path>
   done <"$_tmp/v.txt"
 }
 
+# PROVABLY-SAFE, UNSTATUSED (8): every `>>"$_tmp/msg.fail"` and `>>"$_tmp/msg.info"` append in
+# _swap_report, _list_sites and the reader loop below. The VERDICT does not read those files for
+# its decision — it reads the in-shell counters, which no append can corrupt — and a TOTAL loss of
+# the failure diagnostic is caught separately by the `diagnostic-lost` refusal. A partial loss
+# shortens a message on a run that is already FAILing. msg.info carries only NON-FAILING
+# observations (IMPROVED / BASELINE FILE GONE), so losing one cannot change any verdict either.
 INCREASED=0
 NEWFILES=0
 SWAPPED=0
@@ -811,18 +879,31 @@ printf '           (%d file(s) / %d recorded match(es)). It asserts only that th
 printf '           WORSE. #4061 converted TWO named sites and deliberately left the rest.\n'
 printf 'EVERY PRODUCER IS STATUSED, and a failed one is a NAMED REFUSAL (exit 3), never a zero: the\n'
 printf '           matcher (self-check AND per subject), the count, the normalise+sort, the digest,\n'
-printf '           git ls-files, the duplicate probe, the awk comparison and its sort, and the\n'
-printf '           census/baseline/record write-backs, which are re-counted against the in-shell\n'
-printf '           counters. A ZERO COUNT FROM AN EMPTY STREAM IS INDISTINGUISHABLE FROM A CLEAN\n'
-printf '           FILE, so a count is trusted only when its producer SUCCEEDED (roborev job 139:\n'
-printf '           an ignored matcher status made a failed scan read CLEAN). There is no degraded\n'
-printf '           count-only mode and no per-file skip.\n'
+printf '           git ls-files, the duplicate probe, the awk comparison and its sort. A ZERO COUNT\n'
+printf '           FROM AN EMPTY STREAM IS INDISTINGUISHABLE FROM A CLEAN FILE, so a count is\n'
+printf '           trusted only when its producer SUCCEEDED (roborev job 139: an ignored matcher\n'
+printf '           status made a failed scan read CLEAN). No degraded mode, no per-file skip.\n'
+printf 'AND EVERY SET IS RECOUNTED AGAINST THE COUNTER THAT DESCRIBES IT (roborev job 140): the\n'
+printf '           subject list, the census, the parsed baseline, the duplicate-detection set, the\n'
+printf '           self-check fixture and the comparison records are each re-counted before\n'
+printf '           anything reads them, because a counter and its file can disagree — a failed\n'
+printf '           append, a short write, ENOSPC, a truncation, a clobber — and no floor can tell,\n'
+printf '           since a floor reads the COUNTER while the census reads the FILE. The consumers\n'
+printf '           are accounted for too (%d subject(s) enumerated and all of them SCANNED, every\n' "$N_SUBJECTS"
+printf '           emitted comparison record READ, and the comparison reports how many records it\n'
+printf '           read from each of its three inputs), and the PASS verdict\x27s own emission is\n'
+printf '           statused: exit 0 with nothing on stdout would be silence read as success. The\n'
+printf '           ten operations that remain unstatused each carry a numbered PROVABLY-SAFE\n'
+printf '           comment in this script arguing why they cannot produce a false clean.\n'
 printf 'PREREQUISITES: git + awk + a sha256 tool (%s) + standard text tools. No cargo, no\n' "$DIGEST_CMD"
 printf '           python3, no datasets, no network. This guard NEVER SKIPs; an unmeasurable run\n'
 printf '           is a REFUSAL (exit 3) — including an absent digest tool, which is NEVER a\n'
 printf '           silent fall back to comparing counts alone.\n'
 printf '==== END DECLARED SCOPE ====\n\n'
 
+# PROVABLY-SAFE, UNSTATUSED (9): this reader and the DECLARED SCOPE block above it. Both emit
+# PROSE. A lost INFO line drops a non-failing observation, and a lost scope line drops
+# documentation; neither is a verdict, and the verdict lines themselves are statused.
 while IFS= read -r m; do
   [ -n "$m" ] || continue
   printf 'SIGPIPE-SITES: %s\n' "$m"
@@ -839,6 +920,10 @@ if [ "$FAILING" -gt 0 ] && [ ! -s "$_tmp/msg.fail" ]; then
     "$FAILING failing file(s) were counted but the diagnostic could not be written, so the run cannot say WHICH files failed" \
     "check TMPDIR=${TMPDIR:-/tmp} for free space, then re-run"
 fi
+# PROVABLY-SAFE, UNSTATUSED (10): the diagnostic reader and the verdict/remedy `printf`s on THIS
+# branch. It ends in `exit 1`, so a write that fails here loses explanation, never the failure: a
+# caller sees a non-zero status. That is exactly why the PASS branch at the end of the file gets
+# the opposite treatment — there, a lost verdict would be silence read as success.
 if [ "$FAILING" -gt 0 ] || [ -s "$_tmp/msg.fail" ]; then
   while IFS= read -r m; do
     [ -n "$m" ] || continue
