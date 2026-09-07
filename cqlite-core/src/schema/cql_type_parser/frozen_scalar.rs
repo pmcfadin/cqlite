@@ -85,6 +85,27 @@
 //! refusal belongs upstream of decode, at the metadata boundary, so that no decoder
 //! ever has to hold an opinion about bytes that cannot exist.
 
+// # THIS DECLARATION SITS AT THE TOP ON PURPOSE, AND MOVING IT DOWN BREAKS THE GATE
+//
+// Conventional resolution: this file is `cql_type_parser/frozen_scalar.rs`, so it
+// owns `cql_type_parser/frozen_scalar/` and the tests file sits there. No
+// path-override attribute anywhere in the chain (see this module's declaration in
+// `cql_type_parser.rs` for why an override put the tests file beyond the walker).
+//
+// The remaining hazard is POSITION, not path. With this exact declaration at the
+// END of the file, `issue_1714_mod_reachability` reported the tests file as an
+// orphan — "compiles nowhere, is linted nowhere, is tested nowhere" — while all 13
+// of its tests were passing in the same run. Moved here, above the first `use`, the
+// guard passes and the tests still run. The guard tracks inline-`mod` scope by
+// counting braces as it walks the file, and this module's header quotes Java and
+// ANTLR bodies (`CQL3Type.java` freeze(), `Parser.g`'s K_FROZEN rule) that carry
+// braces and char literals; a late top-level `mod` is then resolved against a
+// phantom scope directory. So: do not relocate this below the header. The guard's
+// disagreement with rustc is a real defect, but it is not this issue's to fix, and
+// a shared gate guard cannot certify its own change from a lane.
+#[cfg(test)]
+mod frozen_scalar_tests;
+
 use crate::error::{Error, Result};
 use crate::schema::{is_udt_identifier, CqlType};
 
@@ -426,7 +447,3 @@ fn marshal_head_supports_freezing(inner: &str) -> bool {
         .iter()
         .any(|n| n.eq_ignore_ascii_case(simple))
 }
-
-#[cfg(test)]
-#[path = "frozen_scalar_tests.rs"]
-mod frozen_scalar_tests;

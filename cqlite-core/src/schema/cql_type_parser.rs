@@ -33,7 +33,23 @@ const MAX_NESTING_DEPTH: usize = 32;
 /// which is why `schema/mod.rs` declares this module `pub(crate)` (a MODIFIED
 /// line, not an added one). Precedent for restructuring rather than opting out of
 /// the ratchet: `row_decoder::frozen_map`'s header.
-#[path = "frozen_scalar.rs"]
+/// # NO `#[path]` — IT PUT THE CHILD TESTS FILE BEYOND THE #1714 GUARD
+/// This was `#[path = "frozen_scalar.rs"]` over a file at `schema/`. That
+/// compiled, but rustc and the gate's `issue_1714_mod_reachability` walker
+/// derive a `#[path]`-loaded module's CHILD directory differently: rustc uses
+/// the path'd file's own dir (`schema/`), the walker uses `<dir>/<stem>/`
+/// (`schema/frozen_scalar/`, guard line 456-461 — "any other file owns the
+/// `<stem>/` subdirectory"). So the child tests file was reachable to rustc and
+/// an ORPHAN to the walker, which FAILed `core-tests` claiming it "compiles
+/// nowhere, is linted nowhere, is tested nowhere" while all 14 of its tests were
+/// passing in that same run.
+///
+/// No placement satisfies both while ANY `#[path]` is in the chain, so the whole
+/// chain is now CONVENTIONAL: this module lives in `cql_type_parser/` (the dir
+/// this non-`mod.rs` file owns) and its tests in `cql_type_parser/frozen_scalar/`.
+/// Zero `#[path]` attributes, so the two resolvers cannot diverge here again.
+/// The walker's disagreement with rustc is a real defect but is NOT this issue's
+/// to fix — and a shared guard cannot certify its own change from a lane.
 pub(crate) mod frozen_scalar;
 
 impl CqlType {
