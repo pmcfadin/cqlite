@@ -2,9 +2,14 @@
 //! Shared fixtures live in `support`; tests are grouped by file.
 
 mod collection_order_serialize;
+/// WRITE-SIDE admission of the sentinel on a multicell SET's CELL PATH (issue
+/// #4106) — the sibling of the above one collection over, with every byte of its
+/// expectation derived from `cassandra-5.0.8` rather than from a round trip.
+mod empty_sentinel_set_write;
 /// WRITE-SIDE admission of the empty-buffer sentinel (issue #3805, roborev job
-/// 449 finding D): legal ONLY on a multicell map's cell path with the tag
-/// validated against the declared key type; refused in every type-blind context.
+/// 449 finding D): legal ONLY on a multicell collection's cell path with the tag
+/// validated against the declared component type; refused in every type-blind
+/// context. This module covers the MAP half; the SET half is below (#4106).
 mod empty_sentinel_write;
 /// Correctness proof for `IncrementalPartitionWriter` (issue #1668, stage
 /// 5c-iv part 1) against today's whole-slice `write_partition_with_index_blocks`.

@@ -145,8 +145,18 @@ pub(crate) fn len_as_i32(len: usize) -> Result<i32> {
 /// Serialize a collection element, rejecting null (CQL semantics: lists/sets cannot contain null).
 ///
 /// Thin wrapper over [`serialize_collection_element_into`] preserving the
-/// owned-`Vec` signature that the comparator fallback (`collection_order`) and
-/// tests depend on.
+/// owned-`Vec` signature the writer's test fixtures depend on for building an
+/// expected SET cell path.
+///
+/// TEST-ONLY since issue #4106, and gated so `-D dead-code` says so honestly:
+/// the last production caller was `write_set_complex_cells`, which now routes
+/// its cell path through the schema-aware
+/// [`super::serialize_set_cell_path_element_into`] (which still delegates every
+/// NON-sentinel element to the `_into` twin, so no bytes changed). Same
+/// treatment, and the same reason, as
+/// `row_decoder::complex_column::cell_path_key::parse_cell_path_key`: an
+/// `#[allow(dead_code)]` would silence a true statement instead of stating it.
+#[cfg(test)]
 pub(crate) fn serialize_collection_element(
     value: &Value,
     collection_kind: &str,
@@ -171,118 +181,6 @@ pub(crate) fn serialize_collection_element_into(
         )));
     }
     serialize_value_into(value, out)
-}
-
-/// The DECLARED KEY type of a multicell map column, from its declared type
-/// string in EITHER spelling — `None` when the string denotes no map type at
-/// all (issue #3805, roborev job 453).
-///
-/// # Why two spellings, and why this is not a relaxation
-/// A column's declared type reaches the writer as a CQL `map<K,V>` when it came
-/// from a CQL schema, and as Cassandra's MARSHAL form
-/// `org.apache.cassandra.db.marshal.MapType(Int32Type,Int32Type)` when it came
-/// from a `SerializationHeader` — which is why `write_complex_column` dispatches
-/// on both forms, and why the READ path decodes both
-/// (`row_decoder::complex_column::extract_map_types`). A gate that understood
-/// only the CQL spelling therefore refused a sentinel that a schema-less read
-/// had legitimately DECODED, on a rewrite (compaction) of the very SSTable it
-/// came from. Recognising the second spelling widens what the gate can SEE; the
-/// admission itself is unchanged and is still
-/// [`crate::types::EmptyValueType::check_admits`], so a key type that does not
-/// admit an empty buffer is refused in either spelling.
-///
-/// # NEITHER resolution is written here (one fact, one parser)
-///  * the CQL spelling is [`CqlType::parse`];
-///  * the marshal spelling is
-///    [`V5CompressedLegacyParser::parse_cassandra_type`], whose name table is
-///    derived arm-by-arm from `cql3/CQL3Type.java`'s `Native` enum at
-///    `cassandra-5.0.8` and which enforces the marshal PACKAGE rule (a
-///    third-party `com.acme.Int32Type` is refused, not read as `int`).
-///
-/// The string->string `convert_marshal_type_to_cql` in
-/// `parser::enhanced_statistics_parser` is deliberately NOT used: it maps
-/// `IntegerType` to `int` where Cassandra binds it to `varint`, and a one-argument
-/// `MapType(V)` to `map<text, V>`, so reusing it would decide an admission
-/// against a key type Cassandra does not agree with.
-///
-/// # What stays refused, on purpose
-/// A `FrozenType(MapType(K,V))` resolves to [`CqlType::Frozen`] and NOT to
-/// [`CqlType::Map`], so it is refused here: a frozen map is ONE inline
-/// length-prefixed cell with no CellPath at all, so its empty key is the
-/// inline-element case owned by `require_fixed_width` (#3847/#4071), not this
-/// one. A non-map declaration, a foreign-package class, and a spelling neither
-/// parser models are all refused for the reason this function exists.
-fn resolve_declared_map_key_type(map_data_type: &str) -> Option<CqlType> {
-    if let Ok(CqlType::Map(key, _)) = CqlType::parse(map_data_type) {
-        return Some(*key);
-    }
-    match crate::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser::parse_cassandra_type(
-        map_data_type,
-    ) {
-        Ok(CqlType::Map(key, _)) => Some(*key),
-        _ => None,
-    }
-}
-
-/// Serialize a MULTICELL map's CELL PATH (its serialized KEY) into `out`.
-///
-/// This is the ONE write-path position where the empty-buffer sentinel
-/// (`Value::Empty`, issue #3805) may legally be serialized, and the only reason
-/// it may is that BOTH of the things [`serialize_value_into`] lacks are present
-/// here: the length is carried by the enclosing framing (an unsigned VInt, so a
-/// zero-length path is expressible and means an EMPTY KEY —
-/// `db/marshal/CollectionType.java:361-382`), and the DECLARED KEY TYPE is known,
-/// so the sentinel's tag can be checked against it.
-///
-/// # The admission check is NOT written twice
-/// It is [`crate::types::EmptyValueType::check_admits`], which lives beside the
-/// tag table it is derived from, which is derived from Cassandra's `validate()`;
-/// a copy here would be a second opinion able to drift from it (roborev job 449
-/// finding D asked for exactly this reuse). That check answers the TYPE half
-/// only. The FRAMING half — that a zero-length buffer is expressible here and
-/// means an empty KEY — is supplied by THIS position and by no other, which is
-/// why this is the only value-serializing function in the crate that admits the
-/// sentinel (roborev job 452; the type-aware writer
-/// `storage/serialization/types.rs` has the type and not the framing, so it
-/// refuses). Pinned by the write-surface census in
-/// `crate::types::empty_value`'s `write_surface_census_tests`.
-///
-/// # BOTH declared SPELLINGS are recognised; an UNRESOLVABLE one is still a
-/// REFUSAL, never a guess (#28)
-/// `map_data_type` is the COLUMN's declared type, and it arrives in EITHER of
-/// two spellings — a CQL `map<int, int>` or Cassandra's MARSHAL form
-/// `org.apache.cassandra.db.marshal.MapType(Int32Type,Int32Type)` — because
-/// `write_complex_column` dispatches on both (`complex.rs`, the
-/// `org.apache.cassandra.db.marshal.maptype(` arm) and a schema-less read yields
-/// the marshal one. [`resolve_declared_map_key_type`] resolves both; where it
-/// cannot, the sentinel is REFUSED, because there is then no declared KEY type
-/// to validate the tag against and refusing beats writing bytes that read back
-/// as something else. Every NON-sentinel key is unaffected and goes straight to
-/// [`serialize_value_into`], so an unresolved declared type costs nothing on any
-/// path that does not carry a sentinel.
-pub(crate) fn serialize_map_cell_path_key_into(
-    key: &Value,
-    map_data_type: &str,
-    out: &mut Vec<u8>,
-) -> Result<()> {
-    let Value::Empty(tag) = key else {
-        return serialize_value_into(key, out);
-    };
-    let Some(key_type) = resolve_declared_map_key_type(map_data_type) else {
-        return Err(Error::InvalidInput(format!(
-            "an empty-buffer sentinel (`{}`, issue #3805) needs the DECLARED map key \
-             type to be validated against, and `{map_data_type}` resolves to a map \
-             type in neither the CQL spelling (`map<K,V>`) nor the Cassandra marshal \
-             one (`org.apache.cassandra.db.marshal.MapType(K,V)`); refusing rather \
-             than guessing (issue #28)",
-            tag.cql_name()
-        )));
-    };
-    tag.check_admits(&key_type, map_data_type)?;
-    // The whole encoding: NOTHING. `out` is deliberately left untouched — the
-    // length lives in the caller's unsigned VInt, so a zero-length cell path IS
-    // the empty key.
-    Ok(())
 }
 
 /// Serialize a Value to bytes for cell storage.
@@ -332,18 +230,20 @@ pub(crate) fn serialize_value_into(value: &Value, out: &mut Vec<u8>) -> Result<(
         //
         // Where the declared type is NOT available, REFUSE rather than guess
         // (no-heuristics, issue #28): refusing beats writing bytes that read back
-        // as something else. The ONE legal position — a MULTICELL map's CELL
-        // PATH, where the length IS carried by the enclosing framing (an unsigned
-        // VInt, `db/marshal/CollectionType.java:361-382`) and the declared key
-        // type IS known — has its own schema-aware entry point,
-        // [`serialize_map_cell_path_key_into`].
+        // as something else. The legal positions — a MULTICELL collection's CELL
+        // PATH (a map's KEY, a set's ELEMENT), where the length IS carried by the
+        // enclosing framing (an unsigned VInt,
+        // `db/marshal/CollectionType.java:361-382`) and the declared component
+        // type IS known — have their own schema-aware entry points in
+        // [`super::cell_path`] (#3805 for the map half, #4106 for the set half).
         Value::Empty(tag) => {
             return Err(Error::InvalidInput(format!(
                 "an empty-buffer sentinel (`{}`, issue #3805) has no type-blind \
                  serialization: zero bytes mean a different thing in every generic \
-                 context, so it is legal only on a MULTICELL map's cell path via \
-                 `serialize_map_cell_path_key_into`, where the declared key type is \
-                 known and the tag can be validated against it (issue #28)",
+                 context, so it is legal only on a MULTICELL collection's cell path \
+                 via `serialize_map_cell_path_key_into` / \
+                 `serialize_set_cell_path_element_into`, where the declared component \
+                 type is known and the tag can be validated against it (issue #28)",
                 tag.cql_name()
             )))
         }

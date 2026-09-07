@@ -90,15 +90,15 @@ impl TypeSerializer {
             //
             // Knowing the declared type says only that an empty buffer would be
             // LEGAL for that type; it does not say that this position means an
-            // empty MAP KEY. That is the whole gap: this writer has the type and
-            // not the framing context. The ONE write position where both are
-            // present — the length carried by the enclosing framing (an unsigned
-            // VInt, `db/marshal/CollectionType.java:361-382`) and the declared
-            // KEY type available to validate the tag — is a MULTICELL map's CELL
-            // PATH, which has its own schema-aware entry point,
-            // `storage::sstable::writer::data_writer::encoding::serialize_map_cell_path_key_into`.
-            // Refusing beats writing bytes that read back as something else
-            // (no-heuristics, issue #28).
+            // empty collection COMPONENT. That is the whole gap: this writer has
+            // the type and not the framing context. The write positions where
+            // both are present — the length carried by the enclosing framing (an
+            // unsigned VInt, `db/marshal/CollectionType.java:361-382`) and the
+            // declared component type available to validate the tag — are a
+            // MULTICELL collection's CELL PATH (a map's KEY, #3805; a set's
+            // ELEMENT, #4106), which have their own schema-aware entry points in
+            // `storage::sstable::writer::data_writer::cell_path`. Refusing beats
+            // writing bytes that read back as something else (#28).
             Value::Empty(tag) => Err(refuse_empty_sentinel_cell_value(*tag)),
             _ => {
                 let cql_type = CqlType::parse(data_type)?;
@@ -642,23 +642,23 @@ impl TypeSerializer {
 /// bytes read back as `null` (`db/rows/Cell.java:264` at `cassandra-5.0.8`), and
 /// a length-prefixed collection/tuple/UDT component's zero length is that
 /// component's own empty value. The single position that supplies both is a
-/// MULTICELL map's CELL PATH, whose schema-aware entry point is
-/// [`crate::storage::sstable::writer::data_writer::encoding`]'s
-/// `serialize_map_cell_path_key_into` — and that is the ONLY value-serializing
-/// function in this crate licensed to admit the sentinel, pinned by
-/// `crate::types::empty_value`'s write-surface census.
+/// MULTICELL collection's CELL PATH, whose schema-aware entry points are
+/// [`crate::storage::sstable::writer::data_writer::cell_path`]'s
+/// `serialize_map_cell_path_key_into` (a map's KEY, #3805) and
+/// `serialize_set_cell_path_element_into` (a set's ELEMENT, #4106) — the ONLY
+/// two licensed to admit it, pinned BY NAME by that census.
 fn refuse_empty_sentinel_cell_value(tag: crate::types::EmptyValueType) -> Error {
     Error::InvalidInput(format!(
         "an empty-buffer sentinel (`{}`, issue #3805) has no cell-value \
          serialization: a declared type says only that an empty buffer would be \
-         LEGAL for it, never that this position means an empty MAP KEY — as a \
-         cell value zero bytes read back as `null` \
+         LEGAL for it, never that this position means an empty collection \
+         COMPONENT — as a cell value zero bytes read back as `null` \
          (`db/rows/Cell.java:264`), and inside a length-prefixed \
          collection/tuple/UDT component they read back as that component's own \
-         empty value. It is legal ONLY on a multicell map's cell path, via \
-         `data_writer::encoding::serialize_map_cell_path_key_into`, where the \
-         length is carried by the enclosing framing and the declared key type \
-         can validate the tag (issue #28)",
+         empty value. It is legal ONLY on a multicell collection's cell path, via \
+         `data_writer::cell_path`'s `serialize_map_cell_path_key_into` or \
+         `serialize_set_cell_path_element_into`, where the length is carried by the \
+         enclosing framing and the declared component type validates the tag (#28)",
         tag.cql_name()
     ))
 }

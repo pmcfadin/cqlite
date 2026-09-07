@@ -691,10 +691,10 @@ fn serialize_value_without_type_prefix(value: &Value) -> Result<Vec<u8>> {
 /// no-heuristics mandate forbids (issue #28); the sentinel's write-side
 /// representation is a declared fail-closed residual, issue #4072.
 ///
-/// # The surface that CAN write it — CORRECTED (roborev job 452)
-/// It is the multicell MAP CELL PATH in the SSTable writer,
-/// `storage::sstable::writer::data_writer::encoding::serialize_map_cell_path_key_into`,
-/// and ONLY that. An earlier revision of this comment named the type-aware
+/// # The surface that CAN write it — CORRECTED (roborev job 452, then #4106)
+/// It is a multicell COLLECTION's CELL PATH in the SSTable writer — a map's KEY
+/// (#3805) or a set's ELEMENT (#4106), both in `data_writer::cell_path` — and
+/// ONLY that. An earlier revision of this comment named the type-aware
 /// writer (`crate::storage::serialization::types`) on the ground that a declared
 /// column type "supplies the framing this format lacks" — which was WRONG, and
 /// citing it made this rationale point at a site that now refuses. A declared

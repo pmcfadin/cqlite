@@ -3,6 +3,14 @@
 pub mod bloom;
 pub mod bti;
 pub mod bulletproof_reader;
+/// Which COMPONENT of a multicell collection's declared type a CELL PATH holds
+/// (a map's KEY, a set's ELEMENT), and the ONE resolver that names it from the
+/// column's COMPLETE declared type in either spelling. Shared by the READ gate
+/// (`reader::parsing::row_decoder::complex_column::cell_path_empty`) and the
+/// WRITE gate (`writer::data_writer::cell_path`) so the two cannot form
+/// different opinions about a declared type — which they did, and that was
+/// #4106 roborev job 449 finding B1. See its header.
+pub(crate) mod cell_path_component;
 pub mod chunk_decompressor;
 pub mod chunk_reader;
 pub mod compression;

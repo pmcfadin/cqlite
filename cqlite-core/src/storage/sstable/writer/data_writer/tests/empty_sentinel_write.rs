@@ -721,7 +721,13 @@ fn the_type_aware_writer_refuses_every_family_as_a_cell_value() {
                  the general CELL-VALUE API and zero bytes there read back as null"
             ));
         let msg = err.to_string();
-        for needle in ["#3805", "serialize_map_cell_path_key_into"] {
+        // BOTH legal routes must be named (#4106): a message naming only the map
+        // one tells a caller holding a set that there is nowhere to write it.
+        for needle in [
+            "#3805",
+            "serialize_map_cell_path_key_into",
+            "serialize_set_cell_path_element_into",
+        ] {
             assert!(
                 msg.contains(needle),
                 "the refusal for `{key_type}` must name {needle}; got: {msg}"
