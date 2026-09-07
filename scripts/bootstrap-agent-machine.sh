@@ -5389,7 +5389,11 @@ else
     # could classify itself, or emitted something this reader does not know. Unknown is
     # never ok.
     warn "object-store: UNMEASURED (the sweep produced no recognised verdict, rc=$obj_rc — integrity is UNKNOWN, not ok)"
-    printf '%s\n' "$obj_out" | head -4 | while IFS= read -r obj_line; do
+    # head reads from a herestring, not a piped builtin printf (#4061): head -4 exits after four
+    # lines and closes the pipe under bash's BUILTIN writer -> EPIPE noise on stderr. The `| while`
+    # is deliberately UNCHANGED (converting it to `done < <(...)` would move the loop out of its
+    # subshell and change variable scoping); only the writer is removed.
+    head -4 <<<"$obj_out" | while IFS= read -r obj_line; do
       [ -n "$obj_line" ] && info "$obj_line"
     done
   fi
