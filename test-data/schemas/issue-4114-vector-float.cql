@@ -118,3 +118,50 @@ CREATE TABLE IF NOT EXISTS vector_clustered (
     z_after  text,             -- witness: sorts AFTER the vector column
     PRIMARY KEY (pk, ck)
 );
+
+-- ============================================================================
+-- vector_last — THE SILENT-MIS-DECODE REACHABILITY SUBJECT (issue #4114)
+--
+-- The two tables above prove a cell-level mis-decode but BOTH of them FAIL
+-- CLOSED end-to-end, for two different reasons, and neither reason is a
+-- property of the vector type:
+--
+--   * vector_clustered.v3 = [1.0, ...] starts `3f 80 00 00`. A reader that
+--     treats the value as vint-length-prefixed consumes 0x3f == 63 as a length
+--     with only ~24 bytes remaining, so the bounds check rejects it => Err.
+--   * vector_pk_only.v1 = [1.5] starts `3f c0 00 00`, and there the 63-byte
+--     read IS satisfiable (a 1536-byte v384 follows), so v1 silently returns 63
+--     wrong bytes with NO error — but the resulting offset desync then lands
+--     mid-`v384` and the row dies a few columns later.
+--
+-- So in both shapes the user sees an error. That makes the defect look like a
+-- missing feature. The question that changes the priority is whether a FULLY
+-- SILENT WRONG ROW is reachable: emitted to the user, wrong value, exit 0.
+--
+-- This table is built to answer exactly that, by removing both escape hatches:
+--
+--   1. The vector is the ONLY regular column, so there is NOTHING after it to
+--      desync into. Any bytes the mis-decode leaves unconsumed sit at the end
+--      of the row body, where a size-prefixed row body simply ends.
+--   2. The FIRST ELEMENT is chosen so its leading big-endian byte is a SMALL,
+--      SATISFIABLE vint length:
+--        id=1  v3[0] = 0.0                     => 00 00 00 00 => vint 0x00 = 0
+--        id=2  v3[0] = 3.851859888774472e-34   => 08 00 00 00 => vint 0x08 = 8
+--      (that second literal is exactly 2^-111: exponent field 127-111 == 16 ==
+--      0x10, mantissa 0, so the binary32 encoding is precisely 0x08000000 —
+--      chosen for its LEADING BYTE, not for its magnitude.)
+--      Both lengths are far below the bytes remaining, so the bounds check that
+--      saves the other two tables cannot fire.
+--
+-- The remaining elements are 1.0 and 2.0 (`3f 80 00 00`, `40 00 00 00`) so that
+-- the bytes a mis-decode hands back are legible in a hex dump and obviously
+-- belong to the LATER elements of this same value.
+--
+-- There is deliberately NO sentinel column here. A sentinel would sort after
+-- the vector and re-introduce escape hatch (1); the partition key in the
+-- emitted row is sufficient evidence that the row was reached and returned.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS vector_last (
+    id       int PRIMARY KEY,
+    v3       vector<float, 3>   -- 12 bytes; the ONLY regular column
+);
