@@ -68,6 +68,31 @@ pub enum ComparatorType {
     /// Frozen type comparator (byte-wise comparison of serialized form)
     Frozen(Box<ComparatorType>),
     /// Custom type comparator (fallback)
+    /// `vector<element, n>` — issue #4114 / roborev job 112.
+    ///
+    /// This variant exists so that CONSTRUCTING parsing metadata for a
+    /// vector-bearing schema SUCCEEDS. Comparator construction is metadata, not
+    /// ordering: `SchemaRegistry`'s `DerivedParsingState::compute` builds a
+    /// comparator for EVERY column (`schema/registry.rs:136-141`, not just key
+    /// columns), and `get_parsing_context` RE-COMPUTES and PROPAGATES that error on
+    /// the `derived: None` branch (`:852`). So refusing at construction did not
+    /// merely decline to order a vector — it made `get_parsing_context` fail for any
+    /// table carrying one, i.e. it broke schema-driven reads of exactly the tables
+    /// #4114 exists to make readable.
+    ///
+    /// The refusal is preserved where it belongs: `compare` and `supports_ordering`.
+    /// Cassandra's `VectorType` is `ComparisonType.CUSTOM` comparing element-wise via
+    /// its serializer (`VectorType.java:88`, `:122-125`), and #4114 implements
+    /// READING, not ORDERING — so an actual comparison still fails closed by name
+    /// rather than guessing a rule (e.g. reusing the `List` comparator) that nothing
+    /// here has verified against Cassandra.
+    Vector {
+        /// Comparator for the element type, carried so a future ordering
+        /// implementation has what it needs without re-deriving it.
+        element: Box<ComparatorType>,
+        /// Declared dimension.
+        dimension: usize,
+    },
     Custom(String),
 }
 
@@ -80,6 +105,18 @@ pub enum ComparatorType {
 // reviewed edit here.
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::size_of::<ComparatorType>() == 72);
+
+/// The ONE refusal both `from_cql_type` constructors return for a vector column,
+/// so the two cannot drift into two different messages (issue #4114).
+fn vector_ordering_unsupported() -> Error {
+    Error::unsupported_format(
+        "ordering/comparing a vector column is not implemented (issue #4114 covers \
+         READING vector<float, n> values); Cassandra's VectorType is a CUSTOM \
+         comparator that compares element-wise via its serializer \
+         (VectorType.java:88,122-125)"
+            .to_string(),
+    )
+}
 
 impl ComparatorType {
     /// Create a ComparatorType from a CqlType
@@ -137,6 +174,15 @@ impl ComparatorType {
                 ComparatorType::Frozen(Box::new(inner_comparator))
             }
             CqlType::Custom(type_name) => ComparatorType::Custom(type_name.clone()),
+            // CONSTRUCT, do not refuse (roborev job 112). Refusing here broke
+            // `get_parsing_context` for every vector-bearing table — see the
+            // `ComparatorType::Vector` doc comment. Ordering is still refused, at
+            // `compare`/`supports_ordering`, which is where the unsupported
+            // OPERATION actually happens.
+            CqlType::Vector(element_type, dimension) => ComparatorType::Vector {
+                element: Box::new(Self::from_cql_type(element_type)?),
+                dimension: *dimension,
+            },
             // Map newly supported types
             CqlType::Decimal => ComparatorType::Decimal,
             CqlType::Duration => ComparatorType::Duration,
@@ -280,6 +326,20 @@ impl ComparatorType {
                     ComparatorType::Custom(type_name.clone())
                 }
             }
+            // CONSTRUCT here too (roborev job 113). Fixing only `from_cql_type` left
+            // this REGISTRY-AWARE TWIN still refusing, so
+            // `from_data_type_with_registry("vector<float, 3>", ..)` kept failing and a
+            // registry-resolved composite containing a vector field still could not
+            // build its comparator — the same defect, one function over. The element
+            // recurses through the REGISTRY-aware call so a UDT element still resolves.
+            CqlType::Vector(element_type, dimension) => ComparatorType::Vector {
+                element: Box::new(Self::from_cql_type_with_registry(
+                    element_type,
+                    registry,
+                    keyspace,
+                )?),
+                dimension: *dimension,
+            },
         };
 
         Ok(comparator)
@@ -331,6 +391,10 @@ impl ComparatorType {
             ComparatorType::Frozen(inner_comparator) => {
                 self.compare_frozen(left, right, inner_comparator)
             }
+            // ORDERING refused HERE — at the unsupported OPERATION — not at
+            // construction. Refusing at construction broke get_parsing_context for
+            // every vector-bearing table (roborev job 112).
+            ComparatorType::Vector { .. } => Err(vector_ordering_unsupported()),
             ComparatorType::Custom(name) => custom::compare(name, left, right),
         }
     }
@@ -388,6 +452,8 @@ impl ComparatorType {
             ComparatorType::Tuple(_) => "tuple",
             ComparatorType::Udt { .. } => "udt",
             ComparatorType::Frozen(_) => "frozen",
+            // #4114 implements READING a vector, not ORDERING one.
+            ComparatorType::Vector { .. } => "vector",
             ComparatorType::Custom(name) => name,
         }
     }
@@ -424,6 +490,10 @@ impl ComparatorType {
             ComparatorType::Frozen(inner_comparator) => inner_comparator.supports_ordering(),
             // `inet` / `time` order by value (issue #3790); the residual
             // unresolved-UDT / unknown name does not.
+            // A vector has no verified ordering rule here, so it does NOT support
+            // ordering. Callers that ask first get an honest `false` instead of an
+            // error from `compare`.
+            ComparatorType::Vector { .. } => false,
             ComparatorType::Custom(name) => custom::supports_ordering(name),
         }
     }
@@ -918,5 +988,108 @@ mod tests {
             Box::new(ComparatorType::Int)
         )
         .supports_ordering());
+    }
+}
+#[cfg(test)]
+mod issue_4114_vector_comparator_tests {
+    use super::*;
+    use crate::schema::CqlType;
+
+    /// roborev job 112: constructing comparator METADATA for a vector must SUCCEED.
+    ///
+    /// This is the regression that matters. `SchemaRegistry`'s
+    /// `DerivedParsingState::compute` builds a comparator for EVERY column
+    /// (`schema/registry.rs:136-141` — all of `schema.columns`, not just key
+    /// columns) with `?`, and `get_parsing_context` RE-COMPUTES and PROPAGATES that
+    /// error on the `derived: None` branch (`:852`). So refusing a vector at
+    /// CONSTRUCTION did not merely decline to order one — it made
+    /// `get_parsing_context` fail for any table carrying a vector column, i.e. it
+    /// broke schema-driven reads of exactly the tables #4114 exists to make
+    /// readable. My own SELECT test did not catch it because it does not route
+    /// through `SchemaRegistry`.
+    #[test]
+    fn constructing_a_vector_comparator_succeeds() {
+        let ty = CqlType::Vector(Box::new(CqlType::Float), 3);
+        let c = ComparatorType::from_cql_type(&ty).expect(
+            "comparator METADATA for a vector must construct; refusing here \
+                     breaks get_parsing_context for the whole table",
+        );
+        match &c {
+            ComparatorType::Vector { element, dimension } => {
+                assert_eq!(**element, ComparatorType::Float32, "element comparator");
+                assert_eq!(*dimension, 3, "dimension is carried, not discarded");
+            }
+            other => panic!("expected ComparatorType::Vector, got {other:?}"),
+        }
+        assert_eq!(c.type_name(), "vector");
+    }
+
+    /// ...and ORDERING is still refused, at the operation rather than at
+    /// construction. Cassandra's VectorType is ComparisonType.CUSTOM comparing
+    /// element-wise via its serializer (`VectorType.java:88`, `:122-125`); #4114
+    /// implements READING, so an ordering rule here would be a guess.
+    #[test]
+    fn ordering_a_vector_is_still_refused() {
+        let c = ComparatorType::from_cql_type(&CqlType::Vector(Box::new(CqlType::Float), 2))
+            .expect("must construct");
+
+        assert!(
+            !c.supports_ordering(),
+            "a vector must report that it does NOT support ordering"
+        );
+
+        let left = Value::List(vec![Value::Float32(1.0), Value::Float32(2.0)]);
+        let right = Value::List(vec![Value::Float32(1.0), Value::Float32(3.0)]);
+        let err = c
+            .compare(&left, &right)
+            .expect_err("comparing two vectors must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("vector"),
+            "the refusal must name what it refuses, got: {msg}"
+        );
+    }
+
+    /// roborev job 113: the REGISTRY-AWARE twin must construct too.
+    ///
+    /// Fixing only `from_cql_type` left `from_cql_type_with_registry` still refusing,
+    /// so `from_data_type_with_registry("vector<float, 3>", ..)` kept failing and a
+    /// registry-resolved composite carrying a vector field still could not build its
+    /// comparator. The lesson, recorded because I missed it once: when an enum-arm
+    /// refusal is wrong, look for SIBLING functions matching the same enum before
+    /// declaring it fixed.
+    #[test]
+    fn the_registry_aware_twin_constructs_too() {
+        let registry = crate::schema::UdtRegistry::new();
+        let ty = CqlType::Vector(Box::new(CqlType::Float), 3);
+        let c = ComparatorType::from_cql_type_with_registry(&ty, &registry, "ks")
+            .expect("the registry-aware constructor must build vector metadata too");
+        match &c {
+            ComparatorType::Vector { element, dimension } => {
+                assert_eq!(**element, ComparatorType::Float32);
+                assert_eq!(*dimension, 3);
+            }
+            other => panic!("expected Vector, got {other:?}"),
+        }
+        // Both constructors must agree, or one of them is the odd one out again.
+        assert_eq!(
+            c,
+            ComparatorType::from_cql_type(&ty).expect("plain constructor"),
+            "the two constructors must produce the SAME comparator for a vector"
+        );
+    }
+
+    /// The metadata round-trips: element + dimension are carried precisely so a
+    /// comparator can be turned back into its `CqlType` without re-deriving.
+    #[test]
+    fn vector_comparator_round_trips_to_cql_type() {
+        for dim in [1usize, 3, 384] {
+            let ty = CqlType::Vector(Box::new(CqlType::Float), dim);
+            let c = ComparatorType::from_cql_type(&ty).expect("construct");
+            match c {
+                ComparatorType::Vector { dimension, .. } => assert_eq!(dimension, dim),
+                other => panic!("expected Vector, got {other:?}"),
+            }
+        }
     }
 }

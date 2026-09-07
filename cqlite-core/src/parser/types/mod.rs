@@ -282,6 +282,24 @@ pub(super) fn create_empty_value_for_cql_type(cql_type: &CqlType) -> Result<Valu
             "unknown".to_string(),
         )))),
         CqlType::Frozen(inner) => create_empty_value_for_cql_type(inner),
+        // #4114 (roborev job 109): there is NO empty vector to construct. A
+        // zero-length vector value is an ERROR in Cassandra
+        // (`VectorType.java:365-368`, "Invalid empty vector value"), so this arm must
+        // not fall through to `Value::Null` below — that would turn an invalid value
+        // into a legal-looking one. The refusal comes from the ONE framing rule so
+        // the message matches every other vector site. (A genuinely NULL field is
+        // decided by the outer framing — `length == -1` — and never reaches here; the
+        // collection map path's `length < 0` also lands here, and refusing is the
+        // fail-closed reading: Cassandra permits neither a null nor an empty map
+        // key/value.)
+        CqlType::Vector(element, dimension) => {
+            crate::schema::vector_type::vector_value::decode_framed_float_vector(
+                &[],
+                element,
+                *dimension,
+                "empty framed vector value",
+            )
+        }
         _ => Ok(Value::Null),
     }
 }
@@ -314,6 +332,14 @@ pub(super) fn cql_type_to_type_id(cql_type: &CqlType) -> CqlTypeId {
         CqlType::Tuple(_) => CqlTypeId::Tuple,
         CqlType::Udt(_, _) => CqlTypeId::Udt,
         CqlType::Frozen(_) => CqlTypeId::Blob, // Fallback only; callers should handle Frozen explicitly
+        // #4114: a vector has NO native protocol type id (Cassandra carries it as a
+        // custom type), so this conversion is LOSSY — it discards the element type
+        // and the dimension, and `CqlTypeId::Custom` decodes as a vint-framed blob.
+        // Every caller must therefore intercept `CqlType::Vector` BEFORE reaching a
+        // type id, exactly like the `Frozen` arm above. All three do:
+        // `parse_cql_value_for_type`, `parse_cql_value_for_type_with_registry` (the
+        // one that did NOT, roborev job 109) and `parse_cql_value_with_schema`.
+        CqlType::Vector(_, _) => CqlTypeId::Custom,
         CqlType::Custom(_) => CqlTypeId::Blob, // Custom types as blob
     }
 }
@@ -871,6 +897,18 @@ pub(super) fn parse_cql_value_with_schema<'a>(
         CqlType::Map(key_type, value_type) => parse_map_with_schema(input, key_type, value_type),
         CqlType::Tuple(_) => parse_tuple(input),
         CqlType::Udt(_, _) => parse_udt(input),
+        // #4114: `vector<float, n>` is `4*n` raw big-endian binary32 bytes with NO
+        // length prefix and no per-element framing (`VectorType.java:94-101`,
+        // `:445-460`), so it consumes a FIXED width off the front of `input` — it is
+        // NOT a collection and must not reach `parse_blob`, which would read the
+        // first float's high byte as a vint length (the #4114 defect).
+        CqlType::Vector(element_type, dimension) => {
+            crate::schema::vector_type::vector_value::parse_float_vector_nom(
+                input,
+                element_type,
+                *dimension,
+            )
+        }
         CqlType::Frozen(inner) => parse_cql_value_with_schema(input, inner),
         CqlType::Custom(_) => {
             // Custom types require additional metadata, parse as blob

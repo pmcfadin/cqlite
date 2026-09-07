@@ -777,7 +777,7 @@ pub fn cql_type_to_data_type(cql_type: &CqlType) -> crate::types::DataType {
         CqlType::Timestamp => DataType::Timestamp,
         CqlType::Date | CqlType::Time | CqlType::Duration | CqlType::Inet => DataType::BigInt,
         CqlType::Uuid | CqlType::TimeUuid => DataType::Uuid,
-        CqlType::List(_) => DataType::List,
+        CqlType::List(_) | CqlType::Vector(_, _) => DataType::List,
         CqlType::Set(_) => DataType::Set,
         CqlType::Map(_, _) => DataType::Map,
         CqlType::Tuple(_) => DataType::Tuple,
@@ -822,6 +822,7 @@ fn format_cql_type(cql_type: &CqlType) -> String {
         }
         CqlType::Udt(name, _) => name.clone(),
         CqlType::Frozen(inner) => format!("frozen<{}>", format_cql_type(inner)),
+        CqlType::Vector(e, n) => format!("vector<{}, {n}>", format_cql_type(e)),
         CqlType::Custom(name) => name.clone(),
     }
 }
