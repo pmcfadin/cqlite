@@ -384,6 +384,76 @@ impl V5CompressedLegacyParser {
                 // Cassandra makes at rule 2.
                 Ok((Value::Tuple(elements), off))
             }
+            // `vector<element, n>` / `VectorType(element , n)` — issue #4114.
+            //
+            // Sited BEFORE the UDT and unknown-type arms, which is the whole point:
+            // a vector reaching either of those was DEGRADED — the unknown-type arm
+            // returns `Value::Blob(data)` over what are exactly `4 * n` raw
+            // big-endian binary32 bytes (`VectorType.java:94-96`, `:445-460`: no
+            // length prefix, no element count, no per-element framing). That blob is
+            // the right LENGTH here, so unlike the vint-framed sibling defect it
+            // does not desync the row — it silently returns the WRONG TYPE, which is
+            // the misdecode #4114 exists to remove.
+            //
+            // Reached with a vector when a multicell/frozen UDT field or a
+            // collection element is declared as one: those field types come from the
+            // on-disk `UserType(...)` marshal string, so the spelling arriving here
+            // is `org.apache.cassandra.db.marshal.VectorType(…FloatType , 3)`.
+            //
+            // `data` is EXACTLY the value (the outer `[i32 len]` framing already
+            // delimited it), so the exact-width rule applies and the consumed count
+            // is the declared width — which the bounded caller's fully-consumed
+            // assert then re-checks.
+            type_str
+                if type_str.starts_with("vector<")
+                    || type_str
+                        .starts_with("org.apache.cassandra.db.marshal.vectortype(")
+                    || type_str.starts_with("vectortype(") =>
+            {
+                // Parse from `raw_type_str` (ORIGINAL case), never the lowercased
+                // match binding: `marshal_vector_kind` matches the Java class name
+                // `VectorType` CASE-SENSITIVELY, and the element it yields
+                // (`FloatType`) is resolved case-sensitively too. This is the same
+                // trap this function's header documents for the collection arms.
+                let is_cql_spelling = type_str.starts_with("vector<");
+                let kind = if is_cql_spelling {
+                    crate::schema::vector_type::cql_vector_kind(raw_type_str)
+                } else {
+                    crate::schema::vector_type::marshal_vector_kind(raw_type_str)
+                };
+                // A malformed vector type is an ERROR naming the type, never a
+                // fall-through to the blob arm below (roborev job 109).
+                let args = kind.into_args(raw_type_str)?.ok_or_else(|| {
+                    Error::corruption(format!(
+                        "'{column_name}': type '{raw_type_str}' matched the vector \
+                         arm but is not a vector type"
+                    ))
+                })?;
+                // The element type comes from the DECLARED type via the ONE marshal
+                // name authority (or `CqlType::parse` for the CQL spelling) — never
+                // from the bytes (#28).
+                let element = if is_cql_spelling {
+                    crate::schema::CqlType::parse(args.element)?
+                } else {
+                    Self::native_marshal_to_cql_type(args.element).ok_or_else(|| {
+                        Error::unsupported_format(format!(
+                            "'{column_name}': vector element type '{}' in \
+                             '{raw_type_str}' is not a recognised Cassandra scalar \
+                             marshal type, so its width is unknown; refused rather \
+                             than decoded as a blob (issue #4114)",
+                            args.element
+                        ))
+                    })?
+                };
+                // AC4: an element type CQLite does not implement is refused BY NAME.
+                let value = crate::schema::vector_type::vector_value::decode_framed_float_vector(
+                    data,
+                    &element,
+                    args.dimension,
+                    column_name,
+                )?;
+                Ok((value, data.len()))
+            }
             // Issue #1081: accept BOTH the CQL short form (`frozen<...>`) and the
             // authoritative Cassandra marshal form
             // (`org.apache.cassandra.db.marshal.FrozenType(...)`). Collection/UDT
