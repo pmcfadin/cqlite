@@ -34,7 +34,9 @@
 # `scripts/bootstrap-agent-machine.sh:3329`, which had drifted to `:5392` within two days. A
 # line-numbered list is a curated list in disguise (lead ruling); PER-FILE COUNTS are stale-proof
 # against pure code motion. The SUBJECT SET is likewise derived at run time from `git ls-files`
-# and is never curated: a new script is a subject the moment it is added to the index.
+# and is never curated: a new script is a subject the moment it is added to the index. MEMBERSHIP
+# comes from the INDEX and CONTENT from the WORKTREE, so a new site in an already-tracked script
+# reds BEFORE it is ever committed, while an untracked scratch file is deliberately not a subject.
 #
 # THE RULE IS NOT IMPLEMENTED HERE. It lives ONCE in scripts/tests/lib/sigpipe-matcher.sh,
 # together with its declared false positives and residuals, and is PINNED by #3803's 33 cases.
@@ -352,6 +354,10 @@ done <"$_tmp/cmp"
 printf '\n==== DECLARED SCOPE (check-sigpipe-sites.sh, #4061 AC4) ====\n'
 printf 'guarded:   EVERY git-tracked scripts/**/*.sh (%d subject(s), derived at run time from the\n' "$N_SUBJECTS"
 printf '           git index — never a curated path list)\n'
+printf 'MEMBERSHIP comes from the INDEX, CONTENT from the WORKTREE. So a new site added to an\n'
+printf '           already-tracked script REDS immediately, before any commit; a brand-new script\n'
+printf '           becomes a subject the moment it is `git add`ed, which is before any PR. An\n'
+printf '           UNTRACKED scratch file is deliberately not a subject.\n'
 printf 'THE RULE:  a bash BUILTIN writer (printf/echo) with a pipe after it on the same line is a\n'
 printf '           SHAPE MATCH. Implemented ONCE in scripts/tests/lib/sigpipe-matcher.sh and\n'
 printf '           PINNED by the 33 cases of scripts/tests/test_gate_liveness_no_sigpipe.sh\n'
