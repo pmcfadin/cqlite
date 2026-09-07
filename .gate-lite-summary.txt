@@ -1,7 +1,0 @@
-==== AGENT-GATE LITE SUMMARY ====
-run-id: /tmp/agent-gate.QfL5DT
-MODE: lite (FAST ITERATION — NOT the gate of record; full agent-gate.sh must PASS once before merge)
-tree-start: 2636e9a17f1b dirty: no digest: 5560f0c152c2
-heartbeat: /data/lanes/lane-4106/.gate-lite-summary.txt.heartbeat (interval 20s) — read it with: bash /data/lanes/lane-4106/scripts/gate-liveness.sh /data/lanes/lane-4106/.gate-lite-summary.txt --run-id /tmp/agent-gate.QfL5DT (#3473)
-RESULT: INCOMPLETE (gate did not finish)
-==== END AGENT-GATE LITE SUMMARY ====
