@@ -1,6 +1,17 @@
 //! `frozen<T>` IS NOT DECLARABLE OVER A SCALAR — the one rule, both spellings
 //! (issue #4104).
 //!
+//! # SCOPE OF THE CLAIM — read this before trusting the title
+//!
+//! "Both spellings" means the two METADATA ENTRY POINTS (CQL type string,
+//! SerializationHeader marshal string), NOT "every syntactic position". One
+//! position is knowingly NOT covered: a frozen scalar nested in a VECTOR ELEMENT
+//! (`frozen<vector<frozen<int>, 3>>`), because `CqlType::parse` never descends
+//! into a vector — see the DECLARED BOUNDS on
+//! [`FREEZABLE_MARSHAL_SIMPLE_NAMES`]/[`is_vector_spelling`] and issue #4154.
+//! The title states a rule, not a totality proof; a guarantee this module does
+//! not deliver would be its own defect (roborev job 116, finding 2).
+//!
 //! # The oracle is Cassandra's GRAMMAR, not its bytes
 //!
 //! `CQL3Type.Raw::freeze()` is the BASE implementation and it does nothing but
@@ -237,7 +248,13 @@ pub(crate) fn frozen_inner_supports_freezing(inner: &CqlType) -> bool {
 ///    vector element still passes BOTH gates. That is PRE-EXISTING (it passed
 ///    before #4104 too, when nothing was refused) and closing it needs real
 ///    `CqlType::Vector` parsing, i.e. a new public type variant: out of scope
-///    here, and reported for a follow-up. Inspecting it by re-entering
+///    here, and TRACKED AS ISSUE #4154 (0.18, P3) — deferred by lead ruling on
+///    roborev job 116 as an INCOMPLETE refusal rather than a wrong one: it
+///    accepts something Cassandra rejects and rejects nothing Cassandra accepts,
+///    and the declaration can only reach this gate if something WROTE it, which
+///    Cassandra will not, because it refuses it at CQL parse time.
+///    #4154 requires the element reuse THIS validation rather than a second copy
+///    of the rule. Inspecting it by re-entering
 ///    `CqlType::parse` was rejected deliberately: that call restarts at depth 0,
 ///    so `frozen<vector<frozen<vector<…` would recurse unbounded past
 ///    `MAX_NESTING_DEPTH` — issue #1690's stack-overflow hazard.
