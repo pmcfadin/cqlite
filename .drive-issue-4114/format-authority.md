@@ -111,3 +111,34 @@ No real vector fixture exists — tests/src/cql_test_data_fixtures.rs:780-786 FA
    comma rather than match the exact literal.
 3. Unverified whether CQLite's Statistics.db/serialization-header path preserves the raw type string
    losslessly enough for marshal_type.rs to see the " , 3" at all — check before sizing that arm.
+
+## ADDENDUM — layout VERIFIED against the committed Cassandra-5.0.8-written bytes
+Checked by the lead directly (not reported by a subagent), on
+test-data/fixtures/issue_4114/test_vector/vector_clustered-*/nb-1-big-Data.db.
+Row `ck=10` holds v3 = [1.0, 2.5, -3.75] and z_after = "ck-after-10".
+
+Data.db bytes 20..46:
+    24 07 00 f1 0f 0a 1c 12 00 08 3f 80 00 00 40 20 00 00 c0 70 00 00 08 0b 63 6b
+                                  ^^ ^^^^^^^^^^^ ^^^^^^^^^^^ ^^^^^^^^^^^ ^^ ^^ ^^
+                                  |  1.0         2.5         -3.75       |  |  "ck"...
+                                  |                                      |  vint len 11
+                                  cell flags 0x08                        cell flags 0x08
+
+The 12-byte big-endian binary32 payload 3f800000 40200000 c0700000 appears RAW at offset 30
+(LZ4 keeps incompressible float data as literals, so it survives verbatim despite CompressionInfo.db).
+The byte immediately preceding it is 0x08 — the CELL FLAGS byte — and NOT 0x0c, i.e. NOT a vint
+length of 12. Meanwhile the very next cell in the SAME row, a variable-width `text`, is framed
+`08 0b` = flags + vint length 11 before "ck-after-11 chars".
+
+=> CONFIRMED from Cassandra-written bytes, with fixed and variable framing side by side in one row:
+   vector<float,3> carries NO value-length prefix; a text column does.
+   This is the AC5 evidence. A reader that treats VectorType as variable-width (today's
+   repair_clustering.rs:135) would consume 0x3f == 63 as a vint length and read 63 bytes for a
+   12-byte value — an unrecoverable desync, not a bad value.
+
+CAVEAT, carry forward: repair_clustering governs CLUSTERING values, and in THIS fixture the vector is
+a REGULAR column. The same AbstractType.writeValue/skipValue rule governs both paths
+(ClusteringPrefix.java:473,536), so the source argument transfers — but the BYTES above demonstrate the
+regular-cell path. Worth establishing whether Cassandra 5.0.8 actually accepts a vector as a clustering
+key (source says nothing forbids it, and vectors are always frozen); if it does, generate that fixture
+too so the clustering path has Cassandra-written bytes of its own rather than a transferred argument.
