@@ -61,7 +61,7 @@ Ordered. Groups 1–2 are the mechanism (small), 3 is the measurement (the expen
       `allocator:` in `--version`. `docs/observability/` if the startup line is documented there.
 - [x] 5.2 Helm/Trino deployment notes: state that the release binary carries the allocator; nothing
       to configure.
-- [ ] 5.3 Full gate ONCE (`AGENT_GATE_SUMMARY_FILE` redirect) → C intent audit vs this spec →
+- [x] 5.3 Full gate ONCE (`AGENT_GATE_SUMMARY_FILE` redirect) → C intent audit vs this spec →
       roborev (`scripts/flow/roborev-review.sh --agent … --model …`) clean → `premerge-assert` →
       `gh pr merge --auto --squash --delete-branch` → flow-finalize (telemetry via PR-in-worktree).
 
@@ -99,3 +99,32 @@ run under `--flight-allocator system` and still pass `verify_flight_server_alloc
 `/proc/<pid>/{environ,maps}` check; real `VmHWM`/`VmRSS` magnitudes under load; the digest
 precondition against real cargo output; and that `refuse_binaries_older_than_head` accepts two
 separately-built bin dirs.
+
+---
+
+## Archive status — DEFERRED to #4120, with a second blocker recorded
+
+**`openspec archive flight-jemalloc` was attempted on 2026-09-07 after PR #4117 merged
+(`c8cf992c7`) and it correctly ABORTED, changing no files.** Two independent reasons:
+
+1. **The change is not complete, by design.** Six tasks remain open — 3.1/3.4/3.5 (the linked A/E
+   measurement) and 4.1/4.2 (the default decision) — all deferred to **#4120** under the lead's
+   `req-3997-01` Q1 ruling, which merged #4117 as a mechanism-only slice with `default = []`. An
+   archive is for a completed change, so this one stays ACTIVE until #4120 finishes it. #3997 also
+   stays OPEN for the same reason. Archiving here would have recorded a decision nobody has made.
+
+2. **A SEPARATE, INDEPENDENT BLOCKER that will still be there when #4120 is done, so it is
+   recorded now rather than rediscovered then.** `openspec archive` reports:
+   `Delta parsing found no operations for flight-allocator. Provide ADDED/MODIFIED/REMOVED/RENAMED
+   sections in change spec.` The cause is the spec's header style: `specs/flight-allocator/spec.md`
+   uses `## Requirement R1 — …` headers, whereas OpenSpec's delta parser wants
+   `## ADDED Requirements` with `### Requirement: …` / `#### Scenario: …` beneath it. Peer changes
+   in this repo use the parseable form (e.g. `openspec/changes/feature-matrix-gate-lanes/`,
+   `openspec/changes/certified-tree-vs-merged-tree/`).
+
+   **Not fixed from this lane on purpose.** The spec's CONTENT was sealed by the owner at Seam 1;
+   converting it to delta headers is a structural rewrite of every requirement heading in a sealed
+   artifact, and it is not a change a worker should make unilaterally at finalize time. Whoever
+   completes this change decides: restructure into delta headers, or set `skip_specs: true` in the
+   change's `.openspec.yaml` if the capability is judged already-captured. Either way the archive
+   cannot succeed until that is settled.
