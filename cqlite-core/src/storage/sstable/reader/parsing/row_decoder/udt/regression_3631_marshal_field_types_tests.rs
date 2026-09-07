@@ -274,6 +274,14 @@ fn an_unmappable_marshal_type_is_refused_as_an_undecodable_type_not_as_a_missing
 ///
 /// The spacing is Cassandra's own: `TypeParser.stringifyVectorParameters`
 /// (TypeParser.java:239-242) writes `" , "`.
+///
+/// A PINNED EXPECTATION IS ONLY WORTH ITS AUTHORITY. The one removed here cited
+/// no Cassandra source at all — its stated ground was that `CqlType` had no
+/// variant, i.e. a fact about CQLite, which is never format authority (#3041).
+/// The replacement's ground is `cassandra-5.0.8` and Cassandra-written bytes.
+/// What #3631 actually pins — that a marshal type CQLite cannot map is refused
+/// BY NAME and never mistaken for a missing UDT — is preserved verbatim by the
+/// two cases below (`DoubleType` element, `0` dimension).
 #[test]
 fn a_marshal_vector_field_decodes_from_its_declared_dimension() {
     let ty = format!("{PKG}VectorType({PKG}FloatType , 3)");
@@ -283,9 +291,17 @@ fn a_marshal_vector_field_decodes_from_its_declared_dimension() {
         "the dimension must survive the type parse — it is the only thing that \
          makes a prefix-free fixed-width value parseable"
     );
-    // 3f800000 40200000 c0700000 == [1.0, 2.5, -3.75], the byte sequence verified
-    // against the committed Cassandra-written fixture in
-    // `.drive-issue-4114/format-authority.md`.
+    // 3f800000 40200000 c0700000 == [1.0, 2.5, -3.75]. THESE BYTES ARE NOT
+    // HAND-DERIVED: they are the exact 12 bytes Cassandra 5.0 wrote for
+    // `test_vector.vector_clustered` row `ck=10`, located in the fixture's
+    // `Data.db` with the cell FLAGS byte `0x08` — and NOT a vint length `0x0c` —
+    // immediately preceding them (`.drive-issue-4114/format-authority.md`
+    // addendum, byte-verified). A hand-written literal on its own would only
+    // prove the decoder agrees with its author (#3042), so the SAME row is
+    // asserted against the `sstabledump` golden by the integration target
+    // `cqlite-core/tests/issue_4114_vector_float_cassandra_golden.rs`
+    // (`ac3_clustered_table_vector_with_clustering_column`); this case pins the
+    // marshal TYPE-STRING arm that gets there.
     let bytes = [
         0x3f, 0x80, 0x00, 0x00, 0x40, 0x20, 0x00, 0x00, 0xc0, 0x70, 0x00, 0x00,
     ];
