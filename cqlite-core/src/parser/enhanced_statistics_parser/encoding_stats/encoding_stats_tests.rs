@@ -174,13 +174,28 @@ fn frozen_scalar_header_is_refused_and_never_marker_searched() {
             cols.len()
         ),
     };
-    match err {
-        nom::Err::Error(e) => assert_eq!(
-            e.code,
-            nom::error::ErrorKind::Verify,
-            "refusals surface as a Verify failure"
-        ),
-        other => panic!("expected a recoverable Verify error, got {other:?}"),
+    // THE VARIANT is the fail-closed decision (#4104 job 116) …
+    let HeaderSchemaError::Refused(refusal) = err else {
+        panic!("a frozen<scalar> must leave as a SEMANTIC refusal, got {err:?}");
+    };
+    // … and THE MESSAGE is what the user sees (#4158 review, blocker A). Before it
+    // was carried, this refusal reached the user as
+    // `Corruption: … Error { input: [..], code: Verify }` — shape-identical to a
+    // truncated file — while the citation-carrying text existed only in a
+    // `tracing::error!` nobody had `RUST_LOG` on for.
+    let msg = refusal.to_string();
+    for expected in [
+        // the refused type, verbatim
+        "FrozenType(org.apache.cassandra.db.marshal.Int32Type)",
+        // the writer rule that was applied
+        "includeFrozenType",
+        // and the CQL oracle
+        "CQL3Type.java:647-651",
+    ] {
+        assert!(
+            msg.contains(expected),
+            "the surfaced refusal must name `{expected}`; got: {msg}"
+        );
     }
 }
 
@@ -207,4 +222,68 @@ fn truncated_header_still_falls_back_to_marker_search() {
     assert!(ck_cols.is_empty(), "fixture declares no clustering keys");
     // The EncodingStats themselves came from the anchored offset (all deltas 0).
     assert_eq!(min_ts, 1_442_880_000_000_000, "minTimestamp epoch baseline");
+}
+
+// ── The NO-TOC path: what does the marker search do with a semantic refusal? ──
+
+/// The `parse_encoding_stats_fallback` preamble that precedes the schema when no
+/// TOC HEADER offset is available: metadata_type (u32 BE), data_length,
+/// partitioner length + string, then two skipped VInts, then the three
+/// EncodingStats deltas.
+fn fallback_preamble_then(schema: &[u8]) -> Vec<u8> {
+    const PARTITIONER: &str = "org.apache.cassandra.dht.Murmur3Partitioner";
+    let mut out = vec![0x00, 0x00, 0x00, 0x03]; // metadata_type
+    out.extend_from_slice(&encode_vuint(0)); // data_length
+    push_str(&mut out, PARTITIONER);
+    out.extend_from_slice(&encode_vuint(0)); // skipped metadata 1
+    out.extend_from_slice(&encode_vuint(0)); // skipped metadata 2
+    out.extend_from_slice(&[0x00, 0x00, 0x00]); // EncodingStats deltas
+    out.extend_from_slice(schema);
+    out
+}
+
+/// EMPIRICAL ANSWER to the disagreement in roborev job 119 (#4104): with NO TOC
+/// header offset, a frozen-scalar column reaches `parse_encoding_stats_fallback`
+/// and therefore the MARKER-SEARCH decoder — and the refusal must be FAIL-CLOSED
+/// there too.
+///
+/// The disagreement was about what the marker-search fallbacks do. Both reviewers
+/// were half right, and reading alone could not settle it: the per-candidate gates
+/// DO fire (`sequential.rs`'s four `convert_marshal_type_to_cql_checked` sites and
+/// `mod.rs`'s `convert_marshal_type_to_cql_logged` ones each reject the candidate),
+/// but a rejected candidate was only "this offset holds no readable header", so the
+/// SEARCH continued and `parse_serialization_header` ended at its
+/// `Ok((input, (Vec::new(), Vec::new(), Vec::new())))` empty-schema success. Net
+/// effect: a header declaring `FrozenType(Int32Type)` was ACCEPTED with an empty
+/// schema — fail-open, exactly as job 119 reported, even though every individual
+/// gate had refused.
+///
+/// The fixture is a header the marker search parses HAPPILY except for its one
+/// frozen-scalar column type, so an `Err` here can only come from the refusal.
+#[test]
+fn a_frozen_scalar_header_is_refused_on_the_no_toc_marker_search_path_too() {
+    let no_toc = fallback_preamble_then(&frozen_scalar_header());
+
+    // Control: the SAME buffer with a legal column type decodes, so the refusal
+    // below is attributable to the type and not to the fixture's framing.
+    let legal = fallback_preamble_then(&schema_blob(
+        &marshal("UTF8Type"),
+        &[],
+        &[("v", marshal("Int32Type"))],
+    ));
+    let (_, (_, _, _, pk_cols, _, cols)) = parse_minimal_encoding_stats(&legal, &legal, None, None)
+        .unwrap_or_else(|e| panic!("the no-TOC fixture must decode when legal: {e:?}"));
+    assert_eq!(cols.len(), 1, "control: one regular column decoded");
+    assert_eq!(cols[0].name, "v");
+    assert_eq!(pk_cols.len(), 1, "control: one partition key column");
+
+    match parse_minimal_encoding_stats(&no_toc, &no_toc, None, None) {
+        Err(_) => {}
+        Ok((_, (_, _, _, _, _, cols))) => panic!(
+            "FAIL-OPEN: a frozen<scalar> SerializationHeader was ACCEPTED on the \
+             no-TOC marker-search path with {} column(s) — a semantic refusal must \
+             fail closed there exactly as it does on the TOC-anchored path",
+            cols.len()
+        ),
+    }
 }

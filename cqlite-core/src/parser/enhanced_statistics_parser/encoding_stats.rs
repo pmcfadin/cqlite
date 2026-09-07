@@ -37,12 +37,24 @@ const TTL_EPOCH: i64 = 0;
 /// * `header_offset` - Optional offset to SerializationHeader from TOC (Issue #216)
 /// * `gates` - Optional VersionGates for VG3 version-sensitive decoding decisions.
 ///   Pass `None` from standalone tools/tests to use nb-compatible defaults.
+///
+/// # The error is TYPED, and that is the point (#4104, roborev job 119)
+///
+/// A semantic refusal (`frozen<scalar>`) and a structural failure (truncated,
+/// mispositioned) are two different answers, and a `nom::Err` can carry neither
+/// the distinction nor the refusal's message. Both used to leave here as the same
+/// bare `ErrorKind::Verify`, so a user opening an SSTable whose header spells
+/// `FrozenType(Int32Type)` was told `Corruption: … code: Verify` — indistinguishable
+/// from a garbled file, while the precise column-naming, citation-carrying message
+/// the gate had already built survived only if `RUST_LOG` happened to be on.
+/// [`HeaderSchemaError::Refused`] carries that message to the caller, which turns it
+/// into the user-visible error.
 pub(super) fn parse_minimal_encoding_stats<'a>(
     input: &'a [u8],
     full_input: &'a [u8],
     header_offset: Option<usize>,
     gates: Option<&VersionGates>,
-) -> IResult<&'a [u8], EncodingStatsResult> {
+) -> Result<(&'a [u8], EncodingStatsResult), HeaderSchemaError<'a>> {
     // The SERIALIZATION_HEADER component (type 3) starts with EncodingStats:
     //   [vuint minTimestamp_delta] [vuint minLocalDeletionTime_delta] [vuint minTTL_delta]
     // These are unsigned VInt deltas from epoch constants (see EncodingStats.Serializer).
@@ -96,14 +108,10 @@ pub(super) fn parse_minimal_encoding_stats<'a>(
     let (partition_types, clustering_types, columns) = match parse_serialization_header_schema(rest)
     {
         Ok((_, result)) => result,
-        // SEMANTIC — fail closed. Decided on the variant, never on message text.
-        Err(HeaderSchemaError::Refused(e)) => {
-            tracing::error!("Refusing SerializationHeader column types: {e}");
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Verify,
-            )));
-        }
+        // SEMANTIC — fail closed. Decided on the VARIANT, never on message text;
+        // the message is only PROPAGATED (#4104 blocker A), so the user is told
+        // which column and which type were refused, and why.
+        Err(refused @ HeaderSchemaError::Refused(_)) => return Err(refused),
         // STRUCTURAL — the pre-existing marker-search fallback, untouched.
         Err(HeaderSchemaError::Structural(e)) => {
             tracing::warn!(
@@ -121,13 +129,10 @@ pub(super) fn parse_minimal_encoding_stats<'a>(
     let (partition_key_columns, clustering_key_columns) =
         match build_column_infos(&partition_types, &clustering_types) {
             Ok(cols) => cols,
-            Err(e) => {
-                tracing::error!("Refusing SerializationHeader key types: {e}");
-                return Err(nom::Err::Error(nom::error::Error::new(
-                    input,
-                    nom::error::ErrorKind::Verify,
-                )));
-            }
+            // Semantic, exactly like the column gate above: the refusal message
+            // (which names the key column and its type) is carried to the caller
+            // rather than logged and dropped (#4104 blocker A).
+            Err(e) => return Err(HeaderSchemaError::Refused(e)),
         };
 
     Ok((
@@ -196,7 +201,7 @@ fn parse_encoding_stats_vuints<'a>(
 fn parse_encoding_stats_fallback<'a>(
     input: &'a [u8],
     gates: Option<&VersionGates>,
-) -> IResult<&'a [u8], EncodingStatsResult> {
+) -> Result<(&'a [u8], EncodingStatsResult), HeaderSchemaError<'a>> {
     // Skip metadata_type (u32 BE) at start of data section
     let (rest, _metadata_type) = be_u32(input)?;
 
@@ -228,13 +233,10 @@ fn parse_encoding_stats_fallback<'a>(
     let (partition_key_columns, clustering_key_columns) =
         match build_column_infos(&partition_types, &clustering_types) {
             Ok(cols) => cols,
-            Err(e) => {
-                tracing::error!("Refusing SerializationHeader key types: {e}");
-                return Err(nom::Err::Error(nom::error::Error::new(
-                    input,
-                    nom::error::ErrorKind::Verify,
-                )));
-            }
+            // Semantic, exactly like the column gate above: the refusal message
+            // (which names the key column and its type) is carried to the caller
+            // rather than logged and dropped (#4104 blocker A).
+            Err(e) => return Err(HeaderSchemaError::Refused(e)),
         };
 
     Ok((
