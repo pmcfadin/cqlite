@@ -151,17 +151,29 @@ pub(crate) fn record(ledger: &mut RefusalLedger, key: String, path: PathBuf, cau
         .push(RefusedSSTable::new(path, cause));
 }
 
-/// Drop every recorded refusal whose path is no longer among the DISCOVERED
-/// generations, and drop keys left empty.
+/// Drop every recorded refusal that no longer bears on its table, and drop keys
+/// left empty.
 ///
-/// Called from `refresh_tables` under the same write guard that applies the
-/// reader diff: once a refused file is gone from disk it must stop poisoning its
-/// table, or a table stays permanently unreadable after the operator removed the
-/// bad generation. `still_present` is asked in CANONICAL form by the caller, which
-/// owns the canonicalization cache.
-pub(crate) fn retain_present(ledger: &mut RefusalLedger, still_present: impl Fn(&Path) -> bool) {
+/// Called from `refresh_tables` under the same write guard that applies the reader
+/// diff. A refusal must be invalidated by BOTH of the ways a bad generation stops
+/// being bad, or the table stays permanently unreadable:
+///
+/// * the file is **gone** — the operator deleted the bad generation;
+/// * the file was **repaired in place** — the same path now opens. This is the
+///   common case and the one a "still on disk?" test gets WRONG: a manager opened
+///   mid-`rsync` records a refusal for a half-written `Statistics.db`, the copy
+///   then completes, and the next refresh re-opens that exact path successfully.
+///   Keying invalidation on disappearance alone left the refusal in place forever
+///   with every generation healthy and open.
+///
+/// `still_refusing` is asked in CANONICAL form by the caller, which owns the
+/// canonicalization cache and knows which paths this refresh re-opened.
+pub(crate) fn retain_still_refusing(
+    ledger: &mut RefusalLedger,
+    still_refusing: impl Fn(&Path) -> bool,
+) {
     for list in ledger.values_mut() {
-        list.retain(|r| still_present(r.path()));
+        list.retain(|r| still_refusing(r.path()));
     }
     ledger.retain(|_key, list| !list.is_empty());
 }
@@ -309,9 +321,9 @@ mod tests {
     }
 
     #[test]
-    fn retain_present_clears_a_removed_generation() {
+    fn retain_clears_a_removed_generation() {
         let mut l = ledger_with("ks.t", "/d/ks/t-1/nb-1-big-Data.db");
-        retain_present(&mut l, |_p| false);
+        retain_still_refusing(&mut l, |_p| false);
         assert!(
             l.is_empty(),
             "a refused file that is gone must stop refusing"
@@ -320,9 +332,9 @@ mod tests {
     }
 
     #[test]
-    fn retain_present_keeps_a_still_present_generation() {
+    fn retain_keeps_a_generation_that_is_still_refusing() {
         let mut l = ledger_with("ks.t", "/d/ks/t-1/nb-1-big-Data.db");
-        retain_present(&mut l, |_p| true);
+        retain_still_refusing(&mut l, |_p| true);
         assert!(check(&l, "ks.t").is_err());
     }
 }

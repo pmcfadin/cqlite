@@ -147,9 +147,11 @@ enum Damage {
     /// any one trigger.
     TruncatedStatistics,
     /// The partition-key marshal TYPE string in the SERIALIZATION_HEADER is made
-    /// invalid UTF-8, which `parse_serialization_header_schema` refuses
-    /// ("Invalid UTF-8 in partition key type"). This is the #4158-shaped trigger:
-    /// a serialization-header type the reader legitimately will not decode.
+    /// invalid UTF-8, which `parse_serialization_header_schema` refuses. This is
+    /// the #4158-shaped trigger: a serialization-header type the reader
+    /// legitimately will not decode. The refusal's exact wording is asserted in
+    /// ONE place — [`Damage::expected_cause_fragment`] — so this doc cannot drift
+    /// out of step with it.
     RefusedHeaderType,
     /// The file is cut inside its 32-byte OUTER header, so `parse_nb_format_header`
     /// itself cannot complete.
@@ -692,6 +694,72 @@ async fn removing_the_refused_generation_and_refreshing_restores_readability() {
         rows.len(),
         1,
         "the surviving generation's row must be returned"
+    );
+}
+
+/// The OTHER way a refusal stops applying: the generation is REPAIRED IN PLACE.
+///
+/// # Why this case exists
+///
+/// The first version of the invalidation asked only "is the refused path still on
+/// disk?", which is the wrong question and permanently bricked the commonest real
+/// scenario. A manager opened while Cassandra (or an `rsync`, or a snapshot
+/// restore) is mid-write records a refusal for a half-written `Statistics.db`. The
+/// write then completes — same path, same generation, now perfectly readable — and
+/// `refresh_tables` re-opens it successfully into the reader map, but a
+/// presence-keyed predicate RETAINED the ledger entry, so `ensure_readable` errored
+/// for the life of the process with every generation healthy and open.
+///
+/// Note there is no other exit from the ledger to test against: while the file is
+/// still broken, the refresh's fail-closed open aborts the whole refresh with `?`,
+/// so the invalidation step is not even reached. Disappearance (the test above) and
+/// repair-in-place (this one) are the complete set.
+#[tokio::test]
+async fn repairing_the_refused_generation_in_place_and_refreshing_restores_readability() {
+    let root = TempDir::new().expect("TempDir");
+    let good = write_generation(root.path(), TABLE, 1).await;
+    let bad = write_generation(root.path(), TABLE, 2).await;
+
+    // Keep the PRISTINE bytes so the repair restores the very same path, byte for
+    // byte — a repair-in-place, not a new generation.
+    let pristine = std::fs::read(&bad.statistics).expect("read pristine Statistics.db");
+    stage(&bad, Damage::TruncatedStatistics);
+
+    let manager = manager(root.path()).await;
+    let e = manager
+        .scan(&table_id(TABLE), None, None, None, Some(&schema_for(TABLE)))
+        .await
+        .expect_err("while the generation is half-written the table is unreadable");
+    assert_unreadable(
+        "scan (pre-repair)",
+        &e,
+        &bad.data,
+        Damage::TruncatedStatistics,
+    );
+
+    // The writer finishes: the SAME path now holds a complete Statistics.db.
+    std::fs::write(&bad.statistics, &pristine).expect("repair Statistics.db in place");
+    assert!(
+        bad.data.exists() && good.data.exists(),
+        "repair-in-place: BOTH generations are still on disk, so an invalidation \
+         keyed on disappearance cannot fire"
+    );
+
+    let report = manager.refresh_tables().await.expect("refresh_tables");
+    assert_eq!(
+        report.readers_added, 1,
+        "the repaired generation must be OPENED by this refresh — that is the fact \
+         the ledger invalidation keys on"
+    );
+
+    let rows = manager
+        .scan(&table_id(TABLE), None, None, None, Some(&schema_for(TABLE)))
+        .await
+        .expect("a generation repaired in place must stop refusing after a refresh");
+    assert_eq!(
+        rows.len(),
+        2,
+        "both the healthy and the repaired generation's rows must be returned"
     );
 }
 

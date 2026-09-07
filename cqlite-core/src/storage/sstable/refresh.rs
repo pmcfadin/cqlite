@@ -268,20 +268,36 @@ impl SSTableManager {
             opened.push((canon_of(path), sstable_id, key, reader_arc));
         }
 
+        // Canonical paths this refresh RE-OPENED successfully. A refusal recorded
+        // for one of these has been REPAIRED IN PLACE (the classic case: the
+        // manager opened mid-`rsync` over a half-written `Statistics.db`, and the
+        // copy has since completed), so it must stop refusing even though the path
+        // is still very much on disk.
+        let reopened_canon: HashSet<PathBuf> = opened.iter().map(|(c, ..)| c.clone()).collect();
+
         // 5. Apply the diff under the write guards (short critical section).
         let mut readers = self.readers.write().await;
         let mut table_readers = self.table_readers.write().await;
         let mut refused = self.refused.write().await;
 
         // 5.0 Issue #4159: a refusal recorded at construction must stop poisoning
-        //     its table once the offending generation is GONE from disk, or the
-        //     table stays permanently unreadable after the operator removed the bad
-        //     file. Every path is compared in the SAME canonical form the reader
-        //     diff below uses, from the precomputed cache — zero syscalls under the
-        //     guard. A refused generation still on disk KEEPS its entry: step 4 is
-        //     fail-closed, so this refresh never re-opened it and nothing has
-        //     changed about its readability.
-        refusal::retain_present(&mut refused, |p| discovered_canon.contains(&canon_of(p)));
+        //     its table once the generation stops being bad, or the table is
+        //     unreadable for the life of the process. There are TWO such ways and a
+        //     refusal survives only when NEITHER happened:
+        //
+        //       * GONE from disk — the operator deleted the bad generation;
+        //       * RE-OPENED by this refresh — repaired in place, so the very path
+        //         that refused now opens. Testing presence alone kept the refusal
+        //         forever in exactly this case, which is the common one.
+        //
+        //     Every path is compared in the SAME canonical form the reader diff
+        //     below uses, from the precomputed cache — zero syscalls under the
+        //     guard. Note the ledger has no other exit: a generation that is still
+        //     unreadable aborts step 4 with `?`, so this line is not even reached.
+        refusal::retain_still_refusing(&mut refused, |p| {
+            let c = canon_of(p);
+            discovered_canon.contains(&c) && !reopened_canon.contains(&c)
+        });
 
         // 5a. Removal: retain only readers still present on disk. Every
         //     canonical path below comes from the precomputed cache — the
