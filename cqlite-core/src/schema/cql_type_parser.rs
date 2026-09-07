@@ -4,7 +4,7 @@
 //! the small inherent accessors (`fixed_size`, `is_collection`). Extracted from
 //! `schema/mod.rs` (issue #1134, source-split doctrine) with no behavior change.
 
-use super::vector_type::{cql_vector_inner, split_vector_args};
+use super::vector_type::cql_vector_kind;
 use super::CqlType;
 use crate::error::{Error, Result};
 
@@ -150,8 +150,12 @@ impl CqlType {
         // value parseable — was lost. The two parameters are parsed by the ONE
         // shared rule (`schema::vector_type`), so a malformed dimension is refused
         // BY NAME here rather than degraded to a `Custom` string.
-        if let Some(inner) = cql_vector_inner(type_str) {
-            let args = split_vector_args(inner, type_str)?;
+        // A malformed vector — `vector<` whose parameters do not terminate, or do not
+        // split into (element, dimension) — is an ERROR here, never a fall-through to
+        // the UDT/`Custom` arms below, which would restore the blob framing #4114
+        // removed (roborev job 109). `NotAVector` still falls through, because an
+        // unparameterised `vector` can legitimately be a UDT name.
+        if let Some(args) = cql_vector_kind(type_str).into_args(type_str)? {
             return Ok(CqlType::Vector(
                 Box::new(Self::parse_with_depth(args.element, depth + 1)?),
                 args.dimension,

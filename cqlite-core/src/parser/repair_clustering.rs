@@ -102,17 +102,22 @@ pub(crate) fn resolve_clustering_value_layout(type_name: &str) -> Option<Cluster
     // A malformed vector type is `None` (UNKNOWN), never a guessed width: the caller
     // then reports the trailing repair fields as `Unparsed`, which is the honest
     // outcome when the skip cannot be computed.
-    if let Some(args_inner) = crate::schema::vector_type::marshal_vector_inner(inner) {
-        let Ok(args) = crate::schema::vector_type::split_vector_args(args_inner, inner) else {
-            return None;
-        };
-        return match resolve_clustering_value_layout(args.element)? {
-            ClusteringValueLayout::Fixed(element_width) => {
-                crate::schema::vector_type::vector_byte_width(element_width, args.dimension)
-                    .map(ClusteringValueLayout::Fixed)
+    // The probe is three-valued: `NotAVector` falls through to the tables below,
+    // while EITHER malformed state (an unextractable parameter list or one that does
+    // not split into (element, dimension)) is `None` — UNKNOWN — never a guessed
+    // width (roborev job 109).
+    match crate::schema::vector_type::marshal_vector_kind(inner).into_args(inner) {
+        Ok(Some(args)) => {
+            return match resolve_clustering_value_layout(args.element)? {
+                ClusteringValueLayout::Fixed(element_width) => {
+                    crate::schema::vector_type::vector_byte_width(element_width, args.dimension)
+                        .map(ClusteringValueLayout::Fixed)
+                }
+                ClusteringValueLayout::Variable => Some(ClusteringValueLayout::Variable),
             }
-            ClusteringValueLayout::Variable => Some(ClusteringValueLayout::Variable),
-        };
+        }
+        Err(_) => return None,
+        Ok(None) => {}
     }
 
     // Fixed-width comparators (exact `valueLengthIfFixed()` from cassandra-5.0.0).

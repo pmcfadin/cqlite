@@ -285,13 +285,12 @@ pub(super) fn parse_cql_value_for_type(input: &[u8], cql_type: &CqlType) -> Resu
         // silently discarding the declared element type and dimension (#28). The
         // field bytes are exactly the value here, so the exact-width rule applies.
         CqlType::Vector(element, dimension) => {
-            crate::schema::vector_type::vector_value::require_float_element(element, *dimension)?;
-            crate::schema::vector_type::vector_value::decode_float_vector_exact(
+            crate::schema::vector_type::vector_value::decode_framed_float_vector(
                 input,
-                "UDT field",
+                element,
                 *dimension,
+                "UDT field",
             )
-            .map(|(value, _consumed)| value)
         }
         _ => {
             let type_id = cql_type_to_type_id(cql_type);
@@ -407,6 +406,23 @@ pub(super) fn parse_cql_value_for_type_with_registry(
             let inner_value =
                 parse_cql_value_for_type_with_registry(input, inner_type, keyspace, registry)?;
             Ok(Value::Frozen(Box::new(inner_value)))
+        }
+        // #4114 (roborev job 109): intercepted BEFORE `cql_type_to_type_id`, exactly
+        // like the sibling arm in `parse_cql_value_for_type`. Without it a vector
+        // reaching this function — as a registry-backed UDT FIELD, a collection
+        // ELEMENT, or a map KEY/VALUE — got `CqlTypeId::Custom`, i.e. `parse_blob`,
+        // which reads a VINT LENGTH the fixed-width value never carries: the #4114
+        // defect, still live by a second route. `input` is exactly the framed value
+        // (every caller `take`s the field/element length first), so the exact-width
+        // rule applies and it is the SAME decoder the non-registry path uses — one
+        // framing rule, one place.
+        CqlType::Vector(element, dimension) => {
+            crate::schema::vector_type::vector_value::decode_framed_float_vector(
+                input,
+                element,
+                *dimension,
+                "UDT field / collection element",
+            )
         }
         _ => {
             // For primitive types, use the standard parser

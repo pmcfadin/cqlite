@@ -69,54 +69,139 @@ pub(crate) struct VectorTypeArgs<'a> {
     pub dimension: usize,
 }
 
-/// The content between `vector<` and its matching final `>`, or `None` when
-/// `type_str` is not a CQL-spelled vector.
+/// The three answers a vector-type probe can give (issue #4114, roborev job 109).
+///
+/// Two-valued `Option` was a DEFECT, not a simplification: `None` meant both "this
+/// is not a vector" (so the caller's other type arms apply) and "this IS a vector
+/// but its parameter list is unparseable" (so the caller must FAIL CLOSED). Every
+/// caller took the first reading, so a malformed `VectorType(` reached a generic
+/// fallback — in `enhanced_statistics_parser::marshal_type` the
+/// `other => other.to_lowercase()` one, which restored exactly the blob/phantom-vint
+/// framing #4114 exists to remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VectorInner<'a> {
+    /// `type_str` does not claim to be a vector type.
+    NotAVector,
+    /// `type_str` is a vector type; the payload is its raw parameter list, still to
+    /// be split by [`split_vector_args`].
+    Args(&'a str),
+    /// `type_str` CLAIMS to be a vector type but its parameter list could not be
+    /// extracted. The payload says why, for the refusal message.
+    Malformed(&'static str),
+}
+
+impl<'a> VectorInner<'a> {
+    /// Collapse the probe into the answer a caller actually needs:
+    /// `Ok(None)` = not a vector, `Ok(Some(args))` = a well-formed vector,
+    /// `Err` = a vector that must fail closed, with `type_str` named.
+    ///
+    /// Both malformed states — an unextractable parameter list AND a parameter list
+    /// that does not split into (element, dimension) — come out as `Err`, so no
+    /// caller can accidentally handle only one of them.
+    pub(crate) fn into_args(self, type_str: &'a str) -> Result<Option<VectorTypeArgs<'a>>> {
+        match self {
+            VectorInner::NotAVector => Ok(None),
+            VectorInner::Args(inner) => split_vector_args(inner, type_str).map(Some),
+            VectorInner::Malformed(why) => Err(malformed(type_str, why)),
+        }
+    }
+}
+
+/// Probe `type_str` for the CQL spelling `vector<element, n>`.
 ///
 /// The keyword is matched case-insensitively because CQL type keywords are
 /// (`SET<TEXT>` == `set<text>`), which the sibling parsers in
 /// [`super::cql_type_parser`] already rely on.
-pub(crate) fn cql_vector_inner(type_str: &str) -> Option<&str> {
+///
+/// A bare `vector` with NO parameter list is [`VectorInner::NotAVector`], NOT
+/// malformed: `vector` is not a reserved word in CQL (`CQL3Type.java:589,:938`
+/// recognises it only WITH parameters), so an unparameterised `vector` can be a
+/// legitimate UDT name and must stay available to the caller's UDT arm. Once a `<`
+/// follows, no other type can be meant, so an unterminated parameter list is
+/// [`VectorInner::Malformed`].
+pub(crate) fn cql_vector_kind(type_str: &str) -> VectorInner<'_> {
     let trimmed = type_str.trim();
-    let head = trimmed.get(..7)?;
-    if !head.eq_ignore_ascii_case("vector<") {
-        return None;
+    let (keyword, rest) = split_leading_identifier(trimmed);
+    if !keyword.eq_ignore_ascii_case("vector") {
+        return VectorInner::NotAVector;
     }
-    trimmed[7..].strip_suffix('>')
+    let rest = rest.trim_start();
+    let Some(after_open) = rest.strip_prefix('<') else {
+        // No parameter list: a UDT may legitimately be named `vector`.
+        return VectorInner::NotAVector;
+    };
+    match matched_bracket_body(after_open, '<', '>') {
+        Some((inner, tail)) if tail.trim().is_empty() => VectorInner::Args(inner),
+        Some(_) => {
+            VectorInner::Malformed("trailing text after the closing '>' of the type parameters")
+        }
+        None => VectorInner::Malformed("the type parameters are not terminated by a matching '>'"),
+    }
 }
 
-/// The content between a `VectorType(` constructor and its MATCHING close paren,
-/// or `None` when `type_str` is not a marshal-spelled vector.
+/// Probe `type_str` for the marshal spelling `VectorType(element , n)`.
 ///
 /// The constructor name is matched EXACTLY on its package-stripped simple name
 /// (`VectorType`), the same way the sibling marshal resolvers in
 /// `parser::repair_clustering` and `parser::enhanced_statistics_parser` identify a
 /// constructor: Java class names are case-sensitive, so a lowercased spelling is
 /// not a class reference and must not be accepted here.
-pub(crate) fn marshal_vector_inner(type_str: &str) -> Option<&str> {
+///
+/// Unlike the CQL probe, a `VectorType` with no usable parameter list is
+/// [`VectorInner::Malformed`] rather than `NotAVector`: `VectorType` is a Java class
+/// name, nothing else can be spelled that way, and `VectorType.getInstance` has no
+/// parameterless form (`TypeParser.getVectorParameters`, `TypeParser.java:244-263`,
+/// requires both parameters). So there is no honest reading of it other than "a
+/// broken vector type".
+pub(crate) fn marshal_vector_kind(type_str: &str) -> VectorInner<'_> {
     let trimmed = type_str.trim();
-    let open = trimmed.find('(')?;
-    let ctor = trimmed[..open].trim();
+    let (ctor, rest) = split_leading_identifier(trimmed);
     let simple = ctor.rsplit('.').next().unwrap_or(ctor);
     if simple != "VectorType" {
-        return None;
+        return VectorInner::NotAVector;
     }
-    matched_paren_body(&trimmed[open + 1..])
+    let rest = rest.trim_start();
+    let Some(after_open) = rest.strip_prefix('(') else {
+        return VectorInner::Malformed(
+            "a VectorType constructor with no '(' parameter list (Cassandra has no \
+             parameterless VectorType)",
+        );
+    };
+    match matched_bracket_body(after_open, '(', ')') {
+        Some((inner, tail)) if tail.trim().is_empty() => VectorInner::Args(inner),
+        Some(_) => {
+            VectorInner::Malformed("trailing text after the closing ')' of the parameter list")
+        }
+        None => VectorInner::Malformed("the parameter list is not terminated by a matching ')'"),
+    }
 }
 
-/// The prefix of `after_open` up to (not including) the `)` that matches the `(`
-/// already consumed by the caller. `None` on unbalanced parentheses.
-fn matched_paren_body(after_open: &str) -> Option<&str> {
+/// Split off the leading Java/CQL type identifier — the run of characters legal in
+/// a (possibly package-qualified) type name — and return `(identifier, rest)`.
+///
+/// `.` is part of the identifier so a package-qualified class name comes back
+/// whole; the caller package-strips. `_` and `$` are legal Java identifier
+/// characters. Nothing else is consumed, so the very next character decides
+/// whether a parameter list follows.
+fn split_leading_identifier(value: &str) -> (&str, &str) {
+    let end = value
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '$'))
+        .unwrap_or(value.len());
+    (&value[..end], &value[end..])
+}
+
+/// The body between an ALREADY-CONSUMED `open` bracket and its MATCHING `close`,
+/// plus whatever follows that `close`. `None` on unbalanced brackets.
+fn matched_bracket_body(after_open: &str, open: char, close: char) -> Option<(&str, &str)> {
     let mut depth = 1usize;
     for (idx, ch) in after_open.char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&after_open[..idx]);
-                }
+        if ch == open {
+            depth += 1;
+        } else if ch == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some((&after_open[..idx], &after_open[idx + close.len_utf8()..]));
             }
-            _ => {}
         }
     }
     None
@@ -124,9 +209,10 @@ fn matched_paren_body(after_open: &str) -> Option<&str> {
 
 /// Split a vector type's argument list into its (element type, dimension) pair.
 ///
-/// `inner` is the already-extracted argument list — the output of
-/// [`cql_vector_inner`] or [`marshal_vector_inner`]. `type_str` is the full type
-/// string, used only so a refusal NAMES the type that was refused.
+/// `inner` is the already-extracted argument list — the [`VectorInner::Args`]
+/// payload from [`cql_vector_kind`] or [`marshal_vector_kind`], normally reached
+/// via [`VectorInner::into_args`] rather than called directly. `type_str` is the
+/// full type string, used only so a refusal NAMES the type that was refused.
 ///
 /// Splitting is on the LAST TOP-LEVEL comma rather than the first, because the
 /// ELEMENT may itself be a parameterised type carrying top-level-looking commas
@@ -198,7 +284,9 @@ pub(crate) fn parse_vector_dimension(raw: &str, type_str: &str) -> Result<usize>
         return Err(malformed(
             type_str,
             &format!(
-                "dimension '{raw}' is not a plain decimal integer (digits only: a                  sign, a decimal point, whitespace or a non-ASCII digit is not a                  dimension Cassandra's writer can emit)"
+                "dimension '{raw}' is not a plain decimal integer (digits only: a \
+                 sign, a decimal point, whitespace or a non-ASCII digit is not a \
+                 dimension Cassandra's writer can emit)"
             ),
         ));
     }
@@ -237,14 +325,89 @@ mod tests {
 
     const PKG: &str = "org.apache.cassandra.db.marshal.";
 
+    /// `into_args` for a string that MUST be a well-formed vector.
+    fn marshal_args<'a>(ty: &'a str) -> VectorTypeArgs<'a> {
+        marshal_vector_kind(ty)
+            .into_args(ty)
+            .expect("a well-formed vector type")
+            .expect("a vector type")
+    }
+
+    fn cql_args<'a>(ty: &'a str) -> VectorTypeArgs<'a> {
+        cql_vector_kind(ty)
+            .into_args(ty)
+            .expect("a well-formed vector type")
+            .expect("a vector type")
+    }
+
     #[test]
     fn marshal_spelling_cassandra_writes_is_parsed() {
         // The exact string `VectorType.toString` produces, spaces and all.
         let ty = format!("{PKG}VectorType({PKG}FloatType , 3)");
-        let inner = marshal_vector_inner(&ty).expect("a VectorType constructor");
-        let args = split_vector_args(inner, &ty).expect("well-formed parameters");
+        let args = marshal_args(&ty);
         assert_eq!(args.element, format!("{PKG}FloatType"));
         assert_eq!(args.dimension, 3);
+    }
+
+    /// Regression, roborev job 109 (issue #4114): a `VectorType` whose parameter
+    /// list cannot be EXTRACTED must be distinguishable from "not a vector type".
+    ///
+    /// The two used to collapse into `None`, so every caller read a malformed vector
+    /// as "some other type" and sent it down a generic fallback — in
+    /// `enhanced_statistics_parser::marshal_type` the `other => other.to_lowercase()`
+    /// one, which restores the blob/phantom-vint framing #4114 exists to remove. The
+    /// type STRINGS here are literals rather than fixture-derived on purpose: a
+    /// malformed type string is a text-parsing question, not a byte-framing one, so
+    /// no Cassandra-written bytes can express it (Cassandra's writer cannot emit one).
+    #[test]
+    fn a_malformed_vector_type_is_malformed_not_notavector() {
+        for ty in [
+            // Unmatched open paren — the case that reached the lowercase fallback.
+            format!("{PKG}VectorType({PKG}FloatType , 3"),
+            // A `VectorType` claim with no parameter list at all.
+            format!("{PKG}VectorType"),
+            "VectorType".to_string(),
+            // Trailing text after the matched close paren.
+            format!("{PKG}VectorType({PKG}FloatType , 3) , 4"),
+        ] {
+            assert!(
+                matches!(marshal_vector_kind(&ty), VectorInner::Malformed(_)),
+                "'{ty}' claims to be a VectorType and must be MALFORMED, not NotAVector"
+            );
+            let err = marshal_vector_kind(&ty)
+                .into_args(&ty)
+                .expect_err("a malformed vector type must fail closed")
+                .to_string();
+            assert!(
+                err.contains(ty.trim()),
+                "the refusal must name the type it refused: {err}"
+            );
+        }
+    }
+
+    /// The CQL-spelling half of the same defect class. `vector` WITHOUT parameters
+    /// stays `NotAVector` — it is not a reserved word, so it can be a UDT name — but
+    /// once a `<` follows, nothing else can be meant and an unterminated parameter
+    /// list must fail closed rather than fall through to the UDT/`Custom` arm.
+    #[test]
+    fn an_unterminated_cql_vector_is_malformed_but_a_bare_vector_is_a_udt_name() {
+        for ty in ["vector<float, 3", "vector<float, 3>>", "VECTOR<float"] {
+            assert!(
+                matches!(cql_vector_kind(ty), VectorInner::Malformed(_)),
+                "'{ty}' must be MALFORMED"
+            );
+            assert!(cql_vector_kind(ty).into_args(ty).is_err(), "{ty}");
+        }
+        for ty in ["vector", "  vector  ", "vector_column", "vectorish<int>"] {
+            assert!(
+                matches!(cql_vector_kind(ty), VectorInner::NotAVector),
+                "'{ty}' must stay available to the caller's UDT arm"
+            );
+            assert!(
+                matches!(cql_vector_kind(ty).into_args(ty), Ok(None)),
+                "{ty}"
+            );
+        }
     }
 
     #[test]
@@ -256,8 +419,7 @@ mod tests {
             format!("{PKG}VectorType({PKG}FloatType , 3)"),
             format!("{PKG}VectorType( {PKG}FloatType ,  3 )"),
         ] {
-            let inner = marshal_vector_inner(&ty).expect("a VectorType constructor");
-            let args = split_vector_args(inner, &ty).expect("well-formed parameters");
+            let args = marshal_args(&ty);
             assert_eq!(args.element, format!("{PKG}FloatType"), "{ty}");
             assert_eq!(args.dimension, 3, "{ty}");
         }
@@ -267,13 +429,22 @@ mod tests {
     fn a_bare_constructor_name_is_accepted_and_a_foreign_one_is_not() {
         // `TypeParser.getAbstractType` resolves an unqualified name against the
         // marshal package, so the bare spelling is the same type.
-        assert!(marshal_vector_inner("VectorType(FloatType , 2)").is_some());
+        assert_eq!(marshal_args("VectorType(FloatType , 2)").dimension, 2);
         // Case matters: a lowercased string is not a Java class reference.
-        assert!(marshal_vector_inner("vectortype(FloatType , 2)").is_none());
+        assert!(matches!(
+            marshal_vector_kind("vectortype(FloatType , 2)"),
+            VectorInner::NotAVector
+        ));
         // A different constructor is not a vector.
-        assert!(marshal_vector_inner(&format!("{PKG}ListType({PKG}FloatType)")).is_none());
-        // Not parameterised at all.
-        assert!(marshal_vector_inner(&format!("{PKG}FloatType")).is_none());
+        assert!(matches!(
+            marshal_vector_kind(&format!("{PKG}ListType({PKG}FloatType)")),
+            VectorInner::NotAVector
+        ));
+        // A non-parameterised FOREIGN type is not a vector either.
+        assert!(matches!(
+            marshal_vector_kind(&format!("{PKG}FloatType")),
+            VectorInner::NotAVector
+        ));
     }
 
     #[test]
@@ -281,8 +452,7 @@ mod tests {
         // The element's commas are at depth > 0; only the LAST top-level comma
         // separates the dimension.
         let ty = format!("{PKG}VectorType({PKG}TupleType({PKG}Int32Type,{PKG}UTF8Type) , 7)");
-        let inner = marshal_vector_inner(&ty).expect("a VectorType constructor");
-        let args = split_vector_args(inner, &ty).expect("well-formed parameters");
+        let args = marshal_args(&ty);
         assert_eq!(
             args.element,
             format!("{PKG}TupleType({PKG}Int32Type,{PKG}UTF8Type)")
@@ -297,17 +467,17 @@ mod tests {
             "VECTOR<FLOAT,3>",
             "  vector< float , 3 >",
         ] {
-            let inner = cql_vector_inner(ty).expect("a CQL vector spelling");
-            let args = split_vector_args(inner, ty).expect("well-formed parameters");
+            let args = cql_args(ty);
             assert!(args.element.eq_ignore_ascii_case("float"), "{ty}");
             assert_eq!(args.dimension, 3, "{ty}");
         }
-        assert!(cql_vector_inner("list<float>").is_none());
-        assert!(cql_vector_inner("vector").is_none());
+        assert!(matches!(
+            cql_vector_kind("list<float>"),
+            VectorInner::NotAVector
+        ));
         // A nested element keeps its own angle brackets.
         let ty = "vector<frozen<tuple<int, text>>, 4>";
-        let inner = cql_vector_inner(ty).expect("a CQL vector spelling");
-        let args = split_vector_args(inner, ty).expect("well-formed parameters");
+        let args = cql_args(ty);
         assert_eq!(args.element, "frozen<tuple<int, text>>");
         assert_eq!(args.dimension, 4);
     }

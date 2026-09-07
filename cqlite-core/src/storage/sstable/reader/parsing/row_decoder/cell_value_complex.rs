@@ -352,14 +352,18 @@ impl V5CompressedLegacyParser {
         // field instead travels the `CqlType` route (`type_string.rs` ->
         // `typed_value.rs`).
         else if type_str.starts_with("vector<") {
-            let args = crate::schema::vector_type::cql_vector_inner(type_str)
+            // Three-valued probe: a malformed vector type is an `Err` naming the type
+            // (never a fall-through to the blob arm below), and the `NotAVector`
+            // reading is unreachable under this `starts_with("vector<")` guard yet is
+            // still refused explicitly rather than defaulted (roborev job 109).
+            let args = crate::schema::vector_type::cql_vector_kind(type_str)
+                .into_args(type_str)?
                 .ok_or_else(|| {
                     Error::schema(format!(
-                        "Cell '{}': malformed vector type '{}' (unterminated type parameters)",
+                        "Cell '{}': type '{}' begins 'vector<' but is not a vector type",
                         column.name, type_str
                     ))
-                })
-                .and_then(|inner| crate::schema::vector_type::split_vector_args(inner, type_str))?;
+                })?;
             // AC4: the dimension comes from the type, and an element type CQLite
             // does not implement is refused BY NAME rather than decoded as
             // something else (#28).

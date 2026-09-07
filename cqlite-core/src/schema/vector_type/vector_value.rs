@@ -135,6 +135,34 @@ pub(crate) fn decode_float_vector_exact(
     Ok((float_elements(data, column_name, dimension)?, width))
 }
 
+/// The ONE entry point for a vector value that arrived inside an OUTER framing
+/// that already delimited it — a UDT field, a collection element, a map key or
+/// value, a tuple component (issue #4114, roborev job 109).
+///
+/// It is a thin composition of [`require_float_element`] and
+/// [`decode_float_vector_exact`], and it exists so that every such caller shares
+/// ONE rule rather than re-deriving the element check and the exact-width check.
+/// The #4114 defect was reachable by a second route precisely because one of these
+/// callers (`parse_cql_value_for_type_with_registry`) had no vector arm at all and
+/// fell through to a `CqlTypeId::Custom` blob decode.
+///
+/// `context` names the site for the refusal message (e.g. `"UDT field 'embedding'"`).
+///
+/// An EMPTY `framed_value` is refused here, and that is the point: Cassandra has no
+/// empty vector (`VectorType.java:365-368` throws "Invalid empty vector value"), so
+/// a zero-length vector value must NOT become `Value::Null` or `Vector([])`. A
+/// genuinely NULL cell/field is a different thing, decided by the outer framing
+/// before this function is reached.
+pub(crate) fn decode_framed_float_vector(
+    framed_value: &[u8],
+    element: &CqlType,
+    dimension: usize,
+    context: &str,
+) -> Result<Value> {
+    require_float_element(element, dimension)?;
+    decode_float_vector_exact(framed_value, context, dimension).map(|(value, _consumed)| value)
+}
+
 /// The `nom`-shaped entry point used by the schema-aware value parsers
 /// (`parser::types::parse_cql_value_with_schema`), which consume a value off the
 /// FRONT of a stream and return the remainder.
