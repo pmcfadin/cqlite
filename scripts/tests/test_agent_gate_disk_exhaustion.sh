@@ -96,7 +96,9 @@ EXTRACT_OK=1
   # #3800 (roborev job 316): the seconds GRAMMAR and the AGGREGATION wrapper. The shipped
   # `aggregate_lite_components` case 20c drives is extracted SEPARATELY, into $EX_AGG -- see the
   # reason at its extraction below.
-  for fn in _disk_safe _disk_abbrev _disk_df_probe _disk_gib _disk_free_leg \
+  # `_gate_cntrl_strip` is #3637's ONE DEFINITION of the control-character class and
+  # `_disk_safe` now DELEGATES to it, so the extracted harness must carry it too.
+  for fn in _gate_cntrl_strip _disk_safe _disk_abbrev _disk_df_probe _disk_gib _disk_free_leg \
             _disk_free_field _disk_scan_field _disk_note_capture_failure \
             _disk_note_unread_verdict _disk_secs_is_int _disk_verdict_read \
             _disk_verdict_read_aggregate _disk_recorded_pairs _disk_preflight_meta \
@@ -110,7 +112,7 @@ EXTRACT_OK=1
   done
 } >> "$EX"
 
-for want in DISK_EXHAUSTION_SIGNATURES DISK_MEM_SUBJECTS DISK_UNREAD_VERDICTS _disk_safe _disk_abbrev \
+for want in DISK_EXHAUSTION_SIGNATURES DISK_MEM_SUBJECTS DISK_UNREAD_VERDICTS _gate_cntrl_strip _disk_safe _disk_abbrev \
             _disk_df_probe _disk_gib _disk_free_leg _disk_free_field _disk_scan_field \
             _disk_note_capture_failure _disk_note_unread_verdict _disk_secs_is_int \
             _disk_verdict_read _disk_verdict_read_aggregate _disk_recorded_pairs \
@@ -2414,7 +2416,7 @@ if command -v mkfifo >/dev/null 2>&1 && [ -n "$DISK_TIMEOUT" ]; then
         !inb && $0 ~ s { inb=1; print; next } inb { print; if ($0 ~ e) exit }' "$_fifo_ctl" > "$_fifo_ex"
       grep -m1 '^DISK_MEM_SUBJECTS=()$' "$_fifo_ctl" >> "$_fifo_ex"
       grep -m1 '^DISK_UNREAD_VERDICTS=()$' "$_fifo_ctl" >> "$_fifo_ex"
-      for fn in _disk_safe _disk_abbrev _disk_df_probe _disk_gib _disk_free_leg _disk_free_field \
+      for fn in _gate_cntrl_strip _disk_safe _disk_abbrev _disk_df_probe _disk_gib _disk_free_leg _disk_free_field \
                 _disk_scan_field _disk_note_capture_failure _disk_note_unread_verdict \
                 _disk_secs_is_int _disk_verdict_read _disk_verdict_read_aggregate \
                 _disk_scan_subject _disk_exhaustion_line; do

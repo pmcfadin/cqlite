@@ -7391,7 +7391,16 @@ DISK_FREE_START_LOGS=""
 # `==== AGENT-GATE SUMMARY ====` marker inside the block. Neutralised at the ONE emit boundary
 # (the final printf), never per interpolation site: a per-site escape is a list to keep complete.
 _disk_safe() {
-  printf '%s' "${1:-}" | LC_ALL=C tr -d '\000-\037\177'
+  # DELEGATES to `_gate_cntrl_strip`, THE ONE DEFINITION of "control character" for
+  # SUMMARY-block text (#3637). This function used to spell the class itself, as
+  # `tr -d '\000-\037\177'` -- byte-for-byte the same set as that helper's
+  # `tr -d '[:cntrl:]'` under the same pinned `LC_ALL=C`, and therefore exactly the second
+  # spelling #3637's own header rules out: two spellings can DISAGREE about what a control
+  # character is, which is the per-site drift #3312 rules against. The name is kept because
+  # it is what marks this block's ONE emit boundary, and because the extracted-function
+  # harness in scripts/tests/test_agent_gate_disk_exhaustion.sh names it; what is removed is
+  # the second DEFINITION, not the boundary.
+  _gate_cntrl_strip "${1-}"
 }
 
 # _disk_abbrev <csv> <max-items> -- bound a name list so one line stays one readable line.
@@ -7665,6 +7674,20 @@ _disk_scan_subject() {
       # and its three-valued rc reaches the caller unaltered. The residual is then the same one the
       # FILE branch declares above -- occurrences on a single line -- rather than the whole
       # payload.
+      #
+      # AND THE #4061 RATCHET'S REMEDY IS NOT AVAILABLE HERE, WHICH IS WHY THIS PIPE STAYS.
+      # `scripts/ci/check-sigpipe-sites.sh` recognises `printf | grep -m1` as the
+      # piped-builtin-writer (EPIPE) class and prescribes `reader <<<"$text"`, "which bash
+      # implements with a temp file, so no writer is left to take EPIPE at all". A TEMP FILE is
+      # exactly what this branch may not need: it is the IN-MEMORY subject channel, and it exists
+      # because under ENOSPC a spill file is what cannot be written -- so applying that remedy
+      # would put the disk-exhaustion diagnostic back on the disk it is diagnosing, and lose the
+      # evidence on precisely the run that had it. The class hazard is instead NEUTRALISED rather
+      # than avoided: `PIPESTATUS[1]` is grep's OWN status, `set +o pipefail` is scoped to this
+      # subshell, and printf's SIGPIPE narration is discarded by the `2>/dev/null` on the pipeline,
+      # so no `printf: write error` can reach a verdict a caller is reading. Pinned by case
+      # 25d-grep-status. This site is therefore a DELIBERATE, tested entry in the ratchet's
+      # baseline, not an unhandled one -- do not "fix" it to a herestring.
       hit="$(
         set +o pipefail
         printf '%s\n' "$payload" | LC_ALL=C grep -n -o -m1 -a -F -e "$phrase" 2>/dev/null
