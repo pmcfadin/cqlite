@@ -1,3 +1,4 @@
+#![allow(dead_code)] // MEASUREMENT SCAFFOLD (#4159)
 //! Direct (offset-anchored) SerializationHeader parsers.
 //!
 //! Both routines here assume the caller already knows where the schema starts —

@@ -1,3 +1,4 @@
+#![allow(dead_code)] // MEASUREMENT SCAFFOLD (#4159): removed below if the corpus stays green
 //! SerializationHeader schema parsing (partition/clustering/static/regular columns).
 //!
 //! The SerializationHeader component of Statistics.db describes the table schema.

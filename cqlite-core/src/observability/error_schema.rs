@@ -13,7 +13,8 @@
 //! |----------------|------------------|-------------------------------------------------------------------|
 //! | `Io`           | `io`             | `Io`, `InvalidPath`, `Timeout`                                     |
 //! | `Serialization`| `serialization`  | `Serialization`, `TypeConversion`                                 |
-//! | `Corruption`   | `corruption`     | `Corruption`, `CorruptCommitLogFrame`, `ColumnDecode`             |
+//! | `Corruption`   | `corruption`     | `Corruption`, `CorruptCommitLogFrame`, `ColumnDecode`,            |
+//! |                |                  | `UnreadableSSTable`                                               |
 //! | `Schema`       | `schema`         | `Schema`, `Table`                                                  |
 //! | `Parsing`      | `parsing`        | `Parse`, `CqlParse`, `InvalidFormat`, `UnsupportedFormat`,        |
 //! |                |                  | `UnsupportedVersion`, `UnsupportedCommitLogVersion`               |
