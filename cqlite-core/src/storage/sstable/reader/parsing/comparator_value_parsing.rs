@@ -171,6 +171,19 @@ fn parse_value_with_comparator_at_depth(
                 crate::storage::sstable::reader::value_borrow::borrow_active(value_data),
             ))
         }
+        // Vector is refused BY NAME and is deliberately NOT routed to the Blob arm
+        // below (#4114, roborev job 112): a vector's bytes are a correct-length,
+        // valid-looking blob, so a blob fallback is indistinguishable from a correct
+        // decode — the exact silent mis-decode this issue removes. #4114 implements
+        // reading a vector COLUMN value, not decoding a vector used as a KEY
+        // component; Cassandra permits the latter, so this is a CQLite boundary.
+        ComparatorType::Vector { .. } => Err(Error::unsupported_format(
+            "decoding a vector used as a key component is not implemented (issue \
+             #4114 covers reading vector<float, n> COLUMN values); refused rather than \
+             returned as a blob, because a blob of the right length is \
+             indistinguishable from a correct decode"
+                .to_string(),
+        )),
         ComparatorType::Blob => Ok(Value::Blob(
             crate::storage::sstable::reader::value_borrow::borrow_active(value_data),
         )),

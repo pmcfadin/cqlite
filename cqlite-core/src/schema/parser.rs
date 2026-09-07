@@ -565,6 +565,13 @@ impl SchemaParser {
                 let inner_type = self.comparator_to_cql_type(inner_comparator)?;
                 Ok(CqlType::Frozen(Box::new(inner_type)))
             }
+            // Round-trips the metadata: element + dimension were carried precisely so
+            // this reconstruction needs no re-derivation (#4114, roborev job 112).
+            ComparatorType::Vector { element, dimension } => Ok(CqlType::Vector(
+                Box::new(self.comparator_to_cql_type(element)?),
+                *dimension,
+            )),
+
             ComparatorType::Custom(type_name) => Ok(CqlType::Custom(type_name.clone())),
         }
     }
