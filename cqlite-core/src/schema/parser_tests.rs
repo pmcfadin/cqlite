@@ -660,4 +660,107 @@ mod parser_tests {
             );
         }
     }
+
+    /// Issue #4114 / roborev job 117: the PUBLIC schema-driven surface must decode a
+    /// vector column.
+    ///
+    /// This is the arm's reason for existing. Job 112 made `comparator_to_cql_type`
+    /// RECONSTRUCT `CqlType::Vector`, so `parse_typed_value` began receiving vectors
+    /// it had no arm for and answered "Unsupported type for schema-driven parsing"
+    /// from its `_` arm — fixing the comparator without its CONSUMER left
+    /// `parse_column_value` unable to read the very columns #4114 exists to make
+    /// readable. It failed CLOSED rather than blobbing, so it was an INCOMPLETE path
+    /// and not a mis-decode; incomplete is still unreadable.
+    ///
+    /// Driven through `parse_column_value` — the PUBLIC entry point — deliberately,
+    /// not through the private `parse_typed_value`: the defect was reachable exactly
+    /// there, and a test on the inner function would have passed while the surface
+    /// stayed broken.
+    #[test]
+    fn issue_4114_parse_column_value_decodes_a_vector_column() {
+        let mut schema = create_test_schema();
+        schema.columns.push(Column {
+            name: "embedding".to_string(),
+            data_type: "vector<float, 3>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        });
+
+        let mut column_comparators = HashMap::new();
+        column_comparators.insert(
+            "embedding".to_string(),
+            ComparatorType::Vector {
+                element: Box::new(ComparatorType::Float32),
+                dimension: 3,
+            },
+        );
+
+        let context = ParsingContext::from_owned(schema, vec![], vec![], column_comparators);
+        let parser = SchemaParser::new(context).unwrap();
+
+        // 3 raw big-endian binary32 elements, no length prefix: the same 12 bytes
+        // Cassandra wrote into the committed vector_clustered fixture.
+        let data: Vec<u8> = vec![
+            0x3f, 0x80, 0x00, 0x00, // 1.0
+            0x40, 0x20, 0x00, 0x00, // 2.5
+            0xc0, 0x70, 0x00, 0x00, // -3.75
+        ];
+
+        let (value, consumed) = parser
+            .parse_column_value("embedding", &data)
+            .expect("the PUBLIC schema-driven surface must decode a vector column");
+
+        assert_eq!(
+            consumed, 12,
+            "a vector<float, 3> value is exactly 4*3 bytes"
+        );
+        match value {
+            Value::List(elems) => {
+                let got: Vec<f32> = elems
+                    .iter()
+                    .map(|e| match e {
+                        Value::Float32(f) => *f,
+                        other => panic!("element is not a Float32: {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(got, vec![1.0f32, 2.5, -3.75]);
+            }
+            other => panic!("expected a List of Float32, got {other:?}"),
+        }
+    }
+
+    /// AC4 on this surface too: a non-float element is refused BY NAME, not blobbed.
+    #[test]
+    fn issue_4114_parse_column_value_refuses_a_non_float_vector_element() {
+        let mut schema = create_test_schema();
+        schema.columns.push(Column {
+            name: "v".to_string(),
+            data_type: "vector<int, 3>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        });
+
+        let mut column_comparators = HashMap::new();
+        column_comparators.insert(
+            "v".to_string(),
+            ComparatorType::Vector {
+                element: Box::new(ComparatorType::Int),
+                dimension: 3,
+            },
+        );
+
+        let context = ParsingContext::from_owned(schema, vec![], vec![], column_comparators);
+        let parser = SchemaParser::new(context).unwrap();
+
+        let err = parser
+            .parse_column_value("v", &[0u8; 12])
+            .expect_err("a non-float vector element must be refused on this surface too");
+        let msg = err.to_string();
+        assert!(
+            msg.to_lowercase().contains("int") || msg.contains("not implemented"),
+            "the refusal must name what it refuses, got: {msg}"
+        );
+    }
 }

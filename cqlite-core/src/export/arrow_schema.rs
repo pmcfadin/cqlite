@@ -119,7 +119,12 @@ pub(crate) fn cql_type_to_arrow_field(
         CqlType::Counter => Some(Field::new(name, ArrowDataType::Int64, nullable)),
         // List and Set: map to Arrow List with recursively mapped element type.
         // Arrow has no dedicated Set type; Set is represented as List.
-        CqlType::List(inner) | CqlType::Set(inner) => {
+        // #4114: a `vector<element, n>` decodes to `Value::List` of its elements,
+        // so it takes the SAME Arrow List mapping as a list/set. Arrow's
+        // `FixedSizeList(element, n)` would additionally carry the dimension, but it
+        // needs its own array builder and #4114's scope is the READ path; the value
+        // shape here is correct either way.
+        CqlType::List(inner) | CqlType::Set(inner) | CqlType::Vector(inner, _) => {
             let item_type = cql_type_to_arrow_data_type(inner);
             let item_field = Arc::new(Field::new("item", item_type, true));
             Some(Field::new(name, ArrowDataType::List(item_field), nullable))
@@ -213,7 +218,8 @@ pub(crate) fn cql_type_to_arrow_data_type(cql_type: &CqlType) -> ArrowDataType {
         CqlType::Inet => ArrowDataType::Utf8,
         // List/Set → Arrow List with recursively mapped element type.
         // Arrow has no dedicated Set type; both map to List.
-        CqlType::List(inner) | CqlType::Set(inner) => {
+        // Same rule as `cql_type_to_arrow_field` above (#4114).
+        CqlType::List(inner) | CqlType::Set(inner) | CqlType::Vector(inner, _) => {
             let item_type = cql_type_to_arrow_data_type(inner);
             ArrowDataType::List(Arc::new(Field::new("item", item_type, true)))
         }

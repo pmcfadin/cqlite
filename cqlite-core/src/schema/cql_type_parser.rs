@@ -4,6 +4,7 @@
 //! the small inherent accessors (`fixed_size`, `is_collection`). Extracted from
 //! `schema/mod.rs` (issue #1134, source-split doctrine) with no behavior change.
 
+use super::vector_type::cql_vector_kind;
 use super::CqlType;
 use crate::error::{Error, Result};
 use frozen_scalar::{frozen_inner_supports_freezing, refuse_frozen_scalar_cql};
@@ -186,6 +187,26 @@ impl CqlType {
             }
         }
 
+        // Handle `vector<element, n>` (Cassandra 5.0; `CQL3Type.java:589,:938`).
+        //
+        // Sited BEFORE the UDT/primitive fall-through: `vector` is not a reserved
+        // word, so without this arm `vector<float, 3>` fell to `Custom(...)` and
+        // the declared dimension — the only thing that makes a fixed-width vector
+        // value parseable — was lost. The two parameters are parsed by the ONE
+        // shared rule (`schema::vector_type`), so a malformed dimension is refused
+        // BY NAME here rather than degraded to a `Custom` string.
+        // A malformed vector — `vector<` whose parameters do not terminate, or do not
+        // split into (element, dimension) — is an ERROR here, never a fall-through to
+        // the UDT/`Custom` arms below, which would restore the blob framing #4114
+        // removed (roborev job 109). `NotAVector` still falls through, because an
+        // unparameterised `vector` can legitimately be a UDT name.
+        if let Some(args) = cql_vector_kind(type_str).into_args(type_str)? {
+            return Ok(CqlType::Vector(
+                Box::new(Self::parse_with_depth(args.element, depth + 1)?),
+                args.dimension,
+            ));
+        }
+
         // Handle UDT types - format: udt_name or keyspace.udt_name
         // But first check if it's not a primitive type in uppercase
         let lowercase_type = type_str.to_lowercase();
@@ -285,6 +306,22 @@ impl CqlType {
             | CqlType::Tuple(_)
             | CqlType::Udt(_, _) => None,
             CqlType::Frozen(inner) => inner.fixed_size(),
+            // `VectorType.java:94-96`: a vector is fixed-width IFF its element is,
+            // and then its width is `element_width * dimension`. A variable-width
+            // element (e.g. `vector<text, 3>`) inherits
+            // `AbstractType.VARIABLE_LENGTH` and is `None` here. `checked_mul` so a
+            // declared dimension can never wrap into a plausible-looking width.
+            // NOTE the element width comes from `cassandra_fixed_element_width`, NOT
+            // from `element.fixed_size()` (roborev job 111): `fixed_size()` answers a
+            // different question and reports TinyInt/SmallInt/Date/Time/Inet as fixed
+            // when Cassandra frames them variable, so deriving a vector's framing from
+            // it made e.g. `vector<tinyint, 3>` claim a fixed width Cassandra would
+            // not use. See that function's header for why the pre-existing
+            // `fixed_size()` disagreement is left alone rather than re-plumbed here.
+            CqlType::Vector(element, dimension) => {
+                super::vector_type::cassandra_fixed_element_width(element)
+                    .and_then(|width| super::vector_type::vector_byte_width(width, *dimension))
+            }
             CqlType::Custom(_) => None,
         }
     }

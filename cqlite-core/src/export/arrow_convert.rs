@@ -470,12 +470,27 @@ pub(crate) fn convert_column_to_array(
             CqlType::Uuid | CqlType::TimeUuid => return build_uuid_fixed_binary_array(col, cells),
             CqlType::Inet => return build_inet_utf8_array(col, cells),
             CqlType::Counter => return build_int64_array(col, cells),
-            // List, Set, Map, Tuple, and Udt: use the recursive typed builder.
+            // List, Set, Map, Tuple, Udt and Vector: use the recursive typed builder.
+            //
+            // `Vector` MUST be here (issue #4114, roborev job 110). Both
+            // `cql_type_to_arrow_field` and `cql_type_to_arrow_data_type`
+            // (`arrow_schema.rs:127`, `:222`) DECLARE a vector as
+            // `List<element>` — for `vector<float, n>` that is `List<Float32>`.
+            // Without this arm a vector fell through to the flat `DataType`
+            // dispatch below and was built by a path that does NOT produce
+            // `List<Float32>`, so the array did not match the schema the very
+            // same module had declared for it. A RecordBatch whose column array
+            // disagrees with its declared field is invalid, so this was not a
+            // cosmetic mismatch: the export either errors or emits a batch no
+            // reader can trust. The typed builder is the one that honours the
+            // declared element type, which is exactly what a vector needs since
+            // its element type is load-bearing.
             CqlType::List(_)
             | CqlType::Set(_)
             | CqlType::Map(_, _)
             | CqlType::Tuple(_)
-            | CqlType::Udt(_, _) => {
+            | CqlType::Udt(_, _)
+            | CqlType::Vector(_, _) => {
                 return build_typed_value_array(cql_type, cells);
             }
             // All other complex/collection types fall through to the flat dispatch.
