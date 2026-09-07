@@ -38,6 +38,14 @@
 # comes from the INDEX and CONTENT from the WORKTREE, so a new site in an already-tracked script
 # reds BEFORE it is ever committed, while an untracked scratch file is deliberately not a subject.
 #
+# THE OPERATIONAL COST, stated up front: because the baseline is a COUNT census over the whole
+# tree, a REBASE OR MERGE OF main that adds matching lines in files you never touched moves the
+# census and FAILs this guard until the baseline is regenerated. That happened on #4061's own
+# branch (main gained 6 files and ~370 matches mid-flight, none of them in this PR's diff). The
+# remedy is the documented one and is printed in the failure: check whether the named files are in
+# your diff, and if not, regenerate as part of the rebase. Line numbers would make this WORSE, not
+# better — any edit above a site moves it.
+#
 # THE RULE IS NOT IMPLEMENTED HERE. It lives ONCE in scripts/tests/lib/sigpipe-matcher.sh,
 # together with its declared false positives and residuals, and is PINNED by #3803's 33 cases.
 # This file must never carry a second copy of it (CLAUDE.md: a canonical form implemented twice
@@ -405,6 +413,11 @@ if [ -s "$_tmp/msg.fail" ]; then
   printf '           downstream `tr -c` then translates. If the site is genuinely correct code (one\n'
   printf '           of the declared false-positive classes above), restructure the line, or accept\n'
   printf '           it deliberately with: %s\n' "$REGEN_CMD"
+  printf '           IF origin/main ADVANCED (a rebase or a merge of main) the new sites may not be\n'
+  printf '           yours at all: this is a COUNT baseline, so any commit that adds a matching line\n'
+  printf '           anywhere under scripts/** moves the census. Check whether the named files are in\n'
+  printf '           YOUR diff; if they are not, %s and commit the\n' "$REGEN_CMD"
+  printf '           regenerated baseline as part of the rebase.\n'
   exit 1
 fi
 
