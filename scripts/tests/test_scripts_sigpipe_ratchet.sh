@@ -35,7 +35,7 @@ MATCHER_REL="scripts/tests/lib/sigpipe-matcher.sh"
 
 # Case floor (CLAUDE.md #3544): a span-replacing edit that silently deletes cases yields a green
 # tally over a shrunken suite. ENFORCED. May only go DOWN with a stated reason.
-CASE_FLOOR=31
+CASE_FLOOR=39
 
 pass=0; fail=0; cases=0
 ok()  { cases=$((cases+1)); pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
@@ -435,6 +435,134 @@ if [ "$nd_tools_ok" = 1 ] && [ "$dg_rc" = 3 ] && grep -qF 'reason: no-sha256' "$
   ok "27 no sha256 tool on PATH REFUSES by name (rc=$dg_rc) — no count-only fallback"
 else
   bad "27 absent digest tool" "expected rc=3 naming no-sha256 with a REMEDY; got rc=$dg_rc (git/awk symlinks ok=$nd_tools_ok)"
+fi
+
+# ---------------------------------------------------------------------------
+# 28. A FAILING MATCHER IS A NAMED REFUSAL, NOT A CLEAN FILE (roborev job 139, triaged BLOCKER).
+#     The census ran `sigpipe_violations "$f" >census 2>/dev/null` and IGNORED the status: a
+#     failing awk left an EMPTY census, the count computed as 0, and that subject was reported
+#     CLEAN. A zero count from an empty stream is indistinguishable from a genuine clean file, so
+#     this case FAILED before the fix and is the RED control for the whole producer-status class.
+#     RED-VERIFIED, and reproducible: restore the pre-fix guard and re-run this file —
+#         git show 34730166c:scripts/ci/check-sigpipe-sites.sh >scripts/ci/check-sigpipe-sites.sh
+#         bash scripts/tests/test_scripts_sigpipe_ratchet.sh   # 28b and 30b FAIL, 39 cases run
+#     — then restore it. Pre-fix, 28b saw rc=0 with `verdict NO-INCREASE`: the unmeasured victim
+#     read CLEAN. 29b passed pre-fix (see its own note), which is why it is labelled a pin.
+#
+#     HOW THE FAILURE IS FORCED, hermetically: an `awk` shim EARLY on PATH that exits non-zero
+#     only when invoked with the victim SUBJECT as a file argument — i.e. exactly the matcher's
+#     per-subject scan — and `exec`s the real awk for every other call (the self-check, the
+#     counts, the normaliser, the comparison). So the refusal can only come from the scan, and
+#     28a proves BY CONSTRUCTION that the shim really fired (a marker file), without which this
+#     case could pass while forcing nothing.
+# ---------------------------------------------------------------------------
+d=$(mkcase matcherfail)
+mf_bin="$tmp/matcherfail-bin"; mkdir -p "$mf_bin"
+mf_marker="$tmp/matcherfail.fired"
+REAL_AWK=$(command -v awk)
+cat >"$mf_bin/awk" <<EOF
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    $VICTIM|*/$VICTIM) : >"$mf_marker"; exit 1 ;;
+  esac
+done
+exec "$REAL_AWK" "\$@"
+EOF
+chmod +x "$mf_bin/awk"
+mf_rc=0
+( cd "$d" && PATH="$mf_bin:$PATH" "${BASH:-$(command -v bash)}" "$d/$GUARD_REL" ) >"$d/mf.txt" 2>&1 || mf_rc=$?
+if [ -f "$mf_marker" ] && [ -n "${REAL_AWK:-}" ]; then
+  ok "28a the awk shim really FIRED on $VICTIM (marker present): the matcher failure was forced, not assumed"
+else
+  bad "28a forced matcher failure" "the shim never fired (marker absent) or awk is not on PATH — 28b would be testing nothing"
+fi
+mf_missing=""
+for nd in "reason: matcher-failed" "$VICTIM" "UNKNOWN, not zero" "REMEDY" "verdict REFUSED"; do
+  grep -qF -- "$nd" "$d/mf.txt" || mf_missing="$mf_missing [missing: $nd]"
+done
+if [ "$mf_rc" = 3 ] && [ -z "$mf_missing" ] \
+   && ! grep -qF 'verdict NO-INCREASE' "$d/mf.txt" && ! grep -qF '0 INCREASE RECOGNISED' "$d/mf.txt"; then
+  ok "28b a FAILING matcher REFUSES by name and NAMES the unmeasured file (rc=$mf_rc) — never CLEAN, never NO-INCREASE"
+else
+  bad "28b failing matcher" "expected rc=3 naming matcher-failed and $VICTIM with no NO-INCREASE token; got rc=$mf_rc$mf_missing"
+fi
+
+# ---------------------------------------------------------------------------
+# 29. A FAILING DIGEST TOOL IS A NAMED REFUSAL, not an empty digest fed into a comparison. This
+#     path was ALREADY fail-closed before the fix — `_digest_of`'s output was shape-checked
+#     against 64 hex characters, and an empty string fails that — so this case is a REGRESSION
+#     PIN rather than a RED control: it pins that the refusal survives now that the tool's STATUS
+#     is read too, and stops a future "optimisation" that trusts the tool's output. Forced with a
+#     `sha256sum` shim that exits non-zero, with a marker proving it ran.
+# ---------------------------------------------------------------------------
+d=$(mkcase digestfail)
+df_bin="$tmp/digestfail-bin"; mkdir -p "$df_bin"
+df_marker="$tmp/digestfail.fired"
+cat >"$df_bin/sha256sum" <<EOF
+#!/usr/bin/env bash
+: >"$df_marker"
+exit 1
+EOF
+chmod +x "$df_bin/sha256sum"
+df_rc=0
+( cd "$d" && PATH="$df_bin:$PATH" "${BASH:-$(command -v bash)}" "$d/$GUARD_REL" ) >"$d/df.txt" 2>&1 || df_rc=$?
+if [ -f "$df_marker" ]; then
+  ok "29a the sha256sum shim really FIRED (marker present): the digest failure was forced, not assumed"
+else
+  bad "29a forced digest failure" "the shim never fired (marker absent) — 29b would be testing nothing"
+fi
+df_missing=""
+for nd in "reason: digest-failed" "UNKNOWN" "REMEDY" "verdict REFUSED"; do
+  grep -qF -- "$nd" "$d/df.txt" || df_missing="$df_missing [missing: $nd]"
+done
+if [ "$df_rc" = 3 ] && [ -z "$df_missing" ] && ! grep -qF 'verdict NO-INCREASE' "$d/df.txt"; then
+  ok "29b a FAILING digest tool REFUSES by name (rc=$df_rc) — no empty digest reaches the comparison"
+else
+  bad "29b failing digest tool" "expected rc=3 naming digest-failed with no NO-INCREASE token; got rc=$df_rc$df_missing"
+fi
+
+# ---------------------------------------------------------------------------
+# 30. THE SAME CLASS ONE STAGE LATER, AND THE SECOND RED CONTROL: the sort that orders the
+#     comparison records. Before the fix its status was ignored, so a failed sort left the record
+#     file EMPTY, the reader loop found no FAIL record, and a run WITH A PLANTED INCREASE printed
+#     NO-INCREASE and exited 0 — a false PASS reachable without touching the matcher at all. That
+#     is why the fix is the class and not line 243. Forced with a `sort` shim that fails ONLY for
+#     the comparison-record file, so the census normaliser (which also sorts) is untouched.
+#     RED-VERIFIED against the pre-fix guard: rc=0, `verdict NO-INCREASE`, with a PLANTED hazard
+#     sitting in the tree — the false PASS in full, and not reachable through the matcher.
+# ---------------------------------------------------------------------------
+d=$(mkcase cmpsortfail)
+printf '%s\n' "$HAZARD" >>"$d/$VICTIM"
+reindex "$d"
+cs_bin="$tmp/cmpsortfail-bin"; mkdir -p "$cs_bin"
+cs_marker="$tmp/cmpsortfail.fired"
+REAL_SORT=$(command -v sort)
+cat >"$cs_bin/sort" <<EOF
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    *cmp.unsorted) : >"$cs_marker"; exit 1 ;;
+  esac
+done
+exec "$REAL_SORT" "\$@"
+EOF
+chmod +x "$cs_bin/sort"
+cs_rc=0
+( cd "$d" && PATH="$cs_bin:$PATH" "${BASH:-$(command -v bash)}" "$d/$GUARD_REL" ) >"$d/cs.txt" 2>&1 || cs_rc=$?
+if [ -f "$cs_marker" ] && [ -n "${REAL_SORT:-}" ]; then
+  ok "30a the sort shim really FIRED on the comparison records (marker present)"
+else
+  bad "30a forced comparison-sort failure" "the shim never fired (marker absent) or sort is not on PATH — 30b would be testing nothing"
+fi
+cs_missing=""
+for nd in "reason: comparison-sort-failed" "NO-INCREASE" "REMEDY" "verdict REFUSED"; do
+  grep -qF -- "$nd" "$d/cs.txt" || cs_missing="$cs_missing [missing: $nd]"
+done
+if [ "$cs_rc" = 3 ] && [ -z "$cs_missing" ] && ! grep -qF 'verdict NO-INCREASE' "$d/cs.txt"; then
+  ok "30b a FAILING comparison sort REFUSES by name (rc=$cs_rc) — a planted INCREASE can never read as NO-INCREASE"
+else
+  bad "30b failing comparison sort" "expected rc=3 naming comparison-sort-failed with no NO-INCREASE VERDICT; got rc=$cs_rc$cs_missing"
 fi
 
 printf '\npassed=%d failed=%d cases=%d (floor %d)\n' "$pass" "$fail" "$cases" "$CASE_FLOOR"
