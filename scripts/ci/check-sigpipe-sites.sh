@@ -312,7 +312,9 @@ fi
 : >"$_tmp/now"
 CUR_FILES=0
 CUR_SITES=0
+SUBJECTS_SCANNED=0
 while IFS= read -r f; do
+  SUBJECTS_SCANNED=$((SUBJECTS_SCANNED + 1))
   # THE REPORTED FALSE PASS (roborev job 139). This status was ignored: a failing matcher left an
   # EMPTY census, `grep -c .` said 0, and the subject read CLEAN. An UNMEASURED file is UNKNOWN,
   # never zero, so it is a REFUSAL naming the file — there is no per-file skip.
@@ -356,6 +358,15 @@ while IFS= read -r f; do
     CUR_SITES=$((CUR_SITES + n))
   fi
 done <"$_tmp/subjects"
+# EVERY ENUMERATED SUBJECT MUST HAVE BEEN SCANNED, and this is a DIFFERENT assertion from the
+# recount above: that one proved the LIST holds every subject, this one proves the LOOP READ every
+# record of it. A read that stops early (an I/O error on the redirect, a clobber between the
+# recount and here) leaves the skipped files unscanned — and an unscanned file contributes no
+# census record, so it reads exactly like a clean one and a new site in it ships as NO-INCREASE.
+# Both counters are in-shell and neither can be corrupted by a failing read.
+[ "$SUBJECTS_SCANNED" = "$N_SUBJECTS" ] || refuse "subjects-unscanned" \
+  "$N_SUBJECTS subject(s) were enumerated but only $SUBJECTS_SCANNED were scanned, so the unscanned files were never measured — and an unmeasured file reads CLEAN, so a new site in one of them would ship as NO-INCREASE" \
+  "re-run; if it persists, check TMPDIR=${TMPDIR:-/tmp} for free space — an unscanned subject is never a clean one"
 # THE CENSUS FILE MUST HOLD EVERY RECORD THE LOOP COUNTED. A `>>` that silently fails (a full
 # disk) would drop a subject from the census, and a subject ABSENT from the census compares as
 # IMPROVED — a non-failing observation. So the file is re-counted against the in-shell counter,
@@ -551,10 +562,16 @@ printf 'SIGPIPE-SITES: baseline PARSED %d entr%s, %d recorded match(es) (floor %
 # bash then renders. awk's own arrays are used here — the bash-3.2 constraint is about bash.
 # Output is sorted, so a diagnostic is deterministic run to run.
 if ! awk -v base="$_tmp/base" -v now="$_tmp/now" -v subj="$_tmp/subjects" '
-    FILENAME == base { b[$1] = $2; bh[$1] = $3; next }
-    FILENAME == now  { n[$1] = $2; nh[$1] = $3; next }
-    FILENAME == subj { s[$0] = 1;  next }
+    FILENAME == base { b[$1] = $2; bh[$1] = $3; nb++; next }
+    FILENAME == now  { n[$1] = $2; nh[$1] = $3; nn++; next }
+    FILENAME == subj { s[$0] = 1;  ns++; next }
     END {
+      # THE INPUTS ARE ACCOUNTED FOR, NOT ASSUMED. awk reports how many records it actually read
+      # from each set so bash can compare them against the counters that produced them: a short
+      # read here would silently shrink the comparison (a subject missing from `subj` becomes a
+      # non-failing INFO-GONE, a census record missing from `now` disappears from the FAIL scan)
+      # and the verdict would read clean over a set nobody measured.
+      print "STAT " nb + 0 " " nn + 0 " " ns + 0
       for (p in n) {
         if (!(p in b))            { print "FAIL-NEW " p " " n[p]; continue }
         if (n[p] + 0 > b[p] + 0)  { print "FAIL-INC " p " " n[p] " " b[p]; continue }
@@ -682,6 +699,7 @@ INCREASED=0
 NEWFILES=0
 SWAPPED=0
 RECORDS_READ=0
+STAT_SEEN=0
 : >"$_tmp/msg.fail"
 : >"$_tmp/msg.info"
 while IFS= read -r rec; do
@@ -710,6 +728,18 @@ while IFS= read -r rec; do
         "$rp" "$rn" "${rhn:0:12}" "${rhb:0:12}" >>"$_tmp/msg.fail"
       _swap_report "$rp" "$rhb"
       ;;
+    STAT)
+      # The comparison's INPUT ACCOUNTING (emitted once by the awk END block). Each number is the
+      # record count awk really read from one of the three sets; each must equal the in-shell
+      # counter that produced that set, or the comparison ran over less material than the verdict
+      # claims — the class's shape one stage further on.
+      sb=${rest%% *}; srt=${rest#* }; sn=${srt%% *}; ss=${srt##* }
+      STAT_SEEN=$((STAT_SEEN + 1))
+      [ "$sb" = "$B_ENTRIES" ] && [ "$sn" = "$CUR_FILES" ] && [ "$ss" = "$N_SUBJECTS" ] || \
+        refuse "comparison-input-truncated" \
+          "the comparison read $sb baseline record(s), $sn census record(s) and $ss subject record(s), but $B_ENTRIES / $CUR_FILES / $N_SUBJECTS were measured, so it compared less material than this run claims to have examined" \
+          "check TMPDIR=${TMPDIR:-/tmp} for free space, then re-run; the three pairs must be EQUAL"
+      ;;
     INFO-GONE)
       printf 'BASELINE FILE GONE: %s is in the baseline but is no longer a tracked subject (fixed, renamed or deleted)\n' "$rest" >>"$_tmp/msg.info"
       ;;
@@ -726,6 +756,12 @@ while IFS= read -r rec; do
 done <"$_tmp/cmp"
 # EVERY EMITTED RECORD MUST HAVE BEEN READ. A read that stops early (an I/O error on the redirect)
 # would drop FAIL records and the run would print NO-INCREASE.
+# AND THE INPUT ACCOUNTING MUST HAVE BEEN EMITTED AND READ EXACTLY ONCE. Its absence would mean
+# the comparison's END block never completed (or its record was dropped), so nothing verified that
+# the comparison saw the whole census — an unaccounted comparison is never a pass.
+[ "$STAT_SEEN" = 1 ] || refuse "comparison-unaccounted" \
+  "the comparison emitted its input accounting $STAT_SEEN time(s) rather than exactly once, so it is UNKNOWN whether it compared the whole census against the whole baseline" \
+  "re-run; if it persists, fix the awk/reader pair in scripts/ci/check-sigpipe-sites.sh"
 [ "$RECORDS_READ" = "$CMP_RECORDS" ] || refuse "comparison-unread" \
   "$CMP_RECORDS comparison record(s) were measured but only $RECORDS_READ were read, so at least one verdict was never rendered — and an unrendered FAIL reads as NO-INCREASE" \
   "re-run; an unread record is never a pass"
