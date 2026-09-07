@@ -50,10 +50,16 @@ readme = "../README.md"
 # fixture is `must_run`, #3220), so a packaged copy without the fixture would always
 # panic. Three instances in three lanes says the narrow per-file key is a pattern each
 # lane pays for and not a fix; #3677 still owns the class-wide call.
+# issue_4114_vector_float_cassandra_golden.rs JOINS the same class for the same reason,
+# and is the fourth instance: it resolves `test-data/fixtures/issue_4114/` from
+# `CARGO_MANIFEST_DIR`'s PARENT and panics on an unreadable keyspace dir (the committed
+# Cassandra-written vector fixture is `must_run`, #3220), so a packaged copy without the
+# fixture would always panic. Same narrow per-file key; #3677 still owns the class-wide call.
 exclude = [
     "tests/issue_3358_bti_query_token_bound.rs",
     "tests/issue_3747_empty_map_key.rs",
     "tests/issue_3722_udt_field_type_fidelity.rs",
+    "tests/issue_4114_vector_float_cassandra_golden.rs",
 ]
 
 # docs.rs build: document the commonly used features.
