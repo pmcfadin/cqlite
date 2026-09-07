@@ -28,6 +28,19 @@ use crate::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyPar
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CellPathComponent {
     /// A `map<K,V>`'s KEY (`MapType.nameComparator()` == the keys type).
+    ///
+    /// WRITE-SIDE ONLY, and gated to say so. Its sole constructor is
+    /// `writer::data_writer::cell_path`; the READ path constructs
+    /// [`Self::SetElement`] only, because the map read route keeps its own
+    /// marshal-over-schema precedence rule (#3612 R7/R8, authority
+    /// `SerializationHeader.getType`) rather than resolving from the declared
+    /// container. Under `--no-default-features` the `write-support` default
+    /// vanishes, `pub mod writer` with it, and this variant would be
+    /// constructed by nothing. Gated rather than `allow(dead_code)`-ed: this
+    /// module's sibling records that a conditional allow "would silence
+    /// nothing and merely assert something false"
+    /// (`row_decoder/udt/type_string.rs`).
+    #[cfg(feature = "write-support")]
     MapKey,
     /// A `set<T>`'s ELEMENT (`SetType.nameComparator()` == the elements type).
     SetElement,
@@ -131,6 +144,7 @@ pub(crate) fn resolve_declared_cell_path_type(
 ) -> Option<CqlType> {
     fn pick(ty: CqlType, component: CellPathComponent) -> Option<CqlType> {
         match (ty, component) {
+            #[cfg(feature = "write-support")]
             (CqlType::Map(key, _), CellPathComponent::MapKey) => Some(*key),
             (CqlType::Set(element), CellPathComponent::SetElement) => Some(*element),
             _ => None,
@@ -155,6 +169,11 @@ mod tests {
     /// element/key name — a legal `TypeParser` spelling
     /// (`TypeParser.java:450`) that the component-name classifiers cannot
     /// resolve and this one can, because it still has the marshal CONTEXT.
+    ///
+    /// The MAP half of every case here lives in the `write_support` module
+    /// below: [`CellPathComponent::MapKey`] is write-side only, so under
+    /// `--no-default-features` it does not exist to assert about. The SET half
+    /// is unconditional — it is the read path's own case.
     #[test]
     fn a_bare_inner_marshal_name_resolves_from_the_complete_declared_type() {
         assert_eq!(
@@ -164,17 +183,10 @@ mod tests {
             ),
             Some(CqlType::Int)
         );
-        assert_eq!(
-            resolve_declared_cell_path_type(
-                "org.apache.cassandra.db.marshal.MapType(Int32Type,Int32Type)",
-                CellPathComponent::MapKey
-            ),
-            Some(CqlType::Int)
-        );
     }
 
     #[test]
-    fn both_spellings_resolve_and_the_component_kinds_do_not_cross() {
+    fn both_spellings_resolve_a_set_element() {
         for (declared, expected) in [
             ("set<int>", CqlType::Int),
             (
@@ -188,17 +200,8 @@ mod tests {
                 Some(expected.clone()),
                 "{declared} as a SET element"
             );
-            // A set declaration has no MAP KEY, and vice versa.
-            assert_eq!(
-                resolve_declared_cell_path_type(declared, CellPathComponent::MapKey),
-                None,
-                "{declared} must not resolve a MAP KEY"
-            );
         }
-        assert_eq!(
-            resolve_declared_cell_path_type("map<bigint,text>", CellPathComponent::MapKey),
-            Some(CqlType::BigInt)
-        );
+        // A MAP declaration has no SET element.
         assert_eq!(
             resolve_declared_cell_path_type("map<bigint,text>", CellPathComponent::SetElement),
             None
@@ -227,25 +230,76 @@ mod tests {
     /// component here — its empty component is the inline case owned by
     /// `require_fixed_width` (#3847/#4071).
     #[test]
-    fn frozen_and_non_collection_declarations_resolve_to_nothing() {
-        for declared in [
-            "frozen<set<int>>",
-            "org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.Int32Type))",
-            "int",
-            "list<int>",
-            "org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type)",
-            "",
-        ] {
+    fn frozen_and_non_collection_declarations_resolve_no_set_element() {
+        for declared in FROZEN_AND_NON_COLLECTION {
             assert_eq!(
                 resolve_declared_cell_path_type(declared, CellPathComponent::SetElement),
                 None,
                 "{declared} must resolve no SET element"
             );
+        }
+    }
+
+    /// Shared by the set-side test above and its map-side sibling, so the two
+    /// halves cannot drift apart on which declarations they cover.
+    const FROZEN_AND_NON_COLLECTION: &[&str] = &[
+        "frozen<set<int>>",
+        "org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.Int32Type))",
+        "int",
+        "list<int>",
+        "org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type)",
+        "",
+    ];
+
+    /// The MAP-KEY half. [`CellPathComponent::MapKey`] is constructed only by
+    /// `writer::data_writer::cell_path`, so it exists only under
+    /// `write-support` — and these assertions, including the
+    /// kinds-do-not-cross direction, are only meaningful where it does.
+    #[cfg(feature = "write-support")]
+    mod write_support {
+        use super::*;
+
+        #[test]
+        fn a_bare_inner_marshal_name_resolves_a_map_key() {
             assert_eq!(
-                resolve_declared_cell_path_type(declared, CellPathComponent::MapKey),
-                None,
-                "{declared} must resolve no MAP key"
+                resolve_declared_cell_path_type(
+                    "org.apache.cassandra.db.marshal.MapType(Int32Type,Int32Type)",
+                    CellPathComponent::MapKey
+                ),
+                Some(CqlType::Int)
             );
+        }
+
+        #[test]
+        fn the_component_kinds_do_not_cross() {
+            // A SET declaration has no MAP KEY ...
+            for declared in [
+                "set<int>",
+                "org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.Int32Type)",
+                "set<decimal>",
+            ] {
+                assert_eq!(
+                    resolve_declared_cell_path_type(declared, CellPathComponent::MapKey),
+                    None,
+                    "{declared} must not resolve a MAP KEY"
+                );
+            }
+            // ... and a MAP declaration does.
+            assert_eq!(
+                resolve_declared_cell_path_type("map<bigint,text>", CellPathComponent::MapKey),
+                Some(CqlType::BigInt)
+            );
+        }
+
+        #[test]
+        fn frozen_and_non_collection_declarations_resolve_no_map_key() {
+            for declared in FROZEN_AND_NON_COLLECTION {
+                assert_eq!(
+                    resolve_declared_cell_path_type(declared, CellPathComponent::MapKey),
+                    None,
+                    "{declared} must resolve no MAP key"
+                );
+            }
         }
     }
 }
