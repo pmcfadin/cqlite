@@ -6,7 +6,13 @@
 # rather than shipping. Nothing about a green ratchet run demonstrates that: a guard that
 # enumerates nothing, or whose matcher matches nothing, or that skips an unparsed baseline, reads
 # exactly the same as one that works. So every FAILING and every REFUSING path is driven here on
-# PLANTED input, and the two central cases assert the guard EXITS NON-ZERO **and NAMES THE FILE**.
+# PLANTED input, and the central cases assert the guard EXITS NON-ZERO **and NAMES THE FILE**.
+#
+# THE SWAP CASE (24) IS THE ONE TO READ FIRST. The baseline recorded per-file COUNTS only, so
+# removing one matching line and adding a DIFFERENT hazardous one left the count unchanged and
+# PASSed (roborev job 138). Case 24a proves the fixture's count really is unchanged, so 24b
+# cannot be passing for the count reason; case 25 is its control, pinning that pure MOTION still
+# passes — the property that keeps the baseline free of line numbers.
 #
 # NO TRACKED FILE IS EVER MUTATED. Each case gets its own scratch GIT repository under $tmp,
 # built by copying the git-tracked scripts/**/*.sh set plus the committed baseline and running
@@ -29,7 +35,7 @@ MATCHER_REL="scripts/tests/lib/sigpipe-matcher.sh"
 
 # Case floor (CLAUDE.md #3544): a span-replacing edit that silently deletes cases yields a green
 # tally over a shrunken suite. ENFORCED. May only go DOWN with a stated reason.
-CASE_FLOOR=24
+CASE_FLOOR=31
 
 pass=0; fail=0; cases=0
 ok()  { cases=$((cases+1)); pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
@@ -41,6 +47,24 @@ trap 'rm -rf "$tmp"' EXIT
 PIPE='|'
 # The exact #4061 shape, assembled so it is not a literal in this file.
 HAZARD="line=\$(printf '%s\\n' \"\$text\" $PIPE grep -m1 \"^\$k: \") $PIPE$PIPE return 0"
+# A SECOND, TEXTUALLY DIFFERENT hazard of the same shape. The swap case (24) needs one match to
+# replace another so the COUNT is unchanged and only the content DIGEST moves.
+HAZARD2="v=\$(printf '%s\\n' \"\$other\" $PIPE head -1)"
+# A syntactically valid 64-hex digest for the baseline-grammar cases, so each one exercises the
+# check it names rather than tripping the digest-shape check first.
+OKHASH=0000000000000000000000000000000000000000000000000000000000000000
+
+# THE ONE MATCHER, SOURCED — never a second copy (case 20 pins that there is exactly one
+# definer). The swap and motion cases must MEASURE the planted file's match count to prove the
+# property they claim, and this is the only sanctioned way to do it.
+# shellcheck source=scripts/tests/lib/sigpipe-matcher.sh
+if ! . "$REPO_ROOT/$MATCHER_REL" 2>/dev/null || ! declare -F sigpipe_violations >/dev/null 2>&1; then
+  printf 'FAIL could not source %s — nothing below could measure anything\n' "$MATCHER_REL"
+  exit 1
+fi
+n_matches() { sigpipe_violations "$1" >"$tmp/nm.txt" 2>/dev/null; grep -c . "$tmp/nm.txt" || true; }
+first_match_lineno() { sigpipe_violations "$1" >"$tmp/fm.txt" 2>/dev/null; awk -F: 'NR==1{print $1}' "$tmp/fm.txt"; }
+match_linenos() { sigpipe_violations "$1" >"$tmp/ml.txt" 2>/dev/null; awk -F: '{ printf "%s ", $1 }' "$tmp/ml.txt"; }
 
 # ---------------------------------------------------------------------------
 # 0. The scratch root must be OUTSIDE any git repository, or the "not a git repo" case would
@@ -76,7 +100,14 @@ else
   printf '\npassed=%d failed=%d cases=%d\n' "$pass" "$fail" "$cases"
   exit 1
 fi
-git -C "$PRISTINE" init -q >/dev/null 2>&1 && git -C "$PRISTINE" add -A >/dev/null 2>&1 || {
+# A COMMIT, not just an index: the guard's swap diagnostic recovers the REMOVED line from the
+# file at HEAD and declares the difference EXACT only when HEAD reproduces the baseline digest.
+# Without a HEAD that branch could never be exercised, and case 24 would only ever see the
+# indicative fallback.
+git -C "$PRISTINE" init -q >/dev/null 2>&1 \
+  && git -C "$PRISTINE" add -A >/dev/null 2>&1 \
+  && git -C "$PRISTINE" -c user.email=t@example.invalid -c user.name=t \
+       commit -q -m 'scratch fixture' >/dev/null 2>&1 || {
   bad "1b scratch repo" "git init/add failed in $PRISTINE"
   printf '\npassed=%d failed=%d cases=%d\n' "$pass" "$fail" "$cases"
   exit 1
@@ -177,7 +208,7 @@ reindex "$d"
 regen_rc=0
 ( cd "$d" && bash "$d/$GUARD_REL" --regenerate ) >"$d/regen.txt" 2>&1 || regen_rc=$?
 recheck_rc=$(run_guard "$d")
-if [ "$regen_rc" = 0 ] && [ "$recheck_rc" = 0 ] && grep -q "^$VICTIM 3$" "$d/$BASE_REL" \
+if [ "$regen_rc" = 0 ] && [ "$recheck_rc" = 0 ] && grep -qE "^$VICTIM 3 [0-9a-f]{64}$" "$d/$BASE_REL" \
    && grep -qF 'verdict REGENERATED' "$d/regen.txt"; then
   ok "8 --regenerate records the planted site (bump-version.sh 2 -> 3) and the re-check is clean"
 else
@@ -195,18 +226,28 @@ expect 9 "missing baseline REFUSES (fail-closed)" "$d" 3 "reason: no-baseline" "
 d=$(mkcase ungram);   printf 'this line is not a baseline record\n' >>"$d/$BASE_REL"
 expect 10 "an UNRECOGNISED baseline line is REFUSED, not skipped" "$d" 3 "reason: baseline-grammar" "REMEDY"
 
-d=$(mkcase dupe);     printf '%s\n' "$VICTIM 9" >>"$d/$BASE_REL"
+d=$(mkcase dupe);     printf '%s\n' "$VICTIM 9 $OKHASH" >>"$d/$BASE_REL"
 expect 11 "a DUPLICATE baseline entry is REFUSED" "$d" 3 "reason: baseline-duplicate" "$VICTIM"
 
-d=$(mkcase zerocount); printf '%s\n' "$GUARD_REL 0" >>"$d/$BASE_REL"
+d=$(mkcase zerocount); printf '%s\n' "$GUARD_REL 0 $OKHASH" >>"$d/$BASE_REL"
 expect 12 "a ZERO count is not a record and is REFUSED" "$d" 3 "reason: baseline-grammar"
 
 d=$(mkcase truncated)
 { grep '^#' "$PRISTINE/$BASE_REL"; grep '^scripts/' "$PRISTINE/$BASE_REL" | head -3; } >"$d/$BASE_REL"
 expect 13 "a TRUNCATED baseline trips the entry floor" "$d" 3 "reason: baseline-floor" "REMEDY"
 
-d=$(mkcase badpath);  printf '/etc/passwd 3\n' >>"$d/$BASE_REL"
+d=$(mkcase badpath);  printf '/etc/passwd 3 %s\n' "$OKHASH" >>"$d/$BASE_REL"
 expect 13b "a baseline path outside scripts/**/*.sh is REFUSED" "$d" 3 "reason: baseline-grammar"
+
+# The pre-#4061 COUNT-ONLY record. It must be REFUSED, not read as "a count with an unknown
+# digest": a two-field entry tolerated silently is exactly the swap-blind state this change
+# removed (roborev job 138), reintroduced through the parser.
+d=$(mkcase twofield); printf '%s\n' "scripts/zz-two-field.sh 3" >>"$d/$BASE_REL"
+expect 13c "a TWO-FIELD (pre-#4061 count-only) baseline record is REFUSED" "$d" 3 \
+  "reason: baseline-grammar" "REMEDY"
+
+d=$(mkcase badhash);  printf '%s\n' "scripts/zz-bad-hash.sh 3 not-a-sha256" >>"$d/$BASE_REL"
+expect 13d "a digest that is not 64 hex characters is REFUSED" "$d" 3 "reason: baseline-grammar"
 
 # ---------------------------------------------------------------------------
 # 14-17. EVERY MEASUREMENT REFUSAL PATH: no repo, no matcher, an INERT matcher, and a subject set
@@ -291,6 +332,109 @@ if grep -qF 'head -4 <<<"$obj_out"' "$REPO_ROOT/scripts/bootstrap-agent-machine.
   ok "23 bootstrap-agent-machine.sh reads the object-store lines via a herestring"
 else
   bad "23 bootstrap-agent-machine.sh" "the #4061 site is not the expected \`head -4 <<<\"\$obj_out\"\` form"
+fi
+
+
+# ---------------------------------------------------------------------------
+# 24. THE SWAP — the regression the aggregate content hash exists for (roborev job 138, triaged
+#     BLOCKER). Remove one matching line from a baseline file and add a DIFFERENT hazardous one:
+#     the per-file COUNT is unchanged, so the count-only ratchet PASSed and a new defect shipped
+#     green. 24a asserts BY CONSTRUCTION that the count really is unchanged — without it 24b
+#     could be passing for the count reason and never testing the swap at all.
+# ---------------------------------------------------------------------------
+d=$(mkcase swap)
+sw_before=$(n_matches "$d/$VICTIM")
+sw_ln=$(first_match_lineno "$d/$VICTIM")
+awk -v skip="$sw_ln" 'NR != skip' "$d/$VICTIM" >"$tmp/swap.body" 2>/dev/null
+{ cat "$tmp/swap.body"; printf '%s\n' "$HAZARD2"; } >"$d/$VICTIM"
+sw_after=$(n_matches "$d/$VICTIM")
+reindex "$d"
+sw_rc=$(run_guard "$d")
+if [ -n "${sw_before:-}" ] && [ "${sw_before:-0}" -ge 1 ] && [ "$sw_before" = "$sw_after" ]; then
+  ok "24a the swap fixture leaves $VICTIM's COUNT UNCHANGED ($sw_before -> $sw_after): only the matched-line SET moved"
+else
+  bad "24a swap fixture is a real swap" "count went $sw_before -> $sw_after; 24b would then be testing an INCREASE, not a swap"
+fi
+sw_missing=""
+for nd in "SWAP: $VICTIM" "verdict INCREASE" "ADDED:" "REMOVED:" "EXACT" "--regenerate"; do
+  grep -qF -- "$nd" "$d/out.txt" || sw_missing="$sw_missing [missing: $nd]"
+done
+if [ "$sw_rc" = 1 ] && [ -z "$sw_missing" ]; then
+  ok "24b a SWAP at an unchanged count REDS, NAMES the file and names the added/removed lines (rc=$sw_rc)"
+else
+  bad "24b a SWAP REDS and is actionable" "expected rc=1 with all needles; got rc=$sw_rc$sw_missing"
+fi
+
+# ---------------------------------------------------------------------------
+# 25. MOTION-INVARIANCE CONTROL — the property the whole design rests on, and the reason the
+#     digest is taken over SORTED, NORMALISED text with the line numbers DISCARDED. Reorder the
+#     matched lines and re-indent one of them so EVERY match's line number moves: the multiset is
+#     unchanged, so the ratchet must still PASS. This is what stops a future "fix" from putting
+#     line numbers back into the hashed material (#4061 pinned :3329 and it drifted to :5392 in
+#     two days).
+# ---------------------------------------------------------------------------
+d=$(mkcase motion)
+mo_before=$(n_matches "$d/$VICTIM")
+mo_lines_before=$(match_linenos "$d/$VICTIM")
+awk '{ a[NR] = $0 }
+     END { print "# a non-matching line, added above every site"
+           for (i = NR; i >= 1; i--) print a[i] }' "$d/$VICTIM" >"$tmp/motion.body"
+mo_reind=$(first_match_lineno "$tmp/motion.body")
+awk -v t="${mo_reind:-0}" 'NR == t { print "        " $0; next } { print }' "$tmp/motion.body" >"$d/$VICTIM"
+mo_after=$(n_matches "$d/$VICTIM")
+mo_lines_after=$(match_linenos "$d/$VICTIM")
+reindex "$d"
+mo_rc=$(run_guard "$d")
+if [ "$mo_before" = "$mo_after" ] && [ "$mo_lines_before" != "$mo_lines_after" ] \
+   && [ "$mo_rc" = 0 ] && grep -qF 'verdict NO-INCREASE' "$d/out.txt" \
+   && grep -qF '0 INCREASE RECOGNISED' "$d/out.txt" && ! grep -qF "SWAP: $VICTIM" "$d/out.txt"; then
+  ok "25 REORDERED + RE-INDENTED sites (line numbers $mo_lines_before-> $mo_lines_after) still PASS: the digest is motion-proof"
+else
+  bad "25 motion-invariance" "count $mo_before -> $mo_after, linenos '$mo_lines_before' -> '$mo_lines_after', rc=$mo_rc (want 0 with NO-INCREASE and moved linenos)"
+fi
+
+# ---------------------------------------------------------------------------
+# 26. A DECREASE NEVER FAILS — and this case pins the ONE DECLARED RESIDUAL as a deliberate
+#     choice rather than an accident: the digest changes on ANY removal, so it cannot separate a
+#     pure removal from a removal-plus-addition. Here BOTH baseline sites are removed and ONE new
+#     hazard is added (2 -> 1). It must PASS and be reported as IMPROVED. A ratchet that reds on
+#     a net improvement is one agents route around; closing this would need matched-line TEXT in
+#     the baseline, i.e. the curated, motion-sensitive list this design refuses.
+# ---------------------------------------------------------------------------
+d=$(mkcase netdecrease)
+{ printf '#!/usr/bin/env bash\n'; printf '%s\n' "$HAZARD2"; } >"$d/$VICTIM"
+nd_before=$(n_matches "$d/$VICTIM")
+reindex "$d"
+if [ "${nd_before:-0}" -eq 1 ]; then
+  expect 26 "a NET DECREASE that also ADDS a line still PASSes (the declared residual)" "$d" 0 \
+    "IMPROVED: $VICTIM" "verdict NO-INCREASE"
+else
+  bad "26 net-decrease fixture" "planted file has $nd_before match(es), expected exactly 1"
+fi
+
+# ---------------------------------------------------------------------------
+# 27. AN ABSENT DIGEST TOOL IS A NAMED REFUSAL, never a SKIP and never a silent fall back to
+#     comparing counts alone — a degraded mode that quietly restores the false PASS would be
+#     worse than the bug this change fixes. Driven with a PATH holding git and awk (so the
+#     refusal cannot be one of those, and `dirname`, which the guard uses to locate itself) and
+#     NEITHER sha256sum NOR shasum.
+# ---------------------------------------------------------------------------
+d=$(mkcase nodigest)
+nodigest_bin="$tmp/nodigest-bin"
+mkdir -p "$nodigest_bin"
+nd_tools_ok=1
+for t in dirname git awk; do
+  tp=$(command -v "$t") || nd_tools_ok=0
+  [ -n "${tp:-}" ] && ln -s "$tp" "$nodigest_bin/$t" 2>/dev/null || nd_tools_ok=0
+done
+BASH_BIN="${BASH:-$(command -v bash)}"
+dg_rc=0
+( cd "$d" && PATH="$nodigest_bin" "$BASH_BIN" "$d/$GUARD_REL" ) >"$d/dg.txt" 2>&1 || dg_rc=$?
+if [ "$nd_tools_ok" = 1 ] && [ "$dg_rc" = 3 ] && grep -qF 'reason: no-sha256' "$d/dg.txt" \
+   && grep -qF 'REMEDY' "$d/dg.txt" && grep -qF 'verdict REFUSED' "$d/dg.txt"; then
+  ok "27 no sha256 tool on PATH REFUSES by name (rc=$dg_rc) — no count-only fallback"
+else
+  bad "27 absent digest tool" "expected rc=3 naming no-sha256 with a REMEDY; got rc=$dg_rc (git/awk symlinks ok=$nd_tools_ok)"
 fi
 
 printf '\npassed=%d failed=%d cases=%d (floor %d)\n' "$pass" "$fail" "$cases" "$CASE_FLOOR"
