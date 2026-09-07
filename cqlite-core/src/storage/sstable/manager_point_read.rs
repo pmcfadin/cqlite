@@ -59,7 +59,10 @@ impl SSTableManager {
         //
         // Issue #1591: snapshot the resolved readers + the authoritative
         // `fully_qualified_match` signal and DROP the read guard before any I/O.
-        let (reader_list, fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
+        // #4159: FAIL CLOSED when any of this table's SSTables was REFUSED at
+        // open — `Ok(None)` here means "the row is absent", which an unreadable
+        // generation cannot establish.
+        let (reader_list, fully_qualified_match) = self.resolve_readers_checked(table_id).await?;
         if reader_list.is_empty() {
             // A read of a table with no candidate SSTables is still a completed read
             // operation: it consumed the resolution latency above and returned an
@@ -137,7 +140,10 @@ impl SSTableManager {
         // to a name-only check across a header-keyspace divergence; a fully-qualified
         // query resolved via the bare-name fallback keeps strict keyspace matching so
         // get() never returns another keyspace's same-named rows (issue #1321).
-        let (reader_list, fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
+        // #4159: FAIL CLOSED when any of this table's SSTables was REFUSED at
+        // open — `Ok(None)` here means "the row is absent", which an unreadable
+        // generation cannot establish.
+        let (reader_list, fully_qualified_match) = self.resolve_readers_checked(table_id).await?;
 
         // Return the first value found across all SSTables for this table
         for reader in &reader_list {

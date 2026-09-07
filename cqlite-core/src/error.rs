@@ -73,6 +73,57 @@ pub enum Error {
         source: Box<Error>,
     },
 
+    /// One or more of a table's SSTables could not be READ, so a scan of that
+    /// table cannot return a complete answer (issue #4159).
+    ///
+    /// Raised by [`SSTableManager`](crate::storage::sstable::SSTableManager)'s read
+    /// surfaces when the table being read has at least one SSTable generation whose
+    /// **open REFUSED** — a corrupt/truncated `Statistics.db`, a
+    /// SerializationHeader whose declared type cannot be decoded, an unsupported
+    /// version, an unreadable component. The refusal is recorded at construction
+    /// time (the two `SSTableManager` constructors load every discovered generation
+    /// best-effort so ONE bad file cannot render an unrelated table unreadable) and
+    /// consulted by every read of that table.
+    ///
+    /// # Why this is its OWN variant rather than a `Corruption` message
+    ///
+    /// The constructors used to answer a per-file open failure with a
+    /// `tracing::warn!` and nothing else: the generation was silently absent from
+    /// the reader map, and the scan's `reader_list.is_empty()` guard then returned
+    /// `Ok(Vec::new())`. A successful empty read is indistinguishable from a table
+    /// that genuinely holds no rows, so no caller, test or supervisor could detect
+    /// it — the #3721 swallow class at SSTable granularity. A caller that wants to
+    /// tell "empty table" from "unreadable table" must be able to MATCH on the
+    /// discriminant, never on message text (issue #28: no heuristics).
+    ///
+    /// # `source` is the ORIGINAL open failure, by reference count
+    ///
+    /// The refusal is CARRIED, not re-synthesised: `source` is an
+    /// [`Arc`](std::sync::Arc) over the very `Error` the reader open produced, so
+    /// the operator (and a programmatic caller walking
+    /// [`std::error::Error::source`]) sees WHY the file was refused and not merely
+    /// that it was. `Arc` rather than `Box` because [`Error`] is deliberately not
+    /// [`Clone`] (it carries boxed `dyn Error` sources) while the manager's refusal
+    /// ledger must be able to report the SAME refusal to every subsequent read —
+    /// re-wrapping the rendered message on each report would discard the cause,
+    /// which is the mistake this variant exists to stop.
+    #[error(
+        "table '{table}': {refused} of its SSTable(s) could not be read, so this read \
+         would silently omit their rows; first refusal at {}: {source}",
+        path.display()
+    )]
+    UnreadableSSTable {
+        /// The `table_readers` key of the table being read.
+        table: String,
+        /// Path of the FIRST refused `Data.db` generation reported here.
+        path: std::path::PathBuf,
+        /// How many of the table's generations were refused (>= 1).
+        refused: usize,
+        /// The original reader-open failure for `path`.
+        #[source]
+        source: std::sync::Arc<Error>,
+    },
+
     /// Schema validation errors
     #[error("Schema error: {0}")]
     Schema(String),
@@ -349,6 +400,26 @@ impl Error {
         }
     }
 
+    /// Report that a table cannot be read completely because at least one of its
+    /// SSTables was refused at open (issue #4159).
+    ///
+    /// `source` is the ORIGINAL refusal, shared by reference count — never
+    /// rendered to a string: the caller matching on [`Error::UnreadableSSTable`]
+    /// walks `source` for the real cause.
+    pub fn unreadable_sstable(
+        table: impl Into<String>,
+        path: impl Into<std::path::PathBuf>,
+        refused: usize,
+        source: std::sync::Arc<Error>,
+    ) -> Self {
+        Self::UnreadableSSTable {
+            table: table.into(),
+            path: path.into(),
+            refused,
+            source,
+        }
+    }
+
     /// Create a schema error
     pub fn schema(msg: impl Into<String>) -> Self {
         Self::Schema(msg.into())
@@ -514,6 +585,9 @@ impl Error {
             // A column that cannot be decoded will not decode on a retry: the
             // bytes and the declared type are both unchanged (issue #3721).
             Error::ColumnDecode { .. } => false,
+            // The refused SSTable's bytes do not change on a retry, and the
+            // manager's refusal ledger only changes at `refresh_tables`.
+            Error::UnreadableSSTable { .. } => false,
             Error::Schema(_) => false,
             Error::CqlParse(_) => false,
             Error::Configuration(_) => false,
@@ -575,6 +649,7 @@ impl Error {
             Error::Serialization { .. } => ErrorCategory::Data,
             Error::Corruption(_) => ErrorCategory::Data,
             Error::ColumnDecode { .. } => ErrorCategory::Data,
+            Error::UnreadableSSTable { .. } => ErrorCategory::Data,
             Error::Schema(_) => ErrorCategory::Schema,
             Error::CqlParse(_) => ErrorCategory::Query,
             Error::QueryExecution(_) => ErrorCategory::Query,

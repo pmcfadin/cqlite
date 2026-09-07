@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::{
-    extract_keyspace_and_table_name, extract_table_name, is_apple_double_sidecar, reader,
+    extract_keyspace_and_table_name, extract_table_name, is_apple_double_sidecar, reader, refusal,
     SSTableId, SSTableManager, MAX_SSTABLE_SCAN_DEPTH,
 };
 use crate::Result;
@@ -311,6 +311,19 @@ impl SSTableManager {
         // 5. Apply the diff under the write guards (short critical section).
         let mut readers = self.readers.write().await;
         let mut table_readers = self.table_readers.write().await;
+        let mut refused = self.refused.write().await;
+
+        // 5.0 Issue #4159: a refusal recorded at construction must stop poisoning
+        //     its table once the offending generation is GONE from disk, or the
+        //     table stays permanently unreadable after the operator removed the bad
+        //     file. Every path is compared in the SAME canonical form the reader
+        //     diff below uses, from the precomputed cache — zero syscalls under the
+        //     guard. A refused generation still on disk KEEPS its entry: step 4 is
+        //     fail-closed, so this refresh never re-opened it and nothing has
+        //     changed about its readability.
+        refusal::retain_present(&mut refused, |p| {
+            discovered_canon.contains(&canon_of(p))
+        });
 
         // 5a. Removal: retain only readers still present on disk. Every
         //     canonical path below comes from the precomputed cache — the

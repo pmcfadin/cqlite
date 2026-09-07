@@ -5,11 +5,25 @@
 //! and [`SSTableManager::new_from_discovered_paths`] (pre-discovered table dirs) —
 //! together with the best-effort load routines they drive. Grouping them here puts
 //! the boundary checks and the load behaviour those checks exist to protect against
-//! (a per-file reader error is LOGGED AND SKIPPED, so nothing else would report a
-//! systematically failing open) in one readable place.
+//! in one readable place.
+//!
+//! # A per-file open error is SKIPPED but no longer SILENT (issue #4159)
+//!
+//! Both routines below still load best-effort: a generation whose
+//! `SSTableReader::open` fails is skipped so ONE corrupt file cannot render an
+//! unrelated table unreadable. What changed is that the refusal is now RECORDED on
+//! the manager's [`refusal`] ledger, keyed by the table the generation belongs to
+//! and carrying the original [`Error`](crate::Error). Every read surface of that
+//! table then fails closed with `Error::UnreadableSSTable`.
+//!
+//! Before #4159 the `Err` arm was a `tracing::warn!` and nothing else, so the
+//! generation was merely absent from the reader map and the read surfaces'
+//! `reader_list.is_empty()` guard turned that absence into `Ok(Vec::new())` — a
+//! scan over an unreadable SSTable reported SUCCESS with zero rows, which no
+//! caller, test or supervisor can detect.
 
 use super::{
-    build_chunk_cache, is_apple_double_sidecar, refresh, SSTableId, SSTableManager,
+    build_chunk_cache, is_apple_double_sidecar, refresh, refusal, SSTableId, SSTableManager,
     MAX_SSTABLE_SCAN_DEPTH,
 };
 use crate::platform::Platform;
@@ -32,20 +46,22 @@ impl SSTableManager {
         // Reject an out-of-range `direct_io_memory_fraction` before any
         // filesystem work (#1696 roborev r3 F2). This constructor is public, so
         // it is a boundary in its own right — and `load_existing_sstables`
-        // treats a per-file reader-open error as best-effort (log and skip), so
-        // without this an invalid fraction would build a manager holding ZERO
-        // readers and report success. One rule, one definition:
-        // `validated_direct_io_memory_fraction`.
+        // treats a per-file reader-open error as best-effort (skip, and since
+        // #4159 record), so without this an invalid fraction would build a
+        // manager holding ZERO readers and report success. One rule, one
+        // definition: `validated_direct_io_memory_fraction`.
         config.storage.validated_direct_io_memory_fraction()?;
 
         let base_path = path.to_path_buf();
         let readers = Arc::new(RwLock::new(HashMap::new()));
         let table_readers = Arc::new(RwLock::new(HashMap::new()));
+        let refused = Arc::new(RwLock::new(refusal::RefusalLedger::new()));
 
         let manager = Self {
             base_path,
             readers,
             table_readers,
+            refused,
             platform,
             config: config.clone(),
             discovery_source: refresh::DiscoverySource::BasePath,
@@ -91,9 +107,13 @@ impl SSTableManager {
     /// Returns an error if the configuration is invalid (an out-of-range
     /// `storage.direct_io_memory_fraction`, checked before any filesystem work),
     /// or if any of the specified directories cannot be read.
-    /// Individual SSTable loading errors are logged but do not fail the entire operation —
-    /// which is exactly why a config defect must be rejected here rather than left
-    /// to the reader opens it would silently swallow (#1696).
+    ///
+    /// An individual SSTable's open error does NOT fail this constructor — which is
+    /// exactly why a config defect must be rejected here rather than left to the
+    /// reader opens it would swallow (#1696) — but it is no longer discarded: it is
+    /// recorded on the refusal ledger, and every subsequent read of THAT table
+    /// returns `Error::UnreadableSSTable` naming the cause (#4159). Reads of other
+    /// tables are unaffected.
     ///
     /// # Example
     ///
@@ -139,11 +159,13 @@ impl SSTableManager {
         let base_path = storage_path.to_path_buf();
         let readers = Arc::new(RwLock::new(HashMap::new()));
         let table_readers = Arc::new(RwLock::new(HashMap::new()));
+        let refused = Arc::new(RwLock::new(refusal::RefusalLedger::new()));
 
         let manager = Self {
             base_path,
             readers,
             table_readers,
+            refused,
             platform: platform.clone(),
             config: config.clone(),
             discovery_source: refresh::DiscoverySource::TableDirs(table_dirs.clone()),
@@ -168,6 +190,7 @@ impl SSTableManager {
     async fn load_from_table_directories(&self, table_dirs: Vec<PathBuf>) -> Result<()> {
         let mut readers = self.readers.write().await;
         let mut table_readers = self.table_readers.write().await;
+        let mut refused = self.refused.write().await;
 
         tracing::debug!(
             "SSTableManager::load_from_table_directories: processing {} directories",
@@ -238,8 +261,19 @@ impl SSTableManager {
                                 }
                             }
                             Err(e) => {
-                                // Log warning but continue loading other SSTables
+                                // Issue #4159: the load stays best-effort — one
+                                // unreadable generation must not render an
+                                // UNRELATED table unreadable — but the refusal is
+                                // RECORDED against this table so every read of it
+                                // fails closed instead of reporting an empty
+                                // success. The `Error` itself is kept, never
+                                // stringified: `Error::UnreadableSSTable` carries
+                                // it as its `#[source]`.
                                 tracing::warn!("Could not load SSTable file {:?}: {}", path, e);
+                                let key = refresh::table_dir_table_key(&path).unwrap_or_else(|| {
+                                    refusal::UNATTRIBUTED_TABLE_KEY.to_string()
+                                });
+                                refusal::record(&mut refused, key, path.clone(), e);
                             }
                         }
                     }
@@ -283,6 +317,7 @@ impl SSTableManager {
 
         let mut readers = self.readers.write().await;
         let mut table_readers = self.table_readers.write().await;
+        let mut refused = self.refused.write().await;
 
         // Pre-compute for the table name fallback heuristic
         let base_dir_name = self
@@ -331,9 +366,24 @@ impl SSTableManager {
                         );
                     }
                 }
-                Err(_) => {
-                    // Skip problematic SSTable files during initialization
-                    tracing::warn!("Could not load SSTable file: {:?}", path);
+                Err(e) => {
+                    // Issue #4159: the load stays best-effort, but the refusal is
+                    // RECORDED (with its `Error`, not a message) against this
+                    // table's key so every subsequent read of it fails closed —
+                    // the reader is absent from the map, and the scan surfaces'
+                    // `reader_list.is_empty()` guard would otherwise report that
+                    // absence as an empty SUCCESS.
+                    //
+                    // The key is derived from the PATH alone: a refused open
+                    // produced no header, so the `header_table_name` last-resort
+                    // branch of `base_path_table_key` is deliberately given the
+                    // empty string (which that helper skips). When no key can be
+                    // derived at all the refusal is UNATTRIBUTED and bears on every
+                    // table — see `refusal`'s module doc.
+                    tracing::warn!("Could not load SSTable file {:?}: {}", path, e);
+                    let key = refresh::base_path_table_key(&path, &base_dir_name, "")
+                        .unwrap_or_else(|| refusal::UNATTRIBUTED_TABLE_KEY.to_string());
+                    refusal::record(&mut refused, key, path.clone(), e);
                 }
             }
         }

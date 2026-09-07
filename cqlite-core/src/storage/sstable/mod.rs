@@ -56,6 +56,8 @@ pub use reader::SSTableReader;
 /// the held reader set. Not `state_machine`-gated — meaningful for minimal builds.
 pub mod refresh;
 pub use refresh::RefreshReport;
+/// Per-table SSTable REFUSAL ledger + the fail-closed read guard (issue #4159).
+mod refusal;
 mod reverse_scan; // BIG reverse partition iteration (issue #1184); file is tombstones-gated.
 pub mod row_cell_state_machine;
 /// Cross-SSTable scan ordering: k-way merge in Cassandra token order (issue #1580).
@@ -457,6 +459,21 @@ pub struct SSTableManager {
     /// Maps table names (e.g., "simple_table") to their corresponding SSTable readers
     pub(crate) table_readers: Arc<RwLock<HashMap<String, Vec<Arc<reader::SSTableReader>>>>>,
 
+    /// SSTable generations whose OPEN REFUSED, keyed by the same table key a
+    /// successful open would have used (issue #4159).
+    ///
+    /// Both constructors load discovered generations best-effort — one corrupt file
+    /// must not render an unrelated table unreadable — so a refusal cannot simply
+    /// propagate out of `new`. It is recorded HERE instead, and every read surface
+    /// of the affected table then FAILS CLOSED with [`Error::UnreadableSSTable`]
+    /// (see [`refusal`] for the full rationale, including why a PARTIAL answer is
+    /// still a refusal). Empty in the overwhelmingly common case, and
+    /// [`refusal::check`] short-circuits on empty, so a healthy manager pays one
+    /// uncontended read-lock acquisition per read.
+    ///
+    /// [`Error::UnreadableSSTable`]: crate::Error::UnreadableSSTable
+    pub(crate) refused: Arc<RwLock<refusal::RefusalLedger>>,
+
     /// Platform abstraction
     platform: Arc<Platform>,
 
@@ -745,7 +762,9 @@ impl SSTableManager {
         // Issue #1591: snapshot the reader list and DROP the read guard before any
         // I/O. Holding it across the whole scan let one queued writer FIFO-park
         // every later point read behind the slowest in-flight scan.
-        let (reader_list, _fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
+        // #4159: FAIL CLOSED before the emptiness test — a table with a REFUSED
+        // SSTable must never be reported as an empty one.
+        let (reader_list, _fully_qualified_match) = self.resolve_readers_checked(table_id).await?;
 
         if reader_list.is_empty() {
             tracing::debug!(
@@ -1081,7 +1100,7 @@ impl SSTableManager {
 
         // Issue #1591: snapshot the reader list and DROP the read guard before any
         // I/O (bloom/BTI prune, per-candidate decode, cross-generation merge).
-        let (reader_list, _fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
+        let (reader_list, _fully_qualified_match) = self.resolve_readers_checked(table_id).await?;
         if reader_list.is_empty() {
             return Ok((Vec::new(), true));
         }
@@ -1226,7 +1245,7 @@ impl SSTableManager {
         // Format-agnostic: the operation spans a table's generations.
         let mut meter = ReadOpMeter::start(None);
 
-        let (reader_list, fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
+        let (reader_list, fully_qualified_match) = self.resolve_readers_checked(table_id).await?;
         if reader_list.is_empty() {
             return Ok((Vec::new(), false));
         }
@@ -1464,7 +1483,7 @@ impl SSTableManager {
     ) -> Result<Vec<(RowKey, ScanRow, HashMap<String, CellWriteMetadata>)>> {
         // Issue #1591: snapshot the reader list and DROP the read guard before any
         // I/O (per-reader metadata decode and cross-generation merge).
-        let (reader_list, _fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
+        let (reader_list, _fully_qualified_match) = self.resolve_readers_checked(table_id).await?;
         if reader_list.is_empty() {
             return Ok(Vec::new());
         }
@@ -1574,6 +1593,42 @@ impl SSTableManager {
         (readers, fully_qualified_match)
     }
 
+    /// [`resolve_reader_snapshot`](Self::resolve_reader_snapshot), but FAILING
+    /// CLOSED first when any SSTable of `table_id` was REFUSED at open (issue
+    /// #4159).
+    ///
+    /// # Why the check lives in the resolver and not at each guard
+    ///
+    /// Every read surface resolves its reader list through exactly one of two
+    /// helpers, and each then had its own `reader_list.is_empty()` early return to
+    /// `Ok(empty)`. Putting the check at each of those guards would (a) miss the
+    /// PARTIAL case — some generations opened, one refused, so the list is NOT
+    /// empty and the guard never fires — and (b) leave a new read surface free to
+    /// inherit the swallow by writing its own guard. Checking HERE, before the
+    /// snapshot is handed out, makes both impossible: a surface cannot obtain a
+    /// reader list without the refusal question having been answered.
+    ///
+    /// The order matters: the refusal check runs BEFORE any I/O and before the
+    /// emptiness test, so "the table is unreadable" is never reported as "the
+    /// table is empty".
+    pub(crate) async fn resolve_readers_checked(
+        &self,
+        table_id: &TableId,
+    ) -> Result<(Vec<Arc<reader::SSTableReader>>, bool)> {
+        self.ensure_readable(table_id).await?;
+        Ok(self.resolve_reader_snapshot(table_id).await)
+    }
+
+    /// `Ok(())` iff no recorded refusal bears on a read of `table_id`.
+    ///
+    /// Held in one place so the ledger's resolution rule (exact key, unqualified
+    /// fallback, plus every unattributed refusal) cannot drift from
+    /// [`resolve_reader_list`](Self::resolve_reader_list)'s.
+    pub(crate) async fn ensure_readable(&self, table_id: &TableId) -> Result<()> {
+        let refused = self.refused.read().await;
+        refusal::check(&refused, table_id.name())
+    }
+
     /// Resolve the AUTHORITATIVE partition-key shape for `table_id` from the
     /// SSTable readers' Statistics.db SerializationHeader (issue #1750).
     ///
@@ -1609,6 +1664,11 @@ impl SSTableManager {
     /// caller then keeps the honest full-scan path (all from SerializationHeaders,
     /// no heuristics — #28).
     pub async fn partition_key_shape(&self, table_id: &TableId) -> Option<PartitionKeyShape> {
+        // Deliberately the UNCHECKED resolver (#4159): this returns no rows, only the
+        // authoritative key SHAPE used to CLASSIFY a query. The read the
+        // classification then selects — `scan`, `scan_partition`, `get` — resolves
+        // through `resolve_readers_checked` and fails closed there, so refusing here
+        // would only replace one fail-closed report with a less specific one.
         let (readers, _) = self.resolve_reader_snapshot(table_id).await;
         partition_key_shape_from_headers(readers.iter().map(|r| r.header().columns.as_slice()))
     }
@@ -1624,6 +1684,18 @@ impl SSTableManager {
             *slot = Some(Arc::clone(&gate));
         }
         gate
+    }
+
+    /// [`resolve_table_readers`](Self::resolve_table_readers) with the issue #4159
+    /// refusal check applied first — the streaming surfaces' counterpart to
+    /// [`resolve_readers_checked`](Self::resolve_readers_checked).
+    #[cfg(not(feature = "tombstones"))]
+    async fn resolve_table_readers_checked(
+        &self,
+        table_id: &TableId,
+    ) -> Result<Vec<Arc<reader::SSTableReader>>> {
+        self.ensure_readable(table_id).await?;
+        Ok(self.resolve_table_readers(table_id).await)
     }
 
     /// Resolve the readers serving `table_id`, returning cloned `Arc` handles.
@@ -1774,7 +1846,9 @@ impl SSTableManager {
         schema: Option<&crate::schema::TableSchema>,
         buffer_size: usize,
     ) -> Result<reader::RowScanStream> {
-        let readers = self.resolve_table_readers(table_id).await;
+        // #4159: a streaming scan over a table with a REFUSED SSTable must fail,
+        // not end cleanly having yielded nothing.
+        let readers = self.resolve_table_readers_checked(table_id).await?;
 
         // Issue #957: keep the materializing `scan` and this streaming path in lockstep
         // ON THE SUCCESS PATH. Reuse the EXACT guard `scan` uses for cross-generation
@@ -1875,7 +1949,8 @@ impl SSTableManager {
         schema: Option<&crate::schema::TableSchema>,
         buffer_size: usize,
     ) -> Result<reader::BatchedScanStream> {
-        let readers = self.resolve_table_readers(table_id).await;
+        // #4159: same contract as `scan_stream` — see there.
+        let readers = self.resolve_table_readers_checked(table_id).await?;
 
         if readers.len() == 1 {
             if let Some(reader) = readers.into_iter().next() {

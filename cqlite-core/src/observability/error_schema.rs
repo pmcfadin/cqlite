@@ -162,9 +162,15 @@ pub(crate) fn classify(err: &Error) -> ObsErrorCategory {
         // Issue #3721: a per-column decode failure IS damaged/undecodable data at
         // the cell level — the same operator signal as `Corruption`, and never the
         // `Other` bucket, so a dashboard shows a read that failed on bad bytes.
+        // Issue #4159: an SSTable that could not be OPENED is damaged/undecodable
+        // data at file granularity — the same operator signal, one level up from
+        // `ColumnDecode`. Never `Other`: a dashboard must show a read that failed
+        // because a file was unreadable, which is precisely the event the silent
+        // `Ok(vec![])` used to hide.
         Error::Corruption(_)
         | Error::CorruptCommitLogFrame(_)
-        | Error::ColumnDecode { .. } => ObsErrorCategory::Corruption,
+        | Error::ColumnDecode { .. }
+        | Error::UnreadableSSTable { .. } => ObsErrorCategory::Corruption,
 
         Error::Schema(_) | Error::Table(_) => ObsErrorCategory::Schema,
 
