@@ -55,87 +55,22 @@
 //! not carry a sentinel.
 
 use super::*;
+use crate::storage::sstable::cell_path_component::{
+    resolve_declared_cell_path_type, CellPathComponent,
+};
 use crate::types::EmptyValueType;
 
-/// Which component of a multicell collection's declared type a cell path holds.
-///
-/// The two are the same question — Cassandra answers both with
-/// `nameComparator()` (see the module header) — so they share ONE resolver rather
-/// than two near-identical ones able to drift.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CellPathComponent {
-    /// A `map<K,V>`'s KEY (`MapType.nameComparator()` == the keys type).
-    MapKey,
-    /// A `set<T>`'s ELEMENT (`SetType.nameComparator()` == the elements type).
-    SetElement,
-}
-
-impl CellPathComponent {
-    /// The two declared-type spellings this component is resolvable from, for a
-    /// diagnostic — the message tells the caller exactly what would have worked.
-    fn declared_shapes(self) -> &'static str {
-        match self {
-            CellPathComponent::MapKey => {
-                "the CQL spelling `map<K,V>` nor the Cassandra marshal one \
-                 `org.apache.cassandra.db.marshal.MapType(K,V)`"
-            }
-            CellPathComponent::SetElement => {
-                "the CQL spelling `set<T>` nor the Cassandra marshal one \
-                 `org.apache.cassandra.db.marshal.SetType(T)`"
-            }
-        }
-    }
-}
-
-/// The DECLARED type of the cell-path component of a multicell collection
-/// column, from its declared type string in EITHER spelling — `None` when the
-/// string denotes no collection of that kind at all.
-///
-/// # NEITHER resolution is written here (one fact, one parser)
-///  * the CQL spelling is [`CqlType::parse`];
-///  * the marshal spelling is
-///    [`V5CompressedLegacyParser::parse_cassandra_type`], whose name table is
-///    derived arm-by-arm from `cql3/CQL3Type.java`'s `Native` enum at
-///    `cassandra-5.0.8` and which enforces the marshal PACKAGE rule (a
-///    third-party `com.acme.Int32Type` is refused, not read as `int`).
-///
-/// The string->string `convert_marshal_type_to_cql` in
-/// `parser::enhanced_statistics_parser` is deliberately NOT used: it maps
-/// `IntegerType` to `int` where Cassandra binds it to `varint`, and a one-argument
-/// `MapType(V)` to `map<text, V>`, so reusing it would decide an admission
-/// against a component type Cassandra does not agree with.
-///
-/// # What stays refused, on purpose
-/// A `FrozenType(MapType(K,V))` / `FrozenType(SetType(T))` resolves to
-/// [`CqlType::Frozen`] and NOT to [`CqlType::Map`] / [`CqlType::Set`], so it is
-/// refused here: a frozen collection is ONE inline length-prefixed cell with no
-/// CellPath at all, so its empty component is the inline-element case owned by
-/// `require_fixed_width` (#3847/#4071), not this one. A non-collection
-/// declaration, a foreign-package class, and a spelling neither parser models
-/// are all refused for the reason this function exists.
-fn resolve_declared_cell_path_type(
-    declared: &str,
-    component: CellPathComponent,
-) -> Option<CqlType> {
-    fn pick(ty: CqlType, component: CellPathComponent) -> Option<CqlType> {
-        match (ty, component) {
-            (CqlType::Map(key, _), CellPathComponent::MapKey) => Some(*key),
-            (CqlType::Set(element), CellPathComponent::SetElement) => Some(*element),
-            _ => None,
-        }
-    }
-    if let Ok(ty) = CqlType::parse(declared) {
-        if let Some(resolved) = pick(ty, component) {
-            return Some(resolved);
-        }
-    }
-    match crate::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser::parse_cassandra_type(
-        declared,
-    ) {
-        Ok(ty) => pick(ty, component),
-        Err(_) => None,
-    }
-}
+// THE COMPONENT RESOLVER IS SHARED WITH THE READ SIDE and lives in
+// `crate::storage::sstable::cell_path_component` — see that module's header, and
+// in particular `resolve_declared_cell_path_type`'s "THE SEAM" section.
+//
+// It used to be private HERE, and that is precisely what #4106 roborev job 449
+// finding B1 found: the writer resolved the component from the COMPLETE declared
+// type (so `org.apache.cassandra.db.marshal.SetType(Int32Type)` — package on the
+// outer name, BARE inner element name — worked), while the reader split the
+// component name out first and then asked a classifier that requires the package
+// on the name it is HANDED, so the same declaration decoded the empty cell path
+// as an opaque blob. One resolver, one opinion.
 
 /// The ADMISSION, shared by the two entry points below.
 ///

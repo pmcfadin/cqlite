@@ -60,25 +60,116 @@
 //! `regression_3747_empty_map_key_tests` and
 //! `regression_4106_empty_set_member_tests`, so a widening of the table cannot
 //! silently widen either decoder.
+//!
+//! # ONE ADMISSION, TWO RESOLUTIONS — THE SEAM, stated (#4106, roborev job 449 B1)
+//! Two reviewers reported adjacent facts on this file that only LOOK
+//! contradictory. Both are right, about different things:
+//!
+//!  * the marshal TABLE is shared, so "the gate's classifier and the decoder
+//!    cannot disagree on the marshal spelling" holds:
+//!    [`Self::native_marshal_to_cql_type`] is the crate's one marshal-name
+//!    authority and `primitive_marshal_to_cql_short` (which the decoder consults)
+//!    is a projection of it;
+//!  * the ENTRY CONDITION differs, and THAT is where read and write diverged.
+//!    Every consumer handed an ISOLATED COMPONENT NAME consults the table only
+//!    when the string already `contains("org.apache.cassandra.db.marshal.")` —
+//!    [`Self::cell_path_key_cql_type`] and the value decoder
+//!    (`raw_value/reporting.rs`) both spell it that way, and they must, because a
+//!    bare name out of context is ambiguous (`#3612` round 9 finding 2 removed
+//!    the package-synthesising alternative: it made a foreign
+//!    `com.acme.CustomBytesType` match `BytesType`, which is name-pattern
+//!    inference #28 forbids).
+//!
+//! So the ADMISSION is one function ([`Self::cell_path_empty_admits`]) and the
+//! RESOLUTION of the component TYPE is per-route — because Cassandra's own type
+//! SELECTION is per-route:
+//!
+//!  * a SET's element type is derived from the column's declared type and from
+//!    nothing else, so the set route resolves it from the COMPLETE declared type
+//!    via the shared `cell_path_component::resolve_declared_cell_path_type` — the
+//!    same function the WRITER uses, so the two agree by construction. This is
+//!    finding B1's fix: `org.apache.cassandra.db.marshal.SetType(Int32Type)`
+//!    (package on the OUTER name, bare inner element name — a legal `TypeParser`
+//!    spelling, `TypeParser.java:450`) was ACCEPTED by the writer and refused by
+//!    the reader, whose string split had discarded the marshal context before the
+//!    classifier ever saw it;
+//!  * a MAP's key type has a committed marshal-over-schema PRECEDENCE rule
+//!    (`map_key_type_for_decode`, #3612 R7/R8: the marshal form wins when it is
+//!    UDT-bearing, and Cassandra's `SerializationHeader.getType` is the authority
+//!    for that), so the string the decoder uses is NOT always derived from
+//!    `column.data_type` and resolving from `column.data_type` would OVERRIDE the
+//!    header in exactly the case that rule resolves in the header's favour. The
+//!    map route therefore keeps classifying the string the precedence rule
+//!    picked. **The same bare-inner-name asymmetry is therefore still reachable
+//!    on the MAP route** — `org.apache.cassandra.db.marshal.MapType(Int32Type,
+//!    Int32Type)` — and it is NOT silently fixed here; it is named, and it needs
+//!    the precedence rule to report WHICH container it picked from before it can
+//!    be closed the same way. Every real `SerializationHeader` writes fully
+//!    qualified names, so the reachable spelling is the hand-written/
+//!    `TypeParser`-legal one.
 
 use super::*;
+use crate::storage::sstable::cell_path_component::{
+    resolve_declared_cell_path_type, CellPathComponent,
+};
 use crate::types::EmptyValueType;
 
 impl V5CompressedLegacyParser {
-    /// The typed sentinel a zero-length cell path denotes for a component of
+    /// **THE ADMISSION** — the ONE place the legal/corruption line is drawn for a
+    /// zero-length cell path, on an already-RESOLVED component type.
+    ///
+    /// Both routes below end here, so a widening of the tag table widens both at
+    /// once and neither can hold a per-family opinion of its own. What differs
+    /// between the routes is only how the component type is NAMED; see the
+    /// module header's "ONE ADMISSION, TWO RESOLUTIONS" section for why that
+    /// half cannot be shared.
+    pub(super) fn cell_path_empty_admits(component_type: &CqlType) -> Option<EmptyValueType> {
+        EmptyValueType::for_cql_type(component_type)
+    }
+
+    /// The typed sentinel a zero-length cell path denotes for a MAP KEY of
     /// DECLARED type `type_str`, or `None` when no authority admits an empty
     /// buffer there.
     ///
-    /// Delegates entirely: the type spelling is normalized by
-    /// [`Self::cell_path_key_cql_type`] (the module's ONE classifier, CQL short
-    /// form and marshal alike) and the admission is
-    /// [`EmptyValueType::for_cql_type`]. Nothing per-family is decided here — see
-    /// the module header for why a second opinion at this level is the drift this
-    /// file exists to prevent.
+    /// `type_str` is the string `map_key_type_for_decode` picked (schema short
+    /// form, or the marshal form when it is UDT-bearing), so it is an ISOLATED
+    /// COMPONENT NAME and is normalized by [`Self::cell_path_key_cql_type`] —
+    /// the classifier for that shape. The admission is
+    /// [`Self::cell_path_empty_admits`]. Nothing per-family is decided here.
+    ///
+    /// See the module header for why this route cannot resolve from the COMPLETE
+    /// declared type the way the set route does, and for the residual
+    /// bare-inner-marshal-name asymmetry that leaves.
     pub(super) fn cell_path_empty_sentinel(&self, type_str: &str) -> Option<EmptyValueType> {
         self.cell_path_key_cql_type(type_str)
             .as_ref()
-            .and_then(EmptyValueType::for_cql_type)
+            .and_then(Self::cell_path_empty_admits)
+    }
+
+    /// The typed sentinel a zero-length cell path denotes for the ELEMENT of a
+    /// multicell set whose COLUMN is declared `set_data_type`, or `None` when no
+    /// authority admits an empty buffer there.
+    ///
+    /// **Resolved from the COMPLETE declared type, never from the split-out
+    /// element name** (#4106, roborev job 449 finding B1). The set branch derives
+    /// its element type from `column.data_type` and from nothing else, so
+    /// resolving the element from `column.data_type` is resolving THE SAME
+    /// DECLARATION — it restores the marshal context that
+    /// `extract_collection_element_type`'s string split discards, and it does so
+    /// through `cell_path_component::resolve_declared_cell_path_type`, the very
+    /// function the WRITER's admission uses. Read and write therefore agree on
+    /// every declared string by construction rather than by care.
+    ///
+    /// There is deliberately NO fallback to [`Self::cell_path_key_cql_type`] on
+    /// the split-out name. A fallback would re-admit exactly the disagreements
+    /// this shares a resolver to prevent: `set<frozen<int>>` (not legal CQL)
+    /// resolves to `Frozen(Int)` here and is REFUSED, which is what the writer
+    /// does with it — a fallback would peel the `frozen<>` and admit `Int` on the
+    /// read side only.
+    pub(super) fn set_element_empty_sentinel(&self, set_data_type: &str) -> Option<EmptyValueType> {
+        resolve_declared_cell_path_type(set_data_type, CellPathComponent::SetElement)
+            .as_ref()
+            .and_then(Self::cell_path_empty_admits)
     }
 
     /// Decode a MULTICELL SET's cell path — which IS the member (`cql3/Sets.java:407`
@@ -129,14 +220,28 @@ impl V5CompressedLegacyParser {
     /// exactly those four (`regression_4106_empty_set_member_tests`'s refusal and
     /// trichotomy cases pin it). Nothing per-family is decided here — the branch
     /// is keyed on the decoder's answer, so it cannot drift from the tag table.
+    ///
+    /// # TWO type strings, and each is used for the ONE thing it can answer
+    /// `set_data_type` is the COLUMN's complete declared type and is what the
+    /// admission is resolved from ([`Self::set_element_empty_sentinel`]) — see
+    /// the module header's "ONE ADMISSION, TWO RESOLUTIONS" section for why the
+    /// split-out element name cannot answer that question for the marshal
+    /// spelling. `element_type` is that split-out name and is what the VALUE
+    /// DECODER is handed, unchanged: a NON-EMPTY member keeps its exact
+    /// pre-existing decode, and widening the decoder's own entry condition is
+    /// out of #4106's scope (a bare-inner-name marshal element still decodes to
+    /// an opaque blob there, exactly as it did before this change — that is the
+    /// decoder's pre-existing `contains(package)` guard in
+    /// `raw_value/reporting.rs`, not something introduced or fixed here).
     pub(super) fn decode_set_cell_path_member(
         &self,
         path_bytes: &[u8],
+        set_data_type: &str,
         element_type: &str,
         column_name: &str,
     ) -> Result<Value> {
         if path_bytes.is_empty() {
-            if let Some(tag) = self.cell_path_empty_sentinel(element_type) {
+            if let Some(tag) = self.set_element_empty_sentinel(set_data_type) {
                 return Ok(Value::Empty(tag));
             }
         }

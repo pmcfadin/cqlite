@@ -642,6 +642,16 @@ impl V5CompressedLegacyParser {
                     Some(val) => val,
                     None => self.decode_set_cell_path_member(
                         &cell.path_bytes,
+                        // The COMPLETE declared type, from which the admission
+                        // resolves the element (#4106 roborev job 449 B1: the
+                        // split-out `element_type` below has lost the marshal
+                        // context, so a bare inner name like
+                        // `SetType(Int32Type)` could not be classified and the
+                        // reader disagreed with the WRITER, which resolves from
+                        // this same complete string). Both are passed because
+                        // each answers exactly one question — see
+                        // `decode_set_cell_path_member`'s doc.
+                        &column.data_type,
                         &element_type,
                         &column.name,
                     )?,

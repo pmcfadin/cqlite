@@ -195,13 +195,13 @@ impl V5CompressedLegacyParser {
     /// Handles: UTF8Type, Int32Type, ListType(...), SetType(...), MapType(...), UserType(...), FrozenType(...)
     ///
     /// This is the crate's ONE marshal-string -> [`CqlType`] entry point, and it
-    /// is `pub(crate)` because a WRITE path needs it too: the empty-buffer
-    /// sentinel's admission on a multicell collection's cell path is decided
-    /// against the DECLARED component type — a map's KEY (issue #3805) or a set's
-    /// ELEMENT (issue #4106) — and the column's declared type arrives in either
-    /// spelling: a CQL `map<K,V>`/`set<T>` or this marshal form, both of which
-    /// `write_complex_column` explicitly dispatches on. See
-    /// `crate::storage::sstable::writer::data_writer::cell_path`.
+    /// is `pub(crate)` because both the READ and the WRITE side need it: the
+    /// empty-buffer sentinel's admission on a multicell collection's cell path is
+    /// decided against the DECLARED component type — a map's KEY (issue #3805) or
+    /// a set's ELEMENT (issue #4106) — and the column's declared type arrives in
+    /// either spelling, a CQL `map<K,V>`/`set<T>` or this marshal form. Both
+    /// sides reach it through ONE resolver,
+    /// `crate::storage::sstable::cell_path_component::resolve_declared_cell_path_type`.
     /// It is deliberately THIS parser and not the string->string
     /// `convert_marshal_type_to_cql`: the table above is derived name-by-name
     /// from `cql3/CQL3Type.java`'s `Native` enum at `cassandra-5.0.8` and
@@ -209,11 +209,14 @@ impl V5CompressedLegacyParser {
     /// third-party class sharing a native simple name is refused rather than
     /// decoded as the type it resembles.
     ///
-    /// That one caller is behind `write-support`, so without that feature this
-    /// function has no caller — hence the CONDITIONAL allow. An unconditional
-    /// `#[allow(dead_code)]` (which is what it carried while it had no caller at
-    /// all) would go on masking a genuinely unused parser in the default build.
-    #[cfg_attr(not(feature = "write-support"), allow(dead_code))]
+    /// # NO `allow(dead_code)`, conditional or otherwise
+    /// It carried `#[cfg_attr(not(feature = "write-support"), allow(dead_code))]`
+    /// while its ONLY caller was the write-side gate. #4106 gave it an
+    /// UNCONDITIONAL caller on the READ path (the set cell-path admission
+    /// resolves from the complete declared type), so the attribute would now
+    /// silence nothing and merely assert something false. Do not restore it: if
+    /// this ever becomes unreachable again, the honest fix is to say so at the
+    /// site that stopped calling it.
     pub(crate) fn parse_cassandra_type(type_str: &str) -> Result<CqlType> {
         Self::parse_cassandra_type_with_depth(type_str, 0)
     }

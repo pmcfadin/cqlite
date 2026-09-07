@@ -289,7 +289,6 @@ fn a_cassandra_invalid_empty_member_is_refused_like_any_other_corruption() {
 /// never restated (see the module header).
 #[test]
 fn an_empty_member_is_never_null_and_never_silently_absent() {
-    use crate::schema::CqlType;
     const CANDIDATES: &[&str] = &[
         "int",
         "bigint",
@@ -321,11 +320,19 @@ fn an_empty_member_is_never_null_and_never_silently_absent() {
     let mut refused = 0usize;
     let mut native = 0usize;
     for ty in CANDIDATES {
-        let expected_tag = CqlType::parse(ty)
-            .ok()
-            .as_ref()
-            .and_then(EmptyValueType::for_cql_type);
-        match decode(&format!("set<{ty}>"), &[b""]) {
+        let declared = format!("set<{ty}>");
+        // THE PRODUCTION CLASSIFIER, not a second one (#4106, roborev job 449
+        // finding B4). This used to be `CqlType::parse(ty)` over the ELEMENT
+        // name, which agreed with production on every candidate here but not in
+        // general: production peels `frozen<…>`/`FrozenType(…)` and resolves the
+        // marshal spelling, so `frozen<int>` was `None` to the old oracle and
+        // `Some(Int)` to production. A census whose oracle can disagree with the
+        // subject for a NON-defect reason will eventually red for one, and the
+        // next reader cannot tell which. Asking the production gate keeps the
+        // derivation (the per-family verdict is still `for_cql_type`'s, reached
+        // through it) while removing the drift.
+        let expected_tag = parser().set_element_empty_sentinel(&declared);
+        match decode(&declared, &[b""]) {
             Ok(v) => {
                 let got = members(v);
                 assert_eq!(
@@ -446,5 +453,112 @@ fn a_non_empty_member_is_decoded_exactly_as_before() {
         vec![Value::inet(vec![10, 0, 0, 1])],
         "a NON-empty inet member keeps its native spelling: normalization is a property \
          of the EMPTY cell path, never of the family"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// B1 — THE MARSHAL SPELLING WITH A **BARE INNER ELEMENT NAME**
+// (roborev job 449, Medium)
+// ════════════════════════════════════════════════════════════════════════════
+
+/// `org.apache.cassandra.db.marshal.SetType(Int32Type)` — package on the OUTER
+/// name, BARE inner element name — must admit the empty member as
+/// `Value::Empty(Int)`, because the WRITER accepts that same declaration.
+///
+/// # Why this spelling is LEGAL and not a malformed input
+/// `TypeParser.getAbstractType` (`cassandra-5.0.8
+/// db/marshal/TypeParser.java:450`) loads
+/// `compareWith.contains(".") ? compareWith : "org.apache.cassandra.db.marshal."
+/// + compareWith`, so INSIDE a marshal type string an unqualified name IS a
+/// class in the marshal package. `SetType(Int32Type)` is what Cassandra's own
+/// parser reads as `set<int>`.
+///
+/// # The asymmetry this closes
+/// The reader split `Int32Type` out of that string with
+/// `extract_collection_element_type` and handed the bare name to
+/// `cell_path_key_cql_type`, which consults the marshal table only when the
+/// string it is HANDED already `contains("org.apache.cassandra.db.marshal.")` —
+/// and must, since a bare name out of context is ambiguous and synthesising the
+/// package onto it is what #3612 round 9 finding 2 removed. So the gate declined
+/// and the empty member decoded as an opaque blob, while
+/// `serialize_set_cell_path_element_into` — resolving from the COMPLETE declared
+/// type — accepted it. A read/write asymmetry in the exact property #4106 is
+/// about: a member CQLite decoded could not be written back.
+///
+/// The fix is not a widening of any name table. It is that the set route now
+/// resolves the element from the COMPLETE declared type through the SAME
+/// `cell_path_component::resolve_declared_cell_path_type` the writer uses, so
+/// the two agree by construction rather than by care.
+#[test]
+fn a_bare_inner_marshal_element_name_admits_the_sentinel_like_the_writer_does() {
+    const BARE_INNER: &str = "org.apache.cassandra.db.marshal.SetType(Int32Type)";
+
+    // The GATE agrees with the writer's resolver.
+    assert_eq!(
+        parser().set_element_empty_sentinel(BARE_INNER),
+        Some(EmptyValueType::Int),
+        "the gate must resolve the element from the COMPLETE declared type; before          #4106's B1 fix it asked a classifier that had already lost the marshal          context and answered None"
+    );
+
+    // And the DECODE does too, end to end through the set branch.
+    assert_eq!(
+        members(decode(BARE_INNER, &[b""]).expect("an empty int member is legal data")),
+        vec![Value::Empty(EmptyValueType::Int)],
+        "an empty member under the bare-inner marshal spelling must be the TYPED          sentinel, not an opaque blob"
+    );
+
+    // The FULLY-QUALIFIED inner spelling — which always worked — must still work,
+    // so the fix is a widening of what the gate can SEE and not a substitution.
+    let qualified =
+        "org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.Int32Type)";
+    assert_eq!(
+        parser().set_element_empty_sentinel(qualified),
+        Some(EmptyValueType::Int)
+    );
+    assert_eq!(
+        members(decode(qualified, &[b""]).expect("an empty int member is legal data")),
+        vec![Value::Empty(EmptyValueType::Int)]
+    );
+
+    // THE PACKAGE RULE IS UNTOUCHED (#3631 roborev job 76 / round 9 finding 2,
+    // #28): a FOREIGN inner class must NOT be read as the marshal type it
+    // resembles, so the gate declines and the member takes the decoder's own
+    // outcome. Pinning it here as well as in
+    // `cell_path_component`'s own tests is deliberate — this is the route that
+    // regressed, and a fix that "widened" it by synthesising the package would
+    // pass every other assertion in this test.
+    assert_eq!(
+        parser().set_element_empty_sentinel(
+            "org.apache.cassandra.db.marshal.SetType(com.acme.Int32Type)"
+        ),
+        None,
+        "a foreign-package element class must never be resolved as `int`"
+    );
+}
+
+/// THE BOUND on B1's fix, MEASURED and stated: only the ADMISSION was moved to
+/// the complete declared type. The VALUE DECODER keeps its own pre-existing
+/// entry condition, so a NON-EMPTY member under the bare-inner marshal spelling
+/// still decodes to an opaque `Value::Blob` exactly as it did before #4106.
+///
+/// That residual is `raw_value/reporting.rs`'s `contains(package)` guard, which
+/// every isolated-component-name consumer shares; widening it is a change to
+/// the whole value decode path (map keys, list/set elements, UDT fields) and is
+/// not #4106's. Asserted rather than left to prose so the bound is visible and
+/// so a later widening has to come here and say so.
+#[test]
+fn a_bare_inner_marshal_name_leaves_the_non_empty_decode_exactly_as_it_was() {
+    let decoded = members(
+        decode(
+            "org.apache.cassandra.db.marshal.SetType(Int32Type)",
+            &[&7i32.to_be_bytes()],
+        )
+        .expect("a non-empty member decodes"),
+    );
+    assert_eq!(decoded.len(), 1, "one member");
+    assert!(
+        matches!(decoded[0], Value::Blob(_)),
+        "PRE-EXISTING and unchanged by #4106: the value decoder consults the marshal          table only for a name that already carries the package, so a bare inner name          falls to the opaque default. If this ever becomes `Integer(7)`, the value          decoder's entry condition was widened — a much larger change than #4106's —          and this test is where that must be acknowledged. Got: {:?}",
+        decoded[0]
     );
 }
