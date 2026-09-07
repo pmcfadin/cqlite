@@ -337,6 +337,44 @@ impl V5CompressedLegacyParser {
             off = new_offset;
             Value::Frozen(Box::new(udt_value))
         }
+        // Cassandra 5.0 `vector<element, n>` (issue #4114). Sited BEFORE the blob
+        // fall-through, which is exactly what used to swallow it: a fixed-width
+        // vector value carries NO length prefix, so the fall-through read the first
+        // float's leading byte as a vint length and — depending on that ONE BYTE OF
+        // USER DATA — either errored blaming the data or returned a WRONG VALUE at
+        // exit 0 (`.drive-issue-4114/silent-misdecode-measurement.md`).
+        //
+        // `type_str` is the lowercased DECLARED type. Only the CQL spelling is
+        // matched here because every header marshal type reaching a column's
+        // `data_type` has already been normalized by the ONE conversion point,
+        // `enhanced_statistics_parser::marshal_type::convert_marshal_type_to_cql`
+        // (which now emits `vector<…, n>`); a marshal-spelled vector inside a UDT
+        // field instead travels the `CqlType` route (`type_string.rs` ->
+        // `typed_value.rs`).
+        else if type_str.starts_with("vector<") {
+            let args = crate::schema::vector_type::cql_vector_inner(type_str)
+                .ok_or_else(|| {
+                    Error::schema(format!(
+                        "Cell '{}': malformed vector type '{}' (unterminated type parameters)",
+                        column.name, type_str
+                    ))
+                })
+                .and_then(|inner| crate::schema::vector_type::split_vector_args(inner, type_str))?;
+            // AC4: the dimension comes from the type, and an element type CQLite
+            // does not implement is refused BY NAME rather than decoded as
+            // something else (#28).
+            let element = crate::schema::CqlType::parse(args.element)?;
+            crate::schema::vector_type::vector_value::require_float_element(
+                &element,
+                args.dimension,
+            )?;
+            crate::schema::vector_type::vector_value::decode_float_vector_at(
+                data,
+                &mut off,
+                &column.name,
+                args.dimension,
+            )?
+        }
         // CQL `varint`: [VInt len][big-endian two's-complement bytes]. Decode to
         // Value::Varint, matching the block path (issue #1885). Without this arm the
         // value fell through to the blob default and was mis-typed as Value::Blob.

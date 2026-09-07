@@ -81,6 +81,18 @@ pub enum ComparatorType {
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::size_of::<ComparatorType>() == 72);
 
+/// The ONE refusal both `from_cql_type` constructors return for a vector column,
+/// so the two cannot drift into two different messages (issue #4114).
+fn vector_ordering_unsupported() -> Error {
+    Error::unsupported_format(
+        "ordering/comparing a vector column is not implemented (issue #4114 covers \
+         READING vector<float, n> values); Cassandra's VectorType is a CUSTOM \
+         comparator that compares element-wise via its serializer \
+         (VectorType.java:88,122-125)"
+            .to_string(),
+    )
+}
+
 impl ComparatorType {
     /// Create a ComparatorType from a CqlType
     pub fn from_cql_type(cql_type: &CqlType) -> Result<Self> {
@@ -137,6 +149,12 @@ impl ComparatorType {
                 ComparatorType::Frozen(Box::new(inner_comparator))
             }
             CqlType::Custom(type_name) => ComparatorType::Custom(type_name.clone()),
+            // #4114 implements READING a `vector<float, n>` value, not ORDERING one.
+            // Cassandra's `VectorType` is `ComparisonType.CUSTOM` and compares
+            // element-wise through its serializer (`VectorType.java:88,122-125`);
+            // reusing the `List` comparator would be a guess about a rule nothing
+            // here has verified, so this fails closed instead.
+            CqlType::Vector(_, _) => return Err(vector_ordering_unsupported()),
             // Map newly supported types
             CqlType::Decimal => ComparatorType::Decimal,
             CqlType::Duration => ComparatorType::Duration,
@@ -280,6 +298,9 @@ impl ComparatorType {
                     ComparatorType::Custom(type_name.clone())
                 }
             }
+            // See the same arm in `from_cql_type`: reading a vector is implemented,
+            // ordering one is not (#4114).
+            CqlType::Vector(_, _) => return Err(vector_ordering_unsupported()),
         };
 
         Ok(comparator)

@@ -168,6 +168,27 @@ fn cql_type(input: &str) -> IResult<&str, String> {
                 )),
                 |(_, _, inner, _)| format!("frozen<{}>", inner),
             ),
+            // Vector type — `vector<element, n>` (Cassandra 5.0, `CQL3Type.java:589`).
+            // Issue #4114: without this arm `vector` parsed as a bare
+            // `qualified_type_name` and the grammar then failed on the `<`, so a
+            // CREATE TABLE with a vector column could not be read at all (measured:
+            // nom `code: Char`). The dimension is carried VERBATIM into the emitted
+            // type string; `schema::vector_type` applies the dimension rules (an
+            // illegal `0` is refused there, by name).
+            map(
+                tuple((
+                    keyword("vector"),
+                    char('<'),
+                    |i| parse_type_inner(i, depth + 1),
+                    tuple((ws, char(','), ws)),
+                    nom::character::complete::digit1,
+                    ws,
+                    char('>'),
+                )),
+                |(_, _, element, _, dimension, _, _): (_, _, String, _, &str, _, _)| {
+                    format!("vector<{}, {}>", element, dimension)
+                },
+            ),
             // Simple types and UDTs. UDT type names may be keyspace-qualified
             // (`keyspace.type_name`), which Cassandra always emits (issue #2807);
             // `qualified_type_name` accepts the optional prefix and retains it. The

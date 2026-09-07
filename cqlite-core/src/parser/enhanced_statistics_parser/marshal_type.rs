@@ -168,6 +168,41 @@ pub(super) fn convert_marshal_type_to_cql(marshal_type: &str) -> String {
         }
     }
 
+    // Cassandra 5.0 `VectorType(element , n)` -> CQL `vector<element, n>`
+    // (issue #4114). THIS is the conversion the measured `read-sstable` path uses,
+    // and before it the vector fell through to the `other => other.to_lowercase()`
+    // fallback at the bottom of this function, which SILENTLY produced the junk
+    // type string `floattype , 3`. The value was then decoded as a
+    // vint-length-prefixed blob and, on Cassandra-written bytes, could be returned
+    // WRONG with exit 0 (see `.drive-issue-4114/silent-misdecode-measurement.md`).
+    //
+    // The dimension must survive this conversion: a fixed-width vector value
+    // carries no length prefix and no element count, so `n` is the ONLY thing that
+    // makes it parseable (#28 — nothing may be inferred from the bytes). A
+    // MALFORMED vector type is deliberately NOT silently degraded either: it is
+    // returned in a spelling no decoder claims (`vector<…, invalid>` never parses),
+    // because this function's signature cannot carry an error and inventing a
+    // dimension would put a made-up width on the decode path.
+    if let Some(inner) = crate::schema::vector_type::marshal_vector_inner(cleaned) {
+        return match crate::schema::vector_type::split_vector_args(inner, cleaned) {
+            Ok(args) => format!(
+                "vector<{}, {}>",
+                convert_marshal_type_to_cql(args.element),
+                args.dimension
+            ),
+            Err(e) => {
+                tracing::warn!(
+                    "malformed vector marshal type '{}' in SerializationHeader: {}",
+                    cleaned,
+                    e
+                );
+                // No decoder recognizes this spelling, so the column fails closed
+                // with the type NAMED rather than being mis-framed as a blob.
+                format!("vector<unparseable:{}>", cleaned)
+            }
+        };
+    }
+
     for prefix in ["org.apache.cassandra.db.marshal.MapType(", "MapType("] {
         if let Some(params_with_close) = cleaned.strip_prefix(prefix) {
             if let Some(inner) = extract_inner_type(params_with_close) {
