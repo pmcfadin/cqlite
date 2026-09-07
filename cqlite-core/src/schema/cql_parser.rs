@@ -1036,6 +1036,54 @@ fn cql_type_to_type_id_with_depth(cql_type: &str, depth: usize) -> Result<CqlTyp
     if type_lower.starts_with("tuple<") {
         return Ok(CqlTypeId::Tuple);
     }
+
+    // `vector<element, n>` (Cassandra 5.0) — issue #4114, blocker 3.
+    //
+    // REFUSED with a named error, and deliberately NOT mapped to a type id at all.
+    // Two things make refusal the only honest answer here:
+    //
+    // * There IS no vector type id. `CqlTypeId` mirrors the wire/protocol ids and a
+    //   vector rides as a custom type, so any id returned would DISCARD the element
+    //   type and the dimension — and the dimension is the ONLY thing that makes a
+    //   fixed-width vector value parseable (`VectorType.java:94-96`; no length
+    //   prefix, no element count).
+    // * Falling through to this function's `_ => Ok(CqlTypeId::Udt)` guess was
+    //   WORSE than a blob: a vector handed to `parse_udt_enhanced` is read as a UDT
+    //   STRUCTURE over what are actually `4 * n` raw big-endian binary32 bytes. It
+    //   is also a #28 no-heuristics violation (a type inferred from the ABSENCE of a
+    //   match) and contradicts AC4's "never a fallback decode".
+    //
+    // The sibling `CqlType`-taking `parser::types::cql_type_to_type_id` keeps its
+    // `CqlTypeId::Custom` mapping because all three of ITS callers intercept
+    // `CqlType::Vector` before reaching a type id. That option does not exist here:
+    // this function's input is a STRING and its only output is the id, so a caller
+    // receiving `Custom` has nothing left to intercept — it has already lost the
+    // element type and the dimension. Callers that need a vector must use
+    // `CqlType::parse`, which preserves both.
+    //
+    // Reach: this is a PUBLIC-API boundary (`SchemaManager::cql_type_to_internal`,
+    // `schema::cql_type_to_type_id`). NO internal read-path caller was found, so the
+    // demonstrated exposure is API consumers (bindings, embedders), not the measured
+    // `read-sstable` path.
+    //
+    // `NotAVector` still falls through: `vector` is not reserved in CQL, so an
+    // unparameterised `vector` may be a genuine UDT name (the one place the
+    // "assume a UDT" fallback below is right). Both a WELL-FORMED and a MALFORMED
+    // parameterised vector are refused — neither has a type id.
+    if !matches!(
+        crate::schema::vector_type::cql_vector_kind(&type_lower),
+        crate::schema::vector_type::VectorInner::NotAVector
+    ) {
+        return Err(Error::schema(format!(
+            "'{cql_type}' is a vector type, which has no CQL protocol type id: a \
+             vector's element type and dimension are load-bearing (a vector<float, n> \
+             value is exactly 4*n raw big-endian bytes with NO length prefix), and \
+             both would be discarded by any CqlTypeId. Refused rather than guessed \
+             (issue #4114; the previous fallback answered CqlTypeId::Udt, which would \
+             read the float bytes as a UDT structure). Use CqlType::parse to keep the \
+             element type and dimension."
+        )));
+    }
     if type_lower.starts_with("frozen<") {
         // Extract inner type from frozen<type>
         if let Some(inner_start) = type_lower.find('<') {
@@ -1572,6 +1620,68 @@ mod tests {
     /// recursively. Pathologically nested `frozen<` input must return `Err`, not
     /// stack-overflow / abort. A leaf at the depth bound still resolves; one level
     /// deeper errors.
+    /// Issue #4114: `vector<...>` must FAIL CLOSED out of the type-id conversion,
+    /// never be guessed as a UDT.
+    ///
+    /// Guards the `cql_vector_kind(..) != VectorInner::NotAVector` refusal in this
+    /// function. Before it, this function had no vector case, so a vector
+    /// spelling fell through to `_ => Ok(CqlTypeId::Udt)` ("assume it's a UDT if
+    /// not a known primitive"). A vector value would then reach
+    /// `parse_udt_enhanced` and be read as a UDT structure over what are really
+    /// `4 * n` raw big-endian binary32 bytes (`.drive-issue-4114/format-authority.md`,
+    /// derived from `cassandra-5.0.8` `VectorType.java:86-101`).
+    ///
+    /// `CqlTypeId` genuinely cannot represent a vector — Cassandra carries it as a
+    /// CUSTOM type and the id would drop both the element type and the dimension —
+    /// so `Err` is the honest answer, not a substitute id (#4114 AC4, #28).
+    ///
+    /// This asserts the SPECIFIC wrong answer is gone (`Udt`), not merely that some
+    /// error occurs, because a future refactor could reintroduce the guess through a
+    /// different arm and a bare `is_err()` would not notice.
+    #[test]
+    fn test_cql_type_to_type_id_vector_fails_closed_not_udt() {
+        for spelling in [
+            "vector<float, 3>",
+            "vector<float,3>",
+            "VECTOR<FLOAT, 384>",
+            "  vector<float, 1>  ",
+            "vector<text, 3>",
+        ] {
+            let got = cql_type_to_type_id(spelling);
+            assert!(
+                got.is_err(),
+                "{spelling:?} must fail closed out of the type-id conversion, got {got:?}"
+            );
+        }
+
+        // The regression proper: it must not be reported as a UDT.
+        assert_ne!(
+            cql_type_to_type_id("vector<float, 3>").ok(),
+            Some(CqlTypeId::Udt),
+            "a vector must never be guessed as a UDT (the pre-#4114 fallthrough)"
+        );
+
+        // A BARE, unparameterised `vector` must STILL resolve as a possible UDT
+        // name: `vector` is not a reserved word in CQL, so a table may legitimately
+        // declare a UDT called `vector`. Only a PARAMETERISED vector is refused,
+        // because only that one is provably a vector type. Pinned here so the
+        // refusal is never widened into a keyword ban.
+        assert_eq!(
+            cql_type_to_type_id("vector").expect("a bare `vector` may be a UDT name"),
+            CqlTypeId::Udt,
+        );
+
+        // Guard the neighbours: this arm must not swallow a real UDT or a collection.
+        assert_eq!(
+            cql_type_to_type_id("my_udt").expect("a plain identifier still resolves"),
+            CqlTypeId::Udt,
+        );
+        assert_eq!(
+            cql_type_to_type_id("list<float>").expect("a list still resolves"),
+            CqlTypeId::List,
+        );
+    }
+
     #[test]
     fn test_cql_type_to_type_id_deep_frozen_returns_err_not_abort() {
         let s = "frozen<".repeat(50_000) + "int" + &">".repeat(50_000);
