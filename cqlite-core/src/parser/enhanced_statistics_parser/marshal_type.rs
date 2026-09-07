@@ -180,27 +180,46 @@ pub(super) fn convert_marshal_type_to_cql(marshal_type: &str) -> String {
     // carries no length prefix and no element count, so `n` is the ONLY thing that
     // makes it parseable (#28 — nothing may be inferred from the bytes). A
     // MALFORMED vector type is deliberately NOT silently degraded either: it is
-    // returned in a spelling no decoder claims (`vector<…, invalid>` never parses),
-    // because this function's signature cannot carry an error and inventing a
-    // dimension would put a made-up width on the decode path.
-    if let Some(inner) = crate::schema::vector_type::marshal_vector_inner(cleaned) {
-        return match crate::schema::vector_type::split_vector_args(inner, cleaned) {
-            Ok(args) => format!(
+    // returned in a spelling no decoder claims (`vector<unparseable:…>` never
+    // parses as a vector and matches no other type arm), because this function's
+    // signature cannot carry an error and inventing a dimension would put a
+    // made-up width on the decode path.
+    //
+    // The probe is THREE-valued (roborev job 109): a malformed `VectorType(`, whose
+    // parameter list cannot even be EXTRACTED, used to be indistinguishable from
+    // "not a vector" and so reached the lowercase fallback — the very defect above,
+    // by a second route. `into_args` folds both malformed states into `Err`.
+    match crate::schema::vector_type::marshal_vector_kind(cleaned).into_args(cleaned) {
+        Ok(Some(args)) => {
+            return format!(
                 "vector<{}, {}>",
                 convert_marshal_type_to_cql(args.element),
                 args.dimension
-            ),
-            Err(e) => {
-                tracing::warn!(
-                    "malformed vector marshal type '{}' in SerializationHeader: {}",
-                    cleaned,
-                    e
-                );
-                // No decoder recognizes this spelling, so the column fails closed
-                // with the type NAMED rather than being mis-framed as a blob.
-                format!("vector<unparseable:{}>", cleaned)
-            }
-        };
+            )
+        }
+        Err(e) => {
+            tracing::warn!(
+                "malformed vector marshal type '{}' in SerializationHeader: {}",
+                cleaned,
+                e
+            );
+            // Fail closed, with the type NAMED, in a spelling that (a) still
+            // begins `vector<` so the decoder's VECTOR arm intercepts it — anything
+            // else would reach the blob fall-through, which is the defect — and (b)
+            // can never parse as a vector.
+            //
+            // (b) is why the `, unparseable-dimension` tail is appended rather than
+            // just wrapping `cleaned`: `vector<unparseable:{cleaned}>` alone CAN
+            // parse when `cleaned` happens to end in `, <digits>` (measured: a
+            // trailing-text VectorType parsed as `vector<…, 4>`). With the tail,
+            // every case fails — either the `<`/`>` matcher rejects the brackets, or
+            // `cleaned`'s own unclosed bracket leaves NO top-level comma, or the last
+            // top-level comma is this one and `unparseable-dimension` is not a
+            // decimal dimension.
+            return format!("vector<unparseable:{}, unparseable-dimension>", cleaned);
+        }
+        // Not a vector at all: fall through to the remaining type arms.
+        Ok(None) => {}
     }
 
     for prefix in ["org.apache.cassandra.db.marshal.MapType(", "MapType("] {
@@ -474,5 +493,56 @@ mod tests {
             convert_marshal_type_to_cql(list_udt).contains("UserType("),
             "UserType inside List should be preserved"
         );
+    }
+
+    /// Regression, roborev job 109 (issue #4114): a MALFORMED `VectorType` must FAIL
+    /// CLOSED here, never reach the `other => other.to_lowercase()` fallback at the
+    /// bottom of `convert_marshal_type_to_cql`.
+    ///
+    /// The probe used to answer `None` for BOTH "not a vector" and "a vector whose
+    /// parameter list cannot be extracted", so an unmatched paren fell through and
+    /// `org…VectorType(org…FloatType , 3` converted to the junk scalar spelling
+    /// `floattype , 3` — which no arm recognises, so the column was decoded as a
+    /// vint-length-prefixed BLOB: exactly the framing #4114 removed, restored by a
+    /// second route.
+    ///
+    /// The type strings are literals, not fixture-derived: a malformed type STRING is
+    /// a text-parsing question, not a byte-framing one, and Cassandra's writer cannot
+    /// emit one (`TypeParser.stringifyVectorParameters` concatenates an `int`), so no
+    /// Cassandra-written bytes can express this case.
+    #[test]
+    fn a_malformed_vector_marshal_type_never_reaches_the_lowercase_fallback() {
+        const PKG: &str = "org.apache.cassandra.db.marshal.";
+        // The well-formed spelling Cassandra writes still converts, dimension intact.
+        assert_eq!(
+            convert_marshal_type_to_cql(&format!("{PKG}VectorType({PKG}FloatType , 3)")),
+            "vector<float, 3>"
+        );
+
+        for malformed in [
+            // Unmatched open paren — the case that reached the lowercase fallback.
+            format!("{PKG}VectorType({PKG}FloatType , 3"),
+            // A `VectorType` claim with no parameter list at all.
+            format!("{PKG}VectorType"),
+            // Trailing text after the matched close paren.
+            format!("{PKG}VectorType({PKG}FloatType , 3) , 4"),
+            // Extractable parameters that do not split into (element, dimension).
+            format!("{PKG}VectorType({PKG}FloatType)"),
+            // A dimension Cassandra rejects at construction (VectorType.java:89-90).
+            format!("{PKG}VectorType({PKG}FloatType , 0)"),
+        ] {
+            let converted = convert_marshal_type_to_cql(&malformed);
+            assert!(
+                converted.starts_with("vector<unparseable:"),
+                "'{malformed}' converted to '{converted}': a malformed vector must \
+                 fail closed, not degrade to a spelling the blob arm accepts"
+            );
+            // And the fail-closed spelling must really be unparseable — no decoder
+            // may claim it, or "fail closed" would be a label rather than a property.
+            assert!(
+                crate::schema::CqlType::parse(&converted).is_err(),
+                "the fail-closed spelling '{converted}' must not parse as any type"
+            );
+        }
     }
 }
