@@ -148,6 +148,64 @@ fn frozen_over_a_collection_tuple_or_udt_still_parses() {
     }
 }
 
+/// A VECTOR is freezable, and `CqlType` cannot model one — so the gate has to
+/// decide it by SPELLING or it refuses declarable CQL.
+///
+/// `RawVector::freeze` (`CQL3Type.java:916-920`) returns `this`; a vector is
+/// implicitly frozen (`isImplicitlyFrozen`, `:632-635`). `CqlType` has no `Vector`
+/// variant, so `vector<float, 3>` parses to `Custom` — the same arm that carries an
+/// unresolved UDT reference — and an `is_udt_identifier`-only rule would have
+/// refused `frozen<vector<float, 3>>` because the name contains `<`.
+///
+/// Pinned in BOTH spellings, because the marshal allowlist naming `VectorType` and
+/// the CQL rule are one rule and must not disagree.
+#[test]
+fn a_frozen_vector_is_accepted_in_both_spellings() {
+    for spelling in [
+        "frozen<vector<float, 3>>",
+        "frozen<VECTOR<float,3>>",
+        "list<frozen<vector<float, 3>>>",
+    ] {
+        assert!(
+            CqlType::parse(spelling).is_ok(),
+            "`{spelling}` is declarable CQL — RawVector overrides freeze()"
+        );
+    }
+    const P: &str = "org.apache.cassandra.db.marshal.";
+    assert!(
+        validate_marshal_frozen(&format!("{P}FrozenType({P}VectorType({P}FloatType,3))")).is_ok()
+    );
+}
+
+/// The header sometimes prefixes a comparator with a structural `[` or `(`
+/// (roborev jobs 43/48), and `convert_marshal_type_to_cql` strips both. The gate
+/// must strip them too: a normalization one reader applies and another does not is
+/// how two readers form two opinions about one string.
+#[test]
+fn the_header_gate_strips_the_same_structural_prefixes_the_converter_does() {
+    const P: &str = "org.apache.cassandra.db.marshal.";
+    for accepted in [
+        format!("{P}FrozenType([{P}SetType({P}Int32Type))"),
+        format!("{P}FrozenType(({P}SetType({P}Int32Type)))"),
+        format!("[{P}FrozenType({P}SetType({P}Int32Type))"),
+    ] {
+        assert!(
+            validate_marshal_frozen(&accepted).is_ok(),
+            "`{accepted}` freezes a SetType under a structural prefix"
+        );
+    }
+    // Stripping the prefix must not smuggle a scalar through.
+    for refused in [
+        format!("{P}FrozenType([{P}Int32Type)"),
+        format!("{P}FrozenType(({P}Int32Type))"),
+    ] {
+        assert!(
+            validate_marshal_frozen(&refused).is_err(),
+            "`{refused}` still freezes a scalar"
+        );
+    }
+}
+
 /// A QUOTED custom class is a `RawType` too, so it is refused.
 ///
 /// `Parser.g:1861-1864` builds a `STRING_LITERAL` type as
@@ -184,6 +242,9 @@ fn the_membership_set_is_cassandras_override_set() {
         CqlType::Frozen(Box::new(CqlType::List(Box::new(CqlType::Int)))),
         CqlType::Custom("udt:address_type".to_string()),
         CqlType::Custom("address_type".to_string()),
+        // A vector: `CqlType` has no variant for it, and `RawVector` overrides
+        // `freeze()` (`CQL3Type.java:916-920`).
+        CqlType::Custom("vector<float, 3>".to_string()),
     ] {
         assert!(
             frozen_inner_supports_freezing(&freezable),

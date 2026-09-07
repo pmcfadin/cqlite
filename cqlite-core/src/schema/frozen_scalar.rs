@@ -102,13 +102,24 @@ const CITATION: &str = "frozen<> is only allowed on collections, tuples, and use
 /// already-frozen inner ([`CqlType::Frozen`]) because `RawCollection::freeze`
 /// (`CQL3Type.java:777-786`) freezes an already-frozen collection to itself.
 ///
-/// [`CqlType::Custom`] is CQLite's UDT-REFERENCE carrier: `CqlType::parse` has no
-/// UDT registry, so a bare `frozen<address_type>` lands there and refusing it would
-/// refuse every real frozen UDT. It is admitted ONLY when the name is a plausible
-/// UDT identifier ([`is_udt_identifier`]), which keeps the quoted custom-class
-/// spelling (`frozen<'org.apache.cassandra.db.marshal.Int32Type'>`) refused —
-/// Cassandra routes that through `CQL3Type.Raw.from(new CQL3Type.Custom(..))`, i.e.
-/// a `RawType`, i.e. the throwing base (`Parser.g:1861-1864`).
+/// [`CqlType::Custom`] carries TWO things `CqlType::parse` cannot model, and both
+/// are legally freezable, so the arm decides between them by SPELLING:
+///
+///   * a UDT REFERENCE. `CqlType::parse` has no UDT registry, so a bare
+///     `frozen<address_type>` lands in `Custom` and refusing it would refuse every
+///     real frozen UDT. Admitted when the name is a plausible UDT identifier
+///     ([`is_udt_identifier`]).
+///   * a VECTOR. `CqlType` has no `Vector` variant, so `vector<float, 3>` also
+///     lands in `Custom` — and `RawVector::freeze` (`CQL3Type.java:916-920`)
+///     returns `this`, a vector being implicitly frozen (`isImplicitlyFrozen`,
+///     `:632-635`), so `frozen<vector<float, 3>>` IS declarable CQL. Without this
+///     arm the gate would refuse it, which is why the marshal half's allowlist
+///     naming `VectorType` is not enough on its own: the two spellings must agree.
+///
+/// Everything else in `Custom` is refused, which keeps the quoted custom-class
+/// spelling (`frozen<'org.apache.cassandra.db.marshal.Int32Type'>`) out — Cassandra
+/// routes that through `CQL3Type.Raw.from(new CQL3Type.Custom(..))`, i.e. a
+/// `RawType`, i.e. the throwing base (`Parser.g:1861-1864`).
 ///
 /// Every native scalar is `false`. This function is the ONLY membership statement;
 /// the enumeration is exhaustive with no `_` arm on purpose, so a new [`CqlType`]
@@ -121,7 +132,8 @@ pub(crate) fn frozen_inner_supports_freezing(inner: &CqlType) -> bool {
         CqlType::Udt(_, _) => true,
         CqlType::Frozen(_) => true,
         CqlType::Custom(name) => {
-            is_udt_identifier(name.strip_prefix("udt:").unwrap_or(name.as_str()))
+            let name = name.strip_prefix("udt:").unwrap_or(name.as_str());
+            is_udt_identifier(name) || is_vector_spelling(name)
         }
         // `RawType` — every native scalar reaches the throwing base.
         CqlType::Boolean
@@ -146,6 +158,17 @@ pub(crate) fn frozen_inner_supports_freezing(inner: &CqlType) -> bool {
         | CqlType::Duration
         | CqlType::Varint => false,
     }
+}
+
+/// Whether a `Custom` type name is CQL's `vector<element, dimension>` spelling.
+///
+/// Matched on the HEAD keyword only, case-insensitively, exactly as
+/// `CqlType::parse` matches `list<`/`set<`/`map<`/`tuple<`. Deciding freezability
+/// needs nothing more: the element and dimension are the vector's business, and a
+/// vector is freezable whatever they are.
+fn is_vector_spelling(name: &str) -> bool {
+    name.split_once('<')
+        .is_some_and(|(head, _)| head.trim().eq_ignore_ascii_case("vector"))
 }
 
 /// The refusal a CQL-form `frozen<scalar>` earns, naming both the spelling that
@@ -194,7 +217,16 @@ const MARSHAL_PACKAGE: &str = "org.apache.cassandra.db.marshal.";
 ///
 /// Fail-closed in every direction: an EMPTY inner (`FrozenType()`), an unbalanced
 /// parenthesis, a non-canonical package and an unrecognised head are each refused
-/// rather than allowed through. The `FrozenType(` marker itself is matched
+/// rather than allowed through.
+///
+/// # THE SCAN'S BOUND, STATED RATHER THAN IMPLIED
+/// The marker is a plain substring search for `FrozenType(`, so it assumes the
+/// marshal grammar in which a `(` follows only a CLASS NAME. That holds for
+/// everything Cassandra writes: a keyspace or UDT name cannot contain `(`, and a
+/// UDT's FIELD names are hex-encoded. It is NOT proven for a third-party CUSTOM
+/// class free to put arbitrary text inside its own parameters — such a class would
+/// have to embed the literal `FrozenType(` to be affected, and the outcome would be
+/// a refusal (fail-closed), never a silent misread. The `FrozenType(` marker itself is matched
 /// case-insensitively (as `extract_frozen_inner_type` does), and the inner head is
 /// compared case-insensitively against the table above for the same reason: a
 /// spelling this crate would not decode as `SetType` must not be admitted as one.
@@ -246,7 +278,13 @@ fn balanced_inner(after_open: &str) -> Option<&str> {
 }
 
 /// Whether a MARSHAL type string's head class overrides `freeze()`.
+///
+/// The leading `[` and `(` the header sometimes prefixes a comparator with are
+/// stripped first, mirroring `convert_marshal_type_to_cql`'s own
+/// `strip_wrapping_parens` (roborev jobs 43/48): a normalization one reader applies
+/// and another does not is how two readers form two opinions about one string.
 fn marshal_head_supports_freezing(inner: &str) -> bool {
+    let inner = inner.trim().trim_start_matches(['[', '(']).trim_start();
     // The head is everything before the first `(` (a parameterised class) or the
     // whole string (a bare class name).
     let head = match inner.find('(') {
