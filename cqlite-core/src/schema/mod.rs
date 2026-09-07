@@ -14,7 +14,7 @@ pub mod registry;
 // doctrine). They add inherent impls on the types defined here and own the
 // `UdtRegistry` type; the `pub use` below preserves the `schema::UdtRegistry`
 // public path.
-mod cql_type_parser;
+pub(crate) mod cql_type_parser;
 mod key_ordering;
 mod schema_comparator;
 mod udt_registry;

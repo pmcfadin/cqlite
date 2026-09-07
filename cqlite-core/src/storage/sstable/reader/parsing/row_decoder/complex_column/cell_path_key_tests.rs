@@ -418,49 +418,11 @@ fn fixed_width_cell_path_keys_reject_a_wrong_width() {
     assert!(p
         .parse_cell_path_key(&[0u8; 5], &format!("{MARSHAL}.Int32Type"), "k")
         .is_err());
-    // FROZEN-SPELLED fixed-width keys must be width-checked too (finding B1).
-    // The classifier used to run on the RAW string, so `frozen<int>` took the
-    // "contains '<' => variable width" branch, the dispatcher's frozen arm then
-    // recursed to `"int"` and returned `None` consumption, and a 5-byte key
-    // decoded `Integer` from `data[0..4]` silently. The composite drift guard
-    // could not see this: it enumerates COMPOSITES only.
-    for (type_str, bytes) in [
-        ("frozen<int>", vec![0u8; 5]),
-        ("frozen<int>", vec![0u8; 3]),
-        ("Frozen<BIGINT>", vec![0u8; 9]),
-        ("frozen<inet>", vec![0u8; 5]),
-        ("frozen<uuid>", vec![0u8; 17]),
-        ("frozen<smallint>", vec![0u8; 3]),
-    ] {
-        assert!(
-            p.parse_cell_path_key(&bytes, type_str, "k").is_err(),
-            "{type_str}: {} bytes must be refused — a frozen-spelled fixed-width \
-             key must not bypass the width table (B1)",
-            bytes.len()
-        );
-    }
-    for marshal_inner in ["Int32Type", "LongType", "InetAddressType", "UUIDType"] {
-        let t = format!("{MARSHAL}.FrozenType({MARSHAL}.{marshal_inner})");
-        assert!(
-            p.parse_cell_path_key(&[0u8; 5], &t, "k").is_err(),
-            "{t}: 5 bytes must be refused (B1, marshal spelling)"
-        );
-    }
-    // ...and the CORRECT widths still decode through the frozen spelling, so B1's
-    // fix is a narrowing and not a ban.
-    assert!(p
-        .parse_cell_path_key(&7i32.to_be_bytes(), "frozen<int>", "k")
-        .is_ok());
-    assert!(p
-        .parse_cell_path_key(&[127, 0, 0, 1], "frozen<inet>", "k")
-        .is_ok());
-    assert!(p
-        .parse_cell_path_key(
-            &7i32.to_be_bytes(),
-            &format!("{MARSHAL}.FrozenType({MARSHAL}.Int32Type)"),
-            "k"
-        )
-        .is_ok());
+    // The FROZEN-SPELLED fixed-width cases that stood here (finding B1) are GONE,
+    // not moved: `frozen<int>`/`FrozenType(Int32Type)` are refused at both metadata
+    // entry points (#4104), so no such string can reach this decoder and pinning an
+    // outcome for one would be pinning an invention. The reachability claim that
+    // replaces them is `cell_path_key_tests_frozen`.
     // Variable-width families are unaffected.
     assert!(p.parse_cell_path_key(&[0u8; 5], "text", "k").is_ok());
     assert!(p.parse_cell_path_key(&[0u8; 5], "blob", "k").is_ok());
@@ -498,31 +460,12 @@ fn a_declared_blob_cell_path_key_is_a_blob() {
             .unwrap(),
         Value::blob(vec![1, 2, 3])
     );
-    // A FROZEN-SPELLED blob keeps its wrapper, because this reader mirrors
-    // `parse_value_from_raw_bytes` exactly — that is what makes it agree with the
-    // frozen map reader for every spelling (roborev round 8). Before that the
-    // multicell side peeled and re-applied a wrapper of its own, and these three
-    // cases asserted the BARE value; the wrapper is the frozen reader's answer for
-    // this string, so it is now the right expectation.
+    // The three FROZEN-SPELLED blob cases that stood here are GONE (#4104).
+    // `frozen<blob>` is not declarable CQL — a blob is a `RawType`, which does not
+    // override the throwing base `CQL3Type.Raw::freeze()` — so both metadata entry
+    // points refuse it and there is no outcome left to pin. See
+    // `cell_path_key_tests_frozen`.
     //
-    // CQL does not permit `frozen<blob>` as a map key (freezing applies to
-    // composites), but if such a spelling ever reaches here it is still a DECLARED
-    // blob and must not be misdiagnosed as an undecoded key — the diagnostic reads
-    // a PEELED view, so the wrapper does not hide the `Blob` from it.
-    assert_eq!(
-        p.parse_cell_path_key(&[1, 2, 3], "frozen<blob>", "k")
-            .unwrap(),
-        Value::Frozen(Box::new(Value::blob(vec![1, 2, 3])))
-    );
-    // Case-INSENSITIVELY, because `parse_value_from_raw_bytes` routes off a
-    // LOWERCASED guard: were the declared-blob test case-sensitive where the
-    // decode is not, a `Frozen<BLOB>` would decode to a blob and then be
-    // rejected as undecoded.
-    assert_eq!(
-        p.parse_cell_path_key(&[1, 2, 3], "Frozen<BLOB>", "k")
-            .unwrap(),
-        Value::Frozen(Box::new(Value::blob(vec![1, 2, 3])))
-    );
     // A BARE, unqualified marshal name (a hand-written schema, or a marshal
     // string whose package prefix was stripped upstream): the declared-blob test
     // must recognise it, or the diagnostic below would fire on a CORRECT decode.
@@ -540,16 +483,6 @@ fn a_declared_blob_cell_path_key_is_a_blob() {
         )
         .unwrap(),
         Value::blob(vec![1, 2, 3])
-    );
-    // Frozen-spelled marshal: same wrapper, same reason as the two above.
-    assert_eq!(
-        p.parse_cell_path_key(
-            &[1, 2, 3],
-            &format!("{MARSHAL}.FrozenType({MARSHAL}.BytesType)"),
-            "k"
-        )
-        .unwrap(),
-        Value::Frozen(Box::new(Value::blob(vec![1, 2, 3])))
     );
 }
 
@@ -1481,7 +1414,8 @@ fn a_foreign_type_ending_in_bytes_type_is_not_treated_as_a_declared_blob() {
         "BytesType",
         "org.apache.cassandra.db.marshal.BytesType",
         "'org.apache.cassandra.db.marshal.BytesType'",
-        "frozen<blob>",
+        // NO `frozen<blob>`: it is refused at both metadata entry points (#4104),
+        // and this helper no longer peels frozen spellings.
     ] {
         assert!(
             p.cell_path_key_declares_blob(real),

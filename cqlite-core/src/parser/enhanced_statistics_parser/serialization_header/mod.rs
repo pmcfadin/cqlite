@@ -14,7 +14,7 @@ pub(in crate::parser::enhanced_statistics_parser) use schema::parse_serializatio
 
 use super::super::header::ColumnInfo;
 use super::super::vint::parse_vuint;
-use super::marshal_type::convert_marshal_type_to_cql;
+use super::marshal_type::convert_marshal_type_to_cql_logged;
 use super::SerializationHeaderResult;
 use nom::IResult;
 use sequential::{parse_serialization_header_at_offset, parse_serialization_header_sequential};
@@ -439,34 +439,31 @@ fn parse_regular_columns(input: &[u8]) -> IResult<&[u8], (Vec<String>, Vec<Colum
                     break;
                 }
 
-                // Column type (Cassandra internal type name)
+                // Column type: decoded and CQL-converted in one step. TWO causes share
+                // this failure arm deliberately — bytes that are not UTF-8, and a type
+                // no Cassandra writer can have recorded (`FrozenType(<scalar>)`, gate 2
+                // of #4104, which logs its own `error!` with the CQL3Type.java citation).
+                // Both mean this marker offset holds no readable header.
                 let type_bytes = &input[pos..pos + type_len];
-                let internal_type = match std::str::from_utf8(type_bytes) {
-                    Ok(s) => s.to_string(),
-                    Err(e) => {
-                        let type_hex: String = type_bytes
-                            .iter()
-                            .map(|b| format!("{:02x}", b))
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        tracing::debug!(
-                            "Column {} ('{}') parsing failed at offset {}: UTF-8 decode error for column type at pos {} (len={}): {:?}, bytes: {}",
-                            col_idx,
-                            column_name,
-                            marker_offset,
-                            pos,
-                            type_len,
-                            e,
-                            type_hex
-                        );
-                        parse_success = false;
-                        break;
-                    }
+                let Some(cql_type) = std::str::from_utf8(type_bytes)
+                    .ok()
+                    .and_then(convert_marshal_type_to_cql_logged)
+                else {
+                    tracing::debug!(
+                        "Column {} ('{}') parsing failed at offset {}: column type at pos {} \
+                         (len={}) is not valid UTF-8, or is a type Cassandra cannot have \
+                         written (see the preceding error line); bytes: {:02x?}",
+                        col_idx,
+                        column_name,
+                        marker_offset,
+                        pos,
+                        type_len,
+                        type_bytes
+                    );
+                    parse_success = false;
+                    break;
                 };
                 pos += type_len;
-
-                // Convert Cassandra marshal type to CQL type
-                let cql_type = convert_marshal_type_to_cql(&internal_type);
 
                 parsed_columns.push(ColumnInfo {
                     name: column_name,
@@ -634,7 +631,10 @@ fn fallback_parse_serialization_header_ascii(
                         }
                     };
 
-                    let cql_type = convert_marshal_type_to_cql(&internal_type);
+                    // Gate 2 of #4104: a refused type fails the WHOLE header rather
+                    // than silently dropping the column, which would hide the refusal
+                    // behind a schema that merely looks short.
+                    let cql_type = convert_marshal_type_to_cql_logged(&internal_type)?;
                     columns.push(ColumnInfo {
                         name: column_name,
                         column_type: cql_type,

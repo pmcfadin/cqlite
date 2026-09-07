@@ -6,6 +6,7 @@
 
 use super::CqlType;
 use crate::error::{Error, Result};
+use frozen_scalar::{frozen_inner_supports_freezing, refuse_frozen_scalar_cql};
 
 /// Maximum allowed CQL type nesting depth. Mirrors
 /// [`crate::parser::complex_types::ComplexTypeParser`] (`max_depth = 32`).
@@ -18,6 +19,22 @@ use crate::error::{Error, Result};
 /// reached at exactly depth 32 (i.e. 32 levels of collection/frozen nesting) is
 /// therefore the last allowed depth; a 33rd level returns `Err`.
 const MAX_NESTING_DEPTH: usize = 32;
+
+/// The `frozen<T>` FREEZABILITY rule — one rule, both spellings (issue #4104).
+///
+/// A CHILD of this module rather than a sibling under `schema`, and the reason is
+/// the campsite ratchet, not taxonomy: `schema/mod.rs` is 1627 lines — 827 OVER
+/// the 800-line source threshold — so it may not grow by even the one `mod` line,
+/// and splitting it is out of scope for #4104 (epic #1116). The siting is not
+/// arbitrary either: [`CqlType::parse`] is the rule's first consumer and the CQL
+/// half of the gate, so the rule sits with the parser that enforces it. Its second
+/// consumer, the `Statistics.db` SerializationHeader type parser, reaches it as
+/// `crate::schema::cql_type_parser::frozen_scalar::validate_marshal_frozen` —
+/// which is why `schema/mod.rs` declares this module `pub(crate)` (a MODIFIED
+/// line, not an added one). Precedent for restructuring rather than opting out of
+/// the ratchet: `row_decoder::frozen_map`'s header.
+#[path = "frozen_scalar.rs"]
+pub(crate) mod frozen_scalar;
 
 impl CqlType {
     fn split_top_level_types(type_str: &str) -> Result<Vec<&str>> {
@@ -87,13 +104,25 @@ impl CqlType {
                 .map(|_| &s[prefix.len()..])
         }
 
-        // Handle frozen types
+        // ═══ GATE 1 OF 2: `frozen<>` IS NOT DECLARABLE OVER A SCALAR ═══
+        //
+        // `CQL3Type.Raw::freeze()` is the base implementation and does nothing but
+        // throw ("frozen<> is only allowed on collections, tuples, and user-defined
+        // types"), and the grammar routes every `frozen<…>` through it — so a
+        // `frozen<scalar>` column, map key, element or UDT field cannot exist and
+        // there are no Cassandra-written bytes for one. The rule, its citation and
+        // the corpus census live in ONE place (`schema::frozen_scalar`), shared with
+        // the SerializationHeader gate; issue #4104.
+        //
+        // Sited HERE, at the metadata entry point, and never in a decoder: the
+        // refusal is upstream of decode by design.
         if let Some(inner) = strip_prefix_ci(type_str, "frozen<") {
             if let Some(inner) = inner.strip_suffix('>') {
-                return Ok(CqlType::Frozen(Box::new(Self::parse_with_depth(
-                    inner,
-                    depth + 1,
-                )?)));
+                let parsed = Self::parse_with_depth(inner, depth + 1)?;
+                if !frozen_inner_supports_freezing(&parsed) {
+                    return Err(refuse_frozen_scalar_cql(type_str, inner.trim()));
+                }
+                return Ok(CqlType::Frozen(Box::new(parsed)));
             }
         }
 
@@ -320,9 +349,13 @@ mod tests {
     /// nesting must NOT stack-overflow (which under `panic = "abort"` aborts the
     /// whole process). It must return `Err` instead. The recursion is bounded at
     /// [`MAX_NESTING_DEPTH`], so this errors long before the stack is exhausted.
+    ///
+    /// The leaf is `list<int>` so the `Err` can only be the DEPTH guard: a
+    /// `frozen<int>` leaf would also error, but from the #4104 frozen-scalar
+    /// refusal, which would make this test pass without testing the guard.
     #[test]
     fn test_adversarial_deep_nesting_returns_err_not_abort() {
-        let s = "frozen<".repeat(50_000) + "int" + &">".repeat(50_000);
+        let s = "frozen<".repeat(50_000) + "list<int>" + &">".repeat(50_000);
         assert!(
             CqlType::parse(&s).is_err(),
             "pathological nesting must return Err, not abort"
@@ -333,12 +366,22 @@ mod tests {
     /// (i.e. `MAX_NESTING_DEPTH` levels of `frozen<...>` around a leaf) is the
     /// last allowed depth and must still parse to the identical `CqlType` it did
     /// before the guard existed; one level deeper must error.
+    ///
+    /// # The leaf is `list<int>`, and it has to be (#4104)
+    /// `frozen<int>` is not declarable CQL (`CQL3Type.Raw::freeze()` throws —
+    /// `cassandra-5.0.8:src/java/org/apache/cassandra/cql3/CQL3Type.java:647-651`)
+    /// and is refused by this parser, so a frozen-scalar leaf would make BOTH
+    /// halves of this test pass for the wrong reason. `list<int>` is a legal frozen
+    /// inner, and the collection itself costs one level — so `MAX_NESTING_DEPTH - 1`
+    /// frozen layers put the `int` leaf at exactly `MAX_NESTING_DEPTH`, the last
+    /// allowed depth.
     #[test]
     fn test_nesting_depth_boundary_is_exact() {
-        // 32 levels of frozen nesting: last allowed. Must parse and produce the
-        // unchanged nested structure (Frozen x32 around Int).
+        // The leaf `int` lands at depth MAX_NESTING_DEPTH: last allowed. Must parse
+        // and produce the unchanged nested structure (Frozen x31 around List(Int)).
         let depth = MAX_NESTING_DEPTH; // 32 — the last allowed nesting level.
-        let ok_str = "frozen<".repeat(depth) + "int" + &">".repeat(depth);
+        let frozens = depth - 1; // the `list<...>` level costs the 32nd.
+        let ok_str = "frozen<".repeat(frozens) + "list<int>" + &">".repeat(frozens);
         let mut parsed =
             CqlType::parse(&ok_str).expect("nesting at the depth bound must still parse");
 
@@ -347,11 +390,20 @@ mod tests {
             parsed = *inner;
             frozen_levels += 1;
         }
-        assert_eq!(frozen_levels, depth, "all frozen levels must be preserved");
-        assert_eq!(parsed, CqlType::Int, "the leaf type must be unchanged");
+        assert_eq!(
+            frozen_levels, frozens,
+            "all frozen levels must be preserved"
+        );
+        assert_eq!(
+            parsed,
+            CqlType::List(Box::new(CqlType::Int)),
+            "the leaf type must be unchanged"
+        );
 
-        // 33 levels: one past the bound. Must error with a clear message.
-        let bad_str = "frozen<".repeat(depth + 1) + "int" + &">".repeat(depth + 1);
+        // One level deeper: the leaf lands at MAX_NESTING_DEPTH + 1. Must error with
+        // a clear message, and the message is what distinguishes the DEPTH guard
+        // from any other refusal.
+        let bad_str = "frozen<".repeat(frozens + 1) + "list<int>" + &">".repeat(frozens + 1);
         let err = CqlType::parse(&bad_str).expect_err("one level past the bound must error");
         let msg = err.to_string();
         assert!(

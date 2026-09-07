@@ -8,7 +8,7 @@
 
 use super::super::super::header::ColumnInfo;
 use super::super::super::vint::parse_vuint;
-use super::super::marshal_type::convert_marshal_type_to_cql;
+use super::super::marshal_type::convert_marshal_type_to_cql_checked;
 use super::super::SerializationHeaderResult;
 use nom::IResult;
 
@@ -140,7 +140,14 @@ pub(super) fn parse_serialization_header_at_offset(
             })?
             .to_string();
 
-        let cql_type = convert_marshal_type_to_cql(&internal_type);
+        // Gate 2 of #4104: refuse a `FrozenType(<scalar>)` no Cassandra writer can
+        // emit. The nom channel carries no message, so the refusal — which does
+        // carry the `CQL3Type.java:647-651` citation — is logged before it is
+        // discarded.
+        let cql_type = convert_marshal_type_to_cql_checked(&internal_type).map_err(|e| {
+            tracing::error!("Refusing SerializationHeader type '{internal_type}': {e}");
+            nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+        })?;
 
         tracing::debug!(
             "Static column {}: name='{}', type='{}' (CQL: '{}')",
@@ -225,7 +232,14 @@ pub(super) fn parse_serialization_header_at_offset(
         input = remaining;
 
         // Convert to CQL type
-        let cql_type = convert_marshal_type_to_cql(&internal_type);
+        // Gate 2 of #4104: refuse a `FrozenType(<scalar>)` no Cassandra writer can
+        // emit. The nom channel carries no message, so the refusal — which does
+        // carry the `CQL3Type.java:647-651` citation — is logged before it is
+        // discarded.
+        let cql_type = convert_marshal_type_to_cql_checked(&internal_type).map_err(|e| {
+            tracing::error!("Refusing SerializationHeader type '{internal_type}': {e}");
+            nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+        })?;
 
         tracing::debug!(
             "Column {}: name='{}', type='{}' (CQL: '{}')",
@@ -424,7 +438,14 @@ pub(super) fn parse_serialization_header_sequential(
             })?
             .to_string();
 
-        let cql_type = convert_marshal_type_to_cql(&internal_type);
+        // Gate 2 of #4104: refuse a `FrozenType(<scalar>)` no Cassandra writer can
+        // emit. The nom channel carries no message, so the refusal — which does
+        // carry the `CQL3Type.java:647-651` citation — is logged before it is
+        // discarded.
+        let cql_type = convert_marshal_type_to_cql_checked(&internal_type).map_err(|e| {
+            tracing::error!("Refusing SerializationHeader type '{internal_type}': {e}");
+            nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+        })?;
 
         tracing::debug!(
             "Sequential parser: static column {}: name='{}', type='{}'",
@@ -510,7 +531,14 @@ pub(super) fn parse_serialization_header_sequential(
             })?
             .to_string();
 
-        let cql_type = convert_marshal_type_to_cql(&internal_type);
+        // Gate 2 of #4104: refuse a `FrozenType(<scalar>)` no Cassandra writer can
+        // emit. The nom channel carries no message, so the refusal — which does
+        // carry the `CQL3Type.java:647-651` citation — is logged before it is
+        // discarded.
+        let cql_type = convert_marshal_type_to_cql_checked(&internal_type).map_err(|e| {
+            tracing::error!("Refusing SerializationHeader type '{internal_type}': {e}");
+            nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+        })?;
 
         tracing::debug!(
             "Sequential parser: regular column {}: name='{}', type='{}'",
