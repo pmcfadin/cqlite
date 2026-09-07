@@ -354,6 +354,7 @@ mod tests {
     /// | `InvalidState` | `RuntimeError` (builtin) | Invalid state (e.g. closed DB) |
     /// | `Cancelled` | `CancelledError` | Cooperative abort (#2264) — never `IOError` |
     /// | `Corruption`, `Serialization`, `InvalidFormat`, `UnsupportedFormat` | `CqliteError` (base) | No closer Python class |
+    /// | `ColumnDecode`, `UnreadableSSTable` | `CqliteError` (base) | Undecodable data at cell (#3721) / file (#4159) granularity |
     /// | `UnsupportedVersion`, `UnsupportedCommitLogVersion`, `CorruptCommitLogFrame` | `CqliteError` (base) | Format gating |
     /// | `InvalidReadPath`, `ForcedReadPathUnavailable` | `CqliteError` (base) | Read-path knob (#1918) |
     /// | `InvalidPath`, `TypeConversion`, `Storage`, `Concurrency`, `NotFound` | `CqliteError` (base) | |
@@ -389,6 +390,10 @@ mod tests {
             // class as `Corruption` for a caller (undecodable data reaching them),
             // so it takes the same Python class and the same `PARSE` code on Node.
             Error::ColumnDecode { .. } => PyExceptionClass::Cqlite,
+            // Issue #4159: an SSTable whose OPEN refused — the same class as
+            // `ColumnDecode` one granularity up (a whole file rather than one cell),
+            // so the same Python class and the same `PARSE` code on Node.
+            Error::UnreadableSSTable { .. } => PyExceptionClass::Cqlite,
             Error::InvalidFormat(_) => PyExceptionClass::Cqlite,
             Error::UnsupportedFormat(_) => PyExceptionClass::Cqlite,
             Error::UnsupportedVersion { .. } => PyExceptionClass::Cqlite,

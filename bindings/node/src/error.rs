@@ -498,7 +498,12 @@ mod tests {
             // Issue #3721: a column whose value could not be decoded is
             // undecodable DATA reaching the caller — same identity as
             // `Corruption`, hence the same `PARSE` code (and Python's `Cqlite`).
-            | Error::ColumnDecode { .. } => "PARSE",
+            | Error::ColumnDecode { .. }
+            // Issue #4159: an SSTable whose OPEN refused. Same identity as
+            // `ColumnDecode` one granularity up (the whole file, not one cell) —
+            // undecodable DATA reaching the caller — hence the same `PARSE` code and
+            // Python's `Cqlite`.
+            | Error::UnreadableSSTable { .. } => "PARSE",
             // Query execution budget elapsed (issue #1695): the SAME `TIMEOUT` code as
             // its sibling `Timeout`, so a JS caller checking for `TIMEOUT` catches
             // both. Deliberately NOT `QUERY`, even though its `ErrorCategory` IS
