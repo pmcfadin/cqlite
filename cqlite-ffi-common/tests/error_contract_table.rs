@@ -154,9 +154,12 @@ fn query_timeout_shares_the_timeout_identity_on_both_surfaces() {
 /// together with the table.
 #[test]
 fn row_count_is_pinned() {
+    // 40 since issue #4159 added `UnreadableSSTable` (39 before): reviewed as the
+    // same `Corruption`/`ColumnDecode` row on every axis — undecodable data reaching
+    // a caller, at FILE granularity — so no binding consumer needs a new branch.
     assert_eq!(
         FfiErrorVariant::ALL.len(),
-        39,
+        40,
         "contract row count changed — review the new row's py_class/node_code \
          and update this pin"
     );

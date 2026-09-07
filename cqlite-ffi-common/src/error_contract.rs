@@ -193,6 +193,14 @@ ffi_error_contract_table! {
     // `Corruption` on every axis — it IS undecodable data reaching a caller — so a
     // binding consumer that already handles a parse failure needs no new branch.
     ColumnDecode => { py: Cqlite, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
+    // Issue #4159: an SSTable whose OPEN refused, so a scan of its table cannot
+    // return a complete answer. Same row as `Corruption`/`ColumnDecode` on every
+    // axis — it IS undecodable data reaching a caller, one granularity up (the whole
+    // file rather than one cell) — so a binding consumer that already handles a
+    // parse failure needs no new branch, and both bindings agree on the identity.
+    // `category: Data` MATCHES `Error::classify()` (Corruption) and
+    // `recoverable: false` matches `Error::is_recoverable()` for the variant.
+    UnreadableSSTable => { py: Cqlite, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
     Schema => { py: Schema, code: "SCHEMA", category: Schema, recoverable: false, prefix: Some("SchemaError"), },
     // (#1451) real PARSE: a CQL syntax failure, not the generic QUERY bucket.
     CqlParse => { py: Parse, code: "PARSE", category: Query, recoverable: false, prefix: Some("ParseError"), },
@@ -259,6 +267,7 @@ pub fn variant_of(err: &Error) -> FfiErrorVariant {
         Error::Serialization { .. } => FfiErrorVariant::Serialization,
         Error::Corruption(_) => FfiErrorVariant::Corruption,
         Error::ColumnDecode { .. } => FfiErrorVariant::ColumnDecode,
+        Error::UnreadableSSTable { .. } => FfiErrorVariant::UnreadableSSTable,
         Error::Schema(_) => FfiErrorVariant::Schema,
         Error::CqlParse(_) => FfiErrorVariant::CqlParse,
         Error::InvalidFormat(_) => FfiErrorVariant::InvalidFormat,
@@ -324,6 +333,12 @@ impl FfiErrorVariant {
                 "org.apache.cassandra.db.marshal.Int32Type",
                 0,
                 Error::corruption("sample cell decode failure"),
+            ),
+            FfiErrorVariant::UnreadableSSTable => Error::unreadable_sstable(
+                "sample_keyspace.sample_table",
+                "/sample/sample_keyspace/sample_table-1/nb-1-big-Data.db",
+                1,
+                std::sync::Arc::new(Error::corruption("sample SSTable open refusal")),
             ),
             FfiErrorVariant::Schema => Error::schema("sample schema failure"),
             FfiErrorVariant::CqlParse => Error::cql_parse("sample CQL syntax failure"),
