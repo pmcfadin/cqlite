@@ -116,7 +116,8 @@ fn vector_is_decoded_not_returned_as_a_blob() {
 /// restriction), so this asserts CQLite's own declared boundary, not Cassandra's.
 #[test]
 fn unimplemented_element_type_is_refused_by_name() {
-    let ty = "org.apache.cassandra.db.marshal.VectorType(org.apache.cassandra.db.marshal.Int32Type , 3)";
+    let ty =
+        "org.apache.cassandra.db.marshal.VectorType(org.apache.cassandra.db.marshal.Int32Type , 3)";
     let err = decode(ty, &THREE).expect_err("a non-float element must be refused");
     let msg = err.to_string();
     // The refusal names the element in its CQL spelling (`Int`), having already
