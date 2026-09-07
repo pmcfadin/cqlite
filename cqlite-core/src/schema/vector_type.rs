@@ -165,8 +165,10 @@ pub(crate) fn split_vector_args<'a>(inner: &'a str, type_str: &str) -> Result<Ve
 /// Parse a vector's dimension parameter.
 ///
 /// Rejects — each with a named error, never a fallback value:
-/// * an empty or non-numeric parameter (a dimension is a decimal integer;
-///   `TypeParser.getVectorParameters` uses `Integer.parseInt`);
+/// * an empty parameter, or one that is not PLAIN DECIMAL DIGITS — including the
+///   signed spellings Cassandra's own reader would tolerate but its writer can
+///   never emit (see the body for the pinned citation and why the divergence is
+///   one-directional);
 /// * `0` and any negative spelling — `VectorType.java:89-90` rejects
 ///   `dimension <= 0`, so a zero-dimension vector does not exist and a
 ///   zero-length value is an error rather than an empty vector;
@@ -176,8 +178,30 @@ pub(crate) fn parse_vector_dimension(raw: &str, type_str: &str) -> Result<usize>
     if raw.is_empty() {
         return Err(malformed(type_str, "the dimension parameter is empty"));
     }
-    // Parsed as `usize` so a leading `-` or `+`, whitespace inside, or any
-    // non-digit is a parse failure rather than something silently tolerated.
+    // DIGITS ONLY, checked explicitly rather than left to `str::parse`, which
+    // ACCEPTS a leading `+` (`"+3".parse::<usize>() == Ok(3)`) — measured, and it
+    // is what the sibling test caught.
+    //
+    // This is deliberately STRICTER THAN CASSANDRA'S OWN READER, which would
+    // accept `+3`: `TypeParser.readNextIdentifier` treats `+`, `-`, `.`, `_` and
+    // `&` as identifier characters (`TypeParser.java:578-583`) and
+    // `getVectorParameters` hands the result to `Integer.parseInt`
+    // (`:255-258`), which tolerates a leading sign. The divergence is safe and
+    // one-directional: Cassandra's WRITER concatenates the `int` dimension
+    // directly (`stringifyVectorParameters`, `TypeParser.java:239-242`), so no
+    // Cassandra-written type string can carry a sign, a `.` or a `_` in this
+    // parameter. Refusing them therefore rejects nothing Cassandra wrote, while
+    // accepting them would mean two spellings of one dimension reaching the
+    // decode path — and a dimension IS the width, so an unnormalised spelling is
+    // a width nobody declared (#28).
+    if !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(malformed(
+            type_str,
+            &format!(
+                "dimension '{raw}' is not a plain decimal integer (digits only: a                  sign, a decimal point, whitespace or a non-ASCII digit is not a                  dimension Cassandra's writer can emit)"
+            ),
+        ));
+    }
     let dimension: usize = raw.parse().map_err(|_| {
         malformed(
             type_str,
