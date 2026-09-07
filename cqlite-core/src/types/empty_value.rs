@@ -194,6 +194,19 @@ impl EmptyValueType {
             CqlType::Varint => Some(EmptyValueType::Varint),
             // CORRUPTION on Cassandra's own terms — bare `!= N` validate.
             CqlType::TinyInt | CqlType::SmallInt | CqlType::Date | CqlType::Time => None,
+            // CORRUPTION on Cassandra's own terms too, but spelled as an EXPLICIT
+            // empty-buffer rejection rather than a bare `!= N` (issue #4114): a
+            // vector's `validate` opens
+            // `if (accessor.isEmpty(input)) rejectNullOrEmptyValue()`
+            // (`db/marshal/VectorType.java:515-517`, `:653-655`), and
+            // `rejectNullOrEmptyValue` (`:365-368`) throws
+            // `MarshalException("Invalid empty vector value")`. The type cannot even
+            // be CONSTRUCTED at dimension 0 (`:89-90` enforces `n > 0`), so there is
+            // no legal zero-length encoding for this family to speak for. Kept a
+            // separate arm from the four above precisely because its citation is a
+            // different spelling — folding it into their comment would make that
+            // comment false about it.
+            CqlType::Vector(_, _) => None,
             // Empty is a MEANINGFUL value for these; no sentinel.
             CqlType::Text | CqlType::Ascii | CqlType::Varchar | CqlType::Blob => None,
             // Not a scalar family this sentinel speaks for.
