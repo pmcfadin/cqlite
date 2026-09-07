@@ -205,11 +205,22 @@ ffi_error_contract_table! {
     // it did not find cannot be reported as absent. Deliberately NOT the
     // `UnreadableSSTable` row: nothing here is undecodable data — every file is
     // fine, the walk simply could not see a directory. It is an I/O condition, and
-    // an ENVIRONMENTAL one, so `code: "IO"`, `category: System` and
+    // an ENVIRONMENTAL one, so `py: Io`, `code: "IO"`, `category: System` and
     // `recoverable: true` all MATCH `Error::category()`/`Error::is_recoverable()`
     // for the variant, and a binding consumer handling an I/O failure (fix the
     // mount, fix the permissions, retry) already has the right branch.
-    IncompleteDiscovery => { py: Cqlite, code: "IO", category: System, recoverable: true, prefix: Some("IoError"), },
+    //
+    // `py` was `Cqlite` when this row was first written — contradicting this row's
+    // OWN `code: "IO"`, and contradicting the Python binding's documented table AND
+    // its `expected_py_class` restatement, so `to_py_err` raised `CqliteError`
+    // where all three said `IOError`. It survived review because the test that
+    // reconciles the restatement against this table,
+    // `test_error_mapping_completeness` in `bindings/python/src/error.rs`, cannot
+    // LINK in the gate: a pyo3 extension-module build has no libpython, so
+    // `cargo test -p cqlite-py --lib` dies with `undefined symbol: PyExc_*` before
+    // any test runs. Both #4159 rows are therefore now pinned in
+    // `cqlite-ffi-common/tests/error_contract_table.rs`, which does run.
+    IncompleteDiscovery => { py: Io, code: "IO", category: System, recoverable: true, prefix: Some("IoError"), },
     Schema => { py: Schema, code: "SCHEMA", category: Schema, recoverable: false, prefix: Some("SchemaError"), },
     // (#1451) real PARSE: a CQL syntax failure, not the generic QUERY bucket.
     CqlParse => { py: Parse, code: "PARSE", category: Query, recoverable: false, prefix: Some("ParseError"), },
