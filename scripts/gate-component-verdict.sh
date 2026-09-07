@@ -446,7 +446,10 @@ if [ "$GL_RC" -ne 0 ]; then
   # Name the SUMMARY rather than the private snapshot the reader was handed: that path is
   # gone by the time anyone reads this line. Exact literal substitution, never a regex —
   # TMPDIR is caller-controlled and would arrive as a pattern.
-  _gl_first=$(printf '%s\n' "$GL_OUT" | head -1)
+  # Herestring, not `printf | head` (#4061): head -1 exits on the first line and closes the
+  # pipe while bash's BUILTIN printf is still writing, so an unanchored `printf: write error:
+  # Broken pipe` lands on stderr — inside the very diagnostic a caller reads.
+  _gl_first=$(head -1 <<<"$GL_OUT")
   _gl_first="${_gl_first//"$SNAP"/"$SUMMARY"}"
   _gl_first="${_gl_first//"$SNAPDIR"/(snapshot)}"
   # ONE code, and NO verdict of our own about liveness. The reader's answer is quoted
