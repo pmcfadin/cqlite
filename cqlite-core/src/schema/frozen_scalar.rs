@@ -167,15 +167,103 @@ pub(crate) fn frozen_inner_supports_freezing(inner: &CqlType) -> bool {
     }
 }
 
-/// Whether a `Custom` type name is CQL's `vector<element, dimension>` spelling.
+/// Whether a `Custom` type name is a COMPLETE, DECLARABLE `vector<element,
+/// dimension>` spelling.
 ///
-/// Matched on the HEAD keyword only, case-insensitively, exactly as
-/// `CqlType::parse` matches `list<`/`set<`/`map<`/`tuple<`. Deciding freezability
-/// needs nothing more: the element and dimension are the vector's business, and a
-/// vector is freezable whatever they are.
+/// # A HEAD-KEYWORD MATCH IS NOT ENOUGH, and that was roborev job 108's finding
+/// This checked only that the text before the first `<` was `vector`, so
+/// `frozen<vector<int>>` (no dimension), `frozen<vector<>>` (no arguments) and
+/// `frozen<vector<int, nope>>` (dimension not an integer) were all granted
+/// freezability. None of them is declarable CQL, so that was a permissive
+/// fall-through GRANTING A PERMISSION CASSANDRA DOES NOT — the same
+/// no-heuristics defect as an invented decode result, pointed the other way.
+///
+/// The `Custom` arm needs the spelling to be a vector because the SPELLING is all
+/// it has: `CqlType` has no `Vector` variant, so a vector and an unparseable
+/// string are the same value. A spelling that never becomes a `RawVector` never
+/// reaches `RawVector::freeze` either, so it must be refused here.
+///
+/// # THE ACCEPTED GRAMMAR, DERIVED AT THE PINNED TAG
+///
+/// ```text
+/// Parser.g:1916-1919
+///   vector_type returns [CQL3Type.Raw vt]
+///       : K_VECTOR '<' t1=comparatorType ','  d=INTEGER '>'
+///           { $vt = CQL3Type.Raw.vector(t1, Integer.parseInt($d.text)); }
+///       ;
+/// Lexer.g:337-339
+///   INTEGER : '-'? DIGIT+ ;
+/// VectorType.java:86-92
+///   private VectorType(AbstractType<T> elementType, int dimension) {
+///       ...
+///       if (dimension <= 0)
+///           throw new InvalidRequestException("vectors may only have positive dimensions; given %d");
+/// ```
+///
+/// So, exactly: the head keyword `vector`; EXACTLY TWO top-level arguments (the
+/// element may itself contain commas, e.g. `vector<map<int, text>, 3>`); a
+/// non-empty element; and a dimension that is a bare DIGIT string (`INTEGER`
+/// permits a leading `-` and nothing else — no `+`, no separators, no radix),
+/// fits a Java `int` (`Integer.parseInt` throws beyond it), and is `> 0`
+/// (`VectorType`'s constructor). Rust's `parse::<i32>()` reproduces the `int`
+/// bound exactly and RETURNS `Err` rather than saturating; requiring all-digits
+/// first is what excludes the `-`/`+` spellings `parse` would otherwise accept.
+///
+/// # TWO BOUNDS, DECLARED RATHER THAN IMPLIED
+///  * **The ELEMENT is not inspected.** `vector<frozen<int>, 3>` is accepted by
+///    this predicate, because `CqlType::parse` never descends into a vector at
+///    all — the whole spelling lands in `Custom` — so a frozen scalar nested in a
+///    vector element still passes BOTH gates. That is PRE-EXISTING (it passed
+///    before #4104 too, when nothing was refused) and closing it needs real
+///    `CqlType::Vector` parsing, i.e. a new public type variant: out of scope
+///    here, and reported for a follow-up. Inspecting it by re-entering
+///    `CqlType::parse` was rejected deliberately: that call restarts at depth 0,
+///    so `frozen<vector<frozen<vector<…` would recurse unbounded past
+///    `MAX_NESTING_DEPTH` — issue #1690's stack-overflow hazard.
+///  * **The MARSHAL half does not validate arity/dimension** — see
+///    [`FREEZABLE_MARSHAL_SIMPLE_NAMES`], which is a head-CLASS lookup over names
+///    a Cassandra WRITER produced, not a spelling proxy.
 fn is_vector_spelling(name: &str) -> bool {
-    name.split_once('<')
-        .is_some_and(|(head, _)| head.trim().eq_ignore_ascii_case("vector"))
+    let Some((head, rest)) = name.split_once('<') else {
+        return false;
+    };
+    if !head.trim().eq_ignore_ascii_case("vector") {
+        return false;
+    }
+    let Some(inner) = rest.strip_suffix('>') else {
+        return false;
+    };
+    // An EMPTY argument is a CQL syntax error at whatever depth it occurs, and the
+    // shared splitter FILTERS empty segments — so `vector<int, , 3>` would
+    // otherwise split to two parts and pass. Refuse the shape directly: no legal
+    // type string carries a leading, trailing or doubled comma at any depth, so
+    // this cannot over-refuse.
+    let squeezed: String = inner.chars().filter(|c| !c.is_whitespace()).collect();
+    if squeezed.starts_with(',') || squeezed.ends_with(',') || squeezed.contains(",,") {
+        return false;
+    }
+    // THE SHARED SPLITTER, reused rather than re-implemented: it is the parent
+    // module's own `<>`-depth walk (and it already refuses unbalanced nesting), so
+    // this predicate cannot form a second opinion about where an argument ends.
+    let Ok(parts) = CqlType::split_top_level_types(inner) else {
+        return false;
+    };
+    let [element, dimension] = parts[..] else {
+        return false;
+    };
+    !element.trim().is_empty() && is_vector_dimension(dimension.trim())
+}
+
+/// Whether `d` is a dimension `Integer.parseInt` would accept and `VectorType`'s
+/// constructor would keep: a bare digit string, inside Java `int`, strictly `> 0`.
+///
+/// `is_ascii_digit` FIRST, and it is load-bearing: `str::parse::<i32>` accepts a
+/// leading `+` that `Lexer.g:337-339`'s `INTEGER` does not, and would accept the
+/// `-` spellings `VectorType.java:89-90` throws on. Digits-only settles both, and
+/// leaves `parse` to do only the one thing Java's does — enforce the `int` bound,
+/// by returning `Err` instead of saturating.
+fn is_vector_dimension(d: &str) -> bool {
+    !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()) && d.parse::<i32>().is_ok_and(|n| n > 0)
 }
 
 /// The refusal a CQL-form `frozen<scalar>` earns, naming both the spelling that
@@ -210,6 +298,16 @@ pub(crate) fn refuse_frozen_scalar_cql(spelling: &str, inner: &str) -> Error {
 ///
 /// Conclusion: `frozen<vector<..>>` is declarable CQL and `FrozenType(VectorType(..))`
 /// is a grammatical header type, even though no corpus file spells either.
+///
+/// # THIS IS A HEAD-CLASS LOOKUP AND CHECKS NO ARGUMENTS — deliberately
+/// Unlike the CQL side's [`is_vector_spelling`], which must validate the whole
+/// `vector<..>` spelling because the spelling is its only evidence that a `Custom`
+/// IS a vector, these names arrive from a marshal string a Cassandra WRITER
+/// produced, and the freezability question they answer is decided by the class
+/// alone: `RawVector::freeze` returns `this` whatever the dimension. Validating a
+/// `VectorType(..)`'s arity belongs to the marshal type parser, not to a
+/// freezability gate. Stated so the asymmetry reads as a decision rather than an
+/// oversight.
 const FREEZABLE_MARSHAL_SIMPLE_NAMES: &[&str] = &[
     "ListType",
     "SetType",

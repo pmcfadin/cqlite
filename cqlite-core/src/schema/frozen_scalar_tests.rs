@@ -161,20 +161,115 @@ fn frozen_over_a_collection_tuple_or_udt_still_parses() {
 /// the CQL rule are one rule and must not disagree.
 #[test]
 fn a_frozen_vector_is_accepted_in_both_spellings() {
-    for spelling in [
-        "frozen<vector<float, 3>>",
-        "frozen<VECTOR<float,3>>",
-        "list<frozen<vector<float, 3>>>",
-    ] {
-        assert!(
-            CqlType::parse(spelling).is_ok(),
-            "`{spelling}` is declarable CQL — RawVector overrides freeze()"
-        );
-    }
+    // The full ACCEPT/REFUSE sets for the spelling live in
+    // `a_complete_vector_spelling_is_still_accepted` /
+    // `an_incomplete_vector_spelling_is_refused`; this case pins the CROSS-SPELLING
+    // agreement, which is the property the two halves of one rule can break.
+    assert!(CqlType::parse("frozen<vector<float, 3>>").is_ok());
     const P: &str = "org.apache.cassandra.db.marshal.";
     assert!(
         validate_marshal_frozen(&format!("{P}FrozenType({P}VectorType({P}FloatType,3))")).is_ok()
     );
+}
+
+/// An INCOMPLETE `vector<..>` spelling is NOT declarable, so it is NOT freezable.
+///
+/// roborev job 108. `is_vector_spelling` matched only the head keyword, so every
+/// spelling below was granted freezability — a permission Cassandra does not grant,
+/// which is this issue's own defect pointed the other way.
+///
+/// The accepted grammar is `Parser.g:1916-1919`
+/// (`K_VECTOR '<' comparatorType ',' INTEGER '>'`, i.e. EXACTLY two arguments),
+/// `Lexer.g:337-339` (`INTEGER : '-'? DIGIT+`, so digits with at most a leading
+/// `-`, and `Integer.parseInt` bounds it to a Java `int`) and
+/// `VectorType.java:89-90` (`if (dimension <= 0) throw ... "vectors may only have
+/// positive dimensions"`). Every case below violates exactly one of those.
+#[test]
+fn an_incomplete_vector_spelling_is_refused() {
+    const NOT_DECLARABLE: &[&str] = &[
+        // The three roborev job 108 named.
+        "frozen<vector<int>>",       // no dimension — one argument, not two
+        "frozen<vector<>>",          // no arguments at all
+        "frozen<vector<int, nope>>", // dimension is not an INTEGER
+        // `VectorType.java:89-90`: the dimension must be POSITIVE. `Lexer.g` admits
+        // the `-` spelling, so this is a real reachable string, not a straw man.
+        "frozen<vector<int, 0>>",
+        "frozen<vector<int, -3>>",
+        // `Integer.parseInt` throws past the Java `int` bound (2147483647), so this
+        // is a parse error in Cassandra rather than a large vector.
+        "frozen<vector<int, 2147483648>>",
+        // `INTEGER` is `'-'? DIGIT+` — no `+`, no separators, no radix, no float.
+        "frozen<vector<int, +3>>",
+        "frozen<vector<int, 3.0>>",
+        "frozen<vector<int, 0x3>>",
+        "frozen<vector<int, 1_000>>",
+        // Arity: three arguments, and an EMPTY one (which the shared splitter's
+        // empty-segment filtering would otherwise hide).
+        "frozen<vector<int, text, 3>>",
+        "frozen<vector<int, , 3>>",
+        "frozen<vector<, 3>>",
+        "frozen<vector<int, 3,>>",
+        // An empty element with a valid dimension.
+        "frozen<vector< , 3>>",
+        // The head keyword must be `vector`, not merely end in it.
+        "frozen<myvector<int, 3>>",
+        // Unbalanced — the shared splitter refuses it and so must this.
+        "frozen<vector<int, 3>>>",
+    ];
+    assert_eq!(
+        NOT_DECLARABLE.len(),
+        17,
+        "case floor: an emptied or truncated list would pass vacuously"
+    );
+    for spelling in NOT_DECLARABLE {
+        let err = CqlType::parse(spelling)
+            .err()
+            .unwrap_or_else(|| panic!("`{spelling}` is not declarable CQL and must be refused"));
+        assert!(
+            err.to_string().contains("CQL3Type.java:647-651"),
+            "the refusal must cite its oracle, got: {err}"
+        );
+    }
+}
+
+/// OVER-refusal is as much a defect as under-refusal: a COMPLETE vector spelling
+/// must still be accepted.
+///
+/// Without this half, deleting the vector arm outright would satisfy the test
+/// above — and refusing `frozen<vector<float, 3>>` would be refusing declarable
+/// CQL, which is worse than the hole job 108 found.
+#[test]
+fn a_complete_vector_spelling_is_still_accepted() {
+    const DECLARABLE: &[&str] = &[
+        "frozen<vector<float, 3>>",
+        // CQL type keywords are case-insensitive, and whitespace is free.
+        "frozen<VECTOR<float,3>>",
+        "frozen<vector < float , 3 >>",
+        // `Integer.parseInt("03")` is 3; a leading zero is legal.
+        "frozen<vector<float, 03>>",
+        // The element is a `comparatorType`, so it may itself carry top-level
+        // commas — which is why the arity check has to split on `<>` DEPTH.
+        "frozen<vector<map<int, text>, 3>>",
+        "frozen<vector<tuple<int, text>, 2>>",
+        "frozen<vector<vector<float, 3>, 2>>",
+        // The Java `int` bound itself is legal.
+        "frozen<vector<float, 2147483647>>",
+        // And at the positions a vector actually occupies.
+        "list<frozen<vector<float, 3>>>",
+        "map<frozen<vector<float, 3>>, int>",
+    ];
+    assert_eq!(
+        DECLARABLE.len(),
+        10,
+        "case floor: an emptied list would make this test assert nothing"
+    );
+    for spelling in DECLARABLE {
+        assert!(
+            CqlType::parse(spelling).is_ok(),
+            "`{spelling}` is declarable CQL — RawVector overrides freeze() \
+             (CQL3Type.java:915-919) — and must not be refused"
+        );
+    }
 }
 
 /// The header sometimes prefixes a comparator with a structural `[` or `(`
@@ -277,6 +372,11 @@ fn the_membership_set_is_cassandras_override_set() {
         // `RawType`.
         CqlType::Custom("'org.apache.cassandra.db.marshal.Int32Type'".to_string()),
         CqlType::Custom("foo<bar>".to_string()),
+        // An INCOMPLETE vector is not declarable, so it is not freezable either —
+        // asserted here too, at the membership predicate, and not only through
+        // `CqlType::parse` (roborev job 108).
+        CqlType::Custom("vector<int>".to_string()),
+        CqlType::Custom("vector<int, 0>".to_string()),
     ] {
         assert!(
             !frozen_inner_supports_freezing(&scalar),
