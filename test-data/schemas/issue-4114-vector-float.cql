@@ -102,20 +102,29 @@ CREATE KEYSPACE IF NOT EXISTS test_vector
 USE test_vector;
 
 -- Partition-key-only. Regular-column order on disk: a_before, v1, v384, z_after.
+--   a_before : control, sorts BEFORE both vector columns
+--   v1       : vector<float, 1>   =    4 bytes
+--   v384     : vector<float, 384> = 1536 bytes; typical embedding width
+--   z_after  : witness, sorts AFTER both vector columns
+-- (the comments are hoisted out of the column list because
+--  schema/cql_parser.rs's `ws` skips whitespace only, not `--` comments — a
+--  pre-existing limitation, unrelated to vectors)
 CREATE TABLE IF NOT EXISTS vector_pk_only (
     id       int PRIMARY KEY,
-    a_before text,             -- control: sorts BEFORE both vector columns
-    v1       vector<float, 1>,   -- 4 bytes
-    v384     vector<float, 384>, -- 1536 bytes; typical embedding width
-    z_after  text              -- witness: sorts AFTER both vector columns
+    a_before text,
+    v1       vector<float, 1>,
+    v384     vector<float, 384>,
+    z_after  text
 );
 
 -- Partition key + clustering column. Regular-column order: v3, z_after.
+--   v3      : vector<float, 3> = 12 bytes
+--   z_after : witness, sorts AFTER the vector column
 CREATE TABLE IF NOT EXISTS vector_clustered (
     pk       int,
     ck       int,
-    v3       vector<float, 3>,   -- 12 bytes
-    z_after  text,             -- witness: sorts AFTER the vector column
+    v3       vector<float, 3>,
+    z_after  text,
     PRIMARY KEY (pk, ck)
 );
 
@@ -161,9 +170,10 @@ CREATE TABLE IF NOT EXISTS vector_clustered (
 -- the vector and re-introduce escape hatch (1); the partition key in the
 -- emitted row is sufficient evidence that the row was reached and returned.
 -- ============================================================================
+-- v3 = vector<float, 3>, 12 bytes; the ONLY regular column.
 CREATE TABLE IF NOT EXISTS vector_last (
     id       int PRIMARY KEY,
-    v3       vector<float, 3>   -- 12 bytes; the ONLY regular column
+    v3       vector<float, 3>
 );
 
 -- ============================================================================
@@ -199,7 +209,8 @@ CREATE TABLE IF NOT EXISTS vector_last (
 -- That is also why this is a separate table from vector_last rather than a
 -- third row in it.
 -- ============================================================================
+-- v3 = vector<float, 3>, 12 bytes; the ONLY regular column.
 CREATE TABLE IF NOT EXISTS vector_exact (
     id       int PRIMARY KEY,
-    v3       vector<float, 3>   -- 12 bytes; the ONLY regular column
+    v3       vector<float, 3>
 );
