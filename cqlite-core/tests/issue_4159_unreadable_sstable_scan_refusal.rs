@@ -763,6 +763,145 @@ async fn repairing_the_refused_generation_in_place_and_refreshing_restores_reada
     );
 }
 
+/// An UNREADABLE DIRECTORY: the healthy tables must still read, and only a query
+/// whose answer the gap could change may fail.
+///
+/// # The regression this pins
+///
+/// The first version of this branch made every `read_dir` failure ABORT the walk,
+/// so `SSTableManager::new` returned `Err` and NO table was readable. That is not a
+/// hypothetical layout: essentially every ext4 data volume carries a root-owned
+/// `lost+found` at mode 0700, and Cassandra's data directory usually sits on its own
+/// volume. It also contradicted the governing principle of the refusal ledger — one
+/// unreadable thing must not render an UNRELATED table unreadable — by aborting on
+/// the per-directory axis while recording on the per-file one.
+///
+/// Both halves are asserted here because either alone is satisfiable by a wrong fix:
+/// swallowing the error passes the first, aborting passes the second.
+///
+/// # The root guard is an EMPIRICAL capability probe, not an assumption
+///
+/// `chmod 0` does not block root, and it does not block `CAP_DAC_OVERRIDE`, an
+/// unusual filesystem, or a container that grants either. Rather than infer any of
+/// that from a uid, the test STAGES the directory and then MEASURES whether this
+/// process can in fact still read it; only a demonstrated inability to read it makes
+/// the assertions meaningful, so only that case proceeds.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unreadable_directory_leaves_healthy_tables_readable_but_makes_absence_unknowable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Restore `path`'s permissions on the way out, however this test leaves.
+    ///
+    /// A 0-mode directory cannot be removed by `TempDir`'s cleanup, so an assertion
+    /// failure would otherwise leak the whole temp tree AND report a confusing
+    /// second failure from the destructor.
+    struct RestoreMode(PathBuf);
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    let root = TempDir::new().expect("TempDir");
+    let healthy = write_generation(root.path(), TABLE, 1).await;
+
+    // A directory INSIDE the scanned tree, holding something, then made unreadable.
+    let blocked = root.path().join("data").join("lost+found");
+    std::fs::create_dir_all(&blocked).expect("create lost+found");
+    std::fs::write(blocked.join("nb-9-big-Data.db"), b"unreachable")
+        .expect("stage a file the walk must not be able to see");
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000))
+        .expect("chmod 0");
+    let _restore = RestoreMode(blocked.clone());
+
+    // MEASURE the capability rather than assuming it (see the doc above).
+    if std::fs::read_dir(&blocked).is_ok() {
+        eprintln!(
+            "SKIP: this process can still read a 0-mode directory (root, or \
+             CAP_DAC_OVERRIDE), so an unreadable directory cannot be staged here"
+        );
+        return;
+    }
+
+    // (1) The constructor must SUCCEED. This is the regression proper.
+    let manager = manager(root.path()).await;
+
+    // (2) A table that was discovered and opens fine reads NORMALLY, gap or no gap.
+    let rows = manager
+        .scan(&table_id(TABLE), None, None, None, Some(&schema_for(TABLE)))
+        .await
+        .expect("an unreadable sibling directory must not make a healthy table unreadable");
+    assert_eq!(rows.len(), 1, "the healthy table's row must be returned");
+    assert!(
+        healthy.data.exists(),
+        "control: the healthy generation is the one that was read"
+    );
+
+    // (3) A table the walk did NOT discover cannot be reported as empty, because
+    //     part of the tree was unreadable. The error names the directory AND keeps
+    //     the io::ErrorKind, so PermissionDenied stays distinguishable from NotFound.
+    let e = manager
+        .scan(&table_id("never_written"), None, None, None, None)
+        .await
+        .expect_err(
+            "absence cannot be confirmed while part of the tree is unreadable — \
+             answering Ok(empty) here is the #4159 swallow at directory granularity",
+        );
+    match &e {
+        Error::IncompleteDiscovery {
+            table,
+            directory,
+            unreadable,
+            source,
+        } => {
+            assert_eq!(table, "ks_4159.never_written");
+            assert_eq!(
+                directory, &blocked,
+                "the error must NAME the directory the operator has to fix"
+            );
+            assert_eq!(*unreadable, 1, "exactly one directory was unreadable");
+            let rendered = source.to_string();
+            assert!(
+                rendered.contains("lost+found"),
+                "the cause must name the path, got: {rendered}"
+            );
+            assert!(
+                matches!(
+                    source.as_ref(),
+                    Error::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied
+                ),
+                "the original io::ErrorKind must survive — io::Error::other would \
+                 flatten PermissionDenied and NotFound to the same thing, and those \
+                 are different operator problems. Got: {source:?}"
+            );
+        }
+        other => panic!(
+            "expected Error::IncompleteDiscovery so a caller can MATCH on it rather \
+             than parse a message, got {other:?}"
+        ),
+    }
+
+    // (4) Once the directory is readable again, a refresh restores knowable absence.
+    //     Without this the condition would be permanent for the life of the process,
+    //     which is the same defect as a refusal that never clears.
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755))
+        .expect("restore permissions");
+    manager.refresh_tables().await.expect("refresh_tables");
+    let rows = manager
+        .scan(&table_id("never_written"), None, None, None, None)
+        .await
+        .expect("with the whole tree readable, an absent table is EMPTY again");
+    assert!(rows.is_empty(), "no SSTables for that table ⇒ no rows");
+
+    // And the healthy table is still fine after the refresh.
+    let rows = manager
+        .scan(&table_id(TABLE), None, None, None, Some(&schema_for(TABLE)))
+        .await
+        .expect("the healthy table survives the refresh");
+    assert_eq!(rows.len(), 1, "the healthy table's row is still returned");
+}
+
 /// SIBLING (audit S25/S26): a `CompressionInfo.db` that is PRESENT but unreadable
 /// must refuse, while an ABSENT one still means "uncompressed".
 ///
