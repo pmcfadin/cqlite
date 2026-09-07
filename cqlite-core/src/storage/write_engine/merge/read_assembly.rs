@@ -24,15 +24,24 @@
 //! [`deserialize_value_bytes`] codec (never guessed).
 //!
 //! Non-scalar set elements / map keys (`frozen<tuple>`, `frozen<udt>`, nested
-//! `frozen<collection>`) are NOT decodable by the scalar `deserialize_value_bytes`
-//! codec. Serving them as an opaque `Value::Blob(cell_path)` does not actually
+//! `frozen<collection>`) are not decodable by the scalar `deserialize_value_bytes`
+//! codec, and serving them as an opaque `Value::Blob(cell_path)` does not actually
 //! reassemble them — the typed Arrow builder downstream expects a tuple/struct
-//! value for the declared type and BREAKS on raw bytes, the same failure the
-//! whole-row error produced, one layer deeper. So this path FAILS CLOSED with a
-//! clear error naming the column + declared key/element type
-//! ([`composite_collection_unsupported`]); full composite key/element decode via
-//! the value deserializer is follow-up #2339. The opaque/scalar choice branches
-//! on the DECLARED schema type only (no guessing).
+//! value for the declared type and BREAKS on raw bytes. Issue #2339 therefore
+//! decodes them STRUCTURALLY from their authoritative `cell_path` identity bytes
+//! with the canonical value deserializer
+//! (`comparator_value_parsing::parse_value_with_comparator` — the SAME decoder the
+//! single-generation/bypass arm uses, never a second structural decoder), so a
+//! `set<frozen<udt>>` / `map<frozen<tuple>, V>` reads IDENTICALLY however many
+//! SSTable generations the table has. Before #2339 this path failed closed, which
+//! made a correctness outcome flip on generation count.
+//!
+//! Composite decode needs the table's [`UdtRegistry`]: an all-lowercase UDT name
+//! parses to a bare `CqlType::Custom` with no field list, so without the registry
+//! there is no structure to decode into and the path STILL fails closed with a
+//! clear error naming the column + declared type (never opaque bytes, never a
+//! guess). The composite/scalar choice branches on the DECLARED schema type only
+//! (no-heuristics, issue #28).
 //!
 //! Two decodable scalars — `inet` (`InetAddressType`) and `time` (`TimeType`) —
 //! have serialized `cell_path` forms that ARE unsigned-byte-comparable, so they
@@ -58,16 +67,33 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 #[cfg(feature = "write-support")]
-use crate::schema::{CqlType, TableSchema};
+use crate::schema::{CqlType, TableSchema, UdtRegistry};
 #[cfg(feature = "write-support")]
 use crate::storage::partition_key_codec::deserialize_value_bytes;
 #[cfg(feature = "write-support")]
 use crate::types::{ComparatorType, RowCells, Value};
 #[cfg(feature = "write-support")]
 use crate::{Error, Result};
+#[cfg(feature = "write-support")]
+use composite::{compare_composite, decode_composite};
 
 #[cfg(feature = "write-support")]
 use super::model::CellData;
+
+// Composite (frozen tuple / UDT / nested frozen collection) key/element decode +
+// Cassandra-faithful ordering (issue #2339). A CHILD module rather than a sibling
+// so the campsite-rule split adds nothing to `merge/mod.rs`, which is itself far
+// over the size threshold (epic #1116).
+#[path = "read_assembly_composite.rs"]
+mod composite;
+
+// Re-exported through `merge/mod.rs` as the ONE authority the bypass arm asks
+// "can the merged arm order this composite?" (#4063, roborev job 116 F1).
+//
+// Gated to match `composite`'s own inner `#![cfg(feature = "write-support")]`, so the
+// re-export cannot outlive the items it names.
+#[cfg(feature = "write-support")]
+pub use composite::first_unorderable_leaf;
 
 /// One column's accumulated cells while grouping a row's flat cell list.
 ///
@@ -101,6 +127,31 @@ fn mixed_shape_error(column: &str) -> Error {
     ))
 }
 
+/// Which [`UdtRegistry`], and under WHICH KEYSPACE, an UNQUALIFIED UDT reference
+/// in a declared type resolves for merged-read reassembly (issue #2339).
+///
+/// The two facts travel together because neither is usable alone: the registry is
+/// keyed by keyspace, and a caller's `TableSchema.keyspace` is NOT always the one
+/// the registry was built under — `schema::parse_cql_schema` yields the literal
+/// placeholder `"default"` for an unqualified `CREATE TABLE`, which is what a
+/// Flight ticket DDL is, while its registry is keyed by the ticket's real
+/// keyspace. Passing the keyspace explicitly makes that mismatch impossible to
+/// re-introduce silently: a missed lookup leaves a UDT reference an opaque
+/// `Custom` and (correctly) fails the composite decode closed, which reads as
+/// "unsupported" rather than "mis-wired".
+///
+/// `None` at the call site means NO registry: a composite whose element/key is a
+/// bare UDT reference then has no field list to decode into and fails closed
+/// (never a guess — no-heuristics, issue #28).
+#[cfg(feature = "write-support")]
+#[derive(Debug, Clone, Copy)]
+pub struct UdtScope<'a> {
+    /// The authoritative UDT definitions.
+    pub registry: &'a UdtRegistry,
+    /// The keyspace an unqualified UDT reference resolves under.
+    pub keyspace: &'a str,
+}
+
 /// Reassemble a merged live row's per-column cells into user-facing
 /// [`RowCells`], collapsing multi-cell collection columns into a single
 /// `Value::List` / `Value::Set` / `Value::Map` (issue #2324).
@@ -127,11 +178,43 @@ fn mixed_shape_error(column: &str) -> Error {
 /// observable pre-#2324 behaviour — while the clean error still fires when that
 /// composite column IS projected or referenced (issue #2324, roborev 1633). It
 /// is also a small perf win (unprojected collections are never reassembled).
+/// The BACK-COMPATIBLE entry point, at this function's pre-#2339 signature.
+///
+/// `assemble_read_cells` is public API of `cqlite-core` (re-exported through
+/// `storage::write_engine::merge`), so #2339 may not change its arity: adding a
+/// required parameter would break every external consumer at compile time
+/// (roborev job 110 F2). It therefore keeps its three arguments and delegates
+/// with NO registry.
+///
+/// Composite/UDT-aware callers want [`assemble_read_cells_with_udts`]: with no
+/// registry, a composite whose element/key is a bare UDT reference has no field
+/// list to decode into and fails closed (never a guess — no-heuristics, #28).
+/// Behaviour here is otherwise IDENTICAL, because this is a delegation and not a
+/// second implementation — there is exactly one body.
+///
+/// Deliberately NOT `#[deprecated]`: this is the correct entry point for a caller
+/// with no UDT registry, and the attribute would red `-D warnings` on every
+/// in-repo use of it.
 #[cfg(feature = "write-support")]
 pub fn assemble_read_cells(
     cells: Vec<CellData>,
     schema: &TableSchema,
     needed: Option<&HashSet<String>>,
+) -> Result<RowCells> {
+    assemble_read_cells_with_udts(cells, schema, needed, None)
+}
+
+/// As [`assemble_read_cells`], plus the [`UdtScope`] an unqualified UDT reference
+/// in a declared element/key type resolves against (issue #2339).
+///
+/// This holds the implementation; the three-argument form delegates here with
+/// `udts: None`.
+#[cfg(feature = "write-support")]
+pub fn assemble_read_cells_with_udts(
+    cells: Vec<CellData>,
+    schema: &TableSchema,
+    needed: Option<&HashSet<String>>,
+    udts: Option<UdtScope<'_>>,
 ) -> Result<RowCells> {
     // Group cells by column, preserving first-seen order so a stable, schema-
     // independent ordering results (downstream keys by name, so order is not
@@ -169,11 +252,23 @@ pub fn assemble_read_cells(
             // divergent physical side, tracked separately (issue #2336 family). Do
             // NOT "fix" this to preserve `(key, Null)` here — that would corrupt the
             // merger read-shape a `do_get` returns.
-            if cell.is_deleted || matches!(cell.value, Value::Tombstone(_)) {
-                continue;
-            }
-            // Fail closed if this column already accumulated a simple cell (mixed
-            // shape — impossible for a consistent na+ schema; see `ColumnAccum`).
+            // TOMBSTONES ARE RETAINED HERE AND DROPPED LATER (issue #2339, roborev
+            // job 119, High). They USED to be skipped at this point, which resurrected
+            // data: a NEWER tombstone whose composite cell path is comparator-EQUAL to
+            // an OLDER live cell's — an explicit all-null suffix versus an omitted one
+            // — was discarded before it could reach `cell_wins`, so the older value
+            // survived. Reproduced: ts-200 tombstone + ts-100 live yielded
+            // `Map([(Tuple([1]), BigInt(1))])` where Cassandra returns an EMPTY map.
+            //
+            // `reconcile.rs` cannot prevent it either, because it keys cells by RAW
+            // `cell_path` and the two encodings are different bytes.
+            //
+            // The DROP still happens — `assemble_complex` does it, either before
+            // assembly for a non-composite identity (byte-identical behaviour to
+            // skipping here, since nothing coalesces those) or AFTER comparator-equal
+            // reconciliation for a composite one, where the tombstone must be present
+            // to win. The adjudication below is unchanged: a deleted entry is OMITTED
+            // from the reassembled collection, never surfaced as `(key, Null)`.
             let elems = register_complex(&mut order, &mut index, &mut accums, name)?;
             elems.push(cell);
         } else {
@@ -202,8 +297,15 @@ pub fn assemble_read_cells(
         match accum {
             ColumnAccum::Simple(value) => out.push((name, value)),
             ColumnAccum::Complex(elements) => {
-                let value = assemble_complex(&name, elements, schema)?;
-                out.push((name, value));
+                // `None` = the column is ABSENT: every element it accumulated was a
+                // deletion, so an empty non-frozen collection reads as null (the
+                // pre-existing invariant `all_deleted_collection_is_absent` pins).
+                // Absence is decided INSIDE `assemble_complex` because tombstones now
+                // survive accumulation and, for a composite identity, are only
+                // resolved after comparator-equal reconciliation (roborev job 119).
+                if let Some(value) = assemble_complex(&name, elements, schema, udts)? {
+                    out.push((name, value));
+                }
             }
         }
     }
@@ -246,11 +348,23 @@ fn assemble_complex(
     name: &str,
     mut elements: Vec<CellData>,
     schema: &TableSchema,
-) -> Result<Value> {
+    udts: Option<UdtScope<'_>>,
+) -> Result<Option<Value>> {
     // Resolve the declared collection type. An undeclared column (the Flight
     // producer builds cells for every on-disk column, even ones the caller did
     // not declare) has no type here; such columns are never emitted to Arrow, so
     // fall back to the last live element's value rather than fail the whole row.
+    // ALL-TOMBSTONE SHORT-CIRCUIT, BEFORE any type resolution or decoding (issue
+    // #2339, roborev job 120 F2). Retaining tombstones for reconciliation made an
+    // ABSENT collection walk the whole composite path — comparator construction and
+    // structural cell-path decode — so an unresolved UDT or a malformed DELETED key
+    // could turn "the column is absent" into an unsupported-format / corruption
+    // ERROR, where the pre-#2339 code simply returned absent. No element can survive
+    // here, so none of that work can change the answer.
+    if elements.iter().all(is_tombstone_cell) {
+        return Ok(None);
+    }
+
     let declared = schema
         .columns
         .iter()
@@ -259,9 +373,33 @@ fn assemble_complex(
 
     let cql_type = match declared {
         Some(dt) => CqlType::parse(dt)?,
-        None => return Ok(last_value(elements)),
+        None => {
+            drop_tombstones(&mut elements);
+            return Ok(absent_if_empty(&elements).map(|()| last_value(elements)));
+        }
     };
     let cql_type = unwrap_frozen(&cql_type);
+
+    // WHERE THE TOMBSTONE DROP LIVES (issue #2339, roborev job 119). Accumulation now
+    // RETAINS tombstones so a composite identity can reconcile them; everything whose
+    // identity is NOT a comparator-compared composite drops them right here, which is
+    // byte-identical to the previous skip-at-accumulation because nothing coalesces
+    // those paths. A composite identity keeps them through `sort_composite` and drops
+    // the losers afterwards, in `drop_tombstone_winners`.
+    let identity_is_composite = match &cql_type {
+        CqlType::Set(inner) => key_is_opaque_composite(&element_comparator(inner, udts)?),
+        CqlType::Map(key_type, _) => key_is_opaque_composite(&element_comparator(key_type, udts)?),
+        _ => false,
+    };
+    if !identity_is_composite {
+        drop_tombstones(&mut elements);
+        // Everything it had was a deletion => the column is absent. Checked here so
+        // the non-composite paths behave EXACTLY as they did when the skip happened
+        // at accumulation time.
+        if elements.is_empty() {
+            return Ok(None);
+        }
+    }
 
     match cql_type {
         // A set's element identity IS its `cell_path`; order by the declared
@@ -269,35 +407,62 @@ fn assemble_complex(
         // arrive in run-encounter, not disk, order) reconstructs in the SAME order
         // a single-generation `SELECT` returns (issue #2324, roborev 1628).
         CqlType::Set(inner) => {
-            let elem_cmp = ComparatorType::from_cql_type(inner)?;
-            // A frozen tuple/UDT/nested-collection element cannot be materialized
-            // as a typed Arrow value here — fail closed (see #2339) rather than
-            // emit opaque bytes that break the typed builder downstream.
+            let elem_cmp = element_comparator(inner, udts)?;
             if key_is_opaque_composite(&elem_cmp) {
-                return Err(composite_collection_unsupported(name, "set element", inner));
+                // A composite (frozen tuple / UDT / nested collection) set element
+                // IS its `cell_path` — `e.value` is EMPTY for a set cell, as the
+                // sstabledump golden confirms (`"value":""`). Decode the identity
+                // bytes structurally with the declared element type, then order the
+                // DECODED values with Cassandra's own type comparator (issue #2339;
+                // see the `composite` module for why raw `cell_path` byte order
+                // is NOT Cassandra's order for a composite).
+                let keyed = decode_composite_elements(name, "set element", elements, &elem_cmp)?;
+                let survivors = drop_tombstone_winners(sort_composite(name, keyed, &elem_cmp)?);
+                if survivors.is_empty() {
+                    return Ok(None);
+                }
+                return Ok(Some(Value::Set(
+                    survivors.into_iter().map(|(v, _)| v).collect(),
+                )));
             }
+            // A set's element identity IS its `cell_path`; order by the declared
+            // element comparator so a set spanning multiple SSTables reconstructs
+            // in the SAME order a single-generation `SELECT` returns.
             sort_elements_by_cell_path(&mut elements, &elem_cmp)?;
-            Ok(Value::Set(elements.into_iter().map(|e| e.value).collect()))
+            Ok(Some(Value::Set(
+                elements.into_iter().map(|e| e.value).collect(),
+            )))
         }
         // A list element's `cell_path` is its position timeuuid, which orders by
         // raw byte comparison — sort by `cell_path` bytes so multi-SSTable list
         // elements land in authoritative position order, not arrival order.
         CqlType::List(_) => {
             elements.sort_by(|a, b| cell_path_bytes(a).cmp(cell_path_bytes(b)));
-            Ok(Value::List(elements.into_iter().map(|e| e.value).collect()))
+            Ok(Some(Value::List(
+                elements.into_iter().map(|e| e.value).collect(),
+            )))
         }
         CqlType::Map(key_type, _) => {
-            let key_cmp = ComparatorType::from_cql_type(key_type)?;
-            // A frozen tuple/UDT/nested-collection KEY cannot be materialized as a
-            // typed Arrow value here — fail closed (see #2339) rather than serve an
-            // opaque Value::Blob(cell_path) that breaks the typed builder one layer
-            // deeper. Only scalar-keyed maps reassemble on this path.
+            let key_cmp = element_comparator(key_type, udts)?;
             if key_is_opaque_composite(&key_cmp) {
-                return Err(composite_collection_unsupported(name, "map key", key_type));
+                // A composite map KEY is the element's `cell_path`: decode it
+                // structurally, then order entries with Cassandra's own type
+                // comparator over the DECODED keys (issue #2339).
+                let keyed = decode_composite_elements(name, "map key", elements, &key_cmp)?;
+                let survivors = drop_tombstone_winners(sort_composite(name, keyed, &key_cmp)?);
+                if survivors.is_empty() {
+                    return Ok(None);
+                }
+                return Ok(Some(Value::Map(
+                    survivors
+                        .into_iter()
+                        .map(|(key, cell)| (key, cell.value))
+                        .collect(),
+                )));
             }
-            // Order entries by the declared (scalar) key comparator so a map
-            // spanning multiple SSTables reconstructs in authoritative key order —
-            // done on the cells up front so the key is decoded once, at build time.
+            // Order entries by the declared scalar key comparator so a map spanning
+            // multiple SSTables reconstructs in authoritative key order — done on
+            // the cells up front so the key is decoded once, at build time.
             sort_elements_by_cell_path(&mut elements, &key_cmp)?;
             let mut entries = Vec::with_capacity(elements.len());
             for e in elements {
@@ -307,12 +472,12 @@ fn assemble_complex(
                 let key = deserialize_value_bytes(key_bytes, &key_cmp)?;
                 entries.push((key, e.value));
             }
-            Ok(Value::Map(entries))
+            Ok(Some(Value::Map(entries)))
         }
         // A non-collection complex column (e.g. non-frozen top-level UDT):
         // reassembly of those shapes is out of this issue's scope. Keep the last
         // element's value (prior behaviour) so nothing regresses.
-        _ => Ok(last_value(elements)),
+        _ => Ok(Some(last_value(elements))),
     }
 }
 
@@ -325,9 +490,12 @@ fn cell_path_bytes(cell: &CellData) -> &[u8] {
 /// Order collection cells by their `cell_path` (the element/key identity), in
 /// place, using the declared element/key comparator.
 ///
-/// The Set/Map callers now FAIL CLOSED on an opaque composite element/key before
-/// reaching here (see [`composite_collection_unsupported`], #2339), so in practice
-/// `cmp` is always a scalar. Two scalar shapes:
+/// Reached for SCALAR element/key types only: an OPAQUE COMPOSITE
+/// ([`key_is_opaque_composite`]) is decoded and ordered by [`sort_composite`]
+/// before this is called, because Cassandra orders a composite by its TYPE
+/// comparator and not by raw `cell_path` bytes (issue #2339). Should a composite
+/// nonetheless reach here, `deserialize_value_bytes` fails closed rather than
+/// silently mis-ordering it. Two scalar shapes:
 ///   * A `inet`/`time` comparator ([`comparator_orders_by_raw_cell_path_bytes`])
 ///     orders by raw `cell_path` byte comparison — its serialized form's unsigned
 ///     byte order IS its Cassandra order (roborev 1631/1632; the scalar comparator
@@ -335,12 +503,9 @@ fn cell_path_bytes(cell: &CellData) -> &[u8] {
 ///   * Any other scalar decodes each `cell_path` to a `Value` and orders by the
 ///     type comparator (e.g. signed-int order != raw byte order), surfacing any
 ///     genuine decode error (wrong-width scalar) rather than masking it.
-///
-/// The [`key_is_opaque_composite`] arm is retained as defensive belt-and-suspenders
-/// (raw-byte order) should the helper ever be reused without the upstream guard.
 #[cfg(feature = "write-support")]
 fn sort_elements_by_cell_path(elements: &mut Vec<CellData>, cmp: &ComparatorType) -> Result<()> {
-    if key_is_opaque_composite(cmp) || comparator_orders_by_raw_cell_path_bytes(cmp) {
+    if comparator_orders_by_raw_cell_path_bytes(cmp) {
         elements.sort_by(|a, b| cell_path_bytes(a).cmp(cell_path_bytes(b)));
         return Ok(());
     }
@@ -356,14 +521,30 @@ fn sort_elements_by_cell_path(elements: &mut Vec<CellData>, cmp: &ComparatorType
     Ok(())
 }
 
-/// True when `cmp` names an element/key type [`deserialize_value_bytes`] CANNOT decode — a
-/// frozen tuple / UDT / nested collection / non-scalar `Custom`. It is THIS PATH'S FAIL-CLOSED
-/// PREDICATE: both guard call sites (set element, map key) return
-/// [`composite_collection_unsupported`], whose doc records why the opaque-blob route was
-/// abandoned, so the merge path ERRORS; #2339 closes THIS side. Its only other consumer,
-/// [`sort_elements_by_cell_path`]'s arm (the `Frozen` arm recurses), is DEFENSIVE: the guard
-/// fires first. Lockstep scalars; DECLARED type only (#28). The SINGLE-generation reader's
-/// behaviour per type is stated ONCE in `cell_path_key.rs`'s asymmetry section — cite, never restate.
+/// True when `cmp` names an element/key type the scalar [`deserialize_value_bytes`]
+/// codec CANNOT decode — a frozen tuple / UDT / nested collection (or any other
+/// non-scalar `Custom`).
+///
+/// Such a key/element is decoded STRUCTURALLY from its `cell_path` by
+/// `composite::decode_composite` and ORDERED by `composite::compare_composite`,
+/// which implements Cassandra's own type comparators (issue #2339). Decoding and
+/// ordering are deliberately separate concerns.
+///
+/// This predicate is therefore no longer a fail-closed guard: it SELECTS the
+/// structural path. It still fails closed for one case only — a UDT reference
+/// that the table's `UdtRegistry` cannot resolve has no field list to decode
+/// into, and is refused by name (see [`composite_collection_unsupported`], whose
+/// doc records why the opaque-blob route was abandoned).
+///
+/// The set of decodable scalars is kept in lockstep with
+/// `deserialize_value_bytes`; branching on the DECLARED type only, never a byte
+/// pattern (no-heuristics, issue #28).
+///
+/// The SINGLE-generation reader's behaviour per type is stated ONCE in
+/// `cell_path_key.rs`'s asymmetry section (issue #3612) — cite, never restate.
+/// That asymmetry is now CLOSED for the shapes #2339 covers: both arms decode a
+/// composite cell-path key/element structurally, so the outcome no longer depends
+/// on SSTable generation count.
 #[cfg(feature = "write-support")]
 fn key_is_opaque_composite(cmp: &ComparatorType) -> bool {
     match cmp {
@@ -422,27 +603,161 @@ fn comparator_orders_by_raw_cell_path_bytes(cmp: &ComparatorType) -> bool {
     }
 }
 
-/// Fail closed when a collection's key/element is an OPAQUE COMPOSITE — a frozen
-/// tuple / UDT / nested collection the scalar codec cannot decode — on the
-/// merged-read (Flight) assembly path.
+/// Resolve a collection's declared element/key type to a [`ComparatorType`],
+/// resolving UDT REFERENCES through `udts` when a scope is available (issue
+/// #2339).
 ///
-/// Serving such a key/element as an opaque `Value::Blob(cell_path)` (the round-2
-/// route) does not actually reassemble it: the typed Arrow builder downstream
-/// expects a tuple/struct value for the declared type and BREAKS on raw bytes —
-/// the same failure the pre-#2324 whole-row error produced, only one layer
-/// deeper. A clear error naming the column + declared key/element type is
-/// strictly better than either, and composite decode was NEVER functional on
-/// this path (it collapsed to a scalar and errored in Arrow conversion). Full
-/// composite key/element decode via the value deserializer is follow-up #2339
-/// (roborev 1632).
+/// The registry is what makes a composite element/key decodable at all:
+/// `CqlType::parse("set<frozen<contact_info>>")` yields
+/// `Set(Frozen(Custom("contact_info")))` — an all-lowercase UDT name parses to a
+/// bare `Custom` carrying NO field list — so without the registry there is no
+/// field structure to decode INTO and the type stays an opaque `Custom`
+/// ([`key_is_opaque_composite`] still names it, so the path fails closed with a
+/// clear error rather than guessing).
+///
+/// UDT references are resolved by [`UdtRegistry::resolve_type`] — the SINGLE
+/// shared resolver, not a second implementation (roborev F2). This matters for
+/// correctness, not just tidiness: `from_cql_type_with_registry`'s own `Custom`
+/// arm looks a reference up with `registry.get_udt(keyspace, name)`, which is NOT
+/// qualifier-aware, so a Cassandra-style QUALIFIED reference (`ks.contact_info`,
+/// which the CQL parser retains) missed the registry and stayed an opaque
+/// `Custom` — while the Flight bypass predicate answers the same question with
+/// `resolve_type`, which IS qualifier-aware (`split_qualified_udt`). The two
+/// therefore DISAGREED: the predicate called the type resolvable and selected the
+/// single-generation arm, while a MULTI-generation merged read of the same table
+/// failed closed — reintroducing exactly the generation-dependent correctness
+/// outcome this issue exists to remove. Resolving here first makes both arms agree
+/// BY CONSTRUCTION: one resolver, one answer.
+///
+/// Resolution is fail-open by design (an unknown reference is left UNCHANGED,
+/// never fabricated — no-heuristics, issue #28), so a genuinely unresolvable UDT
+/// still arrives as a bare `Custom` and `decode_composite` still fails closed
+/// naming the column and the declared type.
 #[cfg(feature = "write-support")]
-fn composite_collection_unsupported(column: &str, kind: &str, declared: &CqlType) -> Error {
-    Error::unsupported_format(format!(
-        "column '{column}': composite-keyed collection decode unsupported on this \
-         path — {kind} type {declared:?} is a frozen tuple/UDT/nested collection the \
-         merged-read assembler cannot materialize as a typed Arrow value; failing \
-         closed rather than emitting opaque bytes (roborev 1632, follow-up #2339)"
-    ))
+fn element_comparator(declared: &CqlType, udts: Option<UdtScope<'_>>) -> Result<ComparatorType> {
+    match udts {
+        Some(udts) => {
+            let resolved = udts.registry.resolve_type(declared, udts.keyspace);
+            ComparatorType::from_cql_type_with_registry(&resolved, udts.registry, udts.keyspace)
+        }
+        None => ComparatorType::from_cql_type(declared),
+    }
+}
+
+/// Decode every element's composite `cell_path` identity once, pairing each
+/// decoded key/element with its cell (issue #2339).
+#[cfg(feature = "write-support")]
+fn decode_composite_elements(
+    column: &str,
+    kind: &str,
+    elements: Vec<CellData>,
+    cmp: &ComparatorType,
+) -> Result<Vec<(Value, CellData)>> {
+    let mut keyed = Vec::with_capacity(elements.len());
+    for cell in elements {
+        let value = decode_composite(column, kind, cell_path_bytes(&cell), cmp)?;
+        keyed.push((value, cell));
+    }
+    Ok(keyed)
+}
+
+/// Order decoded composite keys/elements with Cassandra's own type comparator.
+///
+/// NOT raw `cell_path` byte order: Cassandra writes a collection's cells in
+/// `cellPathComparator()` order, which for a composite is the declared type's
+/// component-wise comparator, and the two orders genuinely DISAGREE on
+/// Cassandra-written bytes (see [`composite`] for the
+/// measured cases). The decode is fallible and already done, so the sort itself is
+/// total; a comparison error is captured and surfaced rather than silently
+/// mis-ordering. Two shapes reach here: a decoded shape the declared type
+/// contradicts, and a leaf type whose central comparator is known to diverge from
+/// Cassandra's and is therefore REFUSED (`varint`/`decimal`/`uuid`, issue #4063 —
+/// see `composite::divergent_leaf`). `column` is carried in only so those refusals
+/// can name it.
+#[cfg(feature = "write-support")]
+fn sort_composite(
+    column: &str,
+    mut keyed: Vec<(Value, CellData)>,
+    cmp: &ComparatorType,
+) -> Result<Vec<(Value, CellData)>> {
+    let mut first_err: Option<Error> = None;
+    keyed.sort_by(|a, b| match compare_composite(column, &a.0, &b.0, cmp) {
+        Ok(ord) => ord,
+        Err(e) => {
+            if first_err.is_none() {
+                first_err = Some(e);
+            }
+            Ordering::Equal
+        }
+    });
+    if let Some(e) = first_err {
+        return Err(e);
+    }
+    coalesce_comparator_equal(column, keyed, cmp)
+}
+
+/// Collapse runs of comparator-EQUAL cell paths to ONE cell, by the shared
+/// reconciliation rule (issue #2339, roborev job 117).
+///
+/// **The defect this closes, reproduced before it was written.** Two encodings can be
+/// DIFFERENT BYTES and comparator-EQUAL — an omitted trailing tuple component versus
+/// an explicit null one, which `TupleType.compareCustom` returns 0 for and which
+/// `an_omitted_tuple_suffix_compares_equal_to_an_explicit_all_null_suffix` already
+/// pins. But `reconcile.rs` keys cells by `(column, RAW cell_path)`, so two
+/// generations carrying the two encodings both SURVIVE reconciliation and assembly
+/// emitted BOTH:
+///
+/// ```text
+/// Map([(Frozen(Tuple([Integer(1)])),       BigInt(1)),
+///      (Frozen(Tuple([Integer(1), Null])), BigInt(2))])
+/// ```
+///
+/// That is not a valid CQL map — one logical key, two entries — and Cassandra would
+/// return the later-timestamped winner alone.
+///
+/// **Why HERE and not in `reconcile.rs`.** Making `CellKey` comparator-aware would
+/// change the identity of every multi-cell column in the engine, needs the declared
+/// type at a layer that deliberately does not have it, and is far outside this
+/// issue. This runs where the comparator IS known and the run is already SORTED, so
+/// equal keys are adjacent and one linear pass suffices.
+///
+/// **The winner rule is NOT reimplemented**: `reconcile_rules::cell_wins` is the
+/// SHARED predicate already used by both the merge path and the flush/write path
+/// (issue #947) — higher timestamp, then a tombstone beats a live/expiring cell at
+/// equal timestamp, then first-seen. A second copy here would be a second
+/// reconciliation authority, which is the divergence class #2339 exists to remove.
+///
+/// The WINNER's own key encoding is the one kept, matching Cassandra keeping the
+/// winning cell rather than synthesising a canonical form.
+#[cfg(feature = "write-support")]
+fn coalesce_comparator_equal(
+    column: &str,
+    keyed: Vec<(Value, CellData)>,
+    cmp: &ComparatorType,
+) -> Result<Vec<(Value, CellData)>> {
+    let mut out: Vec<(Value, CellData)> = Vec::with_capacity(keyed.len());
+    for (key, cell) in keyed {
+        let collapses = match out.last() {
+            // The run is sorted, so a comparator-equal peer can only be the LAST
+            // pushed entry. Errors propagate rather than being swallowed into
+            // "not equal", which would silently re-admit the duplicate.
+            Some((prev_key, _)) => {
+                compare_composite(column, prev_key, &key, cmp)? == Ordering::Equal
+            }
+            None => false,
+        };
+        if collapses {
+            if let Some((prev_key, prev_cell)) = out.last_mut() {
+                if crate::storage::write_engine::reconcile_rules::cell_wins(&cell, prev_cell) {
+                    *prev_key = key;
+                    *prev_cell = cell;
+                }
+            }
+            continue;
+        }
+        out.push((key, cell));
+    }
+    Ok(out)
 }
 
 /// Sort `items` by the first tuple element with the fallible [`ComparatorType`],
@@ -479,6 +794,77 @@ fn unwrap_frozen(cql: &CqlType) -> &CqlType {
 /// The last element's value, or `Value::Null` when there are none — the safe
 /// fallback for a column whose collection type cannot be resolved.
 #[cfg(feature = "write-support")]
+/// Does this column have any cell that SURVIVES reconciliation? (issue #2339, roborev
+/// job 128.)
+///
+/// **Why this exists.** `cqlite-flight` decides row VISIBILITY from the full
+/// pre-projection cell set, but a raw cell can look live and still lose: a composite
+/// cell path written with an omitted trailing component is comparator-EQUAL to one
+/// written with an explicit null, so a NEWER tombstone in the other encoding supersedes
+/// it. When that column is EXCLUDED by the projection, the assembled row cannot correct
+/// the decision, and the row surfaces as a PHANTOM key-only row. Deciding it from raw
+/// cells is therefore wrong, and deciding it from the PROJECTED assembly cannot see the
+/// excluded column.
+///
+/// **Why it delegates to [`assemble_complex`] rather than reimplementing the rule.**
+/// This is exactly the question assembly already answers — `None` means the column is
+/// absent because every element was a deletion or lost reconciliation. A second,
+/// "lightweight" copy of comparator-equal coalescing plus tombstone-winner selection is
+/// a second reconciliation authority, which is the divergence class #2339 exists to
+/// remove; it would also have to be kept in step with `cell_wins` by hand. So there is
+/// ONE decision procedure and this is a thin projection of it.
+///
+/// **The cost, stated rather than hidden.** For a column the projection EXCLUDED this
+/// does build that column's `Value` in order to discard it. That is accepted because the
+/// caller only asks about columns whose liveness is genuinely AMBIGUOUS from timestamps
+/// alone — every live cell outranked by a tombstone in the same column — which is rare,
+/// and because the alternative is a wrong answer. It performs no Arrow conversion.
+#[cfg(feature = "write-support")]
+pub fn column_has_surviving_live_cell(
+    name: &str,
+    cells: Vec<CellData>,
+    schema: &TableSchema,
+    udts: Option<UdtScope<'_>>,
+) -> Result<bool> {
+    Ok(assemble_complex(name, cells, schema, udts)?.is_some())
+}
+
+/// A deleted collection element is OMITTED from the reassembled value, never
+/// surfaced as `(key, Null)` — the #2324 / roborev-1628 adjudication, unchanged.
+/// Only the POINT at which it is dropped moved (issue #2339, roborev job 119).
+#[cfg(feature = "write-support")]
+fn drop_tombstones(elements: &mut Vec<CellData>) {
+    elements.retain(|c| !is_tombstone_cell(c));
+}
+
+/// Drop reconciliation WINNERS that are tombstones, after comparator-equal
+/// coalescing (issue #2339, roborev job 119).
+///
+/// A tombstone that LOST is already gone — `cell_wins` replaced it. A tombstone that
+/// WON means the newest write for that logical key was a delete, so the entry is
+/// omitted, which is what a Cassandra `SELECT` returns. Doing this before coalescing
+/// is the resurrection bug: the tombstone has to be present to win.
+#[cfg(feature = "write-support")]
+fn drop_tombstone_winners(keyed: Vec<(Value, CellData)>) -> Vec<(Value, CellData)> {
+    keyed
+        .into_iter()
+        .filter(|(_, cell)| !is_tombstone_cell(cell))
+        .collect()
+}
+
+/// `Some(())` when at least one element survived, `None` when the column is absent.
+/// Expressed as an Option so each call site reads as "absent unless something is left".
+#[cfg(feature = "write-support")]
+fn absent_if_empty(elements: &[CellData]) -> Option<()> {
+    (!elements.is_empty()).then_some(())
+}
+
+/// ONE spelling of "this cell is a deletion", so the retain/filter pair cannot drift.
+#[cfg(feature = "write-support")]
+fn is_tombstone_cell(cell: &CellData) -> bool {
+    cell.is_deleted || matches!(cell.value, Value::Tombstone(_))
+}
+
 fn last_value(elements: Vec<CellData>) -> Value {
     elements
         .into_iter()
@@ -487,431 +873,9 @@ fn last_value(elements: Vec<CellData>) -> Value {
         .unwrap_or(Value::Null)
 }
 
+// Unit tests live in their own file under the campsite rule (epic #1116/#1135);
+// `#[path]` keeps them a CHILD of this module, so `use super::*` still reaches
+// this module's private helpers exactly as an inline `mod tests` would.
 #[cfg(all(test, feature = "write-support"))]
-mod tests {
-    use super::*;
-    use crate::schema::{Column, KeyColumn, TableSchema};
-    use crate::types::{TombstoneInfo, TombstoneType};
-    use std::collections::HashMap;
-
-    fn col(name: &str, ty: &str) -> Column {
-        Column {
-            name: name.into(),
-            data_type: ty.into(),
-            nullable: true,
-            default: None,
-            is_static: false,
-        }
-    }
-
-    fn schema() -> TableSchema {
-        TableSchema {
-            keyspace: "ks".into(),
-            table: "t".into(),
-            partition_keys: vec![KeyColumn {
-                name: "id".into(),
-                data_type: "int".into(),
-                position: 0,
-            }],
-            clustering_keys: Vec::new(),
-            columns: vec![
-                col("id", "int"),
-                col("s", "int"),
-                col("nums", "set<int>"),
-                col("items", "list<int>"),
-                col("m", "map<text, bigint>"),
-                // Non-scalar element/key columns (roborev 1629 F2): the scalar
-                // codec cannot decode these, so they exercise the opaque-composite
-                // Blob + raw-byte-order path.
-                col("fset", "set<frozen<addr_type>>"),
-                col("ftk", "map<frozen<tuple<int, text>>, bigint>"),
-                // inet/time element ordering (roborev 1631/1632): InetAddressType /
-                // TimeType order by raw serialized bytes, which the scalar comparator
-                // contradicted with a formatted-string order until #3790.
-                col("iset", "set<inet>"),
-                col("tset", "set<time>"),
-            ],
-            comments: HashMap::new(),
-            dropped_columns: HashMap::new(),
-        }
-    }
-
-    /// One complex ELEMENT cell (a set/list member, or a map entry keyed by
-    /// `cell_path`).
-    fn elem(column: &str, value: Value, cell_path: Vec<u8>) -> CellData {
-        CellData {
-            column: column.into(),
-            value,
-            timestamp: 1,
-            ttl: None,
-            cell_path: Some(cell_path),
-            local_deletion_time: None,
-            is_complex_element: true,
-            is_deleted: false,
-            has_empty_value: false,
-        }
-    }
-
-    fn get<'a>(cells: &'a RowCells, name: &str) -> Option<&'a Value> {
-        cells
-            .iter()
-            .find(|(n, _)| n.as_ref() == name)
-            .map(|(_, v)| v)
-    }
-
-    #[test]
-    fn simple_column_passes_through() {
-        let cells = vec![CellData::new("s".into(), Value::Integer(7), 1)];
-        let out = assemble_read_cells(cells, &schema(), None).unwrap();
-        assert_eq!(get(&out, "s"), Some(&Value::Integer(7)));
-    }
-
-    #[test]
-    fn simple_tombstone_reads_absent() {
-        let tomb = Value::Tombstone(Box::new(TombstoneInfo {
-            deletion_time: 1,
-            tombstone_type: TombstoneType::CellTombstone,
-            local_deletion_time: 0,
-            ttl: None,
-            range_start: None,
-            range_end: None,
-        }));
-        let cells = vec![CellData::new("s".into(), tomb, 1)];
-        let out = assemble_read_cells(cells, &schema(), None).unwrap();
-        assert_eq!(
-            get(&out, "s"),
-            None,
-            "a tombstoned simple cell is absent (null)"
-        );
-    }
-
-    #[test]
-    fn set_and_list_reassemble_all_members_not_last_cell() {
-        // Two set members + three list members, each its own cell.
-        let cells = vec![
-            elem("nums", Value::Integer(10), vec![0, 0, 0, 10]),
-            elem("nums", Value::Integer(20), vec![0, 0, 0, 20]),
-            elem("items", Value::Integer(1), vec![0]),
-            elem("items", Value::Integer(2), vec![1]),
-            elem("items", Value::Integer(3), vec![2]),
-        ];
-        let out = assemble_read_cells(cells, &schema(), None).unwrap();
-        assert_eq!(
-            get(&out, "nums"),
-            Some(&Value::Set(vec![Value::Integer(10), Value::Integer(20)])),
-            "SET must keep ALL members, not last-cell-wins"
-        );
-        assert_eq!(
-            get(&out, "items"),
-            Some(&Value::List(vec![
-                Value::Integer(1),
-                Value::Integer(2),
-                Value::Integer(3)
-            ])),
-            "LIST must keep all members in on-disk order"
-        );
-    }
-
-    #[test]
-    fn map_reassembles_entries_decoding_key_from_cell_path() {
-        // MAP<TEXT,BIGINT>: cell_path is the raw utf8 key; value is the bigint.
-        let cells = vec![
-            elem("m", Value::BigInt(100), b"alpha".to_vec()),
-            elem("m", Value::BigInt(200), b"beta".to_vec()),
-        ];
-        let out = assemble_read_cells(cells, &schema(), None).unwrap();
-        assert_eq!(
-            get(&out, "m"),
-            Some(&Value::Map(vec![
-                (Value::Text("alpha".into()), Value::BigInt(100)),
-                (Value::Text("beta".into()), Value::BigInt(200)),
-            ])),
-            "MAP must reassemble every entry with the key decoded from cell_path"
-        );
-    }
-
-    #[test]
-    fn set_of_inet_orders_by_raw_bytes_not_string() {
-        // set<inet>: cell_path (and value) is the raw 4-byte address. Cassandra's
-        // InetAddressType orders by UNSIGNED address bytes, so 9.0.0.1 (bytes
-        // [9,0,0,1]) precedes 10.0.0.1 (bytes [10,0,0,1]). The formatted-string
-        // order the scalar `Custom("inet")` comparator would use is the REVERSE
-        // ("10.0.0.1" < "9.0.0.1"), which would mis-order a multi-SSTable set.
-        // Arrive out of order to prove the sort actually runs (roborev 1631).
-        let ip_9 = vec![9u8, 0, 0, 1];
-        let ip_10 = vec![10u8, 0, 0, 1];
-        let cells = vec![
-            elem("iset", Value::inet(ip_10.clone()), ip_10.clone()),
-            elem("iset", Value::inet(ip_9.clone()), ip_9.clone()),
-        ];
-        let out = assemble_read_cells(cells, &schema(), None).unwrap();
-        assert_eq!(
-            get(&out, "iset"),
-            Some(&Value::Set(vec![
-                Value::Inet(ip_9.into()),
-                Value::Inet(ip_10.into()),
-            ])),
-            "set<inet> must order by unsigned address bytes (9.0.0.1 before 10.0.0.1), \
-             not the reversed formatted-string order"
-        );
-    }
-
-    #[test]
-    fn set_of_time_orders_by_raw_bytes_not_formatted_string() {
-        // set<time>: cell_path is the 8-byte big-endian nanoseconds-of-day; Cassandra's
-        // TimeType orders by that raw long (non-negative → byte order == numeric order).
-        // Until #3790 the scalar Custom("time") comparator instead used a
-        // FORMATTED-string order ("TIME(HH:MM:SS.nnn)"), which — because the hours
-        // field is only zero-padded to two digits — diverges from numeric order once
-        // the hours magnitude changes digit-width. 10h vs 100h: the string
-        // "TIME(100:..." sorts BEFORE "TIME(10:..." ('0' < ':'), the REVERSE of numeric
-        // order, so a multi-SSTable set would mis-order pre-fix. (Valid times-of-day
-        // happen to coincide under the current Display; ordering by the raw cell_path
-        // bytes is the robust, parity-correct rule and closes that class here,
-        // roborev 1632.) Arrive out of order to prove the sort runs.
-        let t_small = 36_000_000_000_000i64; // 10h in ns
-        let t_big = 360_000_000_000_000i64; // 100h in ns
-        let cells = vec![
-            elem("tset", Value::Time(t_big), t_big.to_be_bytes().to_vec()),
-            elem("tset", Value::Time(t_small), t_small.to_be_bytes().to_vec()),
-        ];
-        let out = assemble_read_cells(cells, &schema(), None).unwrap();
-        assert_eq!(
-            get(&out, "tset"),
-            Some(&Value::Set(vec![Value::Time(t_small), Value::Time(t_big)])),
-            "set<time> must order by the raw big-endian long (10h before 100h), \
-             not the reversed formatted-string order"
-        );
-    }
-
-    #[test]
-    fn deleted_elements_are_dropped() {
-        let mut deleted = elem("nums", Value::Integer(99), vec![0, 0, 0, 99]);
-        deleted.is_deleted = true;
-        let cells = vec![elem("nums", Value::Integer(10), vec![0, 0, 0, 10]), deleted];
-        let out = assemble_read_cells(cells, &schema(), None).unwrap();
-        assert_eq!(
-            get(&out, "nums"),
-            Some(&Value::Set(vec![Value::Integer(10)])),
-            "a deleted set member must be dropped from the reassembled collection"
-        );
-    }
-
-    #[test]
-    fn elements_reassemble_in_cell_path_order_not_arrival_order() {
-        // Simulate multi-SSTable merge arrival: elements registered OUT of
-        // cell_path order (a newer run's members encountered first). The
-        // reassembled collection must land in authoritative cell_path order, not
-        // arrival order (issue #2324, roborev 1628).
-        let cells = vec![
-            // set<int>: cell_path is the 4-byte big-endian member; arrive 30,10,20.
-            elem("nums", Value::Integer(30), vec![0, 0, 0, 30]),
-            elem("nums", Value::Integer(10), vec![0, 0, 0, 10]),
-            elem("nums", Value::Integer(20), vec![0, 0, 0, 20]),
-            // list<int>: cell_path is the position (single byte here); arrive 2,0,1.
-            elem("items", Value::Integer(200), vec![2]),
-            elem("items", Value::Integer(0), vec![0]),
-            elem("items", Value::Integer(100), vec![1]),
-            // map<text,bigint>: cell_path is the key; arrive gamma,alpha,beta.
-            elem("m", Value::BigInt(3), b"gamma".to_vec()),
-            elem("m", Value::BigInt(1), b"alpha".to_vec()),
-            elem("m", Value::BigInt(2), b"beta".to_vec()),
-        ];
-        let out = assemble_read_cells(cells, &schema(), None).unwrap();
-        assert_eq!(
-            get(&out, "nums"),
-            Some(&Value::Set(vec![
-                Value::Integer(10),
-                Value::Integer(20),
-                Value::Integer(30),
-            ])),
-            "SET must reassemble in element (cell_path) order, not arrival order"
-        );
-        assert_eq!(
-            get(&out, "items"),
-            Some(&Value::List(vec![
-                Value::Integer(0),
-                Value::Integer(100),
-                Value::Integer(200),
-            ])),
-            "LIST must reassemble in position (cell_path) order, not arrival order"
-        );
-        assert_eq!(
-            get(&out, "m"),
-            Some(&Value::Map(vec![
-                (Value::Text("alpha".into()), Value::BigInt(1)),
-                (Value::Text("beta".into()), Value::BigInt(2)),
-                (Value::Text("gamma".into()), Value::BigInt(3)),
-            ])),
-            "MAP must reassemble in key (cell_path) order, not arrival order"
-        );
-    }
-
-    #[test]
-    fn map_deleted_entry_omitted_per_cassandra_select_semantics() {
-        // A deleted MAP entry is OMITTED from the reassembled map — matching real
-        // Cassandra SELECT output (the read-path authority, issue #1742). This
-        // intentionally diverges from the single-generation reader's physical
-        // collapsed_value, which keeps a (key, Null) pair (issue #2324, roborev
-        // 1628 adjudication; see the module doc + drop-site comment).
-        let mut deleted = elem("m", Value::BigInt(999), b"gone".to_vec());
-        deleted.is_deleted = true;
-        let cells = vec![
-            elem("m", Value::BigInt(1), b"alpha".to_vec()),
-            deleted,
-            elem("m", Value::BigInt(2), b"beta".to_vec()),
-        ];
-        let out = assemble_read_cells(cells, &schema(), None).unwrap();
-        assert_eq!(
-            get(&out, "m"),
-            Some(&Value::Map(vec![
-                (Value::Text("alpha".into()), Value::BigInt(1)),
-                (Value::Text("beta".into()), Value::BigInt(2)),
-            ])),
-            "a deleted map entry must be omitted (no (key, Null)) per Cassandra SELECT semantics"
-        );
-    }
-
-    #[test]
-    fn simple_then_complex_same_column_fails_closed() {
-        // A simple (whole-value) cell then a per-element (complex) cell for the
-        // SAME column: impossible for a consistent na+ schema (roborev 1629 F1).
-        // Pre-fix the element was SILENTLY DROPPED (register_complex's `if let`
-        // fell through); now it fails closed naming the column.
-        let simple = CellData::new("nums".into(), Value::Integer(5), 1);
-        let complex = elem("nums", Value::Integer(10), vec![0, 0, 0, 10]);
-        let err = assemble_read_cells(vec![simple, complex], &schema(), None).unwrap_err();
-        assert!(
-            err.to_string().contains("nums"),
-            "mixed-shape error must name the column, got: {err}"
-        );
-    }
-
-    #[test]
-    fn complex_then_simple_same_column_fails_closed() {
-        // The reverse arrival order: a complex element then a simple cell for the
-        // SAME column. Pre-fix the simple cell OVERWROTE (dropped) the whole
-        // collection; now it fails closed naming the column (roborev 1629 F1).
-        let complex = elem("nums", Value::Integer(10), vec![0, 0, 0, 10]);
-        let simple = CellData::new("nums".into(), Value::Integer(5), 1);
-        let err = assemble_read_cells(vec![complex, simple], &schema(), None).unwrap_err();
-        assert!(
-            err.to_string().contains("nums"),
-            "mixed-shape error must name the column, got: {err}"
-        );
-    }
-
-    #[test]
-    fn map_with_frozen_tuple_key_fails_closed() {
-        // frozen<tuple> map key: an opaque composite the scalar codec cannot decode.
-        // The round-2 route served it as a raw Value::Blob(cell_path), but that Blob
-        // breaks the typed Arrow builder downstream (which expects a tuple/struct for
-        // the declared key type) — the same failure the pre-#2324 whole-row error
-        // produced, one layer deeper. So this path now FAILS CLOSED with a clear
-        // error naming the column + declared key type (roborev 1632; full composite
-        // key decode is follow-up #2339).
-        let cells = vec![
-            elem("ftk", Value::BigInt(2), vec![0x00, 0x00, 0x00, 0x09, 0x62]),
-            elem("ftk", Value::BigInt(1), vec![0x00, 0x00, 0x00, 0x01, 0x61]),
-        ];
-        let err = assemble_read_cells(cells, &schema(), None).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("ftk") && msg.contains("map key") && msg.contains("#2339"),
-            "composite map-key error must name the column, the kind, and the follow-up, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn set_of_frozen_udt_fails_closed() {
-        // frozen<udt> set element: an opaque composite the scalar codec cannot decode.
-        // The round-2 route kept the reader's e.value (an opaque Blob) and ordered by
-        // raw cell_path bytes, but that Blob likewise breaks the typed Arrow builder
-        // for the declared element type. This path now FAILS CLOSED with a clear error
-        // naming the column + declared element type (roborev 1632; full composite
-        // element decode is follow-up #2339).
-        let cells = vec![
-            elem("fset", Value::blob(vec![0xBB]), vec![0x02]),
-            elem("fset", Value::blob(vec![0xAA]), vec![0x01]),
-        ];
-        let err = assemble_read_cells(cells, &schema(), None).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("fset") && msg.contains("set element") && msg.contains("#2339"),
-            "composite set-element error must name the column, the kind, and the follow-up, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn all_deleted_collection_is_absent() {
-        let mut deleted = elem("nums", Value::Integer(99), vec![0, 0, 0, 99]);
-        deleted.is_deleted = true;
-        let out = assemble_read_cells(vec![deleted], &schema(), None).unwrap();
-        assert_eq!(
-            get(&out, "nums"),
-            None,
-            "an all-deleted collection reads absent (empty non-frozen collection == null)"
-        );
-    }
-
-    #[test]
-    fn unprojected_composite_collection_column_is_dropped_not_errored() {
-        // Projection-aware assembly (issue #2324, roborev 1633): a row carrying a
-        // scalar column `s` AND an unsupported composite-keyed collection column
-        // `ftk` (frozen<tuple> map key). A query that projects ONLY `s` (so `ftk`
-        // is NOT in `needed`) must SUCCEED, dropping `ftk` entirely — matching the
-        // observable pre-#2324 behaviour where an unrelated SELECT never touched
-        // this column. Pre-fix (round-3, no `needed` filter — i.e. `None` here)
-        // this same row HARD-ERRORS the whole do_get; the guard closes that
-        // regression. (`fails_closed_without_projection_filter` below pins the red.)
-        let cells = vec![
-            CellData::new("s".into(), Value::Integer(7), 1),
-            elem("ftk", Value::BigInt(1), vec![0x00, 0x00, 0x00, 0x01, 0x61]),
-        ];
-        let needed: HashSet<String> = ["s".to_string()].into_iter().collect();
-        let out = assemble_read_cells(cells, &schema(), Some(&needed)).unwrap();
-        assert_eq!(get(&out, "s"), Some(&Value::Integer(7)));
-        assert_eq!(
-            get(&out, "ftk"),
-            None,
-            "an unprojected composite-keyed collection column is dropped, not assembled/errored"
-        );
-    }
-
-    #[test]
-    fn fails_closed_without_projection_filter() {
-        // The RED anchor for the fix above: the SAME row, but with `needed = None`
-        // (the round-3 behaviour, and a plain `SELECT *`). Because every column is
-        // read, the composite-keyed `ftk` IS assembled and fails closed — proving
-        // the projection filter, not some incidental change, is what rescues the
-        // unrelated-projection case (roborev 1633).
-        let cells = vec![
-            CellData::new("s".into(), Value::Integer(7), 1),
-            elem("ftk", Value::BigInt(1), vec![0x00, 0x00, 0x00, 0x01, 0x61]),
-        ];
-        let err = assemble_read_cells(cells, &schema(), None).unwrap_err();
-        assert!(
-            err.to_string().contains("ftk"),
-            "with no projection filter the composite column still fails closed, got: {err}"
-        );
-    }
-
-    #[test]
-    fn projected_composite_collection_column_still_fails_closed() {
-        // The complement: when the composite column IS projected/referenced (it is
-        // in `needed`), the round-3 clean fail-closed error still fires — the fix
-        // scopes the error, it does not suppress it (roborev 1632/1633; #2339).
-        let cells = vec![elem(
-            "ftk",
-            Value::BigInt(1),
-            vec![0x00, 0x00, 0x00, 0x01, 0x61],
-        )];
-        let needed: HashSet<String> = ["ftk".to_string()].into_iter().collect();
-        let err = assemble_read_cells(cells, &schema(), Some(&needed)).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("ftk") && msg.contains("map key") && msg.contains("#2339"),
-            "a projected composite map-key column still fails closed, got: {msg}"
-        );
-    }
-}
+#[path = "read_assembly_tests.rs"]
+mod tests;

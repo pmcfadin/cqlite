@@ -20,6 +20,7 @@
 //!
 //! [`produce_streaming`]: MergeProducer::produce_streaming
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use arrow::datatypes::{Field as ArrowField, Schema as ArrowSchema};
@@ -332,6 +333,20 @@ fn sstable_token_span(data_path: &Path, rt: &PruneRuntime) -> Option<(i64, i64)>
     Some((min_token, max_token))
 }
 
+/// Raw-cell row-visibility signals (issue #2339, roborev job 120 F1). Computed
+/// without decoding any value, so an excluded column cannot fail a query.
+struct RawVisibility {
+    /// A live non-primary-key cell that outranks every tombstone in its own column,
+    /// hence provably survives reconciliation. Exact, and needs no comparator.
+    outranks_every_tombstone: bool,
+    /// Non-primary-key columns whose liveness is AMBIGUOUS from timestamps alone: they
+    /// have at least one live cell, but EVERY one of them is outranked by a tombstone in
+    /// the same column. Only these need the comparator-aware pass (roborev job 128) —
+    /// whether the tombstone actually supersedes a live cell depends on whether their
+    /// cell paths are comparator-EQUAL, which timestamps cannot say.
+    ambiguous_columns: Vec<String>,
+}
+
 /// Produces Arrow record batches from a compaction merge of a table's SSTables.
 pub struct MergeProducer {
     // `schema` + `spec` are `pub(crate)` so the point-read routing (issue #2207)
@@ -356,6 +371,34 @@ pub struct MergeProducer {
     agg: Option<AggPlan>,
     /// Partial-output column metadata, present iff [`Self::agg`] is `Some`.
     partial_columns: Option<Vec<ColumnInfo>>,
+    /// The UNRESOLVED `cql_type` each column carried as DECLARED by the schema,
+    /// captured before any registry resolution, keyed by column name.
+    ///
+    /// **Why a snapshot and not a re-derivation (issue #3960, roborev job 115).**
+    /// `UdtRegistry::resolve_type` is IDEMPOTENT on an already-resolved
+    /// `CqlType::Udt` node. That makes re-resolution safe but also makes it a
+    /// NO-OP, so a column bound under one keyspace can never be re-bound to
+    /// another's same-named UDT — which is exactly what
+    /// [`Self::with_udt_keyspace`] has to do when it runs AFTER
+    /// [`Self::with_udt_registry`]. Resetting to the declaration first is the
+    /// only way re-resolution can change the binding.
+    ///
+    /// It is a stored snapshot rather than a fresh `schema_columns(&self.schema)`
+    /// call because that call is FALLIBLE and `with_udt_keyspace` returns `Self`,
+    /// not `Result` — and fail-soft there would silently keep the stale binding,
+    /// i.e. the defect this exists to remove.
+    original_cql_types: HashMap<String, Option<CqlType>>,
+    /// The same snapshot for PARTIAL (aggregate output) columns, kept in a SEPARATE
+    /// map (issue #3960, roborev job 121).
+    ///
+    /// One name-keyed map for both sets is unsound: an aggregate output may REUSE a
+    /// base table column's name, and the two have unrelated types. Sharing the map
+    /// meant a `count(*)` output aliased to a UDT column's name would be reset to that
+    /// column's declared UDT and re-resolved into a `Struct` while the emitted array
+    /// holds integers — a silent Arrow schema/array disagreement, which is the exact
+    /// class the surrounding code exists to prevent. Two maps make the collision
+    /// unexpressible rather than merely unlikely.
+    original_partial_cql_types: HashMap<String, Option<CqlType>>,
     /// Authoritative UDT registry resolved from the ticket DDL's `CREATE TYPE`
     /// statements (issue #2349). When present it is threaded onto every merge
     /// reader (cold [`KWayMerger::new_with_gc_and_registry_cancellable`] and the
@@ -369,6 +412,17 @@ pub struct MergeProducer {
     /// so the service can hand the SAME resolved registry to the warm registry's
     /// reader-open path (issue #2349).
     pub(crate) udt_registry: Option<UdtRegistry>,
+    /// The keyspace an UNQUALIFIED UDT reference resolves under when
+    /// [`Self::udt_registry`] is consulted for MERGED-READ reassembly (issue
+    /// #2339), i.e. the keyspace that registry was BUILT under.
+    ///
+    /// Distinct from `schema.keyspace` on purpose: `parse_cql_schema` gives an
+    /// unqualified ticket `CREATE TABLE` the literal placeholder `"default"`, so a
+    /// lookup keyed on the schema would miss every UDT the ticket declared. `None`
+    /// falls back to `schema.keyspace`, which is correct for every caller that
+    /// builds its own schema and registry under one keyspace (the direct
+    /// `MergeProducer` users in tests and tools).
+    pub(crate) udt_keyspace: Option<String>,
     /// Read-time reconciliation clock (epoch seconds), captured ONCE at
     /// construction from the authoritative `read_time_now_secs` seam (issue
     /// #2374/#2789). Threaded into every merger this producer opens (so
@@ -455,6 +509,10 @@ impl MergeProducer {
             // Keep schema (key-first) order, restricted to the projected set.
             columns.retain(|c| projection.iter().any(|p| p == &c.name));
         }
+        let original_cql_types = columns
+            .iter()
+            .map(|c| (c.name.clone(), c.cql_type.clone()))
+            .collect();
         Ok(Self {
             schema,
             columns,
@@ -466,6 +524,9 @@ impl MergeProducer {
             agg: None,
             partial_columns: None,
             udt_registry: None,
+            udt_keyspace: None,
+            original_cql_types,
+            original_partial_cql_types: HashMap::new(),
             // Issue #2374/#2789: capture the read-time reconciliation clock once.
             now_secs: Self::reconciliation_now_secs(),
         })
@@ -503,7 +564,24 @@ impl MergeProducer {
     /// no-op — column types and reader posture are unchanged. Consumes and returns
     /// `self` for chaining.
     pub fn with_udt_registry(mut self, registry: UdtRegistry) -> Self {
-        let keyspace = self.schema.keyspace.clone();
+        // Issue #2339 (roborev F1): resolve against the EFFECTIVE UDT keyspace, not
+        // `schema.keyspace`. A ticket's unqualified `CREATE TABLE` parses to the
+        // placeholder keyspace `"default"`, so resolving column types under it MISSES
+        // every UDT the ticket declared — leaving a `frozen<UDT>` collection element
+        // as `Custom`/`Utf8` in the Arrow metadata while merged-read reassembly (which
+        // consults `udt_scope`, the same effective keyspace) now emits a structured
+        // `Value::Udt`: a silent Arrow schema/array disagreement.
+        let keyspace = self.effective_udt_keyspace().to_string();
+        // RESET TO THE DECLARATION FIRST (issue #2339, roborev job 131), for the same
+        // reason `with_udt_keyspace` does it: `UdtRegistry::resolve_type` is idempotent
+        // on an already-resolved node, so resolving in place cannot REBIND a column.
+        // This is a PUBLIC setter, so a caller may supply a REPLACEMENT registry — and
+        // `self.udt_registry` below (which merged-read decoding and `udt_scope` consult)
+        // is replaced unconditionally. Without the reset the Arrow metadata would stay
+        // bound to the SUPERSEDED registry's definitions while the emitted values follow
+        // the new one: for same-named UDTs with different shapes, a silent schema/array
+        // disagreement. The reset makes the two registries' answers agree by construction.
+        Self::reset_columns_to_declared(&self.original_cql_types, &mut self.columns);
         Self::resolve_columns_udts(&registry, &keyspace, &mut self.columns);
         // If aggregation was already attached (a caller that chained
         // `with_aggregation` BEFORE `with_udt_registry`), the PARTIAL output columns
@@ -512,11 +590,160 @@ impl MergeProducer {
         // resolved, a silent schema/array disagreement (roborev job 1924 blocker 1).
         // The PRODUCTION order (`with_udt_registry` THEN `with_aggregation`) is
         // covered symmetrically in `with_aggregation` (roborev job 1925 item 1).
+        // They take the reset too, from their OWN declared-type snapshot.
         if let Some(partial) = self.partial_columns.as_mut() {
+            Self::reset_columns_to_declared(&self.original_partial_cql_types, partial);
             Self::resolve_columns_udts(&registry, &keyspace, partial);
         }
         self.udt_registry = Some(registry);
         self
+    }
+
+    /// Set the keyspace an unqualified UDT reference resolves under for
+    /// merged-read reassembly (issue #2339) — see [`Self::udt_keyspace`].
+    pub(crate) fn with_udt_keyspace(mut self, keyspace: &str) -> Self {
+        self.udt_keyspace = Some(keyspace.to_string());
+        // Order-independence (issue #2339, roborev F1): production chains
+        // `with_udt_keyspace` BEFORE `with_udt_registry`, but a caller that attached
+        // the registry first would have resolved its columns under `schema.keyspace`.
+        // Re-resolve against the now-authoritative keyspace so BOTH orders produce the
+        // same Arrow metadata. `UdtRegistry::resolve_type` is idempotent on an
+        // already-resolved tree, so this can never un-resolve a column.
+        if let Some(registry) = self.udt_registry.clone() {
+            let keyspace = self.effective_udt_keyspace().to_string();
+            // RESET TO THE DECLARATION FIRST (issue #3960, roborev job 115). The
+            // previous revision relied on re-resolution alone and cited
+            // `resolve_type`'s idempotence as the safety argument — but idempotence
+            // is precisely why re-resolution could not FIX anything here: a column
+            // already bound to `schema.keyspace`'s `address` UDT stayed bound to it,
+            // so a registry holding a DIFFERENT same-named `address` in the newly
+            // selected keyspace was silently ignored and the promised Arrow metadata
+            // described the wrong type. Order-independence was documented and untrue.
+            Self::reset_columns_to_declared(&self.original_cql_types, &mut self.columns);
+            Self::resolve_columns_udts(&registry, &keyspace, &mut self.columns);
+            if let Some(partial) = self.partial_columns.as_mut() {
+                Self::reset_columns_to_declared(&self.original_partial_cql_types, partial);
+                Self::resolve_columns_udts(&registry, &keyspace, partial);
+            }
+        }
+        self
+    }
+
+    /// Restore each column's `cql_type` to the DECLARED (unresolved) form captured
+    /// at construction, so a following [`Self::resolve_columns_udts`] binds against
+    /// the current keyspace rather than no-oping on an already-resolved tree
+    /// (issue #3960).
+    ///
+    /// A column with no snapshot entry is left ALONE rather than cleared: absence
+    /// means it was never a schema-declared column, and clearing its type would
+    /// turn a resolution bug into a missing-type bug.
+    fn reset_columns_to_declared(
+        declared: &HashMap<String, Option<CqlType>>,
+        columns: &mut [ColumnInfo],
+    ) {
+        for column in columns {
+            if let Some(original) = declared.get(&column.name) {
+                column.cql_type = original.clone();
+            }
+        }
+    }
+
+    /// The keyspace an UNQUALIFIED UDT reference resolves under: the explicitly
+    /// established [`Self::udt_keyspace`] when present, else `schema.keyspace`
+    /// (issue #2339, roborev F1).
+    ///
+    /// The SINGLE source of that answer for every consumer — Arrow column metadata
+    /// ([`Self::with_udt_registry`]), aggregation/partial column metadata
+    /// ([`Self::with_aggregation`]) and merged-read reassembly plus the bypass
+    /// divergence predicate ([`Self::udt_scope`]) — so the Arrow schema a client is
+    /// promised and the values the reassembler produces cannot resolve under
+    /// different keyspaces.
+    /// Row-visibility signals taken from RAW cells only — no decoding, so a column
+    /// the projection excluded can never abort the query (issue #2339, roborev job
+    /// 120 F1).
+    ///
+    /// `outranks_every_tombstone` is the EXACT half: a live non-primary-key cell whose
+    /// timestamp is strictly greater than every tombstone timestamp in its OWN column
+    /// cannot be superseded by any of them, whatever the comparator says about their
+    /// cell paths — so the row is visible with no comparator and no decode.
+    ///
+    /// `ambiguous_columns` is the rest: columns with live cells that are ALL outranked by
+    /// a tombstone in the same column. Timestamps cannot decide those — it depends on
+    /// whether the cell PATHS are comparator-equal — so the caller asks cqlite-core's
+    /// reconciliation for exactly those columns (roborev job 128).
+    ///
+    /// TWO LINEAR PASSES, never a rescan per cell (roborev job 122). The first draft
+    /// re-scanned every cell to find its column's maximum tombstone timestamp, which is
+    /// O(n^2) exactly when the early exit does NOT fire — a wide collection row whose
+    /// live cells are all accompanied by newer tombstones — i.e. quadratic in the hot
+    /// read path for the very case this check exists to handle.
+    fn raw_visibility_signal(
+        &self,
+        cells: &[cqlite_core::storage::write_engine::merge::CellData],
+    ) -> RawVisibility {
+        let is_tomb = |c: &cqlite_core::storage::write_engine::merge::CellData| {
+            c.is_deleted || matches!(c.value, cqlite_core::Value::Tombstone(_))
+        };
+        // Pass 1: the maximum tombstone timestamp per column.
+        let mut max_tomb: HashMap<&str, i64> = HashMap::new();
+        for cell in cells.iter().filter(|c| is_tomb(c)) {
+            max_tomb
+                .entry(cell.column.as_str())
+                .and_modify(|t| {
+                    if cell.timestamp > *t {
+                        *t = cell.timestamp;
+                    }
+                })
+                .or_insert(cell.timestamp);
+        }
+        // Pass 2: evaluate the live cells against it. No early exit: the ambiguous set
+        // has to be complete, because any ONE of those columns can still hold a
+        // surviving cell and the caller must be able to ask about all of them.
+        let mut outranks_every_tombstone = false;
+        let mut ambiguous: Vec<String> = Vec::new();
+        for cell in cells {
+            if is_tomb(cell) || self.is_primary_key_column(&cell.column) {
+                continue;
+            }
+            if max_tomb
+                .get(cell.column.as_str())
+                .is_none_or(|t| cell.timestamp > *t)
+            {
+                outranks_every_tombstone = true;
+            } else if !ambiguous.iter().any(|c| c == &cell.column) {
+                ambiguous.push(cell.column.clone());
+            }
+        }
+        RawVisibility {
+            outranks_every_tombstone,
+            ambiguous_columns: if outranks_every_tombstone {
+                // Tier 1 already decided the row visible, so nothing needs the
+                // comparator pass and nothing needs cloning.
+                Vec::new()
+            } else {
+                ambiguous
+            },
+        }
+    }
+
+    pub(crate) fn effective_udt_keyspace(&self) -> &str {
+        self.udt_keyspace
+            .as_deref()
+            .unwrap_or(self.schema.keyspace.as_str())
+    }
+
+    /// The UDT resolution scope handed to the merged-read reassembler and to the
+    /// bypass divergence predicate, so both answer the same question with the same
+    /// inputs (issue #2339). `None` when no registry is attached.
+    pub(crate) fn udt_scope(
+        &self,
+    ) -> Option<cqlite_core::storage::write_engine::merge::UdtScope<'_>> {
+        self.udt_registry.as_ref().map(|registry| {
+            cqlite_core::storage::write_engine::merge::UdtScope {
+                registry,
+                keyspace: self.effective_udt_keyspace(),
+            }
+        })
     }
 
     /// Resolve each column's `cql_type` against `registry` in place (issue #2349):
@@ -585,6 +812,20 @@ impl MergeProducer {
     pub fn with_aggregation(mut self, aggregation: &Aggregation) -> Result<Self, ProducerError> {
         let plan = AggPlan::build(aggregation, &self.schema)?;
         let mut partial = plan.partial_columns(&self.schema)?;
+        // Snapshot the PARTIAL columns' declared types before any resolution, for the
+        // same reason as the full-row set (issue #3960): `with_udt_keyspace` running
+        // after this must be able to reset them to the declaration and re-bind.
+        // `partial_columns` derives from the RAW schema, so these ARE declarations.
+        //
+        // Into the PARTIAL-scoped map, and INSERTED rather than `or_insert_with`
+        // (roborev job 121): an aggregate output can reuse a base column's NAME with an
+        // unrelated type, so keeping the first-seen entry would reset this column to the
+        // OTHER set's declaration. Rebuilding the map each time `with_aggregation` runs
+        // also means a second call cannot inherit the first plan's columns.
+        self.original_partial_cql_types = partial
+            .iter()
+            .map(|c| (c.name.clone(), c.cql_type.clone()))
+            .collect();
         // Production order is `with_udt_registry(...)` THEN `with_aggregation(...)`
         // (service.rs). `plan.partial_columns` derives from the RAW schema, so a
         // UDT-typed group-by column would carry `Custom("udt:X")` while its emitted
@@ -592,7 +833,12 @@ impl MergeProducer {
         // (roborev job 1925 item 1). Resolve the partial columns against the already-
         // attached registry so both are `Struct`.
         if let Some(registry) = self.udt_registry.clone() {
-            Self::resolve_columns_udts(&registry, &self.schema.keyspace, &mut partial);
+            // Issue #2339 (roborev F1): the EFFECTIVE UDT keyspace, matching
+            // `with_udt_registry` and `udt_scope` — a ticket keyspace other than the
+            // `"default"` placeholder would otherwise leave a UDT group-by column
+            // unresolved here while the full-row columns resolved.
+            let keyspace = self.effective_udt_keyspace().to_string();
+            Self::resolve_columns_udts(&registry, &keyspace, &mut partial);
         }
         self.agg = Some(plan);
         self.partial_columns = Some(partial);
@@ -1018,11 +1264,6 @@ impl MergeProducer {
         // Cassandra returns it. Scan the full cells for any live (non-tombstone,
         // non-deleted-element) cell whose column is not a primary-key column —
         // mirroring the drop logic `assemble_read_cells` applies.
-        let has_live_data_cell = cells.iter().any(|c| {
-            !c.is_deleted
-                && !matches!(c.value, cqlite_core::Value::Tombstone(_))
-                && !self.is_primary_key_column(&c.column)
-        });
 
         // Issue #2324: the k-way merger emits every element of a non-frozen
         // collection (list/set/map) as its OWN cell, all sharing the column name.
@@ -1037,12 +1278,124 @@ impl MergeProducer {
         // carrier every scan producer builds, so `build_row_from_scan`
         // disassembles it into real column values (never the non-row fallback that
         // once emitted `Value::Map` and dropped every column — roborev H2).
-        let row_cells: RowCells = cqlite_core::storage::write_engine::merge::assemble_read_cells(
-            cells,
-            &self.schema,
-            needed,
-        )
-        .map_err(ProducerError::Merge)?;
+        // Issue #2339: the SAME resolved UDT registry every merge reader gets is
+        // handed to the reassembler, so a COMPOSITE set element / map key
+        // (`set<frozen<udt>>`, `map<frozen<tuple>, V>`) decodes STRUCTURALLY from
+        // its cell_path instead of failing closed. Without it an all-lowercase UDT
+        // name stays a bare `CqlType::Custom` with no field list and the path
+        // (correctly) still fails closed.
+        // PROJECTION-SCOPED ASSEMBLY IS RESTORED (issue #2339, roborev job 120 F1).
+        // Assembling unprojected to decide visibility was wrong: a composite column
+        // the query never requested could fail structural decode or UDT resolution and
+        // ABORT the whole query, discarding the projection-scoped fail-closed contract
+        // this API documents. Visibility is decided WITHOUT decoding unneeded columns,
+        // by `outranks_every_tombstone` below.
+        let visibility = self.raw_visibility_signal(&cells);
+        // Clone ONLY the ambiguous columns' cells, and only when tier 1 did not already
+        // decide the row visible — `cells` is moved into the assembly below, and the
+        // comparator pass needs them. Bounded by construction: an unambiguous row clones
+        // nothing (roborev job 128; the O(n^2) lesson of job 122 is why this is not a
+        // blanket clone).
+        // ONE pass over `cells`, not one pass PER ambiguous column (roborev job 132).
+        // The previous form filtered the whole cell list for each ambiguous column, i.e.
+        // O(columns x cells) — the same quadratic class job 122 already paid for, one
+        // level out, and reachable on exactly the rows this path exists for: a wide
+        // collection whose elements are all outranked contributes many cells AND many
+        // ambiguous columns at once.
+        //
+        // Equivalent to the filter form by construction, not by inspection:
+        // `ambiguous_columns` is DEDUPLICATED where it is built (`raw_visibility_signal`
+        // pushes a column only if absent), so keying by name loses no entry; the buckets
+        // are pre-seeded so a column with NO matching cell still yields its empty vec
+        // exactly as the filter did; cells are appended in `cells` order, so each
+        // column's cell order is unchanged; and the result is rebuilt in
+        // `ambiguous_columns` order.
+        let ambiguous_cells: Vec<(
+            String,
+            Vec<cqlite_core::storage::write_engine::merge::CellData>,
+        )> = {
+            let mut grouped: HashMap<
+                &str,
+                Vec<cqlite_core::storage::write_engine::merge::CellData>,
+            > = visibility
+                .ambiguous_columns
+                .iter()
+                .map(|col| (col.as_str(), Vec::new()))
+                .collect();
+            for cell in &cells {
+                if let Some(bucket) = grouped.get_mut(cell.column.as_str()) {
+                    bucket.push(cell.clone());
+                }
+            }
+            visibility
+                .ambiguous_columns
+                .iter()
+                .map(|col| {
+                    (
+                        col.clone(),
+                        grouped.remove(col.as_str()).unwrap_or_default(),
+                    )
+                })
+                .collect()
+        };
+        let row_cells: RowCells =
+            cqlite_core::storage::write_engine::merge::assemble_read_cells_with_udts(
+                cells,
+                &self.schema,
+                needed,
+                self.udt_scope(),
+            )
+            .map_err(ProducerError::Merge)?;
+
+        // The verdict, in three tiers, cheapest first:
+        //   1. a live non-PK cell that OUTRANKS every tombstone in its own column
+        //      definitely survives reconciliation — exact, and no comparator needed;
+        //   2. else, if a non-PK column SURVIVED the (projected) assembly, it is live;
+        //   3. else ask cqlite-core's reconciliation about the AMBIGUOUS columns only.
+        // Tier 3 used to be a raw-cell guess, conservative toward visible, whose declared
+        // residual was a phantom key-only row for an EXCLUDED composite column. roborev
+        // job 128 (correctly) refused a declared phantom: a comment acknowledging a wrong
+        // answer does not make it right. It is now MEASURED instead of guessed.
+        let mut has_live_data_cell = visibility.outranks_every_tombstone
+            || row_cells
+                .iter()
+                .any(|(name, _)| !self.is_primary_key_column(name));
+
+        // TIER 3 — the comparator-aware pass, replacing the raw-cell guess that produced
+        // a PHANTOM key-only row (roborev job 128). A raw cell can look live and still
+        // lose reconciliation to a comparator-EQUAL newer tombstone; when its column is
+        // EXCLUDED by the projection, `row_cells` cannot show that, so tier 2 is blind to
+        // it. Deciding it from raw cells was the declared residual this replaces.
+        //
+        // Asked of cqlite-core's OWN reconciliation (`column_has_surviving_live_cell`), so
+        // there is ONE decision procedure rather than a second "lightweight" copy that
+        // would have to track `cell_wins` by hand. Reached only for the genuinely
+        // ambiguous columns, so an unambiguous row pays nothing.
+        if !has_live_data_cell {
+            for (column, column_cells) in ambiguous_cells {
+                match cqlite_core::storage::write_engine::merge::column_has_surviving_live_cell(
+                    &column,
+                    column_cells,
+                    &self.schema,
+                    self.udt_scope(),
+                ) {
+                    Ok(true) => {
+                        has_live_data_cell = true;
+                        break;
+                    }
+                    Ok(false) => {}
+                    // UNMEASURABLE, not "absent": an EXCLUDED column failing to decode
+                    // must never abort a query it was not part of (roborev job 120 F1), and
+                    // a positive verdict may not rest on an unmeasured state. Fall back to
+                    // VISIBLE — hiding a row on a decode error we could not interpret would
+                    // be DATA LOSS, which is strictly worse than a spurious row.
+                    Err(_) => {
+                        has_live_data_cell = true;
+                        break;
+                    }
+                }
+            }
+        }
 
         // Issue #2374/#2789: Cassandra row-visibility rule for the READ path. A
         // reconciled row is visible to a `SELECT` iff it has at least one
@@ -1282,6 +1635,12 @@ fn flat_data_type(cql: &CqlType) -> DataType {
         | CqlType::Custom(_) => DataType::Text,
     }
 }
+
+/// The dedup invariant the tier-3 ambiguous-cell grouping depends on (roborev job 132).
+/// A CHILD module, so it can see the private `raw_visibility_signal`/`RawVisibility`.
+#[cfg(test)]
+#[path = "producer_visibility_invariant_tests.rs"]
+mod producer_visibility_invariant_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3106,6 +3465,102 @@ mod tests {
         assert!(s.field_with_name("agg1").unwrap().is_nullable());
     }
 
+    /// Decode a hex literal to bytes — the cell-path encodings in the job-128 test are
+    /// written as hex because the BYTES are the point (two spellings of one logical key).
+    fn hex_bytes(h: &str) -> Vec<u8> {
+        (0..h.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&h[i..i + 2], 16).expect("valid hex"))
+            .collect()
+    }
+
+    /// **Issue #2339 / roborev job 128 — no PHANTOM key-only row when an EXCLUDED
+    /// composite column's only live cell lost to a comparator-EQUAL tombstone.**
+    ///
+    /// `ftk` is `map<frozen<tuple<int, text>>, bigint>`. Two cell paths that are
+    /// comparator-EQUAL but DIFFERENT BYTES — an omitted trailing component vs an explicit
+    /// null one — carry a ts-100 LIVE cell and a ts-200 TOMBSTONE. Reconciliation gives the
+    /// delete, so the column is absent and the row has no surviving data and no liveness
+    /// marker: Cassandra returns NOTHING.
+    ///
+    /// Under a PK-only projection the assembled row cannot show that (`ftk` is dropped), so
+    /// the old raw-cell tier said "a live cell exists" and emitted a key-only row. That was
+    /// the residual DECLARED in a comment until job 128 refused it.
+    ///
+    /// The second half is the control that makes the first meaningful: swap the timestamps
+    /// so the LIVE cell is newer, and the row must be VISIBLE. Without it, "hide whenever an
+    /// ambiguous column exists" would pass the phantom assertion while losing real rows.
+    #[test]
+    fn no_phantom_row_when_an_excluded_composite_column_lost_to_a_comparator_equal_tombstone() {
+        use cqlite_core::storage::sstable::reader::compaction_row::RowLiveness;
+        use cqlite_core::storage::write_engine::merge::{CellData, MergeEntry, RowData};
+        use cqlite_core::storage::write_engine::PartitionKey;
+        use cqlite_core::Value;
+        use std::collections::HashSet;
+
+        // `simple_schema` has no composite-keyed map, so declare one on `name`.
+        let mut schema = simple_schema();
+        if let Some(c) = schema.columns.iter_mut().find(|c| c.name == "name") {
+            c.data_type = "map<frozen<tuple<int, text>>, bigint>".to_string();
+        }
+        let producer = MergeProducer::new(schema.clone(), 1024).unwrap();
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let decorated = pk.to_decorated_key(&schema).unwrap();
+        let pk_bytes = decorated.key.clone();
+
+        // Same logical key, two encodings: omitted trailing component vs explicit null.
+        let omitted = hex_bytes("0000000400000001");
+        let explicit = hex_bytes("0000000400000001ffffffff");
+
+        let entry = |live_ts: i64, tomb_ts: i64| {
+            let mut live = CellData::new("name".into(), Value::BigInt(1), live_ts);
+            live.cell_path = Some(omitted.clone());
+            let mut tomb = CellData::new("name".into(), Value::BigInt(0), tomb_ts);
+            tomb.cell_path = Some(explicit.clone());
+            tomb.is_deleted = true;
+            MergeEntry::new(
+                0,
+                decorated.clone(),
+                None,
+                live_ts.max(tomb_ts),
+                RowData::Live {
+                    cells: vec![live, tomb],
+                },
+            )
+            .with_row_liveness(RowLiveness::default())
+        };
+
+        assert!(
+            !entry(100, 200).row_liveness.marker_live_at(300),
+            "precondition: marker-less, so visibility can only come from the data cell"
+        );
+
+        let pk_only: HashSet<String> = ["id".to_string()].into_iter().collect();
+
+        // Tombstone NEWER -> the entry is deleted -> NO row, even though a raw live cell
+        // is present and `name` is excluded by the projection.
+        let mut cache = PartitionKeyCache::default();
+        let row = producer
+            .entry_to_row(&pk_bytes, entry(100, 200), &mut cache, Some(&pk_only), 300)
+            .unwrap();
+        assert!(
+            row.is_none(),
+            "PHANTOM row: the ts-100 live cell lost to a comparator-EQUAL ts-200 tombstone, \
+             so nothing survives and the row must not be returned (roborev job 128)"
+        );
+
+        // CONTROL: live cell NEWER -> the row is real and must be VISIBLE.
+        let mut cache = PartitionKeyCache::default();
+        let row = producer
+            .entry_to_row(&pk_bytes, entry(200, 100), &mut cache, Some(&pk_only), 300)
+            .unwrap();
+        assert!(
+            row.is_some(),
+            "a row whose live cell OUTRANKS the comparator-equal tombstone must stay \
+             visible — hiding it would be data loss, not a phantom fix"
+        );
+    }
+
     /// Issue #2374/#2789 (roborev BLOCKER 1): a row written ONLY by an UPDATE
     /// (a live regular-column DATA cell, NO primary-key liveness marker) must
     /// stay VISIBLE even when the projection drops that data column. Before the
@@ -3208,6 +3663,59 @@ mod tests {
         assert!(
             row.is_none(),
             "a fully-tombstoned marker-less row must stay hidden"
+        );
+    }
+
+    /// **Issue #3960 / roborev job 121 — an aggregate output ALIASED to a base column's
+    /// name must keep the AGGREGATE's type through `with_udt_keyspace`.**
+    ///
+    /// The declared-type snapshot used ONE name-keyed map for both the full-row and the
+    /// partial (aggregate output) column sets, filled with `or_insert_with`. An
+    /// aggregate output may reuse a base column's NAME with an unrelated type, so the
+    /// first-seen entry won and resetting the partial columns replaced the aggregate's
+    /// own type with the base column's — here `count(*) AS name` would be reset to
+    /// `text` instead of staying `BigInt`, while the emitted array holds integers. That
+    /// is the silent Arrow schema/array disagreement the surrounding code exists to
+    /// prevent.
+    ///
+    /// RED BEFORE THE FIX: `Utf8` for the `name` output column.
+    #[test]
+    fn an_aggregate_aliased_to_a_base_column_name_keeps_its_own_type() {
+        use cqlite_core::schema::udt_registry_from_cql;
+
+        let schema = simple_schema();
+        assert!(
+            schema.columns.iter().any(|c| c.name == "name"),
+            "precondition: `name` is a base TEXT column, which is what makes the alias \
+             collide"
+        );
+        // `count(id) AS name` — the output deliberately shadows the base text column.
+        let agg = Aggregation {
+            group_by: vec![],
+            aggregates: vec![agg_on(AggFunc::Count, "id", "name")],
+        };
+        let registry = udt_registry_from_cql(
+            "CREATE TYPE contact_info (email text, phone text);",
+            &schema.keyspace,
+        );
+
+        // with_aggregation BEFORE with_udt_keyspace: the order that triggers the reset.
+        let producer = MergeProducer::with_spec(schema, 1024, ScanSpec::default())
+            .unwrap()
+            .with_udt_registry(registry)
+            .with_aggregation(&agg)
+            .expect("aggregation plan")
+            .with_udt_keyspace("some_keyspace");
+
+        let arrow = producer.arrow_schema().expect("arrow schema");
+        assert_eq!(
+            arrow
+                .field_with_name("name")
+                .expect("aggregate output column")
+                .data_type(),
+            &arrow::datatypes::DataType::Int64,
+            "a count(*) output aliased to a TEXT base column must stay Int64 — resetting \
+             it to the base column's declaration is issue #3960 / roborev job 121"
         );
     }
 

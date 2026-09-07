@@ -61,6 +61,21 @@ see coming — a supervisor recycle, `kill-pane`, logout — and which you canno
 from a slow gate. Launching with `scripts/flow/gate-detached.sh` costs one call and removes
 the whole dependency by putting the gate under `app.slice` in a cgroup of its own.
 
+**Every probe is asked about a NAMED run — never "the newest one" (#3637).** The summary
+file you passed to `AGENT_GATE_SUMMARY_FILE` (and the `run-id:` inside it) is the ONLY thing
+binding an artifact to your gate. **A run directory is bound to a gate only by the `run-id:`
+line in that gate's own summary file. Never locate one by `ls -t`, by a glob, or by
+recency. Progress read from an unbound run dir is a peer's progress; a verdict read from one
+is a peer's verdict.** With up to four gates per box sharing one `$TMPDIR`, recency lands on a
+peer routinely: on PR #3616 a closer's hand-rolled progress loop located "the newest run dir"
+(`ls -t /tmp/agent-gate.*`), read a peer lane's 33-of-37-PASS table and was about to merge on
+another PR's verdict — the count, the directory and the timestamps were all real, and only the
+`run-id:` line exposed it. Since #3637 the gate also REMOVES its run dir on a terminal PASS
+(and on any verdict when nested), so a surviving directory is disproportionately a *failed* or
+*foreign* run: retaining runs name their reason on their own `logdir-disposition:` line (the
+`logs:` line is PATH-ONLY — never parse a disposition out of it), and
+`AGENT_GATE_KEEP_LOGS=1` keeps a PASSing run's bundle when you genuinely need it.
+
 **Polling is MANDATORY, not optional (#2668).** Poll with `gate-liveness.sh`, never a bare
 `grep`, at **5-minute intervals**:
 ```bash
