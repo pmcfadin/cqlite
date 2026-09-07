@@ -116,6 +116,8 @@
 #     numbered `PROVABLY-SAFE, UNSTATUSED (n)` comment saying why its failure cannot produce a false
 #     clean. Tally, re-derivable from this file with `grep -c 'PROVABLY-SAFE, UNSTATUSED ('` and by
 #     counting the guard sites: 65 status/invariant guards, 10 declared-safe operations.
+#   * THE WORKING SET IS ASSERTED TO STILL EXIST at verdict time, so a clean verdict can always
+#     point at the material it was computed from.
 #   * ONE RESIDUAL WITH NO INDEPENDENT REFERENCE, DECLARED at its site: `git ls-files` ORIGINATES
 #     the subject set, so nothing here can cross-check its stream — bounded by git's own status and
 #     by SUBJECT_FLOOR.
@@ -168,7 +170,9 @@ esac
 # safe and IS statused; see the end of this file.)
 # PROVABLY-SAFE, UNSTATUSED (5): the `$(tr '\n' ' ' <…err)` substitutions that flatten a captured
 # stderr INTO a refusal message. They are evaluated only on a path that is ALREADY refusing (or
-# already FAILing), so a failure there can only shorten a message, never produce a verdict.
+# already FAILing), so a failure there can only shorten a message, never produce a verdict. The
+# `2>"$_tmp/….err"` CAPTURES themselves are safe for a different reason: a redirect that cannot be
+# opened makes the COMMAND fail, and every one of those commands has its status read.
 refuse() { # refuse <cause> <what> <remedy>
   printf 'SIGPIPE-SITES: REFUSING (reason: %s): %s\n' "$1" "$2"
   printf 'SIGPIPE-SITES: REMEDY: %s\n' "$3"
@@ -946,6 +950,18 @@ if [ "$FAILING" -gt 0 ] || [ -s "$_tmp/msg.fail" ]; then
   exit 1
 fi
 
+# THE WORKING SET MUST STILL EXIST AT VERDICT TIME — checked, not argued (the lead's audit list
+# names the temp directory's continued existence explicitly). Every measurement above was read out
+# of files under $_tmp; if that directory has since vanished (a tmp reaper, a hostile cleanup) the
+# material this clean verdict rests on cannot be pointed at, and a verdict over vanished material
+# is not a measurement. `now` and `base` are tested for EXISTENCE and not for content: a tree with
+# no shape match anywhere would leave `now` legitimately EMPTY, and `-s` there would refuse a
+# genuinely clean run.
+if ! { [ -d "$_tmp" ] && [ -s "$_tmp/subjects" ] && [ -f "$_tmp/now" ] && [ -f "$_tmp/base" ]; }; then
+  refuse "working-set-gone" \
+    "the temp directory holding this run's measurements ($_tmp) is gone, or its subject/census/baseline files are, so nothing can be pointed at behind a clean verdict" \
+    "re-run; if it persists, check TMPDIR=${TMPDIR:-/tmp} for a reaper deleting live temp directories"
+fi
 # THE LAST MEMBER OF THE CLASS: THE VERDICT'S OWN EMISSION. Everything above makes an unmeasured
 # state refuse rather than read clean; this makes an UNDELIVERED clean verdict refuse too. A
 # caller keys on the verdict LINE, so a run whose stdout was closed, full or broken would exit 0
