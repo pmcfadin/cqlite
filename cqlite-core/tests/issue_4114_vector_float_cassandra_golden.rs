@@ -472,6 +472,12 @@ fn assert_full_rows_match_golden(table: &str, rows: &[(Vec<u8>, BTreeMap<String,
 /// `2.4651903e-32` is exactly `2^-105` (`0x0b000000`) — chosen for its LEADING
 /// BYTE, not its magnitude. The two rows have DIFFERENT tails so a constant wrong
 /// answer cannot pass as a data-derived one.
+///
+/// REVERT-VERIFY (MEASURED at `git checkout 786166cd8 -- cqlite-core/src` with
+/// this test in place): FAILED with
+/// `partition 1 v3 came back as a BLOB … Got Blob(b"\0\0\0?\x80\0\0@\0\0\0")`
+/// — the 11 bytes `0000003f80000040000000`, i.e. the tail of the value, exactly
+/// the pre-fix CLI output.
 #[tokio::test]
 async fn ac3_vector_exact_silent_misdecode_is_fixed() {
     const TABLE: &str = "vector_exact";
@@ -529,6 +535,12 @@ async fn ac3_vector_exact_silent_misdecode_is_fixed() {
 /// key ["2"]: a_before "before-2", v1 DELETED, v384 DELETED,                z_after "after-2"
 /// key ["3"]: a_before "before-3", v1 [-2.25], v384 [1000.0,1000.5,…,1191.5], z_after "after-3"
 /// ```
+///
+/// REVERT-VERIFY (MEASURED pre-fix, as above): FAILED in the SCAN, before any
+/// assertion — `column 'v384' (column type floattype , 384) failed to decode at
+/// byte offset 98 of the row: Cell 'v384': need 16640 bytes for blob, only 1479
+/// available`. `0x40` (the leading byte of `1000.0`'s successor elements) read as
+/// a vint length demanded 16640 bytes: the bounds-check regime.
 #[tokio::test]
 async fn ac3_pk_only_n1_n384_and_null_vectors() {
     const TABLE: &str = "vector_pk_only";
@@ -595,6 +607,10 @@ async fn ac3_pk_only_n1_n384_and_null_vectors() {
 /// by a vint length `0x0c`, while the `text` cell that follows it in the SAME row
 /// is framed `08 0b` = flags + vint length 11 (`.drive-issue-4114/format-authority.md`).
 /// Fixed and variable framing side by side in one Cassandra-written row.
+///
+/// REVERT-VERIFY (MEASURED pre-fix, as above): FAILED with `column 'v3' … need 63
+/// bytes for blob, only 24 available` — `0x3f`, the leading byte of `1.0`, read
+/// as a vint length.
 #[tokio::test]
 async fn ac3_clustered_table_vector_with_clustering_column() {
     const TABLE: &str = "vector_clustered";
@@ -627,6 +643,12 @@ async fn ac3_clustered_table_vector_with_clustering_column() {
 /// key ["1"]: v3 [0.0,1.0,2.0]         (first element 0x00000000)
 /// key ["2"]: v3 [3.85186e-34,1.0,2.0] (first element 0x08000000 == 2^-111)
 /// ```
+///
+/// REVERT-VERIFY (MEASURED pre-fix, as above): FAILED with `row body
+/// under-consumed: … left the cursor at offset 24 but the row body ends at 35 …
+/// leaving 11 byte(s) inside this row accounted for by no column` — the
+/// accounting regime, distinct from both the bounds regime and `vector_exact`'s
+/// silent balance.
 #[tokio::test]
 async fn ac3_vector_as_last_regular_column() {
     const TABLE: &str = "vector_last";
@@ -653,6 +675,11 @@ async fn ac3_vector_as_last_regular_column() {
 // `cqlite_core::ingestion` is gated behind `cli-helpers` (the gate's `core-tests`
 // component runs `--features cli-helpers`, so this lane executes there). The
 // cases above are deliberately NOT gated, so this target can never run zero tests.
+//
+// REVERT-VERIFY (MEASURED pre-fix, as above): this case FAILED in `ingest` —
+// `CQL parse error … input: "<float, 1>, …", code: Char` — i.e. pre-fix the CQL
+// text parser could not even read the type, which is a second, independent
+// surface the fix repairs.
 
 #[cfg(feature = "cli-helpers")]
 #[tokio::test]
