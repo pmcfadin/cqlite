@@ -900,9 +900,24 @@ async fn test_1632_frozen_depth_schema_path_symmetric_with_block_path() {
     // element decode (which would recurse to `n + 1`) is never entered and the
     // frozen layers remain the only thing being counted.
     //
-    // Body: one VInt `0x00` = element count 0. Frozen consumes nothing, so the same
-    // byte serves at every nesting level.
-    let data = vec![0x00];
+    // # THE BODY IS `i32`-BE FRAMED, NOT VInt FRAMED, AND THAT IS THE FROZEN PATH
+    //
+    // A FROZEN collection body is `i32`-BE element-framed — Cassandra's
+    // `CollectionSerializer` writes a 4-byte element count and an `i32`-BE length
+    // before each element — whereas a NON-frozen collection cell is VInt-framed.
+    // `parse_frozen_inner_with` routes `List`/`Set`/`Map` to the frozen framing
+    // helpers (issue #2339), so `Frozen^n(List(Int))` reaches `read_count` ->
+    // `read_i32_be`, which needs FOUR bytes. A 1-byte VInt `0x00` body — correct
+    // for the old `Frozen^n(Int)` scalar probe, which took the `other` arm and
+    // never read a count — is a TRUNCATED count here, and it made `n = 10` Err for
+    // a framing reason while `n = 11` Err'd for the intended depth reason, so the
+    // boundary assertion failed and the depth assertion passed vacuously.
+    //
+    // Four zero bytes = `i32`-BE element count 0. `Frozen` consumes no bytes, so the
+    // same body serves at every nesting level, and a zero count means the element
+    // decode (which would recurse to `n + 1`) is never entered — the frozen layers
+    // remain the only thing being counted.
+    let data = vec![0x00, 0x00, 0x00, 0x00];
 
     // Build the equivalent block-path comparator for `n` frozen layers over
     // `list<int>`.
