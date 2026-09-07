@@ -165,3 +165,41 @@ CREATE TABLE IF NOT EXISTS vector_last (
     id       int PRIMARY KEY,
     v3       vector<float, 3>   -- 12 bytes; the ONLY regular column
 );
+
+-- ============================================================================
+-- vector_exact — THE FULLY-SILENT CASE (issue #4114)
+--
+-- vector_last (above) FAILS CLOSED, but NOT via the vint bounds check: the
+-- measured error is a ROW-BODY UNDER-CONSUMPTION guard. With v3[0]=0.0 the
+-- bogus vint 0x00 makes the mis-decode consume 1 byte of a 12-byte value, so
+-- 11 bytes of the row body belong to no column and the reader rejects the row
+-- against the row header's authoritative row_size.
+--
+-- That guard is an ACCOUNTING check, so it is defeated by arithmetic rather
+-- than by bounds: it cannot fire when the mis-decode consumes EXACTLY the
+-- value's width. For a `vector<float,3>` the misreader consumes
+-- `1 (the vint byte) + len`, so the row body balances precisely when
+-- `len == 11`, i.e. when the first element's leading big-endian byte is 0x0b.
+--
+-- 2^-105 encodes as exactly 0x0b000000: exponent field 127-105 == 22, and the
+-- top 7 bits of 22 are 0b0001011 == 0x0b with a zero mantissa. So
+-- v3 = [2^-105, x, y] mis-decodes into an 11-byte blob — the *tail* of its own
+-- value — consumes all 12 bytes, balances the row, and is emitted with NO
+-- error. Again the literal is chosen for its LEADING BYTE, not its magnitude.
+--
+-- TWO ROWS WITH DIFFERENT TAILS, because a single row cannot distinguish a
+-- data-derived wrong value from a constant. id=1 tails on [1.0, 2.0] and id=2
+-- on [4.5, -5.0], so the two wrong blobs differ in exactly the bytes the tails
+-- differ in.
+--
+-- BOTH rows must mis-decode silently for the demonstration to be visible at
+-- all: the reader ABORTS the whole scan on the first partition that errors
+-- (measured on vector_last: exit 5, zero rows emitted), so a single
+-- fail-closed row anywhere in this table would mask every silent row after it.
+-- That is also why this is a separate table from vector_last rather than a
+-- third row in it.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS vector_exact (
+    id       int PRIMARY KEY,
+    v3       vector<float, 3>   -- 12 bytes; the ONLY regular column
+);
