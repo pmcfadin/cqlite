@@ -154,14 +154,17 @@ fn qualified_reference_to_unknown_udt_is_refused_not_degraded_to_blob() {
 /// from "you supplied no schema at all" (here).
 ///
 /// # Why this is a DECODER-level test and not an end-to-end one
-/// The precondition is not constructible through the CLI: the schema loader fails
-/// CLOSED on a column referencing an undefined UDT (`Column 'w' references
-/// undefined UDT 'wide'`), and validation descends into collection element types
-/// too, so there is no user-reachable route to a table whose declared UDT cannot be
-/// resolved. Four constructions were tried during #4070's measurement and every one
-/// was rejected at load. Building a fixture for a state the loader refuses to let a
-/// user create would be inventing the state, not covering it — so this drives
-/// `parse_raw_type_value` directly, the idiom this whole module already uses.
+/// The precondition is not constructible through the CLI. #4070's measurement tried
+/// FOUR constructions and NONE of them reached this state, by one of two routes:
+/// the schema loader fails CLOSED on a column referencing an undefined UDT (`Column
+/// 'w' references undefined UDT 'wide'`), and its validation descends into
+/// collection element types too; while the other two RESOLVED rather than failing —
+/// a UDT declared after the table using it, and a cross-keyspace qualified
+/// reference, both resolve. So there is no user-reachable route to a table whose
+/// declared UDT cannot be resolved: either the load is refused or the name resolves.
+/// Building a fixture for a state a user cannot create would be inventing the state,
+/// not covering it — so this drives `parse_raw_type_value` directly, the idiom this
+/// whole module already uses.
 /// #4070's public-surface wiring evidence lives with AC1, on the route that IS
 /// reachable (`cqlite-core/tests/issue_3722_udt_field_type_fidelity.rs`).
 #[test]
