@@ -6,9 +6,13 @@
 //! This module decodes those three fields and then defers to
 //! [`super::serialization_header`] for the schema that follows.
 
+#[cfg(test)]
+mod encoding_stats_tests;
+
 use super::super::vint::parse_vuint;
 use super::super::vint_narrow::take_vuint_length;
 use super::marshal_type::build_column_infos;
+use super::schema_refusal::HeaderSchemaError;
 use super::serialization_header::{parse_serialization_header, parse_serialization_header_schema};
 use super::EncodingStatsResult;
 use crate::storage::sstable::version_gate::VersionGates;
@@ -76,13 +80,35 @@ pub(super) fn parse_minimal_encoding_stats<'a>(
         min_ttl
     );
 
-    // Parse the rest of the SerializationHeader (schema info)
+    // Parse the rest of the SerializationHeader (schema info).
+    //
+    // The two failure kinds get OPPOSITE treatment (#4104, roborev job 116). A
+    // STRUCTURAL failure says "the header is not here" — WHERE it lives is in
+    // doubt, so the marker search gets a second attempt at locating it (unchanged
+    // behaviour). A SEMANTIC refusal says "the header IS here and declares a type
+    // Cassandra cannot have written" — position is not in doubt, so re-reading the
+    // same file with a marker search cannot produce a better answer, only a
+    // heuristic guess (`parse_serialization_header` ends by returning an EMPTY
+    // schema as `Ok`, so retrying would turn a correct refusal into silent
+    // acceptance). That is fail-open and a no-heuristics violation (#28), and it
+    // would also put this gate at odds with the KEY-type gate immediately below,
+    // which already fails closed.
     let (partition_types, clustering_types, columns) = match parse_serialization_header_schema(rest)
     {
         Ok((_, result)) => result,
-        Err(e) => {
+        // SEMANTIC — fail closed. Decided on the variant, never on message text.
+        Err(HeaderSchemaError::Refused(e)) => {
+            tracing::error!("Refusing SerializationHeader column types: {e}");
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+        // STRUCTURAL — the pre-existing marker-search fallback, untouched.
+        Err(HeaderSchemaError::Structural(e)) => {
             tracing::warn!(
-                "Schema parsing after EncodingStats failed: {:?}, falling back to marker search",
+                "Schema parsing after EncodingStats failed structurally: {:?}, \
+                 falling back to marker search",
                 e
             );
             parse_serialization_header(input)?.1

@@ -42,11 +42,14 @@
 //! - [`encoding_stats`] — EncodingStats (min timestamp/deletion-time/TTL) decode.
 //! - [`serialization_header`] — table-schema (partition/clustering/static/regular columns).
 //! - [`marshal_type`] — Cassandra marshal-type → CQL conversion + `ColumnInfo` builders.
+//! - [`schema_refusal`] — the schema decoder's typed failure channel: structural
+//!   (a retry may find the header elsewhere) vs semantic (fail-closed, #4104).
 //! - this `mod.rs` — the public entry points that orchestrate the above.
 
 mod encoding_stats;
 mod header;
 mod marshal_type;
+mod schema_refusal;
 mod serialization_header;
 
 pub use header::parse_nb_format_header;
