@@ -21,6 +21,8 @@ mod issue_3811_consumption_demo_tests;
 // the bounded decoder that is the issue's named subject.
 #[cfg(test)]
 mod issue_3847_empty_fixed_width_tests;
+#[cfg(test)]
+mod issue_4114_vector_dispatch_tests;
 
 // Issue #3811 / roborev round 4 (closes #3861): the two frozen-UDT consumption
 // checks in `cell_value_complex.rs` driven at their PRODUCTION call site, which
