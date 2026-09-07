@@ -7,9 +7,7 @@ use super::*;
 // composite key and ~10 scalar families. Its only caller is the map branch
 // below, so it nests here rather than beside the whole-value decoders.
 mod cell_path_key;
-// Issues #3747/#4106: the empty-buffer admission gate a zero-length CELL PATH
-// goes through, shared by the MAP key and SET member routes because Cassandra
-// decides both with one `validateCellPath` line. See its header.
+// Issues #3747/#4106: the shared zero-length CELL PATH admission gate.
 mod cell_path_empty;
 
 #[cfg(test)]
@@ -629,15 +627,11 @@ impl V5CompressedLegacyParser {
                 // For sets the path bytes ARE the member (a live set cell carries
                 // HAS_EMPTY_VALUE, so `cell.value` is `None`); a set cell with a
                 // non-empty VALUE is unusual and its value wins.
-                // ISSUE #4106 — DECODED UNCONDITIONALLY. A ZERO-LENGTH path is the
-                // EMPTY MEMBER, never "no member": the old `!path_bytes.is_empty()`
-                // guard yielded `None` and DROPPED it, returning a set one member
-                // short with no error and no log line. Which empties are legal is
-                // `decode_set_cell_path_member`'s delegated call to the shared
-                // cell-path admission gate (`cell_path_empty`), the SAME authority
-                // the map-key route uses (#3747) — never a decision at this site.
-                // Errors PROPAGATE (#3811, roborev F1): mapping them to `None`
-                // dropped the member and left no trace at all.
+                // ISSUE #4106 — DECODED UNCONDITIONALLY. A ZERO-LENGTH path is
+                // the EMPTY MEMBER, never "no member": the old
+                // `!path_bytes.is_empty()` guard yielded `None` and DROPPED it.
+                // Legality and error propagation are `cell_path_empty`'s
+                // (#3747/#3811); never decided at this site.
                 let set_member = match cell.value.clone() {
                     Some(val) => val,
                     None => self.decode_set_cell_path_member(
