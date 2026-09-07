@@ -23,7 +23,14 @@ else. With the feature off, or off-Linux, the binary SHALL use the system alloca
 
 - **Scenario R2.1** — When `cqlite-flight --version` runs, Then stdout contains exactly one line
   matching `^allocator: (jemalloc|system)$`, and the value matches R1's build (integration test
-  `cqlite-flight/tests/issue_3997_allocator_surface.rs`, run under both feature states in the gate).
+  `scripts/tests/test_flight_allocator_link.sh`, which drives the BUILT BINARY under both feature
+  states inside the gate's `tooling-tests` component). The cargo-native test expressing the same
+  contract, `cqlite-flight/tests/issue_3997_allocator_surface.rs`, lands with this change but is
+  executed by NO gate component: `flight-tests` runs `cqlite-flight` at `--lib --bins` only and
+  censuses the integration `--test` targets it does not run (#3384). An earlier revision of this
+  scenario named that target as the gate-run evidence, which was false; the shell guard is the
+  enforcer, and it additionally covers a property no cargo test can reach — what is actually
+  LINKED into the binary.
 - **Scenario R2.2** — When the server starts, Then the first startup `info` log line contains
   `allocator=<same value>`.
 
