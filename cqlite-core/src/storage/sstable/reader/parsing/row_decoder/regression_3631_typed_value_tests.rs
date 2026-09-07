@@ -398,9 +398,13 @@ fn a_cyclic_udt_through_a_collection_is_refused_not_recursed() {
     let err = p
         .parse_simple_udt_field_value_at(
             &deep,
-            &CqlType::Frozen(Box::new(CqlType::Custom("cyclic".to_string()))), 0)
+            &CqlType::Frozen(Box::new(CqlType::Custom("cyclic".to_string()))),
+            0,
+        )
         .expect_err(
-            "a cyclic UDT reached through a collection must be REFUSED; before              #3631's BLOCKER 2 fix each UDT hop reset the depth counter and this              recursed until the stack was exhausted",
+            "a cyclic UDT reached through a collection must be REFUSED; before \
+             #3631's BLOCKER 2 fix each UDT hop reset the depth counter and this \
+             recursed until the stack was exhausted",
         );
     let text = err.to_string();
     assert!(
@@ -419,9 +423,10 @@ fn alternating_collection_and_udt_layers_share_one_nesting_limit() {
 
     // POSITIVE CONTROL: two layers is well inside the limit and must decode.
     let shallow = nested_cyclic_bytes(2);
-    let decoded = p
-        .parse_simple_udt_field_value_at(&shallow, &ty, 0)
-        .expect("a SHALLOW cyclic-typed value must still decode — the limit must                  bound depth, not reject the shape");
+    let decoded = p.parse_simple_udt_field_value_at(&shallow, &ty, 0).expect(
+        "a SHALLOW cyclic-typed value must still decode — the limit must \
+                 bound depth, not reject the shape",
+    );
     assert!(
         matches!(unfrozen(&decoded), Value::Udt(_)),
         "got {decoded:?}"
@@ -1050,7 +1055,8 @@ fn a_float_udt_field_decodes_to_float32_not_a_widened_double() {
         // above measures.
         Value::Float(f) => panic!(
             "a `float` UDT field must be Value::Float32, not a widened Value::Float \
-             ({f} — sstabledump renders a FLOAT column as its f32 form, e.g.              `humidity: 92.88221`, and would render this as 0.10000000149011612)"
+             ({f} — sstabledump renders a FLOAT column as its f32 form, \
+             e.g. `humidity: 92.88221`, and would render this as 0.10000000149011612)"
         ),
         other => panic!("expected Value::Float32(0.1), got {other:?}"),
     }

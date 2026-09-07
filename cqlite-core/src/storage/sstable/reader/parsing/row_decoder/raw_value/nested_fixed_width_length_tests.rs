@@ -892,14 +892,18 @@ fn wrong_width_udt_field_of_five_types_is_refused_since_3631() {
             .expect_err("consolidation witness: a wrong-width `int` UDT field must be refused");
         assert!(
             is_declared_width_error(&err),
-            "consolidation witness ({w} bytes): since #4070 an `int` UDT field must be              refused by the ONE delegated declared-width check, not by a private arm.              A bespoke wording here means a scalar arm was reintroduced into              `parse_simple_udt_field_value_at`: {err:?}"
+            "consolidation witness ({w} bytes): since #4070 an `int` UDT field must be \
+             refused by the ONE delegated declared-width check, not by a private arm. \
+             A bespoke wording here means a scalar arm was reintroduced into \
+             `parse_simple_udt_field_value_at`: {err:?}"
         );
         let msg = err.to_string();
         assert!(
             msg.contains("'int'")
                 && msg.contains("is 4 bytes wide")
                 && msg.contains(&format!("is {w} bytes")),
-            "consolidation witness ({w} bytes): the delegated refusal must name the type,              the admissible width and the actual length: {msg}"
+            "consolidation witness ({w} bytes): the delegated refusal must name the type, \
+             the admissible width and the actual length: {msg}"
         );
     }
 
