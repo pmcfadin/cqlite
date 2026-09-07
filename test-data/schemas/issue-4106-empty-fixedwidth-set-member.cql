@@ -1,0 +1,173 @@
+-- issue-4106-empty-fixedwidth-set-member.cql — Cassandra 5.0 reference schema
+-- for the EMPTY FIXED-WIDTH MULTICELL SET MEMBER fixture (issue #4106).
+--
+-- THE SET HALF OF #3805's MAP FIXTURE. Read
+-- test-data/schemas/issue-3805-empty-fixedwidth-map-key.cql first: every claim
+-- about WHY an empty fixed-width buffer is legal data (the `size != N &&
+-- !isEmpty` spelling of Cassandra's fixed-width serializers, the `decimal`
+-- doctrine correction, and the four STRICT families a CQL fixture cannot carry)
+-- is derived there from `cassandra-5.0.8` source and is NOT repeated here. This
+-- file records only what is DIFFERENT about a SET.
+--
+-- WHY A SET NEEDS ITS OWN FIXTURE AND CANNOT INHERIT THE MAP'S
+-- A non-frozen `set<T>` is MULTICELL, and its member travels in the cell PATH
+-- exactly as a map's key does — `cql3/Sets.java:407` at the pinned tag:
+--
+--   params.addCell(column, CellPath.create(bb), ByteBufferUtil.EMPTY_BYTE_BUFFER);
+--
+-- so the member IS the cell path and the cell VALUE is empty (HAS_EMPTY_VALUE).
+-- Cassandra validates both kinds with ONE line — `schema/ColumnMetadata.java:
+-- 457-467` calls `((CollectionType)type).nameComparator().validate(path.get(0))`,
+-- and `nameComparator()` is the KEYS type of a `MapType` and the ELEMENTS type
+-- of a `SetType` (`db/marshal/SetType.java:101-104`).
+--
+-- But CQLite's READER did not: the multicell set branch carried its own
+-- `!path_bytes.is_empty()` guard, which yielded "no member" for a zero-length
+-- path and DROPPED it — a `SELECT` returned the set SHORT ONE MEMBER, with no
+-- error and no log line. That is the same defect #3747 removed for map keys and
+-- #3805 typed, one collection kind over, and it is invisible to the map
+-- fixture: a map short one ENTRY and a set short one MEMBER are two different
+-- code paths in `complex_column.rs`. Hence Cassandra-written bytes carrying an
+-- empty SET member.
+--
+-- WHY IT IS CASSANDRA-WRITTEN AND NOT A CQLITE ROUND-TRIP
+-- Unchanged from #3805, and it applies with extra force here because #4106 also
+-- adds a WRITE path (`serialize_set_cell_path_element_into`). A CQLite-written +
+-- CQLite-read round trip is INVARIANT to a uniform framing error on both sides
+-- (CLAUDE.md, #3042): reader and writer would make the identical mistake, the
+-- round trip would close, and real Cassandra data would still read wrong while
+-- CQLite's output stayed unreadable by Cassandra. Only Cassandra-written bytes
+-- settle what the on-disk encoding IS. The decode->encode test that consumes
+-- this fixture (`cqlite-core/tests/issue_4106_empty_fixedwidth_set_member.rs`)
+-- exists for exactly that reason.
+--
+-- HOW AN EMPTY FIXED-WIDTH SET MEMBER IS EXPRESSED IN CQL
+-- `blobAsX(0x)` as a set-literal element: `{blobAsInt(0x), 42}`. `0x` is a
+-- grammatical blob literal (Lexer.g HEXNUMBER is '0' X HEX*, ZERO OR MORE
+-- digits) and `blobAsX` passes it through after a `validate()` that exempts
+-- empty. What cqlsh ACCEPTED and REFUSED here is recorded by the generator's
+-- own probe (it is MEASURED per run, not inherited from the map lane).
+--
+-- ============================================================================
+-- WHAT EACH COLUMN IS FOR — none is interchangeable filler
+--
+--   s_int     set<int>       — THE HEADLINE SUBJECT and the 4-BYTE family.
+--                              `blobAsInt(0x)` must reach `SELECT` as
+--                              `Value::Empty(Int)`; pre-fix the member was
+--                              silently DROPPED.
+--
+--   s_bigint  set<bigint>    — the 8-BYTE family, so the fixture is not
+--                              evidence about ONE width.
+--
+--   s_uuid    set<uuid>      — the 16-BYTE family, the widest in the set.
+--
+--   s_bool    set<boolean>   — the `size > 1` family, SPELLED DIFFERENTLY from
+--                              every other column (BooleanSerializer bounds an
+--                              upper size and has no `!= N && !isEmpty`
+--                              conjunction at all).
+--
+--   s_inet    set<inet>      — REGRESSION CONTROL #1. `InetAddressSerializer`
+--                              returns early on empty, so this family's DECODE
+--                              always succeeded. A change that "fixes" the
+--                              others by breaking inet REDS here.
+--
+--   s_varint  set<varint>    — REGRESSION CONTROL #2, and the column #3805
+--                              could not have. `IntegerSerializer.validate` is
+--                              the comment `// no invalid integers.`, so an
+--                              empty varint decodes too. #3805's map fixture
+--                              carries NO `map<varint, …>` column and had to
+--                              re-declare `m_inet` as `map<varint,int>` to
+--                              reach the family at all (see that lane's
+--                              `INET_DECL_AS_VARINT`); the set half carries a
+--                              REAL Cassandra-written `varint` column instead,
+--                              closing that declared gap rather than inheriting
+--                              it.
+--
+--   s_dec     set<decimal>   — the VARIABLE-width family whose minimum is
+--                              non-zero (`0 or >= 4`), which no WIDTH table can
+--                              express. #3805's doctrine correction, pinned on
+--                              the set side.
+--
+--   s_text    set<text>      — the ALREADY-WORKING variable-width case, so "an
+--                              empty member decodes at all" stays
+--                              distinguishable from "this fixture's
+--                              fixed-width families decode". An empty buffer is
+--                              a legal MEANINGFUL value for a text type
+--                              (`AbstractTextSerializer.java:72-77` overrides
+--                              `isNull` to say so), so it must come back as the
+--                              NATIVE empty text and NEVER as a sentinel.
+--
+--   s_frozen  frozen<set<int>>
+--                            — THE ENCODING CONTROL. A frozen set is ONE inline
+--                              length-prefixed cell with NO CellPath at all,
+--                              decoded by a different path entirely
+--                              (`frozen.rs`), so it discriminates the MULTICELL
+--                              fixed-width path (this issue) from the FROZEN
+--                              one (#3847's subject). Keyed on `int` so a fix
+--                              cannot be credited to the wrong decoder.
+-- ============================================================================
+--
+-- ============================================================================
+-- NOT COVERED, AND WHY
+--
+-- `tinyint`, `smallint`, `date` and `time` are ABSENT, and the absence is a
+-- MEASURED bound rather than an omission: those four spell their width check as
+-- a BARE `size != N` with no `&& !isEmpty` escape (ByteSerializer.java:42-43,
+-- ShortSerializer.java:42-43, SimpleDateSerializer.java:120-121,
+-- TimeSerializer.java:73-74), and cqlsh REFUSES `blobAsTinyint(0x)` /
+-- `blobAsSmallint(0x)` / `blobAsDate(0x)` / `blobAsTime(0x)` with "value 0x is
+-- not a valid binary representation for type X". So CQL cannot construct such a
+-- member and a Cassandra-written fixture CANNOT CARRY ONE. The generator PROBES
+-- this per run and records what it measured, so the claim is never inherited.
+--
+-- The asymmetry that bounds what the absence means is #3805's and is unchanged:
+-- each of those four still returns null from `deserialize` on an empty buffer —
+-- the strictness lives only in `validate`, which is what `blobAsX` calls — so
+-- an empty `tinyint` member is unreachable THROUGH CQL but is not proven
+-- unreachable ON DISK. This fixture says nothing about it. CQLite's own
+-- disposition for those four is a REFUSAL, which is unit-covered
+-- (`regression_4106_empty_set_member_tests`) and cannot be fixture-covered by
+-- construction.
+--
+-- `counter` cannot be a set element type in CQL at all, and `duration` cannot
+-- be one either (it is not orderable), so neither is expressible here.
+-- ============================================================================
+--
+-- ROWS:
+--   id 1 — THE SUBJECT. Every set column carries an EMPTY member ALONGSIDE a
+--          NON-EMPTY sibling. The sibling is what makes a failure legible: the
+--          set comes back SHORT EXACTLY ONE MEMBER rather than absent, so
+--          "member dropped" (this issue) is distinguishable from "column
+--          missing" (a different cause entirely). Pre-fix, EVERY one of these
+--          columns came back with the sibling only.
+--   id 2 — THE CONTRAST. No empty member anywhere. Pins that the fix is a
+--          property of the empty-member path and not of the data; this row must
+--          decode identically before and after.
+--
+-- Every INSERT pins `USING TIMESTAMP 1000`, which stabilises `liveness_info`
+-- and the collection tombstones' `marked_deleted`. It does NOT make the golden
+-- BYTE-REPRODUCIBLE: an INSERT of a whole NON-FROZEN collection REPLACES it, so
+-- Cassandra emits a collection tombstone per multicell column whose
+-- `local_delete_time` is a WALL CLOCK no CQL clause can pin. Only `s_frozen`,
+-- being a single inline cell, escapes it. Consequences, both load-bearing:
+-- never byte-compare this golden across regenerations, and the consuming test
+-- MUST NOT assert on `local_delete_time`.
+--
+-- Generator: test-data/scripts/generate-issue-4106-empty-fixedwidth-set-member.sh
+-- Backs: issue #4106.
+
+CREATE KEYSPACE IF NOT EXISTS test_empty_fixedwidth_set
+  WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};
+
+CREATE TABLE IF NOT EXISTS test_empty_fixedwidth_set.empty_fixedwidth_set_member (
+    id       int PRIMARY KEY,
+    s_int    set<int>,
+    s_bigint set<bigint>,
+    s_uuid   set<uuid>,
+    s_bool   set<boolean>,
+    s_inet   set<inet>,
+    s_varint set<varint>,
+    s_dec    set<decimal>,
+    s_text   set<text>,
+    s_frozen frozen<set<int>>
+);
