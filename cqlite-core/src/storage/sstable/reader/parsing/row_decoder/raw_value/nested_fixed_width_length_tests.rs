@@ -80,20 +80,25 @@
 //! **blob fallback**, which applied NO width check to `tinyint`, `smallint`,
 //! `date`, `time` or `counter`; #3811's consumption assert was structurally
 //! unable to see it (the blob consumed the whole slice, so `consumed == len`).
-//! **Issue #3631 removed the fallback.** The trailing arm is now
-//! `other => self.parse_typed_value(data, other, "UDT field", depth)`, whose
-//! scalar branch refuses any length outside the declared type's allowed-width
-//! set — `"UDT field: declared type '<t>' is <n> bytes wide …"` — so those five
-//! are now width-checked too, by a THIRD wording this module matches separately
-//! ([`is_declared_width_error`]). That is pinned at the end of this file by
+//! **Issue #3631 removed the fallback** in favour of a trailing
+//! `other => self.parse_typed_value(data, other, "UDT field", depth)`, and
+//! **issue #4070 deleted the ten explicit scalar arms in front of it**, so
+//! `parse_simple_udt_field_value_at` is now a depth check and that ONE
+//! delegation. Its scalar branch refuses any length outside the declared type's
+//! allowed-width set — `"UDT field: declared type '<t>' is <n> bytes wide …"` —
+//! so EVERY fixed-width UDT field is width-checked there, by a THIRD wording
+//! this module matches separately ([`is_declared_width_error`]). That is pinned
+//! at the end of this file by
 //! `wrong_width_udt_field_of_five_types_is_refused_since_3631`, which is also
 //! where the five types and the mechanism are stated in full.
 //!
 //! A ZERO-length UDT field is a SEPARATE, PRE-EXISTING disposition and is NOT
 //! part of what #3631 closed: it decodes to `Value::Null`, never a width error,
-//! because `parse_simple_udt_field_value_at` redirects an empty slice to the
-//! typed decoder, whose `empty_is_a_value` reads Cassandra's
-//! `accessor.isEmpty(value) ? null : …` guard. The same case characterises it.
+//! because `parse_simple_udt_field_value_at` hands an empty slice to the typed
+//! decoder, whose `empty_is_a_value` reads Cassandra's
+//! `accessor.isEmpty(value) ? null : …` guard. (Before #4070 that took an
+//! explicit empty-slice REDIRECT past the width-demanding scalar arms; with the
+//! arms gone it is the same single delegation.) The same case characterises it.
 //!
 //! The ZERO-length case is NO LONGER a narrowing. The table above is `validate()`,
 //! the WRITE rule and non-uniform; this is a READ path, whose oracle is
@@ -748,20 +753,25 @@ fn inet_is_width_unconstrained_here_but_not_in_cassandra_declared_divergence() {
 // width-checked — one layer up, since #3631 (roborev r7 / job 71).
 // ---------------------------------------------------------------------------
 
-/// Every fixed-width type whose UDT-field decode reaches the TRAILING arm of
-/// `parse_simple_udt_field_value_at` (`row_decoder/typed_value.rs`), with the
-/// width the pinned `cassandra-5.0.8` serializer requires.
+/// Five fixed-width types decoded in a UDT-FIELD position, with the width the
+/// pinned `cassandra-5.0.8` serializer requires.
 ///
-/// That function enumerates explicit arms for `Text`/`Ascii`, `Int`, `BigInt`,
-/// `Boolean`, `Float`, `Double`, `Uuid`/`TimeUuid`, `Timestamp` and `Blob`;
-/// these five fall through to `other => self.parse_typed_value(..)`, where the
-/// declared type's allowed-width set decides. They were the `_ => Value::Blob`
-/// fallback's population until #3631 removed it, which is why they are named
-/// here rather than any other five.
+/// # Why these five, now that EVERY type takes the same route (issue #4070)
+/// `parse_simple_udt_field_value_at` no longer has a per-type dispatch to fall
+/// through: #4070 deleted its ten explicit scalar arms, so the function is a
+/// depth check plus one `self.parse_typed_value(data, field_type, "UDT field",
+/// depth)` and the declared type's allowed-width set decides for ALL of them.
+/// The name is historical — these five were the `_ => Value::Blob` fallback's
+/// population until #3631 removed it, which is why they, rather than any other
+/// five, are the regression subjects of the case below.
 ///
-/// **CURATED, NOT DERIVED**, on the same terms as [`FIXED_WIDTH_TYPES`]: an arm
-/// moved into or out of `parse_simple_udt_field_value_at` is not detected by
-/// anything below.
+/// **CURATED, NOT DERIVED**, on the same terms as [`FIXED_WIDTH_TYPES`]: nothing
+/// below derives this list from the decoder. What #4070 changed is that the list
+/// no longer has to track WHICH arm a type lands on, because there is only one —
+/// the earlier version of this header enumerated an explicit-arm set that AC1
+/// then falsified. A width or a `Value` variant changing is still caught (by
+/// [`expected_correct_width_decode`] and the case's own asserts); a SIXTH
+/// fixed-width type appearing in `CqlType` is still not.
 const DELEGATED_UDT_FIELD_TYPES: &[(&str, CqlType, usize)] = &[
     ("tinyint", CqlType::TinyInt, 1),
     ("smallint", CqlType::SmallInt, 2),
@@ -815,7 +825,10 @@ fn one_field_udt(ft: CqlType) -> Vec<(String, CqlType)> {
 /// `other => self.parse_typed_value(data, other, "UDT field", depth)`, and the
 /// scalar branch there checks the declared type's allowed-width SET before
 /// delegating — a width rule, not a consumption one, which is why it sees what
-/// #3811 could not.
+/// #3811 could not. **Issue #4070** then deleted the ten explicit scalar arms
+/// sitting in front of that trailing arm, so the delegation is no longer a
+/// fall-through but the function's whole body — which is what arm (d) below now
+/// witnesses.
 ///
 /// ## Cassandra oracle
 ///
@@ -920,19 +933,44 @@ fn wrong_width_udt_field_of_five_types_is_refused_since_3631() {
         }
     }
 
-    // (d) LIVE CONTROL, a DIFFERENT layer: a type with its OWN explicit arm in
-    // `parse_simple_udt_field_value_at` is refused by THAT arm's wording, not by
-    // the delegated one. So (b) is evidence about the delegation specifically,
-    // rather than about a decoder that refuses every UDT field it is handed.
+    // (d) CONSOLIDATION WITNESS (issue #4070) — RE-PURPOSED, deliberately.
+    //
+    // This arm used to be a live control at a DIFFERENT LAYER: `Int` had its own
+    // explicit arm in `parse_simple_udt_field_value_at`, so a wrong-width `int`
+    // field was refused with THAT arm's private wording (`"Int field requires 4
+    // bytes, got 3"`), which made (b)'s delegated wording evidence about the
+    // delegation specifically rather than about a decoder that refuses every UDT
+    // field it is handed. #4070's AC1 deleted that arm, so its wording can no
+    // longer be produced by anything and the control's distinguishing premise
+    // evaporated — an assert on a message no code path emits is worse than no
+    // assert, so it is not left standing.
+    //
+    // It is re-purposed rather than deleted because the inverse assertion is a
+    // real, load-bearing property: `Int` — the type most recently REMOVED from
+    // that dispatch — must now be refused by the SAME declared-width wording as
+    // the five delegated types in (b), and must NOT carry a bespoke one. That
+    // fails if any scalar arm is reintroduced with its own message, which is the
+    // regression #4070 exists to prevent. The different-LAYER control that this
+    // arm used to provide is still provided, by (e).
     for w in [3usize, 5] {
         let body = framed(&vec![0x11u8; w]);
         let err = p
             .parse_inline_udt_value(&body, "t", &one_field_udt(CqlType::Int), 0)
-            .expect_err("control: a wrong-width `int` UDT field must be refused");
+            .expect_err("consolidation witness: a wrong-width `int` UDT field must be refused");
         assert!(
-            matches!(&err, Error::Corruption(msg)
-                if msg.contains(&format!("Int field requires 4 bytes, got {w}"))),
-            "control: the refusal must come from the Int arm's own width check, got {err:?}"
+            is_declared_width_error(&err),
+            "consolidation witness ({w} bytes): since #4070 an `int` UDT field must be \
+             refused by the ONE delegated declared-width check, not by a private arm. \
+             A bespoke wording here means a scalar arm was reintroduced into \
+             `parse_simple_udt_field_value_at`: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("'int'")
+                && msg.contains("is 4 bytes wide")
+                && msg.contains(&format!("is {w} bytes")),
+            "consolidation witness ({w} bytes): the delegated refusal must name the type, \
+             the admissible width and the actual length: {msg}"
         );
     }
 

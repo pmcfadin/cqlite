@@ -398,9 +398,13 @@ fn a_cyclic_udt_through_a_collection_is_refused_not_recursed() {
     let err = p
         .parse_simple_udt_field_value_at(
             &deep,
-            &CqlType::Frozen(Box::new(CqlType::Custom("cyclic".to_string()))), 0)
+            &CqlType::Frozen(Box::new(CqlType::Custom("cyclic".to_string()))),
+            0,
+        )
         .expect_err(
-            "a cyclic UDT reached through a collection must be REFUSED; before              #3631's BLOCKER 2 fix each UDT hop reset the depth counter and this              recursed until the stack was exhausted",
+            "a cyclic UDT reached through a collection must be REFUSED; before \
+             #3631's BLOCKER 2 fix each UDT hop reset the depth counter and this \
+             recursed until the stack was exhausted",
         );
     let text = err.to_string();
     assert!(
@@ -419,9 +423,10 @@ fn alternating_collection_and_udt_layers_share_one_nesting_limit() {
 
     // POSITIVE CONTROL: two layers is well inside the limit and must decode.
     let shallow = nested_cyclic_bytes(2);
-    let decoded = p
-        .parse_simple_udt_field_value_at(&shallow, &ty, 0)
-        .expect("a SHALLOW cyclic-typed value must still decode — the limit must                  bound depth, not reject the shape");
+    let decoded = p.parse_simple_udt_field_value_at(&shallow, &ty, 0).expect(
+        "a SHALLOW cyclic-typed value must still decode — the limit must \
+                 bound depth, not reject the shape",
+    );
     assert!(
         matches!(unfrozen(&decoded), Value::Udt(_)),
         "got {decoded:?}"
@@ -977,14 +982,91 @@ fn an_empty_variable_width_field_keeps_its_own_empty_semantics() {
 fn an_oversized_fixed_width_field_is_still_refused() {
     // The other side of the same gate, on an actual FIXED-WIDTH type — which is the
     // coverage finding D says was missing, the previous case having used a map.
+    //
+    // The wording is asserted EXACTLY, not as a disjunction (issue #4070). This assert
+    // used to read `contains("Int field requires 4 bytes") || contains("4 bytes")`, and
+    // #4070 deleted the `Int` arm that produced the first alternative — so it would have
+    // survived only via the accident that the surviving declared-width message happens
+    // to contain the substring `"4 bytes"`. A test that passes for a reason unrelated to
+    // what it names is how a wording regression goes unnoticed, so it now pins the ONE
+    // refusal this path can now emit: `parse_typed_value`'s declared-width gate.
     let err = parser()
         .parse_simple_udt_field_value_at(&[0, 0, 0, 1, 0xFF], &CqlType::Int, 0)
         .expect_err("5 bytes is neither 4 nor 0");
+    let msg = err.to_string();
     assert!(
-        err.to_string().contains("Int field requires 4 bytes")
-            || err.to_string().contains("4 bytes"),
-        "got: {}",
-        err
+        msg.contains("declared type 'int'")
+            && msg.contains("is 4 bytes wide")
+            && msg.contains("the framed value is 5 bytes"),
+        "expected the declared-width refusal naming the type, its width and the actual \
+         length; got: {msg}"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// FLOAT SPELLING — a `float` UDT field is `Value::Float32`, never a widened
+// `Value::Float` (issue #4070, AC2).
+// ════════════════════════════════════════════════════════════════════════════
+
+/// A non-empty CQL `float` UDT field decodes to [`Value::Float32`].
+///
+/// # Why `Float32` is the correct spelling, from format authority (#3041)
+///
+/// Rung 1 (`git show cassandra-5.0.8:…`) is NOT quoted here, and deliberately not
+/// invented: no Cassandra clone is available in this lane and `CQLITE_CASSANDRA_REPO`
+/// is unset, so the pinned source could not be read first-hand for this claim.
+///
+/// Rung 2 — `sstabledump` output — is available, committed and decisive.
+/// `test-data/datasets/sstables/test_timeseries/sensor_data-6c698230a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl`
+/// renders, in its first row, `humidity` as `92.88221` and `temperature` as
+/// `-16.172066` — both f32-precision decimal forms — beside `pressure` as
+/// `1017.9518806690071`, an f64 form, against a schema declaring
+/// `temperature FLOAT, humidity FLOAT, pressure DOUBLE`
+/// (`test-data/schemas/time-series.cql:20-22`). Cassandra's own renderer therefore
+/// DISTINGUISHES the two widths, so widening a `float` to f64 is a measurable parity
+/// break and not a representation detail: `0.1f32` renders as `0.1` when it is carried
+/// as `Value::Float32` and as `0.10000000149011612` once widened to `Value::Float`,
+/// which is what this case's payload asserts.
+///
+/// # Declared gap: this is a DECODER-level pin, not a fixture-backed parity oracle
+///
+/// NO committed fixture or schema anywhere has a CQL `float` field inside a UDT —
+/// verified over every `CREATE TYPE` in `test-data/schemas/**` (8 files, none declaring
+/// a `float` or `double` field) — so the spelling cannot be pinned end-to-end against
+/// Cassandra-written bytes today. A CQLite-WRITTEN fixture is deliberately NOT invented
+/// to fake one: per #3042 a CQLite-written + CQLite-read round-trip is invariant to a
+/// uniform framing/serialization error and can never be the oracle. The authority above
+/// is what carries the claim; this case pins the decoder against it.
+#[test]
+fn a_float_udt_field_decodes_to_float32_not_a_widened_double() {
+    let p = parser();
+    // `0.1f32` — the value that makes the two spellings render DIFFERENTLY.
+    let bytes = 0.1f32.to_be_bytes();
+    let value = p
+        .parse_simple_udt_field_value_at(&bytes, &CqlType::Float, 0)
+        .expect("a 4-byte float field must decode");
+    match value {
+        Value::Float32(f) => assert_eq!(
+            f, 0.1f32,
+            "a `float` UDT field must decode to the f32 that was written"
+        ),
+        // Named explicitly: `Value::Float` is the f64 spelling, and surfacing a
+        // declared `float` as one is the parity break the sstabledump golden cited
+        // above measures.
+        Value::Float(f) => panic!(
+            "a `float` UDT field must be Value::Float32, not a widened Value::Float \
+             ({f} — sstabledump renders a FLOAT column as its f32 form, \
+             e.g. `humidity: 92.88221`, and would render this as 0.10000000149011612)"
+        ),
+        other => panic!("expected Value::Float32(0.1), got {other:?}"),
+    }
+    // The DOUBLE side of the same distinction, so the case cannot pass on a decoder
+    // that answers `Float32` for every floating-point width.
+    assert_eq!(
+        p.parse_simple_udt_field_value_at(&0.1f64.to_be_bytes(), &CqlType::Double, 0)
+            .expect("an 8-byte double field must decode"),
+        Value::Float(0.1f64),
+        "a `double` UDT field stays the f64 spelling"
     );
 }
 

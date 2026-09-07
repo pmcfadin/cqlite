@@ -484,11 +484,34 @@ fn assert_wide_fully_decoded(udt: &UdtValue, ctx: &str) {
         &Value::Integer(5),
         "{ctx}: nested UDT field a"
     );
-    assert_eq!(
-        field(nested, "b").as_str(),
-        Some("nested"),
-        "{ctx}: nested UDT field b"
-    );
+    // Issue #4070: asserted as the VARIANT, not through `as_str()`, which any
+    // future text-ish variant would also satisfy. `text` is one of the ten scalar
+    // arms #4070 deleted from `parse_simple_udt_field_value_at`, so this is the
+    // end-to-end pin that the delegate still spells it `Value::Text`. (The sibling
+    // arms this fixture covers — `i`, `bl`, `tu` — are already pinned as whole
+    // `Value`s below and at the top of this helper, variant AND payload.)
+    //
+    // DECLARED GAP (#4070): those four are ALL this fixture reaches. `bigint`,
+    // `boolean`, `float`, `double`, bare `uuid` and `timestamp` appear in NO
+    // committed UDT fixture, so six of the ten deleted arms have decoder-level
+    // coverage only (`row_decoder/regression_3631_typed_value_tests.rs`,
+    // `row_decoder/raw_value/nested_fixed_width_length_tests.rs`) plus the
+    // arm-by-arm diff recorded in `parse_simple_udt_field_value_at`'s doc comment.
+    // A CQLite-WRITTEN fixture is deliberately not invented to close it: per #3042
+    // a CQLite-written + CQLite-read round-trip is invariant to a uniform framing
+    // error and could not be the oracle.
+    match peel(field(nested, "b")) {
+        Value::Text(t) => assert_eq!(
+            std::str::from_utf8(t).ok(),
+            Some("nested"),
+            "{ctx}: nested UDT field b"
+        ),
+        other => panic!(
+            "{ctx}: nested UDT field b is declared `text` and must decode to \
+             Value::Text, got {}",
+            variant(other)
+        ),
+    }
     // roborev round 2, BLOCKER A: the nested-UDT field arm built its value with
     // an EMPTY keyspace, so a UDT reached through a UDT field had a DIFFERENT
     // public identity (`_keyspace` in the Python/Node bindings; part of `Udt`
