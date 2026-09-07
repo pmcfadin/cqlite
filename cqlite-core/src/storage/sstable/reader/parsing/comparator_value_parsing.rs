@@ -285,8 +285,17 @@ fn parse_value_with_comparator_at_depth(
             })))
         }
         ComparatorType::Frozen(inner_comparator) => {
-            let inner_value =
-                parse_value_with_comparator_at_depth(value_data, inner_comparator, depth + 1)?;
+            // Issue #2339: a frozen COLLECTION body uses i32-BE element framing, not
+            // the VInt framing a NON-frozen collection cell uses, so the three
+            // collection kinds dispatch to `frozen_value_parsing`; every other inner
+            // type (tuple/UDT/scalar/nested frozen) decodes through this same body.
+            let inner_value = super::frozen_value_parsing::parse_frozen_inner_with(
+                value_data,
+                inner_comparator,
+                depth + 1,
+                MAX_VALUE_NESTING_DEPTH,
+                &|d, c, dep| parse_value_with_comparator_at_depth(d, c, dep),
+            )?;
             Ok(Value::Frozen(Box::new(inner_value)))
         }
         ComparatorType::Custom(name) => {

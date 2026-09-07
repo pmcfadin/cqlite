@@ -65,11 +65,14 @@
 //!
 //! A UDT field's length header decides whether a field is absent (`-1`), present
 //! and empty (`0`) or present with bytes. Five sites route the `0`:
-//! `parse_udt_value` and `raw_type_value.rs`'s UDT arm through
-//! `create_empty_value_for_type`, and `parse_nested_udt_from_registry`,
-//! `parse_inline_udt_value` and `raw_type_value.rs`'s registry arm by calling a
-//! field decoder with an explicit `&[]`. Before #3847 the first two answered
-//! "empty BLOB" and the other three answered `Err`; all five now answer `null`.
+//! `parse_udt_value`, `parse_nested_udt_from_registry`, `parse_inline_udt_value`
+//! and `raw_type_value.rs`'s two UDT arms (marshal/inline and registry-resolved).
+//! All five hand it to the SAME delegate today,
+//! `typed_value.rs::parse_simple_udt_field_value_at`, with an explicit `&[]`, and
+//! all five answer `null`. They did not always: before #3847 `parse_udt_value` and
+//! `raw_type_value.rs`'s marshal/inline arm routed through
+//! `create_empty_value_for_type` — a function since DELETED (#3631/PR#3820) — and
+//! answered "empty BLOB", while the other three answered `Err`.
 //! An `Err` there was the worse of the two, because `row_data.rs` `break`s its
 //! column loop on a failing column, so the failing column AND every later one
 //! silently became null.

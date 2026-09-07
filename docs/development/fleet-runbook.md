@@ -2301,6 +2301,143 @@ so the padding is not cosmetic: it is what makes the check below total.
 
 ## Delivery-pipeline depth moved verbatim from CLAUDE.md (#4092)
 
+### The machine-local lane lock (#3436) — moved here to follow #4092
+
+PR #3682 added this bullet to CLAUDE.md's claim-protocol section. #4092 then moved that whole
+section here and left a pointer, so the bullet is relocated rather than re-added upstream:
+re-introducing it into CLAUDE.md would silently undo #4092's trim, and dropping it would orphan
+doctrine for a lock that ships in this PR. Verbatim, per #4092's own "move mechanism verbatim,
+orphan nothing".
+
+- **The claim ref is a CROSS-MACHINE control and a LOCAL ADVISORY — the machine-local half is
+  `refs/claims`'s blind spot, and it is now a separate lock (#3436).** `claim.sh`'s arbitration is a
+  plain `git push` to a fixed-name ref, so *git* decides every cross-machine race. Locally it decides
+  nothing: a session that never calls `claim.sh` simply proceeds. Measured 2026-08-28 — two Claude
+  sessions worked #3367 in ONE worktree on ONE box for ~20 minutes; session B arrived 7 minutes after
+  A had created and claimed the lane, held no claim, and committed into A's branch. A's `git add -A`
+  then swept up B's uncommitted work, so a commit landed carrying **B's design under A's reasoning**,
+  and A reported a measurement ("34 scanning sites rewritten") taken against a tree B had already
+  refactored. **The only thing that noticed was `agent-gate.sh`'s `tree-integrity` (#2926), by
+  accident** — absent it, A would have certified a tree being rewritten underneath it.
+  **Why the existing controls could not fire, each for its own reason** (worth knowing, because each
+  is still true of the thing it does cover): the claim ref is advisory locally; the supervisor
+  single-instance lock protects supervisor-driven runs and **no supervisor was running**; `git
+  worktree add` gives no collision signal, and the `/data/lanes/lane-<N>` convention *guarantees* two
+  sessions on one issue pick the same directory; and the board said **`Ready`** throughout, so it was
+  actively inviting a third claimant.
+  So: **`scripts/flow/lane-lock.sh acquire <N>` before the first write to a lane directory, RUN FROM
+  INSIDE THAT DIRECTORY** (`bash scripts/flow/lane-lock.sh acquire <N> --lane-dir "$PWD"`, with `$PWD`
+  BEING the lane — the cwd is what makes the durable session process findable; see the identity note
+  below), and
+  `release <N>` at finalize. **Neither needs a `--lane-dir`, and no reader does either**: the lock
+  files live in `$LANE_ROOT/.lane-locks/lane-<N>.*`, OUTSIDE any worktree, so the record is found by
+  ISSUE alone. That is what makes `release`, the AC5 probe and the collision scan agree with the
+  `acquire` — they used to re-derive `${LANE_ROOT}/lane-<N>` while acquires passed an explicit
+  `--lane-dir`, so a `release 9600` printed `RELEASED (already free) … record=absent` rc=0 while the
+  record sat in `.claude/worktrees/issue-9600-slug/`: **a finalize reporting a successful release
+  having released nothing**. Being outside the worktree also means `git worktree remove` cannot
+  destroy a live lock, and the lock can never appear in the untracked set `agent-gate.sh`'s
+  `tree-integrity` captures. Its identity is the FULL PROCESS identity — machine, actor, pid, boot-id and
+  `/proc/<pid>/stat` start-ticks — **NOT `machine+actor`, and that distinction IS the fix**:
+  `claim.sh`'s re-entrancy is keyed on machine+actor, and two Claude sessions on one box are both
+  `machine=<box> actor=flow`, so a machine+actor lock grants the second session a re-entrant win on
+  the first session's lane. Boot-id + start-ticks is also **clock-step immune**, which
+  `claim-heartbeat.sh`'s own header names as the unfixed weakness of its `now - elapsed`
+  reconstruction (a backward NTP step reads a reused pid as consistent, a forward one reads a live
+  supervisor as reused); a new record could do it right from the start, and does.
+  **Liveness is a CLOSED set and only a `DEAD-*` verdict permits auto-reclaim** — every `UNKNOWN-*`
+  refuses. That is the affirmative-measurement rule: an unknown liveness state must not inherit the
+  permissive branch. The identity is resolved by walking up from `$$` and taking the outermost
+  ancestor whose `/proc/<pid>/cwd` is inside the lane dir (on this fleet the long-lived `claude`
+  session process — deliberately NOT the tmux server, whose cwd is the root checkout and which is
+  SHARED by all 4 lanes on a box, so recording it would make every lane read mutually-alive forever).
+  **THAT RESOLUTION ONLY SUCCEEDS WHEN THE CALLER'S OWN CWD IS INSIDE THE LANE, which is a constraint
+  on how you INVOKE it, not an implementation detail**: `acquire <N> --lane-dir "$(cd "$wt" && pwd)"`
+  computes a PATH and leaves the process in the root checkout, resolving nothing. So **an `acquire`
+  (or `reclaim`) that cannot name a durable owner REFUSES** — `ERROR reason=unresolved-identity`,
+  exit 1 — and **writes nothing**, printing its own correction (cwd inside the lane, or `--pid`). The
+  alternative was measured and is worse: recording the tool call's own shell, which exits
+  immediately, leaves a record reading `UNKNOWN-EPHEMERAL` forever, and every `UNKNOWN-*` refuses —
+  **including the owning session's own later acquire** — so ONE acquire from outside the lane BRICKED
+  the lane on first use, which is strictly worse than no lock because it reds on correct input.
+  `flow-activate` therefore does not acquire at worktree-creation time at all (the session is acting
+  from the root checkout and is not in the lane yet, so no durable owner exists to record); the lock
+  belongs to the session that works IN the lane, taken from inside it.
+  **How a stale lock gets cleared, and by whom** — answered before it was built, because *a guard
+  that never permits work is broken, not fail-closed*: `DEAD-*` is auto-reclaimed by the next
+  `acquire`, recorded in the audit log, no human involved; **a reboot clears everything** (the boot id
+  changes, so every pre-reboot record reads `DEAD-REBOOT` — a box restart is a global un-brick);
+  `UNKNOWN-*` is cleared deliberately with `reclaim <N> --expect <lease> --reason <why>` (CAS,
+  recorded) or `release <N> --force`, which only DELETES, needs no identity of its own and therefore
+  works from anywhere.
+  **THIS PARAGRAPH USED TO PRINT `( cd "$wt" && … acquire <N> )` — the exact form the next
+  paragraph condemns (#3436, roborev round 15).** FIX 14 corrected `worker.md` and
+  `drive-issue.md` and left the doctrine recommending the broken shape, so the two halves of one
+  file disagreed for four rounds and a reader following the first would record a transient
+  subshell. A correction that updates the callers and not the doctrine has not been made; it has
+  been described.
+  **AND THE CWD TEST PROVES "WORKING IN THIS LANE", NOT "WILL OUTLIVE THIS COMMAND" — those are
+  different facts and conflating them made the lock a NO-OP in its own wiring (#3436 FIX 14).** The
+  auto-resolved scope is `pid-scope=cwd-match`, not `session`, because a transient subshell that just
+  `cd`'d into the lane matches the rule and is outermost among the matches, so it is what gets
+  recorded. Measured while the field was still called `session`: the wired
+  `( cd "$wt" && lane-lock.sh acquire <N> )` recorded the SUBSHELL, which exits when the command
+  returns, the record then read `DEAD-NO-PROCESS`, and a peer's next acquire was granted by
+  auto-reclaim — **an acquire that returns `ACQUIRED` and protects nothing.** That is strictly worse
+  than the bricking bug it replaced, because bricking is loud and this reads as success. So: acquire
+  from the **session's own cwd** (`--lane-dir "$PWD"`, which is why `worker.md` and `drive-issue.md`
+  are correct and must not be "tidied" into a subshell) or pass an explicit `--pid`; a
+  `$(cd … && pwd)` computes only a path and is refused, and a `( cd … && … )` subshell succeeds
+  dishonestly. Durability is the CALLER's guarantee, so the guard lives in the suite: it asserts the
+  recorded pid is the test's own `$$` **and** that a second acquire is `(re-entrant)` — a transient
+  holder fails both, so a future edit that reintroduces a subshell `cd` reds the suite instead of
+  silently disarming the lock.
+  **Scope, stated because a lock read as covering more than it does is its own false-clean**: it is
+  machine-local and says NOTHING cross-machine (that is `refs/claims/issue-<N>`'s job — the two are
+  complements, not alternatives); it is Linux-`/proc`-specific — on a host without `/proc` no durable
+  identity can be resolved, so `acquire` REFUSES with `reason=unresolved-identity` and writes nothing,
+  and an existing record's liveness refuses as `UNKNOWN-*` (this used to be written as "degrades to a
+  loud refusing `UNKNOWN-NO-PROC`"; that verdict is in the set but is NOT what the resolution
+  produces, and a doctrine line naming a verdict the code does not emit is the decay this repo treats
+  as a defect); and **a lane whose session never acquired is invisible to it**, which
+  is why `claim.sh claim` now *reports* the lane-lock state on its verdict line rather than relying on
+  every session having taken it.
+
+  **THE ENFORCEMENT POINT IS A GIT HOOK, AND IT IS THE ONLY ONE (C intent audit, #3436).**
+  Everything above describes `lane-lock.sh acquire`, which is what an agent is *instructed* to
+  run — instructions, not enforcement. The thing that actually stops the #3436 damage is
+  `scripts/git-hooks/pre-commit`: on every commit in a `/data/lanes/lane-<N>` worktree it probes
+  the lock and, if a DIFFERENT LIVE process holds the lane, **refuses the commit** (`exit 1`)
+  naming the occupant. That refusal is the only place a second entrant is stopped by code rather
+  than by an agent reading a paragraph, and doctrine failed to mention it at all until now —
+  every surface presented `acquire` as the mechanism, so a reader reasonably concluded the lock
+  was advisory-only.
+
+  **Check whether the box you are on is actually protected** — the hook is inert until git is
+  told where to look, and only `scripts/bootstrap-agent-machine.sh` step 5e sets that:
+
+  ```bash
+  git config --get core.hooksPath     # want: scripts/git-hooks ; EMPTY = NOT PROTECTED
+  ```
+
+  Four residuals, stated because a guard read as covering more than it does is its own
+  false-clean:
+
+  - **It fires at COMMIT time, not at lane entry.** Two sessions can both write into one
+    worktree; what is prevented is the *commit* that launders a peer's work. When the hook
+    acquires a lane that had no record it says so — `DECLARED GAP 1 RECOGNISED` — because that
+    acquisition cannot retroactively exclude a peer who was already writing during the unlocked
+    window. Acquiring at entry is #4056; lanes that never acquire at all are #4024.
+  - **`git commit --no-verify` bypasses it**, as it bypasses every hook. Nothing in git can
+    prevent that.
+  - **An `UNKNOWN-*` holder WARNS and allows.** Refusing on an unmeasurable holder would brick a
+    lane whose holder merely cannot be read, which is strictly worse than the hole.
+  - **Its activation is not covered by a test** — the hook itself is pinned by
+    `scripts/tests/test_lane_lock_precommit_hook.sh` (which installs into `.git/hooks/`
+    directly), but nothing asserts that bootstrap step 5e sets `core.hooksPath`. Verify it by
+    reading the config, per the command above.
+
+
 - **`flow-lead`** orchestrates (opt-in: `claude --agent flow-lead`; plain sessions are default Claude) — it spawns
   and sequences the specialists + roborev + the gate, and writes no production code. Verbs:
   `flow-groom` → `flow-activate` (**Seam 1**: owner approves spec + design) → `flow-implement` (the

@@ -51,6 +51,12 @@ committed, owner-approvable OpenSpec change on an isolated worktree. **STOP at a
    wt=".claude/worktrees/issue-<N>-<slug>"
    git -C <repo-root> worktree add "$wt" -b "issue-<N>-<slug>" origin/main
    git -C "$wt" push -u origin "issue-<N>-<slug>"   # PR head — NOT the lock
+   # NO lane-lock acquire HERE, deliberately (#3436 FIX 5): at creation time this session
+   # is acting from the ROOT checkout and is not in the lane yet, so there is no durable
+   # process whose cwd is inside it — the lock would have nothing re-identifiable to
+   # record, and `acquire` now REFUSES with reason=unresolved-identity rather than write a
+   # record that refuses forever. The lane lock is taken by the session that works IN the
+   # lane (flow-implement / flow-address), from inside it.
    # Board visibility: assignee + Status=In Progress. Run the flow-board detection snippet FIRST — it
    # does `gh auth switch --user "$project_account"` so the project-capable account is active (the EMU
    # account flip otherwise makes the board write fail and degrade to a label SILENTLY).
