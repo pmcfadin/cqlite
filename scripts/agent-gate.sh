@@ -19680,6 +19680,25 @@ run_features_load_bearing() {
 # cannot come from a matcher that matches nothing. It DECLARES its narrowing at run time: it
 # guards ONE file, and scripts/flow/claim.sh + scripts/flow/roborev-review-oracles.sh carry the
 # same shape UNGUARDED. Hermetic: no cargo, no datasets, no network, never invokes the gate.
+# Also runs scripts/ci/check-sigpipe-sites.sh (#4061 AC4) — the CLASS RATCHET for that same
+# defect across EVERY git-tracked scripts/**/*.sh, so a NEW `printf | grep -m1` / `| head`
+# site REDS rather than shipping. The subject set is DERIVED AT RUN TIME from the git index
+# (never a curated path list) and the rule is not re-implemented: guard and #3803 suite SOURCE
+# the one matcher in scripts/tests/lib/sigpipe-matcher.sh, which the #3803 suite's 33 cases pin.
+# It is a RATCHET because 113 of 193 subjects already carry >=1 shape match (2340 in all) and
+# most are presumably the matcher's DECLARED false-positive classes, so a hard whole-tree zero
+# would red on largely correct code; the baseline scripts/ci/sigpipe-sites-baseline.txt records
+# PER-FILE COUNTS AND NO LINE NUMBERS (#4061's own pinned site drifted from :3329 to :5392 in two
+# days) and `--regenerate` is the ONLY way an existing site is tolerated. FAILs on an increase or
+# on any match in an unlisted file; every unmeasurable state (no matcher, no git, an INERT
+# matcher, a missing/ungrammatical/truncated baseline, a subject set below the non-vacuity floor)
+# is a REFUSAL naming cause and remedy, never a SKIP and never a pass. No bypass env var.
+# Also runs scripts/tests/test_scripts_sigpipe_ratchet.sh (#4061), that ratchet's self-test with
+# teeth: 26 cases driving every FAIL and REFUSAL path over per-case scratch GIT repos built from
+# the real tracked subject set, including the two negative controls that plant a piped builtin
+# writer and assert the guard exits non-zero AND NAMES THE PLANTED FILE, the converse (a new
+# CLEAN script must pass), and an INERT matcher REFUSING rather than reporting zero sites. It
+# mutates no tracked file. Hermetic: git + awk only, no cargo, no datasets, no network.
 # Also runs scripts/tests/test_gate_component_verdict.sh (#3750), the non-vacuity proof
 # for the split of COMPLETION from VERDICT: 106 cases (per-section floors) over
 # scripts/gate-component-verdict.sh
@@ -21305,6 +21324,39 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_gate_liveness_no_sigpipe.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (gate-liveness SIGPIPE guard #3803); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # the #4061 CLASS RATCHET: no NEW piped-builtin-writer site anywhere under scripts/**. The
+  # subject set is derived at run time from the git index and the rule is sourced from the one
+  # matcher the #3803 suite above pins, so this cannot drift from it. FAILs on an increase or on
+  # any match in a file the baseline does not list; an unmeasurable run REFUSES (exit 3) naming
+  # its cause. Needs git + awk only.
+  echo ">>> [$name] bash scripts/ci/check-sigpipe-sites.sh"
+  if ! bash "$REPO_ROOT/scripts/ci/check-sigpipe-sites.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (sigpipe-site class ratchet #4061); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # and that ratchet's SELF-TEST WITH TEETH (#4061): a green ratchet run proves nothing by
+  # itself, so every FAIL and REFUSAL path is driven on PLANTED input in per-case scratch git
+  # repos (no tracked file is mutated). The two central cases assert the guard exits non-zero AND
+  # NAMES the planted file.
+  echo ">>> [$name] bash scripts/tests/test_scripts_sigpipe_ratchet.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_scripts_sigpipe_ratchet.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (sigpipe-site ratchet self-test #4061); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
