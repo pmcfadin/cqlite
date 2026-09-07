@@ -105,16 +105,36 @@ pub(super) fn kind_of(e: &Error) -> std::io::ErrorKind {
     }
 }
 
-/// Is `entry` a directory? Propagates the `stat` failure instead of answering
-/// `false`, which is what `Path::is_dir()` does for a directory it cannot stat.
+/// Is `entry` a directory, FOLLOWING symlinks? Propagates the `stat` failure
+/// instead of answering `false`, which is what `Path::is_dir()` does for a
+/// directory it cannot stat.
+///
+/// # Why `std::fs::metadata` and not `DirEntry::file_type`
+///
+/// `DirEntry::file_type` does NOT follow symlinks — it reports the LINK. The
+/// `Path::is_dir()` this replaced does follow them, so using `file_type` here
+/// silently skipped a symlinked keyspace or table directory with no
+/// unreadable-directory record at all: incomplete results reported as complete,
+/// which is the exact swallow class this module exists to remove, reintroduced by
+/// the fix for it. A data directory whose keyspaces are symlinks onto separate
+/// mounts is a normal Cassandra layout, not an exotic one.
+///
+/// A DANGLING symlink is `Ok(false)`, not an error: `metadata` fails with
+/// `NotFound` because the TARGET does not exist, and "there is provably no
+/// directory here" is genuine absence — the one answer that is not a swallow.
+/// Every other failure (`PermissionDenied`, `ELOOP`, EIO) is propagated so the
+/// caller records a gap.
 pub(super) fn entry_is_dir(entry: &std::fs::DirEntry) -> Result<bool> {
-    entry.file_type().map(|ft| ft.is_dir()).map_err(|e| {
-        Error::Io(std::io::Error::new(
+    let path = entry.path();
+    match std::fs::metadata(&path) {
+        Ok(md) => Ok(md.is_dir()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(Error::Io(std::io::Error::new(
             e.kind(),
             format!(
                 "Failed to determine the file type of {}: {e}",
-                entry.path().display()
+                path.display()
             ),
-        ))
-    })
+        ))),
+    }
 }

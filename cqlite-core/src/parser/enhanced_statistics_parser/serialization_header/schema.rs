@@ -55,10 +55,16 @@ use nom::bytes::complete::take;
 /// longer, so this is set well above any plausible nesting depth. No Cassandra-side
 /// limit is being approximated — there is none.
 const MAX_TYPE_LEN: u64 = 5000;
-/// Refuse an absurd declared column-name length before allocating. Cassandra's own
-/// identifier limit is 48 characters (`SchemaConstants.NAME_LENGTH`), which this is
-/// four times over; the slack is deliberate, since that limit governs what CQL will
-/// CREATE and not what the header format can represent.
+/// Refuse an absurd declared column-name length before allocating.
+///
+/// The margin over Cassandra is much thinner than it looks, and the arithmetic is
+/// spelled out because this is exactly the class of bound whose comment says it must
+/// never be tightened toward what has been observed. Cassandra's identifier limit is
+/// 48 CHARACTERS (`SchemaConstants.NAME_LENGTH`); this bound is 200 BYTES. A 48-char
+/// identifier of 4-byte UTF-8 codepoints is 192 bytes, so the real headroom is
+/// **1.04x, not 4x**. No false refusal is reachable today — 192 < 200 — but the
+/// slack is one codepoint wide, and that limit governs what CQL will CREATE rather
+/// than what the header format can represent. Raise it, never lower it.
 const MAX_NAME_LEN: u64 = 200;
 /// Refuse an absurd declared clustering-key count before allocating. Real tables have
 /// single-digit clustering key counts; no format limit exists.

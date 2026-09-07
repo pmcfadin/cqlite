@@ -219,6 +219,21 @@ impl SSTableManager {
             canon_cache.entry(p.clone()).or_insert_with(|| canon(p));
         }
 
+        // The UNREADABLE paths must be in the cache too, and BEFORE the cache-only
+        // `canon_of` closure below exists — otherwise `canonicalized_unreadable`
+        // resolves them through that closure, misses, and keeps them RAW. With a
+        // symlinked base path the held readers' paths are canonical while the
+        // unreadable prefix is not, so `view_was_complete_for` answers "complete"
+        // for a path it cannot see and step 5a REMOVES live readers under it. That
+        // is worse than the gap this whole mechanism exists to close: it does not
+        // merely fail to report an unreadable directory, it destroys working
+        // readers because of one.
+        for d in &walk.unreadable {
+            canon_cache
+                .entry(d.path().to_path_buf())
+                .or_insert_with(|| canon(d.path()));
+        }
+
         // 2. Snapshot the canonical paths currently held (short read guards),
         //    extending the cache with every held reader's file_path so the
         //    guarded section can resolve them without syscalls. Union both maps
@@ -279,7 +294,7 @@ impl SSTableManager {
         // The unreadable regions, in the SAME canonical form as every path below,
         // so "was this path inside a part of the tree the walk could not see?" is
         // answered without a syscall under the write guard.
-        let walk = walk.canonicalized_unreadable(|p| canon_of(p));
+        let walk = walk.with_canonical_unreadable(|p| canon_of(p));
 
         // Canonical paths this refresh RE-OPENED successfully. A refusal recorded
         // for one of these has been REPAIRED IN PLACE (the classic case: the

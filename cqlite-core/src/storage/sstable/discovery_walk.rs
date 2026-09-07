@@ -68,6 +68,17 @@ use crate::{Error, Result};
 #[derive(Debug, Clone)]
 pub(crate) struct UnreadableDir {
     path: PathBuf,
+    /// The canonicalized spelling of `path`, when it differs and could be resolved.
+    ///
+    /// Both spellings are kept because the two sides of a prefix test can resolve
+    /// DIFFERENTLY, and the mismatch is not hypothetical: under a symlinked base
+    /// path, `canonicalize` on the unreadable DIRECTORY succeeds (its parent is
+    /// readable) while `canonicalize` on a held reader's FILE inside that directory
+    /// FAILS with EACCES and falls back to the raw path. Comparing one form only
+    /// then answers "the walk saw this path" for a path it demonstrably could not
+    /// see, and the reader is removed. See
+    /// [`view_was_complete_for`](DirWalk::view_was_complete_for).
+    canonical: Option<PathBuf>,
     cause: Arc<Error>,
 }
 
@@ -75,6 +86,7 @@ impl UnreadableDir {
     pub(crate) fn new(path: PathBuf, cause: Error) -> Self {
         Self {
             path,
+            canonical: None,
             cause: Arc::new(cause),
         }
     }
@@ -110,22 +122,37 @@ impl DirWalk {
     /// evidence that `path` exists nor that it does not. Used by `refresh_tables`
     /// so an unreadable directory can never be mistaken for "these generations were
     /// deleted", which would drop live readers.
+    /// Tested against BOTH recorded spellings, because `path` may itself be in
+    /// either form: `canonicalize` on a file inside a 0-mode directory fails and
+    /// falls back to the raw path, while the directory above it canonicalizes fine.
+    /// Matching one spelling only reports a COMPLETE view of a path the walk could
+    /// not see — and in `refresh_tables` that removes a live reader.
     pub(crate) fn view_was_complete_for(&self, path: &Path) -> bool {
-        !self.unreadable.iter().any(|d| path.starts_with(&d.path))
+        !self.unreadable.iter().any(|d| {
+            path.starts_with(&d.path)
+                || d.canonical
+                    .as_ref()
+                    .is_some_and(|canonical| path.starts_with(canonical))
+        })
     }
 
-    /// Canonicalize every recorded unreadable path with `canon`, so
+    /// Attach each unreadable path's canonical spelling with `canon`, so
     /// [`view_was_complete_for`](Self::view_was_complete_for) can be asked with the
-    /// canonical reader paths the refresh diff uses.
-    pub(crate) fn canonicalized_unreadable(&self, canon: impl Fn(&Path) -> PathBuf) -> Self {
+    /// canonical reader paths the refresh diff uses. The RAW spelling is retained
+    /// alongside rather than replaced — see [`UnreadableDir::canonical`].
+    pub(crate) fn with_canonical_unreadable(&self, canon: impl Fn(&Path) -> PathBuf) -> Self {
         Self {
             data_files: self.data_files.clone(),
             unreadable: self
                 .unreadable
                 .iter()
-                .map(|d| UnreadableDir {
-                    path: canon(&d.path),
-                    cause: Arc::clone(&d.cause),
+                .map(|d| {
+                    let canonical = canon(&d.path);
+                    UnreadableDir {
+                        path: d.path.clone(),
+                        canonical: (canonical != d.path).then_some(canonical),
+                        cause: Arc::clone(&d.cause),
+                    }
                 })
                 .collect(),
         }
@@ -261,8 +288,18 @@ impl SSTableManager {
                 // A `stat` failure means this entry's subtree is unknown: it may be
                 // a directory full of SSTables. `.unwrap_or(false)` silently pruned
                 // it; recording keeps the gap visible without losing the siblings.
-                let is_dir = match entry.file_type().await {
-                    Ok(ft) => ft.is_dir(),
+                //
+                // `tokio::fs::metadata` FOLLOWS symlinks; `DirEntry::file_type` does
+                // not, and reports the LINK. Using `file_type` here silently skipped
+                // a symlinked keyspace or table directory — a normal Cassandra layout
+                // when data is spread across mounts — with no gap recorded at all,
+                // i.e. the swallow this module removes, reintroduced one level down.
+                // A DANGLING symlink is genuine absence (`NotFound`: nothing is at
+                // the target) and is skipped without a gap; every other failure is
+                // recorded.
+                let is_dir = match tokio::fs::metadata(&path).await {
+                    Ok(md) => md.is_dir(),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                     Err(e) => {
                         let cause = unreadable_dir_error(
                             &path,
@@ -290,10 +327,24 @@ impl SSTableManager {
     pub(super) async fn discover_data_file_paths(&self) -> Result<DirWalk> {
         match &self.discovery_source {
             DiscoverySource::BasePath => {
-                if !self.platform.fs().exists(&self.base_path).await? {
+                // `try_exists`, not `exists`: the latter is `metadata().is_ok()`, so
+                // an unstattable base path would read as ABSENT and return a
+                // COMPLETE empty walk — claiming the whole tree is knowably empty
+                // when it could not be looked at.
+                match self.platform.fs().try_exists(&self.base_path).await {
                     // A base path that does not exist is a COMPLETE view of an
                     // empty tree, not an unreadable one.
-                    return Ok(DirWalk::default());
+                    Ok(false) => return Ok(DirWalk::default()),
+                    Ok(true) => {}
+                    Err(e) => {
+                        let cause =
+                            unreadable_dir_error(&self.base_path, "stat SSTable base path", e);
+                        tracing::warn!("SSTable discovery: {cause}");
+                        let mut walk = DirWalk::default();
+                        walk.unreadable
+                            .push(UnreadableDir::new(self.base_path.clone(), cause));
+                        return Ok(walk);
+                    }
                 }
                 SSTableManager::find_data_files(
                     &self.platform,
@@ -305,8 +356,21 @@ impl SSTableManager {
             DiscoverySource::TableDirs(dirs) => {
                 let mut walk = DirWalk::default();
                 for dir in dirs {
-                    if !self.platform.fs().exists(dir).await? {
-                        continue;
+                    // Same reason as the base-path arm: an unstattable table
+                    // directory must not `continue` as though it were absent, which
+                    // would drop every generation under it from the refresh's
+                    // discovered set — and the refresh reads "not discovered" as
+                    // "removed from disk".
+                    match self.platform.fs().try_exists(dir).await {
+                        Ok(false) => continue,
+                        Ok(true) => {}
+                        Err(e) => {
+                            let cause =
+                                unreadable_dir_error(dir, "stat discovered table directory", e);
+                            tracing::warn!("SSTable discovery: {cause}");
+                            walk.unreadable.push(UnreadableDir::new(dir.clone(), cause));
+                            continue;
+                        }
                     }
                     let mut entries = match self.platform.fs().read_dir(dir).await {
                         Ok(entries) => entries,

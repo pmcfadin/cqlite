@@ -203,10 +203,30 @@ impl SSTableManager {
         );
 
         for table_dir in table_dirs {
-            // Check if directory exists
-            if !self.platform.fs().exists(&table_dir).await? {
-                tracing::warn!("Table directory does not exist: {:?}", table_dir);
-                continue;
+            // Check if directory exists. `try_exists`, not `exists`: the latter is
+            // `metadata().is_ok()`, so an UNSTATTABLE table directory would read as
+            // absent and be skipped with only a warn! — every SSTable under it
+            // silently missing from the reader map, which the scan surfaces then
+            // report as an empty SUCCESS. Only `NotFound` is genuine absence.
+            match self.platform.fs().try_exists(&table_dir).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!("Table directory does not exist: {:?}", table_dir);
+                    continue;
+                }
+                Err(e) => {
+                    let cause =
+                        discovery_walk::unreadable_dir_error(&table_dir, "stat table directory", e);
+                    tracing::warn!(
+                        "SSTableManager: {cause}. Discovery is INCOMPLETE; queries for \
+                         tables not otherwise discovered will fail closed."
+                    );
+                    incomplete.extend_from_walk([discovery_walk::UnreadableDir::new(
+                        table_dir.clone(),
+                        cause,
+                    )]);
+                    continue;
+                }
             }
 
             tracing::debug!("SSTableManager scanning directory: {:?}", table_dir);
@@ -355,9 +375,26 @@ impl SSTableManager {
     /// This supports both flat layouts (Data.db directly in base_path) and Cassandra-style
     /// directory structures (keyspace/table_name/Data.db).
     async fn load_existing_sstables(&self) -> Result<()> {
-        // Check if directory exists first
-        if !self.platform.fs().exists(&self.base_path).await? {
-            return Ok(()); // No directory, no SSTables to load
+        // Check if directory exists first. `try_exists` for the same reason as the
+        // sibling loader: an unstattable base path must not be reported as an empty
+        // one. A stat failure is recorded so an absent-table query fails closed.
+        match self.platform.fs().try_exists(&self.base_path).await {
+            Ok(true) => {}
+            Ok(false) => return Ok(()), // No directory, no SSTables to load
+            Err(e) => {
+                let cause = discovery_walk::unreadable_dir_error(
+                    &self.base_path,
+                    "stat SSTable base path",
+                    e,
+                );
+                tracing::warn!("SSTableManager: {cause}. Discovery is INCOMPLETE.");
+                let mut incomplete = self.incomplete_walk.write().await;
+                incomplete.extend_from_walk([discovery_walk::UnreadableDir::new(
+                    self.base_path.clone(),
+                    cause,
+                )]);
+                return Ok(());
+            }
         }
 
         // Collect all Data.db paths by walking up to 3 levels deep. The walk

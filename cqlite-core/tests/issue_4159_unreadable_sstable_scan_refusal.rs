@@ -814,12 +814,12 @@ async fn an_unreadable_directory_leaves_healthy_tables_readable_but_makes_absenc
     std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).expect("chmod 0");
     let _restore = RestoreMode(blocked.clone());
 
-    // MEASURE the capability rather than assuming it (see the doc above).
-    if std::fs::read_dir(&blocked).is_ok() {
-        eprintln!(
-            "SKIP: this process can still read a 0-mode directory (root, or \
-             CAP_DAC_OVERRIDE), so an unreadable directory cannot be staged here"
-        );
+    // MEASURE the capability rather than assuming it (see the doc above), then route
+    // the outcome through the shared guard so a skip can never read as a pass.
+    if !unreadable_dir_case_can_run(
+        std::fs::read_dir(&blocked).is_err(),
+        "unreadable-directory scan refusal",
+    ) {
         return;
     }
 
@@ -1056,4 +1056,185 @@ async fn the_storage_engine_surfaces_refuse_too() {
         &generation.data,
         Damage::TruncatedToOuterHeader,
     );
+}
+
+/// Issue #4159, finding 2: under a SYMLINKED base path, a live reader beneath a
+/// directory that has become unreadable must SURVIVE a refresh.
+///
+/// # The defect, and why it is worse than the one it came from
+///
+/// `refresh_tables` reads "not discovered" as "removed from disk", so every removal
+/// is gated on `view_was_complete_for` — did the walk actually see this path? That
+/// question is only answerable if both sides are in the same canonical form. The
+/// canonicalization cache was populated with the discovered files and the held
+/// readers but NOT with the walk's unreadable paths, so those stayed RAW while the
+/// held readers' paths were canonical.
+///
+/// With a symlinked base path the two forms differ: the reader canonicalizes to
+/// `<real>/ks/table/...` while the unreadable prefix stays `<link>/ks/table`, so
+/// `starts_with` answers false, the view is reported COMPLETE for a path the walk
+/// could not see, and the reader is REMOVED. That does not merely fail to report a
+/// gap — it destroys a working reader because of one, and the table then scans EMPTY
+/// under `Ok`, which is the original #4159 swallow arrived at from the opposite
+/// direction.
+///
+/// A data directory reached through a symlink is a normal Cassandra deployment
+/// (data spread across mounts), so this is the ordinary case, not a corner.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_live_reader_under_a_newly_unreadable_directory_survives_refresh_via_a_symlinked_base() {
+    use std::os::unix::fs::PermissionsExt;
+
+    struct RestoreMode(PathBuf);
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    let root = TempDir::new().expect("TempDir");
+    // `real/` holds the data; `link/` is the symlink the manager is opened through.
+    let real = root.path().join("real");
+    std::fs::create_dir_all(&real).expect("create real root");
+    let generation = write_generation(&real, TABLE, 1).await;
+    let link = root.path().join("link");
+    std::os::unix::fs::symlink(real.join("data"), &link).expect("symlink the data dir");
+
+    // Open THROUGH the symlink, while everything is still readable, so the reader
+    // exists and is live.
+    let config = Config::default();
+    let platform = platform().await;
+    let registry = empty_registry(Arc::clone(&platform)).await;
+    let manager = SSTableManager::new(
+        &link,
+        &config,
+        platform,
+        #[cfg(feature = "state_machine")]
+        Some(registry),
+    )
+    .await
+    .expect("manager over a symlinked base path");
+
+    let rows = manager
+        .scan(&table_id(TABLE), None, None, None, Some(&schema_for(TABLE)))
+        .await
+        .expect("control: the row must be readable before anything is broken");
+    assert_eq!(rows.len(), 1, "control: one written row");
+
+    // The table directory becomes UNLISTABLE after the reader was opened — mode
+    // `--x`: no `r`, so `read_dir` fails with EACCES and the walk cannot enumerate
+    // it; but `x` is retained, so opening a file by its known name still works.
+    //
+    // That distinction is the whole point of the case. Mode 0 would ALSO break
+    // reading the already-open generation, so the test could not tell "the reader
+    // was destroyed by the refresh" from "the reader survived but its file is now
+    // unreachable" — and only the first is the defect. `--x` isolates it: the walk
+    // is blind, the reader is fine, so any failure to answer is the refresh's doing.
+    // It is also a real configuration, not a contrivance.
+    let table_dir = generation
+        .data
+        .parent()
+        .expect("generation directory")
+        .to_path_buf();
+    std::fs::set_permissions(&table_dir, std::fs::Permissions::from_mode(0o111))
+        .expect("chmod --x");
+    let _restore = RestoreMode(table_dir.clone());
+
+    // Control: the generation is still READABLE through the unlistable directory,
+    // so the assertions below measure the refresh and nothing else.
+    assert!(
+        std::fs::File::open(&generation.data).is_ok(),
+        "control: `--x` must still permit opening a known file name; if this fails \
+         the case cannot distinguish a destroyed reader from an unreachable file"
+    );
+
+    if !unreadable_dir_case_can_run(
+        std::fs::read_dir(&table_dir).is_err(),
+        "live reader under a newly unreadable directory",
+    ) {
+        return;
+    }
+
+    manager.refresh_tables().await.expect("refresh_tables");
+
+    // Asserted through the PUBLIC surface: the reader must still be held and must
+    // still answer. The walk could not SEE that directory, so its silence is not
+    // evidence the generation was deleted.
+    //
+    // Pre-fix the reader is REMOVED here, and the observable failure is this `scan`
+    // returning `Err(IncompleteDiscovery)` rather than the row — because the same
+    // refresh also records the (raw-path) gap, which then makes the now-empty reader
+    // list fail closed. Stated so the pre-fix mode is not overclaimed as a silent
+    // empty: the destroyed reader is the defect, and for a table with OTHER readable
+    // generations it would surface instead as a SHORT result under `Ok`.
+    let rows = manager
+        .scan(&table_id(TABLE), None, None, None, Some(&schema_for(TABLE)))
+        .await
+        .expect(
+            "the live reader must SURVIVE — an unreadable directory is not a \
+             deletion, and removing readers over one destroys working state",
+        );
+    assert_eq!(
+        rows.len(),
+        1,
+        "the row must still be returned from the already-open reader"
+    );
+}
+
+/// Decide whether an unreadable-directory case may legitimately be SKIPPED, and
+/// make it impossible for a skip to be mistaken for a pass (issue #4159).
+///
+/// # Why this is not an `eprintln!` and a `return`
+///
+/// libtest CAPTURES stderr and DISCARDS it for a test that passes. A case that
+/// probes, prints "SKIPPED", and returns therefore reports a bare `ok` having
+/// asserted NOTHING — and under a container CI lane holding `CAP_DAC_OVERRIDE`, or
+/// any root lane, all of these cases would do that at once. A regression that
+/// re-aborted the walk on `lost+found` would then merge green. A silent no-op is the
+/// same defect class as everything else this issue is about: an absence that reads
+/// like a success.
+///
+/// `staged_unreadable` is the EMPIRICAL probe result — whether this process can in
+/// fact still read the 0-mode directory the caller just created. It is measured, not
+/// inferred from a uid, so it also covers `CAP_DAC_OVERRIDE`, an unusual filesystem
+/// and a permission-ignoring mount.
+///
+/// Two ways this refuses to skip quietly:
+///
+/// * `CQLITE_REQUIRE_FIXTURES=1` (the repo's existing fail-closed idiom) turns any
+///   skip into a hard FAILURE, so a lane can demand the case actually ran;
+/// * a process that is NOT privileged and yet still reads a 0-mode directory is an
+///   unexplained environment, never a legitimate skip, so it PANICS unconditionally.
+///   Skipping there would hide a filesystem that ignores permissions entirely.
+///
+/// Returns `true` when the caller should proceed with its assertions.
+#[cfg(unix)]
+fn unreadable_dir_case_can_run(staged_unreadable: bool, case: &str) -> bool {
+    if staged_unreadable {
+        return true;
+    }
+    // SAFETY: `geteuid` takes no arguments, touches no memory and cannot fail.
+    let privileged = unsafe { libc::geteuid() } == 0;
+    assert!(
+        privileged,
+        "{case}: this process is NOT root yet can still read a 0-mode directory. \
+         That is an unexplained environment (a permission-ignoring filesystem, or a \
+         capability this test cannot account for), not a legitimate skip — refusing \
+         to report a pass for a case that asserted nothing."
+    );
+    let require = std::env::var("CQLITE_REQUIRE_FIXTURES")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    assert!(
+        !require,
+        "CQLITE_REQUIRE_FIXTURES=1 but {case} cannot be staged: this process is root, \
+         so a 0-mode directory is still readable — fail-closed rather than reporting \
+         a pass for a case that asserted nothing. Run this lane as a non-root user."
+    );
+    eprintln!(
+        "SKIPPED ({case}): running as root, so a 0-mode directory is still readable \
+         and an unreadable directory cannot be staged. Set CQLITE_REQUIRE_FIXTURES=1 \
+         to make this a hard failure instead."
+    );
+    false
 }

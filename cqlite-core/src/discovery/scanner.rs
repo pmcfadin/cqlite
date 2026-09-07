@@ -351,20 +351,30 @@ impl Scanner {
 
         // Precedence 3: Try to read metadata.yml
         let metadata_path = self.data_dir.join("metadata.yml");
-        if metadata_path.exists() {
-            // #4159: a metadata.yml that EXISTS and cannot be read is a real fault,
-            // not "no version recorded" — it is propagated rather than falling
-            // through to the "unknown" answer below. (An ABSENT metadata.yml is the
-            // ordinary case and is handled by the `exists()` guard, not here.)
-            let content = std::fs::read_to_string(&metadata_path).map_err(|e| {
-                Error::Io(std::io::Error::new(
+        // #4159: a metadata.yml that is PRESENT and cannot be read is a real fault,
+        // not "no version recorded" — it propagates rather than falling through to
+        // the "unknown" answer below.
+        //
+        // The read is attempted DIRECTLY, with no `exists()` guard, because
+        // `Path::exists()` collapses a stat FAILURE into `false`: a present but
+        // unstattable metadata.yml would take the absent branch and answer
+        // "unknown", contradicting the very contract this arm establishes. Reading
+        // first also removes the TOCTOU window between the probe and the open. Only
+        // `NotFound` — genuine absence, the ordinary case — is a non-error.
+        let content = match std::fs::read_to_string(&metadata_path) {
+            Ok(content) => Some(content),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                return Err(Error::Io(std::io::Error::new(
                     e.kind(),
                     format!(
-                        "metadata.yml exists at {} but could not be read: {e}",
+                        "metadata.yml is present at {} but could not be read: {e}",
                         metadata_path.display()
                     ),
-                ))
-            })?;
+                )))
+            }
+        };
+        if let Some(content) = content {
             {
                 // Parse YAML for version field (simple string search, not full YAML parsing)
                 for line in content.lines() {
@@ -655,12 +665,7 @@ mod tests {
         // Restore before asserting so a failure cannot leave an unremovable TempDir.
         fs::set_permissions(&blocked_ks, fs::Permissions::from_mode(0o755)).unwrap();
 
-        if !staged_unreadable {
-            eprintln!(
-                "SKIPPED: this process can still read a 0-mode directory (root, or \
-                 CAP_DAC_OVERRIDE), so the unreadable-keyspace case cannot be staged \
-                 here"
-            );
+        if !unreadable_dir_case_can_run(staged_unreadable, "unreadable keyspace directory") {
             return;
         }
 
@@ -716,11 +721,7 @@ mod tests {
         let result = Scanner::new(temp_dir.path(), None).scan();
         fs::set_permissions(&table_dir, fs::Permissions::from_mode(0o755)).unwrap();
 
-        if !staged_unreadable {
-            eprintln!(
-                "SKIPPED: this process can still read a 0-mode directory (root, or \
-                 CAP_DAC_OVERRIDE), so the unreadable-table case cannot be staged here"
-            );
+        if !unreadable_dir_case_can_run(staged_unreadable, "unreadable table directory") {
             return;
         }
 
@@ -740,5 +741,189 @@ mod tests {
         assert_eq!(gap.path, table_dir);
         assert_eq!(gap.role, "table");
         assert_eq!(gap.kind, std::io::ErrorKind::PermissionDenied);
+    }
+
+    /// Issue #4159, finding 1: a SYMLINKED table directory must still be discovered.
+    ///
+    /// `DirEntry::file_type()` does NOT follow symlinks, while the `Path::is_dir()`
+    /// it replaced does. Using it made a symlinked keyspace or table directory vanish
+    /// from the scan with NO gap recorded at all — incomplete results reported as
+    /// complete, which is strictly worse than the swallow this issue removes, because
+    /// nothing anywhere shows that something was missed. Spreading a data directory
+    /// across mounts with symlinks is a normal Cassandra layout.
+    ///
+    /// Also pins the DANGLING case, which must NOT become a gap: a symlink whose
+    /// target does not exist is genuine absence (`metadata` -> `NotFound`), the one
+    /// answer that is not a swallow, so it is skipped silently and on purpose.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_table_directory_is_discovered_and_a_dangling_one_is_not_a_gap() {
+        let temp_dir = TempDir::new().unwrap();
+        // Only `data/` is scanned; `other_mount/` sits outside it, standing in for a
+        // separate filesystem, so it is not itself mistaken for a keyspace.
+        let data_dir = temp_dir.path().join("data");
+        fs::create_dir(&data_dir).unwrap();
+
+        let real_table = temp_dir
+            .path()
+            .join("other_mount")
+            .join("users-6aa08200a25111f0a3fef1a551383fb9");
+        fs::create_dir_all(&real_table).unwrap();
+        fs::write(real_table.join("na-1-big-Data.db"), b"mock data").unwrap();
+
+        let keyspace_dir = data_dir.join("test_ks");
+        fs::create_dir(&keyspace_dir).unwrap();
+        std::os::unix::fs::symlink(
+            &real_table,
+            keyspace_dir.join("users-6aa08200a25111f0a3fef1a551383fb9"),
+        )
+        .unwrap();
+
+        // A DANGLING symlink alongside it: its target never exists.
+        std::os::unix::fs::symlink(
+            temp_dir.path().join("no_such_target"),
+            keyspace_dir.join("ghost-6aa08200a25111f0a3fef1a551383fb9"),
+        )
+        .unwrap();
+
+        let result = Scanner::new(&data_dir, None)
+            .scan()
+            .expect("a symlinked layout must scan");
+
+        assert_eq!(
+            result.tables,
+            vec!["test_ks.users".to_string()],
+            "the symlinked table directory must be FOLLOWED and discovered; \
+             DirEntry::file_type() reports the LINK and silently skipped it"
+        );
+        assert_eq!(
+            result.sstable_count, 1,
+            "the SSTable behind the symlink must be counted"
+        );
+        assert!(
+            result.unreadable_dirs.is_empty(),
+            "neither a followed symlink nor a DANGLING one is an unreadable \
+             directory — a dangling link is genuine absence, not a gap: {:?}",
+            result.unreadable_dirs
+        );
+    }
+
+    /// Issue #4159, finding 3: a `metadata.yml` that is PRESENT but cannot be
+    /// statted must propagate, not fall through to "unknown".
+    ///
+    /// `Path::exists()` collapses a stat FAILURE into `false`, so the present-but-
+    /// unreadable file took the absent branch and answered `Some("unknown")` —
+    /// contradicting the contract the same arm establishes for a file it can stat
+    /// but not read. Staged by making the containing directory unreadable, which is
+    /// what an operator permissions mistake looks like.
+    #[cfg(unix)]
+    #[test]
+    fn a_present_but_unstattable_metadata_yml_propagates_instead_of_answering_unknown() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        fs::create_dir(&data_dir).unwrap();
+        fs::write(data_dir.join("metadata.yml"), "version: 5.0.8\n").unwrap();
+
+        let scanner = Scanner::new(&data_dir, None);
+        let empty = ScanResult {
+            keyspaces: vec![],
+            tables: vec![],
+            sstable_count: 0,
+            keyspace_info: vec![],
+            warnings: vec![],
+            unreadable_dirs: vec![],
+        };
+
+        // Control: readable ⇒ the version is read from the file.
+        assert_eq!(
+            scanner.resolve_version(&empty).unwrap(),
+            Some("5.0.8".to_string()),
+            "control: a readable metadata.yml must be parsed"
+        );
+
+        fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o000)).unwrap();
+        let staged_unreadable = fs::metadata(data_dir.join("metadata.yml")).is_err();
+        let result = scanner.resolve_version(&empty);
+        fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        if !unreadable_dir_case_can_run(staged_unreadable, "unstattable metadata.yml") {
+            return;
+        }
+
+        let e = result.expect_err(
+            "a metadata.yml that is present and cannot be statted must PROPAGATE — \
+             answering Some(\"unknown\") is the same swallow one field over",
+        );
+        assert!(
+            matches!(
+                &e,
+                Error::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied
+            ),
+            "the original io::ErrorKind must survive, got {e:?}"
+        );
+        assert!(
+            e.to_string().contains("metadata.yml"),
+            "the error must name the file: {e}"
+        );
+    }
+
+    /// Decide whether an unreadable-directory case may legitimately be SKIPPED, and
+    /// make it impossible for a skip to be mistaken for a pass (issue #4159).
+    ///
+    /// # Why this is not an `eprintln!` and a `return`
+    ///
+    /// libtest CAPTURES stderr and DISCARDS it for a test that passes. A case that
+    /// probes, prints "SKIPPED", and returns therefore reports a bare `ok` having
+    /// asserted NOTHING — and under a container CI lane holding `CAP_DAC_OVERRIDE`, or
+    /// any root lane, all of these cases would do that at once. A regression that
+    /// re-aborted the walk on `lost+found` would then merge green. A silent no-op is the
+    /// same defect class as everything else this issue is about: an absence that reads
+    /// like a success.
+    ///
+    /// `staged_unreadable` is the EMPIRICAL probe result — whether this process can in
+    /// fact still read the 0-mode directory the caller just created. It is measured, not
+    /// inferred from a uid, so it also covers `CAP_DAC_OVERRIDE`, an unusual filesystem
+    /// and a permission-ignoring mount.
+    ///
+    /// Two ways this refuses to skip quietly:
+    ///
+    /// * `CQLITE_REQUIRE_FIXTURES=1` (the repo's existing fail-closed idiom) turns any
+    ///   skip into a hard FAILURE, so a lane can demand the case actually ran;
+    /// * a process that is NOT privileged and yet still reads a 0-mode directory is an
+    ///   unexplained environment, never a legitimate skip, so it PANICS unconditionally.
+    ///   Skipping there would hide a filesystem that ignores permissions entirely.
+    ///
+    /// Returns `true` when the caller should proceed with its assertions.
+    #[cfg(unix)]
+    fn unreadable_dir_case_can_run(staged_unreadable: bool, case: &str) -> bool {
+        if staged_unreadable {
+            return true;
+        }
+        // SAFETY: `geteuid` takes no arguments, touches no memory and cannot fail.
+        let privileged = unsafe { libc::geteuid() } == 0;
+        assert!(
+            privileged,
+            "{case}: this process is NOT root yet can still read a 0-mode directory. \
+         That is an unexplained environment (a permission-ignoring filesystem, or a \
+         capability this test cannot account for), not a legitimate skip — refusing \
+         to report a pass for a case that asserted nothing."
+        );
+        let require = std::env::var("CQLITE_REQUIRE_FIXTURES")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        assert!(
+            !require,
+            "CQLITE_REQUIRE_FIXTURES=1 but {case} cannot be staged: this process is root, \
+         so a 0-mode directory is still readable — fail-closed rather than reporting \
+         a pass for a case that asserted nothing. Run this lane as a non-root user."
+        );
+        eprintln!(
+            "SKIPPED ({case}): running as root, so a 0-mode directory is still readable \
+         and an unreadable directory cannot be staged. Set CQLITE_REQUIRE_FIXTURES=1 \
+         to make this a hard failure instead."
+        );
+        false
     }
 }
