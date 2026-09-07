@@ -1199,8 +1199,8 @@ pub(crate) fn schema_columns(schema: &TableSchema) -> Result<Vec<ColumnInfo>, Pr
 ///   aggregates on them are declined.
 /// - `"none"` — the server cannot faithfully compare these operands at all
 ///   (`json_to_value` rejects them): `Inet`, `Duration`, `Varint`, `Decimal`,
-///   `Blob`, `Date`, `Time`, and the collection/tuple/UDT/custom types. Nothing
-///   is pushed (neither predicate nor aggregate).
+///   `Blob`, `Date`, `Time`, and the collection/vector/tuple/UDT/custom types.
+///   Nothing is pushed (neither predicate nor aggregate).
 ///
 /// `Frozen(inner)` is unwrapped recursively (it never changes comparability).
 ///
@@ -1243,6 +1243,11 @@ pub(crate) fn pushdown_capability(ty: &CqlType) -> &'static str {
         | CqlType::Map(_, _)
         | CqlType::Tuple(_)
         | CqlType::Udt(_, _)
+        // #4114: a `vector<element, n>` lowers to `Value::List` of its elements.
+        // `json_to_value` has no list operand, so it cannot faithfully compare one
+        // server-side — same posture as List/Set, and fail-closed by construction:
+        // nothing is pushed and Trino evaluates the predicate itself.
+        | CqlType::Vector(_, _)
         | CqlType::Custom(_) => "none",
     }
 }
@@ -1266,7 +1271,12 @@ fn flat_data_type(cql: &CqlType) -> DataType {
         CqlType::Blob => DataType::Blob,
         CqlType::Timestamp => DataType::Timestamp,
         CqlType::Uuid | CqlType::TimeUuid => DataType::Uuid,
-        CqlType::List(_) => DataType::List,
+        // #4114: a vector decodes to `Value::List` of its elements, so it takes the
+        // same flat placeholder as a list — matching the Arrow mapping in
+        // `cqlite_core::export::arrow_schema` (`Vector(inner, _)` shares the List
+        // arm there). The flat type is a structural placeholder only: `cql_type` is
+        // always `Some` here and drives the actual conversion.
+        CqlType::List(_) | CqlType::Vector(_, _) => DataType::List,
         CqlType::Set(_) => DataType::Set,
         CqlType::Map(_, _) => DataType::Map,
         CqlType::Tuple(_) => DataType::Tuple,
@@ -1520,6 +1530,21 @@ mod tests {
         // constant encoder — but that fail-closed lives in the connector's
         // constantValue path, NOT in this capability flag.
         assert_eq!(pushdown_capability(&CqlType::Timestamp), "full");
+        // #4114: a `vector<float, n>` lowers to `Value::List` of its elements and
+        // `json_to_value` has no list operand, so it is not comparable
+        // server-side — neither predicate nor aggregate is pushed.
+        assert_eq!(
+            pushdown_capability(&CqlType::Vector(Box::new(CqlType::Float), 384)),
+            "none"
+        );
+        assert_eq!(
+            pushdown_capability(&CqlType::Frozen(Box::new(CqlType::Vector(
+                Box::new(CqlType::Float),
+                3
+            )))),
+            "none",
+            "Frozen unwraps to the vector's capability, not to a default"
+        );
     }
 
     /// Issue #2239 (Option A): the Rust-side peer of the capability contract.
