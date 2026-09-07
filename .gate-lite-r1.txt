@@ -1,0 +1,26 @@
+
+==== AGENT-GATE LITE SUMMARY ====
+run-id: /tmp/agent-gate.UUUM0K
+MODE: lite (FAST ITERATION — NOT the gate of record; full agent-gate.sh must PASS once before merge)
+commit: 5bf0533 branch: issue-4159-scan-unreadable-returns-ok-empty dirty: no
+lite-scope: file-size fmt clippy roborev-lints scoped-tests (full gate NOT run — run it once before merge)
+component-set: ADVISORY-PASS (39/39 names vs origin/main f22ce842bd1ed27e9286ec0433d9c76b880db1bb; NAMES ONLY — not implementations, and no component is run here) — --lite is lenient (#3544); this run does NOT fail on component-set skew — baseline read via the committed manifest; objects: baseline REUSED from this lane's SHARED store — store TRUSTED, not verified (#3749)
+python-tier: PASS (maturin develop --profile dev -m bindings/python/Cargo.toml && pytest bindings/python/tests -m 'not slow' -q)
+accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=53687091200 sccache-used=46445599857(86%) mold=linked perf=ok
+cpu-budget: wrapper=nice ncpu=16 max-concurrency=1(pinned) cores-per-gate=16 build-jobs=16(derived) test-threads=16
+tree-start: 5bf0533c3df2 dirty: no digest: 67474a5fe453
+tree-end: 5bf0533c3df2 dirty: no digest: 67474a5fe453
+tree-integrity: PASS
+census: 1/5 components AFFIRMED a count; 3 DECLARED-GAP (RECOGNISED); 0 NOT-MEASURED (RECOGNISED); 0 measured-ZERO (RECOGNISED); 1 not-applicable (component did not PASS); 0 no-subject (PASSed; the run had nothing to measure); 0 UNDECLARED; 0 unrecognised; 0 row(s) carry a VACUOUS status. NON-EXHAUSTIVE: the gap set is CURATED, so an unaffirmed component is UNMEASURED, never verified (#3625; the remaining gaps are tracked in #3162).
+file-size:         FAIL (0s)  [no-cargo]  {no census: component ended FAIL, so there is no PASS to affirm}
+fmt:               PASS (7s)  [fmt workspace features=n/a]  {no census — cargo fmt --all --check emits no per-file tally to count}
+clippy:            PASS (119s)  [clippy workspace(excl 5) --all-features | clippy cqlite-core --features 25:all-compression,arrow,bench-internals,+22 more | clippy cqlite-cli --features 8:benchmarks,cli-helpers,delta-export,+5 more | clippy cqlite-flight+cqlite-py+cqlite-node --features cqlite-node/write-support]  {no census — cargo clippy emits a per-crate tally only COLD; a warm run prints Finished alone}
+roborev-lints:     PASS (88s)  [no-cargo]  {no census — shell/python guard prints no AGENT-GATE-CENSUS contract line yet (#3162)}
+scoped-tests:      PASS (1364s)  [test cqlite-node default-features | test cqlite-core --features cli-helpers | test cqlite-ffi-common default-features x2 | test cqlite default-features | test cqlite-cli default-features | test cqlite-flight default-features | +5 more sets]  {verified: 4093 tests passed and 175 test binaries built/verified}
+logs: /tmp/agent-gate.UUUM0K
+logdir-disposition: RETAINED: FAIL
+logdir-sweep: 0 REMOVED of 0 aged (>7d) under /tmp (owner verified-dead 0, live 0, unverifiable 0; examined 0, removals attempted 0, declined on identity re-check 0, cap 1000)
+summary-file: /data/lanes/lane-4159/.gate-lite-r1.txt
+heartbeat: on file: /data/lanes/lane-4159/.gate-lite-r1.txt.heartbeat interval: 20s
+RESULT: FAIL
+==== END AGENT-GATE LITE SUMMARY ====
