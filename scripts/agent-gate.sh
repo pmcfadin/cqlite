@@ -21894,6 +21894,63 @@ run_tooling_tests() {
     return 0
   fi
 
+  # cqlite-flight allocator CONFINEMENT guard + its positive control (#3997, R4.1/R5.1).
+  # ABOVE the python3 gate on purpose: both need nothing beyond bash + git + grep, and
+  # folding a never-SKIPping suite into a SKIP-aware block would be a coverage hole
+  # wearing a SKIP's clothes (#3522's ruling). Static source/manifest scan, ~0.3s + ~2s.
+  # What it pins: a `#[global_allocator]` is PROCESS-WIDE, and the whole design of #3997
+  # rests on the one install site living in cqlite-flight/src/main.rs, which rustc compiles
+  # into the BIN target alone — that is what keeps jemalloc out of the library every
+  # embedder, binding and integration test links, and out of the memory ratchets that
+  # install their OWN allocator in their OWN test binaries. Nothing about that is enforced
+  # by the compiler: a later "move it to lib.rs for convenience" would build fine and
+  # silently impose an allocator on every consumer. It also asserts no manifest outside
+  # cqlite-flight names tikv-jemallocator, and that every cqlite-flight dependent links the
+  # LIBRARY target (`artifact`/`bin` refused). Every occurrence is CLASSIFIED, and an
+  # unrecognised shape is a named FAIL rather than a skipped line. The selftest is the
+  # positive control — 21 cases over scratch git trees, 2 green controls so a
+  # refuse-everything guard cannot satisfy the 17 reds, each red required to NAME its
+  # planted defect. A failure FAILs the component, mirroring the guards above.
+  echo ">>> [$name] bash scripts/tests/test_flight_allocator_confinement.sh; bash scripts/tests/test_flight_allocator_confinement_selftest.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_flight_allocator_confinement.sh" >>"$log" 2>&1 ||
+     ! bash "$REPO_ROOT/scripts/tests/test_flight_allocator_confinement_selftest.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (flight allocator confinement #3997); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # cqlite-flight LINKED-allocator guard (#3997, R1.1/R1.2/R2.1). THE gate-enforcing
+  # surface for the jemalloc mechanism, and it is here because nothing else runs it: the
+  # cargo-native test expressing the same contract
+  # (cqlite-flight/tests/issue_3997_allocator_surface.rs) is executed by NO component —
+  # `flight-tests` runs cqlite-flight at `--lib --bins` only and censuses the ~42
+  # integration `--test` targets it does not run (#3384). This guard also covers a property
+  # no cargo test can reach: what is actually LINKED INTO the binary. Two DEBUG builds
+  # (`--features jemalloc`, then default features, which is the feature set other components
+  # already built, so it is warm) and per arm: the symbol table must / must not carry
+  # jemalloc symbols, and `--version` must report the matching `allocator:` line. The arms
+  # are each other's control — a matcher that matches everything satisfies the positive arm
+  # alone, one that matches nothing satisfies the negative arm alone. Internally SKIP-aware
+  # and always NAMING the cause (off-Linux printing the actual `uname -s`; no cargo/cc/make/
+  # symbol tool/bounded `timeout`; unparseable symbol output), while a FAILING cargo build is
+  # a FAIL, not a skip. Measured 5.3s warm on a fleet box. A failure FAILs the component.
+  echo ">>> [$name] bash scripts/tests/test_flight_allocator_link.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_flight_allocator_link.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (flight linked-allocator guard #3997); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
   if ! command -v python3 >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no python3 on PATH; selftest truncation reader needs it)"

@@ -30,11 +30,20 @@ use cqlite_flight::admission::{
 use cqlite_flight::cli::{self, Args, ARG_MAX_CONCURRENT_SCANS};
 use serial_test::serial;
 
+/// The allocator name these tests hand the parser (issue #3997). This target is
+/// an INTEGRATION test, so `main.rs` — and therefore the real
+/// `#[global_allocator]` and its `ALLOCATOR` const — is not compiled into it;
+/// nothing here asserts on the allocator, so a fixed placeholder is honest. The
+/// allocator's own end-to-end assertion drives the BUILT BINARY, in
+/// `issue_3997_allocator_surface.rs`.
+const TEST_ALLOCATOR: &str = "system";
+
 /// Parse a command line through the real parser and resolve the ceiling.
 fn resolve(argv: &[&str]) -> admission::ResolvedMaxConcurrentScans {
     let mut full = vec!["cqlite-flight", "--data-dir", "/tmp/cqlite-flight-test"];
     full.extend_from_slice(argv);
-    let (args, matches) = Args::try_parse_with_matches_from(full).expect("argv must parse");
+    let (args, matches) =
+        Args::try_parse_with_matches_from(TEST_ALLOCATOR, full).expect("argv must parse");
     cli::resolve_max_concurrent_scans(&args, &matches)
 }
 
@@ -295,14 +304,15 @@ mod startup_log {
 
         let mut full = vec!["cqlite-flight", "--data-dir", "/tmp/cqlite-flight-test"];
         full.extend_from_slice(argv);
-        let (args, matches) = Args::try_parse_with_matches_from(full).expect("argv must parse");
+        let (args, matches) =
+            Args::try_parse_with_matches_from(TEST_ALLOCATOR, full).expect("argv must parse");
         let scans = scans.unwrap_or_else(|| cli::resolve_max_concurrent_scans(&args, &matches));
         let limit = admission_limit_for(scans.value);
 
         let capture = Capture::default();
         let subscriber = tracing_subscriber::registry().with(capture.clone());
         tracing::subscriber::with_default(subscriber, || {
-            cli::log_startup(&args, &scans, limit, 1024);
+            cli::log_startup(&args, &scans, limit, 1024, TEST_ALLOCATOR);
         });
         let events = capture.0.lock().expect("capture mutex").clone();
         let starting: Vec<_> = events
