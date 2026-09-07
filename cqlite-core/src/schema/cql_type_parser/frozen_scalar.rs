@@ -17,7 +17,18 @@
 //! open for the audit of the remaining positions — this note records one position
 //! closing, not the whole issue. The MARSHAL half still checks a head class only and
 //! descends into nothing; its bound is declared on
-//! [`FREEZABLE_MARSHAL_SIMPLE_NAMES`].
+//! [`FROZEN_WRAPPABLE_MARSHAL_SIMPLE_NAMES`].
+//!
+//! # THE TWO HALVES ARE TWO QUESTIONS, AND THEIR ACCEPT SETS DIFFER (#4158 review)
+//!
+//! The CQL half asks "is `frozen<T>` DECLARABLE?" (Cassandra's grammar); the marshal
+//! half asks "could Cassandra have WRITTEN `FrozenType(T)` into this header?"
+//! (Cassandra's writer). `vector` and `tuple` answer YES to the first and NO to the
+//! second — both are freezable CQL, and neither is ever printed inside a
+//! `FrozenType(` wrapper. Expecting ONE accept set for both is what let the read gate
+//! admit `FrozenType(VectorType(..))` while the same PR's writer proved that string
+//! impossible. Derivations: [`frozen_inner_supports_freezing`] (grammar) and
+//! [`FROZEN_WRAPPABLE_MARSHAL_SIMPLE_NAMES`] (writer).
 //!
 //! # The oracle is Cassandra's GRAMMAR, not its bytes
 //!
@@ -133,6 +144,15 @@ const CITATION: &str = "frozen<> is only allowed on collections, tuples, and use
      (cassandra-5.0.8:src/java/org/apache/cassandra/cql3/CQL3Type.java:647-651 — \
      CQL3Type.Raw::freeze() throws for every type that does not override it)";
 
+/// The WRITER half of the one rule: which classes can PRINT the wrapper. Kept
+/// beside [`CITATION`] because a refusal has to say which of the two rules it
+/// applied — see [`FROZEN_WRAPPABLE_MARSHAL_SIMPLE_NAMES`] for the derivation.
+const WRITER_CITATION: &str = "only ListType, SetType, MapType and UserType carry the \
+     includeFrozenType = !ignoreFreezing && !isMultiCell() branch that prints it \
+     (cassandra-5.0.8 ListType.java:195-206, SetType.java:185-196, MapType.java:310-320, \
+     UserType.java:436-447); every other type inherits AbstractType.toString(boolean), \
+     AbstractType.java:466-469";
+
 /// Whether a PARSED inner type may legally carry a `frozen<>` wrapper.
 ///
 /// The membership set is Cassandra's override set, mapped onto [`CqlType`]:
@@ -170,7 +190,24 @@ const CITATION: &str = "frozen<> is only allowed on collections, tuples, and use
 ///     exists to prevent. The two AGREE today: a well-formed spelling is `true`
 ///     either way, and a malformed one is refused either way (by this predicate
 ///     via `Custom`, or by `cql_vector_kind` before the predicate is reached).
-///     Full derivation, factory to grammar, at [`FREEZABLE_MARSHAL_SIMPLE_NAMES`].
+///     THE FULL DERIVATION, FACTORY TO GRAMMAR, at the pinned tag — it answers the
+///     CQL question, so it lives here and not on the writer-side
+///     [`FROZEN_WRAPPABLE_MARSHAL_SIMPLE_NAMES`]:
+///       1. `Parser.g:1916-1919` — `vector_type : K_VECTOR '<' comparatorType ','
+///          INTEGER '>' { $vt = CQL3Type.Raw.vector(t1, ...); }`
+///       2. `CQL3Type.java:705-708` — `public static Raw vector(..) { return new
+///          RawVector(t, dimension); }`
+///       3. `CQL3Type.java:885` — `private static class RawVector extends Raw`
+///       4. `CQL3Type.java:915-919` — `@Override public Raw freeze() { return this; }`
+///          — it DOES override, and RETURNS rather than throws (`:909-913`
+///          `supportsFreezing() -> true`; `:897-901` `isVector() -> true`; base
+///          `:632-635` `isImplicitlyFrozen() -> isTuple() || isVector()`).
+///       5. `Parser.g:1851` puts `vector_type` in `comparatorType`, and `:1853-1860`
+///          routes `K_FROZEN '<' comparatorType '>'` through `freeze()` — so
+///          `frozen<vector<float, 3>>` raises no `InvalidRequestException` and no
+///          recognition error.
+///     Its HEADER spelling is nonetheless the BARE `VectorType(FloatType , 3)`:
+///     `VectorType.toString` prints no wrapper (`VectorType.java:339-342`).
 ///
 /// Everything else in `Custom` is refused, which keeps the quoted custom-class
 /// spelling (`frozen<'org.apache.cassandra.db.marshal.Int32Type'>`) out — Cassandra
@@ -203,7 +240,9 @@ pub(crate) fn frozen_inner_supports_freezing(inner: &CqlType) -> bool {
         //
         // Unconditional, and that is Cassandra's answer too: `RawVector::freeze`
         // returns `this` whatever the parameters, so freezability is a HEAD-CLASS
-        // question here exactly as it is in [`FREEZABLE_MARSHAL_SIMPLE_NAMES`]. A
+        // question here — as it is on the marshal side, though over a DIFFERENT set
+        // ([`FROZEN_WRAPPABLE_MARSHAL_SIMPLE_NAMES`] answers what the WRITER prints,
+        // and it prints no wrapper around a vector). A
         // `CqlType::Vector` value can only exist because `schema::vector_type`
         // already validated its element and dimension (the CQL parser errors on a
         // malformed one BEFORE this predicate is reached), so there is nothing left
@@ -301,7 +340,7 @@ pub(crate) fn frozen_inner_supports_freezing(inner: &CqlType) -> bool {
 ///
 /// # ONE FURTHER BOUND, DECLARED RATHER THAN IMPLIED
 ///  * **The MARSHAL half does not validate arity/dimension** — see
-///    [`FREEZABLE_MARSHAL_SIMPLE_NAMES`], which is a head-CLASS lookup over names
+///    [`FROZEN_WRAPPABLE_MARSHAL_SIMPLE_NAMES`], which is a head-CLASS lookup over names
 ///    a Cassandra WRITER produced, not a spelling proxy.
 fn is_vector_spelling(name: &str) -> bool {
     let Some((head, rest)) = name.split_once('<') else {
@@ -355,49 +394,80 @@ pub(crate) fn refuse_frozen_scalar_cql(spelling: &str, inner: &str) -> Error {
     ))
 }
 
-/// The MARSHAL simple names whose `CQL3Type.Raw` counterpart overrides `freeze()`.
+/// The MARSHAL simple names that can appear as the IMMEDIATE inner of a
+/// `FrozenType(` in a header Apache Cassandra WROTE.
 ///
-/// # `VectorType` is in this set, and here is the whole chain at the pinned tag
-/// The one entry not evidenced by the corpus census, so it is derived end to end
-/// rather than assumed — a permission Cassandra does not grant would be the same
-/// no-heuristics defect as an invented decode result, pointed the other way:
+/// # THE TWO GATES ANSWER TWO DIFFERENT QUESTIONS, AND HERE THEY MUST DIVERGE
 ///
-///   1. `Parser.g:1916-1919` — `vector_type : K_VECTOR '<' comparatorType ','
-///      INTEGER '>' { $vt = CQL3Type.Raw.vector(t1, ...); }`
-///   2. `CQL3Type.java:705-708` — `public static Raw vector(..) { return new
-///      RawVector(t, dimension); }`
-///   3. `CQL3Type.java:885` — `private static class RawVector extends Raw`
-///   4. `CQL3Type.java:915-919` — `@Override public Raw freeze() { return this; }`
-///      — it DOES override, and it RETURNS rather than throws. (`:909-913`
-///      `supportsFreezing() -> true`; `:897-901` `isVector() -> true`; base
-///      `:632-635` `isImplicitlyFrozen() -> isTuple() || isVector()`.)
-///   5. `Parser.g:1851` puts `vector_type` in `comparatorType`, and `:1853-1860`
-///      routes `K_FROZEN '<' comparatorType '>'` through `freeze()` — so
-///      `frozen<vector<float, 3>>` raises no `InvalidRequestException` and no
-///      recognition error.
+/// The CQL half ([`frozen_inner_supports_freezing`]) answers a GRAMMAR question —
+/// would `CQL3Type.Raw::freeze()` accept `frozen<T>`? This half answers a WRITER
+/// question — can `AbstractType::toString()` ever PRINT `FrozenType(` around this
+/// class? A type can be freezable in CQL and never carry the wrapper on disk, and
+/// `vector` and `tuple` are exactly that: `frozen<vector<float, 3>>` and
+/// `frozen<tuple<int, text>>` are declarable (accepted on the CQL side) while
+/// `FrozenType(VectorType(..))` and `FrozenType(TupleType(..))` are refused here,
+/// because those BYTES cannot exist. Reading this set as "the freezable types"
+/// is what made the two halves of #4158 contradict each other.
 ///
-/// Conclusion: `frozen<vector<..>>` is declarable CQL and `FrozenType(VectorType(..))`
-/// is a grammatical header type, even though no corpus file spells either.
+/// # DERIVED AT THE PINNED TAG, WHOLE-TREE — the set is FOUR, not seven
+///
+/// The SerializationHeader records `type.toString()` verbatim
+/// (`serializers/AbstractTypeSerializer.java:36-39`, the serializer
+/// `SerializationHeader.Serializer` holds at `SerializationHeader.java:389`), and
+/// the literal `FrozenType(` is printed at exactly FOUR sites in the whole of
+/// `cassandra-5.0.8/src/java` — the `includeFrozenType = !ignoreFreezing &&
+/// !isMultiCell()` branch of `ListType.java:195-206`, `SetType.java:185-196`,
+/// `MapType.java:310-320` and `UserType.java:436-447`:
+///
+/// ```text
+/// $ grep -rn 'FrozenType.class.getName()' cassandra-5.0.8/src/java
+/// .../db/marshal/ListType.java:201        .../db/marshal/MapType.java:316
+/// .../db/marshal/SetType.java:191         .../db/marshal/UserType.java:442
+/// ```
+///
+/// (the only other whole-tree hit for the class NAME,
+/// `cql3/functions/types/DataTypeClassNameParser.java:49`, is a client-side
+/// PARSER constant and prints nothing). Everything else inherits
+/// `AbstractType::toString(boolean) { return this.toString(); }`
+/// (`AbstractType.java:466-469`), so it can never be wrapped:
+///
+///  * `TupleType.toString()` is `getClass().getName() +
+///    stringifyTypeParameters(types, true)` (`TupleType.java:557-560`) — no
+///    wrapper, and it forces `ignoreFreezing` on its own components;
+///  * `VectorType.toString(ignoreFreezing)` is `getClass().getName() +
+///    stringifyVectorParameters(elementType, ignoreFreezing, dimension)`
+///    (`VectorType.java:339-342`) — no wrapper either, so a frozen vector is
+///    written as the BARE `VectorType(FloatType , 3)`;
+///  * a NESTED `FrozenType(FrozenType(..))` is unprintable: each of the four
+///    wrapping types passes `ignoreFreezing || !isMultiCell` down to its own
+///    parameters (`ListType.java:203`, `SetType.java:193`, `MapType.java:317`,
+///    `UserType.java:444`), so anything under a wrapper is printed with
+///    `ignoreFreezing = true` and prints no wrapper of its own. A frozen
+///    collection nested in a MULTICELL parent still wraps — that is the corpus's
+///    `MapType(FrozenType(SetType(..)),..)` shape, and it is one level of
+///    wrapping, not two.
+///
+/// This is the SAME four-name set the WRITE path derives independently, for the
+/// same reason (`stats_writer::marshal::FREEZE_WRAPPED_HEADS`, #4158) — the read
+/// gate and the writer must not hold two opinions about what is possible.
+///
+/// Corroborated, never established, by the corpus: `MapType` 25, `ListType` 16,
+/// `UserType` 10, `SetType` 9 over 144 `Statistics.db` — no `TupleType`, no
+/// `VectorType`, no nesting (recipe in this module's header). Because a NARROWING
+/// can over-refuse where a widening cannot,
+/// `frozen_scalar_tests::the_header_gate_never_refuses_a_frozentype_cassandra_wrote`
+/// re-derives the accept set from the Cassandra-written bytes themselves.
 ///
 /// # THIS IS A HEAD-CLASS LOOKUP AND CHECKS NO ARGUMENTS — deliberately
 /// Unlike the CQL side's [`is_vector_spelling`], which must validate the whole
 /// `vector<..>` spelling because the spelling is its only evidence that a `Custom`
 /// IS a vector, these names arrive from a marshal string a Cassandra WRITER
-/// produced, and the freezability question they answer is decided by the class
-/// alone: `RawVector::freeze` returns `this` whatever the dimension. Validating a
-/// `VectorType(..)`'s arity belongs to the marshal type parser, not to a
-/// freezability gate. Stated so the asymmetry reads as a decision rather than an
-/// oversight.
-const FREEZABLE_MARSHAL_SIMPLE_NAMES: &[&str] = &[
-    "ListType",
-    "SetType",
-    "MapType",
-    "TupleType",
-    "UserType",
-    "VectorType",
-    // An already-frozen inner: `FrozenType(FrozenType(SetType(..)))`.
-    "FrozenType",
-];
+/// produced, and the wrapper question they answer is decided by the class alone:
+/// `MapType.toString` prints the wrapper whatever its key and value types are.
+/// Validating a parameter list belongs to the marshal type parser, not to this
+/// gate. Stated so the asymmetry reads as a decision rather than an oversight.
+const FROZEN_WRAPPABLE_MARSHAL_SIMPLE_NAMES: &[&str] =
+    &["ListType", "SetType", "MapType", "UserType"];
 
 /// The canonical Cassandra marshal package. A `FrozenType` inner head must be
 /// either a BARE simple name or this package's — the same package rule
@@ -449,11 +519,12 @@ pub(crate) fn validate_marshal_frozen(marshal: &str) -> Result<()> {
             ))
         })?;
         let inner = inner.trim();
-        if !marshal_head_supports_freezing(inner) {
+        if !marshal_head_takes_frozen_wrapper(inner) {
             return Err(Error::schema(format!(
                 "SerializationHeader type '{marshal}' is not writable by Cassandra: it spells \
-                 FrozenType({inner}), and '{inner}' is not a collection, tuple, vector, or \
-                 user-defined type — {CITATION}"
+                 FrozenType({inner}), and no Cassandra writer prints a FrozenType(…) wrapper \
+                 around '{inner}' — {WRITER_CITATION}. The companion CQL rule, which \
+                 decides what is DECLARABLE rather than what is written: {CITATION}"
             )));
         }
     }
@@ -485,7 +556,7 @@ fn balanced_inner(after_open: &str) -> Option<&str> {
 /// stripped first, mirroring `convert_marshal_type_to_cql`'s own
 /// `strip_wrapping_parens` (roborev jobs 43/48): a normalization one reader applies
 /// and another does not is how two readers form two opinions about one string.
-fn marshal_head_supports_freezing(inner: &str) -> bool {
+fn marshal_head_takes_frozen_wrapper(inner: &str) -> bool {
     let inner = inner.trim().trim_start_matches(['[', '(']).trim_start();
     // The head is everything before the first `(` (a parameterised class) or the
     // whole string (a bare class name).
@@ -502,7 +573,7 @@ fn marshal_head_supports_freezing(inner: &str) -> bool {
     } else {
         head
     };
-    FREEZABLE_MARSHAL_SIMPLE_NAMES
+    FROZEN_WRAPPABLE_MARSHAL_SIMPLE_NAMES
         .iter()
         .any(|n| n.eq_ignore_ascii_case(simple))
 }

@@ -148,27 +148,51 @@ fn frozen_over_a_collection_tuple_or_udt_still_parses() {
     }
 }
 
-/// A VECTOR is freezable, and `CqlType` cannot model one — so the gate has to
-/// decide it by SPELLING or it refuses declarable CQL.
+/// A VECTOR is freezable CQL, and its HEADER spelling carries NO wrapper — so the
+/// two gates give the same declared type two different answers, on purpose.
 ///
-/// `RawVector::freeze` (`CQL3Type.java:916-919`) returns `this`; a vector is
-/// implicitly frozen (`isImplicitlyFrozen`, `:632-635`). `CqlType` has no `Vector`
-/// variant, so `vector<float, 3>` parses to `Custom` — the same arm that carries an
-/// unresolved UDT reference — and an `is_udt_identifier`-only rule would have
-/// refused `frozen<vector<float, 3>>` because the name contains `<`.
+/// `RawVector::freeze` (`CQL3Type.java:915-919`) returns `this`, so
+/// `frozen<vector<float, 3>>` is declarable and the CQL gate must accept it. But
+/// `VectorType.toString(ignoreFreezing)` is `getClass().getName() +
+/// stringifyVectorParameters(..)` (`VectorType.java:339-342`) with no
+/// `includeFrozenType` branch, so Apache Cassandra writes the BARE
+/// `VectorType(FloatType , 3)` and can never write `FrozenType(VectorType(..))`.
 ///
-/// Pinned in BOTH spellings, because the marshal allowlist naming `VectorType` and
-/// the CQL rule are one rule and must not disagree.
+/// THE DEFECT THIS PINS (#4158 review, blocker C): the marshal allowlist admitted
+/// `VectorType` as a `FrozenType(` inner "because a vector is freezable", which
+/// made the read gate accept a byte string the same PR's writer had just proved
+/// impossible. Freezable and frozen-WRAPPED are different questions.
 #[test]
-fn a_frozen_vector_is_accepted_in_both_spellings() {
+fn a_frozen_vector_is_declarable_cql_but_never_a_frozen_wrapped_header() {
     // The full ACCEPT/REFUSE sets for the spelling live in
     // `a_complete_vector_spelling_is_still_accepted` /
     // `an_incomplete_vector_spelling_is_refused`; this case pins the CROSS-SPELLING
-    // agreement, which is the property the two halves of one rule can break.
-    assert!(CqlType::parse("frozen<vector<float, 3>>").is_ok());
-    const P: &str = "org.apache.cassandra.db.marshal.";
+    // relationship, which is what the two halves of one rule get wrong.
     assert!(
-        validate_marshal_frozen(&format!("{P}FrozenType({P}VectorType({P}FloatType,3))")).is_ok()
+        CqlType::parse("frozen<vector<float, 3>>").is_ok(),
+        "declarable CQL: RawVector overrides freeze() and returns this"
+    );
+    const P: &str = "org.apache.cassandra.db.marshal.";
+    // The spelling Cassandra DOES write for that column — accepted.
+    assert!(
+        validate_marshal_frozen(&format!("{P}VectorType({P}FloatType , 3)")).is_ok(),
+        "the bare VectorType spelling is what Cassandra writes for a frozen vector"
+    );
+    // The spelling Cassandra CANNOT write — refused.
+    let err = validate_marshal_frozen(&format!("{P}FrozenType({P}VectorType({P}FloatType , 3))"))
+        .err()
+        .unwrap_or_else(|| {
+            panic!(
+                "no Cassandra writer prints FrozenType(VectorType(..)): \
+                 VectorType.toString has no includeFrozenType branch \
+                 (VectorType.java:339-342)"
+            )
+        });
+    let msg = err.to_string();
+    assert!(
+        msg.contains("includeFrozenType") && msg.contains("UserType.java:436-447"),
+        "the refusal must cite the WRITER rule it applied (the includeFrozenType \
+         branch and the four classes that carry it), got: {err}"
     );
 }
 
@@ -514,29 +538,30 @@ fn a_frozen_scalar_serialization_header_type_is_refused() {
     }
 }
 
-/// The header ACCEPT set — measured on the real corpus, and it is exactly the
-/// override set.
+/// The header ACCEPT set — the four classes whose `toString(boolean)` can PRINT a
+/// `FrozenType(` wrapper, and nothing else.
 ///
-/// A census of every `FrozenType(` occurrence in the 310 `Statistics.db`/`Data.db`
-/// files this box holds found four inner heads and no others: `MapType` (25),
-/// `ListType` (16), `UserType` (10), `SetType` (9). The recipe is in this module's
-/// parent doc. `TupleType`/`VectorType`/nested `FrozenType` are admitted from the
-/// override set rather than from that census — an absence in one corpus is not an
-/// impossibility.
+/// Not "the freezable types": this gate reads bytes a Cassandra WRITER produced, so
+/// its set is the writer's (`FROZEN_WRAPPABLE_MARSHAL_SIMPLE_NAMES`, derived
+/// whole-tree at `cassandra-5.0.8`), which is also the set the write path uses
+/// (`stats_writer::marshal::FREEZE_WRAPPED_HEADS`). The corpus agrees without
+/// establishing it: `MapType` 25, `ListType` 16, `UserType` 10, `SetType` 9 over
+/// 144 `Statistics.db`, no `TupleType`, no `VectorType`, no nesting.
 #[test]
-fn a_frozen_collection_tuple_udt_or_vector_header_type_is_accepted() {
+fn a_frozen_collection_or_udt_header_type_is_accepted() {
     const P: &str = "org.apache.cassandra.db.marshal.";
     for spelling in [
         format!("{P}FrozenType({P}MapType({P}Int32Type,{P}Int32Type))"),
         format!("{P}FrozenType({P}ListType({P}Int32Type))"),
         format!("{P}FrozenType({P}SetType({P}Int32Type))"),
         format!("{P}FrozenType({P}UserType(ks,6e,66:{P}Int32Type))"),
-        format!("{P}FrozenType({P}TupleType({P}Int32Type,{P}UTF8Type))"),
-        format!("{P}FrozenType({P}VectorType({P}FloatType,3))"),
-        format!("{P}FrozenType({P}FrozenType({P}SetType({P}Int32Type)))"),
         // The frozen wrapper on a map KEY, which is where a frozen UDT really lands.
         format!("{P}MapType({P}FrozenType({P}UserType(ks,6e,66:{P}Int32Type)),{P}Int32Type)"),
-        // No frozen wrapper at all.
+        // ONE level of wrapping under a MULTICELL parent is exactly the corpus shape.
+        format!("{P}ListType({P}FrozenType({P}SetType({P}Int32Type)))"),
+        // No frozen wrapper at all: a tuple and a vector are written BARE.
+        format!("{P}TupleType({P}Int32Type,{P}UTF8Type)"),
+        format!("{P}VectorType({P}FloatType , 3)"),
         format!("{P}MapType({P}Int32Type,{P}Int32Type)"),
         format!("{P}Int32Type"),
         String::new(),
@@ -544,6 +569,67 @@ fn a_frozen_collection_tuple_udt_or_vector_header_type_is_accepted() {
         assert!(
             validate_marshal_frozen(&spelling).is_ok(),
             "`{spelling}` is a type Cassandra can and does write"
+        );
+    }
+}
+
+/// The three wrapper shapes that are GRAMMATICAL, even declarable, and still
+/// unwritable — so the gate refuses them (#4158 review, blocker C).
+///
+/// Each is unprintable for its own reason at the pinned tag, and the reasons are
+/// what make this a narrowing rather than a preference:
+///  * `FrozenType(TupleType(..))` — `TupleType.toString()` is
+///    `getClass().getName() + stringifyTypeParameters(types, true)`
+///    (`TupleType.java:557-560`): no `includeFrozenType` branch, and it forces
+///    `ignoreFreezing` on its own components. A CQL tuple is already frozen.
+///  * `FrozenType(VectorType(..))` — `VectorType.toString(boolean)`
+///    (`VectorType.java:339-342`) likewise prints no wrapper.
+///  * `FrozenType(FrozenType(..))` — each of the four wrapping types passes
+///    `ignoreFreezing || !isMultiCell` to its parameters (`MapType.java:317` et al),
+///    so anything already under a wrapper prints with `ignoreFreezing = true` and
+///    wraps nothing.
+///
+/// `frozen<tuple<..>>` and `frozen<vector<..>>` stay DECLARABLE — see
+/// `a_frozen_vector_is_declarable_cql_but_never_a_frozen_wrapped_header` and the
+/// CQL accept sets above. Only the on-disk spelling is refused.
+#[test]
+fn a_wrapper_cassandra_cannot_print_is_refused_even_though_the_cql_is_declarable() {
+    const P: &str = "org.apache.cassandra.db.marshal.";
+    let unwritable = [
+        format!("{P}FrozenType({P}TupleType({P}Int32Type,{P}UTF8Type))"),
+        format!("{P}FrozenType({P}VectorType({P}FloatType , 3))"),
+        format!("{P}FrozenType({P}FrozenType({P}SetType({P}Int32Type)))"),
+        // At depth, too: the gate scans EVERY FrozenType( occurrence.
+        format!("{P}MapType({P}FrozenType({P}TupleType({P}Int32Type)),{P}Int32Type)"),
+        format!("{P}UserType(ks,6e,66:{P}FrozenType({P}VectorType({P}FloatType , 3)))"),
+    ];
+    assert_eq!(
+        unwritable.len(),
+        5,
+        "case floor: an emptied list would make this test assert nothing"
+    );
+    for spelling in unwritable {
+        let err = validate_marshal_frozen(&spelling).err().unwrap_or_else(|| {
+            panic!(
+                "`{spelling}` is not printable by any Cassandra writer and must be \
+                 refused — see FROZEN_WRAPPABLE_MARSHAL_SIMPLE_NAMES"
+            )
+        });
+        assert!(
+            err.to_string().contains("includeFrozenType"),
+            "the refusal must cite the writer rule it applied, got: {err}"
+        );
+    }
+    // The corresponding CQL declarations are still accepted: this is a narrowing of
+    // the BYTE gate, not a ban on the CQL keyword.
+    for cql in [
+        "frozen<tuple<int, text>>",
+        "frozen<vector<float, 3>>",
+        "frozen<frozen<set<int>>>",
+    ] {
+        assert!(
+            CqlType::parse(cql).is_ok(),
+            "`{cql}` remains declarable CQL (CQL3Type.java freeze() overrides)"
         );
     }
 }
@@ -576,4 +662,165 @@ fn the_header_gate_fails_closed_on_what_it_cannot_read() {
             "`{spelling}` is not a type Cassandra can write and must not be admitted"
         );
     }
+}
+
+// ══════════════ OVER-REFUSAL: the gate never refuses a byte Cassandra wrote ══════
+
+/// THE NARROWING'S OWN GUARD (#4158 review, blocker C): every `FrozenType(...)`
+/// string Apache Cassandra actually wrote into the corpus is ACCEPTED by
+/// [`validate_marshal_frozen`].
+///
+/// A widening can only be fail-open; a NARROWING can be fail-closed on real data,
+/// and no other test here can see that — the accept/refuse sets above are hand-written
+/// spellings, so they are evidence about the rule and not about Cassandra's bytes.
+/// This case is the complement: the strings come from Cassandra-written
+/// `Statistics.db` files, and the ONLY expectation is "the read gate does not refuse
+/// them". It is a UNIT test because `validate_marshal_frozen` is `pub(crate)` and no
+/// integration test can reach it; `tests/issue_4158_frozen_wrapper_cassandra_oracle.rs`
+/// censuses the same bytes from the outside for the WRITER side.
+///
+/// Fixture-gated per repo doctrine: SKIPs when no `*-Statistics.db` is reachable
+/// (hard-fails under `CQLITE_REQUIRE_FIXTURES=1`), and treats "files present but
+/// nothing RECOGNISED" as a failure rather than a pass.
+#[test]
+fn the_header_gate_never_refuses_a_frozentype_cassandra_wrote() {
+    let mut files = 0usize;
+    let mut recognised = 0usize;
+    let mut unreadable = 0usize;
+    let mut refused: Vec<String> = Vec::new();
+
+    for root in corpus_roots() {
+        for path in statistics_db_files(&root) {
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            files += 1;
+            let hay = String::from_utf8_lossy(&bytes);
+            for (idx, _) in hay.match_indices("FrozenType(") {
+                match balanced_marshal_string(&hay[idx..]) {
+                    // Truncated by the surrounding binary, not a Cassandra string.
+                    None => unreadable += 1,
+                    Some(spelling) => {
+                        recognised += 1;
+                        if let Err(e) = validate_marshal_frozen(spelling) {
+                            refused.push(format!("{}: {spelling} — {e}", path.display()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if files == 0 {
+        assert!(
+            !require_fixtures(),
+            "CQLITE_REQUIRE_FIXTURES=1 but no *-Statistics.db was reachable; the \
+             over-refusal guard cannot be measured"
+        );
+        eprintln!(
+            "[#4158] SKIP: no *-Statistics.db under CQLITE_DATASETS_ROOT or the \
+             checkout; over-refusal guard not measured"
+        );
+        return;
+    }
+
+    assert!(
+        refused.is_empty(),
+        "the read gate REFUSED {} FrozenType(...) string(s) Apache Cassandra wrote \
+         — an over-refusal, which is what narrowing the allowlist risks: {:?}",
+        refused.len(),
+        refused
+    );
+    // Affirmative zero: an unmeasured guard must not read like a clean one.
+    assert!(
+        recognised > 0,
+        "{files} Statistics.db file(s) scanned but 0 complete FrozenType(...) \
+         string(s) RECOGNISED ({unreadable} truncated) — the guard would be vacuous"
+    );
+    eprintln!(
+        "[#4158] over-refusal guard: {recognised} Cassandra-written FrozenType(...) \
+         string(s) RECOGNISED over {files} Statistics.db file(s), 0 refused \
+         ({unreadable} truncated by the surrounding binary and not checked)"
+    );
+}
+
+/// `true` when an absent corpus must FAIL rather than SKIP.
+fn require_fixtures() -> bool {
+    matches!(
+        std::env::var("CQLITE_REQUIRE_FIXTURES").ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE")
+    )
+}
+
+/// EVERY candidate corpus root, never a preferred one: neither the exported root
+/// nor the checkout is a superset of the other (#3220), so both are walked.
+fn corpus_roots() -> Vec<std::path::PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(env_root) = std::env::var("CQLITE_DATASETS_ROOT") {
+        let p = std::path::PathBuf::from(env_root);
+        if p.is_dir() {
+            roots.push(p);
+        }
+    }
+    let checkout = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|w| w.join("test-data").join("datasets"));
+    match checkout {
+        Some(p) if p.is_dir() && !roots.contains(&p) => roots.push(p),
+        _ => {}
+    }
+    roots
+}
+
+/// Every `*-Statistics.db` under `root`, recursively.
+fn statistics_db_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with("-Statistics.db"))
+            {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+/// The complete `FrozenType(...)` marshal string starting at `at`, or `None` when
+/// it does not close inside the marshal grammar — which is how a match that is
+/// really binary noise (or a string the surrounding buffer truncated) is EXCLUDED
+/// rather than asserted about.
+///
+/// The accepted alphabet is exactly what Cassandra's own printers emit: class
+/// names and keyspace names (`[A-Za-z0-9_.]`), the `,` / `:` / space separators
+/// (`stringifyTypeParameters`, `stringifyUserTypeParameters`,
+/// `stringifyVectorParameters`\'s `" , "`) and the parentheses.
+fn balanced_marshal_string(at: &str) -> Option<&str> {
+    let mut depth = 0usize;
+    for (idx, ch) in at.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&at[..=idx]);
+                }
+            }
+            c if c.is_ascii_alphanumeric() => {}
+            '.' | '_' | ',' | ':' | ' ' | '-' => {}
+            // Anything else means this is not a Cassandra-printed type string.
+            _ => return None,
+        }
+    }
+    None
 }

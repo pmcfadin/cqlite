@@ -207,7 +207,10 @@ fn a_legal_frozen_key_type_still_passes_both_producers() {
         format!("{MARSHAL}.FrozenType({MARSHAL}.SetType({MARSHAL}.Int32Type))"),
         format!("{MARSHAL}.FrozenType({MARSHAL}.ListType({MARSHAL}.Int32Type))"),
         format!("{MARSHAL}.FrozenType({MARSHAL}.MapType({MARSHAL}.UTF8Type,{MARSHAL}.Int32Type))"),
-        format!("{MARSHAL}.FrozenType({MARSHAL}.TupleType({MARSHAL}.Int32Type))"),
+        // A frozen TUPLE key is written BARE — `TupleType.toString()` has no
+        // `includeFrozenType` branch (`TupleType.java:557-560`), so the wrapper
+        // spelling is unwritable and is refused by the header gate (#4158).
+        format!("{MARSHAL}.TupleType({MARSHAL}.Int32Type)"),
         format!("{MARSHAL}.FrozenType({MARSHAL}.UserType(ks,6e,66:{MARSHAL}.Int32Type))"),
         format!(
             "{MARSHAL}.MapType({MARSHAL}.FrozenType({MARSHAL}.UserType(ks,6e,66:{MARSHAL}.Int32Type)),{MARSHAL}.Int32Type)"
