@@ -310,6 +310,20 @@ pub(crate) fn parse_vector_dimension(raw: &str, type_str: &str) -> Result<usize>
     // keep, and a late failure where an early one was available. Validated through the
     // SAME helper the decoders use, so the parser and the decode path cannot disagree
     // about what is representable.
+    // Cassandra's dimension is a Java `int`: `getVectorParameters` hands the token to
+    // `Integer.parseInt` (`TypeParser.java:255-258`), so `Integer.MAX_VALUE` is the
+    // hard ceiling and NO Cassandra-written type string can exceed it (roborev job
+    // 114). This is the same one-directional argument the digits-only check above
+    // rests on — Cassandra's WRITER concatenates the `int` directly
+    // (`stringifyVectorParameters`, `:239-242`) — so refusing a larger value rejects
+    // nothing Cassandra wrote, while accepting one would admit an IMPOSSIBLE schema
+    // and hand a multi-gigabyte declared width to the decode path.
+    if dimension > i32::MAX as usize {
+        return Err(malformed(
+            type_str,
+            "the dimension exceeds Cassandra's Integer.MAX_VALUE ceiling",
+        ));
+    }
     // Checked at the FLOAT element width, which is element-SPECIFIC and deliberately
     // so: this parser sees only the dimension token, never the element, so there is no
     // generally-correct width to check against — a check at width 1 would be
@@ -637,6 +651,36 @@ mod tests {
                 "{ok} is representable and must parse"
             );
         }
+    }
+
+    /// roborev job 114: the dimension is bounded by Cassandra's Java `int`.
+    ///
+    /// `getVectorParameters` parses it with `Integer.parseInt`
+    /// (`TypeParser.java:255-258`), so `Integer.MAX_VALUE` is the ceiling and no
+    /// Cassandra-written type string can exceed it. Accepting a larger value would
+    /// admit an impossible schema and pass a multi-gigabyte declared width to decode.
+    /// Boundary-tested on BOTH sides, because an off-by-one here is exactly the kind
+    /// of bound that gets written `>=` by mistake.
+    #[test]
+    fn a_dimension_above_java_integer_max_is_refused() {
+        let ty = "org.apache.cassandra.db.marshal.VectorType(org.apache.cassandra.db.marshal.FloatType , n)";
+
+        // i32::MAX itself is LEGAL — Cassandra could write it.
+        let max = i32::MAX as usize; // 2147483647
+        assert_eq!(
+            parse_vector_dimension(&max.to_string(), ty).expect("i32::MAX is a legal dimension"),
+            max,
+            "2147483647 must be accepted: Integer.MAX_VALUE is reachable"
+        );
+
+        // One above is NOT.
+        let over = max + 1; // 2147483648
+        let err = parse_vector_dimension(&over.to_string(), ty)
+            .expect_err("2147483648 exceeds Integer.MAX_VALUE and must be refused");
+        assert!(
+            err.to_string().contains("Integer.MAX_VALUE"),
+            "the refusal must name the ceiling it enforces, got: {err}"
+        );
     }
 
     #[test]
