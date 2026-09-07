@@ -414,7 +414,10 @@ pub(crate) fn build_typed_value_array(
         // Arrow has no dedicated Set type; Set maps to List.
         // See `arrow_builders_nested::build_typed_list_or_set_array`.
         // ----------------------------------------------------------------
-        CqlType::List(inner) | CqlType::Set(inner) => build_typed_list_or_set_array(inner, values),
+        // #4114: a vector's value IS `Value::List`, so the list builder is exact.
+        CqlType::List(inner) | CqlType::Set(inner) | CqlType::Vector(inner, _) => {
+            build_typed_list_or_set_array(inner, values)
+        }
         // Frozen is unwrapped above in `unwrap_frozen_type`; this arm is
         // unreachable but required for exhaustiveness.
         CqlType::Frozen(inner) => build_typed_value_array(inner, values),

@@ -80,6 +80,9 @@ pub(super) fn column_shape(col: &ColumnInfo) -> Shape<'_> {
             | CqlType::Counter
             | CqlType::List(_)
             | CqlType::Set(_)
+            // #4114: high-fidelity like the other collections — the converter
+            // dispatches a vector through `build_typed_value_array`.
+            | CqlType::Vector(_, _)
             | CqlType::Map(_, _)
             | CqlType::Tuple(_)
             | CqlType::Udt(_, _) => return Shape::Cql(effective),
@@ -163,6 +166,8 @@ pub(super) fn branches(shape: Shape<'_>, value: Option<&Value>) -> bool {
         Shape::Cql(t) => match unwrap_frozen_type(t) {
             CqlType::List(_)
             | CqlType::Set(_)
+            // #4114: a vector queues one child slot per element, like a list.
+            | CqlType::Vector(_, _)
             | CqlType::Map(_, _)
             | CqlType::Tuple(_)
             | CqlType::Udt(_, _)

@@ -475,7 +475,9 @@ impl<'a> Estimator<'a> {
             }
             // ListArray: the row's own offsets entry, plus one typed child slot
             // per element.
-            CqlType::List(inner) | CqlType::Set(inner) => {
+            // #4114: a vector charges exactly as a list — its value is `Value::List`
+            // and its Arrow node is the same ListArray.
+            CqlType::List(inner) | CqlType::Set(inner) | CqlType::Vector(inner, _) => {
                 self.add(ARROW_CELL_OVERHEAD_BYTES);
                 match value {
                     Some(Value::List(items) | Value::Set(items)) if !items.is_empty() => {
