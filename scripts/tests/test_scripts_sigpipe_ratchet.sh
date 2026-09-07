@@ -220,7 +220,13 @@ expect 14 "no git repository REFUSES (the subject set cannot be derived)" "$d" 3
 d=$(mkcase nomatcher); rm -f "$d/$MATCHER_REL"; reindex "$d"
 expect 15 "a MISSING matcher library REFUSES (nothing was scanned)" "$d" 3 "reason: no-matcher" "REMEDY"
 
-d=$(mkcase inert);    printf '#!/usr/bin/env bash\nsigpipe_violations() { :; }\n' >"$d/$MATCHER_REL"; reindex "$d"
+# The stub's DEFINITION is assembled at run time from $MATCHER_FN, so this file never contains
+# the literal `<fn>() {` that case 20 counts — a lint that matches its own fixture literals is a
+# defect this repo has paid for more than once (see the needle-assembly note in
+# scripts/tests/test_agent_gate_summary.sh's portability lint).
+MATCHER_FN='sigpipe_violations'
+d=$(mkcase inert)
+printf '#!/usr/bin/env bash\n%s() { :; }\n' "$MATCHER_FN" >"$d/$MATCHER_REL"; reindex "$d"
 expect 16 "an INERT matcher REFUSES instead of reporting zero sites" "$d" 3 "reason: matcher-inert" "REMEDY"
 
 d=$(mkcase fewsubj)
@@ -250,11 +256,12 @@ fi
 #     matcher, and the guard must SOURCE it. A copied regex is the silent-divergence defect
 #     CLAUDE.md names, and no test can catch it after the fact.
 # ---------------------------------------------------------------------------
-definers=$(git -C "$REPO_ROOT" grep -l -e 'sigpipe_violations() {' -- 'scripts/**' | grep -c . || true)
+git -C "$REPO_ROOT" grep -l -e "$MATCHER_FN() {" -- 'scripts/**' >"$tmp/definers.txt" 2>/dev/null || true
+definers=$(grep -c . "$tmp/definers.txt" || true)
 if [ "${definers:-0}" -eq 1 ] && grep -qF "$MATCHER_REL" "$REPO_ROOT/$GUARD_REL"; then
   ok "20 exactly ONE tracked file defines the matcher, and the ratchet sources it"
 else
-  bad "20 ONE matcher" "$definers tracked file(s) define sigpipe_violations (want 1), or the ratchet does not source $MATCHER_REL"
+  bad "20 ONE matcher" "$definers tracked file(s) define the matcher (want 1: $(tr '\n' ' ' <"$tmp/definers.txt")), or the ratchet does not source $MATCHER_REL"
 fi
 
 # ---------------------------------------------------------------------------

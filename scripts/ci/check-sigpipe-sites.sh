@@ -147,7 +147,11 @@ if ! git ls-files -z 'scripts/*.sh' 'scripts/**/*.sh' >"$_tmp/subjects.z" 2>"$_t
     "repair the checkout; an unmeasured subject set is never a pass"
 fi
 
-declare -a SUBJECTS=()
+# BASH 3.2 THROUGHOUT (macOS is a first-class gate host and ships 3.2): no associative arrays
+# anywhere in this file. Every set lives in a sorted temp FILE and the comparison is one awk pass,
+# which is also why the output is deterministically ordered.
+: >"$_tmp/subjects"
+N_SUBJECTS=0
 while IFS= read -r -d '' f; do
   [[ "$f" =~ $PATH_RE ]] || refuse "subject-path-shape" \
     "git listed a subject whose path is not the recognised scripts/**/*.sh shape: $f" \
@@ -155,30 +159,29 @@ while IFS= read -r -d '' f; do
   [ -r "$f" ] || refuse "unreadable-subject" \
     "$f is tracked but not readable, so its site count is UNKNOWN, not zero" \
     "restore file permissions, or remove the file from the index"
-  SUBJECTS+=("$f")
+  printf '%s\n' "$f" >>"$_tmp/subjects"
+  N_SUBJECTS=$((N_SUBJECTS + 1))
 done <"$_tmp/subjects.z"
-
-N_SUBJECTS=${#SUBJECTS[@]}
 printf 'SIGPIPE-SITES: subjects ENUMERATED %d git-tracked scripts/**/*.sh file(s) (floor %d)\n' \
   "$N_SUBJECTS" "$SUBJECT_FLOOR"
 [ "$N_SUBJECTS" -ge "$SUBJECT_FLOOR" ] || refuse "subject-floor" \
   "only $N_SUBJECTS subject(s) enumerated, floor is $SUBJECT_FLOOR — a clean verdict over this set would measure nothing" \
   "check that the git index is populated and the pathspecs still match; lower the floor only with a stated reason"
 
-declare -A NOW=()
+: >"$_tmp/now"
 CUR_FILES=0
 CUR_SITES=0
-for f in "${SUBJECTS[@]}"; do
+while IFS= read -r f; do
   n=$(sigpipe_violations "$f" | grep -c . || true)
   [ -n "$n" ] || refuse "count-failed" \
     "the matcher produced no count for $f" \
     "re-run; if it persists, fix scripts/tests/lib/sigpipe-matcher.sh"
   if [ "$n" -gt 0 ]; then
-    NOW["$f"]=$n
+    printf '%s %s\n' "$f" "$n" >>"$_tmp/now"
     CUR_FILES=$((CUR_FILES + 1))
     CUR_SITES=$((CUR_SITES + n))
   fi
-done
+done <"$_tmp/subjects"
 printf 'SIGPIPE-SITES: MEASURED %d file(s) with at least one SHAPE MATCH, %d match(es) in total\n' \
   "$CUR_FILES" "$CUR_SITES"
 printf 'SIGPIPE-SITES: (a SHAPE MATCH is not a confirmed hazard — see the DECLARED SCOPE block)\n'
@@ -203,11 +206,10 @@ if [ "$MODE" = regenerate ]; then
     printf '# classes of correct code; see its header and the run-time DECLARED SCOPE block.\n'
     printf '# THE RATCHET: an increase in a listed file, or ANY match in a file not listed here, FAILs.\n'
     printf '# A DECREASE never fails — re-run the command above and commit a tighter baseline.\n'
-    # Written to a file and sorted from it, never `printf ... | sort`: `sort` reads to EOF so
-    # there is no EPIPE hazard here, but the shape is one this guard REPORTS, and a guard that
-    # must list itself in its own baseline is a guard nobody believes.
-    for f in "${!NOW[@]}"; do printf '%s %s\n' "$f" "${NOW[$f]}"; done >"$_tmp/census"
-    LC_ALL=C sort "$_tmp/census"
+    # Sorted from the census FILE, never `printf ... | sort`: `sort` reads to EOF so there is no
+    # EPIPE hazard here, but the shape is one this guard REPORTS, and a guard that must list
+    # itself in its own baseline is a guard nobody believes.
+    LC_ALL=C sort "$_tmp/now"
   } >"$BASELINE.tmp.$$" || refuse "baseline-write-failed" \
     "could not write $BASELINE.tmp.$$" "check write permissions on scripts/ci/"
   mv -- "$BASELINE.tmp.$$" "$BASELINE" || refuse "baseline-write-failed" \
@@ -229,7 +231,8 @@ fi
   "the baseline $BASELINE exists but is not readable" \
   "fix its permissions"
 
-declare -A BASE=()
+: >"$_tmp/base"
+: >"$_tmp/basepaths"
 B_ENTRIES=0
 B_SITES=0
 _lineno=0
@@ -251,10 +254,15 @@ while IFS= read -r bline || [ -n "$bline" ]; do
   [ "$bcount" -ge 1 ] || refuse "baseline-grammar" \
     "$BASELINE line $_lineno records a count of $bcount for $bpath — the baseline lists only files WITH sites" \
     "$REGEN_CMD"
-  [ -z "${BASE[$bpath]+set}" ] || refuse "baseline-duplicate" \
-    "$BASELINE names $bpath twice (line $_lineno), so which count binds is undefined" \
-    "$REGEN_CMD"
-  BASE["$bpath"]=$bcount
+  # Duplicate detection without an associative array (bash 3.2): the accumulating file is the
+  # set. A fixed-string, whole-line-anchored grep, so a path is never read as a pattern.
+  if grep -qxF -- "$bpath" "$_tmp/basepaths" 2>/dev/null; then
+    refuse "baseline-duplicate" \
+      "$BASELINE names $bpath twice (line $_lineno), so which count binds is undefined" \
+      "$REGEN_CMD"
+  fi
+  printf '%s\n' "$bpath" >>"$_tmp/basepaths"
+  printf '%s %s\n' "$bpath" "$bcount" >>"$_tmp/base"
   B_ENTRIES=$((B_ENTRIES + 1))
   B_SITES=$((B_SITES + bcount))
 done <"$BASELINE"
@@ -268,36 +276,74 @@ printf 'SIGPIPE-SITES: baseline PARSED %d entr%s, %d recorded match(es) (floor %
 # ---------------------------------------------------------------------------
 # THE COMPARISON. Two FAILing conditions and two non-failing observations, each named.
 # ---------------------------------------------------------------------------
+# ONE awk pass over the three sets (baseline, census, subjects), emitting TAGGED records that
+# bash then renders. awk's own arrays are used here — the bash-3.2 constraint is about bash.
+# Output is sorted, so a diagnostic is deterministic run to run.
+if ! awk -v base="$_tmp/base" -v now="$_tmp/now" -v subj="$_tmp/subjects" '
+    FILENAME == base { b[$1] = $2; next }
+    FILENAME == now  { n[$1] = $2; next }
+    FILENAME == subj { s[$0] = 1;  next }
+    END {
+      for (p in n) {
+        if (!(p in b))            { print "FAIL-NEW " p " " n[p]; continue }
+        if (n[p] + 0 > b[p] + 0)  { print "FAIL-INC " p " " n[p] " " b[p] }
+      }
+      for (p in b) {
+        if (!(p in s))            { print "INFO-GONE " p; continue }
+        cur = (p in n) ? n[p] + 0 : 0
+        if (cur < b[p] + 0)       { print "INFO-IMPROVED " p " " cur " " b[p] }
+      }
+    }
+  ' "$_tmp/base" "$_tmp/now" "$_tmp/subjects" >"$_tmp/cmp.unsorted" 2>"$_tmp/cmp.err"; then
+  refuse "comparison-failed" \
+    "the awk comparison of census against baseline exited non-zero: $(tr '\n' ' ' <"$_tmp/cmp.err")" \
+    "re-run; an unmeasured comparison is never a pass"
+fi
+LC_ALL=C sort "$_tmp/cmp.unsorted" >"$_tmp/cmp"
+
 INCREASED=0
 NEWFILES=0
-declare -a MSG_FAIL=()
-declare -a MSG_INFO=()
-
-for f in "${SUBJECTS[@]}"; do
-  n=${NOW[$f]:-0}
-  if [ -z "${BASE[$f]+set}" ]; then
-    if [ "$n" -gt 0 ]; then
+: >"$_tmp/msg.fail"
+: >"$_tmp/msg.info"
+while IFS= read -r rec; do
+  [ -n "$rec" ] || continue
+  tag=${rec%% *}
+  rest=${rec#* }
+  case "$tag" in
+    FAIL-NEW)
+      rp=${rest%% *}; rn=${rest##* }
       NEWFILES=$((NEWFILES + 1))
-      MSG_FAIL+=("NEW FILE WITH SITES: $f has $n shape match(es) and is not in the baseline")
-    fi
-    continue
-  fi
-  b=${BASE[$f]}
-  if [ "$n" -gt "$b" ]; then
-    INCREASED=$((INCREASED + 1))
-    MSG_FAIL+=("INCREASE: $f has $n shape match(es), baseline records $b")
-    while IFS= read -r v; do
-      [ -n "$v" ] || continue
-      MSG_FAIL+=("    $f:$v")
-    done < <(sigpipe_violations "$f")
-  elif [ "$n" -lt "$b" ]; then
-    MSG_INFO+=("IMPROVED: $f has $n shape match(es), baseline records $b")
-  fi
-done
-
-for bp in "${!BASE[@]}"; do
-  [ -e "$bp" ] || MSG_INFO+=("BASELINE FILE GONE: $bp is in the baseline but is not tracked/on disk (fixed, renamed or deleted)")
-done
+      printf 'NEW FILE WITH SITES: %s has %s shape match(es) and is not in the baseline\n' "$rp" "$rn" >>"$_tmp/msg.fail"
+      sigpipe_violations "$rp" >"$_tmp/v.txt"
+      while IFS= read -r v; do
+        [ -n "$v" ] || continue
+        printf '    %s:%s\n' "$rp" "$v" >>"$_tmp/msg.fail"
+      done <"$_tmp/v.txt"
+      ;;
+    FAIL-INC)
+      rp=${rest%% *}; rtail=${rest#* }; rn=${rtail%% *}; rb=${rtail##* }
+      INCREASED=$((INCREASED + 1))
+      printf 'INCREASE: %s has %s shape match(es), baseline records %s\n' "$rp" "$rn" "$rb" >>"$_tmp/msg.fail"
+      sigpipe_violations "$rp" >"$_tmp/v.txt"
+      while IFS= read -r v; do
+        [ -n "$v" ] || continue
+        printf '    %s:%s\n' "$rp" "$v" >>"$_tmp/msg.fail"
+      done <"$_tmp/v.txt"
+      ;;
+    INFO-GONE)
+      printf 'BASELINE FILE GONE: %s is in the baseline but is no longer a tracked subject (fixed, renamed or deleted)\n' "$rest" >>"$_tmp/msg.info"
+      ;;
+    INFO-IMPROVED)
+      rp=${rest%% *}; rtail=${rest#* }; rn=${rtail%% *}; rb=${rtail##* }
+      printf 'IMPROVED: %s has %s shape match(es), baseline records %s\n' "$rp" "$rn" "$rb" >>"$_tmp/msg.info"
+      ;;
+    *)
+      refuse "comparison-grammar" \
+        "the comparison emitted a record this reader does not recognise: $rec" \
+        "fix the awk/reader pair in scripts/ci/check-sigpipe-sites.sh; an unread record is never a pass"
+      ;;
+  esac
+done <"$_tmp/cmp"
 
 # ---------------------------------------------------------------------------
 # DECLARED SCOPE — printed on EVERY run, pass or fail. A README nobody opens is not a
@@ -331,10 +377,16 @@ printf 'PREREQUISITES: git + awk + standard text tools. No cargo, no python3, no
 printf '           network. This guard NEVER SKIPs; an unmeasurable run is a REFUSAL (exit 3).\n'
 printf '==== END DECLARED SCOPE ====\n\n'
 
-for m in "${MSG_INFO[@]}"; do printf 'SIGPIPE-SITES: %s\n' "$m"; done
+while IFS= read -r m; do
+  [ -n "$m" ] || continue
+  printf 'SIGPIPE-SITES: %s\n' "$m"
+done <"$_tmp/msg.info"
 
-if [ "${#MSG_FAIL[@]}" -gt 0 ]; then
-  for m in "${MSG_FAIL[@]}"; do printf 'SIGPIPE-SITES: %s\n' "$m"; done
+if [ -s "$_tmp/msg.fail" ]; then
+  while IFS= read -r m; do
+    [ -n "$m" ] || continue
+    printf 'SIGPIPE-SITES: %s\n' "$m"
+  done <"$_tmp/msg.fail"
   printf 'SIGPIPE-SITES: verdict INCREASE (%d file(s) grew, %d new file(s) with sites)\n' \
     "$INCREASED" "$NEWFILES"
   printf 'SIGPIPE-SITES: REMEDY: remove the writer — `reader <<<"$text"` instead of\n'
