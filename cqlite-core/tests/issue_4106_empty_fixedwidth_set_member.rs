@@ -74,23 +74,34 @@
 //! such a member) — this file says nothing about them; CQLite's refusal for those
 //! four is unit-covered in `regression_4106_empty_set_member_tests`.
 
-#![cfg(feature = "lz4")]
+#![cfg(all(feature = "lz4", feature = "cli-helpers"))]
 //  ^ SOURCE-level gate, deliberately NOT a `[[test]] required-features` entry —
-//  the same reasoning as `issue_3805_empty_fixedwidth_map_key.rs`: the fixture is
-//  real Cassandra output and LZ4-compressed (`CompressionInfo.db` present), so
-//  reading it needs `lz4`, and without the feature the target would compile and
-//  then fail at runtime on a blob it cannot decompress — a false red, not a
-//  signal. `lz4` arrives via the DEFAULT `all-compression` set, so no lane
-//  silently executes zero tests here (the #3375 hazard).
+//  the same reasoning as `issue_3805_empty_fixedwidth_map_key.rs`.
+//
+//  `lz4`: the fixture is real Cassandra output and LZ4-compressed
+//  (`CompressionInfo.db` present), so reading it needs `lz4`, and without the
+//  feature the target would compile and then fail at runtime on a blob it cannot
+//  decompress — a false red, not a signal. `lz4` arrives via the DEFAULT
+//  `all-compression` set.
+//
+//  `cli-helpers`: BOTH tests read the fixture through `cqlite_core::ingestion`,
+//  which that feature gates, so EVERY item in this file is unreachable without
+//  it. The gate is at FILE level rather than per-test precisely because of that:
+//  with the feature off there is nothing left to keep, and per-test gating would
+//  leave every helper below dead — `cargo clippy -p cqlite-core --all-targets`
+//  at default features reports 13 `never used` errors under `-D warnings` for
+//  exactly that shape (a sibling, `issue_3809_tombstone_clustering_identity`,
+//  already does). `cli-helpers` is NON-default, so a lane without it executes
+//  ZERO tests here (the #3375 hazard); the full gate's `core-tests` component
+//  runs `cargo test -p cqlite-core --features cli-helpers`, which is the lane
+//  that executes them.
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-#[cfg(feature = "cli-helpers")]
 use cqlite_core::ingestion::{ingest, IngestionConfig};
 use cqlite_core::types::{EmptyValueType, Value};
-#[cfg(feature = "cli-helpers")]
 use cqlite_core::Config;
 
 // TABLE-granular fixture resolution (#3220). `first_root_with_table` is the PURE
@@ -167,7 +178,6 @@ const MULTICELL_COLUMNS: &[&str] = &[
 
 /// `(id, column) -> Value` for every fixture row via the PUBLIC
 /// `Database::execute` SELECT surface, or the failure verbatim.
-#[cfg(feature = "cli-helpers")]
 async fn select_star() -> Result<Vec<(i32, HashMap<String, Value>)>, String> {
     let config = IngestionConfig {
         schema_paths: vec![schema_path()],
@@ -275,7 +285,6 @@ fn rendered(members: &[Value]) -> BTreeSet<String> {
 /// With the pre-fix guard restored in `complex_column.rs` (skip the cell when
 /// `path_bytes.is_empty()`), this fails on the FIRST arity assertion:
 /// `row id=1 s_int: the golden carries TWO members ... got 1 ([Integer(42)])`.
-#[cfg(feature = "cli-helpers")]
 #[tokio::test]
 async fn an_empty_fixed_width_set_member_reaches_select_at_the_full_arity() {
     // FAIL-CLOSED: no excusing arm anywhere. A committed fixture is `must_run`,
@@ -476,11 +485,11 @@ async fn an_empty_fixed_width_set_member_reaches_select_at_the_full_arity() {
 // ════════════════════════════════════════════════════════════════════════════
 
 // Cassandra cell flags (`db/rows/Cell.Serializer` at `cassandra-5.0.8`).
-#[cfg(all(feature = "cli-helpers", feature = "write-support"))]
+#[cfg(feature = "write-support")]
 const CELL_HAS_EMPTY_VALUE: u8 = 0x04;
-#[cfg(all(feature = "cli-helpers", feature = "write-support"))]
+#[cfg(feature = "write-support")]
 const CELL_USE_ROW_TIMESTAMP: u8 = 0x08;
-#[cfg(all(feature = "cli-helpers", feature = "write-support"))]
+#[cfg(feature = "write-support")]
 const END_OF_PARTITION: u8 = 0x01;
 
 /// Read a Cassandra unsigned VInt; returns `(value, new_pos)`.
@@ -489,7 +498,7 @@ const END_OF_PARTITION: u8 = 0x01;
 /// the number of leading ONE bits of the first byte, and the first byte
 /// contributes its remaining low bits — none at all in the 9-byte form
 /// (`0xff`), which the LIVE complex deletion below really does take.
-#[cfg(all(feature = "cli-helpers", feature = "write-support"))]
+#[cfg(feature = "write-support")]
 fn read_vuint(data: &[u8], pos: usize) -> (u64, usize) {
     let first = data[pos];
     let extra = first.leading_ones() as usize;
@@ -540,7 +549,7 @@ fn read_vuint(data: &[u8], pos: usize) -> (u64, usize) {
 /// route (`serialize_value_into(element, out)`) makes the write REFUSE the
 /// sentinel and this test fails at `flush`, which is precisely the "compaction
 /// failed outright" symptom.
-#[cfg(all(feature = "cli-helpers", feature = "write-support"))]
+#[cfg(feature = "write-support")]
 #[tokio::test]
 async fn the_decoded_empty_member_writes_back_as_a_zero_length_cell_path() {
     use cqlite_core::schema::{Column, KeyColumn, TableSchema};
