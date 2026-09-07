@@ -5,134 +5,145 @@
 #   bash scripts/ci/check-sigpipe-sites.sh --regenerate
 #
 # GRAMMAR (closed — anything else is REFUSED, not skipped):
-#   "<relative-path> <count>"  one per git-tracked scripts/**/*.sh file with >=1 match,
-#                              count >= 1, sorted (LC_ALL=C), no duplicates
+#   "<relative-path> <count> <sha256>"  one per git-tracked scripts/**/*.sh file with
+#                              >=1 match; count >= 1; sha256 = 64 lowercase hex chars;
+#                              sorted (LC_ALL=C), no duplicate paths
 #   "#..." comment / blank     ignored
+# THE THIRD FIELD is an AGGREGATE DIGEST OVER MATCHED-LINE TEXT, and carries NO LINE
+# NUMBERS: each matched line is normalised (trimmed, internal whitespace runs collapsed
+# to one space, the matcher's "<lineno>:" prefix discarded), the normalised lines are
+# SORTED (LC_ALL=C), and sha256 is taken over that concatenation. Sorting is what keeps
+# it MOTION-PROOF — moving or reordering a matched line does not change the multiset —
+# while a SWAP (one site removed, one added, count unchanged) DOES change it and FAILs.
+# A count alone could not see that swap; that false PASS is why the field exists.
 # NO LINE NUMBERS, deliberately: #4061 pinned bootstrap-agent-machine.sh:3329 and it had
 # drifted to :5392 within two days. Per-file counts are stale-proof against code motion,
 # and a line-numbered list is a curated list in disguise (lead ruling on #4061).
 # A COUNT IS A COUNT OF SHAPE MATCHES, NOT OF CONFIRMED HAZARDS. The shared matcher
 # (scripts/tests/lib/sigpipe-matcher.sh) is deliberately BROAD and REPORTS six declared
 # classes of correct code; see its header and the run-time DECLARED SCOPE block.
-# THE RATCHET: an increase in a listed file, or ANY match in a file not listed here, FAILs.
-# A DECREASE never fails — re-run the command above and commit a tighter baseline.
-scripts/agent-gate.sh 105
-scripts/audit-inert-surfaces.sh 1
-scripts/bootstrap-agent-machine.sh 44
-scripts/bump-version.sh 2
-scripts/check-object-store-integrity.sh 5
-scripts/ci/board-label-mirror.sh 9
-scripts/ci/check-dataset-pin.sh 1
-scripts/ci/check-root-junk-files.sh 4
-scripts/ci/ci-timing-summary.sh 3
-scripts/ci/ensure_real_dataset.sh 5
-scripts/ci/gate-failure-mode.sh 1
-scripts/ci/install-sstabledump.sh 1
-scripts/ci/observability_no_otel_default.sh 1
-scripts/ci/run-core-test-group.sh 3
-scripts/ci/validate-cleanup.sh 3
-scripts/claude-auth-capability.sh 10
-scripts/docs-examples-smoke.sh 6
-scripts/e2e_collections.sh 2
-scripts/e2e_collections_existing_docker.sh 2
-scripts/e2e_nodetool_import.sh 2
-scripts/flow/advertised-collision-scan.sh 13
-scripts/flow/claim-heartbeat.sh 9
-scripts/flow/claim.sh 10
-scripts/flow/drive-issue-state.sh 4
-scripts/flow/finalize-cleanup.sh 4
-scripts/flow/lane-lock.sh 9
-scripts/flow/lib/process-liveness.sh 1
-scripts/flow/lib/roborev-findings-count.sh 1
-scripts/flow/premerge-assert.sh 5
-scripts/flow/premerge-review-binding.sh 5
-scripts/flow/roborev-review-checks.sh 2
-scripts/flow/roborev-review-oracles.sh 18
-scripts/flow/roborev-review.sh 6
-scripts/flow/tests/claim-resume.test.sh 128
-scripts/flow/tests/finalize-cleanup.test.sh 5
-scripts/gate-component-verdict.sh 2
-scripts/lib/gate-notify.sh 1
-scripts/local/audit-ci-commands.sh 1
-scripts/local/pre-merge.sh 1
-scripts/local/test-all-ci-locally.sh 1
-scripts/local/test-m1-ci-locally.sh 1
-scripts/local/worker-supervisor.sh 16
-scripts/perf-capability.sh 7
-scripts/perf/lib-cpu.sh 1
-scripts/perf/lib-flight-arm.sh 3
-scripts/perf/ws0-baseline.sh 6
-scripts/tests/lib-ws0-hermetic.sh 2
-scripts/tests/lib/pub-surface-scratch-lib.sh 1
-scripts/tests/lib/sigpipe-matcher.sh 2
-scripts/tests/test_advertised_collision_scan.sh 78
-scripts/tests/test_agent_gate_all_features_lane.sh 4
-scripts/tests/test_agent_gate_binding_rust_lanes.sh 3
-scripts/tests/test_agent_gate_census.sh 19
-scripts/tests/test_agent_gate_cli_tests_enum.sh 2
-scripts/tests/test_agent_gate_component_set.sh 69
-scripts/tests/test_agent_gate_delta.sh 17
-scripts/tests/test_agent_gate_disk_admission.sh 5
-scripts/tests/test_agent_gate_feature_matrix_annotation.sh 5
-scripts/tests/test_agent_gate_feature_matrix_lanes.sh 3
-scripts/tests/test_agent_gate_logdir_cleanup.sh 17
-scripts/tests/test_agent_gate_nested_isolation.sh 4
-scripts/tests/test_agent_gate_notify.sh 1
-scripts/tests/test_agent_gate_parser_parity.sh 3
-scripts/tests/test_agent_gate_python_bindings_determinism.sh 8
-scripts/tests/test_agent_gate_schemas_preflight.sh 10
-scripts/tests/test_agent_gate_sublanes.sh 6
-scripts/tests/test_agent_gate_summary.sh 59
-scripts/tests/test_agent_gate_tree_integrity.sh 14
-scripts/tests/test_agent_gate_tree_portability.sh 18
-scripts/tests/test_aggregate_required_tiers.sh 4
-scripts/tests/test_base_staleness.sh 22
-scripts/tests/test_binding_unwind_profile.sh 8
-scripts/tests/test_board_label_mirror.sh 21
-scripts/tests/test_bootstrap_agent_machine.sh 214
-scripts/tests/test_cargo_output_parsers.sh 1
-scripts/tests/test_check_dataset_manifest.sh 66
-scripts/tests/test_check_dockerfile_rust_pin.sh 1
-scripts/tests/test_check_object_store_integrity.sh 100
-scripts/tests/test_claim_heartbeat.sh 128
-scripts/tests/test_claim_lock.sh 181
-scripts/tests/test_classify_docs_only.sh 17
-scripts/tests/test_claude_auth_capability.sh 138
-scripts/tests/test_dep_duplicates_ratchet.sh 6
-scripts/tests/test_drive_issue_state.sh 83
-scripts/tests/test_features_load_bearing_guard.sh 1
-scripts/tests/test_fetch_datasets_tracked_guard.sh 7
-scripts/tests/test_finalize_cleanup_lane_lock.sh 6
-scripts/tests/test_gate_component_verdict.sh 43
-scripts/tests/test_gate_cpu_budget.sh 2
-scripts/tests/test_gate_detached.sh 128
-scripts/tests/test_gate_liveness.sh 45
-scripts/tests/test_gate_liveness_no_sigpipe.sh 35
-scripts/tests/test_gate_notify_contract.sh 2
-scripts/tests/test_gating_registry_policy.sh 4
-scripts/tests/test_gating_workflow_semantics.sh 12
-scripts/tests/test_issue_3358_failclosed.sh 1
-scripts/tests/test_issue_gate_hook.sh 2
-scripts/tests/test_lane_lock.sh 129
-scripts/tests/test_lane_lock_precommit_hook.sh 12
-scripts/tests/test_perf_capability.sh 72
-scripts/tests/test_perf_capability_bootstrap.sh 154
-scripts/tests/test_premerge_assert.sh 3
-scripts/tests/test_premerge_review_binding.sh 2
-scripts/tests/test_pub_surface_guard.sh 1
-scripts/tests/test_roborev_guard_portability.sh 38
-scripts/tests/test_roborev_review_guard.sh 15
-scripts/tests/test_tools_crate_disposition.sh 8
-scripts/tests/test_tools_crate_disposition_selftest.sh 6
-scripts/tests/test_worker_supervisor.sh 134
-scripts/tests/test_workspace_test_disposition.sh 14
-scripts/tests/test_workspace_test_disposition_selftest.sh 2
-scripts/tests/test_ws0_cpu_pinning_guards.sh 2
-scripts/tests/test_ws0_embedded_steps_execute.sh 4
-scripts/tests/test_ws0_fabrication_guards.sh 5
-scripts/tests/test_ws0_hermeticity.sh 5
-scripts/tests/test_ws0_perf_invocation_lint.sh 2
-scripts/tests/test_ws0_prewarm_completeness.sh 4
-scripts/tests/test_ws0_provenance_guards.sh 1
-scripts/tests/test_ws0_quiescence_evidence_guards.sh 1
-scripts/tests/test_ws0_report_guards.sh 3
+# THE RATCHET: an increase in a listed file, a CHANGED digest at an unchanged count, or
+# ANY match in a file not listed here, FAILs.
+# A DECREASE never fails — re-run the command above and commit a tighter baseline. That
+# is also the ONE declared residual: the digest changes on any removal, so a net decrease
+# that also ADDS a line is tolerated.
+scripts/agent-gate.sh 105 6788f4fdc2bdf580753e84e7d1120515bf5b9c7943ffed3a49013086a0200a2b
+scripts/audit-inert-surfaces.sh 1 bb72bed6f53cbe17f37446cb6ca69b342de3f6d12568cb2f783e53e266330ac4
+scripts/bootstrap-agent-machine.sh 44 2c9067d9ad2e0947309819e81b2580d456412994e8f3bbbcbd7383cd223e3ed2
+scripts/bump-version.sh 2 b8b4c6e32848ce57f6420923360038c3469adcc5ea2ba0b00999a3e2fb7e3a2c
+scripts/check-object-store-integrity.sh 5 83ca008f073d92bb4683ff15dc5e244c450965ef012843909b4c54b82b4239b6
+scripts/ci/board-label-mirror.sh 9 7544da5489b357067f773f2d31373efb2617b56b88026a751e24337de2a4055b
+scripts/ci/check-dataset-pin.sh 1 fcfa818ee9b43aac4c2824309bcf6bdfcd656817d9e84f82b4ab5983417c604e
+scripts/ci/check-root-junk-files.sh 4 3c658e05b92417db1115e97cebc886eb941e86e7bc234bc1c5f7a3ca90a8d53e
+scripts/ci/ci-timing-summary.sh 3 16af01eb4e8a6f2e7b2baced53dc830de331b1170ea0d90b73d551da2864343d
+scripts/ci/ensure_real_dataset.sh 5 5745f5dc91aa1f12f15288cb9b8c29bec006fc7613ffbb5886faa787d6252eda
+scripts/ci/gate-failure-mode.sh 1 5b4a257d020203b29b92be18b0dd5b716ffd3875dfc183364e4d473bfc5c9d76
+scripts/ci/install-sstabledump.sh 1 a1b7d85fbef1bc8cd382f0921a9d074a9551459f85acfab326cd2aff248bdb78
+scripts/ci/observability_no_otel_default.sh 1 887a5cd8811e1f96c2e495270975ee34225775719040e29a92fc6db577cf3867
+scripts/ci/run-core-test-group.sh 3 361495e5eda2dcb42109b672368e40a5543b5dd053bb537b5a960a00d519f55e
+scripts/ci/validate-cleanup.sh 3 47731b70b656b5b32557c688286b286ade5028f9f39eb5cb9121c51b1c6118b6
+scripts/claude-auth-capability.sh 10 4c2714a2446c0c62aa76163ac36221f1def17e2f95043cef4117c93ba9e5bfba
+scripts/docs-examples-smoke.sh 6 1de1ee6bf22f15bad692458f6501c42d7343c61a36dab11ae6601419b0ad78d0
+scripts/e2e_collections.sh 2 876222ce996759e1d5996d7aa495af0d86899b1d8bd501a979e9298b54565bac
+scripts/e2e_collections_existing_docker.sh 2 876222ce996759e1d5996d7aa495af0d86899b1d8bd501a979e9298b54565bac
+scripts/e2e_nodetool_import.sh 2 3004e7ad0cb5a5bc97d0aeb4513ac6b7175b4f65a918f9ff91291ea01a481068
+scripts/flow/advertised-collision-scan.sh 13 dff6225a2121ddd9318071a5705905fcd6e908559028b4e2b270badc354f7a0c
+scripts/flow/claim-heartbeat.sh 9 ee32238560f2d7468632a019d9f66fae1e55def5242bc11c20247415cd711e35
+scripts/flow/claim.sh 10 613425d5abd43d23cccaab71daa4e2b7ca506658d41b05307a996682b67ee54f
+scripts/flow/drive-issue-state.sh 4 cf85261febd3f6912d9a31aea945b9a6f1c818e394c67d1a1943752a5ffb5e72
+scripts/flow/finalize-cleanup.sh 4 e7d8261bb43b22cc0e05eb791a27b63e8d2966c655e0bfa2272fd1b70c07ce95
+scripts/flow/lane-lock.sh 9 e4db9c1c20942c605b02189661f5c2a7047f93db6122ed28190e24136a83cc24
+scripts/flow/lib/process-liveness.sh 1 197abf46fc6735ee75df02e980b550fa3640237269dc93e09420a27c6370cdcc
+scripts/flow/lib/roborev-findings-count.sh 1 aa67339f2cd3b01f6c92ed6c8f62c6a591ad10b51e35ec4964f8576417bf97ac
+scripts/flow/premerge-assert.sh 5 d80c6e73c585b5e2d0d59c3fe525187471ebba1139883227d7af4c384ce471dc
+scripts/flow/premerge-review-binding.sh 5 ab0177a3af48c06efeea4c2aaa252ff0972a8a0bc6395e6a553e43fd6af3ffdd
+scripts/flow/roborev-review-checks.sh 2 86104a8daecd3b506a8e25b6c2768ca062c5a9cac4c1d1e50089d28fc005f333
+scripts/flow/roborev-review-oracles.sh 18 cc052d0d54b890ec1cbccf39986637144da328561efd71468065ffa898a0b0c8
+scripts/flow/roborev-review.sh 6 7452db0ecf5d144cdaf50005edc6cbe65644246dc9684f3eb8bfdb758a7a56e6
+scripts/flow/tests/claim-resume.test.sh 128 d5405d189133a4ec24a22410857d223ba5949ea3f8e7f5e2628cc08fef916141
+scripts/flow/tests/finalize-cleanup.test.sh 5 1425ebeb86776577985280998a4fc614258cc3713be0d28b36c818cd952343cf
+scripts/gate-component-verdict.sh 2 7dd234b10e78bbeaa90f2c57a16ad73c7055ee675967757415a1e8704bc140fa
+scripts/lib/gate-notify.sh 1 defae3c729e4a264f18e28d0e5ca3fa1f1711f7d1e87c7a242d365fcffe7858c
+scripts/local/audit-ci-commands.sh 1 03b2626dd12f2bf7b31e8d5f10863875e765a231406a9499aea713d963d5347e
+scripts/local/pre-merge.sh 1 ceb8863c04edde78ddd8327323ed6758cbc56e7061857ad3e0b568aa78bfaa3d
+scripts/local/test-all-ci-locally.sh 1 acee272f300976f39b15da8d48d6af5a3ce95b6fab0aad4e94696789ab3e59c5
+scripts/local/test-m1-ci-locally.sh 1 acee272f300976f39b15da8d48d6af5a3ce95b6fab0aad4e94696789ab3e59c5
+scripts/local/worker-supervisor.sh 16 d5b7e441cae57d5814867f43380bcc9a3ac5153c3765b8e926047fef4706ad6c
+scripts/perf-capability.sh 7 3348729294fab5440d4378f8e7a046e78940d615d3c23f199c0422bd40de67cd
+scripts/perf/lib-cpu.sh 1 a3ed735ede2badda939f6ec33bf469d2fb04fdbcd1a75e8f76b75d236255a685
+scripts/perf/lib-flight-arm.sh 3 2220647bbec6235e9dc41793547dc92635acbb69263f0b16ddc1688d3c9c1d3f
+scripts/perf/ws0-baseline.sh 6 047aee3e1cf8f72e3312b6c4e8606d2774c07261c16c7da05d0c8fb4b76e3f92
+scripts/tests/lib-ws0-hermetic.sh 2 b1749f2228efff62460f04c987e94b50a29f6fd7529d931525d081549b18d880
+scripts/tests/lib/pub-surface-scratch-lib.sh 1 76bc257ebcefe1bf97f42f1123ca64d4686e8342f93aa64fbb7a3c9e1444bdb2
+scripts/tests/lib/sigpipe-matcher.sh 2 e1630d9dd5765891be27a94c9fc76c2fafe4e0f32330314786241e8b64a6629f
+scripts/tests/test_advertised_collision_scan.sh 78 acee4478160f8b158d38b7a573394ffb75c6359c9fad236ef149c11ffcb52f9c
+scripts/tests/test_agent_gate_all_features_lane.sh 4 a1a395ad9f666d9bcc1eb38cdfdadb0064ea3c92b8f9616e24069eb411f17910
+scripts/tests/test_agent_gate_binding_rust_lanes.sh 3 7af46327aa8024b5a045ccabd8ae76664a62b63e9119e9422e159bede3ba4d45
+scripts/tests/test_agent_gate_census.sh 19 d857c883dafd89da90b1032bec564443c7a7eb19b560658e14d7ab7714f2eb5f
+scripts/tests/test_agent_gate_cli_tests_enum.sh 2 fa69dba07d2f077e904e0799fef0bb3f08e1f229fd78ddea4c767015464b4a94
+scripts/tests/test_agent_gate_component_set.sh 69 92740e6eb3624b9bd2b0017093a5d7b8ca079171a5ab45fbc8053b8901f79f1c
+scripts/tests/test_agent_gate_delta.sh 17 b442f64bcadc20713862a013f3474a82b57a9bb54cc23397547b59053740abf8
+scripts/tests/test_agent_gate_disk_admission.sh 5 a2309183eff0c73f23e6d9ccffec5d77f84f846a59044f889fd9909b13345eea
+scripts/tests/test_agent_gate_feature_matrix_annotation.sh 5 02a3da104d9c3fcbb6e23ec88ceca970a52045b59313279c74f1882f0c887449
+scripts/tests/test_agent_gate_feature_matrix_lanes.sh 3 e472162bb86c91854d9c3b036b5b6d8a77c90632a1c0e3019e5c117257d747cc
+scripts/tests/test_agent_gate_logdir_cleanup.sh 17 ddb0053166c81d1b2a5191b01d8eecfcefa70a3fbdc468646bf35cff396d786c
+scripts/tests/test_agent_gate_nested_isolation.sh 4 c794306c6f0396753a2c2164a3646e3a8144618e957f07cb77a44d2fa15ab1c2
+scripts/tests/test_agent_gate_notify.sh 1 13437c1d0abf514ba7b8a375827d9e9710e9c8d221dd66fea8aca92fd6f79938
+scripts/tests/test_agent_gate_parser_parity.sh 3 80a8227461ecd2ced1a02eb3eb34209b196efd4c79f4ea813ce7833f7888c743
+scripts/tests/test_agent_gate_python_bindings_determinism.sh 8 b492e835fd6029c85e9398a9b5cd254d530bbea837f9b29d45abed6684e8262d
+scripts/tests/test_agent_gate_schemas_preflight.sh 10 3ce9ff54aad53bd160bc61d1afc654215068d68939fe572054a4ec3a6a0dedff
+scripts/tests/test_agent_gate_sublanes.sh 6 0850239498702362234f60ff02a4bc13a9298b457511dc21c384c0a873a0cf6b
+scripts/tests/test_agent_gate_summary.sh 59 9b11916c82461b279c222e8af8db92622da83d8da0e23cf00974d5f2cc3f6101
+scripts/tests/test_agent_gate_tree_integrity.sh 14 2bd49b7a572c02721e8739bd5ff1ac0acbf770f7cb326801eabbfe51d1e38c07
+scripts/tests/test_agent_gate_tree_portability.sh 18 ad4d8bfbaddcf707a88357ee79e7973553c196cec3f58cfd055591b315f52a1a
+scripts/tests/test_aggregate_required_tiers.sh 4 161dfe2f1d1997f07f08bb67e581db70ee433888ff3a3ad2cefe7682c082255d
+scripts/tests/test_base_staleness.sh 22 3caa57dd89213f81599429a03cb3eaeaf953a8feca7f144f535e34fcadc3df80
+scripts/tests/test_binding_unwind_profile.sh 8 c7d532ee0f4543adca47830496293ef6eb33e1ab02568fabe297d2300cd3faa9
+scripts/tests/test_board_label_mirror.sh 21 79beec53236dec222b9be8594d2e6037ffcfd83515013299cf01f6b226898435
+scripts/tests/test_bootstrap_agent_machine.sh 214 c6f94e5424ced8b88d0635169657a11291bdaa0848596393ebfd5bcf537722bc
+scripts/tests/test_cargo_output_parsers.sh 1 b7ac8f7cd9d71448df14b16c31ff7bf48cf061021db60fa2959428d87eb2ace4
+scripts/tests/test_check_dataset_manifest.sh 66 c6a07d053f73ee4f6c8087b73d8553dc7dcbc188647f7492da64986824087b2e
+scripts/tests/test_check_dockerfile_rust_pin.sh 1 b7831d2bd799f95a95e81db4158f2156f3645859e6768813c37014e7023e6b96
+scripts/tests/test_check_object_store_integrity.sh 100 b3051950f888b855dbab66deda7340e67c46c6f2ddd825d3e2bd00fa7ffb8c48
+scripts/tests/test_claim_heartbeat.sh 128 204bc3e5be7f65c73256a78e40ad12edf7033701f7bceea4fc429ad9bd672250
+scripts/tests/test_claim_lock.sh 181 2ec04edd04a59c7a2b475ac988e56d7bf919ee08a5306bb15175535e72c6a83e
+scripts/tests/test_classify_docs_only.sh 17 b487605711aeb954abd326cc7bae90237f588128e8e31a4bc9a7eb7c1eed9c14
+scripts/tests/test_claude_auth_capability.sh 138 3e3bfa1ca7f32a8c149e0369dec5afeb970b5135a192cbb9f2cdb383c6390bc3
+scripts/tests/test_dep_duplicates_ratchet.sh 6 228f4276fa94666bca79e5c52d4c214e78a0c12de3f0f2e1c090ab252602ce20
+scripts/tests/test_drive_issue_state.sh 83 a81d112653600b5fc4eada490d6fe03eaffccb461e7db4cc5ad6af58b9650de2
+scripts/tests/test_features_load_bearing_guard.sh 1 801d5f77c40f39aaf10e0d68d98775723c746dd050ac3581f1046bcb967e56d9
+scripts/tests/test_fetch_datasets_tracked_guard.sh 7 9f2df710be5027c4821a80201cc9cf7ae6fa186c1746d7525202062244372fc0
+scripts/tests/test_finalize_cleanup_lane_lock.sh 6 173e892a2e9536206feb49ebeca39ea39409c9bbe5d33fbaeaecc4ab1fc40f8c
+scripts/tests/test_gate_component_verdict.sh 43 26735ac346f44cf2f8f5f8af3b302e4ec245a05581a9447b9597ffa3df6838c5
+scripts/tests/test_gate_cpu_budget.sh 2 6ad2bfff7eb826c78bc82834a2e5aba604f367d39bb851c59bfed2180d5da93d
+scripts/tests/test_gate_detached.sh 128 6eba72e8de776db7527df08f327b2cf4ca0a7eb0ef62a3c17d2d22feadbb23cd
+scripts/tests/test_gate_liveness.sh 45 473893bf30e76dccbf36d54e90718437b93a0a011853a960415229d6694d3a5c
+scripts/tests/test_gate_liveness_no_sigpipe.sh 35 40252b34b6aa678d08d3a6803cd786a9d379687d0c2c64b95fdec66f07560473
+scripts/tests/test_gate_notify_contract.sh 2 249a84b3fba0d328a05d4d9ab280e6113222d0ba3edb3579f5bbe58e7a4bc436
+scripts/tests/test_gating_registry_policy.sh 4 bf507dba91beab473befaaceaef90a270ec7fee24d7e126d94d40b1bcc7f5fdd
+scripts/tests/test_gating_workflow_semantics.sh 12 e729e1d2c69a267c55531c2d1663dbf1c1afd3fa2f4e35cf2578538328b7df9f
+scripts/tests/test_issue_3358_failclosed.sh 1 4296a272274e012f87abb5a83e822b5189dd62eb9870457f1feafc4f73605526
+scripts/tests/test_issue_gate_hook.sh 2 36f8a9968107fba4fc8065158fd5cb03645636f2ac291b1b186a6ffb27601cfa
+scripts/tests/test_lane_lock.sh 129 4bc645a2e3daf54cbbd892c63b67fb00cff3a29fc0a5912b64448345743066ac
+scripts/tests/test_lane_lock_precommit_hook.sh 12 4f4ad04c2683a8c5a4f57f7e5fdac353fa7ff7a4ffaad9f6aadff64db923e61a
+scripts/tests/test_perf_capability.sh 72 2b671af40cf2f4cdecff2c25fa2c251bb54ea6f37fbe6205e5ff12d68fe45a7c
+scripts/tests/test_perf_capability_bootstrap.sh 154 9bf23f24ea0bcab0d12dc46ecd722b9817f7375b6926be922585f3c8760107e9
+scripts/tests/test_premerge_assert.sh 3 2357f0436c130b5a3ef4e00c13ecd436173ea7645cdb9fc4cfddcd717f3961ea
+scripts/tests/test_premerge_review_binding.sh 2 1c289034dc6b210386155b99b6beedb6f9717c4766feef88e762626cb908ec2b
+scripts/tests/test_pub_surface_guard.sh 1 68e897407dbb3033b4711bdfd2f2ad86b4adbb924e1ec117cd51fe158eb2ad86
+scripts/tests/test_roborev_guard_portability.sh 38 29bf34563897e39c7c0e85fde5498bfc9854afc763ba638e583cebc1149b102e
+scripts/tests/test_roborev_review_guard.sh 15 8e3f036bace31b3f90d59bb2b58c8b61da654a1a63c624325c21ce74c0f5614b
+scripts/tests/test_tools_crate_disposition.sh 8 754df1e26c18d316080e2fefde96a07e02a6cfbf67a13c6bd8c11e65c3ca7fef
+scripts/tests/test_tools_crate_disposition_selftest.sh 6 9dc7d6251e18ceae04e0b82efc41c1d0bf20f45dc32eb3f9d9e65bc4cadd6888
+scripts/tests/test_worker_supervisor.sh 134 f07556196de9631990721cce0eed72a805056501ad8c9495965dcf5034e6be20
+scripts/tests/test_workspace_test_disposition.sh 14 fc7bab2ad75da01c2a1b11c217b573fbf13749862c9c072fba668e67fec27dd5
+scripts/tests/test_workspace_test_disposition_selftest.sh 2 21239a773ef6678d2e5fa006584d42cbead448a809e2572892f07d708dcbc421
+scripts/tests/test_ws0_cpu_pinning_guards.sh 2 f4144cc56bab3f395567f925a1bbf6bf102da918f67fcb8fb78b6dca428e1168
+scripts/tests/test_ws0_embedded_steps_execute.sh 4 f87b23ebe4705979a7e194b2ccc790e32e666ab18485ca102783d8c1294e8a1e
+scripts/tests/test_ws0_fabrication_guards.sh 5 887c0ecfc01aaecc7eee524a31dda63d53f5ef2c9968855063165f053dd6cab1
+scripts/tests/test_ws0_hermeticity.sh 5 7b8b9b4e1db31ece38bbc348170abfa2ec4a545b3afcea75b617a85a76c16b48
+scripts/tests/test_ws0_perf_invocation_lint.sh 2 77daded35d24561898bf28406e85c8e8eeeb61c7ae4fa77d23de62d9c38e92d1
+scripts/tests/test_ws0_prewarm_completeness.sh 4 4de779c3b31bdbf08e48eac17a54a6fa0582efab59c3e66c0de1cb6bb3a771c9
+scripts/tests/test_ws0_provenance_guards.sh 1 f66c350267a91ae37ba936c14799b1e2c785eff761a594619911fa8244281eb1
+scripts/tests/test_ws0_quiescence_evidence_guards.sh 1 45b1c79f9fb00789dde83f8f8a3a058e89cd87277834fdfb2af46336fbd87ab5
+scripts/tests/test_ws0_report_guards.sh 3 70f6bc507cdb42197ff513bbe2dbdc0047384c2da3e2b00f465bcc5c52c2acd7
