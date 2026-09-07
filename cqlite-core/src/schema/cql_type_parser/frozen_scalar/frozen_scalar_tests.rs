@@ -172,11 +172,21 @@ fn a_frozen_vector_is_accepted_in_both_spellings() {
     );
 }
 
-/// An INCOMPLETE `vector<..>` spelling is NOT declarable, so it is NOT freezable.
+/// An INCOMPLETE `vector<..>` spelling is NOT declarable, so it is NOT freezable —
+/// and since #4149 the refusal comes from TWO different gates, so the PARTITION is
+/// pinned rather than just the outcome.
 ///
-/// roborev job 108. `is_vector_spelling` matched only the head keyword, so every
-/// spelling below was granted freezability — a permission Cassandra does not grant,
-/// which is this issue's own defect pointed the other way.
+/// roborev job 108 (the original defect): `is_vector_spelling` matched only the head
+/// keyword, so every spelling below was granted freezability — a permission
+/// Cassandra does not grant, which is this issue's own defect pointed the other way.
+///
+/// WHAT #4149 CHANGED. `CqlType::parse` now resolves a `vector<..>` spelling through
+/// `schema::vector_type::cql_vector_kind` BEFORE the `Custom` fall-through, so a
+/// MALFORMED spelling is an `Err` from the vector type parser and never reaches the
+/// frozen gate at all. The refusal is therefore still total, but the two halves cite
+/// their own oracles, and asserting one citation for all 17 cases would now be
+/// asserting something false. Both lists are kept in ONE test because the property is
+/// the UNION: no incomplete vector spelling is admitted by either gate.
 ///
 /// The accepted grammar is `Parser.g:1916-1919`
 /// (`K_VECTOR '<' comparatorType ',' INTEGER '>'`, i.e. EXACTLY two arguments),
@@ -186,7 +196,9 @@ fn a_frozen_vector_is_accepted_in_both_spellings() {
 /// positive dimensions"`). Every case below violates exactly one of those.
 #[test]
 fn an_incomplete_vector_spelling_is_refused() {
-    const NOT_DECLARABLE: &[&str] = &[
+    // Refused by the SHARED vector type parser (#4149): the spelling IS a
+    // `vector<..>`, so `cql_vector_kind` owns it, and its parameters are illegal.
+    const REFUSED_BY_THE_VECTOR_PARSER: &[&str] = &[
         // The three roborev job 108 named.
         "frozen<vector<int>>",       // no dimension — one argument, not two
         "frozen<vector<>>",          // no arguments at all
@@ -203,31 +215,92 @@ fn an_incomplete_vector_spelling_is_refused() {
         "frozen<vector<int, 3.0>>",
         "frozen<vector<int, 0x3>>",
         "frozen<vector<int, 1_000>>",
-        // Arity: three arguments, and an EMPTY one (which the shared splitter's
-        // empty-segment filtering would otherwise hide).
+        // Arity: three arguments, and an EMPTY one.
         "frozen<vector<int, text, 3>>",
         "frozen<vector<int, , 3>>",
         "frozen<vector<, 3>>",
         "frozen<vector<int, 3,>>",
         // An empty element with a valid dimension.
         "frozen<vector< , 3>>",
-        // The head keyword must be `vector`, not merely end in it.
-        "frozen<myvector<int, 3>>",
-        // Unbalanced — the shared splitter refuses it and so must this.
+        // Unbalanced — the parameter list does not terminate at the type's end.
         "frozen<vector<int, 3>>>",
     ];
+    // Refused by the FROZEN gate: not a `vector<..>` at all, so it lands in `Custom`
+    // and this module's own membership predicate decides it.
+    const REFUSED_BY_THE_FROZEN_GATE: &[&str] = &[
+        // The head keyword must be `vector`, not merely end in it.
+        "frozen<myvector<int, 3>>",
+    ];
     assert_eq!(
-        NOT_DECLARABLE.len(),
+        REFUSED_BY_THE_VECTOR_PARSER.len() + REFUSED_BY_THE_FROZEN_GATE.len(),
         17,
         "case floor: an emptied or truncated list would pass vacuously"
     );
-    for spelling in NOT_DECLARABLE {
+    for spelling in REFUSED_BY_THE_VECTOR_PARSER {
+        let err = CqlType::parse(spelling)
+            .err()
+            .unwrap_or_else(|| panic!("`{spelling}` is not declarable CQL and must be refused"));
+        assert!(
+            err.to_string().contains("malformed vector type"),
+            "`{spelling}` must be refused BY THE VECTOR TYPE PARSER, naming the type \
+             it could not read, got: {err}"
+        );
+    }
+    for spelling in REFUSED_BY_THE_FROZEN_GATE {
         let err = CqlType::parse(spelling)
             .err()
             .unwrap_or_else(|| panic!("`{spelling}` is not declarable CQL and must be refused"));
         assert!(
             err.to_string().contains("CQL3Type.java:647-651"),
             "the refusal must cite its oracle, got: {err}"
+        );
+    }
+}
+
+/// `frozen<vector<float, 3>>` parses to `Frozen(Vector(Float, 3))` AT THIS HEAD.
+///
+/// The sibling accept-set tests below only assert `is_ok()`, and they were written
+/// when this spelling parsed to `Frozen(Custom("vector<float, 3>"))` — so they would
+/// have stayed green through #4149's variant change without noticing that the
+/// permission had moved from the `Custom` arm to a brand-new one. This case pins the
+/// SHAPE, which is what makes the `CqlType::Vector` arm of
+/// [`frozen_inner_supports_freezing`] the thing under test.
+#[test]
+fn a_frozen_vector_parses_to_a_frozen_vector_variant() {
+    let parsed = CqlType::parse("frozen<vector<float, 3>>").expect(
+        "frozen<vector<float, 3>> is declarable CQL — RawVector::freeze() returns \
+         `this` (CQL3Type.java:915-919)",
+    );
+    assert_eq!(
+        parsed,
+        CqlType::Frozen(Box::new(CqlType::Vector(Box::new(CqlType::Float), 3))),
+        "the inner must be the #4149 `CqlType::Vector` variant, not a `Custom` \
+         spelling carrier"
+    );
+}
+
+/// A frozen SCALAR nested in a VECTOR ELEMENT is refused as of #4149 — the gap this
+/// module's header used to DECLARE as out of scope (issue #4154).
+///
+/// It was out of scope because `CqlType::parse` could not descend into a vector: the
+/// whole `vector<..>` spelling landed in `Custom` and the element was never parsed.
+/// #4149's arm parses the element through `parse_with_depth`, which re-enters the
+/// frozen gate — so the refusal now reaches this position for free. Pinned here so
+/// the coverage cannot silently regress if the element recursion is ever changed;
+/// #4154 stays open for whoever audits the remaining positions.
+#[test]
+fn a_frozen_scalar_in_a_vector_element_is_refused_since_4149() {
+    for spelling in [
+        "frozen<vector<frozen<int>, 3>>",
+        "vector<frozen<int>, 3>",
+        "frozen<vector<vector<frozen<text>, 2>, 3>>",
+    ] {
+        let err = CqlType::parse(spelling)
+            .err()
+            .unwrap_or_else(|| panic!("`{spelling}` freezes a scalar and must be refused"));
+        assert!(
+            err.to_string().contains("CQL3Type.java:647-651"),
+            "the refusal must cite the frozen-scalar oracle, got: {err}"
         );
     }
 }
@@ -337,8 +410,13 @@ fn the_membership_set_is_cassandras_override_set() {
         CqlType::Frozen(Box::new(CqlType::List(Box::new(CqlType::Int)))),
         CqlType::Custom("udt:address_type".to_string()),
         CqlType::Custom("address_type".to_string()),
-        // A vector: `CqlType` has no variant for it, and `RawVector` overrides
-        // `freeze()` (`CQL3Type.java:916-919`).
+        // A vector, in BOTH carriers: the #4149 variant, and the `Custom` spelling
+        // that carried it before #4149 (now unreachable from `CqlType::parse`, but
+        // still a representable `CqlType` this predicate must answer consistently).
+        // `RawVector` overrides `freeze()` and returns `this`
+        // (`CQL3Type.java:915-919`).
+        CqlType::Vector(Box::new(CqlType::Float), 3),
+        CqlType::Vector(Box::new(CqlType::Map(Box::new(CqlType::Int), Box::new(CqlType::Text))), 2),
         CqlType::Custom("vector<float, 3>".to_string()),
     ] {
         assert!(

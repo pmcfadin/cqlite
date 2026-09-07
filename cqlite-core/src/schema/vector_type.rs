@@ -214,24 +214,53 @@ fn matched_bracket_body(after_open: &str, open: char, close: char) -> Option<(&s
 /// via [`VectorInner::into_args`] rather than called directly. `type_str` is the
 /// full type string, used only so a refusal NAMES the type that was refused.
 ///
-/// Splitting is on the LAST TOP-LEVEL comma rather than the first, because the
-/// ELEMENT may itself be a parameterised type carrying top-level-looking commas
-/// inside its own brackets — those are at depth > 0 and are skipped — while the
-/// dimension never contains one. Requiring exactly two top-level arguments would
-/// be equivalent; taking the last is stated because the order is fixed by
-/// `TypeParser.getVectorParameters` (element first, dimension last).
+/// EXACTLY ONE top-level comma is required, and that is not a restatement of
+/// "split on the last one" — the two differ, measurably. This function used to take
+/// the LAST top-level comma and fold everything before it into the element, so
+/// `vector<int, text, 3>` parsed as element `int, text` (which then degraded to a
+/// `CqlType::Custom` carrier) with dimension `3`, ADMITTING a spelling Cassandra
+/// refuses. Caught by the frozen-scalar gate's own accept/refuse pins (#4104): it
+/// was refused before `CqlType::Vector` existed and silently admitted after.
+///
+/// Cassandra permits no third parameter, in either spelling:
+/// * CQL — `Parser.g:1916-1919`,
+///   `vector_type : K_VECTOR '<' t1=comparatorType ',' d=INTEGER '>'`;
+/// * marshal — `TypeParser.getVectorParameters` (`TypeParser.java:244-263`) parses
+///   ONE type, then `skipBlankAndComma()`, then ONE identifier, and then
+///   `if (str.charAt(idx) != ')') throw new IllegalStateException()`.
+///
+/// Commas INSIDE the element's own brackets are at depth > 0 and are not counted,
+/// so `vector<map<int, text>, 3>` and `VectorType(MapType(Int32Type,UTF8Type) , 3)`
+/// are unaffected. Order is fixed by the same functions: element first, dimension
+/// last.
 pub(crate) fn split_vector_args<'a>(inner: &'a str, type_str: &str) -> Result<VectorTypeArgs<'a>> {
     let mut depth = 0usize;
     let mut split_at: Option<usize> = None;
+    let mut top_level_commas = 0usize;
     for (idx, ch) in inner.char_indices() {
         match ch {
             '(' | '<' => depth += 1,
             ')' | '>' => {
                 depth = depth.saturating_sub(1);
             }
-            ',' if depth == 0 => split_at = Some(idx),
+            ',' if depth == 0 => {
+                top_level_commas += 1;
+                split_at = Some(idx);
+            }
             _ => {}
         }
+    }
+    if top_level_commas > 1 {
+        return Err(malformed(
+            type_str,
+            &format!(
+                "expected exactly two parameters (element type, dimension) but found \
+                 {} top-level comma(s): Cassandra's grammar admits no third parameter \
+                 (Parser.g:1916-1919; TypeParser.getVectorParameters requires ')' after \
+                 the dimension, TypeParser.java:244-263)",
+                top_level_commas
+            ),
+        ));
     }
     let Some(comma) = split_at else {
         return Err(malformed(

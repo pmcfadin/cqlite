@@ -4,13 +4,20 @@
 //! # SCOPE OF THE CLAIM — read this before trusting the title
 //!
 //! "Both spellings" means the two METADATA ENTRY POINTS (CQL type string,
-//! SerializationHeader marshal string), NOT "every syntactic position". One
-//! position is knowingly NOT covered: a frozen scalar nested in a VECTOR ELEMENT
-//! (`frozen<vector<frozen<int>, 3>>`), because `CqlType::parse` never descends
-//! into a vector — see the DECLARED BOUNDS on
-//! [`FREEZABLE_MARSHAL_SIMPLE_NAMES`]/[`is_vector_spelling`] and issue #4154.
-//! The title states a rule, not a totality proof; a guarantee this module does
-//! not deliver would be its own defect (roborev job 116, finding 2).
+//! SerializationHeader marshal string), NOT "every syntactic position". The title
+//! states a rule, not a totality proof; a guarantee this module does not deliver
+//! would be its own defect (roborev job 116, finding 2).
+//!
+//! The one position #4104 DECLARED as not covered — a frozen scalar nested in a
+//! VECTOR ELEMENT, `frozen<vector<frozen<int>, 3>>` — is now covered, and NOT by
+//! anything this module does. #4149 gave `CqlType` a `Vector(element, dimension)`
+//! variant whose parser recurses into the element through `parse_with_depth`, which
+//! re-enters the CQL gate below; the refusal reaches that position for free. Pinned
+//! by `a_frozen_scalar_in_a_vector_element_is_refused_since_4149`. Issue #4154 stays
+//! open for the audit of the remaining positions — this note records one position
+//! closing, not the whole issue. The MARSHAL half still checks a head class only and
+//! descends into nothing; its bound is declared on
+//! [`FREEZABLE_MARSHAL_SIMPLE_NAMES`].
 //!
 //! # The oracle is Cassandra's GRAMMAR, not its bytes
 //!
@@ -141,19 +148,29 @@ const CITATION: &str = "frozen<> is only allowed on collections, tuples, and use
 ///     `frozen<address_type>` lands in `Custom` and refusing it would refuse every
 ///     real frozen UDT. Admitted when the name is a plausible UDT identifier
 ///     ([`is_udt_identifier`]).
-///   * a VECTOR. `CqlType` has no `Vector` variant, so `vector<float, 3>` also
-///     lands in `Custom` — and `RawVector` DOES override `freeze()`, returning
-///     `this` rather than throwing (`CQL3Type.java:915-919`), so
-///     `frozen<vector<float, 3>>` IS declarable CQL. Without this arm the gate
-///     would refuse declarable CQL, which is why the marshal half's allowlist
-///     naming `VectorType` is not enough on its own: the two spellings are one
-///     rule. Full derivation, factory to grammar, at
-///     [`FREEZABLE_MARSHAL_SIMPLE_NAMES`].
+///   * a VECTOR — and as of #4149 this half is UNREACHABLE FROM
+///     [`CqlType::parse`], which is stated here rather than quietly left to rot.
+///     When #4104 wrote it, `CqlType` had no `Vector` variant and every
+///     `vector<..>` spelling landed in `Custom`. #4149 added
+///     `CqlType::Vector(element, dimension)` and sited its arm BEFORE the
+///     UDT/primitive fall-through, so today `CqlType::parse` resolves a
+///     `vector<..>` spelling to either `CqlType::Vector` (well-formed) or an
+///     `Err` (malformed) — never to a `Custom`. Derivation: for
+///     [`is_vector_spelling`] to answer `true` the text before the first `<` must
+///     trim to exactly `vector`, which is precisely the shape
+///     `schema::vector_type::cql_vector_kind` classifies as `Args` or
+///     `Malformed`, and BOTH are handled upstream of this arm.
 ///
-///     CQLite does not DECODE vectors, and this arm does not claim it does — the
-///     type still lands in `Custom`, exactly as before #4104. A metadata gate's
-///     job is to refuse what Cassandra cannot have written, never to narrow what
-///     it can.
+///     It is KEPT, not deleted, because this function is a `pub(crate)`
+///     membership predicate over an ARBITRARY [`CqlType`] value and
+///     `Custom("vector<float, 3>")` is still representable. Deleting the carve-out
+///     would make the predicate answer `false` there while the
+///     [`CqlType::Vector`] arm answers `true` for the same declared type — one
+///     rule with two answers, which is the exact divergence class this module
+///     exists to prevent. The two AGREE today: a well-formed spelling is `true`
+///     either way, and a malformed one is refused either way (by this predicate
+///     via `Custom`, or by `cql_vector_kind` before the predicate is reached).
+///     Full derivation, factory to grammar, at [`FREEZABLE_MARSHAL_SIMPLE_NAMES`].
 ///
 /// Everything else in `Custom` is refused, which keeps the quoted custom-class
 /// spelling (`frozen<'org.apache.cassandra.db.marshal.Int32Type'>`) out — Cassandra
@@ -170,6 +187,28 @@ pub(crate) fn frozen_inner_supports_freezing(inner: &CqlType) -> bool {
         CqlType::Tuple(_) => true,
         CqlType::Udt(_, _) => true,
         CqlType::Frozen(_) => true,
+        // `RawVector` is Cassandra's FIFTH `freeze()` override, and it RETURNS
+        // `this` rather than throwing (`CQL3Type.java:915-919`, with
+        // `supportsFreezing() -> true` at `:909-913`), so `frozen<vector<float, 3>>`
+        // IS declarable CQL and must not be refused.
+        //
+        // WHY THIS ARM IS NEW rather than always having been here: before #4149
+        // `CqlType` had NO `Vector` variant, so `frozen<vector<float, 3>>` parsed to
+        // `Frozen(Custom("vector<float, 3>"))` and the permission was granted by the
+        // `Custom` arm's [`is_vector_spelling`] carve-out below. #4149 added
+        // `CqlType::Vector(element, dimension)`, so the same spelling now parses to
+        // `Frozen(Vector(Float, 3))` and the ONE rule has to be expressed on the new
+        // variant too — otherwise this gate would refuse declarable CQL, which is a
+        // worse defect than the hole it exists to close.
+        //
+        // Unconditional, and that is Cassandra's answer too: `RawVector::freeze`
+        // returns `this` whatever the parameters, so freezability is a HEAD-CLASS
+        // question here exactly as it is in [`FREEZABLE_MARSHAL_SIMPLE_NAMES`]. A
+        // `CqlType::Vector` value can only exist because `schema::vector_type`
+        // already validated its element and dimension (the CQL parser errors on a
+        // malformed one BEFORE this predicate is reached), so there is nothing left
+        // for a freezability gate to re-check.
+        CqlType::Vector(_, _) => true,
         CqlType::Custom(name) => {
             let name = name.strip_prefix("udt:").unwrap_or(name.as_str());
             is_udt_identifier(name) || is_vector_spelling(name)
@@ -241,23 +280,26 @@ pub(crate) fn frozen_inner_supports_freezing(inner: &CqlType) -> bool {
 /// bound exactly and RETURNS `Err` rather than saturating; requiring all-digits
 /// first is what excludes the `-`/`+` spellings `parse` would otherwise accept.
 ///
-/// # TWO BOUNDS, DECLARED RATHER THAN IMPLIED
-///  * **The ELEMENT is not inspected.** `vector<frozen<int>, 3>` is accepted by
-///    this predicate, because `CqlType::parse` never descends into a vector at
-///    all — the whole spelling lands in `Custom` — so a frozen scalar nested in a
-///    vector element still passes BOTH gates. That is PRE-EXISTING (it passed
-///    before #4104 too, when nothing was refused) and closing it needs real
-///    `CqlType::Vector` parsing, i.e. a new public type variant: out of scope
-///    here, and TRACKED AS ISSUE #4154 (0.18, P3) — deferred by lead ruling on
-///    roborev job 116 as an INCOMPLETE refusal rather than a wrong one: it
-///    accepts something Cassandra rejects and rejects nothing Cassandra accepts,
-///    and the declaration can only reach this gate if something WROTE it, which
-///    Cassandra will not, because it refuses it at CQL parse time.
-///    #4154 requires the element reuse THIS validation rather than a second copy
-///    of the rule. Inspecting it by re-entering
-///    `CqlType::parse` was rejected deliberately: that call restarts at depth 0,
-///    so `frozen<vector<frozen<vector<…` would recurse unbounded past
-///    `MAX_NESTING_DEPTH` — issue #1690's stack-overflow hazard.
+/// # UNREACHABLE FROM `CqlType::parse` SINCE #4149
+/// This predicate is retained for the reasons given on
+/// [`frozen_inner_supports_freezing`]'s `Custom` arm (it must keep answering
+/// consistently for a representable `Custom("vector<..>")`), but no `CqlType::parse`
+/// input reaches it any more: #4149's vector arm resolves every `vector<..>`
+/// spelling to `CqlType::Vector` or an `Err` before the `Custom` fall-through.
+/// Consequences worth stating, because both were true when this was written and are
+/// no longer:
+///  * **The ELEMENT is now inspected** — by #4149's `parse_with_depth` recursion,
+///    not here — so `frozen<vector<frozen<int>, 3>>` is refused. That closes the
+///    position #4104 declared out of scope (issue #4154 stays open for the rest).
+///    This predicate STILL does not inspect the element, and that no longer matters
+///    on the parse path; it is why the predicate must not be the only gate.
+///  * Re-entering `CqlType::parse` from HERE remains the wrong fix, and #4149 did
+///    not do it: a fresh `parse` call restarts at depth 0, so
+///    `frozen<vector<frozen<vector<…` would recurse unbounded past
+///    `MAX_NESTING_DEPTH` (issue #1690's stack-overflow hazard). #4149 threads the
+///    EXISTING depth instead.
+///
+/// # ONE FURTHER BOUND, DECLARED RATHER THAN IMPLIED
 ///  * **The MARSHAL half does not validate arity/dimension** — see
 ///    [`FREEZABLE_MARSHAL_SIMPLE_NAMES`], which is a head-CLASS lookup over names
 ///    a Cassandra WRITER produced, not a spelling proxy.
