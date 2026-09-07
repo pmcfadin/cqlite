@@ -734,7 +734,46 @@ cargo build --package cqlite-core --features cli-helpers
 # Build/test core with the embeddable Parquet writer (Epic #682)
 cargo build --package cqlite-core --features parquet
 cargo test --package cqlite-core --features parquet
+
+# Flight server with the LINKED non-glibc allocator (issue #3997) — Linux only,
+# NON-DEFAULT. `default = []`, so every ordinary build (and the GHCR image) links
+# glibc malloc; this feature is the only way to get jemalloc, and it applies to
+# cqlite-flight's BIN target only — the lib target, every binding and cqlite-core
+# keep the system allocator.
+cargo build --release -p cqlite-flight --features jemalloc
+
+# Which allocator a built binary ACTUALLY installed — reported by the binary, from
+# the same cfg as the installation, so it cannot disagree with what was linked:
+./target/release/cqlite-flight --version | grep '^allocator: '   # -> jemalloc | system
+# The startup `info` line carries the same value, rendered by tracing as a QUOTED
+# string field: `allocator="jemalloc"` / `allocator="system"`. `fmt::layer()` leaves
+# ANSI escapes in even when stdout is a file, so strip them before matching —
+# a raw `grep 'allocator="system"'` finds NOTHING on a perfectly good binary (#3400,
+# in a new place). Both surfaces derive from ONE const, so they cannot disagree, and
+# `scripts/tests/test_flight_allocator_link.sh` asserts that AGREEMENT rather than
+# each surface against a literal.
+
+# The gate-enforcing guard for the above (a `tooling-tests` component). Builds BOTH
+# arms and asserts they DISCRIMINATE — jemalloc symbols present + `allocator: jemalloc`
+# under the feature, `0 JEMALLOC SYMBOLS RECOGNISED` + `allocator: system` without it.
+# SKIPs naming the cause off-Linux or on a host missing cargo/cc/make/nm; a failed
+# build is a FAIL, never a SKIP.
+bash scripts/tests/test_flight_allocator_link.sh
+
+# The structural confinement guard: exactly one non-test production `#[global_allocator]`
+# in the workspace (cqlite-flight/src/main.rs, feature-gated), `tikv-jemallocator` named
+# by no manifest under cqlite-core/, cqlite-cli/ or bindings/, and every cqlite-flight
+# dependent linking the LIBRARY target. Needs no cargo and never SKIPs.
+bash scripts/tests/test_flight_allocator_confinement.sh
 ```
+
+**Do not quote a speedup for `--features jemalloc` yet.** #3551's **+29.21% rows/s** was
+measured by `LD_PRELOAD`ing jemalloc into one binary, which is a different artifact from a
+linked `#[global_allocator]` (initialization order, static-vs-dynamic symbol resolution, what
+runs before `main`). The linked A-vs-E measurement — plus `VmHWM`/`VmRSS` against the <128 MB
+target — is issue #3997's remaining work on the #3551 rig, and a pre-registered kill criterion
+(`openspec/changes/flight-jemalloc/proposal.md`) decides whether `default` flips, the feature
+stays opt-in, or it is removed and the null recorded. A null there is a shippable result.
 
 ## Runtime tuning knobs (env)
 
