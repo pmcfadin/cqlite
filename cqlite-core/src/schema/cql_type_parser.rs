@@ -4,6 +4,7 @@
 //! the small inherent accessors (`fixed_size`, `is_collection`). Extracted from
 //! `schema/mod.rs` (issue #1134, source-split doctrine) with no behavior change.
 
+use super::vector_type::{cql_vector_inner, split_vector_args};
 use super::CqlType;
 use crate::error::{Error, Result};
 
@@ -141,6 +142,22 @@ impl CqlType {
             }
         }
 
+        // Handle `vector<element, n>` (Cassandra 5.0; `CQL3Type.java:589,:938`).
+        //
+        // Sited BEFORE the UDT/primitive fall-through: `vector` is not a reserved
+        // word, so without this arm `vector<float, 3>` fell to `Custom(...)` and
+        // the declared dimension — the only thing that makes a fixed-width vector
+        // value parseable — was lost. The two parameters are parsed by the ONE
+        // shared rule (`schema::vector_type`), so a malformed dimension is refused
+        // BY NAME here rather than degraded to a `Custom` string.
+        if let Some(inner) = cql_vector_inner(type_str) {
+            let args = split_vector_args(inner, type_str)?;
+            return Ok(CqlType::Vector(
+                Box::new(Self::parse_with_depth(args.element, depth + 1)?),
+                args.dimension,
+            ));
+        }
+
         // Handle UDT types - format: udt_name or keyspace.udt_name
         // But first check if it's not a primitive type in uppercase
         let lowercase_type = type_str.to_lowercase();
@@ -240,6 +257,14 @@ impl CqlType {
             | CqlType::Tuple(_)
             | CqlType::Udt(_, _) => None,
             CqlType::Frozen(inner) => inner.fixed_size(),
+            // `VectorType.java:94-96`: a vector is fixed-width IFF its element is,
+            // and then its width is `element_width * dimension`. A variable-width
+            // element (e.g. `vector<text, 3>`) inherits
+            // `AbstractType.VARIABLE_LENGTH` and is `None` here. `checked_mul` so a
+            // declared dimension can never wrap into a plausible-looking width.
+            CqlType::Vector(element, dimension) => element
+                .fixed_size()
+                .and_then(|width| super::vector_type::vector_byte_width(width, *dimension)),
             CqlType::Custom(_) => None,
         }
     }

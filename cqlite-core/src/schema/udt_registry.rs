@@ -554,6 +554,12 @@ impl UdtRegistry {
             CqlType::Duration => "duration".to_string(),
             CqlType::Varint => "varint".to_string(),
             CqlType::Decimal => "decimal".to_string(),
+            // #4114: the CQL spelling, dimension included — a `CREATE TYPE` that
+            // dropped the dimension would not round-trip (the dimension is the only
+            // thing that makes a fixed-width vector value parseable).
+            CqlType::Vector(element, dimension) => {
+                format!("vector<{}, {dimension}>", self.format_cql_type(element))
+            }
             CqlType::List(inner) => format!("list<{}>", self.format_cql_type(inner)),
             CqlType::Set(inner) => format!("set<{}>", self.format_cql_type(inner)),
             CqlType::Map(key, value) => format!(

@@ -196,6 +196,11 @@ pub(crate) fn cql_type_to_cql_string(ty: &CqlType) -> String {
             format!("tuple<{}>", inner.join(","))
         }
         CqlType::Frozen(inner) => format!("frozen<{}>", cql_type_to_cql_string(inner)),
+        // #4114 is a READ-path issue; this renderer feeds `cql_type_to_marshal_type`,
+        // which has no vector arm, so a vector field falls through there exactly as a
+        // nested bare UDT does. The spelling is emitted faithfully (dimension
+        // included) rather than dropped.
+        CqlType::Vector(e, n) => format!("vector<{}, {n}>", cql_type_to_cql_string(e)),
         // Bare UDT reference — emit the name; out of scope for marshal expansion
         // (issue #929 covers top-level bare UDTs only).
         CqlType::Udt(name, _) => name.clone(),

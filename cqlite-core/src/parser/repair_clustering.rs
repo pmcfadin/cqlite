@@ -88,6 +88,33 @@ pub(crate) fn resolve_clustering_value_layout(type_name: &str) -> Option<Cluster
     let ctor = inner.split('(').next().unwrap_or(inner);
     let simple = ctor.rsplit('.').next().unwrap_or(ctor);
 
+    // `VectorType(element , n)` — issue #4114. This CANNOT be decided from the
+    // constructor name, which is why listing it below as `Variable` was a BUG:
+    // `VectorType.valueLengthIfFixed()` is `element.valueLengthIfFixed() * n` when
+    // the ELEMENT is fixed, and `VARIABLE_LENGTH` otherwise (VectorType.java:94-96
+    // + AbstractType.java:62,490-493), so `vector<float, 3>` is Fixed(12) while
+    // `vector<text, 3>` is genuinely Variable. One classification cannot cover both,
+    // and the `ctor` computed above DISCARDS the argument list — so the element type
+    // is parsed here and its own layout resolved recursively. That is exactly the
+    // rule this module's AUTHORITY NOTE states: the serialization layer branches
+    // PURELY on `valueLengthIfFixed()`.
+    //
+    // A malformed vector type is `None` (UNKNOWN), never a guessed width: the caller
+    // then reports the trailing repair fields as `Unparsed`, which is the honest
+    // outcome when the skip cannot be computed.
+    if let Some(args_inner) = crate::schema::vector_type::marshal_vector_inner(inner) {
+        let Ok(args) = crate::schema::vector_type::split_vector_args(args_inner, inner) else {
+            return None;
+        };
+        return match resolve_clustering_value_layout(args.element)? {
+            ClusteringValueLayout::Fixed(element_width) => {
+                crate::schema::vector_type::vector_byte_width(element_width, args.dimension)
+                    .map(ClusteringValueLayout::Fixed)
+            }
+            ClusteringValueLayout::Variable => Some(ClusteringValueLayout::Variable),
+        };
+    }
+
     // Fixed-width comparators (exact `valueLengthIfFixed()` from cassandra-5.0.0).
     let fixed = match simple {
         "BooleanType" => Some(1),
@@ -131,8 +158,9 @@ pub(crate) fn resolve_clustering_value_layout(type_name: &str) -> Option<Cluster
             | "UserType"
             | "FrozenType"
             | "CompositeType"
-            | "DynamicCompositeType"
-            | "VectorType"
+            | "DynamicCompositeType" // NOT "VectorType": it is handled ABOVE, from its ELEMENT's layout.
+                                     // Leaving it here made CQLite read a phantom vint length Cassandra never
+                                     // wrote for every fixed-element vector (issue #4114).
     );
     if variable {
         return Some(ClusteringValueLayout::Variable);

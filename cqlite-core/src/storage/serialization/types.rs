@@ -111,6 +111,16 @@ impl TypeSerializer {
             // Network types
             CqlType::Inet => self.serialize_inet(value),
 
+            // #4114 implements READING `vector<float, n>`; WRITING one is not in
+            // scope and is refused rather than serialized as some other shape (a
+            // vector has no length prefix and no per-element framing, so the
+            // collection writers would emit bytes Cassandra cannot read).
+            CqlType::Vector(_, _) => Err(Error::unsupported_format(
+                "serializing a vector column is not implemented (issue #4114 covers \
+                 READING vector<float, n> values)"
+                    .to_string(),
+            )),
+
             // Collection types
             CqlType::List(elem_type) => self.serialize_list(value, elem_type),
             CqlType::Set(elem_type) => self.serialize_set(value, elem_type),

@@ -280,6 +280,19 @@ pub(super) fn parse_cql_value_for_type(input: &[u8], cql_type: &CqlType) -> Resu
             let inner_value = parse_cql_value_for_type(input, inner)?;
             Ok(Value::Frozen(Box::new(inner_value)))
         }
+        // #4114: intercepted BEFORE `cql_type_to_type_id`, which has no vector id —
+        // a vector reaching a type id would be decoded as a `Custom`, i.e. a blob,
+        // silently discarding the declared element type and dimension (#28). The
+        // field bytes are exactly the value here, so the exact-width rule applies.
+        CqlType::Vector(element, dimension) => {
+            crate::schema::vector_type::vector_value::require_float_element(element, *dimension)?;
+            crate::schema::vector_type::vector_value::decode_float_vector_exact(
+                input,
+                "UDT field",
+                *dimension,
+            )
+            .map(|(value, _consumed)| value)
+        }
         _ => {
             let type_id = cql_type_to_type_id(cql_type);
             let (_, value) = parse_cql_value(input, type_id).map_err(|_| {

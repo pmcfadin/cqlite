@@ -282,6 +282,26 @@ impl V5CompressedLegacyParser {
             return Ok(CqlType::Tuple(components));
         }
 
+        // VectorType — STRUCTURAL, so it is PARSED and not name-matched (issue
+        // #4114). Its marshal string is
+        // `getClass().getName() + stringifyVectorParameters(type, dimension)`
+        // (`cassandra-5.0.8` VectorType.java:339-342 / TypeParser.java:239-242),
+        // i.e. `VectorType(<element> , <n>)`. `depth + 1` like every other
+        // structural arm.
+        //
+        // Before this arm the whole type collapsed to `CqlType::Custom`, which the
+        // decoder refuses by name — honest, but it meant a `vector<float, n>` UDT
+        // FIELD could not be read at all. The dimension is carried into
+        // `CqlType::Vector` because the on-disk value has no element count and no
+        // per-element framing for a fixed-width element: `n` is the only thing that
+        // makes it parseable (#28).
+        if let Some(args) = Self::marshal_parameterised_inner(type_str, "VectorType") {
+            let inner = Self::extract_inner_parens(args)?;
+            let parsed = crate::schema::vector_type::split_vector_args(&inner, type_str)?;
+            let element = Self::parse_cassandra_type_with_depth(parsed.element, depth + 1)?;
+            return Ok(CqlType::Vector(Box::new(element), parsed.dimension));
+        }
+
         // ReversedType — a COMPARISON wrapper with no layout of its own:
         // `ReversedType.asCQL3Type()` and `getSerializer()` both delegate to
         // `baseType` (cassandra-5.0.8 ReversedType.java:138,144), so the value of a

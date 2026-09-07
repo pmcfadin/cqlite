@@ -163,6 +163,9 @@ impl V5CompressedLegacyParser {
             | CqlType::Tuple(_)
             | CqlType::Udt(_, _)
             | CqlType::Frozen(_)
+            // #4114: a vector is decoded by `parse_typed_value`'s own arm from its
+            // declared dimension, so it must never reach the scalar delegation.
+            | CqlType::Vector(_, _)
             | CqlType::Custom(_) => return None,
         })
     }

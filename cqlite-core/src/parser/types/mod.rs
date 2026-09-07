@@ -314,6 +314,12 @@ pub(super) fn cql_type_to_type_id(cql_type: &CqlType) -> CqlTypeId {
         CqlType::Tuple(_) => CqlTypeId::Tuple,
         CqlType::Udt(_, _) => CqlTypeId::Udt,
         CqlType::Frozen(_) => CqlTypeId::Blob, // Fallback only; callers should handle Frozen explicitly
+        // #4114: a vector has NO native protocol type id (Cassandra carries it as a
+        // custom type). `Custom` rather than `Blob` because the callers that decode
+        // vectors intercept `CqlType::Vector` BEFORE reaching a type id
+        // (`parse_cql_value_for_type`, `parse_cql_value_with_schema`), exactly like
+        // the `Frozen` arm above.
+        CqlType::Vector(_, _) => CqlTypeId::Custom,
         CqlType::Custom(_) => CqlTypeId::Blob, // Custom types as blob
     }
 }
@@ -792,6 +798,18 @@ pub(super) fn parse_cql_value_with_schema<'a>(
         CqlType::Map(key_type, value_type) => parse_map_with_schema(input, key_type, value_type),
         CqlType::Tuple(_) => parse_tuple(input),
         CqlType::Udt(_, _) => parse_udt(input),
+        // #4114: `vector<float, n>` is `4*n` raw big-endian binary32 bytes with NO
+        // length prefix and no per-element framing (`VectorType.java:94-101`,
+        // `:445-460`), so it consumes a FIXED width off the front of `input` — it is
+        // NOT a collection and must not reach `parse_blob`, which would read the
+        // first float's high byte as a vint length (the #4114 defect).
+        CqlType::Vector(element_type, dimension) => {
+            crate::schema::vector_type::vector_value::parse_float_vector_nom(
+                input,
+                element_type,
+                *dimension,
+            )
+        }
         CqlType::Frozen(inner) => parse_cql_value_with_schema(input, inner),
         CqlType::Custom(_) => {
             // Custom types require additional metadata, parse as blob

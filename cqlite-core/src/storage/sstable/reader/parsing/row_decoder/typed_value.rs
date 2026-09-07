@@ -558,6 +558,25 @@ impl V5CompressedLegacyParser {
                 self.parse_typed_udt(data, name, inline_fields, ctx, depth)
             }
 
+            // `vector<float, n>` (issue #4114). NOT a collection: there is no
+            // element count and no per-element `[i32 size]` framing — the value is
+            // exactly `4 * n` raw big-endian binary32 bytes
+            // (`VectorType.java:94-101`, `:445-460`). So it must NOT reuse
+            // `parse_typed_collection_elements`, and the whole framed buffer IS the
+            // value. Routed to the one framing rule in `super::vector_value`.
+            //
+            // An element type CQLite does not implement is refused there BY NAME
+            // (AC4): a vector's layout is decided entirely by its element type, so
+            // a fallback decode could only be a guess (#28).
+            CqlType::Vector(element, dimension) => {
+                crate::schema::vector_type::vector_value::require_float_element(
+                    element, *dimension,
+                )?;
+                crate::schema::vector_type::vector_value::decode_float_vector_exact(
+                    data, ctx, *dimension,
+                )
+            }
+
             // ── Scalars ─────────────────────────────────────────────────────────
             // Delegated to the type-STRING decoder by naming the declared type: one
             // closed `CqlType` -> canonical CQL short form mapping, no guessing, and
