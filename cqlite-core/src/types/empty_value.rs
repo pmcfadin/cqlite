@@ -235,12 +235,23 @@ impl EmptyValueType {
     /// able to drift from that table — the "one fact written twice" shape this
     /// repository removes elsewhere.
     ///
-    /// # Exactly ONE write path may legally emit the zero-byte form
-    /// The multicell MAP CELL PATH in the SSTable writer
-    /// (`storage::sstable::writer::data_writer::encoding::serialize_map_cell_path_key_into`),
-    /// and nothing else — pinned by the write-surface census in
-    /// `write_surface_census_tests`, which requires exactly one admitting
-    /// disposition across every value-serializing function in the crate. An
+    /// # Only a multicell collection's CELL PATH may legally emit the zero-byte form
+    /// The SSTable writer's two schema-aware cell-path serializers
+    /// (`storage::sstable::writer::data_writer::cell_path`'s
+    /// `serialize_map_cell_path_key_into` for a map's KEY and
+    /// `serialize_set_cell_path_element_into` for a set's ELEMENT), and nothing
+    /// else — pinned by the write-surface census in
+    /// `write_surface_census_tests`, which asserts that admitting set BY NAME
+    /// across every value-serializing function in the crate. Cassandra treats
+    /// the two as ONE case: `schema/ColumnMetadata.java:457-467` validates every
+    /// collection cell path with `nameComparator().validate(...)`, the keys type
+    /// for a `MapType` and the elements type for a `SetType`
+    /// (`db/marshal/SetType.java:101-104`). It read "exactly ONE ... the
+    /// multicell MAP cell path" until issue #4106 added the set half, whose
+    /// absence meant a set CQLite had legitimately DECODED could not be written
+    /// back. A LIST cell path is NOT and can never be in the set: it is a
+    /// generated 16-byte TimeUUID, not a component of the declared type, so
+    /// there is nothing for a tag to be validated against. An
     /// earlier revision of this comment named a SECOND path, the type-aware
     /// [`crate::storage::serialization::types::TypeSerializer`]; that was the
     /// defect roborev job 452 found. A declared type is necessary and NOT

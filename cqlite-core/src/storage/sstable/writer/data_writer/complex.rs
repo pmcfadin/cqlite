@@ -344,7 +344,14 @@ impl DataWriter {
         let dt = column.data_type.to_lowercase();
 
         if dt.starts_with("set<") || dt.starts_with("org.apache.cassandra.db.marshal.settype(") {
-            self.write_set_complex_cells(buf, value, timestamp_micros, ttl_seconds, now_seconds)?;
+            self.write_set_complex_cells(
+                buf,
+                value,
+                &column.data_type,
+                timestamp_micros,
+                ttl_seconds,
+                now_seconds,
+            )?;
         } else if dt.starts_with("map<")
             || dt.starts_with("org.apache.cassandra.db.marshal.maptype(")
         {
@@ -591,130 +598,6 @@ impl DataWriter {
                 buf.push(base_flags | CELL_USE_ROW_TIMESTAMP);
             }
         }
-        Ok(())
-    }
-
-    /// Write SET complex cells.
-    ///
-    /// SET elements: cell_path = serialized element value, cell value = empty (HAS_EMPTY_VALUE).
-    /// Elements are ordered by the element type's Cassandra `SetType` comparator (#1275).
-    pub(super) fn write_set_complex_cells(
-        &self,
-        buf: &mut Vec<u8>,
-        value: &Value,
-        timestamp_micros: i64,
-        ttl_seconds: Option<u32>,
-        now_seconds: i32,
-    ) -> Result<()> {
-        let elements = match value {
-            Value::Set(elements) => elements,
-            _ => {
-                return Err(Error::InvalidInput(format!(
-                    "Expected Set value for complex SET column, got {:?}",
-                    value
-                )))
-            }
-        };
-
-        // Order by the element type's Cassandra `SetType` comparator (#1275, see
-        // collection_order: SIGNED numerics, unsigned-byte otherwise) decided from
-        // the element `Value`s. serialize_collection_element rejects Value::Null.
-        let mut ordered: Vec<&Value> = elements.iter().collect();
-        ordered.sort_by(|a, b| compare_collection_elements(a, b));
-        let serialized: Vec<Vec<u8>> = ordered
-            .iter()
-            .map(|e| serialize_collection_element(e, "SET"))
-            .collect::<Result<Vec<_>>>()?;
-
-        encode_unsigned(serialized.len() as u64, buf); // cell count
-        for path_bytes in &serialized {
-            // Cell header: flags + optional TTL fields
-            self.write_complex_cell_header(
-                buf,
-                CELL_HAS_EMPTY_VALUE,
-                timestamp_micros,
-                ttl_seconds,
-                now_seconds,
-            )?;
-
-            // Cell path: serialized element value
-            encode_unsigned(path_bytes.len() as u64, buf);
-            buf.extend_from_slice(path_bytes);
-            // No value bytes (HAS_EMPTY_VALUE flag set)
-        }
-
-        Ok(())
-    }
-
-    /// Write MAP complex cells.
-    ///
-    /// MAP entries: cell_path = serialized key, cell value = serialized value.
-    /// Entries are sorted by their serialized key byte representation for Cassandra compatibility.
-    ///
-    /// `map_data_type` is the COLUMN's DECLARED type (e.g. `map<int, int>`) and
-    /// is threaded down for ONE reason: the cell path is the only write-path
-    /// position where an empty-buffer sentinel is legal (issue #3805), and
-    /// legality there depends on the declared KEY type, which a bare `Value`
-    /// cannot supply (roborev job 449 finding D). See
-    /// [`serialize_map_cell_path_key_into`]. The cell VALUE deliberately keeps
-    /// the type-blind [`serialize_value_into`], which REFUSES a sentinel: a
-    /// zero-byte map VALUE is not a sentinel, it is the empty value of the
-    /// value type — or, with `HAS_EMPTY_VALUE`, a null.
-    pub(super) fn write_map_complex_cells(
-        &self,
-        buf: &mut Vec<u8>,
-        value: &Value,
-        map_data_type: &str,
-        timestamp_micros: i64,
-        ttl_seconds: Option<u32>,
-        now_seconds: i32,
-    ) -> Result<()> {
-        let entries = match value {
-            Value::Map(entries) => entries,
-            _ => {
-                return Err(Error::InvalidInput(format!(
-                    "Expected Map value for complex MAP column, got {:?}",
-                    value
-                )))
-            }
-        };
-
-        // Order by the KEY type's Cassandra `MapType` comparator (#1275, see
-        // collection_order: SIGNED numerics so negative keys sort -1 before 0/1,
-        // unsigned-byte otherwise) from the key `Value`s. Null keys rejected inline.
-        let mut ordered: Vec<&(Value, Value)> = entries.iter().collect();
-        ordered.sort_by(|a, b| compare_collection_elements(&a.0, &b.0));
-
-        // Reusable per-entry scratch (issue #1672): one alloc for the whole map,
-        // not a Vec-of-Vecs holding every key/value.
-        encode_unsigned(ordered.len() as u64, buf); // cell count
-        let mut key_scratch = Vec::new();
-        let mut val_scratch = Vec::new();
-        for (key, val) in ordered {
-            if matches!(key, Value::Null) {
-                return Err(Error::InvalidInput(
-                    "MAP keys cannot be null (CQL semantics)".to_string(),
-                ));
-            }
-
-            // Cell header: flags + optional TTL fields
-            self.write_complex_cell_header(buf, 0, timestamp_micros, ttl_seconds, now_seconds)?;
-
-            // Cell path: serialized key. SCHEMA-AWARE, because this is the one
-            // position an empty-buffer sentinel may occupy (issue #3805) and its
-            // tag must be validated against the DECLARED key type.
-            key_scratch.clear();
-            serialize_map_cell_path_key_into(key, map_data_type, &mut key_scratch)?;
-            encode_unsigned(key_scratch.len() as u64, buf);
-            buf.extend_from_slice(&key_scratch);
-
-            // Cell value: serialized value
-            val_scratch.clear();
-            serialize_value_into(val, &mut val_scratch)?;
-            encode_unsigned(val_scratch.len() as u64, buf);
-            buf.extend_from_slice(&val_scratch);
-        }
-
         Ok(())
     }
 

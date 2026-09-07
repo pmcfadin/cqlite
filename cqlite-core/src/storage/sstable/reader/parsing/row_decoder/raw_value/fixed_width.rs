@@ -89,7 +89,9 @@
 //!
 //! 1. *"No READ reaches an empty cell path — the multicell map caller filters
 //!    `path_bytes.is_empty()` — so the divergence is unit-observable only, a
-//!    residual and not a defect."* **#3747 REMOVED that caller guard on purpose**;
+//!    residual and not a defect."* **#3747 REMOVED that caller guard on purpose**
+//!    (and #4106 removed the SET branch's identical one, for the identical
+//!    reason: a zero-length cell path is the EMPTY component, not its absence);
 //!    its tests now carry `!! REACHABILITY: THE EMPTY-KEY CASES BELOW ARE NOW
 //!    REACHED BY A REAL READ`. A stale reachability argument is the worst kind of
 //!    comment: it reads as a licence to stop looking.
