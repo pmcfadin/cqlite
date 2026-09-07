@@ -170,6 +170,10 @@ printf 'SIGPIPE-SITES: subjects ENUMERATED %d git-tracked scripts/**/*.sh file(s
   "only $N_SUBJECTS subject(s) enumerated, floor is $SUBJECT_FLOOR — a clean verdict over this set would measure nothing" \
   "check that the git index is populated and the pathspecs still match; lower the floor only with a stated reason"
 
+# LINE-BASED reads from here on, and that is SAFE ONLY BECAUSE the enumeration above already
+# REFUSED anything outside PATH_RE — which admits no whitespace, so no subject path can contain a
+# space or a newline. The census file's "path count" records are likewise whitespace-split by awk
+# for the same reason. Widening PATH_RE means revisiting both.
 : >"$_tmp/now"
 CUR_FILES=0
 CUR_SITES=0
