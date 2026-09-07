@@ -114,8 +114,9 @@
 #     non-zero, so a lost message costs explanation, never the failure.)
 #   * WHAT IS NOT STATUSED IS ARGUED, IN PLACE. Ten unstatused operations remain and each carries a
 #     numbered `PROVABLY-SAFE, UNSTATUSED (n)` comment saying why its failure cannot produce a false
-#     clean. Tally, re-derivable from this file with `grep -c 'PROVABLY-SAFE, UNSTATUSED ('` and by
-#     counting the guard sites: 65 status/invariant guards, 10 declared-safe operations.
+#     clean. Tally, re-derivable from this file by grep: TEN numbered PROVABLY-SAFE comments (the
+#     two mentions in this header say (n) rather than a digit, so they cannot inflate the count),
+#     against 62 named refusal SITES raised by the status checks and invariants above.
 #   * THE WORKING SET IS ASSERTED TO STILL EXIST at verdict time, so a clean verdict can always
 #     point at the material it was computed from.
 #   * ONE RESIDUAL WITH NO INDEPENDENT REFERENCE, DECLARED at its site: `git ls-files` ORIGINATES
