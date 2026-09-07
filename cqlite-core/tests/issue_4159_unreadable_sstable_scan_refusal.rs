@@ -151,6 +151,21 @@ enum Damage {
     /// ("Invalid UTF-8 in partition key type"). This is the #4158-shaped trigger:
     /// a serialization-header type the reader legitimately will not decode.
     RefusedHeaderType,
+    /// The file is cut inside its 32-byte OUTER header, so `parse_nb_format_header`
+    /// itself cannot complete.
+    ///
+    /// # Why this class exists, and why it is the load-bearing RED control
+    ///
+    /// It is the ONE class that refuses at `f22ce842b` too. The other two are
+    /// swallowed *below* the manager by the SerializationHeader MARKER SEARCH this
+    /// issue also removes: pre-fix, both still parsed SUCCESSFULLY, so pre-fix they
+    /// cannot reach the read surfaces at all and cannot demonstrate the
+    /// SSTable-granularity swallow. This class reaches it, which is what makes the
+    /// pre-fix measurement `scan` → `Ok` with 0 rows rather than a fixture-staging
+    /// failure. Keep all three: they refuse at three different depths (outer
+    /// framing, TOC-positioned content, declared type) and a fix at one says
+    /// nothing about the others.
+    TruncatedToOuterHeader,
 }
 
 impl Damage {
@@ -174,6 +189,10 @@ impl Damage {
                 out[at] = 0xFF;
                 out
             }
+            // 20 < the 32-byte `parse_nb_format_header` fixed header, so the walk
+            // cannot even read the file's own framing. No downstream fallback can
+            // reach past a header that did not parse.
+            Damage::TruncatedToOuterHeader => bytes[..20.min(bytes.len())].to_vec(),
         }
     }
 }
@@ -454,6 +473,14 @@ async fn truncated_statistics_makes_every_read_surface_refuse() {
 #[tokio::test]
 async fn refused_serialization_header_type_makes_every_read_surface_refuse() {
     assert_every_surface_refuses(Damage::RefusedHeaderType).await;
+}
+
+/// AC3's RED CONTROL PROPER — the class that refuses pre-fix too, so the pre-fix
+/// run reaches the read surfaces and MEASURES the swallow instead of failing while
+/// staging the fixture. See [`Damage::TruncatedToOuterHeader`].
+#[tokio::test]
+async fn a_statistics_db_cut_inside_its_outer_header_makes_every_read_surface_refuse() {
+    assert_every_surface_refuses(Damage::TruncatedToOuterHeader).await;
 }
 
 /// AC2's OTHER half: `Ok(empty)` must still mean "this table genuinely has no
