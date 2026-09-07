@@ -1603,14 +1603,16 @@ fn frozen_collection_of_udt_column_advertises_user_type_header() {
     assert_eq!(
         crate::storage::sstable::writer::stats_writer::cql_type_to_marshal_type(
             &schema.columns[0].data_type
-        ),
+        )
+        .expect("a renderable marshal type"),
         "org.apache.cassandra.db.marshal.FrozenType(\
          org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type))",
     );
     assert_eq!(
         crate::storage::sstable::writer::stats_writer::cql_type_to_marshal_type(
             &schema.columns[1].data_type
-        ),
+        )
+        .expect("a renderable marshal type"),
         "org.apache.cassandra.db.marshal.FrozenType(\
          org.apache.cassandra.db.marshal.MapType(\
          org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.Int32Type))",

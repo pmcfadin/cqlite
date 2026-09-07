@@ -277,7 +277,9 @@ pub(crate) fn render_udt_marshal(udt: &UdtTypeDef) -> String {
         out.push(':');
         let field_cql = cql_type_to_cql_string(&field.field_type);
         out.push_str(
-            &crate::storage::sstable::writer::stats_writer::cql_type_to_marshal_type(&field_cql),
+            &crate::storage::sstable::writer::stats_writer::cql_type_to_marshal_type_or_bytes(
+                &field_cql,
+            ),
         );
     }
     out.push(')');
@@ -413,6 +415,17 @@ fn render_field_marshal(
                 .collect();
             format!("{prefix}TupleType({})", components.join(","))
         }
+        // `vector<element, n>` (#4158): `"(" + element.toString(ignoreFreezing)
+        // + " , " + dimension + ")"` — `stringifyVectorParameters`,
+        // `TypeParser.java:239-242`, from `VectorType.toString`,
+        // `VectorType.java:338-342`. Rendered by THIS renderer (registry-aware, so a
+        // UDT element resolves) rather than by the `_` tail's string converter,
+        // which since #4158 REFUSES an element it cannot resolve — a refusal this
+        // infallible signature cannot carry. See `stats_writer::marshal`.
+        CqlType::Vector(element, dimension) => format!(
+            "{prefix}VectorType({} , {dimension})",
+            render_field_marshal(element, keyspace, registry, ignore_freezing)
+        ),
         // A BARE `CqlType::Udt` field reference (a UDT field declared without an
         // explicit `frozen<>`, which CQL implies) is spelled as the bare
         // `UserType(...)` — the corpus-attested shape for a nested UDT field. An
@@ -427,14 +440,18 @@ fn render_field_marshal(
                 render_udt_marshal_recursive(udt, keyspace, registry)
             } else {
                 let field_cql = cql_type_to_cql_string(ty);
-                crate::storage::sstable::writer::stats_writer::cql_type_to_marshal_type(&field_cql)
+                crate::storage::sstable::writer::stats_writer::cql_type_to_marshal_type_or_bytes(
+                    &field_cql,
+                )
             }
         }
         // Primitives: no `includeFrozenType` branch exists for them, so
         // `ignore_freezing` is irrelevant here.
         _ => {
             let field_cql = cql_type_to_cql_string(ty);
-            crate::storage::sstable::writer::stats_writer::cql_type_to_marshal_type(&field_cql)
+            crate::storage::sstable::writer::stats_writer::cql_type_to_marshal_type_or_bytes(
+                &field_cql,
+            )
         }
     }
 }

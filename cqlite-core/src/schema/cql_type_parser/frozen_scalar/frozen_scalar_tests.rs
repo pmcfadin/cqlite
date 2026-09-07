@@ -416,7 +416,13 @@ fn the_membership_set_is_cassandras_override_set() {
         // `RawVector` overrides `freeze()` and returns `this`
         // (`CQL3Type.java:915-919`).
         CqlType::Vector(Box::new(CqlType::Float), 3),
-        CqlType::Vector(Box::new(CqlType::Map(Box::new(CqlType::Int), Box::new(CqlType::Text))), 2),
+        CqlType::Vector(
+            Box::new(CqlType::Map(
+                Box::new(CqlType::Int),
+                Box::new(CqlType::Text),
+            )),
+            2,
+        ),
         CqlType::Custom("vector<float, 3>".to_string()),
     ] {
         assert!(
