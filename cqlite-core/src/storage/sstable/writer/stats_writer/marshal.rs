@@ -44,7 +44,7 @@ const FREEZE_WRAPPED_HEADS: [&str; 4] = ["ListType(", "SetType(", "MapType(", "U
 /// (`TypeParser` resolves class names verbatim), so a differently-cased inner is
 /// not a type Cassandra can parse and must not be handed a wrapper that would
 /// make the header unparseable in a NEW way.
-fn takes_frozen_type_wrapper(rendered: &str) -> bool {
+pub(crate) fn takes_frozen_type_wrapper(rendered: &str) -> bool {
     match rendered.strip_prefix("org.apache.cassandra.db.marshal.") {
         Some(rest) => FREEZE_WRAPPED_HEADS.iter().any(|h| rest.starts_with(h)),
         None => false,

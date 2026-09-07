@@ -61,6 +61,7 @@ pub use metadata::{StatisticsMetadata, TombstoneHistogram};
 // Re-exported so callers can keep using the pre-split path
 // `...writer::stats_writer::cql_type_to_marshal_type` (e.g. data_writer.rs).
 pub(crate) use marshal::cql_type_to_marshal_type;
+pub(crate) use marshal::takes_frozen_type_wrapper;
 
 use crate::error::{Error, Result};
 use crate::schema::TableSchema;
