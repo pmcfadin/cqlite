@@ -407,7 +407,7 @@ _swap_report() { # _swap_report <path> <baseline-hash>
     sigpipe_violations "$_tmp/s.head.src" >"$_tmp/s.head" 2>/dev/null
     _norm_sorted "$_tmp/s.head" >"$_tmp/s.head.norm"
     hh=$(_digest_of "$_tmp/s.head.norm")
-    [ "$hh" = "$sbh" ] && ref_ok=1
+    if [ "$hh" = "$sbh" ]; then ref_ok=1; fi
   fi
   if [ "$ref_ok" -eq 1 ]; then
     printf '    the baseline digest equals this file AT HEAD, so this difference is EXACT:\n' >>"$_tmp/msg.fail"
