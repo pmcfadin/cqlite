@@ -118,24 +118,13 @@ pub(super) fn convert_marshal_type_to_cql_checked(
     Ok(convert_marshal_type_to_cql(marshal_type))
 }
 
-/// [`convert_marshal_type_to_cql_checked`] for the two callers whose error channel
-/// is an `Option`: it LOGS the refusal (which carries the
-/// `CQL3Type.java:647-651` citation) and answers `None`.
-///
-/// The marker-search SerializationHeader parsers in `serialization_header::mod`
-/// have no per-column error type to carry a message, and both already treat "this
-/// offset does not hold a readable header" as a single outcome. Giving them a
-/// one-expression form keeps the gate at the SAME site as the UTF-8 check instead
-/// of adding a second failure ladder beside it. Issue #4104.
-pub(super) fn convert_marshal_type_to_cql_logged(marshal_type: &str) -> Option<String> {
-    match convert_marshal_type_to_cql_checked(marshal_type) {
-        Ok(t) => Some(t),
-        Err(e) => {
-            tracing::error!("Refusing SerializationHeader type '{marshal_type}': {e}");
-            None
-        }
-    }
-}
+// REMOVED with #4104's job-119 fix: `convert_marshal_type_to_cql_logged`, which
+// answered `None` for a refusal so the marker-search parsers could fold it into
+// their "this offset holds no readable header" outcome. That fold WAS the fail-open
+// — a refusal became an ordinary failed candidate and the search carried on to the
+// empty-schema success. Those parsers now carry `HeaderSchemaError`, so they call
+// `convert_marshal_type_to_cql_checked` directly and a refusal keeps both its
+// meaning and its message.
 
 /// Convert Cassandra internal marshal type to CQL type name.
 ///

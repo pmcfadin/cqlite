@@ -16,6 +16,20 @@
 //!   return its schema — proving the fix narrowed the fallback rather than
 //!   disabling it.
 //!
+//! # Two more groups, added by the #4158 review round
+//!
+//! * THE NO-TOC PATH (roborev job 119): with `header_offset = None` there is no
+//!   anchored read at all, so the marker search is the ONLY decoder. A refusal
+//!   there used to be indistinguishable from a failed candidate, so the search
+//!   continued and ended at `parse_serialization_header`'s empty-schema `Ok` —
+//!   fail-open even though every per-candidate gate had refused. Settled by test,
+//!   not by reading: `a_frozen_scalar_header_is_refused_on_the_no_toc_marker_search_path_too`
+//!   carries its own legal-type control so the refusal cannot be a fixture artifact.
+//! * THE MESSAGE, at the public boundary (blocker A): a refusal must reach the user
+//!   as text naming the refused type and citing its oracle, not as
+//!   `code: Verify` relabelled `Corruption`
+//!   (`the_public_entry_point_surfaces_the_refusal_message`).
+//!
 //! # Authority
 //!
 //! A `frozen<scalar>` column cannot exist in Cassandra: `CQL3Type.Raw::freeze()`
@@ -26,10 +40,13 @@
 //! the defect.
 
 use super::parse_minimal_encoding_stats;
+use crate::error::Error;
+use crate::parser::enhanced_statistics_parser::parse_nb_format_statistics_data;
 use crate::parser::enhanced_statistics_parser::schema_refusal::HeaderSchemaError;
 use crate::parser::enhanced_statistics_parser::serialization_header::{
     parse_serialization_header, parse_serialization_header_schema,
 };
+use crate::parser::statistics::StatisticsHeader;
 use crate::parser::vint::encode_vuint;
 
 const MARSHAL: &str = "org.apache.cassandra.db.marshal.";
@@ -277,13 +294,76 @@ fn a_frozen_scalar_header_is_refused_on_the_no_toc_marker_search_path_too() {
     assert_eq!(cols[0].name, "v");
     assert_eq!(pk_cols.len(), 1, "control: one partition key column");
 
-    match parse_minimal_encoding_stats(&no_toc, &no_toc, None, None) {
-        Err(_) => {}
+    let err = match parse_minimal_encoding_stats(&no_toc, &no_toc, None, None) {
+        Err(e) => e,
         Ok((_, (_, _, _, _, _, cols))) => panic!(
             "FAIL-OPEN: a frozen<scalar> SerializationHeader was ACCEPTED on the \
              no-TOC marker-search path with {} column(s) — a semantic refusal must \
              fail closed there exactly as it does on the TOC-anchored path",
             cols.len()
         ),
+    };
+    let HeaderSchemaError::Refused(refusal) = err else {
+        panic!(
+            "the marker-search path must report a SEMANTIC refusal, not a structural \
+             failure (which a caller is allowed to retry heuristically): {err:?}"
+        );
+    };
+    assert!(
+        refusal
+            .to_string()
+            .contains("FrozenType(org.apache.cassandra.db.marshal.Int32Type)"),
+        "the refusal must name the refused type: {refusal}"
+    );
+}
+
+/// The refusal at the PUBLIC boundary: `parse_nb_format_statistics_data` returns a
+/// `Schema` error whose text names the refused type and cites its oracle (#4158
+/// review, blocker A).
+///
+/// This is the assertion that matters for a user, and it is made on the public
+/// entry point rather than on an internal channel: before the message was carried,
+/// this same input produced
+/// `UnsupportedFormat("… EncodingStats: Error { input: [..], code: Verify }")`,
+/// which `StatisticsReader::open` then relabelled `Corruption` — a deliberate
+/// refusal presented as a garbled file.
+#[test]
+fn the_public_entry_point_surfaces_the_refusal_message() {
+    let header = StatisticsHeader {
+        version: 4,
+        statistics_kind: 0x2629_1b05,
+        data_length: 44,
+        metadata1: 1,
+        metadata2: 101,
+        metadata3: 2,
+        checksum: 0x14d4,
+        table_id: None,
+    };
+    let bytes = fallback_preamble_then(&frozen_scalar_header());
+
+    let err = parse_nb_format_statistics_data(&bytes, &header, &bytes, None)
+        .err()
+        .unwrap_or_else(|| panic!("a frozen<scalar> header must not be accepted"));
+
+    assert!(
+        matches!(err, Error::Schema(_)),
+        "a semantic refusal must keep the `Schema` kind rather than being \
+         relabelled as unreadable/corrupt data: {err:?}"
+    );
+    let msg = err.to_string();
+    for expected in [
+        "FrozenType(org.apache.cassandra.db.marshal.Int32Type)",
+        "includeFrozenType",
+        "CQL3Type.java:647-651",
+    ] {
+        assert!(
+            msg.contains(expected),
+            "the user-visible error must name `{expected}`; got: {msg}"
+        );
     }
+    // And it must NOT read like a parse failure of unreadable bytes.
+    assert!(
+        !msg.contains("code: Verify"),
+        "the refusal must not surface as a bare nom error: {msg}"
+    );
 }

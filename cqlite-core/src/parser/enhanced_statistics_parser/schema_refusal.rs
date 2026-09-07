@@ -21,6 +21,18 @@
 //! the frozen-scalar gate had correctly refused was accepted anyway — while the
 //! sibling KEY-type gate in the same function failed closed. This enum is what
 //! makes the two gates agree.
+//!
+//! # Its reach, after the #4158 review round
+//!
+//! It is no longer only the anchored decoder's channel. Job 119 found the same
+//! fail-open in the MARKER-SEARCH decoders — a refusal there became an ordinary
+//! failed candidate, so the search continued to its empty-schema success — so
+//! `serialization_header::{mod, sequential}` and `parse_regular_columns` and the
+//! ASCII fallback all carry this type now, and `Refused` terminates the search
+//! wherever it arises. Blocker A extended it in the other direction: the carried
+//! `Error` is propagated out through `parse_nb_format_statistics_data_with_toc`
+//! and the `_detailed` entry points to `StatisticsReader::open`, so the refusal
+//! the user sees is the message the gate wrote.
 
 use crate::error::Error;
 
@@ -36,9 +48,12 @@ pub(super) enum HeaderSchemaError<'a> {
     /// the marker-search fallback may legitimately be tried.
     Structural(nom::Err<nom::error::Error<&'a [u8]>>),
     /// The header decoded, and what it declares is not writable by Cassandra.
-    /// FAIL-CLOSED: never retried with a heuristic. The carried [`Error`] holds
-    /// the refusal message (with its Cassandra citation) for logging; the
-    /// DECISION is taken on the variant, never on the message text.
+    /// FAIL-CLOSED: never retried with a heuristic. The carried [`Error`] is
+    /// PROPAGATED to the user (#4158 review, blocker A) — it is the only text that
+    /// names the refused column, the refused type and the Cassandra citation, and
+    /// it used to be logged and then dropped, so the refusal reached the caller as
+    /// a bare `ErrorKind::Verify` that read like data corruption. The DECISION is
+    /// still taken on the VARIANT, never on the message text.
     Refused(Error),
 }
 

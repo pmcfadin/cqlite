@@ -17,9 +17,9 @@ pub(in crate::parser::enhanced_statistics_parser) use schema::parse_serializatio
 
 use super::super::header::ColumnInfo;
 use super::super::vint::parse_vuint;
-use super::marshal_type::convert_marshal_type_to_cql_logged;
+use super::marshal_type::convert_marshal_type_to_cql_checked;
+use super::schema_refusal::HeaderSchemaError;
 use super::SerializationHeaderResult;
-use nom::IResult;
 use sequential::{parse_serialization_header_at_offset, parse_serialization_header_sequential};
 
 /// Parse SerializationHeader from Statistics.db (Issue #163)
@@ -30,9 +30,25 @@ use sequential::{parse_serialization_header_at_offset, parse_serialization_heade
 /// 3. Regular column definitions
 ///
 /// Returns: (partition_key_types, clustering_key_types, regular_columns)
+///
+/// # A SEMANTIC REFUSAL STOPS THE SEARCH (#4104, roborev job 119)
+///
+/// The search tries many candidate offsets, so a failed candidate is normally just
+/// "not here — try the next one", and that is right for every STRUCTURAL failure:
+/// where the header lives is exactly what is in doubt. It is WRONG for a semantic
+/// refusal. A candidate that decoded a column name and a marshal type and then
+/// found `FrozenType(<scalar>)` DID find a header; continuing the search can only
+/// replace a correct refusal with a different heuristic match — or, as measured,
+/// with this function's own `Ok((input, (empty, empty, empty)))` no-header success,
+/// which the caller accepts as a schema-less header. That was fail-open even though
+/// every individual gate had refused, which is why the two reviewers of job 119
+/// disagreed: the per-candidate gates DO fire, and the net outcome was still `Ok`.
+///
+/// So [`HeaderSchemaError::Refused`] is propagated immediately from wherever it
+/// arises, and only `Structural` continues the search.
 pub(super) fn parse_serialization_header(
     input: &[u8],
-) -> IResult<&[u8], SerializationHeaderResult> {
+) -> Result<(&[u8], SerializationHeaderResult), HeaderSchemaError<'_>> {
     tracing::debug!(
         "Searching for SerializationHeader in {} bytes (max search: 8KB)",
         input.len()
@@ -105,6 +121,11 @@ pub(super) fn parse_serialization_header(
                 if is_valid_single_byte_len || is_multi_byte_vint {
                     // Try parsing from this offset using sequential parser
                     let result = parse_serialization_header_sequential(&input[type_len_offset..]);
+                    // FAIL-CLOSED on a semantic refusal: this offset DID hold a
+                    // header, so no other offset can produce a better answer (#4104).
+                    if let Err(refused @ HeaderSchemaError::Refused(_)) = result {
+                        return Err(refused);
+                    }
                     if let Ok((remaining, (pk_types, ck_types, cols))) = result {
                         // Validate: partition key type should contain expected substring
                         if !pk_types.is_empty()
@@ -126,6 +147,10 @@ pub(super) fn parse_serialization_header(
                     let prev_offset = type_len_offset - 1;
                     if input[prev_offset] == 0x00 && input[type_len_offset] == 0x00 {
                         let result = parse_serialization_header_at_offset(&input[prev_offset..]);
+                        // Same fail-closed rule as the sequential candidate above.
+                        if let Err(refused @ HeaderSchemaError::Refused(_)) = result {
+                            return Err(refused);
+                        }
                         if result.is_ok() {
                             tracing::debug!(
                                 "Successfully parsed SerializationHeader at legacy marker offset {}",
@@ -165,7 +190,7 @@ pub(super) fn parse_serialization_header(
         search_offset
     );
 
-    if let Some((pk_types, ck_types, cols)) = fallback_parse_serialization_header_ascii(input) {
+    if let Some((pk_types, ck_types, cols)) = fallback_parse_serialization_header_ascii(input)? {
         tracing::debug!(
             "ASCII fallback extracted SerializationHeader: {} partition keys, {} clustering keys, {} regular columns",
             pk_types.len(),
@@ -274,7 +299,9 @@ fn extract_partition_key_before_marker(input: &[u8], marker_offset: usize) -> Op
 ///
 /// Returns: (partition_key_types, regular_columns)
 /// Partition key types are extracted via backtracking when found before the column section marker.
-fn parse_regular_columns(input: &[u8]) -> IResult<&[u8], (Vec<String>, Vec<ColumnInfo>)> {
+fn parse_regular_columns(
+    input: &[u8],
+) -> Result<(&[u8], (Vec<String>, Vec<ColumnInfo>)), HeaderSchemaError<'_>> {
     let mut search_offset = 0;
     let mut partition_key_types = Vec::new();
 
@@ -442,20 +469,17 @@ fn parse_regular_columns(input: &[u8]) -> IResult<&[u8], (Vec<String>, Vec<Colum
                     break;
                 }
 
-                // Column type: decoded and CQL-converted in one step. TWO causes share
-                // this failure arm deliberately — bytes that are not UTF-8, and a type
-                // no Cassandra writer can have recorded (`FrozenType(<scalar>)`, gate 2
-                // of #4104, which logs its own `error!` with the CQL3Type.java citation).
-                // Both mean this marker offset holds no readable header.
+                // Column type: decoded and CQL-converted in one step. The two causes
+                // no longer share one arm (#4104, roborev job 119) — they are
+                // DIFFERENT answers. Bytes that are not UTF-8 mean "this marker
+                // offset holds no readable header", so the search continues. A type
+                // no Cassandra writer can have recorded means the header IS here and
+                // is unwritable, so it fails CLOSED and carries its message out.
                 let type_bytes = &input[pos..pos + type_len];
-                let Some(cql_type) = std::str::from_utf8(type_bytes)
-                    .ok()
-                    .and_then(convert_marshal_type_to_cql_logged)
-                else {
+                let Ok(internal_type) = std::str::from_utf8(type_bytes) else {
                     tracing::debug!(
                         "Column {} ('{}') parsing failed at offset {}: column type at pos {} \
-                         (len={}) is not valid UTF-8, or is a type Cassandra cannot have \
-                         written (see the preceding error line); bytes: {:02x?}",
+                         (len={}) is not valid UTF-8; bytes: {:02x?}",
                         col_idx,
                         column_name,
                         marker_offset,
@@ -466,6 +490,8 @@ fn parse_regular_columns(input: &[u8]) -> IResult<&[u8], (Vec<String>, Vec<Colum
                     parse_success = false;
                     break;
                 };
+                let cql_type = convert_marshal_type_to_cql_checked(internal_type)
+                    .map_err(HeaderSchemaError::Refused)?;
                 pos += type_len;
 
                 parsed_columns.push(ColumnInfo {
@@ -513,10 +539,15 @@ fn parse_regular_columns(input: &[u8]) -> IResult<&[u8], (Vec<String>, Vec<Colum
     Ok((input, (Vec::new(), Vec::new())))
 }
 
-/// ASCII fallback parser for SerializationHeader when structured parsing fails
+/// ASCII fallback parser for SerializationHeader when structured parsing fails.
+///
+/// `Ok(None)` = nothing recognisable here (the caller falls through to its
+/// no-header success). `Err(Refused)` = a type Cassandra cannot have written was
+/// found, which fails CLOSED — it must not degrade to `Ok(None)` and thence to an
+/// accepted empty schema (#4104, roborev job 119).
 fn fallback_parse_serialization_header_ascii(
     input: &[u8],
-) -> Option<(Vec<String>, Vec<String>, Vec<ColumnInfo>)> {
+) -> Result<Option<(Vec<String>, Vec<String>, Vec<ColumnInfo>)>, HeaderSchemaError<'_>> {
     // Helper to find subsequence
     fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         haystack
@@ -636,8 +667,10 @@ fn fallback_parse_serialization_header_ascii(
 
                     // Gate 2 of #4104: a refused type fails the WHOLE header rather
                     // than silently dropping the column, which would hide the refusal
-                    // behind a schema that merely looks short.
-                    let cql_type = convert_marshal_type_to_cql_logged(&internal_type)?;
+                    // behind a schema that merely looks short — and it propagates as
+                    // a REFUSAL, not as `None`, which the caller would accept.
+                    let cql_type = convert_marshal_type_to_cql_checked(&internal_type)
+                        .map_err(HeaderSchemaError::Refused)?;
                     columns.push(ColumnInfo {
                         name: column_name,
                         column_type: cql_type,
@@ -659,8 +692,8 @@ fn fallback_parse_serialization_header_ascii(
     }
 
     if partition_types.is_empty() && columns.is_empty() {
-        return None;
+        return Ok(None);
     }
 
-    Some((partition_types, clustering_types, columns))
+    Ok(Some((partition_types, clustering_types, columns)))
 }
