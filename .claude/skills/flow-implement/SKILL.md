@@ -122,6 +122,14 @@ never gate stdout or review churn.
       `RESULT:` confirm its `run-id:` line is the run you launched — the no-clobber guard can leave a
       foreign peer's block on a shared pinned path (unreachable with a unique path, but verify). On a
       `run-id` mismatch, read the sibling `/tmp/lite-<N>.txt.integrity-fail.*` / `logs:` bundle instead.
+      **And a run dir is bound to a gate ONLY by that `run-id:` line (#3637).** Never locate one by
+      `ls -t`, by a glob, or by recency: up to four gates share one `$TMPDIR`, so recency lands on a
+      peer routinely — progress read from an unbound run dir is a peer's progress, and a verdict read
+      from one is a peer's verdict (PR #3616's closer nearly merged on another PR's 33/37 table).
+      Since #3637 a PASSing (or nested) run also REMOVES its dir at exit — as does an early exit
+      that reaches no verdict at all — and says so on its own `logdir-disposition:` line (`logs:`
+      stays PATH-ONLY; never parse a disposition out of it). Export `AGENT_GATE_KEEP_LOGS=1` when
+      you actually need `<logs-dir>/<component>.log` kept.
       **And only `PASS`/`FAIL` is a verdict (#3041):** the gate stamps
       `RESULT: INCOMPLETE (gate did not finish)` at launch, so if you poll rather than wait for exit,
       use the **RECORD grammar** `grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'` — a bare `grep -q` on the
