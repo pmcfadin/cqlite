@@ -43,6 +43,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use super::{reader, SSTableManager};
+use crate::types::TableId;
 use crate::{Error, Result};
 
 /// Ledger key for a refusal whose owning table could NOT be derived from its path.
@@ -164,6 +166,56 @@ pub(crate) fn retain_present(ledger: &mut RefusalLedger, still_present: impl Fn(
     ledger.retain(|_key, list| !list.is_empty());
 }
 
+impl SSTableManager {
+    /// [`resolve_reader_snapshot`](SSTableManager::resolve_reader_snapshot), but
+    /// FAILING CLOSED first when any SSTable of `table_id` was REFUSED at open
+    /// (issue #4159).
+    ///
+    /// # Why the check lives in the resolver and not at each guard
+    ///
+    /// Every read surface resolves its reader list through exactly one of two
+    /// helpers, and each then had its own `reader_list.is_empty()` early return to
+    /// `Ok(empty)`. Putting the check at each of those guards would (a) miss the
+    /// PARTIAL case — some generations opened, one refused, so the list is NOT empty
+    /// and the guard never fires — and (b) leave a new read surface free to inherit
+    /// the swallow by writing its own guard. Checking HERE, before the snapshot is
+    /// handed out, makes both impossible: a surface cannot obtain a reader list
+    /// without the refusal question having been answered.
+    ///
+    /// The order matters: the refusal check runs BEFORE any I/O and before the
+    /// emptiness test, so "the table is unreadable" is never reported as "the table
+    /// is empty".
+    pub(crate) async fn resolve_readers_checked(
+        &self,
+        table_id: &TableId,
+    ) -> Result<(Vec<Arc<reader::SSTableReader>>, bool)> {
+        self.ensure_readable(table_id).await?;
+        Ok(self.resolve_reader_snapshot(table_id).await)
+    }
+
+    /// [`resolve_table_readers`](SSTableManager::resolve_table_readers) with the
+    /// same check applied first — the streaming surfaces' counterpart to
+    /// [`resolve_readers_checked`](SSTableManager::resolve_readers_checked).
+    #[cfg(not(feature = "tombstones"))]
+    pub(super) async fn resolve_table_readers_checked(
+        &self,
+        table_id: &TableId,
+    ) -> Result<Vec<Arc<reader::SSTableReader>>> {
+        self.ensure_readable(table_id).await?;
+        Ok(self.resolve_table_readers(table_id).await)
+    }
+
+    /// `Ok(())` iff no recorded refusal bears on a read of `table_id`.
+    ///
+    /// Held in one place so the ledger's resolution rule (exact key, unqualified
+    /// fallback, plus every unattributed refusal) cannot drift from
+    /// [`resolve_reader_list`](SSTableManager::resolve_reader_list)'s.
+    pub(crate) async fn ensure_readable(&self, table_id: &TableId) -> Result<()> {
+        let refused = self.refused.read().await;
+        check(&refused, table_id.name())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,7 +312,10 @@ mod tests {
     fn retain_present_clears_a_removed_generation() {
         let mut l = ledger_with("ks.t", "/d/ks/t-1/nb-1-big-Data.db");
         retain_present(&mut l, |_p| false);
-        assert!(l.is_empty(), "a refused file that is gone must stop refusing");
+        assert!(
+            l.is_empty(),
+            "a refused file that is gone must stop refusing"
+        );
         assert!(check(&l, "ks.t").is_ok());
     }
 

@@ -2,6 +2,24 @@
 //!
 //! This module provides functionality for scanning a Cassandra data directory
 //! and discovering SSTables, keyspaces, and tables.
+//!
+//! # Every directory read is FAIL-CLOSED (issue #4159)
+//!
+//! [`Scanner::scan`] used to swallow every filesystem error below the top-level
+//! `read_dir`: `if let Ok(table_entries) = read_dir(..)` with no `else`,
+//! `entries.flatten()` over a `ReadDir` (whose items are `io::Result<DirEntry>`, so
+//! `Iterator::flatten` drops each `Err` with no log at all), and
+//! `entry.path().is_dir()` (which answers `false` for a directory it could not
+//! `stat`). The observable results were: an unreadable KEYSPACE contributed zero
+//! tables and was indistinguishable from an empty keyspace; an unreadable TABLE
+//! directory was still reported with `sstable_count: 0`; and an entry that errored
+//! mid-iteration silently never existed.
+//!
+//! That is the issue #4159 defect one layer out from the manager — the discovery
+//! leg. `DiscoveryService::scan` propagates only the top-level `Error::Io`, so none
+//! of those ever reached a `?`, and a caller that then opened the reported (short)
+//! table set got a successful, silently incomplete answer. Each read now names its
+//! path and propagates.
 
 use std::path::{Path, PathBuf};
 
@@ -66,6 +84,51 @@ fn has_cassandra_table_uuid_suffix(dir_name: &str) -> bool {
     }
 }
 
+/// Read `dir`, naming it (and what it was being read AS) on failure.
+///
+/// Issue #4159: a directory this scanner cannot read must not read as an EMPTY
+/// directory — an unreadable keyspace and a keyspace with no tables are different
+/// facts, and a caller cannot tell them apart from a short result set.
+fn read_dir_named(dir: &Path, what: &str) -> Result<std::fs::ReadDir> {
+    std::fs::read_dir(dir).map_err(|e| {
+        Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("Failed to read {what} directory {}: {e}", dir.display()),
+        ))
+    })
+}
+
+/// Unwrap one `ReadDir` item, naming the directory it came from on failure.
+///
+/// `ReadDir` yields `io::Result<DirEntry>`: an entry can fail MID-ITERATION (a
+/// concurrent unlink, an I/O fault). `Iterator::flatten` discards those silently,
+/// which is how an entry came to "never exist".
+fn dir_entry_named(
+    item: std::io::Result<std::fs::DirEntry>,
+    dir: &Path,
+) -> Result<std::fs::DirEntry> {
+    item.map_err(|e| {
+        Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("Failed to read an entry of {}: {e}", dir.display()),
+        ))
+    })
+}
+
+/// Is `entry` a directory? Propagates the `stat` failure instead of answering
+/// `false`, which is what `Path::is_dir()` does for a directory it cannot stat.
+fn entry_is_dir(entry: &std::fs::DirEntry) -> Result<bool> {
+    entry.file_type().map(|ft| ft.is_dir()).map_err(|e| {
+        Error::Io(std::io::Error::new(
+            e.kind(),
+            format!(
+                "Failed to determine the file type of {}: {e}",
+                entry.path().display()
+            ),
+        ))
+    })
+}
+
 /// Scanner for discovering SSTables in a data directory
 pub struct Scanner {
     data_dir: PathBuf,
@@ -97,19 +160,11 @@ impl Scanner {
         let mut keyspace_info = Vec::new();
 
         // Read top-level directory entries (keyspaces)
-        let entries = std::fs::read_dir(&self.data_dir).map_err(|e| {
-            Error::Io(std::io::Error::new(
-                e.kind(),
-                format!(
-                    "Failed to read data directory {}: {}",
-                    self.data_dir.display(),
-                    e
-                ),
-            ))
-        })?;
+        let entries = read_dir_named(&self.data_dir, "data")?;
 
-        for entry in entries.flatten() {
-            if !entry.path().is_dir() {
+        for entry in entries {
+            let entry = dir_entry_named(entry, &self.data_dir)?;
+            if !entry_is_dir(&entry)? {
                 continue;
             }
 
@@ -124,9 +179,12 @@ impl Scanner {
 
             // Scan tables in this keyspace
             let mut keyspace_tables = Vec::new();
-            if let Ok(table_entries) = std::fs::read_dir(entry.path()) {
-                for table_entry in table_entries.flatten() {
-                    if !table_entry.path().is_dir() {
+            {
+                let keyspace_dir = entry.path();
+                let table_entries = read_dir_named(&keyspace_dir, "keyspace")?;
+                for table_entry in table_entries {
+                    let table_entry = dir_entry_named(table_entry, &keyspace_dir)?;
+                    if !entry_is_dir(&table_entry)? {
                         continue;
                     }
 
@@ -143,8 +201,11 @@ impl Scanner {
 
                     // Count SSTable files (Data.db files)
                     let mut table_sstable_count = 0;
-                    if let Ok(sstable_files) = std::fs::read_dir(table_entry.path()) {
-                        for sstable_file in sstable_files.flatten() {
+                    {
+                        let table_dir = table_entry.path();
+                        let sstable_files = read_dir_named(&table_dir, "table")?;
+                        for sstable_file in sstable_files {
+                            let sstable_file = dir_entry_named(sstable_file, &table_dir)?;
                             let file_name = sstable_file.file_name().to_string_lossy().to_string();
                             // Match both old and new SSTable naming conventions
                             if file_name.ends_with("-Data.db") || file_name == "Data.db" {
@@ -228,7 +289,20 @@ impl Scanner {
         // Precedence 3: Try to read metadata.yml
         let metadata_path = self.data_dir.join("metadata.yml");
         if metadata_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&metadata_path) {
+            // #4159: a metadata.yml that EXISTS and cannot be read is a real fault,
+            // not "no version recorded" — it is propagated rather than falling
+            // through to the "unknown" answer below. (An ABSENT metadata.yml is the
+            // ordinary case and is handled by the `exists()` guard, not here.)
+            let content = std::fs::read_to_string(&metadata_path).map_err(|e| {
+                Error::Io(std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "metadata.yml exists at {} but could not be read: {e}",
+                        metadata_path.display()
+                    ),
+                ))
+            })?;
+            {
                 // Parse YAML for version field (simple string search, not full YAML parsing)
                 for line in content.lines() {
                     if line.trim().starts_with("version:") {
@@ -469,5 +543,103 @@ mod tests {
         assert!(!has_cassandra_table_uuid_suffix(
             "table-6aa08200a25111f0a3fef1a551383fgz"
         )); // 'g' and 'z' not hex
+    }
+
+    /// Issue #4159: an UNREADABLE keyspace directory must not read as an EMPTY one.
+    ///
+    /// Staged with a mode-0 directory, which is what an EACCES on a real deployment
+    /// looks like. Skipped for root (whose `read_dir` ignores the mode), and the skip
+    /// is LOUD rather than silent — a case that cannot be staged must not read as a
+    /// case that passed.
+    // Permission-staged, so Unix-only: `PermissionsExt` and `geteuid` do not exist
+    // elsewhere, and there is no portable way to make a directory unreadable.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_keyspace_directory_is_an_error_not_an_empty_keyspace() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let keyspace_dir = temp_dir.path().join("test_ks");
+        fs::create_dir(&keyspace_dir).unwrap();
+        let table_dir = keyspace_dir.join("users-6aa08200a25111f0a3fef1a551383fb9");
+        fs::create_dir(&table_dir).unwrap();
+        fs::write(table_dir.join("na-1-big-Data.db"), b"mock data").unwrap();
+
+        // Control: readable ⇒ the table and its SSTable are discovered.
+        let before = Scanner::new(temp_dir.path(), None)
+            .scan()
+            .expect("a readable corpus must scan");
+        assert_eq!(before.tables, vec!["test_ks.users".to_string()]);
+        assert_eq!(before.sstable_count, 1);
+
+        fs::set_permissions(&keyspace_dir, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = Scanner::new(temp_dir.path(), None).scan();
+        // Restore before asserting so a failure cannot leave an unremovable TempDir.
+        fs::set_permissions(&keyspace_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        if nix_running_as_root() {
+            eprintln!(
+                "SKIPPED (running as root, which bypasses the directory mode): the \
+                 unreadable-keyspace case cannot be staged here"
+            );
+            return;
+        }
+
+        let e = result.expect_err(
+            "an unreadable keyspace directory used to be swallowed by \
+             `if let Ok(table_entries) = read_dir(..)` with no else, so the keyspace \
+             contributed ZERO tables and was indistinguishable from an empty one",
+        );
+        let msg = e.to_string();
+        assert!(
+            msg.contains("keyspace") && msg.contains("test_ks"),
+            "the error must name what it failed to read and where: {msg}"
+        );
+    }
+
+    /// Issue #4159: an unreadable TABLE directory must not be reported with
+    /// `sstable_count: 0` — that claimed the table exists and holds nothing.
+    // Permission-staged, so Unix-only: `PermissionsExt` and `geteuid` do not exist
+    // elsewhere, and there is no portable way to make a directory unreadable.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_table_directory_is_an_error_not_a_zero_sstable_table() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let keyspace_dir = temp_dir.path().join("test_ks");
+        fs::create_dir(&keyspace_dir).unwrap();
+        let table_dir = keyspace_dir.join("users-6aa08200a25111f0a3fef1a551383fb9");
+        fs::create_dir(&table_dir).unwrap();
+        fs::write(table_dir.join("na-1-big-Data.db"), b"mock data").unwrap();
+
+        fs::set_permissions(&table_dir, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = Scanner::new(temp_dir.path(), None).scan();
+        fs::set_permissions(&table_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        if nix_running_as_root() {
+            eprintln!(
+                "SKIPPED (running as root, which bypasses the directory mode): the \
+                 unreadable-table case cannot be staged here"
+            );
+            return;
+        }
+
+        let e = result.expect_err("an unreadable table directory must not report 0 SSTables");
+        let msg = e.to_string();
+        assert!(
+            msg.contains("table") && msg.contains("users-"),
+            "the error must name what it failed to read and where: {msg}"
+        );
+    }
+
+    /// A mode-0 directory is still readable by root, so the two permission-staged
+    /// cases above cannot assert anything there. Answered from the effective uid,
+    /// never from whether the operation happened to succeed — the latter would make
+    /// the guard indistinguishable from the defect it exists to catch.
+    #[cfg(unix)]
+    fn nix_running_as_root() -> bool {
+        // SAFETY: `geteuid` takes no arguments, touches no memory and cannot fail.
+        unsafe { libc::geteuid() == 0 }
     }
 }

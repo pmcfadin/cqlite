@@ -56,6 +56,8 @@ pub use reader::SSTableReader;
 /// the held reader set. Not `state_machine`-gated — meaningful for minimal builds.
 pub mod refresh;
 pub use refresh::RefreshReport;
+/// The on-disk `*-Data.db` walk shared by the constructors and `refresh_tables`.
+mod discovery_walk;
 /// Per-table SSTable REFUSAL ledger + the fail-closed read guard (issue #4159).
 mod refusal;
 mod reverse_scan; // BIG reverse partition iteration (issue #1184); file is tombstones-gated.
@@ -606,49 +608,6 @@ impl SSTableManager {
         } else {
             crate::storage::cache::GlobalKeyCacheSnapshot::default()
         }
-    }
-
-    /// Recursively find all *-Data.db files up to `max_depth` levels deep
-    fn find_data_files<'a>(
-        platform: &'a Platform,
-        dir: &'a Path,
-        max_depth: usize,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<PathBuf>>> + Send + 'a>>
-    {
-        let dir = dir.to_path_buf();
-        Box::pin(async move {
-            let mut results = Vec::new();
-
-            let mut dir_entries = match platform.fs().read_dir(&dir).await {
-                Ok(entries) => entries,
-                Err(_) => return Ok(results),
-            };
-
-            while let Some(entry) = dir_entries.next_entry().await? {
-                let path = entry.path();
-                if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-                    // Skip macOS AppleDouble sidecars via is_apple_double_sidecar().
-                    // See Issue #481.
-                    if filename.ends_with("-Data.db") && !is_apple_double_sidecar(filename) {
-                        results.push(path);
-                    } else if max_depth > 0 {
-                        // Check if it's a directory and recurse
-                        if entry
-                            .file_type()
-                            .await
-                            .map(|ft| ft.is_dir())
-                            .unwrap_or(false)
-                        {
-                            let sub_results =
-                                Self::find_data_files(platform, &path, max_depth - 1).await?;
-                            results.extend(sub_results);
-                        }
-                    }
-                }
-            }
-
-            Ok(results)
-        })
     }
 
     /// Create a new SSTable from MemTable data
@@ -1593,42 +1552,6 @@ impl SSTableManager {
         (readers, fully_qualified_match)
     }
 
-    /// [`resolve_reader_snapshot`](Self::resolve_reader_snapshot), but FAILING
-    /// CLOSED first when any SSTable of `table_id` was REFUSED at open (issue
-    /// #4159).
-    ///
-    /// # Why the check lives in the resolver and not at each guard
-    ///
-    /// Every read surface resolves its reader list through exactly one of two
-    /// helpers, and each then had its own `reader_list.is_empty()` early return to
-    /// `Ok(empty)`. Putting the check at each of those guards would (a) miss the
-    /// PARTIAL case — some generations opened, one refused, so the list is NOT
-    /// empty and the guard never fires — and (b) leave a new read surface free to
-    /// inherit the swallow by writing its own guard. Checking HERE, before the
-    /// snapshot is handed out, makes both impossible: a surface cannot obtain a
-    /// reader list without the refusal question having been answered.
-    ///
-    /// The order matters: the refusal check runs BEFORE any I/O and before the
-    /// emptiness test, so "the table is unreadable" is never reported as "the
-    /// table is empty".
-    pub(crate) async fn resolve_readers_checked(
-        &self,
-        table_id: &TableId,
-    ) -> Result<(Vec<Arc<reader::SSTableReader>>, bool)> {
-        self.ensure_readable(table_id).await?;
-        Ok(self.resolve_reader_snapshot(table_id).await)
-    }
-
-    /// `Ok(())` iff no recorded refusal bears on a read of `table_id`.
-    ///
-    /// Held in one place so the ledger's resolution rule (exact key, unqualified
-    /// fallback, plus every unattributed refusal) cannot drift from
-    /// [`resolve_reader_list`](Self::resolve_reader_list)'s.
-    pub(crate) async fn ensure_readable(&self, table_id: &TableId) -> Result<()> {
-        let refused = self.refused.read().await;
-        refusal::check(&refused, table_id.name())
-    }
-
     /// Resolve the AUTHORITATIVE partition-key shape for `table_id` from the
     /// SSTable readers' Statistics.db SerializationHeader (issue #1750).
     ///
@@ -1686,18 +1609,6 @@ impl SSTableManager {
         gate
     }
 
-    /// [`resolve_table_readers`](Self::resolve_table_readers) with the issue #4159
-    /// refusal check applied first — the streaming surfaces' counterpart to
-    /// [`resolve_readers_checked`](Self::resolve_readers_checked).
-    #[cfg(not(feature = "tombstones"))]
-    async fn resolve_table_readers_checked(
-        &self,
-        table_id: &TableId,
-    ) -> Result<Vec<Arc<reader::SSTableReader>>> {
-        self.ensure_readable(table_id).await?;
-        Ok(self.resolve_table_readers(table_id).await)
-    }
-
     /// Resolve the readers serving `table_id`, returning cloned `Arc` handles.
     ///
     /// Mirrors the qualified-then-unqualified lookup of [`scan`](Self::scan)
@@ -1705,7 +1616,10 @@ impl SSTableManager {
     /// `table_readers` read lock — needed by the streaming scan, which spawns a
     /// background merge task.
     #[cfg(not(feature = "tombstones"))]
-    async fn resolve_table_readers(&self, table_id: &TableId) -> Vec<Arc<reader::SSTableReader>> {
+    pub(super) async fn resolve_table_readers(
+        &self,
+        table_id: &TableId,
+    ) -> Vec<Arc<reader::SSTableReader>> {
         let table_readers = self.table_readers.read().await;
         let table_name = table_id.name();
         let list = if table_readers.contains_key(table_name) {

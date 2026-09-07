@@ -73,40 +73,30 @@ pub enum Error {
         source: Box<Error>,
     },
 
-    /// One or more of a table's SSTables could not be READ, so a scan of that
-    /// table cannot return a complete answer (issue #4159).
+    /// One or more of a table's SSTables could not be READ, so a scan of that table
+    /// cannot return a complete answer (issue #4159).
     ///
-    /// Raised by [`SSTableManager`](crate::storage::sstable::SSTableManager)'s read
-    /// surfaces when the table being read has at least one SSTable generation whose
-    /// **open REFUSED** — a corrupt/truncated `Statistics.db`, a
-    /// SerializationHeader whose declared type cannot be decoded, an unsupported
-    /// version, an unreadable component. The refusal is recorded at construction
-    /// time (the two `SSTableManager` constructors load every discovered generation
-    /// best-effort so ONE bad file cannot render an unrelated table unreadable) and
-    /// consulted by every read of that table.
+    /// Raised by every row-returning [`SSTableManager`] read surface when the table
+    /// has at least one generation whose **open REFUSED** (a corrupt `Statistics.db`,
+    /// an undecodable SerializationHeader type, an unsupported version, an unreadable
+    /// component). The constructors load best-effort, so the refusal is RECORDED
+    /// per table and consulted per read; the full rationale — including why a PARTIAL
+    /// answer is still a refusal — is in [`storage::sstable`]'s `refusal` module.
     ///
-    /// # Why this is its OWN variant rather than a `Corruption` message
+    /// It is its OWN variant, not a `Corruption` message, because a caller must be
+    /// able to tell "empty table" from "unreadable table" by MATCHING on the
+    /// discriminant, never on message text (#28). Before #4159 the constructors
+    /// answered a per-file open failure with a `tracing::warn!` and nothing else, so
+    /// the scan's `reader_list.is_empty()` guard returned `Ok(Vec::new())` — the
+    /// #3721 swallow class at SSTable granularity.
     ///
-    /// The constructors used to answer a per-file open failure with a
-    /// `tracing::warn!` and nothing else: the generation was silently absent from
-    /// the reader map, and the scan's `reader_list.is_empty()` guard then returned
-    /// `Ok(Vec::new())`. A successful empty read is indistinguishable from a table
-    /// that genuinely holds no rows, so no caller, test or supervisor could detect
-    /// it — the #3721 swallow class at SSTable granularity. A caller that wants to
-    /// tell "empty table" from "unreadable table" must be able to MATCH on the
-    /// discriminant, never on message text (issue #28: no heuristics).
+    /// `source` is an [`Arc`](std::sync::Arc) over the ORIGINAL refusal, never a
+    /// re-rendered message: [`Error`] is deliberately not [`Clone`], and a ledger
+    /// that had to hand out owned errors would re-wrap the text and discard the
+    /// cause, which is the mistake this variant exists to stop.
     ///
-    /// # `source` is the ORIGINAL open failure, by reference count
-    ///
-    /// The refusal is CARRIED, not re-synthesised: `source` is an
-    /// [`Arc`](std::sync::Arc) over the very `Error` the reader open produced, so
-    /// the operator (and a programmatic caller walking
-    /// [`std::error::Error::source`]) sees WHY the file was refused and not merely
-    /// that it was. `Arc` rather than `Box` because [`Error`] is deliberately not
-    /// [`Clone`] (it carries boxed `dyn Error` sources) while the manager's refusal
-    /// ledger must be able to report the SAME refusal to every subsequent read —
-    /// re-wrapping the rendered message on each report would discard the cause,
-    /// which is the mistake this variant exists to stop.
+    /// [`SSTableManager`]: crate::storage::sstable::SSTableManager
+    /// [`storage::sstable`]: crate::storage::sstable
     #[error(
         "table '{table}': {refused} of its SSTable(s) could not be read, so this read \
          would silently omit their rows; first refusal at {}: {source}",
@@ -400,12 +390,9 @@ impl Error {
         }
     }
 
-    /// Report that a table cannot be read completely because at least one of its
-    /// SSTables was refused at open (issue #4159).
-    ///
-    /// `source` is the ORIGINAL refusal, shared by reference count — never
-    /// rendered to a string: the caller matching on [`Error::UnreadableSSTable`]
-    /// walks `source` for the real cause.
+    /// A table cannot be read completely: at least one of its SSTables was refused
+    /// at open (issue #4159). `source` is the ORIGINAL refusal, shared by reference
+    /// count — never rendered to a string.
     pub fn unreadable_sstable(
         table: impl Into<String>,
         path: impl Into<std::path::PathBuf>,

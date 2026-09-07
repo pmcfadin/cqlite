@@ -661,7 +661,11 @@ async fn removing_the_refused_generation_and_refreshing_restores_readability() {
         .expect_err("while the bad generation is present the table is unreadable");
 
     // Remove every component of the refused generation.
-    let dir = bad.data.parent().expect("generation directory").to_path_buf();
+    let dir = bad
+        .data
+        .parent()
+        .expect("generation directory")
+        .to_path_buf();
     let stem = bad
         .data
         .file_name()
@@ -688,5 +692,78 @@ async fn removing_the_refused_generation_and_refreshing_restores_readability() {
         rows.len(),
         1,
         "the surviving generation's row must be returned"
+    );
+}
+
+/// SIBLING (audit S25/S26): a `CompressionInfo.db` that is PRESENT but unreadable
+/// must refuse, while an ABSENT one still means "uncompressed".
+///
+/// The two `create_minimal_*_header` builders answered BOTH with `"NONE"` under one
+/// `Err` arm commented "Assuming no compression". Absence is legitimate — every
+/// SSTable CQLite's own write surface emits is uncompressed and has no such
+/// component (#1406) — but a CORRUPT one taking the same branch means reading
+/// COMPRESSED chunk data as raw bytes, which decodes to nothing: a silently empty
+/// read of a healthy file, the same class as the swallow this issue is about.
+///
+/// Both directions are asserted, because the fix would be worthless (and would
+/// break every uncompressed read) if it refused on absence too.
+///
+/// NOTE, stated so this is not read as more than it is: the corrupt direction was
+/// ALREADY refusing before this change, via `load_compression_info_metadata`'s
+/// #1001 fail-fast on a present-but-malformed component. The
+/// `create_minimal_*_header` change is therefore a LOCAL honesty fix — absence and
+/// corruption are now distinguished at the probe that asks the question, instead of
+/// one `"NONE"` arm relying on a different reader to refuse later — not a newly
+/// closed data-loss path. Keeping the case anyway pins the end-to-end contract.
+#[tokio::test]
+async fn a_present_but_corrupt_compression_info_refuses_while_an_absent_one_does_not() {
+    let root = TempDir::new().expect("TempDir");
+    let generation = write_generation(root.path(), TABLE, 1).await;
+
+    let compression_info = generation
+        .data
+        .to_string_lossy()
+        .replace("-Data.db", "-CompressionInfo.db");
+    let compression_info = PathBuf::from(compression_info);
+
+    // Direction 1 — ABSENT. CQLite writes uncompressed SSTables, so the component
+    // is genuinely not there and the table must read normally.
+    assert!(
+        !compression_info.exists(),
+        "the write surface emits UNCOMPRESSED SSTables (#1406), so there should be no \
+         CompressionInfo.db to begin with — this case's premise"
+    );
+    {
+        let manager = manager(root.path()).await;
+        let rows = manager
+            .scan(&table_id(TABLE), None, None, None, Some(&schema_for(TABLE)))
+            .await
+            .expect("an ABSENT CompressionInfo.db means UNCOMPRESSED, not unreadable");
+        assert_eq!(rows.len(), 1, "the uncompressed table must still read");
+    }
+
+    // Direction 2 — PRESENT and unparseable.
+    std::fs::write(&compression_info, b"not a CompressionInfo.db").expect("stage the component");
+    let manager = manager(root.path()).await;
+    let e = manager
+        .scan(&table_id(TABLE), None, None, None, Some(&schema_for(TABLE)))
+        .await
+        .expect_err(
+            "a PRESENT but unparseable CompressionInfo.db must refuse: answering \
+             `algorithm = \"NONE\"` reads compressed chunks as raw bytes and decodes to \
+             nothing",
+        );
+    // The OUTCOME is what this case pins, not the SITE: several component readers
+    // touch `CompressionInfo.db` during one open (`create_minimal_*_header`'s
+    // algorithm probe and, for a chunk-compressed Data.db,
+    // `load_compression_info_metadata`'s #1001 fail-fast), and which one reaches the
+    // damaged component first depends on whether that generation's Data.db is
+    // headerless. Asserting a particular message here would pin the dispatch order
+    // rather than the contract. The absence/corruption split at the probe itself is
+    // pinned by `load_nb_compression_info`'s own unit tests in
+    // `reader/header.rs`, which call it directly.
+    assert!(
+        matches!(e, Error::UnreadableSSTable { .. }),
+        "the refusal must reach the caller as the dedicated matchable variant; got {e:?}"
     );
 }

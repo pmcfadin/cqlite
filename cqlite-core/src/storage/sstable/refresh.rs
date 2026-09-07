@@ -41,8 +41,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::{
-    extract_keyspace_and_table_name, extract_table_name, is_apple_double_sidecar, reader, refusal,
-    SSTableId, SSTableManager, MAX_SSTABLE_SCAN_DEPTH,
+    extract_keyspace_and_table_name, extract_table_name, reader, refusal, SSTableId, SSTableManager,
 };
 use crate::Result;
 
@@ -168,45 +167,6 @@ impl SSTableManager {
         Ok(Arc::new(reader))
     }
 
-    /// List the current on-disk `Data.db` paths using the manager's recorded
-    /// [`DiscoverySource`] — the same discovery the manager was built with.
-    async fn discover_data_file_paths(&self) -> Result<Vec<PathBuf>> {
-        match &self.discovery_source {
-            DiscoverySource::BasePath => {
-                if !self.platform.fs().exists(&self.base_path).await? {
-                    return Ok(Vec::new());
-                }
-                SSTableManager::find_data_files(
-                    &self.platform,
-                    &self.base_path,
-                    MAX_SSTABLE_SCAN_DEPTH,
-                )
-                .await
-            }
-            DiscoverySource::TableDirs(dirs) => {
-                let mut out = Vec::new();
-                for dir in dirs {
-                    if !self.platform.fs().exists(dir).await? {
-                        continue;
-                    }
-                    let mut entries = match self.platform.fs().read_dir(dir).await {
-                        Ok(entries) => entries,
-                        Err(_) => continue,
-                    };
-                    while let Some(entry) = entries.next_entry().await? {
-                        let path = entry.path();
-                        if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
-                            if fname.ends_with("-Data.db") && !is_apple_double_sidecar(fname) {
-                                out.push(path);
-                            }
-                        }
-                    }
-                }
-                Ok(out)
-            }
-        }
-    }
-
     /// Compute the `table_readers` key for a discovered `path`/`reader` under the
     /// manager's discovery keying.
     fn table_key_for(&self, path: &Path, reader: &reader::SSTableReader) -> Option<String> {
@@ -321,9 +281,7 @@ impl SSTableManager {
         //     guard. A refused generation still on disk KEEPS its entry: step 4 is
         //     fail-closed, so this refresh never re-opened it and nothing has
         //     changed about its readability.
-        refusal::retain_present(&mut refused, |p| {
-            discovered_canon.contains(&canon_of(p))
-        });
+        refusal::retain_present(&mut refused, |p| discovered_canon.contains(&canon_of(p)));
 
         // 5a. Removal: retain only readers still present on disk. Every
         //     canonical path below comes from the precomputed cache — the

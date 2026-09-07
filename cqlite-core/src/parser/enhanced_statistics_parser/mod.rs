@@ -419,7 +419,6 @@ fn parse_statistics_body(
     header: StatisticsHeader,
     gates: Option<&VersionGates>,
 ) -> crate::Result<SSTableStatistics> {
-
     // Parse the Statistics.db TOC ONCE (issue #2148) and thread it to every
     // downstream consumer — the EncodingStats/row-count decode below and the
     // STATS-extras post-pass — so the TOC is walked exactly once per open,

@@ -190,4 +190,3 @@ fn parse_encoding_stats_vuints<'a>(
         ),
     ))
 }
-

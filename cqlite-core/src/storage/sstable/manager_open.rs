@@ -270,9 +270,8 @@ impl SSTableManager {
                                 // stringified: `Error::UnreadableSSTable` carries
                                 // it as its `#[source]`.
                                 tracing::warn!("Could not load SSTable file {:?}: {}", path, e);
-                                let key = refresh::table_dir_table_key(&path).unwrap_or_else(|| {
-                                    refusal::UNATTRIBUTED_TABLE_KEY.to_string()
-                                });
+                                let key = refresh::table_dir_table_key(&path)
+                                    .unwrap_or_else(|| refusal::UNATTRIBUTED_TABLE_KEY.to_string());
                                 refusal::record(&mut refused, key, path.clone(), e);
                             }
                         }

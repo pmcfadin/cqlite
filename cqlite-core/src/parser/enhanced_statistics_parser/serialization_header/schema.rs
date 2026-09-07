@@ -203,11 +203,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
         at(body, input)
     );
 
-    Ok((
-        vec![partition_key_type],
-        clustering_key_types,
-        all_columns,
-    ))
+    Ok((vec![partition_key_type], clustering_key_types, all_columns))
 }
 
 /// `[VInt count]` then `count` × `[VInt name_len][name][VInt type_len][type]` — the
@@ -372,8 +368,7 @@ mod tests {
     fn a_truncated_type_string_names_the_shortfall() {
         let mut b = vec![0x28]; // declares 40 bytes
         b.extend_from_slice(b"org.apache"); // supplies 10
-        let e =
-            parse_serialization_header_schema(&b).expect_err("a truncated type must refuse");
+        let e = parse_serialization_header_schema(&b).expect_err("a truncated type must refuse");
         let msg = e.to_string();
         assert!(
             msg.contains("keyType") && msg.contains("only 10 remain"),
@@ -389,8 +384,8 @@ mod tests {
         b.push(0x01); // one regular column
         b.push(0x40); // declares a 64-byte name
         b.extend_from_slice(b"ab"); // supplies 2
-        let e = parse_serialization_header_schema(&b)
-            .expect_err("a truncated column name must refuse");
+        let e =
+            parse_serialization_header_schema(&b).expect_err("a truncated column name must refuse");
         let msg = e.to_string();
         assert!(
             msg.contains("regular column 0 name"),
