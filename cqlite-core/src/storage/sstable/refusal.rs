@@ -37,6 +37,15 @@
 //! there — the alternative silently drops the refusal on the floor, which is the
 //! defect.
 //!
+//! **That key is the widest effect in this module, so reach for it only for a
+//! refused SSTable.** Its rows belong to SOME table, which is what makes
+//! "every table" the honest scope. A fact with a different subject must not borrow
+//! it: an unreadable DIRECTORY is recorded in
+//! [`incomplete_walk`](SSTableManager::incomplete_walk) instead, because a stock
+//! root-owned `lost+found` recorded here would refuse every read on the most common
+//! real deployment layout. Both recording sites carry this note
+//! (`manager_open.rs`), so it is visible where the next one gets added.
+//!
 //! [`SSTableManager`]: crate::storage::sstable::SSTableManager
 
 use std::collections::HashMap;

@@ -431,6 +431,17 @@ fn error_samples() -> Vec<Error> {
             1,
             std::sync::Arc::new(Error::Corruption("c".into())),
         ),
+        // Issue #4159: discovery could not read a directory, so a table it did not
+        // find cannot be reported as absent.
+        Error::incomplete_discovery(
+            "ks.t",
+            "/d/lost+found",
+            1,
+            std::sync::Arc::new(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "denied",
+            ))),
+        ),
         Error::Schema("s".into()),
         Error::CqlParse("q".into()),
         Error::InvalidFormat("f".into()),
@@ -832,6 +843,24 @@ fn independent_expectations() -> Vec<(Error, ObsErrorCategory)> {
                 std::sync::Arc::new(Error::corruption("c")),
             ),
             Corruption,
+        ),
+        // Issue #4159: an unreadable DIRECTORY is `Io`, NOT `Corruption` — and the
+        // contrast with the row directly above is the point. Nothing here is
+        // undecodable: every file is intact and the walk simply could not enter a
+        // directory. The operator's remedy is a permissions or mount fix, so it
+        // belongs on the I/O dashboard; routing it to `Corruption` would put a
+        // `chmod` problem on the bit-rot alert. Never `Other`.
+        (
+            Error::incomplete_discovery(
+                "ks.t",
+                "/d/lost+found",
+                1,
+                std::sync::Arc::new(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "denied",
+                ))),
+            ),
+            Io,
         ),
         (Error::schema("s"), Schema),
         (Error::Table("t".into()), Schema),

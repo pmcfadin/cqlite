@@ -310,6 +310,19 @@ impl SSTableManager {
                                 // success. The `Error` itself is kept, never
                                 // stringified: `Error::UnreadableSSTable` carries
                                 // it as its `#[source]`.
+                                //
+                                // BLAST RADIUS of the fallback key: an
+                                // UNATTRIBUTED refusal bears on EVERY table's read,
+                                // not just this one (see `refusal`'s module doc) —
+                                // "we cannot say which table this file belonged to"
+                                // means no table's answer is knowably complete. It
+                                // is the right answer for a refused SSTable, whose
+                                // rows must belong to SOME table, but it is a heavy
+                                // hammer: if you add a recording site here, make
+                                // sure its subject really is a table's data before
+                                // reaching for this key. An unreadable DIRECTORY,
+                                // for instance, deliberately does NOT use it — see
+                                // `incomplete_walk`.
                                 tracing::warn!("Could not load SSTable file {:?}: {}", path, e);
                                 let key = refresh::table_dir_table_key(&path)
                                     .unwrap_or_else(|| refusal::UNATTRIBUTED_TABLE_KEY.to_string());
@@ -429,9 +442,17 @@ impl SSTableManager {
                     // The key is derived from the PATH alone: a refused open
                     // produced no header, so the `header_table_name` last-resort
                     // branch of `base_path_table_key` is deliberately given the
-                    // empty string (which that helper skips). When no key can be
-                    // derived at all the refusal is UNATTRIBUTED and bears on every
-                    // table — see `refusal`'s module doc.
+                    // empty string (which that helper skips).
+                    //
+                    // BLAST RADIUS of the fallback: when no key can be derived at
+                    // all the refusal is UNATTRIBUTED and every table's read then
+                    // fails closed on it, not just this one — see `refusal`'s module
+                    // doc. That is correct for a refused SSTable (its rows belong to
+                    // SOME table, and we cannot say which), but it is the widest
+                    // possible effect, so a NEW recording site must justify reaching
+                    // for this key. An unreadable DIRECTORY is deliberately recorded
+                    // elsewhere (`incomplete_walk`) precisely to avoid it: a stock
+                    // root-owned `lost+found` would otherwise refuse every read.
                     tracing::warn!("Could not load SSTable file {:?}: {}", path, e);
                     let key = refresh::base_path_table_key(&path, &base_dir_name, "")
                         .unwrap_or_else(|| refusal::UNATTRIBUTED_TABLE_KEY.to_string());

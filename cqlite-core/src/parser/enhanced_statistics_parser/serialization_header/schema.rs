@@ -33,18 +33,37 @@ use super::super::SerializationHeaderResult;
 use crate::{Error, Result};
 use nom::bytes::complete::take;
 
-/// Longest plausible marshal-type class name. Cassandra's longest built-in type
-/// strings are well under 200 bytes; deeply-nested frozen collection types can be
-/// long, so the bound is generous and exists only to refuse an absurd declared
-/// length before allocating on it.
+// # These four bounds are CQLite-invented, and carry NO format authority
+//
+// Nothing in the Cassandra 5.0 SerializationHeader format bounds any of these
+// lengths: `SerializationHeader.Serializer` writes each as an unprefixed VInt and
+// reads it back with no ceiling. They exist for ONE purpose — refusing an absurd
+// DECLARED length before allocating on it, so a corrupt VInt cannot drive a
+// multi-gigabyte reservation — and they are deliberately far above anything a real
+// schema produces. They are not a claim about what Cassandra can emit, and they
+// must never be tightened toward "what we have seen": a bound that refuses a
+// legitimate file turns a healthy SSTable unreadable, which is a worse failure than
+// the allocation they guard against.
+//
+// They can only ever REFUSE, never guess a value, so they are not a #28
+// no-heuristics violation. If one of these is ever hit by a real Cassandra-written
+// file, the bound is wrong and should be raised — not worked around.
+
+/// Refuse an absurd declared marshal-type class-name length before allocating.
+/// Cassandra's built-in type strings are ~30-60 bytes; a deeply nested frozen
+/// collection type (`FrozenType(MapType(...,ListType(TupleType(...))))`) can be far
+/// longer, so this is set well above any plausible nesting depth. No Cassandra-side
+/// limit is being approximated — there is none.
 const MAX_TYPE_LEN: u64 = 5000;
-/// Longest plausible CQL identifier. Cassandra's own limit is 48 characters
-/// (`SchemaConstants`), so 200 refuses only nonsense.
+/// Refuse an absurd declared column-name length before allocating. Cassandra's own
+/// identifier limit is 48 characters (`SchemaConstants.NAME_LENGTH`), which this is
+/// four times over; the slack is deliberate, since that limit governs what CQL will
+/// CREATE and not what the header format can represent.
 const MAX_NAME_LEN: u64 = 200;
-/// Refuse an absurd clustering-key count before allocating on it. Cassandra tables
-/// have single-digit clustering key counts in practice.
+/// Refuse an absurd declared clustering-key count before allocating. Real tables have
+/// single-digit clustering key counts; no format limit exists.
 const MAX_CLUSTERING_COUNT: u64 = 1000;
-/// Refuse an absurd column count before allocating on it.
+/// Refuse an absurd declared column count before allocating. No format limit exists.
 const MAX_COLUMN_COUNT: u64 = 10000;
 
 /// Byte offset of `rest` within `whole` — for diagnostics only; no decision is made
@@ -84,12 +103,33 @@ fn bytes<'a>(whole: &[u8], input: &'a [u8], len: u64, field: &str) -> Result<(&'
     })
 }
 
-/// Refuse a declared length outside `1..=max`.
-fn checked_len(whole: &[u8], input: &[u8], len: u64, max: u64, field: &str) -> Result<()> {
-    if len == 0 || len > max {
+/// Refuse a declared TYPE length outside `1..=max`.
+///
+/// Zero is refused here and NOT in [`checked_name_len`], and the asymmetry is
+/// deliberate: an empty marshal-type string names no type and cannot be decoded to
+/// one, so a zero-length type is unusable however it arose — whereas an empty column
+/// NAME is representable and has really existed (the unnamed value column of a
+/// COMPACT STORAGE table survives into `system_schema.columns` on an upgraded
+/// cluster). Refusing zero uniformly would make such a table unreadable, which is
+/// exactly the false refusal these guards must not cause.
+fn checked_type_len(whole: &[u8], input: &[u8], len: u64, max: u64, field: &str) -> Result<()> {
+    if len == 0 {
         return Err(Error::corruption(format!(
-            "SerializationHeader: {field} declares a length of {len}, which is zero or \
-             beyond the {max}-byte bound, at byte {} of the header body",
+            "SerializationHeader: {field} declares a length of zero, but an empty type \
+             string names no type, at byte {} of the header body",
+            at(whole, input)
+        )));
+    }
+    checked_name_len(whole, input, len, max, field)
+}
+
+/// Refuse a declared length above `max`. Zero is ACCEPTED — see
+/// [`checked_type_len`] for why the two differ.
+fn checked_name_len(whole: &[u8], input: &[u8], len: u64, max: u64, field: &str) -> Result<()> {
+    if len > max {
+        return Err(Error::corruption(format!(
+            "SerializationHeader: {field} declares a length of {len}, beyond the \
+             {max}-byte bound, at byte {} of the header body",
             at(whole, input)
         )));
     }
@@ -133,7 +173,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
 ) -> Result<SerializationHeaderResult> {
     // Step 1: keyType (partition key type).
     let (input, pk_type_len) = vuint(body, body, "keyType length")?;
-    checked_len(body, input, pk_type_len, MAX_TYPE_LEN, "keyType")?;
+    checked_type_len(body, input, pk_type_len, MAX_TYPE_LEN, "keyType")?;
     let (input, pk_type_bytes) = bytes(body, input, pk_type_len, "keyType")?;
     // ═══ GATE 2 OF #4104, RE-HOMED ONTO THE ANCHORED DECODER (#4159) ═══
     //
@@ -181,7 +221,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
     for i in 0..clustering_count {
         let field = format!("clustering key type {i}");
         let (rest, ck_type_len) = vuint(body, input, &format!("{field} length"))?;
-        checked_len(body, rest, ck_type_len, MAX_TYPE_LEN, &field)?;
+        checked_type_len(body, rest, ck_type_len, MAX_TYPE_LEN, &field)?;
         let (rest, ck_type_bytes) = bytes(body, rest, ck_type_len, &field)?;
         let ck_type = utf8(body, rest, ck_type_bytes, &field)?;
         tracing::debug!("HEADER: Clustering key {i}: {ck_type} ({ck_type_len} bytes)");
@@ -228,13 +268,13 @@ fn parse_column_list<'a>(
     for i in 0..count {
         let name_field = format!("{noun} column {i} name");
         let (rest, name_len) = vuint(body, input, &format!("{name_field} length"))?;
-        checked_len(body, rest, name_len, MAX_NAME_LEN, &name_field)?;
+        checked_name_len(body, rest, name_len, MAX_NAME_LEN, &name_field)?;
         let (rest, name_bytes) = bytes(body, rest, name_len, &name_field)?;
         let column_name = utf8(body, rest, name_bytes, &name_field)?;
 
         let type_field = format!("{noun} column '{column_name}' type");
         let (rest, type_len) = vuint(body, rest, &format!("{type_field} length"))?;
-        checked_len(body, rest, type_len, MAX_TYPE_LEN, &type_field)?;
+        checked_type_len(body, rest, type_len, MAX_TYPE_LEN, &type_field)?;
         let (rest, type_bytes) = bytes(body, rest, type_len, &type_field)?;
         // Gate 2 of #4104 — see the partition-key site for the authority. This
         // loop is BOTH `staticColumns` and `regularColumns` (they share their
@@ -339,13 +379,52 @@ mod tests {
         );
     }
 
+    /// An EMPTY column name decodes; only an empty TYPE refuses.
+    ///
+    /// The guards here are CQLite-invented allocation bounds with no format
+    /// authority (see the constants' doc), so their job is to refuse the absurd and
+    /// nothing else. A uniform `len == 0` rejection over-reached: an empty column
+    /// name is representable, and the unnamed value column of a COMPACT STORAGE
+    /// table survives into `system_schema.columns` on an upgraded cluster — refusing
+    /// it would make a healthy SSTable unreadable, the exact false refusal these
+    /// bounds must not cause. An empty TYPE string names no type and stays refused.
+    #[test]
+    fn an_empty_column_name_is_decoded_while_an_empty_type_still_refuses() {
+        let mut b = marshal("Int32Type");
+        b.push(0x00); // no clustering keys
+        b.push(0x00); // no static columns
+        b.push(0x01); // one regular column
+        b.push(0x00); // name length = 0 -- the unnamed compact-storage value column
+        b.extend_from_slice(&marshal("UTF8Type"));
+        let (_, _, cols) =
+            parse_serialization_header_schema(&b).expect("an empty column NAME is legal");
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0].name, "", "the empty name must survive decoding");
+        assert_eq!(cols[0].column_type, "text");
+
+        // The same body with a zero-length TYPE must still refuse.
+        let mut b = marshal("Int32Type");
+        b.push(0x00);
+        b.push(0x00);
+        b.push(0x01);
+        b.push(0x04);
+        b.extend_from_slice(b"name");
+        b.push(0x00); // type length = 0
+        let e = parse_serialization_header_schema(&b)
+            .expect_err("an empty TYPE string names no type and must refuse");
+        assert!(
+            e.to_string().contains("length of zero"),
+            "the refusal must say the type length was zero: {e}"
+        );
+    }
+
     #[test]
     fn a_zero_length_key_type_names_itself() {
         let e = parse_serialization_header_schema(&[0x00])
             .expect_err("a zero-length keyType must refuse");
         let msg = e.to_string();
         assert!(
-            msg.contains("keyType") && msg.contains("zero or beyond"),
+            msg.contains("keyType") && msg.contains("length of zero"),
             "the refusal must name the field and the bound: {msg}"
         );
     }

@@ -326,6 +326,18 @@ pub(crate) fn parse_nb_format_statistics_data_with_toc(
             // refusal WITH the component path, and `UnsupportedFormat` fell through
             // its catch-all instead, so the surfaced error named neither the
             // Statistics.db path nor the real cause.
+            //
+            // KNOWN GAP (follow-up): the typed inner refusal is FLATTENED into a
+            // `Corruption(String)` here, so `Error::source()` cannot be walked to it
+            // — only its TEXT survives, forwarded in full. Fixing it properly needs
+            // a source-carrying corruption variant, because there are TWO flattening
+            // layers, not one: `component_loading::load_statistics_reader` re-wraps
+            // this into `Error::corruption(format!(..))` again to add the component
+            // path, so preserving the chain HERE alone would still lose it one frame
+            // up. Both layers match on `Error::Corruption(_)` by discriminant, so the
+            // new variant has to be threaded through both plus the four error-surface
+            // tables. Out of scope for #4159, which is about a swallow, not about
+            // error-chain fidelity.
             Err(Error::corruption(format!(
                 "Statistics.db EncodingStats/SerializationHeader decode refused: {e}. \
                          This metadata is required for delta-coded timestamp decoding and \
