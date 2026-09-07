@@ -379,6 +379,13 @@ async fn observe(manager: &SSTableManager, table: &str) -> Vec<SurfaceOutcome> {
             .await
             .map(|(r, _engaged)| r.len()),
     });
+    // `scan_partition_clustering` and the reverse iterator exist only on the default
+    // build: the `tombstones` build's partition surface is
+    // `manager_tombstones_partition_scan.rs` (scan-and-filter), and `reverse_scan.rs`
+    // carries `#![cfg(not(feature = "tombstones"))]`. Naming the cfg here keeps the
+    // surface census honest per build instead of silently covering fewer surfaces
+    // under `--all-features`.
+    #[cfg(not(feature = "tombstones"))]
     out.push(SurfaceOutcome {
         name: "scan_partition_clustering",
         outcome: manager
