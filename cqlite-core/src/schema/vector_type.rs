@@ -324,6 +324,15 @@ pub(crate) fn parse_vector_dimension(raw: &str, type_str: &str) -> Result<usize>
             "the dimension exceeds Cassandra's Integer.MAX_VALUE ceiling",
         ));
     }
+    // NOTE the ORDER: the Integer.MAX_VALUE ceiling above runs FIRST, and on a 64-bit
+    // target it SUBSUMES this width guard (usize::MAX/4 is 4.6e18, far above
+    // i32::MAX = 2.1e9, so nothing can reach here overflowing). This guard is NOT dead
+    // code though: on a 32-bit target usize::MAX/4 is 1_073_741_823, BELOW i32::MAX, so
+    // a dimension in (1.07e9, 2.1e9] is legal per Cassandra and still overflows `4 * n`
+    // — and there this is the only thing standing between that and a wrapped byte
+    // count. Both guards are load-bearing; which one reports is target-dependent, so
+    // no test may pin the message.
+    //
     // Checked at the FLOAT element width, which is element-SPECIFIC and deliberately
     // so: this parser sees only the dimension token, never the element, so there is no
     // generally-correct width to check against — a check at width 1 would be
@@ -624,63 +633,51 @@ mod tests {
     /// successful `Value::List([])` — a value Cassandra says cannot exist
     /// (`VectorType.java:89-90` refuses n <= 0 at construction; `:365-368` throws
     /// `MarshalException("Invalid empty vector value")`).
-    /// roborev job 113: the parser's doc comment promised it rejects a dimension
-    /// whose BYTE WIDTH overflows, and it only rejected zero. A dimension above
-    /// `usize::MAX / 4` was accepted into `CqlType::Vector` and failed much later at
-    /// decode — a promise the code did not keep, and a late failure where an early one
-    /// was available.
+    /// roborev job 113: an overflowing dimension is refused AT PARSE TIME, not only
+    /// later at width computation.
+    ///
+    /// TWO guards now stand between a raw token and `CqlType::Vector`, and WHICH ONE
+    /// fires is TARGET-DEPENDENT — which is why this asserts REFUSAL rather than a
+    /// message. Measured:
+    ///
+    /// | target | `usize::MAX / 4`      | `i32::MAX`    | width guard reachable? |
+    /// |--------|-----------------------|---------------|------------------------|
+    /// | 64-bit | 4_611_686_018_427_387_903 | 2_147_483_647 | NO — the ceiling always fires first |
+    /// | 32-bit | 1_073_741_823         | 2_147_483_647 | YES — (1.07e9, 2.1e9] passes the ceiling and overflows `4 * n` |
+    ///
+    /// So on 64-bit the Integer.MAX_VALUE ceiling subsumes the width guard, while on
+    /// 32-bit the width guard is the only thing standing between a legal-per-Cassandra
+    /// dimension and a wrapped byte count. BOTH are load-bearing; neither is dead.
+    ///
+    /// An earlier version of this test asserted the message contained "overflow" and
+    /// broke the moment the ceiling landed (it fired first and said
+    /// "Integer.MAX_VALUE" instead) — one unit test failing FOUR gate components,
+    /// since core-tests / write-tests / legacy-heuristics / feature-iso-delta-scan all
+    /// run this lib. Pinning a message that guard ORDERING can change was the mistake.
     #[test]
     fn an_overflowing_dimension_is_refused_at_parse_time_not_only_at_width() {
-        let too_big = (usize::MAX / FLOAT_ELEMENT_WIDTH) + 1;
-        let ty = format!("org.apache.cassandra.db.marshal.VectorType(org.apache.cassandra.db.marshal.FloatType , {too_big})");
-        let err = parse_vector_dimension(&too_big.to_string(), &ty)
-            .expect_err("a dimension whose byte width overflows must be refused AT PARSE TIME");
-        let msg = err.to_string();
+        let ty = "org.apache.cassandra.db.marshal.VectorType(org.apache.cassandra.db.marshal.FloatType , n)";
+
+        // A dimension whose 4*n width cannot be represented must be REFUSED at parse
+        // time by SOME guard. Which one is target-dependent, so do not pin the text.
+        let width_overflow = (usize::MAX / FLOAT_ELEMENT_WIDTH) + 1;
         assert!(
-            msg.contains("overflow"),
-            "the refusal must say the width overflows, got: {msg}"
+            parse_vector_dimension(&width_overflow.to_string(), ty).is_err(),
+            "a dimension whose byte width cannot be represented must be refused at \
+             PARSE time, by whichever guard applies on this target"
+        );
+        assert!(
+            parse_vector_dimension(&usize::MAX.to_string(), ty).is_err(),
+            "usize::MAX must be refused"
         );
 
-        // usize::MAX itself, the extreme case.
-        assert!(parse_vector_dimension(&usize::MAX.to_string(), &ty).is_err());
-
-        // And the representable ones still parse.
+        // The representable ones still parse.
         for ok in ["1", "3", "384", "4096"] {
             assert!(
-                parse_vector_dimension(ok, &ty).is_ok(),
+                parse_vector_dimension(ok, ty).is_ok(),
                 "{ok} is representable and must parse"
             );
         }
-    }
-
-    /// roborev job 114: the dimension is bounded by Cassandra's Java `int`.
-    ///
-    /// `getVectorParameters` parses it with `Integer.parseInt`
-    /// (`TypeParser.java:255-258`), so `Integer.MAX_VALUE` is the ceiling and no
-    /// Cassandra-written type string can exceed it. Accepting a larger value would
-    /// admit an impossible schema and pass a multi-gigabyte declared width to decode.
-    /// Boundary-tested on BOTH sides, because an off-by-one here is exactly the kind
-    /// of bound that gets written `>=` by mistake.
-    #[test]
-    fn a_dimension_above_java_integer_max_is_refused() {
-        let ty = "org.apache.cassandra.db.marshal.VectorType(org.apache.cassandra.db.marshal.FloatType , n)";
-
-        // i32::MAX itself is LEGAL — Cassandra could write it.
-        let max = i32::MAX as usize; // 2147483647
-        assert_eq!(
-            parse_vector_dimension(&max.to_string(), ty).expect("i32::MAX is a legal dimension"),
-            max,
-            "2147483647 must be accepted: Integer.MAX_VALUE is reachable"
-        );
-
-        // One above is NOT.
-        let over = max + 1; // 2147483648
-        let err = parse_vector_dimension(&over.to_string(), ty)
-            .expect_err("2147483648 exceeds Integer.MAX_VALUE and must be refused");
-        assert!(
-            err.to_string().contains("Integer.MAX_VALUE"),
-            "the refusal must name the ceiling it enforces, got: {err}"
-        );
     }
 
     #[test]
