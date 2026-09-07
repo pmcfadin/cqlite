@@ -98,7 +98,7 @@ EXTRACT_OK=1
   # reason at its extraction below.
   # `_gate_cntrl_strip` is #3637's ONE DEFINITION of the control-character class and
   # `_disk_safe` now DELEGATES to it, so the extracted harness must carry it too.
-  for fn in _gate_cntrl_strip _disk_safe _disk_abbrev _disk_df_probe _disk_gib _disk_free_leg \
+  for fn in _gate_cntrl_strip _gate_pid_identity _disk_gate_signal_ok _disk_safe _disk_abbrev _disk_df_probe _disk_gib _disk_free_leg \
             _disk_free_field _disk_scan_field _disk_note_capture_failure \
             _disk_note_unread_verdict _disk_secs_is_int _disk_verdict_read \
             _disk_verdict_read_aggregate _disk_recorded_pairs _disk_preflight_meta \
@@ -112,7 +112,7 @@ EXTRACT_OK=1
   done
 } >> "$EX"
 
-for want in DISK_EXHAUSTION_SIGNATURES DISK_MEM_SUBJECTS DISK_UNREAD_VERDICTS _gate_cntrl_strip _disk_safe _disk_abbrev \
+for want in DISK_EXHAUSTION_SIGNATURES DISK_MEM_SUBJECTS DISK_UNREAD_VERDICTS _gate_cntrl_strip _gate_pid_identity _disk_gate_signal_ok _disk_safe _disk_abbrev \
             _disk_df_probe _disk_gib _disk_free_leg _disk_free_field _disk_scan_field \
             _disk_note_capture_failure _disk_note_unread_verdict _disk_secs_is_int \
             _disk_verdict_read _disk_verdict_read_aggregate _disk_recorded_pairs \
@@ -2416,7 +2416,7 @@ if command -v mkfifo >/dev/null 2>&1 && [ -n "$DISK_TIMEOUT" ]; then
         !inb && $0 ~ s { inb=1; print; next } inb { print; if ($0 ~ e) exit }' "$_fifo_ctl" > "$_fifo_ex"
       grep -m1 '^DISK_MEM_SUBJECTS=()$' "$_fifo_ctl" >> "$_fifo_ex"
       grep -m1 '^DISK_UNREAD_VERDICTS=()$' "$_fifo_ctl" >> "$_fifo_ex"
-      for fn in _gate_cntrl_strip _disk_safe _disk_abbrev _disk_df_probe _disk_gib _disk_free_leg _disk_free_field \
+      for fn in _gate_cntrl_strip _gate_pid_identity _disk_gate_signal_ok _disk_safe _disk_abbrev _disk_df_probe _disk_gib _disk_free_leg _disk_free_field \
                 _disk_scan_field _disk_note_capture_failure _disk_note_unread_verdict \
                 _disk_secs_is_int _disk_verdict_read _disk_verdict_read_aggregate \
                 _disk_scan_subject _disk_exhaustion_line; do
@@ -2557,6 +2557,73 @@ else
   printf 'SKIP - 21c-ladder + 21d-unignorable: this host could not be made to refuse BOTH a truncate and an unlink (running as root, or a permissive filesystem), so rungs 3-4 cannot be induced. DECLARED, not silently omitted.\n'
 fi
 
+# (21e) RUNG 4 VERIFIES THE TARGET'S IDENTITY -- roborev job 1 on the merge candidate. `$$` inside
+# a `( … ) &` sub-pool grandchild is the TOP-LEVEL gate's pid, so once ONE SIDE child's SIGKILL
+# lands, every sibling is orphaned and its `$$` names a pid that may already have been reaped and
+# REASSIGNED -- most likely, on a four-lane box, to a peer lane's gate. ENOSPC hits every component
+# at once, so a second child reaching this rung is the expected shape. Both directions are pinned,
+# because a guard that merely stops signalling would "fix" this by disabling the rung -- which
+# would restore the surviving-PASS certification rung 4 exists to prevent.
+d="$tmp/c21e"; mkdir -p "$d/logs"
+printf 'PASS 611\n' > "$d/logs/legacy-heuristics.result"
+ln -s /dev/full "$d/logs/tree-integrity.fail" 2>/dev/null || true
+chmod 444 "$d/logs/legacy-heuristics.result"
+chmod 555 "$d/logs"
+if [ -c /dev/full ] && ! : 2>/dev/null > "$d/logs/legacy-heuristics.result" && ! rm -f "$d/logs/legacy-heuristics.result" 2>/dev/null; then
+  # (a) MISMATCH: the identity captured at launch is not this process's -> the gate was reaped,
+  #     the pid is somebody else's, and NOTHING may be signalled. The shell must SURVIVE to ALIVE.
+  o21e=$(
+    bash -c '
+      . "$1"; LOG_DIR="$2"; _disk_env
+      GATE_MAIN_IDENTITY="identity-of-a-gate-that-has-already-been-reaped"
+      ( _tree_boundary_fail legacy-heuristics "tree-capture-failed; the tree cannot be proven unchanged" capture-failed ) 2>&1 |
+        sed -n -e "s/.*\(REFUSING to signal pid\).*/D3 \1/p"
+      printf "ALIVE\n"
+    ' _ "$EX" "$d/logs" 2>&1
+    printf 'EXIT %s\n' "$?"
+  )
+  ex21e=$(printf '%s\n' "$o21e" | sed -n 's/^EXIT //p')
+  if [ "${ex21e:-1}" = 0 ] \
+     && case "$o21e" in *"D3 REFUSING to signal pid"*) true ;; *) false ;; esac \
+     && case "$o21e" in *ALIVE*) true ;; *) false ;; esac; then
+    ok "21e-identity-refuse: with a NON-MATCHING launch identity the rung REFUSES to signal, names why, and the shell SURVIVES -- an orphaned SIDE child can no longer SIGKILL a pid that has been reaped and reassigned to a peer lane's gate"
+  else
+    bad "21e-identity-refuse: expected exit 0 with the REFUSING diagnostic and ALIVE, got exit='${ex21e:-<none>}':
+$o21e"
+  fi
+  # (b) CONTROL -- MATCH: the identity IS this process's, so the rung still SIGKILLs exactly as
+  #     before. Without this, (a) would pass just as well against a rung that never signals.
+  o21f=$(
+    bash -c '
+      . "$1"; LOG_DIR="$2"; _disk_env
+      GATE_MAIN_IDENTITY="$(_gate_pid_identity "$$" 2>/dev/null || true)"
+      [ -n "$GATE_MAIN_IDENTITY" ] || { printf "NOIDENT\n"; exit 0; }
+      ( _tree_boundary_fail legacy-heuristics "tree-capture-failed; the tree cannot be proven unchanged" capture-failed ) 2>&1 |
+        sed -n -e "s/.*\(GATE is being terminated\).*/D2 \1/p"
+      printf "ALIVE\n"
+    ' _ "$EX" "$d/logs" 2>&1
+    printf 'EXIT %s\n' "$?"
+  )
+  ex21f=$(printf '%s\n' "$o21f" | sed -n 's/^EXIT //p')
+  case "$o21f" in
+    *NOIDENT*)
+      printf 'SKIP - 21e-identity-match: this host publishes no process start-time identity (no /proc, no ps), so the VERIFIED-ours direction cannot be induced. DECLARED, not silently omitted.\n' ;;
+    *)
+      if [ "${ex21f:-0}" = 137 ] \
+         && case "$o21f" in *"D2 GATE is being terminated"*) true ;; *) false ;; esac \
+         && case "$o21f" in *ALIVE*) false ;; *) true ;; esac; then
+        ok "21e-identity-match: with a MATCHING launch identity the rung still SIGKILLs (exit 137, no ALIVE) -- so 21e-identity-refuse measures the identity check and not a rung that was simply disabled"
+      else
+        bad "21e-identity-match: expected exit 137 with the termination diagnostic and no ALIVE, got exit='${ex21f:-<none>}':
+$o21f"
+      fi ;;
+  esac
+  chmod 755 "$d/logs" 2>/dev/null || true
+else
+  chmod 755 "$d/logs" 2>/dev/null || true
+  printf 'SKIP - 21e-identity-refuse + 21e-identity-match: this host could not be made to refuse BOTH a truncate and an unlink, so rung 4 cannot be induced. DECLARED, not silently omitted.\n'
+fi
+
 # +4 (roborev job 319: the two false-PASS routes that survived round 5. 21a the terminator and
 # trailing-content contract, plus the mutation showing the pre-fix read ADOPTS all three
 # truncated verdicts (incl. `PASS 1`, a valid integer that is the wrong number): 2. 21b the
@@ -2566,7 +2633,12 @@ fi
 # count and holds on macOS: 2 + 0. Floor rises by 2, not 4. 21c -- the ladder's lower rungs,
 # added in round 2 of the same job when the `|| true` on the truncation turned out to be the very
 # shape 21b was written to remove -- also DECLARES its skip (it needs a host that refuses both a
-# truncate and an unlink), so it does not raise the floor either.); +3 (roborev job 319 round 3:
+# truncate and an unlink), so it does not raise the floor either.); +0 (roborev job 1 on the
+# merge candidate: rung 4 verifies the SIGNAL TARGET'S IDENTITY, in BOTH directions -- 21e-identity-refuse (a
+# non-matching launch identity must NOT signal) and 21e-identity-match (a matching one still
+# must, so the refuse case cannot pass against a rung that was merely disabled). Both DECLARE
+# their skip on a host where rung 4 cannot be induced, exactly as 21c/21d do, so like them they
+# do NOT raise the floor: +0.); +3 (roborev job 319 round 3:
 # a component can VANISH from a certification. 22a the two opposed halves of file-size's
 # selection (recorded for the presence guard, still not dispatched); 22b the lite path through the
 # SHIPPED aggregator in BOTH directions -- selected-and-absent FAILS, --only-absent still passes

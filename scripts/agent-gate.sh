@@ -7403,6 +7403,54 @@ _disk_safe() {
   _gate_cntrl_strip "${1-}"
 }
 
+# _gate_pid_identity <pid> -- print a STABLE identity token for <pid> (its START TIME), rc 0.
+# rc 1 = <pid> is not a pid we can name; the token is EMPTY and an empty token NEVER matches.
+#
+# A PID IS NOT AN IDENTITY (#3800, roborev job 1 on the merge candidate). It is reused, and on a
+# multi-lane box the most likely next owner of a gate's pid is A PEER LANE'S GATE -- a harm this
+# repository already has an incident for. The start time is what makes (pid, token) an identity:
+# the kernel's own value for that process, which a reused pid cannot reproduce.
+#
+# Linux: /proc/<pid>/stat field 22. The `comm` field is parenthesised and MAY CONTAIN both spaces
+# and ')' , so the prefix is matched with a GREEDY `.*\)` (awk regexes are greedy, so this takes
+# the LAST ')') rather than split on whitespace -- a naive `$22` reads the wrong field for any
+# process whose name has a space in it. Elsewhere (macOS): `ps -o lstart=`, an opaque string
+# compared only for EQUALITY, never parsed.
+_gate_pid_identity() {
+  local pid="${1:-}" v=""
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -r "/proc/$pid/stat" ]; then
+    v=$(awk '{ if (match($0, /^[0-9]+ \(.*\) /)) { r = substr($0, RSTART + RLENGTH); split(r, f, " "); print f[20] } }' "/proc/$pid/stat" 2>/dev/null) || return 1
+    case "$v" in ''|*[!0-9]*) return 1 ;; esac
+  else
+    command -v ps >/dev/null 2>&1 || return 1
+    v=$(ps -o lstart= -p "$pid" 2>/dev/null | LC_ALL=C tr -d '\000-\037\177' | tr -s ' ') || return 1
+    v="${v# }"; v="${v% }"
+    [ -n "$v" ] || return 1
+  fi
+  printf '%s' "$v"
+}
+
+# _disk_gate_signal_ok -- may this SIDE-lane descendant signal the pid in `$$`?
+#   rc 0 = VERIFIED still the gate this run was launched as
+#   rc 1 = VERIFIED NOT it (the gate was reaped; the pid may now be a peer's) -- REFUSE
+#   rc 2 = could not be measured on this host
+#
+# THREE-VALUED because a two-valued predicate collapses "cannot tell" onto one answer, and the
+# permissive one here kills a stranger. The rc-2 branch deliberately keeps the PREVIOUS behaviour
+# (signal), so this change is a pure SUBTRACTION of blind signalling and cannot introduce a false
+# PASS: the reuse harm needs a MULTI-LANE box, every multi-lane box on this fleet is Linux with
+# /proc, and there the identity IS measurable -- so rc 2 is precisely the host where the reuse
+# hazard is least reachable and the false-certification harm is unchanged.
+_disk_gate_signal_ok() {
+  local now
+  [ -n "${GATE_MAIN_IDENTITY:-}" ] || return 2
+  now="$(_gate_pid_identity "$$" 2>/dev/null)" || return 2
+  [ -n "$now" ] || return 2
+  [ "$now" = "$GATE_MAIN_IDENTITY" ] || return 1
+  return 0
+}
+
 # _disk_abbrev <csv> <max-items> -- bound a name list so one line stays one readable line.
 _disk_abbrev() {
   local csv="${1:-}" max="${2:-6}" out="" n=0 item rest="${1:-}"
@@ -9441,6 +9489,15 @@ GATE_LOGDIR_OWNER_FILE="$GATE_LOGDIR_CREATED/$GATE_LOGDIR_OWNER_BASENAME"
 # Deliberately BEFORE `_logdir_sweep` below: that sweep may unlink aged peer bundles and so
 # FREES space itself, and a start reading taken after it would understate the collapse.
 _disk_capture_start
+
+# #3800: the gate's OWN process identity, captured HERE -- before any component, and therefore
+# before any SIDE-lane descendant exists to inherit it. It is what lets the SIDE lane's last
+# escalation rung prove the pid in `$$` is STILL this gate before it SIGKILLs it, instead of
+# signalling a pid that may have been reaped and reassigned to a PEER LANE'S GATE. Plain shell
+# variables (not exported): a forked subshell inherits them, which is exactly the scope wanted --
+# an execed child has no business signalling this gate. An unmeasurable identity is left EMPTY
+# and is never read as a match.
+GATE_MAIN_IDENTITY="$(_gate_pid_identity "$$" 2>/dev/null || true)"
 
 # Arm the at-exit disposition THE MOMENT the machinery exists — NOT thousands of
 # lines later where the composed `trap '_gate_atexit' EXIT` is armed (#3637).
@@ -13675,7 +13732,25 @@ _tree_boundary_fail() {
       fi
       if [ -e "$_tbf_v" ] && [ -s "$_tbf_v" ]; then
         echo "⚠️ agent-gate: [$comp] verdict could be neither emptied nor removed, and the marker channel is unavailable — there is no disk-free way left to fail this run from a SIDE-lane subshell, so the GATE is being terminated: it will publish no verdict at all (RESULT stays the INCOMPLETE launch sentinel, which is never a certification) (#3800)" >&2
-        kill -KILL "$$" 2>/dev/null || true
+        # AND `$$` IS VERIFIED TO STILL BE THIS GATE BEFORE IT IS SIGNALLED (#3800, roborev job 1
+        # on the merge candidate). The round-5 comment above says the single SIGKILL goes "to a pid
+        # that is still our own live ancestor at the instant we signal it, so there is no window in
+        # which it can be reaped and reused". That is true of ONE SIDE child and FALSE of the
+        # SECOND: `$$` in a `( … ) &` sub-pool grandchild is the TOP-LEVEL gate's pid (measured:
+        # $$ is unchanged in nested subshells while $BASHPID is not), so once child A's SIGKILL
+        # lands, child B is orphaned and its own `$$` names a DEAD pid. ENOSPC hits every component
+        # at once, so two SIDE children reaching this rung is the expected shape, not an exotic one
+        # — and the pid's likeliest next owner on a four-lane box is a peer lane's gate. A false
+        # rationale in a comment is worse than none, which is why the claim above is corrected here
+        # rather than left standing.
+        _disk_gate_signal_ok; _tbf_sig=$?
+        if [ "$_tbf_sig" -eq 1 ]; then
+          echo "⚠️ agent-gate: [$comp] REFUSING to signal pid $$ — it is verifiably NO LONGER this gate (start-time identity mismatch), so this gate was already reaped and that pid may now belong to an unrelated process, most likely a PEER LANE'S GATE. No signal is sent. This run published no further verdict from here; treat its block as non-certifying (#3800)" >&2
+        else
+          # rc 0 = verified ours. rc 2 = identity unmeasurable on this host, where the previous
+          # behaviour is kept deliberately — see _disk_gate_signal_ok.
+          kill -KILL "$$" 2>/dev/null || true
+        fi
       fi
       return 1
     fi
