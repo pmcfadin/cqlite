@@ -303,6 +303,26 @@ pub(crate) fn parse_vector_dimension(raw: &str, type_str: &str) -> Result<usize>
              dimension <= 0: VectorType.java:89-90)",
         ));
     }
+    // The doc comment above promises this function rejects a dimension whose BYTE
+    // WIDTH would overflow, and before this it only rejected zero (roborev job 113).
+    // On a 64-bit target any `dimension > usize::MAX / 4` was accepted into
+    // `CqlType::Vector` and failed much later, at decode — a promise the code did not
+    // keep, and a late failure where an early one was available. Validated through the
+    // SAME helper the decoders use, so the parser and the decode path cannot disagree
+    // about what is representable.
+    // Checked at the FLOAT element width, which is element-SPECIFIC and deliberately
+    // so: this parser sees only the dimension token, never the element, so there is no
+    // generally-correct width to check against — a check at width 1 would be
+    // vacuously true. `float` is the only element #4114 decodes, and every other
+    // element is refused by name at `require_float_element` before any width is
+    // computed, so no unchecked path exists today. A future element type wider than 4
+    // bytes must add its own check; it cannot inherit this one.
+    if vector_byte_width(FLOAT_ELEMENT_WIDTH, dimension).is_none() {
+        return Err(malformed(
+            type_str,
+            "the dimension's byte width overflows the addressable range",
+        ));
+    }
     Ok(dimension)
 }
 
@@ -590,6 +610,35 @@ mod tests {
     /// successful `Value::List([])` — a value Cassandra says cannot exist
     /// (`VectorType.java:89-90` refuses n <= 0 at construction; `:365-368` throws
     /// `MarshalException("Invalid empty vector value")`).
+    /// roborev job 113: the parser's doc comment promised it rejects a dimension
+    /// whose BYTE WIDTH overflows, and it only rejected zero. A dimension above
+    /// `usize::MAX / 4` was accepted into `CqlType::Vector` and failed much later at
+    /// decode — a promise the code did not keep, and a late failure where an early one
+    /// was available.
+    #[test]
+    fn an_overflowing_dimension_is_refused_at_parse_time_not_only_at_width() {
+        let too_big = (usize::MAX / FLOAT_ELEMENT_WIDTH) + 1;
+        let ty = format!("org.apache.cassandra.db.marshal.VectorType(org.apache.cassandra.db.marshal.FloatType , {too_big})");
+        let err = parse_vector_dimension(&too_big.to_string(), &ty)
+            .expect_err("a dimension whose byte width overflows must be refused AT PARSE TIME");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("overflow"),
+            "the refusal must say the width overflows, got: {msg}"
+        );
+
+        // usize::MAX itself, the extreme case.
+        assert!(parse_vector_dimension(&usize::MAX.to_string(), &ty).is_err());
+
+        // And the representable ones still parse.
+        for ok in ["1", "3", "384", "4096"] {
+            assert!(
+                parse_vector_dimension(ok, &ty).is_ok(),
+                "{ok} is representable and must parse"
+            );
+        }
+    }
+
     #[test]
     fn zero_dimension_has_no_width() {
         assert_eq!(

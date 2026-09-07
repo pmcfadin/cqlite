@@ -326,9 +326,20 @@ impl ComparatorType {
                     ComparatorType::Custom(type_name.clone())
                 }
             }
-            // See the same arm in `from_cql_type`: reading a vector is implemented,
-            // ordering one is not (#4114).
-            CqlType::Vector(_, _) => return Err(vector_ordering_unsupported()),
+            // CONSTRUCT here too (roborev job 113). Fixing only `from_cql_type` left
+            // this REGISTRY-AWARE TWIN still refusing, so
+            // `from_data_type_with_registry("vector<float, 3>", ..)` kept failing and a
+            // registry-resolved composite containing a vector field still could not
+            // build its comparator — the same defect, one function over. The element
+            // recurses through the REGISTRY-aware call so a UDT element still resolves.
+            CqlType::Vector(element_type, dimension) => ComparatorType::Vector {
+                element: Box::new(Self::from_cql_type_with_registry(
+                    element_type,
+                    registry,
+                    keyspace,
+                )?),
+                dimension: *dimension,
+            },
         };
 
         Ok(comparator)
@@ -1036,6 +1047,35 @@ mod issue_4114_vector_comparator_tests {
         assert!(
             msg.contains("vector"),
             "the refusal must name what it refuses, got: {msg}"
+        );
+    }
+
+    /// roborev job 113: the REGISTRY-AWARE twin must construct too.
+    ///
+    /// Fixing only `from_cql_type` left `from_cql_type_with_registry` still refusing,
+    /// so `from_data_type_with_registry("vector<float, 3>", ..)` kept failing and a
+    /// registry-resolved composite carrying a vector field still could not build its
+    /// comparator. The lesson, recorded because I missed it once: when an enum-arm
+    /// refusal is wrong, look for SIBLING functions matching the same enum before
+    /// declaring it fixed.
+    #[test]
+    fn the_registry_aware_twin_constructs_too() {
+        let registry = crate::schema::UdtRegistry::new();
+        let ty = CqlType::Vector(Box::new(CqlType::Float), 3);
+        let c = ComparatorType::from_cql_type_with_registry(&ty, &registry, "ks")
+            .expect("the registry-aware constructor must build vector metadata too");
+        match &c {
+            ComparatorType::Vector { element, dimension } => {
+                assert_eq!(**element, ComparatorType::Float32);
+                assert_eq!(*dimension, 3);
+            }
+            other => panic!("expected Vector, got {other:?}"),
+        }
+        // Both constructors must agree, or one of them is the odd one out again.
+        assert_eq!(
+            c,
+            ComparatorType::from_cql_type(&ty).expect("plain constructor"),
+            "the two constructors must produce the SAME comparator for a vector"
         );
     }
 
