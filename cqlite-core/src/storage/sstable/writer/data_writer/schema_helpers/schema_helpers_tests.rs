@@ -262,3 +262,54 @@ org.apache.cassandra.db.marshal.UserType(test_ks,61646472657373,\
 63697479:org.apache.cassandra.db.marshal.UTF8Type))"
     );
 }
+
+/// The VECTOR arm, and the ONE disposition it does not share with the column path
+/// (#4158 review): a resolvable element renders truthfully, an UNRESOLVABLE one
+/// degrades to `BytesType` inside the vector rather than being refused by name.
+///
+/// The spelling is Cassandra's: `getClass().getName() +
+/// stringifyVectorParameters(element, ignoreFreezing, dimension)`
+/// (`VectorType.java:339-342`, `TypeParser.java:239-242`), i.e. the literal
+/// `" , "` separator and NO `FrozenType(` wrapper ever.
+///
+/// The degradation is DECLARED on
+/// [`super::super::stats_writer::cql_type_to_marshal_type_or_bytes`] — these
+/// renderers are infallible by signature, so they have no channel for the column
+/// path's named refusal. This test exists so the divergence is pinned rather than
+/// merely described: if the field path is ever unified with the column path, this
+/// is the case that must change, deliberately.
+#[test]
+fn an_unresolvable_vector_element_in_a_udt_field_degrades_to_bytestype() {
+    let reg = registry_with_address();
+    const P: &str = "org.apache.cassandra.db.marshal.";
+
+    // (a) A native element resolves — the truthful spelling, both entry points.
+    let floats = CqlType::Vector(Box::new(CqlType::Float), 3);
+    for rendered in [as_column(&floats, &reg), as_frozen_udt_field(&floats, &reg)] {
+        assert_eq!(
+            rendered,
+            format!("{P}VectorType({P}FloatType , 3)"),
+            "a vector is written bare, with the ' , ' separator"
+        );
+    }
+
+    // (b) A REGISTERED UDT element resolves through this renderer's registry —
+    //     which is why the arm recurses instead of delegating to the string
+    //     converter (that one has no registry).
+    let udts = CqlType::Vector(Box::new(CqlType::Custom("address".to_string())), 2);
+    let rendered = as_frozen_udt_field(&udts, &reg);
+    assert!(
+        rendered.starts_with(&format!("{P}VectorType({P}UserType(")) && rendered.ends_with(" , 2)"),
+        "a registered UDT element must expand to UserType(...), got {rendered}"
+    );
+
+    // (c) An UNRESOLVABLE element takes the declared degradation: a WRONG element
+    //     type, not a refusal, because the signature cannot carry one.
+    let unknown = CqlType::Vector(Box::new(CqlType::Custom("unregistered_udt".to_string())), 3);
+    assert_eq!(
+        as_frozen_udt_field(&unknown, &reg),
+        format!("{P}VectorType({P}BytesType , 3)"),
+        "the declared UDT-field degradation reaches a vector's ELEMENT too — see \
+         cql_type_to_marshal_type_or_bytes's third-behaviour note"
+    );
+}

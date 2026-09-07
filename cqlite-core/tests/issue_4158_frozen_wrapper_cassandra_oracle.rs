@@ -131,7 +131,15 @@ fn statistics_files(root: &Path) -> Vec<PathBuf> {
 ///
 /// This is what makes the writer-side assertion in half 2 an oracle rather than
 /// a preference: the set is not asserted from CQLite's behaviour, it is measured
-/// from bytes Cassandra produced. Measured on this fleet's corpus (144
+/// from bytes Cassandra produced.
+///
+/// THE READ-SIDE COMPLEMENT ("the read gate never refuses a byte Cassandra wrote")
+/// cannot live here: `validate_marshal_frozen` is `pub(crate)`, so it is pinned by
+/// the unit test `frozen_scalar_tests::
+/// the_header_gate_never_refuses_a_frozentype_cassandra_wrote`, which walks the same
+/// corpus and asserts the read gate ACCEPTS every complete `FrozenType(...)` string
+/// it finds (#4158 review, blocker C's over-refusal guard). This half stays the
+/// WRITER oracle. Measured on this fleet's corpus (144
 /// `Statistics.db`, `CQLITE_DATASETS_ROOT=/data/datasets`): 60 occurrences —
 /// MapType 25, ListType 16, UserType 10, SetType 9. Never a scalar, and never
 /// `TupleType`.
@@ -343,12 +351,36 @@ async fn cqlite_emits_no_frozentype_cassandra_cannot_write() {
         ("r_bare_udt", "address_type"),
     ];
 
-    for (label, cols, registry) in [
-        ("no-registry", &unresolvable[..], None),
+    // PER-LEG WRAPPER FLOOR — the affirmative-zero half of this assertion (#4158
+    // review). `bad.is_empty()` alone passes VACUOUSLY if the writer regresses to
+    // emitting no `FrozenType(` at all, which is what the #4158 defect looked like
+    // from one side. The floors are the wrappers each battery must produce:
+    //
+    //   no-registry (5): `frozen<list<int>>`, `frozen<set<text>>`,
+    //     `frozen<map<text,text>>`, `frozen<list<frozen<person>>>` and
+    //     `frozen<frozen<list<int>>>` each wrap ONCE (`ListType` x3, `SetType`,
+    //     `MapType`). The rest wrap nothing: `frozen<int>`/`frozen<text>` are
+    //     scalars, `frozen<person>` resolves nowhere, a `TupleType` is never
+    //     wrapped, and a wrapper's own children print with `ignoreFreezing = true`.
+    //   with-registry (3): `frozen<address_type>` -> `FrozenType(UserType(..))`,
+    //     `frozen<list<frozen<address_type>>>` -> `FrozenType(ListType(..))`,
+    //     `frozen<map<text, frozen<address_type>>>` -> `FrozenType(MapType(..))`.
+    //
+    // FLOORS (`>=`), deliberately not equalities: `list<frozen<udt>>` is a MULTICELL
+    // parent, so Cassandra writes `ListType(FrozenType(UserType(..)))` for it —
+    // corpus-attested in `test_collections/collections_with_udts` and
+    // `test_types/cx_nested_frozen_collections` — while CQLite currently emits the
+    // wrapper-less `ListType(UserType(..))`, because the registry-aware column
+    // dispatch is scoped to a TOP-LEVEL `frozen<...>` (`schema_helpers`'s own scope
+    // note, issue #1020). That is a MISSING wrapper, the opposite direction from the
+    // impossible wrapper this file exists to pin, and it is not asserted here.
+    for (label, cols, registry, min_wrappers) in [
+        ("no-registry", &unresolvable[..], None, 5usize),
         (
             "with-registry",
             &resolvable[..],
             Some(address_type_registry()),
+            3usize,
         ),
     ] {
         let temp_dir = TempDir::new().expect("temp dir");
@@ -367,9 +399,19 @@ async fn cqlite_emits_no_frozentype_cassandra_cannot_write() {
             bad.len(),
             cols
         );
+        assert!(
+            heads.len() >= min_wrappers,
+            "[{label}] only {} FrozenType( occurrence(s) RECOGNISED ({heads:?}), \
+             below the floor of {min_wrappers} this battery must emit — the \
+             assertion above would then be vacuously satisfied. Column types under \
+             test: {:?}",
+            heads.len(),
+            cols
+        );
         eprintln!(
             "[#4158] {label}: {} column spelling(s) emitted, {} FrozenType( \
-             occurrence(s) RECOGNISED, all within the Cassandra oracle set",
+             occurrence(s) RECOGNISED {heads:?} (floor {min_wrappers}), all within \
+             the Cassandra oracle set",
             cols.len(),
             heads.len()
         );
@@ -416,7 +458,22 @@ async fn frozen_udt_header_matches_the_cassandra_written_string() {
                 let bytes = std::fs::read(&path).expect("Statistics.db readable");
                 let hay = String::from_utf8_lossy(&bytes);
                 if let Some(idx) = hay.find(&format!("{MARSHAL_PREFIX}FrozenType(")) {
-                    let cassandra = &hay[idx..idx + CASSANDRA_FROZEN_ADDRESS_TYPE.len()];
+                    // `get`, never `&hay[a..b]`: the window can run past the end of
+                    // the buffer, and `from_utf8_lossy` emits 3-byte U+FFFD over
+                    // binary so an index need not be a char boundary. A slice panic
+                    // there would replace a real oracle MISMATCH with an opaque
+                    // "byte index is not a char boundary" (#4158 review).
+                    let cassandra = hay.get(idx..idx + CASSANDRA_FROZEN_ADDRESS_TYPE.len());
+                    let cassandra = cassandra.unwrap_or_else(|| {
+                        panic!(
+                            "the FrozenType( at byte {idx} of {} does not span {} \
+                             readable bytes (buffer is {} long) — the header is \
+                             truncated or the literal no longer matches",
+                            path.display(),
+                            CASSANDRA_FROZEN_ADDRESS_TYPE.len(),
+                            hay.len()
+                        )
+                    });
                     assert_eq!(
                         cassandra,
                         CASSANDRA_FROZEN_ADDRESS_TYPE,

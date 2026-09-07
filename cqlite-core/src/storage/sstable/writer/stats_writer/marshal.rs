@@ -60,6 +60,33 @@ pub(crate) fn cql_type_to_marshal_type(cql_type: &str) -> Result<String> {
 /// own arm, so its `Custom`/scalar tails never see a vector. The reachable site is
 /// `render_udt_marshal` (the registry-LESS renderer), where a `vector<..>` field
 /// whose element resolves to no marshal class takes the declared degradation.
+///
+/// # A THIRD BEHAVIOUR, DECLARED RATHER THAN LEFT TO BE DISCOVERED (#4158 review)
+///
+/// The degradation also reaches a vector's ELEMENT, one level in. Since #4158
+/// `render_field_marshal` renders `CqlType::Vector` itself and recurses for the
+/// element, so an element that resolves to no marshal class — a UDT FIELD declared
+/// `vector<unregistered_udt, 3>`, i.e. a UDT nested in a UDT with no registry entry
+/// — reaches THIS function through the recursion's `Custom` tail and emits
+///
+/// ```text
+/// org.apache.cassandra.db.marshal.VectorType(org.apache.cassandra.db.marshal.BytesType , 3)
+/// ```
+///
+/// a WRONG element type, where the COLUMN path refuses the same shape by name
+/// (`render_marshal_type`'s `refuse_unknown` arm). So THREE dispositions exist for
+/// one unresolvable name — refuse (column), `BytesType` (UDT field), and
+/// `VectorType(BytesType , n)` (UDT field whose type is a vector) — and this is the
+/// third.
+///
+/// It stays a divergence rather than being unified because the UDT-field renderers
+/// are infallible BY SIGNATURE (`-> String`), so they have no channel to carry the
+/// column path's named refusal; making them consistent means giving those renderers
+/// an error type, which is a contract change to `render_udt_marshal`, not a doc fix.
+/// The on-disk FRAMING is unaffected either way (`VectorType` and `BytesType` are
+/// both `VARIABLE_LENGTH` at the cell boundary), so the cost is a wrong recorded
+/// element type on a nested-UDT field, not an unreadable file. Pinned by
+/// `schema_helpers_tests::an_unresolvable_vector_element_in_a_udt_field_degrades_to_bytestype`.
 pub(crate) fn cql_type_to_marshal_type_or_bytes(cql_type: &str) -> String {
     cql_type_to_marshal_type(cql_type)
         .unwrap_or_else(|_| "org.apache.cassandra.db.marshal.BytesType".to_string())
@@ -230,7 +257,8 @@ fn render_marshal_type(
     // carries, at a VInt length of 0x59 = 89,
     //   org.apache.cassandra.db.marshal.VectorType(org.apache.cassandra.db.marshal.FloatType , 3)
     // and `vector_pk_only-*` carries the same shape at dimension 1 and 384. Pinned in
-    // `issue_4158_vector_marshal_parity::cassandra_written_vector_header_is_reproduced`.
+    // `issue_4158_vector_tests::cassandra_written_vector_header_is_reproduced` (this
+    // module's `#[cfg(test)] mod issue_4158_vector_tests`, marshal.rs:12).
     //
     // NO `FrozenType(` WRAPPER, EVER: `VectorType.toString(boolean)` has no
     // `includeFrozenType` branch (it is the two lines quoted above), so a vector is
