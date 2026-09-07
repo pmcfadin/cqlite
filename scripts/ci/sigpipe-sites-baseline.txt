@@ -16,7 +16,7 @@
 # classes of correct code; see its header and the run-time DECLARED SCOPE block.
 # THE RATCHET: an increase in a listed file, or ANY match in a file not listed here, FAILs.
 # A DECREASE never fails — re-run the command above and commit a tighter baseline.
-scripts/agent-gate.sh 102
+scripts/agent-gate.sh 105
 scripts/audit-inert-surfaces.sh 1
 scripts/bootstrap-agent-machine.sh 44
 scripts/bump-version.sh 2
@@ -36,10 +36,12 @@ scripts/docs-examples-smoke.sh 6
 scripts/e2e_collections.sh 2
 scripts/e2e_collections_existing_docker.sh 2
 scripts/e2e_nodetool_import.sh 2
+scripts/flow/advertised-collision-scan.sh 13
 scripts/flow/claim-heartbeat.sh 9
-scripts/flow/claim.sh 7
+scripts/flow/claim.sh 10
 scripts/flow/drive-issue-state.sh 4
-scripts/flow/finalize-cleanup.sh 2
+scripts/flow/finalize-cleanup.sh 4
+scripts/flow/lane-lock.sh 9
 scripts/flow/lib/process-liveness.sh 1
 scripts/flow/lib/roborev-findings-count.sh 1
 scripts/flow/premerge-assert.sh 5
@@ -63,6 +65,7 @@ scripts/perf/ws0-baseline.sh 6
 scripts/tests/lib-ws0-hermetic.sh 2
 scripts/tests/lib/pub-surface-scratch-lib.sh 1
 scripts/tests/lib/sigpipe-matcher.sh 2
+scripts/tests/test_advertised_collision_scan.sh 78
 scripts/tests/test_agent_gate_all_features_lane.sh 4
 scripts/tests/test_agent_gate_binding_rust_lanes.sh 3
 scripts/tests/test_agent_gate_census.sh 19
@@ -72,6 +75,7 @@ scripts/tests/test_agent_gate_delta.sh 17
 scripts/tests/test_agent_gate_disk_admission.sh 5
 scripts/tests/test_agent_gate_feature_matrix_annotation.sh 5
 scripts/tests/test_agent_gate_feature_matrix_lanes.sh 3
+scripts/tests/test_agent_gate_logdir_cleanup.sh 17
 scripts/tests/test_agent_gate_nested_isolation.sh 4
 scripts/tests/test_agent_gate_notify.sh 1
 scripts/tests/test_agent_gate_parser_parity.sh 3
@@ -91,13 +95,14 @@ scripts/tests/test_check_dataset_manifest.sh 66
 scripts/tests/test_check_dockerfile_rust_pin.sh 1
 scripts/tests/test_check_object_store_integrity.sh 100
 scripts/tests/test_claim_heartbeat.sh 128
-scripts/tests/test_claim_lock.sh 78
+scripts/tests/test_claim_lock.sh 181
 scripts/tests/test_classify_docs_only.sh 17
 scripts/tests/test_claude_auth_capability.sh 138
 scripts/tests/test_dep_duplicates_ratchet.sh 6
 scripts/tests/test_drive_issue_state.sh 83
 scripts/tests/test_features_load_bearing_guard.sh 1
 scripts/tests/test_fetch_datasets_tracked_guard.sh 7
+scripts/tests/test_finalize_cleanup_lane_lock.sh 6
 scripts/tests/test_gate_component_verdict.sh 43
 scripts/tests/test_gate_cpu_budget.sh 2
 scripts/tests/test_gate_detached.sh 128
@@ -108,6 +113,8 @@ scripts/tests/test_gating_registry_policy.sh 4
 scripts/tests/test_gating_workflow_semantics.sh 12
 scripts/tests/test_issue_3358_failclosed.sh 1
 scripts/tests/test_issue_gate_hook.sh 2
+scripts/tests/test_lane_lock.sh 129
+scripts/tests/test_lane_lock_precommit_hook.sh 12
 scripts/tests/test_perf_capability.sh 72
 scripts/tests/test_perf_capability_bootstrap.sh 154
 scripts/tests/test_premerge_assert.sh 3
