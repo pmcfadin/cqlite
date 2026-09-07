@@ -377,6 +377,31 @@ pub fn create_test_engine(
     WriteEngine::new(config)
 }
 
+/// Create a write engine that carries a [`UdtRegistry`], so the writer can
+/// resolve a `frozen<udt>` / bare-UDT column's `data_type` to the
+/// `UserType(...)` marshal Apache Cassandra writes into the
+/// SerializationHeader (issues #929/#1020; #4158 for why the writer needs it
+/// as much as the reader does).
+///
+/// Without a registry the writer has no field names or field types for a UDT
+/// name, so it can only advertise the column as an opaque `BytesType` — it must
+/// never fabricate a definition, and it must never fabricate the impossible
+/// `FrozenType(BytesType)`. A test that expects the Cassandra header spelling
+/// must therefore supply the definition on the WRITE side too.
+pub fn create_test_engine_with_udt_registry(
+    temp_dir: &TempDir,
+    schema: TableSchema,
+    registry: UdtRegistry,
+) -> cqlite_core::error::Result<WriteEngine> {
+    let config = WriteEngineConfig::new(
+        temp_dir.path().join("data"),
+        temp_dir.path().join("wal"),
+        schema,
+    )
+    .with_udt_registry(registry);
+    WriteEngine::new(config)
+}
+
 /// Helper to verify a file exists and is non-empty
 pub fn assert_file_exists_and_nonempty(path: &Path, component: &str) {
     assert!(
