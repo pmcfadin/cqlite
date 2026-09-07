@@ -27,6 +27,13 @@ gg() { git -c user.email=t@t -c user.name=t -c init.defaultBranch=main -c commit
 T=$(mktemp -d "${TMPDIR:-/tmp}/claim-lock-test.XXXXXX")
 trap 'rm -rf "$T"' EXIT
 
+# claim.sh now reports the machine-local lane-directory lock's state on every HELD
+# line (#3436 AC5), reading ${LANE_ROOT:-/data/lanes}/lane-<N>. Pin LANE_ROOT into
+# the sandbox for the WHOLE suite so no case reads a real fleet lane directory:
+# the report would otherwise depend on which lanes happen to exist on the host.
+export LANE_ROOT="$T/lanes"
+mkdir -p "$LANE_ROOT"
+
 ORIGIN="$T/origin.git"
 A="$T/A"
 B="$T/B"
@@ -801,7 +808,696 @@ $outI1
 $outI2"
 fi
 
+# PLATFORM GATE for TEST 21 + TEST 22 (#3436 AC5/AC6; roborev round 28, Medium).
+# These two tests -- and ONLY these two -- drive scripts/flow/lane-lock.sh, whose holder
+# identity is boot-id + /proc/<pid>/stat start-ticks. On a host without /proc `acquire`
+# REFUSES with reason=unresolved-identity BY DESIGN, so the occupied/self lane states these
+# cases assert can never be reached and both would FAIL on a macOS gate host -- which this
+# repo treats as first-class (scripts/agent-gate.sh carries a Darwin branch and a bash-3.2
+# floor; scripts/tests/test_agent_gate_tree_portability.sh exists because a GNU-only
+# construct once shipped without a macOS path).
+#
+# SCOPED TO THESE TWO TESTS, NOT THE SUITE. Skipping the whole file would drop ~120 cases of
+# claim.sh coverage that have nothing to do with /proc -- a real coverage hole, as against
+# these cases, whose SUBJECT does not exist on the platform. TESTs 1-20 and the leading-zero
+# block below still run everywhere.
+#
+# Keyed on CLAIM_TEST_OS (defaulting to `uname -s`) so the skip arm is exercisable on Linux
+# rather than being a branch nobody can reach -- the same reason agent-gate.sh keys its
+# sibling guard on AGENT_GATE_TEST_OS. A bare `[ -d /proc ]` probe that misfired on Linux
+# would silently delete this coverage exactly where it matters.
+if [ "${CLAIM_TEST_OS:-$(uname -s 2>/dev/null || echo unknown)}" != "Linux" ]; then
+  echo "SKIP - TEST 21 + TEST 22 (#3436 AC5/AC6): the machine-local lane lock is Linux-/proc-specific"
+  echo "SKIP -   by design; there lane-lock.sh acquire refuses with reason=unresolved-identity,"
+  echo "SKIP -   so there is no occupied/self lane state for these cases to assert."
+else
+  # ===========================================================================
+  echo "TEST 21: AC5 — every HELD line reports lane-lock=<state>; a WARNING that never changes the verdict"
+  # ===========================================================================
+  # The two locks arbitrate different things and used to know nothing about each
+  # other (#3436): `refs/claims/issue-<N>` is hard CROSS-machine and advisory
+  # LOCALLY, so a second session on one box walks into an occupied lane directory.
+  # `claim` now REPORTS the machine-local lock's state. The property under test is
+  # deliberately double-sided: the field must be PRESENT AND CORRECT, and the claim
+  # verdict + exit code must be BIT-FOR-BIT what they were before it existed — the
+  # whole risk of this feature is a warning that grows into a failure.
+  LANELOCK="$SCRIPT_DIR/../flow/lane-lock.sh"
+  # runAerr — like runA but with stderr captured to a file, since the occupant
+  # description (AC2) is a stderr note, not part of the verdict line.
+  runAerr() { local errf="$1"; shift; ( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin bash "$CLAIM" "$@" 2>"$errf" ); }
+
+  # (a) no lane directory at all — the ordinary case for a fresh claim. It must read
+  # as unremarkable (a distinct state, not a warning).
+  out21a=$(runA claim 30); rc21a=$?
+  if [ "$rc21a" -eq 0 ] && printf '%s\n' "$out21a" | grep -q 'CLAIM: HELD' \
+     && printf '%s\n' "$out21a" | grep -q 'lane-lock=no-lock-record(default-path-absent)'; then
+    ok "(a) AC5: with no record and no default lane dir, the state is what was MEASURED (no-lock-record) and the absent default path is a NAMED parenthetical, never a lane census (#3436 round 12)"
+  else
+    bad "(a) expected HELD + lane-lock=no-lock-record(default-path-absent) exit 0; got rc=$rc21a
+  $out21a"
+  fi
+
+  # (b) the lane directory exists but nobody locked it -> no-lock-record (a DISTINCT state,
+  # and deliberately not called 'free': absence of a record is not evidence of an empty lane).
+  mkdir -p "$LANE_ROOT/lane-31"
+  out21b=$(runA claim 31); rc21b=$?
+  if [ "$rc21b" -eq 0 ] && printf '%s\n' "$out21b" | grep -q 'CLAIM: HELD' \
+     && printf '%s\n' "$out21b" | grep -q 'lane-lock=no-lock-record' \
+     && ! printf '%s\n' "$out21b" | grep -q 'lane-lock=free'; then
+    ok "(b) AC5: an existing but unlocked lane directory reports lane-lock=no-lock-record — NOT 'free', which would assert the lane is unoccupied when all that was measured is the absence of a record — and the claim is still HELD (exit 0)"
+  else
+    bad "(b) expected HELD + lane-lock=no-lock-record (never 'free') exit 0; got rc=$rc21b
+  $out21b"
+  fi
+
+  # (c) A LIVE HOLDER, AND THIS RUN CANNOT SAY WHETHER IT IS US — which is the COMMON path
+  # (#3436 FIX 7): `claim` runs from the root checkout, so no durable in-lane process exists
+  # and the probe's own token matches nobody. `occupied-alive` ASSERTS the occupant is
+  # someone else, and that must not be asserted from the failure to prove SELF, so the state
+  # is the distinct `occupied-alive-unattributed`. A real `sleep` is the occupant, so
+  # liveness is measured against a real /proc entry rather than a fabricated record.
+  sleep 900 &
+  OCCUPANT_PID=$!
+  LANE_LOCK_PID=$OCCUPANT_PID bash "$LANELOCK" acquire 32 >/dev/null 2>&1
+  out21c=$(runAerr "$T/err21c" claim 32); rc21c=$?
+  err21c=$(cat "$T/err21c" 2>/dev/null)
+  ref32=$(ref_sha 32)
+  if [ "$rc21c" -eq 0 ] && printf '%s\n' "$out21c" | grep -q 'CLAIM: HELD' \
+     && printf '%s\n' "$out21c" | grep -q 'lane-lock=occupied-alive-unattributed' \
+     && [ -n "$ref32" ]; then
+    ok "(c) AC5/FIX7: a live holder with our own identity UNRESOLVED reports lane-lock=occupied-alive-unattributed — not 'occupied-alive' — and the claim is STILL GRANTED (exit 0, ref created)"
+  else
+    bad "(c) expected HELD + lane-lock=occupied-alive-unattributed exit 0 with the ref created; got rc=$rc21c ref=$ref32
+  $out21c"
+  fi
+  # AC2's principle: a collision diagnosed generically sends the reader to the wrong
+  # problem, so the note must NAME the occupant — while NOT claiming it is someone else.
+  if printf '%s\n' "$err21c" | grep -q "holder-pid=$OCCUPANT_PID" \
+     && printf '%s\n' "$err21c" | grep -q 'acquired-ts=' \
+     && printf '%s\n' "$err21c" | grep -q 'age=' \
+     && printf '%s\n' "$err21c" | grep -q 'could NOT establish whether it is YOU' \
+     && printf '%s\n' "$err21c" | grep -q 'our-identity=UNRESOLVED' \
+     && ! printf '%s\n' "$err21c" | grep -q 'ALREADY OCCUPIED'; then
+    ok "(c) AC5: the note NAMES the occupant (pid=$OCCUPANT_PID, acquired-ts, age) AND says the relationship is undetermined, without the 'ALREADY OCCUPIED' accusation"
+  else
+    bad "(c) the unattributed note is wrong (want holder-pid=$OCCUPANT_PID + acquired-ts + age + 'could NOT establish whether it is YOU' + our-identity=UNRESOLVED, and NO 'ALREADY OCCUPIED'):
+  $err21c"
+  fi
+
+  # (c2) POSITIVE CONTROL — otherwise a fix that ALWAYS reports `unattributed` would pass.
+  # With a live --pid that is NOT the occupant, our identity IS established and the tokens
+  # differ, so the occupant is KNOWN to be someone else: `occupied-alive`, the accusation
+  # earned by measurement. `$$` is this suite's own shell: real, live, and not the sleeper.
+  LANE_LOCK_PID=$OCCUPANT_PID bash "$LANELOCK" acquire 36 >/dev/null 2>&1
+  out21c2=$(LANE_LOCK_PID=$$ runAerr "$T/err21c2" claim 36); rc21c2=$?
+  err21c2=$(cat "$T/err21c2" 2>/dev/null)
+  if [ "$rc21c2" -eq 0 ] && printf '%s\n' "$out21c2" | grep -q 'CLAIM: HELD' \
+     && printf '%s\n' "$out21c2" | grep -q 'lane-lock=occupied-alive' \
+     && ! printf '%s\n' "$out21c2" | grep -q 'unattributed' \
+     && printf '%s\n' "$err21c2" | grep -q 'ALREADY OCCUPIED'; then
+    ok "(c2) AC5/FIX7 control: with our identity ESTABLISHED and a differing token the state IS occupied-alive and the note DOES accuse — so the unattributed state is not a blanket answer"
+  else
+    bad "(c2) expected lane-lock=occupied-alive (not unattributed) with the ALREADY OCCUPIED note; got rc=$rc21c2
+  $out21c2
+  $err21c2"
+  fi
+
+  # (d) NON-VACUITY: with lane-lock.sh unavailable the claim must still succeed and
+  # say so. The artifact is SUBSTITUTED in a scratch copy of the tree — there is no
+  # env override to point the report elsewhere, on #3312's ruling that the
+  # constrained party must not choose its own enforcer.
+  mkdir -p "$T/scratch-nolanelock/flow"
+  cp "$CLAIM" "$T/scratch-nolanelock/flow/claim.sh"
+  rc=0; out21d=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin bash "$T/scratch-nolanelock/flow/claim.sh" claim 34 2>/dev/null ) || rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s\n' "$out21d" | grep -q 'CLAIM: HELD' \
+     && printf '%s\n' "$out21d" | grep -q 'lane-lock=unmeasured('; then
+    ok "(d) AC5 non-vacuity: with lane-lock.sh absent the claim still succeeds and reports lane-lock=unmeasured(...)"
+  else
+    bad "(d) expected HELD + lane-lock=unmeasured(...) exit 0 with lane-lock.sh absent; got rc=$rc
+  $out21d"
+  fi
+
+  # (e) THE FIELD IS ON THE RE-ENTRANT PATH TOO. There are four HELD emit sites in
+  # cmd_claim; a fix applied to one of them must not pass. (a)-(c) cover the plain
+  # post-push win; this covers the pre-check re-entrant one.
+  runA claim 35 >/dev/null 2>&1
+  out21e=$(runA claim 35); rc21e=$?
+  if [ "$rc21e" -eq 0 ] && printf '%s\n' "$out21e" | grep -q 're-entrant' \
+     && printf '%s\n' "$out21e" | grep -q 'lane-lock='; then
+    ok "(e) AC5: the re-entrant HELD line carries lane-lock= too (not just the post-push win)"
+  else
+    bad "(e) expected a re-entrant HELD carrying lane-lock=; got rc=$rc21e
+  $out21e"
+  fi
+
+  # (f) A SELF-HELD lane is its OWN state, not `occupied-alive` (#3436 review).
+  # Both mean "a live process holds this lane", but the urgency is opposite: our own
+  # lock is unremarkable, a peer's is the #3436 incident. Conflating them left anyone
+  # grepping `lane-lock=occupied-alive` in a log unable to triage, so the field --
+  # whose whole job IS triage -- must separate them. The lock here is taken for the
+  # claim process's OWN resolved identity, so `probe` reports liveness=SELF.
+  # `$$` (this suite's own shell) is a REAL live process, and passing the SAME pid to
+  # the acquire and to claim.sh's probe makes both compute the same five-component
+  # token -- which is what SELF means. No test-only seam: LANE_LOCK_PID is a shipped
+  # env var of lane-lock.sh, used here exactly as a supervisor would.
+  mkdir -p "$LANE_ROOT/lane-33"
+  LANE_LOCK_PID=$$ bash "$LANELOCK" acquire 33 >/dev/null 2>&1
+  out21f=$(LANE_LOCK_PID=$$ runAerr "$T/err21f" claim 33); rc21f=$?
+  err21f=$(cat "$T/err21f" 2>/dev/null)
+  if [ "$rc21f" -eq 0 ] && printf '%s\n' "$out21f" | grep -q 'CLAIM: HELD' \
+     && printf '%s\n' "$out21f" | grep -q 'lane-lock=self'; then
+    ok "(f) AC5: a lane held by THIS session reports lane-lock=self, still HELD (exit 0)"
+  else
+    bad "(f) expected HELD + lane-lock=self exit 0; got rc=$rc21f
+  $out21f"
+  fi
+  # ...and it must NOT emit the alarming peer-occupancy note about our own lock: a
+  # warning fired on correct input is the warning readers learn to ignore.
+  if printf '%s\n' "$err21f" | grep -q 'held by THIS session' \
+     && ! printf '%s\n' "$err21f" | grep -q 'ALREADY OCCUPIED'; then
+    ok "(f) AC5: a self-held lane gets the THIS-session note and NOT the peer-occupancy warning"
+  else
+    bad "(f) expected the THIS-session note without the ALREADY OCCUPIED warning; got:
+  $err21f"
+  fi
+
+  # (h) A SPACE-BEARING LANE PATH (#3436 FIX 9b). `lane-dir` is the one field written RAW —
+  # it is a real filesystem path — and claim.sh read it with a space-delimited word scan, so
+  # `/data/my lanes/lane-38` became `/data/my`, the `[ -d ]` probe failed, and AC5 reported
+  # `no-lane-dir` for a lane that EXISTS: a false clean produced by a parser, about the lock
+  # whose entire job is preventing false cleans. lane-lock.sh now emits lane-dir LAST and
+  # claim.sh reads it as the rest of the line.
+  SPACE_ROOT="$T/my lanes"
+  mkdir -p "$SPACE_ROOT/lane-38"
+  rc=0
+  out21h=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_ROOT="$SPACE_ROOT" bash "$CLAIM" claim 38 2>"$T/err21h" ) || rc=$?
+  rc21h=$rc
+  err21h=$(cat "$T/err21h" 2>/dev/null)
+  if [ "$rc21h" -eq 0 ] && printf '%s\n' "$out21h" | grep -q 'CLAIM: HELD' \
+     && printf '%s\n' "$out21h" | grep -q 'lane-lock=no-lock-record' \
+     && ! printf '%s\n' "$out21h" | grep -q 'no-lane-dir'; then
+    ok "(h) FIX9b: an EXISTING lane directory whose path contains a SPACE reports lane-lock=no-lock-record, not no-lane-dir"
+  else
+    bad "(h) expected lane-lock=no-lock-record for a space-bearing lane path; got rc=$rc21h
+  $out21h
+  $err21h"
+  fi
+
+  # ...and the same path must survive into the OCCUPANT description, which is the half a
+  # reader acts on.
+  LANE_LOCK_PID=$OCCUPANT_PID LANE_ROOT="$SPACE_ROOT" bash "$LANELOCK" acquire 39 --lane-dir "$SPACE_ROOT/lane-39" >/dev/null 2>&1
+  rc=0
+  out21h2=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_ROOT="$SPACE_ROOT" bash "$CLAIM" claim 39 2>"$T/err21h2" ) || rc=$?
+  err21h2=$(cat "$T/err21h2" 2>/dev/null)
+  if [ "$rc" -eq 0 ] && printf '%s\n' "$out21h2" | grep -q 'CLAIM: HELD' \
+     && printf '%s\n' "$out21h2" | grep -q 'lane-lock=occupied-alive' \
+     && printf '%s\n' "$err21h2" | grep -qF "lane-dir=$SPACE_ROOT/lane-39"; then
+    ok "(h) FIX9b: the occupant note carries the WHOLE space-bearing path ($SPACE_ROOT/lane-39), not its first word"
+  else
+    bad "(h) expected the full space-bearing lane-dir in the occupant note; got rc=$rc
+  $out21h2
+  $err21h2"
+  fi
+
+  # (g) control: the field is not a constant. Four claims above measured four
+  # different lane states, so a hard-coded value cannot satisfy all of them, and
+  # `self` vs `occupied-alive` in particular cannot be one value.
+  s21a=$(printf '%s\n' "$out21a" | grep -o 'lane-lock=[^ ]*' | head -1)
+  s21b=$(printf '%s\n' "$out21b" | grep -o 'lane-lock=[^ ]*' | head -1)
+  s21c=$(printf '%s\n' "$out21c" | grep -o 'lane-lock=[^ ]*' | head -1)
+  s21f=$(printf '%s\n' "$out21f" | grep -o 'lane-lock=[^ ]*' | head -1)
+  s21c2=$(printf '%s\n' "$out21c2" | grep -o 'lane-lock=[^ ]*' | head -1)
+  uniq_states=$(printf '%s\n%s\n%s\n%s\n%s\n' "$s21a" "$s21b" "$s21c" "$s21c2" "$s21f" | sort -u | grep -c .)
+  if [ -n "$s21a" ] && [ -n "$s21b" ] && [ -n "$s21c" ] && [ -n "$s21c2" ] && [ -n "$s21f" ] \
+     && [ "$uniq_states" -eq 5 ]; then
+    ok "(g) AC5 control: the lane states measured here are all DISTINCT values ($s21a / $s21b / $s21c / $s21c2 / $s21f)"
+  else
+    bad "(g) expected five distinct lane-lock states; got '$s21a' '$s21b' '$s21c' '$s21c2' '$s21f' (uniq=$uniq_states)"
+  fi
+
+  # ===========================================================================
+  echo "TEST 22: AC6 — the legacy-branch refusal splits THREE ways by what the evidence PROVES, and none prints a runnable resume"
+  # ===========================================================================
+  # Measured on #3393: a slice shipped, the claim ref was released correctly and the
+  # board went back to Ready — proper finalize behaviour — then work resumed on the
+  # SAME branch for 20+ commits holding no claim. `claim` refused with
+  # reason=legacy-branch-lock and pointed at the abandoned-lane procedure, which is
+  # exactly the wrong advice when the lane is yours and live. The states have
+  # OPPOSITE remedies, so they must be textually distinct.
+  #
+  # ROUND-1 REVIEW FIX, and case (h) is the regression: three evidence rungs used to
+  # collapse onto reason=released-then-resumed, whose text says "the branch above is
+  # almost certainly YOUR OWN" and points at adoption. Only ONE of them proves that.
+  # A live LOCAL lane-lock holder proves a live process on THIS BOX owns the lane, NOT
+  # that it is THIS SESSION — and that is exactly #3436's scenario, so the refusal told
+  # a reader to adopt the claim for an actively-worked PEER lane (the inverse hazard).
+  # A lane DIRECTORY on the issue's branch proves less again. So: SELF ->
+  # released-then-resumed; live local peer -> lane-occupied-by-live-peer; everything
+  # else, worktree-only evidence INCLUDED -> legacy-branch-lock.
+  push_legacy_branch() {   # <issue> — an issue-<N>-* branch on origin, no claim ref
+    (
+      cd "$A" || exit 1
+      gg checkout -q -b "issue-$1-slug" main
+      gg commit -q --allow-empty -m "work on issue $1"
+      gg push -q origin "issue-$1-slug"
+      gg checkout -q main
+      gg branch -q -D "issue-$1-slug"
+    )
+  }
+
+  # (a) NO local evidence -> the unchanged generic verdict.
+  push_legacy_branch 40
+  out22a=$(runA claim 40 2>/dev/null); rc22a=$?
+  if [ "$rc22a" -eq 2 ] && printf '%s\n' "$out22a" | grep -q 'reason=legacy-branch-lock' \
+     && printf '%s\n' "$out22a" | grep -q 'claim-ref=free' \
+     && printf '%s\n' "$out22a" | grep -q 'lane-evidence=none' \
+     && ! printf '%s\n' "$out22a" | grep -q 'released-then-resumed'; then
+    ok "(a) AC6: an issue-40-* branch with NO local lane evidence keeps reason=legacy-branch-lock (exit 2, lane-evidence=none)"
+  else
+    bad "(a) expected reason=legacy-branch-lock exit 2 with no released-then-resumed; got rc=$rc22a
+  $out22a"
+  fi
+
+  # (b) THIS SESSION holds the lane lock (SELF, the strongest evidence) -> the new
+  # verdict. LANE_LOCK_PID is lane-lock.sh's own documented env, used identically for
+  # the acquire and the claim, so the token really is this session's — no test-only
+  # seam is introduced in either script.
+  push_legacy_branch 41
+  LANE_LOCK_PID=$OCCUPANT_PID bash "$LANELOCK" acquire 41 >/dev/null 2>&1
+  rc=0; out22b=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_LOCK_PID=$OCCUPANT_PID bash "$CLAIM" claim 41 2>/dev/null ) || rc=$?
+  rc22b=$rc
+  if [ "$rc22b" -eq 2 ] && printf '%s\n' "$out22b" | grep -q 'reason=released-then-resumed' \
+     && printf '%s\n' "$out22b" | grep -q 'claim-ref=free' \
+     && printf '%s\n' "$out22b" | grep -q 'lane-evidence=lane-lock-self' \
+     && ! printf '%s\n' "$out22b" | grep -q 'reason=legacy-branch-lock' \
+     && ! printf '%s\n' "$out22b" | grep -q 'reason=lane-occupied-by-live-peer'; then
+    ok "(b) AC6: the lane lock held by THIS session yields reason=released-then-resumed (exit 2, lane-evidence=lane-lock-self)"
+  else
+    bad "(b) expected reason=released-then-resumed exit 2 with lane-evidence=lane-lock-self; got rc=$rc22b
+  $out22b"
+  fi
+
+  # (c) The prose must send the reader to the RIGHT procedure — and this assertion was
+  # INVERTED until roborev round 11. It required the text to say the abandoned-lane
+  # procedure "does not apply", i.e. it PINNED AN OVER-CLAIM: the lane lock is
+  # MACHINE-LOCAL and the branch is a REMOTE artifact, so holding the lock proves only
+  # that this process holds this machine's lock for this issue. A live worker on another
+  # machine can hold that branch with no claim ref (#3393, the very scenario this verdict
+  # names), and should-reap / board Status / branch author are the ONLY signals here that
+  # can see another machine. Telling the reader to skip them fails toward two writers. So
+  # the text must now SCOPE the claim and KEEP those checks, and still name verify first.
+  if printf '%s\n' "$out22b" | grep -q 'should-reap' \
+     && printf '%s\n' "$out22b" | grep -qi 'machine-local' \
+     && printf '%s\n' "$out22b" | grep -qi 'does NOT establish that the branch' \
+     && ! printf '%s\n' "$out22b" | grep -qi 'PROCEDURE DOES NOT APPLY' \
+     && printf '%s\n' "$out22b" | grep -q "'verify' subcommand"; then
+    ok "(c) AC6: the released-then-resumed text scopes its claim to LOCAL evidence, keeps the cross-machine checks, and points at verify"
+  else
+    bad "(c) released-then-resumed text over-claims (branch ownership from a machine-local lock) or drops the cross-machine checks:
+  $out22b"
+  fi
+
+  # (f) ROUND-1 REVIEW: WORKTREE-ONLY EVIDENCE IS REPORTED AND DECIDES NOTHING.
+  # A lane directory on this issue's branch used to be evidence enough for
+  # released-then-resumed — i.e. an unattributed directory got a reader told the branch
+  # was theirs, with an adoption pointer attached. A directory existing says nobody is
+  # necessarily in it, and the branch says nothing about WHICH session put it there. So
+  # the verdict falls back to the generic one AND the observation still shows up in
+  # `lane-evidence=`, which is what keeps the rung visible without it deciding.
+  push_legacy_branch 42
+  mkdir -p "$LANE_ROOT/lane-42"
+  (
+    cd "$LANE_ROOT/lane-42" || exit 1
+    gg init -q .
+    echo x >x.txt; gg add x.txt; gg commit -qm x
+    gg checkout -q -b issue-42-slug
+  )
+  out22f=$(runA claim 42 2>/dev/null); rc22f=$?
+  if [ "$rc22f" -eq 2 ] && printf '%s\n' "$out22f" | grep -q 'reason=legacy-branch-lock' \
+     && printf '%s\n' "$out22f" | grep -q 'lane-evidence=lane-worktree-branch' \
+     && ! printf '%s\n' "$out22f" | grep -q 'released-then-resumed' \
+     && ! printf '%s\n' "$out22f" | grep -q 'lane-occupied-by-live-peer'; then
+    ok "(f) AC6: a local lane checkout on issue-42-* (no lane lock) keeps reason=legacy-branch-lock, with the worktree still REPORTED in lane-evidence="
+  else
+    bad "(f) expected reason=legacy-branch-lock with lane-evidence=lane-worktree-branch...; got rc=$rc22f
+  $out22f"
+  fi
+
+  # (g) NEGATIVE control for (f), so the branch match is proven to do work: the same
+  # lane directory shape on an UNRELATED branch must fall back to the generic verdict.
+  # Fail-closed direction: an unread/unmatched signal is NO evidence.
+  push_legacy_branch 43
+  mkdir -p "$LANE_ROOT/lane-43"
+  (
+    cd "$LANE_ROOT/lane-43" || exit 1
+    gg init -q .
+    echo x >x.txt; gg add x.txt; gg commit -qm x
+  )
+  out22g=$(runA claim 43 2>/dev/null); rc22g=$?
+  if [ "$rc22g" -eq 2 ] && printf '%s\n' "$out22g" | grep -q 'reason=legacy-branch-lock' \
+     && printf '%s\n' "$out22g" | grep -q 'lane-evidence=none' \
+     && ! printf '%s\n' "$out22g" | grep -q 'released-then-resumed'; then
+    ok "(g) AC6 control: a lane checkout NOT on issue-43-* is no evidence at all (lane-evidence=none) — so (f)'s branch match is proven to do work"
+  else
+    bad "(g) expected the generic legacy-branch-lock verdict for a non-matching branch; got rc=$rc22g
+  $out22g"
+  fi
+
+  # (h) THE ROUND-1 REGRESSION CASE. Evidence (b): a LIVE LOCAL holder that is NOT this
+  # session. The lane lock is acquired for the sleeper's pid but the claim runs WITHOUT
+  # LANE_LOCK_PID, so lane-lock `verify` fails (the token is not ours) and rung (a)
+  # cannot fire; the probe still reports ALIVE with the holder machine equal to ours and
+  # a holder token DIFFERENT from ours, which is (b). The lane directory here is the one
+  # lane-lock.sh created — NOT a git checkout — so (c) cannot fire either, which is what
+  # makes this case attribute the verdict to (b) alone.
+  #
+  # THIS IS THE CASE THAT WAS PREVIOUSLY WRONG: it returned reason=released-then-resumed,
+  # telling a session that a lane an ACTIVELY-WORKED PEER holds was "almost certainly
+  # YOUR OWN" and pointing it at claim adoption — the inverse of the right advice, and
+  # the exact collision #3436 exists to prevent. It must now be its own verdict.
+  # The claim runs with LANE_LOCK_PID=$$ — this suite's own live shell — so its OWN identity
+  # is ESTABLISHED (`our-identity=explicit`) and differs from the occupant's. Without that,
+  # our token matches nobody and the honest answer is the unattributed one, which case (i)
+  # below covers; naming a peer requires the affirmative measurement (#3436 FIX 7).
+  push_legacy_branch 44
+  LANE_LOCK_PID=$OCCUPANT_PID bash "$LANELOCK" acquire 44 >/dev/null 2>&1
+  rc=0; out22h=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_LOCK_PID=$$ bash "$CLAIM" claim 44 2>/dev/null ) || rc=$?
+  rc22h=$rc
+  if [ "$rc22h" -eq 2 ] && printf '%s\n' "$out22h" | grep -q 'reason=lane-occupied-by-live-peer' \
+     && printf '%s\n' "$out22h" | grep -q 'lane-evidence=lane-lock-alive-local-peer' \
+     && printf '%s\n' "$out22h" | grep -q "lane-holder-pid=$OCCUPANT_PID" \
+     && ! printf '%s\n' "$out22h" | grep -q 'reason=released-then-resumed' \
+     && ! printf '%s\n' "$out22h" | grep -q 'reason=legacy-branch-lock'; then
+    ok "(h) AC6 regression: a LIVE LOCAL lane-lock holder that is NOT this session is reason=lane-occupied-by-live-peer (exit 2), naming the holder pid — NOT released-then-resumed"
+  else
+    bad "(h) expected reason=lane-occupied-by-live-peer exit 2 with lane-evidence=lane-lock-alive-local-peer and lane-holder-pid=$OCCUPANT_PID; got rc=$rc22h
+  $out22h"
+  fi
+
+  # (h2) ...and its PROSE must send the reader somewhere else again: not to adoption,
+  # and not to the abandonment tests, which describe a lane nobody is in.
+  if printf '%s\n' "$out22h" | grep -q 'DO NOT ADOPT THE CLAIM REF' \
+     && printf '%s\n' "$out22h" | grep -q 'should-reap' \
+     && printf '%s\n' "$out22h" | grep -qi 'does not apply' \
+     && printf '%s\n' "$out22h" | grep -qi 'find that session'; then
+    ok "(h) AC6: the live-peer text refuses BOTH other remedies by name (no adoption, no abandonment procedure) and says to find that session"
+  else
+    bad "(h) live-peer text did not refuse adoption + the abandonment procedure:
+  $out22h"
+  fi
+
+  # (i) THE FIX-7 CASE, and it is the COMMON one: same setup as (h) but the claim runs with
+  # NO LANE_LOCK_PID from a cwd OUTSIDE the lane — i.e. exactly how `claim` runs in the flow,
+  # from the root checkout. Our own identity cannot be resolved, so our token matches nobody
+  # and the record reads ALIVE whether or not the holder is us. Naming a peer there is
+  # asserting a positive from the FAILURE to prove its opposite, and it told a session that
+  # its OWN lane belonged to someone else. The honest answer is the GENERIC verdict with both
+  # facts in the evidence.
+  push_legacy_branch 45
+  LANE_LOCK_PID=$OCCUPANT_PID bash "$LANELOCK" acquire 45 >/dev/null 2>&1
+  out22i=$(runA claim 45 2>/dev/null); rc22i=$?
+  if [ "$rc22i" -eq 2 ] && printf '%s\n' "$out22i" | grep -q 'reason=legacy-branch-lock' \
+     && ! printf '%s\n' "$out22i" | grep -q 'reason=lane-occupied-by-live-peer' \
+     && printf '%s\n' "$out22i" | grep -q 'lane-evidence=lane-lock-alive-local-unattributed:our-identity-UNRESOLVED' \
+     && printf '%s\n' "$out22i" | grep -q 'lane-lock=occupied-alive-unattributed'; then
+    ok "(i) AC6/FIX7: a live LOCAL holder with our own identity UNRESOLVED keeps reason=legacy-branch-lock, records BOTH facts in lane-evidence=, and reports the unattributed AC5 state"
+  else
+    bad "(i) expected legacy-branch-lock + lane-evidence=lane-lock-alive-local-unattributed:our-identity-UNRESOLVED + lane-lock=occupied-alive-unattributed; got rc=$rc22i
+  $out22i"
+  fi
+  # ...and (h) vs (i) differ ONLY in whether our own identity was resolvable. Same lane
+  # state, same holder liveness, OPPOSITE attribution — so neither verdict can be a constant.
+  r22h_chk=$(printf '%s\n' "$out22h" | grep -o 'reason=[^ ]*' | head -1)
+  r22i_chk=$(printf '%s\n' "$out22i" | grep -o 'reason=[^ ]*' | head -1)
+  if [ -n "$r22h_chk" ] && [ -n "$r22i_chk" ] && [ "$r22h_chk" != "$r22i_chk" ]; then
+    ok "(i) control: identical setup, identity established vs not, yields DIFFERENT verdicts ($r22h_chk vs $r22i_chk)"
+  else
+    bad "(i) control: expected different verdicts for established vs unresolved identity; got '$r22h_chk' and '$r22i_chk'"
+  fi
+
+  kill "$OCCUPANT_PID" 2>/dev/null || true
+  wait "$OCCUPANT_PID" 2>/dev/null || true
+
+  # (d) THE #2945 RULING, and a test is the only thing that keeps it true: NO refusal
+  # may print a runnable resume command. The readers are agents that execute printed
+  # remediations literally, and an older-fleet worker holds only the BRANCH, so a
+  # printed empty-lease adopt WOULD succeed against a live lane. All FOUR refusal
+  # outputs above are checked, the live-peer one included — it is the one where a
+  # printed adopt would do the most damage.
+  d22_bad=""
+  for v in a b f h i; do
+    eval "d22_out=\"\$out22$v\""
+    if printf '%s\n' "$d22_out" | grep -q 'claim.sh adopt' \
+       || printf '%s\n' "$d22_out" | grep -q -- '--expect none'; then
+      d22_bad="$d22_bad ($v)"
+    fi
+  done
+  if [ -z "$d22_bad" ]; then
+  # (k) SAME PROCESS, DIFFERENT ACTOR — not a peer (roborev round 2).
+  # The token is machine:actor:pid:boot:ticks, so comparing TOKENS made an actor change look
+  # like a different process: one session acquiring the lane as actor `flow` and claiming as
+  # `other` was told "a different live process on this machine holds that lane" about its OWN
+  # process, with the do-not-touch remedy attached. "A different process" is a PID/start-ticks
+  # difference; the actor gates verify/release but says nothing about process identity. The
+  # honest verdict here is neither peer nor self, so it is the generic one with the
+  # same-process observation recorded.
+  push_legacy_branch 46
+  LANE_LOCK_PID=$$ bash "$LANELOCK" acquire 46 --actor flow >/dev/null 2>&1
+  rc=0; out22k=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_LOCK_PID=$$ CLAIM_ACTOR=other bash "$CLAIM" claim 46 --actor other 2>/dev/null ) || rc=$?
+  rc22k=$rc
+  if [ "$rc22k" -eq 2 ] && printf '%s\n' "$out22k" | grep -q 'reason=legacy-branch-lock' \
+     && printf '%s\n' "$out22k" | grep -q 'lane-evidence=lane-lock-alive-local-same-process-other-actor' \
+     && ! printf '%s\n' "$out22k" | grep -q 'reason=lane-occupied-by-live-peer' \
+     && ! printf '%s\n' "$out22k" | grep -q 'reason=released-then-resumed'; then
+    ok "(k) AC6/round-2: the SAME process holding under a different actor is NOT lane-occupied-by-live-peer; the verdict is generic and the evidence records same-process-other-actor"
+  else
+    bad "(k) expected reason=legacy-branch-lock with lane-evidence=...same-process-other-actor; got rc=$rc22k
+  $out22k"
+  fi
+
+  # (k2) POSITIVE CONTROL: a genuinely different live process, same actor, IS a peer. Without
+  # this, an implementation that never says live-peer would satisfy (k).
+  push_legacy_branch 47
+  sleep 900 &
+  OCC47=$!
+  LANE_LOCK_PID=$OCC47 bash "$LANELOCK" acquire 47 >/dev/null 2>&1
+  rc=0; out22k2=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_LOCK_PID=$$ bash "$CLAIM" claim 47 2>/dev/null ) || rc=$?
+  if [ "$rc" -eq 2 ] && printf '%s\n' "$out22k2" | grep -q 'reason=lane-occupied-by-live-peer'; then
+    ok "(k2) control: a DIFFERENT live pid, same actor, still yields lane-occupied-by-live-peer — so (k) is not satisfied by never naming a peer"
+  else
+    bad "(k2) expected lane-occupied-by-live-peer for a different live pid; got rc=$rc
+  $out22k2"
+  fi
+  kill "$OCC47" 2>/dev/null || true
+
+  # (l) THE AC5 STATE MAPPING HAD THE SAME ACTOR BUG AS THE EVIDENCE LADDER (round 4).
+  # Two sites classified one fact and only the ladder was fixed, so a same-process actor
+  # change still reported `lane-lock=occupied-alive` and emitted the "do NOT write in that
+  # lane directory" warning about the caller's OWN process. Same miss shape as
+  # probe/verify-vs-release and the CAS-vs-re-entrant compare, which is why this asserts the
+  # STATE and the NOTE, not just the verdict.
+  push_legacy_branch 48
+  LANE_LOCK_PID=$$ bash "$LANELOCK" acquire 48 --actor flow >/dev/null 2>&1
+  rc=0; out22l=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_LOCK_PID=$$ CLAIM_ACTOR=other bash "$CLAIM" claim 48 --actor other 2>"$T/err22l" ) || rc=$?
+  err22l=$(cat "$T/err22l" 2>/dev/null)
+  if printf '%s\n' "$out22l" | grep -q 'lane-lock=self-other-actor' \
+     && ! printf '%s\n' "$out22l" | grep -q 'lane-lock=occupied-alive' \
+     && printf '%s\n' "$err22l" | grep -q 'DIFFERENT actor' \
+     && ! printf '%s\n' "$err22l" | grep -q 'ALREADY OCCUPIED'; then
+    ok "(l) AC5/round-4: our own PROCESS under another actor is lane-lock=self-other-actor, NOT occupied-alive, and the note does not warn about a peer"
+  else
+    bad "(l) expected lane-lock=self-other-actor and no ALREADY OCCUPIED note; got rc=$rc
+  $out22l
+  --- stderr ---
+  $err22l"
+  fi
+
+  # (l2) POSITIVE CONTROL: a genuinely different live process still reports occupied-alive.
+  push_legacy_branch 49
+  sleep 900 &
+  OCC49=$!
+  LANE_LOCK_PID=$OCC49 bash "$LANELOCK" acquire 49 >/dev/null 2>&1
+  rc=0; out22m=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_LOCK_PID=$$ bash "$CLAIM" claim 49 2>/dev/null ) || rc=$?
+  if printf '%s\n' "$out22m" | grep -q 'lane-lock=occupied-alive' \
+     && ! printf '%s\n' "$out22m" | grep -q 'self-other-actor'; then
+    ok "(l2) control: a DIFFERENT live pid still reports lane-lock=occupied-alive — so (l) is not satisfied by never reporting occupancy"
+  else
+    bad "(l2) expected lane-lock=occupied-alive for a different live pid; got
+  $out22m"
+  fi
+  kill "$OCC49" 2>/dev/null || true
+
+  # (n) A COLON-BEARING MACHINE IDENTITY (roborev round 5) — the THIRD instance of the
+  # token-parsing family. `sanitize_field` permits `:`, so a legitimate LANE_LOCK_MACHINE like
+  # `site:host` made `cut -d: -f1` on the display token yield `site`; the machine comparison
+  # then failed and a PROVEN live peer never reached lane-occupied-by-live-peer. Rounds 2 and 3
+  # fixed the token COMPARISONS and left this EXTRACTION, which is why the rule is #3312's:
+  # ask for the field, do not parse the channel.
+  push_legacy_branch 50
+  sleep 900 &
+  OCC50=$!
+  LANE_LOCK_MACHINE='site:host' LANE_LOCK_PID=$OCC50 bash "$LANELOCK" acquire 50 >/dev/null 2>&1
+  rc=0; out22n=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_LOCK_MACHINE='site:host' LANE_LOCK_PID=$$ bash "$CLAIM" claim 50 2>/dev/null ) || rc=$?
+  if [ "$rc" -eq 2 ] && printf '%s\n' "$out22n" | grep -q 'reason=lane-occupied-by-live-peer'; then
+    ok "(n) AC6/round-5: a colon-bearing machine identity ('site:host') still reaches lane-occupied-by-live-peer — the machine is read as a FIELD, not split out of the token"
+  else
+    bad "(n) expected lane-occupied-by-live-peer with a colon-bearing machine; got rc=$rc
+  $out22n"
+  fi
+  kill "$OCC50" 2>/dev/null || true
+
+  # (j) COMPOSED EVIDENCE — rungs (b) AND (c) fire together (implementer residual 3).
+  # Reachable and previously untested: a LIVE LOCAL peer holds the lane lock AND the lane
+  # directory is a git checkout on this issue's branch. The point of the case is that the
+  # two rungs have different jobs and composing them must not blur either: (b) DECIDES the
+  # verdict, (c) is only ever REPORTED. So the verdict must be lane-occupied-by-live-peer
+  # — the strongest true statement — while `lane-evidence=` carries BOTH observations, in
+  # that order, so a reader can see the whole basis rather than the winning half.
+  # A single-rung implementation, or one that let (c) override (b), fails here.
+  push_legacy_branch 45
+  mkdir -p "$LANE_ROOT/lane-45"
+  (
+    cd "$LANE_ROOT/lane-45" || exit 1
+    gg init -q .
+    echo x >x.txt; gg add x.txt; gg commit -qm x
+    gg checkout -q -b issue-45-slug
+  )
+  sleep 900 &
+  OCCUPANT45=$!
+  LANE_LOCK_PID=$OCCUPANT45 bash "$LANELOCK" acquire 45 --lane-dir "$LANE_ROOT/lane-45" >/dev/null 2>&1
+  rc=0; out22j=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_LOCK_PID=$$ bash "$CLAIM" claim 45 2>/dev/null ) || rc=$?
+  rc22j=$rc
+  if [ "$rc22j" -eq 2 ] && printf '%s\n' "$out22j" | grep -q 'reason=lane-occupied-by-live-peer' \
+     && printf '%s\n' "$out22j" | grep -q 'lane-evidence=lane-lock-alive-local-peer,lane-worktree-branch:issue-45-slug' \
+     && printf '%s\n' "$out22j" | grep -q "lane-holder-pid=$OCCUPANT45" \
+     && ! printf '%s\n' "$out22j" | grep -q 'reason=released-then-resumed' \
+     && ! printf '%s\n' "$out22j" | grep -q 'reason=legacy-branch-lock'; then
+    ok "(j) AC6: composed evidence (live LOCAL peer + a checkout on issue-45-*) is reason=lane-occupied-by-live-peer, and lane-evidence carries BOTH rungs — (b) decides, (c) only reports"
+  else
+    bad "(j) expected reason=lane-occupied-by-live-peer with lane-evidence=lane-lock-alive-local-peer,lane-worktree-branch:issue-45-slug; got rc=$rc22j
+  $out22j"
+  fi
+  kill "$OCCUPANT45" 2>/dev/null || true
+
+    ok "(d) AC6: no refusal prints a runnable resume command (no 'claim.sh adopt', no '--expect none') — checked on all five"
+  else
+    bad "(d) a refusal printed a runnable resume command (#2945 violation):$d22_bad
+  generic:   $out22a
+  resumed:   $out22b
+  worktree:  $out22f
+  live-peer: $out22h"
+  fi
+
+  # (e) DISTINCTNESS control over ALL THREE reason tokens: a two-verdict implementation
+  # fails here, which is precisely what the round-1 defect was. The tokens are compared
+  # as VALUES, never searched for as substrings (`legacy-branch-lock` is a substring of
+  # nothing else here, but `released-then-resumed` vs a hypothetical
+  # `released-then-resumed-peer` would defeat a substring test).
+  r22a=$(printf '%s\n' "$out22a" | grep -o 'reason=[^ ]*' | head -1)
+  r22b=$(printf '%s\n' "$out22b" | grep -o 'reason=[^ ]*' | head -1)
+  r22h=$(printf '%s\n' "$out22h" | grep -o 'reason=[^ ]*' | head -1)
+  uniq_reasons=$(printf '%s\n%s\n%s\n' "$r22a" "$r22b" "$r22h" | sort -u | grep -c .)
+  if [ -n "$r22a" ] && [ -n "$r22b" ] && [ -n "$r22h" ] && [ "$uniq_reasons" -eq 3 ]; then
+    ok "(e) AC6 control: the three refusals carry THREE DISTINCT reason tokens ($r22a / $r22b / $r22h)"
+  else
+    bad "(e) expected three distinct reason tokens; got '$r22a' '$r22b' '$r22h' (uniq=$uniq_reasons)"
+  fi
+
+fi
 # ===========================================================================
 echo
+# ===========================================================================
+echo 'TEST: a LEADING-ZERO issue is refused, because the claim ref is built from it RAW (round 19)'
+# ===========================================================================
+# `refs/claims/issue-$issue` is derived from the string RAW, so `03436` would create a DIFFERENT
+# ref from `3436` — two claim refs for one issue, i.e. the double-claim the ref exists to prevent,
+# arbitrated correctly by git while protecting nothing. lane-lock.sh already refused this and this
+# copy of the SAME function did not, so a padded issue was accepted here and rejected there,
+# degrading an otherwise fine claim to `lane-lock=unmeasured(probe-exit-N)`.
+#
+# REFUSE, not canonicalise: a tool that MINTS an identity from the number refuses a spelling it
+# did not choose; a tool that MATCHES numbers it FOUND (advertised-collision-scan) canonicalises.
+# MINT vs MATCH (#3436, roborev round 25). Round 19 refused padding on EVERY subcommand, which
+# stranded any `refs/claims/issue-03436` created before that round — it could no longer be
+# inspected, verified or RELEASED, i.e. the fix blocked cleanup of exactly the refs it existed to
+# prevent. `claim` and `adopt` MINT a ref from the string and must refuse a spelling they did not
+# choose; `status`, `verify` and `release` MATCH a ref that already exists and must accept the
+# spelling it actually has.
+for sub in claim adopt; do
+  out_z="$(bash "$CLAIM" "$sub" 03436 2>&1)"; rc_z=$?
+  if [ "$rc_z" -ne 0 ] && printf '%s' "$out_z" | grep -q 'leading zero'; then
+    ok "($sub) MINTS a ref, so a zero-padded issue is refused with the raw-derivation reason"
+  else
+    bad "($sub) a zero-padded issue was accepted by a ref-creating command: rc=$rc_z
+$out_z"
+  fi
+done
+for sub in status verify release; do
+  out_r="$(bash "$CLAIM" "$sub" 03436 2>&1)"; rc_r=$?
+  if ! printf '%s' "$out_r" | grep -q 'leading zero'; then
+    ok "($sub) MATCHES an existing ref, so a legacy zero-padded issue is still reachable"
+  else
+    bad "($sub) a read/cleanup command refused a legacy padded ref, stranding it: rc=$rc_r
+$out_r"
+  fi
+done
+# CONTROL: the canonical spelling still works — a guard that refuses everything is broken.
+out_c="$(bash "$CLAIM" status 3436 2>&1)"; rc_c=$?
+if [ "$rc_c" -eq 0 ] || printf '%s' "$out_c" | grep -q 'CLAIM: STATUS'; then
+  ok "CONTROL: the canonical issue number is still accepted"
+else
+  bad "CONTROL: the canonical number was refused too: rc=$rc_c
+$out_c"
+fi
+
+# ===========================================================================
+echo 'TEST: a credential-bearing CLAIM_REMOTE is REDACTED in claim.sh output (rounds 28/33)'
+# ===========================================================================
+# claim.sh interpolated $REMOTE into ~20 diagnostics with no redaction while its sibling
+# advertised-collision-scan.sh had redact_remote() from round 7 -- one env var, two scripts, one
+# leaking (round 28). The fix redacts at the ONE emit boundary (note + emit). It shipped with NO
+# TEST, which is why round 33 could then find a LOCALE bug in it and nothing would have caught a
+# regression either way. Exercised through the REAL emit path, not by sourcing the function: the
+# property that matters is what a user actually sees on stdout.
+# Deliberately OUTSIDE the CLAIM_TEST_OS guard above -- redaction has nothing to do with /proc.
+# BOUND THESE TWO through a RESOLVED command, never a bare `timeout` (#3436, roborev round 36).
+# Stock macOS has no `timeout`; GNU coreutils installs it as `gtimeout`. A bare `timeout` in a
+# gate-wired suite is therefore a FAILURE on a first-class macOS host -- and only the
+# /proc-dependent cases above are skipped there, so these two would red `tooling-tests` on a
+# platform this repo supports. An EMPTY resolver runs the command unbounded rather than skipping
+# the case: the assertion is about REDACTION, the bound is only insurance against a DNS stall,
+# and losing the redaction coverage would be the worse trade.
+T_TO=""
+if command -v timeout >/dev/null 2>&1; then T_TO=timeout
+elif command -v gtimeout >/dev/null 2>&1; then T_TO=gtimeout
+fi
+bounded_claim() {  # bounded_claim <env-assignments...> -- runs $CLAIM with them
+  if [ -n "$T_TO" ]; then ( cd /tmp && "$T_TO" 30 env "$@" ); else ( cd /tmp && env "$@" ); fi
+}
+
+o_red="$( bounded_claim CLAIM_REMOTE='https://user:ghp_TESTSECRET123@example.invalid/o/r.git' \
+          GIT_TERMINAL_PROMPT=0 bash "$CLAIM" status 999 2>&1 )"
+if ! printf '%s' "$o_red" | grep -q 'ghp_TESTSECRET123' \
+   && printf '%s' "$o_red" | grep -q '\*\*\*@example.invalid'; then
+  ok "a credential-bearing CLAIM_REMOTE is redacted to ***@host in claim.sh's emitted diagnostics"
+else
+  bad "the token survived into claim.sh output, or the host was lost:
+$o_red"
+fi
+# LOCALE: BSD/macOS sed REJECTS invalid UTF-8 in a UTF-8 locale, and redact_urls runs inside
+# `$(...)` in emit -- a failed sed would contribute an EMPTY substitution while the surrounding
+# echo still exits 0, printing a bare `CLAIM: ` and silently losing the whole verdict (round 33).
+# LC_ALL=C makes the match byte-oriented. Asserted as "the line still carries its content",
+# which is the property; the locale pin is the mechanism.
+o_utf="$( bounded_claim CLAIM_REMOTE="$(printf 'https://user:tok@ex\xff\xfeample.invalid/o/r.git')" \
+          LC_ALL=en_US.UTF-8 GIT_TERMINAL_PROMPT=0 bash "$CLAIM" status 999 2>&1 )"
+if printf '%s' "$o_utf" | grep -q 'ls-remote-unreachable-on' \
+   && ! printf '%s' "$o_utf" | grep -qE '^CLAIM: *$'; then
+  ok "a remote carrying INVALID UTF-8 still emits its full verdict — the redactor did not swallow the line"
+else
+  bad "an invalid-UTF-8 remote produced an empty or truncated verdict:
+$o_utf"
+fi
+
 echo "==== CLAIM-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

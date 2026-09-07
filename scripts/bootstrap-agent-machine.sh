@@ -5399,6 +5399,55 @@ else
   fi
 fi
 
+# ---- 5e. Lane-lock enforcement hook (issue #3436) ----------------------------
+# WHY BOOTSTRAP OWNS THIS. `.git/hooks` is not versioned, so a hook committed to the tree does
+# nothing until git is told where to look. `core.hooksPath` is the pointer, and it is set
+# REPO-LOCAL on purpose: every lane on this box is a worktree of ONE repository, so one setting
+# covers all of them, while a --global one would also apply to the scratch `git init`
+# repositories the test suites build — and scripts/tests/test_agent_gate_file_size_log.sh
+# already has to neutralise a global hooksPath for exactly that reason.
+#
+# WHAT THE HOOK DOES: refuses a commit in /data/lanes/lane-<N> when a DIFFERENT LIVE process on
+# this box holds that lane's lock, and acquires the lock when the lane is free. It is the
+# production acquire path the lock did not have (roborev job 434/436) — before it, `acquire`
+# appeared only in tests and in agent-instruction markdown, so the lock was taken only by an
+# agent choosing to follow an instruction. It NO-OPS outside a lane, so the root checkout and
+# the telemetry-<N> worktrees are untouched.
+#
+# NOT FATAL IF IT CANNOT BE SET: a box without the hook still works, it is simply unprotected,
+# and saying so is better than aborting a bootstrap over an advisory control.
+hooks_rel="scripts/git-hooks"
+# EVERY NON-ACTIONABLE OUTCOME IS INFORMATIONAL, NOT A WARNING — and that distinction is
+# load-bearing, not politeness. test_bootstrap_agent_machine.sh asserts a sandbox WARNING
+# BASELINE: a second warning makes three green-path cases SKIP instead of run, and that suite
+# already carries the scar ("one warning to every sandbox, and the suite still said FAIL=0").
+# My first version warned whenever the hook could not be wired, which in a sandbox with no
+# repository to protect drifted the baseline 1 -> 2 and silently disabled those cases. The
+# suite's guard caught it, which is the guard working. So: a `warn` here means SOMETHING ON
+# THIS BOX NEEDS ATTENTION. "There is no repository here" and "this checkout has no hook file"
+# need none — they are stated through `ok`, which carries the same information without
+# claiming an action item.
+if ! git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  ok "lane-lock hook: $REPO_ROOT is not a git repository — nothing to protect, guard not wired"
+elif [ ! -x "$REPO_ROOT/$hooks_rel/pre-commit" ]; then
+  ok "lane-lock hook: $hooks_rel/pre-commit absent from this checkout — guard NOT active"
+else
+  cur_hooks="$(git -C "$REPO_ROOT" config --local --get core.hooksPath 2>/dev/null || true)"
+  if [ "$cur_hooks" = "$hooks_rel" ]; then
+    ok "lane-lock hook: core.hooksPath already set to $hooks_rel"
+  elif [ -n "$cur_hooks" ]; then
+    # Someone else owns this lever. Do NOT take it over silently — a hooks path is a repo-wide
+    # behaviour change, and clobbering another owner's is how two mechanisms end up fighting
+    # over one setting. This one IS actionable, so it warns.
+    warn "lane-lock hook: core.hooksPath is already '$cur_hooks' (not $hooks_rel) — left alone; the #3436 commit guard is NOT active. Set it deliberately if that is wrong."
+  elif git -C "$REPO_ROOT" config --local core.hooksPath "$hooks_rel" 2>/dev/null; then
+    ok "lane-lock hook: core.hooksPath -> $hooks_rel (#3436 commit guard active for every lane)"
+  else
+    # Asked git and git refused: on a real box that is worth a human look.
+    warn "lane-lock hook: could not set core.hooksPath in $REPO_ROOT — the #3436 commit guard is NOT active"
+  fi
+fi
+
 # ---- 6. Health check: gate fmt + authoritative accelerators line ----
 hdr "Health check (gate fmt + accelerators line)"
 if [ "$SKIP_SMOKE" = 1 ]; then

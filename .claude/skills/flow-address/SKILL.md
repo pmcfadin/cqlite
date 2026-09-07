@@ -25,14 +25,50 @@ Resolve them in the worktree and reply per thread.
    instead **park** — post ONE structured question comment (options + recommendation + default), add the
    `needs-decision` label, write a `blocked` marker with `reason: needs-decision`, and **EXIT**, releasing
    the machine. Push back with a reason where a suggestion is wrong, rather than complying blindly.
-4. **Fix in the worktree** (`.claude/worktrees/issue-<N>-<slug>`), spawning `sstable-developer` for
+4. **Re-acquire before the first edit — this stage RESUMES work, which is where the collision window
+   reopens (#3436).** Addressing review comments is by definition restarting work on an existing branch,
+   so the #3436 trigger applies verbatim: *"I am about to commit to a branch for an issue I do not
+   currently hold"*. Do BOTH, before any fix:
+   ```bash
+   bash scripts/flow/claim.sh verify <N>       # on failure read reason=; see flow-implement step 2
+   # From the SESSION's own cwd, never a subshell. `$(cd … && pwd)` computes only a path
+   # and is REFUSED (reason=unresolved-identity, #3436 FIX 5); `( cd … && acquire )` is
+   # worse — it SUCCEEDS while recording the subshell, which exits on return, so the
+   # record reads DEAD-NO-PROCESS and a peer is granted the lane by auto-reclaim
+   # (#3436 FIX 14). The cwd test finds a process working in the lane; it does not prove
+   # the process outlives the command.
+   cd <worktree> || exit 1
+   bash scripts/flow/lane-lock.sh acquire <N> --lane-dir "$PWD" || exit 0
+   ```
+   **AND TAKE THE BOARD OFF `Ready` IN THE SAME BREATH (#3436 AC6).** Re-acquiring the claim
+   closes the window for a session that reads the *ref*; the board is what a session reads
+   *first*. #3393 ran 20+ commits with no claim ref **while the board advertised the issue as
+   available**, so a well-behaved peer doing exactly what doctrine says — read the board, take a
+   `Ready` item — would have collided, and the claim ref could not stop it because no ref existed.
+   ```bash
+   gh project item-list 1 --owner pmcfadin --query 'status:Ready' --format json -L 100 \
+     --jq '.items[]|select(.content.number==<N>)|.id'      # empty => already off Ready
+   # still Ready? set board Status=In Progress -- board Status ONLY, never a status:* label,
+   # which the #2855 mirror owns and will revert.
+   ```
+   `advertised-collision-scan.sh` reports exactly this shape (Ready + a pushed branch + no claim
+   ref), so leaving it unfixed on resume is a row someone else has to chase.
+   A `released-then-resumed` refusal is NOT a stale lock and NOT an abandoned peer lane — it means the
+   lane lock holds THIS SESSION's own token; take the documented `adopt --expect none --reason <why>`
+   path. A `lane-occupied-by-live-peer` refusal is its opposite: a DIFFERENT live process on this box is
+   in that lane — adopt nothing, reap nothing, stop. Same for a `lane-lock` `OCCUPIED` with
+   `liveness=ALIVE`: do not edit. Only a verifiably DEAD holder is auto-reclaimed.
+   `lane-lock=occupied-alive-unattributed` (or a `lane-evidence=…unattributed…`) means a live holder
+   exists and the run could NOT establish whether it is you — run `lane-lock.sh verify <N>` from
+   INSIDE the lane before writing anything.
+5. **Fix in the worktree** (`.claude/worktrees/issue-<N>-<slug>`), spawning `sstable-developer` for
    non-trivial code changes. Set the transient `addressing` sub-marker (a skill-managed marker the
    board→label mirror #2855 does not own); clear the sibling transient `spec-review` marker. Do NOT
    write status:ready/in-progress/in-review — those are the mirror's, derived from the board Status:
    ```bash
    gh issue edit <N> --remove-label status:spec-review --add-label status:addressing
    ```
-5. **Re-verify what the change touched — `--lite` per address round, NEVER a full gate here.** The tiered
+6. **Re-verify what the change touched — `--lite` per address round, NEVER a full gate here.** The tiered
    loop (#1821/#2087) gives each fix round `--lite`; the ONE full gate of record runs inside `flow-closer`
    (#2084). Always use the mandatory summary-file redirect (#1175/#2079) — never stream raw gate stdout
    into a persistent context:
@@ -50,13 +86,13 @@ Resolve them in the worktree and reply per thread.
    `NOTHING-TO-REVIEW` included, is a failed round, not clean.
    If the certified SHA moved, re-certification is the closer's full (or `--delta`) gate per
    the gate contract — not a full gate in this skill.
-6. **Push + reply.** `git -C <worktree> push`, then reply on each `$PR` thread with what changed (commit
+7. **Push + reply.** `git -C <worktree> push`, then reply on each `$PR` thread with what changed (commit
    ref), and clear the transient `addressing` sub-marker. The board stays `In Review` (PR still open),
    so the mirror keeps `status:in-review` — do NOT hand-write it:
    ```bash
    gh issue edit <N> --remove-label status:addressing
    ```
-7. **Re-certify and re-arm merge-on-green (#2667).** The owner's comments are input, NOT a merge
+8. **Re-certify and re-arm merge-on-green (#2667).** The owner's comments are input, NOT a merge
    gate — unless a comment is an explicit `HOLD:` or raises a product/scope question. After addressing
    them, re-certify (lite + any diff-relevant targets), then re-run premerge-assert in the shape that
    matches what you changed (#3465) and re-arm `gh pr merge --auto --squash --delete-branch`:
