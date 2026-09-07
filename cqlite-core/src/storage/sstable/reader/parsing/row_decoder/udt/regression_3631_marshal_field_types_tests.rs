@@ -259,17 +259,90 @@ fn an_unmappable_marshal_type_is_refused_as_an_undecodable_type_not_as_a_missing
     );
 }
 
-/// `VectorType(FloatType, 3)` is Cassandra 5.0's `vector<float, 3>`: STRUCTURAL, and
-/// `CqlType` has no variant for it. Same refusal, and still not a UDT.
+/// `VectorType(FloatType , 3)` is Cassandra 5.0's `vector<float, 3>`, and since
+/// issue #4114 it DECODES rather than being refused.
+///
+/// This case previously required the refusal, on the grounds that `CqlType` had no
+/// variant for it. That is no longer true — `CqlType::Vector(Box<CqlType>, usize)`
+/// exists, `parse_cassandra_type_with_depth` parses the constructor structurally,
+/// and the value is `4 * n` raw big-endian binary32 bytes with NO prefix of any
+/// kind (`cassandra-5.0.8` VectorType.java:94-101 picks width AND serializer from
+/// the element type; FixedLengthSerializer.split at :445-460 reads no prefix;
+/// FloatType.valueLengthIfFixed() == 4 at FloatType.java:148-152). So the old
+/// expectation encoded a MISSING FEATURE as a requirement, and keeping it would
+/// have pinned the defect in place.
+///
+/// The spacing is Cassandra's own: `TypeParser.stringifyVectorParameters`
+/// (TypeParser.java:239-242) writes `" , "`.
 #[test]
-fn a_structural_marshal_type_with_no_cqltype_is_refused_by_name() {
-    let ty = format!("{PKG}VectorType({PKG}FloatType, 3)");
-    let err = decode_field(&ty, &[0u8; 12]).expect_err("vector has no CqlType");
+fn a_marshal_vector_field_decodes_from_its_declared_dimension() {
+    let ty = format!("{PKG}VectorType({PKG}FloatType , 3)");
+    assert_eq!(
+        field_type_of(&ty),
+        CqlType::Vector(Box::new(CqlType::Float), 3),
+        "the dimension must survive the type parse — it is the only thing that \
+         makes a prefix-free fixed-width value parseable"
+    );
+    // 3f800000 40200000 c0700000 == [1.0, 2.5, -3.75], the byte sequence verified
+    // against the committed Cassandra-written fixture in
+    // `.drive-issue-4114/format-authority.md`.
+    let bytes = [
+        0x3f, 0x80, 0x00, 0x00, 0x40, 0x20, 0x00, 0x00, 0xc0, 0x70, 0x00, 0x00,
+    ];
+    assert_eq!(
+        decode_field(&ty, &bytes).expect("a 12-byte vector<float, 3> field must decode"),
+        Value::List(vec![
+            Value::Float32(1.0),
+            Value::Float32(2.5),
+            Value::Float32(-3.75)
+        ]),
+    );
+    // The refusal that DID survive: 12 bytes is the ONLY legal width, in both
+    // directions (`checkConsumedFully`, VectorType.java:358-363).
+    for wrong in [&bytes[..11], &bytes[..4]] {
+        assert!(
+            decode_field(&ty, wrong).is_err(),
+            "a {}-byte value is not a vector<float, 3>",
+            wrong.len()
+        );
+    }
+}
+
+/// The refusal #4114 KEEPS: a non-`float` element type. The shape generalises to
+/// any fixed-width element, but "the shape generalises" is not evidence the decode
+/// is right and there is no Cassandra-written fixture for any other element, so it
+/// is refused BY NAME rather than decoded (AC4).
+#[test]
+fn a_marshal_vector_of_a_non_float_element_is_refused_by_name() {
+    let ty = format!("{PKG}VectorType({PKG}DoubleType , 2)");
+    assert_eq!(
+        field_type_of(&ty),
+        CqlType::Vector(Box::new(CqlType::Double), 2),
+        "the TYPE parses; only the DECODE is unimplemented"
+    );
+    let err = decode_field(&ty, &[0u8; 16]).expect_err("only vector<float, n> decodes");
     let msg = err.to_string();
     assert!(
-        msg.contains("VectorType") && !msg.contains("nested user-defined type"),
-        "{msg}"
+        msg.contains("Double") && msg.contains("not implemented"),
+        "the refusal must name the element type it cannot decode: {msg}"
     );
+    assert!(
+        !msg.contains("nested user-defined type"),
+        "a vector is not a UDT: {msg}"
+    );
+}
+
+/// A dimension Cassandra itself rejects (`VectorType.java:89-90`, `dimension <= 0`)
+/// must be refused at the TYPE, by name — never read as an empty vector, which
+/// Cassandra does not have (`:409-414`).
+#[test]
+fn a_zero_dimension_marshal_vector_is_refused_at_the_type() {
+    let err = V5CompressedLegacyParser::parse_udt_type_definition(&marshal_udt_with_field(
+        &format!("{PKG}VectorType({PKG}FloatType , 0)"),
+    ))
+    .expect_err("dimension 0 is not a legal vector");
+    let msg = err.to_string();
+    assert!(msg.contains("dimension 0"), "{msg}");
 }
 
 /// The SAME type spelled BARE. `TypeParser.getAbstractType` (TypeParser.java:450)
