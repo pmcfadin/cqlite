@@ -196,7 +196,15 @@ impl SSTableManager {
         let _refresh_guard = self.refresh_lock.lock().await;
 
         // 1. Rediscover the current on-disk Data.db set (no readers opened yet).
-        let discovered_paths = self.discover_data_file_paths().await?;
+        //
+        //    The walk records rather than aborts on an unreadable directory (issue
+        //    #4159), which matters MORE here than at construction: `refresh_tables`
+        //    reads "not discovered" as "removed from disk", so a directory it could
+        //    not read would otherwise look like a mass deletion and DROP live
+        //    readers. Every diff step below is therefore gated on the walk having
+        //    had a complete view of the path in question.
+        let walk = self.discover_data_file_paths().await?;
+        let discovered_paths = walk.data_files.clone();
 
         // Precompute a raw-path -> canonical-path cache for EVERY path this
         // refresh will diff. Filesystem canonicalization happens ONLY here (and
@@ -268,6 +276,11 @@ impl SSTableManager {
             opened.push((canon_of(path), sstable_id, key, reader_arc));
         }
 
+        // The unreadable regions, in the SAME canonical form as every path below,
+        // so "was this path inside a part of the tree the walk could not see?" is
+        // answered without a syscall under the write guard.
+        let walk = walk.canonicalized_unreadable(|p| canon_of(p));
+
         // Canonical paths this refresh RE-OPENED successfully. A refusal recorded
         // for one of these has been REPAIRED IN PLACE (the classic case: the
         // manager opened mid-`rsync` over a half-written `Statistics.db`, and the
@@ -294,10 +307,23 @@ impl SSTableManager {
         //     below uses, from the precomputed cache — zero syscalls under the
         //     guard. Note the ledger has no other exit: a generation that is still
         //     unreadable aborts step 4 with `?`, so this line is not even reached.
+        //
+        //     A path the walk could not SEE is not a path that disappeared: while
+        //     its directory is unreadable nothing has been learned about it, so the
+        //     refusal stands.
         refusal::retain_still_refusing(&mut refused, |p| {
             let c = canon_of(p);
-            discovered_canon.contains(&c) && !reopened_canon.contains(&c)
+            let vanished = !discovered_canon.contains(&c) && walk.view_was_complete_for(&c);
+            !vanished && !reopened_canon.contains(&c)
         });
+
+        // 5.0b Replace the incomplete-walk record with THIS walk's. A directory
+        //      that became readable again must stop making absence unknowable, and
+        //      one that just became unreadable must start.
+        {
+            let mut incomplete = self.incomplete_walk.write().await;
+            *incomplete = walk.unreadable.clone();
+        }
 
         // 5a. Removal: retain only readers still present on disk. Every
         //     canonical path below comes from the precomputed cache — the
@@ -323,8 +349,11 @@ impl SSTableManager {
         {
             let mut seen: HashSet<*const reader::SSTableReader> = HashSet::new();
             for r in readers.values().chain(table_readers.values().flatten()) {
-                if discovered_canon.contains(&canon_of(&r.file_path())) {
-                    continue; // still present on disk — not removed
+                let c = canon_of(&r.file_path());
+                if discovered_canon.contains(&c) || !walk.view_was_complete_for(&c) {
+                    // Still present on disk, or under a directory the walk could
+                    // not read (so not knowably removed) — either way, not removed.
+                    continue;
                 }
                 if seen.insert(Arc::as_ptr(r)) {
                     r.invalidate_key_cache_entries();
@@ -332,9 +361,17 @@ impl SSTableManager {
             }
         }
 
-        readers.retain(|_id, r| discovered_canon.contains(&canon_of(&r.file_path())));
+        // A reader is removed only when the walk SAW that its path is gone. Under an
+        // unreadable directory the walk's silence is not evidence of deletion, and
+        // dropping a live reader on it would turn a permissions problem into
+        // silently short scan results — the very failure mode this issue is about.
+        let still_on_disk = |r: &Arc<reader::SSTableReader>| {
+            let c = canon_of(&r.file_path());
+            discovered_canon.contains(&c) || !walk.view_was_complete_for(&c)
+        };
+        readers.retain(|_id, r| still_on_disk(r));
         for list in table_readers.values_mut() {
-            list.retain(|r| discovered_canon.contains(&canon_of(&r.file_path())));
+            list.retain(&still_on_disk);
         }
         table_readers.retain(|_key, list| !list.is_empty());
 

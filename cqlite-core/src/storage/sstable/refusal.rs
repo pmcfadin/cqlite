@@ -202,7 +202,11 @@ impl SSTableManager {
         table_id: &TableId,
     ) -> Result<(Vec<Arc<reader::SSTableReader>>, bool)> {
         self.ensure_readable(table_id).await?;
-        Ok(self.resolve_reader_snapshot(table_id).await)
+        let snapshot = self.resolve_reader_snapshot(table_id).await;
+        if snapshot.0.is_empty() {
+            self.ensure_absence_is_knowable(table_id).await?;
+        }
+        Ok(snapshot)
     }
 
     /// [`resolve_table_readers`](SSTableManager::resolve_table_readers) with the
@@ -214,7 +218,11 @@ impl SSTableManager {
         table_id: &TableId,
     ) -> Result<Vec<Arc<reader::SSTableReader>>> {
         self.ensure_readable(table_id).await?;
-        Ok(self.resolve_table_readers(table_id).await)
+        let readers = self.resolve_table_readers(table_id).await;
+        if readers.is_empty() {
+            self.ensure_absence_is_knowable(table_id).await?;
+        }
+        Ok(readers)
     }
 
     /// `Ok(())` iff no recorded refusal bears on a read of `table_id`.
@@ -225,6 +233,30 @@ impl SSTableManager {
     pub(crate) async fn ensure_readable(&self, table_id: &TableId) -> Result<()> {
         let refused = self.refused.read().await;
         check(&refused, table_id.name())
+    }
+
+    /// `Ok(())` iff the manager may honestly report that `table_id` has NO data.
+    ///
+    /// Asked ONLY when the resolved reader list came out empty, which is the one
+    /// question an incomplete discovery walk can change the answer to. A table that
+    /// WAS discovered and opened reads normally no matter how much of the rest of
+    /// the tree was unreadable — that is what keeps a stock root-owned `lost+found`
+    /// (mode 0700, present on essentially every ext4 data volume) harmless instead
+    /// of turning it into a whole-database outage.
+    ///
+    /// See [`discovery_walk`](super::discovery_walk) for the four-outcome table this
+    /// implements, and why the fact is NOT recorded as an unattributed refusal.
+    pub(crate) async fn ensure_absence_is_knowable(&self, table_id: &TableId) -> Result<()> {
+        let incomplete = self.incomplete_walk.read().await;
+        let Some(first) = incomplete.first() else {
+            return Ok(());
+        };
+        Err(Error::incomplete_discovery(
+            table_id.name(),
+            first.path().to_path_buf(),
+            incomplete.len(),
+            first.cause(),
+        ))
     }
 }
 

@@ -11,7 +11,7 @@
 //!
 //! | Variant        | `as_str()`       | Maps from `cqlite_core::Error` …                                  |
 //! |----------------|------------------|-------------------------------------------------------------------|
-//! | `Io`           | `io`             | `Io`, `InvalidPath`, `Timeout`                                     |
+//! | `Io`           | `io`             | `Io`, `InvalidPath`, `Timeout`, `IncompleteDiscovery`              |
 //! | `Serialization`| `serialization`  | `Serialization`, `TypeConversion`                                 |
 //! | `Corruption`   | `corruption`     | `Corruption`, `CorruptCommitLogFrame`, `ColumnDecode`,            |
 //! |                |                  | `UnreadableSSTable`                                               |
@@ -156,7 +156,14 @@ impl std::fmt::Display for ObsErrorCategory {
 /// `Error::obs_category` and `record_error` route through it.
 pub(crate) fn classify(err: &Error) -> ObsErrorCategory {
     match err {
-        Error::Io(_) | Error::InvalidPath(_) | Error::Timeout(_) => ObsErrorCategory::Io,
+        // `IncompleteDiscovery` is an I/O condition (an unreadable directory), not
+        // corruption: the bytes of every file are fine, the walk simply could not
+        // see part of the tree. It belongs with the `io::Error` it carries, so a
+        // dashboard shows a permissions/mount problem as one.
+        Error::Io(_)
+        | Error::InvalidPath(_)
+        | Error::Timeout(_)
+        | Error::IncompleteDiscovery { .. } => ObsErrorCategory::Io,
 
         Error::Serialization { .. } | Error::TypeConversion(_) => ObsErrorCategory::Serialization,
 

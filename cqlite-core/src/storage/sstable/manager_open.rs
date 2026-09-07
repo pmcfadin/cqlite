@@ -23,8 +23,8 @@
 //! caller, test or supervisor can detect.
 
 use super::{
-    build_chunk_cache, is_apple_double_sidecar, refresh, refusal, SSTableId, SSTableManager,
-    MAX_SSTABLE_SCAN_DEPTH,
+    build_chunk_cache, discovery_walk, is_apple_double_sidecar, refresh, refusal, SSTableId,
+    SSTableManager, MAX_SSTABLE_SCAN_DEPTH,
 };
 use crate::platform::Platform;
 use crate::{Config, Result};
@@ -56,12 +56,14 @@ impl SSTableManager {
         let readers = Arc::new(RwLock::new(HashMap::new()));
         let table_readers = Arc::new(RwLock::new(HashMap::new()));
         let refused = Arc::new(RwLock::new(refusal::RefusalLedger::new()));
+        let incomplete_walk = Arc::new(RwLock::new(Vec::new()));
 
         let manager = Self {
             base_path,
             readers,
             table_readers,
             refused,
+            incomplete_walk,
             platform,
             config: config.clone(),
             discovery_source: refresh::DiscoverySource::BasePath,
@@ -160,12 +162,14 @@ impl SSTableManager {
         let readers = Arc::new(RwLock::new(HashMap::new()));
         let table_readers = Arc::new(RwLock::new(HashMap::new()));
         let refused = Arc::new(RwLock::new(refusal::RefusalLedger::new()));
+        let incomplete_walk = Arc::new(RwLock::new(Vec::new()));
 
         let manager = Self {
             base_path,
             readers,
             table_readers,
             refused,
+            incomplete_walk,
             platform: platform.clone(),
             config: config.clone(),
             discovery_source: refresh::DiscoverySource::TableDirs(table_dirs.clone()),
@@ -191,6 +195,7 @@ impl SSTableManager {
         let mut readers = self.readers.write().await;
         let mut table_readers = self.table_readers.write().await;
         let mut refused = self.refused.write().await;
+        let mut incomplete = self.incomplete_walk.write().await;
 
         tracing::debug!(
             "SSTableManager::load_from_table_directories: processing {} directories",
@@ -206,18 +211,57 @@ impl SSTableManager {
 
             tracing::debug!("SSTableManager scanning directory: {:?}", table_dir);
 
-            // Read directory contents
+            // Read directory contents. Issue #4159: a `warn!` + `continue` here
+            // made every SSTable under an unreadable table directory silently
+            // absent, and the scan surfaces then reported that absence as an EMPTY
+            // SUCCESS. The gap is RECORDED (not swallowed, and not escalated into
+            // an abort that would take every OTHER table down with it) so a query
+            // for an undiscovered table fails closed.
             let mut dir_entries = match self.platform.fs().read_dir(&table_dir).await {
                 Ok(entries) => entries,
                 Err(e) => {
-                    tracing::warn!("Cannot read table directory {:?}: {}", table_dir, e);
+                    let cause = discovery_walk::unreadable_dir_error(
+                        &table_dir,
+                        "read table directory",
+                        e,
+                    );
+                    tracing::warn!(
+                        "SSTableManager: {cause}. Discovery is INCOMPLETE; queries for \
+                         tables not otherwise discovered will fail closed."
+                    );
+                    incomplete.push(discovery_walk::UnreadableDir::new(
+                        table_dir.clone(),
+                        cause,
+                    ));
                     continue;
                 }
             };
 
             // Scan for Data.db files
             let mut files_found = 0;
-            while let Some(entry) = dir_entries.next_entry().await? {
+            loop {
+                // An entry can fail MID-ITERATION. Propagating with `?` here would
+                // abort the whole constructor over one directory (the same
+                // over-correction the `read_dir` arm above avoids), so the
+                // remainder of THIS directory is recorded as unseen and the walk
+                // moves on. Entries already collected are real and are kept.
+                let entry = match dir_entries.next_entry().await {
+                    Ok(Some(entry)) => entry,
+                    Ok(None) => break,
+                    Err(e) => {
+                        let cause = discovery_walk::unreadable_dir_error(
+                            &table_dir,
+                            "read an entry of",
+                            crate::Error::Io(e),
+                        );
+                        tracing::warn!("SSTableManager: {cause}");
+                        incomplete.push(discovery_walk::UnreadableDir::new(
+                            table_dir.clone(),
+                            cause,
+                        ));
+                        break;
+                    }
+                };
                 let path = entry.path();
                 if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
                     // Check for Cassandra SSTable data files using the *-Data.db pattern.
@@ -306,9 +350,21 @@ impl SSTableManager {
             return Ok(()); // No directory, no SSTables to load
         }
 
-        // Collect all Data.db paths by walking up to 3 levels deep
-        let data_files: Vec<PathBuf> =
+        // Collect all Data.db paths by walking up to 3 levels deep. The walk
+        // RECORDS every directory it could not read rather than aborting (issue
+        // #4159): one inaccessible directory — a root-owned `lost+found` at mode
+        // 0700 is on essentially every ext4 data volume — must not make the whole
+        // constructor fail and leave NO table readable. What it must not do either
+        // is vanish: an incomplete walk is remembered so a query for a table it
+        // did not discover fails closed instead of reporting "empty".
+        let walk =
             Self::find_data_files(&self.platform, &self.base_path, MAX_SSTABLE_SCAN_DEPTH).await?;
+        let data_files = walk.data_files;
+
+        {
+            let mut incomplete = self.incomplete_walk.write().await;
+            incomplete.extend(walk.unreadable);
+        }
 
         if data_files.is_empty() {
             return Ok(());

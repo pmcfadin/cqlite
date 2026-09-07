@@ -476,6 +476,24 @@ pub struct SSTableManager {
     /// [`Error::UnreadableSSTable`]: crate::Error::UnreadableSSTable
     pub(crate) refused: Arc<RwLock<refusal::RefusalLedger>>,
 
+    /// Directories the last discovery walk could NOT read (issue #4159).
+    ///
+    /// Kept SEPARATE from [`refused`](Self::refused) on purpose. A refusal is
+    /// attributed to a table; an unreadable directory is attributed to nothing —
+    /// recording it as an unattributed refusal would make it bear on EVERY table,
+    /// and since essentially every ext4 data volume carries a root-owned
+    /// `lost+found` at mode 0700, that would refuse all reads on the most common
+    /// real deployment layout.
+    ///
+    /// It bears on exactly one question: whether "this table was not discovered"
+    /// may be reported as "this table is empty". While this list is non-empty a
+    /// discovered table reads normally, and a query for an UNdiscovered one fails
+    /// closed with [`Error::IncompleteDiscovery`]. See [`discovery_walk`] for the
+    /// four-outcome table.
+    ///
+    /// [`Error::IncompleteDiscovery`]: crate::Error::IncompleteDiscovery
+    pub(crate) incomplete_walk: Arc<RwLock<Vec<discovery_walk::UnreadableDir>>>,
+
     /// Platform abstraction
     platform: Arc<Platform>,
 
@@ -2217,9 +2235,15 @@ mod tests {
         fs::write(&sidecar, b"\x00\x00").unwrap();
 
         // find_data_files scans `temp_dir` with max_depth=0 (single level).
-        let results = SSTableManager::find_data_files(&platform, temp_dir.path(), 0)
+        let walk = SSTableManager::find_data_files(&platform, temp_dir.path(), 0)
             .await
             .unwrap();
+        assert!(
+            walk.unreadable.is_empty(),
+            "a healthy temp directory must produce a COMPLETE walk, or the \
+             expectations below are about the wrong thing"
+        );
+        let results = walk.data_files;
 
         // Only the real Data.db file should be returned; the ._ sidecar must be excluded.
         assert_eq!(
