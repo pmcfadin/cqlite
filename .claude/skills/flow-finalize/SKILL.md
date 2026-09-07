@@ -132,12 +132,65 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    ref is THE cross-machine lock); deleting the `issue-<N>-<slug>` branch is plumbing cleanup of the merged
    PR head, not the lock. Both happen in step 6 below. After finalize, nothing for this issue may remain
    `In Progress`/`In Review`, and neither the claim ref nor an `issue-<N>-*` branch may remain on origin.
-6. **Release the claim ref, then remove the worktree + branch via the guarded cleanup (plumbing).** Do NOT hand-glob
+6. **Release the locks, THEN remove the worktree + branch via the guarded cleanup (plumbing).** Do NOT hand-glob
    `issue-<N>-*` or blindly `--force` — that destroyed an unrelated active claim on 2026-06-27 (the #1143
    incident: PR merged from `issue-1143-read-p99-regression`, glob also matched + deleted the separate
    active `issue-1143-scan-window-offload`). Use the guardrailed script instead — it targets ONLY the
    merged PR's branch, refuses on >1 lock for the issue (1:1:1:1 violation), and refuses to remove a
-   dirty/unpushed worktree:
+   dirty/unpushed worktree.
+   **Release the locks FIRST, while the lane directory still exists** — the claim ref, the actual
+   cross-machine lock (#2665), and the machine-local lane lock. The PR is merged, so the open-PR
+   guard passes; do NOT use `--force` here (that is the reaper's path in `flow-board`, not finalize).
+   **The ORDER is load-bearing and was wrong until #3436 roborev round 15**: the cleanup below deletes
+   the worktree, and `lane-lock.sh release` proves you are the holder by walking up from your cwd
+   INSIDE the lane — so releasing afterwards is refused as not-holder and leaks the record. Round 12
+   wrote that warning into the comment below and left the steps in the old order, which is why a
+   later review found it again: an instruction is not a sequence.
+   ```bash
+   bash scripts/flow/claim.sh release <N>   # deletes refs/claims/issue-<N> → CLAIM: RELEASED
+   # ...and drop the MACHINE-LOCAL lane lock (#3436). THIS IS NOW REQUIRED, not cosmetic:
+   # the lock files live in a lock root OUTSIDE the worktree (`$LANE_ROOT/.lane-locks`),
+   # so removing the worktree does NOT delete the record. An earlier version of this note
+   # said it did, which made a real release read as optional.
+   # KEYED BY ISSUE FIXES THE SUBJECT, NOT THE IDENTITY (#3436, roborev round 12). It needs
+   # no --lane-dir, so it cannot miss a lane locked under a non-default path -- but proving
+   # you are the HOLDER resolves an identity by walking up from your cwd INSIDE the lane, and
+   # the cleanup BELOW removes the worktree. Run from a deleted lane, release is
+   # refused as not-holder, and the `|| true` below turned that into a silent leak: the record
+   # outlives the lane and the next session for this issue meets a lock nobody can clear.
+   # SO THIS BLOCK RUNS FIRST, from inside the lane. If the lane is already gone,
+   # the sanctioned fallbacks are `--pid <durable-holder>` or `--force` (which only DELETES and
+   # needs no identity). Do not suppress the failure, and verify the record is actually gone.
+   # (#3436 FIX 8 --
+   # measured before the lock root existed: `release 9600` printed
+   # `RELEASED (already free) ... record=absent` rc=0 while the record sat in
+   # `.claude/worktrees/issue-9600-slug/`, i.e. a finalize reported a successful release
+   # having released nothing).
+   # A lock left behind by a killed session is still not a leak: its holder reads DEAD-*
+   # and the next acquire reclaims it automatically.
+   # PASS THE LEASE (#3436, roborev round 24). `release --expect` exists precisely so a DELAYED
+   # or DUPLICATED release cannot delete a NEWER lock: the five-component token is IDENTICAL
+   # across a release-and-reacquire by the same process, so only the lease (`<token>#<nonce>`,
+   # the record INCARNATION) tells the two apart. Adding the option and leaving the documented
+   # caller without it fixes nothing in the flow that actually runs — a second finalize, or a
+   # retried one, still deletes a live lock. Read the lease immediately before releasing; if the
+   # record changed in between, the CAS refuses, which is the point.
+   LEASE="$(bash scripts/flow/lane-lock.sh status <N> 2>/dev/null | grep -oE 'lease=[^ ]*' | head -1 | cut -d= -f2-)"
+   if [ -n "$LEASE" ]; then
+     bash scripts/flow/lane-lock.sh release <N> --expect "$LEASE"
+   else
+     # No lease means no record to protect — release plainly so a genuinely absent lock is still
+     # cleaned up. `--expect ''` is refused by design, so it must not be passed through.
+     bash scripts/flow/lane-lock.sh release <N>
+   fi
+   # NO `|| true` on either branch: a refused release is a LEAK, not noise
+   # VERIFY, do not assume — `status` must report no record for this issue:
+   bash scripts/flow/lane-lock.sh status <N>
+   # confirm gone: `claim.sh status <N>` prints `CLAIM: STATUS none`.
+   ```
+
+   **Now remove the worktree + branch via the guarded cleanup (plumbing).** Do NOT hand-glob
+   `issue-<N>-*` or blindly `--force`.
    ```bash
    # --confirm-unmerged: a squash-merge leaves the branch tip out of `main`; step 1
    # already verified PR state=MERGED, which IS the authority the flag stands for.
@@ -149,12 +202,6 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    dirty worktree by hand; never force past it. Confirm the lock is gone afterward:
    `git ls-remote --heads origin "issue-<N>-*"` returns nothing.
    (Regression coverage: `scripts/flow/tests/finalize-cleanup.test.sh` encodes the #1143 scenario.)
-   Then **release the claim ref itself** — the actual cross-machine lock (#2665). The PR is merged, so the
-   open-PR guard passes; do NOT use `--force` here (that is the reaper's path in `flow-board`, not finalize):
-   ```bash
-   bash scripts/flow/claim.sh release <N>   # deletes refs/claims/issue-<N> → CLAIM: RELEASED
-   # confirm gone: `claim.sh status <N>` prints `CLAIM: STATUS none`.
-   ```
    Then clear this machine's claim heartbeat so it doesn't linger on origin until `flow-board`'s 4h reap
    window (issue #2089):
    ```bash

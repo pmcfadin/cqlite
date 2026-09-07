@@ -19740,6 +19740,24 @@ run_features_load_bearing() {
 # two defects landed inside the two prior fix rounds — the #3229 `census-exclusion:` precedent),
 # so this file measures BEHAVIOUR against real code and nothing here depends on it; mechanization
 # is #3499. Hermetic: temp dir only, no cargo, no datasets, no network, never invokes the gate.
+# Also runs three #3436 suites, all hermetic and python3-free, so they run BEFORE this
+# component's python3 gate:
+#   * scripts/tests/test_lane_lock.sh                  — the machine-local lane-directory
+#                                                        lock (scripts/flow/lane-lock.sh)
+#   * scripts/tests/test_advertised_collision_scan.sh   — the ADVERTISED-COLLISION SCAN
+#                                                        (the coordination lead's
+#                                                        deliverable 2). It is NOT AC5 and
+#                                                        pins nothing in claim.sh; an
+#                                                        earlier version of this comment
+#                                                        said it did, sending a reader
+#                                                        chasing an AC5 failure to the
+#                                                        wrong suite.
+#   * scripts/tests/test_claim_lock.sh                  — the claim lock, and THE suite that
+#                                                        pins #3436 AC5/AC6 (the
+#                                                        `lane-lock=` warning field and the
+#                                                        three-way legacy-branch refusal).
+#                                                        Moved ahead of the python3 gate for
+#                                                        the same reason as the other two.
 # Also runs scripts/tests/test_dep_duplicates_ratchet.sh (#1700), the non-vacuity proof
 # for the ADVISORY dep-duplicates component: its cases drive
 # scripts/ci/check-dep-duplicates.sh over PLANTED cargo-tree output (shim `cargo` +
@@ -21723,13 +21741,166 @@ run_tooling_tests() {
     return 0
   fi
 
+  # PLATFORM GATE for the two #3436 suites below (roborev round 28, Medium). macOS is a
+  # FIRST-CLASS gate host — this script carries `Darwin) … taskpolicy -c utility`, a BSD
+  # `stat` branch, a /bin/bash-3.2 floor, and scripts/tests/test_agent_gate_tree_portability.sh
+  # exists solely because a GNU-only construct shipped without a macOS path. The lane lock is
+  # Linux-`/proc`-SPECIFIC BY DESIGN: its holder identity is boot-id + `/proc/<pid>/stat`
+  # start-ticks, and on a host without /proc `acquire` REFUSES with
+  # reason=unresolved-identity. test_lane_lock.sh is WHOLLY that subject — every case asserts
+  # real acquisitions against real /proc identities — so unguarded it would FAIL
+  # `tooling-tests` on every macOS gate host.
+  #
+  # SCOPED TO THIS ONE SUITE (#3436, roborev round 30). An earlier revision also skipped
+  # test_advertised_collision_scan.sh here, but only ONE of its 32 cases touches the lane lock
+  # (TEST 9's lock-record clause); the rest are pure git + filesystem and are exactly the
+  # portability coverage a macOS run exists to provide. That skip deleted all of it, and was
+  # inconsistent with how the same round scoped test_claim_lock.sh to two tests instead of
+  # muting the file. The condition now lives INSIDE that suite, next to the clause it guards.
+  #
+  # THIS IS A SKIP, AND IT IS NOT A COVERAGE HOLE WEARING A SKIP'S CLOTHES. The distinction
+  # CLAUDE.md draws is whether something COVERABLE is being excused: here the subject does not
+  # exist on the platform — the feature is documented as unavailable and its own contract on
+  # such a host is a refusal — so there is no behaviour to cover, as against `node-bindings`,
+  # where the suite would run fine given node. It is DECLARED in the log on every run, for the
+  # same reason flight-tests prints what it does not execute: a lane that omits coverage
+  # silently is indistinguishable from one that covers it.
+  #
+  # Keyed on the gate's OWN `_AGENT_GATE_OS`, which honours AGENT_GATE_TEST_OS — an EXISTING
+  # seam (used by the summary/mold/perf paths), so the guard is exercisable on Linux instead
+  # of being a branch nobody can reach. NOT a bare `[ -d /proc ]` probe: a capability test
+  # that misfires on Linux would silently disable both suites, which is the failure mode this
+  # comment is warning about, and it would be invisible precisely where it matters.
+  if [ "$_AGENT_GATE_OS" != "Linux" ]; then
+    echo ">>> [$name] DECLARED SKIP (#3436): test_lane_lock.sh NOT executed on $_AGENT_GATE_OS"
+    echo ">>> [$name]   the machine-local lane lock is Linux-/proc-specific by design (boot-id + /proc/<pid>/stat"
+    echo ">>> [$name]   start-ticks); on a host without /proc \`acquire\` refuses with reason=unresolved-identity,"
+    echo ">>> [$name]   so there is no behaviour to assert. Every OTHER tooling-tests suite still runs here."
+  else
+
+    # machine-local lane-lock regression suite (#3436): hermetic (mktemp lane roots, real
+    # `sleep` processes for liveness, no python3/cargo/gh/git/network/datasets, seconds).
+    # Pins scripts/flow/lane-lock.sh, the lock that refuses a SECOND LOCAL SESSION in an
+    # occupied lane directory — the collision `refs/claims/issue-<N>` cannot stop, because
+    # its holder identity is machine+actor and two Claude sessions on one box share both.
+    # #3436 AC4 requires coverage of BOTH directions with neither passing by doing
+    # nothing, so the suite asserts the OCCUPIED line names the FIRST holder's pid, that a
+    # reclaim actually REWROTE the record and logged the displaced token + liveness +
+    # reason, and that every UNKNOWN-* refusal left the record BYTE-IDENTICAL (a genuine
+    # byte comparison in every one of those cases since #3436 FIX 13c — this sentence was
+    # written when only the duplicate-key case compared bytes and the rest compared the
+    # holder token, so a refusal that rewrote acquired-ts would have passed). Placed
+    # BEFORE the python3 gate because it needs no python3 and must never be reached only
+    # on hosts that happen to have one. A failure FAILs the component, mirroring the
+    # keyspace-scoping guard.
+    echo ">>> [$name] bash scripts/tests/test_lane_lock.sh"
+    if ! bash "$REPO_ROOT/scripts/tests/test_lane_lock.sh" >>"$log" 2>&1; then
+      status=FAIL
+      echo "--- [$name] FAILED (machine-local lane-lock regression suite #3436); last 40 lines of $log ---"
+      tail -40 "$log"
+      echo "--- end of $name output ---"
+      end=$(date +%s)
+      record_result "$name" "$status" "$((end - start))"
+      echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+      return 0
+    fi
+
+  fi
+
+  # advertised-collision scan guard (#3436, the coordination lead's deliverable 2 --
+  # NOT AC5, which is the `claim.sh claim` lane-lock warning and is pinned by
+  # test_claim_lock.sh): pins scripts/flow/advertised-collision-scan.sh, which reports
+  # the machine-visible signature of an ADVERTISED collision window -- board
+  # Status=Ready AND a pushed issue-<N>-* branch AND no refs/claims/issue-<N>, three
+  # facts ANDed. Measured instance: #3393 ran 20+ commits in exactly that state after a
+  # legitimate release-on-finalize while the board invited a second claimant. The suite
+  # pins each fact's absence separately (a detector firing on two of three facts fails),
+  # every unmeasurable input landing on exit 1 WITH the input named, that the tool never
+  # exits 0, and that it mutates nothing. Same
+  # hermetic, python3-free profile as the lane-lock suite above. A failure FAILs the
+  # component, mirroring the keyspace-scoping guard.
+  echo ">>> [$name] bash scripts/tests/test_advertised_collision_scan.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_advertised_collision_scan.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (advertised-collision scan guard #3436 — the scan, NOT AC5; AC5 is pinned by test_claim_lock.sh); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # claim-lock suite (#3436 FIX 13d): it needs bash + git + coreutils and NO python3, and
+  # it is the suite that pins #3436 AC5/AC6 — so leaving it in the post-python3 chain meant
+  # the AC5/AC6 coverage silently did not run on a python3-less host. That is verbatim the
+  # rationale used to place the two suites above ahead of this gate.
+  # finalize teardown guard (#3436): pins that finalize-cleanup.sh RELEASES the lane lock
+  # lease-checked before removing the worktree, and REFUSES (exit 6) when the lock holds a
+  # different incarnation than --lane-lease named. Needs bash + coreutils only — no python3,
+  # no git, no network — so it sits above the python3 gate with its siblings. finalize-cleanup
+  # had NO suite at all before this; the orphaned-lock bug it covers was invisible.
+  # lane-lock pre-commit hook (#3436): the END-TO-END control the wiring-evidence ruling asked
+  # for — a second entrant is REFUSED at the act that caused the incident. Exercises the REAL
+  # hook against a REAL git repo laid out as a lane with a REAL live peer process; bash + git
+  # only, no python3, so it sits above the python3 gate with its siblings.
+  # PLATFORM GUARD (#3436, roborev job 446 Medium): BOTH suites below drive
+  # scripts/flow/lane-lock.sh, whose identity is boot-id + /proc/<pid> start-ticks, and the
+  # pre-commit suite reads /proc directly. On a host without /proc `acquire` refuses with
+  # reason=unresolved-identity, so there is no behaviour to assert and the suites would red on
+  # correct input — the guard agents learn to waive. Same `_AGENT_GATE_OS` key and same
+  # DECLARED-SKIP idiom as the test_lane_lock.sh guard above, so the narrowing is announced at
+  # run time rather than inferred, and it stays exercisable on Linux via AGENT_GATE_TEST_OS.
+  if [ "$_AGENT_GATE_OS" != "Linux" ]; then
+    echo ">>> [$name] DECLARED SKIP (#3436): test_lane_lock_precommit_hook.sh and test_finalize_cleanup_lane_lock.sh NOT executed on $_AGENT_GATE_OS"
+    echo ">>> [$name]   both drive the Linux-/proc-specific machine-local lane lock; every OTHER tooling-tests suite still runs here."
+  else
+
+  echo ">>> [$name] bash scripts/tests/test_lane_lock_precommit_hook.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_lane_lock_precommit_hook.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (lane-lock pre-commit enforcement #3436); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  echo ">>> [$name] bash scripts/tests/test_finalize_cleanup_lane_lock.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_finalize_cleanup_lane_lock.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (finalize teardown lane-lock release #3436); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  fi
+
+  echo ">>> [$name] bash scripts/tests/test_claim_lock.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_claim_lock.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (claim-lock suite #3436 AC5/AC6); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
   if ! command -v python3 >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no python3 on PATH; selftest truncation reader needs it)"
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_agent_gate_disk_admission.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claude_auth_capability.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/tests/test_drive_issue_state.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_premerge_review_binding.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh; bash scripts/tests/test_agent_gate_census.sh"
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_agent_gate_disk_admission.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claude_auth_capability.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/tests/test_drive_issue_state.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_premerge_review_binding.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh; bash scripts/tests/test_agent_gate_census.sh"
   if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_notify.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_notify_contract.sh" >>"$log" 2>&1 &&
@@ -21740,7 +21911,6 @@ run_tooling_tests() {
      bash "$REPO_ROOT/scripts/tests/test_perf_capability.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_perf_capability_bootstrap.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_claude_auth_capability.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_claim_lock.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_claim_heartbeat.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_drive_issue_state.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/flow/tests/claim-resume.test.sh" >>"$log" 2>&1 &&
