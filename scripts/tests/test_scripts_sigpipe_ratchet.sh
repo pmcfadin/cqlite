@@ -35,7 +35,7 @@ MATCHER_REL="scripts/tests/lib/sigpipe-matcher.sh"
 
 # Case floor (CLAUDE.md #3544): a span-replacing edit that silently deletes cases yields a green
 # tally over a shrunken suite. ENFORCED. May only go DOWN with a stated reason.
-CASE_FLOOR=39
+CASE_FLOOR=43
 
 pass=0; fail=0; cases=0
 ok()  { cases=$((cases+1)); pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
@@ -563,6 +563,150 @@ if [ "$cs_rc" = 3 ] && [ -z "$cs_missing" ] && ! grep -qF 'verdict NO-INCREASE' 
   ok "30b a FAILING comparison sort REFUSES by name (rc=$cs_rc) — a planted INCREASE can never read as NO-INCREASE"
 else
   bad "30b failing comparison sort" "expected rc=3 naming comparison-sort-failed with no NO-INCREASE VERDICT; got rc=$cs_rc$cs_missing"
+fi
+
+# ---------------------------------------------------------------------------
+# 31. A TRUNCATED SUBJECT LIST IS A NAMED REFUSAL, NOT A SMALLER CENSUS (roborev job 140, triaged
+#     BLOCKER, and the THIRD instance of one class: an unmeasured or failed operation read as a
+#     clean result). The enumeration appended each indexed path to the subject list UNCHECKED while
+#     N_SUBJECTS was incremented regardless, so a failed append or a truncated file left the census
+#     scanning FEWER files than the run claimed — and the non-vacuity floor could not tell, because
+#     THE FLOOR READS THE COUNTER WHILE THE CENSUS READS THE FILE. The dropped scripts were never
+#     scanned, an unscanned file is indistinguishable from a clean one, and a new site in one of
+#     them would have shipped as NO-INCREASE.
+#
+#     THE FIX UNDER TEST IS THE END-TO-END INVARIANT, not a per-append check: the finished list is
+#     RECOUNTED and must hold exactly N_SUBJECTS records. That catches ANY cause of loss — a failed
+#     append, a short or partial write, ENOSPC, a truncation, a concurrent clobber — including
+#     causes nobody enumerated.
+#
+#     HOW THE LOSS IS FORCED, hermetically and deterministically: an `awk` shim early on PATH that,
+#     the FIRST time awk is invoked with the guard's subject-list file as an argument, records that
+#     file's line count, TRUNCATES it to $TR_KEEP lines, records the new count, and then `exec`s
+#     the real awk. Every other awk call (the self-check, the matcher, the counts, the normaliser)
+#     is passed straight through, so the refusal can only come from the recount.
+#
+#     31a ASSERTS THE FORCING BY CONSTRUCTION, and asserts the two properties without which 31b
+#     would be testing the wrong thing: the truncation really happened (post < pre), and the
+#     truncated count is STILL AT OR ABOVE the guard's own SUBJECT_FLOOR — so 31b cannot be passing
+#     via the floor. The floor is read out of the guard rather than hardcoded here.
+#
+#     RED-VERIFIED against the pre-fix guard (e92763ac9): there, NOTHING read the subject list with
+#     awk before the census, so the same forced truncation went unnoticed and the run printed
+#     `verdict NO-INCREASE` with rc=0 over a list short of its own enumeration — the false clean in
+#     full. Reproduce:
+#         git show e92763ac9:scripts/ci/check-sigpipe-sites.sh >scripts/ci/check-sigpipe-sites.sh
+#         bash scripts/tests/test_scripts_sigpipe_ratchet.sh   # 31b and 32b FAIL
+#     — then `git checkout scripts/ci/check-sigpipe-sites.sh`.
+# ---------------------------------------------------------------------------
+d=$(mkcase subjtrunc)
+TR_KEEP=150
+tr_bin="$tmp/subjtrunc-bin"; mkdir -p "$tr_bin"
+tr_stamp="$tmp/subjtrunc.fired"; tr_pre="$tmp/subjtrunc.pre"; tr_post="$tmp/subjtrunc.post"
+REAL_AWK=$(command -v awk); REAL_HEAD=$(command -v head)
+REAL_WC=$(command -v wc);   REAL_MV=$(command -v mv)
+cat >"$tr_bin/awk" <<EOF
+#!/usr/bin/env bash
+t=""
+for a in "\$@"; do
+  case "\$a" in
+    */subjects) t="\$a" ;;
+  esac
+done
+if [ -n "\$t" ] && [ -f "\$t" ] && [ ! -f "$tr_stamp" ]; then
+  : >"$tr_stamp"
+  "$REAL_WC" -l <"\$t" >"$tr_pre"
+  "$REAL_HEAD" -n $TR_KEEP "\$t" >"\$t.cut" && "$REAL_MV" "\$t.cut" "\$t"
+  "$REAL_WC" -l <"\$t" >"$tr_post"
+fi
+exec "$REAL_AWK" "\$@"
+EOF
+chmod +x "$tr_bin/awk"
+tr_rc=0
+( cd "$d" && PATH="$tr_bin:$PATH" "${BASH:-$(command -v bash)}" "$d/$GUARD_REL" ) >"$d/tr.txt" 2>&1 || tr_rc=$?
+tr_pre_n=$(tr -cd '0-9' <"$tr_pre" 2>/dev/null)
+tr_post_n=$(tr -cd '0-9' <"$tr_post" 2>/dev/null)
+# The guard's OWN floor, so this case cannot drift away from it.
+tr_floor=$(awk -F'[=# ]' '/^SUBJECT_FLOOR=/ { print $2; exit }' "$d/$GUARD_REL")
+if [ -f "$tr_stamp" ] && [ -n "${REAL_AWK:-}" ] && [ -n "${tr_pre_n:-}" ] && [ -n "${tr_post_n:-}" ] \
+   && [ "$tr_post_n" -lt "$tr_pre_n" ] && [ "$tr_post_n" = "$TR_KEEP" ] \
+   && [ -n "${tr_floor:-}" ] && [ "$tr_post_n" -ge "$tr_floor" ]; then
+  ok "31a the subject list really WAS truncated ($tr_pre_n -> $tr_post_n record(s)) and the truncated count is still >= the guard's floor ($tr_floor): 31b cannot pass via the floor"
+else
+  bad "31a forced subject-list truncation" "stamp/counts unusable or the truncation did not hold: pre=${tr_pre_n:-?} post=${tr_post_n:-?} keep=$TR_KEEP floor=${tr_floor:-?} — 31b would be testing the wrong thing"
+fi
+tr_missing=""
+for nd in "reason: subject-list-truncated" "holds $tr_post_n record(s)" "but $tr_pre_n subject(s) were enumerated" \
+          "reads CLEAN" "REMEDY" "verdict REFUSED"; do
+  grep -qF -- "$nd" "$d/tr.txt" || tr_missing="$tr_missing [missing: $nd]"
+done
+if [ "$tr_rc" = 3 ] && [ -z "$tr_missing" ] \
+   && ! grep -qF 'verdict NO-INCREASE' "$d/tr.txt" && ! grep -qF '0 INCREASE RECOGNISED' "$d/tr.txt"; then
+  ok "31b a TRUNCATED subject list REFUSES by name and prints BOTH counts (rc=$tr_rc) — never NO-INCREASE"
+else
+  bad "31b truncated subject list" "expected rc=3 naming subject-list-truncated with both counts and no NO-INCREASE token; got rc=$tr_rc$tr_missing"
+fi
+
+# ---------------------------------------------------------------------------
+# 32. THE SAME CLASS PAST THE RECOUNT: A CENSUS RECORD LOST BETWEEN THE RECOUNT AND THE COMPARISON.
+#     This is the cause "nobody enumerated" — a clobber AFTER the census file has been re-counted —
+#     and it is why the comparison now ACCOUNTS FOR ITS INPUTS: awk reports how many records it
+#     really read from the baseline, census and subject sets, and each must equal the counter that
+#     produced it.
+#
+#     WHY IT IS A FALSE CLEAN AND NOT A RED: a file MISSING from the census compares as
+#     INFO-IMPROVED, a NON-FAILING observation. So dropping the census record of a file that has a
+#     PLANTED INCREASE turns a FAIL into a pass. That is exactly what is forced here: the victim
+#     gets a real new site, and an `awk` shim deletes ONLY that file's census record on the way into
+#     the comparison.
+#
+#     RED-VERIFIED against the pre-accounting guard (56b1af1ae): rc=0, `verdict NO-INCREASE`, with
+#     the planted hazard sitting in the tree and the victim reported as IMPROVED.
+# ---------------------------------------------------------------------------
+d=$(mkcase cmpclobber)
+printf '%s\n' "$HAZARD" >>"$d/$VICTIM"
+reindex "$d"
+cl_bin="$tmp/cmpclobber-bin"; mkdir -p "$cl_bin"
+cl_stamp="$tmp/cmpclobber.fired"; cl_pre="$tmp/cmpclobber.pre"; cl_post="$tmp/cmpclobber.post"
+REAL_GREP=$(command -v grep)
+cat >"$cl_bin/awk" <<EOF
+#!/usr/bin/env bash
+t=""
+for a in "\$@"; do
+  case "\$a" in
+    now=*) t="\${a#now=}" ;;
+  esac
+done
+if [ -n "\$t" ] && [ -f "\$t" ] && [ ! -f "$cl_stamp" ]; then
+  : >"$cl_stamp"
+  "$REAL_WC" -l <"\$t" >"$cl_pre"
+  "$REAL_GREP" -vF "$VICTIM " "\$t" >"\$t.cut"
+  "$REAL_MV" "\$t.cut" "\$t"
+  "$REAL_WC" -l <"\$t" >"$cl_post"
+fi
+exec "$REAL_AWK" "\$@"
+EOF
+chmod +x "$cl_bin/awk"
+cl_rc=0
+( cd "$d" && PATH="$cl_bin:$PATH" "${BASH:-$(command -v bash)}" "$d/$GUARD_REL" ) >"$d/cl.txt" 2>&1 || cl_rc=$?
+cl_pre_n=$(tr -cd '0-9' <"$cl_pre" 2>/dev/null)
+cl_post_n=$(tr -cd '0-9' <"$cl_post" 2>/dev/null)
+if [ -f "$cl_stamp" ] && [ -n "${REAL_GREP:-}" ] && [ -n "${cl_pre_n:-}" ] && [ -n "${cl_post_n:-}" ] \
+   && [ "$cl_post_n" -lt "$cl_pre_n" ]; then
+  ok "32a the victim's census record really WAS removed after the recount ($cl_pre_n -> $cl_post_n record(s)): the post-recount clobber was forced, not assumed"
+else
+  bad "32a forced census clobber" "stamp/counts unusable or nothing was removed: pre=${cl_pre_n:-?} post=${cl_post_n:-?} — 32b would be testing nothing"
+fi
+cl_missing=""
+for nd in "reason: comparison-input-truncated" "$cl_post_n census record(s)" "/ $cl_pre_n /" \
+          "were measured" "verdict REFUSED"; do
+  grep -qF -- "$nd" "$d/cl.txt" || cl_missing="$cl_missing [missing: $nd]"
+done
+if [ "$cl_rc" = 3 ] && [ -z "$cl_missing" ] \
+   && ! grep -qF 'verdict NO-INCREASE' "$d/cl.txt" && ! grep -qF '0 INCREASE RECOGNISED' "$d/cl.txt"; then
+  ok "32b a census record lost AFTER the recount REFUSES by name (rc=$cl_rc) — a planted INCREASE can never read as IMPROVED"
+else
+  bad "32b post-recount census clobber" "expected rc=3 naming comparison-input-truncated with both counts and no NO-INCREASE token; got rc=$cl_rc$cl_missing"
 fi
 
 printf '\npassed=%d failed=%d cases=%d (floor %d)\n' "$pass" "$fail" "$cases" "$CASE_FLOOR"
