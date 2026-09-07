@@ -58,6 +58,29 @@
 # never from the dirty tree that produced them.
 # ============================================================================
 #
+# ============================================================================
+# REGENERATION REPLACES EVERY TABLE DIRECTORY, INCLUDING ALREADY-COMMITTED ONES
+#
+# The export step `rm -rf`s $OUT_DIR/$KEYSPACE and Cassandra mints a FRESH table
+# UUID per run, so a plain re-run of this script does not "add" a table — it
+# replaces all of them with new directories and new bytes. That matters because
+# committed analysis cites byte OFFSETS inside the already-committed
+# vector_clustered/vector_pk_only Data.db files
+# (.drive-issue-4114/format-authority.md), and those citations would silently
+# stop describing the committed bytes.
+#
+# So when the goal is to ADD a table to an existing committed fixture, generate
+# to a scratch directory and copy only the NEW table directory across:
+#
+#   bash test-data/scripts/generate-issue-4114-vector-float.sh --out /tmp/i4114-run
+#   cp -r /tmp/i4114-run/test_vector/vector_last-* \
+#         test-data/fixtures/issue_4114/test_vector/
+#
+# All three tables are still generated and verified in the scratch run; only the
+# new directory is promoted. A full regeneration (pointing --out straight at the
+# fixture root) is legitimate too, but then re-derive any byte-offset analysis.
+# ============================================================================
+#
 # Usage:
 #   bash test-data/scripts/generate-issue-4114-vector-float.sh [--out <dir>] [--dry-run]
 #
@@ -93,6 +116,12 @@ CASSANDRA_IMAGE="${CASSANDRA_IMAGE:-cassandra:5.0.8}"
 KEYSPACE="test_vector"
 TABLE_PK="vector_pk_only"
 TABLE_CK="vector_clustered"
+TABLE_LAST="vector_last"
+
+# vector_last's first elements are chosen for their LEADING BIG-ENDIAN BYTE, not
+# for their magnitude — see the schema's vector_last block and build_inserts()
+# below. 2^-111 encodes as exactly 0x08000000 (exponent field 127-111 == 16).
+V_LAST_SMALL_EXP="-111"
 
 SCHEMA_FILE="$ROOT/schemas/issue-4114-vector-float.cql"
 
@@ -255,9 +284,10 @@ flush_ks() {
 # ----------------------------------------------------------------------------
 build_inserts() {
   local out="$1"
-  python3 - "$out" "$T_FIXED" "$TABLE_PK" "$TABLE_CK" "$V384_STEP" <<'PY'
-import sys
-out, tfixed, table_pk, table_ck, step = sys.argv[1:6]
+  python3 - "$out" "$T_FIXED" "$TABLE_PK" "$TABLE_CK" "$V384_STEP" \
+           "$TABLE_LAST" "$V_LAST_SMALL_EXP" <<'PY'
+import struct, sys
+out, tfixed, table_pk, table_ck, step, table_last, small_exp = sys.argv[1:8]
 step = float(step)
 n = 384
 
@@ -303,10 +333,43 @@ lines.append(
     % (table_ck, tfixed)
 )
 lines.append("")
+
+# ---- vector_last: the silent-mis-decode reachability subject ----------------
+# The literals are chosen for the LEADING BYTE of the FIRST element's big-endian
+# binary32 encoding, because that byte is what a vint-length-prefix misreader
+# consumes as a length:
+#
+#   0.0        -> 00 00 00 00  -> vint 0x00 = 0 bytes  (empty value, no bounds hit)
+#   2^-111     -> 08 00 00 00  -> vint 0x08 = 8 bytes  (satisfiable, wrong bytes)
+#
+# repr() of the float32-exact double round-trips through cqlsh's decimal parse
+# without a rounding step, so the on-disk bytes are exactly 0x08000000. That is
+# ASSERTED here rather than assumed: a literal whose leading byte is not the one
+# this fixture is built around would make the whole subject vacuous.
+small = 2.0 ** int(small_exp)
+packed = struct.pack(">f", float(repr(small)))
+if packed != b"\x08\x00\x00\x00":
+    print("[i4114][ERROR] 2^%s must encode as 08000000, got %s"
+          % (small_exp, packed.hex()), file=sys.stderr)
+    sys.exit(1)
+if struct.pack(">f", 0.0) != b"\x00\x00\x00\x00":
+    print("[i4114][ERROR] 0.0 must encode as 00000000", file=sys.stderr)
+    sys.exit(1)
+
+lines.append(
+    "INSERT INTO %s (id, v3) VALUES (1, [0.0, 1.0, 2.0]) USING TIMESTAMP %s;"
+    % (table_last, tfixed)
+)
+lines.append(
+    "INSERT INTO %s (id, v3) VALUES (2, [%s, 1.0, 2.0]) USING TIMESTAMP %s;"
+    % (table_last, repr(small), tfixed)
+)
+lines.append("")
 with open(out, "w") as fh:
     fh.write("\n".join(lines) + "\n")
-print("[i4114]   built %d INSERT statements (v384 dim=%d, step=%g)"
-      % (5, n, step))
+print("[i4114]   built %d INSERT statements (v384 dim=%d, step=%g); "
+      "vector_last v3[0] literals 0.0 -> 00000000 and %s -> %s"
+      % (7, n, step, repr(small), packed.hex()))
 PY
 }
 
@@ -443,7 +506,7 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   # ONE flush => exactly one Data.db PER TABLE. More than one means the inserts
   # did not land in a single memtable flush and the fixture is not the
   # single-SSTable subject the tests assume.
-  for t in "$TABLE_PK" "$TABLE_CK"; do
+  for t in "$TABLE_PK" "$TABLE_CK" "$TABLE_LAST"; do
     tdirs=( "$OUT_DIR/$KEYSPACE/$t"* )
     if [[ ! -d "${tdirs[0]}" ]]; then
       fail "$t: no table directory matched under $OUT_DIR/$KEYSPACE/ \
@@ -498,12 +561,14 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   # the time this sees it.
   # ==========================================================================
   log "Verifying the goldens actually carry the inserted vector values..."
-  python3 - "$OUT_DIR/$KEYSPACE" "$TABLE_PK" "$TABLE_CK" "$V384_STEP" <<'PY' || fail "golden verification FAILED (see above)"
-import glob, json, os, sys
+  python3 - "$OUT_DIR/$KEYSPACE" "$TABLE_PK" "$TABLE_CK" "$V384_STEP" \
+           "$TABLE_LAST" "$V_LAST_SMALL_EXP" <<'PY' || fail "golden verification FAILED (see above)"
+import glob, json, os, struct, sys
 
-ks_dir, table_pk, table_ck, step = sys.argv[1:5]
+ks_dir, table_pk, table_ck, step, table_last, small_exp = sys.argv[1:7]
 step = float(step)
 N = 384
+V_LAST_SMALL = float(repr(2.0 ** int(small_exp)))
 
 def load(table):
     hits = glob.glob(os.path.join(ks_dir, table + "-*", "*-Data.db.jsonl"))
@@ -618,6 +683,45 @@ for c, want_v3, want_z in ((10, [1.0, 2.5, -3.75], "ck-after-10"),
     if m.get("z_after") != want_z:
         errors.append("%s ck=%d: z_after expected %r, golden has %r" % (table_ck, c, want_z, m.get("z_after")))
 
+# ---- vector_last ----------------------------------------------------------
+# The subject here is the FIRST ELEMENT'S LEADING BYTE, so the check asserts the
+# reconstructed big-endian encoding and not merely the decoded number: a value
+# that compares equal but re-encodes to a different leading byte would leave the
+# fixture unable to reach the mis-decode it exists to demonstrate.
+path_last, parts_last = load(table_last)
+seen_last = {}
+for part in parts_last:
+    key = part.get("partition", {}).get("key")
+    pid = int(key[0]) if isinstance(key, list) and key else None
+    for row, m in cells(part):
+        seen_last[pid] = m
+
+for pid, want_v3, want_lead in ((1, [0.0, 1.0, 2.0], 0x00),
+                                (2, [V_LAST_SMALL, 1.0, 2.0], 0x08)):
+    if pid not in seen_last:
+        errors.append("%s: partition id=%d absent from golden" % (table_last, pid))
+        continue
+    got = seen_last[pid].get("v3")
+    if not isinstance(got, list) or len(got) != 3:
+        errors.append("%s id=%d: v3 expected a 3-element list, golden has %r"
+                      % (table_last, pid, got))
+        continue
+    got_f = [float(x) for x in got]
+    if got_f != want_v3:
+        errors.append("%s id=%d: v3 expected %r, golden has %r"
+                      % (table_last, pid, want_v3, got_f))
+        continue
+    lead = struct.pack(">f", got_f[0])[0]
+    if lead != want_lead:
+        errors.append("%s id=%d: v3[0]=%r must encode with leading byte 0x%02x, got 0x%02x"
+                      % (table_last, pid, got_f[0], want_lead, lead))
+    # vector_last must have NO other regular column: a column after the vector
+    # would restore the desync escape hatch this table exists to remove.
+    extra = sorted(k for k in seen_last[pid] if k != "v3")
+    if extra:
+        errors.append("%s id=%d: expected v3 as the ONLY cell, golden also has %r"
+                      % (table_last, pid, extra))
+
 if errors:
     print("[i4114][ERROR] the goldens do NOT carry the subject of issue #4114:", file=sys.stderr)
     for e in errors:
@@ -628,8 +732,11 @@ print("[i4114]   %s: id=1 v1=[1.5] and all %d v384 elements == i*%g (OK)" % (tab
 print("[i4114]   %s: id=3 v1=[-2.25] and all %d v384 elements == 1000+i*%g (OK)" % (table_pk, N, step))
 print("[i4114]   %s: id=2 both vector columns have NO live value, sentinels live (OK)" % table_pk)
 print("[i4114]   %s: ck=10 and ck=20 v3 exact, sentinels live (OK)" % table_ck)
+print("[i4114]   %s: id=1 v3=[0,1,2] (lead 0x00) and id=2 v3[0]=%r (lead 0x08), "
+      "v3 the only cell (OK)" % (table_last, V_LAST_SMALL))
 print("[i4114]   goldens: %s" % os.path.basename(path_pk))
 print("[i4114]            %s" % os.path.basename(path_ck))
+print("[i4114]            %s" % os.path.basename(path_last))
 PY
 
   log "=== $KEYSPACE generation COMPLETE ==="
