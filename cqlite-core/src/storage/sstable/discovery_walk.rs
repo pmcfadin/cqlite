@@ -47,10 +47,10 @@ impl SSTableManager {
             // scan surfaces then reported that absence as an empty SUCCESS. The
             // error names the directory.
             let mut dir_entries = platform.fs().read_dir(&dir).await.map_err(|e| {
-                crate::Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to read SSTable directory {}: {e}", dir.display()),
-                ))
+                crate::Error::Io(std::io::Error::other(format!(
+                    "Failed to read SSTable directory {}: {e}",
+                    dir.display()
+                )))
             })?;
 
             while let Some(entry) = dir_entries.next_entry().await? {
@@ -70,14 +70,11 @@ impl SSTableManager {
                         // down. The failure is propagated with the path named.
                         let is_dir =
                             entry.file_type().await.map(|ft| ft.is_dir()).map_err(|e| {
-                                crate::Error::Io(std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    format!(
-                                        "Failed to determine the file type of {} while scanning \
+                                crate::Error::Io(std::io::Error::other(format!(
+                                    "Failed to determine the file type of {} while scanning \
                                      for SSTables: {e}",
-                                        path.display()
-                                    ),
-                                ))
+                                    path.display()
+                                )))
                             })?;
                         if is_dir {
                             let sub_results =
@@ -121,14 +118,11 @@ impl SSTableManager {
                     // fail-closed everywhere else (its opens abort the whole
                     // refresh and mutate nothing); this was the one hole in it.
                     let mut entries = self.platform.fs().read_dir(dir).await.map_err(|e| {
-                        crate::Error::Io(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!(
-                                "Failed to read discovered table directory {} during \
+                        crate::Error::Io(std::io::Error::other(format!(
+                            "Failed to read discovered table directory {} during \
                                  refresh: {e}",
-                                dir.display()
-                            ),
-                        ))
+                            dir.display()
+                        )))
                     })?;
                     while let Some(entry) = entries.next_entry().await? {
                         let path = entry.path();

@@ -767,3 +767,87 @@ async fn a_present_but_corrupt_compression_info_refuses_while_an_absent_one_does
         "the refusal must reach the caller as the dedicated matchable variant; got {e:?}"
     );
 }
+
+/// The #3814 lesson, applied: TWO more surfaces, reached through `StorageEngine`.
+///
+/// PR #3814 (the #3721 fix) was green on six surfaces and FALSE on the BTI
+/// point-read path, because "an AC satisfied on the surfaces you tested is not an AC
+/// satisfied". `observe` above covers every ROW-RETURNING `SSTableManager` method;
+/// these two are the ones only reachable one layer up:
+///
+///   * `StorageEngine::scan` — the OUTERMOST storage read surface, which the query
+///     executor and the CLI SELECT path actually call. It proves the refusal is not
+///     flattened by the delegation layer.
+///   * `StorageEngine::scan_partition_clustering_reverse` — the BIG reverse
+///     clustering iterator, whose `SSTableManager` method is `pub(crate)` and so
+///     unreachable from an integration test directly. Its `Ok(None)` means "reverse
+///     iteration did not apply, fall back to the in-memory ORDER BY DESC sort" — and
+///     that fallback would read the SAME unreadable table, so a refusal here must be
+///     an `Err`, never the fallback signal.
+#[cfg(not(feature = "tombstones"))]
+#[tokio::test]
+async fn the_storage_engine_surfaces_refuse_too() {
+    use cqlite_core::storage::StorageEngine;
+
+    let root = TempDir::new().expect("TempDir");
+    let generation = write_generation(root.path(), TABLE, 1).await;
+    let data_dir = root.path().join("data");
+    let tid = table_id(TABLE);
+    let schema = schema_for(TABLE);
+    let pk_bytes = 1i32.to_be_bytes();
+
+    let engine = |dir: PathBuf| async move {
+        let config = Config::default();
+        let platform = platform().await;
+        let registry = empty_registry(platform.clone()).await;
+        StorageEngine::open(&dir, &config, platform, Some(registry))
+            .await
+            .expect("StorageEngine::open stays best-effort over a refused generation")
+    };
+
+    // Control leg, over the pristine bytes.
+    {
+        let engine = engine(data_dir.clone()).await;
+        let rows = engine
+            .scan(&tid, None, None, None, Some(&schema))
+            .await
+            .expect("control: StorageEngine::scan must read the written row");
+        assert_eq!(rows.len(), 1, "control: the written row must be visible");
+        // The reverse iterator legitimately answers `Ok(None)` on a healthy
+        // single-row partition (it applies only to a BIG WIDE partition), so the
+        // control asserts only that it does not ERROR — which is what makes the
+        // mutated leg's `Err` attributable to the damage.
+        engine
+            .scan_partition_clustering_reverse(&tid, &pk_bytes, Some(&schema))
+            .await
+            .expect("control: the reverse iterator must not error on a healthy table");
+    }
+
+    stage(&generation, Damage::TruncatedToOuterHeader);
+
+    let engine = engine(data_dir).await;
+    let e = engine
+        .scan(&tid, None, None, None, Some(&schema))
+        .await
+        .expect_err("StorageEngine::scan must propagate the refusal, not flatten it");
+    assert_unreadable(
+        "StorageEngine::scan",
+        &e,
+        &generation.data,
+        Damage::TruncatedToOuterHeader,
+    );
+
+    let e = engine
+        .scan_partition_clustering_reverse(&tid, &pk_bytes, Some(&schema))
+        .await
+        .expect_err(
+            "the reverse iterator must REFUSE, not answer Ok(None) — that would send the \
+             caller to an in-memory-sort fallback over the same unreadable table",
+        );
+    assert_unreadable(
+        "StorageEngine::scan_partition_clustering_reverse",
+        &e,
+        &generation.data,
+        Damage::TruncatedToOuterHeader,
+    );
+}
