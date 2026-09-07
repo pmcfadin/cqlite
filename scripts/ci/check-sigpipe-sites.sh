@@ -78,6 +78,18 @@
 #      an unmeasurable run is never a pass. There is NO bypass env var and no opt-out; a
 #      curated-list escape hatch could only buy a vacuous green.
 #
+# EVERY PRODUCER'S EXIT STATUS IS CHECKED, AS A CLASS (roborev job 139, triaged BLOCKER). The
+# reported defect was one instance of it: the census ran the matcher as
+# `sigpipe_violations "$f" >census 2>/dev/null` and IGNORED its status, so an awk that FAILED left
+# an EMPTY census, the count computed as 0, and that subject was reported CLEAN — a false PASS,
+# and the same shape as the swap: an UNMEASURED state read as a clean one. The root cause is
+# general: a ZERO COUNT FROM AN EMPTY STREAM IS INDISTINGUISHABLE FROM A GENUINE CLEAN FILE, so a
+# count may be trusted ONLY when its producer is known to have SUCCEEDED. `set -o pipefail` does
+# NOT establish that — it propagates a status nobody reads. So the shape used throughout this file
+# is `if ! producer >file; then refuse …; fi`, and every remaining unchecked command carries a
+# comment saying why its failure cannot be read as clean. There is deliberately no degraded
+# count-only mode: a mode that silently restores the false PASS is worse than the bug.
+#
 # PREREQUISITES: git, awk, a SHA-256 digest tool (`sha256sum`, else `shasum -a 256` — macOS
 # ships the latter), standard text tools. No cargo, no python3, no network, no datasets. It
 # therefore NEVER SKIPs — and an ABSENT digest tool is a REFUSAL naming it, never a skip and
@@ -167,9 +179,17 @@ _norm_sorted() { # _norm_sorted <violations-file>  -> normalised, sorted lines o
          gsub(/[[:space:]]+/, " ", $0)
          if (length($0) > 0) print }' "$1" | LC_ALL=C sort
 }
-# The hex digest of a file's bytes. `< file` so the tool never prints a name to strip.
-_digest_of() { # _digest_of <file> -> 64 hex chars
-  $DIGEST_CMD <"$1" | awk '{ print $1; exit }'
+# The hex digest of a file's bytes. `< file` so the tool never prints a name to strip. NO PIPE
+# and no reader: the first field is taken with bash parameter expansion. The pipeline this
+# replaced (`$DIGEST_CMD <file | awk '{print $1; exit}'`) was BOTH unstatused AND a hazard of the
+# very class this guard ratchets — an external writer whose reader exits on its first record, so
+# under `pipefail` a SUCCESSFUL digest could return 141. Returns non-zero when the tool fails, so
+# every caller can tell "digest unknown" from "digest computed".
+_digest_of() { # _digest_of <file> -> 64 hex chars on stdout, non-zero on failure
+  local out
+  out=$($DIGEST_CMD <"$1") || return 1
+  out=${out%%$'\n'*}
+  printf '%s' "${out%% *}"
 }
 HASH_RE='^[0-9a-f]{64}$'
 
@@ -183,13 +203,32 @@ _tmp=$(mktemp -d 2>/dev/null) || refuse "no-tmpdir" \
   "check TMPDIR=${TMPDIR:-/tmp}"
 trap 'rm -rf "$_tmp"' EXIT
 PIPE='|'
-{
+if ! {
   printf '#!/usr/bin/env bash\n'
   printf 'line=$(printf %s "$text" %s grep -m1 "^$k: ") || return 0\n' "'%s\\n'" "$PIPE"
-} >"$_tmp/selfcheck.sh"
-_sc=$(sigpipe_violations "$_tmp/selfcheck.sh" | grep -c . || true)
-[ "${_sc:-0}" -eq 1 ] || refuse "matcher-inert" \
-  "the shared matcher reported ${_sc:-0} site(s) in a fixture containing exactly ONE known #4061 site, so no count it produces can be trusted" \
+} >"$_tmp/selfcheck.sh"; then
+  refuse "selfcheck-write-failed" \
+    "the one-site self-check fixture could not be written to $_tmp/selfcheck.sh, so the matcher cannot be proved to FIRE — and an unproved matcher's zero is not a measurement" \
+    "check TMPDIR=${TMPDIR:-/tmp} for space and permissions"
+fi
+# THE MATCHER'S OWN STATUS, not just its output: a matcher that FAILS here emits nothing, and
+# nothing would otherwise be read as "inert" — a plausible but WRONG cause. Both states refuse;
+# they are told apart so the remedy is right.
+if ! sigpipe_violations "$_tmp/selfcheck.sh" >"$_tmp/selfcheck.out" 2>"$_tmp/selfcheck.err"; then
+  refuse "matcher-failed" \
+    "the shared matcher exited non-zero on the built-in one-site self-check fixture, so NO count it produces can be trusted (stderr: $(tr '\n' ' ' <"$_tmp/selfcheck.err"))" \
+    "check that awk works on this host, then fix scripts/tests/lib/sigpipe-matcher.sh and re-run scripts/tests/test_gate_liveness_no_sigpipe.sh (33 cases pin it)"
+fi
+if ! _sc=$(awk 'END { print NR + 0 }' "$_tmp/selfcheck.out" 2>"$_tmp/selfcheck.cnt.err"); then
+  refuse "count-failed" \
+    "the self-check's matcher output could not be counted: $(tr '\n' ' ' <"$_tmp/selfcheck.cnt.err")" \
+    "check that awk works on this host; an uncounted self-check cannot license any later count"
+fi
+[[ "$_sc" =~ ^[0-9]+$ ]] || refuse "count-failed" \
+  "the self-check site count came back as '$_sc', which is not a number — UNKNOWN, not zero" \
+  "check that awk works on this host"
+[ "$_sc" -eq 1 ] || refuse "matcher-inert" \
+  "the shared matcher reported $_sc site(s) in a fixture containing exactly ONE known #4061 site, so no count it produces can be trusted" \
   "fix scripts/tests/lib/sigpipe-matcher.sh and re-run scripts/tests/test_gate_liveness_no_sigpipe.sh (33 cases pin it)"
 printf 'SIGPIPE-SITES: matcher SELF-CHECK OK (1 known site found in 1-site fixture)\n'
 
@@ -239,14 +278,36 @@ printf 'SIGPIPE-SITES: subjects ENUMERATED %d git-tracked scripts/**/*.sh file(s
 CUR_FILES=0
 CUR_SITES=0
 while IFS= read -r f; do
-  sigpipe_violations "$f" >"$_tmp/v.census" 2>/dev/null
-  n=$(grep -c . "$_tmp/v.census" || true)
-  [ -n "$n" ] || refuse "count-failed" \
-    "the matcher produced no count for $f" \
+  # THE REPORTED FALSE PASS (roborev job 139). This status was ignored: a failing matcher left an
+  # EMPTY census, `grep -c .` said 0, and the subject read CLEAN. An UNMEASURED file is UNKNOWN,
+  # never zero, so it is a REFUSAL naming the file — there is no per-file skip.
+  if ! sigpipe_violations "$f" >"$_tmp/v.census" 2>"$_tmp/v.err"; then
+    refuse "matcher-failed" \
+      "the shared matcher exited non-zero while scanning $f, so that file's site count is UNKNOWN, not zero (stderr: $(tr '\n' ' ' <"$_tmp/v.err"))" \
+      "check that awk works on this host and that $f is readable; if the matcher itself is broken, fix scripts/tests/lib/sigpipe-matcher.sh. An unmeasured file never reads as a clean one, so there is no skip."
+  fi
+  # And the COUNT itself is statused. `awk END{NR}` rather than `grep -c . || true`: grep exits 1
+  # on a legitimately EMPTY match set, so its status is unusable and the `|| true` that made it
+  # usable also swallowed a genuine grep failure.
+  if ! n=$(awk 'END { print NR + 0 }' "$_tmp/v.census" 2>"$_tmp/n.err"); then
+    refuse "count-failed" \
+      "the matcher's output for $f could not be counted: $(tr '\n' ' ' <"$_tmp/n.err")" \
+      "check that awk works on this host; an uncounted file is UNKNOWN, not clean"
+  fi
+  [[ "$n" =~ ^[0-9]+$ ]] || refuse "count-failed" \
+    "the site count for $f came back as '$n', which is not a number, so it is UNKNOWN rather than zero" \
     "re-run; if it persists, fix scripts/tests/lib/sigpipe-matcher.sh"
   if [ "$n" -gt 0 ]; then
-    _norm_sorted "$_tmp/v.census" >"$_tmp/v.census.norm"
-    h=$(_digest_of "$_tmp/v.census.norm")
+    if ! _norm_sorted "$_tmp/v.census" >"$_tmp/v.census.norm" 2>"$_tmp/norm.err"; then
+      refuse "normalise-failed" \
+        "normalising/sorting the matched lines of $f failed, so the material the digest is taken over is UNKNOWN — and an empty normalisation would digest to the SAME value for every such file (stderr: $(tr '\n' ' ' <"$_tmp/norm.err"))" \
+        "check that awk and sort work on this host; an unmeasured set is never an unchanged one"
+    fi
+    if ! h=$(_digest_of "$_tmp/v.census.norm" 2>"$_tmp/dg.err"); then
+      refuse "digest-failed" \
+        "\`$DIGEST_CMD\` exited non-zero for $f, so that file's matched-line SET is UNKNOWN — and an unknown set must never read as an unchanged one (stderr: $(tr '\n' ' ' <"$_tmp/dg.err"))" \
+        "check that $DIGEST_CMD works on this host; an unmeasured comparison is never a pass"
+    fi
     [[ "$h" =~ $HASH_RE ]] || refuse "digest-failed" \
       "\`$DIGEST_CMD\` produced '$h' rather than a 64-character hex digest for $f, so that file's matched-line SET is UNKNOWN — and an unknown set must never read as an unchanged one" \
       "check that $DIGEST_CMD works on this host; an unmeasured comparison is never a pass"
@@ -255,6 +316,18 @@ while IFS= read -r f; do
     CUR_SITES=$((CUR_SITES + n))
   fi
 done <"$_tmp/subjects"
+# THE CENSUS FILE MUST HOLD EVERY RECORD THE LOOP COUNTED. A `>>` that silently fails (a full
+# disk) would drop a subject from the census, and a subject ABSENT from the census compares as
+# IMPROVED — a non-failing observation. So the file is re-counted against the in-shell counter,
+# which the append cannot corrupt.
+if ! _now_records=$(awk 'END { print NR + 0 }' "$_tmp/now" 2>"$_tmp/nowcnt.err"); then
+  refuse "census-count-failed" \
+    "the census file $_tmp/now could not be counted: $(tr '\n' ' ' <"$_tmp/nowcnt.err")" \
+    "check that awk works on this host and that TMPDIR has space"
+fi
+[ "$_now_records" = "$CUR_FILES" ] || refuse "census-truncated" \
+  "the census recorded $_now_records line(s) for $CUR_FILES measured file(s), so at least one measurement was LOST — and a file missing from the census compares as IMPROVED rather than failing" \
+  "check TMPDIR=${TMPDIR:-/tmp} for free space, then re-run"
 printf 'SIGPIPE-SITES: MEASURED %d file(s) with at least one SHAPE MATCH, %d match(es) in total\n' \
   "$CUR_FILES" "$CUR_SITES"
 printf 'SIGPIPE-SITES: (a SHAPE MATCH is not a confirmed hazard — see the DECLARED SCOPE block)\n'
@@ -263,6 +336,14 @@ printf 'SIGPIPE-SITES: (a SHAPE MATCH is not a confirmed hazard — see the DECL
 # --regenerate: the ONE documented way an existing site is tolerated.
 # ---------------------------------------------------------------------------
 if [ "$MODE" = regenerate ]; then
+  # SORTED FIRST, WITH ITS STATUS READ. Inside the brace group the sort's failure would have been
+  # the group's status only while it stayed LAST — a later added line would have masked it, and a
+  # failed sort writes a SHORT baseline that the very next --check then treats as the truth.
+  if ! LC_ALL=C sort "$_tmp/now" >"$_tmp/now.sorted" 2>"$_tmp/regensort.err"; then
+    refuse "baseline-write-failed" \
+      "sorting the census for the regenerated baseline failed, and a short baseline would be read as the truth by the next run: $(tr '\n' ' ' <"$_tmp/regensort.err")" \
+      "check that sort works on this host and that TMPDIR has space"
+  fi
   {
     printf '# scripts/ci/sigpipe-sites-baseline.txt — THE PIPED-BUILTIN-WRITER (EPIPE) SITE RATCHET\n'
     printf '# BASELINE (issue #4061, AC4). GENERATED FILE — do not hand-edit; regenerate with ONE\n'
@@ -293,11 +374,22 @@ if [ "$MODE" = regenerate ]; then
     # Sorted from the census FILE, never `printf ... | sort`: `sort` reads to EOF so there is no
     # EPIPE hazard here, but the shape is one this guard REPORTS, and a guard that must list
     # itself in its own baseline is a guard nobody believes.
-    LC_ALL=C sort "$_tmp/now"
+    cat "$_tmp/now.sorted"
   } >"$BASELINE.tmp.$$" || refuse "baseline-write-failed" \
     "could not write $BASELINE.tmp.$$" "check write permissions on scripts/ci/"
   mv -- "$BASELINE.tmp.$$" "$BASELINE" || refuse "baseline-write-failed" \
     "could not move the regenerated baseline into place" "check write permissions on scripts/ci/"
+  # A brace group's status is its LAST command's, so a failed `printf` mid-header would go unseen
+  # while `cat` succeeded. Re-count what landed: the file must carry exactly one record per
+  # measured file, or the next --check would ratchet against a truncated census.
+  if ! _wrote=$(awk '/^[[:space:]]*#/ { next } NF > 0 { c++ } END { print c + 0 }' "$BASELINE" 2>"$_tmp/wrote.err"); then
+    refuse "baseline-write-failed" \
+      "the regenerated baseline could not be re-counted: $(tr '\n' ' ' <"$_tmp/wrote.err")" \
+      "check that awk works on this host"
+  fi
+  [ "$_wrote" = "$CUR_FILES" ] || refuse "baseline-write-failed" \
+    "the regenerated baseline holds $_wrote record(s) for $CUR_FILES measured file(s), so the write was TRUNCATED — and a short baseline is read as the truth by the next run" \
+    "check free space and permissions on scripts/ci/, then re-run $REGEN_CMD"
   printf 'SIGPIPE-SITES: REGENERATED %s (%d file(s), %d match(es))\n' "$BASELINE" "$CUR_FILES" "$CUR_SITES"
   printf 'SIGPIPE-SITES: verdict REGENERATED\n'
   exit 0
@@ -315,6 +407,10 @@ fi
   "the baseline $BASELINE exists but is not readable" \
   "fix its permissions"
 
+# The read redirect below is NOT statused, and cannot be read as clean: if it fails the loop body
+# never runs, B_ENTRIES stays 0 and the entry floor REFUSES. Same for the subjects loop above (a
+# failed read leaves N_SUBJECTS at 0 and trips the subject floor). Both floors are why an
+# unreadable input cannot become a pass.
 : >"$_tmp/base"
 : >"$_tmp/basepaths"
 B_ENTRIES=0
@@ -344,11 +440,21 @@ while IFS= read -r bline || [ -n "$bline" ]; do
     "$REGEN_CMD"
   # Duplicate detection without an associative array (bash 3.2): the accumulating file is the
   # set. A fixed-string, whole-line-anchored grep, so a path is never read as a pattern.
-  if grep -qxF -- "$bpath" "$_tmp/basepaths" 2>/dev/null; then
-    refuse "baseline-duplicate" \
-      "$BASELINE names $bpath twice (line $_lineno), so which count binds is undefined" \
-      "$REGEN_CMD"
-  fi
+  # ITS STATUS IS TRICHOTOMOUS and all three branches are handled: 0 = duplicate, 1 = absent (the
+  # only other legal answer), anything else = grep FAILED, which the plain `if` read as "absent".
+  _dup_rc=0
+  grep -qxF -- "$bpath" "$_tmp/basepaths" 2>"$_tmp/dup.err" || _dup_rc=$?
+  case "$_dup_rc" in
+    0)
+      refuse "baseline-duplicate" \
+        "$BASELINE names $bpath twice (line $_lineno), so which count binds is undefined" \
+        "$REGEN_CMD" ;;
+    1) : ;;
+    *)
+      refuse "duplicate-check-failed" \
+        "the duplicate-path probe for $bpath exited $_dup_rc, which is neither found nor not-found, so duplicate paths are UNDETECTED rather than absent: $(tr '\n' ' ' <"$_tmp/dup.err")" \
+        "check that grep works on this host; an unmeasured baseline is never a pass" ;;
+  esac
   printf '%s\n' "$bpath" >>"$_tmp/basepaths"
   printf '%s %s %s\n' "$bpath" "$bcount" "$bhash" >>"$_tmp/base"
   B_ENTRIES=$((B_ENTRIES + 1))
@@ -391,7 +497,28 @@ if ! awk -v base="$_tmp/base" -v now="$_tmp/now" -v subj="$_tmp/subjects" '
     "the awk comparison of census against baseline exited non-zero: $(tr '\n' ' ' <"$_tmp/cmp.err")" \
     "re-run; an unmeasured comparison is never a pass"
 fi
-LC_ALL=C sort "$_tmp/cmp.unsorted" >"$_tmp/cmp"
+# THE SORT'S STATUS IS THE VERDICT'S. A failed sort leaves $_tmp/cmp EMPTY, the reader loop then
+# finds no FAIL record, and the run prints NO-INCREASE — the reported false-PASS class, one step
+# further down the pipeline than where it was found.
+if ! LC_ALL=C sort "$_tmp/cmp.unsorted" >"$_tmp/cmp" 2>"$_tmp/cmpsort.err"; then
+  refuse "comparison-sort-failed" \
+    "sorting the comparison records failed, and an empty record set would read as NO-INCREASE: $(tr '\n' ' ' <"$_tmp/cmpsort.err")" \
+    "check that sort works on this host; an unmeasured comparison is never a pass"
+fi
+# And the sorted set must hold every record awk emitted, or verdicts were silently dropped.
+if ! CMP_RECORDS=$(awk 'NF > 0 { c++ } END { print c + 0 }' "$_tmp/cmp" 2>"$_tmp/cmpcnt.err"); then
+  refuse "comparison-count-failed" \
+    "the comparison records could not be counted: $(tr '\n' ' ' <"$_tmp/cmpcnt.err")" \
+    "check that awk works on this host"
+fi
+if ! CMP_EMITTED=$(awk 'NF > 0 { c++ } END { print c + 0 }' "$_tmp/cmp.unsorted" 2>"$_tmp/cmpcnt.err"); then
+  refuse "comparison-count-failed" \
+    "the comparison records could not be counted before sorting: $(tr '\n' ' ' <"$_tmp/cmpcnt.err")" \
+    "check that awk works on this host"
+fi
+[ "$CMP_RECORDS" = "$CMP_EMITTED" ] || refuse "comparison-truncated" \
+  "the comparison emitted $CMP_EMITTED record(s) but $CMP_RECORDS survived sorting, so at least one verdict was LOST — and a lost FAIL record reads as NO-INCREASE" \
+  "check TMPDIR=${TMPDIR:-/tmp} for free space, then re-run"
 
 # A DIGEST-ONLY FAILURE WOULD BE UNACTIONABLE, so name the lines that moved. The baseline stores
 # no TEXT, so the removed line cannot be recovered FROM the baseline — but it can be recovered
@@ -399,20 +526,41 @@ LC_ALL=C sort "$_tmp/cmp.unsorted" >"$_tmp/cmp"
 # baseline's digest the difference reported is EXACT rather than indicative. That is checked, not
 # assumed; when it does not hold the reader is TOLD the reference state is unavailable and gets
 # the current set in full, never a bare digest mismatch.
+# EVERY STEP OF THIS DIAGNOSTIC IS STATUSED TOO. It cannot turn a FAIL into a pass — the verdict
+# is already decided by the counters — but a failed producer here would have printed an EMPTY
+# ADDED/REMOVED set under the word "EXACT", i.e. named nothing while claiming precision. When a
+# step fails the reader is TOLD, which is the same rule as everywhere else in this file.
 _swap_report() { # _swap_report <path> <baseline-hash>
-  local sp="$1" sbh="$2" ref_ok=0 hh=""
-  sigpipe_violations "$sp" >"$_tmp/s.now" 2>/dev/null
-  _norm_sorted "$_tmp/s.now" >"$_tmp/s.now.norm"
-  if command -v comm >/dev/null 2>&1 && git show "HEAD:$sp" >"$_tmp/s.head.src" 2>/dev/null; then
-    sigpipe_violations "$_tmp/s.head.src" >"$_tmp/s.head" 2>/dev/null
-    _norm_sorted "$_tmp/s.head" >"$_tmp/s.head.norm"
-    hh=$(_digest_of "$_tmp/s.head.norm")
-    if [ "$hh" = "$sbh" ]; then ref_ok=1; fi
+  local sp="$1" sbh="$2" ref_ok=0 hh="" now_ok=1 cmp_failed=0
+  if ! sigpipe_violations "$sp" >"$_tmp/s.now" 2>/dev/null; then now_ok=0; fi
+  if [ "$now_ok" -eq 1 ] && ! _norm_sorted "$_tmp/s.now" >"$_tmp/s.now.norm" 2>/dev/null; then now_ok=0; fi
+  if [ "$now_ok" -eq 0 ]; then
+    printf '    the matcher or the normaliser FAILED re-reading this file, so neither the added nor\n' >>"$_tmp/msg.fail"
+    printf '    the removed line can be named. The digest mismatch above stands and this run FAILs.\n' >>"$_tmp/msg.fail"
+    return 0
+  fi
+  if command -v comm >/dev/null 2>&1 && git show "HEAD:$sp" >"$_tmp/s.head.src" 2>/dev/null \
+     && sigpipe_violations "$_tmp/s.head.src" >"$_tmp/s.head" 2>/dev/null \
+     && _norm_sorted "$_tmp/s.head" >"$_tmp/s.head.norm" 2>/dev/null; then
+    if hh=$(_digest_of "$_tmp/s.head.norm" 2>/dev/null); then
+      if [ "$hh" = "$sbh" ]; then ref_ok=1; fi
+    else
+      hh=""
+    fi
+  fi
+  # The set difference is only claimed EXACT if BOTH comm runs succeed; otherwise fall back to
+  # printing the current set in full rather than an empty difference under a precise-sounding word.
+  if [ "$ref_ok" -eq 1 ]; then
+    if ! LC_ALL=C comm -13 "$_tmp/s.head.norm" "$_tmp/s.now.norm" >"$_tmp/s.added" 2>/dev/null \
+       || ! LC_ALL=C comm -23 "$_tmp/s.head.norm" "$_tmp/s.now.norm" >"$_tmp/s.removed" 2>/dev/null; then
+      printf '    the set difference against HEAD could not be computed (`comm` failed), so the\n' >>"$_tmp/msg.fail"
+      printf '    difference below is the CURRENT set in full rather than an exact ADDED/REMOVED pair.\n' >>"$_tmp/msg.fail"
+      ref_ok=0
+      cmp_failed=1
+    fi
   fi
   if [ "$ref_ok" -eq 1 ]; then
     printf '    the baseline digest equals this file AT HEAD, so this difference is EXACT:\n' >>"$_tmp/msg.fail"
-    LC_ALL=C comm -13 "$_tmp/s.head.norm" "$_tmp/s.now.norm" >"$_tmp/s.added"
-    LC_ALL=C comm -23 "$_tmp/s.head.norm" "$_tmp/s.now.norm" >"$_tmp/s.removed"
     while IFS= read -r sl; do
       [ -n "$sl" ] && printf '    ADDED:   %s\n' "$sl" >>"$_tmp/msg.fail"
     done <"$_tmp/s.added"
@@ -420,22 +568,48 @@ _swap_report() { # _swap_report <path> <baseline-hash>
       [ -n "$sl" ] && printf '    REMOVED: %s\n' "$sl" >>"$_tmp/msg.fail"
     done <"$_tmp/s.removed"
   else
-    printf '    the baseline records a DIGEST, not text, and this file at HEAD does not reproduce\n' >>"$_tmp/msg.fail"
-    printf '    it (HEAD digest: %s), so the REMOVED line cannot be named. The current matched-line\n' "${hh:-unavailable}" >>"$_tmp/msg.fail"
-    printf '    set in full follows; compare it against `git diff -- %s`.\n' "$sp" >>"$_tmp/msg.fail"
+    # TWO DISTINCT reasons land here and they must not be reported as one: HEAD's digest did not
+    # match the baseline (so the removed line is genuinely unrecoverable), or the set difference
+    # itself failed (in which case HEAD *did* match and saying otherwise would be false).
+    if [ "$cmp_failed" -eq 1 ]; then
+      printf '    the REMOVED line cannot be named because the set difference could not be taken.\n' >>"$_tmp/msg.fail"
+      printf '    The current matched-line set in full follows; compare it against `git diff -- %s`.\n' "$sp" >>"$_tmp/msg.fail"
+    else
+      printf '    the baseline records a DIGEST, not text, and this file at HEAD does not reproduce\n' >>"$_tmp/msg.fail"
+      printf '    it (HEAD digest: %s), so the REMOVED line cannot be named. The current matched-line\n' "${hh:-unavailable}" >>"$_tmp/msg.fail"
+      printf '    set in full follows; compare it against `git diff -- %s`.\n' "$sp" >>"$_tmp/msg.fail"
+    fi
     while IFS= read -r sl; do
       [ -n "$sl" ] && printf '    NOW:     %s\n' "$sl" >>"$_tmp/msg.fail"
     done <"$_tmp/s.now.norm"
   fi
 }
 
+# The matcher is re-run to QUOTE the sites in a failure message. Statused: a failure here must
+# not silently render an INCREASE with no lines under it, which reads like a guard that found
+# nothing. It is a NOTE, not a refusal — the verdict is already FAIL.
+_list_sites() { # _list_sites <path>
+  local lp="$1" v
+  if ! sigpipe_violations "$lp" >"$_tmp/v.txt" 2>"$_tmp/v.err2"; then
+    printf '    (the matcher exited non-zero re-reading %s, so its sites cannot be quoted: %s)\n' \
+      "$lp" "$(tr '\n' ' ' <"$_tmp/v.err2")" >>"$_tmp/msg.fail"
+    return 0
+  fi
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    printf '    %s:%s\n' "$lp" "$v" >>"$_tmp/msg.fail"
+  done <"$_tmp/v.txt"
+}
+
 INCREASED=0
 NEWFILES=0
 SWAPPED=0
+RECORDS_READ=0
 : >"$_tmp/msg.fail"
 : >"$_tmp/msg.info"
 while IFS= read -r rec; do
   [ -n "$rec" ] || continue
+  RECORDS_READ=$((RECORDS_READ + 1))
   tag=${rec%% *}
   rest=${rec#* }
   case "$tag" in
@@ -443,21 +617,13 @@ while IFS= read -r rec; do
       rp=${rest%% *}; rn=${rest##* }
       NEWFILES=$((NEWFILES + 1))
       printf 'NEW FILE WITH SITES: %s has %s shape match(es) and is not in the baseline\n' "$rp" "$rn" >>"$_tmp/msg.fail"
-      sigpipe_violations "$rp" >"$_tmp/v.txt"
-      while IFS= read -r v; do
-        [ -n "$v" ] || continue
-        printf '    %s:%s\n' "$rp" "$v" >>"$_tmp/msg.fail"
-      done <"$_tmp/v.txt"
+      _list_sites "$rp"
       ;;
     FAIL-INC)
       rp=${rest%% *}; rtail=${rest#* }; rn=${rtail%% *}; rb=${rtail##* }
       INCREASED=$((INCREASED + 1))
       printf 'INCREASE: %s has %s shape match(es), baseline records %s\n' "$rp" "$rn" "$rb" >>"$_tmp/msg.fail"
-      sigpipe_violations "$rp" >"$_tmp/v.txt"
-      while IFS= read -r v; do
-        [ -n "$v" ] || continue
-        printf '    %s:%s\n' "$rp" "$v" >>"$_tmp/msg.fail"
-      done <"$_tmp/v.txt"
+      _list_sites "$rp"
       ;;
     FAIL-SWAP)
       rp=${rest%% *}; rtail=${rest#* }; rn=${rtail%% *}
@@ -481,6 +647,11 @@ while IFS= read -r rec; do
       ;;
   esac
 done <"$_tmp/cmp"
+# EVERY EMITTED RECORD MUST HAVE BEEN READ. A read that stops early (an I/O error on the redirect)
+# would drop FAIL records and the run would print NO-INCREASE.
+[ "$RECORDS_READ" = "$CMP_RECORDS" ] || refuse "comparison-unread" \
+  "$CMP_RECORDS comparison record(s) were measured but only $RECORDS_READ were read, so at least one verdict was never rendered — and an unrendered FAIL reads as NO-INCREASE" \
+  "re-run; an unread record is never a pass"
 
 # ---------------------------------------------------------------------------
 # DECLARED SCOPE — printed on EVERY run, pass or fail. A README nobody opens is not a
@@ -525,6 +696,14 @@ printf '           Narrowing any of the false positives is issue #3992.\n'
 printf 'WHAT THIS GUARD DOES NOT ASSERT: that the baseline sites are safe. They are UNTRIAGED\n'
 printf '           (%d file(s) / %d recorded match(es)). It asserts only that the tree gets no\n' "$B_ENTRIES" "$B_SITES"
 printf '           WORSE. #4061 converted TWO named sites and deliberately left the rest.\n'
+printf 'EVERY PRODUCER IS STATUSED, and a failed one is a NAMED REFUSAL (exit 3), never a zero: the\n'
+printf '           matcher (self-check AND per subject), the count, the normalise+sort, the digest,\n'
+printf '           git ls-files, the duplicate probe, the awk comparison and its sort, and the\n'
+printf '           census/baseline/record write-backs, which are re-counted against the in-shell\n'
+printf '           counters. A ZERO COUNT FROM AN EMPTY STREAM IS INDISTINGUISHABLE FROM A CLEAN\n'
+printf '           FILE, so a count is trusted only when its producer SUCCEEDED (roborev job 139:\n'
+printf '           an ignored matcher status made a failed scan read CLEAN). There is no degraded\n'
+printf '           count-only mode and no per-file skip.\n'
 printf 'PREREQUISITES: git + awk + a sha256 tool (%s) + standard text tools. No cargo, no\n' "$DIGEST_CMD"
 printf '           python3, no datasets, no network. This guard NEVER SKIPs; an unmeasurable run\n'
 printf '           is a REFUSAL (exit 3) — including an absent digest tool, which is NEVER a\n'
@@ -536,7 +715,18 @@ while IFS= read -r m; do
   printf 'SIGPIPE-SITES: %s\n' "$m"
 done <"$_tmp/msg.info"
 
-if [ -s "$_tmp/msg.fail" ]; then
+# THE VERDICT BINDS ON THE IN-SHELL COUNTERS, NOT ONLY ON THE DIAGNOSTIC FILE. The counters are
+# incremented as each FAIL record is read and no append can corrupt them; `[ -s msg.fail ]` alone
+# meant that if every diagnostic APPEND failed (a full disk) the run printed NO-INCREASE with
+# failures already counted. Either signal now FAILs, and a counted failure with no diagnostic is a
+# REFUSAL — a FAIL nobody can act on is not a usable verdict.
+FAILING=$((INCREASED + NEWFILES + SWAPPED))
+if [ "$FAILING" -gt 0 ] && [ ! -s "$_tmp/msg.fail" ]; then
+  refuse "diagnostic-lost" \
+    "$FAILING failing file(s) were counted but the diagnostic could not be written, so the run cannot say WHICH files failed" \
+    "check TMPDIR=${TMPDIR:-/tmp} for free space, then re-run"
+fi
+if [ "$FAILING" -gt 0 ] || [ -s "$_tmp/msg.fail" ]; then
   while IFS= read -r m; do
     [ -n "$m" ] || continue
     printf 'SIGPIPE-SITES: %s\n' "$m"
