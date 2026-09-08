@@ -1,0 +1,12 @@
+> D2 supporting series -- cqlite catalog scan scaling under LIMIT. Issue #4137.
+> query: SELECT * FROM cqlite.cassandra_easy_stress.keyvalue LIMIT <n>
+> Establishes that the cqlite scan path scales linearly and has no cliff, which is what
+> separates the count(*) stall (see d2-count-star-stall.md) from a general scan problem.
+> processed_rows exceeds the LIMIT because Trino reads whole pages/splits before applying it.
+> Single run each (a ladder, not a claimed median) -- the medians-of-3 claim is d2-scan-warm.csv.
+> Same pins as d2-scan-warm.csv.
+limit_rows,elapsed_ms,processed_rows,processed_bytes,state,query_id
+5,245,35,6100,FINISHED,20260908_013832_00002_6dba3
+1000,245,7000,1217627,FINISHED,20260908_013846_00003_6dba3
+100000,2740,212992,37075751,FINISHED,20260908_013847_00004_6dba3
+1000000,27190,2502656,435543948,FINISHED,20260908_013850_00005_6dba3

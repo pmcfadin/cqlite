@@ -1,0 +1,50 @@
+> D4 -- "dashboards at scale": concurrency ladder against the cqlite catalog. Issue #4137.
+> Same pins as d2-scan-warm.csv. 8/16/32/64/80 concurrent clients, 180s per step.
+> elapsed per query from the coordinator's /v1/query/<id>; p50/p99 over all queries in the step.
+>
+> Mixed dashboard-shaped query set (all BOUNDED -- a dashboard panel does not full-scan):
+>   SELECT * FROM cqlite.<ks>.keyvalue LIMIT 500
+>   SELECT key, value FROM cqlite.<ks>.keyvalue LIMIT 50
+>   SELECT count(*) FROM cqlite.<ks>.sensor_data WHERE sensor_id='001.26.44'
+>   SELECT sensor_id, count(*) FROM cqlite.<ks>.sensor_data WHERE sensor_id='001.26.44' GROUP BY 1
+>
+> ### NOT COMPARABLE TO R11b's 34 qps FLOOR -- do not read a regression here ###
+> #4137 names R11b (#2367) as the regression bar: 34 qps, p50 227ms, p99 366ms at 32 threads on a
+> SMALLER node shape, driven by trino-loadtest with ITS query file. This run uses a HAND-AUTHORED
+> mix, because the mix had to avoid the unbounded count(*) that never completes on the cqlite
+> catalog (#4170), and it includes LIMIT 500 row-shipping scans. Different workload and different
+> driver => the qps figures measure different things. A lower number here is NOT evidence of a
+> regression against that floor, and none is claimed. Re-running trino-loadtest's own file, once
+> #4170 is fixed, is the only way to test that floor.
+>
+> ### WHAT IS SOLID ###
+> ZERO errors and ZERO container restarts at every level INCLUDING 80 threads. That is the
+> overload claim (#4137: "error count must be 0", "OOMKills must be 0") and it holds outright.
+> Throughput rises monotonically 5.5 -> 15.0 qps; p99 rises 214ms -> 1,280ms, i.e. the system
+> degrades in LATENCY under load rather than by failing -- which is the property a dashboard needs.
+threads,n,duration_s,qps,p50_ms,p99_ms,errors,restarts_before,restarts_after
+8,999,182,5.5,111,214,0,0,0
+16,1450,184,7.9,153,297,0,0,0
+32,2288,181,12.6,150,493,0,0,0
+64,2521,184,13.7,130,744,0,0,0
+80,2745,183,15.0,172,1280,0,0,0
+>
+> ### Flight pod memory, 4-point protocol -- FLATNESS is the signal, the ABSOLUTE VALUE IS NOT RSS ###
+> phase,pod_a,pod_b,pod_c
+> idle_before,2079Mi,2215Mi,2992Mi
+> peak_8t,2080Mi,2164Mi,3057Mi
+> peak_16t,2064Mi,2148Mi,3059Mi
+> peak_32t,2063Mi,2148Mi,3059Mi
+> peak_64t,2064Mi,2148Mi,3060Mi
+> peak_80t,2064Mi,2149Mi,3060Mi
+> idle_after,2064Mi,2149Mi,3060Mi
+>
+> Memory is FLAT from idle through 80 threads -- no per-query growth, and idle_after == peak_80t.
+> That is the bounded-memory property.
+> BUT these are NOT process RSS and must not be quoted as such. #2367 reports idle 3-4 MiB; these
+> read 2-3 GiB, a ~1000x gap. The explanation is almost certainly measurement, not regression:
+> `kubectl top pod` reports the cgroup working set, and these pods mmap Cassandra's data files from
+> a hostPath, so pages faulted in while scanning a 4.46 GB/node table are counted against the pod.
+> Reported this way rather than as a leak, because asserting a 1000x memory regression from an
+> instrument known to include page cache would be wrong. A real RSS figure needs
+> /proc/<pid>/status VmRSS inside the container; NOT COLLECTED this run.

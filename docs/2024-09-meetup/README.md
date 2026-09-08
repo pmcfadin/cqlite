@@ -77,6 +77,26 @@ the pre-#3058 merge path (82k rows/s); anything cold on EBS (cold I/O is ~60 µs
 
 _(the #4137 agent appends one line per session: date, what ran, where the output landed)_
 
+- **2026-09-07/08** — Full cluster run on `easy-db-lab` (3× i4i.2xlarge db + 2× m6i.2xlarge app,
+  Cassandra 5.0.9, Trino 481, connector 0.16.1, `cqlite-flight:talk017` built from trunk
+  `f22ce842b`). All six demos ran; **D3 contradicts the story and is reported as measured**.
+  Headlines: D1 **5.61× vs 2.21×** baseline client p99; D2 **1.66×** on `keyvalue`;
+  **1,720,646 rows/s sustained 8.5 min**; D4 **0 errors / 0 restarts** to 80 clients; D5 **0-row**
+  staleness gap; D6 **288 ms** first query after restart. D3: CQLite **1.3–1.4× slower** on
+  `sensor_data`, but a two-table join completes only through it. Output: `results/` (9 CSVs +
+  15 rescued VictoriaMetrics TSVs), `charts/` (9 PNGs + 2 render scripts), `REPORT.md`.
+  Four defects filed: **#4161**, **#4170**, **#4173**, **#4175** — the last qualifies every
+  throughput figure as single-pod. Two earlier claims corrected (real RSS *was* collectable and is
+  higher than reported; `index_parses_total` is 127, not unavailable). Cluster torn down.
+
+### Open question this run leaves for the talk
+
+**D2 and D3 disagree on the direction of the speed claim.** CQLite is 1.66× faster on `keyvalue`
+(~1 row/partition) and 1.3–1.4× slower on `sensor_data` (~9 rows/partition), same cluster minutes
+apart. Slide 2 must name the table or characterise the shape; "same SQL and it's faster" is not
+supportable as a general claim from this run. Partition width is a correlation, not an established
+cause.
+
 ## Open questions
 
 - Which of D7/D8 make the cut given cluster time (~1 day for D1–D6 at 50M rows)?

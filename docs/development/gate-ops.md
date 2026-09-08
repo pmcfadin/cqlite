@@ -391,14 +391,137 @@ mode (both path seams mandatory, no production fallback).
 
 ## Disk hygiene for multi-worktree gates (issue #1848)
 
-Each active worktree owns its own ~25–30GB `target/` dir. Several concurrent
-worktrees can exhaust the disk mid-gate (a confusing hard failure). `flow-finalize`
-removes a finished issue's worktree; additionally prune stale worktrees' `target/`
-dirs and size the shared cache with `SCCACHE_CACHE_SIZE` (`50G` on the fleet
-boxes — derived from a measured working set, see `.agent-ami/profile.yaml`; persist it with
+**A full gate's `target/` dir is ~100–145GB per active worktree, NOT the ~25–30GB
+this section claimed until #3800.** That figure was 4–5x low and is exactly what made
+current fleet capacity look adequate. Measured, twice, on two different boxes:
+
+- **#3800, `ip-172-31-1-216`** (295G `/data`): `lane-3634/target` at **101G mid-full-gate,
+  peaking at 143G**, with two other active lanes at **68G** and **57G** — **0 bytes free**
+  at the failure.
+- **2026-09-01, `ip-172-31-6-169`** (independent corroboration): `lane-3731/target` at
+  **108G**, alongside a 15G `/data/sccache`. Broken down, that one lane is `debug` **89G** plus
+  `agent-gate-side` **20G**.
+- **#3724, `box7`, 2026-09-01 — a COLD gate that COMPLETED**: `target/` grew to **102G**
+  mid-run and **peaked at 105G** at completion. Quote this one for a cold single lane; the
+  101–143G figures above are warm trees carrying earlier runs' profiles.
+
+**AND ONLY A RUN THAT COMPLETES THE BUILD CAN MEASURE THE BUILD (#3724, lead measurement).**
+An **~80G** figure circulated before this and was wrong for a reason worth naming: every run it
+came from **died before finishing the build**, so it measured how far cargo got, not what a full
+gate needs. A peak read off an aborted or ENOSPC-killed run is a **lower bound on the lower
+bound** — the failure truncates exactly the components that were about to allocate most. Never
+quote a disk peak from a run with no terminal `RESULT: PASS|FAIL`.
+
+**Corollary for capacity, which is the ruling's input and not a ruling:** at ~102G per cold
+gate a 295G volume supports **two lanes gating serially with reserve — not four lanes with
+independent trees**. What the slot cap should actually COUNT is #3434/#3763/#3755 under one
+owner design ruling, deliberately not this section.
+
+**The longest component is `tooling-tests`, and its measured figure has been understated three
+times running: ~850s → 2073s (#3473 gate of record #4) → 2417s / 40.3 min (#3724, 2026-09-01).**
+That matters here because a lane sizing a disk-pressure window — or deciding a `STALLED` gate is
+dead — off the longest component must derive the bound **from the component table in its own
+SUMMARY**, never from a figure in prose like this one. Three successive corrections are the
+evidence that prose figure will be low again.
+
+**What moved it:** the feature-matrix lanes. `feature-iso-parquet`, `feature-iso-delta-scan`,
+`legacy-heuristics`, `all-features-check` and the `--all-features` clippy matrix each compile
+a **distinct feature profile**, and cargo never evicts a stale profile's artifacts — so the
+per-worktree peak grew with the component set while this paragraph did not. A **second,
+separately-named mechanism** rides on top and the breakdown above measures it directly: #2657's
+2-lane split gives every SIDE-lane component its **own isolated `CARGO_TARGET_DIR`** under
+`target/agent-gate-side`, deliberately, to stop it thrashing MAIN's shared dir. That is a whole
+extra profile tree per worktree — 20G of the 108G above — so widening the SIDE lane raises the
+disk peak even when no new feature is compiled.
+
+**The consequence to plan around:** three concurrent full gates need roughly **430G** of
+`target/` on a **295G** disk. They do not fit. `flow-finalize` removes a finished issue's
+worktree; additionally prune stale worktrees' `target/` dirs and size the shared cache with
+`SCCACHE_CACHE_SIZE` (`50G` on the fleet boxes — derived from a measured working set, see
+`.agent-ami/profile.yaml`; persist it with
 `bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap`, because a value only in a launcher
 profile reaches launcher-created processes alone — #3727) (previously `30G` on the
 10-core machine).
+
+**When it happens anyway, the SUMMARY now says so (#3800).** ENOSPC used to surface as a
+bare `minimal-build: FAIL (611s)` beside 36/37 PASS and `tree-integrity: PASS` — and since
+doctrine retains ONLY the SUMMARY and forbids reading `gate.log`, the reader debugged a
+minimal-features build that was never broken. Every SUMMARY block **that carries a component
+table**, plus the four FULL-gate pre-flight blocks reachable after `run_file_size` — 11 of the
+script's 26 emit sites — now carries a `disk-exhaustion:` line naming a
+recognised signature, the component and the log line, plus a start→emit free-space delta; see
+the gate section of `CLAUDE.md` for its closed value set. (The pre-flight blocks were exempt
+until #3800/job 358, on the stated ground that no component had run — false, because
+`run_file_size` executes before them, so a file-size that died of ENOSPC was named nowhere.) The other 15, emitted before any
+component runs (the pre-flight FAIL-CLOSED blocks, the `--delta` usage errors and
+refused-before-execution blocks, the self-test hooks), are **declared exempt at the site** and
+already name their own cause. It is an **attribution, never a verdict**: it never changes
+`RESULT`, and a matched signature is evidence about the host, not proof the diff is innocent.
+
+**Read `tree-integrity: FAIL (tree-capture-failed; …)` as a possible ENOSPC too.** That reason
+string is a **fixed constant** — `tree-capture-failed; the tree cannot be proven unchanged` —
+and it is stamped whenever `_tree_identity` cannot write or validate its capture manifest, which
+is written into `$LOG_DIR`. A full logs filesystem therefore produces a verdict that reads as a
+git/worktree problem and **can never name disk**. That is why the #2926 component-BOUNDARY FAIL
+block (the 7th table-bearing site) carries the attribution, having been wrongly exempted for a
+round on the grounds that "its cause is already named". It is the one MID-RUN emit, so both
+halves of its line declare a partial window (`start->boundary, MID-RUN PARTIAL WINDOW`, and
+`SUBJECT SET ALSO PARTIAL` — only the components recorded by that boundary are scanned).
+
+**Marking that block was not the same as covering it (roborev job 301) — the lesson to carry:
+adding a marker to a block does NOT make the block's CAUSE observable to that marker.** The
+scan's subject set was *non-PASS component logs*. On the tree-capture ENOSPC path
+`_tree_identity` fails independently of any component, its write-error text reaches **no**
+component log, and the components are typically **still PASS** — so the block would have
+emitted an affirmative `0 RECOGNISED` on precisely the path the line was added for. When you
+extend a diagnostic to a new failure path, ask what the SUBJECT SET is **on that path** and
+whether the evidence can physically land in it. The fix gives the scan a **second kind of
+subject**: the capture's own stderr, carried back on `_tree_identity`'s rc-2 channel and held
+**in memory** (never a spill file — under ENOSPC that is what cannot be written), scanned by
+the same closed signature set through the same loop and counted in the same census. So on a
+logs-filesystem ENOSPC the block now reads `RECOGNISED … in IN-MEMORY subject 'tree-identity
+manifest write (…)'` even though every component PASSed. A capture whose text was not recorded
+reads `UNMEASURED` naming that — never clean.
+
+**A THIRD subject kind, then a DECLARED boundary (roborev job 304).** `record_result` writes
+`$LOG_DIR/<component>.result`; under ENOSPC that write fails, its error text goes to gate
+**stderr** — neither a component log nor an in-memory subject — and the parent's fail-closed
+guard then synthesises `FAIL 0` for a component whose own log is CLEAN. Both channels empty ⇒
+the same false `0 RECOGNISED`, one writer over. Three consecutive rounds each found a
+*different* unwatched writer, so rather than carve a fourth time the scan now takes a **third
+kind of subject** — a `.result` verdict the gate could not READ, whether absent, unreadable or
+**malformed** — and the emitted `scan:` field **declares its SUBJECT set** the way it already
+declared its signature set, naming the gate-internal writers known to sit outside it:
+`NON-EXHAUSTIVE by construction ON BOTH AXES`. **When a diagnostic's subject set has been
+extended three times, publish the boundary** — a marker that names its own blind spots is worth
+more than one implying a completeness it does not have.
+
+**And marking a subject UNMEASURED is not DISPOSING of it (roborev job 316).** That third kind
+was wired to the marker and not to the **verdict**: the aggregation loops keyed `OVERALL=FAIL`
+on the status token being exactly `FAIL`, so an unreadable `.result` was reported UNMEASURED by
+the line while the run still emitted `RESULT: PASS` — a certified gate over a component whose
+verdict was never read. An unread verdict now becomes a synthetic `FAIL 0` and fails the run,
+because **a component whose verdict cannot be read may have succeeded, and a gate may not
+certify a maybe**. That is not a breach of "an attribution, never a verdict": what fails the run
+is the aggregation's handling of a file it could not read, which would be correct if this line
+did not exist.
+
+**And the SIDE lane's escalation channel was itself on the full filesystem (roborev job 319).**
+A SIDE-lane component that detects a tree-capture failure escalates by appending to a marker file
+under `$LOG_DIR` — on the same filesystem that just filled — and that append was `|| true`, while
+its in-memory note dies at the subshell boundary and its own `.result` is a complete, well-formed
+`PASS` written before the disk filled. If space freed before the terminal capture, the run
+certified. The escalation now needs no disk: the SIDE branch **truncates its own verdict**, which
+allocates nothing, and an empty `.result` is already an unread verdict — synthetic `FAIL 0`,
+`OVERALL=FAIL`, named UNMEASURED. Two rules came out of it that generalise past this script: **a
+stated coverage is worse than a declared gap** (a comment claimed this path was covered by the
+third subject kind, and it was not), and **when the failure you are reporting is "the disk is
+full", every channel in the report path must be checked for needing disk.**
+
+**This is a diagnostic, not the fix.** Nothing here makes the slot cap disk-aware, refuses or
+queues a gate on low free space, budgets disk per lane, or shares one `CARGO_TARGET_DIR` per
+box. That capacity-management work is tracked under **#3434 / #3763 / #3755** — do not read
+this section as solved.
 
 **A single `--lite` round can be the thing that exhausts the disk.** Measured by
 another lane and reported in issue #3764: one `--lite` on a `cqlite-core/src/` diff
@@ -658,9 +781,11 @@ in this order:
   component; re-read before acting, and if it is still `STALLED` after a component's worth of
   time treat the gate as gone and relaunch it — and read that duration OFF THE COMPONENT TABLE IN
   YOUR OWN SUMMARY (`<name>: PASS (<n>s)`), never off a figure in prose. The figure that used to sit
-  here, "~850s", was understated by 2.4x (`tooling-tests` measured **2073s**, #3473), and acting on
-  an understated bound is exactly what makes a closer declare a LIVE gate gone and relaunch it —
-  putting two gates on one summary path. Pass `--run-id` whenever
+  here, "~850s", was understated by 2.4x (`tooling-tests` measured **2073s**, #3473) and is now
+  understated a THIRD time (**2417s / 40.3 min** on #3724's completed cold gate, 2026-09-01), and
+  acting on an understated bound is exactly what makes a closer declare a LIVE gate gone and
+  relaunch it — putting two gates on one summary path. Three successive corrections say the next
+  prose figure will be low too: derive it from your own table. Pass `--run-id` whenever
   you know it; a concurrent peer's beat on a shared default path otherwise answers about the
   peer's gate (#2874). A **missing** beat is `UNKNOWN`, never `STALLED` — an older gate simply
   has no beat.
@@ -1669,8 +1794,11 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   still-`STALLED` run as gone only after **longer than the LONGEST COMPONENT OF YOUR OWN RUN,
   derived from the component table in your own SUMMARY** — never from a constant in prose. The
   figure previously written here, "~850s", was understated by 2.4x (`tooling-tests` measured
-  **2073s** on #3473's gate of record #4), and acting on an understated bound makes a closer declare
-  a LIVE gate gone and relaunch it, putting two gates on one summary path.
+  **2073s** on #3473's gate of record #4) and is now understated a THIRD time (**2417s / 40.3 min**
+  on #3724's completed cold gate, 2026-09-01) — which is the point: acting on an understated bound
+  makes a closer declare a LIVE gate gone and relaunch it, putting two gates on one summary path,
+  and three successive corrections say the next prose figure will be low too. Derive it from your
+  own table.
   Full record: `docs/development/lane-gate-execution.md`.
 - **A GENUINELY PROSE diff cannot change the compiled binary — so a test failure in its full gate
   is BY DEFINITION pre-existing on `main` or a flake, and the correct response is CITE-AND-WAIVE
@@ -1754,6 +1882,238 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
     shows the check RAN. **There is deliberately NO opt-out env var, and none may be added**:
     committed source in a checkout is never legitimately absent, so an escape hatch could only buy a
     vacuous green.
+- **A DISK-EXHAUSTION FAIL now NAMES ITSELF in the block — `disk-exhaustion:` is an
+  ATTRIBUTION, never a verdict (#3800).** A full gate that died because the disk filled used
+  to report only `minimal-build: FAIL (611s)` beside 36/37 PASS and `tree-integrity: PASS`, so
+  an agent obeying the retain-only-the-SUMMARY rule debugged a minimal-features build that was
+  never broken. Every SUMMARY block **that carries a COMPONENT TABLE** (the full gate's
+  terminal, `--lite`'s, `--delta`'s, `--delta`'s python-tier REFUSED block, the #2926
+  tree-integrity component-BOUNDARY FAIL, the two selftest hooks) now carries ONE
+  `disk-exhaustion:` line with a CLOSED value set:
+  `RECOGNISED (#3800)` naming the signature, the component and `<log>:<line>`;
+  `0 RECOGNISED (#3800)` (**never a bare `0`**) either for a scan that read every subject
+  and matched nothing, or for a run with no non-PASS component and no in-memory subject; and
+  `UNMEASURED (#3800)` when a subject could not be read — **UNMEASURED is never "no ENOSPC"**,
+  and the clean verdict is keyed on the affirmative *every subject was READ*. The **signature set is CLOSED** —
+  `No space left on device`, `os error 28`, `Disk quota exceeded`, with a bare `ENOSPC` token
+  deliberately excluded because this repo's own tests and doctrine contain it — and the line
+  DECLARES that non-exhaustiveness on every run. Only **non-PASS** components are scanned (a
+  PASSing log carrying the phrase explains nothing), only **REGULAR FILES** are scanned — `-e` and
+  `-r` are both true for a FIFO and for a symlink to `/dev/zero`, and `grep` on either **BLOCKS
+  FOREVER** on the path to the terminal emit, so a non-regular subject would hang the gate with no
+  verdict at all, which is worse than the misattribution the line prevents (refused and counted
+  toward `UNMEASURED`, never silently skipped, #3800/job 343) — the **RAW** log is read rather than
+  `_ansi_stripped_log` (**a disk diagnostic that needs free disk to run is useless exactly when
+  it matters**; safe under #3400 because these signatures are pure `strerror`/`io::Error`
+  PAYLOAD, never a coloured cargo status word), and **NO log-derived text reaches the block** —
+  only our signature name, the component name from `COMPONENTS`, and an integer (#3312). The
+  free-space field is a **start→emit DELTA**, because peers free space between the failure and
+  the emit — that is #3800's own re-run evidence (same tree, same sha, opposite verdicts) — and
+  at the ONE MID-RUN site it is relabelled `start→boundary, MID-RUN PARTIAL WINDOW` with the
+  scan's subject set declared partial too (only the components recorded by that boundary):
+  **labelled, never omitted**, because a partial measurement read as a terminal one understates
+  a collapse that had not finished happening. It
+  **never changes `OVERALL`/`RESULT`**: a matched signature is evidence about the HOST, not
+  proof the diff is innocent, and this marker does not own the verdict — so the `RECOGNISED`
+  text says the signature is **consistent with disk exhaustion on this HOST** and to free space
+  and re-run **before** treating the non-PASS as a defect in the diff, and states plainly that
+  this is **evidence, not proof**. It said "NOT a defect in the diff" until roborev job 299:
+  an assertion the scan cannot support (a failing test may legitimately *print* a signature,
+  and a diff can itself drive disk usage) and one that contradicted this same bullet.
+  **AND ADDING THE MARKER TO A BLOCK DOES NOT MAKE THAT BLOCK'S CAUSE OBSERVABLE TO IT
+  (roborev job 301) — ASK WHAT THE SUBJECT SET IS ON THE NEW PATH.** The #2926 tree-integrity
+  BOUNDARY block was given the line precisely because `tree-integrity: FAIL` is reachable from
+  ENOSPC (the capture manifest is written into `$LOG_DIR`, and `TREE_CAPTURE_FAIL_REASON` is a
+  FIXED CONSTANT that can never name disk). On that path the evidence **cannot reach the
+  subject set**: `_tree_identity` fails independently of any component, its write-error text
+  lands in **no component log**, and the components themselves are typically **still PASS** —
+  so the block would have emitted an affirmative `0 RECOGNISED` on exactly the path the line
+  was added for. A **false clean reading**, and this repo's standing anti-pattern (a positive
+  verdict keyed on the ABSENCE of a bad signal in a subject set that cannot contain it) —
+  strictly worse than the exemption it replaced. So the subject set went to **TWO KINDS**
+  (a THIRD followed one round later — see the boundary paragraph below):
+  non-PASS component logs, **plus the gate's own capture-failure text**, captured **IN MEMORY**
+  (`DISK_MEM_SUBJECTS`) and handed back on `_tree_identity`'s rc-2 channel, which is disjoint
+  from the identity channel **by return code**. In memory and never a spill file, for the same
+  reason the scanner avoids `_ansi_stripped_log`: under ENOSPC the file cannot be written, so a
+  file-backed subject would be empty exactly on the run that had the answer. **One signature
+  loop, two subject kinds** (`_disk_scan_subject file|text`) — never a second matcher — and the
+  in-memory subjects are **counted in the census**, so `0 RECOGNISED` can only be claimed when
+  they were read too. A match is named in **our** vocabulary (`IN-MEMORY subject '<label>'`)
+  with **no fabricated `<log>:<line>`**, and no captured byte is interpolated (#3312 — the text
+  is OS/libc-controlled). A capture recorded with **no text**, and a `TREE_CAPTURE_FAILED` with
+  **nothing recorded**, are each `UNMEASURED` **naming that**, never clean. Pinned by a REAL
+  ENOSPC: the suite points the manifest and its `.report` at **`/dev/full`**, asserts the
+  platform's own `strerror` text really arrived, and includes the mutation control — emptying
+  the in-memory subjects collapses the same run to `0 RECOGNISED … (3/3 PASS)`, which *is* the
+  false reading. `/dev/full` is Linux-only, so that case **declares its skip** and a
+  host-independent injected case carries the property everywhere.
+  **THE SCOPE IS "COULD A VERDICT ALREADY BE RECORDED", NOT "IS TERMINAL" AND NOT "CARRIES A
+  TABLE" — AND THE EXCLUSIONS ARE DECLARED AT THE SITE.** Of the script's 26
+  `emit_summary`/`_emit_terminal_summary` call sites, **11** append the line: the **7** that
+  render a component table, plus the **4 PRE-FLIGHT blocks reachable AFTER `run_file_size`**
+  (#2078 fixtures, #3148 schemas ×2, and the `--only` zero-Data.db block — reachable via e.g.
+  `--only file-size,core-tests`). **Those three were exempt on the ground that "no component has run", and that
+  was FALSE (job 358): `run_file_size` executes BEFORE both preflights** — deliberately, since
+  it needs no dataset and those guards exit when the corpus is absent — so a `file-size` that
+  died of ENOSPC was named by neither the block's contents nor any attribution. **This issue's
+  opening defect, inside an exemption written for this issue.** They now attribute over **all three
+  subject kinds** — component verdicts recorded so far, the in-memory capture-failure channel, and
+  unread verdicts — and omit the line only when **every** kind is empty, which is the one part of
+  the old rationale that survives. **Gating on the component pairs alone was a FALSE NEGATIVE on
+  this issue's headline scenario (job 365):** if ENOSPC stops `file-size.result` being CREATED
+  there are no pairs at all, while `record_result` has already recorded its write failure in
+  memory — so the attribution was omitted from exactly the run that had the answer. **And the
+  gathering happens in the PARENT shell, not in `$( )`** — the first version echoed its pairs, so
+  every site gathered inside a subshell and any unread-verdict note recorded on the way (an
+  absent, unreadable or MALFORMED `.result` is what ENOSPC leaves) was lost at the boundary before
+  the line was rendered. Same lesson as `record_result`'s SIDE-lane note, and it applies to **any
+  helper whose job is partly to RECORD**. The remaining **15** (the `component-set` FAIL, the
+  two summary-integrity FAILs, the shared forwarder, the five self-test hooks, the four
+  `--delta` usage ERRORs, the two `--delta` refused-**before-execution** blocks) are emitted
+  before any component *can* have recorded a verdict, so they have **nothing to attribute** —
+  the line could only render a misleading `0 RECOGNISED … (0/0 PASS)` — and each already names
+  its own cause with its own marker. **Read the pattern across jobs 299 → 301 → 304 → 358 → 370: five
+  times an exemption or a subject set was justified by a claim about WHAT COULD HAVE RUN, and five
+  times that claim was wrong. Verify the ordering in the source; do not reason about it.** And job
+  370 adds the second half of that lesson: **fixing the INSTANCES a finding names leaves the CLASS
+  open** — three sites were corrected, the fourth kept the identical false comment and surfaced one
+  round later. A per-site comment cannot guard this, because the comment is the thing that is
+  wrong; the guard has to **derive the class** (an emit site reachable after `run_file_size` must
+  be marked, computed from the call graph), which is what would have caught all four at once. Each carries a `# disk-exhaustion-exempt: <reason>` and
+  `scripts/tests/test_agent_gate_disk_exhaustion.sh` censuses **every** site as
+  MARKED/EXEMPT/GAP, so a new emit site with neither REDS that suite. The claim read "every
+  terminal block" until job 299, and the then-structural test **could not see** that it was
+  false: it derived its subject set from sites containing `_fm_summary_line`, i.e. exactly the
+  sites already compliant — **a guard whose subject set is the compliant set cannot fail**.
+  Note the `--delta` REFUSED paths split: the python-tier one HAS a table and IS marked; the
+  two refused-before-execution ones do not and are exempt.
+  **THAT CIRCULARITY HAD A SECOND LEVEL, AND IT COST THE 7th SITE — "my cause is already
+  named" IS NOT A REASON TO OMIT AN ATTRIBUTION UNLESS THE NAMED CAUSE CAN ACTUALLY NAME
+  THIS ONE.** Narrowing the claim to "carries a component table" fixed the WORDING and left
+  the census deriving its table-bearing subset from `_fm_summary_line` alone — so the ONE
+  block that renders a component table with its own `printf '%-18s %s (%ss)'`, the #2926
+  tree-integrity component-BOUNDARY FAIL (`_tree_boundary_meta_lines`), was **invisible to the
+  derivation** and shipped a round *exempted*, on the stated grounds that its cause was already
+  named (a mid-run tree mutation). **It is not: `tree-integrity: FAIL` has a SECOND cause that
+  IS disk exhaustion.** `_tree_identity` writes its capture manifest into `$LOG_DIR`; when that
+  write or its validation fails, the block is stamped with `TREE_CAPTURE_FAIL_REASON`, a **FIXED
+  CONSTANT** reading `tree-capture-failed; the tree cannot be proven unchanged` — so an ENOSPC
+  on the logs filesystem produces a verdict that **can never name disk** and that reads as a
+  git/worktree problem. That is a *worse* instance of this issue's own defect than the
+  `minimal-build: FAIL` that opened it. The census now derives table-bearing sites from the
+  **row FORMAT** (a function is a component-row renderer if its body emits `%-18s %s (%s`; a row
+  site is any code line outside every renderer's own body that emits that format or calls a
+  renderer; row sites map to their emit site and are DEDUPED), so a third renderer is recognised
+  with no edit to the suite — plus a permanent control planting into the SECOND renderer
+  specifically, because the two pre-existing controls both plant into the `_fm_summary_line`
+  family and neither can fail if the derivation goes blind again.
+  **THIRD INSTANCE, SO THE SUBJECT SET IS NOW *DECLARED* RATHER THAN CARVED AGAIN (roborev job
+  304).** `record_result` writes `$LOG_DIR/<component>.result`; under ENOSPC that write fails,
+  its error text goes to **gate STDERR** — neither a component log nor an in-memory subject —
+  and the parent's fail-closed guard then synthesises `FAIL 0` for a component whose **own log
+  is CLEAN**, because it may genuinely have succeeded and died on the WRITE. Both channels
+  empty ⇒ an affirmative `0 RECOGNISED`: the identical false-clean shape to the tree-capture
+  case, one writer over. Three consecutive rounds each found a **different** unwatched writer,
+  which is the standing signal to CONSOLIDATE and STATE THE BOUNDARY rather than patch the next
+  instance. So: **(1)** a `.result` verdict the gate could not READ — **absent, unreadable, or
+  MALFORMED** (the STATUS token checked against the closed `PASS|FAIL|SKIP` set and the seconds
+  field against an integer; an ENOSPC write typically leaves the file CREATED and EMPTY) — is a
+  **THIRD kind of subject** (`DISK_UNREAD_VERDICTS`) contributing to `UNMEASURED` and **never**
+  to a clean reading, *whatever caused it* — strictly more general than ENOSPC, and the same
+  rule as always (key the clean branch on the affirmative "every subject was READ"). **Every**
+  `.result` reader routes through the ONE reader `_disk_verdict_read`, pinned structurally: a
+  private two-field verdict read anywhere else records nothing and REDS the suite. **The
+  UNMEASURED arm now takes precedence over "no non-PASS component to scan"**, and that ORDER is
+  load-bearing on a reachable shape — a `.result` reading `PASS abc` records PASS in the table
+  while its verdict was not fully read, so the old order rendered the affirmative clean reading
+  over an unmeasured subject on a run with nothing else wrong (found by MUTATION: removing the
+  reorder left every other case in the suite green).
+  **AND MARKING A SUBJECT UNMEASURED IS NOT DISPOSING OF IT — THE RUN MUST FAIL TOO
+  (roborev job 316).** That third subject kind was wired to the MARKER and not to the VERDICT: all three
+  aggregation loops keyed `OVERALL=FAIL` on the status token being exactly `FAIL`, so the same
+  `PASS abc` (or the EMPTY file an ENOSPC write actually leaves behind) was recorded as
+  UNMEASURED by the line **and left `OVERALL` untouched** — the gate of record emitting
+  `RESULT: PASS` for a run in which a SELECTED component's verdict was never read. **Worse than
+  either half alone, because the verdict is what a closer reads**, and the same absence-of-a-bad-
+  signal shape one layer in: *"the status token was not the string `FAIL`"* is not *"a verdict was
+  read"*. An unread verdict is now normalised to a synthetic `FAIL 0` by the ONE wrapper
+  `_disk_verdict_read_aggregate` and the caller forces `OVERALL=FAIL` — the disposition the
+  fail-closed presence guard already gave an ABSENT `.result`, because **a component whose verdict
+  cannot be read may have SUCCEEDED, and a gate may not certify a maybe**. Structurally pinned
+  two ways: exactly ONE raw-reader call site, inside the wrapper, and a call-site census where
+  every wrapper site must either force `OVERALL` or carry a declared renderer exemption — so a
+  fourth aggregation site cannot be added back into the hole. **This does NOT breach "an
+  attribution, never a verdict"**: what fails the run is the aggregation's handling of a file it
+  could not read, which would be correct if the `disk-exhaustion:` line did not exist; the line
+  still changes nothing, and the structural guard asserting that is deliberately unweakened (the
+  aggregator is extracted into its own file rather than excused by name — *excluding whatever
+  fails* is how such a guard rots). Same round, same family: a seconds check spelled
+  `case $v in ''|*[!0-9-]*)` **admits `-`, `--`, `1-2`, `-1-`** — a character-class complement
+  cannot express WHERE a minus may appear — so a partially-written duration passed as well-formed
+  and its component was omitted from the subject set the channel exists to populate.
+  **(2)** `record_result` captures its own
+  write failure **IN MEMORY** on the existing `_disk_note_capture_failure` channel — never a
+  spill file, which under ENOSPC is what cannot be written. **THAT NOTE REACHES THE PARENT ONLY
+  FROM THE PARENT SHELL**: the serial MAIN lane and every `--lite`/`--delta` component. A
+  SIDE-lane component runs in a backgrounded subshell (#1737) where the append is lost, and the
+  marker-FILE idiom used elsewhere is unavailable **by construction** under ENOSPC.
+  **THAT PATH WAS CLAIMED TO BE "COVERED BY (1)" AND WAS NOT — a stated coverage is worse than a
+  declared gap (roborev job 319).** On the SIDE-lane tree-capture route the component's `.result`
+  is a **complete, well-formed `PASS`** written before the disk filled, so nothing was malformed
+  for (1) to catch: the marker append to `$LOG_DIR/tree-integrity.fail` failed under `|| true`,
+  the in-memory note died at the subshell boundary, and if space freed before the terminal
+  capture the parent **certified the run**. The escalation now needs **no disk**: the SIDE branch
+  **truncates its own verdict** (`> file` on an existing file allocates nothing — `O_TRUNC` is
+  metadata — so it succeeds exactly where the append failed), and an EMPTY `.result` is already a
+  first-class unread verdict ⇒ synthetic `FAIL 0` ⇒ `OVERALL=FAIL` ⇒ named UNMEASURED. It trades
+  SPECIFICITY for soundness and says so on stderr: the block reports the verdict as unreadable
+  rather than `tree-integrity: FAIL`, because the only channel that could carry the reason is the
+  one that just failed. **A less specific FAIL beats a false PASS.** **And the first version of
+  that fix ended `|| true` on the truncation — the very shape it was written to remove (job 319
+  round 2), so the escalation is now a VERIFIED LADDER**, each rung needing strictly less of the
+  filesystem than the last and each checked by observing the filesystem rather than an exit
+  status: marker append (carries the reason) → **truncate** our own verdict → **unlink** it
+  (needs no space and frees some; sound HERE because absence means "not selected" only to the
+  `--lite`/`--delta` loops and the SIDE lane exists only in the full gate) → **signal the gate**,
+  the last disk-free channel, after which the run publishes NO verdict and keeps the
+  `RESULT: INCOMPLETE` launch sentinel, which is never a certification. Bounded by a state where
+  the gate cannot produce a trustworthy verdict anyway. **That last rung sends EXACTLY ONE signal
+  and it is SIGKILL — two rounds landed there and the second FALSIFIED the reasoning written for
+  the first (job 319 rounds 4–5).** Round 4: `kill` SUCCEEDING IS NOT THE TARGET DYING — `kill
+  -TERM` returns 0 on mere DELIVERY, and an ignored TERM disposition inherited by the gate's shell
+  survives into bash and cannot be un-ignored, so a TERM-only rung resumes with the original
+  well-formed `PASS` intact. That produced TERM → sleep → KILL. Round 5: **that sequence reopened
+  the pid-reuse hazard, and the comment written for it asserted the hazard was absent** — *"`$$` is
+  our ancestor, alive by construction"*, true BEFORE the first signal and **false after it**: once
+  TERM lands the gate may exit and be reaped during the wait, and on a four-lane box the pid's next
+  owner is most likely **a peer lane's gate**, which this repo has an incident for. The fix is a
+  **DELETION** — no TERM, no sleep, one SIGKILL to a pid that is still our own live ancestor at the
+  instant we signal it — **and that a repeatedly-patched guard's next fix REMOVES code is the tell
+  that it is the right one**, where each previous round ADDED a rung. SIGKILL cannot be ignored, so
+  "did it work" does not arise, and the EXIT trap does not run, leaving the INCOMPLETE sentinel.
+  Cleanup is forgone deliberately: a cleanup that needs to write has nowhere to write. **Anything
+  that re-adds a first signal re-adds the reuse window**, which is why that is pinned
+  structurally — the runtime cases cannot see it (a re-added TERM+sleep+KILL still exits 137 and
+  passes them both). Same round, same family, one
+  file down: **the missing NEWLINE is part of the verdict.** An ENOSPC short write can truncate
+  `printf '%s %s\n'` ON A FIELD BOUNDARY — `PASS 12` losing its newline, or `PASS 1` being all
+  that reached disk of `PASS 12` — and both parse as well-formed two-field verdicts, the second
+  with a valid integer that is merely the WRONG NUMBER, so every content check passes and the sole
+  evidence is `read`'s nonzero status, which was discarded with `|| true`. The verdict must be
+  exactly ONE TERMINATED LINE; trailing content is refused too. Fixed on the READ side
+  deliberately — unlinking the partial file would make the component **vanish** from the
+  `--lite`/`--delta` tables, whose loops treat absence as "not selected", so **the partial file is
+  the evidence**. Partial and declared beats a false clean. **(3)** The emitted `scan:` field now declares its **SUBJECT
+  set** exactly as it declares its **signature set** — the three kinds, plus the gate-internal
+  writers **known to sit outside** them (`_fm_*` sidecars, `node-bindings.leak-lane`,
+  `summary-integrity.fail`, the heartbeat file), whose ENOSPC failures are **DECLARED false
+  negatives**. `NON-EXHAUSTIVE by construction ON BOTH AXES`. The transferable rule: **when a
+  diagnostic's subject set has been extended three times, publish the boundary — a marker that
+  names its own blind spots is worth more than one implying a completeness it does not have.** Capacity management (a
+  disk-aware slot cap, per-lane budgets, a shared `CARGO_TARGET_DIR`) is **#3434/#3763/#3755**,
+  not here. Per-worktree `target/` is **~100–145GB** for a full gate, not the ~25–30GB
+  this file claimed until #3800 — see *Disk hygiene for multi-worktree gates* above.
 - **A gate script BEHIND `origin/main` cannot certify (#3544).** `agent-gate.sh` is read from
   the tree under test, so a branch cut before a component-set expansion runs the OLD script and
   reports a true `N/N nonpass=0` while being **silent about every component added since**

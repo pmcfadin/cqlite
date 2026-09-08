@@ -1,0 +1,160 @@
+> D5 -- freshness under continuous writes, both catalogs. Issue #4137.
+> Same pins as d2-scan-warm.csv. Subject: cassandra_easy_stress.sensor_data (sensor_id text PK,
+> timestamp timeuuid clustering, data text), written by BasicTimeSeries -p 100 --rate 2000 -r 0.0.
+> Probe every 10s: SELECT count(*) ... WHERE sensor_id='001.26.44' against EACH catalog.
+> gap = cassandra_rows - cqlite_rows, i.e. rows visible to Cassandra but not yet to CQLite.
+>
+> ### PROBE SENSITIVITY IS VERIFIED, NOT ASSUMED -- read this before trusting a zero gap ###
+> Two earlier rounds of this demo were DISCARDED, both caught by an explicit growth check:
+>   round 1: writes spread over 20,000 partitions -> probed partition gained ~2 rows in 6 min.
+>   round 2: writes concentrated to 100 partitions but the probe SID came from `LIMIT 1`, which
+>            returned a COLD leftover partition -> grew 16 -> 16 in 30s.
+> Both would have reported "gap = 0 in every sample" while measuring nothing at all. A zero gap is
+> only meaningful against a signal large enough for a gap to appear in.
+> THIS round's probe was measured BEFORE the run: 001.26.44 grew 223 -> 251 in 28s == ~60 rows/min
+> == ~1 row/s. During the run the partition grew +234 and +212 rows respectively, so a lag of even
+> a few seconds had room to show as several rows.
+>
+> ### RESULT AND ITS HONEST INTERPRETATION ###
+> Observed staleness was AT OR BELOW THE PROBE'S RESOLUTION in both settings: max gap 0 rows.
+> This does NOT prove "CQLite is always fresh". What it shows is narrower and should be said as
+> such: at a table-wide write rate of 2,000/s, MEMTABLE PRESSURE drives flushes frequently enough
+> on its own that CQLite's visible row set stayed within one row of Cassandra's -- the flush cadence
+> was never the binding constraint at this write rate. A LOW-write-rate table, where the memtable
+> takes minutes to fill, is exactly the case this run does NOT cover and where 0.17's
+> flush-cadence bound WOULD be visible. That case is untested here.
+> The 0.17 bound still stands as stated in #4137 and README: CQLite freshness == flush cadence;
+> memtable reads are the 0.18 headline (#1807). The `cassandra` catalog is always fresh by construction.
+>
+> ### A NEGATIVE MEDIAN GAP IS A PROBE ARTIFACT, NOT CQLITE BEING "FRESHER THAN FRESH" ###
+> stock_flush60's median gap is -1 row. The two catalogs are probed SEQUENTIALLY, cassandra first,
+> ~2s apart, while rows arrive at ~1/s -- so the cqlite probe is simply taken later and sees one
+> more row. Reported rather than clipped to zero, because clipping would hide the fact that this
+> probe cannot resolve sub-2s differences in EITHER direction.
+>
+> phase_summary:
+> setting,n_pairs,median_gap_rows,max_gap_rows,pairs_with_gap_zero,partition_growth_rows,cassandra_probe_ms,cqlite_probe_ms
+> stock_flush60,26,-1,0,11,234,28,320
+> flush_period_10s,31,0,0,22,212,29,192
+>
+> SIDE OBSERVATION (not a D5 claim): the bounded point-read probe is 7-11x slower through cqlite
+> than through the cassandra catalog (320ms / 192ms vs ~28ms). Consistent with the 12x seen on
+> issue #4170's bounded count. Snapshot resolution per query is a plausible fixed cost. Worth its
+> own measurement; NOT presented as a talk number.
+>
+> raw series follows.
+timestamp_utc,setting,catalog,elapsed_ms,visible_rows,bytes,state,query_id
+2026-09-08T03:16:02Z,stock_flush60,cassandra,30,274,0B,FINISHED,20260908_031602_00221_6dba3
+2026-09-08T03:16:04Z,stock_flush60,cqlite,1460,275,3850B,FINISHED,20260908_031603_00222_6dba3
+2026-09-08T03:16:15Z,stock_flush60,cassandra,29,281,0B,FINISHED,20260908_031615_00223_6dba3
+2026-09-08T03:16:16Z,stock_flush60,cqlite,327,281,3934B,FINISHED,20260908_031616_00224_6dba3
+2026-09-08T03:16:27Z,stock_flush60,cassandra,32,291,0B,FINISHED,20260908_031627_00225_6dba3
+2026-09-08T03:16:28Z,stock_flush60,cqlite,312,291,4074B,FINISHED,20260908_031628_00226_6dba3
+2026-09-08T03:16:39Z,stock_flush60,cassandra,37,297,0B,FINISHED,20260908_031639_00227_6dba3
+2026-09-08T03:16:40Z,stock_flush60,cqlite,306,297,4158B,FINISHED,20260908_031640_00228_6dba3
+2026-09-08T03:16:51Z,stock_flush60,cassandra,27,305,0B,FINISHED,20260908_031651_00229_6dba3
+2026-09-08T03:16:52Z,stock_flush60,cqlite,315,306,4284B,FINISHED,20260908_031652_00230_6dba3
+2026-09-08T03:17:13Z,stock_flush60,cassandra,24,320,0B,FINISHED,20260908_031713_00231_6dba3
+2026-09-08T03:17:14Z,stock_flush60,cqlite,230,320,4480B,FINISHED,20260908_031714_00232_6dba3
+2026-09-08T03:17:25Z,stock_flush60,cassandra,27,331,0B,FINISHED,20260908_031725_00233_6dba3
+2026-09-08T03:17:26Z,stock_flush60,cqlite,310,331,4634B,FINISHED,20260908_031725_00234_6dba3
+2026-09-08T03:17:37Z,stock_flush60,cassandra,31,334,0B,FINISHED,20260908_031737_00235_6dba3
+2026-09-08T03:17:38Z,stock_flush60,cqlite,336,335,4690B,FINISHED,20260908_031738_00236_6dba3
+2026-09-08T03:17:49Z,stock_flush60,cassandra,29,341,0B,FINISHED,20260908_031749_00237_6dba3
+2026-09-08T03:17:50Z,stock_flush60,cqlite,312,342,4788B,FINISHED,20260908_031750_00238_6dba3
+2026-09-08T03:18:02Z,stock_flush60,cassandra,30,348,0B,FINISHED,20260908_031802_00239_6dba3
+2026-09-08T03:18:05Z,stock_flush60,cqlite,362,349,4886B,FINISHED,20260908_031804_00240_6dba3
+2026-09-08T03:18:25Z,stock_flush60,cassandra,23,360,0B,FINISHED,20260908_031825_00241_6dba3
+2026-09-08T03:18:27Z,stock_flush60,cqlite,452,362,5068B,FINISHED,20260908_031826_00242_6dba3
+2026-09-08T03:18:38Z,stock_flush60,cassandra,25,371,0B,FINISHED,20260908_031838_00243_6dba3
+2026-09-08T03:18:39Z,stock_flush60,cqlite,320,372,5208B,FINISHED,20260908_031839_00244_6dba3
+2026-09-08T03:18:50Z,stock_flush60,cassandra,30,383,0B,FINISHED,20260908_031850_00245_6dba3
+2026-09-08T03:18:51Z,stock_flush60,cqlite,320,383,5362B,FINISHED,20260908_031851_00246_6dba3
+2026-09-08T03:19:03Z,stock_flush60,cassandra,32,386,0B,FINISHED,20260908_031902_00247_6dba3
+2026-09-08T03:19:04Z,stock_flush60,cqlite,319,387,5418B,FINISHED,20260908_031903_00248_6dba3
+2026-09-08T03:19:15Z,stock_flush60,cassandra,30,395,0B,FINISHED,20260908_031914_00249_6dba3
+2026-09-08T03:19:16Z,stock_flush60,cqlite,323,395,5530B,FINISHED,20260908_031915_00250_6dba3
+2026-09-08T03:19:36Z,stock_flush60,cassandra,27,409,0B,FINISHED,20260908_031936_00251_6dba3
+2026-09-08T03:19:37Z,stock_flush60,cqlite,223,411,5754B,FINISHED,20260908_031937_00252_6dba3
+2026-09-08T03:19:48Z,stock_flush60,cassandra,27,417,0B,FINISHED,20260908_031948_00253_6dba3
+2026-09-08T03:19:49Z,stock_flush60,cqlite,305,418,5852B,FINISHED,20260908_031949_00254_6dba3
+2026-09-08T03:20:00Z,stock_flush60,cassandra,29,426,0B,FINISHED,20260908_032000_00255_6dba3
+2026-09-08T03:20:01Z,stock_flush60,cqlite,324,427,5978B,FINISHED,20260908_032001_00256_6dba3
+2026-09-08T03:20:13Z,stock_flush60,cassandra,27,431,0B,FINISHED,20260908_032013_00257_6dba3
+2026-09-08T03:20:15Z,stock_flush60,cqlite,345,431,6034B,FINISHED,20260908_032014_00258_6dba3
+2026-09-08T03:20:26Z,stock_flush60,cassandra,27,440,0B,FINISHED,20260908_032025_00259_6dba3
+2026-09-08T03:20:27Z,stock_flush60,cqlite,321,440,6160B,FINISHED,20260908_032026_00260_6dba3
+2026-09-08T03:20:48Z,stock_flush60,cassandra,38,451,0B,FINISHED,20260908_032048_00261_6dba3
+2026-09-08T03:20:49Z,stock_flush60,cqlite,239,452,6328B,FINISHED,20260908_032049_00262_6dba3
+2026-09-08T03:21:00Z,stock_flush60,cassandra,26,458,0B,FINISHED,20260908_032100_00263_6dba3
+2026-09-08T03:21:02Z,stock_flush60,cqlite,328,458,6412B,FINISHED,20260908_032101_00264_6dba3
+2026-09-08T03:21:12Z,stock_flush60,cassandra,28,468,0B,FINISHED,20260908_032112_00265_6dba3
+2026-09-08T03:21:14Z,stock_flush60,cqlite,340,469,6566B,FINISHED,20260908_032113_00266_6dba3
+2026-09-08T03:21:24Z,stock_flush60,cassandra,27,482,0B,FINISHED,20260908_032124_00267_6dba3
+2026-09-08T03:21:25Z,stock_flush60,cqlite,314,482,6748B,FINISHED,20260908_032125_00268_6dba3
+2026-09-08T03:21:36Z,stock_flush60,cassandra,28,492,0B,FINISHED,20260908_032136_00269_6dba3
+2026-09-08T03:21:37Z,stock_flush60,cqlite,323,493,6902B,FINISHED,20260908_032137_00270_6dba3
+2026-09-08T03:21:58Z,stock_flush60,cassandra,35,508,0B,FINISHED,20260908_032158_00271_6dba3
+2026-09-08T03:21:59Z,stock_flush60,cqlite,224,509,7126B,FINISHED,20260908_032158_00272_6dba3
+2026-09-08T03:22:17Z,flush_period_10s,cassandra,28,519,0B,FINISHED,20260908_032217_00273_6dba3
+2026-09-08T03:22:18Z,flush_period_10s,cqlite,235,519,7266B,FINISHED,20260908_032218_00274_6dba3
+2026-09-08T03:22:29Z,flush_period_10s,cassandra,27,531,0B,FINISHED,20260908_032229_00275_6dba3
+2026-09-08T03:22:30Z,flush_period_10s,cqlite,187,531,7434B,FINISHED,20260908_032230_00276_6dba3
+2026-09-08T03:22:42Z,flush_period_10s,cassandra,29,540,0B,FINISHED,20260908_032241_00277_6dba3
+2026-09-08T03:22:43Z,flush_period_10s,cqlite,205,541,7574B,FINISHED,20260908_032242_00278_6dba3
+2026-09-08T03:22:53Z,flush_period_10s,cassandra,30,551,0B,FINISHED,20260908_032253_00279_6dba3
+2026-09-08T03:22:54Z,flush_period_10s,cqlite,188,552,7728B,FINISHED,20260908_032254_00280_6dba3
+2026-09-08T03:23:05Z,flush_period_10s,cassandra,27,557,0B,FINISHED,20260908_032305_00281_6dba3
+2026-09-08T03:23:06Z,flush_period_10s,cqlite,187,557,7798B,FINISHED,20260908_032305_00282_6dba3
+2026-09-08T03:23:17Z,flush_period_10s,cassandra,28,568,0B,FINISHED,20260908_032316_00283_6dba3
+2026-09-08T03:23:17Z,flush_period_10s,cqlite,195,568,7952B,FINISHED,20260908_032317_00284_6dba3
+2026-09-08T03:23:29Z,flush_period_10s,cassandra,22,574,0B,FINISHED,20260908_032329_00285_6dba3
+2026-09-08T03:23:30Z,flush_period_10s,cqlite,204,575,8050B,FINISHED,20260908_032330_00286_6dba3
+2026-09-08T03:23:41Z,flush_period_10s,cassandra,32,584,0B,FINISHED,20260908_032341_00287_6dba3
+2026-09-08T03:23:42Z,flush_period_10s,cqlite,192,584,8176B,FINISHED,20260908_032341_00288_6dba3
+2026-09-08T03:23:52Z,flush_period_10s,cassandra,29,589,0B,FINISHED,20260908_032352_00289_6dba3
+2026-09-08T03:23:53Z,flush_period_10s,cqlite,189,589,8246B,FINISHED,20260908_032353_00290_6dba3
+2026-09-08T03:24:06Z,flush_period_10s,cassandra,29,593,0B,FINISHED,20260908_032406_00291_6dba3
+2026-09-08T03:24:07Z,flush_period_10s,cqlite,220,593,8302B,FINISHED,20260908_032407_00292_6dba3
+2026-09-08T03:24:18Z,flush_period_10s,cassandra,28,597,0B,FINISHED,20260908_032418_00293_6dba3
+2026-09-08T03:24:19Z,flush_period_10s,cqlite,218,597,8358B,FINISHED,20260908_032419_00294_6dba3
+2026-09-08T03:24:30Z,flush_period_10s,cassandra,40,601,0B,FINISHED,20260908_032430_00295_6dba3
+2026-09-08T03:24:31Z,flush_period_10s,cqlite,207,601,8414B,FINISHED,20260908_032430_00296_6dba3
+2026-09-08T03:24:41Z,flush_period_10s,cassandra,26,605,0B,FINISHED,20260908_032441_00297_6dba3
+2026-09-08T03:24:42Z,flush_period_10s,cqlite,186,605,8470B,FINISHED,20260908_032442_00298_6dba3
+2026-09-08T03:24:53Z,flush_period_10s,cassandra,29,613,0B,FINISHED,20260908_032453_00299_6dba3
+2026-09-08T03:24:54Z,flush_period_10s,cqlite,185,614,8596B,FINISHED,20260908_032453_00300_6dba3
+2026-09-08T03:25:04Z,flush_period_10s,cassandra,31,621,0B,FINISHED,20260908_032504_00301_6dba3
+2026-09-08T03:25:05Z,flush_period_10s,cqlite,185,621,8694B,FINISHED,20260908_032505_00302_6dba3
+2026-09-08T03:25:16Z,flush_period_10s,cassandra,29,625,0B,FINISHED,20260908_032516_00303_6dba3
+2026-09-08T03:25:17Z,flush_period_10s,cqlite,192,625,8750B,FINISHED,20260908_032517_00304_6dba3
+2026-09-08T03:25:28Z,flush_period_10s,cassandra,31,634,0B,FINISHED,20260908_032528_00305_6dba3
+2026-09-08T03:25:29Z,flush_period_10s,cqlite,195,634,8876B,FINISHED,20260908_032529_00306_6dba3
+2026-09-08T03:25:40Z,flush_period_10s,cassandra,32,646,0B,FINISHED,20260908_032539_00307_6dba3
+2026-09-08T03:25:40Z,flush_period_10s,cqlite,191,646,9044B,FINISHED,20260908_032540_00308_6dba3
+2026-09-08T03:25:51Z,flush_period_10s,cassandra,26,653,0B,FINISHED,20260908_032551_00309_6dba3
+2026-09-08T03:25:52Z,flush_period_10s,cqlite,180,654,9156B,FINISHED,20260908_032552_00310_6dba3
+2026-09-08T03:26:03Z,flush_period_10s,cassandra,29,661,0B,FINISHED,20260908_032603_00311_6dba3
+2026-09-08T03:26:03Z,flush_period_10s,cqlite,192,661,9254B,FINISHED,20260908_032603_00312_6dba3
+2026-09-08T03:26:14Z,flush_period_10s,cassandra,28,666,0B,FINISHED,20260908_032614_00313_6dba3
+2026-09-08T03:26:15Z,flush_period_10s,cqlite,189,666,9324B,FINISHED,20260908_032615_00314_6dba3
+2026-09-08T03:26:26Z,flush_period_10s,cassandra,21,673,0B,FINISHED,20260908_032626_00315_6dba3
+2026-09-08T03:26:27Z,flush_period_10s,cqlite,192,673,9422B,FINISHED,20260908_032626_00316_6dba3
+2026-09-08T03:26:37Z,flush_period_10s,cassandra,28,675,0B,FINISHED,20260908_032637_00317_6dba3
+2026-09-08T03:26:38Z,flush_period_10s,cqlite,180,675,9450B,FINISHED,20260908_032638_00318_6dba3
+2026-09-08T03:26:49Z,flush_period_10s,cassandra,26,682,0B,FINISHED,20260908_032649_00319_6dba3
+2026-09-08T03:26:50Z,flush_period_10s,cqlite,193,684,9576B,FINISHED,20260908_032649_00320_6dba3
+2026-09-08T03:27:00Z,flush_period_10s,cassandra,30,689,0B,FINISHED,20260908_032700_00321_6dba3
+2026-09-08T03:27:02Z,flush_period_10s,cqlite,191,690,9660B,FINISHED,20260908_032701_00322_6dba3
+2026-09-08T03:27:13Z,flush_period_10s,cassandra,28,700,0B,FINISHED,20260908_032712_00323_6dba3
+2026-09-08T03:27:14Z,flush_period_10s,cqlite,200,701,9814B,FINISHED,20260908_032713_00324_6dba3
+2026-09-08T03:27:26Z,flush_period_10s,cassandra,35,709,0B,FINISHED,20260908_032725_00325_6dba3
+2026-09-08T03:27:26Z,flush_period_10s,cqlite,209,709,9926B,FINISHED,20260908_032726_00326_6dba3
+2026-09-08T03:27:37Z,flush_period_10s,cassandra,33,715,0B,FINISHED,20260908_032737_00327_6dba3
+2026-09-08T03:27:38Z,flush_period_10s,cqlite,196,715,10010B,FINISHED,20260908_032738_00328_6dba3
+2026-09-08T03:27:49Z,flush_period_10s,cassandra,29,721,0B,FINISHED,20260908_032749_00329_6dba3
+2026-09-08T03:27:50Z,flush_period_10s,cqlite,197,721,10094B,FINISHED,20260908_032750_00330_6dba3
+2026-09-08T03:28:02Z,flush_period_10s,cassandra,50,727,0B,FINISHED,20260908_032802_00331_6dba3
+2026-09-08T03:28:03Z,flush_period_10s,cqlite,217,727,10178B,FINISHED,20260908_032803_00332_6dba3
+2026-09-08T03:28:15Z,flush_period_10s,cassandra,28,731,0B,FINISHED,20260908_032815_00333_6dba3
+2026-09-08T03:28:16Z,flush_period_10s,cqlite,215,732,10248B,FINISHED,20260908_032816_00334_6dba3
