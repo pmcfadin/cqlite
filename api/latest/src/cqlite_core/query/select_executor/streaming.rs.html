@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/query/select_executor/streaming.rs`."><title>streaming.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/query/select_executor/</div>streaming.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Streaming SELECT producer (`execute_streaming_background`) — issue #1578 split.
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/query/select_executor/streaming.rs`."><title>streaming.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/query/select_executor/</div>streaming.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Streaming SELECT producer (`execute_streaming_background`) — issue #1578 split.
 <a href=#2 id=2 data-nosnippet>2</a>//!
 <a href=#3 id=3 data-nosnippet>3</a>//! Relocated verbatim from `execute.rs` (epic #1116 file-size split) so the
 <a href=#4 id=4 data-nosnippet>4</a>//! materializing runner and the streaming producer live in separate files. As a
@@ -299,89 +299,123 @@
 <a href=#299 id=299 data-nosnippet>299</a>                    // partition may straddle a batch boundary), so a partition's
 <a href=#300 id=300 data-nosnippet>300</a>                    // key is decoded once regardless of batching.
 <a href=#301 id=301 data-nosnippet>301</a>                    </span><span class="kw">let </span><span class="kw-2">mut </span>pk_cache = PartitionKeyCache::default();
-<a href=#302 id=302 data-nosnippet>302</a>                    <span class="kw">while let </span><span class="prelude-val">Some</span>(batch) = scan_stream.recv().<span class="kw">await </span>{
-<a href=#303 id=303 data-nosnippet>303</a>                        <span class="kw">for </span>(key, value) <span class="kw">in </span>batch<span class="question-mark">? </span>{
-<a href=#304 id=304 data-nosnippet>304</a>                            <span class="comment">// Capture the partition-key digest before `key` is moved
-<a href=#305 id=305 data-nosnippet>305</a>                            // into row construction (only when needed).
-<a href=#306 id=306 data-nosnippet>306</a>                            </span><span class="kw">let </span>part_sig =
-<a href=#307 id=307 data-nosnippet>307</a>                                per_partition_limit.map(|<span class="kw">_</span>| partition_key_digest(<span class="kw-2">&amp;</span>key.<span class="number">0</span>));
-<a href=#308 id=308 data-nosnippet>308</a>                            <span class="kw">let </span><span class="prelude-val">Some</span>(row) = build_row_from_scan_cached(
-<a href=#309 id=309 data-nosnippet>309</a>                                key,
-<a href=#310 id=310 data-nosnippet>310</a>                                value,
-<a href=#311 id=311 data-nosnippet>311</a>                                projection,
-<a href=#312 id=312 data-nosnippet>312</a>                                schema_opt,
-<a href=#313 id=313 data-nosnippet>313</a>                                <span class="kw-2">&amp;mut </span>pk_cache,
-<a href=#314 id=314 data-nosnippet>314</a>                            ) <span class="kw">else </span>{
-<a href=#315 id=315 data-nosnippet>315</a>                                <span class="kw">continue</span>;
-<a href=#316 id=316 data-nosnippet>316</a>                            };
-<a href=#317 id=317 data-nosnippet>317</a>
-<a href=#318 id=318 data-nosnippet>318</a>                            <span class="kw">if </span>!evaluate_predicates(<span class="kw-2">&amp;</span>row, predicates)<span class="question-mark">? </span>{
-<a href=#319 id=319 data-nosnippet>319</a>                                <span class="kw">continue</span>;
-<a href=#320 id=320 data-nosnippet>320</a>                            }
-<a href=#321 id=321 data-nosnippet>321</a>
-<a href=#322 id=322 data-nosnippet>322</a>                            <span class="comment">// Apply PER PARTITION LIMIT: cap matching rows per
-<a href=#323 id=323 data-nosnippet>323</a>                            // partition, before OFFSET/LIMIT (Cassandra semantics).
-<a href=#324 id=324 data-nosnippet>324</a>                            </span><span class="kw">if let </span>(<span class="prelude-val">Some</span>(cap), <span class="prelude-val">Some</span>(sig)) = (per_partition_limit, part_sig) {
-<a href=#325 id=325 data-nosnippet>325</a>                                <span class="comment">// Fast digest pre-check, then EXACT byte confirm so a
-<a href=#326 id=326 data-nosnippet>326</a>                                // digest collision between DISTINCT partitions never
-<a href=#327 id=327 data-nosnippet>327</a>                                // shares a counter (issue #1590).
-<a href=#328 id=328 data-nosnippet>328</a>                                </span><span class="kw">let </span>same = <span class="macro">matches!</span>(
-<a href=#329 id=329 data-nosnippet>329</a>                                    <span class="kw-2">&amp;</span>current_partition,
-<a href=#330 id=330 data-nosnippet>330</a>                                    <span class="prelude-val">Some</span>((d, bytes))
-<a href=#331 id=331 data-nosnippet>331</a>                                        <span class="kw">if </span><span class="kw-2">*</span>d == sig &amp;&amp; bytes.as_slice() == row.key.as_bytes()
-<a href=#332 id=332 data-nosnippet>332</a>                                );
-<a href=#333 id=333 data-nosnippet>333</a>                                <span class="kw">if </span>!same {
-<a href=#334 id=334 data-nosnippet>334</a>                                    <span class="comment">// Clone the key bytes ONCE per boundary, not per row.
-<a href=#335 id=335 data-nosnippet>335</a>                                    </span>current_partition = <span class="prelude-val">Some</span>((sig, row.key.as_bytes().to_vec()));
-<a href=#336 id=336 data-nosnippet>336</a>                                    partition_count = <span class="number">0</span>;
-<a href=#337 id=337 data-nosnippet>337</a>                                }
-<a href=#338 id=338 data-nosnippet>338</a>                                <span class="kw">if </span>partition_count &gt;= cap {
-<a href=#339 id=339 data-nosnippet>339</a>                                    <span class="kw">continue</span>;
-<a href=#340 id=340 data-nosnippet>340</a>                                }
-<a href=#341 id=341 data-nosnippet>341</a>                                partition_count += <span class="number">1</span>;
-<a href=#342 id=342 data-nosnippet>342</a>                            }
-<a href=#343 id=343 data-nosnippet>343</a>
-<a href=#344 id=344 data-nosnippet>344</a>                            <span class="comment">// Apply OFFSET: skip the first `offset_remaining` matches.
-<a href=#345 id=345 data-nosnippet>345</a>                            </span><span class="kw">if </span>offset_remaining &gt; <span class="number">0 </span>{
-<a href=#346 id=346 data-nosnippet>346</a>                                offset_remaining -= <span class="number">1</span>;
-<a href=#347 id=347 data-nosnippet>347</a>                                <span class="kw">continue</span>;
-<a href=#348 id=348 data-nosnippet>348</a>                            }
-<a href=#349 id=349 data-nosnippet>349</a>
-<a href=#350 id=350 data-nosnippet>350</a>                            <span class="comment">// Send row through channel (with backpressure). Consumer drop ends the scan.
-<a href=#351 id=351 data-nosnippet>351</a>                            </span><span class="kw">if </span>tx.send(<span class="prelude-val">Ok</span>(row)).<span class="kw">await</span>.is_err() {
-<a href=#352 id=352 data-nosnippet>352</a>                                <span class="kw">return </span><span class="prelude-val">Ok</span>(());
-<a href=#353 id=353 data-nosnippet>353</a>                            }
-<a href=#354 id=354 data-nosnippet>354</a>                            sent += <span class="number">1</span>;
+<a href=#302 id=302 data-nosnippet>302</a>                    <span class="kw">loop </span>{
+<a href=#303 id=303 data-nosnippet>303</a>                        <span class="comment">// #1695: stop as soon as OUR consumer is gone, even with nothing
+<a href=#304 id=304 data-nosnippet>304</a>                        // to send AND even while the upstream batch is still coming.
+<a href=#305 id=305 data-nosnippet>305</a>                        //
+<a href=#306 id=306 data-nosnippet>306</a>                        // `tx.send(..).is_err()` below is otherwise the only stop signal,
+<a href=#307 id=307 data-nosnippet>307</a>                        // and it is reached only by a row that SURVIVES the row build,
+<a href=#308 id=308 data-nosnippet>308</a>                        // the predicates, the per-partition limit and the OFFSET skip —
+<a href=#309 id=309 data-nosnippet>309</a>                        // every one of which `continue`s. A no-match predicate, or an
+<a href=#310 id=310 data-nosnippet>310</a>                        // OFFSET past the result set, therefore sent nothing, checked
+<a href=#311 id=311 data-nosnippet>311</a>                        // nothing, and drained this whole scan after the caller already
+<a href=#312 id=312 data-nosnippet>312</a>                        // had its `QueryTimeout`.
+<a href=#313 id=313 data-nosnippet>313</a>                        //
+<a href=#314 id=314 data-nosnippet>314</a>                        // A bare `is_closed()` at the top of the loop was NOT enough
+<a href=#315 id=315 data-nosnippet>315</a>                        // (roborev round 11): it runs only after `recv()` RETURNS, so a
+<a href=#316 id=316 data-nosnippet>316</a>                        // stalled or slow upstream batch never reached it. Awaiting
+<a href=#317 id=317 data-nosnippet>317</a>                        // `tx.closed()` CONCURRENTLY with the batch bounds the wait
+<a href=#318 id=318 data-nosnippet>318</a>                        // itself — the same correction round 10 forced on the export
+<a href=#319 id=319 data-nosnippet>319</a>                        // chunk pull, which I applied there and not here.
+<a href=#320 id=320 data-nosnippet>320</a>                        //
+<a href=#321 id=321 data-nosnippet>321</a>                        // `biased` so closure is polled BEFORE the batch: an already-gone
+<a href=#322 id=322 data-nosnippet>322</a>                        // consumer ends the scan without first taking another batch.
+<a href=#323 id=323 data-nosnippet>323</a>                        //
+<a href=#324 id=324 data-nosnippet>324</a>                        // This task also holds `scan_stream`, the STORAGE producer's
+<a href=#325 id=325 data-nosnippet>325</a>                        // receiver, so the `is_closed()` check down in `generation_merge`
+<a href=#326 id=326 data-nosnippet>326</a>                        // cannot fire on our behalf: from the storage side its consumer
+<a href=#327 id=327 data-nosnippet>327</a>                        // is alive and asking for batches. One check per layer, and
+<a href=#328 id=328 data-nosnippet>328</a>                        // neither substitutes for the other.
+<a href=#329 id=329 data-nosnippet>329</a>                        </span><span class="kw">let </span>batch = <span class="macro">tokio::select!</span> {
+<a href=#330 id=330 data-nosnippet>330</a>                            biased;
+<a href=#331 id=331 data-nosnippet>331</a>                            <span class="kw">_ </span>= tx.closed() =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(()),
+<a href=#332 id=332 data-nosnippet>332</a>                            next = scan_stream.recv() =&gt; <span class="kw">match </span>next {
+<a href=#333 id=333 data-nosnippet>333</a>                                <span class="prelude-val">Some</span>(batch) =&gt; batch,
+<a href=#334 id=334 data-nosnippet>334</a>                                <span class="prelude-val">None </span>=&gt; <span class="kw">break</span>,
+<a href=#335 id=335 data-nosnippet>335</a>                            },
+<a href=#336 id=336 data-nosnippet>336</a>                        };
+<a href=#337 id=337 data-nosnippet>337</a>                        <span class="kw">for </span>(key, value) <span class="kw">in </span>batch<span class="question-mark">? </span>{
+<a href=#338 id=338 data-nosnippet>338</a>                            <span class="comment">// Capture the partition-key digest before `key` is moved
+<a href=#339 id=339 data-nosnippet>339</a>                            // into row construction (only when needed).
+<a href=#340 id=340 data-nosnippet>340</a>                            </span><span class="kw">let </span>part_sig =
+<a href=#341 id=341 data-nosnippet>341</a>                                per_partition_limit.map(|<span class="kw">_</span>| partition_key_digest(<span class="kw-2">&amp;</span>key.<span class="number">0</span>));
+<a href=#342 id=342 data-nosnippet>342</a>                            <span class="kw">let </span><span class="prelude-val">Some</span>(row) = build_row_from_scan_cached(
+<a href=#343 id=343 data-nosnippet>343</a>                                key,
+<a href=#344 id=344 data-nosnippet>344</a>                                value,
+<a href=#345 id=345 data-nosnippet>345</a>                                projection,
+<a href=#346 id=346 data-nosnippet>346</a>                                schema_opt,
+<a href=#347 id=347 data-nosnippet>347</a>                                <span class="kw-2">&amp;mut </span>pk_cache,
+<a href=#348 id=348 data-nosnippet>348</a>                            ) <span class="kw">else </span>{
+<a href=#349 id=349 data-nosnippet>349</a>                                <span class="kw">continue</span>;
+<a href=#350 id=350 data-nosnippet>350</a>                            };
+<a href=#351 id=351 data-nosnippet>351</a>
+<a href=#352 id=352 data-nosnippet>352</a>                            <span class="kw">if </span>!evaluate_predicates(<span class="kw-2">&amp;</span>row, predicates)<span class="question-mark">? </span>{
+<a href=#353 id=353 data-nosnippet>353</a>                                <span class="kw">continue</span>;
+<a href=#354 id=354 data-nosnippet>354</a>                            }
 <a href=#355 id=355 data-nosnippet>355</a>
-<a href=#356 id=356 data-nosnippet>356</a>                            <span class="comment">// Apply LIMIT: stop scanning once `count` rows have been
-<a href=#357 id=357 data-nosnippet>357</a>                            // sent. Dropping `scan_stream` here signals the producer
-<a href=#358 id=358 data-nosnippet>358</a>                            // (via a closed channel) to stop parsing early.
-<a href=#359 id=359 data-nosnippet>359</a>                            </span><span class="kw">if let </span><span class="prelude-val">Some</span>(count) = limit_count {
-<a href=#360 id=360 data-nosnippet>360</a>                                <span class="kw">if </span>sent &gt;= count {
-<a href=#361 id=361 data-nosnippet>361</a>                                    <span class="kw">return </span><span class="prelude-val">Ok</span>(());
-<a href=#362 id=362 data-nosnippet>362</a>                                }
-<a href=#363 id=363 data-nosnippet>363</a>                            }
-<a href=#364 id=364 data-nosnippet>364</a>                        }
-<a href=#365 id=365 data-nosnippet>365</a>                    }
-<a href=#366 id=366 data-nosnippet>366</a>                }
-<a href=#367 id=367 data-nosnippet>367</a>                ExecutionStep::Limit { .. } | ExecutionStep::PerPartitionLimit { .. } =&gt; {
-<a href=#368 id=368 data-nosnippet>368</a>                    <span class="comment">// Enforced inline during the scan above (see the bounds
-<a href=#369 id=369 data-nosnippet>369</a>                    // extracted before the loop).
-<a href=#370 id=370 data-nosnippet>370</a>                </span>}
-<a href=#371 id=371 data-nosnippet>371</a>                <span class="comment">// Projection and predicate filtering are pushed into SSTableScan above.
-<a href=#372 id=372 data-nosnippet>372</a>                </span>ExecutionStep::Project { .. } | ExecutionStep::Filter { .. } =&gt; {}
-<a href=#373 id=373 data-nosnippet>373</a>                <span class="kw">_ </span>=&gt; {
-<a href=#374 id=374 data-nosnippet>374</a>                    <span class="comment">// Data-safety (issue #1694): log the step's variant name only,
-<a href=#375 id=375 data-nosnippet>375</a>                    // never its contents (which carry query literals/values).
-<a href=#376 id=376 data-nosnippet>376</a>                    </span><span class="macro">tracing::warn!</span>(
-<a href=#377 id=377 data-nosnippet>377</a>                        <span class="string">"Streaming execution: skipping unsupported step {}"</span>,
-<a href=#378 id=378 data-nosnippet>378</a>                        step.variant_name()
-<a href=#379 id=379 data-nosnippet>379</a>                    );
-<a href=#380 id=380 data-nosnippet>380</a>                }
-<a href=#381 id=381 data-nosnippet>381</a>            }
-<a href=#382 id=382 data-nosnippet>382</a>        }
+<a href=#356 id=356 data-nosnippet>356</a>                            <span class="comment">// Apply PER PARTITION LIMIT: cap matching rows per
+<a href=#357 id=357 data-nosnippet>357</a>                            // partition, before OFFSET/LIMIT (Cassandra semantics).
+<a href=#358 id=358 data-nosnippet>358</a>                            </span><span class="kw">if let </span>(<span class="prelude-val">Some</span>(cap), <span class="prelude-val">Some</span>(sig)) = (per_partition_limit, part_sig) {
+<a href=#359 id=359 data-nosnippet>359</a>                                <span class="comment">// Fast digest pre-check, then EXACT byte confirm so a
+<a href=#360 id=360 data-nosnippet>360</a>                                // digest collision between DISTINCT partitions never
+<a href=#361 id=361 data-nosnippet>361</a>                                // shares a counter (issue #1590).
+<a href=#362 id=362 data-nosnippet>362</a>                                </span><span class="kw">let </span>same = <span class="macro">matches!</span>(
+<a href=#363 id=363 data-nosnippet>363</a>                                    <span class="kw-2">&amp;</span>current_partition,
+<a href=#364 id=364 data-nosnippet>364</a>                                    <span class="prelude-val">Some</span>((d, bytes))
+<a href=#365 id=365 data-nosnippet>365</a>                                        <span class="kw">if </span><span class="kw-2">*</span>d == sig &amp;&amp; bytes.as_slice() == row.key.as_bytes()
+<a href=#366 id=366 data-nosnippet>366</a>                                );
+<a href=#367 id=367 data-nosnippet>367</a>                                <span class="kw">if </span>!same {
+<a href=#368 id=368 data-nosnippet>368</a>                                    <span class="comment">// Clone the key bytes ONCE per boundary, not per row.
+<a href=#369 id=369 data-nosnippet>369</a>                                    </span>current_partition = <span class="prelude-val">Some</span>((sig, row.key.as_bytes().to_vec()));
+<a href=#370 id=370 data-nosnippet>370</a>                                    partition_count = <span class="number">0</span>;
+<a href=#371 id=371 data-nosnippet>371</a>                                }
+<a href=#372 id=372 data-nosnippet>372</a>                                <span class="kw">if </span>partition_count &gt;= cap {
+<a href=#373 id=373 data-nosnippet>373</a>                                    <span class="kw">continue</span>;
+<a href=#374 id=374 data-nosnippet>374</a>                                }
+<a href=#375 id=375 data-nosnippet>375</a>                                partition_count += <span class="number">1</span>;
+<a href=#376 id=376 data-nosnippet>376</a>                            }
+<a href=#377 id=377 data-nosnippet>377</a>
+<a href=#378 id=378 data-nosnippet>378</a>                            <span class="comment">// Apply OFFSET: skip the first `offset_remaining` matches.
+<a href=#379 id=379 data-nosnippet>379</a>                            </span><span class="kw">if </span>offset_remaining &gt; <span class="number">0 </span>{
+<a href=#380 id=380 data-nosnippet>380</a>                                offset_remaining -= <span class="number">1</span>;
+<a href=#381 id=381 data-nosnippet>381</a>                                <span class="kw">continue</span>;
+<a href=#382 id=382 data-nosnippet>382</a>                            }
 <a href=#383 id=383 data-nosnippet>383</a>
-<a href=#384 id=384 data-nosnippet>384</a>        <span class="prelude-val">Ok</span>(())
-<a href=#385 id=385 data-nosnippet>385</a>    }
-<a href=#386 id=386 data-nosnippet>386</a>}
+<a href=#384 id=384 data-nosnippet>384</a>                            <span class="comment">// Send row through channel (with backpressure). Consumer drop ends the scan.
+<a href=#385 id=385 data-nosnippet>385</a>                            </span><span class="kw">if </span>tx.send(<span class="prelude-val">Ok</span>(row)).<span class="kw">await</span>.is_err() {
+<a href=#386 id=386 data-nosnippet>386</a>                                <span class="kw">return </span><span class="prelude-val">Ok</span>(());
+<a href=#387 id=387 data-nosnippet>387</a>                            }
+<a href=#388 id=388 data-nosnippet>388</a>                            sent += <span class="number">1</span>;
+<a href=#389 id=389 data-nosnippet>389</a>
+<a href=#390 id=390 data-nosnippet>390</a>                            <span class="comment">// Apply LIMIT: stop scanning once `count` rows have been
+<a href=#391 id=391 data-nosnippet>391</a>                            // sent. Dropping `scan_stream` here signals the producer
+<a href=#392 id=392 data-nosnippet>392</a>                            // (via a closed channel) to stop parsing early.
+<a href=#393 id=393 data-nosnippet>393</a>                            </span><span class="kw">if let </span><span class="prelude-val">Some</span>(count) = limit_count {
+<a href=#394 id=394 data-nosnippet>394</a>                                <span class="kw">if </span>sent &gt;= count {
+<a href=#395 id=395 data-nosnippet>395</a>                                    <span class="kw">return </span><span class="prelude-val">Ok</span>(());
+<a href=#396 id=396 data-nosnippet>396</a>                                }
+<a href=#397 id=397 data-nosnippet>397</a>                            }
+<a href=#398 id=398 data-nosnippet>398</a>                        }
+<a href=#399 id=399 data-nosnippet>399</a>                    }
+<a href=#400 id=400 data-nosnippet>400</a>                }
+<a href=#401 id=401 data-nosnippet>401</a>                ExecutionStep::Limit { .. } | ExecutionStep::PerPartitionLimit { .. } =&gt; {
+<a href=#402 id=402 data-nosnippet>402</a>                    <span class="comment">// Enforced inline during the scan above (see the bounds
+<a href=#403 id=403 data-nosnippet>403</a>                    // extracted before the loop).
+<a href=#404 id=404 data-nosnippet>404</a>                </span>}
+<a href=#405 id=405 data-nosnippet>405</a>                <span class="comment">// Projection and predicate filtering are pushed into SSTableScan above.
+<a href=#406 id=406 data-nosnippet>406</a>                </span>ExecutionStep::Project { .. } | ExecutionStep::Filter { .. } =&gt; {}
+<a href=#407 id=407 data-nosnippet>407</a>                <span class="kw">_ </span>=&gt; {
+<a href=#408 id=408 data-nosnippet>408</a>                    <span class="comment">// Data-safety (issue #1694): log the step's variant name only,
+<a href=#409 id=409 data-nosnippet>409</a>                    // never its contents (which carry query literals/values).
+<a href=#410 id=410 data-nosnippet>410</a>                    </span><span class="macro">tracing::warn!</span>(
+<a href=#411 id=411 data-nosnippet>411</a>                        <span class="string">"Streaming execution: skipping unsupported step {}"</span>,
+<a href=#412 id=412 data-nosnippet>412</a>                        step.variant_name()
+<a href=#413 id=413 data-nosnippet>413</a>                    );
+<a href=#414 id=414 data-nosnippet>414</a>                }
+<a href=#415 id=415 data-nosnippet>415</a>            }
+<a href=#416 id=416 data-nosnippet>416</a>        }
+<a href=#417 id=417 data-nosnippet>417</a>
+<a href=#418 id=418 data-nosnippet>418</a>        <span class="prelude-val">Ok</span>(())
+<a href=#419 id=419 data-nosnippet>419</a>    }
+<a href=#420 id=420 data-nosnippet>420</a>}
 </code></pre></div></section></main></body></html>

@@ -1,0 +1,786 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/schema/vector_type.rs`."><title>vector_type.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/schema/</div>vector_type.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! The ONE parser for a `vector` type's two declared parameters — element type
+<a href=#2 id=2 data-nosnippet>2</a>//! and dimension (issue #4114).
+<a href=#3 id=3 data-nosnippet>3</a>//!
+<a href=#4 id=4 data-nosnippet>4</a>//! # Why this is shared rather than repeated
+<a href=#5 id=5 data-nosnippet>5</a>//!
+<a href=#6 id=6 data-nosnippet>6</a>//! Four independent type-string parsers plus the STATS clustering-layout resolver
+<a href=#7 id=7 data-nosnippet>7</a>//! all have to learn `vector`, and every one of them needs the SAME two answers:
+<a href=#8 id=8 data-nosnippet>8</a>//! which element type, and what dimension. Repeating the dimension rules (reject
+<a href=#9 id=9 data-nosnippet>9</a>//! `0`, reject non-numeric, reject an overflowing product) five times is five
+<a href=#10 id=10 data-nosnippet>10</a>//! chances to disagree, and the disagreement would be silent — the defect #4114
+<a href=#11 id=11 data-nosnippet>11</a>//! exists to remove.
+<a href=#12 id=12 data-nosnippet>12</a>//!
+<a href=#13 id=13 data-nosnippet>13</a>//! # Authority (pinned `cassandra-5.0.8`, never CQLite's own code — #3041)
+<a href=#14 id=14 data-nosnippet>14</a>//!
+<a href=#15 id=15 data-nosnippet>15</a>//! * The marshal spelling is written by `TypeParser.stringifyVectorParameters`
+<a href=#16 id=16 data-nosnippet>16</a>//!   (`TypeParser.java:239-242`):
+<a href=#17 id=17 data-nosnippet>17</a>//!   `"(" + type.toString(ignoreFreezing) + " , " + dimension + ")"`, reached from
+<a href=#18 id=18 data-nosnippet>18</a>//!   `VectorType.toString` (`VectorType.java:339-342`) as
+<a href=#19 id=19 data-nosnippet>19</a>//!   `getClass().getName() + stringifyVectorParameters(…)`. So Cassandra WRITES
+<a href=#20 id=20 data-nosnippet>20</a>//!   `org.apache.cassandra.db.marshal.VectorType(org.apache.cassandra.db.marshal.FloatType , 3)`
+<a href=#21 id=21 data-nosnippet>21</a>//!   — note the spaces around the comma.
+<a href=#22 id=22 data-nosnippet>22</a>//! * Cassandra's own READER tolerates whitespace variation:
+<a href=#23 id=23 data-nosnippet>23</a>//!   `TypeParser.getVectorParameters` (`TypeParser.java:244-263`) calls
+<a href=#24 id=24 data-nosnippet>24</a>//!   `skipBlankAndComma()` between the two parameters. So this parser TRIMS rather
+<a href=#25 id=25 data-nosnippet>25</a>//!   than matching Cassandra's exact output spacing — matching the literal `" , "`
+<a href=#26 id=26 data-nosnippet>26</a>//!   would refuse a legal spelling another writer may emit.
+<a href=#27 id=27 data-nosnippet>27</a>//! * Parameter ORDER is (element type, dimension) — same function.
+<a href=#28 id=28 data-nosnippet>28</a>//! * `dimension &lt;= 0` is rejected by Cassandra at construction
+<a href=#29 id=29 data-nosnippet>29</a>//!   (`VectorType.java:89-90`, `InvalidRequestException`: "vectors may only have
+<a href=#30 id=30 data-nosnippet>30</a>//!   positive dimensions"), so a `0` dimension is a MALFORMED TYPE here, never an
+<a href=#31 id=31 data-nosnippet>31</a>//!   empty vector. There is NO upper bound in the type itself
+<a href=#32 id=32 data-nosnippet>32</a>//!   (`Guardrails.vectorDimensions` is a soft, disabled-by-default cluster
+<a href=#33 id=33 data-nosnippet>33</a>//!   setting — `Config.java:924-925`), so none is imposed here either; the only
+<a href=#34 id=34 data-nosnippet>34</a>//!   rejected large value is one whose byte width overflows `usize`.
+<a href=#35 id=35 data-nosnippet>35</a>//! * The CQL3 surface spelling is `vector&lt;float, 3&gt;` (`CQL3Type.java:589,:938`).
+<a href=#36 id=36 data-nosnippet>36</a>//!
+<a href=#37 id=37 data-nosnippet>37</a>//! # No-heuristics (#28)
+<a href=#38 id=38 data-nosnippet>38</a>//!
+<a href=#39 id=39 data-nosnippet>39</a>//! The dimension is read from the DECLARED type and from nowhere else. Nothing in
+<a href=#40 id=40 data-nosnippet>40</a>//! this module looks at a value byte, and no width is ever inferred from how many
+<a href=#41 id=41 data-nosnippet>41</a>//! bytes happen to be available.
+<a href=#42 id=42 data-nosnippet>42</a>
+<a href=#43 id=43 data-nosnippet>43</a></span><span class="kw">use </span><span class="kw">crate</span>::error::{Error, <span class="prelude-ty">Result</span>};
+<a href=#44 id=44 data-nosnippet>44</a>
+<a href=#45 id=45 data-nosnippet>45</a><span class="doccomment">/// The VALUE side: `vector&lt;float, n&gt;`'s fixed-width, prefix-free byte layout.
+<a href=#46 id=46 data-nosnippet>46</a>///
+<a href=#47 id=47 data-nosnippet>47</a>/// A child of this module rather than a sibling elsewhere so that everything
+<a href=#48 id=48 data-nosnippet>48</a>/// about the vector type — its declared parameters AND the layout those
+<a href=#49 id=49 data-nosnippet>49</a>/// parameters imply — has ONE home, reachable from both the SSTable row decoder
+<a href=#50 id=50 data-nosnippet>50</a>/// and the schema-aware value parsers without either owning it.
+<a href=#51 id=51 data-nosnippet>51</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">mod </span>vector_value;
+<a href=#52 id=52 data-nosnippet>52</a>
+<a href=#53 id=53 data-nosnippet>53</a><span class="doccomment">/// Width in bytes of one `float` (CQL) / `FloatType` (marshal) element.
+<a href=#54 id=54 data-nosnippet>54</a>///
+<a href=#55 id=55 data-nosnippet>55</a>/// `FloatType.valueLengthIfFixed()` returns 4 (`FloatType.java:148-152`), and
+<a href=#56 id=56 data-nosnippet>56</a>/// `VectorType`'s fixed width is `elementType.valueLengthIfFixed() * dimension`
+<a href=#57 id=57 data-nosnippet>57</a>/// (`VectorType.java:94-96`).
+<a href=#58 id=58 data-nosnippet>58</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">const </span>FLOAT_ELEMENT_WIDTH: usize = <span class="number">4</span>;
+<a href=#59 id=59 data-nosnippet>59</a>
+<a href=#60 id=60 data-nosnippet>60</a><span class="doccomment">/// The two declared parameters of a `vector` type, as borrowed substrings of the
+<a href=#61 id=61 data-nosnippet>61</a>/// type string they came from.
+<a href=#62 id=62 data-nosnippet>62</a></span><span class="attr">#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+<a href=#63 id=63 data-nosnippet>63</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct </span>VectorTypeArgs&lt;<span class="lifetime">'a</span>&gt; {
+<a href=#64 id=64 data-nosnippet>64</a>    <span class="doccomment">/// The element type, verbatim and trimmed (a CQL short form such as `float`
+<a href=#65 id=65 data-nosnippet>65</a>    /// for the CQL spelling, or a marshal class name such as
+<a href=#66 id=66 data-nosnippet>66</a>    /// `org.apache.cassandra.db.marshal.FloatType` for the marshal spelling).
+<a href=#67 id=67 data-nosnippet>67</a>    </span><span class="kw">pub </span>element: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>str,
+<a href=#68 id=68 data-nosnippet>68</a>    <span class="doccomment">/// The dimension `n`, guaranteed `&gt;= 1`.
+<a href=#69 id=69 data-nosnippet>69</a>    </span><span class="kw">pub </span>dimension: usize,
+<a href=#70 id=70 data-nosnippet>70</a>}
+<a href=#71 id=71 data-nosnippet>71</a>
+<a href=#72 id=72 data-nosnippet>72</a><span class="doccomment">/// The three answers a vector-type probe can give (issue #4114, roborev job 109).
+<a href=#73 id=73 data-nosnippet>73</a>///
+<a href=#74 id=74 data-nosnippet>74</a>/// Two-valued `Option` was a DEFECT, not a simplification: `None` meant both "this
+<a href=#75 id=75 data-nosnippet>75</a>/// is not a vector" (so the caller's other type arms apply) and "this IS a vector
+<a href=#76 id=76 data-nosnippet>76</a>/// but its parameter list is unparseable" (so the caller must FAIL CLOSED). Every
+<a href=#77 id=77 data-nosnippet>77</a>/// caller took the first reading, so a malformed `VectorType(` reached a generic
+<a href=#78 id=78 data-nosnippet>78</a>/// fallback — in `enhanced_statistics_parser::marshal_type` the
+<a href=#79 id=79 data-nosnippet>79</a>/// `other =&gt; other.to_lowercase()` one, which restored exactly the blob/phantom-vint
+<a href=#80 id=80 data-nosnippet>80</a>/// framing #4114 exists to remove.
+<a href=#81 id=81 data-nosnippet>81</a></span><span class="attr">#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+<a href=#82 id=82 data-nosnippet>82</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">enum </span>VectorInner&lt;<span class="lifetime">'a</span>&gt; {
+<a href=#83 id=83 data-nosnippet>83</a>    <span class="doccomment">/// `type_str` does not claim to be a vector type.
+<a href=#84 id=84 data-nosnippet>84</a>    </span>NotAVector,
+<a href=#85 id=85 data-nosnippet>85</a>    <span class="doccomment">/// `type_str` is a vector type; the payload is its raw parameter list, still to
+<a href=#86 id=86 data-nosnippet>86</a>    /// be split by [`split_vector_args`].
+<a href=#87 id=87 data-nosnippet>87</a>    </span>Args(<span class="kw-2">&amp;</span><span class="lifetime">'a </span>str),
+<a href=#88 id=88 data-nosnippet>88</a>    <span class="doccomment">/// `type_str` CLAIMS to be a vector type but its parameter list could not be
+<a href=#89 id=89 data-nosnippet>89</a>    /// extracted. The payload says why, for the refusal message.
+<a href=#90 id=90 data-nosnippet>90</a>    </span>Malformed(<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str),
+<a href=#91 id=91 data-nosnippet>91</a>}
+<a href=#92 id=92 data-nosnippet>92</a>
+<a href=#93 id=93 data-nosnippet>93</a><span class="kw">impl</span>&lt;<span class="lifetime">'a</span>&gt; VectorInner&lt;<span class="lifetime">'a</span>&gt; {
+<a href=#94 id=94 data-nosnippet>94</a>    <span class="doccomment">/// Collapse the probe into the answer a caller actually needs:
+<a href=#95 id=95 data-nosnippet>95</a>    /// `Ok(None)` = not a vector, `Ok(Some(args))` = a well-formed vector,
+<a href=#96 id=96 data-nosnippet>96</a>    /// `Err` = a vector that must fail closed, with `type_str` named.
+<a href=#97 id=97 data-nosnippet>97</a>    ///
+<a href=#98 id=98 data-nosnippet>98</a>    /// Both malformed states — an unextractable parameter list AND a parameter list
+<a href=#99 id=99 data-nosnippet>99</a>    /// that does not split into (element, dimension) — come out as `Err`, so no
+<a href=#100 id=100 data-nosnippet>100</a>    /// caller can accidentally handle only one of them.
+<a href=#101 id=101 data-nosnippet>101</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>into_args(<span class="self">self</span>, type_str: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>str) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="prelude-ty">Option</span>&lt;VectorTypeArgs&lt;<span class="lifetime">'a</span>&gt;&gt;&gt; {
+<a href=#102 id=102 data-nosnippet>102</a>        <span class="kw">match </span><span class="self">self </span>{
+<a href=#103 id=103 data-nosnippet>103</a>            VectorInner::NotAVector =&gt; <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
+<a href=#104 id=104 data-nosnippet>104</a>            VectorInner::Args(inner) =&gt; split_vector_args(inner, type_str).map(<span class="prelude-val">Some</span>),
+<a href=#105 id=105 data-nosnippet>105</a>            VectorInner::Malformed(why) =&gt; <span class="prelude-val">Err</span>(malformed(type_str, why)),
+<a href=#106 id=106 data-nosnippet>106</a>        }
+<a href=#107 id=107 data-nosnippet>107</a>    }
+<a href=#108 id=108 data-nosnippet>108</a>}
+<a href=#109 id=109 data-nosnippet>109</a>
+<a href=#110 id=110 data-nosnippet>110</a><span class="doccomment">/// Probe `type_str` for the CQL spelling `vector&lt;element, n&gt;`.
+<a href=#111 id=111 data-nosnippet>111</a>///
+<a href=#112 id=112 data-nosnippet>112</a>/// The keyword is matched case-insensitively because CQL type keywords are
+<a href=#113 id=113 data-nosnippet>113</a>/// (`SET&lt;TEXT&gt;` == `set&lt;text&gt;`), which the sibling parsers in
+<a href=#114 id=114 data-nosnippet>114</a>/// [`super::cql_type_parser`] already rely on.
+<a href=#115 id=115 data-nosnippet>115</a>///
+<a href=#116 id=116 data-nosnippet>116</a>/// A bare `vector` with NO parameter list is [`VectorInner::NotAVector`], NOT
+<a href=#117 id=117 data-nosnippet>117</a>/// malformed: `vector` is not a reserved word in CQL (`CQL3Type.java:589,:938`
+<a href=#118 id=118 data-nosnippet>118</a>/// recognises it only WITH parameters), so an unparameterised `vector` can be a
+<a href=#119 id=119 data-nosnippet>119</a>/// legitimate UDT name and must stay available to the caller's UDT arm. Once a `&lt;`
+<a href=#120 id=120 data-nosnippet>120</a>/// follows, no other type can be meant, so an unterminated parameter list is
+<a href=#121 id=121 data-nosnippet>121</a>/// [`VectorInner::Malformed`].
+<a href=#122 id=122 data-nosnippet>122</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>cql_vector_kind(type_str: <span class="kw-2">&amp;</span>str) -&gt; VectorInner&lt;<span class="lifetime">'_</span>&gt; {
+<a href=#123 id=123 data-nosnippet>123</a>    <span class="kw">let </span>trimmed = type_str.trim();
+<a href=#124 id=124 data-nosnippet>124</a>    <span class="kw">let </span>(keyword, rest) = split_leading_identifier(trimmed);
+<a href=#125 id=125 data-nosnippet>125</a>    <span class="kw">if </span>!keyword.eq_ignore_ascii_case(<span class="string">"vector"</span>) {
+<a href=#126 id=126 data-nosnippet>126</a>        <span class="kw">return </span>VectorInner::NotAVector;
+<a href=#127 id=127 data-nosnippet>127</a>    }
+<a href=#128 id=128 data-nosnippet>128</a>    <span class="kw">let </span>rest = rest.trim_start();
+<a href=#129 id=129 data-nosnippet>129</a>    <span class="kw">let </span><span class="prelude-val">Some</span>(after_open) = rest.strip_prefix(<span class="string">'&lt;'</span>) <span class="kw">else </span>{
+<a href=#130 id=130 data-nosnippet>130</a>        <span class="comment">// No parameter list: a UDT may legitimately be named `vector`.
+<a href=#131 id=131 data-nosnippet>131</a>        </span><span class="kw">return </span>VectorInner::NotAVector;
+<a href=#132 id=132 data-nosnippet>132</a>    };
+<a href=#133 id=133 data-nosnippet>133</a>    <span class="kw">match </span>matched_bracket_body(after_open, <span class="string">'&lt;'</span>, <span class="string">'&gt;'</span>) {
+<a href=#134 id=134 data-nosnippet>134</a>        <span class="prelude-val">Some</span>((inner, tail)) <span class="kw">if </span>tail.trim().is_empty() =&gt; VectorInner::Args(inner),
+<a href=#135 id=135 data-nosnippet>135</a>        <span class="prelude-val">Some</span>(<span class="kw">_</span>) =&gt; {
+<a href=#136 id=136 data-nosnippet>136</a>            VectorInner::Malformed(<span class="string">"trailing text after the closing '&gt;' of the type parameters"</span>)
+<a href=#137 id=137 data-nosnippet>137</a>        }
+<a href=#138 id=138 data-nosnippet>138</a>        <span class="prelude-val">None </span>=&gt; VectorInner::Malformed(<span class="string">"the type parameters are not terminated by a matching '&gt;'"</span>),
+<a href=#139 id=139 data-nosnippet>139</a>    }
+<a href=#140 id=140 data-nosnippet>140</a>}
+<a href=#141 id=141 data-nosnippet>141</a>
+<a href=#142 id=142 data-nosnippet>142</a><span class="doccomment">/// Probe `type_str` for the marshal spelling `VectorType(element , n)`.
+<a href=#143 id=143 data-nosnippet>143</a>///
+<a href=#144 id=144 data-nosnippet>144</a>/// The constructor name is matched EXACTLY on its package-stripped simple name
+<a href=#145 id=145 data-nosnippet>145</a>/// (`VectorType`), the same way the sibling marshal resolvers in
+<a href=#146 id=146 data-nosnippet>146</a>/// `parser::repair_clustering` and `parser::enhanced_statistics_parser` identify a
+<a href=#147 id=147 data-nosnippet>147</a>/// constructor: Java class names are case-sensitive, so a lowercased spelling is
+<a href=#148 id=148 data-nosnippet>148</a>/// not a class reference and must not be accepted here.
+<a href=#149 id=149 data-nosnippet>149</a>///
+<a href=#150 id=150 data-nosnippet>150</a>/// Unlike the CQL probe, a `VectorType` with no usable parameter list is
+<a href=#151 id=151 data-nosnippet>151</a>/// [`VectorInner::Malformed`] rather than `NotAVector`: `VectorType` is a Java class
+<a href=#152 id=152 data-nosnippet>152</a>/// name, nothing else can be spelled that way, and `VectorType.getInstance` has no
+<a href=#153 id=153 data-nosnippet>153</a>/// parameterless form (`TypeParser.getVectorParameters`, `TypeParser.java:244-263`,
+<a href=#154 id=154 data-nosnippet>154</a>/// requires both parameters). So there is no honest reading of it other than "a
+<a href=#155 id=155 data-nosnippet>155</a>/// broken vector type".
+<a href=#156 id=156 data-nosnippet>156</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>marshal_vector_kind(type_str: <span class="kw-2">&amp;</span>str) -&gt; VectorInner&lt;<span class="lifetime">'_</span>&gt; {
+<a href=#157 id=157 data-nosnippet>157</a>    <span class="kw">let </span>trimmed = type_str.trim();
+<a href=#158 id=158 data-nosnippet>158</a>    <span class="kw">let </span>(ctor, rest) = split_leading_identifier(trimmed);
+<a href=#159 id=159 data-nosnippet>159</a>    <span class="kw">let </span>simple = ctor.rsplit(<span class="string">'.'</span>).next().unwrap_or(ctor);
+<a href=#160 id=160 data-nosnippet>160</a>    <span class="kw">if </span>simple != <span class="string">"VectorType" </span>{
+<a href=#161 id=161 data-nosnippet>161</a>        <span class="kw">return </span>VectorInner::NotAVector;
+<a href=#162 id=162 data-nosnippet>162</a>    }
+<a href=#163 id=163 data-nosnippet>163</a>    <span class="kw">let </span>rest = rest.trim_start();
+<a href=#164 id=164 data-nosnippet>164</a>    <span class="kw">let </span><span class="prelude-val">Some</span>(after_open) = rest.strip_prefix(<span class="string">'('</span>) <span class="kw">else </span>{
+<a href=#165 id=165 data-nosnippet>165</a>        <span class="kw">return </span>VectorInner::Malformed(
+<a href=#166 id=166 data-nosnippet>166</a>            <span class="string">"a VectorType constructor with no '(' parameter list (Cassandra has no \
+<a href=#167 id=167 data-nosnippet>167</a>             parameterless VectorType)"</span>,
+<a href=#168 id=168 data-nosnippet>168</a>        );
+<a href=#169 id=169 data-nosnippet>169</a>    };
+<a href=#170 id=170 data-nosnippet>170</a>    <span class="kw">match </span>matched_bracket_body(after_open, <span class="string">'('</span>, <span class="string">')'</span>) {
+<a href=#171 id=171 data-nosnippet>171</a>        <span class="prelude-val">Some</span>((inner, tail)) <span class="kw">if </span>tail.trim().is_empty() =&gt; VectorInner::Args(inner),
+<a href=#172 id=172 data-nosnippet>172</a>        <span class="prelude-val">Some</span>(<span class="kw">_</span>) =&gt; {
+<a href=#173 id=173 data-nosnippet>173</a>            VectorInner::Malformed(<span class="string">"trailing text after the closing ')' of the parameter list"</span>)
+<a href=#174 id=174 data-nosnippet>174</a>        }
+<a href=#175 id=175 data-nosnippet>175</a>        <span class="prelude-val">None </span>=&gt; VectorInner::Malformed(<span class="string">"the parameter list is not terminated by a matching ')'"</span>),
+<a href=#176 id=176 data-nosnippet>176</a>    }
+<a href=#177 id=177 data-nosnippet>177</a>}
+<a href=#178 id=178 data-nosnippet>178</a>
+<a href=#179 id=179 data-nosnippet>179</a><span class="doccomment">/// Split off the leading Java/CQL type identifier — the run of characters legal in
+<a href=#180 id=180 data-nosnippet>180</a>/// a (possibly package-qualified) type name — and return `(identifier, rest)`.
+<a href=#181 id=181 data-nosnippet>181</a>///
+<a href=#182 id=182 data-nosnippet>182</a>/// `.` is part of the identifier so a package-qualified class name comes back
+<a href=#183 id=183 data-nosnippet>183</a>/// whole; the caller package-strips. `_` and `$` are legal Java identifier
+<a href=#184 id=184 data-nosnippet>184</a>/// characters. Nothing else is consumed, so the very next character decides
+<a href=#185 id=185 data-nosnippet>185</a>/// whether a parameter list follows.
+<a href=#186 id=186 data-nosnippet>186</a></span><span class="kw">fn </span>split_leading_identifier(value: <span class="kw-2">&amp;</span>str) -&gt; (<span class="kw-2">&amp;</span>str, <span class="kw-2">&amp;</span>str) {
+<a href=#187 id=187 data-nosnippet>187</a>    <span class="kw">let </span>end = value
+<a href=#188 id=188 data-nosnippet>188</a>        .find(|c: char| !(c.is_ascii_alphanumeric() || c == <span class="string">'.' </span>|| c == <span class="string">'_' </span>|| c == <span class="string">'$'</span>))
+<a href=#189 id=189 data-nosnippet>189</a>        .unwrap_or(value.len());
+<a href=#190 id=190 data-nosnippet>190</a>    (<span class="kw-2">&amp;</span>value[..end], <span class="kw-2">&amp;</span>value[end..])
+<a href=#191 id=191 data-nosnippet>191</a>}
+<a href=#192 id=192 data-nosnippet>192</a>
+<a href=#193 id=193 data-nosnippet>193</a><span class="doccomment">/// The body between an ALREADY-CONSUMED `open` bracket and its MATCHING `close`,
+<a href=#194 id=194 data-nosnippet>194</a>/// plus whatever follows that `close`. `None` on unbalanced brackets.
+<a href=#195 id=195 data-nosnippet>195</a></span><span class="kw">fn </span>matched_bracket_body(after_open: <span class="kw-2">&amp;</span>str, open: char, close: char) -&gt; <span class="prelude-ty">Option</span>&lt;(<span class="kw-2">&amp;</span>str, <span class="kw-2">&amp;</span>str)&gt; {
+<a href=#196 id=196 data-nosnippet>196</a>    <span class="kw">let </span><span class="kw-2">mut </span>depth = <span class="number">1usize</span>;
+<a href=#197 id=197 data-nosnippet>197</a>    <span class="kw">for </span>(idx, ch) <span class="kw">in </span>after_open.char_indices() {
+<a href=#198 id=198 data-nosnippet>198</a>        <span class="kw">if </span>ch == open {
+<a href=#199 id=199 data-nosnippet>199</a>            depth += <span class="number">1</span>;
+<a href=#200 id=200 data-nosnippet>200</a>        } <span class="kw">else if </span>ch == close {
+<a href=#201 id=201 data-nosnippet>201</a>            depth -= <span class="number">1</span>;
+<a href=#202 id=202 data-nosnippet>202</a>            <span class="kw">if </span>depth == <span class="number">0 </span>{
+<a href=#203 id=203 data-nosnippet>203</a>                <span class="kw">return </span><span class="prelude-val">Some</span>((<span class="kw-2">&amp;</span>after_open[..idx], <span class="kw-2">&amp;</span>after_open[idx + close.len_utf8()..]));
+<a href=#204 id=204 data-nosnippet>204</a>            }
+<a href=#205 id=205 data-nosnippet>205</a>        }
+<a href=#206 id=206 data-nosnippet>206</a>    }
+<a href=#207 id=207 data-nosnippet>207</a>    <span class="prelude-val">None
+<a href=#208 id=208 data-nosnippet>208</a></span>}
+<a href=#209 id=209 data-nosnippet>209</a>
+<a href=#210 id=210 data-nosnippet>210</a><span class="doccomment">/// Split a vector type's argument list into its (element type, dimension) pair.
+<a href=#211 id=211 data-nosnippet>211</a>///
+<a href=#212 id=212 data-nosnippet>212</a>/// `inner` is the already-extracted argument list — the [`VectorInner::Args`]
+<a href=#213 id=213 data-nosnippet>213</a>/// payload from [`cql_vector_kind`] or [`marshal_vector_kind`], normally reached
+<a href=#214 id=214 data-nosnippet>214</a>/// via [`VectorInner::into_args`] rather than called directly. `type_str` is the
+<a href=#215 id=215 data-nosnippet>215</a>/// full type string, used only so a refusal NAMES the type that was refused.
+<a href=#216 id=216 data-nosnippet>216</a>///
+<a href=#217 id=217 data-nosnippet>217</a>/// EXACTLY ONE top-level comma is required, and that is not a restatement of
+<a href=#218 id=218 data-nosnippet>218</a>/// "split on the last one" — the two differ, measurably. This function used to take
+<a href=#219 id=219 data-nosnippet>219</a>/// the LAST top-level comma and fold everything before it into the element, so
+<a href=#220 id=220 data-nosnippet>220</a>/// `vector&lt;int, text, 3&gt;` parsed as element `int, text` (which then degraded to a
+<a href=#221 id=221 data-nosnippet>221</a>/// `CqlType::Custom` carrier) with dimension `3`, ADMITTING a spelling Cassandra
+<a href=#222 id=222 data-nosnippet>222</a>/// refuses. Caught by the frozen-scalar gate's own accept/refuse pins (#4104): it
+<a href=#223 id=223 data-nosnippet>223</a>/// was refused before `CqlType::Vector` existed and silently admitted after.
+<a href=#224 id=224 data-nosnippet>224</a>///
+<a href=#225 id=225 data-nosnippet>225</a>/// Cassandra permits no third parameter, in either spelling:
+<a href=#226 id=226 data-nosnippet>226</a>/// * CQL — `Parser.g:1916-1919`,
+<a href=#227 id=227 data-nosnippet>227</a>///   `vector_type : K_VECTOR '&lt;' t1=comparatorType ',' d=INTEGER '&gt;'`;
+<a href=#228 id=228 data-nosnippet>228</a>/// * marshal — `TypeParser.getVectorParameters` (`TypeParser.java:244-263`) parses
+<a href=#229 id=229 data-nosnippet>229</a>///   ONE type, then `skipBlankAndComma()`, then ONE identifier, and then
+<a href=#230 id=230 data-nosnippet>230</a>///   `if (str.charAt(idx) != ')') throw new IllegalStateException()`.
+<a href=#231 id=231 data-nosnippet>231</a>///
+<a href=#232 id=232 data-nosnippet>232</a>/// Commas INSIDE the element's own brackets are at depth &gt; 0 and are not counted,
+<a href=#233 id=233 data-nosnippet>233</a>/// so `vector&lt;map&lt;int, text&gt;, 3&gt;` and `VectorType(MapType(Int32Type,UTF8Type) , 3)`
+<a href=#234 id=234 data-nosnippet>234</a>/// are unaffected. Order is fixed by the same functions: element first, dimension
+<a href=#235 id=235 data-nosnippet>235</a>/// last.
+<a href=#236 id=236 data-nosnippet>236</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>split_vector_args&lt;<span class="lifetime">'a</span>&gt;(inner: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>str, type_str: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Result</span>&lt;VectorTypeArgs&lt;<span class="lifetime">'a</span>&gt;&gt; {
+<a href=#237 id=237 data-nosnippet>237</a>    <span class="kw">let </span><span class="kw-2">mut </span>depth = <span class="number">0usize</span>;
+<a href=#238 id=238 data-nosnippet>238</a>    <span class="kw">let </span><span class="kw-2">mut </span>split_at: <span class="prelude-ty">Option</span>&lt;usize&gt; = <span class="prelude-val">None</span>;
+<a href=#239 id=239 data-nosnippet>239</a>    <span class="kw">let </span><span class="kw-2">mut </span>top_level_commas = <span class="number">0usize</span>;
+<a href=#240 id=240 data-nosnippet>240</a>    <span class="kw">for </span>(idx, ch) <span class="kw">in </span>inner.char_indices() {
+<a href=#241 id=241 data-nosnippet>241</a>        <span class="kw">match </span>ch {
+<a href=#242 id=242 data-nosnippet>242</a>            <span class="string">'(' </span>| <span class="string">'&lt;' </span>=&gt; depth += <span class="number">1</span>,
+<a href=#243 id=243 data-nosnippet>243</a>            <span class="string">')' </span>| <span class="string">'&gt;' </span>=&gt; {
+<a href=#244 id=244 data-nosnippet>244</a>                depth = depth.saturating_sub(<span class="number">1</span>);
+<a href=#245 id=245 data-nosnippet>245</a>            }
+<a href=#246 id=246 data-nosnippet>246</a>            <span class="string">',' </span><span class="kw">if </span>depth == <span class="number">0 </span>=&gt; {
+<a href=#247 id=247 data-nosnippet>247</a>                top_level_commas += <span class="number">1</span>;
+<a href=#248 id=248 data-nosnippet>248</a>                split_at = <span class="prelude-val">Some</span>(idx);
+<a href=#249 id=249 data-nosnippet>249</a>            }
+<a href=#250 id=250 data-nosnippet>250</a>            <span class="kw">_ </span>=&gt; {}
+<a href=#251 id=251 data-nosnippet>251</a>        }
+<a href=#252 id=252 data-nosnippet>252</a>    }
+<a href=#253 id=253 data-nosnippet>253</a>    <span class="kw">if </span>top_level_commas &gt; <span class="number">1 </span>{
+<a href=#254 id=254 data-nosnippet>254</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(malformed(
+<a href=#255 id=255 data-nosnippet>255</a>            type_str,
+<a href=#256 id=256 data-nosnippet>256</a>            <span class="kw-2">&amp;</span><span class="macro">format!</span>(
+<a href=#257 id=257 data-nosnippet>257</a>                <span class="string">"expected exactly two parameters (element type, dimension) but found \
+<a href=#258 id=258 data-nosnippet>258</a>                 {} top-level comma(s): Cassandra's grammar admits no third parameter \
+<a href=#259 id=259 data-nosnippet>259</a>                 (Parser.g:1916-1919; TypeParser.getVectorParameters requires ')' after \
+<a href=#260 id=260 data-nosnippet>260</a>                 the dimension, TypeParser.java:244-263)"</span>,
+<a href=#261 id=261 data-nosnippet>261</a>                top_level_commas
+<a href=#262 id=262 data-nosnippet>262</a>            ),
+<a href=#263 id=263 data-nosnippet>263</a>        ));
+<a href=#264 id=264 data-nosnippet>264</a>    }
+<a href=#265 id=265 data-nosnippet>265</a>    <span class="kw">let </span><span class="prelude-val">Some</span>(comma) = split_at <span class="kw">else </span>{
+<a href=#266 id=266 data-nosnippet>266</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(malformed(
+<a href=#267 id=267 data-nosnippet>267</a>            type_str,
+<a href=#268 id=268 data-nosnippet>268</a>            <span class="string">"expected two parameters (element type, dimension) separated by a comma"</span>,
+<a href=#269 id=269 data-nosnippet>269</a>        ));
+<a href=#270 id=270 data-nosnippet>270</a>    };
+<a href=#271 id=271 data-nosnippet>271</a>    <span class="kw">let </span>element = inner[..comma].trim();
+<a href=#272 id=272 data-nosnippet>272</a>    <span class="kw">let </span>dimension_raw = inner[comma + <span class="number">1</span>..].trim();
+<a href=#273 id=273 data-nosnippet>273</a>    <span class="kw">if </span>element.is_empty() {
+<a href=#274 id=274 data-nosnippet>274</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(malformed(type_str, <span class="string">"the element type parameter is empty"</span>));
+<a href=#275 id=275 data-nosnippet>275</a>    }
+<a href=#276 id=276 data-nosnippet>276</a>    <span class="kw">let </span>dimension = parse_vector_dimension(dimension_raw, type_str)<span class="question-mark">?</span>;
+<a href=#277 id=277 data-nosnippet>277</a>    <span class="prelude-val">Ok</span>(VectorTypeArgs { element, dimension })
+<a href=#278 id=278 data-nosnippet>278</a>}
+<a href=#279 id=279 data-nosnippet>279</a>
+<a href=#280 id=280 data-nosnippet>280</a><span class="doccomment">/// Parse a vector's dimension parameter.
+<a href=#281 id=281 data-nosnippet>281</a>///
+<a href=#282 id=282 data-nosnippet>282</a>/// Rejects — each with a named error, never a fallback value:
+<a href=#283 id=283 data-nosnippet>283</a>/// * an empty parameter, or one that is not PLAIN DECIMAL DIGITS — including the
+<a href=#284 id=284 data-nosnippet>284</a>///   signed spellings Cassandra's own reader would tolerate but its writer can
+<a href=#285 id=285 data-nosnippet>285</a>///   never emit (see the body for the pinned citation and why the divergence is
+<a href=#286 id=286 data-nosnippet>286</a>///   one-directional);
+<a href=#287 id=287 data-nosnippet>287</a>/// * `0` and any negative spelling — `VectorType.java:89-90` rejects
+<a href=#288 id=288 data-nosnippet>288</a>///   `dimension &lt;= 0`, so a zero-dimension vector does not exist and a
+<a href=#289 id=289 data-nosnippet>289</a>///   zero-length value is an error rather than an empty vector;
+<a href=#290 id=290 data-nosnippet>290</a>/// * a dimension whose byte width would overflow `usize` (see
+<a href=#291 id=291 data-nosnippet>291</a>///   [`vector_byte_width`]).
+<a href=#292 id=292 data-nosnippet>292</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>parse_vector_dimension(raw: <span class="kw-2">&amp;</span>str, type_str: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Result</span>&lt;usize&gt; {
+<a href=#293 id=293 data-nosnippet>293</a>    <span class="kw">if </span>raw.is_empty() {
+<a href=#294 id=294 data-nosnippet>294</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(malformed(type_str, <span class="string">"the dimension parameter is empty"</span>));
+<a href=#295 id=295 data-nosnippet>295</a>    }
+<a href=#296 id=296 data-nosnippet>296</a>    <span class="comment">// DIGITS ONLY, checked explicitly rather than left to `str::parse`, which
+<a href=#297 id=297 data-nosnippet>297</a>    // ACCEPTS a leading `+` (`"+3".parse::&lt;usize&gt;() == Ok(3)`) — measured, and it
+<a href=#298 id=298 data-nosnippet>298</a>    // is what the sibling test caught.
+<a href=#299 id=299 data-nosnippet>299</a>    //
+<a href=#300 id=300 data-nosnippet>300</a>    // This is deliberately STRICTER THAN CASSANDRA'S OWN READER, which would
+<a href=#301 id=301 data-nosnippet>301</a>    // accept `+3`: `TypeParser.readNextIdentifier` treats `+`, `-`, `.`, `_` and
+<a href=#302 id=302 data-nosnippet>302</a>    // `&amp;` as identifier characters (`TypeParser.java:578-583`) and
+<a href=#303 id=303 data-nosnippet>303</a>    // `getVectorParameters` hands the result to `Integer.parseInt`
+<a href=#304 id=304 data-nosnippet>304</a>    // (`:255-258`), which tolerates a leading sign. The divergence is safe and
+<a href=#305 id=305 data-nosnippet>305</a>    // one-directional: Cassandra's WRITER concatenates the `int` dimension
+<a href=#306 id=306 data-nosnippet>306</a>    // directly (`stringifyVectorParameters`, `TypeParser.java:239-242`), so no
+<a href=#307 id=307 data-nosnippet>307</a>    // Cassandra-written type string can carry a sign, a `.` or a `_` in this
+<a href=#308 id=308 data-nosnippet>308</a>    // parameter. Refusing them therefore rejects nothing Cassandra wrote, while
+<a href=#309 id=309 data-nosnippet>309</a>    // accepting them would mean two spellings of one dimension reaching the
+<a href=#310 id=310 data-nosnippet>310</a>    // decode path — and a dimension IS the width, so an unnormalised spelling is
+<a href=#311 id=311 data-nosnippet>311</a>    // a width nobody declared (#28).
+<a href=#312 id=312 data-nosnippet>312</a>    </span><span class="kw">if </span>!raw.bytes().all(|b| b.is_ascii_digit()) {
+<a href=#313 id=313 data-nosnippet>313</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(malformed(
+<a href=#314 id=314 data-nosnippet>314</a>            type_str,
+<a href=#315 id=315 data-nosnippet>315</a>            <span class="kw-2">&amp;</span><span class="macro">format!</span>(
+<a href=#316 id=316 data-nosnippet>316</a>                <span class="string">"dimension '{raw}' is not a plain decimal integer (digits only: a \
+<a href=#317 id=317 data-nosnippet>317</a>                 sign, a decimal point, whitespace or a non-ASCII digit is not a \
+<a href=#318 id=318 data-nosnippet>318</a>                 dimension Cassandra's writer can emit)"
+<a href=#319 id=319 data-nosnippet>319</a>            </span>),
+<a href=#320 id=320 data-nosnippet>320</a>        ));
+<a href=#321 id=321 data-nosnippet>321</a>    }
+<a href=#322 id=322 data-nosnippet>322</a>    <span class="kw">let </span>dimension: usize = raw.parse().map_err(|<span class="kw">_</span>| {
+<a href=#323 id=323 data-nosnippet>323</a>        malformed(
+<a href=#324 id=324 data-nosnippet>324</a>            type_str,
+<a href=#325 id=325 data-nosnippet>325</a>            <span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"dimension '{raw}' is not a non-negative decimal integer"</span>),
+<a href=#326 id=326 data-nosnippet>326</a>        )
+<a href=#327 id=327 data-nosnippet>327</a>    })<span class="question-mark">?</span>;
+<a href=#328 id=328 data-nosnippet>328</a>    <span class="kw">if </span>dimension == <span class="number">0 </span>{
+<a href=#329 id=329 data-nosnippet>329</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(malformed(
+<a href=#330 id=330 data-nosnippet>330</a>            type_str,
+<a href=#331 id=331 data-nosnippet>331</a>            <span class="string">"dimension 0 is not a legal vector dimension (Cassandra rejects \
+<a href=#332 id=332 data-nosnippet>332</a>             dimension &lt;= 0: VectorType.java:89-90)"</span>,
+<a href=#333 id=333 data-nosnippet>333</a>        ));
+<a href=#334 id=334 data-nosnippet>334</a>    }
+<a href=#335 id=335 data-nosnippet>335</a>    <span class="comment">// The doc comment above promises this function rejects a dimension whose BYTE
+<a href=#336 id=336 data-nosnippet>336</a>    // WIDTH would overflow, and before this it only rejected zero (roborev job 113).
+<a href=#337 id=337 data-nosnippet>337</a>    // On a 64-bit target any `dimension &gt; usize::MAX / 4` was accepted into
+<a href=#338 id=338 data-nosnippet>338</a>    // `CqlType::Vector` and failed much later, at decode — a promise the code did not
+<a href=#339 id=339 data-nosnippet>339</a>    // keep, and a late failure where an early one was available. Validated through the
+<a href=#340 id=340 data-nosnippet>340</a>    // SAME helper the decoders use, so the parser and the decode path cannot disagree
+<a href=#341 id=341 data-nosnippet>341</a>    // about what is representable.
+<a href=#342 id=342 data-nosnippet>342</a>    // Cassandra's dimension is a Java `int`: `getVectorParameters` hands the token to
+<a href=#343 id=343 data-nosnippet>343</a>    // `Integer.parseInt` (`TypeParser.java:255-258`), so `Integer.MAX_VALUE` is the
+<a href=#344 id=344 data-nosnippet>344</a>    // hard ceiling and NO Cassandra-written type string can exceed it (roborev job
+<a href=#345 id=345 data-nosnippet>345</a>    // 114). This is the same one-directional argument the digits-only check above
+<a href=#346 id=346 data-nosnippet>346</a>    // rests on — Cassandra's WRITER concatenates the `int` directly
+<a href=#347 id=347 data-nosnippet>347</a>    // (`stringifyVectorParameters`, `:239-242`) — so refusing a larger value rejects
+<a href=#348 id=348 data-nosnippet>348</a>    // nothing Cassandra wrote, while accepting one would admit an IMPOSSIBLE schema
+<a href=#349 id=349 data-nosnippet>349</a>    // and hand a multi-gigabyte declared width to the decode path.
+<a href=#350 id=350 data-nosnippet>350</a>    </span><span class="kw">if </span>dimension &gt; i32::MAX <span class="kw">as </span>usize {
+<a href=#351 id=351 data-nosnippet>351</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(malformed(
+<a href=#352 id=352 data-nosnippet>352</a>            type_str,
+<a href=#353 id=353 data-nosnippet>353</a>            <span class="string">"the dimension exceeds Cassandra's Integer.MAX_VALUE ceiling"</span>,
+<a href=#354 id=354 data-nosnippet>354</a>        ));
+<a href=#355 id=355 data-nosnippet>355</a>    }
+<a href=#356 id=356 data-nosnippet>356</a>    <span class="comment">// NOTE the ORDER: the Integer.MAX_VALUE ceiling above runs FIRST, and on a 64-bit
+<a href=#357 id=357 data-nosnippet>357</a>    // target it SUBSUMES this width guard (usize::MAX/4 is 4.6e18, far above
+<a href=#358 id=358 data-nosnippet>358</a>    // i32::MAX = 2.1e9, so nothing can reach here overflowing). This guard is NOT dead
+<a href=#359 id=359 data-nosnippet>359</a>    // code though: on a 32-bit target usize::MAX/4 is 1_073_741_823, BELOW i32::MAX, so
+<a href=#360 id=360 data-nosnippet>360</a>    // a dimension in (1.07e9, 2.1e9] is legal per Cassandra and still overflows `4 * n`
+<a href=#361 id=361 data-nosnippet>361</a>    // — and there this is the only thing standing between that and a wrapped byte
+<a href=#362 id=362 data-nosnippet>362</a>    // count. Both guards are load-bearing; which one reports is target-dependent, so
+<a href=#363 id=363 data-nosnippet>363</a>    // no test may pin the message.
+<a href=#364 id=364 data-nosnippet>364</a>    //
+<a href=#365 id=365 data-nosnippet>365</a>    // Checked at the FLOAT element width, which is element-SPECIFIC and deliberately
+<a href=#366 id=366 data-nosnippet>366</a>    // so: this parser sees only the dimension token, never the element, so there is no
+<a href=#367 id=367 data-nosnippet>367</a>    // generally-correct width to check against — a check at width 1 would be
+<a href=#368 id=368 data-nosnippet>368</a>    // vacuously true. `float` is the only element #4114 decodes, and every other
+<a href=#369 id=369 data-nosnippet>369</a>    // element is refused by name at `require_float_element` before any width is
+<a href=#370 id=370 data-nosnippet>370</a>    // computed, so no unchecked path exists today. A future element type wider than 4
+<a href=#371 id=371 data-nosnippet>371</a>    // bytes must add its own check; it cannot inherit this one.
+<a href=#372 id=372 data-nosnippet>372</a>    </span><span class="kw">if </span>vector_byte_width(FLOAT_ELEMENT_WIDTH, dimension).is_none() {
+<a href=#373 id=373 data-nosnippet>373</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(malformed(
+<a href=#374 id=374 data-nosnippet>374</a>            type_str,
+<a href=#375 id=375 data-nosnippet>375</a>            <span class="string">"the dimension's byte width overflows the addressable range"</span>,
+<a href=#376 id=376 data-nosnippet>376</a>        ));
+<a href=#377 id=377 data-nosnippet>377</a>    }
+<a href=#378 id=378 data-nosnippet>378</a>    <span class="prelude-val">Ok</span>(dimension)
+<a href=#379 id=379 data-nosnippet>379</a>}
+<a href=#380 id=380 data-nosnippet>380</a>
+<a href=#381 id=381 data-nosnippet>381</a><span class="doccomment">/// The total on-disk byte width of a FIXED-width vector: `element_width *
+<a href=#382 id=382 data-nosnippet>382</a>/// dimension`, or `None` when that product overflows `usize`.
+<a href=#383 id=383 data-nosnippet>383</a>///
+<a href=#384 id=384 data-nosnippet>384</a>/// `VectorType.java:94-96`:
+<a href=#385 id=385 data-nosnippet>385</a>/// `valueLengthIfFixed = elementType.valueLengthIfFixed() * dimension`.
+<a href=#386 id=386 data-nosnippet>386</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>vector_byte_width(element_width: usize, dimension: usize) -&gt; <span class="prelude-ty">Option</span>&lt;usize&gt; {
+<a href=#387 id=387 data-nosnippet>387</a>    <span class="comment">// `dimension == 0` is REFUSED, not multiplied (issue #4114, roborev job 111).
+<a href=#388 id=388 data-nosnippet>388</a>    // Cassandra cannot even CONSTRUCT a zero-dimension vector — `VectorType.java:89-90`
+<a href=#389 id=389 data-nosnippet>389</a>    // throws `InvalidRequestException("vectors may only have positive dimensions")` —
+<a href=#390 id=390 data-nosnippet>390</a>    // and an empty vector VALUE is `MarshalException("Invalid empty vector value")`
+<a href=#391 id=391 data-nosnippet>391</a>    // (`:365-368` via `:515-517`). Without this guard `0` multiplied cleanly to a width
+<a href=#392 id=392 data-nosnippet>392</a>    // of 0 and an EMPTY buffer then decoded as a successful `Value::List([])`: a value
+<a href=#393 id=393 data-nosnippet>393</a>    // Cassandra says cannot exist, produced without error. `CqlType::Vector` is
+<a href=#394 id=394 data-nosnippet>394</a>    // publicly constructible, so the string parser's own `n &gt; 0` check is NOT
+<a href=#395 id=395 data-nosnippet>395</a>    // sufficient — a programmatically built `Vector(Float, 0)` bypasses it entirely,
+<a href=#396 id=396 data-nosnippet>396</a>    // which is why the guard belongs HERE, at the shared width helper every decode
+<a href=#397 id=397 data-nosnippet>397</a>    // entry point funnels through, rather than at one caller.
+<a href=#398 id=398 data-nosnippet>398</a>    </span><span class="kw">if </span>dimension == <span class="number">0 </span>{
+<a href=#399 id=399 data-nosnippet>399</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#400 id=400 data-nosnippet>400</a>    }
+<a href=#401 id=401 data-nosnippet>401</a>    element_width.checked_mul(dimension)
+<a href=#402 id=402 data-nosnippet>402</a>}
+<a href=#403 id=403 data-nosnippet>403</a>
+<a href=#404 id=404 data-nosnippet>404</a><span class="doccomment">/// The width Cassandra's `valueLengthIfFixed()` reports for a vector ELEMENT, or
+<a href=#405 id=405 data-nosnippet>405</a>/// `None` when that element is variable-length in Cassandra's FRAMING.
+<a href=#406 id=406 data-nosnippet>406</a>///
+<a href=#407 id=407 data-nosnippet>407</a>/// Deliberately NOT `CqlType::fixed_size()` (issue #4114, roborev job 111).
+<a href=#408 id=408 data-nosnippet>408</a>/// `fixed_size()` answers "how many bytes does one logical value occupy", which is a
+<a href=#409 id=409 data-nosnippet>409</a>/// DIFFERENT question from "does Cassandra frame this without a length prefix", and
+<a href=#410 id=410 data-nosnippet>410</a>/// it disagrees with the framing authority on five types: it reports `TinyInt(1)`,
+<a href=#411 id=411 data-nosnippet>411</a>/// `SmallInt(2)`, `Date(4)`, `Time(8)` and `Inet(16)` as fixed, while
+<a href=#412 id=412 data-nosnippet>412</a>/// `parser/repair_clustering.rs` — whose classification is derived from
+<a href=#413 id=413 data-nosnippet>413</a>/// `valueLengthIfFixed()` and pinned by tests — treats `InetAddressType`, `TimeType`
+<a href=#414 id=414 data-nosnippet>414</a>/// and `SimpleDateType` as VARIABLE, and its own tests assert tinyint and date
+<a href=#415 id=415 data-nosnippet>415</a>/// clusterings are vint-prefixed. (`fixed_size()`'s `Inet` arm even concedes the point
+<a href=#416 id=416 data-nosnippet>416</a>/// in a comment: IPv4 is 4 bytes, IPv6 is 16.)
+<a href=#417 id=417 data-nosnippet>417</a>///
+<a href=#418 id=418 data-nosnippet>418</a>/// That pre-existing disagreement is NOT corrected here — `fixed_size()` has no
+<a href=#419 id=419 data-nosnippet>419</a>/// callers other than its own recursion, so re-plumbing it is a separate change with
+<a href=#420 id=420 data-nosnippet>420</a>/// its own blast radius. What this function fixes is the vector arm's DEPENDENCE on
+<a href=#421 id=421 data-nosnippet>421</a>/// it: a vector must not inherit a framing claim from a method that does not answer
+<a href=#422 id=422 data-nosnippet>422</a>/// the framing question. Only element types whose Cassandra framing is KNOWN fixed
+<a href=#423 id=423 data-nosnippet>423</a>/// are listed, so an unlisted element yields `None` (variable) rather than a guess
+<a href=#424 id=424 data-nosnippet>424</a>/// (#28).
+<a href=#425 id=425 data-nosnippet>425</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>cassandra_fixed_element_width(element: <span class="kw-2">&amp;</span><span class="kw">crate</span>::schema::CqlType) -&gt; <span class="prelude-ty">Option</span>&lt;usize&gt; {
+<a href=#426 id=426 data-nosnippet>426</a>    <span class="kw">use </span><span class="kw">crate</span>::schema::CqlType <span class="kw">as </span>T;
+<a href=#427 id=427 data-nosnippet>427</a>    <span class="kw">match </span>element {
+<a href=#428 id=428 data-nosnippet>428</a>        T::Boolean =&gt; <span class="prelude-val">Some</span>(<span class="number">1</span>),
+<a href=#429 id=429 data-nosnippet>429</a>        T::Int =&gt; <span class="prelude-val">Some</span>(<span class="number">4</span>),
+<a href=#430 id=430 data-nosnippet>430</a>        T::Float =&gt; <span class="prelude-val">Some</span>(<span class="number">4</span>),
+<a href=#431 id=431 data-nosnippet>431</a>        T::BigInt | T::Counter | T::Double | T::Timestamp =&gt; <span class="prelude-val">Some</span>(<span class="number">8</span>),
+<a href=#432 id=432 data-nosnippet>432</a>        T::Uuid | T::TimeUuid =&gt; <span class="prelude-val">Some</span>(<span class="number">16</span>),
+<a href=#433 id=433 data-nosnippet>433</a>        <span class="comment">// Everything else — including TinyInt, SmallInt, Date, Time and Inet — is
+<a href=#434 id=434 data-nosnippet>434</a>        // either variable in Cassandra's framing or not a scalar this function
+<a href=#435 id=435 data-nosnippet>435</a>        // speaks for. `None` means "not known fixed", never "zero width".
+<a href=#436 id=436 data-nosnippet>436</a>        </span><span class="kw">_ </span>=&gt; <span class="prelude-val">None</span>,
+<a href=#437 id=437 data-nosnippet>437</a>    }
+<a href=#438 id=438 data-nosnippet>438</a>}
+<a href=#439 id=439 data-nosnippet>439</a>
+<a href=#440 id=440 data-nosnippet>440</a><span class="kw">fn </span>malformed(type_str: <span class="kw-2">&amp;</span>str, why: <span class="kw-2">&amp;</span>str) -&gt; Error {
+<a href=#441 id=441 data-nosnippet>441</a>    Error::schema(<span class="macro">format!</span>(<span class="string">"malformed vector type '{type_str}': {why}"</span>))
+<a href=#442 id=442 data-nosnippet>442</a>}
+<a href=#443 id=443 data-nosnippet>443</a>
+<a href=#444 id=444 data-nosnippet>444</a><span class="attr">#[cfg(test)]
+<a href=#445 id=445 data-nosnippet>445</a></span><span class="kw">mod </span>tests {
+<a href=#446 id=446 data-nosnippet>446</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#447 id=447 data-nosnippet>447</a>
+<a href=#448 id=448 data-nosnippet>448</a>    <span class="kw">const </span>PKG: <span class="kw-2">&amp;</span>str = <span class="string">"org.apache.cassandra.db.marshal."</span>;
+<a href=#449 id=449 data-nosnippet>449</a>
+<a href=#450 id=450 data-nosnippet>450</a>    <span class="doccomment">/// `into_args` for a string that MUST be a well-formed vector.
+<a href=#451 id=451 data-nosnippet>451</a>    </span><span class="kw">fn </span>marshal_args&lt;<span class="lifetime">'a</span>&gt;(ty: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>str) -&gt; VectorTypeArgs&lt;<span class="lifetime">'a</span>&gt; {
+<a href=#452 id=452 data-nosnippet>452</a>        marshal_vector_kind(ty)
+<a href=#453 id=453 data-nosnippet>453</a>            .into_args(ty)
+<a href=#454 id=454 data-nosnippet>454</a>            .expect(<span class="string">"a well-formed vector type"</span>)
+<a href=#455 id=455 data-nosnippet>455</a>            .expect(<span class="string">"a vector type"</span>)
+<a href=#456 id=456 data-nosnippet>456</a>    }
+<a href=#457 id=457 data-nosnippet>457</a>
+<a href=#458 id=458 data-nosnippet>458</a>    <span class="kw">fn </span>cql_args&lt;<span class="lifetime">'a</span>&gt;(ty: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>str) -&gt; VectorTypeArgs&lt;<span class="lifetime">'a</span>&gt; {
+<a href=#459 id=459 data-nosnippet>459</a>        cql_vector_kind(ty)
+<a href=#460 id=460 data-nosnippet>460</a>            .into_args(ty)
+<a href=#461 id=461 data-nosnippet>461</a>            .expect(<span class="string">"a well-formed vector type"</span>)
+<a href=#462 id=462 data-nosnippet>462</a>            .expect(<span class="string">"a vector type"</span>)
+<a href=#463 id=463 data-nosnippet>463</a>    }
+<a href=#464 id=464 data-nosnippet>464</a>
+<a href=#465 id=465 data-nosnippet>465</a>    <span class="attr">#[test]
+<a href=#466 id=466 data-nosnippet>466</a>    </span><span class="kw">fn </span>marshal_spelling_cassandra_writes_is_parsed() {
+<a href=#467 id=467 data-nosnippet>467</a>        <span class="comment">// The exact string `VectorType.toString` produces, spaces and all.
+<a href=#468 id=468 data-nosnippet>468</a>        </span><span class="kw">let </span>ty = <span class="macro">format!</span>(<span class="string">"{PKG}VectorType({PKG}FloatType , 3)"</span>);
+<a href=#469 id=469 data-nosnippet>469</a>        <span class="kw">let </span>args = marshal_args(<span class="kw-2">&amp;</span>ty);
+<a href=#470 id=470 data-nosnippet>470</a>        <span class="macro">assert_eq!</span>(args.element, <span class="macro">format!</span>(<span class="string">"{PKG}FloatType"</span>));
+<a href=#471 id=471 data-nosnippet>471</a>        <span class="macro">assert_eq!</span>(args.dimension, <span class="number">3</span>);
+<a href=#472 id=472 data-nosnippet>472</a>    }
+<a href=#473 id=473 data-nosnippet>473</a>
+<a href=#474 id=474 data-nosnippet>474</a>    <span class="doccomment">/// Regression, roborev job 109 (issue #4114): a `VectorType` whose parameter
+<a href=#475 id=475 data-nosnippet>475</a>    /// list cannot be EXTRACTED must be distinguishable from "not a vector type".
+<a href=#476 id=476 data-nosnippet>476</a>    ///
+<a href=#477 id=477 data-nosnippet>477</a>    /// The two used to collapse into `None`, so every caller read a malformed vector
+<a href=#478 id=478 data-nosnippet>478</a>    /// as "some other type" and sent it down a generic fallback — in
+<a href=#479 id=479 data-nosnippet>479</a>    /// `enhanced_statistics_parser::marshal_type` the `other =&gt; other.to_lowercase()`
+<a href=#480 id=480 data-nosnippet>480</a>    /// one, which restores the blob/phantom-vint framing #4114 exists to remove. The
+<a href=#481 id=481 data-nosnippet>481</a>    /// type STRINGS here are literals rather than fixture-derived on purpose: a
+<a href=#482 id=482 data-nosnippet>482</a>    /// malformed type string is a text-parsing question, not a byte-framing one, so
+<a href=#483 id=483 data-nosnippet>483</a>    /// no Cassandra-written bytes can express it (Cassandra's writer cannot emit one).
+<a href=#484 id=484 data-nosnippet>484</a>    </span><span class="attr">#[test]
+<a href=#485 id=485 data-nosnippet>485</a>    </span><span class="kw">fn </span>a_malformed_vector_type_is_malformed_not_notavector() {
+<a href=#486 id=486 data-nosnippet>486</a>        <span class="kw">for </span>ty <span class="kw">in </span>[
+<a href=#487 id=487 data-nosnippet>487</a>            <span class="comment">// Unmatched open paren — the case that reached the lowercase fallback.
+<a href=#488 id=488 data-nosnippet>488</a>            </span><span class="macro">format!</span>(<span class="string">"{PKG}VectorType({PKG}FloatType , 3"</span>),
+<a href=#489 id=489 data-nosnippet>489</a>            <span class="comment">// A `VectorType` claim with no parameter list at all.
+<a href=#490 id=490 data-nosnippet>490</a>            </span><span class="macro">format!</span>(<span class="string">"{PKG}VectorType"</span>),
+<a href=#491 id=491 data-nosnippet>491</a>            <span class="string">"VectorType"</span>.to_string(),
+<a href=#492 id=492 data-nosnippet>492</a>            <span class="comment">// Trailing text after the matched close paren.
+<a href=#493 id=493 data-nosnippet>493</a>            </span><span class="macro">format!</span>(<span class="string">"{PKG}VectorType({PKG}FloatType , 3) , 4"</span>),
+<a href=#494 id=494 data-nosnippet>494</a>        ] {
+<a href=#495 id=495 data-nosnippet>495</a>            <span class="macro">assert!</span>(
+<a href=#496 id=496 data-nosnippet>496</a>                <span class="macro">matches!</span>(marshal_vector_kind(<span class="kw-2">&amp;</span>ty), VectorInner::Malformed(<span class="kw">_</span>)),
+<a href=#497 id=497 data-nosnippet>497</a>                <span class="string">"'{ty}' claims to be a VectorType and must be MALFORMED, not NotAVector"
+<a href=#498 id=498 data-nosnippet>498</a>            </span>);
+<a href=#499 id=499 data-nosnippet>499</a>            <span class="kw">let </span>err = marshal_vector_kind(<span class="kw-2">&amp;</span>ty)
+<a href=#500 id=500 data-nosnippet>500</a>                .into_args(<span class="kw-2">&amp;</span>ty)
+<a href=#501 id=501 data-nosnippet>501</a>                .expect_err(<span class="string">"a malformed vector type must fail closed"</span>)
+<a href=#502 id=502 data-nosnippet>502</a>                .to_string();
+<a href=#503 id=503 data-nosnippet>503</a>            <span class="macro">assert!</span>(
+<a href=#504 id=504 data-nosnippet>504</a>                err.contains(ty.trim()),
+<a href=#505 id=505 data-nosnippet>505</a>                <span class="string">"the refusal must name the type it refused: {err}"
+<a href=#506 id=506 data-nosnippet>506</a>            </span>);
+<a href=#507 id=507 data-nosnippet>507</a>        }
+<a href=#508 id=508 data-nosnippet>508</a>    }
+<a href=#509 id=509 data-nosnippet>509</a>
+<a href=#510 id=510 data-nosnippet>510</a>    <span class="doccomment">/// The CQL-spelling half of the same defect class. `vector` WITHOUT parameters
+<a href=#511 id=511 data-nosnippet>511</a>    /// stays `NotAVector` — it is not a reserved word, so it can be a UDT name — but
+<a href=#512 id=512 data-nosnippet>512</a>    /// once a `&lt;` follows, nothing else can be meant and an unterminated parameter
+<a href=#513 id=513 data-nosnippet>513</a>    /// list must fail closed rather than fall through to the UDT/`Custom` arm.
+<a href=#514 id=514 data-nosnippet>514</a>    </span><span class="attr">#[test]
+<a href=#515 id=515 data-nosnippet>515</a>    </span><span class="kw">fn </span>an_unterminated_cql_vector_is_malformed_but_a_bare_vector_is_a_udt_name() {
+<a href=#516 id=516 data-nosnippet>516</a>        <span class="kw">for </span>ty <span class="kw">in </span>[<span class="string">"vector&lt;float, 3"</span>, <span class="string">"vector&lt;float, 3&gt;&gt;"</span>, <span class="string">"VECTOR&lt;float"</span>] {
+<a href=#517 id=517 data-nosnippet>517</a>            <span class="macro">assert!</span>(
+<a href=#518 id=518 data-nosnippet>518</a>                <span class="macro">matches!</span>(cql_vector_kind(ty), VectorInner::Malformed(<span class="kw">_</span>)),
+<a href=#519 id=519 data-nosnippet>519</a>                <span class="string">"'{ty}' must be MALFORMED"
+<a href=#520 id=520 data-nosnippet>520</a>            </span>);
+<a href=#521 id=521 data-nosnippet>521</a>            <span class="macro">assert!</span>(cql_vector_kind(ty).into_args(ty).is_err(), <span class="string">"{ty}"</span>);
+<a href=#522 id=522 data-nosnippet>522</a>        }
+<a href=#523 id=523 data-nosnippet>523</a>        <span class="kw">for </span>ty <span class="kw">in </span>[<span class="string">"vector"</span>, <span class="string">"  vector  "</span>, <span class="string">"vector_column"</span>, <span class="string">"vectorish&lt;int&gt;"</span>] {
+<a href=#524 id=524 data-nosnippet>524</a>            <span class="macro">assert!</span>(
+<a href=#525 id=525 data-nosnippet>525</a>                <span class="macro">matches!</span>(cql_vector_kind(ty), VectorInner::NotAVector),
+<a href=#526 id=526 data-nosnippet>526</a>                <span class="string">"'{ty}' must stay available to the caller's UDT arm"
+<a href=#527 id=527 data-nosnippet>527</a>            </span>);
+<a href=#528 id=528 data-nosnippet>528</a>            <span class="macro">assert!</span>(
+<a href=#529 id=529 data-nosnippet>529</a>                <span class="macro">matches!</span>(cql_vector_kind(ty).into_args(ty), <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>)),
+<a href=#530 id=530 data-nosnippet>530</a>                <span class="string">"{ty}"
+<a href=#531 id=531 data-nosnippet>531</a>            </span>);
+<a href=#532 id=532 data-nosnippet>532</a>        }
+<a href=#533 id=533 data-nosnippet>533</a>    }
+<a href=#534 id=534 data-nosnippet>534</a>
+<a href=#535 id=535 data-nosnippet>535</a>    <span class="attr">#[test]
+<a href=#536 id=536 data-nosnippet>536</a>    </span><span class="kw">fn </span>whitespace_around_the_comma_is_tolerated_in_both_directions() {
+<a href=#537 id=537 data-nosnippet>537</a>        <span class="comment">// `TypeParser.skipBlankAndComma` tolerates variation on READ, so a writer
+<a href=#538 id=538 data-nosnippet>538</a>        // that omits the spaces Cassandra emits must still parse.
+<a href=#539 id=539 data-nosnippet>539</a>        </span><span class="kw">for </span>ty <span class="kw">in </span>[
+<a href=#540 id=540 data-nosnippet>540</a>            <span class="macro">format!</span>(<span class="string">"{PKG}VectorType({PKG}FloatType,3)"</span>),
+<a href=#541 id=541 data-nosnippet>541</a>            <span class="macro">format!</span>(<span class="string">"{PKG}VectorType({PKG}FloatType , 3)"</span>),
+<a href=#542 id=542 data-nosnippet>542</a>            <span class="macro">format!</span>(<span class="string">"{PKG}VectorType( {PKG}FloatType ,  3 )"</span>),
+<a href=#543 id=543 data-nosnippet>543</a>        ] {
+<a href=#544 id=544 data-nosnippet>544</a>            <span class="kw">let </span>args = marshal_args(<span class="kw-2">&amp;</span>ty);
+<a href=#545 id=545 data-nosnippet>545</a>            <span class="macro">assert_eq!</span>(args.element, <span class="macro">format!</span>(<span class="string">"{PKG}FloatType"</span>), <span class="string">"{ty}"</span>);
+<a href=#546 id=546 data-nosnippet>546</a>            <span class="macro">assert_eq!</span>(args.dimension, <span class="number">3</span>, <span class="string">"{ty}"</span>);
+<a href=#547 id=547 data-nosnippet>547</a>        }
+<a href=#548 id=548 data-nosnippet>548</a>    }
+<a href=#549 id=549 data-nosnippet>549</a>
+<a href=#550 id=550 data-nosnippet>550</a>    <span class="attr">#[test]
+<a href=#551 id=551 data-nosnippet>551</a>    </span><span class="kw">fn </span>a_bare_constructor_name_is_accepted_and_a_foreign_one_is_not() {
+<a href=#552 id=552 data-nosnippet>552</a>        <span class="comment">// `TypeParser.getAbstractType` resolves an unqualified name against the
+<a href=#553 id=553 data-nosnippet>553</a>        // marshal package, so the bare spelling is the same type.
+<a href=#554 id=554 data-nosnippet>554</a>        </span><span class="macro">assert_eq!</span>(marshal_args(<span class="string">"VectorType(FloatType , 2)"</span>).dimension, <span class="number">2</span>);
+<a href=#555 id=555 data-nosnippet>555</a>        <span class="comment">// Case matters: a lowercased string is not a Java class reference.
+<a href=#556 id=556 data-nosnippet>556</a>        </span><span class="macro">assert!</span>(<span class="macro">matches!</span>(
+<a href=#557 id=557 data-nosnippet>557</a>            marshal_vector_kind(<span class="string">"vectortype(FloatType , 2)"</span>),
+<a href=#558 id=558 data-nosnippet>558</a>            VectorInner::NotAVector
+<a href=#559 id=559 data-nosnippet>559</a>        ));
+<a href=#560 id=560 data-nosnippet>560</a>        <span class="comment">// A different constructor is not a vector.
+<a href=#561 id=561 data-nosnippet>561</a>        </span><span class="macro">assert!</span>(<span class="macro">matches!</span>(
+<a href=#562 id=562 data-nosnippet>562</a>            marshal_vector_kind(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"{PKG}ListType({PKG}FloatType)"</span>)),
+<a href=#563 id=563 data-nosnippet>563</a>            VectorInner::NotAVector
+<a href=#564 id=564 data-nosnippet>564</a>        ));
+<a href=#565 id=565 data-nosnippet>565</a>        <span class="comment">// A non-parameterised FOREIGN type is not a vector either.
+<a href=#566 id=566 data-nosnippet>566</a>        </span><span class="macro">assert!</span>(<span class="macro">matches!</span>(
+<a href=#567 id=567 data-nosnippet>567</a>            marshal_vector_kind(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"{PKG}FloatType"</span>)),
+<a href=#568 id=568 data-nosnippet>568</a>            VectorInner::NotAVector
+<a href=#569 id=569 data-nosnippet>569</a>        ));
+<a href=#570 id=570 data-nosnippet>570</a>    }
+<a href=#571 id=571 data-nosnippet>571</a>
+<a href=#572 id=572 data-nosnippet>572</a>    <span class="attr">#[test]
+<a href=#573 id=573 data-nosnippet>573</a>    </span><span class="kw">fn </span>a_parameterised_element_keeps_its_own_commas() {
+<a href=#574 id=574 data-nosnippet>574</a>        <span class="comment">// The element's commas are at depth &gt; 0; only the LAST top-level comma
+<a href=#575 id=575 data-nosnippet>575</a>        // separates the dimension.
+<a href=#576 id=576 data-nosnippet>576</a>        </span><span class="kw">let </span>ty = <span class="macro">format!</span>(<span class="string">"{PKG}VectorType({PKG}TupleType({PKG}Int32Type,{PKG}UTF8Type) , 7)"</span>);
+<a href=#577 id=577 data-nosnippet>577</a>        <span class="kw">let </span>args = marshal_args(<span class="kw-2">&amp;</span>ty);
+<a href=#578 id=578 data-nosnippet>578</a>        <span class="macro">assert_eq!</span>(
+<a href=#579 id=579 data-nosnippet>579</a>            args.element,
+<a href=#580 id=580 data-nosnippet>580</a>            <span class="macro">format!</span>(<span class="string">"{PKG}TupleType({PKG}Int32Type,{PKG}UTF8Type)"</span>)
+<a href=#581 id=581 data-nosnippet>581</a>        );
+<a href=#582 id=582 data-nosnippet>582</a>        <span class="macro">assert_eq!</span>(args.dimension, <span class="number">7</span>);
+<a href=#583 id=583 data-nosnippet>583</a>    }
+<a href=#584 id=584 data-nosnippet>584</a>
+<a href=#585 id=585 data-nosnippet>585</a>    <span class="attr">#[test]
+<a href=#586 id=586 data-nosnippet>586</a>    </span><span class="kw">fn </span>cql_spelling_is_case_insensitive_and_whitespace_tolerant() {
+<a href=#587 id=587 data-nosnippet>587</a>        <span class="kw">for </span>ty <span class="kw">in </span>[
+<a href=#588 id=588 data-nosnippet>588</a>            <span class="string">"vector&lt;float, 3&gt;"</span>,
+<a href=#589 id=589 data-nosnippet>589</a>            <span class="string">"VECTOR&lt;FLOAT,3&gt;"</span>,
+<a href=#590 id=590 data-nosnippet>590</a>            <span class="string">"  vector&lt; float , 3 &gt;"</span>,
+<a href=#591 id=591 data-nosnippet>591</a>        ] {
+<a href=#592 id=592 data-nosnippet>592</a>            <span class="kw">let </span>args = cql_args(ty);
+<a href=#593 id=593 data-nosnippet>593</a>            <span class="macro">assert!</span>(args.element.eq_ignore_ascii_case(<span class="string">"float"</span>), <span class="string">"{ty}"</span>);
+<a href=#594 id=594 data-nosnippet>594</a>            <span class="macro">assert_eq!</span>(args.dimension, <span class="number">3</span>, <span class="string">"{ty}"</span>);
+<a href=#595 id=595 data-nosnippet>595</a>        }
+<a href=#596 id=596 data-nosnippet>596</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(
+<a href=#597 id=597 data-nosnippet>597</a>            cql_vector_kind(<span class="string">"list&lt;float&gt;"</span>),
+<a href=#598 id=598 data-nosnippet>598</a>            VectorInner::NotAVector
+<a href=#599 id=599 data-nosnippet>599</a>        ));
+<a href=#600 id=600 data-nosnippet>600</a>        <span class="comment">// A nested element keeps its own angle brackets.
+<a href=#601 id=601 data-nosnippet>601</a>        </span><span class="kw">let </span>ty = <span class="string">"vector&lt;frozen&lt;tuple&lt;int, text&gt;&gt;, 4&gt;"</span>;
+<a href=#602 id=602 data-nosnippet>602</a>        <span class="kw">let </span>args = cql_args(ty);
+<a href=#603 id=603 data-nosnippet>603</a>        <span class="macro">assert_eq!</span>(args.element, <span class="string">"frozen&lt;tuple&lt;int, text&gt;&gt;"</span>);
+<a href=#604 id=604 data-nosnippet>604</a>        <span class="macro">assert_eq!</span>(args.dimension, <span class="number">4</span>);
+<a href=#605 id=605 data-nosnippet>605</a>    }
+<a href=#606 id=606 data-nosnippet>606</a>
+<a href=#607 id=607 data-nosnippet>607</a>    <span class="attr">#[test]
+<a href=#608 id=608 data-nosnippet>608</a>    </span><span class="kw">fn </span>a_zero_dimension_is_refused_by_name_never_read_as_an_empty_vector() {
+<a href=#609 id=609 data-nosnippet>609</a>        <span class="kw">let </span>err = parse_vector_dimension(<span class="string">"0"</span>, <span class="string">"vector&lt;float, 0&gt;"</span>)
+<a href=#610 id=610 data-nosnippet>610</a>            .expect_err(<span class="string">"Cassandra rejects dimension &lt;= 0"</span>);
+<a href=#611 id=611 data-nosnippet>611</a>        <span class="kw">let </span>msg = err.to_string();
+<a href=#612 id=612 data-nosnippet>612</a>        <span class="macro">assert!</span>(
+<a href=#613 id=613 data-nosnippet>613</a>            msg.contains(<span class="string">"vector&lt;float, 0&gt;"</span>) &amp;&amp; msg.contains(<span class="string">"dimension 0"</span>),
+<a href=#614 id=614 data-nosnippet>614</a>            <span class="string">"{msg}"
+<a href=#615 id=615 data-nosnippet>615</a>        </span>);
+<a href=#616 id=616 data-nosnippet>616</a>    }
+<a href=#617 id=617 data-nosnippet>617</a>
+<a href=#618 id=618 data-nosnippet>618</a>    <span class="attr">#[test]
+<a href=#619 id=619 data-nosnippet>619</a>    </span><span class="kw">fn </span>a_non_numeric_or_negative_dimension_is_refused_by_name() {
+<a href=#620 id=620 data-nosnippet>620</a>        <span class="comment">// Every one of these is a MALFORMED dimension, not a value to salvage: a
+<a href=#621 id=621 data-nosnippet>621</a>        // fallback would put a made-up width on the decode path (#28).
+<a href=#622 id=622 data-nosnippet>622</a>        </span><span class="kw">for </span>raw <span class="kw">in </span>[<span class="string">""</span>, <span class="string">"n"</span>, <span class="string">"3.5"</span>, <span class="string">"-1"</span>, <span class="string">"+3"</span>, <span class="string">"0x3"</span>, <span class="string">"3 3"</span>, <span class="string">"\u{ff13}"</span>] {
+<a href=#623 id=623 data-nosnippet>623</a>            <span class="kw">let </span>err = <span class="kw">match </span>parse_vector_dimension(raw, <span class="string">"vector&lt;float, ?&gt;"</span>) {
+<a href=#624 id=624 data-nosnippet>624</a>                <span class="prelude-val">Ok</span>(n) =&gt; <span class="macro">panic!</span>(<span class="string">"dimension {raw:?} must be refused, got {n}"</span>),
+<a href=#625 id=625 data-nosnippet>625</a>                <span class="prelude-val">Err</span>(e) =&gt; e.to_string(),
+<a href=#626 id=626 data-nosnippet>626</a>            };
+<a href=#627 id=627 data-nosnippet>627</a>            <span class="macro">assert!</span>(
+<a href=#628 id=628 data-nosnippet>628</a>                err.contains(<span class="string">"vector&lt;float, ?&gt;"</span>),
+<a href=#629 id=629 data-nosnippet>629</a>                <span class="string">"the refusal must name the type it refused: {err}"
+<a href=#630 id=630 data-nosnippet>630</a>            </span>);
+<a href=#631 id=631 data-nosnippet>631</a>        }
+<a href=#632 id=632 data-nosnippet>632</a>    }
+<a href=#633 id=633 data-nosnippet>633</a>
+<a href=#634 id=634 data-nosnippet>634</a>    <span class="attr">#[test]
+<a href=#635 id=635 data-nosnippet>635</a>    </span><span class="kw">fn </span>an_overflowing_dimension_is_refused_rather_than_wrapped() {
+<a href=#636 id=636 data-nosnippet>636</a>        <span class="comment">// The declared dimension parses, but its byte width does not fit.
+<a href=#637 id=637 data-nosnippet>637</a>        </span><span class="macro">assert_eq!</span>(vector_byte_width(FLOAT_ELEMENT_WIDTH, <span class="number">3</span>), <span class="prelude-val">Some</span>(<span class="number">12</span>));
+<a href=#638 id=638 data-nosnippet>638</a>        <span class="macro">assert_eq!</span>(vector_byte_width(FLOAT_ELEMENT_WIDTH, usize::MAX), <span class="prelude-val">None</span>);
+<a href=#639 id=639 data-nosnippet>639</a>        <span class="macro">assert_eq!</span>(vector_byte_width(<span class="number">0</span>, usize::MAX), <span class="prelude-val">Some</span>(<span class="number">0</span>));
+<a href=#640 id=640 data-nosnippet>640</a>    }
+<a href=#641 id=641 data-nosnippet>641</a>
+<a href=#642 id=642 data-nosnippet>642</a>    <span class="attr">#[test]
+<a href=#643 id=643 data-nosnippet>643</a>    </span><span class="kw">fn </span>a_missing_comma_or_empty_element_is_refused_by_name() {
+<a href=#644 id=644 data-nosnippet>644</a>        <span class="kw">let </span>err = split_vector_args(<span class="string">"FloatType"</span>, <span class="string">"VectorType(FloatType)"</span>)
+<a href=#645 id=645 data-nosnippet>645</a>            .expect_err(<span class="string">"a vector needs two parameters"</span>)
+<a href=#646 id=646 data-nosnippet>646</a>            .to_string();
+<a href=#647 id=647 data-nosnippet>647</a>        <span class="macro">assert!</span>(err.contains(<span class="string">"two parameters"</span>), <span class="string">"{err}"</span>);
+<a href=#648 id=648 data-nosnippet>648</a>        <span class="kw">let </span>err = split_vector_args(<span class="string">" , 3"</span>, <span class="string">"vector&lt; , 3&gt;"</span>)
+<a href=#649 id=649 data-nosnippet>649</a>            .expect_err(<span class="string">"an empty element type is malformed"</span>)
+<a href=#650 id=650 data-nosnippet>650</a>            .to_string();
+<a href=#651 id=651 data-nosnippet>651</a>        <span class="macro">assert!</span>(err.contains(<span class="string">"element type parameter is empty"</span>), <span class="string">"{err}"</span>);
+<a href=#652 id=652 data-nosnippet>652</a>    }
+<a href=#653 id=653 data-nosnippet>653</a>
+<a href=#654 id=654 data-nosnippet>654</a>    <span class="comment">// ── roborev job 111 ────────────────────────────────────────────────────────
+<a href=#655 id=655 data-nosnippet>655</a>
+<a href=#656 id=656 data-nosnippet>656</a>    </span><span class="doccomment">/// A zero dimension is REFUSED at the shared width helper, so no decode entry
+<a href=#657 id=657 data-nosnippet>657</a>    /// point can be reached with it.
+<a href=#658 id=658 data-nosnippet>658</a>    ///
+<a href=#659 id=659 data-nosnippet>659</a>    /// `CqlType::Vector` is publicly constructible, so the string parser's `n &gt; 0`
+<a href=#660 id=660 data-nosnippet>660</a>    /// check does not cover a programmatically built `Vector(Float, 0)`. Before this
+<a href=#661 id=661 data-nosnippet>661</a>    /// guard, `0` multiplied cleanly to width 0 and an EMPTY buffer decoded as a
+<a href=#662 id=662 data-nosnippet>662</a>    /// successful `Value::List([])` — a value Cassandra says cannot exist
+<a href=#663 id=663 data-nosnippet>663</a>    /// (`VectorType.java:89-90` refuses n &lt;= 0 at construction; `:365-368` throws
+<a href=#664 id=664 data-nosnippet>664</a>    /// `MarshalException("Invalid empty vector value")`).
+<a href=#665 id=665 data-nosnippet>665</a>    /// roborev job 113: an overflowing dimension is refused AT PARSE TIME, not only
+<a href=#666 id=666 data-nosnippet>666</a>    /// later at width computation.
+<a href=#667 id=667 data-nosnippet>667</a>    ///
+<a href=#668 id=668 data-nosnippet>668</a>    /// TWO guards now stand between a raw token and `CqlType::Vector`, and WHICH ONE
+<a href=#669 id=669 data-nosnippet>669</a>    /// fires is TARGET-DEPENDENT — which is why this asserts REFUSAL rather than a
+<a href=#670 id=670 data-nosnippet>670</a>    /// message. Measured:
+<a href=#671 id=671 data-nosnippet>671</a>    ///
+<a href=#672 id=672 data-nosnippet>672</a>    /// | target | `usize::MAX / 4`      | `i32::MAX`    | width guard reachable? |
+<a href=#673 id=673 data-nosnippet>673</a>    /// |--------|-----------------------|---------------|------------------------|
+<a href=#674 id=674 data-nosnippet>674</a>    /// | 64-bit | 4_611_686_018_427_387_903 | 2_147_483_647 | NO — the ceiling always fires first |
+<a href=#675 id=675 data-nosnippet>675</a>    /// | 32-bit | 1_073_741_823         | 2_147_483_647 | YES — (1.07e9, 2.1e9] passes the ceiling and overflows `4 * n` |
+<a href=#676 id=676 data-nosnippet>676</a>    ///
+<a href=#677 id=677 data-nosnippet>677</a>    /// So on 64-bit the Integer.MAX_VALUE ceiling subsumes the width guard, while on
+<a href=#678 id=678 data-nosnippet>678</a>    /// 32-bit the width guard is the only thing standing between a legal-per-Cassandra
+<a href=#679 id=679 data-nosnippet>679</a>    /// dimension and a wrapped byte count. BOTH are load-bearing; neither is dead.
+<a href=#680 id=680 data-nosnippet>680</a>    ///
+<a href=#681 id=681 data-nosnippet>681</a>    /// An earlier version of this test asserted the message contained "overflow" and
+<a href=#682 id=682 data-nosnippet>682</a>    /// broke the moment the ceiling landed (it fired first and said
+<a href=#683 id=683 data-nosnippet>683</a>    /// "Integer.MAX_VALUE" instead) — one unit test failing FOUR gate components,
+<a href=#684 id=684 data-nosnippet>684</a>    /// since core-tests / write-tests / legacy-heuristics / feature-iso-delta-scan all
+<a href=#685 id=685 data-nosnippet>685</a>    /// run this lib. Pinning a message that guard ORDERING can change was the mistake.
+<a href=#686 id=686 data-nosnippet>686</a>    </span><span class="attr">#[test]
+<a href=#687 id=687 data-nosnippet>687</a>    </span><span class="kw">fn </span>an_overflowing_dimension_is_refused_at_parse_time_not_only_at_width() {
+<a href=#688 id=688 data-nosnippet>688</a>        <span class="kw">let </span>ty = <span class="string">"org.apache.cassandra.db.marshal.VectorType(org.apache.cassandra.db.marshal.FloatType , n)"</span>;
+<a href=#689 id=689 data-nosnippet>689</a>
+<a href=#690 id=690 data-nosnippet>690</a>        <span class="comment">// A dimension whose 4*n width cannot be represented must be REFUSED at parse
+<a href=#691 id=691 data-nosnippet>691</a>        // time by SOME guard. Which one is target-dependent, so do not pin the text.
+<a href=#692 id=692 data-nosnippet>692</a>        </span><span class="kw">let </span>width_overflow = (usize::MAX / FLOAT_ELEMENT_WIDTH) + <span class="number">1</span>;
+<a href=#693 id=693 data-nosnippet>693</a>        <span class="macro">assert!</span>(
+<a href=#694 id=694 data-nosnippet>694</a>            parse_vector_dimension(<span class="kw-2">&amp;</span>width_overflow.to_string(), ty).is_err(),
+<a href=#695 id=695 data-nosnippet>695</a>            <span class="string">"a dimension whose byte width cannot be represented must be refused at \
+<a href=#696 id=696 data-nosnippet>696</a>             PARSE time, by whichever guard applies on this target"
+<a href=#697 id=697 data-nosnippet>697</a>        </span>);
+<a href=#698 id=698 data-nosnippet>698</a>        <span class="macro">assert!</span>(
+<a href=#699 id=699 data-nosnippet>699</a>            parse_vector_dimension(<span class="kw-2">&amp;</span>usize::MAX.to_string(), ty).is_err(),
+<a href=#700 id=700 data-nosnippet>700</a>            <span class="string">"usize::MAX must be refused"
+<a href=#701 id=701 data-nosnippet>701</a>        </span>);
+<a href=#702 id=702 data-nosnippet>702</a>
+<a href=#703 id=703 data-nosnippet>703</a>        <span class="comment">// The representable ones still parse.
+<a href=#704 id=704 data-nosnippet>704</a>        </span><span class="kw">for </span>ok <span class="kw">in </span>[<span class="string">"1"</span>, <span class="string">"3"</span>, <span class="string">"384"</span>, <span class="string">"4096"</span>] {
+<a href=#705 id=705 data-nosnippet>705</a>            <span class="macro">assert!</span>(
+<a href=#706 id=706 data-nosnippet>706</a>                parse_vector_dimension(ok, ty).is_ok(),
+<a href=#707 id=707 data-nosnippet>707</a>                <span class="string">"{ok} is representable and must parse"
+<a href=#708 id=708 data-nosnippet>708</a>            </span>);
+<a href=#709 id=709 data-nosnippet>709</a>        }
+<a href=#710 id=710 data-nosnippet>710</a>    }
+<a href=#711 id=711 data-nosnippet>711</a>
+<a href=#712 id=712 data-nosnippet>712</a>    <span class="attr">#[test]
+<a href=#713 id=713 data-nosnippet>713</a>    </span><span class="kw">fn </span>zero_dimension_has_no_width() {
+<a href=#714 id=714 data-nosnippet>714</a>        <span class="macro">assert_eq!</span>(
+<a href=#715 id=715 data-nosnippet>715</a>            vector_byte_width(<span class="number">4</span>, <span class="number">0</span>),
+<a href=#716 id=716 data-nosnippet>716</a>            <span class="prelude-val">None</span>,
+<a href=#717 id=717 data-nosnippet>717</a>            <span class="string">"a zero dimension must have NO width, not a width of 0 — a width of 0 \
+<a href=#718 id=718 data-nosnippet>718</a>             lets an empty buffer decode as an empty vector"
+<a href=#719 id=719 data-nosnippet>719</a>        </span>);
+<a href=#720 id=720 data-nosnippet>720</a>        <span class="comment">// Any element width, same answer: the refusal is on the DIMENSION.
+<a href=#721 id=721 data-nosnippet>721</a>        </span><span class="kw">for </span>w <span class="kw">in </span>[<span class="number">1usize</span>, <span class="number">2</span>, <span class="number">4</span>, <span class="number">8</span>, <span class="number">16</span>] {
+<a href=#722 id=722 data-nosnippet>722</a>            <span class="macro">assert_eq!</span>(vector_byte_width(w, <span class="number">0</span>), <span class="prelude-val">None</span>, <span class="string">"element width {w}, n=0"</span>);
+<a href=#723 id=723 data-nosnippet>723</a>        }
+<a href=#724 id=724 data-nosnippet>724</a>        <span class="comment">// And a positive dimension still computes.
+<a href=#725 id=725 data-nosnippet>725</a>        </span><span class="macro">assert_eq!</span>(vector_byte_width(<span class="number">4</span>, <span class="number">1</span>), <span class="prelude-val">Some</span>(<span class="number">4</span>));
+<a href=#726 id=726 data-nosnippet>726</a>        <span class="macro">assert_eq!</span>(vector_byte_width(<span class="number">4</span>, <span class="number">3</span>), <span class="prelude-val">Some</span>(<span class="number">12</span>));
+<a href=#727 id=727 data-nosnippet>727</a>        <span class="macro">assert_eq!</span>(vector_byte_width(<span class="number">4</span>, <span class="number">384</span>), <span class="prelude-val">Some</span>(<span class="number">1536</span>));
+<a href=#728 id=728 data-nosnippet>728</a>        <span class="comment">// Overflow still refused (the pre-existing checked_mul contract).
+<a href=#729 id=729 data-nosnippet>729</a>        </span><span class="macro">assert_eq!</span>(vector_byte_width(<span class="number">4</span>, usize::MAX), <span class="prelude-val">None</span>);
+<a href=#730 id=730 data-nosnippet>730</a>    }
+<a href=#731 id=731 data-nosnippet>731</a>
+<a href=#732 id=732 data-nosnippet>732</a>    <span class="doccomment">/// The element width used for a vector's framing is Cassandra's
+<a href=#733 id=733 data-nosnippet>733</a>    /// `valueLengthIfFixed()`, NOT `CqlType::fixed_size()`.
+<a href=#734 id=734 data-nosnippet>734</a>    ///
+<a href=#735 id=735 data-nosnippet>735</a>    /// `fixed_size()` reports TinyInt/SmallInt/Date/Time/Inet as fixed, while the
+<a href=#736 id=736 data-nosnippet>736</a>    /// framing authority (`parser/repair_clustering.rs`, derived from
+<a href=#737 id=737 data-nosnippet>737</a>    /// `valueLengthIfFixed()` and pinned by its own tests) treats
+<a href=#738 id=738 data-nosnippet>738</a>    /// `InetAddressType`/`TimeType`/`SimpleDateType` as VARIABLE and asserts tinyint
+<a href=#739 id=739 data-nosnippet>739</a>    /// and date clusterings are vint-prefixed. A vector must not inherit a framing
+<a href=#740 id=740 data-nosnippet>740</a>    /// claim from a method that answers a different question.
+<a href=#741 id=741 data-nosnippet>741</a>    </span><span class="attr">#[test]
+<a href=#742 id=742 data-nosnippet>742</a>    </span><span class="kw">fn </span>framing_width_is_not_fixed_size() {
+<a href=#743 id=743 data-nosnippet>743</a>        <span class="kw">use </span><span class="kw">crate</span>::schema::CqlType <span class="kw">as </span>T;
+<a href=#744 id=744 data-nosnippet>744</a>
+<a href=#745 id=745 data-nosnippet>745</a>        <span class="comment">// KNOWN-FIXED elements, with Cassandra's widths.
+<a href=#746 id=746 data-nosnippet>746</a>        </span><span class="kw">for </span>(ty, want) <span class="kw">in </span>[
+<a href=#747 id=747 data-nosnippet>747</a>            (T::Boolean, <span class="number">1usize</span>),
+<a href=#748 id=748 data-nosnippet>748</a>            (T::Int, <span class="number">4</span>),
+<a href=#749 id=749 data-nosnippet>749</a>            (T::Float, <span class="number">4</span>),
+<a href=#750 id=750 data-nosnippet>750</a>            (T::BigInt, <span class="number">8</span>),
+<a href=#751 id=751 data-nosnippet>751</a>            (T::Counter, <span class="number">8</span>),
+<a href=#752 id=752 data-nosnippet>752</a>            (T::Double, <span class="number">8</span>),
+<a href=#753 id=753 data-nosnippet>753</a>            (T::Timestamp, <span class="number">8</span>),
+<a href=#754 id=754 data-nosnippet>754</a>            (T::Uuid, <span class="number">16</span>),
+<a href=#755 id=755 data-nosnippet>755</a>            (T::TimeUuid, <span class="number">16</span>),
+<a href=#756 id=756 data-nosnippet>756</a>        ] {
+<a href=#757 id=757 data-nosnippet>757</a>            <span class="macro">assert_eq!</span>(
+<a href=#758 id=758 data-nosnippet>758</a>                cassandra_fixed_element_width(<span class="kw-2">&amp;</span>ty),
+<a href=#759 id=759 data-nosnippet>759</a>                <span class="prelude-val">Some</span>(want),
+<a href=#760 id=760 data-nosnippet>760</a>                <span class="string">"{ty:?} must be fixed at {want} bytes"
+<a href=#761 id=761 data-nosnippet>761</a>            </span>);
+<a href=#762 id=762 data-nosnippet>762</a>        }
+<a href=#763 id=763 data-nosnippet>763</a>
+<a href=#764 id=764 data-nosnippet>764</a>        <span class="comment">// THE REGRESSION: the five types `fixed_size()` gets wrong for framing.
+<a href=#765 id=765 data-nosnippet>765</a>        // Each of these returns Some(..) from fixed_size(), so a vector arm built on
+<a href=#766 id=766 data-nosnippet>766</a>        // that method claimed a fixed width Cassandra does not use.
+<a href=#767 id=767 data-nosnippet>767</a>        </span><span class="kw">for </span>ty <span class="kw">in </span>[T::TinyInt, T::SmallInt, T::Date, T::Time, T::Inet] {
+<a href=#768 id=768 data-nosnippet>768</a>            <span class="macro">assert_eq!</span>(
+<a href=#769 id=769 data-nosnippet>769</a>                cassandra_fixed_element_width(<span class="kw-2">&amp;</span>ty),
+<a href=#770 id=770 data-nosnippet>770</a>                <span class="prelude-val">None</span>,
+<a href=#771 id=771 data-nosnippet>771</a>                <span class="string">"{ty:?} is VARIABLE in Cassandra framing and must NOT report a fixed width"
+<a href=#772 id=772 data-nosnippet>772</a>            </span>);
+<a href=#773 id=773 data-nosnippet>773</a>            <span class="macro">assert!</span>(
+<a href=#774 id=774 data-nosnippet>774</a>                ty.fixed_size().is_some(),
+<a href=#775 id=775 data-nosnippet>775</a>                <span class="string">"{ty:?} is expected to still report a logical fixed_size() — this test \
+<a href=#776 id=776 data-nosnippet>776</a>                 exists precisely because the two answers differ"
+<a href=#777 id=777 data-nosnippet>777</a>            </span>);
+<a href=#778 id=778 data-nosnippet>778</a>        }
+<a href=#779 id=779 data-nosnippet>779</a>
+<a href=#780 id=780 data-nosnippet>780</a>        <span class="comment">// Genuinely variable elements stay None.
+<a href=#781 id=781 data-nosnippet>781</a>        </span><span class="kw">for </span>ty <span class="kw">in </span>[T::Text, T::Blob, T::Decimal, T::Duration, T::Varint] {
+<a href=#782 id=782 data-nosnippet>782</a>            <span class="macro">assert_eq!</span>(cassandra_fixed_element_width(<span class="kw-2">&amp;</span>ty), <span class="prelude-val">None</span>, <span class="string">"{ty:?}"</span>);
+<a href=#783 id=783 data-nosnippet>783</a>        }
+<a href=#784 id=784 data-nosnippet>784</a>    }
+<a href=#785 id=785 data-nosnippet>785</a>}
+</code></pre></div></section></main></body></html>

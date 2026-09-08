@@ -1,0 +1,30 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="`cqlite.wal.recovery.duration` — histogram `s` (issue #1707)."><title>WAL_RECOVERY_DURATION in cqlite_core::observability::catalog - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc constant"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">WAL_RECOVERY_DURATION</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.17.0</span></h2></div><div class="sidebar-elems"><div id="rustdoc-modnav"><h2><a href="index.html">In cqlite_<wbr>core::<wbr>observability::<wbr>catalog</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">cqlite_core</a>::<wbr><a href="../index.html">observability</a>::<wbr><a href="index.html">catalog</a></div><h1>Constant <span class="constant">WAL_<wbr>RECOVERY_<wbr>DURATION</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/cqlite_core/observability/catalog.rs.html#637">Source</a> </span></div><pre class="rust item-decl"><code>pub const WAL_RECOVERY_DURATION: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.98.1/std/primitive.str.html">str</a> = &quot;cqlite.wal.recovery.duration&quot;;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p><code>cqlite.wal.recovery.duration</code> — histogram <code>s</code> (issue #1707).</p>
+<p>How long write-ahead-log recovery at engine open took, in seconds. Recovery is
+BOTH halves of what open does to the log: the CRC validation scan (plus any
+torn-tail trim) and the replay of its entries into the memtable. On a large or
+corrupt-tail WAL the validation scan is the dominant half, which is why the
+timer spans the whole window — a replay-only timing would understate exactly the
+startup an operator is asking about. Recovery happens EXACTLY ONCE per engine
+open, so this series normally carries ONE sample per process — read it as a
+value, not as a distribution.</p>
+<p><strong>Why a histogram and not a gauge, which is what one-sample-per-process argues
+for</strong>: the gauge plane in this crate is <code>i64</code> (<code>Gauge&lt;i64&gt;</code>, and OTel’s gauge
+builders here are <code>i64</code>/<code>u64</code>), and this value is sub-second in the common case.
+An <code>i64</code> gauge in base-unit SECONDS would report <code>0</code> for a 400 ms recovery — a
+FABRICATED zero, which is the precise defect class epic #1686 exists to remove,
+and worse than the wart of a one-sample distribution. Reporting milliseconds
+instead would break the catalog’s base-unit rule (see the <code>read.phase.*</code>
+naming note). So the instrument follows the value’s precision, and every other
+duration in this catalog is an <code>f64</code> histogram in seconds anyway.</p>
+<p><strong>Recorded unconditionally at every engine open, including the 0-entry case</strong>: a
+fresh WAL with nothing to recover genuinely took ~0s, and that IS a measurement —
+the absence rule forbids inventing a value nobody measured, not reporting a real
+one that happens to be small. It is also recorded when replay found CORRUPTION,
+before the lossy-recovery branch, because that is exactly when an operator cares
+what open cost. Absence of this series therefore means “no engine was opened in
+this process”, never “recovery was skipped”.</p>
+<p><strong>Healthy vs alarming</strong>: near-zero after a clean shutdown; seconds means a crash
+left a large log to validate and replay, which directly delays open — pair it
+with <a href="constant.WAL_SIZE.html" title="constant cqlite_core::observability::catalog::WAL_SIZE"><code>WAL_SIZE</code></a>, whose growth is what makes this number grow.
+<strong>Attributes</strong>: none.</p>
+</div></details></section></div></main></body></html>

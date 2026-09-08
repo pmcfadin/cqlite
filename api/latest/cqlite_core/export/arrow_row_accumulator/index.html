@@ -1,0 +1,99 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Push-time columnar row accumulator: ONE cell resolution per row, feeding both the Arrow build pass and the payload-byte accounting (issue #3552)."><title>cqlite_core::export::arrow_row_accumulator - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module arrow_row_accumulator</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.17.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module arrow_<wbr>row_<wbr>accumulator</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-was-duplicated" title="What was duplicated">What was duplicated</a></li><li><a href="#the-fold" title="The fold">The fold</a></li><li><a href="#memory-profile--sparse-persistent-dense-transient" title="Memory profile — sparse persistent, dense transient">Memory profile — sparse persistent, dense transient</a></li><li><a href="#why-stagecommit-and-not-push-the-byte-budget-contract--ac2" title="Why stage/commit, and not push (the byte-budget contract — AC2)">Why stage/commit, and not push (the byte-budget contract — AC2)</a></li><li><a href="#conservatism-is-preserved-including-for-absent-columns" title="Conservatism is preserved, including for ABSENT columns">Conservatism is preserved, including for ABSENT columns</a></li><li><a href="#what-deliberately-still-uses-the-standalone-estimator" title="What deliberately still uses the standalone estimator">What deliberately still uses the standalone estimator</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In cqlite_<wbr>core::<wbr>export</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">cqlite_core</a>::<wbr><a href="../index.html">export</a></div><h1>Module <span>arrow_<wbr>row_<wbr>accumulator</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/cqlite_core/export/arrow_row_accumulator.rs.html#1-655">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Push-time columnar row accumulator: ONE cell resolution per row, feeding both
+the Arrow build pass and the payload-byte accounting (issue #3552).</p>
+<h2 id="what-was-duplicated"><a class="doc-anchor" href="#what-was-duplicated">§</a>What was duplicated</h2>
+<p>The <code>cqlite-flight</code> <code>do_get</code> row routes resolved every projected cell of every
+row TWICE:</p>
+<ol>
+<li>at PUSH time, <a href="../arrow_size/fn.estimate_arrow_row_bytes.html" title="fn cqlite_core::export::arrow_size::estimate_arrow_row_bytes"><code>estimate_arrow_row_bytes</code></a>
+walked the projected columns and probed <code>row.values.get(col.name)</code> — one
+sip-hash string lookup into the row’s own value map per column per row
+(<code>N·M</code> probes, including absent cells: the exact pattern issue #1495
+removed from the build pass);</li>
+<li>at FLUSH time, <code>arrow_columnar::transpose_columns</code> walked the buffered rows
+again to build the column-major cell slices the builders consume.</li>
+</ol>
+<p>Issue #3248 priced that first walk at 592 cyc/row (<code>Estimator::charge_slot</code>
+163 + <code>charge_child</code> 93 on top).</p>
+<h2 id="the-fold"><a class="doc-anchor" href="#the-fold">§</a>The fold</h2>
+<p><a href="struct.ArrowRowAccumulator.html" title="struct cqlite_core::export::arrow_row_accumulator::ArrowRowAccumulator"><code>ArrowRowAccumulator</code></a> moves the build pass’s FIRST STAGE — the transpose —
+to push time and charges the estimator from the cells it has just resolved, so
+a cell is resolved exactly once:</p>
+<ul>
+<li><a href="struct.ArrowRowAccumulator.html#method.stage" title="method cqlite_core::export::arrow_row_accumulator::ArrowRowAccumulator::stage"><code>stage</code></a> consumes one row, routes each of its
+OWN entries into that column’s staging slot through a small
+<code>name → column indices</code> map built once per column set (no probe against the
+large per-row map), and returns the row’s payload width charged from those
+slots;</li>
+<li><a href="struct.ArrowRowAccumulator.html#method.commit" title="method cqlite_core::export::arrow_row_accumulator::ArrowRowAccumulator::commit"><code>commit</code></a> moves the staged cells into the
+column-major store — into ONE store per distinct projected NAME, so a value
+named by several output columns (<code>SELECT a, a</code>) is stored once and read twice
+through the <code>canonical</code> index, never cloned (issue #3552 review B3), and
+storing only PRESENT cells, so an absent cell costs no slot (review B4);</li>
+<li><a href="struct.ArrowRowAccumulator.html#method.to_record_batch" title="method cqlite_core::export::arrow_row_accumulator::ArrowRowAccumulator::to_record_batch"><code>to_record_batch</code></a> hands each column’s
+already-transposed cells straight to its builder — <code>transpose_columns</code> is not
+run at all on this path.</li>
+</ul>
+<p>The store is reused across batches — <a href="struct.ArrowRowAccumulator.html#method.clear" title="method cqlite_core::export::arrow_row_accumulator::ArrowRowAccumulator::clear"><code>clear</code></a>
+keeps allocations up to a BOUND and releases the excess above it, so a store
+that grew far past what any batch since has used may shrink and later
+reallocate — so the per-batch <code>n_cols × vec![None; n_rows]</code> allocation is gone
+too. The bound is what stops per-column capacity accumulating across batches
+whose density moves between columns (issue #3552, roborev rounds 6-7).</p>
+<h2 id="memory-profile--sparse-persistent-dense-transient"><a class="doc-anchor" href="#memory-profile--sparse-persistent-dense-transient">§</a>Memory profile — sparse persistent, dense transient</h2>
+<p>What is RETAINED between batches is one <code>(row index, value)</code> pair per PRESENT
+cell, per distinct projected name. Nothing retained scales with
+<code>n_cols × rows</code>: an absent cell costs no slot, and a duplicate output column
+costs one <code>usize</code> in <code>canonical</code>, not a copy. What is DENSE is built only
+inside <a href="struct.ArrowRowAccumulator.html#method.to_record_batch" title="method cqlite_core::export::arrow_row_accumulator::ArrowRowAccumulator::to_record_batch"><code>to_record_batch</code></a>, into ONE
+reused <code>Vec&lt;Option&lt;&amp;Value&gt;&gt;</code> of <code>rows</code> borrowed slots, and dropped with the
+batch.</p>
+<p>This matters because of what the byte-cap does NOT bound (issue #3552 reviews
+B1/B3/B4, three instances of one family): the cap is denominated in PAYLOAD
+bytes, so a wide SPARSE projection has small payload, does not trip the cap
+early, and fills the buffer to the ROW cap. Any per-row cost proportional to
+projection WIDTH rather than to payload is therefore effectively unbounded by
+the governor, and must not be retained. The rule this module is built to: ask
+of every allocation not just “is it bounded”, but “bounded by what, in the
+worst case over BOTH projection width AND sparsity?” — and “the caps bound it”
+is a valid answer only for a quantity proportional to PAYLOAD.</p>
+<h2 id="why-stagecommit-and-not-push-the-byte-budget-contract--ac2"><a class="doc-anchor" href="#why-stagecommit-and-not-push-the-byte-budget-contract--ac2">§</a>Why stage/commit, and not push (the byte-budget contract — AC2)</h2>
+<p>The width has two consumers that MUST run before any batch materializes:
+<code>BatchByteCap::cut_before(width)</code> decides the batch boundary before the row
+joins the buffer (test-then-push — building a batch to discover it is oversized
+“is a report, not a cap”), and issue #2821’s reserve-before-materialize turns
+the accumulated payload into an egress credit reservation before the build runs.
+So the width is still produced BEFORE the row joins the batch, and the caller’s
+sequence — <code>stage</code> → <code>cut_before</code> → (flush) → <code>commit</code> → <code>accumulate</code> — is
+byte-for-byte the sequence it replaces (<code>estimate</code> → <code>cut_before</code> → (flush) →
+<code>push</code> → <code>accumulate</code>). Thresholds, timing and batch boundaries are unchanged;
+only the duplicated resolution is gone.</p>
+<p>A staged row deliberately SURVIVES a flush: <code>clear</code> empties the committed
+store and leaves the staging slot alone, exactly as the old code pushed the
+crossing row into the freshly emptied buffer.</p>
+<h2 id="conservatism-is-preserved-including-for-absent-columns"><a class="doc-anchor" href="#conservatism-is-preserved-including-for-absent-columns">§</a>Conservatism is preserved, including for ABSENT columns</h2>
+<p><code>Σ width(columns, row) &gt;= arrow_payload_bytes(batch)</code> still holds. The one
+place a fold like this can silently under-charge is an ABSENT cell:
+<code>transpose_columns</code> never enumerates the projected columns per row, so it never
+<em>sees</em> an absent cell, while the estimator charges one (its validity byte, its
+shape’s structural overhead and <code>column_slack_bytes</code>). This accumulator
+therefore keeps the estimator’s enumeration, not the transpose’s: the staging
+slot is a vector of ARITY <code>columns.len()</code> reset to <code>None</code> per row, and the
+charge walks all of it — so an absent column arrives at the charging core as
+<code>None</code>, which is exactly what a failed <code>row.values.get(name)</code> produces in
+<code>estimate_arrow_row_bytes</code>. Nothing about the absent-column charge is
+re-derived or approximated here.</p>
+<h2 id="what-deliberately-still-uses-the-standalone-estimator"><a class="doc-anchor" href="#what-deliberately-still-uses-the-standalone-estimator">§</a>What deliberately still uses the standalone estimator</h2>
+<p>The AGGREGATE route (<code>cqlite_flight::producer</code>’s <code>split_rows_into_batches</code>)
+folds rows into accumulator state and materializes one PARTIAL row per
+<code>GROUP BY</code> group in one go, then applies the batch boundary AFTER THE FACT to
+an already-materialized row slice. It has no incremental push loop, so this
+seam does not reach it and it keeps calling
+<a href="../arrow_size/fn.estimate_arrow_row_bytes.html" title="fn cqlite_core::export::arrow_size::estimate_arrow_row_bytes"><code>estimate_arrow_row_bytes</code></a> per row. Nothing
+there is duplicated work of the kind this module removes: that route resolves
+the cells once for the estimate and once for the build, but its rows are
+already in hand and are a per-GROUP count, not a per-ROW-of-the-scan one.</p>
+<p>Both accountings share ONE charging core (<code>arrow_size::charge_row</code>) and differ
+only in resolution, and their equivalence over the shared shape corpus —
+including absent columns, saturating fan-out and duplicate column names — is
+pinned by <code>arrow_row_accumulator_tests</code>.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.ArrowRowAccumulator.html" title="struct cqlite_core::export::arrow_row_accumulator::ArrowRowAccumulator">Arrow<wbr>RowAccumulator</a></dt><dd>Reusable column-major row accumulator for one projected column set.</dd></dl></section></div></main></body></html>

@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["SchemaStatus"],"struct":["AnalyzeResult","CacheStats","ExplainResult","QueryEngine"]};
+window.SIDEBAR_ITEMS = {"enum":["SchemaStatus"],"mod":["deadline"],"struct":["AnalyzeResult","CacheStats","ExplainResult","QueryEngine"]};

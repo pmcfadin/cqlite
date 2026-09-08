@@ -1,0 +1,114 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Conservative pre-materialization Arrow payload-byte estimator (issue #2825)."><title>cqlite_core::export::arrow_size - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module arrow_size</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.17.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module arrow_<wbr>size</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#why-this-exists" title="Why this exists">Why this exists</a></li><li><a href="#currency-payload-bytes-not-get_array_memory_size" title="Currency: payload bytes, not `get_array_memory_size()`">Currency: payload bytes, not <code>get_array_memory_size()</code></a></li><li><a href="#the-charging-model-from-first-principles" title="The charging model, from first principles">The charging model, from first principles</a></li><li><a href="#conservatism-is-a-contract-not-an-aspiration" title="Conservatism is a contract, not an aspiration">Conservatism is a contract, not an aspiration</a></li><li><a href="#cross-issue-dependency-a-per-stream-memory-bound-rests-on-that-contract" title="Cross-issue dependency: a per-stream MEMORY BOUND rests on that contract">Cross-issue dependency: a per-stream MEMORY BOUND rests on that contract</a></li><li><a href="#no-heuristics-issue-28" title="No-heuristics (issue #28)">No-heuristics (issue #28)</a></li><li><a href="#hardening" title="Hardening">Hardening</a></li></ul><h3><a href="#constants">Module Items</a></h3><ul class="block"><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In cqlite_<wbr>core::<wbr>export</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">cqlite_core</a>::<wbr><a href="../index.html">export</a></div><h1>Module <span>arrow_<wbr>size</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/cqlite_core/export/arrow_size.rs.html#1-676">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Conservative pre-materialization Arrow payload-byte estimator (issue #2825).</p>
+<h2 id="why-this-exists"><a class="doc-anchor" href="#why-this-exists">§</a>Why this exists</h2>
+<p>The <code>cqlite-flight</code> egress path finishes a record batch on <strong>row count</strong>
+alone, so a batch’s byte size is <code>batch_size × row_width</code> — an unbounded
+function of schema shape. Bounding it needs a byte decision made <strong>while rows
+accumulate</strong>, before any <code>RecordBatch</code> exists: building the batch to
+discover it is too big defeats the purpose, so
+<code>RecordBatch::get_array_memory_size()</code> cannot be the production trigger (it
+is only readable <em>after</em> every value has been allocated and copied).</p>
+<p><a href="fn.estimate_arrow_row_bytes.html" title="fn cqlite_core::export::arrow_size::estimate_arrow_row_bytes"><code>estimate_arrow_row_bytes</code></a> supplies that pre-batch number: given the
+authoritative projected <a href="../../query/result/struct.ColumnInfo.html" title="struct cqlite_core::query::result::ColumnInfo"><code>ColumnInfo</code></a> set and one decoded <a href="../../query/result/struct.QueryRow.html" title="struct cqlite_core::query::result::QueryRow"><code>QueryRow</code></a>, it
+reports an <strong>upper bound</strong> on that row’s contribution to the resulting Arrow
+batch’s <em>payload</em> bytes.</p>
+<h2 id="currency-payload-bytes-not-get_array_memory_size"><a class="doc-anchor" href="#currency-payload-bytes-not-get_array_memory_size">§</a>Currency: payload bytes, not <code>get_array_memory_size()</code></h2>
+<p>“Payload bytes” means the sum of Arrow buffer <strong>lengths</strong>, recursively
+including child data — exactly what <a href="fn.arrow_payload_bytes.html" title="fn cqlite_core::export::arrow_size::arrow_payload_bytes"><code>arrow_payload_bytes</code></a> measures.
+<code>get_array_memory_size()</code> reports buffer <strong>capacity</strong>, which the batch
+construction path grows by power-of-two doubling, so it runs up to ~2× the
+payload (measured 1.72–1.80× on realistic shapes). Payload bytes are
+estimable from the rows in hand, monotonic in row count, and stable across
+arrow versions and allocator policy; capacity is none of those. Consumers
+that need a capacity figure convert with the published capacity factor
+(<code>cqlite_flight::batch_bytes::BATCH_BYTES_CAPACITY_FACTOR</code>).</p>
+<h2 id="the-charging-model-from-first-principles"><a class="doc-anchor" href="#the-charging-model-from-first-principles">§</a>The charging model, from first principles</h2>
+<p>Arrow buffer <strong>lengths are exact</strong> — measured against this tree’s arrow 53, a
+one-row <code>Int32</code> column is 4 bytes, a nine-row <code>Boolean</code> column is
+<code>ceil(9/8) = 2</code> bytes, and a null buffer is <code>ceil(n/8)</code> (absent entirely when
+a column has no nulls). Nothing is rounded up to an allocator quantum, so the
+estimate is built from the three real per-slot costs and one small per-column
+residual — <strong>never</strong> from a large fudge charged per cell:</p>
+<div><table><thead><tr><th>term</th><th>charged</th><th>covers</th></tr></thead><tbody>
+<tr><td><code>ARROW_VALIDITY_BYTES</code></td><td>every slot</td><td>the slot’s validity <strong>bit</strong>; <code>n</code> bytes ≥ <code>ceil(n/8)</code></td></tr>
+<tr><td>content</td><td>every slot</td><td>the slot’s data-buffer bytes</td></tr>
+<tr><td><code>ARROW_CELL_OVERHEAD_BYTES</code></td><td>variable-width slots</td><td>its offsets entry + the buffer’s trailing <code>n+1</code>-th entry</td></tr>
+<tr><td><code>ARROW_COLUMN_SLACK_BYTES</code></td><td>once per <strong>column whose builder materializes childless array nodes</strong></td><td>those nodes’ empty offsets buffers</td></tr>
+</tbody></table>
+</div>
+<p>The per-cell terms are therefore tight (a 1000-element <code>list&lt;int&gt;</code> estimates
+~1.2× its realized payload, not ~9×), and the residual is charged ONLY where
+a childless node can exist — the flat <code>list</code>/<code>set</code>/<code>map</code> builders, whose
+<code>MapArray</code>/<code>ListArray</code> always materialize a rendered <code>Utf8</code> child (see
+[<code>column_slack_bytes</code>]). A fixed-width column materializes exactly one array
+node with one data buffer, no offsets and no children, so it pays no residual
+at all: an <code>int</code> column costs <code>1 + 4 = 5</code> B/row against ~4.1 B/row realized.
+A 100-column <code>int</code> row therefore estimates 500 B and a full 8192-row batch
+4,096,000 B — still inside the 4 MiB default, so the ROW-cap keeps binding on
+wide narrow-cell schemas up to 102 <code>int</code> columns (issue #2825 review C1;
+charging the residual per column put that cliff at 40 columns).</p>
+<h2 id="conservatism-is-a-contract-not-an-aspiration"><a class="doc-anchor" href="#conservatism-is-a-contract-not-an-aspiration">§</a>Conservatism is a contract, not an aspiration</h2>
+<p><code>Σ estimate_arrow_row_bytes(columns, row) &gt;= arrow_payload_bytes(batch)</code> for
+every shape, enforced by the property test in <code>arrow_size_tests.rs</code> over a
+corpus covering fixed-width columns, <code>text</code>, <code>blob</code>, <code>list</code>/<code>set</code>, <code>map</code>,
+<code>tuple</code>/UDT, JSON, deeply nested empty collections, all-null rows, empty
+strings and empty collections.</p>
+<p><strong>The production consumer of that contract is the FUSED accounting, not this
+function (issue #3552).</strong> <code>cqlite-flight</code>’s two <code>do_get</code> row routes take each
+row’s width from <a href="../arrow_row_accumulator/struct.ArrowRowAccumulator.html#method.stage" title="method cqlite_core::export::arrow_row_accumulator::ArrowRowAccumulator::stage"><code>super::ArrowRowAccumulator::stage</code></a>, which charges it from
+the cells it resolved for the Arrow build pass instead of re-resolving them
+here; <code>estimate_arrow_row_bytes</code> remains the aggregate route’s estimator, this
+module’s tested surface, and the ORACLE the fused width is pinned against.
+Both charge through the private <code>charge_row</code> core and differ ONLY in cell
+resolution, and their per-row equality over the SHARED shape corpus — absent
+columns, duplicate output columns and the saturating fan-out included — is
+asserted by <code>arrow_row_accumulator</code>’s
+<code>fused_width_equals_the_standalone_estimate_over_the_shape_corpus</code>. That test
+is what transfers the conservatism contract above to the fused path: weaken it
+and the contract stops covering production. Read the <code># Cross-issue dependency</code> section below with that substitution in mind. The three pre-existing per-<code>Value</code> estimators
+are all <em>under</em>-estimators for this purpose (see the issue-#2825 design §d):
+<code>Value::size_estimate</code> models the SERIALIZED size (a 1-byte vint prefix where
+Arrow spends a 4-byte offset plus a validity bit), and
+<code>memory::estimate_value_size</code> / <code>Memtable::estimate_value_size</code> are
+content-only. None is Arrow-aware, and an under-estimator cannot found a
+memory bound.</p>
+<h2 id="cross-issue-dependency-a-per-stream-memory-bound-rests-on-that-contract"><a class="doc-anchor" href="#cross-issue-dependency-a-per-stream-memory-bound-rests-on-that-contract">§</a>Cross-issue dependency: a per-stream MEMORY BOUND rests on that contract</h2>
+<p><code>cqlite-flight</code>’s per-stream in-flight egress ceiling (issue #2821,
+<code>cqlite-flight/src/egress_credit.rs</code>) reserves credit for a batch BEFORE it is
+materialized, converting THIS estimate into Arrow capacity bytes with
+<code>worst_case_batch_capacity_bytes</code>. The reservation is a true upper bound on
+the realized <code>get_array_memory_size()</code> ONLY while the conservatism above
+holds; weaken it and that published memory bound is silently voided (the
+governor then fails closed with a terminal internal error rather than
+exceeding its pool, but the stream breaks). Any change here that could make
+the estimate non-conservative must be made together with that consumer.</p>
+<h2 id="no-heuristics-issue-28"><a class="doc-anchor" href="#no-heuristics-issue-28">§</a>No-heuristics (issue #28)</h2>
+<p>Width is derived from the authoritative <code>ColumnInfo</code> CQL/flat types plus the
+already-decoded <a href="../../types/enum.Value.html" title="enum cqlite_core::types::Value"><code>Value</code></a>s. Nothing is inferred from byte patterns and no
+decode decision is influenced.</p>
+<h2 id="hardening"><a class="doc-anchor" href="#hardening">§</a>Hardening</h2>
+<p>The walk is <strong>iterative</strong> (an explicit worklist) and every arithmetic step is
+saturating. Two budgets, both reset <strong>per column</strong>, bound the work:</p>
+<ul>
+<li><a href="constant.MAX_ESTIMATE_NODES.html" title="constant cqlite_core::export::arrow_size::MAX_ESTIMATE_NODES"><code>MAX_ESTIMATE_NODES</code></a> caps the <strong>branching</strong> slots — those that can queue
+further slots. Only a branching slot ever enters the worklist, so the
+worklist can never hold more entries than the budget (a stronger form of
+the pre-push fan-out check it replaces), and a value nested deeper than the
+budget fails closed.</li>
+<li><a href="constant.MAX_ESTIMATE_LEAF_SLOTS.html" title="constant cqlite_core::export::arrow_size::MAX_ESTIMATE_LEAF_SLOTS"><code>MAX_ESTIMATE_LEAF_SLOTS</code></a> caps the leaf slots charged inline. A leaf costs
+no worklist entry and no structural node, so a collection’s ELEMENT COUNT —
+the one dimension a legal Cassandra row pushes to 65,535 — no longer
+consumes the structural budget (issue #2825 review C2): a 65,535-entry
+<code>map&lt;text,text&gt;</code> spends ONE node rather than 131,070, and is estimated
+exactly instead of failing closed and degrading the stream to one row per
+batch for the rest of the scan.</li>
+</ul>
+<p>Per-column budgets mean one wide column can no longer starve the columns
+after it. A row that exhausts either budget, or whose widths would overflow
+<code>usize</code>, <strong>fails closed</strong> to <code>usize::MAX</code> — which trips the byte-cap and cuts
+the batch, the safe direction. It never panics and never hangs.</p>
+</div></details><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.MAX_ESTIMATE_LEAF_SLOTS.html" title="constant cqlite_core::export::arrow_size::MAX_ESTIMATE_LEAF_SLOTS">MAX_<wbr>ESTIMATE_<wbr>LEAF_<wbr>SLOTS</a></dt><dd>Maximum number of <strong>leaf</strong> slots one COLUMN’s estimate may charge inline.</dd><dt><a class="constant" href="constant.MAX_ESTIMATE_NODES.html" title="constant cqlite_core::export::arrow_size::MAX_ESTIMATE_NODES">MAX_<wbr>ESTIMATE_<wbr>NODES</a></dt><dd>Maximum number of <strong>branching</strong> slots one COLUMN’s estimate may queue — a
+slot that can fan out into further slots (a collection, a map, a struct, or a
+rendered container).</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.arrow_payload_bytes.html" title="fn cqlite_core::export::arrow_size::arrow_payload_bytes">arrow_<wbr>payload_<wbr>bytes</a></dt><dd>Sum of Arrow buffer <strong>lengths</strong> across <code>batch</code>, recursively including child
+data — the cap’s currency, and the oracle <a href="fn.estimate_arrow_row_bytes.html" title="fn cqlite_core::export::arrow_size::estimate_arrow_row_bytes"><code>estimate_arrow_row_bytes</code></a> must
+never under-count.</dd><dt><a class="fn" href="fn.estimate_arrow_row_bytes.html" title="fn cqlite_core::export::arrow_size::estimate_arrow_row_bytes">estimate_<wbr>arrow_<wbr>row_<wbr>bytes</a></dt><dd>Upper bound, in Arrow <strong>payload</strong> bytes, on <code>row</code>’s contribution to a batch
+built from <code>columns</code> by <a href="../arrow_convert/fn.rows_to_record_batch.html" title="fn cqlite_core::export::arrow_convert::rows_to_record_batch"><code>rows_to_record_batch</code></a>.</dd></dl></section></div></main></body></html>

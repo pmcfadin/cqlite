@@ -1,0 +1,328 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/write_engine/merge/producer_msg.rs`."><title>producer_msg.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../src-files.js"></script><script defer src="../../../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/write_engine/merge/</div>producer_msg.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! The producer→consumer CHANNEL PROTOCOL for the k-way merge (issue #3120).
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! # Why a protocol, and not just `Result&lt;MergeEntry, _&gt;`
+<a href=#4 id=4 data-nosnippet>4</a>//!
+<a href=#5 id=5 data-nosnippet>5</a>//! Every merge run is fed by a detached producer THREAD over a bounded
+<a href=#6 id=6 data-nosnippet>6</a>//! `sync_channel` ([`producer_iter`](super::producer_iter) for the path-based
+<a href=#7 id=7 data-nosnippet>7</a>//! shape, [`from_readers`](super::from_readers) for the shared-reader shape).
+<a href=#8 id=8 data-nosnippet>8</a>//! Before this issue the channel item was `Result&lt;MergeEntry,
+<a href=#9 id=9 data-nosnippet>9</a>//! MergeProducerError&gt;` and there was NO terminator: a producer that finished
+<a href=#10 id=10 data-nosnippet>10</a>//! and a producer that UNWOUND both simply dropped their `SyncSender`, and the
+<a href=#11 id=11 data-nosnippet>11</a>//! consumer mapped that channel DISCONNECT onto `None` = "this run is
+<a href=#12 id=12 data-nosnippet>12</a>//! exhausted". So a panicking producer made its run look EXHAUSTED:
+<a href=#13 id=13 data-nosnippet>13</a>//!
+<a href=#14 id=14 data-nosnippet>14</a>//! * on the READ path, a silently short result set served as a successful scan;
+<a href=#15 id=15 data-nosnippet>15</a>//! * on the WRITE path, `compact_sstables` rewrote an SSTable **missing rows**
+<a href=#16 id=16 data-nosnippet>16</a>//!   and then deleted (or superseded) its inputs — silent data loss at rest.
+<a href=#17 id=17 data-nosnippet>17</a>//!
+<a href=#18 id=18 data-nosnippet>18</a>//! [`MergeMsg`] makes completion an OBSERVED FACT instead of an inference. The
+<a href=#19 id=19 data-nosnippet>19</a>//! producer's last act on EVERY exit path is exactly one terminator
+<a href=#20 id=20 data-nosnippet>20</a>//! ([`MergeMsg::Done`] or [`MergeMsg::Failed`]), sent with the BLOCKING
+<a href=#21 id=21 data-nosnippet>21</a>//! `SyncSender::send` (a `try_send` that dropped the terminator would recreate
+<a href=#22 id=22 data-nosnippet>22</a>//! the very ambiguity this closes), and the consumer reports end-of-input ONLY
+<a href=#23 id=23 data-nosnippet>23</a>//! on `Done`. This is the same treatment issue #3106 gave the query row stream's
+<a href=#24 id=24 data-nosnippet>24</a>//! two producer boundaries.
+<a href=#25 id=25 data-nosnippet>25</a>//!
+<a href=#26 id=26 data-nosnippet>26</a>//! Deliberately NOT `Err(MergeProducerError::Done)` (a sentinel inside the
+<a href=#27 id=27 data-nosnippet>27</a>//! `Result`): that makes normal completion an *error* every match site has to
+<a href=#28 id=28 data-nosnippet>28</a>//! special-case, still permits a non-terminal `Err` to ride in the DATA slot,
+<a href=#29 id=29 data-nosnippet>29</a>//! and would make the terminator untracked on the egress-depth gauge by
+<a href=#30 id=30 data-nosnippet>30</a>//! ACCIDENT (right answer, wrong reason — see [`MergeMsg::tracked_entries`]).
+<a href=#31 id=31 data-nosnippet>31</a>//!
+<a href=#32 id=32 data-nosnippet>32</a>//! # Both halves are needed, and they cover different builds
+<a href=#33 id=33 data-nosnippet>33</a>//!
+<a href=#34 id=34 data-nosnippet>34</a>//! `catch_unwind` in the producer thread body turns a panic into an INFORMATIVE
+<a href=#35 id=35 data-nosnippet>35</a>//! terminal [`MergeProducerError::Panicked`], but it only fires under `panic =
+<a href=#36 id=36 data-nosnippet>36</a>//! "unwind"`. The `Done` terminator needs no unwinding at all: it makes any
+<a href=#37 id=37 data-nosnippet>37</a>//! *other* way a producer thread can stop without reporting — a future exit path
+<a href=#38 id=38 data-nosnippet>38</a>//! that forgets its terminator included — fail CLOSED in every profile.
+<a href=#39 id=39 data-nosnippet>39</a>
+<a href=#40 id=40 data-nosnippet>40</a></span><span class="kw">use </span><span class="kw">crate</span>::error::Error;
+<a href=#41 id=41 data-nosnippet>41</a>
+<a href=#42 id=42 data-nosnippet>42</a><span class="kw">use </span><span class="kw">super</span>::MergeEntry;
+<a href=#43 id=43 data-nosnippet>43</a>
+<a href=#44 id=44 data-nosnippet>44</a><span class="doccomment">/// Channel-safe error payload sent from a producer thread to the merge (issue
+<a href=#45 id=45 data-nosnippet>45</a>/// #2264).
+<a href=#46 id=46 data-nosnippet>46</a>///
+<a href=#47 id=47 data-nosnippet>47</a>/// The producer thread runs the reader's compaction scan under `Result&lt;_,
+<a href=#48 id=48 data-nosnippet>48</a>/// crate::Error&gt;`, but `crate::Error` is not `Clone` and the channel item is
+<a href=#49 id=49 data-nosnippet>49</a>/// consumed once anyway, so this small enum is the minimal payload that
+<a href=#50 id=50 data-nosnippet>50</a>/// SURVIVES the thread boundary while still distinguishing a cooperative
+<a href=#51 id=51 data-nosnippet>51</a>/// cancellation (`Error::Cancelled`) from every other failure. Without this,
+<a href=#52 id=52 data-nosnippet>52</a>/// stringifying every error the same way would make a genuine I/O/corruption
+<a href=#53 id=53 data-nosnippet>53</a>/// error indistinguishable from a cancelled scan at the receiving end — exactly
+<a href=#54 id=54 data-nosnippet>54</a>/// the ambiguity `SSTableRowIterator::next` and `drive_merge` must NOT have.
+<a href=#55 id=55 data-nosnippet>55</a>///
+<a href=#56 id=56 data-nosnippet>56</a>/// Deliberately NOT `Clone` (rust-reviewer, issue #3120): the consumer stores the
+<a href=#57 id=57 data-nosnippet>57</a>/// terminal verdict on the run's state by MOVE, and re-reports it through
+<a href=#58 id=58 data-nosnippet>58</a>/// [`Self::to_error`], which borrows. Nothing ever clones one, so a `Clone` derive
+<a href=#59 id=59 data-nosnippet>59</a>/// would only invite a needless copy of the payload string.
+<a href=#60 id=60 data-nosnippet>60</a></span><span class="attr">#[derive(Debug)]
+<a href=#61 id=61 data-nosnippet>61</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">enum </span>MergeProducerError {
+<a href=#62 id=62 data-nosnippet>62</a>    <span class="doccomment">/// The scan was cooperatively cancelled (`Error::Cancelled`).
+<a href=#63 id=63 data-nosnippet>63</a>    </span>Cancelled,
+<a href=#64 id=64 data-nosnippet>64</a>    <span class="doccomment">/// Any other failure, stringified (matches the pre-#2264 behaviour).
+<a href=#65 id=65 data-nosnippet>65</a>    </span>Other(String),
+<a href=#66 id=66 data-nosnippet>66</a>    <span class="doccomment">/// The producer thread UNWOUND — a `panic!`/assertion anywhere in its
+<a href=#67 id=67 data-nosnippet>67</a>    /// walk/decode — carrying the panic payload (issue #3120).
+<a href=#68 id=68 data-nosnippet>68</a>    ///
+<a href=#69 id=69 data-nosnippet>69</a>    /// A DISTINCT variant, not folded into [`Self::Other`], because it is the
+<a href=#70 id=70 data-nosnippet>70</a>    /// event this issue exists to make visible: the run is TRUNCATED at an
+<a href=#71 id=71 data-nosnippet>71</a>    /// arbitrary point, so it must never be reconciled or written as if it were
+<a href=#72 id=72 data-nosnippet>72</a>    /// complete.
+<a href=#73 id=73 data-nosnippet>73</a>    </span>Panicked(String),
+<a href=#74 id=74 data-nosnippet>74</a>}
+<a href=#75 id=75 data-nosnippet>75</a>
+<a href=#76 id=76 data-nosnippet>76</a><span class="kw">impl </span>From&lt;Error&gt; <span class="kw">for </span>MergeProducerError {
+<a href=#77 id=77 data-nosnippet>77</a>    <span class="kw">fn </span>from(e: Error) -&gt; <span class="self">Self </span>{
+<a href=#78 id=78 data-nosnippet>78</a>        <span class="kw">match </span>e {
+<a href=#79 id=79 data-nosnippet>79</a>            Error::Cancelled =&gt; MergeProducerError::Cancelled,
+<a href=#80 id=80 data-nosnippet>80</a>            other =&gt; MergeProducerError::Other(other.to_string()),
+<a href=#81 id=81 data-nosnippet>81</a>        }
+<a href=#82 id=82 data-nosnippet>82</a>    }
+<a href=#83 id=83 data-nosnippet>83</a>}
+<a href=#84 id=84 data-nosnippet>84</a>
+<a href=#85 id=85 data-nosnippet>85</a><span class="kw">impl </span>MergeProducerError {
+<a href=#86 id=86 data-nosnippet>86</a>    <span class="doccomment">/// Rebuild the consumer-side [`Error`] for this terminal verdict.
+<a href=#87 id=87 data-nosnippet>87</a>    ///
+<a href=#88 id=88 data-nosnippet>88</a>    /// Total and side-effect free, so a run whose verdict is STICKY can
+<a href=#89 id=89 data-nosnippet>89</a>    /// re-report the identical error on every subsequent poll rather than
+<a href=#90 id=90 data-nosnippet>90</a>    /// downgrading to `None` once the payload has been handed out (issue #3120).
+<a href=#91 id=91 data-nosnippet>91</a>    ///
+<a href=#92 id=92 data-nosnippet>92</a>    /// [`Self::Panicked`] maps to [`Error::internal`], NOT `Error::Storage`
+<a href=#93 id=93 data-nosnippet>93</a>    /// (roborev, issue #3106): `Storage.is_recoverable() == true`, which would
+<a href=#94 id=94 data-nosnippet>94</a>    /// advertise a deterministic dead-producer failure as RETRYABLE to the
+<a href=#95 id=95 data-nosnippet>95</a>    /// Node/Python error mapping. Nothing suggests the `Data.db` is bad either,
+<a href=#96 id=96 data-nosnippet>96</a>    /// so `Corruption` would send an operator hunting a nonexistent bad file.
+<a href=#97 id=97 data-nosnippet>97</a>    /// `Internal` is `is_recoverable() == false` and is the honest variant for a
+<a href=#98 id=98 data-nosnippet>98</a>    /// violated internal invariant.
+<a href=#99 id=99 data-nosnippet>99</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>to_error(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Error {
+<a href=#100 id=100 data-nosnippet>100</a>        <span class="kw">match </span><span class="self">self </span>{
+<a href=#101 id=101 data-nosnippet>101</a>            <span class="comment">// Issue #2264: reconstructed DISTINCTLY so a cancelled scan is never
+<a href=#102 id=102 data-nosnippet>102</a>            // confused with a genuine I/O/corruption error at the
+<a href=#103 id=103 data-nosnippet>103</a>            // merge/producer boundary — `drive_merge` matches on the variant.
+<a href=#104 id=104 data-nosnippet>104</a>            </span>MergeProducerError::Cancelled =&gt; Error::Cancelled,
+<a href=#105 id=105 data-nosnippet>105</a>            MergeProducerError::Other(msg) =&gt; {
+<a href=#106 id=106 data-nosnippet>106</a>                Error::Storage(<span class="macro">format!</span>(<span class="string">"streaming merge producer error: {msg}"</span>))
+<a href=#107 id=107 data-nosnippet>107</a>            }
+<a href=#108 id=108 data-nosnippet>108</a>            MergeProducerError::Panicked(message) =&gt; Error::internal(<span class="macro">format!</span>(
+<a href=#109 id=109 data-nosnippet>109</a>                <span class="string">"streaming merge producer: the producer thread PANICKED mid-walk \
+<a href=#110 id=110 data-nosnippet>110</a>                 ({message}) — this run is TRUNCATED and cannot be merged as if it \
+<a href=#111 id=111 data-nosnippet>111</a>                 were complete (issue #3120)"
+<a href=#112 id=112 data-nosnippet>112</a>            </span>)),
+<a href=#113 id=113 data-nosnippet>113</a>        }
+<a href=#114 id=114 data-nosnippet>114</a>    }
+<a href=#115 id=115 data-nosnippet>115</a>}
+<a href=#116 id=116 data-nosnippet>116</a>
+<a href=#117 id=117 data-nosnippet>117</a><span class="doccomment">/// One message on a merge producer→consumer channel (issue #3120).
+<a href=#118 id=118 data-nosnippet>118</a>///
+<a href=#119 id=119 data-nosnippet>119</a>/// INTERNAL to the merge: the terminator is deliberately not observable by any
+<a href=#120 id=120 data-nosnippet>120</a>/// merge CONSUMER (`SSTableRowIterator::next` keeps its
+<a href=#121 id=121 data-nosnippet>121</a>/// `Option&lt;Result&lt;MergeEntry&gt;&gt;` signature), so no `SSTableRowIterator`
+<a href=#122 id=122 data-nosnippet>122</a>/// implementation — `VecRun`, `SinglePartitionFilterRun`, the synthetic
+<a href=#123 id=123 data-nosnippet>123</a>/// streaming iterators — has to know this protocol exists. Only the two
+<a href=#124 id=124 data-nosnippet>124</a>/// producer-thread shapes and the one adapter that consumes their channels do.
+<a href=#125 id=125 data-nosnippet>125</a></span><span class="comment">// Issue #2820: the DATA variant carries a `Vec` BATCH of entries, not one entry
+<a href=#126 id=126 data-nosnippet>126</a>// (~288 bytes) — so every variant of this enum is now small and no
+<a href=#127 id=127 data-nosnippet>127</a>// `large_enum_variant` allowance is needed. The batch's ONE heap allocation is
+<a href=#128 id=128 data-nosnippet>128</a>// amortised over up to `BATCH_EMIT_ROWS_MERGE` rows, unlike the per-entry
+<a href=#129 id=129 data-nosnippet>129</a>// allocation issue #1664 removed; what it buys is one cross-thread park/wake per
+<a href=#130 id=130 data-nosnippet>130</a>// BATCH instead of per ROW (measured at 49.9% of single-stream CPU before this
+<a href=#131 id=131 data-nosnippet>131</a>// change). See `egress_batch` for the batching contract.
+<a href=#132 id=132 data-nosnippet>132</a></span><span class="attr">#[derive(Debug)]
+<a href=#133 id=133 data-nosnippet>133</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">enum </span>MergeMsg {
+<a href=#134 id=134 data-nosnippet>134</a>    <span class="doccomment">/// One BATCH of decoded merge entries, in scan order (issue #2820). Carries
+<a href=#135 id=135 data-nosnippet>135</a>    /// DATA rows and NOTHING else BY CONSTRUCTION (issue #3120): a failure is
+<a href=#136 id=136 data-nosnippet>136</a>    /// [`MergeMsg::Failed`], so "this message ends the run" is a structural
+<a href=#137 id=137 data-nosnippet>137</a>    /// property of the variant rather than an unenforced invariant about where an
+<a href=#138 id=138 data-nosnippet>138</a>    /// `Err` was built.
+<a href=#139 id=139 data-nosnippet>139</a>    ///
+<a href=#140 id=140 data-nosnippet>140</a>    /// NON-EMPTY by construction (`EgressBatcher::flush` returns early on an
+<a href=#141 id=141 data-nosnippet>141</a>    /// empty accumulator); the consumer treats an empty batch as "nothing to hand
+<a href=#142 id=142 data-nosnippet>142</a>    /// out" and polls again rather than trusting that, so an empty one could never
+<a href=#143 id=143 data-nosnippet>143</a>    /// be mistaken for end-of-input.
+<a href=#144 id=144 data-nosnippet>144</a>    ///
+<a href=#145 id=145 data-nosnippet>145</a>    /// This is why `forward_row` no longer sends a conversion failure as a
+<a href=#146 id=146 data-nosnippet>146</a>    /// mid-walk channel message: a non-terminal error in the DATA slot, after
+<a href=#147 id=147 data-nosnippet>147</a>    /// which the walk KEEPS GOING, is exactly the shape that would let a later
+<a href=#148 id=148 data-nosnippet>148</a>    /// genuine dead-producer disconnect revert to a clean end-of-input.
+<a href=#149 id=149 data-nosnippet>149</a>    </span>Batch(Vec&lt;MergeEntry&gt;),
+<a href=#150 id=150 data-nosnippet>150</a>    <span class="doccomment">/// The run failed. TERMINAL: the producer sends exactly one of this or
+<a href=#151 id=151 data-nosnippet>151</a>    /// [`MergeMsg::Done`], as its last act, on every exit path.
+<a href=#152 id=152 data-nosnippet>152</a>    </span>Failed(MergeProducerError),
+<a href=#153 id=153 data-nosnippet>153</a>    <span class="doccomment">/// The producer finished its walk and is exiting normally. The ONLY thing
+<a href=#154 id=154 data-nosnippet>154</a>    /// that makes the consuming adapter report a clean end-of-input; a
+<a href=#155 id=155 data-nosnippet>155</a>    /// disconnect without it is a dead producer, i.e. a TRUNCATED run.
+<a href=#156 id=156 data-nosnippet>156</a>    </span>Done,
+<a href=#157 id=157 data-nosnippet>157</a>}
+<a href=#158 id=158 data-nosnippet>158</a>
+<a href=#159 id=159 data-nosnippet>159</a><span class="kw">impl </span>MergeMsg {
+<a href=#160 id=160 data-nosnippet>160</a>    <span class="doccomment">/// How many entries of this message occupy TRACKED data slots on the
+<a href=#161 id=161 data-nosnippet>161</a>    /// egress-depth gauge ([`channel_depth`](super::channel_depth)) — the gauge's
+<a href=#162 id=162 data-nosnippet>162</a>    /// unit is ENTRIES (rows), and issue #2820 did not change that: a batch of
+<a href=#163 id=163 data-nosnippet>163</a>    /// `n` rows counts `n`, exactly as `n` per-row messages used to.
+<a href=#164 id=164 data-nosnippet>164</a>    ///
+<a href=#165 id=165 data-nosnippet>165</a>    /// Called at the SEND site (`egress_batch::EgressBatcher::flush`). It is worth
+<a href=#166 id=166 data-nosnippet>166</a>    /// being precise about what this does and does not buy, because overclaiming
+<a href=#167 id=167 data-nosnippet>167</a>    /// here is how the next reader stops looking (rust-reviewer, issue #3120):
+<a href=#168 id=168 data-nosnippet>168</a>    ///
+<a href=#169 id=169 data-nosnippet>169</a>    /// * At that call site it is a **TAUTOLOGY** — the batcher builds
+<a href=#170 id=170 data-nosnippet>170</a>    ///   `MergeMsg::Batch(batch)` unconditionally, so the answer can only be the
+<a href=#171 id=171 data-nosnippet>171</a>    ///   batch length. It is not a runtime filter; it is a **compile-time
+<a href=#172 id=172 data-nosnippet>172</a>    ///   tripwire**. Because the body below is an EXHAUSTIVE match with no
+<a href=#173 id=173 data-nosnippet>173</a>    ///   wildcard, adding a 4th `MergeMsg` variant forces an explicit
+<a href=#174 id=174 data-nosnippet>174</a>    ///   tracked/untracked decision here instead of a silent default.
+<a href=#175 id=175 data-nosnippet>175</a>    /// * The RECEIVE site (`producer_iter`'s `next`) does NOT call this. It is a
+<a href=#176 id=176 data-nosnippet>176</a>    ///   hand-written `MergeMsg::Batch(entries)` match arm, held correct by its own
+<a href=#177 id=177 data-nosnippet>177</a>    ///   two properties: that `match` is exhaustive with no wildcard, and
+<a href=#178 id=178 data-nosnippet>178</a>    ///   `channel_depth::received_n` / `received_count` each appear at exactly ONE
+<a href=#179 id=179 data-nosnippet>179</a>    ///   site in the crate, both inside that arm (issue #2820 moved
+<a href=#180 id=180 data-nosnippet>180</a>    ///   `add_merge_run_entry_decoded` to the per-ENTRY hand-out below it, since
+<a href=#181 id=181 data-nosnippet>181</a>    ///   its unit is entries decoded, not messages received).
+<a href=#182 id=182 data-nosnippet>182</a>    ///
+<a href=#183 id=183 data-nosnippet>183</a>    /// Why it matters at all: before issue #3120 the two sides were two DIFFERENT
+<a href=#184 id=184 data-nosnippet>184</a>    /// expressions of one rule — `msg.is_ok()` on send versus an `Ok(Ok(_))`
+<a href=#185 id=185 data-nosnippet>185</a>    /// pattern on receive — and a message counted on exactly one side drives the
+<a href=#186 id=186 data-nosnippet>186</a>    /// reconcile residual NEGATIVE, which
+<a href=#187 id=187 data-nosnippet>187</a>    /// `channel_depth::reconcile_residual`'s `&gt; 0` guard skips and `record`'s
+<a href=#188 id=188 data-nosnippet>188</a>    /// `max(0)` floor then hides from every observer, permanently.
+<a href=#189 id=189 data-nosnippet>189</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>tracked_entries(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+<a href=#190 id=190 data-nosnippet>190</a>        <span class="kw">match </span><span class="self">self </span>{
+<a href=#191 id=191 data-nosnippet>191</a>            MergeMsg::Batch(entries) =&gt; entries.len(),
+<a href=#192 id=192 data-nosnippet>192</a>            <span class="comment">// TERMINATORS are untracked on BOTH sides, so they can never
+<a href=#193 id=193 data-nosnippet>193</a>            // unbalance the level.
+<a href=#194 id=194 data-nosnippet>194</a>            </span>MergeMsg::Failed(<span class="kw">_</span>) | MergeMsg::Done =&gt; <span class="number">0</span>,
+<a href=#195 id=195 data-nosnippet>195</a>        }
+<a href=#196 id=196 data-nosnippet>196</a>    }
+<a href=#197 id=197 data-nosnippet>197</a>}
+<a href=#198 id=198 data-nosnippet>198</a>
+<a href=#199 id=199 data-nosnippet>199</a><span class="doccomment">/// The fail-closed error for a producer that disconnected WITHOUT a terminator
+<a href=#200 id=200 data-nosnippet>200</a>/// (issue #3120).
+<a href=#201 id=201 data-nosnippet>201</a>///
+<a href=#202 id=202 data-nosnippet>202</a>/// [`Error::internal`] for the same reason [`MergeProducerError::Panicked`] is
+<a href=#203 id=203 data-nosnippet>203</a>/// (see [`MergeProducerError::to_error`]): a dead producer is a violated
+<a href=#204 id=204 data-nosnippet>204</a>/// internal invariant, not a retryable storage condition and not a bad file.
+<a href=#205 id=205 data-nosnippet>205</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>dead_producer_error() -&gt; Error {
+<a href=#206 id=206 data-nosnippet>206</a>    Error::internal(
+<a href=#207 id=207 data-nosnippet>207</a>        <span class="string">"streaming merge producer: the channel disconnected WITHOUT a terminal Done \
+<a href=#208 id=208 data-nosnippet>208</a>         message — the producer thread died mid-walk, so this run is TRUNCATED and \
+<a href=#209 id=209 data-nosnippet>209</a>         must not be merged (or written) as if it were exhausted (issue #3120)"</span>,
+<a href=#210 id=210 data-nosnippet>210</a>    )
+<a href=#211 id=211 data-nosnippet>211</a>}
+<a href=#212 id=212 data-nosnippet>212</a>
+<a href=#213 id=213 data-nosnippet>213</a><span class="doccomment">/// Turn a caught producer-thread panic payload into a
+<a href=#214 id=214 data-nosnippet>214</a>/// [`MergeProducerError::Panicked`].
+<a href=#215 id=215 data-nosnippet>215</a>///
+<a href=#216 id=216 data-nosnippet>216</a>/// The payload is a `String`/`&amp;str` for every `panic!`/assertion (the only other
+<a href=#217 id=217 data-nosnippet>217</a>/// shapes are hand-rolled `panic_any`), so an unrecognized payload degrades to a
+<a href=#218 id=218 data-nosnippet>218</a>/// named placeholder rather than being dropped — the terminator is still sent
+<a href=#219 id=219 data-nosnippet>219</a>/// either way, which is the property that matters.
+<a href=#220 id=220 data-nosnippet>220</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>panicked_producer_error(payload: <span class="kw-2">&amp;</span>(<span class="kw">dyn </span>std::any::Any + Send)) -&gt; MergeProducerError {
+<a href=#221 id=221 data-nosnippet>221</a>    <span class="kw">let </span>message = payload
+<a href=#222 id=222 data-nosnippet>222</a>        .downcast_ref::&lt;String&gt;()
+<a href=#223 id=223 data-nosnippet>223</a>        .map(String::as_str)
+<a href=#224 id=224 data-nosnippet>224</a>        .or_else(|| payload.downcast_ref::&lt;<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str&gt;().copied())
+<a href=#225 id=225 data-nosnippet>225</a>        .unwrap_or(<span class="string">"&lt;non-string panic payload&gt;"</span>);
+<a href=#226 id=226 data-nosnippet>226</a>    MergeProducerError::Panicked(message.to_string())
+<a href=#227 id=227 data-nosnippet>227</a>}
+<a href=#228 id=228 data-nosnippet>228</a>
+<a href=#229 id=229 data-nosnippet>229</a><span class="attr">#[cfg(test)]
+<a href=#230 id=230 data-nosnippet>230</a></span><span class="kw">mod </span>tests {
+<a href=#231 id=231 data-nosnippet>231</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#232 id=232 data-nosnippet>232</a>    <span class="kw">use </span><span class="kw">crate</span>::storage::write_engine::merge::{CellData, RowData};
+<a href=#233 id=233 data-nosnippet>233</a>    <span class="kw">use </span><span class="kw">crate</span>::storage::write_engine::mutation::DecoratedKey;
+<a href=#234 id=234 data-nosnippet>234</a>    <span class="kw">use </span><span class="kw">crate</span>::types::Value;
+<a href=#235 id=235 data-nosnippet>235</a>
+<a href=#236 id=236 data-nosnippet>236</a>    <span class="kw">fn </span>entry(n: i64) -&gt; MergeEntry {
+<a href=#237 id=237 data-nosnippet>237</a>        MergeEntry::new(
+<a href=#238 id=238 data-nosnippet>238</a>            <span class="number">0</span>,
+<a href=#239 id=239 data-nosnippet>239</a>            DecoratedKey::new(n, n.to_be_bytes().to_vec()),
+<a href=#240 id=240 data-nosnippet>240</a>            <span class="prelude-val">None</span>,
+<a href=#241 id=241 data-nosnippet>241</a>            <span class="number">100</span>,
+<a href=#242 id=242 data-nosnippet>242</a>            RowData::Live {
+<a href=#243 id=243 data-nosnippet>243</a>                cells: <span class="macro">vec!</span>[CellData::new(<span class="string">"name"</span>.to_string(), Value::text(<span class="string">"v"</span>), <span class="number">100</span>)],
+<a href=#244 id=244 data-nosnippet>244</a>            },
+<a href=#245 id=245 data-nosnippet>245</a>        )
+<a href=#246 id=246 data-nosnippet>246</a>    }
+<a href=#247 id=247 data-nosnippet>247</a>
+<a href=#248 id=248 data-nosnippet>248</a>    <span class="kw">fn </span>batch(rows: usize) -&gt; MergeMsg {
+<a href=#249 id=249 data-nosnippet>249</a>        MergeMsg::Batch((<span class="number">0</span>..rows <span class="kw">as </span>i64).map(entry).collect())
+<a href=#250 id=250 data-nosnippet>250</a>    }
+<a href=#251 id=251 data-nosnippet>251</a>
+<a href=#252 id=252 data-nosnippet>252</a>    <span class="doccomment">/// The gauge unit is ENTRIES: a DATA batch of `n` rows counts `n` tracked
+<a href=#253 id=253 data-nosnippet>253</a>    /// slots (issue #2820 — batching changed the MESSAGE count, never the gauge
+<a href=#254 id=254 data-nosnippet>254</a>    /// unit), and EVERY terminator counts zero (issue #3120). Asserted on the real
+<a href=#255 id=255 data-nosnippet>255</a>    /// values both the send site and the receive site key on, so an asymmetry
+<a href=#256 id=256 data-nosnippet>256</a>    /// between them cannot hide here.
+<a href=#257 id=257 data-nosnippet>257</a>    </span><span class="attr">#[test]
+<a href=#258 id=258 data-nosnippet>258</a>    </span><span class="kw">fn </span>a_data_batch_tracks_one_slot_per_entry_and_a_terminator_tracks_none() {
+<a href=#259 id=259 data-nosnippet>259</a>        <span class="kw">for </span>rows <span class="kw">in </span>[<span class="number">1usize</span>, <span class="number">2</span>, <span class="number">7</span>, <span class="number">256</span>] {
+<a href=#260 id=260 data-nosnippet>260</a>            <span class="macro">assert_eq!</span>(
+<a href=#261 id=261 data-nosnippet>261</a>                batch(rows).tracked_entries(),
+<a href=#262 id=262 data-nosnippet>262</a>                rows,
+<a href=#263 id=263 data-nosnippet>263</a>                <span class="string">"a batch of {rows} DATA entries occupies {rows} tracked channel \
+<a href=#264 id=264 data-nosnippet>264</a>                 slots — counting it as ONE would make the #2419 gauge read \
+<a href=#265 id=265 data-nosnippet>265</a>                 messages while its unit says entries"
+<a href=#266 id=266 data-nosnippet>266</a>            </span>);
+<a href=#267 id=267 data-nosnippet>267</a>        }
+<a href=#268 id=268 data-nosnippet>268</a>        <span class="kw">for </span>terminator <span class="kw">in </span>[
+<a href=#269 id=269 data-nosnippet>269</a>            MergeMsg::Done,
+<a href=#270 id=270 data-nosnippet>270</a>            MergeMsg::Failed(MergeProducerError::Cancelled),
+<a href=#271 id=271 data-nosnippet>271</a>            MergeMsg::Failed(MergeProducerError::Other(<span class="string">"io"</span>.to_string())),
+<a href=#272 id=272 data-nosnippet>272</a>            MergeMsg::Failed(MergeProducerError::Panicked(<span class="string">"boom"</span>.to_string())),
+<a href=#273 id=273 data-nosnippet>273</a>        ] {
+<a href=#274 id=274 data-nosnippet>274</a>            <span class="macro">assert_eq!</span>(
+<a href=#275 id=275 data-nosnippet>275</a>                terminator.tracked_entries(),
+<a href=#276 id=276 data-nosnippet>276</a>                <span class="number">0</span>,
+<a href=#277 id=277 data-nosnippet>277</a>                <span class="string">"a terminator must be UNTRACKED on both send and receive, else the \
+<a href=#278 id=278 data-nosnippet>278</a>                 reconcile residual goes negative and is hidden by the `&gt; 0` guard \
+<a href=#279 id=279 data-nosnippet>279</a>                 + `max(0)` floor forever (issue #3120): {terminator:?}"
+<a href=#280 id=280 data-nosnippet>280</a>            </span>);
+<a href=#281 id=281 data-nosnippet>281</a>        }
+<a href=#282 id=282 data-nosnippet>282</a>    }
+<a href=#283 id=283 data-nosnippet>283</a>
+<a href=#284 id=284 data-nosnippet>284</a>    <span class="doccomment">/// A panicked producer must surface as a NON-recoverable `Internal` error
+<a href=#285 id=285 data-nosnippet>285</a>    /// naming the panic — never `Storage`, whose `is_recoverable() == true`
+<a href=#286 id=286 data-nosnippet>286</a>    /// would advertise a deterministic dead-producer failure as RETRYABLE to the
+<a href=#287 id=287 data-nosnippet>287</a>    /// bindings' error mapping (roborev, issue #3106).
+<a href=#288 id=288 data-nosnippet>288</a>    </span><span class="attr">#[test]
+<a href=#289 id=289 data-nosnippet>289</a>    </span><span class="kw">fn </span>a_panicked_producer_maps_to_a_non_recoverable_internal_error() {
+<a href=#290 id=290 data-nosnippet>290</a>        <span class="kw">let </span>payload: Box&lt;<span class="kw">dyn </span>std::any::Any + Send&gt; = Box::new(<span class="string">"boom-from-the-walk"</span>.to_string());
+<a href=#291 id=291 data-nosnippet>291</a>        <span class="kw">let </span>error = panicked_producer_error(payload.as_ref()).to_error();
+<a href=#292 id=292 data-nosnippet>292</a>        <span class="macro">assert!</span>(
+<a href=#293 id=293 data-nosnippet>293</a>            !error.is_recoverable(),
+<a href=#294 id=294 data-nosnippet>294</a>            <span class="string">"a dead producer is deterministic, not retryable: {error}"
+<a href=#295 id=295 data-nosnippet>295</a>        </span>);
+<a href=#296 id=296 data-nosnippet>296</a>        <span class="kw">let </span>text = error.to_string();
+<a href=#297 id=297 data-nosnippet>297</a>        <span class="macro">assert!</span>(
+<a href=#298 id=298 data-nosnippet>298</a>            text.contains(<span class="string">"PANICKED"</span>) &amp;&amp; text.contains(<span class="string">"boom-from-the-walk"</span>),
+<a href=#299 id=299 data-nosnippet>299</a>            <span class="string">"the error must name the panic and carry its payload so the failure is \
+<a href=#300 id=300 data-nosnippet>300</a>             debuggable rather than a generic 'the producer died', got: {text}"
+<a href=#301 id=301 data-nosnippet>301</a>        </span>);
+<a href=#302 id=302 data-nosnippet>302</a>        <span class="macro">assert!</span>(
+<a href=#303 id=303 data-nosnippet>303</a>            text.contains(<span class="string">"TRUNCATED"</span>),
+<a href=#304 id=304 data-nosnippet>304</a>            <span class="string">"the error must state the run is incomplete, got: {text}"
+<a href=#305 id=305 data-nosnippet>305</a>        </span>);
+<a href=#306 id=306 data-nosnippet>306</a>    }
+<a href=#307 id=307 data-nosnippet>307</a>
+<a href=#308 id=308 data-nosnippet>308</a>    <span class="doccomment">/// The bare-disconnect backstop is the same non-recoverable `Internal`
+<a href=#309 id=309 data-nosnippet>309</a>    /// class, and says so.
+<a href=#310 id=310 data-nosnippet>310</a>    </span><span class="attr">#[test]
+<a href=#311 id=311 data-nosnippet>311</a>    </span><span class="kw">fn </span>a_bare_disconnect_maps_to_a_non_recoverable_internal_error() {
+<a href=#312 id=312 data-nosnippet>312</a>        <span class="kw">let </span>error = dead_producer_error();
+<a href=#313 id=313 data-nosnippet>313</a>        <span class="macro">assert!</span>(!error.is_recoverable(), <span class="string">"not retryable: {error}"</span>);
+<a href=#314 id=314 data-nosnippet>314</a>        <span class="macro">assert!</span>(error.to_string().contains(<span class="string">"TRUNCATED"</span>));
+<a href=#315 id=315 data-nosnippet>315</a>    }
+<a href=#316 id=316 data-nosnippet>316</a>
+<a href=#317 id=317 data-nosnippet>317</a>    <span class="doccomment">/// Cancellation stays a DISTINCT `Error::Cancelled` through the terminator
+<a href=#318 id=318 data-nosnippet>318</a>    /// protocol (issue #2264): a cancelled scan must never be reported as a dead
+<a href=#319 id=319 data-nosnippet>319</a>    /// producer, which is the likeliest false positive of this fix.
+<a href=#320 id=320 data-nosnippet>320</a>    </span><span class="attr">#[test]
+<a href=#321 id=321 data-nosnippet>321</a>    </span><span class="kw">fn </span>cancellation_survives_the_terminator_protocol_as_cancelled() {
+<a href=#322 id=322 data-nosnippet>322</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(
+<a href=#323 id=323 data-nosnippet>323</a>            MergeProducerError::from(Error::Cancelled).to_error(),
+<a href=#324 id=324 data-nosnippet>324</a>            Error::Cancelled
+<a href=#325 id=325 data-nosnippet>325</a>        ));
+<a href=#326 id=326 data-nosnippet>326</a>    }
+<a href=#327 id=327 data-nosnippet>327</a>}
+</code></pre></div></section></main></body></html>

@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/marshal_element.rs`."><title>marshal_element.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../../../" data-static-root-path="../../../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../../../src-files.js"></script><script defer src="../../../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/parsing/row_decoder/</div>marshal_element.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Marshal collection-element type extraction (issue #1340).
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/marshal_element.rs`."><title>marshal_element.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../../../../../" data-static-root-path="../../../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../../../src-files.js"></script><script defer src="../../../../../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/parsing/row_decoder/</div>marshal_element.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Marshal collection-element type extraction (issue #1340).
 <a href=#2 id=2 data-nosnippet>2</a>//!
 <a href=#3 id=3 data-nosnippet>3</a>//! A `frozen&lt;collection&gt;` column's authoritative on-disk SerializationHeader
 <a href=#4 id=4 data-nosnippet>4</a>//! marshal type (`RowColumnResolution.header_type`) carries the full element type
@@ -139,155 +139,251 @@
 <a href=#139 id=139 data-nosnippet>139</a>            <span class="kw">_ </span>=&gt; schema_short,
 <a href=#140 id=140 data-nosnippet>140</a>        }
 <a href=#141 id=141 data-nosnippet>141</a>    }
-<a href=#142 id=142 data-nosnippet>142</a>}
-<a href=#143 id=143 data-nosnippet>143</a>
-<a href=#144 id=144 data-nosnippet>144</a><span class="attr">#[cfg(test)]
-<a href=#145 id=145 data-nosnippet>145</a></span><span class="kw">mod </span>tests {
-<a href=#146 id=146 data-nosnippet>146</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
-<a href=#147 id=147 data-nosnippet>147</a>
-<a href=#148 id=148 data-nosnippet>148</a>    <span class="kw">type </span>P = V5CompressedLegacyParser;
-<a href=#149 id=149 data-nosnippet>149</a>
-<a href=#150 id=150 data-nosnippet>150</a>    <span class="attr">#[test]
-<a href=#151 id=151 data-nosnippet>151</a>    </span><span class="kw">fn </span>list_marshal_element_extracted() {
-<a href=#152 id=152 data-nosnippet>152</a>        <span class="kw">let </span>ht = <span class="string">"org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type))"</span>;
-<a href=#153 id=153 data-nosnippet>153</a>        <span class="macro">assert_eq!</span>(
-<a href=#154 id=154 data-nosnippet>154</a>            P::extract_marshal_collection_elements(ht),
-<a href=#155 id=155 data-nosnippet>155</a>            <span class="prelude-val">Some</span>(MarshalCollectionElements::Sequence(
-<a href=#156 id=156 data-nosnippet>156</a>                <span class="string">"org.apache.cassandra.db.marshal.Int32Type"
-<a href=#157 id=157 data-nosnippet>157</a>            </span>))
-<a href=#158 id=158 data-nosnippet>158</a>        );
-<a href=#159 id=159 data-nosnippet>159</a>    }
-<a href=#160 id=160 data-nosnippet>160</a>
-<a href=#161 id=161 data-nosnippet>161</a>    <span class="attr">#[test]
-<a href=#162 id=162 data-nosnippet>162</a>    </span><span class="kw">fn </span>set_marshal_element_extracted() {
-<a href=#163 id=163 data-nosnippet>163</a>        <span class="kw">let </span>ht = <span class="string">"org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.UTF8Type))"</span>;
-<a href=#164 id=164 data-nosnippet>164</a>        <span class="macro">assert_eq!</span>(
-<a href=#165 id=165 data-nosnippet>165</a>            P::extract_marshal_collection_elements(ht),
-<a href=#166 id=166 data-nosnippet>166</a>            <span class="prelude-val">Some</span>(MarshalCollectionElements::Sequence(
-<a href=#167 id=167 data-nosnippet>167</a>                <span class="string">"org.apache.cassandra.db.marshal.UTF8Type"
-<a href=#168 id=168 data-nosnippet>168</a>            </span>))
-<a href=#169 id=169 data-nosnippet>169</a>        );
-<a href=#170 id=170 data-nosnippet>170</a>    }
-<a href=#171 id=171 data-nosnippet>171</a>
-<a href=#172 id=172 data-nosnippet>172</a>    <span class="attr">#[test]
-<a href=#173 id=173 data-nosnippet>173</a>    </span><span class="kw">fn </span>bare_listtype_without_frozen_wrapper() {
-<a href=#174 id=174 data-nosnippet>174</a>        <span class="comment">// Tolerate a header that is not wrapped in FrozenType(...).
-<a href=#175 id=175 data-nosnippet>175</a>        </span><span class="kw">let </span>ht =
-<a href=#176 id=176 data-nosnippet>176</a>            <span class="string">"org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type)"</span>;
-<a href=#177 id=177 data-nosnippet>177</a>        <span class="macro">assert_eq!</span>(
-<a href=#178 id=178 data-nosnippet>178</a>            P::extract_marshal_collection_elements(ht),
-<a href=#179 id=179 data-nosnippet>179</a>            <span class="prelude-val">Some</span>(MarshalCollectionElements::Sequence(
-<a href=#180 id=180 data-nosnippet>180</a>                <span class="string">"org.apache.cassandra.db.marshal.Int32Type"
-<a href=#181 id=181 data-nosnippet>181</a>            </span>))
-<a href=#182 id=182 data-nosnippet>182</a>        );
-<a href=#183 id=183 data-nosnippet>183</a>    }
-<a href=#184 id=184 data-nosnippet>184</a>
-<a href=#185 id=185 data-nosnippet>185</a>    <span class="attr">#[test]
-<a href=#186 id=186 data-nosnippet>186</a>    </span><span class="kw">fn </span>map_marshal_key_value_extracted() {
-<a href=#187 id=187 data-nosnippet>187</a>        <span class="comment">// frozen&lt;map&lt;text, frozen&lt;address&gt;&gt;&gt;
-<a href=#188 id=188 data-nosnippet>188</a>        </span><span class="kw">let </span>ht = <span class="string">"org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(ks,61,66:org.apache.cassandra.db.marshal.UTF8Type))))"</span>;
-<a href=#189 id=189 data-nosnippet>189</a>        <span class="kw">let </span>got = P::extract_marshal_collection_elements(ht).expect(<span class="string">"map elements"</span>);
-<a href=#190 id=190 data-nosnippet>190</a>        <span class="kw">match </span>got {
-<a href=#191 id=191 data-nosnippet>191</a>            MarshalCollectionElements::Map(k, v) =&gt; {
-<a href=#192 id=192 data-nosnippet>192</a>                <span class="macro">assert_eq!</span>(k, <span class="string">"org.apache.cassandra.db.marshal.UTF8Type"</span>);
-<a href=#193 id=193 data-nosnippet>193</a>                <span class="macro">assert!</span>(
-<a href=#194 id=194 data-nosnippet>194</a>                    P::is_udt_type(v),
-<a href=#195 id=195 data-nosnippet>195</a>                    <span class="string">"map value marshal must carry UserType: {v}"
-<a href=#196 id=196 data-nosnippet>196</a>                </span>);
-<a href=#197 id=197 data-nosnippet>197</a>                <span class="comment">// The comma INSIDE the value's UserType(...) must NOT split the pair.
-<a href=#198 id=198 data-nosnippet>198</a>                </span><span class="macro">assert!</span>(v.starts_with(<span class="string">"org.apache.cassandra.db.marshal.FrozenType("</span>));
-<a href=#199 id=199 data-nosnippet>199</a>            }
-<a href=#200 id=200 data-nosnippet>200</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected Map, got {other:?}"</span>),
-<a href=#201 id=201 data-nosnippet>201</a>        }
-<a href=#202 id=202 data-nosnippet>202</a>    }
-<a href=#203 id=203 data-nosnippet>203</a>
-<a href=#204 id=204 data-nosnippet>204</a>    <span class="attr">#[test]
-<a href=#205 id=205 data-nosnippet>205</a>    </span><span class="kw">fn </span>nested_frozen_list_of_frozen_udt() {
-<a href=#206 id=206 data-nosnippet>206</a>        <span class="comment">// frozen&lt;list&lt;frozen&lt;person&gt;&gt;&gt; — the #1240 `lp` column shape.
-<a href=#207 id=207 data-nosnippet>207</a>        </span><span class="kw">let </span>ht = <span class="string">"org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(ks,706572736f6e,66:org.apache.cassandra.db.marshal.UTF8Type))))"</span>;
-<a href=#208 id=208 data-nosnippet>208</a>        <span class="kw">let </span>got = P::extract_marshal_collection_elements(ht).expect(<span class="string">"list elements"</span>);
-<a href=#209 id=209 data-nosnippet>209</a>        <span class="kw">match </span>got {
-<a href=#210 id=210 data-nosnippet>210</a>            MarshalCollectionElements::Sequence(elem) =&gt; {
-<a href=#211 id=211 data-nosnippet>211</a>                <span class="macro">assert!</span>(P::is_udt_type(elem), <span class="string">"element marshal must carry UserType"</span>);
-<a href=#212 id=212 data-nosnippet>212</a>                <span class="macro">assert!</span>(elem.starts_with(<span class="string">"org.apache.cassandra.db.marshal.FrozenType("</span>));
-<a href=#213 id=213 data-nosnippet>213</a>            }
-<a href=#214 id=214 data-nosnippet>214</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected Sequence, got {other:?}"</span>),
-<a href=#215 id=215 data-nosnippet>215</a>        }
-<a href=#216 id=216 data-nosnippet>216</a>    }
-<a href=#217 id=217 data-nosnippet>217</a>
-<a href=#218 id=218 data-nosnippet>218</a>    <span class="attr">#[test]
-<a href=#219 id=219 data-nosnippet>219</a>    </span><span class="kw">fn </span>tuple_in_collection_returns_tuple_marshal() {
-<a href=#220 id=220 data-nosnippet>220</a>        <span class="kw">let </span>ht = <span class="string">"org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.TupleType(org.apache.cassandra.db.marshal.Int32Type,org.apache.cassandra.db.marshal.UTF8Type)))"</span>;
-<a href=#221 id=221 data-nosnippet>221</a>        <span class="macro">assert_eq!</span>(
-<a href=#222 id=222 data-nosnippet>222</a>            P::extract_marshal_collection_elements(ht),
-<a href=#223 id=223 data-nosnippet>223</a>            <span class="prelude-val">Some</span>(MarshalCollectionElements::Sequence(
-<a href=#224 id=224 data-nosnippet>224</a>                <span class="string">"org.apache.cassandra.db.marshal.TupleType(org.apache.cassandra.db.marshal.Int32Type,org.apache.cassandra.db.marshal.UTF8Type)"
-<a href=#225 id=225 data-nosnippet>225</a>            </span>))
-<a href=#226 id=226 data-nosnippet>226</a>        );
-<a href=#227 id=227 data-nosnippet>227</a>    }
-<a href=#228 id=228 data-nosnippet>228</a>
-<a href=#229 id=229 data-nosnippet>229</a>    <span class="attr">#[test]
-<a href=#230 id=230 data-nosnippet>230</a>    </span><span class="kw">fn </span>malformed_unbalanced_parens_return_none() {
-<a href=#231 id=231 data-nosnippet>231</a>        <span class="comment">// Missing the closing paren — must NOT panic, must return None.
-<a href=#232 id=232 data-nosnippet>232</a>        </span><span class="kw">let </span>ht = <span class="string">"org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type"</span>;
-<a href=#233 id=233 data-nosnippet>233</a>        <span class="macro">assert_eq!</span>(P::extract_marshal_collection_elements(ht), <span class="prelude-val">None</span>);
-<a href=#234 id=234 data-nosnippet>234</a>    }
-<a href=#235 id=235 data-nosnippet>235</a>
-<a href=#236 id=236 data-nosnippet>236</a>    <span class="attr">#[test]
-<a href=#237 id=237 data-nosnippet>237</a>    </span><span class="kw">fn </span>non_collection_marshal_returns_none() {
-<a href=#238 id=238 data-nosnippet>238</a>        <span class="comment">// A top-level frozen UDT is NOT a collection — the collection extractor
-<a href=#239 id=239 data-nosnippet>239</a>        // must decline it (that column takes the top-level frozen-UDT path).
-<a href=#240 id=240 data-nosnippet>240</a>        </span><span class="kw">let </span>ht = <span class="string">"org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(ks,61,66:org.apache.cassandra.db.marshal.UTF8Type))"</span>;
-<a href=#241 id=241 data-nosnippet>241</a>        <span class="macro">assert_eq!</span>(P::extract_marshal_collection_elements(ht), <span class="prelude-val">None</span>);
-<a href=#242 id=242 data-nosnippet>242</a>    }
+<a href=#142 id=142 data-nosnippet>142</a>
+<a href=#143 id=143 data-nosnippet>143</a>    <span class="doccomment">/// THE ONE RULE FOR A MAP KEY'S DECODE TYPE, shared by BOTH map readers
+<a href=#144 id=144 data-nosnippet>144</a>    /// (issue #3612, roborev round 8 finding 1).
+<a href=#145 id=145 data-nosnippet>145</a>    ///
+<a href=#146 id=146 data-nosnippet>146</a>    /// The multicell reader (`complex_column`'s map branch) and the frozen reader
+<a href=#147 id=147 data-nosnippet>147</a>    /// (`cell_value_complex`'s `map&lt;` branch) must hand the SAME string to the same
+<a href=#148 id=148 data-nosnippet>148</a>    /// decoder, or they produce `Value` keys that compare and hash differently for
+<a href=#149 id=149 data-nosnippet>149</a>    /// one CQL value. They previously did not, and the difference was invisible for
+<a href=#150 id=150 data-nosnippet>150</a>    /// UDT keys and visible for COLLECTION keys:
+<a href=#151 id=151 data-nosnippet>151</a>    ///
+<a href=#152 id=152 data-nosnippet>152</a>    /// * multicell `map&lt;frozen&lt;set&lt;frozen&lt;U&gt;&gt;&gt;, int&gt;` → Cassandra records
+<a href=#153 id=153 data-nosnippet>153</a>    ///   `MapType(FrozenType(SetType(UserType(..))),..)`, so the key marshal KEEPS
+<a href=#154 id=154 data-nosnippet>154</a>    ///   its `FrozenType` — a multicell map key must be explicitly frozen;
+<a href=#155 id=155 data-nosnippet>155</a>    /// * frozen `frozen&lt;map&lt;frozen&lt;set&lt;frozen&lt;U&gt;&gt;&gt;, int&gt;&gt;` → Cassandra records
+<a href=#156 id=156 data-nosnippet>156</a>    ///   `FrozenType(MapType(SetType(UserType(..)),..))`, with the INNER marker
+<a href=#157 id=157 data-nosnippet>157</a>    ///   OMITTED, because everything inside a frozen collection is already frozen.
+<a href=#158 id=158 data-nosnippet>158</a>    ///
+<a href=#159 id=159 data-nosnippet>159</a>    /// Decoding those two strings yields `Frozen(Set(Udt))` and `Set(Udt)`. Hence
+<a href=#160 id=160 data-nosnippet>160</a>    /// the strip below: it normalizes the marshal form to the shape the frozen
+<a href=#161 id=161 data-nosnippet>161</a>    /// reader already receives, so both readers decode an identical string and
+<a href=#162 id=162 data-nosnippet>162</a>    /// parity holds BY CONSTRUCTION rather than by a second, value-level
+<a href=#163 id=163 data-nosnippet>163</a>    /// normalizer bolted onto one side (which is what round 3 did, and what left
+<a href=#164 id=164 data-nosnippet>164</a>    /// this hole one nesting level down).
+<a href=#165 id=165 data-nosnippet>165</a>    ///
+<a href=#166 id=166 data-nosnippet>166</a>    /// # WHY MARSHAL BEATS SCHEMA AT ALL — from CASSANDRA, not from our own code
+<a href=#167 id=167 data-nosnippet>167</a>    ///
+<a href=#168 id=168 data-nosnippet>168</a>    /// `SerializationHeader.getType` (cassandra-5.0.8,
+<a href=#169 id=169 data-nosnippet>169</a>    /// `src/java/org/apache/cassandra/db/SerializationHeader.java`) is:
+<a href=#170 id=170 data-nosnippet>170</a>    ///
+<a href=#171 id=171 data-nosnippet>171</a>    /// ```text
+<a href=#172 id=172 data-nosnippet>172</a>    /// public AbstractType&lt;?&gt; getType(ColumnMetadata column)
+<a href=#173 id=173 data-nosnippet>173</a>    /// {
+<a href=#174 id=174 data-nosnippet>174</a>    ///     return typeMap == null ? column.type : typeMap.get(column.name.bytes);
+<a href=#175 id=175 data-nosnippet>175</a>    /// }
+<a href=#176 id=176 data-nosnippet>176</a>    /// ```
+<a href=#177 id=177 data-nosnippet>177</a>    ///
+<a href=#178 id=178 data-nosnippet>178</a>    /// Cassandra's OWN read path decodes with the header's recorded type and falls
+<a href=#179 id=179 data-nosnippet>179</a>    /// back to the live schema's `column.type` only when the header carries no type
+<a href=#180 id=180 data-nosnippet>180</a>    /// map. The recorded type is not a guess — it is what the writer put beside
+<a href=#181 id=181 data-nosnippet>181</a>    /// these bytes, and after an `ALTER` the on-disk bytes conform to IT, not to the
+<a href=#182 id=182 data-nosnippet>182</a>    /// current schema. Decoding old bytes with a newer schema is how you mis-decode
+<a href=#183 id=183 data-nosnippet>183</a>    /// them.
+<a href=#184 id=184 data-nosnippet>184</a>    ///
+<a href=#185 id=185 data-nosnippet>185</a>    /// This does NOT contradict CLAUDE.md's "schema, else `Statistics.db`". That
+<a href=#186 id=186 data-nosnippet>186</a>    /// rule is about where type information may come from AT ALL — prefer declared
+<a href=#187 id=187 data-nosnippet>187</a>    /// metadata, never infer a type from byte patterns (issue #28). It is not a
+<a href=#188 id=188 data-nosnippet>188</a>    /// claim that a user-supplied schema overrides the writer's recorded type for
+<a href=#189 id=189 data-nosnippet>189</a>    /// the same column; `getType` settles that question the other way.
+<a href=#190 id=190 data-nosnippet>190</a>    ///
+<a href=#191 id=191 data-nosnippet>191</a>    /// We are deliberately NARROWER than `getType`: the marshal is taken ONLY when
+<a href=#192 id=192 data-nosnippet>192</a>    /// it is UDT-bearing, so no non-UDT map key changes behaviour. One consequence,
+<a href=#193 id=193 data-nosnippet>193</a>    /// correct rather than unfortunate: a user-supplied schema that DISAGREES with
+<a href=#194 id=194 data-nosnippet>194</a>    /// the recorded type on a UDT-keyed multicell map is ignored — exactly the case
+<a href=#195 id=195 data-nosnippet>195</a>    /// Cassandra resolves in the header's favour.
+<a href=#196 id=196 data-nosnippet>196</a>    ///
+<a href=#197 id=197 data-nosnippet>197</a>    /// The strip is applied ONLY to the marshal form. When
+<a href=#198 id=198 data-nosnippet>198</a>    /// `prefer_udt_marshal_element` keeps the SCHEMA short form — every non
+<a href=#199 id=199 data-nosnippet>199</a>    /// UDT-bearing key — both readers already receive that same unstripped string
+<a href=#200 id=200 data-nosnippet>200</a>    /// (e.g. `frozen&lt;set&lt;int&gt;&gt;` on both sides), so stripping it would break the
+<a href=#201 id=201 data-nosnippet>201</a>    /// parity it is meant to preserve.
+<a href=#202 id=202 data-nosnippet>202</a>    ///
+<a href=#203 id=203 data-nosnippet>203</a>    /// On the FROZEN reader this call is a NO-OP in both branches, by
+<a href=#204 id=204 data-nosnippet>204</a>    /// construction: its marshal key never carries the outer marker (Cassandra
+<a href=#205 id=205 data-nosnippet>205</a>    /// omits it, measured on `f_map_tuple_udt` and `fcm`), and its schema branch is
+<a href=#206 id=206 data-nosnippet>206</a>    /// untouched. It is wired there anyway so the rule has ONE home and cannot
+<a href=#207 id=207 data-nosnippet>207</a>    /// drift into two opinions.
+<a href=#208 id=208 data-nosnippet>208</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>map_key_type_for_decode(marshal: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>str&gt;, schema_short: <span class="kw-2">&amp;</span>str) -&gt; String {
+<a href=#209 id=209 data-nosnippet>209</a>        <span class="kw">match </span>marshal {
+<a href=#210 id=210 data-nosnippet>210</a>            <span class="comment">// This guard MUST stay identical to `prefer_udt_marshal_element`'s, since
+<a href=#211 id=211 data-nosnippet>211</a>            // it decides the same choice; the `debug_assert` pins them together so a
+<a href=#212 id=212 data-nosnippet>212</a>            // change to one cannot silently diverge from the other.
+<a href=#213 id=213 data-nosnippet>213</a>            </span><span class="prelude-val">Some</span>(m) <span class="kw">if </span><span class="self">Self</span>::is_udt_type(m) =&gt; {
+<a href=#214 id=214 data-nosnippet>214</a>                <span class="macro">debug_assert!</span>(
+<a href=#215 id=215 data-nosnippet>215</a>                    std::ptr::eq(
+<a href=#216 id=216 data-nosnippet>216</a>                        <span class="self">Self</span>::prefer_udt_marshal_element(marshal, schema_short),
+<a href=#217 id=217 data-nosnippet>217</a>                        m <span class="kw">as </span><span class="kw-2">&amp;</span>str
+<a href=#218 id=218 data-nosnippet>218</a>                    ),
+<a href=#219 id=219 data-nosnippet>219</a>                    <span class="string">"map_key_type_for_decode's guard diverged from prefer_udt_marshal_element"
+<a href=#220 id=220 data-nosnippet>220</a>                </span>);
+<a href=#221 id=221 data-nosnippet>221</a>                <span class="self">Self</span>::strip_one_outer_frozen_marshal(m).to_string()
+<a href=#222 id=222 data-nosnippet>222</a>            }
+<a href=#223 id=223 data-nosnippet>223</a>            <span class="kw">_ </span>=&gt; schema_short.to_string(),
+<a href=#224 id=224 data-nosnippet>224</a>        }
+<a href=#225 id=225 data-nosnippet>225</a>    }
+<a href=#226 id=226 data-nosnippet>226</a>
+<a href=#227 id=227 data-nosnippet>227</a>    <span class="doccomment">/// Strip at most ONE outer `FrozenType(..)` from a MARSHAL type string,
+<a href=#228 id=228 data-nosnippet>228</a>    /// case-insensitively; return the input unchanged if it carries none.
+<a href=#229 id=229 data-nosnippet>229</a>    </span><span class="kw">fn </span>strip_one_outer_frozen_marshal(marshal: <span class="kw-2">&amp;</span>str) -&gt; <span class="kw-2">&amp;</span>str {
+<a href=#230 id=230 data-nosnippet>230</a>        <span class="kw">const </span>PREFIX: <span class="kw-2">&amp;</span>str = <span class="string">"org.apache.cassandra.db.marshal.frozentype("</span>;
+<a href=#231 id=231 data-nosnippet>231</a>        <span class="kw">let </span>t = marshal.trim();
+<a href=#232 id=232 data-nosnippet>232</a>        <span class="kw">let </span>lower = t.to_ascii_lowercase();
+<a href=#233 id=233 data-nosnippet>233</a>        <span class="kw">if </span>lower.starts_with(PREFIX) &amp;&amp; lower.ends_with(<span class="string">')'</span>) {
+<a href=#234 id=234 data-nosnippet>234</a>            <span class="kw">return </span>t[PREFIX.len()..t.len() - <span class="number">1</span>].trim();
+<a href=#235 id=235 data-nosnippet>235</a>        }
+<a href=#236 id=236 data-nosnippet>236</a>        t
+<a href=#237 id=237 data-nosnippet>237</a>    }
+<a href=#238 id=238 data-nosnippet>238</a>}
+<a href=#239 id=239 data-nosnippet>239</a>
+<a href=#240 id=240 data-nosnippet>240</a><span class="attr">#[cfg(test)]
+<a href=#241 id=241 data-nosnippet>241</a></span><span class="kw">mod </span>tests {
+<a href=#242 id=242 data-nosnippet>242</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
 <a href=#243 id=243 data-nosnippet>243</a>
-<a href=#244 id=244 data-nosnippet>244</a>    <span class="attr">#[test]
-<a href=#245 id=245 data-nosnippet>245</a>    </span><span class="kw">fn </span>map_missing_comma_returns_none() {
-<a href=#246 id=246 data-nosnippet>246</a>        <span class="comment">// MapType with a single (malformed) argument — no top-level comma.
-<a href=#247 id=247 data-nosnippet>247</a>        </span><span class="kw">let </span>ht =
-<a href=#248 id=248 data-nosnippet>248</a>            <span class="string">"org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UTF8Type)"</span>;
-<a href=#249 id=249 data-nosnippet>249</a>        <span class="macro">assert_eq!</span>(P::extract_marshal_collection_elements(ht), <span class="prelude-val">None</span>);
-<a href=#250 id=250 data-nosnippet>250</a>    }
-<a href=#251 id=251 data-nosnippet>251</a>
-<a href=#252 id=252 data-nosnippet>252</a>    <span class="attr">#[test]
-<a href=#253 id=253 data-nosnippet>253</a>    </span><span class="kw">fn </span>empty_and_garbage_return_none() {
-<a href=#254 id=254 data-nosnippet>254</a>        <span class="macro">assert_eq!</span>(P::extract_marshal_collection_elements(<span class="string">""</span>), <span class="prelude-val">None</span>);
-<a href=#255 id=255 data-nosnippet>255</a>        <span class="macro">assert_eq!</span>(
-<a href=#256 id=256 data-nosnippet>256</a>            P::extract_marshal_collection_elements(<span class="string">"not a marshal type"</span>),
-<a href=#257 id=257 data-nosnippet>257</a>            <span class="prelude-val">None
-<a href=#258 id=258 data-nosnippet>258</a>        </span>);
-<a href=#259 id=259 data-nosnippet>259</a>        <span class="macro">assert_eq!</span>(P::extract_marshal_collection_elements(<span class="string">"ListType("</span>), <span class="prelude-val">None</span>);
-<a href=#260 id=260 data-nosnippet>260</a>    }
-<a href=#261 id=261 data-nosnippet>261</a>
-<a href=#262 id=262 data-nosnippet>262</a>    <span class="attr">#[test]
-<a href=#263 id=263 data-nosnippet>263</a>    </span><span class="kw">fn </span>unresolvable_inner_type_decodes_to_blob_no_panic() {
-<a href=#264 id=264 data-nosnippet>264</a>        <span class="comment">// Spec Req 1 scenario 4 (no-heuristics #28): with NO header marshal type
-<a href=#265 id=265 data-nosnippet>265</a>        // and NO wired registry, an unresolvable inner UDT short-name must stay an
-<a href=#266 id=266 data-nosnippet>266</a>        // opaque `Value::Blob` carrying the exact bytes — never a byte-pattern
-<a href=#267 id=267 data-nosnippet>267</a>        // guess, never a panic.
-<a href=#268 id=268 data-nosnippet>268</a>        </span><span class="kw">let </span>parser = V5CompressedLegacyParser::new(<span class="string">"ks"</span>.to_string(), <span class="string">"tbl"</span>.to_string(), <span class="number">0</span>, <span class="number">0</span>, <span class="prelude-val">None</span>);
-<a href=#269 id=269 data-nosnippet>269</a>        <span class="kw">let </span>bytes = [<span class="number">0xDE</span>, <span class="number">0xAD</span>, <span class="number">0xBE</span>, <span class="number">0xEF</span>];
-<a href=#270 id=270 data-nosnippet>270</a>        <span class="kw">let </span>val = parser
-<a href=#271 id=271 data-nosnippet>271</a>            .parse_value_from_raw_bytes(<span class="kw-2">&amp;</span>bytes, <span class="string">"some_unregistered_udt"</span>, <span class="string">"col"</span>, <span class="number">0</span>)
-<a href=#272 id=272 data-nosnippet>272</a>            .expect(<span class="string">"unresolved UDT must not error"</span>);
-<a href=#273 id=273 data-nosnippet>273</a>        <span class="macro">assert_eq!</span>(val, Value::blob(bytes.to_vec()));
-<a href=#274 id=274 data-nosnippet>274</a>    }
-<a href=#275 id=275 data-nosnippet>275</a>
-<a href=#276 id=276 data-nosnippet>276</a>    <span class="attr">#[test]
-<a href=#277 id=277 data-nosnippet>277</a>    </span><span class="kw">fn </span>prefer_marshal_only_for_udt_elements() {
-<a href=#278 id=278 data-nosnippet>278</a>        <span class="kw">let </span>udt = <span class="string">"org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(ks,61))"</span>;
-<a href=#279 id=279 data-nosnippet>279</a>        <span class="comment">// UDT-bearing marshal wins over the schema short form.
-<a href=#280 id=280 data-nosnippet>280</a>        </span><span class="macro">assert_eq!</span>(
-<a href=#281 id=281 data-nosnippet>281</a>            P::prefer_udt_marshal_element(<span class="prelude-val">Some</span>(udt), <span class="string">"frozen&lt;person&gt;"</span>),
-<a href=#282 id=282 data-nosnippet>282</a>            udt
-<a href=#283 id=283 data-nosnippet>283</a>        );
-<a href=#284 id=284 data-nosnippet>284</a>        <span class="comment">// Non-UDT marshal (primitive) keeps the schema short form (byte-parity path).
-<a href=#285 id=285 data-nosnippet>285</a>        </span><span class="macro">assert_eq!</span>(
-<a href=#286 id=286 data-nosnippet>286</a>            P::prefer_udt_marshal_element(<span class="prelude-val">Some</span>(<span class="string">"org.apache.cassandra.db.marshal.Int32Type"</span>), <span class="string">"int"</span>),
-<a href=#287 id=287 data-nosnippet>287</a>            <span class="string">"int"
-<a href=#288 id=288 data-nosnippet>288</a>        </span>);
-<a href=#289 id=289 data-nosnippet>289</a>        <span class="comment">// Absent marshal keeps the schema short form.
-<a href=#290 id=290 data-nosnippet>290</a>        </span><span class="macro">assert_eq!</span>(P::prefer_udt_marshal_element(<span class="prelude-val">None</span>, <span class="string">"int"</span>), <span class="string">"int"</span>);
-<a href=#291 id=291 data-nosnippet>291</a>    }
-<a href=#292 id=292 data-nosnippet>292</a>}
+<a href=#244 id=244 data-nosnippet>244</a>    <span class="kw">type </span>P = V5CompressedLegacyParser;
+<a href=#245 id=245 data-nosnippet>245</a>
+<a href=#246 id=246 data-nosnippet>246</a>    <span class="attr">#[test]
+<a href=#247 id=247 data-nosnippet>247</a>    </span><span class="kw">fn </span>list_marshal_element_extracted() {
+<a href=#248 id=248 data-nosnippet>248</a>        <span class="kw">let </span>ht = <span class="string">"org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type))"</span>;
+<a href=#249 id=249 data-nosnippet>249</a>        <span class="macro">assert_eq!</span>(
+<a href=#250 id=250 data-nosnippet>250</a>            P::extract_marshal_collection_elements(ht),
+<a href=#251 id=251 data-nosnippet>251</a>            <span class="prelude-val">Some</span>(MarshalCollectionElements::Sequence(
+<a href=#252 id=252 data-nosnippet>252</a>                <span class="string">"org.apache.cassandra.db.marshal.Int32Type"
+<a href=#253 id=253 data-nosnippet>253</a>            </span>))
+<a href=#254 id=254 data-nosnippet>254</a>        );
+<a href=#255 id=255 data-nosnippet>255</a>    }
+<a href=#256 id=256 data-nosnippet>256</a>
+<a href=#257 id=257 data-nosnippet>257</a>    <span class="attr">#[test]
+<a href=#258 id=258 data-nosnippet>258</a>    </span><span class="kw">fn </span>set_marshal_element_extracted() {
+<a href=#259 id=259 data-nosnippet>259</a>        <span class="kw">let </span>ht = <span class="string">"org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.UTF8Type))"</span>;
+<a href=#260 id=260 data-nosnippet>260</a>        <span class="macro">assert_eq!</span>(
+<a href=#261 id=261 data-nosnippet>261</a>            P::extract_marshal_collection_elements(ht),
+<a href=#262 id=262 data-nosnippet>262</a>            <span class="prelude-val">Some</span>(MarshalCollectionElements::Sequence(
+<a href=#263 id=263 data-nosnippet>263</a>                <span class="string">"org.apache.cassandra.db.marshal.UTF8Type"
+<a href=#264 id=264 data-nosnippet>264</a>            </span>))
+<a href=#265 id=265 data-nosnippet>265</a>        );
+<a href=#266 id=266 data-nosnippet>266</a>    }
+<a href=#267 id=267 data-nosnippet>267</a>
+<a href=#268 id=268 data-nosnippet>268</a>    <span class="attr">#[test]
+<a href=#269 id=269 data-nosnippet>269</a>    </span><span class="kw">fn </span>bare_listtype_without_frozen_wrapper() {
+<a href=#270 id=270 data-nosnippet>270</a>        <span class="comment">// Tolerate a header that is not wrapped in FrozenType(...).
+<a href=#271 id=271 data-nosnippet>271</a>        </span><span class="kw">let </span>ht =
+<a href=#272 id=272 data-nosnippet>272</a>            <span class="string">"org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type)"</span>;
+<a href=#273 id=273 data-nosnippet>273</a>        <span class="macro">assert_eq!</span>(
+<a href=#274 id=274 data-nosnippet>274</a>            P::extract_marshal_collection_elements(ht),
+<a href=#275 id=275 data-nosnippet>275</a>            <span class="prelude-val">Some</span>(MarshalCollectionElements::Sequence(
+<a href=#276 id=276 data-nosnippet>276</a>                <span class="string">"org.apache.cassandra.db.marshal.Int32Type"
+<a href=#277 id=277 data-nosnippet>277</a>            </span>))
+<a href=#278 id=278 data-nosnippet>278</a>        );
+<a href=#279 id=279 data-nosnippet>279</a>    }
+<a href=#280 id=280 data-nosnippet>280</a>
+<a href=#281 id=281 data-nosnippet>281</a>    <span class="attr">#[test]
+<a href=#282 id=282 data-nosnippet>282</a>    </span><span class="kw">fn </span>map_marshal_key_value_extracted() {
+<a href=#283 id=283 data-nosnippet>283</a>        <span class="comment">// frozen&lt;map&lt;text, frozen&lt;address&gt;&gt;&gt;
+<a href=#284 id=284 data-nosnippet>284</a>        </span><span class="kw">let </span>ht = <span class="string">"org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(ks,61,66:org.apache.cassandra.db.marshal.UTF8Type))))"</span>;
+<a href=#285 id=285 data-nosnippet>285</a>        <span class="kw">let </span>got = P::extract_marshal_collection_elements(ht).expect(<span class="string">"map elements"</span>);
+<a href=#286 id=286 data-nosnippet>286</a>        <span class="kw">match </span>got {
+<a href=#287 id=287 data-nosnippet>287</a>            MarshalCollectionElements::Map(k, v) =&gt; {
+<a href=#288 id=288 data-nosnippet>288</a>                <span class="macro">assert_eq!</span>(k, <span class="string">"org.apache.cassandra.db.marshal.UTF8Type"</span>);
+<a href=#289 id=289 data-nosnippet>289</a>                <span class="macro">assert!</span>(
+<a href=#290 id=290 data-nosnippet>290</a>                    P::is_udt_type(v),
+<a href=#291 id=291 data-nosnippet>291</a>                    <span class="string">"map value marshal must carry UserType: {v}"
+<a href=#292 id=292 data-nosnippet>292</a>                </span>);
+<a href=#293 id=293 data-nosnippet>293</a>                <span class="comment">// The comma INSIDE the value's UserType(...) must NOT split the pair.
+<a href=#294 id=294 data-nosnippet>294</a>                </span><span class="macro">assert!</span>(v.starts_with(<span class="string">"org.apache.cassandra.db.marshal.FrozenType("</span>));
+<a href=#295 id=295 data-nosnippet>295</a>            }
+<a href=#296 id=296 data-nosnippet>296</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected Map, got {other:?}"</span>),
+<a href=#297 id=297 data-nosnippet>297</a>        }
+<a href=#298 id=298 data-nosnippet>298</a>    }
+<a href=#299 id=299 data-nosnippet>299</a>
+<a href=#300 id=300 data-nosnippet>300</a>    <span class="attr">#[test]
+<a href=#301 id=301 data-nosnippet>301</a>    </span><span class="kw">fn </span>nested_frozen_list_of_frozen_udt() {
+<a href=#302 id=302 data-nosnippet>302</a>        <span class="comment">// frozen&lt;list&lt;frozen&lt;person&gt;&gt;&gt; — the #1240 `lp` column shape.
+<a href=#303 id=303 data-nosnippet>303</a>        </span><span class="kw">let </span>ht = <span class="string">"org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(ks,706572736f6e,66:org.apache.cassandra.db.marshal.UTF8Type))))"</span>;
+<a href=#304 id=304 data-nosnippet>304</a>        <span class="kw">let </span>got = P::extract_marshal_collection_elements(ht).expect(<span class="string">"list elements"</span>);
+<a href=#305 id=305 data-nosnippet>305</a>        <span class="kw">match </span>got {
+<a href=#306 id=306 data-nosnippet>306</a>            MarshalCollectionElements::Sequence(elem) =&gt; {
+<a href=#307 id=307 data-nosnippet>307</a>                <span class="macro">assert!</span>(P::is_udt_type(elem), <span class="string">"element marshal must carry UserType"</span>);
+<a href=#308 id=308 data-nosnippet>308</a>                <span class="macro">assert!</span>(elem.starts_with(<span class="string">"org.apache.cassandra.db.marshal.FrozenType("</span>));
+<a href=#309 id=309 data-nosnippet>309</a>            }
+<a href=#310 id=310 data-nosnippet>310</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected Sequence, got {other:?}"</span>),
+<a href=#311 id=311 data-nosnippet>311</a>        }
+<a href=#312 id=312 data-nosnippet>312</a>    }
+<a href=#313 id=313 data-nosnippet>313</a>
+<a href=#314 id=314 data-nosnippet>314</a>    <span class="attr">#[test]
+<a href=#315 id=315 data-nosnippet>315</a>    </span><span class="kw">fn </span>tuple_in_collection_returns_tuple_marshal() {
+<a href=#316 id=316 data-nosnippet>316</a>        <span class="kw">let </span>ht = <span class="string">"org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.TupleType(org.apache.cassandra.db.marshal.Int32Type,org.apache.cassandra.db.marshal.UTF8Type)))"</span>;
+<a href=#317 id=317 data-nosnippet>317</a>        <span class="macro">assert_eq!</span>(
+<a href=#318 id=318 data-nosnippet>318</a>            P::extract_marshal_collection_elements(ht),
+<a href=#319 id=319 data-nosnippet>319</a>            <span class="prelude-val">Some</span>(MarshalCollectionElements::Sequence(
+<a href=#320 id=320 data-nosnippet>320</a>                <span class="string">"org.apache.cassandra.db.marshal.TupleType(org.apache.cassandra.db.marshal.Int32Type,org.apache.cassandra.db.marshal.UTF8Type)"
+<a href=#321 id=321 data-nosnippet>321</a>            </span>))
+<a href=#322 id=322 data-nosnippet>322</a>        );
+<a href=#323 id=323 data-nosnippet>323</a>    }
+<a href=#324 id=324 data-nosnippet>324</a>
+<a href=#325 id=325 data-nosnippet>325</a>    <span class="attr">#[test]
+<a href=#326 id=326 data-nosnippet>326</a>    </span><span class="kw">fn </span>malformed_unbalanced_parens_return_none() {
+<a href=#327 id=327 data-nosnippet>327</a>        <span class="comment">// Missing the closing paren — must NOT panic, must return None.
+<a href=#328 id=328 data-nosnippet>328</a>        </span><span class="kw">let </span>ht = <span class="string">"org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type"</span>;
+<a href=#329 id=329 data-nosnippet>329</a>        <span class="macro">assert_eq!</span>(P::extract_marshal_collection_elements(ht), <span class="prelude-val">None</span>);
+<a href=#330 id=330 data-nosnippet>330</a>    }
+<a href=#331 id=331 data-nosnippet>331</a>
+<a href=#332 id=332 data-nosnippet>332</a>    <span class="attr">#[test]
+<a href=#333 id=333 data-nosnippet>333</a>    </span><span class="kw">fn </span>non_collection_marshal_returns_none() {
+<a href=#334 id=334 data-nosnippet>334</a>        <span class="comment">// A top-level frozen UDT is NOT a collection — the collection extractor
+<a href=#335 id=335 data-nosnippet>335</a>        // must decline it (that column takes the top-level frozen-UDT path).
+<a href=#336 id=336 data-nosnippet>336</a>        </span><span class="kw">let </span>ht = <span class="string">"org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(ks,61,66:org.apache.cassandra.db.marshal.UTF8Type))"</span>;
+<a href=#337 id=337 data-nosnippet>337</a>        <span class="macro">assert_eq!</span>(P::extract_marshal_collection_elements(ht), <span class="prelude-val">None</span>);
+<a href=#338 id=338 data-nosnippet>338</a>    }
+<a href=#339 id=339 data-nosnippet>339</a>
+<a href=#340 id=340 data-nosnippet>340</a>    <span class="attr">#[test]
+<a href=#341 id=341 data-nosnippet>341</a>    </span><span class="kw">fn </span>map_missing_comma_returns_none() {
+<a href=#342 id=342 data-nosnippet>342</a>        <span class="comment">// MapType with a single (malformed) argument — no top-level comma.
+<a href=#343 id=343 data-nosnippet>343</a>        </span><span class="kw">let </span>ht =
+<a href=#344 id=344 data-nosnippet>344</a>            <span class="string">"org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UTF8Type)"</span>;
+<a href=#345 id=345 data-nosnippet>345</a>        <span class="macro">assert_eq!</span>(P::extract_marshal_collection_elements(ht), <span class="prelude-val">None</span>);
+<a href=#346 id=346 data-nosnippet>346</a>    }
+<a href=#347 id=347 data-nosnippet>347</a>
+<a href=#348 id=348 data-nosnippet>348</a>    <span class="attr">#[test]
+<a href=#349 id=349 data-nosnippet>349</a>    </span><span class="kw">fn </span>empty_and_garbage_return_none() {
+<a href=#350 id=350 data-nosnippet>350</a>        <span class="macro">assert_eq!</span>(P::extract_marshal_collection_elements(<span class="string">""</span>), <span class="prelude-val">None</span>);
+<a href=#351 id=351 data-nosnippet>351</a>        <span class="macro">assert_eq!</span>(
+<a href=#352 id=352 data-nosnippet>352</a>            P::extract_marshal_collection_elements(<span class="string">"not a marshal type"</span>),
+<a href=#353 id=353 data-nosnippet>353</a>            <span class="prelude-val">None
+<a href=#354 id=354 data-nosnippet>354</a>        </span>);
+<a href=#355 id=355 data-nosnippet>355</a>        <span class="macro">assert_eq!</span>(P::extract_marshal_collection_elements(<span class="string">"ListType("</span>), <span class="prelude-val">None</span>);
+<a href=#356 id=356 data-nosnippet>356</a>    }
+<a href=#357 id=357 data-nosnippet>357</a>
+<a href=#358 id=358 data-nosnippet>358</a>    <span class="attr">#[test]
+<a href=#359 id=359 data-nosnippet>359</a>    </span><span class="kw">fn </span>unresolvable_inner_type_decodes_to_blob_no_panic() {
+<a href=#360 id=360 data-nosnippet>360</a>        <span class="comment">// Spec Req 1 scenario 4 (no-heuristics #28): with NO header marshal type
+<a href=#361 id=361 data-nosnippet>361</a>        // and NO wired registry, an unresolvable inner UDT short-name must stay an
+<a href=#362 id=362 data-nosnippet>362</a>        // opaque `Value::Blob` carrying the exact bytes — never a byte-pattern
+<a href=#363 id=363 data-nosnippet>363</a>        // guess, never a panic.
+<a href=#364 id=364 data-nosnippet>364</a>        </span><span class="kw">let </span>parser = V5CompressedLegacyParser::new(<span class="string">"ks"</span>.to_string(), <span class="string">"tbl"</span>.to_string(), <span class="number">0</span>, <span class="number">0</span>, <span class="prelude-val">None</span>);
+<a href=#365 id=365 data-nosnippet>365</a>        <span class="kw">let </span>bytes = [<span class="number">0xDE</span>, <span class="number">0xAD</span>, <span class="number">0xBE</span>, <span class="number">0xEF</span>];
+<a href=#366 id=366 data-nosnippet>366</a>        <span class="kw">let </span>val = parser
+<a href=#367 id=367 data-nosnippet>367</a>            .parse_value_from_raw_bytes(<span class="kw-2">&amp;</span>bytes, <span class="string">"some_unregistered_udt"</span>, <span class="string">"col"</span>, <span class="number">0</span>)
+<a href=#368 id=368 data-nosnippet>368</a>            .expect(<span class="string">"unresolved UDT must not error"</span>);
+<a href=#369 id=369 data-nosnippet>369</a>        <span class="macro">assert_eq!</span>(val, Value::blob(bytes.to_vec()));
+<a href=#370 id=370 data-nosnippet>370</a>    }
+<a href=#371 id=371 data-nosnippet>371</a>
+<a href=#372 id=372 data-nosnippet>372</a>    <span class="attr">#[test]
+<a href=#373 id=373 data-nosnippet>373</a>    </span><span class="kw">fn </span>prefer_marshal_only_for_udt_elements() {
+<a href=#374 id=374 data-nosnippet>374</a>        <span class="kw">let </span>udt = <span class="string">"org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(ks,61))"</span>;
+<a href=#375 id=375 data-nosnippet>375</a>        <span class="comment">// UDT-bearing marshal wins over the schema short form.
+<a href=#376 id=376 data-nosnippet>376</a>        </span><span class="macro">assert_eq!</span>(
+<a href=#377 id=377 data-nosnippet>377</a>            P::prefer_udt_marshal_element(<span class="prelude-val">Some</span>(udt), <span class="string">"frozen&lt;person&gt;"</span>),
+<a href=#378 id=378 data-nosnippet>378</a>            udt
+<a href=#379 id=379 data-nosnippet>379</a>        );
+<a href=#380 id=380 data-nosnippet>380</a>        <span class="comment">// Non-UDT marshal (primitive) keeps the schema short form (byte-parity path).
+<a href=#381 id=381 data-nosnippet>381</a>        </span><span class="macro">assert_eq!</span>(
+<a href=#382 id=382 data-nosnippet>382</a>            P::prefer_udt_marshal_element(<span class="prelude-val">Some</span>(<span class="string">"org.apache.cassandra.db.marshal.Int32Type"</span>), <span class="string">"int"</span>),
+<a href=#383 id=383 data-nosnippet>383</a>            <span class="string">"int"
+<a href=#384 id=384 data-nosnippet>384</a>        </span>);
+<a href=#385 id=385 data-nosnippet>385</a>        <span class="comment">// Absent marshal keeps the schema short form.
+<a href=#386 id=386 data-nosnippet>386</a>        </span><span class="macro">assert_eq!</span>(P::prefer_udt_marshal_element(<span class="prelude-val">None</span>, <span class="string">"int"</span>), <span class="string">"int"</span>);
+<a href=#387 id=387 data-nosnippet>387</a>    }
+<a href=#388 id=388 data-nosnippet>388</a>}
 </code></pre></div></section></main></body></html>

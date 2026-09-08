@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ASSUMED_DECODE_MULTIPLIER","MIN_ACCESSES","RECOMMENDED_GO_THRESHOLD"],"enum":["Refusal","Verdict","WindowSource"],"fn":["evaluate","evaluate_with_threshold"],"struct":["Ceiling"]};

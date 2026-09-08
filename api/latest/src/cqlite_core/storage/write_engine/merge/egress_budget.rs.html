@@ -1,0 +1,666 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/write_engine/merge/egress_budget.rs`."><title>egress_budget.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../src-files.js"></script><script defer src="../../../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/write_engine/merge/</div>egress_budget.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Process-global adaptive egress budget for concurrent k-way merges
+<a href=#2 id=2 data-nosnippet>2</a>//! (issues #2765/#2600/#2367).
+<a href=#3 id=3 data-nosnippet>3</a>//!
+<a href=#4 id=4 data-nosnippet>4</a>//! A k-way merge streams each of its `K` input SSTables through a bounded
+<a href=#5 id=5 data-nosnippet>5</a>//! producer→consumer `sync_channel` that buffers prefetched `MergeEntry` values
+<a href=#6 id=6 data-nosnippet>6</a>//! (see `STREAMING_CHANNEL_CAPACITY`, `merge/mod.rs`). With a FIXED per-channel
+<a href=#7 id=7 data-nosnippet>7</a>//! capacity, the rows buffered by a SINGLE merge grew as `K × per_source`, and
+<a href=#8 id=8 data-nosnippet>8</a>//! across the process as `active_merges × K × per_source` — an unbounded
+<a href=#9 id=9 data-nosnippet>9</a>//! aggregate working set under concurrent scan/compaction load (the #2600/#2367
+<a href=#10 id=10 data-nosnippet>10</a>//! backpressure gap; the field signal was ~80 producer threads live at once).
+<a href=#11 id=11 data-nosnippet>11</a>//!
+<a href=#12 id=12 data-nosnippet>12</a>//! ## `per_source` — the ONE quantity every aggregate here multiplies (#2820)
+<a href=#13 id=13 data-nosnippet>13</a>//!
+<a href=#14 id=14 data-nosnippet>14</a>//! Every figure below is a PRODUCT of a per-source row bound, so it is stated in
+<a href=#15 id=15 data-nosnippet>15</a>//! terms of that quantity rather than a literal — the literals moved once
+<a href=#16 id=16 data-nosnippet>16</a>//! already. Since #2820 an egress channel carries BATCHES, and three populations
+<a href=#17 id=17 data-nosnippet>17</a>//! coexist at one instant (channel-resident, consumer-held, and the batch a
+<a href=#18 id=18 data-nosnippet>18</a>//! producer is PARKED holding in `send`), so:
+<a href=#19 id=19 data-nosnippet>19</a>//!
+<a href=#20 id=20 data-nosnippet>20</a>//! ```text
+<a href=#21 id=21 data-nosnippet>21</a>//! per_source = egress_batch::max_inflight_rows(cap_per_channel)
+<a href=#22 id=22 data-nosnippet>22</a>//!            = (msg_cap + 2) × batch_ceiling
+<a href=#23 id=23 data-nosnippet>23</a>//!            = 4 × cap_per_channel        (at every reachable setting)
+<a href=#24 id=24 data-nosnippet>24</a>//! ```
+<a href=#25 id=25 data-nosnippet>25</a>//!
+<a href=#26 id=26 data-nosnippet>26</a>//! of which `egress_batch::rows_resident_in_channel(cap_per_channel)` =
+<a href=#27 id=27 data-nosnippet>27</a>//! `2 × cap_per_channel` is the strictly smaller half the #2419 depth gauge can
+<a href=#28 id=28 data-nosnippet>28</a>//! observe, and a cold-started producer parks holding less again
+<a href=#29 id=29 data-nosnippet>29</a>//! (`egress_batch::rows_in_full_channel(cap) + batch_ceiling + 1`, the ramp sum).
+<a href=#30 id=30 data-nosnippet>30</a>//!
+<a href=#31 id=31 data-nosnippet>31</a>//! The pre-#2820 per-source figure was `cap_per_channel` ITSELF (one row per
+<a href=#32 id=32 data-nosnippet>32</a>//! channel slot), so **every product in this module is 4× what the same sentence
+<a href=#33 id=33 data-nosnippet>33</a>//! said before #2820**. That 4× is the envelope of record for #2820 — the
+<a href=#34 id=34 data-nosnippet>34</a>//! reconciliation that makes a ~256× reduction in cross-thread sends safe — not
+<a href=#35 id=35 data-nosnippet>35</a>//! an accidental regression, and it is measured, not argued (dhat peak FELL
+<a href=#36 id=36 data-nosnippet>36</a>//! against the pre-change baseline, because batching also shortens the interval
+<a href=#37 id=37 data-nosnippet>37</a>//! over which a producer holds rows at all). Two substitutions to refuse:
+<a href=#38 id=38 data-nosnippet>38</a>//! putting the channel-resident figure in for `per_source` understates the
+<a href=#39 id=39 data-nosnippet>39</a>//! MEMORY bound 2×, and putting `cap_per_channel` in understates it 4× — which
+<a href=#40 id=40 data-nosnippet>40</a>//! is exactly how the four aggregate sentences below went stale.
+<a href=#41 id=41 data-nosnippet>41</a>//!
+<a href=#42 id=42 data-nosnippet>42</a>//! ## The unit is a MERGE, not a source channel
+<a href=#43 id=43 data-nosnippet>43</a>//!
+<a href=#44 id=44 data-nosnippet>44</a>//! The count keyed here is **concurrent k-way MERGE operations**, incremented
+<a href=#45 id=45 data-nosnippet>45</a>//! exactly ONCE per merge — when a [`KWayMerger`](super::KWayMerger) is
+<a href=#46 id=46 data-nosnippet>46</a>//! constructed — NOT once per source channel. (An earlier revision counted per
+<a href=#47 id=47 data-nosnippet>47</a>//! source adapter, so a solo `K`-way compaction registered `K` "merges" and its
+<a href=#48 id=48 data-nosnippet>48</a>//! own later source channels shrank below 256 — violating the "a single merge is
+<a href=#49 id=49 data-nosnippet>49</a>//! unchanged = 256 per source" contract regardless of `K`. Keying per merge
+<a href=#50 id=50 data-nosnippet>50</a>//! fixes that.) This is also why the count deliberately differs from
+<a href=#51 id=51 data-nosnippet>51</a>//! [`producer_gauge`](super::producer_gauge)'s `LIVE`, which counts per-SOURCE
+<a href=#52 id=52 data-nosnippet>52</a>//! producer THREADS (`O(K × active_merges)`): that gauge answers "how many
+<a href=#53 id=53 data-nosnippet>53</a>//! producer threads exist"; this counter answers "how many merge operations are
+<a href=#54 id=54 data-nosnippet>54</a>//! competing for the egress budget".
+<a href=#55 id=55 data-nosnippet>55</a>//!
+<a href=#56 id=56 data-nosnippet>56</a>//! ## Capacity snapshot
+<a href=#57 id=57 data-nosnippet>57</a>//!
+<a href=#58 id=58 data-nosnippet>58</a>//! At merge construction the active-merge count is incremented ONCE (via
+<a href=#59 id=59 data-nosnippet>59</a>//! [`begin_merge`], returning an [`ActiveMergeGuard`] stored on the
+<a href=#60 id=60 data-nosnippet>60</a>//! `KWayMerger`, decremented exactly once when the whole merge is dropped — even
+<a href=#61 id=61 data-nosnippet>61</a>//! on panic/early-return) and a single per-channel capacity is snapshotted:
+<a href=#62 id=62 data-nosnippet>62</a>//!
+<a href=#63 id=63 data-nosnippet>63</a>//! ```text
+<a href=#64 id=64 data-nosnippet>64</a>//! cap_per_channel = clamp(EGRESS_ROW_BUDGET / active_merge_count, MIN_CAP, MAX_CAP)
+<a href=#65 id=65 data-nosnippet>65</a>//! ```
+<a href=#66 id=66 data-nosnippet>66</a>//!
+<a href=#67 id=67 data-nosnippet>67</a>//! ALL `K` source channels of that merge use the SAME snapshot. So a SOLO merge
+<a href=#68 id=68 data-nosnippet>68</a>//! (active = 1) gives 256 per source for ANY `K` (single-merge behavior
+<a href=#69 id=69 data-nosnippet>69</a>//! unchanged); the cap shrinks only as CONCURRENT merges rise.
+<a href=#70 id=70 data-nosnippet>70</a>//!
+<a href=#71 id=71 data-nosnippet>71</a>//! ## Honest bound (NOT a strict global `≤ EGRESS_ROW_BUDGET`)
+<a href=#72 id=72 data-nosnippet>72</a>//!
+<a href=#73 id=73 data-nosnippet>73</a>//! [`EGRESS_ROW_BUDGET`] is a per-ACTIVE-MERGE-SLOT budget, not a hard global
+<a href=#74 id=74 data-nosnippet>74</a>//! ceiling. Because every source channel of a merge gets `cap_per_channel`, the
+<a href=#75 id=75 data-nosnippet>75</a>//! honest worst-case global working set is
+<a href=#76 id=76 data-nosnippet>76</a>//!
+<a href=#77 id=77 data-nosnippet>77</a>//! ```text
+<a href=#78 id=78 data-nosnippet>78</a>//! working_set ≈ active_merges × K × per_source
+<a href=#79 id=79 data-nosnippet>79</a>//!             = active_merges × K × max_inflight_rows(cap_per_channel)
+<a href=#80 id=80 data-nosnippet>80</a>//!             = 4 × active_merges × K × cap_per_channel
+<a href=#81 id=81 data-nosnippet>81</a>//! ```
+<a href=#82 id=82 data-nosnippet>82</a>//!
+<a href=#83 id=83 data-nosnippet>83</a>//! which for `active_merges ≥ EGRESS_ROW_BUDGET / MAX_CAP` is `≈ 4 × K × budget`
+<a href=#84 id=84 data-nosnippet>84</a>//! (the `/active` division cancels the outer `active` factor down to ONE budget
+<a href=#85 id=85 data-nosnippet>85</a>//! per source-fanout, and `per_source` keeps its 4×), and is floored by
+<a href=#86 id=86 data-nosnippet>86</a>//! `active_merges × K × max_inflight_rows(MIN_CAP)` = `4 × active_merges × K ×
+<a href=#87 id=87 data-nosnippet>87</a>//! MIN_CAP` — the deliberate cost of the forward-progress floor. Of that working
+<a href=#88 id=88 data-nosnippet>88</a>//! set, half is channel-RESIDENT (`2 ×` rather than `4 ×`); the other half is the
+<a href=#89 id=89 data-nosnippet>89</a>//! consumer-held and producer-parked batches, which are just as real to the
+<a href=#90 id=90 data-nosnippet>90</a>//! allocator and so belong in a MEMORY figure. The win vs. the fixed cap is
+<a href=#91 id=91 data-nosnippet>91</a>//! unchanged and is the removal of the per-source CONSTANT: `per_source` is a
+<a href=#92 id=92 data-nosnippet>92</a>//! multiple of `cap_per_channel` at every setting, so caps fall toward
+<a href=#93 id=93 data-nosnippet>93</a>//! [`MIN_CAP`] as concurrency climbs instead of every channel holding a fixed
+<a href=#94 id=94 data-nosnippet>94</a>//! `MAX_CAP` worth. Do NOT read this as a strict `≤ EGRESS_ROW_BUDGET` global
+<a href=#95 id=95 data-nosnippet>95</a>//! bound — it never was one, and since #2820 it is 4× further from one.
+<a href=#96 id=96 data-nosnippet>96</a>//!
+<a href=#97 id=97 data-nosnippet>97</a>//! Residual K-linear dimension: the budget divides by merge COUNT only, never by
+<a href=#98 id=98 data-nosnippet>98</a>//! per-merge fanout `K`, so a SINGLE wide merge still buffers up to
+<a href=#99 id=99 data-nosnippet>99</a>//! `K × max_inflight_rows(MAX_CAP)` = `4 × K × MAX_CAP` entries invariant to
+<a href=#100 id=100 data-nosnippet>100</a>//! concurrency — intended (the owner's "a solo merge is unchanged for any `K`"
+<a href=#101 id=101 data-nosnippet>101</a>//! contract), and 4× the pre-#2820 `K × MAX_CAP`, so the ~60 MB this doc used to
+<a href=#102 id=102 data-nosnippet>102</a>//! quote at `K = 100` is ~240 MB at the same ~2.4 KB/row. For any row shape fat
+<a href=#103 id=103 data-nosnippet>103</a>//! enough to matter the BYTE budget binds first and is the figure to reason with:
+<a href=#104 id=104 data-nosnippet>104</a>//! `K × egress_batch::max_inflight_bytes(cap, max_row_bytes)` =
+<a href=#105 id=105 data-nosnippet>105</a>//! `4 × K × (BATCH_EMIT_BYTES_MERGE + max_row_bytes)`, ≈ 4 MiB per source. Both
+<a href=#106 id=106 data-nosnippet>106</a>//! are worst-case row bounds against a STALLED consumer, not steady state. The
+<a href=#107 id=107 data-nosnippet>107</a>//! high-`K` envelope is validated by the #2895 loadgen sweep (deferred
+<a href=#108 id=108 data-nosnippet>108</a>//! follow-up).
+<a href=#109 id=109 data-nosnippet>109</a>//!
+<a href=#110 id=110 data-nosnippet>110</a>//! The snapshot is taken ONCE at construction and never revised, so it is
+<a href=#111 id=111 data-nosnippet>111</a>//! order-dependent, not fair: a long-lived merge that starts during a burst
+<a href=#112 id=112 data-nosnippet>112</a>//! stays PINNED at its low snapshot cap for its entire life, even after the
+<a href=#113 id=113 data-nosnippet>113</a>//! burst clears and concurrency drops back to one. Conversely a merge that
+<a href=#114 id=114 data-nosnippet>114</a>//! starts while the process is idle keeps the full 256 per channel even as later
+<a href=#115 id=115 data-nosnippet>115</a>//! merges arriving during ITS lifetime are squeezed toward [`MIN_CAP`] — the
+<a href=#116 id=116 data-nosnippet>116</a>//! throttle falls on the newcomers, not the incumbent.
+<a href=#117 id=117 data-nosnippet>117</a>//!
+<a href=#118 id=118 data-nosnippet>118</a>//! ## Operator knobs
+<a href=#119 id=119 data-nosnippet>119</a>//!
+<a href=#120 id=120 data-nosnippet>120</a>//! Both bounds are runtime-overridable env knobs (parsed ONCE per process — see
+<a href=#121 id=121 data-nosnippet>121</a>//! [`resolved`] — never on the per-merge hot path), defaulting to the shipped
+<a href=#122 id=122 data-nosnippet>122</a>//! values so behavior is unchanged when unset:
+<a href=#123 id=123 data-nosnippet>123</a>//!
+<a href=#124 id=124 data-nosnippet>124</a>//! * `CQLITE_EGRESS_ROW_BUDGET` → [`EGRESS_ROW_BUDGET`] (default `2048`): the
+<a href=#125 id=125 data-nosnippet>125</a>//!   per-active-merge-slot budget divided among a merge's channels.
+<a href=#126 id=126 data-nosnippet>126</a>//! * `CQLITE_EGRESS_MIN_CAP` → [`MIN_CAP`] (default `8`): the forward-progress
+<a href=#127 id=127 data-nosnippet>127</a>//!   floor, clamped to `[1, MAX_CAP]`; the budget is forced `≥ min_cap`.
+<a href=#128 id=128 data-nosnippet>128</a>//!
+<a href=#129 id=129 data-nosnippet>129</a>//! A missing/unparseable/zero value falls back to the default (never panics).
+<a href=#130 id=130 data-nosnippet>130</a>//!
+<a href=#131 id=131 data-nosnippet>131</a>//! ## AC#3 grounding (throughput evidence) — NOT "gap closed"
+<a href=#132 id=132 data-nosnippet>132</a>//!
+<a href=#133 id=133 data-nosnippet>133</a>//! With the DEFAULT budget `2048` / `MAX_CAP` `256` the throttle is INERT at ≤ 8
+<a href=#134 id=134 data-nosnippet>134</a>//! concurrent merges (`2048 / 8 = 256`, i.e. the cap stays at the pre-change
+<a href=#135 id=135 data-nosnippet>135</a>//! 256): it ENGAGES (per-channel cap falls below 256) only ABOVE 8 concurrent
+<a href=#136 id=136 data-nosnippet>136</a>//! merges, and the [`MIN_CAP`] floor only at `budget / min_cap` ≈ 256 concurrent
+<a href=#137 id=137 data-nosnippet>137</a>//! merges. So this change does NOT by itself "close" the #2600/#2367
+<a href=#138 id=138 data-nosnippet>138</a>//! backpressure gap — it installs the MECHANISM (and the operator knobs to tune
+<a href=#139 id=139 data-nosnippet>139</a>//! it); whether the DEFAULT bounds are the right ones at field concurrency is
+<a href=#140 id=140 data-nosnippet>140</a>//! validated/tuned by the **#2895** flight-loadgen sweep (deferred follow-up).
+<a href=#141 id=141 data-nosnippet>141</a>//!
+<a href=#142 id=142 data-nosnippet>142</a>//! The reverted `STREAMING_CHANNEL_CAPACITY = 32` experiment in #2765 measured
+<a href=#143 id=143 data-nosnippet>143</a>//! the egress-channel depth SHRINKING at FLAT qps and p99 — i.e. the buffering
+<a href=#144 id=144 data-nosnippet>144</a>//! was slack, not a throughput floor, so bounding it does not cost throughput at
+<a href=#145 id=145 data-nosnippet>145</a>//! the concurrency levels tested.
+<a href=#146 id=146 data-nosnippet>146</a>//!
+<a href=#147 id=147 data-nosnippet>147</a>//! This budget is ORTHOGONAL to the #2419 `channel_depth` gauge: that gauge
+<a href=#148 id=148 data-nosnippet>148</a>//! observes live occupancy; this bounds the per-channel capacity ceiling. Kept
+<a href=#149 id=149 data-nosnippet>149</a>//! out of `merge/mod.rs` to bound that file.
+<a href=#150 id=150 data-nosnippet>150</a>
+<a href=#151 id=151 data-nosnippet>151</a></span><span class="kw">use </span>std::sync::atomic::{AtomicUsize, Ordering};
+<a href=#152 id=152 data-nosnippet>152</a><span class="kw">use </span>std::sync::OnceLock;
+<a href=#153 id=153 data-nosnippet>153</a>
+<a href=#154 id=154 data-nosnippet>154</a><span class="kw">use </span><span class="kw">crate</span>::observability;
+<a href=#155 id=155 data-nosnippet>155</a>
+<a href=#156 id=156 data-nosnippet>156</a><span class="doccomment">/// DEFAULT per-active-merge-SLOT egress budget in prefetched `MergeEntry` values
+<a href=#157 id=157 data-nosnippet>157</a>/// (issue #2765) — overridable at runtime by [`BUDGET_ENV`]. The per-channel
+<a href=#158 id=158 data-nosnippet>158</a>/// capacity a merge receives is `budget / active_merges` (clamped). Chosen so
+<a href=#159 id=159 data-nosnippet>159</a>/// that at the pre-change fixed capacity of 256 the budget is fully consumed by
+<a href=#160 id=160 data-nosnippet>160</a>/// ~8 concurrent merges; beyond that, per-channel capacity shrinks (down to
+<a href=#161 id=161 data-nosnippet>161</a>/// [`MIN_CAP`]) instead of every channel holding a fixed 256. See the module doc
+<a href=#162 id=162 data-nosnippet>162</a>/// for why this is a per-slot budget, NOT a strict global ceiling — and for
+<a href=#163 id=163 data-nosnippet>163</a>/// `per_source`, the quantity a solo merge's footprint actually multiplies:
+<a href=#164 id=164 data-nosnippet>164</a>/// `K × per_source` = `4 × K × MAX_CAP` rows since #2820, NOT `K × 256`. The
+<a href=#165 id=165 data-nosnippet>165</a>/// module doc carries the one derivation and the one per-row constant; do not
+<a href=#166 id=166 data-nosnippet>166</a>/// re-derive a second here, which is how these two figures drifted apart in the
+<a href=#167 id=167 data-nosnippet>167</a>/// first place. For a fat-row workload the BYTE term
+<a href=#168 id=168 data-nosnippet>168</a>/// (`egress_batch::max_inflight_bytes`, ≈4 MiB/source) binds first, and the
+<a href=#169 id=169 data-nosnippet>169</a>/// high-`K` envelope is #2895's to validate.
+<a href=#170 id=170 data-nosnippet>170</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">const </span>EGRESS_ROW_BUDGET: usize = <span class="number">2048</span>;
+<a href=#171 id=171 data-nosnippet>171</a>
+<a href=#172 id=172 data-nosnippet>172</a><span class="doccomment">/// DEFAULT minimum per-channel capacity (issue #2765) — overridable at runtime
+<a href=#173 id=173 data-nosnippet>173</a>/// by [`MIN_CAP_ENV`]. Guarantees forward progress: no matter how many merges
+<a href=#174 id=174 data-nosnippet>174</a>/// are concurrently active, every producer can always place at least this many
+<a href=#175 id=175 data-nosnippet>175</a>/// entries, so a bounded `sync_channel` can never be constructed with capacity 0
+<a href=#176 id=176 data-nosnippet>176</a>/// (which would wedge the producer on its first `send`). Kept ≥ 1 by
+<a href=#177 id=177 data-nosnippet>177</a>/// construction, in both the default and the resolved-override path.
+<a href=#178 id=178 data-nosnippet>178</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">const </span>MIN_CAP: usize = <span class="number">8</span>;
+<a href=#179 id=179 data-nosnippet>179</a>
+<a href=#180 id=180 data-nosnippet>180</a><span class="doccomment">/// Maximum per-channel capacity — the unchanged single-merge value
+<a href=#181 id=181 data-nosnippet>181</a>/// (`STREAMING_CHANNEL_CAPACITY` in `merge/mod.rs`). At LOW concurrency the cap
+<a href=#182 id=182 data-nosnippet>182</a>/// clamps up to this, so single-merge behavior is byte-for-byte unchanged. NOT
+<a href=#183 id=183 data-nosnippet>183</a>/// operator-overridable (it is the memory-bounded ceiling of one channel).
+<a href=#184 id=184 data-nosnippet>184</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">const </span>MAX_CAP: usize = <span class="kw">super</span>::STREAMING_CHANNEL_CAPACITY;
+<a href=#185 id=185 data-nosnippet>185</a>
+<a href=#186 id=186 data-nosnippet>186</a><span class="doccomment">/// Operator env knob overriding [`EGRESS_ROW_BUDGET`] (issue #2765). Parsed ONCE
+<a href=#187 id=187 data-nosnippet>187</a>/// per process (see [`resolved`]); a missing/unparseable/zero value falls back
+<a href=#188 id=188 data-nosnippet>188</a>/// to the default, and the result is clamped `≥ resolved MIN_CAP`.
+<a href=#189 id=189 data-nosnippet>189</a></span><span class="kw">const </span>BUDGET_ENV: <span class="kw-2">&amp;</span>str = <span class="string">"CQLITE_EGRESS_ROW_BUDGET"</span>;
+<a href=#190 id=190 data-nosnippet>190</a>
+<a href=#191 id=191 data-nosnippet>191</a><span class="doccomment">/// Operator env knob overriding [`MIN_CAP`] (issue #2765). Parsed ONCE per
+<a href=#192 id=192 data-nosnippet>192</a>/// process; a missing/unparseable/zero value falls back to the default, and the
+<a href=#193 id=193 data-nosnippet>193</a>/// result is clamped to `[1, MAX_CAP]` (the ≥1 forward-progress invariant).
+<a href=#194 id=194 data-nosnippet>194</a></span><span class="kw">const </span>MIN_CAP_ENV: <span class="kw-2">&amp;</span>str = <span class="string">"CQLITE_EGRESS_MIN_CAP"</span>;
+<a href=#195 id=195 data-nosnippet>195</a>
+<a href=#196 id=196 data-nosnippet>196</a><span class="doccomment">/// The resolved `(budget, min_cap)` pair, read from the environment ONCE per
+<a href=#197 id=197 data-nosnippet>197</a>/// process into a `OnceLock` (mirroring `select_executor::forcing`'s cached-env
+<a href=#198 id=198 data-nosnippet>198</a>/// pattern) so env parsing is OFF the per-merge hot path. Every `capacity_for`
+<a href=#199 id=199 data-nosnippet>199</a>/// call reads this cached tuple, never `std::env`.
+<a href=#200 id=200 data-nosnippet>200</a></span><span class="kw">fn </span>resolved() -&gt; (usize, usize) {
+<a href=#201 id=201 data-nosnippet>201</a>    <span class="kw">static </span>RESOLVED: OnceLock&lt;(usize, usize)&gt; = OnceLock::new();
+<a href=#202 id=202 data-nosnippet>202</a>    <span class="kw-2">*</span>RESOLVED.get_or_init(|| {
+<a href=#203 id=203 data-nosnippet>203</a>        <span class="kw">let </span>(budget, min_cap) = resolve_budget(
+<a href=#204 id=204 data-nosnippet>204</a>            std::env::var(BUDGET_ENV).ok().as_deref(),
+<a href=#205 id=205 data-nosnippet>205</a>            std::env::var(MIN_CAP_ENV).ok().as_deref(),
+<a href=#206 id=206 data-nosnippet>206</a>        );
+<a href=#207 id=207 data-nosnippet>207</a>        <span class="comment">// One-time operator signal (issue #2765): warn on the two inert-throttle
+<a href=#208 id=208 data-nosnippet>208</a>        // configs this predicate covers — the floor meets the ceiling
+<a href=#209 id=209 data-nosnippet>209</a>        // (`min_cap &gt;= MAX_CAP`, so every channel is 256 at any concurrency) or
+<a href=#210 id=210 data-nosnippet>210</a>        // the range is degenerate (`budget &lt; 2 × min_cap`, i.e. `budget / min_cap
+<a href=#211 id=211 data-nosnippet>211</a>        // &lt;= 1`, so the cap is pinned at `min_cap` regardless of concurrency).
+<a href=#212 id=212 data-nosnippet>212</a>        // NOTE: this does NOT cover a very LARGE budget (e.g. 1_000_000), where
+<a href=#213 id=213 data-nosnippet>213</a>        // caps stay at 256 until ~`budget / MAX_CAP` concurrent merges with no
+<a href=#214 id=214 data-nosnippet>214</a>        // warn — that direction is intentionally un-warned here (no behavior
+<a href=#215 id=215 data-nosnippet>215</a>        // change). Runs once (OnceLock init).
+<a href=#216 id=216 data-nosnippet>216</a>        </span><span class="kw">if </span>min_cap &gt;= MAX_CAP || budget / min_cap &lt;= <span class="number">1 </span>{
+<a href=#217 id=217 data-nosnippet>217</a>            <span class="macro">tracing::warn!</span>(
+<a href=#218 id=218 data-nosnippet>218</a>                budget,
+<a href=#219 id=219 data-nosnippet>219</a>                min_cap,
+<a href=#220 id=220 data-nosnippet>220</a>                max_cap = MAX_CAP,
+<a href=#221 id=221 data-nosnippet>221</a>                <span class="string">"{BUDGET_ENV}/{MIN_CAP_ENV} leave the adaptive merge egress \
+<a href=#222 id=222 data-nosnippet>222</a>                 throttle INERT (per-channel capacity does not shrink with \
+<a href=#223 id=223 data-nosnippet>223</a>                 concurrency); see cqlite.merge.active_merges / #2765"
+<a href=#224 id=224 data-nosnippet>224</a>            </span>);
+<a href=#225 id=225 data-nosnippet>225</a>        }
+<a href=#226 id=226 data-nosnippet>226</a>        (budget, min_cap)
+<a href=#227 id=227 data-nosnippet>227</a>    })
+<a href=#228 id=228 data-nosnippet>228</a>}
+<a href=#229 id=229 data-nosnippet>229</a>
+<a href=#230 id=230 data-nosnippet>230</a><span class="doccomment">/// Pure resolver over the two raw env values (injectable seam for tests — the
+<a href=#231 id=231 data-nosnippet>231</a>/// #2451-safe alternative to mutating real process env in a shared-binary test).
+<a href=#232 id=232 data-nosnippet>232</a>/// Validates/clamps defensively and NEVER panics: a `None`/unparseable/zero
+<a href=#233 id=233 data-nosnippet>233</a>/// value falls back to the default; `min_cap` is clamped to `[1, MAX_CAP]` (the
+<a href=#234 id=234 data-nosnippet>234</a>/// forward-progress invariant) and `budget` to `≥ min_cap` (so `budget/1` can
+<a href=#235 id=235 data-nosnippet>235</a>/// never fall below the floor). Returns `(budget, min_cap)`.
+<a href=#236 id=236 data-nosnippet>236</a></span><span class="kw">fn </span>resolve_budget(env_budget: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>str&gt;, env_min_cap: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>str&gt;) -&gt; (usize, usize) {
+<a href=#237 id=237 data-nosnippet>237</a>    <span class="kw">let </span>parse = |raw: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>str&gt;| {
+<a href=#238 id=238 data-nosnippet>238</a>        raw.and_then(|s| s.trim().parse::&lt;usize&gt;().ok())
+<a href=#239 id=239 data-nosnippet>239</a>            .filter(|<span class="kw-2">&amp;</span>v| v &gt; <span class="number">0</span>)
+<a href=#240 id=240 data-nosnippet>240</a>    };
+<a href=#241 id=241 data-nosnippet>241</a>    <span class="kw">let </span>min_cap = parse(env_min_cap).unwrap_or(MIN_CAP).clamp(<span class="number">1</span>, MAX_CAP);
+<a href=#242 id=242 data-nosnippet>242</a>    <span class="kw">let </span>budget = parse(env_budget).unwrap_or(EGRESS_ROW_BUDGET).max(min_cap);
+<a href=#243 id=243 data-nosnippet>243</a>    (budget, min_cap)
+<a href=#244 id=244 data-nosnippet>244</a>}
+<a href=#245 id=245 data-nosnippet>245</a>
+<a href=#246 id=246 data-nosnippet>246</a><span class="doccomment">/// Process-global live count of in-flight streaming merges. Incremented by
+<a href=#247 id=247 data-nosnippet>247</a>/// [`begin_merge`] when a merge's egress channel is constructed and decremented
+<a href=#248 id=248 data-nosnippet>248</a>/// by [`ActiveMergeGuard`]'s drop when that merge finishes (or is torn down).
+<a href=#249 id=249 data-nosnippet>249</a></span><span class="kw">static </span>ACTIVE: AtomicUsize = AtomicUsize::new(<span class="number">0</span>);
+<a href=#250 id=250 data-nosnippet>250</a>
+<a href=#251 id=251 data-nosnippet>251</a><span class="doccomment">/// Record the operator-facing `cqlite.merge.active_merges` gauge (issue #2765),
+<a href=#252 id=252 data-nosnippet>252</a>/// mirroring the `producer_gauge::record` pattern: publish the post-transition
+<a href=#253 id=253 data-nosnippet>253</a>/// `level` the caller already computed from its own `fetch_add`/`fetch_sub`.
+<a href=#254 id=254 data-nosnippet>254</a>///
+<a href=#255 id=255 data-nosnippet>255</a>/// The gauge is EVENTUALLY-CONSISTENT, not strictly synchronized: the atomic
+<a href=#256 id=256 data-nosnippet>256</a>/// update and this record are two separate steps, so two concurrent transitions
+<a href=#257 id=257 data-nosnippet>257</a>/// can publish out of order and the gauge may briefly show a stale level until
+<a href=#258 id=258 data-nosnippet>258</a>/// the NEXT begin/drop re-publishes — the same lock-free convention as
+<a href=#259 id=259 data-nosnippet>259</a>/// `producer_gauge`. A lock/seqlock would be overkill for a diagnostic gauge.
+<a href=#260 id=260 data-nosnippet>260</a></span><span class="kw">fn </span>record_active(level: usize) {
+<a href=#261 id=261 data-nosnippet>261</a>    observability::record_gauge(
+<a href=#262 id=262 data-nosnippet>262</a>        observability::catalog::MERGE_ACTIVE_MERGES,
+<a href=#263 id=263 data-nosnippet>263</a>        level <span class="kw">as </span>i64,
+<a href=#264 id=264 data-nosnippet>264</a>        <span class="kw-2">&amp;</span>[],
+<a href=#265 id=265 data-nosnippet>265</a>    );
+<a href=#266 id=266 data-nosnippet>266</a>}
+<a href=#267 id=267 data-nosnippet>267</a>
+<a href=#268 id=268 data-nosnippet>268</a><span class="doccomment">/// Current live process-global active-merge count (test/observability hook —
+<a href=#269 id=269 data-nosnippet>269</a>/// mirrors the [`MERGE_ACTIVE_MERGES`](crate::observability::catalog::MERGE_ACTIVE_MERGES)
+<a href=#270 id=270 data-nosnippet>270</a>/// gauge, exposed to integration tests via `merge::active_merge_count`).
+<a href=#271 id=271 data-nosnippet>271</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>active_count() -&gt; usize {
+<a href=#272 id=272 data-nosnippet>272</a>    ACTIVE.load(Ordering::SeqCst)
+<a href=#273 id=273 data-nosnippet>273</a>}
+<a href=#274 id=274 data-nosnippet>274</a>
+<a href=#275 id=275 data-nosnippet>275</a><span class="doccomment">/// Resolve the per-merge channel capacity for a given live active-merge count,
+<a href=#276 id=276 data-nosnippet>276</a>/// using the runtime-[`resolved`] `(budget, min_cap)` (env-overridable).
+<a href=#277 id=277 data-nosnippet>277</a>///
+<a href=#278 id=278 data-nosnippet>278</a>/// `clamp(budget / active, min_cap, MAX_CAP)`. `active` is floored at 1 (via
+<a href=#279 id=279 data-nosnippet>279</a>/// [`usize::max`]) so the division is always well-defined and the result is
+<a href=#280 id=280 data-nosnippet>280</a>/// never 0 — combined with the `min_cap ≥ 1` clamp this is doubly safe against a
+<a href=#281 id=281 data-nosnippet>281</a>/// zero-capacity channel.
+<a href=#282 id=282 data-nosnippet>282</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>capacity_for(active: usize) -&gt; usize {
+<a href=#283 id=283 data-nosnippet>283</a>    <span class="kw">let </span>(budget, min_cap) = resolved();
+<a href=#284 id=284 data-nosnippet>284</a>    capacity_from(active, budget, min_cap)
+<a href=#285 id=285 data-nosnippet>285</a>}
+<a href=#286 id=286 data-nosnippet>286</a>
+<a href=#287 id=287 data-nosnippet>287</a><span class="doccomment">/// The pure `clamp(budget / active, min_cap, MAX_CAP)` kernel — shared by
+<a href=#288 id=288 data-nosnippet>288</a>/// [`capacity_for`] (resolved values) and the override test (injected values).
+<a href=#289 id=289 data-nosnippet>289</a>/// `min_cap ≤ MAX_CAP` is guaranteed by [`resolve_budget`], so the clamp bounds
+<a href=#290 id=290 data-nosnippet>290</a>/// are always valid.
+<a href=#291 id=291 data-nosnippet>291</a></span><span class="kw">fn </span>capacity_from(active: usize, budget: usize, min_cap: usize) -&gt; usize {
+<a href=#292 id=292 data-nosnippet>292</a>    <span class="kw">let </span>active = active.max(<span class="number">1</span>);
+<a href=#293 id=293 data-nosnippet>293</a>    (budget / active).clamp(min_cap, MAX_CAP)
+<a href=#294 id=294 data-nosnippet>294</a>}
+<a href=#295 id=295 data-nosnippet>295</a>
+<a href=#296 id=296 data-nosnippet>296</a><span class="doccomment">/// The runtime-resolved minimum per-channel capacity (env-overridable). Used by
+<a href=#297 id=297 data-nosnippet>297</a>/// the wiring tests' clamp-range assertions so they track an override too.
+<a href=#298 id=298 data-nosnippet>298</a></span><span class="attr">#[cfg(test)]
+<a href=#299 id=299 data-nosnippet>299</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>min_cap() -&gt; usize {
+<a href=#300 id=300 data-nosnippet>300</a>    resolved().<span class="number">1
+<a href=#301 id=301 data-nosnippet>301</a></span>}
+<a href=#302 id=302 data-nosnippet>302</a>
+<a href=#303 id=303 data-nosnippet>303</a><span class="doccomment">/// The runtime-resolved egress budget (env-overridable). Used by the wiring test
+<a href=#304 id=304 data-nosnippet>304</a>/// to size its concurrency against the SAME budget the production path resolves,
+<a href=#305 id=305 data-nosnippet>305</a>/// so it stays correct under an operator `CQLITE_EGRESS_ROW_BUDGET` override.
+<a href=#306 id=306 data-nosnippet>306</a></span><span class="attr">#[cfg(test)]
+<a href=#307 id=307 data-nosnippet>307</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>budget() -&gt; usize {
+<a href=#308 id=308 data-nosnippet>308</a>    resolved().<span class="number">0
+<a href=#309 id=309 data-nosnippet>309</a></span>}
+<a href=#310 id=310 data-nosnippet>310</a>
+<a href=#311 id=311 data-nosnippet>311</a><span class="doccomment">/// Register a starting k-way MERGE (called ONCE per merge, at `KWayMerger`
+<a href=#312 id=312 data-nosnippet>312</a>/// construction — NOT per source channel) and return the per-channel capacity
+<a href=#313 id=313 data-nosnippet>313</a>/// ALL its source channels share, together with the RAII [`ActiveMergeGuard`]
+<a href=#314 id=314 data-nosnippet>314</a>/// that decrements the live count once when the whole merge is dropped.
+<a href=#315 id=315 data-nosnippet>315</a>///
+<a href=#316 id=316 data-nosnippet>316</a>/// The active count is incremented FIRST, then the capacity is computed from the
+<a href=#317 id=317 data-nosnippet>317</a>/// post-increment count, so the current merge counts itself: `N` merges each
+<a href=#318 id=318 data-nosnippet>318</a>/// starting when `N` are active observe `active &gt;= N` and receive `budget / N`
+<a href=#319 id=319 data-nosnippet>319</a>/// per channel. The returned guard MUST be stored for the merge's lifetime (on
+<a href=#320 id=320 data-nosnippet>320</a>/// the `KWayMerger`, dropped AFTER its runs/channels) so exactly one decrement
+<a href=#321 id=321 data-nosnippet>321</a>/// pairs with this increment on every exit path.
+<a href=#322 id=322 data-nosnippet>322</a>///
+<a href=#323 id=323 data-nosnippet>323</a>/// Always targets the process-global [`ACTIVE`] and always publishes the gauge —
+<a href=#324 id=324 data-nosnippet>324</a>/// no injectable atomic and no `record` branch on this hot path (the per-test
+<a href=#325 id=325 data-nosnippet>325</a>/// private-atomic seam is the `#[cfg(test)]`-only [`begin_on_for_test`]).
+<a href=#326 id=326 data-nosnippet>326</a></span><span class="attr">#[must_use]
+<a href=#327 id=327 data-nosnippet>327</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>begin_merge() -&gt; (usize, ActiveMergeGuard) {
+<a href=#328 id=328 data-nosnippet>328</a>    <span class="kw">let </span>active = ACTIVE.fetch_add(<span class="number">1</span>, Ordering::SeqCst) + <span class="number">1</span>;
+<a href=#329 id=329 data-nosnippet>329</a>    record_active(active);
+<a href=#330 id=330 data-nosnippet>330</a>    (capacity_for(active), ActiveMergeGuard)
+<a href=#331 id=331 data-nosnippet>331</a>}
+<a href=#332 id=332 data-nosnippet>332</a>
+<a href=#333 id=333 data-nosnippet>333</a><span class="doccomment">/// RAII guard that decrements the process-global active-merge count (and
+<a href=#334 id=334 data-nosnippet>334</a>/// re-publishes the gauge) when a streaming merge finishes — on normal
+<a href=#335 id=335 data-nosnippet>335</a>/// completion, early return, or panic. Stored on the `KWayMerger` (dropped after
+<a href=#336 id=336 data-nosnippet>336</a>/// its runs/channels) so exactly one decrement pairs with the merge's single
+<a href=#337 id=337 data-nosnippet>337</a>/// [`begin_merge`] increment.
+<a href=#338 id=338 data-nosnippet>338</a></span><span class="attr">#[derive(Debug)]
+<a href=#339 id=339 data-nosnippet>339</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">struct </span>ActiveMergeGuard;
+<a href=#340 id=340 data-nosnippet>340</a>
+<a href=#341 id=341 data-nosnippet>341</a><span class="kw">impl </span>Drop <span class="kw">for </span>ActiveMergeGuard {
+<a href=#342 id=342 data-nosnippet>342</a>    <span class="kw">fn </span>drop(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
+<a href=#343 id=343 data-nosnippet>343</a>        <span class="kw">let </span>level = ACTIVE.fetch_sub(<span class="number">1</span>, Ordering::SeqCst) - <span class="number">1</span>;
+<a href=#344 id=344 data-nosnippet>344</a>        record_active(level);
+<a href=#345 id=345 data-nosnippet>345</a>    }
+<a href=#346 id=346 data-nosnippet>346</a>}
+<a href=#347 id=347 data-nosnippet>347</a>
+<a href=#348 id=348 data-nosnippet>348</a><span class="doccomment">/// Test-only injectable seam: run the EXACT increment/capacity/guard-drop pairing
+<a href=#349 id=349 data-nosnippet>349</a>/// [`begin_merge`] uses, but against a PRIVATE `&amp;'static AtomicUsize` (a
+<a href=#350 id=350 data-nosnippet>350</a>/// `Box::leak`ed per-test counter) and WITHOUT touching the process-global gauge
+<a href=#351 id=351 data-nosnippet>351</a>/// — so a test can drive deterministic concurrency without racing the shared
+<a href=#352 id=352 data-nosnippet>352</a>/// [`ACTIVE`] or publishing a bogus `cqlite.merge.active_merges` level (#2451
+<a href=#353 id=353 data-nosnippet>353</a>/// isolation). The returned guard decrements that private counter on drop.
+<a href=#354 id=354 data-nosnippet>354</a></span><span class="attr">#[cfg(test)]
+<a href=#355 id=355 data-nosnippet>355</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>begin_on_for_test(counter: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>AtomicUsize) -&gt; (usize, TestMergeGuard) {
+<a href=#356 id=356 data-nosnippet>356</a>    <span class="kw">let </span>active = counter.fetch_add(<span class="number">1</span>, Ordering::SeqCst) + <span class="number">1</span>;
+<a href=#357 id=357 data-nosnippet>357</a>    (capacity_for(active), TestMergeGuard { counter })
+<a href=#358 id=358 data-nosnippet>358</a>}
+<a href=#359 id=359 data-nosnippet>359</a>
+<a href=#360 id=360 data-nosnippet>360</a><span class="doccomment">/// Test-only counterpart of [`ActiveMergeGuard`] bound to a private atomic; its
+<a href=#361 id=361 data-nosnippet>361</a>/// drop decrements that counter only (never the global gauge). See
+<a href=#362 id=362 data-nosnippet>362</a>/// [`begin_on_for_test`].
+<a href=#363 id=363 data-nosnippet>363</a></span><span class="attr">#[cfg(test)]
+<a href=#364 id=364 data-nosnippet>364</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">struct </span>TestMergeGuard {
+<a href=#365 id=365 data-nosnippet>365</a>    counter: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>AtomicUsize,
+<a href=#366 id=366 data-nosnippet>366</a>}
+<a href=#367 id=367 data-nosnippet>367</a>
+<a href=#368 id=368 data-nosnippet>368</a><span class="attr">#[cfg(test)]
+<a href=#369 id=369 data-nosnippet>369</a></span><span class="kw">impl </span>Drop <span class="kw">for </span>TestMergeGuard {
+<a href=#370 id=370 data-nosnippet>370</a>    <span class="kw">fn </span>drop(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
+<a href=#371 id=371 data-nosnippet>371</a>        <span class="self">self</span>.counter.fetch_sub(<span class="number">1</span>, Ordering::SeqCst);
+<a href=#372 id=372 data-nosnippet>372</a>    }
+<a href=#373 id=373 data-nosnippet>373</a>}
+<a href=#374 id=374 data-nosnippet>374</a>
+<a href=#375 id=375 data-nosnippet>375</a><span class="kw">impl </span><span class="kw">super</span>::KWayMerger {
+<a href=#376 id=376 data-nosnippet>376</a>    <span class="doccomment">/// Attach the adaptive egress-budget slot guard (issue #2765) to a merger
+<a href=#377 id=377 data-nosnippet>377</a>    /// whose source channels were opened OUTSIDE its constructor — the point-read
+<a href=#378 id=378 data-nosnippet>378</a>    /// builders (`build_single_partition_merger*`) open their fail-safe adapters,
+<a href=#379 id=379 data-nosnippet>379</a>    /// with the shared capacity snapshot, before calling `from_row_iterators`,
+<a href=#380 id=380 data-nosnippet>380</a>    /// then move the matching guard onto the built merger here so it decrements
+<a href=#381 id=381 data-nosnippet>381</a>    /// exactly once at merge end. See [`begin_merge`].
+<a href=#382 id=382 data-nosnippet>382</a>    ///
+<a href=#383 id=383 data-nosnippet>383</a>    /// Takes the guard BY VALUE (not `Option`), so it is impossible to call this
+<a href=#384 id=384 data-nosnippet>384</a>    /// with `None` and silently un-register a live merge; the `debug_assert`
+<a href=#385 id=385 data-nosnippet>385</a>    /// additionally catches a double-attach that would drop a still-live guard
+<a href=#386 id=386 data-nosnippet>386</a>    /// early and under-count concurrency. Kept in this sibling module (not
+<a href=#387 id=387 data-nosnippet>387</a>    /// `merge/mod.rs`) to bound that over-threshold file (#1116). `pub(super)`
+<a href=#388 id=388 data-nosnippet>388</a>    /// (matching [`ActiveMergeGuard`]'s visibility) — uncallable outside `merge`.
+<a href=#389 id=389 data-nosnippet>389</a>    </span><span class="attr">#[must_use]
+<a href=#390 id=390 data-nosnippet>390</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>with_egress_slot(<span class="kw-2">mut </span><span class="self">self</span>, egress_slot: ActiveMergeGuard) -&gt; <span class="self">Self </span>{
+<a href=#391 id=391 data-nosnippet>391</a>        <span class="macro">debug_assert!</span>(
+<a href=#392 id=392 data-nosnippet>392</a>            <span class="self">self</span>._egress_slot.is_none(),
+<a href=#393 id=393 data-nosnippet>393</a>            <span class="string">"with_egress_slot must not overwrite a live active-merge slot"
+<a href=#394 id=394 data-nosnippet>394</a>        </span>);
+<a href=#395 id=395 data-nosnippet>395</a>        <span class="self">self</span>._egress_slot = <span class="prelude-val">Some</span>(egress_slot);
+<a href=#396 id=396 data-nosnippet>396</a>        <span class="self">self
+<a href=#397 id=397 data-nosnippet>397</a>    </span>}
+<a href=#398 id=398 data-nosnippet>398</a>}
+<a href=#399 id=399 data-nosnippet>399</a>
+<a href=#400 id=400 data-nosnippet>400</a><span class="doccomment">/// Doc-hidden integration-test hook (issue #2765): the adaptive per-channel
+<a href=#401 id=401 data-nosnippet>401</a>/// egress capacity a NEW merge would receive at `active_merges` concurrent
+<a href=#402 id=402 data-nosnippet>402</a>/// merges — `clamp(EGRESS_ROW_BUDGET / active_merges, MIN_CAP, 256)`. Lets an
+<a href=#403 id=403 data-nosnippet>403</a>/// integration test derive an ADAPTIVE backpressure threshold instead of
+<a href=#404 id=404 data-nosnippet>404</a>/// hard-coding the pre-#2765 fixed 256. Re-exported from `merge`.
+<a href=#405 id=405 data-nosnippet>405</a></span><span class="attr">#[doc(hidden)]
+<a href=#406 id=406 data-nosnippet>406</a></span><span class="kw">pub fn </span>egress_channel_capacity_for(active_merges: usize) -&gt; usize {
+<a href=#407 id=407 data-nosnippet>407</a>    capacity_for(active_merges)
+<a href=#408 id=408 data-nosnippet>408</a>}
+<a href=#409 id=409 data-nosnippet>409</a>
+<a href=#410 id=410 data-nosnippet>410</a><span class="doccomment">/// Doc-hidden integration-test hook (issue #2765): the live process-global count
+<a href=#411 id=411 data-nosnippet>411</a>/// of in-flight k-way merges (the `cqlite.merge.active_merges` gauge value).
+<a href=#412 id=412 data-nosnippet>412</a>/// Used with [`egress_channel_capacity_for`] to compute the current adaptive
+<a href=#413 id=413 data-nosnippet>413</a>/// per-channel capacity from an integration test. Re-exported from `merge`.
+<a href=#414 id=414 data-nosnippet>414</a></span><span class="attr">#[doc(hidden)]
+<a href=#415 id=415 data-nosnippet>415</a></span><span class="kw">pub fn </span>active_merge_count() -&gt; usize {
+<a href=#416 id=416 data-nosnippet>416</a>    active_count()
+<a href=#417 id=417 data-nosnippet>417</a>}
+<a href=#418 id=418 data-nosnippet>418</a>
+<a href=#419 id=419 data-nosnippet>419</a><span class="attr">#[cfg(test)]
+<a href=#420 id=420 data-nosnippet>420</a></span><span class="kw">mod </span>tests {
+<a href=#421 id=421 data-nosnippet>421</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#422 id=422 data-nosnippet>422</a>
+<a href=#423 id=423 data-nosnippet>423</a>    <span class="doccomment">/// Evaluate the capacity kernel against the SHIPPED DEFAULTS, bypassing the
+<a href=#424 id=424 data-nosnippet>424</a>    /// env-reading `capacity_for` — so exporting `CQLITE_EGRESS_*` (an operator
+<a href=#425 id=425 data-nosnippet>425</a>    /// knob this change added) can never break these compile-time-constant
+<a href=#426 id=426 data-nosnippet>426</a>    /// assertions. The env plumbing itself is covered by
+<a href=#427 id=427 data-nosnippet>427</a>    /// `env_knobs_resolve_validate_and_drive_capacity`.
+<a href=#428 id=428 data-nosnippet>428</a>    </span><span class="kw">fn </span>cap_default(active: usize) -&gt; usize {
+<a href=#429 id=429 data-nosnippet>429</a>        capacity_from(active, EGRESS_ROW_BUDGET, MIN_CAP)
+<a href=#430 id=430 data-nosnippet>430</a>    }
+<a href=#431 id=431 data-nosnippet>431</a>
+<a href=#432 id=432 data-nosnippet>432</a>    <span class="attr">#[test]
+<a href=#433 id=433 data-nosnippet>433</a>    </span><span class="kw">fn </span>low_concurrency_resolves_to_max_cap() {
+<a href=#434 id=434 data-nosnippet>434</a>        <span class="comment">// Criterion 1: a single active merge gets the unchanged 256 cap.
+<a href=#435 id=435 data-nosnippet>435</a>        </span><span class="macro">assert_eq!</span>(cap_default(<span class="number">1</span>), MAX_CAP);
+<a href=#436 id=436 data-nosnippet>436</a>        <span class="macro">assert_eq!</span>(MAX_CAP, <span class="number">256</span>);
+<a href=#437 id=437 data-nosnippet>437</a>        <span class="comment">// Zero active (defensive) is floored to 1 → MAX_CAP, never a div-by-zero.
+<a href=#438 id=438 data-nosnippet>438</a>        </span><span class="macro">assert_eq!</span>(cap_default(<span class="number">0</span>), MAX_CAP);
+<a href=#439 id=439 data-nosnippet>439</a>    }
+<a href=#440 id=440 data-nosnippet>440</a>
+<a href=#441 id=441 data-nosnippet>441</a>    <span class="attr">#[test]
+<a href=#442 id=442 data-nosnippet>442</a>    </span><span class="kw">fn </span>env_knobs_resolve_validate_and_drive_capacity() {
+<a href=#443 id=443 data-nosnippet>443</a>        <span class="comment">// Inject via the PURE seam (`resolve_budget`), never real process env, so
+<a href=#444 id=444 data-nosnippet>444</a>        // this cannot perturb the OnceLock other tests observe (#2451-safe).
+<a href=#445 id=445 data-nosnippet>445</a>        // Unset → the shipped defaults (behavior unchanged when the knobs absent).
+<a href=#446 id=446 data-nosnippet>446</a>        </span><span class="macro">assert_eq!</span>(resolve_budget(<span class="prelude-val">None</span>, <span class="prelude-val">None</span>), (EGRESS_ROW_BUDGET, MIN_CAP));
+<a href=#447 id=447 data-nosnippet>447</a>
+<a href=#448 id=448 data-nosnippet>448</a>        <span class="comment">// A clean override flows through the SAME clamp kernel `capacity_for` uses.
+<a href=#449 id=449 data-nosnippet>449</a>        </span><span class="kw">let </span>(budget, min_cap) = resolve_budget(<span class="prelude-val">Some</span>(<span class="string">"4096"</span>), <span class="prelude-val">Some</span>(<span class="string">"16"</span>));
+<a href=#450 id=450 data-nosnippet>450</a>        <span class="macro">assert_eq!</span>((budget, min_cap), (<span class="number">4096</span>, <span class="number">16</span>));
+<a href=#451 id=451 data-nosnippet>451</a>        <span class="macro">assert_eq!</span>(capacity_from(<span class="number">1</span>, budget, min_cap), MAX_CAP); <span class="comment">// 4096 clamps to 256
+<a href=#452 id=452 data-nosnippet>452</a>        </span><span class="macro">assert_eq!</span>(capacity_from(<span class="number">16</span>, budget, min_cap), <span class="number">256</span>); <span class="comment">// 4096/16 = 256
+<a href=#453 id=453 data-nosnippet>453</a>        </span><span class="macro">assert_eq!</span>(capacity_from(<span class="number">4096</span>, budget, min_cap), <span class="number">16</span>); <span class="comment">// floors at the raised min_cap
+<a href=#454 id=454 data-nosnippet>454</a>
+<a href=#455 id=455 data-nosnippet>455</a>        // Defensive: missing / unparseable / zero each fall back to the default,
+<a href=#456 id=456 data-nosnippet>456</a>        // never a panic.
+<a href=#457 id=457 data-nosnippet>457</a>        </span><span class="macro">assert_eq!</span>(
+<a href=#458 id=458 data-nosnippet>458</a>            resolve_budget(<span class="prelude-val">Some</span>(<span class="string">""</span>), <span class="prelude-val">Some</span>(<span class="string">"nope"</span>)),
+<a href=#459 id=459 data-nosnippet>459</a>            (EGRESS_ROW_BUDGET, MIN_CAP)
+<a href=#460 id=460 data-nosnippet>460</a>        );
+<a href=#461 id=461 data-nosnippet>461</a>        <span class="macro">assert_eq!</span>(
+<a href=#462 id=462 data-nosnippet>462</a>            resolve_budget(<span class="prelude-val">Some</span>(<span class="string">"0"</span>), <span class="prelude-val">Some</span>(<span class="string">"0"</span>)),
+<a href=#463 id=463 data-nosnippet>463</a>            (EGRESS_ROW_BUDGET, MIN_CAP)
+<a href=#464 id=464 data-nosnippet>464</a>        );
+<a href=#465 id=465 data-nosnippet>465</a>        <span class="macro">assert_eq!</span>(resolve_budget(<span class="prelude-val">Some</span>(<span class="string">"  1024  "</span>), <span class="prelude-val">None</span>), (<span class="number">1024</span>, MIN_CAP)); <span class="comment">// trims
+<a href=#466 id=466 data-nosnippet>466</a>
+<a href=#467 id=467 data-nosnippet>467</a>        // Invariants: min_cap clamped to [1, MAX_CAP]; budget forced ≥ min_cap so
+<a href=#468 id=468 data-nosnippet>468</a>        // `budget/1` can never dip under the forward-progress floor.
+<a href=#469 id=469 data-nosnippet>469</a>        </span><span class="kw">let </span>(b, m) = resolve_budget(<span class="prelude-val">Some</span>(<span class="string">"10"</span>), <span class="prelude-val">Some</span>(<span class="string">"100000"</span>));
+<a href=#470 id=470 data-nosnippet>470</a>        <span class="macro">assert_eq!</span>(m, MAX_CAP, <span class="string">"min_cap clamped down to MAX_CAP"</span>);
+<a href=#471 id=471 data-nosnippet>471</a>        <span class="macro">assert_eq!</span>(b, MAX_CAP, <span class="string">"budget raised to ≥ min_cap"</span>);
+<a href=#472 id=472 data-nosnippet>472</a>        <span class="macro">assert!</span>(m &gt;= <span class="number">1</span>, <span class="string">"forward-progress floor: min_cap ≥ 1"</span>);
+<a href=#473 id=473 data-nosnippet>473</a>        <span class="macro">assert!</span>(
+<a href=#474 id=474 data-nosnippet>474</a>            capacity_from(usize::MAX, b, m) &gt;= <span class="number">1</span>,
+<a href=#475 id=475 data-nosnippet>475</a>            <span class="string">"never a zero-capacity channel"
+<a href=#476 id=476 data-nosnippet>476</a>        </span>);
+<a href=#477 id=477 data-nosnippet>477</a>    }
+<a href=#478 id=478 data-nosnippet>478</a>
+<a href=#479 id=479 data-nosnippet>479</a>    <span class="attr">#[test]
+<a href=#480 id=480 data-nosnippet>480</a>    </span><span class="kw">fn </span>capacity_shrinks_with_concurrency_but_never_below_min() {
+<a href=#481 id=481 data-nosnippet>481</a>        <span class="comment">// Budget divided among concurrent merges, clamped to the ceiling.
+<a href=#482 id=482 data-nosnippet>482</a>        </span><span class="macro">assert_eq!</span>(cap_default(<span class="number">8</span>), EGRESS_ROW_BUDGET / <span class="number">8</span>); <span class="comment">// exactly 256 (== MAX_CAP)
+<a href=#483 id=483 data-nosnippet>483</a>        </span><span class="macro">assert_eq!</span>(cap_default(<span class="number">16</span>), EGRESS_ROW_BUDGET / <span class="number">16</span>); <span class="comment">// 128
+<a href=#484 id=484 data-nosnippet>484</a>                                                             // Very high concurrency clamps to MIN_CAP (never 0 → forward progress).
+<a href=#485 id=485 data-nosnippet>485</a>        </span><span class="macro">assert_eq!</span>(cap_default(usize::MAX), MIN_CAP);
+<a href=#486 id=486 data-nosnippet>486</a>        <span class="macro">assert!</span>(MIN_CAP &gt;= <span class="number">1</span>, <span class="string">"MIN_CAP must guarantee at least one slot"</span>);
+<a href=#487 id=487 data-nosnippet>487</a>    }
+<a href=#488 id=488 data-nosnippet>488</a>
+<a href=#489 id=489 data-nosnippet>489</a>    <span class="attr">#[test]
+<a href=#490 id=490 data-nosnippet>490</a>    </span><span class="kw">fn </span>per_slot_bound_holds_and_min_cap_floor_is_honest() {
+<a href=#491 id=491 data-nosnippet>491</a>        <span class="comment">// The per-ACTIVE-MERGE-SLOT invariant (see module doc "Honest bound"):
+<a href=#492 id=492 data-nosnippet>492</a>        // at any concurrency `a`, one merge's per-channel share `cap_default(a)`
+<a href=#493 id=493 data-nosnippet>493</a>        // times `a` stays within the budget — whereas the pre-change fixed cap
+<a href=#494 id=494 data-nosnippet>494</a>        // of 256 gives `a × 256`, blowing past the budget for a &gt; 8 (a == 8
+<a href=#495 id=495 data-nosnippet>495</a>        // exactly saturates it: 8 × 256 == 2048). Beyond the clamp point the
+<a href=#496 id=496 data-nosnippet>496</a>        // per-slot product is BELOW budget because the cap floors at MIN_CAP —
+<a href=#497 id=497 data-nosnippet>497</a>        // the deliberate, explicit cost of guaranteeing forward progress.
+<a href=#498 id=498 data-nosnippet>498</a>        //
+<a href=#499 id=499 data-nosnippet>499</a>        // Low #6: exercise BOTH the divide region AND the MIN_CAP-floor region so
+<a href=#500 id=500 data-nosnippet>500</a>        // the floor's cost (per-slot product falling under budget) is explicit.
+<a href=#501 id=501 data-nosnippet>501</a>        </span><span class="kw">let </span>clamp_point = EGRESS_ROW_BUDGET / MAX_CAP; <span class="comment">// 8: highest `a` with cap==MAX_CAP
+<a href=#502 id=502 data-nosnippet>502</a>        </span><span class="kw">let </span>floor_point = EGRESS_ROW_BUDGET / MIN_CAP; <span class="comment">// 256: lowest `a` with cap==MIN_CAP
+<a href=#503 id=503 data-nosnippet>503</a>        </span><span class="macro">assert!</span>(floor_point &gt; clamp_point);
+<a href=#504 id=504 data-nosnippet>504</a>        <span class="kw">for </span>a <span class="kw">in </span><span class="number">1</span>..=(floor_point + <span class="number">64</span>) {
+<a href=#505 id=505 data-nosnippet>505</a>            <span class="kw">let </span>cap = cap_default(a);
+<a href=#506 id=506 data-nosnippet>506</a>            <span class="macro">assert!</span>((MIN_CAP..=MAX_CAP).contains(<span class="kw-2">&amp;</span>cap), <span class="string">"cap {cap} within clamp"</span>);
+<a href=#507 id=507 data-nosnippet>507</a>            <span class="comment">// Per-slot product never exceeds the budget.
+<a href=#508 id=508 data-nosnippet>508</a>            </span><span class="macro">assert!</span>(
+<a href=#509 id=509 data-nosnippet>509</a>                a * cap &lt;= EGRESS_ROW_BUDGET || cap == MIN_CAP,
+<a href=#510 id=510 data-nosnippet>510</a>                <span class="string">"per-slot product {} must stay within budget at a={a}"</span>,
+<a href=#511 id=511 data-nosnippet>511</a>                a * cap
+<a href=#512 id=512 data-nosnippet>512</a>            );
+<a href=#513 id=513 data-nosnippet>513</a>            <span class="kw">if </span>a &gt; clamp_point {
+<a href=#514 id=514 data-nosnippet>514</a>                <span class="macro">assert!</span>(
+<a href=#515 id=515 data-nosnippet>515</a>                    a * MAX_CAP &gt; EGRESS_ROW_BUDGET,
+<a href=#516 id=516 data-nosnippet>516</a>                    <span class="string">"pre-change fixed cap {MAX_CAP} × {a} exceeds budget"
+<a href=#517 id=517 data-nosnippet>517</a>                </span>);
+<a href=#518 id=518 data-nosnippet>518</a>            }
+<a href=#519 id=519 data-nosnippet>519</a>            <span class="kw">if </span>a &gt;= floor_point {
+<a href=#520 id=520 data-nosnippet>520</a>                <span class="comment">// MIN_CAP-floor region: the cap has bottomed out; the per-slot
+<a href=#521 id=521 data-nosnippet>521</a>                // product now GROWS as `a × MIN_CAP` — the forward-progress cost.
+<a href=#522 id=522 data-nosnippet>522</a>                </span><span class="macro">assert_eq!</span>(cap, MIN_CAP, <span class="string">"cap floored at MIN_CAP for a={a}"</span>);
+<a href=#523 id=523 data-nosnippet>523</a>                <span class="macro">assert_eq!</span>(a * cap, a * MIN_CAP);
+<a href=#524 id=524 data-nosnippet>524</a>            }
+<a href=#525 id=525 data-nosnippet>525</a>        }
+<a href=#526 id=526 data-nosnippet>526</a>    }
+<a href=#527 id=527 data-nosnippet>527</a>
+<a href=#528 id=528 data-nosnippet>528</a>    <span class="attr">#[test]
+<a href=#529 id=529 data-nosnippet>529</a>    </span><span class="kw">fn </span>concurrent_begin_shrinks_per_channel_capacity() {
+<a href=#530 id=530 data-nosnippet>530</a>        <span class="kw">use </span>std::sync::{Arc, Barrier};
+<a href=#531 id=531 data-nosnippet>531</a>
+<a href=#532 id=532 data-nosnippet>532</a>        <span class="comment">// Drive `n` concurrent MERGE registrations through the SAME
+<a href=#533 id=533 data-nosnippet>533</a>        // increment/snapshot logic `begin_merge` uses, via the test-only
+<a href=#534 id=534 data-nosnippet>534</a>        // `begin_on_for_test` seam against a PRIVATE atomic (issue #2451
+<a href=#535 id=535 data-nosnippet>535</a>        // isolation, mirroring the pairing test) so this test can
+<a href=#536 id=536 data-nosnippet>536</a>        // NEVER inflate the shared global `ACTIVE` and shrink a parallel
+<a href=#537 id=537 data-nosnippet>537</a>        // merger-building test's caps. Assert the per-channel capacity a merge is
+<a href=#538 id=538 data-nosnippet>538</a>        // HANDED shrinks below the fixed 256 as concurrent merges rise — and
+<a href=#539 id=539 data-nosnippet>539</a>        // never below the resolved floor. (KWayMerger-level end-to-end wiring, on
+<a href=#540 id=540 data-nosnippet>540</a>        // the real global, lives in `egress_wiring_tests`.)
+<a href=#541 id=541 data-nosnippet>541</a>        //
+<a href=#542 id=542 data-nosnippet>542</a>        // `n` is sized from the RESOLVED budget (not a fixed 16): `begin_on_for_test`
+<a href=#543 id=543 data-nosnippet>543</a>        // calls the env-resolved `capacity_for`, so under `CQLITE_EGRESS_ROW_BUDGET=8192`
+<a href=#544 id=544 data-nosnippet>544</a>        // a fixed 16 would leave `8192/16 == 512` clamped back to 256 and never
+<a href=#545 id=545 data-nosnippet>545</a>        // shrink. `budget/MAX_CAP + 8` makes the last-registering thread see
+<a href=#546 id=546 data-nosnippet>546</a>        // `capacity_for(n) &lt; MAX_CAP` for any realistic budget — but is CLAMPED to
+<a href=#547 id=547 data-nosnippet>547</a>        // 64 so a pathological `CQLITE_EGRESS_ROW_BUDGET` can't spawn thousands of
+<a href=#548 id=548 data-nosnippet>548</a>        // threads. If the clamp defeats the shrink precondition (a huge budget
+<a href=#549 id=549 data-nosnippet>549</a>        // where even 64 concurrency stays at the 256 clamp), skip: the property is
+<a href=#550 id=550 data-nosnippet>550</a>        // unobservable within a bounded workload, not violated.
+<a href=#551 id=551 data-nosnippet>551</a>        // UNCONDITIONAL kernel-path proof (env-INDEPENDENT — uses the compile-time
+<a href=#552 id=552 data-nosnippet>552</a>        // DEFAULT budget/floor via `capacity_from`): at the crossover concurrency
+<a href=#553 id=553 data-nosnippet>553</a>        // the default kernel shrinks below the 256 ceiling. So even when the
+<a href=#554 id=554 data-nosnippet>554</a>        // threaded phase below is skipped under a large env override, this test
+<a href=#555 id=555 data-nosnippet>555</a>        // always proves the shrink math.
+<a href=#556 id=556 data-nosnippet>556</a>        </span><span class="kw">let </span>default_crossover = EGRESS_ROW_BUDGET / MAX_CAP + <span class="number">1</span>;
+<a href=#557 id=557 data-nosnippet>557</a>        <span class="macro">assert!</span>(
+<a href=#558 id=558 data-nosnippet>558</a>            capacity_from(default_crossover, EGRESS_ROW_BUDGET, MIN_CAP) &lt; MAX_CAP,
+<a href=#559 id=559 data-nosnippet>559</a>            <span class="string">"default kernel must shrink below {MAX_CAP} at concurrency {default_crossover}"
+<a href=#560 id=560 data-nosnippet>560</a>        </span>);
+<a href=#561 id=561 data-nosnippet>561</a>
+<a href=#562 id=562 data-nosnippet>562</a>        <span class="kw">let </span>counter: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>AtomicUsize = Box::leak(Box::new(AtomicUsize::new(<span class="number">0</span>)));
+<a href=#563 id=563 data-nosnippet>563</a>        <span class="kw">let </span>floor = min_cap();
+<a href=#564 id=564 data-nosnippet>564</a>        <span class="kw">let </span>n = (budget() / MAX_CAP + <span class="number">8</span>).min(<span class="number">64</span>);
+<a href=#565 id=565 data-nosnippet>565</a>        <span class="kw">if </span>capacity_for(n) &gt;= MAX_CAP {
+<a href=#566 id=566 data-nosnippet>566</a>            <span class="macro">eprintln!</span>(
+<a href=#567 id=567 data-nosnippet>567</a>                <span class="string">"SKIP: concurrent_begin_shrinks_per_channel_capacity — budget={} \
+<a href=#568 id=568 data-nosnippet>568</a>                 min_cap={} defeats the bounded-workload shrink precondition \
+<a href=#569 id=569 data-nosnippet>569</a>                 (clamp={n}); default kernel path asserted above"</span>,
+<a href=#570 id=570 data-nosnippet>570</a>                budget(),
+<a href=#571 id=571 data-nosnippet>571</a>                floor
+<a href=#572 id=572 data-nosnippet>572</a>            );
+<a href=#573 id=573 data-nosnippet>573</a>            <span class="kw">return</span>;
+<a href=#574 id=574 data-nosnippet>574</a>        }
+<a href=#575 id=575 data-nosnippet>575</a>        <span class="kw">let </span>registered = Arc::new(Barrier::new(n));
+<a href=#576 id=576 data-nosnippet>576</a>        <span class="kw">let </span>released = Arc::new(Barrier::new(n));
+<a href=#577 id=577 data-nosnippet>577</a>
+<a href=#578 id=578 data-nosnippet>578</a>        <span class="kw">let </span>handles: Vec&lt;<span class="kw">_</span>&gt; = (<span class="number">0</span>..n)
+<a href=#579 id=579 data-nosnippet>579</a>            .map(|<span class="kw">_</span>| {
+<a href=#580 id=580 data-nosnippet>580</a>                <span class="kw">let </span>registered = registered.clone();
+<a href=#581 id=581 data-nosnippet>581</a>                <span class="kw">let </span>released = released.clone();
+<a href=#582 id=582 data-nosnippet>582</a>                std::thread::spawn(<span class="kw">move </span>|| {
+<a href=#583 id=583 data-nosnippet>583</a>                    <span class="comment">// Register FIRST (increments the PRIVATE count + snapshots the
+<a href=#584 id=584 data-nosnippet>584</a>                    // cap), THEN barrier — so all `n` are counted before any reads;
+<a href=#585 id=585 data-nosnippet>585</a>                    // the second barrier holds every guard alive until all have
+<a href=#586 id=586 data-nosnippet>586</a>                    // observed, modelling `n` concurrent merges. `begin_on_for_test`
+<a href=#587 id=587 data-nosnippet>587</a>                    // never publishes the global gauge (structural suppression).
+<a href=#588 id=588 data-nosnippet>588</a>                    </span><span class="kw">let </span>(cap, _guard) = begin_on_for_test(counter);
+<a href=#589 id=589 data-nosnippet>589</a>                    registered.wait();
+<a href=#590 id=590 data-nosnippet>590</a>                    <span class="kw">let </span>live = counter.load(Ordering::SeqCst);
+<a href=#591 id=591 data-nosnippet>591</a>                    released.wait();
+<a href=#592 id=592 data-nosnippet>592</a>                    (live, cap)
+<a href=#593 id=593 data-nosnippet>593</a>                })
+<a href=#594 id=594 data-nosnippet>594</a>            })
+<a href=#595 id=595 data-nosnippet>595</a>            .collect();
+<a href=#596 id=596 data-nosnippet>596</a>
+<a href=#597 id=597 data-nosnippet>597</a>        <span class="kw">let </span>results: Vec&lt;(usize, usize)&gt; = handles
+<a href=#598 id=598 data-nosnippet>598</a>            .into_iter()
+<a href=#599 id=599 data-nosnippet>599</a>            .map(|h| h.join().expect(<span class="string">"merge thread joins"</span>))
+<a href=#600 id=600 data-nosnippet>600</a>            .collect();
+<a href=#601 id=601 data-nosnippet>601</a>
+<a href=#602 id=602 data-nosnippet>602</a>        <span class="comment">// The private atomic is touched ONLY by this test's `n` threads, so the
+<a href=#603 id=603 data-nosnippet>603</a>        // observed concurrency is EXACTLY `n` (deterministic, not `&gt;=`).
+<a href=#604 id=604 data-nosnippet>604</a>        </span><span class="kw">let </span>max_live = results.iter().map(|(l, <span class="kw">_</span>)| <span class="kw-2">*</span>l).max().unwrap_or(<span class="number">0</span>);
+<a href=#605 id=605 data-nosnippet>605</a>        <span class="macro">assert_eq!</span>(
+<a href=#606 id=606 data-nosnippet>606</a>            max_live, n,
+<a href=#607 id=607 data-nosnippet>607</a>            <span class="string">"private-atomic concurrency must be exactly {n}"
+<a href=#608 id=608 data-nosnippet>608</a>        </span>);
+<a href=#609 id=609 data-nosnippet>609</a>        <span class="comment">// The merges that registered while the count was already high got a
+<a href=#610 id=610 data-nosnippet>610</a>        // capacity strictly below the pre-change fixed 256 — the shrink property.
+<a href=#611 id=611 data-nosnippet>611</a>        </span><span class="kw">let </span>min_cap_seen = results.iter().map(|(<span class="kw">_</span>, c)| <span class="kw-2">*</span>c).min().unwrap_or(MAX_CAP);
+<a href=#612 id=612 data-nosnippet>612</a>        <span class="macro">assert!</span>(
+<a href=#613 id=613 data-nosnippet>613</a>            min_cap_seen &lt; MAX_CAP,
+<a href=#614 id=614 data-nosnippet>614</a>            <span class="string">"with {n} concurrent merges at least one per-channel cap must fall \
+<a href=#615 id=615 data-nosnippet>615</a>             below {MAX_CAP} (min seen = {min_cap_seen})"
+<a href=#616 id=616 data-nosnippet>616</a>        </span>);
+<a href=#617 id=617 data-nosnippet>617</a>        <span class="comment">// Forward progress: no merge is ever handed a sub-floor capacity (uses the
+<a href=#618 id=618 data-nosnippet>618</a>        // RESOLVED floor, so it holds under a `CQLITE_EGRESS_MIN_CAP` override).
+<a href=#619 id=619 data-nosnippet>619</a>        </span><span class="kw">for </span>(<span class="kw">_</span>, cap) <span class="kw">in </span><span class="kw-2">&amp;</span>results {
+<a href=#620 id=620 data-nosnippet>620</a>            <span class="macro">assert!</span>(
+<a href=#621 id=621 data-nosnippet>621</a>                <span class="kw-2">*</span>cap &gt;= floor,
+<a href=#622 id=622 data-nosnippet>622</a>                <span class="string">"per-channel cap {cap} &gt;= resolved floor {floor}"
+<a href=#623 id=623 data-nosnippet>623</a>            </span>);
+<a href=#624 id=624 data-nosnippet>624</a>        }
+<a href=#625 id=625 data-nosnippet>625</a>        <span class="comment">// Every guard dropped on join → the private count returns to zero.
+<a href=#626 id=626 data-nosnippet>626</a>        </span><span class="macro">assert_eq!</span>(
+<a href=#627 id=627 data-nosnippet>627</a>            counter.load(Ordering::SeqCst),
+<a href=#628 id=628 data-nosnippet>628</a>            <span class="number">0</span>,
+<a href=#629 id=629 data-nosnippet>629</a>            <span class="string">"no leak: all guards dropped"
+<a href=#630 id=630 data-nosnippet>630</a>        </span>);
+<a href=#631 id=631 data-nosnippet>631</a>    }
+<a href=#632 id=632 data-nosnippet>632</a>
+<a href=#633 id=633 data-nosnippet>633</a>    <span class="attr">#[test]
+<a href=#634 id=634 data-nosnippet>634</a>    </span><span class="kw">fn </span>guard_increments_and_decrements_a_private_count() {
+<a href=#635 id=635 data-nosnippet>635</a>        <span class="comment">// Deterministic pairing test against a PRIVATE atomic (mirroring
+<a href=#636 id=636 data-nosnippet>636</a>        // `channel_depth`'s per-test-atomic pattern): `begin_on_for_test`
+<a href=#637 id=637 data-nosnippet>637</a>        // increments and the returned guard's drop decrements, so the count
+<a href=#638 id=638 data-nosnippet>638</a>        // returns to baseline on every scope exit. A private atomic cannot be
+<a href=#639 id=639 data-nosnippet>639</a>        // perturbed by the other tests in this binary that drive real merges
+<a href=#640 id=640 data-nosnippet>640</a>        // through the shared global, and `begin_on_for_test` never publishes the
+<a href=#641 id=641 data-nosnippet>641</a>        // process-global operator gauge (structural suppression).
+<a href=#642 id=642 data-nosnippet>642</a>        </span><span class="kw">let </span>counter: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>AtomicUsize = Box::leak(Box::new(AtomicUsize::new(<span class="number">0</span>)));
+<a href=#643 id=643 data-nosnippet>643</a>        <span class="macro">assert_eq!</span>(counter.load(Ordering::SeqCst), <span class="number">0</span>);
+<a href=#644 id=644 data-nosnippet>644</a>        {
+<a href=#645 id=645 data-nosnippet>645</a>            <span class="kw">let </span>(cap0, _g0) = begin_on_for_test(counter);
+<a href=#646 id=646 data-nosnippet>646</a>            <span class="macro">assert_eq!</span>(counter.load(Ordering::SeqCst), <span class="number">1</span>);
+<a href=#647 id=647 data-nosnippet>647</a>            <span class="macro">assert_eq!</span>(cap0, capacity_for(<span class="number">1</span>), <span class="string">"first merge sees active=1"</span>);
+<a href=#648 id=648 data-nosnippet>648</a>            {
+<a href=#649 id=649 data-nosnippet>649</a>                <span class="kw">let </span>(cap1, _g1) = begin_on_for_test(counter);
+<a href=#650 id=650 data-nosnippet>650</a>                <span class="macro">assert_eq!</span>(counter.load(Ordering::SeqCst), <span class="number">2</span>);
+<a href=#651 id=651 data-nosnippet>651</a>                <span class="macro">assert_eq!</span>(cap1, capacity_for(<span class="number">2</span>), <span class="string">"second merge sees active=2"</span>);
+<a href=#652 id=652 data-nosnippet>652</a>            }
+<a href=#653 id=653 data-nosnippet>653</a>            <span class="macro">assert_eq!</span>(
+<a href=#654 id=654 data-nosnippet>654</a>                counter.load(Ordering::SeqCst),
+<a href=#655 id=655 data-nosnippet>655</a>                <span class="number">1</span>,
+<a href=#656 id=656 data-nosnippet>656</a>                <span class="string">"inner guard drop decremented"
+<a href=#657 id=657 data-nosnippet>657</a>            </span>);
+<a href=#658 id=658 data-nosnippet>658</a>        }
+<a href=#659 id=659 data-nosnippet>659</a>        <span class="macro">assert_eq!</span>(
+<a href=#660 id=660 data-nosnippet>660</a>            counter.load(Ordering::SeqCst),
+<a href=#661 id=661 data-nosnippet>661</a>            <span class="number">0</span>,
+<a href=#662 id=662 data-nosnippet>662</a>            <span class="string">"outer guard drop returned to baseline (no leak on any exit path)"
+<a href=#663 id=663 data-nosnippet>663</a>        </span>);
+<a href=#664 id=664 data-nosnippet>664</a>    }
+<a href=#665 id=665 data-nosnippet>665</a>}
+</code></pre></div></section></main></body></html>

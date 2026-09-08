@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["ScanCancel"]};
+window.SIDEBAR_ITEMS = {"constant":["YIELD_STRIDE"],"struct":["ScanCancel"]};

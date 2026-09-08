@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["parse_enhanced_statistics_file","parse_nb_format_header","parse_nb_format_statistics_data","parse_statistics_with_fallback"]};
+window.SIDEBAR_ITEMS = {"fn":["parse_enhanced_statistics_file","parse_enhanced_statistics_file_detailed","parse_nb_format_header","parse_nb_format_statistics_data","parse_statistics_with_fallback","parse_statistics_with_fallback_detailed"]};

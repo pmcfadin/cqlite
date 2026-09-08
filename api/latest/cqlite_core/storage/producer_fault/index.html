@@ -1,0 +1,125 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="TEST-ONLY fault injection for the producer boundaries that used to collapse a dead producer into a clean end of input: the query row stream’s two (issue #3106), the k-way MERGE’s shared row-forward funnel (issue #3120), and every spawned task on the multi-generation streaming-scan path (issue #3124)."><title>cqlite_core::storage::producer_fault - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module producer_fault</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.17.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module producer_<wbr>fault</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#why-this-exists" title="Why this exists">Why this exists</a></li><li><a href="#every-arm-is-scoped-to-one-reader--no-test-can-take-anothers-roborev" title="Every arm is SCOPED to one reader — no test can take another’s (roborev)">Every arm is SCOPED to one reader — no test can take another’s (roborev)</a></li><li><a href="#why-this-is-not-a-production-knob-no-heuristics-safe" title="Why this is not a production knob (no-heuristics safe)">Why this is not a production knob (no-heuristics safe)</a></li><li><a href="#one-seam-injects-an-err-not-a-panic-issue-3154" title="One seam injects an `Err`, not a panic (issue #3154)">One seam injects an <code>Err</code>, not a panic (issue #3154)</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In cqlite_<wbr>core::<wbr>storage</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">cqlite_core</a>::<wbr><a href="../index.html">storage</a></div><h1>Module <span>producer_<wbr>fault</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/cqlite_core/storage/producer_fault.rs.html#1-749">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>TEST-ONLY fault injection for the producer boundaries that used to collapse a
+dead producer into a clean end of input: the query row stream’s two (issue
+#3106), the k-way MERGE’s shared row-forward funnel (issue #3120), and every
+spawned task on the multi-generation streaming-scan path (issue #3124).</p>
+<h2 id="why-this-exists"><a class="doc-anchor" href="#why-this-exists">§</a>Why this exists</h2>
+<p>The query row stream (<a href="../sstable/reader/struct.QueryRowStream.html" title="struct cqlite_core::storage::sstable::reader::QueryRowStream"><code>crate::storage::sstable::reader::QueryRowStream</code></a>) is
+fed by a detached producer thread over a bounded channel, and on the full-ring
+arm that thread is in turn fed by an INNER <code>tokio</code> task over a second channel.
+Before issue #3106 BOTH boundaries collapsed a channel DISCONNECT into a clean
+end of stream, so a producer that UNWOUND (a panic anywhere in the walk/decode,
+rather than an <code>Err</code> return) dropped its sender without a terminal message and
+the request completed SUCCESSFULLY with a silently truncated result set. The
+fix makes completion explicit at both boundaries; this module is how a test
+PROVES that, deterministically, without waiting for a real decode bug to
+unwind.</p>
+<p>Independent seams, one per boundary:</p>
+<ul>
+<li>
+<p><a href="fn.arm_query_row_producer_panic.html" title="fn cqlite_core::storage::producer_fault::arm_query_row_producer_panic"><code>arm_query_row_producer_panic</code></a> → the OUTER boundary: the query-row producer
+THREAD panics at a batch handoff ([<code>ProducerFault::before_batch_handoff</code>],
+consulted in <code>query_rows::emit_rows</code>).</p>
+</li>
+<li>
+<p><a href="fn.arm_inner_scan_task_panic.html" title="fn cqlite_core::storage::producer_fault::arm_inner_scan_task_panic"><code>arm_inner_scan_task_panic</code></a> → the INNER boundary: the batched-scan <code>tokio</code>
+TASK panics ([<code>inner_scan_task_checkpoint</code>]). ONE checkpoint site, in that
+task’s cursor-open prelude
+(<code>data_access::joined_scan_stream::SSTableReader::open_batched_scan_cursor</code>),
+which sits ABOVE the <code>requires_chunk_stitching()</code> branch and is therefore
+reached whatever on-disk format the reader has — a checkpoint inside either
+branch would fire only for that branch’s formats and could silently not fire.
+This is the arm a <code>do_get</code> with NO token filter takes, so it is the issue’s
+own repro; killing the task drops its sender with no terminator, which the
+query-row thread used to read as “the scan finished”.</p>
+</li>
+<li>
+<p><a href="fn.arm_scan_task_panic.html" title="fn cqlite_core::storage::producer_fault::arm_scan_task_panic"><code>arm_scan_task_panic</code></a> → the generalisation of the second seam to EVERY
+spawned scan task on the ≠1-generation (query-engine full scan) path (issue
+#3124): the fan-out k-way merge task, a per-reader per-row sub-scan, the
+windowed forwarder, and the cross-generation RECONCILING merge task — see
+<a href="enum.ScanTaskSite.html" title="enum cqlite_core::storage::producer_fault::ScanTaskSite"><code>ScanTaskSite</code></a>. Each had a DISCARDED <code>JoinHandle</code>
+and a consumer that read channel-close as end-of-scan, i.e. the #3106 defect
+on the multi-generation path. An arm is keyed by <code>(site, scope)</code>, not scope
+alone, because one scan traverses several of these checkpoints.</p>
+</li>
+<li>
+<p><a href="fn.arm_merge_producer_panic.html" title="fn cqlite_core::storage::producer_fault::arm_merge_producer_panic"><code>arm_merge_producer_panic</code></a> → the K-WAY MERGE boundary (issue #3120): a
+merge producer THREAD panics at a row forward
+([<code>MergeProducerFault::before_row_forward</code>], consulted in
+<code>write_engine::merge::from_readers::forward_row</code>). That is the <code>emit</code>
+callback BOTH <code>stream_all_partitions_for_compaction</code> and
+<code>..._for_query</code> invoke, and it sits in <code>write_engine/merge</code> ABOVE any
+reader format branch — so unlike a checkpoint inside the reader there is no
+<code>requires_chunk_stitching()</code>-style bypass that could make the fault silently
+not fire, and ONE funnel covers BOTH producer shapes (path-based compaction
+and shared-reader warm query).</p>
+<p>Its registry is SEPARATE from the query-row one (<a href="fn.arm_merge_producer_panic.html" title="fn cqlite_core::storage::producer_fault::arm_merge_producer_panic"><code>arm_merge_producer_panic</code></a>
+vs <a href="fn.arm_query_row_producer_panic.html" title="fn cqlite_core::storage::producer_fault::arm_query_row_producer_panic"><code>arm_query_row_producer_panic</code></a>) on purpose: a shared registry would let
+a merge producer consume an arm a query-row test registered (and vice versa),
+which is exactly the cross-consumption class the per-reader scoping below
+exists to eliminate.</p>
+</li>
+</ul>
+<h2 id="every-arm-is-scoped-to-one-reader--no-test-can-take-anothers-roborev"><a class="doc-anchor" href="#every-arm-is-scoped-to-one-reader--no-test-can-take-anothers-roborev">§</a>Every arm is SCOPED to one reader — no test can take another’s (roborev)</h2>
+<p>An arm is registered against a <code>scope</code> STRING, and a checkpoint fires only when
+the scanning reader’s <code>Data.db</code> PATH contains that scope. This is the
+structural replacement for the earlier “process-global, caller serializes”
+convention, which was unsound in the <code>cqlite-core</code> lib test binary: the in-<code>src</code>
+panic tests compile into the SAME binary as thousands of other tests and
+libtest runs them in parallel, so a concurrent test’s scan could consume the arm
+and let a panic-injection test pass for the wrong reason (a doc comment asking
+callers to serialize is exactly the mitigation that failed).</p>
+<p>Two properties make it structural rather than conventional:</p>
+<ul>
+<li><strong>Scoped consumption.</strong> A scan whose path does not match leaves the arm
+registered, so it cannot consume a foreign arm even by racing. A test scopes
+to its own <code>TempDir</code> path (unique per run) or to its own <code>keyspace/table</code>.</li>
+<li><strong>A registry, not a slot.</strong> Arms live in a <code>Vec</code>, so two concurrently armed
+tests coexist; neither can clobber the other’s arm by arming second. Each
+guard removes its OWN entry (by id) on drop.</li>
+</ul>
+<p>Matching is by substring so a caller can scope to a directory (<code>keyspace/table</code>)
+without knowing the generated SSTable filename. An arm that matches nothing is
+simply never taken — the arming test then fails LOUDLY (it sees no error), which
+is the correct failure direction.</p>
+<h2 id="why-this-is-not-a-production-knob-no-heuristics-safe"><a class="doc-anchor" href="#why-this-is-not-a-production-knob-no-heuristics-safe">§</a>Why this is not a production knob (no-heuristics safe)</h2>
+<ul>
+<li>Everything that can arm a fault is <code>#[cfg(any(test, feature = "producer-fault-injection"))]</code>. In a default build the arming API does not
+exist, the registries do not exist, [<code>ProducerFault</code>] is a zero-sized struct
+with no fields, and both checkpoints compile to empty functions that never
+even evaluate their scope closure — so a production scan does not pay the
+<code>PathBuf</code> clone. The production build is byte-identical to one without this
+module’s body, and the module itself is <code>pub(crate)</code> there.</li>
+<li>No environment variable, config field or on-disk byte pattern can arm it: the
+only way in is a Rust call to an arming function that does not exist in
+production builds. So it cannot influence a decoding decision (issue #28)
+even accidentally.</li>
+<li><code>cqlite-flight</code> enables the feature from its <code>[dev-dependencies]</code> (the same
+convention <code>arrow-shape-corpus</code> / <code>test-util</code> already use), so the shipped
+Flight binary never links it.</li>
+</ul>
+<h2 id="one-seam-injects-an-err-not-a-panic-issue-3154"><a class="doc-anchor" href="#one-seam-injects-an-err-not-a-panic-issue-3154">§</a>One seam injects an <code>Err</code>, not a panic (issue #3154)</h2>
+<p>[<code>arm_merge_construction_error</code>] (child module <code>construction</code>) makes
+<code>KWayMerger::new</code> REPORT a chosen error variant on the cross-generation merge
+path, proving the narrowed fallback classification: an I/O or corruption failure
+must propagate, while a merger-ineligible unsupported-format failure must still
+degrade to the documented concat. See that module’s doc.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.ArmedMergeProducerPanic.html" title="struct cqlite_core::storage::producer_fault::ArmedMergeProducerPanic">Armed<wbr>Merge<wbr>Producer<wbr>Panic</a></dt><dd>Guard returned by <a href="fn.arm_merge_producer_panic.html" title="fn cqlite_core::storage::producer_fault::arm_merge_producer_panic"><code>arm_merge_producer_panic</code></a>: removes its own arm on drop.
+Holds no lock, so it is safe to hold across an <code>.await</code>.</dd><dt><a class="struct" href="struct.ArmedProducerPanic.html" title="struct cqlite_core::storage::producer_fault::ArmedProducerPanic">Armed<wbr>Producer<wbr>Panic</a></dt><dd>Guard returned by <a href="fn.arm_query_row_producer_panic.html" title="fn cqlite_core::storage::producer_fault::arm_query_row_producer_panic"><code>arm_query_row_producer_panic</code></a>: removes its own arm on
+drop. Holds no lock, so it is safe to hold across an <code>.await</code>.</dd><dt><a class="struct" href="struct.ArmedScanTaskPanic.html" title="struct cqlite_core::storage::producer_fault::ArmedScanTaskPanic">Armed<wbr>Scan<wbr>Task<wbr>Panic</a></dt><dd>Guard returned by <a href="fn.arm_scan_task_panic.html" title="fn cqlite_core::storage::producer_fault::arm_scan_task_panic"><code>arm_scan_task_panic</code></a> / <a href="fn.arm_inner_scan_task_panic.html" title="fn cqlite_core::storage::producer_fault::arm_inner_scan_task_panic"><code>arm_inner_scan_task_panic</code></a>:
+removes its own arm on drop. Holds no lock, so it is safe to hold across an
+<code>.await</code>.</dd><dt><a class="struct" href="struct.SilencedInjectedPanics.html" title="struct cqlite_core::storage::producer_fault::SilencedInjectedPanics">Silenced<wbr>Injected<wbr>Panics</a></dt><dd>Guard returned by <a href="fn.silence_injected_panics.html" title="fn cqlite_core::storage::producer_fault::silence_injected_panics"><code>silence_injected_panics</code></a>; restores the previous hook on a
+normal drop (see <a href="struct.SilencedInjectedPanics.html#method.drop" title="method cqlite_core::storage::producer_fault::SilencedInjectedPanics::drop"><code>Self::drop</code></a> for the unwinding case).</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.ScanTaskSite.html" title="enum cqlite_core::storage::producer_fault::ScanTaskSite">Scan<wbr>Task<wbr>Site</a></dt><dd>Which spawned scan task a checkpoint belongs to (issue #3124).</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.INJECTED_PANIC_MESSAGE.html" title="constant cqlite_core::storage::producer_fault::INJECTED_PANIC_MESSAGE">INJECTED_<wbr>PANIC_<wbr>MESSAGE</a></dt><dd>The panic message both checkpoints raise. Exported so a test can (a) assert
+the forwarded error carries it and (b) suppress exactly this panic in its
+panic hook without silencing a real one.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.arm_inner_scan_task_panic.html" title="fn cqlite_core::storage::producer_fault::arm_inner_scan_task_panic">arm_<wbr>inner_<wbr>scan_<wbr>task_<wbr>panic</a></dt><dd>Arm the next batched-scan task over a reader whose <code>Data.db</code> path contains
+<code>scope</code> to panic in its cursor-open prelude, so the task unwinds and drops its
+sender with no error and no terminator.</dd><dt><a class="fn" href="fn.arm_merge_producer_panic.html" title="fn cqlite_core::storage::producer_fault::arm_merge_producer_panic">arm_<wbr>merge_<wbr>producer_<wbr>panic</a></dt><dd>Arm the next k-way MERGE run over a reader whose <code>Data.db</code> path contains
+<code>scope</code> to panic in its producer THREAD just before it forwards row number
+<code>after_rows</code> (0-based), so <code>after_rows</code> rows reach the merge and the run then
+dies MID-WALK (issue #3120).</dd><dt><a class="fn" href="fn.arm_query_row_producer_panic.html" title="fn cqlite_core::storage::producer_fault::arm_query_row_producer_panic">arm_<wbr>query_<wbr>row_<wbr>producer_<wbr>panic</a></dt><dd>Arm the next query row stream opened over a reader whose <code>Data.db</code> path
+contains <code>scope</code> to panic in its producer THREAD just before it hands over
+batch number <code>after_batches</code> (0-based), so <code>after_batches</code> batches reach the
+consumer and the walk then dies MID-STREAM.</dd><dt><a class="fn" href="fn.arm_scan_task_panic.html" title="fn cqlite_core::storage::producer_fault::arm_scan_task_panic">arm_<wbr>scan_<wbr>task_<wbr>panic</a></dt><dd>Arm the next scan task of <code>site</code>, over a reader whose <code>Data.db</code> path contains
+<code>scope</code>, to panic at that site’s checkpoint — so the task unwinds and drops its
+sender with no error and no terminator (issue #3124).</dd><dt><a class="fn" href="fn.silence_injected_panics.html" title="fn cqlite_core::storage::producer_fault::silence_injected_panics">silence_<wbr>injected_<wbr>panics</a></dt><dd>Suppress the console noise of the INJECTED panic — and only that one — for the
+returned guard’s lifetime.</dd></dl></section></div></main></body></html>

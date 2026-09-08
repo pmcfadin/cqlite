@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/partition_lookup.rs`."><title>partition_lookup.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../src-files.js"></script><script defer src="../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/</div>partition_lookup.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Partition lookup and index-based access methods for SSTableReader
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/partition_lookup.rs`."><title>partition_lookup.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../src-files.js"></script><script defer src="../../../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/</div>partition_lookup.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Partition lookup and index-based access methods for SSTableReader
 <a href=#2 id=2 data-nosnippet>2</a>//!
 <a href=#3 id=3 data-nosnippet>3</a>//! This module contains methods for efficient partition lookup using Index.db,
 <a href=#4 id=4 data-nosnippet>4</a>//! Summary.db, and Statistics.db readers.
@@ -623,212 +623,216 @@
 <a href=#623 id=623 data-nosnippet>623</a>    /// directly. For V5CompressedLegacy NB SSTables (the format the writer emits),
 <a href=#624 id=624 data-nosnippet>624</a>    /// `sequential_scan` uses the chunk-stitching path and returns every partition.
 <a href=#625 id=625 data-nosnippet>625</a>    </span><span class="kw">pub async fn </span>iterate_all_partitions(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;(RowKey, ScanRow)&gt;&gt; {
-<a href=#626 id=626 data-nosnippet>626</a>        <span class="comment">// Delegates to the per-call-token sibling with the reader's own field —
-<a href=#627 id=627 data-nosnippet>627</a>        // byte-identical to the pre-#2346 behaviour of this method (every
-<a href=#628 id=628 data-nosnippet>628</a>        // pre-existing caller keeps its exact cancellation semantics).
-<a href=#629 id=629 data-nosnippet>629</a>        </span><span class="self">self</span>.iterate_all_partitions_cancellable(<span class="kw-2">&amp;</span><span class="self">self</span>.scan_cancel)
-<a href=#630 id=630 data-nosnippet>630</a>            .<span class="kw">await
-<a href=#631 id=631 data-nosnippet>631</a>    </span>}
-<a href=#632 id=632 data-nosnippet>632</a>
-<a href=#633 id=633 data-nosnippet>633</a>    <span class="doccomment">/// Like [`Self::iterate_all_partitions`], but takes an explicit PER-CALL
-<a href=#634 id=634 data-nosnippet>634</a>    /// cancellation token instead of always reading the reader's own
-<a href=#635 id=635 data-nosnippet>635</a>    /// [`SSTableReader::scan_cancel`] field (issue #2346).
-<a href=#636 id=636 data-nosnippet>636</a>    ///
-<a href=#637 id=637 data-nosnippet>637</a>    /// A cached/shared `Arc&lt;SSTableReader&gt;` (a future warm-handle registry) has
-<a href=#638 id=638 data-nosnippet>638</a>    /// no `&amp;mut self` available to set a per-request cancel flag, so this seam
-<a href=#639 id=639 data-nosnippet>639</a>    /// lets the compaction streaming path
-<a href=#640 id=640 data-nosnippet>640</a>    /// ([`SSTableReader::stream_all_partitions_for_compaction`]'s non-stitching
-<a href=#641 id=641 data-nosnippet>641</a>    /// fallback) drive two concurrent enumerations with two INDEPENDENT tokens.
-<a href=#642 id=642 data-nosnippet>642</a>    /// `iterate_all_partitions` itself is UNCHANGED — it delegates here with
-<a href=#643 id=643 data-nosnippet>643</a>    /// `&amp;self.scan_cancel`, so every existing caller keeps identical behaviour.
-<a href=#644 id=644 data-nosnippet>644</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">async fn </span>iterate_all_partitions_cancellable(
-<a href=#645 id=645 data-nosnippet>645</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
-<a href=#646 id=646 data-nosnippet>646</a>        scan_cancel: <span class="kw-2">&amp;</span><span class="kw">crate</span>::storage::scan_cancel::ScanCancel,
-<a href=#647 id=647 data-nosnippet>647</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;(RowKey, ScanRow)&gt;&gt; {
-<a href=#648 id=648 data-nosnippet>648</a>        <span class="comment">// Index-random-read path (issue #2302): when a `Index.db` is present on a
-<a href=#649 id=649 data-nosnippet>649</a>        // BIG SSTable, enumerate EVERY partition via the full Index.db
-<a href=#650 id=650 data-nosnippet>650</a>        // partition-offset table instead of the sparse `Summary.db` samples.
-<a href=#651 id=651 data-nosnippet>651</a>        //
-<a href=#652 id=652 data-nosnippet>652</a>        // The historical loop walked `Summary.db` (only ~1-in-128 partitions) AND
-<a href=#653 id=653 data-nosnippet>653</a>        // passed `data_size = 0` to `parse_partition_at_offset` (Index.db never
-<a href=#654 id=654 data-nosnippet>654</a>        // stores partition size), so it read zero bytes per entry, resolved zero
-<a href=#655 id=655 data-nosnippet>655</a>        // partitions, and SILENTLY fell back to a full `sequential_scan` on EVERY
-<a href=#656 id=656 data-nosnippet>656</a>        // read — even with complete, valid components. Each partition's span is
-<a href=#657 id=657 data-nosnippet>657</a>        // bounded instead by the successor entry's offset (the last by the
-<a href=#658 id=658 data-nosnippet>658</a>        // data-section end), authoritative on-disk structure rather than a size
-<a href=#659 id=659 data-nosnippet>659</a>        // guess (issue #28). Index.db offsets are in the UNCOMPRESSED data-section
-<a href=#660 id=660 data-nosnippet>660</a>        // domain: for an uncompressed reader that equals the raw file domain; for a
-<a href=#661 id=661 data-nosnippet>661</a>        // compressed reader the per-partition slice is mapped to its covering
-<a href=#662 id=662 data-nosnippet>662</a>        // compression chunk(s) and decompressed (`read_compressed_offset_window`).
-<a href=#663 id=663 data-nosnippet>663</a>        </span><span class="kw">if </span><span class="self">self</span>.index_reader.is_some() &amp;&amp; <span class="self">self</span>.bti_partitions_db.is_none() {
-<a href=#664 id=664 data-nosnippet>664</a>            <span class="kw">match </span><span class="self">self
-<a href=#665 id=665 data-nosnippet>665</a>                </span>.iterate_all_partitions_via_full_index(scan_cancel)
-<a href=#666 id=666 data-nosnippet>666</a>                .<span class="kw">await</span><span class="question-mark">?
-<a href=#667 id=667 data-nosnippet>667</a>            </span>{
-<a href=#668 id=668 data-nosnippet>668</a>                <span class="prelude-val">Some</span>(results) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(results),
-<a href=#669 id=669 data-nosnippet>669</a>                <span class="prelude-val">None </span>=&gt; {
-<a href=#670 id=670 data-nosnippet>670</a>                    <span class="comment">// Present components that did NOT fully resolve: never silent.
-<a href=#671 id=671 data-nosnippet>671</a>                    </span><span class="macro">tracing::warn!</span>(
-<a href=#672 id=672 data-nosnippet>672</a>                        <span class="string">"SSTable Index.db is present but iterate_all_partitions could not \
-<a href=#673 id=673 data-nosnippet>673</a>                         resolve every partition through the index-random-read path; \
-<a href=#674 id=674 data-nosnippet>674</a>                         falling back to a full sequential scan of Data.db (issue #2302). \
-<a href=#675 id=675 data-nosnippet>675</a>                         This should not happen for a well-formed BIG SSTable — the emitted \
-<a href=#676 id=676 data-nosnippet>676</a>                         Index.db/Summary.db may be malformed or the data-section length is \
-<a href=#677 id=677 data-nosnippet>677</a>                         inconsistent with the index offsets."
-<a href=#678 id=678 data-nosnippet>678</a>                    </span>);
-<a href=#679 id=679 data-nosnippet>679</a>                }
-<a href=#680 id=680 data-nosnippet>680</a>            }
-<a href=#681 id=681 data-nosnippet>681</a>        } <span class="kw">else if </span><span class="self">self</span>.bti_partitions_db.is_none() {
-<a href=#682 id=682 data-nosnippet>682</a>            <span class="comment">// BIG SSTable with NO usable `index_reader` (this branch is only reached
-<a href=#683 id=683 data-nosnippet>683</a>            // when `index_reader.is_none()`): the full-index random-read path cannot
-<a href=#684 id=684 data-nosnippet>684</a>            // run, so every iteration falls into the sequential Data.db scan below — a
-<a href=#685 id=685 data-nosnippet>685</a>            // real per-read perf cliff. The WARN trigger keys on Index.db availability,
-<a href=#686 id=686 data-nosnippet>686</a>            // NOT Summary.db presence (roborev job 1612): a present Summary.db only
-<a href=#687 id=687 data-nosnippet>687</a>            // samples ~1-in-128 partitions and never gates the full-index path, so a
-<a href=#688 id=688 data-nosnippet>688</a>            // present-Summary/missing-Index pair is the SAME silent degradation this
-<a href=#689 id=689 data-nosnippet>689</a>            // issue exists to kill and must be named LOUD, never dropped silently into
-<a href=#690 id=690 data-nosnippet>690</a>            // `sequential_scan`. The sub-cause (failed-to-open vs genuinely absent)
-<a href=#691 id=691 data-nosnippet>691</a>            // only shapes the message.
-<a href=#692 id=692 data-nosnippet>692</a>            </span><span class="kw">if </span><span class="self">self</span>.index_present_but_unloadable {
-<a href=#693 id=693 data-nosnippet>693</a>                <span class="comment">// The sibling Index.db EXISTS on disk but failed to open/parse
-<a href=#694 id=694 data-nosnippet>694</a>                // (issue #2302, roborev job 1606): distinct from a genuinely absent
-<a href=#695 id=695 data-nosnippet>695</a>                // file — the component is malformed/truncated.
-<a href=#696 id=696 data-nosnippet>696</a>                </span><span class="macro">tracing::warn!</span>(
-<a href=#697 id=697 data-nosnippet>697</a>                    <span class="string">"SSTable Index.db is present on disk but failed to open/parse \
-<a href=#698 id=698 data-nosnippet>698</a>                     (iterate_all_partitions cannot use the index-random-read path) \
-<a href=#699 id=699 data-nosnippet>699</a>                     and falls back to a full sequential scan of Data.db (a per-read \
-<a href=#700 id=700 data-nosnippet>700</a>                     perf cliff, issue #2302). The Index.db component may be malformed \
-<a href=#701 id=701 data-nosnippet>701</a>                     or truncated — regenerate the SSTable or restore an intact Index.db."
-<a href=#702 id=702 data-nosnippet>702</a>                </span>);
-<a href=#703 id=703 data-nosnippet>703</a>            } <span class="kw">else </span>{
-<a href=#704 id=704 data-nosnippet>704</a>                <span class="comment">// Index.db genuinely absent. Whether or not Summary.db loaded, the
-<a href=#705 id=705 data-nosnippet>705</a>                // full-index path is unavailable, so this is still the degraded
-<a href=#706 id=706 data-nosnippet>706</a>                // full-scan cliff (issues #2295/#2302). Name the absent components so
-<a href=#707 id=707 data-nosnippet>707</a>                // an operator can spot an incomplete snapshot directory served with
-<a href=#708 id=708 data-nosnippet>708</a>                // only Data.db (or Data.db + Summary.db) instead of silently paying
-<a href=#709 id=709 data-nosnippet>709</a>                // the full-scan cost on every read.
-<a href=#710 id=710 data-nosnippet>710</a>                </span><span class="kw">let </span>missing = <span class="kw">if </span><span class="self">self</span>.summary_reader.is_none() {
-<a href=#711 id=711 data-nosnippet>711</a>                    <span class="string">"Index.db and Summary.db"
-<a href=#712 id=712 data-nosnippet>712</a>                </span>} <span class="kw">else </span>{
-<a href=#713 id=713 data-nosnippet>713</a>                    <span class="string">"Index.db"
-<a href=#714 id=714 data-nosnippet>714</a>                </span>};
-<a href=#715 id=715 data-nosnippet>715</a>                <span class="macro">tracing::warn!</span>(
-<a href=#716 id=716 data-nosnippet>716</a>                    <span class="string">"SSTable has no usable random-access partition index ({missing} \
-<a href=#717 id=717 data-nosnippet>717</a>                     absent): iterate_all_partitions falls back to a full sequential \
-<a href=#718 id=718 data-nosnippet>718</a>                     scan of Data.db, materializing and sorting every partition on \
-<a href=#719 id=719 data-nosnippet>719</a>                     each read (a per-read perf cliff, issues #2295/#2302). For \
-<a href=#720 id=720 data-nosnippet>720</a>                     snapshot reads, ensure the snapshot directory holds the full \
-<a href=#721 id=721 data-nosnippet>721</a>                     SSTable component set (Index.db + Summary.db), not just Data.db."
-<a href=#722 id=722 data-nosnippet>722</a>                </span>);
-<a href=#723 id=723 data-nosnippet>723</a>            }
-<a href=#724 id=724 data-nosnippet>724</a>        }
-<a href=#725 id=725 data-nosnippet>725</a>
-<a href=#726 id=726 data-nosnippet>726</a>        <span class="comment">// Fallback path: sequential walk of Data.db.
-<a href=#727 id=727 data-nosnippet>727</a>        // Used when Summary.db is absent OR when the Index.db lookup loop returned
-<a href=#728 id=728 data-nosnippet>728</a>        // no entries (Issue #500: writer-produced SSTables emit a raw-key Index.db
-<a href=#729 id=729 data-nosnippet>729</a>        // format the reader's digest-based parser does not resolve).
-<a href=#730 id=730 data-nosnippet>730</a>        </span><span class="kw">let </span>table_id = <span class="self">self</span>.scan_table_id();
-<a href=#731 id=731 data-nosnippet>731</a>        <span class="kw">let </span>schema = <span class="self">self</span>.schema.as_deref();
-<a href=#732 id=732 data-nosnippet>732</a>        <span class="self">self</span>.sequential_scan(<span class="kw-2">&amp;</span>table_id, <span class="prelude-val">None</span>, <span class="prelude-val">None</span>, <span class="prelude-val">None</span>, schema, scan_cancel)
-<a href=#733 id=733 data-nosnippet>733</a>            .<span class="kw">await
-<a href=#734 id=734 data-nosnippet>734</a>    </span>}
-<a href=#735 id=735 data-nosnippet>735</a>
-<a href=#736 id=736 data-nosnippet>736</a>    <span class="doccomment">/// Whether this reader has a **usable random-access partition index** — a
-<a href=#737 id=737 data-nosnippet>737</a>    /// loaded `Index.db` (BIG format; issue #2302 resolves CQLite-written Index.db
-<a href=#738 id=738 data-nosnippet>738</a>    /// too) or a `Partitions.db` trie (BTI format) — that lets
-<a href=#739 id=739 data-nosnippet>739</a>    /// [`iterate_all_partitions`](Self::iterate_all_partitions) and point lookups
-<a href=#740 id=740 data-nosnippet>740</a>    /// avoid a full sequential Data.db scan.
-<a href=#741 id=741 data-nosnippet>741</a>    ///
-<a href=#742 id=742 data-nosnippet>742</a>    /// This is a **capability probe**: it must report `true` only for the exact
-<a href=#743 id=743 data-nosnippet>743</a>    /// states that route to the non-sequential path. Both point lookups
-<a href=#744 id=744 data-nosnippet>744</a>    /// (`index_reader.lookup_partition` / the BTI trie) and `iterate_all_partitions`
-<a href=#745 id=745 data-nosnippet>745</a>    /// (the full-`Index.db` walk / BTI) gate on `index_reader`/`bti_partitions_db`
-<a href=#746 id=746 data-nosnippet>746</a>    /// — never on `summary_reader`.
-<a href=#747 id=747 data-nosnippet>747</a>    ///
-<a href=#748 id=748 data-nosnippet>748</a>    /// Issue #2302 (roborev job 1613): `summary_reader` is DELIBERATELY excluded. A
-<a href=#749 id=749 data-nosnippet>749</a>    /// `Summary.db` only samples ~1-in-128 partitions and never gates the
-<a href=#750 id=750 data-nosnippet>750</a>    /// random-access route, so a present-Summary / absent-Index BIG reader is
-<a href=#751 id=751 data-nosnippet>751</a>    /// degraded — every read falls into `sequential_scan` and WARNs. Including
-<a href=#752 id=752 data-nosnippet>752</a>    /// `summary_reader` here made the probe report "fast path available" for that
-<a href=#753 id=753 data-nosnippet>753</a>    /// degraded reader (a fidelity lie). Narrowing to the truly-supporting state
-<a href=#754 id=754 data-nosnippet>754</a>    /// keeps the probe honest.
-<a href=#755 id=755 data-nosnippet>755</a>    ///
-<a href=#756 id=756 data-nosnippet>756</a>    /// Snapshot-completeness probe (issue #2295): a directory served with only
-<a href=#757 id=757 data-nosnippet>757</a>    /// `Data.db` (its index siblings absent) still opens but reports `false`; a
-<a href=#758 id=758 data-nosnippet>758</a>    /// complete component set loads `Index.db` (→ `index_reader`) and reports
-<a href=#759 id=759 data-nosnippet>759</a>    /// `true`. All current callers (this module's own tests + the #2295 snapshot
-<a href=#760 id=760 data-nosnippet>760</a>    /// test) use this probe to mean "does the fast/index path apply," so a single
-<a href=#761 id=761 data-nosnippet>761</a>    /// narrowed predicate covers every caller without a split API.
-<a href=#762 id=762 data-nosnippet>762</a>    </span><span class="kw">pub fn </span>has_partition_index(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
-<a href=#763 id=763 data-nosnippet>763</a>        <span class="self">self</span>.index_reader.is_some() || <span class="self">self</span>.bti_partitions_db.is_some()
-<a href=#764 id=764 data-nosnippet>764</a>    }
-<a href=#765 id=765 data-nosnippet>765</a>
-<a href=#766 id=766 data-nosnippet>766</a>    <span class="doccomment">/// Build the TableId used for fallback `sequential_scan` from header metadata.
-<a href=#767 id=767 data-nosnippet>767</a>    ///
-<a href=#768 id=768 data-nosnippet>768</a>    /// The reader populates `header.keyspace` / `header.table_name` from either the
-<a href=#769 id=769 data-nosnippet>769</a>    /// SSTable header or the parent directory path. When the V5CompressedLegacy
-<a href=#770 id=770 data-nosnippet>770</a>    /// stitching path is used, table_id matching is skipped, so any non-empty value
-<a href=#771 id=771 data-nosnippet>771</a>    /// is accepted; for other formats this returns the qualified `keyspace.table`
-<a href=#772 id=772 data-nosnippet>772</a>    /// form so the scan filter matches.
-<a href=#773 id=773 data-nosnippet>773</a>    </span><span class="kw">pub</span>(<span class="kw">in </span><span class="kw">crate</span>::storage::sstable::reader) <span class="kw">fn </span>scan_table_id(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; TableId {
-<a href=#774 id=774 data-nosnippet>774</a>        <span class="kw">let </span>keyspace = <span class="kw-2">&amp;</span><span class="self">self</span>.header.keyspace;
-<a href=#775 id=775 data-nosnippet>775</a>        <span class="kw">let </span>table_name = <span class="kw-2">&amp;</span><span class="self">self</span>.header.table_name;
-<a href=#776 id=776 data-nosnippet>776</a>        <span class="kw">if </span>!keyspace.is_empty() &amp;&amp; !table_name.is_empty() {
-<a href=#777 id=777 data-nosnippet>777</a>            TableId::from(<span class="macro">format!</span>(<span class="string">"{}.{}"</span>, keyspace, table_name))
-<a href=#778 id=778 data-nosnippet>778</a>        } <span class="kw">else if </span>!table_name.is_empty() {
-<a href=#779 id=779 data-nosnippet>779</a>            TableId::from(table_name.as_str())
-<a href=#780 id=780 data-nosnippet>780</a>        } <span class="kw">else </span>{
-<a href=#781 id=781 data-nosnippet>781</a>            TableId::from(<span class="string">"default"</span>)
-<a href=#782 id=782 data-nosnippet>782</a>        }
-<a href=#783 id=783 data-nosnippet>783</a>    }
-<a href=#784 id=784 data-nosnippet>784</a>
-<a href=#785 id=785 data-nosnippet>785</a>    <span class="doccomment">/// Token range iteration (deprecated - tokens not stored in Summary.db)
-<a href=#786 id=786 data-nosnippet>786</a>    ///
-<a href=#787 id=787 data-nosnippet>787</a>    /// This method is kept for API compatibility but simply delegates to
-<a href=#788 id=788 data-nosnippet>788</a>    /// `iterate_all_partitions()` since Summary.db does not store token values.
-<a href=#789 id=789 data-nosnippet>789</a>    /// Token filtering should be done by the caller after retrieval.
-<a href=#790 id=790 data-nosnippet>790</a>    </span><span class="attr">#[deprecated(
-<a href=#791 id=791 data-nosnippet>791</a>        since = <span class="string">"0.1.0"</span>,
-<a href=#792 id=792 data-nosnippet>792</a>        note = <span class="string">"Summary.db does not store tokens. Use iterate_all_partitions() and filter by computed tokens."
-<a href=#793 id=793 data-nosnippet>793</a>    </span>)]
-<a href=#794 id=794 data-nosnippet>794</a>    </span><span class="kw">pub async fn </span>iterate_token_range(
-<a href=#795 id=795 data-nosnippet>795</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
-<a href=#796 id=796 data-nosnippet>796</a>        _start_token: i64,
-<a href=#797 id=797 data-nosnippet>797</a>        _end_token: i64,
-<a href=#798 id=798 data-nosnippet>798</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;(RowKey, ScanRow)&gt;&gt; {
-<a href=#799 id=799 data-nosnippet>799</a>        <span class="comment">// Token values are not stored in Summary.db (Issue #218)
-<a href=#800 id=800 data-nosnippet>800</a>        // Delegate to all-partition iteration
-<a href=#801 id=801 data-nosnippet>801</a>        </span><span class="self">self</span>.iterate_all_partitions().<span class="kw">await
-<a href=#802 id=802 data-nosnippet>802</a>    </span>}
-<a href=#803 id=803 data-nosnippet>803</a>
-<a href=#804 id=804 data-nosnippet>804</a>    <span class="doccomment">/// Get min/max timestamps from Statistics.db reader
-<a href=#805 id=805 data-nosnippet>805</a>    </span><span class="kw">pub async fn </span>get_timestamp_range(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="prelude-ty">Option</span>&lt;(i64, i64)&gt;&gt; {
-<a href=#806 id=806 data-nosnippet>806</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(statistics_reader) = <span class="kw-2">&amp;</span><span class="self">self</span>.statistics_reader {
-<a href=#807 id=807 data-nosnippet>807</a>            <span class="kw">let </span>(min_ts, max_ts) = statistics_reader.timestamp_range();
-<a href=#808 id=808 data-nosnippet>808</a>            <span class="macro">debug!</span>(
-<a href=#809 id=809 data-nosnippet>809</a>                <span class="string">"Retrieved timestamp range from Statistics.db: {} to {}"</span>,
-<a href=#810 id=810 data-nosnippet>810</a>                min_ts, max_ts
-<a href=#811 id=811 data-nosnippet>811</a>            );
-<a href=#812 id=812 data-nosnippet>812</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>((min_ts, max_ts)));
-<a href=#813 id=813 data-nosnippet>813</a>        }
-<a href=#814 id=814 data-nosnippet>814</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>)
-<a href=#815 id=815 data-nosnippet>815</a>    }
-<a href=#816 id=816 data-nosnippet>816</a>
-<a href=#817 id=817 data-nosnippet>817</a>    <span class="doccomment">/// Get token coverage (deprecated - tokens not stored in Summary.db)
-<a href=#818 id=818 data-nosnippet>818</a>    ///
-<a href=#819 id=819 data-nosnippet>819</a>    /// Note: As of Issue #218, Summary.db does not store token values.
-<a href=#820 id=820 data-nosnippet>820</a>    /// This method now returns None since token coverage cannot be determined
-<a href=#821 id=821 data-nosnippet>821</a>    /// from Summary.db alone. Token computation requires partition keys and
-<a href=#822 id=822 data-nosnippet>822</a>    /// the partitioner algorithm.
-<a href=#823 id=823 data-nosnippet>823</a>    </span><span class="attr">#[deprecated(
-<a href=#824 id=824 data-nosnippet>824</a>        since = <span class="string">"0.1.0"</span>,
-<a href=#825 id=825 data-nosnippet>825</a>        note = <span class="string">"Summary.db does not store tokens. Compute tokens from partition keys using the partitioner."
-<a href=#826 id=826 data-nosnippet>826</a>    </span>)]
-<a href=#827 id=827 data-nosnippet>827</a>    </span><span class="kw">pub async fn </span>get_token_coverage(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="prelude-ty">Option</span>&lt;(i64, i64)&gt;&gt; {
-<a href=#828 id=828 data-nosnippet>828</a>        <span class="comment">// Token values are not stored in Summary.db (Issue #218)
-<a href=#829 id=829 data-nosnippet>829</a>        // Return None - caller should compute tokens from partition keys if needed
-<a href=#830 id=830 data-nosnippet>830</a>        </span><span class="macro">debug!</span>(<span class="string">"get_token_coverage: Summary.db does not store token values"</span>);
-<a href=#831 id=831 data-nosnippet>831</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>)
-<a href=#832 id=832 data-nosnippet>832</a>    }
-<a href=#833 id=833 data-nosnippet>833</a>}
+<a href=#626 id=626 data-nosnippet>626</a>        <span class="kw">let </span>_scan = <span class="self">self</span>.begin_scan(); <span class="comment">// #3853 scan-lifetime madvise seam
+<a href=#627 id=627 data-nosnippet>627</a>
+<a href=#628 id=628 data-nosnippet>628</a>        // Delegates to the per-call-token sibling with the reader's own field —
+<a href=#629 id=629 data-nosnippet>629</a>        // byte-identical to the pre-#2346 behaviour of this method (every
+<a href=#630 id=630 data-nosnippet>630</a>        // pre-existing caller keeps its exact cancellation semantics).
+<a href=#631 id=631 data-nosnippet>631</a>        </span><span class="self">self</span>.iterate_all_partitions_cancellable(<span class="kw-2">&amp;</span><span class="self">self</span>.scan_cancel)
+<a href=#632 id=632 data-nosnippet>632</a>            .<span class="kw">await
+<a href=#633 id=633 data-nosnippet>633</a>    </span>}
+<a href=#634 id=634 data-nosnippet>634</a>
+<a href=#635 id=635 data-nosnippet>635</a>    <span class="doccomment">/// Like [`Self::iterate_all_partitions`], but takes an explicit PER-CALL
+<a href=#636 id=636 data-nosnippet>636</a>    /// cancellation token instead of always reading the reader's own
+<a href=#637 id=637 data-nosnippet>637</a>    /// [`SSTableReader::scan_cancel`] field (issue #2346).
+<a href=#638 id=638 data-nosnippet>638</a>    ///
+<a href=#639 id=639 data-nosnippet>639</a>    /// A cached/shared `Arc&lt;SSTableReader&gt;` (a future warm-handle registry) has
+<a href=#640 id=640 data-nosnippet>640</a>    /// no `&amp;mut self` available to set a per-request cancel flag, so this seam
+<a href=#641 id=641 data-nosnippet>641</a>    /// lets the compaction streaming path
+<a href=#642 id=642 data-nosnippet>642</a>    /// ([`SSTableReader::stream_all_partitions_for_compaction`]'s non-stitching
+<a href=#643 id=643 data-nosnippet>643</a>    /// fallback) drive two concurrent enumerations with two INDEPENDENT tokens.
+<a href=#644 id=644 data-nosnippet>644</a>    /// `iterate_all_partitions` itself is UNCHANGED — it delegates here with
+<a href=#645 id=645 data-nosnippet>645</a>    /// `&amp;self.scan_cancel`, so every existing caller keeps identical behaviour.
+<a href=#646 id=646 data-nosnippet>646</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">async fn </span>iterate_all_partitions_cancellable(
+<a href=#647 id=647 data-nosnippet>647</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#648 id=648 data-nosnippet>648</a>        scan_cancel: <span class="kw-2">&amp;</span><span class="kw">crate</span>::storage::scan_cancel::ScanCancel,
+<a href=#649 id=649 data-nosnippet>649</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;(RowKey, ScanRow)&gt;&gt; {
+<a href=#650 id=650 data-nosnippet>650</a>        <span class="kw">let </span>_scan = <span class="self">self</span>.begin_scan(); <span class="comment">// #3853 scan-lifetime madvise seam
+<a href=#651 id=651 data-nosnippet>651</a>
+<a href=#652 id=652 data-nosnippet>652</a>        // Index-random-read path (issue #2302): when a `Index.db` is present on a
+<a href=#653 id=653 data-nosnippet>653</a>        // BIG SSTable, enumerate EVERY partition via the full Index.db
+<a href=#654 id=654 data-nosnippet>654</a>        // partition-offset table instead of the sparse `Summary.db` samples.
+<a href=#655 id=655 data-nosnippet>655</a>        //
+<a href=#656 id=656 data-nosnippet>656</a>        // The historical loop walked `Summary.db` (only ~1-in-128 partitions) AND
+<a href=#657 id=657 data-nosnippet>657</a>        // passed `data_size = 0` to `parse_partition_at_offset` (Index.db never
+<a href=#658 id=658 data-nosnippet>658</a>        // stores partition size), so it read zero bytes per entry, resolved zero
+<a href=#659 id=659 data-nosnippet>659</a>        // partitions, and SILENTLY fell back to a full `sequential_scan` on EVERY
+<a href=#660 id=660 data-nosnippet>660</a>        // read — even with complete, valid components. Each partition's span is
+<a href=#661 id=661 data-nosnippet>661</a>        // bounded instead by the successor entry's offset (the last by the
+<a href=#662 id=662 data-nosnippet>662</a>        // data-section end), authoritative on-disk structure rather than a size
+<a href=#663 id=663 data-nosnippet>663</a>        // guess (issue #28). Index.db offsets are in the UNCOMPRESSED data-section
+<a href=#664 id=664 data-nosnippet>664</a>        // domain: for an uncompressed reader that equals the raw file domain; for a
+<a href=#665 id=665 data-nosnippet>665</a>        // compressed reader the per-partition slice is mapped to its covering
+<a href=#666 id=666 data-nosnippet>666</a>        // compression chunk(s) and decompressed (`read_compressed_offset_window`).
+<a href=#667 id=667 data-nosnippet>667</a>        </span><span class="kw">if </span><span class="self">self</span>.index_reader.is_some() &amp;&amp; <span class="self">self</span>.bti_partitions_db.is_none() {
+<a href=#668 id=668 data-nosnippet>668</a>            <span class="kw">match </span><span class="self">self
+<a href=#669 id=669 data-nosnippet>669</a>                </span>.iterate_all_partitions_via_full_index(scan_cancel)
+<a href=#670 id=670 data-nosnippet>670</a>                .<span class="kw">await</span><span class="question-mark">?
+<a href=#671 id=671 data-nosnippet>671</a>            </span>{
+<a href=#672 id=672 data-nosnippet>672</a>                <span class="prelude-val">Some</span>(results) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(results),
+<a href=#673 id=673 data-nosnippet>673</a>                <span class="prelude-val">None </span>=&gt; {
+<a href=#674 id=674 data-nosnippet>674</a>                    <span class="comment">// Present components that did NOT fully resolve: never silent.
+<a href=#675 id=675 data-nosnippet>675</a>                    </span><span class="macro">tracing::warn!</span>(
+<a href=#676 id=676 data-nosnippet>676</a>                        <span class="string">"SSTable Index.db is present but iterate_all_partitions could not \
+<a href=#677 id=677 data-nosnippet>677</a>                         resolve every partition through the index-random-read path; \
+<a href=#678 id=678 data-nosnippet>678</a>                         falling back to a full sequential scan of Data.db (issue #2302). \
+<a href=#679 id=679 data-nosnippet>679</a>                         This should not happen for a well-formed BIG SSTable — the emitted \
+<a href=#680 id=680 data-nosnippet>680</a>                         Index.db/Summary.db may be malformed or the data-section length is \
+<a href=#681 id=681 data-nosnippet>681</a>                         inconsistent with the index offsets."
+<a href=#682 id=682 data-nosnippet>682</a>                    </span>);
+<a href=#683 id=683 data-nosnippet>683</a>                }
+<a href=#684 id=684 data-nosnippet>684</a>            }
+<a href=#685 id=685 data-nosnippet>685</a>        } <span class="kw">else if </span><span class="self">self</span>.bti_partitions_db.is_none() {
+<a href=#686 id=686 data-nosnippet>686</a>            <span class="comment">// BIG SSTable with NO usable `index_reader` (this branch is only reached
+<a href=#687 id=687 data-nosnippet>687</a>            // when `index_reader.is_none()`): the full-index random-read path cannot
+<a href=#688 id=688 data-nosnippet>688</a>            // run, so every iteration falls into the sequential Data.db scan below — a
+<a href=#689 id=689 data-nosnippet>689</a>            // real per-read perf cliff. The WARN trigger keys on Index.db availability,
+<a href=#690 id=690 data-nosnippet>690</a>            // NOT Summary.db presence (roborev job 1612): a present Summary.db only
+<a href=#691 id=691 data-nosnippet>691</a>            // samples ~1-in-128 partitions and never gates the full-index path, so a
+<a href=#692 id=692 data-nosnippet>692</a>            // present-Summary/missing-Index pair is the SAME silent degradation this
+<a href=#693 id=693 data-nosnippet>693</a>            // issue exists to kill and must be named LOUD, never dropped silently into
+<a href=#694 id=694 data-nosnippet>694</a>            // `sequential_scan`. The sub-cause (failed-to-open vs genuinely absent)
+<a href=#695 id=695 data-nosnippet>695</a>            // only shapes the message.
+<a href=#696 id=696 data-nosnippet>696</a>            </span><span class="kw">if </span><span class="self">self</span>.index_present_but_unloadable {
+<a href=#697 id=697 data-nosnippet>697</a>                <span class="comment">// The sibling Index.db EXISTS on disk but failed to open/parse
+<a href=#698 id=698 data-nosnippet>698</a>                // (issue #2302, roborev job 1606): distinct from a genuinely absent
+<a href=#699 id=699 data-nosnippet>699</a>                // file — the component is malformed/truncated.
+<a href=#700 id=700 data-nosnippet>700</a>                </span><span class="macro">tracing::warn!</span>(
+<a href=#701 id=701 data-nosnippet>701</a>                    <span class="string">"SSTable Index.db is present on disk but failed to open/parse \
+<a href=#702 id=702 data-nosnippet>702</a>                     (iterate_all_partitions cannot use the index-random-read path) \
+<a href=#703 id=703 data-nosnippet>703</a>                     and falls back to a full sequential scan of Data.db (a per-read \
+<a href=#704 id=704 data-nosnippet>704</a>                     perf cliff, issue #2302). The Index.db component may be malformed \
+<a href=#705 id=705 data-nosnippet>705</a>                     or truncated — regenerate the SSTable or restore an intact Index.db."
+<a href=#706 id=706 data-nosnippet>706</a>                </span>);
+<a href=#707 id=707 data-nosnippet>707</a>            } <span class="kw">else </span>{
+<a href=#708 id=708 data-nosnippet>708</a>                <span class="comment">// Index.db genuinely absent. Whether or not Summary.db loaded, the
+<a href=#709 id=709 data-nosnippet>709</a>                // full-index path is unavailable, so this is still the degraded
+<a href=#710 id=710 data-nosnippet>710</a>                // full-scan cliff (issues #2295/#2302). Name the absent components so
+<a href=#711 id=711 data-nosnippet>711</a>                // an operator can spot an incomplete snapshot directory served with
+<a href=#712 id=712 data-nosnippet>712</a>                // only Data.db (or Data.db + Summary.db) instead of silently paying
+<a href=#713 id=713 data-nosnippet>713</a>                // the full-scan cost on every read.
+<a href=#714 id=714 data-nosnippet>714</a>                </span><span class="kw">let </span>missing = <span class="kw">if </span><span class="self">self</span>.summary_reader.is_none() {
+<a href=#715 id=715 data-nosnippet>715</a>                    <span class="string">"Index.db and Summary.db"
+<a href=#716 id=716 data-nosnippet>716</a>                </span>} <span class="kw">else </span>{
+<a href=#717 id=717 data-nosnippet>717</a>                    <span class="string">"Index.db"
+<a href=#718 id=718 data-nosnippet>718</a>                </span>};
+<a href=#719 id=719 data-nosnippet>719</a>                <span class="macro">tracing::warn!</span>(
+<a href=#720 id=720 data-nosnippet>720</a>                    <span class="string">"SSTable has no usable random-access partition index ({missing} \
+<a href=#721 id=721 data-nosnippet>721</a>                     absent): iterate_all_partitions falls back to a full sequential \
+<a href=#722 id=722 data-nosnippet>722</a>                     scan of Data.db, materializing and sorting every partition on \
+<a href=#723 id=723 data-nosnippet>723</a>                     each read (a per-read perf cliff, issues #2295/#2302). For \
+<a href=#724 id=724 data-nosnippet>724</a>                     snapshot reads, ensure the snapshot directory holds the full \
+<a href=#725 id=725 data-nosnippet>725</a>                     SSTable component set (Index.db + Summary.db), not just Data.db."
+<a href=#726 id=726 data-nosnippet>726</a>                </span>);
+<a href=#727 id=727 data-nosnippet>727</a>            }
+<a href=#728 id=728 data-nosnippet>728</a>        }
+<a href=#729 id=729 data-nosnippet>729</a>
+<a href=#730 id=730 data-nosnippet>730</a>        <span class="comment">// Fallback path: sequential walk of Data.db.
+<a href=#731 id=731 data-nosnippet>731</a>        // Used when Summary.db is absent OR when the Index.db lookup loop returned
+<a href=#732 id=732 data-nosnippet>732</a>        // no entries (Issue #500: writer-produced SSTables emit a raw-key Index.db
+<a href=#733 id=733 data-nosnippet>733</a>        // format the reader's digest-based parser does not resolve).
+<a href=#734 id=734 data-nosnippet>734</a>        </span><span class="kw">let </span>table_id = <span class="self">self</span>.scan_table_id();
+<a href=#735 id=735 data-nosnippet>735</a>        <span class="kw">let </span>schema = <span class="self">self</span>.schema.as_deref();
+<a href=#736 id=736 data-nosnippet>736</a>        <span class="self">self</span>.sequential_scan(<span class="kw-2">&amp;</span>table_id, <span class="prelude-val">None</span>, <span class="prelude-val">None</span>, <span class="prelude-val">None</span>, schema, scan_cancel)
+<a href=#737 id=737 data-nosnippet>737</a>            .<span class="kw">await
+<a href=#738 id=738 data-nosnippet>738</a>    </span>}
+<a href=#739 id=739 data-nosnippet>739</a>
+<a href=#740 id=740 data-nosnippet>740</a>    <span class="doccomment">/// Whether this reader has a **usable random-access partition index** — a
+<a href=#741 id=741 data-nosnippet>741</a>    /// loaded `Index.db` (BIG format; issue #2302 resolves CQLite-written Index.db
+<a href=#742 id=742 data-nosnippet>742</a>    /// too) or a `Partitions.db` trie (BTI format) — that lets
+<a href=#743 id=743 data-nosnippet>743</a>    /// [`iterate_all_partitions`](Self::iterate_all_partitions) and point lookups
+<a href=#744 id=744 data-nosnippet>744</a>    /// avoid a full sequential Data.db scan.
+<a href=#745 id=745 data-nosnippet>745</a>    ///
+<a href=#746 id=746 data-nosnippet>746</a>    /// This is a **capability probe**: it must report `true` only for the exact
+<a href=#747 id=747 data-nosnippet>747</a>    /// states that route to the non-sequential path. Both point lookups
+<a href=#748 id=748 data-nosnippet>748</a>    /// (`index_reader.lookup_partition` / the BTI trie) and `iterate_all_partitions`
+<a href=#749 id=749 data-nosnippet>749</a>    /// (the full-`Index.db` walk / BTI) gate on `index_reader`/`bti_partitions_db`
+<a href=#750 id=750 data-nosnippet>750</a>    /// — never on `summary_reader`.
+<a href=#751 id=751 data-nosnippet>751</a>    ///
+<a href=#752 id=752 data-nosnippet>752</a>    /// Issue #2302 (roborev job 1613): `summary_reader` is DELIBERATELY excluded. A
+<a href=#753 id=753 data-nosnippet>753</a>    /// `Summary.db` only samples ~1-in-128 partitions and never gates the
+<a href=#754 id=754 data-nosnippet>754</a>    /// random-access route, so a present-Summary / absent-Index BIG reader is
+<a href=#755 id=755 data-nosnippet>755</a>    /// degraded — every read falls into `sequential_scan` and WARNs. Including
+<a href=#756 id=756 data-nosnippet>756</a>    /// `summary_reader` here made the probe report "fast path available" for that
+<a href=#757 id=757 data-nosnippet>757</a>    /// degraded reader (a fidelity lie). Narrowing to the truly-supporting state
+<a href=#758 id=758 data-nosnippet>758</a>    /// keeps the probe honest.
+<a href=#759 id=759 data-nosnippet>759</a>    ///
+<a href=#760 id=760 data-nosnippet>760</a>    /// Snapshot-completeness probe (issue #2295): a directory served with only
+<a href=#761 id=761 data-nosnippet>761</a>    /// `Data.db` (its index siblings absent) still opens but reports `false`; a
+<a href=#762 id=762 data-nosnippet>762</a>    /// complete component set loads `Index.db` (→ `index_reader`) and reports
+<a href=#763 id=763 data-nosnippet>763</a>    /// `true`. All current callers (this module's own tests + the #2295 snapshot
+<a href=#764 id=764 data-nosnippet>764</a>    /// test) use this probe to mean "does the fast/index path apply," so a single
+<a href=#765 id=765 data-nosnippet>765</a>    /// narrowed predicate covers every caller without a split API.
+<a href=#766 id=766 data-nosnippet>766</a>    </span><span class="kw">pub fn </span>has_partition_index(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
+<a href=#767 id=767 data-nosnippet>767</a>        <span class="self">self</span>.index_reader.is_some() || <span class="self">self</span>.bti_partitions_db.is_some()
+<a href=#768 id=768 data-nosnippet>768</a>    }
+<a href=#769 id=769 data-nosnippet>769</a>
+<a href=#770 id=770 data-nosnippet>770</a>    <span class="doccomment">/// Build the TableId used for fallback `sequential_scan` from header metadata.
+<a href=#771 id=771 data-nosnippet>771</a>    ///
+<a href=#772 id=772 data-nosnippet>772</a>    /// The reader populates `header.keyspace` / `header.table_name` from either the
+<a href=#773 id=773 data-nosnippet>773</a>    /// SSTable header or the parent directory path. When the V5CompressedLegacy
+<a href=#774 id=774 data-nosnippet>774</a>    /// stitching path is used, table_id matching is skipped, so any non-empty value
+<a href=#775 id=775 data-nosnippet>775</a>    /// is accepted; for other formats this returns the qualified `keyspace.table`
+<a href=#776 id=776 data-nosnippet>776</a>    /// form so the scan filter matches.
+<a href=#777 id=777 data-nosnippet>777</a>    </span><span class="kw">pub</span>(<span class="kw">in </span><span class="kw">crate</span>::storage::sstable::reader) <span class="kw">fn </span>scan_table_id(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; TableId {
+<a href=#778 id=778 data-nosnippet>778</a>        <span class="kw">let </span>keyspace = <span class="kw-2">&amp;</span><span class="self">self</span>.header.keyspace;
+<a href=#779 id=779 data-nosnippet>779</a>        <span class="kw">let </span>table_name = <span class="kw-2">&amp;</span><span class="self">self</span>.header.table_name;
+<a href=#780 id=780 data-nosnippet>780</a>        <span class="kw">if </span>!keyspace.is_empty() &amp;&amp; !table_name.is_empty() {
+<a href=#781 id=781 data-nosnippet>781</a>            TableId::from(<span class="macro">format!</span>(<span class="string">"{}.{}"</span>, keyspace, table_name))
+<a href=#782 id=782 data-nosnippet>782</a>        } <span class="kw">else if </span>!table_name.is_empty() {
+<a href=#783 id=783 data-nosnippet>783</a>            TableId::from(table_name.as_str())
+<a href=#784 id=784 data-nosnippet>784</a>        } <span class="kw">else </span>{
+<a href=#785 id=785 data-nosnippet>785</a>            TableId::from(<span class="string">"default"</span>)
+<a href=#786 id=786 data-nosnippet>786</a>        }
+<a href=#787 id=787 data-nosnippet>787</a>    }
+<a href=#788 id=788 data-nosnippet>788</a>
+<a href=#789 id=789 data-nosnippet>789</a>    <span class="doccomment">/// Token range iteration (deprecated - tokens not stored in Summary.db)
+<a href=#790 id=790 data-nosnippet>790</a>    ///
+<a href=#791 id=791 data-nosnippet>791</a>    /// This method is kept for API compatibility but simply delegates to
+<a href=#792 id=792 data-nosnippet>792</a>    /// `iterate_all_partitions()` since Summary.db does not store token values.
+<a href=#793 id=793 data-nosnippet>793</a>    /// Token filtering should be done by the caller after retrieval.
+<a href=#794 id=794 data-nosnippet>794</a>    </span><span class="attr">#[deprecated(
+<a href=#795 id=795 data-nosnippet>795</a>        since = <span class="string">"0.1.0"</span>,
+<a href=#796 id=796 data-nosnippet>796</a>        note = <span class="string">"Summary.db does not store tokens. Use iterate_all_partitions() and filter by computed tokens."
+<a href=#797 id=797 data-nosnippet>797</a>    </span>)]
+<a href=#798 id=798 data-nosnippet>798</a>    </span><span class="kw">pub async fn </span>iterate_token_range(
+<a href=#799 id=799 data-nosnippet>799</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#800 id=800 data-nosnippet>800</a>        _start_token: i64,
+<a href=#801 id=801 data-nosnippet>801</a>        _end_token: i64,
+<a href=#802 id=802 data-nosnippet>802</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;(RowKey, ScanRow)&gt;&gt; {
+<a href=#803 id=803 data-nosnippet>803</a>        <span class="comment">// Token values are not stored in Summary.db (Issue #218)
+<a href=#804 id=804 data-nosnippet>804</a>        // Delegate to all-partition iteration
+<a href=#805 id=805 data-nosnippet>805</a>        </span><span class="self">self</span>.iterate_all_partitions().<span class="kw">await
+<a href=#806 id=806 data-nosnippet>806</a>    </span>}
+<a href=#807 id=807 data-nosnippet>807</a>
+<a href=#808 id=808 data-nosnippet>808</a>    <span class="doccomment">/// Get min/max timestamps from Statistics.db reader
+<a href=#809 id=809 data-nosnippet>809</a>    </span><span class="kw">pub async fn </span>get_timestamp_range(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="prelude-ty">Option</span>&lt;(i64, i64)&gt;&gt; {
+<a href=#810 id=810 data-nosnippet>810</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(statistics_reader) = <span class="kw-2">&amp;</span><span class="self">self</span>.statistics_reader {
+<a href=#811 id=811 data-nosnippet>811</a>            <span class="kw">let </span>(min_ts, max_ts) = statistics_reader.timestamp_range();
+<a href=#812 id=812 data-nosnippet>812</a>            <span class="macro">debug!</span>(
+<a href=#813 id=813 data-nosnippet>813</a>                <span class="string">"Retrieved timestamp range from Statistics.db: {} to {}"</span>,
+<a href=#814 id=814 data-nosnippet>814</a>                min_ts, max_ts
+<a href=#815 id=815 data-nosnippet>815</a>            );
+<a href=#816 id=816 data-nosnippet>816</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>((min_ts, max_ts)));
+<a href=#817 id=817 data-nosnippet>817</a>        }
+<a href=#818 id=818 data-nosnippet>818</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>)
+<a href=#819 id=819 data-nosnippet>819</a>    }
+<a href=#820 id=820 data-nosnippet>820</a>
+<a href=#821 id=821 data-nosnippet>821</a>    <span class="doccomment">/// Get token coverage (deprecated - tokens not stored in Summary.db)
+<a href=#822 id=822 data-nosnippet>822</a>    ///
+<a href=#823 id=823 data-nosnippet>823</a>    /// Note: As of Issue #218, Summary.db does not store token values.
+<a href=#824 id=824 data-nosnippet>824</a>    /// This method now returns None since token coverage cannot be determined
+<a href=#825 id=825 data-nosnippet>825</a>    /// from Summary.db alone. Token computation requires partition keys and
+<a href=#826 id=826 data-nosnippet>826</a>    /// the partitioner algorithm.
+<a href=#827 id=827 data-nosnippet>827</a>    </span><span class="attr">#[deprecated(
+<a href=#828 id=828 data-nosnippet>828</a>        since = <span class="string">"0.1.0"</span>,
+<a href=#829 id=829 data-nosnippet>829</a>        note = <span class="string">"Summary.db does not store tokens. Compute tokens from partition keys using the partitioner."
+<a href=#830 id=830 data-nosnippet>830</a>    </span>)]
+<a href=#831 id=831 data-nosnippet>831</a>    </span><span class="kw">pub async fn </span>get_token_coverage(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="prelude-ty">Option</span>&lt;(i64, i64)&gt;&gt; {
+<a href=#832 id=832 data-nosnippet>832</a>        <span class="comment">// Token values are not stored in Summary.db (Issue #218)
+<a href=#833 id=833 data-nosnippet>833</a>        // Return None - caller should compute tokens from partition keys if needed
+<a href=#834 id=834 data-nosnippet>834</a>        </span><span class="macro">debug!</span>(<span class="string">"get_token_coverage: Summary.db does not store token values"</span>);
+<a href=#835 id=835 data-nosnippet>835</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>)
+<a href=#836 id=836 data-nosnippet>836</a>    }
+<a href=#837 id=837 data-nosnippet>837</a>}
 </code></pre></div></section></main></body></html>

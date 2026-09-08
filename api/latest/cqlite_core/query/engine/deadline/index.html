@@ -1,0 +1,88 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The ONE query-execution time bound (issue #1695)."><title>cqlite_core::query::engine::deadline - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module deadline</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.17.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module deadline</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#why-this-module-exists" title="Why this module exists">Why this module exists</a></li><li><a href="#shape-one-wrapper-per-public-entry-point-at-the-engine-boundary" title="Shape: one wrapper per public entry point, at the engine boundary">Shape: one wrapper per public entry point, at the engine boundary</a></li><li><a href="#the-durationzero-sentinel" title="The `Duration::ZERO` sentinel">The <code>Duration::ZERO</code> sentinel</a></li><li><a href="#cancellation" title="Cancellation">Cancellation</a></li><li><a href="#what-the-bound-does-not-cover" title="What the bound does NOT cover">What the bound does NOT cover</a></li><li><a href="#telemetry-across-the-two-prepared-routes-the-error-stream-matches-the" title="Telemetry across the two prepared routes: the error stream matches, the">Telemetry across the two prepared routes: the error stream matches, the</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In cqlite_<wbr>core::<wbr>query::<wbr>engine</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">cqlite_core</a>::<wbr><a href="../../index.html">query</a>::<wbr><a href="../index.html">engine</a></div><h1>Module <span>deadline</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/cqlite_core/query/engine/deadline.rs.html#1-627">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The ONE query-execution time bound (issue #1695).</p>
+<h2 id="why-this-module-exists"><a class="doc-anchor" href="#why-this-module-exists">§</a>Why this module exists</h2>
+<p><code>Config.query.max_execution_time</code> (default 300s, set by the CLI’s
+<code>performance.query_timeout_ms</code>) was enforced NOWHERE: a runaway query ran
+forever and the operator’s knob was a placebo. This module is the enforcement
+point, and it is deliberately the ONLY one.</p>
+<h2 id="shape-one-wrapper-per-public-entry-point-at-the-engine-boundary"><a class="doc-anchor" href="#shape-one-wrapper-per-public-entry-point-at-the-engine-boundary">§</a>Shape: one wrapper per public entry point, at the engine boundary</h2>
+<p>Every public <code>async</code> entry point of <a href="../struct.QueryEngine.html" title="struct cqlite_core::query::engine::QueryEngine"><code>AdvancedQueryEngine</code></a> that can drive a
+scan is a thin wrapper here over a private <code>*_inner</code> body in the parent
+module, and the wrapper is the single place a <code>tokio::time::timeout</code> is
+applied:</p>
+<div><table><thead><tr><th>public entry point</th><th>inner body</th><th>bound covers</th></tr></thead><tbody>
+<tr><td><code>execute</code></td><td><code>execute_inner</code></td><td>parse, plan, execute, collect</td></tr>
+<tr><td><code>execute_streaming</code></td><td><code>execute_streaming_inner</code></td><td>setup (see the scope note)</td></tr>
+<tr><td><code>execute_with_params</code></td><td><code>execute_with_params_inner</code></td><td>bind, plan, execute, collect</td></tr>
+<tr><td><code>execute_prepared</code></td><td><code>execute_prepared_inner</code></td><td>bind, execute, collect</td></tr>
+</tbody></table>
+</div>
+<p>There are deliberately NO ad-hoc clock checks inside the scan loop: a deadline
+sampled at N places is N places that can drift, mis-round, or be forgotten on
+a new path. One <code>timeout</code> at the boundary bounds every path underneath it,
+including ones that do not exist yet.</p>
+<p>Inner bodies delegate to each OTHER’S inner form (e.g. <code>execute_with_params_inner</code>
+→ <code>execute_inner</code> for a markerless SELECT), never back through a public
+wrapper, so one caller-visible query is bounded by exactly ONE budget instead
+of restarting the clock at an internal hop.</p>
+<h2 id="the-durationzero-sentinel"><a class="doc-anchor" href="#the-durationzero-sentinel">§</a>The <code>Duration::ZERO</code> sentinel</h2>
+<p><code>max_execution_time == Duration::ZERO</code> means <strong>no timeout</strong> (unbounded): the
+future is awaited directly, with no timer registered at all. It is an
+explicitly legal configuration — <a href="../../../config/struct.Config.html#method.validate" title="method cqlite_core::config::Config::validate"><code>crate::Config::validate</code></a> never rejects it
+— and it is the only way to disable the bound, since the field is a
+<code>Duration</code> rather than an <code>Option</code>.</p>
+<h2 id="cancellation"><a class="doc-anchor" href="#cancellation">§</a>Cancellation</h2>
+<p>On elapse, <code>tokio::time::timeout</code> DROPS the inner future. That is the whole
+cancellation mechanism: the materializing path holds its readers and buffers
+inside that future, so dropping it releases them, and the streaming path’s
+spawned producer observes its receiver go away and exits (its <code>send</code> fails).
+Nothing is detached and left running — see
+<code>tests/issue_1695_query_timeout.rs</code>.</p>
+<p>ONE place needs more than the drop, and has it: a <code>spawn_blocking</code> closure
+CANNOT be cancelled by dropping its <code>JoinHandle</code>. The multi-generation
+materializing merges build their result inside such a closure with no channel
+send that could fail, so each one arms a per-call flag whose guard lives in the
+dropped future’s scope and abandons the merge at its next partition — see
+<code>storage::sstable::generation_merge::merge_cancel</code>. Any FUTURE blocking work
+reached from a bounded entry point owes the same treatment; the drop alone is
+not enough for it.</p>
+<h2 id="what-the-bound-does-not-cover"><a class="doc-anchor" href="#what-the-bound-does-not-cover">§</a>What the bound does NOT cover</h2>
+<p>A <code>tokio::time::timeout</code> can only elapse when the future it wraps becomes
+<code>Pending</code>. So the budget bounds work that YIELDS, and three things do not:</p>
+<ol>
+<li><strong>Post-scan synchronous stages.</strong> <code>ORDER BY</code> sorting, aggregation and
+projection run inside <code>select_executor</code>’s non-async <code>execute_sort</code> and
+friends, over an already-materialized <code>Vec</code>. A query whose scan finishes
+inside the budget and then sorts a large result set can overshoot
+substantially, and this wrapper cannot interrupt it — <code>Vec::sort_by</code> is one
+uninterruptible call. Bounding it means making the post-scan pipeline async
+or chunked, which is deliberately NOT part of issue #1695 (whose mandate is
+ONE wrapper at the chokepoint); it follows the contract that issue chose for
+the analogous streaming case — bound what is practical, document the rest.
+Note the scan is the dominant cost for genuinely large data, and it IS
+bounded, so the exposure is a result set big enough to sort for a long time
+yet cheap enough to have been scanned within budget.</li>
+<li><strong>Row consumption after <code>execute_streaming</code> returns.</strong> The bound covers the
+whole future including time-to-first-batch, not the caller’s subsequent
+iteration. Per-batch bounds are a follow-up.</li>
+<li><strong>A single overshooting poll.</strong> If one poll runs past the deadline and
+returns <code>Ready</code>, its result is ACCEPTED rather than discarded — the plain
+<code>tokio::time::timeout</code> semantics this issue specifies. Erroring there would
+throw away a correct completed result without shortening the wait the caller
+already took. The reported <code>elapsed</code> is MEASURED, so the overshoot is
+visible rather than hidden.</li>
+</ol>
+<h2 id="telemetry-across-the-two-prepared-routes-the-error-stream-matches-the"><a class="doc-anchor" href="#telemetry-across-the-two-prepared-routes-the-error-stream-matches-the">§</a>Telemetry across the two prepared routes: the error stream matches, the</h2>
+<p>engine counter does not</p>
+<p><a href="../struct.QueryEngine.html#method.bounded" title="method cqlite_core::query::engine::QueryEngine::bounded"><code>AdvancedQueryEngine::bounded</code></a> records an elapse two ways: it increments the
+engine’s <code>error_queries</code> counter AND marks the observability error stream with
+the timeout category. The prepared-handle route
+(<a href="../../prepared/struct.PreparedQuery.html" title="struct cqlite_core::query::prepared::PreparedQuery"><code>crate::query::prepared::PreparedQuery</code></a>) bounds itself through the bare
+[<code>bound</code>] helper, because a handle carries only its executor and its budget.</p>
+<p>It now records on the ERROR STREAM itself, so a handle-route timeout is visible
+to <code>cqlite.errors.total{category="timeout"}</code> — that is the same public sink, not
+a second mechanism, and the routes are disjoint so nothing double counts. What it
+still does NOT move is <code>error_queries</code>, which is private accounting for queries
+the ENGINE executed; <code>Database::stats()</code> therefore reflects engine-routed
+executions only. Do not read “both routes are bounded” as “both routes are
+identical” — but the dashboard-visible half is no longer asymmetric.</p>
+</div></details></section></div></main></body></html>

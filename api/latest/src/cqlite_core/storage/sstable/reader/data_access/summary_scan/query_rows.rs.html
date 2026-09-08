@@ -1,0 +1,778 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/data_access/summary_scan/query_rows.rs`."><title>query_rows.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../../../../../" data-static-root-path="../../../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../../../src-files.js"></script><script defer src="../../../../../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/data_access/summary_scan/</div>query_rows.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Single-generation, token-scoped, PULL-based query ROW stream (issue #3058).
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! # Why this exists
+<a href=#4 id=4 data-nosnippet>4</a>//!
+<a href=#5 id=5 data-nosnippet>5</a>//! A `SELECT` served from exactly ONE SSTable generation needs no cross-generation
+<a href=#6 id=6 data-nosnippet>6</a>//! reconciliation: read-time SELECT semantics (partition deletions, range
+<a href=#7 id=7 data-nosnippet>7</a>//! tombstones, row/cell tombstones, TTL expiry, static-cell injection) are applied
+<a href=#8 id=8 data-nosnippet>8</a>//! inside the decoder by `PartitionShadow` when the parser is built with
+<a href=#9 id=9 data-nosnippet>9</a>//! `read_shadowing = true` (issue #1741). The k-way merge exists to reconcile
+<a href=#10 id=10 data-nosnippet>10</a>//! ACROSS generations; with one generation it is pure overhead — it materialises
+<a href=#11 id=11 data-nosnippet>11</a>//! full-fidelity `CompactionRow`s with per-cell write metadata that the read path
+<a href=#12 id=12 data-nosnippet>12</a>//! then throws away.
+<a href=#13 id=13 data-nosnippet>13</a>//!
+<a href=#14 id=14 data-nosnippet>14</a>//! This module exposes the already-shipped single-generation walk as a **pull**
+<a href=#15 id=15 data-nosnippet>15</a>//! surface a synchronous consumer can drive: the Flight `do_get` row loop
+<a href=#16 id=16 data-nosnippet>16</a>//! (`cqlite-flight`) runs on a blocking thread with no async runtime of its own,
+<a href=#17 id=17 data-nosnippet>17</a>//! and the underlying walks ([`SSTableReader::stream_partitions_summary_guided`],
+<a href=#18 id=18 data-nosnippet>18</a>//! [`SSTableReader::stream_all_partitions_via_full_index`]) are async with a
+<a href=#19 id=19 data-nosnippet>19</a>//! SYNCHRONOUS emit callback. So the walk is driven on a dedicated thread owning a
+<a href=#20 id=20 data-nosnippet>20</a>//! `current_thread` runtime and hands BATCHES to the consumer over a bounded
+<a href=#21 id=21 data-nosnippet>21</a>//! `sync_channel` — the same thread/bounded-channel shape the k-way merge's own
+<a href=#22 id=22 data-nosnippet>22</a>//! per-input adapter uses (`write_engine/merge/from_readers.rs`), minus the merge:
+<a href=#23 id=23 data-nosnippet>23</a>//! one thread instead of one-per-input, and one handoff per BATCH instead of one
+<a href=#24 id=24 data-nosnippet>24</a>//! per row.
+<a href=#25 id=25 data-nosnippet>25</a>//!
+<a href=#26 id=26 data-nosnippet>26</a>//! # Guarantees this surface makes to its caller
+<a href=#27 id=27 data-nosnippet>27</a>//!
+<a href=#28 id=28 data-nosnippet>28</a>//! * **Read shadowing is ON.** Every source this module drives builds its parser
+<a href=#29 id=29 data-nosnippet>29</a>//!   with `build_v5_parser(true)` — the Summary-guided walk
+<a href=#30 id=30 data-nosnippet>30</a>//!   ([`SSTableReader::stream_partitions_summary_guided`]), the full-`Index.db`
+<a href=#31 id=31 data-nosnippet>31</a>//!   walk ([`SSTableReader::stream_all_partitions_via_full_index`]) and the
+<a href=#32 id=32 data-nosnippet>32</a>//!   windowed batched scan (`scan_stream_windowed`'s `drain_scan_window_blocking`).
+<a href=#33 id=33 data-nosnippet>33</a>//!   That posture is asserted BEHAVIOURALLY, not by reading: the Flight
+<a href=#34 id=34 data-nosnippet>34</a>//!   forced-path differential (`cqlite-flight/tests/issue_3058_forced_path_differential.rs`)
+<a href=#35 id=35 data-nosnippet>35</a>//!   shows tombstoned/expired rows suppressed identically to the reconciling
+<a href=#36 id=36 data-nosnippet>36</a>//!   merge arm, which is only possible with shadowing on.
+<a href=#37 id=37 data-nosnippet>37</a>//! * **The TTL/expiry clock is the CALLER's.** `now_secs` is pinned onto the
+<a href=#38 id=38 data-nosnippet>38</a>//!   parser ([`V5CompressedLegacyParser::with_now_secs`]), never re-sampled from
+<a href=#39 id=39 data-nosnippet>39</a>//!   the wall clock, so a request that captured ONE reconciliation instant (and a
+<a href=#40 id=40 data-nosnippet>40</a>//!   test that PINS `now`) is honored.
+<a href=#41 id=41 data-nosnippet>41</a>//! * **Token pushdown is preserved.** `token_bound` is pushed into the
+<a href=#42 id=42 data-nosnippet>42</a>//!   Summary-guided walk (#2412/#2413), so out-of-range partition bodies are never
+<a href=#43 id=43 data-nosnippet>43</a>//!   decoded.
+<a href=#44 id=44 data-nosnippet>44</a>//! * **Fail-closed on an unservable reader.** If neither walk can prove it can
+<a href=#45 id=45 data-nosnippet>45</a>//!   stream this reader (no usable `Index.db`/`Summary.db`, a BTI reader, or a
+<a href=#46 id=46 data-nosnippet>46</a>//!   coverage gap), the stream reports [`QueryRowBatch::Unsupported`] as its FIRST
+<a href=#47 id=47 data-nosnippet>47</a>//!   and ONLY message — having emitted NOTHING — so the caller can fall back to
+<a href=#48 id=48 data-nosnippet>48</a>//!   the k-way merge path with no partial output. The degenerate materialising
+<a href=#49 id=49 data-nosnippet>49</a>//!   `sequential_scan` fallback is deliberately NOT taken here: it cannot honor a
+<a href=#50 id=50 data-nosnippet>50</a>//!   caller-pinned `now`, and silently serving a scan against the wall clock would
+<a href=#51 id=51 data-nosnippet>51</a>//!   break the pinned-`now` contract above.
+<a href=#52 id=52 data-nosnippet>52</a>//! * **Cancellation and backpressure.** The walk polls this stream's CHILD
+<a href=#53 id=53 data-nosnippet>53</a>//!   [`ScanCancel`] at its normal cadence, and the CALLER's flag is bridged into
+<a href=#54 id=54 data-nosnippet>54</a>//!   that child at every batch boundary — on the full-ring arm in
+<a href=#55 id=55 data-nosnippet>55</a>//!   [`drive_full_scan_rows`] and on the token-bounded arm in `BatchSink::flush`
+<a href=#56 id=56 data-nosnippet>56</a>//!   — so a client disconnect stops either walk without waiting for the consumer
+<a href=#57 id=57 data-nosnippet>57</a>//!   to drop the stream, and a cancelled scan terminates with `Cancelled` rather
+<a href=#58 id=58 data-nosnippet>58</a>//!   than a silently short stream. Only the child is ever cancelled; the caller's
+<a href=#59 id=59 data-nosnippet>59</a>//!   flag is left intact so a fallback to the merge arm still works. Every batch
+<a href=#60 id=60 data-nosnippet>60</a>//!   send also observes the bounded channel, and a dropped consumer breaks the
+<a href=#61 id=61 data-nosnippet>61</a>//!   walk at its next send.
+<a href=#62 id=62 data-nosnippet>62</a>//! * **A dead producer is an ERROR, never a clean end of stream (issue #3106).**
+<a href=#63 id=63 data-nosnippet>63</a>//!   Completion is EXPLICIT: the producer thread's last act is to send
+<a href=#64 id=64 data-nosnippet>64</a>//!   [`QueryRowMsg::Done`], and the consumer reports end-of-stream ONLY on that
+<a href=#65 id=65 data-nosnippet>65</a>//!   sentinel. A bare channel disconnect — which is what an UNWINDING producer
+<a href=#66 id=66 data-nosnippet>66</a>//!   leaves behind, since a panic drops the `SyncSender` without sending anything
+<a href=#67 id=67 data-nosnippet>67</a>//!   — is reported as a hard error instead of "the walk finished". Belt and
+<a href=#68 id=68 data-nosnippet>68</a>//!   braces: the thread body also runs under `catch_unwind`, so a panic is
+<a href=#69 id=69 data-nosnippet>69</a>//!   forwarded as an INFORMATIVE terminal error naming the panic message rather
+<a href=#70 id=70 data-nosnippet>70</a>//!   than a generic "the producer died". Before this, such a panic completed the
+<a href=#71 id=71 data-nosnippet>71</a>//!   request SUCCESSFULLY with a silently truncated result set.
+<a href=#72 id=72 data-nosnippet>72</a>//!
+<a href=#73 id=73 data-nosnippet>73</a>//!   The two halves cover different builds ON PURPOSE, which is why both are
+<a href=#74 id=74 data-nosnippet>74</a>//!   here: `catch_unwind` only fires under `panic = "unwind"` (dev/test, and the
+<a href=#75 id=75 data-nosnippet>75</a>//!   `release-unwind` profile the bindings ship — `[profile.release]` is
+<a href=#76 id=76 data-nosnippet>76</a>//!   `panic = "abort"`, where a panicking producer takes the process down instead,
+<a href=#77 id=77 data-nosnippet>77</a>//!   loudly). The `Done` sentinel needs no unwinding at all: it makes "the walk
+<a href=#78 id=78 data-nosnippet>78</a>//!   finished" an OBSERVED fact in every profile, so any way THIS THREAD can stop
+<a href=#79 id=79 data-nosnippet>79</a>//!   without reporting — a future exit path that forgets its terminator included —
+<a href=#80 id=80 data-nosnippet>80</a>//!   fails closed rather than being read as a complete scan.
+<a href=#81 id=81 data-nosnippet>81</a>//!
+<a href=#82 id=82 data-nosnippet>82</a>//!   SCOPE, stated precisely (roborev, issue #3106): `Done` proves only that the
+<a href=#83 id=83 data-nosnippet>83</a>//!   query-row THREAD ran to completion. It says nothing about that thread's own
+<a href=#84 id=84 data-nosnippet>84</a>//!   upstream, and on the full-ring arm the rows come from an INNER `tokio` task
+<a href=#85 id=85 data-nosnippet>85</a>//!   over a second channel — whose death this thread would report as a clean
+<a href=#86 id=86 data-nosnippet>86</a>//!   walk. That boundary is closed separately and by the same principle, in
+<a href=#87 id=87 data-nosnippet>87</a>//!   [`crate::storage::sstable::reader::BatchedScanStream`]: it owns the scan
+<a href=#88 id=88 data-nosnippet>88</a>//!   task's `JoinHandle` and joins it when its channel closes, so a task that
+<a href=#89 id=89 data-nosnippet>89</a>//!   died surfaces as an error there and reaches this thread as a normal `Err`
+<a href=#90 id=90 data-nosnippet>90</a>//!   (hence a `Failed` terminator). Both boundaries are needed for the end-to-end
+<a href=#91 id=91 data-nosnippet>91</a>//!   claim; neither alone suffices — and the claim is bounded to those two, NOT
+<a href=#92 id=92 data-nosnippet>92</a>//!   universal: on the chunk-stitching branch there is a THIRD hop, the windowed
+<a href=#93 id=93 data-nosnippet>93</a>//!   driver's batch forwarder, whose `JoinError` is deliberately discarded
+<a href=#94 id=94 data-nosnippet>94</a>//!   (`scan_stream_windowed`'s `let _ = forwarder.await;`), so a panic there is
+<a href=#95 id=95 data-nosnippet>95</a>//!   still invisible. Pre-existing and low-likelihood (the forwarder only moves
+<a href=#96 id=96 data-nosnippet>96</a>//!   already-decoded batches), tracked as a follow-up rather than fixed here.
+<a href=#97 id=97 data-nosnippet>97</a>
+<a href=#98 id=98 data-nosnippet>98</a></span><span class="kw">use </span>std::ops::ControlFlow;
+<a href=#99 id=99 data-nosnippet>99</a><span class="kw">use </span>std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+<a href=#100 id=100 data-nosnippet>100</a><span class="kw">use </span>std::sync::Arc;
+<a href=#101 id=101 data-nosnippet>101</a>
+<a href=#102 id=102 data-nosnippet>102</a><span class="kw">use </span><span class="kw">super</span>::<span class="kw">super</span>::<span class="kw">super</span>::SSTableReader;
+<a href=#103 id=103 data-nosnippet>103</a><span class="kw">use </span><span class="kw">super</span>::<span class="kw">super</span>::full_index_stream::FullIndexStreamOutcome;
+<a href=#104 id=104 data-nosnippet>104</a><span class="kw">use </span><span class="kw">super</span>::query_rows_bounds::{
+<a href=#105 id=105 data-nosnippet>105</a>    QUERY_ROWS_CHANNEL_BATCHES, QUERY_ROWS_FULL_SCAN_BUFFER_ROWS, QUERY_ROWS_PER_BATCH,
+<a href=#106 id=106 data-nosnippet>106</a>};
+<a href=#107 id=107 data-nosnippet>107</a><span class="kw">use </span><span class="kw">super</span>::ScanTokenBound;
+<a href=#108 id=108 data-nosnippet>108</a><span class="kw">use </span><span class="kw">crate</span>::storage::producer_fault::ProducerFault;
+<a href=#109 id=109 data-nosnippet>109</a><span class="kw">use </span><span class="kw">crate</span>::storage::scan_cancel::ScanCancel;
+<a href=#110 id=110 data-nosnippet>110</a><span class="kw">use </span><span class="kw">crate</span>::storage::sstable::reader::scan_stream_windowed::scan_admission::ScanAdmission;
+<a href=#111 id=111 data-nosnippet>111</a><span class="comment">// Re-exported so `summary_scan::query_rows::QUERY_ROWS_MAX_READ_AHEAD` keeps
+<a href=#112 id=112 data-nosnippet>112</a>// resolving after the sizing constants moved to their own file (issue #3384).
+<a href=#113 id=113 data-nosnippet>113</a></span><span class="attr">#[allow(unused_imports)]
+<a href=#114 id=114 data-nosnippet>114</a></span><span class="kw">pub use </span><span class="kw">super</span>::query_rows_bounds::{QUERY_ROWS_MAX_READ_AHEAD, QUERY_ROWS_MAX_RESIDENT_ROWS};
+<a href=#115 id=115 data-nosnippet>115</a><span class="kw">use </span><span class="kw">crate</span>::types::ScanRow;
+<a href=#116 id=116 data-nosnippet>116</a><span class="kw">use crate</span>::{Error, <span class="prelude-ty">Result</span>, RowKey};
+<a href=#117 id=117 data-nosnippet>117</a>
+<a href=#118 id=118 data-nosnippet>118</a><span class="doccomment">/// One message from a [`QueryRowStream`].
+<a href=#119 id=119 data-nosnippet>119</a></span><span class="attr">#[derive(Debug)]
+<a href=#120 id=120 data-nosnippet>120</a></span><span class="kw">pub enum </span>QueryRowBatch {
+<a href=#121 id=121 data-nosnippet>121</a>    <span class="doccomment">/// A batch of decoded, read-shadowed `(RowKey, ScanRow)` rows in
+<a href=#122 id=122 data-nosnippet>122</a>    /// token/partition order.
+<a href=#123 id=123 data-nosnippet>123</a>    </span>Rows(Vec&lt;(RowKey, ScanRow)&gt;),
+<a href=#124 id=124 data-nosnippet>124</a>    <span class="doccomment">/// This reader cannot be served by the single-generation streaming query
+<a href=#125 id=125 data-nosnippet>125</a>    /// walk. Guaranteed to arrive BEFORE any [`QueryRowBatch::Rows`] and to be
+<a href=#126 id=126 data-nosnippet>126</a>    /// the stream's only message, so the caller may fall back to another read
+<a href=#127 id=127 data-nosnippet>127</a>    /// path having emitted nothing.
+<a href=#128 id=128 data-nosnippet>128</a>    </span>Unsupported,
+<a href=#129 id=129 data-nosnippet>129</a>}
+<a href=#130 id=130 data-nosnippet>130</a>
+<a href=#131 id=131 data-nosnippet>131</a><span class="doccomment">/// One message on the producer→consumer channel (issue #3106).
+<a href=#132 id=132 data-nosnippet>132</a>///
+<a href=#133 id=133 data-nosnippet>133</a>/// INTERNAL: the terminator is deliberately NOT a [`QueryRowBatch`] variant, so
+<a href=#134 id=134 data-nosnippet>134</a>/// no consumer can observe (or forget to handle) it — the sentinel exists purely
+<a href=#135 id=135 data-nosnippet>135</a>/// to disambiguate "the walk finished" from "the producer died", which a bare
+<a href=#136 id=136 data-nosnippet>136</a>/// channel disconnect cannot do.
+<a href=#137 id=137 data-nosnippet>137</a></span><span class="attr">#[derive(Debug)]
+<a href=#138 id=138 data-nosnippet>138</a></span><span class="kw">enum </span>QueryRowMsg {
+<a href=#139 id=139 data-nosnippet>139</a>    <span class="doccomment">/// A batch. Carries only `Ok` BY CONSTRUCTION (issue #3106, roborev): a
+<a href=#140 id=140 data-nosnippet>140</a>    /// failure is [`QueryRowMsg::Failed`], so "this message ends the stream" is a
+<a href=#141 id=141 data-nosnippet>141</a>    /// structural property of the variant rather than an unenforced invariant
+<a href=#142 id=142 data-nosnippet>142</a>    /// about where an `Err` was built. Were a non-fatal mid-stream `Err` ever sent
+<a href=#143 id=143 data-nosnippet>143</a>    /// as an `Item`, the consumer would mark the stream terminated and a LATER
+<a href=#144 id=144 data-nosnippet>144</a>    /// genuine dead-producer disconnect would silently revert to a clean end of
+<a href=#145 id=145 data-nosnippet>145</a>    /// stream — #3106 reintroduced with no test failing.
+<a href=#146 id=146 data-nosnippet>146</a>    </span>Item(QueryRowBatch),
+<a href=#147 id=147 data-nosnippet>147</a>    <span class="doccomment">/// The walk failed. TERMINAL: the producer sends exactly one of this or
+<a href=#148 id=148 data-nosnippet>148</a>    /// [`QueryRowMsg::Done`], as its last act.
+<a href=#149 id=149 data-nosnippet>149</a>    </span>Failed(Error),
+<a href=#150 id=150 data-nosnippet>150</a>    <span class="doccomment">/// The producer finished its walk and is exiting normally. This is the ONLY
+<a href=#151 id=151 data-nosnippet>151</a>    /// thing that makes [`QueryRowStream::next_batch`] report a clean end of
+<a href=#152 id=152 data-nosnippet>152</a>    /// stream; a disconnect without it is a dead producer.
+<a href=#153 id=153 data-nosnippet>153</a>    </span>Done,
+<a href=#154 id=154 data-nosnippet>154</a>}
+<a href=#155 id=155 data-nosnippet>155</a>
+<a href=#156 id=156 data-nosnippet>156</a><span class="doccomment">/// A pull-based, single-generation query row stream (issue #3058).
+<a href=#157 id=157 data-nosnippet>157</a>///
+<a href=#158 id=158 data-nosnippet>158</a>/// Dropping it requests cancellation of the underlying walk; the producer thread
+<a href=#159 id=159 data-nosnippet>159</a>/// then observes the cancel (or a failed send into the dropped channel) and exits.
+<a href=#160 id=160 data-nosnippet>160</a></span><span class="kw">pub struct </span>QueryRowStream {
+<a href=#161 id=161 data-nosnippet>161</a>    rx: Receiver&lt;QueryRowMsg&gt;,
+<a href=#162 id=162 data-nosnippet>162</a>    <span class="doccomment">/// This stream's OWN cancellation flag — a CHILD of the caller's, never the
+<a href=#163 id=163 data-nosnippet>163</a>    /// caller's own clone (roborev, issue #3058).
+<a href=#164 id=164 data-nosnippet>164</a>    ///
+<a href=#165 id=165 data-nosnippet>165</a>    /// `ScanCancel` clones share one `Arc&lt;AtomicBool&gt;`, so cancelling the
+<a href=#166 id=166 data-nosnippet>166</a>    /// caller's flag on drop would POISON the whole request: the designed clean
+<a href=#167 id=167 data-nosnippet>167</a>    /// fallback (`QueryRowBatch::Unsupported` → drop the stream → build the
+<a href=#168 id=168 data-nosnippet>168</a>    /// k-way merger instead) would hand the merger an already-cancelled flag and
+<a href=#169 id=169 data-nosnippet>169</a>    /// yield `Cancelled`/zero rows instead of the full result set, and even a
+<a href=#170 id=170 data-nosnippet>170</a>    /// successful stream would leave the request's `CancelFlag` single-use. The
+<a href=#171 id=171 data-nosnippet>171</a>    /// caller's flag is bridged INTO this child (caller-cancel stops the walk)
+<a href=#172 id=172 data-nosnippet>172</a>    /// but never the other way round.
+<a href=#173 id=173 data-nosnippet>173</a>    </span>child_cancel: ScanCancel,
+<a href=#174 id=174 data-nosnippet>174</a>    <span class="doccomment">/// Whether an EXPLICIT terminator has been observed (issue #3106): either the
+<a href=#175 id=175 data-nosnippet>175</a>    /// [`QueryRowMsg::Done`] sentinel or a terminal `Err`.
+<a href=#176 id=176 data-nosnippet>176</a>    ///
+<a href=#177 id=177 data-nosnippet>177</a>    /// This is what makes a subsequent channel disconnect interpretable. Set →
+<a href=#178 id=178 data-nosnippet>178</a>    /// the producer is known to have finished/failed on purpose, so the
+<a href=#179 id=179 data-nosnippet>179</a>    /// disconnect is a clean end of stream. Unset → the sender was dropped
+<a href=#180 id=180 data-nosnippet>180</a>    /// WITHOUT a terminator, which only an unwinding (or otherwise dead)
+<a href=#181 id=181 data-nosnippet>181</a>    /// producer can do, so the stream fails closed rather than reporting a
+<a href=#182 id=182 data-nosnippet>182</a>    /// silently truncated result set as success.
+<a href=#183 id=183 data-nosnippet>183</a>    </span>terminated: bool,
+<a href=#184 id=184 data-nosnippet>184</a>}
+<a href=#185 id=185 data-nosnippet>185</a>
+<a href=#186 id=186 data-nosnippet>186</a><span class="kw">impl </span>QueryRowStream {
+<a href=#187 id=187 data-nosnippet>187</a>    <span class="doccomment">/// Block until the next message is available. `None` = the walk finished
+<a href=#188 id=188 data-nosnippet>188</a>    /// (clean end of stream), proven by the explicit [`QueryRowMsg::Done`]
+<a href=#189 id=189 data-nosnippet>189</a>    /// sentinel — never inferred from a channel disconnect.
+<a href=#190 id=190 data-nosnippet>190</a>    ///
+<a href=#191 id=191 data-nosnippet>191</a>    /// A disconnect WITHOUT that sentinel means the producer thread died mid-walk
+<a href=#192 id=192 data-nosnippet>192</a>    /// (issue #3106) and yields `Some(Err(..))`: the result set is truncated, and
+<a href=#193 id=193 data-nosnippet>193</a>    /// truncation must never be reported as success. A producer PANIC normally
+<a href=#194 id=194 data-nosnippet>194</a>    /// arrives as a terminal `Err` carrying the panic message (the thread body
+<a href=#195 id=195 data-nosnippet>195</a>    /// runs under `catch_unwind`), so this arm is the backstop for a producer that
+<a href=#196 id=196 data-nosnippet>196</a>    /// died in a way it could not report at all (e.g. an abort of the send itself).
+<a href=#197 id=197 data-nosnippet>197</a>    ///
+<a href=#198 id=198 data-nosnippet>198</a>    /// The blocking wait is timed into the per-request RECV-WAIT accumulator
+<a href=#199 id=199 data-nosnippet>199</a>    /// (`stream_subphase::time_recv`), exactly as the k-way merge's own recv site
+<a href=#200 id=200 data-nosnippet>200</a>    /// is (`write_engine/merge/mod.rs`). The drive loop SUBTRACTS that accumulator
+<a href=#201 id=201 data-nosnippet>201</a>    /// from its `stream_merge` bucket, so producer starvation / cold I/O on this
+<a href=#202 id=202 data-nosnippet>202</a>    /// arm is not billed as merge CPU — without this wrap the fast arm (now the
+<a href=#203 id=203 data-nosnippet>203</a>    /// DEFAULT path) would silently break #2819's "`stream_merge` is merge CPU
+<a href=#204 id=204 data-nosnippet>204</a>    /// only" contract and inflate the sub-phase profile that issue #3096 uses as
+<a href=#205 id=205 data-nosnippet>205</a>    /// its evidence base. Inert (no clock read) when no sub-phase sink is
+<a href=#206 id=206 data-nosnippet>206</a>    /// installed, and it never touches the value returned.
+<a href=#207 id=207 data-nosnippet>207</a>    </span><span class="kw">pub fn </span>next_batch(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;<span class="prelude-ty">Result</span>&lt;QueryRowBatch&gt;&gt; {
+<a href=#208 id=208 data-nosnippet>208</a>        <span class="kw">let </span>received = <span class="kw">crate</span>::observability::stream_subphase::time_recv(|| <span class="self">self</span>.rx.recv());
+<a href=#209 id=209 data-nosnippet>209</a>        <span class="kw">match </span>received {
+<a href=#210 id=210 data-nosnippet>210</a>            <span class="prelude-val">Ok</span>(QueryRowMsg::Item(batch)) =&gt; <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(batch)),
+<a href=#211 id=211 data-nosnippet>211</a>            <span class="prelude-val">Ok</span>(QueryRowMsg::Failed(e)) =&gt; {
+<a href=#212 id=212 data-nosnippet>212</a>                <span class="comment">// Terminal by construction: a caller that keeps polling after it
+<a href=#213 id=213 data-nosnippet>213</a>                // gets a clean `None`, not a spurious dead-producer error.
+<a href=#214 id=214 data-nosnippet>214</a>                </span><span class="self">self</span>.terminated = <span class="bool-val">true</span>;
+<a href=#215 id=215 data-nosnippet>215</a>                <span class="prelude-val">Some</span>(<span class="prelude-val">Err</span>(e))
+<a href=#216 id=216 data-nosnippet>216</a>            }
+<a href=#217 id=217 data-nosnippet>217</a>            <span class="prelude-val">Ok</span>(QueryRowMsg::Done) =&gt; {
+<a href=#218 id=218 data-nosnippet>218</a>                <span class="self">self</span>.terminated = <span class="bool-val">true</span>;
+<a href=#219 id=219 data-nosnippet>219</a>                <span class="prelude-val">None
+<a href=#220 id=220 data-nosnippet>220</a>            </span>}
+<a href=#221 id=221 data-nosnippet>221</a>            <span class="prelude-val">Err</span>(_disconnected) <span class="kw">if </span><span class="self">self</span>.terminated =&gt; <span class="prelude-val">None</span>,
+<a href=#222 id=222 data-nosnippet>222</a>            <span class="prelude-val">Err</span>(_disconnected) =&gt; {
+<a href=#223 id=223 data-nosnippet>223</a>                <span class="self">self</span>.terminated = <span class="bool-val">true</span>;
+<a href=#224 id=224 data-nosnippet>224</a>                <span class="prelude-val">Some</span>(<span class="prelude-val">Err</span>(dead_producer_error()))
+<a href=#225 id=225 data-nosnippet>225</a>            }
+<a href=#226 id=226 data-nosnippet>226</a>        }
+<a href=#227 id=227 data-nosnippet>227</a>    }
+<a href=#228 id=228 data-nosnippet>228</a>}
+<a href=#229 id=229 data-nosnippet>229</a>
+<a href=#230 id=230 data-nosnippet>230</a><span class="doccomment">/// The fail-closed error for a producer that disconnected without a terminator
+<a href=#231 id=231 data-nosnippet>231</a>/// (issue #3106).
+<a href=#232 id=232 data-nosnippet>232</a>///
+<a href=#233 id=233 data-nosnippet>233</a>/// [`Error::Internal`] — ONE variant for both halves of this event (here and
+<a href=#234 id=234 data-nosnippet>234</a>/// [`panicked_producer_error`]), chosen deliberately (roborev, issue #3106):
+<a href=#235 id=235 data-nosnippet>235</a>/// nothing suggests the `Data.db` is bad, so `Corruption` would send an operator
+<a href=#236 id=236 data-nosnippet>236</a>/// hunting a nonexistent bad file, and `Storage` is `is_recoverable() == true`
+<a href=#237 id=237 data-nosnippet>237</a>/// (surfaced to consumers, e.g. the Node bindings' error mapping) which would
+<a href=#238 id=238 data-nosnippet>238</a>/// advertise a deterministic internal failure as RETRYABLE. `Internal` is
+<a href=#239 id=239 data-nosnippet>239</a>/// `is_recoverable() == false` and is the honest variant for a violated internal
+<a href=#240 id=240 data-nosnippet>240</a>/// invariant.
+<a href=#241 id=241 data-nosnippet>241</a></span><span class="kw">fn </span>dead_producer_error() -&gt; Error {
+<a href=#242 id=242 data-nosnippet>242</a>    Error::internal(
+<a href=#243 id=243 data-nosnippet>243</a>        <span class="string">"query row stream: the producer thread disconnected WITHOUT its terminal \
+<a href=#244 id=244 data-nosnippet>244</a>         Done sentinel — it died mid-walk, so the result set is TRUNCATED and \
+<a href=#245 id=245 data-nosnippet>245</a>         cannot be reported as a complete scan (issue #3106)"</span>,
+<a href=#246 id=246 data-nosnippet>246</a>    )
+<a href=#247 id=247 data-nosnippet>247</a>}
+<a href=#248 id=248 data-nosnippet>248</a>
+<a href=#249 id=249 data-nosnippet>249</a><span class="doccomment">/// Turn a caught producer-thread panic into an INFORMATIVE terminal error
+<a href=#250 id=250 data-nosnippet>250</a>/// (issue #3106).
+<a href=#251 id=251 data-nosnippet>251</a>///
+<a href=#252 id=252 data-nosnippet>252</a>/// The bare disconnect backstop can only say "the producer died"; catching the
+<a href=#253 id=253 data-nosnippet>253</a>/// unwind lets the client see WHERE/WHY, which is the difference between a
+<a href=#254 id=254 data-nosnippet>254</a>/// debuggable failure and a mystery. The panic payload is a `String`/`&amp;str` for
+<a href=#255 id=255 data-nosnippet>255</a>/// every `panic!`/assertion (the only other shapes are hand-rolled
+<a href=#256 id=256 data-nosnippet>256</a>/// `panic_any`), so an unrecognized payload degrades to a named placeholder
+<a href=#257 id=257 data-nosnippet>257</a>/// rather than being dropped.
+<a href=#258 id=258 data-nosnippet>258</a>///
+<a href=#259 id=259 data-nosnippet>259</a>/// Same [`Error::Internal`] variant as [`dead_producer_error`] — one event, one
+<a href=#260 id=260 data-nosnippet>260</a>/// variant, and not the `is_recoverable() == true` `Storage` this first used.
+<a href=#261 id=261 data-nosnippet>261</a></span><span class="kw">fn </span>panicked_producer_error(payload: <span class="kw-2">&amp;</span>(<span class="kw">dyn </span>std::any::Any + Send)) -&gt; Error {
+<a href=#262 id=262 data-nosnippet>262</a>    <span class="kw">let </span>message = payload
+<a href=#263 id=263 data-nosnippet>263</a>        .downcast_ref::&lt;String&gt;()
+<a href=#264 id=264 data-nosnippet>264</a>        .map(String::as_str)
+<a href=#265 id=265 data-nosnippet>265</a>        .or_else(|| payload.downcast_ref::&lt;<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str&gt;().copied())
+<a href=#266 id=266 data-nosnippet>266</a>        .unwrap_or(<span class="string">"&lt;non-string panic payload&gt;"</span>);
+<a href=#267 id=267 data-nosnippet>267</a>    Error::internal(<span class="macro">format!</span>(
+<a href=#268 id=268 data-nosnippet>268</a>        <span class="string">"query row stream: the producer thread PANICKED mid-walk ({message}) — the \
+<a href=#269 id=269 data-nosnippet>269</a>         result set is TRUNCATED and cannot be reported as a complete scan \
+<a href=#270 id=270 data-nosnippet>270</a>         (issue #3106)"
+<a href=#271 id=271 data-nosnippet>271</a>    </span>))
+<a href=#272 id=272 data-nosnippet>272</a>}
+<a href=#273 id=273 data-nosnippet>273</a>
+<a href=#274 id=274 data-nosnippet>274</a><span class="kw">impl </span>Drop <span class="kw">for </span>QueryRowStream {
+<a href=#275 id=275 data-nosnippet>275</a>    <span class="kw">fn </span>drop(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
+<a href=#276 id=276 data-nosnippet>276</a>        <span class="comment">// Stop the walk promptly rather than letting it run to completion into a
+<a href=#277 id=277 data-nosnippet>277</a>        // channel nobody reads (the producer would otherwise only notice at its
+<a href=#278 id=278 data-nosnippet>278</a>        // next send). Cancels only THIS stream's child flag — the caller's flag
+<a href=#279 id=279 data-nosnippet>279</a>        // is untouched, so a caller that falls back to another read path gets an
+<a href=#280 id=280 data-nosnippet>280</a>        // un-cancelled one. The thread is deliberately NOT joined: it holds only
+<a href=#281 id=281 data-nosnippet>281</a>        // an `Arc&lt;SSTableReader&gt;` + its own runtime and exits on the next cancel
+<a href=#282 id=282 data-nosnippet>282</a>        // poll, so a dropped stream never blocks the consumer.
+<a href=#283 id=283 data-nosnippet>283</a>        </span><span class="self">self</span>.child_cancel.cancel();
+<a href=#284 id=284 data-nosnippet>284</a>    }
+<a href=#285 id=285 data-nosnippet>285</a>}
+<a href=#286 id=286 data-nosnippet>286</a>
+<a href=#287 id=287 data-nosnippet>287</a><span class="kw">impl </span>SSTableReader {
+<a href=#288 id=288 data-nosnippet>288</a>    <span class="doccomment">/// Open a [`QueryRowStream`] over this ONE reader (issue #3058).
+<a href=#289 id=289 data-nosnippet>289</a>    ///
+<a href=#290 id=290 data-nosnippet>290</a>    /// `schema` is the authoritative table schema for decoding, `token_bound` the
+<a href=#291 id=291 data-nosnippet>291</a>    /// split's `(start, end]` range to push into the Summary-guided walk (`None`
+<a href=#292 id=292 data-nosnippet>292</a>    /// = full ring), `now_secs` the caller's request-scoped read-time TTL clock,
+<a href=#293 id=293 data-nosnippet>293</a>    /// and `scan_cancel` the caller's cooperative cancellation flag.
+<a href=#294 id=294 data-nosnippet>294</a>    ///
+<a href=#295 id=295 data-nosnippet>295</a>    /// See the module docs for the guarantees (read shadowing on, pinned clock,
+<a href=#296 id=296 data-nosnippet>296</a>    /// token pushdown, fail-closed [`QueryRowBatch::Unsupported`]).
+<a href=#297 id=297 data-nosnippet>297</a>    </span><span class="kw">pub fn </span>open_query_row_stream(
+<a href=#298 id=298 data-nosnippet>298</a>        <span class="self">self</span>: Arc&lt;<span class="self">Self</span>&gt;,
+<a href=#299 id=299 data-nosnippet>299</a>        schema: <span class="kw">crate</span>::schema::TableSchema,
+<a href=#300 id=300 data-nosnippet>300</a>        token_bound: <span class="prelude-ty">Option</span>&lt;ScanTokenBound&gt;,
+<a href=#301 id=301 data-nosnippet>301</a>        now_secs: i64,
+<a href=#302 id=302 data-nosnippet>302</a>        scan_cancel: ScanCancel,
+<a href=#303 id=303 data-nosnippet>303</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;QueryRowStream&gt; {
+<a href=#304 id=304 data-nosnippet>304</a>        <span class="kw">let </span>(tx, rx) = sync_channel::&lt;QueryRowMsg&gt;(QUERY_ROWS_CHANNEL_BATCHES);
+<a href=#305 id=305 data-nosnippet>305</a>        <span class="comment">// This stream's own flag (see `QueryRowStream::child_cancel`): the walk
+<a href=#306 id=306 data-nosnippet>306</a>        // polls the CHILD, the caller's flag is bridged into it, and nothing ever
+<a href=#307 id=307 data-nosnippet>307</a>        // cancels the caller's.
+<a href=#308 id=308 data-nosnippet>308</a>        </span><span class="kw">let </span>child_cancel = ScanCancel::new();
+<a href=#309 id=309 data-nosnippet>309</a>        <span class="kw">let </span>bridge = CancelBridge {
+<a href=#310 id=310 data-nosnippet>310</a>            caller: scan_cancel,
+<a href=#311 id=311 data-nosnippet>311</a>            child: child_cancel.clone(),
+<a href=#312 id=312 data-nosnippet>312</a>        };
+<a href=#313 id=313 data-nosnippet>313</a>        <span class="comment">// Issue #3106: whatever fault a test armed FOR THIS READER is captured
+<a href=#314 id=314 data-nosnippet>314</a>        // HERE (never re-read mid-walk) and owned by the producer thread. Always
+<a href=#315 id=315 data-nosnippet>315</a>        // empty — and a zero-sized no-op whose scope closure is never called — in
+<a href=#316 id=316 data-nosnippet>316</a>        // a production build.
+<a href=#317 id=317 data-nosnippet>317</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>fault =
+<a href=#318 id=318 data-nosnippet>318</a>            <span class="kw">crate</span>::storage::producer_fault::ProducerFault::capture_for(|| <span class="self">self</span>.file_path());
+<a href=#319 id=319 data-nosnippet>319</a>        <span class="comment">// One publisher per producer thread; see `CompletionOnce` (issue #3384).
+<a href=#320 id=320 data-nosnippet>320</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>done = CompletionOnce::new();
+<a href=#321 id=321 data-nosnippet>321</a>        std::thread::Builder::new()
+<a href=#322 id=322 data-nosnippet>322</a>            .name(<span class="string">"cqlite-query-rows"</span>.to_string())
+<a href=#323 id=323 data-nosnippet>323</a>            .spawn(<span class="kw">move </span>|| {
+<a href=#324 id=324 data-nosnippet>324</a>                <span class="kw">let </span>sender = tx.clone();
+<a href=#325 id=325 data-nosnippet>325</a>                <span class="comment">// Issue #3106: an UNWINDING walk must not look like a finished
+<a href=#326 id=326 data-nosnippet>326</a>                // one. `AssertUnwindSafe` is sound here because nothing the
+<a href=#327 id=327 data-nosnippet>327</a>                // closure touched is observed after an unwind: the reader,
+<a href=#328 id=328 data-nosnippet>328</a>                // schema, parser buffers and cancel bridge are dropped, and the
+<a href=#329 id=329 data-nosnippet>329</a>                // only thing used afterwards is `sender` — an mpsc `SyncSender`,
+<a href=#330 id=330 data-nosnippet>330</a>                // which has no poisoning/broken-invariant state — to report the
+<a href=#331 id=331 data-nosnippet>331</a>                // failure. The walk's own output is already downstream.
+<a href=#332 id=332 data-nosnippet>332</a>                </span><span class="kw">let </span>outcome =
+<a href=#333 id=333 data-nosnippet>333</a>                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
+<a href=#334 id=334 data-nosnippet>334</a>                        <span class="kw">let </span>rt = tokio::runtime::Builder::new_current_thread()
+<a href=#335 id=335 data-nosnippet>335</a>                            .enable_all()
+<a href=#336 id=336 data-nosnippet>336</a>                            .build()
+<a href=#337 id=337 data-nosnippet>337</a>                            .map_err(|e| {
+<a href=#338 id=338 data-nosnippet>338</a>                                Error::Storage(<span class="macro">format!</span>(
+<a href=#339 id=339 data-nosnippet>339</a>                                    <span class="string">"query row stream: failed to create runtime: {e}"
+<a href=#340 id=340 data-nosnippet>340</a>                                </span>))
+<a href=#341 id=341 data-nosnippet>341</a>                            })<span class="question-mark">?</span>;
+<a href=#342 id=342 data-nosnippet>342</a>                        rt.block_on(drive_query_rows(
+<a href=#343 id=343 data-nosnippet>343</a>                            <span class="self">self</span>,
+<a href=#344 id=344 data-nosnippet>344</a>                            schema,
+<a href=#345 id=345 data-nosnippet>345</a>                            token_bound,
+<a href=#346 id=346 data-nosnippet>346</a>                            now_secs,
+<a href=#347 id=347 data-nosnippet>347</a>                            <span class="kw-2">&amp;</span>bridge,
+<a href=#348 id=348 data-nosnippet>348</a>                            <span class="kw-2">&amp;</span>tx,
+<a href=#349 id=349 data-nosnippet>349</a>                            <span class="kw-2">&amp;mut </span>fault,
+<a href=#350 id=350 data-nosnippet>350</a>                            <span class="kw-2">&amp;mut </span>done,
+<a href=#351 id=351 data-nosnippet>351</a>                        ))
+<a href=#352 id=352 data-nosnippet>352</a>                    }));
+<a href=#353 id=353 data-nosnippet>353</a>                <span class="comment">// EXACTLY ONE terminal message on every exit path, so the
+<a href=#354 id=354 data-nosnippet>354</a>                // consumer never has to infer completion from a disconnect.
+<a href=#355 id=355 data-nosnippet>355</a>                </span><span class="kw">let </span>terminal = <span class="kw">match </span>outcome {
+<a href=#356 id=356 data-nosnippet>356</a>                    <span class="prelude-val">Ok</span>(<span class="prelude-val">Ok</span>(())) =&gt; QueryRowMsg::Done,
+<a href=#357 id=357 data-nosnippet>357</a>                    <span class="prelude-val">Ok</span>(<span class="prelude-val">Err</span>(e)) =&gt; QueryRowMsg::Failed(e),
+<a href=#358 id=358 data-nosnippet>358</a>                    <span class="prelude-val">Err</span>(panic) =&gt; QueryRowMsg::Failed(panicked_producer_error(panic.as_ref())),
+<a href=#359 id=359 data-nosnippet>359</a>                };
+<a href=#360 id=360 data-nosnippet>360</a>                <span class="comment">// CAUSAL completion signal (issue #3384), published BEFORE the
+<a href=#361 id=361 data-nosnippet>361</a>                // terminal message and never after (roborev): a consumer holding
+<a href=#362 id=362 data-nosnippet>362</a>                // the terminal message must be able to conclude this producer can
+<a href=#363 id=363 data-nosnippet>363</a>                // no longer publish, or a PRIOR case's producer could increment
+<a href=#364 id=364 data-nosnippet>364</a>                // into a LATER case's freshly-reset counter. Nothing below decodes.
+<a href=#365 id=365 data-nosnippet>365</a>                </span>done.publish();
+<a href=#366 id=366 data-nosnippet>366</a>                <span class="comment">// The consumer may already be gone; a failed send is fine.
+<a href=#367 id=367 data-nosnippet>367</a>                </span><span class="kw">let _ </span>= sender.send(terminal);
+<a href=#368 id=368 data-nosnippet>368</a>            })
+<a href=#369 id=369 data-nosnippet>369</a>            .map_err(|e| {
+<a href=#370 id=370 data-nosnippet>370</a>                Error::Storage(<span class="macro">format!</span>(<span class="string">"query row stream: failed to spawn thread: {e}"</span>))
+<a href=#371 id=371 data-nosnippet>371</a>            })<span class="question-mark">?</span>;
+<a href=#372 id=372 data-nosnippet>372</a>        <span class="prelude-val">Ok</span>(QueryRowStream {
+<a href=#373 id=373 data-nosnippet>373</a>            rx,
+<a href=#374 id=374 data-nosnippet>374</a>            child_cancel,
+<a href=#375 id=375 data-nosnippet>375</a>            terminated: <span class="bool-val">false</span>,
+<a href=#376 id=376 data-nosnippet>376</a>        })
+<a href=#377 id=377 data-nosnippet>377</a>    }
+<a href=#378 id=378 data-nosnippet>378</a>
+<a href=#379 id=379 data-nosnippet>379</a>    <span class="doccomment">/// Whether this reader has the components the single-generation streaming
+<a href=#380 id=380 data-nosnippet>380</a>    /// query walk needs (an `Index.db`, not a BTI `Partitions.db`).
+<a href=#381 id=381 data-nosnippet>381</a>    ///
+<a href=#382 id=382 data-nosnippet>382</a>    /// AUTHORITATIVE reader metadata (issue #28): the presence of parsed
+<a href=#383 id=383 data-nosnippet>383</a>    /// components, never a guess from file names, sizes, or byte content. It is a
+<a href=#384 id=384 data-nosnippet>384</a>    /// NECESSARY condition, not a sufficient one — a walk may still report
+<a href=#385 id=385 data-nosnippet>385</a>    /// [`QueryRowBatch::Unsupported`] when it cannot prove partition coverage, which
+<a href=#386 id=386 data-nosnippet>386</a>    /// is why that signal exists.
+<a href=#387 id=387 data-nosnippet>387</a>    </span><span class="kw">pub fn </span>supports_streaming_query_scan(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
+<a href=#388 id=388 data-nosnippet>388</a>        <span class="self">self</span>.index_reader.is_some() &amp;&amp; <span class="self">self</span>.bti_partitions_db.is_none()
+<a href=#389 id=389 data-nosnippet>389</a>    }
+<a href=#390 id=390 data-nosnippet>390</a>
+<a href=#391 id=391 data-nosnippet>391</a>    <span class="doccomment">/// The STATIC columns this SSTable's OWN serialization header declares
+<a href=#392 id=392 data-nosnippet>392</a>    /// (`Statistics.db`'s `SerializationHeader.staticColumns`) — authoritative
+<a href=#393 id=393 data-nosnippet>393</a>    /// ON-DISK metadata, independent of any caller-supplied schema.
+<a href=#394 id=394 data-nosnippet>394</a>    ///
+<a href=#395 id=395 data-nosnippet>395</a>    /// Exists because a caller schema is not a safe source for the static
+<a href=#396 id=396 data-nosnippet>396</a>    /// question (roborev, issue #3058): the Flight producer's schema comes from
+<a href=#397 id=397 data-nosnippet>397</a>    /// the ticket DDL, and an `nb` header carries no embedded schema to
+<a href=#398 id=398 data-nosnippet>398</a>    /// cross-check it against (#3097), so a DDL that predates an
+<a href=#399 id=399 data-nosnippet>399</a>    /// `ALTER TABLE ADD … STATIC` (or a hand-built ticket) would declare no
+<a href=#400 id=400 data-nosnippet>400</a>    /// static column for an SSTable that actually contains one. The
+<a href=#401 id=401 data-nosnippet>401</a>    /// single-generation read path emits NOTHING for a partition holding only a
+<a href=#402 id=402 data-nosnippet>402</a>    /// static row, where the merge arm emits one row, so a routing decision made
+<a href=#403 id=403 data-nosnippet>403</a>    /// on the stale DDL alone would change the row count.
+<a href=#404 id=404 data-nosnippet>404</a>    ///
+<a href=#405 id=405 data-nosnippet>405</a>    /// The serialization header enumerates EVERY static column the file can
+<a href=#406 id=406 data-nosnippet>406</a>    /// contain, so this is at least as strong as inspecting each decoded row's
+<a href=#407 id=407 data-nosnippet>407</a>    /// `EXTENDED_IS_STATIC` flag, and it is available BEFORE the first row (so a
+<a href=#408 id=408 data-nosnippet>408</a>    /// caller can fall back cleanly instead of aborting mid-stream).
+<a href=#409 id=409 data-nosnippet>409</a>    ///
+<a href=#410 id=410 data-nosnippet>410</a>    /// An empty result means "this file declares no static column" when the
+<a href=#411 id=411 data-nosnippet>411</a>    /// header was parsed. A file whose `Statistics.db` is absent/unparsed also
+<a href=#412 id=412 data-nosnippet>412</a>    /// yields an empty list — see [`Self::static_columns_are_known`], which a
+<a href=#413 id=413 data-nosnippet>413</a>    /// caller MUST consult to distinguish the two.
+<a href=#414 id=414 data-nosnippet>414</a>    </span><span class="kw">pub fn </span>on_disk_static_columns(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;String&gt; {
+<a href=#415 id=415 data-nosnippet>415</a>        <span class="kw">let </span><span class="prelude-val">Some</span>(stats) = <span class="self">self</span>.statistics_reader.as_ref() <span class="kw">else </span>{
+<a href=#416 id=416 data-nosnippet>416</a>            <span class="kw">return </span>Vec::new();
+<a href=#417 id=417 data-nosnippet>417</a>        };
+<a href=#418 id=418 data-nosnippet>418</a>        stats
+<a href=#419 id=419 data-nosnippet>419</a>            .statistics()
+<a href=#420 id=420 data-nosnippet>420</a>            .serialization_header_columns
+<a href=#421 id=421 data-nosnippet>421</a>            .iter()
+<a href=#422 id=422 data-nosnippet>422</a>            .filter(|c| c.is_static)
+<a href=#423 id=423 data-nosnippet>423</a>            .map(|c| c.name.clone())
+<a href=#424 id=424 data-nosnippet>424</a>            .collect()
+<a href=#425 id=425 data-nosnippet>425</a>    }
+<a href=#426 id=426 data-nosnippet>426</a>
+<a href=#427 id=427 data-nosnippet>427</a>    <span class="doccomment">/// Whether [`Self::on_disk_static_columns`] is an ANSWER rather than an
+<a href=#428 id=428 data-nosnippet>428</a>    /// absence of information: `true` when the serialization header was parsed
+<a href=#429 id=429 data-nosnippet>429</a>    /// (so "no static columns" is authoritative), `false` when there is nothing
+<a href=#430 id=430 data-nosnippet>430</a>    /// to read (no `Statistics.db`, or a header with no columns at all), in which
+<a href=#431 id=431 data-nosnippet>431</a>    /// case a caller that needs the static question settled MUST fail closed.
+<a href=#432 id=432 data-nosnippet>432</a>    </span><span class="kw">pub fn </span>static_columns_are_known(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
+<a href=#433 id=433 data-nosnippet>433</a>        <span class="self">self</span>.statistics_reader
+<a href=#434 id=434 data-nosnippet>434</a>            .as_ref()
+<a href=#435 id=435 data-nosnippet>435</a>            .is_some_and(|s| !s.statistics().serialization_header_columns.is_empty())
+<a href=#436 id=436 data-nosnippet>436</a>    }
+<a href=#437 id=437 data-nosnippet>437</a>}
+<a href=#438 id=438 data-nosnippet>438</a>
+<a href=#439 id=439 data-nosnippet>439</a><span class="doccomment">/// Drive the single-generation walk, batching rows into `tx`.
+<a href=#440 id=440 data-nosnippet>440</a>///
+<a href=#441 id=441 data-nosnippet>441</a>/// # Source selection (issue #3058)
+<a href=#442 id=442 data-nosnippet>442</a>///
+<a href=#443 id=443 data-nosnippet>443</a>/// Both sources are single-generation, read-shadowed and clock-pinned; they
+<a href=#444 id=444 data-nosnippet>444</a>/// differ in which cost they avoid, and the choice is made from the request's
+<a href=#445 id=445 data-nosnippet>445</a>/// own authoritative shape — the presence of a token bound — never from a guess:
+<a href=#446 id=446 data-nosnippet>446</a>///
+<a href=#447 id=447 data-nosnippet>447</a>/// * **No token bound (a full-ring scan).** The WINDOWED batched scan
+<a href=#448 id=448 data-nosnippet>448</a>///   (`scan_stream_batched_admitted`) — the exact path the bare `SELECT`
+<a href=#449 id=449 data-nosnippet>449</a>///   full scan uses. It walks the data section directly, so it pays NO
+<a href=#450 id=450 data-nosnippet>450</a>///   `partition_slice_fully_consumed` structural re-decode per partition and
+<a href=#451 id=451 data-nosnippet>451</a>///   builds ZERO per-row `CellWriteMetadata` maps.
+<a href=#452 id=452 data-nosnippet>452</a>/// * **A token bound (a Trino split).** The Summary-guided walk, so the split's
+<a href=#453 id=453 data-nosnippet>453</a>///   range is pushed INTO the per-SSTable walk (#2412/#2413) and out-of-range
+<a href=#454 id=454 data-nosnippet>454</a>///   partition bodies are never read. Its per-partition coverage check
+<a href=#455 id=455 data-nosnippet>455</a>///   (`partition_slice_fully_consumed`, Signal B) drives the framing in
+<a href=#456 id=456 data-nosnippet>456</a>///   STRUCTURE-ONLY mode (`parse_one_partition_structure_only`), so it builds no
+<a href=#457 id=457 data-nosnippet>457</a>///   `CompactionRow`, no per-row `CellWriteMetadata` map and no complex-element
+<a href=#458 id=458 data-nosnippet>458</a>///   map — this arm allocates ZERO metadata maps, exactly like the full-ring one,
+<a href=#459 id=459 data-nosnippet>459</a>///   and that is pinned by `cell_metadata_maps == 0` in
+<a href=#460 id=460 data-nosnippet>460</a>///   `cqlite-flight/tests/issue_3058_bypass_path_taken.rs`
+<a href=#461 id=461 data-nosnippet>461</a>///   (`token_pruning_to_one_source_still_selects_the_fast_path`) plus every
+<a href=#462 id=462 data-nosnippet>462</a>///   `assert_arms_agree` case's bypass leg. (Before that fix the check decoded
+<a href=#463 id=463 data-nosnippet>463</a>///   through the compaction parser and DID build one map per row; the merge arm's
+<a href=#464 id=464 data-nosnippet>464</a>///   own coverage check got the same saving, since those rows were always
+<a href=#465 id=465 data-nosnippet>465</a>///   discarded.)
+<a href=#466 id=466 data-nosnippet>466</a>///
+<a href=#467 id=467 data-nosnippet>467</a>/// On a pre-emit `FellBack` from the Summary-guided walk the full-`Index.db`
+<a href=#468 id=468 data-nosnippet>468</a>/// streaming walk is tried (full ring; the caller's downstream token filter
+<a href=#469 id=469 data-nosnippet>469</a>/// still bounds the result set); on a second pre-emit `FellBack`,
+<a href=#470 id=470 data-nosnippet>470</a>/// [`QueryRowBatch::Unsupported`] is reported and NOTHING has been emitted.
+<a href=#471 id=471 data-nosnippet>471</a></span><span class="kw">async fn </span>drive_query_rows(
+<a href=#472 id=472 data-nosnippet>472</a>    reader: Arc&lt;SSTableReader&gt;,
+<a href=#473 id=473 data-nosnippet>473</a>    schema: <span class="kw">crate</span>::schema::TableSchema,
+<a href=#474 id=474 data-nosnippet>474</a>    token_bound: <span class="prelude-ty">Option</span>&lt;ScanTokenBound&gt;,
+<a href=#475 id=475 data-nosnippet>475</a>    now_secs: i64,
+<a href=#476 id=476 data-nosnippet>476</a>    cancel: <span class="kw-2">&amp;</span>CancelBridge,
+<a href=#477 id=477 data-nosnippet>477</a>    tx: <span class="kw-2">&amp;</span>SyncSender&lt;QueryRowMsg&gt;,
+<a href=#478 id=478 data-nosnippet>478</a>    fault: <span class="kw-2">&amp;mut </span>ProducerFault,
+<a href=#479 id=479 data-nosnippet>479</a>    done: <span class="kw-2">&amp;mut </span>CompletionOnce,
+<a href=#480 id=480 data-nosnippet>480</a>) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
+<a href=#481 id=481 data-nosnippet>481</a>    <span class="kw">if </span>token_bound.is_none() {
+<a href=#482 id=482 data-nosnippet>482</a>        <span class="kw">return </span>drive_full_scan_rows(reader, schema, now_secs, cancel, tx, fault).<span class="kw">await</span>;
+<a href=#483 id=483 data-nosnippet>483</a>    }
+<a href=#484 id=484 data-nosnippet>484</a>
+<a href=#485 id=485 data-nosnippet>485</a>    <span class="kw">let </span>scan_cancel = cancel.child();
+<a href=#486 id=486 data-nosnippet>486</a>    <span class="kw">let </span><span class="kw-2">mut </span>sink = BatchSink::new(tx, cancel, fault);
+<a href=#487 id=487 data-nosnippet>487</a>
+<a href=#488 id=488 data-nosnippet>488</a>    <span class="comment">// Each walk gets its OWN short-lived emit closure so the `&amp;mut sink` borrow
+<a href=#489 id=489 data-nosnippet>489</a>    // ends with the call — that is what lets the pre-emit guard below actually
+<a href=#490 id=490 data-nosnippet>490</a>    // READ `sink.emitted` between the two walks (roborev, issue #3058).
+<a href=#491 id=491 data-nosnippet>491</a>    </span><span class="kw">let </span>outcome = reader
+<a href=#492 id=492 data-nosnippet>492</a>        .stream_partitions_summary_guided(
+<a href=#493 id=493 data-nosnippet>493</a>            scan_cancel,
+<a href=#494 id=494 data-nosnippet>494</a>            token_bound,
+<a href=#495 id=495 data-nosnippet>495</a>            <span class="prelude-val">Some</span>(now_secs),
+<a href=#496 id=496 data-nosnippet>496</a>            <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>schema),
+<a href=#497 id=497 data-nosnippet>497</a>            <span class="kw-2">&amp;mut </span>|row: (RowKey, ScanRow)| sink.push(row),
+<a href=#498 id=498 data-nosnippet>498</a>        )
+<a href=#499 id=499 data-nosnippet>499</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#500 id=500 data-nosnippet>500</a>    <span class="kw">if </span><span class="macro">matches!</span>(outcome, FullIndexStreamOutcome::Streamed) {
+<a href=#501 id=501 data-nosnippet>501</a>        sink.finish()<span class="question-mark">?</span>;
+<a href=#502 id=502 data-nosnippet>502</a>        <span class="comment">// A caller cancellation that broke the walk must surface as `Cancelled`,
+<a href=#503 id=503 data-nosnippet>503</a>        // never as a clean (silently short) end of stream.
+<a href=#504 id=504 data-nosnippet>504</a>        </span><span class="kw">return </span>cancel.caller_result();
+<a href=#505 id=505 data-nosnippet>505</a>    }
+<a href=#506 id=506 data-nosnippet>506</a>
+<a href=#507 id=507 data-nosnippet>507</a>    <span class="comment">// No usable Summary.db: fall back to the full-`Index.db` streaming walk. Both
+<a href=#508 id=508 data-nosnippet>508</a>    // walks CONTRACT to report `FellBack` only BEFORE their first emit — ENFORCED
+<a href=#509 id=509 data-nosnippet>509</a>    // here, not assumed (roborev, issue #3058): re-driving a second walk into a
+<a href=#510 id=510 data-nosnippet>510</a>    // sink that already holds rows (an under-full, still-buffered batch counts)
+<a href=#511 id=511 data-nosnippet>511</a>    // would flush both walks' output and silently DUPLICATE rows. Fail closed.
+<a href=#512 id=512 data-nosnippet>512</a>    </span>assert_nothing_emitted(sink.emitted, <span class="string">"before the full-index fallback walk"</span>)<span class="question-mark">?</span>;
+<a href=#513 id=513 data-nosnippet>513</a>    <span class="kw">let </span>outcome = reader
+<a href=#514 id=514 data-nosnippet>514</a>        .stream_all_partitions_via_full_index(
+<a href=#515 id=515 data-nosnippet>515</a>            scan_cancel,
+<a href=#516 id=516 data-nosnippet>516</a>            <span class="prelude-val">Some</span>(now_secs),
+<a href=#517 id=517 data-nosnippet>517</a>            <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>schema),
+<a href=#518 id=518 data-nosnippet>518</a>            <span class="kw-2">&amp;mut </span>|row: (RowKey, ScanRow)| sink.push(row),
+<a href=#519 id=519 data-nosnippet>519</a>        )
+<a href=#520 id=520 data-nosnippet>520</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#521 id=521 data-nosnippet>521</a>    <span class="kw">if </span><span class="macro">matches!</span>(outcome, FullIndexStreamOutcome::Streamed) {
+<a href=#522 id=522 data-nosnippet>522</a>        sink.finish()<span class="question-mark">?</span>;
+<a href=#523 id=523 data-nosnippet>523</a>        <span class="kw">return </span>cancel.caller_result();
+<a href=#524 id=524 data-nosnippet>524</a>    }
+<a href=#525 id=525 data-nosnippet>525</a>
+<a href=#526 id=526 data-nosnippet>526</a>    <span class="comment">// Neither walk can serve this reader. Report it as the FIRST and ONLY
+<a href=#527 id=527 data-nosnippet>527</a>    // message, having emitted nothing — enforced, for the same reason.
+<a href=#528 id=528 data-nosnippet>528</a>    </span>assert_nothing_emitted(sink.emitted, <span class="string">"before reporting Unsupported"</span>)<span class="question-mark">?</span>;
+<a href=#529 id=529 data-nosnippet>529</a>    <span class="comment">// Publish BEFORE the send: the documented caller drops the stream the moment it
+<a href=#530 id=530 data-nosnippet>530</a>    // sees `Unsupported`, so this message is terminal in practice even though the
+<a href=#531 id=531 data-nosnippet>531</a>    // closure still sends `Done` behind it (roborev, issue #3384).
+<a href=#532 id=532 data-nosnippet>532</a>    </span>done.publish();
+<a href=#533 id=533 data-nosnippet>533</a>    <span class="kw">let _ </span>= tx.send(QueryRowMsg::Item(QueryRowBatch::Unsupported));
+<a href=#534 id=534 data-nosnippet>534</a>    <span class="prelude-val">Ok</span>(())
+<a href=#535 id=535 data-nosnippet>535</a>}
+<a href=#536 id=536 data-nosnippet>536</a>
+<a href=#537 id=537 data-nosnippet>537</a><span class="doccomment">/// Publishes producer completion EXACTLY ONCE, and always BEFORE any message a
+<a href=#538 id=538 data-nosnippet>538</a>/// consumer can act on as terminal (issue #3384, roborev).
+<a href=#539 id=539 data-nosnippet>539</a>///
+<a href=#540 id=540 data-nosnippet>540</a>/// The invariant this exists to hold: **no consumer-observable terminal message may
+<a href=#541 id=541 data-nosnippet>541</a>/// precede the completion publish.** If one does, the consumer can drop the stream,
+<a href=#542 id=542 data-nosnippet>542</a>/// its test can finish and a LATER test can `reset` the counter, and only then does
+<a href=#543 id=543 data-nosnippet>543</a>/// the paused producer increment — so the later test observes a completion that was
+<a href=#544 id=544 data-nosnippet>544</a>/// never its own and reads a non-final work count. That is a false PASS in the exact
+<a href=#545 id=545 data-nosnippet>545</a>/// test this issue exists to make trustworthy.
+<a href=#546 id=546 data-nosnippet>546</a>///
+<a href=#547 id=547 data-nosnippet>547</a>/// Two exit paths publish, hence the idempotence: the `Unsupported` report inside
+<a href=#548 id=548 data-nosnippet>548</a>/// [`drive_query_rows`], and the producer closure's terminal `Done`/`Failed`. A
+<a href=#549 id=549 data-nosnippet>549</a>/// producer that takes the first still reaches the second.
+<a href=#550 id=550 data-nosnippet>550</a></span><span class="kw">struct </span>CompletionOnce(bool);
+<a href=#551 id=551 data-nosnippet>551</a>
+<a href=#552 id=552 data-nosnippet>552</a><span class="kw">impl </span>CompletionOnce {
+<a href=#553 id=553 data-nosnippet>553</a>    <span class="kw">const fn </span>new() -&gt; <span class="self">Self </span>{
+<a href=#554 id=554 data-nosnippet>554</a>        <span class="self">Self</span>(<span class="bool-val">false</span>)
+<a href=#555 id=555 data-nosnippet>555</a>    }
+<a href=#556 id=556 data-nosnippet>556</a>
+<a href=#557 id=557 data-nosnippet>557</a>    <span class="kw">fn </span>publish(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
+<a href=#558 id=558 data-nosnippet>558</a>        <span class="kw">if </span>!<span class="self">self</span>.<span class="number">0 </span>{
+<a href=#559 id=559 data-nosnippet>559</a>            <span class="self">self</span>.<span class="number">0 </span>= <span class="bool-val">true</span>;
+<a href=#560 id=560 data-nosnippet>560</a>            <span class="kw">crate</span>::storage::read_path_probe::mark_query_row_producer_finished();
+<a href=#561 id=561 data-nosnippet>561</a>        }
+<a href=#562 id=562 data-nosnippet>562</a>    }
+<a href=#563 id=563 data-nosnippet>563</a>}
+<a href=#564 id=564 data-nosnippet>564</a>
+<a href=#565 id=565 data-nosnippet>565</a><span class="doccomment">/// Hand ONE batch of rows to the consumer, returning `false` when the consumer
+<a href=#566 id=566 data-nosnippet>566</a>/// has dropped the channel.
+<a href=#567 id=567 data-nosnippet>567</a>///
+<a href=#568 id=568 data-nosnippet>568</a>/// The SINGLE batch-handoff funnel for BOTH walk arms — which is exactly why the
+<a href=#569 id=569 data-nosnippet>569</a>/// test-only producer-fault hook is consulted here (issue #3106): a fault armed
+<a href=#570 id=570 data-nosnippet>570</a>/// against this stream is observed identically on the full-ring and the
+<a href=#571 id=571 data-nosnippet>571</a>/// token-bounded arm, so neither can be fixed while the other silently truncates.
+<a href=#572 id=572 data-nosnippet>572</a>/// [`ProducerFault::before_batch_handoff`] is a no-op (and `fault` a ZST) in a
+<a href=#573 id=573 data-nosnippet>573</a>/// production build.
+<a href=#574 id=574 data-nosnippet>574</a></span><span class="kw">fn </span>emit_rows(
+<a href=#575 id=575 data-nosnippet>575</a>    tx: <span class="kw-2">&amp;</span>SyncSender&lt;QueryRowMsg&gt;,
+<a href=#576 id=576 data-nosnippet>576</a>    fault: <span class="kw-2">&amp;mut </span>ProducerFault,
+<a href=#577 id=577 data-nosnippet>577</a>    rows: Vec&lt;(RowKey, ScanRow)&gt;,
+<a href=#578 id=578 data-nosnippet>578</a>) -&gt; bool {
+<a href=#579 id=579 data-nosnippet>579</a>    fault.before_batch_handoff();
+<a href=#580 id=580 data-nosnippet>580</a>    tx.send(QueryRowMsg::Item(QueryRowBatch::Rows(rows)))
+<a href=#581 id=581 data-nosnippet>581</a>        .is_ok()
+<a href=#582 id=582 data-nosnippet>582</a>}
+<a href=#583 id=583 data-nosnippet>583</a>
+<a href=#584 id=584 data-nosnippet>584</a><span class="doccomment">/// Fail closed when a walk reported `FellBack` AFTER handing rows to the sink.
+<a href=#585 id=585 data-nosnippet>585</a>///
+<a href=#586 id=586 data-nosnippet>586</a>/// The fallback design rests on "`FellBack` is pre-emit only"; if that ever
+<a href=#587 id=587 data-nosnippet>587</a>/// stopped holding, continuing would emit some rows twice (once from the walk
+<a href=#588 id=588 data-nosnippet>588</a>/// that fell back, once from the fallback walk) with no error anywhere. A
+<a href=#589 id=589 data-nosnippet>589</a>/// corruption error is the only safe outcome — a partially-served stream must
+<a href=#590 id=590 data-nosnippet>590</a>/// never be silently topped up.
+<a href=#591 id=591 data-nosnippet>591</a></span><span class="kw">fn </span>assert_nothing_emitted(emitted: u64, stage: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
+<a href=#592 id=592 data-nosnippet>592</a>    <span class="kw">if </span>emitted &gt; <span class="number">0 </span>{
+<a href=#593 id=593 data-nosnippet>593</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(Error::corruption(<span class="macro">format!</span>(
+<a href=#594 id=594 data-nosnippet>594</a>            <span class="string">"query row stream: a walk reported FellBack AFTER emitting {emitted} row(s) \
+<a href=#595 id=595 data-nosnippet>595</a>             ({stage}) — continuing would duplicate rows (issue #3058)"
+<a href=#596 id=596 data-nosnippet>596</a>        </span>)));
+<a href=#597 id=597 data-nosnippet>597</a>    }
+<a href=#598 id=598 data-nosnippet>598</a>    <span class="prelude-val">Ok</span>(())
+<a href=#599 id=599 data-nosnippet>599</a>}
+<a href=#600 id=600 data-nosnippet>600</a>
+<a href=#601 id=601 data-nosnippet>601</a><span class="doccomment">/// The stream's cancellation pair: the caller's flag (observed, NEVER cancelled)
+<a href=#602 id=602 data-nosnippet>602</a>/// and this stream's own child flag (what the walks poll and what `Drop`
+<a href=#603 id=603 data-nosnippet>603</a>/// cancels). See [`QueryRowStream::child_cancel`].
+<a href=#604 id=604 data-nosnippet>604</a></span><span class="kw">struct </span>CancelBridge {
+<a href=#605 id=605 data-nosnippet>605</a>    caller: ScanCancel,
+<a href=#606 id=606 data-nosnippet>606</a>    child: ScanCancel,
+<a href=#607 id=607 data-nosnippet>607</a>}
+<a href=#608 id=608 data-nosnippet>608</a>
+<a href=#609 id=609 data-nosnippet>609</a><span class="kw">impl </span>CancelBridge {
+<a href=#610 id=610 data-nosnippet>610</a>    <span class="doccomment">/// The flag to hand the walks.
+<a href=#611 id=611 data-nosnippet>611</a>    </span><span class="kw">fn </span>child(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>ScanCancel {
+<a href=#612 id=612 data-nosnippet>612</a>        <span class="kw-2">&amp;</span><span class="self">self</span>.child
+<a href=#613 id=613 data-nosnippet>613</a>    }
+<a href=#614 id=614 data-nosnippet>614</a>
+<a href=#615 id=615 data-nosnippet>615</a>    <span class="doccomment">/// Propagate a CALLER cancellation into the child (one-way), returning
+<a href=#616 id=616 data-nosnippet>616</a>    /// whether the scan should stop. Polled at batch boundaries, so a cancelled
+<a href=#617 id=617 data-nosnippet>617</a>    /// request stops the walk without waiting for the consumer to drop us.
+<a href=#618 id=618 data-nosnippet>618</a>    </span><span class="kw">fn </span>poll_caller(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
+<a href=#619 id=619 data-nosnippet>619</a>        <span class="kw">if </span><span class="self">self</span>.caller.is_cancelled() {
+<a href=#620 id=620 data-nosnippet>620</a>            <span class="self">self</span>.child.cancel();
+<a href=#621 id=621 data-nosnippet>621</a>            <span class="kw">return </span><span class="bool-val">true</span>;
+<a href=#622 id=622 data-nosnippet>622</a>        }
+<a href=#623 id=623 data-nosnippet>623</a>        <span class="bool-val">false
+<a href=#624 id=624 data-nosnippet>624</a>    </span>}
+<a href=#625 id=625 data-nosnippet>625</a>
+<a href=#626 id=626 data-nosnippet>626</a>    <span class="doccomment">/// `Err(Cancelled)` when the CALLER cancelled, else `Ok(())` — so a walk that
+<a href=#627 id=627 data-nosnippet>627</a>    /// was broken by a cancellation terminates the stream with a cancellation
+<a href=#628 id=628 data-nosnippet>628</a>    /// rather than a clean, silently truncated end of stream.
+<a href=#629 id=629 data-nosnippet>629</a>    </span><span class="kw">fn </span>caller_result(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
+<a href=#630 id=630 data-nosnippet>630</a>        <span class="kw">if </span><span class="self">self</span>.caller.is_cancelled() {
+<a href=#631 id=631 data-nosnippet>631</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(Error::Cancelled);
+<a href=#632 id=632 data-nosnippet>632</a>        }
+<a href=#633 id=633 data-nosnippet>633</a>        <span class="prelude-val">Ok</span>(())
+<a href=#634 id=634 data-nosnippet>634</a>    }
+<a href=#635 id=635 data-nosnippet>635</a>}
+<a href=#636 id=636 data-nosnippet>636</a>
+<a href=#637 id=637 data-nosnippet>637</a><span class="doccomment">/// Full-ring arm: forward the windowed batched scan's `(RowKey, ScanRow)` batches
+<a href=#638 id=638 data-nosnippet>638</a>/// straight through, re-using the batching the scan already did.
+<a href=#639 id=639 data-nosnippet>639</a>///
+<a href=#640 id=640 data-nosnippet>640</a>/// # Admission (issue #1594 / #2420, roborev #3058)
+<a href=#641 id=641 data-nosnippet>641</a>///
+<a href=#642 id=642 data-nosnippet>642</a>/// Opened [`ScanAdmission::Exempt`] — this scan does NOT take a core admission
+<a href=#643 id=643 data-nosnippet>643</a>/// permit. Three reasons, all load-bearing:
+<a href=#644 id=644 data-nosnippet>644</a>/// * The CALLER is already admitted. The Flight `do_get` this serves holds a
+<a href=#645 id=645 data-nosnippet>645</a>///   `--max-concurrent-scans` permit for its whole life (#2420), and the core
+<a href=#646 id=646 data-nosnippet>646</a>///   semaphore's default cap is `available_parallelism()` (≈ncpu), which is
+<a href=#647 id=647 data-nosnippet>647</a>///   SMALLER than that governor's default of 64 — acquiring here would silently
+<a href=#648 id=648 data-nosnippet>648</a>///   throttle single-source `do_get`s below the operator's configured
+<a href=#649 id=649 data-nosnippet>649</a>///   concurrency.
+<a href=#650 id=650 data-nosnippet>650</a>/// * The arm it replaces takes none. The k-way merge arm drives its inputs on
+<a href=#651 id=651 data-nosnippet>651</a>///   plain `std::thread`s and never admits, so admitting here would make the
+<a href=#652 id=652 data-nosnippet>652</a>///   fast path *less* concurrent than the slow path it replaces.
+<a href=#653 id=653 data-nosnippet>653</a>/// * The resource the core semaphore protects is not contended here. This scan's
+<a href=#654 id=654 data-nosnippet>654</a>///   `spawn_blocking` parse/feed tasks run on the query-row thread's OWN
+<a href=#655 id=655 data-nosnippet>655</a>///   `current_thread` runtime (and therefore its own blocking pool), not the
+<a href=#656 id=656 data-nosnippet>656</a>///   shared runtime pool whose starvation #1594 exists to prevent.
+<a href=#657 id=657 data-nosnippet>657</a>///
+<a href=#658 id=658 data-nosnippet>658</a>/// `Exempt` never blocks, so it cannot introduce the #1594 hold-and-wait cycle.
+<a href=#659 id=659 data-nosnippet>659</a></span><span class="kw">async fn </span>drive_full_scan_rows(
+<a href=#660 id=660 data-nosnippet>660</a>    reader: Arc&lt;SSTableReader&gt;,
+<a href=#661 id=661 data-nosnippet>661</a>    schema: <span class="kw">crate</span>::schema::TableSchema,
+<a href=#662 id=662 data-nosnippet>662</a>    now_secs: i64,
+<a href=#663 id=663 data-nosnippet>663</a>    cancel: <span class="kw-2">&amp;</span>CancelBridge,
+<a href=#664 id=664 data-nosnippet>664</a>    tx: <span class="kw-2">&amp;</span>SyncSender&lt;QueryRowMsg&gt;,
+<a href=#665 id=665 data-nosnippet>665</a>    fault: <span class="kw-2">&amp;mut </span>ProducerFault,
+<a href=#666 id=666 data-nosnippet>666</a>) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
+<a href=#667 id=667 data-nosnippet>667</a>    <span class="kw">let </span>table_id = reader.scan_table_id();
+<a href=#668 id=668 data-nosnippet>668</a>    <span class="kw">let </span><span class="kw-2">mut </span>rx = reader.scan_stream_batched_admitted(
+<a href=#669 id=669 data-nosnippet>669</a>        table_id,
+<a href=#670 id=670 data-nosnippet>670</a>        <span class="prelude-val">None</span>,
+<a href=#671 id=671 data-nosnippet>671</a>        <span class="prelude-val">None</span>,
+<a href=#672 id=672 data-nosnippet>672</a>        <span class="prelude-val">Some</span>(schema),
+<a href=#673 id=673 data-nosnippet>673</a>        QUERY_ROWS_FULL_SCAN_BUFFER_ROWS,
+<a href=#674 id=674 data-nosnippet>674</a>        ScanAdmission::Exempt,
+<a href=#675 id=675 data-nosnippet>675</a>        <span class="prelude-val">Some</span>(now_secs),
+<a href=#676 id=676 data-nosnippet>676</a>        <span class="comment">// Issue #1704: `Exempt` here is about the ADMISSION permit (the caller holds
+<a href=#677 id=677 data-nosnippet>677</a>        // one for the whole operation), not about nesting — this stream is drained
+<a href=#678 id=678 data-nosnippet>678</a>        // DIRECTLY below, so nothing else will ever see its failures.
+<a href=#679 id=679 data-nosnippet>679</a>        </span><span class="kw">crate</span>::storage::sstable::reader::ScanErrorReporting::TopLevel,
+<a href=#680 id=680 data-nosnippet>680</a>    );
+<a href=#681 id=681 data-nosnippet>681</a>    <span class="kw">while let </span><span class="prelude-val">Some</span>(msg) = rx.recv().<span class="kw">await </span>{
+<a href=#682 id=682 data-nosnippet>682</a>        <span class="comment">// Cooperative cancellation: the caller dropping the stream also drops our
+<a href=#683 id=683 data-nosnippet>683</a>        // receiver (so the send below fails), but polling here stops a cancelled
+<a href=#684 id=684 data-nosnippet>684</a>        // scan without waiting for the next batch to be produced. A CALLER cancel
+<a href=#685 id=685 data-nosnippet>685</a>        // is bridged into the child flag; the caller's own flag is never touched.
+<a href=#686 id=686 data-nosnippet>686</a>        </span><span class="kw">if </span>cancel.poll_caller() {
+<a href=#687 id=687 data-nosnippet>687</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(Error::Cancelled);
+<a href=#688 id=688 data-nosnippet>688</a>        }
+<a href=#689 id=689 data-nosnippet>689</a>        cancel.child().check()<span class="question-mark">?</span>;
+<a href=#690 id=690 data-nosnippet>690</a>        <span class="kw">let </span>rows = msg<span class="question-mark">?</span>;
+<a href=#691 id=691 data-nosnippet>691</a>        <span class="kw">if </span>!emit_rows(tx, fault, rows) {
+<a href=#692 id=692 data-nosnippet>692</a>            <span class="comment">// Consumer dropped: stop pulling (not an error).
+<a href=#693 id=693 data-nosnippet>693</a>            </span><span class="kw">return </span><span class="prelude-val">Ok</span>(());
+<a href=#694 id=694 data-nosnippet>694</a>        }
+<a href=#695 id=695 data-nosnippet>695</a>    }
+<a href=#696 id=696 data-nosnippet>696</a>    <span class="prelude-val">Ok</span>(())
+<a href=#697 id=697 data-nosnippet>697</a>}
+<a href=#698 id=698 data-nosnippet>698</a>
+<a href=#699 id=699 data-nosnippet>699</a><span class="doccomment">/// Accumulates emitted rows into `QUERY_ROWS_PER_BATCH`-sized batches and pushes
+<a href=#700 id=700 data-nosnippet>700</a>/// them through the bounded channel, translating a dropped consumer — or a
+<a href=#701 id=701 data-nosnippet>701</a>/// CALLER cancellation — into `ControlFlow::Break` so the walk stops instead of
+<a href=#702 id=702 data-nosnippet>702</a>/// running to completion.
+<a href=#703 id=703 data-nosnippet>703</a></span><span class="kw">struct </span>BatchSink&lt;<span class="lifetime">'a</span>&gt; {
+<a href=#704 id=704 data-nosnippet>704</a>    tx: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>SyncSender&lt;QueryRowMsg&gt;,
+<a href=#705 id=705 data-nosnippet>705</a>    <span class="doccomment">/// The caller/child cancellation pair. The token-bounded walk polls the CHILD
+<a href=#706 id=706 data-nosnippet>706</a>    /// internally at its own cadence, but nothing there sees the CALLER's flag —
+<a href=#707 id=707 data-nosnippet>707</a>    /// so a client disconnect would otherwise only stop this walk once the
+<a href=#708 id=708 data-nosnippet>708</a>    /// consumer noticed and dropped the stream (a whole batch of a wide partition
+<a href=#709 id=709 data-nosnippet>709</a>    /// later). Bridged here, at the batch boundary (roborev, issue #3058).
+<a href=#710 id=710 data-nosnippet>710</a>    </span>cancel: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>CancelBridge,
+<a href=#711 id=711 data-nosnippet>711</a>    batch: Vec&lt;(RowKey, ScanRow)&gt;,
+<a href=#712 id=712 data-nosnippet>712</a>    emitted: u64,
+<a href=#713 id=713 data-nosnippet>713</a>    <span class="doccomment">/// Test-only producer-fault state for this stream (issue #3106); a ZST with
+<a href=#714 id=714 data-nosnippet>714</a>    /// a no-op hook in a production build.
+<a href=#715 id=715 data-nosnippet>715</a>    </span>fault: <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="kw-2">mut </span>ProducerFault,
+<a href=#716 id=716 data-nosnippet>716</a>}
+<a href=#717 id=717 data-nosnippet>717</a>
+<a href=#718 id=718 data-nosnippet>718</a><span class="kw">impl</span>&lt;<span class="lifetime">'a</span>&gt; BatchSink&lt;<span class="lifetime">'a</span>&gt; {
+<a href=#719 id=719 data-nosnippet>719</a>    <span class="kw">fn </span>new(
+<a href=#720 id=720 data-nosnippet>720</a>        tx: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>SyncSender&lt;QueryRowMsg&gt;,
+<a href=#721 id=721 data-nosnippet>721</a>        cancel: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>CancelBridge,
+<a href=#722 id=722 data-nosnippet>722</a>        fault: <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="kw-2">mut </span>ProducerFault,
+<a href=#723 id=723 data-nosnippet>723</a>    ) -&gt; <span class="self">Self </span>{
+<a href=#724 id=724 data-nosnippet>724</a>        <span class="self">Self </span>{
+<a href=#725 id=725 data-nosnippet>725</a>            tx,
+<a href=#726 id=726 data-nosnippet>726</a>            cancel,
+<a href=#727 id=727 data-nosnippet>727</a>            batch: Vec::with_capacity(QUERY_ROWS_PER_BATCH),
+<a href=#728 id=728 data-nosnippet>728</a>            emitted: <span class="number">0</span>,
+<a href=#729 id=729 data-nosnippet>729</a>            fault,
+<a href=#730 id=730 data-nosnippet>730</a>        }
+<a href=#731 id=731 data-nosnippet>731</a>    }
+<a href=#732 id=732 data-nosnippet>732</a>
+<a href=#733 id=733 data-nosnippet>733</a>    <span class="kw">fn </span>push(<span class="kw-2">&amp;mut </span><span class="self">self</span>, row: (RowKey, ScanRow)) -&gt; <span class="prelude-ty">Result</span>&lt;ControlFlow&lt;()&gt;&gt; {
+<a href=#734 id=734 data-nosnippet>734</a>        <span class="self">self</span>.batch.push(row);
+<a href=#735 id=735 data-nosnippet>735</a>        <span class="self">self</span>.emitted += <span class="number">1</span>;
+<a href=#736 id=736 data-nosnippet>736</a>        <span class="kw">if </span><span class="self">self</span>.batch.len() &gt;= QUERY_ROWS_PER_BATCH {
+<a href=#737 id=737 data-nosnippet>737</a>            <span class="kw">return </span><span class="self">self</span>.flush();
+<a href=#738 id=738 data-nosnippet>738</a>        }
+<a href=#739 id=739 data-nosnippet>739</a>        <span class="prelude-val">Ok</span>(ControlFlow::Continue(()))
+<a href=#740 id=740 data-nosnippet>740</a>    }
+<a href=#741 id=741 data-nosnippet>741</a>
+<a href=#742 id=742 data-nosnippet>742</a>    <span class="kw">fn </span>flush(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;ControlFlow&lt;()&gt;&gt; {
+<a href=#743 id=743 data-nosnippet>743</a>        <span class="comment">// Bridge a CALLER cancellation into the child (one-way — the caller's own
+<a href=#744 id=744 data-nosnippet>744</a>        // flag is never cancelled, which is what keeps the merge-arm fallback
+<a href=#745 id=745 data-nosnippet>745</a>        // usable) and stop the walk here rather than a batch later.
+<a href=#746 id=746 data-nosnippet>746</a>        </span><span class="kw">if </span><span class="self">self</span>.cancel.poll_caller() {
+<a href=#747 id=747 data-nosnippet>747</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(ControlFlow::Break(()));
+<a href=#748 id=748 data-nosnippet>748</a>        }
+<a href=#749 id=749 data-nosnippet>749</a>        <span class="kw">if </span><span class="self">self</span>.batch.is_empty() {
+<a href=#750 id=750 data-nosnippet>750</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(ControlFlow::Continue(()));
+<a href=#751 id=751 data-nosnippet>751</a>        }
+<a href=#752 id=752 data-nosnippet>752</a>        <span class="kw">let </span>batch = std::mem::take(<span class="kw-2">&amp;mut </span><span class="self">self</span>.batch);
+<a href=#753 id=753 data-nosnippet>753</a>        <span class="self">self</span>.batch.reserve(QUERY_ROWS_PER_BATCH);
+<a href=#754 id=754 data-nosnippet>754</a>        <span class="kw">if </span>emit_rows(<span class="self">self</span>.tx, <span class="self">self</span>.fault, batch) {
+<a href=#755 id=755 data-nosnippet>755</a>            <span class="prelude-val">Ok</span>(ControlFlow::Continue(()))
+<a href=#756 id=756 data-nosnippet>756</a>        } <span class="kw">else </span>{
+<a href=#757 id=757 data-nosnippet>757</a>            <span class="comment">// Consumer dropped: stop the walk (not an error).
+<a href=#758 id=758 data-nosnippet>758</a>            </span><span class="prelude-val">Ok</span>(ControlFlow::Break(()))
+<a href=#759 id=759 data-nosnippet>759</a>        }
+<a href=#760 id=760 data-nosnippet>760</a>    }
+<a href=#761 id=761 data-nosnippet>761</a>
+<a href=#762 id=762 data-nosnippet>762</a>    <span class="kw">fn </span>finish(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
+<a href=#763 id=763 data-nosnippet>763</a>        <span class="comment">// A `Break` here means the consumer went away with a partial tail
+<a href=#764 id=764 data-nosnippet>764</a>        // pending — a clean end of stream, not an error.
+<a href=#765 id=765 data-nosnippet>765</a>        </span><span class="kw">let _ </span>= <span class="self">self</span>.flush()<span class="question-mark">?</span>;
+<a href=#766 id=766 data-nosnippet>766</a>        <span class="prelude-val">Ok</span>(())
+<a href=#767 id=767 data-nosnippet>767</a>    }
+<a href=#768 id=768 data-nosnippet>768</a>}
+<a href=#769 id=769 data-nosnippet>769</a><span class="attr">#[cfg(test)]
+<a href=#770 id=770 data-nosnippet>770</a>#[path = <span class="string">"query_rows_tests.rs"</span>]
+<a href=#771 id=771 data-nosnippet>771</a></span><span class="kw">mod </span>tests;
+<a href=#772 id=772 data-nosnippet>772</a>
+<a href=#773 id=773 data-nosnippet>773</a><span class="comment">// Issue #3106 END-TO-END pin: a real walk whose real producer thread PANICS. Needs
+<a href=#774 id=774 data-nosnippet>774</a>// the write engine to build its fixture, so it is gated on `write-support`.
+<a href=#775 id=775 data-nosnippet>775</a></span><span class="attr">#[cfg(all(test, feature = <span class="string">"write-support"</span>))]
+<a href=#776 id=776 data-nosnippet>776</a>#[path = <span class="string">"query_rows_panic_tests.rs"</span>]
+<a href=#777 id=777 data-nosnippet>777</a></span><span class="kw">mod </span>panic_tests;
+</code></pre></div></section></main></body></html>

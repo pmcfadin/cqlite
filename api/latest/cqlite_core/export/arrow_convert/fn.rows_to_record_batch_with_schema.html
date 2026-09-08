@@ -1,0 +1,85 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="`rows_to_record_batch` over a schema the caller already holds."><title>rows_to_record_batch_with_schema in cqlite_core::export::arrow_convert - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">rows_to_record_batch_with_schema</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.17.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">rows_<wbr>to_<wbr>record_<wbr>batch_<wbr>with_<wbr>schema</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-is-validated-exactly-issue-3096-second-review" title="What is validated, exactly (issue #3096, second review)">What is validated, exactly (issue #3096, second review)</a></li><li><a href="#cost--borne-by-this-entry-point-only" title="Cost — borne by THIS entry point only">Cost — borne by THIS entry point only</a></li><li><a href="#errors" title="Errors">Errors</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="index.html">In cqlite_<wbr>core::<wbr>export::<wbr>arrow_<wbr>convert</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">cqlite_core</a>::<wbr><a href="../index.html">export</a>::<wbr><a href="index.html">arrow_convert</a></div><h1>Function <span class="fn">rows_<wbr>to_<wbr>record_<wbr>batch_<wbr>with_<wbr>schema</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/cqlite_core/export/arrow_convert.rs.html#279-287">Source</a> </span></div><pre class="rust item-decl"><code>pub fn rows_to_record_batch_with_schema(
+    schema: <a class="struct" href="https://doc.rust-lang.org/1.98.1/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;Schema&gt;,
+    columns: &amp;[<a class="struct" href="../../query/result/struct.ColumnInfo.html" title="struct cqlite_core::query::result::ColumnInfo">ColumnInfo</a>],
+    rows: &amp;[<a class="struct" href="../../query/result/struct.QueryRow.html" title="struct cqlite_core::query::result::QueryRow">QueryRow</a>],
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/1.98.1/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;RecordBatch, <a class="enum" href="enum.ArrowConvertError.html" title="enum cqlite_core::export::arrow_convert::ArrowConvertError">ArrowConvertError</a>&gt;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p><a href="fn.rows_to_record_batch.html" title="fn cqlite_core::export::arrow_convert::rows_to_record_batch"><code>rows_to_record_batch</code></a> over a schema the caller already holds.</p>
+<p>Identical output — <code>schema</code> MUST be the <a href="fn.build_arrow_schema.html" title="fn cqlite_core::export::arrow_convert::build_arrow_schema"><code>build_arrow_schema</code></a> of the same
+<code>columns</code>, which is what <a href="fn.rows_to_record_batch.html" title="fn cqlite_core::export::arrow_convert::rows_to_record_batch"><code>rows_to_record_batch</code></a> derives inline. This entry
+point exists for a caller whose schema arrives from somewhere it did not derive
+it, and its job is to REJECT one that does not describe <code>columns</code>; the
+<code>Arc&lt;Schema&gt;</code> it takes is incidental to that.</p>
+<p>It is deliberately NOT a performance door. Reusing one <code>Arc&lt;Schema&gt;</code> across a
+scan’s batches through this entry point is not cheaper than deriving it per
+batch — see <code># Cost</code> below — and hoisting the derivation out of the Flight
+<code>do_get</code> egress loop was measured twice on the WS0 corpus and delivered nothing
+(issue #3096, lever 6, reverted: +0.30%, 95% CI covering zero, 4.5x below the
+measuring box’s between-binary code-layout noise floor).</p>
+<h2 id="what-is-validated-exactly-issue-3096-second-review"><a class="doc-anchor" href="#what-is-validated-exactly-issue-3096-second-review">§</a>What is validated, exactly (issue #3096, second review)</h2>
+<p>This function accepts a schema it did not build, so the mismatch question is
+real — and what is enforced is that <code>schema</code> <strong>IS</strong> <a href="fn.build_arrow_schema.html" title="fn cqlite_core::export::arrow_convert::build_arrow_schema"><code>build_arrow_schema</code></a>’s
+output for <code>columns</code>, not merely that it is compatible with the arrays:</p>
+<ul>
+<li><strong>Full <code>Field</code> identity, position by position</strong> — checked HERE, by
+[<code>check_schema_matches_columns</code>], against <code>column_to_field(col)</code>: the exact
+function <a href="fn.build_arrow_schema.html" title="fn cqlite_core::export::arrow_convert::build_arrow_schema"><code>build_arrow_schema</code></a> itself uses, so there is ONE source of truth
+and no re-derived mapping that can drift. Arrow’s <code>Field: PartialEq</code>
+compares <strong>name, data type, nullability and metadata</strong> (deliberately
+excluding the IPC-only <code>dict_id</code>/<code>dict_is_ordered</code>, which arrow-schema
+documents as irrelevant to schema equality), so every one of those four axes
+is covered — including the <code>ARROW:extension:name</code> = <code>arrow.uuid</code> metadata a
+uuid/timeuuid column carries. Field ORDER and ARITY follow from comparing
+position by position.</li>
+<li><strong>Schema-level metadata</strong> — must be empty, because <code>build_arrow_schema</code>
+builds with <code>Schema::new</code>, which sets none.</li>
+<li><strong>Array lengths</strong> — left to <code>RecordBatch::try_new</code>, which owns them.</li>
+</ul>
+<p>All of the above is checked here because <strong><code>RecordBatch::try_new</code> does not
+check it</strong>: it compares field DATA TYPES and array lengths, and rejects a
+non-nullable field that actually holds nulls. It never compares field NAMES,
+field METADATA, or schema metadata, and a nullability difference the data does
+not contradict passes it. So a schema whose fields are REORDERED or RENAMED
+among columns of the same Arrow type, or which drops the uuid extension
+metadata, or which flips <code>nullable</code>, is accepted by Arrow and silently
+mislabels the batch. The first version of this guard checked arity and names
+only — leaving nullability and metadata unchecked while documenting the
+contract as enforced; the full-identity comparison is what makes the
+documented guarantee TRUE.</p>
+<p>A near-miss worth naming: <code>cqlite-flight</code>’s <code>MergeProducer::arrow_schema()</code>
+(the WIRE schema for <code>GetFlightInfo</code>/<code>GetSchema</code>) augments every field with
+<code>cqlite:pushdown</code> metadata, so it is NOT this function’s schema and is
+correctly rejected here. The egress path passes
+<code>build_arrow_schema(&amp;self.columns)</code> unmodified and is unaffected.</p>
+<h2 id="cost--borne-by-this-entry-point-only"><a class="doc-anchor" href="#cost--borne-by-this-entry-point-only">§</a>Cost — borne by THIS entry point only</h2>
+<p>One <code>column_to_field</code> construction and one <code>Field</code> comparison per COLUMN per
+BATCH — for a 12-column table, 12 short <code>String</code> allocations plus one small
+metadata <code>HashMap</code> per uuid/timeuuid column, against per-batch work
+proportional to rows x columns.</p>
+<p><a href="fn.rows_to_record_batch.html" title="fn cqlite_core::export::arrow_convert::rows_to_record_batch"><code>rows_to_record_batch</code></a> does NOT pay it: it goes through the private trusted
+tail both entry points share, because its schema is
+<a href="fn.build_arrow_schema.html" title="fn cqlite_core::export::arrow_convert::build_arrow_schema"><code>build_arrow_schema</code></a>’s output for the same <code>columns</code> by construction (issue
+#3096, third review — before that fix it delegated here and every caller paid
+the mapping twice).</p>
+<p>So state the schema-reuse tradeoff exactly, without overclaiming: reusing one
+<code>Arc&lt;Schema&gt;</code> across a scan’s batches THROUGH THIS ENTRY POINT saves the
+<code>Schema</code>/<code>Fields</code> allocation and a fresh <code>SchemaRef</code> per batch, and costs a
+<code>column_to_field</code> construction plus a <code>Field</code> comparison per column per batch.
+It is therefore CHEAPER IN ALLOCATIONS but NOT strictly less work per batch than
+rebuilding the schema through <a href="fn.rows_to_record_batch.html" title="fn cqlite_core::export::arrow_convert::rows_to_record_batch"><code>rows_to_record_batch</code></a> — the per-field
+construction is paid either way, once as <code>build_arrow_schema</code> or once as this
+validation.</p>
+<p>So a caller emitting many batches over one column set should use
+<a href="fn.rows_to_record_batch.html" title="fn cqlite_core::export::arrow_convert::rows_to_record_batch"><code>rows_to_record_batch</code></a>, not this function with a hoisted schema. Issue #3096
+pursued the hoist on the Flight <code>do_get</code> egress with the validation removed
+as well (a schema newtype bound to its columns), measured it against the WS0
+corpus, and found nothing to keep: the per-batch work at stake is 1.53
+cycles/row of 23,940, so the whole lever was reverted. This entry point remains
+for the case it is actually for — a schema the caller did not derive, which must
+be REJECTED if it does not describe <code>columns</code>.</p>
+<h2 id="errors"><a class="doc-anchor" href="#errors">§</a>Errors</h2>
+<p>Returns <a href="enum.ArrowConvertError.html#variant.SchemaMismatch" title="variant cqlite_core::export::arrow_convert::ArrowConvertError::SchemaMismatch"><code>ArrowConvertError::SchemaMismatch</code></a> if <code>schema</code> is not
+<a href="fn.build_arrow_schema.html" title="fn cqlite_core::export::arrow_convert::build_arrow_schema"><code>build_arrow_schema</code></a>’s output for <code>columns</code> (field count, order, name, data
+type, nullability, field metadata, or schema-level metadata);
+<a href="enum.ArrowConvertError.html#variant.InvalidValue" title="variant cqlite_core::export::arrow_convert::ArrowConvertError::InvalidValue"><code>ArrowConvertError::InvalidValue</code></a> if a value cannot be represented in the
+target Arrow type; and <a href="enum.ArrowConvertError.html#variant.Arrow" title="variant cqlite_core::export::arrow_convert::ArrowConvertError::Arrow"><code>ArrowConvertError::Arrow</code></a> if array construction
+fails or the built arrays do not match <code>schema</code>’s field types or lengths.</p>
+</div></details></section></div></main></body></html>
