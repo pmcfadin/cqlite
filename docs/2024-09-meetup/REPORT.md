@@ -63,9 +63,9 @@ day as the build sha, which is the compatibility evidence for this pairing.
 
 ## Corpus
 
-**Not yet measured — no chart may cite this table until the row counts below are filled in from
-`nodetool tablestats` / `sstablemetadata`.** Left deliberately empty rather than pre-filled with
-targets, per #4137 ("Never report a chart against a table whose row count you did not measure").
+All figures below are **measured** from `nodetool tablestats` and a `count(*)` through the
+`cassandra` catalog — never a target, per #4137 ("Never report a chart against a table whose row
+count you did not measure").
 
 | Table | Workload | Target | Measured rows | Partitions | SSTables/node | On-disk bytes/node | Compression ratio |
 |---|---|---|---|---|---|---|---|
@@ -91,9 +91,15 @@ throughput at 4× concurrency with everything idle is a throttle, not a bottlene
 
 **Row-count target reduced from 50M to 20M**, which #4137 explicitly permits provided it is
 disclosed: *"If 50M does not fit the time budget, drop to 20M and say so in every chart title."*
-Every chart title carrying this table therefore reads **20M**, not 50M. Measured client write
-throughput during the load was **~4,800 ops/s** (120,001 ops over a 25 s window), which put the
-20M load at ~68 minutes and 50M at ~2.9 hours of pure load time before any demo could start.
+Every chart carrying this table names the **measured 22,339,536**, which is the stronger form of
+that disclosure — a reader sees the actual corpus rather than either target.
+
+**The reduction was decided against the throttled rate and would not have been necessary
+otherwise.** At the observed ~4,800 ops/s, 20M was ~68 min and 50M ~2.9 h of pure load time before
+any demo could start. Once `--rate 60000` removed the throttle (see above), the effective rate was
+59,939 ops/s — at which 50M is roughly 14 minutes. The 20M corpus was already loaded by then and
+reloading would have cost more than it bought, so the run continued on it. **A future run should
+use 50M**; the constraint that forced 20M was a default flag, not the hardware.
 
 The real table name is **`keyvalue`** (from the workload's own DDL), not `kv` as #4137's prose
 calls it. Chart titles and CSV headers use the real name.
