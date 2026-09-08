@@ -35,14 +35,18 @@ def data_rows(path):
     return list(csv.DictReader(lines))
 
 
-def finish(fig, ax, title, ylabel, png):
-    ax.set_title(title, fontsize=12, fontweight="bold", pad=14)
+def finish(fig, ax, title, ylabel, png, rows=ROWS):
+    """`rows` is per-chart on purpose: the footer must name the row count of the table THIS chart
+    measures. Defaulting every chart to keyvalue's 22,339,536 put the wrong count under the D3
+    chart, which is sensor_data (23,703,992). #4137 requires the measured count for that table."""
+    ax.set_title(title, fontsize=11.5, fontweight="bold", pad=14, wrap=True)
     ax.set_ylabel(ylabel, fontsize=10)
     ax.grid(axis="y", **GRID)
     ax.set_axisbelow(True)
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)
-    fig.text(0.5, 0.015, SUB, ha="center", fontsize=6.5, color="#555")
+    sub = f"{rows} | {SHAPE} | cqlite-flight talk017 @ {DIGEST} | Cassandra 5.0.9 | Trino 481"
+    fig.text(0.5, 0.015, sub, ha="center", fontsize=6.5, color="#555")
     fig.tight_layout(rect=(0, 0.05, 1, 1))
     fig.savefig(OUT / png, dpi=170)
     plt.close(fig)
@@ -168,3 +172,102 @@ ax.set_xlabel("rows actually processed (log)", fontsize=10)
 finish(fig, ax,
        "cqlite scan scales linearly, no cliff\nSELECT * ... LIMIT n through the cqlite catalog",
        "wall time (s, log)", "d2-scan-limit-ladder.png")
+
+# ---------------------------------------------------------------- D3 two catalogs
+import re as _re
+d3 = {}
+for line in open(RES / "d3-timeseries.csv"):
+    m = _re.match(r">\s*(q\d_\w+),(cassandra|cqlite),(\d*),(\d),(.*)", line.strip())
+    if m:
+        q, cat, ms, n, verdict = m.groups()
+        d3[(q, cat)] = (int(ms) if ms else None, verdict.strip())
+
+qs = ["q1_cross_partition_groupby", "q2_approx_percentile", "q3_window_function", "q4_join_two_tables"]
+NICE = {"q1_cross_partition_groupby": "cross-partition\nGROUP BY",
+        "q2_approx_percentile": "approx_percentile\nper sensor",
+        "q3_window_function": "window function\n(row_number)",
+        "q4_join_two_tables": "JOIN two\nCassandra tables"}
+fig, ax = plt.subplots(figsize=(9.2, 4.8))
+x = list(range(len(qs)))
+w = 0.36
+cass = [d3.get((q, "cassandra"), (None, ""))[0] for q in qs]
+cql = [d3.get((q, "cqlite"), (None, ""))[0] for q in qs]
+# A failed query has no bar; it gets an explicit annotation instead of a zero, so absence of a bar
+# cannot be misread as "instant".
+ax.bar([i - w / 2 for i in x], [(v or 0) / 1000 for v in cass], w, color=C_CASS, label="cassandra")
+ax.bar([i + w / 2 for i in x], [(v or 0) / 1000 for v in cql], w, color=C_CQL, label="cqlite")
+for i, q in enumerate(qs):
+    for v, off, col in ((cass[i], -w / 2, C_CASS), (cql[i], w / 2, C_CQL)):
+        if v is None:
+            ax.text(i + off, 0.6, "FAILED\nout of\nmemory", ha="center", va="bottom",
+                    fontsize=8, fontweight="bold", color="#A02020")
+        else:
+            ax.text(i + off, v / 1000 + 0.3, f"{v/1000:.1f}s", ha="center", fontsize=9)
+    if cass[i] and cql[i]:
+        r = cass[i] / cql[i]
+        ax.text(i, max(cass[i], cql[i]) / 1000 + 1.8, f"{r:.2f}x",
+                ha="center", fontsize=10, fontweight="bold",
+                color=C_CQL if r > 1 else "#A02020")
+ax.set_xticks(x)
+ax.set_xticklabels([NICE[q] for q in qs], fontsize=9)
+ax.legend(frameon=False, fontsize=9, loc="upper left")
+ax.set_ylim(0, 17)
+finish(fig, ax,
+       "Analytics you can't write in CQL -- and where cqlite is SLOWER\n"
+       "on sensor_data cqlite runs 1.3-1.4x slower; only the JOIN needs it",
+       "wall time (s), medians of 3", "d3-timeseries.png",
+       rows="23,703,992 rows (sensor_data, ~9 rows/partition)")
+
+# ------------------------------------------------------------------- D4 ladder
+rows = data_rows(RES / "d4-ladder.csv")
+th = [int(r["threads"]) for r in rows]
+qps = [float(r["qps"]) for r in rows]
+p50 = [int(r["p50_ms"]) for r in rows]
+p99 = [int(r["p99_ms"]) for r in rows]
+fig, ax = plt.subplots(figsize=(8.0, 4.6))
+ax.plot(th, qps, marker="o", color=C_CQL, lw=2.2, ms=7, label="qps")
+ax.set_xlabel("concurrent clients", fontsize=10)
+ax.set_ylabel("queries/sec", fontsize=10, color=C_CQL)
+ax.tick_params(axis="y", labelcolor=C_CQL)
+ax2 = ax.twinx()
+ax2.plot(th, p99, marker="s", color=C_CASS, lw=2.2, ms=6, ls="--", label="p99 ms")
+ax2.plot(th, p50, marker="^", color="#8A8A8A", lw=1.6, ms=6, ls=":", label="p50 ms")
+ax2.set_ylabel("latency (ms)", fontsize=10, color=C_CASS)
+ax2.tick_params(axis="y", labelcolor=C_CASS)
+ax2.spines["top"].set_visible(False)
+for xx, yy in zip(th, qps):
+    ax.annotate(f"{yy:.1f}", (xx, yy), textcoords="offset points", xytext=(0, 8), fontsize=8, color=C_CQL)
+h1, l1 = ax.get_legend_handles_labels()
+h2, l2 = ax2.get_legend_handles_labels()
+ax.legend(h1 + h2, l1 + l2, frameon=False, fontsize=9, loc="upper left")
+ax.set_xticks(th)
+finish(fig, ax,
+       "Dashboards at scale: 0 errors and 0 restarts through 80 clients\n"
+       "degrades in LATENCY, never by failing; Flight memory flat idle->80 clients",
+       "queries/sec", "d4-ladder.png",
+       rows="mixed bounded queries over keyvalue + sensor_data")
+
+# ---------------------------------------------------------------- D5 freshness
+d5 = {}
+for line in open(RES / "d5-freshness.csv"):
+    m = _re.match(r">\s*(stock_flush60|flush_period_10s),(\d+),(-?\d+),(-?\d+),(\d+),(\d+),", line.strip())
+    if m:
+        lab, n, medg, maxg, z, growth = m.groups()
+        d5[lab] = dict(n=int(n), med=int(medg), mx=int(maxg), zero=int(z), growth=int(growth))
+fig, ax = plt.subplots(figsize=(7.6, 4.4))
+labs = ["stock_flush60", "flush_period_10s"]
+NICE5 = {"stock_flush60": "forced flush\nevery 60s", "flush_period_10s": "memtable_flush_\nperiod = 10s"}
+mx = [d5[l]["mx"] for l in labs]
+bars = ax.bar([NICE5[l] for l in labs], mx, color=C_CQL, width=0.45)
+for b, l in zip(bars, labs):
+    dd = d5[l]
+    ax.text(b.get_x() + b.get_width() / 2, 0.06,
+            f"max gap\n{dd['mx']} rows\n\n(n={dd['n']} probes,\npartition grew\n+{dd['growth']} rows)",
+            ha="center", va="bottom", fontsize=9)
+ax.set_ylim(-1.2, 1.2)
+ax.axhline(0, color="#444", lw=1)
+finish(fig, ax,
+       "Fresh within a flush: rows visible to Cassandra but NOT to CQLite\n"
+       "0.17 freshness == flush cadence (#1807 is 0.18). At 2k writes/s memtable pressure flushed often enough that lag never appeared.",
+       "staleness (rows), max over probes", "d5-freshness.png",
+       rows="23,703,992 rows (sensor_data)")
