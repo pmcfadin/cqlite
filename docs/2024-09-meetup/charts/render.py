@@ -60,7 +60,7 @@ for cat in ("cassandra", "cqlite"):
     v = [int(r["elapsed_ms"]) for r in rows if r["catalog"] == cat]
     med[cat] = (st.median(v), min(v), max(v), len(v))
 
-fig, ax = plt.subplots(figsize=(7.2, 4.4))
+fig, ax = plt.subplots(figsize=(12.5, 5.0))
 cats = ["cassandra", "cqlite"]
 vals = [med[c][0] / 1000 for c in cats]
 errs = [[(med[c][0] - med[c][1]) / 1000 for c in cats],
@@ -110,7 +110,7 @@ missing = [p for p in PH if p not in p99]
 if missing:
     raise SystemExit(f"D1 chart refuses to render: phases absent from the CSV: {missing}")
 
-fig, ax = plt.subplots(figsize=(8.4, 4.6))
+fig, ax = plt.subplots(figsize=(13.0, 5.2))
 colors = {"baseline": "#8A8A8A", "quiet_1": "#8A8A8A", "quiet_2": "#8A8A8A",
           "window_C": C_CASS, "window_Q": C_CQL}
 ks = [k for k in PH if k in p99]
@@ -145,7 +145,7 @@ for m in ("limit5", "sum_scan"):
 warm = st.median([int(r["elapsed_ms"]) for r in data_rows(RES / "d2-scan-warm.csv")
                   if r["catalog"] == "cqlite"])
 
-fig, ax = plt.subplots(figsize=(7.2, 4.4))
+fig, ax = plt.subplots(figsize=(12.5, 5.0))
 labels = ["first LIMIT 5\nafter restart", "first full scan\nafter restart", "warm full scan\n(reference)"]
 vals = [g["limit5"] / 1000, g["sum_scan"] / 1000, warm / 1000]
 bars = ax.bar(labels, vals, color=[C_CQL, C_CQL, "#8A8A8A"], width=0.55)
@@ -162,7 +162,7 @@ finish(fig, ax,
 rows = data_rows(RES / "d2-scan-limit-ladder.csv")
 xs = [int(r["processed_rows"]) for r in rows]
 ys = [int(r["elapsed_ms"]) / 1000 for r in rows]
-fig, ax = plt.subplots(figsize=(7.2, 4.2))
+fig, ax = plt.subplots(figsize=(12.5, 4.8))
 ax.plot(xs, ys, marker="o", color=C_CQL, lw=2, ms=7)
 for x, y in zip(xs, ys):
     ax.annotate(f"{y:.1f}s", (x, y), textcoords="offset points", xytext=(6, -10), fontsize=8)
@@ -187,7 +187,7 @@ NICE = {"q1_cross_partition_groupby": "cross-partition\nGROUP BY",
         "q2_approx_percentile": "approx_percentile\nper sensor",
         "q3_window_function": "window function\n(row_number)",
         "q4_join_two_tables": "JOIN two\nCassandra tables"}
-fig, ax = plt.subplots(figsize=(9.2, 4.8))
+fig, ax = plt.subplots(figsize=(13.5, 5.4))
 x = list(range(len(qs)))
 w = 0.36
 cass = [d3.get((q, "cassandra"), (None, ""))[0] for q in qs]
@@ -224,7 +224,7 @@ th = [int(r["threads"]) for r in rows]
 qps = [float(r["qps"]) for r in rows]
 p50 = [int(r["p50_ms"]) for r in rows]
 p99 = [int(r["p99_ms"]) for r in rows]
-fig, ax = plt.subplots(figsize=(8.0, 4.6))
+fig, ax = plt.subplots(figsize=(13.0, 5.2))
 ax.plot(th, qps, marker="o", color=C_CQL, lw=2.2, ms=7, label="qps")
 ax.set_xlabel("concurrent clients", fontsize=10)
 ax.set_ylabel("queries/sec", fontsize=10, color=C_CQL)
@@ -254,7 +254,7 @@ for line in open(RES / "d5-freshness.csv"):
     if m:
         lab, n, medg, maxg, z, growth = m.groups()
         d5[lab] = dict(n=int(n), med=int(medg), mx=int(maxg), zero=int(z), growth=int(growth))
-fig, ax = plt.subplots(figsize=(7.6, 4.4))
+fig, ax = plt.subplots(figsize=(12.0, 5.0))
 labs = ["stock_flush60", "flush_period_10s"]
 NICE5 = {"stock_flush60": "forced flush\nevery 60s", "flush_period_10s": "memtable_flush_\nperiod = 10s"}
 mx = [d5[l]["mx"] for l in labs]

@@ -67,11 +67,27 @@ day as the build sha, which is the compatibility evidence for this pairing.
 `nodetool tablestats` / `sstablemetadata`.** Left deliberately empty rather than pre-filled with
 targets, per #4137 ("Never report a chart against a table whose row count you did not measure").
 
-| Table | Workload | Target | Measured rows | SSTables/node | On-disk bytes | Compression ratio |
-|---|---|---|---|---|---|---|
-| `keyvalue` | `KeyValue -n 312500 -p 20000000 -r 0.0 --threads 64` | 20M | _pending_ | _pending_ | _pending_ | _pending_ |
-| `ts` | `BasicTimeSeries` | 20k partitions | _pending_ | _pending_ | _pending_ | _pending_ |
-| `kv_small` | `KeyValue` | 5M | _pending_ | _pending_ | _pending_ | _pending_ |
+| Table | Workload | Target | Measured rows | Partitions | SSTables/node | On-disk bytes/node | Compression ratio |
+|---|---|---|---|---|---|---|---|
+| `keyvalue` | `KeyValue -n 156250 -p 20000000 -r 0.0 --threads 128 --rate 60000` | 20M | **22,339,536** | 22,504,314 (~1 row/partition) | 3 | 4,459,716,529 | 0.92195 |
+| `sensor_data` | `BasicTimeSeries -n 156250 -p 20000 -r 0.0 --threads 128 --rate 60000` | 20k partitions | **23,703,992** | 2,548,496 (~9 rows/partition) | 3 | 4,153,175,060 | 0.94011 |
+| `kv_small` | — | 5M | **NOT CREATED** | — | — | — | — |
+
+`keyvalue` measured **22,339,536**, above the 20M target: the aborted early load attempts (see the
+`-n` trap below) left rows behind. #4137 requires the *measured* count and forbids reporting a
+target, so every chart says 22,339,536.
+
+`kv_small` could not be built: `cassandra-easy-stress` rejects `--table`
+(`ParameterException: Only one main parameter allowed but found several: "KeyValue" and "--table"`),
+so a second KeyValue-shaped table is not expressible through that CLI. D4 and D5 used `keyvalue`
+and `sensor_data` instead.
+
+**A second throughput trap, worth as much as the `-n` one:** `cassandra-easy-stress` silently
+rate-limits to roughly **5,000 ops/s** by default. Both a 64-thread and a 256-thread run measured
+*exactly* 4,800 ops/s with the client at 0.5 core and the db nodes at 10% CPU — identical
+throughput at 4× concurrency with everything idle is a throttle, not a bottleneck. Adding
+`--rate 60000` took it to **59,939 ops/s (12.5×)** and the db nodes to 75–84% CPU, turning a
+68-minute load into 4.4 minutes.
 
 **Row-count target reduced from 50M to 20M**, which #4137 explicitly permits provided it is
 disclosed: *"If 50M does not fit the time budget, drop to 20M and say so in every chart title."*
@@ -93,18 +109,69 @@ iterations`. A reader reproducing this run from #4137's `-p 50000000` prose woul
 
 ## Demos
 
-_(one paragraph per demo — chart, the number the slide can say, and the caveat that must
-accompany it. Filled in as each demo lands; a demo whose result contradicts the story is still
-reported.)_
+All six ran. **One contradicts the story and is reported as measured** (D3), per #4137: "the talk
+changes, not the data."
 
-| Demo | Status | Chart | Slide number | Caveat |
-|---|---|---|---|---|
-| D1 OLTP isolation | not started | `charts/d1-isolation.png` | — | — |
-| D2 same SQL, two catalogs | not started | `charts/d2-scan-warm.png`, `charts/d2-scan-cold.png` | — | — |
-| D3 time-series SQL | not started | `charts/d3-timeseries.png` | — | — |
-| D4 concurrency ladder | not started | `charts/d4-ladder.png` | — | — |
-| D5 freshness | not started | `charts/d5-freshness.png` | — | — |
-| D6 cold start | not started | `charts/d6-coldstart.png` | — | — |
+| Demo | Chart | The number the slide can say | The caveat that must ride with it |
+|---|---|---|---|
+| D1 OLTP isolation | `charts/d1-isolation.png` | Same analytic costs **5.61×** baseline client p99 through Cassandra's CQL path vs **2.21×** through CQLite → **~2.5× less p99 impact** | Impact is **not zero**. Flight shares the db node's cores and the DaemonSet has no `resources.limits`. Single-pod (see #4175). GC-pause panel **not collected**. |
+| D2 same SQL | `charts/d2-scan-warm.png` | Full-table scan **17,100 ms → 10,300 ms**, **1.66× faster**, medians of 3 | Byte-identical work both sides (22,339,536 rows / 3,451,144,643 B), so it is like-for-like — but it is **`keyvalue` only**, and D3 shows the opposite on another table. Single-pod. |
+| D2 scaling | `charts/d2-scan-limit-ladder.png` | Scan scales linearly to 1M rows, no cliff | Single runs, a ladder not a claimed median. |
+| **rows/sec** | `charts/rows-per-sec-sustained.png` | **1,720,646 rows/s sustained for 8.5 min** (peak 1,775,645), *while Cassandra concurrently served ~6,400 OLTP reads/s* | **Single-pod** (`charts/rows-per-sec-per-pod.png` shows two pods idle). Do not caption as a 3-node aggregate. Rig reference is 1.17M rows/s (#3225). |
+| D3 time-series SQL | `charts/d3-timeseries.png` | The **SQL** is the point: cross-partition `GROUP BY`, `approx_percentile`, window function, and a **join that only completes through CQLite** (stock catalog fails `EXCEEDED_LOCAL_MEMORY_LIMIT`) | **CQLite is 1.3–1.4× SLOWER here** (0.70×/0.75×/0.80×) — the opposite of D2. The join win is "leaner delivery fit the same 1 GB Trino budget" (797 MB vs 1.86 GB), **not** "Cassandra cannot join". |
+| D4 concurrency | `charts/d4-ladder.png` | **0 errors and 0 restarts** through 80 concurrent clients; 5.5 → 15.0 qps; memory flat idle→80 | qps **not comparable** to R11b's 34 qps floor (hand-authored mix avoiding #4170, different driver). No regression claimed. |
+| D5 freshness | `charts/d5-freshness.png` | Staleness **0 rows** at both flush settings | Does **not** show "always fresh". At 2,000 writes/s memtable pressure flushed often enough that cadence never bound. A **low-write-rate table is untested** and is where 0.17's bound would show. |
+| D6 cold start | `charts/d6-coldstart.png` | First query after a Flight restart: **288 ms** (`LIMIT 5`), full scan 12,820 ms = 1.24× warm | **Not `drop_caches`-cold** — the drop moved 24 MB of 2.7 GB (Cassandra holds SSTables mmap'd). Flight-process-cold only. |
+
+### The one thing to resolve before building slide 2
+
+**D2 and D3 disagree.** CQLite is 1.66× *faster* on `keyvalue` (~1 row/partition) and 1.3–1.4×
+*slower* on `sensor_data` (~9 rows/partition) — same cluster, same Trino, minutes apart. So
+"same SQL and it's faster" is **not** a general claim from this run; it is true of the shape it was
+measured on. Partition width is the most visible difference and is recorded as a **correlation, not
+a cause** — isolating it needs a purpose-built table pair differing only in that dimension.
+
+## Corrections to earlier files in this same directory
+
+Recorded rather than silently patched, because a reader comparing files should see the disagreement.
+
+1. **`results/d4-ladder.csv` says a real VmRSS reading "was NOT collected". That is wrong.**
+   `cqlite_proc_rss_bytes` was in VictoriaMetrics throughout and is now exported to
+   `results/metrics/proc_rss_bytes.tsv`. It is not merely a provenance fix: **real RSS peaks at
+   3.5–5.9 GiB**, i.e. *higher* than the 2–3 GiB `kubectl top` figures that file attributed to
+   page-cache inflation. So the memory question against #2367's "idle 3–4 MiB" is **open, not
+   explained**, and no memory claim from this run should be presented as settled.
+2. **`results/d6-coldstart.csv` reports `index_parses_total` as UNAVAILABLE. It is 127, not 0.**
+   #2412's lazy Summary-guided open predicts an O(summary) open with no full `Index.db` parse, so a
+   nonzero count needs explaining. Exported to `results/metrics/index_parses_total.tsv`.
+
+Both were found only because the metric store was drained before teardown; both are cheap to
+re-check and neither is asserted as a defect here.
+
+## Defects found (filed, all reproducible)
+
+| Issue | What |
+|---|---|
+| [#4161](https://github.com/pmcfadin/cqlite/issues/4161) | `trino-cqlite` kit renders the literal `__LOCAL_DATACENTER__` when `--local-datacenter` is omitted, contradicting its own comment. Measurement-corrupting (governs split placement), not cosmetic. |
+| [#4170](https://github.com/pmcfadin/cqlite/issues/4170) | Unbounded `SELECT count(*)` through the `cqlite` catalog never completes — 10.83 min at 0 processed rows with an SSTable re-open loop — while `sum(length(value))` over the same table finishes in 9.5 s and a partition-bounded `count(*)` in 1.7 s. |
+| [#4173](https://github.com/pmcfadin/cqlite/issues/4173) | `timeuuid` maps to `varchar` on `cqlite` but `uuid` on the stock `cassandra` catalog. Breaks "same SQL" silently — `ORDER BY` differs and neither is time order. |
+| [#4175](https://github.com/pmcfadin/cqlite/issues/4175) | Scans do not fan out: one Flight pod (the `sidecar-uri` host) does all the work while the other two replicas idle. Caps throughput at one node and makes the scaling story untestable. |
+
+**#4175 qualifies every throughput figure in this report.** All of them — 1.66×, 1.72M rows/s, the
+D4 ladder — are single-pod results. That means the run **understates** CQLite, which is the safe
+direction for a public claim, but the 3-node numbers are unmeasured.
+
+## Not run
+
+- **`kv_small` was never created.** `cassandra-easy-stress` rejects `--table`
+  (`ParameterException: Only one main parameter allowed`), so a second KeyValue table is not
+  expressible through that CLI. D4 and D5 used `keyvalue` and `sensor_data` instead.
+- **D2 cold** (`d2-scan-cold.csv`) — the `drop_caches` instrument does not work here (see D6), so a
+  cold/warm pair could not be honestly separated. Reported missing rather than published warm-as-cold.
+- **D7 / D8** (single-box refresh, Parquet export) — optional in #4137, not reached.
+- **Cassandra GC-pause panel** for D1 — upstream swapped the metrics agent to the OpenTelemetry
+  Java agent the same day (easy-db-lab #916), so the round-5 plan's series names no longer apply and
+  no substitute was verified.
 
 ## Environment deviations (disclosed)
 
@@ -152,4 +219,11 @@ applied. The deviations below are all build/access infrastructure and touch no m
 
 ## Teardown
 
-_(pending — `$EDB down` and confirmation go here and in the final comment on #4137)_
+Cluster `talk017` torn down with `easy-db-lab down` after all deliverables were committed **and
+pushed**, and after draining VictoriaMetrics to `results/metrics/` — that store was inside the
+cluster and teardown destroys it, so the drain had to precede the down. Confirmation is in the
+final comment on #4137.
+
+Not reverted, and deliberately so: the `sg-0ff2000d523e05f3f` port-22 CIDR additions (deviation 2
+above). They are a build-infrastructure allowlist for the shared packer security group, not
+cluster state, and removing them would break the next local AMI bake from this laptop.
