@@ -10,23 +10,23 @@ the per-node otel-collector, into VictoriaMetrics.
 
 | File | PromQL |
 |---|---|
-| `rows_served_per_sec.tsv` | `sum(rate(cqlite_rpc_rows_total[1m]))` |
-| `rows_read_per_sec.tsv` | `sum(rate(cqlite_read_rows_total[1m]))` |
-| `rows_served_per_pod.tsv` | `rate(cqlite_rpc_rows_total[1m])` |
-| `rows_read_per_pod.tsv` | `rate(cqlite_read_rows_total[1m])` |
-| `bytes_served_per_sec.tsv` | `sum(rate(cqlite_rpc_bytes_total[1m]))` |
-| `proc_rss_bytes.tsv` | `cqlite_proc_rss_bytes` |
-| `index_parses_total.tsv` | `cqlite_sstable_index_parses_total` |
-| `index_interval_parses_total.tsv` | `cqlite_sstable_index_interval_parses_total` |
-| `rpc_in_flight_ratio.tsv` | `cqlite_rpc_in_flight_ratio` |
-| `admission_in_use_ratio.tsv` | `cqlite_flight_admission_in_use_ratio` |
-| `errors_total.tsv` | `cqlite_errors_total` |
-| `partitions_per_sec.tsv` | `sum(rate(cqlite_read_partitions_total[1m]))` |
-| `sstables_open.tsv` | `cqlite_sstables_open` |
-| `merge_rows_out_per_sec.tsv` | `sum(rate(cqlite_merge_rows_out_total[1m]))` |
-| `proc_threads.tsv` | `cqlite_proc_threads` |
+| `rows_served_per_sec.csv` | `sum(rate(cqlite_rpc_rows_total[1m]))` |
+| `rows_read_per_sec.csv` | `sum(rate(cqlite_read_rows_total[1m]))` |
+| `rows_served_per_pod.csv` | `rate(cqlite_rpc_rows_total[1m])` |
+| `rows_read_per_pod.csv` | `rate(cqlite_read_rows_total[1m])` |
+| `bytes_served_per_sec.csv` | `sum(rate(cqlite_rpc_bytes_total[1m]))` |
+| `proc_rss_bytes.csv` | `cqlite_proc_rss_bytes` |
+| `index_parses_total.csv` | `cqlite_sstable_index_parses_total` |
+| `index_interval_parses_total.csv` | `cqlite_sstable_index_interval_parses_total` |
+| `rpc_in_flight_ratio.csv` | `cqlite_rpc_in_flight_ratio` |
+| `admission_in_use_ratio.csv` | `cqlite_flight_admission_in_use_ratio` |
+| `errors_total.csv` | `cqlite_errors_total` |
+| `partitions_per_sec.csv` | `sum(rate(cqlite_read_partitions_total[1m]))` |
+| `sstables_open.csv` | `cqlite_sstables_open` |
+| `merge_rows_out_per_sec.csv` | `sum(rate(cqlite_merge_rows_out_total[1m]))` |
+| `proc_threads.csv` | `cqlite_proc_threads` |
 
-Format: `unix_ts <TAB> series <TAB> value`. `series` is the pod/instance label, or `agg` for a
+Format: `unix_ts,series,value`. `series` is the pod/instance label, or `agg` for a
 summed expression.
 
 ## Two corrections these files force on the sibling CSVs

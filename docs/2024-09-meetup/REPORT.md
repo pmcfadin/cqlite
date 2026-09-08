@@ -137,13 +137,13 @@ Recorded rather than silently patched, because a reader comparing files should s
 
 1. **`results/d4-ladder.csv` says a real VmRSS reading "was NOT collected". That is wrong.**
    `cqlite_proc_rss_bytes` was in VictoriaMetrics throughout and is now exported to
-   `results/metrics/proc_rss_bytes.tsv`. It is not merely a provenance fix: **real RSS peaks at
+   `results/metrics/proc_rss_bytes.csv`. It is not merely a provenance fix: **real RSS peaks at
    3.5–5.9 GiB**, i.e. *higher* than the 2–3 GiB `kubectl top` figures that file attributed to
    page-cache inflation. So the memory question against #2367's "idle 3–4 MiB" is **open, not
    explained**, and no memory claim from this run should be presented as settled.
 2. **`results/d6-coldstart.csv` reports `index_parses_total` as UNAVAILABLE. It is 127, not 0.**
    #2412's lazy Summary-guided open predicts an O(summary) open with no full `Index.db` parse, so a
-   nonzero count needs explaining. Exported to `results/metrics/index_parses_total.tsv`.
+   nonzero count needs explaining. Exported to `results/metrics/index_parses_total.csv`.
 
 Both were found only because the metric store was drained before teardown; both are cheap to
 re-check and neither is asserted as a defect here.
