@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["WriteTimeTtlKind"],"fn":["descriptors_from_table_schema","extract_writetime_ttl_calls","validate_all_writetime_ttl_calls","validate_writetime_ttl_call"],"struct":["ColumnDescriptor"]};

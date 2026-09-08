@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["RECORD_OVERHEAD","SYNC_MARKER_SIZE"],"enum":["FrameStep"],"fn":["marker_crc"],"struct":["FrameWalker"]};

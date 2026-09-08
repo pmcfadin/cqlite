@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["peak_resident","record_resident","reset"]};

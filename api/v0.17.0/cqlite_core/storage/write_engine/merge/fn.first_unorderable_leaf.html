@@ -1,0 +1,66 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="ONE authority for “can the merged arm ORDER this composite?” — the bypass divergence predicate in `cqlite-flight` asks this rather than keeping its own leaf list, so the two arms cannot disagree (#4063, roborev job 116 F1)."><title>first_unorderable_leaf in cqlite_core::storage::write_engine::merge - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">first_unorderable_leaf</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.17.0</span></h2></div><div class="sidebar-elems"><div id="rustdoc-modnav"><h2><a href="index.html">In cqlite_<wbr>core::<wbr>storage::<wbr>write_<wbr>engine::<wbr>merge</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">cqlite_core</a>::<wbr><a href="../../index.html">storage</a>::<wbr><a href="../index.html">write_engine</a>::<wbr><a href="index.html">merge</a></div><h1>Function <span class="fn">first_<wbr>unorderable_<wbr>leaf</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/cqlite_core/storage/write_engine/merge/read_assembly_composite.rs.html#410-428">Source</a> </span></div><pre class="rust item-decl"><code>pub fn first_unorderable_leaf(cmp: &amp;<a class="enum" href="../../../types/comparator/enum.ComparatorType.html" title="enum cqlite_core::types::comparator::ComparatorType">ComparatorType</a>) -&gt; <a class="enum" href="https://doc.rust-lang.org/1.98.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.98.1/alloc/string/struct.String.html" title="struct alloc::string::String">String</a>&gt;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>ONE authority for “can the merged arm ORDER this composite?” — the bypass
+divergence predicate in <code>cqlite-flight</code> asks this rather than keeping its own leaf
+list, so the two arms cannot disagree (#4063, roborev job 116 F1).</p>
+<p>Gated like every sibling re-export in this file. That is REDUNDANT today — both
+<code>storage::write_engine</code> and this <code>merge</code> module are already
+<code>#[cfg(feature = "write-support")]</code>, so nothing here compiles without it — and it
+is kept because the neighbours do it and because the redundancy is what makes the
+line survive a change to the enclosing gate (roborev job 118, whose stated
+<code>--no-default-features</code> compile failure does NOT reproduce for that reason).
+A scalar leaf type whose CENTRAL <code>ComparatorType::compare</code> arm is KNOWN not to
+implement Cassandra’s ordering, with the pinned-source citation for WHY
+(issue #4063).</p>
+<p>This is a REFUSAL list, not a second comparator: [<code>compare_composite</code>] fails
+closed for these leaves instead of ordering them. It exists because the
+alternative — inheriting <code>ComparatorType::compare</code>’s answer — returns a
+plausible-looking collection in an order Cassandra would not produce, and a
+merged read has no way for the caller to notice.</p>
+<p>The divergences, read from <code>types::comparator</code> rather than assumed, against the
+pinned <code>cassandra-5.0.8</code> comparators:</p>
+<ul>
+<li><code>varint</code> — <code>compare_varint</code> is <code>Bytes::cmp</code>, i.e. raw UNSIGNED bytes, where
+Cassandra <code>IntegerType.compare</code> orders by SIGNED two’s-complement magnitude
+(so <code>-1</code>, body <code>0xFF</code>, sorts ABOVE <code>0</code> here — reversed).</li>
+<li><code>decimal</code> — <code>compare_decimal</code> normalizes unequal scales by comparing
+<code>format!("{:?}.{}", unscaled, scale)</code> STRINGS, self-described in source as
+“For now, simple string comparison”; Cassandra <code>DecimalType.compare</code> compares
+NUMERICALLY.</li>
+<li><code>uuid</code> — <code>compare_uuid</code> is <code>Uuid::cmp</code> (raw bytes), where Cassandra <code>UUIDType</code>
+compares version first, then a v1 timestamp, then the tail. <code>CqlType::TimeUuid</code>
+maps onto this SAME <code>ComparatorType::Uuid</code> variant, so a <code>timeuuid</code> leaf is
+refused here too — and Cassandra’s <code>TimeUUIDType</code> order differs again, so
+inheriting would be wrong for both spellings.</li>
+</ul>
+<p><strong>SCOPE — why the refusal is CONFINED to the composite arm, measured not
+aesthetic.</strong> The same central defect affects a SCALAR element/key of these types
+(<code>set&lt;uuid&gt;</code>, <code>set&lt;decimal&gt;</code>, <code>map&lt;varint, ...&gt;</code>), which
+<code>super::sort_elements_by_cell_path</code> orders with the same
+<code>ComparatorType::compare</code>. That arm is deliberately NOT narrowed here:</p>
+<ul>
+<li>For a COMPOSITE, refusing restores the PRE-#2339 outcome exactly — that arm
+failed closed for EVERY composite (see [<code>decode_composite</code>]) — so the refusal
+costs no behaviour that existed before #2339, and it stops #2339 introducing a
+NEW silent-wrong-order case.</li>
+<li>For a SCALAR the wrong ordering is long-standing AND in-corpus: the committed
+Cassandra-written fixtures declare <code>uuid_set SET&lt;UUID&gt;</code> / <code>decimal_set SET&lt;DECIMAL&gt;</code> (<code>test-data/schemas/collections.cql</code>) and <code>related_products SET&lt;UUID&gt;</code> (<code>wide-rows.cql</code>), so refusing there would convert an ordering
+imprecision into an availability failure for data Cassandra reads fine.</li>
+</ul>
+<p>Both halves converge when #4063 fixes the central arms — that is the fix, and
+this guard is deleted with it (the <code>#[ignore]</code>d tripwire test says so too).</p>
+<p>Dispatch is on the DECLARED comparator, never on the runtime value (#28).
+The first leaf ANYWHERE in <code>cmp</code>’s tree whose ordering the merged read path
+REFUSES (issue #4063), or <code>None</code> when every leaf is orderable.</p>
+<p><strong>Why this is public, and why the bypass arm MUST ask it rather than keep its own
+list (issue #3058 + roborev job 116 F1).</strong> <code>compare_composite</code> refuses these leaves,
+so a MERGED read of such a collection fails closed — while a one-source read that
+BYPASSES merging would decode and return it, succeeding. The same query would then
+start failing the moment a second SSTable appeared, which is a worse failure than
+either arm’s own behaviour: it is arm-dependent and therefore unpredictable.</p>
+<p>The bypass predicate keys its divergence check on this function so there is ONE
+authority for “can the merged arm order this?”. A second copy of the leaf list in
+<code>cqlite-flight</code> is exactly the two-ordering-authorities divergence #2339 exists to
+remove, one crate over.</p>
+<p>Recursive for the same reason <code>first_unresolved_custom</code> is: a refused leaf can sit
+at any depth, and a top-level-only check was a real silent-wrong-value bug here
+(roborev job 52, G2).</p>
+</div></details></section></div></main></body></html>

@@ -1,0 +1,772 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/write_engine/merge/producer_iter.rs`."><title>producer_iter.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../src-files.js"></script><script defer src="../../../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/write_engine/merge/</div>producer_iter.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Streaming producer-thread row iterator for the k-way merge.
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! PURE CODE MOTION out of `merge/mod.rs` (issue #3139): that file is ~13.5k
+<a href=#4 id=4 data-nosnippet>4</a>//! lines, far over the ~800-line source campsite target (epic #1116). Nothing
+<a href=#5 id=5 data-nosnippet>5</a>//! here changed behaviourally — the moved items are byte-identical to their
+<a href=#6 id=6 data-nosnippet>6</a>//! pre-move form apart from `use` paths and the `pub(super)` visibility the
+<a href=#7 id=7 data-nosnippet>7</a>//! move requires.
+<a href=#8 id=8 data-nosnippet>8</a>//!
+<a href=#9 id=9 data-nosnippet>9</a>//! This module owns the PATH-BASED streaming producer shape:
+<a href=#10 id=10 data-nosnippet>10</a>//! - [`SSTableRowIteratorAdapter`] — the bounded-channel adapter that turns an
+<a href=#11 id=11 data-nosnippet>11</a>//!   async `SSTableReader` into a sync [`SSTableRowIterator`],
+<a href=#12 id=12 data-nosnippet>12</a>//! - its constructor + producer-thread body (`open` / `producer_thread`),
+<a href=#13 id=13 data-nosnippet>13</a>//! - the consumer side ([`SSTableRowIterator`] impl) and the cancel-aware
+<a href=#14 id=14 data-nosnippet>14</a>//!   join-on-drop teardown ([`Drop`] impl).
+<a href=#15 id=15 data-nosnippet>15</a>//!
+<a href=#16 id=16 data-nosnippet>16</a>//! Siblings: the reader→[`MergeEntry`] conversion helpers live in
+<a href=#17 id=17 data-nosnippet>17</a>//! [`producer_iter_convert`](super::producer_iter_convert); the SHARED-READER
+<a href=#18 id=18 data-nosnippet>18</a>//! producer shape (`open_from_reader` / `producer_thread_from_reader`, which
+<a href=#19 id=19 data-nosnippet>19</a>//! adds its own inherent `impl` onto this adapter) lives in
+<a href=#20 id=20 data-nosnippet>20</a>//! [`from_readers`](super::from_readers); the CHANNEL PROTOCOL both producer
+<a href=#21 id=21 data-nosnippet>21</a>//! shapes speak lives in [`producer_msg`](super::producer_msg); the egress-depth
+<a href=#22 id=22 data-nosnippet>22</a>//! gauge accounting this module only *calls* lives in
+<a href=#23 id=23 data-nosnippet>23</a>//! [`channel_depth`](super::channel_depth).
+<a href=#24 id=24 data-nosnippet>24</a>//!
+<a href=#25 id=25 data-nosnippet>25</a>//! Issue #3120 CLOSED the defect this module's header used to warn about (a
+<a href=#26 id=26 data-nosnippet>26</a>//! producer thread that UNWINDS being indistinguishable from an exhausted run):
+<a href=#27 id=27 data-nosnippet>27</a>//! completion is now an explicit [`MergeMsg::Done`] terminator and this adapter's
+<a href=#28 id=28 data-nosnippet>28</a>//! [`RunState`] makes "receiver/verdict gone, so assume exhausted" unrepresentable.
+<a href=#29 id=29 data-nosnippet>29</a>//! See [`producer_msg`](super::producer_msg)'s header for the protocol and
+<a href=#30 id=30 data-nosnippet>30</a>//! [`from_readers`](super::from_readers)'s for the emit-side contract.
+<a href=#31 id=31 data-nosnippet>31</a>
+<a href=#32 id=32 data-nosnippet>32</a></span><span class="kw">use </span><span class="kw">super</span>::producer_msg::{
+<a href=#33 id=33 data-nosnippet>33</a>    dead_producer_error, panicked_producer_error, MergeMsg, MergeProducerError,
+<a href=#34 id=34 data-nosnippet>34</a>};
+<a href=#35 id=35 data-nosnippet>35</a><span class="kw">use super</span>::{channel_depth, from_readers, producer_gauge, MergeEntry, SSTableRowIterator};
+<a href=#36 id=36 data-nosnippet>36</a><span class="kw">use </span><span class="kw">crate</span>::error::{Error, <span class="prelude-ty">Result</span>};
+<a href=#37 id=37 data-nosnippet>37</a><span class="kw">use </span><span class="kw">crate</span>::schema::TableSchema;
+<a href=#38 id=38 data-nosnippet>38</a><span class="kw">use </span><span class="kw">crate</span>::storage::producer_fault::MergeProducerFault;
+<a href=#39 id=39 data-nosnippet>39</a><span class="kw">use </span>std::path::{Path, PathBuf};
+<a href=#40 id=40 data-nosnippet>40</a>
+<a href=#41 id=41 data-nosnippet>41</a><span class="doccomment">/// Whether this adapter's producer run has been PROVEN finished, proven failed,
+<a href=#42 id=42 data-nosnippet>42</a>/// or is of unknown standing (issue #3120).
+<a href=#43 id=43 data-nosnippet>43</a>///
+<a href=#44 id=44 data-nosnippet>44</a>/// The point of the type is that a verdict can never be DOWNGRADED to "clean end
+<a href=#45 id=45 data-nosnippet>45</a>/// of input" by accident. Before this issue there were two silent routes to
+<a href=#46 id=46 data-nosnippet>46</a>/// `None`: a channel disconnect (which an unwinding producer is
+<a href=#47 id=47 data-nosnippet>47</a>/// indistinguishable from) and a `self.receiver.as_ref()?`. Both are now folded
+<a href=#48 id=48 data-nosnippet>48</a>/// into this state, and `None` is reachable ONLY from [`RunState::Finished`].
+<a href=#49 id=49 data-nosnippet>49</a></span><span class="attr">#[cfg(feature = <span class="string">"write-support"</span>)]
+<a href=#50 id=50 data-nosnippet>50</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">enum </span>RunState {
+<a href=#51 id=51 data-nosnippet>51</a>    <span class="doccomment">/// No terminator observed yet: the producer may still send.
+<a href=#52 id=52 data-nosnippet>52</a>    </span>Streaming,
+<a href=#53 id=53 data-nosnippet>53</a>    <span class="doccomment">/// The producer sent [`MergeMsg::Done`] — the ONLY proof of a clean,
+<a href=#54 id=54 data-nosnippet>54</a>    /// COMPLETE run, and therefore the only state from which
+<a href=#55 id=55 data-nosnippet>55</a>    /// [`SSTableRowIterator::next`] may report end of input.
+<a href=#56 id=56 data-nosnippet>56</a>    </span>Finished,
+<a href=#57 id=57 data-nosnippet>57</a>    <span class="doccomment">/// The producer sent a terminal [`MergeMsg::Failed`], already reported once.
+<a href=#58 id=58 data-nosnippet>58</a>    ///
+<a href=#59 id=59 data-nosnippet>59</a>    /// STICKY, and it keeps the payload so a repeat poll re-reports the IDENTICAL
+<a href=#60 id=60 data-nosnippet>60</a>    /// error instead of degrading to `None`. That matters because
+<a href=#61 id=61 data-nosnippet>61</a>    /// `RunReader::refill_buffer` propagates our `Err` but keeps NO sticky error
+<a href=#62 id=62 data-nosnippet>62</a>    /// of its own: a consumer that swallowed the error and advanced again would
+<a href=#63 id=63 data-nosnippet>63</a>    /// otherwise see a dead producer downgraded to a clean end of input — issue
+<a href=#64 id=64 data-nosnippet>64</a>    /// #3120 reintroduced inside its own fix, with no test failing.
+<a href=#65 id=65 data-nosnippet>65</a>    </span>Failed(MergeProducerError),
+<a href=#66 id=66 data-nosnippet>66</a>    <span class="doccomment">/// STICKY: the channel disconnected with NO terminator, or the receiver was
+<a href=#67 id=67 data-nosnippet>67</a>    /// gone when a poll arrived. The verdict is "unknown, therefore TRUNCATED",
+<a href=#68 id=68 data-nosnippet>68</a>    /// so every subsequent poll re-reports the error and never `None`.
+<a href=#69 id=69 data-nosnippet>69</a>    ///
+<a href=#70 id=70 data-nosnippet>70</a>    /// Deliberately NOT #3106's non-sticky `terminated` flag, which returns
+<a href=#71 id=71 data-nosnippet>71</a>    /// `None` on the SECOND poll.
+<a href=#72 id=72 data-nosnippet>72</a>    </span>Died,
+<a href=#73 id=73 data-nosnippet>73</a>}
+<a href=#74 id=74 data-nosnippet>74</a>
+<a href=#75 id=75 data-nosnippet>75</a><span class="doccomment">/// Adapter that wraps async SSTableReader into a true-streaming sync
+<a href=#76 id=76 data-nosnippet>76</a>/// [`SSTableRowIterator`].
+<a href=#77 id=77 data-nosnippet>77</a>///
+<a href=#78 id=78 data-nosnippet>78</a>/// ## Design (Issue #754 — remove 128MB buffer cap residue of #447)
+<a href=#79 id=79 data-nosnippet>79</a>///
+<a href=#80 id=80 data-nosnippet>80</a>/// The V5CompressedLegacy format requires chunk stitching: a partition may
+<a href=#81 id=81 data-nosnippet>81</a>/// straddle compression-chunk boundaries, so the decoder needs a contiguous
+<a href=#82 id=82 data-nosnippet>82</a>/// view spanning at least one whole partition. The reader's streaming path
+<a href=#83 id=83 data-nosnippet>83</a>/// keeps only a **sliding window** of that view — one chunk plus the partition
+<a href=#84 id=84 data-nosnippet>84</a>/// currently being decoded — rather than the whole decompressed file.
+<a href=#85 id=85 data-nosnippet>85</a>///
+<a href=#86 id=86 data-nosnippet>86</a>/// A background thread (the producer) opens the SSTable with its own Tokio
+<a href=#87 id=87 data-nosnippet>87</a>/// runtime and calls
+<a href=#88 id=88 data-nosnippet>88</a>/// [`stream_all_partitions_for_compaction`](crate::storage::sstable::reader::SSTableReader::stream_all_partitions_for_compaction),
+<a href=#89 id=89 data-nosnippet>89</a>/// which decompresses one chunk at a time, drains every fully-decoded partition
+<a href=#90 id=90 data-nosnippet>90</a>/// out of the window, and forwards the entries into a bounded `sync_channel` in
+<a href=#91 id=91 data-nosnippet>91</a>/// BATCHES (issue #2820 — one cross-thread wake per batch instead of per row; see
+<a href=#92 id=92 data-nosnippet>92</a>/// [`egress_batch`](super::egress_batch)). The channel's capacity is in MESSAGES,
+<a href=#93 id=93 data-nosnippet>93</a>/// converted from the [`STREAMING_CHANNEL_CAPACITY`](super::STREAMING_CHANNEL_CAPACITY)
+<a href=#94 id=94 data-nosnippet>94</a>/// ROW budget, adaptively reduced under concurrent merges (see
+<a href=#95 id=95 data-nosnippet>95</a>/// [`egress_budget`](super::egress_budget)); once the channel is full the producer
+<a href=#96 id=96 data-nosnippet>96</a>/// blocks until the consumer (the main merge thread) pulls the next batch.
+<a href=#97 id=97 data-nosnippet>97</a>///
+<a href=#98 id=98 data-nosnippet>98</a>/// The bounded window plus the bounded channel together make end-to-end peak
+<a href=#99 id=99 data-nosnippet>99</a>/// memory independent of total input size: a source's decompressed content is
+<a href=#100 id=100 data-nosnippet>100</a>/// never fully resident. Peak is roughly `max_partition_size + one_chunk +
+<a href=#101 id=101 data-nosnippet>101</a>/// egress_batch::max_inflight_rows` per source (issue #827; `4 × rows_cap` since
+<a href=#102 id=102 data-nosnippet>102</a>/// #2820 — 1024 at the default, 32 at the throttled floor — and additionally
+<a href=#103 id=103 data-nosnippet>103</a>/// bounded in BYTES by `egress_batch::BATCH_EMIT_BYTES_MERGE` per batch).
+<a href=#104 id=104 data-nosnippet>104</a>///
+<a href=#105 id=105 data-nosnippet>105</a>/// ## Issue #591 safety (mmap vs file deletion)
+<a href=#106 id=106 data-nosnippet>106</a>///
+<a href=#107 id=107 data-nosnippet>107</a>/// `finalize_merge_async` deletes the input SSTable files once the merged output
+<a href=#108 id=108 data-nosnippet>108</a>/// is published. We require that no mmap outlives its backing file. The producer
+<a href=#109 id=109 data-nosnippet>109</a>/// thread opens the reader with `use_mmap = false`, and the thread *fully reads
+<a href=#110 id=110 data-nosnippet>110</a>/// all file data* (the stitching phase) before it can block on a channel send.
+<a href=#111 id=111 data-nosnippet>111</a>/// By the time `finalize_merge_async` runs, the merge is complete and all
+<a href=#112 id=112 data-nosnippet>112</a>/// channel entries have been consumed, so the producer thread has long since
+<a href=#113 id=113 data-nosnippet>113</a>/// finished and dropped its file handle. No mmap ever exists.
+<a href=#114 id=114 data-nosnippet>114</a>///
+<a href=#115 id=115 data-nosnippet>115</a>/// ## Issue #587 safety (async-from-sync bridge)
+<a href=#116 id=116 data-nosnippet>116</a>///
+<a href=#117 id=117 data-nosnippet>117</a>/// The producer thread creates its own Tokio runtime (never `Handle::block_on`),
+<a href=#118 id=118 data-nosnippet>118</a>/// so it cannot panic even when called from within an existing Tokio runtime.
+<a href=#119 id=119 data-nosnippet>119</a>/// This is the same strategy as [`block_on_async`](super::block_on_async).
+<a href=#120 id=120 data-nosnippet>120</a>///
+<a href=#121 id=121 data-nosnippet>121</a>/// ## Issue #2316 thread budget (O(M), no per-producer worker pool)
+<a href=#122 id=122 data-nosnippet>122</a>///
+<a href=#123 id=123 data-nosnippet>123</a>/// That per-producer runtime is a **`current_thread`** runtime, NOT a
+<a href=#124 id=124 data-nosnippet>124</a>/// multi-threaded `Runtime::new()`: it drives the producer's single sequential
+<a href=#125 id=125 data-nosnippet>125</a>/// scan (no internal `tokio::spawn`) on the producer thread itself, adding ZERO
+<a href=#126 id=126 data-nosnippet>126</a>/// worker threads. A merge over `M` inputs therefore costs `O(M)` OS threads, not
+<a href=#127 id=127 data-nosnippet>127</a>/// `M + M·num_cpus` — killing the context-switch storm under concurrent `do_get`.
+<a href=#128 id=128 data-nosnippet>128</a></span><span class="attr">#[cfg(feature = <span class="string">"write-support"</span>)]
+<a href=#129 id=129 data-nosnippet>129</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">struct </span>SSTableRowIteratorAdapter {
+<a href=#130 id=130 data-nosnippet>130</a>    <span class="doccomment">/// Receiving end of the bounded channel fed by the producer thread. `Option`
+<a href=#131 id=131 data-nosnippet>131</a>    /// so [`Drop`] can drop it FIRST (issue #2361) — closing the channel wakes a
+<a href=#132 id=132 data-nosnippet>132</a>    /// producer blocked on a full `SyncSender::send` (its send returns `Err`), so
+<a href=#133 id=133 data-nosnippet>133</a>    /// the subsequent producer join is bounded and cannot deadlock.
+<a href=#134 id=134 data-nosnippet>134</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) receiver: <span class="prelude-ty">Option</span>&lt;std::sync::mpsc::Receiver&lt;MergeMsg&gt;&gt;,
+<a href=#135 id=135 data-nosnippet>135</a>    <span class="doccomment">/// Producer thread handle. `Option` so [`Drop`] can `take()` it and JOIN the
+<a href=#136 id=136 data-nosnippet>136</a>    /// thread (issue #2361) rather than detach it — the pre-#2361 `_producer`
+<a href=#137 id=137 data-nosnippet>137</a>    /// field's "joined on drop" doc was WRONG (dropping a `JoinHandle` detaches
+<a href=#138 id=138 data-nosnippet>138</a>    /// the thread, leaving it to run to completion in the background; a cancelled
+<a href=#139 id=139 data-nosnippet>139</a>    /// `do_get` over a 1M-partition scan would keep burning CPU/IO). Joining after
+<a href=#140 id=140 data-nosnippet>140</a>    /// dropping the receiver + tripping `scan_cancel` guarantees prompt teardown.
+<a href=#141 id=141 data-nosnippet>141</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) producer: <span class="prelude-ty">Option</span>&lt;std::thread::JoinHandle&lt;()&gt;&gt;,
+<a href=#142 id=142 data-nosnippet>142</a>    <span class="doccomment">/// The PER-CALL cancellation token this adapter's producer scan polls (issues
+<a href=#143 id=143 data-nosnippet>143</a>    /// #2264/#2346). Held so (a) [`Self::next`] can make its blocking channel
+<a href=#144 id=144 data-nosnippet>144</a>    /// `recv` cancel-aware and (b) [`Drop`] can trip it, waking a producer that is
+<a href=#145 id=145 data-nosnippet>145</a>    /// mid-scan (not blocked on send) so it exits promptly before the join.
+<a href=#146 id=146 data-nosnippet>146</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) scan_cancel: <span class="kw">crate</span>::storage::scan_cancel::ScanCancel,
+<a href=#147 id=147 data-nosnippet>147</a>    <span class="doccomment">/// This adapter's OWN count of DATA entries its producer thread has
+<a href=#148 id=148 data-nosnippet>148</a>    /// successfully sent into the bounded channel (issue #2419 roborev job
+<a href=#149 id=149 data-nosnippet>149</a>    /// 1733), shared with the producer thread via `Arc` so `Drop` can read it.
+<a href=#150 id=150 data-nosnippet>150</a>    /// It only becomes STABLE — no further increments possible — once the
+<a href=#151 id=151 data-nosnippet>151</a>    /// producer thread has been joined (see `Drop`). Paired with
+<a href=#152 id=152 data-nosnippet>152</a>    /// [`Self::received_count`] to compute the exact post-join egress-depth
+<a href=#153 id=153 data-nosnippet>153</a>    /// reconcile residual: reading it BEFORE the join (as the pre-fix drain loop
+<a href=#154 id=154 data-nosnippet>154</a>    /// did) races a producer send that can slip in after the drain's last
+<a href=#155 id=155 data-nosnippet>155</a>    /// `Empty` and before the receiver is actually dropped, permanently leaking
+<a href=#156 id=156 data-nosnippet>156</a>    /// the shared `cqlite.merge.egress_channel_depth` gauge upward across
+<a href=#157 id=157 data-nosnippet>157</a>    /// repeated cancellations on a long-running server.
+<a href=#158 id=158 data-nosnippet>158</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) sent_count: std::sync::Arc&lt;std::sync::atomic::AtomicI64&gt;,
+<a href=#159 id=159 data-nosnippet>159</a>    <span class="doccomment">/// This adapter's own count of DATA entries actually received off the
+<a href=#160 id=160 data-nosnippet>160</a>    /// channel, incremented by the same batch length as every
+<a href=#161 id=161 data-nosnippet>161</a>    /// [`channel_depth::received_n`] call this adapter makes ([`Self::next`]'s
+<a href=#162 id=162 data-nosnippet>162</a>    /// normal consumption). Only ever touched by the thread holding `&amp;mut self`
+<a href=#163 id=163 data-nosnippet>163</a>    /// (never shared), so a plain `i64`.
+<a href=#164 id=164 data-nosnippet>164</a>    ///
+<a href=#165 id=165 data-nosnippet>165</a>    /// Issue #2820: "received" means PULLED OFF THE CHANNEL, not handed to the
+<a href=#166 id=166 data-nosnippet>166</a>    /// consumer — entries still sitting in [`Self::held`] are counted here,
+<a href=#167 id=167 data-nosnippet>167</a>    /// because the gauge they balance tracks channel occupancy and they have
+<a href=#168 id=168 data-nosnippet>168</a>    /// already left it. That keeps the `Drop` reconcile exact for an abandoned
+<a href=#169 id=169 data-nosnippet>169</a>    /// partial batch: it was never a residual to begin with.
+<a href=#170 id=170 data-nosnippet>170</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) received_count: i64,
+<a href=#171 id=171 data-nosnippet>171</a>    <span class="doccomment">/// This run's verdict (issue #3120) — see [`RunState`]. The single place a
+<a href=#172 id=172 data-nosnippet>172</a>    /// "this run is exhausted" answer may come from.
+<a href=#173 id=173 data-nosnippet>173</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) state: RunState,
+<a href=#174 id=174 data-nosnippet>174</a>    <span class="doccomment">/// Test-only (issue #2765): the exact `sync_channel` capacity this adapter's
+<a href=#175 id=175 data-nosnippet>175</a>    /// egress channel was built with. Since issue #2820 that argument is in
+<a href=#176 id=176 data-nosnippet>176</a>    /// MESSAGES (batches) — the truth of what was passed to `sync_channel` —
+<a href=#177 id=177 data-nosnippet>177</a>    /// while the merge-scoped adaptive snapshot the constructor threaded in is in
+<a href=#178 id=178 data-nosnippet>178</a>    /// ROWS; see [`Self::egress_rows_capacity`]. Observed via
+<a href=#179 id=179 data-nosnippet>179</a>    /// [`SSTableRowIterator::egress_channel_capacity`] so a wiring test proves the
+<a href=#180 id=180 data-nosnippet>180</a>    /// budget reaches BOTH construction sites.
+<a href=#181 id=181 data-nosnippet>181</a>    </span><span class="attr">#[cfg(test)]
+<a href=#182 id=182 data-nosnippet>182</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) egress_channel_capacity: usize,
+<a href=#183 id=183 data-nosnippet>183</a>    <span class="doccomment">/// Test-only (issue #2820): the ROW capacity snapshot
+<a href=#184 id=184 data-nosnippet>184</a>    /// [`Self::egress_channel_capacity`] was derived from — i.e. the value
+<a href=#185 id=185 data-nosnippet>185</a>    /// `egress_budget::begin_merge` handed the constructor, in the units every
+<a href=#186 id=186 data-nosnippet>186</a>    /// `egress_budget` doc and test speaks. Keeping BOTH observable is what lets a
+<a href=#187 id=187 data-nosnippet>187</a>    /// wiring test assert the CONVERSION (`message_capacity_for_rows(rows) ==
+<a href=#188 id=188 data-nosnippet>188</a>    /// messages`) rather than just a plausible-looking number: a channel silently
+<a href=#189 id=189 data-nosnippet>189</a>    /// built with the ROW budget as its message capacity is a 256x resident-row
+<a href=#190 id=190 data-nosnippet>190</a>    /// blow-up that an unconverted assertion would have called correct.
+<a href=#191 id=191 data-nosnippet>191</a>    </span><span class="attr">#[cfg(test)]
+<a href=#192 id=192 data-nosnippet>192</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) egress_rows_capacity: usize,
+<a href=#193 id=193 data-nosnippet>193</a>    <span class="doccomment">/// The BATCH this adapter received from the channel and is handing out one
+<a href=#194 id=194 data-nosnippet>194</a>    /// entry per [`SSTableRowIterator::next`] (issue #2820). Empty between
+<a href=#195 id=195 data-nosnippet>195</a>    /// batches; refilled by exactly one `recv`.
+<a href=#196 id=196 data-nosnippet>196</a>    ///
+<a href=#197 id=197 data-nosnippet>197</a>    /// Its entries have ALREADY left the bounded channel, so they are already
+<a href=#198 id=198 data-nosnippet>198</a>    /// accounted on the egress-depth gauge as received — see `next` and the
+<a href=#199 id=199 data-nosnippet>199</a>    /// `Drop` reconcile.
+<a href=#200 id=200 data-nosnippet>200</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) held: std::vec::IntoIter&lt;MergeEntry&gt;,
+<a href=#201 id=201 data-nosnippet>201</a>}
+<a href=#202 id=202 data-nosnippet>202</a>
+<a href=#203 id=203 data-nosnippet>203</a><span class="doccomment">/// Poll interval for the cancel-aware blocking `recv` in
+<a href=#204 id=204 data-nosnippet>204</a>/// [`SSTableRowIteratorAdapter::next`] (issue #2361). A bounded wait so a
+<a href=#205 id=205 data-nosnippet>205</a>/// cancellation that lands while the consumer is blocked waiting for the next
+<a href=#206 id=206 data-nosnippet>206</a>/// producer entry is observed within one interval, without a busy-spin. This is
+<a href=#207 id=207 data-nosnippet>207</a>/// an INTERNAL cadence only — never asserted against wall-clock in tests.
+<a href=#208 id=208 data-nosnippet>208</a></span><span class="attr">#[cfg(feature = <span class="string">"write-support"</span>)]
+<a href=#209 id=209 data-nosnippet>209</a></span><span class="kw">const </span>RECV_CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(<span class="number">50</span>);
+<a href=#210 id=210 data-nosnippet>210</a>
+<a href=#211 id=211 data-nosnippet>211</a><span class="attr">#[cfg(feature = <span class="string">"write-support"</span>)]
+<a href=#212 id=212 data-nosnippet>212</a></span><span class="kw">impl </span>SSTableRowIteratorAdapter {
+<a href=#213 id=213 data-nosnippet>213</a>    <span class="doccomment">/// Open an SSTable and start a streaming producer thread.
+<a href=#214 id=214 data-nosnippet>214</a>    ///
+<a href=#215 id=215 data-nosnippet>215</a>    /// Returns immediately; the producer thread runs concurrently and populates
+<a href=#216 id=216 data-nosnippet>216</a>    /// the channel as the consumer advances. The file handle is held only by
+<a href=#217 id=217 data-nosnippet>217</a>    /// the producer thread and is dropped when the thread finishes.
+<a href=#218 id=218 data-nosnippet>218</a>    ///
+<a href=#219 id=219 data-nosnippet>219</a>    /// Uses [`SSTableReader::iterate_all_partitions_for_compaction`] which
+<a href=#220 id=220 data-nosnippet>220</a>    /// returns actual per-row timestamps decoded from the on-disk row headers.
+<a href=#221 id=221 data-nosnippet>221</a>    /// This allows the k-way merger to perform timestamp-accurate last-write-wins
+<a href=#222 id=222 data-nosnippet>222</a>    /// ordering, which is essential for tombstone shadowing (Issue #505).
+<a href=#223 id=223 data-nosnippet>223</a>    ///
+<a href=#224 id=224 data-nosnippet>224</a>    /// When the schema has clustering columns, their values are extracted from
+<a href=#225 id=225 data-nosnippet>225</a>    /// the decoded cells (in the producer thread, by column name in schema order)
+<a href=#226 id=226 data-nosnippet>226</a>    /// and stored on `MergeEntry.clustering_key` so `merge_partition_rows` groups
+<a href=#227 id=227 data-nosnippet>227</a>    /// and reconciles distinct clustering rows correctly. The clustering columns
+<a href=#228 id=228 data-nosnippet>228</a>    /// are left in the cells as well, since the read-back path expects them there.
+<a href=#229 id=229 data-nosnippet>229</a>    ///
+<a href=#230 id=230 data-nosnippet>230</a>    /// `channel_capacity` (issue #2765) is the merge-scoped adaptive egress
+<a href=#231 id=231 data-nosnippet>231</a>    /// capacity snapshotted ONCE by the `KWayMerger` constructor and shared by
+<a href=#232 id=232 data-nosnippet>232</a>    /// every source channel of that merge — never derived per adapter here.
+<a href=#233 id=233 data-nosnippet>233</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>open(
+<a href=#234 id=234 data-nosnippet>234</a>        path: <span class="kw-2">&amp;</span>Path,
+<a href=#235 id=235 data-nosnippet>235</a>        run_index: usize,
+<a href=#236 id=236 data-nosnippet>236</a>        schema: <span class="kw-2">&amp;</span>TableSchema,
+<a href=#237 id=237 data-nosnippet>237</a>        udt_registry: <span class="prelude-ty">Option</span>&lt;<span class="kw">crate</span>::schema::UdtRegistry&gt;,
+<a href=#238 id=238 data-nosnippet>238</a>        scan_cancel: <span class="kw">crate</span>::storage::scan_cancel::ScanCancel,
+<a href=#239 id=239 data-nosnippet>239</a>        channel_capacity: usize,
+<a href=#240 id=240 data-nosnippet>240</a>        <span class="comment">// Issue #1704: WHO counts a failed reopen. Stated by the caller because only
+<a href=#241 id=241 data-nosnippet>241</a>        // it knows whether its own seam records — see `merge::constructors`.
+<a href=#242 id=242 data-nosnippet>242</a>        </span>reporting: <span class="kw">crate</span>::storage::sstable::reader::OpenErrorReporting,
+<a href=#243 id=243 data-nosnippet>243</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>&gt; {
+<a href=#244 id=244 data-nosnippet>244</a>        <span class="kw">let </span>path_buf = path.to_path_buf();
+<a href=#245 id=245 data-nosnippet>245</a>        <span class="kw">let </span>schema = schema.clone();
+<a href=#246 id=246 data-nosnippet>246</a>        <span class="comment">// Held on the adapter for cancel-aware recv + Drop teardown (issue #2361).
+<a href=#247 id=247 data-nosnippet>247</a>        </span><span class="kw">let </span>adapter_cancel = scan_cancel.clone();
+<a href=#248 id=248 data-nosnippet>248</a>
+<a href=#249 id=249 data-nosnippet>249</a>        <span class="comment">// Issue #2820: `channel_capacity` is a ROW budget (`egress_budget`'s whole
+<a href=#250 id=250 data-nosnippet>250</a>        // vocabulary is rows); the channel carries BATCHES, so it is converted to a
+<a href=#251 id=251 data-nosnippet>251</a>        // MESSAGE capacity here — the same conversion, from the same constant, as
+<a href=#252 id=252 data-nosnippet>252</a>        // the shared-reader construction site in `from_readers`. Passing the row
+<a href=#253 id=253 data-nosnippet>253</a>        // budget straight through would budget 256 BATCHES = 65_536 entries per
+<a href=#254 id=254 data-nosnippet>254</a>        // source. See `egress_batch::message_capacity_for_rows`.
+<a href=#255 id=255 data-nosnippet>255</a>        </span><span class="kw">let </span>message_capacity = <span class="kw">super</span>::egress_batch::message_capacity_for_rows(channel_capacity);
+<a href=#256 id=256 data-nosnippet>256</a>        <span class="kw">let </span>(sender, receiver) = std::sync::mpsc::sync_channel(message_capacity);
+<a href=#257 id=257 data-nosnippet>257</a>        <span class="comment">// Issue #2419 roborev job 1733: this adapter's own sent-count, shared
+<a href=#258 id=258 data-nosnippet>258</a>        // with the producer thread so `Drop` can read its post-join-stable value
+<a href=#259 id=259 data-nosnippet>259</a>        // for the egress-depth reconcile (see the field doc).
+<a href=#260 id=260 data-nosnippet>260</a>        </span><span class="kw">let </span>sent_count = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(<span class="number">0</span>));
+<a href=#261 id=261 data-nosnippet>261</a>        <span class="kw">let </span>producer_sent_count = sent_count.clone();
+<a href=#262 id=262 data-nosnippet>262</a>
+<a href=#263 id=263 data-nosnippet>263</a>        <span class="comment">// Issue #2316: account this producer on the `cqlite.merge.producer_threads`
+<a href=#264 id=264 data-nosnippet>264</a>        // gauge BEFORE spawning, so the increment happens-before any possible
+<a href=#265 id=265 data-nosnippet>265</a>        // decrement. The decrementing `ProducerThreadGuard` is created first thing
+<a href=#266 id=266 data-nosnippet>266</a>        // inside the child thread (see `producer_thread`); a fast-exiting producer
+<a href=#267 id=267 data-nosnippet>267</a>        // (e.g. a reader-open error) could otherwise race its own guard's drop
+<a href=#268 id=268 data-nosnippet>268</a>        // against a post-spawn increment on the parent, transiently underflowing
+<a href=#269 id=269 data-nosnippet>269</a>        // the live count. Incrementing here first makes the pairing
+<a href=#270 id=270 data-nosnippet>270</a>        // correct-by-construction — no ordering race is possible.
+<a href=#271 id=271 data-nosnippet>271</a>        </span>producer_gauge::spawned();
+<a href=#272 id=272 data-nosnippet>272</a>
+<a href=#273 id=273 data-nosnippet>273</a>        <span class="comment">// Issue #2819: propagate the sub-phase sink onto this path-based producer
+<a href=#274 id=274 data-nosnippet>274</a>        // thread too (thread-locals are not inherited across a spawn); `None`
+<a href=#275 id=275 data-nosnippet>275</a>        // (no-op) for non-flight callers. NOTE (roborev L2): this is a DEFENSIVE /
+<a href=#276 id=276 data-nosnippet>276</a>        // latent propagation, NOT a parity-covered do_get path — production
+<a href=#277 id=277 data-nosnippet>277</a>        // `do_get` is warm-only (`spawn_streaming_from_readers` → `open_from_reader`,
+<a href=#278 id=278 data-nosnippet>278</a>        // which has the tested propagation). The path-based `open`
+<a href=#279 id=279 data-nosnippet>279</a>        // (`MergeInput::Paths`) is the test-only byte-identity oracle, so its
+<a href=#280 id=280 data-nosnippet>280</a>        // cold_fault/decompress attribution has no e2e assertion (and would fire
+<a href=#281 id=281 data-nosnippet>281</a>        // only for a stitching/BTI fixture via the `read_next_block` loop). Kept so
+<a href=#282 id=282 data-nosnippet>282</a>        // a future path-based flight caller is correct by construction, not to
+<a href=#283 id=283 data-nosnippet>283</a>        // imply current parity coverage. (This file is far over the #1116 campsite
+<a href=#284 id=284 data-nosnippet>284</a>        // target; the +2 lines are the minimal propagation.)
+<a href=#285 id=285 data-nosnippet>285</a>        </span><span class="kw">let </span>subphase_sink = <span class="kw">crate</span>::observability::stream_subphase::current();
+<a href=#286 id=286 data-nosnippet>286</a>        <span class="comment">// Issue #1707: the read-PHASE sink, propagated the SAME way and for the same
+<a href=#287 id=287 data-nosnippet>287</a>        // reason — and on THIS path it is exercised in production, unlike the
+<a href=#288 id=288 data-nosnippet>288</a>        // sub-phase sink above: `generation_merge::stream_generations_for_read`
+<a href=#289 id=289 data-nosnippet>289</a>        // reaches `KWayMerger::new` → `MergeInput::Paths` → here, so the chunk decode
+<a href=#290 id=290 data-nosnippet>290</a>        // of every cross-generation read runs on this thread. Installing the sink on
+<a href=#291 id=291 data-nosnippet>291</a>        // the merge/consumer thread alone left that route recording `merge` and
+<a href=#292 id=292 data-nosnippet>292</a>        // nothing else. It reaches the shared chunk-decode plane
+<a href=#293 id=293 data-nosnippet>293</a>        // (`reader::chunk_source`), so DECOMPRESS is measured through it; the io seam
+<a href=#294 id=294 data-nosnippet>294</a>        // lives only in the windowed scan's read helpers and is therefore still NOT
+<a href=#295 id=295 data-nosnippet>295</a>        // reached from here — see `observability::read_phase`'s coverage boundary.
+<a href=#296 id=296 data-nosnippet>296</a>        // `None` (no-op) for an unmetered caller.
+<a href=#297 id=297 data-nosnippet>297</a>        </span><span class="kw">let </span>read_phase_sink = <span class="kw">crate</span>::observability::read_phase::current();
+<a href=#298 id=298 data-nosnippet>298</a>
+<a href=#299 id=299 data-nosnippet>299</a>        <span class="comment">// Issue #3120: whatever fault a test armed FOR THIS INPUT is captured HERE
+<a href=#300 id=300 data-nosnippet>300</a>        // (never re-read mid-walk) and owned by the producer thread. Always empty —
+<a href=#301 id=301 data-nosnippet>301</a>        // and a zero-sized no-op whose scope closure is never called — in a
+<a href=#302 id=302 data-nosnippet>302</a>        // production build.
+<a href=#303 id=303 data-nosnippet>303</a>        </span><span class="kw">let </span>fault = MergeProducerFault::capture_for(|| path.to_path_buf());
+<a href=#304 id=304 data-nosnippet>304</a>
+<a href=#305 id=305 data-nosnippet>305</a>        <span class="comment">// Spawn the producer thread via `Builder::spawn` (rather than the
+<a href=#306 id=306 data-nosnippet>306</a>        // panic-on-failure `std::thread::spawn`) so an OS thread-creation failure
+<a href=#307 id=307 data-nosnippet>307</a>        // is a recoverable `Err`, not a process abort: the gauge increment above
+<a href=#308 id=308 data-nosnippet>308</a>        // must never leak for a thread that never actually started, so roll it
+<a href=#309 id=309 data-nosnippet>309</a>        // back on this path via `producer_gauge::rollback`. The thread owns a
+<a href=#310 id=310 data-nosnippet>310</a>        // fresh single-threaded (current_thread) Tokio runtime so it never
+<a href=#311 id=311 data-nosnippet>311</a>        // collides with any runtime on the calling thread (Issue #587) and adds no
+<a href=#312 id=312 data-nosnippet>312</a>        // worker threads beyond itself (Issue #2316).
+<a href=#313 id=313 data-nosnippet>313</a>        </span><span class="kw">let </span>producer = <span class="kw">match </span>std::thread::Builder::new().spawn(<span class="kw">move </span>|| {
+<a href=#314 id=314 data-nosnippet>314</a>            <span class="kw">let </span>_subphase_guard = <span class="kw">crate</span>::observability::stream_subphase::install(subphase_sink);
+<a href=#315 id=315 data-nosnippet>315</a>            <span class="kw">let </span>_read_phase_guard = <span class="kw">crate</span>::observability::read_phase::install(read_phase_sink);
+<a href=#316 id=316 data-nosnippet>316</a>            <span class="self">Self</span>::producer_thread(
+<a href=#317 id=317 data-nosnippet>317</a>                path_buf,
+<a href=#318 id=318 data-nosnippet>318</a>                run_index,
+<a href=#319 id=319 data-nosnippet>319</a>                schema,
+<a href=#320 id=320 data-nosnippet>320</a>                udt_registry,
+<a href=#321 id=321 data-nosnippet>321</a>                scan_cancel,
+<a href=#322 id=322 data-nosnippet>322</a>                sender,
+<a href=#323 id=323 data-nosnippet>323</a>                producer_sent_count,
+<a href=#324 id=324 data-nosnippet>324</a>                channel_capacity,
+<a href=#325 id=325 data-nosnippet>325</a>                fault,
+<a href=#326 id=326 data-nosnippet>326</a>                reporting,
+<a href=#327 id=327 data-nosnippet>327</a>            );
+<a href=#328 id=328 data-nosnippet>328</a>        }) {
+<a href=#329 id=329 data-nosnippet>329</a>            <span class="prelude-val">Ok</span>(handle) =&gt; handle,
+<a href=#330 id=330 data-nosnippet>330</a>            <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#331 id=331 data-nosnippet>331</a>                producer_gauge::rollback();
+<a href=#332 id=332 data-nosnippet>332</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(Error::Storage(<span class="macro">format!</span>(
+<a href=#333 id=333 data-nosnippet>333</a>                    <span class="string">"streaming producer: failed to spawn thread: {}"</span>,
+<a href=#334 id=334 data-nosnippet>334</a>                    e
+<a href=#335 id=335 data-nosnippet>335</a>                )));
+<a href=#336 id=336 data-nosnippet>336</a>            }
+<a href=#337 id=337 data-nosnippet>337</a>        };
+<a href=#338 id=338 data-nosnippet>338</a>
+<a href=#339 id=339 data-nosnippet>339</a>        <span class="prelude-val">Ok</span>(<span class="self">Self </span>{
+<a href=#340 id=340 data-nosnippet>340</a>            receiver: <span class="prelude-val">Some</span>(receiver),
+<a href=#341 id=341 data-nosnippet>341</a>            producer: <span class="prelude-val">Some</span>(producer),
+<a href=#342 id=342 data-nosnippet>342</a>            scan_cancel: adapter_cancel,
+<a href=#343 id=343 data-nosnippet>343</a>            sent_count,
+<a href=#344 id=344 data-nosnippet>344</a>            received_count: <span class="number">0</span>,
+<a href=#345 id=345 data-nosnippet>345</a>            held: Vec::new().into_iter(),
+<a href=#346 id=346 data-nosnippet>346</a>            <span class="comment">// Issue #3120: no terminator observed yet. `None` (end of input) is
+<a href=#347 id=347 data-nosnippet>347</a>            // reachable ONLY from a `Done`-proven `RunState::Finished`.
+<a href=#348 id=348 data-nosnippet>348</a>            </span>state: RunState::Streaming,
+<a href=#349 id=349 data-nosnippet>349</a>            <span class="attr">#[cfg(test)]
+<a href=#350 id=350 data-nosnippet>350</a>            </span>egress_channel_capacity: message_capacity,
+<a href=#351 id=351 data-nosnippet>351</a>            <span class="attr">#[cfg(test)]
+<a href=#352 id=352 data-nosnippet>352</a>            </span>egress_rows_capacity: channel_capacity,
+<a href=#353 id=353 data-nosnippet>353</a>        })
+<a href=#354 id=354 data-nosnippet>354</a>    }
+<a href=#355 id=355 data-nosnippet>355</a>
+<a href=#356 id=356 data-nosnippet>356</a>    <span class="doccomment">/// Body of the producer thread.
+<a href=#357 id=357 data-nosnippet>357</a>    ///
+<a href=#358 id=358 data-nosnippet>358</a>    /// Opens the SSTable with buffered I/O (Issue #591), then **streams** the
+<a href=#359 id=359 data-nosnippet>359</a>    /// source one partition at a time via
+<a href=#360 id=360 data-nosnippet>360</a>    /// [`stream_all_partitions_for_compaction`](crate::storage::sstable::reader::SSTableReader::stream_all_partitions_for_compaction),
+<a href=#361 id=361 data-nosnippet>361</a>    /// converting each entry to a [`MergeEntry`] (populating the clustering key
+<a href=#362 id=362 data-nosnippet>362</a>    /// from the decoded cells when the schema has clustering columns) and sending
+<a href=#363 id=363 data-nosnippet>363</a>    /// it through the bounded channel, BATCHED since issue #2820 (issue #827). The
+<a href=#364 id=364 data-nosnippet>364</a>    /// blocking `SyncSender::send` provides the backpressure that — together
+<a href=#365 id=365 data-nosnippet>365</a>    /// with the reader's sliding-window stitch+parse — keeps peak memory bounded
+<a href=#366 id=366 data-nosnippet>366</a>    /// by `max_partition_size + one_chunk + egress_batch::max_inflight_rows`
+<a href=#367 id=367 data-nosnippet>367</a>    /// (and `egress_batch::max_inflight_bytes`), independent of total source size.
+<a href=#368 id=368 data-nosnippet>368</a>    ///
+<a href=#369 id=369 data-nosnippet>369</a>    /// Sends EXACTLY ONE terminal [`MergeMsg`] on EVERY exit path (issue #3120) —
+<a href=#370 id=370 data-nosnippet>370</a>    /// `Done` on a completed walk, `Failed` on an error return, `Failed(Panicked)`
+<a href=#371 id=371 data-nosnippet>371</a>    /// on an unwind caught here — so the consumer never has to infer completion
+<a href=#372 id=372 data-nosnippet>372</a>    /// from a channel disconnect. See [`producer_msg`](super::producer_msg)'s
+<a href=#373 id=373 data-nosnippet>373</a>    /// header for why both the `catch_unwind` and the `Done` sentinel are needed.
+<a href=#374 id=374 data-nosnippet>374</a>    </span><span class="attr">#[allow(clippy::too_many_arguments)]
+<a href=#375 id=375 data-nosnippet>375</a>    </span><span class="kw">fn </span>producer_thread(
+<a href=#376 id=376 data-nosnippet>376</a>        path_buf: PathBuf,
+<a href=#377 id=377 data-nosnippet>377</a>        run_index: usize,
+<a href=#378 id=378 data-nosnippet>378</a>        schema: TableSchema,
+<a href=#379 id=379 data-nosnippet>379</a>        udt_registry: <span class="prelude-ty">Option</span>&lt;<span class="kw">crate</span>::schema::UdtRegistry&gt;,
+<a href=#380 id=380 data-nosnippet>380</a>        scan_cancel: <span class="kw">crate</span>::storage::scan_cancel::ScanCancel,
+<a href=#381 id=381 data-nosnippet>381</a>        sender: std::sync::mpsc::SyncSender&lt;MergeMsg&gt;,
+<a href=#382 id=382 data-nosnippet>382</a>        sent_count: std::sync::Arc&lt;std::sync::atomic::AtomicI64&gt;,
+<a href=#383 id=383 data-nosnippet>383</a>        <span class="comment">// Issue #2820: the merge-scoped adaptive ROW capacity, which bounds this
+<a href=#384 id=384 data-nosnippet>384</a>        // run's BATCH size as well as its channel's message capacity — see
+<a href=#385 id=385 data-nosnippet>385</a>        // `egress_batch::batch_limit_ceiling`.
+<a href=#386 id=386 data-nosnippet>386</a>        </span>channel_capacity: usize,
+<a href=#387 id=387 data-nosnippet>387</a>        <span class="kw-2">mut </span>fault: MergeProducerFault,
+<a href=#388 id=388 data-nosnippet>388</a>        reporting: <span class="kw">crate</span>::storage::sstable::reader::OpenErrorReporting,
+<a href=#389 id=389 data-nosnippet>389</a>    ) {
+<a href=#390 id=390 data-nosnippet>390</a>        <span class="comment">// Issue #2316: decrement the live producer-thread gauge when this thread
+<a href=#391 id=391 data-nosnippet>391</a>        // exits (even on panic). Created FIRST so the spawn-time increment in
+<a href=#392 id=392 data-nosnippet>392</a>        // `open` is always balanced exactly once.
+<a href=#393 id=393 data-nosnippet>393</a>        </span><span class="kw">let </span>_thread_guard = producer_gauge::ProducerThreadGuard;
+<a href=#394 id=394 data-nosnippet>394</a>
+<a href=#395 id=395 data-nosnippet>395</a>        <span class="comment">// Drive the streaming read on an owned Tokio runtime (Issue #587): the
+<a href=#396 id=396 data-nosnippet>396</a>        // producer owns its single-purpose runtime, so the blocking
+<a href=#397 id=397 data-nosnippet>397</a>        // `SyncSender::send` inside the emit callback never stalls a shared
+<a href=#398 id=398 data-nosnippet>398</a>        // runtime, and there is no nested `block_on` / `Handle::current`. The
+<a href=#399 id=399 data-nosnippet>399</a>        // runtime is `current_thread` (Issue #2316), so it adds no worker threads.
+<a href=#400 id=400 data-nosnippet>400</a>        // Buffered I/O (Issue #591): the file must not be memory-mapped OR read
+<a href=#401 id=401 data-nosnippet>401</a>        // via direct I/O because finalize_merge_async may delete it after the
+<a href=#402 id=402 data-nosnippet>402</a>        // merge completes. The default disk-access mode is `Auto`, which would
+<a href=#403 id=403 data-nosnippet>403</a>        // otherwise map (or direct-read) inputs above the size thresholds, so we
+<a href=#404 id=404 data-nosnippet>404</a>        // force `Buffered` explicitly here — clearing `use_mmap` alone is no
+<a href=#405 id=405 data-nosnippet>405</a>        // longer sufficient now that `Auto` ignores that legacy flag.
+<a href=#406 id=406 data-nosnippet>406</a>        // Clone the sender for the TERMINAL message: the streaming closure moves
+<a href=#407 id=407 data-nosnippet>407</a>        // one clone for per-entry sends, leaving this one to report the single
+<a href=#408 id=408 data-nosnippet>408</a>        // terminator. Issue #3120: it lives OUTSIDE the `catch_unwind` closure, so
+<a href=#409 id=409 data-nosnippet>409</a>        // an unwind cannot drop it before the terminator is sent.
+<a href=#410 id=410 data-nosnippet>410</a>        </span><span class="kw">let </span>terminal_sender = sender.clone();
+<a href=#411 id=411 data-nosnippet>411</a>        <span class="comment">// Reborrowed into the closure (and on into the `async move` block) so the
+<a href=#412 id=412 data-nosnippet>412</a>        // per-row fault checkpoint is reached without the closure taking ownership.
+<a href=#413 id=413 data-nosnippet>413</a>        </span><span class="kw">let </span>fault = <span class="kw-2">&amp;mut </span>fault;
+<a href=#414 id=414 data-nosnippet>414</a>        <span class="comment">// Issue #3120: an UNWINDING walk must not look like a finished one.
+<a href=#415 id=415 data-nosnippet>415</a>        // `AssertUnwindSafe` is sound here because nothing the closure touched is
+<a href=#416 id=416 data-nosnippet>416</a>        // observed after an unwind: the reader, config, schema, cancel token and
+<a href=#417 id=417 data-nosnippet>417</a>        // fault state are dropped, and the only thing used afterwards is
+<a href=#418 id=418 data-nosnippet>418</a>        // `terminal_sender` — an mpsc `SyncSender`, which has no
+<a href=#419 id=419 data-nosnippet>419</a>        // poisoning/broken-invariant state. `sent_count` is an atomic whose value
+<a href=#420 id=420 data-nosnippet>420</a>        // stays meaningful (it counts sends that already succeeded) and `Drop`
+<a href=#421 id=421 data-nosnippet>421</a>        // reads it only after joining this thread.
+<a href=#422 id=422 data-nosnippet>422</a>        </span><span class="kw">let </span>stream_result =
+<a href=#423 id=423 data-nosnippet>423</a>            std::panic::catch_unwind(std::panic::AssertUnwindSafe(<span class="kw">move </span>|| -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
+<a href=#424 id=424 data-nosnippet>424</a>                <span class="kw">use </span><span class="kw">crate</span>::config::DiskAccessMode;
+<a href=#425 id=425 data-nosnippet>425</a>                <span class="kw">use </span><span class="kw">crate</span>::platform::Platform;
+<a href=#426 id=426 data-nosnippet>426</a>                <span class="kw">use </span><span class="kw">crate</span>::Config;
+<a href=#427 id=427 data-nosnippet>427</a>                <span class="kw">use </span>std::sync::Arc;
+<a href=#428 id=428 data-nosnippet>428</a>
+<a href=#429 id=429 data-nosnippet>429</a>                <span class="kw">let </span><span class="kw-2">mut </span>config = Config::default();
+<a href=#430 id=430 data-nosnippet>430</a>                config.storage.use_mmap = <span class="bool-val">false</span>;
+<a href=#431 id=431 data-nosnippet>431</a>                config.storage.disk_access_mode = DiskAccessMode::Buffered;
+<a href=#432 id=432 data-nosnippet>432</a>
+<a href=#433 id=433 data-nosnippet>433</a>                <span class="comment">// Issue #2316: a `current_thread` runtime drives the scan ON this
+<a href=#434 id=434 data-nosnippet>434</a>                // producer thread with ZERO extra workers. A multi-threaded
+<a href=#435 id=435 data-nosnippet>435</a>                // `Runtime::new()` would spin up `num_cpus` workers per producer
+<a href=#436 id=436 data-nosnippet>436</a>                // (~M·num_cpus threads/merge) that the single sequential scan never
+<a href=#437 id=437 data-nosnippet>437</a>                // uses — pure overhead. This bounds the per-merge thread cost to O(M).
+<a href=#438 id=438 data-nosnippet>438</a>                </span><span class="kw">let </span>rt = tokio::runtime::Builder::new_current_thread()
+<a href=#439 id=439 data-nosnippet>439</a>                    .enable_all()
+<a href=#440 id=440 data-nosnippet>440</a>                    .build()
+<a href=#441 id=441 data-nosnippet>441</a>                    .map_err(|e| {
+<a href=#442 id=442 data-nosnippet>442</a>                        Error::Storage(<span class="macro">format!</span>(
+<a href=#443 id=443 data-nosnippet>443</a>                            <span class="string">"streaming producer: failed to create runtime: {}"</span>,
+<a href=#444 id=444 data-nosnippet>444</a>                            e
+<a href=#445 id=445 data-nosnippet>445</a>                        ))
+<a href=#446 id=446 data-nosnippet>446</a>                    })<span class="question-mark">?</span>;
+<a href=#447 id=447 data-nosnippet>447</a>
+<a href=#448 id=448 data-nosnippet>448</a>                rt.block_on(<span class="kw">async move </span>{
+<a href=#449 id=449 data-nosnippet>449</a>                    <span class="kw">let </span>platform = Arc::new(Platform::new(<span class="kw-2">&amp;</span>config).<span class="kw">await</span><span class="question-mark">?</span>);
+<a href=#450 id=450 data-nosnippet>450</a>                    <span class="comment">// `open_with_reporting`, NOT the self-reporting default (issue #1704): this reopen is an
+<a href=#451 id=451 data-nosnippet>451</a>                    // INNER STEP. A failure here surfaces mid-stream at `step()` and
+<a href=#452 id=452 data-nosnippet>452</a>                    // is counted ONCE by the enclosing operation's seam — the measured
+<a href=#453 id=453 data-nosnippet>453</a>                    // `JoinedStream` on the cross-generation streaming read path, or
+<a href=#454 id=454 data-nosnippet>454</a>                    // `record_result("compaction", ..)` in `maintenance_step` on the
+<a href=#455 id=455 data-nosnippet>455</a>                    // write path. `open`, which records its own failure, made one
+<a href=#456 id=456 data-nosnippet>456</a>                    // failed reopen report TWO increments, under two different
+<a href=#457 id=457 data-nosnippet>457</a>                    // categories (measured: `io` from the raw EACCES plus `storage`
+<a href=#458 id=458 data-nosnippet>458</a>                    // from the merge's rewrap).
+<a href=#459 id=459 data-nosnippet>459</a>                    </span><span class="kw">let </span><span class="kw-2">mut </span>reader =
+<a href=#460 id=460 data-nosnippet>460</a>                        <span class="kw">crate</span>::storage::sstable::reader::SSTableReader::open_with_reporting(
+<a href=#461 id=461 data-nosnippet>461</a>                            <span class="kw-2">&amp;</span>path_buf, <span class="kw-2">&amp;</span>config, platform, reporting,
+<a href=#462 id=462 data-nosnippet>462</a>                        )
+<a href=#463 id=463 data-nosnippet>463</a>                        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#464 id=464 data-nosnippet>464</a>
+<a href=#465 id=465 data-nosnippet>465</a>                    <span class="comment">// Issue #1234: wire the authoritative UDT registry onto the reader
+<a href=#466 id=466 data-nosnippet>466</a>                    // so the compaction read path decodes a top-level `frozen&lt;UDT&gt;`
+<a href=#467 id=467 data-nosnippet>467</a>                    // value structurally. Without it the value decode errors
+<a href=#468 id=468 data-nosnippet>468</a>                    // (`UDT not found in registry`), the row reconciles to empty, and
+<a href=#469 id=469 data-nosnippet>469</a>                    // the partition is dropped — silent data loss during compaction.
+<a href=#470 id=470 data-nosnippet>470</a>                    // This mutation requires `&amp;mut self`, so it can only happen HERE
+<a href=#471 id=471 data-nosnippet>471</a>                    // — before the reader is ever shared — not on the shared-reader
+<a href=#472 id=472 data-nosnippet>472</a>                    // producer path (issue #2346, see `from_readers::open_from_reader`'s
+<a href=#473 id=473 data-nosnippet>473</a>                    // doc comment for that seam's UDT-registry contract).
+<a href=#474 id=474 data-nosnippet>474</a>                    </span><span class="kw">if let </span><span class="prelude-val">Some</span>(registry) = udt_registry {
+<a href=#475 id=475 data-nosnippet>475</a>                        reader.set_udt_registry(registry);
+<a href=#476 id=476 data-nosnippet>476</a>                    }
+<a href=#477 id=477 data-nosnippet>477</a>
+<a href=#478 id=478 data-nosnippet>478</a>                    <span class="comment">// Issue #2264/#2346: the cooperative-cancellation token is now a
+<a href=#479 id=479 data-nosnippet>479</a>                    // PER-CALL parameter to `stream_all_partitions_for_compaction`
+<a href=#480 id=480 data-nosnippet>480</a>                    // rather than mutated onto the reader (`set_scan_cancel` needed
+<a href=#481 id=481 data-nosnippet>481</a>                    // `&amp;mut self`, which a SHARED reader cannot offer — see
+<a href=#482 id=482 data-nosnippet>482</a>                    // `from_readers::drive_compaction_stream`). This path-based
+<a href=#483 id=483 data-nosnippet>483</a>                    // producer still owns its freshly-opened `reader` exclusively, so
+<a href=#484 id=484 data-nosnippet>484</a>                    // passing `scan_cancel` by reference here is behaviourally
+<a href=#485 id=485 data-nosnippet>485</a>                    // identical to the old `set_scan_cancel` + field-read.
+<a href=#486 id=486 data-nosnippet>486</a>                    //
+<a href=#487 id=487 data-nosnippet>487</a>                    // Pass the schema so the parser uses the real clustering column
+<a href=#488 id=488 data-nosnippet>488</a>                    // names; the header-inferred fallback uses generic names like
+<a href=#489 id=489 data-nosnippet>489</a>                    // "clustering_key", which would defeat extract_clustering_key.
+<a href=#490 id=490 data-nosnippet>490</a>                    // `drive_compaction_stream` is the SAME streaming helper the
+<a href=#491 id=491 data-nosnippet>491</a>                    // shared-reader producer thread uses (issue #2346) — the
+<a href=#492 id=492 data-nosnippet>492</a>                    // conversion/backpressure/cancellation-by-variant semantics are
+<a href=#493 id=493 data-nosnippet>493</a>                    // defined in exactly one place.
+<a href=#494 id=494 data-nosnippet>494</a>                    </span>from_readers::drive_compaction_stream(
+<a href=#495 id=495 data-nosnippet>495</a>                        <span class="kw-2">&amp;</span>reader,
+<a href=#496 id=496 data-nosnippet>496</a>                        run_index,
+<a href=#497 id=497 data-nosnippet>497</a>                        <span class="kw-2">&amp;</span>schema,
+<a href=#498 id=498 data-nosnippet>498</a>                        <span class="kw-2">&amp;</span>scan_cancel,
+<a href=#499 id=499 data-nosnippet>499</a>                        <span class="kw-2">&amp;</span>sender,
+<a href=#500 id=500 data-nosnippet>500</a>                        sent_count.as_ref(),
+<a href=#501 id=501 data-nosnippet>501</a>                        channel_capacity,
+<a href=#502 id=502 data-nosnippet>502</a>                        fault,
+<a href=#503 id=503 data-nosnippet>503</a>                    )
+<a href=#504 id=504 data-nosnippet>504</a>                    .<span class="kw">await
+<a href=#505 id=505 data-nosnippet>505</a>                </span>})
+<a href=#506 id=506 data-nosnippet>506</a>            }));
+<a href=#507 id=507 data-nosnippet>507</a>
+<a href=#508 id=508 data-nosnippet>508</a>        <span class="comment">// EXACTLY ONE terminal message, on every exit path (issue #3120).
+<a href=#509 id=509 data-nosnippet>509</a>        // `Cancelled` is preserved distinctly (issue #2264) by
+<a href=#510 id=510 data-nosnippet>510</a>        // `MergeProducerError::from`.
+<a href=#511 id=511 data-nosnippet>511</a>        </span><span class="kw">let </span>terminal = <span class="kw">match </span>stream_result {
+<a href=#512 id=512 data-nosnippet>512</a>            <span class="prelude-val">Ok</span>(<span class="prelude-val">Ok</span>(())) =&gt; MergeMsg::Done,
+<a href=#513 id=513 data-nosnippet>513</a>            <span class="prelude-val">Ok</span>(<span class="prelude-val">Err</span>(e)) =&gt; MergeMsg::Failed(MergeProducerError::from(e)),
+<a href=#514 id=514 data-nosnippet>514</a>            <span class="prelude-val">Err</span>(panic) =&gt; MergeMsg::Failed(panicked_producer_error(panic.as_ref())),
+<a href=#515 id=515 data-nosnippet>515</a>        };
+<a href=#516 id=516 data-nosnippet>516</a>        <span class="comment">// The BLOCKING `send`, never `try_send`: dropping the terminator because
+<a href=#517 id=517 data-nosnippet>517</a>        // the bounded channel happened to be full would recreate exactly the
+<a href=#518 id=518 data-nosnippet>518</a>        // ambiguity this protocol removes. A failed send means the consumer is
+<a href=#519 id=519 data-nosnippet>519</a>        // already gone, which is fine — nobody is left to mislead.
+<a href=#520 id=520 data-nosnippet>520</a>        </span><span class="kw">let _ </span>= terminal_sender.send(terminal);
+<a href=#521 id=521 data-nosnippet>521</a>        <span class="comment">// Channel closed naturally when sender is dropped here.
+<a href=#522 id=522 data-nosnippet>522</a>    </span>}
+<a href=#523 id=523 data-nosnippet>523</a>}
+<a href=#524 id=524 data-nosnippet>524</a>
+<a href=#525 id=525 data-nosnippet>525</a><span class="attr">#[cfg(feature = <span class="string">"write-support"</span>)]
+<a href=#526 id=526 data-nosnippet>526</a></span><span class="kw">impl </span>SSTableRowIterator <span class="kw">for </span>SSTableRowIteratorAdapter {
+<a href=#527 id=527 data-nosnippet>527</a>    <span class="doccomment">/// Pull the next entry of this run.
+<a href=#528 id=528 data-nosnippet>528</a>    ///
+<a href=#529 id=529 data-nosnippet>529</a>    /// `None` means EXHAUSTED, and issue #3120 made that answer reachable from
+<a href=#530 id=530 data-nosnippet>530</a>    /// exactly ONE place: a [`RunState::Finished`] proven by the producer's
+<a href=#531 id=531 data-nosnippet>531</a>    /// [`MergeMsg::Done`] terminator. Every other way this adapter can stop —
+<a href=#532 id=532 data-nosnippet>532</a>    /// a bare channel disconnect, a torn-down receiver, a terminal failure — is
+<a href=#533 id=533 data-nosnippet>533</a>    /// an `Err`, because a run whose standing is unknown is a TRUNCATED run, and
+<a href=#534 id=534 data-nosnippet>534</a>    /// merging (or REWRITING) a truncated run as if it were complete is silent
+<a href=#535 id=535 data-nosnippet>535</a>    /// data loss.
+<a href=#536 id=536 data-nosnippet>536</a>    </span><span class="kw">fn </span>next(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;<span class="prelude-ty">Result</span>&lt;MergeEntry&gt;&gt; {
+<a href=#537 id=537 data-nosnippet>537</a>        <span class="kw">use </span>std::sync::mpsc::RecvTimeoutError;
+<a href=#538 id=538 data-nosnippet>538</a>        <span class="comment">// A terminal state is STICKY: re-poll it as many times as a consumer
+<a href=#539 id=539 data-nosnippet>539</a>        // likes, and it never decays into a clean end of input. `RunReader::
+<a href=#540 id=540 data-nosnippet>540</a>        // refill_buffer` propagates our `Err` but keeps no sticky error of its
+<a href=#541 id=541 data-nosnippet>541</a>        // own, so this is where the stickiness has to live (issue #3120).
+<a href=#542 id=542 data-nosnippet>542</a>        </span><span class="kw">match </span><span class="kw-2">&amp;</span><span class="self">self</span>.state {
+<a href=#543 id=543 data-nosnippet>543</a>            RunState::Finished =&gt; <span class="kw">return </span><span class="prelude-val">None</span>,
+<a href=#544 id=544 data-nosnippet>544</a>            RunState::Failed(e) =&gt; <span class="kw">return </span><span class="prelude-val">Some</span>(<span class="prelude-val">Err</span>(e.to_error())),
+<a href=#545 id=545 data-nosnippet>545</a>            RunState::Died =&gt; <span class="kw">return </span><span class="prelude-val">Some</span>(<span class="prelude-val">Err</span>(dead_producer_error())),
+<a href=#546 id=546 data-nosnippet>546</a>            RunState::Streaming =&gt; {}
+<a href=#547 id=547 data-nosnippet>547</a>        }
+<a href=#548 id=548 data-nosnippet>548</a>        <span class="comment">// The receiver is torn down ONLY by `Drop`, so a live poll that finds it
+<a href=#549 id=549 data-nosnippet>549</a>        // gone has NO verdict at all. Pre-#3120 this was a `?`, i.e. a second
+<a href=#550 id=550 data-nosnippet>550</a>        // silent route to "exhausted"; fail closed instead.
+<a href=#551 id=551 data-nosnippet>551</a>        </span><span class="kw">let </span>receiver = <span class="kw">match </span><span class="self">self</span>.receiver.as_ref() {
+<a href=#552 id=552 data-nosnippet>552</a>            <span class="prelude-val">Some</span>(receiver) =&gt; receiver,
+<a href=#553 id=553 data-nosnippet>553</a>            <span class="prelude-val">None </span>=&gt; {
+<a href=#554 id=554 data-nosnippet>554</a>                <span class="self">self</span>.state = RunState::Died;
+<a href=#555 id=555 data-nosnippet>555</a>                <span class="kw">return </span><span class="prelude-val">Some</span>(<span class="prelude-val">Err</span>(dead_producer_error()));
+<a href=#556 id=556 data-nosnippet>556</a>            }
+<a href=#557 id=557 data-nosnippet>557</a>        };
+<a href=#558 id=558 data-nosnippet>558</a>        <span class="comment">// Cancel-aware blocking recv (issue #2361): a plain `recv()` blocks
+<a href=#559 id=559 data-nosnippet>559</a>        // indefinitely inside `KWayMerger::step`, so a `do_get` cancellation that
+<a href=#560 id=560 data-nosnippet>560</a>        // lands while the consumer is waiting for the next producer entry was NOT
+<a href=#561 id=561 data-nosnippet>561</a>        // observed until an entry (or channel close) arrived. Poll `scan_cancel`
+<a href=#562 id=562 data-nosnippet>562</a>        // at a bounded interval so `drive_merge` sees `Error::Cancelled` promptly
+<a href=#563 id=563 data-nosnippet>563</a>        // even while blocked here.
+<a href=#564 id=564 data-nosnippet>564</a>        </span><span class="kw">loop </span>{
+<a href=#565 id=565 data-nosnippet>565</a>            <span class="comment">// A CANCELLED scan must never be reported as a dead producer (issue
+<a href=#566 id=566 data-nosnippet>566</a>            // #3120): that is this fix's likeliest false positive. The check stays
+<a href=#567 id=567 data-nosnippet>567</a>            // at the TOP of the loop so it wins over a queued terminator, and
+<a href=#568 id=568 data-nosnippet>568</a>            // `ScanCancel` is set-once, so a repeat poll keeps answering
+<a href=#569 id=569 data-nosnippet>569</a>            // `Cancelled` — no state transition is needed or wanted here (the run
+<a href=#570 id=570 data-nosnippet>570</a>            // is abandoned, not truncated-and-misreported).
+<a href=#571 id=571 data-nosnippet>571</a>            </span><span class="kw">if </span><span class="self">self</span>.scan_cancel.is_cancelled() {
+<a href=#572 id=572 data-nosnippet>572</a>                <span class="kw">return </span><span class="prelude-val">Some</span>(<span class="prelude-val">Err</span>(Error::Cancelled));
+<a href=#573 id=573 data-nosnippet>573</a>            }
+<a href=#574 id=574 data-nosnippet>574</a>            <span class="comment">// Hand out the next entry of the batch already in hand (issue #2820)
+<a href=#575 id=575 data-nosnippet>575</a>            // BEFORE touching the channel. Deliberately BELOW the cancel check, so
+<a href=#576 id=576 data-nosnippet>576</a>            // cancellation wins over a partially-drained batch too: the run is
+<a href=#577 id=577 data-nosnippet>577</a>            // abandoned, and a torn-down consumer that kept draining buffered rows
+<a href=#578 id=578 data-nosnippet>578</a>            // would delay the very teardown the cancel exists to start. Its
+<a href=#579 id=579 data-nosnippet>579</a>            // entries were already accounted as received when the batch was pulled
+<a href=#580 id=580 data-nosnippet>580</a>            // off the channel, so abandoning them here cannot unbalance the
+<a href=#581 id=581 data-nosnippet>581</a>            // egress-depth gauge (nor the `Drop` reconcile, which is computed from
+<a href=#582 id=582 data-nosnippet>582</a>            // the SAME `received_count`).
+<a href=#583 id=583 data-nosnippet>583</a>            </span><span class="kw">if let </span><span class="prelude-val">Some</span>(entry) = <span class="self">self</span>.held.next() {
+<a href=#584 id=584 data-nosnippet>584</a>                <span class="comment">// Issue #2096: one merge entry decoded from `Data.db` by THIS
+<a href=#585 id=585 data-nosnippet>585</a>                // adapter-driven run — a full scan, compaction, or (via the
+<a href=#586 id=586 data-nosnippet>586</a>                // fail-safe `SinglePartitionFilterRun`) a point read all share
+<a href=#587 id=587 data-nosnippet>587</a>                // this increment site, so `merge_run_entries_decoded` counts
+<a href=#588 id=588 data-nosnippet>588</a>                // entries for any of them, not point reads alone. It is counted
+<a href=#589 id=589 data-nosnippet>589</a>                // per ENTRY HANDED OUT (never per batch received): its unit is
+<a href=#590 id=590 data-nosnippet>590</a>                // entries decoded, and every existing bound test reads it as such.
+<a href=#591 id=591 data-nosnippet>591</a>                // See `work_counters::merge_run_entries_decoded`'s doc for the
+<a href=#592 id=592 data-nosnippet>592</a>                // process-global caveat when using it as a delta assertion.
+<a href=#593 id=593 data-nosnippet>593</a>                </span><span class="kw">crate</span>::storage::sstable::work_counters::add_merge_run_entry_decoded();
+<a href=#594 id=594 data-nosnippet>594</a>                <span class="kw">return </span><span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(entry));
+<a href=#595 id=595 data-nosnippet>595</a>            }
+<a href=#596 id=596 data-nosnippet>596</a>            <span class="kw">match </span>receiver.recv_timeout(RECV_CANCEL_POLL) {
+<a href=#597 id=597 data-nosnippet>597</a>                <span class="prelude-val">Ok</span>(MergeMsg::Batch(entries)) =&gt; {
+<a href=#598 id=598 data-nosnippet>598</a>                    <span class="comment">// Issue #2419 (WS2): these DATA entries just left the bounded
+<a href=#599 id=599 data-nosnippet>599</a>                    // egress channel — decrement the live occupancy gauge by the
+<a href=#600 id=600 data-nosnippet>600</a>                    // BATCH LENGTH, balancing the `channel_depth::sent_n` at its
+<a href=#601 id=601 data-nosnippet>601</a>                    // send site (`egress_batch::EgressBatcher::flush`).
+<a href=#602 id=602 data-nosnippet>602</a>                    // `received_count` is this adapter's OWN mirror of that
+<a href=#603 id=603 data-nosnippet>603</a>                    // decrement (roborev job 1733), read by `Drop` post-join to
+<a href=#604 id=604 data-nosnippet>604</a>                    // compute the exact reconcile residual — see the field doc.
+<a href=#605 id=605 data-nosnippet>605</a>                    // Issue #2820: BOTH must move by entries, never by 1 per
+<a href=#606 id=606 data-nosnippet>606</a>                    // message, or the residual drifts by `entries - messages` and
+<a href=#607 id=607 data-nosnippet>607</a>                    // the `&gt; 0` guard plus `max(0)` floor hide it forever.
+<a href=#608 id=608 data-nosnippet>608</a>                    //
+<a href=#609 id=609 data-nosnippet>609</a>                    // Issue #3120 — the receive-side half of "a TERMINATOR is
+<a href=#610 id=610 data-nosnippet>610</a>                    // untracked on both sides". Note what enforces it HERE: this
+<a href=#611 id=611 data-nosnippet>611</a>                    // arm does NOT call `MergeMsg::tracked_entries` (that is the
+<a href=#612 id=612 data-nosnippet>612</a>                    // send site's compile-time tripwire). It is correct because
+<a href=#613 id=613 data-nosnippet>613</a>                    // (a) the `match` it belongs to is EXHAUSTIVE with no wildcard
+<a href=#614 id=614 data-nosnippet>614</a>                    // arm, so a future 4th variant is a compile error rather than
+<a href=#615 id=615 data-nosnippet>615</a>                    // a silent catch-all, and (b) `channel_depth::received_n` and
+<a href=#616 id=616 data-nosnippet>616</a>                    // `received_count` each appear at exactly ONE site in the
+<a href=#617 id=617 data-nosnippet>617</a>                    // crate — both right here, both passed the same length.
+<a href=#618 id=618 data-nosnippet>618</a>                    </span><span class="kw">let </span>received = entries.len();
+<a href=#619 id=619 data-nosnippet>619</a>                    channel_depth::received_n(received);
+<a href=#620 id=620 data-nosnippet>620</a>                    <span class="self">self</span>.received_count += received <span class="kw">as </span>i64;
+<a href=#621 id=621 data-nosnippet>621</a>                    <span class="comment">// Hold the batch and loop: the top of the loop re-checks the
+<a href=#622 id=622 data-nosnippet>622</a>                    // cancel flag, then hands out its first entry. An EMPTY batch
+<a href=#623 id=623 data-nosnippet>623</a>                    // (never sent by `EgressBatcher`, which returns early on an
+<a href=#624 id=624 data-nosnippet>624</a>                    // empty accumulator) simply polls again — it can never be
+<a href=#625 id=625 data-nosnippet>625</a>                    // mistaken for end-of-input, which only `Done` proves.
+<a href=#626 id=626 data-nosnippet>626</a>                    </span><span class="self">self</span>.held = entries.into_iter();
+<a href=#627 id=627 data-nosnippet>627</a>                    <span class="kw">continue</span>;
+<a href=#628 id=628 data-nosnippet>628</a>                }
+<a href=#629 id=629 data-nosnippet>629</a>                <span class="comment">// TERMINAL failure. Recorded so a repeat poll re-reports the
+<a href=#630 id=630 data-nosnippet>630</a>                // identical error. `Cancelled` stays a distinct `Error::Cancelled`
+<a href=#631 id=631 data-nosnippet>631</a>                // (issue #2264) — `drive_merge` matches on the variant, not on a
+<a href=#632 id=632 data-nosnippet>632</a>                // side-channel flag — via `MergeProducerError::to_error`.
+<a href=#633 id=633 data-nosnippet>633</a>                </span><span class="prelude-val">Ok</span>(MergeMsg::Failed(e)) =&gt; {
+<a href=#634 id=634 data-nosnippet>634</a>                    <span class="kw">let </span>error = e.to_error();
+<a href=#635 id=635 data-nosnippet>635</a>                    <span class="self">self</span>.state = RunState::Failed(e);
+<a href=#636 id=636 data-nosnippet>636</a>                    <span class="kw">return </span><span class="prelude-val">Some</span>(<span class="prelude-val">Err</span>(error));
+<a href=#637 id=637 data-nosnippet>637</a>                }
+<a href=#638 id=638 data-nosnippet>638</a>                <span class="comment">// The ONLY proof of a clean, COMPLETE run.
+<a href=#639 id=639 data-nosnippet>639</a>                </span><span class="prelude-val">Ok</span>(MergeMsg::Done) =&gt; {
+<a href=#640 id=640 data-nosnippet>640</a>                    <span class="self">self</span>.state = RunState::Finished;
+<a href=#641 id=641 data-nosnippet>641</a>                    <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#642 id=642 data-nosnippet>642</a>                }
+<a href=#643 id=643 data-nosnippet>643</a>                <span class="comment">// No entry yet: re-poll the cancel flag and keep waiting.
+<a href=#644 id=644 data-nosnippet>644</a>                </span><span class="prelude-val">Err</span>(RecvTimeoutError::Timeout) =&gt; <span class="kw">continue</span>,
+<a href=#645 id=645 data-nosnippet>645</a>                <span class="comment">// The sender was dropped WITHOUT a terminator. Only a dead
+<a href=#646 id=646 data-nosnippet>646</a>                // producer can do that (a healthy one sends `Done`; a failing one
+<a href=#647 id=647 data-nosnippet>647</a>                // sends `Failed`), so this run is TRUNCATED at an arbitrary point.
+<a href=#648 id=648 data-nosnippet>648</a>                // Pre-#3120 this returned `None` — "the run is exhausted" — which
+<a href=#649 id=649 data-nosnippet>649</a>                // is the defect: a short read result, or a short REWRITTEN SSTable.
+<a href=#650 id=650 data-nosnippet>650</a>                </span><span class="prelude-val">Err</span>(RecvTimeoutError::Disconnected) =&gt; {
+<a href=#651 id=651 data-nosnippet>651</a>                    <span class="self">self</span>.state = RunState::Died;
+<a href=#652 id=652 data-nosnippet>652</a>                    <span class="kw">return </span><span class="prelude-val">Some</span>(<span class="prelude-val">Err</span>(dead_producer_error()));
+<a href=#653 id=653 data-nosnippet>653</a>                }
+<a href=#654 id=654 data-nosnippet>654</a>            }
+<a href=#655 id=655 data-nosnippet>655</a>        }
+<a href=#656 id=656 data-nosnippet>656</a>    }
+<a href=#657 id=657 data-nosnippet>657</a>
+<a href=#658 id=658 data-nosnippet>658</a>    <span class="doccomment">/// Issue #2765 wiring hook: the exact capacity this adapter's egress
+<a href=#659 id=659 data-nosnippet>659</a>    /// `sync_channel` was constructed with — in MESSAGES since issue #2820.
+<a href=#660 id=660 data-nosnippet>660</a>    </span><span class="attr">#[cfg(test)]
+<a href=#661 id=661 data-nosnippet>661</a>    </span><span class="kw">fn </span>egress_channel_capacity(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;usize&gt; {
+<a href=#662 id=662 data-nosnippet>662</a>        <span class="prelude-val">Some</span>(<span class="self">self</span>.egress_channel_capacity)
+<a href=#663 id=663 data-nosnippet>663</a>    }
+<a href=#664 id=664 data-nosnippet>664</a>
+<a href=#665 id=665 data-nosnippet>665</a>    <span class="doccomment">/// Issue #2820 wiring hook: the ROW capacity snapshot the message capacity
+<a href=#666 id=666 data-nosnippet>666</a>    /// above was derived from (the merge-scoped `egress_budget` snapshot the
+<a href=#667 id=667 data-nosnippet>667</a>    /// constructor threaded in).
+<a href=#668 id=668 data-nosnippet>668</a>    </span><span class="attr">#[cfg(test)]
+<a href=#669 id=669 data-nosnippet>669</a>    </span><span class="kw">fn </span>egress_rows_capacity(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;usize&gt; {
+<a href=#670 id=670 data-nosnippet>670</a>        <span class="prelude-val">Some</span>(<span class="self">self</span>.egress_rows_capacity)
+<a href=#671 id=671 data-nosnippet>671</a>    }
+<a href=#672 id=672 data-nosnippet>672</a>}
+<a href=#673 id=673 data-nosnippet>673</a>
+<a href=#674 id=674 data-nosnippet>674</a><span class="doccomment">/// Cancel-aware teardown (issue #2361): trip the scan token, close the channel,
+<a href=#675 id=675 data-nosnippet>675</a>/// then JOIN the producer thread — so a dropped merger (LIMIT satisfied, client
+<a href=#676 id=676 data-nosnippet>676</a>/// disconnect, error, panic) does not leave a detached producer streaming a
+<a href=#677 id=677 data-nosnippet>677</a>/// multi-million-partition scan in the background.
+<a href=#678 id=678 data-nosnippet>678</a>///
+<a href=#679 id=679 data-nosnippet>679</a>/// ## Step order is LOAD-BEARING and must not change
+<a href=#680 id=680 data-nosnippet>680</a>///
+<a href=#681 id=681 data-nosnippet>681</a>/// cancel → drop receiver → join → reconcile. (1)+(2) are what make (3) bounded,
+<a href=#682 id=682 data-nosnippet>682</a>/// and (4) is only race-free once (3) has proven the producer can no longer send.
+<a href=#683 id=683 data-nosnippet>683</a>///
+<a href=#684 id=684 data-nosnippet>684</a>/// ## The join is a DIAGNOSTIC, never the verdict (issue #3120)
+<a href=#685 id=685 data-nosnippet>685</a>///
+<a href=#686 id=686 data-nosnippet>686</a>/// `std::thread::JoinHandle::join(self)` CONSUMES the handle and BLOCKS, so —
+<a href=#687 id=687 data-nosnippet>687</a>/// unlike the `tokio::JoinHandle` that issue #3106 could poll in place — it can
+<a href=#688 id=688 data-nosnippet>688</a>/// never be the mechanism that decides whether a run finished. The verdict comes
+<a href=#689 id=689 data-nosnippet>689</a>/// entirely from the producer's explicit terminator (see
+<a href=#690 id=690 data-nosnippet>690</a>/// [`SSTableRowIterator::next`] above and [`producer_msg`](super::producer_msg)),
+<a href=#691 id=691 data-nosnippet>691</a>/// which is why `next()` performs no join at all and stays non-blocking.
+<a href=#692 id=692 data-nosnippet>692</a>///
+<a href=#693 id=693 data-nosnippet>693</a>/// What step 3 does now is stop DISCARDING the join outcome: a producer that
+<a href=#694 id=694 data-nosnippet>694</a>/// unwound is logged here rather than silently swallowed. That is deliberately a
+<a href=#695 id=695 data-nosnippet>695</a>/// log/metric only — this `Drop` must stay NON-PANICKING (`teardown_tests` drops
+<a href=#696 id=696 data-nosnippet>696</a>/// mergers on purpose; issue #2361 pins that), and by the time a `Drop` runs the
+<a href=#697 id=697 data-nosnippet>697</a>/// consumer is gone, so there is nobody left to return an error to. The
+<a href=#698 id=698 data-nosnippet>698</a>/// correctness answer was already delivered through the channel.
+<a href=#699 id=699 data-nosnippet>699</a></span><span class="attr">#[cfg(feature = <span class="string">"write-support"</span>)]
+<a href=#700 id=700 data-nosnippet>700</a></span><span class="kw">impl </span>Drop <span class="kw">for </span>SSTableRowIteratorAdapter {
+<a href=#701 id=701 data-nosnippet>701</a>    <span class="kw">fn </span>drop(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
+<a href=#702 id=702 data-nosnippet>702</a>        <span class="comment">// 1. Trip the cooperative token so a producer that is mid-scan (polling
+<a href=#703 id=703 data-nosnippet>703</a>        //    `scan_cancel`, NOT blocked on a channel send) abandons its walk.
+<a href=#704 id=704 data-nosnippet>704</a>        </span><span class="self">self</span>.scan_cancel.cancel();
+<a href=#705 id=705 data-nosnippet>705</a>        <span class="comment">// 2. Drop the receiver so a producer BLOCKED on a full `SyncSender::send`
+<a href=#706 id=706 data-nosnippet>706</a>        //    wakes immediately (send returns `Err`, and `drive_compaction_stream`
+<a href=#707 id=707 data-nosnippet>707</a>        //    maps that to `ControlFlow::Break`). Without this the join below could
+<a href=#708 id=708 data-nosnippet>708</a>        //    block until the channel drained. Dropping it here (before the join)
+<a href=#709 id=709 data-nosnippet>709</a>        //    rather than relying on field-drop order (which runs AFTER this `Drop`)
+<a href=#710 id=710 data-nosnippet>710</a>        //    is what makes the join bounded.
+<a href=#711 id=711 data-nosnippet>711</a>        //
+<a href=#712 id=712 data-nosnippet>712</a>        //    Issue #2419 roborev job 1733: do NOT try to drain-and-decrement the
+<a href=#713 id=713 data-nosnippet>713</a>        //    egress-depth gauge HERE. A prior version looped `try_recv` until
+<a href=#714 id=714 data-nosnippet>714</a>        //    `Empty` and decremented per drained entry before dropping the
+<a href=#715 id=715 data-nosnippet>715</a>        //    receiver — but the producer runs on another OS thread, so a send can
+<a href=#716 id=716 data-nosnippet>716</a>        //    slip in and succeed (incrementing the shared gauge) in the window
+<a href=#717 id=717 data-nosnippet>717</a>        //    between that loop's last `Empty` and this `drop`, with no entry ever
+<a href=#718 id=718 data-nosnippet>718</a>        //    physically drained to balance it: a PERMANENT, monotonic upward leak
+<a href=#719 id=719 data-nosnippet>719</a>        //    of `cqlite.merge.egress_channel_depth` across every
+<a href=#720 id=720 data-nosnippet>720</a>        //    cancelled/disconnected scan on a long-running server. The gauge is
+<a href=#721 id=721 data-nosnippet>721</a>        //    reconciled instead in step 4, AFTER the join, using this adapter's
+<a href=#722 id=722 data-nosnippet>722</a>        //    own sent/received delta — which only becomes authoritative once the
+<a href=#723 id=723 data-nosnippet>723</a>        //    producer thread has provably stopped sending.
+<a href=#724 id=724 data-nosnippet>724</a>        </span>drop(<span class="self">self</span>.receiver.take());
+<a href=#725 id=725 data-nosnippet>725</a>        <span class="comment">// 3. Join the producer — bounded, because after (1)+(2) the producer
+<a href=#726 id=726 data-nosnippet>726</a>        //    cannot block indefinitely: it either observes the cancel in its scan
+<a href=#727 id=727 data-nosnippet>727</a>        //    loop or its next send fails. Issue #3120: the join outcome is no
+<a href=#728 id=728 data-nosnippet>728</a>        //    longer DISCARDED. It is a diagnostic, not the verdict (see this
+<a href=#729 id=729 data-nosnippet>729</a>        //    impl's doc): a producer that unwound has already reported itself
+<a href=#730 id=730 data-nosnippet>730</a>        //    through the terminator protocol, and a `Drop` has no caller to return
+<a href=#731 id=731 data-nosnippet>731</a>        //    an error to, so an unwind is LOGGED here — never re-panicked, which
+<a href=#732 id=732 data-nosnippet>732</a>        //    would abort a teardown that is frequently itself running during an
+<a href=#733 id=733 data-nosnippet>733</a>        //    unwind.
+<a href=#734 id=734 data-nosnippet>734</a>        //
+<a href=#735 id=735 data-nosnippet>735</a>        //    NOT exercised by the injected-panic tests, on purpose: both producer
+<a href=#736 id=736 data-nosnippet>736</a>        //    bodies wrap their whole walk in `catch_unwind`, so under
+<a href=#737 id=737 data-nosnippet>737</a>        //    `panic = "unwind"` a caught panic never reaches the join as an `Err`.
+<a href=#738 id=738 data-nosnippet>738</a>        //    This is the residual backstop for an unwind that escapes the
+<a href=#739 id=739 data-nosnippet>739</a>        //    `catch_unwind` — a panic between it returning and the terminal `send`,
+<a href=#740 id=740 data-nosnippet>740</a>        //    or inside the `send` itself — which is also the shape the bare-
+<a href=#741 id=741 data-nosnippet>741</a>        //    disconnect arm of `next()` above reports (see
+<a href=#742 id=742 data-nosnippet>742</a>        //    `producer_panic_tests::a_producer_that_disconnects_without_a_terminator_*`).
+<a href=#743 id=743 data-nosnippet>743</a>        </span><span class="kw">if let </span><span class="prelude-val">Some</span>(handle) = <span class="self">self</span>.producer.take() {
+<a href=#744 id=744 data-nosnippet>744</a>            <span class="kw">if </span>handle.join().is_err() {
+<a href=#745 id=745 data-nosnippet>745</a>                <span class="macro">tracing::warn!</span>(
+<a href=#746 id=746 data-nosnippet>746</a>                    <span class="string">"streaming merge producer thread PANICKED (issue #3120); its run \
+<a href=#747 id=747 data-nosnippet>747</a>                     was reported to the merge as a terminal error via the channel \
+<a href=#748 id=748 data-nosnippet>748</a>                     terminator, so no row was silently dropped"
+<a href=#749 id=749 data-nosnippet>749</a>                </span>);
+<a href=#750 id=750 data-nosnippet>750</a>            }
+<a href=#751 id=751 data-nosnippet>751</a>        }
+<a href=#752 id=752 data-nosnippet>752</a>        <span class="comment">// 4. Issue #2419 roborev job 1733: reconcile the shared egress-depth
+<a href=#753 id=753 data-nosnippet>753</a>        //    gauge AFTER the producer thread has definitively exited — `join`
+<a href=#754 id=754 data-nosnippet>754</a>        //    returning guarantees `self.sent_count` can never increase again, so
+<a href=#755 id=755 data-nosnippet>755</a>        //    this read is race-free (unlike reading it, or draining the channel,
+<a href=#756 id=756 data-nosnippet>756</a>        //    before the join). Any DATA entries this adapter's producer
+<a href=#757 id=757 data-nosnippet>757</a>        //    successfully sent but this consumer never received — abandoned when
+<a href=#758 id=758 data-nosnippet>758</a>        //    the channel was torn down while entries were still buffered —
+<a href=#759 id=759 data-nosnippet>759</a>        //    are exactly `sent_count - received_count`. Issue #2820: entries of a
+<a href=#760 id=760 data-nosnippet>760</a>        //    partially-drained HELD batch are NOT part of that residual; they were
+<a href=#761 id=761 data-nosnippet>761</a>        //    counted as received when the batch left the channel, which is the same
+<a href=#762 id=762 data-nosnippet>762</a>        //    moment the gauge was decremented for them, so abandoning them here is
+<a href=#763 id=763 data-nosnippet>763</a>        //    already balanced. reconcile the shared
+<a href=#764 id=764 data-nosnippet>764</a>        //    gauge by that residual in ONE atomic op so a cancelled/disconnected
+<a href=#765 id=765 data-nosnippet>765</a>        //    scan returns `cqlite.merge.egress_channel_depth` to baseline instead
+<a href=#766 id=766 data-nosnippet>766</a>        //    of drifting upward.
+<a href=#767 id=767 data-nosnippet>767</a>        </span><span class="kw">let </span>residual =
+<a href=#768 id=768 data-nosnippet>768</a>            <span class="self">self</span>.sent_count.load(std::sync::atomic::Ordering::SeqCst) - <span class="self">self</span>.received_count;
+<a href=#769 id=769 data-nosnippet>769</a>        channel_depth::reconcile_residual(residual);
+<a href=#770 id=770 data-nosnippet>770</a>    }
+<a href=#771 id=771 data-nosnippet>771</a>}
+</code></pre></div></section></main></body></html>

@@ -1,0 +1,633 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/observability/partition_access/table.rs`."><title>table.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/observability/partition_access/</div>table.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! The fixed-footprint counting structure behind the partition access-distribution
+<a href=#2 id=2 data-nosnippet>2</a>//! probe (issue #2827, design D4).
+<a href=#3 id=3 data-nosnippet>3</a>//!
+<a href=#4 id=4 data-nosnippet>4</a>//! One lazily-allocated, open-addressed (linear-probing) table:
+<a href=#5 id=5 data-nosnippet>5</a>//!
+<a href=#6 id=6 data-nosnippet>6</a>//! - `SLOTS = 1 &lt;&lt; 17` = 131,072
+<a href=#7 id=7 data-nosnippet>7</a>//! - entry = `key_hash: AtomicU64` (8 B) + `bytes: AtomicU64` (8 B) +
+<a href=#8 id=8 data-nosnippet>8</a>//!   `count: AtomicU32` (4 B) + `flags: AtomicU8` (1 B) + 3 B padding = **24 B**
+<a href=#9 id=9 data-nosnippet>9</a>//! - **total = 131,072 × 24 B = 3,145,728 B = exactly 3 MiB, fixed** — independent
+<a href=#10 id=10 data-nosnippet>10</a>//!   of the partition count, of qps, and of window length.
+<a href=#11 id=11 data-nosnippet>11</a>//!
+<a href=#12 id=12 data-nosnippet>12</a>//! # Why overflow is handled by SAMPLING, not eviction
+<a href=#13 id=13 data-nosnippet>13</a>//!
+<a href=#14 id=14 data-nosnippet>14</a>//! When occupancy reaches a 0.75 load factor the recorder widens a hash-prefix
+<a href=#15 id=15 data-nosnippet>15</a>//! admission predicate by one bit and drops every entry that no longer satisfies
+<a href=#16 id=16 data-nosnippet>16</a>//! it. The predicate is a function of the key hash ALONE, so it is statistically
+<a href=#17 id=17 data-nosnippet>17</a>//! independent of a key's access frequency: the survivors are a uniform random
+<a href=#18 id=18 data-nosnippet>18</a>//! sample of the DISTINCT partitions touched in the window, and each survivor's
+<a href=#19 id=19 data-nosnippet>19</a>//! count stays EXACT (the predicate is monotone — a key admitted at prefix width
+<a href=#20 id=20 data-nosnippet>20</a>//! `k` is admitted at every `k' &lt; k` — so a downsample only ever removes keys, it
+<a href=#21 id=21 data-nosnippet>21</a>//! never invalidates a survivor's already-accumulated count).
+<a href=#22 id=22 data-nosnippet>22</a>//!
+<a href=#23 id=23 data-nosnippet>23</a>//! Recency- (LRU) or arrival-ordered eviction would do the opposite: hot keys are
+<a href=#24 id=24 data-nosnippet>24</a>//! accessed often, so they survive preferentially, the singleton bucket is
+<a href=#25 id=25 data-nosnippet>25</a>//! under-counted and the histogram OVERSTATES concentration — the direction that
+<a href=#26 id=26 data-nosnippet>26</a>//! makes a decoded-partition cache look better than it is. A go/no-go instrument
+<a href=#27 id=27 data-nosnippet>27</a>//! must not be biased toward "go", so eviction is disqualified on correctness
+<a href=#28 id=28 data-nosnippet>28</a>//! grounds, not on cost.
+<a href=#29 id=29 data-nosnippet>29</a>//!
+<a href=#30 id=30 data-nosnippet>30</a>//! # Deletion and probe chains
+<a href=#31 id=31 data-nosnippet>31</a>//!
+<a href=#32 id=32 data-nosnippet>32</a>//! Linear probing cannot simply blank a slot: later members of the same probe
+<a href=#33 id=33 data-nosnippet>33</a>//! chain would become unreachable and their counts would silently split across a
+<a href=#34 id=34 data-nosnippet>34</a>//! second entry. Downsampling therefore uses **backward-shift deletion**
+<a href=#35 id=35 data-nosnippet>35</a>//! ([`Table::delete_at`]), which restores the probe-chain invariant in place with
+<a href=#36 id=36 data-nosnippet>36</a>//! no auxiliary allocation — so the 3 MiB bound holds during a downsample too.
+<a href=#37 id=37 data-nosnippet>37</a>
+<a href=#38 id=38 data-nosnippet>38</a></span><span class="kw">use </span>std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+<a href=#39 id=39 data-nosnippet>39</a>
+<a href=#40 id=40 data-nosnippet>40</a><span class="doccomment">/// log2 of the slot count.
+<a href=#41 id=41 data-nosnippet>41</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">const </span>SLOT_BITS: u32 = <span class="number">17</span>;
+<a href=#42 id=42 data-nosnippet>42</a><span class="doccomment">/// Number of slots in the counting table.
+<a href=#43 id=43 data-nosnippet>43</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">const </span>SLOTS: usize = <span class="number">1 </span>&lt;&lt; SLOT_BITS;
+<a href=#44 id=44 data-nosnippet>44</a><span class="doccomment">/// Slot index mask (`SLOTS` is a power of two).
+<a href=#45 id=45 data-nosnippet>45</a></span><span class="kw">const </span>SLOT_MASK: usize = SLOTS - <span class="number">1</span>;
+<a href=#46 id=46 data-nosnippet>46</a><span class="doccomment">/// Declared per-entry footprint. Asserted against the real layout below.
+<a href=#47 id=47 data-nosnippet>47</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">const </span>ENTRY_BYTES: usize = <span class="number">24</span>;
+<a href=#48 id=48 data-nosnippet>48</a><span class="doccomment">/// The whole structure's fixed footprint: exactly 3 MiB.
+<a href=#49 id=49 data-nosnippet>49</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">const </span>TABLE_BYTES: usize = SLOTS * ENTRY_BYTES;
+<a href=#50 id=50 data-nosnippet>50</a><span class="doccomment">/// Occupancy at which the recorder widens the sampling prefix (load factor 0.75).
+<a href=#51 id=51 data-nosnippet>51</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">const </span>LOAD_FACTOR_LIMIT: usize = SLOTS / <span class="number">4 </span>* <span class="number">3</span>;
+<a href=#52 id=52 data-nosnippet>52</a><span class="doccomment">/// Longest linear-probe run before an insert reports the table effectively full.
+<a href=#53 id=53 data-nosnippet>53</a>///
+<a href=#54 id=54 data-nosnippet>54</a>/// At a 0.75 load factor with a well-mixed hash a run this long is
+<a href=#55 id=55 data-nosnippet>55</a>/// vanishingly rare; treating it as "full" simply triggers a downsample one
+<a href=#56 id=56 data-nosnippet>56</a>/// insert early, which is harmless (the scale is published).
+<a href=#57 id=57 data-nosnippet>57</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">const </span>MAX_PROBES: usize = <span class="number">64</span>;
+<a href=#58 id=58 data-nosnippet>58</a>
+<a href=#59 id=59 data-nosnippet>59</a><span class="doccomment">/// Sticky per-entry flag: at least one access to this partition resolved an
+<a href=#60 id=60 data-nosnippet>60</a>/// SSTable that reported no authoritative size, so the entry contributes ZERO
+<a href=#61 id=61 data-nosnippet>61</a>/// bytes and is counted as `size_source = unavailable`.
+<a href=#62 id=62 data-nosnippet>62</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">const </span>FLAG_SIZE_UNAVAILABLE: u8 = <span class="number">0b0000_0001</span>;
+<a href=#63 id=63 data-nosnippet>63</a>
+<a href=#64 id=64 data-nosnippet>64</a><span class="doccomment">/// Sticky per-entry flag: at least one access to this partition had its extent
+<a href=#65 id=65 data-nosnippet>65</a>/// MEASURED as a successor gap rather than read from an index-recorded size, so the
+<a href=#66 id=66 data-nosnippet>66</a>/// entry's bytes are reported with `size_source = successor_gap`.
+<a href=#67 id=67 data-nosnippet>67</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">const </span>FLAG_SIZE_FROM_GAP: u8 = <span class="number">0b0000_0010</span>;
+<a href=#68 id=68 data-nosnippet>68</a>
+<a href=#69 id=69 data-nosnippet>69</a><span class="doccomment">/// One counting slot. `key_hash == 0` means EMPTY; a hash that would be zero is
+<a href=#70 id=70 data-nosnippet>70</a>/// remapped to 1 by [`hash_partition`], so the sentinel is unambiguous.
+<a href=#71 id=71 data-nosnippet>71</a></span><span class="attr">#[repr(C)]
+<a href=#72 id=72 data-nosnippet>72</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">struct </span>Slot {
+<a href=#73 id=73 data-nosnippet>73</a>    key_hash: AtomicU64,
+<a href=#74 id=74 data-nosnippet>74</a>    bytes: AtomicU64,
+<a href=#75 id=75 data-nosnippet>75</a>    count: AtomicU32,
+<a href=#76 id=76 data-nosnippet>76</a>    flags: AtomicU8,
+<a href=#77 id=77 data-nosnippet>77</a>    _pad: [u8; <span class="number">3</span>],
+<a href=#78 id=78 data-nosnippet>78</a>}
+<a href=#79 id=79 data-nosnippet>79</a>
+<a href=#80 id=80 data-nosnippet>80</a><span class="comment">// The 3 MiB claim in the docs, the catalog and the spec is only true if the entry
+<a href=#81 id=81 data-nosnippet>81</a>// really is 24 bytes. Assert the layout at compile time rather than trusting the
+<a href=#82 id=82 data-nosnippet>82</a>// comment.
+<a href=#83 id=83 data-nosnippet>83</a></span><span class="kw">const _</span>: () = <span class="macro">assert!</span>(std::mem::size_of::&lt;Slot&gt;() == ENTRY_BYTES);
+<a href=#84 id=84 data-nosnippet>84</a><span class="kw">const _</span>: () = <span class="macro">assert!</span>(TABLE_BYTES == <span class="number">3 </span>* <span class="number">1024 </span>* <span class="number">1024</span>);
+<a href=#85 id=85 data-nosnippet>85</a>
+<a href=#86 id=86 data-nosnippet>86</a><span class="kw">impl </span>Slot {
+<a href=#87 id=87 data-nosnippet>87</a>    <span class="kw">fn </span>empty() -&gt; <span class="self">Self </span>{
+<a href=#88 id=88 data-nosnippet>88</a>        <span class="self">Self </span>{
+<a href=#89 id=89 data-nosnippet>89</a>            key_hash: AtomicU64::new(<span class="number">0</span>),
+<a href=#90 id=90 data-nosnippet>90</a>            bytes: AtomicU64::new(<span class="number">0</span>),
+<a href=#91 id=91 data-nosnippet>91</a>            count: AtomicU32::new(<span class="number">0</span>),
+<a href=#92 id=92 data-nosnippet>92</a>            flags: AtomicU8::new(<span class="number">0</span>),
+<a href=#93 id=93 data-nosnippet>93</a>            _pad: [<span class="number">0</span>; <span class="number">3</span>],
+<a href=#94 id=94 data-nosnippet>94</a>        }
+<a href=#95 id=95 data-nosnippet>95</a>    }
+<a href=#96 id=96 data-nosnippet>96</a>
+<a href=#97 id=97 data-nosnippet>97</a>    <span class="kw">fn </span>clear(<span class="kw-2">&amp;</span><span class="self">self</span>) {
+<a href=#98 id=98 data-nosnippet>98</a>        <span class="self">self</span>.key_hash.store(<span class="number">0</span>, Ordering::Relaxed);
+<a href=#99 id=99 data-nosnippet>99</a>        <span class="self">self</span>.bytes.store(<span class="number">0</span>, Ordering::Relaxed);
+<a href=#100 id=100 data-nosnippet>100</a>        <span class="self">self</span>.count.store(<span class="number">0</span>, Ordering::Relaxed);
+<a href=#101 id=101 data-nosnippet>101</a>        <span class="self">self</span>.flags.store(<span class="number">0</span>, Ordering::Relaxed);
+<a href=#102 id=102 data-nosnippet>102</a>    }
+<a href=#103 id=103 data-nosnippet>103</a>}
+<a href=#104 id=104 data-nosnippet>104</a>
+<a href=#105 id=105 data-nosnippet>105</a><span class="doccomment">/// A live entry read out of the table at window close.
+<a href=#106 id=106 data-nosnippet>106</a></span><span class="attr">#[derive(Clone, Copy, Debug)]
+<a href=#107 id=107 data-nosnippet>107</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">struct </span>Entry {
+<a href=#108 id=108 data-nosnippet>108</a>    <span class="doccomment">/// Number of accesses recorded for this partition inside the window.
+<a href=#109 id=109 data-nosnippet>109</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) count: u32,
+<a href=#110 id=110 data-nosnippet>110</a>    <span class="doccomment">/// Largest on-disk byte weight observed for it (meaningless when
+<a href=#111 id=111 data-nosnippet>111</a>    /// `size_unavailable` is set — such an entry contributes zero bytes).
+<a href=#112 id=112 data-nosnippet>112</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) bytes: u64,
+<a href=#113 id=113 data-nosnippet>113</a>    <span class="doccomment">/// Sticky: at least one access could not be priced authoritatively.
+<a href=#114 id=114 data-nosnippet>114</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) size_unavailable: bool,
+<a href=#115 id=115 data-nosnippet>115</a>    <span class="doccomment">/// Sticky: at least one priced access had its extent measured as a gap.
+<a href=#116 id=116 data-nosnippet>116</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) size_from_gap: bool,
+<a href=#117 id=117 data-nosnippet>117</a>}
+<a href=#118 id=118 data-nosnippet>118</a>
+<a href=#119 id=119 data-nosnippet>119</a><span class="doccomment">/// Outcome of an insert attempt.
+<a href=#120 id=120 data-nosnippet>120</a></span><span class="attr">#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+<a href=#121 id=121 data-nosnippet>121</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">enum </span>Insert {
+<a href=#122 id=122 data-nosnippet>122</a>    <span class="doccomment">/// The access was recorded (either into a fresh slot or an existing one).
+<a href=#123 id=123 data-nosnippet>123</a>    </span>Recorded,
+<a href=#124 id=124 data-nosnippet>124</a>    <span class="doccomment">/// The key is not in the currently-admitted sample; nothing was recorded.
+<a href=#125 id=125 data-nosnippet>125</a>    </span>NotAdmitted,
+<a href=#126 id=126 data-nosnippet>126</a>    <span class="doccomment">/// No slot could be claimed within [`MAX_PROBES`]; the caller must downsample.
+<a href=#127 id=127 data-nosnippet>127</a>    </span>Full,
+<a href=#128 id=128 data-nosnippet>128</a>}
+<a href=#129 id=129 data-nosnippet>129</a>
+<a href=#130 id=130 data-nosnippet>130</a><span class="doccomment">/// The fixed 3 MiB counting table.
+<a href=#131 id=131 data-nosnippet>131</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">struct </span>Table {
+<a href=#132 id=132 data-nosnippet>132</a>    slots: Box&lt;[Slot]&gt;,
+<a href=#133 id=133 data-nosnippet>133</a>    occupancy: AtomicUsize,
+<a href=#134 id=134 data-nosnippet>134</a>}
+<a href=#135 id=135 data-nosnippet>135</a>
+<a href=#136 id=136 data-nosnippet>136</a><span class="doccomment">/// A 64-bit hash identifying one partition WITHIN ONE TABLE.
+<a href=#137 id=137 data-nosnippet>137</a>///
+<a href=#138 id=138 data-nosnippet>138</a>/// # Why the table is part of the identity
+<a href=#139 id=139 data-nosnippet>139</a>///
+<a href=#140 id=140 data-nosnippet>140</a>/// [`super::global`] is ONE process-wide recorder shared by every table, so an
+<a href=#141 id=141 data-nosnippet>141</a>/// identity over raw key bytes alone merges the same key in two different tables
+<a href=#142 id=142 data-nosnippet>142</a>/// into one entry — and an ordinary tenant/user id shared across tables is common,
+<a href=#143 id=143 data-nosnippet>143</a>/// not a rare collision. The merge is biased in the unsafe direction twice over:
+<a href=#144 id=144 data-nosnippet>144</a>/// two singletons become a `count = 2` entry, manufacturing a hit where the truth
+<a href=#145 id=145 data-nosnippet>145</a>/// is none; and the entry keeps the MAXIMUM byte weight rather than the sum, so it
+<a href=#146 id=146 data-nosnippet>146</a>/// is under-priced and ranks EARLIER by access density. Both flatter the cache,
+<a href=#147 id=147 data-nosnippet>147</a>/// which is the bias class D2/D4 disqualify other mechanisms for.
+<a href=#148 id=148 data-nosnippet>148</a>///
+<a href=#149 id=149 data-nosnippet>149</a>/// Deliberately NOT the Murmur3 token: the BIG point path takes raw key bytes and
+<a href=#150 id=150 data-nosnippet>150</a>/// never computes a token, so hashing the token would make the probe force work
+<a href=#151 id=151 data-nosnippet>151</a>/// that path does not otherwise do. This value is used ONLY for slot addressing
+<a href=#152 id=152 data-nosnippet>152</a>/// and within-window identity — it is never emitted, logged, or attached to a
+<a href=#153 id=153 data-nosnippet>153</a>/// metric attribute (the whole point of the bucket histogram is that no per-key
+<a href=#154 id=154 data-nosnippet>154</a>/// value leaves the process).
+<a href=#155 id=155 data-nosnippet>155</a>///
+<a href=#156 id=156 data-nosnippet>156</a>/// FNV-1a over the table scope and the key bytes, separated by a byte that cannot
+<a href=#157 id=157 data-nosnippet>157</a>/// occur in the scope's UTF-8 (so `("ab", "c")` and `("a", "bc")` cannot collide),
+<a href=#158 id=158 data-nosnippet>158</a>/// finalised with a splitmix64 avalanche so the HIGH bits (used by the sampling
+<a href=#159 id=159 data-nosnippet>159</a>/// predicate) and the LOW bits (used for slot addressing) are independently
+<a href=#160 id=160 data-nosnippet>160</a>/// well-mixed. `0` is reserved as the empty-slot sentinel and is remapped to `1`.
+<a href=#161 id=161 data-nosnippet>161</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>hash_partition(keyspace: <span class="kw-2">&amp;</span>str, table: <span class="kw-2">&amp;</span>str, key: <span class="kw-2">&amp;</span>[u8]) -&gt; u64 {
+<a href=#162 id=162 data-nosnippet>162</a>    <span class="doccomment">/// Separator that cannot appear inside a UTF-8 scan of the scope strings.
+<a href=#163 id=163 data-nosnippet>163</a>    </span><span class="kw">const </span>SEP: u8 = <span class="number">0xFF</span>;
+<a href=#164 id=164 data-nosnippet>164</a>    <span class="kw">let </span><span class="kw-2">mut </span>h: u64 = <span class="number">0xcbf2_9ce4_8422_2325</span>;
+<a href=#165 id=165 data-nosnippet>165</a>    <span class="kw">let </span>mix = |bytes: <span class="kw-2">&amp;</span>[u8], h: <span class="kw-2">&amp;mut </span>u64| {
+<a href=#166 id=166 data-nosnippet>166</a>        <span class="kw">for </span>b <span class="kw">in </span>bytes {
+<a href=#167 id=167 data-nosnippet>167</a>            <span class="kw-2">*</span>h ^= <span class="kw-2">*</span>b <span class="kw">as </span>u64;
+<a href=#168 id=168 data-nosnippet>168</a>            <span class="kw-2">*</span>h = h.wrapping_mul(<span class="number">0x0000_0100_0000_01b3</span>);
+<a href=#169 id=169 data-nosnippet>169</a>        }
+<a href=#170 id=170 data-nosnippet>170</a>    };
+<a href=#171 id=171 data-nosnippet>171</a>    mix(keyspace.as_bytes(), <span class="kw-2">&amp;mut </span>h);
+<a href=#172 id=172 data-nosnippet>172</a>    mix(<span class="kw-2">&amp;</span>[SEP], <span class="kw-2">&amp;mut </span>h);
+<a href=#173 id=173 data-nosnippet>173</a>    mix(table.as_bytes(), <span class="kw-2">&amp;mut </span>h);
+<a href=#174 id=174 data-nosnippet>174</a>    mix(<span class="kw-2">&amp;</span>[SEP], <span class="kw-2">&amp;mut </span>h);
+<a href=#175 id=175 data-nosnippet>175</a>    <span class="kw">for </span>b <span class="kw">in </span>key {
+<a href=#176 id=176 data-nosnippet>176</a>        h ^= <span class="kw-2">*</span>b <span class="kw">as </span>u64;
+<a href=#177 id=177 data-nosnippet>177</a>        h = h.wrapping_mul(<span class="number">0x0000_0100_0000_01b3</span>);
+<a href=#178 id=178 data-nosnippet>178</a>    }
+<a href=#179 id=179 data-nosnippet>179</a>    <span class="comment">// splitmix64 finaliser.
+<a href=#180 id=180 data-nosnippet>180</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>z = h.wrapping_add(<span class="number">0x9e37_79b9_7f4a_7c15</span>);
+<a href=#181 id=181 data-nosnippet>181</a>    z = (z ^ (z &gt;&gt; <span class="number">30</span>)).wrapping_mul(<span class="number">0xbf58_476d_1ce4_e5b9</span>);
+<a href=#182 id=182 data-nosnippet>182</a>    z = (z ^ (z &gt;&gt; <span class="number">27</span>)).wrapping_mul(<span class="number">0x94d0_49bb_1331_11eb</span>);
+<a href=#183 id=183 data-nosnippet>183</a>    z ^= z &gt;&gt; <span class="number">31</span>;
+<a href=#184 id=184 data-nosnippet>184</a>    <span class="kw">if </span>z == <span class="number">0 </span>{
+<a href=#185 id=185 data-nosnippet>185</a>        <span class="number">1
+<a href=#186 id=186 data-nosnippet>186</a>    </span>} <span class="kw">else </span>{
+<a href=#187 id=187 data-nosnippet>187</a>        z
+<a href=#188 id=188 data-nosnippet>188</a>    }
+<a href=#189 id=189 data-nosnippet>189</a>}
+<a href=#190 id=190 data-nosnippet>190</a>
+<a href=#191 id=191 data-nosnippet>191</a><span class="doccomment">/// The hash-prefix admission predicate: a key is admitted at prefix width `k`
+<a href=#192 id=192 data-nosnippet>192</a>/// when its top `k` hash bits are all zero.
+<a href=#193 id=193 data-nosnippet>193</a>///
+<a href=#194 id=194 data-nosnippet>194</a>/// Monotone in `k` (admitted at `k` ⇒ admitted at every smaller `k`), which is
+<a href=#195 id=195 data-nosnippet>195</a>/// what makes a survivor's already-accumulated count remain exact across a
+<a href=#196 id=196 data-nosnippet>196</a>/// downsample. Uses the HIGH bits so admission is independent of the low bits that
+<a href=#197 id=197 data-nosnippet>197</a>/// choose the slot.
+<a href=#198 id=198 data-nosnippet>198</a></span><span class="attr">#[inline]
+<a href=#199 id=199 data-nosnippet>199</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>admitted(hash: u64, prefix_bits: u32) -&gt; bool {
+<a href=#200 id=200 data-nosnippet>200</a>    <span class="kw">if </span>prefix_bits == <span class="number">0 </span>{
+<a href=#201 id=201 data-nosnippet>201</a>        <span class="kw">return </span><span class="bool-val">true</span>;
+<a href=#202 id=202 data-nosnippet>202</a>    }
+<a href=#203 id=203 data-nosnippet>203</a>    <span class="macro">debug_assert!</span>(prefix_bits &lt; <span class="number">64</span>);
+<a href=#204 id=204 data-nosnippet>204</a>    (hash &gt;&gt; (<span class="number">64 </span>- prefix_bits)) == <span class="number">0
+<a href=#205 id=205 data-nosnippet>205</a></span>}
+<a href=#206 id=206 data-nosnippet>206</a>
+<a href=#207 id=207 data-nosnippet>207</a><span class="kw">impl </span>Table {
+<a href=#208 id=208 data-nosnippet>208</a>    <span class="doccomment">/// Allocate the fixed 3 MiB table. Only ever called once the probe is enabled
+<a href=#209 id=209 data-nosnippet>209</a>    /// and an access actually arrives (lazy allocation — a disabled probe holds no
+<a href=#210 id=210 data-nosnippet>210</a>    /// memory at all).
+<a href=#211 id=211 data-nosnippet>211</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>new() -&gt; <span class="self">Self </span>{
+<a href=#212 id=212 data-nosnippet>212</a>        <span class="kw">let </span><span class="kw-2">mut </span>slots = Vec::with_capacity(SLOTS);
+<a href=#213 id=213 data-nosnippet>213</a>        slots.resize_with(SLOTS, Slot::empty);
+<a href=#214 id=214 data-nosnippet>214</a>        <span class="self">Self </span>{
+<a href=#215 id=215 data-nosnippet>215</a>            slots: slots.into_boxed_slice(),
+<a href=#216 id=216 data-nosnippet>216</a>            occupancy: AtomicUsize::new(<span class="number">0</span>),
+<a href=#217 id=217 data-nosnippet>217</a>        }
+<a href=#218 id=218 data-nosnippet>218</a>    }
+<a href=#219 id=219 data-nosnippet>219</a>
+<a href=#220 id=220 data-nosnippet>220</a>    <span class="doccomment">/// The structure's footprint in bytes — a constant, by construction.
+<a href=#221 id=221 data-nosnippet>221</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>footprint_bytes(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+<a href=#222 id=222 data-nosnippet>222</a>        <span class="self">self</span>.slots.len() * ENTRY_BYTES
+<a href=#223 id=223 data-nosnippet>223</a>    }
+<a href=#224 id=224 data-nosnippet>224</a>
+<a href=#225 id=225 data-nosnippet>225</a>    <span class="doccomment">/// Number of distinct keys currently held.
+<a href=#226 id=226 data-nosnippet>226</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>occupancy(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+<a href=#227 id=227 data-nosnippet>227</a>        <span class="self">self</span>.occupancy.load(Ordering::Relaxed)
+<a href=#228 id=228 data-nosnippet>228</a>    }
+<a href=#229 id=229 data-nosnippet>229</a>
+<a href=#230 id=230 data-nosnippet>230</a>    <span class="doccomment">/// Record one access to `hash`, weighted by `bytes` (`None` = the access could
+<a href=#231 id=231 data-nosnippet>231</a>    /// not be priced authoritatively, which sets the sticky unavailable flag and
+<a href=#232 id=232 data-nosnippet>232</a>    /// contributes zero bytes).
+<a href=#233 id=233 data-nosnippet>233</a>    ///
+<a href=#234 id=234 data-nosnippet>234</a>    /// Takes `&amp;self`: the caller holds only a READ lock, so concurrent recorders
+<a href=#235 id=235 data-nosnippet>235</a>    /// share the table and mutate their own slots with atomics. Slot claiming is a
+<a href=#236 id=236 data-nosnippet>236</a>    /// CAS on the `key_hash` sentinel, so two threads racing on the same empty slot
+<a href=#237 id=237 data-nosnippet>237</a>    /// cannot both claim it.
+<a href=#238 id=238 data-nosnippet>238</a>    </span><span class="attr">#[cfg(test)]
+<a href=#239 id=239 data-nosnippet>239</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>record(<span class="kw-2">&amp;</span><span class="self">self</span>, hash: u64, prefix_bits: u32, bytes: <span class="prelude-ty">Option</span>&lt;u64&gt;) -&gt; Insert {
+<a href=#240 id=240 data-nosnippet>240</a>        <span class="self">self</span>.record_with_flags(hash, prefix_bits, bytes, <span class="number">0</span>)
+<a href=#241 id=241 data-nosnippet>241</a>    }
+<a href=#242 id=242 data-nosnippet>242</a>
+<a href=#243 id=243 data-nosnippet>243</a>    <span class="doccomment">/// [`Self::record`] with extra sticky provenance flags OR-ed into the slot.
+<a href=#244 id=244 data-nosnippet>244</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>record_with_flags(
+<a href=#245 id=245 data-nosnippet>245</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#246 id=246 data-nosnippet>246</a>        hash: u64,
+<a href=#247 id=247 data-nosnippet>247</a>        prefix_bits: u32,
+<a href=#248 id=248 data-nosnippet>248</a>        bytes: <span class="prelude-ty">Option</span>&lt;u64&gt;,
+<a href=#249 id=249 data-nosnippet>249</a>        extra_flags: u8,
+<a href=#250 id=250 data-nosnippet>250</a>    ) -&gt; Insert {
+<a href=#251 id=251 data-nosnippet>251</a>        <span class="kw">if </span>!admitted(hash, prefix_bits) {
+<a href=#252 id=252 data-nosnippet>252</a>            <span class="kw">return </span>Insert::NotAdmitted;
+<a href=#253 id=253 data-nosnippet>253</a>        }
+<a href=#254 id=254 data-nosnippet>254</a>        <span class="kw">let </span><span class="kw-2">mut </span>idx = (hash <span class="kw">as </span>usize) &amp; SLOT_MASK;
+<a href=#255 id=255 data-nosnippet>255</a>        <span class="kw">for _ in </span><span class="number">0</span>..MAX_PROBES {
+<a href=#256 id=256 data-nosnippet>256</a>            <span class="kw">let </span>slot = <span class="kw-2">&amp;</span><span class="self">self</span>.slots[idx];
+<a href=#257 id=257 data-nosnippet>257</a>            <span class="kw">let </span><span class="kw-2">mut </span>observed = slot.key_hash.load(Ordering::Acquire);
+<a href=#258 id=258 data-nosnippet>258</a>            <span class="kw">if </span>observed == <span class="number">0 </span>{
+<a href=#259 id=259 data-nosnippet>259</a>                <span class="kw">match </span>slot
+<a href=#260 id=260 data-nosnippet>260</a>                    .key_hash
+<a href=#261 id=261 data-nosnippet>261</a>                    .compare_exchange(<span class="number">0</span>, hash, Ordering::AcqRel, Ordering::Acquire)
+<a href=#262 id=262 data-nosnippet>262</a>                {
+<a href=#263 id=263 data-nosnippet>263</a>                    <span class="prelude-val">Ok</span>(<span class="kw">_</span>) =&gt; {
+<a href=#264 id=264 data-nosnippet>264</a>                        <span class="self">self</span>.occupancy.fetch_add(<span class="number">1</span>, Ordering::Relaxed);
+<a href=#265 id=265 data-nosnippet>265</a>                        observed = hash;
+<a href=#266 id=266 data-nosnippet>266</a>                    }
+<a href=#267 id=267 data-nosnippet>267</a>                    <span class="comment">// Lost the race: re-read what the winner stored and fall
+<a href=#268 id=268 data-nosnippet>268</a>                    // through — if it is our own hash we share the slot.
+<a href=#269 id=269 data-nosnippet>269</a>                    </span><span class="prelude-val">Err</span>(actual) =&gt; observed = actual,
+<a href=#270 id=270 data-nosnippet>270</a>                }
+<a href=#271 id=271 data-nosnippet>271</a>            }
+<a href=#272 id=272 data-nosnippet>272</a>            <span class="kw">if </span>observed == hash {
+<a href=#273 id=273 data-nosnippet>273</a>                <span class="self">Self</span>::apply(slot, bytes, extra_flags);
+<a href=#274 id=274 data-nosnippet>274</a>                <span class="kw">return </span>Insert::Recorded;
+<a href=#275 id=275 data-nosnippet>275</a>            }
+<a href=#276 id=276 data-nosnippet>276</a>            idx = (idx + <span class="number">1</span>) &amp; SLOT_MASK;
+<a href=#277 id=277 data-nosnippet>277</a>        }
+<a href=#278 id=278 data-nosnippet>278</a>        Insert::Full
+<a href=#279 id=279 data-nosnippet>279</a>    }
+<a href=#280 id=280 data-nosnippet>280</a>
+<a href=#281 id=281 data-nosnippet>281</a>    <span class="doccomment">/// Fold one access into an already-claimed slot.
+<a href=#282 id=282 data-nosnippet>282</a>    </span><span class="kw">fn </span>apply(slot: <span class="kw-2">&amp;</span>Slot, bytes: <span class="prelude-ty">Option</span>&lt;u64&gt;, extra_flags: u8) {
+<a href=#283 id=283 data-nosnippet>283</a>        <span class="kw">if </span>extra_flags != <span class="number">0 </span>{
+<a href=#284 id=284 data-nosnippet>284</a>            slot.flags.fetch_or(extra_flags, Ordering::Relaxed);
+<a href=#285 id=285 data-nosnippet>285</a>        }
+<a href=#286 id=286 data-nosnippet>286</a>        <span class="comment">// Saturating rather than wrapping: a window that somehow recorded 2^32
+<a href=#287 id=287 data-nosnippet>287</a>        // accesses to one partition must not wrap back into the `1` bucket.
+<a href=#288 id=288 data-nosnippet>288</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>cur = slot.count.load(Ordering::Relaxed);
+<a href=#289 id=289 data-nosnippet>289</a>        <span class="kw">loop </span>{
+<a href=#290 id=290 data-nosnippet>290</a>            <span class="kw">let </span>next = cur.saturating_add(<span class="number">1</span>);
+<a href=#291 id=291 data-nosnippet>291</a>            <span class="kw">match </span>slot
+<a href=#292 id=292 data-nosnippet>292</a>                .count
+<a href=#293 id=293 data-nosnippet>293</a>                .compare_exchange_weak(cur, next, Ordering::Relaxed, Ordering::Relaxed)
+<a href=#294 id=294 data-nosnippet>294</a>            {
+<a href=#295 id=295 data-nosnippet>295</a>                <span class="prelude-val">Ok</span>(<span class="kw">_</span>) =&gt; <span class="kw">break</span>,
+<a href=#296 id=296 data-nosnippet>296</a>                <span class="prelude-val">Err</span>(actual) =&gt; cur = actual,
+<a href=#297 id=297 data-nosnippet>297</a>            }
+<a href=#298 id=298 data-nosnippet>298</a>        }
+<a href=#299 id=299 data-nosnippet>299</a>        <span class="kw">match </span>bytes {
+<a href=#300 id=300 data-nosnippet>300</a>            <span class="comment">// The working set is defined over DISTINCT partitions, so an entry
+<a href=#301 id=301 data-nosnippet>301</a>            // retains the MAXIMUM weight observed, never a running sum: ten
+<a href=#302 id=302 data-nosnippet>302</a>            // accesses to one partition contribute its size once.
+<a href=#303 id=303 data-nosnippet>303</a>            </span><span class="prelude-val">Some</span>(b) =&gt; {
+<a href=#304 id=304 data-nosnippet>304</a>                <span class="kw">let </span><span class="kw-2">mut </span>cur = slot.bytes.load(Ordering::Relaxed);
+<a href=#305 id=305 data-nosnippet>305</a>                <span class="kw">while </span>b &gt; cur {
+<a href=#306 id=306 data-nosnippet>306</a>                    <span class="kw">match </span>slot.bytes.compare_exchange_weak(
+<a href=#307 id=307 data-nosnippet>307</a>                        cur,
+<a href=#308 id=308 data-nosnippet>308</a>                        b,
+<a href=#309 id=309 data-nosnippet>309</a>                        Ordering::Relaxed,
+<a href=#310 id=310 data-nosnippet>310</a>                        Ordering::Relaxed,
+<a href=#311 id=311 data-nosnippet>311</a>                    ) {
+<a href=#312 id=312 data-nosnippet>312</a>                        <span class="prelude-val">Ok</span>(<span class="kw">_</span>) =&gt; <span class="kw">break</span>,
+<a href=#313 id=313 data-nosnippet>313</a>                        <span class="prelude-val">Err</span>(actual) =&gt; cur = actual,
+<a href=#314 id=314 data-nosnippet>314</a>                    }
+<a href=#315 id=315 data-nosnippet>315</a>                }
+<a href=#316 id=316 data-nosnippet>316</a>            }
+<a href=#317 id=317 data-nosnippet>317</a>            <span class="comment">// Sticky for the rest of the window: once an access to this partition
+<a href=#318 id=318 data-nosnippet>318</a>            // could not be priced, the partition's bytes are not trustworthy and it
+<a href=#319 id=319 data-nosnippet>319</a>            // is reported under `size_source = unavailable` with zero bytes.
+<a href=#320 id=320 data-nosnippet>320</a>            </span><span class="prelude-val">None </span>=&gt; {
+<a href=#321 id=321 data-nosnippet>321</a>                slot.flags
+<a href=#322 id=322 data-nosnippet>322</a>                    .fetch_or(FLAG_SIZE_UNAVAILABLE, Ordering::Relaxed);
+<a href=#323 id=323 data-nosnippet>323</a>            }
+<a href=#324 id=324 data-nosnippet>324</a>        }
+<a href=#325 id=325 data-nosnippet>325</a>    }
+<a href=#326 id=326 data-nosnippet>326</a>
+<a href=#327 id=327 data-nosnippet>327</a>    <span class="doccomment">/// Visit every live entry. Requires `&amp;mut` (window close holds the write lock).
+<a href=#328 id=328 data-nosnippet>328</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>for_each_entry(<span class="kw-2">&amp;mut </span><span class="self">self</span>, <span class="kw-2">mut </span>f: <span class="kw">impl </span>FnMut(Entry)) {
+<a href=#329 id=329 data-nosnippet>329</a>        <span class="kw">for </span>slot <span class="kw">in </span><span class="self">self</span>.slots.iter() {
+<a href=#330 id=330 data-nosnippet>330</a>            <span class="kw">if </span>slot.key_hash.load(Ordering::Relaxed) == <span class="number">0 </span>{
+<a href=#331 id=331 data-nosnippet>331</a>                <span class="kw">continue</span>;
+<a href=#332 id=332 data-nosnippet>332</a>            }
+<a href=#333 id=333 data-nosnippet>333</a>            f(Entry {
+<a href=#334 id=334 data-nosnippet>334</a>                count: slot.count.load(Ordering::Relaxed),
+<a href=#335 id=335 data-nosnippet>335</a>                bytes: slot.bytes.load(Ordering::Relaxed),
+<a href=#336 id=336 data-nosnippet>336</a>                size_unavailable: slot.flags.load(Ordering::Relaxed) &amp; FLAG_SIZE_UNAVAILABLE != <span class="number">0</span>,
+<a href=#337 id=337 data-nosnippet>337</a>                size_from_gap: slot.flags.load(Ordering::Relaxed) &amp; FLAG_SIZE_FROM_GAP != <span class="number">0</span>,
+<a href=#338 id=338 data-nosnippet>338</a>            });
+<a href=#339 id=339 data-nosnippet>339</a>        }
+<a href=#340 id=340 data-nosnippet>340</a>    }
+<a href=#341 id=341 data-nosnippet>341</a>
+<a href=#342 id=342 data-nosnippet>342</a>    <span class="doccomment">/// Empty the table for the next tumbling window.
+<a href=#343 id=343 data-nosnippet>343</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>reset(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
+<a href=#344 id=344 data-nosnippet>344</a>        <span class="kw">for </span>slot <span class="kw">in </span><span class="self">self</span>.slots.iter() {
+<a href=#345 id=345 data-nosnippet>345</a>            slot.clear();
+<a href=#346 id=346 data-nosnippet>346</a>        }
+<a href=#347 id=347 data-nosnippet>347</a>        <span class="self">self</span>.occupancy.store(<span class="number">0</span>, Ordering::Relaxed);
+<a href=#348 id=348 data-nosnippet>348</a>    }
+<a href=#349 id=349 data-nosnippet>349</a>
+<a href=#350 id=350 data-nosnippet>350</a>    <span class="doccomment">/// Drop every entry that is not admitted at `prefix_bits`, restoring the
+<a href=#351 id=351 data-nosnippet>351</a>    /// probe-chain invariant in place. Returns the new occupancy.
+<a href=#352 id=352 data-nosnippet>352</a>    ///
+<a href=#353 id=353 data-nosnippet>353</a>    /// Requires `&amp;mut` (the recorder takes the WRITE lock for a downsample), so no
+<a href=#354 id=354 data-nosnippet>354</a>    /// concurrent recorder can observe a half-shifted chain.
+<a href=#355 id=355 data-nosnippet>355</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>downsample(<span class="kw-2">&amp;mut </span><span class="self">self</span>, prefix_bits: u32) -&gt; usize {
+<a href=#356 id=356 data-nosnippet>356</a>        <span class="kw">let </span><span class="kw-2">mut </span>i = <span class="number">0usize</span>;
+<a href=#357 id=357 data-nosnippet>357</a>        <span class="kw">while </span>i &lt; SLOTS {
+<a href=#358 id=358 data-nosnippet>358</a>            <span class="kw">let </span>h = <span class="self">self</span>.slots[i].key_hash.load(Ordering::Relaxed);
+<a href=#359 id=359 data-nosnippet>359</a>            <span class="kw">if </span>h != <span class="number">0 </span>&amp;&amp; !admitted(h, prefix_bits) {
+<a href=#360 id=360 data-nosnippet>360</a>                <span class="self">self</span>.delete_at(i);
+<a href=#361 id=361 data-nosnippet>361</a>                <span class="comment">// Do NOT advance: the backward shift may have moved another entry
+<a href=#362 id=362 data-nosnippet>362</a>                // into slot `i`, and that one may also need dropping.
+<a href=#363 id=363 data-nosnippet>363</a>                </span><span class="kw">continue</span>;
+<a href=#364 id=364 data-nosnippet>364</a>            }
+<a href=#365 id=365 data-nosnippet>365</a>            i += <span class="number">1</span>;
+<a href=#366 id=366 data-nosnippet>366</a>        }
+<a href=#367 id=367 data-nosnippet>367</a>        <span class="self">self</span>.occupancy()
+<a href=#368 id=368 data-nosnippet>368</a>    }
+<a href=#369 id=369 data-nosnippet>369</a>
+<a href=#370 id=370 data-nosnippet>370</a>    <span class="doccomment">/// Backward-shift deletion for linear probing (Knuth 6.4 algorithm R).
+<a href=#371 id=371 data-nosnippet>371</a>    ///
+<a href=#372 id=372 data-nosnippet>372</a>    /// Blanking a slot outright would break every probe chain that passes through
+<a href=#373 id=373 data-nosnippet>373</a>    /// it — later members would become unreachable and a subsequent access to one
+<a href=#374 id=374 data-nosnippet>374</a>    /// of them would claim a SECOND slot, splitting one partition's count into two
+<a href=#375 id=375 data-nosnippet>375</a>    /// lower-repeat entries and silently understating concentration. Shifting the
+<a href=#376 id=376 data-nosnippet>376</a>    /// displaced members back into the hole keeps every survivor findable at its
+<a href=#377 id=377 data-nosnippet>377</a>    /// exact count, with no auxiliary allocation.
+<a href=#378 id=378 data-nosnippet>378</a>    </span><span class="kw">fn </span>delete_at(<span class="kw-2">&amp;mut </span><span class="self">self</span>, at: usize) {
+<a href=#379 id=379 data-nosnippet>379</a>        <span class="self">self</span>.slots[at].clear();
+<a href=#380 id=380 data-nosnippet>380</a>        <span class="self">self</span>.occupancy.fetch_sub(<span class="number">1</span>, Ordering::Relaxed);
+<a href=#381 id=381 data-nosnippet>381</a>
+<a href=#382 id=382 data-nosnippet>382</a>        <span class="kw">let </span><span class="kw-2">mut </span>hole = at;
+<a href=#383 id=383 data-nosnippet>383</a>        <span class="kw">let </span><span class="kw-2">mut </span>probe = (at + <span class="number">1</span>) &amp; SLOT_MASK;
+<a href=#384 id=384 data-nosnippet>384</a>        <span class="comment">// The loop terminates at the first empty slot; a full table is impossible
+<a href=#385 id=385 data-nosnippet>385</a>        // here because we just created a hole.
+<a href=#386 id=386 data-nosnippet>386</a>        </span><span class="kw">while </span><span class="self">self</span>.slots[probe].key_hash.load(Ordering::Relaxed) != <span class="number">0 </span>{
+<a href=#387 id=387 data-nosnippet>387</a>            <span class="kw">let </span>h = <span class="self">self</span>.slots[probe].key_hash.load(Ordering::Relaxed);
+<a href=#388 id=388 data-nosnippet>388</a>            <span class="kw">let </span>home = (h <span class="kw">as </span>usize) &amp; SLOT_MASK;
+<a href=#389 id=389 data-nosnippet>389</a>            <span class="comment">// Move the entry back only when its home does NOT lie strictly inside
+<a href=#390 id=390 data-nosnippet>390</a>            // the cyclic window `(hole, probe]` — otherwise moving it to `hole`
+<a href=#391 id=391 data-nosnippet>391</a>            // would place it BEFORE its own home and it could never be found.
+<a href=#392 id=392 data-nosnippet>392</a>            </span><span class="kw">if </span>!cyclic_in_exclusive_start(hole, probe, home) {
+<a href=#393 id=393 data-nosnippet>393</a>                <span class="self">self</span>.move_slot(probe, hole);
+<a href=#394 id=394 data-nosnippet>394</a>                hole = probe;
+<a href=#395 id=395 data-nosnippet>395</a>            }
+<a href=#396 id=396 data-nosnippet>396</a>            probe = (probe + <span class="number">1</span>) &amp; SLOT_MASK;
+<a href=#397 id=397 data-nosnippet>397</a>            <span class="kw">if </span>probe == hole {
+<a href=#398 id=398 data-nosnippet>398</a>                <span class="kw">break</span>;
+<a href=#399 id=399 data-nosnippet>399</a>            }
+<a href=#400 id=400 data-nosnippet>400</a>        }
+<a href=#401 id=401 data-nosnippet>401</a>    }
+<a href=#402 id=402 data-nosnippet>402</a>
+<a href=#403 id=403 data-nosnippet>403</a>    <span class="kw">fn </span>move_slot(<span class="kw-2">&amp;mut </span><span class="self">self</span>, from: usize, to: usize) {
+<a href=#404 id=404 data-nosnippet>404</a>        <span class="kw">let </span>(h, b, c, f) = {
+<a href=#405 id=405 data-nosnippet>405</a>            <span class="kw">let </span>s = <span class="kw-2">&amp;</span><span class="self">self</span>.slots[from];
+<a href=#406 id=406 data-nosnippet>406</a>            (
+<a href=#407 id=407 data-nosnippet>407</a>                s.key_hash.load(Ordering::Relaxed),
+<a href=#408 id=408 data-nosnippet>408</a>                s.bytes.load(Ordering::Relaxed),
+<a href=#409 id=409 data-nosnippet>409</a>                s.count.load(Ordering::Relaxed),
+<a href=#410 id=410 data-nosnippet>410</a>                s.flags.load(Ordering::Relaxed),
+<a href=#411 id=411 data-nosnippet>411</a>            )
+<a href=#412 id=412 data-nosnippet>412</a>        };
+<a href=#413 id=413 data-nosnippet>413</a>        <span class="kw">let </span>dst = <span class="kw-2">&amp;</span><span class="self">self</span>.slots[to];
+<a href=#414 id=414 data-nosnippet>414</a>        dst.bytes.store(b, Ordering::Relaxed);
+<a href=#415 id=415 data-nosnippet>415</a>        dst.count.store(c, Ordering::Relaxed);
+<a href=#416 id=416 data-nosnippet>416</a>        dst.flags.store(f, Ordering::Relaxed);
+<a href=#417 id=417 data-nosnippet>417</a>        dst.key_hash.store(h, Ordering::Relaxed);
+<a href=#418 id=418 data-nosnippet>418</a>        <span class="self">self</span>.slots[from].clear();
+<a href=#419 id=419 data-nosnippet>419</a>    }
+<a href=#420 id=420 data-nosnippet>420</a>}
+<a href=#421 id=421 data-nosnippet>421</a>
+<a href=#422 id=422 data-nosnippet>422</a><span class="doccomment">/// Is `x` inside the cyclic range `(start, end]`?
+<a href=#423 id=423 data-nosnippet>423</a></span><span class="kw">fn </span>cyclic_in_exclusive_start(start: usize, end: usize, x: usize) -&gt; bool {
+<a href=#424 id=424 data-nosnippet>424</a>    <span class="kw">if </span>start &lt; end {
+<a href=#425 id=425 data-nosnippet>425</a>        x &gt; start &amp;&amp; x &lt;= end
+<a href=#426 id=426 data-nosnippet>426</a>    } <span class="kw">else </span>{
+<a href=#427 id=427 data-nosnippet>427</a>        x &gt; start || x &lt;= end
+<a href=#428 id=428 data-nosnippet>428</a>    }
+<a href=#429 id=429 data-nosnippet>429</a>}
+<a href=#430 id=430 data-nosnippet>430</a>
+<a href=#431 id=431 data-nosnippet>431</a><span class="attr">#[cfg(test)]
+<a href=#432 id=432 data-nosnippet>432</a></span><span class="kw">mod </span>tests {
+<a href=#433 id=433 data-nosnippet>433</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#434 id=434 data-nosnippet>434</a>
+<a href=#435 id=435 data-nosnippet>435</a>    <span class="attr">#[test]
+<a href=#436 id=436 data-nosnippet>436</a>    </span><span class="kw">fn </span>footprint_is_exactly_three_mib() {
+<a href=#437 id=437 data-nosnippet>437</a>        <span class="macro">assert_eq!</span>(TABLE_BYTES, <span class="number">3 </span>* <span class="number">1024 </span>* <span class="number">1024</span>);
+<a href=#438 id=438 data-nosnippet>438</a>        <span class="macro">assert_eq!</span>(std::mem::size_of::&lt;Slot&gt;(), <span class="number">24</span>);
+<a href=#439 id=439 data-nosnippet>439</a>        <span class="kw">let </span>t = Table::new();
+<a href=#440 id=440 data-nosnippet>440</a>        <span class="macro">assert_eq!</span>(t.footprint_bytes(), <span class="number">3 </span>* <span class="number">1024 </span>* <span class="number">1024</span>);
+<a href=#441 id=441 data-nosnippet>441</a>    }
+<a href=#442 id=442 data-nosnippet>442</a>
+<a href=#443 id=443 data-nosnippet>443</a>    <span class="attr">#[test]
+<a href=#444 id=444 data-nosnippet>444</a>    </span><span class="kw">fn </span>admission_predicate_is_monotone_in_prefix_width() {
+<a href=#445 id=445 data-nosnippet>445</a>        <span class="comment">// A key admitted at width k must be admitted at every smaller width —
+<a href=#446 id=446 data-nosnippet>446</a>        // that is what keeps a survivor's already-accumulated count exact.
+<a href=#447 id=447 data-nosnippet>447</a>        </span><span class="kw">for </span>hash <span class="kw">in </span>[<span class="number">1u64</span>, <span class="number">0x0000_0000_dead_beef</span>, u64::MAX, <span class="number">0x7fff_ffff_ffff_ffff</span>] {
+<a href=#448 id=448 data-nosnippet>448</a>            <span class="kw">let </span><span class="kw-2">mut </span>still = <span class="bool-val">true</span>;
+<a href=#449 id=449 data-nosnippet>449</a>            <span class="kw">for </span>k <span class="kw">in </span><span class="number">0</span>..=<span class="number">20u32 </span>{
+<a href=#450 id=450 data-nosnippet>450</a>                <span class="kw">let </span>a = admitted(hash, k);
+<a href=#451 id=451 data-nosnippet>451</a>                <span class="kw">if </span>!a {
+<a href=#452 id=452 data-nosnippet>452</a>                    still = <span class="bool-val">false</span>;
+<a href=#453 id=453 data-nosnippet>453</a>                }
+<a href=#454 id=454 data-nosnippet>454</a>                <span class="kw">if </span>!still {
+<a href=#455 id=455 data-nosnippet>455</a>                    <span class="macro">assert!</span>(!a, <span class="string">"admission must be monotone (hash={hash:#x}, k={k})"</span>);
+<a href=#456 id=456 data-nosnippet>456</a>                }
+<a href=#457 id=457 data-nosnippet>457</a>            }
+<a href=#458 id=458 data-nosnippet>458</a>        }
+<a href=#459 id=459 data-nosnippet>459</a>    }
+<a href=#460 id=460 data-nosnippet>460</a>
+<a href=#461 id=461 data-nosnippet>461</a>    <span class="attr">#[test]
+<a href=#462 id=462 data-nosnippet>462</a>    </span><span class="kw">fn </span>downsample_keeps_every_survivor_findable_at_its_exact_count() {
+<a href=#463 id=463 data-nosnippet>463</a>        <span class="comment">// The backward-shift deletion regression: after a downsample every
+<a href=#464 id=464 data-nosnippet>464</a>        // surviving key must still be reachable on its probe chain, so a
+<a href=#465 id=465 data-nosnippet>465</a>        // subsequent access folds into the SAME slot rather than claiming a
+<a href=#466 id=466 data-nosnippet>466</a>        // second one (which would split one partition into two lower-repeat
+<a href=#467 id=467 data-nosnippet>467</a>        // entries and understate concentration).
+<a href=#468 id=468 data-nosnippet>468</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>table = Table::new();
+<a href=#469 id=469 data-nosnippet>469</a>        <span class="kw">let </span>n = <span class="number">40_000u64</span>;
+<a href=#470 id=470 data-nosnippet>470</a>        <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..n {
+<a href=#471 id=471 data-nosnippet>471</a>            <span class="kw">let </span>h = hash_partition(<span class="string">"ks"</span>, <span class="string">"t"</span>, <span class="kw-2">&amp;</span>i.to_le_bytes());
+<a href=#472 id=472 data-nosnippet>472</a>            <span class="macro">assert_eq!</span>(table.record(h, <span class="number">0</span>, <span class="prelude-val">Some</span>(<span class="number">10</span>)), Insert::Recorded);
+<a href=#473 id=473 data-nosnippet>473</a>        }
+<a href=#474 id=474 data-nosnippet>474</a>        <span class="kw">let </span>before = table.occupancy();
+<a href=#475 id=475 data-nosnippet>475</a>        <span class="macro">assert_eq!</span>(before, n <span class="kw">as </span>usize);
+<a href=#476 id=476 data-nosnippet>476</a>
+<a href=#477 id=477 data-nosnippet>477</a>        <span class="kw">let </span>survivors = table.downsample(<span class="number">1</span>);
+<a href=#478 id=478 data-nosnippet>478</a>        <span class="macro">assert!</span>(survivors &lt; before, <span class="string">"a downsample must drop entries"</span>);
+<a href=#479 id=479 data-nosnippet>479</a>
+<a href=#480 id=480 data-nosnippet>480</a>        <span class="comment">// Every admitted key folds into its existing slot: occupancy is unchanged
+<a href=#481 id=481 data-nosnippet>481</a>        // and each survivor's count becomes exactly 2.
+<a href=#482 id=482 data-nosnippet>482</a>        </span><span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..n {
+<a href=#483 id=483 data-nosnippet>483</a>            <span class="kw">let </span>h = hash_partition(<span class="string">"ks"</span>, <span class="string">"t"</span>, <span class="kw-2">&amp;</span>i.to_le_bytes());
+<a href=#484 id=484 data-nosnippet>484</a>            <span class="kw">match </span>table.record(h, <span class="number">1</span>, <span class="prelude-val">Some</span>(<span class="number">10</span>)) {
+<a href=#485 id=485 data-nosnippet>485</a>                Insert::Recorded =&gt; {}
+<a href=#486 id=486 data-nosnippet>486</a>                Insert::NotAdmitted =&gt; <span class="macro">assert!</span>(!admitted(h, <span class="number">1</span>)),
+<a href=#487 id=487 data-nosnippet>487</a>                Insert::Full =&gt; <span class="macro">panic!</span>(<span class="string">"table must not be full at {survivors} entries"</span>),
+<a href=#488 id=488 data-nosnippet>488</a>            }
+<a href=#489 id=489 data-nosnippet>489</a>        }
+<a href=#490 id=490 data-nosnippet>490</a>        <span class="macro">assert_eq!</span>(
+<a href=#491 id=491 data-nosnippet>491</a>            table.occupancy(),
+<a href=#492 id=492 data-nosnippet>492</a>            survivors,
+<a href=#493 id=493 data-nosnippet>493</a>            <span class="string">"a second pass over the same keys must claim no new slots"
+<a href=#494 id=494 data-nosnippet>494</a>        </span>);
+<a href=#495 id=495 data-nosnippet>495</a>        <span class="kw">let </span><span class="kw-2">mut </span>twos = <span class="number">0usize</span>;
+<a href=#496 id=496 data-nosnippet>496</a>        <span class="kw">let </span><span class="kw-2">mut </span>others = <span class="number">0usize</span>;
+<a href=#497 id=497 data-nosnippet>497</a>        table.for_each_entry(|e| <span class="kw">if </span>e.count == <span class="number">2 </span>{ twos += <span class="number">1 </span>} <span class="kw">else </span>{ others += <span class="number">1 </span>});
+<a href=#498 id=498 data-nosnippet>498</a>        <span class="macro">assert_eq!</span>(others, <span class="number">0</span>, <span class="string">"every survivor must have folded, not split"</span>);
+<a href=#499 id=499 data-nosnippet>499</a>        <span class="macro">assert_eq!</span>(twos, survivors);
+<a href=#500 id=500 data-nosnippet>500</a>    }
+<a href=#501 id=501 data-nosnippet>501</a>
+<a href=#502 id=502 data-nosnippet>502</a>    <span class="attr">#[test]
+<a href=#503 id=503 data-nosnippet>503</a>    </span><span class="kw">fn </span>bytes_take_the_maximum_not_the_sum() {
+<a href=#504 id=504 data-nosnippet>504</a>        <span class="kw">let </span>table = Table::new();
+<a href=#505 id=505 data-nosnippet>505</a>        <span class="kw">let </span>h = hash_partition(<span class="string">"ks"</span>, <span class="string">"t"</span>, <span class="string">b"partition-a"</span>);
+<a href=#506 id=506 data-nosnippet>506</a>        <span class="kw">for _ in </span><span class="number">0</span>..<span class="number">10 </span>{
+<a href=#507 id=507 data-nosnippet>507</a>            <span class="macro">assert_eq!</span>(table.record(h, <span class="number">0</span>, <span class="prelude-val">Some</span>(<span class="number">4_096</span>)), Insert::Recorded);
+<a href=#508 id=508 data-nosnippet>508</a>        }
+<a href=#509 id=509 data-nosnippet>509</a>        <span class="kw">let </span><span class="kw-2">mut </span>table = table;
+<a href=#510 id=510 data-nosnippet>510</a>        <span class="kw">let </span><span class="kw-2">mut </span>seen = Vec::new();
+<a href=#511 id=511 data-nosnippet>511</a>        table.for_each_entry(|e| seen.push(e));
+<a href=#512 id=512 data-nosnippet>512</a>        <span class="macro">assert_eq!</span>(seen.len(), <span class="number">1</span>);
+<a href=#513 id=513 data-nosnippet>513</a>        <span class="macro">assert_eq!</span>(seen[<span class="number">0</span>].count, <span class="number">10</span>);
+<a href=#514 id=514 data-nosnippet>514</a>        <span class="macro">assert_eq!</span>(seen[<span class="number">0</span>].bytes, <span class="number">4_096</span>, <span class="string">"distinct-partition bytes, not a sum"</span>);
+<a href=#515 id=515 data-nosnippet>515</a>        <span class="macro">assert!</span>(!seen[<span class="number">0</span>].size_unavailable);
+<a href=#516 id=516 data-nosnippet>516</a>    }
+<a href=#517 id=517 data-nosnippet>517</a>
+<a href=#518 id=518 data-nosnippet>518</a>    <span class="attr">#[test]
+<a href=#519 id=519 data-nosnippet>519</a>    </span><span class="kw">fn </span>an_unpriced_access_makes_the_entry_sticky_unavailable() {
+<a href=#520 id=520 data-nosnippet>520</a>        <span class="kw">let </span>table = Table::new();
+<a href=#521 id=521 data-nosnippet>521</a>        <span class="kw">let </span>h = hash_partition(<span class="string">"ks"</span>, <span class="string">"t"</span>, <span class="string">b"partition-b"</span>);
+<a href=#522 id=522 data-nosnippet>522</a>        <span class="macro">assert_eq!</span>(table.record(h, <span class="number">0</span>, <span class="prelude-val">Some</span>(<span class="number">8_192</span>)), Insert::Recorded);
+<a href=#523 id=523 data-nosnippet>523</a>        <span class="macro">assert_eq!</span>(table.record(h, <span class="number">0</span>, <span class="prelude-val">None</span>), Insert::Recorded);
+<a href=#524 id=524 data-nosnippet>524</a>        <span class="macro">assert_eq!</span>(table.record(h, <span class="number">0</span>, <span class="prelude-val">Some</span>(<span class="number">8_192</span>)), Insert::Recorded);
+<a href=#525 id=525 data-nosnippet>525</a>        <span class="kw">let </span><span class="kw-2">mut </span>table = table;
+<a href=#526 id=526 data-nosnippet>526</a>        <span class="kw">let </span><span class="kw-2">mut </span>seen = Vec::new();
+<a href=#527 id=527 data-nosnippet>527</a>        table.for_each_entry(|e| seen.push(e));
+<a href=#528 id=528 data-nosnippet>528</a>        <span class="macro">assert_eq!</span>(seen.len(), <span class="number">1</span>);
+<a href=#529 id=529 data-nosnippet>529</a>        <span class="macro">assert!</span>(
+<a href=#530 id=530 data-nosnippet>530</a>            seen[<span class="number">0</span>].size_unavailable,
+<a href=#531 id=531 data-nosnippet>531</a>            <span class="string">"unavailable must be sticky for the window"
+<a href=#532 id=532 data-nosnippet>532</a>        </span>);
+<a href=#533 id=533 data-nosnippet>533</a>    }
+<a href=#534 id=534 data-nosnippet>534</a>
+<a href=#535 id=535 data-nosnippet>535</a>    <span class="attr">#[test]
+<a href=#536 id=536 data-nosnippet>536</a>    </span><span class="kw">fn </span>reset_empties_the_table_without_changing_its_footprint() {
+<a href=#537 id=537 data-nosnippet>537</a>        <span class="kw">let </span><span class="kw-2">mut </span>table = Table::new();
+<a href=#538 id=538 data-nosnippet>538</a>        <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..<span class="number">1_000u64 </span>{
+<a href=#539 id=539 data-nosnippet>539</a>            table.record(hash_partition(<span class="string">"ks"</span>, <span class="string">"t"</span>, <span class="kw-2">&amp;</span>i.to_le_bytes()), <span class="number">0</span>, <span class="prelude-val">Some</span>(<span class="number">1</span>));
+<a href=#540 id=540 data-nosnippet>540</a>        }
+<a href=#541 id=541 data-nosnippet>541</a>        <span class="macro">assert_eq!</span>(table.occupancy(), <span class="number">1_000</span>);
+<a href=#542 id=542 data-nosnippet>542</a>        table.reset();
+<a href=#543 id=543 data-nosnippet>543</a>        <span class="macro">assert_eq!</span>(table.occupancy(), <span class="number">0</span>);
+<a href=#544 id=544 data-nosnippet>544</a>        <span class="kw">let </span><span class="kw-2">mut </span>n = <span class="number">0</span>;
+<a href=#545 id=545 data-nosnippet>545</a>        table.for_each_entry(|<span class="kw">_</span>| n += <span class="number">1</span>);
+<a href=#546 id=546 data-nosnippet>546</a>        <span class="macro">assert_eq!</span>(n, <span class="number">0</span>);
+<a href=#547 id=547 data-nosnippet>547</a>        <span class="macro">assert_eq!</span>(table.footprint_bytes(), TABLE_BYTES);
+<a href=#548 id=548 data-nosnippet>548</a>    }
+<a href=#549 id=549 data-nosnippet>549</a>
+<a href=#550 id=550 data-nosnippet>550</a>    <span class="attr">#[test]
+<a href=#551 id=551 data-nosnippet>551</a>    </span><span class="kw">fn </span>a_probe_cluster_reports_full_well_below_the_load_factor() {
+<a href=#552 id=552 data-nosnippet>552</a>        <span class="comment">// The premise of the recorder's widen-instead-of-drop path (C4): `Full` is
+<a href=#553 id=553 data-nosnippet>553</a>        // reachable far below the load factor, because the probe bound is 64 slots
+<a href=#554 id=554 data-nosnippet>554</a>        // while a cluster can be much longer. Construct the cluster directly —
+<a href=#555 id=555 data-nosnippet>555</a>        // MAX_PROBES + 1 keys that all hash to the same home slot — so the property
+<a href=#556 id=556 data-nosnippet>556</a>        // is demonstrated rather than assumed from a statistical argument.
+<a href=#557 id=557 data-nosnippet>557</a>        </span><span class="kw">let </span>table = Table::new();
+<a href=#558 id=558 data-nosnippet>558</a>        <span class="comment">// Find enough distinct keys sharing one home slot.
+<a href=#559 id=559 data-nosnippet>559</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>home: <span class="prelude-ty">Option</span>&lt;usize&gt; = <span class="prelude-val">None</span>;
+<a href=#560 id=560 data-nosnippet>560</a>        <span class="kw">let </span><span class="kw-2">mut </span>hashes = Vec::new();
+<a href=#561 id=561 data-nosnippet>561</a>        <span class="kw">let </span><span class="kw-2">mut </span>i = <span class="number">0u64</span>;
+<a href=#562 id=562 data-nosnippet>562</a>        <span class="kw">while </span>hashes.len() &lt;= MAX_PROBES &amp;&amp; i &lt; <span class="number">50_000_000 </span>{
+<a href=#563 id=563 data-nosnippet>563</a>            <span class="kw">let </span>h = hash_partition(<span class="string">"ks"</span>, <span class="string">"t"</span>, <span class="kw-2">&amp;</span>i.to_le_bytes());
+<a href=#564 id=564 data-nosnippet>564</a>            <span class="kw">let </span>slot = (h <span class="kw">as </span>usize) &amp; SLOT_MASK;
+<a href=#565 id=565 data-nosnippet>565</a>            <span class="kw">match </span>home {
+<a href=#566 id=566 data-nosnippet>566</a>                <span class="prelude-val">None </span>=&gt; {
+<a href=#567 id=567 data-nosnippet>567</a>                    home = <span class="prelude-val">Some</span>(slot);
+<a href=#568 id=568 data-nosnippet>568</a>                    hashes.push(h);
+<a href=#569 id=569 data-nosnippet>569</a>                }
+<a href=#570 id=570 data-nosnippet>570</a>                <span class="prelude-val">Some</span>(target) <span class="kw">if </span>slot == target =&gt; hashes.push(h),
+<a href=#571 id=571 data-nosnippet>571</a>                <span class="kw">_ </span>=&gt; {}
+<a href=#572 id=572 data-nosnippet>572</a>            }
+<a href=#573 id=573 data-nosnippet>573</a>            i += <span class="number">1</span>;
+<a href=#574 id=574 data-nosnippet>574</a>        }
+<a href=#575 id=575 data-nosnippet>575</a>        <span class="macro">assert!</span>(
+<a href=#576 id=576 data-nosnippet>576</a>            hashes.len() &gt; MAX_PROBES,
+<a href=#577 id=577 data-nosnippet>577</a>            <span class="string">"needed {} colliding keys, found {}"</span>,
+<a href=#578 id=578 data-nosnippet>578</a>            MAX_PROBES + <span class="number">1</span>,
+<a href=#579 id=579 data-nosnippet>579</a>            hashes.len()
+<a href=#580 id=580 data-nosnippet>580</a>        );
+<a href=#581 id=581 data-nosnippet>581</a>
+<a href=#582 id=582 data-nosnippet>582</a>        <span class="kw">for </span>h <span class="kw">in </span>hashes.iter().take(MAX_PROBES) {
+<a href=#583 id=583 data-nosnippet>583</a>            <span class="macro">assert_eq!</span>(table.record(<span class="kw-2">*</span>h, <span class="number">0</span>, <span class="prelude-val">Some</span>(<span class="number">1</span>)), Insert::Recorded);
+<a href=#584 id=584 data-nosnippet>584</a>        }
+<a href=#585 id=585 data-nosnippet>585</a>        <span class="comment">// The table is ~0.05% full, nowhere near LOAD_FACTOR_LIMIT.
+<a href=#586 id=586 data-nosnippet>586</a>        </span><span class="macro">assert!</span>(table.occupancy() &lt; LOAD_FACTOR_LIMIT / <span class="number">100</span>);
+<a href=#587 id=587 data-nosnippet>587</a>        <span class="macro">assert_eq!</span>(
+<a href=#588 id=588 data-nosnippet>588</a>            table.record(hashes[MAX_PROBES], <span class="number">0</span>, <span class="prelude-val">Some</span>(<span class="number">1</span>)),
+<a href=#589 id=589 data-nosnippet>589</a>            Insert::Full,
+<a href=#590 id=590 data-nosnippet>590</a>            <span class="string">"a cluster longer than the probe bound reports Full even on an almost \
+<a href=#591 id=591 data-nosnippet>591</a>             empty table — which is why the recorder must widen rather than drop"
+<a href=#592 id=592 data-nosnippet>592</a>        </span>);
+<a href=#593 id=593 data-nosnippet>593</a>    }
+<a href=#594 id=594 data-nosnippet>594</a>
+<a href=#595 id=595 data-nosnippet>595</a>    <span class="attr">#[test]
+<a href=#596 id=596 data-nosnippet>596</a>    </span><span class="kw">fn </span>the_same_key_in_two_tables_is_two_identities() {
+<a href=#597 id=597 data-nosnippet>597</a>        <span class="comment">// F1: one process-wide recorder serves every table, so an identity over raw
+<a href=#598 id=598 data-nosnippet>598</a>        // key bytes alone would merge a tenant id shared by two tables into a single
+<a href=#599 id=599 data-nosnippet>599</a>        // entry — manufacturing a repeat where there are two singletons.
+<a href=#600 id=600 data-nosnippet>600</a>        </span><span class="kw">let </span>key = <span class="string">b"tenant-42"</span>;
+<a href=#601 id=601 data-nosnippet>601</a>        <span class="macro">assert_ne!</span>(
+<a href=#602 id=602 data-nosnippet>602</a>            hash_partition(<span class="string">"ks"</span>, <span class="string">"users"</span>, key),
+<a href=#603 id=603 data-nosnippet>603</a>            hash_partition(<span class="string">"ks"</span>, <span class="string">"orders"</span>, key)
+<a href=#604 id=604 data-nosnippet>604</a>        );
+<a href=#605 id=605 data-nosnippet>605</a>        <span class="macro">assert_ne!</span>(
+<a href=#606 id=606 data-nosnippet>606</a>            hash_partition(<span class="string">"ks_a"</span>, <span class="string">"t"</span>, key),
+<a href=#607 id=607 data-nosnippet>607</a>            hash_partition(<span class="string">"ks_b"</span>, <span class="string">"t"</span>, key)
+<a href=#608 id=608 data-nosnippet>608</a>        );
+<a href=#609 id=609 data-nosnippet>609</a>        <span class="comment">// Same table, same key: one identity.
+<a href=#610 id=610 data-nosnippet>610</a>        </span><span class="macro">assert_eq!</span>(
+<a href=#611 id=611 data-nosnippet>611</a>            hash_partition(<span class="string">"ks"</span>, <span class="string">"users"</span>, key),
+<a href=#612 id=612 data-nosnippet>612</a>            hash_partition(<span class="string">"ks"</span>, <span class="string">"users"</span>, key)
+<a href=#613 id=613 data-nosnippet>613</a>        );
+<a href=#614 id=614 data-nosnippet>614</a>        <span class="comment">// The separator makes the scope unambiguous: ("ab","c") != ("a","bc").
+<a href=#615 id=615 data-nosnippet>615</a>        </span><span class="macro">assert_ne!</span>(
+<a href=#616 id=616 data-nosnippet>616</a>            hash_partition(<span class="string">"ab"</span>, <span class="string">"c"</span>, key),
+<a href=#617 id=617 data-nosnippet>617</a>            hash_partition(<span class="string">"a"</span>, <span class="string">"bc"</span>, key)
+<a href=#618 id=618 data-nosnippet>618</a>        );
+<a href=#619 id=619 data-nosnippet>619</a>    }
+<a href=#620 id=620 data-nosnippet>620</a>
+<a href=#621 id=621 data-nosnippet>621</a>    <span class="attr">#[test]
+<a href=#622 id=622 data-nosnippet>622</a>    </span><span class="kw">fn </span>cyclic_window_membership() {
+<a href=#623 id=623 data-nosnippet>623</a>        <span class="macro">assert!</span>(cyclic_in_exclusive_start(<span class="number">2</span>, <span class="number">5</span>, <span class="number">3</span>));
+<a href=#624 id=624 data-nosnippet>624</a>        <span class="macro">assert!</span>(cyclic_in_exclusive_start(<span class="number">2</span>, <span class="number">5</span>, <span class="number">5</span>));
+<a href=#625 id=625 data-nosnippet>625</a>        <span class="macro">assert!</span>(!cyclic_in_exclusive_start(<span class="number">2</span>, <span class="number">5</span>, <span class="number">2</span>));
+<a href=#626 id=626 data-nosnippet>626</a>        <span class="macro">assert!</span>(!cyclic_in_exclusive_start(<span class="number">2</span>, <span class="number">5</span>, <span class="number">6</span>));
+<a href=#627 id=627 data-nosnippet>627</a>        <span class="comment">// Wrapped window.
+<a href=#628 id=628 data-nosnippet>628</a>        </span><span class="macro">assert!</span>(cyclic_in_exclusive_start(SLOTS - <span class="number">2</span>, <span class="number">1</span>, SLOTS - <span class="number">1</span>));
+<a href=#629 id=629 data-nosnippet>629</a>        <span class="macro">assert!</span>(cyclic_in_exclusive_start(SLOTS - <span class="number">2</span>, <span class="number">1</span>, <span class="number">0</span>));
+<a href=#630 id=630 data-nosnippet>630</a>        <span class="macro">assert!</span>(!cyclic_in_exclusive_start(SLOTS - <span class="number">2</span>, <span class="number">1</span>, <span class="number">2</span>));
+<a href=#631 id=631 data-nosnippet>631</a>    }
+<a href=#632 id=632 data-nosnippet>632</a>}
+</code></pre></div></section></main></body></html>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["cql_fixed_len","format_table_id","is_simple_scalar_type","parse_table_id"],"struct":["ColumnSpec","CommitLogSchema"],"type":["SchemaSet"]};

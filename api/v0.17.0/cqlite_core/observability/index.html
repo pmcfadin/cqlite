@@ -1,0 +1,117 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Observability foundation (epic #1031, issues #1032 + #1038)."><title>cqlite_core::observability - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module observability</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.17.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module observability</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#the-contract-for-downstream-issues-10331043" title="The contract for downstream issues (#1033–#1043)">The contract for downstream issues (#1033–#1043)</a></li><li><a href="#why-was-this-query-slow-issue-1707" title="Why was this query slow? (issue #1707)">Why was this query slow? (issue #1707)</a></li><li><a href="#always-compiled-vs-feature-gated" title="Always-compiled vs feature-gated">Always-compiled vs feature-gated</a></li></ul><h3><a href="#reexports">Module Items</a></h3><ul class="block"><li><a href="#reexports" title="Re-exports">Re-exports</a></li><li><a href="#modules" title="Modules">Modules</a></li><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li><li><a href="#types" title="Type Aliases">Type Aliases</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate cqlite_<wbr>core</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">cqlite_core</a></div><h1>Module <span>observability</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/cqlite_core/observability/mod.rs.html#1-592">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Observability foundation (epic #1031, issues #1032 + #1038).</p>
+<p>This module is the single shared foundation every other observability issue
+builds on. It owns OpenTelemetry initialisation, the <code>CQLITE_OTEL_*</code> config,
+the metric-naming <a href="catalog/index.html" title="mod cqlite_core::observability::catalog"><code>catalog</code></a>, the error-rate schema (<a href="enum.ObsErrorCategory.html" title="enum cqlite_core::observability::ObsErrorCategory"><code>ObsErrorCategory</code></a> +
+<a href="fn.record_error.html" title="fn cqlite_core::observability::record_error"><code>record_error</code></a>), and graceful shutdown — and it is designed so that
+<strong>instrumentation call sites are identical whether or not the
+<code>observability</code> feature is enabled.</strong> When the feature is off, every helper
+here compiles to a no-op and <code>cargo tree -p cqlite-core</code> links no
+OpenTelemetry crates.</p>
+<h2 id="the-contract-for-downstream-issues-10331043"><a class="doc-anchor" href="#the-contract-for-downstream-issues-10331043">§</a>The contract for downstream issues (#1033–#1043)</h2>
+<p>Downstream code MUST go through this module rather than touching
+<code>opentelemetry</code>/<code>tracing-opentelemetry</code> directly, so telemetry stays
+consistent and zero-cost-when-off:</p>
+<p><strong>Initialisation (CLI #1033, Flight #1041, bindings #1039/#1040):</strong></p>
+
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">let </span>cfg = observability::ObservabilityConfig::from_env();
+<span class="kw">let </span>_guard = observability::init(cfg)<span class="question-mark">?</span>;            <span class="comment">// RAII; flushes on drop
+// compose the tracing layer into your own subscriber (feature-gated):
+</span>tracing_subscriber::registry()
+    .with(tracing_subscriber::fmt::layer())
+    .with(observability::tracing_layer())
+    .init();</code></pre></div>
+<p><strong>Spans (read/query/write/compaction #1034–#1037):</strong> use the ordinary
+<code>tracing</code> macros (<code>#[tracing::instrument]</code>, <code>tracing::info_span!</code>) — they are
+always available and the OTel layer bridges them when active. Do NOT create
+per-cell spans on hot paths; aggregate with metrics instead.</p>
+<p><strong>Metrics:</strong> call <a href="fn.add_counter.html" title="fn cqlite_core::observability::add_counter"><code>add_counter</code></a>, <a href="fn.record_histogram.html" title="fn cqlite_core::observability::record_histogram"><code>record_histogram</code></a>, <a href="fn.record_gauge.html" title="fn cqlite_core::observability::record_gauge"><code>record_gauge</code></a>
+with a name from <a href="catalog/index.html" title="mod cqlite_core::observability::catalog"><code>catalog</code></a> and bounded <a href="type.Attr.html" title="type cqlite_core::observability::Attr"><code>Attr</code></a> attributes whose keys come
+from <a href="catalog/attr/index.html" title="mod cqlite_core::observability::catalog::attr"><code>catalog::attr</code></a>:</p>
+
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">use </span>cqlite_core::observability::{<span class="self">self </span><span class="kw">as </span>obs, catalog, AttrValue};
+obs::add_counter(catalog::READ_ROWS, n, <span class="kw-2">&amp;</span>[(catalog::attr::SSTABLE_FORMAT, <span class="string">"bti"</span>.into())]);
+obs::record_histogram(catalog::QUERY_DURATION, elapsed.as_secs_f64(), <span class="kw-2">&amp;</span>[]);</code></pre></div>
+<p><strong>Errors (#1038):</strong> at every boundary instrumented by #1034–#1037, call
+<a href="fn.record_error.html" title="fn cqlite_core::observability::record_error"><code>record_error</code></a> when an error escapes — it increments
+<a href="catalog/constant.ERRORS_TOTAL.html" title="constant cqlite_core::observability::catalog::ERRORS_TOTAL"><code>catalog::ERRORS_TOTAL</code></a> keyed by the bounded <code>{category, subsystem}</code> label
+set and marks the active span errored. Never attach the raw error message.</p>
+<h2 id="why-was-this-query-slow-issue-1707"><a class="doc-anchor" href="#why-was-this-query-slow-issue-1707">§</a>Why was this query slow? (issue #1707)</h2>
+<p><a href="catalog/constant.READ_DURATION.html" title="constant cqlite_core::observability::catalog::READ_DURATION"><code>catalog::READ_DURATION</code></a> tells you a read was slow. These four histograms tell
+you WHERE the time went, so the next step is a decision rather than a profiler:</p>
+<ol>
+<li><strong>Localise with <code>cqlite.read.phase.*</code>.</strong> One sample per phase per completed
+scan — <a href="catalog/constant.READ_PHASE_IO.html" title="constant cqlite_core::observability::catalog::READ_PHASE_IO"><code>catalog::READ_PHASE_IO</code></a>, <a href="catalog/constant.READ_PHASE_DECOMPRESS.html" title="constant cqlite_core::observability::catalog::READ_PHASE_DECOMPRESS"><code>catalog::READ_PHASE_DECOMPRESS</code></a>,
+<a href="catalog/constant.READ_PHASE_DECODE.html" title="constant cqlite_core::observability::catalog::READ_PHASE_DECODE"><code>catalog::READ_PHASE_DECODE</code></a>, <a href="catalog/constant.READ_PHASE_MERGE.html" title="constant cqlite_core::observability::catalog::READ_PHASE_MERGE"><code>catalog::READ_PHASE_MERGE</code></a>. Compare them
+against EACH OTHER:
+<ul>
+<li><strong>io dominant</strong> → disk / page-cache bound (cold storage, evicted cache, a
+network filesystem). Decode and merge tuning cannot help this read.</li>
+<li><strong>decompress dominant</strong> → chunk length / compressor choice, or the same
+chunks being decompressed repeatedly (a decompressed-chunk cache too small
+for the scan’s window).</li>
+<li><strong>decode dominant</strong> → normally HEALTHY on a warm scan (decode is the CPU
+work of a read). Suspicious only when it grows relative to the rows
+DELIVERED: wide partitions, many collection/UDT cells, or a schema-less
+fallback decode.</li>
+<li><strong>merge dominant</strong> → too many overlapping generations, or heavy reconcile
+(tombstones, LWW collapse). Cross-check <a href="catalog/constant.COMPACTION_LAG.html" title="constant cqlite_core::observability::catalog::COMPACTION_LAG"><code>catalog::COMPACTION_LAG</code></a>; the
+recv-wait is already excluded, so this really is merge work and not a
+producer starving.</li>
+</ul>
+</li>
+<li><strong>Read the ABSENCES, they are informative.</strong> A phase that never ran records NO
+sample rather than <code>0.0</code>: no <code>decompress</code> series means the SSTable is
+uncompressed (the #1406 write-surface shape), and no <code>merge</code> series means the
+read had a single generation. Absence is a fact about the read; <code>0.0</code> would be
+a claim that a measurement was taken.</li>
+<li><strong>Know which surfaces are instrumented before you read an absence.</strong> The
+phases come from the STREAMING scan surfaces and the streaming
+cross-generation merge. The materializing <code>SSTableManager::scan</code>, the BIG
+reverse-clustering scan, the BTI trie walk, point reads and compaction reads
+emit <a href="catalog/constant.READ_DURATION.html" title="constant cqlite_core::observability::catalog::READ_DURATION"><code>catalog::READ_DURATION</code></a> with NO phase series at all — for those, an
+empty breakdown means NOT MEASURED, never “fast”. The full list, and why
+instrumenting them needs async-safe propagation rather than another seam, is in
+[<code>read_phase</code>]’s “Coverage boundary” section.</li>
+<li><strong>Check fd pressure.</strong> <a href="catalog/constant.READER_FDS_OPEN.html" title="constant cqlite_core::observability::catalog::READER_FDS_OPEN"><code>catalog::READER_FDS_OPEN</code></a> is what the readers hold
+(exact, every platform, no <code>/proc</code>); <a href="catalog/constant.PROC_FDS.html" title="constant cqlite_core::observability::catalog::PROC_FDS"><code>catalog::PROC_FDS</code></a> is the whole process
+(sampled ~2s, Linux). A reader level climbing toward <code>ulimit -n</code> explains
+latency that is really queueing behind failing/retried opens — and it is
+visible BEFORE the first <code>EMFILE</code>. <code>PROC_FDS</code> minus the reader level is roughly
+the non-reader footprint (sockets, WAL).</li>
+<li><strong>Check startup / durability stalls.</strong> <a href="catalog/constant.WAL_SIZE.html" title="constant cqlite_core::observability::catalog::WAL_SIZE"><code>catalog::WAL_SIZE</code></a> should saw-tooth;
+a level that only climbs means flushes are not keeping up, and next open’s
+<a href="catalog/constant.WAL_RECOVERY_DURATION.html" title="constant cqlite_core::observability::catalog::WAL_RECOVERY_DURATION"><code>catalog::WAL_RECOVERY_DURATION</code></a> grows with it. A slow FIRST query after a
+restart is usually WAL recovery, not the read path.</li>
+</ol>
+<p><strong>The accounting caveat, and it matters for step 1:</strong> the read pipeline is
+CONCURRENT — an IO/decompress feed thread, a blocking parse thread, a merge
+producer thread — so the phases OVERLAP in wall-clock and DO NOT sum to
+<code>read.duration</code>. Their sum can even exceed it. They are per-phase TOTALS for
+attribution (“which phase dominates, and how did that move between two runs?”),
+never a decomposition of latency, and a dashboard that stacks them as a
+breakdown of wall time will mislead. Same caveat as the #2819 <code>stream_*</code>
+sub-phases.</p>
+<h2 id="always-compiled-vs-feature-gated"><a class="doc-anchor" href="#always-compiled-vs-feature-gated">§</a>Always-compiled vs feature-gated</h2>
+<p><a href="catalog/index.html" title="mod cqlite_core::observability::catalog"><code>catalog</code></a>, <a href="config/index.html" title="mod cqlite_core::observability::config"><code>config</code></a>, the <a href="enum.ObsErrorCategory.html" title="enum cqlite_core::observability::ObsErrorCategory"><code>ObsErrorCategory</code></a> taxonomy, and the helper
+signatures here are ALWAYS compiled (they pull in no OTel types), so call
+sites and tests build in any configuration. Only the exporter/runtime wiring
+([<code>otel</code>]) is gated behind <code>observability</code>.</p>
+</div></details><h2 id="reexports" class="section-header">Re-exports<a href="#reexports" class="anchor">§</a></h2><dl class="item-table reexports"><dt id="reexport.ObservabilityConfig"><code>pub use config::<a class="struct" href="config/struct.ObservabilityConfig.html" title="struct cqlite_core::observability::config::ObservabilityConfig">ObservabilityConfig</a>;</code></dt><dt id="reexport.ObservabilityConfigBuilder"><code>pub use config::<a class="struct" href="config/struct.ObservabilityConfigBuilder.html" title="struct cqlite_core::observability::config::ObservabilityConfigBuilder">ObservabilityConfigBuilder</a>;</code></dt><dt id="reexport.OtelProtocol"><code>pub use config::<a class="enum" href="config/enum.OtelProtocol.html" title="enum cqlite_core::observability::config::OtelProtocol">OtelProtocol</a>;</code></dt><dt id="reexport.StreamSubPhase"><code>pub use stream_subphase::<a class="enum" href="stream_subphase/enum.StreamSubPhase.html" title="enum cqlite_core::observability::stream_subphase::StreamSubPhase">StreamSubPhase</a>;</code></dt><dt id="reexport.StreamSubPhaseGuard"><code>pub use stream_subphase::<a class="struct" href="stream_subphase/struct.StreamSubPhaseGuard.html" title="struct cqlite_core::observability::stream_subphase::StreamSubPhaseGuard">StreamSubPhaseGuard</a>;</code></dt><dt id="reexport.StreamSubPhaseTimings"><code>pub use stream_subphase::<a class="struct" href="stream_subphase/struct.StreamSubPhaseTimings.html" title="struct cqlite_core::observability::stream_subphase::StreamSubPhaseTimings">StreamSubPhaseTimings</a>;</code></dt></dl><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="catalog/index.html" title="mod cqlite_core::observability::catalog">catalog</a></dt><dd>Metric catalog — the single source of truth for CQLite metric names + units.</dd><dt><a class="mod" href="config/index.html" title="mod cqlite_core::observability::config">config</a></dt><dd>Observability configuration, populated from the standard <code>CQLITE_OTEL_*</code>
+environment variables (epic #1031, issue #1032).</dd><dt><a class="mod" href="operator_docs/index.html" title="mod cqlite_core::observability::operator_docs">operator_<wbr>docs</a></dt><dd>Operator-facing metric reference — GENERATED source of truth (issue #2426).</dd><dt><a class="mod" href="partition_access/index.html" title="mod cqlite_core::observability::partition_access">partition_<wbr>access</a></dt><dd>Bounded partition repeat-access probe (issue #2827).</dd><dt><a class="mod" href="stream_subphase/index.html" title="mod cqlite_core::observability::stream_subphase">stream_<wbr>subphase</a></dt><dd>In-<code>stream</code> sub-phase wall-time accumulator for the Flight <code>do_get</code> data plane
+(issue #2819).</dd><dt><a class="mod" href="testing/index.html" title="mod cqlite_core::observability::testing">testing</a></dt><dd>Shared in-memory OTLP capture harness for observability tests (issue #1043).</dd></dl><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.ObservabilityGuard.html" title="struct cqlite_core::observability::ObservabilityGuard">Observability<wbr>Guard</a></dt><dd>RAII guard returned by <a href="fn.init.html" title="fn cqlite_core::observability::init"><code>init</code></a>.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.AttrValue.html" title="enum cqlite_core::observability::AttrValue">Attr<wbr>Value</a></dt><dd>A bounded attribute value for catalog metrics.</dd><dt><a class="enum" href="enum.ObsErrorCategory.html" title="enum cqlite_core::observability::ObsErrorCategory">ObsError<wbr>Category</a></dt><dd>Bounded, telemetry-safe error categories. The total count is small and
+fixed, making <code>as_str()</code> values safe as metric/span attribute values.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.add_counter.html" title="fn cqlite_core::observability::add_counter">add_<wbr>counter</a></dt><dd>Add <code>value</code> to the monotonic counter identified by a <a href="catalog/index.html" title="mod cqlite_core::observability::catalog"><code>catalog</code></a> name, with
+bounded <a href="type.Attr.html" title="type cqlite_core::observability::Attr"><code>Attr</code></a> attributes. No-op (and zero-cost) when the <code>observability</code>
+feature is off.</dd><dt><a class="fn" href="fn.init.html" title="fn cqlite_core::observability::init">init</a></dt><dd>Initialise OTLP trace + metric export and install the global providers.</dd><dt><a class="fn" href="fn.mark_span_error.html" title="fn cqlite_core::observability::mark_span_error">mark_<wbr>span_<wbr>error</a></dt><dd>Mark the active span as errored WITHOUT counting the failure (issue #1704).</dd><dt><a class="fn" href="fn.metrics_active.html" title="fn cqlite_core::observability::metrics_active">metrics_<wbr>active</a></dt><dd>Whether metrics are actually being collected — the <code>observability</code> feature is
+compiled in AND a meter provider is installed (<code>otel::metrics_active</code>). Every
+<code>record_*</code> here already gates on this, so it is a no-op when false; exposing it
+lets a caller SKIP building per-request timing state whose samples would only
+be discarded (issue #2819 M1 — the “zero-cost when the meter is off” promise).</dd><dt><a class="fn" href="fn.record_error.html" title="fn cqlite_core::observability::record_error">record_<wbr>error</a></dt><dd>Record an error that escaped a critical section (issue #1038).</dd><dt><a class="fn" href="fn.record_error_with_attrs.html" title="fn cqlite_core::observability::record_error_with_attrs">record_<wbr>error_<wbr>with_<wbr>attrs</a></dt><dd>Record an error into <a href="catalog/constant.ERRORS_TOTAL.html" title="constant cqlite_core::observability::catalog::ERRORS_TOTAL"><code>catalog::ERRORS_TOTAL</code></a> with EXTRA bounded attributes
+beyond the canonical <code>{cqlite.error.category, cqlite.subsystem}</code> pair.</dd><dt><a class="fn" href="fn.record_gauge.html" title="fn cqlite_core::observability::record_gauge">record_<wbr>gauge</a></dt><dd>Record <code>value</code> for the gauge identified by a <a href="catalog/index.html" title="mod cqlite_core::observability::catalog"><code>catalog</code></a> name (a current
+value such as in-flight count or open SSTables). No-op when off.</dd><dt><a class="fn" href="fn.record_histogram.html" title="fn cqlite_core::observability::record_histogram">record_<wbr>histogram</a></dt><dd>Record <code>value</code> into the histogram identified by a <a href="catalog/index.html" title="mod cqlite_core::observability::catalog"><code>catalog</code></a> name (durations
+in seconds, sizes in bytes — see the catalog docs). No-op when off.</dd><dt><a class="fn" href="fn.record_result.html" title="fn cqlite_core::observability::record_result">record_<wbr>result</a></dt><dd>Convenience: run a <code>Result</code>-returning closure and <a href="fn.record_error.html" title="fn cqlite_core::observability::record_error"><code>record_error</code></a> on the
+<code>Err</code> path, returning the result unchanged. Lets call sites instrument an
+operation without restructuring their error handling.</dd><dt><a class="fn" href="fn.set_span_parent_from_traceparent.html" title="fn cqlite_core::observability::set_span_parent_from_traceparent">set_<wbr>span_<wbr>parent_<wbr>from_<wbr>traceparent</a></dt><dd>Parent a <code>tracing</code> span under a remote trace described by a W3C
+<a href="https://www.w3.org/TR/trace-context/#traceparent-header"><code>traceparent</code></a>
+header string (issues #1039/#1040/#1041).</dd><dt><a class="fn" href="fn.tracing_layer.html" title="fn cqlite_core::observability::tracing_layer">tracing_<wbr>layer</a></dt><dd>Return the <code>tracing</code> layer that bridges spans/events into OpenTelemetry, or
+<code>None</code> if observability has not been initialised.</dd></dl><h2 id="types" class="section-header">Type Aliases<a href="#types" class="anchor">§</a></h2><dl class="item-table"><dt><a class="type" href="type.Attr.html" title="type cqlite_core::observability::Attr">Attr</a></dt><dd>A single bounded metric attribute: a <code>&amp;'static str</code> key (always from
+<a href="catalog/attr/index.html" title="mod cqlite_core::observability::catalog::attr"><code>catalog::attr</code></a>) paired with a bounded <a href="enum.AttrValue.html" title="enum cqlite_core::observability::AttrValue"><code>AttrValue</code></a>.</dd></dl></section></div></main></body></html>

@@ -1,0 +1,51 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Upper bound, IN ROWS, on what a [`QueryRowStream`] producer can decode AHEAD of its consumer — and therefore on how much work an ABANDONED or CANCELLED walk can still do after the consumer stops reading. A CONSTANT: it does not scale with the table, so a walk over a million partitions abandoned after one row decodes at most this many more rows, not the rest of the table."><title>QUERY_ROWS_MAX_READ_AHEAD in cqlite_core::storage::sstable::reader - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc constant"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">QUERY_ROWS_MAX_READ_AHEAD</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.17.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">QUERY_<wbr>ROWS_<wbr>MAX_<wbr>READ_<wbr>AHEAD</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-it-does-not-cover" title="What it does NOT cover">What it does NOT cover</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="index.html">In cqlite_<wbr>core::<wbr>storage::<wbr>sstable::<wbr>reader</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">cqlite_core</a>::<wbr><a href="../../index.html">storage</a>::<wbr><a href="../index.html">sstable</a>::<wbr><a href="index.html">reader</a></div><h1>Constant <span class="constant">QUERY_<wbr>ROWS_<wbr>MAX_<wbr>READ_<wbr>AHEAD</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/cqlite_core/storage/sstable/reader/data_access/summary_scan/query_rows_bounds.rs.html#122-125">Source</a> </span></div><pre class="rust item-decl"><code>pub const QUERY_ROWS_MAX_READ_AHEAD: <a class="primitive" href="https://doc.rust-lang.org/1.98.1/std/primitive.usize.html">usize</a> = _; // 3_072usize</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Upper bound, IN ROWS, on what a [<code>QueryRowStream</code>] producer can decode AHEAD of its
+consumer — and therefore on how much work an ABANDONED or CANCELLED walk can
+still do after the consumer stops reading. A CONSTANT: it does not scale with
+the table, so a walk over a million partitions abandoned after one row decodes
+at most this many more rows, not the rest of the table.</p>
+<p>Every term is a bounded buffer between the disk and the consumer, on the
+full-ring arm ([<code>drive_full_scan_rows</code>], the deepest of the two arms):</p>
+<ol>
+<li>[<code>QUERY_ROWS_MAX_RESIDENT_ROWS</code>] — this stream’s handoff channel plus the
+producer’s parked send.</li>
+<li>The inner batched scan stream’s public channel:
+[<code>batched_channel_capacity</code>] batches of up to
+[<code>BATCH_EMIT_ROWS</code>] rows.</li>
+<li>The one inner batch [<code>drive_full_scan_rows</code>] has <code>recv</code>’d and still owns
+while parked handing it on (up to [<code>BATCH_EMIT_ROWS</code>] rows).</li>
+<li>[<code>MAX_INFLIGHT_BATCH_ROWS</code>] — the windowed scan’s own batching subsystem
+(pending batch + bounded batch channel + producer parked in <code>send</code>).</li>
+</ol>
+<h2 id="what-it-does-not-cover"><a class="doc-anchor" href="#what-it-does-not-cover">§</a>What it does NOT cover</h2>
+<ul>
+<li>The ONE partition currently being decoded: the windowed scan materializes a
+confirmed partition in <code>scratch</code> before batching it, so a table with wide
+partitions adds a <code>max_partition_size</code> term on top (the pre-existing #1156
+term, see [<code>MAX_INFLIGHT_BATCH_ROWS</code>]’s docs).</li>
+<li>Anything resident in the CONSUMER downstream of this stream — a Flight
+producer’s own Arrow batches, for instance, are bounded by that consumer’s
+own budget, not by this constant.</li>
+<li><strong>Regions that decode to NO emitted rows.</strong> This is a PRECONDITION, not a
+footnote (roborev, issue #3384). The full-ring arm observes cancellation
+only BETWEEN batches it receives from the inner scan, because
+<code>scan_stream_batched_admitted</code> is not handed the child cancel flag and does
+not poll one internally. So the bound holds while decoded partitions keep
+YIELDING rows — every decoded partition then pushes the channel toward the
+parked state in which cancellation is observed. Over a stretch that survives
+nothing (all tombstoned, or all TTL-expired at the read clock) the inner scan
+emits no batch, the producer never parks, and it can decode past this bound —
+in the limit, to the end of the table. Tracked as a real cancellation gap in
+the read path, NOT merely a documentation caveat: see issue #3428.</li>
+<li><strong>Eager materialization inside a single decode step.</strong> The bound counts rows
+RESIDENT IN THE PIPELINE’S BOUNDED BUFFERS, and the work probe it is asserted
+against (<code>work_counters::stream_walk_partitions_parsed</code>) advances as entries
+are ITERATED — which is backpressured, hence bounded. It does NOT bound work
+done eagerly <em>inside</em> one step before any iteration begins (roborev, issue
+#3384): <code>parse_batched_block</code> materializes a whole block’s entries at once,
+and for a format whose data section is one block that is the whole table;
+<code>bti_scan_with_metadata</code> on the <code>da</code> path is materializing too. So read this
+constant as <em>“rows that can be handed onward after the consumer leaves”</em>, not
+as <em>“CPU and memory an abandoned walk can still spend”</em>. The two coincide on
+the incremental block-iteration path and diverge on the materializing ones.</li>
+</ul>
+</div></details></section></div></main></body></html>

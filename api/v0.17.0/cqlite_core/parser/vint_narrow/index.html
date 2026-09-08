@@ -1,0 +1,42 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Truncation-free narrowing of a VInt/VUInt-decoded length for the `nom` parsers (issue #3848)."><title>cqlite_core::parser::vint_narrow - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module vint_narrow</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.17.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module vint_<wbr>narrow</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#why-the-narrowing-step-is-width-parameterized-test-efficacy" title="Why the narrowing step is WIDTH-PARAMETERIZED (test efficacy)">Why the narrowing step is WIDTH-PARAMETERIZED (test efficacy)</a></li></ul><h3><a href="#functions">Module Items</a></h3><ul class="block"><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In cqlite_<wbr>core::<wbr>parser</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">cqlite_core</a>::<wbr><a href="../index.html">parser</a></div><h1>Module <span>vint_<wbr>narrow</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/cqlite_core/parser/vint_narrow.rs.html#1-255">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Truncation-free narrowing of a VInt/VUInt-decoded length for the <code>nom</code>
+parsers (issue #3848).</p>
+<p><code>parse_vuint</code> yields a <code>u64</code> and <code>parse_vint</code> an <code>i64</code> — both wider than
+<code>usize</code> on a 32-bit target (<code>wasm32-unknown-unknown</code> is a configured target
+of this workspace). The historical shape at these call sites was</p>
+<div class="example-wrap"><pre class="language-text"><code>let (rest, len) = parse_vint(input)?;   // i64
+if len &lt; 0 { return Err(..) }           // sign checked...
+let (rest, body) = take(len as usize)(rest)?;   // ...but NOT the width</code></pre></div>
+<p>On a 32-bit target <code>(1i64 &lt;&lt; 32) as usize == 0</code>, so <code>take(0)</code> SUCCEEDS: a
+declared 4 GiB run is silently reinterpreted as an empty one and every
+following field is misparsed. Nothing in the sign check reaches that, and no
+upper bound was applied in the original width.</p>
+<p>The two parser constructors below take the length in its ORIGINAL width and
+narrow it through [<code>narrow_vuint_len</code>] / [<code>narrow_vint_len</code>], so a value that
+does not fit the target width is a <code>nom::error::ErrorKind::TooLarge</code> failure
+rather than a truncated length.</p>
+<p>They are parser CONSTRUCTORS (<code>take_vint_length(len)(input)</code>) rather than
+<code>usize</code>-returning helpers so a call site converts one-for-one from
+<code>take(len as usize)(input)</code> with no extra statement — the sites live in files
+that are over the campsite-rule size threshold.</p>
+<h3 id="why-the-narrowing-step-is-width-parameterized-test-efficacy"><a class="doc-anchor" href="#why-the-narrowing-step-is-width-parameterized-test-efficacy">§</a>Why the narrowing step is WIDTH-PARAMETERIZED (test efficacy)</h3>
+<p>The runtime target width is always <code>usize</code>. But on a 64-bit host — every
+gate component and every CI lane, since nothing here builds a 32-bit target —
+<code>len as usize</code> is the IDENTITY for a <code>u64</code>, so a test that only observes
+<code>take_vuint_length(1u64 &lt;&lt; 32)</code> returning <em>some</em> error cannot tell the guard
+from a reintroduced truncating cast: with the guard the rejection is
+<code>TooLarge</code>, without it <code>take(4294967296)</code> rejects with <code>Eof</code>, and an
+<code>is_err()</code> assertion is satisfied either way. Such a test pins NOTHING —
+deleting the guard leaves it green (#3042: a test invariant to the defect it
+claims to pin).</p>
+<p>So the narrowing itself is a generic function over the [<code>LengthWidth</code>] target.
+Production code instantiates it at <code>usize</code>; the tests ALSO instantiate it at
+<code>u32</code>, which is exactly the semantics a 32-bit <code>usize</code> has, on any host. There
+a plain cast and the checked conversion give DIFFERENT answers
+(<code>((1u64 &lt;&lt; 32) + 3) as u32 == 3</code> vs <code>None</code>), so the regression is caught on
+every lane that runs.</p>
+</div></details><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.take_vint_length.html" title="fn cqlite_core::parser::vint_narrow::take_vint_length">take_<wbr>vint_<wbr>length</a></dt><dd><code>take</code> exactly <code>len</code> bytes, where <code>len</code> is a SIGNED (ZigZag) VInt-decoded
+length. A negative length, or one too large for <code>usize</code> on this target, is a
+<code>TooLarge</code> parse error rather than a truncated or wrapped byte count.</dd><dt><a class="fn" href="fn.take_vuint_length.html" title="fn cqlite_core::parser::vint_narrow::take_vuint_length">take_<wbr>vuint_<wbr>length</a></dt><dd><code>take</code> exactly <code>len</code> bytes, where <code>len</code> is an UNSIGNED VUInt-decoded length
+(<code>writeUnsignedVInt</code>, i.e. Cassandra-written bytes). A length too large for
+<code>usize</code> on this target is a <code>TooLarge</code> parse error rather than a truncated
+byte count.</dd></dl></section></div></main></body></html>

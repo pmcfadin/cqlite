@@ -1,0 +1,822 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/data_access/bti.rs`."><title>bti.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../../../../" data-static-root-path="../../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../../src-files.js"></script><script defer src="../../../../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/data_access/</div>bti.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! BTI ("da") read paths: trie-resolved point lookups, single-partition seeks,
+<a href=#2 id=2 data-nosnippet>2</a>//! clustering-slice narrowing, and the whole-Data.db BTI scan.
+<a href=#3 id=3 data-nosnippet>3</a>//!
+<a href=#4 id=4 data-nosnippet>4</a>//! BTI SSTables carry no Index.db/Summary.db. The Partitions.db trie is the
+<a href=#5 id=5 data-nosnippet>5</a>//! authoritative present/absent oracle; every method here resolves an
+<a href=#6 id=6 data-nosnippet>6</a>//! uncompressed Data.db offset via the trie and decodes only the chunk window
+<a href=#7 id=7 data-nosnippet>7</a>//! that holds the target partition (issue #831 / #909 / #953 / #954).
+<a href=#8 id=8 data-nosnippet>8</a>
+<a href=#9 id=9 data-nosnippet>9</a></span><span class="kw">use </span><span class="kw">super</span>::<span class="kw">super</span>::scan_stream_windowed::{WindowedOut, BATCH_EMIT_ROWS};
+<a href=#10 id=10 data-nosnippet>10</a><span class="kw">use </span><span class="kw">super</span>::<span class="kw">super</span>::SSTableReader;
+<a href=#11 id=11 data-nosnippet>11</a><span class="kw">use </span><span class="kw">super</span>::model::{sort_by_token_order_with_meta, SCAN_FOR_KEY_CALLS};
+<a href=#12 id=12 data-nosnippet>12</a><span class="kw">use </span><span class="kw">crate</span>::storage::sstable::reader::parsing::BufferExtent;
+<a href=#13 id=13 data-nosnippet>13</a><span class="kw">use </span><span class="kw">crate</span>::types::{CellWriteMetadata, ScanRow};
+<a href=#14 id=14 data-nosnippet>14</a><span class="kw">use crate</span>::{<span class="prelude-ty">Result</span>, RowKey};
+<a href=#15 id=15 data-nosnippet>15</a><span class="kw">use </span>std::io::SeekFrom;
+<a href=#16 id=16 data-nosnippet>16</a><span class="kw">use </span>tokio::io::AsyncSeekExt;
+<a href=#17 id=17 data-nosnippet>17</a>
+<a href=#18 id=18 data-nosnippet>18</a><span class="comment">// `TableId`, `Error`, and `debug!` are used only by the seek/clustering paths
+<a href=#19 id=19 data-nosnippet>19</a>// (`scan_single_partition_clustering` / `bti_clustering_row_window`), which are
+<a href=#20 id=20 data-nosnippet>20</a>// `not(tombstones)`-gated; the point-read decoders that also used them moved to
+<a href=#21 id=21 data-nosnippet>21</a>// `bti_point.rs` (issue #1599 / G3 split).
+<a href=#22 id=22 data-nosnippet>22</a></span><span class="attr">#[cfg(not(feature = <span class="string">"tombstones"</span>))]
+<a href=#23 id=23 data-nosnippet>23</a></span><span class="kw">use </span><span class="kw">super</span>::model::{physical_byte_bounds_for_slice, ClusteringRowWindow, ClusteringSlice};
+<a href=#24 id=24 data-nosnippet>24</a><span class="attr">#[cfg(not(feature = <span class="string">"tombstones"</span>))]
+<a href=#25 id=25 data-nosnippet>25</a></span><span class="kw">use </span><span class="kw">crate</span>::types::TableId;
+<a href=#26 id=26 data-nosnippet>26</a><span class="attr">#[cfg(not(feature = <span class="string">"tombstones"</span>))]
+<a href=#27 id=27 data-nosnippet>27</a></span><span class="kw">use </span><span class="kw">crate</span>::Error;
+<a href=#28 id=28 data-nosnippet>28</a><span class="attr">#[cfg(not(feature = <span class="string">"tombstones"</span>))]
+<a href=#29 id=29 data-nosnippet>29</a></span><span class="kw">use </span>tracing::debug;
+<a href=#30 id=30 data-nosnippet>30</a>
+<a href=#31 id=31 data-nosnippet>31</a><span class="comment">// Issue #3721: the seek's decode step + its ONE fallback. Declared HERE, and gated
+<a href=#32 id=32 data-nosnippet>32</a>// exactly like `scan_single_partition_clustering` below, which is its only caller.
+<a href=#33 id=33 data-nosnippet>33</a></span><span class="attr">#[cfg(not(feature = <span class="string">"tombstones"</span>))]
+<a href=#34 id=34 data-nosnippet>34</a></span><span class="kw">mod </span>clustering_seek_decode;
+<a href=#35 id=35 data-nosnippet>35</a>
+<a href=#36 id=36 data-nosnippet>36</a><span class="kw">impl </span>SSTableReader {
+<a href=#37 id=37 data-nosnippet>37</a>    <span class="doccomment">/// Current value of the test-only `scan_for_key` invocation counter.
+<a href=#38 id=38 data-nosnippet>38</a>    ///
+<a href=#39 id=39 data-nosnippet>39</a>    /// Issue #831: tests use this to assert that a BTI `get()` resolves entirely
+<a href=#40 id=40 data-nosnippet>40</a>    /// through the Partitions.db trie and never falls through to the sequential
+<a href=#41 id=41 data-nosnippet>41</a>    /// scan. See [`SCAN_FOR_KEY_CALLS`].
+<a href=#42 id=42 data-nosnippet>42</a>    </span><span class="kw">pub fn </span>scan_for_key_call_count() -&gt; u64 {
+<a href=#43 id=43 data-nosnippet>43</a>        SCAN_FOR_KEY_CALLS.load(std::sync::atomic::Ordering::Relaxed)
+<a href=#44 id=44 data-nosnippet>44</a>    }
+<a href=#45 id=45 data-nosnippet>45</a>
+<a href=#46 id=46 data-nosnippet>46</a>    <span class="doccomment">/// Single-partition *seek* for the partition-targeted lookup fast path,
+<a href=#47 id=47 data-nosnippet>47</a>    /// clustering-slice-aware (Issue #953 + #954, Epic #951).
+<a href=#48 id=48 data-nosnippet>48</a>    ///
+<a href=#49 id=49 data-nosnippet>49</a>    /// Where [`scan`](Self::scan) decodes EVERY partition in this SSTable and the
+<a href=#50 id=50 data-nosnippet>50</a>    /// caller retains one, this resolves the target partition's `Data.db` offset
+<a href=#51 id=51 data-nosnippet>51</a>    /// from the authoritative index (the BTI Partitions.db trie or the BIG
+<a href=#52 id=52 data-nosnippet>52</a>    /// `Index.db`) and decodes ONLY that partition — the same per-partition decode
+<a href=#53 id=53 data-nosnippet>53</a>    /// `scan` runs (`parse_block_emit` over the chunk-targeted decompressed
+<a href=#54 id=54 data-nosnippet>54</a>    /// window), so its output is byte-for-byte identical to filtering the full
+<a href=#55 id=55 data-nosnippet>55</a>    /// `scan` result down to `partition_key`.
+<a href=#56 id=56 data-nosnippet>56</a>    ///
+<a href=#57 id=57 data-nosnippet>57</a>    /// Offset domains (no-heuristics: authoritative resolved offsets only):
+<a href=#58 id=58 data-nosnippet>58</a>    /// - **BTI ("da")** — `lookup_partition_via_bti_trie` returns the UNCOMPRESSED
+<a href=#59 id=59 data-nosnippet>59</a>    ///   `Data.db` offset; a trie miss is authoritative absence.
+<a href=#60 id=60 data-nosnippet>60</a>    /// - **BIG (`nb`)** — `lookup_partition_with_index` returns the partition's
+<a href=#61 id=61 data-nosnippet>61</a>    ///   offset into the (uncompressed) data section. A hit is authoritative
+<a href=#62 id=62 data-nosnippet>62</a>    ///   present; a MISS returns `Ok(None)` (the `Index.db` may be digest-keyed or
+<a href=#63 id=63 data-nosnippet>63</a>    ///   incomplete, exactly the `get()` fallback rationale at #517) so the caller
+<a href=#64 id=64 data-nosnippet>64</a>    ///   re-checks via a full scan rather than risk a false negative.
+<a href=#65 id=65 data-nosnippet>65</a>    ///
+<a href=#66 id=66 data-nosnippet>66</a>    /// Prefix-collision / wrong-offset guard: the decode
+<a href=#67 id=67 data-nosnippet>67</a>    /// (`bti_decompress_and_parse_target_all`) re-verifies the decoded partition
+<a href=#68 id=68 data-nosnippet>68</a>    /// key equals `partition_key` before collecting any row, so a BTI
+<a href=#69 id=69 data-nosnippet>69</a>    /// prefix-collision candidate or a stale/mismatched index offset decodes to
+<a href=#70 id=70 data-nosnippet>70</a>    /// nothing and is reported as absent — never a wrong partition. Every
+<a href=#71 id=71 data-nosnippet>71</a>    /// clustering row of the matched partition is collected (not just the first),
+<a href=#72 id=72 data-nosnippet>72</a>    /// so a multi-row partition returns all rows.
+<a href=#73 id=73 data-nosnippet>73</a>    ///
+<a href=#74 id=74 data-nosnippet>74</a>    /// Compiled only for the default (`not(tombstones)`) build: the manager's
+<a href=#75 id=75 data-nosnippet>75</a>    /// seek-driven `scan_partition` exists only there, so under `tombstones` this
+<a href=#76 id=76 data-nosnippet>76</a>    /// would be dead code.
+<a href=#77 id=77 data-nosnippet>77</a>    ///
+<a href=#78 id=78 data-nosnippet>78</a>    /// When `clustering` is `Some(slice)` AND this reader is BTI (`da`) with a
+<a href=#79 id=79 data-nosnippet>79</a>    /// per-partition row index (`Rows.db`), the target partition's authoritative
+<a href=#80 id=80 data-nosnippet>80</a>    /// row index is consulted to resolve the byte extent of the row-index
+<a href=#81 id=81 data-nosnippet>81</a>    /// block(s) covering the requested clustering range, and ONLY that byte window
+<a href=#82 id=82 data-nosnippet>82</a>    /// is decoded — so a `WHERE pk = ? AND ck &lt;/&gt;/= ?` slice over a wide partition
+<a href=#83 id=83 data-nosnippet>83</a>    /// decodes O(matched rows + index block slack) rather than the whole
+<a href=#84 id=84 data-nosnippet>84</a>    /// partition. The post-scan `evaluate_leaf` backstop trims the
+<a href=#85 id=85 data-nosnippet>85</a>    /// block-granularity over-read, so the returned rows are a superset of the
+<a href=#86 id=86 data-nosnippet>86</a>    /// exact slice and the final query output is byte-identical to the
+<a href=#87 id=87 data-nosnippet>87</a>    /// full-partition decode + post-filter.
+<a href=#88 id=88 data-nosnippet>88</a>    ///
+<a href=#89 id=89 data-nosnippet>89</a>    /// Returns `Ok(Some((rows, clustering_seek_engaged)))`:
+<a href=#90 id=90 data-nosnippet>90</a>    /// - `clustering_seek_engaged == true` only when the clustering row-index
+<a href=#91 id=91 data-nosnippet>91</a>    ///   narrowing actually bounded the decode (BTI wide partition with a usable
+<a href=#92 id=92 data-nosnippet>92</a>    ///   row index and an encodable bound). The caller reports
+<a href=#93 id=93 data-nosnippet>93</a>    ///   [`AccessPath::ClusteringSlice`](crate::query::access_path::AccessPath::ClusteringSlice)
+<a href=#94 id=94 data-nosnippet>94</a>    ///   in that case.
+<a href=#95 id=95 data-nosnippet>95</a>    /// - `clustering_seek_engaged == false` when the partition was decoded in full
+<a href=#96 id=96 data-nosnippet>96</a>    ///   (no clustering slice, a NARROW BTI partition with no row index, the BIG
+<a href=#97 id=97 data-nosnippet>97</a>    ///   format, or an un-encodable bound). Results are still correct — the caller
+<a href=#98 id=98 data-nosnippet>98</a>    ///   reports the honest `PartitionLookup` path, NOT a fake clustering slice.
+<a href=#99 id=99 data-nosnippet>99</a>    ///
+<a href=#100 id=100 data-nosnippet>100</a>    /// `Ok(None)` mirrors [`scan_single_partition`]: the seek is not applicable
+<a href=#101 id=101 data-nosnippet>101</a>    /// (no authoritative offset) and the caller must fall back to a full scan +
+<a href=#102 id=102 data-nosnippet>102</a>    /// retain.
+<a href=#103 id=103 data-nosnippet>103</a>    ///
+<a href=#104 id=104 data-nosnippet>104</a>    /// [`scan_single_partition`]: crate::storage::sstable::SSTableReader
+<a href=#105 id=105 data-nosnippet>105</a>    </span><span class="attr">#[cfg(not(feature = <span class="string">"tombstones"</span>))]
+<a href=#106 id=106 data-nosnippet>106</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">async fn </span>scan_single_partition_clustering(
+<a href=#107 id=107 data-nosnippet>107</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#108 id=108 data-nosnippet>108</a>        table_id: <span class="kw-2">&amp;</span>TableId,
+<a href=#109 id=109 data-nosnippet>109</a>        partition_key: <span class="kw-2">&amp;</span>[u8],
+<a href=#110 id=110 data-nosnippet>110</a>        clustering: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>ClusteringSlice&gt;,
+<a href=#111 id=111 data-nosnippet>111</a>        <span class="comment">// `true` iff the manager resolved this reader by an EXACT fully-qualified
+<a href=#112 id=112 data-nosnippet>112</a>        // `keyspace.table` match (or the query is unqualified). `false` means a
+<a href=#113 id=113 data-nosnippet>113</a>        // fully-qualified query reached this reader via the bare-name fallback, in
+<a href=#114 id=114 data-nosnippet>114</a>        // which case the seek guard keeps STRICT keyspace matching so it can never
+<a href=#115 id=115 data-nosnippet>115</a>        // return rows from a different keyspace whose table name collides (#1284).
+<a href=#116 id=116 data-nosnippet>116</a>        </span>fully_qualified_match: bool,
+<a href=#117 id=117 data-nosnippet>117</a>        schema: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span><span class="kw">crate</span>::schema::TableSchema&gt;,
+<a href=#118 id=118 data-nosnippet>118</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="prelude-ty">Option</span>&lt;(Vec&lt;(RowKey, ScanRow)&gt;, bool)&gt;&gt; {
+<a href=#119 id=119 data-nosnippet>119</a>        <span class="comment">// 1. Resolve the partition's uncompressed Data.db offset, and record
+<a href=#120 id=120 data-nosnippet>120</a>        //    whether THIS path's "decoded nothing" is authoritative absence (BTI
+<a href=#121 id=121 data-nosnippet>121</a>        //    trie) or merely inconclusive (BIG Index.db).
+<a href=#122 id=122 data-nosnippet>122</a>        </span><span class="kw">let </span>is_bti = <span class="self">self</span>.bti_partitions_db.is_some();
+<a href=#123 id=123 data-nosnippet>123</a>        <span class="comment">// Resolve the target partition's UNCOMPRESSED `Data.db` start offset.
+<a href=#124 id=124 data-nosnippet>124</a>        </span><span class="kw">let </span>offset = <span class="kw">if </span>is_bti {
+<a href=#125 id=125 data-nosnippet>125</a>            <span class="kw">match </span><span class="self">self</span>.lookup_partition_via_bti_trie(partition_key)<span class="question-mark">? </span>{
+<a href=#126 id=126 data-nosnippet>126</a>                <span class="comment">// Trie hit: candidate uncompressed offset (re-verified on decode).
+<a href=#127 id=127 data-nosnippet>127</a>                </span><span class="prelude-val">Some</span>(off) =&gt; off,
+<a href=#128 id=128 data-nosnippet>128</a>                <span class="comment">// Trie miss is AUTHORITATIVE absence for BTI (no rows, no seek).
+<a href=#129 id=129 data-nosnippet>129</a>                </span><span class="prelude-val">None </span>=&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>((Vec::new(), <span class="bool-val">false</span>))),
+<a href=#130 id=130 data-nosnippet>130</a>            }
+<a href=#131 id=131 data-nosnippet>131</a>        } <span class="kw">else </span>{
+<a href=#132 id=132 data-nosnippet>132</a>            <span class="kw">match </span><span class="self">self</span>.lookup_partition_with_index(partition_key).<span class="kw">await</span><span class="question-mark">? </span>{
+<a href=#133 id=133 data-nosnippet>133</a>                <span class="comment">// Index.db hit: a candidate offset into the data section. (The
+<a href=#134 id=134 data-nosnippet>134</a>                // `data_size` is 0 in writer-produced Index.db, so we do NOT use it
+<a href=#135 id=135 data-nosnippet>135</a>                // as a bound — the successor offset below is the authoritative end.)
+<a href=#136 id=136 data-nosnippet>136</a>                </span><span class="prelude-val">Some</span>((off, _size)) =&gt; off,
+<a href=#137 id=137 data-nosnippet>137</a>                <span class="comment">// No Index.db hit: cannot seek authoritatively (the index may be
+<a href=#138 id=138 data-nosnippet>138</a>                // digest-keyed / incomplete, exactly the get() #517 rationale).
+<a href=#139 id=139 data-nosnippet>139</a>                // Fall back to a full scan.
+<a href=#140 id=140 data-nosnippet>140</a>                </span><span class="prelude-val">None </span>=&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
+<a href=#141 id=141 data-nosnippet>141</a>            }
+<a href=#142 id=142 data-nosnippet>142</a>        };
+<a href=#143 id=143 data-nosnippet>143</a>
+<a href=#144 id=144 data-nosnippet>144</a>        <span class="comment">// AUTHORITATIVE end bound (issue #953 / #951 MEDIUM): the target partition
+<a href=#145 id=145 data-nosnippet>145</a>        // occupies `[offset, end)`, where `end` is the SUCCESSOR partition's start
+<a href=#146 id=146 data-nosnippet>146</a>        // offset (next trie/index entry) — never a boundary-scan heuristic. It
+<a href=#147 id=147 data-nosnippet>147</a>        // bounds BOTH the decompression and (issue #3890) the parse; the callee's
+<a href=#148 id=148 data-nosnippet>148</a>        // doc comment states which is which and why they differ under a #954
+<a href=#149 id=149 data-nosnippet>149</a>        // clustering narrowing. `None` = the LAST partition (no successor): the
+<a href=#150 id=150 data-nosnippet>150</a>        // callee then uses the authoritative data-section length, or falls back to
+<a href=#151 id=151 data-nosnippet>151</a>        // the safe full-scan path when even that is unknown.
+<a href=#152 id=152 data-nosnippet>152</a>        </span><span class="kw">let </span>end_bound = <span class="self">self
+<a href=#153 id=153 data-nosnippet>153</a>            </span>.successor_partition_offset(offset, partition_key)
+<a href=#154 id=154 data-nosnippet>154</a>            .<span class="kw">await</span><span class="question-mark">?
+<a href=#155 id=155 data-nosnippet>155</a>            </span>.map(|e| e <span class="kw">as </span>usize);
+<a href=#156 id=156 data-nosnippet>156</a>
+<a href=#157 id=157 data-nosnippet>157</a>        <span class="kw">let </span>schema_opt = <span class="self">self</span>.get_table_schema(schema);
+<a href=#158 id=158 data-nosnippet>158</a>
+<a href=#159 id=159 data-nosnippet>159</a>        <span class="comment">// Issue #954 / #1184: resolve the within-partition row-body byte window for a
+<a href=#160 id=160 data-nosnippet>160</a>        // single-column clustering slice from the authoritative index (BTI `Rows.db`
+<a href=#161 id=161 data-nosnippet>161</a>        // trie or BIG promoted `IndexInfo` blocks). The unified resolver lives in
+<a href=#162 id=162 data-nosnippet>162</a>        // `big_promoted.rs` (campsite: keeps this over-threshold file from growing).
+<a href=#163 id=163 data-nosnippet>163</a>        </span><span class="kw">let </span>(row_body_window, decode_end_bound, clustering_engaged) = <span class="self">self
+<a href=#164 id=164 data-nosnippet>164</a>            </span>.resolve_clustering_seek_window(
+<a href=#165 id=165 data-nosnippet>165</a>                is_bti,
+<a href=#166 id=166 data-nosnippet>166</a>                partition_key,
+<a href=#167 id=167 data-nosnippet>167</a>                offset,
+<a href=#168 id=168 data-nosnippet>168</a>                clustering,
+<a href=#169 id=169 data-nosnippet>169</a>                schema_opt.as_ref(),
+<a href=#170 id=170 data-nosnippet>170</a>                end_bound,
+<a href=#171 id=171 data-nosnippet>171</a>            )
+<a href=#172 id=172 data-nosnippet>172</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#173 id=173 data-nosnippet>173</a>
+<a href=#174 id=174 data-nosnippet>174</a>        <span class="comment">// 2. Decode ONLY the target partition at the resolved offset. Issue #3721:
+<a href=#175 id=175 data-nosnippet>175</a>        //    the decode step lives in `clustering_seek_decode` because a per-column
+<a href=#176 id=176 data-nosnippet>176</a>        //    decode failure under an INDEX-POSITIONED narrowing must retract that
+<a href=#177 id=177 data-nosnippet>177</a>        //    narrowing and re-read the full partition — a decision that needs BOTH
+<a href=#178 id=178 data-nosnippet>178</a>        //    the narrowed and the authoritative bounds, which only this call has.
+<a href=#179 id=179 data-nosnippet>179</a>        //    `clustering_engaged` comes back FALSE when the narrowing was retracted,
+<a href=#180 id=180 data-nosnippet>180</a>        //    so the caller's reported `AccessPath` stays honest.
+<a href=#181 id=181 data-nosnippet>181</a>        </span><span class="kw">let </span>key = RowKey::from(partition_key.to_vec());
+<a href=#182 id=182 data-nosnippet>182</a>        <span class="kw">let </span>(decoded, clustering_engaged) = <span class="self">self
+<a href=#183 id=183 data-nosnippet>183</a>            </span>.decode_clustering_seek_target(
+<a href=#184 id=184 data-nosnippet>184</a>                table_id,
+<a href=#185 id=185 data-nosnippet>185</a>                partition_key,
+<a href=#186 id=186 data-nosnippet>186</a>                <span class="kw-2">&amp;</span>key,
+<a href=#187 id=187 data-nosnippet>187</a>                is_bti,
+<a href=#188 id=188 data-nosnippet>188</a>                fully_qualified_match,
+<a href=#189 id=189 data-nosnippet>189</a>                offset,
+<a href=#190 id=190 data-nosnippet>190</a>                <span class="comment">// Issue #3890 x #3721: the UN-narrowed successor offset is BOTH
+<a href=#191 id=191 data-nosnippet>191</a>                // the retraction bound and the authoritative PARSE bound —
+<a href=#192 id=192 data-nosnippet>192</a>                // `decode_end_bound` may point INSIDE the partition, which is
+<a href=#193 id=193 data-nosnippet>193</a>                // right for the DECOMPRESSION and wrong for the PARSE. Passed
+<a href=#194 id=194 data-nosnippet>194</a>                // ONCE, as `full_end_bound`, so the two uses cannot drift apart.
+<a href=#195 id=195 data-nosnippet>195</a>                </span>end_bound,
+<a href=#196 id=196 data-nosnippet>196</a>                decode_end_bound,
+<a href=#197 id=197 data-nosnippet>197</a>                row_body_window,
+<a href=#198 id=198 data-nosnippet>198</a>                clustering_engaged,
+<a href=#199 id=199 data-nosnippet>199</a>                schema_opt.as_ref(),
+<a href=#200 id=200 data-nosnippet>200</a>            )
+<a href=#201 id=201 data-nosnippet>201</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#202 id=202 data-nosnippet>202</a>        <span class="kw">let </span>decoded_rows = <span class="kw">match </span>decoded {
+<a href=#203 id=203 data-nosnippet>203</a>            <span class="comment">// Authoritatively bounded decode (rows may be empty for an absent key).
+<a href=#204 id=204 data-nosnippet>204</a>            </span><span class="prelude-val">Some</span>(rows) =&gt; rows,
+<a href=#205 id=205 data-nosnippet>205</a>            <span class="comment">// The seek could not bound the target partition authoritatively (the
+<a href=#206 id=206 data-nosnippet>206</a>            // LAST partition with an unknown data-section length): fall back to the
+<a href=#207 id=207 data-nosnippet>207</a>            // safe full scan + retain for correctness, per the #953 mandate.
+<a href=#208 id=208 data-nosnippet>208</a>            </span><span class="prelude-val">None </span>=&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
+<a href=#209 id=209 data-nosnippet>209</a>        };
+<a href=#210 id=210 data-nosnippet>210</a>
+<a href=#211 id=211 data-nosnippet>211</a>        <span class="comment">// 3. Record the per-partition decode (Issue #953 / #958): exactly ONE
+<a href=#212 id=212 data-nosnippet>212</a>        //    partition is decoded for a hit regardless of how many clustering rows
+<a href=#213 id=213 data-nosnippet>213</a>        //    it yields — `partitions_decoded` counts partitions, not rows. This is
+<a href=#214 id=214 data-nosnippet>214</a>        //    the signal that proves the within-SSTable seek (vs a full
+<a href=#215 id=215 data-nosnippet>215</a>        //    parse-then-retain). A non-empty decode means the partition exists.
+<a href=#216 id=216 data-nosnippet>216</a>        </span><span class="kw">if </span>!decoded_rows.is_empty() {
+<a href=#217 id=217 data-nosnippet>217</a>            <span class="kw">super</span>::<span class="kw">super</span>::<span class="kw">super</span>::work_counters::add_partition_decoded();
+<a href=#218 id=218 data-nosnippet>218</a>            <span class="comment">// Tombstone suppression matches the user-facing scan path
+<a href=#219 id=219 data-nosnippet>219</a>            // (`sequential_scan`/`bti_scan_with_metadata` both apply it),
+<a href=#220 id=220 data-nosnippet>220</a>            // applied per-row so a row tombstone is dropped while live rows in
+<a href=#221 id=221 data-nosnippet>221</a>            // the same partition survive.
+<a href=#222 id=222 data-nosnippet>222</a>            </span><span class="kw">let </span>rows: Vec&lt;(RowKey, ScanRow)&gt; = decoded_rows
+<a href=#223 id=223 data-nosnippet>223</a>                .into_iter()
+<a href=#224 id=224 data-nosnippet>224</a>                .filter(|value| <span class="self">self</span>.filter_tombstone(value))
+<a href=#225 id=225 data-nosnippet>225</a>                .map(|value| (key.clone(), value))
+<a href=#226 id=226 data-nosnippet>226</a>                .collect();
+<a href=#227 id=227 data-nosnippet>227</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>((rows, clustering_engaged)));
+<a href=#228 id=228 data-nosnippet>228</a>        }
+<a href=#229 id=229 data-nosnippet>229</a>
+<a href=#230 id=230 data-nosnippet>230</a>        <span class="comment">// Decoded nothing at the resolved offset. Whether that is authoritative
+<a href=#231 id=231 data-nosnippet>231</a>        // depends on HOW the offset was resolved (Constraint #4: never return a
+<a href=#232 id=232 data-nosnippet>232</a>        // wrong/empty result from an unsupported/inconclusive seek):
+<a href=#233 id=233 data-nosnippet>233</a>        //
+<a href=#234 id=234 data-nosnippet>234</a>        // - **BTI** — the trie is the authoritative present/absent oracle and the
+<a href=#235 id=235 data-nosnippet>235</a>        //   decode re-verified the key, so "decoded nothing" means the trie
+<a href=#236 id=236 data-nosnippet>236</a>        //   candidate was a prefix-collision for an absent key. AUTHORITATIVE
+<a href=#237 id=237 data-nosnippet>237</a>        //   empty: the caller does NOT fall back.
+<a href=#238 id=238 data-nosnippet>238</a>        // - **BIG** — the `Index.db` offset is only a candidate position; its
+<a href=#239 id=239 data-nosnippet>239</a>        //   promoted-index / chunk layout is not as load-bearing as the BTI trie,
+<a href=#240 id=240 data-nosnippet>240</a>        //   so a failed decode at the resolved offset is INCONCLUSIVE (a partition
+<a href=#241 id=241 data-nosnippet>241</a>        //   that straddles a chunk boundary, or a stale offset, can fail the
+<a href=#242 id=242 data-nosnippet>242</a>        //   chunk-targeted decode yet be found by a full parse). Fall back to a
+<a href=#243 id=243 data-nosnippet>243</a>        //   full scan rather than risk a false negative.
+<a href=#244 id=244 data-nosnippet>244</a>        </span><span class="kw">if </span>is_bti {
+<a href=#245 id=245 data-nosnippet>245</a>            <span class="comment">// Authoritative absence (prefix-collision candidate for an absent key).
+<a href=#246 id=246 data-nosnippet>246</a>            // No rows decoded, so report the clustering seek as NOT engaged.
+<a href=#247 id=247 data-nosnippet>247</a>            </span><span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>((Vec::new(), <span class="bool-val">false</span>)))
+<a href=#248 id=248 data-nosnippet>248</a>        } <span class="kw">else </span>{
+<a href=#249 id=249 data-nosnippet>249</a>            <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>)
+<a href=#250 id=250 data-nosnippet>250</a>        }
+<a href=#251 id=251 data-nosnippet>251</a>    }
+<a href=#252 id=252 data-nosnippet>252</a>
+<a href=#253 id=253 data-nosnippet>253</a>    <span class="doccomment">/// Resolve the within-partition row-body byte window covering a single-column
+<a href=#254 id=254 data-nosnippet>254</a>    /// clustering slice, using the target partition's authoritative BTI row index
+<a href=#255 id=255 data-nosnippet>255</a>    /// (Issue #954, Epic #951).
+<a href=#256 id=256 data-nosnippet>256</a>    ///
+<a href=#257 id=257 data-nosnippet>257</a>    /// For a WIDE BTI partition the `Partitions.db` trie points at a per-partition
+<a href=#258 id=258 data-nosnippet>258</a>    /// `TrieIndexEntry` in `Rows.db`; that entry's row-index trie maps clustering
+<a href=#259 id=259 data-nosnippet>259</a>    /// **separators** to row-index BLOCK offsets (relative to the partition
+<a href=#260 id=260 data-nosnippet>260</a>    /// start). [`select_row_index_blocks_for_range`] applies the authoritative
+<a href=#261 id=261 data-nosnippet>261</a>    /// separator-floor semantics to pick exactly the blocks whose key interval
+<a href=#262 id=262 data-nosnippet>262</a>    /// intersects `[start, end]`, so the returned byte window is the smallest
+<a href=#263 id=263 data-nosnippet>263</a>    /// authoritative extent that can contain the requested clustering range.
+<a href=#264 id=264 data-nosnippet>264</a>    ///
+<a href=#265 id=265 data-nosnippet>265</a>    /// Returns `Ok(Some(window))` only when the narrowing is authoritative and
+<a href=#266 id=266 data-nosnippet>266</a>    /// useful:
+<a href=#267 id=267 data-nosnippet>267</a>    /// - the reader is BTI with a `Rows.db`,
+<a href=#268 id=268 data-nosnippet>268</a>    /// - the partition is WIDE (`Partitions.db` returned a `RowsOffset`, i.e. the
+<a href=#269 id=269 data-nosnippet>269</a>    ///   partition has a row index — a NARROW partition has no per-partition row
+<a href=#270 id=270 data-nosnippet>270</a>    ///   index to seek within),
+<a href=#271 id=271 data-nosnippet>271</a>    /// - the clustering bound(s) encode to the OSS50 byte-comparable form, and
+<a href=#272 id=272 data-nosnippet>272</a>    /// - the selected block set is non-empty.
+<a href=#273 id=273 data-nosnippet>273</a>    ///
+<a href=#274 id=274 data-nosnippet>274</a>    /// Returns `Ok(None)` (decode the whole partition, report `PartitionLookup`)
+<a href=#275 id=275 data-nosnippet>275</a>    /// for every other case — a NARROW partition, an empty `Rows.db`, an
+<a href=#276 id=276 data-nosnippet>276</a>    /// un-encodable bound, a slice that selects no block, or (issue #3002) an entry
+<a href=#277 id=277 data-nosnippet>277</a>    /// whose row-index ROOT failed structural validation. This is the honest
+<a href=#278 id=278 data-nosnippet>278</a>    /// fallback: correctness is preserved by decoding the full partition and
+<a href=#279 id=279 data-nosnippet>279</a>    /// letting the post-scan backstop filter.
+<a href=#280 id=280 data-nosnippet>280</a>    </span><span class="attr">#[cfg(not(feature = <span class="string">"tombstones"</span>))]
+<a href=#281 id=281 data-nosnippet>281</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>bti_clustering_row_window(
+<a href=#282 id=282 data-nosnippet>282</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#283 id=283 data-nosnippet>283</a>        partition_key: <span class="kw-2">&amp;</span>[u8],
+<a href=#284 id=284 data-nosnippet>284</a>        slice: <span class="kw-2">&amp;</span>ClusteringSlice,
+<a href=#285 id=285 data-nosnippet>285</a>        schema: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span><span class="kw">crate</span>::schema::TableSchema&gt;,
+<a href=#286 id=286 data-nosnippet>286</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="prelude-ty">Option</span>&lt;ClusteringRowWindow&gt;&gt; {
+<a href=#287 id=287 data-nosnippet>287</a>        <span class="kw">use </span><span class="kw">crate</span>::storage::sstable::bti::{
+<a href=#288 id=288 data-nosnippet>288</a>            encode_partition_key_for_bti_trie, lookup_partition_in_bti_slice,
+<a href=#289 id=289 data-nosnippet>289</a>            resolve_rows_db_entry, rows_floor_block, rows_strict_ceiling_block,
+<a href=#290 id=290 data-nosnippet>290</a>            BtiPartitionLocation,
+<a href=#291 id=291 data-nosnippet>291</a>        };
+<a href=#292 id=292 data-nosnippet>292</a>
+<a href=#293 id=293 data-nosnippet>293</a>        <span class="kw">let </span>(<span class="prelude-val">Some</span>(partitions_db), <span class="prelude-val">Some</span>(rows_db)) = (<span class="kw-2">&amp;</span><span class="self">self</span>.bti_partitions_db, <span class="kw-2">&amp;</span><span class="self">self</span>.bti_rows_db)
+<a href=#294 id=294 data-nosnippet>294</a>        <span class="kw">else </span>{
+<a href=#295 id=295 data-nosnippet>295</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
+<a href=#296 id=296 data-nosnippet>296</a>        };
+<a href=#297 id=297 data-nosnippet>297</a>
+<a href=#298 id=298 data-nosnippet>298</a>        <span class="comment">// Resolve the partition's location. Only a WIDE partition (RowsOffset) has
+<a href=#299 id=299 data-nosnippet>299</a>        // a per-partition row index we can seek within; a NARROW partition
+<a href=#300 id=300 data-nosnippet>300</a>        // (DataOffset) has none, so decode it in full.
+<a href=#301 id=301 data-nosnippet>301</a>        // Issue #1574 (C3): walk the resident trie buffer in place (no whole-file copy).
+<a href=#302 id=302 data-nosnippet>302</a>        // Issue #1575 (C4): encode the raw key then walk with the pre-encoded key via
+<a href=#303 id=303 data-nosnippet>303</a>        // the single `lookup_partition_in_bti_slice` primitive every BTI lookup shares.
+<a href=#304 id=304 data-nosnippet>304</a>        </span><span class="kw">let </span>encoded = encode_partition_key_for_bti_trie(partition_key);
+<a href=#305 id=305 data-nosnippet>305</a>        <span class="kw">let </span>rows_offset = <span class="kw">match </span>lookup_partition_in_bti_slice(partitions_db.as_slice(), <span class="kw-2">&amp;</span>encoded)
+<a href=#306 id=306 data-nosnippet>306</a>            .map_err(|e| {
+<a href=#307 id=307 data-nosnippet>307</a>                Error::corruption(<span class="macro">format!</span>(
+<a href=#308 id=308 data-nosnippet>308</a>                    <span class="string">"BTI clustering seek: Partitions.db trie lookup failed (key len={}): {}"</span>,
+<a href=#309 id=309 data-nosnippet>309</a>                    partition_key.len(),
+<a href=#310 id=310 data-nosnippet>310</a>                    e
+<a href=#311 id=311 data-nosnippet>311</a>                ))
+<a href=#312 id=312 data-nosnippet>312</a>            })<span class="question-mark">? </span>{
+<a href=#313 id=313 data-nosnippet>313</a>            <span class="prelude-val">Some</span>(BtiPartitionLocation::RowsOffset(off)) =&gt; off <span class="kw">as </span>usize,
+<a href=#314 id=314 data-nosnippet>314</a>            <span class="comment">// NARROW partition or absent key: no row index to narrow with.
+<a href=#315 id=315 data-nosnippet>315</a>            </span><span class="prelude-val">Some</span>(BtiPartitionLocation::DataOffset(<span class="kw">_</span>)) | <span class="prelude-val">None </span>=&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
+<a href=#316 id=316 data-nosnippet>316</a>        };
+<a href=#317 id=317 data-nosnippet>317</a>
+<a href=#318 id=318 data-nosnippet>318</a>        <span class="comment">// Resolve the per-partition row-index entry ONCE (issue #1647 / L1: the
+<a href=#319 id=319 data-nosnippet>319</a>        // pre-L1 path resolved it HERE and again inside `iterate_rows_for_partition`,
+<a href=#320 id=320 data-nosnippet>320</a>        // discarding the first). `header.trie_root` roots the O(key-length)
+<a href=#321 id=321 data-nosnippet>321</a>        // floor/ceiling walks below, so a clustering read never materializes every
+<a href=#322 id=322 data-nosnippet>322</a>        // row-index block.
+<a href=#323 id=323 data-nosnippet>323</a>        </span><span class="kw">let </span>header = resolve_rows_db_entry(rows_db.as_slice(), rows_offset).map_err(|e| {
+<a href=#324 id=324 data-nosnippet>324</a>            Error::corruption(<span class="macro">format!</span>(
+<a href=#325 id=325 data-nosnippet>325</a>                <span class="string">"BTI clustering seek: Rows.db entry at RowsOffset({rows_offset}) unreadable: {e}"
+<a href=#326 id=326 data-nosnippet>326</a>            </span>))
+<a href=#327 id=327 data-nosnippet>327</a>        })<span class="question-mark">?</span>;
+<a href=#328 id=328 data-nosnippet>328</a>        <span class="comment">// ROOT UNUSABLE (issue #3002): the entry's resolved root failed structural
+<a href=#329 id=329 data-nosnippet>329</a>        // validation — it is not the last-written node before the entry, so walking
+<a href=#330 id=330 data-nosnippet>330</a>        // from it would return a structurally valid but BOGUS window that silently
+<a href=#331 id=331 data-nosnippet>331</a>        // drops rows (exactly the pre-#3002 fail-open). Take the honest "cannot
+<a href=#332 id=332 data-nosnippet>332</a>        // narrow" fallback: `Ok(None)` ⇒ decode the whole partition and let the
+<a href=#333 id=333 data-nosnippet>333</a>        // post-scan backstop filter. This is DISTINCT from the #1968 implicit-first
+<a href=#334 id=334 data-nosnippet>334</a>        // signal below, which keeps a real (narrowed-END) window rooted at rel 0.
+<a href=#335 id=335 data-nosnippet>335</a>        // `header.data_position`/`block_count` are unaffected and stay usable by the
+<a href=#336 id=336 data-nosnippet>336</a>        // point-lookup / successor-walk paths.
+<a href=#337 id=337 data-nosnippet>337</a>        </span><span class="kw">let </span>root = <span class="kw">match </span><span class="kw-2">&amp;</span>header.trie_root {
+<a href=#338 id=338 data-nosnippet>338</a>            <span class="prelude-val">Ok</span>(root) =&gt; root.offset(),
+<a href=#339 id=339 data-nosnippet>339</a>            <span class="prelude-val">Err</span>(rejection) =&gt; {
+<a href=#340 id=340 data-nosnippet>340</a>                <span class="comment">// OPERATOR SIGNAL (#3002): this fallback is otherwise invisible — it
+<a href=#341 id=341 data-nosnippet>341</a>                // shows up only as unexplained clustering-read latency, because every
+<a href=#342 id=342 data-nosnippet>342</a>                // slice over the affected partitions decodes in full. Count it with
+<a href=#343 id=343 data-nosnippet>343</a>                // the violated invariant as the bounded attribute so a dashboard can
+<a href=#344 id=344 data-nosnippet>344</a>                // name the cause; the `debug!` keeps the offsets, which never go on a
+<a href=#345 id=345 data-nosnippet>345</a>                // metric label.
+<a href=#346 id=346 data-nosnippet>346</a>                </span><span class="kw">crate</span>::observability::add_counter(
+<a href=#347 id=347 data-nosnippet>347</a>                    <span class="kw">crate</span>::observability::catalog::READ_BTI_ROWS_ROOT_REJECTED,
+<a href=#348 id=348 data-nosnippet>348</a>                    <span class="number">1</span>,
+<a href=#349 id=349 data-nosnippet>349</a>                    <span class="kw-2">&amp;</span>[(
+<a href=#350 id=350 data-nosnippet>350</a>                        <span class="kw">crate</span>::observability::catalog::attr::ROWS_ROOT_REJECT_REASON,
+<a href=#351 id=351 data-nosnippet>351</a>                        rejection.reason.label().into(),
+<a href=#352 id=352 data-nosnippet>352</a>                    )],
+<a href=#353 id=353 data-nosnippet>353</a>                );
+<a href=#354 id=354 data-nosnippet>354</a>                <span class="macro">debug!</span>(
+<a href=#355 id=355 data-nosnippet>355</a>                    <span class="string">"BTI clustering seek: {rejection}; decoding the full partition (no \
+<a href=#356 id=356 data-nosnippet>356</a>                     narrowing) — a Rows.db row index written by CQLite &lt;= 0.16 must be \
+<a href=#357 id=357 data-nosnippet>357</a>                     rewritten (re-flush/re-compact), see issue #3002"
+<a href=#358 id=358 data-nosnippet>358</a>                </span>);
+<a href=#359 id=359 data-nosnippet>359</a>                <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
+<a href=#360 id=360 data-nosnippet>360</a>            }
+<a href=#361 id=361 data-nosnippet>361</a>        };
+<a href=#362 id=362 data-nosnippet>362</a>
+<a href=#363 id=363 data-nosnippet>363</a>        <span class="comment">// Per-column reverse order for the FIRST clustering column (single-column
+<a href=#364 id=364 data-nosnippet>364</a>        // scope per #954). A missing/absent schema treats it as ascending.
+<a href=#365 id=365 data-nosnippet>365</a>        </span><span class="kw">let </span>is_reversed: Vec&lt;bool&gt; = schema
+<a href=#366 id=366 data-nosnippet>366</a>            .map(|s| {
+<a href=#367 id=367 data-nosnippet>367</a>                s.clustering_keys
+<a href=#368 id=368 data-nosnippet>368</a>                    .iter()
+<a href=#369 id=369 data-nosnippet>369</a>                    .map(|c| <span class="macro">matches!</span>(c.order, <span class="kw">crate</span>::schema::ClusteringOrder::Desc))
+<a href=#370 id=370 data-nosnippet>370</a>                    .collect()
+<a href=#371 id=371 data-nosnippet>371</a>            })
+<a href=#372 id=372 data-nosnippet>372</a>            .unwrap_or_default();
+<a href=#373 id=373 data-nosnippet>373</a>
+<a href=#374 id=374 data-nosnippet>374</a>        <span class="comment">// Encode the CQL bounds into the PHYSICAL byte-comparable order the row
+<a href=#375 id=375 data-nosnippet>375</a>        // index uses, normalizing for a DESC first clustering column (issue #954
+<a href=#376 id=376 data-nosnippet>376</a>        // High-severity correctness fix). The floor/ceiling walks operate purely in
+<a href=#377 id=377 data-nosnippet>377</a>        // physical (on-disk, byte-comparable) order, so the CQL lower/upper bounds
+<a href=#378 id=378 data-nosnippet>378</a>        // must be mapped to the physical-lower/physical-upper sides before the walk.
+<a href=#379 id=379 data-nosnippet>379</a>        // For a DESC column those roles SWAP (see `physical_byte_bounds_for_slice`).
+<a href=#380 id=380 data-nosnippet>380</a>        // An un-encodable bound makes the narrowing unsafe → decode the whole
+<a href=#381 id=381 data-nosnippet>381</a>        // partition (honest fallback).
+<a href=#382 id=382 data-nosnippet>382</a>        </span><span class="kw">let </span><span class="prelude-val">Some</span>((start_bytes, end_bytes)) = physical_byte_bounds_for_slice(slice, <span class="kw-2">&amp;</span>is_reversed)<span class="question-mark">?
+<a href=#383 id=383 data-nosnippet>383</a>        </span><span class="kw">else </span>{
+<a href=#384 id=384 data-nosnippet>384</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
+<a href=#385 id=385 data-nosnippet>385</a>        };
+<a href=#386 id=386 data-nosnippet>386</a>
+<a href=#387 id=387 data-nosnippet>387</a>        <span class="comment">// Locate the row-body window with two O(key-length) separator walks instead
+<a href=#388 id=388 data-nosnippet>388</a>        // of materializing every row-index block then linearly filtering (issue
+<a href=#389 id=389 data-nosnippet>389</a>        // #1647 / L1). Both mirror Cassandra `RowIndexReader.separatorFloor`:
+<a href=#390 id=390 data-nosnippet>390</a>        //   - floor(start): the block whose half-open interval `[s_i, s_{i+1})`
+<a href=#391 id=391 data-nosnippet>391</a>        //     contains the physical-lower bound (largest separator `&lt;= start`), i.e.
+<a href=#392 id=392 data-nosnippet>392</a>        //     the first block that can hold a row of the slice. `None` when `start`
+<a href=#393 id=393 data-nosnippet>393</a>        //     sorts below the FIRST separator — the trie-implicit first block at the
+<a href=#394 id=394 data-nosnippet>394</a>        //     partition body start (issue #1968), which no stored walk can return.
+<a href=#395 id=395 data-nosnippet>395</a>        //   - strict_ceiling(end): the block with the smallest separator strictly
+<a href=#396 id=396 data-nosnippet>396</a>        //     `&gt; end` = the EXCLUSIVE window end (the successor of `floor(end)`).
+<a href=#397 id=397 data-nosnippet>397</a>        //     `None` when the slice reaches the last block (window runs to the
+<a href=#398 id=398 data-nosnippet>398</a>        //     partition end).
+<a href=#399 id=399 data-nosnippet>399</a>        // These reproduce the pre-L1 `select_row_index_blocks_for_range` window
+<a href=#400 id=400 data-nosnippet>400</a>        // (min selected-block start .. successor of max selected-block) EXACTLY, by
+<a href=#401 id=401 data-nosnippet>401</a>        // construction, for every boundary class (see the rows_floor unit tests).
+<a href=#402 id=402 data-nosnippet>402</a>        </span><span class="kw">let </span>floor_block =
+<a href=#403 id=403 data-nosnippet>403</a>            rows_floor_block(rows_db.as_slice(), root, <span class="kw-2">&amp;</span>start_bytes).map_err(|e| {
+<a href=#404 id=404 data-nosnippet>404</a>                Error::corruption(<span class="macro">format!</span>(
+<a href=#405 id=405 data-nosnippet>405</a>                <span class="string">"BTI clustering seek: Rows.db floor walk at RowsOffset({rows_offset}) failed: {e}"
+<a href=#406 id=406 data-nosnippet>406</a>            </span>))
+<a href=#407 id=407 data-nosnippet>407</a>            })<span class="question-mark">?</span>;
+<a href=#408 id=408 data-nosnippet>408</a>        <span class="kw">let </span>ceil_block =
+<a href=#409 id=409 data-nosnippet>409</a>            rows_strict_ceiling_block(rows_db.as_slice(), root, <span class="kw-2">&amp;</span>end_bytes).map_err(|e| {
+<a href=#410 id=410 data-nosnippet>410</a>                Error::corruption(<span class="macro">format!</span>(
+<a href=#411 id=411 data-nosnippet>411</a>                    <span class="string">"BTI clustering seek: Rows.db ceiling walk at RowsOffset({rows_offset}) \
+<a href=#412 id=412 data-nosnippet>412</a>                     failed: {e}"
+<a href=#413 id=413 data-nosnippet>413</a>                </span>))
+<a href=#414 id=414 data-nosnippet>414</a>            })<span class="question-mark">?</span>;
+<a href=#415 id=415 data-nosnippet>415</a>
+<a href=#416 id=416 data-nosnippet>416</a>        <span class="comment">// The static row precedes the clustering rows and must be merged into each
+<a href=#417 id=417 data-nosnippet>417</a>        // emitted clustering row, so we may only fast-forward PAST it when the table
+<a href=#418 id=418 data-nosnippet>418</a>        // has NO static columns; otherwise decode from the partition body start
+<a href=#419 id=419 data-nosnippet>419</a>        // (`body_start_rel = 0`) so the static prefix is seen (the END bound still
+<a href=#420 id=420 data-nosnippet>420</a>        // narrows). (`test_da.wide_table` has no static columns, so the start narrows
+<a href=#421 id=421 data-nosnippet>421</a>        // too.)
+<a href=#422 id=422 data-nosnippet>422</a>        </span><span class="kw">let </span>has_static = schema
+<a href=#423 id=423 data-nosnippet>423</a>            .map(|s| s.columns.iter().any(|c| c.is_static))
+<a href=#424 id=424 data-nosnippet>424</a>            .unwrap_or(<span class="bool-val">false</span>);
+<a href=#425 id=425 data-nosnippet>425</a>
+<a href=#426 id=426 data-nosnippet>426</a>        <span class="comment">// IMPLICIT FIRST BLOCK (issue #1968): a `start` below the FIRST stored
+<a href=#427 id=427 data-nosnippet>427</a>        // separator selects a block no walk can return, so `rows_floor_block`'s
+<a href=#428 id=428 data-nosnippet>428</a>        // `None` IS the implicit-first signal and the decode must begin at rel 0 or
+<a href=#429 id=429 data-nosnippet>429</a>        // the earliest clustering rows are dropped. In a Cassandra-written trie read
+<a href=#430 id=430 data-nosnippet>430</a>        // from the CORRECT root (issue #3002) this is now unreachable: the first
+<a href=#431 id=431 data-nosnippet>431</a>        // block's separator is `ByteComparable.EMPTY` (`RowIndexWriter.add`), stored
+<a href=#432 id=432 data-nosnippet>432</a>        // as the ROOT node's own payload, and nothing sorts below the empty key — the
+<a href=#433 id=433 data-nosnippet>433</a>        // floor walk returns that block 0 entry as a genuine STORED floor. The `None`
+<a href=#434 id=434 data-nosnippet>434</a>        // branch is retained for a trie whose first separator is NOT empty (a
+<a href=#435 id=435 data-nosnippet>435</a>        // CQLite-written row index, or any bound below a non-empty first separator).
+<a href=#436 id=436 data-nosnippet>436</a>        </span><span class="kw">let </span>includes_implicit_first_block = floor_block.is_none();
+<a href=#437 id=437 data-nosnippet>437</a>
+<a href=#438 id=438 data-nosnippet>438</a>        <span class="comment">// The start narrows to the floor block only when NEITHER a static row NOR the
+<a href=#439 id=439 data-nosnippet>439</a>        // implicit first block forces decoding from rel 0.
+<a href=#440 id=440 data-nosnippet>440</a>        </span><span class="kw">let </span>narrows_start = !has_static &amp;&amp; !includes_implicit_first_block;
+<a href=#441 id=441 data-nosnippet>441</a>
+<a href=#442 id=442 data-nosnippet>442</a>        <span class="comment">// CORRECTNESS GUARD (no-heuristics, never wrong results): FLAG_OPEN_MARKER on
+<a href=#443 id=443 data-nosnippet>443</a>        // the floor block's `IndexInfo` means a range tombstone is OPEN at the START
+<a href=#444 id=444 data-nosnippet>444</a>        // of the narrowed window — a deletion opened in an earlier block still shadows
+<a href=#445 id=445 data-nosnippet>445</a>        // rows inside the slice. Skipping earlier blocks would drop that range-open
+<a href=#446 id=446 data-nosnippet>446</a>        // marker and risk resurrecting a deleted row (the post-scan backstop only
+<a href=#447 id=447 data-nosnippet>447</a>        // FILTERS rows, it cannot re-apply a missed range tombstone). Per Cassandra
+<a href=#448 id=448 data-nosnippet>448</a>        // `RowIndexReader.IndexInfo.openDeletion`, the marker on the floor block fully
+<a href=#449 id=449 data-nosnippet>449</a>        // captures any deletion open at the window start, so this is the exact, tight
+<a href=#450 id=450 data-nosnippet>450</a>        // guard: when it fires (only relevant when the start actually narrows) fall
+<a href=#451 id=451 data-nosnippet>451</a>        // back to a full-partition decode. When the decode already starts at rel 0
+<a href=#452 id=452 data-nosnippet>452</a>        // (static / implicit-first) no earlier block is skipped, so no guard is
+<a href=#453 id=453 data-nosnippet>453</a>        // needed. (`test_da.wide_table` has no range tombstones.)
+<a href=#454 id=454 data-nosnippet>454</a>        </span><span class="kw">if </span>narrows_start
+<a href=#455 id=455 data-nosnippet>455</a>            &amp;&amp; floor_block
+<a href=#456 id=456 data-nosnippet>456</a>                .as_ref()
+<a href=#457 id=457 data-nosnippet>457</a>                .map(|b| b.open_marker.is_some())
+<a href=#458 id=458 data-nosnippet>458</a>                .unwrap_or(<span class="bool-val">false</span>)
+<a href=#459 id=459 data-nosnippet>459</a>        {
+<a href=#460 id=460 data-nosnippet>460</a>            <span class="macro">debug!</span>(
+<a href=#461 id=461 data-nosnippet>461</a>                <span class="string">"BTI clustering seek: floor row-index block carries an open range-tombstone \
+<a href=#462 id=462 data-nosnippet>462</a>                 marker; decoding full partition to preserve range-deletion semantics (no \
+<a href=#463 id=463 data-nosnippet>463</a>                 narrowing)"
+<a href=#464 id=464 data-nosnippet>464</a>            </span>);
+<a href=#465 id=465 data-nosnippet>465</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
+<a href=#466 id=466 data-nosnippet>466</a>        }
+<a href=#467 id=467 data-nosnippet>467</a>
+<a href=#468 id=468 data-nosnippet>468</a>        <span class="comment">// body_start_rel: the floor block's offset when the start narrows, else the
+<a href=#469 id=469 data-nosnippet>469</a>        // partition body start (rel 0). The block `data_offset` is relative to the
+<a href=#470 id=470 data-nosnippet>470</a>        // partition start (the same domain the parser sees for `window[within..]`).
+<a href=#471 id=471 data-nosnippet>471</a>        </span><span class="kw">let </span>body_start_rel = <span class="kw">match </span><span class="kw-2">&amp;</span>floor_block {
+<a href=#472 id=472 data-nosnippet>472</a>            <span class="prelude-val">Some</span>(b) <span class="kw">if </span>narrows_start =&gt; b.data_offset <span class="kw">as </span>usize,
+<a href=#473 id=473 data-nosnippet>473</a>            <span class="kw">_ </span>=&gt; <span class="number">0</span>,
+<a href=#474 id=474 data-nosnippet>474</a>        };
+<a href=#475 id=475 data-nosnippet>475</a>        <span class="comment">// body_end_rel: the exclusive successor block start, or the partition end
+<a href=#476 id=476 data-nosnippet>476</a>        // (`usize::MAX`, clamped by the caller against the authoritative partition
+<a href=#477 id=477 data-nosnippet>477</a>        // end / data-section length) when the slice reaches the last block.
+<a href=#478 id=478 data-nosnippet>478</a>        </span><span class="kw">let </span>body_end_rel = ceil_block
+<a href=#479 id=479 data-nosnippet>479</a>            .map(|b| b.data_offset <span class="kw">as </span>usize)
+<a href=#480 id=480 data-nosnippet>480</a>            .unwrap_or(usize::MAX);
+<a href=#481 id=481 data-nosnippet>481</a>
+<a href=#482 id=482 data-nosnippet>482</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(ClusteringRowWindow {
+<a href=#483 id=483 data-nosnippet>483</a>            body_start_rel,
+<a href=#484 id=484 data-nosnippet>484</a>            body_end_rel,
+<a href=#485 id=485 data-nosnippet>485</a>        }))
+<a href=#486 id=486 data-nosnippet>486</a>    }
+<a href=#487 id=487 data-nosnippet>487</a>
+<a href=#488 id=488 data-nosnippet>488</a>    <span class="doccomment">/// BTI ("da") full scan: decompress the whole Data.db section and parse
+<a href=#489 id=489 data-nosnippet>489</a>    /// every partition in token order (issue #660).
+<a href=#490 id=490 data-nosnippet>490</a>    ///
+<a href=#491 id=491 data-nosnippet>491</a>    /// BTI SSTables carry no Index.db/Summary.db, so a range/full scan cannot
+<a href=#492 id=492 data-nosnippet>492</a>    /// use the index path. Instead we stitch the entire (chunk-compressed) data
+<a href=#493 id=493 data-nosnippet>493</a>    /// section into one buffer and run [`parse_block_with_cell_metadata`], which
+<a href=#494 id=494 data-nosnippet>494</a>    /// walks ALL partitions — the same per-partition decode the point-lookup
+<a href=#495 id=495 data-nosnippet>495</a>    /// path uses, but without stopping at the first match.
+<a href=#496 id=496 data-nosnippet>496</a>    ///
+<a href=#497 id=497 data-nosnippet>497</a>    /// Returns entries with per-cell write metadata so the WRITETIME/TTL scan
+<a href=#498 id=498 data-nosnippet>498</a>    /// (`scan_with_cell_metadata`) and the plain `scan` (which drops the metadata)
+<a href=#499 id=499 data-nosnippet>499</a>    /// can share a single implementation. Results are filtered by the optional
+<a href=#500 id=500 data-nosnippet>500</a>    /// `[start_key, end_key]` range and tombstone-suppressed, then sorted into
+<a href=#501 id=501 data-nosnippet>501</a>    /// Murmur3 token order and truncated to `limit` — identical post-processing
+<a href=#502 id=502 data-nosnippet>502</a>    /// to the V5CompressedLegacy stitched path.
+<a href=#503 id=503 data-nosnippet>503</a>    ///
+<a href=#504 id=504 data-nosnippet>504</a>    /// Uses its own per-scan
+<a href=#505 id=505 data-nosnippet>505</a>    /// [`ScanCursor`](crate::storage::sstable::reader::source::ScanCursor), so it
+<a href=#506 id=506 data-nosnippet>506</a>    /// runs in parallel with other scans on this reader without serialization
+<a href=#507 id=507 data-nosnippet>507</a>    /// (issue #815).
+<a href=#508 id=508 data-nosnippet>508</a>    ///
+<a href=#509 id=509 data-nosnippet>509</a>    /// [`parse_block_with_cell_metadata`]: crate::storage::sstable::reader::parsing::V5CompressedLegacyParser::parse_block_with_cell_metadata
+<a href=#510 id=510 data-nosnippet>510</a>    ///
+<a href=#511 id=511 data-nosnippet>511</a>    /// `read_shadowing` (issue #1741): `true` for user-facing SELECT scans
+<a href=#512 id=512 data-nosnippet>512</a>    /// (`scan`, `scan_with_cell_metadata`), `false` for the physical
+<a href=#513 id=513 data-nosnippet>513</a>    /// `get_all_entries` (integrity verification / data-manager) which must count
+<a href=#514 id=514 data-nosnippet>514</a>    /// every on-disk row.
+<a href=#515 id=515 data-nosnippet>515</a>    ///
+<a href=#516 id=516 data-nosnippet>516</a>    /// `now_secs` (issue #3058, threaded here by #3109): a caller-pinned read-time
+<a href=#517 id=517 data-nosnippet>517</a>    /// TTL clock. `Some` pins the decoder's expiry instant to the ONE
+<a href=#518 id=518 data-nosnippet>518</a>    /// reconciliation instant the caller already captured for the request instead
+<a href=#519 id=519 data-nosnippet>519</a>    /// of the ambient sample the parser takes at construction; `None` keeps the
+<a href=#520 id=520 data-nosnippet>520</a>    /// ambient sample. Only consulted when `read_shadowing`.
+<a href=#521 id=521 data-nosnippet>521</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">async fn </span>bti_scan_with_metadata(
+<a href=#522 id=522 data-nosnippet>522</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#523 id=523 data-nosnippet>523</a>        start_key: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>RowKey&gt;,
+<a href=#524 id=524 data-nosnippet>524</a>        end_key: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>RowKey&gt;,
+<a href=#525 id=525 data-nosnippet>525</a>        limit: <span class="prelude-ty">Option</span>&lt;usize&gt;,
+<a href=#526 id=526 data-nosnippet>526</a>        schema: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span><span class="kw">crate</span>::schema::TableSchema&gt;,
+<a href=#527 id=527 data-nosnippet>527</a>        read_shadowing: bool,
+<a href=#528 id=528 data-nosnippet>528</a>        now_secs: <span class="prelude-ty">Option</span>&lt;i64&gt;,
+<a href=#529 id=529 data-nosnippet>529</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;
+<a href=#530 id=530 data-nosnippet>530</a>        Vec&lt;(
+<a href=#531 id=531 data-nosnippet>531</a>            RowKey,
+<a href=#532 id=532 data-nosnippet>532</a>            ScanRow,
+<a href=#533 id=533 data-nosnippet>533</a>            std::collections::HashMap&lt;String, CellWriteMetadata&gt;,
+<a href=#534 id=534 data-nosnippet>534</a>        )&gt;,
+<a href=#535 id=535 data-nosnippet>535</a>    &gt; {
+<a href=#536 id=536 data-nosnippet>536</a>        <span class="kw">let </span>_scan = <span class="self">self</span>.begin_scan(); <span class="comment">// #3853 scan-lifetime madvise seam
+<a href=#537 id=537 data-nosnippet>537</a>        </span><span class="self">self</span>.bti_scan_with_metadata_cancellable(
+<a href=#538 id=538 data-nosnippet>538</a>            start_key,
+<a href=#539 id=539 data-nosnippet>539</a>            end_key,
+<a href=#540 id=540 data-nosnippet>540</a>            limit,
+<a href=#541 id=541 data-nosnippet>541</a>            schema,
+<a href=#542 id=542 data-nosnippet>542</a>            read_shadowing,
+<a href=#543 id=543 data-nosnippet>543</a>            now_secs,
+<a href=#544 id=544 data-nosnippet>544</a>            <span class="kw-2">&amp;</span><span class="self">self</span>.scan_cancel,
+<a href=#545 id=545 data-nosnippet>545</a>        )
+<a href=#546 id=546 data-nosnippet>546</a>        .<span class="kw">await
+<a href=#547 id=547 data-nosnippet>547</a>    </span>}
+<a href=#548 id=548 data-nosnippet>548</a>
+<a href=#549 id=549 data-nosnippet>549</a>    <span class="doccomment">/// [`Self::bti_scan_with_metadata`] with an explicit PER-CALL cancellation
+<a href=#550 id=550 data-nosnippet>550</a>    /// token (issue #2346/#2264), mirroring the
+<a href=#551 id=551 data-nosnippet>551</a>    /// [`stitch_all_chunks`](Self::stitch_all_chunks) /
+<a href=#552 id=552 data-nosnippet>552</a>    /// [`stitch_all_chunks_cancellable`](Self::stitch_all_chunks_cancellable) pair.
+<a href=#553 id=553 data-nosnippet>553</a>    ///
+<a href=#554 id=554 data-nosnippet>554</a>    /// `sequential_scan` is the seam that needs it: it takes a caller-supplied
+<a href=#555 id=555 data-nosnippet>555</a>    /// token (the compaction path's
+<a href=#556 id=556 data-nosnippet>556</a>    /// [`iterate_all_partitions_cancellable`](SSTableReader::iterate_all_partitions_cancellable)
+<a href=#557 id=557 data-nosnippet>557</a>    /// drives it with one that is NOT the reader's own field), and its BTI branch
+<a href=#558 id=558 data-nosnippet>558</a>    /// must honour that token. Routing a `da` reader through the non-cancellable
+<a href=#559 id=559 data-nosnippet>559</a>    /// wrapper would poll the WRONG flag — a cancelled walk would stitch and parse
+<a href=#560 id=560 data-nosnippet>560</a>    /// the entire data section and return `Ok(every row)`, reporting success for a
+<a href=#561 id=561 data-nosnippet>561</a>    /// scan the caller abandoned.
+<a href=#562 id=562 data-nosnippet>562</a>    ///
+<a href=#563 id=563 data-nosnippet>563</a>    /// The token is polled in BOTH phases of the walk: every 256 chunks inside the
+<a href=#564 id=564 data-nosnippet>564</a>    /// stitch (the I/O phase) and every 256 entries of the post-parse filter loop —
+<a href=#565 id=565 data-nosnippet>565</a>    /// the same two-phase cadence `sequential_scan`'s stitched branch uses.
+<a href=#566 id=566 data-nosnippet>566</a>    </span><span class="attr">#[allow(clippy::too_many_arguments)]
+<a href=#567 id=567 data-nosnippet>567</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">async fn </span>bti_scan_with_metadata_cancellable(
+<a href=#568 id=568 data-nosnippet>568</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#569 id=569 data-nosnippet>569</a>        start_key: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>RowKey&gt;,
+<a href=#570 id=570 data-nosnippet>570</a>        end_key: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>RowKey&gt;,
+<a href=#571 id=571 data-nosnippet>571</a>        limit: <span class="prelude-ty">Option</span>&lt;usize&gt;,
+<a href=#572 id=572 data-nosnippet>572</a>        schema: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span><span class="kw">crate</span>::schema::TableSchema&gt;,
+<a href=#573 id=573 data-nosnippet>573</a>        read_shadowing: bool,
+<a href=#574 id=574 data-nosnippet>574</a>        now_secs: <span class="prelude-ty">Option</span>&lt;i64&gt;,
+<a href=#575 id=575 data-nosnippet>575</a>        scan_cancel: <span class="kw-2">&amp;</span><span class="kw">crate</span>::storage::scan_cancel::ScanCancel,
+<a href=#576 id=576 data-nosnippet>576</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;
+<a href=#577 id=577 data-nosnippet>577</a>        Vec&lt;(
+<a href=#578 id=578 data-nosnippet>578</a>            RowKey,
+<a href=#579 id=579 data-nosnippet>579</a>            ScanRow,
+<a href=#580 id=580 data-nosnippet>580</a>            std::collections::HashMap&lt;String, CellWriteMetadata&gt;,
+<a href=#581 id=581 data-nosnippet>581</a>        )&gt;,
+<a href=#582 id=582 data-nosnippet>582</a>    &gt; {
+<a href=#583 id=583 data-nosnippet>583</a>        <span class="kw">let </span>_scan = <span class="self">self</span>.begin_scan(); <span class="comment">// #3853 scan-lifetime madvise seam
+<a href=#584 id=584 data-nosnippet>584</a>        </span>scan_cancel.check()<span class="question-mark">?</span>;
+<a href=#585 id=585 data-nosnippet>585</a>        <span class="kw">let </span>cursor = <span class="self">self</span>.new_scan_cursor().<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#586 id=586 data-nosnippet>586</a>
+<a href=#587 id=587 data-nosnippet>587</a>        <span class="comment">// Decompress the entire data section. Precondition for stitch_all_chunks:
+<a href=#588 id=588 data-nosnippet>588</a>        // cursor's file seeked to data-section start (fresh cursor is at chunk 0).
+<a href=#589 id=589 data-nosnippet>589</a>        </span><span class="kw">let </span>header_size = <span class="self">self</span>.calculate_header_size();
+<a href=#590 id=590 data-nosnippet>590</a>        {
+<a href=#591 id=591 data-nosnippet>591</a>            <span class="kw">let </span><span class="kw-2">mut </span>file_guard = cursor.file.lock().<span class="kw">await</span>;
+<a href=#592 id=592 data-nosnippet>592</a>            <span class="comment">// A5 read-work counter (SEEK_CALLS; consumer E4): scan seek-to-data-start
+<a href=#593 id=593 data-nosnippet>593</a>            // before stitching the section. No-op in release (design.md Decision 1/2).
+<a href=#594 id=594 data-nosnippet>594</a>            </span><span class="kw">crate</span>::storage::sstable::read_work_counters::record_seek();
+<a href=#595 id=595 data-nosnippet>595</a>            file_guard.seek(SeekFrom::Start(header_size <span class="kw">as </span>u64)).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#596 id=596 data-nosnippet>596</a>        }
+<a href=#597 id=597 data-nosnippet>597</a>        <span class="kw">let </span>whole = <span class="self">self
+<a href=#598 id=598 data-nosnippet>598</a>            </span>.stitch_all_chunks_cancellable(<span class="kw-2">&amp;</span>cursor, scan_cancel)
+<a href=#599 id=599 data-nosnippet>599</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#600 id=600 data-nosnippet>600</a>
+<a href=#601 id=601 data-nosnippet>601</a>        <span class="comment">// Resolve schema via the four-tier strategy (provided &gt; header &gt; registry).
+<a href=#602 id=602 data-nosnippet>602</a>        // V5CompressedLegacy partition decode requires a schema (cells lack names).
+<a href=#603 id=603 data-nosnippet>603</a>        </span><span class="kw">let </span>effective_schema = <span class="self">self</span>.get_table_schema(schema);
+<a href=#604 id=604 data-nosnippet>604</a>        <span class="kw">let </span>parser = <span class="self">self</span>.build_v5_parser(read_shadowing);
+<a href=#605 id=605 data-nosnippet>605</a>        <span class="comment">// Issue #3058/#3109: honour the caller's pinned reconciliation clock, so a
+<a href=#606 id=606 data-nosnippet>606</a>        // request that already sampled ONE `now` expires TTL cells at exactly that
+<a href=#607 id=607 data-nosnippet>607</a>        // instant on this decoder too (mirrors `parse_block_entries_at_now` and the
+<a href=#608 id=608 data-nosnippet>608</a>        // windowed driver).
+<a href=#609 id=609 data-nosnippet>609</a>        </span><span class="kw">let </span>parser = <span class="kw">match </span>now_secs {
+<a href=#610 id=610 data-nosnippet>610</a>            <span class="prelude-val">Some</span>(now) =&gt; parser.with_now_secs(now),
+<a href=#611 id=611 data-nosnippet>611</a>            <span class="prelude-val">None </span>=&gt; parser,
+<a href=#612 id=612 data-nosnippet>612</a>        };
+<a href=#613 id=613 data-nosnippet>613</a>        <span class="comment">// Issue #3782 (roborev job 48): `whole` is the ENTIRE data section —
+<a href=#614 id=614 data-nosnippet>614</a>        // every chunk, stitched from a fresh cursor seeked to the data-section
+<a href=#615 id=615 data-nosnippet>615</a>        // start above — so no further bytes can arrive to finish a row and a row
+<a href=#616 id=616 data-nosnippet>616</a>        // decode error here is DATA LOSS. Before this declaration the `da` full
+<a href=#617 id=617 data-nosnippet>617</a>        // scan (this is the route `scan`/`get_all_entries`/the batched streaming
+<a href=#618 id=618 data-nosnippet>618</a>        // surface all take) inherited the tolerant break and returned `Ok` with
+<a href=#619 id=619 data-nosnippet>619</a>        // 120 of 468 rows on a fixture with ONE compressed byte flipped inside a
+<a href=#620 id=620 data-nosnippet>620</a>        // clustering value.
+<a href=#621 id=621 data-nosnippet>621</a>        </span><span class="kw">let </span>parsed = parser.parse_block_with_cell_metadata(
+<a href=#622 id=622 data-nosnippet>622</a>            <span class="kw-2">&amp;</span>whole,
+<a href=#623 id=623 data-nosnippet>623</a>            BufferExtent::Complete,
+<a href=#624 id=624 data-nosnippet>624</a>            effective_schema.as_ref(),
+<a href=#625 id=625 data-nosnippet>625</a>            <span class="self">self</span>,
+<a href=#626 id=626 data-nosnippet>626</a>        )<span class="question-mark">?</span>;
+<a href=#627 id=627 data-nosnippet>627</a>
+<a href=#628 id=628 data-nosnippet>628</a>        <span class="kw">let </span><span class="kw-2">mut </span>results = Vec::new();
+<a href=#629 id=629 data-nosnippet>629</a>        <span class="comment">// Work-probe (issue #2398, threaded to BTI by #3109): "changed partition key
+<a href=#630 id=630 data-nosnippet>630</a>        // = one more partition BODY decoded", counted BEFORE any range/tombstone
+<a href=#631 id=631 data-nosnippet>631</a>        // filter exactly like the sibling walks (`sequential_scan`, the stitched
+<a href=#632 id=632 data-nosnippet>632</a>        // walk, `run_scan_stream_batched`'s block loop). Without it the BTI decode
+<a href=#633 id=633 data-nosnippet>633</a>        // would report ZERO scan work — including on the batched streaming surface,
+<a href=#634 id=634 data-nosnippet>634</a>        // whose block loop counted before #3109 routed BTI readers here.
+<a href=#635 id=635 data-nosnippet>635</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>prev_partition_key: <span class="prelude-ty">Option</span>&lt;RowKey&gt; = <span class="prelude-val">None</span>;
+<a href=#636 id=636 data-nosnippet>636</a>        <span class="kw">for </span>(idx, (_entry_table_id, entry_key, entry_value, cell_meta)) <span class="kw">in
+<a href=#637 id=637 data-nosnippet>637</a>            </span>parsed.into_iter().enumerate()
+<a href=#638 id=638 data-nosnippet>638</a>        {
+<a href=#639 id=639 data-nosnippet>639</a>            <span class="comment">// Cooperative cancellation (issue #2346/#2264): the stitch poll above
+<a href=#640 id=640 data-nosnippet>640</a>            // covers the I/O phase, but `parse_block_with_cell_metadata`
+<a href=#641 id=641 data-nosnippet>641</a>            // materialises every entry in one shot — poll here at the same
+<a href=#642 id=642 data-nosnippet>642</a>            // 256-entry cadence as `sequential_scan`'s stitched branch so a
+<a href=#643 id=643 data-nosnippet>643</a>            // cancelled caller does not walk a huge already-parsed result set to
+<a href=#644 id=644 data-nosnippet>644</a>            // completion and then report success.
+<a href=#645 id=645 data-nosnippet>645</a>            //
+<a href=#646 id=646 data-nosnippet>646</a>            // KNOWN GAP for a QUERY TIMEOUT (#1695, roborev round 12), recorded here
+<a href=#647 id=647 data-nosnippet>647</a>            // so it need not be re-derived: `scan_cancel` is the READER's SHARED
+<a href=#648 id=648 data-nosnippet>648</a>            // token. #2264 trips it on a Flight client disconnect, and #2361 trips it
+<a href=#649 id=649 data-nosnippet>649</a>            // when an iterator adapter drops — but NOTHING trips it when a streaming
+<a href=#650 id=650 data-nosnippet>650</a>            // query's consumer goes away, so a timed-out scan over a BTI table keeps
+<a href=#651 id=651 data-nosnippet>651</a>            // materialising this whole `results` Vec. The sibling producers were fixed
+<a href=#652 id=652 data-nosnippet>652</a>            // by consulting their own channel (`tx.is_closed()` / racing
+<a href=#653 id=653 data-nosnippet>653</a>            // `tx.closed()`), which is not available here: this function RETURNS a Vec
+<a href=#654 id=654 data-nosnippet>654</a>            // and holds no sender.
+<a href=#655 id=655 data-nosnippet>655</a>            //
+<a href=#656 id=656 data-nosnippet>656</a>            // WHAT IS ACTUALLY MISSING, verified rather than guessed (roborev raised
+<a href=#657 id=657 data-nosnippet>657</a>            // this twice, so the next person should not have to re-derive it):
+<a href=#658 id=658 data-nosnippet>658</a>            // `bti_scan_with_metadata_cancellable` already exists and already takes a
+<a href=#659 id=659 data-nosnippet>659</a>            // `&amp;ScanCancel`, so the plumbing is NOT the gap. The gap is that the
+<a href=#660 id=660 data-nosnippet>660</a>            // caller has no token it can legitimately pass:
+<a href=#661 id=661 data-nosnippet>661</a>            //
+<a href=#662 id=662 data-nosnippet>662</a>            //  * A CLONE of the reader's token is wrong — clones share state, so
+<a href=#663 id=663 data-nosnippet>663</a>            //    tripping it cancels OTHER queries scanning the same reader. That is
+<a href=#664 id=664 data-nosnippet>664</a>            //    the trap the materializing merges avoided with a per-call token.
+<a href=#665 id=665 data-nosnippet>665</a>            //  * A FRESH per-call token tripped by a watcher on the output sender's
+<a href=#666 id=666 data-nosnippet>666</a>            //    `closed()` handles the timeout case but silently DROPS #2264's Flight
+<a href=#667 id=667 data-nosnippet>667</a>            //    cancellation, which trips the reader token WITHOUT necessarily
+<a href=#668 id=668 data-nosnippet>668</a>            //    dropping the receiver — so a client disconnect would go back to the
+<a href=#669 id=669 data-nosnippet>669</a>            //    ~1–2 min transport backstop. Losing existing cancellation to add new
+<a href=#670 id=670 data-nosnippet>670</a>            //    cancellation is not a fix.
+<a href=#671 id=671 data-nosnippet>671</a>            //
+<a href=#672 id=672 data-nosnippet>672</a>            // So this needs one small API decision — a token that represents "either
+<a href=#673 id=673 data-nosnippet>673</a>            // the reader's OR this stream's closure" (a linked/derived `ScanCancel`) —
+<a href=#674 id=674 data-nosnippet>674</a>            // and that composition is the same primitive the deferred `JoinedStream` /
+<a href=#675 id=675 data-nosnippet>675</a>            // `KWayMerger::step()` work needs. It is deliberately not improvised here:
+<a href=#676 id=676 data-nosnippet>676</a>            // three partial fixes in this area is how the gap got this scattered, and a
+<a href=#677 id=677 data-nosnippet>677</a>            // fourth guessing at token composition would be the worst of them.
+<a href=#678 id=678 data-nosnippet>678</a>            </span>scan_cancel.checkpoint(idx).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#679 id=679 data-nosnippet>679</a>            <span class="kw">if </span>prev_partition_key.as_ref() != <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>entry_key) {
+<a href=#680 id=680 data-nosnippet>680</a>                <span class="kw">crate</span>::storage::sstable::work_counters::add_stream_walk_partition_parsed();
+<a href=#681 id=681 data-nosnippet>681</a>                prev_partition_key = <span class="prelude-val">Some</span>(entry_key.clone());
+<a href=#682 id=682 data-nosnippet>682</a>            }
+<a href=#683 id=683 data-nosnippet>683</a>            <span class="kw">if let </span><span class="prelude-val">Some</span>(start) = start_key {
+<a href=#684 id=684 data-nosnippet>684</a>                <span class="kw">if </span><span class="kw-2">&amp;</span>entry_key &lt; start {
+<a href=#685 id=685 data-nosnippet>685</a>                    <span class="kw">continue</span>;
+<a href=#686 id=686 data-nosnippet>686</a>                }
+<a href=#687 id=687 data-nosnippet>687</a>            }
+<a href=#688 id=688 data-nosnippet>688</a>            <span class="kw">if let </span><span class="prelude-val">Some</span>(end) = end_key {
+<a href=#689 id=689 data-nosnippet>689</a>                <span class="kw">if </span><span class="kw-2">&amp;</span>entry_key &gt; end {
+<a href=#690 id=690 data-nosnippet>690</a>                    <span class="kw">continue</span>;
+<a href=#691 id=691 data-nosnippet>691</a>                }
+<a href=#692 id=692 data-nosnippet>692</a>            }
+<a href=#693 id=693 data-nosnippet>693</a>            <span class="kw">if </span>!<span class="self">self</span>.filter_tombstone(<span class="kw-2">&amp;</span>entry_value) {
+<a href=#694 id=694 data-nosnippet>694</a>                <span class="kw">continue</span>;
+<a href=#695 id=695 data-nosnippet>695</a>            }
+<a href=#696 id=696 data-nosnippet>696</a>            results.push((entry_key, entry_value, cell_meta));
+<a href=#697 id=697 data-nosnippet>697</a>        }
+<a href=#698 id=698 data-nosnippet>698</a>
+<a href=#699 id=699 data-nosnippet>699</a>        sort_by_token_order_with_meta(<span class="kw-2">&amp;mut </span>results);
+<a href=#700 id=700 data-nosnippet>700</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(lim) = limit {
+<a href=#701 id=701 data-nosnippet>701</a>            results.truncate(lim);
+<a href=#702 id=702 data-nosnippet>702</a>        }
+<a href=#703 id=703 data-nosnippet>703</a>
+<a href=#704 id=704 data-nosnippet>704</a>        <span class="macro">tracing::debug!</span>(
+<a href=#705 id=705 data-nosnippet>705</a>            <span class="string">"SSTableReader::bti_scan_with_metadata - Returning {} results"</span>,
+<a href=#706 id=706 data-nosnippet>706</a>            results.len()
+<a href=#707 id=707 data-nosnippet>707</a>        );
+<a href=#708 id=708 data-nosnippet>708</a>        <span class="prelude-val">Ok</span>(results)
+<a href=#709 id=709 data-nosnippet>709</a>    }
+<a href=#710 id=710 data-nosnippet>710</a>
+<a href=#711 id=711 data-nosnippet>711</a>    <span class="doccomment">/// The BTI (`da`) dispatch for BOTH public streaming surfaces — the per-row
+<a href=#712 id=712 data-nosnippet>712</a>    /// `run_scan_stream` and the batched `run_scan_stream_batched` — in ONE place
+<a href=#713 id=713 data-nosnippet>713</a>    /// (issue #3109).
+<a href=#714 id=714 data-nosnippet>714</a>    ///
+<a href=#715 id=715 data-nosnippet>715</a>    /// # Why a shared helper and not a third copy
+<a href=#716 id=716 data-nosnippet>716</a>    ///
+<a href=#717 id=717 data-nosnippet>717</a>    /// Issue #1577 established the rule: a BTI reader MUST decode through the SAME
+<a href=#718 id=718 data-nosnippet>718</a>    /// authoritative trie-walk decoder [`Self::bti_scan_with_metadata`] that
+<a href=#719 id=719 data-nosnippet>719</a>    /// [`SSTableReader::scan`] uses, NEVER the block-by-block `read_next_block` +
+<a href=#720 id=720 data-nosnippet>720</a>    /// `parse_block_entries*` route. For `da` that route lands in the
+<a href=#721 id=721 data-nosnippet>721</a>    /// `V5UncompressedOA` STATE MACHINE, which takes neither `read_shadowing` nor
+<a href=#722 id=722 data-nosnippet>722</a>    /// `now_secs` and therefore silently DROPS both (see the "KNOWN FAIL-OPEN SEAM"
+<a href=#723 id=723 data-nosnippet>723</a>    /// note in `parsing/block_entries.rs`, issue #3108) — so a `da` table read that
+<a href=#724 id=724 data-nosnippet>724</a>    /// way is UNSHADOWED: partition/range tombstones and TTL expiry are not applied,
+<a href=#725 id=725 data-nosnippet>725</a>    /// and on a schema-required fixture it fails outright ("Blob fallback not allowed
+<a href=#726 id=726 data-nosnippet>726</a>    /// for V5_0Bti"). #1577 fixed the per-row surface; the batched surface was added
+<a href=#727 id=727 data-nosnippet>727</a>    /// without the dispatch and reproduced the identical defect (#3109). Both now
+<a href=#728 id=728 data-nosnippet>728</a>    /// call THIS function, gating on the SAME `bti_partitions_db.is_some()` condition
+<a href=#729 id=729 data-nosnippet>729</a>    /// `scan` uses, so the three surfaces can never again disagree about which
+<a href=#730 id=730 data-nosnippet>730</a>    /// readers are BTI or about the posture their rows are decoded under.
+<a href=#731 id=731 data-nosnippet>731</a>    ///
+<a href=#732 id=732 data-nosnippet>732</a>    /// The rows are exactly `scan`'s BTI rows: `bti_scan_with_metadata` has already
+<a href=#733 id=733 data-nosnippet>733</a>    /// applied the key-range and tombstone filters and token-ordered them, so this
+<a href=#734 id=734 data-nosnippet>734</a>    /// forwards them AS-IS and the stream stays prefix-authoritative with `scan`
+<a href=#735 id=735 data-nosnippet>735</a>    /// (what D1's LIMIT pushdown relies on). BTI decode fully materializes the
+<a href=#736 id=736 data-nosnippet>736</a>    /// (index-less) reconciled table before streaming — mirrored by
+<a href=#737 id=737 data-nosnippet>737</a>    /// `scan_stream_materializes` returning `true` for BTI.
+<a href=#738 id=738 data-nosnippet>738</a>    ///
+<a href=#739 id=739 data-nosnippet>739</a>    /// `out` selects the emission shape only: one send per ROW for
+<a href=#740 id=740 data-nosnippet>740</a>    /// [`WindowedOut::PerRow`], one send per `BATCH_EMIT_ROWS`-capped BATCH for
+<a href=#741 id=741 data-nosnippet>741</a>    /// [`WindowedOut::Batched`] — the same cap and the same "flattening the batches
+<a href=#742 id=742 data-nosnippet>742</a>    /// yields the per-row stream" contract the windowed driver honours, so the two
+<a href=#743 id=743 data-nosnippet>743</a>    /// surfaces stay row-for-row identical for BTI by construction. A closed
+<a href=#744 id=744 data-nosnippet>744</a>    /// consumer channel ends the scan cleanly (`Ok(())`), matching both callers.
+<a href=#745 id=745 data-nosnippet>745</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">async fn </span>stream_bti_scan(
+<a href=#746 id=746 data-nosnippet>746</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#747 id=747 data-nosnippet>747</a>        start_key: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>RowKey&gt;,
+<a href=#748 id=748 data-nosnippet>748</a>        end_key: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>RowKey&gt;,
+<a href=#749 id=749 data-nosnippet>749</a>        schema: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span><span class="kw">crate</span>::schema::TableSchema&gt;,
+<a href=#750 id=750 data-nosnippet>750</a>        now_secs: <span class="prelude-ty">Option</span>&lt;i64&gt;,
+<a href=#751 id=751 data-nosnippet>751</a>        out: <span class="kw-2">&amp;</span>WindowedOut,
+<a href=#752 id=752 data-nosnippet>752</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
+<a href=#753 id=753 data-nosnippet>753</a>        <span class="kw">let </span>_scan = <span class="self">self</span>.begin_scan(); <span class="comment">// #3853 scan-lifetime madvise seam
+<a href=#754 id=754 data-nosnippet>754</a>
+<a href=#755 id=755 data-nosnippet>755</a>        // #1695 (roborev raised this in rounds 12, 14 and 15): race the
+<a href=#756 id=756 data-nosnippet>756</a>        // materialization against OUR consumer's departure.
+<a href=#757 id=757 data-nosnippet>757</a>        //
+<a href=#758 id=758 data-nosnippet>758</a>        // `bti_scan_with_metadata` materializes the WHOLE table into `entries` before
+<a href=#759 id=759 data-nosnippet>759</a>        // the first send below, so the send-failure checks in the arms are reached
+<a href=#760 id=760 data-nosnippet>760</a>        // only after all the work is done. Its internal `scan_cancel.checkpoint(idx)`
+<a href=#761 id=761 data-nosnippet>761</a>        // polls the READER-WIDE token, which #2264 trips on a Flight disconnect and
+<a href=#762 id=762 data-nosnippet>762</a>        // #2361 on adapter teardown — but nothing trips when a timed-out streaming
+<a href=#763 id=763 data-nosnippet>763</a>        // query drops its iterator. So a timed-out query kept decoding and sorting a
+<a href=#764 id=764 data-nosnippet>764</a>        // whole BTI table.
+<a href=#765 id=765 data-nosnippet>765</a>        //
+<a href=#766 id=766 data-nosnippet>766</a>        // Racing the scan FUTURE is what fixes it, and it needs no new cancellation
+<a href=#767 id=767 data-nosnippet>767</a>        // plumbing: the checkpoints inside are await points, so dropping the future
+<a href=#768 id=768 data-nosnippet>768</a>        // there abandons the scan within one checkpoint interval. Crucially the
+<a href=#769 id=769 data-nosnippet>769</a>        // reader-wide token is still passed through untouched, so #2264 and #2361 keep
+<a href=#770 id=770 data-nosnippet>770</a>        // working — nothing is traded away for this. (An earlier attempt added a
+<a href=#771 id=771 data-nosnippet>771</a>        // "derive a per-stream token from the reader's" API for the same purpose; it
+<a href=#772 id=772 data-nosnippet>772</a>        // was removed once the race proved to give the same semantics with no new
+<a href=#773 id=773 data-nosnippet>773</a>        // surface. Do not reintroduce it without a caller the race cannot serve.)
+<a href=#774 id=774 data-nosnippet>774</a>        //
+<a href=#775 id=775 data-nosnippet>775</a>        // `biased` so an already-departed consumer wins over a ready scan.
+<a href=#776 id=776 data-nosnippet>776</a>        //
+<a href=#777 id=777 data-nosnippet>777</a>        // RESIDUAL, deliberately: `sort_by_token_order_with_meta` after the loop is
+<a href=#778 id=778 data-nosnippet>778</a>        // SYNCHRONOUS, so a departure during the sort is not observed until it ends.
+<a href=#779 id=779 data-nosnippet>779</a>        // That is bounded by one sort rather than a whole table walk, and is the same
+<a href=#780 id=780 data-nosnippet>780</a>        // uninterruptible-post-scan-stage limit documented at the chokepoint.
+<a href=#781 id=781 data-nosnippet>781</a>        </span><span class="kw">let </span>scan = <span class="self">self</span>.bti_scan_with_metadata(start_key, end_key, <span class="prelude-val">None</span>, schema, <span class="bool-val">true</span>, now_secs);
+<a href=#782 id=782 data-nosnippet>782</a>        <span class="kw">let </span>entries = <span class="kw">match </span>out {
+<a href=#783 id=783 data-nosnippet>783</a>            WindowedOut::PerRow(tx) =&gt; <span class="macro">tokio::select!</span> {
+<a href=#784 id=784 data-nosnippet>784</a>                biased;
+<a href=#785 id=785 data-nosnippet>785</a>                <span class="kw">_ </span>= tx.closed() =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(()),
+<a href=#786 id=786 data-nosnippet>786</a>                result = scan =&gt; result<span class="question-mark">?</span>,
+<a href=#787 id=787 data-nosnippet>787</a>            },
+<a href=#788 id=788 data-nosnippet>788</a>            WindowedOut::Batched(tx) =&gt; <span class="macro">tokio::select!</span> {
+<a href=#789 id=789 data-nosnippet>789</a>                biased;
+<a href=#790 id=790 data-nosnippet>790</a>                <span class="kw">_ </span>= tx.closed() =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(()),
+<a href=#791 id=791 data-nosnippet>791</a>                result = scan =&gt; result<span class="question-mark">?</span>,
+<a href=#792 id=792 data-nosnippet>792</a>            },
+<a href=#793 id=793 data-nosnippet>793</a>        };
+<a href=#794 id=794 data-nosnippet>794</a>
+<a href=#795 id=795 data-nosnippet>795</a>        <span class="kw">match </span>out {
+<a href=#796 id=796 data-nosnippet>796</a>            WindowedOut::PerRow(tx) =&gt; {
+<a href=#797 id=797 data-nosnippet>797</a>                <span class="kw">for </span>(entry_key, entry_value, _meta) <span class="kw">in </span>entries {
+<a href=#798 id=798 data-nosnippet>798</a>                    <span class="kw">if </span>tx.send(<span class="prelude-val">Ok</span>((entry_key, entry_value))).<span class="kw">await</span>.is_err() {
+<a href=#799 id=799 data-nosnippet>799</a>                        <span class="kw">return </span><span class="prelude-val">Ok</span>(()); <span class="comment">// consumer dropped
+<a href=#800 id=800 data-nosnippet>800</a>                    </span>}
+<a href=#801 id=801 data-nosnippet>801</a>                }
+<a href=#802 id=802 data-nosnippet>802</a>            }
+<a href=#803 id=803 data-nosnippet>803</a>            WindowedOut::Batched(tx) =&gt; {
+<a href=#804 id=804 data-nosnippet>804</a>                <span class="kw">let </span><span class="kw-2">mut </span>batch: Vec&lt;(RowKey, ScanRow)&gt; = Vec::with_capacity(BATCH_EMIT_ROWS);
+<a href=#805 id=805 data-nosnippet>805</a>                <span class="kw">for </span>(entry_key, entry_value, _meta) <span class="kw">in </span>entries {
+<a href=#806 id=806 data-nosnippet>806</a>                    batch.push((entry_key, entry_value));
+<a href=#807 id=807 data-nosnippet>807</a>                    <span class="kw">if </span>batch.len() &gt;= BATCH_EMIT_ROWS {
+<a href=#808 id=808 data-nosnippet>808</a>                        <span class="kw">if </span>tx.send(<span class="prelude-val">Ok</span>(std::mem::take(<span class="kw-2">&amp;mut </span>batch))).<span class="kw">await</span>.is_err() {
+<a href=#809 id=809 data-nosnippet>809</a>                            <span class="kw">return </span><span class="prelude-val">Ok</span>(()); <span class="comment">// consumer dropped
+<a href=#810 id=810 data-nosnippet>810</a>                        </span>}
+<a href=#811 id=811 data-nosnippet>811</a>                        batch.reserve(BATCH_EMIT_ROWS);
+<a href=#812 id=812 data-nosnippet>812</a>                    }
+<a href=#813 id=813 data-nosnippet>813</a>                }
+<a href=#814 id=814 data-nosnippet>814</a>                <span class="kw">if </span>!batch.is_empty() &amp;&amp; tx.send(<span class="prelude-val">Ok</span>(batch)).<span class="kw">await</span>.is_err() {
+<a href=#815 id=815 data-nosnippet>815</a>                    <span class="kw">return </span><span class="prelude-val">Ok</span>(()); <span class="comment">// consumer dropped
+<a href=#816 id=816 data-nosnippet>816</a>                </span>}
+<a href=#817 id=817 data-nosnippet>817</a>            }
+<a href=#818 id=818 data-nosnippet>818</a>        }
+<a href=#819 id=819 data-nosnippet>819</a>        <span class="prelude-val">Ok</span>(())
+<a href=#820 id=820 data-nosnippet>820</a>    }
+<a href=#821 id=821 data-nosnippet>821</a>}
+</code></pre></div></section></main></body></html>

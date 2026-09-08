@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["descriptor","frame","mutation","reader","schema"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BTI_FORMAT_VERSION","BTI_MAGIC_NUMBER","BTI_PAGE_SIZE","MAX_TRIE_DEPTH"],"enum":["FormatType"],"fn":["detect_format","is_bti_format"],"mod":["encoder","node","parser","sized_ints"],"struct":["BtiConfig","BtiLookupResult","BtiMetadata"]};

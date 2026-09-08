@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_VINT_LENGTH","MAX_VINT_SIZE"],"enum":["VIntError"],"fn":["decode_signed","decode_unsigned","encode_vint","encode_vint_zigzag","encode_vuint","parse_vint","parse_vint_length","parse_vint_length_signed","parse_vuint","zigzag_decode","zigzag_encode"]};

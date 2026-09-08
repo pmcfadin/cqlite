@@ -1,0 +1,445 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/observability/read_metrics.rs`."><title>read_metrics.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/observability/</div>read_metrics.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Read-path metric emission at BATCH granularity (issue #1701, epic #1686).
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! # Why this module exists
+<a href=#4 id=4 data-nosnippet>4</a>//!
+<a href=#5 id=5 data-nosnippet>5</a>//! The four headline read metrics — [`catalog::READ_ROWS`], [`catalog::READ_BYTES`],
+<a href=#6 id=6 data-nosnippet>6</a>//! [`catalog::READ_PARTITIONS`] and [`catalog::READ_DURATION`] — were documented,
+<a href=#7 id=7 data-nosnippet>7</a>//! registered as instruments, rendered in the operator metric reference and shown
+<a href=#8 id=8 data-nosnippet>8</a>//! in this module's parent doc example, while NO production read path ever updated
+<a href=#9 id=9 data-nosnippet>9</a>//! them (finding AI1 of `docs/reports/platform-observability-audit-2026-07-01.md`).
+<a href=#10 id=10 data-nosnippet>10</a>//! A documented metric that is never written is worse than an absent one: an
+<a href=#11 id=11 data-nosnippet>11</a>//! operator's dashboard shows a flat zero and reads it as "no reads happening".
+<a href=#12 id=12 data-nosnippet>12</a>//!
+<a href=#13 id=13 data-nosnippet>13</a>//! # The granularity rule
+<a href=#14 id=14 data-nosnippet>14</a>//!
+<a href=#15 id=15 data-nosnippet>15</a>//! The span-granularity doctrine in [`catalog`] applies to metrics too: emission is
+<a href=#16 id=16 data-nosnippet>16</a>//! per read OPERATION, never per row. [`ReadOpMeter`] accumulates a scan's rows and
+<a href=#17 id=17 data-nosnippet>17</a>//! partitions in two `u64` fields and emits ONE counter add per metric plus ONE
+<a href=#18 id=18 data-nosnippet>18</a>//! duration recording when the operation ends. `read.bytes` is emitted once per
+<a href=#19 id=19 data-nosnippet>19</a>//! decompressed chunk ([`record_decompressed_bytes`]) — the coarsest grain at which
+<a href=#20 id=20 data-nosnippet>20</a>//! the decompressed size is actually known.
+<a href=#21 id=21 data-nosnippet>21</a>//!
+<a href=#22 id=22 data-nosnippet>22</a>//! # Which SUBSYSTEM's bytes `read.bytes` counts (issue #1701, roborev F3)
+<a href=#23 id=23 data-nosnippet>23</a>//!
+<a href=#24 id=24 data-nosnippet>24</a>//! `read.rows` / `read.partitions` / `read.duration` are emitted at an ENUMERATED set
+<a href=#25 id=25 data-nosnippet>25</a>//! of core query read boundaries — `SSTableManager`'s materializing scans and point
+<a href=#26 id=26 data-nosnippet>26</a>//! reads, and the `JoinedStream` streaming handles — so a compaction can never
+<a href=#27 id=27 data-nosnippet>27</a>//! contribute to them: compaction reads its inputs through
+<a href=#28 id=28 data-nosnippet>28</a>//! `stream_all_partitions_for_compaction` on a reader directly, never through those
+<a href=#29 id=29 data-nosnippet>29</a>//! boundaries.
+<a href=#30 id=30 data-nosnippet>30</a>//!
+<a href=#31 id=31 data-nosnippet>31</a>//! That set is a CLAIM ABOUT THOSE BOUNDARIES, not about the whole product. A caller
+<a href=#32 id=32 data-nosnippet>32</a>//! that reaches the readers by another route is NOT metered by this module — notably
+<a href=#33 id=33 data-nosnippet>33</a>//! the Arrow Flight `do_get` path, which drives `KWayMerger`/`QueryRowStream` directly
+<a href=#34 id=34 data-nosnippet>34</a>//! and emits its own rows/partitions from `cqlite-flight`'s `ScanProgressMeter` with no
+<a href=#35 id=35 data-nosnippet>35</a>//! duration at all. Extending duration coverage there needs Flight-level metering and
+<a href=#36 id=36 data-nosnippet>36</a>//! capture infrastructure in that crate, and is deliberately out of scope here; nothing
+<a href=#37 id=37 data-nosnippet>37</a>//! in this module or the operator reference should be read as claiming it. Flight reads
+<a href=#38 id=38 data-nosnippet>38</a>//! DO contribute `read.bytes`, because they decode through the same chunk plane.
+<a href=#39 id=39 data-nosnippet>39</a>//!
+<a href=#40 id=40 data-nosnippet>40</a>//! `read.bytes` is different, and deliberately so. It is credited inside the CHUNK
+<a href=#41 id=41 data-nosnippet>41</a>//! DECODE PLANE (`reader::chunk_source`), which is handed a `ReadAt` + a
+<a href=#42 id=42 data-nosnippet>42</a>//! `CompressionInfo` and cannot know WHO asked — the same plane serves a query read,
+<a href=#43 id=43 data-nosnippet>43</a>//! a compaction read, and a verification scan. So the metric answers "how many
+<a href=#44 id=44 data-nosnippet>44</a>//! `Data.db` bytes did this process materialise", including compaction's own reads.
+<a href=#45 id=45 data-nosnippet>45</a>//!
+<a href=#46 id=46 data-nosnippet>46</a>//! That is a real limitation for an operator reading query amplification off
+<a href=#47 id=47 data-nosnippet>47</a>//! `read.bytes` while a compaction runs, and the honest fix is NOT to guess at the
+<a href=#48 id=48 data-nosnippet>48</a>//! plane: it needs a read-PURPOSE dimension threaded from each caller (or a separate
+<a href=#49 id=49 data-nosnippet>49</a>//! compaction-bytes-read instrument), which reaches into the compaction merge
+<a href=#50 id=50 data-nosnippet>50</a>//! producer and is a change to compaction plumbing rather than metric wiring. It is
+<a href=#51 id=51 data-nosnippet>51</a>//! therefore recorded here and left to a follow-up, not silently approximated: the
+<a href=#52 id=52 data-nosnippet>52</a>//! plane never invents a purpose label it cannot know, exactly as it never invents
+<a href=#53 id=53 data-nosnippet>53</a>//! the SSTable format label.
+<a href=#54 id=54 data-nosnippet>54</a>//!
+<a href=#55 id=55 data-nosnippet>55</a>//! # Zero-cost when off
+<a href=#56 id=56 data-nosnippet>56</a>//!
+<a href=#57 id=57 data-nosnippet>57</a>//! [`ReadOpMeter::start`] consults [`obs::metrics_active`] ONCE (the issue #2819 M1
+<a href=#58 id=58 data-nosnippet>58</a>//! pattern) and returns an INERT meter when metrics are not being collected: no
+<a href=#59 id=59 data-nosnippet>59</a>//! [`Instant`] is sampled, no key is retained, and every later `record_*` call is a
+<a href=#60 id=60 data-nosnippet>60</a>//! single branch on a `None`. With the `observability` feature off,
+<a href=#61 id=61 data-nosnippet>61</a>//! `metrics_active()` is a compile-time `false`, so the whole meter degenerates to
+<a href=#62 id=62 data-nosnippet>62</a>//! that branch and the emission helpers compile to no-ops.
+<a href=#63 id=63 data-nosnippet>63</a>
+<a href=#64 id=64 data-nosnippet>64</a></span><span class="kw">use </span>std::sync::Arc;
+<a href=#65 id=65 data-nosnippet>65</a><span class="kw">use </span>std::time::{Duration, Instant};
+<a href=#66 id=66 data-nosnippet>66</a>
+<a href=#67 id=67 data-nosnippet>67</a><span class="kw">use </span><span class="kw">super</span>::read_phase::{ReadPhase, ReadPhaseTimings};
+<a href=#68 id=68 data-nosnippet>68</a><span class="kw">use super</span>::{catalog, AttrValue};
+<a href=#69 id=69 data-nosnippet>69</a><span class="kw">use </span><span class="kw">crate</span>::observability <span class="kw">as </span>obs;
+<a href=#70 id=70 data-nosnippet>70</a><span class="kw">use </span><span class="kw">crate</span>::storage::sstable::compression::CompressionAlgorithm;
+<a href=#71 id=71 data-nosnippet>71</a><span class="kw">use </span><span class="kw">crate</span>::types::RowKey;
+<a href=#72 id=72 data-nosnippet>72</a>
+<a href=#73 id=73 data-nosnippet>73</a><span class="doccomment">/// The bounded [`catalog::attr::COMPRESSION`] value for "this SSTable has no
+<a href=#74 id=74 data-nosnippet>74</a>/// compressor", so an uncompressed read is attributed to a NAMED series rather than
+<a href=#75 id=75 data-nosnippet>75</a>/// an anonymous one (issue #1701). Same spelling the write side uses for
+<a href=#76 id=76 data-nosnippet>76</a>/// `CompressionAlgorithm::None`.
+<a href=#77 id=77 data-nosnippet>77</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">const </span>COMPRESSION_NONE: <span class="kw-2">&amp;</span>str = <span class="string">"none"</span>;
+<a href=#78 id=78 data-nosnippet>78</a>
+<a href=#79 id=79 data-nosnippet>79</a><span class="doccomment">/// Map a compression algorithm to its bounded [`catalog::attr::COMPRESSION`] value.
+<a href=#80 id=80 data-nosnippet>80</a>///
+<a href=#81 id=81 data-nosnippet>81</a>/// Bounded by the `CompressionAlgorithm` enum itself (five variants), never by a
+<a href=#82 id=82 data-nosnippet>82</a>/// string read out of `CompressionInfo.db` — an on-disk algorithm name is
+<a href=#83 id=83 data-nosnippet>83</a>/// file-controlled and would be an unbounded metric dimension. Mirrors the write
+<a href=#84 id=84 data-nosnippet>84</a>/// side's `CompressedDataWriter::compression_attr` (issue #1036).
+<a href=#85 id=85 data-nosnippet>85</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>compression_attr(algorithm: <span class="kw-2">&amp;</span>CompressionAlgorithm) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str {
+<a href=#86 id=86 data-nosnippet>86</a>    <span class="kw">match </span>algorithm {
+<a href=#87 id=87 data-nosnippet>87</a>        CompressionAlgorithm::Lz4 =&gt; <span class="string">"lz4"</span>,
+<a href=#88 id=88 data-nosnippet>88</a>        CompressionAlgorithm::Snappy =&gt; <span class="string">"snappy"</span>,
+<a href=#89 id=89 data-nosnippet>89</a>        CompressionAlgorithm::Deflate =&gt; <span class="string">"deflate"</span>,
+<a href=#90 id=90 data-nosnippet>90</a>        CompressionAlgorithm::Zstd =&gt; <span class="string">"zstd"</span>,
+<a href=#91 id=91 data-nosnippet>91</a>        CompressionAlgorithm::None =&gt; COMPRESSION_NONE,
+<a href=#92 id=92 data-nosnippet>92</a>    }
+<a href=#93 id=93 data-nosnippet>93</a>}
+<a href=#94 id=94 data-nosnippet>94</a>
+<a href=#95 id=95 data-nosnippet>95</a><span class="doccomment">/// Count `bytes` of `Data.db` payload (post-decompression) into
+<a href=#96 id=96 data-nosnippet>96</a>/// [`catalog::READ_BYTES`], tagged with the bounded `compression` label.
+<a href=#97 id=97 data-nosnippet>97</a>///
+<a href=#98 id=98 data-nosnippet>98</a>/// Called once per chunk the read path materialises, from the single chunk decode
+<a href=#99 id=99 data-nosnippet>99</a>/// plane (`reader::chunk_source`) — every one of its four decode exits, INCLUDING
+<a href=#100 id=100 data-nosnippet>100</a>/// the ones that hand back raw bytes: an UNCOMPRESSED SSTable (`compression =
+<a href=#101 id=101 data-nosnippet>101</a>/// "none"`) and a Cassandra-stored-raw incompressible chunk read `Data.db` payload
+<a href=#102 id=102 data-nosnippet>102</a>/// exactly like a decompressed chunk does. Uncompressed is a first-class read path,
+<a href=#103 id=103 data-nosnippet>103</a>/// not an edge case — CQLite's own production write surface emits uncompressed
+<a href=#104 id=104 data-nosnippet>104</a>/// SSTables only (the #1406 claim boundary) — so a `"none"` read that went
+<a href=#105 id=105 data-nosnippet>105</a>/// uncounted would make the metric silently understate real I/O.
+<a href=#106 id=106 data-nosnippet>106</a>///
+<a href=#107 id=107 data-nosnippet>107</a>/// A resident decompressed-chunk cache HIT is counted too, and the reason is a fact
+<a href=#108 id=108 data-nosnippet>108</a>/// about the feed rather than a preference (issue #1701, roborev round 5): the
+<a href=#109 id=109 data-nosnippet>109</a>/// windowed scan calls `read_compressed_chunk_sync` /
+<a href=#110 id=110 data-nosnippet>110</a>/// `read_uncompressed_piece_sync` UNCONDITIONALLY and only then asks the cache, and
+<a href=#111 id=111 data-nosnippet>111</a>/// neither reader consults it — so the disk read has ALREADY happened and that cache
+<a href=#112 id=112 data-nosnippet>112</a>/// saves DECOMPRESSION, not I/O. An earlier version of this doc asserted the
+<a href=#113 id=113 data-nosnippet>113</a>/// opposite, and a test asserted it too; they agreed with each other and were both
+<a href=#114 id=114 data-nosnippet>114</a>/// wrong, which is how a warm scan came to report zero bytes for I/O it really
+<a href=#115 id=115 data-nosnippet>115</a>/// performed. The one place a read is genuinely skipped — `get_cached_data`'s
+<a href=#116 id=116 data-nosnippet>116</a>/// early return, which reads no `Data.db` at all — stays uncounted.
+<a href=#117 id=117 data-nosnippet>117</a>///
+<a href=#118 id=118 data-nosnippet>118</a>/// The label is a `&amp;'static str` from [`compression_attr`]'s closed mapping, so this
+<a href=#119 id=119 data-nosnippet>119</a>/// costs no allocation and no formatting on the per-chunk path.
+<a href=#120 id=120 data-nosnippet>120</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>record_decompressed_bytes(bytes: usize, compression: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str) {
+<a href=#121 id=121 data-nosnippet>121</a>    <span class="kw">if </span>bytes == <span class="number">0 </span>{
+<a href=#122 id=122 data-nosnippet>122</a>        <span class="kw">return</span>;
+<a href=#123 id=123 data-nosnippet>123</a>    }
+<a href=#124 id=124 data-nosnippet>124</a>    obs::add_counter(
+<a href=#125 id=125 data-nosnippet>125</a>        catalog::READ_BYTES,
+<a href=#126 id=126 data-nosnippet>126</a>        bytes <span class="kw">as </span>u64,
+<a href=#127 id=127 data-nosnippet>127</a>        <span class="kw-2">&amp;</span>[(
+<a href=#128 id=128 data-nosnippet>128</a>            catalog::attr::COMPRESSION,
+<a href=#129 id=129 data-nosnippet>129</a>            AttrValue::StaticStr(compression),
+<a href=#130 id=130 data-nosnippet>130</a>        )],
+<a href=#131 id=131 data-nosnippet>131</a>    );
+<a href=#132 id=132 data-nosnippet>132</a>}
+<a href=#133 id=133 data-nosnippet>133</a>
+<a href=#134 id=134 data-nosnippet>134</a><span class="doccomment">/// One read OPERATION's row/partition/duration accounting, emitted ONCE at the end.
+<a href=#135 id=135 data-nosnippet>135</a>///
+<a href=#136 id=136 data-nosnippet>136</a>/// A scan stream owns one of these for its whole lifetime; a point read owns one for
+<a href=#137 id=137 data-nosnippet>137</a>/// the duration of the lookup. [`finish`](Self::finish) is idempotent and is also
+<a href=#138 id=138 data-nosnippet>138</a>/// called from `Drop`, so an ABANDONED read (the common `LIMIT` shape: the consumer
+<a href=#139 id=139 data-nosnippet>139</a>/// stops polling and drops the stream) still reports the work it did instead of
+<a href=#140 id=140 data-nosnippet>140</a>/// vanishing from the metrics.
+<a href=#141 id=141 data-nosnippet>141</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct </span>ReadOpMeter(<span class="prelude-ty">Option</span>&lt;Accounting&gt;);
+<a href=#142 id=142 data-nosnippet>142</a>
+<a href=#143 id=143 data-nosnippet>143</a><span class="kw">struct </span>Accounting {
+<a href=#144 id=144 data-nosnippet>144</a>    started: Instant,
+<a href=#145 id=145 data-nosnippet>145</a>    <span class="doccomment">/// `Some(label)` when the operation reads ONE SSTable of a known format;
+<a href=#146 id=146 data-nosnippet>146</a>    /// `None` for a cross-generation merge, whose reconciled rows come from
+<a href=#147 id=147 data-nosnippet>147</a>    /// possibly mixed-format inputs, so no single format label is honest
+<a href=#148 id=148 data-nosnippet>148</a>    /// (the rule [`catalog::READ_ROWS`] documents).
+<a href=#149 id=149 data-nosnippet>149</a>    </span>format: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str&gt;,
+<a href=#150 id=150 data-nosnippet>150</a>    rows: u64,
+<a href=#151 id=151 data-nosnippet>151</a>    partitions: u64,
+<a href=#152 id=152 data-nosnippet>152</a>    <span class="doccomment">/// The previous row's partition key. Scan producers emit rows GROUPED BY
+<a href=#153 id=153 data-nosnippet>153</a>    /// partition in on-disk (token) order and every emitted row carries its
+<a href=#154 id=154 data-nosnippet>154</a>    /// PARTITION key — the row key is the one decoded from the partition header
+<a href=#155 id=155 data-nosnippet>155</a>    /// (`row_decoder/row_framing.rs::parse_partition_header_full`, cloned onto each
+<a href=#156 id=156 data-nosnippet>156</a>    /// of that partition's rows in `row_decoder/block_emit.rs`) — so a CHANGE of key
+<a href=#157 id=157 data-nosnippet>157</a>    /// is a partition boundary.
+<a href=#158 id=158 data-nosnippet>158</a>    ///
+<a href=#159 id=159 data-nosnippet>159</a>    /// That is not a new inference: it is the same rule the read-work probe already
+<a href=#160 id=160 data-nosnippet>160</a>    /// applies at the BTI and BIG walks ("changed partition key = one more partition
+<a href=#161 id=161 data-nosnippet>161</a>    /// BODY decoded", `work_counters::add_stream_walk_partition_parsed` call sites,
+<a href=#162 id=162 data-nosnippet>162</a>    /// issues #2398/#3109). Because emission is token-ordered, a partition appearing
+<a href=#163 id=163 data-nosnippet>163</a>    /// in several inputs of a merge arrives as ONE adjacent run and is counted once.
+<a href=#164 id=164 data-nosnippet>164</a>    ///
+<a href=#165 id=165 data-nosnippet>165</a>    /// Retained as an `Arc` clone (a refcount bump, no key copy).
+<a href=#166 id=166 data-nosnippet>166</a>    </span>last_partition: <span class="prelude-ty">Option</span>&lt;Arc&lt;[u8]&gt;&gt;,
+<a href=#167 id=167 data-nosnippet>167</a>    <span class="doccomment">/// This operation's read-PHASE accumulator (issue #1707), shared with the
+<a href=#168 id=168 data-nosnippet>168</a>    /// pipeline threads that do the io/decompress/decode/merge work. Owned here so
+<a href=#169 id=169 data-nosnippet>169</a>    /// the four `cqlite.read.phase.*` histograms inherit the whole `ReadOpMeter`
+<a href=#170 id=170 data-nosnippet>170</a>    /// lifecycle — idempotent [`finish`](ReadOpMeter::finish), `Drop`-safe, and
+<a href=#171 id=171 data-nosnippet>171</a>    /// absent entirely on an [`inert`](ReadOpMeter::inert) sub-scan, so a fan-out
+<a href=#172 id=172 data-nosnippet>172</a>    /// merge's per-generation scans can never double-count.
+<a href=#173 id=173 data-nosnippet>173</a>    </span>phases: Arc&lt;ReadPhaseTimings&gt;,
+<a href=#174 id=174 data-nosnippet>174</a>    emitted: bool,
+<a href=#175 id=175 data-nosnippet>175</a>}
+<a href=#176 id=176 data-nosnippet>176</a>
+<a href=#177 id=177 data-nosnippet>177</a><span class="kw">impl </span>ReadOpMeter {
+<a href=#178 id=178 data-nosnippet>178</a>    <span class="doccomment">/// A meter for a read operation that SHOULD be measured.
+<a href=#179 id=179 data-nosnippet>179</a>    ///
+<a href=#180 id=180 data-nosnippet>180</a>    /// `format` is the single-SSTable format label, or `None` for a merged
+<a href=#181 id=181 data-nosnippet>181</a>    /// (format-agnostic) grain. Returns an inert meter when metrics are not being
+<a href=#182 id=182 data-nosnippet>182</a>    /// collected, so nothing — not even the `Instant` sample — is paid for.
+<a href=#183 id=183 data-nosnippet>183</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>start(format: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str&gt;) -&gt; <span class="self">Self </span>{
+<a href=#184 id=184 data-nosnippet>184</a>        <span class="kw">if </span>!obs::metrics_active() {
+<a href=#185 id=185 data-nosnippet>185</a>            <span class="kw">return </span><span class="self">Self</span>(<span class="prelude-val">None</span>);
+<a href=#186 id=186 data-nosnippet>186</a>        }
+<a href=#187 id=187 data-nosnippet>187</a>        <span class="self">Self</span>(<span class="prelude-val">Some</span>(Accounting {
+<a href=#188 id=188 data-nosnippet>188</a>            started: Instant::now(),
+<a href=#189 id=189 data-nosnippet>189</a>            format,
+<a href=#190 id=190 data-nosnippet>190</a>            rows: <span class="number">0</span>,
+<a href=#191 id=191 data-nosnippet>191</a>            partitions: <span class="number">0</span>,
+<a href=#192 id=192 data-nosnippet>192</a>            last_partition: <span class="prelude-val">None</span>,
+<a href=#193 id=193 data-nosnippet>193</a>            phases: Arc::new(ReadPhaseTimings::default()),
+<a href=#194 id=194 data-nosnippet>194</a>            emitted: <span class="bool-val">false</span>,
+<a href=#195 id=195 data-nosnippet>195</a>        }))
+<a href=#196 id=196 data-nosnippet>196</a>    }
+<a href=#197 id=197 data-nosnippet>197</a>
+<a href=#198 id=198 data-nosnippet>198</a>    <span class="doccomment">/// A meter that never records and never emits.
+<a href=#199 id=199 data-nosnippet>199</a>    ///
+<a href=#200 id=200 data-nosnippet>200</a>    /// Used by the stream boundaries that are NOT a top-level read operation: a
+<a href=#201 id=201 data-nosnippet>201</a>    /// fan-out merge's per-generation sub-scan (the merge holds the operation) and
+<a href=#202 id=202 data-nosnippet>202</a>    /// the per-row → batch re-chunker (its source stream is already measured).
+<a href=#203 id=203 data-nosnippet>203</a>    /// Measuring those would count the same rows two or three times.
+<a href=#204 id=204 data-nosnippet>204</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>inert() -&gt; <span class="self">Self </span>{
+<a href=#205 id=205 data-nosnippet>205</a>        <span class="self">Self</span>(<span class="prelude-val">None</span>)
+<a href=#206 id=206 data-nosnippet>206</a>    }
+<a href=#207 id=207 data-nosnippet>207</a>
+<a href=#208 id=208 data-nosnippet>208</a>    <span class="doccomment">/// This operation's read-phase accumulator, for propagation to the threads that
+<a href=#209 id=209 data-nosnippet>209</a>    /// actually perform the work (issue #1707), or `None` for an inert meter.
+<a href=#210 id=210 data-nosnippet>210</a>    ///
+<a href=#211 id=211 data-nosnippet>211</a>    /// Handed to each `spawn_blocking` / producer-thread closure at its SPAWN SITE
+<a href=#212 id=212 data-nosnippet>212</a>    /// and re-installed there: thread-locals are not inherited across a spawn, and
+<a href=#213 id=213 data-nosnippet>213</a>    /// the io/decompress/decode/merge phases all run on threads that never see this
+<a href=#214 id=214 data-nosnippet>214</a>    /// meter. `None` (an inert meter, or metrics not being collected) propagates as
+<a href=#215 id=215 data-nosnippet>215</a>    /// "no sink", which makes every seam a single thread-local peek.
+<a href=#216 id=216 data-nosnippet>216</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>phase_sink(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;Arc&lt;ReadPhaseTimings&gt;&gt; {
+<a href=#217 id=217 data-nosnippet>217</a>        <span class="self">self</span>.<span class="number">0</span>.as_ref().map(|acc| Arc::clone(<span class="kw-2">&amp;</span>acc.phases))
+<a href=#218 id=218 data-nosnippet>218</a>    }
+<a href=#219 id=219 data-nosnippet>219</a>
+<a href=#220 id=220 data-nosnippet>220</a>    <span class="doccomment">/// Account one delivered row, and a partition boundary when its key differs
+<a href=#221 id=221 data-nosnippet>221</a>    /// from the previous row's.
+<a href=#222 id=222 data-nosnippet>222</a>    ///
+<a href=#223 id=223 data-nosnippet>223</a>    /// # `read.rows` counts rows this read DELIVERED, not every row decoded
+<a href=#224 id=224 data-nosnippet>224</a>    ///
+<a href=#225 id=225 data-nosnippet>225</a>    /// An ABANDONED stream reports the rows it polled plus the rows the producer had
+<a href=#226 id=226 data-nosnippet>226</a>    /// already enqueued (the `Drop` drain). A row the producer was mid-`send` with when
+<a href=#227 id=227 data-nosnippet>227</a>    /// the channel closed is NOT counted: it was decoded, then rejected and discarded,
+<a href=#228 id=228 data-nosnippet>228</a>    /// so it never reached the consumer and could never have appeared in a result set
+<a href=#229 id=229 data-nosnippet>229</a>    /// (issue #1701, roborev round 5). Counting it would let `read.rows` exceed the rows
+<a href=#230 id=230 data-nosnippet>230</a>    /// the query could possibly have returned, which is the less useful of the two
+<a href=#231 id=231 data-nosnippet>231</a>    /// errors. The residual is bounded by the channel's in-flight sends, not by the
+<a href=#232 id=232 data-nosnippet>232</a>    /// backlog — that unbounded case was the round-2 defect, and closing this one means
+<a href=#233 id=233 data-nosnippet>233</a>    /// accounting at the producer's materialization boundary through shared state, which
+<a href=#234 id=234 data-nosnippet>234</a>    /// is a redesign of this seam rather than a fix to it.
+<a href=#235 id=235 data-nosnippet>235</a>    ///
+<a href=#236 id=236 data-nosnippet>236</a>    /// # `read.partitions` counts partitions this read DELIVERED rows from
+<a href=#237 id=237 data-nosnippet>237</a>    ///
+<a href=#238 id=238 data-nosnippet>238</a>    /// Boundaries come from the keys of EMITTED rows, so a partition whose every row is
+<a href=#239 id=239 data-nosnippet>239</a>    /// shadowed by a tombstone or expired by TTL emits nothing and contributes ZERO —
+<a href=#240 id=240 data-nosnippet>240</a>    /// while Flight's k-way MERGE arm calls its own `record_partition()` for a partition
+<a href=#241 id=241 data-nosnippet>241</a>    /// it scanned, and so counts it. The gap between the two producers is exactly the
+<a href=#242 id=242 data-nosnippet>242</a>    /// number of fully-suppressed partitions (issue #1701, roborev round 5).
+<a href=#243 id=243 data-nosnippet>243</a>    ///
+<a href=#244 id=244 data-nosnippet>244</a>    /// That asymmetry is NOT introduced here, and it is already documented on the Flight
+<a href=#245 id=245 data-nosnippet>245</a>    /// side between Flight's OWN two arms (`cqlite-flight/src/row_source.rs`): the
+<a href=#246 id=246 data-nosnippet>246</a>    /// single-generation arm "CANNOT" surface such partitions because "the walk emits
+<a href=#247 id=247 data-nosnippet>247</a>    /// only SURVIVING rows … the source never learns it existed", and closing it "would
+<a href=#248 id=248 data-nosnippet>248</a>    /// need a new partition-boundary signal threaded out of two core walks".
+<a href=#249 id=249 data-nosnippet>249</a>    ///
+<a href=#250 id=250 data-nosnippet>250</a>    /// Wiring that signal is deliberately NOT attempted here — this issue's scope is
+<a href=#251 id=251 data-nosnippet>251</a>    /// emitting the metric at batch granularity from the seams that already exist, and
+<a href=#252 id=252 data-nosnippet>252</a>    /// threading a new boundary signal through two core walks is a separate change with
+<a href=#253 id=253 data-nosnippet>253</a>    /// its own parity risk. Recorded instead of quietly leaving the two counts to differ,
+<a href=#254 id=254 data-nosnippet>254</a>    /// because a metric that means two things across producers is worse for an operator
+<a href=#255 id=255 data-nosnippet>255</a>    /// than one that means a narrower thing consistently. `read.rows` is unaffected: a
+<a href=#256 id=256 data-nosnippet>256</a>    /// suppressed partition materialises no rows on either producer.
+<a href=#257 id=257 data-nosnippet>257</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>record_row(<span class="kw-2">&amp;mut </span><span class="self">self</span>, key: <span class="kw-2">&amp;</span>RowKey) {
+<a href=#258 id=258 data-nosnippet>258</a>        <span class="kw">let </span><span class="prelude-val">Some</span>(acc) = <span class="self">self</span>.<span class="number">0</span>.as_mut() <span class="kw">else </span>{
+<a href=#259 id=259 data-nosnippet>259</a>            <span class="kw">return</span>;
+<a href=#260 id=260 data-nosnippet>260</a>        };
+<a href=#261 id=261 data-nosnippet>261</a>        acc.rows = acc.rows.saturating_add(<span class="number">1</span>);
+<a href=#262 id=262 data-nosnippet>262</a>        <span class="kw">let </span>same_partition = acc
+<a href=#263 id=263 data-nosnippet>263</a>            .last_partition
+<a href=#264 id=264 data-nosnippet>264</a>            .as_ref()
+<a href=#265 id=265 data-nosnippet>265</a>            .is_some_and(|prev| Arc::ptr_eq(prev, <span class="kw-2">&amp;</span>key.<span class="number">0</span>) || <span class="kw-2">**</span>prev == <span class="kw-2">*</span>key.<span class="number">0</span>);
+<a href=#266 id=266 data-nosnippet>266</a>        <span class="kw">if </span>!same_partition {
+<a href=#267 id=267 data-nosnippet>267</a>            acc.partitions = acc.partitions.saturating_add(<span class="number">1</span>);
+<a href=#268 id=268 data-nosnippet>268</a>            acc.last_partition = <span class="prelude-val">Some</span>(Arc::clone(<span class="kw-2">&amp;</span>key.<span class="number">0</span>));
+<a href=#269 id=269 data-nosnippet>269</a>        }
+<a href=#270 id=270 data-nosnippet>270</a>    }
+<a href=#271 id=271 data-nosnippet>271</a>
+<a href=#272 id=272 data-nosnippet>272</a>    <span class="doccomment">/// Account every row of an ALREADY-MATERIALIZED result (issue #1701 F1).
+<a href=#273 id=273 data-nosnippet>273</a>    ///
+<a href=#274 id=274 data-nosnippet>274</a>    /// The materializing read boundaries (`SSTableManager::scan` and the
+<a href=#275 id=275 data-nosnippet>275</a>    /// partition-targeted scans) hand their whole `Vec` here in one call, so the
+<a href=#276 id=276 data-nosnippet>276</a>    /// emission stays at operation granularity — this is bookkeeping over a result
+<a href=#277 id=277 data-nosnippet>277</a>    /// the caller already holds, not a per-row emission. Written to take an iterator
+<a href=#278 id=278 data-nosnippet>278</a>    /// of KEYS so a 2-tuple `(key, row)` and a 3-tuple `(key, row, cell_metadata)`
+<a href=#279 id=279 data-nosnippet>279</a>    /// result both fit (`rows.iter().map(|(k, ..)| k)`).
+<a href=#280 id=280 data-nosnippet>280</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>record_keys&lt;<span class="lifetime">'a</span>&gt;(<span class="kw-2">&amp;mut </span><span class="self">self</span>, keys: <span class="kw">impl </span>IntoIterator&lt;Item = <span class="kw-2">&amp;</span><span class="lifetime">'a </span>RowKey&gt;) {
+<a href=#281 id=281 data-nosnippet>281</a>        <span class="kw">if </span><span class="self">self</span>.<span class="number">0</span>.is_none() {
+<a href=#282 id=282 data-nosnippet>282</a>            <span class="kw">return</span>;
+<a href=#283 id=283 data-nosnippet>283</a>        }
+<a href=#284 id=284 data-nosnippet>284</a>        <span class="kw">for </span>key <span class="kw">in </span>keys {
+<a href=#285 id=285 data-nosnippet>285</a>            <span class="self">self</span>.record_row(key);
+<a href=#286 id=286 data-nosnippet>286</a>        }
+<a href=#287 id=287 data-nosnippet>287</a>    }
+<a href=#288 id=288 data-nosnippet>288</a>
+<a href=#289 id=289 data-nosnippet>289</a>    <span class="doccomment">/// Suppress this meter permanently: neither [`finish`](Self::finish) nor `Drop`
+<a href=#290 id=290 data-nosnippet>290</a>    /// will emit (issue #1701, roborev round 4).
+<a href=#291 id=291 data-nosnippet>291</a>    ///
+<a href=#292 id=292 data-nosnippet>292</a>    /// # KNOWN GAP a declining boundary leaves, stated rather than implied
+<a href=#293 id=293 data-nosnippet>293</a>    ///
+<a href=#294 id=294 data-nosnippet>294</a>    /// The declining attempt's own latency is EXCLUDED from the logical read: the
+<a href=#295 id=295 data-nosnippet>295</a>    /// fallback path starts a fresh meter, so whatever the attempt spent — reader
+<a href=#296 id=296 data-nosnippet>296</a>    /// resolution, candidate pruning, and for the reverse seam possibly a promoted-index
+<a href=#297 id=297 data-nosnippet>297</a>    /// decode — is reported by nobody (issue #1701, roborev round 5). By the
+<a href=#298 id=298 data-nosnippet>298</a>    /// entry-at-function rule (`manager_point_read`'s module doc) it SHOULD be counted:
+<a href=#299 id=299 data-nosnippet>299</a>    /// excluding setup hides exactly the stall an operator hunts.
+<a href=#300 id=300 data-nosnippet>300</a>    ///
+<a href=#301 id=301 data-nosnippet>301</a>    /// Closing it means ONE meter owned by the common caller
+<a href=#302 id=302 data-nosnippet>302</a>    /// (`query::select_executor::lookup`) and threaded into both attempts — the pattern
+<a href=#303 id=303 data-nosnippet>303</a>    /// `stream_generations_for_read` now uses. Not done here: it changes a public-ish
+<a href=#304 id=304 data-nosnippet>304</a>    /// manager signature with several callers and edits `storage/sstable/mod.rs`, which is
+<a href=#305 id=305 data-nosnippet>305</a>    /// far over the campsite threshold, so it belongs in its own reviewed change rather
+<a href=#306 id=306 data-nosnippet>306</a>    /// than a fifth review round of this one. Bounded meanwhile: a decline on the cheap
+<a href=#307 id=307 data-nosnippet>307</a>    /// eligibility checks (static columns, non-fixed clustering) costs almost nothing;
+<a href=#308 id=308 data-nosnippet>308</a>    /// only a decline past those carries real excluded latency.
+<a href=#309 id=309 data-nosnippet>309</a>    ///
+<a href=#310 id=310 data-nosnippet>310</a>    /// For a read boundary that may DECLINE the read and hand it to a different,
+<a href=#311 id=311 data-nosnippet>311</a>    /// ALREADY-METERED path. `Drop` emits, so simply returning would report a
+<a href=#312 id=312 data-nosnippet>312</a>    /// duration for the attempt AND another for the path that actually served the
+<a href=#313 id=313 data-nosnippet>313</a>    /// read — two operations for one logical read, which is exactly the
+<a href=#314 id=314 data-nosnippet>314</a>    /// over-counting roborev B1 removed. The declining boundary therefore discards
+<a href=#315 id=315 data-nosnippet>315</a>    /// its meter rather than dropping it. Distinct from [`inert`](Self::inert),
+<a href=#316 id=316 data-nosnippet>316</a>    /// which is chosen at CONSTRUCTION for a boundary that is never an operation;
+<a href=#317 id=317 data-nosnippet>317</a>    /// this is decided at RUNTIME, after the attempt has already begun timing.
+<a href=#318 id=318 data-nosnippet>318</a>    ///
+<a href=#319 id=319 data-nosnippet>319</a>    /// Gated to the build that HAS a declining boundary: the only one is
+<a href=#320 id=320 data-nosnippet>320</a>    /// `SSTableManager::scan_partition_clustering_reverse`, and `reverse_scan.rs` is
+<a href=#321 id=321 data-nosnippet>321</a>    /// itself `#![cfg(not(feature = "tombstones"))]` (the seek/reverse paths exist only
+<a href=#322 id=322 data-nosnippet>322</a>    /// on the default build). Under `--all-features` that module is compiled out, so an
+<a href=#323 id=323 data-nosnippet>323</a>    /// ungated `discard` is dead code and fails the crate's `-D warnings` — and a blanket
+<a href=#324 id=324 data-nosnippet>324</a>    /// `#[allow(dead_code)]` would silence the NEXT genuinely-dead method too. Widen this
+<a href=#325 id=325 data-nosnippet>325</a>    /// cfg when a second declining boundary appears outside that module.
+<a href=#326 id=326 data-nosnippet>326</a>    </span><span class="attr">#[cfg(not(feature = <span class="string">"tombstones"</span>))]
+<a href=#327 id=327 data-nosnippet>327</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>discard(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
+<a href=#328 id=328 data-nosnippet>328</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(acc) = <span class="self">self</span>.<span class="number">0</span>.as_mut() {
+<a href=#329 id=329 data-nosnippet>329</a>            acc.emitted = <span class="bool-val">true</span>;
+<a href=#330 id=330 data-nosnippet>330</a>        }
+<a href=#331 id=331 data-nosnippet>331</a>    }
+<a href=#332 id=332 data-nosnippet>332</a>
+<a href=#333 id=333 data-nosnippet>333</a>    <span class="doccomment">/// Emit this operation's totals. Idempotent: the second call is a no-op, so a
+<a href=#334 id=334 data-nosnippet>334</a>    /// stream that observed its own end of stream and is then dropped emits once.
+<a href=#335 id=335 data-nosnippet>335</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>finish(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
+<a href=#336 id=336 data-nosnippet>336</a>        <span class="kw">let </span><span class="prelude-val">Some</span>(acc) = <span class="self">self</span>.<span class="number">0</span>.as_mut() <span class="kw">else </span>{
+<a href=#337 id=337 data-nosnippet>337</a>            <span class="kw">return</span>;
+<a href=#338 id=338 data-nosnippet>338</a>        };
+<a href=#339 id=339 data-nosnippet>339</a>        <span class="kw">if </span>acc.emitted {
+<a href=#340 id=340 data-nosnippet>340</a>            <span class="kw">return</span>;
+<a href=#341 id=341 data-nosnippet>341</a>        }
+<a href=#342 id=342 data-nosnippet>342</a>        acc.emitted = <span class="bool-val">true</span>;
+<a href=#343 id=343 data-nosnippet>343</a>
+<a href=#344 id=344 data-nosnippet>344</a>        <span class="comment">// Held in a local so the borrowed attribute slice below outlives the calls.
+<a href=#345 id=345 data-nosnippet>345</a>        </span><span class="kw">let </span>format_attr = acc
+<a href=#346 id=346 data-nosnippet>346</a>            .format
+<a href=#347 id=347 data-nosnippet>347</a>            .map(|f| [(catalog::attr::SSTABLE_FORMAT, AttrValue::StaticStr(f))]);
+<a href=#348 id=348 data-nosnippet>348</a>        <span class="kw">let </span>attrs: <span class="kw-2">&amp;</span>[(<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str, AttrValue)] = <span class="kw">match </span>format_attr.as_ref() {
+<a href=#349 id=349 data-nosnippet>349</a>            <span class="prelude-val">Some</span>(a) =&gt; a,
+<a href=#350 id=350 data-nosnippet>350</a>            <span class="prelude-val">None </span>=&gt; <span class="kw-2">&amp;</span>[],
+<a href=#351 id=351 data-nosnippet>351</a>        };
+<a href=#352 id=352 data-nosnippet>352</a>
+<a href=#353 id=353 data-nosnippet>353</a>        <span class="kw">if </span>acc.rows &gt; <span class="number">0 </span>{
+<a href=#354 id=354 data-nosnippet>354</a>            obs::add_counter(catalog::READ_ROWS, acc.rows, attrs);
+<a href=#355 id=355 data-nosnippet>355</a>        }
+<a href=#356 id=356 data-nosnippet>356</a>        <span class="kw">if </span>acc.partitions &gt; <span class="number">0 </span>{
+<a href=#357 id=357 data-nosnippet>357</a>            obs::add_counter(catalog::READ_PARTITIONS, acc.partitions, attrs);
+<a href=#358 id=358 data-nosnippet>358</a>        }
+<a href=#359 id=359 data-nosnippet>359</a>        <span class="comment">// Always ONE recording per completed operation, including a read that
+<a href=#360 id=360 data-nosnippet>360</a>        // returned nothing: a zero-row read still consumed latency, and dropping it
+<a href=#361 id=361 data-nosnippet>361</a>        // would bias the distribution toward the rows-returning reads.
+<a href=#362 id=362 data-nosnippet>362</a>        </span>obs::record_histogram(
+<a href=#363 id=363 data-nosnippet>363</a>            catalog::READ_DURATION,
+<a href=#364 id=364 data-nosnippet>364</a>            acc.started.elapsed().as_secs_f64(),
+<a href=#365 id=365 data-nosnippet>365</a>            attrs,
+<a href=#366 id=366 data-nosnippet>366</a>        );
+<a href=#367 id=367 data-nosnippet>367</a>
+<a href=#368 id=368 data-nosnippet>368</a>        <span class="comment">// The four read PHASES (issue #1707): ONE sample per phase per completed
+<a href=#369 id=369 data-nosnippet>369</a>        // operation, from the counters the pipeline threads accumulated into.
+<a href=#370 id=370 data-nosnippet>370</a>        //
+<a href=#371 id=371 data-nosnippet>371</a>        // A phase is emitted iff it RAN — `phases.entered(phase)` — and NOT iff it
+<a href=#372 id=372 data-nosnippet>372</a>        // accumulated nanos (issue #1707, roborev job 145). The two are different
+<a href=#373 id=373 data-nosnippet>373</a>        // questions, and gating on the duration answered the wrong one: it reported
+<a href=#374 id=374 data-nosnippet>374</a>        // "ran but measured zero" as "did not run".
+<a href=#375 id=375 data-nosnippet>375</a>        //
+<a href=#376 id=376 data-nosnippet>376</a>        // Absence carries load-bearing meaning here that it does not carry for
+<a href=#377 id=377 data-nosnippet>377</a>        // `read.duration` above: no `decompress` series means the SSTable is
+<a href=#378 id=378 data-nosnippet>378</a>        // UNCOMPRESSED, no `merge` series means a SINGLE GENERATION. Under the old
+<a href=#379 id=379 data-nosnippet>379</a>        // `nanos &gt; 0` gate a phase that genuinely ran and measured zero was
+<a href=#380 id=380 data-nosnippet>380</a>        // indistinguishable from one that never ran, so the metric asserted the
+<a href=#381 id=381 data-nosnippet>381</a>        // opposite of the truth.
+<a href=#382 id=382 data-nosnippet>382</a>        //
+<a href=#383 id=383 data-nosnippet>383</a>        // That is not hypothetical for MERGE. `timed_merge_excluding_recv_wait`
+<a href=#384 id=384 data-nosnippet>384</a>        // saturates to 0 when the recv-wait it subtracts exceeds the step's wall
+<a href=#385 id=385 data-nosnippet>385</a>        // time — documented, tested, and the honest thing to do — so a real
+<a href=#386 id=386 data-nosnippet>386</a>        // multi-generation merge whose producer starved records 0 nanos and was
+<a href=#387 id=387 data-nosnippet>387</a>        // skipped, telling the operator "single generation". The honesty mechanism
+<a href=#388 id=388 data-nosnippet>388</a>        // manufactured the false statement.
+<a href=#389 id=389 data-nosnippet>389</a>        //
+<a href=#390 id=390 data-nosnippet>390</a>        // So `0.0` now MEANS something precise: the phase ran and measured zero
+<a href=#391 id=391 data-nosnippet>391</a>        // (too fast for the clock, or a merge whose whole wall time was recv-wait).
+<a href=#392 id=392 data-nosnippet>392</a>        // It is no longer "a measurement that was never taken", because entry is
+<a href=#393 id=393 data-nosnippet>393</a>        // tracked separately from duration. Absence means exactly what the docs
+<a href=#394 id=394 data-nosnippet>394</a>        // say — the phase DID NOT RUN — and a zero-valued sample is a real
+<a href=#395 id=395 data-nosnippet>395</a>        // observation, not a fabrication.
+<a href=#396 id=396 data-nosnippet>396</a>        //
+<a href=#397 id=397 data-nosnippet>397</a>        // ATTRIBUTE-FREE, deliberately, and NOT `attrs`: this family is declared
+<a href=#398 id=398 data-nosnippet>398</a>        // "**Attributes**: none" by `catalog_read_phase` and carries an empty
+<a href=#399 id=399 data-nosnippet>399</a>        // `attributes` in every `operator_docs_annotations_read_phase` row, so
+<a href=#400 id=400 data-nosnippet>400</a>        // emitting `cqlite.sstable.format` here would make the emission and the
+<a href=#401 id=401 data-nosnippet>401</a>        // declaration disagree — two statements of one fact, one of them wrong.
+<a href=#402 id=402 data-nosnippet>402</a>        // The declaration is the one to keep: the merge phase is format-agnostic
+<a href=#403 id=403 data-nosnippet>403</a>        // (it spans generations), so a per-format phase dimension could not be
+<a href=#404 id=404 data-nosnippet>404</a>        // honestly populated across the family anyway. `read.duration` above keeps
+<a href=#405 id=405 data-nosnippet>405</a>        // `attrs` — its format attribute IS declared.
+<a href=#406 id=406 data-nosnippet>406</a>        //
+<a href=#407 id=407 data-nosnippet>407</a>        // PARTIAL-SNAPSHOT CAVEAT (issue #1707): the surrounding prose says "ONE
+<a href=#408 id=408 data-nosnippet>408</a>        // sample per phase per COMPLETED scan", and completion here means THIS
+<a href=#409 id=409 data-nosnippet>409</a>        // METER completed — `finish()` runs when the stream is dropped. The
+<a href=#410 id=410 data-nosnippet>410</a>        // detached feed/parse tasks hold their own `Arc&lt;ReadPhaseTimings&gt;` clone
+<a href=#411 id=411 data-nosnippet>411</a>        // and keep accumulating into it after that, so an ABANDONED scan (a `LIMIT`
+<a href=#412 id=412 data-nosnippet>412</a>        // the consumer stopped reading, a dropped stream) emits a PARTIAL snapshot
+<a href=#413 id=413 data-nosnippet>413</a>        // of an operation still in flight, not a final total. That is the same
+<a href=#414 id=414 data-nosnippet>414</a>        // shape `read.duration` already has (it measures until the drop, not until
+<a href=#415 id=415 data-nosnippet>415</a>        // the pipeline quiesces) and is why the emission is here rather than behind
+<a href=#416 id=416 data-nosnippet>416</a>        // a join: waiting for the detached tasks would make an abandoned scan's
+<a href=#417 id=417 data-nosnippet>417</a>        // metric arrive late, or never.
+<a href=#418 id=418 data-nosnippet>418</a>        </span><span class="kw">let </span>phase_attrs: <span class="kw-2">&amp;</span>[(<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str, AttrValue)] = <span class="kw-2">&amp;</span>[];
+<a href=#419 id=419 data-nosnippet>419</a>        <span class="kw">for </span>(phase, name) <span class="kw">in </span>[
+<a href=#420 id=420 data-nosnippet>420</a>            (ReadPhase::Io, catalog::READ_PHASE_IO),
+<a href=#421 id=421 data-nosnippet>421</a>            (ReadPhase::Decompress, catalog::READ_PHASE_DECOMPRESS),
+<a href=#422 id=422 data-nosnippet>422</a>            (ReadPhase::Decode, catalog::READ_PHASE_DECODE),
+<a href=#423 id=423 data-nosnippet>423</a>            (ReadPhase::Merge, catalog::READ_PHASE_MERGE),
+<a href=#424 id=424 data-nosnippet>424</a>        ] {
+<a href=#425 id=425 data-nosnippet>425</a>            <span class="comment">// ONE synchronized read of the (entry bit, counter) pair — never an
+<a href=#426 id=426 data-nosnippet>426</a>            // `entered()` then a separate `nanos()`. This runs CONCURRENTLY with
+<a href=#427 id=427 data-nosnippet>427</a>            // the still-accumulating detached threads described just above, and
+<a href=#428 id=428 data-nosnippet>428</a>            // reading the bit before the counter without the acquire/release
+<a href=#429 id=429 data-nosnippet>429</a>            // pairing inside `snapshot` would let a fresh entry bit be paired with
+<a href=#430 id=430 data-nosnippet>430</a>            // a stale zero counter, publishing a fabricated `0.0` (roborev job
+<a href=#431 id=431 data-nosnippet>431</a>            // 149). See `ReadPhaseTimings::snapshot` for which atomic carries
+<a href=#432 id=432 data-nosnippet>432</a>            // which ordering.
+<a href=#433 id=433 data-nosnippet>433</a>            </span><span class="kw">if let </span><span class="prelude-val">Some</span>(nanos) = acc.phases.snapshot(phase) {
+<a href=#434 id=434 data-nosnippet>434</a>                obs::record_histogram(name, Duration::from_nanos(nanos).as_secs_f64(), phase_attrs);
+<a href=#435 id=435 data-nosnippet>435</a>            }
+<a href=#436 id=436 data-nosnippet>436</a>        }
+<a href=#437 id=437 data-nosnippet>437</a>    }
+<a href=#438 id=438 data-nosnippet>438</a>}
+<a href=#439 id=439 data-nosnippet>439</a>
+<a href=#440 id=440 data-nosnippet>440</a><span class="kw">impl </span>Drop <span class="kw">for </span>ReadOpMeter {
+<a href=#441 id=441 data-nosnippet>441</a>    <span class="kw">fn </span>drop(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
+<a href=#442 id=442 data-nosnippet>442</a>        <span class="self">self</span>.finish();
+<a href=#443 id=443 data-nosnippet>443</a>    }
+<a href=#444 id=444 data-nosnippet>444</a>}
+</code></pre></div></section></main></body></html>

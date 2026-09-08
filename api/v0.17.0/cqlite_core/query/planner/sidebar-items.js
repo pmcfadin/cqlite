@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["IndexType","PlanType","StepType"],"struct":["CostModel","ExecutionStep","IndexSelection","ParallelizationInfo","QueryHints","QueryPlan","QueryPlanner","TableStatistics"]};

@@ -1,0 +1,582 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/schema/cql_type_parser/frozen_scalar.rs`."><title>frozen_scalar.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/schema/cql_type_parser/</div>frozen_scalar.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! `frozen&lt;T&gt;` IS NOT DECLARABLE OVER A SCALAR — the one rule, both spellings
+<a href=#2 id=2 data-nosnippet>2</a>//! (issue #4104).
+<a href=#3 id=3 data-nosnippet>3</a>//!
+<a href=#4 id=4 data-nosnippet>4</a>//! # SCOPE OF THE CLAIM — read this before trusting the title
+<a href=#5 id=5 data-nosnippet>5</a>//!
+<a href=#6 id=6 data-nosnippet>6</a>//! "Both spellings" means the two METADATA ENTRY POINTS (CQL type string,
+<a href=#7 id=7 data-nosnippet>7</a>//! SerializationHeader marshal string), NOT "every syntactic position". The title
+<a href=#8 id=8 data-nosnippet>8</a>//! states a rule, not a totality proof; a guarantee this module does not deliver
+<a href=#9 id=9 data-nosnippet>9</a>//! would be its own defect (roborev job 116, finding 2).
+<a href=#10 id=10 data-nosnippet>10</a>//!
+<a href=#11 id=11 data-nosnippet>11</a>//! The one position #4104 DECLARED as not covered — a frozen scalar nested in a
+<a href=#12 id=12 data-nosnippet>12</a>//! VECTOR ELEMENT, `frozen&lt;vector&lt;frozen&lt;int&gt;, 3&gt;&gt;` — is now covered, and NOT by
+<a href=#13 id=13 data-nosnippet>13</a>//! anything this module does. #4149 gave `CqlType` a `Vector(element, dimension)`
+<a href=#14 id=14 data-nosnippet>14</a>//! variant whose parser recurses into the element through `parse_with_depth`, which
+<a href=#15 id=15 data-nosnippet>15</a>//! re-enters the CQL gate below; the refusal reaches that position for free. Pinned
+<a href=#16 id=16 data-nosnippet>16</a>//! by `a_frozen_scalar_in_a_vector_element_is_refused_since_4149`. Issue #4154 stays
+<a href=#17 id=17 data-nosnippet>17</a>//! open for the audit of the remaining positions — this note records one position
+<a href=#18 id=18 data-nosnippet>18</a>//! closing, not the whole issue. The MARSHAL half still checks a head class only and
+<a href=#19 id=19 data-nosnippet>19</a>//! descends into nothing; its bound is declared on
+<a href=#20 id=20 data-nosnippet>20</a>//! [`FROZEN_WRAPPABLE_MARSHAL_SIMPLE_NAMES`].
+<a href=#21 id=21 data-nosnippet>21</a>//!
+<a href=#22 id=22 data-nosnippet>22</a>//! # THE TWO HALVES ARE TWO QUESTIONS, AND THEIR ACCEPT SETS DIFFER (#4158 review)
+<a href=#23 id=23 data-nosnippet>23</a>//!
+<a href=#24 id=24 data-nosnippet>24</a>//! The CQL half asks "is `frozen&lt;T&gt;` DECLARABLE?" (Cassandra's grammar); the marshal
+<a href=#25 id=25 data-nosnippet>25</a>//! half asks "could Cassandra have WRITTEN `FrozenType(T)` into this header?"
+<a href=#26 id=26 data-nosnippet>26</a>//! (Cassandra's writer). `vector` and `tuple` answer YES to the first and NO to the
+<a href=#27 id=27 data-nosnippet>27</a>//! second — both are freezable CQL, and neither is ever printed inside a
+<a href=#28 id=28 data-nosnippet>28</a>//! `FrozenType(` wrapper. Expecting ONE accept set for both is what let the read gate
+<a href=#29 id=29 data-nosnippet>29</a>//! admit `FrozenType(VectorType(..))` while the same PR's writer proved that string
+<a href=#30 id=30 data-nosnippet>30</a>//! impossible. Derivations: [`frozen_inner_supports_freezing`] (grammar) and
+<a href=#31 id=31 data-nosnippet>31</a>//! [`FROZEN_WRAPPABLE_MARSHAL_SIMPLE_NAMES`] (writer).
+<a href=#32 id=32 data-nosnippet>32</a>//!
+<a href=#33 id=33 data-nosnippet>33</a>//! # The oracle is Cassandra's GRAMMAR, not its bytes
+<a href=#34 id=34 data-nosnippet>34</a>//!
+<a href=#35 id=35 data-nosnippet>35</a>//! `CQL3Type.Raw::freeze()` is the BASE implementation and it does nothing but
+<a href=#36 id=36 data-nosnippet>36</a>//! throw (`cassandra-5.0.8:src/java/org/apache/cassandra/cql3/CQL3Type.java:647-651`):
+<a href=#37 id=37 data-nosnippet>37</a>//!
+<a href=#38 id=38 data-nosnippet>38</a>//! ```text
+<a href=#39 id=39 data-nosnippet>39</a>//!         public Raw freeze()
+<a href=#40 id=40 data-nosnippet>40</a>//!         {
+<a href=#41 id=41 data-nosnippet>41</a>//!             String message = String.format("frozen&lt;&gt; is only allowed on collections, tuples, and user-defined types (got %s)", this);
+<a href=#42 id=42 data-nosnippet>42</a>//!             throw new InvalidRequestException(message);
+<a href=#43 id=43 data-nosnippet>43</a>//!         }
+<a href=#44 id=44 data-nosnippet>44</a>//! ```
+<a href=#45 id=45 data-nosnippet>45</a>//!
+<a href=#46 id=46 data-nosnippet>46</a>//! and the grammar routes EVERY `frozen&lt;…&gt;` through it
+<a href=#47 id=47 data-nosnippet>47</a>//! (`cassandra-5.0.8:src/antlr/Parser.g:1853-1860`):
+<a href=#48 id=48 data-nosnippet>48</a>//!
+<a href=#49 id=49 data-nosnippet>49</a>//! ```text
+<a href=#50 id=50 data-nosnippet>50</a>//!     | K_FROZEN '&lt;' f=comparatorType '&gt;'
+<a href=#51 id=51 data-nosnippet>51</a>//!       {
+<a href=#52 id=52 data-nosnippet>52</a>//!         try {
+<a href=#53 id=53 data-nosnippet>53</a>//!             $t = f.freeze();
+<a href=#54 id=54 data-nosnippet>54</a>//!         } catch (InvalidRequestException e) {
+<a href=#55 id=55 data-nosnippet>55</a>//!             addRecognitionError(e.getMessage());
+<a href=#56 id=56 data-nosnippet>56</a>//!         }
+<a href=#57 id=57 data-nosnippet>57</a>//!       }
+<a href=#58 id=58 data-nosnippet>58</a>//! ```
+<a href=#59 id=59 data-nosnippet>59</a>//!
+<a href=#60 id=60 data-nosnippet>60</a>//! Only four subclasses override it — `RawCollection` (`:773`, list/set/map),
+<a href=#61 id=61 data-nosnippet>61</a>//! `RawVector` (`:916`), `RawUT` (`:958`) and `RawTuple` (`:1037`). Everything
+<a href=#62 id=62 data-nosnippet>62</a>//! else, `RawType` (every native scalar) and a `STRING_LITERAL` custom class
+<a href=#63 id=63 data-nosnippet>63</a>//! included, reaches the base and is a recognition error.
+<a href=#64 id=64 data-nosnippet>64</a>//!
+<a href=#65 id=65 data-nosnippet>65</a>//! Three consequences, and they are the whole content of this module:
+<a href=#66 id=66 data-nosnippet>66</a>//!
+<a href=#67 id=67 data-nosnippet>67</a>//! 1. no Cassandra table can carry a `frozen&lt;scalar&gt;` column, map key, collection
+<a href=#68 id=68 data-nosnippet>68</a>//!    element or UDT field;
+<a href=#69 id=69 data-nosnippet>69</a>//! 2. no Cassandra-written `Statistics.db` SerializationHeader can spell
+<a href=#70 id=70 data-nosnippet>70</a>//!    `FrozenType(Int32Type)`;
+<a href=#71 id=71 data-nosnippet>71</a>//! 3. **there are no Cassandra-written bytes for this input, BY CONSTRUCTION** — so
+<a href=#72 id=72 data-nosnippet>72</a>//!    under the no-heuristics mandate (#28) CQLite must not invent a decode result
+<a href=#73 id=73 data-nosnippet>73</a>//!    for it. Two lanes did invent one, in opposite directions (`Value::blob(b"")`
+<a href=#74 id=74 data-nosnippet>74</a>//!    on #3847/PR #4017, `Value::Empty(Int)` on #3805/PR #4033); the lead's
+<a href=#75 id=75 data-nosnippet>75</a>//!    `REQ-3805-14` ruling deleted BOTH pins and sent the refusal here.
+<a href=#76 id=76 data-nosnippet>76</a>//!
+<a href=#77 id=77 data-nosnippet>77</a>//! # Corroborated on the real corpus, and the recipe is reproducible
+<a href=#78 id=78 data-nosnippet>78</a>//!
+<a href=#79 id=79 data-nosnippet>79</a>//! Every `FrozenType(` occurrence in the fetched corpus was censused
+<a href=#80 id=80 data-nosnippet>80</a>//! (310 `Statistics.db`/`Data.db` files under `/data/datasets`, i.e. every one the
+<a href=#81 id=81 data-nosnippet>81</a>//! box holds) and the inner head was one of exactly four classes — `MapType` (25),
+<a href=#82 id=82 data-nosnippet>82</a>//! `ListType` (16), `UserType` (10), `SetType` (9); no scalar, ever. Reproduce with:
+<a href=#83 id=83 data-nosnippet>83</a>//!
+<a href=#84 id=84 data-nosnippet>84</a>//! ```text
+<a href=#85 id=85 data-nosnippet>85</a>//! python3 - &lt;&lt;'EOF'
+<a href=#86 id=86 data-nosnippet>86</a>//! import re, os, collections
+<a href=#87 id=87 data-nosnippet>87</a>//! pat = re.compile(rb'FrozenType\(([A-Za-z0-9_.]+)')
+<a href=#88 id=88 data-nosnippet>88</a>//! c = collections.Counter()
+<a href=#89 id=89 data-nosnippet>89</a>//! for root, _, files in os.walk(os.environ['CQLITE_DATASETS_ROOT']):
+<a href=#90 id=90 data-nosnippet>90</a>//!     for f in files:
+<a href=#91 id=91 data-nosnippet>91</a>//!         if f.endswith(('Statistics.db', 'Data.db')):
+<a href=#92 id=92 data-nosnippet>92</a>//!             for m in pat.finditer(open(os.path.join(root, f), 'rb').read()):
+<a href=#93 id=93 data-nosnippet>93</a>//!                 c[m.group(1).decode('ascii', 'replace')] += 1
+<a href=#94 id=94 data-nosnippet>94</a>//! print(c.most_common())
+<a href=#95 id=95 data-nosnippet>95</a>//! EOF
+<a href=#96 id=96 data-nosnippet>96</a>//! ```
+<a href=#97 id=97 data-nosnippet>97</a>//!
+<a href=#98 id=98 data-nosnippet>98</a>//! That is CORROBORATION and not the oracle: an absence measured over one corpus
+<a href=#99 id=99 data-nosnippet>99</a>//! could never establish an impossibility, which is why the grammar above does.
+<a href=#100 id=100 data-nosnippet>100</a>//!
+<a href=#101 id=101 data-nosnippet>101</a>//! # Where the two gates are, and why there are exactly two
+<a href=#102 id=102 data-nosnippet>102</a>//!
+<a href=#103 id=103 data-nosnippet>103</a>//! A declared type reaches CQLite through exactly two metadata entry points, and
+<a href=#104 id=104 data-nosnippet>104</a>//! this module is called from both:
+<a href=#105 id=105 data-nosnippet>105</a>//!
+<a href=#106 id=106 data-nosnippet>106</a>//! * the CQL type-string parser, [`CqlType::parse`] — via
+<a href=#107 id=107 data-nosnippet>107</a>//!   [`frozen_inner_supports_freezing`] + [`refuse_frozen_scalar_cql`];
+<a href=#108 id=108 data-nosnippet>108</a>//! * the `Statistics.db` SerializationHeader type parser — via
+<a href=#109 id=109 data-nosnippet>109</a>//!   [`validate_marshal_frozen`], called from the one choke point every header
+<a href=#110 id=110 data-nosnippet>110</a>//!   type string passes through
+<a href=#111 id=111 data-nosnippet>111</a>//!   (`parser::enhanced_statistics_parser::marshal_type::convert_marshal_type_to_cql_checked`).
+<a href=#112 id=112 data-nosnippet>112</a>//!
+<a href=#113 id=113 data-nosnippet>113</a>//! **No DECODE path gains a frozen-scalar branch**, and that is deliberate: the
+<a href=#114 id=114 data-nosnippet>114</a>//! refusal belongs upstream of decode, at the metadata boundary, so that no decoder
+<a href=#115 id=115 data-nosnippet>115</a>//! ever has to hold an opinion about bytes that cannot exist.
+<a href=#116 id=116 data-nosnippet>116</a>
+<a href=#117 id=117 data-nosnippet>117</a></span><span class="comment">// # THIS DECLARATION SITS AT THE TOP ON PURPOSE, AND MOVING IT DOWN BREAKS THE GATE
+<a href=#118 id=118 data-nosnippet>118</a>//
+<a href=#119 id=119 data-nosnippet>119</a>// Conventional resolution: this file is `cql_type_parser/frozen_scalar.rs`, so it
+<a href=#120 id=120 data-nosnippet>120</a>// owns `cql_type_parser/frozen_scalar/` and the tests file sits there. No
+<a href=#121 id=121 data-nosnippet>121</a>// path-override attribute anywhere in the chain (see this module's declaration in
+<a href=#122 id=122 data-nosnippet>122</a>// `cql_type_parser.rs` for why an override put the tests file beyond the walker).
+<a href=#123 id=123 data-nosnippet>123</a>//
+<a href=#124 id=124 data-nosnippet>124</a>// The remaining hazard is POSITION, not path. With this exact declaration at the
+<a href=#125 id=125 data-nosnippet>125</a>// END of the file, `issue_1714_mod_reachability` reported the tests file as an
+<a href=#126 id=126 data-nosnippet>126</a>// orphan — "compiles nowhere, is linted nowhere, is tested nowhere" — while all 13
+<a href=#127 id=127 data-nosnippet>127</a>// of its tests were passing in the same run. Moved here, above the first `use`, the
+<a href=#128 id=128 data-nosnippet>128</a>// guard passes and the tests still run. The guard tracks inline-`mod` scope by
+<a href=#129 id=129 data-nosnippet>129</a>// counting braces as it walks the file, and this module's header quotes Java and
+<a href=#130 id=130 data-nosnippet>130</a>// ANTLR bodies (`CQL3Type.java` freeze(), `Parser.g`'s K_FROZEN rule) that carry
+<a href=#131 id=131 data-nosnippet>131</a>// braces and char literals; a late top-level `mod` is then resolved against a
+<a href=#132 id=132 data-nosnippet>132</a>// phantom scope directory. So: do not relocate this below the header. The guard's
+<a href=#133 id=133 data-nosnippet>133</a>// disagreement with rustc is a real defect, but it is not this issue's to fix, and
+<a href=#134 id=134 data-nosnippet>134</a>// a shared gate guard cannot certify its own change from a lane.
+<a href=#135 id=135 data-nosnippet>135</a></span><span class="attr">#[cfg(test)]
+<a href=#136 id=136 data-nosnippet>136</a></span><span class="kw">mod </span>frozen_scalar_tests;
+<a href=#137 id=137 data-nosnippet>137</a>
+<a href=#138 id=138 data-nosnippet>138</a><span class="kw">use </span><span class="kw">crate</span>::error::{Error, <span class="prelude-ty">Result</span>};
+<a href=#139 id=139 data-nosnippet>139</a><span class="kw">use </span><span class="kw">crate</span>::schema::{is_udt_identifier, CqlType};
+<a href=#140 id=140 data-nosnippet>140</a>
+<a href=#141 id=141 data-nosnippet>141</a><span class="doccomment">/// The one wording, carrying the one citation. Kept as a `const` so the CQL and
+<a href=#142 id=142 data-nosnippet>142</a>/// marshal refusals cannot drift into two different explanations of one rule.
+<a href=#143 id=143 data-nosnippet>143</a></span><span class="kw">const </span>CITATION: <span class="kw-2">&amp;</span>str = <span class="string">"frozen&lt;&gt; is only allowed on collections, tuples, and user-defined types \
+<a href=#144 id=144 data-nosnippet>144</a>     (cassandra-5.0.8:src/java/org/apache/cassandra/cql3/CQL3Type.java:647-651 — \
+<a href=#145 id=145 data-nosnippet>145</a>     CQL3Type.Raw::freeze() throws for every type that does not override it)"</span>;
+<a href=#146 id=146 data-nosnippet>146</a>
+<a href=#147 id=147 data-nosnippet>147</a><span class="doccomment">/// The WRITER half of the one rule: which classes can PRINT the wrapper. Kept
+<a href=#148 id=148 data-nosnippet>148</a>/// beside [`CITATION`] because a refusal has to say which of the two rules it
+<a href=#149 id=149 data-nosnippet>149</a>/// applied — see [`FROZEN_WRAPPABLE_MARSHAL_SIMPLE_NAMES`] for the derivation.
+<a href=#150 id=150 data-nosnippet>150</a></span><span class="kw">const </span>WRITER_CITATION: <span class="kw-2">&amp;</span>str = <span class="string">"only ListType, SetType, MapType and UserType carry the \
+<a href=#151 id=151 data-nosnippet>151</a>     includeFrozenType = !ignoreFreezing &amp;&amp; !isMultiCell() branch that prints it \
+<a href=#152 id=152 data-nosnippet>152</a>     (cassandra-5.0.8 ListType.java:195-206, SetType.java:185-196, MapType.java:310-320, \
+<a href=#153 id=153 data-nosnippet>153</a>     UserType.java:436-447); every other type inherits AbstractType.toString(boolean), \
+<a href=#154 id=154 data-nosnippet>154</a>     AbstractType.java:466-469"</span>;
+<a href=#155 id=155 data-nosnippet>155</a>
+<a href=#156 id=156 data-nosnippet>156</a><span class="doccomment">/// Whether a PARSED inner type may legally carry a `frozen&lt;&gt;` wrapper.
+<a href=#157 id=157 data-nosnippet>157</a>///
+<a href=#158 id=158 data-nosnippet>158</a>/// The membership set is Cassandra's override set, mapped onto [`CqlType`]:
+<a href=#159 id=159 data-nosnippet>159</a>/// `RawCollection` -&gt; [`CqlType::List`]/[`CqlType::Set`]/[`CqlType::Map`],
+<a href=#160 id=160 data-nosnippet>160</a>/// `RawTuple` -&gt; [`CqlType::Tuple`], `RawUT` -&gt; [`CqlType::Udt`], and an
+<a href=#161 id=161 data-nosnippet>161</a>/// already-frozen inner ([`CqlType::Frozen`]) because `RawCollection::freeze`
+<a href=#162 id=162 data-nosnippet>162</a>/// (`CQL3Type.java:773-786`) freezes an already-frozen collection to itself.
+<a href=#163 id=163 data-nosnippet>163</a>///
+<a href=#164 id=164 data-nosnippet>164</a>/// [`CqlType::Custom`] carries TWO things `CqlType::parse` cannot model, and both
+<a href=#165 id=165 data-nosnippet>165</a>/// are legally freezable, so the arm decides between them by SPELLING:
+<a href=#166 id=166 data-nosnippet>166</a>///
+<a href=#167 id=167 data-nosnippet>167</a>///   * a UDT REFERENCE. `CqlType::parse` has no UDT registry, so a bare
+<a href=#168 id=168 data-nosnippet>168</a>///     `frozen&lt;address_type&gt;` lands in `Custom` and refusing it would refuse every
+<a href=#169 id=169 data-nosnippet>169</a>///     real frozen UDT. Admitted when the name is a plausible UDT identifier
+<a href=#170 id=170 data-nosnippet>170</a>///     ([`is_udt_identifier`]).
+<a href=#171 id=171 data-nosnippet>171</a>///   * a VECTOR — and as of #4149 this half is UNREACHABLE FROM
+<a href=#172 id=172 data-nosnippet>172</a>///     [`CqlType::parse`], which is stated here rather than quietly left to rot.
+<a href=#173 id=173 data-nosnippet>173</a>///     When #4104 wrote it, `CqlType` had no `Vector` variant and every
+<a href=#174 id=174 data-nosnippet>174</a>///     `vector&lt;..&gt;` spelling landed in `Custom`. #4149 added
+<a href=#175 id=175 data-nosnippet>175</a>///     `CqlType::Vector(element, dimension)` and sited its arm BEFORE the
+<a href=#176 id=176 data-nosnippet>176</a>///     UDT/primitive fall-through, so today `CqlType::parse` resolves a
+<a href=#177 id=177 data-nosnippet>177</a>///     `vector&lt;..&gt;` spelling to either `CqlType::Vector` (well-formed) or an
+<a href=#178 id=178 data-nosnippet>178</a>///     `Err` (malformed) — never to a `Custom`. Derivation: for
+<a href=#179 id=179 data-nosnippet>179</a>///     [`is_vector_spelling`] to answer `true` the text before the first `&lt;` must
+<a href=#180 id=180 data-nosnippet>180</a>///     trim to exactly `vector`, which is precisely the shape
+<a href=#181 id=181 data-nosnippet>181</a>///     `schema::vector_type::cql_vector_kind` classifies as `Args` or
+<a href=#182 id=182 data-nosnippet>182</a>///     `Malformed`, and BOTH are handled upstream of this arm.
+<a href=#183 id=183 data-nosnippet>183</a>///
+<a href=#184 id=184 data-nosnippet>184</a>///     It is KEPT, not deleted, because this function is a `pub(crate)`
+<a href=#185 id=185 data-nosnippet>185</a>///     membership predicate over an ARBITRARY [`CqlType`] value and
+<a href=#186 id=186 data-nosnippet>186</a>///     `Custom("vector&lt;float, 3&gt;")` is still representable. Deleting the carve-out
+<a href=#187 id=187 data-nosnippet>187</a>///     would make the predicate answer `false` there while the
+<a href=#188 id=188 data-nosnippet>188</a>///     [`CqlType::Vector`] arm answers `true` for the same declared type — one
+<a href=#189 id=189 data-nosnippet>189</a>///     rule with two answers, which is the exact divergence class this module
+<a href=#190 id=190 data-nosnippet>190</a>///     exists to prevent. The two AGREE today: a well-formed spelling is `true`
+<a href=#191 id=191 data-nosnippet>191</a>///     either way, and a malformed one is refused either way (by this predicate
+<a href=#192 id=192 data-nosnippet>192</a>///     via `Custom`, or by `cql_vector_kind` before the predicate is reached).
+<a href=#193 id=193 data-nosnippet>193</a>///
+<a href=#194 id=194 data-nosnippet>194</a>///     THE FULL DERIVATION, FACTORY TO GRAMMAR, at the pinned tag — it answers the
+<a href=#195 id=195 data-nosnippet>195</a>///     CQL question, so it lives here and not on the writer-side
+<a href=#196 id=196 data-nosnippet>196</a>///     [`FROZEN_WRAPPABLE_MARSHAL_SIMPLE_NAMES`]:
+<a href=#197 id=197 data-nosnippet>197</a>///       1. `Parser.g:1916-1919` — `vector_type : K_VECTOR '&lt;' comparatorType ','
+<a href=#198 id=198 data-nosnippet>198</a>///          INTEGER '&gt;' { $vt = CQL3Type.Raw.vector(t1, ...); }`
+<a href=#199 id=199 data-nosnippet>199</a>///       2. `CQL3Type.java:705-708` — `public static Raw vector(..) { return new
+<a href=#200 id=200 data-nosnippet>200</a>///          RawVector(t, dimension); }`
+<a href=#201 id=201 data-nosnippet>201</a>///       3. `CQL3Type.java:885` — `private static class RawVector extends Raw`
+<a href=#202 id=202 data-nosnippet>202</a>///       4. `CQL3Type.java:915-919` — `@Override public Raw freeze() { return this; }`
+<a href=#203 id=203 data-nosnippet>203</a>///          — it DOES override, and RETURNS rather than throws (`:909-913`
+<a href=#204 id=204 data-nosnippet>204</a>///          `supportsFreezing() -&gt; true`; `:897-901` `isVector() -&gt; true`; base
+<a href=#205 id=205 data-nosnippet>205</a>///          `:632-635` `isImplicitlyFrozen() -&gt; isTuple() || isVector()`).
+<a href=#206 id=206 data-nosnippet>206</a>///       5. `Parser.g:1851` puts `vector_type` in `comparatorType`, and `:1853-1860`
+<a href=#207 id=207 data-nosnippet>207</a>///          routes `K_FROZEN '&lt;' comparatorType '&gt;'` through `freeze()` — so
+<a href=#208 id=208 data-nosnippet>208</a>///          `frozen&lt;vector&lt;float, 3&gt;&gt;` raises no `InvalidRequestException` and no
+<a href=#209 id=209 data-nosnippet>209</a>///          recognition error.
+<a href=#210 id=210 data-nosnippet>210</a>///
+<a href=#211 id=211 data-nosnippet>211</a>///     Its HEADER spelling is nonetheless the BARE `VectorType(FloatType , 3)`:
+<a href=#212 id=212 data-nosnippet>212</a>///     `VectorType.toString` prints no wrapper (`VectorType.java:339-342`).
+<a href=#213 id=213 data-nosnippet>213</a>///
+<a href=#214 id=214 data-nosnippet>214</a>/// Everything else in `Custom` is refused, which keeps the quoted custom-class
+<a href=#215 id=215 data-nosnippet>215</a>/// spelling (`frozen&lt;'org.apache.cassandra.db.marshal.Int32Type'&gt;`) out — Cassandra
+<a href=#216 id=216 data-nosnippet>216</a>/// routes that through `CQL3Type.Raw.from(new CQL3Type.Custom(..))`, i.e. a
+<a href=#217 id=217 data-nosnippet>217</a>/// `RawType`, i.e. the throwing base (`Parser.g:1861-1864`).
+<a href=#218 id=218 data-nosnippet>218</a>///
+<a href=#219 id=219 data-nosnippet>219</a>/// Every native scalar is `false`. This function is the ONLY membership statement;
+<a href=#220 id=220 data-nosnippet>220</a>/// the enumeration is exhaustive with no `_` arm on purpose, so a new [`CqlType`]
+<a href=#221 id=221 data-nosnippet>221</a>/// variant cannot silently inherit either answer.
+<a href=#222 id=222 data-nosnippet>222</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>frozen_inner_supports_freezing(inner: <span class="kw-2">&amp;</span>CqlType) -&gt; bool {
+<a href=#223 id=223 data-nosnippet>223</a>    <span class="kw">match </span>inner {
+<a href=#224 id=224 data-nosnippet>224</a>        <span class="comment">// Cassandra's four `freeze()` overrides, plus the already-frozen case.
+<a href=#225 id=225 data-nosnippet>225</a>        </span>CqlType::List(<span class="kw">_</span>) | CqlType::Set(<span class="kw">_</span>) | CqlType::Map(<span class="kw">_</span>, <span class="kw">_</span>) =&gt; <span class="bool-val">true</span>,
+<a href=#226 id=226 data-nosnippet>226</a>        CqlType::Tuple(<span class="kw">_</span>) =&gt; <span class="bool-val">true</span>,
+<a href=#227 id=227 data-nosnippet>227</a>        CqlType::Udt(<span class="kw">_</span>, <span class="kw">_</span>) =&gt; <span class="bool-val">true</span>,
+<a href=#228 id=228 data-nosnippet>228</a>        CqlType::Frozen(<span class="kw">_</span>) =&gt; <span class="bool-val">true</span>,
+<a href=#229 id=229 data-nosnippet>229</a>        <span class="comment">// `RawVector` is Cassandra's FIFTH `freeze()` override, and it RETURNS
+<a href=#230 id=230 data-nosnippet>230</a>        // `this` rather than throwing (`CQL3Type.java:915-919`, with
+<a href=#231 id=231 data-nosnippet>231</a>        // `supportsFreezing() -&gt; true` at `:909-913`), so `frozen&lt;vector&lt;float, 3&gt;&gt;`
+<a href=#232 id=232 data-nosnippet>232</a>        // IS declarable CQL and must not be refused.
+<a href=#233 id=233 data-nosnippet>233</a>        //
+<a href=#234 id=234 data-nosnippet>234</a>        // WHY THIS ARM IS NEW rather than always having been here: before #4149
+<a href=#235 id=235 data-nosnippet>235</a>        // `CqlType` had NO `Vector` variant, so `frozen&lt;vector&lt;float, 3&gt;&gt;` parsed to
+<a href=#236 id=236 data-nosnippet>236</a>        // `Frozen(Custom("vector&lt;float, 3&gt;"))` and the permission was granted by the
+<a href=#237 id=237 data-nosnippet>237</a>        // `Custom` arm's [`is_vector_spelling`] carve-out below. #4149 added
+<a href=#238 id=238 data-nosnippet>238</a>        // `CqlType::Vector(element, dimension)`, so the same spelling now parses to
+<a href=#239 id=239 data-nosnippet>239</a>        // `Frozen(Vector(Float, 3))` and the ONE rule has to be expressed on the new
+<a href=#240 id=240 data-nosnippet>240</a>        // variant too — otherwise this gate would refuse declarable CQL, which is a
+<a href=#241 id=241 data-nosnippet>241</a>        // worse defect than the hole it exists to close.
+<a href=#242 id=242 data-nosnippet>242</a>        //
+<a href=#243 id=243 data-nosnippet>243</a>        // Unconditional, and that is Cassandra's answer too: `RawVector::freeze`
+<a href=#244 id=244 data-nosnippet>244</a>        // returns `this` whatever the parameters, so freezability is a HEAD-CLASS
+<a href=#245 id=245 data-nosnippet>245</a>        // question here — as it is on the marshal side, though over a DIFFERENT set
+<a href=#246 id=246 data-nosnippet>246</a>        // ([`FROZEN_WRAPPABLE_MARSHAL_SIMPLE_NAMES`] answers what the WRITER prints,
+<a href=#247 id=247 data-nosnippet>247</a>        // and it prints no wrapper around a vector). A
+<a href=#248 id=248 data-nosnippet>248</a>        // `CqlType::Vector` value can only exist because `schema::vector_type`
+<a href=#249 id=249 data-nosnippet>249</a>        // already validated its element and dimension (the CQL parser errors on a
+<a href=#250 id=250 data-nosnippet>250</a>        // malformed one BEFORE this predicate is reached), so there is nothing left
+<a href=#251 id=251 data-nosnippet>251</a>        // for a freezability gate to re-check.
+<a href=#252 id=252 data-nosnippet>252</a>        </span>CqlType::Vector(<span class="kw">_</span>, <span class="kw">_</span>) =&gt; <span class="bool-val">true</span>,
+<a href=#253 id=253 data-nosnippet>253</a>        CqlType::Custom(name) =&gt; {
+<a href=#254 id=254 data-nosnippet>254</a>            <span class="kw">let </span>name = name.strip_prefix(<span class="string">"udt:"</span>).unwrap_or(name.as_str());
+<a href=#255 id=255 data-nosnippet>255</a>            is_udt_identifier(name) || is_vector_spelling(name)
+<a href=#256 id=256 data-nosnippet>256</a>        }
+<a href=#257 id=257 data-nosnippet>257</a>        <span class="comment">// `RawType` — every native scalar reaches the throwing base.
+<a href=#258 id=258 data-nosnippet>258</a>        </span>CqlType::Boolean
+<a href=#259 id=259 data-nosnippet>259</a>        | CqlType::TinyInt
+<a href=#260 id=260 data-nosnippet>260</a>        | CqlType::SmallInt
+<a href=#261 id=261 data-nosnippet>261</a>        | CqlType::Int
+<a href=#262 id=262 data-nosnippet>262</a>        | CqlType::BigInt
+<a href=#263 id=263 data-nosnippet>263</a>        | CqlType::Counter
+<a href=#264 id=264 data-nosnippet>264</a>        | CqlType::Float
+<a href=#265 id=265 data-nosnippet>265</a>        | CqlType::Double
+<a href=#266 id=266 data-nosnippet>266</a>        | CqlType::Decimal
+<a href=#267 id=267 data-nosnippet>267</a>        | CqlType::Text
+<a href=#268 id=268 data-nosnippet>268</a>        | CqlType::Ascii
+<a href=#269 id=269 data-nosnippet>269</a>        | CqlType::Varchar
+<a href=#270 id=270 data-nosnippet>270</a>        | CqlType::Blob
+<a href=#271 id=271 data-nosnippet>271</a>        | CqlType::Timestamp
+<a href=#272 id=272 data-nosnippet>272</a>        | CqlType::Date
+<a href=#273 id=273 data-nosnippet>273</a>        | CqlType::Time
+<a href=#274 id=274 data-nosnippet>274</a>        | CqlType::Uuid
+<a href=#275 id=275 data-nosnippet>275</a>        | CqlType::TimeUuid
+<a href=#276 id=276 data-nosnippet>276</a>        | CqlType::Inet
+<a href=#277 id=277 data-nosnippet>277</a>        | CqlType::Duration
+<a href=#278 id=278 data-nosnippet>278</a>        | CqlType::Varint =&gt; <span class="bool-val">false</span>,
+<a href=#279 id=279 data-nosnippet>279</a>    }
+<a href=#280 id=280 data-nosnippet>280</a>}
+<a href=#281 id=281 data-nosnippet>281</a>
+<a href=#282 id=282 data-nosnippet>282</a><span class="doccomment">/// Whether a `Custom` type name is a COMPLETE, DECLARABLE `vector&lt;element,
+<a href=#283 id=283 data-nosnippet>283</a>/// dimension&gt;` spelling.
+<a href=#284 id=284 data-nosnippet>284</a>///
+<a href=#285 id=285 data-nosnippet>285</a>/// # A HEAD-KEYWORD MATCH IS NOT ENOUGH, and that was roborev job 108's finding
+<a href=#286 id=286 data-nosnippet>286</a>/// This checked only that the text before the first `&lt;` was `vector`, so
+<a href=#287 id=287 data-nosnippet>287</a>/// `frozen&lt;vector&lt;int&gt;&gt;` (no dimension), `frozen&lt;vector&lt;&gt;&gt;` (no arguments) and
+<a href=#288 id=288 data-nosnippet>288</a>/// `frozen&lt;vector&lt;int, nope&gt;&gt;` (dimension not an integer) were all granted
+<a href=#289 id=289 data-nosnippet>289</a>/// freezability. None of them is declarable CQL, so that was a permissive
+<a href=#290 id=290 data-nosnippet>290</a>/// fall-through GRANTING A PERMISSION CASSANDRA DOES NOT — the same
+<a href=#291 id=291 data-nosnippet>291</a>/// no-heuristics defect as an invented decode result, pointed the other way.
+<a href=#292 id=292 data-nosnippet>292</a>///
+<a href=#293 id=293 data-nosnippet>293</a>/// The `Custom` arm needs the spelling to be a vector because the SPELLING is all
+<a href=#294 id=294 data-nosnippet>294</a>/// it has: `CqlType` has no `Vector` variant, so a vector and an unparseable
+<a href=#295 id=295 data-nosnippet>295</a>/// string are the same value. A spelling that never becomes a `RawVector` never
+<a href=#296 id=296 data-nosnippet>296</a>/// reaches `RawVector::freeze` either, so it must be refused here.
+<a href=#297 id=297 data-nosnippet>297</a>///
+<a href=#298 id=298 data-nosnippet>298</a>/// # THE ACCEPTED GRAMMAR, DERIVED AT THE PINNED TAG
+<a href=#299 id=299 data-nosnippet>299</a>///
+<a href=#300 id=300 data-nosnippet>300</a>/// ```text
+<a href=#301 id=301 data-nosnippet>301</a>/// Parser.g:1916-1919
+<a href=#302 id=302 data-nosnippet>302</a>///   vector_type returns [CQL3Type.Raw vt]
+<a href=#303 id=303 data-nosnippet>303</a>///       : K_VECTOR '&lt;' t1=comparatorType ','  d=INTEGER '&gt;'
+<a href=#304 id=304 data-nosnippet>304</a>///           { $vt = CQL3Type.Raw.vector(t1, Integer.parseInt($d.text)); }
+<a href=#305 id=305 data-nosnippet>305</a>///       ;
+<a href=#306 id=306 data-nosnippet>306</a>/// Lexer.g:337-339
+<a href=#307 id=307 data-nosnippet>307</a>///   INTEGER : '-'? DIGIT+ ;
+<a href=#308 id=308 data-nosnippet>308</a>/// VectorType.java:86-92
+<a href=#309 id=309 data-nosnippet>309</a>///   private VectorType(AbstractType&lt;T&gt; elementType, int dimension) {
+<a href=#310 id=310 data-nosnippet>310</a>///       ...
+<a href=#311 id=311 data-nosnippet>311</a>///       if (dimension &lt;= 0)
+<a href=#312 id=312 data-nosnippet>312</a>///           throw new InvalidRequestException("vectors may only have positive dimensions; given %d");
+<a href=#313 id=313 data-nosnippet>313</a>/// ```
+<a href=#314 id=314 data-nosnippet>314</a>///
+<a href=#315 id=315 data-nosnippet>315</a>/// So, exactly: the head keyword `vector`; EXACTLY TWO top-level arguments (the
+<a href=#316 id=316 data-nosnippet>316</a>/// element may itself contain commas, e.g. `vector&lt;map&lt;int, text&gt;, 3&gt;`); a
+<a href=#317 id=317 data-nosnippet>317</a>/// non-empty element; and a dimension that is a bare DIGIT string (`INTEGER`
+<a href=#318 id=318 data-nosnippet>318</a>/// permits a leading `-` and nothing else — no `+`, no separators, no radix),
+<a href=#319 id=319 data-nosnippet>319</a>/// fits a Java `int` (`Integer.parseInt` throws beyond it), and is `&gt; 0`
+<a href=#320 id=320 data-nosnippet>320</a>/// (`VectorType`'s constructor). Rust's `parse::&lt;i32&gt;()` reproduces the `int`
+<a href=#321 id=321 data-nosnippet>321</a>/// bound exactly and RETURNS `Err` rather than saturating; requiring all-digits
+<a href=#322 id=322 data-nosnippet>322</a>/// first is what excludes the `-`/`+` spellings `parse` would otherwise accept.
+<a href=#323 id=323 data-nosnippet>323</a>///
+<a href=#324 id=324 data-nosnippet>324</a>/// # UNREACHABLE FROM `CqlType::parse` SINCE #4149
+<a href=#325 id=325 data-nosnippet>325</a>/// This predicate is retained for the reasons given on
+<a href=#326 id=326 data-nosnippet>326</a>/// [`frozen_inner_supports_freezing`]'s `Custom` arm (it must keep answering
+<a href=#327 id=327 data-nosnippet>327</a>/// consistently for a representable `Custom("vector&lt;..&gt;")`), but no `CqlType::parse`
+<a href=#328 id=328 data-nosnippet>328</a>/// input reaches it any more: #4149's vector arm resolves every `vector&lt;..&gt;`
+<a href=#329 id=329 data-nosnippet>329</a>/// spelling to `CqlType::Vector` or an `Err` before the `Custom` fall-through.
+<a href=#330 id=330 data-nosnippet>330</a>/// Consequences worth stating, because both were true when this was written and are
+<a href=#331 id=331 data-nosnippet>331</a>/// no longer:
+<a href=#332 id=332 data-nosnippet>332</a>///  * **The ELEMENT is now inspected** — by #4149's `parse_with_depth` recursion,
+<a href=#333 id=333 data-nosnippet>333</a>///    not here — so `frozen&lt;vector&lt;frozen&lt;int&gt;, 3&gt;&gt;` is refused. That closes the
+<a href=#334 id=334 data-nosnippet>334</a>///    position #4104 declared out of scope (issue #4154 stays open for the rest).
+<a href=#335 id=335 data-nosnippet>335</a>///    This predicate STILL does not inspect the element, and that no longer matters
+<a href=#336 id=336 data-nosnippet>336</a>///    on the parse path; it is why the predicate must not be the only gate.
+<a href=#337 id=337 data-nosnippet>337</a>///  * Re-entering `CqlType::parse` from HERE remains the wrong fix, and #4149 did
+<a href=#338 id=338 data-nosnippet>338</a>///    not do it: a fresh `parse` call restarts at depth 0, so
+<a href=#339 id=339 data-nosnippet>339</a>///    `frozen&lt;vector&lt;frozen&lt;vector&lt;…` would recurse unbounded past
+<a href=#340 id=340 data-nosnippet>340</a>///    `MAX_NESTING_DEPTH` (issue #1690's stack-overflow hazard). #4149 threads the
+<a href=#341 id=341 data-nosnippet>341</a>///    EXISTING depth instead.
+<a href=#342 id=342 data-nosnippet>342</a>///
+<a href=#343 id=343 data-nosnippet>343</a>/// # ONE FURTHER BOUND, DECLARED RATHER THAN IMPLIED
+<a href=#344 id=344 data-nosnippet>344</a>///  * **The MARSHAL half does not validate arity/dimension** — see
+<a href=#345 id=345 data-nosnippet>345</a>///    [`FROZEN_WRAPPABLE_MARSHAL_SIMPLE_NAMES`], which is a head-CLASS lookup over names
+<a href=#346 id=346 data-nosnippet>346</a>///    a Cassandra WRITER produced, not a spelling proxy.
+<a href=#347 id=347 data-nosnippet>347</a></span><span class="kw">fn </span>is_vector_spelling(name: <span class="kw-2">&amp;</span>str) -&gt; bool {
+<a href=#348 id=348 data-nosnippet>348</a>    <span class="kw">let </span><span class="prelude-val">Some</span>((head, rest)) = name.split_once(<span class="string">'&lt;'</span>) <span class="kw">else </span>{
+<a href=#349 id=349 data-nosnippet>349</a>        <span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#350 id=350 data-nosnippet>350</a>    };
+<a href=#351 id=351 data-nosnippet>351</a>    <span class="kw">if </span>!head.trim().eq_ignore_ascii_case(<span class="string">"vector"</span>) {
+<a href=#352 id=352 data-nosnippet>352</a>        <span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#353 id=353 data-nosnippet>353</a>    }
+<a href=#354 id=354 data-nosnippet>354</a>    <span class="kw">let </span><span class="prelude-val">Some</span>(inner) = rest.strip_suffix(<span class="string">'&gt;'</span>) <span class="kw">else </span>{
+<a href=#355 id=355 data-nosnippet>355</a>        <span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#356 id=356 data-nosnippet>356</a>    };
+<a href=#357 id=357 data-nosnippet>357</a>    <span class="comment">// An EMPTY argument is a CQL syntax error at whatever depth it occurs, and the
+<a href=#358 id=358 data-nosnippet>358</a>    // shared splitter FILTERS empty segments — so `vector&lt;int, , 3&gt;` would
+<a href=#359 id=359 data-nosnippet>359</a>    // otherwise split to two parts and pass. Refuse the shape directly: no legal
+<a href=#360 id=360 data-nosnippet>360</a>    // type string carries a leading, trailing or doubled comma at any depth, so
+<a href=#361 id=361 data-nosnippet>361</a>    // this cannot over-refuse.
+<a href=#362 id=362 data-nosnippet>362</a>    </span><span class="kw">let </span>squeezed: String = inner.chars().filter(|c| !c.is_whitespace()).collect();
+<a href=#363 id=363 data-nosnippet>363</a>    <span class="kw">if </span>squeezed.starts_with(<span class="string">','</span>) || squeezed.ends_with(<span class="string">','</span>) || squeezed.contains(<span class="string">",,"</span>) {
+<a href=#364 id=364 data-nosnippet>364</a>        <span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#365 id=365 data-nosnippet>365</a>    }
+<a href=#366 id=366 data-nosnippet>366</a>    <span class="comment">// THE SHARED SPLITTER, reused rather than re-implemented: it is the parent
+<a href=#367 id=367 data-nosnippet>367</a>    // module's own `&lt;&gt;`-depth walk (and it already refuses unbalanced nesting), so
+<a href=#368 id=368 data-nosnippet>368</a>    // this predicate cannot form a second opinion about where an argument ends.
+<a href=#369 id=369 data-nosnippet>369</a>    </span><span class="kw">let </span><span class="prelude-val">Ok</span>(parts) = CqlType::split_top_level_types(inner) <span class="kw">else </span>{
+<a href=#370 id=370 data-nosnippet>370</a>        <span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#371 id=371 data-nosnippet>371</a>    };
+<a href=#372 id=372 data-nosnippet>372</a>    <span class="kw">let </span>[element, dimension] = parts[..] <span class="kw">else </span>{
+<a href=#373 id=373 data-nosnippet>373</a>        <span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#374 id=374 data-nosnippet>374</a>    };
+<a href=#375 id=375 data-nosnippet>375</a>    !element.trim().is_empty() &amp;&amp; is_vector_dimension(dimension.trim())
+<a href=#376 id=376 data-nosnippet>376</a>}
+<a href=#377 id=377 data-nosnippet>377</a>
+<a href=#378 id=378 data-nosnippet>378</a><span class="doccomment">/// Whether `d` is a dimension `Integer.parseInt` would accept and `VectorType`'s
+<a href=#379 id=379 data-nosnippet>379</a>/// constructor would keep: a bare digit string, inside Java `int`, strictly `&gt; 0`.
+<a href=#380 id=380 data-nosnippet>380</a>///
+<a href=#381 id=381 data-nosnippet>381</a>/// `is_ascii_digit` FIRST, and it is load-bearing: `str::parse::&lt;i32&gt;` accepts a
+<a href=#382 id=382 data-nosnippet>382</a>/// leading `+` that `Lexer.g:337-339`'s `INTEGER` does not, and would accept the
+<a href=#383 id=383 data-nosnippet>383</a>/// `-` spellings `VectorType.java:89-90` throws on. Digits-only settles both, and
+<a href=#384 id=384 data-nosnippet>384</a>/// leaves `parse` to do only the one thing Java's does — enforce the `int` bound,
+<a href=#385 id=385 data-nosnippet>385</a>/// by returning `Err` instead of saturating.
+<a href=#386 id=386 data-nosnippet>386</a></span><span class="kw">fn </span>is_vector_dimension(d: <span class="kw-2">&amp;</span>str) -&gt; bool {
+<a href=#387 id=387 data-nosnippet>387</a>    !d.is_empty() &amp;&amp; d.bytes().all(|b| b.is_ascii_digit()) &amp;&amp; d.parse::&lt;i32&gt;().is_ok_and(|n| n &gt; <span class="number">0</span>)
+<a href=#388 id=388 data-nosnippet>388</a>}
+<a href=#389 id=389 data-nosnippet>389</a>
+<a href=#390 id=390 data-nosnippet>390</a><span class="doccomment">/// The refusal a CQL-form `frozen&lt;scalar&gt;` earns, naming both the spelling that
+<a href=#391 id=391 data-nosnippet>391</a>/// was refused and the inner type that cannot be frozen.
+<a href=#392 id=392 data-nosnippet>392</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>refuse_frozen_scalar_cql(spelling: <span class="kw-2">&amp;</span>str, inner: <span class="kw-2">&amp;</span>str) -&gt; Error {
+<a href=#393 id=393 data-nosnippet>393</a>    Error::schema(<span class="macro">format!</span>(
+<a href=#394 id=394 data-nosnippet>394</a>        <span class="string">"not declarable CQL: '{spelling}' freezes '{inner}', which is not a collection, \
+<a href=#395 id=395 data-nosnippet>395</a>         tuple, or user-defined type — {CITATION}"
+<a href=#396 id=396 data-nosnippet>396</a>    </span>))
+<a href=#397 id=397 data-nosnippet>397</a>}
+<a href=#398 id=398 data-nosnippet>398</a>
+<a href=#399 id=399 data-nosnippet>399</a><span class="doccomment">/// The MARSHAL simple names that can appear as the IMMEDIATE inner of a
+<a href=#400 id=400 data-nosnippet>400</a>/// `FrozenType(` in a header Apache Cassandra WROTE.
+<a href=#401 id=401 data-nosnippet>401</a>///
+<a href=#402 id=402 data-nosnippet>402</a>/// # THE TWO GATES ANSWER TWO DIFFERENT QUESTIONS, AND HERE THEY MUST DIVERGE
+<a href=#403 id=403 data-nosnippet>403</a>///
+<a href=#404 id=404 data-nosnippet>404</a>/// The CQL half ([`frozen_inner_supports_freezing`]) answers a GRAMMAR question —
+<a href=#405 id=405 data-nosnippet>405</a>/// would `CQL3Type.Raw::freeze()` accept `frozen&lt;T&gt;`? This half answers a WRITER
+<a href=#406 id=406 data-nosnippet>406</a>/// question — can `AbstractType::toString()` ever PRINT `FrozenType(` around this
+<a href=#407 id=407 data-nosnippet>407</a>/// class? A type can be freezable in CQL and never carry the wrapper on disk, and
+<a href=#408 id=408 data-nosnippet>408</a>/// `vector` and `tuple` are exactly that: `frozen&lt;vector&lt;float, 3&gt;&gt;` and
+<a href=#409 id=409 data-nosnippet>409</a>/// `frozen&lt;tuple&lt;int, text&gt;&gt;` are declarable (accepted on the CQL side) while
+<a href=#410 id=410 data-nosnippet>410</a>/// `FrozenType(VectorType(..))` and `FrozenType(TupleType(..))` are refused here,
+<a href=#411 id=411 data-nosnippet>411</a>/// because those BYTES cannot exist. Reading this set as "the freezable types"
+<a href=#412 id=412 data-nosnippet>412</a>/// is what made the two halves of #4158 contradict each other.
+<a href=#413 id=413 data-nosnippet>413</a>///
+<a href=#414 id=414 data-nosnippet>414</a>/// # DERIVED AT THE PINNED TAG, WHOLE-TREE — the set is FOUR, not seven
+<a href=#415 id=415 data-nosnippet>415</a>///
+<a href=#416 id=416 data-nosnippet>416</a>/// The SerializationHeader records `type.toString()` verbatim
+<a href=#417 id=417 data-nosnippet>417</a>/// (`serializers/AbstractTypeSerializer.java:36-39`, the serializer
+<a href=#418 id=418 data-nosnippet>418</a>/// `SerializationHeader.Serializer` holds at `SerializationHeader.java:389`), and
+<a href=#419 id=419 data-nosnippet>419</a>/// the literal `FrozenType(` is printed at exactly FOUR sites in the whole of
+<a href=#420 id=420 data-nosnippet>420</a>/// `cassandra-5.0.8/src/java` — the `includeFrozenType = !ignoreFreezing &amp;&amp;
+<a href=#421 id=421 data-nosnippet>421</a>/// !isMultiCell()` branch of `ListType.java:195-206`, `SetType.java:185-196`,
+<a href=#422 id=422 data-nosnippet>422</a>/// `MapType.java:310-320` and `UserType.java:436-447`:
+<a href=#423 id=423 data-nosnippet>423</a>///
+<a href=#424 id=424 data-nosnippet>424</a>/// ```text
+<a href=#425 id=425 data-nosnippet>425</a>/// $ grep -rn 'FrozenType.class.getName()' cassandra-5.0.8/src/java
+<a href=#426 id=426 data-nosnippet>426</a>/// .../db/marshal/ListType.java:201        .../db/marshal/MapType.java:316
+<a href=#427 id=427 data-nosnippet>427</a>/// .../db/marshal/SetType.java:191         .../db/marshal/UserType.java:442
+<a href=#428 id=428 data-nosnippet>428</a>/// ```
+<a href=#429 id=429 data-nosnippet>429</a>///
+<a href=#430 id=430 data-nosnippet>430</a>/// (the only other whole-tree hit for the class NAME,
+<a href=#431 id=431 data-nosnippet>431</a>/// `cql3/functions/types/DataTypeClassNameParser.java:49`, is a client-side
+<a href=#432 id=432 data-nosnippet>432</a>/// PARSER constant and prints nothing). Everything else inherits
+<a href=#433 id=433 data-nosnippet>433</a>/// `AbstractType::toString(boolean) { return this.toString(); }`
+<a href=#434 id=434 data-nosnippet>434</a>/// (`AbstractType.java:466-469`), so it can never be wrapped:
+<a href=#435 id=435 data-nosnippet>435</a>///
+<a href=#436 id=436 data-nosnippet>436</a>///  * `TupleType.toString()` is `getClass().getName() +
+<a href=#437 id=437 data-nosnippet>437</a>///    stringifyTypeParameters(types, true)` (`TupleType.java:557-560`) — no
+<a href=#438 id=438 data-nosnippet>438</a>///    wrapper, and it forces `ignoreFreezing` on its own components;
+<a href=#439 id=439 data-nosnippet>439</a>///  * `VectorType.toString(ignoreFreezing)` is `getClass().getName() +
+<a href=#440 id=440 data-nosnippet>440</a>///    stringifyVectorParameters(elementType, ignoreFreezing, dimension)`
+<a href=#441 id=441 data-nosnippet>441</a>///    (`VectorType.java:339-342`) — no wrapper either, so a frozen vector is
+<a href=#442 id=442 data-nosnippet>442</a>///    written as the BARE `VectorType(FloatType , 3)`;
+<a href=#443 id=443 data-nosnippet>443</a>///  * a NESTED `FrozenType(FrozenType(..))` is unprintable: each of the four
+<a href=#444 id=444 data-nosnippet>444</a>///    wrapping types passes `ignoreFreezing || !isMultiCell` down to its own
+<a href=#445 id=445 data-nosnippet>445</a>///    parameters (`ListType.java:203`, `SetType.java:193`, `MapType.java:317`,
+<a href=#446 id=446 data-nosnippet>446</a>///    `UserType.java:444`), so anything under a wrapper is printed with
+<a href=#447 id=447 data-nosnippet>447</a>///    `ignoreFreezing = true` and prints no wrapper of its own. A frozen
+<a href=#448 id=448 data-nosnippet>448</a>///    collection nested in a MULTICELL parent still wraps — that is the corpus's
+<a href=#449 id=449 data-nosnippet>449</a>///    `MapType(FrozenType(SetType(..)),..)` shape, and it is one level of
+<a href=#450 id=450 data-nosnippet>450</a>///    wrapping, not two.
+<a href=#451 id=451 data-nosnippet>451</a>///
+<a href=#452 id=452 data-nosnippet>452</a>/// This is the SAME four-name set the WRITE path derives independently, for the
+<a href=#453 id=453 data-nosnippet>453</a>/// same reason (`stats_writer::marshal::FREEZE_WRAPPED_HEADS`, #4158) — the read
+<a href=#454 id=454 data-nosnippet>454</a>/// gate and the writer must not hold two opinions about what is possible.
+<a href=#455 id=455 data-nosnippet>455</a>///
+<a href=#456 id=456 data-nosnippet>456</a>/// Corroborated, never established, by the corpus: `MapType` 25, `ListType` 16,
+<a href=#457 id=457 data-nosnippet>457</a>/// `UserType` 10, `SetType` 9 over 144 `Statistics.db` — no `TupleType`, no
+<a href=#458 id=458 data-nosnippet>458</a>/// `VectorType`, no nesting (recipe in this module's header). Because a NARROWING
+<a href=#459 id=459 data-nosnippet>459</a>/// can over-refuse where a widening cannot,
+<a href=#460 id=460 data-nosnippet>460</a>/// `frozen_scalar_tests::the_header_gate_never_refuses_a_frozentype_cassandra_wrote`
+<a href=#461 id=461 data-nosnippet>461</a>/// re-derives the accept set from the Cassandra-written bytes themselves.
+<a href=#462 id=462 data-nosnippet>462</a>///
+<a href=#463 id=463 data-nosnippet>463</a>/// # THIS IS A HEAD-CLASS LOOKUP AND CHECKS NO ARGUMENTS — deliberately
+<a href=#464 id=464 data-nosnippet>464</a>/// Unlike the CQL side's [`is_vector_spelling`], which must validate the whole
+<a href=#465 id=465 data-nosnippet>465</a>/// `vector&lt;..&gt;` spelling because the spelling is its only evidence that a `Custom`
+<a href=#466 id=466 data-nosnippet>466</a>/// IS a vector, these names arrive from a marshal string a Cassandra WRITER
+<a href=#467 id=467 data-nosnippet>467</a>/// produced, and the wrapper question they answer is decided by the class alone:
+<a href=#468 id=468 data-nosnippet>468</a>/// `MapType.toString` prints the wrapper whatever its key and value types are.
+<a href=#469 id=469 data-nosnippet>469</a>/// Validating a parameter list belongs to the marshal type parser, not to this
+<a href=#470 id=470 data-nosnippet>470</a>/// gate. Stated so the asymmetry reads as a decision rather than an oversight.
+<a href=#471 id=471 data-nosnippet>471</a></span><span class="kw">const </span>FROZEN_WRAPPABLE_MARSHAL_SIMPLE_NAMES: <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>str] =
+<a href=#472 id=472 data-nosnippet>472</a>    <span class="kw-2">&amp;</span>[<span class="string">"ListType"</span>, <span class="string">"SetType"</span>, <span class="string">"MapType"</span>, <span class="string">"UserType"</span>];
+<a href=#473 id=473 data-nosnippet>473</a>
+<a href=#474 id=474 data-nosnippet>474</a><span class="doccomment">/// The canonical Cassandra marshal package. A `FrozenType` inner head must be
+<a href=#475 id=475 data-nosnippet>475</a>/// either a BARE simple name or this package's — the same package rule
+<a href=#476 id=476 data-nosnippet>476</a>/// `row_decoder::udt::marshal_name` enforces, and for the same reason: a
+<a href=#477 id=477 data-nosnippet>477</a>/// third-party `com.acme.SetType` is not Cassandra's `SetType` and must not be
+<a href=#478 id=478 data-nosnippet>478</a>/// read as if it were (#28, roborev job 76).
+<a href=#479 id=479 data-nosnippet>479</a></span><span class="kw">const </span>MARSHAL_PACKAGE: <span class="kw-2">&amp;</span>str = <span class="string">"org.apache.cassandra.db.marshal."</span>;
+<a href=#480 id=480 data-nosnippet>480</a>
+<a href=#481 id=481 data-nosnippet>481</a><span class="doccomment">/// Refuse a `Statistics.db` SerializationHeader type string that freezes a
+<a href=#482 id=482 data-nosnippet>482</a>/// non-freezable type, ANYWHERE inside it — fail-closed.
+<a href=#483 id=483 data-nosnippet>483</a>///
+<a href=#484 id=484 data-nosnippet>484</a>/// Scans EVERY `FrozenType(` occurrence rather than only a leading one, because a
+<a href=#485 id=485 data-nosnippet>485</a>/// header type string nests: the frozen wrapper can sit on a map key
+<a href=#486 id=486 data-nosnippet>486</a>/// (`MapType(FrozenType(Int32Type),Int32Type)`), on a collection element, or on a
+<a href=#487 id=487 data-nosnippet>487</a>/// UDT field (`UserType(ks,name,f:FrozenType(Int32Type))`) — and the UDT case is
+<a href=#488 id=488 data-nosnippet>488</a>/// exactly the one a leading-prefix check would miss, since
+<a href=#489 id=489 data-nosnippet>489</a>/// `convert_marshal_type_to_cql` returns a `UserType`-bearing string verbatim
+<a href=#490 id=490 data-nosnippet>490</a>/// without descending into it.
+<a href=#491 id=491 data-nosnippet>491</a>///
+<a href=#492 id=492 data-nosnippet>492</a>/// Fail-closed in every direction: an EMPTY inner (`FrozenType()`), an unbalanced
+<a href=#493 id=493 data-nosnippet>493</a>/// parenthesis, a non-canonical package and an unrecognised head are each refused
+<a href=#494 id=494 data-nosnippet>494</a>/// rather than allowed through.
+<a href=#495 id=495 data-nosnippet>495</a>///
+<a href=#496 id=496 data-nosnippet>496</a>/// # THE SCAN'S BOUND, STATED RATHER THAN IMPLIED
+<a href=#497 id=497 data-nosnippet>497</a>/// The marker is a plain substring search for `FrozenType(`, so it assumes the
+<a href=#498 id=498 data-nosnippet>498</a>/// marshal grammar in which a `(` follows only a CLASS NAME. That holds for
+<a href=#499 id=499 data-nosnippet>499</a>/// everything Cassandra writes: a keyspace or UDT name cannot contain `(`, and a
+<a href=#500 id=500 data-nosnippet>500</a>/// UDT's FIELD names are hex-encoded. It is NOT proven for a third-party CUSTOM
+<a href=#501 id=501 data-nosnippet>501</a>/// class free to put arbitrary text inside its own parameters — such a class would
+<a href=#502 id=502 data-nosnippet>502</a>/// have to embed the literal `FrozenType(` to be affected, and the outcome would be
+<a href=#503 id=503 data-nosnippet>503</a>/// a refusal (fail-closed), never a silent misread. The `FrozenType(` marker itself is matched
+<a href=#504 id=504 data-nosnippet>504</a>/// case-insensitively (as `extract_frozen_inner_type` does), and the inner head is
+<a href=#505 id=505 data-nosnippet>505</a>/// compared case-insensitively against the table above for the same reason: a
+<a href=#506 id=506 data-nosnippet>506</a>/// spelling this crate would not decode as `SetType` must not be admitted as one.
+<a href=#507 id=507 data-nosnippet>507</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>validate_marshal_frozen(marshal: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
+<a href=#508 id=508 data-nosnippet>508</a>    <span class="kw">const </span>MARKER: <span class="kw-2">&amp;</span>str = <span class="string">"frozentype("</span>;
+<a href=#509 id=509 data-nosnippet>509</a>    <span class="kw">let </span>lower = marshal.to_ascii_lowercase();
+<a href=#510 id=510 data-nosnippet>510</a>    <span class="kw">let </span><span class="kw-2">mut </span>search_from = <span class="number">0usize</span>;
+<a href=#511 id=511 data-nosnippet>511</a>    <span class="kw">while let </span><span class="prelude-val">Some</span>(rel) = lower[search_from..].find(MARKER) {
+<a href=#512 id=512 data-nosnippet>512</a>        <span class="kw">let </span>open = search_from + rel + MARKER.len();
+<a href=#513 id=513 data-nosnippet>513</a>        <span class="comment">// Advance past THIS marker whatever the outcome, so a nested
+<a href=#514 id=514 data-nosnippet>514</a>        // `FrozenType(FrozenType(..))` is inspected at both levels and the loop
+<a href=#515 id=515 data-nosnippet>515</a>        // always makes progress.
+<a href=#516 id=516 data-nosnippet>516</a>        </span>search_from = open;
+<a href=#517 id=517 data-nosnippet>517</a>        <span class="kw">let </span>inner = balanced_inner(<span class="kw-2">&amp;</span>marshal[open..]).ok_or_else(|| {
+<a href=#518 id=518 data-nosnippet>518</a>            Error::schema(<span class="macro">format!</span>(
+<a href=#519 id=519 data-nosnippet>519</a>                <span class="string">"unreadable SerializationHeader type '{marshal}': a FrozenType(…) has no \
+<a href=#520 id=520 data-nosnippet>520</a>                 matching close parenthesis, so what it freezes cannot be checked — {CITATION}"
+<a href=#521 id=521 data-nosnippet>521</a>            </span>))
+<a href=#522 id=522 data-nosnippet>522</a>        })<span class="question-mark">?</span>;
+<a href=#523 id=523 data-nosnippet>523</a>        <span class="kw">let </span>inner = inner.trim();
+<a href=#524 id=524 data-nosnippet>524</a>        <span class="kw">if </span>!marshal_head_takes_frozen_wrapper(inner) {
+<a href=#525 id=525 data-nosnippet>525</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(Error::schema(<span class="macro">format!</span>(
+<a href=#526 id=526 data-nosnippet>526</a>                <span class="string">"SerializationHeader type '{marshal}' is not writable by Cassandra: it spells \
+<a href=#527 id=527 data-nosnippet>527</a>                 FrozenType({inner}), and no Cassandra writer prints a FrozenType(…) wrapper \
+<a href=#528 id=528 data-nosnippet>528</a>                 around '{inner}' — {WRITER_CITATION}. The companion CQL rule, which \
+<a href=#529 id=529 data-nosnippet>529</a>                 decides what is DECLARABLE rather than what is written: {CITATION}"
+<a href=#530 id=530 data-nosnippet>530</a>            </span>)));
+<a href=#531 id=531 data-nosnippet>531</a>        }
+<a href=#532 id=532 data-nosnippet>532</a>    }
+<a href=#533 id=533 data-nosnippet>533</a>    <span class="prelude-val">Ok</span>(())
+<a href=#534 id=534 data-nosnippet>534</a>}
+<a href=#535 id=535 data-nosnippet>535</a>
+<a href=#536 id=536 data-nosnippet>536</a><span class="doccomment">/// The content of a parenthesised group whose opening `(` has already been
+<a href=#537 id=537 data-nosnippet>537</a>/// consumed, or `None` if the parentheses do not balance.
+<a href=#538 id=538 data-nosnippet>538</a></span><span class="kw">fn </span>balanced_inner(after_open: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>str&gt; {
+<a href=#539 id=539 data-nosnippet>539</a>    <span class="kw">let </span><span class="kw-2">mut </span>depth = <span class="number">1usize</span>;
+<a href=#540 id=540 data-nosnippet>540</a>    <span class="kw">for </span>(idx, ch) <span class="kw">in </span>after_open.char_indices() {
+<a href=#541 id=541 data-nosnippet>541</a>        <span class="kw">match </span>ch {
+<a href=#542 id=542 data-nosnippet>542</a>            <span class="string">'(' </span>=&gt; depth += <span class="number">1</span>,
+<a href=#543 id=543 data-nosnippet>543</a>            <span class="string">')' </span>=&gt; {
+<a href=#544 id=544 data-nosnippet>544</a>                depth -= <span class="number">1</span>;
+<a href=#545 id=545 data-nosnippet>545</a>                <span class="kw">if </span>depth == <span class="number">0 </span>{
+<a href=#546 id=546 data-nosnippet>546</a>                    <span class="kw">return </span><span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>after_open[..idx]);
+<a href=#547 id=547 data-nosnippet>547</a>                }
+<a href=#548 id=548 data-nosnippet>548</a>            }
+<a href=#549 id=549 data-nosnippet>549</a>            <span class="kw">_ </span>=&gt; {}
+<a href=#550 id=550 data-nosnippet>550</a>        }
+<a href=#551 id=551 data-nosnippet>551</a>    }
+<a href=#552 id=552 data-nosnippet>552</a>    <span class="prelude-val">None
+<a href=#553 id=553 data-nosnippet>553</a></span>}
+<a href=#554 id=554 data-nosnippet>554</a>
+<a href=#555 id=555 data-nosnippet>555</a><span class="doccomment">/// Whether a MARSHAL type string's head class overrides `freeze()`.
+<a href=#556 id=556 data-nosnippet>556</a>///
+<a href=#557 id=557 data-nosnippet>557</a>/// The leading `[` and `(` the header sometimes prefixes a comparator with are
+<a href=#558 id=558 data-nosnippet>558</a>/// stripped first, mirroring `convert_marshal_type_to_cql`'s own
+<a href=#559 id=559 data-nosnippet>559</a>/// `strip_wrapping_parens` (roborev jobs 43/48): a normalization one reader applies
+<a href=#560 id=560 data-nosnippet>560</a>/// and another does not is how two readers form two opinions about one string.
+<a href=#561 id=561 data-nosnippet>561</a></span><span class="kw">fn </span>marshal_head_takes_frozen_wrapper(inner: <span class="kw-2">&amp;</span>str) -&gt; bool {
+<a href=#562 id=562 data-nosnippet>562</a>    <span class="kw">let </span>inner = inner.trim().trim_start_matches([<span class="string">'['</span>, <span class="string">'('</span>]).trim_start();
+<a href=#563 id=563 data-nosnippet>563</a>    <span class="comment">// The head is everything before the first `(` (a parameterised class) or the
+<a href=#564 id=564 data-nosnippet>564</a>    // whole string (a bare class name).
+<a href=#565 id=565 data-nosnippet>565</a>    </span><span class="kw">let </span>head = <span class="kw">match </span>inner.find(<span class="string">'('</span>) {
+<a href=#566 id=566 data-nosnippet>566</a>        <span class="prelude-val">Some</span>(i) =&gt; <span class="kw-2">&amp;</span>inner[..i],
+<a href=#567 id=567 data-nosnippet>567</a>        <span class="prelude-val">None </span>=&gt; inner,
+<a href=#568 id=568 data-nosnippet>568</a>    }
+<a href=#569 id=569 data-nosnippet>569</a>    .trim();
+<a href=#570 id=570 data-nosnippet>570</a>    <span class="comment">// THE PACKAGE RULE. A bare simple name, or the canonical package — nothing else.
+<a href=#571 id=571 data-nosnippet>571</a>    </span><span class="kw">let </span>simple = <span class="kw">if let </span><span class="prelude-val">Some</span>(rest) = head.strip_prefix(MARSHAL_PACKAGE) {
+<a href=#572 id=572 data-nosnippet>572</a>        rest
+<a href=#573 id=573 data-nosnippet>573</a>    } <span class="kw">else if </span>head.contains(<span class="string">'.'</span>) {
+<a href=#574 id=574 data-nosnippet>574</a>        <span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#575 id=575 data-nosnippet>575</a>    } <span class="kw">else </span>{
+<a href=#576 id=576 data-nosnippet>576</a>        head
+<a href=#577 id=577 data-nosnippet>577</a>    };
+<a href=#578 id=578 data-nosnippet>578</a>    FROZEN_WRAPPABLE_MARSHAL_SIMPLE_NAMES
+<a href=#579 id=579 data-nosnippet>579</a>        .iter()
+<a href=#580 id=580 data-nosnippet>580</a>        .any(|n| n.eq_ignore_ascii_case(simple))
+<a href=#581 id=581 data-nosnippet>581</a>}
+</code></pre></div></section></main></body></html>

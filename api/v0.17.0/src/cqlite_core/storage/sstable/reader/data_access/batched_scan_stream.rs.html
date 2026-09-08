@@ -1,0 +1,374 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/data_access/batched_scan_stream.rs`."><title>batched_scan_stream.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../../../../" data-static-root-path="../../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../../src-files.js"></script><script defer src="../../../../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/data_access/</div>batched_scan_stream.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! The BATCHED streaming scan (`scan_stream_batched`, issue #1592 Epic F/F2) — the
+<a href=#2 id=2 data-nosnippet>2</a>//! additive companion to the per-row `scan_stream` whose channel item is a `Vec`
+<a href=#3 id=3 data-nosnippet>3</a>//! BATCH of `(RowKey, ScanRow)` entries rather than a single entry.
+<a href=#4 id=4 data-nosnippet>4</a>//!
+<a href=#5 id=5 data-nosnippet>5</a>//! Split out of `sequential.rs` (campsite rule, epic #1116) alongside its per-row
+<a href=#6 id=6 data-nosnippet>6</a>//! sibling `per_row_scan_stream.rs`: that file is well over the ~800-line source
+<a href=#7 id=7 data-nosnippet>7</a>//! target, and the batched streaming scan is the same self-contained responsibility
+<a href=#8 id=8 data-nosnippet>8</a>//! — one spawned producer task per reader, feeding a bounded channel, with the
+<a href=#9 id=9 data-nosnippet>9</a>//! format branch (BTI trie walk / windowed stitch / block-by-block) chosen inside it.
+<a href=#10 id=10 data-nosnippet>10</a>//!
+<a href=#11 id=11 data-nosnippet>11</a>//! # Issue #3109: the BTI (`da`) dispatch
+<a href=#12 id=12 data-nosnippet>12</a>//!
+<a href=#13 id=13 data-nosnippet>13</a>//! This surface shipped WITHOUT the `bti_partitions_db.is_some()` dispatch that
+<a href=#14 id=14 data-nosnippet>14</a>//! `scan` and `run_scan_stream` have, so a `da` reader fell straight into the
+<a href=#15 id=15 data-nosnippet>15</a>//! non-stitching block loop and decoded through the `V5UncompressedOA` state
+<a href=#16 id=16 data-nosnippet>16</a>//! machine — which honours neither `read_shadowing` nor a caller-pinned read clock.
+<a href=#17 id=17 data-nosnippet>17</a>//! A BTI table streamed here was therefore read UNSHADOWED. Both streaming surfaces
+<a href=#18 id=18 data-nosnippet>18</a>//! now share ONE dispatch, [`SSTableReader::stream_bti_scan`], so a third divergent
+<a href=#19 id=19 data-nosnippet>19</a>//! copy of this decision cannot drift again (the #1577 class).
+<a href=#20 id=20 data-nosnippet>20</a>//!
+<a href=#21 id=21 data-nosnippet>21</a>//! Included via `#[path = "batched_scan_stream.rs"] pub(super) mod batched_scan_stream;`
+<a href=#22 id=22 data-nosnippet>22</a>//! in [`super`], so it shares `sequential.rs`'s imports through `use super::*`.
+<a href=#23 id=23 data-nosnippet>23</a>//!
+<a href=#24 id=24 data-nosnippet>24</a>//! # Why the module is `pub(super)` (issue #3384)
+<a href=#25 id=25 data-nosnippet>25</a>//!
+<a href=#26 id=26 data-nosnippet>26</a>//! [`batched_channel_capacity`] is the SINGLE definition of this surface's channel
+<a href=#27 id=27 data-nosnippet>27</a>//! sizing, and `summary_scan::query_rows` derives its exported read-ahead bound
+<a href=#28 id=28 data-nosnippet>28</a>//! ([`QUERY_ROWS_MAX_READ_AHEAD`](crate::storage::sstable::reader::QUERY_ROWS_MAX_READ_AHEAD))
+<a href=#29 id=29 data-nosnippet>29</a>//! from it rather than restating the arithmetic. `pub(super)` is the narrowest
+<a href=#30 id=30 data-nosnippet>30</a>//! visibility that reaches that sibling; the prose lives here rather than beside
+<a href=#31 id=31 data-nosnippet>31</a>//! the `mod` declaration because `sequential.rs` is 1319 lines, already over the
+<a href=#32 id=32 data-nosnippet>32</a>//! campsite threshold (epic #1116), and this file is not.
+<a href=#33 id=33 data-nosnippet>33</a>
+<a href=#34 id=34 data-nosnippet>34</a></span><span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#35 id=35 data-nosnippet>35</a>
+<a href=#36 id=36 data-nosnippet>36</a><span class="doccomment">/// Publishes detached-scan completion on drop — see the spawn site (issue #3384).
+<a href=#37 id=37 data-nosnippet>37</a></span><span class="kw">struct </span>ScanTaskDone;
+<a href=#38 id=38 data-nosnippet>38</a>
+<a href=#39 id=39 data-nosnippet>39</a><span class="kw">impl </span>Drop <span class="kw">for </span>ScanTaskDone {
+<a href=#40 id=40 data-nosnippet>40</a>    <span class="kw">fn </span>drop(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
+<a href=#41 id=41 data-nosnippet>41</a>        <span class="kw">crate</span>::storage::read_path_probe::mark_batched_scan_finished();
+<a href=#42 id=42 data-nosnippet>42</a>    }
+<a href=#43 id=43 data-nosnippet>43</a>}
+<a href=#44 id=44 data-nosnippet>44</a>
+<a href=#45 id=45 data-nosnippet>45</a><span class="doccomment">/// Batches the public BATCHED-scan channel below holds for a given `buffer_size`.
+<a href=#46 id=46 data-nosnippet>46</a>///
+<a href=#47 id=47 data-nosnippet>47</a>/// Sizing the channel to `ceil(buffer_size / BATCH_EMIT_ROWS)` batches keeps its
+<a href=#48 id=48 data-nosnippet>48</a>/// resident-row budget comparable to the per-row surface's `buffer_size` rather
+<a href=#49 id=49 data-nosnippet>49</a>/// than `buffer_size * BATCH_EMIT_ROWS`.
+<a href=#50 id=50 data-nosnippet>50</a>///
+<a href=#51 id=51 data-nosnippet>51</a>/// A `const fn` with ONE definition because the query-row stream's exported
+<a href=#52 id=52 data-nosnippet>52</a>/// read-ahead bound
+<a href=#53 id=53 data-nosnippet>53</a>/// ([`QUERY_ROWS_MAX_READ_AHEAD`](crate::storage::sstable::reader::QUERY_ROWS_MAX_READ_AHEAD))
+<a href=#54 id=54 data-nosnippet>54</a>/// is derived from it. A second copy of this arithmetic could drift from the
+<a href=#55 id=55 data-nosnippet>55</a>/// channel the constructor actually builds — which is precisely how a documented
+<a href=#56 id=56 data-nosnippet>56</a>/// read-ahead bound becomes silently wrong (issue #3384).
+<a href=#57 id=57 data-nosnippet>57</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">const fn </span>batched_channel_capacity(buffer_size: usize) -&gt; usize {
+<a href=#58 id=58 data-nosnippet>58</a>    <span class="kw">let </span>cap = buffer_size.div_ceil(BATCH_EMIT_ROWS);
+<a href=#59 id=59 data-nosnippet>59</a>    <span class="kw">if </span>cap == <span class="number">0 </span>{
+<a href=#60 id=60 data-nosnippet>60</a>        <span class="number">1
+<a href=#61 id=61 data-nosnippet>61</a>    </span>} <span class="kw">else </span>{
+<a href=#62 id=62 data-nosnippet>62</a>        cap
+<a href=#63 id=63 data-nosnippet>63</a>    }
+<a href=#64 id=64 data-nosnippet>64</a>}
+<a href=#65 id=65 data-nosnippet>65</a>
+<a href=#66 id=66 data-nosnippet>66</a><span class="kw">impl </span>SSTableReader {
+<a href=#67 id=67 data-nosnippet>67</a>    <span class="doccomment">/// Batched streaming scan (issue #1592, Epic F/F2): the additive companion to
+<a href=#68 id=68 data-nosnippet>68</a>    /// [`scan_stream`](Self::scan_stream) whose channel item is a `Vec` BATCH of
+<a href=#69 id=69 data-nosnippet>69</a>    /// `(RowKey, ScanRow)` entries rather than a single entry. Forwarding one batch
+<a href=#70 id=70 data-nosnippet>70</a>    /// per channel send collapses the one-async-wake-per-row cost the internal
+<a href=#71 id=71 data-nosnippet>71</a>    /// windowed pipeline (issue #1143) was designed to amortize but the public
+<a href=#72 id=72 data-nosnippet>72</a>    /// forwarder then re-flattened away.
+<a href=#73 id=73 data-nosnippet>73</a>    ///
+<a href=#74 id=74 data-nosnippet>74</a>    /// Order and content are identical to [`scan_stream`](Self::scan_stream):
+<a href=#75 id=75 data-nosnippet>75</a>    /// flattening the batches yields exactly the per-row stream. Backpressure is
+<a href=#76 id=76 data-nosnippet>76</a>    /// preserved — the channel is bounded (in BATCHES) and every send observes it.
+<a href=#77 id=77 data-nosnippet>77</a>    </span><span class="kw">pub fn </span>scan_stream_batched(
+<a href=#78 id=78 data-nosnippet>78</a>        <span class="self">self</span>: std::sync::Arc&lt;<span class="self">Self</span>&gt;,
+<a href=#79 id=79 data-nosnippet>79</a>        table_id: TableId,
+<a href=#80 id=80 data-nosnippet>80</a>        start_key: <span class="prelude-ty">Option</span>&lt;RowKey&gt;,
+<a href=#81 id=81 data-nosnippet>81</a>        end_key: <span class="prelude-ty">Option</span>&lt;RowKey&gt;,
+<a href=#82 id=82 data-nosnippet>82</a>        schema: <span class="prelude-ty">Option</span>&lt;<span class="kw">crate</span>::schema::TableSchema&gt;,
+<a href=#83 id=83 data-nosnippet>83</a>        buffer_size: usize,
+<a href=#84 id=84 data-nosnippet>84</a>    ) -&gt; BatchedScanStream {
+<a href=#85 id=85 data-nosnippet>85</a>        <span class="self">self</span>.scan_stream_batched_admitted(
+<a href=#86 id=86 data-nosnippet>86</a>            table_id,
+<a href=#87 id=87 data-nosnippet>87</a>            start_key,
+<a href=#88 id=88 data-nosnippet>88</a>            end_key,
+<a href=#89 id=89 data-nosnippet>89</a>            schema,
+<a href=#90 id=90 data-nosnippet>90</a>            buffer_size,
+<a href=#91 id=91 data-nosnippet>91</a>            ScanAdmission::Acquire,
+<a href=#92 id=92 data-nosnippet>92</a>            <span class="prelude-val">None</span>,
+<a href=#93 id=93 data-nosnippet>93</a>            <span class="kw">crate</span>::storage::sstable::reader::ScanErrorReporting::TopLevel,
+<a href=#94 id=94 data-nosnippet>94</a>        )
+<a href=#95 id=95 data-nosnippet>95</a>    }
+<a href=#96 id=96 data-nosnippet>96</a>
+<a href=#97 id=97 data-nosnippet>97</a>    <span class="doccomment">/// [`scan_stream_batched`](Self::scan_stream_batched) with an explicit
+<a href=#98 id=98 data-nosnippet>98</a>    /// admission context (issue #1594), mirroring
+<a href=#99 id=99 data-nosnippet>99</a>    /// [`scan_stream_admitted`](Self::scan_stream_admitted).
+<a href=#100 id=100 data-nosnippet>100</a>    /// `now_secs` (issue #3058): a caller-pinned read-time TTL clock, threaded to
+<a href=#101 id=101 data-nosnippet>101</a>    /// the read-shadowing decoder so a caller that already captured ONE
+<a href=#102 id=102 data-nosnippet>102</a>    /// reconciliation instant for the request (the Flight single-source fast
+<a href=#103 id=103 data-nosnippet>103</a>    /// path) expires TTL cells at exactly that instant instead of an ambient
+<a href=#104 id=104 data-nosnippet>104</a>    /// wall-clock sample. `None` keeps the ambient sample.
+<a href=#105 id=105 data-nosnippet>105</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>scan_stream_batched_admitted(
+<a href=#106 id=106 data-nosnippet>106</a>        <span class="self">self</span>: std::sync::Arc&lt;<span class="self">Self</span>&gt;,
+<a href=#107 id=107 data-nosnippet>107</a>        table_id: TableId,
+<a href=#108 id=108 data-nosnippet>108</a>        start_key: <span class="prelude-ty">Option</span>&lt;RowKey&gt;,
+<a href=#109 id=109 data-nosnippet>109</a>        end_key: <span class="prelude-ty">Option</span>&lt;RowKey&gt;,
+<a href=#110 id=110 data-nosnippet>110</a>        schema: <span class="prelude-ty">Option</span>&lt;<span class="kw">crate</span>::schema::TableSchema&gt;,
+<a href=#111 id=111 data-nosnippet>111</a>        buffer_size: usize,
+<a href=#112 id=112 data-nosnippet>112</a>        admission: ScanAdmission,
+<a href=#113 id=113 data-nosnippet>113</a>        now_secs: <span class="prelude-ty">Option</span>&lt;i64&gt;,
+<a href=#114 id=114 data-nosnippet>114</a>        <span class="comment">// Issue #1704: whether anything ENCLOSES this stream. NOT derivable from
+<a href=#115 id=115 data-nosnippet>115</a>        // `admission` — `query_rows` consumes an `Exempt` stream directly.
+<a href=#116 id=116 data-nosnippet>116</a>        </span>reporting: <span class="kw">crate</span>::storage::sstable::reader::ScanErrorReporting,
+<a href=#117 id=117 data-nosnippet>117</a>    ) -&gt; BatchedScanStream {
+<a href=#118 id=118 data-nosnippet>118</a>        <span class="comment">// The public channel carries BATCHES (see `batched_channel_capacity`,
+<a href=#119 id=119 data-nosnippet>119</a>        // which is the SINGLE definition of this sizing — the query-row stream's
+<a href=#120 id=120 data-nosnippet>120</a>        // exported read-ahead bound is derived from the same `const fn`).
+<a href=#121 id=121 data-nosnippet>121</a>        </span><span class="kw">let </span>cap = batched_channel_capacity(buffer_size);
+<a href=#122 id=122 data-nosnippet>122</a>        <span class="kw">let </span>(tx, rx) = mpsc::channel(cap);
+<a href=#123 id=123 data-nosnippet>123</a>        <span class="comment">// Read-metric grain (issue #1701): identical rule to the per-row surface —
+<a href=#124 id=124 data-nosnippet>124</a>        // an `Acquire` scan is the top-level read OPERATION and is measured with
+<a href=#125 id=125 data-nosnippet>125</a>        // this reader's format label; an `Exempt` sub-scan is not (its merge is).
+<a href=#126 id=126 data-nosnippet>126</a>        // Sampled before `self` moves into the task below.
+<a href=#127 id=127 data-nosnippet>127</a>        // START the meter BEFORE the spawn (issue #1701, roborev round 7) — see the
+<a href=#128 id=128 data-nosnippet>128</a>        // per-row sibling: constructed after it, the producer could run before timing
+<a href=#129 id=129 data-nosnippet>129</a>        // began. The format label is still sampled before `self` moves into the task.
+<a href=#130 id=130 data-nosnippet>130</a>        </span><span class="kw">let </span>meter = <span class="kw">match </span>admission {
+<a href=#131 id=131 data-nosnippet>131</a>            ScanAdmission::Acquire =&gt; <span class="prelude-val">Some</span>(<span class="kw">crate</span>::observability::read_metrics::ReadOpMeter::start(
+<a href=#132 id=132 data-nosnippet>132</a>                <span class="prelude-val">Some</span>(<span class="self">self</span>.sstable_format_label()),
+<a href=#133 id=133 data-nosnippet>133</a>            )),
+<a href=#134 id=134 data-nosnippet>134</a>            ScanAdmission::Exempt =&gt; <span class="prelude-val">None</span>,
+<a href=#135 id=135 data-nosnippet>135</a>        };
+<a href=#136 id=136 data-nosnippet>136</a>
+<a href=#137 id=137 data-nosnippet>137</a>        <span class="comment">// Read-PHASE accumulator (issue #1707) — see the per-row sibling for why it
+<a href=#138 id=138 data-nosnippet>138</a>        // is propagated explicitly rather than through a thread-local.
+<a href=#139 id=139 data-nosnippet>139</a>        </span><span class="kw">let </span>phase_sink = meter.as_ref().and_then(|m| m.phase_sink());
+<a href=#140 id=140 data-nosnippet>140</a>
+<a href=#141 id=141 data-nosnippet>141</a>        <span class="comment">// CAUSAL completion signal for THIS detached task (issue #3384, roborev).
+<a href=#142 id=142 data-nosnippet>142</a>        // `BatchedScanStream` is dropped without joining its task, so a consumer that
+<a href=#143 id=143 data-nosnippet>143</a>        // stopped reading cannot otherwise tell "the scan finished" from "the scan is
+<a href=#144 id=144 data-nosnippet>144</a>        // descheduled between two increments".
+<a href=#145 id=145 data-nosnippet>145</a>        //
+<a href=#146 id=146 data-nosnippet>146</a>        // A DROP guard, not a statement at the end of the block, because the common exit
+<a href=#147 id=147 data-nosnippet>147</a>        // here is CANCELLATION, not completion: the query-row producer owns a
+<a href=#148 id=148 data-nosnippet>148</a>        // `current_thread` runtime and drops it as it returns, cancelling this future at
+<a href=#149 id=149 data-nosnippet>149</a>        // its next await — a trailing statement would never run. Measured: it never fired.
+<a href=#150 id=150 data-nosnippet>150</a>        //
+<a href=#151 id=151 data-nosnippet>151</a>        // Constructed BEFORE `tokio::spawn` and moved in (roborev): a future dropped
+<a href=#152 id=152 data-nosnippet>152</a>        // before its FIRST POLL — a runtime shut down between spawn and schedule — would
+<a href=#153 id=153 data-nosnippet>153</a>        // otherwise never construct the guard, so nothing would publish and every waiter
+<a href=#154 id=154 data-nosnippet>154</a>        // would time out. Owning it outside the async block makes the guard's lifetime
+<a href=#155 id=155 data-nosnippet>155</a>        // the TASK's, not the body's.
+<a href=#156 id=156 data-nosnippet>156</a>        </span><span class="kw">let </span>done = ScanTaskDone;
+<a href=#157 id=157 data-nosnippet>157</a>        <span class="kw">let </span>task = tokio::spawn(<span class="kw">async move </span>{
+<a href=#158 id=158 data-nosnippet>158</a>            <span class="kw">let </span>_done = done;
+<a href=#159 id=159 data-nosnippet>159</a>            <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = <span class="self">self
+<a href=#160 id=160 data-nosnippet>160</a>                </span>.run_scan_stream_batched(
+<a href=#161 id=161 data-nosnippet>161</a>                    table_id,
+<a href=#162 id=162 data-nosnippet>162</a>                    start_key,
+<a href=#163 id=163 data-nosnippet>163</a>                    end_key,
+<a href=#164 id=164 data-nosnippet>164</a>                    schema,
+<a href=#165 id=165 data-nosnippet>165</a>                    tx.clone(),
+<a href=#166 id=166 data-nosnippet>166</a>                    admission,
+<a href=#167 id=167 data-nosnippet>167</a>                    now_secs,
+<a href=#168 id=168 data-nosnippet>168</a>                    phase_sink,
+<a href=#169 id=169 data-nosnippet>169</a>                )
+<a href=#170 id=170 data-nosnippet>170</a>                .<span class="kw">await
+<a href=#171 id=171 data-nosnippet>171</a>            </span>{
+<a href=#172 id=172 data-nosnippet>172</a>                <span class="kw">let _ </span>= tx.send(<span class="prelude-val">Err</span>(e)).<span class="kw">await</span>;
+<a href=#173 id=173 data-nosnippet>173</a>            }
+<a href=#174 id=174 data-nosnippet>174</a>        });
+<a href=#175 id=175 data-nosnippet>175</a>        <span class="kw">match </span>meter {
+<a href=#176 id=176 data-nosnippet>176</a>            <span class="prelude-val">Some</span>(meter) =&gt; BatchedScanStream::new_measured_batches(rx, task, meter),
+<a href=#177 id=177 data-nosnippet>177</a>            <span class="prelude-val">None </span>=&gt; BatchedScanStream::unmetered_as(rx, task, reporting),
+<a href=#178 id=178 data-nosnippet>178</a>        }
+<a href=#179 id=179 data-nosnippet>179</a>    }
+<a href=#180 id=180 data-nosnippet>180</a>
+<a href=#181 id=181 data-nosnippet>181</a>    <span class="kw">async fn </span>run_scan_stream_batched(
+<a href=#182 id=182 data-nosnippet>182</a>        <span class="self">self</span>: std::sync::Arc&lt;<span class="self">Self</span>&gt;,
+<a href=#183 id=183 data-nosnippet>183</a>        table_id: TableId,
+<a href=#184 id=184 data-nosnippet>184</a>        start_key: <span class="prelude-ty">Option</span>&lt;RowKey&gt;,
+<a href=#185 id=185 data-nosnippet>185</a>        end_key: <span class="prelude-ty">Option</span>&lt;RowKey&gt;,
+<a href=#186 id=186 data-nosnippet>186</a>        schema: <span class="prelude-ty">Option</span>&lt;<span class="kw">crate</span>::schema::TableSchema&gt;,
+<a href=#187 id=187 data-nosnippet>187</a>        tx: mpsc::Sender&lt;<span class="prelude-ty">Result</span>&lt;Vec&lt;(RowKey, ScanRow)&gt;&gt;&gt;,
+<a href=#188 id=188 data-nosnippet>188</a>        admission: ScanAdmission,
+<a href=#189 id=189 data-nosnippet>189</a>        <span class="comment">// Issue #3058: caller-pinned read-time TTL clock (`None` = ambient).
+<a href=#190 id=190 data-nosnippet>190</a>        </span>now_secs: <span class="prelude-ty">Option</span>&lt;i64&gt;,
+<a href=#191 id=191 data-nosnippet>191</a>        <span class="comment">// This scan operation's read-phase accumulator (issue #1707), or `None`.
+<a href=#192 id=192 data-nosnippet>192</a>        </span>phase_sink: <span class="prelude-ty">Option</span>&lt;std::sync::Arc&lt;<span class="kw">crate</span>::observability::ReadPhaseTimings&gt;&gt;,
+<a href=#193 id=193 data-nosnippet>193</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
+<a href=#194 id=194 data-nosnippet>194</a>        <span class="comment">// Admission control (issue #1594, F4): identical discipline to the per-row
+<a href=#195 id=195 data-nosnippet>195</a>        // `run_scan_stream` — one permit per top-level scan operation, held via RAII.
+<a href=#196 id=196 data-nosnippet>196</a>        </span><span class="kw">let </span>_admission = <span class="kw">match </span>admission {
+<a href=#197 id=197 data-nosnippet>197</a>            ScanAdmission::Acquire =&gt; <span class="prelude-val">Some</span>(scan_admission::admit().<span class="kw">await</span>),
+<a href=#198 id=198 data-nosnippet>198</a>            ScanAdmission::Exempt =&gt; <span class="prelude-val">None</span>,
+<a href=#199 id=199 data-nosnippet>199</a>        };
+<a href=#200 id=200 data-nosnippet>200</a>        <span class="kw">let </span>_scan = <span class="self">self</span>.begin_scan(); <span class="comment">// #3853 scan-lifetime madvise seam
+<a href=#201 id=201 data-nosnippet>201</a>
+<a href=#202 id=202 data-nosnippet>202</a>        </span><span class="kw">let </span>cursor = <span class="self">self</span>.open_batched_scan_cursor().<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#203 id=203 data-nosnippet>203</a>
+<a href=#204 id=204 data-nosnippet>204</a>        <span class="comment">// Issue #3109: BTI (`da`) readers take the SAME shared dispatch the per-row
+<a href=#205 id=205 data-nosnippet>205</a>        // surface takes — the authoritative trie walk, with read shadowing and the
+<a href=#206 id=206 data-nosnippet>206</a>        // caller's pinned clock applied — instead of the block-by-block decoder
+<a href=#207 id=207 data-nosnippet>207</a>        // below, whose `V5UncompressedOA` state machine drops BOTH. Gated on the
+<a href=#208 id=208 data-nosnippet>208</a>        // SAME `bti_partitions_db.is_some()` condition `scan` and `run_scan_stream`
+<a href=#209 id=209 data-nosnippet>209</a>        // use, so the three surfaces cannot disagree about which readers are BTI.
+<a href=#210 id=210 data-nosnippet>210</a>        // See [`SSTableReader::stream_bti_scan`] for the full rationale.
+<a href=#211 id=211 data-nosnippet>211</a>        //
+<a href=#212 id=212 data-nosnippet>212</a>        // BEHAVIOR DELTA, stated so it is not a surprise: this branch does NOT apply
+<a href=#213 id=213 data-nosnippet>213</a>        // the `table_ids_match(&amp;entry_table_id, &amp;table_id)` filter the block loop
+<a href=#214 id=214 data-nosnippet>214</a>        // below applies — the trie walk returns no per-entry `TableId` to match on.
+<a href=#215 id=215 data-nosnippet>215</a>        // Safe and consistent with the sibling BTI surfaces (`scan`,
+<a href=#216 id=216 data-nosnippet>216</a>        // `sequential_scan`, `run_scan_stream`), which all skip it for the same
+<a href=#217 id=217 data-nosnippet>217</a>        // reason: every entry in this walk comes from the single SSTable being
+<a href=#218 id=218 data-nosnippet>218</a>        // scanned, so the filter can only ever reject rows that DO belong to it
+<a href=#219 id=219 data-nosnippet>219</a>        // (the parser tags entries from the SSTable header, which may carry a bare
+<a href=#220 id=220 data-nosnippet>220</a>        // or default keyspace/table name rather than the query's qualified form).
+<a href=#221 id=221 data-nosnippet>221</a>        //
+<a href=#222 id=222 data-nosnippet>222</a>        // Placed AFTER `open_batched_scan_cursor` deliberately: that call is this
+<a href=#223 id=223 data-nosnippet>223</a>        // task's single, format-branch-independent fault checkpoint (issue #3106),
+<a href=#224 id=224 data-nosnippet>224</a>        // and moving the BTI return above it would make the checkpoint silently
+<a href=#225 id=225 data-nosnippet>225</a>        // unreachable for `da` readers — the exact "armable but never armed" hazard
+<a href=#226 id=226 data-nosnippet>226</a>        // its doc comment warns about. The cursor is then unused on this branch
+<a href=#227 id=227 data-nosnippet>227</a>        // (`bti_scan_with_metadata` mints its own, issue #815); one open(2) is the
+<a href=#228 id=228 data-nosnippet>228</a>        // price of keeping the checkpoint branch-agnostic.
+<a href=#229 id=229 data-nosnippet>229</a>        </span><span class="kw">if </span><span class="self">self</span>.bti_partitions_db.is_some() {
+<a href=#230 id=230 data-nosnippet>230</a>            drop(cursor);
+<a href=#231 id=231 data-nosnippet>231</a>            <span class="kw">return </span><span class="self">self
+<a href=#232 id=232 data-nosnippet>232</a>                </span>.stream_bti_scan(
+<a href=#233 id=233 data-nosnippet>233</a>                    start_key.as_ref(),
+<a href=#234 id=234 data-nosnippet>234</a>                    end_key.as_ref(),
+<a href=#235 id=235 data-nosnippet>235</a>                    schema.as_ref(),
+<a href=#236 id=236 data-nosnippet>236</a>                    now_secs,
+<a href=#237 id=237 data-nosnippet>237</a>                    <span class="kw-2">&amp;</span>WindowedOut::Batched(tx.clone()),
+<a href=#238 id=238 data-nosnippet>238</a>                )
+<a href=#239 id=239 data-nosnippet>239</a>                .<span class="kw">await</span>;
+<a href=#240 id=240 data-nosnippet>240</a>        }
+<a href=#241 id=241 data-nosnippet>241</a>
+<a href=#242 id=242 data-nosnippet>242</a>        <span class="kw">let </span>header_size = <span class="self">self</span>.calculate_header_size();
+<a href=#243 id=243 data-nosnippet>243</a>        {
+<a href=#244 id=244 data-nosnippet>244</a>            <span class="kw">let </span><span class="kw-2">mut </span>file_guard = cursor.file.lock().<span class="kw">await</span>;
+<a href=#245 id=245 data-nosnippet>245</a>            file_guard.seek(SeekFrom::Start(header_size <span class="kw">as </span>u64)).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#246 id=246 data-nosnippet>246</a>        }
+<a href=#247 id=247 data-nosnippet>247</a>
+<a href=#248 id=248 data-nosnippet>248</a>        <span class="kw">if </span><span class="self">self</span>.requires_chunk_stitching() {
+<a href=#249 id=249 data-nosnippet>249</a>            <span class="comment">// Affirmative branch marker (issue #3384): the detached-scan completion
+<a href=#250 id=250 data-nosnippet>250</a>            // signal does NOT cover this branch's `spawn_blocking` decode, so a test
+<a href=#251 id=251 data-nosnippet>251</a>            // relying on that signal must be able to measure that it did not land here.
+<a href=#252 id=252 data-nosnippet>252</a>            </span><span class="kw">crate</span>::storage::read_path_probe::mark_batched_scan_stitching_path();
+<a href=#253 id=253 data-nosnippet>253</a>            <span class="comment">// Forward the windowed driver's internal batches straight through — no
+<a href=#254 id=254 data-nosnippet>254</a>            // flatten, no re-batch (issue #1592). Same driver, same order/content
+<a href=#255 id=255 data-nosnippet>255</a>            // as the per-row path; only the output surface differs.
+<a href=#256 id=256 data-nosnippet>256</a>            </span><span class="self">self</span>.run_scan_stream_windowed(
+<a href=#257 id=257 data-nosnippet>257</a>                table_id,
+<a href=#258 id=258 data-nosnippet>258</a>                start_key,
+<a href=#259 id=259 data-nosnippet>259</a>                end_key,
+<a href=#260 id=260 data-nosnippet>260</a>                schema,
+<a href=#261 id=261 data-nosnippet>261</a>                <span class="kw-2">&amp;</span>cursor,
+<a href=#262 id=262 data-nosnippet>262</a>                now_secs,
+<a href=#263 id=263 data-nosnippet>263</a>                WindowedOut::Batched(tx.clone()),
+<a href=#264 id=264 data-nosnippet>264</a>                phase_sink,
+<a href=#265 id=265 data-nosnippet>265</a>            )
+<a href=#266 id=266 data-nosnippet>266</a>            .<span class="kw">await
+<a href=#267 id=267 data-nosnippet>267</a>        </span>} <span class="kw">else </span>{
+<a href=#268 id=268 data-nosnippet>268</a>            <span class="comment">// Non-stitching formats read block-by-block; emit surviving entries
+<a href=#269 id=269 data-nosnippet>269</a>            // in BATCH_EMIT_ROWS-capped batches (issue #1592). A block with more
+<a href=#270 id=270 data-nosnippet>270</a>            // than BATCH_EMIT_ROWS surviving entries is split across multiple
+<a href=#271 id=271 data-nosnippet>271</a>            // batches so every emitted batch respects `batch.len() &lt;=
+<a href=#272 id=272 data-nosnippet>272</a>            // BATCH_EMIT_ROWS` (the resident-row budget behind the channel cap);
+<a href=#273 id=273 data-nosnippet>273</a>            // the remainder carries over to the next block so we still wake the
+<a href=#274 id=274 data-nosnippet>274</a>            // consumer at most once per full batch.
+<a href=#275 id=275 data-nosnippet>275</a>            //
+<a href=#276 id=276 data-nosnippet>276</a>            // Confirmed rows from successfully-parsed prior blocks live in `batch`
+<a href=#277 id=277 data-nosnippet>277</a>            // until it fills. If a LATER block's read/parse errors mid-scan, flush
+<a href=#278 id=278 data-nosnippet>278</a>            // those confirmed rows to the consumer BEFORE surfacing the terminal
+<a href=#279 id=279 data-nosnippet>279</a>            // error — matching both the per-row `run_scan_stream` contract (each row
+<a href=#280 id=280 data-nosnippet>280</a>            // is sent the instant it is parsed) and the stitching path's
+<a href=#281 id=281 data-nosnippet>281</a>            // `flush_pending` (issue #1143 / #1592, roborev Finding 1). Propagating
+<a href=#282 id=282 data-nosnippet>282</a>            // the error via `?` here would silently drop up to BATCH_EMIT_ROWS-1
+<a href=#283 id=283 data-nosnippet>283</a>            // confirmed rows.
+<a href=#284 id=284 data-nosnippet>284</a>            </span><span class="kw">let </span><span class="kw-2">mut </span>batch: Vec&lt;(RowKey, ScanRow)&gt; = Vec::with_capacity(BATCH_EMIT_ROWS);
+<a href=#285 id=285 data-nosnippet>285</a>            <span class="comment">// Work-probe (issue #2398, extended by #3058): same "changed partition
+<a href=#286 id=286 data-nosnippet>286</a>            // key = one more partition body decoded" accounting `sequential_scan`
+<a href=#287 id=287 data-nosnippet>287</a>            // does, so the single-source `do_get` fast path's full-ring scan is
+<a href=#288 id=288 data-nosnippet>288</a>            // visible to the scan-work counter instead of silently unrecorded. The
+<a href=#289 id=289 data-nosnippet>289</a>            // BTI branch above keeps the same accounting inside
+<a href=#290 id=290 data-nosnippet>290</a>            // `bti_scan_with_metadata` (issue #3109), so routing `da` readers away
+<a href=#291 id=291 data-nosnippet>291</a>            // from this loop does not make their decode work invisible.
+<a href=#292 id=292 data-nosnippet>292</a>            </span><span class="kw">let </span><span class="kw-2">mut </span>prev_partition_key: <span class="prelude-ty">Option</span>&lt;RowKey&gt; = <span class="prelude-val">None</span>;
+<a href=#293 id=293 data-nosnippet>293</a>            <span class="kw">loop </span>{
+<a href=#294 id=294 data-nosnippet>294</a>                <span class="kw">let </span>block = <span class="kw">match </span><span class="self">self</span>.read_next_block(<span class="kw-2">&amp;</span>cursor).<span class="kw">await </span>{
+<a href=#295 id=295 data-nosnippet>295</a>                    <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(block)) =&gt; block,
+<a href=#296 id=296 data-nosnippet>296</a>                    <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>) =&gt; <span class="kw">break</span>,
+<a href=#297 id=297 data-nosnippet>297</a>                    <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#298 id=298 data-nosnippet>298</a>                        <span class="kw">if </span>!batch.is_empty() {
+<a href=#299 id=299 data-nosnippet>299</a>                            <span class="kw">let _ </span>= tx.send(<span class="prelude-val">Ok</span>(std::mem::take(<span class="kw-2">&amp;mut </span>batch))).<span class="kw">await</span>;
+<a href=#300 id=300 data-nosnippet>300</a>                        }
+<a href=#301 id=301 data-nosnippet>301</a>                        <span class="kw">return </span><span class="prelude-val">Err</span>(e);
+<a href=#302 id=302 data-nosnippet>302</a>                    }
+<a href=#303 id=303 data-nosnippet>303</a>                };
+<a href=#304 id=304 data-nosnippet>304</a>                <span class="comment">// #1695: observe consumer closure once per BLOCK, not only when a
+<a href=#305 id=305 data-nosnippet>305</a>                // batch fills. The four `continue` paths below (table-id mismatch,
+<a href=#306 id=306 data-nosnippet>306</a>                // below `start`, above `end`, tombstone-filtered) never reach a send,
+<a href=#307 id=307 data-nosnippet>307</a>                // and `BATCH_EMIT_ROWS` gates the send even when rows DO survive — so
+<a href=#308 id=308 data-nosnippet>308</a>                // a scan whose filters reject everything read and PARSED every block
+<a href=#309 id=309 data-nosnippet>309</a>                // of the table after the caller already had its `QueryTimeout`.
+<a href=#310 id=310 data-nosnippet>310</a>                //
+<a href=#311 id=311 data-nosnippet>311</a>                // This is the BATCHED sibling of `per_row_scan_stream`'s non-stitching
+<a href=#312 id=312 data-nosnippet>312</a>                // walk and is the surface query execution actually uses, so fixing only
+<a href=#313 id=313 data-nosnippet>313</a>                // the per-row one (as an earlier revision did) left the common path
+<a href=#314 id=314 data-nosnippet>314</a>                // exposed. A plain check suffices: the await above is a bounded disk
+<a href=#315 id=315 data-nosnippet>315</a>                // read that always returns here, not an open-ended wait on another
+<a href=#316 id=316 data-nosnippet>316</a>                // producer.
+<a href=#317 id=317 data-nosnippet>317</a>                </span><span class="kw">if </span>tx.is_closed() {
+<a href=#318 id=318 data-nosnippet>318</a>                    <span class="kw">return </span><span class="prelude-val">Ok</span>(());
+<a href=#319 id=319 data-nosnippet>319</a>                }
+<a href=#320 id=320 data-nosnippet>320</a>                <span class="kw">let </span>entries = <span class="kw">match </span><span class="self">self</span>.parse_batched_block(<span class="kw-2">&amp;</span>block, schema.as_ref(), now_secs) {
+<a href=#321 id=321 data-nosnippet>321</a>                    <span class="prelude-val">Ok</span>(entries) =&gt; entries,
+<a href=#322 id=322 data-nosnippet>322</a>                    <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#323 id=323 data-nosnippet>323</a>                        <span class="kw">if </span>!batch.is_empty() {
+<a href=#324 id=324 data-nosnippet>324</a>                            <span class="kw">let _ </span>= tx.send(<span class="prelude-val">Ok</span>(std::mem::take(<span class="kw-2">&amp;mut </span>batch))).<span class="kw">await</span>;
+<a href=#325 id=325 data-nosnippet>325</a>                        }
+<a href=#326 id=326 data-nosnippet>326</a>                        <span class="kw">return </span><span class="prelude-val">Err</span>(e);
+<a href=#327 id=327 data-nosnippet>327</a>                    }
+<a href=#328 id=328 data-nosnippet>328</a>                };
+<a href=#329 id=329 data-nosnippet>329</a>                <span class="kw">for </span>(entry_table_id, entry_key, entry_value) <span class="kw">in </span>entries {
+<a href=#330 id=330 data-nosnippet>330</a>                    <span class="comment">// Counted BEFORE every filter — including the table-id filter —
+<a href=#331 id=331 data-nosnippet>331</a>                    // exactly like the sibling sites (`sequential_scan`'s two loops
+<a href=#332 id=332 data-nosnippet>332</a>                    // and the stitched walk): the partition body was DECODED
+<a href=#333 id=333 data-nosnippet>333</a>                    // regardless of whether its rows survive, and a `Data.db` whose
+<a href=#334 id=334 data-nosnippet>334</a>                    // entries carry a non-matching `TableId` (path/header keyspace
+<a href=#335 id=335 data-nosnippet>335</a>                    // mismatch, or `scan_table_id`'s `"default"` fallback) must not
+<a href=#336 id=336 data-nosnippet>336</a>                    // report 0 bodies where `sequential_scan` reports N (roborev,
+<a href=#337 id=337 data-nosnippet>337</a>                    // issue #3058).
+<a href=#338 id=338 data-nosnippet>338</a>                    </span><span class="kw">if </span>prev_partition_key.as_ref() != <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>entry_key) {
+<a href=#339 id=339 data-nosnippet>339</a>                        <span class="kw">crate</span>::storage::sstable::work_counters::add_stream_walk_partition_parsed();
+<a href=#340 id=340 data-nosnippet>340</a>                        prev_partition_key = <span class="prelude-val">Some</span>(entry_key.clone());
+<a href=#341 id=341 data-nosnippet>341</a>                    }
+<a href=#342 id=342 data-nosnippet>342</a>                    <span class="kw">if </span>!table_ids_match(<span class="kw-2">&amp;</span>entry_table_id, <span class="kw-2">&amp;</span>table_id) {
+<a href=#343 id=343 data-nosnippet>343</a>                        <span class="kw">continue</span>;
+<a href=#344 id=344 data-nosnippet>344</a>                    }
+<a href=#345 id=345 data-nosnippet>345</a>                    <span class="kw">if let </span><span class="prelude-val">Some</span>(<span class="kw-2">ref </span>start) = start_key {
+<a href=#346 id=346 data-nosnippet>346</a>                        <span class="kw">if </span><span class="kw-2">&amp;</span>entry_key &lt; start {
+<a href=#347 id=347 data-nosnippet>347</a>                            <span class="kw">continue</span>;
+<a href=#348 id=348 data-nosnippet>348</a>                        }
+<a href=#349 id=349 data-nosnippet>349</a>                    }
+<a href=#350 id=350 data-nosnippet>350</a>                    <span class="kw">if let </span><span class="prelude-val">Some</span>(<span class="kw-2">ref </span>end) = end_key {
+<a href=#351 id=351 data-nosnippet>351</a>                        <span class="kw">if </span><span class="kw-2">&amp;</span>entry_key &gt; end {
+<a href=#352 id=352 data-nosnippet>352</a>                            <span class="kw">continue</span>;
+<a href=#353 id=353 data-nosnippet>353</a>                        }
+<a href=#354 id=354 data-nosnippet>354</a>                    }
+<a href=#355 id=355 data-nosnippet>355</a>                    <span class="kw">if </span>!<span class="self">self</span>.filter_tombstone(<span class="kw-2">&amp;</span>entry_value) {
+<a href=#356 id=356 data-nosnippet>356</a>                        <span class="kw">continue</span>;
+<a href=#357 id=357 data-nosnippet>357</a>                    }
+<a href=#358 id=358 data-nosnippet>358</a>                    batch.push((entry_key, entry_value));
+<a href=#359 id=359 data-nosnippet>359</a>                    <span class="kw">if </span>batch.len() &gt;= BATCH_EMIT_ROWS {
+<a href=#360 id=360 data-nosnippet>360</a>                        <span class="kw">if </span>tx.send(<span class="prelude-val">Ok</span>(std::mem::take(<span class="kw-2">&amp;mut </span>batch))).<span class="kw">await</span>.is_err() {
+<a href=#361 id=361 data-nosnippet>361</a>                            <span class="kw">return </span><span class="prelude-val">Ok</span>(()); <span class="comment">// consumer dropped
+<a href=#362 id=362 data-nosnippet>362</a>                        </span>}
+<a href=#363 id=363 data-nosnippet>363</a>                        batch.reserve(BATCH_EMIT_ROWS);
+<a href=#364 id=364 data-nosnippet>364</a>                    }
+<a href=#365 id=365 data-nosnippet>365</a>                }
+<a href=#366 id=366 data-nosnippet>366</a>            }
+<a href=#367 id=367 data-nosnippet>367</a>            <span class="kw">if </span>!batch.is_empty() &amp;&amp; tx.send(<span class="prelude-val">Ok</span>(batch)).<span class="kw">await</span>.is_err() {
+<a href=#368 id=368 data-nosnippet>368</a>                <span class="kw">return </span><span class="prelude-val">Ok</span>(()); <span class="comment">// consumer dropped
+<a href=#369 id=369 data-nosnippet>369</a>            </span>}
+<a href=#370 id=370 data-nosnippet>370</a>            <span class="prelude-val">Ok</span>(())
+<a href=#371 id=371 data-nosnippet>371</a>        }
+<a href=#372 id=372 data-nosnippet>372</a>    }
+<a href=#373 id=373 data-nosnippet>373</a>}
+</code></pre></div></section></main></body></html>

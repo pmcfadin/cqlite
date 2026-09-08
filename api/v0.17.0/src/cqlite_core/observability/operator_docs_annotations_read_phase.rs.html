@@ -1,0 +1,88 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/observability/operator_docs_annotations_read_phase.rs`."><title>operator_docs_annotations_read_phase.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/observability/</div>operator_docs_annotations_read_phase.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-2"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Operator annotations for the read-PHASE timing histograms and the
+<a href=#2 id=2 data-nosnippet>2</a>//! reader/WAL resource gauges (issue #1707, AI7 of epic #1686).
+<a href=#3 id=3 data-nosnippet>3</a>//!
+<a href=#4 id=4 data-nosnippet>4</a>//! A SECOND annotation table beside `operator_docs_annotations.rs`, which was
+<a href=#5 id=5 data-nosnippet>5</a>//! already at the campsite-rule source target (#1116): the table is append-only
+<a href=#6 id=6 data-nosnippet>6</a>//! data, so a new family gets a new file rather than growing the existing one.
+<a href=#7 id=7 data-nosnippet>7</a>//! Both are listed in `operator_docs_annotations::ANNOTATION_TABLES` and the
+<a href=#8 id=8 data-nosnippet>8</a>//! renderer walks the union in catalog order.
+<a href=#9 id=9 data-nosnippet>9</a>//!
+<a href=#10 id=10 data-nosnippet>10</a>//! Prose split (issue #1707): the PER-METRIC operator sentence lives in these
+<a href=#11 id=11 data-nosnippet>11</a>//! `interpretation` fields (they are what lands in the two committed markdown
+<a href=#12 id=12 data-nosnippet>12</a>//! artifacts); the CROSS-metric "why was this query slow?" narrative — which
+<a href=#13 id=13 data-nosnippet>13</a>//! order to read the phases in, and what to cross-check — lives in the
+<a href=#14 id=14 data-nosnippet>14</a>//! `observability` module docs, so it is not duplicated per row.
+<a href=#15 id=15 data-nosnippet>15</a>
+<a href=#16 id=16 data-nosnippet>16</a></span><span class="comment">// No `attr` import: this family is deliberately attribute-FREE (every dimension
+<a href=#17 id=17 data-nosnippet>17</a>// multiplies cardinality, and none of these seven can name a bounded dimension it
+<a href=#18 id=18 data-nosnippet>18</a>// honestly knows), so every entry's `attributes` is empty.
+<a href=#19 id=19 data-nosnippet>19</a></span><span class="kw">use </span><span class="kw">super</span>::<span class="kw">super</span>::catalog;
+<a href=#20 id=20 data-nosnippet>20</a><span class="kw">use </span><span class="kw">super</span>::<span class="kw">super</span>::operator_docs::{MetricDoc, MetricKind};
+<a href=#21 id=21 data-nosnippet>21</a>
+<a href=#22 id=22 data-nosnippet>22</a><span class="doccomment">/// The read-phase + resource-gauge annotations (catalog declaration order).
+<a href=#23 id=23 data-nosnippet>23</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">const </span>ANNOTATIONS: <span class="kw-2">&amp;</span>[MetricDoc] = <span class="kw-2">&amp;</span>[
+<a href=#24 id=24 data-nosnippet>24</a>    MetricDoc {
+<a href=#25 id=25 data-nosnippet>25</a>        name: catalog::READ_PHASE_IO,
+<a href=#26 id=26 data-nosnippet>26</a>        kind: MetricKind::Histogram,
+<a href=#27 id=27 data-nosnippet>27</a>        unit: catalog::unit::SECONDS,
+<a href=#28 id=28 data-nosnippet>28</a>        summary: <span class="string">"Wall time ONE completed scan spent reading Data.db bytes (positional chunk/piece reads incl. CRC verify, decompression excluded) — exactly one sample per scan, never per chunk."</span>,
+<a href=#29 id=29 data-nosnippet>29</a>        attributes: <span class="kw-2">&amp;</span>[],
+<a href=#30 id=30 data-nosnippet>30</a>        interpretation: <span class="string">"Read this FIRST when a scan is slow: io dominating the four read.phase.* series means the scan is disk/page-cache bound, so decode or merge tuning cannot help it. Small on a warm page cache. The phases run on concurrent pipeline threads, so they OVERLAP and do not sum to read.duration — compare them against EACH OTHER, not against wall time. SURFACE COVERAGE IS PARTIAL: io is recorded ONLY by the streaming scan surfaces (scan_stream / scan_stream_batched over a chunk-stitching reader) — the streaming cross-generation merge records merge and decompress but NO io, because its producer threads read through a route that has no io seam; the materializing SSTableManager::scan, the BIG reverse-clustering scan, the BTI trie walk, point reads and compaction reads emit read.duration with NO phase series at all — so an absent read.phase.* breakdown beside a rising read.duration means the phase was NOT MEASURED on that read path, never that it was fast."</span>,
+<a href=#31 id=31 data-nosnippet>31</a>        round_item: <span class="string">"—"</span>,
+<a href=#32 id=32 data-nosnippet>32</a>    },
+<a href=#33 id=33 data-nosnippet>33</a>    MetricDoc {
+<a href=#34 id=34 data-nosnippet>34</a>        name: catalog::READ_PHASE_DECOMPRESS,
+<a href=#35 id=35 data-nosnippet>35</a>        kind: MetricKind::Histogram,
+<a href=#36 id=36 data-nosnippet>36</a>        unit: catalog::unit::SECONDS,
+<a href=#37 id=37 data-nosnippet>37</a>        summary: <span class="string">"Wall time ONE completed scan spent decompressing chunk payloads, measured in the single chunk-decode plane around the compressor call only."</span>,
+<a href=#38 id=38 data-nosnippet>38</a>        attributes: <span class="kw-2">&amp;</span>[],
+<a href=#39 id=39 data-nosnippet>39</a>        interpretation: <span class="string">"Proportional to compressed bytes read; a growing share points at chunk length / compressor choice, or at re-decompressing the same chunks (a decompressed-chunk cache too small for the scan's window). ABSENT — not zero — for an uncompressed SSTable, which decompresses nothing. Absence and 0.0 are DIFFERENT statements: absence means the phase did not run, a 0.0 means it ran and measured zero (decompression too fast for the clock). SURFACE COVERAGE IS PARTIAL (cqlite.read.phase.io lists the instrumented and uninstrumented surfaces): an absent read.phase.* breakdown beside a rising read.duration means the phase was NOT MEASURED on that read path, never that it was fast."</span>,
+<a href=#40 id=40 data-nosnippet>40</a>        round_item: <span class="string">"—"</span>,
+<a href=#41 id=41 data-nosnippet>41</a>    },
+<a href=#42 id=42 data-nosnippet>42</a>    MetricDoc {
+<a href=#43 id=43 data-nosnippet>43</a>        name: catalog::READ_PHASE_DECODE,
+<a href=#44 id=44 data-nosnippet>44</a>        kind: MetricKind::Histogram,
+<a href=#45 id=45 data-nosnippet>45</a>        unit: catalog::unit::SECONDS,
+<a href=#46 id=46 data-nosnippet>46</a>        summary: <span class="string">"Wall time ONE completed scan spent decoding rows/cells from already-resident bytes, accumulated per PARTITION at the parse boundary (never per row)."</span>,
+<a href=#47 id=47 data-nosnippet>47</a>        attributes: <span class="kw-2">&amp;</span>[],
+<a href=#48 id=48 data-nosnippet>48</a>        interpretation: <span class="string">"Usually the largest phase of a WARM full scan — that is healthy, it is the CPU work of the read. Alarming when it grows relative to the rows delivered: wide partitions, many collection/UDT cells, or a schema-less fallback decode doing more work per row. SURFACE COVERAGE IS PARTIAL (cqlite.read.phase.io lists the instrumented and uninstrumented surfaces): an absent read.phase.* breakdown beside a rising read.duration means the phase was NOT MEASURED on that read path, never that it was fast."</span>,
+<a href=#49 id=49 data-nosnippet>49</a>        round_item: <span class="string">"—"</span>,
+<a href=#50 id=50 data-nosnippet>50</a>    },
+<a href=#51 id=51 data-nosnippet>51</a>    MetricDoc {
+<a href=#52 id=52 data-nosnippet>52</a>        name: catalog::READ_PHASE_MERGE,
+<a href=#53 id=53 data-nosnippet>53</a>        kind: MetricKind::Histogram,
+<a href=#54 id=54 data-nosnippet>54</a>        unit: catalog::unit::SECONDS,
+<a href=#55 id=55 data-nosnippet>55</a>        summary: <span class="string">"Wall time ONE completed cross-generation read spent in the k-way merge/reconcile step, with the blocking merge-input recv-wait SUBTRACTED so producer starvation is not counted as merge CPU."</span>,
+<a href=#56 id=56 data-nosnippet>56</a>        attributes: <span class="kw-2">&amp;</span>[],
+<a href=#57 id=57 data-nosnippet>57</a>        interpretation: <span class="string">"Recorded ONLY on the cross-generation merge route: a single-generation scan has nothing to merge and records no sample, so absence means \"nothing to merge\", never \"merge was free\". A 0.0 here is NOT absence — it means a merge ran and the recv-wait subtraction consumed the whole step, i.e. the merge thread spent all its time waiting on starved producers. Grows with the number of overlapping generations and with reconcile work (tombstones, LWW collapse) — a merge-dominated read delivering few rows is the compaction-lag smell, so cross-check cqlite.compaction.lag. SURFACE COVERAGE IS PARTIAL: the STREAMING cross-generation merge records this; the materializing merge_generations_for_read beneath SSTableManager::scan records nothing — so absence here is \"nothing to merge\" only when the other read.phase.* series ARE present for the same traffic, and otherwise means NOT MEASURED on that read path, never that it was fast."</span>,
+<a href=#58 id=58 data-nosnippet>58</a>        round_item: <span class="string">"—"</span>,
+<a href=#59 id=59 data-nosnippet>59</a>    },
+<a href=#60 id=60 data-nosnippet>60</a>    MetricDoc {
+<a href=#61 id=61 data-nosnippet>61</a>        name: catalog::READER_FDS_OPEN,
+<a href=#62 id=62 data-nosnippet>62</a>        kind: MetricKind::Gauge,
+<a href=#63 id=63 data-nosnippet>63</a>        unit: catalog::unit::FDS,
+<a href=#64 id=64 data-nosnippet>64</a>        summary: <span class="string">"OS file descriptors the SSTable readers currently hold, reported by the readers themselves (an atomic incremented where a descriptor is really minted and decremented in the matching Drop) — no /proc read."</span>,
+<a href=#65 id=65 data-nosnippet>65</a>        attributes: <span class="kw-2">&amp;</span>[],
+<a href=#66 id=66 data-nosnippet>66</a>        interpretation: <span class="string">"Rises with concurrent scans and falls as they complete (there is no reader pool, by design). A level climbing toward the process ulimit -n is EMFILE pressure, visible here BEFORE an open fails. Counts DESCRIPTORS, so an mmap-backed source contributes 0 and an Arc clone of an existing handle contributes nothing. Distinct from cqlite.proc.fds, the whole-process /proc sample (sockets and the WAL included): proc.fds minus this is roughly the non-reader footprint."</span>,
+<a href=#67 id=67 data-nosnippet>67</a>        round_item: <span class="string">"—"</span>,
+<a href=#68 id=68 data-nosnippet>68</a>    },
+<a href=#69 id=69 data-nosnippet>69</a>    MetricDoc {
+<a href=#70 id=70 data-nosnippet>70</a>        name: catalog::WAL_SIZE,
+<a href=#71 id=71 data-nosnippet>71</a>        kind: MetricKind::Gauge,
+<a href=#72 id=72 data-nosnippet>72</a>        unit: catalog::unit::BYTES,
+<a href=#73 id=73 data-nosnippet>73</a>        summary: <span class="string">"Current on-disk size of the active write-ahead log, reported by the write engine after each successful mutation (a value the engine already tracks — nothing is stat'ed)."</span>,
+<a href=#74 id=74 data-nosnippet>74</a>        attributes: <span class="kw-2">&amp;</span>[],
+<a href=#75 id=75 data-nosnippet>75</a>        interpretation: <span class="string">"Healthy shape is a saw-tooth: grows with writes, drops back when a flush truncates/rotates the log. A level that only climbs means flushes are not keeping up — a disk-space problem AND a startup-latency one, because next open's recovery cost is a function of this size (cross-check cqlite.wal.recovery.duration)."</span>,
+<a href=#76 id=76 data-nosnippet>76</a>        round_item: <span class="string">"—"</span>,
+<a href=#77 id=77 data-nosnippet>77</a>    },
+<a href=#78 id=78 data-nosnippet>78</a>    MetricDoc {
+<a href=#79 id=79 data-nosnippet>79</a>        name: catalog::WAL_RECOVERY_DURATION,
+<a href=#80 id=80 data-nosnippet>80</a>        kind: MetricKind::Histogram,
+<a href=#81 id=81 data-nosnippet>81</a>        unit: catalog::unit::SECONDS,
+<a href=#82 id=82 data-nosnippet>82</a>        summary: <span class="string">"How long write-ahead-log recovery at engine open took, in seconds — both halves of it: the CRC validation scan of the log (plus any torn-tail trim) and the replay of its entries into the memtable. Normally ONE sample per process (recovery runs exactly once per open), so read it as a value rather than a distribution."</span>,
+<a href=#83 id=83 data-nosnippet>83</a>        attributes: <span class="kw-2">&amp;</span>[],
+<a href=#84 id=84 data-nosnippet>84</a>        interpretation: <span class="string">"Near-zero after a clean shutdown; seconds means a crash left a large log to validate and replay, which directly delays open — pair it with cqlite.wal.size, whose growth makes this grow. On a large or corrupt-tail WAL the validation scan is the dominant half, so the timer spans the whole open-and-recover window. A histogram rather than a gauge because the gauge plane is i64 and a sub-second recovery would truncate to a fabricated 0. Recorded at EVERY open, including when there was nothing to recover (a fresh WAL genuinely took ~0s, which is a real measurement) and including a corrupt-WAL open, so absence means no engine was opened in this process, never that recovery was skipped."</span>,
+<a href=#85 id=85 data-nosnippet>85</a>        round_item: <span class="string">"—"</span>,
+<a href=#86 id=86 data-nosnippet>86</a>    },
+<a href=#87 id=87 data-nosnippet>87</a>];
+</code></pre></div></section></main></body></html>

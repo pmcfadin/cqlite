@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["BatchEncoder","ByteComparableDecoder","ByteComparableEncoder","EncoderConfig","EncoderStats"]};

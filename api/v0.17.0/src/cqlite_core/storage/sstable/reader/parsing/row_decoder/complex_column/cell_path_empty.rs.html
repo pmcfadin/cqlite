@@ -1,0 +1,259 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column/cell_path_empty.rs`."><title>cell_path_empty.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../../../../../../" data-static-root-path="../../../../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../../../../src-files.js"></script><script defer src="../../../../../../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/parsing/row_decoder/complex_column/</div>cell_path_empty.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! The EMPTY-BUFFER ADMISSION GATE for a multicell collection's CELL PATH, and
+<a href=#2 id=2 data-nosnippet>2</a>//! the SET path's decode entry point (issues #3747, #3805, #4106).
+<a href=#3 id=3 data-nosnippet>3</a>//!
+<a href=#4 id=4 data-nosnippet>4</a>//! # ONE gate, because Cassandra asks ONE question
+<a href=#5 id=5 data-nosnippet>5</a>//! A zero-length cell path is the EMPTY component, never "no component". Whether
+<a href=#6 id=6 data-nosnippet>6</a>//! that component is LEGAL DATA or CORRUPTION is decided by `validateCellPath`,
+<a href=#7 id=7 data-nosnippet>7</a>//! and at `cassandra-5.0.8` that is a single line for every collection kind:
+<a href=#8 id=8 data-nosnippet>8</a>//! `schema/ColumnMetadata.java:457-467` calls
+<a href=#9 id=9 data-nosnippet>9</a>//! `((CollectionType)type).nameComparator().validate(path.get(0))`, where
+<a href=#10 id=10 data-nosnippet>10</a>//! `nameComparator()` is the KEYS type of a `MapType`
+<a href=#11 id=11 data-nosnippet>11</a>//! (`db/marshal/MapType.java`) and the ELEMENTS type of a `SetType`
+<a href=#12 id=12 data-nosnippet>12</a>//! (`db/marshal/SetType.java:101-104`). The FRAMING half is the same object too:
+<a href=#13 id=13 data-nosnippet>13</a>//! one `CollectionType.cellPathSerializer` (`db/marshal/CollectionType.java:55`,
+<a href=#14 id=14 data-nosnippet>14</a>//! `:361-382`) serializes every collection's cell path as
+<a href=#15 id=15 data-nosnippet>15</a>//! `ByteBufferUtil.writeWithVIntLength(path.get(0))`, so a zero-length path is
+<a href=#16 id=16 data-nosnippet>16</a>//! expressible and MEANS empty. Hence one gate here rather than a per-collection
+<a href=#17 id=17 data-nosnippet>17</a>//! opinion able to drift.
+<a href=#18 id=18 data-nosnippet>18</a>//!
+<a href=#19 id=19 data-nosnippet>19</a>//! # THE GATE IS THE TAG TABLE, NOT A WIDTH TABLE
+<a href=#20 id=20 data-nosnippet>20</a>//! The admission is [`EmptyValueType::for_cql_type`] — the ONE place the
+<a href=#21 id=21 data-nosnippet>21</a>//! legal/corruption line is drawn, on Cassandra's `validate()` rather than on
+<a href=#22 id=22 data-nosnippet>22</a>//! decodability. A `Some` tag means that family's serializer accepts the empty
+<a href=#23 id=23 data-nosnippet>23</a>//! buffer AND maps it to null (see that function's membership rule), so the
+<a href=#24 id=24 data-nosnippet>24</a>//! component is PRESENT, TYPED and MEANINGLESS-VALUED. Because the gate is drawn
+<a href=#25 id=25 data-nosnippet>25</a>//! on `validate()` and not on decodability it is CORRECT to consult it without
+<a href=#26 id=26 data-nosnippet>26</a>//! regard to what the decoder would have done, which is why it is consulted for
+<a href=#27 id=27 data-nosnippet>27</a>//! EVERY empty cell path and BEFORE the decode.
+<a href=#28 id=28 data-nosnippet>28</a>//!
+<a href=#29 id=29 data-nosnippet>29</a>//! That placement is the whole content of roborev job 449 finding C (#4079): a
+<a href=#30 id=30 data-nosnippet>30</a>//! gate consulted only in the decoder's `Err` arm cannot reach a family whose
+<a href=#31 id=31 data-nosnippet>31</a>//! decoder ACCEPTS the empty buffer, so `varint` and `inet` — both ADMITTED by
+<a href=#32 id=32 data-nosnippet>32</a>//! the tag table — kept a SECOND spelling of the empty buffer (`Varint(b"")` /
+<a href=#33 id=33 data-nosnippet>33</a>//! `Inet(b"")`) beside the canonical `Value::Empty(tag)`.
+<a href=#34 id=34 data-nosnippet>34</a>//!
+<a href=#35 id=35 data-nosnippet>35</a>//! An earlier revision of the map gate asked the WIDTH table instead
+<a href=#36 id=36 data-nosnippet>36</a>//! (`allowed.contains(&amp;0)`). Those are two authorities answering two DIFFERENT
+<a href=#37 id=37 data-nosnippet>37</a>//! questions and they disagree on exactly one family: `decimal` is
+<a href=#38 id=38 data-nosnippet>38</a>//! VARIABLE-width (Cassandra accepts `0` or `&gt;= 4`), a width table cannot
+<a href=#39 id=39 data-nosnippet>39</a>//! express `{0} ∪ [4, ∞)`, so `allowed.contains(&amp;0)` was FALSE and a LEGAL empty
+<a href=#40 id=40 data-nosnippet>40</a>//! `decimal` component was refused — while `for_cql_type` admits it from
+<a href=#41 id=41 data-nosnippet>41</a>//! `DecimalSerializer.java:31-34,58-63`, whose own message reads *"Expected 0 or
+<a href=#42 id=42 data-nosnippet>42</a>//! at least 4 bytes"* (#3805 REQ-3805-02).
+<a href=#43 id=43 data-nosnippet>43</a>//!
+<a href=#44 id=44 data-nosnippet>44</a>//! # WHAT THE GATE DOES *NOT* REACH — the bound, MEASURED not reasoned
+<a href=#45 id=45 data-nosnippet>45</a>//!  * `text`/`ascii`/`varchar`/`blob`: `for_cql_type` is `None`, because an empty
+<a href=#46 id=46 data-nosnippet>46</a>//!    buffer is a legal, MEANINGFUL value there
+<a href=#47 id=47 data-nosnippet>47</a>//!    (`serializers/AbstractTextSerializer.java:72-77`,
+<a href=#48 id=48 data-nosnippet>48</a>//!    `serializers/BytesSerializer.java:57-62` override `isNull` to say so). They
+<a href=#49 id=49 data-nosnippet>49</a>//!    keep `Text(b"")`/`Blob(b"")`.
+<a href=#50 id=50 data-nosnippet>50</a>//!  * `tinyint`/`smallint`/`date`/`time`: `for_cql_type` is `None` (bare `!= N`
+<a href=#51 id=51 data-nosnippet>51</a>//!    validate — corruption on Cassandra's own terms), so the gate declines and
+<a href=#52 id=52 data-nosnippet>52</a>//!    the refusal is the width check's (map) or the decoder's own (set).
+<a href=#53 id=53 data-nosnippet>53</a>//!  * `duration`, every composite (`list`/`set`/`map`/`tuple`/UDT/
+<a href=#54 id=54 data-nosnippet>54</a>//!    `frozen&lt;collection&gt;`) and `custom`: `for_cql_type` is `None`, so they fall
+<a href=#55 id=55 data-nosnippet>55</a>//!    through to the decode and keep their existing outcome — an `Err` for
+<a href=#56 id=56 data-nosnippet>56</a>//!    `duration` and the collections, a structural decode for `tuple`, an opaque
+<a href=#57 id=57 data-nosnippet>57</a>//!    blob for an unresolvable UDT name.
+<a href=#58 id=58 data-nosnippet>58</a>//!
+<a href=#59 id=59 data-nosnippet>59</a>//! Both halves — the table's answer AND the decode result — are asserted by
+<a href=#60 id=60 data-nosnippet>60</a>//! `regression_3747_empty_map_key_tests` and
+<a href=#61 id=61 data-nosnippet>61</a>//! `regression_4106_empty_set_member_tests`, so a widening of the table cannot
+<a href=#62 id=62 data-nosnippet>62</a>//! silently widen either decoder.
+<a href=#63 id=63 data-nosnippet>63</a>//!
+<a href=#64 id=64 data-nosnippet>64</a>//! # ONE ADMISSION, TWO RESOLUTIONS — THE SEAM, stated (#4106, roborev job 449 B1)
+<a href=#65 id=65 data-nosnippet>65</a>//! Two reviewers reported adjacent facts on this file that only LOOK
+<a href=#66 id=66 data-nosnippet>66</a>//! contradictory. Both are right, about different things:
+<a href=#67 id=67 data-nosnippet>67</a>//!
+<a href=#68 id=68 data-nosnippet>68</a>//!  * the marshal TABLE is shared, so "the gate's classifier and the decoder
+<a href=#69 id=69 data-nosnippet>69</a>//!    cannot disagree on the marshal spelling" holds:
+<a href=#70 id=70 data-nosnippet>70</a>//!    [`Self::native_marshal_to_cql_type`] is the crate's one marshal-name
+<a href=#71 id=71 data-nosnippet>71</a>//!    authority and `primitive_marshal_to_cql_short` (which the decoder consults)
+<a href=#72 id=72 data-nosnippet>72</a>//!    is a projection of it;
+<a href=#73 id=73 data-nosnippet>73</a>//!  * the ENTRY CONDITION differs, and THAT is where read and write diverged.
+<a href=#74 id=74 data-nosnippet>74</a>//!    Every consumer handed an ISOLATED COMPONENT NAME consults the table only
+<a href=#75 id=75 data-nosnippet>75</a>//!    when the string already `contains("org.apache.cassandra.db.marshal.")` —
+<a href=#76 id=76 data-nosnippet>76</a>//!    [`Self::cell_path_key_cql_type`] and the value decoder
+<a href=#77 id=77 data-nosnippet>77</a>//!    (`raw_value/reporting.rs`) both spell it that way, and they must, because a
+<a href=#78 id=78 data-nosnippet>78</a>//!    bare name out of context is ambiguous (`#3612` round 9 finding 2 removed
+<a href=#79 id=79 data-nosnippet>79</a>//!    the package-synthesising alternative: it made a foreign
+<a href=#80 id=80 data-nosnippet>80</a>//!    `com.acme.CustomBytesType` match `BytesType`, which is name-pattern
+<a href=#81 id=81 data-nosnippet>81</a>//!    inference #28 forbids).
+<a href=#82 id=82 data-nosnippet>82</a>//!
+<a href=#83 id=83 data-nosnippet>83</a>//! So the ADMISSION is one function ([`Self::cell_path_empty_admits`]) and the
+<a href=#84 id=84 data-nosnippet>84</a>//! RESOLUTION of the component TYPE is per-route — because Cassandra's own type
+<a href=#85 id=85 data-nosnippet>85</a>//! SELECTION is per-route:
+<a href=#86 id=86 data-nosnippet>86</a>//!
+<a href=#87 id=87 data-nosnippet>87</a>//!  * a SET's element type is derived from the column's declared type and from
+<a href=#88 id=88 data-nosnippet>88</a>//!    nothing else, so the set route resolves it from the COMPLETE declared type
+<a href=#89 id=89 data-nosnippet>89</a>//!    via the shared `cell_path_component::resolve_declared_cell_path_type` — the
+<a href=#90 id=90 data-nosnippet>90</a>//!    same function the WRITER uses, so the two agree by construction. This is
+<a href=#91 id=91 data-nosnippet>91</a>//!    finding B1's fix: `org.apache.cassandra.db.marshal.SetType(Int32Type)`
+<a href=#92 id=92 data-nosnippet>92</a>//!    (package on the OUTER name, bare inner element name — a legal `TypeParser`
+<a href=#93 id=93 data-nosnippet>93</a>//!    spelling, `TypeParser.java:450`) was ACCEPTED by the writer and refused by
+<a href=#94 id=94 data-nosnippet>94</a>//!    the reader, whose string split had discarded the marshal context before the
+<a href=#95 id=95 data-nosnippet>95</a>//!    classifier ever saw it;
+<a href=#96 id=96 data-nosnippet>96</a>//!  * a MAP's key type has a committed marshal-over-schema PRECEDENCE rule
+<a href=#97 id=97 data-nosnippet>97</a>//!    (`map_key_type_for_decode`, #3612 R7/R8: the marshal form wins when it is
+<a href=#98 id=98 data-nosnippet>98</a>//!    UDT-bearing, and Cassandra's `SerializationHeader.getType` is the authority
+<a href=#99 id=99 data-nosnippet>99</a>//!    for that), so the string the decoder uses is NOT always derived from
+<a href=#100 id=100 data-nosnippet>100</a>//!    `column.data_type` and resolving from `column.data_type` would OVERRIDE the
+<a href=#101 id=101 data-nosnippet>101</a>//!    header in exactly the case that rule resolves in the header's favour. The
+<a href=#102 id=102 data-nosnippet>102</a>//!    map route therefore keeps classifying the string the precedence rule
+<a href=#103 id=103 data-nosnippet>103</a>//!    picked. **The same bare-inner-name asymmetry is therefore still reachable
+<a href=#104 id=104 data-nosnippet>104</a>//!    on the MAP route** — `org.apache.cassandra.db.marshal.MapType(Int32Type,
+<a href=#105 id=105 data-nosnippet>105</a>//!    Int32Type)` — and it is NOT silently fixed here; it is named, and it needs
+<a href=#106 id=106 data-nosnippet>106</a>//!    the precedence rule to report WHICH container it picked from before it can
+<a href=#107 id=107 data-nosnippet>107</a>//!    be closed the same way. Every real `SerializationHeader` writes fully
+<a href=#108 id=108 data-nosnippet>108</a>//!    qualified names, so the reachable spelling is the hand-written/
+<a href=#109 id=109 data-nosnippet>109</a>//!    `TypeParser`-legal one.
+<a href=#110 id=110 data-nosnippet>110</a>
+<a href=#111 id=111 data-nosnippet>111</a></span><span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#112 id=112 data-nosnippet>112</a><span class="kw">use </span><span class="kw">crate</span>::storage::sstable::cell_path_component::{
+<a href=#113 id=113 data-nosnippet>113</a>    resolve_declared_cell_path_type, CellPathComponent,
+<a href=#114 id=114 data-nosnippet>114</a>};
+<a href=#115 id=115 data-nosnippet>115</a><span class="kw">use </span><span class="kw">crate</span>::types::EmptyValueType;
+<a href=#116 id=116 data-nosnippet>116</a>
+<a href=#117 id=117 data-nosnippet>117</a><span class="kw">impl </span>V5CompressedLegacyParser {
+<a href=#118 id=118 data-nosnippet>118</a>    <span class="doccomment">/// **THE ADMISSION** — the ONE place the legal/corruption line is drawn for a
+<a href=#119 id=119 data-nosnippet>119</a>    /// zero-length cell path, on an already-RESOLVED component type.
+<a href=#120 id=120 data-nosnippet>120</a>    ///
+<a href=#121 id=121 data-nosnippet>121</a>    /// Both routes below end here, so a widening of the tag table widens both at
+<a href=#122 id=122 data-nosnippet>122</a>    /// once and neither can hold a per-family opinion of its own. What differs
+<a href=#123 id=123 data-nosnippet>123</a>    /// between the routes is only how the component type is NAMED; see the
+<a href=#124 id=124 data-nosnippet>124</a>    /// module header's "ONE ADMISSION, TWO RESOLUTIONS" section for why that
+<a href=#125 id=125 data-nosnippet>125</a>    /// half cannot be shared.
+<a href=#126 id=126 data-nosnippet>126</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>cell_path_empty_admits(component_type: <span class="kw-2">&amp;</span>CqlType) -&gt; <span class="prelude-ty">Option</span>&lt;EmptyValueType&gt; {
+<a href=#127 id=127 data-nosnippet>127</a>        EmptyValueType::for_cql_type(component_type)
+<a href=#128 id=128 data-nosnippet>128</a>    }
+<a href=#129 id=129 data-nosnippet>129</a>
+<a href=#130 id=130 data-nosnippet>130</a>    <span class="doccomment">/// The typed sentinel a zero-length cell path denotes for a MAP KEY of
+<a href=#131 id=131 data-nosnippet>131</a>    /// DECLARED type `type_str`, or `None` when no authority admits an empty
+<a href=#132 id=132 data-nosnippet>132</a>    /// buffer there.
+<a href=#133 id=133 data-nosnippet>133</a>    ///
+<a href=#134 id=134 data-nosnippet>134</a>    /// `type_str` is the string `map_key_type_for_decode` picked (schema short
+<a href=#135 id=135 data-nosnippet>135</a>    /// form, or the marshal form when it is UDT-bearing), so it is an ISOLATED
+<a href=#136 id=136 data-nosnippet>136</a>    /// COMPONENT NAME and is normalized by [`Self::cell_path_key_cql_type`] —
+<a href=#137 id=137 data-nosnippet>137</a>    /// the classifier for that shape. The admission is
+<a href=#138 id=138 data-nosnippet>138</a>    /// [`Self::cell_path_empty_admits`]. Nothing per-family is decided here.
+<a href=#139 id=139 data-nosnippet>139</a>    ///
+<a href=#140 id=140 data-nosnippet>140</a>    /// See the module header for why this route cannot resolve from the COMPLETE
+<a href=#141 id=141 data-nosnippet>141</a>    /// declared type the way the set route does, and for the residual
+<a href=#142 id=142 data-nosnippet>142</a>    /// bare-inner-marshal-name asymmetry that leaves.
+<a href=#143 id=143 data-nosnippet>143</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>cell_path_empty_sentinel(<span class="kw-2">&amp;</span><span class="self">self</span>, type_str: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Option</span>&lt;EmptyValueType&gt; {
+<a href=#144 id=144 data-nosnippet>144</a>        <span class="self">self</span>.cell_path_key_cql_type(type_str)
+<a href=#145 id=145 data-nosnippet>145</a>            .as_ref()
+<a href=#146 id=146 data-nosnippet>146</a>            .and_then(<span class="self">Self</span>::cell_path_empty_admits)
+<a href=#147 id=147 data-nosnippet>147</a>    }
+<a href=#148 id=148 data-nosnippet>148</a>
+<a href=#149 id=149 data-nosnippet>149</a>    <span class="doccomment">/// The typed sentinel a zero-length cell path denotes for the ELEMENT of a
+<a href=#150 id=150 data-nosnippet>150</a>    /// multicell set whose COLUMN is declared `set_data_type`, or `None` when no
+<a href=#151 id=151 data-nosnippet>151</a>    /// authority admits an empty buffer there.
+<a href=#152 id=152 data-nosnippet>152</a>    ///
+<a href=#153 id=153 data-nosnippet>153</a>    /// **Resolved from the COMPLETE declared type, never from the split-out
+<a href=#154 id=154 data-nosnippet>154</a>    /// element name** (#4106, roborev job 449 finding B1). The set branch derives
+<a href=#155 id=155 data-nosnippet>155</a>    /// its element type from `column.data_type` and from nothing else, so
+<a href=#156 id=156 data-nosnippet>156</a>    /// resolving the element from `column.data_type` is resolving THE SAME
+<a href=#157 id=157 data-nosnippet>157</a>    /// DECLARATION — it restores the marshal context that
+<a href=#158 id=158 data-nosnippet>158</a>    /// `extract_collection_element_type`'s string split discards, and it does so
+<a href=#159 id=159 data-nosnippet>159</a>    /// through `cell_path_component::resolve_declared_cell_path_type`, the very
+<a href=#160 id=160 data-nosnippet>160</a>    /// function the WRITER's admission uses. Read and write therefore agree on
+<a href=#161 id=161 data-nosnippet>161</a>    /// every declared string by construction rather than by care.
+<a href=#162 id=162 data-nosnippet>162</a>    ///
+<a href=#163 id=163 data-nosnippet>163</a>    /// There is deliberately NO fallback to [`Self::cell_path_key_cql_type`] on
+<a href=#164 id=164 data-nosnippet>164</a>    /// the split-out name. A fallback would re-admit exactly the disagreements
+<a href=#165 id=165 data-nosnippet>165</a>    /// this shares a resolver to prevent: `set&lt;frozen&lt;int&gt;&gt;` (not legal CQL)
+<a href=#166 id=166 data-nosnippet>166</a>    /// resolves to `Frozen(Int)` here and is REFUSED, which is what the writer
+<a href=#167 id=167 data-nosnippet>167</a>    /// does with it — a fallback would peel the `frozen&lt;&gt;` and admit `Int` on the
+<a href=#168 id=168 data-nosnippet>168</a>    /// read side only.
+<a href=#169 id=169 data-nosnippet>169</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>set_element_empty_sentinel(<span class="kw-2">&amp;</span><span class="self">self</span>, set_data_type: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Option</span>&lt;EmptyValueType&gt; {
+<a href=#170 id=170 data-nosnippet>170</a>        resolve_declared_cell_path_type(set_data_type, CellPathComponent::SetElement)
+<a href=#171 id=171 data-nosnippet>171</a>            .as_ref()
+<a href=#172 id=172 data-nosnippet>172</a>            .and_then(<span class="self">Self</span>::cell_path_empty_admits)
+<a href=#173 id=173 data-nosnippet>173</a>    }
+<a href=#174 id=174 data-nosnippet>174</a>
+<a href=#175 id=175 data-nosnippet>175</a>    <span class="doccomment">/// Decode a MULTICELL SET's cell path — which IS the member (`cql3/Sets.java:407`
+<a href=#176 id=176 data-nosnippet>176</a>    /// writes the element as the cell path and `ByteBufferUtil.EMPTY_BYTE_BUFFER`
+<a href=#177 id=177 data-nosnippet>177</a>    /// as the cell value).
+<a href=#178 id=178 data-nosnippet>178</a>    ///
+<a href=#179 id=179 data-nosnippet>179</a>    /// ISSUE #4106. A ZERO-LENGTH path is the EMPTY MEMBER, so it goes through the
+<a href=#180 id=180 data-nosnippet>180</a>    /// shared admission gate above; everything else takes the SAME
+<a href=#181 id=181 data-nosnippet>181</a>    /// [`Self::parse_value_from_raw_bytes`] it always did. The guard this replaces
+<a href=#182 id=182 data-nosnippet>182</a>    /// (`!path_bytes.is_empty()`) produced `None` and DROPPED the member, so a
+<a href=#183 id=183 data-nosnippet>183</a>    /// `SELECT` returned a set one member short with no error and no log line —
+<a href=#184 id=184 data-nosnippet>184</a>    /// the identical defect #3747 removed for map keys, and the reason the gate
+<a href=#185 id=185 data-nosnippet>185</a>    /// lives in one place for both.
+<a href=#186 id=186 data-nosnippet>186</a>    ///
+<a href=#187 id=187 data-nosnippet>187</a>    /// # SCOPE: the fixed-width / full-consumption checks are NOT extended here
+<a href=#188 id=188 data-nosnippet>188</a>    /// The MAP cell path additionally validates widths and full consumption
+<a href=#189 id=189 data-nosnippet>189</a>    /// ([`Self::parse_cell_path_key_reporting`], issue #3612), and that module's
+<a href=#190 id=190 data-nosnippet>190</a>    /// header records that widening those to the set/frozen routes was out of
+<a href=#191 id=191 data-nosnippet>191</a>    /// #3612's scope. It stays out of #4106's: a NON-EMPTY member keeps its exact
+<a href=#192 id=192 data-nosnippet>192</a>    /// pre-existing decode, and only the empty buffer — which the guard meant
+<a href=#193 id=193 data-nosnippet>193</a>    /// reached NO authority at all — is newly admitted.
+<a href=#194 id=194 data-nosnippet>194</a>    ///
+<a href=#195 id=195 data-nosnippet>195</a>    /// Errors PROPAGATE (#3811, roborev F1): mapping them to a dropped member is
+<a href=#196 id=196 data-nosnippet>196</a>    /// strictly worse than a refusal, because a dropped member leaves no trace.
+<a href=#197 id=197 data-nosnippet>197</a>    ///
+<a href=#198 id=198 data-nosnippet>198</a>    /// # A CELL-PATH COMPONENT IS NEVER `null`, so a `Null` decode is a REFUSAL
+<a href=#199 id=199 data-nosnippet>199</a>    /// The shared value decoder's oracle for an empty buffer is Cassandra's
+<a href=#200 id=200 data-nosnippet>200</a>    /// `deserialize()`, which maps it to `null` UNIFORMLY for all twelve
+<a href=#201 id=201 data-nosnippet>201</a>    /// fixed-width scalars (issue #3847 — see
+<a href=#202 id=202 data-nosnippet>202</a>    /// [`super::super::raw_value::fixed_width`]'s header and its pinned oracle).
+<a href=#203 id=203 data-nosnippet>203</a>    /// That is the right answer for a VALUE and an impossible one for a cell-path
+<a href=#204 id=204 data-nosnippet>204</a>    /// COMPONENT: Cassandra has no null map key and no null set member —
+<a href=#205 id=205 data-nosnippet>205</a>    /// `cql3/Sets.java:407` writes the element INTO the path and cannot express
+<a href=#206 id=206 data-nosnippet>206</a>    /// one, and `validateCellPath` (`schema/ColumnMetadata.java:457-467`)
+<a href=#207 id=207 data-nosnippet>207</a>    /// validates the component with the element type's `validate()`, which for
+<a href=#208 id=208 data-nosnippet>208</a>    /// `tinyint`/`smallint`/`date`/`time` is a bare `!= N` that THROWS on the
+<a href=#209 id=209 data-nosnippet>209</a>    /// empty buffer. So when the admission gate declines AND the decoder answers
+<a href=#210 id=210 data-nosnippet>210</a>    /// `Null`, no authority admits these bytes and the member is REFUSED.
+<a href=#211 id=211 data-nosnippet>211</a>    ///
+<a href=#212 id=212 data-nosnippet>212</a>    /// This is the same composition `cell_path_key.rs` uses one route over (it
+<a href=#213 id=213 data-nosnippet>213</a>    /// substitutes its own answer keyed on THIS DECODER'S ANSWER, never on a
+<a href=#214 id=214 data-nosnippet>214</a>    /// width table), and it lands on the same OUTCOME the map route already has
+<a href=#215 id=215 data-nosnippet>215</a>    /// for the same declared type: an empty `tinyint` map key is refused there by
+<a href=#216 id=216 data-nosnippet>216</a>    /// the width check, on `cell_path_key`'s committed error-budget rule — `Err`
+<a href=#217 id=217 data-nosnippet>217</a>    /// only where Cassandra's own `validate`/`split` throws.
+<a href=#218 id=218 data-nosnippet>218</a>    ///
+<a href=#219 id=219 data-nosnippet>219</a>    /// MEASURED, not derived: the families this branch actually reaches are
+<a href=#220 id=220 data-nosnippet>220</a>    /// exactly those four (`regression_4106_empty_set_member_tests`'s refusal and
+<a href=#221 id=221 data-nosnippet>221</a>    /// trichotomy cases pin it). Nothing per-family is decided here — the branch
+<a href=#222 id=222 data-nosnippet>222</a>    /// is keyed on the decoder's answer, so it cannot drift from the tag table.
+<a href=#223 id=223 data-nosnippet>223</a>    ///
+<a href=#224 id=224 data-nosnippet>224</a>    /// # TWO type strings, and each is used for the ONE thing it can answer
+<a href=#225 id=225 data-nosnippet>225</a>    /// `set_data_type` is the COLUMN's complete declared type and is what the
+<a href=#226 id=226 data-nosnippet>226</a>    /// admission is resolved from ([`Self::set_element_empty_sentinel`]) — see
+<a href=#227 id=227 data-nosnippet>227</a>    /// the module header's "ONE ADMISSION, TWO RESOLUTIONS" section for why the
+<a href=#228 id=228 data-nosnippet>228</a>    /// split-out element name cannot answer that question for the marshal
+<a href=#229 id=229 data-nosnippet>229</a>    /// spelling. `element_type` is that split-out name and is what the VALUE
+<a href=#230 id=230 data-nosnippet>230</a>    /// DECODER is handed, unchanged: a NON-EMPTY member keeps its exact
+<a href=#231 id=231 data-nosnippet>231</a>    /// pre-existing decode, and widening the decoder's own entry condition is
+<a href=#232 id=232 data-nosnippet>232</a>    /// out of #4106's scope (a bare-inner-name marshal element still decodes to
+<a href=#233 id=233 data-nosnippet>233</a>    /// an opaque blob there, exactly as it did before this change — that is the
+<a href=#234 id=234 data-nosnippet>234</a>    /// decoder's pre-existing `contains(package)` guard in
+<a href=#235 id=235 data-nosnippet>235</a>    /// `raw_value/reporting.rs`, not something introduced or fixed here).
+<a href=#236 id=236 data-nosnippet>236</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>decode_set_cell_path_member(
+<a href=#237 id=237 data-nosnippet>237</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#238 id=238 data-nosnippet>238</a>        path_bytes: <span class="kw-2">&amp;</span>[u8],
+<a href=#239 id=239 data-nosnippet>239</a>        set_data_type: <span class="kw-2">&amp;</span>str,
+<a href=#240 id=240 data-nosnippet>240</a>        element_type: <span class="kw-2">&amp;</span>str,
+<a href=#241 id=241 data-nosnippet>241</a>        column_name: <span class="kw-2">&amp;</span>str,
+<a href=#242 id=242 data-nosnippet>242</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;Value&gt; {
+<a href=#243 id=243 data-nosnippet>243</a>        <span class="kw">if </span>path_bytes.is_empty() {
+<a href=#244 id=244 data-nosnippet>244</a>            <span class="kw">if let </span><span class="prelude-val">Some</span>(tag) = <span class="self">self</span>.set_element_empty_sentinel(set_data_type) {
+<a href=#245 id=245 data-nosnippet>245</a>                <span class="kw">return </span><span class="prelude-val">Ok</span>(Value::Empty(tag));
+<a href=#246 id=246 data-nosnippet>246</a>            }
+<a href=#247 id=247 data-nosnippet>247</a>        }
+<a href=#248 id=248 data-nosnippet>248</a>        <span class="kw">let </span>decoded = <span class="self">self</span>.parse_value_from_raw_bytes(path_bytes, element_type, column_name, <span class="number">0</span>)<span class="question-mark">?</span>;
+<a href=#249 id=249 data-nosnippet>249</a>        <span class="kw">if </span>path_bytes.is_empty() &amp;&amp; <span class="macro">matches!</span>(<span class="self">Self</span>::peeled_for_inspection(<span class="kw-2">&amp;</span>decoded), Value::Null) {
+<a href=#250 id=250 data-nosnippet>250</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(Error::corruption(<span class="macro">format!</span>(
+<a href=#251 id=251 data-nosnippet>251</a>                <span class="string">"Set member '{column_name}' of type '{element_type}': a zero-length \
+<a href=#252 id=252 data-nosnippet>252</a>                 cell path decodes to no value for this type, and Cassandra's own \
+<a href=#253 id=253 data-nosnippet>253</a>                 `validateCellPath` rejects it (issue #4106)"
+<a href=#254 id=254 data-nosnippet>254</a>            </span>)));
+<a href=#255 id=255 data-nosnippet>255</a>        }
+<a href=#256 id=256 data-nosnippet>256</a>        <span class="prelude-val">Ok</span>(decoded)
+<a href=#257 id=257 data-nosnippet>257</a>    }
+<a href=#258 id=258 data-nosnippet>258</a>}
+</code></pre></div></section></main></body></html>

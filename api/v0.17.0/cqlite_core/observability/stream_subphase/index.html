@@ -1,0 +1,88 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="In-`stream` sub-phase wall-time accumulator for the Flight `do_get` data plane (issue #2819)."><title>cqlite_core::observability::stream_subphase - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module stream_subphase</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.17.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module stream_<wbr>subphase</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#zero-cost-when-absent" title="Zero-cost when absent">Zero-cost when absent</a></li><li><a href="#isolation" title="Isolation">Isolation</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In cqlite_<wbr>core::<wbr>observability</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">cqlite_core</a>::<wbr><a href="../index.html">observability</a></div><h1>Module <span>stream_<wbr>subphase</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/cqlite_core/observability/stream_subphase.rs.html#1-497">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>In-<code>stream</code> sub-phase wall-time accumulator for the Flight <code>do_get</code> data plane
+(issue #2819).</p>
+<p>The Flight <code>do_get</code> <code>stream</code> phase (<code>cqlite-flight</code>) is a CONCURRENT pipeline:
+the merge consumer runs on one <code>spawn_blocking</code> thread and each input SSTable
+is scanned on its own producer thread, where the cold body-chunk page-in + LZ4
+decompress physically happen (synchronously, on that producer thread — NOT a
+separate <code>spawn_blocking</code> feed thread). To attribute WHERE the in-<code>stream</code> time
+goes (cold-IO vs decompress vs merge vs encode vs gRPC-write) WITHOUT a
+profiler, the flight side installs a per-request accumulator and each pipeline
+thread adds its own elapsed wall time into the right bucket.</p>
+<p>Thread-locals are NOT inherited across a thread spawn, so the per-request sink
+is propagated EXPLICITLY at each spawn site: the merge closure installs it on
+the merge consumer thread, and <a href="fn.current.html" title="fn cqlite_core::observability::stream_subphase::current"><code>current</code></a> captures it there so the per-SSTable
+producer thread can re-<a href="fn.install.html" title="fn cqlite_core::observability::stream_subphase::install"><code>install</code></a> the SAME <code>Arc</code>. A deeper <code>spawn_blocking</code>
+feed thread (the windowed-scan page-in path) is NOT reached by this
+propagation and is therefore NOT covered — the instrumented Summary-guided /
+full-ring compaction read paths run their page-in on the producer thread, which
+IS covered.</p>
+<p>This module owns the crate-side half of that seam so the <code>cqlite-core</code> scan
+path (which is where cold-fault + decompress physically happen) can push into
+it WITHOUT taking a new parameter on every hot reader signature:</p>
+<ul>
+<li><a href="struct.StreamSubPhaseTimings.html" title="struct cqlite_core::observability::stream_subphase::StreamSubPhaseTimings"><code>StreamSubPhaseTimings</code></a> — five <code>AtomicU64</code> nanosecond counters shared via an
+<code>Arc</code>, so scopes on the concurrent pipeline threads accumulate lock-free.</li>
+<li>A thread-local <code>Option&lt;Arc&lt;StreamSubPhaseTimings&gt;&gt;</code> sink installed for the
+duration of one RPC’s work on a thread, via the panic-safe RAII
+<a href="struct.StreamSubPhaseGuard.html" title="struct cqlite_core::observability::stream_subphase::StreamSubPhaseGuard"><code>StreamSubPhaseGuard</code></a>. <a href="fn.current.html" title="fn cqlite_core::observability::stream_subphase::current"><code>current</code></a> reads it (so a spawn site can propagate
+the SAME <code>Arc</code> onto a child scan thread); <a href="fn.timed.html" title="fn cqlite_core::observability::stream_subphase::timed"><code>timed</code></a> times a closure and
+attributes it to a sub-phase on the installed sink.</li>
+<li>A thread-local recv-wait accumulator (<a href="fn.add_pull_wait_nanos.html" title="fn cqlite_core::observability::stream_subphase::add_pull_wait_nanos"><code>add_pull_wait_nanos</code></a> /
+<a href="fn.pull_wait_nanos.html" title="fn cqlite_core::observability::stream_subphase::pull_wait_nanos"><code>pull_wait_nanos</code></a>) the merge consumer thread uses to EXCLUDE the blocking
+merge-input channel wait from <code>stream_merge</code> (issue #2819 B2 — that wait is
+producer starvation / cold-IO, not merge CPU).</li>
+</ul>
+<h2 id="zero-cost-when-absent"><a class="doc-anchor" href="#zero-cost-when-absent">§</a>Zero-cost when absent</h2>
+<p>Every non-flight caller (compaction, CLI, point reads) never installs a sink,
+so <a href="fn.current.html" title="fn cqlite_core::observability::stream_subphase::current"><code>current</code></a> returns <code>None</code>, <a href="fn.timed.html" title="fn cqlite_core::observability::stream_subphase::timed"><code>timed</code></a> runs the closure with a single
+thread-local peek and NO <code>Instant::now()</code> and NO atomic write, and
+<a href="fn.record_nanos.html" title="fn cqlite_core::observability::stream_subphase::record_nanos"><code>record_nanos</code></a> is a no-op. The instrumentation is paid for only on the flight
+streaming path that opted in.</p>
+<h2 id="isolation"><a class="doc-anchor" href="#isolation">§</a>Isolation</h2>
+<p>The sink is scoped to the request’s scan threads only: it is installed with an
+RAII guard that restores the previous thread-local value on drop (including on
+panic / unwind), so a reused blocking-pool thread never leaks one RPC’s <code>Arc</code>
+into another RPC or an unrelated thread.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.StreamSubPhaseGuard.html" title="struct cqlite_core::observability::stream_subphase::StreamSubPhaseGuard">Stream<wbr>SubPhase<wbr>Guard</a></dt><dd>RAII guard restoring the previous sub-phase sink on drop — panic-safe, so a
+reused blocking-pool thread never leaks one RPC’s sink into another.</dd><dt><a class="struct" href="struct.StreamSubPhaseTimings.html" title="struct cqlite_core::observability::stream_subphase::StreamSubPhaseTimings">Stream<wbr>SubPhase<wbr>Timings</a></dt><dd>Per-request accumulator of in-<code>stream</code> sub-phase wall time, in nanoseconds.</dd><dt><a class="struct" href="struct.SubPhaseTimer.html" title="struct cqlite_core::observability::stream_subphase::SubPhaseTimer">SubPhase<wbr>Timer</a></dt><dd>RAII timer that records the elapsed wall time into <code>phase</code> when dropped. The
+tight-scope counterpart of <a href="fn.timed.html" title="fn cqlite_core::observability::stream_subphase::timed"><code>timed</code></a> for an ASYNC region that a sync closure
+cannot wrap (e.g. an <code>.await</code>ed page-in): bind it in a <code>{ let _t = …; expr }</code>
+block so it drops the instant the region ends.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.StreamSubPhase.html" title="enum cqlite_core::observability::stream_subphase::StreamSubPhase">Stream<wbr>SubPhase</a></dt><dd>One of the six in-<code>stream</code> data-plane sub-phases (issue #2819; <code>EncodeFraming</code>
+added by issue #3096). Which thread records each is fixed by the pipeline
+architecture: <code>ColdFault</code>/<code>Decompress</code> on the per-SSTable PRODUCER thread(s)
+(where the page-in + decompress run synchronously), <code>Merge</code>/<code>Encode</code>/<code>GrpcWrite</code>
+all on the MERGE-CONSUMER <code>spawn_blocking</code> thread (<code>GrpcWrite</code> is
+<code>ChannelSink::emit</code>, which runs on that thread, NOT a separate egress thread),
+and <code>EncodeFraming</code> on the ASYNC gRPC task that polls the response stream. The
+flight side maps these to the bounded <code>cqlite.rpc.phase</code> values
+<code>stream_cold_fault</code> / <code>stream_decompress</code> / <code>stream_merge</code> / <code>stream_encode</code> /
+<code>stream_encode_framing</code> / <code>stream_grpc_write</code>.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.add_pull_wait_nanos.html" title="fn cqlite_core::observability::stream_subphase::add_pull_wait_nanos">add_<wbr>pull_<wbr>wait_<wbr>nanos</a></dt><dd>Add merge-input channel recv-wait (<code>nanos</code>) to this thread’s running pull-wait
+total (issue #2819 B2). Recorded only by the merge consumer thread, at the
+blocking <code>SSTableRowIterator::next</code> recv site, so the row-drive loop can
+subtract it from <code>stream_merge</code>. A plain thread-local <code>Cell</code> add — cheap, and
+never touched on the non-flight path (the caller gates on <a href="fn.sink_active.html" title="fn cqlite_core::observability::stream_subphase::sink_active"><code>sink_active</code></a>).</dd><dt><a class="fn" href="fn.current.html" title="fn cqlite_core::observability::stream_subphase::current">current</a></dt><dd>The current thread’s installed sub-phase sink, if any. A scan-thread spawn
+site calls this on the PARENT thread and re-<a href="fn.install.html" title="fn cqlite_core::observability::stream_subphase::install"><code>install</code></a>s the captured value on
+the CHILD thread, so the per-SSTable producer thread’s page-in/decompress reach
+the request’s accumulator.</dd><dt><a class="fn" href="fn.elapsed_nanos.html" title="fn cqlite_core::observability::stream_subphase::elapsed_nanos">elapsed_<wbr>nanos</a></dt><dd>Clamped nanoseconds elapsed since <code>start</code> — the ONE place the <code>Instant</code>→<code>u64</code>
+clamp lives (issue #2819 L3), reused by every sub-phase timing site. A scan
+long enough to overflow <code>u64</code> nanoseconds (~584 years) is unreachable.</dd><dt><a class="fn" href="fn.install.html" title="fn cqlite_core::observability::stream_subphase::install">install</a></dt><dd>Install <code>sink</code> as the current thread’s sub-phase sink for the lifetime of the
+returned guard, restoring the previous value on drop. Passing <code>None</code> installs
+“no sink” (used when a scan-thread spawn captured <code>None</code> from a non-flight
+caller) — still restoring the prior value on drop.</dd><dt><a class="fn" href="fn.pull_wait_nanos.html" title="fn cqlite_core::observability::stream_subphase::pull_wait_nanos">pull_<wbr>wait_<wbr>nanos</a></dt><dd>This thread’s running merge-input recv-wait total, in nanoseconds (issue #2819
+B2). The drive loop reads it before/after each <code>step_row</code> and uses the delta.</dd><dt><a class="fn" href="fn.record_nanos.html" title="fn cqlite_core::observability::stream_subphase::record_nanos">record_<wbr>nanos</a></dt><dd>Add <code>nanos</code> directly to <code>phase</code> on the current thread’s sink, if installed
+(no-op otherwise). For a caller that measured elapsed time itself rather than
+wrapping a closure via <a href="fn.timed.html" title="fn cqlite_core::observability::stream_subphase::timed"><code>timed</code></a>.</dd><dt><a class="fn" href="fn.scoped.html" title="fn cqlite_core::observability::stream_subphase::scoped">scoped</a></dt><dd>A <a href="struct.SubPhaseTimer.html" title="struct cqlite_core::observability::stream_subphase::SubPhaseTimer"><code>SubPhaseTimer</code></a> for <code>phase</code>, or <code>None</code> (zero <code>Instant::now</code>) when no sink
+is installed — so a non-flight caller pays nothing. The sink <code>Arc</code> is captured
+here (correct-by-construction across an <code>.await</code>), never re-resolved at drop.</dd><dt><a class="fn" href="fn.scoped_captured.html" title="fn cqlite_core::observability::stream_subphase::scoped_captured">scoped_<wbr>captured</a></dt><dd>A <a href="struct.SubPhaseTimer.html" title="struct cqlite_core::observability::stream_subphase::SubPhaseTimer"><code>SubPhaseTimer</code></a> for <code>phase</code> built from an ALREADY-CAPTURED sink (from a
+prior <a href="fn.current.html" title="fn cqlite_core::observability::stream_subphase::current"><code>current</code></a> call), so NO thread-local read happens here (issue #2819
+L1). Use when the timer must be constructed AFTER an <code>.await</code> that may resume
+on a different executor thread — capture the sink ONCE before the await, then
+build each timer from that captured <code>Option</code>.</dd><dt><a class="fn" href="fn.sink_active.html" title="fn cqlite_core::observability::stream_subphase::sink_active">sink_<wbr>active</a></dt><dd>Whether a flight sub-phase sink is installed on this thread — a cheap
+<code>Cell&lt;bool&gt;</code> load (no <code>RefCell</code> borrow, no <code>Arc</code> clone). A hot caller uses it
+to skip <code>Instant::now()</code> entirely on the non-flight path (issue #2819 B3).</dd><dt><a class="fn" href="fn.time_recv.html" title="fn cqlite_core::observability::stream_subphase::time_recv">time_<wbr>recv</a></dt><dd>Time <code>f</code> (a BLOCKING merge-input recv) and add its elapsed to this thread’s
+pull-wait accumulator IF a sink is installed, so the row-drive loop can
+EXCLUDE it from <code>stream_merge</code> (issue #2819 B2). Zero <code>Instant::now</code> when
+inert, so the non-flight compaction merge pays nothing.</dd><dt><a class="fn" href="fn.timed.html" title="fn cqlite_core::observability::stream_subphase::timed">timed</a></dt><dd>Time <code>f</code> and, IF a sink is installed on this thread, attribute its elapsed
+wall time to <code>phase</code>. When no sink is installed (every non-flight caller) this
+is a single thread-local peek plus the bare closure — no <code>Instant::now()</code>, no
+atomic write — so the hot scan path pays effectively nothing.</dd></dl></section></div></main></body></html>

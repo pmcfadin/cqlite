@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_ESTIMATE_LEAF_SLOTS","MAX_ESTIMATE_NODES"],"fn":["arrow_payload_bytes","estimate_arrow_row_bytes"]};

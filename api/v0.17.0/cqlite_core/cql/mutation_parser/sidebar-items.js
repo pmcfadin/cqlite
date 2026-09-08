@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["parse_batch_statement","parse_delete_statement","parse_insert_statement","parse_update_statement"]};

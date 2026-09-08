@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_MAX_RESULT_BYTES"],"enum":["CachePolicy","CompressionAlgorithm","DiskAccessMode","PrefetchMode","ReadPathMode"],"struct":["CacheConfig","CompactionConfig","CompressionConfig","Config","MemoryConfig","QueryConfig","StorageConfig"]};

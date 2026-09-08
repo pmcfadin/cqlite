@@ -1,0 +1,54 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="One rule for rendering a UDT as JSON: its declared fields and nothing else."><title>cqlite_core::util::udt_json - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module udt_json</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.17.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module udt_<wbr>json</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#why-this-exists-issue-3629-parent-class-3504" title="Why this exists (issue #3629, parent class #3504)">Why this exists (issue #3629, parent class #3504)</a></li><li><a href="#the-reference-rule-and-its-primary-source" title="The reference rule, and its PRIMARY SOURCE">The reference rule, and its PRIMARY SOURCE</a></li><li><a href="#why-it-is-generic-over-the-field-renderer" title="Why it is generic over the field renderer">Why it is generic over the field renderer</a></li></ul><h3><a href="#functions">Module Items</a></h3><ul class="block"><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In cqlite_<wbr>core::<wbr>util</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">cqlite_core</a>::<wbr><a href="../index.html">util</a></div><h1>Module <span>udt_<wbr>json</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/cqlite_core/util/udt_json.rs.html#1-119">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>One rule for rendering a UDT as JSON: <strong>its declared fields and nothing else</strong>.</p>
+<h2 id="why-this-exists-issue-3629-parent-class-3504"><a class="doc-anchor" href="#why-this-exists-issue-3629-parent-class-3504">§</a>Why this exists (issue #3629, parent class #3504)</h2>
+<p>Two JSON renderers — <code>cqlite-cli</code>’s per-cell JSON rendering (then
+<code>JSONWriter::value_to_json</code>, now <code>JsonCell::from_value</code>) and <code>cqlite-core</code>’s
+<code>impl ToJson for Value</code> — each used to <code>insert("_type", …)</code>
+into the SAME <code>serde_json</code> object that then received the UDT’s own declared
+fields. That makes type identity (our control data) and the user’s field names
+(their data) share ONE channel, which is a defect twice over:</p>
+<ul>
+<li>a UDT that DECLARES a field named <code>_type</code> — legal CQL via a quoted
+identifier — silently OVERWRITES the marker, so the type name is
+unrecoverable and the collision is invisible; and</li>
+<li>every UDT that declares no such field carries a key Cassandra never wrote,
+so the output diverges from <code>sstabledump</code> for ordinary data.</li>
+</ul>
+<h2 id="the-reference-rule-and-its-primary-source"><a class="doc-anchor" href="#the-reference-rule-and-its-primary-source">§</a>The reference rule, and its PRIMARY SOURCE</h2>
+<p>Authority is Cassandra, read at the pinned tag — not CQLite’s own code:
+<code>cassandra-5.0.8:src/java/org/apache/cassandra/db/marshal/UserType.java:261</code>
+(<code>toJSONString</code>) builds <code>{"&lt;field&gt;": &lt;value&gt;, …}</code> by iterating
+<code>for (int i = 0; i &lt; types.size(); i++)</code> over <code>stringFieldNames</code> ALONE. It
+emits <strong>no type key and no keyspace key</strong>, and where a field’s buffer is
+absent it appends the literal <code>null</code> (line 280). So “declared fields, nothing
+else, <code>null</code> for an absent one” is Cassandra’s rule, not a CQLite convention.</p>
+<p>Corroborated by <code>sstabledump</code> on the committed Cassandra-written fixture
+<code>test-data/fixtures/issue_3504/</code>, whose non-colliding <code>p</code> cell dumps as
+<code>{"label": …, "real_field": 7}</code> — and whose <code>id 3</code> <code>c</code> cell dumps
+<code>"_type": null</code>, which line 280 says is the CORRECT rendering of a null
+FIELD and not a residue of the removed marker.</p>
+<p><code>crate::util::value_fmt::ValueFormatter::format_udt</code> (the table/CSV display
+path) already followed that rule. This helper is the same rule, for JSON.</p>
+<h2 id="why-it-is-generic-over-the-field-renderer"><a class="doc-anchor" href="#why-it-is-generic-over-the-field-renderer">§</a>Why it is generic over the field renderer</h2>
+<p>The two callers deliberately render field VALUES by DIFFERENT rules — 11 arms
+differ (blobs/uuids/inet as CLI hex vs core base64, timestamps as human
+strings vs raw integers, maps as <code>[{key,value}]</code> vs a Display-keyed object).
+<code>decimal</code> and <code>varint</code> are two of those 11 and were divergent BEFORE #3644 (a
+quoted display string against core’s <code>{scale, unscaled: &lt;base64&gt;}</code> and a
+base64 string); #3644 changed the KIND of the CLI side — an unquoted JSON
+number — without changing the count. Converging the whole writer would be
+wrong, so only the UDT arm is shared and each caller keeps its own field-value
+renderer.</p>
+<p>Call sites (both must stay on this rule):</p>
+<ul>
+<li><code>cqlite-cli/src/output/json_cell.rs</code> — <code>JsonCell::from_value</code>, through
+<a href="fn.udt_render_fields.html" title="fn cqlite_core::util::udt_json::udt_render_fields"><code>udt_render_fields</code></a> (its cell type is not a <code>serde_json::Value</code>, so it
+shares the RULE rather than the return type)</li>
+<li><code>cqlite-core/src/query/result.rs</code> — <code>impl ToJson for Value</code>, through
+<a href="fn.udt_to_json_object.html" title="fn cqlite_core::util::udt_json::udt_to_json_object"><code>udt_to_json_object</code></a>, which is itself a thin adapter over
+<a href="fn.udt_render_fields.html" title="fn cqlite_core::util::udt_json::udt_render_fields"><code>udt_render_fields</code></a></li>
+</ul>
+<p>Coverage: <code>cqlite-cli/tests/issue_3629_cli_udt_json_namespace.rs</code> and
+<code>cqlite-core/tests/issue_3629_core_tojson_udt_namespace.rs</code> (independent per
+site, so the two copies cannot silently diverge again).</p>
+</div></details><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.udt_render_fields.html" title="fn cqlite_core::util::udt_json::udt_render_fields">udt_<wbr>render_<wbr>fields</a></dt><dd>The SAME rule as <a href="fn.udt_to_json_object.html" title="fn cqlite_core::util::udt_json::udt_to_json_object"><code>udt_to_json_object</code></a>, for a caller whose rendered field is
+not a <a href="https://docs.rs/serde_json/1.0.151/serde_json/value/enum.Value.html" title="enum serde_json::value::Value"><code>JsonValue</code></a>.</dd><dt><a class="fn" href="fn.udt_to_json_object.html" title="fn cqlite_core::util::udt_json::udt_to_json_object">udt_<wbr>to_<wbr>json_<wbr>object</a></dt><dd>Render <code>udt</code> as a JSON object holding its DECLARED FIELDS AND NOTHING ELSE.</dd></dl></section></div></main></body></html>

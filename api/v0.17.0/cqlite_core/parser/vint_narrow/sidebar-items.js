@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["take_vint_length","take_vuint_length"]};

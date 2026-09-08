@@ -1,0 +1,58 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Deprecation reporting for configuration keys CQLite has REMOVED (issue #1696)."><title>cqlite_core::config_removed_keys - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module config_removed_keys</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.17.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module config_<wbr>removed_<wbr>keys</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#why-a-rust-struct-is-not-the-whole-story" title="Why a Rust struct is not the whole story">Why a Rust struct is not the whole story</a></li><li><a href="#where-the-rule-is-enforced--and-where-it-is-not-1696-roborev-r2-f3" title="WHERE THE RULE IS ENFORCED — and where it is NOT (#1696 roborev r2 F3)">WHERE THE RULE IS ENFORCED — and where it is NOT (#1696 roborev r2 F3)</a></li><li><a href="#why-not-deny_unknown_fields" title="Why not `deny_unknown_fields`">Why not <code>deny_unknown_fields</code></a></li><li><a href="#one-mechanism-one-table-per-document-schema" title="One mechanism, one table per DOCUMENT SCHEMA">One mechanism, one table per DOCUMENT SCHEMA</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate cqlite_<wbr>core</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">cqlite_core</a></div><h1>Module <span>config_<wbr>removed_<wbr>keys</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/cqlite_core/config_removed_keys.rs.html#1-237">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Deprecation reporting for configuration keys CQLite has REMOVED (issue #1696).</p>
+<h2 id="why-a-rust-struct-is-not-the-whole-story"><a class="doc-anchor" href="#why-a-rust-struct-is-not-the-whole-story">§</a>Why a Rust struct is not the whole story</h2>
+<p>Deleting a decorative field from <a href="../config/struct.Config.html" title="struct cqlite_core::config::Config"><code>crate::Config</code></a> is a COMPILE error for an
+embedder writing Rust — the loudest signal available. But <code>Config</code> derives
+<code>Deserialize</code>, and serde’s default behaviour is to DISCARD unknown fields, so
+every non-Rust authoring surface gets the opposite: a pre-change document that
+still says</p>
+<div class="example-wrap"><pre class="language-json"><code>{ &quot;storage&quot;: { &quot;block_size&quot;: 65536 }, &quot;query&quot;: { &quot;parallel&quot;: { &quot;enabled&quot;: true } } }</code></pre></div>
+<p>deserializes SUCCESSFULLY and is silently ignored. The Python bindings’ dict /
+JSON bridge is exactly that surface (<code>cqlite.open(path, config={...})</code>), which
+made the crate-wide rule stated in #1696</p>
+<blockquote>
+<p>A removed knob must produce a LOUD signal at the layer where it is set,
+never silence.</p>
+</blockquote>
+<p>false for anyone configuring CQLite through the bindings (#1696 roborev F1).</p>
+<h2 id="where-the-rule-is-enforced--and-where-it-is-not-1696-roborev-r2-f3"><a class="doc-anchor" href="#where-the-rule-is-enforced--and-where-it-is-not-1696-roborev-r2-f3">§</a>WHERE THE RULE IS ENFORCED — and where it is NOT (#1696 roborev r2 F3)</h2>
+<p>Stated exactly, because a rule quoted without its scope reads as universal
+coverage and this one does not have it. The rule holds on:</p>
+<ul>
+<li>the CLI’s config-file loader (<code>cqlite_cli::config::removed_keys</code>) — a named
+warning on stderr;</li>
+<li>the Python bindings’ dict/JSON entry points — a <code>UserWarning</code> naming each
+dead path (visible under Python’s DEFAULT filters, which is why the category
+is not <code>DeprecationWarning</code>);</li>
+<li>Rust FIELD ACCESS — a compile error, and only for callers writing Rust.</li>
+</ul>
+<p>It does NOT hold on a DIRECT serde deserialization of <a href="../config/struct.Config.html" title="struct cqlite_core::config::Config"><code>crate::Config</code></a>.
+<code>Config</code> derives <code>Deserialize</code>, so <code>serde_json::from_str::&lt;Config&gt;</code> /
+<code>from_value::&lt;Config&gt;</code> bypass <a href="../config/struct.Config.html#method.from_json_str" title="associated function cqlite_core::config::Config::from_json_str"><code>crate::Config::from_json_str</code></a> and
+<a href="../config/struct.Config.html#method.from_json_str_reporting_removed" title="associated function cqlite_core::config::Config::from_json_str_reporting_removed"><code>crate::Config::from_json_str_reporting_removed</code></a> entirely, and serde
+silently DISCARDS the removed keys. An embedder deserializing a <code>Config</code>
+document themselves therefore still gets silence: a reporting constructor is
+OPTIONAL, and an optional constructor enforces nothing at the boundary it sits
+beside. That residual is <strong>issue #3520</strong>, pinned by
+<code>direct_serde_deserialization_is_the_unreported_surface</code> in this module’s
+tests. It was scoped out of #1696 rather than fixed: closing it needs a custom
+<code>Deserialize</code> capturing unknown keys across every nested config struct.</p>
+<h2 id="why-not-deny_unknown_fields"><a class="doc-anchor" href="#why-not-deny_unknown_fields">§</a>Why not <code>deny_unknown_fields</code></h2>
+<p>Because it would HARD-FAIL a Python caller whose config predates the removal,
+with no migration path, for keys that never did anything. That is the opposite
+of the parse-and-ignore-PLUS-a-named-warning posture deliberately chosen for
+the CLI’s file surface, and #1696 requires ONE consistent posture crate-wide.
+So this module is the same mechanism, at the deserialization boundary.</p>
+<h2 id="one-mechanism-one-table-per-document-schema"><a class="doc-anchor" href="#one-mechanism-one-table-per-document-schema">§</a>One mechanism, one table per DOCUMENT SCHEMA</h2>
+<p><a href="struct.Removed.html" title="struct cqlite_core::config_removed_keys::Removed"><code>Removed</code></a>, <a href="fn.removed_keys_present.html" title="fn cqlite_core::config_removed_keys::removed_keys_present"><code>removed_keys_present</code></a> and <a href="fn.deprecation_warning.html" title="fn cqlite_core::config_removed_keys::deprecation_warning"><code>deprecation_warning</code></a> live here and
+are shared with <code>cqlite_cli::config::removed_keys</code>, so the wording, the
+matching rule and the shape cannot drift between the two surfaces.</p>
+<p>The TABLES are necessarily per-schema and must not be crossed: this crate’s
+<a href="constant.REMOVED_KEYS.html" title="constant cqlite_core::config_removed_keys::REMOVED_KEYS"><code>REMOVED_KEYS</code></a> describes a <code>cqlite_core::Config</code> document, while the CLI’s
+describes a <code>cqlite.toml</code>/<code>.yaml</code>/<code>.json</code>. Applying this table to a CLI file
+would be WRONG, not merely redundant — the CLI’s <code>[performance]</code> section is
+live (<code>query_timeout_ms</code>, <code>memory_limit_mb</code>, <code>cache_size_mb</code>) while the core’s
+<code>performance</code> tree was removed, so a shared table would scold a user for a key
+that works.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.Removed.html" title="struct cqlite_core::config_removed_keys::Removed">Removed</a></dt><dd>A configuration key removed by an issue, and why it is gone.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.REMOVED_KEYS.html" title="constant cqlite_core::config_removed_keys::REMOVED_KEYS">REMOVED_<wbr>KEYS</a></dt><dd>Every <code>cqlite_core::Config</code> key removed by issue #1696.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.deprecation_warning.html" title="fn cqlite_core::config_removed_keys::deprecation_warning">deprecation_<wbr>warning</a></dt><dd>The operator-facing deprecation warning for a set of still-named removed keys,
+or <code>None</code> when the document names none.</dd><dt><a class="fn" href="fn.json_has_path.html" title="fn cqlite_core::config_removed_keys::json_has_path">json_<wbr>has_<wbr>path</a></dt><dd>Whether a parsed JSON document contains <code>path</code> as an object key.</dd><dt><a class="fn" href="fn.removed_keys_present.html" title="fn cqlite_core::config_removed_keys::removed_keys_present">removed_<wbr>keys_<wbr>present</a></dt><dd>Which of <code>table</code>’s removed keys a document still names.</dd><dt><a class="fn" href="fn.warning_for_json.html" title="fn cqlite_core::config_removed_keys::warning_for_json">warning_<wbr>for_<wbr>json</a></dt><dd>The deprecation warning a JSON <code>Config</code> document should produce, or <code>None</code>
+when it names no removed key (or is not parseable JSON at all).</dd></dl></section></div></main></body></html>

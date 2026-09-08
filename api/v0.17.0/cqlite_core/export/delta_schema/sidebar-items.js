@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DeltaSchemaError"],"fn":["derive_delta_schema"],"struct":["DeltaSchemaOpts"]};

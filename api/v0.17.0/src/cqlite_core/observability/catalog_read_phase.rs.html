@@ -1,0 +1,139 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/observability/catalog_read_phase.rs`."><title>catalog_read_phase.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/observability/</div>catalog_read_phase.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Read-path PHASE timing metric names + the reader-reported fd gauge (issue
+<a href=#2 id=2 data-nosnippet>2</a>//! #1707, AI7 of epic #1686) — declared in a sibling file so `catalog.rs` stays
+<a href=#3 id=3 data-nosnippet>3</a>//! inside the campsite-rule source target (#1116). Every constant is re-exported
+<a href=#4 id=4 data-nosnippet>4</a>//! from [`super`], so the public paths (`observability::catalog::READ_PHASE_IO`, …)
+<a href=#5 id=5 data-nosnippet>5</a>//! are unchanged and no caller moves.
+<a href=#6 id=6 data-nosnippet>6</a>//!
+<a href=#7 id=7 data-nosnippet>7</a>//! Declaration-parsing note: the catalog guards recover `pub const IDENT: &amp;str =
+<a href=#8 id=8 data-nosnippet>8</a>//! "…";` declarations from SOURCE and scan this file too (see
+<a href=#9 id=9 data-nosnippet>9</a>//! `catalog_tests::catalog_sources`). A future split must be added there as well, or
+<a href=#10 id=10 data-nosnippet>10</a>//! the guards go blind to the constants it moves.
+<a href=#11 id=11 data-nosnippet>11</a>
+<a href=#12 id=12 data-nosnippet>12</a></span><span class="comment">// ---------------------------------------------------------------------------
+<a href=#13 id=13 data-nosnippet>13</a>// Read-path PHASE timings + reader-reported resource gauges (issue #1707, AI7 of
+<a href=#14 id=14 data-nosnippet>14</a>// epic #1686). A slow `SELECT` used to be un-localisable from metrics alone:
+<a href=#15 id=15 data-nosnippet>15</a>// `READ_DURATION` says the read was slow and nothing says WHERE the time went.
+<a href=#16 id=16 data-nosnippet>16</a>// These four histograms split one completed scan's accumulated wall time into
+<a href=#17 id=17 data-nosnippet>17</a>// io / decompress / decode / merge — accumulated at existing function seams into a
+<a href=#18 id=18 data-nosnippet>18</a>// per-scan `ReadPhaseTimings`, and emitted as exactly ONE sample per phase per
+<a href=#19 id=19 data-nosnippet>19</a>// COMPLETED scan (never per chunk, never per row).
+<a href=#20 id=20 data-nosnippet>20</a>//
+<a href=#21 id=21 data-nosnippet>21</a>// NAMING (#1707): the issue text spelled these `read.phase.io_ms` etc. The `_ms`
+<a href=#22 id=22 data-nosnippet>22</a>// suffix was deliberately NOT adopted — every timing metric in this catalog is
+<a href=#23 id=23 data-nosnippet>23</a>// base-unit SECONDS ([`super::READ_DURATION`], [`super::WAL_SYNC_DURATION`], the `cqlite.rpc.*`
+<a href=#24 id=24 data-nosnippet>24</a>// durations), which is what OTel's semantic conventions ask for, so an `_ms`-named
+<a href=#25 id=25 data-nosnippet>25</a>// metric carrying [`super::unit::SECONDS`] would misdescribe its own values and an `ms`
+<a href=#26 id=26 data-nosnippet>26</a>// unit would break the repo-wide (and OTel) base-unit convention.
+<a href=#27 id=27 data-nosnippet>27</a>//
+<a href=#28 id=28 data-nosnippet>28</a>// ACCOUNTING CAVEAT, stated here because it changes how the numbers are read: the
+<a href=#29 id=29 data-nosnippet>29</a>// read pipeline is CONCURRENT (an IO/decode feed thread, a blocking parse thread, a
+<a href=#30 id=30 data-nosnippet>30</a>// merge consumer thread), so these phases OVERLAP in wall-clock and DO NOT sum to
+<a href=#31 id=31 data-nosnippet>31</a>// the scan's [`super::READ_DURATION`]. They are per-phase totals for attribution — which
+<a href=#32 id=32 data-nosnippet>32</a>// phase dominates, and how it moves between two runs — not a decomposition of
+<a href=#33 id=33 data-nosnippet>33</a>// latency. Same caveat as the #2819 `stream_*` sub-phases.
+<a href=#34 id=34 data-nosnippet>34</a>// ---------------------------------------------------------------------------
+<a href=#35 id=35 data-nosnippet>35</a>
+<a href=#36 id=36 data-nosnippet>36</a></span><span class="doccomment">/// `cqlite.read.phase.io` — histogram `s` (issue #1707).
+<a href=#37 id=37 data-nosnippet>37</a>///
+<a href=#38 id=38 data-nosnippet>38</a>/// Wall time ONE completed scan spent in `Data.db` READS: the synchronous
+<a href=#39 id=39 data-nosnippet>39</a>/// positional chunk/piece reads the windowed scan's IO half performs
+<a href=#40 id=40 data-nosnippet>40</a>/// (`read_compressed_chunk_sync` / `read_uncompressed_piece_sync`), CRC verify
+<a href=#41 id=41 data-nosnippet>41</a>/// included, decompression excluded (that is [`READ_PHASE_DECOMPRESS`]).
+<a href=#42 id=42 data-nosnippet>42</a>///
+<a href=#43 id=43 data-nosnippet>43</a>/// **Healthy vs alarming**: on a warm page cache this is a small fraction of the
+<a href=#44 id=44 data-nosnippet>44</a>/// scan; io dominating (say &gt; half the recorded phase time) means the scan is
+<a href=#45 id=45 data-nosnippet>45</a>/// disk/page-fault bound — cold storage, an evicted page cache, or a network
+<a href=#46 id=46 data-nosnippet>46</a>/// filesystem — not CPU bound, so a decode/merge optimisation will not help it.
+<a href=#47 id=47 data-nosnippet>47</a>/// Compare it against [`READ_PHASE_DECODE`] before tuning anything.
+<a href=#48 id=48 data-nosnippet>48</a>///
+<a href=#49 id=49 data-nosnippet>49</a>/// **Coverage**: the windowed scan driver (the dominant `SELECT *` path). A read
+<a href=#50 id=50 data-nosnippet>50</a>/// that never enters that driver (a point read, the BTI trie walk) records NO
+<a href=#51 id=51 data-nosnippet>51</a>/// sample at all — absence means the phase DID NOT RUN. A `0.0` sample is a
+<a href=#52 id=52 data-nosnippet>52</a>/// different statement: the phase ran and measured zero. **Attributes**: none.
+<a href=#53 id=53 data-nosnippet>53</a></span><span class="kw">pub const </span>READ_PHASE_IO: <span class="kw-2">&amp;</span>str = <span class="string">"cqlite.read.phase.io"</span>;
+<a href=#54 id=54 data-nosnippet>54</a>
+<a href=#55 id=55 data-nosnippet>55</a><span class="doccomment">/// `cqlite.read.phase.decompress` — histogram `s` (issue #1707).
+<a href=#56 id=56 data-nosnippet>56</a>///
+<a href=#57 id=57 data-nosnippet>57</a>/// Wall time ONE completed scan spent DECOMPRESSING chunk payloads, measured
+<a href=#58 id=58 data-nosnippet>58</a>/// inside the single chunk-decode plane (`reader::chunk_source`) around the
+<a href=#59 id=59 data-nosnippet>59</a>/// compressor call ONLY — the read that fetched the compressed bytes is
+<a href=#60 id=60 data-nosnippet>60</a>/// [`READ_PHASE_IO`], and a resident decompressed-chunk cache HIT does no
+<a href=#61 id=61 data-nosnippet>61</a>/// decompression and so adds nothing.
+<a href=#62 id=62 data-nosnippet>62</a>///
+<a href=#63 id=63 data-nosnippet>63</a>/// **Healthy vs alarming**: proportional to compressed bytes; a growing share
+<a href=#64 id=64 data-nosnippet>64</a>/// points at chunk-length/compressor choice or at re-decompressing the same chunks
+<a href=#65 id=65 data-nosnippet>65</a>/// (a cache too small for the scan's window).
+<a href=#66 id=66 data-nosnippet>66</a>///
+<a href=#67 id=67 data-nosnippet>67</a>/// **ABSENT, never zero, for an UNCOMPRESSED SSTable** — CQLite's own write surface
+<a href=#68 id=68 data-nosnippet>68</a>/// emits uncompressed SSTables (#1406) and those reads decompress NOTHING, so this
+<a href=#69 id=69 data-nosnippet>69</a>/// series carries no sample at all for them. Absence and `0.0` are DIFFERENT
+<a href=#70 id=70 data-nosnippet>70</a>/// statements and the emitter distinguishes them by tracking phase ENTRY separately
+<a href=#71 id=71 data-nosnippet>71</a>/// from duration (#1707): absence means the phase did not run, while `0.0` means it
+<a href=#72 id=72 data-nosnippet>72</a>/// ran and measured zero — decompression too fast for the clock, not the absence of
+<a href=#73 id=73 data-nosnippet>73</a>/// decompression. **Attributes**: none.
+<a href=#74 id=74 data-nosnippet>74</a></span><span class="kw">pub const </span>READ_PHASE_DECOMPRESS: <span class="kw-2">&amp;</span>str = <span class="string">"cqlite.read.phase.decompress"</span>;
+<a href=#75 id=75 data-nosnippet>75</a>
+<a href=#76 id=76 data-nosnippet>76</a><span class="doccomment">/// `cqlite.read.phase.decode` — histogram `s` (issue #1707).
+<a href=#77 id=77 data-nosnippet>77</a>///
+<a href=#78 id=78 data-nosnippet>78</a>/// Wall time ONE completed scan spent DECODING rows/cells out of already-resident
+<a href=#79 id=79 data-nosnippet>79</a>/// decompressed bytes — accumulated per PARTITION at the windowed scan's parse
+<a href=#80 id=80 data-nosnippet>80</a>/// boundary (`parse_one_partition_with_timestamps`), which is the coarsest boundary
+<a href=#81 id=81 data-nosnippet>81</a>/// that still separates decode from io. Deliberately NOT per row: the row/cell
+<a href=#82 id=82 data-nosnippet>82</a>/// decoder is the hottest loop in the read path and is never instrumented.
+<a href=#83 id=83 data-nosnippet>83</a>///
+<a href=#84 id=84 data-nosnippet>84</a>/// **Healthy vs alarming**: normally the largest phase of a warm full scan (decode
+<a href=#85 id=85 data-nosnippet>85</a>/// is CPU-bound work over resident bytes). Alarming when it grows relative to the
+<a href=#86 id=86 data-nosnippet>86</a>/// rows delivered — wide partitions, many collection/UDT cells, or a schema-less
+<a href=#87 id=87 data-nosnippet>87</a>/// fallback decode doing more work per row. **Attributes**: none.
+<a href=#88 id=88 data-nosnippet>88</a></span><span class="kw">pub const </span>READ_PHASE_DECODE: <span class="kw-2">&amp;</span>str = <span class="string">"cqlite.read.phase.decode"</span>;
+<a href=#89 id=89 data-nosnippet>89</a>
+<a href=#90 id=90 data-nosnippet>90</a><span class="doccomment">/// `cqlite.read.phase.merge` — histogram `s` (issue #1707).
+<a href=#91 id=91 data-nosnippet>91</a>///
+<a href=#92 id=92 data-nosnippet>92</a>/// Wall time ONE completed cross-generation read spent in the k-way MERGE +
+<a href=#93 id=93 data-nosnippet>93</a>/// reconcile step (`KWayMerger::step`), with the blocking merge-input recv-wait
+<a href=#94 id=94 data-nosnippet>94</a>/// SUBTRACTED — that wait is producer starvation (i.e. io on another thread), not
+<a href=#95 id=95 data-nosnippet>95</a>/// merge CPU, and counting it would make every disk-bound scan look merge-bound.
+<a href=#96 id=96 data-nosnippet>96</a>/// Same exclusion the #2819 `stream_merge` sub-phase applies, through the same
+<a href=#97 id=97 data-nosnippet>97</a>/// per-thread recv-wait accumulator.
+<a href=#98 id=98 data-nosnippet>98</a>///
+<a href=#99 id=99 data-nosnippet>99</a>/// **Coverage, stated because it is narrower than its siblings**: this phase is
+<a href=#100 id=100 data-nosnippet>100</a>/// recorded only on the CROSS-GENERATION merge route (`stream_generations_for_read`).
+<a href=#101 id=101 data-nosnippet>101</a>/// A single-generation scan performs no k-way merge, so it records NO sample —
+<a href=#102 id=102 data-nosnippet>102</a>/// absence here means "there was nothing to merge", not "merge was free".
+<a href=#103 id=103 data-nosnippet>103</a>///
+<a href=#104 id=104 data-nosnippet>104</a>/// **A `0.0` sample means a merge DID run and measured zero**, which on this series
+<a href=#105 id=105 data-nosnippet>105</a>/// has a specific and useful reading: the recv-wait subtraction consumed the whole
+<a href=#106 id=106 data-nosnippet>106</a>/// step, i.e. the merge thread spent all its time waiting on starved producers. That
+<a href=#107 id=107 data-nosnippet>107</a>/// case used to be reported as ABSENCE — "single generation" — which was a false
+<a href=#108 id=108 data-nosnippet>108</a>/// statement produced by the subtraction that exists to keep the number honest
+<a href=#109 id=109 data-nosnippet>109</a>/// (#1707). Entry is now tracked separately from duration, so the zero is emitted.
+<a href=#110 id=110 data-nosnippet>110</a>///
+<a href=#111 id=111 data-nosnippet>111</a>/// **Healthy vs alarming**: grows with the number of overlapping generations and
+<a href=#112 id=112 data-nosnippet>112</a>/// with reconcile work (tombstones, LWW collapse); a merge-dominated read with few
+<a href=#113 id=113 data-nosnippet>113</a>/// delivered rows is the compaction-lag smell — cross-check
+<a href=#114 id=114 data-nosnippet>114</a>/// [`super::COMPACTION_LAG`]. **Attributes**: none.
+<a href=#115 id=115 data-nosnippet>115</a></span><span class="kw">pub const </span>READ_PHASE_MERGE: <span class="kw-2">&amp;</span>str = <span class="string">"cqlite.read.phase.merge"</span>;
+<a href=#116 id=116 data-nosnippet>116</a>
+<a href=#117 id=117 data-nosnippet>117</a><span class="doccomment">/// `cqlite.reader.fds.open` — gauge `{fd}` (issue #1707).
+<a href=#118 id=118 data-nosnippet>118</a>///
+<a href=#119 id=119 data-nosnippet>119</a>/// OS file descriptors the SSTable READERS currently hold open, reported BY the
+<a href=#120 id=120 data-nosnippet>120</a>/// readers themselves: a process-wide atomic incremented at each site that really
+<a href=#121 id=121 data-nosnippet>121</a>/// mints a descriptor (a scan source's buffered/`O_DIRECT` handle, a positional
+<a href=#122 id=122 data-nosnippet>122</a>/// reader's handle, a reader cold-open) and decremented in the matching `Drop`.
+<a href=#123 id=123 data-nosnippet>123</a>///
+<a href=#124 id=124 data-nosnippet>124</a>/// **It counts descriptors, so an mmap-backed source contributes 0** — `Mapped`
+<a href=#125 id=125 data-nosnippet>125</a>/// sources hold a mapping, not an fd, and an `Arc` clone of an existing handle is
+<a href=#126 id=126 data-nosnippet>126</a>/// not a new descriptor. Neither is invented as a number here.
+<a href=#127 id=127 data-nosnippet>127</a>///
+<a href=#128 id=128 data-nosnippet>128</a>/// **Healthy vs alarming**: rises with concurrent scans and falls as they complete
+<a href=#129 id=129 data-nosnippet>129</a>/// (there is no reader pool, by #815 design: each scan opens its own handles);
+<a href=#130 id=130 data-nosnippet>130</a>/// a level that climbs toward the process `ulimit -n` is the `EMFILE` pressure this
+<a href=#131 id=131 data-nosnippet>131</a>/// gauge exists to make visible BEFORE an open fails.
+<a href=#132 id=132 data-nosnippet>132</a>///
+<a href=#133 id=133 data-nosnippet>133</a>/// DISTINCT from [`super::PROC_FDS`], and the difference is the point: `PROC_FDS` is the
+<a href=#134 id=134 data-nosnippet>134</a>/// PROCESS total sampled from `/proc/self/fd` (~2s cadence, Linux only), so it
+<a href=#135 id=135 data-nosnippet>135</a>/// includes sockets, the WAL, and everything else. This gauge is the READER-OWNED
+<a href=#136 id=136 data-nosnippet>136</a>/// subset, needs no `/proc`, and is exact at its update points. `PROC_FDS` minus
+<a href=#137 id=137 data-nosnippet>137</a>/// this is roughly the non-reader footprint. **Attributes**: none.
+<a href=#138 id=138 data-nosnippet>138</a></span><span class="kw">pub const </span>READER_FDS_OPEN: <span class="kw-2">&amp;</span>str = <span class="string">"cqlite.reader.fds.open"</span>;
+</code></pre></div></section></main></body></html>
