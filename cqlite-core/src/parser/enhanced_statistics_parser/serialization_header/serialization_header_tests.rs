@@ -543,3 +543,115 @@ fn the_false_candidate_reaches_the_semantic_gate_and_is_unconfirmed() {
         "a run whose keyType is not a marshal class spelling must stay UNCONFIRMED"
     );
 }
+
+/// A GENUINE header that the search CONFIRMS must still fail closed — pinned on
+/// a fixture where the confirmed candidate is the ONLY route to the refusal.
+///
+/// Why the fixture looks like this: the existing higher-level guard
+/// (`encoding_stats_tests::a_frozen_scalar_header_is_refused_on_the_no_toc_marker_search_path_too`)
+/// does not pin THIS branch, because its bytes carry a `0x00` that the
+/// last-resort `parse_regular_columns` scanner anchors on and refuses at as well
+/// — so dropping the confirmed refusal here leaves that test green. This header
+/// declares a clustering key, a static column and a regular column, so every
+/// count and length is non-zero and it contains no `0x00` at all: the scanner
+/// finds no anchor, the ASCII fallback finds no `CompositeType(`, and the
+/// dispatcher's own empty-schema `Ok` is what a fall-through would produce. That
+/// `Ok` is job 119's fail-open, and this test is what keeps it closed.
+#[test]
+fn a_confirmed_frozen_scalar_header_still_fails_closed_on_the_marker_search() {
+    let refusal = match parse_serialization_header(&zero_free_header(&frozen_scalar())) {
+        Err(HeaderSchemaError::Refused(refusal)) => refusal,
+        Err(HeaderSchemaError::Structural(e)) => panic!(
+            "a frozen-scalar header must be a SEMANTIC refusal, not a structural \
+             failure a caller may retry heuristically: {e:?}"
+        ),
+        Ok((_, (pk_types, ck_types, columns))) => panic!(
+            "FAIL-OPEN: a CONFIRMED frozen<scalar> header was accepted by the marker \
+             search — pk={pk_types:?} ck={ck_types:?} {} column(s). A confirmed \
+             candidate's refusal must not fall through to another candidate or to \
+             the no-header success",
+            columns.len()
+        ),
+    };
+    assert!(
+        refusal
+            .to_string()
+            .contains("FrozenType(org.apache.cassandra.db.marshal.Int32Type)"),
+        "the refusal must name the refused type: {refusal}"
+    );
+}
+
+/// The control for the fixture above: with a LEGAL column type the same bytes are
+/// a header the marker search parses happily, so the refusal is attributable to
+/// the type and not to the fixture's framing.
+#[test]
+fn the_zero_free_header_fixture_decodes_when_its_column_type_is_legal() {
+    let (_, (pk_types, ck_types, columns)) =
+        parse_serialization_header(&zero_free_header(&marshal("Int32Type")))
+            .unwrap_or_else(|e| panic!("the control fixture must decode: {e:?}"));
+    assert_eq!(pk_types, vec![marshal("UTF8Type")], "keyType");
+    assert_eq!(ck_types, vec![marshal("TimestampType")], "clusteringTypes");
+    assert_eq!(columns.len(), 2, "one static plus one regular column");
+    assert_eq!(columns[0].name, "s");
+    assert!(columns[0].is_static);
+    assert_eq!(columns[1].name, "v");
+    assert_eq!(columns[1].column_type, "int");
+}
+
+/// A well-formed SerializationHeader containing no `0x00` byte: one clustering
+/// type, one static column and one regular column of `column_type`, so every
+/// count and every length VInt is non-zero (guide Ch.8 field order).
+fn zero_free_header(column_type: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    push_str(&mut out, &marshal("UTF8Type"));
+    out.extend_from_slice(&[0x01]); // clusteringTypes: one
+    push_str(&mut out, &marshal("TimestampType"));
+    out.extend_from_slice(&[0x01]); // staticColumns: one
+    push_str(&mut out, "s");
+    push_str(&mut out, &marshal("UTF8Type"));
+    out.extend_from_slice(&[0x01]); // regularColumns: one
+    push_str(&mut out, "v");
+    push_str(&mut out, column_type);
+    assert!(
+        !out.contains(&0x00),
+        "the fixture's premise is that it carries no 0x00 anchor"
+    );
+    out
+}
+
+/// The same confirm-then-refuse rule on the search's OTHER candidate flavour —
+/// the legacy `0x00 0x00` marker, which decodes counts and name/type lengths as
+/// single bytes rather than VInts.
+///
+/// Reaching it needs a key-type length byte the SEQUENTIAL flavour disagrees
+/// about, since an equivalent sequential candidate sits two bytes later and is
+/// therefore tried first: `0x80` is a 128-byte key type as a single byte (a
+/// `CompositeType(..)` spelling reaches that size easily) and a different, small
+/// value as a VInt, so the sequential candidate fails structurally and the legacy
+/// one is what reaches the frozen-scalar gate. Its key type is junk-prefixed, so
+/// it is unconfirmed and the valid header that follows must still be found.
+#[test]
+fn a_false_legacy_marker_candidate_must_not_refuse_a_valid_header() {
+    let mut buffer = vec![0x00, 0x00, 0x80, 0x01];
+    buffer.extend_from_slice(MARSHAL_PACKAGE.as_bytes());
+    // Pad the declared 128-byte key type out to its full length.
+    buffer.resize(3 + 128, b'x');
+    buffer.extend_from_slice(&[0x00, 0x00, 0x01]); // 0 clustering, 0 static, 1 regular
+    push_str(&mut buffer, "v");
+    push_str(&mut buffer, &frozen_scalar());
+    let header_offset = buffer.len();
+    buffer.extend_from_slice(&valid_header());
+
+    let (_, (pk_types, _, columns)) = parse_serialization_header(&buffer).unwrap_or_else(|e| {
+        panic!(
+            "OVER-REFUSAL on the legacy-marker flavour: a valid header at offset \
+             {header_offset} was rejected because an earlier false candidate quoted a \
+             frozen scalar: {e:?}"
+        )
+    });
+    assert_eq!(pk_types, vec![marshal("UTF8Type")], "real header's keyType");
+    assert_eq!(columns.len(), 1);
+    assert_eq!(columns[0].name, "v");
+    assert_eq!(columns[0].column_type, "int");
+}
+
