@@ -1,0 +1,39 @@
+> D6 -- first query after a cqlite-flight rollout restart. 3 trials. Issue #4137.
+> Same pins as d2-scan-warm.csv (image talk017 @ sha256:847c93ba...c82980, trunk f22ce842b,
+> connector 0.16.1, Trino 481, Cassandra 5.0.9, read-mode=snapshot, 3x i4i.2xlarge + 2x m6i.2xlarge).
+> table: cassandra_easy_stress.keyvalue -- 22,339,536 rows MEASURED, 4,459,716,529 B/node, LZ4.
+> elapsed_ms is queryStats.elapsedTime from /v1/query/<id>, never wall-clock.
+>
+> ### READ THIS BEFORE CALLING THESE NUMBERS "COLD" ###
+> The protocol was: `kubectl rollout restart daemonset/cqlite-flight`, wait Ready, then
+> `sync; echo 3 > /proc/sys/vm/drop_caches` on all three db nodes. The Flight restart is real and
+> verified. THE PAGE-CACHE DROP IS NOT EFFECTIVE, and the command lies about it -- it exits 0:
+>     before Cached: 2,720,812 kB
+>     drop rc=OK
+>     after  Cached: 2,696,260 kB      <-- 24 MB of 2.7 GB
+> Cassandra holds its SSTables mmap'd, so those pages are referenced and cannot be reclaimed.
+> These are therefore FLIGHT-PROCESS-COLD, OS-PAGE-CACHE-PARTIALLY-WARM measurements.
+>
+> Mitigating fact, stated so the reader can judge rather than take my word: Cached (2.7 GB) is
+> SMALLER than the table's on-disk size on a single node (4.46 GB), so the page cache was never
+> holding the bulk of the table and the scans are substantially served from local NVMe either way.
+> But "substantially" is not "entirely", and no chart here claims a drop_caches-cold number.
+>
+> What the Flight restart DOES isolate is exactly what #2412 addressed: the cost of OPENING the
+> SSTable set on the first query. That is the variable behind the 257s -> 10.7s reference, and it
+> is measured correctly here.
+>
+> index_parses_total is UNAVAILABLE, not zero, and must not be read as evidence: the pod exposes
+> only containerPort 8815 (flight-grpc) with no /metrics endpoint, and the container image has no
+> curl (exit 127). Flight metrics leave via OTLP to localhost:4317, so #2412's O(summary)-open
+> evidence has to come from the observability stack, not a pod scrape. NOT COLLECTED this run.
+metric,trial,elapsed_ms,processed_rows,processed_bytes,state,query_id
+limit5,1,336,20,3510,FINISHED,20260908_021545_00016_6dba3
+sum_scan,1,12710,22339536,3451144643,FINISHED,20260908_021547_00017_6dba3
+limit5,2,287,65,11612,FINISHED,20260908_021649_00018_6dba3
+sum_scan,2,12880,22339536,3451144643,FINISHED,20260908_021650_00019_6dba3
+limit5,3,288,20,3510,FINISHED,20260908_021750_00020_6dba3
+sum_scan,3,12820,22339536,3451144643,FINISHED,20260908_021751_00021_6dba3
+> medians: limit5 = 288 ms (n=3, spread 287-336); sum_scan = 12,820 ms (n=3, spread 12,710-12,880)
+> warm comparison from d2-scan-warm.csv: cqlite sum_scan median 10,300 ms
+> -> first-query penalty = 12,820 / 10,300 = 1.24x, i.e. the restart costs ~2.5 s on a 22.3M-row scan.

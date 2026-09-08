@@ -1,0 +1,19 @@
+> D2 -- same SQL, two catalogs. WARM full-table scan. Issue #4137.
+> query: SELECT sum(length(value)) FROM <catalog>.cassandra_easy_stress.keyvalue
+> table: cassandra_easy_stress.keyvalue -- 22,339,536 rows MEASURED (not the 20M target; early aborted
+>        load runs left extra rows, and #4137 requires the measured count, never the target)
+> corpus: 3 SSTables/node, 4,459,716,529 bytes/node, LZ4, SSTable compression ratio 0.92195
+> shape: 3x i4i.2xlarge db + 2x m6i.2xlarge app, Cassandra 5.0.9, Trino 481, connector 0.16.1
+> image: ghcr.io/pmcfadin/cqlite-flight:talk017 @ sha256:847c93ba109ceeb0a6759a5c23a1b063a86779ab11fa05b6e522df8257c82980
+> allocator: system   read-mode: snapshot   cqlite.local-datacenter: us-west-2
+> elapsed_ms is queryStats.elapsedTime from the coordinator's /v1/query/<id>, NEVER wall-clock.
+> Both catalogs processed identical row and byte counts, so this is like-for-like.
+> CAVEAT: only ONE Flight pod (db0, the node cqlite.sidecar-uri points at) did work during these
+>         scans -- db1/db2 sat at 1m CPU. This is therefore a SINGLE-POD cqlite figure.
+catalog,run,elapsed_ms,processed_rows,processed_bytes,state,query_id
+cassandra,1,17700,22339536,3451144643,FINISHED,20260908_014837_00010_6dba3
+cqlite,1,10130,22339536,3451144643,FINISHED,20260908_014856_00011_6dba3
+cassandra,2,16000,22339536,3451144643,FINISHED,20260908_014907_00012_6dba3
+cqlite,2,10360,22339536,3451144643,FINISHED,20260908_014923_00013_6dba3
+cassandra,3,17100,22339536,3451144643,FINISHED,20260908_014935_00014_6dba3
+cqlite,3,10300,22339536,3451144643,FINISHED,20260908_014952_00015_6dba3
