@@ -661,3 +661,193 @@ fn a_false_legacy_marker_candidate_must_not_refuse_a_valid_header() {
     assert_eq!(columns[0].name, "v");
     assert_eq!(columns[0].column_type, "int");
 }
+
+// ── The LAST-RESORT scanner's anchors are guesses too (#4104, job 121) ───────
+
+/// A `0x00`-anchored run the last-resort scanner reads as a complete one-column
+/// list, with NOTHING before the anchor a partition-key backtrack can recover.
+///
+/// `0xFF` filler cannot yield one: `extract_partition_key_before_marker` requires
+/// a length-framed string ending EXACTLY at the anchor that contains
+/// `org.apache.cassandra`, and these bytes are not even UTF-8. So whatever this
+/// run's column type is, nothing identifies the run as a header — which is the
+/// whole point: any cell value, index byte or min/max clustering value can look
+/// like this.
+fn false_column_section(column_type: &str) -> Vec<u8> {
+    let mut out = vec![0xFF; 16];
+    out.push(0x00); // the anchor
+    out.push(0x01); // column count: one
+    push_str(&mut out, "v");
+    push_str(&mut out, column_type);
+    out
+}
+
+/// A column section with the `[VInt len][marshal class spelling]` field
+/// Cassandra's `writeType` writes immediately before the counts — the evidence
+/// the last-resort scanner CAN weigh, since it has no `keyType` field.
+fn spelled_column_section(column_type: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    push_str(&mut out, &marshal("UTF8Type"));
+    out.extend_from_slice(&[0x00, 0x00]); // anchor + (count read two bytes on)
+    out.push(0x01); // column count: one
+    push_str(&mut out, "v");
+    push_str(&mut out, column_type);
+    out
+}
+
+/// THE OVER-REFUSAL, one level down from job 120: a frozen-scalar run at an
+/// UNCONFIRMED `0x00` anchor must not stop the scan, so the real column section
+/// after it is still found.
+///
+/// Before this fix the scanner propagated its refusal from inside the column
+/// loop, i.e. from an offset it had not yet decided was a header at all, so these
+/// bytes came back as
+/// `Err(Refused("… FrozenType(org.apache.cassandra.db.marshal.Int32Type) …"))`
+/// and a valid SSTable was unopenable.
+#[test]
+fn a_false_column_section_carrying_a_frozen_scalar_must_not_refuse_a_valid_one() {
+    let mut buffer = false_column_section(&frozen_scalar());
+    let genuine_offset = buffer.len();
+    buffer.extend_from_slice(&spelled_column_section(&marshal("Int32Type")));
+
+    let (_, (pk_types, columns)) = parse_regular_columns(&buffer).unwrap_or_else(|e| {
+        panic!(
+            "OVER-REFUSAL: the column section at offset {genuine_offset} was rejected because \
+             an EARLIER unconfirmed `0x00` anchor decoded a frozen scalar; the last-resort \
+             scanner's anchors are guesses, so its refusal is authoritative only once the \
+             candidate is confirmed: {e:?}"
+        )
+    });
+
+    // The schema returned must be the REAL section's, not the guess's: continuing
+    // the scan must not degrade into accepting the run that was skipped.
+    assert_eq!(
+        pk_types,
+        vec![marshal("UTF8Type")],
+        "the spelled type before the real anchor"
+    );
+    assert_eq!(columns.len(), 1, "one regular column");
+    assert_eq!(columns[0].name, "v");
+    assert_eq!(
+        columns[0].column_type, "int",
+        "the CONVERTED CQL name, never the deferred raw spelling"
+    );
+}
+
+/// Anti-vacuity control: the same run with a LEGAL column type decodes to one
+/// column, so the fixture really is column-shaped and really does reach the
+/// semantic gate — the frozen type is the only thing that differs.
+///
+/// It also pins the other half of the skip: with the frozen type the scanner
+/// returns NO columns from that run rather than the raw spelling it decoded
+/// under the deferral.
+#[test]
+fn the_false_column_section_reaches_the_semantic_gate_and_is_skipped() {
+    let (_, (legal_pk, legal_columns)) =
+        parse_regular_columns(&false_column_section(&marshal("Int32Type")))
+            .unwrap_or_else(|e| panic!("the control fixture must decode: {e:?}"));
+    assert!(
+        legal_pk.is_empty(),
+        "the premise: nothing before the anchor is recoverable, so the run is \
+         unconfirmable whatever its type — got {legal_pk:?}"
+    );
+    assert_eq!(legal_columns.len(), 1, "control: the run IS column-shaped");
+    assert_eq!(legal_columns[0].column_type, "int");
+
+    let (_, (_, frozen_columns)) = parse_regular_columns(&false_column_section(&frozen_scalar()))
+        .unwrap_or_else(|e| panic!("an unconfirmed candidate's refusal must not propagate: {e:?}"));
+    assert!(
+        frozen_columns.is_empty(),
+        "the skipped candidate must yield NO schema — a deferred refusal leaves a raw \
+         marshal spelling where a CQL type belongs and must never reach a caller (#28): \
+         {frozen_columns:?}"
+    );
+}
+
+/// The fail-open stays CLOSED: a candidate whose column list completes AND whose
+/// anchor is preceded by a marshal class spelling is confirmed, so its refusal is
+/// authoritative and propagates — it reaches neither a later candidate nor the
+/// scanner's own empty `Ok`.
+#[test]
+fn a_confirmed_column_section_declaring_a_frozen_scalar_still_fails_closed() {
+    // A later, perfectly legal section: the refusal must not be traded for it.
+    let mut buffer = spelled_column_section(&frozen_scalar());
+    buffer.extend_from_slice(&spelled_column_section(&marshal("Int32Type")));
+
+    let refusal = match parse_regular_columns(&buffer) {
+        Err(HeaderSchemaError::Refused(refusal)) => refusal,
+        Err(HeaderSchemaError::Structural(e)) => panic!(
+            "a frozen-scalar column must be a SEMANTIC refusal, not a structural failure a \
+             caller may retry heuristically: {e:?}"
+        ),
+        Ok((_, (pk_types, columns))) => panic!(
+            "FAIL-OPEN: a CONFIRMED column section declaring frozen<scalar> was accepted — \
+             pk={pk_types:?} {} column(s). A confirmed candidate's refusal must not fall \
+             through to a later candidate or to the scanner's empty success",
+            columns.len()
+        ),
+    };
+    assert!(
+        refusal
+            .to_string()
+            .contains("FrozenType(org.apache.cassandra.db.marshal.Int32Type)"),
+        "the refusal must name the refused type: {refusal}"
+    );
+}
+
+/// The control for the fixture above: with a legal column type the same framing
+/// decodes, so the refusal is attributable to the type and not to the framing.
+#[test]
+fn the_spelled_column_section_fixture_decodes_when_its_type_is_legal() {
+    let (_, (pk_types, columns)) =
+        parse_regular_columns(&spelled_column_section(&marshal("Int32Type")))
+            .unwrap_or_else(|e| panic!("the control fixture must decode: {e:?}"));
+    assert_eq!(
+        pk_types,
+        vec![marshal("UTF8Type")],
+        "recovered by backtrack"
+    );
+    assert_eq!(columns.len(), 1);
+    assert_eq!(columns[0].column_type, "int");
+}
+
+/// The same over-refusal at the DISPATCHER — a whole `Statistics.db` schema
+/// section made unreadable by a junk run that quoted a type name.
+///
+/// The last-resort scanner is reached only when the marker search has failed to
+/// locate a header, so the header this test recovers is a COLUMNS-ONLY section
+/// with a two-byte-VInt-framed partition-key type before it (the
+/// `test_partition_key_extraction_via_backtracking` shape, which is what that
+/// scanner exists for). Placing the frozen-scalar junk run in front of it made
+/// `parse_serialization_header` return `Err(Refused(..))` for the entire file.
+#[test]
+fn the_dispatcher_reads_a_columns_only_header_behind_a_frozen_scalar_junk_run() {
+    let mut buffer = false_column_section(&frozen_scalar());
+    let header_offset = buffer.len();
+    // A partition-key type framed with a TWO-byte VInt (`0x80 0x28` = 40), then a
+    // single `0x00` separator and one column — no clustering or static section,
+    // which is why the marker search cannot decode it and this scanner must.
+    buffer.extend_from_slice(&[0x80, 0x28]);
+    buffer.extend_from_slice(marshal("UUIDType").as_bytes());
+    buffer.push(0x00); // separator
+    buffer.push(0x01); // one column
+    push_str(&mut buffer, "c1");
+    push_str(&mut buffer, &marshal("Int32Type"));
+
+    let (_, (pk_types, ck_types, columns)) =
+        parse_serialization_header(&buffer).unwrap_or_else(|e| {
+            panic!(
+                "OVER-REFUSAL at the dispatcher: the columns-only header at offset \
+                 {header_offset} was rejected because an earlier unconfirmed `0x00` anchor \
+                 decoded a frozen scalar: {e:?}"
+            )
+        });
+    assert_eq!(pk_types, vec![marshal("UUIDType")], "backtracked keyType");
+    assert!(
+        ck_types.is_empty(),
+        "this shape declares no clustering keys"
+    );
+    assert_eq!(columns.len(), 1, "the real section's one column");
+    assert_eq!(columns[0].name, "c1");
+    assert_eq!(columns[0].column_type, "int");
+}

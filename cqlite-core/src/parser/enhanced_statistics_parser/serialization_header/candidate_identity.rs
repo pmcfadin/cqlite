@@ -105,7 +105,12 @@ pub(super) fn candidate_confirmed_as_header(
 /// search entered before the true type-length VInt decodes a key type of the form
 /// `<junk>org.apache.cassandra.db.marshal.…`, which contains the package and is
 /// still not a class name.
-fn is_marshal_type_spelling(type_string: &str) -> bool {
+///
+/// Shared with [`super::regular_columns`], whose last-resort scanner has no
+/// `keyType` field to confirm against and so judges the spellings of the types it
+/// did recover (#4104, roborev job 121). One spelling rule, one opinion about
+/// what `writeType` can have produced.
+pub(super) fn is_marshal_type_spelling(type_string: &str) -> bool {
     // The accepted header forms sometimes hand the top-level type over with a
     // wrapping paren or bracket (`(org.apache…UUIDType`,
     // `[org.apache…ReversedType(…)`) — the same normalisation
