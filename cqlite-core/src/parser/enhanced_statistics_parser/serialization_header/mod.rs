@@ -7,6 +7,7 @@
 //! - [`sequential`] — parse from a known start (legacy marker or post-EncodingStats).
 //! - [`schema`] — the authoritative post-EncodingStats sequential decoder.
 
+mod candidate_identity;
 mod schema;
 mod sequential;
 
@@ -20,7 +21,10 @@ use super::super::vint::parse_vuint;
 use super::marshal_type::convert_marshal_type_to_cql_checked;
 use super::schema_refusal::HeaderSchemaError;
 use super::SerializationHeaderResult;
-use sequential::{parse_serialization_header_at_offset, parse_serialization_header_sequential};
+use candidate_identity::candidate_confirmed_as_header;
+use sequential::{
+    parse_serialization_header_at_offset, parse_serialization_header_sequential, SemanticGate,
+};
 
 /// `(partition_key_types, regular_columns)` — what the backtracking column
 /// scanner recovers when no partition-key/clustering section could be located.
@@ -36,21 +40,37 @@ type RegularColumns = (Vec<String>, Vec<ColumnInfo>);
 ///
 /// Returns: (partition_key_types, clustering_key_types, regular_columns)
 ///
-/// # A SEMANTIC REFUSAL STOPS THE SEARCH (#4104, roborev job 119)
+/// # A SEMANTIC REFUSAL STOPS THE SEARCH — ONCE THE CANDIDATE IS CONFIRMED (#4104)
 ///
 /// The search tries many candidate offsets, so a failed candidate is normally just
 /// "not here — try the next one", and that is right for every STRUCTURAL failure:
-/// where the header lives is exactly what is in doubt. It is WRONG for a semantic
-/// refusal. A candidate that decoded a column name and a marshal type and then
-/// found `FrozenType(<scalar>)` DID find a header; continuing the search can only
-/// replace a correct refusal with a different heuristic match — or, as measured,
-/// with this function's own `Ok((input, (empty, empty, empty)))` no-header success,
-/// which the caller accepts as a schema-less header. That was fail-open even though
-/// every individual gate had refused, which is why the two reviewers of job 119
-/// disagreed: the per-candidate gates DO fire, and the net outcome was still `Ok`.
+/// where the header lives is exactly what is in doubt.
 ///
-/// So [`HeaderSchemaError::Refused`] is propagated immediately from wherever it
-/// arises, and only `Structural` continues the search.
+/// A semantic refusal (`FrozenType(<scalar>)`, which no Cassandra writer can have
+/// recorded) is a different answer, and it needed THREE attempts to place
+/// correctly:
+///
+/// 1. Originally it was demoted to an ordinary failed candidate, so the search
+///    continued and ended at this function's own
+///    `Ok((input, (empty, empty, empty)))` no-header success, which the caller
+///    accepts as a schema-less header. FAIL-OPEN — every individual gate refused
+///    and the net outcome was still `Ok` (roborev job 119).
+/// 2. Then it was propagated immediately from wherever it arose. OVER-REFUSAL —
+///    this search walks ARBITRARY bytes and the decoders accept any UTF-8 string
+///    as the key type, so an earlier FALSE candidate carrying a plausible
+///    `FrozenType(<scalar>)` run aborted an otherwise VALID SSTable before the
+///    real header was reached (roborev job 120).
+/// 3. Now: a refusal is authoritative only once the candidate is CONFIRMED to be
+///    a SerializationHeader — a complete decode of its own declared column lists
+///    plus marshal class SPELLINGS for its key and clustering types, judged by
+///    [`candidate_confirmed_as_header`] from Cassandra's writer. Confirmed ⇒
+///    propagate (never fall through to another candidate or to the no-header
+///    success). Unconfirmed ⇒ it was a guess that did not pan out, so the search
+///    continues, exactly as for a structural failure.
+///
+/// On the TOC-ANCHORED path the location is known, so the refusal is authoritative
+/// on arrival and is propagated there without any of this — see
+/// `parse_minimal_encoding_stats`.
 pub(super) fn parse_serialization_header(
     input: &[u8],
 ) -> Result<(&[u8], SerializationHeaderResult), HeaderSchemaError<'_>> {
@@ -125,25 +145,41 @@ pub(super) fn parse_serialization_header(
 
                 if is_valid_single_byte_len || is_multi_byte_vint {
                     // Try parsing from this offset using sequential parser
-                    let result = parse_serialization_header_sequential(&input[type_len_offset..]);
-                    // FAIL-CLOSED on a semantic refusal: this offset DID hold a
-                    // header, so no other offset can produce a better answer (#4104).
-                    if let Err(refused @ HeaderSchemaError::Refused(_)) = result {
-                        return Err(refused);
-                    }
-                    if let Ok((remaining, (pk_types, ck_types, cols))) = result {
-                        // Validate: partition key type should contain expected substring
-                        if !pk_types.is_empty()
-                            && pk_types[0].contains("org.apache.cassandra.db.marshal")
-                        {
-                            tracing::debug!(
-                                "Successfully parsed SerializationHeader at offset {} (lookback: {}): pk_type={}",
-                                type_len_offset,
-                                lookback,
-                                pk_types[0]
-                            );
-                            return Ok((remaining, (pk_types, ck_types, cols)));
+                    let candidate = &input[type_len_offset..];
+                    match parse_serialization_header_sequential(candidate, SemanticGate::Enforce)
+                    {
+                        // A semantic refusal fails CLOSED — but only once these
+                        // bytes are CONFIRMED to be a header rather than a
+                        // candidate that briefly looked like one. The confirmation
+                        // re-decodes the SAME bytes with the refusal deferred, so
+                        // the completeness the refusal cut short can be judged
+                        // (#4104, roborev job 120). Unconfirmed falls through to
+                        // the next candidate offset, like a structural failure.
+                        Err(refused @ HeaderSchemaError::Refused(_)) => {
+                            if candidate_confirmed_as_header(
+                                parse_serialization_header_sequential(
+                                    candidate,
+                                    SemanticGate::Survey,
+                                ),
+                            ) {
+                                return Err(refused);
+                            }
                         }
+                        Ok((remaining, (pk_types, ck_types, cols))) => {
+                            // Validate: partition key type should contain expected substring
+                            if !pk_types.is_empty()
+                                && pk_types[0].contains("org.apache.cassandra.db.marshal")
+                            {
+                                tracing::debug!(
+                                    "Successfully parsed SerializationHeader at offset {} (lookback: {}): pk_type={}",
+                                    type_len_offset,
+                                    lookback,
+                                    pk_types[0]
+                                );
+                                return Ok((remaining, (pk_types, ck_types, cols)));
+                            }
+                        }
+                        Err(HeaderSchemaError::Structural(_)) => {}
                     }
                 }
 
@@ -151,17 +187,31 @@ pub(super) fn parse_serialization_header(
                 if type_len_offset > 0 {
                     let prev_offset = type_len_offset - 1;
                     if input[prev_offset] == 0x00 && input[type_len_offset] == 0x00 {
-                        let result = parse_serialization_header_at_offset(&input[prev_offset..]);
-                        // Same fail-closed rule as the sequential candidate above.
-                        if let Err(refused @ HeaderSchemaError::Refused(_)) = result {
-                            return Err(refused);
-                        }
-                        if result.is_ok() {
-                            tracing::debug!(
-                                "Successfully parsed SerializationHeader at legacy marker offset {}",
-                                prev_offset
-                            );
-                            return result;
+                        let candidate = &input[prev_offset..];
+                        match parse_serialization_header_at_offset(
+                            candidate,
+                            SemanticGate::Enforce,
+                        ) {
+                            // Same confirm-then-fail-closed rule as the sequential
+                            // candidate above: this offset is a guess too.
+                            Err(refused @ HeaderSchemaError::Refused(_)) => {
+                                if candidate_confirmed_as_header(
+                                    parse_serialization_header_at_offset(
+                                        candidate,
+                                        SemanticGate::Survey,
+                                    ),
+                                ) {
+                                    return Err(refused);
+                                }
+                            }
+                            Ok(parsed) => {
+                                tracing::debug!(
+                                    "Successfully parsed SerializationHeader at legacy marker offset {}",
+                                    prev_offset
+                                );
+                                return Ok(parsed);
+                            }
+                            Err(HeaderSchemaError::Structural(_)) => {}
                         }
                     }
                 }

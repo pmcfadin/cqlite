@@ -401,3 +401,145 @@ fn test_backtracking_rejects_invalid_types() {
         "Should reject invalid type pattern"
     );
 }
+
+// ── The marker search's candidates are GUESSES (#4104, roborev job 120) ──────
+
+const MARSHAL_PACKAGE: &str = "org.apache.cassandra.db.marshal.";
+
+/// A fully-qualified marshal class spelling — what
+/// `SerializationHeader.writeType` (`AbstractType::toString()`) writes for every
+/// type field of the header.
+fn marshal(simple_name: &str) -> String {
+    format!("{MARSHAL_PACKAGE}{simple_name}")
+}
+
+/// `FrozenType(Int32Type)`: a spelling no Cassandra writer can emit, because
+/// `CQL3Type.Raw::freeze()` throws for every non-collection/tuple/UDT/vector
+/// (`cassandra-5.0.8:src/java/org/apache/cassandra/cql3/CQL3Type.java:647-651`).
+fn frozen_scalar() -> String {
+    format!("{MARSHAL_PACKAGE}FrozenType({})", marshal("Int32Type"))
+}
+
+/// Append a `[VInt len][UTF-8 bytes]` field, as SerializationHeader.java does.
+fn push_str(out: &mut Vec<u8>, value: &str) {
+    out.extend_from_slice(&crate::parser::vint::encode_vuint(value.len() as u64));
+    out.extend_from_slice(value.as_bytes());
+}
+
+/// A well-formed single-column SerializationHeader: `keyType`, clusteringTypes,
+/// staticColumns, regularColumns (guide Ch.8, "SerializationHeader Component").
+fn valid_header() -> Vec<u8> {
+    let mut out = Vec::new();
+    push_str(&mut out, &marshal("UTF8Type"));
+    out.extend_from_slice(&[0x00]); // clusteringTypes: none
+    out.extend_from_slice(&[0x00]); // staticColumns: none
+    out.extend_from_slice(&[0x01]); // regularColumns: one
+    push_str(&mut out, "v");
+    push_str(&mut out, &marshal("Int32Type"));
+    out
+}
+
+/// A byte run that is NOT a header but that the marker search enters, decodes
+/// through, and refuses — the over-refusal fixture.
+///
+/// The search anchors on an `org.apache.cassandra.db.marshal` occurrence and then
+/// tries the 1..=15 bytes BEFORE it as the key-type length VInt. Here the byte
+/// that passes its plausibility test sits three bytes early, so the decoded "key
+/// type" is `<two junk bytes>org.apache.cassandra.db.marshal.` — a string that
+/// CONTAINS the package and is not a class spelling, which is precisely what
+/// `writeType` can never have produced. Everything after it happens to read as
+/// `0 clustering / 0 static / 1 regular column` whose type is a frozen scalar, so
+/// the candidate reaches the semantic gate and refuses.
+///
+/// Any cell value, min/max clustering value or index byte quoting a Cassandra type
+/// name can produce this shape; nothing about it is a header.
+fn false_candidate_ending_in_a_frozen_scalar() -> Vec<u8> {
+    let mut out = Vec::new();
+    // Read as keyType length: 2 junk bytes + the 32-byte package prefix.
+    out.push(0x22);
+    out.extend_from_slice(&[0x00, 0x01]);
+    out.extend_from_slice(MARSHAL_PACKAGE.as_bytes());
+    out.extend_from_slice(&[0x00, 0x00, 0x01]); // "0 clustering, 0 static, 1 regular"
+    push_str(&mut out, "v");
+    push_str(&mut out, &frozen_scalar());
+    out
+}
+
+/// A FALSE candidate's semantic refusal must NOT abort the search: the valid
+/// header that follows it is found and returned.
+///
+/// Before the confirm-then-refuse rule, `parse_serialization_header` propagated
+/// `Refused` from the first candidate that hit the frozen-scalar gate, whoever it
+/// was. This exact buffer therefore came back as
+/// `Err(Refused("… FrozenType(org.apache.cassandra.db.marshal.Int32Type) …"))`,
+/// i.e. a perfectly good SSTable was unopenable because a byte run earlier in the
+/// file quoted a type name. The refusal is authoritative only once the candidate
+/// is confirmed to BE a SerializationHeader, which this one is not.
+#[test]
+fn a_false_candidate_carrying_a_frozen_scalar_run_must_not_refuse_a_valid_header() {
+    let mut buffer = false_candidate_ending_in_a_frozen_scalar();
+    let header_offset = buffer.len();
+    buffer.extend_from_slice(&valid_header());
+
+    let (_, (pk_types, ck_types, columns)) = parse_serialization_header(&buffer)
+        .unwrap_or_else(|e| {
+            panic!(
+                "OVER-REFUSAL: a valid header at offset {header_offset} was rejected because an \
+                 EARLIER false candidate quoted a frozen scalar; a marker-search candidate is a \
+                 guess, so its refusal is authoritative only once confirmed: {e:?}"
+            )
+        });
+
+    // The schema returned must be the REAL header's, not the false candidate's:
+    // continuing the search must not degrade into accepting the guess either.
+    assert_eq!(pk_types, vec![marshal("UTF8Type")], "real header's keyType");
+    assert!(ck_types.is_empty(), "real header declares no clustering keys");
+    assert_eq!(columns.len(), 1, "real header declares one regular column");
+    assert_eq!(columns[0].name, "v");
+    assert_eq!(columns[0].column_type, "int");
+}
+
+/// Anti-vacuity control for the test above: the fixture really does reach the
+/// frozen-scalar gate, and the confirmation really does call it unconfirmed.
+///
+/// Without this, a fixture the search happened to SKIP would make the test above
+/// pass for the wrong reason. There is deliberately no "same run with a legal
+/// type" twin instead: the search's ACCEPTANCE rule is a weaker, pre-existing
+/// `contains("org.apache.cassandra.db.marshal")` test that admits this
+/// junk-prefixed key type, so such a twin would characterise that separate
+/// heuristic rather than this fix.
+#[test]
+fn the_false_candidate_reaches_the_semantic_gate_and_is_unconfirmed() {
+    let run = false_candidate_ending_in_a_frozen_scalar();
+
+    // Under `Enforce` the run DOES hit the frozen-scalar gate — which is why,
+    // before the confirm-then-refuse rule, it aborted the whole search.
+    match parse_serialization_header_sequential(&run, SemanticGate::Enforce) {
+        Err(HeaderSchemaError::Refused(_)) => {}
+        Err(HeaderSchemaError::Structural(e)) => {
+            panic!("fixture never reached the semantic gate (structural): {e:?}")
+        }
+        Ok(_) => panic!("fixture never reached the semantic gate (it decoded cleanly)"),
+    }
+
+    // Under `Survey` it decodes to the end of its own declared column list, and
+    // its key type is `<junk>org.apache.cassandra.db.marshal.` — a string that
+    // contains the package and is not the class spelling `writeType` produces. So
+    // these bytes are not a SerializationHeader and the refusal above is not
+    // authoritative.
+    let survey = parse_serialization_header_sequential(&run, SemanticGate::Survey);
+    let Ok((_, (ref key_types, _, ref columns))) = survey else {
+        panic!("the survey decode must run past the deferred refusal to the end")
+    };
+    assert_eq!(key_types.len(), 1, "one keyType field was decoded");
+    assert!(
+        !key_types[0].starts_with(MARSHAL_PACKAGE),
+        "the fixture's keyType is junk-prefixed: {:?}",
+        key_types[0]
+    );
+    assert_eq!(columns.len(), 1, "the deferred refusal did not cut the decode");
+    assert!(
+        !candidate_confirmed_as_header(survey),
+        "a run whose keyType is not a marshal class spelling must stay UNCONFIRMED"
+    );
+}

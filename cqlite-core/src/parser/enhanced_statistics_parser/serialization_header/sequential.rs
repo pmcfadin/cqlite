@@ -23,9 +23,50 @@ use super::super::marshal_type::convert_marshal_type_to_cql_checked;
 use super::super::schema_refusal::HeaderSchemaError;
 use super::super::SerializationHeaderResult;
 
+/// Whether a semantic refusal decided by [`convert_marshal_type_to_cql_checked`]
+/// is authoritative for THIS decode (#4104, roborev job 120).
+///
+/// The marker SEARCH has to ask two different questions of the same bytes, and
+/// only one of them may honour a refusal:
+///
+/// * `Enforce` — "what schema do these bytes declare?" A `FrozenType(<scalar>)`
+///   here means the header is unwritable by Cassandra, so it fails closed.
+/// * `Survey` — "are these bytes a SerializationHeader AT ALL?" The refusal is
+///   DEFERRED (the raw marshal spelling is kept in its place) so the decode can
+///   run to the end of the declared column list and the candidate's IDENTITY can
+///   be judged. A survey decode answers a boolean and NOTHING else: its column
+///   types are never returned to a caller as schema, which is why keeping an
+///   unconvertible spelling here is not a no-heuristics escape hatch (#28).
+///
+/// Both questions are needed because a marker-search candidate is a GUESS: the
+/// search walks arbitrary bytes, so an earlier FALSE candidate can decode a
+/// plausible `FrozenType(<scalar>)` run and its refusal must not abort an
+/// otherwise valid SSTable before the real header is ever reached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SemanticGate {
+    /// The header location is settled — a refusal is the answer.
+    Enforce,
+    /// The header location is what is being decided — defer the refusal.
+    Survey,
+}
+
+/// Convert a header type string, honouring the refusal only under
+/// [`SemanticGate::Enforce`]. See [`SemanticGate`] for why `Survey` keeps the raw
+/// spelling instead.
+fn gated_cql_type(gate: SemanticGate, internal_type: &str) -> Result<String, crate::error::Error> {
+    match convert_marshal_type_to_cql_checked(internal_type) {
+        Ok(cql_type) => Ok(cql_type),
+        Err(refusal) => match gate {
+            SemanticGate::Enforce => Err(refusal),
+            SemanticGate::Survey => Ok(internal_type.to_string()),
+        },
+    }
+}
+
 /// Parse SerializationHeader structure starting at a known offset
 pub(super) fn parse_serialization_header_at_offset(
     input: &[u8],
+    gate: SemanticGate,
 ) -> Result<(&[u8], SerializationHeaderResult), HeaderSchemaError<'_>> {
     use nom::bytes::complete::tag;
     use nom::number::complete::u8 as parse_u8;
@@ -143,8 +184,7 @@ pub(super) fn parse_serialization_header_at_offset(
         // emit — as a SEMANTIC refusal, so the dispatcher stops searching instead
         // of treating this offset as an ordinary failed candidate, and so the
         // message (with its `CQL3Type.java:647-651` citation) reaches the user.
-        let cql_type = convert_marshal_type_to_cql_checked(&internal_type)
-            .map_err(HeaderSchemaError::Refused)?;
+        let cql_type = gated_cql_type(gate, &internal_type).map_err(HeaderSchemaError::Refused)?;
 
         tracing::debug!(
             "Static column {}: name='{}', type='{}' (CQL: '{}')",
@@ -226,8 +266,7 @@ pub(super) fn parse_serialization_header_at_offset(
         // emit — as a SEMANTIC refusal, so the dispatcher stops searching instead
         // of treating this offset as an ordinary failed candidate, and so the
         // message (with its `CQL3Type.java:647-651` citation) reaches the user.
-        let cql_type = convert_marshal_type_to_cql_checked(&internal_type)
-            .map_err(HeaderSchemaError::Refused)?;
+        let cql_type = gated_cql_type(gate, &internal_type).map_err(HeaderSchemaError::Refused)?;
 
         tracing::debug!(
             "Column {}: name='{}', type='{}' (CQL: '{}')",
@@ -280,6 +319,7 @@ pub(super) fn parse_serialization_header_at_offset(
 /// [VInt regular_count] [for each: VInt name_len, name, VInt type_len, type]
 pub(super) fn parse_serialization_header_sequential(
     input: &[u8],
+    gate: SemanticGate,
 ) -> Result<(&[u8], SerializationHeaderResult), HeaderSchemaError<'_>> {
     // Step 1: Parse partition key type (VInt length + string)
     let (input, pk_type_len) = parse_vuint(input)?;
@@ -406,8 +446,7 @@ pub(super) fn parse_serialization_header_sequential(
         // emit — as a SEMANTIC refusal, so the dispatcher stops searching instead
         // of treating this offset as an ordinary failed candidate, and so the
         // message (with its `CQL3Type.java:647-651` citation) reaches the user.
-        let cql_type = convert_marshal_type_to_cql_checked(&internal_type)
-            .map_err(HeaderSchemaError::Refused)?;
+        let cql_type = gated_cql_type(gate, &internal_type).map_err(HeaderSchemaError::Refused)?;
 
         tracing::debug!(
             "Sequential parser: static column {}: name='{}', type='{}'",
@@ -484,8 +523,7 @@ pub(super) fn parse_serialization_header_sequential(
         // emit — as a SEMANTIC refusal, so the dispatcher stops searching instead
         // of treating this offset as an ordinary failed candidate, and so the
         // message (with its `CQL3Type.java:647-651` citation) reaches the user.
-        let cql_type = convert_marshal_type_to_cql_checked(&internal_type)
-            .map_err(HeaderSchemaError::Refused)?;
+        let cql_type = gated_cql_type(gate, &internal_type).map_err(HeaderSchemaError::Refused)?;
 
         tracing::debug!(
             "Sequential parser: regular column {}: name='{}', type='{}'",
