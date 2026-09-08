@@ -7482,6 +7482,11 @@ _disk_abbrev() {
   if [ "$n" -gt "$max" ]; then printf '%s,+%s more' "$out" "$(( n - max ))"; else printf '%s' "$out"; fi
 }
 
+# The probe's wall-clock bound. Small: it is three stat(2) reads on a healthy filesystem and
+# runs on the path to the terminal emit, so the only thing this needs to survive is a WEDGED
+# mount -- where any value is equally right and a short one publishes the verdict sooner.
+_DISK_PROBE_BOUND_SECS=10
+
 # _disk_df_probe <path> -- print "<avail_kb> <mountpoint>" for the filesystem holding <path>,
 # or nothing (and rc 1) when it cannot be measured.
 #
@@ -7489,69 +7494,50 @@ _disk_abbrev() {
 # see the two blocks inside. It is kept because it is what the extracted-function harness in
 # scripts/tests/test_agent_gate_disk_exhaustion.sh names.
 _disk_df_probe() {
-  local p="${1:-}" a bs mp
+  local p="${1:-}" out rc
   [ -n "$p" ] || return 1
-  # Walk up to the first EXISTING ancestor: the cargo target dir legitimately does not exist
-  # on a clean checkout, and statting a missing path is an ERROR, not a free-space of zero.
-  # Bounded by the loop below shortening `p` every iteration.
-  while [ -n "$p" ] && [ "$p" != / ] && [ ! -e "$p" ]; do
-    case "$p" in */*) p="${p%/*}"; [ -n "$p" ] || p=/ ;; *) p="." ;; esac
-  done
-  [ -e "$p" ] || return 1
-  # PREFER `stat`, AND THE REASON IS A MEASURED CROSS-FEATURE REGRESSION, not tidiness.
+  # BOUNDED, AND THE ARGUMENT FOR IT IS THE ONE THIS FUNCTION ALREADY MADE (#3800, roborev job 4).
+  # Deleting the `df` fallback was justified partly because it was UNBOUNDED on the path to the
+  # TERMINAL EMIT -- and the replacement was unbounded too: `[ -e ]` and `stat` both issue
+  # stat(2), which on a hard NFS or a wedged FUSE mount blocks UNINTERRUPTIBLY. `_disk_free_field`
+  # calls this at emit time, so the gate would publish NO VERDICT AT ALL -- strictly worse than
+  # the wrong number the bound protects. Fixing the instance a finding names and leaving the CLASS
+  # open is the failure this file records elsewhere by name; this is that failure, committed by
+  # the commit that quoted the rule.
   #
-  # This probe used to invoke the `df` BINARY unconditionally. #3755's disk-admission suite
-  # PATH-shims `df` and asserts on the NUMBER and the OPERANDS of every df call in the run -- and
-  # its shim answers from a SEQUENCED script. So the two calls `_disk_capture_start` makes (target
-  # + logs) broke 25 of its cases three ways at once: they inflated exact counts (`expected 1
-  # measurement, got 3`), introduced a foreign operand (a LOG DIR) into `df_operands_all`, and
-  # CONSUMED the shim's scripted answers, so cases expecting a df-timeout or a specific mount got
-  # someone else's reading. They even fired on non-full-gate runs, where the admission probe is
-  # supposed to measure nothing at all. #3755 landed FIRST, so absorbing this is #3800's job.
+  # The ancestor walk and all three stat reads run INSIDE one bounded child, because the walk uses
+  # the `[` BUILTIN and a builtin cannot be bounded from outside without a subprocess. ONE
+  # invocation, so the bound covers the whole probe rather than each leg.
   #
-  # `stat` reads the same statvfs data WITHOUT executing `df`, so the shim cannot see this probe
-  # and the non-interference is STRUCTURAL rather than negotiated. Verified numerically on this
-  # fleet: `stat -f -c '%a' * '%S' / 1024` equals `df -Pk` avail to the byte.
-  #
-  # AND THERE IS NO `df` FALLBACK, WHICH IS A DELETION AND NOT AN OMISSION (#3800, roborev job 1 on
-  # the merge candidate). `stat -f -c` and `stat -c %m` are GNU, so on a BSD/macOS host -- and macOS
-  # is a first-class gate host -- this probe used to fall back to the `df` BINARY, and BOTH problems
-  # above returned there in full: the shim sees the calls again, and #3755's suite reds on a
-  # supported platform.
-  #
-  # A SECOND HAZARD, WHICH IS THE ONE THAT DECIDES IT: that fallback was UNBOUNDED. #3755's own df
-  # probe runs under `_component_set_bounded "$_GATE_DF_BOUND_SECS"`; this one had no bound at all,
-  # so a `df` that hangs -- an unresponsive mount, or that suite's own hanging-df shim -- would hang
-  # THIS probe on the path to the TERMINAL EMIT, producing no verdict rather than a wrong one. That
-  # is the same class as the FIFO subject refused in `_disk_scan_subject`, and the same rule the
-  # dep-duplicates probe follows: where a probe cannot be BOUNDED it is not run at all.
-  #
-  # So the fallback is REMOVED rather than bounded or absolute-pathed. Non-interference is now
-  # STRUCTURAL ON EVERY PLATFORM -- this code executes no `df`, ever -- and no hard-coded /bin vs
-  # /usr/bin guess is made on the very platform it would claim to support. The reviewer's suggested
-  # alternative, a native BSD `stat` implementation, does not exist: BSD `stat(1)` has no filesystem
-  # mode and cannot report free space at all.
-  #
-  # DECLARED COST: on a host without GNU `stat` the free-space field reads `UNMEASURED` instead of a
-  # delta. That is the SUPPLEMENTARY half of this line; the attribution -- naming a recognised
-  # signature, which is what #3800 exists for -- is unaffected, and the UNMEASURED rendering is an
-  # already-exercised path rather than a new one. A missing diagnostic field on macOS is strictly
-  # better than a red tooling-tests on macOS. Reversible the moment #3755's assertions are scoped to
-  # the ADMISSION WINDOW rather than to every df call in the process, which remains the durable fix
-  # and is a change to another lane's tests.
-  if a=$(stat -f -c '%a' "$p" 2>/dev/null) \
-     && bs=$(stat -f -c '%S' "$p" 2>/dev/null) \
-     && mp=$(stat -c '%m' "$p" 2>/dev/null); then
-    case "$a"  in ''|*[!0-9]*) a="" ;; esac
-    case "$bs" in ''|*[!0-9]*) bs="" ;; esac
-    case "$mp" in ''|'?') mp="" ;; esac
-    if [ -n "$a" ] && [ -n "$bs" ] && [ -n "$mp" ]; then
-      printf '%s %s' "$(( a * bs / 1024 ))" "$mp"
-      return 0
-    fi
-  fi
-  # Unmeasurable. NOT an error and NOT a free-space of zero: the caller renders UNMEASURED.
-  return 1
+  # `_component_set_bounded` is #3755's reviewed runner (TERM -> grace -> group KILL, streams
+  # captured to files so a leaked descendant cannot hold the caller's pipe open). It is reused
+  # rather than reimplemented: a second bounding mechanism is a second set of failure modes, and
+  # it is defined well above this point so it is genuinely available here. It returns
+  # $_CS_UNBOUNDABLE_RC when it can neither bound nor capture, which lands on the same `return 1`
+  # as a failed probe -- i.e. UNMEASURED, never a fabricated reading. "Where a probe cannot be
+  # BOUNDED it is not run at all" is the rule this now actually follows.
+  out=$(_component_set_bounded "$_DISK_PROBE_BOUND_SECS" sh -c '
+    p=$1
+    # Walk up to the first EXISTING ancestor: the cargo target dir legitimately does not exist on
+    # a clean checkout, and statting a missing path is an ERROR, not a free-space of zero.
+    while [ -n "$p" ] && [ "$p" != / ] && [ ! -e "$p" ]; do
+      case "$p" in */*) p=${p%/*}; [ -n "$p" ] || p=/ ;; *) p=. ;; esac
+    done
+    [ -e "$p" ] || exit 1
+    # `stat` reads the same statvfs data WITHOUT executing `df`, so #3755'"'"'s PATH-shimmed `df`
+    # cannot see this probe and the non-interference is STRUCTURAL. GNU-only, deliberately: there
+    # is no BSD `stat` filesystem mode, and a `df` fallback is what this removed.
+    a=$(stat -f -c "%a" "$p" 2>/dev/null)  || exit 1
+    bs=$(stat -f -c "%S" "$p" 2>/dev/null) || exit 1
+    mp=$(stat -c "%m" "$p" 2>/dev/null)    || exit 1
+    case "$a"  in ""|*[!0-9]*) exit 1 ;; esac
+    case "$bs" in ""|*[!0-9]*) exit 1 ;; esac
+    case "$mp" in ""|"?") exit 1 ;; esac
+    printf "%s %s" "$(( a * bs / 1024 ))" "$mp"
+  ' _ "$p"); rc=$?
+  [ "$rc" -eq 0 ] || return 1
+  case "$out" in ''|[!0-9]*) return 1 ;; esac
+  printf '%s' "$out"
 }
 
 # _disk_capture_start -- take the START-of-run free-space reading. Called once, right after
@@ -7573,12 +7559,13 @@ _disk_capture_start() {
 # would report a DIFFERENT FILESYSTEM from the one the build fills -- a confidently wrong number
 # in the one line that exists to stop a reader being misled about disk.
 #
-# WHY A REFRESH AND NOT A CORRECT FIRST READ. #3755 already resolves this authoritatively
-# (`_gate_resolve_target_dir`, cargo metadata under a bounded probe), and that function is
-# DEFINED far below `_disk_capture_start`'s CALL SITE -- bash executes definitions in order, so
-# it does not exist yet at startup. Calling cargo metadata during startup instead would put a
-# bounded subprocess on the path before the first component, for a supplementary field. So the
-# cheap guess stands until the authoritative answer is available, and this reconciles them.
+# WHY A REFRESH AND NOT A CORRECT FIRST READ. The authoritative answer is #3755's, and it is not
+# available at `_disk_capture_start`'s call site: `_gate_resolve_target_dir` is DEFINED far below
+# it and bash executes definitions in order, while admission -- which is what actually resolves
+# and pins the directory -- runs after the slot is granted. Resolving it at startup instead would
+# put a `cargo metadata` subprocess on the path before the first component, for a supplementary
+# field, and on a no-cargo `--only` run that has no business running cargo at all. So the cheap
+# guess stands until admission has answered, and this reconciles the two WITHOUT a second probe.
 #
 # ONLY on disagreement: when the two name the same directory the early reading is already for the
 # right filesystem AND has the longer, more honest window. On disagreement the start reading is
@@ -7588,12 +7575,25 @@ _disk_capture_start() {
 # Called from the PARENT shell, never inside `$( … )`: it RECORDS, and a recorder in a subshell
 # records nothing (the lesson this file already carries for `_disk_recorded_pairs`).
 _disk_retarget() {
-  local r td
-  command -v _gate_resolve_target_dir >/dev/null 2>&1 || return 0
-  r=$(_gate_resolve_target_dir 2>/dev/null) || return 0
-  case "$r" in 'OK '*) td="${r#OK }" ;; *) return 0 ;; esac   # UNRESOLVED: keep the guess
+  local td="${_DA_TARGET_DIR:-}"
+  # NO CARGO INVOCATION OF ITS OWN (#3800, roborev job 4). The first version called
+  # `_gate_resolve_target_dir`, which runs `cargo metadata` -- unconditionally, including on an
+  # `--only file-size` run that is documented and derived as no-cargo and hermetic. That is a
+  # contract this repo enforces, broken by a supplementary free-space field.
+  #
+  # #3755's admission has ALREADY resolved and pinned the target dir for this very run, in the
+  # PARENT shell (`_gate_disk_admission_measure` is called directly from
+  # `_gate_disk_admission_bind_after_queue`, not in a `$( … )`), so its value is simply readable
+  # here. Reusing it is strictly better than the finding's own suggestion to probe again: ONE
+  # cargo metadata per run instead of two, ONE source of truth for "where does the build write",
+  # and hermeticity restored BY CONSTRUCTION rather than by a guard someone must remember --
+  # admission self-exempts on `--only`, so there `_DA_TARGET_DIR` is empty and this returns
+  # having executed nothing at all.
+  #
+  # EMPTY is "not resolved", never "resolve it yourself": keeping the startup guess beats trading
+  # a usable reading for nothing, and beats reintroducing the cargo call this removed.
   [ -n "$td" ] || return 0
-  [ "$td" != "${DISK_TARGET_PATH:-}" ] || return 0            # agree: keep the longer window
+  [ "$td" != "${DISK_TARGET_PATH:-}" ] || return 0   # agree: keep the LONGER window
   DISK_TARGET_PATH="$td"
   DISK_FREE_START_TARGET="$(_disk_df_probe "$td" 2>/dev/null)"
   DISK_TARGET_RETARGETED=1

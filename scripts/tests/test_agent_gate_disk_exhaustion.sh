@@ -112,6 +112,15 @@ EXTRACT_OK=1
   done
 } >> "$EX"
 
+# `_disk_df_probe` routes through #3755's `_component_set_bounded` (roborev job 4). That runner
+# and its capture/mechanism helpers are a chain this suite does not own -- #3755's own suite pins
+# it -- and pulling the whole chain in would make THIS suite fail on defects that are not its
+# subject. So the harness supplies a FAITHFUL-ENOUGH stub that runs the command unbounded, the
+# behavioural cases below exercise the probe's LOGIC, and the BOUND itself is pinned STRUCTURALLY
+# by case 25h against the shipped source -- which is the only place it can be pinned, since a
+# behavioural case would need a genuinely wedged mount.
+printf '%s\n' '_component_set_bounded() { shift; "$@"; }' >> "$EX"
+
 for want in DISK_EXHAUSTION_SIGNATURES DISK_MEM_SUBJECTS DISK_UNREAD_VERDICTS _gate_cntrl_strip _gate_pid_identity _disk_gate_signal_ok _disk_retarget _disk_safe _disk_abbrev \
             _disk_df_probe _disk_gib _disk_free_leg _disk_free_field _disk_scan_field \
             _disk_note_capture_failure _disk_note_unread_verdict _disk_secs_is_int \
@@ -202,7 +211,12 @@ run_line() {  # <logdir> <name> <status> ...
 # ─────────────────────────────────────────────────────────────────────────────────
 # The closed signature set is what the doctrine claims it is.
 # ─────────────────────────────────────────────────────────────────────────────────
-sig_count=$(grep -c "^  '" "$EX")
+# COUNTED INSIDE THE ARRAY BLOCK, not by `grep -c "^  '"` over the whole extract. That needle
+# matched any line starting with two spaces and a quote, and #3800's own bounded probe introduced
+# one (`' _ "$p"); rc=$?`, closing a `sh -c` heredoc-style argument) -- so a correct code change
+# reported "the doctrine text and the code disagree". A guard that reds on correct input is the
+# guard agents learn to waive.
+sig_count=$(awk '/^DISK_EXHAUSTION_SIGNATURES=\($/{f=1;next} f&&/^\)$/{exit} f&&/^[[:space:]]*'"'"'/{n++} END{print n+0}' "$EX")
 if [ "$sig_count" -eq 3 ]; then
   ok "signatures: the shipped set holds exactly 3 entries (closed set, as documented)"
 else
@@ -2429,8 +2443,7 @@ _rt=$(mktemp -d "$tmp/c25f.XXXXXX")
 # (a) DISAGREE -> re-based, and the shortened window is DECLARED in the rendered label.
 o25fa=$(bash -c '
   . "$1"
-  _RT_ANSWER="$2"
-  _gate_resolve_target_dir() { printf "OK %s\n" "$_RT_ANSWER"; }
+  _DA_TARGET_DIR="$2"
   DISK_TARGET_PATH="/nonexistent/guess"; DISK_FREE_START_TARGET="1 /nonexistent"
   DISK_LOGS_PATH="$2"; DISK_FREE_START_LOGS="$(_disk_df_probe "$2")"
   _disk_retarget
@@ -2450,8 +2463,7 @@ fi
 #     refresh that fired unconditionally and silently shortened every window.
 o25fb=$(bash -c '
   . "$1"
-  _RT_ANSWER="$2"
-  _gate_resolve_target_dir() { printf "OK %s\n" "$_RT_ANSWER"; }
+  _DA_TARGET_DIR="$2"
   DISK_TARGET_PATH="$2"; DISK_FREE_START_TARGET="999999 /sentinel-unchanged"
   DISK_LOGS_PATH="$2"; DISK_FREE_START_LOGS="$(_disk_df_probe "$2")"
   _disk_retarget
@@ -2471,7 +2483,7 @@ fi
 #     usable guess with nothing, which is worse than the guess.
 o25fc=$(bash -c '
   . "$1"
-  _gate_resolve_target_dir() { printf "UNRESOLVED cargo metadata failed\n"; }
+  _DA_TARGET_DIR=""            # admission self-exempted (--only) or could not resolve
   DISK_TARGET_PATH="/keep/this/guess"; DISK_FREE_START_TARGET="42 /keep"
   _disk_retarget
   printf "PATH %s\n" "$DISK_TARGET_PATH"
@@ -2479,10 +2491,56 @@ o25fc=$(bash -c '
 ' _ "$EX" 2>&1)
 if case "$o25fc" in *"PATH /keep/this/guess"*) true ;; *) false ;; esac \
    && case "$o25fc" in *"FLAG 0"*) true ;; *) false ;; esac; then
-  ok "25f-retarget-unresolved: an UNRESOLVED authoritative answer leaves the startup guess in place -- the refresh never trades a usable reading for nothing"
+  ok "25f-retarget-unresolved: an EMPTY authoritative answer (admission self-exempted on --only, or it could not resolve) leaves the startup guess in place and runs NO cargo of its own -- the refresh never trades a usable reading for nothing, and never breaks a no-cargo run's hermeticity to get one"
 else
   bad "25f-retarget-unresolved: expected the guess kept and FLAG 0:
 $o25fc"
+fi
+
+# (25g) `_disk_retarget` RUNS NO CARGO -- roborev job 4. Its first version called
+# `_gate_resolve_target_dir` (cargo metadata) unconditionally, including on `--only file-size`,
+# a run this repo derives and documents as no-cargo and hermetic. Structural, because a
+# behavioural case would need a full `--only` run to see it.
+_rt_body=$(awk '/^_disk_retarget\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$GATE")
+if [ -n "$_rt_body" ] \
+   && ! printf '%s\n' "$_rt_body" | grep -vE '^[[:space:]]*#' | grep -qE 'cargo|_gate_resolve_target_dir'; then
+  ok "25g-retarget-no-cargo: _disk_retarget's body invokes neither cargo nor _gate_resolve_target_dir -- it reads the directory #3755's admission already resolved, so a no-cargo --only run stays hermetic BY CONSTRUCTION rather than by a guard someone must remember"
+else
+  bad "25g-retarget-no-cargo: _disk_retarget's body still reaches a cargo path (or could not be extracted):
+$_rt_body"
+fi
+
+# (25h) THE FREE-SPACE PROBE IS BOUNDED -- roborev job 4, and it is the same rule this PR quoted
+# when it DELETED the unbounded `df` fallback. `[ -e ]` and `stat` both issue stat(2), which on a
+# hard NFS or wedged FUSE mount blocks UNINTERRUPTIBLY, and `_disk_free_field` calls this probe on
+# the path to the TERMINAL EMIT -- so unbounded, the gate publishes NO verdict at all. Structural:
+# a behavioural case would need a genuinely wedged mount, which cannot be synthesised portably.
+_dp_body=$(awk '/^_disk_df_probe\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$GATE")
+_dp_code=$(printf '%s\n' "$_dp_body" | grep -vE '^[[:space:]]*#')
+if [ -n "$_dp_body" ] && printf '%s\n' "$_dp_code" | grep -q '_component_set_bounded'; then
+  ok "25h-probe-bounded: the shipped _disk_df_probe routes its filesystem reads through _component_set_bounded, so a wedged mount cannot hold the terminal emit open"
+else
+  bad "25h-probe-bounded: the shipped _disk_df_probe does NOT route through a bounded runner -- an unbounded stat(2) here means no verdict at all on a wedged mount:
+$_dp_code"
+fi
+# And the walk + all three stats must be INSIDE that one bounded child: the walk uses the `[`
+# BUILTIN, which cannot be bounded from outside without a subprocess, so a version that bounded
+# only the stats would leave the hang reachable through the ancestor walk.
+# POSITIONAL, not a bare grep: the walk lives INSIDE the `sh -c '…'` argument, so its text is
+# present either way and a text match cannot tell "inside the bounded child" from "in the caller's
+# shell". The first draft of this case did exactly that and red on correct code. What is checked
+# is the ORDER: the walk, and every stat, must fall between the `_component_set_bounded` line that
+# opens the quoted argument and the line that closes it.
+_dp_open=$(printf '%s\n' "$_dp_code" | grep -n '_component_set_bounded' | head -1 | cut -d: -f1)
+_dp_close=$(printf '%s\n' "$_dp_code" | grep -n "^[[:space:]]*' _ \"\$p\")" | head -1 | cut -d: -f1)
+_dp_walk=$(printf '%s\n' "$_dp_code" | grep -nE '\[ ! -e' | head -1 | cut -d: -f1)
+_dp_stat_out=$(printf '%s\n' "$_dp_code" | grep -nE 'stat ' | awk -F: '{print $1}' | tail -1)
+if [ -n "$_dp_open" ] && [ -n "$_dp_close" ] && [ -n "$_dp_walk" ] && [ -n "$_dp_stat_out" ] \
+   && [ "$_dp_walk" -gt "$_dp_open" ] && [ "$_dp_walk" -lt "$_dp_close" ] \
+   && [ "$_dp_stat_out" -gt "$_dp_open" ] && [ "$_dp_stat_out" -lt "$_dp_close" ]; then
+  ok "25h-probe-walk-inside: the ancestor walk (line $_dp_walk) and the last stat read (line $_dp_stat_out) both fall INSIDE the bounded child's argument (lines $_dp_open..$_dp_close) -- so the \`[\` BUILTIN walk, which cannot be bounded from outside without a subprocess, is covered by the same one bound as the stats"
+else
+  bad "25h-probe-walk-inside: could not place the walk and the stats inside the bounded argument (open=$_dp_open walk=$_dp_walk last-stat=$_dp_stat_out close=$_dp_close) -- a walk outside the bound blocks on a wedged mount exactly as stat does"
 fi
 
 # (23) roborev job 343 -- THE SCAN MUST NOT BE ABLE TO HANG THE GATE.
