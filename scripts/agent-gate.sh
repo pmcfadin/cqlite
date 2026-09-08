@@ -7121,9 +7121,14 @@ EXPLICIT_SUMMARY_FILE=0
 #   * Full-gate components run in BACKGROUNDED SUBSHELLS (#1737) and cannot mutate the parent's
 #     arrays, and `$LOG_DIR/<name>.result` is a HARD two-field format (`<STATUS> <SECONDS>`,
 #     read back with `read -r _st _secs`) that must not grow a third field.
-#   * Component logs are never deleted -- there is no `rm -rf "$LOG_DIR"` anywhere in this
-#     script, and `$LOG_DIR` is retained deliberately as the `logs:` bundle -- so every
-#     `<component>.log` is still on disk at the terminal emit, whichever runner wrote it.
+#   * Every `<component>.log` is still on disk AT THE TERMINAL EMIT, whichever runner wrote it,
+#     because nothing removes them before it. This used to be justified as "$LOG_DIR is retained
+#     deliberately as the `logs:` bundle" and that rationale is FALSE since #3637, which REMOVES
+#     the bundle on a terminal PASS -- caught by that issue's own guard (AC26 of
+#     test_agent_gate_logdir_cleanup.sh). What actually holds the property is the ORDERING: the
+#     #3637 disposition runs from the EXIT trap, i.e. strictly AFTER the terminal emit, so the
+#     scan below always reads a populated bundle. On a non-PASS run -- the only kind this scan
+#     has subjects for -- the bundle is RETAINED anyway.
 #
 # THE SUBJECT SET IS DECLARED AND CLOSED, AND THAT IS A BOUNDARY, NOT A CARVE SERIES
 # (#3800, roborev job 304). The scan can only see what reaches one of THREE channels:
@@ -7558,6 +7563,42 @@ _disk_capture_start() {
   DISK_FREE_START_LOGS="$(_disk_df_probe "$DISK_LOGS_PATH" 2>/dev/null)"
 }
 
+# _disk_retarget -- REFRESH DISK_TARGET_PATH from the AUTHORITATIVE target-dir resolution once
+# it exists, and re-take the start reading if it named a different directory (#3800, roborev
+# job 3).
+#
+# `_disk_capture_start` models cargo's target dir as `${CARGO_TARGET_DIR:-$REPO_ROOT/target}`.
+# That is a GUESS: cargo also honours `CARGO_BUILD_TARGET_DIR` and `[build] target-dir` in any
+# `.cargo/config.toml` in the hierarchy, so on a box configuring either, the free-space field
+# would report a DIFFERENT FILESYSTEM from the one the build fills -- a confidently wrong number
+# in the one line that exists to stop a reader being misled about disk.
+#
+# WHY A REFRESH AND NOT A CORRECT FIRST READ. #3755 already resolves this authoritatively
+# (`_gate_resolve_target_dir`, cargo metadata under a bounded probe), and that function is
+# DEFINED far below `_disk_capture_start`'s CALL SITE -- bash executes definitions in order, so
+# it does not exist yet at startup. Calling cargo metadata during startup instead would put a
+# bounded subprocess on the path before the first component, for a supplementary field. So the
+# cheap guess stands until the authoritative answer is available, and this reconciles them.
+#
+# ONLY on disagreement: when the two name the same directory the early reading is already for the
+# right filesystem AND has the longer, more honest window. On disagreement the start reading is
+# re-taken against the correct filesystem, and the shortened window is DECLARED in the emitted
+# field rather than silently implied -- a delta whose start moved must say so.
+#
+# Called from the PARENT shell, never inside `$( … )`: it RECORDS, and a recorder in a subshell
+# records nothing (the lesson this file already carries for `_disk_recorded_pairs`).
+_disk_retarget() {
+  local r td
+  command -v _gate_resolve_target_dir >/dev/null 2>&1 || return 0
+  r=$(_gate_resolve_target_dir 2>/dev/null) || return 0
+  case "$r" in 'OK '*) td="${r#OK }" ;; *) return 0 ;; esac   # UNRESOLVED: keep the guess
+  [ -n "$td" ] || return 0
+  [ "$td" != "${DISK_TARGET_PATH:-}" ] || return 0            # agree: keep the longer window
+  DISK_TARGET_PATH="$td"
+  DISK_FREE_START_TARGET="$(_disk_df_probe "$td" 2>/dev/null)"
+  DISK_TARGET_RETARGETED=1
+}
+
 # _disk_gib <kb> -- render KiB as "<n>.<d>G". `?` when the input is not a measurement.
 _disk_gib() {
   case "${1:-}" in ''|*[!0-9]*) printf '?' ; return 0 ;; esac
@@ -7592,6 +7633,9 @@ _disk_free_field() {
   local st_t="${DISK_FREE_START_TARGET:-}" st_l="${DISK_FREE_START_LOGS:-}"
   local now_t="" now_l="" lbl='free(start->emit)'
   [ "${DISK_MIDRUN:-0}" = 1 ] && lbl='free(start->boundary, MID-RUN PARTIAL WINDOW: the run had NOT finished)'
+  # The target leg's start moved to the target-dir resolution, so the window is SHORTER than the
+  # label otherwise promises. Declared, never implied (#3800, roborev job 3).
+  [ "${DISK_TARGET_RETARGETED:-0}" = 1 ] && lbl="$lbl [target leg re-based at target-dir resolution: cargo named a directory the startup guess did not]"
   [ -n "${DISK_TARGET_PATH:-}" ] && now_t="$(_disk_df_probe "$DISK_TARGET_PATH" 2>/dev/null)"
   [ -n "${DISK_LOGS_PATH:-}" ] && now_l="$(_disk_df_probe "$DISK_LOGS_PATH" 2>/dev/null)"
   if [ -z "$st_t" ] && [ -z "$st_l" ]; then
@@ -7764,13 +7808,34 @@ _disk_scan_subject() {
       # would put the disk-exhaustion diagnostic back on the disk it is diagnosing, and lose the
       # evidence on precisely the run that had it. The class hazard is instead NEUTRALISED rather
       # than avoided: `PIPESTATUS[1]` is grep's OWN status, `set +o pipefail` is scoped to this
-      # subshell, and printf's SIGPIPE narration is discarded by the `2>/dev/null` on the pipeline,
+      # subshell, and printf's own stderr is redirected (its OWN `2>/dev/null`, not grep's -- see the block at the call),
       # so no `printf: write error` can reach a verdict a caller is reading. Pinned by case
       # 25d-grep-status. This site is therefore a DELIBERATE, tested entry in the ratchet's
       # baseline, not an unhandled one -- do not "fix" it to a herestring.
+      #
+      # THE `2>/dev/null` ON `printf` IS LOAD-BEARING AND IS NOT THE ONE ON `grep` (#3800,
+      # roborev job 3). A single redirection at the end of a pipeline binds to the LAST command
+      # only, so grep's redirect never covered printf, and an earlier revision of this block
+      # claimed it did -- a false statement about the mechanism being documented, in the file
+      # every agent reads to decide whether a verdict is trustworthy.
+      #
+      # MEASURED on this host rather than reasoned, in both directions, at 2 MB with the match on
+      # line 1 so grep exits with nearly all of it unwritten:
+      #   * DEFAULT SIGPIPE disposition -> the subshell dies of SIGPIPE silently: 0 bytes stderr.
+      #   * SIGPIPE IGNORED (`trap '' PIPE`) -> bash cannot die, the write returns EPIPE, and the
+      #     BUILTIN printf NARRATES it: `printf: write error: Broken pipe` on stderr.
+      # In BOTH runs `rc` and `hit` were correct, so this was never a wrong verdict -- only text
+      # escaping onto the gate's stderr.
+      #
+      # It is reachable HERE, and that is a fact about THIS gate and not a claim about bash in
+      # general: `agent-gate.sh` traps PIPE nowhere, and the disposition is INHERITED. Measured on
+      # the LIVE gate of record for this branch: /proc/<gate-pid>/status reported
+      # `SigIgn: 0000000000001004` -- bit 12 set, i.e. SIGPIPE ignored. An ignored disposition
+      # survives fork AND exec and bash cannot un-ignore it, the same property this file already
+      # documents for TERM at the SIDE-lane rung below.
       hit="$(
         set +o pipefail
-        printf '%s\n' "$payload" | LC_ALL=C grep -n -o -m1 -a -F -e "$phrase" 2>/dev/null
+        printf '%s\n' "$payload" 2>/dev/null | LC_ALL=C grep -n -o -m1 -a -F -e "$phrase" 2>/dev/null
         exit "${PIPESTATUS[1]}"
       )"; rc=$?
     fi
@@ -9515,22 +9580,6 @@ GATE_LOGDIR_CREATED="$LOG_DIR"
 # never guessed from a basename by a consumer.
 GATE_LOGDIR_OWNER_FILE="$GATE_LOGDIR_CREATED/$GATE_LOGDIR_OWNER_BASENAME"
 
-# #3800: the START-of-run free-space reading, taken the moment LOG_DIR exists and is
-# VALIDATED, so the terminal `disk-exhaustion:` line can report a start->emit DELTA rather
-# than an instantaneous emit-time read (peers free space between the failure and the emit).
-# Deliberately BEFORE `_logdir_sweep` below: that sweep may unlink aged peer bundles and so
-# FREES space itself, and a start reading taken after it would understate the collapse.
-_disk_capture_start
-
-# #3800: the gate's OWN process identity, captured HERE -- before any component, and therefore
-# before any SIDE-lane descendant exists to inherit it. It is what lets the SIDE lane's last
-# escalation rung prove the pid in `$$` is STILL this gate before it SIGKILLs it, instead of
-# signalling a pid that may have been reaped and reassigned to a PEER LANE'S GATE. Plain shell
-# variables (not exported): a forked subshell inherits them, which is exactly the scope wanted --
-# an execed child has no business signalling this gate. An unmeasurable identity is left EMPTY
-# and is never read as a match.
-GATE_MAIN_IDENTITY="$(_gate_pid_identity "$$" 2>/dev/null || true)"
-
 # Arm the at-exit disposition THE MOMENT the machinery exists — NOT thousands of
 # lines later where the composed `trap '_gate_atexit' EXIT` is armed (#3637).
 #
@@ -9547,6 +9596,32 @@ GATE_MAIN_IDENTITY="$(_gate_pid_identity "$$" 2>/dev/null || true)"
 # reason this handler must stay callable from both. `$?` is expanded when the trap
 # FIRES, so the handler sees the status the gate is exiting with.
 trap '_logdir_cleanup "$?"' EXIT
+
+# #3800, AND IT SITS HERE FOR TWO OPPOSED REASONS -- an ordering SANDWICH, not a preference.
+#
+# AFTER the `trap` above (#3637, and this is where the first version of this block was WRONG).
+# That comment says the LOG_DIR creation "sits directly above this line so the unhandled window
+# is straight-line code only", and #3800 originally inserted these two statements INTO that
+# window. Both are more than straight-line code -- `_disk_capture_start` runs `stat` in command
+# substitutions and `_gate_pid_identity` runs `awk` -- so an INT/TERM arriving in them ran NO
+# trap and left the husk #3637 exists to close. Caught by that issue's OWN guard
+# (test_agent_gate_logdir_cleanup.sh AC11b: "the signalled bundle published no disposition
+# artifact"), which passes on origin/main and failed here -- the third instance in this PR of
+# the register-cleanup-BEFORE-the-resource family CLAUDE.md names by name.
+#
+# BEFORE `_logdir_sweep` below, which may unlink aged peer bundles and so FREES space itself: a
+# start reading taken after it would understate the collapse the field exists to show.
+#
+# The free-space reading gives the terminal `disk-exhaustion:` line a start->emit DELTA rather
+# than an instantaneous emit-time read (peers free space between the failure and the emit). The
+# process identity is captured before any component, and therefore before any SIDE-lane
+# descendant exists to inherit it; it is what lets the SIDE lane's last escalation rung prove the
+# pid in `$$` is STILL this gate before it SIGKILLs it. Plain shell variables, NOT exported: a
+# forked subshell inherits them, which is exactly the scope wanted -- an execed child has no
+# business signalling this gate. An unmeasurable identity is left EMPTY and never reads as a
+# match.
+_disk_capture_start
+GATE_MAIN_IDENTITY="$(_gate_pid_identity "$$" 2>/dev/null || true)"
 
 # The owner marker, written AFTER the trap that disposes of the directory and BEFORE
 # the sweep that reads other runs' markers — the register-before-create ordering this
@@ -26562,6 +26637,16 @@ acquire_gate_slot
 # #2926: the full gate's certification window begins HERE — after the (possibly very
 # long) queue for that slot, when work actually begins. See _tree_recapture_after_slot.
 _tree_recapture_after_slot
+
+# #3800 (roborev job 3): reconcile the startup free-space GUESS with cargo's AUTHORITATIVE
+# target dir, now that `_gate_resolve_target_dir` is defined and #3755's admission has already
+# resolved it for this same run. HERE and not earlier because that function does not exist at
+# `_disk_capture_start`'s call site (bash executes definitions in order); HERE and not later
+# because no component has run yet, so on the disagreement path the re-based start reading still
+# precedes every byte the build writes. A no-op when the two agree, which is every box on this
+# fleet today -- measured: nothing sets CARGO_BUILD_TARGET_DIR or `[build] target-dir` here.
+# PARENT shell, never `$( … )`: it records.
+_disk_retarget
 
 # ---- A CHECK MUST BE INSIDE THE WINDOW IT CERTIFIES (roborev job 290, High) ----------------
 #

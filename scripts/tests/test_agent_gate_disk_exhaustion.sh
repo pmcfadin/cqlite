@@ -98,7 +98,7 @@ EXTRACT_OK=1
   # reason at its extraction below.
   # `_gate_cntrl_strip` is #3637's ONE DEFINITION of the control-character class and
   # `_disk_safe` now DELEGATES to it, so the extracted harness must carry it too.
-  for fn in _gate_cntrl_strip _gate_pid_identity _disk_gate_signal_ok _disk_safe _disk_abbrev _disk_df_probe _disk_gib _disk_free_leg \
+  for fn in _gate_cntrl_strip _gate_pid_identity _disk_gate_signal_ok _disk_safe _disk_abbrev _disk_df_probe _disk_retarget _disk_gib _disk_free_leg \
             _disk_free_field _disk_scan_field _disk_note_capture_failure \
             _disk_note_unread_verdict _disk_secs_is_int _disk_verdict_read \
             _disk_verdict_read_aggregate _disk_recorded_pairs _disk_preflight_meta \
@@ -112,7 +112,7 @@ EXTRACT_OK=1
   done
 } >> "$EX"
 
-for want in DISK_EXHAUSTION_SIGNATURES DISK_MEM_SUBJECTS DISK_UNREAD_VERDICTS _gate_cntrl_strip _gate_pid_identity _disk_gate_signal_ok _disk_safe _disk_abbrev \
+for want in DISK_EXHAUSTION_SIGNATURES DISK_MEM_SUBJECTS DISK_UNREAD_VERDICTS _gate_cntrl_strip _gate_pid_identity _disk_gate_signal_ok _disk_retarget _disk_safe _disk_abbrev \
             _disk_df_probe _disk_gib _disk_free_leg _disk_free_field _disk_scan_field \
             _disk_note_capture_failure _disk_note_unread_verdict _disk_secs_is_int \
             _disk_verdict_read _disk_verdict_read_aggregate _disk_recorded_pairs \
@@ -2360,6 +2360,129 @@ if [ "$_mem_pipestatus" -ge 1 ] && [ "$_mem_nopf" -ge 1 ]; then
   ok "25d-grep-status: the in-memory branch takes grep's OWN status via PIPESTATUS[1] under a subshell-scoped 'set +o pipefail' -- so printf dying of SIGPIPE is irrelevant rather than avoided, which is what lets -m1 (and the bound) come back"
 else
   bad "25d-grep-status: PIPESTATUS[1]=$_mem_pipestatus 'set +o pipefail'=$_mem_nopf (excluding comments) -- without both, the pipeline's status is printf's and a matched signature reads as 'could not read' on a large payload; outer rc-capture sites=$_mem_bare"
+fi
+
+# (25e) THE IN-MEMORY BRANCH LEAKS NO printf EPIPE NARRATION -- roborev job 3.
+#
+# A single redirection at the end of a pipeline binds to the LAST command, so grep's
+# `2>/dev/null` never covered printf, and an earlier revision of the shipped comment claimed it
+# did. It only shows under an IGNORED SIGPIPE -- with the default disposition the subshell dies
+# silently -- and the gate INHERITS SIG_IGN for SIGPIPE (measured on a live gate of record:
+# SigIgn bit 12 set) while trapping PIPE nowhere, so the leak is reachable in the real gate.
+#
+# Driven under an explicitly IGNORED SIGPIPE so the case does not depend on this host's inherited
+# disposition, with the match on line 1 of a 2 MB payload so grep exits with nearly all of it
+# unwritten. The MUTATION control is what makes the clean reading a measurement: the pre-fix form
+# (printf unredirected) must LEAK on the identical input, or this case is asserting nothing.
+_e5=$(mktemp -d "$tmp/c25e.XXXXXX")
+_e5_payload_cmd='payload=$(printf "NEEDLE here\n"; head -c 2000000 /dev/zero | tr "\0" "x")'
+cat > "$_e5/fixed.sh" <<EOF
+#!/usr/bin/env bash
+$_e5_payload_cmd
+trap '' PIPE
+hit="\$(
+  set +o pipefail
+  printf '%s\n' "\$payload" 2>/dev/null | LC_ALL=C grep -n -o -m1 -a -F -e "NEEDLE" 2>/dev/null
+  exit "\${PIPESTATUS[1]}"
+)"; printf 'RC %s HIT %s\n' "\$?" "\$hit"
+EOF
+cat > "$_e5/prefix.sh" <<EOF
+#!/usr/bin/env bash
+$_e5_payload_cmd
+trap '' PIPE
+hit="\$(
+  set +o pipefail
+  printf '%s\n' "\$payload" | LC_ALL=C grep -n -o -m1 -a -F -e "NEEDLE" 2>/dev/null
+  exit "\${PIPESTATUS[1]}"
+)"; printf 'RC %s HIT %s\n' "\$?" "\$hit"
+EOF
+bash "$_e5/fixed.sh"  >"$_e5/fixed.out"  2>"$_e5/fixed.err"
+bash "$_e5/prefix.sh" >"$_e5/prefix.out" 2>"$_e5/prefix.err"
+_e5_fixed_err=$(wc -c < "$_e5/fixed.err" | tr -d ' ')
+_e5_pre_err=$(wc -c < "$_e5/prefix.err" | tr -d ' ')
+_e5_fixed_out=$(cat "$_e5/fixed.out")
+_e5_pre_out=$(cat "$_e5/prefix.out")
+if [ "$_e5_fixed_err" = 0 ] && [ "$_e5_fixed_out" = "RC 0 HIT 1:NEEDLE" ]; then
+  ok "25e-epipe-quiet: with printf's OWN stderr redirected, a 2MB early-match under an IGNORED SIGPIPE emits ZERO bytes of stderr and still reports the right hit ($_e5_fixed_out) -- no 'printf: write error' can reach the gate's stderr"
+else
+  bad "25e-epipe-quiet: expected 0 stderr bytes and 'RC 0 HIT 1:NEEDLE', got ${_e5_fixed_err} bytes and '$_e5_fixed_out': $(head -c 200 "$_e5/fixed.err")"
+fi
+if [ "$_e5_pre_err" -gt 0 ] && case "$(cat "$_e5/prefix.err")" in *"write error"*) true ;; *) false ;; esac; then
+  ok "25e-epipe-mutation: the PRE-FIX form (grep's redirect only) LEAKS the narration on the identical input (${_e5_pre_err} bytes) -- so the clean reading above measures the printf redirect and not the absence of a leak on this host"
+else
+  bad "25e-epipe-mutation: the pre-fix form leaked ${_e5_pre_err} bytes and no 'write error' text, so 25e-epipe-quiet is asserting nothing on this host: $(head -c 200 "$_e5/prefix.err")"
+fi
+if [ "$_e5_pre_out" = "RC 0 HIT 1:NEEDLE" ]; then
+  ok "25e-epipe-verdict: the pre-fix form's rc and hit were CORRECT too ($_e5_pre_out) -- confirming this was only stderr noise and never a wrong verdict, which is why it was a Low and not a false-verdict class"
+else
+  bad "25e-epipe-verdict: expected the pre-fix verdict to be correct, got '$_e5_pre_out'"
+fi
+
+# (25f) THE TARGET-DIR REFRESH -- roborev job 3, both directions.
+#
+# `_disk_capture_start` GUESSES `${CARGO_TARGET_DIR:-$REPO_ROOT/target}`; cargo also honours
+# CARGO_BUILD_TARGET_DIR and `[build] target-dir`, so on a box configuring either the free-space
+# field would name the WRONG FILESYSTEM. `_disk_retarget` reconciles against the authoritative
+# resolution once it exists. Both directions matter: a refresh that always fired would throw away
+# the longer, more honest window on every ordinary run.
+_rt=$(mktemp -d "$tmp/c25f.XXXXXX")
+# (a) DISAGREE -> re-based, and the shortened window is DECLARED in the rendered label.
+o25fa=$(bash -c '
+  . "$1"
+  _RT_ANSWER="$2"
+  _gate_resolve_target_dir() { printf "OK %s\n" "$_RT_ANSWER"; }
+  DISK_TARGET_PATH="/nonexistent/guess"; DISK_FREE_START_TARGET="1 /nonexistent"
+  DISK_LOGS_PATH="$2"; DISK_FREE_START_LOGS="$(_disk_df_probe "$2")"
+  _disk_retarget
+  printf "PATH %s\n" "$DISK_TARGET_PATH"
+  printf "FLAG %s\n" "${DISK_TARGET_RETARGETED:-0}"
+  printf "FIELD %s\n" "$(_disk_free_field)"
+' _ "$EX" "$_rt" 2>&1)
+if case "$o25fa" in *"PATH $_rt"*) true ;; *) false ;; esac \
+   && case "$o25fa" in *"FLAG 1"*) true ;; *) false ;; esac \
+   && case "$o25fa" in *"re-based at target-dir resolution"*) true ;; *) false ;; esac; then
+  ok "25f-retarget-disagree: when cargo names a DIFFERENT directory the path is re-based, the start reading is re-taken, and the rendered label DECLARES the shortened window rather than implying a start->emit delta it no longer has"
+else
+  bad "25f-retarget-disagree: expected the re-based path, FLAG 1 and the declaration:
+$o25fa"
+fi
+# (b) AGREE -> untouched, no flag, no declaration. Without this, (a) would pass against a
+#     refresh that fired unconditionally and silently shortened every window.
+o25fb=$(bash -c '
+  . "$1"
+  _RT_ANSWER="$2"
+  _gate_resolve_target_dir() { printf "OK %s\n" "$_RT_ANSWER"; }
+  DISK_TARGET_PATH="$2"; DISK_FREE_START_TARGET="999999 /sentinel-unchanged"
+  DISK_LOGS_PATH="$2"; DISK_FREE_START_LOGS="$(_disk_df_probe "$2")"
+  _disk_retarget
+  printf "FLAG %s\n" "${DISK_TARGET_RETARGETED:-0}"
+  printf "START %s\n" "$DISK_FREE_START_TARGET"
+  printf "FIELD %s\n" "$(_disk_free_field)"
+' _ "$EX" "$_rt" 2>&1)
+if case "$o25fb" in *"FLAG 0"*) true ;; *) false ;; esac \
+   && case "$o25fb" in *"START 999999 /sentinel-unchanged"*) true ;; *) false ;; esac \
+   && case "$o25fb" in *"re-based at target-dir resolution"*) false ;; *) true ;; esac; then
+  ok "25f-retarget-agree: when cargo names the SAME directory nothing is touched -- the sentinel start reading survives, no flag is set and no declaration is rendered, so the longer window is kept on every ordinary run"
+else
+  bad "25f-retarget-agree: expected FLAG 0, the untouched sentinel and no declaration:
+$o25fb"
+fi
+# (c) UNRESOLVED -> keep the guess. A refresh that trusted an UNRESOLVED answer would replace a
+#     usable guess with nothing, which is worse than the guess.
+o25fc=$(bash -c '
+  . "$1"
+  _gate_resolve_target_dir() { printf "UNRESOLVED cargo metadata failed\n"; }
+  DISK_TARGET_PATH="/keep/this/guess"; DISK_FREE_START_TARGET="42 /keep"
+  _disk_retarget
+  printf "PATH %s\n" "$DISK_TARGET_PATH"
+  printf "FLAG %s\n" "${DISK_TARGET_RETARGETED:-0}"
+' _ "$EX" 2>&1)
+if case "$o25fc" in *"PATH /keep/this/guess"*) true ;; *) false ;; esac \
+   && case "$o25fc" in *"FLAG 0"*) true ;; *) false ;; esac; then
+  ok "25f-retarget-unresolved: an UNRESOLVED authoritative answer leaves the startup guess in place -- the refresh never trades a usable reading for nothing"
+else
+  bad "25f-retarget-unresolved: expected the guess kept and FLAG 0:
+$o25fc"
 fi
 
 # (23) roborev job 343 -- THE SCAN MUST NOT BE ABLE TO HANG THE GATE.

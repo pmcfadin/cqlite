@@ -27,7 +27,7 @@
 # A DECREASE never fails — re-run the command above and commit a tighter baseline. That
 # is also the ONE declared residual: the digest changes on any removal, so a net decrease
 # that also ADDS a line is tolerated.
-scripts/agent-gate.sh 106 332167b574ee9163a550534529f98da323bcb75bf9c2c7a4cca27b1231a3dd0c
+scripts/agent-gate.sh 106 101ddaac01fffd9401f45c5e7d0300fde207f608f7037a9fd7a196238d602525
 scripts/audit-inert-surfaces.sh 1 bb72bed6f53cbe17f37446cb6ca69b342de3f6d12568cb2f783e53e266330ac4
 scripts/bootstrap-agent-machine.sh 44 2c9067d9ad2e0947309819e81b2580d456412994e8f3bbbcbd7383cd223e3ed2
 scripts/bump-version.sh 2 b8b4c6e32848ce57f6420923360038c3469adcc5ea2ba0b00999a3e2fb7e3a2c
@@ -85,7 +85,7 @@ scripts/tests/test_agent_gate_cli_tests_enum.sh 2 fa69dba07d2f077e904e0799fef0bb
 scripts/tests/test_agent_gate_component_set.sh 69 92740e6eb3624b9bd2b0017093a5d7b8ca079171a5ab45fbc8053b8901f79f1c
 scripts/tests/test_agent_gate_delta.sh 17 b442f64bcadc20713862a013f3474a82b57a9bb54cc23397547b59053740abf8
 scripts/tests/test_agent_gate_disk_admission.sh 5 a2309183eff0c73f23e6d9ccffec5d77f84f846a59044f889fd9909b13345eea
-scripts/tests/test_agent_gate_disk_exhaustion.sh 82 aa4dfbfa18212d9e16f89670d635b1030bb56df588768467115c0bbe92edc231
+scripts/tests/test_agent_gate_disk_exhaustion.sh 85 5fa9874b5d772603b936151d95056d777b2e5e1aaae4e61e4fbe0f8f3ce95e15
 scripts/tests/test_agent_gate_feature_matrix_annotation.sh 5 02a3da104d9c3fcbb6e23ec88ceca970a52045b59313279c74f1882f0c887449
 scripts/tests/test_agent_gate_feature_matrix_lanes.sh 3 e472162bb86c91854d9c3b036b5b6d8a77c90632a1c0e3019e5c117257d747cc
 scripts/tests/test_agent_gate_logdir_cleanup.sh 17 ddb0053166c81d1b2a5191b01d8eecfcefa70a3fbdc468646bf35cff396d786c
