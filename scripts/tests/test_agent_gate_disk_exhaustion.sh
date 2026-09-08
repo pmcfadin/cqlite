@@ -2586,7 +2586,7 @@ if [ -c /dev/full ] && ! : 2>/dev/null > "$d/logs/legacy-heuristics.result" && !
   if [ "${ex21e:-1}" = 0 ] \
      && case "$o21e" in *"D3 REFUSING to signal pid"*) true ;; *) false ;; esac \
      && case "$o21e" in *ALIVE*) true ;; *) false ;; esac; then
-    ok "21e-identity-refuse: with a NON-MATCHING launch identity the rung REFUSES to signal, names why, and the shell SURVIVES -- an orphaned SIDE child can no longer SIGKILL a pid that has been reaped and reassigned to a peer lane's gate"
+    ok "21e-identity-refuse: with a NON-MATCHING launch identity the rung REFUSES to signal, names why, and the shell SURVIVES -- an ORPHANED SIDE child, whose gate is already gone, can no longer SIGKILL a pid that may have been reassigned to a peer lane's gate. Scoped deliberately to the orphaned case: the verify-then-signal TOCTOU is a DECLARED residual (#4166), microseconds wide against this one's seconds-to-minutes"
   else
     bad "21e-identity-refuse: expected exit 0 with the REFUSING diagnostic and ALIVE, got exit='${ex21e:-<none>}':
 $o21e"

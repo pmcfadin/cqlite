@@ -7442,6 +7442,20 @@ _gate_pid_identity() {
 # PASS: the reuse harm needs a MULTI-LANE box, every multi-lane box on this fleet is Linux with
 # /proc, and there the identity IS measurable -- so rc 2 is precisely the host where the reuse
 # hazard is least reachable and the false-certification harm is unchanged.
+#
+# DECLARED RESIDUAL, and the CLAIM IS NARROWED TO MATCH IT (#3800, roborev job 2; tracked in
+# #4166). What this CLOSES is the ORPHANED-child case: the gate is already gone, the child
+# verifies a MISMATCH and refuses. That window was the orphan's entire remaining lifetime --
+# seconds to minutes, and entirely reachable. What it does NOT close is that the read and the
+# signal are TWO OPERATIONS: two SIDE children can both verify a MATCH, one can kill the gate,
+# and the other can signal between its own verify and its own kill. That window is MICROSECONDS
+# wide and biting it needs the kernel to REUSE the gate's pid inside it -- Linux allocates pids
+# sequentially up to /proc/sys/kernel/pid_max, so it is a boundary worth recording and not a
+# reachable shape. Closing it needs an atomic identity-bound signal (pidfd_send_signal: Linux-only
+# and unreachable from bash without a helper binary) or a SIDE-pool status channel carrying the
+# failure instead of a signal (a redesign of #2657's two-lane split). Both are out of this slice.
+# Stated here rather than left implied, because the comment this replaced claimed a completeness
+# it did not have, and that is the failure this rung has now had twice.
 _disk_gate_signal_ok() {
   local now
   [ -n "${GATE_MAIN_IDENTITY:-}" ] || return 2
@@ -7466,14 +7480,14 @@ _disk_abbrev() {
 # _disk_df_probe <path> -- print "<avail_kb> <mountpoint>" for the filesystem holding <path>,
 # or nothing (and rc 1) when it cannot be measured.
 #
-# `df -Pk` is the POSIX form and the ONLY correct one here: `df -h`'s output differs between
-# GNU and BSD and macOS is a first-class gate host, and `-P` is what guarantees one
-# unwrapped line per filesystem so field positions mean what they say.
+# THE NAME IS HISTORICAL: this probe reads statvfs through `stat` and executes NO `df` at all --
+# see the two blocks inside. It is kept because it is what the extracted-function harness in
+# scripts/tests/test_agent_gate_disk_exhaustion.sh names.
 _disk_df_probe() {
-  local p="${1:-}" out a bs mp
+  local p="${1:-}" a bs mp
   [ -n "$p" ] || return 1
   # Walk up to the first EXISTING ancestor: the cargo target dir legitimately does not exist
-  # on a clean checkout, and `df` on a missing path is an ERROR, not a free-space of zero.
+  # on a clean checkout, and statting a missing path is an ERROR, not a free-space of zero.
   # Bounded by the loop below shortening `p` every iteration.
   while [ -n "$p" ] && [ "$p" != / ] && [ ! -e "$p" ]; do
     case "$p" in */*) p="${p%/*}"; [ -n "$p" ] || p=/ ;; *) p="." ;; esac
@@ -7494,11 +7508,32 @@ _disk_df_probe() {
   # and the non-interference is STRUCTURAL rather than negotiated. Verified numerically on this
   # fleet: `stat -f -c '%a' * '%S' / 1024` equals `df -Pk` avail to the byte.
   #
-  # DECLARED RESIDUAL: `stat -f -c` and `stat -c %m` are GNU. On a BSD/macOS host -- and macOS is a
-  # first-class gate host -- this falls back to `df` and the interference RETURNS there. The
-  # durable fix is for #3755's assertions to be scoped to the ADMISSION WINDOW rather than to every
-  # df call in the process, so that ANY future filesystem measurement cannot red them. That is a
-  # change to another lane's tests, so it is DECLARED to the coordinator, not made from here.
+  # AND THERE IS NO `df` FALLBACK, WHICH IS A DELETION AND NOT AN OMISSION (#3800, roborev job 1 on
+  # the merge candidate). `stat -f -c` and `stat -c %m` are GNU, so on a BSD/macOS host -- and macOS
+  # is a first-class gate host -- this probe used to fall back to the `df` BINARY, and BOTH problems
+  # above returned there in full: the shim sees the calls again, and #3755's suite reds on a
+  # supported platform.
+  #
+  # A SECOND HAZARD, WHICH IS THE ONE THAT DECIDES IT: that fallback was UNBOUNDED. #3755's own df
+  # probe runs under `_component_set_bounded "$_GATE_DF_BOUND_SECS"`; this one had no bound at all,
+  # so a `df` that hangs -- an unresponsive mount, or that suite's own hanging-df shim -- would hang
+  # THIS probe on the path to the TERMINAL EMIT, producing no verdict rather than a wrong one. That
+  # is the same class as the FIFO subject refused in `_disk_scan_subject`, and the same rule the
+  # dep-duplicates probe follows: where a probe cannot be BOUNDED it is not run at all.
+  #
+  # So the fallback is REMOVED rather than bounded or absolute-pathed. Non-interference is now
+  # STRUCTURAL ON EVERY PLATFORM -- this code executes no `df`, ever -- and no hard-coded /bin vs
+  # /usr/bin guess is made on the very platform it would claim to support. The reviewer's suggested
+  # alternative, a native BSD `stat` implementation, does not exist: BSD `stat(1)` has no filesystem
+  # mode and cannot report free space at all.
+  #
+  # DECLARED COST: on a host without GNU `stat` the free-space field reads `UNMEASURED` instead of a
+  # delta. That is the SUPPLEMENTARY half of this line; the attribution -- naming a recognised
+  # signature, which is what #3800 exists for -- is unaffected, and the UNMEASURED rendering is an
+  # already-exercised path rather than a new one. A missing diagnostic field on macOS is strictly
+  # better than a red tooling-tests on macOS. Reversible the moment #3755's assertions are scoped to
+  # the ADMISSION WINDOW rather than to every df call in the process, which remains the durable fix
+  # and is a change to another lane's tests.
   if a=$(stat -f -c '%a' "$p" 2>/dev/null) \
      && bs=$(stat -f -c '%S' "$p" 2>/dev/null) \
      && mp=$(stat -c '%m' "$p" 2>/dev/null); then
@@ -7510,11 +7545,8 @@ _disk_df_probe() {
       return 0
     fi
   fi
-  command -v df >/dev/null 2>&1 || return 1
-  # Mount points may contain spaces, so avail is $4 and the mount point is $6..NF.
-  out=$(df -Pk "$p" 2>/dev/null | awk 'NR>1 {a=$4; m=$6; for(i=7;i<=NF;i++) m=m" "$i; print a" "m; exit}')
-  case "$out" in ''|[!0-9]*) return 1 ;; esac
-  printf '%s' "$out"
+  # Unmeasurable. NOT an error and NOT a free-space of zero: the caller renders UNMEASURED.
+  return 1
 }
 
 # _disk_capture_start -- take the START-of-run free-space reading. Called once, right after
@@ -13742,7 +13774,9 @@ _tree_boundary_fail() {
         # at once, so two SIDE children reaching this rung is the expected shape, not an exotic one
         # — and the pid's likeliest next owner on a four-lane box is a peer lane's gate. A false
         # rationale in a comment is worse than none, which is why the claim above is corrected here
-        # rather than left standing.
+        # rather than left standing. The check's OWN residual -- verify and signal are two
+        # operations -- is declared at `_disk_gate_signal_ok` and tracked in #4166; it is
+        # microseconds wide against the seconds-to-minutes window closed here.
         _disk_gate_signal_ok; _tbf_sig=$?
         if [ "$_tbf_sig" -eq 1 ]; then
           echo "⚠️ agent-gate: [$comp] REFUSING to signal pid $$ — it is verifiably NO LONGER this gate (start-time identity mismatch), so this gate was already reaped and that pid may now belong to an unrelated process, most likely a PEER LANE'S GATE. No signal is sent. This run published no further verdict from here; treat its block as non-certifying (#3800)" >&2
