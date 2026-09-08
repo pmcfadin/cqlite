@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Enhanced TestContext Framework is designed to achieve tiered test coverage for CQLite (see [PRD Section 5.1](development/PRD.md#51--tiered-coverage-targets)) by providing:
+The Enhanced TestContext Framework is designed to achieve tiered test coverage for CQLite (see [historical PRD Section 5.1](development/PRD-toolkit-v0.2.md#51--tiered-coverage-targets)) by providing:
 
 1. **Enhanced TestContext**: Schema validation, coverage tracking, quality gates
 2. **Test Categorization**: Systematic organization for comprehensive coverage
@@ -30,7 +30,7 @@ pub enum TestCategory {
 - Property Tests: 1000+ generated test cases
 - End-to-End Tests: Critical user scenarios
 
-See [PRD Section 5.1](development/PRD.md#51--tiered-coverage-targets) for authoritative tier definitions.
+See [historical PRD Section 5.1](development/PRD-toolkit-v0.2.md#51--tiered-coverage-targets) for authoritative tier definitions.
 
 ### 2. Enhanced TestContext
 

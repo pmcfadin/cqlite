@@ -88,7 +88,8 @@ Welcome to the CQLite documentation hub. This directory holds technical document
 - **Milestones Complete**: M1 (Core Reading), M2 (CLI), M3 (Output Writers), M4 (Python & Node.js Bindings), M5 (Write Support + Compaction)
 - **v0.13.0**: Read-path constant-factor speedups (Epic E, C2) · Node bindings throughput · byte-bounded result budgets · explicit `Database.refresh()` · no-heuristics correctness fixes
 - **v0.12.0**: Byte-for-byte compaction parity vs Apache Cassandra · Arrow Flight + Trino connector · canonical BTI write/read · CDC delta-export · `WRITETIME()`/`TTL()` in `SELECT`
-- **Next**: M6 (WebAssembly Bindings), M7 (Performance validation + v1.0)
+- **Product direction**: shared storage execution for analytics, materialization, bulk writing, and compaction — see the [current PRD](development/PRD.md)
+- **Next**: SE1–SE4 qualify the external engine for 1.0; SE5–SE7 cover freshness and Cassandra integration. WASM is optional. The [toolkit PRD](development/PRD-toolkit-v0.2.md) preserves historical M1–M7 planning
 - **Test Pass Rate**: 100% (33/33 tables vs sstabledump, see `test-data/validation-matrix.md`)
 
 ---
@@ -96,7 +97,7 @@ Welcome to the CQLite documentation hub. This directory holds technical document
 ## 🔄 Document Maintenance
 
 ### Last Updated
-- Documentation hub: 2026-06-10
+- Documentation hub roadmap: 2026-09-06
 - Performance & profiling docs: 2026-06-10
 - Architecture docs: 2026-01-27
 - User guides: 2026-01-27

@@ -335,5 +335,5 @@ Both paths create a GitHub Release with all artifacts attached.
 - **Release workflow**: `.github/workflows/python-release.yml`
 - **CI workflow**: `.github/workflows/python-ci.yml`
 - **Package config**: `bindings/python/pyproject.toml`
-- **Strategic context**: `docs/development/PRD.md` Section 6.1
+- **Product release criteria**: [PRD release and support contract](PRD.md#8-release-and-support-contract)
 - **Technical details**: `docs/development/M4_spec.md` Section 6

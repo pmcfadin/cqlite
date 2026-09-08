@@ -38,7 +38,7 @@ Full documentation is at **[https://pmcfadin.github.io/cqlite/](https://pmcfadin
 
 ## Vision
 
-CQLite aims to become the standard tool for Cassandra SSTable manipulation outside of the main Apache Cassandra project, enabling new workflows for data analytics, migration, testing, and edge computing.
+CQLite aims to provide a Cassandra-compatible storage engine that shares reconciliation and materialization across analytics, bulk ingestion, and compaction, with incremental integration into Cassandra. The CLI, bindings, and query interfaces remain the accessible product surfaces. See the [Product Requirements](docs/development/PRD.md) for scope, guarantees, and qualification milestones.
 
 ## Project Leadership
 
@@ -339,17 +339,24 @@ See the [**Roadmap**](#roadmap) section below for in-flight epics and milestones
 
 ## Roadmap
 
-CQLite is at **v0.13.0** and production-ready for the use cases above. The path to
-**v1.0** is tracked in the open. Full detail, with milestones, lives at
-[pmcfadin.github.io/cqlite → Roadmap](https://pmcfadin.github.io/cqlite/user-docs/roadmap/).
+The [PRD](docs/development/PRD.md#7-milestones-and-dependency-gates) defines the
+storage-engine qualification program. M1–M5 remain historical delivery milestones;
+the new milestones measure supported workflows and operator outcomes.
 
-| Workstream | Epic |
-|------------|------|
-| Wire storage-layer capabilities (bloom/index/BTI seeks) into the CQL query path + regression guards | [#951](https://github.com/pmcfadin/cqlite/issues/951) |
-| Read-path performance & I/O backend (parallel single-reader scans, io_uring spike) | [#906](https://github.com/pmcfadin/cqlite/issues/906) |
-| CLI & bindings polish (DX & cleanup) | [#907](https://github.com/pmcfadin/cqlite/issues/907) |
-| Compaction byte-parity follow-ups (range tombstones e2e + edge cases) | [#938](https://github.com/pmcfadin/cqlite/issues/938) |
-| M6 — WASM bindings · M7 — performance validation + **v1.0** | _planned_ |
+| Milestone | Outcome |
+|-----------|---------|
+| SE1 — Engine contract | Explicit scope, authority, capabilities, and workload acceptance criteria |
+| SE2 — Shared offline execution | Safe compaction and reusable analytics materialization |
+| SE3 — Analytics offload value | Measured benefit within Cassandra foreground-service and freshness budgets |
+| SE4 — Bulk writing and policy tools | Qualified native ingestion plus compaction planning/simulation |
+| SE5 — Qualified freshness | Proven memtable-tail behavior for opted-in analytical reads |
+| SE6 — Bounded Cassandra integration | One reversible native/offload pilot |
+| SE7 — Native lifecycle qualification | Supported integrated behavior backed by operational evidence |
+
+Qualification is pending; existing implementation and research contribute evidence
+but do not automatically complete these milestones. External-engine **1.0 requires
+SE1–SE4** and the PRD's release gates. WASM and native lifecycle integration are
+separate tracks. See the [user roadmap](https://pmcfadin.github.io/cqlite/user-docs/roadmap/).
 
 The roadmap follows real-world use. Want something prioritized?
 [Open or 👍 an issue](https://github.com/pmcfadin/cqlite/issues) — and
@@ -433,7 +440,7 @@ env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test --package cqlite-cor
 - 33/33 test tables passing (100% validation)
 - All 21 CQL primitive types + collections + UDTs + frozen types
 - All compression algorithms working
-- Tiered test coverage targets (see [PRD Section 5.1](docs/development/PRD.md#51--tiered-coverage-targets))
+- Tiered test coverage targets (see [historical PRD Section 5.1](docs/development/PRD-toolkit-v0.2.md#51--tiered-coverage-targets))
 
 ### ✅ M2 Complete (Jan 2026)
 - CLI with one-shot and REPL modes
@@ -479,7 +486,7 @@ See [docs/development/PRD.md](docs/development/PRD.md) for milestone details.
 ### Language Bindings
 - **Python**: Production-ready sync API (see [Python README](bindings/python/README.md))
 - **Node.js**: Production-ready Promise API (see [Node.js README](bindings/node/README.md))
-- **WASM**: Planned (M6+)
+- **WASM**: Deferred optional surface; not a prerequisite for external-engine 1.0
 
 ## Resources
 
@@ -512,4 +519,4 @@ Special thanks to the Apache Cassandra community and the many contributors who m
 
 ---
 
-**Note**: M1 through M5 milestones are complete and the project is at **v0.13.0**. Core SSTable reading, CLI, output writers (including Parquet), Python and Node.js bindings, and write support with STCS compaction and **byte-for-byte compaction parity vs Apache Cassandra** are production-ready, alongside read-path performance wins, byte-bounded result budgets, an Arrow Flight + Trino connector, canonical BTI (`da`) write/read, and CDC-style delta export. Next: M6 (WASM bindings) and M7 (performance validation + v1.0).
+**Planning note**: M1–M5 record the toolkit and execution foundation. The [current PRD](docs/development/PRD.md) replaces the remaining M6/M7 sequence with SE1–SE7 qualification milestones. Release-specific support and parity claims must follow the [parity release checklist](docs/development/parity-release-checklist.md).
