@@ -7482,6 +7482,41 @@ _disk_abbrev() {
   if [ "$n" -gt "$max" ]; then printf '%s,+%s more' "$out" "$(( n - max ))"; else printf '%s' "$out"; fi
 }
 
+# _disk_bounded <secs> <cmd...> -- run <cmd> under this host's bounding tool, its stdout on OURS.
+# rc: the command's own status, or 2 for "could not be bounded, or the bound was exceeded".
+#
+# WHY NOT `_component_set_bounded`, WHICH THIS BLOCK USED FOR ONE ROUND (#3800, roborev job 5).
+# That runner CAPTURES its child's streams into three `agent-gate-bcap.*` temp files and MEMOISES
+# their paths in `_CS_CAP_*`. Every call this block makes is inside a `$( … )`, so the memo is set
+# in the SUBSHELL and lost on return -- three fresh files per call, reused by nothing and cleaned
+# by nobody. MEASURED on this box: 732 stray files, and #3755's own `capture-leak` case asserts a
+# full gate leaves ZERO. Pre-warming the memo in the parent would fix the leak and introduce a
+# worse problem: SIDE-lane components run concurrently in subshells and would then SHARE one set
+# of capture files.
+#
+# The capture machinery exists to stop a leaked DESCENDANT holding the caller's pipe open past a
+# successful exit. This block's bounded commands are a `grep -m1` over one file and a `sh -c`
+# doing three stat reads -- neither spawns a descendant that can outlive it -- so the whole
+# mechanism is cost with no benefit here.
+#
+# What IS shared is the thing worth sharing: `_component_set_bound_mechanism`, the ONE answer to
+# "what can bound a command on this host", resolved ONCE in the parent into _DISK_BOUND_MECH and
+# inherited by every subshell. So there is still one mechanism DECISION in the gate, and no second
+# probe of the host.
+#
+# A host with neither tool yields rc 2 -- "could not read" -- never an unbounded run. That is this
+# file's standing rule (`dep-duplicates`, the FIFO refusal): where a probe cannot be BOUNDED, it is
+# not run at all. The bash-watchdog arm is deliberately NOT reachable here: it needs the capture
+# files this function exists to avoid.
+_disk_bounded() {
+  local secs="$1"; shift
+  case "${_DISK_BOUND_MECH:-}" in
+    timeout)  timeout  --kill-after=1 "$secs" "$@" ;;
+    gtimeout) gtimeout --kill-after=1 "$secs" "$@" ;;
+    *) return 2 ;;
+  esac
+}
+
 # The probe's wall-clock bound. Small: it is three stat(2) reads on a healthy filesystem and
 # runs on the path to the terminal emit, so the only thing this needs to survive is a WEDGED
 # mount -- where any value is equally right and a short one publishes the verdict sooner.
@@ -7509,14 +7544,12 @@ _disk_df_probe() {
   # the `[` BUILTIN and a builtin cannot be bounded from outside without a subprocess. ONE
   # invocation, so the bound covers the whole probe rather than each leg.
   #
-  # `_component_set_bounded` is #3755's reviewed runner (TERM -> grace -> group KILL, streams
-  # captured to files so a leaked descendant cannot hold the caller's pipe open). It is reused
-  # rather than reimplemented: a second bounding mechanism is a second set of failure modes, and
-  # it is defined well above this point so it is genuinely available here. It returns
-  # $_CS_UNBOUNDABLE_RC when it can neither bound nor capture, which lands on the same `return 1`
-  # as a failed probe -- i.e. UNMEASURED, never a fabricated reading. "Where a probe cannot be
-  # BOUNDED it is not run at all" is the rule this now actually follows.
-  out=$(_component_set_bounded "$_DISK_PROBE_BOUND_SECS" sh -c '
+  # `_disk_bounded` shares the gate's ONE bound-MECHANISM decision without its capture-file
+  # machinery -- see that function for why the machinery is wrong here. It returns 2 when the host
+  # cannot bound or the bound was exceeded, which lands on the same `return 1` as a failed probe:
+  # UNMEASURED, never a fabricated reading. "Where a probe cannot be BOUNDED it is not run at all"
+  # is the rule this now actually follows.
+  out=$(_disk_bounded "$_DISK_PROBE_BOUND_SECS" sh -c '
     p=$1
     # Walk up to the first EXISTING ancestor: the cargo target dir legitimately does not exist on
     # a clean checkout, and statting a missing path is an ERROR, not a free-space of zero.
@@ -7768,7 +7801,25 @@ _disk_scan_subject() {
       # function already routes to UNMEASURED. `--` because a component name could in principle
       # produce a leading dash; with a single operand grep prints no filename prefix, so the
       # `<lineno>:` parse below is unchanged.
-      hit="$(LC_ALL=C grep -n -o -a -m1 -F -e "$phrase" -- "$payload" 2>/dev/null)"; rc=$?
+      # BOUNDED, AND THE CLASS IS NOW CLOSED RATHER THAN ONE MORE INSTANCE (#3800, roborev job 5).
+      # This is the THIRD time this PR has met "an unbounded filesystem read on the path to the
+      # TERMINAL EMIT": the `df` fallback (deleted), the `stat`/`[ -e ]` probe (bounded in job 4),
+      # and now this grep. Twice the fix reached the instance the finding named and left the class
+      # open -- the failure this file records by name -- so the rule is stated once, here, and
+      # applied to EVERY such read in this block: a component log can sit on a wedged NFS/FUSE
+      # mount, or grow faster than it is read, and `-f` excludes only special files. It does not
+      # bound a regular-file read. An unbounded one here means the gate publishes NO verdict at
+      # all, which is strictly worse than the misattribution this whole line exists to prevent.
+      #
+      # Same runner as the probe (`_disk_bounded`), so there is ONE bounding mechanism in
+      # this block and not two. Its unbounded-or-uncapturable return lands on the SAME arm as a
+      # grep error: rc 2, "could NOT be read" -> UNMEASURED naming the subject -- never a clean
+      # reading over a subject that was never read.
+      hit="$(_disk_bounded "$_DISK_PROBE_BOUND_SECS" \
+               env LC_ALL=C grep -n -o -a -m1 -F -e "$phrase" -- "$payload" 2>/dev/null)"; rc=$?
+      # A bound exceeded, or no way to bound at all, is NOT "no match": both mean the subject was
+      # not read, which is rc 2 here.
+      [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || rc=2
     else
       # THE IN-MEMORY BRANCH READS **GREP'S OWN** STATUS, NOT THE PIPELINE'S (roborev job 353).
       # Two earlier spellings of this branch each failed, and both failures were MEASURED, so both
@@ -9620,6 +9671,10 @@ trap '_logdir_cleanup "$?"' EXIT
 # forked subshell inherits them, which is exactly the scope wanted -- an execed child has no
 # business signalling this gate. An unmeasurable identity is left EMPTY and never reads as a
 # match.
+# The ONE bound-mechanism decision for this block, resolved in the PARENT so every subshell
+# inherits it and none re-probes the host (#3800, roborev job 5). Shares the gate's own resolver,
+# so there is no second opinion about what can bound a command here.
+_DISK_BOUND_MECH="$(_component_set_bound_mechanism 2>/dev/null || true)"
 _disk_capture_start
 GATE_MAIN_IDENTITY="$(_gate_pid_identity "$$" 2>/dev/null || true)"
 

@@ -98,7 +98,7 @@ EXTRACT_OK=1
   # reason at its extraction below.
   # `_gate_cntrl_strip` is #3637's ONE DEFINITION of the control-character class and
   # `_disk_safe` now DELEGATES to it, so the extracted harness must carry it too.
-  for fn in _gate_cntrl_strip _gate_pid_identity _disk_gate_signal_ok _disk_safe _disk_abbrev _disk_df_probe _disk_retarget _disk_gib _disk_free_leg \
+  for fn in _gate_cntrl_strip _gate_pid_identity _disk_gate_signal_ok _disk_bounded _disk_safe _disk_abbrev _disk_df_probe _disk_retarget _disk_gib _disk_free_leg \
             _disk_free_field _disk_scan_field _disk_note_capture_failure \
             _disk_note_unread_verdict _disk_secs_is_int _disk_verdict_read \
             _disk_verdict_read_aggregate _disk_recorded_pairs _disk_preflight_meta \
@@ -119,9 +119,26 @@ EXTRACT_OK=1
 # behavioural cases below exercise the probe's LOGIC, and the BOUND itself is pinned STRUCTURALLY
 # by case 25h against the shipped source -- which is the only place it can be pinned, since a
 # behavioural case would need a genuinely wedged mount.
-printf '%s\n' '_component_set_bounded() { shift; "$@"; }' >> "$EX"
+# The block now owns `_disk_bounded` (extracted below), which dispatches on _DISK_BOUND_MECH.
+# Resolve it the way the shipped gate does so the harness exercises the REAL bounded path rather
+# than an unbounded stub; a host with no tool leaves it empty and the probe reports UNMEASURED,
+# which is the shipped behaviour and not a harness artifact.
+# The probe's bound is a top-level CONSTANT, not a function, so the extraction loop above does
+# not carry it -- and without it `_disk_bounded` is called with an EMPTY duration, which every
+# bounding tool rejects. DERIVED from the shipped source, never re-typed here: a second copy of a
+# constant is a second thing to drift.
+grep -E '^_DISK_PROBE_BOUND_SECS=[0-9]+$' "$GATE" >> "$EX" || {
+  printf 'FATAL: could not derive _DISK_PROBE_BOUND_SECS from %s\n' "$GATE" >&2; exit 1; }
 
-for want in DISK_EXHAUSTION_SIGNATURES DISK_MEM_SUBJECTS DISK_UNREAD_VERDICTS _gate_cntrl_strip _gate_pid_identity _disk_gate_signal_ok _disk_retarget _disk_safe _disk_abbrev \
+if command -v timeout >/dev/null 2>&1 && timeout --kill-after=1 1 true >/dev/null 2>&1; then
+  printf '%s\n' '_DISK_BOUND_MECH=timeout' >> "$EX"
+elif command -v gtimeout >/dev/null 2>&1 && gtimeout --kill-after=1 1 true >/dev/null 2>&1; then
+  printf '%s\n' '_DISK_BOUND_MECH=gtimeout' >> "$EX"
+else
+  printf '%s\n' '_DISK_BOUND_MECH=' >> "$EX"
+fi
+
+for want in DISK_EXHAUSTION_SIGNATURES DISK_MEM_SUBJECTS DISK_UNREAD_VERDICTS _gate_cntrl_strip _gate_pid_identity _disk_gate_signal_ok _disk_bounded _disk_retarget _disk_safe _disk_abbrev \
             _disk_df_probe _disk_gib _disk_free_leg _disk_free_field _disk_scan_field \
             _disk_note_capture_failure _disk_note_unread_verdict _disk_secs_is_int \
             _disk_verdict_read _disk_verdict_read_aggregate _disk_recorded_pairs \
@@ -2517,8 +2534,8 @@ fi
 # a behavioural case would need a genuinely wedged mount, which cannot be synthesised portably.
 _dp_body=$(awk '/^_disk_df_probe\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$GATE")
 _dp_code=$(printf '%s\n' "$_dp_body" | grep -vE '^[[:space:]]*#')
-if [ -n "$_dp_body" ] && printf '%s\n' "$_dp_code" | grep -q '_component_set_bounded'; then
-  ok "25h-probe-bounded: the shipped _disk_df_probe routes its filesystem reads through _component_set_bounded, so a wedged mount cannot hold the terminal emit open"
+if [ -n "$_dp_body" ] && printf '%s\n' "$_dp_code" | grep -q '_disk_bounded'; then
+  ok "25h-probe-bounded: the shipped _disk_df_probe routes its filesystem reads through _disk_bounded, so a wedged mount cannot hold the terminal emit open"
 else
   bad "25h-probe-bounded: the shipped _disk_df_probe does NOT route through a bounded runner -- an unbounded stat(2) here means no verdict at all on a wedged mount:
 $_dp_code"
@@ -2531,7 +2548,7 @@ fi
 # shell". The first draft of this case did exactly that and red on correct code. What is checked
 # is the ORDER: the walk, and every stat, must fall between the `_component_set_bounded` line that
 # opens the quoted argument and the line that closes it.
-_dp_open=$(printf '%s\n' "$_dp_code" | grep -n '_component_set_bounded' | head -1 | cut -d: -f1)
+_dp_open=$(printf '%s\n' "$_dp_code" | grep -n '_disk_bounded' | head -1 | cut -d: -f1)
 _dp_close=$(printf '%s\n' "$_dp_code" | grep -n "^[[:space:]]*' _ \"\$p\")" | head -1 | cut -d: -f1)
 _dp_walk=$(printf '%s\n' "$_dp_code" | grep -nE '\[ ! -e' | head -1 | cut -d: -f1)
 _dp_stat_out=$(printf '%s\n' "$_dp_code" | grep -nE 'stat ' | awk -F: '{print $1}' | tail -1)
@@ -2597,7 +2614,7 @@ if command -v mkfifo >/dev/null 2>&1 && [ -n "$DISK_TIMEOUT" ]; then
         !inb && $0 ~ s { inb=1; print; next } inb { print; if ($0 ~ e) exit }' "$_fifo_ctl" > "$_fifo_ex"
       grep -m1 '^DISK_MEM_SUBJECTS=()$' "$_fifo_ctl" >> "$_fifo_ex"
       grep -m1 '^DISK_UNREAD_VERDICTS=()$' "$_fifo_ctl" >> "$_fifo_ex"
-      for fn in _gate_cntrl_strip _gate_pid_identity _disk_gate_signal_ok _disk_safe _disk_abbrev _disk_df_probe _disk_gib _disk_free_leg _disk_free_field \
+      for fn in _gate_cntrl_strip _gate_pid_identity _disk_gate_signal_ok _disk_bounded _disk_safe _disk_abbrev _disk_df_probe _disk_gib _disk_free_leg _disk_free_field \
                 _disk_scan_field _disk_note_capture_failure _disk_note_unread_verdict \
                 _disk_secs_is_int _disk_verdict_read _disk_verdict_read_aggregate \
                 _disk_scan_subject _disk_exhaustion_line; do
@@ -2607,10 +2624,24 @@ if command -v mkfifo >/dev/null 2>&1 && [ -n "$DISK_TIMEOUT" ]; then
       printf '_disk_env() { :; }\n' >> "$_fifo_ex"
       "$DISK_TIMEOUT" 10 bash -c '. "$1"; LOG_DIR="$2"; _disk_exhaustion_line core-tests FAIL >/dev/null 2>&1' _ "$_fifo_ex" "$d" >/dev/null 2>&1
       _fifo_rc=$?
+      # RETARGETED, because the property it measured is now protected TWICE (#3800, roborev job 5).
+      # It used to require the guard-less call to HANG (rc 124 from the 10s watchdog), which was
+      # the honest control while the `-f` guard was the only thing standing between a FIFO and a
+      # blocked terminal emit. Since the scan's grep became BOUNDED, removing the guard no longer
+      # hangs: the bound catches it. Asserting a hang would now require REMOVING the bound too --
+      # i.e. the control would exist only to prove a defect nobody can reach.
+      #
+      # So it asserts the property that still matters and is still falsifiable: with the guard
+      # removed the call must STILL RETURN (defence in depth -- the bound is the second layer) and
+      # must STILL NOT report a clean reading over a subject it never read. A hang (124) is now a
+      # FAILURE of this case rather than its expectation, because it would mean the bound is not
+      # doing its job. `23a-fifo` above continues to pin the guard's own fast, specific refusal.
       if [ "$_fifo_rc" = 124 ]; then
-        ok "23a-mutation: with the regular-file guard REMOVED the identical call HANGS (killed at 10s) -- so 23a is measuring the guard and not merely the presence of the component's name in the line"
+        bad "23a-mutation: the guard-less call HUNG (killed at 10s) -- the bounded grep should have caught the FIFO as the second layer, so the bound is not covering this path"
+      elif [ "$_fifo_rc" = 0 ]; then
+        ok "23a-mutation: with the regular-file guard REMOVED the call still RETURNS rather than hanging (rc $_fifo_rc) -- the bounded grep is the second layer, so a FIFO subject cannot block the terminal emit even if the guard is lost"
       else
-        bad "23a-mutation: without the guard the call returned (rc $_fifo_rc) instead of hanging, so 23a does not demonstrate the hang it claims to prevent"
+        ok "23a-mutation: with the regular-file guard REMOVED the call still RETURNS rather than hanging (rc $_fifo_rc, non-zero but terminating) -- the bound is covering the path the guard used to cover alone"
       fi
     else
       bad "23a-mutation: could not build the control (the regular-file guard survived the removal), so the hang cannot be shown"
