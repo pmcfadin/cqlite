@@ -243,12 +243,15 @@ async fn assert_stray_is_ignored(what: &str, plant: impl Fn(&Path, &Path)) {
         let root = TempDir::new().expect("TempDir");
         let real = write_generation(root.path(), 1).await;
 
-        let manager = site.open(root.path(), &real, &plant).await.unwrap_or_else(|e| {
-            panic!(
-                "{what} @ {site:?}: re-discovery FAILED over an entry that is not an \
+        let manager = site
+            .open(root.path(), &real, &plant)
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{what} @ {site:?}: re-discovery FAILED over an entry that is not an \
                  SSTable at all ({e})"
-            )
-        });
+                )
+            });
         let rows = scan(&manager).await.unwrap_or_else(|e| {
             panic!(
                 "{what} @ {site:?}: the scan REFUSED a healthy table because of an entry \
