@@ -549,16 +549,14 @@ pub fn parse_statistics_with_fallback<'a>(
     parse_enhanced_statistics_file(input, gates)
 }
 
-/// [`parse_statistics_with_fallback`] with the TYPED error preserved (#4104
-/// blocker A) — the form `StatisticsReader::open` uses, so a SerializationHeader
-/// refusal reaches the user as the message the gate wrote rather than as a bare
-/// `ErrorKind::Verify` relabelled `Corruption`.
-pub fn parse_statistics_with_fallback_detailed<'a>(
-    input: &'a [u8],
-    gates: Option<&VersionGates>,
-) -> Result<(&'a [u8], SSTableStatistics)> {
-    parse_enhanced_statistics_file_detailed(input, gates)
-}
+// REMOVED in the #4159 rebase: `parse_statistics_with_fallback_detailed`, #4104's
+// typed-error entry point. Its PURPOSE survives unchanged — `StatisticsReader::open`
+// still reaches the decode through a `Result`-shaped entry point, so a
+// SerializationHeader refusal still arrives as the message the gate wrote (and, for
+// a semantic refusal, still as `Error::Schema`) rather than as a bare
+// `ErrorKind::Verify` relabelled `Corruption`. It is just `parse_statistics_file`
+// above, which #4159 introduced for the same reason; keeping both would have left
+// two parallel typed-error entry points free to drift.
 
 #[cfg(test)]
 mod tests {
