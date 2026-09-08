@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "cqlite-py"
-version = "0.16.1"
+version = "0.17.0"
 description = "Python bindings for CQLite - read Cassandra 5.0 SSTables locally without a cluster"
 readme = "README.md"
 # Issue #1459: this floor is now TESTED, not merely advertised — the

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [v0.17.0] - 2026-09-08
+
 ### Changed
 
 - **BREAKING (public API, source-level): `cqlite-core`'s `Value` enum gains a

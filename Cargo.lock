@@ -1238,7 +1238,7 @@ dependencies = [
 
 [[package]]
 name = "cqlite"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "clap",
  "cqlite-core",
@@ -1255,7 +1255,7 @@ dependencies = [
 
 [[package]]
 name = "cqlite-cli"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "arrow 53.4.1",
@@ -1318,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "cqlite-core"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1387,7 +1387,7 @@ dependencies = [
 
 [[package]]
 name = "cqlite-examples"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "cqlite-core",
  "env_logger",
@@ -1397,7 +1397,7 @@ dependencies = [
 
 [[package]]
 name = "cqlite-ffi-common"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "cqlite-core",
  "num-bigint",
@@ -1407,7 +1407,7 @@ dependencies = [
 
 [[package]]
 name = "cqlite-flight"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "arrow 53.4.1",
  "arrow-flight",
@@ -1438,7 +1438,7 @@ dependencies = [
 
 [[package]]
 name = "cqlite-integration-tests"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1473,7 +1473,7 @@ dependencies = [
 
 [[package]]
 name = "cqlite-node"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -1493,7 +1493,7 @@ dependencies = [
 
 [[package]]
 name = "cqlite-py"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "cqlite-core",
  "cqlite-ffi-common",
@@ -2463,7 +2463,7 @@ dependencies = [
 
 [[package]]
 name = "flight-loadgen"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "arrow 53.4.1",
  "arrow-flight",
@@ -3603,7 +3603,7 @@ dependencies = [
 
 [[package]]
 name = "memory-safety-runner"
-version = "0.16.1"
+version = "0.17.0"
 
 [[package]]
 name = "mime"
@@ -6979,7 +6979,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "ws0-corpus-gen"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "clap",
  "cqlite-core",
@@ -7011,7 +7011,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "proc-macro2",
  "quote",
