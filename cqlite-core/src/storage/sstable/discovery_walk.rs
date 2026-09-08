@@ -208,6 +208,82 @@ impl IncompleteDiscovery {
     }
 }
 
+/// Is `path` — an entry whose NAME already matched `*-Data.db` — a candidate the
+/// read path may hand to `SSTableReader::open`?
+///
+/// The name pattern alone is not a type. `true` iff `lstat` says the entry is a
+/// REGULAR FILE; a DIRECTORY named `da-9-bti-Data.db` and a SYMLINK named
+/// `da-8-bti-Data.db` are both rejected. Every candidate-enumeration site in the
+/// read path calls this, so the three of them cannot drift:
+/// [`find_data_files`](SSTableManager::find_data_files),
+/// [`discover_data_file_paths`](SSTableManager::discover_data_file_paths) and
+/// `manager_open`'s `load_from_table_directories`.
+///
+/// # Why this exists (issue #4159 follow-on)
+///
+/// #4159 made a generation that cannot be READ refuse rather than silently
+/// contribute nothing. With enumeration accepting anything matching the NAME, a
+/// stray entry that is not an SSTable at all then made an entire HEALTHY table
+/// return [`Error::UnreadableSSTable`](crate::Error::UnreadableSSTable) — a false
+/// refusal on data that reads perfectly. On the pre-#4159 binary the same two
+/// entries (planted by `scripts/tests/test_bti_perf_scan.sh`) only inflated the
+/// reported GENERATION COUNT: `rows_scanned` stayed 468 and the exit code stayed 0.
+/// #4159 turned that miscount into total loss of the table, which is strictly
+/// worse.
+///
+/// # Why symlinks are NOT followed here, while the directory walk DOES follow them
+///
+/// This deliberately contradicts the policy in
+/// [`discovery::scan_gap::entry_is_dir`](crate::discovery::scan_gap), and the
+/// difference is not an oversight — the two answer questions about DIFFERENT OBJECT
+/// KINDS:
+///
+/// * A symlinked keyspace or table **DIRECTORY** is a normal Cassandra layout
+///   (`data_file_directories` spread across mounts), so skipping one silently loses
+///   real data. `entry_is_dir` therefore uses `std::fs::metadata` and FOLLOWS the
+///   link.
+/// * Cassandra symlinks DIRECTORIES, never individual component files. A symlink
+///   named `da-8-bti-Data.db` pointing at `da-2-bti-Data.db` is a **phantom
+///   duplicate generation**: the same bytes under a second generation number, with
+///   no `da-8-*-Statistics.db` companion. Following it either duplicates rows or
+///   refuses on the missing companion. Neither is right, so this predicate uses
+///   `symlink_metadata` and does NOT follow the link.
+///
+/// # A rejected entry is NOT a refusal and NOT a discovery gap
+///
+/// Recording either would refuse the table again and defeat the fix. A directory
+/// named `X-Data.db` holds no SSTable rows, so skipping it omits nothing — unlike
+/// an unreadable DIRECTORY, whose contents are unknown, and unlike a refused
+/// generation, whose rows are real. This is a rejection of the CANDIDATE, before
+/// any claim about readable data exists to be lost.
+///
+/// # An UNOBSERVABLE entry stays a candidate
+///
+/// `lstat` failing is not evidence that the entry is not an SSTable — under a table
+/// directory that lost `x` it fails for every child, including real generations.
+/// Answering `false` there would reinstate exactly the swallow #4159 removed, so
+/// only a POSITIVE observation of a non-regular type rejects. An entry we cannot
+/// look at stays a candidate and the open path renders the authoritative verdict:
+/// it either opens or is RECORDED AS A REFUSAL, which is the loud answer.
+///
+/// # Residual (issue #4168)
+///
+/// If a generation's OTHER components exist but its `Data.db` is a directory or a
+/// symlink, that generation is now skipped silently. That is an INCOMPLETE
+/// GENERATION — a different concern, about component sets rather than about
+/// candidate types — and it is not handled here.
+///
+/// `tokio::fs` is used directly rather than [`Platform`]'s filesystem for the same
+/// reason the sibling type probe in `find_data_files` does: the platform layer
+/// exposes no `symlink_metadata`, and adding one for a single caller would put the
+/// FOLLOWING and NON-FOLLOWING probes behind indistinguishable names.
+pub(crate) async fn is_data_db_candidate(path: &Path) -> bool {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(md) => md.is_file(),
+        Err(_) => true,
+    }
+}
+
 /// Wrap `e` for `path`, PRESERVING its [`std::io::ErrorKind`].
 ///
 /// Shared with the manager's own table-directory walk
@@ -279,7 +355,18 @@ impl SSTableManager {
                 // Skip macOS AppleDouble sidecars via is_apple_double_sidecar().
                 // See Issue #481.
                 if filename.ends_with("-Data.db") && !is_apple_double_sidecar(filename) {
-                    walk.data_files.push(path);
+                    // The NAME is not the type: an entry that is not a regular file
+                    // is not an SSTable, and must not be opened (nor refused) as
+                    // one. See `is_data_db_candidate`.
+                    if is_data_db_candidate(&path).await {
+                        walk.data_files.push(path);
+                    } else {
+                        tracing::debug!(
+                            "SSTable discovery: skipping {} — it matches `*-Data.db` but \
+                             is not a regular file",
+                            path.display()
+                        );
+                    }
                     continue;
                 }
                 if max_depth == 0 {
@@ -396,7 +483,14 @@ impl SSTableManager {
                         };
                         let path = entry.path();
                         if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
-                            if fname.ends_with("-Data.db") && !is_apple_double_sidecar(fname) {
+                            // Same candidate test as `find_data_files`, via the same
+                            // predicate: a refresh that re-admitted a directory or a
+                            // symlink named `*-Data.db` would re-introduce the false
+                            // refusal one generation later.
+                            if fname.ends_with("-Data.db")
+                                && !is_apple_double_sidecar(fname)
+                                && is_data_db_candidate(&path).await
+                            {
                                 walk.data_files.push(path);
                             }
                         }

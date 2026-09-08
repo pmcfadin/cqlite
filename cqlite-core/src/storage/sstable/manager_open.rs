@@ -284,7 +284,18 @@ impl SSTableManager {
                     // Check for Cassandra SSTable data files using the *-Data.db pattern.
                     // Skip macOS AppleDouble sidecars via is_apple_double_sidecar().
                     // See Issue #481.
-                    if filename.ends_with("-Data.db") && !is_apple_double_sidecar(filename) {
+                    // The NAME is not the type. An entry matching `*-Data.db`
+                    // that is not a regular file is not an SSTable, so it is
+                    // rejected as a CANDIDATE here rather than opened and then
+                    // recorded as a refusal — which made one stray directory or
+                    // symlink render this whole HEALTHY table unreadable. Shared
+                    // with both walk sites; the reasoning, including why symlinks
+                    // are followed for DIRECTORIES but not for `Data.db` entries,
+                    // is on `discovery_walk::is_data_db_candidate`.
+                    if filename.ends_with("-Data.db")
+                        && !is_apple_double_sidecar(filename)
+                        && discovery_walk::is_data_db_candidate(&path).await
+                    {
                         files_found += 1;
                         tracing::debug!("SSTableManager found SSTable file: {:?}", path);
 
