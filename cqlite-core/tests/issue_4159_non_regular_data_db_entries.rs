@@ -414,3 +414,72 @@ fn plant_unreadable_generation(dir: &Path, real: &Path) {
          case is testing case 1"
     );
 }
+
+/// The OTHER half of the candidate test: an entry whose TYPE CANNOT BE OBSERVED
+/// stays a candidate.
+///
+/// `lstat` failing is not evidence that an entry is not an SSTable. Under a table
+/// directory that kept `r` (so `read_dir` still lists it) and lost `x` (so `lstat`
+/// of every child fails with `EACCES`), a candidate test written as
+/// `symlink_metadata(..).map(|m| m.is_file()).unwrap_or(false)` would drop every
+/// REAL generation and hand the read surfaces an empty reader list — the exact
+/// #4159 swallow, reintroduced by the fix for the false refusal. So the read must
+/// still REFUSE here.
+///
+/// The permission staging is MEASURED, not assumed: a `uid 0` process bypasses the
+/// mode bits entirely, so the case verifies that `lstat` really did become
+/// impossible and otherwise reports that it could not stage the condition.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_entry_whose_type_cannot_be_observed_still_refuses() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = TempDir::new().expect("TempDir");
+    let real = write_generation(root.path(), 1).await;
+    let dir = table_dir(root.path());
+
+    let original = std::fs::metadata(&dir)
+        .expect("stat the table dir")
+        .permissions();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o600))
+        .expect("drop `x` from the table directory");
+    let staged = std::fs::symlink_metadata(&real).is_err();
+    if !staged {
+        // uid 0 (or an ACL) bypasses the mode bits, so the condition under test does
+        // not exist on this box and asserting anything about it would be a lie.
+        std::fs::set_permissions(&dir, original).expect("restore the table dir");
+        eprintln!(
+            "SKIP an_entry_whose_type_cannot_be_observed_still_refuses: `lstat` still \
+             succeeds under mode 0600 (running as root?), so the unobservable-entry \
+             condition could not be staged"
+        );
+        return;
+    }
+
+    let outcome = async {
+        let config = Config::default();
+        let platform = platform().await;
+        let registry = empty_registry(platform.clone()).await;
+        let manager =
+            SSTableManager::new(&root.path().join("data"), &config, platform, Some(registry))
+                .await
+                .expect("the constructor stays best-effort");
+        scan(&manager).await
+    }
+    .await;
+
+    std::fs::set_permissions(&dir, original).expect("restore the table dir");
+
+    match outcome {
+        Ok(n) => panic!(
+            "the scan answered Ok with {n} row(s) over a table directory whose entries \
+             could not be stat'd. An entry whose type cannot be OBSERVED must stay a \
+             candidate so the open path refuses loudly — answering `false` there is the \
+             #4159 swallow returning."
+        ),
+        Err(Error::UnreadableSSTable { .. }) => {}
+        Err(other) => panic!(
+            "expected Error::UnreadableSSTable for an unobservable generation; got {other:?}"
+        ),
+    }
+}

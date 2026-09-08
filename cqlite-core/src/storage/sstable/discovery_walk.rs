@@ -257,14 +257,23 @@ impl IncompleteDiscovery {
 /// generation, whose rows are real. This is a rejection of the CANDIDATE, before
 /// any claim about readable data exists to be lost.
 ///
-/// # An UNOBSERVABLE entry stays a candidate
+/// # An UNOBSERVABLE entry stays a candidate; a VANISHED one does not
 ///
 /// `lstat` failing is not evidence that the entry is not an SSTable — under a table
 /// directory that lost `x` it fails for every child, including real generations.
 /// Answering `false` there would reinstate exactly the swallow #4159 removed, so
-/// only a POSITIVE observation of a non-regular type rejects. An entry we cannot
-/// look at stays a candidate and the open path renders the authoritative verdict:
-/// it either opens or is RECORDED AS A REFUSAL, which is the loud answer.
+/// only a POSITIVE observation rejects. An entry we cannot look at stays a
+/// candidate and the open path renders the authoritative verdict: it either opens
+/// or is RECORDED AS A REFUSAL, which is the loud answer.
+///
+/// `NotFound` is the one failure that IS a positive observation — of absence. The
+/// entry was listed by `read_dir` and is gone by the time it is stat'd, which on a
+/// live data directory means a compaction unlinked it mid-walk. There are no rows
+/// there to omit, and treating it as a candidate would make an ordinary compaction
+/// race refuse the whole table — the very defect this predicate removes. Both
+/// sibling probes in this module already read `NotFound` as genuine absence.
+/// A DANGLING symlink is NOT this case: `lstat` does not follow the link, so it
+/// succeeds and the entry is rejected as non-regular above.
 ///
 /// # Residual (issue #4168)
 ///
@@ -280,6 +289,7 @@ impl IncompleteDiscovery {
 pub(crate) async fn is_data_db_candidate(path: &Path) -> bool {
     match tokio::fs::symlink_metadata(path).await {
         Ok(md) => md.is_file(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(_) => true,
     }
 }
@@ -513,5 +523,74 @@ fn to_io(e: Error) -> std::io::Error {
     match e {
         Error::Io(io) => io,
         other => std::io::Error::other(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod candidate_tests {
+    use super::is_data_db_candidate;
+
+    /// The whole truth table of [`is_data_db_candidate`], on one directory.
+    ///
+    /// Stated as one test over one staging so the ACCEPT and the REJECT legs cannot
+    /// drift apart: a predicate that accepted nothing would satisfy every reject
+    /// leg on its own.
+    #[tokio::test]
+    async fn only_a_regular_file_is_a_candidate() {
+        let dir = tempfile::TempDir::new().expect("TempDir");
+        let dir = dir.path();
+
+        let regular = dir.join("nb-1-big-Data.db");
+        std::fs::write(&regular, b"not a real SSTable, and not read here").expect("write");
+        assert!(
+            is_data_db_candidate(&regular).await,
+            "a REGULAR FILE is a candidate — its CONTENT is the open path's business, \
+             not this predicate's"
+        );
+
+        let directory = dir.join("nb-2-big-Data.db");
+        std::fs::create_dir(&directory).expect("mkdir");
+        assert!(
+            !is_data_db_candidate(&directory).await,
+            "a DIRECTORY named `*-Data.db` holds no SSTable rows"
+        );
+
+        // Missing: `read_dir` listed it and it is gone by the time it is stat'd —
+        // an ordinary compaction race. Genuine absence, so not a candidate.
+        assert!(
+            !is_data_db_candidate(&dir.join("nb-3-big-Data.db")).await,
+            "an entry that no longer exists is genuine absence, not a candidate"
+        );
+    }
+
+    /// Symlinks are NOT followed here — see the predicate's docs for why this
+    /// differs from the directory walk, which follows them deliberately.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlink_is_never_a_candidate_even_when_its_target_is_one() {
+        let dir = tempfile::TempDir::new().expect("TempDir");
+        let dir = dir.path();
+
+        let target = dir.join("nb-1-big-Data.db");
+        std::fs::write(&target, b"the real generation").expect("write");
+        let link = dir.join("nb-8-big-Data.db");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        assert!(
+            is_data_db_candidate(&target).await,
+            "control: the TARGET is a candidate, so the rejection below is about the \
+             LINK and not about the bytes"
+        );
+        assert!(
+            !is_data_db_candidate(&link).await,
+            "a symlink onto a sibling generation is a PHANTOM DUPLICATE GENERATION"
+        );
+
+        let dangling = dir.join("nb-9-big-Data.db");
+        std::os::unix::fs::symlink(dir.join("no-such-target"), &dangling).expect("symlink");
+        assert!(
+            !is_data_db_candidate(&dangling).await,
+            "a DANGLING symlink must be rejected as a symlink (lstat SUCCEEDS on it), \
+             never mistaken for the NotFound branch"
+        );
     }
 }
