@@ -249,6 +249,19 @@ async fn emitted_statistics_header(
     schema: &TableSchema,
     registry: Option<UdtRegistry>,
 ) -> String {
+    try_emitted_statistics_header(temp_dir, schema, registry)
+        .await
+        .unwrap_or_else(|e| panic!("the write path should emit a Statistics.db: {e}"))
+}
+
+/// The fallible form, for the halves that assert the writer REFUSES (#4104): a
+/// refusal is the behaviour under test, so it must not reach the harness as a
+/// panic.
+async fn try_emitted_statistics_header(
+    temp_dir: &TempDir,
+    schema: &TableSchema,
+    registry: Option<UdtRegistry>,
+) -> Result<String, String> {
     let mut config = WriteEngineConfig::new(
         temp_dir.path().join("data"),
         temp_dir.path().join("wal"),
@@ -257,7 +270,7 @@ async fn emitted_statistics_header(
     if let Some(registry) = registry {
         config = config.with_udt_registry(registry);
     }
-    let mut engine = WriteEngine::new(config).expect("engine creation should succeed");
+    let mut engine = WriteEngine::new(config).map_err(|e| format!("engine creation: {e}"))?;
 
     let mutation = Mutation::new(
         TableId::new(&schema.keyspace, &schema.table),
@@ -273,22 +286,22 @@ async fn emitted_statistics_header(
     engine
         .write_async(mutation)
         .await
-        .expect("write should succeed");
+        .map_err(|e| format!("write: {e}"))?;
     let info = engine
         .flush()
         .await
-        .expect("flush should succeed")
-        .expect("flush should return SSTableInfo");
+        .map_err(|e| format!("flush: {e}"))?
+        .ok_or_else(|| "flush returned no SSTableInfo".to_string())?;
 
     let stats_path = info.data_path.with_file_name(
         info.data_path
             .file_name()
             .and_then(|n| n.to_str())
-            .expect("Data.db file name")
+            .ok_or_else(|| "Data.db file name".to_string())?
             .replace("Data.db", "Statistics.db"),
     );
-    let bytes = std::fs::read(&stats_path).expect("Statistics.db should be readable");
-    String::from_utf8_lossy(&bytes).into_owned()
+    let bytes = std::fs::read(&stats_path).map_err(|e| format!("reading {stats_path:?}: {e}"))?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// `test_oa.address_type` exactly as Apache Cassandra declared it for the
@@ -522,5 +535,96 @@ async fn frozen_udt_header_matches_the_cassandra_written_string() {
          string.\nexpected: {CASSANDRA_FROZEN_ADDRESS_TYPE}\nFrozenType inner \
          heads emitted: {:?}",
         frozen_inner_heads(&header)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Half 3 — the PASS-THROUGH route into the header (#4104, roborev job 121).
+// ---------------------------------------------------------------------------
+
+/// `TableSchema::data_type` is a `String`, so a schema can declare a column type
+/// that is ALREADY a marshal string — and such a string was returned verbatim by
+/// the converter before any validation. This is half 2's assertion made against
+/// the route half 2 cannot reach: every spelling in its battery is CQL
+/// (`frozen<int>`), so none of them exercises the pass-through at all.
+///
+/// The writer must REFUSE, and nothing under the write directory may end up
+/// carrying the impossible wrapper.
+#[tokio::test]
+async fn a_schema_declaring_a_marshal_frozentype_scalar_is_refused_by_the_writer() {
+    const IMPOSSIBLE: &str =
+        "org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.Int32Type)";
+
+    let temp_dir = TempDir::new().expect("temp dir");
+    let schema = schema_with(
+        "test_oa",
+        "frozen_passthrough_probe",
+        &[("c_marshal_frozen_scalar", IMPOSSIBLE)],
+    );
+
+    let err = match try_emitted_statistics_header(&temp_dir, &schema, None).await {
+        Err(err) => err,
+        Ok(header) => panic!(
+            "the writer ACCEPTED a schema declaring {IMPOSSIBLE}; the emitted \
+             Statistics.db carries {} FrozenType( occurrence(s) {:?}, and Apache \
+             Cassandra can print a wrapper only around {FREEZE_WRAPPED_HEADS:?}",
+            frozen_inner_heads(&header).len(),
+            frozen_inner_heads(&header)
+        ),
+    };
+    assert!(
+        err.contains("FrozenType"),
+        "the refusal must name the type it refused: {err}"
+    );
+
+    // And no bytes escaped: a refusal that still leaves the header on disk is
+    // not a refusal.
+    for path in statistics_files(temp_dir.path()) {
+        let bytes = std::fs::read(&path).expect("Statistics.db should be readable");
+        let hay = String::from_utf8_lossy(&bytes);
+        let heads = frozen_inner_heads(&hay);
+        let bad: Vec<&String> = heads
+            .iter()
+            .filter(|h| !FREEZE_WRAPPED_HEADS.contains(&h.as_str()))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "{} was written despite the refusal and carries {bad:?}",
+            path.display()
+        );
+    }
+}
+
+/// The counterpart, so the refusal above is not a blanket ban on the
+/// pass-through: a LEGAL already-marshaled `FrozenType(ListType(..))` — a shape
+/// Cassandra really writes, per half 1's census — still reaches the emitted
+/// header BYTE FOR BYTE, mixed case intact.
+///
+/// Case matters on this route: the marshal grammar is case-sensitive
+/// (`TypeParser` resolves class names verbatim), and a case-folded pass-through
+/// is a defect this area has already had (a lowercased `usertype(...)`, #4158).
+#[tokio::test]
+async fn a_legal_marshal_frozentype_reaches_the_header_verbatim() {
+    const LEGAL: &str = "org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type))";
+
+    let temp_dir = TempDir::new().expect("temp dir");
+    let schema = schema_with(
+        "test_oa",
+        "frozen_passthrough_legal",
+        &[("c_marshal_frozen_list", LEGAL)],
+    );
+    let header = emitted_statistics_header(&temp_dir, &schema, None).await;
+
+    assert!(
+        header.contains(LEGAL),
+        "the emitted SerializationHeader must carry the declared marshal string \
+         unchanged and un-case-folded; it does not"
+    );
+    let heads = frozen_inner_heads(&header);
+    assert_eq!(
+        heads,
+        vec!["ListType".to_string()],
+        "exactly the one wrapper this column declares, drawn from the Cassandra \
+         oracle set — an affirmative census, not merely the absence of a bad one"
     );
 }

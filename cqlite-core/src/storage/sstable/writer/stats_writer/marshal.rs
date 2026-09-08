@@ -10,8 +10,11 @@
 // `schema::cql_type_parser::frozen_scalar` (#4153).
 #[cfg(test)]
 mod issue_4158_vector_tests;
+#[cfg(test)]
+mod passthrough_frozen_tests;
 
 use crate::error::{Error, Result};
+use crate::schema::cql_type_parser::frozen_scalar::validate_marshal_frozen;
 use crate::schema::vector_type::cql_vector_kind;
 
 /// Convert a CQL type name to Cassandra internal marshal type.
@@ -34,13 +37,50 @@ use crate::schema::vector_type::cql_vector_kind;
 /// belongs" case, and [`render_marshal_type`] carries the `ignoreFreezing` flag
 /// Cassandra threads through the type tree.
 ///
-/// Returns `Err` only where a truthful spelling cannot be produced (the vector arm;
-/// issue #4158). Every other type keeps its pre-existing total behaviour, including
-/// the `_ => BytesType` fallback for an unresolvable bare name (#929) — widening
-/// that fallback into a refusal is NOT this function's job and would change the
-/// documented degradation of every unresolved UDT column.
+/// Returns `Err` where a truthful spelling cannot be produced (the vector arm;
+/// issue #4158) and where the string that would be EMITTED is one Cassandra's own
+/// writer cannot print (the post-condition below). Every other type keeps its
+/// pre-existing total behaviour, including the `_ => BytesType` fallback for an
+/// unresolvable bare name (#929) — widening that fallback into a refusal is NOT
+/// this function's job and would change the documented degradation of every
+/// unresolved UDT column.
+///
+/// # THE #4158 INVARIANT IS ENFORCED HERE, ONCE, ON THE STRING ACTUALLY EMITTED
+/// (#4104, roborev job 121)
+///
+/// #4158's guarantee is a property of the OUTPUT — "never emit a `FrozenType(...)`
+/// wrapper Apache Cassandra's writer cannot print" — and it was being enforced
+/// only at the site that BUILDS a wrapper ([`render_marshal_type`]'s `frozen<..>`
+/// arm, via [`takes_frozen_type_wrapper`]). Every other route into the output was
+/// therefore unguarded, and one was live: an ALREADY-MARSHALED input string is
+/// returned verbatim before any validation, and `TableSchema::data_type` is a
+/// `String`, so a supplied schema declaring
+/// `org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.Int32Type)`
+/// went straight into `Statistics.db` — the exact spelling #4158 exists to
+/// prevent, arriving by the one path that never asked.
+///
+/// So the check is a POST-CONDITION on the rendered string rather than another
+/// per-arm guard: [`validate_marshal_frozen`] scans EVERY `FrozenType(` in the
+/// final output, at any nesting depth, whichever arm or pass-through produced it.
+/// It is the SAME gate the READ path applies to every header type string it
+/// decodes (`enhanced_statistics_parser::marshal_type`), so the writer and the
+/// reader hold one opinion about what is possible, and a future arm that
+/// assembles a wrapper wrongly is caught without being individually distrusted.
+///
+/// CASE IS PRESERVED: the validation is case-insensitive but non-consuming, and
+/// the string returned is the rendered one, byte for byte. The marshal grammar is
+/// case-sensitive (`TypeParser` resolves class names verbatim), and case-folding
+/// a pass-through here is a defect this file has already had — a lowercased
+/// `usertype(...)` (#4158).
 pub(crate) fn cql_type_to_marshal_type(cql_type: &str) -> Result<String> {
-    render_marshal_type(cql_type, false, false)
+    let rendered = render_marshal_type(cql_type, false, false)?;
+    if let Err(refusal) = validate_marshal_frozen(&rendered) {
+        return Err(Error::unsupported_format(format!(
+            "refusing to write SerializationHeader type '{rendered}' for declared \
+             type '{cql_type}': {refusal}"
+        )));
+    }
+    Ok(rendered)
 }
 
 /// The UDT-FIELD-path disposition of [`cql_type_to_marshal_type`]: identical, except
@@ -83,6 +123,19 @@ pub(crate) fn cql_type_to_marshal_type(cql_type: &str) -> Result<String> {
 /// are infallible BY SIGNATURE (`-> String`), so they have no channel to carry the
 /// column path's named refusal; making them consistent means giving those renderers
 /// an error type, which is a contract change to `render_udt_marshal`, not a doc fix.
+///
+/// # THE #4158 POST-CONDITION DEGRADES HERE TOO, AND THAT IS THE DECISION (#4104)
+///
+/// A UDT FIELD whose declared type is an already-marshaled string freezing a
+/// non-freezable type (`FrozenType(Int32Type)`) is refused by
+/// [`cql_type_to_marshal_type`] and therefore reaches `BytesType` HERE, while the
+/// COLUMN path refuses the same input by name. That asymmetry is deliberate and
+/// costs nothing the invariant cares about: the invariant is about what is
+/// EMITTED, and `BytesType` is a legal spelling — the impossible wrapper is
+/// DROPPED, never written. It also keeps this renderer's documented property, that
+/// the header and the value bytes stay SELF-CONSISTENT for a field the direct-write
+/// path writes as an opaque length-prefixed blob (#929/#1011). Pinned by
+/// `passthrough_frozen_tests::a_udt_field_freezing_a_scalar_takes_the_declared_bytestype_degradation`.
 /// The on-disk FRAMING is unaffected either way (`VectorType` and `BytesType` are
 /// both `VARIABLE_LENGTH` at the cell boundary), so the cost is a wrong recorded
 /// element type on a nested-UDT field, not an unreadable file. Pinned by
@@ -155,6 +208,15 @@ fn render_marshal_type(
     // original-case string MUST be preserved. Without this, an already-marshaled
     // type would fall through to BytesType, advertising the wrong type in the
     // header while Data.db carries the real (e.g. complex UDT) cells (#929).
+    //
+    // VERBATIM, AND STILL NOT UNCHECKED: this string reaches the output without
+    // passing any arm that could have judged it. The #4158 invariant is therefore
+    // enforced as a POST-CONDITION on the rendered result in
+    // `cql_type_to_marshal_type` (#4104, roborev job 121) rather than by a check
+    // added here: the invariant is a property of what is EMITTED, so validating
+    // the emitted string covers this arm, every other arm, and any arm added
+    // later, whereas a per-arm check is only ever as complete as the list of arms
+    // someone remembered.
     let raw = cql_type.trim();
     if raw
         .to_lowercase()

@@ -498,4 +498,3 @@ pub(super) fn parse_regular_columns(
     );
     Ok((input, (Vec::new(), Vec::new())))
 }
-
