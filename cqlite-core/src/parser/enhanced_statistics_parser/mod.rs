@@ -42,11 +42,14 @@
 //! - [`encoding_stats`] — EncodingStats (min timestamp/deletion-time/TTL) decode.
 //! - [`serialization_header`] — table-schema (partition/clustering/static/regular columns).
 //! - [`marshal_type`] — Cassandra marshal-type → CQL conversion + `ColumnInfo` builders.
+//! - [`schema_refusal`] — the schema decoder's typed failure channel: structural
+//!   (a retry may find the header elsewhere) vs semantic (fail-closed, #4104).
 //! - this `mod.rs` — the public entry points that orchestrate the above.
 
 mod encoding_stats;
 mod header;
 mod marshal_type;
+mod schema_refusal;
 mod serialization_header;
 
 pub use header::parse_nb_format_header;
@@ -56,6 +59,7 @@ use crate::error::{Error, Result};
 use crate::parser::repair_metadata::{parse_statistics_toc, StatisticsToc};
 use crate::storage::sstable::version_gate::VersionGates;
 use encoding_stats::parse_minimal_encoding_stats;
+use schema_refusal::HeaderSchemaError;
 
 /// Type alias for EncodingStats parse result to reduce complexity
 type EncodingStatsResult = (
@@ -288,7 +292,20 @@ pub(crate) fn parse_nb_format_statistics_data_with_toc(
                 regular_columns,
             ))
         }
-        Err(e) => {
+        // A SEMANTIC refusal keeps its own message and its own error KIND (#4104
+        // blocker A). The decision is taken on the VARIANT — never on message text
+        // — and the message is propagated verbatim because it is the only place
+        // that names the refused column, the refused type and the Cassandra
+        // citation. Re-wrapping it as `UnsupportedFormat("… {:?}", nom_err)`, as
+        // this arm used to do for both kinds, reduced a deliberate refusal to
+        // `code: Verify` and made it indistinguishable from a truncated file.
+        Err(HeaderSchemaError::Refused(refusal)) => {
+            tracing::error!("Refusing Statistics.db SerializationHeader: {refusal}");
+            Err(refusal)
+        }
+        // STRUCTURAL — unchanged wording and kind: the bytes really are unreadable
+        // here, so the checksum/length diagnostics are the useful ones.
+        Err(HeaderSchemaError::Structural(e)) => {
             tracing::debug!(
                 "Failed to parse minimal EncodingStats from Statistics.db: {:?}",
                 e
@@ -325,8 +342,32 @@ pub fn parse_enhanced_statistics_file<'a>(
     input: &'a [u8],
     gates: Option<&VersionGates>,
 ) -> nom::IResult<&'a [u8], SSTableStatistics> {
+    parse_enhanced_statistics_file_detailed(input, gates).map_err(|e| {
+        // The nom channel cannot carry a message. Callers that need one (the
+        // reader, so a refusal reaches the user) use the `_detailed` form.
+        tracing::warn!("Failed to parse nb-format Statistics.db: {e}");
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+    })
+}
+
+/// [`parse_enhanced_statistics_file`] with the TYPED error preserved (#4104
+/// blocker A).
+///
+/// Identical parse; the only difference is the failure channel. The nom form has
+/// to flatten every failure to `ErrorKind::Verify`, which discarded the
+/// SerializationHeader gate's refusal message — the one text that names the
+/// refused column and type and cites `CQL3Type.java`. Use this form wherever the
+/// error reaches a human; use the nom form only inside a nom combinator chain.
+pub fn parse_enhanced_statistics_file_detailed<'a>(
+    input: &'a [u8],
+    gates: Option<&VersionGates>,
+) -> Result<(&'a [u8], SSTableStatistics)> {
     // Parse the 32-byte header
-    let (remaining, header) = parse_nb_format_header(input)?;
+    let (remaining, header) = parse_nb_format_header(input).map_err(|e| {
+        Error::UnsupportedFormat(format!(
+            "Failed to parse the 32-byte nb-format Statistics.db header: {e:?}"
+        ))
+    })?;
 
     // Parse the Statistics.db TOC ONCE (issue #2148) and thread it to every
     // downstream consumer — the EncodingStats/row-count decode below and the
@@ -415,14 +456,9 @@ pub fn parse_enhanced_statistics_file<'a>(
 
             Ok((remaining, statistics))
         }
-        Err(e) => {
-            // Convert Error to nom::Err
-            tracing::warn!("Failed to parse nb-format Statistics.db: {}", e);
-            Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Verify,
-            )))
-        }
+        // Propagated with its kind and message intact — the flattening to a bare
+        // nom error now happens ONLY in the nom wrapper above (#4104 blocker A).
+        Err(e) => Err(e),
     }
 }
 
@@ -446,6 +482,17 @@ pub fn parse_statistics_with_fallback<'a>(
 ) -> nom::IResult<&'a [u8], SSTableStatistics> {
     // Try the minimal enhanced parser
     parse_enhanced_statistics_file(input, gates)
+}
+
+/// [`parse_statistics_with_fallback`] with the TYPED error preserved (#4104
+/// blocker A) — the form `StatisticsReader::open` uses, so a SerializationHeader
+/// refusal reaches the user as the message the gate wrote rather than as a bare
+/// `ErrorKind::Verify` relabelled `Corruption`.
+pub fn parse_statistics_with_fallback_detailed<'a>(
+    input: &'a [u8],
+    gates: Option<&VersionGates>,
+) -> Result<(&'a [u8], SSTableStatistics)> {
+    parse_enhanced_statistics_file_detailed(input, gates)
 }
 
 #[cfg(test)]

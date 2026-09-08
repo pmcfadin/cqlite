@@ -239,9 +239,12 @@ fn the_marshal_spelling_of_an_empty_key_reaches_the_same_tag() {
 //
 // Under #28, where Cassandra has no behaviour CQLite must not invent one:
 // `Empty(Int)` and `Blob(b"")` are both inventions. The correct behaviour is
-// REFUSAL, and that is its own oracle-driven fix — **#4104** (refuse
-// `frozen<scalar>` at schema-parse and header-parse) — deliberately NOT bundled
-// here. No frozen-scalar branch was added in either direction.
+// REFUSAL, and #4104 SHIPPED it (deliberately not bundled here): `CqlType::parse`
+// and the SerializationHeader type parser both reject the spelling, so nothing
+// downstream needs — or has — a frozen-scalar branch. The reachability claim that
+// replaces these two pins lives in `cell_path_key_tests_frozen`. Also note the
+// override set is FOUR, not three: `RawVector` (`CQL3Type.java:916`) returns
+// `this`, a vector being implicitly frozen.
 
 /// CASSANDRA-INVALID — REFUSED, because that is where the module's committed rule
 /// draws the line, and this is the one place three review rounds disagreed.

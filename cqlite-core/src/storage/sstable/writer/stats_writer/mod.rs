@@ -60,7 +60,17 @@ pub use estimated_histogram::EstimatedHistogram;
 pub use metadata::{StatisticsMetadata, TombstoneHistogram};
 // Re-exported so callers can keep using the pre-split path
 // `...writer::stats_writer::cql_type_to_marshal_type` (e.g. data_writer.rs).
+// TEST-ONLY re-export since #4158: the sibling non-test caller
+// (`data_writer::schema_helpers`) now takes the infallible
+// `..._or_bytes` disposition, so the only remaining user of this path is
+// `data_writer::tests::scenarios_6`, and `marshal` is a private module it cannot
+// name directly. Left as a re-export rather than widened, so the fallible COLUMN
+// entry point keeps exactly one non-test caller set: this module's own
+// `components` / `serialization_header`.
+#[cfg(test)]
 pub(crate) use marshal::cql_type_to_marshal_type;
+pub(crate) use marshal::cql_type_to_marshal_type_or_bytes;
+pub(crate) use marshal::takes_frozen_type_wrapper;
 
 use crate::error::{Error, Result};
 use crate::schema::TableSchema;

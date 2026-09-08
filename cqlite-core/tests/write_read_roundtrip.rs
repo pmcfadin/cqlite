@@ -377,6 +377,95 @@ pub fn create_test_engine(
     WriteEngine::new(config)
 }
 
+/// Create a write engine that carries a [`UdtRegistry`], so the writer can
+/// resolve a `frozen<udt>` / bare-UDT column's `data_type` to the
+/// `UserType(...)` marshal Apache Cassandra writes into the
+/// SerializationHeader (issues #929/#1020; #4158 for why the writer needs it
+/// as much as the reader does).
+///
+/// Without a registry the writer has no field names or field types for a UDT
+/// name, so it can only advertise the column as an opaque `BytesType` — it must
+/// never fabricate a definition, and it must never fabricate the impossible
+/// `FrozenType(BytesType)`. A test that expects the Cassandra header spelling
+/// must therefore supply the definition on the WRITE side too.
+pub fn create_test_engine_with_udt_registry(
+    temp_dir: &TempDir,
+    schema: TableSchema,
+    registry: UdtRegistry,
+) -> cqlite_core::error::Result<WriteEngine> {
+    let config = WriteEngineConfig::new(
+        temp_dir.path().join("data"),
+        temp_dir.path().join("wal"),
+        schema,
+    )
+    .with_udt_registry(registry);
+    WriteEngine::new(config)
+}
+
+/// Helper to write and flush a single value with a [`UdtRegistry`] attached to
+/// the WRITE side, so the writer can resolve a `frozen<udt>` column's
+/// `data_type` to the `UserType(...)` marshal Cassandra writes (#4158).
+pub async fn write_single_value_with_registry(
+    temp_dir: &TempDir,
+    schema: &TableSchema,
+    col_name: &str,
+    value: Value,
+    registry: UdtRegistry,
+) -> cqlite_core::storage::sstable::writer::SSTableInfo {
+    let mut engine = create_test_engine_with_udt_registry(temp_dir, schema.clone(), registry)
+        .expect("Engine creation should succeed");
+
+    let table_id = TableId::new(&schema.keyspace, &schema.table);
+    let pk = PartitionKey::single("pk", Value::Integer(1));
+    let ops = vec![CellOperation::Write {
+        column: col_name.to_string(),
+        value,
+    }];
+    let mutation = Mutation::new(table_id, pk, None, ops, 1000000, None);
+
+    engine
+        .write_async(mutation)
+        .await
+        .expect("Write should succeed");
+
+    engine
+        .flush()
+        .await
+        .expect("Flush should succeed")
+        .expect("Should return SSTableInfo")
+}
+
+/// Assert the flushed SSTable's `Statistics.db` carries `expected` verbatim in
+/// its SerializationHeader. `expected` must always be a byte string derived from
+/// Apache Cassandra (a Cassandra-written header or Cassandra's own writer
+/// source), never from CQLite's output — a CQLite-written + CQLite-read
+/// round-trip is invariant to a uniform header defect (#3042).
+pub fn assert_statistics_header_contains(
+    info: &cqlite_core::storage::sstable::writer::SSTableInfo,
+    expected: &str,
+) {
+    let stats_path = info.data_path.with_file_name(
+        info.data_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("Data.db file name")
+            .replace("Data.db", "Statistics.db"),
+    );
+    let bytes = std::fs::read(&stats_path).expect("Statistics.db should be readable");
+    let hay = String::from_utf8_lossy(&bytes);
+    assert!(
+        hay.contains(expected),
+        "Statistics.db at {} does not carry the Cassandra marshal spelling.\n\
+         expected substring: {}\n\
+         FrozenType occurrences found: {:?}",
+        stats_path.display(),
+        expected,
+        hay.match_indices("FrozenType(")
+            .map(|(i, _)| hay[i..].chars().take(160).collect::<String>())
+            .collect::<Vec<_>>()
+    );
+}
+
 /// Helper to verify a file exists and is non-empty
 pub fn assert_file_exists_and_nonempty(path: &Path, component: &str) {
     assert!(

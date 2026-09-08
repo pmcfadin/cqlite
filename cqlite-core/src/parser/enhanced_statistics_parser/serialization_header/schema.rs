@@ -7,9 +7,10 @@
 
 use super::super::super::header::ColumnInfo;
 use super::super::super::vint::parse_vuint;
-use super::super::marshal_type::convert_marshal_type_to_cql;
+use super::super::marshal_type::convert_marshal_type_to_cql_checked;
+use super::super::schema_refusal::HeaderSchemaError;
 use super::super::SerializationHeaderResult;
-use nom::{bytes::complete::take, IResult};
+use nom::bytes::complete::take;
 
 /// Parse the schema portion of a SerializationHeader (after EncodingStats have been consumed).
 ///
@@ -18,17 +19,28 @@ use nom::{bytes::complete::take, IResult};
 /// 2. clusteringTypes (VInt count + [VInt type_len + type]*)
 /// 3. staticColumns (VInt count + [VInt name_len + name + VInt type_len + type]*)
 /// 4. regularColumns (VInt count + [VInt name_len + name + VInt type_len + type]*)
-pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_schema(
-    input: &[u8],
-) -> IResult<&[u8], SerializationHeaderResult> {
+///
+/// # Failure kinds are NOT interchangeable
+///
+/// The error channel is [`HeaderSchemaError`], not `nom::Err`, precisely so the
+/// caller can tell the two apart (issue #4104, roborev job 116):
+///
+/// * [`HeaderSchemaError::Structural`] — the bytes here are not a readable
+///   header (truncated, implausible declared length, non-UTF-8 name/type). WHERE
+///   the header is, is in doubt, so retrying with the marker-search decoder is
+///   legitimate.
+/// * [`HeaderSchemaError::Refused`] — the header decoded and DECLARES a type
+///   Cassandra cannot have written (`frozen<scalar>`). Position is not in doubt,
+///   so no other decoder can improve the answer; the caller MUST fail closed and
+///   must never substitute a marker-search guess (#28).
+pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_schema<'a>(
+    input: &'a [u8],
+) -> Result<(&'a [u8], SerializationHeaderResult), HeaderSchemaError<'a>> {
     // Parse keyType (partition key type)
     let (input, pk_type_len) = parse_vuint(input)?;
     if pk_type_len == 0 || pk_type_len > 5000 {
         tracing::debug!("Invalid pk_type_len: {}", pk_type_len);
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Verify,
-        )));
+        return Err(HeaderSchemaError::structural_at(input));
     }
     if pk_type_len > 1000 {
         tracing::warn!(
@@ -39,13 +51,24 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
 
     let (input, pk_type_bytes) = take(pk_type_len as usize)(input)?;
     let partition_key_type = match std::str::from_utf8(pk_type_bytes) {
-        Ok(s) => convert_marshal_type_to_cql(s),
+        // Gate 2 of #4104: a header type that freezes a scalar is not writable by
+        // Cassandra, so refuse the HEADER rather than read a type it cannot have
+        // recorded. This is a SEMANTIC refusal — the bytes decoded, and what they
+        // declare cannot exist — so it leaves this function as
+        // `HeaderSchemaError::Refused`, carrying the message (with its
+        // `CQL3Type.java:647-651` citation) verbatim. The caller must NOT retry it
+        // through the marker-search fallback (roborev job 116).
+        Ok(s) => match convert_marshal_type_to_cql_checked(s) {
+            Ok(t) => t,
+            Err(e) => {
+                return Err(HeaderSchemaError::refused(format!(
+                    "SerializationHeader partition key type is not writable by Cassandra: {e}"
+                )));
+            }
+        },
         Err(_) => {
             tracing::debug!("Invalid UTF-8 in partition key type");
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Verify,
-            )));
+            return Err(HeaderSchemaError::structural_at(input));
         }
     };
 
@@ -63,10 +86,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
             "Suspicious clustering_count={} in SerializationHeader (expected <100)",
             clustering_count
         );
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Verify,
-        )));
+        return Err(HeaderSchemaError::structural_at(input));
     }
     tracing::debug!("HEADER: {} clustering key types", clustering_count);
 
@@ -77,10 +97,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
         let (remaining, ck_type_len) = parse_vuint(input)?;
         if ck_type_len == 0 || ck_type_len > 5000 {
             tracing::debug!("Invalid clustering key type length: {}", ck_type_len);
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Verify,
-            )));
+            return Err(HeaderSchemaError::structural_at(input));
         }
         if ck_type_len > 1000 {
             tracing::warn!(
@@ -100,10 +117,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
             Ok(s) => s.to_string(),
             Err(_) => {
                 tracing::debug!("Invalid UTF-8 in clustering key type {}", i);
-                return Err(nom::Err::Error(nom::error::Error::new(
-                    input,
-                    nom::error::ErrorKind::Verify,
-                )));
+                return Err(HeaderSchemaError::structural_at(input));
             }
         };
 
@@ -125,10 +139,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
             "Suspicious static_count={} in SerializationHeader (expected <1000)",
             static_count
         );
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Verify,
-        )));
+        return Err(HeaderSchemaError::structural_at(input));
     }
     tracing::debug!("HEADER: {} static columns", static_count);
 
@@ -140,10 +151,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
         let (remaining, name_len) = parse_vuint(input)?;
         if name_len == 0 || name_len > 200 {
             tracing::debug!("Invalid static column name length: {}", name_len);
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Verify,
-            )));
+            return Err(HeaderSchemaError::structural_at(input));
         }
 
         let (remaining, name_bytes) = take(name_len as usize)(remaining)?;
@@ -151,10 +159,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
             Ok(s) => s.to_string(),
             Err(_) => {
                 tracing::debug!("Invalid UTF-8 in static column name {}", i);
-                return Err(nom::Err::Error(nom::error::Error::new(
-                    input,
-                    nom::error::ErrorKind::Verify,
-                )));
+                return Err(HeaderSchemaError::structural_at(input));
             }
         };
 
@@ -162,10 +167,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
         let (remaining, type_len) = parse_vuint(remaining)?;
         if type_len == 0 || type_len > 5000 {
             tracing::debug!("Invalid static column type length: {}", type_len);
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Verify,
-            )));
+            return Err(HeaderSchemaError::structural_at(input));
         }
         if type_len > 1000 {
             tracing::warn!(
@@ -176,13 +178,20 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
 
         let (remaining, type_bytes) = take(type_len as usize)(remaining)?;
         let cql_type = match std::str::from_utf8(type_bytes) {
-            Ok(s) => convert_marshal_type_to_cql(s),
+            // Gate 2 of #4104 — see the partition-key site for the reasoning.
+            // SEMANTIC: propagated as `Refused`, never retried heuristically.
+            Ok(s) => match convert_marshal_type_to_cql_checked(s) {
+                Ok(t) => t,
+                Err(e) => {
+                    return Err(HeaderSchemaError::refused(format!(
+                        "SerializationHeader static column {i} ('{column_name}') type is not \
+                         writable by Cassandra: {e}"
+                    )));
+                }
+            },
             Err(_) => {
                 tracing::debug!("Invalid UTF-8 in static column type {}", i);
-                return Err(nom::Err::Error(nom::error::Error::new(
-                    input,
-                    nom::error::ErrorKind::Verify,
-                )));
+                return Err(HeaderSchemaError::structural_at(input));
             }
         };
 
@@ -214,10 +223,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
             "Suspicious regular_count={} in SerializationHeader (expected <1000)",
             regular_count
         );
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Verify,
-        )));
+        return Err(HeaderSchemaError::structural_at(input));
     }
     tracing::debug!("HEADER: {} regular columns", regular_count);
 
@@ -229,10 +235,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
         let (remaining, name_len) = parse_vuint(input)?;
         if name_len == 0 || name_len > 200 {
             tracing::debug!("Invalid regular column name length: {}", name_len);
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Verify,
-            )));
+            return Err(HeaderSchemaError::structural_at(input));
         }
 
         let (remaining, name_bytes) = take(name_len as usize)(remaining)?;
@@ -240,10 +243,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
             Ok(s) => s.to_string(),
             Err(_) => {
                 tracing::debug!("Invalid UTF-8 in regular column name {}", i);
-                return Err(nom::Err::Error(nom::error::Error::new(
-                    input,
-                    nom::error::ErrorKind::Verify,
-                )));
+                return Err(HeaderSchemaError::structural_at(input));
             }
         };
 
@@ -251,10 +251,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
         let (remaining, type_len) = parse_vuint(remaining)?;
         if type_len == 0 || type_len > 5000 {
             tracing::debug!("Invalid regular column type length: {}", type_len);
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Verify,
-            )));
+            return Err(HeaderSchemaError::structural_at(input));
         }
         if type_len > 1000 {
             tracing::warn!(
@@ -265,13 +262,20 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
 
         let (remaining, type_bytes) = take(type_len as usize)(remaining)?;
         let cql_type = match std::str::from_utf8(type_bytes) {
-            Ok(s) => convert_marshal_type_to_cql(s),
+            // Gate 2 of #4104 — see the partition-key site for the reasoning.
+            // SEMANTIC: propagated as `Refused`, never retried heuristically.
+            Ok(s) => match convert_marshal_type_to_cql_checked(s) {
+                Ok(t) => t,
+                Err(e) => {
+                    return Err(HeaderSchemaError::refused(format!(
+                        "SerializationHeader regular column {i} ('{column_name}') type is not \
+                         writable by Cassandra: {e}"
+                    )));
+                }
+            },
             Err(_) => {
                 tracing::debug!("Invalid UTF-8 in regular column type {}", i);
-                return Err(nom::Err::Error(nom::error::Error::new(
-                    input,
-                    nom::error::ErrorKind::Verify,
-                )));
+                return Err(HeaderSchemaError::structural_at(input));
             }
         };
 

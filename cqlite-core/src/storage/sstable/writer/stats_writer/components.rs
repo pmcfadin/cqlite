@@ -290,14 +290,18 @@ impl StatisticsWriter {
         // AbstractTypeSerializer.serializeList: unsigned-VInt count, then each
         // type as an unsigned-VInt-length-prefixed UTF-8 marshal-class string —
         // the exact encoding used for the SERIALIZATION_HEADER clusteringTypes.
-        let clustering_types: Vec<String> = schema
-            .map(|s| {
-                s.clustering_keys
-                    .iter()
-                    .map(|ck| cql_type_to_marshal_type(&ck.data_type))
-                    .collect()
-            })
-            .unwrap_or_default();
+        // `?` rather than a `.map(..).unwrap_or_default()` chain: since #4158 the
+        // converter can REFUSE (a vector element it cannot spell truthfully), and a
+        // closure returning `Result` cannot be collapsed with `unwrap_or_default`
+        // without swallowing that refusal into an empty clustering-type list.
+        let clustering_types: Vec<String> = match schema {
+            Some(s) => s
+                .clustering_keys
+                .iter()
+                .map(|ck| cql_type_to_marshal_type(&ck.data_type))
+                .collect::<Result<Vec<String>>>()?,
+            None => Vec::new(),
+        };
         buffer.write_all(&encode_vuint(clustering_types.len() as u64))?;
         for ty in &clustering_types {
             buffer.write_all(&encode_vuint(ty.len() as u64))?;

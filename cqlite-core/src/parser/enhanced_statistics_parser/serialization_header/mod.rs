@@ -7,17 +7,25 @@
 //! - [`sequential`] — parse from a known start (legacy marker or post-EncodingStats).
 //! - [`schema`] — the authoritative post-EncodingStats sequential decoder.
 
+mod candidate_identity;
+mod regular_columns;
 mod schema;
 mod sequential;
+
+#[cfg(test)]
+mod serialization_header_tests;
 
 pub(in crate::parser::enhanced_statistics_parser) use schema::parse_serialization_header_schema;
 
 use super::super::header::ColumnInfo;
-use super::super::vint::parse_vuint;
-use super::marshal_type::convert_marshal_type_to_cql;
+use super::marshal_type::convert_marshal_type_to_cql_checked;
+use super::schema_refusal::HeaderSchemaError;
 use super::SerializationHeaderResult;
-use nom::IResult;
-use sequential::{parse_serialization_header_at_offset, parse_serialization_header_sequential};
+use candidate_identity::candidate_confirmed_as_header;
+use regular_columns::parse_regular_columns;
+use sequential::{
+    parse_serialization_header_at_offset, parse_serialization_header_sequential, SemanticGate,
+};
 
 /// Parse SerializationHeader from Statistics.db (Issue #163)
 ///
@@ -27,9 +35,41 @@ use sequential::{parse_serialization_header_at_offset, parse_serialization_heade
 /// 3. Regular column definitions
 ///
 /// Returns: (partition_key_types, clustering_key_types, regular_columns)
+///
+/// # A SEMANTIC REFUSAL STOPS THE SEARCH — ONCE THE CANDIDATE IS CONFIRMED (#4104)
+///
+/// The search tries many candidate offsets, so a failed candidate is normally just
+/// "not here — try the next one", and that is right for every STRUCTURAL failure:
+/// where the header lives is exactly what is in doubt.
+///
+/// A semantic refusal (`FrozenType(<scalar>)`, which no Cassandra writer can have
+/// recorded) is a different answer, and it needed THREE attempts to place
+/// correctly:
+///
+/// 1. Originally it was demoted to an ordinary failed candidate, so the search
+///    continued and ended at this function's own
+///    `Ok((input, (empty, empty, empty)))` no-header success, which the caller
+///    accepts as a schema-less header. FAIL-OPEN — every individual gate refused
+///    and the net outcome was still `Ok` (roborev job 119).
+/// 2. Then it was propagated immediately from wherever it arose. OVER-REFUSAL —
+///    this search walks ARBITRARY bytes and the decoders accept any UTF-8 string
+///    as the key type, so an earlier FALSE candidate carrying a plausible
+///    `FrozenType(<scalar>)` run aborted an otherwise VALID SSTable before the
+///    real header was reached (roborev job 120).
+/// 3. Now: a refusal is authoritative only once the candidate is CONFIRMED to be
+///    a SerializationHeader — a complete decode of its own declared column lists
+///    plus marshal class SPELLINGS for its key and clustering types, judged by
+///    [`candidate_confirmed_as_header`] from Cassandra's writer. Confirmed ⇒
+///    propagate (never fall through to another candidate or to the no-header
+///    success). Unconfirmed ⇒ it was a guess that did not pan out, so the search
+///    continues, exactly as for a structural failure.
+///
+/// On the TOC-ANCHORED path the location is known, so the refusal is authoritative
+/// on arrival and is propagated there without any of this — see
+/// `parse_minimal_encoding_stats`.
 pub(super) fn parse_serialization_header(
     input: &[u8],
-) -> IResult<&[u8], SerializationHeaderResult> {
+) -> Result<(&[u8], SerializationHeaderResult), HeaderSchemaError<'_>> {
     tracing::debug!(
         "Searching for SerializationHeader in {} bytes (max search: 8KB)",
         input.len()
@@ -101,20 +141,38 @@ pub(super) fn parse_serialization_header(
 
                 if is_valid_single_byte_len || is_multi_byte_vint {
                     // Try parsing from this offset using sequential parser
-                    let result = parse_serialization_header_sequential(&input[type_len_offset..]);
-                    if let Ok((remaining, (pk_types, ck_types, cols))) = result {
-                        // Validate: partition key type should contain expected substring
-                        if !pk_types.is_empty()
-                            && pk_types[0].contains("org.apache.cassandra.db.marshal")
-                        {
-                            tracing::debug!(
-                                "Successfully parsed SerializationHeader at offset {} (lookback: {}): pk_type={}",
-                                type_len_offset,
-                                lookback,
-                                pk_types[0]
-                            );
-                            return Ok((remaining, (pk_types, ck_types, cols)));
+                    let candidate = &input[type_len_offset..];
+                    match parse_serialization_header_sequential(candidate, SemanticGate::Enforce) {
+                        // A semantic refusal fails CLOSED — but only once these
+                        // bytes are CONFIRMED to be a header rather than a
+                        // candidate that briefly looked like one. The confirmation
+                        // re-decodes the SAME bytes with the refusal deferred, so
+                        // the completeness the refusal cut short can be judged
+                        // (#4104, roborev job 120). Unconfirmed falls through to
+                        // the next candidate offset, like a structural failure.
+                        Err(refused @ HeaderSchemaError::Refused(_)) => {
+                            if candidate_confirmed_as_header(parse_serialization_header_sequential(
+                                candidate,
+                                SemanticGate::Survey,
+                            )) {
+                                return Err(refused);
+                            }
                         }
+                        Ok((remaining, (pk_types, ck_types, cols))) => {
+                            // Validate: partition key type should contain expected substring
+                            if !pk_types.is_empty()
+                                && pk_types[0].contains("org.apache.cassandra.db.marshal")
+                            {
+                                tracing::debug!(
+                                    "Successfully parsed SerializationHeader at offset {} (lookback: {}): pk_type={}",
+                                    type_len_offset,
+                                    lookback,
+                                    pk_types[0]
+                                );
+                                return Ok((remaining, (pk_types, ck_types, cols)));
+                            }
+                        }
+                        Err(HeaderSchemaError::Structural(_)) => {}
                     }
                 }
 
@@ -122,13 +180,29 @@ pub(super) fn parse_serialization_header(
                 if type_len_offset > 0 {
                     let prev_offset = type_len_offset - 1;
                     if input[prev_offset] == 0x00 && input[type_len_offset] == 0x00 {
-                        let result = parse_serialization_header_at_offset(&input[prev_offset..]);
-                        if result.is_ok() {
-                            tracing::debug!(
-                                "Successfully parsed SerializationHeader at legacy marker offset {}",
-                                prev_offset
-                            );
-                            return result;
+                        let candidate = &input[prev_offset..];
+                        match parse_serialization_header_at_offset(candidate, SemanticGate::Enforce)
+                        {
+                            // Same confirm-then-fail-closed rule as the sequential
+                            // candidate above: this offset is a guess too.
+                            Err(refused @ HeaderSchemaError::Refused(_)) => {
+                                if candidate_confirmed_as_header(
+                                    parse_serialization_header_at_offset(
+                                        candidate,
+                                        SemanticGate::Survey,
+                                    ),
+                                ) {
+                                    return Err(refused);
+                                }
+                            }
+                            Ok(parsed) => {
+                                tracing::debug!(
+                                    "Successfully parsed SerializationHeader at legacy marker offset {}",
+                                    prev_offset
+                                );
+                                return Ok(parsed);
+                            }
+                            Err(HeaderSchemaError::Structural(_)) => {}
                         }
                     }
                 }
@@ -162,7 +236,7 @@ pub(super) fn parse_serialization_header(
         search_offset
     );
 
-    if let Some((pk_types, ck_types, cols)) = fallback_parse_serialization_header_ascii(input) {
+    if let Some((pk_types, ck_types, cols)) = fallback_parse_serialization_header_ascii(input)? {
         tracing::debug!(
             "ASCII fallback extracted SerializationHeader: {} partition keys, {} clustering keys, {} regular columns",
             pk_types.len(),
@@ -175,348 +249,15 @@ pub(super) fn parse_serialization_header(
     Ok((input, (Vec::new(), Vec::new(), Vec::new())))
 }
 
-/// Extract partition key type by backtracking from the `0x00 0x00` marker
+/// ASCII fallback parser for SerializationHeader when structured parsing fails.
 ///
-/// The partition key type descriptor ends immediately before the marker.
-/// We try parsing VInt lengths at different offsets before the marker to find
-/// a valid type string that matches Cassandra marshal type patterns.
-fn extract_partition_key_before_marker(input: &[u8], marker_offset: usize) -> Option<String> {
-    if marker_offset < 3 {
-        return None;
-    }
-
-    tracing::debug!(
-        "Backtracking from marker at offset {} (input len: {})",
-        marker_offset,
-        input.len()
-    );
-
-    // Try parsing VInt lengths at different positions before the marker
-    // Type strings can be up to 200 bytes, and VInts can be 1-9 bytes,
-    // so we need to search back at least 209 bytes (200 + 9)
-    let max_lookback = 210;
-    let search_start = marker_offset.saturating_sub(max_lookback);
-    tracing::debug!(
-        "Searching for VInt from offset {} to {} ({} positions)",
-        search_start,
-        marker_offset,
-        marker_offset - search_start
-    );
-
-    for vint_start in (search_start..marker_offset).rev() {
-        // Try to parse VInt at this position
-        match parse_vuint(&input[vint_start..marker_offset]) {
-            Ok((remaining, type_len)) => {
-                // Validate type length is reasonable first (before any arithmetic)
-                if !(10..200).contains(&type_len) {
-                    continue;
-                }
-
-                // Calculate how many bytes the VInt consumed
-                let vint_len = marker_offset - vint_start - remaining.len();
-                let type_start = vint_start + vint_len;
-
-                // Bounds check before addition to prevent overflow
-                let type_len_usize = type_len as usize;
-                if type_start > input.len() || type_len_usize > input.len() - type_start {
-                    continue;
-                }
-
-                let type_end = type_start + type_len_usize;
-
-                // Validate:
-                // 1. The type string ends exactly at the marker
-                // 2. The type string is valid UTF-8
-                // 3. It matches Cassandra marshal type patterns
-                if type_end == marker_offset {
-                    if let Ok(type_str) = std::str::from_utf8(&input[type_start..type_end]) {
-                        tracing::debug!(
-                            "Candidate at vint_start={}: type_len={}, type_start={}, type_end={}, str={}",
-                            vint_start, type_len, type_start, type_end, type_str
-                        );
-                        // Validate it's a Cassandra marshal type
-                        // Note: Partition key types may or may not start with '('
-                        // Both "(org.apache.cassandra..." and "org.apache.cassandra..." are valid
-                        if type_str.contains("org.apache.cassandra") {
-                            tracing::debug!(
-                                "Found partition key type at offset {}: length={}, type={}",
-                                vint_start,
-                                type_len,
-                                type_str
-                            );
-                            return Some(type_str.to_string());
-                        } else {
-                            tracing::debug!(
-                                "Rejected candidate (starts_with='(': {}, contains 'org.apache.cassandra': {})",
-                                type_str.starts_with('('),
-                                type_str.contains("org.apache.cassandra")
-                            );
-                        }
-                    } else {
-                        tracing::debug!(
-                            "Rejected candidate at vint_start={}: not valid UTF-8",
-                            vint_start
-                        );
-                    }
-                }
-            }
-            Err(_) => continue, // Try next offset
-        }
-    }
-
-    None
-}
-
-/// Parse regular columns section from SerializationHeader
-///
-/// Returns: (partition_key_types, regular_columns)
-/// Partition key types are extracted via backtracking when found before the column section marker.
-fn parse_regular_columns(input: &[u8]) -> IResult<&[u8], (Vec<String>, Vec<ColumnInfo>)> {
-    let mut search_offset = 0;
-    let mut partition_key_types = Vec::new();
-
-    while search_offset + 2 < input.len() && search_offset < 8192 {
-        if input[search_offset] == 0x00 {
-            let (marker_offset, count_offset) =
-                if search_offset + 1 < input.len() && input[search_offset + 1] == 0x00 {
-                    (search_offset, search_offset + 2)
-                } else {
-                    (search_offset, search_offset + 1)
-                };
-
-            if count_offset >= input.len() {
-                break;
-            }
-
-            let column_count = input[count_offset] as usize;
-            if column_count == 0 || column_count > 50 {
-                search_offset += 1;
-                continue;
-            }
-
-            tracing::debug!(
-                "Attempting to extract partition key by backtracking from marker at offset {}",
-                marker_offset
-            );
-            if let Some(pk_type) = extract_partition_key_before_marker(input, marker_offset) {
-                tracing::debug!("Found partition key type before marker: {}", pk_type);
-                partition_key_types.push(pk_type);
-            } else {
-                tracing::debug!(
-                    "No partition key type found via backtracking at offset {}",
-                    marker_offset
-                );
-            }
-
-            let mut pos = count_offset + 1;
-
-            let context_len = std::cmp::min(128, input.len() - marker_offset);
-            let context_hex: String = input[marker_offset..marker_offset + context_len]
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect::<Vec<_>>()
-                .join(" ");
-            tracing::debug!(
-                "Pattern found at offset {}: count={}, next 128 bytes: {}",
-                marker_offset,
-                column_count,
-                context_hex
-            );
-
-            // Try to parse all columns - if successful, we found the right section
-            let mut parsed_columns = Vec::with_capacity(column_count);
-            let mut parse_success = true;
-
-            for col_idx in 0..column_count {
-                if pos >= input.len() {
-                    tracing::debug!(
-                        "Column {} parsing failed at offset {}: position {} exceeds buffer length {}",
-                        col_idx,
-                        marker_offset,
-                        pos,
-                        input.len()
-                    );
-                    parse_success = false;
-                    break;
-                }
-
-                if pos >= input.len() {
-                    tracing::debug!(
-                        "Column {} parsing failed at offset {}: no data available for name length byte (pos={}, len={})",
-                        col_idx,
-                        marker_offset,
-                        pos,
-                        input.len()
-                    );
-                    parse_success = false;
-                    break;
-                }
-
-                let name_len = input[pos] as usize;
-                pos += 1;
-
-                if name_len == 0 || name_len > 200 || pos + name_len > input.len() {
-                    tracing::debug!(
-                        "Column {} parsing failed at offset {}: name_len sanity check failed (name_len={}, pos={}, buffer_len={})",
-                        col_idx,
-                        marker_offset,
-                        name_len,
-                        pos,
-                        input.len()
-                    );
-                    parse_success = false;
-                    break;
-                }
-
-                // Column name (UTF-8 string)
-                let name_bytes = &input[pos..pos + name_len];
-                let column_name = match std::str::from_utf8(name_bytes) {
-                    Ok(s) => s.to_string(),
-                    Err(e) => {
-                        let name_hex: String = name_bytes
-                            .iter()
-                            .map(|b| format!("{:02x}", b))
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        tracing::debug!(
-                            "Column {} parsing failed at offset {}: UTF-8 decode error for column name at pos {} (len={}): {:?}, bytes: {}",
-                            col_idx,
-                            marker_offset,
-                            pos,
-                            name_len,
-                            e,
-                            name_hex
-                        );
-                        parse_success = false;
-                        break;
-                    }
-                };
-                pos += name_len;
-
-                if pos >= input.len() {
-                    tracing::debug!(
-                        "Column {} ('{}') parsing failed at offset {}: no data available for type length byte (pos={}, len={})",
-                        col_idx,
-                        column_name,
-                        marker_offset,
-                        pos,
-                        input.len()
-                    );
-                    parse_success = false;
-                    break;
-                }
-
-                // Parse type length as VInt (can exceed 127 for collection types)
-                let type_len_result = parse_vuint(&input[pos..]);
-                let (type_remaining, type_len_u64) = match type_len_result {
-                    Ok(r) => r,
-                    Err(_) => {
-                        tracing::debug!(
-                            "Column {} ('{}') parsing failed at offset {}: VInt parse error at pos {}",
-                            col_idx,
-                            column_name,
-                            marker_offset,
-                            pos
-                        );
-                        parse_success = false;
-                        break;
-                    }
-                };
-                let type_len = type_len_u64 as usize; // #3848: raw `u64` bounded on the `if` below
-                pos = input.len() - type_remaining.len();
-
-                if type_len_u64 == 0 || type_len_u64 > 5000 || pos + type_len > input.len() {
-                    tracing::debug!(
-                        "Column {} ('{}') parsing failed at offset {}: type_len sanity check failed (type_len={}, pos={}, buffer_len={})",
-                        col_idx,
-                        column_name,
-                        marker_offset,
-                        type_len,
-                        pos,
-                        input.len()
-                    );
-                    parse_success = false;
-                    break;
-                }
-
-                // Column type (Cassandra internal type name)
-                let type_bytes = &input[pos..pos + type_len];
-                let internal_type = match std::str::from_utf8(type_bytes) {
-                    Ok(s) => s.to_string(),
-                    Err(e) => {
-                        let type_hex: String = type_bytes
-                            .iter()
-                            .map(|b| format!("{:02x}", b))
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        tracing::debug!(
-                            "Column {} ('{}') parsing failed at offset {}: UTF-8 decode error for column type at pos {} (len={}): {:?}, bytes: {}",
-                            col_idx,
-                            column_name,
-                            marker_offset,
-                            pos,
-                            type_len,
-                            e,
-                            type_hex
-                        );
-                        parse_success = false;
-                        break;
-                    }
-                };
-                pos += type_len;
-
-                // Convert Cassandra marshal type to CQL type
-                let cql_type = convert_marshal_type_to_cql(&internal_type);
-
-                parsed_columns.push(ColumnInfo {
-                    name: column_name,
-                    column_type: cql_type,
-                    is_primary_key: false, // Will be determined from partition/clustering info
-                    key_position: None,
-                    is_static: false,
-                    is_clustering: false,
-                    clustering_reversed: false,
-                });
-            }
-
-            if parse_success && parsed_columns.len() == column_count {
-                // Successfully parsed all columns
-                let column_names: Vec<&str> =
-                    parsed_columns.iter().map(|c| c.name.as_str()).collect();
-                tracing::debug!(
-                    "Successfully parsed {} columns at offset {}: {:?}",
-                    parsed_columns.len(),
-                    marker_offset,
-                    column_names
-                );
-                if !partition_key_types.is_empty() {
-                    tracing::debug!(
-                        "Extracted {} partition key types via backtracking: {:?}",
-                        partition_key_types.len(),
-                        partition_key_types
-                    );
-                }
-
-                let remaining = &input[pos..];
-                return Ok((remaining, (partition_key_types, parsed_columns)));
-            }
-        }
-
-        search_offset += 1;
-    }
-
-    // Column section not found - return empty vecs (not an error, some files may have no regular columns)
-    tracing::debug!(
-        "Regular column section not found: searched {} bytes",
-        search_offset
-    );
-    Ok((input, (Vec::new(), Vec::new())))
-}
-
-/// ASCII fallback parser for SerializationHeader when structured parsing fails
+/// `Ok(None)` = nothing recognisable here (the caller falls through to its
+/// no-header success). `Err(Refused)` = a type Cassandra cannot have written was
+/// found, which fails CLOSED — it must not degrade to `Ok(None)` and thence to an
+/// accepted empty schema (#4104, roborev job 119).
 fn fallback_parse_serialization_header_ascii(
     input: &[u8],
-) -> Option<(Vec<String>, Vec<String>, Vec<ColumnInfo>)> {
+) -> Result<Option<SerializationHeaderResult>, HeaderSchemaError<'_>> {
     // Helper to find subsequence
     fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         haystack
@@ -634,7 +375,12 @@ fn fallback_parse_serialization_header_ascii(
                         }
                     };
 
-                    let cql_type = convert_marshal_type_to_cql(&internal_type);
+                    // Gate 2 of #4104: a refused type fails the WHOLE header rather
+                    // than silently dropping the column, which would hide the refusal
+                    // behind a schema that merely looks short — and it propagates as
+                    // a REFUSAL, not as `None`, which the caller would accept.
+                    let cql_type = convert_marshal_type_to_cql_checked(&internal_type)
+                        .map_err(HeaderSchemaError::Refused)?;
                     columns.push(ColumnInfo {
                         name: column_name,
                         column_type: cql_type,
@@ -656,407 +402,8 @@ fn fallback_parse_serialization_header_ascii(
     }
 
     if partition_types.is_empty() && columns.is_empty() {
-        return None;
+        return Ok(None);
     }
 
-    Some((partition_types, clustering_types, columns))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_serialization_header_with_no_clustering_keys() {
-        // Test SerializationHeader with partition key and regular columns, no clustering keys
-        // Format: [VInt partition_type_len] [0x00 0x00] [partition_type] [clustering_count=0] [0x00 0x00 column_count] [columns...]
-
-        let mut test_data = vec![];
-
-        // Partition key type: 41 bytes "(org.apache.cassandra.db.marshal.UUIDType"
-        let partition_type = b"(org.apache.cassandra.db.marshal.UUIDType";
-        test_data.extend_from_slice(&[0x00, 0x00]); // Marker
-        test_data.push(partition_type.len() as u8);
-        test_data.extend_from_slice(partition_type);
-
-        // Clustering key count = 0
-        test_data.push(0x00);
-
-        // Regular columns section: separator (0x00) + count
-        test_data.push(0x00); // section separator
-        test_data.push(0x02); // column count
-
-        // Column 1: "id" (UUID)
-        test_data.push(0x02); // name length = 2
-        test_data.extend_from_slice(b"id");
-        test_data.push(0x28); // type length = 40
-        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.UUIDType");
-
-        // Column 2: "name" (UTF8/text)
-        test_data.push(0x04); // name length = 4
-        test_data.extend_from_slice(b"name");
-        test_data.push(0x28); // type length = 40
-        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.UTF8Type");
-
-        // Add some garbage data before the SerializationHeader
-        let mut full_data = vec![0xFF; 100];
-        full_data.extend_from_slice(&test_data);
-
-        let result = parse_serialization_header(&full_data);
-        assert!(
-            result.is_ok(),
-            "Failed to parse SerializationHeader: {:?}",
-            result.as_ref().err()
-        );
-
-        let (_remaining, (partition_types, clustering_types, columns)) = result.unwrap();
-
-        // Verify partition key
-        assert_eq!(partition_types.len(), 1, "Expected 1 partition key");
-        assert!(partition_types[0].contains("UUIDType"));
-
-        // Verify clustering keys (should be none)
-        assert_eq!(clustering_types.len(), 0, "Expected 0 clustering keys");
-
-        // Verify regular columns
-        assert_eq!(columns.len(), 2, "Expected 2 columns");
-        assert_eq!(columns[0].name, "id");
-        assert_eq!(columns[0].column_type, "uuid");
-        assert_eq!(columns[1].name, "name");
-        assert_eq!(columns[1].column_type, "text");
-    }
-
-    #[test]
-    fn test_serialization_header_with_clustering_keys() {
-        // Test SerializationHeader with partition key, 2 clustering keys, and regular columns
-
-        let mut test_data = vec![];
-
-        // Partition key type: 41 bytes
-        let partition_type = b"(org.apache.cassandra.db.marshal.UUIDType";
-        test_data.extend_from_slice(&[0x00, 0x00]); // Marker
-        test_data.push(partition_type.len() as u8);
-        test_data.extend_from_slice(partition_type);
-
-        // Clustering key count = 2
-        test_data.push(0x02);
-
-        // Clustering key 1: ReversedType(TimestampType)
-        let ck1 =
-            b"[org.apache.cassandra.db.marshal.ReversedType(org.apache.cassandra.db.marshal.TimestampType)";
-        test_data.push(ck1.len() as u8);
-        test_data.extend_from_slice(ck1);
-
-        // Clustering key 2: UTF8Type
-        let ck2 = b"(org.apache.cassandra.db.marshal.UTF8Type)";
-        test_data.push(ck2.len() as u8);
-        test_data.extend_from_slice(ck2);
-
-        // Regular columns section
-        test_data.push(0x00); // separator
-        test_data.push(0x02); // count
-
-        // Column 1: "data" (UTF8)
-        test_data.push(0x04); // name length
-        test_data.extend_from_slice(b"data");
-        test_data.push(0x28); // type length
-        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.UTF8Type");
-
-        // Column 2: "value" (Int32)
-        test_data.push(0x05); // name length
-        test_data.extend_from_slice(b"value");
-        test_data.push(0x29); // type length
-        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.Int32Type");
-
-        // Add garbage data before SerializationHeader
-        let mut full_data = vec![0xFF; 100];
-        full_data.extend_from_slice(&test_data);
-
-        let result = parse_serialization_header(&full_data);
-        assert!(
-            result.is_ok(),
-            "Failed to parse SerializationHeader with clustering keys: {:?}",
-            result.err()
-        );
-
-        let (_remaining, (partition_types, clustering_types, columns)) = result.unwrap();
-
-        // Verify partition key
-        assert_eq!(partition_types.len(), 1);
-        assert!(partition_types[0].contains("UUIDType"));
-
-        // Verify clustering keys
-        assert_eq!(clustering_types.len(), 2, "Expected 2 clustering keys");
-        assert!(clustering_types[0].contains("ReversedType"));
-        assert!(clustering_types[0].contains("TimestampType"));
-        assert!(clustering_types[1].contains("UTF8Type"));
-
-        // Verify regular columns
-        assert_eq!(columns.len(), 2);
-        assert_eq!(columns[0].name, "data");
-        assert_eq!(columns[0].column_type, "text");
-        assert_eq!(columns[1].name, "value");
-        assert_eq!(columns[1].column_type, "int");
-    }
-
-    #[test]
-    fn test_serialization_header_with_static_columns() {
-        // Test SerializationHeader with static columns (Issue #210)
-        // Schema: partition key (uuid), clustering key (timestamp),
-        //         static column (text), regular columns (text, int)
-
-        let mut test_data = vec![];
-
-        // Marker
-        test_data.extend_from_slice(&[0x00, 0x00]);
-
-        // Partition key type: UUIDType (40 bytes)
-        let partition_type = b"org.apache.cassandra.db.marshal.UUIDType";
-        test_data.push(partition_type.len() as u8);
-        test_data.extend_from_slice(partition_type);
-
-        // Clustering key count = 1
-        test_data.push(0x01);
-
-        // Clustering key 1: TimestampType (45 bytes)
-        let ck1 = b"org.apache.cassandra.db.marshal.TimestampType";
-        test_data.push(ck1.len() as u8);
-        test_data.extend_from_slice(ck1);
-
-        // Static column count = 1 (NOT a separator - this is the key fix!)
-        test_data.push(0x01);
-
-        // Static column 1: "static_data" (UTF8Type)
-        test_data.push(0x0b); // name length = 11
-        test_data.extend_from_slice(b"static_data");
-        test_data.push(0x28); // type length = 40
-        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.UTF8Type");
-
-        // Regular column count = 2
-        test_data.push(0x02);
-
-        // Regular column 1: "row_data" (UTF8)
-        test_data.push(0x08); // name length
-        test_data.extend_from_slice(b"row_data");
-        test_data.push(0x28); // type length = 40
-        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.UTF8Type");
-
-        // Regular column 2: "row_value" (Int32)
-        test_data.push(0x09); // name length
-        test_data.extend_from_slice(b"row_value");
-        test_data.push(0x29); // type length = 41
-        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.Int32Type");
-
-        // Add garbage data before SerializationHeader
-        let mut full_data = vec![0xFF; 100];
-        full_data.extend_from_slice(&test_data);
-
-        let result = parse_serialization_header(&full_data);
-        assert!(
-            result.is_ok(),
-            "Failed to parse SerializationHeader with static columns: {:?}",
-            result.err()
-        );
-
-        let (_remaining, (partition_types, clustering_types, columns)) = result.unwrap();
-
-        // Verify partition key
-        assert_eq!(partition_types.len(), 1);
-        assert!(partition_types[0].contains("UUIDType"));
-
-        // Verify clustering keys
-        assert_eq!(clustering_types.len(), 1);
-        assert!(clustering_types[0].contains("TimestampType"));
-
-        // Verify columns (static + regular = 3 total)
-        assert_eq!(
-            columns.len(),
-            3,
-            "Expected 3 columns (1 static + 2 regular)"
-        );
-
-        // Static column should be first and marked as static
-        assert_eq!(columns[0].name, "static_data");
-        assert_eq!(columns[0].column_type, "text");
-        assert!(
-            columns[0].is_static,
-            "static_data should be marked as static"
-        );
-
-        // Regular columns should NOT be static
-        assert_eq!(columns[1].name, "row_data");
-        assert_eq!(columns[1].column_type, "text");
-        assert!(
-            !columns[1].is_static,
-            "row_data should NOT be marked as static"
-        );
-
-        assert_eq!(columns[2].name, "row_value");
-        assert_eq!(columns[2].column_type, "int");
-        assert!(
-            !columns[2].is_static,
-            "row_value should NOT be marked as static"
-        );
-    }
-
-    #[test]
-    fn test_partition_key_extraction_via_backtracking() {
-        // Test the backtracking logic to extract partition key type before the column marker
-        // This simulates the real ttl_test_table case where we have:
-        // VInt(40) + "org.apache.cassandra.db.marshal.UUIDType" + 0x00 0x00 + [count]
-        // Note: Real files use 2-byte VInt: 0x80 0x28 for length 40
-
-        let mut test_data = vec![];
-
-        // Add some garbage data before the partition key
-        test_data.extend_from_slice(&[0xFF; 50]);
-
-        // Partition key type: 40 bytes "org.apache.cassandra.db.marshal.UUIDType"
-        test_data.extend_from_slice(&[0x80, 0x28]); // VInt: 40 (2-byte encoding)
-        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.UUIDType");
-
-        // Marker: 0x00 0x00 followed by column count
-        // NOTE: In SerializationHeader, partition keys are NOT in the regular columns section
-        // Only regular (non-key) columns are listed here
-        test_data.push(0x00); // separator
-        test_data.push(0x02); // 2 regular columns
-
-        // Regular Column 1: "expiring_value" (Int32)
-        test_data.push(0x0E); // name length = 14
-        test_data.extend_from_slice(b"expiring_value");
-        test_data.push(0x29); // type length = 41
-        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.Int32Type");
-
-        // Regular Column 2: "session_info" (UTF8)
-        test_data.push(0x0C); // name length = 12
-        test_data.extend_from_slice(b"session_info");
-        test_data.push(0x28); // type length = 40
-        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.UTF8Type");
-
-        // Parse the regular columns section which should extract partition key via backtracking
-        let result = parse_regular_columns(&test_data);
-        assert!(
-            result.is_ok(),
-            "Failed to parse columns with backtracking: {:?}",
-            result.err()
-        );
-
-        let (_remaining, (partition_keys, columns)) = result.unwrap();
-
-        // Verify partition key was extracted
-        assert_eq!(
-            partition_keys.len(),
-            1,
-            "Expected 1 partition key via backtracking"
-        );
-        assert_eq!(
-            partition_keys[0],
-            "org.apache.cassandra.db.marshal.UUIDType"
-        );
-
-        // Verify regular columns
-        assert_eq!(columns.len(), 2, "Expected 2 regular columns");
-        assert_eq!(columns[0].name, "expiring_value");
-        assert_eq!(columns[0].column_type, "int");
-        assert!(!columns[0].is_primary_key);
-        assert_eq!(columns[1].name, "session_info");
-        assert_eq!(columns[1].column_type, "text");
-        assert!(!columns[1].is_primary_key);
-    }
-
-    #[test]
-    fn test_partition_key_extraction_with_longer_type() {
-        // Test with a composite partition key type (longer type string)
-        let mut test_data = vec![0xFF; 100]; // Garbage prefix
-
-        // CompositeType with multiple components: 75 bytes
-        let composite_type =
-            "(org.apache.cassandra.db.marshal.CompositeType(UTF8Type,Int32Type,UUIDType)";
-        let type_len = composite_type.len() as u8;
-
-        // VInt encode the length (75 = 0x4B, fits in single byte)
-        test_data.push(type_len);
-        test_data.extend_from_slice(composite_type.as_bytes());
-
-        // Marker + column count
-        test_data.push(0x00); // separator
-        test_data.push(0x01); // column count
-
-        // Single column: "data" (UTF8)
-        test_data.push(0x04);
-        test_data.extend_from_slice(b"data");
-        test_data.push(0x28);
-        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.UTF8Type");
-
-        let result = parse_regular_columns(&test_data);
-        assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
-
-        let (_remaining, (partition_keys, columns)) = result.unwrap();
-
-        assert_eq!(partition_keys.len(), 1);
-        assert_eq!(partition_keys[0], composite_type);
-
-        // Expect 1 regular column
-        assert_eq!(columns.len(), 1);
-        assert_eq!(columns[0].name, "data");
-        assert!(!columns[0].is_primary_key);
-    }
-
-    #[test]
-    fn test_backtracking_with_no_partition_key() {
-        // Test case where there's no partition key before the marker
-        // This should still parse columns successfully but return empty partition key list
-
-        let mut test_data = vec![];
-
-        // Just the marker and columns, no partition key type before
-        test_data.push(0x00); // separator
-        test_data.push(0x01); // count
-
-        // Column: "name" (UTF8)
-        test_data.push(0x04);
-        test_data.extend_from_slice(b"name");
-        test_data.push(0x28);
-        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.UTF8Type");
-
-        let result = parse_regular_columns(&test_data);
-        assert!(result.is_ok());
-
-        let (_remaining, (partition_keys, columns)) = result.unwrap();
-
-        assert_eq!(partition_keys.len(), 0, "Should have no partition keys");
-        assert_eq!(columns.len(), 1);
-        assert_eq!(columns[0].name, "name");
-    }
-
-    #[test]
-    fn test_backtracking_rejects_invalid_types() {
-        // Test that backtracking rejects strings that don't match Cassandra type patterns
-        let mut test_data = vec![0xFF; 50];
-
-        // Invalid type: doesn't start with '(' and doesn't contain "org.apache.cassandra"
-        test_data.push(0x15); // VInt: 21 bytes
-        test_data.extend_from_slice(b"InvalidTypeDescriptor");
-
-        // Marker + column count
-        test_data.extend_from_slice(&[0x00, 0x00, 0x01]);
-
-        // Column
-        test_data.push(0x04);
-        test_data.extend_from_slice(b"test");
-        test_data.push(0x28);
-        test_data.extend_from_slice(b"org.apache.cassandra.db.marshal.UTF8Type");
-
-        let result = parse_regular_columns(&test_data);
-        assert!(result.is_ok());
-
-        let (_remaining, (partition_keys, _columns)) = result.unwrap();
-
-        // Should not extract the invalid type
-        assert_eq!(
-            partition_keys.len(),
-            0,
-            "Should reject invalid type pattern"
-        );
-    }
+    Ok(Some((partition_types, clustering_types, columns)))
 }

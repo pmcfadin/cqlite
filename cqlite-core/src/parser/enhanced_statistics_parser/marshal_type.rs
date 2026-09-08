@@ -5,6 +5,8 @@
 //! Statistics.db) into CQL type names, and build the partition/clustering
 //! `ColumnInfo` vectors used by schema discovery.
 
+use crate::schema::cql_type_parser::frozen_scalar::validate_marshal_frozen;
+
 /// Extract inner type from parameterized type string with proper parenthesis matching
 ///
 /// Given a string that starts AFTER the opening parenthesis of a wrapper type,
@@ -96,8 +98,40 @@ pub(super) fn is_reversed_comparator(marshal_type: &str) -> bool {
         || value.starts_with("ReversedType(")
 }
 
-/// Convert Cassandra internal marshal type to CQL type name
-pub(super) fn convert_marshal_type_to_cql(marshal_type: &str) -> String {
+/// ═══ GATE 2 OF 2: the `Statistics.db` SerializationHeader type parser ═══
+///
+/// [`convert_marshal_type_to_cql`] with the `frozen<scalar>` refusal applied, and
+/// THE ONLY WAY OUT OF THIS MODULE for a header type string. The converter itself
+/// is private and infallible so that it can recurse; the gate sits here, on the
+/// whole string, exactly once — which also means it descends into a
+/// `UserType(…)`-bearing string that the converter returns verbatim.
+///
+/// A `FrozenType(<scalar>)` header is not something a Cassandra writer can emit:
+/// the header records `column.type`, and `CQL3Type.Raw::freeze()` throws for every
+/// non-collection/tuple/UDT, so no such column can have been declared. Refusing it
+/// fail-closed is the no-heuristics answer (#28) — see [`validate_marshal_frozen`]
+/// for the citation, the override set, and the corpus census. Issue #4104.
+pub(super) fn convert_marshal_type_to_cql_checked(
+    marshal_type: &str,
+) -> crate::error::Result<String> {
+    validate_marshal_frozen(marshal_type)?;
+    Ok(convert_marshal_type_to_cql(marshal_type))
+}
+
+// REMOVED with #4104's job-119 fix: `convert_marshal_type_to_cql_logged`, which
+// answered `None` for a refusal so the marker-search parsers could fold it into
+// their "this offset holds no readable header" outcome. That fold WAS the fail-open
+// — a refusal became an ordinary failed candidate and the search carried on to the
+// empty-schema success. Those parsers now carry `HeaderSchemaError`, so they call
+// `convert_marshal_type_to_cql_checked` directly and a refusal keeps both its
+// meaning and its message.
+
+/// Convert Cassandra internal marshal type to CQL type name.
+///
+/// PRIVATE and infallible by design: it recurses, so gating here would re-scan the
+/// string at every level. Every caller outside this module goes through
+/// [`convert_marshal_type_to_cql_checked`], which is what makes gate 2 unmissable.
+fn convert_marshal_type_to_cql(marshal_type: &str) -> String {
     fn strip_wrapping_parens(mut value: &str) -> &str {
         loop {
             // Also strip a leading structural `[` the header may prefix the
@@ -270,9 +304,9 @@ pub(super) fn convert_marshal_type_to_cql(marshal_type: &str) -> String {
 /// Construct ColumnInfo entries for partition key definitions found in SerializationHeader
 pub(super) fn build_partition_key_columns(
     partition_types: &[String],
-) -> Vec<super::super::header::ColumnInfo> {
+) -> crate::error::Result<Vec<super::super::header::ColumnInfo>> {
     if partition_types.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let total = partition_types.len();
@@ -280,7 +314,7 @@ pub(super) fn build_partition_key_columns(
         .iter()
         .enumerate()
         .map(|(idx, marshal_type)| {
-            let cql_type = convert_marshal_type_to_cql(marshal_type);
+            let cql_type = convert_marshal_type_to_cql_checked(marshal_type)?;
             let name = if total == 1 {
                 match cql_type.as_str() {
                     "uuid" | "timeuuid" => "id".to_string(),
@@ -290,7 +324,7 @@ pub(super) fn build_partition_key_columns(
                 format!("partition_key_{}", idx)
             };
 
-            super::super::header::ColumnInfo {
+            Ok(super::super::header::ColumnInfo {
                 name,
                 column_type: cql_type,
                 is_primary_key: true,
@@ -298,7 +332,7 @@ pub(super) fn build_partition_key_columns(
                 is_static: false,
                 is_clustering: false,
                 clustering_reversed: false,
-            }
+            })
         })
         .collect()
 }
@@ -306,9 +340,9 @@ pub(super) fn build_partition_key_columns(
 /// Construct ColumnInfo entries for clustering key definitions found in SerializationHeader
 pub(super) fn build_clustering_key_columns(
     clustering_types: &[String],
-) -> Vec<super::super::header::ColumnInfo> {
+) -> crate::error::Result<Vec<super::super::header::ColumnInfo>> {
     if clustering_types.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let total = clustering_types.len();
@@ -323,14 +357,14 @@ pub(super) fn build_clustering_key_columns(
             // continues to come from `convert_marshal_type_to_cql`, which strips
             // `ReversedType` so the inner type's deserialization is undisturbed.
             let clustering_reversed = is_reversed_comparator(marshal_type);
-            let cql_type = convert_marshal_type_to_cql(marshal_type);
+            let cql_type = convert_marshal_type_to_cql_checked(marshal_type)?;
             let name = if total == 1 {
                 "clustering_key".to_string()
             } else {
                 format!("clustering_key_{}", idx)
             };
 
-            super::super::header::ColumnInfo {
+            Ok(super::super::header::ColumnInfo {
                 name,
                 column_type: cql_type,
                 is_primary_key: true,
@@ -338,7 +372,7 @@ pub(super) fn build_clustering_key_columns(
                 is_static: false,
                 is_clustering: true,
                 clustering_reversed,
-            }
+            })
         })
         .collect()
 }
@@ -347,12 +381,12 @@ pub(super) fn build_clustering_key_columns(
 pub(super) fn build_column_infos(
     partition_types: &[String],
     clustering_types: &[String],
-) -> (
+) -> crate::error::Result<(
     Vec<super::super::header::ColumnInfo>,
     Vec<super::super::header::ColumnInfo>,
-) {
-    let partition_key_columns = build_partition_key_columns(partition_types);
-    let clustering_key_columns = build_clustering_key_columns(clustering_types);
+)> {
+    let partition_key_columns = build_partition_key_columns(partition_types)?;
+    let clustering_key_columns = build_clustering_key_columns(clustering_types)?;
 
     tracing::debug!(
         "Constructed ColumnInfo entries from SerializationHeader: {} partition keys, {} clustering keys",
@@ -360,7 +394,7 @@ pub(super) fn build_column_infos(
         clustering_key_columns.len()
     );
 
-    (partition_key_columns, clustering_key_columns)
+    Ok((partition_key_columns, clustering_key_columns))
 }
 
 #[cfg(test)]
@@ -405,7 +439,8 @@ mod tests {
             "org.apache.cassandra.db.marshal.ReversedType(org.apache.cassandra.db.marshal.Int32Type)".to_string(),
         ];
 
-        let cols = build_clustering_key_columns(&clustering_types);
+        let cols = build_clustering_key_columns(&clustering_types)
+            .expect("every type here is one Cassandra writes");
         assert_eq!(cols.len(), 3);
 
         // DESC columns flag clustering_reversed; inner CQL type is preserved.
@@ -431,7 +466,8 @@ mod tests {
             "[org.apache.cassandra.db.marshal.ReversedType(org.apache.cassandra.db.marshal.TimestampType)"
                 .to_string(),
         ];
-        let cols = build_clustering_key_columns(&clustering_types);
+        let cols = build_clustering_key_columns(&clustering_types)
+            .expect("every type here is one Cassandra writes");
         assert_eq!(cols.len(), 1);
         assert!(
             cols[0].clustering_reversed,

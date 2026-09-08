@@ -5,17 +5,69 @@
 //! or exactly at the partition-key type length VInt
 //! (`parse_serialization_header_sequential`, used after EncodingStats). The
 //! marker-search dispatcher in the parent module picks which to call.
+//!
+//! # The failure channel is TYPED, and the dispatcher depends on it (#4104)
+//!
+//! Both routines return [`HeaderSchemaError`]: `Structural` means "these bytes are
+//! not a header" (the dispatcher may try another candidate offset), `Refused`
+//! means "these bytes ARE a header and declare a type Cassandra cannot have
+//! written" (the dispatcher must stop, fail-closed). Returning a bare `nom::Err`
+//! for both made a semantic refusal look like an ordinary failed candidate, so the
+//! search continued and ended at the empty-schema success — roborev job 119's
+//! fail-open, settled empirically by
+//! `encoding_stats_tests::a_frozen_scalar_header_is_refused_on_the_no_toc_marker_search_path_too`.
 
 use super::super::super::header::ColumnInfo;
 use super::super::super::vint::parse_vuint;
-use super::super::marshal_type::convert_marshal_type_to_cql;
+use super::super::marshal_type::convert_marshal_type_to_cql_checked;
+use super::super::schema_refusal::HeaderSchemaError;
 use super::super::SerializationHeaderResult;
-use nom::IResult;
+
+/// Whether a semantic refusal decided by [`convert_marshal_type_to_cql_checked`]
+/// is authoritative for THIS decode (#4104, roborev job 120).
+///
+/// The marker SEARCH has to ask two different questions of the same bytes, and
+/// only one of them may honour a refusal:
+///
+/// * `Enforce` — "what schema do these bytes declare?" A `FrozenType(<scalar>)`
+///   here means the header is unwritable by Cassandra, so it fails closed.
+/// * `Survey` — "are these bytes a SerializationHeader AT ALL?" The refusal is
+///   DEFERRED (the raw marshal spelling is kept in its place) so the decode can
+///   run to the end of the declared column list and the candidate's IDENTITY can
+///   be judged. A survey decode answers a boolean and NOTHING else: its column
+///   types are never returned to a caller as schema, which is why keeping an
+///   unconvertible spelling here is not a no-heuristics escape hatch (#28).
+///
+/// Both questions are needed because a marker-search candidate is a GUESS: the
+/// search walks arbitrary bytes, so an earlier FALSE candidate can decode a
+/// plausible `FrozenType(<scalar>)` run and its refusal must not abort an
+/// otherwise valid SSTable before the real header is ever reached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SemanticGate {
+    /// The header location is settled — a refusal is the answer.
+    Enforce,
+    /// The header location is what is being decided — defer the refusal.
+    Survey,
+}
+
+/// Convert a header type string, honouring the refusal only under
+/// [`SemanticGate::Enforce`]. See [`SemanticGate`] for why `Survey` keeps the raw
+/// spelling instead.
+fn gated_cql_type(gate: SemanticGate, internal_type: &str) -> Result<String, crate::error::Error> {
+    match convert_marshal_type_to_cql_checked(internal_type) {
+        Ok(cql_type) => Ok(cql_type),
+        Err(refusal) => match gate {
+            SemanticGate::Enforce => Err(refusal),
+            SemanticGate::Survey => Ok(internal_type.to_string()),
+        },
+    }
+}
 
 /// Parse SerializationHeader structure starting at a known offset
 pub(super) fn parse_serialization_header_at_offset(
     input: &[u8],
-) -> IResult<&[u8], SerializationHeaderResult> {
+    gate: SemanticGate,
+) -> Result<(&[u8], SerializationHeaderResult), HeaderSchemaError<'_>> {
     use nom::bytes::complete::tag;
     use nom::number::complete::u8 as parse_u8;
 
@@ -52,9 +104,7 @@ pub(super) fn parse_serialization_header_at_offset(
 
         let (remaining, type_bytes) = nom::bytes::complete::take(type_len as usize)(remaining)?;
         let clustering_type = std::str::from_utf8(type_bytes)
-            .map_err(|_| {
-                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
-            })?
+            .map_err(|_| HeaderSchemaError::structural_at(input))?
             .to_string();
 
         tracing::debug!("Clustering key {} type: {}", idx, clustering_type);
@@ -89,18 +139,13 @@ pub(super) fn parse_serialization_header_at_offset(
                 static_idx,
                 name_len
             );
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Verify,
-            )));
+            return Err(HeaderSchemaError::structural_at(input));
         }
 
         // Static column name (UTF-8 string)
         let (remaining, name_bytes) = nom::bytes::complete::take(name_len as usize)(remaining)?;
         let column_name = std::str::from_utf8(name_bytes)
-            .map_err(|_| {
-                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
-            })?
+            .map_err(|_| HeaderSchemaError::structural_at(input))?
             .to_string();
 
         // Static column type length (VInt - can exceed 127 for collection types)
@@ -120,10 +165,7 @@ pub(super) fn parse_serialization_header_at_offset(
                 column_name,
                 type_len_u64
             );
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Verify,
-            )));
+            return Err(HeaderSchemaError::structural_at(input));
         }
         if type_len_u64 > 1000 {
             tracing::warn!(
@@ -135,12 +177,14 @@ pub(super) fn parse_serialization_header_at_offset(
         // Static column type (UTF-8 string)
         let (remaining, type_bytes) = nom::bytes::complete::take(type_len_u64 as usize)(remaining)?;
         let internal_type = std::str::from_utf8(type_bytes)
-            .map_err(|_| {
-                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
-            })?
+            .map_err(|_| HeaderSchemaError::structural_at(input))?
             .to_string();
 
-        let cql_type = convert_marshal_type_to_cql(&internal_type);
+        // Gate 2 of #4104: refuse a `FrozenType(<scalar>)` no Cassandra writer can
+        // emit — as a SEMANTIC refusal, so the dispatcher stops searching instead
+        // of treating this offset as an ordinary failed candidate, and so the
+        // message (with its `CQL3Type.java:647-651` citation) reaches the user.
+        let cql_type = gated_cql_type(gate, &internal_type).map_err(HeaderSchemaError::Refused)?;
 
         tracing::debug!(
             "Static column {}: name='{}', type='{}' (CQL: '{}')",
@@ -180,9 +224,7 @@ pub(super) fn parse_serialization_header_at_offset(
         // Column name (UTF-8 string)
         let (remaining, name_bytes) = nom::bytes::complete::take(name_len as usize)(remaining)?;
         let column_name = std::str::from_utf8(name_bytes)
-            .map_err(|_| {
-                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
-            })?
+            .map_err(|_| HeaderSchemaError::structural_at(input))?
             .to_string();
 
         // Column type length (VInt - can exceed 127 for collection types)
@@ -202,10 +244,7 @@ pub(super) fn parse_serialization_header_at_offset(
                 column_name,
                 type_len_u64
             );
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Verify,
-            )));
+            return Err(HeaderSchemaError::structural_at(input));
         }
         if type_len_u64 > 1000 {
             tracing::warn!(
@@ -217,15 +256,17 @@ pub(super) fn parse_serialization_header_at_offset(
         // Column type (UTF-8 string)
         let (remaining, type_bytes) = nom::bytes::complete::take(type_len_u64 as usize)(remaining)?;
         let internal_type = std::str::from_utf8(type_bytes)
-            .map_err(|_| {
-                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
-            })?
+            .map_err(|_| HeaderSchemaError::structural_at(input))?
             .to_string();
 
         input = remaining;
 
         // Convert to CQL type
-        let cql_type = convert_marshal_type_to_cql(&internal_type);
+        // Gate 2 of #4104: refuse a `FrozenType(<scalar>)` no Cassandra writer can
+        // emit — as a SEMANTIC refusal, so the dispatcher stops searching instead
+        // of treating this offset as an ordinary failed candidate, and so the
+        // message (with its `CQL3Type.java:647-651` citation) reaches the user.
+        let cql_type = gated_cql_type(gate, &internal_type).map_err(HeaderSchemaError::Refused)?;
 
         tracing::debug!(
             "Column {}: name='{}', type='{}' (CQL: '{}')",
@@ -278,7 +319,8 @@ pub(super) fn parse_serialization_header_at_offset(
 /// [VInt regular_count] [for each: VInt name_len, name, VInt type_len, type]
 pub(super) fn parse_serialization_header_sequential(
     input: &[u8],
-) -> IResult<&[u8], SerializationHeaderResult> {
+    gate: SemanticGate,
+) -> Result<(&[u8], SerializationHeaderResult), HeaderSchemaError<'_>> {
     // Step 1: Parse partition key type (VInt length + string)
     let (input, pk_type_len) = parse_vuint(input)?;
 
@@ -288,10 +330,7 @@ pub(super) fn parse_serialization_header_sequential(
             "Invalid partition key type length: {} (expected 1-2000)",
             pk_type_len
         );
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Verify,
-        )));
+        return Err(HeaderSchemaError::structural_at(input));
     }
 
     let (input, pk_type_bytes) = nom::bytes::complete::take(pk_type_len as usize)(input)?;
@@ -313,10 +352,7 @@ pub(super) fn parse_serialization_header_sequential(
             "Invalid clustering key count: {} (expected 0-100)",
             clustering_count
         );
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Verify,
-        )));
+        return Err(HeaderSchemaError::structural_at(input));
     }
 
     // #3848: narrow only AFTER the bound above, which compares the RAW `u64`.
@@ -336,17 +372,12 @@ pub(super) fn parse_serialization_header_sequential(
 
         if type_len == 0 || type_len > 5000 {
             tracing::debug!("Invalid clustering key {} type length: {}", idx, type_len);
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Verify,
-            )));
+            return Err(HeaderSchemaError::structural_at(input));
         }
 
         let (remaining, type_bytes) = nom::bytes::complete::take(type_len as usize)(remaining)?;
         let clustering_type = std::str::from_utf8(type_bytes)
-            .map_err(|_| {
-                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
-            })?
+            .map_err(|_| HeaderSchemaError::structural_at(input))?
             .to_string();
 
         tracing::debug!(
@@ -368,10 +399,7 @@ pub(super) fn parse_serialization_header_sequential(
             "Invalid static column count: {} (expected 0-200)",
             static_count
         );
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Verify,
-        )));
+        return Err(HeaderSchemaError::structural_at(input));
     }
 
     // #3848: narrow only AFTER the bound above, which compares the RAW `u64`.
@@ -389,17 +417,12 @@ pub(super) fn parse_serialization_header_sequential(
 
         if name_len == 0 || name_len > 200 {
             tracing::debug!("Invalid static column {} name length: {}", idx, name_len);
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Verify,
-            )));
+            return Err(HeaderSchemaError::structural_at(input));
         }
 
         let (remaining, name_bytes) = nom::bytes::complete::take(name_len as usize)(remaining)?;
         let column_name = std::str::from_utf8(name_bytes)
-            .map_err(|_| {
-                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
-            })?
+            .map_err(|_| HeaderSchemaError::structural_at(input))?
             .to_string();
 
         // Column type (VInt length + UTF-8)
@@ -411,20 +434,19 @@ pub(super) fn parse_serialization_header_sequential(
                 column_name,
                 type_len
             );
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Verify,
-            )));
+            return Err(HeaderSchemaError::structural_at(input));
         }
 
         let (remaining, type_bytes) = nom::bytes::complete::take(type_len as usize)(remaining)?;
         let internal_type = std::str::from_utf8(type_bytes)
-            .map_err(|_| {
-                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
-            })?
+            .map_err(|_| HeaderSchemaError::structural_at(input))?
             .to_string();
 
-        let cql_type = convert_marshal_type_to_cql(&internal_type);
+        // Gate 2 of #4104: refuse a `FrozenType(<scalar>)` no Cassandra writer can
+        // emit — as a SEMANTIC refusal, so the dispatcher stops searching instead
+        // of treating this offset as an ordinary failed candidate, and so the
+        // message (with its `CQL3Type.java:647-651` citation) reaches the user.
+        let cql_type = gated_cql_type(gate, &internal_type).map_err(HeaderSchemaError::Refused)?;
 
         tracing::debug!(
             "Sequential parser: static column {}: name='{}', type='{}'",
@@ -454,10 +476,7 @@ pub(super) fn parse_serialization_header_sequential(
             "Invalid regular column count: {} (expected 0-500)",
             regular_count
         );
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Verify,
-        )));
+        return Err(HeaderSchemaError::structural_at(input));
     }
 
     // #3848: narrow only AFTER the bound above, which compares the RAW `u64`.
@@ -475,17 +494,12 @@ pub(super) fn parse_serialization_header_sequential(
 
         if name_len == 0 || name_len > 200 {
             tracing::debug!("Invalid regular column {} name length: {}", idx, name_len);
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Verify,
-            )));
+            return Err(HeaderSchemaError::structural_at(input));
         }
 
         let (remaining, name_bytes) = nom::bytes::complete::take(name_len as usize)(remaining)?;
         let column_name = std::str::from_utf8(name_bytes)
-            .map_err(|_| {
-                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
-            })?
+            .map_err(|_| HeaderSchemaError::structural_at(input))?
             .to_string();
 
         // Column type (VInt length + UTF-8)
@@ -497,20 +511,19 @@ pub(super) fn parse_serialization_header_sequential(
                 column_name,
                 type_len
             );
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Verify,
-            )));
+            return Err(HeaderSchemaError::structural_at(input));
         }
 
         let (remaining, type_bytes) = nom::bytes::complete::take(type_len as usize)(remaining)?;
         let internal_type = std::str::from_utf8(type_bytes)
-            .map_err(|_| {
-                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
-            })?
+            .map_err(|_| HeaderSchemaError::structural_at(input))?
             .to_string();
 
-        let cql_type = convert_marshal_type_to_cql(&internal_type);
+        // Gate 2 of #4104: refuse a `FrozenType(<scalar>)` no Cassandra writer can
+        // emit — as a SEMANTIC refusal, so the dispatcher stops searching instead
+        // of treating this offset as an ordinary failed candidate, and so the
+        // message (with its `CQL3Type.java:647-651` citation) reaches the user.
+        let cql_type = gated_cql_type(gate, &internal_type).map_err(HeaderSchemaError::Refused)?;
 
         tracing::debug!(
             "Sequential parser: regular column {}: name='{}', type='{}'",

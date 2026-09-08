@@ -7,6 +7,7 @@ use super::super::*;
 use super::support::*;
 use crate::schema::{ClusteringColumn, ClusteringOrder, Column, CqlType, KeyColumn, TableSchema};
 use crate::storage::serialization::types::TypeSerializer;
+use crate::storage::sstable::writer::stats_writer::cql_type_to_marshal_type as marshal_of;
 use crate::storage::write_engine::mutation::{CellOperation, ClusteringKey, PartitionKey, TableId};
 use crate::types::UdtValue;
 use std::collections::HashMap;
@@ -1601,16 +1602,12 @@ fn frozen_collection_of_udt_column_advertises_user_type_header() {
     assert_eq!(schema.columns[0].data_type, "frozen<list<int>>");
     assert_eq!(schema.columns[1].data_type, "frozen<map<text,int>>");
     assert_eq!(
-        crate::storage::sstable::writer::stats_writer::cql_type_to_marshal_type(
-            &schema.columns[0].data_type
-        ),
+        marshal_of(&schema.columns[0].data_type).expect("a renderable marshal type"),
         "org.apache.cassandra.db.marshal.FrozenType(\
          org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type))",
     );
     assert_eq!(
-        crate::storage::sstable::writer::stats_writer::cql_type_to_marshal_type(
-            &schema.columns[1].data_type
-        ),
+        marshal_of(&schema.columns[1].data_type).expect("a renderable marshal type"),
         "org.apache.cassandra.db.marshal.FrozenType(\
          org.apache.cassandra.db.marshal.MapType(\
          org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.Int32Type))",

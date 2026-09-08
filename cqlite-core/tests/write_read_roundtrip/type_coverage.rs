@@ -1401,8 +1401,40 @@ async fn test_type_frozen_udt() {
     }));
     let original = Value::Frozen(Box::new(inner_udt.clone()));
 
-    let info = write_single_value(&temp_dir, &schema, "frozen_col", original.clone()).await;
+    // The registry goes to the WRITE side too (#4158): without it the writer has
+    // no field names/types for "person" and can only advertise the column as an
+    // opaque `BytesType` — it must never fabricate a definition, and it must
+    // never fabricate the impossible `FrozenType(BytesType)` it used to emit.
+    let info = super::write_single_value_with_registry(
+        &temp_dir,
+        &schema,
+        "frozen_col",
+        original.clone(),
+        udt_registry.clone(),
+    )
+    .await;
     assert_single_partition_written(&info);
+
+    // ORACLE (#4158): the exact shape Apache Cassandra 5.0 writes for a
+    // TOP-LEVEL `frozen<udt>` regular column, transcribed from a
+    // Cassandra-written header — `test_oa/udt_table-*/oa-1-big-Statistics.db`,
+    // column `address frozen<address_type>`:
+    //   FrozenType(UserType(test_oa,616464726573735f74797065,
+    //     737472656574:UTF8Type,63697479:UTF8Type,636f756e747279:UTF8Type,
+    //     706f7374616c5f636f6465:UTF8Type))
+    // i.e. plain-text keyspace, LOWERCASE-HEX UDT name, then `<hex-field>:<marshal>`
+    // in DECLARED order (`UserType.java:436-448` +
+    // `TypeParser.stringifyUserTypeParameters`). Rendered here for
+    // test_types.person{name text, age int}: 706572736f6e = "person",
+    // 6e616d65 = "name", 616765 = "age". Asserting on the emitted bytes — NOT on
+    // what CQLite reads back — is what makes this independent of the reader
+    // (#3042: a CQLite-write + CQLite-read round-trip is invariant to a uniform
+    // header defect, which is exactly how `FrozenType(BytesType)` survived).
+    const CASSANDRA_FROZEN_UDT_MARSHAL: &str = "org.apache.cassandra.db.marshal.FrozenType(\
+org.apache.cassandra.db.marshal.UserType(test_types,706572736f6e,\
+6e616d65:org.apache.cassandra.db.marshal.UTF8Type,\
+616765:org.apache.cassandra.db.marshal.Int32Type))";
+    super::assert_statistics_header_contains(&info, CASSANDRA_FROZEN_UDT_MARSHAL);
 
     // Use the UDT-registry-aware scan helper so the reader can resolve "person".
     let col_value =

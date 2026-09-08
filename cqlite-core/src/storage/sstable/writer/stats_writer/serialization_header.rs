@@ -106,17 +106,17 @@ impl StatisticsWriter {
             Some(s) => {
                 // keyType: single PK → simple type, composite PK → CompositeType(...)
                 let key_marshal = if s.partition_keys.len() > 1 {
-                    let inner: Vec<String> = s
+                    let inner = s
                         .partition_keys
                         .iter()
                         .map(|pk| cql_type_to_marshal_type(&pk.data_type))
-                        .collect();
+                        .collect::<Result<Vec<String>>>()?;
                     format!(
                         "org.apache.cassandra.db.marshal.CompositeType({})",
                         inner.join(",")
                     )
                 } else if !s.partition_keys.is_empty() {
-                    cql_type_to_marshal_type(&s.partition_keys[0].data_type)
+                    cql_type_to_marshal_type(&s.partition_keys[0].data_type)?
                 } else {
                     "org.apache.cassandra.db.marshal.BytesType".to_string()
                 };
@@ -126,7 +126,7 @@ impl StatisticsWriter {
                 // clusteringTypes: VUInt count + for each CK: VUInt-length-prefixed marshal type
                 buffer.write_all(&encode_vuint(s.clustering_keys.len() as u64))?;
                 for ck in &s.clustering_keys {
-                    let ck_marshal = cql_type_to_marshal_type(&ck.data_type);
+                    let ck_marshal = cql_type_to_marshal_type(&ck.data_type)?;
                     buffer.write_all(&encode_vuint(ck_marshal.len() as u64))?;
                     buffer.write_all(ck_marshal.as_bytes())?;
                 }
@@ -163,7 +163,7 @@ impl StatisticsWriter {
                     buffer.write_all(&encode_vuint(col.name.len() as u64))?;
                     buffer.write_all(col.name.as_bytes())?;
                     // Column type: VUInt length + marshal type bytes
-                    let col_marshal = cql_type_to_marshal_type(&col.data_type);
+                    let col_marshal = cql_type_to_marshal_type(&col.data_type)?;
                     buffer.write_all(&encode_vuint(col_marshal.len() as u64))?;
                     buffer.write_all(col_marshal.as_bytes())?;
                 }
@@ -188,7 +188,7 @@ impl StatisticsWriter {
                 for col in &regular_cols {
                     buffer.write_all(&encode_vuint(col.name.len() as u64))?;
                     buffer.write_all(col.name.as_bytes())?;
-                    let col_marshal = cql_type_to_marshal_type(&col.data_type);
+                    let col_marshal = cql_type_to_marshal_type(&col.data_type)?;
                     buffer.write_all(&encode_vuint(col_marshal.len() as u64))?;
                     buffer.write_all(col_marshal.as_bytes())?;
                 }
