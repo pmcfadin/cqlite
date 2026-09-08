@@ -239,6 +239,63 @@ pub(crate) fn check(
     ))
 }
 
+/// `Ok(())` when the manager may honestly report that `table_name` has NO data;
+/// otherwise [`Error::IncompleteDiscovery`] naming the first unreadable directory.
+///
+/// Asked ONLY when the resolved reader list came out empty, which is the one
+/// question an incomplete discovery walk can change the answer to. A table that WAS
+/// discovered and opened reads normally no matter how much of the rest of the tree
+/// was unreadable — that is what keeps a stock root-owned `lost+found` (mode 0700,
+/// present on essentially every ext4 data volume) harmless instead of turning it
+/// into a whole-database outage.
+///
+/// Pure over the walk record, for the same reason [`check`] is pure over the
+/// ledger: the caller reads BOTH under one guard acquisition and evaluates
+/// afterwards (see [`SSTableManager::resolve_checked_snapshot`]).
+///
+/// See [`discovery_walk`](super::discovery_walk) for the four-outcome table this
+/// implements, and why the fact is NOT recorded as an unattributed refusal.
+pub(crate) fn absence_check(
+    incomplete: &super::discovery_walk::IncompleteDiscovery,
+    table_name: &str,
+) -> Result<()> {
+    let Some(first) = incomplete.iter().next() else {
+        return Ok(());
+    };
+    Err(Error::incomplete_discovery(
+        table_name,
+        first.path().to_path_buf(),
+        incomplete.len(),
+        first.cause(),
+    ))
+}
+
+/// The COMPLETE read-admission verdict for one consistent snapshot.
+///
+/// Every input is a value already read under a single `table_readers` guard
+/// acquisition, so this function cannot observe a torn state — which is the whole
+/// point (issue #4159, roborev round 5). Keeping it pure also makes the ordering
+/// rule below unit-testable without a runtime, a filesystem or a lock.
+///
+/// The order is load-bearing and is asserted by the tests: a REFUSAL outranks an
+/// empty reader list, so "this table is unreadable" is never reported as "this
+/// table is empty"; and the absence question is asked ONLY when the reader list is
+/// empty, so a discovered, healthy table still reads while part of the tree is
+/// unreadable.
+pub(crate) fn verdict_for(
+    ledger: &RefusalLedger,
+    incomplete: &super::discovery_walk::IncompleteDiscovery,
+    table_name: &str,
+    resolution_used_exact_key: bool,
+    readers_are_empty: bool,
+) -> Result<()> {
+    check(ledger, table_name, resolution_used_exact_key)?;
+    if readers_are_empty {
+        absence_check(incomplete, table_name)?;
+    }
+    Ok(())
+}
+
 /// Record `cause` for `path` under `key`.
 pub(crate) fn record(ledger: &mut RefusalLedger, key: String, path: PathBuf, cause: Error) {
     ledger
@@ -290,62 +347,98 @@ impl SSTableManager {
     /// handed out, makes both impossible: a surface cannot obtain a reader list
     /// without the refusal question having been answered.
     ///
-    /// The order matters: the refusal check runs BEFORE any reader I/O and before
-    /// the emptiness test, so "the table is unreadable" is never reported as "the
-    /// table is empty". Resolution itself runs first, but it only takes the
-    /// `table_readers` read guard — no SSTable is touched — and its exact-vs-fallback
-    /// decision is exactly what tells the refusal check WHICH ledger keys can bear on
-    /// this query (see [`bearing_on`]).
+    /// # ONE consistent snapshot — resolution and validation cannot be torn
+    ///
+    /// Issue #4159, roborev round 5. The reader list and the refusal/discovery
+    /// verdict used to be THREE separate lock acquisitions, and the window between
+    /// them was not benign. A read could resolve an EMPTY reader list, a concurrent
+    /// `refresh_tables` could then add a repaired reader and clear its refusal, and
+    /// the checks — running after — saw a clean ledger. The read returned
+    /// `Ok(empty)`: at the snapshot instant the answer was `Err` (a refused
+    /// generation), after the refresh it was one row, and `Ok(empty)` was correct at
+    /// NEITHER. That is a linearizability violation, not stale-but-valid data, and
+    /// its symptom is exactly the silent empty this issue exists to remove — which
+    /// is why the ordinary "a snapshot may be stale" argument (issue #1591, where
+    /// `Ok(empty)` before a flush IS the true answer at the scan's instant) does not
+    /// cover it.
+    ///
+    /// So all three are read under a SINGLE `table_readers` read-guard acquisition
+    /// and the verdict is computed from those values by the pure
+    /// [`verdict_for`]. A refresh cannot interleave, because applying its diff needs
+    /// the `table_readers` WRITE guard.
+    ///
+    /// ## No guard is held across I/O (issue #1591 preserved)
+    ///
+    /// Everything inside the guarded block is a MEMORY read — cloning `Arc`s and
+    /// two `HashMap`/`Vec` lookups; no SSTable, index or statistics byte is touched.
+    /// All three guards are released at the end of that block, BEFORE this function
+    /// returns, so every caller does its reader I/O with nothing held. That is the
+    /// property `#1591`'s `scan_gate` exists to police, and it is unchanged.
+    ///
+    /// ## Lock order: `table_readers` -> `refused` -> `incomplete_walk`
+    ///
+    /// A strict SUFFIX of the writers' order (`readers` -> `table_readers` ->
+    /// `refused` -> `incomplete_walk`, in `refresh_tables` and both loaders), so a
+    /// scan can never deadlock against a refresh. Never invert these.
+    async fn resolve_checked_snapshot(
+        &self,
+        table_id: &TableId,
+    ) -> Result<(Vec<Arc<reader::SSTableReader>>, bool)> {
+        let table_name = table_id.name();
+
+        let (readers, resolution_used_exact_key, verdict) = {
+            // (1) `table_readers` — the reader set AND the exact-vs-fallback flag,
+            //     so the flag can never describe a different map than the readers.
+            let table_readers = self.table_readers.read().await;
+            let resolution_used_exact_key = Self::fully_qualified_match(&table_readers, table_name);
+            let readers = Self::resolve_reader_list(&table_readers, table_name)
+                .cloned()
+                .unwrap_or_default();
+
+            // (2) + (3) `refused`, then `incomplete_walk`, both STILL under (1).
+            let refused = self.refused.read().await;
+            let incomplete = self.incomplete_walk.read().await;
+            let verdict = verdict_for(
+                &refused,
+                &incomplete,
+                table_name,
+                resolution_used_exact_key,
+                readers.is_empty(),
+            );
+
+            (readers, resolution_used_exact_key, verdict)
+        }; // ALL guards dropped here — nothing is held across the caller's I/O.
+
+        verdict?;
+        Ok((readers, resolution_used_exact_key))
+    }
+
+    /// [`resolve_reader_snapshot`](SSTableManager::resolve_reader_snapshot), but
+    /// FAILING CLOSED when any SSTable of `table_id` was REFUSED at open, or when
+    /// the table was not discovered and discovery was incomplete (issue #4159).
     pub(crate) async fn resolve_readers_checked(
         &self,
         table_id: &TableId,
     ) -> Result<(Vec<Arc<reader::SSTableReader>>, bool)> {
-        let snapshot = self.resolve_reader_snapshot(table_id).await;
-        self.ensure_readable(table_id, snapshot.1).await?;
-        if snapshot.0.is_empty() {
-            self.ensure_absence_is_knowable(table_id).await?;
-        }
-        Ok(snapshot)
+        self.resolve_checked_snapshot(table_id).await
     }
 
     /// [`resolve_table_readers`](SSTableManager::resolve_table_readers) with the
-    /// same check applied first — the streaming surfaces' counterpart to
+    /// same check applied — the streaming surfaces' counterpart to
     /// [`resolve_readers_checked`](SSTableManager::resolve_readers_checked).
     ///
-    /// Resolution goes through [`resolve_reader_snapshot`](SSTableManager::resolve_reader_snapshot)
-    /// rather than `resolve_table_readers` so the exact-vs-fallback flag comes from
-    /// the SAME guard as the reader list. The two resolvers implement identical
-    /// lookup semantics (exact key, else the bare name), so this changes no reader
-    /// set; it only makes the flag available without a second, racy map read.
+    /// Shares [`resolve_checked_snapshot`](SSTableManager::resolve_checked_snapshot)
+    /// verbatim rather than repeating the acquisition, so the lock ORDER and the
+    /// one-snapshot property exist in exactly one place and a future edit cannot
+    /// make the two surfaces disagree. `resolve_table_readers`' own lookup is
+    /// semantically identical (exact key, else the bare name), so no reader set
+    /// changes.
     #[cfg(not(feature = "tombstones"))]
     pub(super) async fn resolve_table_readers_checked(
         &self,
         table_id: &TableId,
     ) -> Result<Vec<Arc<reader::SSTableReader>>> {
-        let (readers, resolution_used_exact_key) = self.resolve_reader_snapshot(table_id).await;
-        self.ensure_readable(table_id, resolution_used_exact_key)
-            .await?;
-        if readers.is_empty() {
-            self.ensure_absence_is_knowable(table_id).await?;
-        }
-        Ok(readers)
-    }
-
-    /// `Ok(())` iff no recorded refusal bears on a read of `table_id`.
-    ///
-    /// Held in one place so the ledger's resolution rule (exact key, unqualified
-    /// fallback, plus every unattributed refusal) cannot drift from
-    /// [`resolve_reader_list`](SSTableManager::resolve_reader_list)'s.
-    /// `resolution_used_exact_key` must come from the same `table_readers` read that
-    /// produced the caller's reader list — see [`bearing_on`] for why the lookup is
-    /// gated on it and why that is sound in both directions.
-    pub(crate) async fn ensure_readable(
-        &self,
-        table_id: &TableId,
-        resolution_used_exact_key: bool,
-    ) -> Result<()> {
-        let refused = self.refused.read().await;
-        check(&refused, table_id.name(), resolution_used_exact_key)
+        Ok(self.resolve_checked_snapshot(table_id).await?.0)
     }
 
     /// Record a directory an EXTERNAL discovery could not read (issue #4159).
@@ -361,30 +454,6 @@ impl SSTableManager {
     pub async fn note_incomplete_discovery(&self, directory: std::path::PathBuf, cause: Error) {
         let mut incomplete = self.incomplete_walk.write().await;
         incomplete.note_external(super::discovery_walk::UnreadableDir::new(directory, cause));
-    }
-
-    /// `Ok(())` iff the manager may honestly report that `table_id` has NO data.
-    ///
-    /// Asked ONLY when the resolved reader list came out empty, which is the one
-    /// question an incomplete discovery walk can change the answer to. A table that
-    /// WAS discovered and opened reads normally no matter how much of the rest of
-    /// the tree was unreadable — that is what keeps a stock root-owned `lost+found`
-    /// (mode 0700, present on essentially every ext4 data volume) harmless instead
-    /// of turning it into a whole-database outage.
-    ///
-    /// See [`discovery_walk`](super::discovery_walk) for the four-outcome table this
-    /// implements, and why the fact is NOT recorded as an unattributed refusal.
-    pub(crate) async fn ensure_absence_is_knowable(&self, table_id: &TableId) -> Result<()> {
-        let incomplete = self.incomplete_walk.read().await;
-        let Some(first) = incomplete.iter().next() else {
-            return Ok(());
-        };
-        Err(Error::incomplete_discovery(
-            table_id.name(),
-            first.path().to_path_buf(),
-            incomplete.len(),
-            first.cause(),
-        ))
     }
 }
 
@@ -523,6 +592,162 @@ mod tests {
             Err(Error::UnreadableSSTable { refused, .. }) => assert_eq!(refused, 3),
             other => panic!("expected 3 bearing refusals, got {other:?}"),
         }
+    }
+
+    /// The verdict is a pure function of ONE snapshot, and this pins the exact
+    /// outcome the torn read produced wrongly (roborev round 5).
+    ///
+    /// The race was: resolve an EMPTY reader list, a concurrent refresh clears the
+    /// refusal, the later check sees a clean ledger, and the read answers
+    /// `Ok(empty)` — correct at neither instant. With both values taken from one
+    /// snapshot, "empty reader list AND a live refusal" can only ever be `Err`.
+    #[test]
+    fn an_empty_reader_list_with_a_live_refusal_is_err_not_empty_success() {
+        let l = ledger_with("ks.t", "/d/ks/t-1/nb-1-big-Data.db");
+        let none = crate::storage::sstable::discovery_walk::IncompleteDiscovery::default();
+        let e = verdict_for(&l, &none, "ks.t", true, /* readers_are_empty */ true)
+            .expect_err("an unreadable table must never be reported as an empty one");
+        assert!(matches!(e, Error::UnreadableSSTable { .. }));
+    }
+
+    /// A REFUSAL outranks emptiness, and emptiness is only consulted when the reader
+    /// list really is empty. Both halves of the ordering, from one snapshot.
+    #[test]
+    fn a_refusal_outranks_emptiness_and_a_non_empty_table_ignores_absence() {
+        let l = ledger_with("ks.t", "/d/ks/t-1/nb-1-big-Data.db");
+        let none = crate::storage::sstable::discovery_walk::IncompleteDiscovery::default();
+
+        // Non-empty reader list + a refusal on one generation: still Err (the
+        // PARTIAL case — a partial answer presented as complete is the same defect).
+        assert!(matches!(
+            verdict_for(&l, &none, "ks.t", true, false),
+            Err(Error::UnreadableSSTable { .. })
+        ));
+
+        // Clean ledger, complete walk: both list states are Ok.
+        let clean = RefusalLedger::new();
+        assert!(verdict_for(&clean, &none, "ks.t", true, true).is_ok());
+        assert!(verdict_for(&clean, &none, "ks.t", true, false).is_ok());
+    }
+
+    /// An incomplete walk makes ABSENCE unknowable, but never makes a DISCOVERED
+    /// table unreadable — the property that keeps a stock `lost+found` from being a
+    /// whole-database outage. Also from one snapshot.
+    #[test]
+    fn an_incomplete_walk_only_bears_on_an_empty_reader_list() {
+        let clean = RefusalLedger::new();
+        let mut incomplete =
+            crate::storage::sstable::discovery_walk::IncompleteDiscovery::default();
+        incomplete.extend_from_walk(
+            [crate::storage::sstable::discovery_walk::UnreadableDir::new(
+                PathBuf::from("/d/lost+found"),
+                Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "denied",
+                )),
+            )],
+        );
+
+        // Discovered and healthy: reads normally despite the gap.
+        assert!(
+            verdict_for(&clean, &incomplete, "ks.t", true, false).is_ok(),
+            "a table that WAS discovered and opened must still read"
+        );
+
+        // Not discovered, and the walk could not see everything: absence is not a
+        // fact we know.
+        let e = verdict_for(&clean, &incomplete, "ks.t", true, true)
+            .expect_err("absence cannot be confirmed while part of the tree is unreadable");
+        match e {
+            Error::IncompleteDiscovery { directory, .. } => {
+                assert_eq!(directory, PathBuf::from("/d/lost+found"));
+            }
+            other => panic!("expected IncompleteDiscovery, got {other:?}"),
+        }
+    }
+
+    /// The ORDERING property itself, deterministically and with no wall clock:
+    /// resolution and validation really do share ONE `table_readers` guard
+    /// acquisition (roborev round 5).
+    ///
+    /// # How this discriminates, without a timing race
+    ///
+    /// From outside, the atomic and the split shapes are hard to tell apart: both
+    /// end up touching the same locks. The one observable difference is what is HELD
+    /// while the snapshot waits on `refused`. So the test parks it there on purpose:
+    /// it takes the `refused` WRITE guard first, starts the snapshot, and drives the
+    /// spawned task to its first pending await with `yield_now` — cooperative
+    /// scheduling, not a sleep. At that point the snapshot is blocked on
+    /// `refused.read()`.
+    ///
+    /// `table_readers.try_write()` is then the probe, and it is non-blocking, so
+    /// there is no wall-clock threshold anywhere in this test:
+    ///
+    /// * ONE snapshot  -> `table_readers` is still held  -> `try_write` FAILS  (asserted)
+    /// * TWO snapshots -> it was released before `refused` -> `try_write` SUCCEEDS
+    ///
+    /// A refresh applies its diff under `table_readers.write()`, so "try_write
+    /// fails" is exactly "a refresh cannot interleave between resolution and
+    /// validation" — the property the finding is about.
+    #[tokio::test]
+    async fn resolution_and_validation_share_one_table_readers_guard() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let config = crate::Config::default();
+        let platform = Arc::new(crate::Platform::new(&config).await.expect("platform"));
+        let manager = Arc::new(
+            SSTableManager::new(
+                tmp.path(),
+                &config,
+                platform,
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .expect("manager over an empty directory"),
+        );
+
+        // Hold `refused` for writing so the snapshot MUST park on it.
+        let refused_guard = manager.refused.write().await;
+
+        let parked = {
+            let m = Arc::clone(&manager);
+            tokio::spawn(async move {
+                let _ = m.resolve_checked_snapshot(&TableId::new("ks.t")).await;
+            })
+        };
+
+        // Drive the spawned task to its first pending await. Cooperative yields,
+        // never a sleep — nothing here depends on elapsed time.
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !parked.is_finished(),
+            "control: the snapshot must be BLOCKED on `refused` for this probe to \
+             mean anything"
+        );
+
+        assert!(
+            manager.table_readers.try_write().is_err(),
+            "the snapshot must STILL hold the `table_readers` read guard while it \
+             waits for `refused`. If it has released it, resolution and validation \
+             are two separate snapshots and a concurrent refresh can interleave \
+             between them — the read then answers Ok(empty) for a state that was \
+             true at neither instant (#4159, roborev round 5)"
+        );
+
+        drop(refused_guard);
+        parked
+            .await
+            .expect("the parked snapshot completes once `refused` is free");
+
+        // And with nothing held, the guards really were all released: a refresh's
+        // write acquisition succeeds.
+        assert!(
+            manager.table_readers.try_write().is_ok(),
+            "every guard must be dropped before the snapshot returns, or #1591's \
+             no-guard-across-I/O property is broken"
+        );
     }
 
     #[test]
