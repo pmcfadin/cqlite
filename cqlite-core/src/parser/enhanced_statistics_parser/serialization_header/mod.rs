@@ -146,8 +146,7 @@ pub(super) fn parse_serialization_header(
                 if is_valid_single_byte_len || is_multi_byte_vint {
                     // Try parsing from this offset using sequential parser
                     let candidate = &input[type_len_offset..];
-                    match parse_serialization_header_sequential(candidate, SemanticGate::Enforce)
-                    {
+                    match parse_serialization_header_sequential(candidate, SemanticGate::Enforce) {
                         // A semantic refusal fails CLOSED — but only once these
                         // bytes are CONFIRMED to be a header rather than a
                         // candidate that briefly looked like one. The confirmation
@@ -156,12 +155,10 @@ pub(super) fn parse_serialization_header(
                         // (#4104, roborev job 120). Unconfirmed falls through to
                         // the next candidate offset, like a structural failure.
                         Err(refused @ HeaderSchemaError::Refused(_)) => {
-                            if candidate_confirmed_as_header(
-                                parse_serialization_header_sequential(
-                                    candidate,
-                                    SemanticGate::Survey,
-                                ),
-                            ) {
+                            if candidate_confirmed_as_header(parse_serialization_header_sequential(
+                                candidate,
+                                SemanticGate::Survey,
+                            )) {
                                 return Err(refused);
                             }
                         }
@@ -188,10 +185,8 @@ pub(super) fn parse_serialization_header(
                     let prev_offset = type_len_offset - 1;
                     if input[prev_offset] == 0x00 && input[type_len_offset] == 0x00 {
                         let candidate = &input[prev_offset..];
-                        match parse_serialization_header_at_offset(
-                            candidate,
-                            SemanticGate::Enforce,
-                        ) {
+                        match parse_serialization_header_at_offset(candidate, SemanticGate::Enforce)
+                        {
                             // Same confirm-then-fail-closed rule as the sequential
                             // candidate above: this offset is a guess too.
                             Err(refused @ HeaderSchemaError::Refused(_)) => {

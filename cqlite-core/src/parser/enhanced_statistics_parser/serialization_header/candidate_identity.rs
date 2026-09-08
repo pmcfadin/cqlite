@@ -110,7 +110,10 @@ fn is_marshal_type_spelling(type_string: &str) -> bool {
     // wrapping paren or bracket (`(org.apache…UUIDType`,
     // `[org.apache…ReversedType(…)`) — the same normalisation
     // `marshal_type::is_reversed_comparator` performs.
-    let spelling = type_string.trim().trim_start_matches(['(', '[']).trim_start();
+    let spelling = type_string
+        .trim()
+        .trim_start_matches(['(', '['])
+        .trim_start();
     let Some(class_name) = spelling.strip_prefix(MARSHAL_PACKAGE) else {
         return false;
     };
@@ -182,7 +185,10 @@ mod tests {
     #[test]
     fn a_candidate_without_exactly_one_key_type_is_unconfirmed() {
         assert!(!candidate_confirmed_as_header(survey_ok(&[], &[])));
-        assert!(!candidate_confirmed_as_header(survey_ok(&[UTF8, UTF8], &[])));
+        assert!(!candidate_confirmed_as_header(survey_ok(
+            &[UTF8, UTF8],
+            &[]
+        )));
     }
 
     #[test]

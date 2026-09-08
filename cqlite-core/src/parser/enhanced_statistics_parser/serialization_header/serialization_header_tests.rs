@@ -481,8 +481,8 @@ fn a_false_candidate_carrying_a_frozen_scalar_run_must_not_refuse_a_valid_header
     let header_offset = buffer.len();
     buffer.extend_from_slice(&valid_header());
 
-    let (_, (pk_types, ck_types, columns)) = parse_serialization_header(&buffer)
-        .unwrap_or_else(|e| {
+    let (_, (pk_types, ck_types, columns)) =
+        parse_serialization_header(&buffer).unwrap_or_else(|e| {
             panic!(
                 "OVER-REFUSAL: a valid header at offset {header_offset} was rejected because an \
                  EARLIER false candidate quoted a frozen scalar; a marker-search candidate is a \
@@ -493,7 +493,10 @@ fn a_false_candidate_carrying_a_frozen_scalar_run_must_not_refuse_a_valid_header
     // The schema returned must be the REAL header's, not the false candidate's:
     // continuing the search must not degrade into accepting the guess either.
     assert_eq!(pk_types, vec![marshal("UTF8Type")], "real header's keyType");
-    assert!(ck_types.is_empty(), "real header declares no clustering keys");
+    assert!(
+        ck_types.is_empty(),
+        "real header declares no clustering keys"
+    );
     assert_eq!(columns.len(), 1, "real header declares one regular column");
     assert_eq!(columns[0].name, "v");
     assert_eq!(columns[0].column_type, "int");
@@ -537,7 +540,11 @@ fn the_false_candidate_reaches_the_semantic_gate_and_is_unconfirmed() {
         "the fixture's keyType is junk-prefixed: {:?}",
         key_types[0]
     );
-    assert_eq!(columns.len(), 1, "the deferred refusal did not cut the decode");
+    assert_eq!(
+        columns.len(),
+        1,
+        "the deferred refusal did not cut the decode"
+    );
     assert!(
         !candidate_confirmed_as_header(survey),
         "a run whose keyType is not a marshal class spelling must stay UNCONFIRMED"
@@ -654,4 +661,3 @@ fn a_false_legacy_marker_candidate_must_not_refuse_a_valid_header() {
     assert_eq!(columns[0].name, "v");
     assert_eq!(columns[0].column_type, "int");
 }
-
