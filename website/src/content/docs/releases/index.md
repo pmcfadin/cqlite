@@ -14,6 +14,7 @@ For the complete, granular change list, see the
 
 | Version | Date | Highlights |
 |---------|------|-----------|
+| [v0.17.0](/cqlite/releases/v0-17-0/) | 2026-09-08 | Read correctness + read-path performance vs stock Cassandra 5 — 97 issues · 3.06× Flight single-SSTable fast path · one value/error contract across Python/Node/CLI · breaking JSON + config changes |
 | [v0.16.1](/cqlite/releases/v0-16-1/) | 2026-07-23 | Reads a second Cassandra on-disk format — CommitLog segment files — via a library API and a `read-commitlog` CLI |
 | [v0.16.0](/cqlite/releases/v0-16-0/) | 2026-07-22 | Trino connector completeness — typed collection columns (array/row/map) · weight-balanced split fan-out · `LIMIT`-cancellation hang fixed |
 | [v0.15.0](/cqlite/releases/v0-15-0/) | 2026-07-17 | Trino latency/throughput/ops — ~15× warm throughput · admission control · saturation gauges · P0 silent-row-loss fix |
