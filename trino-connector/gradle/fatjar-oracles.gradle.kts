@@ -131,7 +131,8 @@ val verifyFatJar by tasks.registering {
         val resolvedArrow = mutableMapOf<String, String>()
         val serviceUnion = mutableMapOf<String, MutableSet<String>>()
         val serviceSources = mutableMapOf<String, MutableSet<String>>()
-        val sourceEntries = mutableMapOf<String, List<String>>()
+        // (component display name, artifact file name, entry names) per resolved jar.
+        val sourceRecords = mutableListOf<Triple<String, String, List<String>>>()
         val unreadable = mutableListOf<String>()
         for (art in artifacts) {
             val label = art.id.componentIdentifier.displayName
@@ -166,7 +167,17 @@ val verifyFatJar by tasks.registering {
                     }
                 }
             }
-            sourceEntries[label] = names
+            // APPENDED to a list, never put into a map keyed on `label`. A component
+            // identifier's display name is NOT unique per artifact: a module that
+            // resolves both its plain and a CLASSIFIED artifact (the realistic case here
+            // is `netty-tcnative-boringssl-static` plus `…:linux-x86_64`) yields two
+            // artifacts under ONE display name. A map would silently overwrite, which
+            // does two kinds of damage: the losing jar's contribution goes unmeasured,
+            // and `globalNameCounts` below shrinks — which can flip names that WERE
+            // shared to count == 1, minting bogus "unique" probes for OTHER jars and
+            // weakening the eligibility rule everywhere. The arithmetic invariant after
+            // probe selection is what turns such a collision into a named failure.
+            sourceRecords += Triple(label, file.name, names.toList())
         }
 
         // Probe selection is DERIVED, not allowlisted. A probe must be an entry name
@@ -190,7 +201,9 @@ val verifyFatJar by tasks.registering {
         // A jar with no probe is reported BY NAME in the census as INDISTINGUISHABLE, not
         // waived silently: every one of its entries is either shadow-stripped or
         // byte-shared with a sibling, so nothing a probe can see distinguishes its
-        // contribution. That is a measurement, not an exception.
+        // contribution. That is a measurement, not an exception — and it is RATCHETED
+        // below, because an honestly-reported hole that only ever appears in a log line
+        // can still grow from 1 to N unnoticed.
         fun strippedByShadow(name: String): Boolean =
             name.endsWith("module-info.class") ||
                 name == "META-INF/INDEX.LIST" ||
@@ -198,19 +211,60 @@ val verifyFatJar by tasks.registering {
                     name.startsWith("META-INF/") &&
                         (name.endsWith(".SF") || name.endsWith(".DSA") || name.endsWith(".RSA"))
                     )
-        val globalNameCounts = sourceEntries.values.flatten().groupingBy { it }.eachCount()
+        val globalNameCounts = sourceRecords.flatMap { it.third }.groupingBy { it }.eachCount()
         fun eligible(name: String): Boolean = globalNameCounts[name] == 1 && !strippedByShadow(name)
-        val probes = mutableMapOf<String, String>()
-        val indistinguishable = mutableListOf<String>()
-        sourceEntries.forEach { (label, names) ->
+        // Both keyed on the RECORD, not the label, for the collision reason above.
+        val probes = mutableListOf<Triple<String, String, String>>()
+        val indistinguishable = mutableListOf<Pair<String, String>>()
+        sourceRecords.forEach { (label, fileName, names) ->
             val probe = names.firstOrNull { eligible(it) && it.endsWith(".class") && !it.startsWith("META-INF/") }
                 ?: names.firstOrNull { eligible(it) }
-            if (probe == null) indistinguishable += label else probes[label] = probe
+            if (probe == null) indistinguishable += label to fileName else probes += Triple(label, fileName, probe)
         }
         require(probes.isNotEmpty()) {
             "no resolved runtime artifact yielded a unique probe entry — the contribution census " +
                 "would prove nothing, so the graph has changed shape (#2869)"
         }
+        // THE ACCOUNTING MUST CLOSE. Every resolved artifact is in exactly one of three
+        // buckets: probed, indistinguishable, or unreadable. If this does not hold, the
+        // census is arithmetically inconsistent (e.g. "50 RESOLVED, 49 PROBED, 0
+        // INDISTINGUISHABLE") and some artifact went unmeasured — which is precisely the
+        // symptom a display-name collision would produce. Fail closed, and name the
+        // duplicated identifiers so the cause is diagnosable rather than a bare count
+        // mismatch.
+        val accounted = probes.size + indistinguishable.size + unreadable.size
+        require(accounted == artifacts.size) {
+            val duplicatedLabels = sourceRecords.groupingBy { it.first }.eachCount()
+                .filterValues { it > 1 }
+                .map { (label, n) ->
+                    "$label appears $n times as: " +
+                        sourceRecords.filter { it.first == label }.joinToString(", ") { it.second }
+                }
+            "contribution census does not close: ${artifacts.size} runtime artifacts resolved but " +
+                "$accounted accounted for (${probes.size} probed + ${indistinguishable.size} " +
+                "indistinguishable + ${unreadable.size} unreadable) — some artifact went unmeasured " +
+                "(#2869)" +
+                if (duplicatedLabels.isEmpty()) {
+                    "; no duplicated component identifier found, so the cause is elsewhere"
+                } else {
+                    "; duplicated component identifiers: " + duplicatedLabels.joinToString("; ")
+                }
+        }
+
+        // Coverage RATCHET on the indistinguishable bucket. An artifact lands there iff
+        // every entry it owns is shadow-stripped or byte-shared with a sibling, so it is
+        // an honest but REAL hole in the contribution census — and a count that lives
+        // only in a log nothing parses can grow from 1 to N unnoticed. The expected set
+        // is asserted as an upper bound by NAME (no baseline file needed at this size):
+        // growth FAILs and names the newcomer, while an entry that gains real content and
+        // drops out is an improvement, reported below rather than failed.
+        val expectedIndistinguishable = setOf(
+            // Holds only META-INF/MANIFEST.MF; its API moved into grpc-api.
+            "io.grpc:grpc-context:1.79.0",
+        )
+        val actualIndistinguishable = indistinguishable.map { it.first }.toSet()
+        val newlyIndistinguishable = actualIndistinguishable - expectedIndistinguishable
+        val staleIndistinguishable = expectedIndistinguishable - actualIndistinguishable
 
         val problems = mutableListOf<String>()
         problems += unreadable.map { "resolved runtime artifact is not a readable jar: $it" }
@@ -352,11 +406,21 @@ val verifyFatJar by tasks.registering {
         //     unique probe entry into the shaded jar. This proves "the whole runtime tree
         //     is bundled" FROM THE GRAPH, rather than from a magic entry-count floor that
         //     drifts on every dependency bump.
-        val missingContributors = probes.filterValues { it !in entries }
-        problems += missingContributors.entries.map { (label, probe) ->
-            "resolved runtime artifact $label contributed nothing: its unique probe entry $probe is absent"
+        val missingContributors = probes.filter { (_, _, probe) -> probe !in entries }
+        problems += missingContributors.map { (label, fileName, probe) ->
+            "resolved runtime artifact $label ($fileName) contributed nothing: its unique probe entry " +
+                "$probe is absent"
         }
         val contributed = probes.size - missingContributors.size
+
+        // 11. Coverage ratchet on the indistinguishable bucket (see its declaration).
+        problems += newlyIndistinguishable.map { label ->
+            "resolved runtime artifact $label is INDISTINGUISHABLE — every entry it owns is either " +
+                "stripped by shadow or byte-shared with another artifact, so nothing verifies it was " +
+                "bundled. If it is a genuinely content-free placeholder, add it to " +
+                "expectedIndistinguishable with the measurement that says so; otherwise this is a " +
+                "real coverage hole"
+        }
 
         require(problems.isEmpty()) {
             "shaded jar contract violations (#2869), ${problems.size} problem(s):\n  " +
@@ -374,13 +438,40 @@ val verifyFatJar by tasks.registering {
                 "0 INDISTINGUISHABLE RECOGNISED"
             } else {
                 "${indistinguishable.size} INDISTINGUISHABLE (content-free placeholders, unprobeable): " +
-                    indistinguishable.sorted().joinToString(", ")
-            }
+                    indistinguishable.map { it.first }.sorted().joinToString(", ")
+            } +
+                // A stale expectation is dead config, not a failure: the artifact gained
+                // real content and is now probed, which is strictly better coverage.
+                if (staleIndistinguishable.isEmpty()) {
+                    ""
+                } else {
+                    " [${staleIndistinguishable.size} STALE expectation(s) now probed, remove from " +
+                        "expectedIndistinguishable: ${staleIndistinguishable.sorted().joinToString(", ")}]"
+                }
+        // Multi-release jars (jackson-core/-databind 2.18.2 today) put classes under
+        // META-INF/versions/<n>/. Check #8 catches a surviving versioned module-info, but
+        // nothing else looked at this tree at all — so a future bump that starts shipping
+        // REAL versioned classes would change the shaded jar invisibly. Censused so the
+        // number has to move in the log before anyone can call it unchanged.
+        // Real versioned classes are ALREADY present today (jackson-core 2.18.2's
+        // fast-double-parser under 9/11/17/21), and the fat jar's manifest carries
+        // `Multi-Release: true`, so they are live rather than inert — which is exactly
+        // why the count needs to be visible. Sorted NUMERICALLY: a string sort renders
+        // the release ladder as "11, 17, 21, 9".
+        val versionedEntries = entries.filter { it.startsWith("META-INF/versions/") }
+        val versionedRoots = versionedEntries
+            .mapNotNull { it.split('/').getOrNull(2)?.toIntOrNull() }
+            .toSortedSet()
         logger.lifecycle(
             "verifyFatJar: ${jar.name} (${jar.length() / (1024 * 1024)} MiB) — " +
                 "${entryNames.size} ENTRIES EXAMINED; " +
                 "${artifacts.size} RUNTIME ARTIFACTS RESOLVED, ${probes.size} PROBED, " +
-                "$contributed CONTRIBUTED, $indistinguishableNote; " +
+                "$contributed CONTRIBUTED, $indistinguishableNote, " +
+                "${unreadable.size} UNREADABLE RECOGNISED (census closes: " +
+                "${probes.size + indistinguishable.size + unreadable.size} of ${artifacts.size}); " +
+                "${versionedEntries.size} MULTI-RELEASE META-INF/versions ENTRIES RECOGNISED" +
+                (if (versionedRoots.isEmpty()) "" else " under version(s) ${versionedRoots.joinToString(", ")}") +
+                "; " +
                 "${serviceUnion.size} SERVICE DESCRIPTORS EXAMINED across " +
                 "${serviceUnion.keys.count { serviceSources[it]!!.size > 1 }} MULTI-SOURCE PATH(S) " +
                 "carrying $providerLineTotal PROVIDER LINES RECOGNISED; " +

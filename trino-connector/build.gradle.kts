@@ -176,9 +176,13 @@ tasks.withType<Test>().configureEach {
 // `verifyShadowNotPublished` below asserts this from the GENERATED metadata.
 shadow {
     addShadowVariantIntoJavaComponent = false
-    // `assemble`/`build` stay thin-jar-only; the fat jar is built by an explicit
-    // `shadowJar`/`installPluginFat`/`check` request, so a routine build does not
-    // pay 19 MiB of shading.
+    // Detaches shadowJar from `assemble` ONLY, so a bare `./gradlew assemble` (and
+    // therefore the publication path) stays thin-jar-only and does not pay 19 MiB of
+    // shading. `./gradlew build` DOES still shade, and that is intended: `build` =
+    // `assemble` + `check`, and `check` gates `verifyFatJar`, which `dependsOn`
+    // shadowJar — the fat jar is a shipped artifact, so a full local `build` should
+    // verify it. The triggers are therefore `assemble` NO, and
+    // `shadowJar`/`installPluginFat`/`check`/`build` YES.
     addShadowJarToAssembleLifecycle = false
 }
 
