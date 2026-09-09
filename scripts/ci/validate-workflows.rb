@@ -335,13 +335,13 @@ def flight_image_guard_errors(file, workflow)
   errors
 end
 
-# The refusal must live INSIDE the conditional the probe line OPENS — not merely
-# somewhere after it. "Somewhere after it" is defeatable and was demonstrated to
-# be: replacing the refusal body with an `echo` and adding an unrelated
-# `[ -n "$ASSET" ] || exit 1` later in the SAME `run:` body kept the guard green,
-# which is exactly the state that lets a dispatch mint a release tag. (An
-# unrelated EARLIER `exit 1` is a decoy too — this same step also refuses a bad
-# version.) So the span is bounded on both ends.
+# The `exit 1` TEXT must live INSIDE the conditional the probe line OPENS — not
+# merely somewhere after it. "Somewhere after it" is defeatable and was
+# demonstrated to be: replacing the refusal body with an `echo` and adding an
+# unrelated `[ -n "$ASSET" ] || exit 1` later in the SAME `run:` body kept the
+# guard green, which is exactly the state that lets a dispatch mint a release
+# tag. (An unrelated EARLIER `exit 1` is a decoy too — this same step also
+# refuses a bad version.) So the span is bounded on both ends.
 #
 # Two accepted shapes, and anything else is REFUSED rather than guessed:
 #   * same-line:  `<opener> || { ...; exit 1; }`
@@ -352,6 +352,34 @@ end
 #
 # `run` is the raw `run:` scalar, whose lines YAML has already dedented to the
 # block's own base indentation.
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS DOES NOT DECIDE — declared, deliberately not carved (issue #2869)
+# ---------------------------------------------------------------------------
+# This matches the TEXT `exit 1` on a line inside that span. It is a LEXICAL
+# test over shell source and it CANNOT distinguish an executable statement from
+# non-executable text, so a commented `# exit 1` or an `echo "exit 1"` inside the
+# block SATISFIES it. Read the return value as "a refusal is WRITTEN in the right
+# place", never as "a refusal EXECUTES".
+#
+# That gap is left open ON PURPOSE rather than patched, by owner ruling. This
+# repo has ruled on exactly this class three times: **#3725** descoped a
+# per-target source-text scan after seven review rounds found seven holes in it,
+# on the finding that source-text matching cannot decide whether a construct is
+# executable; **#3229** rules "remove the mechanism rather than carve it a fourth
+# time", because every blocked spelling just moves the argument to the next one
+# (a comment stripper then argues about heredocs, then about quoting, then about
+# `$'...'`); **#3499** defers this whole class deliberately. Deciding
+# executability needs a shell PARSER, not a better regex, and that is out of
+# scope for a workflow-policy linter.
+#
+# So the honest division of labour: this function pins the STRUCTURE (which
+# conditional the refusal belongs to, and — via its caller — which job and which
+# position relative to the publish). Whether that refusal actually fires is
+# established by EXECUTING the step, which is where the real evidence lives: the
+# resolve step's shell is driven through every branch against a scratch repo with
+# a real annotated tag (see the PR's verification record), and a workflow run is
+# the final oracle. A reviewer must not read a green `PASS` here as executability.
 def shell_refusal_bound?(run, opener)
   lines = run.lines
   head = lines.index { |line| line.match?(opener) }
@@ -368,6 +396,12 @@ def shell_refusal_bound?(run, opener)
   lines[(head + 1)...closer].any? { |line| line.match?(/exit\s+1/) }
 end
 
+# The step that creates/edits the release and uploads the asset. This is the
+# irreversible-ish action the guards below must precede.
+def release_upload_step?(step)
+  step.is_a?(Hash) && step["uses"].to_s.start_with?("softprops/action-gh-release")
+end
+
 # trino-connector-fatjar.yml (issue #2869): this workflow attaches the SHADED
 # connector jar to a GitHub release. Unlike trino-publish.yml it needs no Maven
 # Central/GPG secrets and its target is MUTABLE, so it deliberately has no
@@ -376,15 +410,27 @@ end
 #   1. `channel` DEFAULTS TO `dev`, so a bare `gh workflow run
 #      trino-connector-fatjar.yml -f version=X` targets the mutable
 #      `trino-connector-dev` prerelease and never a release tag;
-#   2. a step REFUSES (exit 1) unless `git ls-remote --exit-code --tags` already
-#      finds the release tag — softprops/action-gh-release CREATES an absent tag
-#      at github.sha, so without this a release-channel dispatch from an
-#      arbitrary branch could MINT or move a release tag; and
-#   3. that same step REFUSES unless the tag's commit equals `GITHUB_SHA`.
+#   2. the PUBLISHING job refuses unless `git ls-remote --exit-code --tags`
+#      already finds the release tag — softprops/action-gh-release CREATES an
+#      absent tag at github.sha, so without this a release-channel dispatch from
+#      an arbitrary branch could MINT or move a release tag; and
+#   3. that same step refuses unless the tag's commit equals `GITHUB_SHA`.
 #      Existence is not provenance: a `channel=release` dispatch with no `--ref`
 #      runs against the default branch, and since the jar is named from the
 #      `version` INPUT it would overwrite the genuine asset AND its `.sha256`
 #      sidecar with another commit's bytes — which then verify successfully.
+#
+# SCOPE AND ORDER ARE PART OF THE CLAIM. An earlier draft flattened every job's
+# steps into one list and accepted a hit anywhere in it, which certified two
+# states it should have refused: a guard sitting in some OTHER job while the
+# publishing job ran unguarded, and a guard sitting AFTER the upload it is
+# supposed to prevent. So the search is scoped to the job holding the
+# `softprops/action-gh-release` step and the guard must precede that step. If no
+# such job can be identified the check FAILS CLOSED rather than falling back to
+# searching every job — an unlocatable publish point makes the ordering claim
+# unmeasurable, and an unmeasurable claim must never take the permissive branch.
+# (What this does NOT establish is that the refusal EXECUTES — see the declared
+# limit on `shell_refusal_bound?` above.)
 def trino_fatjar_guard_errors(file, workflow)
   errors = []
 
@@ -396,28 +442,58 @@ def trino_fatjar_guard_errors(file, workflow)
   end
 
   probe = /git ls-remote --exit-code --tags/
-  steps = (workflow["jobs"] || {}).values.flat_map { |job| job_step_list(job) }
 
-  unless steps.any? { |step| shell_refusal_bound?(step["run"].to_s, probe) }
-    errors << "#{file}: a step must refuse (exit 1) INSIDE the conditional its `git ls-remote --exit-code --tags` probe opens, so a dispatch can never create or move a release tag (issue #2869)"
+  # EVERY job that uploads a release asset must be guarded, not just one of them.
+  publishers = (workflow["jobs"] || {}).select do |_job_name, job|
+    job_step_list(job).any? { |step| release_upload_step?(step) }
   end
 
-  # Provenance, asserted on the SAME step that holds the probe so the two
-  # refusals cannot drift into separately-skippable steps. The `GITHUB_SHA`
-  # comparison must itself be a bounded refusal — a mention of `GITHUB_SHA` in a
-  # log line does not assert anything, so the opener is matched only inside a
-  # `[ ... ]` test.
-  provenance = steps.any? do |step|
-    run = step["run"].to_s
-    next false unless run.match?(probe)
-
-    run.match?(/git rev-parse .*\^\{commit\}/) &&
-      shell_refusal_bound?(run, /\[[^\]]*GITHUB_SHA[^\]]*\]/)
+  if publishers.empty?
+    errors << "#{file}: no job holds a `softprops/action-gh-release` step, so the publishing job cannot be " \
+              "identified and the tag guards cannot be scoped to it or ordered against it. Refusing rather " \
+              "than searching every job, which would certify a guard that runs in an unrelated job or after " \
+              "the upload (issue #2869)"
+    return errors
   end
-  unless provenance
-    errors << "#{file}: the step holding the `git ls-remote` probe must also assert the release tag's commit " \
-              "(`git rev-parse refs/tags/<tag>^{commit}`) equals GITHUB_SHA and refuse (exit 1) otherwise, " \
-              "so a dispatch cannot overwrite a released asset with another commit's bytes (issue #2869)"
+
+  publishers.each do |job_name, job|
+    steps = job_step_list(job)
+    upload_index = steps.index { |step| release_upload_step?(step) }
+    probe_index = steps.index { |step| step["run"].to_s.match?(probe) }
+
+    if probe_index.nil?
+      errors << "#{file}: job `#{job_name}` uploads a release asset but contains no " \
+                "`git ls-remote --exit-code --tags` probe, so nothing in it stops a dispatch from minting " \
+                "or moving a release tag (issue #2869)"
+      next
+    end
+
+    if probe_index >= upload_index
+      errors << "#{file}: in job `#{job_name}` the `git ls-remote --exit-code --tags` guard is step " \
+                "#{probe_index + 1} but the `softprops/action-gh-release` upload is step " \
+                "#{upload_index + 1} — the guard must run BEFORE the upload it exists to prevent " \
+                "(issue #2869)"
+    end
+
+    run = steps[probe_index]["run"].to_s
+
+    unless shell_refusal_bound?(run, probe)
+      errors << "#{file}: in job `#{job_name}`, the `exit 1` must sit INSIDE the conditional the " \
+                "`git ls-remote --exit-code --tags` probe opens, so a dispatch can never create or move a " \
+                "release tag (issue #2869)"
+    end
+
+    # Provenance, asserted on the SAME step as the probe so the two refusals
+    # cannot drift into separately-skippable steps. The `GITHUB_SHA` comparison
+    # must itself be a bounded refusal — a mention of `GITHUB_SHA` in a log line
+    # asserts nothing, so the opener is matched only inside a `[ ... ]` test.
+    unless run.match?(/git rev-parse .*\^\{commit\}/) &&
+           shell_refusal_bound?(run, /\[[^\]]*GITHUB_SHA[^\]]*\]/)
+      errors << "#{file}: in job `#{job_name}`, the step holding the `git ls-remote` probe must also assert " \
+                "the release tag's commit (`git rev-parse refs/tags/<tag>^{commit}`) equals GITHUB_SHA and " \
+                "refuse (exit 1) otherwise, so a dispatch cannot overwrite a released asset with another " \
+                "commit's bytes (issue #2869)"
+    end
   end
 
   errors
