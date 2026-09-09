@@ -29,11 +29,24 @@
       and nothing else.
 - [ ] 1.7 Emit the `.sha256` sidecar next to the jar (or have the workflow compute it — decide once,
       in one place, and do not do it twice).
-- [ ] 1.8 **Record the MEASURED jar size** once a build runs. The docs currently state an *estimate*
-      (~18–20 MB from ~19 MB of input jars) because no JDK was available on the authoring box; replace
-      it with the measurement, do not restate the estimate as one.
-- [ ] 1.9 Confirm the first-wins duplicate `LICENSE`/`NOTICE`/`DEPENDENCIES` behaviour actually holds
-      in the built jar, since it is documented as a declared residual.
+- [x] 1.8 **Record the MEASURED jar size.** Done: **18.9 MB** (`du -h` → `19M`) from a clean `build/`
+      under shadow 9.4.3 / Gradle 9.1.0, against a **172 KB** thin jar. `verifyFatJar` census: 11142
+      entries, 49 runtime artifacts resolved / 48 contributing, 8 service descriptors across 2
+      multi-source paths, 11 netty core modules at 4.1.130.Final, 6 arrow modules at 19.0.0. The
+      earlier ~18–20 MB *estimate* (input jar sizes; no JDK on the authoring box) has been replaced by
+      the measurement in `trino-connector/README.md`, the website page, `design.md` and `spec.md` — it
+      is no longer hedged anywhere.
+- [x] 1.9 Confirm the first-wins duplicate `LICENSE`/`NOTICE`/`DEPENDENCIES` behaviour actually holds
+      in the built jar, since it is documented as a declared residual. **Confirmed**: the built jar has
+      **zero duplicate entry names**, i.e. the colliding copies collapse first-wins rather than
+      accumulating. Stated as observed in the README and `design.md`; the deferral reason is unchanged.
+- [x] 1.10 **`mergeServiceFiles()` alone is insufficient — proven, and worse than documented.** With
+      the merge configured but the duplicates bypass withheld on the transformer-owned paths, the build
+      dropped `io.grpc.internal.PickFirstLoadBalancerProvider` (gRPC's **default** load balancer, so
+      first-wins breaks every channel, not an edge case: the jar loads, the catalog registers, the
+      first query dies), and `append()` degraded identically, leaving 10 of 11 netty modules with no
+      attestation line. Named explicitly in the README, `design.md` D2 and the spec's shaded-artifact
+      requirement + a dedicated scenario.
 
 ## 2. Docker E2E flavors (surface: `trino-connector/docker/*`) — unit B
 
@@ -72,7 +85,7 @@
 - [x] 5.1 `trino-connector/README.md`: correct the "not a single jar" claim to the directory rule; add
       a "Self-contained fat jar (GitHub Release asset)" section with both channel URLs, the `.sha256`
       sidecar and why it exists, the mount-inside-never-as warning, `trino-spi` exclusion, the
-      no-relocation rationale, the size estimate marked as an estimate, and a pointer to the existing
+      no-relocation rationale, the measured size, and a pointer to the existing
       `--add-opens` section; mention `installPluginFat` in the task list; record the first-wins
       LICENSE/NOTICE residual.
 - [x] 5.2 `website/src/content/docs/user-docs/flight-trino.md`: a subsection mirroring the README

@@ -58,11 +58,22 @@ publication gains a shadow variant or an `-all.jar`. Applying the shadow plugin 
 ### D2 — Merge `META-INF/services/*`; do not overwrite
 
 The connector is discovered by Trino through `META-INF/services/io.trino.spi.Plugin`. Several bundled
-dependencies (grpc, arrow, jackson) also ship service files. A naive shade that takes the last
+dependencies (grpc, arrow, jackson) also ship service files — the built jar carries **8 service
+descriptors, 2 of them contributed by more than one dependency**. A naive shade that takes the last
 writer drops the plugin descriptor and the plugin does not register **at all** — a failure that looks
-like "the catalog is missing" rather than "the jar is wrong. So service-file entries are **merged**,
+like "the catalog is missing" rather than "the jar is wrong". So service-file entries are **merged**,
 and `verifyFatJar` asserts the merged descriptor is present in the built jar (alongside: connector
 classes present, `trino-spi` absent).
+
+**Measured, and worse than assumed: `mergeServiceFiles()` alone is not sufficient.** With the merge
+configured but shadow's duplicates-strategy bypass withheld on the transformer-owned paths, the build
+silently dropped `io.grpc.internal.PickFirstLoadBalancerProvider` from
+`META-INF/services/io.grpc.LoadBalancerProvider`. That is gRPC's **default** load balancer, so
+first-wins there does not degrade an edge case — it breaks **every** channel, i.e. the jar loads,
+Trino registers the catalog, and the first query dies. `append()` degraded identically, leaving 10 of
+11 netty modules with no attestation line. The bypass is therefore load-bearing, and this is why
+`verifyFatJar` must assert against the **built jar** and not against the build script: the build
+script said "merge" while the jar said otherwise.
 
 ### D3 — No relocation, deliberately
 
@@ -124,16 +135,17 @@ failure is silent and is the most likely way the downstream integration breaks.
   wrong mount produces no diagnostic from Trino. Nothing in this repository can make Trino warn. The
   only available mitigation is documentation prominence (D7) plus the `fat` E2E flavor demonstrating
   the correct layout, and that is what this change ships.
-- **Duplicate legal metadata resolves first-wins.** `META-INF/LICENSE`, `META-INF/NOTICE` and
-  `META-INF/DEPENDENCIES` collide across bundled dependencies; one copy lands and the rest are
-  dropped, so the in-jar aggregated `NOTICE` is incomplete. Aggregating properly
-  (`ApacheNoticeResourceTransformer`) needs additional shadow duplicates-strategy bypasses for a gain
-  that changes no behaviour, so it is **deferred and declared** — in the spec, in the README, and
-  here — rather than omitted. Per-dependency licences remain discoverable from the POM and from an
-  `installPlugin` directory.
-- **Size is an estimate.** Roughly **18–20 MB**, derived from ~19 MB of input jars; no build has run
-  on this branch (no JDK on the authoring box). It is published as an estimate for `hostPath` cache
-  sizing and must not be restated as a measurement until a build produces one.
+- **Duplicate legal metadata resolves first-wins — CONFIRMED in the built jar.** `META-INF/LICENSE`,
+  `META-INF/NOTICE` and `META-INF/DEPENDENCIES` collide across bundled dependencies; one copy lands
+  and the rest are dropped, so the in-jar aggregated `NOTICE` is incomplete. This is **observed**: the
+  built jar has **zero duplicate entry names**, so the colliding copies really do collapse rather than
+  accumulate. Aggregating properly (`ApacheNoticeResourceTransformer`) needs additional shadow
+  duplicates-strategy bypasses for a gain that changes no behaviour, so it is **deferred and
+  declared** — in the spec, in the README, and here — rather than omitted. Per-dependency licences
+  remain discoverable from the POM and from an `installPlugin` directory.
+- **Size: measured, 18.9 MB** (`du -h` → `19M`) from a clean `build/` under shadow 9.4.3 / Gradle
+  9.1.0, against a **172 KB** thin jar. Published for `hostPath` cache sizing (~19 MB per cached
+  version). Shrinking it is a non-goal.
 - **A second distribution channel is a second thing to keep correct.** Mitigated by the lane being
   the only non-immutable one in the train: release assets are mutable, so the workflow is
   re-runnable and can backfill an already-shipped version without a new tag or a version bump.

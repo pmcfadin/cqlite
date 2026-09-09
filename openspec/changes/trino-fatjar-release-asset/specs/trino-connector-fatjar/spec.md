@@ -29,7 +29,14 @@ jar needs no dependency resolution to function as a Trino plugin. `io.trino:trin
 excluded, because the engine provides it and a second copy in the plugin directory would clash with
 the engine's. Entries under `META-INF/services/` SHALL be **merged** across the connector and every
 bundled dependency rather than overwritten, so that `META-INF/services/io.trino.spi.Plugin` — without
-which the plugin does not register at all — survives shading. Bundled packages SHALL NOT be
+which the plugin does not register at all — survives shading, and so that a multi-source descriptor
+retains **every** contributed provider. Declaring the merge is not sufficient on its own: with
+`mergeServiceFiles()` configured but shadow's duplicates-strategy bypass withheld on the
+transformer-owned paths, `io.grpc.internal.PickFirstLoadBalancerProvider` was **observed** to be
+dropped from `META-INF/services/io.grpc.LoadBalancerProvider` — gRPC's default load balancer, so the
+loss breaks every channel while the plugin still loads and the catalog still registers. The merge
+SHALL therefore be asserted against the built jar's contents, not against the build configuration.
+Bundled packages SHALL NOT be
 relocated: Trino's plugin classloader is child-first except for `SPI_PACKAGES`
 (`io.trino.spi.`, `com.fasterxml.jackson.annotation.`, `io.airlift.slice.`, `io.opentelemetry.api.`,
 `io.opentelemetry.context.`), so the bundled netty/grpc/arrow/`jackson-databind` are already isolated,
@@ -49,6 +56,12 @@ against the build script, and SHALL fail the build when any of them does not hol
 - **WHEN** `META-INF/services/io.trino.spi.Plugin` is read from the shaded jar
 - **THEN** it names `in.mcfad.cqlite.flight.CqliteFlightPlugin`
 - **AND** service files contributed by bundled dependencies are also present, with their entries merged rather than one file having replaced another
+
+#### Scenario: A multi-source service descriptor retains every provider
+
+- **WHEN** `META-INF/services/io.grpc.LoadBalancerProvider` is read from the shaded jar
+- **THEN** it lists `io.grpc.internal.PickFirstLoadBalancerProvider` — gRPC's default load balancer — alongside the other contributed providers
+- **AND** a build in which that entry is lost fails `verifyFatJar` rather than producing a jar that loads and registers the catalog but fails on the first query
 
 #### Scenario: trino-spi is absent from the shaded jar
 
@@ -185,8 +198,9 @@ directory. Both SHALL give the release-channel and dev-channel URL patterns, exp
 `.sha256` sidecar exists so a consumer caching the jar in a per-node `hostPath` can distinguish a
 complete cached file from a truncated download, state that Maven Central still publishes the **thin**
 jar only (no `:all` classifier), and point at the existing `--add-opens` section rather than
-duplicating it. The documented size SHALL be marked as an **estimate** (roughly 18–20 MB) until a
-build measures it. `RELEASING.md` SHALL list the fat-jar lane in the publish fan-out and the
+duplicating it. The documented size SHALL be the **measured** figure (18.9 MB, `du -h` → `19M`) and
+SHALL NOT be published as an estimate once a build has measured it. `RELEASING.md` SHALL list the
+fat-jar lane in the publish fan-out and the
 resumability table and SHALL document the `trino-connector-dev` channel, including why that tag is
 deliberately not a `v*` tag. The declared residual — duplicate `LICENSE`/`NOTICE`/`DEPENDENCIES`
 entries resolving **first-wins** rather than being aggregated, with aggregation deliberately deferred
@@ -196,7 +210,7 @@ entries resolving **first-wins** rather than being aggregated, with aggregation 
 
 - **WHEN** `trino-connector/README.md` is read after this change
 - **THEN** it describes a Trino plugin as a directory that may hold exactly one self-contained jar, and does not claim a plugin is "not a single jar"
-- **AND** it gives both the release-channel and dev-channel download URLs, the `.sha256` sidecar and its purpose, the `installPluginFat` task, and the size estimate marked as an estimate
+- **AND** it gives both the release-channel and dev-channel download URLs, the `.sha256` sidecar and its purpose, the `installPluginFat` task, and the measured jar size
 - **AND** it warns that mounting the jar as the plugin directory is silently ignored by Trino
 - **AND** it states that Maven Central publishes the thin jar only, with no `:all` classifier
 - **AND** it records the first-wins duplicate `LICENSE`/`NOTICE`/`DEPENDENCIES` residual and that aggregation was deferred

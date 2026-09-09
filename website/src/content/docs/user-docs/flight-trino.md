@@ -274,12 +274,12 @@ across pod restarts: file presence cannot distinguish a complete cached jar from
 truncated download, and a checksum can. Locally, `cd trino-connector && ./gradlew
 installPluginFat` produces the same one-jar layout.
 
-Expect roughly **18–20 MB** (an estimate from the input jar sizes, not a
-measurement). Nothing else changes: `trino-spi` is still engine-provided and
-excluded, no packages are relocated (Trino's child-first plugin classloader
-already isolates the bundled netty/grpc/arrow/`jackson-databind`, and Jackson
-*annotations* must keep resolving to the engine's copy), and the `--add-opens`
-flag below is still required. **Maven Central continues to publish the thin jar
+The jar is **18.9 MB** (`du -h` reports `19M`) against a 172 KB thin jar — size a
+per-node cache off ~19 MB per version. Nothing else changes: `trino-spi` is still
+engine-provided and excluded, no packages are relocated (Trino's child-first
+plugin classloader already isolates the bundled netty/grpc/arrow/`jackson-databind`,
+and Jackson *annotations* must keep resolving to the engine's copy), and the
+`--add-opens` flag below is still required. **Maven Central continues to publish the thin jar
 only** — there is no `:all` classifier there; the fat jar is a GitHub Release asset
 exclusively. See `trino-connector/README.md` for the full contents/residuals list.
 

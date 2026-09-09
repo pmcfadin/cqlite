@@ -119,11 +119,22 @@ those apart; a checksum can. Verify, and re-download on mismatch.
 
 - **`trino-spi` is excluded** — the engine provides it, and a second copy in the
   plugin directory would clash with the engine's.
-- **Bundled**: the connector plus its full runtime closure (Arrow `flight-core`,
-  grpc, netty, `jackson-databind`, …), with `META-INF/services/*` service files
-  **merged** rather than overwritten — including
-  `META-INF/services/io.trino.spi.Plugin`, without which the plugin does not
-  register at all.
+- **Bundled**: the connector plus its full runtime closure — 49 runtime artifacts
+  resolved, 48 contributing entries (Arrow `flight-core`, grpc, netty,
+  `jackson-databind`, …; 11 netty core modules at 4.1.130.Final, 6 arrow modules
+  at 19.0.0), 11142 jar entries in total. `META-INF/services/*` service files are
+  **merged** rather than overwritten — 8 service descriptors, 2 of them
+  contributed by more than one dependency. Merging is not optional in either
+  direction:
+  - `META-INF/services/io.trino.spi.Plugin` — lose it and the plugin does not
+    register at all.
+  - `META-INF/services/io.grpc.LoadBalancerProvider` — **measured**: with
+    `mergeServiceFiles()` configured but shadow's duplicates bypass withheld, the
+    build silently dropped `io.grpc.internal.PickFirstLoadBalancerProvider`.
+    That is gRPC's *default* load balancer, so first-wins there does not break an
+    edge case — it breaks **every** channel. The jar loads, Trino registers the
+    catalog, and the first query dies. `append()` degraded the same way, leaving
+    10 of 11 netty modules with no attestation line.
 - **No relocation, deliberately.** Trino 481's `PluginManager` gives each plugin
   a child-first classloader whose only parent-first packages are `SPI_PACKAGES`
   (`io.trino.spi.`, `com.fasterxml.jackson.annotation.`, `io.airlift.slice.`,
@@ -132,9 +143,9 @@ those apart; a checksum can. Verify, and re-download on mismatch.
   engine's copies, so shading their packages would buy nothing — and Jackson
   *annotations* MUST resolve to the engine's copy for `ConnectorSplit` JSON
   interop, which relocating them would break.
-- **Size: roughly 18–20 MB** (shaded from ~19 MB of input jars). Useful for
-  sizing a per-node `hostPath` cache. **This is an estimate** derived from the
-  input jar sizes, not a measurement of a built artifact.
+- **Size: 18.9 MB** — measured on a clean `build/` (shadow 9.4.3 under Gradle
+  9.1.0); `du -h` reports `19M`. For contrast the thin jar is 172 KB. Size a
+  per-node `hostPath` cache off ~19 MB per cached version.
 - **JVM flags are unchanged.** The fat jar still needs
   `--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED` in
   Trino's `jvm.config` — see [Required JVM
@@ -161,7 +172,9 @@ repository.
 Bundled dependencies each carry their own `META-INF/LICENSE`, `META-INF/NOTICE`
 and `META-INF/DEPENDENCIES`, and in the shaded jar those collide. They resolve
 **first-wins** — one dependency's copy lands and the rest are dropped — rather
-than being aggregated. Aggregating them properly (shadow's
+than being aggregated. **This is observed, not assumed**: the built jar has zero
+duplicate entry names, so the colliding copies really do collapse to one rather
+than accumulating. Aggregating them properly (shadow's
 `ApacheNoticeResourceTransformer`) was **deliberately deferred**: it requires
 additional duplicates-strategy bypasses in the build for a non-functional gain.
 The per-dependency licences are unchanged and remain discoverable from the POM /

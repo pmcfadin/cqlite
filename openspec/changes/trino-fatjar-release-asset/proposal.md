@@ -85,5 +85,5 @@ to a resolver's repository.
   declared as a residual; aggregating needs extra duplicates-strategy bypasses for a non-functional
   gain.
 - **Not changing the `--add-opens` requirement**, the catalog properties, or any query behaviour.
-- **Not measuring the artifact size on this branch.** The ~18–20 MB figure is an estimate from input
-  jar sizes and is documented as one.
+- **Not optimising the artifact's size.** It is **18.9 MB** as measured on this branch (vs a 172 KB
+  thin jar); that is documented for `hostPath` cache sizing, and shrinking it is not a goal here.
