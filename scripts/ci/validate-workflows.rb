@@ -343,12 +343,24 @@ end
 # tag. (An unrelated EARLIER `exit 1` is a decoy too — this same step also
 # refuses a bad version.) So the span is bounded on both ends.
 #
-# Two accepted shapes, and anything else is REFUSED rather than guessed:
-#   * same-line:  `<opener> || { ...; exit 1; }`
-#   * block form: `if ! <opener>; then` … `exit 1` … `fi`, where the closing `fi`
-#                 is the first one at the opener line's OWN indentation (nested
-#                 blocks inside are indented past it, and later sibling blocks
-#                 close after it).
+# THREE accepted shapes, and anything else is REFUSED rather than guessed:
+#   * same-line, bare:  `<opener> || exit 1`
+#   * same-line, group: `<opener> || { …; exit 1; …}`
+#   * block form:       `if ! <opener>; then` … `exit 1` … `fi`, where the closing
+#                       `fi` is the first one at the opener line's OWN indentation
+#                       (nested blocks inside are indented past it, and later
+#                       sibling blocks close after it).
+#
+# The two same-line forms are matched against the text AFTER the opener and are
+# ANCHORED on `||`, so the `exit 1` is demonstrably the `||` consequent — it runs
+# exactly when the opener fails. That anchoring is the whole point: an earlier
+# draft took a same-line fast path of "does this line contain `exit 1` anywhere",
+# which pinned NO structure and accepted
+# `exit 1; if ! <opener>; then echo; fi` — an `exit 1` sitting BEFORE, and
+# outside, the conditional it was supposed to guard. A same-line refusal in any
+# other spelling (a one-line `if …; then …; fi`, a `&&`/`!` inversion, a trap) is
+# REFUSED, not guessed: reformat it as the block form above. Refusing an
+# unrecognised shape is cheap; guessing at one is how the fast path went wrong.
 #
 # `run` is the raw `run:` scalar, whose lines YAML has already dedented to the
 # block's own base indentation.
@@ -356,11 +368,13 @@ end
 # ---------------------------------------------------------------------------
 # WHAT THIS DOES NOT DECIDE — declared, deliberately not carved (issue #2869)
 # ---------------------------------------------------------------------------
-# This matches the TEXT `exit 1` on a line inside that span. It is a LEXICAL
-# test over shell source and it CANNOT distinguish an executable statement from
-# non-executable text, so a commented `# exit 1` or an `echo "exit 1"` inside the
-# block SATISFIES it. Read the return value as "a refusal is WRITTEN in the right
-# place", never as "a refusal EXECUTES".
+# Every shape above is matched LEXICALLY over shell source, and a lexical test
+# CANNOT distinguish an executable statement from non-executable text. So a
+# commented `# exit 1` or an `echo "exit 1"` on a line inside the `if`/`fi` span
+# SATISFIES the block form, and a wholly commented-out
+# `# <opener> || exit 1` SATISFIES a same-line form. What the shapes pin is
+# WHERE the refusal sits, not THAT it runs: read the return value as "a refusal
+# is WRITTEN in the right place", never as "a refusal EXECUTES".
 #
 # That gap is left open ON PURPOSE rather than patched, by owner ruling. This
 # repo has ruled on exactly this class three times: **#3725** descoped a
@@ -373,20 +387,41 @@ end
 # executability needs a shell PARSER, not a better regex, and that is out of
 # scope for a workflow-policy linter.
 #
-# So the honest division of labour: this function pins the STRUCTURE (which
-# conditional the refusal belongs to, and — via its caller — which job and which
-# position relative to the publish). Whether that refusal actually fires is
-# established by EXECUTING the step, which is where the real evidence lives: the
-# resolve step's shell is driven through every branch against a scratch repo with
-# a real annotated tag (see the PR's verification record), and a workflow run is
-# the final oracle. A reviewer must not read a green `PASS` here as executability.
+# So the honest division of labour: this function pins the STRUCTURE — which
+# construct the refusal belongs to (the `||` consequent, or the `if`/`fi` span)
+# and, via its caller, which job it sits in and where relative to the publish
+# step. Every accepted shape puts the `exit 1` inside a construct the opener
+# governs; none of them is a bare "the text appears on this line" test. Whether
+# that refusal actually FIRES is established by EXECUTING the step, which is
+# where the real evidence lives: the resolve step's shell is driven through every
+# branch against a scratch repo with a real annotated tag (see the PR's
+# verification record), and a workflow run is the final oracle. A reviewer must
+# not read a green `PASS` here as executability.
+
+# Matched against the text FOLLOWING the opener on the opener's own line. Both
+# are anchored on `||` and end-anchored, so the `exit 1` is the consequent of the
+# opener's failure and nothing outside that consequent is consulted.
+SAME_LINE_REFUSAL_FORMS = [
+  # `<opener> || exit 1`
+  /\A[ \t]*\|\|[ \t]*exit[ \t]+1[ \t]*;?[ \t]*\z/,
+  # `<opener> || { …; exit 1; …}` — brace groups need a `;` (or newline) before
+  # the closing `}` in sh, so requiring one is stricter AND correct. `[^{}]*`
+  # keeps the group flat: a nested group is an unrecognised shape, not a guess.
+  /\A[ \t]*\|\|[ \t]*\{[^{}]*\bexit[ \t]+1[ \t]*;[^{}]*\}[ \t]*;?[ \t]*\z/
+].freeze
+
 def shell_refusal_bound?(run, opener)
   lines = run.lines
   head = lines.index { |line| line.match?(opener) }
   return false unless head
 
   head_line = lines[head]
-  return true if head_line.match?(/exit\s+1/)
+
+  # Same-line forms: consult ONLY the text after the opener, so an `exit 1`
+  # sitting before it (or otherwise outside the `||` consequent) cannot count.
+  tail = head_line.match(opener).post_match.chomp
+  return true if SAME_LINE_REFUSAL_FORMS.any? { |form| tail.match?(form) }
+
   return false unless head_line.match?(/\bif\b/) && head_line.match?(/\bthen\s*\z/)
 
   indent = head_line[/\A[ \t]*/]
