@@ -13,6 +13,19 @@ import java.util.zip.ZipInputStream
 plugins {
     java
     id("com.vanniktech.maven.publish") version "0.30.0"
+    // Shaded ("fat") jar for the single-file Trino plugin drop (issue #2869).
+    //
+    // 9.4.3 is the newest shadow release whose Gradle floor (9.0) is satisfied by
+    // THIS project's wrapper — 9.5.0+ requires Gradle 9.2 and 9.7.0+ requires 9.4.
+    // VERIFIED, not assumed: `./gradlew shadowJar` under wrapper 9.1.0 builds and
+    // emits build/libs/cqlite-trino-<v>-all.jar.
+    //
+    // Do NOT resolve a future shadow floor by bumping the wrapper. The wrapper
+    // version is in LOCKSTEP with the easy-db-lab kit's `gradle:9.1.0-jdk25` init
+    // image (rustyrazorblade/easy-db-lab#731): that image is what a consumer builds
+    // this connector with, so wrapper != image is a broken contract on their side.
+    // Moving either one is a coordinated, two-repo change.
+    id("com.gradleup.shadow") version "9.4.3"
 }
 
 group = "in.mcfad"
@@ -157,6 +170,78 @@ tasks.register<Sync>("installPlugin") {
 // Arrow on JDK 25 needs the foreign-memory module opened for off-heap access.
 tasks.withType<Test>().configureEach {
     jvmArgs("--add-opens=java.base/java.nio=ALL-UNNAMED", "--enable-native-access=ALL-UNNAMED")
+}
+
+// --- Shaded single-file plugin jar (issue #2869) ------------------------------
+// KEEP THE MAVEN CENTRAL PUBLICATION BYTE-IDENTICAL. Applying shadow would
+// pollute it by DEFAULT: `ShadowJavaPlugin.configureComponents()` adds a
+// `shadowRuntimeElements` variant into the `java` software component, and
+// vanniktech's `configure(JavaLibrary(...))` below publishes exactly
+// `components["java"]` — so the shaded jar would appear in Central's Gradle
+// module metadata as an extra variant. Central keeps publishing the THIN jar
+// only; there is deliberately no `:all` classifier there, because the fat jar is
+// a GitHub Release asset with its own lifecycle, not a library coordinate.
+// `verifyShadowNotPublished` below asserts this from the GENERATED metadata.
+shadow {
+    addShadowVariantIntoJavaComponent = false
+    // `assemble`/`build` stay thin-jar-only; the fat jar is built by an explicit
+    // `shadowJar`/`installPluginFat`/`check` request, so a routine build does not
+    // pay 19 MiB of shading.
+    addShadowJarToAssembleLifecycle = false
+}
+
+tasks.shadowJar {
+    // Shadow's default, set explicitly because the FILENAME is the contract:
+    // easy-db-lab caches the asset on `cqlite-trino-<version>-all.jar`.
+    archiveClassifier = "all"
+
+    // NO RELOCATION, deliberately. Trino 481's PluginManager gives each plugin
+    // directory a child-first classloader whose ONLY parent-first packages are
+    // SPI_PACKAGES (`io.trino.spi.`, `com.fasterxml.jackson.annotation.`,
+    // `io.airlift.slice.`, `io.opentelemetry.api.`, `io.opentelemetry.context.`).
+    // So bundled netty / grpc / arrow / jackson-databind are ALREADY isolated from
+    // the engine's copies — relocation would buy nothing and cost three ways:
+    //   * jackson ANNOTATIONS must resolve to the ENGINE's copy for ConnectorSplit
+    //     JSON interop, and a package rewrite would break that delegation;
+    //   * relocating netty breaks its `META-INF/native/lib*.so` name lookup, which
+    //     is computed from the (unrelocated) package name at runtime;
+    //   * arrow's netty allocator reaches across both stacks (see the #2193 pin
+    //     note above), so rewriting one and not the other splits it.
+    // If a future Trino release makes one of these packages parent-first, relocate
+    // THAT package only, and record the SPI_PACKAGES evidence here.
+
+    // Merge duplicated ServiceLoader descriptors instead of taking the first.
+    mergeServiceFiles()
+    // netty's per-module version attestation: 9 modules each ship a 9-line
+    // properties file at the SAME path, so first-wins leaves the runtime claiming
+    // one module exists. Concatenation is correct here — the keys are
+    // module-qualified (`netty-codec-http2.version=...`).
+    append("META-INF/io.netty.versions.properties")
+
+    // Fail rather than ship a jar with two entries of one name.
+    failOnDuplicateEntries = true
+
+    // NOTE (#2869): shadow's `duplicatesStrategy` default is EXCLUDE and it takes
+    // PRECEDENCE over transforming, so the 2nd..Nth copy of a duplicated resource
+    // never reaches ServiceFileTransformer and `mergeServiceFiles()` above silently
+    // degrades to first-wins. EXCLUDE is the RIGHT global default (LICENSE, NOTICE
+    // and arrow-git.properties all want first-wins), so the fix is a targeted
+    // bypass — added in the next commit, so its absence is observed first.
+    //
+    // `arrow-git.properties` (6 copies) stays at first-wins on purpose: its keys
+    // are NOT module-qualified, so concatenating six of them yields duplicate keys
+    // and a misleading build/commit attribution.
+}
+
+// The single-jar counterpart to `installPlugin`. `Sync`, never `Copy`, so a
+// version bump cannot leave a stale second jar in the directory — Trino would load
+// both and the newer classes might lose. A SEPARATE output root
+// (build/plugin-fat/) keeps the multi-jar `build/plugin/cqlite_flight` tree
+// untouched, since docker-compose still mounts that one.
+tasks.register<Sync>("installPluginFat") {
+    dependsOn(tasks.shadowJar)
+    into(layout.buildDirectory.dir("plugin-fat/cqlite_flight"))
+    from(tasks.shadowJar)
 }
 
 // --- Published-POM netty-pin oracle (issue #2300) ----------------------------
@@ -330,6 +415,7 @@ val verifyFatJar by tasks.registering {
     // silently degraded to first-wins — see the merge note on `shadowJar`.
     val expectedPluginClass = "in.mcfad.cqlite.flight.CqliteFlightPlugin"
     val nettyVersionsPath = "META-INF/io.netty.versions.properties"
+    dependsOn(tasks.shadowJar)
     // Captured lazily at configuration time; the artifact set resolves at execution.
     val runtimeArtifacts = configurations.runtimeClasspath.get().incoming.artifacts
     inputs.files(configurations.runtimeClasspath)
@@ -369,8 +455,9 @@ val verifyFatJar by tasks.registering {
         require(entryNames.isNotEmpty()) { "shaded jar $jar holds no non-directory entries" }
         val entries = entryNames.toSet()
 
-        // 2. Derive every expectation from the RESOLVED runtime graph, and take the
-        //    per-source-jar service census + a probe class per artifact in the SAME pass.
+        // 2. Derive every expectation from the RESOLVED runtime graph: module
+        //    coordinates, the per-source-jar service census and every source jar's
+        //    entry list, in ONE pass over the tree.
         val artifacts = runtimeArtifacts.artifacts.toList()
         require(artifacts.isNotEmpty()) {
             "runtimeClasspath resolved to zero artifacts — graph-derivation is broken, so every " +
@@ -380,8 +467,7 @@ val verifyFatJar by tasks.registering {
         val resolvedArrow = mutableMapOf<String, String>()
         val serviceUnion = mutableMapOf<String, MutableSet<String>>()
         val serviceSources = mutableMapOf<String, MutableSet<String>>()
-        val probes = mutableMapOf<String, String>()
-        val unprobed = mutableListOf<String>()
+        val sourceEntries = mutableMapOf<String, List<String>>()
         val unreadable = mutableListOf<String>()
         for (art in artifacts) {
             val label = art.id.componentIdentifier.displayName
@@ -399,11 +485,12 @@ val verifyFatJar by tasks.registering {
                 unreadable += "$label -> ${file.name}"
                 continue
             }
-            var probe: String? = null
+            val names = mutableListOf<String>()
             ZipFile(file).use { zf ->
                 for (entry in zf.entries().asSequence()) {
                     if (entry.isDirectory) continue
                     val name = entry.name
+                    names += name
                     // Only top-level `META-INF/services/<fqcn>` descriptors, never a
                     // nested path (which is not a ServiceLoader lookup key).
                     if (name.startsWith("META-INF/services/") && name.count { it == '/' } == 2) {
@@ -413,27 +500,57 @@ val verifyFatJar by tasks.registering {
                             serviceSources.getOrPut(name) { mutableSetOf() } += label
                         }
                     }
-                    // Probe: a class that shadow must carry through verbatim. Skip
-                    // META-INF/** (shadow strips versioned module-infos) and module-info.
-                    if (probe == null &&
-                        name.endsWith(".class") &&
-                        !name.startsWith("META-INF/") &&
-                        !name.endsWith("module-info.class")
-                    ) {
-                        probe = name
-                    }
                 }
             }
-            val resolvedProbe = probe
-            if (resolvedProbe == null) unprobed += label else probes[label] = resolvedProbe
+            sourceEntries[label] = names
+        }
+
+        // Probe selection is DERIVED, not allowlisted. A probe must be an entry name
+        // that (a) shadow does not legitimately strip and (b) is UNIQUE to one source
+        // jar across the whole graph. Uniqueness is what makes absence conclusive: a
+        // name several jars share can be legitimately absent-as-a-copy under the
+        // first-wins EXCLUDE strategy, so it could never distinguish "bundled" from
+        // "dropped". Classes outside META-INF/ are preferred (they are what a
+        // classloader actually needs); a resource is accepted when a jar has no unique
+        // class of its own.
+        //
+        // Three artifacts in TODAY's graph have no such probe, all three genuinely
+        // content-free placeholders — measured, not assumed:
+        //   io.grpc:grpc-context           holds ONLY META-INF/MANIFEST.MF (the API
+        //                                  moved into grpc-api),
+        //   com.google.guava:listenablefuture:9999.0-empty-to-avoid-conflict-with-guava
+        //                                  is the well-known empty conflict placeholder,
+        //   io.netty:netty-tcnative-boringssl-static (classifier-less) is a marker POM
+        //                                  jar; the natives live in the per-platform
+        //                                  CLASSIFIED jars, which this graph does not
+        //                                  resolve (hence zero META-INF/native entries).
+        // They are reported by NAME in the census as INDISTINGUISHABLE rather than
+        // waived silently or hard-coded into an allowlist that would drift: a jar whose
+        // every entry is shadow-stripped or byte-shared with a sibling contributes
+        // nothing a probe CAN see, and that is a measurement, not an exception.
+        fun strippedByShadow(name: String): Boolean =
+            name.endsWith("module-info.class") ||
+                name == "META-INF/INDEX.LIST" ||
+                (
+                    name.startsWith("META-INF/") &&
+                        (name.endsWith(".SF") || name.endsWith(".DSA") || name.endsWith(".RSA"))
+                    )
+        val globalNameCounts = sourceEntries.values.flatten().groupingBy { it }.eachCount()
+        fun eligible(name: String): Boolean = globalNameCounts[name] == 1 && !strippedByShadow(name)
+        val probes = mutableMapOf<String, String>()
+        val indistinguishable = mutableListOf<String>()
+        sourceEntries.forEach { (label, names) ->
+            val probe = names.firstOrNull { eligible(it) && it.endsWith(".class") && !it.startsWith("META-INF/") }
+                ?: names.firstOrNull { eligible(it) }
+            if (probe == null) indistinguishable += label else probes[label] = probe
+        }
+        require(probes.isNotEmpty()) {
+            "no resolved runtime artifact yielded a unique probe entry — the contribution census " +
+                "would prove nothing, so the graph has changed shape (#2869)"
         }
 
         val problems = mutableListOf<String>()
         problems += unreadable.map { "resolved runtime artifact is not a readable jar: $it" }
-        problems += unprobed.map {
-            "resolved runtime artifact $it carries no probe class, so its contribution to the " +
-                "shaded jar is unverifiable — add an explicit expectation for it"
-        }
 
         ZipFile(jar).use { zf ->
             fun read(path: String): ByteArray? =
@@ -568,13 +685,13 @@ val verifyFatJar by tasks.registering {
         val duplicates = entryNames.groupingBy { it }.eachCount().filterValues { it > 1 }
         problems += duplicates.entries.map { (name, count) -> "entry $name appears $count times in the shaded jar" }
 
-        // 10. Per-artifact contribution census: every resolved runtime jar put at least
-        //     its probe class into the shaded jar. This proves "the whole runtime tree is
-        //     bundled" FROM THE GRAPH, rather than from a magic entry-count floor that
+        // 10. Per-artifact contribution census: every probeable runtime jar put its
+        //     unique probe entry into the shaded jar. This proves "the whole runtime tree
+        //     is bundled" FROM THE GRAPH, rather than from a magic entry-count floor that
         //     drifts on every dependency bump.
         val missingContributors = probes.filterValues { it !in entries }
         problems += missingContributors.entries.map { (label, probe) ->
-            "resolved runtime artifact $label contributed nothing: its probe class $probe is absent"
+            "resolved runtime artifact $label contributed nothing: its unique probe entry $probe is absent"
         }
         val contributed = probes.size - missingContributors.size
 
@@ -589,10 +706,18 @@ val verifyFatJar by tasks.registering {
         val (tcnativeCount, nettyCoreCount) = resolvedNetty.keys
             .partition { it.startsWith("netty-tcnative") }
             .let { (t, c) -> t.size to c.size }
+        val indistinguishableNote =
+            if (indistinguishable.isEmpty()) {
+                "0 INDISTINGUISHABLE RECOGNISED"
+            } else {
+                "${indistinguishable.size} INDISTINGUISHABLE (content-free placeholders, unprobeable): " +
+                    indistinguishable.sorted().joinToString(", ")
+            }
         logger.lifecycle(
             "verifyFatJar: ${jar.name} (${jar.length() / (1024 * 1024)} MiB) — " +
                 "${entryNames.size} ENTRIES EXAMINED; " +
-                "${artifacts.size} RUNTIME ARTIFACTS RESOLVED, $contributed CONTRIBUTED; " +
+                "${artifacts.size} RUNTIME ARTIFACTS RESOLVED, ${probes.size} PROBED, " +
+                "$contributed CONTRIBUTED, $indistinguishableNote; " +
                 "${serviceUnion.size} SERVICE DESCRIPTORS EXAMINED across " +
                 "${serviceUnion.keys.count { serviceSources[it]!!.size > 1 }} MULTI-SOURCE PATH(S) " +
                 "carrying $providerLineTotal PROVIDER LINES RECOGNISED; " +
