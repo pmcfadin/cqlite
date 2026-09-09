@@ -335,9 +335,49 @@ def flight_image_guard_errors(file, workflow)
   errors
 end
 
+# trino-connector-fatjar.yml (issue #2869): this workflow attaches the SHADED
+# connector jar to a GitHub release. Unlike trino-publish.yml it needs no Maven
+# Central/GPG secrets and its target is MUTABLE, so it deliberately has no
+# `dry_run` input. The equivalent safety property is twofold and asserted here:
+#   1. `channel` DEFAULTS TO `dev`, so a bare `gh workflow run
+#      trino-connector-fatjar.yml -f version=X` targets the mutable
+#      `trino-connector-dev` prerelease and never a release tag; and
+#   2. a step REFUSES (exit 1) unless `git ls-remote --exit-code --tags` already
+#      finds the release tag — softprops/action-gh-release CREATES an absent tag
+#      at github.sha, so without this a release-channel dispatch from an
+#      arbitrary branch could MINT or move a release tag.
+def trino_fatjar_guard_errors(file, workflow)
+  errors = []
+
+  channel = workflow_dispatch_inputs(workflow)["channel"]
+  if !channel.is_a?(Hash)
+    errors << "#{file}: workflow_dispatch must define a `channel` input (issue #2869)"
+  elsif channel["default"].to_s != "dev"
+    errors << "#{file}: `channel` input must default to `dev` so a bare version dispatch cannot target a release tag (issue #2869)"
+  end
+
+  # The `exit 1` must follow the ls-remote probe IN THE SAME run: body. A bare
+  # "step contains both tokens" test would be satisfied by an unrelated earlier
+  # `exit 1` in the same step (this resolve step also refuses a bad version),
+  # so the probe's own refusal could be deleted without tripping the guard.
+  refusal = (workflow["jobs"] || {}).any? do |_job_name, job|
+    job_step_list(job).any? do |step|
+      lines = step["run"].to_s.lines
+      probe = lines.index { |line| line.include?("git ls-remote --exit-code --tags") }
+      probe && lines.drop(probe + 1).any? { |line| line.match?(/exit\s+1/) }
+    end
+  end
+  unless refusal
+    errors << "#{file}: a step must refuse (exit 1) when `git ls-remote --exit-code --tags` cannot find the release tag, so a dispatch can never create or move a release tag (issue #2869)"
+  end
+
+  errors
+end
+
 PUBLISH_DISPATCH_GUARDS = {
   "trino-publish.yml" => method(:trino_publish_guard_errors),
-  "flight-image.yml" => method(:flight_image_guard_errors)
+  "flight-image.yml" => method(:flight_image_guard_errors),
+  "trino-connector-fatjar.yml" => method(:trino_fatjar_guard_errors)
 }.freeze
 
 workflow_files = Dir[File.join(options[:workflows_dir], "*.{yml,yaml}")].sort
