@@ -168,10 +168,31 @@ jobs:
     # design — see the NO RELOCATION rationale on `tasks.shadowJar` in
     # build.gradle.kts — so this job is what demonstrates that Trino's child-first
     # plugin classloader really does isolate the bundled copies from the engine's.
+    # THE LABEL-EVENT GUARD IS PER-JOB, AND THIS JOB NEEDS ITS OWN (roborev job 16754,
+    # Medium). `e2e` above excludes label events wholesale; this job CANNOT, because a
+    # `labeled` event is precisely how `ci:trino-full` opts an already-open PR in. So it
+    # discriminates on WHICH label arrived instead of on the whole label SET.
+    #
+    # The defect that motivated it: testing only
+    # `contains(labels.*.name, 'ci:trino-full')` is true for EVERY subsequent `labeled`
+    # event once the label is present, so each later label mutation started ANOTHER
+    # 60-minute run — and since `concurrency.cancel-in-progress` deliberately exempts
+    # label events (see the block above), those runs COEXIST rather than superseding one
+    # another. Not hypothetical: this repo applies `status:*` read-mirror labels
+    # PROGRAMMATICALLY at every stage transition, and PR #4188 carries `ci:trino-full`
+    # while doing so, which is the exact configuration that stacks runs.
+    #
+    # `unlabeled` is excluded defensively, matching `e2e`'s idiom: the workflow does not
+    # subscribe to it today, and if that ever changes, REMOVING a label must not start a
+    # 60-minute stack either.
     if: >-
       ${{
         github.event_name != 'pull_request' ||
-        contains(github.event.pull_request.labels.*.name, 'ci:trino-full')
+        (github.event.action == 'labeled' &&
+         github.event.label.name == 'ci:trino-full') ||
+        (github.event.action != 'labeled' &&
+         github.event.action != 'unlabeled' &&
+         contains(github.event.pull_request.labels.*.name, 'ci:trino-full'))
       }}
     runs-on: ubuntu-latest
     # Mandatory: this job is new, so it is not in the workflow validator's legacy
