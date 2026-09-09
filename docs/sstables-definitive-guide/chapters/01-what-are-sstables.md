@@ -68,8 +68,8 @@ Summary.db
 ### References
 
 - Cassandra 5.0.8 (pinned):
-  - `SSTableReader` — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/SSTableReader.java
-  - `SSTableWriter` — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/SSTableWriter.java
+  - `SSTableReader` — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/SSTableReader.java
+  - `SSTableWriter` — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/SSTableWriter.java
   - `Descriptor` — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/Descriptor.java
   - `MemtableParams` (default factory L99) — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/schema/MemtableParams.java#L99-L100
   - `BigTableReader` (min/max bounds + Bloom order L220–L278) — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigTableReader.java#L220-L278
