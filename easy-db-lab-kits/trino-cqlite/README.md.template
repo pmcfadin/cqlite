@@ -46,6 +46,29 @@ first pod start (a Maven Central resolve + Gradle configuration pass) and a
 dependency on outbound HTTPS to `repo.maven.apache.org` from the app-node
 pods; both are one-time/per-restart costs, not per-query.
 
+> **NOTE — a pre-built fat jar now exists, and this kit does not use it yet.**
+> CQLite publishes a single self-contained (shaded) connector jar as a GitHub
+> Release asset, with a `.sha256` sidecar:
+>
+> ```
+> https://github.com/pmcfadin/cqlite/releases/download/v<version>/cqlite-trino-<version>-all.jar
+> ```
+>
+> That removes the per-pod-start Gradle dependency resolve entirely: fetch one
+> file once, cache it in a per-node `hostPath`, and mount it — **inside**
+> `/usr/lib/trino/plugin/cqlite_flight/`, never *as* that path, since Trino
+> loads plugins only from directories (`Files::isDirectory`) and silently
+> ignores a bare file there. The `.sha256` is what lets a download-if-missing
+> initContainer tell a complete cached jar from a truncated one.
+>
+> **The in-repo kit still uses the Gradle-resolve initContainer described
+> above** — it is unchanged. Porting the kit to the fetch-and-hostPath shape is
+> tracked **downstream**, in rustyrazorblade/easy-db-lab#731 (PR #860), because
+> verifying it needs a live multi-node Kubernetes cluster that nothing in this
+> repository's CI can provide. See `trino-connector/README.md`
+> ("Self-contained fat jar") for the asset's contents, the dev channel, and its
+> declared residuals.
+
 The `emptyDir` is mounted at `/usr/lib/trino/plugin/cqlite_flight` — a
 *subdirectory* of Trino's plugin path that the `trinodb/trino` image does
 not already populate — never at `/usr/lib/trino/plugin` itself, which would

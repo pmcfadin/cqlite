@@ -213,10 +213,12 @@ fully-unsupported table fails with a clear `NOT_SUPPORTED` error.
 
 ### Install the plugin
 
-A Trino plugin is **not a single jar** — Trino loads each plugin from an isolated
-classloader directory, so the connector jar must sit alongside all of its runtime
-dependencies. You assemble that *directory of jars* and drop it into Trino's
-plugin path (`/usr/lib/trino/plugin/cqlite_flight`).
+A Trino plugin is a **directory**, never a bare jar — Trino loads each plugin from
+an isolated classloader directory, so the connector's classes must sit in that
+directory alongside everything it needs at runtime. That can be many jars (the
+connector plus its resolved runtime dependencies) or exactly one self-contained
+jar; the enclosing directory is not optional either way. You drop that directory
+into Trino's plugin path (`/usr/lib/trino/plugin/cqlite_flight`).
 
 **From this repo** (the Gradle wrapper lives in `trino-connector/`):
 
@@ -242,6 +244,44 @@ tasks.register<Sync>("assemblePlugin") {
 `./gradlew assemblePlugin` yields `build/plugin/cqlite_flight/` (connector jar +
 flight-core + jackson + transitive deps). `trino-spi` is intentionally **not** a
 runtime dependency — Trino supplies it from the engine classpath.
+
+#### Or: one self-contained jar from a GitHub Release
+
+If you would rather fetch **one** file by version than resolve ~50 runtime
+artifacts — a container build, an air-gapped host, a per-node `hostPath` cache —
+a shaded jar is published as a GitHub Release asset, with a `.sha256` sidecar:
+
+```bash
+V=0.17.0
+BASE=https://github.com/pmcfadin/cqlite/releases/download/v$V
+curl -fLO "$BASE/cqlite-trino-$V-all.jar"
+curl -fLO "$BASE/cqlite-trino-$V-all.jar.sha256"
+shasum -a 256 -c "cqlite-trino-$V-all.jar.sha256"
+```
+
+Pre-release builds live at a rolling dev tag instead of a `v*` tag:
+`https://github.com/pmcfadin/cqlite/releases/download/trino-connector-dev/cqlite-trino-<version>-all.jar`.
+
+> **Mount it INSIDE the plugin directory, never AS it.** Trino's
+> `ServerPluginsProvider.loadPlugins` filters the plugin path with
+> `Files::isDirectory`, so a plain file at `/usr/lib/trino/plugin/cqlite_flight`
+> is **silently ignored** — no error, and the catalog simply never appears in
+> `SHOW CATALOGS`. The jar must land at
+> `/usr/lib/trino/plugin/cqlite_flight/cqlite-trino-<version>-all.jar`.
+
+The sidecar exists because the intended consumer caches the jar in a `hostPath`
+across pod restarts: file presence cannot distinguish a complete cached jar from a
+truncated download, and a checksum can. Locally, `cd trino-connector && ./gradlew
+installPluginFat` produces the same one-jar layout.
+
+Expect roughly **18–20 MB** (an estimate from the input jar sizes, not a
+measurement). Nothing else changes: `trino-spi` is still engine-provided and
+excluded, no packages are relocated (Trino's child-first plugin classloader
+already isolates the bundled netty/grpc/arrow/`jackson-databind`, and Jackson
+*annotations* must keep resolving to the engine's copy), and the `--add-opens`
+flag below is still required. **Maven Central continues to publish the thin jar
+only** — there is no `:all` classifier there; the fat jar is a GitHub Release asset
+exclusively. See `trino-connector/README.md` for the full contents/residuals list.
 
 ### Required JVM configuration (Arrow off-heap, JDK 17+)
 

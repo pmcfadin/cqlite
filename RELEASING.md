@@ -20,6 +20,7 @@ independent publish workflows**, each triggered by the same tag:
 | GHCR image | `flight-image.yml` | `ghcr.io/pmcfadin/cqlite-flight` | tags mutable, digests not |
 | Homebrew tap | `release.yml` (`update-homebrew-tap`) | `pmcfadin/homebrew-cqlite` | git, re-runnable |
 | GitHub releases | `release.yml` / `*-release.yml` | release assets | re-runnable |
+| GitHub release asset | `trino-connector-fatjar.yml` | `cqlite-trino-<version>-all.jar` (+ `.sha256`) | re-runnable |
 
 Every package registry above is **immutable**: once a version is published it can
 **never** be overwritten or deleted-and-replaced.
@@ -103,9 +104,16 @@ failed lanes to complete. Every registry lane is now **idempotent**:
 | npm | `publish-npm` runs `npm view @cqlite/node@<version>` first and **skips** the publish if that exact version already exists. |
 | Maven Central | `trino-publish` probes `repo1.maven.org` for the POM and **skips** the publish if `in.mcfad:cqlite-trino:<version>` is already released. |
 | GHCR image | `flight-image` republishes the same digests/tags; re-running is safe. |
+| Trino fat jar (GitHub release asset) | `trino-connector-fatjar.yml` re-uploads `cqlite-trino-<version>-all.jar` + its `.sha256`, overwriting the same asset names on the same release. Release assets are **mutable**, so a re-run is safe and idempotent. |
 
 So a re-run **resumes** rather than restarts: it re-runs to completion, publishing
 only the lanes that had not yet succeeded.
+
+> **The fat-jar lane is the one lane that is not immutable.** It writes GitHub
+> release assets, not a package registry, so it can be re-run freely and can also
+> **backfill an already-shipped version** — no new tag, no version bump. That is
+> why it is the only lane whose resume story is "just run it again", and why a
+> failure there never leaves a half-populated registry behind.
 
 ### How to re-run
 
@@ -128,3 +136,40 @@ only the lanes that had not yet succeeded.
   registries are immutable; instead ship a new patch version.
 - **Never** push a second tag to "fix" a partial train — re-run the lanes.
 - **Never** hand-edit the four manifest fields — use `scripts/bump-version.sh`.
+
+## Connector dev channel (`trino-connector-dev`)
+
+`.github/workflows/trino-connector-fatjar.yml` builds the shaded connector jar
+(`cqlite-trino-<version>-all.jar` + `.sha256`) and attaches it to a GitHub
+Release. It has two triggers: `push` on `v*` tags (the normal release lane, above)
+and `workflow_dispatch` with a `version` and a `channel` input — `channel`
+defaults to **`dev`**.
+
+The dev channel publishes to **one long-lived container tag, `trino-connector-dev`**,
+which carries **many version-stamped assets** (`cqlite-trino-0.17.1-dev.1-all.jar`,
+`cqlite-trino-0.18.0-dev.3-all.jar`, …) rather than one tag per build. So a
+downstream consumer gets a stable URL for a pre-release jar:
+
+```
+https://github.com/pmcfadin/cqlite/releases/download/trino-connector-dev/cqlite-trino-<version>-all.jar
+```
+
+**Why `trino-connector-dev` is deliberately NOT a `v*` tag.** Every publish lane in
+the fan-out table above triggers on `v*`. A dev tag shaped like a release tag would
+therefore start the crates.io, PyPI, npm, Maven Central and GHCR lanes — against a
+version that exists in no manifest. `trino-connector-dev` matches **zero**
+release-train triggers, so it cannot start any of them; and it would never get past
+the shared preflight anyway, since a dev version does not equal all four manifest
+fields. It is also created with **`prerelease: true`**, so GitHub never promotes it
+to the repository's "latest release".
+
+Both dispatch shapes:
+
+```bash
+# Backfill the fat jar for an already-shipped release (the v0.17.0 tag exists;
+# nothing is re-published to any registry, only a release asset is uploaded).
+gh workflow run trino-connector-fatjar.yml -f version=0.17.0 -f channel=release --ref v0.17.0
+
+# Publish a pre-release jar to the rolling dev channel.
+gh workflow run trino-connector-fatjar.yml -f version=0.17.1-dev.1 -f channel=dev
+```
