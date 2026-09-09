@@ -75,7 +75,11 @@ jobs:
           distribution: temurin
           java-version: '25'
           cache: gradle
-          cache-dependency-path: trino-connector/*.gradle.kts
+          # `**/` deliberately: a glob `*` does not cross `/`, so a bare
+          # `trino-connector/*.gradle.kts` leaves nested build scripts — e.g.
+          # trino-connector/gradle/fatjar-oracles.gradle.kts, which defines the
+          # verifyShadowNotPublished task this job runs — OUT of the cache key.
+          cache-dependency-path: trino-connector/**/*.gradle.kts
 
       # Tag runs derive the version from GITHUB_REF_NAME (v0.13.0 -> 0.13.0);
       # manual workflow_dispatch runs have no tag, so use the `version` input.
@@ -140,15 +144,35 @@ jobs:
             echo "in.mcfad:cqlite-trino:${PUBLISH_VERSION} is not on Maven Central (HTTP ${code}) — will publish."
           fi
 
-      # Pre-publish oracle (issue #2300): assert the netty pin survives into the
-      # published POM's <dependencies> BEFORE any publish path runs, so a drifted
-      # or BOM-only pin (which a downstream Maven consumer would resolve at netty
-      # 4.2.x, re-breaking arrow-19's allocator) can never reach Central.
-      - name: Verify published POM netty pin
+      # Pre-publish oracles — TWO properties of the artifact about to reach the
+      # IMMUTABLE Maven Central, both asserted BEFORE any publish path runs.
+      #
+      # 1. verifyPublishedPomNettyPin (issue #2300): the netty pin survives into
+      #    the published POM's <dependencies>. A drifted or BOM-only pin (which a
+      #    downstream Maven consumer would resolve at netty 4.2.x, re-breaking
+      #    arrow-19's allocator) can never reach Central.
+      #
+      # 2. verifyShadowNotPublished (issue #2869): the SHADED jar/variant does NOT
+      #    leak into the publication — Central publishes the THIN jar only, and
+      #    the fat jar ships as a GitHub release asset instead (see
+      #    trino-connector-fatjar.yml). Central purity has to be asserted HERE,
+      #    on the publish path, because nowhere else can stop the upload:
+      #    trino-connector-ci.yml runs this task but is `required`-exempt
+      #    (.github/ci-gating-tiers.yml), so a regression — someone flipping
+      #    `shadow { addShadowVariantIntoJavaComponent = false }`, or a shadow
+      #    bump re-introducing the variant by another route — merges red;
+      #    trino-connector-fatjar.yml runs it on the same v* tag but is a separate
+      #    workflow with NO ordering relative to this publish, so it can only
+      #    report the pollution AFTER an irreversible upload.
+      #
+      # Its prerequisites (generateMetadataFileForMavenPublication,
+      # generatePomFileForMavenPublication) are already on the publish path, so
+      # this adds no new build work.
+      - name: Verify published POM netty pin + Central publication purity
         working-directory: trino-connector
         env:
           PUBLISH_VERSION: ${{ steps.version.outputs.version }}
-        run: ./gradlew --no-daemon verifyPublishedPomNettyPin -Pversion="$PUBLISH_VERSION"
+        run: ./gradlew --no-daemon verifyPublishedPomNettyPin verifyShadowNotPublished -Pversion="$PUBLISH_VERSION"
 
       # Dry run (manual workflow_dispatch with dry_run=true): publish only to the
       # local Maven repo. No Central upload and no signing/Central secrets needed,
