@@ -277,7 +277,16 @@ exempt:
           NOTHING merge-gating runs the Trino connector against a live Flight
           server: the lane is docker-compose + gradle and no gate component or
           registered tier reaches it. The `flight` tier covers cqlite-flight's own
-          Rust end-to-end tests, which is a different surface. Declared, not
+          Rust end-to-end tests, which is a different surface. RESIDUAL NAMED IN
+          #2869: this lane's `e2e-fat` job is the ONLY proof anywhere that Trino
+          LOADS the single shaded fat jar as a plugin and returns rows — the
+          `verifyFatJar` oracle in trino-connector-ci.yml asserts the jar's
+          contents, but only a live Trino can show the relocated/merged tree
+          actually resolves at plugin-classloader time. `e2e-fat` is non-gating
+          twice over: this whole workflow is exempt, and the job is full-tier only
+          (nightly / push to main / workflow_dispatch / release / a PR labeled
+          `ci:trino-full`), so on a routine unlabeled PR it does not run at all. A
+          fat jar that Trino cannot load can therefore merge. Declared, not
           covered.
 
   - workflow: fuzz.yml
@@ -502,7 +511,20 @@ exempt:
           NOTHING merge-gating builds or tests trino-connector/: it is a Gradle/Java
           project outside the cargo workspace, and no gate component or registered
           tier invokes gradle. It releases on its own cadence. Declared, not
-          covered.
+          covered. RESIDUAL NAMED IN #2869: this lane is now also the sole home of
+          the shaded fat-jar oracles — `verifyFatJar` (the shaded jar's CONTENTS:
+          the relocated/merged runtime tree that easy-db-lab curls as ONE Release
+          asset instead of resolving 50 artifacts) and `verifyShadowNotPublished`
+          (the shaded uber-jar must never leak into the Maven Central publication,
+          where it would hand every downstream consumer a duplicate, unresolvable
+          copy of that tree). Both run on EVERY PR here and are therefore gated by
+          NOTHING merge-blocking: a regression in either — a fat jar missing a
+          relocated dependency, or a shaded variant appearing in Central — can
+          merge. No registered tier can fix this, because a tier must emit its
+          declared context unconditionally on every PR and a gradle lane outside
+          the cargo workspace cannot; an always-green classifier job would
+          manufacture exactly the vacuous green this registry exists to prevent.
+          Declared, not covered.
 
   - workflow: workflow-config.yml
     reason: >-
