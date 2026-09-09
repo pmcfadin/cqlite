@@ -519,13 +519,13 @@ exempt:
           instead of resolving 50 artifacts is complete, service-merged and
           version-pinned; nothing is relocated, deliberately — see the NO RELOCATION
           rationale on `tasks.shadowJar` in trino-connector/build.gradle.kts) and
-          `verifyShadowNotPublished`
-          (the shaded uber-jar must never leak into the Maven Central publication,
-          where it would hand every downstream consumer a duplicate, unresolvable
-          copy of that tree). Both run on EVERY PR here and are therefore gated by
-          NOTHING merge-blocking: a regression in either — a fat jar missing a
-          bundled dependency or silently degraded to first-wins service
-          descriptors, or a shaded variant appearing in Central — can merge. No registered tier can fix this, because a tier must emit its
+          `verifyShadowNotPublished` (the shaded uber-jar must never leak into the
+          Maven Central publication, where it would hand every downstream consumer a
+          duplicate, unresolvable copy of that tree). Both run on EVERY PR here and
+          are therefore gated by NOTHING merge-blocking: a regression in either — a
+          fat jar missing a bundled dependency or silently degraded to first-wins
+          service descriptors, or a shaded variant appearing in Central — can merge.
+          No registered tier can fix this, because a tier must emit its
           declared context unconditionally on every PR and a gradle lane outside
           the cargo workspace cannot; an always-green classifier job would
           manufacture exactly the vacuous green this registry exists to prevent.

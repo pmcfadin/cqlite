@@ -27,14 +27,19 @@ on:
     # path filters, so the extra event type cannot broaden it beyond that surface.
     #
     # `unlabeled` is deliberately NOT here: removing a label never needs to START a
-    # run, so subscribing to it would buy nothing and cost a cancel/restart (below).
-    # And `e2e` below is gated OFF for label events on purpose — see its `if:`. This
-    # workflow's `concurrency.cancel-in-progress` is true on pull_request, so without
-    # that gate any label added mid-run would cancel an in-flight ~40 min Cassandra +
-    # Sidecar + cqlite-flight + Trino stack and restart it from zero. That is not
-    # hypothetical: this repo applies `status:*` read-mirror labels PROGRAMMATICALLY
-    # at every stage transition, so its own labelling habits would trigger it
-    # routinely.
+    # run, so subscribing to it would buy nothing.
+    #
+    # Subscribing to `labeled` at all costs TWO guards, both below, because a label
+    # mutation changes no byte of the diff and must therefore neither kill nor repeat
+    # the ~40 min Cassandra + Sidecar + cqlite-flight + Trino stack:
+    #   * `concurrency.cancel-in-progress` excludes label events, so a label cannot
+    #     CANCEL an in-flight run (that decision is made at the RUN level, before any
+    #     job `if:` is evaluated, so a job gate alone cannot prevent it);
+    #   * `e2e`'s `if:` excludes label events, so a label cannot START a redundant
+    #     copy of it.
+    # Neither is hypothetical: this repo applies `status:*` read-mirror labels
+    # PROGRAMMATICALLY at every stage transition, so its own labelling habits would
+    # trigger this routinely.
     types: [opened, synchronize, reopened, ready_for_review, labeled]
     # Targeted path filter (#2358): the docker-compose E2E runs automatically on
     # PRs touching the Flight/Trino integration surface or the core storage
