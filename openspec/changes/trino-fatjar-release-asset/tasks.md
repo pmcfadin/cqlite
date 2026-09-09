@@ -25,8 +25,11 @@
 - [ ] 1.5 `verifyShadowNotPublished` — assert the Maven publication gained no shadow variant, no
       `-all.jar` and no `all` classifier. Applying the shadow plugin can wire `shadowJar` into a
       publication as a side effect, so this is a real failure mode.
-- [ ] 1.6 `installPluginFat` — assemble `build/plugin/cqlite_flight/cqlite-trino-<version>-all.jar`
-      and nothing else.
+- [ ] 1.6 `installPluginFat` — assemble
+      `build/plugin-fat/cqlite_flight/cqlite-trino-<version>-all.jar` and nothing else. Use a
+      **separate output root** from `installPlugin`'s `build/plugin/`, so the ~50-jar tree the docker
+      stack mounts is left intact and nobody can mistake a leftover multi-jar tree for the fat layout;
+      and use `Sync`, not `Copy`, so a version bump cannot leave two shaded jars for Trino to load.
 - [ ] 1.7 Emit the `.sha256` sidecar next to the jar (or have the workflow compute it — decide once,
       in one place, and do not do it twice).
 - [x] 1.8 **Record the MEASURED jar size.** Done: **18.9 MB** (`du -h` → `19M`) from a clean `build/`

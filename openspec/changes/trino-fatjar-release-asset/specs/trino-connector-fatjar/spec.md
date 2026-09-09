@@ -163,8 +163,14 @@ directory: `/usr/lib/trino/plugin/cqlite_flight/cqlite-trino-<version>-all.jar`.
 `ServerPluginsProvider.loadPlugins` filters the plugin path with `Files::isDirectory`, placing the jar
 **as** `/usr/lib/trino/plugin/cqlite_flight` instead of inside it is silently ignored by Trino, so the
 supported layout SHALL be the jar nested one level inside the plugin directory. An `installPluginFat`
-task SHALL assemble exactly that layout locally
-(`build/plugin/cqlite_flight/cqlite-trino-<version>-all.jar`). The docker E2E harness SHALL accept
+task SHALL assemble exactly that layout locally, under a **separate output root**:
+`build/plugin-fat/cqlite_flight/cqlite-trino-<version>-all.jar`. The root SHALL NOT be
+`build/plugin/`, which `installPlugin` owns — keeping the roots distinct is deliberate, so that
+assembling the one-jar layout leaves the ~50-jar `build/plugin/cqlite_flight` tree intact (the docker
+stack still mounts that one) and a reader cannot mistake a leftover multi-jar tree for the fat
+layout. The task SHALL be a `Sync` rather than a `Copy`, so a version bump cannot leave a stale
+second shaded jar in the directory for Trino to load alongside the new one. The docker E2E harness
+SHALL accept
 `docker/e2e-test.sh --plugin-flavor=multi|fat`, defaulting to `multi` so the existing lane is
 unchanged, and the `fat` flavor SHALL exercise the shaded jar through a real Trino query. The JVM
 requirement is unchanged: the shaded jar still needs
@@ -173,8 +179,10 @@ requirement is unchanged: the shaded jar still needs
 #### Scenario: installPluginFat assembles a one-jar plugin directory
 
 - **WHEN** `./gradlew installPluginFat` runs
-- **THEN** `build/plugin/cqlite_flight/` contains the shaded jar
+- **THEN** `build/plugin-fat/cqlite_flight/` contains the shaded jar
 - **AND** it contains no other dependency jars
+- **AND** an existing `build/plugin/cqlite_flight/` multi-jar tree from a prior `installPlugin` run is left untouched
+- **AND** re-running the task after a version bump leaves exactly one shaded jar in the directory, not two
 
 #### Scenario: The fat flavor serves a real query end to end
 

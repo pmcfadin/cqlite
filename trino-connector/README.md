@@ -11,8 +11,9 @@ compacted, filtered data back as Arrow.
 - Build & test: `./gradlew test`
 - Assemble the Trino plugin dir: `./gradlew installPlugin` → `build/plugin/cqlite_flight`
   (connector jar + every runtime dependency, one jar per file)
-- Assemble the same plugin dir from ONE self-contained jar: `./gradlew installPluginFat` →
-  `build/plugin/cqlite_flight/cqlite-trino-<version>-all.jar` (see
+- Assemble an equivalent plugin dir from ONE self-contained jar: `./gradlew installPluginFat` →
+  `build/plugin-fat/cqlite_flight/cqlite-trino-<version>-all.jar` — a **separate output root**, so
+  the multi-jar `build/plugin/` tree above is left untouched (see
   [Self-contained fat jar](#self-contained-fat-jar-github-release-asset))
 
 ## Maven Central / published artifact
@@ -98,8 +99,16 @@ Correct layout:
 
 i.e. a Kubernetes `hostPath`/`subPath` mount or a `COPY` whose **destination is a
 path inside** `…/cqlite_flight/`. Locally, `./gradlew installPluginFat` builds
-exactly that layout (one jar in `build/plugin/cqlite_flight/`), and the docker
-E2E stack can be run either way:
+exactly that layout under its **own** output root — one jar in
+`build/plugin-fat/cqlite_flight/`, **not** `build/plugin/cqlite_flight/`. The two
+roots are deliberately separate so assembling the fat layout leaves the ~50-jar
+`build/plugin/` tree intact (docker-compose still mounts that one); the task is a
+`Sync`, so a version bump cannot leave a stale second jar behind for Trino to load
+alongside the new one. Mind the difference when you mount: `build/plugin/cqlite_flight/`
+after an `installPluginFat` run holds whatever your last `installPlugin` left there,
+which is the multi-jar tree, not the fat jar.
+
+The docker E2E stack can be run either way:
 
 ```bash
 docker/e2e-test.sh                          # --plugin-flavor=multi (default): directory of jars

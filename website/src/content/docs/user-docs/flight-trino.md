@@ -272,7 +272,10 @@ Pre-release builds live at a rolling dev tag instead of a `v*` tag:
 The sidecar exists because the intended consumer caches the jar in a `hostPath`
 across pod restarts: file presence cannot distinguish a complete cached jar from a
 truncated download, and a checksum can. Locally, `cd trino-connector && ./gradlew
-installPluginFat` produces the same one-jar layout.
+installPluginFat` produces the same one-jar layout under its own output root,
+`build/plugin-fat/cqlite_flight/` — deliberately separate from the multi-jar
+`build/plugin/cqlite_flight/` that `installPlugin` writes, so assembling one does
+not disturb the other.
 
 The jar is **18.9 MB** (`du -h` reports `19M`) against a 172 KB thin jar — size a
 per-node cache off ~19 MB per version. Nothing else changes: `trino-spi` is still
