@@ -530,20 +530,19 @@ val verifyFatJar by tasks.registering {
         // classloader actually needs); a resource is accepted when a jar has no unique
         // class of its own.
         //
-        // Three artifacts in TODAY's graph have no such probe, all three genuinely
-        // content-free placeholders — measured, not assumed:
-        //   io.grpc:grpc-context           holds ONLY META-INF/MANIFEST.MF (the API
-        //                                  moved into grpc-api),
-        //   com.google.guava:listenablefuture:9999.0-empty-to-avoid-conflict-with-guava
-        //                                  is the well-known empty conflict placeholder,
-        //   io.netty:netty-tcnative-boringssl-static (classifier-less) is a marker POM
-        //                                  jar; the natives live in the per-platform
-        //                                  CLASSIFIED jars, which this graph does not
-        //                                  resolve (hence zero META-INF/native entries).
-        // They are reported by NAME in the census as INDISTINGUISHABLE rather than
-        // waived silently or hard-coded into an allowlist that would drift: a jar whose
-        // every entry is shadow-stripped or byte-shared with a sibling contributes
-        // nothing a probe CAN see, and that is a measurement, not an exception.
+        // Exactly ONE artifact in today's graph has no such probe, and it is genuinely
+        // content-free — MEASURED, not assumed: `io.grpc:grpc-context:1.79.0` holds only
+        // META-INF/MANIFEST.MF (its API moved into grpc-api). Two other placeholders
+        // (guava's `listenablefuture:9999.0-empty-to-avoid-conflict-with-guava`, and the
+        // classifier-less `netty-tcnative-boringssl-static` marker jar whose natives live
+        // in per-platform CLASSIFIED jars this graph never resolves) ARE probed, via
+        // their uniquely-named META-INF/maven pom.properties — which is the point of
+        // deriving eligibility rather than allowlisting: the rule found coverage a
+        // hand-written waiver list would have thrown away.
+        // A jar with no probe is reported BY NAME in the census as INDISTINGUISHABLE, not
+        // waived silently: every one of its entries is either shadow-stripped or
+        // byte-shared with a sibling, so nothing a probe can see distinguishes its
+        // contribution. That is a measurement, not an exception.
         fun strippedByShadow(name: String): Boolean =
             name.endsWith("module-info.class") ||
                 name == "META-INF/INDEX.LIST" ||
@@ -749,6 +748,85 @@ val verifyFatJar by tasks.registering {
 }
 
 tasks.named("check") { dependsOn(verifyFatJar) }
+
+// --- Publication-purity oracle (issue #2869) ---------------------------------
+// The owner's hard requirement is that adding shadow leaves the Maven Central
+// publication BYTE-IDENTICAL. The `shadow { addShadowVariantIntoJavaComponent =
+// false }` switch above is the mechanism; this is the assertion, and it reads the
+// GENERATED metadata rather than the build script, so it cannot pass by echoing
+// its own config. Central publishes the THIN jar only — there is deliberately no
+// `:all` classifier there, because the shaded jar is a GitHub Release asset with
+// its own lifecycle, not a library coordinate.
+val verifyShadowNotPublished by tasks.registering {
+    description = "Assert the shaded jar/variant does NOT leak into the Maven Central publication (#2869)."
+    group = "verification"
+    dependsOn("generateMetadataFileForMavenPublication", "generatePomFileForMavenPublication")
+    val moduleFile = layout.buildDirectory.file("publications/maven/module.json")
+    val pomFile = layout.buildDirectory.file("publications/maven/pom-default.xml")
+    doLast {
+        val module = moduleFile.get().asFile
+        require(module.isFile) { "generated Gradle module metadata not found at $module" }
+        val pom = pomFile.get().asFile
+        require(pom.isFile) { "generated POM not found at $pom" }
+
+        // module.json is Gradle-authored JSON. Rather than add a JSON dependency to a
+        // build script that has none, read the facts that matter with bounded regexes,
+        // keyed on the ONE structural cue that distinguishes a variant record from any
+        // other `"name"` field in the document (a dependency's, or a file's): a variant
+        // is `"name": "<v>"` immediately followed by its `"attributes"` object. If a
+        // future Gradle reorders those keys this parse yields zero variants and the
+        // require below FAILs — the check refuses rather than passing vacuously.
+        val text = module.readText()
+        val variantNames = Regex("\"name\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"attributes\"")
+            .findAll(text)
+            .map { it.groupValues[1] }
+            .toList()
+        require(variantNames.isNotEmpty()) {
+            "no variant records parsed out of $module — the assertions below would be vacuous, so " +
+                "either the publication produced no variants or the metadata shape changed (#2869)"
+        }
+
+        val problems = mutableListOf<String>()
+        variantNames.filter { it.contains("shadow", ignoreCase = true) }.forEach {
+            problems += "published variant \"$it\" is a shadow variant — set " +
+                "`shadow { addShadowVariantIntoJavaComponent = false }`; Central publishes the thin jar only"
+        }
+        // The attribute a Gradle consumer's variant selection actually keys on. Shadow
+        // stamps its variant `shadowed`; every thin variant is `external`. Checked
+        // independently of the variant NAME so a shadow rename cannot slip past.
+        val bundlings = Regex("\"org\\.gradle\\.dependency\\.bundling\"\\s*:\\s*\"([^\"]+)\"")
+            .findAll(text)
+            .map { it.groupValues[1] }
+            .toList()
+        require(bundlings.isNotEmpty()) {
+            "no org.gradle.dependency.bundling attribute found in $module — the shadowed-bundling " +
+                "assertion would be vacuous (#2869)"
+        }
+        bundlings.filter { it != "external" }.distinct().forEach {
+            problems += "published variant declares org.gradle.dependency.bundling=\"$it\", expected " +
+                "\"external\" on every variant — a shaded/embedded variant is leaking into Central"
+        }
+        // Any `-all.jar` file entry is the shaded jar itself leaking.
+        Regex("\"name\"\\s*:\\s*\"([^\"]*-all\\.jar)\"").findAll(text).forEach {
+            problems += "published module metadata lists shaded artifact ${it.groupValues[1]}"
+        }
+        if (pom.readText().contains("-all.jar")) {
+            problems += "published POM $pom references a -all.jar artifact"
+        }
+        require(problems.isEmpty()) {
+            "shaded jar leaked into the Maven Central publication (#2869):\n  " + problems.joinToString("\n  ")
+        }
+
+        logger.lifecycle(
+            "verifyShadowNotPublished: ${variantNames.size} PUBLISHED VARIANTS EXAMINED " +
+                "(${variantNames.joinToString(", ")}); ${bundlings.size} BUNDLING ATTRIBUTES EXAMINED, " +
+                "all \"external\"; 0 SHADOW VARIANTS RECOGNISED, 0 SHADED ARTIFACT REFERENCES " +
+                "RECOGNISED in module.json or pom-default.xml (#2869)",
+        )
+    }
+}
+
+tasks.named("check") { dependsOn(verifyShadowNotPublished) }
 
 // --- Maven Central publication (Central Portal via vanniktech) ---------------
 // `publishToMavenLocal` / `publishToMavenCentral` produce main + sources +
