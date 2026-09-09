@@ -58,14 +58,31 @@ jobs:
         # otherwise fire only on the publish path, so an enforced-platform / metadata
         # leak (e.g. #2334's enforcedPlatform in a published variant) was invisible to
         # CI until the release publish job failed. Running them here catches it pre-merge.
+        # verifyShadowNotPublished asserts the shaded fat jar (#2869) never leaks into
+        # the Maven Central publication: the fat jar is a Release ASSET, and a shaded
+        # uber-jar in Central would hand every downstream consumer a duplicate,
+        # unresolvable copy of the runtime tree. It reads only the two generate* tasks'
+        # own outputs, both already produced above, so it costs essentially nothing.
         run: >-
           ./gradlew --no-daemon test verifyPublishedPomNettyPin
           generateMetadataFileForMavenPublication generatePomFileForMavenPublication
+          verifyShadowNotPublished
 
-      - name: Assemble plugin
+      # Named as its own step so the fat-jar contents assertion appears BY NAME in the
+      # log rather than hiding inside an aggregate `check`. Cheap on every PR: `test`
+      # above has already compiled `main`, so shading is seconds. verifyFatJar is the
+      # only oracle for the shaded jar's CONTENTS — the relocated/merged runtime tree
+      # that easy-db-lab curls as ONE artifact instead of resolving 50 (#2869).
+      - name: Shade fat jar and verify its contents (shadowJar verifyFatJar)
+        working-directory: trino-connector
+        run: ./gradlew --no-daemon shadowJar verifyFatJar
+
+      - name: Assemble plugin (multi-jar and fat flavors)
         if: env.RUN_FULL == 'true'
         working-directory: trino-connector
-        run: ./gradlew --no-daemon installPlugin
+        # installPlugin => build/plugin/cqlite_flight (the 50-jar runtime tree, unchanged);
+        # installPluginFat => build/plugin-fat/cqlite_flight (exactly one shaded jar, #2869).
+        run: ./gradlew --no-daemon installPlugin installPluginFat
 
       - name: Upload plugin artifact
         if: env.RUN_FULL == 'true'
@@ -73,6 +90,16 @@ jobs:
         with:
           name: cqlite-trino-plugin
           path: trino-connector/build/plugin/cqlite_flight
+          if-no-files-found: error
+
+      - name: Upload fat plugin artifact
+        if: env.RUN_FULL == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cqlite-trino-plugin-fat
+          path: trino-connector/build/plugin-fat/cqlite_flight
+          # error, not warn: a run that assembled the fat flavor and uploaded NOTHING
+          # must never report green (#2869).
           if-no-files-found: error
 
       - name: Upload test reports
@@ -89,8 +116,13 @@ jobs:
           {
             echo "## Trino connector CI tier"
             echo ""
-            echo "- Ordinary PRs run Gradle tests only."
+            echo "- Ordinary PRs run: Gradle \`test\`, \`verifyPublishedPomNettyPin\`, the two publication-metadata generators,"
+            echo "  \`verifyShadowNotPublished\` (the shaded jar must stay OUT of the Maven Central publication),"
+            echo "  and \`shadowJar verifyFatJar\` (the shaded fat jar's contents oracle, #2869)."
             echo "- Plugin assembly and artifact upload run on push to main, nightly schedule, workflow_dispatch, or PRs labeled \`ci:trino-full\`."
-            echo "- Full Docker E2E lives in flight-trino-e2e.yml and accepts \`ci:trino-full\`."
+            echo "  That tier assembles BOTH flavors — \`installPlugin\` (50-jar tree) and \`installPluginFat\` (one shaded jar) —"
+            echo "  and uploads each as an artifact with \`if-no-files-found: error\`."
+            echo "- Full Docker E2E lives in flight-trino-e2e.yml and accepts \`ci:trino-full\`; its \`e2e-fat\` job is the only"
+            echo "  proof that Trino actually LOADS the single shaded jar and returns rows."
             echo "- Current full-tier decision: ${RUN_FULL}."
           } >> "$GITHUB_STEP_SUMMARY"
