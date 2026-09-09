@@ -398,17 +398,30 @@ end
 # verification record), and a workflow run is the final oracle. A reviewer must
 # not read a green `PASS` here as executability.
 
-# Matched against the text FOLLOWING the opener on the opener's own line. Both
-# are anchored on `||` and end-anchored, so the `exit 1` is the consequent of the
-# opener's failure and nothing outside that consequent is consulted.
-SAME_LINE_REFUSAL_FORMS = [
-  # `<opener> || exit 1`
-  /\A[ \t]*\|\|[ \t]*exit[ \t]+1[ \t]*;?[ \t]*\z/,
-  # `<opener> || { …; exit 1; …}` — brace groups need a `;` (or newline) before
-  # the closing `}` in sh, so requiring one is stricter AND correct. `[^{}]*`
-  # keeps the group flat: a nested group is an unrecognised shape, not a guess.
-  /\A[ \t]*\|\|[ \t]*\{[^{}]*\bexit[ \t]+1[ \t]*;[^{}]*\}[ \t]*;?[ \t]*\z/
-].freeze
+# Decides the two same-line shapes from the text FOLLOWING the opener match on
+# the opener's own line.
+#
+# The pre-`||` part may be the remainder of the opener's OWN command — its
+# arguments, redirections (`>/dev/null 2>&1`), even an `&&` continuation — but it
+# may contain NEITHER `;` NOR `|`. Both of those end the opener's command, so an
+# `exit 1` after one of them would be guarding something else (or nothing); that
+# exclusion is what makes this a structural test rather than a text search, and
+# it is what refuses roborev's `exit 1; if ! <opener>; then echo; fi` shape.
+#
+# After `||`, exactly two shapes, both END-anchored so no further statement can
+# follow the refusal:
+#   * `exit 1`
+#   * a brace group delimited by the LAST `}` on the line, whose body contains
+#     `exit 1;` (sh requires a `;` or newline before `}`, so requiring one is
+#     both stricter and correct). Everything in that body is inside the `||`
+#     consequent, which is precisely the structural claim; the body is taken
+#     whole rather than parsed, so `${TAG}` and nested groups are fine.
+def same_line_refusal?(tail)
+  return true if tail.match?(/\A[^;|]*\|\|[ \t]*exit[ \t]+1[ \t]*;?[ \t]*\z/)
+
+  body = tail[/\A[^;|]*\|\|[ \t]*\{(.*)\}[ \t]*;?[ \t]*\z/, 1]
+  !body.nil? && body.match?(/\bexit[ \t]+1[ \t]*;/)
+end
 
 def shell_refusal_bound?(run, opener)
   lines = run.lines
@@ -419,8 +432,7 @@ def shell_refusal_bound?(run, opener)
 
   # Same-line forms: consult ONLY the text after the opener, so an `exit 1`
   # sitting before it (or otherwise outside the `||` consequent) cannot count.
-  tail = head_line.match(opener).post_match.chomp
-  return true if SAME_LINE_REFUSAL_FORMS.any? { |form| tail.match?(form) }
+  return true if same_line_refusal?(head_line.match(opener).post_match.chomp)
 
   return false unless head_line.match?(/\bif\b/) && head_line.match?(/\bthen\s*\z/)
 
