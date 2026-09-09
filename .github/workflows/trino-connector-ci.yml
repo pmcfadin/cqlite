@@ -108,6 +108,36 @@ jobs:
           # must never report green (#2869).
           if-no-files-found: error
 
+      # Deliberately its OWN step, and deliberately AFTER both plugin uploads (#2869).
+      #
+      # This task is the only EXECUTED check that installPluginFat is a `Sync` and not a
+      # `Copy` — i.e. that bumping the version leaves ONE jar in the plugin directory
+      # rather than two, which Trino would both load. It proves that by planting a
+      # sentinel `cqlite-trino-0.0.0-STALE-all.jar` into
+      # build/plugin-fat/cqlite_flight and asserting the sync removes it.
+      #
+      # That directory is exactly what "Upload fat plugin artifact" publishes, so the
+      # placement is a safety boundary, not cosmetics. Running AFTER the uploads makes
+      # the guarantee STRUCTURAL — the sentinel cannot reach a published artifact
+      # because it does not exist yet when the upload runs. The alternative (naming the
+      # task in the `installPlugin installPluginFat` step above) would leave the
+      # sentinel's absence depending on Gradle's task ordering AND on the upload steps
+      # keeping their implicit `success()` guard; this ordering depends on neither.
+      # Verified by running both publish invocations — `shadowJar verifyFatJar
+      # verifyShadowNotPublished` (the release-asset path) and
+      # `verifyPublishedPomNettyPin verifyShadowNotPublished` + `publishToMavenLocal`
+      # (the Central path) — and confirming no sentinel exists anywhere under build/ and
+      # that build/plugin-fat is never even created, because the planting fires only
+      # when this task is in the task graph.
+      #
+      # NOT gated on RUN_FULL: it is cheap (shadowJar is already built by the step
+      # above, so this is a one-file sync plus an assertion) and the whole point is that
+      # it must actually run. It is wired to `check` too, but NO workflow in this repo
+      # invokes `gradlew check`, so `check` alone is not coverage.
+      - name: Verify installPluginFat prunes a stale jar
+        working-directory: trino-connector
+        run: ./gradlew --no-daemon verifyInstallPluginFatPrunesStale
+
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@v4

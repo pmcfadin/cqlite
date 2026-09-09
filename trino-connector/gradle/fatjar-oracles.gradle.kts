@@ -597,9 +597,22 @@ val verifyInstallPluginFatPrunesStale by tasks.registering {
 gradle.taskGraph.whenReady {
     if (hasTask(verifyInstallPluginFatPrunesStale.get())) {
         val dir = layout.buildDirectory.dir("plugin-fat/cqlite_flight").get().asFile
+        // REPLACE the destination with ONLY the sentinel — do not merely add a file to it.
+        //
+        // MEASURED, and it cost a false failure to find: when `installPluginFat` had
+        // already run in an EARLIER Gradle invocation (exactly the CI full tier, where an
+        // earlier step assembles the plugin), simply ADDING a file to its output directory
+        // did NOT make Gradle consider the Sync out of date — it reported
+        // `installPluginFat UP-TO-DATE`, never re-ran, and left the sentinel sitting in the
+        // directory, so the assertion below failed spuriously AND polluted a directory CI
+        // uploads. Emptying the destination removes the real jar, which is a MISSING
+        // declared output; that reliably forces re-execution.
+        //
+        // This also makes the scenario a cleaner statement of the property: the destination
+        // contains a foreign jar and nothing else, and after the sync it must contain
+        // exactly the current one. Content is irrelevant — `Sync` decides by PATH.
+        dir.deleteRecursively()
         dir.mkdirs()
-        // Content is irrelevant — `Sync` decides by PATH, not by bytes. A previous
-        // release's filename makes the simulated scenario the real one: a version bump.
         File(dir, stalePluginJarName).writeText("stale plugin jar planted by #2869 verification")
     }
 }
