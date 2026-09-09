@@ -218,19 +218,35 @@ tasks.shadowJar {
     // module-qualified (`netty-codec-http2.version=...`).
     append("META-INF/io.netty.versions.properties")
 
-    // Fail rather than ship a jar with two entries of one name.
-    failOnDuplicateEntries = true
-
-    // NOTE (#2869): shadow's `duplicatesStrategy` default is EXCLUDE and it takes
-    // PRECEDENCE over transforming, so the 2nd..Nth copy of a duplicated resource
-    // never reaches ServiceFileTransformer and `mergeServiceFiles()` above silently
-    // degrades to first-wins. EXCLUDE is the RIGHT global default (LICENSE, NOTICE
-    // and arrow-git.properties all want first-wins), so the fix is a targeted
-    // bypass — added in the next commit, so its absence is observed first.
+    // THE CRITICAL BIT (#2869): the two calls above are a NO-OP without this.
     //
-    // `arrow-git.properties` (6 copies) stays at first-wins on purpose: its keys
-    // are NOT module-qualified, so concatenating six of them yields duplicate keys
-    // and a misleading build/commit attribution.
+    // Shadow's `duplicatesStrategy` default is EXCLUDE, and it takes PRECEDENCE over
+    // transforming: the 2nd..Nth copy of a duplicated resource is dropped before it
+    // ever reaches ServiceFileTransformer / AppendingTransformer, so `mergeServiceFiles()`
+    // and `append(...)` silently degrade to first-wins. MEASURED on this graph with
+    // both calls configured and this block removed — `verifyFatJar` reported that
+    // META-INF/services/io.grpc.NameResolverProvider lost
+    // `io.grpc.internal.DnsNameResolverProvider` (grpc-core, beaten by grpc-netty) and
+    // io.grpc.LoadBalancerProvider lost `io.grpc.internal.PickFirstLoadBalancerProvider`
+    // (grpc-core, beaten by grpc-util), and that 10 of 11 netty modules were missing
+    // from io.netty.versions.properties. The failure is NEARLY INVISIBLE at runtime:
+    // io.trino.spi.Plugin is single-source, so Trino's startup `checkState` passes and
+    // the plugin LOADS — then the first query has no default gRPC name resolver or load
+    // balancer.
+    //
+    // EXCLUDE stays the correct GLOBAL default (LICENSE, NOTICE and arrow-git.properties
+    // all want first-wins), so the strategy is bypassed ONLY on the paths the two
+    // transformers above own. `arrow-git.properties` (6 copies) deliberately stays at
+    // first-wins: unlike netty's, its keys are NOT module-qualified, so concatenating
+    // six of them yields duplicate keys and a misleading build/commit attribution.
+    filesMatching(listOf("META-INF/services/**", "META-INF/io.netty.versions.properties")) {
+        duplicatesStrategy = DuplicatesStrategy.INCLUDE
+    }
+
+    // Fail rather than ship a jar with two entries of one name. Note this is NOT
+    // contradicted by the INCLUDE above: INCLUDE admits the later copies into the
+    // TRANSFORMER, which then emits exactly one merged entry per path.
+    failOnDuplicateEntries = true
 }
 
 // The single-jar counterpart to `installPlugin`. `Sync`, never `Copy`, so a
