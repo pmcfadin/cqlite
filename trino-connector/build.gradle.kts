@@ -1,6 +1,14 @@
 import com.vanniktech.maven.publish.JavaLibrary
 import com.vanniktech.maven.publish.JavadocJar
 import com.vanniktech.maven.publish.SonatypeHost
+// Imported rather than written fully-qualified on purpose: in a Kotlin DSL build
+// script the `java` extension accessor (from the `java` plugin, configured below)
+// SHADOWS the root `java` package, so a fully-qualified `java.util.zip.ZipFile`
+// fails to resolve with a misleading "Unresolved reference 'util'".
+import java.io.ByteArrayInputStream
+import java.util.Properties
+import java.util.zip.ZipFile
+import java.util.zip.ZipInputStream
 
 plugins {
     java
@@ -282,6 +290,324 @@ val verifyPublishedPomNettyPin by tasks.registering {
 // Run the POM oracle as part of `check` so `./gradlew check` (and any CI that runs
 // it) enforces the published pin. The connector PR lane runs it explicitly.
 tasks.named("check") { dependsOn(verifyPublishedPomNettyPin) }
+
+// --- Shaded-jar contents oracle (issue #2869) --------------------------------
+// The consumer-facing artifact here is ONE jar dropped into a Trino plugin
+// directory (easy-db-lab fetches it once and mounts it per node via hostPath
+// instead of resolving the 50-artifact runtime tree in an initContainer at every
+// Trino pod start). So the property that matters is: everything the multi-jar
+// `installPlugin` tree provided is still REACHABLE from this single file.
+//
+// Modelled deliberately on `verifyPublishedPomNettyPin` above — expectations are
+// DERIVED FROM THE RESOLVED runtime graph (never from a hand-maintained list, so
+// the check cannot degrade to a list-echo), read back out of the REAL artifact on
+// disk (so it cannot pass by reading build.gradle.kts), java.base only (no new
+// dependency), and every failure names the offender.
+//
+// Zip reading uses TWO java.base APIs for two different reasons:
+//   * `ZipInputStream` for the ordered entry census. It walks LOCAL headers and
+//     de-duplicates NOTHING by construction, so a duplicated entry name shows up
+//     twice. A central-directory read (`ZipFile.entries()`) collapses duplicates
+//     on some paths, which would make the duplicate check vacuous.
+//   * `ZipFile` for content reads (random access by name).
+//
+// The archive NAME is part of the contract: easy-db-lab caches on
+// `cqlite-trino-<version>-all.jar`, so the oracle resolves the artifact by that
+// exact path and fails closed if a shadow bump ever renames it.
+val shadedJarLocation = "libs/cqlite-trino-$version-all.jar"
+
+val verifyFatJar by tasks.registering {
+    description =
+        "Assert the shaded cqlite-trino-<v>-all.jar is complete, service-merged and version-pinned (#2869)."
+    group = "verification"
+    val shadedJar = layout.buildDirectory.file(shadedJarLocation)
+    val expectedNettyVersion = nettyVersion
+    val expectedTcnativeVersion = nettyTcnativeVersion
+    val expectedArrowVersion = arrowVersion
+    // The single service entry this plugin owns. Trino's PluginManager reads it at
+    // startup; a `checkState` there is the ONLY runtime signal that the jar is a
+    // plugin at all, and it passes even when every OTHER service descriptor has
+    // silently degraded to first-wins — see the merge note on `shadowJar`.
+    val expectedPluginClass = "in.mcfad.cqlite.flight.CqliteFlightPlugin"
+    val nettyVersionsPath = "META-INF/io.netty.versions.properties"
+    // Captured lazily at configuration time; the artifact set resolves at execution.
+    val runtimeArtifacts = configurations.runtimeClasspath.get().incoming.artifacts
+    inputs.files(configurations.runtimeClasspath)
+    doLast {
+        val jar = shadedJar.get().asFile
+        require(jar.isFile) {
+            "shaded jar not found at $jar — shadowJar produced no artifact under the contracted " +
+                "consumer name cqlite-trino-$version-all.jar (#2869)"
+        }
+
+        // A service descriptor is a provider list: strip `#` comments and blanks so a
+        // comment-only file cannot masquerade as a populated one.
+        fun providerLines(bytes: ByteArray): Set<String> =
+            bytes.toString(Charsets.UTF_8)
+                .lineSequence()
+                .map { it.substringBefore('#').trim() }
+                .filter { it.isNotEmpty() }
+                .toSet()
+
+        fun propertyVersion(bytes: ByteArray): String? =
+            Properties()
+                .apply { load(ByteArrayInputStream(bytes)) }
+                .getProperty("version")
+                ?.trim()
+
+        // 1. Ordered LOCAL-header census of the shaded jar (see the note above on why
+        //    this is ZipInputStream and not ZipFile).
+        val entryNames = mutableListOf<String>()
+        ZipInputStream(jar.inputStream().buffered()).use { zis ->
+            var entry = zis.nextEntry
+            while (entry != null) {
+                if (!entry.isDirectory) entryNames += entry.name
+                zis.closeEntry()
+                entry = zis.nextEntry
+            }
+        }
+        require(entryNames.isNotEmpty()) { "shaded jar $jar holds no non-directory entries" }
+        val entries = entryNames.toSet()
+
+        // 2. Derive every expectation from the RESOLVED runtime graph, and take the
+        //    per-source-jar service census + a probe class per artifact in the SAME pass.
+        val artifacts = runtimeArtifacts.artifacts.toList()
+        require(artifacts.isNotEmpty()) {
+            "runtimeClasspath resolved to zero artifacts — graph-derivation is broken, so every " +
+                "expectation below would be vacuous (#2869)"
+        }
+        val resolvedNetty = mutableMapOf<String, String>()
+        val resolvedArrow = mutableMapOf<String, String>()
+        val serviceUnion = mutableMapOf<String, MutableSet<String>>()
+        val serviceSources = mutableMapOf<String, MutableSet<String>>()
+        val probes = mutableMapOf<String, String>()
+        val unprobed = mutableListOf<String>()
+        val unreadable = mutableListOf<String>()
+        for (art in artifacts) {
+            val label = art.id.componentIdentifier.displayName
+            val id = art.id.componentIdentifier
+            if (id is org.gradle.api.artifacts.component.ModuleComponentIdentifier) {
+                when (id.group) {
+                    "io.netty" -> resolvedNetty[id.moduleIdentifier.name] = id.version
+                    "org.apache.arrow" -> resolvedArrow[id.moduleIdentifier.name] = id.version
+                }
+            }
+            val file = art.file
+            if (!file.isFile || !file.name.endsWith(".jar")) {
+                // Not skipped silently: an unreadable member of the graph would make the
+                // contribution arithmetic below dishonest.
+                unreadable += "$label -> ${file.name}"
+                continue
+            }
+            var probe: String? = null
+            ZipFile(file).use { zf ->
+                for (entry in zf.entries().asSequence()) {
+                    if (entry.isDirectory) continue
+                    val name = entry.name
+                    // Only top-level `META-INF/services/<fqcn>` descriptors, never a
+                    // nested path (which is not a ServiceLoader lookup key).
+                    if (name.startsWith("META-INF/services/") && name.count { it == '/' } == 2) {
+                        val lines = providerLines(zf.getInputStream(entry).use { it.readBytes() })
+                        if (lines.isNotEmpty()) {
+                            serviceUnion.getOrPut(name) { mutableSetOf() } += lines
+                            serviceSources.getOrPut(name) { mutableSetOf() } += label
+                        }
+                    }
+                    // Probe: a class that shadow must carry through verbatim. Skip
+                    // META-INF/** (shadow strips versioned module-infos) and module-info.
+                    if (probe == null &&
+                        name.endsWith(".class") &&
+                        !name.startsWith("META-INF/") &&
+                        !name.endsWith("module-info.class")
+                    ) {
+                        probe = name
+                    }
+                }
+            }
+            val resolvedProbe = probe
+            if (resolvedProbe == null) unprobed += label else probes[label] = resolvedProbe
+        }
+
+        val problems = mutableListOf<String>()
+        problems += unreadable.map { "resolved runtime artifact is not a readable jar: $it" }
+        problems += unprobed.map {
+            "resolved runtime artifact $it carries no probe class, so its contribution to the " +
+                "shaded jar is unverifiable — add an explicit expectation for it"
+        }
+
+        ZipFile(jar).use { zf ->
+            fun read(path: String): ByteArray? =
+                zf.getEntry(path)?.let { e -> zf.getInputStream(e).use { it.readBytes() } }
+
+            // 3. Our own Plugin descriptor survived, and names the real entry point.
+            val pluginDescriptor = "META-INF/services/io.trino.spi.Plugin"
+            when (val bytes = read(pluginDescriptor)) {
+                null -> problems += "$pluginDescriptor is ABSENT — Trino would not recognise this jar as a plugin"
+                else -> {
+                    val declared = providerLines(bytes)
+                    if (declared.isEmpty()) {
+                        problems += "$pluginDescriptor is blank after stripping comments/whitespace"
+                    } else if (expectedPluginClass !in declared) {
+                        problems += "$pluginDescriptor declares $declared, expected to include $expectedPluginClass"
+                    }
+                }
+            }
+
+            // 4. trino-spi is `compileOnly`, so it CANNOT be bundled. Asserted rather
+            //    than assumed: flipping that declaration to `implementation` would
+            //    otherwise silently ship the engine SPI inside the plugin jar and
+            //    break Trino's SPI_PACKAGES parent-first delegation.
+            val bundledSpi = entries.filter { it.startsWith("io/trino/spi/") }
+            if (bundledSpi.isNotEmpty()) {
+                problems += "${bundledSpi.size} io/trino/spi/** entries are bundled (e.g. ${bundledSpi.first()}) — " +
+                    "trino-spi must stay compileOnly"
+            }
+
+            // 5. Service-file merge, graph-derived: the shaded provider set for every
+            //    descriptor must be a SUPERSET of the union across its source jars.
+            //    Shadow's `duplicatesStrategy` default is EXCLUDE and takes precedence
+            //    over transforming, so `mergeServiceFiles()` ALONE silently degrades to
+            //    first-wins for exactly the multi-source paths that need merging.
+            val multiSourcePaths = serviceSources.filterValues { it.size > 1 }.keys.sorted()
+            require(multiSourcePaths.isNotEmpty()) {
+                "no META-INF/services descriptor has more than one source jar on the resolved " +
+                    "runtime classpath — the merge assertion would prove nothing, so the graph has " +
+                    "changed shape and this oracle needs re-deriving (#2869)"
+            }
+            serviceUnion.forEach { (path, expectedProviders) ->
+                val actual = read(path)?.let { providerLines(it) }
+                if (actual == null) {
+                    problems += "service descriptor $path is ABSENT from the shaded jar; provided by " +
+                        "${serviceSources[path]}"
+                } else {
+                    val missing = expectedProviders - actual
+                    if (missing.isNotEmpty()) {
+                        problems += "service descriptor $path lost ${missing.size} provider(s) $missing — " +
+                            "sources ${serviceSources[path]}; the merge degraded to first-wins"
+                    }
+                }
+            }
+
+            // 6. Netty pin, graph-derived. The tcnative native-binding train is
+            //    versioned independently of netty's 4.x line, exactly as
+            //    verifyPublishedPomNettyPin partitions it.
+            val (tcnative, nettyCore) = resolvedNetty.entries.partition { it.key.startsWith("netty-tcnative") }
+            require(nettyCore.isNotEmpty()) {
+                "no io.netty core module resolved on runtimeClasspath — the netty pin assertion " +
+                    "would be vacuous (#2869)"
+            }
+            val nettyVersionsKeys = read(nettyVersionsPath)
+                ?.let { bytes -> providerLines(bytes).mapNotNull { it.substringBefore('=').trim().ifEmpty { null } } }
+                ?.toSet()
+            if (nettyVersionsKeys == null) {
+                problems += "$nettyVersionsPath is ABSENT from the shaded jar — netty's own version " +
+                    "attestation is how a runtime reports which modules it has"
+            }
+            nettyCore.forEach { (module, resolvedVersion) ->
+                if (resolvedVersion != expectedNettyVersion) {
+                    problems += "resolved io.netty:$module at $resolvedVersion, expected $expectedNettyVersion"
+                }
+                val attestation = "META-INF/maven/io.netty/$module/pom.properties"
+                when (val attested = read(attestation)?.let { propertyVersion(it) }) {
+                    null -> problems += "io.netty:$module resolves onto the runtime classpath but is NOT " +
+                        "attested at $attestation inside the shaded jar"
+                    expectedNettyVersion -> {}
+                    else -> problems += "$attestation attests version $attested, expected $expectedNettyVersion"
+                }
+                if (nettyVersionsKeys != null && nettyVersionsKeys.none { it.startsWith("$module.") }) {
+                    problems += "$nettyVersionsPath carries no line for resolved module $module — the " +
+                        "per-jar copies were not appended, so the attestation is one jar's only"
+                }
+            }
+            tcnative.forEach { (module, resolvedVersion) ->
+                if (resolvedVersion != expectedTcnativeVersion) {
+                    problems += "resolved io.netty:$module at $resolvedVersion, expected tcnative train " +
+                        expectedTcnativeVersion
+                }
+            }
+
+            // 7. Arrow present and pinned. FlightClient is the class the connector's
+            //    hot path actually loads, so its presence is the wiring evidence.
+            val flightClient = "org/apache/arrow/flight/FlightClient.class"
+            if (flightClient !in entries) {
+                problems += "$flightClient is ABSENT — the shaded jar cannot talk Arrow Flight"
+            }
+            require(resolvedArrow.isNotEmpty()) {
+                "no org.apache.arrow module resolved on runtimeClasspath — the arrow pin assertion " +
+                    "would be vacuous (#2869)"
+            }
+            resolvedArrow.forEach { (module, resolvedVersion) ->
+                if (resolvedVersion != expectedArrowVersion) {
+                    problems += "resolved org.apache.arrow:$module at $resolvedVersion, expected $expectedArrowVersion"
+                }
+                val attestation = "META-INF/maven/org.apache.arrow/$module/pom.properties"
+                when (val attested = read(attestation)?.let { propertyVersion(it) }) {
+                    null -> problems += "org.apache.arrow:$module resolves onto the runtime classpath but is " +
+                        "NOT attested at $attestation inside the shaded jar"
+                    expectedArrowVersion -> {}
+                    else -> problems += "$attestation attests version $attested, expected $expectedArrowVersion"
+                }
+            }
+        }
+
+        // 8. Shadow's DEFAULT exclusions, ASSERTED rather than re-declared in the task
+        //    config. A re-declaration that drifts from the default is how a future
+        //    shadow bump silently regresses; asserting the OUTCOME survives the bump.
+        val signatureFiles = entries.filter {
+            it.startsWith("META-INF/") && (it.endsWith(".SF") || it.endsWith(".DSA") || it.endsWith(".RSA"))
+        }
+        val indexLists = entries.filter { it == "META-INF/INDEX.LIST" }
+        val moduleInfos = entries.filter { it == "module-info.class" || it.endsWith("/module-info.class") }
+        problems += signatureFiles.map { "jar signature file $it survived — it invalidates the shaded jar's seal" }
+        problems += indexLists.map { "$it survived — a stale index breaks classloading of merged content" }
+        problems += moduleInfos.map { "$it survived — a shaded jar must not claim to be a named module" }
+
+        // 9. No duplicate entry NAMES in the local-header census. `failOnDuplicateEntries`
+        //    on shadowJar covers the same property; this re-reads the finished artifact so
+        //    a future config change cannot turn the guarantee off unnoticed.
+        val duplicates = entryNames.groupingBy { it }.eachCount().filterValues { it > 1 }
+        problems += duplicates.entries.map { (name, count) -> "entry $name appears $count times in the shaded jar" }
+
+        // 10. Per-artifact contribution census: every resolved runtime jar put at least
+        //     its probe class into the shaded jar. This proves "the whole runtime tree is
+        //     bundled" FROM THE GRAPH, rather than from a magic entry-count floor that
+        //     drifts on every dependency bump.
+        val missingContributors = probes.filterValues { it !in entries }
+        problems += missingContributors.entries.map { (label, probe) ->
+            "resolved runtime artifact $label contributed nothing: its probe class $probe is absent"
+        }
+        val contributed = probes.size - missingContributors.size
+
+        require(problems.isEmpty()) {
+            "shaded jar contract violations (#2869), ${problems.size} problem(s):\n  " +
+                problems.joinToString("\n  ")
+        }
+
+        // Affirmative census — a clean run must not read like an unmeasured one, so every
+        // zero is reported as an explicit RECOGNISED count.
+        val providerLineTotal = serviceUnion.values.sumOf { it.size }
+        val (tcnativeCount, nettyCoreCount) = resolvedNetty.keys
+            .partition { it.startsWith("netty-tcnative") }
+            .let { (t, c) -> t.size to c.size }
+        logger.lifecycle(
+            "verifyFatJar: ${jar.name} (${jar.length() / (1024 * 1024)} MiB) — " +
+                "${entryNames.size} ENTRIES EXAMINED; " +
+                "${artifacts.size} RUNTIME ARTIFACTS RESOLVED, $contributed CONTRIBUTED; " +
+                "${serviceUnion.size} SERVICE DESCRIPTORS EXAMINED across " +
+                "${serviceUnion.keys.count { serviceSources[it]!!.size > 1 }} MULTI-SOURCE PATH(S) " +
+                "carrying $providerLineTotal PROVIDER LINES RECOGNISED; " +
+                "$nettyCoreCount NETTY CORE MODULES ATTESTED at $expectedNettyVersion, " +
+                "$tcnativeCount TCNATIVE ARTIFACTS at $expectedTcnativeVersion; " +
+                "${resolvedArrow.size} ARROW MODULES ATTESTED at $expectedArrowVersion; " +
+                "${signatureFiles.size} SIGNATURE FILES RECOGNISED, " +
+                "${indexLists.size} INDEX.LIST RECOGNISED, " +
+                "${moduleInfos.size} MODULE-INFO RECOGNISED, " +
+                "${duplicates.size} DUPLICATE ENTRY NAMES RECOGNISED (#2869)",
+        )
+    }
+}
+
+tasks.named("check") { dependsOn(verifyFatJar) }
 
 // --- Maven Central publication (Central Portal via vanniktech) ---------------
 // `publishToMavenLocal` / `publishToMavenCentral` produce main + sources +
