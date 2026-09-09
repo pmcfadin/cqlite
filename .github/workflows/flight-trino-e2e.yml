@@ -20,7 +20,12 @@ on:
       - '.github/workflows/flight-trino-e2e.yml'
   pull_request:
     branches: [ main ]
-    types: [opened, synchronize, reopened, ready_for_review]
+    # labeled/unlabeled (#2869): the fat-flavor job `e2e-fat` is full-tier only and
+    # opts in via the `ci:trino-full` label. Without these types, applying that label
+    # to an ALREADY-OPEN PR would never re-trigger the workflow, so the opt-in would
+    # silently do nothing until the next push. Allowed here because this workflow has
+    # path filters, so the extra event types cannot broaden it beyond that surface.
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
     # Targeted path filter (#2358): the docker-compose E2E runs automatically on
     # PRs touching the Flight/Trino integration surface or the core storage
     # read path that feeds it — the exact surface whose regression (#2352,
@@ -55,6 +60,10 @@ jobs:
             echo "  \`cqlite-flight/**\`, \`trino-connector/**\`, or \`cqlite-core/src/storage/**\` (#2358)."
             echo "- Unrelated PRs (docs, other core modules) do not trigger the Docker stack."
             echo "- Full E2E also runs on push to main, nightly schedule, workflow_dispatch, and release publication."
+            echo "- The \`e2e\` job uses the multi-jar plugin flavor (50 jars) — the default, unchanged."
+            echo "- The \`e2e-fat\` job (#2869) runs the SAME E2E against the single shaded fat jar and is FULL TIER ONLY:"
+            echo "  nightly, push to main, workflow_dispatch, release publication, or a PR labeled \`ci:trino-full\`."
+            echo "  It is the only proof that Trino loads the one shaded jar and returns rows."
             echo "- Need it on a PR outside the path filter? Trigger it manually via workflow_dispatch."
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -87,6 +96,59 @@ jobs:
 
       - name: Run end-to-end integration test
         run: ./trino-connector/docker/e2e-test.sh
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: |
+          cd trino-connector/docker
+          docker compose logs --tail 200 || true
+
+  e2e-fat:
+    name: docker-compose integration (fat plugin flavor)
+    needs: tier-summary
+    # FULL TIER ONLY. This doubles a Cassandra-class E2E (Cassandra + Sidecar +
+    # cqlite-flight + Trino, twice), so unlike `e2e` above it does NOT run on every
+    # path-matching PR: it runs on nightly schedule, push to main, workflow_dispatch,
+    # release publication, or a PR explicitly labeled `ci:trino-full`. Same tier
+    # expression trino-connector-ci.yml uses for its own full tier.
+    #
+    # What it proves, and nothing else does (#2869): that Trino LOADS the single
+    # shaded fat jar as a plugin and returns rows. `verifyFatJar` in
+    # trino-connector-ci.yml asserts the jar's CONTENTS; only a live Trino can show
+    # the shaded/relocated tree actually resolves at plugin-classloader time.
+    if: >-
+      ${{
+        github.event_name != 'pull_request' ||
+        contains(github.event.pull_request.labels.*.name, 'ci:trino-full')
+      }}
+    runs-on: ubuntu-latest
+    # Mandatory: this job is new, so it is not in the workflow validator's legacy
+    # timeout-migration exemption table (and must never be added to it).
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      # The Rust image build + Cassandra/Sidecar/Trino images need headroom.
+      - name: Free disk space
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h / | tail -1
+
+      - name: Setup JDK 21 (for the connector plugin build inside the script)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+          cache-dependency-path: trino-connector/*.gradle.kts
+
+      - name: Run end-to-end integration test (fat plugin flavor)
+        # --plugin-flavor=fat mounts build/plugin-fat/cqlite_flight (exactly ONE
+        # shaded jar) instead of the 50-jar build/plugin/cqlite_flight tree. The
+        # default remains `multi`, which the `e2e` job above keeps exercising.
+        run: ./trino-connector/docker/e2e-test.sh --plugin-flavor=fat
 
       - name: Dump container logs on failure
         if: failure()
