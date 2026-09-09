@@ -31,6 +31,7 @@
 // build.gradle.kts: keep the `java.*` package reachable regardless of whether a
 // `java` extension accessor is in scope.
 import java.io.ByteArrayInputStream
+import java.io.File
 import java.util.Properties
 import java.util.zip.ZipFile
 import java.util.zip.ZipInputStream
@@ -80,6 +81,20 @@ val verifyFatJar by tasks.registering {
     val expectedPluginClass = "in.mcfad.cqlite.flight.CqliteFlightPlugin"
     val nettyVersionsPath = "META-INF/io.netty.versions.properties"
     dependsOn("shadowJar")
+    // The CONNECTOR'S OWN output. `runtimeClasspath` holds only DEPENDENCIES — the
+    // project's own jar is not on it — so the per-artifact probe census below can
+    // never see the project's classes, and check 3 reads only the
+    // `META-INF/services/io.trino.spi.Plugin` RESOURCE, which would survive intact
+    // even if every connector class were dropped. A shadowJar that lost the project's
+    // own output therefore used to PASS this oracle, leaving only `e2e-fat` to catch
+    // it — and that lane does not run on an unlabeled PR.
+    //
+    // The expectation is DERIVED from `tasks.jar`'s archive, never from a hard-coded
+    // `in/mcfad/cqlite/` literal: a literal would silently stop matching the day the
+    // package moves, which is the same drift the graph-derivation everywhere else in
+    // this file exists to avoid.
+    dependsOn("jar")
+    val projectJar = tasks.named<org.gradle.api.tasks.bundling.Jar>("jar").flatMap { it.archiveFile }
     // Captured lazily at configuration time; the artifact set resolves at execution.
     val runtimeArtifacts = configurations.named("runtimeClasspath").get().incoming.artifacts
     inputs.files(configurations.named("runtimeClasspath"))
@@ -269,11 +284,45 @@ val verifyFatJar by tasks.registering {
         val problems = mutableListOf<String>()
         problems += unreadable.map { "resolved runtime artifact is not a readable jar: $it" }
 
+        // 3. THE CONNECTOR'S OWN CLASSES. Everything else in this oracle is about
+        //    DEPENDENCIES: the probe census is built from `runtimeClasspath`, which does
+        //    not carry the project's own jar, and the `io.trino.spi.Plugin` descriptor
+        //    checked below is a RESOURCE that survives independently of any class. So a
+        //    shadowJar that dropped the project's own output used to pass this oracle
+        //    outright, leaving only `e2e-fat` — which does not run on an unlabeled PR —
+        //    to catch a fat jar with no connector in it.
+        //
+        //    The expected set is read out of `tasks.jar`'s ARCHIVE rather than matched
+        //    against a hard-coded `in/mcfad/cqlite/` prefix, so it keeps working across a
+        //    package rename instead of silently matching nothing.
+        val ownJar = projectJar.get().asFile
+        require(ownJar.isFile) {
+            "project jar not found at $ownJar — cannot derive the connector's own class set (#2869)"
+        }
+        val connectorClasses = ZipFile(ownJar).use { own ->
+            own.entries().asSequence()
+                .filter { !it.isDirectory }
+                .map { it.name }
+                .filter { it.endsWith(".class") && !it.startsWith("META-INF/") && it != "module-info.class" }
+                .toList()
+        }
+        require(connectorClasses.isNotEmpty()) {
+            "the project jar $ownJar declares no classes outside META-INF — the connector-class " +
+                "assertion would be vacuous, so the build's own output has changed shape (#2869)"
+        }
+        val missingOwnClasses = connectorClasses.filter { it !in entries }
+        if (missingOwnClasses.isNotEmpty()) {
+            problems += "the shaded jar is MISSING ${missingOwnClasses.size} of ${connectorClasses.size} " +
+                "of the connector's own classes from $ownJar (e.g. ${missingOwnClasses.sorted().first()}) — " +
+                "shadowJar did not bundle the project's own output, and neither the io.trino.spi.Plugin " +
+                "descriptor nor the dependency probe census can detect that"
+        }
+
         ZipFile(jar).use { zf ->
             fun read(path: String): ByteArray? =
                 zf.getEntry(path)?.let { e -> zf.getInputStream(e).use { it.readBytes() } }
 
-            // 3. Our own Plugin descriptor survived, and names the real entry point.
+            // 3b. Our own Plugin descriptor survived, and names the real entry point.
             val pluginDescriptor = "META-INF/services/io.trino.spi.Plugin"
             when (val bytes = read(pluginDescriptor)) {
                 null -> problems += "$pluginDescriptor is ABSENT — Trino would not recognise this jar as a plugin"
@@ -465,6 +514,8 @@ val verifyFatJar by tasks.registering {
         logger.lifecycle(
             "verifyFatJar: ${jar.name} (${jar.length() / (1024 * 1024)} MiB) — " +
                 "${entryNames.size} ENTRIES EXAMINED; " +
+                "${connectorClasses.size} CONNECTOR CLASS ENTRIES RECOGNISED (all present, derived from " +
+                "${ownJar.name}); " +
                 "${artifacts.size} RUNTIME ARTIFACTS RESOLVED, ${probes.size} PROBED, " +
                 "$contributed CONTRIBUTED, $indistinguishableNote, " +
                 "${unreadable.size} UNREADABLE RECOGNISED (census closes: " +
@@ -487,6 +538,73 @@ val verifyFatJar by tasks.registering {
 }
 
 tasks.named("check") { dependsOn(verifyFatJar) }
+
+// --- installPluginFat prunes a stale jar (issue #2869) -----------------------
+// `installPluginFat` is a `Sync`, not a `Copy`, precisely so a version bump cannot
+// leave two jars in a directory Trino would load BOTH of. That property rested
+// entirely on Gradle's `Sync` contract and was never EXECUTED: `e2e-test.sh` does
+// `rm -rf "$PLUGIN_DIR"` before building, so its "holds exactly one jar" assertion
+// is blind to the stale case, and CI invokes `installPluginFat` once.
+//
+// This exercises it for real rather than asserting the task's TYPE (a configuration
+// tautology that proves nothing about behaviour). A sentinel jar standing in for a
+// previous release is planted in the destination BEFORE `installPluginFat` executes,
+// and the assertion afterwards is that the directory holds exactly one jar, named for
+// the CURRENT version. Swap the `Sync` back to a `Copy` and this fails.
+//
+// The sentinel carries an impossible version (`0.0.0-STALE`) rather than a plausible
+// one like `0.17.0`, because a plausible one would EQUAL the expected name whenever
+// someone happened to build at that version, and the check would pass having proved
+// nothing. The inequality is asserted below rather than left to inspection.
+//
+// The planting happens in `taskGraph.whenReady` — which fires after configuration
+// and before any execution — and ONLY when this verification task is actually in the
+// graph, so a plain `./gradlew installPluginFat` (the release workflow's call) never
+// has a foreign jar dropped into its output.
+val stalePluginJarName = "cqlite-trino-0.0.0-STALE-all.jar"
+val verifyInstallPluginFatPrunesStale by tasks.registering {
+    description = "Assert installPluginFat REMOVES a pre-existing jar rather than accumulating one (#2869)."
+    group = "verification"
+    dependsOn("installPluginFat")
+    val pluginDir = layout.buildDirectory.dir("plugin-fat/cqlite_flight")
+    val expectedJarName = "cqlite-trino-$version-all.jar"
+    val staleName = stalePluginJarName
+    doLast {
+        require(staleName != expectedJarName) {
+            "the planted sentinel $staleName is identical to the expected jar name — this check " +
+                "would pass having proved nothing (#2869)"
+        }
+        val dir = pluginDir.get().asFile
+        require(dir.isDirectory) { "installPluginFat produced no directory at $dir (#2869)" }
+        val jars = (dir.listFiles() ?: emptyArray()).filter { it.isFile }.map { it.name }.sorted()
+        require(staleName !in jars) {
+            "installPluginFat left the stale jar $staleName in $dir alongside ${jars - staleName} — " +
+                "the task is accumulating jars instead of syncing. Trino loads EVERY jar in a plugin " +
+                "directory, so two versions of the connector would both be on the classpath. Is it a " +
+                "`Copy` instead of a `Sync`? (#2869)"
+        }
+        require(jars == listOf(expectedJarName)) {
+            "installPluginFat left $jars in $dir, expected exactly [$expectedJarName] (#2869)"
+        }
+        logger.lifecycle(
+            "verifyInstallPluginFatPrunesStale: planted $staleName before the sync; " +
+                "$dir now holds ${jars.size} JAR RECOGNISED ($expectedJarName), " +
+                "0 STALE JARS RECOGNISED (#2869)",
+        )
+    }
+}
+
+gradle.taskGraph.whenReady {
+    if (hasTask(verifyInstallPluginFatPrunesStale.get())) {
+        val dir = layout.buildDirectory.dir("plugin-fat/cqlite_flight").get().asFile
+        dir.mkdirs()
+        // Content is irrelevant — `Sync` decides by PATH, not by bytes. A previous
+        // release's filename makes the simulated scenario the real one: a version bump.
+        File(dir, stalePluginJarName).writeText("stale plugin jar planted by #2869 verification")
+    }
+}
+
+tasks.named("check") { dependsOn(verifyInstallPluginFatPrunesStale) }
 
 // --- Publication-purity oracle (issue #2869) ---------------------------------
 // The owner's hard requirement is that adding shadow leaves the Maven Central
