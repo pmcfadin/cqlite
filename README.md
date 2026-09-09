@@ -16,9 +16,9 @@
   <a href="https://cassandra.apache.org"><img src="https://img.shields.io/badge/cassandra-5.0+-green.svg" alt="Cassandra"></a>
 </p>
 
-> **Status**: v0.13.0 — the performance release. Core reading, CLI, output writers, Python & Node.js bindings, and write support are production-ready, now with **read-path constant-factor speedups**, **byte-bounded result budgets**, explicit `Database.refresh()`, no-heuristics correctness fixes, and **byte-for-byte compaction parity against Apache Cassandra**, an Arrow Flight + Trino connector, canonical BTI (`da`) write/read, and CDC-style delta export. See [CHANGELOG.md](CHANGELOG.md).
+> **Status**: **v0.17.0** (2026-09-08) — read correctness and read-path performance against **stock Cassandra 5.0**. CQLite reads (and writes) Cassandra 5.0 SSTables with no cluster dependency: CLI, Rust library, Python and Node.js bindings, an Arrow Flight server, and a Trino connector are all shipped and published on every tag. v0.17.0 closed 97 issues: a read-correctness campaign pinned against Cassandra-written bytes (silently truncated rows, a misaligned point-read cell offset, BTI row-index framing, empty collection keys, `inet`/`time` ordering), a measured read-path program (a 3.06× Arrow Flight single-SSTable fast path; 1.25× stock Cassandra's `count(*)` and 1.12× its `SELECT *` on the same core and SSTable), and one value/error contract across Python, Node and the CLI. **[Release notes](docs/releases/RELEASE_NOTES_v0.17.0.md)** · [CHANGELOG.md](CHANGELOG.md) · [all releases](https://pmcfadin.github.io/cqlite/releases/).
 
-> **Upgrading to v0.13?** See the [v0.13 Migration Guide](docs/development/v0.13-migration-guide.md) for the 3 breaking changes (Python duration/time types, unknown-table errors, CLI YAML removal).
+> **Upgrading to v0.17?** It carries breaking changes with before/after examples and consumer guidance in the [`[v0.17.0]` CHANGELOG section](CHANGELOG.md): `cqlite-core`'s `Value` gains `Value::Empty`, `Config.storage` is the single storage config and decorative knobs are gone, CLI `--format json` renders `decimal`/`varint` unquoted and drops the injected UDT `_type` key, and the bindings carry UDT type identity out of band. Earlier migrations: [v0.13 Migration Guide](docs/development/v0.13-migration-guide.md).
 
 CQLite provides SQLite-like local access to Apache Cassandra SSTables, enabling developers to read Cassandra 5.0+ data files without cluster dependencies. Built in Rust for performance and safety.
 
@@ -35,6 +35,12 @@ Full documentation is at **[https://pmcfadin.github.io/cqlite/](https://pmcfadin
 | SSTable Format Guide — binary format deep-dive | [/cqlite/sstable-format/](https://pmcfadin.github.io/cqlite/sstable-format/) |
 | For Agents: Using CQLite — LLM/agent integration | [/cqlite/agents-using/](https://pmcfadin.github.io/cqlite/agents-using/) |
 | For Agents: Developing CQLite — contributor doctrine, gate contract | [/cqlite/agents-developing/](https://pmcfadin.github.io/cqlite/agents-developing/) |
+| Releases — what shipped in each version and how to upgrade | [/cqlite/releases/](https://pmcfadin.github.io/cqlite/releases/) |
+| Roadmap · Known Issues · Limitations | [/cqlite/user-docs/roadmap/](https://pmcfadin.github.io/cqlite/user-docs/roadmap/) · [/cqlite/user-docs/known-issues/](https://pmcfadin.github.io/cqlite/user-docs/known-issues/) · [/cqlite/user-docs/limitations/](https://pmcfadin.github.io/cqlite/user-docs/limitations/) |
+| Field validation — measured runs against live Cassandra clusters | [/cqlite/field-validation/](https://pmcfadin.github.io/cqlite/field-validation/0-16-0-ga/) |
+| API docs (rustdoc) | [/cqlite/api/latest/](https://pmcfadin.github.io/cqlite/api/latest/) · [docs.rs/cqlite-core](https://docs.rs/cqlite-core) |
+
+In-repo: [`docs/releases/`](docs/releases/) (per-release notes), [`docs/sstables-definitive-guide/`](docs/sstables-definitive-guide/) (the SSTable format single source of truth), [`docs/reports/`](docs/reports/) (measurement reports), [`docs/development/`](docs/development/) (PRD, methodology, gate ops).
 
 ## Vision
 
@@ -316,6 +322,19 @@ cargo build -p cqlite-core --no-default-features
 - [x] Real BTI trie node-type dispatch and schema-typed query result columns
 - [x] Published documentation site at [pmcfadin.github.io/cqlite](https://pmcfadin.github.io/cqlite/)
 
+### ✅ v0.17.0 (Sep 2026) — read correctness + read-path performance vs stock Cassandra 5
+- [x] **Read correctness campaign** — row assembly no longer swallows a decode error into a silently truncated row; a P0 misaligned cell offset on point reads is fixed; BTI `Rows.db` row-index root base matches Cassandra's framing; empty map keys / set members are kept, nested types are bounds-checked at every level, `inet`/`time` order as Cassandra orders them; `frozen<scalar>` is refused instead of guessed, which also fixed the writer's `Statistics.db` header type for `frozen<UDT>`
+- [x] **Measured read path** — Arrow Flight `do_get` single-SSTable merge bypass (**3.06×** rows/s per core); admission default derived from core count; byte-bounded Arrow batches; box ceiling established at 2.73M rows/s on 6 physical cores; opt-in `jemalloc` feature for `cqlite-flight`
+- [x] **One value/error contract across bindings** — shared authoritative error table, 3-way golden parity (same `SELECT` through Python, Node and CLI must agree), UDT identity out of band
+- [x] **JSON/CSV and Parquet output parity lanes** against `sstabledump` goldens; platform-hygiene epics (decorative config knobs deleted, dead read metrics wired, dead code removed)
+- See [`docs/releases/RELEASE_NOTES_v0.17.0.md`](docs/releases/RELEASE_NOTES_v0.17.0.md)
+
+### ✅ v0.14 → v0.16.1 (Jul 2026) — Flight field-readiness, Trino latency/throughput, CommitLog reader
+- [x] **v0.14** Arrow Flight + Trino read path validated against a live at-scale Cassandra deployment; `Index.db` parsed once per open (~100× faster cold index build)
+- [x] **v0.15** ~15× warm through-Trino throughput (p50 2.9 s → 227 ms), admission control, saturation gauges, lazy Summary-guided index (O(summary) open), snapshot reuse
+- [x] **v0.16** typed collection columns through Trino (`array`/`row`/`map`), weight-balanced split fan-out, `LIMIT`-cancellation hang fixed; **v0.16.1** Cassandra 5.0 **CommitLog segment reader** (library API + `read-commitlog` CLI)
+- See [`docs/releases/`](docs/releases/) for each release's notes
+
 ### ✅ v0.13.0 (Jul 2026) — the performance release
 - [x] **Read-path constant-factor speedups** — query-engine hot-path cleanups (schema `Arc`, single projection, cached sort keys, plan cache), read-path idiom bundle, and point-read I/O via a positional-read (`ReadAt`) trait
 - [x] **Node.js bindings throughput** — batch-fetch streaming rows, move (not clone) row values in `executeNative`, cached `Set`/`Map` constructors
@@ -364,15 +383,17 @@ The roadmap follows real-world use. Want something prioritized?
 
 ## Known Issues
 
-CQLite is honest about its sharp edges. The current release (`v0.13.0`) has a few
+CQLite is honest about its sharp edges. The current release (`v0.17.0`) has a few
 known gaps — none of which block the core read/export workflows. Full, dated list:
 [pmcfadin.github.io/cqlite → Known Issues](https://pmcfadin.github.io/cqlite/user-docs/known-issues/).
 
 | Issue | Impact | Tracking |
 |-------|--------|----------|
-| `SET<FROZEN<UDT>>` fails to deserialize in the Python bindings | Python only; CLI/Rust unaffected | [#804](https://github.com/pmcfadin/cqlite/issues/804) |
-| Concurrent queries on one `Database` can race (`Column not found`) | Use one handle per thread | [#805](https://github.com/pmcfadin/cqlite/issues/805) |
-| Wide partitions written by CQLite scan linearly (`promoted_index_length = 0`) | Perf on 10k+ rows/partition | [#751](https://github.com/pmcfadin/cqlite/issues/751), [#752](https://github.com/pmcfadin/cqlite/issues/752) |
+| A scan over an SSTable whose metadata is refused returns empty rows instead of an error | Pre-existing in every release; a malformed file reads as "no data" rather than failing loudly | [#4159](https://github.com/pmcfadin/cqlite/issues/4159) (fix in flight, 0.18) |
+| Unbounded `SELECT count(*)` through the Trino `cqlite` catalog can stall | Use a bounded predicate or an aggregate that reads a column; found on a 3-node field run | [#4170](https://github.com/pmcfadin/cqlite/issues/4170) |
+| Trino scans are served by the `sidecar-uri` host's Flight pod only | Single-node throughput on multi-node clusters; other replicas idle | [#4175](https://github.com/pmcfadin/cqlite/issues/4175) |
+| `timeuuid` maps to `varchar` in the Trino `cqlite` catalog (stock connector: `uuid`) | "Same SQL" does not hold for `timeuuid` columns | [#4173](https://github.com/pmcfadin/cqlite/issues/4173) |
+| Cassandra **trunk** SSTables (BIG `pa`, BTI `ea`) are out of scope | BTI `ea` is refused; BIG `pa` needs a version ceiling | [#4142](https://github.com/pmcfadin/cqlite/issues/4142) |
 | Pre-5.0 formats (`md`/`mc`/`la`/`ma`) unsupported | By design — Cassandra 5.0 only | [Limitations](https://pmcfadin.github.io/cqlite/user-docs/limitations/) |
 
 For what CQLite does **not** do by design (older formats, network access, query
@@ -397,9 +418,9 @@ CQLite is developed in the open as an Apache-licensed project. We welcome contri
 
 CQLite uses a **spec-driven, agent-orchestrated, gate-enforced** workflow built on Claude Code. In short:
 
-- **Specs are the source of truth.** Requirements live in a durable [OpenSpec](https://github.com/Fission-AI/OpenSpec) spec under `openspec/specs/`; GitHub issues (epics + sub-issues) are the execution ledger, not the contract. *(spec layer rolling out in the v0.13 cycle.)*
-- **A Product-Manager orchestrator** (`/prioritize`, `/pm-status`, `/start-epic`) plans, prioritizes, and coordinates implementer agents — one stream per issue in an isolated git worktree.
-- **Every task passes a deterministic gate** (`scripts/agent-gate.sh`: `cargo fmt`, `clippy -D warnings`, tests, smoke) before it's "done" — enforced by a `TaskCompleted` hook, not the honor system.
+- **Specs are the source of truth.** Design-driven work lives in a durable [OpenSpec](https://github.com/Fission-AI/OpenSpec) spec under `openspec/specs/`; oracle-driven bug fixes are a GitHub issue plus a fixture-pinned parity test. GitHub issues and the project board are the execution ledger, not the contract.
+- **A delivery pipeline of skills** (`flow-groom` → `flow-activate` → `flow-implement` → `flow-address` → `flow-finalize`, plus `drive-issue` for one issue end to end) runs on a fleet of machines, one issue per worktree/branch/PR, with a server-arbitrated claim ref so two machines cannot take the same issue.
+- **Every change passes a deterministic gate** (`scripts/agent-gate.sh`: `cargo fmt`, `clippy -D warnings`, core/integration/write/CLI tests, structural audits, smoke) whose `AGENT-GATE SUMMARY` block is the only run that counts; GitHub branch protection then requires a `required` check that aggregates the CI tiers before any merge.
 - **The author is never the reviewer.** Work is reviewed in a fresh context by roborev (a second model family) + `rust-reviewer`, and audited against the spec (`spec-auditor`) and for meaningful coverage (`coverage-reviewer`).
 - **Humans decide product, agents decide implementation.** Ambiguous scope and tradeoffs are escalated on a **NEEDS YOU** list, never guessed.
 
@@ -469,19 +490,28 @@ env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test --package cqlite-cor
 - Type roundtrips verified for all major types including Inet, Varint, Duration, Tuple, Frozen
 - E2E validation against live Cassandra 5.0 (write → flush → `nodetool refresh` → `cqlsh`)
 
-See [docs/development/PRD.md](docs/development/PRD.md) for milestone details.
+### ✅ v0.10 → v0.17.0 (Jun–Sep 2026)
+Eight releases since M5 — compaction parity, Arrow Flight + Trino, BTI write/read, delta export, the performance
+release, Flight field-readiness, Trino latency/throughput, the CommitLog reader, and the 0.17 read-correctness +
+read-path program. Per-release notes: [`docs/releases/`](docs/releases/) · [website releases](https://pmcfadin.github.io/cqlite/releases/).
+
+See [docs/development/PRD.md](docs/development/PRD.md) for the qualification milestones (SE1–SE7) that follow M1–M5.
 
 ## Technical Details
 
 ### Supported Formats
-- **Cassandra 5.0+**: 'oa' format with BTI support
-- **File Types**: Data.db, Index.db, Summary.db, Statistics.db
-- **Compression**: LZ4, Snappy, Deflate, Zstd
+- **Cassandra 5.0**: BIG format versions `na`/`nb`/`oa` and BTI (trie-indexed) format `da`; pre-5.0 (`ma`–`me`) is out of scope by design, and trunk's `pa`/`ea` are not supported ([#4142](https://github.com/pmcfadin/cqlite/issues/4142))
+- **SSTable components**: Data.db, Index.db, Summary.db, Statistics.db, CompressionInfo.db, Filter.db, TOC.txt, Digest.crc32; BTI Partitions.db / Rows.db
+- **CommitLog**: Cassandra 5.0 segment files (version 7), read-only (`read-commitlog`)
+- **Compression**: LZ4, Snappy, Deflate, Zstd (reads); the write surface emits uncompressed SSTables only
+- **Format authority**: the pinned `cassandra-5.0.8` source and `sstabledump` output — never CQLite's own prior behaviour ([SSTable definitive guide](docs/sstables-definitive-guide/README.md))
 
-### Performance Targets
-- **Parse Speed**: 1GB files in <10 seconds
-- **Memory Usage**: <128MB for large SSTables
-- **Query Latency**: Sub-millisecond partition lookups
+### Performance (measured, not targeted)
+- **Bare scan ceiling**: 2.73M rows/s on 6 physical cores at 93.5% marginal efficiency ([#3299](https://github.com/pmcfadin/cqlite/issues/3299))
+- **Same core, same SSTable vs stock Cassandra**: 1.25× its `count(*)` on the read path, 1.12× its `SELECT *` when shipping every row over Arrow Flight; ~5× less memory per row ([`docs/reports/ws0-3100-report.md`](docs/reports/ws0-3100-report.md))
+- **3-node Cassandra 5.0.9 cluster, through Trino**: a full-table analytic costs the OLTP client 2.21× baseline p99 via CQLite vs 5.61× via Cassandra's own CQL path; same SQL 1.66× faster on a 22M-row key-value table; 1.72M rows/s sustained from one Flight pod ([`docs/2024-09-meetup/REPORT.md`](docs/2024-09-meetup/REPORT.md), single-pod — see [#4175](https://github.com/pmcfadin/cqlite/issues/4175))
+- **Memory**: <128 MB target for the core library on large SSTables; Flight server RSS under load is an open measurement
+- Method and CI gate policy: [`docs/performance.md`](docs/performance.md)
 
 ### Language Bindings
 - **Python**: Production-ready sync API (see [Python README](bindings/python/README.md))
@@ -492,7 +522,8 @@ See [docs/development/PRD.md](docs/development/PRD.md) for milestone details.
 
 - **Documentation site**: [https://pmcfadin.github.io/cqlite/](https://pmcfadin.github.io/cqlite/) — user docs, SSTable format guide, agent integration docs
 - **API docs (rustdoc)**: [latest tag](https://pmcfadin.github.io/cqlite/api/latest/) · published per release tag at `https://pmcfadin.github.io/cqlite/api/<tag>/`
-- **Changelog**: [CHANGELOG.md](CHANGELOG.md) — what each tagged release contains
+- **Releases**: [`docs/releases/`](docs/releases/) (per-release notes) · [website releases page](https://pmcfadin.github.io/cqlite/releases/) · [GitHub releases](https://github.com/pmcfadin/cqlite/releases) (binaries, wheels, checksums)
+- **Changelog**: [CHANGELOG.md](CHANGELOG.md) — what each tagged release contains, with every breaking change
 - **Performance**: [Methodology, local repro, and CI gate policy](docs/performance.md)
 - **CQL Grammar**: [Patrick's Antlr4 CQL Grammar](https://github.com/pmcfadin/cassandra-antlr4-grammar)
 - **Issues**: [GitHub Issues](https://github.com/pmcfadin/cqlite/issues)
