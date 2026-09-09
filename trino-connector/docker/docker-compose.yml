@@ -101,8 +101,16 @@ services:
       # compose's list-merge semantics for a same-`target:` `volumes:` entry across
       # files is a semantic unknown (it could append rather than replace, leaving two
       # sources bound to one target), whereas an UNSET variable is provably the
-      # historical default. `field-repro.sh` never sets TRINO_PLUGIN_DIR and therefore
-      # keeps resolving that default, untouched.
+      # historical default.
+      #
+      # Every in-repo caller of this file sets the variable EXPLICITLY rather than
+      # relying on the default, so no two of them can contaminate each other and an
+      # ambient value from the invoking shell can never redirect a mount:
+      # `e2e-test.sh` exports the dir its `--plugin-flavor` selected, and
+      # `field-repro.sh` PINS the multi-jar dir unconditionally (it is a
+      # cqlite-flight SERVER harness, never a plugin-packaging one). The `:-`
+      # default therefore serves a bare `docker compose up` by hand, and is what
+      # makes that hand-run byte-identical to the pre-#2869 behaviour.
       - ${TRINO_PLUGIN_DIR:-../build/plugin/cqlite_flight}:/usr/lib/trino/plugin/cqlite_flight:ro
       - ./trino/catalog:/etc/trino/catalog:ro
       - ./trino/jvm.config:/etc/trino/jvm.config:ro
