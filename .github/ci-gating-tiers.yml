@@ -281,8 +281,10 @@ exempt:
           #2869: this lane's `e2e-fat` job is the ONLY proof anywhere that Trino
           LOADS the single shaded fat jar as a plugin and returns rows — the
           `verifyFatJar` oracle in trino-connector-ci.yml asserts the jar's
-          contents, but only a live Trino can show the relocated/merged tree
-          actually resolves at plugin-classloader time. `e2e-fat` is non-gating
+          contents, but only a live Trino can show the bundled, UNRELOCATED tree
+          actually resolves under the plugin classloader (nothing is relocated by
+          design; Trino's child-first plugin classloader is what isolates the
+          bundled netty/grpc/arrow from the engine's copies). `e2e-fat` is non-gating
           twice over: this whole workflow is exempt, and the job is full-tier only
           (nightly / push to main / workflow_dispatch / release / a PR labeled
           `ci:trino-full`), so on a routine unlabeled PR it does not run at all. A
@@ -513,14 +515,17 @@ exempt:
           tier invokes gradle. It releases on its own cadence. Declared, not
           covered. RESIDUAL NAMED IN #2869: this lane is now also the sole home of
           the shaded fat-jar oracles — `verifyFatJar` (the shaded jar's CONTENTS:
-          the relocated/merged runtime tree that easy-db-lab curls as ONE Release
-          asset instead of resolving 50 artifacts) and `verifyShadowNotPublished`
+          that the bundled runtime tree easy-db-lab curls as ONE Release asset
+          instead of resolving 50 artifacts is complete, service-merged and
+          version-pinned; nothing is relocated, deliberately — see the NO RELOCATION
+          rationale on `tasks.shadowJar` in trino-connector/build.gradle.kts) and
+          `verifyShadowNotPublished`
           (the shaded uber-jar must never leak into the Maven Central publication,
           where it would hand every downstream consumer a duplicate, unresolvable
           copy of that tree). Both run on EVERY PR here and are therefore gated by
           NOTHING merge-blocking: a regression in either — a fat jar missing a
-          relocated dependency, or a shaded variant appearing in Central — can
-          merge. No registered tier can fix this, because a tier must emit its
+          bundled dependency or silently degraded to first-wins service
+          descriptors, or a shaded variant appearing in Central — can merge. No registered tier can fix this, because a tier must emit its
           declared context unconditionally on every PR and a gradle lane outside
           the cargo workspace cannot; an always-green classifier job would
           manufacture exactly the vacuous green this registry exists to prevent.

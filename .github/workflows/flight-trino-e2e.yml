@@ -20,12 +20,22 @@ on:
       - '.github/workflows/flight-trino-e2e.yml'
   pull_request:
     branches: [ main ]
-    # labeled/unlabeled (#2869): the fat-flavor job `e2e-fat` is full-tier only and
-    # opts in via the `ci:trino-full` label. Without these types, applying that label
-    # to an ALREADY-OPEN PR would never re-trigger the workflow, so the opt-in would
+    # `labeled` (#2869): the fat-flavor job `e2e-fat` is full-tier only and opts in
+    # via the `ci:trino-full` label. Without this type, applying that label to an
+    # ALREADY-OPEN PR would never re-trigger the workflow, so the opt-in would
     # silently do nothing until the next push. Allowed here because this workflow has
-    # path filters, so the extra event types cannot broaden it beyond that surface.
-    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+    # path filters, so the extra event type cannot broaden it beyond that surface.
+    #
+    # `unlabeled` is deliberately NOT here: removing a label never needs to START a
+    # run, so subscribing to it would buy nothing and cost a cancel/restart (below).
+    # And `e2e` below is gated OFF for label events on purpose — see its `if:`. This
+    # workflow's `concurrency.cancel-in-progress` is true on pull_request, so without
+    # that gate any label added mid-run would cancel an in-flight ~40 min Cassandra +
+    # Sidecar + cqlite-flight + Trino stack and restart it from zero. That is not
+    # hypothetical: this repo applies `status:*` read-mirror labels PROGRAMMATICALLY
+    # at every stage transition, so its own labelling habits would trigger it
+    # routinely.
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
     # Targeted path filter (#2358): the docker-compose E2E runs automatically on
     # PRs touching the Flight/Trino integration surface or the core storage
     # read path that feeds it — the exact surface whose regression (#2352,
@@ -43,7 +53,22 @@ permissions:
 
 concurrency:
   group: flight-trino-e2e-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # A new head sha obsoletes the in-flight run, so cancel it. A LABEL mutation
+  # changes no byte of the diff, so it must NOT (#2869): this workflow now
+  # subscribes to `labeled` so `ci:trino-full` can opt an already-open PR into
+  # `e2e-fat`, and cancellation is decided at the RUN level BEFORE any job `if:` is
+  # evaluated — so without this clause a label event would kill an in-flight ~40 min
+  # Cassandra + Sidecar + cqlite-flight + Trino stack no matter how `e2e` is gated.
+  # This repo applies `status:*` read-mirror labels PROGRAMMATICALLY at every stage
+  # transition, so that would fire routinely. Label runs now coexist with the
+  # in-flight run and skip `e2e` entirely (see its `if:`). Same idiom as
+  # flight-ci.yml and pr-gate.yml; `unlabeled` is kept in the predicate defensively
+  # even though it is not in `types`, so a future types change cannot silently
+  # restore the cancel.
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request'
+    && github.event.action != 'labeled'
+    && github.event.action != 'unlabeled' }}
 
 jobs:
   tier-summary:
@@ -70,10 +95,26 @@ jobs:
   e2e:
     name: docker-compose integration
     needs: tier-summary
-    # No opt-in gate: any event that reaches this workflow warrants the E2E.
+    # No opt-in LABEL gate: any event that reaches this workflow warrants the E2E.
     # On pull_request the on.paths filter above already restricts triggering to
     # the integration surface, so the job runs as a required-visible check for
     # exactly those PRs (#2358).
+    #
+    # The one exclusion (#2869): label events. `labeled` was added to
+    # on.pull_request.types so `ci:trino-full` can opt an already-open PR into
+    # `e2e-fat`; that is `e2e-fat`'s trigger, never this job's. A label mutation
+    # changes no byte of the diff, so re-running this ~40 min Cassandra + Sidecar +
+    # cqlite-flight + Trino stack on one would be pure waste — and it would fire on
+    # every `status:*` read-mirror label this repo applies programmatically at each
+    # stage transition. The companion half is `concurrency.cancel-in-progress` above,
+    # which keeps a label run from CANCELLING an in-flight one; this `if:` keeps the
+    # label run from starting a redundant one. Same two-part shape as pr-gate.yml.
+    # This job's real triggers (open/synchronize/reopen/ready_for_review, push,
+    # schedule, dispatch, release) are unaffected: on those events
+    # `github.event.action` is never 'labeled'/'unlabeled'.
+    if: >-
+      ${{ github.event.action != 'labeled'
+      && github.event.action != 'unlabeled' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -92,7 +133,9 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: gradle
-          cache-dependency-path: trino-connector/*.gradle.kts
+          # `**` so the key covers gradle/fatjar-oracles.gradle.kts too — a single `*`
+          # does not cross `/`, which left that file outside the cache key (#2869).
+          cache-dependency-path: trino-connector/**/*.gradle.kts
 
       - name: Run end-to-end integration test
         run: ./trino-connector/docker/e2e-test.sh
@@ -114,8 +157,12 @@ jobs:
     #
     # What it proves, and nothing else does (#2869): that Trino LOADS the single
     # shaded fat jar as a plugin and returns rows. `verifyFatJar` in
-    # trino-connector-ci.yml asserts the jar's CONTENTS; only a live Trino can show
-    # the shaded/relocated tree actually resolves at plugin-classloader time.
+    # trino-connector-ci.yml asserts the jar's CONTENTS (complete, service-merged,
+    # version-pinned); only a live Trino can show the bundled, UNRELOCATED tree
+    # actually resolves under the plugin classloader. Nothing is relocated by
+    # design — see the NO RELOCATION rationale on `tasks.shadowJar` in
+    # build.gradle.kts — so this job is what demonstrates that Trino's child-first
+    # plugin classloader really does isolate the bundled copies from the engine's.
     if: >-
       ${{
         github.event_name != 'pull_request' ||
@@ -142,7 +189,9 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: gradle
-          cache-dependency-path: trino-connector/*.gradle.kts
+          # `**` so the key covers gradle/fatjar-oracles.gradle.kts too — a single `*`
+          # does not cross `/`, which left that file outside the cache key (#2869).
+          cache-dependency-path: trino-connector/**/*.gradle.kts
 
       - name: Run end-to-end integration test (fat plugin flavor)
         # --plugin-flavor=fat mounts build/plugin-fat/cqlite_flight (exactly ONE

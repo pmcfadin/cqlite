@@ -47,7 +47,9 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: gradle
-          cache-dependency-path: trino-connector/*.gradle.kts
+          # `**` so the key covers gradle/fatjar-oracles.gradle.kts too — a single `*`
+          # does not cross `/`, which left that file outside the cache key (#2869).
+          cache-dependency-path: trino-connector/**/*.gradle.kts
 
       - name: Test
         working-directory: trino-connector
@@ -71,8 +73,12 @@ jobs:
       # Named as its own step so the fat-jar contents assertion appears BY NAME in the
       # log rather than hiding inside an aggregate `check`. Cheap on every PR: `test`
       # above has already compiled `main`, so shading is seconds. verifyFatJar is the
-      # only oracle for the shaded jar's CONTENTS — the relocated/merged runtime tree
-      # that easy-db-lab curls as ONE artifact instead of resolving 50 (#2869).
+      # only oracle for the shaded jar's CONTENTS — that the bundled runtime tree
+      # easy-db-lab curls as ONE artifact instead of resolving 50 is complete,
+      # service-merged and version-pinned (#2869). NOTE: nothing is relocated, and
+      # that is deliberate — see the NO RELOCATION rationale on `tasks.shadowJar` in
+      # build.gradle.kts. Trino's child-first plugin classloader already isolates the
+      # bundled netty/grpc/arrow from the engine's copies.
       - name: Shade fat jar and verify its contents (shadowJar verifyFatJar)
         working-directory: trino-connector
         run: ./gradlew --no-daemon shadowJar verifyFatJar

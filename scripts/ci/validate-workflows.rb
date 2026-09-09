@@ -335,17 +335,56 @@ def flight_image_guard_errors(file, workflow)
   errors
 end
 
+# The refusal must live INSIDE the conditional the probe line OPENS — not merely
+# somewhere after it. "Somewhere after it" is defeatable and was demonstrated to
+# be: replacing the refusal body with an `echo` and adding an unrelated
+# `[ -n "$ASSET" ] || exit 1` later in the SAME `run:` body kept the guard green,
+# which is exactly the state that lets a dispatch mint a release tag. (An
+# unrelated EARLIER `exit 1` is a decoy too — this same step also refuses a bad
+# version.) So the span is bounded on both ends.
+#
+# Two accepted shapes, and anything else is REFUSED rather than guessed:
+#   * same-line:  `<opener> || { ...; exit 1; }`
+#   * block form: `if ! <opener>; then` … `exit 1` … `fi`, where the closing `fi`
+#                 is the first one at the opener line's OWN indentation (nested
+#                 blocks inside are indented past it, and later sibling blocks
+#                 close after it).
+#
+# `run` is the raw `run:` scalar, whose lines YAML has already dedented to the
+# block's own base indentation.
+def shell_refusal_bound?(run, opener)
+  lines = run.lines
+  head = lines.index { |line| line.match?(opener) }
+  return false unless head
+
+  head_line = lines[head]
+  return true if head_line.match?(/exit\s+1/)
+  return false unless head_line.match?(/\bif\b/) && head_line.match?(/\bthen\s*\z/)
+
+  indent = head_line[/\A[ \t]*/]
+  closer = (head + 1...lines.length).find { |idx| lines[idx].rstrip == "#{indent}fi" }
+  return false unless closer
+
+  lines[(head + 1)...closer].any? { |line| line.match?(/exit\s+1/) }
+end
+
 # trino-connector-fatjar.yml (issue #2869): this workflow attaches the SHADED
 # connector jar to a GitHub release. Unlike trino-publish.yml it needs no Maven
 # Central/GPG secrets and its target is MUTABLE, so it deliberately has no
-# `dry_run` input. The equivalent safety property is twofold and asserted here:
+# `dry_run` input. Mutability replaces the immutable-registry hazard with two of
+# its own, and all three properties below are asserted here:
 #   1. `channel` DEFAULTS TO `dev`, so a bare `gh workflow run
 #      trino-connector-fatjar.yml -f version=X` targets the mutable
-#      `trino-connector-dev` prerelease and never a release tag; and
+#      `trino-connector-dev` prerelease and never a release tag;
 #   2. a step REFUSES (exit 1) unless `git ls-remote --exit-code --tags` already
 #      finds the release tag — softprops/action-gh-release CREATES an absent tag
 #      at github.sha, so without this a release-channel dispatch from an
-#      arbitrary branch could MINT or move a release tag.
+#      arbitrary branch could MINT or move a release tag; and
+#   3. that same step REFUSES unless the tag's commit equals `GITHUB_SHA`.
+#      Existence is not provenance: a `channel=release` dispatch with no `--ref`
+#      runs against the default branch, and since the jar is named from the
+#      `version` INPUT it would overwrite the genuine asset AND its `.sha256`
+#      sidecar with another commit's bytes — which then verify successfully.
 def trino_fatjar_guard_errors(file, workflow)
   errors = []
 
@@ -356,19 +395,29 @@ def trino_fatjar_guard_errors(file, workflow)
     errors << "#{file}: `channel` input must default to `dev` so a bare version dispatch cannot target a release tag (issue #2869)"
   end
 
-  # The `exit 1` must follow the ls-remote probe IN THE SAME run: body. A bare
-  # "step contains both tokens" test would be satisfied by an unrelated earlier
-  # `exit 1` in the same step (this resolve step also refuses a bad version),
-  # so the probe's own refusal could be deleted without tripping the guard.
-  refusal = (workflow["jobs"] || {}).any? do |_job_name, job|
-    job_step_list(job).any? do |step|
-      lines = step["run"].to_s.lines
-      probe = lines.index { |line| line.include?("git ls-remote --exit-code --tags") }
-      probe && lines.drop(probe + 1).any? { |line| line.match?(/exit\s+1/) }
-    end
+  probe = /git ls-remote --exit-code --tags/
+  steps = (workflow["jobs"] || {}).values.flat_map { |job| job_step_list(job) }
+
+  unless steps.any? { |step| shell_refusal_bound?(step["run"].to_s, probe) }
+    errors << "#{file}: a step must refuse (exit 1) INSIDE the conditional its `git ls-remote --exit-code --tags` probe opens, so a dispatch can never create or move a release tag (issue #2869)"
   end
-  unless refusal
-    errors << "#{file}: a step must refuse (exit 1) when `git ls-remote --exit-code --tags` cannot find the release tag, so a dispatch can never create or move a release tag (issue #2869)"
+
+  # Provenance, asserted on the SAME step that holds the probe so the two
+  # refusals cannot drift into separately-skippable steps. The `GITHUB_SHA`
+  # comparison must itself be a bounded refusal — a mention of `GITHUB_SHA` in a
+  # log line does not assert anything, so the opener is matched only inside a
+  # `[ ... ]` test.
+  provenance = steps.any? do |step|
+    run = step["run"].to_s
+    next false unless run.match?(probe)
+
+    run.match?(/git rev-parse .*\^\{commit\}/) &&
+      shell_refusal_bound?(run, /\[[^\]]*GITHUB_SHA[^\]]*\]/)
+  end
+  unless provenance
+    errors << "#{file}: the step holding the `git ls-remote` probe must also assert the release tag's commit " \
+              "(`git rev-parse refs/tags/<tag>^{commit}`) equals GITHUB_SHA and refuse (exit 1) otherwise, " \
+              "so a dispatch cannot overwrite a released asset with another commit's bytes (issue #2869)"
   end
 
   errors
