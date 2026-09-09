@@ -57,7 +57,45 @@ permissions:
   contents: read
 
 concurrency:
-  group: flight-trino-e2e-${{ github.ref }}
+  # Label events get their OWN group, keyed by the label NAME; everything else
+  # shares the per-ref group exactly as before (#2869, roborev Finding C).
+  #
+  # Why the suffix is necessary, and why it is not just tidiness. A concurrency group
+  # holds ONE running plus ONE pending run, and a newer pending run SUPERSEDES the
+  # older one. Combined with `cancel-in-progress` being false for label events
+  # (below), a single shared group silently EVICTS the validation someone asked for:
+  #
+  #   1. a PR has an E2E running;
+  #   2. `ci:trino-full` is added -> that run QUEUES behind it (no cancel, by design);
+  #   3. the next automated `status:*` label event starts a run, which SUPERSEDES the
+  #      queued one, because a group keeps only the latest pending run;
+  #   4. that superseding run hits `e2e-fat`'s label-NAME guard and skips `e2e-fat`.
+  #
+  # Net: the requested fat-jar validation vanishes with no failure anywhere. This
+  # repo applies `status:*` labels programmatically at every stage transition, so
+  # step 3 is routine rather than a corner case.
+  #
+  # Suffixing by label name fixes it without relaxing either guard: a
+  # `ci:trino-full` run sits in its own group and cannot be evicted by an unrelated
+  # label, while a `status:*` run gets its own group and skips BOTH jobs (`e2e`
+  # excludes label events; `e2e-fat` requires that specific label), so it costs
+  # essentially nothing. The suffix is applied ONLY to label events, so ordinary
+  # cancellation on the normal path is untouched — opened/synchronize/reopened/
+  # ready_for_review all still share one group and still cancel each other. Giving
+  # EVERY event its own group would have defeated `cancel-in-progress` for the normal
+  # path; that is the failure mode this shape avoids.
+  #
+  # `github.event.label.name` is interpolated into a GROUP NAME, never into a shell,
+  # so this is not an injection surface. The suffix is always `-label-<name>` with a
+  # non-empty name, so it can never collide with the unsuffixed group.
+  # Continuation lines are kept at the SAME indent as the first: in a folded (`>-`)
+  # scalar a MORE-indented line is preserved literally, newline included, which would
+  # embed newlines in a string GitHub compares verbatim.
+  group: >-
+    flight-trino-e2e-${{ github.ref }}${{
+    github.event.action == 'labeled'
+    && format('-label-{0}', github.event.label.name)
+    || '' }}
   # A new head sha obsoletes the in-flight run, so cancel it. A LABEL mutation
   # changes no byte of the diff, so it must NOT (#2869): this workflow now
   # subscribes to `labeled` so `ci:trino-full` can opt an already-open PR into
