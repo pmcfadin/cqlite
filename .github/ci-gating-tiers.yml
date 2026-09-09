@@ -288,8 +288,29 @@ exempt:
           twice over: this whole workflow is exempt, and the job is full-tier only
           (nightly / push to main / workflow_dispatch / release / a PR labeled
           `ci:trino-full`), so on a routine unlabeled PR it does not run at all. A
-          fat jar that Trino cannot load can therefore merge. Declared, not
-          covered.
+          fat jar that Trino cannot load can therefore merge. SECOND RESIDUAL, AND
+          THE SHARPER ONE (#2869, roborev Finding B; owner ruled to DECLARE rather
+          than restructure the release process): `e2e-fat` NEVER RUNS AT TAG TIME ON
+          THE RELEASED BYTES. Three facts compose to it, each verified. (1) This
+          workflow's `push` trigger has `branches` and `paths` but NO `tags`, so the
+          `v*` tag push that drives trino-connector-fatjar.yml does not match it.
+          (2) Its only other automatic hook is `release: {types: [published]}`.
+          (3) trino-connector-fatjar.yml creates that release with
+          `softprops/action-gh-release@v3` under `secrets.GITHUB_TOKEN`, and a
+          GITHUB_TOKEN-created release fires NO workflow runs at all. So the
+          `release` subscription is real and `e2e-fat`'s own `if:` would pass on it
+          — it is inert for THIS publisher specifically, not absent; a human- or
+          PAT-created release would fire it. Note the mechanism is already written
+          down at trino-connector-fatjar.yml (a dev publish cannot start the release
+          train, and that note even names this workflow as one it cannot start) —
+          but ONLY in the safety direction. Its coverage consequence in the other
+          direction is what is declared here: known mechanism, undeclared
+          consequence. MITIGATION, stated as mitigation and NOT as coverage:
+          `e2e-fat` does run nightly, on push to `main` under the path filter, and
+          on a PR labeled `ci:trino-full` — so the CODE that produces the fat jar is
+          exercised against a live Trino, just never the TAGGED ARTIFACT. Residual
+          in one sentence: a release could attach a fat jar whose Trino-loadability
+          was last proven at a different commit. Declared, not covered.
 
   - workflow: fuzz.yml
     reason: Fuzz smoke plus nightly long-run; a fuzz finding is filed as a bug, not a merge block.
