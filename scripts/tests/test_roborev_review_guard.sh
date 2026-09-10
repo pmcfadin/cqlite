@@ -1215,7 +1215,14 @@ run_wrapper() { # run_wrapper [--wrapper <path>] <work-dir> [extra wrapper args.
   INVOKED="$tmp/invoked-$CASE_N.txt"
   # The observer writes beside the transcript, so the stub is told which record to wait on (FIX 4).
   WRAPPER_LOG_PATH="$tmp/transcript-$CASE_N.txt"
-  for _rw_i in $(seq 1 $#); do
+  # Bash arithmetic, not `seq 1 $#` (issue #4206): with zero extra args ($#=0),
+  # BSD seq (`seq 1 0`) emits "1\n0" while GNU seq emits nothing, so on macOS the
+  # loop ran with _rw_i=1 and indirect-expanded `${!_rw_i}` past the bound — a
+  # $1 that does not exist under `set -u` — an `unbound variable` failure on
+  # every invocation, including a zero-arg one. `for ((...))` loops zero times
+  # for $#=0 on both platforms, matching intent exactly.
+  local _rw_n=$#
+  for ((_rw_i = 1; _rw_i <= _rw_n; _rw_i++)); do
     if [ "${!_rw_i}" = "--log" ]; then
       _rw_next=$((_rw_i + 1))
       WRAPPER_LOG_PATH="${!_rw_next}"
@@ -6981,8 +6988,13 @@ assert_says 'case (jd1) --help says to verify git_ref, never the id alone' "VERI
 assert_says 'case (jd1) --help records the measurement behind it' "'job=265' on two lanes"
 # THE PRESCRIBED COMMANDS MUST BE ONES THAT WORK. `show <id> --json` NESTS the fields under `.job`,
 # so a top-level jq over that payload prints nulls — a check whose output cannot show what it claims.
+# The `|` pipes are ESCAPED (issue #4206): an unescaped `|` is ERE alternation, and the pattern's
+# trailing `|` left an EMPTY alternative — GNU grep tolerates that permissively, but BSD grep
+# (macOS's `/usr/bin/grep`) refuses it outright with `empty (sub)expression`, so this assertion
+# could never pass on macOS. `assert_says` was previously unreachable here on this platform: the
+# earlier BSD-`seq` crash in `run_wrapper` (same issue) aborted the suite before case (jd1) ever ran.
 assert_says 'case (jd1) --help prescribes the NESTED .job projection' \
-  "roborev show <id> --json | jq '\.job |"
+  "roborev show <id> --json \| jq '\.job \|"
 assert_says 'case (jd1) --help names the nesting trap' "NESTS git_ref/status/token_usage"
 # THE TOP-LEVEL id IS THE REVIEW ROW'S OWN SEQUENCE, measured over ten records: asking for 9
 # returns id=8 with job_id=9. A human reading it manufactures the very doubt the check removes.
