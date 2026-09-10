@@ -237,6 +237,27 @@ pub async fn salvage_sstable(
     // merely "nothing failed to decode".
     let mut written = 0usize;
     let mut losses: Vec<Loss> = Vec::new();
+    // roborev, issue #4196, round-9 (spec R2.4/R3.1's own oracle: a
+    // bit-flipped-but-still-parseable `Index.db`/`Partitions.db` entry can
+    // be `data_offset`-ascending — `check_strictly_ascending` above already
+    // guards that — while its DECODED KEY still fails to token-sort after
+    // the partition BEFORE it, which only `SSTableWriter::write_partition`'s
+    // own ordering check would have caught, deep in the write path, as a
+    // hard `Err` that discarded every loss/finding gathered so far and left
+    // an unpublished partial generation with NO manifest at all — three
+    // roborev rounds (6, 7, 8) independently surfaced this. Mirroring
+    // `write_partition`'s OWN check (`writer/mod.rs`: `key.token <=
+    // last_token`) HERE, before ever calling it, converts that class of
+    // corruption into an ordinary classified `Loss` like every other
+    // boundary-source disagreement — never reaching the writer at all, so
+    // it can never fail with a partition already-decoded-and-about-to-be-
+    // written. The genuine, RESIDUAL failure mode this does NOT cover — a
+    // real I/O error inside `write_partition`/`finish()` unrelated to
+    // ordering — stays `?`-propagated, matching `compact_sstables`'s own
+    // established posture at the identical call (`merge/mod.rs:1341`) and
+    // round-4's explicit scoping note: building a writer abort/cleanup
+    // mechanism for THAT residual case is disproportionate for a fix round.
+    let mut last_written_token: Option<i64> = None;
 
     for (i, entry) in boundaries.entries.iter().enumerate() {
         let end_bound = boundaries.entries.get(i + 1).map(|e| e.data_offset);
@@ -279,7 +300,32 @@ pub async fn salvage_sstable(
 
         match recover_one_partition(&reader, entry, end_bound, schema, &scan_cancel).await {
             Ok(Some((key, mutations))) => {
+                if token_out_of_order(last_written_token, key.token) {
+                    // Decoded cleanly, but this slot's key does not
+                    // token-sort after the last partition actually written
+                    // — the boundary source and the data disagree on
+                    // ordering, which `write_partition` would otherwise
+                    // reject as a hard `Err`. Classified here instead, as a
+                    // loss, never reaching the writer.
+                    losses.push(build_loss(
+                        entry,
+                        schema,
+                        touched_chunks,
+                        LossClass::KeyMismatch,
+                        0,
+                        format!(
+                            "decoded key's token {} does not sort after the last partition \
+                             actually written (token {}); the boundary source and the data \
+                             disagree on ordering",
+                            key.token,
+                            last_written_token.expect("checked Some above")
+                        ),
+                    ));
+                    continue;
+                }
+                let token = key.token;
                 writer.write_partition(key, mutations)?;
+                last_written_token = Some(token);
                 recovered += 1;
                 written += 1;
             }
@@ -569,5 +615,70 @@ fn build_loss(
             rows_decoded_before_failure,
             message,
         }
+    }
+}
+
+/// `true` when `candidate` does not token-sort strictly after
+/// `last_written` — mirrors `SSTableWriter::write_partition`'s own ordering
+/// check (`writer/mod.rs`: `key.token <= last_token`) so the SAME violation
+/// is caught HERE, before ever calling it, and classified as an ordinary
+/// `Loss` instead of surfacing as a hard `Err` deep in the write path
+/// (roborev, issue #4196, round-9 — three prior rounds independently
+/// surfaced the hard-`Err` propagation this prevents). Extracted as a pure
+/// function so the comparison is unit-testable directly: end-to-end, this
+/// code path is reachable ONLY via a corrupted BTI narrow leaf (no
+/// independent key to cross-check — every OTHER corruption class that could
+/// produce an out-of-order token is already caught EARLIER, either by
+/// `check_strictly_ascending` (offset monotonicity) or by
+/// `decode_partition_at_offset_for_salvage`'s own `expected_key` cross-check
+/// — see this module's `token_out_of_order` unit tests for the reasoning),
+/// which is hard to construct as a real end-to-end fixture; declared here
+/// rather than silently left untested.
+fn token_out_of_order(last_written: Option<i64>, candidate: i64) -> bool {
+    last_written.is_some_and(|last| candidate <= last)
+}
+
+#[cfg(test)]
+mod ordering_tests {
+    use super::token_out_of_order;
+
+    /// The common, healthy case: the first partition ever written has
+    /// nothing to compare against.
+    #[test]
+    fn first_partition_is_never_out_of_order() {
+        assert!(!token_out_of_order(None, i64::MIN));
+        assert!(!token_out_of_order(None, 0));
+        assert!(!token_out_of_order(None, i64::MAX));
+    }
+
+    /// A strictly-increasing token sequence — the normal case for every
+    /// partition after the first — never flags.
+    #[test]
+    fn strictly_increasing_tokens_pass() {
+        assert!(!token_out_of_order(Some(-100), -50));
+        assert!(!token_out_of_order(Some(0), 1));
+        assert!(!token_out_of_order(Some(i64::MIN), i64::MAX));
+    }
+
+    /// A DUPLICATE token — `SSTableWriter::write_partition` rejects `<=`,
+    /// not just `<`, so a repeat must flag too (two boundary entries naming
+    /// the same effective token, e.g. a Murmur3 hash collision on two
+    /// distinct keys — Cassandra's own token-order writer would never
+    /// legitimately produce this for the SAME table without an intervening
+    /// key, so seeing it here IS the corruption signal).
+    #[test]
+    fn duplicate_token_is_out_of_order() {
+        assert!(token_out_of_order(Some(42), 42));
+    }
+
+    /// A DECREASING token — the exact scenario this fix exists for: an
+    /// offset-ascending, individually-key-matching boundary source (so
+    /// NEITHER `check_strictly_ascending` NOR the per-entry key cross-check
+    /// catches it) whose corrupted narrow leaf nonetheless decodes a token
+    /// that sorts BEFORE what was already written.
+    #[test]
+    fn decreasing_token_is_out_of_order() {
+        assert!(token_out_of_order(Some(1000), 999));
+        assert!(token_out_of_order(Some(0), i64::MIN));
     }
 }

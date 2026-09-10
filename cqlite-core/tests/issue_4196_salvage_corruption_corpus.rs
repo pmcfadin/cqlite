@@ -579,3 +579,391 @@ async fn damaged_crc_db_refuses_as_classified() {
     );
     eprintln!("[issue_4196] damaged CRC.db: salvage refused as expected ({report:?}).");
 }
+
+/// Roborev, issue #4196 (round-9, spec R2.3 — `LossClass::Truncated` had no
+/// test anywhere in the change: the corpus's ONLY truncation fixture,
+/// `data_db_truncation`, is `test_comp.lz4_table` (COMPRESSED) — measured
+/// (round 9) to classify `chunk-crc`, NOT `truncated`: `compressed_chunk_preflight`
+/// walks every declared chunk BEFORE the per-partition loop ever runs, and a
+/// chunk whose bytes no longer exist past the truncation point fails to
+/// READ at all, landing in `bad_chunks` — the per-partition loop's
+/// `chunk-crc` short-circuit fires before `recover_one_partition` is ever
+/// reached, so `LossClass::Truncated`'s own code path is unreachable for a
+/// COMPRESSED truncation, and a NAIVE uncompressed byte-truncation has the
+/// SAME problem one layer down: truncating mid-row makes the row parser
+/// return a hard decode `Err` (measured: "row_size=317 ... exceeds
+/// available data"), landing in `PartitionAtOffsetOutcome::DecodeError` →
+/// `LossClass::Decode`, not `Truncated` — `Truncated` is reached ONLY via
+/// `decode_partition_at_offset_for_salvage`'s EARLY `offset_usize >= end`
+/// check (`point_compaction.rs`), before any parsing is attempted at all.
+///
+/// This test therefore does NOT truncate `Data.db` — it leaves a healthy
+/// `test_comp.uncompressed_table` generation's `Data.db`/`CRC.db` byte-for-
+/// byte UNCHANGED (so the chunk-CRC pre-flight finds nothing to flag at
+/// all: zero `bad_chunks`, zero `component_findings`) and instead
+/// re-encodes a COPY of `Index.db` with its ONE entry's `data_offset` VInt
+/// field changed from its true value (`0`) to `200000` — comfortably past
+/// the real, unmutated `Data.db`'s 195018-byte length — while leaving the
+/// entry's key bytes and the promoted-index payload untouched byte-for-byte
+/// (`parse_big_index_entry`'s layout,
+/// `cqlite-core/src/storage/sstable/index_reader/parse.rs`:
+/// `[key_len: u16][key][data_offset: vint][promoted_len: vint][promoted]`).
+/// `enumerate_boundaries`'s `check_strictly_ascending` guard trivially
+/// passes (a single-entry list has no adjacent pair to violate), and
+/// `decode_partition_at_offset_for_salvage`'s uncompressed branch then hits
+/// `offset_usize(200000) >= end(195018 == section_len, since this is the
+/// only/last entry)` on the FIRST line, before a single byte of `Data.db`
+/// is ever read — the cleanest, most deterministic route to `Truncated`
+/// this codebase has, and the reason NO Data.db mutation is needed at all.
+///
+/// R2.3's "all earlier partitions are recovered" narrows to the same
+/// single-partition illustration `data_db_bit_flip`'s test already accepted
+/// in round 6 (this fixture's Index.db, like `lz4_table`'s, names exactly
+/// one partition) — the classification/derivation logic under test is
+/// exercised identically regardless of partition count.
+#[tokio::test]
+async fn index_entry_offset_past_eof_classifies_truncated() {
+    const KEYSPACE: &str = "test_comp";
+    const TABLE_NAME: &str = "uncompressed_table";
+    let Some(root) = datasets_root::sstables_root_for_table(KEYSPACE, TABLE_NAME) else {
+        skip_or_require(
+            "uncompressed_table fixture",
+            &format!(
+                "no candidate root carries {KEYSPACE}.{TABLE_NAME}; {}",
+                datasets_root::describe_search(KEYSPACE, TABLE_NAME)
+            ),
+        );
+        return;
+    };
+    let fixture_dir = datasets_root::table_generation_dirs(&root, KEYSPACE, TABLE_NAME)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("{KEYSPACE}.{TABLE_NAME}: no usable generation directory"));
+
+    let schema_path =
+        datasets_root::schema_path("compression-parity.cql").expect("committed CQL schema");
+    let cql = std::fs::read_to_string(schema_path).expect("read schema");
+    let start = cql
+        .find(&format!("CREATE TABLE IF NOT EXISTS {TABLE_NAME}"))
+        .expect("CREATE TABLE statement");
+    let end = start + cql[start..].find(';').expect("statement terminator") + 1;
+    let mut schema = cqlite_core::schema::cql_parser::parse_cql_schema(&cql[start..end])
+        .expect("parse CREATE TABLE");
+    schema.keyspace = KEYSPACE.to_string();
+
+    let clean_data_db = single_data_db(&fixture_dir);
+    let clean_data_len = std::fs::metadata(&clean_data_db)
+        .expect("stat clean Data.db")
+        .len();
+    let clean_index_db = fixture_dir.join(
+        clean_data_db
+            .file_name()
+            .expect("Data.db has a filename")
+            .to_string_lossy()
+            .replace("-Data.db", "-Index.db"),
+    );
+    let clean_index_bytes = std::fs::read(&clean_index_db).expect("read clean Index.db");
+
+    // Rebuild the ONE entry with a fabricated `data_offset` comfortably past
+    // EOF, keeping the key + promoted-index payload byte-for-byte. Parsed
+    // structurally (not hardcoded byte offsets) so this test does not
+    // silently mis-corrupt a different field if the fixture is regenerated
+    // with a differently-sized key.
+    let key_len = u16::from_be_bytes([clean_index_bytes[0], clean_index_bytes[1]]) as usize;
+    let key_end = 2 + key_len;
+    let (_orig_offset, consumed) =
+        cqlite_core::parser::vint::decode_unsigned(&clean_index_bytes[key_end..])
+            .expect("clean Index.db entry has a well-formed data_offset VInt");
+    let rest_after_offset = &clean_index_bytes[key_end + consumed..];
+    const FABRICATED_OFFSET: u64 = 200_000;
+    assert!(
+        FABRICATED_OFFSET > clean_data_len,
+        "{KEYSPACE}.{TABLE_NAME}: fabricated offset {FABRICATED_OFFSET} must exceed the clean \
+         Data.db's real length {clean_data_len}, or this test proves nothing"
+    );
+    let mut corrupt_index_bytes = Vec::with_capacity(clean_index_bytes.len() + 8);
+    corrupt_index_bytes.extend_from_slice(&clean_index_bytes[..key_end]);
+    cqlite_core::storage::serialization::vint::encode_unsigned(
+        FABRICATED_OFFSET,
+        &mut corrupt_index_bytes,
+    );
+    corrupt_index_bytes.extend_from_slice(rest_after_offset);
+
+    let temp = TempDir::new().expect("tempdir");
+    let corrupt_dir = temp.path().join("corrupt_input");
+    std::fs::create_dir_all(&corrupt_dir).expect("create corrupt input dir");
+    for entry in std::fs::read_dir(&fixture_dir)
+        .expect("read fixture dir")
+        .flatten()
+    {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.ends_with("-Index.db") {
+            std::fs::write(corrupt_dir.join(&name), &corrupt_index_bytes)
+                .expect("write corrupted Index.db");
+        } else if !name_str.ends_with(".jsonl") && !name_str.ends_with("Statistics.db.txt") {
+            std::fs::copy(entry.path(), corrupt_dir.join(&name)).expect("copy fixture component");
+        }
+    }
+    let corrupt_data_db = single_data_db(&corrupt_dir);
+
+    let out_root = temp.path().join("out");
+    let report = salvage_sstable(
+        &corrupt_data_db,
+        &out_root,
+        &schema,
+        SalvageOptions::default(),
+    )
+    .await
+    .unwrap_or_else(|e| {
+        panic!(
+            "salvage must not hard-error on an out-of-range Index.db offset (a Loss, not an \
+             Err): {e:#}"
+        )
+    });
+
+    assert_eq!(
+        report.partitions.total, 1,
+        "{KEYSPACE}.{TABLE_NAME}: expected exactly one partition in this fixture's Index.db; \
+         got {}",
+        report.partitions.total
+    );
+    assert_eq!(
+        report.losses.len(),
+        1,
+        "expected exactly one loss (the file's only partition); got {:?}",
+        report.losses
+    );
+    assert_eq!(
+        report.losses[0].class,
+        LossClass::Truncated,
+        "expected LossClass::Truncated; got {:?} (component findings: {:?})",
+        report.losses[0],
+        report.component_findings
+    );
+    assert!(
+        report.component_findings.is_empty(),
+        "Data.db/CRC.db were never touched — no chunk-CRC finding should fire; got {:?}",
+        report.component_findings
+    );
+    assert!(
+        no_data_db_anywhere(&out_root),
+        "--out must contain no Data.db when the file's only partition is a total loss"
+    );
+    eprintln!(
+        "[issue_4196] Index.db offset past EOF: salvage classified the loss as {:?} as \
+         expected.",
+        report.losses[0].class
+    );
+}
+
+/// Every `(entry_start, key_field_end, entry_end)` triple for the BIG
+/// Index.db entries in `bytes` — parsed structurally via the SAME layout
+/// `parse_big_index_entry` uses
+/// (`cqlite-core/src/storage/sstable/index_reader/parse.rs`:
+/// `[key_len: u16][key][data_offset: vint][promoted_len: vint][promoted]`),
+/// not fixed byte offsets, so a fixture regeneration with different key/
+/// promoted-index sizes does not silently corrupt the wrong bytes. `key
+/// portion` = `bytes[entry_start..key_field_end]` (the 2-byte length prefix
+/// plus the raw key); `bytes[key_field_end..entry_end]` is everything else
+/// (`data_offset`, `promoted_len`, the promoted-index payload) for that
+/// entry.
+fn split_big_index_entries(bytes: &[u8]) -> Vec<(usize, usize, usize)> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        let entry_start = pos;
+        let key_len = u16::from_be_bytes([bytes[pos], bytes[pos + 1]]) as usize;
+        let key_field_end = pos + 2 + key_len;
+        let (_offset, offset_consumed) =
+            cqlite_core::parser::vint::decode_unsigned(&bytes[key_field_end..])
+                .expect("well-formed data_offset VInt");
+        let after_offset = key_field_end + offset_consumed;
+        let (promoted_len, promoted_consumed) =
+            cqlite_core::parser::vint::decode_unsigned(&bytes[after_offset..])
+                .expect("well-formed promoted_len VInt");
+        let after_promoted_len = after_offset + promoted_consumed;
+        let entry_end = after_promoted_len + promoted_len as usize;
+        out.push((entry_start, key_field_end, entry_end));
+        pos = entry_end;
+    }
+    out
+}
+
+/// Roborev, issue #4196 (round-9, spec R4.2 — `LossClass::KeyMismatch` had
+/// no test anywhere in the change).
+///
+/// Spec R4.2's literal wording ("a temp copy of a healthy BIG fixture with
+/// ONE Index.db entry's POSITION pointed at a DIFFERENT partition's
+/// header") describes redirecting an entry's `data_offset`. That construction
+/// is geometrically IMPOSSIBLE against a well-formed, `check_strictly_ascending`-
+/// enforced boundary source (`boundaries.rs`): that guard requires the WHOLE
+/// entry sequence strictly increasing in `data_offset`, so no two entries can
+/// EVER share a value, and any single entry's redirected offset is bounded
+/// by its OWN immediate neighbours — i.e. it can only be moved somewhere
+/// inside the numeric gap `(entries[i-1].data_offset, entries[i+1].data_offset)`,
+/// which is EXACTLY where partition `i`'s own true header already lives, and
+/// nowhere else. There is no position a redirected offset can occupy that
+/// both satisfies strict ascending AND lands on a DIFFERENT, separately-
+/// enumerated partition's real header. (Checked at both the first and last
+/// entry too: entry 0 has no lower-bound neighbour but is upper-bounded by
+/// entry 1 — nothing precedes partition 0 in the data section, so that gap
+/// contains only partition 0's own header; the last entry has no upper
+/// bound but IS lower-bounded by its predecessor, which — being the
+/// SECOND-TO-LAST entry — leaves no smaller, already-enumerated partition's
+/// header still reachable above it either.)
+///
+/// This test instead achieves the IDENTICAL decoder-observable property the
+/// spec scenario exists to exercise — `decode_partition_at_offset_for_salvage`
+/// finds a key AT THE GIVEN, VALID, in-range OFFSET that disagrees with the
+/// boundary source's DECLARED key for that slot — via the functionally
+/// equivalent construction of swapping two entries' KEY portions instead
+/// (offsets are NEVER touched, so `check_strictly_ascending` sees the
+/// UNMODIFIED, still-valid clean sequence and never refuses). Entry 0 and
+/// entry 1's `[key_len][key]` byte spans are swapped in a copy of
+/// `test_basic.multi_partition_table`'s Index.db (a real, ~90-partition
+/// compressed BIG fixture, `basic-types.cql`); `Data.db`/`CompressionInfo.db`
+/// stay byte-for-byte unchanged. Both swapped slots decode their TRUE
+/// partition (offsets untouched) against the WRONG declared key -> BOTH
+/// classify `key-mismatch`. A THIRD, entirely untouched entry (entry 2)
+/// proves the spec's "the [other] partition is still recovered from its own
+/// index entry exactly once" property: an unrelated boundary-source
+/// corruption does not disturb a partition it never touched.
+#[tokio::test]
+async fn swapped_index_entry_keys_classify_key_mismatch() {
+    const KEYSPACE: &str = "test_basic";
+    const TABLE_NAME: &str = "multi_partition_table";
+    let Some(root) = datasets_root::sstables_root_for_table(KEYSPACE, TABLE_NAME) else {
+        skip_or_require(
+            "multi_partition_table fixture",
+            &format!(
+                "no candidate root carries {KEYSPACE}.{TABLE_NAME}; {}",
+                datasets_root::describe_search(KEYSPACE, TABLE_NAME)
+            ),
+        );
+        return;
+    };
+    let fixture_dir = datasets_root::table_generation_dirs(&root, KEYSPACE, TABLE_NAME)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("{KEYSPACE}.{TABLE_NAME}: no usable generation directory"));
+
+    let schema_path = datasets_root::schema_path("basic-types.cql").expect("committed CQL schema");
+    let cql = std::fs::read_to_string(schema_path).expect("read schema");
+    let start = cql
+        .find(&format!("CREATE TABLE IF NOT EXISTS {TABLE_NAME}"))
+        .expect("CREATE TABLE statement");
+    let end = start + cql[start..].find(';').expect("statement terminator") + 1;
+    let mut schema = cqlite_core::schema::cql_parser::parse_cql_schema(&cql[start..end])
+        .expect("parse CREATE TABLE");
+    schema.keyspace = KEYSPACE.to_string();
+
+    let clean_data_db = single_data_db(&fixture_dir);
+    let clean_index_db = fixture_dir.join(
+        clean_data_db
+            .file_name()
+            .expect("Data.db has a filename")
+            .to_string_lossy()
+            .replace("-Data.db", "-Index.db"),
+    );
+    let clean_index_bytes = std::fs::read(&clean_index_db).expect("read clean Index.db");
+    let entries = split_big_index_entries(&clean_index_bytes);
+    assert!(
+        entries.len() >= 3,
+        "{KEYSPACE}.{TABLE_NAME}: need at least 3 partitions (two to swap, one untouched \
+         control); found {}",
+        entries.len()
+    );
+    let (e0_start, e0_key_end, e0_end) = entries[0];
+    let (e1_start, e1_key_end, e1_end) = entries[1];
+    assert_eq!(
+        e0_end, e1_start,
+        "entries[0] and entries[1] must be adjacent for this splice to be a pure key swap"
+    );
+
+    let mut corrupt_index_bytes = Vec::with_capacity(clean_index_bytes.len());
+    corrupt_index_bytes.extend_from_slice(&clean_index_bytes[..e0_start]);
+    // entry 0's slot: entry 1's key + entry 0's own (unchanged) offset/promoted-index.
+    corrupt_index_bytes.extend_from_slice(&clean_index_bytes[e1_start..e1_key_end]);
+    corrupt_index_bytes.extend_from_slice(&clean_index_bytes[e0_key_end..e0_end]);
+    // entry 1's slot: entry 0's key + entry 1's own (unchanged) offset/promoted-index.
+    corrupt_index_bytes.extend_from_slice(&clean_index_bytes[e0_start..e0_key_end]);
+    corrupt_index_bytes.extend_from_slice(&clean_index_bytes[e1_key_end..e1_end]);
+    corrupt_index_bytes.extend_from_slice(&clean_index_bytes[e1_end..]);
+    assert_eq!(
+        corrupt_index_bytes.len(),
+        clean_index_bytes.len(),
+        "a pure key swap must not change the file's total length"
+    );
+
+    let temp = TempDir::new().expect("tempdir");
+    let corrupt_dir = temp.path().join("corrupt_input");
+    std::fs::create_dir_all(&corrupt_dir).expect("create corrupt input dir");
+    for entry in std::fs::read_dir(&fixture_dir)
+        .expect("read fixture dir")
+        .flatten()
+    {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.ends_with("-Index.db") {
+            std::fs::write(corrupt_dir.join(&name), &corrupt_index_bytes)
+                .expect("write corrupted Index.db");
+        } else if !name_str.ends_with(".jsonl") && !name_str.ends_with("Statistics.db.txt") {
+            std::fs::copy(entry.path(), corrupt_dir.join(&name)).expect("copy fixture component");
+        }
+    }
+    let corrupt_data_db = single_data_db(&corrupt_dir);
+
+    let out_root = temp.path().join("out");
+    let report = salvage_sstable(
+        &corrupt_data_db,
+        &out_root,
+        &schema,
+        SalvageOptions::default(),
+    )
+    .await
+    .unwrap_or_else(|e| {
+        panic!("salvage must not hard-error on swapped Index.db keys (a Loss, not an Err): {e:#}")
+    });
+
+    let total = entries.len();
+    assert_eq!(
+        report.partitions.total, total,
+        "expected the untouched partition count; got {}",
+        report.partitions.total
+    );
+    assert_eq!(
+        report.losses.len(),
+        2,
+        "expected exactly the two swapped slots as losses; got {:?}",
+        report.losses
+    );
+    for loss in &report.losses {
+        assert_eq!(
+            loss.class,
+            LossClass::KeyMismatch,
+            "expected LossClass::KeyMismatch for the swapped slots; got {:?}",
+            loss
+        );
+    }
+    // R4.2's "the [other] partition is still recovered from its own index
+    // entry exactly once": every partition OTHER than the two swapped slots
+    // must be untouched, so `recovered` accounts for exactly `total - 2`.
+    assert_eq!(
+        report.partitions.recovered,
+        total - 2,
+        "every UNSWAPPED partition must still recover cleanly from its own, untouched entry"
+    );
+    assert!(
+        report.refused.is_none(),
+        "a partial loss on 2 of {total} partitions must not refuse the whole generation; got \
+         {:?}",
+        report.refused
+    );
+    eprintln!(
+        "[issue_4196] swapped Index.db entry keys: {} of {total} partitions classified \
+         key-mismatch as expected; {} recovered.",
+        report.losses.len(),
+        report.partitions.recovered
+    );
+}

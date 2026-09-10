@@ -684,6 +684,71 @@ cqlite-core --lib --features write-support` 4051 passed; `cargo test -p cqlite-c
 tests (8) pass against the real corpus; `test_salvage_no_resync_scan.sh` passes;
 `features-load-bearing` 61/61.
 
+## Round 9 (lead-scoped: exactly two spec-bound items, both fail C otherwise)
+
+- [x] `write_partition`'s hard-`Err` propagation (round-6 batched (i), restated by
+      round-7's Medium and round-8's finding — three independent rounds). ROOT-CAUSE
+      FIX rather than a reactive catch: `salvage_sstable`'s loop now mirrors
+      `SSTableWriter::write_partition`'s OWN ordering check (`key.token <= last_token`)
+      BEFORE ever calling it — `token_out_of_order` (pure, unit-tested:
+      `recover::ordering_tests`, 4 cases) — so a boundary entry that decodes a key
+      matching its OWN declared key (no `KeyMismatch`) but whose TOKEN does not sort
+      after the last partition actually written is classified `LossClass::KeyMismatch`
+      and skipped, NEVER reaching the writer at all. The writer therefore cannot be
+      asked to reject an already-decoded partition mid-loop, closing the exact defect
+      class three rounds surfaced. The RESIDUAL case — a genuine I/O error inside
+      `write_partition`/`finish()` unrelated to ordering — stays `?`-propagated,
+      matching `compact_sstables`'s own established posture at the identical call
+      (`merge/mod.rs:1341`) and round-4's explicit scoping note: a writer abort/cleanup
+      mechanism for that case remains disproportionate for a fix round and is NOT what
+      this fix addresses. End-to-end reachability analysis (recorded in
+      `token_out_of_order`'s doc): the fixed path is reachable in the FULL pipeline
+      only via a corrupted BTI NARROW leaf (no independent key to cross-check) — every
+      OTHER corruption class that could produce an out-of-order token is already caught
+      earlier by `check_strictly_ascending` (offset monotonicity) or by
+      `decode_partition_at_offset_for_salvage`'s own `expected_key` cross-check, which
+      is why the regression test is a focused unit test on the extracted pure function
+      rather than an end-to-end fixture (constructing a real corrupted-BTI-narrow-leaf
+      fixture that also satisfies the trie's own structural validity is a substantially
+      larger undertaking, left as a declared gap for the BTI-specific follow-up).
+- [x] `LossClass::Truncated` (spec R2.3) and `LossClass::KeyMismatch` (spec R4.2) had
+      no test anywhere in the change. Both added to
+      `issue_4196_salvage_corruption_corpus.rs`, against REAL fixtures (never
+      CQLite-written):
+      - `index_entry_offset_past_eof_classifies_truncated` — measured (this round)
+        that the corpus's only truncation fixture (`data_db_truncation`, COMPRESSED
+        `lz4_table`) actually classifies `chunk-crc` (the chunk pre-flight fails to
+        READ the missing chunk before the per-partition loop ever runs), and that a
+        NAIVE uncompressed byte-truncation mid-row classifies `decode` (a hard parse
+        `Err`, not the clean "window not fully covered" `Ok` path `Truncated` needs) —
+        so this test reaches `Truncated` via `test_comp.uncompressed_table` with
+        `Data.db`/`CRC.db` byte-for-byte UNCHANGED and ONLY its Index.db entry's
+        `data_offset` VInt field re-encoded to a value past the real (untouched) EOF,
+        hitting `decode_partition_at_offset_for_salvage`'s early `offset_usize >= end`
+        check before any parsing is attempted.
+      - `swapped_index_entry_keys_classify_key_mismatch` — spec R4.2's literal wording
+        ("an Index.db entry's POSITION pointed at a different partition's header") is
+        GEOMETRICALLY IMPOSSIBLE against a `check_strictly_ascending`-enforced boundary
+        source (proof recorded in the test's doc: that guard requires the WHOLE
+        sequence strictly increasing, so no entry's redirected offset can ever land on
+        a DIFFERENT already-enumerated partition's real header — only ever back on its
+        own). Achieves the functionally IDENTICAL decoder-observable property (a
+        decoded key at a valid offset disagreeing with the boundary source's declared
+        key for that slot) via swapping two entries' KEY portions instead (offsets
+        untouched, so ascending order is never disturbed) against
+        `test_basic.multi_partition_table` (~100 partitions); a third, untouched entry
+        proves the "other partition still recovered from its own entry" half of the
+        spec scenario.
+
+Re-verified after both fixes: `cargo fmt --check` clean; `cargo clippy -p cqlite-core
+--features write-support --lib` and every touched `--test` target clean; `cargo clippy
+-p cqlite-cli --features write-support --lib --bins --test salvage_cli_tests` clean;
+`cargo test -p cqlite-core --lib --features write-support` 4055 passed (was 4051; +4
+new `recover::ordering_tests`); `cargo test -p cqlite-cli --lib --features
+write-support` 233 passed (unchanged); all salvage core tests (7+4+1, was 5+4+1; +2 new
+corruption-corpus cases) and CLI tests (8) pass against the real corpus;
+`test_salvage_no_resync_scan.sh` passes; `features-load-bearing` 61/61.
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree
