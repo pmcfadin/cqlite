@@ -313,7 +313,15 @@ async fn uncompressed_chunk_crc_flip_loses_exactly_the_intersecting_partitions()
     bytes[flip_at] ^= 0xFF;
     std::fs::write(&corrupt_data_db, &bytes).expect("write chunk-0-flipped Data.db");
 
-    let out_root = TempDir::new().expect("tempdir").path().join("out");
+    // roborev, issue #4196, round-14 Low finding: the `TempDir` must be
+    // bound to a local FIRST — the previous one-liner dropped it at the end
+    // of its own statement (a temporary), removing the directory before
+    // `out_root` was ever used; `SSTableWriter` recreates it via
+    // `create_dir_all`, but nothing then cleans it up (orphaned under
+    // `/tmp` on every run, unlike this test's siblings, which all bind
+    // their `TempDir` to a local).
+    let out_temp = TempDir::new().expect("tempdir");
+    let out_root = out_temp.path().join("out");
     let report = salvage_sstable(
         &corrupt_data_db,
         &out_root,

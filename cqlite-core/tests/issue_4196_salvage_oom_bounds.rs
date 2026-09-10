@@ -776,6 +776,42 @@ async fn implausible_chunk_offset_table_does_not_oom() {
         "expected LossClass::ChunkCrc (every declared chunk position is implausible); got {:?}",
         report.losses[0]
     );
+
+    // roborev, issue #4196, round-14 Low finding: the finding's summary
+    // detail must distinguish "implausible framing" (never read) from a
+    // genuine CRC32 mismatch — every chunk here is implausible by
+    // construction (the offset shift makes ALL of them exceed Data.db's
+    // real length), so the message must name a NON-ZERO implausible count
+    // and a ZERO CRC-failure count, never claim "N chunk(s) failed inline
+    // CRC32 validation" (which would mislead an operator into looking for
+    // bit rot in Data.db when the damaged component is CompressionInfo.db).
+    let finding = report
+        .component_findings
+        .iter()
+        .find(|f| f.class == "ChunkDecompressionError")
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a ChunkDecompressionError component finding; got {:?}",
+                report.component_findings
+            )
+        });
+    assert!(
+        !finding.detail.contains("failed inline CRC32 validation"),
+        "the old, conflating wording must not reappear: {}",
+        finding.detail
+    );
+    assert!(
+        finding.detail.contains("0 CRC failure(s)"),
+        "expected a ZERO CRC-failure count (every bad chunk here is implausible, none were \
+         actually read); got: {}",
+        finding.detail
+    );
+    assert!(
+        finding.detail.contains("implausible framing") && !finding.detail.contains("0 implausible"),
+        "expected a NON-ZERO implausible-framing count; got: {}",
+        finding.detail
+    );
+
     eprintln!(
         "[issue_4196] shifted chunk_offsets table: completed without OOM, classified {:?} (no \
          chunk handed to an allocation sized from the untrusted offset table).",

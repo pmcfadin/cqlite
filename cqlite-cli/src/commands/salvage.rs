@@ -200,33 +200,54 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
     // fact that is true of the table dir as a whole, not any one
     // generation. `generations` is non-empty here (the empty case exits
     // above), so index 0 always exists.
+    // roborev, issue #4196, round-14 Medium finding: a hard `Err` from ONE
+    // generation's `salvage_sstable` used to exit IMMEDIATELY
+    // (`exit_after_partial_failure`, `-> !`), so every REMAINING generation
+    // in the table dir was never even attempted — unlike a discovery-level
+    // skip (named, printed, and recorded above), those generations appeared
+    // NOWHERE in the manifest at all, directly contradicting the skip
+    // path's own "other generations are still salvaged" promise and this
+    // tool's "every partition accounted for" contract. Record the failure
+    // and CONTINUE instead; every generation is now attempted regardless of
+    // an earlier one's hard error, and the failure set is folded into the
+    // SAME `exit_after_partial_failure` used below ONLY when literally
+    // EVERY generation hard-errored (`reports` stays empty) — that specific
+    // sub-case's "probe `--out`, decide 1 vs already-existing-output" logic
+    // is unchanged, just reached after the loop instead of on the first
+    // failure.
+    let mut hard_errors: Vec<(PathBuf, String)> = Vec::new();
     let mut reports = Vec::with_capacity(generations.len());
-    for (idx, input) in generations.iter().enumerate() {
+    for input in &generations {
         match salvage_sstable(input, &args.out, &schema, SalvageOptions::default()).await {
-            Ok(mut report) => {
-                if idx == 0 {
-                    for skipped in &discovery.skipped {
-                        report.component_findings.push(ComponentFinding {
-                            class: "SkippedInputGeneration".to_string(),
-                            component: skipped.path.display().to_string(),
-                            detail: format!(
-                                "a published *-Data.db under the same table dir was never \
-                                 salvaged: {}",
-                                skipped.reason
-                            ),
-                        });
-                    }
-                }
-                reports.push(report);
-            }
+            Ok(report) => reports.push(report),
             Err(e) => {
                 eprintln!(
-                    "cqlite salvage: salvage failed for {}: {e:#}",
+                    "cqlite salvage: salvage failed for {}: {e:#} — other generations are still \
+                     attempted",
                     input.display()
                 );
-                exit_after_partial_failure(&reports, args, is_table_dir);
+                hard_errors.push((input.clone(), format!("{e:#}")));
             }
         }
+    }
+
+    // Both discovery-level skips AND in-loop hard errors are table-dir-level
+    // facts, not one specific generation's — both attach to the FIRST
+    // report only (round-13 Low finding's reasoning applies identically to
+    // the new hard-error class). When EVERY generation hard-errored,
+    // `reports` is empty and there is nothing to attach to; that case falls
+    // through to `exit_after_partial_failure` below unchanged.
+    if reports.is_empty() {
+        if !hard_errors.is_empty() {
+            // Every generation hard-errored: no report exists anywhere to
+            // attach a finding to. Mirrors the pre-round-14 immediate-exit
+            // behavior exactly (probe `--out` directly; exit 3 if something
+            // was still written despite every generation reporting
+            // failure, else exit 1 — genuinely nothing gathered).
+            exit_after_partial_failure(&reports, args, is_table_dir);
+        }
+    } else {
+        record_table_dir_level_findings(&mut reports, &discovery.skipped, &hard_errors);
     }
 
     if let Err(e) = write_manifest_file(&reports, args, is_table_dir) {
@@ -245,13 +266,29 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
     // generation refused" — a table-dir input salvages each generation
     // separately (D1), so one refused generation must not discard a
     // sibling's real output from a script branching on the exit code.
-    let all_refused = !reports.is_empty() && reports.iter().all(|r| r.refused.is_some());
+    // Gated on `hard_errors.is_empty()` too (round-14 Medium finding): a
+    // hard-errored generation might have left a PARTIAL `Data.db` on disk
+    // before failing (`exit_after_partial_failure`'s own doc names this —
+    // `SSTableWriter` opens `Data.db` lazily on the first `write_partition`
+    // and a later failure can still leave bytes behind), which `reports`
+    // cannot see at all since that generation produced no `SalvageReport`;
+    // claiming "no Data.db anywhere" without probing would be a guess, so
+    // fall through to `any_imperfect` (exit 3) instead whenever a hard
+    // error occurred, regardless of what the SUCCESSFUL reports say.
+    let all_refused = hard_errors.is_empty()
+        && !reports.is_empty()
+        && reports.iter().all(|r| r.refused.is_some());
     // roborev, issue #4196 (round-4 Medium, finding 5): a run where every
     // ATTEMPTED generation recovered cleanly but a SIBLING was never
     // attempted (an unparseable-generation skip) is NOT "every partition,
     // across every generation, recovered" — the documented exit-0 contract
     // above `execute_salvage_command` — so it must NOT read as exit 0.
-    let any_imperfect = reports.iter().any(report_is_imperfect) || !discovery.skipped.is_empty();
+    // `!hard_errors.is_empty()` (round-14 Medium finding) extends this the
+    // same way: a hard-errored sibling generation is every bit as much an
+    // imperfect run as a refused or lossy one.
+    let any_imperfect = reports.iter().any(report_is_imperfect)
+        || !discovery.skipped.is_empty()
+        || !hard_errors.is_empty();
     if all_refused {
         std::process::exit(2);
     }
@@ -277,6 +314,49 @@ fn report_is_imperfect(report: &SalvageReport) -> bool {
     report.refused.is_some()
         || !report.losses.is_empty()
         || report.partitions.recovered > report.partitions.written
+}
+
+/// Attach table-dir-level facts (a discovery skip, or an in-loop hard error
+/// from a SIBLING generation) to the FIRST report — factored out of
+/// `execute_salvage_command` (roborev, issue #4196, round-14 Medium finding)
+/// so the attachment logic is unit-testable directly against constructed
+/// `SalvageReport`/`SkippedInput` values, without a real fixture that can
+/// force a genuine hard I/O error out of `salvage_sstable`.
+///
+/// Both classes are facts about the TABLE DIR as a whole, not any one
+/// generation (round-13 Low finding's reasoning), so both attach to
+/// `reports[0]` only — never replicated across every report. A no-op when
+/// `reports` is empty (the caller is responsible for that case: with no
+/// report to attach to, `execute_salvage_command` falls back to
+/// `exit_after_partial_failure` instead of calling this at all).
+fn record_table_dir_level_findings(
+    reports: &mut [SalvageReport],
+    skipped: &[SkippedInput],
+    hard_errors: &[(PathBuf, String)],
+) {
+    let Some(first) = reports.first_mut() else {
+        return;
+    };
+    for s in skipped {
+        first.component_findings.push(ComponentFinding {
+            class: "SkippedInputGeneration".to_string(),
+            component: s.path.display().to_string(),
+            detail: format!(
+                "a published *-Data.db under the same table dir was never salvaged: {}",
+                s.reason
+            ),
+        });
+    }
+    for (path, reason) in hard_errors {
+        first.component_findings.push(ComponentFinding {
+            class: "SalvageGenerationFailed".to_string(),
+            component: path.display().to_string(),
+            detail: format!(
+                "salvage hard-errored for this generation (not a classified refusal — the \
+                 input itself, or the output writer, failed): {reason}"
+            ),
+        });
+    }
 }
 
 /// A post-write failure step — a LATER generation's `salvage_sstable` error,
@@ -569,10 +649,13 @@ fn render_console(reports: &[SalvageReport], args: &SalvageArgs, is_table_dir: b
 
 #[cfg(test)]
 mod tests {
-    use super::{out_dir_has_data_db, report_is_imperfect};
+    use super::{
+        out_dir_has_data_db, record_table_dir_level_findings, report_is_imperfect, SkippedInput,
+    };
     use cqlite_core::storage::write_engine::salvage::{
         PartitionTotals, Refusal, RefusalReason, SalvageReport,
     };
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     /// A minimal, otherwise-clean report — every test below overrides just
@@ -645,6 +728,63 @@ mod tests {
             written: 3,
         };
         assert!(!report_is_imperfect(&report));
+    }
+
+    /// roborev, issue #4196, round-14 Medium finding:
+    /// `record_table_dir_level_findings` attaches BOTH a discovery skip and
+    /// an in-loop hard error to the FIRST report only — never replicated
+    /// across every report (round-13 Low finding's reasoning applies to
+    /// both classes identically).
+    #[test]
+    fn record_table_dir_level_findings_attaches_to_first_report_only() {
+        let mut reports = vec![clean_report(), clean_report(), clean_report()];
+        let skipped = vec![SkippedInput {
+            path: PathBuf::from("/data/nb-abc-big-Data.db"),
+            reason: "unparseable generation number".to_string(),
+        }];
+        let hard_errors = vec![(
+            PathBuf::from("/data/nb-2-big-Data.db"),
+            "disk full".to_string(),
+        )];
+        record_table_dir_level_findings(&mut reports, &skipped, &hard_errors);
+
+        assert_eq!(reports[0].component_findings.len(), 2);
+        assert!(reports[0]
+            .component_findings
+            .iter()
+            .any(|f| f.class == "SkippedInputGeneration"
+                && f.component.contains("nb-abc-big-Data.db")));
+        assert!(reports[0]
+            .component_findings
+            .iter()
+            .any(|f| f.class == "SalvageGenerationFailed"
+                && f.component.contains("nb-2-big-Data.db")
+                && f.detail.contains("disk full")));
+        assert!(
+            reports[1].component_findings.is_empty(),
+            "the SECOND report must carry no findings — the fact belongs to the table dir, \
+             not this specific generation"
+        );
+        assert!(reports[2].component_findings.is_empty());
+    }
+
+    /// Calling with an empty `reports` slice is a documented no-op (the
+    /// caller is responsible for routing that case to
+    /// `exit_after_partial_failure` instead) — must not panic.
+    #[test]
+    fn record_table_dir_level_findings_on_empty_reports_is_a_no_op() {
+        let mut reports: Vec<SalvageReport> = Vec::new();
+        let hard_errors = vec![(PathBuf::from("/data/nb-1-big-Data.db"), "boom".to_string())];
+        record_table_dir_level_findings(&mut reports, &[], &hard_errors);
+        assert!(reports.is_empty());
+    }
+
+    /// No skips and no hard errors: the first report is left untouched.
+    #[test]
+    fn record_table_dir_level_findings_with_nothing_to_record_is_a_no_op() {
+        let mut reports = vec![clean_report()];
+        record_table_dir_level_findings(&mut reports, &[], &[]);
+        assert!(reports[0].component_findings.is_empty());
     }
 
     /// Roborev, issue #4196 (round-5 Medium finding 2): `out_dir_has_data_db`

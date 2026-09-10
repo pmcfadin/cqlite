@@ -1424,6 +1424,149 @@ absorb opportunistically — left as a follow-up matching epic #1116's
 existing "split, don't inline" doctrine, `CQLITE_ALLOW_FILE_GROWTH=1` used
 for this round's lite-gate run with this note as the required link.
 
+## Round 14, roborev job 3372 — 2 Medium + 3 Low found; both Medium fixed,
+## all 3 Low fixed
+
+Preceded by a gate-run correction unrelated to any finding: the round-13
+commit's own re-verification (`--lite` with `CQLITE_ALLOW_FILE_GROWTH=1`)
+surfaced a REAL bug the round-13 diff-scoped `cargo test` runs had not
+caught — `uncompressed_chunk_crc_flip_loses_exactly_the_intersecting_partitions`
+panicked (`read CRC.db: NotFound`) against the WORKTREE's own local
+`test-data/datasets` copy of `test_comp.uncompressed_table`, which is
+missing `nb-1-big-CRC.db` (a stale/incomplete worktree-local fixture set —
+CLAUDE.md's own "Test data in worktrees" note). Fixed:
+`clean_uncompressed_table_dir` (`support/salvage_corpus.rs`) now requires
+`nb-1-big-CRC.db` to actually exist before accepting a candidate root, so
+it skips cleanly rather than panics against an incomplete root. A second,
+pre-existing round-9 test (`index_entry_offset_past_eof_classifies_truncated`,
+untouched by round 13) failed the SAME way for the SAME root cause on a
+`CQLITE_DATASETS_ROOT`-unset lite run — resolved by exporting
+`CQLITE_DATASETS_ROOT` to the main checkout for the gate invocation itself,
+no source change needed for that one.
+
+- [x] Medium (finding 1): `uncompressed_chunk_preflight` returned
+      `data_length: total_scanned` (`0` for a zero-byte `Data.db`) WITHOUT
+      also zeroing `chunk_size` (sourced independently from `CRC.db`'s own
+      header, unconditionally `>= 4096` via `CrcDb::open`'s
+      `validate_chunk_size`) — the SAME data_length/chunk_size decoupling
+      round 12 already closed for the COMPRESSED sibling
+      (`compressed_chunk_preflight`/`CompressionInfo.data_length`), left
+      open in this branch. `recover.rs`'s per-entry loop guards
+      `chunks_for_range` on `chunk_size > 0` alone, so a real, positive
+      `chunk_size` alongside a `data_length == 0` (which disables the
+      `entry.data_offset >= data_length` short-circuit AND the
+      `chunk_range_end.min(data_length)` clamp) reinstates the exact
+      unbounded `chunks_for_range` materialization rounds 9-11 fixed, via a
+      FOURTH entry point their audits didn't separately enumerate. Fixed:
+      both fields now zero together whenever `total_scanned == 0`. NOT
+      independently fixture-tested end-to-end (an attempted
+      `implausible_zeroed_uncompressed_data_length_does_not_oom` in
+      `issue_4196_salvage_oom_bounds.rs` was WRITTEN, RUN, and DISCARDED —
+      it proved the scenario is actually UNREACHABLE via `salvage_sstable`'s
+      real call order: `open_reader`/`SSTableReader::open` runs BEFORE the
+      chunk pre-flight and itself requires at least 8 bytes to parse
+      Data.db's header-detection buffer, so a literal 0-byte `Data.db` is
+      refused with `ComponentUnreadable` before `uncompressed_chunk_preflight`
+      is ever called — measured directly, not assumed). Verified instead
+      with a DIRECT unit test of the function itself
+      (`zero_byte_data_db_zeroes_chunk_size_too` +
+      `non_empty_data_db_keeps_the_real_chunk_size`, both in `chunks.rs`'s
+      own `#[cfg(test)]` module, calling the `pub(super)` function
+      directly, bypassing `SSTableReader::open` entirely) — defense-in-depth
+      against this call order ever changing, and the function's own
+      documented "`0` when unknown" contract must be internally consistent
+      regardless of who currently enforces it.
+- [x] Medium (finding 2): a hard `Err` from ONE generation's
+      `salvage_sstable` (the residual, already-declared
+      `write_partition`/`finish()` I/O-failure gap from round 12's PR-body
+      notes) called `exit_after_partial_failure` (`-> !`) IMMEDIATELY —
+      every REMAINING generation in the table dir was never even attempted,
+      and unlike a discovery-level skip (named, printed, recorded in the
+      manifest), those generations appeared NOWHERE in the manifest at all,
+      contradicting the skip path's own "other generations are still
+      salvaged" promise. Fixed: the per-generation loop now records
+      `(path, reason)` into a new `hard_errors` list and `continue`s instead
+      of exiting — every generation is attempted regardless of an earlier
+      one's hard error. After the loop: if `reports` ended up non-empty,
+      both discovery skips AND hard errors attach to `reports[0]` as
+      component findings (`SkippedInputGeneration` / a new
+      `SalvageGenerationFailed` class — factored into a new, directly
+      unit-tested `record_table_dir_level_findings`, mirroring round-13's
+      `report_is_imperfect` factoring, since forcing a genuine hard I/O
+      error out of `salvage_sstable` end-to-end needs disk-full/permission
+      simulation this suite does not have); if `reports` is EMPTY (every
+      generation hard-errored), falls through to the EXACT pre-round-14
+      `exit_after_partial_failure` behavior (probe `--out`, decide exit 1
+      vs 3), just reached after the loop instead of on the first failure.
+      `any_imperfect`/`all_refused` extended: `all_refused` (exit 2, "no
+      Data.db anywhere") is now additionally gated on `hard_errors.is_empty()`
+      — a hard-errored generation might have left a PARTIAL `Data.db` on
+      disk before failing (`exit_after_partial_failure`'s own doc names
+      this), which `reports` cannot see at all, so claiming "no Data.db
+      anywhere" without probing would be a guess; falls through to
+      `any_imperfect` (exit 3) instead whenever a hard error occurred.
+      3 new unit tests for `record_table_dir_level_findings`
+      (attaches-to-first-report-only; no-op on empty reports; no-op when
+      nothing to record). All 9 existing `salvage_cli_tests` pass
+      unchanged (none of them exercise the in-loop hard-error path, which
+      remains — like round 12's identical `write_partition`/`finish()` gap
+      — a declared, not a fabricated-fixture-tested, gap for the TRIGGER
+      side; this fix's own HANDLING logic is directly unit-tested).
+- [x] Low (finding 1): `test_salvage_no_resync_scan.sh` printed `ok` when
+      `hits == 0`, including when `find` matched zero production `.rs`
+      files (or every file was excluded by the `*/tests/*` filter) — a
+      merge-blocking gate component that scanned nothing read identically
+      to one that scanned everything and found nothing. Fixed: count
+      scanned (non-excluded) files, `FAIL` with a named cause when the
+      count is `0`, and print the census (`N production file(s) scanned, 0
+      ... hit(s) RECOGNISED`) on success.
+- [x] Low (finding 2): the `ChunkDecompressionError` summary detail always
+      read `"{n} of {m} chunk(s) failed inline CRC32 validation"`, but
+      `bad_chunks` also holds chunks rejected by the round-11 plausibility
+      pre-check (deliberately never read) — the count and the claim
+      disagreed for exactly the corruption class the pre-check exists for
+      (an implausible-offset `CompressionInfo.db` reading as a `Data.db`
+      bit-rot problem). Fixed: track `implausible_count`/`crc_failure_count`
+      separately; reworded to `"N chunk(s) untrustworthy (M CRC failure(s),
+      K implausible framing)"`. Strengthened
+      `implausible_chunk_offset_table_does_not_oom` (already constructs
+      exactly this all-implausible scenario) with new assertions: the old
+      wording must not reappear, the CRC-failure count must read `0`, the
+      implausible-framing count must be non-zero.
+- [x] Low (finding 3): `issue_4196_salvage_corruption_corpus.rs`'s new
+      round-13 uncompressed-CRC test bound `out_root` from a `TempDir`
+      dropped at the end of its own statement (a temporary) — the directory
+      was removed before `out_root` was ever used, `SSTableWriter`
+      recreates it via `create_dir_all`, and nothing then cleans it up
+      (orphaned under `/tmp` on every run, unlike every sibling test in
+      this file, which all bind their `TempDir` to a local first). Fixed:
+      bound to `out_temp` first, matching the established pattern.
+
+Re-verified after all fixes: `cargo fmt` clean (`cqlite-core`, `cqlite-cli`);
+`cargo clippy -p cqlite-core --lib --features write-support` clean; `cargo
+clippy -p cqlite-core --test issue_4196_salvage_corruption_corpus --test
+issue_4196_salvage_oom_bounds --features write-support` clean; `cargo
+clippy -p cqlite-cli --lib --bins --test salvage_cli_tests --features
+write-support` clean; all four salvage `cqlite-core` `--test` targets pass
+against the real corpus (corruption-corpus 8, oom-bounds 5 — +2 new unit
+tests in `chunks.rs`'s own module, healthy-parity 4, atomicity 1);
+`cqlite-cli` `commands::salvage::` unit tests 12 (was 9; +3 new); CLI
+integration `salvage_cli_tests` 9/9 unchanged; `test_salvage_no_resync_scan.sh`
+passes with the new census line.
+
+**File-size ratchet**: `cqlite-cli/src/commands/salvage.rs` crosses the
+~800-line source threshold for the FIRST time this round (693 -> 833 —
+the `report_is_imperfect`/`record_table_dir_level_findings` factoring plus
+their unit tests), joining the ALREADY-over-threshold set this PR's file-size
+component has carried since round 13 (`write.rs`, `main.rs`,
+`data_access/mod.rs`, `reader/mod.rs`, `write_engine/merge/mod.rs`,
+`write_engine/mod.rs` — none touched this round, all pre-existing branch
+growth vs `origin/main`). `CQLITE_ALLOW_FILE_GROWTH=1` (epic #1116) is
+required for this round's lite-gate run; splitting `salvage.rs` is real,
+separable follow-up scope (it holds the entire CLI verb: discovery,
+exit-code selection, manifest rendering, table-name derivation) that a
+findings-fix round should not absorb opportunistically mid-fix.
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree

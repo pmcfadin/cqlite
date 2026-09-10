@@ -66,6 +66,16 @@ pub(super) fn compressed_chunk_preflight(
 
     let mut bad_chunks = BTreeSet::new();
     let mut first_detail: Option<String> = None;
+    // roborev, issue #4196, round-14 Low finding: the summary below used to
+    // report every entry in `bad_chunks` as a CRC32 validation failure, but
+    // the round-11 plausibility pre-check below can ALSO add to
+    // `bad_chunks` for chunks that were deliberately NEVER READ (their own
+    // framing is already nonsensical) — count the two causes separately so
+    // the summary's claim matches what actually happened for each chunk
+    // (an implausible-offset `CompressionInfo.db` must not read as a CRC/
+    // bit-rot problem in `Data.db`).
+    let mut implausible_count: u64 = 0;
+    let mut crc_failure_count: u64 = 0;
     for i in 0..chunk_reader.chunk_count() {
         // roborev, issue #4196, round-11 Medium finding: `ChunkReader::read_chunk`
         // sizes its allocation as `compressed_chunk_size(i, total_size)` —
@@ -96,6 +106,7 @@ pub(super) fn compressed_chunk_preflight(
         };
         if !plausible {
             bad_chunks.insert(i as u64);
+            implausible_count += 1;
             if first_detail.is_none() {
                 first_detail = Some(format!(
                     "chunk {i}: declared chunk offset/size exceeds Data.db's real length \
@@ -106,6 +117,7 @@ pub(super) fn compressed_chunk_preflight(
         }
         if let Err(e) = chunk_reader.read_chunk(i) {
             bad_chunks.insert(i as u64);
+            crc_failure_count += 1;
             if first_detail.is_none() {
                 first_detail = Some(format!("chunk {i}: {e}"));
             }
@@ -116,7 +128,8 @@ pub(super) fn compressed_chunk_preflight(
         class: "ChunkDecompressionError".to_string(),
         component: "Data.db".to_string(),
         detail: format!(
-            "{} of {} chunk(s) failed inline CRC32 validation; first: {detail}",
+            "{} of {} chunk(s) untrustworthy ({crc_failure_count} CRC failure(s), \
+             {implausible_count} implausible framing); first: {detail}",
             bad_chunks.len(),
             chunk_reader.chunk_count()
         ),
@@ -306,17 +319,118 @@ pub(super) async fn uncompressed_chunk_preflight(
         ),
     });
 
+    // roborev, issue #4196, round-14 Medium finding: `total_scanned == 0`
+    // (an uncompressed `Data.db` truncated to zero bytes) must report
+    // `chunk_size: 0` ALONGSIDE `data_length: 0` — round 12 fixed exactly
+    // this class for the COMPRESSED branch (a zeroed `data_length` with a
+    // non-zero `chunk_size`/`chunk_table_bound` silently disables both of
+    // `recover.rs`'s OOM/plausibility guards, which are keyed on
+    // `data_length > 0`), and it applied only there. `CrcDb::open` enforces
+    // `chunk_size >= 4096` unconditionally, so without this a zero-byte
+    // `Data.db` with an intact `CRC.db` and a corrupt `Index.db` offset
+    // reaches `chunks_for_range` with a raw, unvalidated `end_bound`.
+    let (chunk_size, data_length) = if total_scanned == 0 {
+        (0, 0)
+    } else {
+        (chunk_size, total_scanned)
+    };
+
     Ok(ChunkPreflight {
         bad_chunks,
         finding,
         chunk_size,
-        data_length: total_scanned,
+        data_length,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::chunks_for_range;
+    use super::{chunks_for_range, uncompressed_chunk_preflight};
+
+    /// roborev, issue #4196, round-14 Medium finding: a zero-byte `Data.db`
+    /// (`total_scanned == 0`) must return `chunk_size: 0` ALONGSIDE
+    /// `data_length: 0` — not a real, positive `chunk_size` sourced
+    /// independently from `CRC.db`'s own header while `data_length` reads
+    /// the "unmeasurable" sentinel. Both fields must move together so a
+    /// caller keying an OOM/plausibility guard on `data_length > 0` (as
+    /// `recover.rs` does) is NEVER left with a real `chunk_size` and a
+    /// disabled clamp at the same time — the exact decoupling round 12
+    /// already closed for the COMPRESSED sibling
+    /// (`compressed_chunk_preflight`/`CompressionInfo.data_length`).
+    ///
+    /// Called DIRECTLY (this function is `pub(super)`, reachable from this
+    /// module's own test) rather than through a `salvage_sstable(..)`
+    /// fixture: `SSTableReader::open` itself requires at least 8 bytes to
+    /// parse Data.db's header-detection buffer, so `recover.rs`'s real call
+    /// order (`open_reader` before this pre-flight — see
+    /// `salvage_sstable`'s own comment on that ordering) makes a literal
+    /// 0-byte `Data.db` UNREACHABLE via the end-to-end CLI path today; the
+    /// underlying invariant this function must hold is still worth fixing
+    /// and guarding directly, both as defense-in-depth against that call
+    /// order ever changing and because the function's own documented
+    /// contract ("`0` when unknown") must be internally consistent
+    /// regardless of who currently enforces it.
+    #[tokio::test]
+    async fn zero_byte_data_db_zeroes_chunk_size_too() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let data_path = temp.path().join("nb-1-big-Data.db");
+        std::fs::write(&data_path, []).expect("write zero-byte Data.db");
+        let crc_path = temp.path().join("nb-1-big-CRC.db");
+        // A real, positive chunk_size header (64 KiB, Cassandra's default) —
+        // zero trailing CRC entries, matching a genuinely 0-byte `data_len`
+        // (mirrors a real `CrcDb::open(..., data_len: 0)` call, whose
+        // `max_len` bound is exactly this: header only, `n_chunks == 0`).
+        std::fs::write(&crc_path, 65536i32.to_be_bytes()).expect("write CRC.db header");
+
+        let preflight = uncompressed_chunk_preflight(&data_path, &crc_path, 0)
+            .await
+            .expect("a well-formed (if empty) Data.db/CRC.db pair must not error");
+
+        assert_eq!(
+            preflight.data_length, 0,
+            "a zero-byte Data.db must report data_length: 0"
+        );
+        assert_eq!(
+            preflight.chunk_size, 0,
+            "chunk_size must be zeroed ALONGSIDE data_length — a real, positive chunk_size \
+             here (sourced independently from CRC.db's header) would let a caller keyed on \
+             `data_length > 0` alone believe chunking is unknown/disabled while chunk_size \
+             still passes a `chunk_size > 0` gate, exactly the decoupling this fix closes"
+        );
+        assert!(
+            preflight.bad_chunks.is_empty(),
+            "a genuinely empty file has no chunks to flag either way"
+        );
+    }
+
+    /// The healthy control for the test above: a NON-empty, matching
+    /// Data.db/CRC.db pair (one full chunk, no corruption) reports the
+    /// REAL positive `chunk_size` and `data_length` — proving the zero-
+    /// fallback above is keyed on `total_scanned == 0` specifically, not on
+    /// something that also (wrongly) zeroes a legitimate small file.
+    #[tokio::test]
+    async fn non_empty_data_db_keeps_the_real_chunk_size() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let data_path = temp.path().join("nb-1-big-Data.db");
+        let payload = vec![0xABu8; 100];
+        std::fs::write(&data_path, &payload).expect("write Data.db");
+        let crc_path = temp.path().join("nb-1-big-CRC.db");
+        let mut crc_bytes = Vec::new();
+        crc_bytes.extend_from_slice(&65536i32.to_be_bytes());
+        crc_bytes.extend_from_slice(&crc32fast::hash(&payload).to_be_bytes());
+        std::fs::write(&crc_path, &crc_bytes).expect("write CRC.db");
+
+        let preflight = uncompressed_chunk_preflight(&data_path, &crc_path, 0)
+            .await
+            .expect("a well-formed Data.db/CRC.db pair must not error");
+
+        assert_eq!(preflight.data_length, 100);
+        assert_eq!(preflight.chunk_size, 65536);
+        assert!(
+            preflight.bad_chunks.is_empty(),
+            "the CRC matches the real payload — nothing should be flagged"
+        );
+    }
 
     /// The common case: an offset and end within one chunk name that one
     /// chunk alone.

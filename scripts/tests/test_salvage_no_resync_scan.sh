@@ -41,12 +41,24 @@ fi
 PATTERNS=("memchr" ".windows(" "find(|" "position(|")
 
 hits=0
+# roborev, issue #4196, round-14 Low finding: count SCANNED (non-excluded)
+# files and require at least one — without this, a guard that matched
+# `find ... -name '*.rs'` against a directory holding only excluded
+# (`*/tests/*`) files, or none at all (a future reorganization leaving only
+# a re-exporting mod.rs under a moved-out production tree), printed the
+# SAME "ok" a genuinely swept-and-clean run does. A merge-blocking gate
+# component that scanned nothing must not read identically to one that
+# scanned everything and found nothing (the affirmative-zero property this
+# change already enforces everywhere else — `losses: 0 RECOGNISED`,
+# `component findings: 0 RECOGNISED`).
+scanned=0
 while IFS= read -r -d '' file; do
   # Exclude test code: any file under a `tests/` path component (unit tests
   # may legitimately use these primitives to build/verify fixtures).
   case "$file" in
     */tests/*) continue ;;
   esac
+  scanned=$((scanned + 1))
   # Track whether the current line is inside a `#[cfg(test)]` module via
   # brace depth from the attribute onward — a lightweight substitute for a
   # real Rust parser, sufficient for excluding an in-file test module.
@@ -95,10 +107,18 @@ while IFS= read -r -d '' file; do
   fi
 done < <(find "$SALVAGE_DIR" -name '*.rs' -print0)
 
+if [ "$scanned" -eq 0 ]; then
+  echo "FAIL - 0 production .rs file(s) scanned under $SALVAGE_DIR (every *.rs found was under \
+a */tests/* path, or none exist) — a guard that scanned nothing cannot certify a 'no \
+byte-pattern search primitive' verdict; this is a REFUSAL, not a pass"
+  exit 1
+fi
+
 if [ "$hits" -gt 0 ]; then
   echo "FAIL - $hits byte-pattern-search hit(s) found in $SALVAGE_DIR outside tests (spec R4.3)"
   exit 1
 fi
 
-echo "ok   - no byte-pattern search primitive in $SALVAGE_DIR outside tests (spec R4.3)"
+echo "ok   - $scanned production file(s) scanned, 0 byte-pattern-search hit(s) RECOGNISED in \
+$SALVAGE_DIR outside tests (spec R4.3)"
 exit 0
