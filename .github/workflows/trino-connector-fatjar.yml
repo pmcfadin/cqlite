@@ -97,6 +97,50 @@ on:
 permissions:
   contents: read
 
+# ---------------------------------------------------------------------------
+# SERIALIZE BY PUBLICATION TARGET (issue #2869)
+# ---------------------------------------------------------------------------
+# The jar and its `.sha256` sidecar are SEPARATE uploads to a MUTABLE target, so
+# two runs aiming at the same asset can interleave and publish a mismatched pair
+# — jar from build N, sidecar from build N+1. A consumer then either verifies
+# successfully against the wrong digest or fails verification on a jar that is
+# fine. The post-upload digest check below cannot catch it: it compares the
+# served bytes against the digest THIS run built, so an interleaved run passes
+# its own check while the published pair is inconsistent. Repeated dev
+# dispatches are the EXPECTED usage (one mutable tag, re-uploaded per build), so
+# this is routine, not a corner case.
+#
+# The key is the PUBLICATION TARGET — the thing that names the asset — and NOT
+# `github.ref`. A dispatch's `github.ref` is the default branch for every dev
+# build, which would both serialize unrelated versions and, worse, FAIL to
+# serialize two same-version runs launched from different refs.
+#
+# `concurrency` cannot read `steps.*`, so the target is re-derived here from the
+# contexts it CAN read (`github`, `inputs`) — the same three cases the resolve
+# step computes:
+#   push v*          -> github.ref_name            (e.g. `v0.17.0`)
+#   dispatch release -> `v<inputs.version>`        (equal to the push key above,
+#                       so a tag push and a channel=release backfill for the same
+#                       version SERIALIZE against each other)
+#   dispatch dev     -> `trino-connector-dev-<inputs.version>`
+# The dev key carries the version because that channel is ONE mutable tag holding
+# many version-stamped assets: two dev builds at DIFFERENT versions touch
+# different assets and must not block each other, while two at the SAME version
+# must. If this expression and the resolve step ever disagree, the resolve step
+# is authoritative for what gets published and this key is authoritative for what
+# serializes — keep them in step.
+#
+# QUEUE, NEVER CANCEL. `cancel-in-progress: true` would be actively harmful here:
+# cancelling mid-upload is how you GET the mismatched pair this exists to
+# prevent, since a cancelled run may have uploaded the jar and not the sidecar.
+# Caveat worth knowing: GitHub keeps at most ONE pending run per group, so a
+# third run supersedes the queued second. That is safe — a superseded PENDING run
+# has uploaded nothing; the IN-PROGRESS run is never interrupted, which is the
+# property that matters.
+concurrency:
+  group: trino-connector-fatjar-${{ github.event_name != 'workflow_dispatch' && github.ref_name || (inputs.channel == 'dev' && format('trino-connector-dev-{0}', inputs.version) || format('v{0}', inputs.version)) }}
+  cancel-in-progress: false
+
 jobs:
   # Shared release-train preflight (issue #2652): assert the release tag agrees
   # with EVERY Rust/Python/Node manifest. Only a v* tag push has a ref-derived
