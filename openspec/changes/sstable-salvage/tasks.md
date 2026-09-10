@@ -1567,6 +1567,62 @@ separable follow-up scope (it holds the entire CLI verb: discovery,
 exit-code selection, manifest rendering, table-name derivation) that a
 findings-fix round should not absorb opportunistically mid-fix.
 
+## Round 15 pre-work — split the newly-over-threshold `salvage.rs` BEFORE
+## the audit-batch fix round (lead instruction), while a whole-module Opus
+## audit runs against HEAD `cd339b1ba` in parallel
+
+`cqlite-cli/src/commands/salvage.rs` crossed the ~800-line source threshold
+at round 14 (693 -> 833) — since this PR CREATED the file, the
+`CQLITE_ALLOW_FILE_GROWTH=1` opt-out (reserved for pre-existing files, per
+lead ruling) does not apply to it; split now rather than carry it under an
+opt-out.
+
+- [x] Split into THREE files under `commands/salvage/`, a pure move (no
+      behavior changed):
+      - `mod.rs` (312 lines): `execute_salvage_command` — the exit-code
+        contract doc comment and the whole per-generation loop — plus the
+        `mod discovery; mod report;` wiring.
+      - `discovery.rs` (148 lines, NEW): `SkippedInput`, `SalvageDiscovery`,
+        `discover_salvage_inputs`, `table_name_from_input`,
+        `is_table_id_suffix` — resolving `args.input` into the generations
+        to salvage and deriving a target table name.
+      - `report.rs` (409 lines, NEW): `report_is_imperfect`,
+        `record_table_dir_level_findings`, `exit_after_partial_failure`,
+        `out_dir_has_data_db`, `manifest_json`, `write_manifest_file`,
+        `render_console` — the exit-code predicate, table-dir-level finding
+        attachment, and JSON/text manifest rendering — plus the WHOLE
+        existing `#[cfg(test)]` module (12 tests; all of them test
+        functions that now live in this file).
+      Cross-module items made `pub(super)` (visible within `salvage/`
+      only): `SkippedInput`/`SalvageDiscovery` (discovery.rs, consumed by
+      both `mod.rs` and `report.rs`'s `record_table_dir_level_findings`
+      signature), `discover_salvage_inputs`/`table_name_from_input`
+      (discovery.rs, consumed by `mod.rs`),
+      `exit_after_partial_failure`/`record_table_dir_level_findings`/
+      `write_manifest_file`/`render_console`/`report_is_imperfect`
+      (report.rs, consumed by `mod.rs`). `is_table_id_suffix`,
+      `out_dir_has_data_db`, `manifest_json` stayed module-private (used
+      only within their own file).
+      `mod salvage;` in `commands/mod.rs` needed NO change — `salvage.rs` ->
+      `salvage/mod.rs` resolves identically.
+- [x] Confirmed the test COUNT is preserved exactly: 12 tests before the
+      split (all in `salvage.rs`) -> 12 in `salvage/report.rs` after (all
+      now under `commands::salvage::report::tests::` instead of
+      `commands::salvage::tests::`) — no test lost, none duplicated.
+
+Verified with `--locked` (read-only audit was reading the tree concurrently,
+so no `cargo` run here may rewrite `Cargo.lock`, and no reformat sweep
+outside the 3 split files): `cargo check --locked -p cqlite-cli --features
+write-support --lib --bins` clean; `cargo clippy --locked -p cqlite-cli
+--lib --bins --test salvage_cli_tests --features write-support -- -D
+warnings` clean; `cargo test --locked -p cqlite-cli --lib --features
+write-support commands::salvage::` 12 passed (unchanged); `cargo test
+--locked -p cqlite-cli --test salvage_cli_tests --features write-support` 9
+passed (unchanged); `rustfmt --check` on all 3 new files: already
+correctly formatted, no sweep needed. All three new files individually
+well under the ~800-line threshold (312 / 148 / 409) — no
+`CQLITE_ALLOW_FILE_GROWTH=1` needed for this file going forward.
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree
