@@ -259,6 +259,9 @@ impl StorageEngine {
         if !partition_access::enabled() {
             return None;
         }
+        // Deliberately the UNCHECKED resolver (#4159): this is INSTRUMENTATION —
+        // it prices an access, returns no rows to any caller, and the read it is
+        // attached to resolves through `resolve_readers_checked` itself.
         let (readers, _fully_qualified_match) =
             self.sstables.resolve_reader_snapshot(table_id).await;
         Some(readers)

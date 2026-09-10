@@ -340,6 +340,20 @@ impl StorageEngine {
         self.sstables.refresh_tables().await
     }
 
+    /// Tell this engine that the discovery which produced its table-directory list
+    /// was INCOMPLETE (issue #4159).
+    ///
+    /// See [`Database::note_incomplete_discovery`](crate::Database::note_incomplete_discovery).
+    pub async fn note_incomplete_discovery(
+        &self,
+        directory: std::path::PathBuf,
+        cause: crate::Error,
+    ) {
+        self.sstables
+            .note_incomplete_discovery(directory, cause)
+            .await
+    }
+
     /// Delete a key
     ///
     /// NOTE: Write functionality removed in Issue #175 (WAL/MemTable infrastructure deleted).

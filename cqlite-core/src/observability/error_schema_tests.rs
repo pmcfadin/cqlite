@@ -424,6 +424,24 @@ fn error_samples() -> Vec<Error> {
         Error::Corruption("c".into()),
         // Issue #3721: a per-column decode failure, wrapping its underlying cause.
         Error::column_decode("col", "int", 0, Error::Corruption("c".into())),
+        // Issue #4159: an SSTable whose open REFUSED, carrying that refusal.
+        Error::unreadable_sstable(
+            "ks.t",
+            "/d/ks/t-1/nb-1-big-Data.db",
+            1,
+            std::sync::Arc::new(Error::Corruption("c".into())),
+        ),
+        // Issue #4159: discovery could not read a directory, so a table it did not
+        // find cannot be reported as absent.
+        Error::incomplete_discovery(
+            "ks.t",
+            "/d/lost+found",
+            1,
+            std::sync::Arc::new(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "denied",
+            ))),
+        ),
         Error::Schema("s".into()),
         Error::CqlParse("q".into()),
         Error::InvalidFormat("f".into()),
@@ -810,6 +828,39 @@ fn independent_expectations() -> Vec<(Error, ObsErrorCategory)> {
         (
             Error::column_decode("col", "int", 0, Error::corruption("c")),
             Corruption,
+        ),
+        // Issue #4159: an SSTable that could not be OPENED is undecodable data at
+        // FILE granularity — the same operator signal as `ColumnDecode` one level
+        // up, so it joins the corruption bucket. Deliberately NOT `Storage` (the
+        // storage layer is fine; the file's contents are not), NOT `Parsing` (the
+        // dashboard an operator watches for bit-rot is the corruption one) and never
+        // `Other`, which is where an unclassified variant would silently land.
+        (
+            Error::unreadable_sstable(
+                "ks.t",
+                "/d/ks/t-1/nb-1-big-Data.db",
+                1,
+                std::sync::Arc::new(Error::corruption("c")),
+            ),
+            Corruption,
+        ),
+        // Issue #4159: an unreadable DIRECTORY is `Io`, NOT `Corruption` — and the
+        // contrast with the row directly above is the point. Nothing here is
+        // undecodable: every file is intact and the walk simply could not enter a
+        // directory. The operator's remedy is a permissions or mount fix, so it
+        // belongs on the I/O dashboard; routing it to `Corruption` would put a
+        // `chmod` problem on the bit-rot alert. Never `Other`.
+        (
+            Error::incomplete_discovery(
+                "ks.t",
+                "/d/lost+found",
+                1,
+                std::sync::Arc::new(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "denied",
+                ))),
+            ),
+            Io,
         ),
         (Error::schema("s"), Schema),
         (Error::Table("t".into()), Schema),

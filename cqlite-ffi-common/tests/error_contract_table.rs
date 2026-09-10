@@ -154,9 +154,19 @@ fn query_timeout_shares_the_timeout_identity_on_both_surfaces() {
 /// together with the table.
 #[test]
 fn row_count_is_pinned() {
+    // 41 since issue #4159 added TWO rows (39 before):
+    //
+    //   * `UnreadableSSTable` — reviewed as the same `Corruption`/`ColumnDecode` row
+    //     on every axis (undecodable data reaching a caller, at FILE granularity),
+    //     so no binding consumer needs a new branch;
+    //   * `IncompleteDiscovery` — deliberately NOT that row. Nothing is undecodable:
+    //     every file is fine and the walk simply could not read a directory. It is
+    //     an environmental I/O condition, so it takes the `Io` row (`code: "IO"`,
+    //     `category: System`, `recoverable: true`), matching `Error::category()` and
+    //     `Error::is_recoverable()` for the variant.
     assert_eq!(
         FfiErrorVariant::ALL.len(),
-        39,
+        41,
         "contract row count changed — review the new row's py_class/node_code \
          and update this pin"
     );
@@ -175,6 +185,81 @@ fn cql_parse_row_is_parse_error_and_real_parse_code() {
     // category(). `PARSE` is now a real CQL parse failure in BOTH bindings.
     assert_eq!(row.node_code, "PARSE");
     assert_eq!(row.category, ErrorCategory::Query);
+    assert!(!row.recoverable);
+    assert_eq!(row.message_prefix, Some("ParseError"));
+}
+
+/// Issue #4159: `IncompleteDiscovery` is the I/O identity on BOTH surfaces.
+///
+/// # Why this reads `contract_for` and not a restatement
+///
+/// Both bindings map through `contract_for(..).py_class` in PRODUCTION, and each
+/// keeps a hand-written restatement (`expected_py_class` / `expected_node_code`)
+/// that its own suite reconciles against the real table — the correct two-oracle
+/// shape. But the PYTHON half of that reconciliation, `test_error_mapping_completeness`
+/// in `bindings/python/src/error.rs`, **cannot link in the gate**: a pyo3
+/// extension-module build has no libpython, so `cargo test -p cqlite-py --lib`
+/// fails with `undefined symbol: PyExc_*` before a single test runs. The one check
+/// that would have caught this row therefore never executes.
+///
+/// That is how this row shipped as `py: Cqlite` with `code: "IO"` — internally
+/// contradictory, and contradicting both the binding's own documented table and its
+/// (unrunnable) test. This assertion lives in `cqlite-ffi-common`, which has no
+/// Python link dependency and DOES run, so the row is pinned somewhere that
+/// executes.
+///
+/// Note the row cannot be pinned by a blanket `code == "IO" => py == Io` invariant:
+/// `InvalidPath` is deliberately `code: "IO"` with `py: Cqlite`, so the columns are
+/// genuinely independent and each row has to be stated.
+#[test]
+fn incomplete_discovery_row_is_the_io_identity_on_both_surfaces() {
+    let row = row_of(&Error::incomplete_discovery(
+        "ks.t",
+        "/d/lost+found",
+        1,
+        std::sync::Arc::new(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "denied",
+        ))),
+    ));
+    assert_eq!(row.variant, "IncompleteDiscovery");
+    // An unreadable DIRECTORY is not undecodable data — every file is intact and
+    // the walk simply could not enter a directory. The remedy is a permissions or
+    // mount fix, so it is the I/O identity, NOT its sibling `UnreadableSSTable`'s
+    // parse identity.
+    assert_eq!(
+        row.py_class,
+        PyExceptionClass::Io,
+        "the Python binding must raise IOError, which is what its own documented \
+         table and `expected_py_class` both state"
+    );
+    assert_eq!(row.node_code, "IO");
+    assert_eq!(row.category, ErrorCategory::System);
+    // Environmental, unlike `UnreadableSSTable`: a remount or a chmod makes the
+    // next discovery complete. Matches `Error::is_recoverable()` for the variant.
+    assert!(row.recoverable);
+    assert_eq!(row.message_prefix, Some("IoError"));
+}
+
+/// Issue #4159's OTHER new variant, pinned in the same runnable place.
+///
+/// Mapped by hand at the same time as `IncompleteDiscovery` and therefore under the
+/// same suspicion. It is `Cqlite`/`PARSE` — the `Corruption`/`ColumnDecode` identity
+/// one granularity up (a whole file rather than one cell) — and deliberately NOT the
+/// I/O identity: an SSTable whose open refused IS undecodable data reaching a
+/// caller, and its bytes do not change on a retry.
+#[test]
+fn unreadable_sstable_row_is_the_parse_identity_on_both_surfaces() {
+    let row = row_of(&Error::unreadable_sstable(
+        "ks.t",
+        "/d/ks/t-1/nb-1-big-Data.db",
+        1,
+        std::sync::Arc::new(Error::corruption("open refused")),
+    ));
+    assert_eq!(row.variant, "UnreadableSSTable");
+    assert_eq!(row.py_class, PyExceptionClass::Cqlite);
+    assert_eq!(row.node_code, "PARSE");
+    assert_eq!(row.category, ErrorCategory::Data);
     assert!(!row.recoverable);
     assert_eq!(row.message_prefix, Some("ParseError"));
 }

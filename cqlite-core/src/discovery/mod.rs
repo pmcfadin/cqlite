@@ -4,9 +4,11 @@
 //! computing schema coverage, and generating coverage badges for status reporting.
 
 pub mod coverage;
+pub mod scan_gap;
 pub mod scanner;
 pub mod service;
 
 pub use coverage::{CoverageBadge, CoverageCalculator, CoverageInfo};
+pub use scan_gap::UnreadableDirectory;
 pub use scanner::{KeyspaceInfo, ScanResult, Scanner, TableInfo};
 pub use service::{DiscoveryService, DiscoverySummary};

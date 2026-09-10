@@ -2,9 +2,48 @@
 //!
 //! This module provides functionality for scanning a Cassandra data directory
 //! and discovering SSTables, keyspaces, and tables.
+//!
+//! # An unreadable directory is REPORTED, never swallowed and never fatal (#4159)
+//!
+//! [`Scanner::scan`] used to swallow every filesystem error below the top-level
+//! `read_dir`: `if let Ok(table_entries) = read_dir(..)` with no `else`,
+//! `entries.flatten()` over a `ReadDir` (whose items are `io::Result<DirEntry>`, so
+//! `Iterator::flatten` drops each `Err` with no log at all), and
+//! `entry.path().is_dir()` (which answers `false` for a directory it could not
+//! `stat`). The observable results were: an unreadable KEYSPACE contributed zero
+//! tables and was indistinguishable from an empty keyspace; an unreadable TABLE
+//! directory was still reported with `sstable_count: 0`; and an entry that errored
+//! mid-iteration silently never existed.
+//!
+//! That is the issue #4159 defect one layer out from the manager — the discovery
+//! leg. `DiscoveryService::scan` propagates only the top-level `Error::Io`, so none
+//! of those ever reached a `?`, and a caller that then opened the reported (short)
+//! table set got a successful, silently incomplete answer.
+//!
+//! Making each of those `?` instead was the opposite error: one inaccessible
+//! directory then failed the WHOLE scan, and a root-owned `lost+found` at mode 0700
+//! — present on essentially every ext4 data volume — would make discovery
+//! impossible on the commonest real layout. So each read below the top level
+//! RECORDS what it could not see into [`ScanResult::unreadable_dirs`] and carries
+//! on, preserving the [`std::io::ErrorKind`] so `PermissionDenied` stays
+//! distinguishable from `NotFound`.
+//!
+//! The one read that still propagates is the TOP-LEVEL `data_dir`: that path is the
+//! caller's own argument, an unreadable one makes every possible answer empty, and
+//! a direct error is the actionable answer there.
+//!
+//! **A recorded gap is not a logged gap.** `unreadable_dirs` is carried into
+//! [`DiscoverySummary`](crate::discovery::DiscoverySummary), rendered by its
+//! `summary_text()`, and — via `Database::note_incomplete_discovery` — seeded into
+//! the `SSTableManager` that the discovered directories are opened with, so a query
+//! for a table this scan could not enumerate fails closed with
+//! [`Error::IncompleteDiscovery`] instead of answering an empty success.
 
 use std::path::{Path, PathBuf};
 
+use super::scan_gap::{
+    dir_entry_named, entry_is_dir, kind_of, note_unreadable, read_dir_named, UnreadableDirectory,
+};
 use crate::error::{Error, Result};
 
 /// Keyspace information
@@ -44,6 +83,12 @@ pub struct ScanResult {
     pub keyspace_info: Vec<KeyspaceInfo>,
     /// Warnings about potential issues with the directory structure
     pub warnings: Vec<String>,
+    /// Directories the scan could NOT read (issue #4159).
+    ///
+    /// Non-empty means this result is INCOMPLETE: the keyspace/table lists are what
+    /// was reachable, not what exists. A caller that reports absence — or opens the
+    /// listed directories and then answers queries — must fail closed on this.
+    pub unreadable_dirs: Vec<UnreadableDirectory>,
 }
 
 /// Check if a directory name has the expected Cassandra table format (name-uuid)
@@ -95,22 +140,32 @@ impl Scanner {
         let mut tables = Vec::new();
         let mut sstable_count = 0;
         let mut keyspace_info = Vec::new();
+        let mut unreadable_dirs: Vec<UnreadableDirectory> = Vec::new();
 
-        // Read top-level directory entries (keyspaces)
-        let entries = std::fs::read_dir(&self.data_dir).map_err(|e| {
-            Error::Io(std::io::Error::new(
-                e.kind(),
-                format!(
-                    "Failed to read data directory {}: {}",
-                    self.data_dir.display(),
-                    e
-                ),
-            ))
-        })?;
+        // Read top-level directory entries (keyspaces). This ONE read still
+        // propagates: `data_dir` is the caller's own argument, and if it cannot be
+        // read then every answer is empty and the direct error is the actionable
+        // one. Everything below it records and carries on — see the module doc.
+        let entries = read_dir_named(&self.data_dir, "data")?;
 
-        for entry in entries.flatten() {
-            if !entry.path().is_dir() {
-                continue;
+        for entry in entries {
+            let entry = match dir_entry_named(entry, &self.data_dir) {
+                Ok(entry) => entry,
+                Err(e) => {
+                    let kind = kind_of(&e);
+                    note_unreadable(&mut unreadable_dirs, &self.data_dir, "data", &e, kind);
+                    continue;
+                }
+            };
+            match entry_is_dir(&entry) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(e) => {
+                    let kind = kind_of(&e);
+                    let path = entry.path();
+                    note_unreadable(&mut unreadable_dirs, &path, "keyspace", &e, kind);
+                    continue;
+                }
             }
 
             let keyspace_name = entry.file_name().to_string_lossy().to_string();
@@ -124,10 +179,40 @@ impl Scanner {
 
             // Scan tables in this keyspace
             let mut keyspace_tables = Vec::new();
-            if let Ok(table_entries) = std::fs::read_dir(entry.path()) {
-                for table_entry in table_entries.flatten() {
-                    if !table_entry.path().is_dir() {
+            {
+                let keyspace_dir = entry.path();
+                let table_entries = match read_dir_named(&keyspace_dir, "keyspace") {
+                    Ok(entries) => entries,
+                    Err(e) => {
+                        let kind = kind_of(&e);
+                        note_unreadable(&mut unreadable_dirs, &keyspace_dir, "keyspace", &e, kind);
                         continue;
+                    }
+                };
+                for table_entry in table_entries {
+                    let table_entry = match dir_entry_named(table_entry, &keyspace_dir) {
+                        Ok(entry) => entry,
+                        Err(e) => {
+                            let kind = kind_of(&e);
+                            note_unreadable(
+                                &mut unreadable_dirs,
+                                &keyspace_dir,
+                                "keyspace",
+                                &e,
+                                kind,
+                            );
+                            continue;
+                        }
+                    };
+                    match entry_is_dir(&table_entry) {
+                        Ok(true) => {}
+                        Ok(false) => continue,
+                        Err(e) => {
+                            let kind = kind_of(&e);
+                            let p = table_entry.path();
+                            note_unreadable(&mut unreadable_dirs, &p, "table", &e, kind);
+                            continue;
+                        }
                     }
 
                     let table_dir_name = table_entry.file_name().to_string_lossy().to_string();
@@ -143,8 +228,46 @@ impl Scanner {
 
                     // Count SSTable files (Data.db files)
                     let mut table_sstable_count = 0;
-                    if let Ok(sstable_files) = std::fs::read_dir(table_entry.path()) {
-                        for sstable_file in sstable_files.flatten() {
+                    {
+                        let table_dir = table_entry.path();
+                        // The table directory EXISTS — we just saw it — so the
+                        // table is still REPORTED even when its contents cannot be
+                        // read. That keeps it in `table_directories`, so the
+                        // SSTableManager re-reads the same directory, records its
+                        // own gap, and fails closed at query time. Dropping the
+                        // table here would hide it from that check entirely. What
+                        // must not happen is reporting `sstable_count: 0` with no
+                        // gap record, which is what made "unreadable" read as
+                        // "empty".
+                        let sstable_files = match read_dir_named(&table_dir, "table") {
+                            Ok(entries) => Some(entries),
+                            Err(e) => {
+                                let kind = kind_of(&e);
+                                note_unreadable(
+                                    &mut unreadable_dirs,
+                                    &table_dir,
+                                    "table",
+                                    &e,
+                                    kind,
+                                );
+                                None
+                            }
+                        };
+                        for sstable_file in sstable_files.into_iter().flatten() {
+                            let sstable_file = match dir_entry_named(sstable_file, &table_dir) {
+                                Ok(entry) => entry,
+                                Err(e) => {
+                                    let kind = kind_of(&e);
+                                    note_unreadable(
+                                        &mut unreadable_dirs,
+                                        &table_dir,
+                                        "table",
+                                        &e,
+                                        kind,
+                                    );
+                                    continue;
+                                }
+                            };
                             let file_name = sstable_file.file_name().to_string_lossy().to_string();
                             // Match both old and new SSTable naming conventions
                             if file_name.ends_with("-Data.db") || file_name == "Data.db" {
@@ -207,6 +330,7 @@ impl Scanner {
             sstable_count,
             keyspace_info,
             warnings,
+            unreadable_dirs,
         })
     }
 
@@ -227,8 +351,31 @@ impl Scanner {
 
         // Precedence 3: Try to read metadata.yml
         let metadata_path = self.data_dir.join("metadata.yml");
-        if metadata_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&metadata_path) {
+        // #4159: a metadata.yml that is PRESENT and cannot be read is a real fault,
+        // not "no version recorded" — it propagates rather than falling through to
+        // the "unknown" answer below.
+        //
+        // The read is attempted DIRECTLY, with no `exists()` guard, because
+        // `Path::exists()` collapses a stat FAILURE into `false`: a present but
+        // unstattable metadata.yml would take the absent branch and answer
+        // "unknown", contradicting the very contract this arm establishes. Reading
+        // first also removes the TOCTOU window between the probe and the open. Only
+        // `NotFound` — genuine absence, the ordinary case — is a non-error.
+        let content = match std::fs::read_to_string(&metadata_path) {
+            Ok(content) => Some(content),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                return Err(Error::Io(std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "metadata.yml is present at {} but could not be read: {e}",
+                        metadata_path.display()
+                    ),
+                )))
+            }
+        };
+        if let Some(content) = content {
+            {
                 // Parse YAML for version field (simple string search, not full YAML parsing)
                 for line in content.lines() {
                     if line.trim().starts_with("version:") {
@@ -469,5 +616,314 @@ mod tests {
         assert!(!has_cassandra_table_uuid_suffix(
             "table-6aa08200a25111f0a3fef1a551383fgz"
         )); // 'g' and 'z' not hex
+    }
+
+    /// Issue #4159: an UNREADABLE keyspace directory is neither an EMPTY one nor a
+    /// reason to abandon the scan.
+    ///
+    /// Both halves matter and each rules out a different wrong fix. Swallowing the
+    /// error (the original defect: `if let Ok(table_entries) = read_dir(..)` with no
+    /// `else`) makes the keyspace contribute zero tables, indistinguishable from an
+    /// empty one. Propagating it (this branch's first attempt) fails the WHOLE scan
+    /// over one directory, which a root-owned `lost+found` at mode 0700 — present on
+    /// essentially every ext4 data volume — would trigger on the commonest real
+    /// layout. The contract is: keep scanning, and RECORD what could not be read.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_keyspace_is_recorded_while_the_rest_of_the_scan_survives() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let blocked_ks = temp_dir.path().join("test_ks");
+        fs::create_dir(&blocked_ks).unwrap();
+        let table_dir = blocked_ks.join("users-6aa08200a25111f0a3fef1a551383fb9");
+        fs::create_dir(&table_dir).unwrap();
+        fs::write(table_dir.join("na-1-big-Data.db"), b"mock data").unwrap();
+
+        // A HEALTHY sibling keyspace, so "the scan survived" is observable and not
+        // merely "the scan returned Ok having found nothing".
+        let ok_ks = temp_dir.path().join("other_ks");
+        fs::create_dir(&ok_ks).unwrap();
+        let ok_table = ok_ks.join("events-6aa08200a25111f0a3fef1a551383fb9");
+        fs::create_dir(&ok_table).unwrap();
+        fs::write(ok_table.join("na-1-big-Data.db"), b"mock data").unwrap();
+
+        // Control: readable ⇒ both tables and both SSTables are discovered.
+        let before = Scanner::new(temp_dir.path(), None)
+            .scan()
+            .expect("a readable corpus must scan");
+        assert_eq!(before.tables.len(), 2, "control: both tables discovered");
+        assert_eq!(before.sstable_count, 2, "control: both SSTables counted");
+        assert!(
+            before.unreadable_dirs.is_empty(),
+            "control: a readable corpus has no gaps"
+        );
+
+        fs::set_permissions(&blocked_ks, fs::Permissions::from_mode(0o000)).unwrap();
+        let staged_unreadable = fs::read_dir(&blocked_ks).is_err();
+        let result = Scanner::new(temp_dir.path(), None).scan();
+        // Restore before asserting so a failure cannot leave an unremovable TempDir.
+        fs::set_permissions(&blocked_ks, fs::Permissions::from_mode(0o755)).unwrap();
+
+        if !unreadable_dir_case_can_run(staged_unreadable, "unreadable keyspace directory") {
+            return;
+        }
+
+        let result = result.expect(
+            "one unreadable keyspace must not fail the whole scan — a stock \
+             root-owned lost+found would then make discovery impossible",
+        );
+        assert_eq!(
+            result.tables,
+            vec!["other_ks.events".to_string()],
+            "the healthy keyspace must still be discovered"
+        );
+        assert_eq!(result.sstable_count, 1, "its SSTable must still be counted");
+        assert_eq!(
+            result.unreadable_dirs.len(),
+            1,
+            "the gap must be RECORDED, not swallowed: {result:?}"
+        );
+        let gap = &result.unreadable_dirs[0];
+        assert_eq!(gap.path, blocked_ks, "the gap must name the directory");
+        assert_eq!(gap.role, "keyspace");
+        assert_eq!(
+            gap.kind,
+            std::io::ErrorKind::PermissionDenied,
+            "the original io::ErrorKind must survive so PermissionDenied stays \
+             distinguishable from NotFound"
+        );
+    }
+
+    /// Issue #4159: an unreadable TABLE directory must not be reported as a table
+    /// that exists and holds nothing.
+    ///
+    /// The table IS still reported — its directory demonstrably exists — because
+    /// that keeps it in `table_directories`, so the `SSTableManager` opens the same
+    /// directory, records its own gap and fails closed at query time. Dropping it
+    /// would hide it from that check entirely. What must not happen is
+    /// `sstable_count: 0` with no gap recorded, which is the claim "this table is
+    /// empty".
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_table_directory_is_recorded_not_reported_as_zero_sstables() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let keyspace_dir = temp_dir.path().join("test_ks");
+        fs::create_dir(&keyspace_dir).unwrap();
+        let table_dir = keyspace_dir.join("users-6aa08200a25111f0a3fef1a551383fb9");
+        fs::create_dir(&table_dir).unwrap();
+        fs::write(table_dir.join("na-1-big-Data.db"), b"mock data").unwrap();
+
+        fs::set_permissions(&table_dir, fs::Permissions::from_mode(0o000)).unwrap();
+        let staged_unreadable = fs::read_dir(&table_dir).is_err();
+        let result = Scanner::new(temp_dir.path(), None).scan();
+        fs::set_permissions(&table_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        if !unreadable_dir_case_can_run(staged_unreadable, "unreadable table directory") {
+            return;
+        }
+
+        let result = result.expect("one unreadable table directory must not fail the scan");
+        assert_eq!(
+            result.tables,
+            vec!["test_ks.users".to_string()],
+            "the table's directory exists, so it stays in the list the manager opens"
+        );
+        assert_eq!(
+            result.unreadable_dirs.len(),
+            1,
+            "reporting sstable_count: 0 with NO gap recorded is the claim 'this \
+             table is empty': {result:?}"
+        );
+        let gap = &result.unreadable_dirs[0];
+        assert_eq!(gap.path, table_dir);
+        assert_eq!(gap.role, "table");
+        assert_eq!(gap.kind, std::io::ErrorKind::PermissionDenied);
+    }
+
+    /// Issue #4159, finding 1: a SYMLINKED table directory must still be discovered.
+    ///
+    /// `DirEntry::file_type()` does NOT follow symlinks, while the `Path::is_dir()`
+    /// it replaced does. Using it made a symlinked keyspace or table directory vanish
+    /// from the scan with NO gap recorded at all — incomplete results reported as
+    /// complete, which is strictly worse than the swallow this issue removes, because
+    /// nothing anywhere shows that something was missed. Spreading a data directory
+    /// across mounts with symlinks is a normal Cassandra layout.
+    ///
+    /// Also pins the DANGLING case, which must NOT become a gap: a symlink whose
+    /// target does not exist is genuine absence (`metadata` -> `NotFound`), the one
+    /// answer that is not a swallow, so it is skipped silently and on purpose.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_table_directory_is_discovered_and_a_dangling_one_is_not_a_gap() {
+        let temp_dir = TempDir::new().unwrap();
+        // Only `data/` is scanned; `other_mount/` sits outside it, standing in for a
+        // separate filesystem, so it is not itself mistaken for a keyspace.
+        let data_dir = temp_dir.path().join("data");
+        fs::create_dir(&data_dir).unwrap();
+
+        let real_table = temp_dir
+            .path()
+            .join("other_mount")
+            .join("users-6aa08200a25111f0a3fef1a551383fb9");
+        fs::create_dir_all(&real_table).unwrap();
+        fs::write(real_table.join("na-1-big-Data.db"), b"mock data").unwrap();
+
+        let keyspace_dir = data_dir.join("test_ks");
+        fs::create_dir(&keyspace_dir).unwrap();
+        std::os::unix::fs::symlink(
+            &real_table,
+            keyspace_dir.join("users-6aa08200a25111f0a3fef1a551383fb9"),
+        )
+        .unwrap();
+
+        // A DANGLING symlink alongside it: its target never exists.
+        std::os::unix::fs::symlink(
+            temp_dir.path().join("no_such_target"),
+            keyspace_dir.join("ghost-6aa08200a25111f0a3fef1a551383fb9"),
+        )
+        .unwrap();
+
+        let result = Scanner::new(&data_dir, None)
+            .scan()
+            .expect("a symlinked layout must scan");
+
+        assert_eq!(
+            result.tables,
+            vec!["test_ks.users".to_string()],
+            "the symlinked table directory must be FOLLOWED and discovered; \
+             DirEntry::file_type() reports the LINK and silently skipped it"
+        );
+        assert_eq!(
+            result.sstable_count, 1,
+            "the SSTable behind the symlink must be counted"
+        );
+        assert!(
+            result.unreadable_dirs.is_empty(),
+            "neither a followed symlink nor a DANGLING one is an unreadable \
+             directory — a dangling link is genuine absence, not a gap: {:?}",
+            result.unreadable_dirs
+        );
+    }
+
+    /// Issue #4159, finding 3: a `metadata.yml` that is PRESENT but cannot be
+    /// statted must propagate, not fall through to "unknown".
+    ///
+    /// `Path::exists()` collapses a stat FAILURE into `false`, so the present-but-
+    /// unreadable file took the absent branch and answered `Some("unknown")` —
+    /// contradicting the contract the same arm establishes for a file it can stat
+    /// but not read. Staged by making the containing directory unreadable, which is
+    /// what an operator permissions mistake looks like.
+    #[cfg(unix)]
+    #[test]
+    fn a_present_but_unstattable_metadata_yml_propagates_instead_of_answering_unknown() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        fs::create_dir(&data_dir).unwrap();
+        fs::write(data_dir.join("metadata.yml"), "version: 5.0.8\n").unwrap();
+
+        let scanner = Scanner::new(&data_dir, None);
+        let empty = ScanResult {
+            keyspaces: vec![],
+            tables: vec![],
+            sstable_count: 0,
+            keyspace_info: vec![],
+            warnings: vec![],
+            unreadable_dirs: vec![],
+        };
+
+        // Control: readable ⇒ the version is read from the file.
+        assert_eq!(
+            scanner.resolve_version(&empty).unwrap(),
+            Some("5.0.8".to_string()),
+            "control: a readable metadata.yml must be parsed"
+        );
+
+        fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o000)).unwrap();
+        let staged_unreadable = fs::metadata(data_dir.join("metadata.yml")).is_err();
+        let result = scanner.resolve_version(&empty);
+        fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        if !unreadable_dir_case_can_run(staged_unreadable, "unstattable metadata.yml") {
+            return;
+        }
+
+        let e = result.expect_err(
+            "a metadata.yml that is present and cannot be statted must PROPAGATE — \
+             answering Some(\"unknown\") is the same swallow one field over",
+        );
+        assert!(
+            matches!(
+                &e,
+                Error::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied
+            ),
+            "the original io::ErrorKind must survive, got {e:?}"
+        );
+        assert!(
+            e.to_string().contains("metadata.yml"),
+            "the error must name the file: {e}"
+        );
+    }
+
+    /// Decide whether an unreadable-directory case may legitimately be SKIPPED, and
+    /// make it impossible for a skip to be mistaken for a pass (issue #4159).
+    ///
+    /// # Why this is not an `eprintln!` and a `return`
+    ///
+    /// libtest CAPTURES stderr and DISCARDS it for a test that passes. A case that
+    /// probes, prints "SKIPPED", and returns therefore reports a bare `ok` having
+    /// asserted NOTHING — and under a container CI lane holding `CAP_DAC_OVERRIDE`, or
+    /// any root lane, all of these cases would do that at once. A regression that
+    /// re-aborted the walk on `lost+found` would then merge green. A silent no-op is the
+    /// same defect class as everything else this issue is about: an absence that reads
+    /// like a success.
+    ///
+    /// `staged_unreadable` is the EMPIRICAL probe result — whether this process can in
+    /// fact still read the 0-mode directory the caller just created. It is measured, not
+    /// inferred from a uid, so it also covers `CAP_DAC_OVERRIDE`, an unusual filesystem
+    /// and a permission-ignoring mount.
+    ///
+    /// Two ways this refuses to skip quietly:
+    ///
+    /// * `CQLITE_REQUIRE_FIXTURES=1` (the repo's existing fail-closed idiom) turns any
+    ///   skip into a hard FAILURE, so a lane can demand the case actually ran;
+    /// * a process that is NOT privileged and yet still reads a 0-mode directory is an
+    ///   unexplained environment, never a legitimate skip, so it PANICS unconditionally.
+    ///   Skipping there would hide a filesystem that ignores permissions entirely.
+    ///
+    /// Returns `true` when the caller should proceed with its assertions.
+    #[cfg(unix)]
+    fn unreadable_dir_case_can_run(staged_unreadable: bool, case: &str) -> bool {
+        if staged_unreadable {
+            return true;
+        }
+        // SAFETY: `geteuid` takes no arguments, touches no memory and cannot fail.
+        let privileged = unsafe { libc::geteuid() } == 0;
+        assert!(
+            privileged,
+            "{case}: this process is NOT root yet can still read a 0-mode directory. \
+         That is an unexplained environment (a permission-ignoring filesystem, or a \
+         capability this test cannot account for), not a legitimate skip — refusing \
+         to report a pass for a case that asserted nothing."
+        );
+        let require = std::env::var("CQLITE_REQUIRE_FIXTURES")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        assert!(
+            !require,
+            "CQLITE_REQUIRE_FIXTURES=1 but {case} cannot be staged: this process is root, \
+         so a 0-mode directory is still readable — fail-closed rather than reporting \
+         a pass for a case that asserted nothing. Run this lane as a non-root user."
+        );
+        eprintln!(
+            "SKIPPED ({case}): running as root, so a 0-mode directory is still readable \
+         and an unreadable directory cannot be staged. Set CQLITE_REQUIRE_FIXTURES=1 \
+         to make this a hard failure instead."
+        );
+        false
     }
 }

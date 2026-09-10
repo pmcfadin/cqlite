@@ -134,7 +134,7 @@ async fn test_nb_format_data_extraction_returns_error() {
         .expect("Failed to read Statistics.db file");
 
     // Parse header successfully (this should work)
-    let (remaining, header) =
+    let (_remaining, header) =
         parse_nb_format_header(&file_bytes).expect("Header parsing should succeed on real file");
 
     assert_eq!(
@@ -143,7 +143,10 @@ async fn test_nb_format_data_extraction_returns_error() {
     );
 
     // Attempt to extract statistics data (Issue #162: now succeeds for minimal EncodingStats)
-    let result = parse_nb_format_statistics_data(remaining, &header, &file_bytes, None);
+    // #4159: the post-header slice is no longer a parameter — the SERIALIZATION_HEADER
+    // is located from the full buffer plus the TOC's HEADER offset and from nothing
+    // else, now that the marker search that consumed it is gone.
+    let result = parse_nb_format_statistics_data(&header, &file_bytes, None);
 
     // Issue #162: Minimal parsing succeeds (extracts EncodingStats only)
     assert!(
@@ -613,12 +616,7 @@ fn test_error_messages_reference_issues() {
     };
 
     let insufficient_data = vec![0u8; 5]; // Too little data for VInt parsing
-    let result = parse_nb_format_statistics_data(
-        &insufficient_data,
-        &dummy_header,
-        &insufficient_data,
-        None,
-    );
+    let result = parse_nb_format_statistics_data(&dummy_header, &insufficient_data, None);
 
     // Issue #162: Parser now attempts minimal parsing and fails on insufficient data
     assert!(result.is_err(), "Should return error for insufficient data");

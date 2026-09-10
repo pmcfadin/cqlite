@@ -474,7 +474,11 @@ mod tests {
     /// are both `Query`.
     fn expected_node_code(err: &Error) -> &'static str {
         match err {
-            Error::Io(_) | Error::InvalidPath(_) => "IO",
+            // Issue #4159: `IncompleteDiscovery` is an unreadable DIRECTORY, not
+            // undecodable data — every file is fine. It joins the I/O bucket (the
+            // caller fixes permissions or a mount and retries), NOT the `PARSE`
+            // bucket its sibling `UnreadableSSTable` sits in.
+            Error::Io(_) | Error::InvalidPath(_) | Error::IncompleteDiscovery { .. } => "IO",
             Error::Schema(_) | Error::Table(_) => "SCHEMA",
             Error::QueryExecution(_)
             | Error::UnsupportedQuery(_)
@@ -498,7 +502,12 @@ mod tests {
             // Issue #3721: a column whose value could not be decoded is
             // undecodable DATA reaching the caller — same identity as
             // `Corruption`, hence the same `PARSE` code (and Python's `Cqlite`).
-            | Error::ColumnDecode { .. } => "PARSE",
+            | Error::ColumnDecode { .. }
+            // Issue #4159: an SSTable whose OPEN refused. Same identity as
+            // `ColumnDecode` one granularity up (the whole file, not one cell) —
+            // undecodable DATA reaching the caller — hence the same `PARSE` code and
+            // Python's `Cqlite`.
+            | Error::UnreadableSSTable { .. } => "PARSE",
             // Query execution budget elapsed (issue #1695): the SAME `TIMEOUT` code as
             // its sibling `Timeout`, so a JS caller checking for `TIMEOUT` catches
             // both. Deliberately NOT `QUERY`, even though its `ErrorCategory` IS

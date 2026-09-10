@@ -123,14 +123,20 @@ async fn corrupt_statistics_hard_fails_open() {
 
     // Truncate the copied Statistics.db so the file is present but unparseable.
     //
-    // NOTE (empirical, see #1626 report): truncating to len/2 does NOT make the
-    // minimal nb parser fail for this fixture — the SerializationHeader lives at
-    // a TOC offset near the END of the file, and `parse_minimal_encoding_stats`
-    // silently FALLS BACK to reading EncodingStats from the front when that
-    // offset is past EOF, so a back-truncated file still parses Ok. The only
-    // robust "present-but-unparseable" corruption is to truncate below the
-    // 32-byte fixed header so `parse_nb_format_header` itself fails. We truncate
-    // to `min(len/2, 16)` bytes (< 32, still > 0).
+    // We truncate to `min(len/2, 16)` bytes: below the 32-byte fixed header, so
+    // `parse_nb_format_header` itself fails. That is the strongest available
+    // corruption and it keeps this test independent of anything downstream of the
+    // outer header.
+    //
+    // HISTORICAL NOTE, corrected by #4159: this comment used to assert that a
+    // `len/2` truncation "does NOT make the minimal nb parser fail", because
+    // `parse_minimal_encoding_stats` silently FELL BACK to reading EncodingStats
+    // from the front when the TOC's SerializationHeader offset landed past EOF.
+    // That fallback — and the SerializationHeader marker search behind it — were
+    // REMOVED by #4159; a TOC pointing past end of file is now itself a refusal.
+    // So a `len/2` truncation would fail today. The 16-byte truncation is retained
+    // deliberately (it exercises the outermost framing), but do not read the old
+    // claim as still true.
     let stats = find_file_suffix(&dst, "-Statistics.db").expect("copied Statistics.db");
     let len = std::fs::metadata(&stats).expect("stat Statistics.db").len();
     let target = (len / 2).clamp(1, 16);
