@@ -113,9 +113,12 @@ pub use model::ClusteringSlice;
 #[cfg(not(feature = "tombstones"))]
 pub use point_compaction::SinglePartitionCompaction;
 // Crate-internal decode-at-offset primitive salvage's recovery loop is built
-// on (issue #4196); see `point_compaction`'s doc for the `not(tombstones)`
-// rationale it inherits.
-#[cfg(not(feature = "tombstones"))]
+// on (issue #4196). `write-support`-gated too (not just `not(tombstones)`):
+// its only consumer, `write_engine::salvage`, does not exist without that
+// feature, so a write-support-off build would otherwise see this as an
+// unused re-export (`-D unused-imports`) — measured via the gate's
+// core-src-diff dependent-crate compile-check fan-out (#2658).
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 pub(crate) use point_compaction::PartitionAtOffsetOutcome;
 // Token-range bound pushed into the Summary-guided streaming walk (issue #2413
 // Option A). Re-exported to the crate so the flight warm merge can construct one

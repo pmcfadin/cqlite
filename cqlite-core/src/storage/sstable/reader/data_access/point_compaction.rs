@@ -71,6 +71,13 @@ pub enum SinglePartitionCompaction {
 /// offset — the primitive `salvage_sstable` builds its recovery loop on
 /// (issue #4196, design D1). See
 /// [`decode_partition_at_offset_for_salvage`](SSTableReader::decode_partition_at_offset_for_salvage).
+///
+/// `write-support`-gated: `salvage_sstable`, its only consumer, does not
+/// exist without that feature (`write_engine::salvage` is itself gated
+/// `all(feature = "write-support", not(feature = "tombstones"))`), so
+/// without this gate a `write-support`-off build (this module's OWN gate is
+/// only `not(tombstones)`) sees this as dead code / an unused re-export.
+#[cfg(feature = "write-support")]
 #[derive(Debug)]
 pub(crate) enum PartitionAtOffsetOutcome {
     /// The partition decoded completely and — when the boundary source named
@@ -416,6 +423,9 @@ impl SSTableReader {
     /// above (design D1) — never a fresh parser.
     ///
     /// [`parse_one_partition_for_compaction`]: crate::storage::sstable::reader::parsing::row_decoder::compaction::CompactionParser::parse_one_partition_for_compaction
+    ///
+    /// `write-support`-gated: see [`PartitionAtOffsetOutcome`]'s doc for why.
+    #[cfg(feature = "write-support")]
     pub(crate) async fn decode_partition_at_offset_for_salvage(
         &self,
         offset: u64,
