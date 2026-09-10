@@ -137,6 +137,36 @@ fn single_data_db(dir: &Path) -> PathBuf {
     }
 }
 
+/// Recursively verifies `dir` (and every subdirectory) contains no
+/// `*-Data.db` file — `SSTableWriter` nests output at
+/// `<out>/<keyspace>/<table>/`, so a top-level-only check passes vacuously
+/// on a real `--out` tree (roborev, issue #4196, round-6 Medium finding 3;
+/// mirrors `salvage_cli_tests.rs::walk_no_data_db`).
+fn no_data_db_anywhere(dir: &Path) -> bool {
+    if !dir.exists() {
+        return true;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return true;
+    };
+    for e in rd.flatten() {
+        let path = e.path();
+        if path.is_dir() {
+            if !no_data_db_anywhere(&path) {
+                return false;
+            }
+        } else if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.ends_with("-Data.db"))
+            .unwrap_or(false)
+        {
+            return false;
+        }
+    }
+    true
+}
+
 fn hex_of(b: &[u8]) -> String {
     hex::encode(b)
 }
@@ -344,12 +374,7 @@ async fn damaged_index_db_refuses_with_the_rebuild_remedy() {
         refusal.remedy
     );
     assert!(
-        !out_root.exists()
-            || std::fs::read_dir(&out_root)
-                .map(|rd| rd
-                    .flatten()
-                    .all(|e| !e.file_name().to_string_lossy().ends_with("-Data.db")))
-                .unwrap_or(true),
+        no_data_db_anywhere(&out_root),
         "--out must contain no Data.db after a refusal"
     );
 
@@ -406,12 +431,7 @@ async fn assert_component_unreadable_refusal(
         "remedy must be named, not empty"
     );
     assert!(
-        !out_root.exists()
-            || std::fs::read_dir(out_root)
-                .map(|rd| rd
-                    .flatten()
-                    .all(|e| !e.file_name().to_string_lossy().ends_with("-Data.db")))
-                .unwrap_or(true),
+        no_data_db_anywhere(out_root),
         "--out must contain no Data.db after a refusal"
     );
     report
@@ -554,12 +574,7 @@ async fn damaged_crc_db_refuses_as_classified() {
         "remedy must be named, not empty"
     );
     assert!(
-        !out_root.exists()
-            || std::fs::read_dir(&out_root)
-                .map(|rd| rd
-                    .flatten()
-                    .all(|e| !e.file_name().to_string_lossy().ends_with("-Data.db")))
-                .unwrap_or(true),
+        no_data_db_anywhere(&out_root),
         "--out must contain no Data.db after a refusal"
     );
     eprintln!("[issue_4196] damaged CRC.db: salvage refused as expected ({report:?}).");

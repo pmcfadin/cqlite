@@ -27,6 +27,39 @@ fn datasets_root() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// Every candidate BASE root (the `CQLITE_DATASETS_ROOT` corpus, then the
+/// checkout's own committed corpus) — issue #3220 doctrine, mirrored from
+/// the sibling core corpus test's `candidate_base_roots()` /
+/// `resolve_root_with_corpus_fixture` (roborev, issue #4196, round-6 Medium
+/// finding 4): `datasets_root()` alone read `CQLITE_DATASETS_ROOT` ONLY, with
+/// no checkout fallback, so every test in this file skipped whenever the env
+/// var was unset — even for fixtures the checkout carries directly.
+fn candidate_base_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(r) = datasets_root() {
+        roots.push(r);
+    }
+    let checkout = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root")
+        .join("test-data/datasets");
+    if !roots.contains(&checkout) {
+        roots.push(checkout);
+    }
+    roots
+}
+
+/// The first candidate base root that carries `relative_fixture` (a path
+/// relative to the base root, e.g. `"sstables/test_comp/lz4_table-..."` or
+/// `"corruption/test_comp_corrupt/data_db_bit_flip"`); `None` when no
+/// candidate root carries it.
+fn resolve_fixture(relative_fixture: &str) -> Option<PathBuf> {
+    candidate_base_roots()
+        .into_iter()
+        .map(|root| root.join(relative_fixture))
+        .find(|dir| usable(dir))
+}
+
 fn skip_or_require(what: &str, reason: &str) -> bool {
     if require_fixtures_strict() {
         panic!("CQLITE_REQUIRE_FIXTURES=1 but {what} unavailable: {reason}");
@@ -66,19 +99,15 @@ fn usable(dir: &Path) -> bool {
 /// exit 0, JSON manifest names two entries each with `losses: []`.
 #[test]
 fn healthy_table_dir_two_generations_exit_0() {
-    let Some(root) = datasets_root() else {
-        skip_or_require("salvage_cli_tests R7.1", "CQLITE_DATASETS_ROOT not set");
-        return;
-    };
-    let table_dir =
-        root.join("sstables/test_tomb/resurrection_gc_positive-4cbfab10702011f1b8f419c9a388d558");
-    if !usable(&table_dir) {
+    const FIXTURE: &str =
+        "sstables/test_tomb/resurrection_gc_positive-4cbfab10702011f1b8f419c9a388d558";
+    let Some(table_dir) = resolve_fixture(FIXTURE) else {
         skip_or_require(
             "resurrection_gc_positive fixture",
-            &format!("{table_dir:?} not usable"),
+            &format!("no candidate root carries {FIXTURE}"),
         );
         return;
-    }
+    };
     let schema = schemas_dir().join("tombstone-parity.cql");
     let temp = TempDir::new().expect("tempdir");
     let out = temp.path().join("out");
@@ -148,22 +177,15 @@ fn healthy_table_dir_two_generations_exit_0() {
 /// have already salvaged successfully.
 #[test]
 fn post_write_manifest_failure_with_prior_output_exits_3_not_1() {
-    let Some(root) = datasets_root() else {
+    const FIXTURE: &str =
+        "sstables/test_tomb/resurrection_gc_positive-4cbfab10702011f1b8f419c9a388d558";
+    let Some(table_dir) = resolve_fixture(FIXTURE) else {
         skip_or_require(
-            "salvage_cli_tests post-write-failure",
-            "CQLITE_DATASETS_ROOT not set",
+            "resurrection_gc_positive fixture",
+            &format!("no candidate root carries {FIXTURE}"),
         );
         return;
     };
-    let table_dir =
-        root.join("sstables/test_tomb/resurrection_gc_positive-4cbfab10702011f1b8f419c9a388d558");
-    if !usable(&table_dir) {
-        skip_or_require(
-            "resurrection_gc_positive fixture",
-            &format!("{table_dir:?} not usable"),
-        );
-        return;
-    }
     let schema = schemas_dir().join("tombstone-parity.cql");
     let temp = TempDir::new().expect("tempdir");
     let out = temp.path().join("out");
@@ -226,21 +248,14 @@ fn post_write_manifest_failure_with_prior_output_exits_3_not_1() {
 /// trick as the exit-3 case above.
 #[test]
 fn post_write_manifest_failure_with_all_refused_exits_2_not_1() {
-    let Some(root) = datasets_root() else {
+    const FIXTURE: &str = "corruption/test_comp_corrupt/index_db_bit_flip_big";
+    let Some(corrupt_dir) = resolve_fixture(FIXTURE) else {
         skip_or_require(
-            "salvage_cli_tests post-write-failure-all-refused",
-            "CQLITE_DATASETS_ROOT not set",
+            "index_db_bit_flip_big fixture",
+            &format!("no candidate root carries {FIXTURE}"),
         );
         return;
     };
-    let corrupt_dir = root.join("corruption/test_comp_corrupt/index_db_bit_flip_big");
-    if !usable(&corrupt_dir) {
-        skip_or_require(
-            "index_db_bit_flip_big fixture",
-            &format!("{corrupt_dir:?} not usable"),
-        );
-        return;
-    }
     let schema = schemas_dir().join("compression-parity.cql");
     let temp = TempDir::new().expect("tempdir");
     let input_dir = temp.path().join("input");
@@ -300,18 +315,14 @@ fn post_write_manifest_failure_with_all_refused_exits_2_not_1() {
 /// rather than aborting the whole run on the malformed one.
 #[test]
 fn unparseable_generation_is_named_and_skipped_others_still_salvaged() {
-    let Some(root) = datasets_root() else {
+    const FIXTURE: &str = "sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77";
+    let Some(clean_dir) = resolve_fixture(FIXTURE) else {
         skip_or_require(
-            "salvage_cli_tests unparseable-generation",
-            "CQLITE_DATASETS_ROOT not set",
+            "lz4_table fixture",
+            &format!("no candidate root carries {FIXTURE}"),
         );
         return;
     };
-    let clean_dir = root.join("sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77");
-    if !usable(&clean_dir) {
-        skip_or_require("lz4_table fixture", &format!("{clean_dir:?} not usable"));
-        return;
-    }
     let schema = schemas_dir().join("compression-parity.cql");
     let temp = TempDir::new().expect("tempdir");
     let input_dir = temp.path().join("input");
@@ -406,18 +417,14 @@ fn unparseable_generation_is_named_and_skipped_others_still_salvaged() {
 /// with zero trace.
 #[test]
 fn toc_less_generation_is_named_and_skipped_others_still_salvaged() {
-    let Some(root) = datasets_root() else {
+    const FIXTURE: &str = "sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77";
+    let Some(clean_dir) = resolve_fixture(FIXTURE) else {
         skip_or_require(
-            "salvage_cli_tests toc-less-generation",
-            "CQLITE_DATASETS_ROOT not set",
+            "lz4_table fixture",
+            &format!("no candidate root carries {FIXTURE}"),
         );
         return;
     };
-    let clean_dir = root.join("sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77");
-    if !usable(&clean_dir) {
-        skip_or_require("lz4_table fixture", &format!("{clean_dir:?} not usable"));
-        return;
-    }
     let schema = schemas_dir().join("compression-parity.cql");
     let temp = TempDir::new().expect("tempdir");
     let input_dir = temp.path().join("input");
@@ -508,18 +515,14 @@ fn toc_less_generation_is_named_and_skipped_others_still_salvaged() {
 /// as a follow-up.
 #[test]
 fn damaged_input_manifest_names_every_loss() {
-    let Some(root) = datasets_root() else {
-        skip_or_require("salvage_cli_tests R7.2", "CQLITE_DATASETS_ROOT not set");
-        return;
-    };
-    let corrupt_dir = root.join("corruption/test_comp_corrupt/data_db_bit_flip");
-    if !usable(&corrupt_dir) {
+    const FIXTURE: &str = "corruption/test_comp_corrupt/data_db_bit_flip";
+    let Some(corrupt_dir) = resolve_fixture(FIXTURE) else {
         skip_or_require(
             "data_db_bit_flip fixture",
-            &format!("{corrupt_dir:?} not usable"),
+            &format!("no candidate root carries {FIXTURE}"),
         );
         return;
-    }
+    };
     let data_db = single_data_db(&corrupt_dir);
     let schema = schemas_dir().join("compression-parity.cql");
     let temp = TempDir::new().expect("tempdir");
@@ -598,18 +601,14 @@ fn damaged_input_manifest_names_every_loss() {
 /// refusal + `rebuild` remedy, no `Data.db` under `--out`.
 #[test]
 fn refusal_exit_2_no_data_db_written() {
-    let Some(root) = datasets_root() else {
-        skip_or_require("salvage_cli_tests R7.3", "CQLITE_DATASETS_ROOT not set");
-        return;
-    };
-    let corrupt_dir = root.join("corruption/test_comp_corrupt/index_db_bit_flip_big");
-    if !usable(&corrupt_dir) {
+    const FIXTURE: &str = "corruption/test_comp_corrupt/index_db_bit_flip_big";
+    let Some(corrupt_dir) = resolve_fixture(FIXTURE) else {
         skip_or_require(
             "index_db_bit_flip_big fixture",
-            &format!("{corrupt_dir:?} not usable"),
+            &format!("no candidate root carries {FIXTURE}"),
         );
         return;
-    }
+    };
     let data_db = single_data_db(&corrupt_dir);
     let schema = schemas_dir().join("compression-parity.cql");
     let temp = TempDir::new().expect("tempdir");
@@ -653,18 +652,14 @@ fn refusal_exit_2_no_data_db_written() {
 /// R7.4 — usage errors exit 1 with the cause on stderr, nothing written.
 #[test]
 fn usage_errors_exit_1() {
-    let Some(root) = datasets_root() else {
-        skip_or_require("salvage_cli_tests R7.4", "CQLITE_DATASETS_ROOT not set");
-        return;
-    };
-    let corrupt_dir = root.join("corruption/test_comp_corrupt/data_db_bit_flip");
-    if !usable(&corrupt_dir) {
+    const FIXTURE: &str = "corruption/test_comp_corrupt/data_db_bit_flip";
+    let Some(corrupt_dir) = resolve_fixture(FIXTURE) else {
         skip_or_require(
             "data_db_bit_flip fixture",
-            &format!("{corrupt_dir:?} not usable"),
+            &format!("no candidate root carries {FIXTURE}"),
         );
         return;
-    }
+    };
     let data_db = single_data_db(&corrupt_dir);
     let schema = schemas_dir().join("compression-parity.cql");
 

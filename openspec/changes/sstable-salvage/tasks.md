@@ -440,6 +440,75 @@ core tests (`issue_4196_salvage_corruption_corpus` 5, `issue_4196_salvage_health
 `issue_4196_salvage_partition_atomicity` 1) and CLI tests (`salvage_cli_tests` 8) pass against the
 real corpus; `test_salvage_no_resync_scan.sh` passes.
 
+## Review-first round 6 (claude-code/claude-opus-5) — 4 Medium (all) + 4 Low fixed;
+## 2 Low BATCHED
+
+- [x] Medium (finding 1): `SalvageReport::render_text` early-returned right after
+      `REFUSED:`/`remedy:`, dropping the partition totals, the loss list and the
+      component findings — but `RefusalReason::NothingDecodable` is set alongside
+      a fully-populated `losses` vector whose remedy literally reads "inspect the
+      losses above", so an operator on the text default (no `--manifest`) got
+      zero information on the most important damage case. Fixed: the refusal
+      branch falls through into the same rendering the non-refused path uses.
+- [x] Medium (finding 2): `uncompressed_chunk_preflight` returned an empty
+      bad-chunk set and NO finding when `CRC.db` is absent — indistinguishable
+      from "every chunk validated", violating affirmative-zero doctrine and
+      hiding that #3782-class flipped-but-still-parseable bytes are undetectable
+      without the sidecar. Fixed: a named `ChunkCrcUnavailable` `ComponentFinding`
+      (component `CRC.db`) is now emitted whenever the sidecar is absent.
+- [x] Medium (finding 3): the three `"--out must contain no Data.db after a
+      refusal"` assertions in `issue_4196_salvage_corruption_corpus.rs` read only
+      the TOP LEVEL of `out_root`, so they passed vacuously against
+      `SSTableWriter`'s nested `<out>/<keyspace>/<table>/` layout. Fixed: a
+      recursive `no_data_db_anywhere` helper (mirroring the CLI tests'
+      `walk_no_data_db`) used at all three sites.
+- [x] Medium (finding 4): `salvage_cli_tests.rs`'s `datasets_root()` read
+      `CQLITE_DATASETS_ROOT` ONLY, with no checkout fallback, so every test in
+      the file skipped whenever the env var was unset — disagreeing with the
+      sibling core test's candidate-root walk in the SAME PR. Fixed: a
+      `candidate_base_roots()`/`resolve_fixture()` pair (env, then checkout),
+      used at all 8 call sites in place of the single-root `datasets_root()` +
+      unguarded `usable()` pattern.
+- [x] Low: `Loss.key` used the Rust `Debug` spelling of the decoded column
+      vector — the same manifest-vs-`Debug` divergence class round-5 fixed for
+      `LossClass`/`RefusalReason`. Fixed: renders `name=value` per column via
+      `Value`'s own stable `Display`, comma-joined.
+- [x] Low: `manifest_json`'s single-report branch indexed `reports[0]`
+      unguarded, reachable from the failure path in `exit_after_partial_failure`
+      where a panic is worst. Fixed: `reports.first().ok_or_else(...)`,
+      signature changed to `anyhow::Result<String>`.
+- [x] Low: the `SkippedInputGeneration` component findings were appended to
+      `reports` AFTER the salvage loop, so a mid-loop hard error that reached
+      `exit_after_partial_failure` wrote a manifest from reports that never got
+      the finding at all. Fixed: pushed onto each report as it is gathered,
+      inside the loop.
+- [x] Low (doc-only): two doc-comment mismatches corrected —
+      `issue_4196_salvage_partition_atomicity.rs`'s function doc claimed
+      `rows_decoded_before_failure >= 2` where the body only `eprintln!`s the
+      measured `0`; `issue_4196_salvage_healthy_parity.rs` cited
+      `test_comp.lz4_table` as "the already byte-parity-proven compressed
+      fixture above" where that fixture is never exercised in the file (the
+      test immediately above actually uses `test_basic.composite_key_table`).
+- [ ] BATCHED FOLLOW-UP (Low, not fixed — reported rather than silently dropped):
+      (i) `recover.rs:282`'s `writer.write_partition(key, mutations)?` still
+      `?`-propagates a hard `Err`, discarding the accumulated losses/findings
+      for that generation and leaving a partial, unpublished `Data.db` on disk;
+      exit 3's documented "check the manifest" contract has nothing to point at
+      for that generation. Same scope call as round-4's identical deferral for
+      `finish()`'s own `?`-propagation (no writer abort/cleanup API exists
+      today) — building one is disproportionate for a fix round, not a 10-line
+      change. (ii) `compressed_chunk_preflight` lacks the `header_size != 0`
+      fail-closed domain guard `uncompressed_chunk_preflight` carries — the
+      identical mis-attribution-by-one-chunk risk is unguarded for the
+      compressed branch. Needs a signature change (thread `header_size`
+      through, from the caller's already-open reader) plus the same ~10-line
+      guard plus a non-false-triggering regression test — batched rather than
+      squeezed into this round.
+      Tracked as a follow-up issue at merge time per the nit-batching doctrine
+      (joins round-5's batched (c)-(g)).
+
+Re-verified after all fixes: `cargo fmt --check` clean.
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree

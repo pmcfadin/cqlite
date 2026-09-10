@@ -189,7 +189,12 @@ impl SalvageReport {
         if let Some(refusal) = &self.refused {
             out.push_str(&format!("REFUSED: {}\n", refusal.reason.manifest_label()));
             out.push_str(&format!("remedy: {}\n", refusal.remedy));
-            return out;
+            // Fall through rather than returning here (roborev, issue #4196,
+            // round-6 Medium finding 1): `RefusalReason::NothingDecodable` is
+            // set alongside a fully-populated `losses` vector, and its remedy
+            // literally reads "inspect the losses above" — so the refusal
+            // branch must still render the partition totals, the loss list
+            // and the component findings, exactly like the non-refused path.
         }
         out.push_str(&format!(
             "partitions: total={} recovered={} lost={}\n",

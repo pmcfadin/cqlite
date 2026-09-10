@@ -331,9 +331,12 @@ async fn salvage_of_healthy_big_sstable_matches_no_purge_compaction() {
 /// (roborev, issue #4196, round-5 Medium finding 4 — de-confounding compression
 /// from table shape): this fixture has the IDENTICAL schema (`pk INT, ck INT,
 /// body TEXT, PRIMARY KEY (pk, ck)`, `compression-parity.cql`) to
-/// `test_comp.lz4_table`, the ALREADY byte-parity-proven compressed fixture
-/// above (issue #1017's cross-engine byte set) — same keyspace, same table
-/// shape, ONLY compression differs. With that confound removed, byte parity
+/// `test_basic.composite_key_table`, the ALREADY byte-parity-proven compressed
+/// fixture the test immediately above this one exercises (issue #1017's
+/// cross-engine byte set) — same table shape, ONLY compression differs
+/// (roborev, issue #4196, round-6 Low finding: this comment previously named
+/// `test_comp.lz4_table`, which is not exercised anywhere in this file).
+/// With that confound removed, byte parity
 /// DOES hold (`require_byte_parity: true` below, no loosening needed) —
 /// proving the divergence `salvage_of_healthy_uncompressed_zero_clustering_columns_content_only`
 /// below measures is NOT a compression-vs-compaction artifact at all.

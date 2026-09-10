@@ -125,7 +125,20 @@ pub(super) async fn uncompressed_chunk_preflight(
     if !crc_path.exists() {
         return Ok(ChunkPreflight {
             bad_chunks: BTreeSet::new(),
-            finding: None,
+            // Affirmative-zero doctrine (roborev, issue #4196, round-6 Medium
+            // finding 2): a manifest with zero `chunk-crc` losses must not
+            // read the same whether every chunk validated OR chunk-CRC
+            // validation never ran at all — a #3782-class flipped-but-still-
+            // parseable byte is undetectable without CRC.db, so the absence
+            // is recorded as a named finding rather than silently skipped.
+            finding: Some(ComponentFinding {
+                class: "ChunkCrcUnavailable".to_string(),
+                component: "CRC.db".to_string(),
+                detail: "CRC.db is absent for this uncompressed input; chunk-CRC validation \
+                         did not run, so a flipped-but-still-parseable byte would not be \
+                         detected by the chunk-crc loss class"
+                    .to_string(),
+            }),
             // No CRC.db to derive a chunk size from; 0 disables chunk-range
             // mapping (callers treat an empty bad-chunk set as "nothing to
             // map" regardless).

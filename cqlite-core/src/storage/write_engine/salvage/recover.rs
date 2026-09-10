@@ -501,9 +501,19 @@ fn build_loss(
     // by. Fall back to the trie's byte-comparable prefix, clearly labelled
     // as such (never presented as the raw key).
     if let Some(key_bytes) = &entry.expected_key {
-        let key = decode_partition_key_columns(key_bytes, schema)
-            .ok()
-            .map(|cols| format!("{cols:?}"));
+        // roborev, issue #4196, round-6 Low finding: the Rust `Debug`
+        // spelling of the decoded column vector is unstable across refactors
+        // and not documented anywhere in the JSON manifest's contract — use
+        // `Value`'s own stable `Display` rendering instead, comma-joined
+        // `name=value` per column (matches the CLI's own row-value output).
+        let key = decode_partition_key_columns(key_bytes, schema).ok().map(
+            |cols: Vec<(String, crate::Value)>| {
+                cols.iter()
+                    .map(|(name, value)| format!("{name}={value}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            },
+        );
         Loss {
             key_hex: hex::encode(key_bytes),
             key,

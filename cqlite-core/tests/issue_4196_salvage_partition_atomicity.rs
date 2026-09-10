@@ -68,11 +68,12 @@ fn single_data_db(dir: &std::path::Path) -> PathBuf {
 }
 
 /// R2.4 + R3.1: the mutated fixture's needle partition is lost whole (class
-/// `decode`, `rows_decoded_before_failure >= 2` per R3.1's premise), and
-/// salvage's output carries ZERO rows for that partition key — never a
-/// prefix — while every OTHER partition in the control matches the output
-/// byte-for-byte (compaction-row decode equality, the same oracle the R1
-/// healthy-parity BTI case uses).
+/// `decode`; for THIS fixture/mutation `rows_decoded_before_failure == 0` —
+/// see the module doc — reported but not asserted, since the safety property
+/// below does not depend on that count), and salvage's output carries ZERO
+/// rows for that partition key — never a prefix — while every OTHER
+/// partition in the control matches the output byte-for-byte (compaction-row
+/// decode equality, the same oracle the R1 healthy-parity BTI case uses).
 #[tokio::test]
 async fn corrupt_row_loses_the_needle_partition_whole_never_a_prefix() {
     let Some(fixture_dir) = datasets_root::sstables_root_for_table(FIX_KS, FIX_TABLE)

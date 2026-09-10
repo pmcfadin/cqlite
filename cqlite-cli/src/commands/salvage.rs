@@ -123,10 +123,36 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
         std::process::exit(1);
     }
 
+    // roborev, issue #4196 (round-4 Medium, finding 5; moved earlier in
+    // round-6 per Low finding — a discovery-level skip must be VISIBLE in
+    // the manifest, but the findings were previously appended to `reports`
+    // AFTER the salvage loop, so a mid-loop hard error that reaches
+    // `exit_after_partial_failure` wrote the manifest from reports that
+    // never got this finding at all): a discovery-level skip (an
+    // unparseable generation, see `discover_salvage_inputs`'s doc) must be
+    // VISIBLE in the manifest — a consumer reading only the JSON must be
+    // able to see that a published generation was never attempted, not just
+    // an operator reading stderr. Recorded via the EXISTING
+    // `component_findings` vehicle (design D5 already declares its shape
+    // generic: `{class, component, detail}`), on EVERY report as it is
+    // gathered — it is a table-dir-level fact, not one specific
+    // generation's.
     let mut reports = Vec::with_capacity(generations.len());
     for input in &generations {
         match salvage_sstable(input, &args.out, &schema, SalvageOptions::default()).await {
-            Ok(report) => reports.push(report),
+            Ok(mut report) => {
+                for skipped in &discovery.skipped {
+                    report.component_findings.push(ComponentFinding {
+                        class: "SkippedInputGeneration".to_string(),
+                        component: skipped.path.display().to_string(),
+                        detail: format!(
+                            "a published *-Data.db under the same table dir was never salvaged: {}",
+                            skipped.reason
+                        ),
+                    });
+                }
+                reports.push(report);
+            }
             Err(e) => {
                 eprintln!(
                     "cqlite salvage: salvage failed for {}: {e:#}",
@@ -134,27 +160,6 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
                 );
                 exit_after_partial_failure(&reports, args, is_table_dir);
             }
-        }
-    }
-
-    // roborev, issue #4196 (round-4 Medium, finding 5): a discovery-level
-    // skip (an unparseable generation, see `discover_salvage_inputs`'s doc)
-    // must be VISIBLE in the manifest — a consumer reading only the JSON
-    // must be able to see that a published generation was never attempted,
-    // not just an operator reading stderr. Recorded via the EXISTING
-    // `component_findings` vehicle (design D5 already declares its shape
-    // generic: `{class, component, detail}`), on EVERY report in this run —
-    // it is a table-dir-level fact, not one specific generation's.
-    for skipped in &discovery.skipped {
-        for report in &mut reports {
-            report.component_findings.push(ComponentFinding {
-                class: "SkippedInputGeneration".to_string(),
-                component: skipped.path.display().to_string(),
-                detail: format!(
-                    "a published *-Data.db under the same table dir was never salvaged: {}",
-                    skipped.reason
-                ),
-            });
         }
     }
 
@@ -377,11 +382,19 @@ fn discover_salvage_inputs(input: &Path) -> anyhow::Result<SalvageDiscovery> {
 /// count: `is_table_dir` -> always a JSON array (one entry per generation,
 /// even when there is only one); a single `Data.db` input -> always a bare
 /// object (design D5's shape).
-fn manifest_json(reports: &[SalvageReport], is_table_dir: bool) -> serde_json::Result<String> {
+fn manifest_json(reports: &[SalvageReport], is_table_dir: bool) -> anyhow::Result<String> {
     if is_table_dir {
-        serde_json::to_string_pretty(reports)
+        Ok(serde_json::to_string_pretty(reports)?)
     } else {
-        serde_json::to_string_pretty(&reports[0])
+        // roborev, issue #4196, round-6 Low finding: both callers (including
+        // the failure path in `exit_after_partial_failure`) can in principle
+        // reach this with an empty `reports` — an unguarded `reports[0]`
+        // would panic in the error path, where a panic is worst. Refuse
+        // explicitly instead.
+        let report = reports
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("no salvage report to render (reports is empty)"))?;
+        Ok(serde_json::to_string_pretty(report)?)
     }
 }
 
