@@ -125,8 +125,14 @@ pub(super) enum RunState {
 /// scan (no internal `tokio::spawn`) on the producer thread itself, adding ZERO
 /// worker threads. A merge over `M` inputs therefore costs `O(M)` OS threads, not
 /// `M + M·num_cpus` — killing the context-switch storm under concurrent `do_get`.
+// `pub(crate)` (not `pub(super)`): issue #4196's `salvage_sstable` (a SIBLING
+// of `merge` under `write_engine`, not a descendant) calls the associated
+// `Self::build_merge_entry` translation directly to reuse the exact
+// CompactionRow -> MergeEntry conversion compaction uses, without needing an
+// instance of this type (fields stay `pub(super)`; only the type name and the
+// associated fns salvage calls need to be nameable from outside `merge`).
 #[cfg(feature = "write-support")]
-pub(super) struct SSTableRowIteratorAdapter {
+pub(crate) struct SSTableRowIteratorAdapter {
     /// Receiving end of the bounded channel fed by the producer thread. `Option`
     /// so [`Drop`] can drop it FIRST (issue #2361) — closing the channel wakes a
     /// producer blocked on a full `SyncSender::send` (its send returns `Err`), so

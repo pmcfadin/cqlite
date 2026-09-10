@@ -67,6 +67,32 @@ pub enum SinglePartitionCompaction {
     Rows(Vec<CompactionRow>),
 }
 
+/// Outcome of decoding a partition at a caller-supplied, already-authoritative
+/// offset — the primitive `salvage_sstable` builds its recovery loop on
+/// (issue #4196, design D1). See
+/// [`decode_partition_at_offset_for_salvage`](SSTableReader::decode_partition_at_offset_for_salvage).
+#[derive(Debug)]
+pub(crate) enum PartitionAtOffsetOutcome {
+    /// The partition decoded completely and — when the boundary source named
+    /// an independent key for this slot — its key matched.
+    Rows(Vec<CompactionRow>),
+    /// The decoded key at `offset` did not match the boundary source's key
+    /// for this slot (spec R4.2, loss class `key-mismatch`).
+    KeyMismatch,
+    /// A row failed to decode partway through the partition (design D2
+    /// atomicity). `rows_decoded_before_failure` counts rows that HAD
+    /// decoded when the error occurred; the caller MUST NOT write any of
+    /// them (the resurrection-bug rationale in D2).
+    DecodeError {
+        rows_decoded_before_failure: usize,
+        error: crate::error::Error,
+    },
+    /// The materialized window did not cover the partition's authoritative
+    /// `[offset, end)` — EOF before the resolved end, or no trustworthy end
+    /// could be established for the last partition (spec R2.3 `truncated`).
+    Truncated,
+}
+
 impl SSTableReader {
     /// Probe one SSTable for a single partition, returning its compaction rows via
     /// an authoritative seek — or a prune / scan-fallback signal (issue #2207).
@@ -371,6 +397,124 @@ impl SSTableReader {
             return Ok(None);
         }
         Ok(Some(rows))
+    }
+
+    /// Decode ONE partition at a caller-supplied, already-authoritative offset
+    /// for `salvage_sstable` (issue #4196, design D1). Unlike
+    /// [`SinglePartitionCompaction`], every anomaly is CLASSIFIED rather than
+    /// degraded to a scan fallback: salvage's caller enumerated `offset` from
+    /// the boundary source itself (`Index.db` / the `Partitions.db` trie), so
+    /// there is no alternative source to fall back to for this one slot — the
+    /// whole point of salvage is to name what is untrustworthy about it.
+    ///
+    /// `expected_key` is the boundary source's key for this slot when it
+    /// carries one independently (always for BIG; for BTI only a `RowsOffset`
+    /// leaf's inline key — see `salvage::boundaries`). `end_bound` is the NEXT
+    /// boundary entry's offset (exclusive), or `None` for the last partition
+    /// in the file. Reuses the SAME chunk-window materialization and
+    /// [`parse_one_partition_for_compaction`] decoder the point-read path uses
+    /// above (design D1) — never a fresh parser.
+    ///
+    /// [`parse_one_partition_for_compaction`]: crate::storage::sstable::reader::parsing::row_decoder::compaction::CompactionParser::parse_one_partition_for_compaction
+    pub(crate) async fn decode_partition_at_offset_for_salvage(
+        &self,
+        offset: u64,
+        end_bound: Option<u64>,
+        expected_key: Option<&[u8]>,
+        schema: Option<&crate::schema::TableSchema>,
+        scan_cancel: &ScanCancel,
+    ) -> Result<PartitionAtOffsetOutcome> {
+        scan_cancel.check()?;
+
+        let offset_usize = offset as usize;
+        let owned_schema = schema.cloned().or_else(|| self.get_table_schema(None));
+        let parser = self.build_v5_parser(false);
+
+        let chunk_length = self
+            .compression_info
+            .as_ref()
+            .map(|ci| ci.chunk_length as usize)
+            .filter(|&len| len > 0);
+
+        let (window, within, reached_end) = match chunk_length {
+            None => {
+                let whole = self.point_read_whole_section().await?;
+                (whole, offset_usize, true)
+            }
+            Some(len) => {
+                let target_chunk = offset_usize / len;
+                let window_base = target_chunk * len;
+                let within = offset_usize - window_base;
+                let end = match end_bound {
+                    Some(e) => e as usize,
+                    None => match self
+                        .compression_info
+                        .as_ref()
+                        .map(|ci| ci.data_length as usize)
+                        .filter(|&l| l > offset_usize)
+                    {
+                        Some(l) => l,
+                        // Last partition, no CompressionInfo bound to trust:
+                        // cannot establish a trustworthy end for this slot.
+                        None => return Ok(PartitionAtOffsetOutcome::Truncated),
+                    },
+                };
+                let (window, reached_end) = self
+                    .pull_chunk_window(target_chunk, window_base, end, scan_cancel)
+                    .await?;
+                (window, within, reached_end)
+            }
+        };
+
+        if within >= window.len() || !reached_end {
+            // The materialized window did not cover the resolved
+            // `[offset, end)` — EOF before the partition's authoritative end
+            // (a truncated Data.db, spec R2.3 `truncated`).
+            return Ok(PartitionAtOffsetOutcome::Truncated);
+        }
+
+        scan_cancel.check()?;
+
+        let mut rows: Vec<CompactionRow> = Vec::new();
+        let mut key_mismatch = false;
+        let decode_result = parser.parse_one_partition_for_compaction(
+            &window[within..],
+            owned_schema.as_ref(),
+            self,
+            true,
+            &mut |row: CompactionRow| {
+                if let Some(expected) = expected_key {
+                    if rows.is_empty() && !key_mismatch && row.key.as_bytes() != expected {
+                        key_mismatch = true;
+                    }
+                }
+                rows.push(row);
+                Ok(ControlFlow::Continue(()))
+            },
+        );
+
+        match decode_result {
+            Ok(_) => {
+                if key_mismatch {
+                    Ok(PartitionAtOffsetOutcome::KeyMismatch)
+                } else {
+                    Ok(PartitionAtOffsetOutcome::Rows(rows))
+                }
+            }
+            Err(error) => {
+                if key_mismatch {
+                    // The very first row already disagreed with the boundary
+                    // source's key for this slot; that IS the finding — do not
+                    // also report a decode failure for it.
+                    Ok(PartitionAtOffsetOutcome::KeyMismatch)
+                } else {
+                    Ok(PartitionAtOffsetOutcome::DecodeError {
+                        rows_decoded_before_failure: rows.len(),
+                        error,
+                    })
+                }
+            }
+        }
     }
 
     /// Pull the decompressed chunks covering `[window_base, end)` starting at

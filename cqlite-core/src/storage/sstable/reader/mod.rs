@@ -94,6 +94,10 @@ pub use data_access::{QueryRowBatch, QueryRowStream, ScanTokenBound, QUERY_ROWS_
 // the seek path it wraps.
 #[cfg(not(feature = "tombstones"))]
 pub use data_access::SinglePartitionCompaction;
+// Decode-at-offset outcome for `salvage_sstable`'s recovery loop (issue
+// #4196). `not(tombstones)` like the seek path it wraps.
+#[cfg(not(feature = "tombstones"))]
+pub(crate) use data_access::PartitionAtOffsetOutcome;
 // Re-export the per-element compaction read contract (epic #899, Phase A).
 pub use compaction_row::{
     CompactionRow, CompactionRowData, ComplexColumn, ComplexElement, SimpleCell,
