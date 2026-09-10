@@ -8,7 +8,10 @@
 //! Dataset doctrine (issue #719): SKIP when the real fixtures are absent;
 //! `CQLITE_REQUIRE_FIXTURES=1` turns that into a hard failure.
 
-#![cfg(feature = "write-support")]
+// `not(tombstones)`: mirrors `commands::salvage`'s own module gate (roborev,
+// issue #4196, round-7 High finding) — the binary this file drives via
+// `CARGO_BIN_EXE_cqlite` has no `salvage` verb at all when `tombstones` is on.
+#![cfg(all(feature = "write-support", not(feature = "tombstones")))]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

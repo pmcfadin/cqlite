@@ -189,12 +189,27 @@ impl SalvageReport {
         if let Some(refusal) = &self.refused {
             out.push_str(&format!("REFUSED: {}\n", refusal.reason.manifest_label()));
             out.push_str(&format!("remedy: {}\n", refusal.remedy));
-            // Fall through rather than returning here (roborev, issue #4196,
-            // round-6 Medium finding 1): `RefusalReason::NothingDecodable` is
-            // set alongside a fully-populated `losses` vector, and its remedy
-            // literally reads "inspect the losses above" — so the refusal
-            // branch must still render the partition totals, the loss list
-            // and the component findings, exactly like the non-refused path.
+            // Fall through (only for `NothingDecodable`) rather than
+            // returning here (roborev, issue #4196, round-6 Medium finding
+            // 1): `RefusalReason::NothingDecodable` is set alongside a
+            // fully-populated `losses` vector, and its remedy literally
+            // reads "inspect the losses above" — so THAT refusal must still
+            // render the partition totals, the loss list and the component
+            // findings, exactly like the non-refused path. But
+            // `BoundarySourceUnreadable`/`ComponentUnreadable` refuse before
+            // anything was ever enumerated (`partitions`/`losses` are still
+            // `PartitionTotals::default()`/empty — see
+            // `recover.rs::report_skeleton`), so falling through
+            // UNCONDITIONALLY made those two print `partitions: total=0
+            // recovered=0 lost=0` / `losses: 0 RECOGNISED` — the EXACT
+            // affirmative-zero violation this doc cites, just moved: an
+            // unmeasured run must not read like a clean one (roborev, issue
+            // #4196, round-7 Low finding).
+            if refusal.reason != RefusalReason::NothingDecodable {
+                out.push_str("partitions: NOT MEASURED (refused before enumeration)\n");
+                out.push_str("losses: NOT MEASURED\n");
+                return out;
+            }
         }
         out.push_str(&format!(
             "partitions: total={} recovered={} lost={}\n",

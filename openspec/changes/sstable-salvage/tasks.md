@@ -509,6 +509,93 @@ real corpus; `test_salvage_no_resync_scan.sh` passes.
 
 Re-verified after all fixes: `cargo fmt --check` clean.
 
+## Review-first round 7 (claude-code/claude-opus-5) — the High (all) + 2 Low fixed;
+## 1 Medium + 2 Low BATCHED
+
+- [x] High: `cqlite-cli`'s `commands::salvage` module (and the `main.rs`
+      dispatch arm, and `salvage_cli_tests.rs`'s top-level `#![cfg(...)]`)
+      were gated `#[cfg(feature = "write-support")]` only, while the CORE
+      module they wrap (`cqlite_core::storage::write_engine::salvage`) is
+      gated `#[cfg(all(feature = "write-support", not(feature =
+      "tombstones")))]`. `cqlite-cli` had no feature forwarding
+      `cqlite-core/tombstones`, so it could not mirror that gate — a
+      workspace `--all-features` build (the nightly `clippy-full` job,
+      `.github/workflows/gate.yml:365`) enables `cqlite-core/tombstones` AND
+      `cqlite-cli/write-support` together, compiling out the core module
+      while the CLI module referencing it stays in → `E0432`/`E0433`,
+      deterministically. The gate's own scoped clippy matrix builds
+      `cqlite-cli` without `tombstones`, so the merge gate of record never
+      caught it — this is the first cross-crate consumer of a
+      `not(tombstones)`-gated core item. Fixed: a new `cqlite-cli` feature
+      `tombstones = ["cqlite-core/tombstones"]` (`Cargo.toml`), and
+      `not(feature = "tombstones")` added to all three gate sites so the CLI
+      module vanishes in lockstep with the core module under
+      `--all-features`.
+- [x] Low: the round-6 fix to `render_text` (Medium finding 1) fell through
+      the refusal branch UNCONDITIONALLY, which is correct for
+      `NothingDecodable` (populated `losses`) but wrong for
+      `BoundarySourceUnreadable`/`ComponentUnreadable` — those refuse BEFORE
+      anything is enumerated, so `partitions`/`losses` are still
+      default/empty, and the unconditional fall-through printed `partitions:
+      total=0 recovered=0 lost=0` / `losses: 0 RECOGNISED` — the SAME
+      affirmative-zero violation the doc comment cites, reintroduced one
+      case over. Fixed: fall through only for `NothingDecodable`; the other
+      two refusal reasons print `partitions: NOT MEASURED (refused before
+      enumeration)` / `losses: NOT MEASURED` instead.
+- [x] Low: `recover_one_partition` called `merger.step()` exactly once and
+      dropped the merger without asserting the next step is `Complete` — a
+      `MergeEntry` belonging to a second partition key in the same boundary
+      slot (reachable if a corrupted `END_OF_PARTITION` marker's
+      over-consumption still satisfies the compressed branch's `consumed <=
+      end - offset` bound) would be silently discarded from BOTH the output
+      and the loss manifest. Fixed: the next `step()` is now asserted
+      `Complete`; a further `Partition` classifies `LossClass::Decode` with
+      an explicit "spanning more than one partition key" message instead of
+      vanishing.
+- [ ] BATCHED FOLLOW-UP (not fixed — reported rather than silently dropped):
+      **Medium**: a hard `Err` from `salvage_sstable` (reachable via
+      `writer.write_partition`/`finish`'s `?`-propagation, the SAME
+      underlying defect batched as round-6 item (i)) aborts the WHOLE
+      table-dir run via `exit_after_partial_failure`; every LATER generation
+      is silently never attempted, and when the failure hits the FIRST
+      generation, `exit_after_partial_failure`'s `reports.is_empty()` branch
+      exits `3` WITHOUT EVER WRITING A MANIFEST — contradicting the
+      documented "exit 3 → check the manifest" contract outright. Assessed
+      in depth this round: a correct fix needs classifying
+      `write_partition`/`finish`'s error as a `Refusal`-carrying `Ok(report)`
+      INSIDE `salvage_sstable` itself (the same pattern already used for
+      `open_reader`/chunk-preflight/boundary-source failures via
+      `report_skeleton`), NOT a CLI-layer patch — the CLI has no way to
+      fabricate the failed generation's `format`/`boundary_source` fields
+      after the fact without risking a no-heuristics violation, and doing it
+      properly needs a writer abort/cleanup mechanism that does not exist
+      today (round-4's own scoping note for the identical root cause).
+      Deferred a THIRD time for the same reason; now named explicitly by TWO
+      separate roborev rounds (round-6 batched (i), round-7 finding 2) —
+      elevate priority in the follow-up issue filed at merge.
+      **Low**: `scripts/agent-gate.sh`'s `run_clippy` pass 2 is the only pass
+      that lints `cqlite-core` sources, and it enables `tombstones`, so the
+      new `write_engine/salvage/**` tree (and `decode_partition_at_offset_for_salvage`)
+      is never linted under `-D warnings` by any gate lane; `CQLITE_CLIPPY_FULL=1`
+      is `--all-features` too, same gap. Out of scope for THIS PR to fix — a
+      shared gate script, not this issue's file — flagged to the lead/follow-up
+      rather than edited here.
+      **Low**: the only atomicity test
+      (`issue_4196_salvage_partition_atomicity.rs`) measures
+      `rows_decoded_before_failure == 0` for its fixture/mutation, so the
+      "output holds zero rows for the needle partition" assertion holds
+      trivially — there was never a decoded prefix in the buffer to leak, so
+      D2's actual safety property (a NON-EMPTY decoded prefix is discarded,
+      never written) has no live oracle. Already an honestly-declared gap in
+      the test's own doc (round-5's "left as a follow-up refinement");
+      needs a fixture mutated AFTER the first row of a multi-row partition,
+      which the existing fixture helper does not yet parameterize for —
+      genuine fixture-engineering work, not a quick fix.
+      Tracked as a follow-up issue at merge time per the nit-batching
+      doctrine (joins round-5's batched (c)-(g) and round-6's batched (i)-(ii)).
+
+Re-verified after all fixes: see the verification table in the PR description (round 7 fix round).
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree

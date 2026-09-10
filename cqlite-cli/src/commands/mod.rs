@@ -29,8 +29,15 @@ pub mod read_sstable;
 // write-support items so the module stays unconditional, this file's content
 // is ENTIRELY write-support-dependent (it imports
 // `cqlite_core::storage::write_engine::salvage` at the top level), so the
-// whole module declaration is gated instead.
-#[cfg(feature = "write-support")]
+// whole module declaration is gated instead. `not(tombstones)` mirrors the
+// core module's OWN gate (roborev, issue #4196, round-7 High finding): the
+// core `write_engine::salvage` module is
+// `#[cfg(all(feature = "write-support", not(feature = "tombstones")))]`, so
+// this CLI module — its only cross-crate consumer — must vanish in lockstep
+// under `--all-features`, or `cqlite-cli/tombstones` (which forwards
+// `cqlite-core/tombstones`, see `Cargo.toml`) would compile against a core
+// item that no longer exists.
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 pub mod salvage;
 pub mod verify;
 

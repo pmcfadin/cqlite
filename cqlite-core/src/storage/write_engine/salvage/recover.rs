@@ -474,6 +474,28 @@ async fn recover_one_partition(
         MergeStep::Partition { key, rows } => (key, rows),
         MergeStep::Complete => return Ok(None),
     };
+    // roborev, issue #4196, round-7 Low finding: `step()` was previously
+    // called exactly once and the merger dropped — every row here came from
+    // ONE `decode_partition_at_offset_for_salvage` call for ONE boundary
+    // slot, so this MUST drain to `Complete` on the next step. A second
+    // `Partition` would mean the decoder fabricated rows spanning a
+    // partition boundary (e.g. a corrupted `END_OF_PARTITION` marker whose
+    // over-consumption still satisfied the compressed branch's `consumed <=
+    // end - offset` bound), and silently dropping the merger here would
+    // discard that second partition's rows from BOTH the output and the
+    // loss manifest — the exact "every partition accounted for" contract
+    // this tool exists to uphold.
+    match merger.step() {
+        Ok(MergeStep::Complete) => {}
+        Ok(MergeStep::Partition { .. }) => {
+            return Err((
+                LossClass::Decode,
+                entries.len(),
+                "boundary slot decoded rows spanning more than one partition key".to_string(),
+            ));
+        }
+        Err(e) => return Err((LossClass::Decode, entries.len(), e.to_string())),
+    }
     if entries.is_empty() {
         return Ok(None);
     }

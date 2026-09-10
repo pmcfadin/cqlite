@@ -271,6 +271,12 @@ experimental = ["cqlite-core/experimental"]
 cli-helpers = ["state_machine", "cqlite-core/cli-helpers"]
 # Issue #392: Write support (enables cqlite-core/write-support for CLI write operations)
 write-support = ["state_machine", "cqlite-core/write-support"]
+# Issue #4196 (roborev round-7 High finding): forwards cqlite-core/tombstones so
+# `commands::salvage` (gated `not(feature = "tombstones")` in lockstep with the
+# core module it wraps, `cqlite_core::storage::write_engine::salvage`) can be
+# gated out consistently under `--all-features` instead of failing to compile
+# (the core module vanishes, the CLI module referencing it does not).
+tombstones = ["cqlite-core/tombstones"]
 # Issue #705: Delta-export CDC subcommand (Epic #696 DS9).
 # Enables cqlite-core/delta-scan (DeltaRecord types, scan_delta API) and
 # cqlite-core/parquet (DeltaParquetWriter, arrow/parquet crates).
