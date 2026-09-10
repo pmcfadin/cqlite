@@ -47,7 +47,9 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: gradle
-          cache-dependency-path: trino-connector/*.gradle.kts
+          # `**` so the key covers gradle/fatjar-oracles.gradle.kts too — a single `*`
+          # does not cross `/`, which left that file outside the cache key (#2869).
+          cache-dependency-path: trino-connector/**/*.gradle.kts
 
       - name: Test
         working-directory: trino-connector
@@ -58,14 +60,48 @@ jobs:
         # otherwise fire only on the publish path, so an enforced-platform / metadata
         # leak (e.g. #2334's enforcedPlatform in a published variant) was invisible to
         # CI until the release publish job failed. Running them here catches it pre-merge.
+        # verifyShadowNotPublished asserts the shaded fat jar (#2869) never leaks into
+        # the Maven Central publication: the fat jar is a Release ASSET, and a shaded
+        # uber-jar in Central would hand every downstream consumer a duplicate,
+        # unresolvable copy of the runtime tree. It reads only the two generate* tasks'
+        # own outputs, both already produced above, so it costs essentially nothing.
+        # verifyPublishedArtifactSet is the DECIDABLE half of the Central guard (#2869
+        # finding F). verifyShadowNotPublished keys on NAMES — a shadow variant, a
+        # non-`external` bundling attribute, an `-all.jar` reference — so a shaded jar
+        # attached under a different classifier (`-shaded`, `-fat`, …) passes it.
+        # Extending that name matcher only moves the argument to the next spelling, so
+        # instead this publishes into an isolated file repo under build/ and asserts the
+        # EXACT artifact set (main jar, sources, javadoc, POM, module metadata) with
+        # anything else a named failure. Runs on EVERY PR, which is where a classifier
+        # would be introduced; Maven Central is immutable, so this must fail before a
+        # tag, not after. It is deliberately NOT added to trino-publish.yml's
+        # pre-flight, because that would pull javadoc generation and signing into a step
+        # whose job is to be cheap and fast — the PR gate is the right place to catch a
+        # source change.
         run: >-
           ./gradlew --no-daemon test verifyPublishedPomNettyPin
           generateMetadataFileForMavenPublication generatePomFileForMavenPublication
+          verifyShadowNotPublished verifyPublishedArtifactSet
 
-      - name: Assemble plugin
+      # Named as its own step so the fat-jar contents assertion appears BY NAME in the
+      # log rather than hiding inside an aggregate `check`. Cheap on every PR: `test`
+      # above has already compiled `main`, so shading is seconds. verifyFatJar is the
+      # only oracle for the shaded jar's CONTENTS — that the bundled runtime tree
+      # easy-db-lab curls as ONE artifact instead of resolving 50 is complete,
+      # service-merged and version-pinned (#2869). NOTE: nothing is relocated, and
+      # that is deliberate — see the NO RELOCATION rationale on `tasks.shadowJar` in
+      # build.gradle.kts. Trino's child-first plugin classloader already isolates the
+      # bundled netty/grpc/arrow from the engine's copies.
+      - name: Shade fat jar and verify its contents (shadowJar verifyFatJar)
+        working-directory: trino-connector
+        run: ./gradlew --no-daemon shadowJar verifyFatJar
+
+      - name: Assemble plugin (multi-jar and fat flavors)
         if: env.RUN_FULL == 'true'
         working-directory: trino-connector
-        run: ./gradlew --no-daemon installPlugin
+        # installPlugin => build/plugin/cqlite_flight (the 50-jar runtime tree, unchanged);
+        # installPluginFat => build/plugin-fat/cqlite_flight (exactly one shaded jar, #2869).
+        run: ./gradlew --no-daemon installPlugin installPluginFat
 
       - name: Upload plugin artifact
         if: env.RUN_FULL == 'true'
@@ -74,6 +110,46 @@ jobs:
           name: cqlite-trino-plugin
           path: trino-connector/build/plugin/cqlite_flight
           if-no-files-found: error
+
+      - name: Upload fat plugin artifact
+        if: env.RUN_FULL == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cqlite-trino-plugin-fat
+          path: trino-connector/build/plugin-fat/cqlite_flight
+          # error, not warn: a run that assembled the fat flavor and uploaded NOTHING
+          # must never report green (#2869).
+          if-no-files-found: error
+
+      # Deliberately its OWN step, and deliberately AFTER both plugin uploads (#2869).
+      #
+      # This task is the only EXECUTED check that installPluginFat is a `Sync` and not a
+      # `Copy` — i.e. that bumping the version leaves ONE jar in the plugin directory
+      # rather than two, which Trino would both load. It proves that by planting a
+      # sentinel `cqlite-trino-0.0.0-STALE-all.jar` into
+      # build/plugin-fat/cqlite_flight and asserting the sync removes it.
+      #
+      # That directory is exactly what "Upload fat plugin artifact" publishes, so the
+      # placement is a safety boundary, not cosmetics. Running AFTER the uploads makes
+      # the guarantee STRUCTURAL — the sentinel cannot reach a published artifact
+      # because it does not exist yet when the upload runs. The alternative (naming the
+      # task in the `installPlugin installPluginFat` step above) would leave the
+      # sentinel's absence depending on Gradle's task ordering AND on the upload steps
+      # keeping their implicit `success()` guard; this ordering depends on neither.
+      # Verified by running both publish invocations — `shadowJar verifyFatJar
+      # verifyShadowNotPublished` (the release-asset path) and
+      # `verifyPublishedPomNettyPin verifyShadowNotPublished` + `publishToMavenLocal`
+      # (the Central path) — and confirming no sentinel exists anywhere under build/ and
+      # that build/plugin-fat is never even created, because the planting fires only
+      # when this task is in the task graph.
+      #
+      # NOT gated on RUN_FULL: it is cheap (shadowJar is already built by the step
+      # above, so this is a one-file sync plus an assertion) and the whole point is that
+      # it must actually run. It is wired to `check` too, but NO workflow in this repo
+      # invokes `gradlew check`, so `check` alone is not coverage.
+      - name: Verify installPluginFat prunes a stale jar
+        working-directory: trino-connector
+        run: ./gradlew --no-daemon verifyInstallPluginFatPrunesStale
 
       - name: Upload test reports
         if: always()
@@ -89,8 +165,24 @@ jobs:
           {
             echo "## Trino connector CI tier"
             echo ""
-            echo "- Ordinary PRs run Gradle tests only."
+            echo "- Ordinary PRs run: Gradle \`test\`, \`verifyPublishedPomNettyPin\`, the two publication-metadata generators,"
+            echo "  and FOUR #2869 oracles, none of them full-tier-gated:"
+            echo "  - \`verifyShadowNotPublished\` — no shadow VARIANT, no non-\`external\` bundling, no \`-all.jar\` reference in the"
+            echo "    published metadata. Keyed on names, so it covers the plausible accident and NOT the general question."
+            echo "  - \`verifyPublishedArtifactSet\` — the DECIDABLE half: publishes to an isolated repo under build/ and asserts the"
+            echo "    EXACT artifact set reaching Central (jar, sources, javadoc, POM, module), so a shaded jar under ANY"
+            echo "    classifier (\`-shaded\`, \`-fat\`, …) fails by name. Central is immutable; this must catch it pre-tag."
+            echo "  - \`shadowJar verifyFatJar\` — the shaded fat jar's contents oracle (complete, service-merged, version-pinned)."
+            echo "  - \`verifyInstallPluginFatPrunesStale\` — installPluginFat is a \`Sync\`, so a version bump leaves ONE jar in the"
+            echo "    plugin directory rather than two, which Trino would both load."
+            echo "- Those four oracles execute ONLY because the steps above NAME them. They are also wired to Gradle's"
+            echo "  \`check\` in gradle/fatjar-oracles.gradle.kts and gradle/publication-purity.gradle.kts, but NO workflow in this"
+            echo "  repo invokes \`gradlew check\`, so that wiring is decorative — a new oracle added to \`check\` alone would run"
+            echo "  nowhere. Name it in a step."
             echo "- Plugin assembly and artifact upload run on push to main, nightly schedule, workflow_dispatch, or PRs labeled \`ci:trino-full\`."
-            echo "- Full Docker E2E lives in flight-trino-e2e.yml and accepts \`ci:trino-full\`."
+            echo "  That tier assembles BOTH flavors — \`installPlugin\` (50-jar tree) and \`installPluginFat\` (one shaded jar) —"
+            echo "  and uploads each as an artifact with \`if-no-files-found: error\`."
+            echo "- Full Docker E2E lives in flight-trino-e2e.yml and accepts \`ci:trino-full\`; its \`e2e-fat\` job is the only"
+            echo "  proof that Trino actually LOADS the single shaded jar and returns rows."
             echo "- Current full-tier decision: ${RUN_FULL}."
           } >> "$GITHUB_STEP_SUMMARY"

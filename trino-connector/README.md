@@ -10,6 +10,11 @@ compacted, filtered data back as Arrow.
   foojay auto-provisions the JDK 25 toolchain — no host JDK 25 needed).
 - Build & test: `./gradlew test`
 - Assemble the Trino plugin dir: `./gradlew installPlugin` → `build/plugin/cqlite_flight`
+  (connector jar + every runtime dependency, one jar per file)
+- Assemble an equivalent plugin dir from ONE self-contained jar: `./gradlew installPluginFat` →
+  `build/plugin-fat/cqlite_flight/cqlite-trino-<version>-all.jar` — a **separate output root**, so
+  the multi-jar `build/plugin/` tree above is left untouched (see
+  [Self-contained fat jar](#self-contained-fat-jar-github-release-asset))
 
 ## Maven Central / published artifact
 
@@ -19,12 +24,17 @@ The connector is published to Maven Central on every `v*` release tag:
 in.mcfad:cqlite-trino:<version>
 ```
 
-A Trino plugin is **not a single jar** — Trino loads each plugin from its own
-isolated classloader directory, so the connector jar must sit alongside all of
-its runtime dependencies. The published Maven artifact is just the connector jar;
-to install it you assemble that *directory of jars* (exactly what `./gradlew
-installPlugin` produces under `build/plugin/cqlite_flight/`), then drop the
-directory into Trino's plugin path (`/usr/lib/trino/plugin/cqlite_flight`).
+A Trino plugin is a **directory**, never a bare jar — Trino loads each plugin
+from its own isolated classloader directory, so the connector's classes must sit
+in that directory alongside everything it needs at runtime. That can be many jars
+(the connector jar plus its resolved runtime dependencies) *or* exactly one
+self-contained jar; what is not negotiable is the enclosing directory. The
+published Maven Central artifact is just the connector jar, so to install it you
+assemble that *directory of jars* (exactly what `./gradlew installPlugin`
+produces under `build/plugin/cqlite_flight/`), then drop the directory into
+Trino's plugin path (`/usr/lib/trino/plugin/cqlite_flight`). For the one-jar
+route see [Self-contained fat
+jar](#self-contained-fat-jar-github-release-asset) below.
 
 Assemble the plugin directory from the published artifact with a throwaway
 Gradle/Maven project that depends on the coordinates above and copies the
@@ -45,6 +55,139 @@ tasks.register<Sync>("assemblePlugin") {
 flight-core + jackson + transitive deps). Note `trino-spi` is intentionally
 **not** a runtime dependency — Trino supplies it from the engine classpath.
 Building from this repo (`./gradlew installPlugin`) produces the same directory.
+
+## Self-contained fat jar (GitHub Release asset)
+
+The Maven route above resolves ~50 runtime artifacts. If you would rather fetch
+**one** file by version — a container image build, an air-gapped host, a
+`hostPath` cache on each Kubernetes node — use the shaded jar published as a
+**GitHub Release asset**:
+
+```bash
+V=0.17.0
+BASE=https://github.com/pmcfadin/cqlite/releases/download/v$V
+curl -fLO "$BASE/cqlite-trino-$V-all.jar"
+curl -fLO "$BASE/cqlite-trino-$V-all.jar.sha256"
+shasum -a 256 -c "cqlite-trino-$V-all.jar.sha256"
+```
+
+Two channels, same asset name:
+
+| Channel | URL |
+|---|---|
+| Release (a `v<version>` tag) | `https://github.com/pmcfadin/cqlite/releases/download/v<version>/cqlite-trino-<version>-all.jar` |
+| Dev (rolling `trino-connector-dev` tag) | `https://github.com/pmcfadin/cqlite/releases/download/trino-connector-dev/cqlite-trino-<version>-all.jar` |
+
+The dev channel is ONE long-lived pre-release tag carrying many version-stamped
+assets, so a pre-release build (`0.17.1-dev.1`) is fetchable at a stable URL
+without minting a `v*` tag. See `RELEASING.md` ("Connector dev channel").
+
+### Install it — the directory rule still applies
+
+> **Mount the jar INSIDE the plugin directory, never AS it.** Trino's
+> `io.trino.server.ServerPluginsProvider.loadPlugins` enumerates the plugin path
+> and filters with `Files::isDirectory`, so a plain file sitting at
+> `/usr/lib/trino/plugin/cqlite_flight` is **silently ignored** — no error, no
+> warning, and `SHOW CATALOGS` simply never lists the catalog. This is the
+> single most likely way a fat-jar deployment fails.
+
+Correct layout:
+
+```
+/usr/lib/trino/plugin/cqlite_flight/cqlite-trino-<version>-all.jar
+```
+
+i.e. a Kubernetes `hostPath`/`subPath` mount or a `COPY` whose **destination is a
+path inside** `…/cqlite_flight/`. Locally, `./gradlew installPluginFat` builds
+exactly that layout under its **own** output root — one jar in
+`build/plugin-fat/cqlite_flight/`, **not** `build/plugin/cqlite_flight/`. The two
+roots are deliberately separate so assembling the fat layout leaves the ~50-jar
+`build/plugin/` tree intact (docker-compose still mounts that one); the task is a
+`Sync`, so a version bump cannot leave a stale second jar behind for Trino to load
+alongside the new one. Mind the difference when you mount: `build/plugin/cqlite_flight/`
+after an `installPluginFat` run holds whatever your last `installPlugin` left there,
+which is the multi-jar tree, not the fat jar.
+
+The docker E2E stack can be run either way:
+
+```bash
+docker/e2e-test.sh                          # --plugin-flavor=multi (default): directory of jars
+docker/e2e-test.sh --plugin-flavor=fat      # the shaded jar, one file in the plugin dir
+```
+
+### The `.sha256` sidecar, and why it exists
+
+Every asset ships with a `cqlite-trino-<version>-all.jar.sha256` sidecar. It is
+not decoration: the intended consumer caches the jar in a **per-node `hostPath`
+that survives pod restarts**, so a download-if-missing initContainer has to
+decide "already cached" vs "a truncated leftover from an interrupted download"
+without re-fetching ~19 MB on every Trino pod start. File *presence* cannot tell
+those apart; a checksum can. Verify, and re-download on mismatch.
+
+### What is in it, and what is not
+
+- **`trino-spi` is excluded** — the engine provides it, and a second copy in the
+  plugin directory would clash with the engine's.
+- **Bundled**: the connector plus its full runtime closure — 49 runtime artifacts
+  resolved, 48 contributing entries (Arrow `flight-core`, grpc, netty,
+  `jackson-databind`, …; 11 netty core modules at 4.1.130.Final, 6 arrow modules
+  at 19.0.0), 11142 jar entries in total. `META-INF/services/*` service files are
+  **merged** rather than overwritten — 8 service descriptors, 2 of them
+  contributed by more than one dependency. Merging is not optional in either
+  direction:
+  - `META-INF/services/io.trino.spi.Plugin` — lose it and the plugin does not
+    register at all.
+  - `META-INF/services/io.grpc.LoadBalancerProvider` — **measured**: with
+    `mergeServiceFiles()` configured but shadow's duplicates bypass withheld, the
+    build silently dropped `io.grpc.internal.PickFirstLoadBalancerProvider`.
+    That is gRPC's *default* load balancer, so first-wins there does not break an
+    edge case — it breaks **every** channel. The jar loads, Trino registers the
+    catalog, and the first query dies. `append()` degraded the same way, leaving
+    10 of 11 netty modules with no attestation line.
+- **No relocation, deliberately.** Trino 481's `PluginManager` gives each plugin
+  a child-first classloader whose only parent-first packages are `SPI_PACKAGES`
+  (`io.trino.spi.`, `com.fasterxml.jackson.annotation.`, `io.airlift.slice.`,
+  `io.opentelemetry.api.`, `io.opentelemetry.context.`). The bundled
+  netty/grpc/arrow/`jackson-databind` are therefore already isolated from the
+  engine's copies, so shading their packages would buy nothing — and Jackson
+  *annotations* MUST resolve to the engine's copy for `ConnectorSplit` JSON
+  interop, which relocating them would break.
+- **Size: 18.9 MB** — measured on a clean `build/` (shadow 9.4.3 under Gradle
+  9.1.0); `du -h` reports `19M`. For contrast the thin jar is 172 KB. Size a
+  per-node `hostPath` cache off ~19 MB per cached version.
+- **JVM flags are unchanged.** The fat jar still needs
+  `--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED` in
+  Trino's `jvm.config` — see [Required JVM
+  configuration](#required-jvm-configuration-arrow-off-heap-jdk-17) for the flag,
+  the failure mode without it, and the connector's fail-fast preflight.
+
+Build-side guards: `./gradlew verifyFatJar` asserts the shaded jar's contents
+(connector classes present, merged service file present, `trino-spi` absent), and
+`./gradlew verifyShadowNotPublished` asserts the Maven publication is unchanged
+by the shadow plugin.
+
+### Maven Central still publishes the THIN jar only
+
+Central carries `in.mcfad:cqlite-trino:<version>` — the connector jar, with its
+dependencies declared in the POM. There is deliberately **no `:all` classifier on
+Central**: the fat jar is a GitHub Release asset **exclusively**. Adding a shaded
+variant to the Central component would change the published coordinates' meaning
+for every existing Maven/Gradle consumer, and the reason the fat jar exists (fetch
+one file with `curl`, no resolver) is not a reason to put it in a resolver's
+repository.
+
+### Declared residual: duplicate legal metadata is first-wins
+
+Bundled dependencies each carry their own `META-INF/LICENSE`, `META-INF/NOTICE`
+and `META-INF/DEPENDENCIES`, and in the shaded jar those collide. They resolve
+**first-wins** — one dependency's copy lands and the rest are dropped — rather
+than being aggregated. **This is observed, not assumed**: the built jar has zero
+duplicate entry names, so the colliding copies really do collapse to one rather
+than accumulating. Aggregating them properly (shadow's
+`ApacheNoticeResourceTransformer`) was **deliberately deferred**: it requires
+additional duplicates-strategy bypasses in the build for a non-functional gain.
+The per-dependency licences are unchanged and remain discoverable from the POM /
+`installPlugin` directory; only the aggregated in-jar `NOTICE` is incomplete.
 
 ## Server-emitted Arrow goldens (drift + Flight-interop guards)
 

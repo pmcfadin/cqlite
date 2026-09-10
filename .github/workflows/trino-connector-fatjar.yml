@@ -1,0 +1,447 @@
+name: Trino Connector Fat Jar
+
+# Publishes the SHADED (fat) cqlite-trino connector jar as a GitHub RELEASE
+# ASSET, so a downstream deployment (easy-db-lab's Trino kit) can `curl` ONE
+# versioned jar into a per-node hostPath and mount it at
+# /usr/lib/trino/plugin/cqlite_flight/ — instead of running a Gradle
+# dependency-resolve in an initContainer on every Trino pod start.
+#
+# Consumers curl exactly these URLs:
+#   release: https://github.com/<owner>/<repo>/releases/download/vX.Y.Z/cqlite-trino-X.Y.Z-all.jar
+#   dev:     https://github.com/<owner>/<repo>/releases/download/trino-connector-dev/cqlite-trino-<version>-all.jar
+# each with a `.sha256` sidecar of the same name.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS IS A NEW WORKFLOW AND NOT AN EXTENSION OF trino-publish.yml
+# ---------------------------------------------------------------------------
+# 1. trino-publish.yml is the THIN Maven Central publish and is heavily
+#    doctrined — fail-closed secrets guard (#2156), dry-run-by-default
+#    (#2639), Central-already-published resumability (#2652). Bolting a
+#    second, differently-gated artifact onto that job would entangle those
+#    invariants with a publish that shares none of them.
+# 2. The gating is genuinely different. The fat jar needs NO Maven Central
+#    credentials and NO GPG signing key, and its target — a GitHub release
+#    asset — is MUTABLE (deletable, re-uploadable). Coupling it to
+#    trino-publish.yml's `should_publish` secrets gate would mean a release cut
+#    on a box without signing secrets produces no fat jar either, which is
+#    exactly backwards: this asset should still be produced.
+#
+# Maven Central keeps publishing the THIN jar only. There is deliberately no
+# `:all` classifier on Central — `verifyShadowNotPublished` (run below) is the
+# assertion that the shadow plugin never leaks a shaded artifact into the Maven
+# publication.
+#
+# ---------------------------------------------------------------------------
+# WHY THERE IS NO `dry_run` INPUT (contrast with trino-publish.yml, #2639)
+# ---------------------------------------------------------------------------
+# #2639's dry-run-by-default doctrine protects an IMMUTABLE registry: a
+# mistaken Maven Central upload can never be undone, so the destructive path
+# must be requested explicitly. A GitHub release asset is not that — it can be
+# deleted and re-uploaded, so an unwanted upload is fully recoverable and a
+# dry-run default would only add ceremony.
+#
+# Mutability does, however, create a DIFFERENT hazard that a dry-run flag would
+# not have addressed: an asset can be silently OVERWRITTEN, sidecar included, so
+# a wrongly-built jar can impersonate a released one and still verify. The two
+# safety properties that matter here are therefore enforced directly in the
+# resolve step, both `exit 1` refusals on `channel=release`:
+#   * a dispatch cannot INVENT or MOVE a release tag — `git ls-remote
+#     --exit-code --tags` must already find it; and
+#   * a dispatch cannot MISLABEL an asset — the tag must resolve to THIS
+#     checkout's `GITHUB_SHA`, so the bytes named `X.Y.Z` are `X.Y.Z`'s bytes.
+# Combined with `channel` defaulting to the harmless `dev`, a bare `gh workflow
+# run trino-connector-fatjar.yml -f version=X` cannot touch a release at all.
+# The post-upload step then asserts the public URL serves exactly the digest
+# this run computed, so a rejected upload cannot pass on a prior build's bytes.
+#
+# ---------------------------------------------------------------------------
+# WHY THE DEV CHANNEL IS ONE FIXED TAG, NOT ONE TAG PER BUILD
+# ---------------------------------------------------------------------------
+# The dev channel is a single container release at tag `trino-connector-dev`
+# accumulating many assets over time. The reason for one tag:
+#
+#   * `trino-connector-dev` has NO leading `v`, so it matches ZERO release-train
+#     triggers — every tag trigger in this repo is `v*`. A dev publish therefore
+#     cannot start the release train. A tag-per-build scheme would put an
+#     unbounded number of tags and releases in front of that boundary, one bad
+#     name away from starting it; one fixed non-`v` tag cannot.
+#
+# NOTE for the next maintainer: do NOT reason about this from `release:` events.
+# A release created or edited with `secrets.GITHUB_TOKEN` — which is what this
+# job uses — triggers NO workflow runs at all, so neither the first publish nor
+# any later upload can start flight-trino-e2e.yml, e2e-readback.yml or
+# sstabledump-parity-gate.yml. The `v*`-trigger reason above is the operative
+# one, and it stands on its own.
+#
+# The dev release is marked `prerelease: true`, which also keeps GitHub from
+# ever promoting it to "Latest release".
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Connector version to build (no leading v), e.g. 0.17.0'
+        type: string
+        required: true
+      channel:
+        description: 'dev (DEFAULT): attach to the mutable `trino-connector-dev` prerelease. release: attach to the v<version> release, which must ALREADY be tagged.'
+        type: choice
+        options:
+          - dev
+          - release
+        default: dev
+
+permissions:
+  contents: read
+
+# ---------------------------------------------------------------------------
+# SERIALIZE BY PUBLICATION TARGET (issue #2869)
+# ---------------------------------------------------------------------------
+# The jar and its `.sha256` sidecar are SEPARATE uploads to a MUTABLE target, so
+# two runs aiming at the same asset can interleave and publish a mismatched pair
+# — jar from build N, sidecar from build N+1. A consumer then either verifies
+# successfully against the wrong digest or fails verification on a jar that is
+# fine. The post-upload digest check below cannot catch it: it compares the
+# served bytes against the digest THIS run built, so an interleaved run passes
+# its own check while the published pair is inconsistent. Repeated dev
+# dispatches are the EXPECTED usage (one mutable tag, re-uploaded per build), so
+# this is routine, not a corner case.
+#
+# The key is the PUBLICATION TARGET — the thing that names the asset — and NOT
+# `github.ref`. A dispatch's `github.ref` is the default branch for every dev
+# build, which would both serialize unrelated versions and, worse, FAIL to
+# serialize two same-version runs launched from different refs.
+#
+# `concurrency` cannot read `steps.*`, so the target is re-derived here from the
+# contexts it CAN read (`github`, `inputs`) — the same three cases the resolve
+# step computes:
+#   push v*          -> github.ref_name            (e.g. `v0.17.0`)
+#   dispatch release -> `v<inputs.version>`        (equal to the push key above,
+#                       so a tag push and a channel=release backfill for the same
+#                       version SERIALIZE against each other)
+#   dispatch dev     -> `trino-connector-dev-<inputs.version>`
+# The dev key carries the version because that channel is ONE mutable tag holding
+# many version-stamped assets: two dev builds at DIFFERENT versions touch
+# different assets and must not block each other, while two at the SAME version
+# must. If this expression and the resolve step ever disagree, the resolve step
+# is authoritative for what gets published and this key is authoritative for what
+# serializes — keep them in step.
+#
+# QUEUE, NEVER CANCEL. `cancel-in-progress: true` would be actively harmful here:
+# cancelling mid-upload is how you GET the mismatched pair this exists to
+# prevent, since a cancelled run may have uploaded the jar and not the sidecar.
+# Caveat worth knowing: GitHub keeps at most ONE pending run per group, so a
+# third run supersedes the queued second. That is safe — a superseded PENDING run
+# has uploaded nothing; the IN-PROGRESS run is never interrupted, which is the
+# property that matters.
+concurrency:
+  group: trino-connector-fatjar-${{ github.event_name != 'workflow_dispatch' && github.ref_name || (inputs.channel == 'dev' && format('trino-connector-dev-{0}', inputs.version) || format('v{0}', inputs.version)) }}
+  cancel-in-progress: false
+
+jobs:
+  # Shared release-train preflight (issue #2652): assert the release tag agrees
+  # with EVERY Rust/Python/Node manifest. Only a v* tag push has a ref-derived
+  # version to preflight. A workflow_dispatch SKIPS this DELIBERATELY: a dev
+  # version does not match the four release manifests, and this asset's target
+  # is mutable, so blocking a dev build on release-manifest agreement would be
+  # wrong. The fatjar job's `if:` below tolerates the skip.
+  preflight:
+    name: Release preflight
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/release-preflight.yml
+    with:
+      version: ${{ github.ref_name }}
+
+  fatjar:
+    name: shadowJar -> release asset
+    runs-on: ubuntu-latest
+    needs: [preflight]
+    # preflight is `if: push`-gated, so a workflow_dispatch run SKIPS it.
+    # Proceed when it passed (tag push) or was skipped (dispatch), never when it
+    # failed.
+    if: ${{ !cancelled() && (needs.preflight.result == 'success' || needs.preflight.result == 'skipped') }}
+    timeout-minutes: 30
+    permissions:
+      # contents: write is scoped to THIS job — it is the only one that creates
+      # or edits a release and uploads assets. The workflow default stays read.
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup JDK 25 (runs Gradle and matches the toolchain)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: gradle
+          # `**/` deliberately: a glob `*` does not cross `/`, so a bare
+          # `trino-connector/*.gradle.kts` leaves nested build scripts — e.g.
+          # trino-connector/gradle/fatjar-oracles.gradle.kts, which defines the
+          # two verification tasks this job runs — OUT of the cache key.
+          cache-dependency-path: trino-connector/**/*.gradle.kts
+
+      # Resolve version, target tag and prerelease flag for the three shapes:
+      #   push v*            -> version=<ref minus v>, tag=<ref>,               prerelease=false
+      #   dispatch release   -> version=<input>,       tag=v<input>,            prerelease=false  (tag MUST exist)
+      #   dispatch dev       -> version=<input>,       tag=trino-connector-dev, prerelease=true
+      #
+      # Every workflow_dispatch input is passed through `env:` and referenced as
+      # a QUOTED shell variable — never interpolated as `${{ }}` into the `run:`
+      # body (GHA command injection; this repo mechanizes that lint in
+      # scripts/ci/check-workflow-injection.sh).
+      - name: Resolve version, tag and channel
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          DEV_TAG='trino-connector-dev'
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="${INPUT_VERSION#v}"
+            CHANNEL="$INPUT_CHANNEL"
+          else
+            VERSION="${REF_NAME#v}"
+            CHANNEL='release'
+          fi
+
+          # Strict allowlist, IDENTICAL to trino-publish.yml's: semver core with
+          # an optional pre-release suffix (0.17.0, 0.17.0-test, 0.17.0-rc.1).
+          # Reject anything else so a crafted version cannot inject shell
+          # metacharacters into the gradle/curl invocations below, and so the
+          # resolved value is safe to embed in a quoted git ref and a URL.
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'; then
+            echo "::error::Refusing to build: version '$VERSION' is not a valid release version (expected ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?\$)"
+            exit 1
+          fi
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$CHANNEL" = "dev" ]; then
+            TAG="$DEV_TAG"
+            PRERELEASE=true
+          else
+            if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+              TAG="v${VERSION}"
+            else
+              TAG="$REF_NAME"
+            fi
+            PRERELEASE=false
+          fi
+
+          # Release-channel integrity, in TWO assertions — existence is not
+          # provenance, and only the second one protects the asset's BYTES.
+          #
+          # (1) The tag must already EXIST. softprops/action-gh-release CREATES a
+          #     tag at github.sha when the tag is absent, so without this an
+          #     unguarded `channel=release` dispatch from an arbitrary branch
+          #     could MINT a release tag. This is the safety property `dry_run`
+          #     provides in trino-publish.yml (see the header).
+          #
+          # (2) The tag must resolve to THIS CHECKOUT'S COMMIT. Existence alone
+          #     lets a MISLABELED asset through: `gh workflow run ... -f
+          #     version=0.17.0 -f channel=release` with NO `--ref` dispatches
+          #     against the DEFAULT BRANCH, actions/checkout takes that ref, and
+          #     `-Pversion=0.17.0` names the jar from the INPUT, not the ref. The
+          #     tag exists, so (1) passes; the job then builds main HEAD, emits
+          #     `cqlite-trino-0.17.0-all.jar`, and — release assets being MUTABLE
+          #     — overwrites the genuine v0.17.0 jar AND its `.sha256` sidecar.
+          #     Verification then SUCCEEDS on bytes that are not 0.17.0. Prose in
+          #     RELEASING.md telling the caller to pass `--ref v0.17.0` is not a
+          #     guard, so assert it here.
+          #
+          # The dev channel is exempt from both: its tag is the mutable container
+          # by design and its asset makes no release claim. A `v*` tag push needs
+          # neither — the tag exists and GITHUB_SHA *is* its commit by
+          # construction.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$CHANNEL" != "dev" ]; then
+            if ! git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+              echo "::error::Refusing to publish: git tag ${TAG} does not exist. A release-channel dispatch may only attach to an ALREADY-TAGGED release — it must never create or move a release tag. Dispatch with channel=dev, or cut the tag first."
+              exit 1
+            fi
+            # actions/checkout is shallow and fetches no tags, so fetch just this
+            # one ref to peel it locally. Fail closed: an unfetchable tag leaves
+            # provenance UNKNOWN, which must never take the permissive branch.
+            if ! git fetch --no-tags --depth=1 origin "+refs/tags/${TAG}:refs/tags/${TAG}" >/dev/null 2>&1; then
+              echo "::error::Refusing to publish: could not fetch refs/tags/${TAG} from origin, so the tag's commit is UNKNOWN and this build's provenance cannot be asserted."
+              exit 1
+            fi
+            # ^{commit} peels an annotated tag to its commit; a lightweight tag
+            # already is one.
+            if ! TAG_SHA="$(git rev-parse "refs/tags/${TAG}^{commit}")"; then
+              echo "::error::Refusing to publish: refs/tags/${TAG} did not resolve to a commit, so this build's provenance cannot be asserted."
+              exit 1
+            fi
+            if [ "$TAG_SHA" != "$GITHUB_SHA" ]; then
+              echo "::error::Refusing to publish: tag ${TAG} is at commit ${TAG_SHA} but this run checked out ${GITHUB_SHA}. Publishing would attach a jar NAMED ${VERSION} whose bytes are a different commit's, overwriting the genuine asset and its .sha256 sidecar (release assets are mutable, so verification would still succeed). Re-dispatch with --ref ${TAG}."
+              exit 1
+            fi
+            echo "Verified: release tag ${TAG} exists on origin AND resolves to the checked-out commit ${GITHUB_SHA} — no tag will be created or moved, and the asset's bytes are the tag's bytes."
+          fi
+
+          ASSET="cqlite-trino-${VERSION}-all.jar"
+          {
+            echo "version=$VERSION"
+            echo "channel=$CHANNEL"
+            echo "tag=$TAG"
+            echo "prerelease=$PRERELEASE"
+            echo "asset=$ASSET"
+            echo "jar=trino-connector/build/libs/$ASSET"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Resolved: version=$VERSION channel=$CHANNEL tag=$TAG prerelease=$PRERELEASE asset=$ASSET"
+
+      # shadowJar builds the shaded jar.
+      #
+      # verifyFatJar asserts it is "complete, service-merged and version-pinned"
+      # — every expectation DERIVED from the resolved runtime graph and read back
+      # out of the real artifact: every probeable runtime jar actually
+      # contributed entries; our own `META-INF/services` Plugin descriptor
+      # survived and names `CqliteFlightPlugin`; the `compileOnly` trino-spi is
+      # NOT bundled; multi-source ServiceLoader descriptors are MERGED (union)
+      # rather than first-wins; netty/arrow match the pinned versions; shadow's
+      # default exclusions hold; and no entry NAME appears twice.
+      # NOTE: it does NOT check for relocation, and must not — this design
+      # deliberately FORBIDS relocation (trino-connector/build.gradle.kts
+      # enumerates three reasons: jackson annotations must delegate to the
+      # engine's copy, netty's META-INF/native lookup is computed from the
+      # unrelocated package name, and arrow's netty allocator spans both stacks).
+      # Trino's child-first plugin classloader already isolates the bundled deps.
+      #
+      # verifyShadowNotPublished asserts the shadow plugin has NOT wired the
+      # `:all` artifact into the Maven publication, so Maven Central still gets
+      # the THIN jar only.
+      - name: Build shaded jar (shadowJar + verifyFatJar + verifyShadowNotPublished)
+        working-directory: trino-connector
+        env:
+          V: ${{ steps.resolve.outputs.version }}
+        run: ./gradlew --no-daemon shadowJar verifyFatJar verifyShadowNotPublished -Pversion="$V"
+
+      - name: Checksum the shaded jar
+        id: sum
+        env:
+          ASSET: ${{ steps.resolve.outputs.asset }}
+        run: |
+          set -euo pipefail
+          cd trino-connector/build/libs
+          # Sidecar holds the BARE filename so a consumer can verify with
+          # `sha256sum -c cqlite-trino-X.Y.Z-all.jar.sha256` next to the jar.
+          sha256sum "$ASSET" > "${ASSET}.sha256"
+          echo "::group::sha256"
+          cat "${ASSET}.sha256"
+          ls -l "$ASSET"
+          echo "::endgroup::"
+          # Both digests are published so the post-upload check can assert MY
+          # bytes are what the public URL serves — see that step's comment.
+          {
+            echo "jar_digest=$(sha256sum "$ASSET" | cut -d' ' -f1)"
+            echo "sidecar_digest=$(sha256sum "${ASSET}.sha256" | cut -d' ' -f1)"
+          } >> "$GITHUB_OUTPUT"
+
+      # if-no-files-found: error — a run must never go green having produced
+      # nothing to attach.
+      - name: Upload shaded jar as a workflow artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: cqlite-trino-fatjar-${{ steps.resolve.outputs.version }}
+          path: |
+            ${{ steps.resolve.outputs.jar }}
+            ${{ steps.resolve.outputs.jar }}.sha256
+          if-no-files-found: error
+
+      # No `body`/`generate_release_notes` here on purpose: on the release
+      # channel this attaches to the release release.yml already authored, and
+      # setting a body would clobber those notes. On the dev channel the tag
+      # name is the whole contract.
+      - name: Attach shaded jar to the release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.resolve.outputs.tag }}
+          prerelease: ${{ steps.resolve.outputs.prerelease }}
+          files: |
+            ${{ steps.resolve.outputs.jar }}
+            ${{ steps.resolve.outputs.jar }}.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Fail-closed post-upload assertion. action-gh-release exiting 0 is not
+      # evidence the asset is fetchable, and this workflow's entire reason to
+      # exist is that ONE curl-able URL.
+      #
+      # "HTTP 200" ALONE IS NOT ENOUGH, and that is the whole point of the digest
+      # compare below. The asset NAME is identical across builds on the mutable
+      # `trino-connector-dev` tag (and on a release re-run), so a REJECTED upload
+      # leaves the PREVIOUS build's asset of the same name serving 200: dev build
+      # N publishes cqlite-trino-<v>-all.jar, build N+1 of the same version has
+      # its upload rejected, and a bare reachability check would 200 on N's bytes
+      # and print a `sha256sum -c` snippet that verifies against N's sidecar. So
+      # both files are DOWNLOADED and their sha256 compared to the digests this
+      # run computed locally — turning "something is there" into "MY bytes are
+      # there". A short retry absorbs CDN propagation; a final mismatch or
+      # non-200 fails the run.
+      - name: Verify the public asset URL serves the bytes this run built
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+          ASSET: ${{ steps.resolve.outputs.asset }}
+          JAR_DIGEST: ${{ steps.sum.outputs.jar_digest }}
+          SIDECAR_DIGEST: ${{ steps.sum.outputs.sidecar_digest }}
+        run: |
+          set -euo pipefail
+          base="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          if [ -z "$JAR_DIGEST" ] || [ -z "$SIDECAR_DIGEST" ]; then
+            echo "::error::No locally-computed digest to compare against — the checksum step published none, so this check would be vacuous. Refusing to report success."
+            exit 1
+          fi
+          rc=1
+          for name in "$ASSET" "${ASSET}.sha256"; do
+            case "$name" in
+              *.sha256) want="$SIDECAR_DIGEST" ;;
+              *)        want="$JAR_DIGEST" ;;
+            esac
+            url="${base}/${name}"
+            reason='never attempted'
+            for attempt in 1 2 3 4 5; do
+              code="$(curl -sIL -o /dev/null -w '%{http_code}' "$url" || echo 000)"
+              if [ "$code" != "200" ]; then
+                reason="HTTP ${code}"
+              elif ! got="$(curl -fsL "$url" | sha256sum | cut -d' ' -f1)"; then
+                reason='GET failed after a 200 HEAD'
+              elif [ "$got" != "$want" ]; then
+                reason="served sha256 ${got} != sha256 ${want} built by this run (a rejected upload leaves a PRIOR build's asset of the same name serving 200)"
+              else
+                reason=''
+                break
+              fi
+              echo "attempt ${attempt}: ${url} -> ${reason}; retrying in 5s"
+              sleep 5
+            done
+            if [ -n "$reason" ]; then
+              echo "::error::Release asset is not the artifact this run built: ${url} -> ${reason}. Refusing to report success."
+              rc=1
+              break
+            fi
+            echo "OK 200 + digest match: ${url}"
+            rc=0
+          done
+          if [ "$rc" != "0" ]; then
+            exit 1
+          fi
+          {
+            echo "## cqlite-trino shaded jar published"
+            echo ""
+            echo "- tag: \`${TAG}\`"
+            echo "- asset: \`${ASSET}\` (+ \`.sha256\`)"
+            echo "- sha256: \`${JAR_DIGEST}\`"
+            echo "- verified: public URL serves exactly these bytes (HTTP 200 + digest match)"
+            echo ""
+            echo '```sh'
+            echo "curl -fSL -o ${ASSET} ${base}/${ASSET}"
+            echo "curl -fSL -o ${ASSET}.sha256 ${base}/${ASSET}.sha256"
+            echo "sha256sum -c ${ASSET}.sha256"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

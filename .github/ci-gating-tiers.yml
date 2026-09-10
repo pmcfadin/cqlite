@@ -277,8 +277,40 @@ exempt:
           NOTHING merge-gating runs the Trino connector against a live Flight
           server: the lane is docker-compose + gradle and no gate component or
           registered tier reaches it. The `flight` tier covers cqlite-flight's own
-          Rust end-to-end tests, which is a different surface. Declared, not
-          covered.
+          Rust end-to-end tests, which is a different surface. RESIDUAL NAMED IN
+          #2869: this lane's `e2e-fat` job is the ONLY proof anywhere that Trino
+          LOADS the single shaded fat jar as a plugin and returns rows — the
+          `verifyFatJar` oracle in trino-connector-ci.yml asserts the jar's
+          contents, but only a live Trino can show the bundled, UNRELOCATED tree
+          actually resolves under the plugin classloader (nothing is relocated by
+          design; Trino's child-first plugin classloader is what isolates the
+          bundled netty/grpc/arrow from the engine's copies). `e2e-fat` is non-gating
+          twice over: this whole workflow is exempt, and the job is full-tier only
+          (nightly / push to main / workflow_dispatch / release / a PR labeled
+          `ci:trino-full`), so on a routine unlabeled PR it does not run at all. A
+          fat jar that Trino cannot load can therefore merge. SECOND RESIDUAL, AND
+          THE SHARPER ONE (#2869, roborev Finding B; owner ruled to DECLARE rather
+          than restructure the release process): `e2e-fat` NEVER RUNS AT TAG TIME ON
+          THE RELEASED BYTES. Three facts compose to it, each verified. (1) This
+          workflow's `push` trigger has `branches` and `paths` but NO `tags`, so the
+          `v*` tag push that drives trino-connector-fatjar.yml does not match it.
+          (2) Its only other automatic hook is `release: {types: [published]}`.
+          (3) trino-connector-fatjar.yml creates that release with
+          `softprops/action-gh-release@v3` under `secrets.GITHUB_TOKEN`, and a
+          GITHUB_TOKEN-created release fires NO workflow runs at all. So the
+          `release` subscription is real and `e2e-fat`'s own `if:` would pass on it
+          — it is inert for THIS publisher specifically, not absent; a human- or
+          PAT-created release would fire it. Note the mechanism is already written
+          down at trino-connector-fatjar.yml (a dev publish cannot start the release
+          train, and that note even names this workflow as one it cannot start) —
+          but ONLY in the safety direction. Its coverage consequence in the other
+          direction is what is declared here: known mechanism, undeclared
+          consequence. MITIGATION, stated as mitigation and NOT as coverage:
+          `e2e-fat` does run nightly, on push to `main` under the path filter, and
+          on a PR labeled `ci:trino-full` — so the CODE that produces the fat jar is
+          exercised against a live Trino, just never the TAGGED ARTIFACT. Residual
+          in one sentence: a release could attach a fat jar whose Trino-loadability
+          was last proven at a different commit. Declared, not covered.
 
   - workflow: fuzz.yml
     reason: Fuzz smoke plus nightly long-run; a fuzz finding is filed as a bug, not a merge block.
@@ -502,7 +534,33 @@ exempt:
           NOTHING merge-gating builds or tests trino-connector/: it is a Gradle/Java
           project outside the cargo workspace, and no gate component or registered
           tier invokes gradle. It releases on its own cadence. Declared, not
-          covered.
+          covered. RESIDUAL NAMED IN #2869: this lane is now also the sole home of
+          the THREE shaded fat-jar oracles — `verifyFatJar` (the shaded jar's
+          CONTENTS: that the bundled runtime tree easy-db-lab curls as ONE Release
+          asset instead of resolving 50 artifacts is complete, service-merged and
+          version-pinned; nothing is relocated, deliberately — see the NO RELOCATION
+          rationale on `tasks.shadowJar` in trino-connector/build.gradle.kts),
+          `verifyShadowNotPublished` (the shaded uber-jar must never leak into the
+          Maven Central publication, where it would hand every downstream consumer a
+          duplicate, unresolvable copy of that tree), and
+          `verifyInstallPluginFatPrunesStale` (that `installPluginFat` is a `Sync`
+          and not a `Copy`, so bumping the version leaves ONE jar in the plugin
+          directory rather than two, which Trino would both load). All three run on
+          EVERY PR here and are therefore gated by NOTHING merge-blocking: a
+          regression in any of them — a fat jar missing a bundled dependency or
+          silently degraded to first-wins service descriptors, a shaded variant
+          appearing in Central, or a stale jar accumulating beside the current one —
+          can merge. No registered tier can fix this, because a tier must emit its
+          declared context unconditionally on every PR and a gradle lane outside
+          the cargo workspace cannot; an always-green classifier job would
+          manufacture exactly the vacuous green this registry exists to prevent.
+          HOW THAT COVERAGE IS OBTAINED, because it is not where a reader will look:
+          all three oracles execute ONLY because this workflow's steps NAME them.
+          `trino-connector/gradle/fatjar-oracles.gradle.kts` also wires each one to
+          Gradle's `check` via `tasks.named("check") { dependsOn(...) }`, but NO
+          workflow in this repo invokes `gradlew check` — so that wiring is
+          DECORATIVE, and a future oracle wired to `check` alone would run nowhere
+          while looking covered. Tracked as its own defect. Declared, not covered.
 
   - workflow: workflow-config.yml
     reason: >-

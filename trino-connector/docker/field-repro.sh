@@ -63,6 +63,36 @@ DOCKER_DIR="$ROOT/trino-connector/docker"
 COMPOSE=(docker compose -f "$DOCKER_DIR/docker-compose.yml" -f "$DOCKER_DIR/docker-compose.field-repro-override.yml")
 FAILURES=0
 
+# `TRINO_PLUGIN_DIR` PIN (issue #2869). `docker-compose.yml` now mounts the Trino
+# plugin directory as `${TRINO_PLUGIN_DIR:-../build/plugin/cqlite_flight}`, so
+# `e2e-test.sh --plugin-flavor=fat` can aim that ONE mount at a single shaded jar
+# instead. That made an environment variable load-bearing which previously meant
+# nothing to anyone — including to this harness, which never sets it.
+#
+# This harness is multi-jar ONLY: every check below is about the cqlite-flight
+# SERVER's behaviour (#2264 backpressure/progress, #2193 decode/framing), never
+# about the plugin's packaging. So it pins the variable to the historical multi-jar
+# tree UNCONDITIONALLY rather than defaulting it with `:-`. An ambient value
+# inherited from the invoking shell (or from a CI job that exported it for another
+# lane) would otherwise silently redirect this harness's plugin mount, and every
+# check would then be measuring a different artifact than the one it names — a
+# mis-ATTRIBUTED result, which is worse than a failure.
+#
+# NOT a `:-` default and NOT an opt-in knob, deliberately — the opposite choice from
+# `FLIGHT_PLATFORM` below, which IS a documented override. There is no documented
+# reason to run THIS harness against a different plugin directory, so honouring an
+# override here could only produce a silently mis-attributed result.
+#
+# Placed here, beside `COMPOSE`, for the same reason `FLIGHT_PLATFORM` is resolved
+# early: it must hold a value BEFORE any `${COMPOSE[@]}` call, including `down`,
+# which still parses the whole compose file.
+#
+# The value is byte-identical to the compose default it replaces: compose resolves
+# a RELATIVE bind source against the compose FILE's directory ($DOCKER_DIR), so
+# `../build/plugin/cqlite_flight` is exactly this absolute path. Pinning therefore
+# changes no behaviour — it only removes the ambient-override hazard.
+export TRINO_PLUGIN_DIR="$ROOT/trino-connector/build/plugin/cqlite_flight"
+
 # ── timeout discipline (issue #2233, same pattern as e2e-test.sh) — placed
 # FIRST, before anything else in this file, so `run_with_timeout` is
 # available to EVERY subsequent command including the `FLIGHT_PLATFORM`
@@ -381,7 +411,11 @@ if [[ -n "$INJECT_FAILURE" ]]; then
 fi
 
 log "build connector plugin (shared with e2e-test.sh's build step)"
-PLUGIN_DIR="$ROOT/trino-connector/build/plugin/cqlite_flight"
+# The directory this harness BUILDS into is by definition the one compose MOUNTS,
+# so read it from the pin above rather than re-typing the path: two copies could
+# drift, and a build target that is not the mount source fails invisibly (the stack
+# comes up against a stale or empty plugin dir).
+PLUGIN_DIR="$TRINO_PLUGIN_DIR"
 rm -rf "$PLUGIN_DIR"
 # Host-side Gradle may cold-download Gradle itself + dependencies over the
 # network on a fresh checkout — bounded at the GRADLE_HOST_BUILD tier (issue

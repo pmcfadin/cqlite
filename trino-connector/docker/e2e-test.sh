@@ -3,13 +3,75 @@
 # image, brings up Cassandra + Sidecar + cqlite-flight + Trino, loads data,
 # flushes to SSTables, and asserts query results through the connector.
 #
-# Usage: trino-connector/docker/e2e-test.sh
-# Exit code 0 = all assertions passed.
+# Usage: trino-connector/docker/e2e-test.sh [--plugin-flavor=multi|fat]
+# Exit code 0 = all assertions passed, 1 = an assertion failed, 2 = bad usage.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 COMPOSE=(docker compose -f "$ROOT/trino-connector/docker/docker-compose.yml")
 FAILURES=0
+
+# --- plugin flavor (issue #2869) ---------------------------------------------
+# Which Gradle task builds the plugin directory Trino mounts, and therefore WHAT
+# SHAPE of plugin this run certifies:
+#
+#   multi (DEFAULT, the historical path) -> installPlugin
+#       build/plugin/cqlite_flight, the thin jar + its whole 50-artifact runtime
+#       classpath, one file per dependency.
+#   fat                                 -> installPluginFat
+#       build/plugin-fat/cqlite_flight, ONE shaded cqlite-trino-<version>-all.jar.
+#       This is the shape published as a GitHub Release asset so easy-db-lab can
+#       curl a single file instead of resolving 50 artifacts in an initContainer
+#       at every Trino pod start.
+#
+# Running the FULL suite (not a jar-contents check) is what certifies the fat jar.
+# A bad service-descriptor merge is nearly invisible at load time — io.trino.spi.Plugin
+# is single-source, so Trino's startup checkState passes and the plugin installs — and
+# only shows up as a missing gRPC name resolver / load balancer on the FIRST QUERY.
+# So the ~30 row/count/pushdown assertions below are the load-bearing half of the
+# proof; the four fat-only assertions merely prove the right jar was mounted.
+PLUGIN_FLAVOR=multi
+
+usage() {
+  echo "Usage: $(basename "$0") [--plugin-flavor=multi|fat]"
+  echo "  --plugin-flavor=multi  installPlugin    -> build/plugin/cqlite_flight     (50 jars; default)"
+  echo "  --plugin-flavor=fat    installPluginFat -> build/plugin-fat/cqlite_flight (1 shaded jar)"
+}
+
+# Reject every unrecognized argument with exit 2 rather than ignoring it: silently
+# dropping an unknown flag would let `--plugin-flavour=fat` (or a typo'd value) run
+# and PASS on the multi-jar path while its author believed the fat jar was certified.
+# Same precedent as test-data/scripts/fetch-datasets.sh.
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --plugin-flavor=multi|--plugin-flavor=fat)
+      PLUGIN_FLAVOR="${1#--plugin-flavor=}"
+      ;;
+    --plugin-flavor)
+      # Space-separated form; the value must be present and recognized.
+      [[ $# -ge 2 ]] || { echo "ERROR: --plugin-flavor requires a value (multi|fat)" >&2; usage >&2; exit 2; }
+      case "$2" in
+        multi|fat) PLUGIN_FLAVOR="$2" ;;
+        *) echo "ERROR: unrecognized --plugin-flavor value: $2 (want multi|fat)" >&2; usage >&2; exit 2 ;;
+      esac
+      shift
+      ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "ERROR: unrecognized argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+case "$PLUGIN_FLAVOR" in
+  multi) GRADLE_INSTALL_TASK=installPlugin;    PLUGIN_DIR="$ROOT/trino-connector/build/plugin/cqlite_flight" ;;
+  fat)   GRADLE_INSTALL_TASK=installPluginFat; PLUGIN_DIR="$ROOT/trino-connector/build/plugin-fat/cqlite_flight" ;;
+  *)     echo "ERROR: unreachable plugin flavor: $PLUGIN_FLAVOR" >&2; exit 2 ;;
+esac
+# docker-compose.yml mounts ${TRINO_PLUGIN_DIR:-../build/plugin/cqlite_flight}.
+# ABSOLUTE on purpose: compose resolves a RELATIVE bind source against the compose
+# FILE's directory, not this script's cwd, so a relative value here would silently
+# mount the wrong path (or nothing) depending on where the script was invoked from.
+export TRINO_PLUGIN_DIR="$PLUGIN_DIR"
 
 # Per-query timeout (issue #2233): a product-side streaming hang (observed live —
 # Trino cancels an over-satisfied LIMIT split mid-stream and the connector's
@@ -75,45 +137,6 @@ assert_eq() {
   fi
 }
 
-cleanup() { log "tearing down"; "${COMPOSE[@]}" --profile loadtest down -v --remove-orphans || true; }
-trap cleanup EXIT
-
-log "clean slate (reproducible run)"
-"${COMPOSE[@]}" --profile loadtest down -v --remove-orphans || true
-
-log "build connector plugin (JDK 25 toolchain)"
-PLUGIN_DIR="$ROOT/trino-connector/build/plugin/cqlite_flight"
-# Prefer the host Gradle (CI runs on a JDK 21 host). When no usable host JDK is
-# present (e.g. a dev box without Java), fall back to a JDK 25 container so the
-# e2e is still runnable. A persistent volume caches the Gradle dist + deps.
-# Verify the plugin jar actually materialised — some host "java" shims exit 0
-# without running, so an exit code alone is not proof of a build.
-rm -rf "$PLUGIN_DIR"
-(cd "$ROOT/trino-connector" && ./gradlew --no-daemon installPlugin) || true
-if ! ls "$PLUGIN_DIR"/*.jar >/dev/null 2>&1; then
-  log "host Gradle produced no plugin; building in a JDK 25 container"
-  docker run --rm \
-    -v "$ROOT/trino-connector":/work -w /work \
-    -v cqlite-gradle-cache:/root/.gradle \
-    eclipse-temurin:25-jdk \
-    ./gradlew --no-daemon --console=plain installPlugin
-fi
-ls "$PLUGIN_DIR"/*.jar >/dev/null 2>&1 || { echo "plugin build failed: no jar in $PLUGIN_DIR"; exit 1; }
-
-log "bring up stack (builds cqlite-flight image; waits for healthy deps)"
-"${COMPOSE[@]}" up -d --build
-
-log "wait for Trino to accept queries"
-for i in $(seq 1 60); do
-  if trino "SELECT 1" >/dev/null 2>&1; then break; fi
-  sleep 5
-  [[ $i -eq 60 ]] && { echo "Trino did not become ready"; exit 1; }
-done
-
-log "load data + flush to SSTables"
-"${COMPOSE[@]}" exec -T cassandra cqlsh 172.42.0.2 < "$ROOT/trino-connector/docker/e2e-data.cql"
-"${COMPOSE[@]}" exec -T cassandra nodetool flush analytics
-
 # Substring assert helper for values whose EXACT rendering is not pinned (e.g. a
 # DESCRIBE line where only the column type fragment matters): assert the actual
 # contains the expected fragment rather than an exact match.
@@ -126,6 +149,82 @@ assert_contains() {
     FAILURES=$((FAILURES + 1))
   fi
 }
+
+cleanup() { log "tearing down"; "${COMPOSE[@]}" --profile loadtest down -v --remove-orphans || true; }
+trap cleanup EXIT
+
+log "clean slate (reproducible run)"
+"${COMPOSE[@]}" --profile loadtest down -v --remove-orphans || true
+
+log "build connector plugin (JDK 25 toolchain) — flavor=$PLUGIN_FLAVOR task=$GRADLE_INSTALL_TASK"
+log "plugin dir: $PLUGIN_DIR"
+# Prefer the host Gradle (CI runs on a JDK 21 host). When no usable host JDK is
+# present (e.g. a dev box without Java), fall back to a JDK 25 container so the
+# e2e is still runnable. A persistent volume caches the Gradle dist + deps.
+# Verify the plugin jar actually materialised — some host "java" shims exit 0
+# without running, so an exit code alone is not proof of a build. (Measured on a
+# managed macOS laptop: /usr/local/bin/java prints a policy notice and exits 0
+# having run nothing, so the host attempt "succeeds" and produces no artifact.)
+rm -rf "$PLUGIN_DIR"
+(cd "$ROOT/trino-connector" && ./gradlew --no-daemon "$GRADLE_INSTALL_TASK") || true
+if ! ls "$PLUGIN_DIR"/*.jar >/dev/null 2>&1; then
+  log "host Gradle produced no plugin; building in a JDK 25 container"
+  docker run --rm \
+    -v "$ROOT/trino-connector":/work -w /work \
+    -v cqlite-gradle-cache:/root/.gradle \
+    eclipse-temurin:25-jdk \
+    ./gradlew --no-daemon --console=plain "$GRADLE_INSTALL_TASK"
+fi
+ls "$PLUGIN_DIR"/*.jar >/dev/null 2>&1 || { echo "plugin build failed: no jar in $PLUGIN_DIR"; exit 1; }
+
+# Fat-flavor-only HOST-side shape assertions (issue #2869). `installPluginFat` is a
+# Sync into its own output root, so a version bump cannot leave a stale second jar
+# behind — assert that rather than trust it.
+if [[ "$PLUGIN_FLAVOR" == fat ]]; then
+  log "assert the fat plugin dir is a single shaded jar (issue #2869)"
+  host_jars=()
+  while IFS= read -r j; do host_jars+=("$j"); done < <(find "$PLUGIN_DIR" -maxdepth 1 -name '*.jar' | sort)
+  assert_eq "host plugin dir holds exactly one jar" "1" "${#host_jars[@]}"
+  # basename, not the full path: assert the SHADOW classifier, which is the filename
+  # contract easy-db-lab caches the Release asset on (cqlite-trino-<version>-all.jar).
+  host_jar_name="$(basename "${host_jars[0]:-<none>}")"
+  assert_contains "the single jar is the shaded -all jar (got $host_jar_name)" "-all.jar" "$host_jar_name"
+fi
+
+log "bring up stack (builds cqlite-flight image; waits for healthy deps)"
+"${COMPOSE[@]}" up -d --build
+
+log "wait for Trino to accept queries"
+for i in $(seq 1 60); do
+  if trino "SELECT 1" >/dev/null 2>&1; then break; fi
+  sleep 5
+  [[ $i -eq 60 ]] && { echo "Trino did not become ready"; exit 1; }
+done
+
+# Fat-flavor-only assertions about what Trino ACTUALLY mounted and loaded (#2869).
+# The container-side jar count is the one that catches a compose interpolation
+# mistake: a host dir holding one jar proves nothing if the bind still resolved to
+# the 50-jar tree (or to both). Read it from INSIDE the container.
+if [[ "$PLUGIN_FLAVOR" == fat ]]; then
+  log "assert the container mounted exactly the single shaded jar (issue #2869)"
+  container_jars="$("${COMPOSE[@]}" exec -T trino \
+    sh -c 'ls -1 /usr/lib/trino/plugin/cqlite_flight/*.jar 2>/dev/null | wc -l' | tr -d '[:space:]')"
+  assert_eq "container plugin dir holds exactly one jar" "1" "$container_jars"
+
+  # And that Trino actually installed OUR plugin from it. Trino 481's PluginManager
+  # logs `Installing <plugin class>` per io.trino.spi.Plugin ServiceLoader entry, so
+  # this line is also the direct evidence the shaded
+  # META-INF/services/io.trino.spi.Plugin survived the merge. Grep first so a FAILURE
+  # prints a short actual instead of the whole Trino startup log.
+  plugin_install_line="$("${COMPOSE[@]}" logs trino 2>&1 \
+    | grep -F 'in.mcfad.cqlite.flight.CqliteFlightPlugin' | head -5 || true)"
+  assert_contains "Trino installed CqliteFlightPlugin from the shaded jar" \
+    "Installing in.mcfad.cqlite.flight.CqliteFlightPlugin" "$plugin_install_line"
+fi
+
+log "load data + flush to SSTables"
+"${COMPOSE[@]}" exec -T cassandra cqlsh 172.42.0.2 < "$ROOT/trino-connector/docker/e2e-data.cql"
+"${COMPOSE[@]}" exec -T cassandra nodetool flush analytics
 
 log "wait for the connector to resolve the table via Sidecar (CQL session warmup)"
 for i in $(seq 1 36); do
@@ -488,8 +587,8 @@ assert_eq "row visible after flush" '"6"'                                   "$(t
 
 echo
 if [[ $FAILURES -eq 0 ]]; then
-  echo "✅ E2E PASSED"
+  echo "✅ E2E PASSED (plugin flavor: $PLUGIN_FLAVOR)"
 else
-  echo "❌ E2E FAILED ($FAILURES assertion(s))"
+  echo "❌ E2E FAILED ($FAILURES assertion(s), plugin flavor: $PLUGIN_FLAVOR)"
   exit 1
 fi

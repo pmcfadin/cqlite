@@ -5,6 +5,19 @@ import com.vanniktech.maven.publish.SonatypeHost
 plugins {
     java
     id("com.vanniktech.maven.publish") version "0.30.0"
+    // Shaded ("fat") jar for the single-file Trino plugin drop (issue #2869).
+    //
+    // 9.4.3 is the newest shadow release whose Gradle floor (9.0) is satisfied by
+    // THIS project's wrapper — 9.5.0+ requires Gradle 9.2 and 9.7.0+ requires 9.4.
+    // VERIFIED, not assumed: `./gradlew shadowJar` under wrapper 9.1.0 builds and
+    // emits build/libs/cqlite-trino-<v>-all.jar.
+    //
+    // Do NOT resolve a future shadow floor by bumping the wrapper. The wrapper
+    // version is in LOCKSTEP with the easy-db-lab kit's `gradle:9.1.0-jdk25` init
+    // image (rustyrazorblade/easy-db-lab#731): that image is what a consumer builds
+    // this connector with, so wrapper != image is a broken contract on their side.
+    // Moving either one is a coordinated, two-repo change.
+    id("com.gradleup.shadow") version "9.4.3"
 }
 
 group = "in.mcfad"
@@ -151,6 +164,98 @@ tasks.withType<Test>().configureEach {
     jvmArgs("--add-opens=java.base/java.nio=ALL-UNNAMED", "--enable-native-access=ALL-UNNAMED")
 }
 
+// --- Shaded single-file plugin jar (issue #2869) ------------------------------
+// KEEP THE MAVEN CENTRAL PUBLICATION BYTE-IDENTICAL. Applying shadow would
+// pollute it by DEFAULT: `ShadowJavaPlugin.configureComponents()` adds a
+// `shadowRuntimeElements` variant into the `java` software component, and
+// vanniktech's `configure(JavaLibrary(...))` below publishes exactly
+// `components["java"]` — so the shaded jar would appear in Central's Gradle
+// module metadata as an extra variant. Central keeps publishing the THIN jar
+// only; there is deliberately no `:all` classifier there, because the fat jar is
+// a GitHub Release asset with its own lifecycle, not a library coordinate.
+// `verifyShadowNotPublished` below asserts this from the GENERATED metadata.
+shadow {
+    addShadowVariantIntoJavaComponent = false
+    // Detaches shadowJar from `assemble` ONLY, so a bare `./gradlew assemble` (and
+    // therefore the publication path) stays thin-jar-only and does not pay 19 MiB of
+    // shading. `./gradlew build` DOES still shade, and that is intended: `build` =
+    // `assemble` + `check`, and `check` gates `verifyFatJar`, which `dependsOn`
+    // shadowJar — the fat jar is a shipped artifact, so a full local `build` should
+    // verify it. The triggers are therefore `assemble` NO, and
+    // `shadowJar`/`installPluginFat`/`check`/`build` YES.
+    addShadowJarToAssembleLifecycle = false
+}
+
+tasks.shadowJar {
+    // Shadow's default, set explicitly because the FILENAME is the contract:
+    // easy-db-lab caches the asset on `cqlite-trino-<version>-all.jar`.
+    archiveClassifier = "all"
+
+    // NO RELOCATION, deliberately. Trino 481's PluginManager gives each plugin
+    // directory a child-first classloader whose ONLY parent-first packages are
+    // SPI_PACKAGES (`io.trino.spi.`, `com.fasterxml.jackson.annotation.`,
+    // `io.airlift.slice.`, `io.opentelemetry.api.`, `io.opentelemetry.context.`).
+    // So bundled netty / grpc / arrow / jackson-databind are ALREADY isolated from
+    // the engine's copies — relocation would buy nothing and cost three ways:
+    //   * jackson ANNOTATIONS must resolve to the ENGINE's copy for ConnectorSplit
+    //     JSON interop, and a package rewrite would break that delegation;
+    //   * relocating netty breaks its `META-INF/native/lib*.so` name lookup, which
+    //     is computed from the (unrelocated) package name at runtime;
+    //   * arrow's netty allocator reaches across both stacks (see the #2193 pin
+    //     note above), so rewriting one and not the other splits it.
+    // If a future Trino release makes one of these packages parent-first, relocate
+    // THAT package only, and record the SPI_PACKAGES evidence here.
+
+    // Merge duplicated ServiceLoader descriptors instead of taking the first.
+    mergeServiceFiles()
+    // netty's per-module version attestation: 9 modules each ship a 9-line
+    // properties file at the SAME path, so first-wins leaves the runtime claiming
+    // one module exists. Concatenation is correct here — the keys are
+    // module-qualified (`netty-codec-http2.version=...`).
+    append("META-INF/io.netty.versions.properties")
+
+    // THE CRITICAL BIT (#2869): the two calls above are a NO-OP without this.
+    //
+    // Shadow's `duplicatesStrategy` default is EXCLUDE, and it takes PRECEDENCE over
+    // transforming: the 2nd..Nth copy of a duplicated resource is dropped before it
+    // ever reaches ServiceFileTransformer / AppendingTransformer, so `mergeServiceFiles()`
+    // and `append(...)` silently degrade to first-wins. MEASURED on this graph with
+    // both calls configured and this block removed — `verifyFatJar` reported that
+    // META-INF/services/io.grpc.NameResolverProvider lost
+    // `io.grpc.internal.DnsNameResolverProvider` (grpc-core, beaten by grpc-netty) and
+    // io.grpc.LoadBalancerProvider lost `io.grpc.internal.PickFirstLoadBalancerProvider`
+    // (grpc-core, beaten by grpc-util), and that 10 of 11 netty modules were missing
+    // from io.netty.versions.properties. The failure is NEARLY INVISIBLE at runtime:
+    // io.trino.spi.Plugin is single-source, so Trino's startup `checkState` passes and
+    // the plugin LOADS — then the first query has no default gRPC name resolver or load
+    // balancer.
+    //
+    // EXCLUDE stays the correct GLOBAL default (LICENSE, NOTICE and arrow-git.properties
+    // all want first-wins), so the strategy is bypassed ONLY on the paths the two
+    // transformers above own. `arrow-git.properties` (6 copies) deliberately stays at
+    // first-wins: unlike netty's, its keys are NOT module-qualified, so concatenating
+    // six of them yields duplicate keys and a misleading build/commit attribution.
+    filesMatching(listOf("META-INF/services/**", "META-INF/io.netty.versions.properties")) {
+        duplicatesStrategy = DuplicatesStrategy.INCLUDE
+    }
+
+    // Fail rather than ship a jar with two entries of one name. Note this is NOT
+    // contradicted by the INCLUDE above: INCLUDE admits the later copies into the
+    // TRANSFORMER, which then emits exactly one merged entry per path.
+    failOnDuplicateEntries = true
+}
+
+// The single-jar counterpart to `installPlugin`. `Sync`, never `Copy`, so a
+// version bump cannot leave a stale second jar in the directory — Trino would load
+// both and the newer classes might lose. A SEPARATE output root
+// (build/plugin-fat/) keeps the multi-jar `build/plugin/cqlite_flight` tree
+// untouched, since docker-compose still mounts that one.
+tasks.register<Sync>("installPluginFat") {
+    dependsOn(tasks.shadowJar)
+    into(layout.buildDirectory.dir("plugin-fat/cqlite_flight"))
+    from(tasks.shadowJar)
+}
+
 // --- Published-POM netty-pin oracle (issue #2300) ----------------------------
 // Assert the CONSUMER-FACING artifact: every netty core module that ACTUALLY
 // RESOLVES onto the runtime classpath appears in the generated POM's <dependencies>
@@ -282,6 +387,35 @@ val verifyPublishedPomNettyPin by tasks.registering {
 // Run the POM oracle as part of `check` so `./gradlew check` (and any CI that runs
 // it) enforces the published pin. The connector PR lane runs it explicitly.
 tasks.named("check") { dependsOn(verifyPublishedPomNettyPin) }
+
+// --- Shaded-jar verification oracles (issue #2869) ---------------------------
+// `verifyFatJar` (the shaded jar's contents contract) and
+// `verifyShadowNotPublished` (Maven Central publication purity) live in their own
+// script plugin: they are VERIFICATION, and keeping them here pushed this file to
+// 884 lines against the repo's ~800 source target. The CONFIGURATION half — the
+// `shadow { }` block, `shadowJar`'s transformers/duplicates strategy, the
+// no-relocation rationale and `installPluginFat` — stays above.
+//
+// The applied script is compiled separately, so build.gradle.kts's locals are not
+// visible to it. The three PINS it asserts against are therefore passed through
+// `extra` from their single declaration site above, never re-typed as literals
+// over there: a second copy of a pinned version is exactly the drift
+// `verifyPublishedPomNettyPin` exists to catch, and it would let the oracle
+// certify a pin this build no longer uses.
+//
+// Both tasks are registered on THIS project, so they stay invocable by name
+// (`./gradlew shadowJar verifyFatJar verifyShadowNotPublished`, as Unit D's release
+// workflow and the CI lane call them) and both wire themselves into `check`.
+extra["cqliteNettyVersion"] = nettyVersion
+extra["cqliteNettyTcnativeVersion"] = nettyTcnativeVersion
+extra["cqliteArrowVersion"] = arrowVersion
+apply(from = "gradle/fatjar-oracles.gradle.kts")
+// Publication purity is its own concern and its own file: everything in it is a
+// pre-flight for the IRREVERSIBLE Maven Central upload, and fatjar-oracles had
+// reached 699 of the ~800-line target. Applied AFTER it, and after `mavenPublishing`
+// is configured below is NOT required — `publishing { repositories { ... } }` there
+// is additive and order-independent.
+apply(from = "gradle/publication-purity.gradle.kts")
 
 // --- Maven Central publication (Central Portal via vanniktech) ---------------
 // `publishToMavenLocal` / `publishToMavenCentral` produce main + sources +

@@ -75,7 +75,11 @@ jobs:
           distribution: temurin
           java-version: '25'
           cache: gradle
-          cache-dependency-path: trino-connector/*.gradle.kts
+          # `**/` deliberately: a glob `*` does not cross `/`, so a bare
+          # `trino-connector/*.gradle.kts` leaves nested build scripts — e.g.
+          # trino-connector/gradle/fatjar-oracles.gradle.kts, which defines the
+          # verifyShadowNotPublished task this job runs — OUT of the cache key.
+          cache-dependency-path: trino-connector/**/*.gradle.kts
 
       # Tag runs derive the version from GITHUB_REF_NAME (v0.13.0 -> 0.13.0);
       # manual workflow_dispatch runs have no tag, so use the `version` input.
@@ -140,15 +144,60 @@ jobs:
             echo "in.mcfad:cqlite-trino:${PUBLISH_VERSION} is not on Maven Central (HTTP ${code}) — will publish."
           fi
 
-      # Pre-publish oracle (issue #2300): assert the netty pin survives into the
-      # published POM's <dependencies> BEFORE any publish path runs, so a drifted
-      # or BOM-only pin (which a downstream Maven consumer would resolve at netty
-      # 4.2.x, re-breaking arrow-19's allocator) can never reach Central.
-      - name: Verify published POM netty pin
+      # Pre-publish oracles — THREE properties of the artifact about to reach the
+      # IMMUTABLE Maven Central, all asserted BEFORE any publish path runs.
+      #
+      # 1. verifyPublishedPomNettyPin (issue #2300): the netty pin survives into
+      #    the published POM's <dependencies>. A drifted or BOM-only pin (which a
+      #    downstream Maven consumer would resolve at netty 4.2.x, re-breaking
+      #    arrow-19's allocator) can never reach Central.
+      #
+      # 2. verifyShadowNotPublished (issue #2869): the SHADED jar/variant does NOT
+      #    leak into the publication — Central publishes the THIN jar only, and
+      #    the fat jar ships as a GitHub release asset instead (see
+      #    trino-connector-fatjar.yml). Central purity has to be asserted HERE,
+      #    on the publish path, because nowhere else can stop the upload:
+      #    trino-connector-ci.yml runs this task but is `required`-exempt
+      #    (.github/ci-gating-tiers.yml), so a regression — someone flipping
+      #    `shadow { addShadowVariantIntoJavaComponent = false }`, or a shadow
+      #    bump re-introducing the variant by another route — merges red;
+      #    trino-connector-fatjar.yml runs it on the same v* tag but is a separate
+      #    workflow with NO ordering relative to this publish, so it can only
+      #    report the pollution AFTER an irreversible upload.
+      #
+      #    Its prerequisites (generateMetadataFileForMavenPublication,
+      #    generatePomFileForMavenPublication) are already on the publish path, so
+      #    it adds no new build work.
+      #
+      # 3. verifyPublishedArtifactSet (issue #2869 finding F): the primary-artifact
+      #    set reaching Central is EXACTLY {jar, -sources.jar, -javadoc.jar, .pom,
+      #    .module} — nothing extra, nothing missing. This is the DECIDABLE half of
+      #    the Central guard: #2 keys on the shadow VARIANT and its `shadowed`
+      #    bundling attribute, so a shaded jar attached under a plain classifier
+      #    (`-shaded`) PASSES #2 and is caught only here. Unit A's negative control
+      #    is conclusive on that point.
+      #
+      #    It runs HERE for the same reason #2 does, and the reason is not
+      #    hypothetical: `trino-connector-ci.yml` also runs it, but that workflow is
+      #    `required`-EXEMPT (.github/ci-gating-tiers.yml), so a PR that reddens it
+      #    can still merge. Without this line the only check between a deliberate
+      #    non-standard classifier and an IMMUTABLE registry would live solely in a
+      #    lane that cannot block a merge.
+      #
+      #    Unlike #1 and #2 this one is NOT free: it depends on
+      #    publishMavenPublicationToPublicationAuditRepository, an extra publish into
+      #    the isolated build/publication-audit-repo, which builds the javadoc and
+      #    sources jars. On the PUBLISH path that is close to zero marginal cost —
+      #    publishToMavenCentral already builds both, because Central requires them
+      #    — which is exactly why this belongs at tag time and would be new work at
+      #    PR time. The audit repo is a directory under build/ and is additive: it
+      #    touches neither mavenLocal nor the Central target, so publishToMavenLocal
+      #    and publishToMavenCentral behave exactly as before.
+      - name: Verify published POM netty pin + Central publication purity + artifact set
         working-directory: trino-connector
         env:
           PUBLISH_VERSION: ${{ steps.version.outputs.version }}
-        run: ./gradlew --no-daemon verifyPublishedPomNettyPin -Pversion="$PUBLISH_VERSION"
+        run: ./gradlew --no-daemon verifyPublishedPomNettyPin verifyShadowNotPublished verifyPublishedArtifactSet -Pversion="$PUBLISH_VERSION"
 
       # Dry run (manual workflow_dispatch with dry_run=true): publish only to the
       # local Maven repo. No Central upload and no signing/Central secrets needed,

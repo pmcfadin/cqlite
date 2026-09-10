@@ -335,9 +335,221 @@ def flight_image_guard_errors(file, workflow)
   errors
 end
 
+# The `exit 1` TEXT must live INSIDE the conditional the probe line OPENS — not
+# merely somewhere after it. "Somewhere after it" is defeatable and was
+# demonstrated to be: replacing the refusal body with an `echo` and adding an
+# unrelated `[ -n "$ASSET" ] || exit 1` later in the SAME `run:` body kept the
+# guard green, which is exactly the state that lets a dispatch mint a release
+# tag. (An unrelated EARLIER `exit 1` is a decoy too — this same step also
+# refuses a bad version.) So the span is bounded on both ends.
+#
+# THREE accepted shapes, and anything else is REFUSED rather than guessed:
+#   * same-line, bare:  `<opener> || exit 1`
+#   * same-line, group: `<opener> || { …; exit 1; …}`
+#   * block form:       `if ! <opener>; then` … `exit 1` … `fi`, where the closing
+#                       `fi` is the first one at the opener line's OWN indentation
+#                       (nested blocks inside are indented past it, and later
+#                       sibling blocks close after it).
+#
+# The two same-line forms are matched against the text AFTER the opener and are
+# ANCHORED on `||`, so the `exit 1` is demonstrably the `||` consequent — it runs
+# exactly when the opener fails. That anchoring is the whole point: an earlier
+# draft took a same-line fast path of "does this line contain `exit 1` anywhere",
+# which pinned NO structure and accepted
+# `exit 1; if ! <opener>; then echo; fi` — an `exit 1` sitting BEFORE, and
+# outside, the conditional it was supposed to guard. A same-line refusal in any
+# other spelling (a one-line `if …; then …; fi`, a `&&`/`!` inversion, a trap) is
+# REFUSED, not guessed: reformat it as the block form above. Refusing an
+# unrecognised shape is cheap; guessing at one is how the fast path went wrong.
+#
+# `run` is the raw `run:` scalar, whose lines YAML has already dedented to the
+# block's own base indentation.
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS DOES NOT DECIDE — declared, deliberately not carved (issue #2869)
+# ---------------------------------------------------------------------------
+# Every shape above is matched LEXICALLY over shell source, and a lexical test
+# CANNOT distinguish an executable statement from non-executable text. So a
+# commented `# exit 1` or an `echo "exit 1"` on a line inside the `if`/`fi` span
+# SATISFIES the block form, and a wholly commented-out
+# `# <opener> || exit 1` SATISFIES a same-line form. What the shapes pin is
+# WHERE the refusal sits, not THAT it runs: read the return value as "a refusal
+# is WRITTEN in the right place", never as "a refusal EXECUTES".
+#
+# That gap is left open ON PURPOSE rather than patched, by owner ruling. This
+# repo has ruled on exactly this class three times: **#3725** descoped a
+# per-target source-text scan after seven review rounds found seven holes in it,
+# on the finding that source-text matching cannot decide whether a construct is
+# executable; **#3229** rules "remove the mechanism rather than carve it a fourth
+# time", because every blocked spelling just moves the argument to the next one
+# (a comment stripper then argues about heredocs, then about quoting, then about
+# `$'...'`); **#3499** defers this whole class deliberately. Deciding
+# executability needs a shell PARSER, not a better regex, and that is out of
+# scope for a workflow-policy linter.
+#
+# So the honest division of labour: this function pins the STRUCTURE — which
+# construct the refusal belongs to (the `||` consequent, or the `if`/`fi` span)
+# and, via its caller, which job it sits in and where relative to the publish
+# step. Every accepted shape puts the `exit 1` inside a construct the opener
+# governs; none of them is a bare "the text appears on this line" test. Whether
+# that refusal actually FIRES is established by EXECUTING the step, which is
+# where the real evidence lives: the resolve step's shell is driven through every
+# branch against a scratch repo with a real annotated tag (see the PR's
+# verification record), and a workflow run is the final oracle. A reviewer must
+# not read a green `PASS` here as executability.
+
+# Decides the two same-line shapes from the text FOLLOWING the opener match on
+# the opener's own line.
+#
+# The pre-`||` part may be the remainder of the opener's OWN command — its
+# arguments, redirections (`>/dev/null 2>&1`), even an `&&` continuation — but it
+# may contain NEITHER `;` NOR `|`. Both of those end the opener's command, so an
+# `exit 1` after one of them would be guarding something else (or nothing); that
+# exclusion is what makes this a structural test rather than a text search, and
+# it is what refuses roborev's `exit 1; if ! <opener>; then echo; fi` shape.
+#
+# After `||`, exactly two shapes, both END-anchored so no further statement can
+# follow the refusal:
+#   * `exit 1`
+#   * a brace group delimited by the LAST `}` on the line, whose body contains
+#     `exit 1;` (sh requires a `;` or newline before `}`, so requiring one is
+#     both stricter and correct). Everything in that body is inside the `||`
+#     consequent, which is precisely the structural claim; the body is taken
+#     whole rather than parsed, so `${TAG}` and nested groups are fine.
+def same_line_refusal?(tail)
+  return true if tail.match?(/\A[^;|]*\|\|[ \t]*exit[ \t]+1[ \t]*;?[ \t]*\z/)
+
+  body = tail[/\A[^;|]*\|\|[ \t]*\{(.*)\}[ \t]*;?[ \t]*\z/, 1]
+  !body.nil? && body.match?(/\bexit[ \t]+1[ \t]*;/)
+end
+
+def shell_refusal_bound?(run, opener)
+  lines = run.lines
+  head = lines.index { |line| line.match?(opener) }
+  return false unless head
+
+  head_line = lines[head]
+
+  # Same-line forms: consult ONLY the text after the opener, so an `exit 1`
+  # sitting before it (or otherwise outside the `||` consequent) cannot count.
+  return true if same_line_refusal?(head_line.match(opener).post_match.chomp)
+
+  return false unless head_line.match?(/\bif\b/) && head_line.match?(/\bthen\s*\z/)
+
+  indent = head_line[/\A[ \t]*/]
+  closer = (head + 1...lines.length).find { |idx| lines[idx].rstrip == "#{indent}fi" }
+  return false unless closer
+
+  lines[(head + 1)...closer].any? { |line| line.match?(/exit\s+1/) }
+end
+
+# The step that creates/edits the release and uploads the asset. This is the
+# irreversible-ish action the guards below must precede.
+def release_upload_step?(step)
+  step.is_a?(Hash) && step["uses"].to_s.start_with?("softprops/action-gh-release")
+end
+
+# trino-connector-fatjar.yml (issue #2869): this workflow attaches the SHADED
+# connector jar to a GitHub release. Unlike trino-publish.yml it needs no Maven
+# Central/GPG secrets and its target is MUTABLE, so it deliberately has no
+# `dry_run` input. Mutability replaces the immutable-registry hazard with two of
+# its own, and all three properties below are asserted here:
+#   1. `channel` DEFAULTS TO `dev`, so a bare `gh workflow run
+#      trino-connector-fatjar.yml -f version=X` targets the mutable
+#      `trino-connector-dev` prerelease and never a release tag;
+#   2. the PUBLISHING job refuses unless `git ls-remote --exit-code --tags`
+#      already finds the release tag — softprops/action-gh-release CREATES an
+#      absent tag at github.sha, so without this a release-channel dispatch from
+#      an arbitrary branch could MINT or move a release tag; and
+#   3. that same step refuses unless the tag's commit equals `GITHUB_SHA`.
+#      Existence is not provenance: a `channel=release` dispatch with no `--ref`
+#      runs against the default branch, and since the jar is named from the
+#      `version` INPUT it would overwrite the genuine asset AND its `.sha256`
+#      sidecar with another commit's bytes — which then verify successfully.
+#
+# SCOPE AND ORDER ARE PART OF THE CLAIM. An earlier draft flattened every job's
+# steps into one list and accepted a hit anywhere in it, which certified two
+# states it should have refused: a guard sitting in some OTHER job while the
+# publishing job ran unguarded, and a guard sitting AFTER the upload it is
+# supposed to prevent. So the search is scoped to the job holding the
+# `softprops/action-gh-release` step and the guard must precede that step. If no
+# such job can be identified the check FAILS CLOSED rather than falling back to
+# searching every job — an unlocatable publish point makes the ordering claim
+# unmeasurable, and an unmeasurable claim must never take the permissive branch.
+# (What this does NOT establish is that the refusal EXECUTES — see the declared
+# limit on `shell_refusal_bound?` above.)
+def trino_fatjar_guard_errors(file, workflow)
+  errors = []
+
+  channel = workflow_dispatch_inputs(workflow)["channel"]
+  if !channel.is_a?(Hash)
+    errors << "#{file}: workflow_dispatch must define a `channel` input (issue #2869)"
+  elsif channel["default"].to_s != "dev"
+    errors << "#{file}: `channel` input must default to `dev` so a bare version dispatch cannot target a release tag (issue #2869)"
+  end
+
+  probe = /git ls-remote --exit-code --tags/
+
+  # EVERY job that uploads a release asset must be guarded, not just one of them.
+  publishers = (workflow["jobs"] || {}).select do |_job_name, job|
+    job_step_list(job).any? { |step| release_upload_step?(step) }
+  end
+
+  if publishers.empty?
+    errors << "#{file}: no job holds a `softprops/action-gh-release` step, so the publishing job cannot be " \
+              "identified and the tag guards cannot be scoped to it or ordered against it. Refusing rather " \
+              "than searching every job, which would certify a guard that runs in an unrelated job or after " \
+              "the upload (issue #2869)"
+    return errors
+  end
+
+  publishers.each do |job_name, job|
+    steps = job_step_list(job)
+    upload_index = steps.index { |step| release_upload_step?(step) }
+    probe_index = steps.index { |step| step["run"].to_s.match?(probe) }
+
+    if probe_index.nil?
+      errors << "#{file}: job `#{job_name}` uploads a release asset but contains no " \
+                "`git ls-remote --exit-code --tags` probe, so nothing in it stops a dispatch from minting " \
+                "or moving a release tag (issue #2869)"
+      next
+    end
+
+    if probe_index >= upload_index
+      errors << "#{file}: in job `#{job_name}` the `git ls-remote --exit-code --tags` guard is step " \
+                "#{probe_index + 1} but the `softprops/action-gh-release` upload is step " \
+                "#{upload_index + 1} — the guard must run BEFORE the upload it exists to prevent " \
+                "(issue #2869)"
+    end
+
+    run = steps[probe_index]["run"].to_s
+
+    unless shell_refusal_bound?(run, probe)
+      errors << "#{file}: in job `#{job_name}`, the `exit 1` must sit INSIDE the conditional the " \
+                "`git ls-remote --exit-code --tags` probe opens, so a dispatch can never create or move a " \
+                "release tag (issue #2869)"
+    end
+
+    # Provenance, asserted on the SAME step as the probe so the two refusals
+    # cannot drift into separately-skippable steps. The `GITHUB_SHA` comparison
+    # must itself be a bounded refusal — a mention of `GITHUB_SHA` in a log line
+    # asserts nothing, so the opener is matched only inside a `[ ... ]` test.
+    unless run.match?(/git rev-parse .*\^\{commit\}/) &&
+           shell_refusal_bound?(run, /\[[^\]]*GITHUB_SHA[^\]]*\]/)
+      errors << "#{file}: in job `#{job_name}`, the step holding the `git ls-remote` probe must also assert " \
+                "the release tag's commit (`git rev-parse refs/tags/<tag>^{commit}`) equals GITHUB_SHA and " \
+                "refuse (exit 1) otherwise, so a dispatch cannot overwrite a released asset with another " \
+                "commit's bytes (issue #2869)"
+    end
+  end
+
+  errors
+end
+
 PUBLISH_DISPATCH_GUARDS = {
   "trino-publish.yml" => method(:trino_publish_guard_errors),
-  "flight-image.yml" => method(:flight_image_guard_errors)
+  "flight-image.yml" => method(:flight_image_guard_errors),
+  "trino-connector-fatjar.yml" => method(:trino_fatjar_guard_errors)
 }.freeze
 
 workflow_files = Dir[File.join(options[:workflows_dir], "*.{yml,yaml}")].sort
