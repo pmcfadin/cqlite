@@ -1088,6 +1088,60 @@ passes; `features-load-bearing` 61/61.
 Per lead instruction, NO round-12 roborev re-run was performed — this fix
 round is reported to the lead for a decision on next steps.
 
+## Round 12 — campsite: split the over-threshold corruption-corpus test
+## file BEFORE the next review (lead instruction), then re-review
+
+Lead authorized round 12 with a pre-review task: `issue_4196_salvage_corruption_corpus.rs`
+had crossed the ~1500-line test-file campsite threshold (1542 lines,
+round-11's process note) — split it by responsibility BEFORE running roborev
+again.
+
+- [x] Split into THREE files, a pure move (no behavior changed):
+      - `issue_4196_salvage_corruption_corpus.rs` (686 lines): the ORIGINAL
+        corruption-corpus refusal/classification cases — chunk-CRC flip,
+        damaged boundary source, the three `ComponentUnreadable` refusal
+        tests, and `swapped_index_entry_keys_classify_key_mismatch`
+        (`LossClass::KeyMismatch`, round 9).
+      - `issue_4196_salvage_oom_bounds.rs` (771 lines, NEW): the 4
+        OOM/allocation-bound tests spanning rounds 9-11
+        (`index_entry_offset_past_eof_classifies_truncated`,
+        `implausible_last_offset_does_not_oom_and_classifies_truncated`,
+        `implausible_compression_info_data_length_does_not_oom`,
+        `implausible_chunk_offset_table_does_not_oom`) — grouped together
+        because they exercise the SAME code area (chunk-range/pre-flight
+        computation, `decode_partition_at_offset_for_salvage`'s
+        past-EOF guard) and share the round-11 audit's evidence trail.
+      - `cqlite-core/tests/support/salvage_corpus.rs` (187 lines, NEW): the
+        shared fixture-resolution + Index.db-structural helpers BOTH files
+        depend on (`CLEAN_KEYSPACE`/`CORRUPT_KEYSPACE`/`CLEAN_TABLE_DIR`
+        consts, `candidate_base_roots`, `resolve_root_with_corpus_fixture`,
+        `table_schema`, `skip_or_require`, `usable`, `single_data_db`,
+        `no_data_db_anywhere`, `split_big_index_entries`) — referenced via
+        `use super::datasets_root;`-style cross-module access, the SAME
+        pattern `support/header_refusal.rs` already establishes for
+        `super::datasets_root`/`super::fixture`. `hex_of`/`compressed_chunk_index`
+        stayed LOCAL to the corruption-corpus file (used only by its one
+        remaining chunk-CRC-flip test).
+      New target named in the gate's `write-tests` list right after its
+      sibling `issue_4196_salvage_corruption_corpus` (issue #3522).
+- [x] Confirmed BOTH targets run and the test COUNT is preserved exactly:
+      10 tests total before the split (all in one file) -> 6 in
+      `issue_4196_salvage_corruption_corpus.rs` + 4 in
+      `issue_4196_salvage_oom_bounds.rs` after — no test lost, none
+      duplicated.
+
+Re-verified: `cargo fmt --check` clean; `cargo clippy -p cqlite-core
+--features write-support --lib` and all four salvage `--test` targets
+(`issue_4196_salvage_corruption_corpus`, `issue_4196_salvage_oom_bounds`,
+`issue_4196_salvage_healthy_parity`, `issue_4196_salvage_partition_atomicity`)
+clean; `cargo test -p cqlite-core --lib --features write-support` 4060
+passed (unchanged); `cargo test -p cqlite-cli --lib --features
+write-support` 233 passed (unchanged); all 4 salvage `cqlite-core` targets
+(6+4+4+1 = 15, was 10+4+1 = 15 pre-split — same total) and CLI tests (8)
+pass against the real corpus; `test_salvage_no_resync_scan.sh` passes;
+`features-load-bearing` 61/61 (1712 source files scanned, was 1710 — the 2
+new files, correctly picked up).
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree

@@ -27158,6 +27158,8 @@ dispatch_component() {
   _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
   cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4196_salvage_corruption_corpus &&
   _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4196_salvage_oom_bounds &&
+  _fm_observe_child write-tests test --package '"$wt_pkg"' --features '"$wt_feats"' &&
   cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test issue_4196_salvage_partition_atomicity' ;;
     cli-tests)
       # #3453: cli-tests runs TWO passes at DIFFERENT feature sets (default, then
