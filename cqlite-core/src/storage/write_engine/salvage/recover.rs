@@ -483,6 +483,13 @@ pub async fn salvage_sstable(
 
     report.partitions.recovered = recovered;
     report.partitions.lost = losses.len();
+    // roborev, issue #4196, round-13 Medium finding: surface the
+    // recovered-but-not-written residue (the `Ok(None)` arm above) in the
+    // manifest so a partial silent-drop run — some partitions `Ok(None)`,
+    // the rest written normally, `losses` still empty — is distinguishable
+    // from a run that wrote every recovered partition's content, instead of
+    // both reporting `recovered=N lost=0` and exiting 0.
+    report.partitions.written = written;
     report.losses = losses;
 
     if written == 0 {

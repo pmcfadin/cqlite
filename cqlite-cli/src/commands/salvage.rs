@@ -93,11 +93,14 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
     // `resurrection_gc_positive`, the 5th of 9 tables), salvage silently
     // decoded and re-encoded with the WRONG column set and reported a
     // confidently "clean" manifest, the worst failure shape for a
-    // data-recovery tool. `resolve_salvage_table_schema` instead derives the
-    // target table name from the INPUT's own directory name (Cassandra's
-    // `<table>-<32-hex-id>` convention) and selects the MATCHING
-    // `CREATE TABLE` statement from the file, failing closed when none (or
-    // more than one) matches.
+    // data-recovery tool. `load_compaction_table_schema_for_table` (round-13
+    // Medium finding: consolidated back into `write.rs` — the ORIGINAL
+    // round-12 fix duplicated the whole function locally, WITHOUT its JSON-
+    // schema-file fallback branch, regressing `--schema x.json salvage`)
+    // derives the target table name from the INPUT's own directory name
+    // (Cassandra's `<table>-<32-hex-id>` convention) and selects the
+    // MATCHING `CREATE TABLE` statement from the file, failing closed when
+    // none (or more than one) matches.
     // `--table` (when named) always wins over derivation — an explicit
     // operator choice, and the only route for an input directory NOT laid
     // out in Cassandra's own `<table>-<id>` convention (common for staged/
@@ -118,12 +121,15 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
             }
         },
     };
-    let schema = match resolve_salvage_table_schema(schema_path, &target_table) {
+    let schema = match crate::commands::write::load_compaction_table_schema_for_table(
+        schema_path,
+        Some(&target_table),
+    ) {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
-                "cqlite salvage: failed to resolve a schema for table '{target_table}' from {}: \
-                 {e:#}",
+                "cqlite salvage: failed to resolve a schema for table '{target_table}' from \
+                     {}: {e:#}",
                 schema_path.display()
             );
             std::process::exit(1);
@@ -187,20 +193,29 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
     // `component_findings` vehicle (design D5 already declares its shape
     // generic: `{class, component, detail}`), on EVERY report as it is
     // gathered — it is a table-dir-level fact, not one specific
-    // generation's.
+    // generation's. Attached to the FIRST report only (roborev, issue
+    // #4196, round-13 Low finding): a table dir with G generations and S
+    // skips previously replicated each skip finding onto EVERY report,
+    // producing G × S identical entries across the manifest array for a
+    // fact that is true of the table dir as a whole, not any one
+    // generation. `generations` is non-empty here (the empty case exits
+    // above), so index 0 always exists.
     let mut reports = Vec::with_capacity(generations.len());
-    for input in &generations {
+    for (idx, input) in generations.iter().enumerate() {
         match salvage_sstable(input, &args.out, &schema, SalvageOptions::default()).await {
             Ok(mut report) => {
-                for skipped in &discovery.skipped {
-                    report.component_findings.push(ComponentFinding {
-                        class: "SkippedInputGeneration".to_string(),
-                        component: skipped.path.display().to_string(),
-                        detail: format!(
-                            "a published *-Data.db under the same table dir was never salvaged: {}",
-                            skipped.reason
-                        ),
-                    });
+                if idx == 0 {
+                    for skipped in &discovery.skipped {
+                        report.component_findings.push(ComponentFinding {
+                            class: "SkippedInputGeneration".to_string(),
+                            component: skipped.path.display().to_string(),
+                            detail: format!(
+                                "a published *-Data.db under the same table dir was never \
+                                 salvaged: {}",
+                                skipped.reason
+                            ),
+                        });
+                    }
                 }
                 reports.push(report);
             }
@@ -236,16 +251,32 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
     // attempted (an unparseable-generation skip) is NOT "every partition,
     // across every generation, recovered" — the documented exit-0 contract
     // above `execute_salvage_command` — so it must NOT read as exit 0.
-    let any_imperfect = reports
-        .iter()
-        .any(|r| r.refused.is_some() || !r.losses.is_empty())
-        || !discovery.skipped.is_empty();
+    let any_imperfect = reports.iter().any(report_is_imperfect) || !discovery.skipped.is_empty();
     if all_refused {
         std::process::exit(2);
     }
     if any_imperfect {
         std::process::exit(3);
     }
+}
+
+/// Does this ONE generation's report make the overall run imperfect (exit 3
+/// rather than 0)? Factored out of `execute_salvage_command` (roborev, issue
+/// #4196, round-13 Medium finding) so the exit-code predicate is unit-testable
+/// directly against constructed `SalvageReport` values, without a real
+/// `salvage_sstable` fixture for each case.
+///
+/// A report is imperfect when it refused outright, when it names a genuine
+/// `Loss`, OR when `recovered > written` — a partition that decoded but
+/// reconciled to nothing to write (`recover.rs`'s `Ok(None)` arm) is not a
+/// `Loss` and not a `refused` report on its own, but it IS a partial silent
+/// drop when it happens alongside other partitions that DID write: without
+/// this third arm such a run read as "every partition recovered" and exited
+/// 0, even though one partition's content silently never reached the output.
+fn report_is_imperfect(report: &SalvageReport) -> bool {
+    report.refused.is_some()
+        || !report.losses.is_empty()
+        || report.partitions.recovered > report.partitions.written
 }
 
 /// A post-write failure step — a LATER generation's `salvage_sstable` error,
@@ -331,110 +362,6 @@ fn is_table_id_suffix(id: &str) -> bool {
         && id
             .chars()
             .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
-}
-
-/// Load `schema_path` and select the ONE `CREATE TABLE` statement matching
-/// `target_table` (case-insensitively) — roborev, issue #4196, round-12 High
-/// finding: `write::load_compaction_table_schema` (shared with `compact`)
-/// returns the FIRST table in a multi-table schema file unconditionally,
-/// which silently bound salvage to the wrong column set for any schema file
-/// whose target table was not first. Reuses `cqlite_core::schema::cql_parser`'s
-/// public statement-splitting primitives directly (the SAME ones
-/// `load_compaction_table_schema` uses internally, including its `USE`/
-/// `CREATE KEYSPACE` inference for a table whose own keyspace field is
-/// empty/unknown/default) rather than that function's first-match behavior.
-/// Fails closed — an explicit error, never a silent fallback — when zero or
-/// more than one `CREATE TABLE` in the file matches `target_table`.
-fn resolve_salvage_table_schema(
-    schema_path: &Path,
-    target_table: &str,
-) -> anyhow::Result<cqlite_core::schema::TableSchema> {
-    use anyhow::Context;
-    use cqlite_core::schema::cql_parser::{
-        classify_statement, parse_create_table, split_cql_statements, StatementType,
-    };
-
-    let content = std::fs::read_to_string(schema_path)
-        .with_context(|| format!("failed to read schema file: {}", schema_path.display()))?;
-
-    let mut file_keyspace: Option<String> = None;
-    let mut matched: Option<cqlite_core::schema::TableSchema> = None;
-    let mut all_tables: Vec<String> = Vec::new();
-    for stmt in split_cql_statements(&content) {
-        match classify_statement(&stmt) {
-            StatementType::Other(ref kind) if kind == "use" => {
-                let name = stmt
-                    .trim()
-                    .strip_prefix("USE")
-                    .or_else(|| stmt.trim().strip_prefix("use"))
-                    .unwrap_or("")
-                    .trim()
-                    .trim_end_matches(';')
-                    .trim()
-                    .to_string();
-                if !name.is_empty() {
-                    file_keyspace = Some(name);
-                }
-            }
-            StatementType::Other(ref kind) if kind == "create" => {
-                let lower = stmt.to_lowercase();
-                if lower.contains("create keyspace") {
-                    let after = if let Some(pos) = lower.find("exists") {
-                        &stmt[pos + 6..]
-                    } else if let Some(pos) = lower.find("keyspace") {
-                        &stmt[pos + 8..]
-                    } else {
-                        ""
-                    };
-                    let name = after
-                        .trim()
-                        .split(|c: char| c.is_whitespace() || c == '{' || c == ';')
-                        .next()
-                        .unwrap_or("")
-                        .trim()
-                        .to_string();
-                    if !name.is_empty() {
-                        file_keyspace = Some(name);
-                    }
-                }
-            }
-            StatementType::CreateTable => {
-                if let Ok((_, mut ts)) = parse_create_table(&stmt) {
-                    all_tables.push(ts.table.clone());
-                    if ts.table.eq_ignore_ascii_case(target_table) {
-                        if ts.keyspace.is_empty()
-                            || ts.keyspace == "unknown"
-                            || ts.keyspace == "default"
-                        {
-                            if let Some(ref ks) = file_keyspace {
-                                ts.keyspace = ks.clone();
-                            }
-                        }
-                        if matched.is_some() {
-                            anyhow::bail!(
-                                "schema file {} declares table '{target_table}' more than once",
-                                schema_path.display()
-                            );
-                        }
-                        matched = Some(ts);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    matched.ok_or_else(|| {
-        anyhow::anyhow!(
-            "schema file {} does not declare a CREATE TABLE for '{target_table}' (derived from \
-             the input's own directory name) — table(s) present: {}",
-            schema_path.display(),
-            if all_tables.is_empty() {
-                "(none)".to_string()
-            } else {
-                all_tables.join(", ")
-            }
-        )
-    })
 }
 
 /// `true` iff any `*-Data.db` exists anywhere under `out` (roborev, issue
@@ -642,8 +569,83 @@ fn render_console(reports: &[SalvageReport], args: &SalvageArgs, is_table_dir: b
 
 #[cfg(test)]
 mod tests {
-    use super::out_dir_has_data_db;
+    use super::{out_dir_has_data_db, report_is_imperfect};
+    use cqlite_core::storage::write_engine::salvage::{
+        PartitionTotals, Refusal, RefusalReason, SalvageReport,
+    };
     use tempfile::TempDir;
+
+    /// A minimal, otherwise-clean report — every test below overrides just
+    /// the field(s) under test, so a change to `SalvageReport`'s shape
+    /// cannot silently make an unrelated field the reason a case passes.
+    fn clean_report() -> SalvageReport {
+        SalvageReport {
+            input: "in".to_string(),
+            output: "out".to_string(),
+            format: "nb".to_string(),
+            compressed_input: false,
+            boundary_source: "index".to_string(),
+            generation: 1,
+            partitions: PartitionTotals {
+                total: 1,
+                recovered: 1,
+                lost: 0,
+                written: 1,
+            },
+            losses: Vec::new(),
+            component_findings: Vec::new(),
+            attempted: true,
+            refused: None,
+            now: "2026-01-01T00:00:00Z".to_string(),
+            cqlite_version: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn clean_report_is_not_imperfect() {
+        assert!(!report_is_imperfect(&clean_report()));
+    }
+
+    #[test]
+    fn refused_report_is_imperfect() {
+        let mut report = clean_report();
+        report.refused = Some(Refusal {
+            reason: RefusalReason::NothingDecodable,
+            remedy: "inspect the losses above".to_string(),
+        });
+        assert!(report_is_imperfect(&report));
+    }
+
+    /// roborev, issue #4196, round-13 Medium finding: `recovered > written`
+    /// with an otherwise-clean, non-refused report (a partition reconciled
+    /// to nothing to write alongside others that DID write) must still be
+    /// treated as imperfect — this is the exact case that previously exited
+    /// 0 while silently dropping a partition's content.
+    #[test]
+    fn recovered_exceeding_written_is_imperfect_even_when_not_refused_and_no_losses() {
+        let mut report = clean_report();
+        report.partitions = PartitionTotals {
+            total: 2,
+            recovered: 2,
+            lost: 0,
+            written: 1,
+        };
+        assert!(report.refused.is_none());
+        assert!(report.losses.is_empty());
+        assert!(report_is_imperfect(&report));
+    }
+
+    #[test]
+    fn recovered_equal_to_written_with_no_losses_is_not_imperfect() {
+        let mut report = clean_report();
+        report.partitions = PartitionTotals {
+            total: 3,
+            recovered: 3,
+            lost: 0,
+            written: 3,
+        };
+        assert!(!report_is_imperfect(&report));
+    }
 
     /// Roborev, issue #4196 (round-5 Medium finding 2): `out_dir_has_data_db`
     /// is the probe `exit_after_partial_failure` relies on to see a partial

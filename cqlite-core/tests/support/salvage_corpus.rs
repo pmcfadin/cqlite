@@ -72,12 +72,20 @@ pub fn resolve_root_with_corpus_fixture(corrupt_fixture: &str) -> Option<PathBuf
 }
 
 pub fn table_schema() -> cqlite_core::schema::TableSchema {
+    table_schema_for(TABLE)
+}
+
+/// Like [`table_schema`], but for any table declared in `SCHEMA_FILE`
+/// (`compression-parity.cql`) rather than always [`TABLE`] (`lz4_table`) —
+/// added (round-13) for the uncompressed bad-chunk regression coverage,
+/// which needs `uncompressed_table`'s schema from the SAME file.
+pub fn table_schema_for(table: &str) -> cqlite_core::schema::TableSchema {
     let schema_path = datasets_root::schema_path(SCHEMA_FILE).expect("committed CQL schema");
     let cql = std::fs::read_to_string(schema_path).expect("read schema");
     let start = cql
-        .find(&format!("CREATE TABLE IF NOT EXISTS {TABLE}"))
+        .find(&format!("CREATE TABLE IF NOT EXISTS {table}"))
         .unwrap_or_else(|| {
-            cql.find(&format!("CREATE TABLE {TABLE}"))
+            cql.find(&format!("CREATE TABLE {table}"))
                 .expect("CREATE TABLE statement")
         });
     let end = start + cql[start..].find(';').expect("statement terminator") + 1;
@@ -85,6 +93,37 @@ pub fn table_schema() -> cqlite_core::schema::TableSchema {
         .expect("parse CREATE TABLE");
     t.keyspace = CLEAN_KEYSPACE.to_string();
     t
+}
+
+/// The clean `test_comp.uncompressed_table` source directory glob — mirrors
+/// `issue_1396_uncompressed_crc_verify.rs::clean_source_data_db`'s directory
+/// resolution (same fixture), but returns the DIRECTORY (every sibling
+/// component, not just `Data.db`) since salvage needs the whole component
+/// set (`Index.db`, `CRC.db`, `Statistics.db`, ...), not a single file.
+///
+/// Requires `nb-1-big-CRC.db` to be PRESENT, not just `*-Data.db` (roborev,
+/// issue #4196, round-13 gate finding): a candidate root can carry a
+/// same-named `uncompressed_table-*` directory with `Data.db` but WITHOUT
+/// `CRC.db` (observed on a worktree checkout whose local `test-data/datasets`
+/// predates this fixture's CRC.db provisioning — worktrees are documented to
+/// lack some gitignored binaries, CLAUDE.md's "Test data in worktrees" note)
+/// — accepting that directory as "usable" sent the chunk-CRC test straight
+/// into a `read CRC.db: NotFound` panic instead of a graceful skip/fall
+/// through to the next candidate root.
+pub fn clean_uncompressed_table_dir(root: &Path) -> Option<PathBuf> {
+    let base = root.join("sstables").join(CLEAN_KEYSPACE);
+    let rd = std::fs::read_dir(&base).ok()?;
+    for entry in rd.flatten() {
+        let name = entry.file_name();
+        let name = name.to_str()?.to_string();
+        if name.starts_with("uncompressed_table-") && entry.path().is_dir() {
+            let dir = entry.path();
+            if dir.join("nb-1-big-CRC.db").is_file() {
+                return Some(dir);
+            }
+        }
+    }
+    None
 }
 
 pub fn skip_or_require(what: &str, reason: &str) -> bool {

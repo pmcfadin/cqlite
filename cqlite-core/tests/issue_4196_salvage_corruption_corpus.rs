@@ -213,6 +213,170 @@ async fn compressed_chunk_crc_flip_loses_exactly_the_intersecting_partitions() {
     );
 }
 
+/// R2.1 (roborev, issue #4196, round-13 Medium finding: NO test anywhere in
+/// this change exercised the UNCOMPRESSED bad-chunk path — the only format
+/// CQLite's own production writer emits, issue #1406) — an uncompressed
+/// `Data.db` with one real chunk-CRC mismatch (a byte flipped inside chunk
+/// 0, `CRC.db` left intact) loses exactly the partitions whose byte range
+/// intersects the bad chunk, classified `LossClass::ChunkCrc`, with an
+/// `UncompressedChunkCrcMismatch` component finding — mirroring the
+/// compressed case above, but exercising `uncompressed_chunk_preflight`
+/// (the `chunk_index`/`Index.db`-offset domain-alignment assumption its own
+/// doc calls out as the risky part) against a REAL CRC mismatch rather than
+/// only an absent/unopenable `CRC.db`.
+///
+/// Fixture built dynamically (no committed corpus fixture existed for this
+/// path) by copying the clean `test_comp.uncompressed_table` source into a
+/// tempdir and flipping one byte, mirroring
+/// `issue_1396_uncompressed_crc_verify.rs::plain_scan_over_chunk0_flipped_uncompressed_fixture_fails_fast`'s
+/// established construction.
+#[tokio::test]
+async fn uncompressed_chunk_crc_flip_loses_exactly_the_intersecting_partitions() {
+    let Some(root) = candidate_base_roots()
+        .into_iter()
+        .find(|root| salvage_corpus::clean_uncompressed_table_dir(root).is_some())
+    else {
+        skip_or_require(
+            "clean test_comp.uncompressed_table source",
+            &format!(
+                "no candidate root carries sstables/{CLEAN_KEYSPACE}/uncompressed_table-*; \
+                 searched {:?}",
+                candidate_base_roots()
+            ),
+        );
+        return;
+    };
+    let clean_dir =
+        salvage_corpus::clean_uncompressed_table_dir(&root).expect("checked present above");
+
+    // Independent expected-loss computation (design D6): the clean source's
+    // OWN Index.db entries + the REAL `CRC.db`-declared chunk size — never
+    // from `salvage_sstable`'s own behaviour.
+    let clean_crc_bytes = std::fs::read(clean_dir.join("nb-1-big-CRC.db")).expect("read CRC.db");
+    let chunk_size = u32::from_be_bytes([
+        clean_crc_bytes[0],
+        clean_crc_bytes[1],
+        clean_crc_bytes[2],
+        clean_crc_bytes[3],
+    ]) as usize;
+    let mut clean_positions = fixture::index_partition_positions(&clean_dir);
+    clean_positions.sort_by_key(|(_, pos)| *pos);
+    let clean_data_len = std::fs::metadata(clean_dir.join("nb-1-big-Data.db"))
+        .expect("stat clean Data.db")
+        .len() as usize;
+
+    // Flip one byte inside chunk 0 ([0, chunk_size)) but well past the
+    // parsed header buffer, matching issue_1396's own established offset —
+    // `open()` must still succeed; the mismatch surfaces on salvage.
+    let flip_at = 40_000usize;
+    assert!(
+        flip_at < chunk_size,
+        "flip offset must stay inside chunk 0 for this test's expected-loss derivation to hold"
+    );
+
+    let bad_chunk = 0usize;
+    let mut expected_lost: BTreeSet<String> = BTreeSet::new();
+    for i in 0..clean_positions.len() {
+        let (key, pos) = &clean_positions[i];
+        let end = clean_positions
+            .get(i + 1)
+            .map(|(_, next_pos)| *next_pos)
+            .unwrap_or(clean_data_len);
+        let start_chunk = pos / chunk_size;
+        let last_byte = end.saturating_sub(1).max(*pos);
+        let end_chunk = last_byte / chunk_size;
+        if (start_chunk..=end_chunk).contains(&bad_chunk) {
+            expected_lost.insert(hex_of(key));
+        }
+    }
+    assert!(
+        !expected_lost.is_empty(),
+        "expected-loss computation found zero intersecting partitions for chunk 0 — the fixture \
+         or the derivation changed"
+    );
+
+    let schema = salvage_corpus::table_schema_for("uncompressed_table");
+    let temp_src = TempDir::new().expect("tempdir");
+    for entry in std::fs::read_dir(&clean_dir)
+        .expect("read clean dir")
+        .flatten()
+    {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy().to_string();
+        if name_str.ends_with(".db.jsonl") || name_str.ends_with(".db.txt") {
+            continue; // drop bulky/derived sidecars salvage never reads
+        }
+        std::fs::copy(entry.path(), temp_src.path().join(&name_str)).expect("copy component");
+    }
+    let corrupt_data_db = single_data_db(temp_src.path());
+    let mut bytes = std::fs::read(&corrupt_data_db).expect("read Data.db");
+    bytes[flip_at] ^= 0xFF;
+    std::fs::write(&corrupt_data_db, &bytes).expect("write chunk-0-flipped Data.db");
+
+    let out_root = TempDir::new().expect("tempdir").path().join("out");
+    let report = salvage_sstable(
+        &corrupt_data_db,
+        &out_root,
+        &schema,
+        SalvageOptions::default(),
+    )
+    .await
+    .expect("salvage must not error on a damaged Data.db (a classified loss, not an Err)");
+
+    assert_eq!(
+        report.partitions.total,
+        clean_positions.len(),
+        "boundary enumeration total must equal the clean Index.db's partition count \
+         (Index.db is untouched by this fixture)"
+    );
+
+    if expected_lost.len() == clean_positions.len() {
+        let refusal = report
+            .refused
+            .as_ref()
+            .expect("every partition lost must REFUSE (spec R5.2)");
+        assert_eq!(refusal.reason, RefusalReason::NothingDecodable);
+    } else {
+        assert!(
+            report.refused.is_none(),
+            "a partial chunk-CRC loss must not REFUSE; got {:?}",
+            report.refused
+        );
+    }
+
+    let actual_lost: BTreeSet<String> = report.losses.iter().map(|l| l.key_hex.clone()).collect();
+    assert_eq!(
+        actual_lost, expected_lost,
+        "lost-partition key set differs from the independently-derived chunk-intersection set"
+    );
+    for loss in &report.losses {
+        assert_eq!(
+            loss.class,
+            LossClass::ChunkCrc,
+            "every loss from a chunk-CRC-only corruption must classify chunk-crc; got {:?} for \
+             key {}",
+            loss.class,
+            loss.key_hex
+        );
+    }
+
+    assert!(
+        report
+            .component_findings
+            .iter()
+            .any(|f| f.class == "UncompressedChunkCrcMismatch"),
+        "component_findings must name UncompressedChunkCrcMismatch; got {:?}",
+        report.component_findings
+    );
+
+    eprintln!(
+        "[issue_4196] uncompressed_chunk_crc_flip: {} of {} partition(s) lost to chunk 0 \
+         (independently derived), matching salvage's own loss set exactly.",
+        report.losses.len(),
+        report.partitions.total
+    );
+}
+
 /// R4.1 — a damaged boundary source (`Index.db`) refuses; no `Data.db` is
 /// written under `--out`.
 #[tokio::test]

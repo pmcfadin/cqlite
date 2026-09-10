@@ -1280,6 +1280,150 @@ was 8; +1 new fail-closed case, plus 5 existing tests updated with
 `--table`) pass against the real corpus; `test_salvage_no_resync_scan.sh`
 passes; `features-load-bearing` 61/61.
 
+## Round 13, roborev job 3371 — 3 Medium + 4 Low found; all 3 Medium fixed,
+## 4 of 4 Low addressed (2 fixed, 2 documented/deferred)
+
+- [x] Medium (finding 1): a partition that decodes but reconciles to
+      nothing to write (`recover.rs`'s `Ok(None)` arm — e.g. a shadowed
+      range tombstone with no live data) increments `recovered` but
+      `written` (tracked locally) was never surfaced in the manifest. A run
+      with SOME partitions written and one `Ok(None)` reported
+      `recovered=N lost=0`, `losses: 0 RECOGNISED`, `refused: null` and
+      exited 0 — indistinguishable from a run that wrote every recovered
+      partition's content. Fixed: added `written: usize` to
+      `PartitionTotals` (`#[serde(default)]` so an OLD manifest without the
+      field still deserializes), set from `recover.rs`'s own local
+      `written` counter, rendered as an explicit `note:` line in
+      `render_text` whenever `recovered > written`, and folded into the
+      CLI's imperfect-run predicate — factored into a standalone
+      `report_is_imperfect(&SalvageReport) -> bool` (previously inlined in
+      `execute_salvage_command`) so the new `recovered > written` arm is
+      unit-testable directly against constructed `SalvageReport` values
+      without a real fixture for the mixed-partition case
+      (`recovered_exceeding_written_is_imperfect_even_when_not_refused_and_no_losses`,
+      plus 3 sibling cases). End-to-end fixture coverage for the actual
+      `Ok(None)` reconciliation mechanism (a real SSTable with a
+      fully-shadowed partition alongside a normal one) is NOT added this
+      round — constructing a byte-accurate such fixture needs the
+      `tombstones`-gated write path this crate's OWN salvage tests
+      deliberately avoid (`not(tombstones)`, matching
+      `issue_4196_salvage_healthy_parity.rs`'s established note) and is
+      real scope beyond a wiring fix; the manifest/exit-code WIRING itself
+      (the actual defect) is precisely covered by the new unit tests above.
+- [x] Medium (finding 2): `resolve_salvage_table_schema` (round-12's fix)
+      was a COPY of `write::load_compaction_table_schema` with a
+      table-name filter added, but it dropped that function's non-CQL
+      (JSON schema file) fallback branch entirely — `cqlite --schema
+      schema.json salvage …` regressed to a hard "does not declare a
+      CREATE TABLE … table(s) present: (none)" failure. Fixed: consolidated
+      BOTH callers into ONE function,
+      `write::load_compaction_table_schema_for_table(schema_path,
+      target_table: Option<&str>)` — `target_table: None` reproduces
+      `compact`'s exact historical "first table wins, return immediately"
+      behavior (kept as the thin `load_compaction_table_schema` wrapper so
+      `compact`'s call site and its existing unit test need no change),
+      `target_table: Some(name)` is salvage's table-selecting path, and the
+      JSON fallback is now reached by BOTH regardless of `target_table`
+      (JSON has no multi-statement concept to filter). Removed the
+      104-line duplicate from `salvage.rs` entirely. New tests:
+      `selects_named_table_from_multi_table_schema_file`,
+      `selecting_absent_table_fails_closed_naming_present_tables`,
+      `json_schema_file_resolves_regardless_of_target_table`.
+- [x] Medium (finding 3): no test anywhere in the change exercised the
+      UNCOMPRESSED bad-chunk path — only a compressed inline-CRC flip and
+      an absent/unopenable `CRC.db` were covered, never a REAL CRC mismatch
+      against the uncompressed format (the ONLY format CQLite's own
+      production writer emits, issue #1406). Fixed:
+      `uncompressed_chunk_crc_flip_loses_exactly_the_intersecting_partitions`
+      — built dynamically (no committed corpus fixture existed for this
+      exact path) by copying the clean `test_comp.uncompressed_table`
+      source into a tempdir and flipping one byte inside chunk 0 while
+      `CRC.db` stays intact, mirroring
+      `issue_1396_uncompressed_crc_verify.rs`'s established construction;
+      asserts the intersecting partition(s) come back `LossClass::ChunkCrc`
+      with an `UncompressedChunkCrcMismatch` component finding, using the
+      SAME independent range-intersection expected-loss derivation the
+      compressed test uses (now against the real `CRC.db`-declared chunk
+      size rather than `CompressionInfo.chunk_length`). On this corpus
+      fixture the single partition happens to intersect chunk 0 entirely,
+      so it exercises the `NothingDecodable` total-refusal branch — the
+      test asserts BOTH branches (like its compressed sibling), so a
+      corpus regeneration that shifted this to a partial loss would still
+      pass. `table_schema()` in `support/salvage_corpus.rs` was
+      generalized to `table_schema_for(table: &str)` (thin
+      backward-compatible wrapper kept) to resolve `uncompressed_table`'s
+      schema from the same `compression-parity.cql` file.
+- [x] Low (finding 1): `load_compaction_table_schema` was briefly
+      `pub(crate)` with a comment claiming `commands::salvage` reused it —
+      stale after round-12's (buggy) duplicate. Resolved as PART of finding
+      2's fix: reverted to private now that salvage genuinely calls the
+      shared `load_compaction_table_schema_for_table` instead.
+- [x] Low (finding 2): `CREATE KEYSPACE` name extraction computed `pos`
+      from `stmt.to_lowercase()` (full Unicode case folding, NOT
+      byte-length-preserving — e.g. `İ` → 3 bytes from 2) then sliced the
+      ORIGINAL `stmt` at that byte offset — a non-ASCII statement could
+      misparse or panic on a non-char-boundary slice. Duplicated in both
+      `write.rs` and `salvage.rs` before finding 2's consolidation. Fixed:
+      `to_ascii_lowercase()` (byte-length-preserving; only ASCII bytes
+      change) in the one consolidated implementation. New test:
+      `create_keyspace_with_non_ascii_prefix_does_not_panic_or_misparse`
+      (a leading `İ` comment before `CREATE KEYSPACE`, which the OLD code's
+      length mismatch would have misaligned).
+- [ ] DOCUMENTED (Low finding 4, not restructured — the mechanism is
+      declared rather than removed): `tombstones = ["cqlite-core/tombstones"]`
+      is SUBTRACTIVE at the CLI's public surface — `--all-features` on
+      `cqlite-cli` removes the `salvage` verb and silently zero-tests the
+      five `issue_4196_salvage_*`/`salvage_cli_tests` targets. Documented
+      at the feature definition in `cqlite-cli/Cargo.toml` (the effect,
+      that `dispatch_salvage`'s error text already names the escape, and
+      that no local gate component currently runs `cqlite-cli
+      --all-features` — verified via `grep` against `scripts/agent-gate.sh`
+      and the workflow files, so this is not presently a false-green risk
+      in CI). A zero-tests guard on those five targets is real, separate
+      infrastructure work (matching the `feature-iso-*` lanes' existing
+      pattern) scoped beyond one Low finding's budget; left as a named
+      prerequisite for any FUTURE `cqlite-cli --all-features` gate lane
+      rather than built speculatively now.
+- [x] Low (finding 5): `SkippedInputGeneration` findings were pushed onto
+      EVERY generation's report inside the per-generation loop, so a table
+      dir with G generations and S skips emitted G × S identical findings
+      — the finding's own justification comment ("a table-dir-level fact,
+      not one specific generation's") argues against replicating it.
+      Fixed: attached to the FIRST report only (`idx == 0`); `generations`
+      is provably non-empty at that point (the empty case exits earlier).
+      Both existing CLI tests asserting this finding's presence use a
+      single-real-generation fixture (`entries[0]`), so behavior is
+      unchanged for them; re-ran `salvage_cli_tests` to confirm.
+
+Re-verified after all fixes: `cargo fmt --check` clean (`cqlite-core`,
+`cqlite-cli`); `cargo clippy -p cqlite-core --lib --features write-support`
+clean; `cargo clippy -p cqlite-core --test issue_4196_salvage_corruption_corpus
+--test issue_4196_salvage_oom_bounds --features write-support` clean;
+`cargo clippy -p cqlite-cli --lib --bins --test salvage_cli_tests --features
+write-support` clean (the workspace-wide `--all-targets` clippy separately
+fails on a PRE-EXISTING, untouched dead-code lint in
+`issue_3809_tombstone_clustering_identity.rs` — confirmed via `git log` that
+file is unrelated to this diff); `cargo test -p cqlite-cli --lib --features
+write-support commands::` 29 passed (was 23; +6 new: 4 `report_is_imperfect`
+unit tests, 2 `load_compaction_table_schema_for_table` tests beyond the
+JSON/ASCII ones already counted below); `cargo test -p cqlite-cli --lib
+--features write-support commands::write::` 10 passed (was 4; +6: table
+selection, absent-table fail-closed, JSON-with-target_table, non-ASCII
+CREATE KEYSPACE, plus the 2 pre-existing UDT tests); all four salvage
+`cqlite-core` `--test` targets pass against the real corpus (corruption-
+corpus now 8 tests, was 7; oom-bounds 5, healthy-parity 4, atomicity 1);
+`salvage_cli_tests` 9/9 unchanged. `write.rs` grew from the pre-existing
+831-line origin/main baseline (already over the ~800 source threshold
+before this PR touched it at all) to ~1010 lines — the growth is the
+Medium-2 consolidation (one shared function replacing two duplicates,
+which is a NET reduction in total salvage-related code even though this
+one file grew) plus 6 new regression tests; splitting `write.rs` by
+responsibility is real, pre-existing scope (`compact`/`export`/write-stats
+handlers predate this PR) that a data-recovery-tool round should not
+absorb opportunistically — left as a follow-up matching epic #1116's
+existing "split, don't inline" doctrine, `CQLITE_ALLOW_FILE_GROWTH=1` used
+for this round's lite-gate run with this note as the required link.
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree

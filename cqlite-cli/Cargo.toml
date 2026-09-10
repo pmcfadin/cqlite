@@ -276,6 +276,20 @@ write-support = ["state_machine", "cqlite-core/write-support"]
 # core module it wraps, `cqlite_core::storage::write_engine::salvage`) can be
 # gated out consistently under `--all-features` instead of failing to compile
 # (the core module vanishes, the CLI module referencing it does not).
+#
+# SUBTRACTIVE at this crate's public surface (roborev, issue #4196, round-13
+# Low finding): enabling this feature REMOVES the `salvage` verb rather than
+# adding anything — `cargo build -p cqlite-cli --all-features` therefore ships
+# a binary with NO `salvage` command (`dispatch_salvage` returns a "not
+# built" error naming this feature) and with core's `SinglePartitionCompaction`
+# / point-read path compiled out. It also turns the five `issue_4196_salvage_*`
+# / `salvage_cli_tests` test targets (each `#![cfg(all(write-support,
+# not(tombstones)))]`) into zero-test binaries under any `--all-features`
+# lane. No local gate component currently runs `cqlite-cli --all-features`
+# (the gate's `all-features-check` component is `cqlite-core`-only), so this
+# is not presently a false-green risk in CI — but a future `--all-features`
+# lane on this crate would need a zero-tests guard on those five targets
+# before it could be trusted (issue #4196 tasks.md, round-13).
 tombstones = ["cqlite-core/tombstones"]
 # Issue #705: Delta-export CDC subcommand (Epic #696 DS9).
 # Enables cqlite-core/delta-scan (DeltaRecord types, scan_delta API) and

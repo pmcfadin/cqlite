@@ -104,6 +104,21 @@ pub struct PartitionTotals {
     pub total: usize,
     pub recovered: usize,
     pub lost: usize,
+    /// How many of `recovered` were actually written to the output
+    /// `Data.db` (roborev, issue #4196, round-13 Medium finding). A
+    /// partition that decoded but reconciled to nothing to write (e.g. a
+    /// shadowed range tombstone with no live data — `recover.rs`'s
+    /// `Ok(None)` arm) counts toward `recovered` but NOT `written`.
+    /// `recovered == written` in the common case; `recovered > written`
+    /// means one or more partitions silently produced no output even
+    /// though they are not `Loss`es — a distinct, non-error outcome the
+    /// manifest previously had no way to surface (a run with exactly one
+    /// such partition reported `total=N recovered=N lost=0`,
+    /// `losses: 0 RECOGNISED`, `refused: null` — indistinguishable from a
+    /// run that wrote every partition's content). `#[serde(default)]` so a
+    /// pre-round-13 manifest (missing the field) still deserializes.
+    #[serde(default)]
+    pub written: usize,
 }
 
 /// Why salvage refused to write any output (design D3).
@@ -266,6 +281,19 @@ impl SalvageReport {
             "partitions: total={} recovered={} lost={}\n",
             self.partitions.total, self.partitions.recovered, self.partitions.lost
         ));
+        // roborev, issue #4196, round-13 Medium finding: surface the
+        // recovered-but-not-written residue explicitly rather than only in
+        // the JSON field — an operator reading text output only must also
+        // see that some "recovered" partitions produced no output.
+        if self.partitions.recovered > self.partitions.written {
+            out.push_str(&format!(
+                "  note: {} of {} recovered partition(s) decoded but reconciled to nothing to \
+                 write (e.g. a shadowed range tombstone with no live data) — written={}\n",
+                self.partitions.recovered - self.partitions.written,
+                self.partitions.recovered,
+                self.partitions.written
+            ));
+        }
         if self.losses.is_empty() {
             out.push_str("losses: 0 RECOGNISED\n");
         } else {
