@@ -144,8 +144,8 @@ jobs:
             echo "in.mcfad:cqlite-trino:${PUBLISH_VERSION} is not on Maven Central (HTTP ${code}) — will publish."
           fi
 
-      # Pre-publish oracles — TWO properties of the artifact about to reach the
-      # IMMUTABLE Maven Central, both asserted BEFORE any publish path runs.
+      # Pre-publish oracles — THREE properties of the artifact about to reach the
+      # IMMUTABLE Maven Central, all asserted BEFORE any publish path runs.
       #
       # 1. verifyPublishedPomNettyPin (issue #2300): the netty pin survives into
       #    the published POM's <dependencies>. A drifted or BOM-only pin (which a
@@ -165,14 +165,39 @@ jobs:
       #    workflow with NO ordering relative to this publish, so it can only
       #    report the pollution AFTER an irreversible upload.
       #
-      # Its prerequisites (generateMetadataFileForMavenPublication,
-      # generatePomFileForMavenPublication) are already on the publish path, so
-      # this adds no new build work.
-      - name: Verify published POM netty pin + Central publication purity
+      #    Its prerequisites (generateMetadataFileForMavenPublication,
+      #    generatePomFileForMavenPublication) are already on the publish path, so
+      #    it adds no new build work.
+      #
+      # 3. verifyPublishedArtifactSet (issue #2869 finding F): the primary-artifact
+      #    set reaching Central is EXACTLY {jar, -sources.jar, -javadoc.jar, .pom,
+      #    .module} — nothing extra, nothing missing. This is the DECIDABLE half of
+      #    the Central guard: #2 keys on the shadow VARIANT and its `shadowed`
+      #    bundling attribute, so a shaded jar attached under a plain classifier
+      #    (`-shaded`) PASSES #2 and is caught only here. Unit A's negative control
+      #    is conclusive on that point.
+      #
+      #    It runs HERE for the same reason #2 does, and the reason is not
+      #    hypothetical: `trino-connector-ci.yml` also runs it, but that workflow is
+      #    `required`-EXEMPT (.github/ci-gating-tiers.yml), so a PR that reddens it
+      #    can still merge. Without this line the only check between a deliberate
+      #    non-standard classifier and an IMMUTABLE registry would live solely in a
+      #    lane that cannot block a merge.
+      #
+      #    Unlike #1 and #2 this one is NOT free: it depends on
+      #    publishMavenPublicationToPublicationAuditRepository, an extra publish into
+      #    the isolated build/publication-audit-repo, which builds the javadoc and
+      #    sources jars. On the PUBLISH path that is close to zero marginal cost —
+      #    publishToMavenCentral already builds both, because Central requires them
+      #    — which is exactly why this belongs at tag time and would be new work at
+      #    PR time. The audit repo is a directory under build/ and is additive: it
+      #    touches neither mavenLocal nor the Central target, so publishToMavenLocal
+      #    and publishToMavenCentral behave exactly as before.
+      - name: Verify published POM netty pin + Central publication purity + artifact set
         working-directory: trino-connector
         env:
           PUBLISH_VERSION: ${{ steps.version.outputs.version }}
-        run: ./gradlew --no-daemon verifyPublishedPomNettyPin verifyShadowNotPublished -Pversion="$PUBLISH_VERSION"
+        run: ./gradlew --no-daemon verifyPublishedPomNettyPin verifyShadowNotPublished verifyPublishedArtifactSet -Pversion="$PUBLISH_VERSION"
 
       # Dry run (manual workflow_dispatch with dry_run=true): publish only to the
       # local Maven repo. No Central upload and no signing/Central secrets needed,
