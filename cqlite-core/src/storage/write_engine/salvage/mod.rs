@@ -158,6 +158,11 @@ pub struct Refusal {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SalvageReport {
     pub input: String,
+    /// The RESOLVED generation directory (`<--out>/<keyspace>/<table>/`),
+    /// not the bare `--out` root passed on the command line — `SSTableWriter`
+    /// always nests output there (roborev, issue #4196, round-11 Low
+    /// finding: this field previously recorded the root verbatim, which did
+    /// not name where the recovered generation actually lands).
     pub output: String,
     /// `"nb"` for BIG input, `"da"` for BTI input.
     pub format: String,
@@ -285,7 +290,15 @@ impl SalvageReport {
     /// the normal path share the SAME rendering rather than risk the two
     /// drifting apart.
     fn render_component_findings(&self, mut out: String) -> String {
-        if !self.component_findings.is_empty() {
+        // roborev, issue #4196, round-11 Low finding: emitting NOTHING when
+        // `component_findings` is empty made "zero findings, genuinely
+        // measured" read identically to "findings were never gathered at
+        // all" — the same affirmative-zero property `losses: 0 RECOGNISED`
+        // and the `ChunkCrcUnavailable` finding exist to guarantee,
+        // previously unapplied to this one field.
+        if self.component_findings.is_empty() {
+            out.push_str("component findings: 0 RECOGNISED\n");
+        } else {
             out.push_str("component findings:\n");
             for f in &self.component_findings {
                 out.push_str(&format!(

@@ -960,6 +960,134 @@ passed over (row 9). No new fix or regression test is required beyond what
 rounds 9 and 10 already added; this table is the evidence trail for that
 claim, not an assertion without one.
 
+## Round 11, roborev job 3369 — audit above was thorough for its OWN class
+## (allocation-size sites) but missed 2 adjacent Medium findings the review
+## caught; both fixed + 4 of 5 Low fixed; 2 declared gaps (1 Low, 1 process
+## note); no round-12 re-run performed (lead's "fix it, push, and stop"
+## instruction)
+
+- [x] Medium (finding 1): the compressed decode branch's completeness check
+      (`point_compaction.rs`) was `consumed <= max_allowed` — round-4's fix
+      for OVER-consumption (decoding past `end` into the next partition).
+      The audit above focused on ALLOCATION SIZES and did not catch that the
+      SAME `<=` also silently ACCEPTS under-consumption: a
+      corrupted/fabricated `END_OF_PARTITION` marker that stops the parser
+      EARLY returns `Rows(prefix)` as complete, with no `Loss` recorded —
+      the exact D2 resurrection hazard the UNCOMPRESSED branch's own
+      equality check already guards against, one branch over. Fixed:
+      `consumed == max_allowed` for `Emitted`; `Done` on a non-empty
+      `[offset, end)` window now also classifies `Truncated` (mirrors the
+      uncompressed arm exactly). Re-verified against the full
+      healthy-parity suite (compressed multi-partition fixtures) — no
+      regression, confirming `consumed` DOES equal `max_allowed` in the
+      healthy case, as it must by definition (`end` names where the NEXT
+      partition starts). NOT independently fixture-tested (declared gap,
+      matching round-4's OWN precedent for the identical construction
+      difficulty — see round-4's Medium finding 2 in this file):
+      constructing a fixture with a fabricated, EARLY-terminating
+      `END_OF_PARTITION` marker precisely enough to demonstrate this
+      specific failure mode is a substantial undertaking; the fix is
+      verified by code inspection + full regression-suite re-run (no
+      healthy fixture's `consumed` stopped short) rather than a dedicated
+      corruption fixture.
+- [x] Medium (finding 2): `compressed_chunk_preflight` handed every chunk to
+      `ChunkReader::read_chunk`, which sizes its buffer as
+      `compressed_chunk_size(i, total_size)` — for a non-last chunk,
+      `chunk_offsets[i+1] - chunk_offsets[i]`, bounded ONLY by
+      `CompressionInfo::validate`'s ascending-order check, NEVER
+      cross-checked against `Data.db`'s real length. A corrupt-but-ascending
+      offset table (e.g. `[0, 2^50, 2^51]`) is a THIRD entry point into the
+      SAME unbounded-allocation class rounds 9/10 fixed, through a field
+      neither of those fixes touches — one the round-11 pre-review audit's
+      table did not separately enumerate (it covered `data_length` and
+      `chunk_count`/`chunk_length` but not the `chunk_offsets` ARRAY VALUES'
+      own plausibility). Fixed: each chunk's declared `[offset, offset+size)`
+      is now bounded against the real, already-measured `total_size` BEFORE
+      `read_chunk` is ever called; an implausible chunk is recorded bad
+      (never read) instead of handed to an allocation sized from the
+      untrusted field. Test: `implausible_chunk_offset_table_does_not_oom`
+      (shifts `chunk_offsets[1..]` to start at `2^50`, preserving relative
+      gaps so ascending order — the one thing `validate` checks — still
+      holds; 30s timeout guard; measured to complete in ~0.01s, classifying
+      the file's one partition `chunk-crc`, not OOMing).
+- [x] Low (finding 3): the comment justifying `chunk_table_bound`
+      mis-attributed the `chunk_count <= 1,000,000` cap to
+      `CompressionInfo::validate` (it actually lives in `CompressionInfo::parse`)
+      and implied `chunk_length` was independently bounded there too (it is
+      only checked non-zero, no upper bound exists anywhere but the field's
+      own `u32` on-disk width). Fixed: corrected the comment's provenance
+      claim precisely, naming `parse` vs `validate` and the honest bound
+      (`u32::MAX`) for `chunk_length`.
+- [ ] Low (finding 4, DECLARED GAP, not fixed): for a COMPRESSED last
+      partition with a corrupted-large `CompressionInfo.data_length`,
+      `pull_chunk_window` correctly avoids OOM (round-10's own test proves
+      this — it reads real, bounded chunks incrementally and reports
+      `reached_end = false` rather than pre-allocating) but WILL read every
+      remaining real chunk in the file before giving up, since its `end`
+      comes from `self.compression_info.data_length` directly — a SEPARATE,
+      unclamped read of the same corrupted field `recover.rs`'s own
+      `chunk_range_end` clamp never reaches. For a genuinely large
+      production `Data.db` this means materializing "the rest of the file"
+      into one `Vec`, violating spec R6 ("one partition resident") and the
+      <128 MB target — a real robustness concern, though bounded by the
+      REAL file's own size (not independently inflatable), and the outcome
+      is still correctly `Truncated`, never wrong data. ASSESSED AND
+      REJECTED as unsafe to fix quickly: the naive fix (pass `recover.rs`'s
+      already-clamped `chunk_range_end` as `end_bound` for every entry,
+      replacing the `None` fallback) has a genuine edge case — for an
+      UNCOMPRESSED file with NO `CRC.db` present, `data_length` stays `0`
+      (the "chunking unknown" signal), so `chunk_range_end` degenerates to
+      `entry.data_offset + 1` for the LAST entry — passing THAT as
+      `end_bound` would hand `decode_partition_at_offset_for_salvage` a
+      1-byte window instead of the real file's true `section_len`,
+      REGRESSING the healthy no-CRC.db uncompressed case. A correct fix
+      needs a value distinct from `chunk_range_end` (clamped ONLY when a
+      real bound is known, falling through to the reader's own `section_len`
+      resolution otherwise) threaded as a genuinely new parameter — real
+      design work, not a quick patch, left for the follow-up issue.
+- [x] Low (finding 5): `render_component_findings` emitted nothing when
+      `component_findings` was empty, making "zero findings, genuinely
+      measured" read identically to "findings never gathered" — the same
+      affirmative-zero property `losses: 0 RECOGNISED` already guarantees,
+      unapplied to this one field. Fixed: emits `component findings: 0
+      RECOGNISED` in the empty case.
+- [x] Low (finding 6): `discover_salvage_inputs`'s `name.trim_end_matches("-Data.db")`
+      strips REPEATED trailing occurrences, so a file literally named
+      `...-Data.db-Data.db` (or any stem itself ending in `-Data.db`) yields
+      a `base` that no longer names the real component prefix, misdirecting
+      the subsequent `-TOC.txt` sibling probe. Fixed: `strip_suffix`
+      (exactly-once), matching the `family` match's own intent.
+- [x] Low (finding 7): `SalvageReport.output` recorded the bare `--out` ROOT,
+      but `SSTableWriter` always nests a generation under
+      `<out>/<keyspace>/<table>/` — an operator/script reading the manifest
+      to locate output looked in the wrong directory. Fixed: records the
+      RESOLVED `output_dir.join(&schema.keyspace).join(&schema.table)` path;
+      doc comment on the field states this explicitly.
+- [ ] PROCESS NOTE (not a roborev finding): this round's additions pushed
+      `issue_4196_salvage_corruption_corpus.rs` to 1542 lines — over the
+      ~1500 test-file campsite-rule threshold (CLAUDE.md; epic #1135 tracks
+      test-file splitting) for the FIRST time (it was 1374 lines at the end
+      of round 10, and did not exist on `origin/main` before this PR at
+      all). NOT split in this round — 13 test functions plus shared helpers
+      accumulated across 5 review rounds, and a mid-fix-round split carries
+      real risk of breaking a currently 100%-passing suite under time
+      pressure; deferred to the closer, who will need
+      `CQLITE_ALLOW_FILE_GROWTH=1` on the full gate (or a pre-gate split) —
+      noted here rather than discovered as a surprise gate failure.
+
+Re-verified after all fixes: `cargo fmt --check` clean; `cargo clippy -p
+cqlite-core --features write-support --lib` and every touched `--test`
+target clean; `cargo clippy -p cqlite-cli --features write-support --lib
+--bins --test salvage_cli_tests` clean; `cargo test -p cqlite-core --lib
+--features write-support` 4060 passed (unchanged); `cargo test -p
+cqlite-cli --lib --features write-support` 233 passed (unchanged); all
+salvage core tests (10+4+1, was 9+4+1; +1 new corruption-corpus case) and
+CLI tests (8) pass against the real corpus; `test_salvage_no_resync_scan.sh`
+passes; `features-load-bearing` 61/61.
+
+Per lead instruction, NO round-12 roborev re-run was performed — this fix
+round is reported to the lead for a decision on next steps.
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree

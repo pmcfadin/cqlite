@@ -1372,3 +1372,171 @@ async fn implausible_compression_info_data_length_does_not_oom() {
         report.losses[0].class
     );
 }
+
+/// Roborev, issue #4196 (round-11 Medium finding): `compressed_chunk_preflight`
+/// walks every chunk through `ChunkReader::read_chunk`, which sizes its
+/// allocation as `compressed_chunk_size(i, total_size)` — for a NON-LAST
+/// chunk, `chunk_offsets[i+1] - chunk_offsets[i]`
+/// (`compression_info.rs::compressed_chunk_size`), bounded ONLY by
+/// `CompressionInfo::validate`'s ASCENDING-order check (`checked_sub`
+/// guards underflow, nothing else) — never cross-checked against `Data.db`'s
+/// real length. A corrupt-but-still-ascending offset table is therefore a
+/// THIRD entry point into the SAME unbounded-allocation class rounds 9
+/// (boundary-source `data_offset`) and 10 (`CompressionInfo.data_length`)
+/// fixed, reachable through a field NEITHER of those fixes touches. Fixed:
+/// `compressed_chunk_preflight` now bounds each chunk's declared
+/// `[offset, offset+size)` against the real, already-measured `total_size`
+/// BEFORE ever calling `read_chunk` — an implausible chunk is recorded bad
+/// (never read) instead of handed to an allocation sized from the
+/// untrusted field.
+///
+/// This test corrupts ONLY `CompressionInfo.db`'s `chunk_offsets` array
+/// (via the same sanctioned `CompressionInfoWriter::build_to_vec` synthesis
+/// route rounds 10/11 use) — shifting every offset from index 1 onward up
+/// to start at `2^50` while preserving their RELATIVE gaps (so ascending
+/// order — the ONE thing `CompressionInfo::validate` checks — still holds,
+/// and only the DECLARED size of chunk 0 explodes to ~2^50 bytes; chunks
+/// 1..N's declared sizes stay exactly as they were, though their declared
+/// offsets no longer correspond to real bytes in the unchanged `Data.db`
+/// either). `Data.db`/`Index.db`/`CRC.db` stay byte-for-byte unchanged.
+#[tokio::test]
+async fn implausible_chunk_offset_table_does_not_oom() {
+    let Some(root) = resolve_root_with_corpus_fixture("data_db_bit_flip") else {
+        skip_or_require(
+            "lz4_table clean source",
+            &format!(
+                "no candidate root carries sstables/{CLEAN_KEYSPACE}/{CLEAN_TABLE_DIR}; searched \
+                 {:?}",
+                candidate_base_roots()
+            ),
+        );
+        return;
+    };
+    let clean_dir = root
+        .join("sstables")
+        .join(CLEAN_KEYSPACE)
+        .join(CLEAN_TABLE_DIR);
+    let schema = table_schema();
+    let clean_data_db = single_data_db(&clean_dir);
+    let clean_ci_path = clean_dir.join(
+        clean_data_db
+            .file_name()
+            .expect("Data.db has a filename")
+            .to_string_lossy()
+            .replace("-Data.db", "-CompressionInfo.db"),
+    );
+    let clean_ci_bytes = std::fs::read(&clean_ci_path).expect("read clean CompressionInfo.db");
+    let clean_ci = CompressionInfo::parse(&clean_ci_bytes).expect("parse clean CompressionInfo.db");
+    assert!(
+        clean_ci.chunk_offsets.len() >= 2,
+        "need at least 2 chunks to demonstrate a shifted (but still ascending) offset table"
+    );
+
+    const SHIFT_BASE: u64 = 1u64 << 50;
+    let anchor = clean_ci.chunk_offsets[1];
+    let mut corrupt_offsets = clean_ci.chunk_offsets.clone();
+    for off in corrupt_offsets.iter_mut().skip(1) {
+        *off = SHIFT_BASE + (*off - anchor);
+    }
+    // Ascending order preserved by construction (a monotonic shift of an
+    // already-ascending tail), which is the ONLY thing
+    // `CompressionInfo::validate` checks — asserted here so a future change
+    // to the shift arithmetic fails LOUDLY in this test rather than
+    // producing a refusal at a different, unintended site.
+    for w in corrupt_offsets.windows(2) {
+        assert!(
+            w[1] > w[0],
+            "corrupted offset table must stay strictly ascending: {corrupt_offsets:?}"
+        );
+    }
+
+    let algorithm =
+        cqlite_core::storage::sstable::writer::CompressionAlgorithm::from_cassandra_name(
+            &clean_ci.algorithm,
+        )
+        .unwrap_or_else(|| panic!("unrecognized compressor name: {}", clean_ci.algorithm));
+    let corrupt_metadata = cqlite_core::storage::sstable::writer::CompressionMetadata {
+        algorithm,
+        chunk_length: clean_ci.chunk_length,
+        max_compressed_length: clean_ci.max_compressed_length,
+        data_length: clean_ci.data_length,
+        chunk_offsets: corrupt_offsets,
+        option_pairs: clean_ci.option_pairs.clone(),
+    };
+    let corrupt_ci_bytes =
+        cqlite_core::storage::sstable::writer::CompressionInfoWriter::new(clean_ci_path.clone())
+            .build_to_vec(&corrupt_metadata)
+            .expect("re-serialize CompressionInfo.db with a shifted chunk_offsets table");
+
+    let temp = TempDir::new().expect("tempdir");
+    let corrupt_dir = temp.path().join("corrupt_input");
+    std::fs::create_dir_all(&corrupt_dir).expect("create corrupt input dir");
+    for entry in std::fs::read_dir(&clean_dir)
+        .expect("read fixture dir")
+        .flatten()
+    {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.ends_with("-CompressionInfo.db") {
+            std::fs::write(corrupt_dir.join(&name), &corrupt_ci_bytes)
+                .expect("write corrupted CompressionInfo.db");
+        } else if !name_str.ends_with(".jsonl") && !name_str.ends_with("Statistics.db.txt") {
+            std::fs::copy(entry.path(), corrupt_dir.join(&name)).expect("copy fixture component");
+        }
+    }
+    let corrupt_data_db = single_data_db(&corrupt_dir);
+
+    let out_root = temp.path().join("out");
+    // The bound itself is the assertion, exactly as the round-9/10 OOM
+    // tests: pre-fix, chunk 0 alone allocates ~1 PB and the process is
+    // OOM-killed; post-fix this must complete in well under a second.
+    let report = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        salvage_sstable(
+            &corrupt_data_db,
+            &out_root,
+            &schema,
+            SalvageOptions::default(),
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "salvage did not complete within 30s on a shifted chunk_offsets table — the \
+             unbounded chunk-buffer allocation regressed"
+        )
+    })
+    .unwrap_or_else(|e| {
+        panic!(
+            "salvage must not hard-error on a shifted CompressionInfo chunk_offsets table (a \
+             Loss or a classified Refusal, not an Err): {e:#}"
+        )
+    });
+
+    // Every chunk's declared position now exceeds Data.db's real length, so
+    // every chunk is bad and the file's one partition is a chunk-crc total
+    // loss — NOT a refusal (the pre-flight itself completes and reports
+    // classified findings; it does not hard-fail).
+    assert_eq!(
+        report.partitions.total, 1,
+        "expected exactly one partition in this fixture's Index.db; got {}",
+        report.partitions.total
+    );
+    assert_eq!(
+        report.losses.len(),
+        1,
+        "expected exactly the one partition as a loss; got {:?}",
+        report.losses
+    );
+    assert_eq!(
+        report.losses[0].class,
+        LossClass::ChunkCrc,
+        "expected LossClass::ChunkCrc (every declared chunk position is implausible); got {:?}",
+        report.losses[0]
+    );
+    eprintln!(
+        "[issue_4196] shifted chunk_offsets table: completed without OOM, classified {:?} (no \
+         chunk handed to an allocation sized from the untrusted offset table).",
+        report.losses[0].class
+    );
+}

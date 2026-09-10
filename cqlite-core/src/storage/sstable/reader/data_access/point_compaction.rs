@@ -571,26 +571,38 @@ impl SSTableReader {
                     }
                 } else if let Some(end) = compressed_end {
                     // roborev, issue #4196 (round-4 Medium): the compressed
-                    // window is chunk-aligned and LEGITIMATELY extends past
+                    // WINDOW is chunk-aligned and LEGITIMATELY extends past
                     // `end` into the next partition's leading bytes (unlike
-                    // the uncompressed case above), so an EQUALITY check
-                    // would be wrong here — but the decode must still never
-                    // consume MORE than `[offset, end)` allows. Without this,
-                    // a partition whose `END_OF_PARTITION` marker was
-                    // corrupted could keep decoding past its authoritative
-                    // end into the next partition's bytes (the only
-                    // remaining guard is a best-effort header sniff inside
-                    // the parser), silently writing rows under the WRONG key
-                    // and duplicating that partition's real content when the
-                    // next boundary entry is decoded on its own.
+                    // the uncompressed case above, so an equality check
+                    // against `window.len()` would be wrong) — but the
+                    // PARSER's own `consumed` count, decoded from
+                    // `window[within..]`, is a DIFFERENT quantity: it is how
+                    // many bytes THIS ONE partition's content actually
+                    // occupied, and for a healthy boundary source that is BY
+                    // DEFINITION exactly `end - offset` (`end` names where
+                    // the NEXT partition starts). round-11's Medium finding:
+                    // the original `consumed <= max_allowed` only rejected
+                    // OVER-consumption (decoding past `end` into the next
+                    // partition, the round-4 hazard) but silently ACCEPTED
+                    // under-consumption too — a corrupted/fabricated
+                    // `END_OF_PARTITION` marker that stops the parser EARLY
+                    // returns `Rows(prefix)` as if complete, exactly the D2
+                    // resurrection hazard the uncompressed branch's equality
+                    // check already guards against: the un-decoded tail can
+                    // carry a tombstone or later-timestamp cell shadowing
+                    // what was already accepted, with no `Loss` recorded.
+                    // Require EQUALITY, mirroring the uncompressed arm; a
+                    // `Done` covering a NON-EMPTY `[offset, end)` window
+                    // means nothing was consumed for bytes the boundary
+                    // source says exist — also suspicious, also `Truncated`.
                     use crate::storage::sstable::reader::parsing::row_decoder::ParseStep;
                     let max_allowed = end.saturating_sub(offset_usize);
-                    let within_bound = match step {
-                        ParseStep::Emitted(consumed) => consumed <= max_allowed,
-                        ParseStep::Done => true,
+                    let fully_consumed = match step {
+                        ParseStep::Emitted(consumed) => consumed == max_allowed,
+                        ParseStep::Done => max_allowed == 0,
                         ParseStep::NeedMore => false, // unreachable at_final_chunk=true
                     };
-                    if !within_bound {
+                    if !fully_consumed {
                         return Ok(PartitionAtOffsetOutcome::Truncated);
                     }
                 }

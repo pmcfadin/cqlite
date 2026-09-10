@@ -77,9 +77,22 @@ pub async fn salvage_sstable(
     let now = chrono::Utc::now().to_rfc3339();
     let cqlite_version = env!("CARGO_PKG_VERSION").to_string();
 
+    // roborev, issue #4196, round-11 Low finding: `output` previously
+    // recorded `output_dir` (the `--out` ROOT) verbatim, but
+    // `SSTableWriter` actually nests every generation under
+    // `<out>/<keyspace>/<table>/` — an operator (or a script) reading the
+    // manifest's `output` field to locate the recovered generation looked
+    // in a directory holding only a keyspace subdirectory. Record the
+    // RESOLVED path instead, so the field genuinely names where output
+    // lands.
+    let resolved_output = output_dir
+        .join(&schema.keyspace)
+        .join(&schema.table)
+        .display()
+        .to_string();
     let report_skeleton = |boundary_source: &str, generation: u64| SalvageReport {
         input: input.display().to_string(),
-        output: output_dir.display().to_string(),
+        output: resolved_output.clone(),
         format: format_label.to_string(),
         compressed_input,
         boundary_source: boundary_source.to_string(),

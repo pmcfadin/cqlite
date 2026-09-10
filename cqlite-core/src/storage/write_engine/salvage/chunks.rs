@@ -67,6 +67,43 @@ pub(super) fn compressed_chunk_preflight(
     let mut bad_chunks = BTreeSet::new();
     let mut first_detail: Option<String> = None;
     for i in 0..chunk_reader.chunk_count() {
+        // roborev, issue #4196, round-11 Medium finding: `ChunkReader::read_chunk`
+        // sizes its allocation as `compressed_chunk_size(i, total_size)` —
+        // for a NON-LAST chunk that is `chunk_offsets[i+1] - chunk_offsets[i]`
+        // (`compression_info.rs::compressed_chunk_size`), bounded ONLY by
+        // `CompressionInfo::validate`'s ascending-order check (via
+        // `checked_sub`, so it cannot underflow) — NEVER cross-checked
+        // against the file's real length. A corrupt-but-still-ascending
+        // offset table (e.g. `[0, 2^50, 2^51]`, a plausible shape for a
+        // partially-overwritten `CompressionInfo.db`) makes `read_chunk`
+        // allocate ~1 PB for chunk 0 alone — the SAME unbounded-allocation
+        // class rounds 9 and 10 fixed for the boundary source and for
+        // `data_length`, reachable here through a THIRD field neither of
+        // those fixes touches. Bound each chunk's declared `[offset,
+        // offset+size)` against the REAL, already-measured `total_size`
+        // BEFORE ever calling `read_chunk` — an implausible chunk is
+        // recorded as bad (its CRC cannot be trusted if its own framing is
+        // already nonsensical) rather than handed to an allocation sized
+        // from the untrusted field.
+        let plausible = match (
+            compression_info.compressed_chunk_offset(i),
+            compression_info.compressed_chunk_size(i, total_size),
+        ) {
+            (Some(offset), Some(size)) => offset
+                .checked_add(size)
+                .is_some_and(|end| end <= total_size),
+            _ => false,
+        };
+        if !plausible {
+            bad_chunks.insert(i as u64);
+            if first_detail.is_none() {
+                first_detail = Some(format!(
+                    "chunk {i}: declared chunk offset/size exceeds Data.db's real length \
+                     ({total_size} bytes) — not read"
+                ));
+            }
+            continue;
+        }
         if let Err(e) = chunk_reader.read_chunk(i) {
             bad_chunks.insert(i as u64);
             if first_detail.is_none() {
@@ -85,21 +122,27 @@ pub(super) fn compressed_chunk_preflight(
         ),
     });
 
-    // roborev, issue #4196, round-10 High finding: `compression_info.data_length`
+    // roborev, issue #4196, round-10 High finding (comment provenance
+    // corrected, round-11 Low finding: the cap below is `CompressionInfo::parse`'s,
+    // not `validate`'s — see that correction): `compression_info.data_length`
     // is taken verbatim from `CompressionInfo.db`'s 8-byte field —
-    // `CompressionInfo::validate` bounds `chunk_count` (<= 1,000,000),
-    // `chunk_length` and offset monotonicity, but never cross-checks
-    // `data_length` against them. A single flipped byte in THAT field alone
-    // (chunk offsets/table/Data.db all intact, so the preflight loop above
-    // reports zero bad chunks) reinstated the exact unbounded chunk-range
+    // `CompressionInfo::parse` bounds `chunk_count` (<= 1,000,000,
+    // `compression_info.rs:242`); `CompressionInfo::validate` separately
+    // checks `chunk_length != 0` (NO upper bound at all) and offset
+    // monotonicity — but nothing anywhere cross-checks `data_length`
+    // against either. A single flipped byte in THAT field alone (chunk
+    // offsets/table/Data.db all intact, so the preflight loop above reports
+    // zero bad chunks) reinstated the exact unbounded chunk-range
     // allocation round-9's fix removed for the boundary-source case:
     // `recover.rs`'s clamp trusts THIS returned `data_length` as the safe
     // bound, so an unvalidated field here defeats it. `chunk_count() *
     // chunk_length` is the REAL, independently-bounded maximum this file's
-    // chunk table can possibly cover (both factors already validated at
-    // `CompressionInfo::validate`) — take the smaller of the declared value
-    // and that bound, so a corrupted `data_length` can never exceed what the
-    // chunk table actually supports.
+    // chunk table can possibly cover — `chunk_count` per `parse`'s cap
+    // above, `chunk_length` per `CompressionInfo::validate`'s non-zero
+    // check ANDED with `u32::MAX` (its own on-disk width) — take the
+    // smaller of the declared value and that bound, so a corrupted
+    // `data_length` can never exceed what the chunk table actually
+    // supports.
     let chunk_table_bound =
         (chunk_reader.chunk_count() as u64).saturating_mul(compression_info.chunk_length as u64);
     let data_length = compression_info.data_length.min(chunk_table_bound);

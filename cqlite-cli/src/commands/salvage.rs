@@ -362,7 +362,17 @@ fn discover_salvage_inputs(input: &Path) -> anyhow::Result<SalvageDiscovery> {
         } else {
             continue;
         };
-        let base = name.trim_end_matches("-Data.db");
+        // roborev, issue #4196, round-11 Low finding: `trim_end_matches`
+        // strips REPEATED trailing occurrences of the pattern — a file
+        // literally named `...-Data.db-Data.db` (or any stem that itself
+        // ends in `-Data.db`) would have BOTH stripped, yielding a `base`
+        // that no longer names the real component prefix, so the `-TOC.txt`
+        // probe below then looks for the wrong sibling. `strip_suffix`
+        // removes the suffix EXACTLY ONCE, which is what `family`'s match
+        // above already established this loop needs.
+        let Some(base) = name.strip_suffix("-Data.db") else {
+            continue;
+        };
         let toc = path.with_file_name(format!("{base}-TOC.txt"));
         if !toc.exists() {
             // roborev, issue #4196 (round-5 Medium): the SAME visibility gap
