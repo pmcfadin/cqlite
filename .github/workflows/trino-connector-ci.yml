@@ -65,10 +65,23 @@ jobs:
         # uber-jar in Central would hand every downstream consumer a duplicate,
         # unresolvable copy of the runtime tree. It reads only the two generate* tasks'
         # own outputs, both already produced above, so it costs essentially nothing.
+        # verifyPublishedArtifactSet is the DECIDABLE half of the Central guard (#2869
+        # finding F). verifyShadowNotPublished keys on NAMES — a shadow variant, a
+        # non-`external` bundling attribute, an `-all.jar` reference — so a shaded jar
+        # attached under a different classifier (`-shaded`, `-fat`, …) passes it.
+        # Extending that name matcher only moves the argument to the next spelling, so
+        # instead this publishes into an isolated file repo under build/ and asserts the
+        # EXACT artifact set (main jar, sources, javadoc, POM, module metadata) with
+        # anything else a named failure. Runs on EVERY PR, which is where a classifier
+        # would be introduced; Maven Central is immutable, so this must fail before a
+        # tag, not after. It is deliberately NOT added to trino-publish.yml's
+        # pre-flight, because that would pull javadoc generation and signing into a step
+        # whose job is to be cheap and fast — the PR gate is the right place to catch a
+        # source change.
         run: >-
           ./gradlew --no-daemon test verifyPublishedPomNettyPin
           generateMetadataFileForMavenPublication generatePomFileForMavenPublication
-          verifyShadowNotPublished
+          verifyShadowNotPublished verifyPublishedArtifactSet
 
       # Named as its own step so the fat-jar contents assertion appears BY NAME in the
       # log rather than hiding inside an aggregate `check`. Cheap on every PR: `test`
@@ -153,13 +166,19 @@ jobs:
             echo "## Trino connector CI tier"
             echo ""
             echo "- Ordinary PRs run: Gradle \`test\`, \`verifyPublishedPomNettyPin\`, the two publication-metadata generators,"
-            echo "  \`verifyShadowNotPublished\` (the shaded jar must stay OUT of the Maven Central publication),"
-            echo "  \`shadowJar verifyFatJar\` (the shaded fat jar's contents oracle — complete, service-merged, version-pinned; #2869),"
-            echo "  and \`verifyInstallPluginFatPrunesStale\` (installPluginFat is a \`Sync\`, so a version bump leaves ONE jar in the"
-            echo "  plugin directory rather than two, which Trino would both load). None of these three is full-tier-gated."
-            echo "- Those three oracles execute ONLY because the steps above NAME them. They are also wired to Gradle's"
-            echo "  \`check\` in gradle/fatjar-oracles.gradle.kts, but NO workflow in this repo invokes \`gradlew check\`, so that"
-            echo "  wiring is decorative — a new oracle added to \`check\` alone would run nowhere. Name it in a step."
+            echo "  and FOUR #2869 oracles, none of them full-tier-gated:"
+            echo "  - \`verifyShadowNotPublished\` — no shadow VARIANT, no non-\`external\` bundling, no \`-all.jar\` reference in the"
+            echo "    published metadata. Keyed on names, so it covers the plausible accident and NOT the general question."
+            echo "  - \`verifyPublishedArtifactSet\` — the DECIDABLE half: publishes to an isolated repo under build/ and asserts the"
+            echo "    EXACT artifact set reaching Central (jar, sources, javadoc, POM, module), so a shaded jar under ANY"
+            echo "    classifier (\`-shaded\`, \`-fat\`, …) fails by name. Central is immutable; this must catch it pre-tag."
+            echo "  - \`shadowJar verifyFatJar\` — the shaded fat jar's contents oracle (complete, service-merged, version-pinned)."
+            echo "  - \`verifyInstallPluginFatPrunesStale\` — installPluginFat is a \`Sync\`, so a version bump leaves ONE jar in the"
+            echo "    plugin directory rather than two, which Trino would both load."
+            echo "- Those four oracles execute ONLY because the steps above NAME them. They are also wired to Gradle's"
+            echo "  \`check\` in gradle/fatjar-oracles.gradle.kts and gradle/publication-purity.gradle.kts, but NO workflow in this"
+            echo "  repo invokes \`gradlew check\`, so that wiring is decorative — a new oracle added to \`check\` alone would run"
+            echo "  nowhere. Name it in a step."
             echo "- Plugin assembly and artifact upload run on push to main, nightly schedule, workflow_dispatch, or PRs labeled \`ci:trino-full\`."
             echo "  That tier assembles BOTH flavors — \`installPlugin\` (50-jar tree) and \`installPluginFat\` (one shaded jar) —"
             echo "  and uploads each as an artifact with \`if-no-files-found: error\`."

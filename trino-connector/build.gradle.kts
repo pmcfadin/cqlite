@@ -410,6 +410,12 @@ extra["cqliteNettyVersion"] = nettyVersion
 extra["cqliteNettyTcnativeVersion"] = nettyTcnativeVersion
 extra["cqliteArrowVersion"] = arrowVersion
 apply(from = "gradle/fatjar-oracles.gradle.kts")
+// Publication purity is its own concern and its own file: everything in it is a
+// pre-flight for the IRREVERSIBLE Maven Central upload, and fatjar-oracles had
+// reached 699 of the ~800-line target. Applied AFTER it, and after `mavenPublishing`
+// is configured below is NOT required — `publishing { repositories { ... } }` there
+// is additive and order-independent.
+apply(from = "gradle/publication-purity.gradle.kts")
 
 // --- Maven Central publication (Central Portal via vanniktech) ---------------
 // `publishToMavenLocal` / `publishToMavenCentral` produce main + sources +
