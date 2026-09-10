@@ -235,10 +235,26 @@ impl SalvageReport {
             // prevent. Key off the explicit `attempted` flag instead —
             // `recover.rs` sets it `true` only once the per-partition loop
             // itself begins, strictly AFTER every earlier refusal site.
+            //
+            // roborev, issue #4196, round-10 Low finding: this branch used
+            // to `return out;` immediately, which ALSO skipped the
+            // `component_findings` block below unconditionally — but a
+            // refusal reached AFTER the chunk pre-flight (e.g.
+            // `classify_inputs` failing on a `Statistics.db` that is
+            // corrupt ALONGSIDE a `Data.db` with real chunk-CRC failures)
+            // has genuinely MEASURED component findings even though
+            // `attempted` is still `false` (no partition was ever decoded).
+            // `NOT MEASURED` is correct for `partitions`/`losses`
+            // specifically; it must not also silently swallow findings the
+            // JSON manifest still carries, or text stops being "a
+            // rendering of the manifest" (D5) for exactly the operator
+            // reading the text default. Skip ONLY the
+            // partitions/losses block; the component-findings block below
+            // always runs.
             if !self.attempted {
                 out.push_str("partitions: NOT MEASURED (refused before enumeration)\n");
                 out.push_str("losses: NOT MEASURED\n");
-                return out;
+                return self.render_component_findings(out);
             }
         }
         out.push_str(&format!(
@@ -260,6 +276,15 @@ impl SalvageReport {
                 ));
             }
         }
+        self.render_component_findings(out)
+    }
+
+    /// Append the `component findings:` block (design D5) when non-empty,
+    /// and return the accumulated text. Factored out (roborev, issue
+    /// #4196, round-10 Low finding) so the `!attempted` early-out path and
+    /// the normal path share the SAME rendering rather than risk the two
+    /// drifting apart.
+    fn render_component_findings(&self, mut out: String) -> String {
         if !self.component_findings.is_empty() {
             out.push_str("component findings:\n");
             for f in &self.component_findings {

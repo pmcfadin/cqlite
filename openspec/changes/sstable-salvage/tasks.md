@@ -834,6 +834,81 @@ passes; `features-load-bearing` 61/61.
 Per lead instruction, NO round-10 roborev re-run was performed — this fix
 round is reported to the lead for a decision on next steps.
 
+Lead authorized round 10 on the same af090679e commit: same protocol, fix any
+Medium/High and stop without re-running, report.
+
+## Round 10, roborev job 3368 — a NEW High + 2 Low found; all 3 fixed,
+## no round-11 re-run performed (lead's "fix it, push, and stop" instruction)
+
+- [x] High: round-9's OOM fix clamped `chunk_range_end` to `data_length` on
+      the premise that `data_length` is "the REAL, independently-measured
+      total, already size-bounded at its own parse site" — FALSE for the
+      COMPRESSED branch, where `data_length` is taken VERBATIM from
+      `CompressionInfo.db`'s 8-byte field. `CompressionInfo::validate`
+      bounds `chunk_count` (<= 1,000,000), `chunk_length`,
+      `max_compressed_length` and offset monotonicity, but never
+      cross-checks `data_length` against them — a single flipped byte in
+      THAT one field alone (chunk offsets/table/`Data.db` all intact, so
+      `compressed_chunk_preflight` reports zero bad chunks) reinstated the
+      exact unbounded chunk-range allocation round-9 removed for the
+      boundary-source case. Fixed: `compressed_chunk_preflight` now returns
+      `data_length.min(chunk_count * chunk_length)` — both factors already
+      independently bounded by `CompressionInfo::validate`. Test:
+      `implausible_compression_info_data_length_does_not_oom` — corrupts
+      ONLY `CompressionInfo.db`'s `data_length` field via the SANCTIONED
+      fixture-synthesis route (`CompressionInfo::parse` the clean file,
+      rebuild a `CompressionMetadata` with every other field byte-identical,
+      re-serialize with `CompressionInfoWriter::build_to_vec` — that writer
+      module's own doc names exactly this use as sanctioned, issue #1406),
+      wrapped in the same 30s `tokio::time::timeout` guard round-9's OOM
+      test uses. MEASURED (not assumed): the partition classifies
+      `Truncated`, not a clean recovery — the fix bounds the PRE-FLIGHT's
+      own chunk-range materialization, but
+      `decode_partition_at_offset_for_salvage`'s OWN internal `end`
+      resolution for a last/compressed partition (`end_bound == None`)
+      reads `self.compression_info.data_length` DIRECTLY off the reader — a
+      SEPARATE, unclamped copy of the same corrupted field — and asks
+      `pull_chunk_window` for a window the real chunk table cannot satisfy;
+      `pull_chunk_window` itself is already safe (reads real, bounded
+      chunks one at a time, reports `reached_end = false` rather than
+      pre-allocating), so the correct, measured outcome is a conservative
+      `Truncated`, not silent wrong-data acceptance — documented precisely
+      in the test's own doc.
+- [x] Low: `render_text`'s `!self.attempted` branch `return`ed immediately,
+      which ALSO skipped the `component_findings` rendering block
+      unconditionally — but a refusal reached AFTER the chunk pre-flight
+      (e.g. `classify_inputs` failing on a corrupt `Statistics.db` ALONGSIDE
+      a `Data.db` with real chunk-CRC failures) has genuinely measured
+      component findings even though `attempted` is still `false` (no
+      partition was ever decoded) — `NOT MEASURED` is correct for
+      `partitions`/`losses` but must not ALSO swallow findings the JSON
+      manifest still carries. Fixed: factored the component-findings
+      rendering into a shared `render_component_findings` helper, called
+      from BOTH the early-out (`!attempted`) path and the normal path, so
+      they can never drift apart again.
+- [x] Low: `Loss.chunks` is documented as the chunks a partition's byte
+      range INTERSECTS, and every OTHER loss class passes the full
+      `touched_chunks` — but the `ChunkCrc` arm passed `bad_touched` (the
+      FAILING subset only), making the same JSON field mean two different
+      things depending on `class`. Fixed: `ChunkCrc` now passes the full
+      `touched_chunks` too, for consistency, with the failing subset named
+      in the loss `message` text instead (where "why" belongs, distinct
+      from "where").
+
+Re-verified after all 3 fixes: `cargo fmt --check` clean; `cargo clippy -p
+cqlite-core --features write-support --lib` and every touched `--test`
+target clean; `cargo clippy -p cqlite-cli --features write-support --lib
+--bins --test salvage_cli_tests` clean; `cargo test -p cqlite-core --lib
+--features write-support` 4060 passed (unchanged — this round added no new
+`#[cfg(test)]` unit tests, only an integration test); `cargo test -p
+cqlite-cli --lib --features write-support` 233 passed (unchanged); all
+salvage core tests (9+4+1, was 8+4+1; +1 new corruption-corpus case) and CLI
+tests (8) pass against the real corpus; `test_salvage_no_resync_scan.sh`
+passes; `features-load-bearing` 61/61.
+
+Per lead instruction, NO round-11 roborev re-run was performed — this fix
+round is reported to the lead for a decision on next steps.
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree

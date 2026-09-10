@@ -1195,3 +1195,180 @@ async fn implausible_last_offset_does_not_oom_and_classifies_truncated() {
         report.partitions.recovered
     );
 }
+
+/// Roborev, issue #4196 (round-10 High finding): round-9's OOM fix clamped
+/// `chunk_range_end` to `data_length` on the premise that `data_length` is
+/// "the REAL, independently-measured total, already size-bounded at its own
+/// parse site" — FALSE for the COMPRESSED branch, where `data_length` is
+/// taken VERBATIM from `CompressionInfo.db`'s 8-byte field.
+/// `CompressionInfo::validate` bounds `chunk_count`/`chunk_length`/
+/// `max_compressed_length`/offset monotonicity but never cross-checks
+/// `data_length` against them, so a single flipped byte in THAT one field
+/// (chunk offsets, chunk table and `Data.db` all intact, so
+/// `compressed_chunk_preflight` reports zero bad chunks) reinstated the
+/// exact unbounded chunk-range allocation round-9 removed for the
+/// boundary-source case. Fixed: `compressed_chunk_preflight` now returns
+/// `data_length.min(chunk_count * chunk_length)` — both factors already
+/// independently bounded by `CompressionInfo::validate`.
+///
+/// This test corrupts ONLY `CompressionInfo.db`'s `data_length` field (via
+/// the sanctioned fixture-synthesis route: parse the clean file with
+/// `CompressionInfo::parse`, rebuild a `CompressionMetadata` with every
+/// OTHER field byte-identical, re-serialize with
+/// `CompressionInfoWriter::build_to_vec` — the same writer module's own doc
+/// names exactly this "read-path fixtures legitimately use [it] to
+/// synthesize compressed SSTables" as sanctioned, issue #1406) to
+/// `2^62` in a copy of `test_comp.lz4_table`. `Data.db`/`Index.db`/`CRC.db`
+/// stay byte-for-byte unchanged.
+///
+/// MEASURED (this round): the partition is classified `Truncated`, NOT
+/// cleanly recovered — a first guess. `chunks.rs`'s clamp fixes the
+/// PRE-FLIGHT's own chunk-range materialization (the OOM this finding is
+/// about), but `decode_partition_at_offset_for_salvage`'s OWN internal
+/// `end` resolution for a LAST/compressed partition (`end_bound == None`)
+/// reads `self.compression_info.data_length` DIRECTLY off the reader — a
+/// SEPARATE, unclamped copy of the same corrupted field — and asks
+/// `pull_chunk_window` to read out to that (still-corrupted) `end`.
+/// `pull_chunk_window` itself is ALREADY safe (it reads real, bounded
+/// chunks one at a time and simply cannot reach an unreachable `end`,
+/// setting `reached_end = false` rather than pre-allocating for it) — so no
+/// second OOM exists here, just a correctly conservative `Truncated`
+/// verdict once the requested window turns out to be unsatisfiable. Both
+/// halves (no OOM, no silent wrong-data acceptance) are exactly what the
+/// design promises; asserted as measured, not as first assumed.
+#[tokio::test]
+async fn implausible_compression_info_data_length_does_not_oom() {
+    let Some(root) = resolve_root_with_corpus_fixture("data_db_bit_flip") else {
+        // Reuses the clean-source presence check `data_db_bit_flip`'s test
+        // already relies on (this test only needs the CLEAN `lz4_table`
+        // source, not that specific corrupt fixture).
+        skip_or_require(
+            "lz4_table clean source",
+            &format!(
+                "no candidate root carries sstables/{CLEAN_KEYSPACE}/{CLEAN_TABLE_DIR}; searched \
+                 {:?}",
+                candidate_base_roots()
+            ),
+        );
+        return;
+    };
+    let clean_dir = root
+        .join("sstables")
+        .join(CLEAN_KEYSPACE)
+        .join(CLEAN_TABLE_DIR);
+    let schema = table_schema();
+    let clean_data_db = single_data_db(&clean_dir);
+    let clean_ci_path = clean_dir.join(
+        clean_data_db
+            .file_name()
+            .expect("Data.db has a filename")
+            .to_string_lossy()
+            .replace("-Data.db", "-CompressionInfo.db"),
+    );
+    let clean_ci_bytes = std::fs::read(&clean_ci_path).expect("read clean CompressionInfo.db");
+    let clean_ci = CompressionInfo::parse(&clean_ci_bytes).expect("parse clean CompressionInfo.db");
+
+    const IMPLAUSIBLE_DATA_LENGTH: u64 = 1u64 << 62;
+    assert!(
+        IMPLAUSIBLE_DATA_LENGTH > clean_ci.data_length,
+        "the fabricated data_length must exceed the real one, or this test proves nothing"
+    );
+    let algorithm =
+        cqlite_core::storage::sstable::writer::CompressionAlgorithm::from_cassandra_name(
+            &clean_ci.algorithm,
+        )
+        .unwrap_or_else(|| panic!("unrecognized compressor name: {}", clean_ci.algorithm));
+    let corrupt_metadata = cqlite_core::storage::sstable::writer::CompressionMetadata {
+        algorithm,
+        chunk_length: clean_ci.chunk_length,
+        max_compressed_length: clean_ci.max_compressed_length,
+        data_length: IMPLAUSIBLE_DATA_LENGTH,
+        chunk_offsets: clean_ci.chunk_offsets.clone(),
+        option_pairs: clean_ci.option_pairs.clone(),
+    };
+    let corrupt_ci_bytes =
+        cqlite_core::storage::sstable::writer::CompressionInfoWriter::new(clean_ci_path.clone())
+            .build_to_vec(&corrupt_metadata)
+            .expect("re-serialize CompressionInfo.db with a fabricated data_length");
+
+    let temp = TempDir::new().expect("tempdir");
+    let corrupt_dir = temp.path().join("corrupt_input");
+    std::fs::create_dir_all(&corrupt_dir).expect("create corrupt input dir");
+    for entry in std::fs::read_dir(&clean_dir)
+        .expect("read fixture dir")
+        .flatten()
+    {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.ends_with("-CompressionInfo.db") {
+            std::fs::write(corrupt_dir.join(&name), &corrupt_ci_bytes)
+                .expect("write corrupted CompressionInfo.db");
+        } else if !name_str.ends_with(".jsonl") && !name_str.ends_with("Statistics.db.txt") {
+            std::fs::copy(entry.path(), corrupt_dir.join(&name)).expect("copy fixture component");
+        }
+    }
+    let corrupt_data_db = single_data_db(&corrupt_dir);
+
+    let out_root = temp.path().join("out");
+    // The bound itself is the assertion, exactly as
+    // `implausible_last_offset_does_not_oom_and_classifies_truncated`
+    // (round 9) — pre-fix this materializes ~1.1 PB and OOM-kills the
+    // process; post-fix it must complete in well under a second.
+    let report = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        salvage_sstable(
+            &corrupt_data_db,
+            &out_root,
+            &schema,
+            SalvageOptions::default(),
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "salvage did not complete within 30s on an implausible CompressionInfo.data_length \
+             — the unbounded chunk-range allocation regressed"
+        )
+    })
+    .unwrap_or_else(|e| {
+        panic!(
+            "salvage must not hard-error on a fabricated CompressionInfo.data_length (a Loss \
+             or a clean recovery, not an Err): {e:#}"
+        )
+    });
+
+    // MEASURED (see this test's doc): the corrupted `data_length` makes
+    // `decode_partition_at_offset_for_salvage`'s OWN internal `end`
+    // resolution (a SEPARATE, unclamped read of the same field, reached
+    // only when `end_bound == None` for a last/compressed partition)
+    // request a window the real chunk table cannot satisfy —
+    // `pull_chunk_window` correctly reports `reached_end = false` rather
+    // than fabricating data or allocating unboundedly, so the ONLY safe
+    // verdict is `Truncated`. The property under test is "no OOM, no
+    // silent wrong-data acceptance", not "recovers cleanly" — asserted as
+    // measured, not as originally assumed.
+    assert_eq!(
+        report.partitions.total, 1,
+        "expected exactly one partition in this fixture's Index.db; got {}",
+        report.partitions.total
+    );
+    assert_eq!(
+        report.losses.len(),
+        1,
+        "expected exactly the one partition as a loss; got {:?}",
+        report.losses
+    );
+    assert_eq!(
+        report.losses[0].class,
+        LossClass::Truncated,
+        "expected LossClass::Truncated (the requested window past the real chunk table cannot \
+         be satisfied); got {:?}",
+        report.losses[0]
+    );
+    assert_eq!(report.partitions.recovered, 0);
+    eprintln!(
+        "[issue_4196] implausible CompressionInfo.data_length ({IMPLAUSIBLE_DATA_LENGTH}): \
+         completed without OOM, classified {:?} (no silent wrong-data acceptance).",
+        report.losses[0].class
+    );
+}

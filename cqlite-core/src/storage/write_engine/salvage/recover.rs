@@ -340,13 +340,26 @@ pub async fn salvage_sstable(
             _ => Vec::new(),
         };
         if !bad_touched.is_empty() {
+            // roborev, issue #4196, round-10 Low finding: `Loss.chunks` is
+            // documented (`mod.rs`) as the chunks this partition's byte
+            // range INTERSECTS — every OTHER loss class passes the full
+            // `touched_chunks`, so this arm passing only the FAILING subset
+            // (`bad_touched`) made the same JSON field mean two different
+            // things depending on `class`. Pass the full intersecting range
+            // here too, for consistency, and name the failing subset in the
+            // message text instead (where a human/consumer wanting "why"
+            // still finds it, distinct from "where").
+            let bad_touched_desc = format!("{bad_touched:?}");
             losses.push(build_loss(
                 entry,
                 schema,
-                bad_touched,
+                touched_chunks,
                 LossClass::ChunkCrc,
                 0,
-                "partition's byte range intersects a chunk that failed CRC validation".to_string(),
+                format!(
+                    "partition's byte range intersects a chunk that failed CRC validation \
+                     (failing chunk(s): {bad_touched_desc})"
+                ),
             ));
             continue;
         }

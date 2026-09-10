@@ -85,11 +85,30 @@ pub(super) fn compressed_chunk_preflight(
         ),
     });
 
+    // roborev, issue #4196, round-10 High finding: `compression_info.data_length`
+    // is taken verbatim from `CompressionInfo.db`'s 8-byte field —
+    // `CompressionInfo::validate` bounds `chunk_count` (<= 1,000,000),
+    // `chunk_length` and offset monotonicity, but never cross-checks
+    // `data_length` against them. A single flipped byte in THAT field alone
+    // (chunk offsets/table/Data.db all intact, so the preflight loop above
+    // reports zero bad chunks) reinstated the exact unbounded chunk-range
+    // allocation round-9's fix removed for the boundary-source case:
+    // `recover.rs`'s clamp trusts THIS returned `data_length` as the safe
+    // bound, so an unvalidated field here defeats it. `chunk_count() *
+    // chunk_length` is the REAL, independently-bounded maximum this file's
+    // chunk table can possibly cover (both factors already validated at
+    // `CompressionInfo::validate`) — take the smaller of the declared value
+    // and that bound, so a corrupted `data_length` can never exceed what the
+    // chunk table actually supports.
+    let chunk_table_bound =
+        (chunk_reader.chunk_count() as u64).saturating_mul(compression_info.chunk_length as u64);
+    let data_length = compression_info.data_length.min(chunk_table_bound);
+
     Ok(ChunkPreflight {
         bad_chunks,
         finding,
         chunk_size: compression_info.chunk_length as u64,
-        data_length: compression_info.data_length,
+        data_length,
     })
 }
 
