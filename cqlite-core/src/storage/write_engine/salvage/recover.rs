@@ -486,9 +486,27 @@ pub async fn salvage_sstable(
     report.losses = losses;
 
     if written == 0 {
+        // roborev, issue #4196, round-12 Low finding: the remedy text
+        // unconditionally read "inspect the losses above", but `written ==
+        // 0` has TWO distinct causes — genuine losses (a non-empty
+        // `losses`), or every partition decoding CLEANLY and reconciling to
+        // `Ok(None)` (`recovered == total`, `losses` affirmatively empty,
+        // e.g. every partition holding only a shadowed range tombstone).
+        // The second case's manifest previously printed `REFUSED:
+        // nothing-decodable` directly next to `losses: 0 RECOGNISED` — a
+        // self-contradictory pairing pointing the operator at a loss list
+        // that has nothing in it. State which case this run is.
+        let remedy = if report.losses.is_empty() {
+            "every partition decoded successfully but reconciled to nothing to write (e.g. a \
+             shadowed range tombstone with no live data); there is nothing to write, not a \
+             decode failure"
+                .to_string()
+        } else {
+            "no partition could be recovered; inspect the losses above".to_string()
+        };
         report.refused = Some(Refusal {
             reason: RefusalReason::NothingDecodable,
-            remedy: "no partition could be recovered; inspect the losses above".to_string(),
+            remedy,
         });
     }
 

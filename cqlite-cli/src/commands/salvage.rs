@@ -14,7 +14,6 @@ use cqlite_core::storage::write_engine::salvage::{
 };
 
 use crate::cli_types::{SalvageArgs, SalvageOutFormatArg};
-use crate::commands::write::load_compaction_table_schema;
 
 /// Execute the `salvage` command.
 ///
@@ -87,11 +86,44 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
         }
     }
 
-    let schema = match load_compaction_table_schema(schema_path) {
+    // roborev, issue #4196, round-12 High finding: `load_compaction_table_schema`
+    // (shared with `compact`) returns the FIRST `CREATE TABLE` in the
+    // `--schema` file unconditionally — for a multi-table schema file whose
+    // target table is not first (e.g. `tombstone-parity.cql`'s
+    // `resurrection_gc_positive`, the 5th of 9 tables), salvage silently
+    // decoded and re-encoded with the WRONG column set and reported a
+    // confidently "clean" manifest, the worst failure shape for a
+    // data-recovery tool. `resolve_salvage_table_schema` instead derives the
+    // target table name from the INPUT's own directory name (Cassandra's
+    // `<table>-<32-hex-id>` convention) and selects the MATCHING
+    // `CREATE TABLE` statement from the file, failing closed when none (or
+    // more than one) matches.
+    // `--table` (when named) always wins over derivation — an explicit
+    // operator choice, and the only route for an input directory NOT laid
+    // out in Cassandra's own `<table>-<id>` convention (common for staged/
+    // synthetic test fixtures, which name directories after the SCENARIO
+    // rather than the real table).
+    let target_table = match &args.table {
+        Some(t) => t.clone(),
+        None => match table_name_from_input(&args.input) {
+            Some(t) => t,
+            None => {
+                eprintln!(
+                    "cqlite salvage: could not derive a table name from {} (expected a table \
+                     directory, or a Data.db file directly under one) — name it explicitly with \
+                     --table",
+                    args.input.display()
+                );
+                std::process::exit(1);
+            }
+        },
+    };
+    let schema = match resolve_salvage_table_schema(schema_path, &target_table) {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
-                "cqlite salvage: failed to load schema from {}: {e:#}",
+                "cqlite salvage: failed to resolve a schema for table '{target_table}' from {}: \
+                 {e:#}",
                 schema_path.display()
             );
             std::process::exit(1);
@@ -269,6 +301,140 @@ fn exit_after_partial_failure(
     // terminal `all_refused` arm's own exit 2, reached here instead because
     // a LATER step hard-failed before that arm ran.
     std::process::exit(2);
+}
+
+/// Derive the target table's DIRECTORY NAME from `input` — either `input`
+/// itself (a table dir) or its PARENT (a single `Data.db` file) — stripping
+/// a trailing `-<32-hex-id>` suffix when present, matching Cassandra's own
+/// `<table>-<tableId>` directory convention. Mirrors
+/// `cqlite_core::storage::sstable::snapshot_path::extract_table_name`'s
+/// algorithm exactly (that module is crate-private to `cqlite-core`, so
+/// reimplemented locally rather than widening its visibility for one
+/// caller) — roborev, issue #4196, round-12 High finding.
+fn table_name_from_input(input: &Path) -> Option<String> {
+    let dir_name = if input.is_dir() {
+        input.file_name()
+    } else {
+        input.parent().and_then(|p| p.file_name())
+    }?
+    .to_str()?;
+    match dir_name.rsplit_once('-') {
+        Some((table_name, id)) if is_table_id_suffix(id) => Some(table_name.to_string()),
+        _ => Some(dir_name.to_string()),
+    }
+}
+
+/// `true` iff `id` is EXACTLY 32 lowercase hex chars — a Cassandra table-id
+/// suffix (same predicate as `snapshot_path::is_table_id_suffix`).
+fn is_table_id_suffix(id: &str) -> bool {
+    id.len() == 32
+        && id
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
+}
+
+/// Load `schema_path` and select the ONE `CREATE TABLE` statement matching
+/// `target_table` (case-insensitively) — roborev, issue #4196, round-12 High
+/// finding: `write::load_compaction_table_schema` (shared with `compact`)
+/// returns the FIRST table in a multi-table schema file unconditionally,
+/// which silently bound salvage to the wrong column set for any schema file
+/// whose target table was not first. Reuses `cqlite_core::schema::cql_parser`'s
+/// public statement-splitting primitives directly (the SAME ones
+/// `load_compaction_table_schema` uses internally, including its `USE`/
+/// `CREATE KEYSPACE` inference for a table whose own keyspace field is
+/// empty/unknown/default) rather than that function's first-match behavior.
+/// Fails closed — an explicit error, never a silent fallback — when zero or
+/// more than one `CREATE TABLE` in the file matches `target_table`.
+fn resolve_salvage_table_schema(
+    schema_path: &Path,
+    target_table: &str,
+) -> anyhow::Result<cqlite_core::schema::TableSchema> {
+    use anyhow::Context;
+    use cqlite_core::schema::cql_parser::{
+        classify_statement, parse_create_table, split_cql_statements, StatementType,
+    };
+
+    let content = std::fs::read_to_string(schema_path)
+        .with_context(|| format!("failed to read schema file: {}", schema_path.display()))?;
+
+    let mut file_keyspace: Option<String> = None;
+    let mut matched: Option<cqlite_core::schema::TableSchema> = None;
+    let mut all_tables: Vec<String> = Vec::new();
+    for stmt in split_cql_statements(&content) {
+        match classify_statement(&stmt) {
+            StatementType::Other(ref kind) if kind == "use" => {
+                let name = stmt
+                    .trim()
+                    .strip_prefix("USE")
+                    .or_else(|| stmt.trim().strip_prefix("use"))
+                    .unwrap_or("")
+                    .trim()
+                    .trim_end_matches(';')
+                    .trim()
+                    .to_string();
+                if !name.is_empty() {
+                    file_keyspace = Some(name);
+                }
+            }
+            StatementType::Other(ref kind) if kind == "create" => {
+                let lower = stmt.to_lowercase();
+                if lower.contains("create keyspace") {
+                    let after = if let Some(pos) = lower.find("exists") {
+                        &stmt[pos + 6..]
+                    } else if let Some(pos) = lower.find("keyspace") {
+                        &stmt[pos + 8..]
+                    } else {
+                        ""
+                    };
+                    let name = after
+                        .trim()
+                        .split(|c: char| c.is_whitespace() || c == '{' || c == ';')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    if !name.is_empty() {
+                        file_keyspace = Some(name);
+                    }
+                }
+            }
+            StatementType::CreateTable => {
+                if let Ok((_, mut ts)) = parse_create_table(&stmt) {
+                    all_tables.push(ts.table.clone());
+                    if ts.table.eq_ignore_ascii_case(target_table) {
+                        if ts.keyspace.is_empty()
+                            || ts.keyspace == "unknown"
+                            || ts.keyspace == "default"
+                        {
+                            if let Some(ref ks) = file_keyspace {
+                                ts.keyspace = ks.clone();
+                            }
+                        }
+                        if matched.is_some() {
+                            anyhow::bail!(
+                                "schema file {} declares table '{target_table}' more than once",
+                                schema_path.display()
+                            );
+                        }
+                        matched = Some(ts);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    matched.ok_or_else(|| {
+        anyhow::anyhow!(
+            "schema file {} does not declare a CREATE TABLE for '{target_table}' (derived from \
+             the input's own directory name) — table(s) present: {}",
+            schema_path.display(),
+            if all_tables.is_empty() {
+                "(none)".to_string()
+            } else {
+                all_tables.join(", ")
+            }
+        )
+    })
 }
 
 /// `true` iff any `*-Data.db` exists anywhere under `out` (roborev, issue

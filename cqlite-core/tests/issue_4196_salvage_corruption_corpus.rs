@@ -684,3 +684,114 @@ async fn swapped_index_entry_keys_classify_key_mismatch() {
         report.partitions.recovered
     );
 }
+
+/// Roborev, issue #4196 (round-12 Low finding): every corruption/refusal
+/// case in this corpus file is BIG (`Index.db`/`CompressionInfo.db`/
+/// `Statistics.db`/`CRC.db`) — `bti_boundaries`'s OWN refusal paths
+/// (missing `Rows.db`, truncated inline key length, an overrunning
+/// declared `key_length`, a corrupt trie root) were exercised only by the
+/// healthy-path test (`salvage_of_healthy_bti_sstable_preserves_every_row`).
+///
+/// This test corrupts a REAL BTI fixture (`test_da.multiclustering_table`)
+/// by REMOVING `Rows.db` entirely while `Partitions.db`'s trie still
+/// references `RowsOffset` (wide-partition) leaves that need it —
+/// `bti_boundaries`'s own explicit check ("Rows.db is missing but
+/// Partitions.db references a RowsOffset leaf") must refuse
+/// `boundary-source-unreadable` with the `rebuild` remedy, exactly like the
+/// BIG `damaged_index_db_refuses_with_the_rebuild_remedy` case above, never
+/// hard-error or silently proceed as if the table were narrow-only.
+#[tokio::test]
+async fn damaged_bti_rows_db_missing_refuses_with_the_rebuild_remedy() {
+    const KEYSPACE: &str = "test_da";
+    const TABLE_NAME: &str = "multiclustering_table";
+    let Some(root) = datasets_root::sstables_root_for_table(KEYSPACE, TABLE_NAME) else {
+        skip_or_require(
+            "multiclustering_table BTI fixture",
+            &format!(
+                "no candidate root carries {KEYSPACE}.{TABLE_NAME}; {}",
+                datasets_root::describe_search(KEYSPACE, TABLE_NAME)
+            ),
+        );
+        return;
+    };
+    let fixture_dir = datasets_root::table_generation_dirs(&root, KEYSPACE, TABLE_NAME)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("{KEYSPACE}.{TABLE_NAME}: no usable generation directory"));
+
+    let schema_path =
+        datasets_root::schema_path("multiclustering-table-bti.cql").expect("committed CQL schema");
+    let cql = std::fs::read_to_string(schema_path).expect("read schema");
+    let start = cql
+        .find(&format!("CREATE TABLE IF NOT EXISTS {TABLE_NAME}"))
+        .unwrap_or_else(|| {
+            cql.find(&format!("CREATE TABLE {TABLE_NAME}"))
+                .expect("CREATE TABLE statement")
+        });
+    let end = start + cql[start..].find(';').expect("statement terminator") + 1;
+    let mut schema = cqlite_core::schema::cql_parser::parse_cql_schema(&cql[start..end])
+        .expect("parse CREATE TABLE");
+    schema.keyspace = KEYSPACE.to_string();
+
+    let temp = TempDir::new().expect("tempdir");
+    let corrupt_dir = temp.path().join("corrupt_input");
+    std::fs::create_dir_all(&corrupt_dir).expect("create corrupt input dir");
+    let mut saw_rows_db = false;
+    for entry in std::fs::read_dir(&fixture_dir)
+        .expect("read fixture dir")
+        .flatten()
+    {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.ends_with("-Rows.db") {
+            // The corruption under test: omit it entirely.
+            saw_rows_db = true;
+            continue;
+        }
+        if !name_str.ends_with(".jsonl") && !name_str.ends_with("Statistics.db.txt") {
+            std::fs::copy(entry.path(), corrupt_dir.join(&name)).expect("copy fixture component");
+        }
+    }
+    assert!(
+        saw_rows_db,
+        "{KEYSPACE}.{TABLE_NAME}: fixture has no Rows.db to remove — this test's premise (a \
+         RowsOffset-leaf table) does not hold for this fixture"
+    );
+    let corrupt_data_db = single_data_db(&corrupt_dir);
+
+    let out_root = temp.path().join("out");
+    let report = salvage_sstable(
+        &corrupt_data_db,
+        &out_root,
+        &schema,
+        SalvageOptions::default(),
+    )
+    .await
+    .unwrap_or_else(|e| {
+        panic!(
+            "salvage must not hard-error on a missing Rows.db (a classified Refusal, not an \
+             Err): {e:#}"
+        )
+    });
+
+    let refusal = report
+        .refused
+        .as_ref()
+        .unwrap_or_else(|| panic!("a missing Rows.db must produce a refusal; report={report:?}"));
+    assert_eq!(
+        refusal.reason,
+        RefusalReason::BoundarySourceUnreadable,
+        "expected BoundarySourceUnreadable; got {:?}",
+        refusal.reason
+    );
+    assert!(
+        refusal.remedy.contains("rebuild"),
+        "remedy must name `rebuild`; got {:?}",
+        refusal.remedy
+    );
+    assert!(
+        no_data_db_anywhere(&out_root),
+        "--out must contain no Data.db after a refusal"
+    );
+    eprintln!("[issue_4196] missing Rows.db (BTI): salvage refused as expected ({refusal:?}).");
+}

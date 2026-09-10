@@ -280,6 +280,19 @@ async fn index_entry_offset_past_eof_classifies_truncated() {
 /// given the corruption, just not the "only the corrupted entry itself is
 /// lost" shape a first guess might expect. Asserted as measured (2 losses),
 /// not as originally assumed (1).
+///
+/// Round-12 Medium finding, additionally: the second-to-last partition's
+/// loss ALSO now exercises `decode_partition_at_offset_for_salvage`'s own
+/// `end > safe_data_length` bound (added round 12) — its `end_bound` IS the
+/// corrupted last entry's offset, passed RAW into that function. This
+/// fixture's real `Data.db` is small (~13 KB) so the bound's absence was
+/// never independently OBSERVABLE via timing here (reading "the rest of
+/// the file" completes instantly either way) — the fix matters for a
+/// genuinely large production `Data.db`, where the pre-fix behavior would
+/// materialize the remaining decompressed section into one resident `Vec`
+/// before reaching the SAME `Truncated` verdict. Verified by code
+/// inspection (the guard fires before `pull_chunk_window` is ever called)
+/// rather than by a timing difference this small fixture cannot exhibit.
 #[tokio::test]
 async fn implausible_last_offset_does_not_oom_and_classifies_truncated() {
     const KEYSPACE: &str = "test_basic";
@@ -767,5 +780,211 @@ async fn implausible_chunk_offset_table_does_not_oom() {
         "[issue_4196] shifted chunk_offsets table: completed without OOM, classified {:?} (no \
          chunk handed to an allocation sized from the untrusted offset table).",
         report.losses[0].class
+    );
+}
+
+/// Roborev, issue #4196 (round-12 Medium finding): both OOM guards
+/// `recover.rs` added in rounds 9/10 are conditioned on `data_length > 0` —
+/// `CompressionInfo::validate` bounds `algorithm`/`chunk_length`/offset
+/// ordering but places NO bound on `data_length` at all (unlike
+/// `chunk_count`, capped in `CompressionInfo::parse`), so a ZEROED
+/// `data_length` field parses fine, and `chunks.rs`'s
+/// `min(chunk_table_bound)` clamp used to yield exactly `0` for it too —
+/// silently DISABLING both the `entry.data_offset >= data_length` short-
+/// circuit and the `chunk_range_end.min(data_length)` clamp (both read `0`
+/// as "unknown/disabled", matching the UNCOMPRESSED "no CRC.db" case's
+/// legitimate `0`), reinstating the exact unbounded `chunks_for_range`
+/// materialization rounds 9/10 fixed — through the OPPOSITE corruption
+/// direction (zeroed rather than inflated) from `implausible_compression_info_data_length_does_not_oom`.
+/// Fixed: `chunks.rs` now falls back to the structurally-derived
+/// `chunk_table_bound` (`chunk_count * chunk_length`, always positive for a
+/// validated `CompressionInfo`) whenever the declared `data_length` is
+/// exactly `0`, instead of propagating a value that disables clamping.
+///
+/// This test combines BOTH corruptions needed to demonstrate the actual
+/// risk (data_length alone, without an adjacent implausible boundary
+/// entry, cannot by itself materialize anything large): `CompressionInfo.data_length`
+/// zeroed, AND the LAST `Index.db` entry's `data_offset` corrupted to
+/// `u64::MAX / 2` (the same construction
+/// `implausible_last_offset_does_not_oom_and_classifies_truncated` uses,
+/// reused here since `check_strictly_ascending` places no upper bound only
+/// on the LAST entry).
+#[tokio::test]
+async fn implausible_zeroed_data_length_does_not_oom() {
+    const KEYSPACE: &str = "test_basic";
+    const TABLE_NAME: &str = "multi_partition_table";
+    let Some(root) = datasets_root::sstables_root_for_table(KEYSPACE, TABLE_NAME) else {
+        skip_or_require(
+            "multi_partition_table fixture",
+            &format!(
+                "no candidate root carries {KEYSPACE}.{TABLE_NAME}; {}",
+                datasets_root::describe_search(KEYSPACE, TABLE_NAME)
+            ),
+        );
+        return;
+    };
+    let fixture_dir = datasets_root::table_generation_dirs(&root, KEYSPACE, TABLE_NAME)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("{KEYSPACE}.{TABLE_NAME}: no usable generation directory"));
+
+    let schema_path = datasets_root::schema_path("basic-types.cql").expect("committed CQL schema");
+    let cql = std::fs::read_to_string(schema_path).expect("read schema");
+    let start = cql
+        .find(&format!("CREATE TABLE IF NOT EXISTS {TABLE_NAME}"))
+        .expect("CREATE TABLE statement");
+    let end = start + cql[start..].find(';').expect("statement terminator") + 1;
+    let mut schema = cqlite_core::schema::cql_parser::parse_cql_schema(&cql[start..end])
+        .expect("parse CREATE TABLE");
+    schema.keyspace = KEYSPACE.to_string();
+
+    // Corruption 1: the LAST Index.db entry's data_offset, same construction
+    // as `implausible_last_offset_does_not_oom_and_classifies_truncated`.
+    let clean_data_db = single_data_db(&fixture_dir);
+    let clean_index_db = fixture_dir.join(
+        clean_data_db
+            .file_name()
+            .expect("Data.db has a filename")
+            .to_string_lossy()
+            .replace("-Data.db", "-Index.db"),
+    );
+    let clean_index_bytes = std::fs::read(&clean_index_db).expect("read clean Index.db");
+    let entries = split_big_index_entries(&clean_index_bytes);
+    let total = entries.len();
+    assert!(
+        total >= 3,
+        "{KEYSPACE}.{TABLE_NAME}: need at least 3 partitions; found {total}"
+    );
+    let (last_start, last_key_end, last_end) = entries[total - 1];
+    let mut corrupt_index_bytes = Vec::with_capacity(clean_index_bytes.len());
+    corrupt_index_bytes.extend_from_slice(&clean_index_bytes[..last_start]);
+    corrupt_index_bytes.extend_from_slice(&clean_index_bytes[last_start..last_key_end]);
+    const IMPLAUSIBLE_OFFSET: u64 = u64::MAX / 2;
+    cqlite_core::storage::serialization::vint::encode_unsigned(
+        IMPLAUSIBLE_OFFSET,
+        &mut corrupt_index_bytes,
+    );
+    let (_orig_offset, offset_consumed) =
+        cqlite_core::parser::vint::decode_unsigned(&clean_index_bytes[last_key_end..])
+            .expect("clean Index.db entry has a well-formed data_offset VInt");
+    corrupt_index_bytes
+        .extend_from_slice(&clean_index_bytes[last_key_end + offset_consumed..last_end]);
+
+    // Corruption 2: CompressionInfo.data_length zeroed, via the sanctioned
+    // fixture-synthesis route (rounds 10/11's own pattern).
+    let clean_ci_path = fixture_dir.join(
+        clean_data_db
+            .file_name()
+            .expect("Data.db has a filename")
+            .to_string_lossy()
+            .replace("-Data.db", "-CompressionInfo.db"),
+    );
+    let clean_ci_bytes = std::fs::read(&clean_ci_path).expect("read clean CompressionInfo.db");
+    let clean_ci = CompressionInfo::parse(&clean_ci_bytes).expect("parse clean CompressionInfo.db");
+    let algorithm =
+        cqlite_core::storage::sstable::writer::CompressionAlgorithm::from_cassandra_name(
+            &clean_ci.algorithm,
+        )
+        .unwrap_or_else(|| panic!("unrecognized compressor name: {}", clean_ci.algorithm));
+    let corrupt_metadata = cqlite_core::storage::sstable::writer::CompressionMetadata {
+        algorithm,
+        chunk_length: clean_ci.chunk_length,
+        max_compressed_length: clean_ci.max_compressed_length,
+        data_length: 0, // <-- the corruption under test
+        chunk_offsets: clean_ci.chunk_offsets.clone(),
+        option_pairs: clean_ci.option_pairs.clone(),
+    };
+    let corrupt_ci_bytes =
+        cqlite_core::storage::sstable::writer::CompressionInfoWriter::new(clean_ci_path.clone())
+            .build_to_vec(&corrupt_metadata)
+            .expect("re-serialize CompressionInfo.db with data_length zeroed");
+
+    let temp = TempDir::new().expect("tempdir");
+    let corrupt_dir = temp.path().join("corrupt_input");
+    std::fs::create_dir_all(&corrupt_dir).expect("create corrupt input dir");
+    for entry in std::fs::read_dir(&fixture_dir)
+        .expect("read fixture dir")
+        .flatten()
+    {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.ends_with("-Index.db") {
+            std::fs::write(corrupt_dir.join(&name), &corrupt_index_bytes)
+                .expect("write corrupted Index.db");
+        } else if name_str.ends_with("-CompressionInfo.db") {
+            std::fs::write(corrupt_dir.join(&name), &corrupt_ci_bytes)
+                .expect("write corrupted CompressionInfo.db");
+        } else if !name_str.ends_with(".jsonl") && !name_str.ends_with("Statistics.db.txt") {
+            std::fs::copy(entry.path(), corrupt_dir.join(&name)).expect("copy fixture component");
+        }
+    }
+    let corrupt_data_db = single_data_db(&corrupt_dir);
+
+    let out_root = temp.path().join("out");
+    let report = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        salvage_sstable(
+            &corrupt_data_db,
+            &out_root,
+            &schema,
+            SalvageOptions::default(),
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "salvage did not complete within 30s on a zeroed CompressionInfo.data_length plus \
+             an implausible last-entry offset — the unbounded chunk-range allocation regressed"
+        )
+    })
+    .unwrap_or_else(|e| {
+        panic!(
+            "salvage must not hard-error on this combined corruption (a Loss or a classified \
+             Refusal, not an Err): {e:#}"
+        )
+    });
+
+    // MEASURED: 2 losses (not 1) — the SAME shape
+    // `implausible_last_offset_does_not_oom_and_classifies_truncated`
+    // establishes: the corrupted LAST entry itself (caught by `recover.rs`'s
+    // own `entry.data_offset >= data_length` pre-check, using
+    // `chunks.rs`'s now-fixed `chunk_table_bound` fallback) AND the
+    // SECOND-TO-LAST entry (whose `end_bound` IS the corrupted last
+    // entry's offset, caught by THIS fix's `end > safe_len` check inside
+    // `decode_partition_at_offset_for_salvage`) — every OTHER partition
+    // decodes normally, proving the zero-`data_length` fallback does not
+    // over-refuse legitimate partitions whose `end_bound` was never
+    // corrupted.
+    assert_eq!(
+        report.partitions.total, total,
+        "expected the untouched partition count; got {}",
+        report.partitions.total
+    );
+    assert_eq!(
+        report.losses.len(),
+        2,
+        "expected exactly the corrupted last partition plus the second-to-last (whose end_bound \
+         IS the corrupted value); got {:?}",
+        report.losses
+    );
+    for loss in &report.losses {
+        assert_eq!(
+            loss.class,
+            LossClass::Truncated,
+            "expected LossClass::Truncated for both affected slots; got {:?}",
+            loss
+        );
+    }
+    assert_eq!(
+        report.partitions.recovered,
+        total - 2,
+        "every OTHER partition (whose end_bound was never corrupted) must still recover \
+         cleanly — the zero-data_length fallback must not over-refuse legitimate partitions"
+    );
+    eprintln!(
+        "[issue_4196] zeroed CompressionInfo.data_length + implausible last offset: completed \
+         without OOM, {} of {total} partitions lost (both Truncated), {} recovered.",
+        report.losses.len(),
+        report.partitions.recovered
     );
 }

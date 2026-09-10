@@ -495,12 +495,50 @@ impl SSTableReader {
                 let target_chunk = offset_usize / len;
                 let window_base = target_chunk * len;
                 let within = offset_usize - window_base;
+                // roborev, issue #4196, round-12 Medium finding: round 9/10's
+                // clamp lives in `chunks.rs`'s `compressed_chunk_preflight`,
+                // whose RETURNED `data_length` only bounds `recover.rs`'s OWN
+                // `chunk_range_end` (the chunk-CRC pre-flight's range) — it is
+                // never threaded into THIS function, so both the `None`
+                // (last-partition) case, which reads `ci.data_length` raw, and
+                // the `Some(e)` (non-last) case, which uses `end_bound` raw
+                // (a possibly-corrupted NEXT entry's `data_offset`), could
+                // still ask `pull_chunk_window` for a window past what the
+                // chunk table can really supply. `pull_chunk_window` has no
+                // pre-allocation (round 9/10/11's own tests already prove
+                // that), but it DOES decompress every remaining real chunk
+                // before giving up — for a genuinely large production
+                // `Data.db` that means materializing "the rest of the file"
+                // into one resident `Vec`, violating spec R6 ("one partition
+                // resident") and the <128 MB target. Compute the SAME clamp
+                // `chunks.rs` does (`chunk_count * chunk_length`, both
+                // already bounded by `CompressionInfo::parse`/`validate`)
+                // directly from the reader's own already-open
+                // `CompressionInfo` — no value needs threading from
+                // `recover.rs` at all — and refuse (`Truncated`) whenever the
+                // resolved `end`, from EITHER source, exceeds it.
+                let safe_data_length = self.compression_info.as_deref().map(|ci| {
+                    let chunk_table_bound =
+                        (ci.chunk_offsets.len() as u64).saturating_mul(ci.chunk_length as u64);
+                    // Mirrors `chunks.rs::compressed_chunk_preflight`'s OWN
+                    // zero-fallback exactly (roborev, issue #4196, round-12
+                    // Medium finding, second half found while regression-
+                    // testing the first): `ci.data_length` has no lower
+                    // bound either, so a ZEROED field must not be treated as
+                    // "0 bytes of real data" (which would make every
+                    // legitimate `end > 0` look implausible and refuse
+                    // EVERY partition, not just the corrupted one) — fall
+                    // back to the always-positive structural bound instead.
+                    if ci.data_length == 0 {
+                        chunk_table_bound
+                    } else {
+                        ci.data_length.min(chunk_table_bound)
+                    }
+                });
                 let end = match end_bound {
                     Some(e) => e as usize,
-                    None => match self
-                        .compression_info
-                        .as_ref()
-                        .map(|ci| ci.data_length as usize)
+                    None => match safe_data_length
+                        .map(|l| l as usize)
                         .filter(|&l| l > offset_usize)
                     {
                         Some(l) => l,
@@ -509,6 +547,11 @@ impl SSTableReader {
                         None => return Ok(PartitionAtOffsetOutcome::Truncated),
                     },
                 };
+                if let Some(safe_len) = safe_data_length {
+                    if end as u64 > safe_len {
+                        return Ok(PartitionAtOffsetOutcome::Truncated);
+                    }
+                }
                 compressed_end = Some(end);
                 let (window, reached_end) = self
                     .pull_chunk_window(target_chunk, window_base, end, scan_cancel)

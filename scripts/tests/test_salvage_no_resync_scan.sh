@@ -8,6 +8,22 @@
 #
 # Registered in the gate's `tooling-tests` component (no cargo/network needed —
 # a pure grep, so it always runs).
+#
+# SCOPE (roborev, issue #4196, round-12 Low finding): this guard scans ONLY
+# `cqlite-core/src/storage/write_engine/salvage/` — the actual byte-touching
+# decode primitive salvage's per-partition loop calls,
+# `decode_partition_at_offset_for_salvage`
+# (`reader/data_access/point_compaction.rs`), is OUTSIDE that directory and
+# therefore OUTSIDE this guard's reach. DELIBERATE, not an oversight:
+# `point_compaction.rs` is a SHARED point-read file with many OTHER
+# functions and their own legitimate byte-pattern-search uses (unrelated to
+# salvage's R4.3 "never resync by scanning" mandate) — widening the scan to
+# the WHOLE file risks false positives against code this guard has no
+# business flagging, and `decode_partition_at_offset_for_salvage` itself
+# reads via `read_exact_at`/`pull_chunk_window`'s bounded, offset-driven
+# reads (never a byte-pattern SEARCH) per its own construction, so nothing
+# in it would trip these patterns regardless. Declared explicitly here
+# rather than silently assumed.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

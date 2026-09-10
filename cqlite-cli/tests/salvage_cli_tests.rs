@@ -287,6 +287,8 @@ fn post_write_manifest_failure_with_all_refused_exits_2_not_1() {
         "--schema",
         schema.to_str().unwrap(),
         "salvage",
+        "--table",
+        "lz4_table",
         input_dir.to_str().unwrap(),
         "--out",
         out.to_str().unwrap(),
@@ -353,6 +355,8 @@ fn unparseable_generation_is_named_and_skipped_others_still_salvaged() {
         "--schema",
         schema.to_str().unwrap(),
         "salvage",
+        "--table",
+        "lz4_table",
         input_dir.to_str().unwrap(),
         "--out",
         out.to_str().unwrap(),
@@ -453,6 +457,8 @@ fn toc_less_generation_is_named_and_skipped_others_still_salvaged() {
         "--schema",
         schema.to_str().unwrap(),
         "salvage",
+        "--table",
+        "lz4_table",
         input_dir.to_str().unwrap(),
         "--out",
         out.to_str().unwrap(),
@@ -536,6 +542,8 @@ fn damaged_input_manifest_names_every_loss() {
         "--schema",
         schema.to_str().unwrap(),
         "salvage",
+        "--table",
+        "lz4_table",
         data_db.to_str().unwrap(),
         "--out",
         out.to_str().unwrap(),
@@ -621,6 +629,8 @@ fn refusal_exit_2_no_data_db_written() {
         "--schema",
         schema.to_str().unwrap(),
         "salvage",
+        "--table",
+        "lz4_table",
         data_db.to_str().unwrap(),
         "--out",
         out.to_str().unwrap(),
@@ -778,4 +788,68 @@ fn walk_no_data_db(dir: &Path, rd: std::fs::ReadDir) -> bool {
     }
     let _ = dir;
     true
+}
+
+/// Roborev, issue #4196, round-12 High finding: `load_compaction_table_schema`
+/// (shared with `compact`) used to return the FIRST `CREATE TABLE` in a
+/// multi-table `--schema` file unconditionally — no fail-closed signal, no
+/// selector, just a silently WRONG column set for any table not first. Fixed
+/// by deriving the target table from the input directory's own name
+/// (Cassandra's `<table>-<id>` convention) and requiring an EXACT match in
+/// the schema file; this test proves the fail-closed half directly: a
+/// staged input directory named after the CORRUPTION SCENARIO
+/// (`index_db_bit_flip_big`, not any real table) against
+/// `compression-parity.cql` (7 declared tables, none named
+/// `index_db_bit_flip_big`) must exit 1 with a NAMED cause — never silently
+/// fall back to the first table and proceed. The 5 tests above prove the
+/// OTHER half (`--table` naming the real table explicitly recovers the
+/// correct schema).
+#[test]
+fn unmatched_directory_name_without_table_flag_fails_closed() {
+    const FIXTURE: &str = "corruption/test_comp_corrupt/index_db_bit_flip_big";
+    let Some(corrupt_dir) = resolve_fixture(FIXTURE) else {
+        skip_or_require(
+            "index_db_bit_flip_big fixture",
+            &format!("no candidate root carries {FIXTURE}"),
+        );
+        return;
+    };
+    let data_db = single_data_db(&corrupt_dir);
+    let schema = schemas_dir().join("compression-parity.cql");
+    let temp = TempDir::new().expect("tempdir");
+    let out = temp.path().join("out");
+
+    // Deliberately NO --table: the input's own directory name
+    // (`index_db_bit_flip_big`) matches none of compression-parity.cql's 7
+    // declared tables.
+    let output = run_cli(&[
+        "--schema",
+        schema.to_str().unwrap(),
+        "salvage",
+        data_db.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "an unresolvable table must exit 1 (usage error), never silently proceed; stdout={}\n\
+         stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("index_db_bit_flip_big") && stderr.contains("lz4_table"),
+        "stderr must NAME both the unresolved target table and at least one real declared \
+         table so an operator can supply --table; got: {stderr}"
+    );
+    assert!(
+        !out.exists()
+            || std::fs::read_dir(&out)
+                .map(|mut rd| rd.next().is_none())
+                .unwrap_or(true),
+        "--out must contain nothing when schema resolution itself failed before any I/O"
+    );
 }

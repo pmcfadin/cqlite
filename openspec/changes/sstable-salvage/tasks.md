@@ -1142,6 +1142,144 @@ pass against the real corpus; `test_salvage_no_resync_scan.sh` passes;
 `features-load-bearing` 61/61 (1712 source files scanned, was 1710 — the 2
 new files, correctly picked up).
 
+## Round 12, roborev job 3370 (post-split re-review) — a NEW High + 2 Medium
+## found; both fixed, 2 of 3 Low fixed, 1 Low declared a follow-up gap
+
+- [x] High: `execute_salvage_command` resolved its schema via
+      `write::load_compaction_table_schema`, which returns the FIRST
+      `CREATE TABLE` in a multi-table `--schema` file UNCONDITIONALLY, with
+      no selector and no cross-check against the input — demonstrated by
+      the change's OWN R7.1 test, which salvages
+      `test_tomb.resurrection_gc_positive` against `tombstone-parity.cql`
+      (9 declared tables) and had been asserting exit 0/zero-losses while
+      silently decoding against `gc_before_boundary` (the FIRST table in
+      the file) the whole time — the worst failure shape for a
+      data-recovery tool: a confidently "clean" manifest reconciled against
+      the WRONG schema. Fixed: a new `resolve_salvage_table_schema` selects
+      the table MATCHING the input's own directory name (Cassandra's
+      `<table>-<32-hex-id>` convention, reimplemented locally — mirrors
+      `snapshot_path::extract_table_name`, which is crate-private to
+      `cqlite-core`), failing closed (exit 1, naming every declared table)
+      when none match; a new `--table <name>` flag lets an operator name it
+      explicitly for a staged/synthetic input directory whose name is NOT
+      the real table (the common shape of this PR's OWN corruption-corpus
+      fixtures, which name directories after the CORRUPTION SCENARIO).
+      Updated 5 existing CLI tests to pass `--table lz4_table` (their real,
+      previously-undeclared target table) and added
+      `unmatched_directory_name_without_table_flag_fails_closed` proving the
+      fail-closed half directly. `healthy_table_dir_two_generations_exit_0`
+      NOW genuinely exercises the CORRECT schema
+      (`resurrection_gc_positive`) for the first time — its assertions held
+      unchanged, confirming the fix is not just fail-closed but correct.
+- [x] Medium (finding 1): round 9/10's `chunk_range_end` clamp bounds only
+      `recover.rs`'s OWN chunk-CRC pre-flight range — the RAW, unvalidated
+      `end_bound` (a possibly-corrupted NEXT entry's `data_offset`, or the
+      reader's own unclamped `compression_info.data_length` for the last
+      partition) is still passed straight into
+      `decode_partition_at_offset_for_salvage`. The uncompressed arm
+      guards this (`end > section_len` before allocating); the compressed
+      arm did not — `pull_chunk_window` has no pre-allocation (already
+      proven safe by rounds 9-11's own tests) but DOES decompress every
+      REMAINING REAL CHUNK before reporting `reached_end = false`, so for a
+      genuinely large production `Data.db` this still materializes "the
+      rest of the file" into one resident `Vec`, violating spec R6 and the
+      <128 MB target. Fixed: `decode_partition_at_offset_for_salvage`'s
+      compressed branch now computes the SAME `chunk_table_bound` clamp
+      `chunks.rs` does, directly from the reader's own already-open
+      `CompressionInfo` (no value threaded from `recover.rs`), and refuses
+      (`Truncated`) whenever the resolved `end` — from EITHER source —
+      exceeds it, before `pull_chunk_window` is ever called. NOT
+      independently fixture-tested with a NEW test (this fixture's real
+      `Data.db` is ~13 KB, too small for "materializes the rest of the
+      file" to be independently OBSERVABLE via timing) — verified instead
+      by code inspection AND by confirming
+      `implausible_last_offset_does_not_oom_and_classifies_truncated`'s
+      existing second-to-last-partition assertion ALSO now exercises this
+      exact new guard (doc comment updated to say so precisely).
+- [x] Medium (finding 2): both OOM guards are conditioned on `data_length >
+      0` — `CompressionInfo::validate` places NO bound on `data_length` at
+      all (unlike `chunk_count`, capped in `parse`), so a ZEROED field
+      parses fine and `chunks.rs`'s `min(chunk_table_bound)` clamp yielded
+      exactly `0` for it too, which BOTH downstream guards read as
+      "unknown/disabled" (matching the uncompressed "no CRC.db" case's
+      LEGITIMATE `0`) — silently disabling the very clamp round 10 added,
+      through the OPPOSITE corruption direction (zeroed rather than
+      inflated). Fixed in BOTH places that compute this clamp
+      (`chunks.rs::compressed_chunk_preflight`, AND — found DURING
+      regression-testing THIS fix, since `decode_partition_at_offset_for_salvage`
+      computes an INDEPENDENT copy from the reader's own raw, unmodified
+      `CompressionInfo` rather than `chunks.rs`'s returned value — the
+      round-12-finding-1 fix in `point_compaction.rs` too, which had
+      reintroduced the identical zero-disables-clamping bug one file over):
+      both now fall back to the always-positive `chunk_table_bound`
+      whenever the declared `data_length` is exactly `0`. Test:
+      `implausible_zeroed_data_length_does_not_oom` — combines a zeroed
+      `CompressionInfo.data_length` with the SAME corrupted-last-entry
+      `Index.db` construction round 9 uses (data_length alone, without an
+      adjacent implausible boundary entry, cannot independently
+      demonstrate the risk); MEASURED (an initial version of this test,
+      before the `point_compaction.rs` half of the fix, showed ALL 100
+      partitions refused instead of the expected 2 — the SAME zero-disables-
+      clamping bug, caught by this test itself before it was ever
+      committed) to lose exactly 2 of 100 partitions (both `Truncated`),
+      98 recovering cleanly — proving the fix neither re-admits the OOM
+      NOR over-refuses legitimate, uncorrupted partitions.
+- [x] Low (finding 3): `RefusalReason::NothingDecodable`'s remedy read "no
+      partition could be recovered; inspect the losses above"
+      UNCONDITIONALLY, even when every partition decoded CLEANLY and
+      reconciled to `Ok(None)` (`recovered == total`, `losses`
+      affirmatively empty) — the manifest then printed `REFUSED:
+      nothing-decodable` directly beside `losses: 0 RECOGNISED`, a
+      self-contradictory pairing pointing an operator at a loss list with
+      nothing in it. Fixed: the remedy is now conditional on whether
+      `losses` is empty, stating plainly that every partition decoded but
+      reconciled to nothing to write, distinct from the genuine-losses case.
+- [x] Low (finding 5, BTI corruption coverage — renumbered from the
+      review's own unlabeled "two coverage gaps" finding): every
+      corruption/refusal case in the corpus was BIG; `bti_boundaries`'s own
+      refusal paths were exercised only by the healthy-path test. Fixed:
+      `damaged_bti_rows_db_missing_refuses_with_the_rebuild_remedy` — a
+      real `test_da.multiclustering_table` (BTI, wide/`RowsOffset`-leaf
+      partitions) fixture with `Rows.db` REMOVED entirely, asserting
+      `boundary-source-unreadable` with the `rebuild` remedy, mirroring the
+      BIG `damaged_index_db_refuses_with_the_rebuild_remedy` case.
+      ALSO fixed (the same finding's second half): `test_salvage_no_resync_scan.sh`'s
+      SCOPE (only `write_engine/salvage/`, not
+      `reader/data_access/point_compaction.rs`, where the actual
+      byte-touching decode primitive now lives) is now stated EXPLICITLY in
+      the guard's own header, with the reasoning for why widening the scan
+      to that SHARED file would risk false positives against unrelated code
+      — declared rather than silently assumed, per the finding's own
+      "or state in its header" alternative.
+- [ ] BATCHED FOLLOW-UP (Low finding 4, not fixed — reported rather than
+      silently dropped): a table directory holding BOTH a BIG and a BTI
+      generation sharing the SAME numeric id (`nb-1-big-Data.db` and
+      `da-1-bti-Data.db`) is enumerated as two generations sorted by number
+      alone (`discover_salvage_inputs`), and both would write into
+      `<out>/<keyspace>/<table>/` at generation `1` — the second run
+      clobbers the first's components with no warning, while the manifest
+      reports two successful generations. A correct fix needs either
+      keying output generations on `(family, id)` or renumbering
+      sequentially, PLUS collision detection in `discover_salvage_inputs`
+      — real design work (this mixed-format-same-id shape does not occur
+      in normal Cassandra operation, a table is one format or the other at
+      a given time, narrowing this to a genuinely unusual input rather than
+      a routine one), left for the follow-up issue rather than a rushed
+      change to generation-numbering semantics under this round's time
+      budget.
+
+Re-verified after all fixes: `cargo fmt --check` clean; `cargo clippy -p
+cqlite-core --features write-support --lib` and all four salvage `--test`
+targets clean; `cargo clippy -p cqlite-cli --features write-support --lib
+--bins --test salvage_cli_tests` clean; `cargo test -p cqlite-core --lib
+--features write-support` 4060 passed (unchanged); `cargo test -p
+cqlite-cli --lib --features write-support` 233 passed (unchanged); all
+salvage `cqlite-core` tests (7+5+4+1 = 17, was 6+4+4+1 = 15 pre-round; +1
+new corruption-corpus BTI case, +1 new OOM-bounds case) and CLI tests (9,
+was 8; +1 new fail-closed case, plus 5 existing tests updated with
+`--table`) pass against the real corpus; `test_salvage_no_resync_scan.sh`
+passes; `features-load-bearing` 61/61.
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree

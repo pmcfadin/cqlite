@@ -145,7 +145,27 @@ pub(super) fn compressed_chunk_preflight(
     // supports.
     let chunk_table_bound =
         (chunk_reader.chunk_count() as u64).saturating_mul(compression_info.chunk_length as u64);
-    let data_length = compression_info.data_length.min(chunk_table_bound);
+    // roborev, issue #4196, round-12 Medium finding: `compression_info.data_length`
+    // has NO independent LOWER bound either — `CompressionInfo::validate`
+    // never checks it at all, so a ZEROED field parses fine and
+    // `.min(chunk_table_bound)` would then yield exactly `0`. BOTH
+    // downstream OOM guards in `recover.rs` are conditioned on `data_length
+    // > 0` (matching the uncompressed "no CRC.db" case's LEGITIMATE `0`,
+    // meaning "chunking info unavailable") — so a zeroed compressed
+    // `data_length` silently DISABLES the very clamp round 10 added,
+    // reinstating the unbounded `chunks_for_range` materialization through
+    // the opposite corruption direction (zeroed rather than inflated).
+    // `chunk_table_bound` is ALWAYS positive for a validated
+    // `CompressionInfo` (`chunk_count >= 1`, `chunk_length > 0`), so a
+    // declared `data_length` of exactly `0` is itself implausible for a
+    // compressed input with a real chunk table — fall back to the
+    // structurally-derived bound instead of propagating a value that
+    // disables clamping.
+    let data_length = if compression_info.data_length == 0 {
+        chunk_table_bound
+    } else {
+        compression_info.data_length.min(chunk_table_bound)
+    };
 
     Ok(ChunkPreflight {
         bad_chunks,

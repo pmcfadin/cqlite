@@ -384,7 +384,7 @@ pub enum Commands {
     Compact(CompactArgs),
     /// Recover every completely-decodable partition of a damaged SSTable (issue #4196)
     #[command(
-        long_about = "Recover every completely-decodable partition of a damaged Data.db | table-dir into a fresh generation, from the authoritative boundary source (Index.db / the Partitions.db trie) -- never by scanning Data.db bytes for a plausible header. A partition is recovered WHOLE OR NOT AT ALL: a partition whose decode fails at any row is skipped entirely (a later row can carry a tombstone that shadows earlier ones already decoded, so writing a prefix would resurrect deleted data). Output is UNCOMPRESSED (issue #1406) -- CQLite's production write surface never emits a CompressionInfo.db. A damaged Index.db/Partitions.db means boundaries are unknown and salvage REFUSES, writing no Data.db; the remedy is `cqlite rebuild --components index` (issue #4197) first. --schema resolves through the global --schema flag. Exit 0 = every partition recovered; 3 = output written with losses (see --manifest); 2 = refused, no Data.db written; 1 = usage error. Example: cqlite --schema ks.tbl.cql salvage ./damaged-table-dir --out ./recovered --manifest ./recovered/salvage.json"
+        long_about = "Recover every completely-decodable partition of a damaged Data.db | table-dir into a fresh generation, from the authoritative boundary source (Index.db / the Partitions.db trie) -- never by scanning Data.db bytes for a plausible header. A partition is recovered WHOLE OR NOT AT ALL: a partition whose decode fails at any row is skipped entirely (a later row can carry a tombstone that shadows earlier ones already decoded, so writing a prefix would resurrect deleted data). Output is UNCOMPRESSED (issue #1406) -- CQLite's production write surface never emits a CompressionInfo.db. A damaged Index.db/Partitions.db means boundaries are unknown and salvage REFUSES, writing no Data.db; the remedy is `cqlite rebuild --components index` (issue #4197) first. --schema resolves through the global --schema flag, which may declare MULTIPLE tables; the target table is DERIVED from the input directory's own name (Cassandra's <table>-<id> convention) unless --table names it explicitly -- salvage FAILS CLOSED (never a silent guess) when neither resolves to exactly one matching CREATE TABLE. Exit 0 = every partition recovered; 3 = output written with losses (see --manifest); 2 = refused, no Data.db written; 1 = usage error. Example: cqlite --schema ks.tbl.cql salvage ./damaged-table-dir --out ./recovered --manifest ./recovered/salvage.json"
     )]
     Salvage(SalvageArgs),
     /// Verify SSTable integrity (compressed + corrupted) — epic #970, issue #1000
@@ -571,6 +571,16 @@ pub struct SalvageArgs {
     /// `Data.db` file, or a table directory (each generation is salvaged
     /// separately, one output generation per input generation)
     pub input: PathBuf,
+    /// The table to salvage, when `--schema` declares more than one
+    /// (roborev, issue #4196, round-12 High finding). When omitted, the
+    /// table name is DERIVED from the input's own directory name
+    /// (Cassandra's `<table>-<32-hex-id>` convention) — that derivation
+    /// fails closed (exit 1, never a silent guess) when the directory name
+    /// does not match any table `--schema` declares, so a staged/synthetic
+    /// input directory whose name is NOT the real table name (common in
+    /// test fixtures) needs this flag named explicitly.
+    #[arg(long)]
+    pub table: Option<String>,
     /// Output directory (keyspace/table/ is appended, matching --schema)
     #[arg(long)]
     pub out: PathBuf,
