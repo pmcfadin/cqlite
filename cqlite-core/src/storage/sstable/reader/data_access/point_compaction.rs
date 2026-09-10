@@ -445,6 +445,12 @@ impl SSTableReader {
             .as_ref()
             .map(|ci| ci.chunk_length as usize)
             .filter(|&len| len > 0);
+        // The full-consumption check below applies ONLY to the uncompressed
+        // branch: a compressed `window` is CHUNK-ALIGNED (`pull_chunk_window`
+        // materializes whole chunks), so it can legitimately extend past
+        // `end` into the next partition's leading bytes — `within + consumed
+        // == window.len()` would be WRONG there.
+        let is_uncompressed = chunk_length.is_none();
 
         let (window, within, reached_end) = match chunk_length {
             None => {
@@ -531,7 +537,31 @@ impl SSTableReader {
         );
 
         match decode_result {
-            Ok(_) => {
+            Ok(step) => {
+                // roborev, issue #4196 (High): the uncompressed branch's
+                // `end` for the LAST partition comes from the file's ACTUAL
+                // length (`section_len`), not a declared one — a Data.db
+                // truncated mid-row therefore still satisfies `within <
+                // window.len() && reached_end` above (there is nothing left
+                // to compare against). `[within..]` is exactly ONE
+                // partition's bytes, so a genuinely complete decode must
+                // consume the WHOLE window; anything less is leftover bytes
+                // the parser did not account for, treated as `Truncated`
+                // rather than silently accepted as a short-but-clean
+                // partition (the D2 resurrection hazard: a partial row set
+                // written as if complete). `Done` (zero bytes consumed) is
+                // likewise suspicious when the window is non-empty.
+                if is_uncompressed {
+                    use crate::storage::sstable::reader::parsing::row_decoder::ParseStep;
+                    let fully_consumed = match step {
+                        ParseStep::Emitted(consumed) => within + consumed == window.len(),
+                        ParseStep::Done => within == window.len(),
+                        ParseStep::NeedMore => false, // unreachable at_final_chunk=true
+                    };
+                    if !fully_consumed {
+                        return Ok(PartitionAtOffsetOutcome::Truncated);
+                    }
+                }
                 if key_mismatch {
                     Ok(PartitionAtOffsetOutcome::KeyMismatch)
                 } else if rows.is_empty() && expected_key.is_some() {

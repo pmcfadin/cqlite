@@ -215,6 +215,45 @@ corpus; the new atomicity test passes; `cargo check`/`clippy` clean for `-p cqli
 `--features write-support`, `--no-default-features`, and `--all-features --all-targets`, and for
 `-p cqlite-cli` at `--features write-support`.
 
+## Review-first round 3 — High finding fixed; 8 Medium/Low findings BATCHED as a follow-up
+## (implementer resource exhaustion — see the session's return summary)
+
+- [x] High: uncompressed `decode_partition_at_offset_for_salvage`'s LAST-partition `end` came from
+      the file's ACTUAL length (`section_len`), not a declared one, so a Data.db truncated mid-row
+      still satisfied the `within < window.len() && reached_end` guard (nothing to compare a
+      truncated actual length against) and the returned `ParseStep` was discarded — a truncated
+      uncompressed tail could write a PARTIAL last partition as if complete, exactly the D2
+      resurrection hazard. Fixed: the uncompressed branch now binds the `ParseStep` and requires the
+      WHOLE window to be consumed (`within + consumed == window.len()` for `Emitted`, `within ==
+      window.len()` for `Done`); anything less is `Truncated`. Scoped to `is_uncompressed` only — a
+      COMPRESSED window is chunk-aligned and legitimately extends past `end` into the next
+      partition's leading bytes, so the same full-consumption check would be WRONG there.
+      NOT fixed (declared, follow-up): deriving the uncompressed declared length from `CRC.db`'s
+      chunk count rather than the on-disk file size remains open — the fix above catches a
+      truncation that leaves an INCOMPLETE last row, but a truncation that happens to land exactly
+      on a row boundary (a "clean" but short file) is not caught by consumption alone.
+- [ ] BATCHED FOLLOW-UP (Medium/Low, not fixed — reported rather than silently dropped):
+      (a) Medium: `salvage.rs`'s post-write failure paths (`write_manifest_file`, a later
+      generation's `salvage_sstable` error) exit 1 even when an EARLIER generation already wrote a
+      complete output set — contradicts "usage error, nothing written". (b) Medium: `recover.rs`'s
+      `open_reader`/`classify_inputs`/`SSTableWriter::with_format` `?`-propagate a hard `Err` for a
+      corrupt `CompressionInfo.db`/`Statistics.db` instead of a classified `Refusal` with a
+      manifest — one of the likeliest damage modes a salvage tool meets produces NO manifest today.
+      (c) Medium: `salvage_cli_tests.rs` resolves fixtures from `CQLITE_DATASETS_ROOT` alone (the
+      exact #3220 defect fixed elsewhere in this same PR) — should reuse
+      `resolve_root_with_corpus_fixture`'s candidate-root walk. (d) Low: the no-resync-scan guard
+      doesn't report a scanned-file count (affirmative-zero doctrine). (e) Low:
+      `boundaries.rs`'s BIG `key_digest` fallback is dead code today but would classify every
+      partition `key-mismatch` if `key_digest` ever regained real digest semantics — drop the
+      fallback. (f) Low: BTI `Rows.db` inline-key parsing is duplicated instead of returned from
+      `resolve_rows_db_entry_uncounted`. (g) Low: the `UnverifiedEmptyDecode` component finding has
+      no cap — O(partitions) entries possible on a wide BTI-narrow table. (h) Low:
+      `discover_salvage_inputs`'s generation-parse `unwrap_or(0)` collapses unparseable ids to the
+      same sort key, and `salvage_sstable` then hard-errors the WHOLE table-dir run on the first
+      such generation rather than skipping it with siblings still salvaged.
+      Tracked as a follow-up issue at merge time per the nit-batching doctrine; the two Mediums (a)
+      and (b) are judgment calls escalated rather than silently deferred — see the session summary.
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree
