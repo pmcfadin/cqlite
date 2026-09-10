@@ -34,11 +34,17 @@ use crate::commands::write::load_compaction_table_schema;
 ///   either genuine losses, or another generation refused outright. Check
 ///   the manifest for which generations wrote output: a table-dir input
 ///   salvages each generation SEPARATELY (D1), so "one generation refused"
-///   must not read as "nothing was produced" when a sibling succeeded.
+///   must not read as "nothing was produced" when a sibling succeeded. Also
+///   reached by a POST-WRITE failure (a later generation's `salvage_sstable`
+///   hard error, or a failed `--manifest` write) once ANY earlier generation
+///   already wrote real output (roborev, issue #4196, batched finding a) —
+///   see [`exit_after_partial_failure`]: exit `1` there would misreport
+///   "nothing written" when `--out` in fact holds a complete generation set.
 /// * `2` — EVERY generation refused: no `Data.db` was written anywhere
 ///   under `--out`.
 /// * `1` — usage error: the cause is printed to stderr and the process
-///   exits directly from the failing step.
+///   exits directly from the failing step, OR a post-write failure struck
+///   before any generation had written real output.
 pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageArgs) {
     let Some(schema_path) = schema_path else {
         eprintln!("cqlite salvage: --schema is required (the global --schema flag)");
@@ -70,19 +76,42 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
     // a consumer's `jq '.[] | .losses'` breaks on precisely the common
     // single-generation case.
     let is_table_dir = args.input.is_dir();
-    let generations = match discover_salvage_inputs(&args.input) {
-        Ok(g) => g,
+    let discovery = match discover_salvage_inputs(&args.input) {
+        Ok(d) => d,
         Err(e) => {
             eprintln!("cqlite salvage: {e:#}");
             std::process::exit(1);
         }
     };
-    if generations.is_empty() {
+    // roborev, issue #4196 (batched finding h): a filename whose generation
+    // number could not be parsed is a NAMED, SKIPPED entry — never silently
+    // folded into sort key `0` (which risked sorting it AHEAD of every real
+    // generation and, on a hard failure there, aborting the whole run before
+    // any sibling ran at all). Named here, unconditionally, even when other
+    // generations exist to salvage.
+    for skipped in &discovery.skipped {
         eprintln!(
-            "cqlite salvage: no published *-Data.db found under {} (a Data.db needs a sibling \
-             TOC.txt)",
-            args.input.display()
+            "cqlite salvage: skipping {} — could not parse a generation number from its \
+             filename ({}); other generations are still salvaged",
+            skipped.path.display(),
+            skipped.reason
         );
+    }
+    let generations = discovery.generations;
+    if generations.is_empty() {
+        if discovery.skipped.is_empty() {
+            eprintln!(
+                "cqlite salvage: no published *-Data.db found under {} (a Data.db needs a \
+                 sibling TOC.txt)",
+                args.input.display()
+            );
+        } else {
+            eprintln!(
+                "cqlite salvage: no salvageable generation under {} — every published *-Data.db \
+                 found had an unparseable generation number (see the skip messages above)",
+                args.input.display()
+            );
+        }
         std::process::exit(1);
     }
 
@@ -95,7 +124,7 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
                     "cqlite salvage: salvage failed for {}: {e:#}",
                     input.display()
                 );
-                std::process::exit(1);
+                exit_after_partial_failure(&reports, args, is_table_dir);
             }
         }
     }
@@ -108,7 +137,7 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
                 .map(|p| p.display().to_string())
                 .unwrap_or_default()
         );
-        std::process::exit(1);
+        exit_after_partial_failure(&reports, args, is_table_dir);
     }
     render_console(&reports, args, is_table_dir);
 
@@ -128,15 +157,71 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
     }
 }
 
+/// A post-write failure step — a LATER generation's `salvage_sstable` error,
+/// or a failed `--manifest` write — MUST NOT report exit `1` ("nothing
+/// written") when an EARLIER generation already wrote a real `Data.db`.
+/// R7/D3 reserve exit `1` for a genuine usage error where nothing was
+/// produced; once any generation actually wrote output, this run's outcome
+/// is "imperfect", not "nothing happened" — exit `3` (roborev, issue #4196,
+/// batched finding a). `reports` gathered so far (from the generations that
+/// DID complete before the failure) is rendered/written best-effort before
+/// exiting, so the operator still gets a manifest for those.
+fn exit_after_partial_failure(
+    reports: &[SalvageReport],
+    args: &SalvageArgs,
+    is_table_dir: bool,
+) -> ! {
+    let any_output_written = reports.iter().any(|r| r.refused.is_none());
+    if any_output_written {
+        // Best-effort: the caller already reported the failure that brought
+        // us here to stderr; a second failure writing/rendering what WAS
+        // gathered is not separately fatal — exit 3 either way, since real
+        // output already exists on disk.
+        let _ = write_manifest_file(reports, args, is_table_dir);
+        render_console(reports, args, is_table_dir);
+        std::process::exit(3);
+    }
+    std::process::exit(1);
+}
+
+/// A `*-Data.db` (with a publishing `*-TOC.txt` sibling) that
+/// [`discover_salvage_inputs`] declined to include because its generation
+/// number could not be parsed — named rather than silently defaulted
+/// (roborev, issue #4196, batched finding h).
+struct SkippedInput {
+    path: PathBuf,
+    reason: String,
+}
+
+/// [`discover_salvage_inputs`]'s result: the generations it WILL salvage
+/// (oldest first), separate from the ones it named and skipped.
+struct SalvageDiscovery {
+    generations: Vec<PathBuf>,
+    skipped: Vec<SkippedInput>,
+}
+
 /// `args.input` is a single `Data.db` file, or a table directory whose
 /// generations (BIG `nb-*-big-Data.db` AND BTI `da-*-bti-Data.db`, each with
 /// a sibling `TOC.txt` publication barrier) are salvaged separately, oldest
 /// generation first for deterministic output.
-fn discover_salvage_inputs(input: &Path) -> anyhow::Result<Vec<PathBuf>> {
+///
+/// A file whose generation number cannot be parsed out of its name is NEVER
+/// folded into the sortable set at sort key `0` (roborev, issue #4196,
+/// batched finding h): that risked sorting a malformed entry AHEAD of every
+/// real generation and, since `salvage_sstable` hard-erroring on it used to
+/// abort the WHOLE run (fixed alongside this — see
+/// `exit_after_partial_failure`), a single badly-named file could silently
+/// prevent every sibling generation from ever being attempted. Such an entry
+/// is instead named in [`SalvageDiscovery::skipped`] and excluded from
+/// `generations`; the caller still salvages every OTHER generation.
+fn discover_salvage_inputs(input: &Path) -> anyhow::Result<SalvageDiscovery> {
     use anyhow::Context;
 
     if input.is_file() {
-        return Ok(vec![input.to_path_buf()]);
+        return Ok(SalvageDiscovery {
+            generations: vec![input.to_path_buf()],
+            skipped: Vec::new(),
+        });
     }
     if !input.is_dir() {
         return Err(anyhow::anyhow!(
@@ -146,6 +231,7 @@ fn discover_salvage_inputs(input: &Path) -> anyhow::Result<Vec<PathBuf>> {
     }
 
     let mut found: Vec<(u64, PathBuf)> = Vec::new();
+    let mut skipped: Vec<SkippedInput> = Vec::new();
     for entry in
         std::fs::read_dir(input).with_context(|| format!("failed to read {}", input.display()))?
     {
@@ -168,15 +254,23 @@ fn discover_salvage_inputs(input: &Path) -> anyhow::Result<Vec<PathBuf>> {
         if !toc.exists() {
             continue;
         }
-        let generation = base
+        match base
             .strip_suffix(family)
             .and_then(|s| s.rsplit_once('-'))
             .and_then(|(_, g)| g.parse::<u64>().ok())
-            .unwrap_or(0);
-        found.push((generation, path));
+        {
+            Some(generation) => found.push((generation, path)),
+            None => skipped.push(SkippedInput {
+                path,
+                reason: format!("'{name}' does not end in <family>-<integer>-Data.db"),
+            }),
+        }
     }
     found.sort_by_key(|(g, _)| *g);
-    Ok(found.into_iter().map(|(_, p)| p).collect())
+    Ok(SalvageDiscovery {
+        generations: found.into_iter().map(|(_, p)| p).collect(),
+        skipped,
+    })
 }
 
 /// Render the manifest as JSON per the INPUT KIND, never the generation

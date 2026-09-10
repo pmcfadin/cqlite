@@ -216,7 +216,9 @@ corpus; the new atomicity test passes; `cargo check`/`clippy` clean for `-p cqli
 `-p cqlite-cli` at `--features write-support`.
 
 ## Review-first round 3 — High finding fixed; 8 Medium/Low findings BATCHED as a follow-up
-## (implementer resource exhaustion — see the session's return summary)
+## (implementer resource exhaustion — see the session's return summary). A later finishing
+## session fixed 3 of the 8 (a, b, h — the ones contradicting a stated spec/design requirement);
+## 5 (c-g) remain batched below.
 
 - [x] High: uncompressed `decode_partition_at_offset_for_salvage`'s LAST-partition `end` came from
       the file's ACTUAL length (`section_len`), not a declared one, so a Data.db truncated mid-row
@@ -232,27 +234,50 @@ corpus; the new atomicity test passes; `cargo check`/`clippy` clean for `-p cqli
       chunk count rather than the on-disk file size remains open — the fix above catches a
       truncation that leaves an INCOMPLETE last row, but a truncation that happens to land exactly
       on a row boundary (a "clean" but short file) is not caught by consumption alone.
-- [ ] BATCHED FOLLOW-UP (Medium/Low, not fixed — reported rather than silently dropped):
-      (a) Medium: `salvage.rs`'s post-write failure paths (`write_manifest_file`, a later
-      generation's `salvage_sstable` error) exit 1 even when an EARLIER generation already wrote a
-      complete output set — contradicts "usage error, nothing written". (b) Medium: `recover.rs`'s
-      `open_reader`/`classify_inputs`/`SSTableWriter::with_format` `?`-propagate a hard `Err` for a
-      corrupt `CompressionInfo.db`/`Statistics.db` instead of a classified `Refusal` with a
-      manifest — one of the likeliest damage modes a salvage tool meets produces NO manifest today.
+- [x] Medium (a): `salvage.rs`'s post-write failure paths (`write_manifest_file`, a later
+      generation's `salvage_sstable` error) used to exit 1 even when an EARLIER generation already
+      wrote a complete output set. Fixed: both call sites route through
+      `exit_after_partial_failure`, which checks whether any gathered report already has
+      `refused: None` (real `Data.db` written) — if so it renders/writes what was gathered
+      best-effort and exits 3, never 1. Test:
+      `salvage_cli_tests.rs::post_write_manifest_failure_with_prior_output_exits_3_not_1` (a
+      directory at the `--manifest` path forces the write to fail after both R7.1 generations
+      already salvaged).
+- [x] Medium (b): `recover.rs`'s `open_reader`/`classify_inputs`/`SSTableWriter::with_format`
+      `?`-propagated a hard `Err` for a corrupt `CompressionInfo.db`/`Statistics.db` instead of a
+      classified `Refusal` with a manifest — one of the likeliest damage modes a salvage tool meets
+      produced NO manifest at all. Fixed: a new `RefusalReason::ComponentUnreadable` (distinct from
+      `BoundarySourceUnreadable` — the boundary source is fine here, so the `rebuild` remedy would
+      point at the wrong component; the remedy instead names `cqlite verify --mode full`), classified
+      at all three call sites via `component_unreadable_refusal`. Tests: new
+      `issue_4196_salvage_corruption_corpus.rs::damaged_compression_info_db_refuses_as_classified` /
+      `::damaged_statistics_db_refuses_as_classified` against the real `compression_info_bad_offset`
+      and `statistics_db_header_damage` corruption corpus fixtures (skip-clean when absent,
+      hard-required under `CQLITE_REQUIRE_FIXTURES=1`).
+- [x] Low (h): `discover_salvage_inputs`'s generation-parse `unwrap_or(0)` used to collapse
+      unparseable ids to the same sort key, and (before (a)'s fix) `salvage_sstable` hard-erroring on
+      such an entry aborted the WHOLE table-dir run before any sibling ran. Fixed: an unparseable
+      generation is now a NAMED, SKIPPED `SkippedInput` entry (never folded into `generations`), with
+      a stderr line naming the exact filename; the run proceeds for every other, well-formed
+      generation. Test:
+      `salvage_cli_tests.rs::unparseable_generation_is_named_and_skipped_others_still_salvaged`
+      (a synthetic `nb-abc-big-Data.db`/`-TOC.txt` pair alongside a real healthy generation).
+- [ ] BATCHED FOLLOW-UP (Medium/Low, still not fixed — reported rather than silently dropped):
       (c) Medium: `salvage_cli_tests.rs` resolves fixtures from `CQLITE_DATASETS_ROOT` alone (the
       exact #3220 defect fixed elsewhere in this same PR) — should reuse
-      `resolve_root_with_corpus_fixture`'s candidate-root walk. (d) Low: the no-resync-scan guard
-      doesn't report a scanned-file count (affirmative-zero doctrine). (e) Low:
-      `boundaries.rs`'s BIG `key_digest` fallback is dead code today but would classify every
-      partition `key-mismatch` if `key_digest` ever regained real digest semantics — drop the
-      fallback. (f) Low: BTI `Rows.db` inline-key parsing is duplicated instead of returned from
-      `resolve_rows_db_entry_uncounted`. (g) Low: the `UnverifiedEmptyDecode` component finding has
-      no cap — O(partitions) entries possible on a wide BTI-narrow table. (h) Low:
-      `discover_salvage_inputs`'s generation-parse `unwrap_or(0)` collapses unparseable ids to the
-      same sort key, and `salvage_sstable` then hard-errors the WHOLE table-dir run on the first
-      such generation rather than skipping it with siblings still salvaged.
-      Tracked as a follow-up issue at merge time per the nit-batching doctrine; the two Mediums (a)
-      and (b) are judgment calls escalated rather than silently deferred — see the session summary.
+      `resolve_root_with_corpus_fixture`'s candidate-root walk. Assessed and left batched on
+      re-review: `sstables_root_for_table` (the natural reuse target) resolves a ROOT, not the exact
+      generation-UUID directory these tests hardcode (`resurrection_gc_positive-4cbfab...`), and
+      covers `sstables/` only — none of `corruption/`'s fixtures. Porting all FIVE fixture
+      references (table-dir, three corrupt-dir, one clean-dir) through a root-then-glob rewrite is
+      not a five-line change; a proper fix belongs with (c) in the follow-up issue, not squeezed in
+      here. (d) Low: the no-resync-scan guard doesn't report a scanned-file count (affirmative-zero
+      doctrine). (e) Low: `boundaries.rs`'s BIG `key_digest` fallback is dead code today but would
+      classify every partition `key-mismatch` if `key_digest` ever regained real digest semantics —
+      drop the fallback. (f) Low: BTI `Rows.db` inline-key parsing is duplicated instead of returned
+      from `resolve_rows_db_entry_uncounted`. (g) Low: the `UnverifiedEmptyDecode` component finding
+      has no cap — O(partitions) entries possible on a wide BTI-narrow table.
+      Tracked as a follow-up issue at merge time per the nit-batching doctrine.
 
 ## 5. Endgame — `flow-closer`
 

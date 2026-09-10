@@ -139,6 +139,166 @@ fn healthy_table_dir_two_generations_exit_0() {
     );
 }
 
+/// Roborev, issue #4196 (batched finding a) — a POST-WRITE failure (here, an
+/// unwritable `--manifest` path) exits `3`, never `1`, once real output was
+/// already written: `1` is "nothing written", which would misreport a run
+/// that left a complete generation set under `--out`. Reuses R7.1's healthy
+/// two-generation fixture; `--manifest` is pointed at a path that is itself
+/// an existing DIRECTORY, so `std::fs::write` fails after BOTH generations
+/// have already salvaged successfully.
+#[test]
+fn post_write_manifest_failure_with_prior_output_exits_3_not_1() {
+    let Some(root) = datasets_root() else {
+        skip_or_require(
+            "salvage_cli_tests post-write-failure",
+            "CQLITE_DATASETS_ROOT not set",
+        );
+        return;
+    };
+    let table_dir =
+        root.join("sstables/test_tomb/resurrection_gc_positive-4cbfab10702011f1b8f419c9a388d558");
+    if !usable(&table_dir) {
+        skip_or_require(
+            "resurrection_gc_positive fixture",
+            &format!("{table_dir:?} not usable"),
+        );
+        return;
+    }
+    let schema = schemas_dir().join("tombstone-parity.cql");
+    let temp = TempDir::new().expect("tempdir");
+    let out = temp.path().join("out");
+    // A DIRECTORY at the manifest path, not a file — `std::fs::write` fails
+    // with "Is a directory" once `salvage_sstable` has already run for both
+    // generations.
+    let manifest_path = temp.path().join("m.json");
+    std::fs::create_dir_all(&manifest_path).expect("create manifest-path directory");
+
+    let output = run_cli(&[
+        "--schema",
+        schema.to_str().unwrap(),
+        "salvage",
+        table_dir.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+        "--manifest",
+        manifest_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "a post-write manifest failure with prior real output must exit 3, not 1; \
+         stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to write manifest"),
+        "stderr must name the manifest write failure; got: {stderr}"
+    );
+
+    // Both generations' output must still be on disk under --out (the
+    // generations were salvaged BEFORE the manifest write was attempted).
+    let out_table_dir = discover_output_table_dir(&out);
+    let data_dbs: Vec<_> = std::fs::read_dir(&out_table_dir)
+        .expect("read out table dir")
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with("-Data.db"))
+        .collect();
+    assert_eq!(
+        data_dbs.len(),
+        2,
+        "expected two Data.db files under --out despite the manifest write failure; got \
+         {data_dbs:?}"
+    );
+}
+
+/// Roborev, issue #4196 (batched finding h) — a `*-Data.db`/`*-TOC.txt` pair
+/// whose GENERATION NUMBER cannot be parsed out of its filename is a NAMED,
+/// SKIPPED discovery entry, never silently folded to generation `0`; the run
+/// continues for the OTHER, well-formed generation(s) in the same table dir
+/// rather than aborting the whole run on the malformed one.
+#[test]
+fn unparseable_generation_is_named_and_skipped_others_still_salvaged() {
+    let Some(root) = datasets_root() else {
+        skip_or_require(
+            "salvage_cli_tests unparseable-generation",
+            "CQLITE_DATASETS_ROOT not set",
+        );
+        return;
+    };
+    let clean_dir = root.join("sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77");
+    if !usable(&clean_dir) {
+        skip_or_require("lz4_table fixture", &format!("{clean_dir:?} not usable"));
+        return;
+    }
+    let schema = schemas_dir().join("compression-parity.cql");
+    let temp = TempDir::new().expect("tempdir");
+    let input_dir = temp.path().join("input");
+    std::fs::create_dir_all(&input_dir).unwrap();
+
+    // A real, healthy generation (nb-1-big-*), copied verbatim.
+    for entry in std::fs::read_dir(&clean_dir)
+        .expect("read clean dir")
+        .flatten()
+    {
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with("nb-1-big-") {
+            std::fs::copy(entry.path(), input_dir.join(&name)).expect("copy fixture component");
+        }
+    }
+
+    // A malformed-generation entry: publishable (a sibling TOC.txt exists),
+    // but its "generation" segment is not an integer — must be skipped, NOT
+    // folded to generation 0 and NOT allowed to abort the whole run.
+    std::fs::write(input_dir.join("nb-abc-big-Data.db"), b"not a real sstable").unwrap();
+    std::fs::write(input_dir.join("nb-abc-big-TOC.txt"), b"Data.db\n").unwrap();
+
+    let out = temp.path().join("out");
+    let output = run_cli(&[
+        "--schema",
+        schema.to_str().unwrap(),
+        "salvage",
+        input_dir.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+        "--out-format",
+        "json",
+    ]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("nb-abc-big-Data.db") && stderr.contains("skipping"),
+        "stderr must NAME the skipped malformed-generation file; got: {stderr}"
+    );
+
+    // The real generation's own outcome (0 = fully recovered, 3 = written
+    // with losses) is unaffected by the malformed sibling — it must NEVER
+    // read as 1 ("nothing written"/usage error) merely because a sibling
+    // filename was malformed.
+    let code = output.status.code();
+    assert!(
+        code == Some(0) || code == Some(3),
+        "expected exit 0 or 3 (the real generation's own outcome), never 1 — a malformed \
+         sibling must not abort the run; got {code:?}; stdout={}\nstderr={stderr}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let manifest: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout is not JSON: {e}\n{stdout}"));
+    let entries = manifest
+        .as_array()
+        .unwrap_or_else(|| panic!("expected a JSON array (table-dir input); got {manifest}"));
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected exactly ONE manifest entry — the malformed generation must be excluded \
+         entirely, never reported as a fake generation 0; got {entries:?}"
+    );
+}
+
 /// R7.2 — a damaged input's `--manifest` names every loss (chunk-crc class).
 ///
 /// The corpus's ONLY `data_db_bit_flip` fixture (`test_comp.lz4_table`) holds

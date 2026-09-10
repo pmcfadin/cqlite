@@ -349,23 +349,27 @@ async fn assert_component_unreadable_refusal(
     corrupt_fixture: &str,
     out_root: &std::path::Path,
 ) -> SalvageReport {
-    let root = resolve_root_with_corpus_fixture(corrupt_fixture).unwrap_or_else(|| {
-        panic!("caller must have already skip-checked {corrupt_fixture}")
-    });
+    let root = resolve_root_with_corpus_fixture(corrupt_fixture)
+        .unwrap_or_else(|| panic!("caller must have already skip-checked {corrupt_fixture}"));
     let corrupt_dir = root
         .join("corruption")
         .join(CORRUPT_KEYSPACE)
         .join(corrupt_fixture);
     let schema = table_schema();
     let corrupt_data_db = single_data_db(&corrupt_dir);
-    let report = salvage_sstable(&corrupt_data_db, out_root, &schema, SalvageOptions::default())
-        .await
-        .unwrap_or_else(|e| {
-            panic!(
-                "salvage must not hard-error on a damaged {corrupt_fixture} component (a \
+    let report = salvage_sstable(
+        &corrupt_data_db,
+        out_root,
+        &schema,
+        SalvageOptions::default(),
+    )
+    .await
+    .unwrap_or_else(|e| {
+        panic!(
+            "salvage must not hard-error on a damaged {corrupt_fixture} component (a \
                  classified Refusal, not an Err): {e:#}"
-            )
-        });
+        )
+    });
 
     let refusal = report.refused.as_ref().unwrap_or_else(|| {
         panic!("a damaged non-boundary component must still produce a refusal; report={report:?}")
@@ -413,7 +417,9 @@ async fn damaged_compression_info_db_refuses_as_classified() {
     let out_root = temp.path().join("out");
     let report =
         assert_component_unreadable_refusal("compression_info_bad_offset", &out_root).await;
-    eprintln!("[issue_4196] compression_info_bad_offset: salvage refused as expected ({report:?}).");
+    eprintln!(
+        "[issue_4196] compression_info_bad_offset: salvage refused as expected ({report:?})."
+    );
 }
 
 /// A corrupt `Statistics.db` header is a component failure salvage meets
@@ -436,5 +442,7 @@ async fn damaged_statistics_db_refuses_as_classified() {
     let out_root = temp.path().join("out");
     let report =
         assert_component_unreadable_refusal("statistics_db_header_damage", &out_root).await;
-    eprintln!("[issue_4196] statistics_db_header_damage: salvage refused as expected ({report:?}).");
+    eprintln!(
+        "[issue_4196] statistics_db_header_damage: salvage refused as expected ({report:?})."
+    );
 }
