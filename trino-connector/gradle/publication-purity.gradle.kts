@@ -90,7 +90,58 @@ val verifyPublishedArtifactSet by tasks.registering {
         // them to get the set of PRIMARY artifacts, and refuse a suffix we do not
         // recognise rather than silently treating it as primary.
         val sideCarSuffixes = listOf(".md5", ".sha1", ".sha256", ".sha512", ".asc")
-        val primaries = allFiles.filter { name -> sideCarSuffixes.none { name.endsWith(it) } }.toSortedSet()
+        val rawPrimaries = allFiles.filter { name -> sideCarSuffixes.none { name.endsWith(it) } }
+
+        // TWO REPOSITORY LAYOUTS, and the oracle must audit whichever one THIS
+        // invocation actually produces (#2869).
+        //
+        // A RELEASE version writes `<artifactId>-<version>[-classifier].<ext>`. A
+        // SNAPSHOT version writes Maven's UNIQUE-SNAPSHOT layout: the DIRECTORY keeps
+        // `-SNAPSHOT` but every FILENAME replaces the literal `SNAPSHOT` with
+        // `<yyyyMMdd.HHmmss>-<buildNumber>`, and a `maven-metadata.xml` appears that no
+        // release layout has.
+        //
+        // This mattered because the two invocations that RUN this task disagree:
+        // trino-connector-ci.yml's Test step passes NO `-Pversion` (so the version is
+        // `0.0.0-SNAPSHOT`), while trino-publish.yml and trino-connector-fatjar.yml pass
+        // a release `-Pversion`. Verified under only the release form, this task reported
+        // all five artifacts as BOTH unexpected AND missing on the PR lane — the
+        // signature of a naming mismatch rather than a purity violation.
+        //
+        // Normalising is deliberate rather than pinning a synthetic release version for
+        // the audit publish: determinism bought by auditing a DIFFERENT artifact set than
+        // the one the real publish produces would defeat the check on the tag path, which
+        // is where it guards Central.
+        //
+        // The normalisation is TIGHT ON PURPOSE — it is the one place where snapshot
+        // handling could become a permissive branch that accepts anything. Only an
+        // EXACTLY-shaped stamp (8 digits, `.`, 6 digits, `-`, digits) immediately after
+        // the `<artifactId>-<baseVersion>-` prefix is rewritten, and only to `SNAPSHOT`;
+        // the classifier and extension are carried through untouched, so
+        // `…-20260910.001751-1-shaded.jar` normalises to `…-SNAPSHOT-shaded.jar` and is
+        // still UNEXPECTED. Anything not matching that shape is left exactly as-is and
+        // therefore still fails.
+        val isSnapshot = publishedVersion.endsWith("-SNAPSHOT")
+        val baseVersion = publishedVersion.removeSuffix("-SNAPSHOT")
+        val timestampedPrefix = "$artifactId-$baseVersion-"
+        val snapshotStamp = Regex("""^\d{8}\.\d{6}-\d+""")
+        var normalisedCount = 0
+        fun canonicalName(name: String): String {
+            if (!isSnapshot || !name.startsWith(timestampedPrefix)) return name
+            val rest = name.removePrefix(timestampedPrefix)
+            val match = snapshotStamp.find(rest)
+            if (match == null || match.range.first != 0) return name
+            normalisedCount++
+            return timestampedPrefix + "SNAPSHOT" + rest.substring(match.range.last + 1)
+        }
+
+        // `maven-metadata.xml` is REPOSITORY metadata, not a published artifact, and it
+        // exists ONLY in the snapshot layout. Permitted by exact name and only when the
+        // version is a snapshot — under a release version it falls through to the set
+        // comparison below and is reported as unexpected, which is correct.
+        val mavenMetadataName = "maven-metadata.xml"
+        val repositoryMetadata = rawPrimaries.filter { isSnapshot && it == mavenMetadataName }
+        val primaries = (rawPrimaries - repositoryMetadata.toSet()).map { canonicalName(it) }.toSortedSet()
         val expected = sortedSetOf(
             "$artifactId-$publishedVersion.jar",
             "$artifactId-$publishedVersion-sources.jar",
@@ -115,10 +166,22 @@ val verifyPublishedArtifactSet by tasks.registering {
             "published artifact set is wrong (#2869), ${problems.size} problem(s):\n  " +
                 problems.joinToString("\n  ")
         }
+        // The census names the LAYOUT in force and how many names normalisation touched,
+        // so a reader can tell the snapshot path from the release path — and so a run
+        // that silently normalised nothing while claiming snapshot mode is visible rather
+        // than indistinguishable from a real one.
+        val layoutNote =
+            if (isSnapshot) {
+                "SNAPSHOT layout (unique-snapshot timestamps), $normalisedCount NAME(S) NORMALISED to the " +
+                    "-SNAPSHOT identity, ${repositoryMetadata.size} REPOSITORY METADATA FILE(S) RECOGNISED"
+            } else {
+                "RELEASE layout, 0 NAMES NORMALISED, 0 REPOSITORY METADATA FILES RECOGNISED"
+            }
         logger.lifecycle(
             "verifyPublishedArtifactSet: ${primaries.size} ARTIFACTS EXAMINED in $versionDir " +
-                "(${primaries.joinToString(", ")}); ${allFiles.size - primaries.size} CHECKSUM/SIGNATURE " +
-                "SIDE FILES RECOGNISED; 0 UNEXPECTED RECOGNISED, 0 MISSING RECOGNISED (#2869)",
+                "(${primaries.joinToString(", ")}); $layoutNote; " +
+                "${allFiles.size - rawPrimaries.size} CHECKSUM/SIGNATURE SIDE FILES RECOGNISED; " +
+                "0 UNEXPECTED RECOGNISED, 0 MISSING RECOGNISED (#2869)",
         )
     }
 }
