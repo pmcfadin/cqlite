@@ -87,6 +87,7 @@ pub async fn salvage_sstable(
         partitions: PartitionTotals::default(),
         losses: Vec::new(),
         component_findings: Vec::new(),
+        attempted: false,
         refused: None,
         now: now.clone(),
         cqlite_version: cqlite_version.clone(),
@@ -258,6 +259,12 @@ pub async fn salvage_sstable(
     // round-4's explicit scoping note: building a writer abort/cleanup
     // mechanism for THAT residual case is disproportionate for a fix round.
     let mut last_written_token: Option<i64> = None;
+    // roborev, issue #4196, round-9 Low finding: every EARLIER possible
+    // refusal (boundary source, `open_reader`, chunk pre-flight, writer
+    // construction, `classify_inputs`) has already returned by this point —
+    // the per-partition loop is genuinely about to run, so this is the
+    // single, correct place to mark the report as having been attempted.
+    report.attempted = true;
 
     for (i, entry) in boundaries.entries.iter().enumerate() {
         let end_bound = boundaries.entries.get(i + 1).map(|e| e.data_offset);
@@ -276,16 +283,62 @@ pub async fn salvage_sstable(
             }
         });
 
+        // roborev, issue #4196, round-9 High finding: for a NON-last
+        // partition, `chunk_range_end` comes directly from the NEXT
+        // boundary entry's `data_offset` — an unbounded, unvalidated VInt
+        // (`parse_big_index_entry` reads it with no sanity check against
+        // the file's real length, and `check_strictly_ascending` enforces
+        // only ORDER, never plausibility). A single flipped byte in ANY
+        // later entry can therefore make THIS partition's chunk range
+        // computation try to materialize an astronomically large `Vec<u64>`
+        // (measured: an offset near `u64::MAX` implies ~1.4e14 chunk
+        // indices, ~1.1 PB) before a single partition is decoded — OOM,
+        // rather than the classified refusal/manifest the whole design
+        // promises. `data_length` (`CompressionInfo.data_length`, or the
+        // uncompressed CRC.db scan's actual byte count) is the REAL,
+        // independently-measured total, already size-bounded at its own
+        // parse site — clamp `chunk_range_end` to it, and refuse to
+        // materialize a chunk range at ALL when this partition's own
+        // `data_offset` is already at or past it (an implausible position
+        // no real chunk can hold; classified `Truncated` immediately,
+        // matching `decode_partition_at_offset_for_salvage`'s own
+        // past-EOF signal one layer up).
+        if data_length > 0 && entry.data_offset >= data_length {
+            losses.push(build_loss(
+                entry,
+                schema,
+                Vec::new(),
+                LossClass::Truncated,
+                0,
+                format!(
+                    "partition's declared start offset {} is at or past the measured data \
+                     length {} — the boundary source names an implausible position",
+                    entry.data_offset, data_length
+                ),
+            ));
+            continue;
+        }
+        let chunk_range_end = if data_length > 0 {
+            chunk_range_end.min(data_length)
+        } else {
+            chunk_range_end
+        };
+
         let touched_chunks: Vec<u64> = if chunk_size > 0 {
             chunks_for_range(entry.data_offset, chunk_range_end, chunk_size)
         } else {
             Vec::new()
         };
-        let bad_touched: Vec<u64> = touched_chunks
-            .iter()
-            .copied()
-            .filter(|c| bad_chunks.contains(c))
-            .collect();
+        // O(hits), not O(range): the only OTHER consumer of the full
+        // `touched_chunks` Vec is `Loss.chunks` on a non-`chunk-crc` loss
+        // below, which needs the materialized (now clamped, so bounded)
+        // list; this filter does not, so query the `BTreeSet` directly
+        // rather than re-scanning every touched index (roborev, issue
+        // #4196, round-9 High finding).
+        let bad_touched: Vec<u64> = match (touched_chunks.first(), touched_chunks.last()) {
+            (Some(&first), Some(&last)) => bad_chunks.range(first..=last).copied().collect(),
+            _ => Vec::new(),
+        };
         if !bad_touched.is_empty() {
             losses.push(build_loss(
                 entry,
@@ -300,28 +353,36 @@ pub async fn salvage_sstable(
 
         match recover_one_partition(&reader, entry, end_bound, schema, &scan_cancel).await {
             Ok(Some((key, mutations))) => {
-                if token_out_of_order(last_written_token, key.token) {
-                    // Decoded cleanly, but this slot's key does not
-                    // token-sort after the last partition actually written
-                    // — the boundary source and the data disagree on
-                    // ordering, which `write_partition` would otherwise
-                    // reject as a hard `Err`. Classified here instead, as a
-                    // loss, never reaching the writer.
-                    losses.push(build_loss(
-                        entry,
-                        schema,
-                        touched_chunks,
-                        LossClass::KeyMismatch,
-                        0,
-                        format!(
-                            "decoded key's token {} does not sort after the last partition \
-                             actually written (token {}); the boundary source and the data \
-                             disagree on ordering",
-                            key.token,
-                            last_written_token.expect("checked Some above")
-                        ),
-                    ));
-                    continue;
+                // roborev, issue #4196, round-9 Low finding: bind `last`
+                // via `if let` rather than re-`expect()`ing
+                // `last_written_token` inside the branch — no `unwrap()`/
+                // `expect()` in library code (project standard), and this
+                // way the value used in the message is the SAME one
+                // `token_out_of_order` compared against, not re-derived.
+                if let Some(last) = last_written_token {
+                    if token_out_of_order(Some(last), key.token) {
+                        // Decoded cleanly, but this slot's key does not
+                        // token-sort after the last partition actually
+                        // written — the boundary source and the data
+                        // disagree on ordering, which `write_partition`
+                        // would otherwise reject as a hard `Err`.
+                        // Classified here instead, as a loss, never
+                        // reaching the writer.
+                        losses.push(build_loss(
+                            entry,
+                            schema,
+                            touched_chunks,
+                            LossClass::KeyMismatch,
+                            0,
+                            format!(
+                                "decoded key's token {} does not sort after the last partition \
+                                 actually written (token {last}); the boundary source and the \
+                                 data disagree on ordering",
+                                key.token
+                            ),
+                        ));
+                        continue;
+                    }
                 }
                 let token = key.token;
                 writer.write_partition(key, mutations)?;

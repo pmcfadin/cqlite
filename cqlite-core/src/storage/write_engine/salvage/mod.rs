@@ -168,6 +168,19 @@ pub struct SalvageReport {
     pub partitions: PartitionTotals,
     pub losses: Vec<Loss>,
     pub component_findings: Vec<ComponentFinding>,
+    /// `true` once the per-partition recovery loop began — DISTINCT from
+    /// `partitions.total`, which is populated as soon as the boundary
+    /// source is enumerated, before a single partition is examined
+    /// (roborev, issue #4196, round-9 Low finding): two `ComponentUnreadable`
+    /// refusal sites (writer construction, `classify_inputs`,
+    /// `recover.rs`) fire AFTER `partitions.total` is set but BEFORE the
+    /// loop ever runs, so keying `render_text`'s affirmative-zero "NOT
+    /// MEASURED" rendering off `partitions.total` alone made a genuine
+    /// zero-attempt refusal print identically to a clean, fully-measured,
+    /// zero-loss run. `false` in every refusal reached before this point;
+    /// `true` from here on, including `RefusalReason::NothingDecodable`
+    /// (which always falls through to a normal rendering regardless).
+    pub attempted: bool,
     pub refused: Option<Refusal>,
     /// RFC3339 timestamp of the run.
     pub now: String,
@@ -206,18 +219,23 @@ impl SalvageReport {
             // `report.component_findings` — real, already-measured data that
             // round-7's reason-only check silently printed as `NOT MEASURED`
             // over, dropping what the JSON manifest still carries and
-            // breaking D5's "text is a rendering of the manifest". Key off
-            // whether anything was actually measured (matches
-            // `recover.rs::report_skeleton`'s all-default, all-empty initial
-            // state) instead of the specific refusal reason: the EARLIER
-            // refusal sites (`BoundarySourceUnreadable`, `open_reader`
-            // `ComponentUnreadable`, a chunk-preflight I/O `ComponentUnreadable`)
-            // all return a FRESH `report_skeleton()` before either field is
-            // ever touched, so this reads identically to the reason-based
-            // check for every case that check got right, and correctly for
-            // the two it got wrong.
-            let measured = self.partitions.total > 0 || !self.component_findings.is_empty();
-            if !measured {
+            // breaking D5's "text is a rendering of the manifest".
+            //
+            // round-8's fix (`partitions.total > 0 ||
+            // !component_findings.is_empty()`) was ALSO wrong the OTHER
+            // direction (roborev, issue #4196, round-9 Low finding): those
+            // SAME two `ComponentUnreadable` sites populate
+            // `partitions.total` (boundary enumeration succeeds) but refuse
+            // BEFORE the per-partition loop ever runs — genuinely ZERO
+            // partitions attempted — yet `partitions.total > 0` made
+            // `measured` read `true`, printing `partitions: total=N
+            // recovered=0 lost=0` / `losses: 0 RECOGNISED`: an unmeasured
+            // run reading identically to a clean one, the EXACT
+            // affirmative-zero violation this whole block exists to
+            // prevent. Key off the explicit `attempted` flag instead —
+            // `recover.rs` sets it `true` only once the per-partition loop
+            // itself begins, strictly AFTER every earlier refusal site.
+            if !self.attempted {
                 out.push_str("partitions: NOT MEASURED (refused before enumeration)\n");
                 out.push_str("losses: NOT MEASURED\n");
                 return out;

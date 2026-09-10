@@ -749,6 +749,91 @@ write-support` 233 passed (unchanged); all salvage core tests (7+4+1, was 5+4+1;
 corruption-corpus cases) and CLI tests (8) pass against the real corpus;
 `test_salvage_no_resync_scan.sh` passes; `features-load-bearing` 61/61.
 
+## Round 9, roborev job 3367 (the ONE authorized post-scoped-fix re-run) —
+## a NEW High + 2 Low found; all 3 fixed per the lead's "fix it and stop —
+## report without re-running" instruction (no round 10 was run)
+
+- [x] High: `chunks_for_range` (`chunks.rs:49`) materializes the WHOLE
+      inclusive chunk range unconditionally. Its inputs come straight from
+      the boundary source — `entry.data_offset` and the NEXT entry's
+      `data_offset` — and neither `parse_big_index_entry` (reads the VInt
+      with no sanity check) nor `check_strictly_ascending` (order only,
+      never plausibility) bounds them, so a single flipped byte in one
+      `Index.db` entry's `data_offset` can make the PRECEDING partition's
+      chunk-range computation try to allocate a `Vec<u64>` with ~1.4e14
+      elements (~1.1 PB) before a single partition is decoded — OOM, not
+      the classified refusal/manifest the design promises. `Loss.chunks`
+      (serialized into the JSON manifest) inherits the same unbounded Vec.
+      Fixed: `recover.rs`'s loop now clamps `chunk_range_end` to the
+      independently-measured `data_length` (already size-bounded at ITS OWN
+      parse site) BEFORE ever calling `chunks_for_range`, and refuses to
+      compute a range at all when the CURRENT entry's own `data_offset` is
+      already at or past `data_length` (classified `Truncated` immediately,
+      matching the decode-level past-EOF signal one layer up). Additionally
+      — the finding's own suggested second half — `bad_touched` now queries
+      the `BTreeSet` via `.range(first..=last)` (O(hits)) instead of
+      filtering the full materialized `touched_chunks` Vec (O(range)).
+      Tests: `chunks::tests` (5 new unit tests on `chunks_for_range` itself
+      — deliberately NOT allocating an actually-huge Vec, since doing so
+      would itself be the hazard) plus
+      `issue_4196_salvage_corruption_corpus.rs::implausible_last_offset_does_not_oom_and_classifies_truncated`
+      (corrupts the LAST Index.db entry's offset to `u64::MAX / 2` in
+      `test_basic.multi_partition_table`, wrapped in a 30s
+      `tokio::time::timeout` so a regression fails the test instead of
+      wedging the suite; MEASURED to complete in ~0.06s and lose BOTH the
+      corrupted entry AND the second-to-last entry — whose clamped window
+      now overlaps what were originally the corrupted partition's own
+      bytes — as `Truncated`, a safe conservative outcome, not the
+      single-loss shape a first guess might expect; documented precisely in
+      the test's own doc after being measured, not assumed).
+- [x] Low: `last_written_token.expect("checked Some above")` in
+      `recover.rs` — `unwrap()`/`expect()` are prohibited in library code
+      by project standard, even though this one was provably safe. Fixed:
+      restructured to `if let Some(last) = last_written_token { if
+      token_out_of_order(Some(last), key.token) { ... using `last` directly
+      in the message ... } }` — no re-derivation, no `expect()`.
+- [x] Low: round-8's `measured = partitions.total > 0 ||
+      !component_findings.is_empty()` heuristic in `render_text` was ALSO
+      wrong (the OTHER direction from round-7's bug it was fixing): the two
+      `ComponentUnreadable` sites (writer construction, `classify_inputs`)
+      populate `partitions.total` (boundary enumeration succeeds) but
+      refuse BEFORE the per-partition loop ever runs — MEASURED (this
+      round, via the fixture-based test added below):
+      `statistics_db_header_damage` produces `partitions.total == 1` while
+      genuinely ZERO partitions were ever attempted, and round-8's
+      total-based check printed the real, misleading `partitions: total=1
+      recovered=0 lost=0` instead of `NOT MEASURED`. Fixed: a new explicit
+      `SalvageReport.attempted: bool` field, set `true` in `recover.rs`
+      only immediately before the per-partition loop begins — strictly
+      AFTER every possible earlier refusal site (boundary source,
+      `open_reader`, chunk pre-flight, writer construction,
+      `classify_inputs`) — and `render_text` now keys its `NOT MEASURED`
+      branch off `!self.attempted` instead of inferring from
+      `partitions.total`/`component_findings`. Tests: extended BOTH
+      `damaged_compression_info_db_refuses_as_classified` (the `open_reader`
+      site — `attempted == false`, `partitions.total == 0`, correctly `NOT
+      MEASURED`) and `damaged_statistics_db_refuses_as_classified` (the
+      `classify_inputs` site — `attempted == false` DESPITE
+      `partitions.total == 1`, the exact case round-8 got wrong, now
+      correctly `NOT MEASURED`) with direct assertions on `report.attempted`
+      and `render_text()`'s output, against the real corruption-corpus
+      fixtures (not a synthetic construction) — the concrete regression
+      proof, not just the reasoning in the field's doc comment.
+
+Re-verified after all 3 fixes: `cargo fmt --check` clean; `cargo clippy -p
+cqlite-core --features write-support --lib` and every touched `--test`
+target clean; `cargo clippy -p cqlite-cli --features write-support --lib
+--bins --test salvage_cli_tests` clean; `cargo test -p cqlite-core --lib
+--features write-support` 4060 passed (was 4055; +5 new `chunks::tests`);
+`cargo test -p cqlite-cli --lib --features write-support` 233 passed
+(unchanged); all salvage core tests (8+4+1, was 7+4+1; +1 new
+corruption-corpus case, +2 extended assertions on existing cases) and CLI
+tests (8) pass against the real corpus; `test_salvage_no_resync_scan.sh`
+passes; `features-load-bearing` 61/61.
+
+Per lead instruction, NO round-10 roborev re-run was performed — this fix
+round is reported to the lead for a decision on next steps.
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree

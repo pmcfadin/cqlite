@@ -231,3 +231,66 @@ pub(super) async fn uncompressed_chunk_preflight(
         data_length: total_scanned,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::chunks_for_range;
+
+    /// The common case: an offset and end within one chunk name that one
+    /// chunk alone.
+    #[test]
+    fn range_within_one_chunk() {
+        assert_eq!(chunks_for_range(0, 100, 1000), vec![0]);
+        assert_eq!(chunks_for_range(500, 999, 1000), vec![0]);
+    }
+
+    /// A range spanning several whole chunks names every one of them,
+    /// inclusive of the chunk holding the exclusive `end - 1` byte.
+    #[test]
+    fn range_spanning_several_chunks() {
+        assert_eq!(chunks_for_range(0, 2500, 1000), vec![0, 1, 2]);
+        assert_eq!(chunks_for_range(1000, 2000, 1000), vec![1]);
+    }
+
+    /// An empty/zero-length range (`end <= offset`) still names the ONE
+    /// chunk holding `offset` — this function's own documented contract.
+    #[test]
+    fn empty_range_names_the_offsets_own_chunk() {
+        assert_eq!(chunks_for_range(500, 500, 1000), vec![0]);
+        assert_eq!(chunks_for_range(500, 0, 1000), vec![0]);
+    }
+
+    /// `chunk_size == 0` is the "chunking unknown" signal (no `CRC.db`, or
+    /// uncompressed with `chunk_size` never established) — callers already
+    /// skip calling this at all in that case, but the function itself
+    /// degrades to an empty result rather than dividing by zero.
+    #[test]
+    fn zero_chunk_size_yields_empty() {
+        assert_eq!(chunks_for_range(0, 1000, 0), Vec::<u64>::new());
+    }
+
+    /// Roborev, issue #4196, round-9 High finding: this function itself
+    /// performs NO bounds checking against a "real" file size — it is a
+    /// pure arithmetic mapping, by design. The safety fix (clamping
+    /// `chunk_range_end` to the measured `data_length` before EVER calling
+    /// this) lives in the CALLER (`recover.rs`'s per-partition loop, see its
+    /// own comment at the call site) — this test documents that this
+    /// function's caller-facing contract is "give me a bounded range", not
+    /// "bound the range for me", so a regression that removes the caller's
+    /// clamp would NOT be caught here; it is caught end-to-end by
+    /// `issue_4196_salvage_corruption_corpus.rs`'s
+    /// `implausible_last_offset_does_not_oom_and_classifies_truncated`
+    /// instead (a bounded-time integration assertion, since actually
+    /// allocating an unbounded `Vec` here to prove the absence of a bound
+    /// would itself be the hazard this fix exists to prevent).
+    #[test]
+    fn large_but_bounded_range_is_the_callers_responsibility() {
+        // A merely large (not absurd) range still materializes fully here —
+        // proving this function computes correctly at scale, without ever
+        // approaching a size this test would regret allocating.
+        let result = chunks_for_range(0, 10_000_000, 65_536);
+        assert_eq!(result.len(), 153);
+        assert_eq!(result[0], 0);
+        assert_eq!(*result.last().unwrap(), 152);
+    }
+}

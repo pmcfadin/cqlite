@@ -457,6 +457,22 @@ async fn damaged_compression_info_db_refuses_as_classified() {
     let out_root = temp.path().join("out");
     let report =
         assert_component_unreadable_refusal("compression_info_bad_offset", &out_root).await;
+    // Roborev, issue #4196, round-9 Low finding: `open_reader` (this
+    // fixture's failure point) fires BEFORE `report.partitions.total` is
+    // ever set — the counterpart to `damaged_statistics_db_refuses_as_classified`'s
+    // assertion below, proving BOTH directions of the `attempted` fix
+    // against real fixtures, not just the abstract reasoning in its doc.
+    assert!(
+        !report.attempted,
+        "open_reader fires BEFORE the per-partition loop's report.attempted = true; got {:?}",
+        report
+    );
+    let text = report.render_text();
+    assert!(
+        text.contains("NOT MEASURED"),
+        "attempted=false must render NOT MEASURED, never the (zero, unmeasured) partition \
+         numbers; got:\n{text}"
+    );
     eprintln!(
         "[issue_4196] compression_info_bad_offset: salvage refused as expected ({report:?})."
     );
@@ -482,6 +498,35 @@ async fn damaged_statistics_db_refuses_as_classified() {
     let out_root = temp.path().join("out");
     let report =
         assert_component_unreadable_refusal("statistics_db_header_damage", &out_root).await;
+    // Roborev, issue #4196, round-9 Low finding: `classify_inputs` (this
+    // fixture's failure point) fires AFTER `report.partitions.total` is
+    // already set (boundary enumeration succeeded) — round-8's
+    // `partitions.total > 0` heuristic read this as "measured" and printed
+    // the (misleadingly zero-but-real-looking) partition numbers — but the
+    // per-partition loop itself NEVER RAN (`classify_inputs` fires BEFORE
+    // `report.attempted = true`, which sits immediately before the loop).
+    // MEASURED (empirically, this round): `partitions.total == 1` here
+    // (boundary enumeration DID succeed) while `attempted == false` (the
+    // loop never started) — exactly the divergence that made round-8's
+    // heuristic wrong, and exactly what `attempted` is for.
+    assert_eq!(
+        report.partitions.total, 1,
+        "boundary enumeration must have succeeded (this fixture's corruption is in \
+         Statistics.db, not Index.db); got {:?}",
+        report
+    );
+    assert!(
+        !report.attempted,
+        "classify_inputs fires BEFORE the per-partition loop's report.attempted = true, even \
+         though partitions.total is already populated; got {:?}",
+        report
+    );
+    let text = report.render_text();
+    assert!(
+        text.contains("NOT MEASURED"),
+        "attempted=false must render NOT MEASURED even though partitions.total > 0 — this is \
+         the EXACT case round-8's `partitions.total > 0` heuristic got wrong; got:\n{text}"
+    );
     eprintln!(
         "[issue_4196] statistics_db_header_damage: salvage refused as expected ({report:?})."
     );
@@ -963,6 +1008,189 @@ async fn swapped_index_entry_keys_classify_key_mismatch() {
     eprintln!(
         "[issue_4196] swapped Index.db entry keys: {} of {total} partitions classified \
          key-mismatch as expected; {} recovered.",
+        report.losses.len(),
+        report.partitions.recovered
+    );
+}
+
+/// Roborev, issue #4196 (round-9 High finding, `chunks.rs:49`): the
+/// PRECEDING partition's chunk-range `end` (`recover.rs`'s
+/// `chunk_range_end`) for a NON-last boundary entry comes directly from the
+/// NEXT entry's `data_offset` — an unbounded, unvalidated VInt with no
+/// sanity check against the file's real length anywhere between
+/// `parse_big_index_entry` and `chunks_for_range`. A single flipped byte in
+/// that NEXT entry's offset therefore makes `chunks_for_range` try to
+/// materialize an astronomically large `Vec<u64>` (an offset near
+/// `u64::MAX` implies ~1.4e14 chunk indices) BEFORE a single partition is
+/// decoded — OOM, not the classified refusal the design promises. Fixed by
+/// clamping `chunk_range_end` to the independently-measured `data_length`
+/// and refusing to compute a chunk range at all for an entry whose OWN
+/// `data_offset` is already implausible (classified `Truncated`
+/// immediately).
+///
+/// This test corrupts the LAST entry's `data_offset` (the only position
+/// `check_strictly_ascending` places NO upper bound on — see
+/// `swapped_index_entry_keys_classify_key_mismatch`'s doc for the same
+/// geometry) to `u64::MAX / 2` in a copy of `test_basic.multi_partition_table`
+/// (100 partitions). This is BOTH the failure mode itself (the corrupted
+/// entry's own chunk range) AND the exposure vector for the SECOND-TO-LAST
+/// entry (whose `chunk_range_end` is this corrupted value) — covering both
+/// halves of the fix in one fixture.
+///
+/// MEASURED (this round): the second-to-last partition is ALSO lost, not
+/// cleanly recovered — clamping its `chunk_range_end` to `data_length` (the
+/// best available bound once the true next-entry offset is gone) widens its
+/// declared window to cover what were ORIGINALLY the corrupted last
+/// partition's own bytes too (still physically present in `Data.db`, just
+/// unindexed). The decoder correctly refuses to silently treat those extra
+/// bytes as more of THIS partition (which would mean fabricating rows under
+/// the wrong key, the exact resurrection hazard design D2 exists to
+/// prevent) and reports `Truncated` instead — a SAFE, conservative outcome
+/// given the corruption, just not the "only the corrupted entry itself is
+/// lost" shape a first guess might expect. Asserted as measured (2 losses),
+/// not as originally assumed (1).
+#[tokio::test]
+async fn implausible_last_offset_does_not_oom_and_classifies_truncated() {
+    const KEYSPACE: &str = "test_basic";
+    const TABLE_NAME: &str = "multi_partition_table";
+    let Some(root) = datasets_root::sstables_root_for_table(KEYSPACE, TABLE_NAME) else {
+        skip_or_require(
+            "multi_partition_table fixture",
+            &format!(
+                "no candidate root carries {KEYSPACE}.{TABLE_NAME}; {}",
+                datasets_root::describe_search(KEYSPACE, TABLE_NAME)
+            ),
+        );
+        return;
+    };
+    let fixture_dir = datasets_root::table_generation_dirs(&root, KEYSPACE, TABLE_NAME)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("{KEYSPACE}.{TABLE_NAME}: no usable generation directory"));
+
+    let schema_path = datasets_root::schema_path("basic-types.cql").expect("committed CQL schema");
+    let cql = std::fs::read_to_string(schema_path).expect("read schema");
+    let start = cql
+        .find(&format!("CREATE TABLE IF NOT EXISTS {TABLE_NAME}"))
+        .expect("CREATE TABLE statement");
+    let end = start + cql[start..].find(';').expect("statement terminator") + 1;
+    let mut schema = cqlite_core::schema::cql_parser::parse_cql_schema(&cql[start..end])
+        .expect("parse CREATE TABLE");
+    schema.keyspace = KEYSPACE.to_string();
+
+    let clean_data_db = single_data_db(&fixture_dir);
+    let clean_index_db = fixture_dir.join(
+        clean_data_db
+            .file_name()
+            .expect("Data.db has a filename")
+            .to_string_lossy()
+            .replace("-Data.db", "-Index.db"),
+    );
+    let clean_index_bytes = std::fs::read(&clean_index_db).expect("read clean Index.db");
+    let entries = split_big_index_entries(&clean_index_bytes);
+    let total = entries.len();
+    assert!(
+        total >= 3,
+        "{KEYSPACE}.{TABLE_NAME}: need at least 3 partitions; found {total}"
+    );
+    let (last_start, last_key_end, last_end) = entries[total - 1];
+
+    let mut corrupt_index_bytes = Vec::with_capacity(clean_index_bytes.len());
+    corrupt_index_bytes.extend_from_slice(&clean_index_bytes[..last_start]);
+    // The last entry's key portion, unchanged.
+    corrupt_index_bytes.extend_from_slice(&clean_index_bytes[last_start..last_key_end]);
+    const IMPLAUSIBLE_OFFSET: u64 = u64::MAX / 2;
+    cqlite_core::storage::serialization::vint::encode_unsigned(
+        IMPLAUSIBLE_OFFSET,
+        &mut corrupt_index_bytes,
+    );
+    // Re-parse the ORIGINAL promoted_len + payload from the clean entry
+    // (everything after ITS OWN original data_offset field) so only the
+    // offset itself changes.
+    let (_orig_offset, offset_consumed) =
+        cqlite_core::parser::vint::decode_unsigned(&clean_index_bytes[last_key_end..])
+            .expect("clean Index.db entry has a well-formed data_offset VInt");
+    corrupt_index_bytes
+        .extend_from_slice(&clean_index_bytes[last_key_end + offset_consumed..last_end]);
+
+    let temp = TempDir::new().expect("tempdir");
+    let corrupt_dir = temp.path().join("corrupt_input");
+    std::fs::create_dir_all(&corrupt_dir).expect("create corrupt input dir");
+    for entry in std::fs::read_dir(&fixture_dir)
+        .expect("read fixture dir")
+        .flatten()
+    {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.ends_with("-Index.db") {
+            std::fs::write(corrupt_dir.join(&name), &corrupt_index_bytes)
+                .expect("write corrupted Index.db");
+        } else if !name_str.ends_with(".jsonl") && !name_str.ends_with("Statistics.db.txt") {
+            std::fs::copy(entry.path(), corrupt_dir.join(&name)).expect("copy fixture component");
+        }
+    }
+    let corrupt_data_db = single_data_db(&corrupt_dir);
+
+    let out_root = temp.path().join("out");
+    // The bound itself is the assertion: pre-fix this materializes ~1.1 PB
+    // and OOM-kills the process; post-fix it must complete in well under a
+    // second. `tokio::time::timeout` turns an unbounded hang/OOM into a
+    // clean test failure instead of wedging the whole suite.
+    let report = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        salvage_sstable(
+            &corrupt_data_db,
+            &out_root,
+            &schema,
+            SalvageOptions::default(),
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "salvage did not complete within 30s on an implausible boundary offset — the \
+             unbounded chunk-range allocation regressed"
+        )
+    })
+    .unwrap_or_else(|e| {
+        panic!(
+            "salvage must not hard-error on an implausible Index.db offset (a Loss, not an \
+             Err): {e:#}"
+        )
+    });
+
+    assert_eq!(
+        report.partitions.total, total,
+        "expected the untouched partition count; got {}",
+        report.partitions.total
+    );
+    // MEASURED (see this test's doc): the corrupted last entry AND the
+    // second-to-last entry (whose widened, clamped window now overlaps what
+    // were originally the last partition's own bytes) both classify as
+    // losses — a safe, conservative outcome, not the corrupted entry alone.
+    assert_eq!(
+        report.losses.len(),
+        2,
+        "expected exactly the corrupted last partition plus the second-to-last (whose clamped \
+         window now overlaps it) as losses; got {:?}",
+        report.losses
+    );
+    for loss in &report.losses {
+        assert_eq!(
+            loss.class,
+            LossClass::Truncated,
+            "expected LossClass::Truncated for both affected slots; got {:?}",
+            loss
+        );
+    }
+    assert_eq!(
+        report.partitions.recovered,
+        total - 2,
+        "every OTHER partition (not adjacent to the corrupted entry) must still recover cleanly"
+    );
+    eprintln!(
+        "[issue_4196] implausible last-entry offset ({IMPLAUSIBLE_OFFSET}): completed without \
+         OOM, {} of {total} partitions lost (both Truncated), {} recovered.",
         report.losses.len(),
         report.partitions.recovered
     );
