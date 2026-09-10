@@ -448,8 +448,35 @@ impl SSTableReader {
 
         let (window, within, reached_end) = match chunk_length {
             None => {
-                let whole = self.point_read_whole_section().await?;
-                (whole, offset_usize, true)
+                // Uncompressed: a BOUNDED positional read of `[offset, end)`
+                // only (roborev, issue #4196) — NOT `point_read_whole_section`,
+                // which materializes the ENTIRE data section. `recover_one_partition`
+                // calls this primitive once per boundary entry, so a whole-section
+                // read here would cost O(partitions x file_size) I/O and hold a
+                // full-file allocation resident per call, violating the <128 MB
+                // target and spec R6 for exactly the uncompressed case salvage is
+                // most likely to see (CQLite's own writer only emits uncompressed
+                // output). `end` is resolved from the SAME two sources the
+                // compressed branch uses (the next boundary entry, or the total
+                // data-section length for the last partition) and is NEVER
+                // silently clamped to the file's actual length: an `end` that
+                // exceeds what is really on disk IS the R2.3 truncation signal,
+                // reported as `Truncated` rather than masked by reading fewer
+                // bytes than the boundary source promised.
+                let header_size = self.calculate_header_size() as u64;
+                let file_len = self.point_source.len();
+                let section_len = file_len.saturating_sub(header_size) as usize;
+                let end = match end_bound {
+                    Some(e) => e as usize,
+                    None => section_len,
+                };
+                if offset_usize >= end || end > section_len {
+                    return Ok(PartitionAtOffsetOutcome::Truncated);
+                }
+                let mut buf = vec![0u8; end - offset_usize];
+                self.point_source
+                    .read_exact_at(header_size + offset_usize as u64, &mut buf)?;
+                (buf, 0usize, true)
             }
             Some(len) => {
                 let target_chunk = offset_usize / len;
@@ -506,6 +533,17 @@ impl SSTableReader {
         match decode_result {
             Ok(_) => {
                 if key_mismatch {
+                    Ok(PartitionAtOffsetOutcome::KeyMismatch)
+                } else if rows.is_empty() && expected_key.is_some() {
+                    // roborev, issue #4196: the key cross-check above lives
+                    // INSIDE the row callback, so a decode that emits ZERO
+                    // rows never runs it — a garbage offset that happens to
+                    // parse as "no rows" would otherwise silently become an
+                    // accepted, nothing-to-write partition (indistinguishable
+                    // from a genuine empty reconciliation downstream) with
+                    // its key NEVER checked against the boundary source's
+                    // claim for this slot. When the boundary source names an
+                    // independent key, an empty decode cannot be trusted.
                     Ok(PartitionAtOffsetOutcome::KeyMismatch)
                 } else {
                     Ok(PartitionAtOffsetOutcome::Rows(rows))

@@ -3,6 +3,14 @@
 `cqlite salvage` SHALL expose the salvage scan from the binary with a stable manifest and exit
 codes scripts can branch on. All requirements are ADDED.
 
+> **DEFERRED SCENARIOS (issue #4196, roborev finding — not implemented in the #4196 PR, tracked as
+> follow-up work):** R8.1's committed expected-manifest fixtures under
+> `cqlite-cli/tests/fixtures/salvage/` and R9.1 (`cqlite verify --mode full` + read-back of every
+> salvaged generation) are NOT implemented. R7.1-R7.4 and R8.2 are implemented and pass against real
+> fixtures via the compiled binary (`cqlite-cli/tests/salvage_cli_tests.rs`); R7.2's scenario runs
+> against the corpus's actual (total-loss) outcome rather than its literal partial-recovery text —
+> see that test's doc comment.
+
 ## ADDED Requirements
 
 ### Requirement: R7 — The verb, its inputs, and its exit codes

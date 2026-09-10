@@ -277,8 +277,9 @@ fn refusal_exit_2_no_data_db_written() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("BoundarySourceUnreadable"),
-        "stderr must name the refusal reason; got: {stderr}"
+        stderr.contains("boundary-source-unreadable"),
+        "stderr must name the refusal reason (the manifest's kebab-case spelling, spec R7.3); \
+         got: {stderr}"
     );
     assert!(
         stderr.contains("rebuild"),

@@ -149,6 +149,72 @@ standalone with zero files changed) — exactly the "#3296 PLATFORM class" the S
 unfixed (out of #4196's scope); every `--lite`/full gate round in this PR names this component's
 FAIL as this pre-existing, unrelated cause rather than treating it as a blocker on my diff.
 
+## Review-first round 1 (codex/gpt-5.6-sol failed to run — "requires --full-auto for stdin input";
+## claude-code/claude-opus-5 ran genuinely, 12 findings) — fixes landed
+
+- [x] High: uncompressed `decode_partition_at_offset_for_salvage` materialized the WHOLE data
+      section per partition via `point_read_whole_section` (O(partitions x file_size), violates the
+      <128MB target and R6 for the uncompressed case salvage is most likely to see). Fixed: a
+      bounded positional `read_exact_at([offset, end))` window, mirroring the compressed branch's
+      shape; `end` resolved from the boundary source, never silently clamped to the file's actual
+      length (an `end` past the real file IS the R2.3 truncation signal).
+- [x] Medium: the same fix made `Truncated` reachable for uncompressed inputs (was previously only
+      reachable for compressed).
+- [x] Medium: the LAST partition's chunk-CRC preflight only inspected the chunk containing its
+      START offset (`entry.data_offset + 1`), missing a bad chunk further into its span. Fixed:
+      `ChunkPreflight` now carries `data_length` (compressed: `CompressionInfo.data_length`;
+      uncompressed: total bytes the CRC.db walk scanned), used as the last partition's true `end`.
+- [x] Medium: a partition that decoded to ZERO rows skipped the key cross-check entirely (it lives
+      inside the row callback) and was silently counted `recovered` with nothing written. Fixed:
+      an empty decode with a known `expected_key` now classifies `KeyMismatch` rather than being
+      accepted uncritically.
+- [x] Medium: BTI narrow (`DataOffset`) leaves reported `key_hex: ""` for every loss (no raw key is
+      carried by the format for that leaf shape). Fixed: `BoundaryEntry::diagnostic_prefix` carries
+      the trie's byte-comparable prefix, rendered in the loss and CLEARLY labelled as a prefix, not
+      the raw key.
+- [x] Medium: a table-dir run exited 2 (design: "no Data.db written") even when OTHER generations
+      in the same run had real output. Fixed: exit 2 now means EVERY generation refused; exit 3
+      covers "some output written, not everything recovered" (including one generation refusing
+      while a sibling succeeds) — `long_about`/D3-facing docs restated accordingly.
+- [x] Medium: a failed `--manifest` write only logged to stderr with no exit-code effect, so a run
+      could report 0/3 while the D5/R8 manifest contract was silently never produced (most reachable
+      on a refusal, where `--out`'s parent may not exist yet). Fixed: `create_dir_all` the manifest's
+      parent first; a write/serialize failure is now a hard exit 1.
+- [x] Medium (test doctrine, #3220): `issue_4196_salvage_corruption_corpus.rs` resolved fixtures by
+      joining `CQLITE_DATASETS_ROOT` directly instead of walking every candidate root. Fixed: a
+      `resolve_root_with_corpus_fixture` helper mirroring `sstables_root_for_table`'s candidate walk
+      (env root, then checkout, requiring BOTH the clean source and the named corrupt fixture).
+      The `manifest_byte_offset: u64 = 64` magic constant's comment was corrected to state plainly
+      that it is a PINNED value from `corruption-manifest.yml`, not something parsed at run time.
+- [x] Medium: R3.1 (no prefix of a lost partition in salvage's output — the one requirement whose
+      failure mode is silent data resurrection) had NO test. Added
+      `issue_4196_salvage_partition_atomicity.rs`, covering R2.4 + R3.1 together against a REAL
+      byte-flipped Cassandra fixture (`corrupt_byte_fixture::stage_control_and_mutated`): the needle
+      partition is lost whole (class `decode`), the output carries ZERO rows for it, and every OTHER
+      partition byte-matches the pristine control via a full compaction-row decode. For this
+      fixture/mutation the corrupted row happens to be the partition's FIRST row
+      (`rows_decoded_before_failure == 0`, not the scenario text's `>= 2`) — the safety property
+      asserted (zero output rows) does not depend on that count; a fixture with a genuinely
+      non-empty decoded prefix is a follow-up refinement, not a gap in the property.
+- [x] Low: the text rendering of a refusal used the Rust `Debug` spelling
+      (`BoundarySourceUnreadable`) while the JSON manifest used the serde kebab-case spelling
+      (`boundary-source-unreadable`) for the SAME value — spec R7.3 requires the kebab-case spelling
+      on stderr. Fixed: `RefusalReason::manifest_label()`, used by both.
+- [x] Low: `Loss.chunks` was populated only for `ChunkCrc`-class losses, even when a compressed
+      input's touched-chunk range was already computed for a `Decode`/`Truncated` loss. Fixed:
+      threaded into every `build_loss` call.
+- Reviewed but NOT reproduced (verified via the EXACT cited `cargo clippy` invocation, twice, both
+  clean): the finding that `PartitionAtOffsetOutcome`/`decode_partition_at_offset_for_salvage` are
+  dead code under `--all-features` (`tombstones` on) — the ENCLOSING `point_compaction` module is
+  itself `#[cfg(not(feature = "tombstones"))]`, so under `tombstones` the whole module (and
+  everything in it) is excluded, not merely unreferenced. Not acted on; noted for the record rather
+  than silently dropped.
+
+Re-verified after fixes: all 4 pre-existing tests (2 core + 2 CLI) still pass against the real
+corpus; the new atomicity test passes; `cargo check`/`clippy` clean for `-p cqlite-core` at `--lib`,
+`--features write-support`, `--no-default-features`, and `--all-features --all-targets`, and for
+`-p cqlite-cli` at `--features write-support`.
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree

@@ -29,6 +29,8 @@ use cqlite_core::storage::write_engine::salvage::{
 };
 use tempfile::TempDir;
 
+#[path = "support/datasets_root.rs"]
+mod datasets_root;
 #[path = "support/corrupt_byte_fixture.rs"]
 mod fixture;
 
@@ -45,22 +47,47 @@ fn require_fixtures_strict() -> bool {
     )
 }
 
-fn datasets_root() -> Option<PathBuf> {
-    std::env::var("CQLITE_DATASETS_ROOT")
-        .ok()
-        .map(PathBuf::from)
+/// Every candidate BASE root (the `CQLITE_DATASETS_ROOT` corpus, then the
+/// checkout's own committed corpus) — the PARENT of what
+/// `datasets_root::sstables_root_candidates()` returns (that helper already
+/// appends `/sstables`, which this test also needs a `corruption/` SIBLING
+/// of). Reuses the SAME env-var + checkout-fallback resolution
+/// `sstables_root_for_table` uses (issue #3220) rather than trusting
+/// `CQLITE_DATASETS_ROOT` alone with no checkout fallback.
+fn candidate_base_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(r) = datasets_root::fixture_roots::datasets_root_if_present() {
+        roots.push(r);
+    }
+    let checkout = datasets_root::fixture_roots::checkout_test_data_dir().join("datasets");
+    if !roots.contains(&checkout) {
+        roots.push(checkout);
+    }
+    roots
 }
 
-/// The committed CQL schema fixture — resolved checkout-relative, never from
-/// `CQLITE_DATASETS_ROOT` (issue #3148).
-fn schema_path() -> PathBuf {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let repo_root = manifest_dir.parent().expect("repo root");
-    repo_root.join("test-data/schemas").join(SCHEMA_FILE)
+/// The first candidate base root that actually carries BOTH the clean source
+/// and the named corrupt fixture (issue #3220: never bind to a root that
+/// holds one but not the other and silently skip).
+fn resolve_root_with_corpus_fixture(corrupt_fixture: &str) -> Option<PathBuf> {
+    candidate_base_roots().into_iter().find(|root| {
+        usable(
+            &root
+                .join("sstables")
+                .join(CLEAN_KEYSPACE)
+                .join(CLEAN_TABLE_DIR),
+        ) && usable(
+            &root
+                .join("corruption")
+                .join(CORRUPT_KEYSPACE)
+                .join(corrupt_fixture),
+        )
+    })
 }
 
 fn table_schema() -> cqlite_core::schema::TableSchema {
-    let cql = std::fs::read_to_string(schema_path()).expect("read schema");
+    let schema_path = datasets_root::schema_path(SCHEMA_FILE).expect("committed CQL schema");
+    let cql = std::fs::read_to_string(schema_path).expect("read schema");
     let start = cql
         .find(&format!("CREATE TABLE IF NOT EXISTS {TABLE}"))
         .unwrap_or_else(|| {
@@ -127,10 +154,14 @@ fn compressed_chunk_index(chunk_offsets: &[u64], compressed_byte_offset: u64) ->
 /// partitions whose decompressed-domain offset falls in the flipped chunk.
 #[tokio::test]
 async fn compressed_chunk_crc_flip_loses_exactly_the_intersecting_partitions() {
-    let Some(root) = datasets_root() else {
+    let Some(root) = resolve_root_with_corpus_fixture("data_db_bit_flip") else {
         skip_or_require(
-            "issue_4196 corruption corpus",
-            "CQLITE_DATASETS_ROOT not set",
+            "data_db_bit_flip corpus fixture",
+            &format!(
+                "no candidate root carries BOTH sstables/{CLEAN_KEYSPACE}/{CLEAN_TABLE_DIR} and \
+                 corruption/{CORRUPT_KEYSPACE}/data_db_bit_flip; searched {:?}",
+                candidate_base_roots()
+            ),
         );
         return;
     };
@@ -142,21 +173,21 @@ async fn compressed_chunk_crc_flip_loses_exactly_the_intersecting_partitions() {
         .join("corruption")
         .join(CORRUPT_KEYSPACE)
         .join("data_db_bit_flip");
-    if !usable(&clean_dir) || !usable(&corrupt_dir) {
-        skip_or_require(
-            "data_db_bit_flip corpus fixture",
-            &format!("{clean_dir:?} or {corrupt_dir:?} not usable"),
-        );
-        return;
-    }
 
     // Independent expected-loss computation (design D6): CompressionInfo.db's
     // chunk table + Index.db's partition positions, from the CLEAN source.
     let ci_bytes = std::fs::read(clean_dir.join("nb-1-big-CompressionInfo.db"))
         .expect("read CompressionInfo.db");
     let ci = CompressionInfo::parse(&ci_bytes).expect("parse CompressionInfo.db");
-    // The manifest's own bit-flip site for this fixture (corruption-manifest.yml
-    // `data_db_bit_flip`), read as an on-disk fact, not assumed here.
+    // PINNED constant, not derived on this run: `corruption-manifest.yml`'s
+    // `data_db_bit_flip` entry records `byte_offset: 64` for the
+    // ORIGINAL/CORRUPTED bytes it captured (`original_sha256`/
+    // `corrupted_sha256`) — a fact about THAT committed corpus generation,
+    // not something this test parses at run time. If the corpus is ever
+    // regenerated with a different mutation site, this constant (and the
+    // manifest's `byte_offset` field) must be updated together; a
+    // divergence would be caught by `expected_lost` coming back empty below
+    // (the assertion immediately following), not silently.
     let manifest_byte_offset: u64 = 64;
     let bad_chunk = compressed_chunk_index(&ci.chunk_offsets, manifest_byte_offset);
 
@@ -253,10 +284,14 @@ async fn compressed_chunk_crc_flip_loses_exactly_the_intersecting_partitions() {
 /// written under `--out`.
 #[tokio::test]
 async fn damaged_index_db_refuses_with_the_rebuild_remedy() {
-    let Some(root) = datasets_root() else {
+    let Some(root) = resolve_root_with_corpus_fixture("index_db_bit_flip_big") else {
         skip_or_require(
-            "issue_4196 corruption corpus",
-            "CQLITE_DATASETS_ROOT not set",
+            "index_db_bit_flip_big corpus fixture",
+            &format!(
+                "no candidate root carries BOTH sstables/{CLEAN_KEYSPACE}/{CLEAN_TABLE_DIR} and \
+                 corruption/{CORRUPT_KEYSPACE}/index_db_bit_flip_big; searched {:?}",
+                candidate_base_roots()
+            ),
         );
         return;
     };
@@ -264,13 +299,6 @@ async fn damaged_index_db_refuses_with_the_rebuild_remedy() {
         .join("corruption")
         .join(CORRUPT_KEYSPACE)
         .join("index_db_bit_flip_big");
-    if !usable(&corrupt_dir) {
-        skip_or_require(
-            "index_db_bit_flip_big corpus fixture",
-            &format!("{corrupt_dir:?} not usable"),
-        );
-        return;
-    }
 
     let schema = table_schema();
     let corrupt_data_db = single_data_db(&corrupt_dir);

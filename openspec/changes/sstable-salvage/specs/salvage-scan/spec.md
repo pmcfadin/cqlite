@@ -3,6 +3,17 @@
 `cqlite-core` SHALL recover every completely-decodable partition of a damaged SSTable into a fresh
 uncompressed generation and account for every partition it could not. All requirements are ADDED.
 
+> **DEFERRED SCENARIOS (issue #4196, roborev finding — not implemented in the #4196 PR, tracked as
+> follow-up work, NOT satisfied-by-reference despite being named below):** R2.2 (uncompressed chunk
+> CRC flip), R2.3 (truncated Data.db), R4.2 (key-at-offset-disagrees-with-index staging), R5.1
+> (input-sha256-unchanged listing), R6.1 (memory-budget lane entry). R1.1/R1.2, R2.1, R2.4, R3.1,
+> R4.1, R4.3 and R5.2 are implemented and pass against real fixtures
+> (`cqlite-core/tests/issue_4196_salvage_healthy_parity.rs`,
+> `issue_4196_salvage_corruption_corpus.rs`, `issue_4196_salvage_partition_atomicity.rs`,
+> `scripts/tests/test_salvage_no_resync_scan.sh`) — R3.1's fixture demonstrates the zero-output-rows
+> safety property unconditionally but happens to measure `rows_decoded_before_failure == 0` rather
+> than the scenario text's `>= 2`, documented in that test's header.
+
 ## ADDED Requirements
 
 ### Requirement: R1 — Salvage of a healthy SSTable equals a no-purge compaction of it

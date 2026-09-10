@@ -52,6 +52,15 @@ pub(super) struct BoundaryEntry {
     /// not store a narrow partition's raw key anywhere but `Data.db` itself.
     pub(super) expected_key: Option<Vec<u8>>,
     pub(super) data_offset: u64,
+    /// The BTI trie's byte-comparable PREFIX for this slot — present ONLY
+    /// when `expected_key` is `None` (a `DataOffset`/narrow BTI leaf). NOT a
+    /// raw key (it is a truncated, byte-comparable-order artifact of the
+    /// trie), but it is the only thing the boundary source can name for this
+    /// slot when a loss must be reported (roborev, issue #4196): without it
+    /// every narrow-BTI loss carried an EMPTY `key_hex`, giving an operator
+    /// nothing to locate the slot by. `None` for BIG and for BTI `RowsOffset`
+    /// leaves, where `expected_key` already carries the real key.
+    pub(super) diagnostic_prefix: Option<Vec<u8>>,
 }
 
 /// The enumerated boundary source for one input SSTable.
@@ -120,6 +129,7 @@ fn big_boundaries(dir: &Path, base: &str) -> Result<Boundaries, Refusal> {
                         .map(<[u8]>::to_vec)
                         .or_else(|| Some(entry.key_digest.to_vec())),
                     data_offset: entry.data_offset,
+                    diagnostic_prefix: None,
                 });
             }
             Err(e) => {
@@ -182,12 +192,13 @@ fn bti_boundaries(dir: &Path, base: &str) -> Result<Boundaries, Refusal> {
     let rows_bytes = std::fs::read(&rows_path).ok();
 
     let mut entries = Vec::with_capacity(partitions.len());
-    for (_prefix, location) in partitions {
+    for (prefix, location) in partitions {
         match location {
             BtiPartitionLocation::DataOffset(off) => {
                 entries.push(BoundaryEntry {
                     expected_key: None,
                     data_offset: off,
+                    diagnostic_prefix: Some(prefix),
                 });
             }
             BtiPartitionLocation::RowsOffset(off) => {
@@ -216,6 +227,7 @@ fn bti_boundaries(dir: &Path, base: &str) -> Result<Boundaries, Refusal> {
                 entries.push(BoundaryEntry {
                     expected_key: Some(rows_bytes[key_start..key_end].to_vec()),
                     data_offset: header.data_position,
+                    diagnostic_prefix: None,
                 });
             }
         }

@@ -98,6 +98,22 @@ pub enum RefusalReason {
     NothingDecodable,
 }
 
+impl RefusalReason {
+    /// The serde kebab-case spelling (`"boundary-source-unreadable"`,
+    /// `"nothing-decodable"`) — spec R7.3 requires the CLI's stderr to name
+    /// the refusal with THIS vocabulary, and design D5 declares the text
+    /// rendering "a rendering of" the JSON manifest, so [`SalvageReport::render_text`]
+    /// uses this rather than the Rust `Debug` spelling (roborev, issue #4196:
+    /// the two previously diverged — `Debug` prints `BoundarySourceUnreadable`,
+    /// the manifest emits `boundary-source-unreadable`).
+    pub fn manifest_label(self) -> &'static str {
+        match self {
+            RefusalReason::BoundarySourceUnreadable => "boundary-source-unreadable",
+            RefusalReason::NothingDecodable => "nothing-decodable",
+        }
+    }
+}
+
 /// A refusal: salvage wrote no `Data.db` (design D3).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Refusal {
@@ -141,7 +157,7 @@ impl SalvageReport {
             self.format, self.boundary_source
         ));
         if let Some(refusal) = &self.refused {
-            out.push_str(&format!("REFUSED: {:?}\n", refusal.reason));
+            out.push_str(&format!("REFUSED: {}\n", refusal.reason.manifest_label()));
             out.push_str(&format!("remedy: {}\n", refusal.remedy));
             return out;
         }

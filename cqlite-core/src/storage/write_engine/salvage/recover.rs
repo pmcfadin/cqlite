@@ -107,23 +107,31 @@ pub async fn salvage_sstable(
     let reader = open_reader(input).await?;
 
     let mut component_findings: Vec<ComponentFinding> = Vec::new();
-    let (bad_chunks, chunk_size): (std::collections::BTreeSet<u64>, u64) = if let Some(ci) =
-        reader.compression_info.as_deref()
-    {
-        let preflight =
-            compressed_chunk_preflight(&reader_data_path(input), ci).map_err(Error::Io)?;
-        if let Some(f) = preflight.finding {
-            component_findings.push(f);
-        }
-        (preflight.bad_chunks, preflight.chunk_size)
-    } else {
-        let crc_path = dir.join(format!("{base}-CRC.db"));
-        let preflight = uncompressed_chunk_preflight(&reader_data_path(input), &crc_path).await?;
-        if let Some(f) = preflight.finding {
-            component_findings.push(f);
-        }
-        (preflight.bad_chunks, preflight.chunk_size)
-    };
+    let (bad_chunks, chunk_size, data_length): (std::collections::BTreeSet<u64>, u64, u64) =
+        if let Some(ci) = reader.compression_info.as_deref() {
+            let preflight =
+                compressed_chunk_preflight(&reader_data_path(input), ci).map_err(Error::Io)?;
+            if let Some(f) = preflight.finding {
+                component_findings.push(f);
+            }
+            (
+                preflight.bad_chunks,
+                preflight.chunk_size,
+                preflight.data_length,
+            )
+        } else {
+            let crc_path = dir.join(format!("{base}-CRC.db"));
+            let preflight =
+                uncompressed_chunk_preflight(&reader_data_path(input), &crc_path).await?;
+            if let Some(f) = preflight.finding {
+                component_findings.push(f);
+            }
+            (
+                preflight.bad_chunks,
+                preflight.chunk_size,
+                preflight.data_length,
+            )
+        };
 
     let mut report = report_skeleton(boundary_label, generation);
     report.component_findings = component_findings;
@@ -157,18 +165,29 @@ pub async fn salvage_sstable(
 
     for (i, entry) in boundaries.entries.iter().enumerate() {
         let end_bound = boundaries.entries.get(i + 1).map(|e| e.data_offset);
+        // For the LAST partition (no next boundary entry), the chunk-range
+        // mapping's `end` comes from the preflight's own `data_length` (the
+        // SAME end resolution `decode_partition_at_offset_for_salvage` uses),
+        // never a synthetic `data_offset + 1` — that one-byte-wide window
+        // only ever names the chunk containing the partition's START, so a
+        // CRC failure in any LATER chunk the last partition's bytes actually
+        // span was invisible to the pre-flight (roborev, issue #4196).
+        let chunk_range_end = end_bound.unwrap_or_else(|| {
+            if data_length > entry.data_offset {
+                data_length
+            } else {
+                entry.data_offset + 1
+            }
+        });
 
         let touched_chunks: Vec<u64> = if chunk_size > 0 {
-            chunks_for_range(
-                entry.data_offset,
-                end_bound.unwrap_or(entry.data_offset + 1),
-                chunk_size,
-            )
+            chunks_for_range(entry.data_offset, chunk_range_end, chunk_size)
         } else {
             Vec::new()
         };
         let bad_touched: Vec<u64> = touched_chunks
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|c| bad_chunks.contains(c))
             .collect();
         if !bad_touched.is_empty() {
@@ -196,10 +215,14 @@ pub async fn salvage_sstable(
                 recovered += 1;
             }
             Err((class, rows_before, message)) => {
+                // roborev, issue #4196: name the chunks this partition's
+                // range intersects on EVERY loss class when known (compressed
+                // input), not just chunk-crc — useful for a manual look even
+                // when the CRC itself was clean but the decode still failed.
                 losses.push(build_loss(
                     entry,
                     schema,
-                    Vec::new(),
+                    touched_chunks,
                     class,
                     rows_before,
                     message,
@@ -350,21 +373,47 @@ fn build_loss(
     rows_decoded_before_failure: usize,
     message: String,
 ) -> Loss {
-    let key_bytes = entry.expected_key.clone().unwrap_or_default();
-    let key = if key_bytes.is_empty() {
-        None
-    } else {
-        decode_partition_key_columns(&key_bytes, schema)
+    // roborev, issue #4196: a BTI narrow (`DataOffset`) leaf carries no raw
+    // key at all (see `BoundaryEntry::diagnostic_prefix`'s doc) — reporting
+    // an empty `key_hex` there gave an operator nothing to locate the slot
+    // by. Fall back to the trie's byte-comparable prefix, clearly labelled
+    // as such (never presented as the raw key).
+    if let Some(key_bytes) = &entry.expected_key {
+        let key = decode_partition_key_columns(key_bytes, schema)
             .ok()
-            .map(|cols| format!("{cols:?}"))
-    };
-    Loss {
-        key_hex: hex::encode(&key_bytes),
-        key,
-        data_offset: entry.data_offset,
-        chunks,
-        class,
-        rows_decoded_before_failure,
-        message,
+            .map(|cols| format!("{cols:?}"));
+        Loss {
+            key_hex: hex::encode(key_bytes),
+            key,
+            data_offset: entry.data_offset,
+            chunks,
+            class,
+            rows_decoded_before_failure,
+            message,
+        }
+    } else if let Some(prefix) = &entry.diagnostic_prefix {
+        Loss {
+            key_hex: hex::encode(prefix),
+            key: Some(
+                "(BTI trie byte-comparable prefix — the raw key is not carried by the boundary \
+                 source for this narrow partition; see Data.db at this offset)"
+                    .to_string(),
+            ),
+            data_offset: entry.data_offset,
+            chunks,
+            class,
+            rows_decoded_before_failure,
+            message,
+        }
+    } else {
+        Loss {
+            key_hex: String::new(),
+            key: None,
+            data_offset: entry.data_offset,
+            chunks,
+            class,
+            rows_decoded_before_failure,
+            message,
+        }
     }
 }

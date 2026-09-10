@@ -26,6 +26,14 @@ pub(super) struct ChunkPreflight {
     /// partition's `[offset, end)` maps to chunk indices via
     /// [`chunks_for_range`] using this value.
     pub(super) chunk_size: u64,
+    /// The total decompressed/uncompressed data-section length, when known
+    /// (compressed: `CompressionInfo.data_length`; uncompressed: the total
+    /// bytes the CRC.db walk actually scanned). `recover.rs` uses this — NOT
+    /// `entry.data_offset + 1` — as the LAST partition's chunk-range `end`,
+    /// so the pre-flight covers every chunk that partition's bytes actually
+    /// span, not just the one containing its start (roborev, issue #4196).
+    /// `0` when unknown (no `CRC.db`, uncompressed).
+    pub(super) data_length: u64,
 }
 
 /// Which chunk indices (inclusive) a partition's decompressed-domain byte
@@ -81,6 +89,7 @@ pub(super) fn compressed_chunk_preflight(
         bad_chunks,
         finding,
         chunk_size: compression_info.chunk_length as u64,
+        data_length: compression_info.data_length,
     })
 }
 
@@ -103,6 +112,7 @@ pub(super) async fn uncompressed_chunk_preflight(
             // mapping (callers treat an empty bad-chunk set as "nothing to
             // map" regardless).
             chunk_size: 0,
+            data_length: 0,
         });
     }
 
@@ -117,6 +127,7 @@ pub(super) async fn uncompressed_chunk_preflight(
     let mut bad_chunks = BTreeSet::new();
     let mut first_detail: Option<String> = None;
     let mut chunk_index: u64 = 0;
+    let mut total_scanned: u64 = 0;
     let mut buf = vec![0u8; chunk_size.max(1) as usize];
     loop {
         let mut filled = 0usize;
@@ -134,6 +145,7 @@ pub(super) async fn uncompressed_chunk_preflight(
         if filled == 0 {
             break;
         }
+        total_scanned += filled as u64;
         let computed = crc32fast::hash(&buf[..filled]);
         match crc.crc_for_chunk(chunk_index as usize) {
             Ok(expected) if expected == computed => {}
@@ -170,5 +182,6 @@ pub(super) async fn uncompressed_chunk_preflight(
         bad_chunks,
         finding,
         chunk_size,
+        data_length: total_scanned,
     })
 }

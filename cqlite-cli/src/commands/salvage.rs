@@ -22,8 +22,15 @@ use crate::commands::write::load_compaction_table_schema;
 /// pattern) rather than the generic error-classification path, because 2/3
 /// are SUCCESSFUL outcomes with a non-zero code, not error conditions:
 /// * `0` — every partition, across every generation, recovered.
-/// * `3` — output written, at least one loss somewhere.
-/// * `2` — at least one generation refused (no `Data.db` for it).
+/// * `3` — SOME `Data.db` was written (at least one generation produced
+///   output), but not every partition of every generation was recovered —
+///   either genuine losses, or another generation refused outright. Check
+///   the manifest for which generations wrote output (roborev, issue
+///   #4196): a table-dir input salvages each generation SEPARATELY (D1), so
+///   "one generation refused" must not read as "nothing was produced" when
+///   a sibling generation succeeded.
+/// * `2` — EVERY generation refused: no `Data.db` was written anywhere
+///   under `--out`.
 /// * `1` — usage error (returned as `Err`, handled the normal way).
 pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageArgs) -> Result<()> {
     let Some(schema_path) = schema_path else {
@@ -59,13 +66,30 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
         reports.push(report);
     }
 
-    write_manifest_file(&reports, args);
+    if let Err(e) = write_manifest_file(&reports, args) {
+        eprintln!(
+            "cqlite salvage: failed to write manifest to {}: {e:#}",
+            args.manifest
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        );
+        std::process::exit(1);
+    }
     render_console(&reports, args);
 
-    if reports.iter().any(|r| r.refused.is_some()) {
+    // roborev, issue #4196: exit 2 means "no Data.db anywhere", never "some
+    // generation refused" — a table-dir input salvages each generation
+    // separately (D1), so one refused generation must not discard a
+    // sibling's real output from a script branching on the exit code.
+    let all_refused = !reports.is_empty() && reports.iter().all(|r| r.refused.is_some());
+    let any_imperfect = reports
+        .iter()
+        .any(|r| r.refused.is_some() || !r.losses.is_empty());
+    if all_refused {
         std::process::exit(2);
     }
-    if reports.iter().any(|r| !r.losses.is_empty()) {
+    if any_imperfect {
         std::process::exit(3);
     }
     Ok(())
@@ -123,26 +147,33 @@ fn discover_salvage_inputs(input: &Path) -> Result<Vec<PathBuf>> {
 /// Write the JSON manifest (design D5) to `--manifest`, when given. A
 /// single-generation run writes ONE manifest object; a multi-generation
 /// (table-dir) run writes a JSON array, one entry per generation.
-fn write_manifest_file(reports: &[SalvageReport], args: &SalvageArgs) {
+///
+/// A failure here is a HARD error (roborev, issue #4196): D5/R8 make the
+/// manifest THE contract, so a run that reports 0/3 while silently failing
+/// to write it — most reachably a refusal, where `--out` is never created
+/// and a naive `--manifest <out>/salvage.json` invocation (as documented in
+/// `--help` and `dev-cookbook.md`) then has no parent directory — must not
+/// be reported as if the manifest existed. The parent directory is created
+/// first so the documented "manifest lives under --out" pattern works even
+/// when `--out` itself was never populated.
+fn write_manifest_file(reports: &[SalvageReport], args: &SalvageArgs) -> anyhow::Result<()> {
     let Some(path) = &args.manifest else {
-        return;
+        return Ok(());
     };
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+    }
     let json = if reports.len() == 1 {
         serde_json::to_string_pretty(&reports[0])
     } else {
         serde_json::to_string_pretty(reports)
-    };
-    match json {
-        Ok(text) => {
-            if let Err(e) = std::fs::write(path, text) {
-                eprintln!(
-                    "cqlite salvage: failed to write manifest to {}: {e}",
-                    path.display()
-                );
-            }
-        }
-        Err(e) => eprintln!("cqlite salvage: failed to serialize manifest: {e}"),
     }
+    .context("failed to serialize manifest")?;
+    std::fs::write(path, json).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
 }
 
 /// Console rendering (independent of `--manifest`): the JSON manifest to
