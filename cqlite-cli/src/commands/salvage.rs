@@ -61,9 +61,28 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
         std::process::exit(1);
     };
 
-    if let Ok(mut rd) = std::fs::read_dir(&args.out) {
-        if rd.next().is_some() {
-            eprintln!("cqlite salvage: --out {} is not empty", args.out.display());
+    // roborev, issue #4196, round-8 Low finding: `if let Ok(...)` silently
+    // proceeded whenever `--out` existed but could not be READ at all
+    // (permissions, or a non-directory file at that path) — the guard
+    // exists specifically to fail closed before writing into something it
+    // should not, so degrading to permissive on a read failure defeats it;
+    // the subsequent writer error then surfaces as an opaque post-write
+    // failure instead of this intended, named exit-1 usage error.
+    match std::fs::read_dir(&args.out) {
+        Ok(mut rd) => {
+            if rd.next().is_some() {
+                eprintln!("cqlite salvage: --out {} is not empty", args.out.display());
+                std::process::exit(1);
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Does not exist yet — the writer creates it. Proceed.
+        }
+        Err(e) => {
+            eprintln!(
+                "cqlite salvage: --out {} could not be read: {e}",
+                args.out.display()
+            );
             std::process::exit(1);
         }
     }

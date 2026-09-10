@@ -596,6 +596,94 @@ Re-verified after all fixes: `cargo fmt --check` clean.
 
 Re-verified after all fixes: see the verification table in the PR description (round 7 fix round).
 
+## Review-first round 8 (claude-code/claude-opus-5) — 4 of 7 findings fixed;
+## 3 (1 Medium restating an already-batched item, 1 Medium, 1 Low) BATCHED.
+## THIS IS THE SECOND OF THE TWO ROBOREV RE-RUNS THE LEAD AUTHORIZED FOR THIS
+## ABSENCE-WAIVER CYCLE — no further roborev re-run was triggered after this
+## round's fixes; the lead decides the next step.
+
+- [x] Medium: round-7's fix to the refusal early-return (round-7 Low finding)
+      keyed the "was anything measured" decision off `refusal.reason ==
+      NothingDecodable` alone — wrong AGAIN, the other direction this time:
+      TWO of the `ComponentUnreadable` sites in `recover.rs` (writer
+      construction, `classify_inputs`) fire AFTER `report.partitions.total`
+      is set and after the chunk-CRC pre-flight's finding was already pushed
+      into `component_findings`, so real measured data got printed as `NOT
+      MEASURED` over. Fixed: key off whether anything was ACTUALLY measured
+      (`partitions.total > 0 || !component_findings.is_empty()`) instead of
+      the specific refusal reason — verified this reads identically to the
+      reason-based check for every case it got right, and correctly for the
+      two it got wrong (the three EARLIER refusal sites all return a FRESH,
+      all-default `report_skeleton()` before either field is touched).
+- [x] Low: `uncompressed_chunk_preflight` swallowed a `Data.db` metadata
+      failure into `data_len = 0` via `.unwrap_or(0)`, which makes
+      `CrcDb::open`'s size-sanity check reject any REAL `CRC.db` as
+      "oversized" — misattributing a `Data.db` read failure to `CRC.db` in
+      the refusal. Fixed: propagate the metadata error via `?`.
+- [x] Low: `execute_salvage_command`'s `--out` non-empty guard used `if let
+      Ok(mut rd) = std::fs::read_dir(&args.out)`, silently proceeding
+      (permissive) whenever `--out` existed but could not be READ AT ALL
+      (permissions, or a non-directory file there) — the guard exists
+      specifically to fail closed, so degrading to permissive on a read
+      failure defeats it and turns the intended exit-1 usage error into an
+      opaque post-write failure later. Fixed: matches all three cases
+      explicitly (non-empty -> exit 1; `NotFound` -> proceed, the writer
+      creates it; any other `Err` -> exit 1 naming the cause).
+- [x] Low: the cfg-gated `Commands::Salvage` dispatch block in `main.rs`
+      (already an over-threshold file at 1368 lines BEFORE this PR, per
+      `git show origin/main:cqlite-cli/src/main.rs | wc -l`) was growing it
+      further, tripping the gate's `file-size` ratchet. Fixed: moved the
+      cfg-gated body into a new always-compiled `commands::dispatch_salvage`
+      (in `commands/mod.rs`, 68 -> 102 lines, nowhere near threshold),
+      leaving `main.rs` a one-line call. Net effect: `main.rs` is now +14
+      lines over the pre-PR baseline (the unavoidable minimum for wiring in
+      any new CLI verb — a short-circuit `if let` plus a placeholder match
+      arm, matching the shape every other pre-database-init verb like
+      `Verify` already uses) rather than the pre-fix +33. **Still a ratchet
+      violation** at gate time since `main.rs` was ALREADY over threshold
+      and this PR still grows it — the gate of record will need
+      `CQLITE_ALLOW_FILE_GROWTH=1` for this file; noting it here per
+      CLAUDE.md's file-size section rather than letting it surprise the
+      closer, linking #1116.
+- [ ] BATCHED FOLLOW-UP (not fixed — reported rather than silently dropped):
+      **Medium** (restates round-6 batched (i) / round-7's batched Medium,
+      now named by a THIRD roborev round): `write_partition`/`finish`'s hard
+      `Err` propagation out of `salvage_sstable` still discards the whole
+      `SalvageReport` on a damaged-but-parseable boundary source (a
+      non-ascending-but-still-offset-ascending key, or an unchecked BTI
+      narrow leaf) and, when it hits the FIRST generation, causes
+      `exit_after_partial_failure` to exit `3` with NO manifest at all,
+      contradicting the documented "check the manifest" contract outright.
+      Same assessment as before: the correct fix classifies this INSIDE
+      `salvage_sstable` (the `report_skeleton` pattern already used for
+      every other component failure), not at the CLI layer, and needs a
+      writer abort/cleanup mechanism that does not exist today. Elevate to
+      HIGH priority in the follow-up issue given three consecutive rounds
+      have now surfaced it independently.
+      **Medium**: `issue_4196_salvage_corruption_corpus.rs` has no test
+      pinning `LossClass::Truncated` (spec R2.3) or `LossClass::KeyMismatch`
+      (spec R4.2) — only `ChunkCrc` (corpus tests) and `Decode` (atomicity
+      test) are exercised; both other classes are covered by prose alone.
+      Roborev's own suggested synthesis (truncate a copied `Data.db`
+      mid-partition; flip a key byte inside an `Index.db` entry keeping its
+      length fields intact) is plausible but constructing it correctly
+      needs care to avoid an unintended side effect on a shared fixture —
+      genuine test-engineering work, not a quick fix within this round's
+      budget.
+      Tracked as a follow-up issue at merge time per the nit-batching
+      doctrine (joins round-5's (c)-(g), round-6's (i)-(ii), round-7's
+      three items).
+
+Re-verified after all fixes: `cargo fmt` clean; `cargo clippy -p cqlite-core
+--features write-support --lib` and `--test issue_4196_salvage_{corruption_corpus,
+healthy_parity,partition_atomicity}` clean; `cargo clippy -p cqlite-cli --features
+write-support --lib --bins --test salvage_cli_tests` clean; `cargo check -p
+cqlite-cli --features write-support,tombstones --lib --bins` clean; `cargo test -p
+cqlite-core --lib --features write-support` 4051 passed; `cargo test -p cqlite-cli
+--lib --features write-support` 233 passed; all salvage core tests (5+4+1) and CLI
+tests (8) pass against the real corpus; `test_salvage_no_resync_scan.sh` passes;
+`features-load-bearing` 61/61.
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree

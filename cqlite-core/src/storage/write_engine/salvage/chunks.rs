@@ -159,10 +159,13 @@ pub(super) async fn uncompressed_chunk_preflight(
         )));
     }
 
-    let data_len = tokio::fs::metadata(data_path)
-        .await
-        .map(|m| m.len())
-        .unwrap_or(0);
+    // roborev, issue #4196, round-8 Low finding: `.unwrap_or(0)` swallowed a
+    // `Data.db` metadata failure into `data_len = 0`, which makes
+    // `CrcDb::open`'s size-sanity check reject any REAL `CRC.db` as
+    // "oversized" — misattributing a `Data.db` read failure to `CRC.db`.
+    // Propagate the metadata error instead so the refusal names the right
+    // component.
+    let data_len = tokio::fs::metadata(data_path).await?.len();
     let crc = CrcDb::open(crc_path, data_len).await?;
     let chunk_size = crc.chunk_size() as u64;
 

@@ -102,31 +102,12 @@ async fn run_main() -> Result<()> {
 
     // `salvage` (issue #4196) likewise operates directly on files and needs no
     // Database/ingestion; short-circuit before database init like `verify`.
+    // The cfg-gated body (write-support/tombstones, roborev round-7 High
+    // finding) lives in `commands::dispatch_salvage` (round-8 Low finding —
+    // keeps this file's dispatch block to one line regardless of which arm
+    // compiles).
     if let Some(Commands::Salvage(args)) = &cli.command {
-        // `not(tombstones)` mirrors `commands::salvage`'s own module gate
-        // (roborev, issue #4196, round-7 High finding) — see that module's
-        // declaration in `commands/mod.rs` for why.
-        #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
-        {
-            // `execute_salvage_command` owns its WHOLE exit-code space
-            // (0/1/2/3, design D3) via direct `std::process::exit` calls on
-            // every path, fallible or not (roborev, issue #4196: routing a
-            // usage error through `?` here would have sent it through
-            // `classify_error`'s CliExitCode enum instead, which has no
-            // variant equal to 1). It therefore never returns an `Err`.
-            commands::salvage::execute_salvage_command(cli.schema.as_deref(), args).await;
-            return Ok(());
-        }
-        #[cfg(any(not(feature = "write-support"), feature = "tombstones"))]
-        {
-            let _ = args;
-            return Err(anyhow::anyhow!(
-                "Write support is not enabled (or this build has cqlite-core/tombstones on, \
-                 which the salvage module cannot be built against, roborev issue #4196 round-7). \
-                 Build with --features write-support (and without --features tombstones) to \
-                 enable salvage."
-            ));
-        }
+        return commands::dispatch_salvage(cli.schema.as_deref(), args).await;
     }
 
     // Initialize database connection

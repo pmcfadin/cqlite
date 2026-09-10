@@ -189,23 +189,35 @@ impl SalvageReport {
         if let Some(refusal) = &self.refused {
             out.push_str(&format!("REFUSED: {}\n", refusal.reason.manifest_label()));
             out.push_str(&format!("remedy: {}\n", refusal.remedy));
-            // Fall through (only for `NothingDecodable`) rather than
+            // Fall through when SOMETHING was actually measured, rather than
             // returning here (roborev, issue #4196, round-6 Medium finding
-            // 1): `RefusalReason::NothingDecodable` is set alongside a
+            // 1) — `RefusalReason::NothingDecodable` is set alongside a
             // fully-populated `losses` vector, and its remedy literally
-            // reads "inspect the losses above" — so THAT refusal must still
+            // reads "inspect the losses above", so THAT refusal must still
             // render the partition totals, the loss list and the component
-            // findings, exactly like the non-refused path. But
-            // `BoundarySourceUnreadable`/`ComponentUnreadable` refuse before
-            // anything was ever enumerated (`partitions`/`losses` are still
-            // `PartitionTotals::default()`/empty — see
-            // `recover.rs::report_skeleton`), so falling through
-            // UNCONDITIONALLY made those two print `partitions: total=0
-            // recovered=0 lost=0` / `losses: 0 RECOGNISED` — the EXACT
-            // affirmative-zero violation this doc cites, just moved: an
-            // unmeasured run must not read like a clean one (roborev, issue
-            // #4196, round-7 Low finding).
-            if refusal.reason != RefusalReason::NothingDecodable {
+            // findings, exactly like the non-refused path.
+            //
+            // round-7's fix keyed this off `refusal.reason == NothingDecodable`
+            // alone, which was ALSO wrong (roborev, issue #4196, round-8
+            // Medium finding): TWO of the `ComponentUnreadable` sites in
+            // `recover.rs` (writer construction, `classify_inputs`) fire
+            // AFTER `report.partitions.total` is set and AFTER the chunk-CRC
+            // pre-flight's own finding was pushed into
+            // `report.component_findings` — real, already-measured data that
+            // round-7's reason-only check silently printed as `NOT MEASURED`
+            // over, dropping what the JSON manifest still carries and
+            // breaking D5's "text is a rendering of the manifest". Key off
+            // whether anything was actually measured (matches
+            // `recover.rs::report_skeleton`'s all-default, all-empty initial
+            // state) instead of the specific refusal reason: the EARLIER
+            // refusal sites (`BoundarySourceUnreadable`, `open_reader`
+            // `ComponentUnreadable`, a chunk-preflight I/O `ComponentUnreadable`)
+            // all return a FRESH `report_skeleton()` before either field is
+            // ever touched, so this reads identically to the reason-based
+            // check for every case that check got right, and correctly for
+            // the two it got wrong.
+            let measured = self.partitions.total > 0 || !self.component_findings.is_empty();
+            if !measured {
                 out.push_str("partitions: NOT MEASURED (refused before enumeration)\n");
                 out.push_str("losses: NOT MEASURED\n");
                 return out;

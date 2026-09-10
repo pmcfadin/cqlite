@@ -66,3 +66,37 @@ pub use query::{execute_query, execute_select_query};
 pub use read::{read_sstable, read_sstable_enhanced};
 pub(crate) use schema_load::load_schema_file;
 pub use support::{ParsedRow, QueryExecutor, QueryExecutorConfig, QueryResult, RealDataParser};
+
+/// Dispatch the `cqlite salvage` verb (issue #4196), or the informative
+/// "not built" error when this binary was built without it. Moved out of
+/// `main.rs` into this always-compiled module (roborev, issue #4196,
+/// round-8 Low finding: the cfg-gated dispatch block was growing an
+/// already-over-threshold `main.rs`, campsite rule/#1116) — the two-armed
+/// `not(tombstones)`-mirroring gate (round-7 High finding, see
+/// `salvage`'s module declaration above for why) lives here instead, so
+/// `main.rs` keeps a one-line call regardless of which arm compiles.
+pub async fn dispatch_salvage(
+    schema: Option<&std::path::Path>,
+    args: &crate::cli_types::SalvageArgs,
+) -> anyhow::Result<()> {
+    #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+    {
+        // `execute_salvage_command` owns its WHOLE exit-code space (0/1/2/3,
+        // design D3) via direct `std::process::exit` calls on every path,
+        // fallible or not (roborev, issue #4196: routing a usage error
+        // through `?` here would have sent it through `classify_error`'s
+        // `CliExitCode` enum instead, which has no variant equal to 1). It
+        // therefore never returns an `Err`.
+        salvage::execute_salvage_command(schema, args).await;
+        Ok(())
+    }
+    #[cfg(any(not(feature = "write-support"), feature = "tombstones"))]
+    {
+        let _ = (schema, args);
+        Err(anyhow::anyhow!(
+            "Write support is not enabled (or this build has cqlite-core/tombstones on, which \
+             the salvage module cannot be built against, roborev issue #4196 round-7). Build \
+             with --features write-support (and without --features tombstones) to enable salvage."
+        ))
+    }
+}
