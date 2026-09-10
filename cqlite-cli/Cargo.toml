@@ -224,6 +224,14 @@ name = "cli_dml_integration_tests"
 path = "tests/cli_dml_integration_tests.rs"
 required-features = ["write-support"]
 
+# Issue #4196: spawns the pre-built `cqlite` binary via CARGO_BIN_EXE_cqlite
+# to observe `salvage`'s process::exit-based exit codes (0/1/2/3), so it must
+# be compiled with write-support for that binary to carry the verb at all.
+[[test]]
+name = "salvage_cli_tests"
+path = "tests/salvage_cli_tests.rs"
+required-features = ["write-support"]
+
 # Issue #1581: dhat-gated bounded-memory guard for the streaming query cutover.
 # Installs the dhat global allocator, so it must be its own opt-in test binary.
 [[test]]

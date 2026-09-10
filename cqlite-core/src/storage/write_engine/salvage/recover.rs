@@ -208,8 +208,21 @@ pub async fn salvage_sstable(
         }
     }
 
-    let output = writer.finish().await?;
-    let _ = output; // SSTableInfo carries stats the manifest does not restate.
+    // Spec R5.2 / design D3: zero partitions decodable REFUSES and writes NO
+    // `Data.db`. `SSTableWriter` opens `Data.db` lazily on the FIRST
+    // `write_partition` call (creating `output_dir/keyspace/table/` as
+    // needed — see `SSTableWriter::with_format_and_registry`'s doc), so when
+    // `recovered == 0` no partition was ever written and no file exists yet;
+    // calling `finish()` here would still emit an empty-but-valid component
+    // set (Statistics.db, TOC.txt, ...) for zero partitions, which is exactly
+    // the "no Data.db" contract's violation. Drop the writer unfinished
+    // instead — nothing on disk to clean up in that case.
+    if recovered > 0 {
+        let output = writer.finish().await?;
+        let _ = output; // SSTableInfo carries stats the manifest does not restate.
+    } else {
+        drop(writer);
+    }
 
     report.partitions.recovered = recovered;
     report.partitions.lost = losses.len();

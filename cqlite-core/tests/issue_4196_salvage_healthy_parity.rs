@@ -18,7 +18,12 @@
 //! Dataset doctrine (issue #719): SKIP when a fixture is genuinely absent;
 //! `CQLITE_REQUIRE_FIXTURES=1` turns that into a hard failure.
 
-#![cfg(feature = "write-support")]
+// `not(tombstones)`: `salvage_sstable`'s decode-at-offset primitive is gated
+// the same way (see `write_engine::salvage`'s module doc) — this target must
+// compile out identically under `--all-features`, or the `tombstones`-on
+// gate lanes (e.g. clippy's per-package matrix) fail on an unresolved import
+// rather than skipping cleanly.
+#![cfg(all(feature = "write-support", not(feature = "tombstones")))]
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

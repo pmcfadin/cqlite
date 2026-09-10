@@ -25,6 +25,13 @@ pub mod docker;
 pub mod info;
 pub mod read_commitlog;
 pub mod read_sstable;
+// `cqlite salvage` (issue #4196): unlike `write.rs`, which gates individual
+// write-support items so the module stays unconditional, this file's content
+// is ENTIRELY write-support-dependent (it imports
+// `cqlite_core::storage::write_engine::salvage` at the top level), so the
+// whole module declaration is gated instead.
+#[cfg(feature = "write-support")]
+pub mod salvage;
 pub mod verify;
 
 // Handlers extracted from the former monolithic `mod.rs` (issue #1126).

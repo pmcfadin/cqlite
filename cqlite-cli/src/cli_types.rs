@@ -382,6 +382,11 @@ pub enum Commands {
         long_about = "One-shot, policy-free compaction over exactly the SSTables in <input-dir>, writing the merged result to --output. Unlike maintenance/export-sstable this does not use a managed write-dir and takes an explicit --gc-before for deterministic, Cassandra-matching purge decisions (used by the compaction-parity harness, issue #842). Example: cqlite compact ./inputs -o ./out --schema ks.tbl.cql --gc-before 1700000000"
     )]
     Compact(CompactArgs),
+    /// Recover every completely-decodable partition of a damaged SSTable (issue #4196)
+    #[command(
+        long_about = "Recover every completely-decodable partition of a damaged Data.db | table-dir into a fresh generation, from the authoritative boundary source (Index.db / the Partitions.db trie) -- never by scanning Data.db bytes for a plausible header. A partition is recovered WHOLE OR NOT AT ALL: a partition whose decode fails at any row is skipped entirely (a later row can carry a tombstone that shadows earlier ones already decoded, so writing a prefix would resurrect deleted data). Output is UNCOMPRESSED (issue #1406) -- CQLite's production write surface never emits a CompressionInfo.db. A damaged Index.db/Partitions.db means boundaries are unknown and salvage REFUSES, writing no Data.db; the remedy is `cqlite rebuild --components index` (issue #4197) first. --schema resolves through the global --schema flag. Exit 0 = every partition recovered; 3 = output written with losses (see --manifest); 2 = refused, no Data.db written; 1 = usage error. Example: cqlite --schema ks.tbl.cql salvage ./damaged-table-dir --out ./recovered --manifest ./recovered/salvage.json"
+    )]
+    Salvage(SalvageArgs),
     /// Verify SSTable integrity (compressed + corrupted) — epic #970, issue #1000
     #[command(
         long_about = "Enforce the CQLite verifier contract on one SSTable generation directory. QUICK mode checks component presence, TOC.txt completeness, Digest.crc32, CompressionInfo.db (+ chunk-offset bounds) and BTI trie structure. FULL mode adds inline Data.db chunk-CRC validation, Statistics.db/Summary.db parse, and a complete row scan that fails loudly on corrupt index/BTI components (no silent empty results). Exit code is non-zero when verification fails. Example: cqlite verify ./test-data/datasets/sstables/test_comp/lz4_table-xxx --mode full --out json"
@@ -548,6 +553,36 @@ pub struct CompactArgs {
     /// and nothing is purged.
     #[arg(long = "major", alias = "purge-tombstones", default_value_t = false)]
     pub major: bool,
+}
+
+/// Output format for the `salvage` subcommand's console rendering (design D5:
+/// the manifest is the JSON contract; text is a rendering of it).
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum SalvageOutFormatArg {
+    /// Human-readable text (the default), to stderr.
+    Text,
+    /// The JSON manifest, to stdout.
+    Json,
+}
+
+// Arguments for the salvage subcommand (issue #4196)
+#[derive(Args, Debug, Clone)]
+pub struct SalvageArgs {
+    /// `Data.db` file, or a table directory (each generation is salvaged
+    /// separately, one output generation per input generation)
+    pub input: PathBuf,
+    /// Output directory (keyspace/table/ is appended, matching --schema)
+    #[arg(long)]
+    pub out: PathBuf,
+    /// Write the JSON manifest (design D5 shape) to this path. A single-Data.db
+    /// input writes one manifest object; a table-dir input writes a JSON array,
+    /// one entry per generation salvaged.
+    #[arg(long)]
+    pub manifest: Option<PathBuf>,
+    /// Console rendering of the same manifest (text to stderr, or JSON to
+    /// stdout) — independent of `--manifest`.
+    #[arg(long, value_enum, default_value = "text")]
+    pub out_format: SalvageOutFormatArg,
 }
 
 // Arguments for the export-sstable subcommand (Issue #392)

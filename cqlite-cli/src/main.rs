@@ -100,6 +100,22 @@ async fn run_main() -> Result<()> {
         return commands::verify::execute_verify_command(path, *mode, *out).await;
     }
 
+    // `salvage` (issue #4196) likewise operates directly on files and needs no
+    // Database/ingestion; short-circuit before database init like `verify`.
+    if let Some(Commands::Salvage(args)) = &cli.command {
+        #[cfg(feature = "write-support")]
+        {
+            return commands::salvage::execute_salvage_command(cli.schema.as_deref(), args).await;
+        }
+        #[cfg(not(feature = "write-support"))]
+        {
+            let _ = args;
+            return Err(anyhow::anyhow!(
+                "Write support is not enabled. Build with --features write-support to enable salvage."
+            ));
+        }
+    }
+
     // Initialize database connection
     let db_path = cli
         .database
@@ -1055,6 +1071,10 @@ async fn run_main() -> Result<()> {
         Some(Commands::Verify { .. }) => {
             // Handled by the short-circuit before database init; see above.
             unreachable!("Commands::Verify is dispatched before database initialization")
+        }
+        Some(Commands::Salvage(_)) => {
+            // Handled by the short-circuit before database init; see above.
+            unreachable!("Commands::Salvage is dispatched before database initialization")
         }
         None => {
             // Issue #1693 (AG4): with `--writable` and no one-shot operation

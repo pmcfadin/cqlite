@@ -16,7 +16,9 @@
 //! Skip-clean when the corruption corpus is absent; `CQLITE_REQUIRE_FIXTURES=1`
 //! (#1094 doctrine) turns that into a hard failure.
 
-#![cfg(feature = "write-support")]
+// `not(tombstones)`: see the matching note in
+// `issue_4196_salvage_healthy_parity.rs`.
+#![cfg(all(feature = "write-support", not(feature = "tombstones")))]
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -44,7 +46,9 @@ fn require_fixtures_strict() -> bool {
 }
 
 fn datasets_root() -> Option<PathBuf> {
-    std::env::var("CQLITE_DATASETS_ROOT").ok().map(PathBuf::from)
+    std::env::var("CQLITE_DATASETS_ROOT")
+        .ok()
+        .map(PathBuf::from)
 }
 
 /// The committed CQL schema fixture — resolved checkout-relative, never from
@@ -124,7 +128,10 @@ fn compressed_chunk_index(chunk_offsets: &[u64], compressed_byte_offset: u64) ->
 #[tokio::test]
 async fn compressed_chunk_crc_flip_loses_exactly_the_intersecting_partitions() {
     let Some(root) = datasets_root() else {
-        skip_or_require("issue_4196 corruption corpus", "CQLITE_DATASETS_ROOT not set");
+        skip_or_require(
+            "issue_4196 corruption corpus",
+            "CQLITE_DATASETS_ROOT not set",
+        );
         return;
     };
     let clean_dir = root
@@ -145,8 +152,8 @@ async fn compressed_chunk_crc_flip_loses_exactly_the_intersecting_partitions() {
 
     // Independent expected-loss computation (design D6): CompressionInfo.db's
     // chunk table + Index.db's partition positions, from the CLEAN source.
-    let ci_bytes =
-        std::fs::read(clean_dir.join("nb-1-big-CompressionInfo.db")).expect("read CompressionInfo.db");
+    let ci_bytes = std::fs::read(clean_dir.join("nb-1-big-CompressionInfo.db"))
+        .expect("read CompressionInfo.db");
     let ci = CompressionInfo::parse(&ci_bytes).expect("parse CompressionInfo.db");
     // The manifest's own bit-flip site for this fixture (corruption-manifest.yml
     // `data_db_bit_flip`), read as an on-disk fact, not assumed here.
@@ -169,9 +176,14 @@ async fn compressed_chunk_crc_flip_loses_exactly_the_intersecting_partitions() {
     let corrupt_data_db = single_data_db(&corrupt_dir);
     let temp = TempDir::new().expect("tempdir");
     let out_root = temp.path().join("out");
-    let report = salvage_sstable(&corrupt_data_db, &out_root, &schema, SalvageOptions::default())
-        .await
-        .expect("salvage must not error on a damaged Data.db (a classified loss, not an Err)");
+    let report = salvage_sstable(
+        &corrupt_data_db,
+        &out_root,
+        &schema,
+        SalvageOptions::default(),
+    )
+    .await
+    .expect("salvage must not error on a damaged Data.db (a classified loss, not an Err)");
 
     // This corpus fixture (`test_comp.lz4_table`) happens to hold exactly ONE
     // partition, whose decompressed offset (0) falls inside the flipped
@@ -242,7 +254,10 @@ async fn compressed_chunk_crc_flip_loses_exactly_the_intersecting_partitions() {
 #[tokio::test]
 async fn damaged_index_db_refuses_with_the_rebuild_remedy() {
     let Some(root) = datasets_root() else {
-        skip_or_require("issue_4196 corruption corpus", "CQLITE_DATASETS_ROOT not set");
+        skip_or_require(
+            "issue_4196 corruption corpus",
+            "CQLITE_DATASETS_ROOT not set",
+        );
         return;
     };
     let corrupt_dir = root
@@ -261,9 +276,14 @@ async fn damaged_index_db_refuses_with_the_rebuild_remedy() {
     let corrupt_data_db = single_data_db(&corrupt_dir);
     let temp = TempDir::new().expect("tempdir");
     let out_root = temp.path().join("out");
-    let report = salvage_sstable(&corrupt_data_db, &out_root, &schema, SalvageOptions::default())
-        .await
-        .expect("salvage must not error on a damaged boundary source (a Refusal, not an Err)");
+    let report = salvage_sstable(
+        &corrupt_data_db,
+        &out_root,
+        &schema,
+        SalvageOptions::default(),
+    )
+    .await
+    .expect("salvage must not error on a damaged boundary source (a Refusal, not an Err)");
 
     let refusal = report
         .refused

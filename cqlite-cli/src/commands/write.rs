@@ -447,8 +447,13 @@ pub async fn handle_compact(args: &crate::cli_types::CompactArgs) -> Result<Comp
 /// keyspace from `CREATE KEYSPACE` / `USE` — so a realistic file with
 /// `CREATE TYPE` (and keyspace) statements before the table parses correctly
 /// (roborev #1031). JSON files fall back to `load_schema_file`.
+// `pub(crate)` (issue #4196): `commands::salvage` reuses this loader for its
+// `--schema` resolution rather than reimplementing CQL-file statement
+// splitting a second time.
 #[cfg(feature = "write-support")]
-fn load_compaction_table_schema(schema_path: &Path) -> Result<cqlite_core::schema::TableSchema> {
+pub(crate) fn load_compaction_table_schema(
+    schema_path: &Path,
+) -> Result<cqlite_core::schema::TableSchema> {
     use cqlite_core::schema::cql_parser::{
         classify_statement, parse_create_table, split_cql_statements, StatementType,
     };
