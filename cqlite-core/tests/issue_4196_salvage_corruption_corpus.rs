@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 
 use cqlite_core::storage::sstable::compression_info::CompressionInfo;
 use cqlite_core::storage::write_engine::salvage::{
-    salvage_sstable, LossClass, RefusalReason, SalvageOptions,
+    salvage_sstable, LossClass, RefusalReason, SalvageOptions, SalvageReport,
 };
 use tempfile::TempDir;
 
@@ -334,4 +334,107 @@ async fn damaged_index_db_refuses_with_the_rebuild_remedy() {
     );
 
     eprintln!("[issue_4196] index_db_bit_flip_big: salvage refused as expected ({refusal:?}).");
+}
+
+/// Roborev, issue #4196 (batched finding b) — a component OTHER than the
+/// boundary source being unreadable (`CompressionInfo.db`, `Statistics.db`)
+/// must produce a classified [`RefusalReason::ComponentUnreadable`] with a
+/// remedy, not a hard `Err` `salvage_sstable` callers previously had to
+/// `?`-propagate (which meant NO manifest was ever produced for one of the
+/// likeliest damage modes this tool exists for). Shared by both fixtures
+/// below: assert the classified-refusal shape and that `--out` holds no
+/// `Data.db`, WITHOUT asserting a specific remedy component name (design D3
+/// does not specify one — only that the reason and remedy are both named).
+async fn assert_component_unreadable_refusal(
+    corrupt_fixture: &str,
+    out_root: &std::path::Path,
+) -> SalvageReport {
+    let root = resolve_root_with_corpus_fixture(corrupt_fixture).unwrap_or_else(|| {
+        panic!("caller must have already skip-checked {corrupt_fixture}")
+    });
+    let corrupt_dir = root
+        .join("corruption")
+        .join(CORRUPT_KEYSPACE)
+        .join(corrupt_fixture);
+    let schema = table_schema();
+    let corrupt_data_db = single_data_db(&corrupt_dir);
+    let report = salvage_sstable(&corrupt_data_db, out_root, &schema, SalvageOptions::default())
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "salvage must not hard-error on a damaged {corrupt_fixture} component (a \
+                 classified Refusal, not an Err): {e:#}"
+            )
+        });
+
+    let refusal = report.refused.as_ref().unwrap_or_else(|| {
+        panic!("a damaged non-boundary component must still produce a refusal; report={report:?}")
+    });
+    assert_eq!(
+        refusal.reason,
+        RefusalReason::ComponentUnreadable,
+        "expected ComponentUnreadable (the boundary source itself is untouched by this fixture); \
+         got {:?}",
+        refusal.reason
+    );
+    assert!(
+        !refusal.remedy.is_empty(),
+        "remedy must be named, not empty"
+    );
+    assert!(
+        !out_root.exists()
+            || std::fs::read_dir(out_root)
+                .map(|rd| rd
+                    .flatten()
+                    .all(|e| !e.file_name().to_string_lossy().ends_with("-Data.db")))
+                .unwrap_or(true),
+        "--out must contain no Data.db after a refusal"
+    );
+    report
+}
+
+/// A corrupt `CompressionInfo.db` (bad chunk-table offset) is a component
+/// failure salvage meets while OPENING the reader (compressed-input chunk
+/// metadata is read eagerly) — must classify, not hard-error.
+#[tokio::test]
+async fn damaged_compression_info_db_refuses_as_classified() {
+    if resolve_root_with_corpus_fixture("compression_info_bad_offset").is_none() {
+        skip_or_require(
+            "compression_info_bad_offset corpus fixture",
+            &format!(
+                "no candidate root carries BOTH sstables/{CLEAN_KEYSPACE}/{CLEAN_TABLE_DIR} and \
+                 corruption/{CORRUPT_KEYSPACE}/compression_info_bad_offset; searched {:?}",
+                candidate_base_roots()
+            ),
+        );
+        return;
+    }
+    let temp = TempDir::new().expect("tempdir");
+    let out_root = temp.path().join("out");
+    let report =
+        assert_component_unreadable_refusal("compression_info_bad_offset", &out_root).await;
+    eprintln!("[issue_4196] compression_info_bad_offset: salvage refused as expected ({report:?}).");
+}
+
+/// A corrupt `Statistics.db` header is a component failure salvage meets
+/// while classifying the input's repair state (`classify_inputs`) — must
+/// classify, not hard-error.
+#[tokio::test]
+async fn damaged_statistics_db_refuses_as_classified() {
+    if resolve_root_with_corpus_fixture("statistics_db_header_damage").is_none() {
+        skip_or_require(
+            "statistics_db_header_damage corpus fixture",
+            &format!(
+                "no candidate root carries BOTH sstables/{CLEAN_KEYSPACE}/{CLEAN_TABLE_DIR} and \
+                 corruption/{CORRUPT_KEYSPACE}/statistics_db_header_damage; searched {:?}",
+                candidate_base_roots()
+            ),
+        );
+        return;
+    }
+    let temp = TempDir::new().expect("tempdir");
+    let out_root = temp.path().join("out");
+    let report =
+        assert_component_unreadable_refusal("statistics_db_header_damage", &out_root).await;
+    eprintln!("[issue_4196] statistics_db_header_damage: salvage refused as expected ({report:?}).");
 }

@@ -104,7 +104,22 @@ pub async fn salvage_sstable(
     };
     let boundary_label = boundaries.kind.manifest_label();
 
-    let reader = open_reader(input).await?;
+    // roborev, issue #4196 (batched finding b): the boundary source was fine
+    // (we would already have refused above otherwise) — a failure HERE is a
+    // DIFFERENT component (most likely `CompressionInfo.db`, since opening
+    // reads it eagerly for a compressed input) being unreadable. That is a
+    // classified refusal per design D3, not a hard `Err` that skips straight
+    // past the manifest: a corrupt `CompressionInfo.db`/`Statistics.db` is
+    // one of the likeliest damage modes an operator reaches for this tool
+    // over, and it must still produce a manifest naming the cause.
+    let reader = match open_reader(input).await {
+        Ok(r) => r,
+        Err(e) => {
+            let mut report = report_skeleton(boundary_label, generation);
+            report.refused = Some(component_unreadable_refusal("opening the input", &e));
+            return Ok(report);
+        }
+    };
 
     let mut component_findings: Vec<ComponentFinding> = Vec::new();
     let (bad_chunks, chunk_size, data_length): (std::collections::BTreeSet<u64>, u64, u64) =
@@ -141,15 +156,38 @@ pub async fn salvage_sstable(
     if is_bti {
         writer_format = WriterFormat::Bti;
     }
-    let mut writer = SSTableWriter::with_format(
+    // roborev, issue #4196 (batched finding b): construction failures are
+    // classified refusals, same reasoning as `open_reader` above —
+    // `report` already exists at this point (unlike the `open_reader` site),
+    // so it is populated with what was already discovered (component
+    // findings, `partitions.total`) rather than dropped.
+    let mut writer = match SSTableWriter::with_format(
         output_dir.to_path_buf(),
         generation,
         schema,
         boundaries.entries.len().max(1),
         writer_format,
-    )?;
+    ) {
+        Ok(w) => w,
+        Err(e) => {
+            report.refused = Some(component_unreadable_refusal(
+                "constructing the output writer",
+                &e,
+            ));
+            return Ok(report);
+        }
+    };
     let input_paths = vec![input.to_path_buf()];
-    let repair_state = classify_inputs(&input_paths)?;
+    let repair_state = match classify_inputs(&input_paths) {
+        Ok(rs) => rs,
+        Err(e) => {
+            report.refused = Some(component_unreadable_refusal(
+                "reading the input's repair state (Statistics.db)",
+                &e,
+            ));
+            return Ok(report);
+        }
+    };
     writer.set_repair_state(
         repair_state.repaired_at,
         repair_state.pending_repair,
@@ -310,6 +348,27 @@ async fn open_reader(input: &Path) -> Result<SSTableReader> {
 /// this alias exists only so the chunk-preflight call sites read clearly.
 fn reader_data_path(input: &Path) -> PathBuf {
     input.to_path_buf()
+}
+
+/// Build a [`RefusalReason::ComponentUnreadable`] [`Refusal`] (roborev, issue
+/// #4196, batched finding b) — `context` names WHAT was being attempted
+/// (`"opening the input"`, `"reading the input's repair state
+/// (Statistics.db)"`, ...) and `error` is the underlying failure's `Display`,
+/// both folded into the remedy so an operator sees the actual cause rather
+/// than a generic "refused" with no lead. Unlike
+/// [`RefusalReason::BoundarySourceUnreadable`] this does NOT point at
+/// `cqlite rebuild --components index` (#4197) — the boundary source was
+/// fine here, so that remedy would send an operator at the wrong component;
+/// `cqlite verify --mode full` is named instead, to let the operator
+/// identify which component is actually damaged before deciding a next step.
+fn component_unreadable_refusal(context: &str, error: &dyn std::fmt::Display) -> Refusal {
+    Refusal {
+        reason: RefusalReason::ComponentUnreadable,
+        remedy: format!(
+            "component unreadable while {context}: {error} — run `cqlite verify --mode full` on \
+             this input to identify the damaged component; salvage cannot proceed without it"
+        ),
+    }
 }
 
 /// Decode + reconcile ONE partition. `Ok(Some((key, mutations)))` on success,

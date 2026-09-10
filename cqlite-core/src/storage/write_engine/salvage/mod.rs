@@ -98,6 +98,14 @@ pub enum RefusalReason {
     /// The boundary source was readable but every named partition was lost
     /// (spec R5.2) — there is nothing to write.
     NothingDecodable,
+    /// A component salvage needs to even OPEN the input or classify its
+    /// repair state — `CompressionInfo.db` (chunk table), `Statistics.db`
+    /// (repair-state fields) — could not be read (roborev, issue #4196,
+    /// batched finding b). Distinct from `BoundarySourceUnreadable`: the
+    /// boundary source (`Index.db`/`Partitions.db`) was fine here, a
+    /// DIFFERENT component was not, so `rebuild --components index` would
+    /// not help — the remedy names the damaged component instead.
+    ComponentUnreadable,
 }
 
 impl RefusalReason {
@@ -112,6 +120,7 @@ impl RefusalReason {
         match self {
             RefusalReason::BoundarySourceUnreadable => "boundary-source-unreadable",
             RefusalReason::NothingDecodable => "nothing-decodable",
+            RefusalReason::ComponentUnreadable => "component-unreadable",
         }
     }
 }
