@@ -105,7 +105,14 @@ async fn run_main() -> Result<()> {
     if let Some(Commands::Salvage(args)) = &cli.command {
         #[cfg(feature = "write-support")]
         {
-            return commands::salvage::execute_salvage_command(cli.schema.as_deref(), args).await;
+            // `execute_salvage_command` owns its WHOLE exit-code space
+            // (0/1/2/3, design D3) via direct `std::process::exit` calls on
+            // every path, fallible or not (roborev, issue #4196: routing a
+            // usage error through `?` here would have sent it through
+            // `classify_error`'s CliExitCode enum instead, which has no
+            // variant equal to 1). It therefore never returns an `Err`.
+            commands::salvage::execute_salvage_command(cli.schema.as_deref(), args).await;
+            return Ok(());
         }
         #[cfg(not(feature = "write-support"))]
         {

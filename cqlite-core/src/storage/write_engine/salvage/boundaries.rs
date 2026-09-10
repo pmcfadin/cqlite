@@ -14,6 +14,21 @@
 //! `Index.db` itself with [`parse_big_index_entry`] directly, mirroring
 //! `check_big_index`'s exhaustive walk (issue #1000) rather than trusting
 //! the lenient reader.
+//!
+//! # Memory: O(index size), NOT O(1) (roborev, issue #4196; declared gap)
+//!
+//! This module reads `Index.db` (or `Partitions.db` + `Rows.db`) WHOLE into
+//! memory and materializes one [`BoundaryEntry`] — a COPY of every
+//! partition's raw key — per partition, all resident for the run's whole
+//! lifetime. Spec R6 ("at most one partition resident on the read side")
+//! describes `recover.rs`'s per-partition DECODE loop, which this module
+//! feeds; it does NOT hold for boundary enumeration itself, and the
+//! `memory-budget` lane entry that would measure this (R6.1) is a declared
+//! gap. On a table with a very large partition count this residency —
+//! O(index size), roughly doubled by the per-entry key copy — can itself
+//! approach or exceed the <128 MB target before a single partition is
+//! decoded. Streaming the boundary walk (yielding entries instead of
+//! collecting them) is tracked as follow-up work, not implemented here.
 
 use super::{Refusal, RefusalReason};
 use crate::storage::sstable::index_reader::parse_big_index_entry;

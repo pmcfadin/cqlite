@@ -39,7 +39,9 @@ pub struct Loss {
     /// This slot's Data.db start offset per the boundary source.
     pub data_offset: u64,
     /// Compressed-chunk indices this partition's byte range intersects, when
-    /// known (compressed input only; empty for uncompressed).
+    /// known: a compressed input (`CompressionInfo.db`), or an uncompressed
+    /// input with a readable `CRC.db` sidecar. Empty when neither chunk
+    /// table is available.
     pub chunks: Vec<u64>,
     pub class: LossClass,
     /// Rows that had already decoded when the failure occurred. Salvage

@@ -97,6 +97,20 @@ pub(super) fn compressed_chunk_preflight(
 /// #1396), collecting every failing chunk index. Absent `CRC.db` is
 /// warn-and-proceed (design D4, matching `verify`): an empty bad-chunk set,
 /// no finding — the chunk-CRC signal simply is not available.
+///
+/// # Domain assumption (roborev, issue #4196; declared gap)
+///
+/// This function chunks `Data.db` from byte 0 (file-ABSOLUTE indices —
+/// `CRC.db`'s own chunking convention), while `recover.rs`'s
+/// `chunks_for_range` maps `Index.db`-derived offsets, which are
+/// DATA-SECTION-relative (i.e. relative to `SSTableReader::calculate_header_size()`).
+/// The two agree only because that header size is `0` for the headerless
+/// `nb`/`da` layouts salvage targets; on ANY input where it is non-zero,
+/// every chunk-range intersection computed from an `Index.db` offset would
+/// be off by one chunk, silently mis-attributing `chunk-crc` losses. Not
+/// asserted or corrected here — this module has no reader instance to
+/// consult `calculate_header_size()` from — tracked as follow-up work
+/// (subtract the header size here, or fail closed when it is non-zero).
 pub(super) async fn uncompressed_chunk_preflight(
     data_path: &Path,
     crc_path: &Path,

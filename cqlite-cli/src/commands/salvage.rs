@@ -7,7 +7,6 @@
 //! `Database`/ingestion, and is dispatched by `main.rs` BEFORE database
 //! initialization (mirroring `verify`'s short-circuit).
 
-use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 use cqlite_core::storage::write_engine::salvage::{salvage_sstable, SalvageOptions, SalvageReport};
@@ -17,22 +16,30 @@ use crate::commands::write::load_compaction_table_schema;
 
 /// Execute the `salvage` command.
 ///
-/// Design D3 exit codes are enforced by DIRECT [`std::process::exit`] calls
-/// (mirroring `commands::verify::execute_verify_command`'s established
-/// pattern) rather than the generic error-classification path, because 2/3
-/// are SUCCESSFUL outcomes with a non-zero code, not error conditions:
+/// Design D3's WHOLE exit-code space (0/1/2/3) is owned end-to-end by DIRECT
+/// [`std::process::exit`] calls (mirroring `commands::verify::execute_verify_command`'s
+/// established pattern) — this function NEVER returns an `Err` for `main.rs`'s
+/// `?`/classify-error path to route: 2/3 are SUCCESSFUL outcomes with a
+/// non-zero code, not error conditions, and (roborev, issue #4196) routing a
+/// genuine USAGE error through `?` would have sent it through
+/// `error::classify_error`'s `CliExitCode` enum instead — which has NO
+/// variant equal to `1` (`Success=0, InvalidCliArgs=2, SchemaError=3,
+/// DataDirError=4, QueryExecutionError=5, WriteError=6`), so an unreadable
+/// `--schema` file would have exited `3` (salvage's OWN "output written with
+/// losses" code) with no output and no manifest ever having existed. Every
+/// fallible step is therefore matched explicitly here, never `?`-propagated:
 /// * `0` — every partition, across every generation, recovered.
 /// * `3` — SOME `Data.db` was written (at least one generation produced
 ///   output), but not every partition of every generation was recovered —
 ///   either genuine losses, or another generation refused outright. Check
-///   the manifest for which generations wrote output (roborev, issue
-///   #4196): a table-dir input salvages each generation SEPARATELY (D1), so
-///   "one generation refused" must not read as "nothing was produced" when
-///   a sibling generation succeeded.
+///   the manifest for which generations wrote output: a table-dir input
+///   salvages each generation SEPARATELY (D1), so "one generation refused"
+///   must not read as "nothing was produced" when a sibling succeeded.
 /// * `2` — EVERY generation refused: no `Data.db` was written anywhere
 ///   under `--out`.
-/// * `1` — usage error (returned as `Err`, handled the normal way).
-pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageArgs) -> Result<()> {
+/// * `1` — usage error: the cause is printed to stderr and the process
+///   exits directly from the failing step.
+pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageArgs) {
     let Some(schema_path) = schema_path else {
         eprintln!("cqlite salvage: --schema is required (the global --schema flag)");
         std::process::exit(1);
@@ -45,10 +52,31 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
         }
     }
 
-    let schema = load_compaction_table_schema(schema_path)
-        .with_context(|| format!("failed to load schema from {}", schema_path.display()))?;
+    let schema = match load_compaction_table_schema(schema_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "cqlite salvage: failed to load schema from {}: {e:#}",
+                schema_path.display()
+            );
+            std::process::exit(1);
+        }
+    };
 
-    let generations = discover_salvage_inputs(&args.input)?;
+    // The manifest shape follows the INPUT KIND (design D5: "a table-dir
+    // input writes a JSON array, one entry per generation"), never the
+    // COUNT of generations actually found (roborev, issue #4196) — a
+    // table-dir holding exactly one generation must still emit an array, or
+    // a consumer's `jq '.[] | .losses'` breaks on precisely the common
+    // single-generation case.
+    let is_table_dir = args.input.is_dir();
+    let generations = match discover_salvage_inputs(&args.input) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("cqlite salvage: {e:#}");
+            std::process::exit(1);
+        }
+    };
     if generations.is_empty() {
         eprintln!(
             "cqlite salvage: no published *-Data.db found under {} (a Data.db needs a sibling \
@@ -60,13 +88,19 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
 
     let mut reports = Vec::with_capacity(generations.len());
     for input in &generations {
-        let report = salvage_sstable(input, &args.out, &schema, SalvageOptions::default())
-            .await
-            .with_context(|| format!("salvage failed for {}", input.display()))?;
-        reports.push(report);
+        match salvage_sstable(input, &args.out, &schema, SalvageOptions::default()).await {
+            Ok(report) => reports.push(report),
+            Err(e) => {
+                eprintln!(
+                    "cqlite salvage: salvage failed for {}: {e:#}",
+                    input.display()
+                );
+                std::process::exit(1);
+            }
+        }
     }
 
-    if let Err(e) = write_manifest_file(&reports, args) {
+    if let Err(e) = write_manifest_file(&reports, args, is_table_dir) {
         eprintln!(
             "cqlite salvage: failed to write manifest to {}: {e:#}",
             args.manifest
@@ -76,7 +110,7 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
         );
         std::process::exit(1);
     }
-    render_console(&reports, args);
+    render_console(&reports, args, is_table_dir);
 
     // roborev, issue #4196: exit 2 means "no Data.db anywhere", never "some
     // generation refused" — a table-dir input salvages each generation
@@ -92,14 +126,15 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
     if any_imperfect {
         std::process::exit(3);
     }
-    Ok(())
 }
 
 /// `args.input` is a single `Data.db` file, or a table directory whose
 /// generations (BIG `nb-*-big-Data.db` AND BTI `da-*-bti-Data.db`, each with
 /// a sibling `TOC.txt` publication barrier) are salvaged separately, oldest
 /// generation first for deterministic output.
-fn discover_salvage_inputs(input: &Path) -> Result<Vec<PathBuf>> {
+fn discover_salvage_inputs(input: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    use anyhow::Context;
+
     if input.is_file() {
         return Ok(vec![input.to_path_buf()]);
     }
@@ -144,9 +179,19 @@ fn discover_salvage_inputs(input: &Path) -> Result<Vec<PathBuf>> {
     Ok(found.into_iter().map(|(_, p)| p).collect())
 }
 
-/// Write the JSON manifest (design D5) to `--manifest`, when given. A
-/// single-generation run writes ONE manifest object; a multi-generation
-/// (table-dir) run writes a JSON array, one entry per generation.
+/// Render the manifest as JSON per the INPUT KIND, never the generation
+/// count: `is_table_dir` -> always a JSON array (one entry per generation,
+/// even when there is only one); a single `Data.db` input -> always a bare
+/// object (design D5's shape).
+fn manifest_json(reports: &[SalvageReport], is_table_dir: bool) -> serde_json::Result<String> {
+    if is_table_dir {
+        serde_json::to_string_pretty(reports)
+    } else {
+        serde_json::to_string_pretty(&reports[0])
+    }
+}
+
+/// Write the JSON manifest (design D5) to `--manifest`, when given.
 ///
 /// A failure here is a HARD error (roborev, issue #4196): D5/R8 make the
 /// manifest THE contract, so a run that reports 0/3 while silently failing
@@ -156,7 +201,13 @@ fn discover_salvage_inputs(input: &Path) -> Result<Vec<PathBuf>> {
 /// be reported as if the manifest existed. The parent directory is created
 /// first so the documented "manifest lives under --out" pattern works even
 /// when `--out` itself was never populated.
-fn write_manifest_file(reports: &[SalvageReport], args: &SalvageArgs) -> anyhow::Result<()> {
+fn write_manifest_file(
+    reports: &[SalvageReport],
+    args: &SalvageArgs,
+    is_table_dir: bool,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+
     let Some(path) = &args.manifest else {
         return Ok(());
     };
@@ -166,31 +217,19 @@ fn write_manifest_file(reports: &[SalvageReport], args: &SalvageArgs) -> anyhow:
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
     }
-    let json = if reports.len() == 1 {
-        serde_json::to_string_pretty(&reports[0])
-    } else {
-        serde_json::to_string_pretty(reports)
-    }
-    .context("failed to serialize manifest")?;
+    let json = manifest_json(reports, is_table_dir).context("failed to serialize manifest")?;
     std::fs::write(path, json).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
 
 /// Console rendering (independent of `--manifest`): the JSON manifest to
 /// stdout under `--out-format json`, else a text rendering to stderr.
-fn render_console(reports: &[SalvageReport], args: &SalvageArgs) {
+fn render_console(reports: &[SalvageReport], args: &SalvageArgs, is_table_dir: bool) {
     match args.out_format {
-        SalvageOutFormatArg::Json => {
-            let json = if reports.len() == 1 {
-                serde_json::to_string_pretty(&reports[0])
-            } else {
-                serde_json::to_string_pretty(reports)
-            };
-            match json {
-                Ok(text) => println!("{text}"),
-                Err(e) => eprintln!("cqlite salvage: failed to serialize manifest: {e}"),
-            }
-        }
+        SalvageOutFormatArg::Json => match manifest_json(reports, is_table_dir) {
+            Ok(text) => println!("{text}"),
+            Err(e) => eprintln!("cqlite salvage: failed to serialize manifest: {e}"),
+        },
         SalvageOutFormatArg::Text => {
             for report in reports {
                 eprint!("{}", report.render_text());

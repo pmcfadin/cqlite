@@ -161,26 +161,41 @@ async fn corrupt_row_loses_the_needle_partition_whole_never_a_prefix() {
         other_losses.is_empty(),
         "only the needle partition should be lost; also lost: {other_losses:?}"
     );
+    // roborev, issue #4196: pin the exact recovered count and refusal state
+    // UNCONDITIONALLY, rather than guarding the substantive assertions below
+    // behind a runtime `if partitions.recovered > 0` — a fixture change that
+    // silently dropped every OTHER partition too would otherwise make this
+    // test pass having compared nothing (the vacuity class this repo's
+    // doctrine calls out). `control_positions.len() - 1` is every partition
+    // except the needle.
+    assert_eq!(
+        mutated_report.partitions.recovered,
+        control_positions.len() - 1,
+        "expected every partition except the needle to be recovered"
+    );
+    assert!(
+        mutated_report.refused.is_none(),
+        "a partial loss with real survivors must not refuse; got {:?}",
+        mutated_report.refused
+    );
 
     // R3.1: the output holds ZERO rows for the needle partition key -- never
     // a prefix. Seek by key on the salvage output via a full compaction-row
     // decode and filter to the needle key (mirrors the R1 BTI healthy-parity
     // test's oracle).
     let mutated_out_table_dir = mutated_out_root.join(&schema.keyspace).join(&schema.table);
-    if mutated_report.partitions.recovered > 0 {
-        let salvaged_data_db = single_data_db(&mutated_out_table_dir);
-        let rows = decode_all_rows(&salvaged_data_db, &schema).await;
-        let needle_rows_in_output: Vec<_> = rows
-            .iter()
-            .filter(|r| r.key.as_bytes() == needle_key.as_slice())
-            .collect();
-        assert!(
-            needle_rows_in_output.is_empty(),
-            "output must hold ZERO rows for the needle partition (a prefix would resurrect data \
-             shadowed by whatever made this partition undecodable); found {}",
-            needle_rows_in_output.len()
-        );
-    }
+    let salvaged_data_db = single_data_db(&mutated_out_table_dir);
+    let rows = decode_all_rows(&salvaged_data_db, &schema).await;
+    let needle_rows_in_output: Vec<_> = rows
+        .iter()
+        .filter(|r| r.key.as_bytes() == needle_key.as_slice())
+        .collect();
+    assert!(
+        needle_rows_in_output.is_empty(),
+        "output must hold ZERO rows for the needle partition (a prefix would resurrect data \
+         shadowed by whatever made this partition undecodable); found {}",
+        needle_rows_in_output.len()
+    );
 
     // Every OTHER partition matches the CONTROL byte-for-byte (compaction-row
     // decode equality).
@@ -207,25 +222,21 @@ async fn corrupt_row_loses_the_needle_partition_whole_never_a_prefix() {
         .filter(|r| r.key.as_bytes() != needle_key.as_slice())
         .collect();
 
-    if mutated_report.partitions.recovered > 0 {
-        let mutated_out_table_dir = mutated_out_root.join(&schema.keyspace).join(&schema.table);
-        let salvaged_data_db = single_data_db(&mutated_out_table_dir);
-        let mutated_rows = decode_all_rows(&salvaged_data_db, &schema).await;
-        assert_eq!(
-            mutated_rows.len(),
-            control_rows_minus_needle.len(),
-            "every OTHER partition's row count must match the control minus the needle"
-        );
-        assert_eq!(
-            &mutated_rows,
-            &control_rows_minus_needle
-                .into_iter()
-                .cloned()
-                .collect::<Vec<_>>(),
-            "every OTHER partition's rows must byte-match the control (minus the needle \
-             partition, which is a total loss)"
-        );
-    }
+    let mutated_rows = decode_all_rows(&salvaged_data_db, &schema).await;
+    assert_eq!(
+        mutated_rows.len(),
+        control_rows_minus_needle.len(),
+        "every OTHER partition's row count must match the control minus the needle"
+    );
+    assert_eq!(
+        &mutated_rows,
+        &control_rows_minus_needle
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        "every OTHER partition's rows must byte-match the control (minus the needle partition, \
+         which is a total loss)"
+    );
 
     eprintln!(
         "[issue_4196] {FIX_KS}.{FIX_TABLE}: needle partition (key_hex={needle_hex}) lost whole \

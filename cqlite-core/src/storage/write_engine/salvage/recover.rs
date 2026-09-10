@@ -161,6 +161,12 @@ pub async fn salvage_sstable(
 
     let scan_cancel = ScanCancel::default();
     let mut recovered = 0usize;
+    // Partitions actually passed to `writer.write_partition` — DISTINCT from
+    // `recovered` (roborev, issue #4196): a partition that decoded but
+    // reconciled to nothing (`Ok(None)`) counts toward `recovered` but not
+    // `written`, so `finish()` below is gated on real write activity, not
+    // merely "nothing failed to decode".
+    let mut written = 0usize;
     let mut losses: Vec<Loss> = Vec::new();
 
     for (i, entry) in boundaries.entries.iter().enumerate() {
@@ -206,13 +212,36 @@ pub async fn salvage_sstable(
             Ok(Some((key, mutations))) => {
                 writer.write_partition(key, mutations)?;
                 recovered += 1;
+                written += 1;
             }
             Ok(None) => {
                 // Every mutation shadowed itself out during reconciliation
                 // (e.g. a lone range-tombstone carrier over an empty range) —
                 // nothing to write, but not a loss: the partition decoded
-                // completely and correctly.
+                // completely and correctly. Counted in `recovered` (it DID
+                // decode) but deliberately NOT in `written` (roborev, issue
+                // #4196): `finish()` below is gated on `written`, not
+                // `recovered`, so a file whose EVERY partition takes this
+                // path (nothing genuinely written anywhere) still refuses
+                // rather than emitting a phantom empty-but-valid component
+                // set. For a BTI NARROW partition (`entry.expected_key ==
+                // None`) this decode could not be key-validated at all — the
+                // format carries nothing to check it against — so it is also
+                // named as a component finding for operator visibility
+                // rather than silently trusted.
                 recovered += 1;
+                if entry.expected_key.is_none() {
+                    report.component_findings.push(ComponentFinding {
+                        class: "UnverifiedEmptyDecode".to_string(),
+                        component: "Data.db".to_string(),
+                        detail: format!(
+                            "partition at offset {} (BTI narrow leaf, no independently-known key \
+                             to validate) decoded to zero rows; accepted as a legitimate empty \
+                             reconciliation but could not be cross-checked",
+                            entry.data_offset
+                        ),
+                    });
+                }
             }
             Err((class, rows_before, message)) => {
                 // roborev, issue #4196: name the chunks this partition's
@@ -235,12 +264,15 @@ pub async fn salvage_sstable(
     // `Data.db`. `SSTableWriter` opens `Data.db` lazily on the FIRST
     // `write_partition` call (creating `output_dir/keyspace/table/` as
     // needed — see `SSTableWriter::with_format_and_registry`'s doc), so when
-    // `recovered == 0` no partition was ever written and no file exists yet;
-    // calling `finish()` here would still emit an empty-but-valid component
-    // set (Statistics.db, TOC.txt, ...) for zero partitions, which is exactly
-    // the "no Data.db" contract's violation. Drop the writer unfinished
-    // instead — nothing on disk to clean up in that case.
-    if recovered > 0 {
+    // `written == 0` (roborev, issue #4196: gated on `written`, NOT
+    // `recovered` — a file whose every partition reconciled to `Ok(None)`
+    // has `recovered > 0` yet wrote nothing) no partition was ever written
+    // and no file exists yet; calling `finish()` here would still emit an
+    // empty-but-valid component set (Statistics.db, TOC.txt, ...) for zero
+    // written partitions, which is exactly the "no Data.db" contract's
+    // violation. Drop the writer unfinished instead — nothing on disk to
+    // clean up in that case.
+    if written > 0 {
         let output = writer.finish().await?;
         let _ = output; // SSTableInfo carries stats the manifest does not restate.
     } else {
@@ -251,7 +283,7 @@ pub async fn salvage_sstable(
     report.partitions.lost = losses.len();
     report.losses = losses;
 
-    if recovered == 0 {
+    if written == 0 {
         report.refused = Some(Refusal {
             reason: RefusalReason::NothingDecodable,
             remedy: "no partition could be recovered; inspect the losses above".to_string(),

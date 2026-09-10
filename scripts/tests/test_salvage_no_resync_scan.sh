@@ -34,6 +34,17 @@ while IFS= read -r -d '' file; do
   # Track whether the current line is inside a `#[cfg(test)]` module via
   # brace depth from the attribute onward — a lightweight substitute for a
   # real Rust parser, sufficient for excluding an in-file test module.
+  #
+  # Two hardenings (roborev, issue #4196) against the naive form: (a) the
+  # attribute match is ANCHORED to a line that, with whitespace stripped, is
+  # EXACTLY `#[cfg(test)]` — a bare substring match would also fire inside a
+  # doc comment or string literal mentioning the attribute, silently
+  # disabling the guard for the rest of the file (this codebase's module
+  # docs routinely quote cfg attributes); (b) if the brace tracker never
+  # returns to depth 0 by EOF (an unbalanced/miscounted file, e.g. a brace
+  # inside a string or comment), that is a REFUSAL (FAIL), not a silent
+  # skip — a guard whose whole job is fail-closed detection must not have a
+  # counting failure read as "nothing to report".
   in_test_mod=0
   depth=0
   line_no=0
@@ -48,7 +59,8 @@ while IFS= read -r -d '' file; do
       fi
       continue
     fi
-    if [[ "$line" == *'#[cfg(test)]'* ]]; then
+    stripped="${line// /}"
+    if [ "$stripped" = '#[cfg(test)]' ]; then
       in_test_mod=1
       depth=0
       continue
@@ -60,6 +72,11 @@ while IFS= read -r -d '' file; do
       fi
     done
   done <"$file"
+  if [ "$in_test_mod" -eq 1 ]; then
+    echo "FAIL - $file: brace tracker for a #[cfg(test)] block never returned to depth 0 by EOF \
+(unbalanced or miscounted braces) — refusing rather than silently trusting the scan"
+    hits=$((hits + 1))
+  fi
 done < <(find "$SALVAGE_DIR" -name '*.rs' -print0)
 
 if [ "$hits" -gt 0 ]; then
