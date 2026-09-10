@@ -123,20 +123,16 @@ fn first_diff(a: &[u8], b: &[u8]) -> Option<usize> {
 /// `require_byte_parity` is `true`, chosen to mirror issue #1017's
 /// cross-engine byte set for the format family.
 ///
-/// `require_byte_parity = false` (roborev, issue #4196, round-4 Medium —
-/// coverage gap): reserved for `test_basic.uncompressed_table`. Measured
-/// while adding that case: `compact_sstables`'s whole-file, one-shared-writer
-/// merge and `salvage_sstable`'s per-partition, fresh-`KWayMerger`-per-call
-/// recovery loop produce DIFFERENT VInt byte-widths for some row-level field
-/// on this fixture (Data.db: 20410 vs 19803 bytes, first diff inside the
-/// first row's serialized body) despite BOTH reading the identical, single
-/// `Statistics.db`-derived `compute_baseline_min` result and BOTH decoding
-/// to IDENTICAL `CompactionRow`s (verified below) — i.e. this is a
-/// byte-level RE-ENCODING difference with no content impact, not a
-/// correctness defect, and not reproduced by the compressed fixture this
-/// same sweep already byte-matches. Root-causing the exact writer code path
-/// responsible is out of scope for this fix round; reported as a follow-up
-/// rather than silently loosening the oracle for every case.
+/// `require_byte_parity = false` (roborev, issue #4196, round-4 Medium
+/// coverage gap; DE-CONFOUNDED in round-5, finding 4): reserved for
+/// `test_basic.uncompressed_table`'s zero-clustering-column shape
+/// specifically — NOT for "uncompressed input" in general, which
+/// `salvage_of_healthy_uncompressed_big_sstable_matches_no_purge_compaction`
+/// above proves byte-matches once compression is the ONLY variable (a
+/// same-shape compressed/uncompressed fixture pair). Content parity
+/// (decode-and-compare, below) still holds for the zero-clustering-column
+/// case; only raw bytes diverge (Data.db: 20410 vs 19803 bytes). Never
+/// loosened for anything OTHER than that one isolated shape.
 async fn assert_healthy_salvage_matches_no_purge_compaction(
     keyspace: &str,
     table: &str,
@@ -327,19 +323,55 @@ async fn salvage_of_healthy_big_sstable_matches_no_purge_compaction() {
 /// `decode_partition_at_offset_for_salvage`'s bounded positional
 /// `read_exact_at` window, the `is_uncompressed` full-consumption check
 /// added for the round-3 High finding, and `uncompressed_chunk_preflight`
-/// (`CRC.db`) — executed in NO test. `test_basic.uncompressed_table`
-/// (`compression = {'enabled': 'false'}`) exercises it; salvage's own output
-/// is itself always uncompressed (design D4), so this path matters on every
-/// run regardless of the input's compression.
+/// (`CRC.db`) — executed in NO test. Salvage's own output is itself always
+/// uncompressed (design D4), so this path matters on every run regardless of
+/// the input's compression.
+///
+/// `test_comp.uncompressed_table`, NOT `test_basic.uncompressed_table`
+/// (roborev, issue #4196, round-5 Medium finding 4 — de-confounding compression
+/// from table shape): this fixture has the IDENTICAL schema (`pk INT, ck INT,
+/// body TEXT, PRIMARY KEY (pk, ck)`, `compression-parity.cql`) to
+/// `test_comp.lz4_table`, the ALREADY byte-parity-proven compressed fixture
+/// above (issue #1017's cross-engine byte set) — same keyspace, same table
+/// shape, ONLY compression differs. With that confound removed, byte parity
+/// DOES hold (`require_byte_parity: true` below, no loosening needed) —
+/// proving the divergence `salvage_of_healthy_uncompressed_zero_clustering_columns_content_only`
+/// below measures is NOT a compression-vs-compaction artifact at all.
 #[tokio::test]
 async fn salvage_of_healthy_uncompressed_big_sstable_matches_no_purge_compaction() {
+    assert_healthy_salvage_matches_no_purge_compaction(
+        "test_comp",
+        "uncompressed_table",
+        "compression-parity.cql",
+        4197,
+        &["Data.db", "Index.db", "Summary.db", "CRC.db"],
+        true, // require_byte_parity
+    )
+    .await;
+}
+
+/// roborev, issue #4196 (round-5 Medium finding 4, follow-on to the
+/// de-confounding above): `test_basic.uncompressed_table` (`id UUID PRIMARY
+/// KEY` — ZERO clustering columns, unlike `test_comp.uncompressed_table`'s
+/// `PRIMARY KEY (pk, ck)` above) genuinely does NOT byte-match
+/// `compact_sstables`'s output (Data.db: 20410 vs 19803 bytes), even though
+/// both decode to IDENTICAL `CompactionRow`s (content-parity fallback,
+/// verified below) — i.e. correctness holds, bytes don't. With the
+/// compression confound eliminated by the sibling test above, the isolated
+/// variable is the CLUSTERING-COLUMN COUNT (zero vs. one), not compression;
+/// `composite_key_table` (compressed, byte-matches, HAS clustering columns)
+/// is consistent with this. Root-causing the exact writer/merger code path
+/// this zero-clustering-column shape triggers is OUT OF SCOPE for this fix
+/// round — reported precisely, not silently dropped, for the follow-up.
+#[tokio::test]
+async fn salvage_of_healthy_uncompressed_zero_clustering_columns_content_only() {
     assert_healthy_salvage_matches_no_purge_compaction(
         "test_basic",
         "uncompressed_table",
         "basic-types.cql",
-        4197,
+        4198,
         &["Data.db", "Index.db", "Summary.db", "CRC.db"],
-        false, // require_byte_parity — see this test's doc comment
+        false, // require_byte_parity — see this test's doc
     )
     .await;
 }

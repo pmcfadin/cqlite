@@ -93,16 +93,14 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
             std::process::exit(1);
         }
     };
-    // roborev, issue #4196 (batched finding h): a filename whose generation
-    // number could not be parsed is a NAMED, SKIPPED entry — never silently
-    // folded into sort key `0` (which risked sorting it AHEAD of every real
-    // generation and, on a hard failure there, aborting the whole run before
-    // any sibling ran at all). Named here, unconditionally, even when other
-    // generations exist to salvage.
+    // roborev, issue #4196 (batched finding h; round-5 Medium extended it to
+    // a missing TOC.txt): a `*-Data.db` discovery declines to attempt — an
+    // unparseable generation number, or a missing publication barrier — is a
+    // NAMED, SKIPPED entry, never silently dropped. Named here,
+    // unconditionally, even when other generations exist to salvage.
     for skipped in &discovery.skipped {
         eprintln!(
-            "cqlite salvage: skipping {} — could not parse a generation number from its \
-             filename ({}); other generations are still salvaged",
+            "cqlite salvage: skipping {} — {}; other generations are still salvaged",
             skipped.path.display(),
             skipped.reason
         );
@@ -117,8 +115,8 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
             );
         } else {
             eprintln!(
-                "cqlite salvage: no salvageable generation under {} — every published *-Data.db \
-                 found had an unparseable generation number (see the skip messages above)",
+                "cqlite salvage: no salvageable generation under {} — every *-Data.db found was \
+                 skipped (see the skip messages above)",
                 args.input.display()
             );
         }
@@ -150,7 +148,7 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
     for skipped in &discovery.skipped {
         for report in &mut reports {
             report.component_findings.push(ComponentFinding {
-                class: "SkippedUnparseableGeneration".to_string(),
+                class: "SkippedInputGeneration".to_string(),
                 component: skipped.path.display().to_string(),
                 detail: format!(
                     "a published *-Data.db under the same table dir was never salvaged: {}",
@@ -211,8 +209,26 @@ fn exit_after_partial_failure(
     args: &SalvageArgs,
     is_table_dir: bool,
 ) -> ! {
+    // roborev, issue #4196 (round-5 Medium finding 2): `reports` only
+    // reflects generations that returned `Ok(...)` — a generation that
+    // hard-errors INSIDE `salvage_sstable` (`write_partition`/`finish`,
+    // scoped out of round 4's boundary-monotonicity fix) can still have
+    // written REAL, partial `Data.db` bytes before failing, invisible to
+    // `reports` entirely (`SSTableWriter` opens `Data.db` lazily on the
+    // FIRST `write_partition`, so a failure at partition k>0 leaves a
+    // partial generation on disk). Probing `--out` directly is the only way
+    // to know whether something exists there before choosing between
+    // "nothing written" (1/2, which DOCUMENT a clean `--out`) and "something
+    // written" (3) — trusting `reports` alone here would let a script that
+    // trusts the 1/2 promise treat a dirty `--out` as untouched, and a
+    // SUBSEQUENT run into the same `--out` then fails with "not empty".
+    let out_has_data_db = out_dir_has_data_db(&args.out);
     if reports.is_empty() {
-        // Genuinely nothing gathered — no manifest exists to write.
+        if out_has_data_db {
+            std::process::exit(3);
+        }
+        // Genuinely nothing gathered and nothing on disk — no manifest
+        // exists to write.
         std::process::exit(1);
     }
     // Best-effort: the caller already reported the failure that brought us
@@ -221,14 +237,40 @@ fn exit_after_partial_failure(
     // there is something worth a manifest, either way below.
     let _ = write_manifest_file(reports, args, is_table_dir);
     render_console(reports, args, is_table_dir);
-    let any_output_written = reports.iter().any(|r| r.refused.is_none());
+    let any_output_written = out_has_data_db || reports.iter().any(|r| r.refused.is_none());
     if any_output_written {
         std::process::exit(3);
     }
-    // Every gathered report refused (no `Data.db` anywhere) — mirrors the
+    // Every gathered report refused AND nothing on disk — mirrors the
     // terminal `all_refused` arm's own exit 2, reached here instead because
     // a LATER step hard-failed before that arm ran.
     std::process::exit(2);
+}
+
+/// `true` iff any `*-Data.db` exists anywhere under `out` (roborev, issue
+/// #4196, round-5 Medium finding 2) — the only way [`exit_after_partial_failure`]
+/// can see a partial generation `salvage_sstable` wrote before hard-erroring,
+/// which never reaches `reports` (no `Ok(report)` was ever returned for it).
+fn out_dir_has_data_db(out: &Path) -> bool {
+    let Ok(rd) = std::fs::read_dir(out) else {
+        return false;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if out_dir_has_data_db(&path) {
+                return true;
+            }
+        } else if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.ends_with("-Data.db"))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// A `*-Data.db` (with a publishing `*-TOC.txt` sibling) that
@@ -299,6 +341,17 @@ fn discover_salvage_inputs(input: &Path) -> anyhow::Result<SalvageDiscovery> {
         let base = name.trim_end_matches("-Data.db");
         let toc = path.with_file_name(format!("{base}-TOC.txt"));
         if !toc.exists() {
+            // roborev, issue #4196 (round-5 Medium): the SAME visibility gap
+            // finding 5 fixed for an unparseable generation number, left
+            // open for a missing publication barrier — a very plausible
+            // damage mode for this tool's own target audience. Named and
+            // skipped via the SAME `SkippedInput` vehicle rather than
+            // silently `continue`d, so it is recorded in the manifest and
+            // forces an imperfect (exit 3) outcome instead of vanishing.
+            skipped.push(SkippedInput {
+                path,
+                reason: format!("no sibling {base}-TOC.txt (unpublished generation)"),
+            });
             continue;
         }
         match base
@@ -376,5 +429,55 @@ fn render_console(reports: &[SalvageReport], args: &SalvageArgs, is_table_dir: b
                 eprint!("{}", report.render_text());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::out_dir_has_data_db;
+    use tempfile::TempDir;
+
+    /// Roborev, issue #4196 (round-5 Medium finding 2): `out_dir_has_data_db`
+    /// is the probe `exit_after_partial_failure` relies on to see a partial
+    /// generation `salvage_sstable` wrote before hard-erroring (invisible to
+    /// `reports`, which only reflects `Ok(...)` returns) — unit-tested
+    /// directly since reproducing that exact hard-error trigger end-to-end
+    /// via the CLI needs a genuine I/O failure mid-write.
+    #[test]
+    fn empty_dir_has_no_data_db() {
+        let temp = TempDir::new().expect("tempdir");
+        assert!(!out_dir_has_data_db(temp.path()));
+    }
+
+    #[test]
+    fn nonexistent_dir_has_no_data_db() {
+        let temp = TempDir::new().expect("tempdir");
+        assert!(!out_dir_has_data_db(&temp.path().join("does-not-exist")));
+    }
+
+    #[test]
+    fn dir_with_only_non_data_files_has_no_data_db() {
+        let temp = TempDir::new().expect("tempdir");
+        std::fs::write(temp.path().join("nb-1-big-Statistics.db"), b"x").unwrap();
+        std::fs::write(temp.path().join("nb-1-big-TOC.txt"), b"x").unwrap();
+        assert!(!out_dir_has_data_db(temp.path()));
+    }
+
+    #[test]
+    fn direct_data_db_is_found() {
+        let temp = TempDir::new().expect("tempdir");
+        std::fs::write(temp.path().join("nb-1-big-Data.db"), b"x").unwrap();
+        assert!(out_dir_has_data_db(temp.path()));
+    }
+
+    /// The realistic case: `--out`'s writer-nested `<out>/<keyspace>/<table>/`
+    /// layout — the probe must recurse.
+    #[test]
+    fn nested_data_db_is_found() {
+        let temp = TempDir::new().expect("tempdir");
+        let nested = temp.path().join("ks").join("tbl");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("nb-1-big-Data.db"), b"x").unwrap();
+        assert!(out_dir_has_data_db(temp.path()));
     }
 }

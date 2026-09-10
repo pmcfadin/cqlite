@@ -98,22 +98,26 @@ pub(super) fn compressed_chunk_preflight(
 /// warn-and-proceed (design D4, matching `verify`): an empty bad-chunk set,
 /// no finding — the chunk-CRC signal simply is not available.
 ///
-/// # Domain assumption (roborev, issue #4196; declared gap)
+/// # Domain assumption (roborev, issue #4196) — now GUARDED, fail-closed
 ///
 /// This function chunks `Data.db` from byte 0 (file-ABSOLUTE indices —
 /// `CRC.db`'s own chunking convention), while `recover.rs`'s
 /// `chunks_for_range` maps `Index.db`-derived offsets, which are
 /// DATA-SECTION-relative (i.e. relative to `SSTableReader::calculate_header_size()`).
-/// The two agree only because that header size is `0` for the headerless
-/// `nb`/`da` layouts salvage targets; on ANY input where it is non-zero,
-/// every chunk-range intersection computed from an `Index.db` offset would
-/// be off by one chunk, silently mis-attributing `chunk-crc` losses. Not
-/// asserted or corrected here — this module has no reader instance to
-/// consult `calculate_header_size()` from — tracked as follow-up work
-/// (subtract the header size here, or fail closed when it is non-zero).
+/// The two agree only when that header size is `0` — true for the headerless
+/// `nb`/`da` layouts salvage targets today, but NOT asserted structurally
+/// anywhere else, so `header_size` (the caller's already-open reader's own
+/// `calculate_header_size()`) is threaded in and checked HERE: a non-zero
+/// value would silently mis-attribute `chunk-crc` losses by one chunk on
+/// every intersection, so it fails closed with a typed `Error::Corruption`
+/// (classified `ComponentUnreadable` by the caller) rather than compute a
+/// wrong answer. Round-3/round-4 rounds left this a declared, unasserted
+/// gap because this function had no reader instance to consult — fixed by
+/// threading the value through instead of computing it locally.
 pub(super) async fn uncompressed_chunk_preflight(
     data_path: &Path,
     crc_path: &Path,
+    header_size: usize,
 ) -> crate::Result<ChunkPreflight> {
     use crate::storage::sstable::reader::crc::CrcDb;
     use tokio::io::AsyncReadExt;
@@ -128,6 +132,18 @@ pub(super) async fn uncompressed_chunk_preflight(
             chunk_size: 0,
             data_length: 0,
         });
+    }
+    if header_size != 0 {
+        // The domain-assumption guard (see this function's doc): a non-zero
+        // header size means `CRC.db`'s file-absolute chunk indices and
+        // `Index.db`-derived data-section-relative offsets would disagree by
+        // a fixed skew this function has no way to correct blindly. Refuse
+        // rather than silently mis-map every chunk-range intersection.
+        return Err(crate::Error::corruption(format!(
+            "uncompressed chunk pre-flight cannot map Index.db-derived offsets to CRC.db's \
+             file-absolute chunking: this input's header is {header_size} bytes (expected 0 for \
+             the headerless nb/da layouts salvage targets)"
+        )));
     }
 
     let data_len = tokio::fs::metadata(data_path)

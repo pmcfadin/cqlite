@@ -68,6 +68,25 @@ pub enum LossClass {
     Truncated,
 }
 
+impl LossClass {
+    /// The serde kebab-case spelling (`"chunk-crc"`, `"decode"`,
+    /// `"key-mismatch"`, `"truncated"`) — the SAME divergence
+    /// [`RefusalReason::manifest_label`] was added to fix (roborev, issue
+    /// #4196, round-5 Low finding 5): `render_text` previously used the Rust
+    /// `Debug` spelling (`ChunkCrc`, `KeyMismatch`, ...) while the JSON
+    /// manifest emitted this kebab-case one, for the SAME value — an
+    /// operator grepping stderr for the class name the manifest documents
+    /// (spec D5's `class` field) found nothing.
+    pub fn manifest_label(self) -> &'static str {
+        match self {
+            LossClass::ChunkCrc => "chunk-crc",
+            LossClass::Decode => "decode",
+            LossClass::KeyMismatch => "key-mismatch",
+            LossClass::Truncated => "truncated",
+        }
+    }
+}
+
 /// A component-level finding observed while salvaging (design D5). The
 /// `class` string mirrors
 /// [`crate::storage::sstable::verify::VerifyErrorClass::code`] naming so the
@@ -182,10 +201,10 @@ impl SalvageReport {
             out.push_str(&format!("losses: {}\n", self.losses.len()));
             for loss in &self.losses {
                 out.push_str(&format!(
-                    "  - key={} offset={} class={:?} rows_decoded_before_failure={}: {}\n",
+                    "  - key={} offset={} class={} rows_decoded_before_failure={}: {}\n",
                     loss.key_hex,
                     loss.data_offset,
-                    loss.class,
+                    loss.class.manifest_label(),
                     loss.rows_decoded_before_failure,
                     loss.message
                 ));

@@ -191,12 +191,32 @@ async fn compressed_chunk_crc_flip_loses_exactly_the_intersecting_partitions() {
     let manifest_byte_offset: u64 = 64;
     let bad_chunk = compressed_chunk_index(&ci.chunk_offsets, manifest_byte_offset);
 
-    let clean_positions = fixture::index_partition_positions(&clean_dir);
-    let expected_lost: BTreeSet<String> = clean_positions
-        .iter()
-        .filter(|(_key, pos)| *pos / ci.chunk_length as usize == bad_chunk)
-        .map(|(key, _pos)| hex_of(key))
-        .collect();
+    let mut clean_positions = fixture::index_partition_positions(&clean_dir);
+    clean_positions.sort_by_key(|(_, pos)| *pos);
+    // Range-based expected-loss derivation (roborev, issue #4196, round-5
+    // Low finding 6): a partition is lost if its BYTE RANGE intersects the
+    // bad chunk, not merely if its START offset does — matching
+    // `chunks_for_range`'s own intersection rule (`chunks.rs`), which is
+    // what `salvage_sstable` actually applies. A start-offset-only
+    // membership test happens to agree with range intersection on THIS
+    // fixture (exactly one partition) but would silently diverge on a
+    // multi-partition fixture where a partition starts in one chunk and
+    // extends into the bad one.
+    let chunk_length = ci.chunk_length as usize;
+    let mut expected_lost: BTreeSet<String> = BTreeSet::new();
+    for i in 0..clean_positions.len() {
+        let (key, pos) = &clean_positions[i];
+        let end = clean_positions
+            .get(i + 1)
+            .map(|(_, next_pos)| *next_pos)
+            .unwrap_or(ci.data_length as usize);
+        let start_chunk = pos / chunk_length;
+        let last_byte = end.saturating_sub(1).max(*pos);
+        let end_chunk = last_byte / chunk_length;
+        if (start_chunk..=end_chunk).contains(&bad_chunk) {
+            expected_lost.insert(hex_of(key));
+        }
+    }
     assert!(
         !expected_lost.is_empty(),
         "expected-loss computation found zero intersecting partitions for chunk {bad_chunk} — \

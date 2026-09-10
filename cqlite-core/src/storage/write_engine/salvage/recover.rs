@@ -152,18 +152,23 @@ pub async fn salvage_sstable(
             )
         } else {
             let crc_path = dir.join(format!("{base}-CRC.db"));
-            let preflight =
-                match uncompressed_chunk_preflight(&reader_data_path(input), &crc_path).await {
-                    Ok(p) => p,
-                    Err(e) => {
-                        let mut report = report_skeleton(boundary_label, generation);
-                        report.refused = Some(component_unreadable_refusal(
-                            "the uncompressed chunk pre-flight (Data.db/CRC.db)",
-                            &e,
-                        ));
-                        return Ok(report);
-                    }
-                };
+            let preflight = match uncompressed_chunk_preflight(
+                &reader_data_path(input),
+                &crc_path,
+                reader.calculate_header_size(),
+            )
+            .await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    let mut report = report_skeleton(boundary_label, generation);
+                    report.refused = Some(component_unreadable_refusal(
+                        "the uncompressed chunk pre-flight (Data.db/CRC.db)",
+                        &e,
+                    ));
+                    return Ok(report);
+                }
+            };
             if let Some(f) = preflight.finding {
                 component_findings.push(f);
             }

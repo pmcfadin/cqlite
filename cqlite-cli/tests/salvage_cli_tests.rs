@@ -387,13 +387,111 @@ fn unparseable_generation_is_named_and_skipped_others_still_salvaged() {
     assert!(
         findings
             .iter()
-            .any(|f| f.get("class").and_then(|c| c.as_str())
-                == Some("SkippedUnparseableGeneration")
-                && f.get("component")
-                    .and_then(|c| c.as_str())
-                    .map(|c| c.contains("nb-abc-big-Data.db"))
-                    .unwrap_or(false)),
+            .any(
+                |f| f.get("class").and_then(|c| c.as_str()) == Some("SkippedInputGeneration")
+                    && f.get("component")
+                        .and_then(|c| c.as_str())
+                        .map(|c| c.contains("nb-abc-big-Data.db"))
+                        .unwrap_or(false)
+            ),
         "manifest component_findings must NAME the skipped file; got {findings:?}"
+    );
+}
+
+/// Roborev, issue #4196 (round-5 Medium finding 1) — a `*-Data.db` with NO
+/// sibling `*-TOC.txt` (an unpublished generation) is the SAME class of
+/// visibility gap round-4 finding 5 fixed for an unparseable generation
+/// number: named on stderr, recorded in the manifest, and forces an
+/// imperfect (exit 3) outcome — never silently `continue`d out of the run
+/// with zero trace.
+#[test]
+fn toc_less_generation_is_named_and_skipped_others_still_salvaged() {
+    let Some(root) = datasets_root() else {
+        skip_or_require(
+            "salvage_cli_tests toc-less-generation",
+            "CQLITE_DATASETS_ROOT not set",
+        );
+        return;
+    };
+    let clean_dir = root.join("sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77");
+    if !usable(&clean_dir) {
+        skip_or_require("lz4_table fixture", &format!("{clean_dir:?} not usable"));
+        return;
+    }
+    let schema = schemas_dir().join("compression-parity.cql");
+    let temp = TempDir::new().expect("tempdir");
+    let input_dir = temp.path().join("input");
+    std::fs::create_dir_all(&input_dir).unwrap();
+
+    // A real, healthy generation (nb-1-big-*), copied verbatim.
+    for entry in std::fs::read_dir(&clean_dir)
+        .expect("read clean dir")
+        .flatten()
+    {
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with("nb-1-big-") {
+            std::fs::copy(entry.path(), input_dir.join(&name)).expect("copy fixture component");
+        }
+    }
+
+    // A well-formed generation number (nb-2-big-Data.db), but with NO
+    // sibling TOC.txt at all — must be skipped, NOT silently ignored.
+    std::fs::write(input_dir.join("nb-2-big-Data.db"), b"not a real sstable").unwrap();
+
+    let out = temp.path().join("out");
+    let output = run_cli(&[
+        "--schema",
+        schema.to_str().unwrap(),
+        "salvage",
+        input_dir.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+        "--out-format",
+        "json",
+    ]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("nb-2-big-Data.db") && stderr.contains("skipping"),
+        "stderr must NAME the skipped TOC-less file; got: {stderr}"
+    );
+
+    let code = output.status.code();
+    assert_eq!(
+        code,
+        Some(3),
+        "a skipped TOC-less sibling must force exit 3 (never 0, and never 1 — it must not abort \
+         the run); got {code:?}; stdout={}\nstderr={stderr}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let manifest: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout is not JSON: {e}\n{stdout}"));
+    let entries = manifest
+        .as_array()
+        .unwrap_or_else(|| panic!("expected a JSON array (table-dir input); got {manifest}"));
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected exactly ONE manifest entry — the TOC-less generation must be excluded \
+         entirely; got {entries:?}"
+    );
+    let findings = entries[0]
+        .get("component_findings")
+        .and_then(|f| f.as_array())
+        .unwrap_or_else(|| panic!("entry missing 'component_findings' array: {}", entries[0]));
+    assert!(
+        findings
+            .iter()
+            .any(
+                |f| f.get("class").and_then(|c| c.as_str()) == Some("SkippedInputGeneration")
+                    && f.get("component")
+                        .and_then(|c| c.as_str())
+                        .map(|c| c.contains("nb-2-big-Data.db"))
+                        .unwrap_or(false)
+            ),
+        "manifest component_findings must NAME the skipped TOC-less file; got {findings:?}"
     );
 }
 

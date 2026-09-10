@@ -370,6 +370,76 @@ cqlite-cli --features write-support -- -D warnings` clean (lib AND every touched
 `issue_4196_salvage_healthy_parity` 3, `issue_4196_salvage_partition_atomicity` 1) and CLI tests
 (`salvage_cli_tests` 7) pass against the real corpus; `test_salvage_no_resync_scan.sh` passes.
 
+## Review-first round 5 (claude-code/claude-opus-5; codex/gpt-5.6-sol failed to run a THIRD time,
+## identical infra error) — all 6 findings fixed
+
+- [x] Medium (finding 1): a `*-Data.db` with no sibling `*-TOC.txt` (an unpublished generation) was
+      silently `continue`d out of discovery — same visibility gap round-4 finding 5 fixed for an
+      unparseable generation number, left open for this different cause. Fixed: routed through the
+      SAME `SkippedInput` vehicle (named on stderr, folded into `any_imperfect`, recorded in the
+      manifest). The shared `ComponentFinding.class` was renamed `SkippedUnparseableGeneration` ->
+      `SkippedInputGeneration` since it now covers two distinct causes. Test:
+      `salvage_cli_tests.rs::toc_less_generation_is_named_and_skipped_others_still_salvaged`.
+- [x] Medium (finding 2): `write_partition`/`finish` still `?`-propagate a hard `Err` (acknowledged
+      scoped-out in round 4), and `exit_after_partial_failure`'s `any_output_written` was computed
+      ONLY from gathered `reports` — invisible to a generation that hard-errored AFTER writing SOME
+      real partitions (never reaches `Ok(report)`), so such a run could exit 1/2 while `--out` in
+      fact held partial bytes, breaking those codes' documented "clean --out" guarantee. Fixed: a new
+      `out_dir_has_data_db` probe (recursive) is OR'd into the output-written decision on BOTH the
+      empty-`reports` and non-empty-`reports` branches. Unit-tested directly (`commands::salvage::tests`,
+      5 cases) since reproducing the exact mid-write hard-error trigger end-to-end needs genuine I/O
+      failure; the probe's logic is what's testable in isolation.
+- [x] Medium (finding 3): `uncompressed_chunk_preflight`'s declared, unasserted domain-mismatch gap
+      (file-absolute `CRC.db` chunking vs. data-section-relative `Index.db` offsets, previously
+      undetectable because the function had no reader instance to consult) is now GUARDED: the
+      caller's already-open reader's `calculate_header_size()` is threaded in and checked — a
+      non-zero value fails closed with a typed `Error::Corruption` (classified `ComponentUnreadable`
+      by the caller) rather than silently mis-mapping every chunk-range intersection. The existing
+      `damaged_crc_db_refuses_as_classified` and both healthy uncompressed-fixture tests (header size
+      0 for the `nb`/`da` layouts salvage targets) continue to pass, confirming the guard doesn't
+      false-trigger for the real target class.
+- [x] Medium (finding 4): PROPERLY DE-CONFOUNDED, not just re-worded. Round-4's diagnosis
+      ("re-encoding difference, not reproduced by the compressed fixture") was confounded — the
+      compressed control (`composite_key_table`) and the uncompressed case
+      (`test_basic.uncompressed_table`) differ by TABLE SHAPE too, not just compression.
+      `test_comp.uncompressed_table` has the IDENTICAL schema to `test_comp.lz4_table` (the
+      already-passing compressed byte-parity fixture) — same keyspace, same `PRIMARY KEY (pk, ck)`
+      shape, ONLY compression differs. Swapping to it: byte parity HOLDS
+      (`require_byte_parity: true`) — proving the divergence is NOT compression-related at all. The
+      TRUE isolated variable is the CLUSTERING-COLUMN COUNT: `test_basic.uncompressed_table`
+      (`id UUID PRIMARY KEY`, ZERO clustering columns) is the only fixture in the sweep that diverges,
+      and `composite_key_table` (compressed, HAS clustering columns, byte-matches) is consistent with
+      that read. Kept as a separately-named, correctly-diagnosed, content-parity-only test
+      (`salvage_of_healthy_uncompressed_zero_clustering_columns_content_only`) rather than dropped —
+      root-causing the exact writer/merger code path this shape triggers stays out of scope for this
+      fix round, but is now reported PRECISELY instead of vaguely.
+- [x] Low (finding 5): `LossClass` rendered with the Rust `Debug` spelling in `render_text`
+      (`ChunkCrc`) while the JSON manifest used serde kebab-case (`chunk-crc`) for the SAME value —
+      the identical divergence already fixed for `RefusalReason` via `manifest_label()`, missed for
+      `LossClass`. Fixed: added `LossClass::manifest_label()`, used in `render_text`.
+- [x] Low (finding 6): the R2.1 corruption-corpus test's "independently derived" expected-loss set
+      selected partitions by START-offset chunk membership, while `salvage_sstable` actually loses a
+      partition whose RANGE intersects the bad chunk (`chunks_for_range`) — the two only agreed
+      because the fixture holds exactly one partition. Fixed: the oracle now derives loss by the SAME
+      range-intersection rule (pairing each `Index.db` position with the next, or
+      `CompressionInfo.data_length` for the last), so it would survive a multi-partition fixture.
+
+A SEPARATE bug in `test_salvage_no_resync_scan.sh` was found and worked around while fixing this
+round's finding 1/2 (NOT one of round 5's 6 named findings): the guard's textual grep for
+byte-pattern-search primitives matches even inside DOC COMMENTS discussing the flagged method name,
+not just executable code — `check_strictly_ascending`'s (round-4) explanatory comment had to avoid
+even NAMING the flagged spelling. Not re-encountered this round (no new occurrences), but noting the
+pattern for whoever owns finding 7's follow-up: any future doc comment discussing these primitives by
+name will trip the same false positive.
+
+Re-verified after all 6 fixes: `cargo fmt --check` clean; `cargo clippy -p cqlite-core -p cqlite-cli
+--features write-support -- -D warnings` clean (lib AND every touched `--test` target); `cargo test
+-p cqlite-core --lib --features write-support` 4051 passed (no change); `cargo test -p cqlite-cli
+--lib --features write-support` 233 passed (was 228; +5 new `commands::salvage::tests`); all salvage
+core tests (`issue_4196_salvage_corruption_corpus` 5, `issue_4196_salvage_healthy_parity` 4,
+`issue_4196_salvage_partition_atomicity` 1) and CLI tests (`salvage_cli_tests` 8) pass against the
+real corpus; `test_salvage_no_resync_scan.sh` passes.
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree
