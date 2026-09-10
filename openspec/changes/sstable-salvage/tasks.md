@@ -909,6 +909,57 @@ passes; `features-load-bearing` 61/61.
 Per lead instruction, NO round-11 roborev re-run was performed — this fix
 round is reported to the lead for a decision on next steps.
 
+Lead authorized round 11, with a self-audit REQUIRED BEFORE the review:
+rounds 9 and 10 both found the SAME defect class (an on-disk-read
+size/count/offset used, unbounded, to size an allocation/range/loop) —
+sweep `write_engine/salvage/` and the CLI verb exhaustively for every such
+site before running roborev again.
+
+## Round 11 pre-review self-audit — every value read from an on-disk
+## component that feeds an allocation size, range, `take(n)`, seek/read
+## length, or loop bound, in `write_engine/salvage/` and the CLI verb
+
+Method: read every line of `boundaries.rs`, `chunks.rs`, `recover.rs`,
+`mod.rs`, `cqlite-cli/src/commands/salvage.rs`, and `commands/mod.rs`'s
+`dispatch_salvage`; for each `Vec::with_capacity`/`vec![..; n]`/range/
+`take(n)`/seek-or-read-length/loop-bound, traced `n`'s ultimate SOURCE back
+to either (a) a raw field parsed directly from an on-disk component with no
+independent bound, or (b) an already-materialized, memory-resident
+collection's own `.len()` (which cannot itself exceed what the file's real
+bytes could produce), or (c) a value already validated/bounds-checked
+against a trustworthy ceiling before use.
+
+| # | Site | File:fn | Value & on-disk source | Status |
+|---|------|---------|--------------------------|--------|
+| 1 | `chunks_for_range`'s `(start_chunk..=end_chunk).collect()` | `chunks.rs::chunks_for_range`, called from `recover.rs`'s per-partition loop | `entry.data_offset` / next entry's `data_offset` — raw `Index.db`/`Partitions.db` VInt/offset, no independent bound | **NEWLY BOUNDED, round 9**: `recover.rs` clamps `chunk_range_end` to the measured `data_length` before ever calling `chunks_for_range`, and short-circuits to `Truncated` when `entry.data_offset` itself is already implausible. Test: `implausible_last_offset_does_not_oom_and_classifies_truncated` (30s timeout guard). |
+| 2 | `compressed_chunk_preflight`'s returned `data_length` (consumed by site 1's clamp) | `chunks.rs::compressed_chunk_preflight` | `CompressionInfo.db`'s 8-byte `data_length` field — `CompressionInfo::validate` bounds `chunk_count`/`chunk_length`/`max_compressed_length`/offset order but never cross-checks `data_length` | **NEWLY BOUNDED, round 10**: returns `data_length.min(chunk_count * chunk_length)` — both factors already independently bounded by `CompressionInfo::validate`. Test: `implausible_compression_info_data_length_does_not_oom` (30s timeout guard). |
+| 3 | `uncompressed_chunk_preflight`'s `vec![0u8; chunk_size.max(1)]` read buffer | `chunks.rs::uncompressed_chunk_preflight` | `CRC.db`'s 4-byte `chunk_size` header | **ALREADY BOUNDED, pre-existing** (`reader/crc.rs::validate_chunk_size`): rejects any value outside `[MIN_CRC_CHUNK_SIZE=4096, MAX_CRC_CHUNK_SIZE=16MiB]` at `CrcDb::open` — `uncompressed_chunk_preflight` never reaches the `vec![]` with an unvalidated size. Not part of this PR's diff (shared CRC.db reader, issue #1396); no new test added here — its own bound is exercised by `damaged_crc_db_refuses_as_classified` (structurally too-short header) and by `crc.rs`'s own module. |
+| 4 | `decode_partition_at_offset_for_salvage`'s uncompressed-branch `vec![0u8; end - offset_usize]` | `point_compaction.rs` (shared point-read primitive `recover_one_partition` calls; outside `write_engine/salvage/`) | `end_bound` (raw next-entry offset, unclamped when passed here) or `self.compression_info`/file length for the last entry | **ALREADY BOUNDED**: `if offset_usize >= end \|\| end > section_len { return Truncated }` runs BEFORE the `vec![]` allocation — `end` can never exceed the file's own real, measured length (`section_len`) at the point of allocation, regardless of how implausible the caller's `end_bound` was. Verified structurally (read the guard ordering) and empirically (site 2's own test exercises the `None`/last-entry path of this exact function and observes `Truncated`, not OOM, confirming the guard fires). |
+| 5 | `decode_partition_at_offset_for_salvage`'s compressed-branch `pull_chunk_window` | `point_compaction.rs` (shared; outside module) | Same `end` as #4, compressed case | **ALREADY BOUNDED**: `pull_chunk_window` starts `window: Vec<u8> = Vec::new()` and grows it ONE REAL CHUNK AT A TIME via `chunk_source.chunk(chunk_index)`, breaking on `None` (EOF) — it never pre-allocates based on the requested `end` at all, so an arbitrarily large `end` just means the loop reads every real chunk and then stops (`reached_end = false`), not an allocation attempt. Verified structurally (read the function) and empirically by site 2's test (this is the exact code path `implausible_compression_info_data_length_does_not_oom` exercises). |
+| 6 | `big_boundaries`'s `entries: Vec::new()` growth | `boundaries.rs::big_boundaries` | `Index.db`'s own entry count (implicit — the loop runs once per successfully-parsed entry) | **ALREADY BOUNDED**: each iteration requires genuine forward progress through the file (`rest.len() >= remaining.len()` is refused as corrupt), so the entry count can never exceed roughly `Index.db`'s own real byte length divided by the minimum possible entry width — proportional to a resource the input already paid for, not independently inflatable by a single field. |
+| 7 | `bti_boundaries`'s `Vec::with_capacity(partitions.len())` | `boundaries.rs::bti_boundaries` | `partitions.len()` — an ALREADY-MATERIALIZED `Vec` returned by `iterate_partitions_in_bti_file` (shared BTI trie walker, outside this module) | **ALREADY BOUNDED**: capacity hint from an already-built collection's own length, not a raw field. |
+| 8 | `bti_boundaries`'s `Rows.db` inline-key slice (`rows_bytes[key_start..key_end]`) | `boundaries.rs::bti_boundaries` | `Rows.db`'s inline key-length `u16` (max 65535) | **ALREADY BOUNDED**: `if key_end > rows_bytes.len() { refuse }` checked BEFORE slicing; no separate buffer is pre-allocated from the untrusted length at all — the slice borrows directly from the already-fully-read `rows_bytes`. |
+| 9 | `iterate_partitions_in_bti_file` / `resolve_rows_db_entry_uncounted` internals | `bti::parser` (shared BTI primitive used by `verify`/the read path too; outside `write_engine/salvage/`) | `Partitions.db`/`Rows.db` trie payload bytes | **OUT OF SCOPE for this module-specific sweep** — a shared, pre-existing primitive this PR does not modify; declared explicitly rather than silently skipped. Its own hardening (or lack thereof) is a separate concern from salvage's own new code. |
+| 10 | `SSTableWriter::with_format`'s capacity-hint parameter | `recover.rs` call into `writer/mod.rs` (shared) | `boundaries.entries.len().max(1)` — an already-materialized `Vec`'s length | **ALREADY BOUNDED**: same reasoning as #7 — a real collection's length, not a raw field. |
+| 11 | `recover_one_partition`'s `Vec::with_capacity(rows.len())` / `Vec::with_capacity(entries.len())` | `recover.rs::recover_one_partition` | Already-materialized `rows: Vec<CompactionRow>` / `entries: Vec<MergeEntry>`, themselves built by parsing an ALREADY-bounded window (per #4/#5) | **ALREADY BOUNDED**: proportional to already-bounded memory the window itself holds, not independently inflatable. |
+| 12 | `classify_inputs`/`read_repair_fields`'s `Statistics.db` TOC parsing | `merge/repair_state.rs` (shared; outside module) -> `parser/repair_metadata.rs` | `Statistics.db`'s TOC `num_components` field | **ALREADY BOUNDED, pre-existing**: `repair_metadata.rs` computes `toc_size = num_components * entry_size + toc_start` with `checked_mul`/`checked_add` (overflow refused) and asserts `input.len() >= toc_size` BEFORE `Vec::with_capacity(num_components as usize)` — `num_components` is cross-validated against the file's real, already-read length before the allocation. Matches the `statistics_db_header_damage` fixture's own observed "TOC component count out of range" rejection. |
+| 13 | `classify_inputs`/`compute_baseline_min`'s other `Statistics.db` reads | `merge/repair_state.rs`, `merge/mod.rs` (shared) | `repairedAt`/`pendingRepair`/`isTransient`/min-timestamp fields | **ALREADY BOUNDED**: fixed-width scalar fields (i64/UUID/bool), never allocation-driving. |
+| 14 | CLI `discover_salvage_inputs`'s `found`/`skipped` `Vec` growth | `cqlite-cli/src/commands/salvage.rs` | Directory LISTING (`std::fs::read_dir`), not file content | **ALREADY BOUNDED**: filesystem-bounded, not derived from any on-disk component's parsed field. |
+| 15 | CLI `Vec::with_capacity(generations.len())` | `cqlite-cli/src/commands/salvage.rs::execute_salvage_command` | Already-materialized `generations: Vec<PathBuf>` (site 14's result) | **ALREADY BOUNDED**. |
+| 16 | CLI `out_dir_has_data_db`'s recursion | `cqlite-cli/src/commands/salvage.rs` | Filesystem directory structure | **ALREADY BOUNDED** — recursion depth/breadth bounded by the real directory tree, not a parsed field. |
+
+**Conclusion**: the defect class rounds 9 and 10 found had exactly TWO entry
+points into `write_engine/salvage/`'s own new code — both already fixed
+(rows 1-2). Every other site either consumes an already-materialized,
+memory-resident collection's own length (rows 6-8, 10-11, 15), is guarded by
+a check-before-allocate pattern that already existed BEFORE this PR (rows
+3-4-5, 12), is a small fixed-width scalar (row 13), is filesystem-bounded
+rather than file-content-derived (rows 14, 16), or is a shared primitive
+this PR does not modify and is declared out of scope rather than silently
+passed over (row 9). No new fix or regression test is required beyond what
+rounds 9 and 10 already added; this table is the evidence trail for that
+claim, not an assertion without one.
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree
