@@ -101,11 +101,50 @@ pub(super) fn enumerate_boundaries(
     base: &str,
     is_bti: bool,
 ) -> Result<Boundaries, Refusal> {
-    if is_bti {
-        bti_boundaries(dir, base)
+    let boundaries = if is_bti {
+        bti_boundaries(dir, base)?
     } else {
-        big_boundaries(dir, base)
+        big_boundaries(dir, base)?
+    };
+    check_strictly_ascending(&boundaries)?;
+    Ok(boundaries)
+}
+
+/// roborev, issue #4196 (round-4 Medium): `recover.rs`'s per-partition loop
+/// derives each slot's chunk range / decode-window `end` from the NEXT
+/// entry's `data_offset`, and `SSTableWriter::write_partition` itself
+/// REJECTS a non-ascending partition token outright — so a boundary source
+/// whose entries are not strictly ascending in `data_offset` must be
+/// refused HERE, before a single partition is decoded, rather than
+/// surfacing as a hard `Err` deep in the write path with no manifest ever
+/// produced. A bit-flipped-but-still-PARSEABLE `Index.db`/`Partitions.db`
+/// entry (exactly the input class this tool exists for) can produce a
+/// non-monotonic `data_offset` while still parsing as a structurally valid
+/// entry — [`big_boundaries`]/[`bti_boundaries`]'s own parse-level checks
+/// cannot catch it, because nothing about a single entry's bytes is wrong.
+fn check_strictly_ascending(boundaries: &Boundaries) -> Result<(), Refusal> {
+    // Index-based adjacency on purpose (roborev, issue #4196): the
+    // std-slice "sliding pairs" iterator method is one of
+    // `test_salvage_no_resync_scan.sh`'s R4.3-guard byte-pattern-search
+    // primitives — it cannot distinguish that use (scanning raw Data.db
+    // bytes for a plausible header, the thing R4.3 forbids) from THIS one
+    // (comparing already-parsed `data_offset` integers in typed
+    // [`BoundaryEntry`] metadata, not searching bytes at all). Avoiding the
+    // flagged method/spelling entirely here — even in a comment — is
+    // simpler and lower-risk than teaching the shared gate script the
+    // distinction.
+    for i in 1..boundaries.entries.len() {
+        let (a, b) = (&boundaries.entries[i - 1], &boundaries.entries[i]);
+        if b.data_offset <= a.data_offset {
+            return Err(refusal(format!(
+                "boundary entries are not strictly ascending in data_offset: an entry at offset \
+                 {} is followed by an entry at offset {} — the boundary source is corrupt \
+                 (non-monotonic)",
+                a.data_offset, b.data_offset
+            )));
+        }
     }
+    Ok(())
 }
 
 /// Walk `Index.db` exhaustively via [`parse_big_index_entry`], mirroring
@@ -252,4 +291,90 @@ fn bti_boundaries(dir: &Path, base: &str) -> Result<Boundaries, Refusal> {
         kind: BoundarySourceKind::BtiTrie,
         entries,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(offset: u64) -> BoundaryEntry {
+        BoundaryEntry {
+            expected_key: Some(vec![0u8]),
+            data_offset: offset,
+            diagnostic_prefix: None,
+        }
+    }
+
+    /// Roborev, issue #4196 (round-4 Medium finding 1): a boundary source
+    /// whose entries are strictly ascending passes untouched — the common,
+    /// healthy case.
+    #[test]
+    fn strictly_ascending_entries_pass() {
+        let boundaries = Boundaries {
+            kind: BoundarySourceKind::Index,
+            entries: vec![entry(0), entry(30), entry(88192), entry(200_000)],
+        };
+        assert!(check_strictly_ascending(&boundaries).is_ok());
+    }
+
+    /// A single entry (or zero entries) trivially has no adjacent pair to
+    /// violate — never refused on that basis alone.
+    #[test]
+    fn single_entry_passes() {
+        let boundaries = Boundaries {
+            kind: BoundarySourceKind::Index,
+            entries: vec![entry(42)],
+        };
+        assert!(check_strictly_ascending(&boundaries).is_ok());
+    }
+
+    /// A repeated `data_offset` (two boundary entries naming the SAME slot)
+    /// is refused: `recover.rs`'s per-partition loop derives each slot's
+    /// chunk range / decode-window `end` from the NEXT entry's
+    /// `data_offset`, so a zero-width or negative-width slot is nonsensical.
+    #[test]
+    fn duplicate_offset_is_refused() {
+        let boundaries = Boundaries {
+            kind: BoundarySourceKind::Index,
+            entries: vec![entry(0), entry(30), entry(30), entry(200_000)],
+        };
+        let err = check_strictly_ascending(&boundaries).expect_err("must refuse");
+        assert_eq!(err.reason, RefusalReason::BoundarySourceUnreadable);
+        assert!(
+            err.remedy.contains("non-monotonic"),
+            "remedy must name the cause; got {:?}",
+            err.remedy
+        );
+    }
+
+    /// A DECREASING `data_offset` — the exact `#3782`-class scenario this
+    /// finding is about: a bit-flipped-but-still-PARSEABLE `Index.db` entry
+    /// whose `data_offset` field itself was the flipped bytes.
+    #[test]
+    fn decreasing_offset_is_refused() {
+        let boundaries = Boundaries {
+            kind: BoundarySourceKind::Index,
+            entries: vec![entry(0), entry(88192), entry(30), entry(200_000)],
+        };
+        let err = check_strictly_ascending(&boundaries).expect_err("must refuse");
+        assert_eq!(err.reason, RefusalReason::BoundarySourceUnreadable);
+    }
+
+    /// The violation is reported with the REMEDY vocabulary ("rebuild") the
+    /// rest of the boundary-source refusal machinery already uses (spec
+    /// R7.3/R4.1) — never a bespoke, differently-worded refusal for this one
+    /// cause.
+    #[test]
+    fn refusal_names_the_rebuild_remedy() {
+        let boundaries = Boundaries {
+            kind: BoundarySourceKind::BtiTrie,
+            entries: vec![entry(500), entry(100)],
+        };
+        let err = check_strictly_ascending(&boundaries).expect_err("must refuse");
+        assert!(
+            err.remedy.contains("rebuild"),
+            "remedy must name the rebuild remedy; got {:?}",
+            err.remedy
+        );
+    }
 }

@@ -446,3 +446,101 @@ async fn damaged_statistics_db_refuses_as_classified() {
         "[issue_4196] statistics_db_header_damage: salvage refused as expected ({report:?})."
     );
 }
+
+/// Roborev, issue #4196 (round-4 Medium finding 3) — the SAME
+/// `ComponentUnreadable` classification for a corrupt `CRC.db` (the
+/// uncompressed sibling of `CompressionInfo.db`/`Statistics.db` above): the
+/// committed corruption corpus has no dedicated `CRC.db`-corruption fixture
+/// (`digest_crc32_mismatch` is a DIFFERENT component, the whole-file
+/// `Digest.crc32`, not the per-chunk `CRC.db` sidecar `uncompressed_chunk_preflight`
+/// reads), so this test synthesizes the corruption itself: a healthy
+/// `test_basic.uncompressed_table` generation copied verbatim except its
+/// `CRC.db`, replaced with 2 garbage bytes — `CrcDb::open` rejects anything
+/// under its mandatory 4-byte chunk-size header with a typed
+/// `Error::Corruption`, guaranteed regardless of chunk-size/content.
+#[tokio::test]
+async fn damaged_crc_db_refuses_as_classified() {
+    const KEYSPACE: &str = "test_basic";
+    const TABLE_NAME: &str = "uncompressed_table";
+    let Some(root) = datasets_root::sstables_root_for_table(KEYSPACE, TABLE_NAME) else {
+        skip_or_require(
+            "uncompressed_table fixture",
+            &format!(
+                "no candidate root carries {KEYSPACE}.{TABLE_NAME}; {}",
+                datasets_root::describe_search(KEYSPACE, TABLE_NAME)
+            ),
+        );
+        return;
+    };
+    let fixture_dir = datasets_root::table_generation_dirs(&root, KEYSPACE, TABLE_NAME)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("{KEYSPACE}.{TABLE_NAME}: no usable generation directory"));
+
+    let schema_path = datasets_root::schema_path("basic-types.cql").expect("committed CQL schema");
+    let cql = std::fs::read_to_string(schema_path).expect("read schema");
+    let start = cql
+        .find(&format!("CREATE TABLE IF NOT EXISTS {TABLE_NAME}"))
+        .expect("CREATE TABLE statement");
+    let end = start + cql[start..].find(';').expect("statement terminator") + 1;
+    let mut schema = cqlite_core::schema::cql_parser::parse_cql_schema(&cql[start..end])
+        .expect("parse CREATE TABLE");
+    schema.keyspace = KEYSPACE.to_string();
+
+    let temp = TempDir::new().expect("tempdir");
+    let corrupt_dir = temp.path().join("corrupt_input");
+    std::fs::create_dir_all(&corrupt_dir).expect("create corrupt input dir");
+    for entry in std::fs::read_dir(&fixture_dir)
+        .expect("read fixture dir")
+        .flatten()
+    {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.ends_with("-CRC.db") {
+            // The corruption under test: too short for CrcDb::open's
+            // mandatory 4-byte chunk-size header.
+            std::fs::write(corrupt_dir.join(&name), [0xff, 0x00]).expect("write corrupt CRC.db");
+        } else if !name_str.ends_with(".jsonl") && !name_str.ends_with("Statistics.db.txt") {
+            std::fs::copy(entry.path(), corrupt_dir.join(&name)).expect("copy fixture component");
+        }
+    }
+    let corrupt_data_db = single_data_db(&corrupt_dir);
+
+    let out_root = temp.path().join("out");
+    let report = salvage_sstable(
+        &corrupt_data_db,
+        &out_root,
+        &schema,
+        SalvageOptions::default(),
+    )
+    .await
+    .unwrap_or_else(|e| {
+        panic!(
+            "salvage must not hard-error on a damaged CRC.db (a classified Refusal, not an \
+                 Err): {e:#}"
+        )
+    });
+    let refusal = report.refused.as_ref().unwrap_or_else(|| {
+        panic!("a damaged CRC.db must still produce a refusal; report={report:?}")
+    });
+    assert_eq!(
+        refusal.reason,
+        RefusalReason::ComponentUnreadable,
+        "expected ComponentUnreadable; got {:?}",
+        refusal.reason
+    );
+    assert!(
+        !refusal.remedy.is_empty(),
+        "remedy must be named, not empty"
+    );
+    assert!(
+        !out_root.exists()
+            || std::fs::read_dir(&out_root)
+                .map(|rd| rd
+                    .flatten()
+                    .all(|e| !e.file_name().to_string_lossy().ends_with("-Data.db")))
+                .unwrap_or(true),
+        "--out must contain no Data.db after a refusal"
+    );
+    eprintln!("[issue_4196] damaged CRC.db: salvage refused as expected ({report:?}).");
+}

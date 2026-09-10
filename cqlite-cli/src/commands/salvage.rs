@@ -9,7 +9,9 @@
 
 use std::path::{Path, PathBuf};
 
-use cqlite_core::storage::write_engine::salvage::{salvage_sstable, SalvageOptions, SalvageReport};
+use cqlite_core::storage::write_engine::salvage::{
+    salvage_sstable, ComponentFinding, SalvageOptions, SalvageReport,
+};
 
 use crate::cli_types::{SalvageArgs, SalvageOutFormatArg};
 use crate::commands::write::load_compaction_table_schema;
@@ -28,23 +30,31 @@ use crate::commands::write::load_compaction_table_schema;
 /// `--schema` file would have exited `3` (salvage's OWN "output written with
 /// losses" code) with no output and no manifest ever having existed. Every
 /// fallible step is therefore matched explicitly here, never `?`-propagated:
-/// * `0` — every partition, across every generation, recovered.
+/// * `0` — every partition, across every generation, recovered, AND every
+///   published generation was actually attempted (a discovery-level SKIP —
+///   an unparseable generation number, see `discover_salvage_inputs` — rules
+///   this out even when every ATTEMPTED generation was itself perfect;
+///   roborev, issue #4196, round-4 Medium finding 5).
 /// * `3` — SOME `Data.db` was written (at least one generation produced
 ///   output), but not every partition of every generation was recovered —
-///   either genuine losses, or another generation refused outright. Check
-///   the manifest for which generations wrote output: a table-dir input
-///   salvages each generation SEPARATELY (D1), so "one generation refused"
-///   must not read as "nothing was produced" when a sibling succeeded. Also
-///   reached by a POST-WRITE failure (a later generation's `salvage_sstable`
-///   hard error, or a failed `--manifest` write) once ANY earlier generation
-///   already wrote real output (roborev, issue #4196, batched finding a) —
-///   see [`exit_after_partial_failure`]: exit `1` there would misreport
-///   "nothing written" when `--out` in fact holds a complete generation set.
-/// * `2` — EVERY generation refused: no `Data.db` was written anywhere
-///   under `--out`.
+///   genuine losses, another generation refused outright, or a published
+///   generation was skipped at discovery. Check the manifest for which
+///   generations wrote output: a table-dir input salvages each generation
+///   SEPARATELY (D1), so "one generation refused" must not read as "nothing
+///   was produced" when a sibling succeeded. Also reached by a POST-WRITE
+///   failure (a later generation's `salvage_sstable` hard error, or a failed
+///   `--manifest` write) once ANY earlier generation already wrote real
+///   output (roborev, issue #4196, batched finding a) — see
+///   [`exit_after_partial_failure`]: exit `1` there would misreport "nothing
+///   written" when `--out` in fact holds a complete generation set.
+/// * `2` — EVERY generation refused: no `Data.db` was written anywhere under
+///   `--out`. Also reached by a post-write failure once every GATHERED
+///   report (before the failure) was itself a refusal — its manifest is
+///   still written (round-4 Low finding 6): distinct from `1`, which is
+///   reserved for when NOTHING was gathered at all.
 /// * `1` — usage error: the cause is printed to stderr and the process
 ///   exits directly from the failing step, OR a post-write failure struck
-///   before any generation had written real output.
+///   before ANY report — refused or otherwise — had been gathered.
 pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageArgs) {
     let Some(schema_path) = schema_path else {
         eprintln!("cqlite salvage: --schema is required (the global --schema flag)");
@@ -129,6 +139,27 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
         }
     }
 
+    // roborev, issue #4196 (round-4 Medium, finding 5): a discovery-level
+    // skip (an unparseable generation, see `discover_salvage_inputs`'s doc)
+    // must be VISIBLE in the manifest — a consumer reading only the JSON
+    // must be able to see that a published generation was never attempted,
+    // not just an operator reading stderr. Recorded via the EXISTING
+    // `component_findings` vehicle (design D5 already declares its shape
+    // generic: `{class, component, detail}`), on EVERY report in this run —
+    // it is a table-dir-level fact, not one specific generation's.
+    for skipped in &discovery.skipped {
+        for report in &mut reports {
+            report.component_findings.push(ComponentFinding {
+                class: "SkippedUnparseableGeneration".to_string(),
+                component: skipped.path.display().to_string(),
+                detail: format!(
+                    "a published *-Data.db under the same table dir was never salvaged: {}",
+                    skipped.reason
+                ),
+            });
+        }
+    }
+
     if let Err(e) = write_manifest_file(&reports, args, is_table_dir) {
         eprintln!(
             "cqlite salvage: failed to write manifest to {}: {e:#}",
@@ -146,9 +177,15 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
     // separately (D1), so one refused generation must not discard a
     // sibling's real output from a script branching on the exit code.
     let all_refused = !reports.is_empty() && reports.iter().all(|r| r.refused.is_some());
+    // roborev, issue #4196 (round-4 Medium, finding 5): a run where every
+    // ATTEMPTED generation recovered cleanly but a SIBLING was never
+    // attempted (an unparseable-generation skip) is NOT "every partition,
+    // across every generation, recovered" — the documented exit-0 contract
+    // above `execute_salvage_command` — so it must NOT read as exit 0.
     let any_imperfect = reports
         .iter()
-        .any(|r| r.refused.is_some() || !r.losses.is_empty());
+        .any(|r| r.refused.is_some() || !r.losses.is_empty())
+        || !discovery.skipped.is_empty();
     if all_refused {
         std::process::exit(2);
     }
@@ -159,29 +196,39 @@ pub async fn execute_salvage_command(schema_path: Option<&Path>, args: &SalvageA
 
 /// A post-write failure step — a LATER generation's `salvage_sstable` error,
 /// or a failed `--manifest` write — MUST NOT report exit `1` ("nothing
-/// written") when an EARLIER generation already wrote a real `Data.db`.
-/// R7/D3 reserve exit `1` for a genuine usage error where nothing was
-/// produced; once any generation actually wrote output, this run's outcome
-/// is "imperfect", not "nothing happened" — exit `3` (roborev, issue #4196,
-/// batched finding a). `reports` gathered so far (from the generations that
-/// DID complete before the failure) is rendered/written best-effort before
-/// exiting, so the operator still gets a manifest for those.
+/// written") when an EARLIER generation already wrote a real `Data.db`, OR
+/// when an earlier generation produced a manifest-worthy REFUSAL (its own
+/// legitimate exit-2 outcome on its own — design D3 — which still deserves a
+/// manifest, unlike a genuine "nothing gathered at all" usage error). R7/D3
+/// reserve exit `1` for that LAST case only. `reports` gathered so far (from
+/// the generations that DID complete before the failure) is rendered/written
+/// best-effort before exiting, so the operator still gets a manifest for
+/// them (roborev, issue #4196, batched finding a + round-4 Low finding 6,
+/// which caught the `reports` non-empty but ALL-refused case originally
+/// falling through to the empty-`reports` exit-1 branch).
 fn exit_after_partial_failure(
     reports: &[SalvageReport],
     args: &SalvageArgs,
     is_table_dir: bool,
 ) -> ! {
+    if reports.is_empty() {
+        // Genuinely nothing gathered — no manifest exists to write.
+        std::process::exit(1);
+    }
+    // Best-effort: the caller already reported the failure that brought us
+    // here to stderr; a second failure writing/rendering what WAS gathered
+    // is not separately fatal — `reports` being non-empty already means
+    // there is something worth a manifest, either way below.
+    let _ = write_manifest_file(reports, args, is_table_dir);
+    render_console(reports, args, is_table_dir);
     let any_output_written = reports.iter().any(|r| r.refused.is_none());
     if any_output_written {
-        // Best-effort: the caller already reported the failure that brought
-        // us here to stderr; a second failure writing/rendering what WAS
-        // gathered is not separately fatal — exit 3 either way, since real
-        // output already exists on disk.
-        let _ = write_manifest_file(reports, args, is_table_dir);
-        render_console(reports, args, is_table_dir);
         std::process::exit(3);
     }
-    std::process::exit(1);
+    // Every gathered report refused (no `Data.db` anywhere) — mirrors the
+    // terminal `all_refused` arm's own exit 2, reached here instead because
+    // a LATER step hard-failed before that arm ran.
+    std::process::exit(2);
 }
 
 /// A `*-Data.db` (with a publishing `*-TOC.txt` sibling) that

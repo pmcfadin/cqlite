@@ -121,11 +121,27 @@ pub async fn salvage_sstable(
         }
     };
 
+    // roborev, issue #4196 (round-4 Medium): the chunk pre-flight reads
+    // `Data.db` (compressed and uncompressed) and, for the uncompressed
+    // branch, `CRC.db` — a component failure HERE (a corrupt `CRC.db` header,
+    // an oversized sidecar, or any I/O error opening `Data.db` for the
+    // pre-flight) is the SAME defect class the `open_reader`/`classify_inputs`
+    // refusal-classification above fixed: it must not `?`-propagate a hard
+    // `Err` that skips the manifest entirely.
     let mut component_findings: Vec<ComponentFinding> = Vec::new();
     let (bad_chunks, chunk_size, data_length): (std::collections::BTreeSet<u64>, u64, u64) =
         if let Some(ci) = reader.compression_info.as_deref() {
-            let preflight =
-                compressed_chunk_preflight(&reader_data_path(input), ci).map_err(Error::Io)?;
+            let preflight = match compressed_chunk_preflight(&reader_data_path(input), ci) {
+                Ok(p) => p,
+                Err(e) => {
+                    let mut report = report_skeleton(boundary_label, generation);
+                    report.refused = Some(component_unreadable_refusal(
+                        "the compressed chunk pre-flight (Data.db)",
+                        &Error::Io(e),
+                    ));
+                    return Ok(report);
+                }
+            };
             if let Some(f) = preflight.finding {
                 component_findings.push(f);
             }
@@ -137,7 +153,17 @@ pub async fn salvage_sstable(
         } else {
             let crc_path = dir.join(format!("{base}-CRC.db"));
             let preflight =
-                uncompressed_chunk_preflight(&reader_data_path(input), &crc_path).await?;
+                match uncompressed_chunk_preflight(&reader_data_path(input), &crc_path).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let mut report = report_skeleton(boundary_label, generation);
+                        report.refused = Some(component_unreadable_refusal(
+                            "the uncompressed chunk pre-flight (Data.db/CRC.db)",
+                            &e,
+                        ));
+                        return Ok(report);
+                    }
+                };
             if let Some(f) = preflight.finding {
                 component_findings.push(f);
             }

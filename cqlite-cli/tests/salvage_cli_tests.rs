@@ -214,6 +214,85 @@ fn post_write_manifest_failure_with_prior_output_exits_3_not_1() {
     );
 }
 
+/// Roborev, issue #4196 (round-4 Low finding 6) — a post-write failure
+/// (here, again an unwritable `--manifest` path) with EVERY gathered report
+/// a refusal (no `Data.db` written by ANY generation) must exit `2` — its
+/// own legitimate "every generation refused" code, which the terminal
+/// `all_refused` arm reaches on its own without a manifest-write failure —
+/// and STILL write the manifest, rather than falling into exit `1`
+/// ("nothing gathered at all", reserved for a genuinely empty `reports`).
+/// Two generations of `index_db_bit_flip_big` (both refuse:
+/// `boundary-source-unreadable`) plus the same directory-at-manifest-path
+/// trick as the exit-3 case above.
+#[test]
+fn post_write_manifest_failure_with_all_refused_exits_2_not_1() {
+    let Some(root) = datasets_root() else {
+        skip_or_require(
+            "salvage_cli_tests post-write-failure-all-refused",
+            "CQLITE_DATASETS_ROOT not set",
+        );
+        return;
+    };
+    let corrupt_dir = root.join("corruption/test_comp_corrupt/index_db_bit_flip_big");
+    if !usable(&corrupt_dir) {
+        skip_or_require(
+            "index_db_bit_flip_big fixture",
+            &format!("{corrupt_dir:?} not usable"),
+        );
+        return;
+    }
+    let schema = schemas_dir().join("compression-parity.cql");
+    let temp = TempDir::new().expect("tempdir");
+    let input_dir = temp.path().join("input");
+    std::fs::create_dir_all(&input_dir).unwrap();
+
+    // Two generations, both copies of the same corrupt (refusing) fixture.
+    for gen_label in ["nb-1-big-", "nb-2-big-"] {
+        for entry in std::fs::read_dir(&corrupt_dir)
+            .expect("read corrupt dir")
+            .flatten()
+        {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if let Some(suffix) = name_str.strip_prefix("nb-1-big-") {
+                std::fs::copy(entry.path(), input_dir.join(format!("{gen_label}{suffix}")))
+                    .expect("copy fixture component");
+            }
+        }
+    }
+
+    let out = temp.path().join("out");
+    let manifest_path = temp.path().join("m.json");
+    std::fs::create_dir_all(&manifest_path).expect("create manifest-path directory");
+
+    let output = run_cli(&[
+        "--schema",
+        schema.to_str().unwrap(),
+        "salvage",
+        input_dir.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+        "--manifest",
+        manifest_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a post-write manifest failure with EVERY gathered report refused must exit 2, not 1; \
+         stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !out.exists()
+            || std::fs::read_dir(&out)
+                .map(|rd| walk_no_data_db(&out, rd))
+                .unwrap_or(true),
+        "--out must contain no Data.db when every generation refused"
+    );
+}
+
 /// Roborev, issue #4196 (batched finding h) — a `*-Data.db`/`*-TOC.txt` pair
 /// whose GENERATION NUMBER cannot be parsed out of its filename is a NAMED,
 /// SKIPPED discovery entry, never silently folded to generation `0`; the run
@@ -273,15 +352,17 @@ fn unparseable_generation_is_named_and_skipped_others_still_salvaged() {
         "stderr must NAME the skipped malformed-generation file; got: {stderr}"
     );
 
-    // The real generation's own outcome (0 = fully recovered, 3 = written
-    // with losses) is unaffected by the malformed sibling — it must NEVER
-    // read as 1 ("nothing written"/usage error) merely because a sibling
-    // filename was malformed.
+    // roborev, issue #4196 (round-4 Medium finding 5): a skipped, published
+    // generation is an IMPERFECT outcome — the real generation on its own
+    // recovers cleanly (would otherwise be exit 0), but a sibling was never
+    // attempted, so this run must exit 3, never 0 (and never 1 — a
+    // malformed sibling must not abort the run either).
     let code = output.status.code();
-    assert!(
-        code == Some(0) || code == Some(3),
-        "expected exit 0 or 3 (the real generation's own outcome), never 1 — a malformed \
-         sibling must not abort the run; got {code:?}; stdout={}\nstderr={stderr}",
+    assert_eq!(
+        code,
+        Some(3),
+        "a skipped sibling generation must force exit 3 (never 0, and never 1 — a malformed \
+         sibling must not abort the run); got {code:?}; stdout={}\nstderr={stderr}",
         String::from_utf8_lossy(&output.stdout)
     );
 
@@ -296,6 +377,23 @@ fn unparseable_generation_is_named_and_skipped_others_still_salvaged() {
         1,
         "expected exactly ONE manifest entry — the malformed generation must be excluded \
          entirely, never reported as a fake generation 0; got {entries:?}"
+    );
+    // The skip must be VISIBLE in the manifest itself, not just on stderr —
+    // a consumer reading only the JSON must be able to see it.
+    let findings = entries[0]
+        .get("component_findings")
+        .and_then(|f| f.as_array())
+        .unwrap_or_else(|| panic!("entry missing 'component_findings' array: {}", entries[0]));
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.get("class").and_then(|c| c.as_str())
+                == Some("SkippedUnparseableGeneration")
+                && f.get("component")
+                    .and_then(|c| c.as_str())
+                    .map(|c| c.contains("nb-abc-big-Data.db"))
+                    .unwrap_or(false)),
+        "manifest component_findings must NAME the skipped file; got {findings:?}"
     );
 }
 
