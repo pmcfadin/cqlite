@@ -278,11 +278,18 @@ write-support = ["state_machine", "cqlite-core/write-support"]
 # (the core module vanishes, the CLI module referencing it does not).
 #
 # SUBTRACTIVE at this crate's public surface (roborev, issue #4196, round-13
-# Low finding): enabling this feature REMOVES the `salvage` verb rather than
-# adding anything — `cargo build -p cqlite-cli --all-features` therefore ships
-# a binary with NO `salvage` command (`dispatch_salvage` returns a "not
-# built" error naming this feature) and with core's `SinglePartitionCompaction`
-# / point-read path compiled out. It also turns the five `issue_4196_salvage_*`
+# Low finding, reworded round-16 — the round-13 wording overclaimed): enabling
+# this feature does NOT remove the `salvage` verb from the CLI's surface —
+# `Commands::Salvage(SalvageArgs)` is declared unconditionally in
+# `cli_types.rs`, so the verb stays PARSED and ADVERTISED in `--help` under
+# `--all-features` too. What it removes is only the HANDLER module
+# (`commands::salvage`, gated `not(feature = "tombstones")` in lockstep with
+# the core module it wraps): `cargo build -p cqlite-cli --all-features`
+# therefore ships a binary that still lists `salvage` in `--help` but FAILS AT
+# RUNTIME with a "not built" error naming this feature the moment it is
+# invoked (`dispatch_salvage`), with core's `SinglePartitionCompaction` /
+# point-read path compiled out underneath it. It also turns the five
+# `issue_4196_salvage_*`
 # / `salvage_cli_tests` test targets (each `#![cfg(all(write-support,
 # not(tombstones)))]`) into zero-test binaries under any `--all-features`
 # lane. No local gate component currently runs `cqlite-cli --all-features`

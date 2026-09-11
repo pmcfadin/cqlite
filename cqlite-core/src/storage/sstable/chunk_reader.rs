@@ -110,33 +110,29 @@ impl<R: Read + Seek> ChunkReader<R> {
         }
 
         // roborev, issue #4196, round-15 Medium finding 2 (an Opus
-        // whole-module audit): `compressed_chunk_size` derives the LAST
-        // chunk's size as `total_file_size - start_offset` (`compression_info.rs`)
-        // — a `chunk_offsets` table corrupted SHORT (e.g. to a single entry
-        // while `Data.db` really holds thousands of chunks) makes the last
-        // (only) chunk's declared size the WHOLE REMAINING FILE, and
-        // `offset + size <= total_size` (the round-11 plausibility guard,
-        // `salvage/chunks.rs`) is satisfied BY CONSTRUCTION for exactly this
-        // shape — `size` is DERIVED from `total_size`, so it can never
-        // exceed it. Bound the allocation itself against the ONE
-        // authoritative per-chunk ceiling Cassandra's own writer never
-        // exceeds: `CompressedSequentialWriter` stores a chunk UNCOMPRESSED
-        // (at exactly `chunk_length` bytes) rather than emit a compressed
-        // payload larger than its declared uncompressed `chunk_length` — so
-        // a compressed chunk record legitimately wider than
-        // `chunk_length + 4` (the CRC trailer) can only be a corrupt
-        // `CompressionInfo.db`, never real Cassandra output. Applies to
-        // EVERY caller (`verify.rs`'s full-mode chunk walk gets the SAME
-        // protection, not just salvage's pre-flight).
-        let max_plausible_total_chunk_size = self.compression_info.chunk_length as u64 + 4;
+        // whole-module audit, fix CORRECTED in round 16 — the original fix
+        // was itself a Medium finding 1: see `max_plausible_total_chunk_size`'s
+        // own doc below for why a bare `chunk_length + 4` ceiling rejects
+        // REAL Cassandra-written data): `compressed_chunk_size` derives the
+        // LAST chunk's size as `total_file_size - start_offset`
+        // (`compression_info.rs`) — a `chunk_offsets` table corrupted SHORT
+        // (e.g. to a single entry while `Data.db` really holds thousands of
+        // chunks) makes the last (only) chunk's declared size the WHOLE
+        // REMAINING FILE, and `offset + size <= total_size` (the round-11
+        // plausibility guard, `salvage/chunks.rs`) is satisfied BY
+        // CONSTRUCTION for exactly this shape — `size` is DERIVED from
+        // `total_size`, so it can never exceed it. Bound the allocation
+        // itself against the largest a REAL chunk record can legitimately
+        // be, instead.
+        let max_plausible_total_chunk_size = max_plausible_total_chunk_size(&self.compression_info);
         if total_chunk_size > max_plausible_total_chunk_size {
             return Err(Error::InvalidFormat(format!(
                 "Chunk {chunk_index} declares a {total_chunk_size}-byte record — exceeds the \
-                 {max_plausible_total_chunk_size}-byte maximum a real chunk_length={} \
-                 CompressionInfo.db can produce (chunk_length + 4-byte CRC); refusing to \
-                 allocate an unbounded chunk buffer (this is a CompressionInfo.db corruption, \
-                 not a Data.db one)",
-                self.compression_info.chunk_length
+                 {max_plausible_total_chunk_size}-byte maximum a real {}, chunk_length={} \
+                 CompressionInfo.db can produce (worst-case compressed size + 4-byte CRC); \
+                 refusing to allocate an unbounded chunk buffer (this is a CompressionInfo.db \
+                 corruption, not a Data.db one)",
+                self.compression_info.algorithm, self.compression_info.chunk_length
             )));
         }
 
@@ -218,6 +214,69 @@ impl<R: Read + Seek> ChunkReader<R> {
     pub fn chunk_length(&self) -> u32 {
         self.compression_info.chunk_length
     }
+}
+
+/// The largest TOTAL chunk record size (compressed payload + the 4-byte
+/// trailing CRC) `read_chunk` will accept for one chunk of `info`, given
+/// what a REAL Cassandra 5.0 writer can legitimately produce (roborev,
+/// issue #4196, round 16 — corrects round 15's Medium finding 2 fix, which
+/// was ITSELF a real defect: a bare `chunk_length + 4` ceiling rejects
+/// legitimate Cassandra-written data).
+///
+/// Cassandra's `CompressionParams.java` records `maxCompressedLength` from
+/// `min_compress_ratio` — **`i32::MAX` (the `2^31 - 1` sentinel) at the
+/// DEFAULT `min_compress_ratio = 0`**, meaning `CompressedSequentialWriter`
+/// does NOT fall back to storing a chunk uncompressed just because the
+/// compressor's output happens to exceed `chunk_length`; only a
+/// NON-DEFAULT, explicitly-configured `min_compress_ratio` makes
+/// `max_compressed_length` a real, smaller bound. At the default, LZ4 and
+/// Snappy BOTH legitimately expand incompressible input past
+/// `chunk_length` by their own documented worst-case bounds — confirmed
+/// against a real, committed Cassandra-written fixture
+/// (`test_basic.simple_table`, Snappy, `chunk_length=16384`,
+/// `max_compressed_length=i32::MAX`): 7 of its 41 real chunks are
+/// 16394 bytes, 6 bytes over the ORIGINAL (incorrect) `chunk_length + 4`
+/// bound.
+///
+/// So the ceiling is: `max_compressed_length + 4` when that field is a
+/// real, configured bound (`< i32::MAX`); otherwise the COMPRESSOR's own
+/// documented worst-case output size for `chunk_length` input bytes, per
+/// algorithm, plus the 4-byte CRC. An unrecognized algorithm name (a
+/// format this crate does not otherwise support decoding either) falls
+/// back to a generous `2x + 4096` margin — comfortably covers every
+/// standard compressor's worst case, while still turning a
+/// `chunk_offsets` table corrupted to claim "the whole remaining file" (the
+/// ACTUAL defect this guard exists for) into a refusal rather than an
+/// unbounded allocation.
+pub(crate) fn max_plausible_total_chunk_size(info: &CompressionInfo) -> u64 {
+    const CRC_TRAILER: u64 = 4;
+    let chunk_length = info.chunk_length as u64;
+    if info.max_compressed_length != i32::MAX as u32 {
+        return (info.max_compressed_length as u64).saturating_add(CRC_TRAILER);
+    }
+    let worst_case_payload = match info.algorithm.as_str() {
+        // LZ4_compressBound(n) = n + n/255 + 16 (lz4.h).
+        "LZ4Compressor" => chunk_length + chunk_length / 255 + 16,
+        // snappy::MaxCompressedLength(n) = 32 + n + n/6 (snappy.cc).
+        "SnappyCompressor" => 32 + chunk_length + chunk_length / 6,
+        // zlib's compressBound(n) = n + (n>>12) + (n>>14) + (n>>25) + 13.
+        "DeflateCompressor" => {
+            chunk_length + (chunk_length >> 12) + (chunk_length >> 14) + (chunk_length >> 25) + 13
+        }
+        // ZSTD_compressBound(n) ~= n + (n>>8) + 64, PLUS a small-input
+        // margin below 128 KiB (zstd.h) — this crate's chunk_length is
+        // always well under that, so the margin term always applies.
+        "ZstdCompressor" => {
+            let small_input_margin = if chunk_length < 128 * 1024 {
+                (128 * 1024 - chunk_length) >> 11
+            } else {
+                0
+            };
+            chunk_length + (chunk_length >> 8) + small_input_margin + 64
+        }
+        _ => chunk_length.saturating_mul(2).saturating_add(4096),
+    };
+    worst_case_payload.saturating_add(CRC_TRAILER)
 }
 
 #[cfg(test)]

@@ -1826,6 +1826,103 @@ finding 2's fix does not reject any legitimate real chunk;
 `issue_4196_salvage_round15_bounds` target, registered next to its
 siblings (#3522).
 
+## Round 16, roborev job 3391 — 1 High + 1 Low found against HEAD `8d3a8158b`;
+## both fixed
+
+Roborev round 16 (`bash scripts/flow/roborev-review.sh --agent claude-code
+--model claude-opus-5`) reviewed round 15's own fix and found that fix was
+itself defective — a real regression this PR would have shipped had round 15
+been the last round.
+
+**High** — `cqlite-core/src/storage/sstable/chunk_reader.rs:131-141`: round
+15's Medium-finding-2 fix bounded every chunk record to
+`chunk_length + 4` bytes, justified as "`CompressedSequentialWriter` stores a
+chunk UNCOMPRESSED rather than emit a compressed payload larger than its
+declared `chunk_length`". That justification holds ONLY when
+`max_compressed_length <= chunk_length`, i.e. a non-default
+`min_compress_ratio`. At Cassandra's DEFAULT (`min_compress_ratio = 0` =>
+`maxCompressedLength = Integer.MAX_VALUE`, recorded in this repo's own
+`docs/sstable-guide-audit/facts-B5.md:52-53`), the writer emits the full
+expanded buffer, and LZ4/Snappy both legitimately expand incompressible input
+past `chunk_length`. The finding named a real, committed, Cassandra-written
+fixture that already violates the round-15 bound:
+`test_basic.simple_table` (Snappy, `chunk_length=16384`,
+`max_compressed_length=2147483647`), 7 of whose 41 chunks (indices 2, 6, 17,
+23, 24, 33, 39) are 16394-byte on-disk records — 6 bytes over the
+`chunk_length + 4 = 16388` ceiling. Independently re-derived straight from
+the binary `CompressionInfo.db`/`Data.db` bytes (a throwaway Python script
+parsing the documented `writeUTF`/`writeInt`/`writeLong` layout) BEFORE
+touching any code — confirmed algo/chunk_length/max_compressed_length/
+chunk_count/data_length exactly as the finding states, and all 7 chunk
+indices/sizes exactly as named. `cqlite verify --mode full` on this fixture,
+and `cqlite salvage` on any Snappy/LZ4 table with an incompressible chunk,
+would both have started failing on undamaged data — a recovery tool
+mis-classifying healthy partitions as lost.
+
+Fix: replaced the flat `chunk_length + 4` ceiling with
+`max_plausible_total_chunk_size(&CompressionInfo) -> u64`
+(`chunk_reader.rs`, free function): when `max_compressed_length` is a REAL
+configured bound (`!= i32::MAX`), use `max_compressed_length + 4`; otherwise
+compute the COMPRESSOR's own documented worst-case output size for
+`chunk_length` input bytes (LZ4 `len + len/255 + 16` from `lz4.h`'s
+`LZ4_compressBound`; Snappy `32 + len + len/6` from `snappy.cc`'s
+`MaxCompressedLength`; Deflate `len + (len>>12) + (len>>14) + (len>>25) + 13`
+from zlib's `compressBound`; Zstd `len + (len>>8) + 64` plus a small-input
+margin below 128 KiB from `zstd.h`'s `ZSTD_compressBound`) plus the 4-byte
+CRC trailer. An unrecognized algorithm name (a format this crate cannot
+decode either) falls back to a generous `2x + 4096` margin rather than
+guessing — still turns the ACTUAL defect this guard exists for (a
+`chunk_offsets` table corrupted to claim "the whole remaining file" as one
+chunk) into a refusal, without rejecting any real compressor's legitimate
+output. All arithmetic uses `saturating_add`/`saturating_mul` (no overflow
+panic on adversarial `chunk_length`/`max_compressed_length` values).
+
+Regression test (roborev's explicit ask: "Add a regression case over
+`test_basic.simple_table` ... so a chunk wider than `chunk_length` stays
+readable"): new `cqlite-core/tests/issue_4196_round16_chunk_size_ceiling.rs`
+— opens the real `test_basic.simple_table` fixture directly (no salvage
+layer, exercising `ChunkReader` itself, the shared component roborev named
+as affecting every caller including `verify.rs`), asserts the fixture's
+shape (algorithm/chunk_length/max_compressed_length) matches what the
+reasoning depends on (fails loudly, naming what drifted, if a future dataset
+regen changes it), reads chunk index 2 (the specific 16394-byte record the
+finding names) and asserts success, then round-trips EVERY chunk in the
+file and asserts exactly 7 exceed the old ceiling (the 7 named indices) —
+proving the other 6 didn't regress either and ordinary-sized chunks are
+unaffected. **Verified the test actually catches the round-15 defect**: ran
+it against the reverted-to-round-15 `chunk_length + 4` bound (a scratch
+edit, discarded, never committed) — it FAILED with exactly the finding's
+predicted error text (`"Chunk 2 declares a 16394-byte record — exceeds the
+16388-byte maximum..."`), then re-ran green after restoring the round-16
+fix, ruling out a vacuous pass. Registered in `scripts/agent-gate.sh`'s
+`write-tests` component next to its `issue_4196_salvage_*` siblings.
+
+**Low** — `cqlite-cli/Cargo.toml:283-286`: the round-14 comment on the
+`tombstones` feature claimed `cargo build -p cqlite-cli --all-features`
+"ships a binary with NO `salvage` command". Not accurate:
+`Commands::Salvage(SalvageArgs)` is declared unconditionally in
+`cli_types.rs:389` (confirmed by direct read), so the verb stays PARSED and
+ADVERTISED in `--help` under `--all-features`; only the HANDLER module
+(`commands::salvage`) is gated out, and `dispatch_salvage` returns a runtime
+"not built" error the moment the verb is actually invoked. Fix: reworded the
+comment to state the verb stays parsed/advertised and fails at RUNTIME
+rather than being absent from the surface — the simpler, lower-risk of the
+two remedies roborev offered (the other being to gate `Commands::Salvage`
+itself, which would be a behavior change, not a comment fix).
+
+Verification: `cargo check --locked -p cqlite-core --lib` clean; `cargo
+build --locked -p cqlite-cli` clean; `cargo fmt --all --check` clean (fmt
+reflowed the now-shorter ceiling-check line, no other changes);
+`issue_4196_round16_chunk_size_ceiling` 1/1 against the real corpus;
+`issue_4196_salvage_round15_bounds` 4/4, `issue_4196_salvage_oom_bounds` 5/5,
+`issue_4196_salvage_corruption_corpus` 8/8, `sstable_parity_corruption_verify`
+3/3 (re-confirms finding 2's fix rejects no legitimate real chunk — this
+time genuinely, not vacuously as round 15's same claim turned out to be),
+`chunk_reader::tests` 7/7, `verify::tests` 30/30 — all unchanged pass counts,
+no regressions. `chunk_reader.rs` (504 lines) and `Cargo.toml` (314 lines)
+both stay well under the 800-line source threshold; no `file-size` opt-out
+needed this round.
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree
