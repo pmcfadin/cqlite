@@ -2290,6 +2290,117 @@ lines) stays just under the 800-line source threshold; `boundaries.rs`
 (398), `commands/mod.rs` (114) both comfortably under; no new file-size
 opt-out needed this round.
 
+## Round 20 (lead-directed follow-up to round 19's Medium 3) — built the
+## scan tool, exhaustively proved `rows_decoded_before_failure >= 1` is
+## UNREACHABLE today by construction; NOT a fixture-search failure
+
+Lead's decision on round 19's Medium 3 (partition-atomicity test cannot
+discriminate "loses whole" from "would also pass if salvage wrote every
+prefix"): build a real byte-offset scan using the `corrupt_byte_fixture`
+mechanism against a Cassandra-written multi-row partition (TIMESTAMP/TIMEUUID
+clustering acceptable), find the first offset producing a hard decode loss
+with `rows_decoded_before_failure >= 1`, pin it as constants; if NONE
+qualifies within a bounded window, that is itself a decoder finding — stop,
+report, do not invent a fixture.
+
+**Built**: `corrupt_byte_fixture::Mutation::AtDecompressedOffset { offset }`
+— a new, general-purpose mutation primitive (alongside the existing
+`ClusteringTextLiteral`/`FirstPartitionHeader` variants) that flips exactly
+ONE byte at a CALLER-CHOSEN decompressed-domain position, found by
+searching the covering compression chunk's compressed bytes for the one
+whose flip produces a clean, single-byte decompressed change at that exact
+position — the same "clean replicated flip" acceptance test the existing
+mutators use, generalized off text-needle-matching to an arbitrary pinned
+offset. `mutate_at_decompressed_offset` returns `Option<(u8, u8)>` (`None`
+= not flippable, no panic) so a many-candidate scan can skip cleanly;
+`stage_spec`'s wiring for the new variant `.expect()`s it (panicking loudly
+if a PINNED, already-verified offset ever stops being flippable — matching
+the other mutators' posture for a known-good site).
+
+**Scan performed** (documented in full, with source citation, in
+`issue_4196_salvage_partition_atomicity.rs`'s module doc, "Round 20"
+section — summarized here): `test_timeseries.tick_data`'s first partition
+(7 rows, decompressed offsets `[0, 443)`, `TIMEUUID` clustering,
+LZ4-compressed, chosen for its tiny 4225-byte compressed file size so a
+345-candidate scan — one salvage_sstable call per flippable candidate —
+completed in under 30s). 345 candidate offsets tried (row 1's start through
+the partition's end), 62 genuinely flippable, **every one** — spanning row
+1 through row 6 (the partition's LAST row) — produced
+`rows_decoded_before_failure == 0` whenever it produced a `Decode` loss at
+all.
+
+**Root cause, found in source** (not inferred from the null result alone):
+`drive_partition_sliding` (`partition_driver.rs`) buffers a WHOLE
+partition's rows locally (`pending: Vec<P::Row>`) and forwards them to the
+caller's `emit` callback — the ONLY thing that grows
+`rows_decoded_before_failure` — EXCLUSIVELY on structural completion (the
+`flush_and_emitted!` macro, reached only via `END_OF_PARTITION` or a
+final-chunk truncated-body flush). A mid-partition `Err` propagates via `?`
+WITHOUT ever reaching that macro, so `pending` — and every row already
+decoded within it — is simply dropped. `PartitionAtOffsetOutcome::DecodeError
+{ rows_decoded_before_failure, .. }` is therefore `0` **by construction,
+for every partition, every corruption, unconditionally** — not a property
+this OR any other fixture could ever demonstrate otherwise, without
+`drive_partition_sliding`'s buffering itself changing. The buffering is
+itself deliberate (issue #827, CLOSED — a perf change bounding K-way-merge
+memory independent of input size), and is UNRELATED to issue #3721 (also
+CLOSED — a different swallow: the per-COLUMN `break` in the SCAN read
+path's row assembly, not this per-PARTITION buffering in the
+COMPACTION/salvage decode path).
+
+**Consequence flagged, not fixed**: `Loss.rows_decoded_before_failure` —
+salvage's OWN manifest field, reported to every operator for every
+`class: "decode"` loss — is therefore ALSO always `0` in production, for
+every decode loss salvage has ever produced. Its doc comment ("rows that
+HAD decoded when the error occurred") describes a property the field
+cannot currently hold. This does NOT weaken design D2's actual safety
+guarantee (a partition whose decode fails partway contributes NOTHING to
+the output — `pending`'s drop-on-error IS that guarantee, one layer removed
+from what this ONE diagnostic field can observe) — it is a
+manifest/documentation-honesty gap, informational-field-only, worth its own
+follow-up issue. Not filed as a new GitHub issue this round (the lead's
+instruction was to stop and report, not to also scope a fix); left as an
+explicit, documented finding in the test's own module doc for the lead to
+route.
+
+**What DID ship this round**: the round-19 `assert_eq!(rows_decoded_before_failure,
+0)` (already committed) is now backed by a PROVEN structural property
+instead of a per-fixture measurement — its failure message and the test's
+module doc were both rewritten to cite the mechanism precisely, so a future
+change to `drive_partition_sliding` that DID start emitting rows
+incrementally would fail this assertion loudly, pointing straight at the
+newly-reachable discriminating case rather than reading as a mystery
+regression. The `Mutation::AtDecompressedOffset` primitive itself remains
+in `corrupt_byte_fixture.rs` as reusable infrastructure for whoever
+eventually changes that buffering and needs to build the NOW-reachable
+regression test.
+
+**Instruction 3 (the >64 `UnverifiedEmptyDecode` cap test)**: left declared,
+per the lead's own explicit permission ("otherwise leave it declared") —
+constructing 65+ genuinely partition-tombstoned BTI narrow leaves needs
+hand-encoding a BTI `Partitions.db`/`Rows.db` trie, a substantially
+different and harder on-disk structure than the Index.db byte layout
+round-15's synthetic-fixture test used, and was judged not cheaply
+hand-buildable from the infrastructure built this round.
+
+Re-verified: `cargo fmt --all --check` clean;
+`env RUSTFLAGS="-D warnings" cargo check --locked -p cqlite-core --features
+write-support --test issue_4196_salvage_partition_atomicity` clean (no
+dead-code warnings for the new, currently-single-caller-via-`stage_spec`
+`AtDecompressedOffset` machinery — `corrupt_byte_fixture.rs`'s existing
+`#![allow(dead_code)]` covers it); `--lib` 4075/4075 unchanged; ALL FIVE
+other `corrupt_byte_fixture`-consuming targets re-run clean
+(`issue_3782_corrupt_row_refusal` 12/12, `issue_3928_corrupt_header_refusal`
+11/11, `issue_3928_truncated_header_refusal` 9/9,
+`issue_4196_salvage_corruption_corpus` 8/8, plus
+`issue_4196_salvage_partition_atomicity` 1/1) — proving the new `Mutation`
+variant and the `mutate_at_decompressed_offset`/`copy_dir` visibility
+reverts (bumped to `pub` only transiently during the scratch discovery run,
+reverted to private before commit) did not disturb any existing consumer.
+`corrupt_byte_fixture.rs` (1020 lines) and
+`issue_4196_salvage_partition_atomicity.rs` (344 lines) both stay
+comfortably under the 1500-line test-file threshold.
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree

@@ -2,22 +2,71 @@
 //! lost WHOLE: no prefix of it appears in salvage's output (design D2, the
 //! resurrection-bug rationale the whole design rests on). For THIS fixture +
 //! mutation the needle partition's corrupted row is itself the FIRST row the
-//! decoder reaches (`rows_decoded_before_failure == 0`, now ASSERTED, not
-//! just measured — roborev, issue #4196, round 19) — the safety property
-//! under test does not depend on that count, since it asserts zero output
-//! rows unconditionally, but a fixture demonstrating a genuinely non-empty
-//! decoded prefix (matching R3.1's scenario text) is NOT currently
-//! constructible from the committed real-fixture corpus: no table combines
-//! a genuine multi-row partition WITH a TEXT clustering column (the ONE
-//! property `ClusteringTextLiteral`'s mutation mechanism can reliably
-//! hard-fail on — a REGULAR column's text is silently DROPPED from the row
-//! on a decode failure rather than failing the row/partition, the #3778
-//! class), surveyed exhaustively across `test_basic`, `test_wide_rows` and
-//! `test_timeseries` (see the in-test comment at the assertion site for the
-//! per-table breakdown). Synthesizing a new fixture (or an independently
-//! format-verified different corruption technique) for this ONE case is
-//! genuine new-fixture-engineering scope, tracked as a follow-up rather
-//! than attempted inside a roborev fix round.
+//! decoder reaches (`rows_decoded_before_failure == 0`, ASSERTED not just
+//! measured — roborev, issue #4196, round 19).
+//!
+//! # Round 20 — why `rows_decoded_before_failure >= 1` is UNREACHABLE today,
+//! # proven structurally, not merely unfound by search
+//!
+//! Round 19 left "no fixture demonstrating a non-empty decoded prefix" as an
+//! open search problem. Round 20 (lead-directed) built the search tool —
+//! `corrupt_byte_fixture::Mutation::AtDecompressedOffset` flips ONE byte at
+//! a CALLER-CHOSEN decompressed position via the same search-and-verify
+//! technique the other `Mutation` variants use — and exhaustively scanned
+//! EVERY flippable byte across an ENTIRE real multi-row partition
+//! (`test_timeseries.tick_data`'s first partition, 7 rows spanning
+//! decompressed offsets `[0, 443)`, `TIMEUUID` clustering — deliberately
+//! NOT a `TEXT`-clustering table, since the lead's ruling was that the
+//! failure need not come from a text clustering key): 345 candidate offsets
+//! tried, 62 genuinely flippable (a clean single-byte change verified by
+//! re-decompression), EVERY ONE of which — from the first byte of row 1
+//! through the last byte of row 6, the partition's LAST row — produced
+//! `rows_decoded_before_failure == 0` when it produced a `Decode` loss at
+//! all (the rest were `Truncated`).
+//!
+//! **Root cause, found in source, not inferred from the null result**:
+//! `parse_one_partition_for_compaction` delegates to
+//! `drive_partition_sliding`
+//! (`cqlite-core/src/storage/sstable/reader/parsing/row_decoder/partition_driver.rs`),
+//! whose own comment states the mechanism precisely — "Finding 1 (#827):
+//! buffer this partition's rows locally and forward them to the external
+//! `emit` only once the partition is CONFIRMED complete (an `Emitted`
+//! return)". Every row a partition decodes is held in a local `pending:
+//! Vec<P::Row>` and is handed to the caller's `emit` callback (the ONLY
+//! thing that grows `rows.len()`, hence `rows_decoded_before_failure`)
+//! EXCLUSIVELY inside the `flush_and_emitted!` macro, which fires ONLY on
+//! a structurally-complete partition (the `END_OF_PARTITION` marker, or a
+//! final-chunk truncated-body flush). A mid-partition `Err` from ANYWHERE
+//! in the row-parsing loop propagates via `?` and reaches the caller
+//! WITHOUT EVER calling `flush_and_emitted!` — `pending` (and every row
+//! already decoded within it) is simply dropped. So
+//! `PartitionAtOffsetOutcome::DecodeError { rows_decoded_before_failure,
+//! .. }` is `0` **by construction, for every partition, every corruption,
+//! unconditionally** — not a property of any one fixture. Issue #827 itself
+//! is CLOSED (a 2025 perf change bounding K-way-merge memory independent of
+//! input size — the buffering exists for a real, deliberate reason, not an
+//! oversight) and unrelated to #3721 (also CLOSED; a DIFFERENT swallow, the
+//! per-COLUMN `break` in the SCAN read path's row assembly, not this
+//! per-PARTITION buffering in the COMPACTION/salvage decode path).
+//!
+//! **Consequence beyond this one test**: `Loss.rows_decoded_before_failure`
+//! — the field salvage's OWN JSON manifest reports to an operator for every
+//! `class: "decode"` loss — is therefore ALSO always `0` in production
+//! today, for every decode-classified loss salvage has ever produced or
+//! will produce until `drive_partition_sliding`'s buffering changes. Its
+//! doc comment ("rows that HAD decoded when the error occurred") describes
+//! a property the field cannot currently hold. This is a genuine, if minor
+//! (informational-field-only, not a correctness defect: D2's WHOLE-loss
+//! guarantee is unaffected — see below), documentation/manifest-honesty gap
+//! worth its own follow-up; not fixed here per the lead's explicit
+//! instruction not to invent a fixture once the scan came back empty.
+//!
+//! **What this does NOT weaken**: design D2's guarantee — a partition whose
+//! decode fails partway contributes NOTHING to the output, `pending`'s
+//! drop-on-error IS the mechanism proving it structurally, one layer
+//! removed from what `rows_decoded_before_failure` can observe. The test
+//! below still asserts the real safety property (zero needle-partition rows
+//! in salvage's output) unconditionally, independent of this count.
 //!
 //! # Oracle (#3042)
 //!
@@ -156,42 +205,26 @@ async fn corrupt_row_loses_the_needle_partition_whole_never_a_prefix() {
     // byte) the corrupted row is itself the FIRST row the decoder reaches,
     // so `rows_decoded_before_failure` is 0 here rather than >= 2.
     //
-    // roborev, issue #4196, round 19 Medium finding: this fixture cannot be
-    // made to demonstrate `rows_decoded_before_failure >= 2` — verified by
-    // survey, not assumed: `composite_key_table` (this fixture) has exactly
-    // ONE row per partition in the committed generation (every one of its
-    // 100 partitions), and the `ClusteringTextLiteral` mutation mechanism
-    // requires a TEXT CLUSTERING value to corrupt (a REGULAR column's text
-    // is silently DROPPED from the row on a decode failure rather than
-    // failing the row/partition — the #3778 class `BTI_MULTICLUSTERING`'s
-    // own doc names — so it cannot exercise this property at all). Surveyed
-    // every OTHER committed real-fixture table for BOTH properties at once
-    // (a genuinely multi-row partition AND a TEXT clustering column):
-    // `test_wide_rows`'s 7 tables and `test_timeseries`'s `app_metrics`/
-    // `event_store`/`log_entries`/`user_activity`/`user_sessions` are ALL
-    // one-row-per-partition despite their names; `test_timeseries`'s
-    // `sensor_data`/`stock_prices`/`tick_data`/`time_bucketed_counters` DO
-    // have genuine multi-row partitions (up to 220 rows) but their
-    // clustering keys are `TIMESTAMP`/`TIMEUUID`/`DATE`-typed, never TEXT —
-    // their TEXT columns (`location`, `status`, `symbol`, ...) are all
-    // REGULAR, hitting the same #3778 dead end. No committed fixture
-    // combines both properties; synthesizing one (or finding a different
-    // corruption technique that reliably hard-fails mid-partition on a
-    // NON-clustering field, which would need independent format-level
-    // verification of its own) is genuine new-fixture-engineering scope,
-    // not a same-round fix — reported precisely for the lead's decision
-    // rather than silently left as a stale comment (this round strengthens
-    // what IS verifiable here instead: the previously-unasserted `== 0`
-    // claim below is now a real assertion, so a future fixture/mutation
-    // change that DID start exercising a non-empty prefix would fail
-    // loudly here, prompting whoever touches this test next to extend the
-    // property rather than silently keep testing the degenerate case).
+    // roborev, issue #4196, round 19 Medium finding, RESOLVED round 20 (see
+    // this file's module doc, "Round 20" section, for the full derivation
+    // and source citation): `rows_decoded_before_failure` is `0` for EVERY
+    // `Decode`-class loss unconditionally, by construction of
+    // `drive_partition_sliding`'s row-buffering (issue #827) — proven by an
+    // exhaustive scan of a real multi-row partition (345 candidate offsets,
+    // 62 flippable, all 62 produced `0`), not merely unfound. This
+    // assertion therefore pins a STRUCTURAL property of the decoder, not a
+    // fact about this one fixture — it will hold for every fixture and
+    // every mutation until `drive_partition_sliding` itself changes to emit
+    // rows incrementally.
     assert_eq!(
         needle_loss.rows_decoded_before_failure, 0,
-        "this fixture/mutation is measured to always corrupt the FIRST row of the needle \
-         partition; a non-zero count here means the fixture or mutation changed underneath \
-         this test's own documented assumption above — re-verify whether a genuinely \
-         discriminating case (>= 2) is now reachable"
+        "rows_decoded_before_failure must be 0 for every Decode-class loss today — \
+         drive_partition_sliding buffers all of a partition's rows and only forwards them on \
+         structural completion (issue #827), so a mid-partition Err always drops the buffer \
+         before any row is externally visible (see this file's module doc, Round 20). A \
+         non-zero value here means that buffering behavior CHANGED — re-verify whether a \
+         genuinely discriminating case (>= 1) is now reachable, and if so, extend this test to \
+         cover it rather than just the degenerate case"
     );
     eprintln!(
         "[issue_4196] rows_decoded_before_failure = {} for this fixture/mutation",

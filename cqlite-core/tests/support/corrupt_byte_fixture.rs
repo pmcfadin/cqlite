@@ -91,6 +91,34 @@ pub enum Mutation {
     /// `DeletionTime` in the form `version.hasUIntDeletionTime()` selects
     /// (`DeletionTime.java:191-196`).
     FirstPartitionHeader(HeaderByte),
+    /// Issue #4196, round 20 — the MID-PARTITION arm. Flip ONE byte at a
+    /// CALLER-PINNED decompressed-domain offset, found by the caller
+    /// scanning candidate offsets (never a needle, never a text match) and
+    /// keeping whichever one downstream behavior it wants. Where
+    /// [`ClusteringTextLiteral`](Self::ClusteringTextLiteral) locates its
+    /// site by MEANING (a specific clustering value) and
+    /// [`FirstPartitionHeader`](Self::FirstPartitionHeader) by FORMAT FACT
+    /// (offset 0 is always the first header), this variant's site is an
+    /// arbitrary POSITION the caller already knows is meaningful for other
+    /// reasons (e.g. "this is inside partition P's second row") — so it
+    /// carries no derivation logic of its own, just the number.
+    ///
+    /// The COMPRESSED-domain byte position that produces the requested
+    /// decompressed change is still found BY SEARCH (never hardcoded, same
+    /// reasoning as [`FirstPartitionHeader`](Self::FirstPartitionHeader)'s
+    /// doc: what compressed byte produces a given decompressed change can
+    /// differ across LZ4 implementations/versions even for identical
+    /// content), scanning every compressed byte of the ONE chunk covering
+    /// `offset` and keeping the first whose flip changes the decompressed
+    /// chunk in EXACTLY that one position — the same "clean replicated
+    /// flip" acceptance test `mutate_text_literal` uses.
+    AtDecompressedOffset {
+        /// Decompressed-domain byte position to flip. Not validated against
+        /// any particular partition/row here — the CALLER establishes that
+        /// meaning (see `issue_4196_salvage_partition_atomicity.rs`'s
+        /// module doc for how this specific constant was derived).
+        offset: usize,
+    },
 }
 
 /// Which byte of the first partition header to overwrite — and, per variant, the
@@ -625,6 +653,93 @@ fn mutate_first_partition_header(
     );
 }
 
+/// Flip exactly ONE decompressed byte at `target` (an ARBITRARY caller-pinned
+/// position, `Mutation::AtDecompressedOffset`'s site) to a definite different
+/// value, found by searching the covering chunk's compressed bytes the same
+/// way `mutate_first_partition_header` does — never hardcoding a compressed
+/// position (robustness across LZ4 implementations/versions, same
+/// reasoning).
+///
+/// Returns `None` (mutates NOTHING — `dir`'s `Data.db` is left byte-for-byte
+/// unchanged) rather than panicking when `target` is not flippable (e.g.
+/// inside an LZ4 match reference rather than a literal): unlike the OTHER
+/// mutators, which target a single pre-verified site and so treat "not
+/// flippable" as a fixture-drifted invariant violation, this one is also
+/// the primitive a CANDIDATE-OFFSET SCAN calls across MANY offsets, most of
+/// which are expected to be unflippable — `None` lets that scan continue
+/// cleanly (`Mutation::AtDecompressedOffset`'s own committed-test use calls
+/// `.expect(...)` at the ONE already-verified offset it pins, restoring the
+/// OTHER mutators' loud-panic-on-drift behavior at that call site instead).
+///
+/// `Some((original_byte, mutated_byte))` on success.
+fn mutate_at_decompressed_offset(
+    dir: &Path,
+    spec: &FixtureSpec,
+    target: usize,
+) -> Option<(u8, u8)> {
+    let (alg, chunk_length, offs) = parse_compression_info(&comp_file(dir, "-CompressionInfo.db"));
+    assert!(
+        alg.to_uppercase().contains("LZ4"),
+        "expected an LZ4-compressed fixture, got {alg}"
+    );
+    let data_path = comp_file(dir, "-Data.db");
+    let mut data = std::fs::read(&data_path).expect("read Data.db");
+    let file_len = data.len() as u64;
+
+    let chunk_index = target / chunk_length;
+    let local_target = target % chunk_length;
+    let start = *offs.get(chunk_index).unwrap_or_else(|| {
+        panic!(
+            "{}.{}: decompressed offset {target} falls in chunk {chunk_index}, but \
+             CompressionInfo.db only lists {} chunk(s)",
+            spec.keyspace,
+            spec.table,
+            offs.len()
+        )
+    });
+    let end = offs.get(chunk_index + 1).copied().unwrap_or(file_len);
+    let (lo, hi) = (start as usize, (end - 4) as usize);
+    let before =
+        lz4_flex::decompress_size_prepended(&data[lo..hi]).expect("decompress target chunk");
+    if local_target >= before.len() {
+        return None; // past this chunk's real decompressed length
+    }
+    let original_byte = before[local_target];
+
+    let want = if original_byte == 0xFF { 0x00 } else { 0xFF };
+
+    for p in lo..hi {
+        let orig = data[p];
+        if orig == want {
+            continue;
+        }
+        data[p] = want;
+        let after = match lz4_flex::decompress_size_prepended(&data[lo..hi]) {
+            Ok(a) => a,
+            Err(_) => {
+                data[p] = orig;
+                continue;
+            }
+        };
+        if after.len() != before.len() || after[local_target] != want {
+            data[p] = orig;
+            continue;
+        }
+        let changed: Vec<usize> = (0..before.len())
+            .filter(|&k| before[k] != after[k])
+            .collect();
+        if changed != [local_target] {
+            data[p] = orig; // it also disturbed something else; keep looking
+            continue;
+        }
+        let crc = crc32fast::hash(&data[lo..hi]).to_be_bytes();
+        data[hi..hi + 4].copy_from_slice(&crc);
+        std::fs::write(&data_path, &data).expect("write mutated Data.db");
+        return Some((original_byte, want));
+    }
+    None
+}
+
 /// The DECOMPRESSED offset of [`HeaderByte`] within the first partition header,
 /// plus the format assertion that the byte currently there is the one the format
 /// says it is — so a fixture whose shape changed fails loudly instead of
@@ -721,6 +836,18 @@ pub fn stage_spec(spec: &FixtureSpec, src: &Path, tag: &str) -> Staged {
         } => mutate_text_literal(&mutated_dir, spec, needles, *flip_offset_in_needle),
         Mutation::FirstPartitionHeader(which) => {
             mutate_first_partition_header(&mutated_dir, spec, *which)
+        }
+        Mutation::AtDecompressedOffset { offset } => {
+            mutate_at_decompressed_offset(&mutated_dir, spec, *offset).unwrap_or_else(|| {
+                panic!(
+                    "{}.{}: decompressed offset {offset} is not flippable (fixture bytes \
+                     changed, or this offset was never verified) — see \
+                     issue_4196_salvage_partition_atomicity.rs's module doc for how this \
+                     constant was derived",
+                    spec.keyspace, spec.table
+                )
+            });
+            (*offset, 1)
         }
     };
     Staged {
