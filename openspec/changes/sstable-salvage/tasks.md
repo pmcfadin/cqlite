@@ -2099,6 +2099,81 @@ over-threshold set from earlier rounds — this round's small addition to
 each stays under the SAME `CQLITE_ALLOW_FILE_GROWTH=1` disclosure, no new
 file crossed threshold.
 
+## Round 18, roborev job 3398 — 1 Medium + 1 Low found against HEAD
+## `e5a3f5611`; both fixed — a THIRD consecutive round finding a defect in
+## THIS SAME function
+
+Roborev round 18 reviewed round 17's own fix to `max_plausible_total_chunk_size`
+and found round 17 had introduced a NEW real defect in the exact branch it
+touched — the third consecutive round (16 -> 17 -> 18) to find a live bug in
+this one function, each correcting the round before.
+
+**Medium** — `chunk_reader.rs:291-293`, the configured-`max_compressed_length`
+branch: round 17's `max(chunk_length, max_compressed_length) + 4` ceiling
+trusted `max_compressed_length` as if it were validated data. It is not:
+`CompressionInfo::parse`/`validate` reject only an EXACT `0` for this
+field — there is no upper-bound check against `chunk_length` anywhere.
+Round 17's OWN doc already established (citing the pinned `cassandra-5.0.8`
+tag) that a LEGITIMATE configured value is always `<= chunk_length` — so
+the `max()` term was PROVABLY dead weight for real files, while remaining
+live and dangerous for a corrupted one: a bit-flipped `max_compressed_length`
+reading as anything short of the exact `i32::MAX` sentinel (e.g.
+`0x7FFFFFFE`, ~2 GiB) would make `max()` pick that corrupt value as the
+ceiling, reopening the exact unbounded `vec![0u8; chunk_size]` allocation
+this whole guard exists to close — via a THIRD untrusted field, after
+`chunk_offsets` (round 15) and the sentinel comparison itself (round 16).
+Fix: dropped the `max()` entirely — the configured branch is now flatly
+`chunk_length.saturating_add(CRC_TRAILER)`, losing nothing for legitimate
+files (round 17's own reasoning already proved `max_compressed_length`
+never exceeds `chunk_length` there) while no longer trusting an unvalidated
+field for corrupt ones. New test
+`corrupt_max_compressed_length_past_chunk_length_does_not_widen_the_ceiling`
+— a `max_compressed_length` of `1_000_000_000` (corrupt, not the sentinel)
+must NOT admit a `chunk_length + 5`-byte record. Verified the test catches
+round 17's actual defect: reverted to the `max()` form (scratch edit,
+discarded, never committed) — failed with the corrupt record wrongly
+ACCEPTED (`Ok(...)` instead of the expected `Err`); re-ran green on the fix.
+
+**Low** — `chunk_reader.rs:297`, the LZ4 worst-case formula: used the raw
+`LZ4_compressBound(chunk_length)` term alone, omitting a 4-byte
+little-endian uncompressed-length prefix Cassandra's `LZ4Compressor.compress()`
+writes directly into the output BEFORE the LZ4 block itself. Verified
+against the pinned tag:
+`src/java/org/apache/cassandra/io/compress/LZ4Compressor.java`'s
+`initialCompressedBufferLength = INTEGER_BYTES + compressor.maxCompressedLength(chunkLength)`
+(the writer's own worst-case allocation) and its `compress()` method, which
+writes 4 raw length bytes then delegates to the underlying LZ4 compressor —
+and cross-checked against this crate's OWN decompressor
+(`compression.rs:272`, "LZ4 format: 4-byte size prefix (little-endian) +
+compressed data"), confirming the on-disk framing independently. Not
+reachable in practice today only because real LZ4 output sits comfortably
+below its own `compressBound` — an INCIDENTAL margin the fix no longer
+relies on. Fix: `LZ4Compressor` arm is now `4 + chunk_length + chunk_length
+/ 255 + 16`.
+
+Re-verified after both fixes: `cargo check --locked -p cqlite-core --lib
+--features write-support` clean; `cargo fmt --all --check` clean; `--lib`
+4075 passed, 0 failed, 14 ignored (+1 net new test:
+`corrupt_max_compressed_length_past_chunk_length_does_not_widen_the_ceiling`);
+`issue_4196_round16_chunk_size_ceiling` 1/1 (the real Snappy fixture still
+reads — the LZ4-only formula change does not touch Snappy's arm),
+`issue_4196_salvage_round15_bounds` 4/4, `issue_4196_salvage_oom_bounds`
+5/5, `issue_4196_salvage_corruption_corpus` 8/8,
+`issue_4196_salvage_healthy_parity` 4/4,
+`issue_4196_salvage_partition_atomicity` 1/1,
+`sstable_parity_corruption_verify` 3/3 — all pass, no regressions.
+`chunk_reader.rs` crossed the 800-line source threshold this round (806
+lines, from the round-16/17/18 doc/test accumulation on this one
+pre-existing file) — PRE-EXISTING (this file predates #4196 entirely; it is
+the core NB `Data.db` chunk reader, not something this PR created), so per
+the campsite rule's pre-existing-file carve-out it joins the ALREADY
+disclosed `CQLITE_ALLOW_FILE_GROWTH=1` set (`point_compaction.rs`,
+`data_access/mod.rs`, `reader/mod.rs`) rather than being split under this
+round's time budget — a genuine split candidate for a dedicated follow-up
+(the test module alone is now ~350 of the 806 lines and could move to a
+sibling `chunk_reader_tests.rs`), noted here rather than silently
+deferred.
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree

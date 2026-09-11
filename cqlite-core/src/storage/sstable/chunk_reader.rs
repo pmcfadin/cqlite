@@ -266,6 +266,22 @@ impl<R: Read + Seek> ChunkReader<R> {
 /// before this fix (format authority, issue #3041) — never through this
 /// crate's own prior (incorrect) code.
 ///
+/// The configured branch's ceiling is `chunk_length + 4` OUTRIGHT — NOT
+/// `max(chunk_length, max_compressed_length) + 4` (roborev, issue #4196,
+/// round 18 — corrects round 17's OWN defect in this exact branch):
+/// `max_compressed_length` is read VERBATIM from `CompressionInfo.db` and
+/// `CompressionInfo::parse`/`validate` reject only an exact `0`, with no
+/// upper-bound check against `chunk_length` at all — so a `max()` against
+/// it is provably DEAD WEIGHT for legitimate files (the paragraph above
+/// already establishes a configured value is always `<= chunk_length` for
+/// any REAL Cassandra writer) and actively DANGEROUS for a corrupted one:
+/// a bit-flipped `max_compressed_length` reading as, say, `0x7FFFFFFE`
+/// (anything short of the exact `i32::MAX` sentinel) would make `max()`
+/// pick that corrupt near-4 GiB value as the ceiling, reopening the exact
+/// unbounded `vec![0u8; chunk_size]` allocation this whole guard exists to
+/// close — via a THIRD untrusted field, after `chunk_offsets` (round 15)
+/// and the sentinel itself (round 16).
+///
 /// `NoopCompressor` (the explicit "no compression" marker,
 /// `compression_info::SUPPORTED_COMPRESSOR_NAMES`) stores chunks RAW, so its
 /// worst case is exactly `chunk_length` — no expansion term at all.
@@ -289,12 +305,25 @@ pub(crate) fn max_plausible_total_chunk_size(info: &CompressionInfo) -> Result<u
     const CRC_TRAILER: u64 = 4;
     let chunk_length = info.chunk_length as u64;
     if info.max_compressed_length != i32::MAX as u32 {
-        let configured_ceiling = std::cmp::max(chunk_length, info.max_compressed_length as u64);
-        return Ok(configured_ceiling.saturating_add(CRC_TRAILER));
+        return Ok(chunk_length.saturating_add(CRC_TRAILER));
     }
     let worst_case_payload = match info.algorithm.as_str() {
-        // LZ4_compressBound(n) = n + n/255 + 16 (lz4.h).
-        "LZ4Compressor" => chunk_length + chunk_length / 255 + 16,
+        // LZ4_compressBound(n) = n + n/255 + 16 (lz4.h) — PLUS a 4-byte
+        // little-endian uncompressed-length prefix Cassandra's
+        // `LZ4Compressor.compress()` writes directly into the output
+        // BEFORE the LZ4 block itself (`INTEGER_BYTES` in
+        // `cassandra-5.0.8:src/java/org/apache/cassandra/io/compress/LZ4Compressor.java`;
+        // this crate's own decompressor strips the same 4 bytes —
+        // `compression.rs:272` — confirming the framing, not just the
+        // bound). `initialCompressedBufferLength = INTEGER_BYTES +
+        // compressor.maxCompressedLength(chunkLength)` in the same file is
+        // the writer's own worst-case allocation size, verified directly
+        // against the pinned tag (roborev, issue #4196, round 18 Low
+        // finding — the raw `LZ4_compressBound` alone under-counts by
+        // exactly this 4-byte prefix; not reachable in practice today only
+        // because real LZ4 output sits well below its own bound, an
+        // INCIDENTAL margin this fix no longer relies on).
+        "LZ4Compressor" => 4 + chunk_length + chunk_length / 255 + 16,
         // snappy::MaxCompressedLength(n) = 32 + n + n/6 (snappy.cc).
         "SnappyCompressor" => 32 + chunk_length + chunk_length / 6,
         // zlib's compressBound(n) = n + (n>>12) + (n>>14) + (n>>25) + 13.
@@ -719,6 +748,59 @@ mod tests {
             result.is_err(),
             "a record wider than chunk_length + 4 has no legitimate Cassandra-writer \
              explanation and must still refuse; got: {result:?}"
+        );
+    }
+
+    /// Roborev, issue #4196, round 18 (Medium — corrects round 17's OWN
+    /// defect): `max_compressed_length` is read VERBATIM from
+    /// `CompressionInfo.db` and `CompressionInfo::parse`/`validate` reject
+    /// only an exact `0` — there is NO upper-bound check against
+    /// `chunk_length`. A CORRUPTED `max_compressed_length` greater than
+    /// `chunk_length` (anything short of the exact `i32::MAX` sentinel)
+    /// must NOT push the ceiling up past `chunk_length + 4` — that would
+    /// reopen the unbounded-allocation class this whole guard exists to
+    /// close, via a third untrusted field (after `chunk_offsets` and the
+    /// sentinel itself). This directly exercises the finding's own named
+    /// gap: `configured_max_compressed_length_still_admits_a_full_chunk_length_fallback_record`
+    /// and its negative control both use `max_compressed_length <
+    /// chunk_length` and so could not catch this.
+    #[test]
+    fn corrupt_max_compressed_length_past_chunk_length_does_not_widen_the_ceiling() {
+        const CHUNK_LENGTH: u32 = 16384;
+        // A corrupted field — larger than chunk_length, but not the exact
+        // i32::MAX sentinel (which would route through the OTHER branch
+        // entirely).
+        const CORRUPT_MAX_COMPRESSED_LENGTH: u32 = 1_000_000_000;
+
+        // A record ONE byte past the true legitimate ceiling
+        // (chunk_length + 4) — must still be REJECTED even though
+        // `max_compressed_length` alone, read naively, would seem to admit
+        // it.
+        let payload = vec![0xEFu8; CHUNK_LENGTH as usize + 1];
+        let crc = crc32fast::hash(&payload);
+        let mut data = Vec::new();
+        data.extend_from_slice(&payload);
+        data.extend_from_slice(&crc.to_be_bytes());
+        let total_size = data.len() as u64;
+
+        let compression_info = CompressionInfo {
+            algorithm: "LZ4Compressor".to_string(),
+            chunk_length: CHUNK_LENGTH,
+            data_length: payload.len() as u64,
+            chunk_offsets: vec![0],
+            option_pairs: vec![],
+            max_compressed_length: CORRUPT_MAX_COMPRESSED_LENGTH,
+        };
+
+        let cursor = Cursor::new(data);
+        let mut reader = ChunkReader::new(cursor, compression_info, total_size);
+
+        let result = reader.read_chunk(0);
+        assert!(
+            result.is_err(),
+            "a corrupted max_compressed_length ({CORRUPT_MAX_COMPRESSED_LENGTH}) greater than \
+             chunk_length ({CHUNK_LENGTH}) must NOT widen the ceiling past chunk_length + 4 — \
+             got: {result:?}"
         );
     }
 }
