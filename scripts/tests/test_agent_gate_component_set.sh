@@ -1929,13 +1929,13 @@ fi
 # not itself host-dependent, and stays meaningful on a GNU-`wc` CI runner too): a small, legitimate
 # capture must still return RC 0 with its bytes intact once the numeric check strips whitespace
 # before matching.
-padwc_bin="$tmp/padwc-bin"
-mkdir -p "$padwc_bin"
-for _t in bash sh sed awk grep cut tr mktemp date basename dirname cat head tail sort \
-          uniq rm mkdir cp mv ln uname nproc env find touch stat comm od xargs sleep kill \
-          ps df readlink id iconv timeout nice chmod git; do
-  _src=$(command -v "$_t" 2>/dev/null) && [ -n "$_src" ] && ln -sf "$_src" "$padwc_bin/$_t"
-done
+# Single-sourced from `mkbin` (roborev job 3406, Medium) rather than a second, hand-rolled
+# tool list: a curated PATH missing a tool the gate legitimately needs (the first draft here
+# omitted `gtimeout`, `mkbin`'s own documented macOS bound-mechanism fallback) makes the
+# invocation fail for a reason unrelated to the padded-wc property this case measures — and
+# the `PATH="$padwc_bin"` prefix below governs the lookup of the outer `timeout` itself, not
+# just what the gate calls. `mkbin padwc wc` omits only `wc`, which is replaced below.
+padwc_bin=$(mkbin padwc wc)
 padwc_real=$(command -v wc)
 cat >"$padwc_bin/wc" <<EOF
 #!/usr/bin/env bash

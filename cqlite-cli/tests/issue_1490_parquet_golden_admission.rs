@@ -1431,8 +1431,13 @@ fn a_field_the_structure_description_does_not_cover_is_refused() {
 fn a_directory_entry_the_harness_cannot_read_refuses_the_fixture() {
     // A non-UTF-8 entry name: the deterministic instance of "cannot read this
     // entry". It used to be dropped by a `filter_map(|e| e.file_name().to_str())`.
+    // A LABELED block, not a bare one: this function has a SECOND, independent #[cfg(unix)]
+    // block below (the unlistable-directory case), which runs fine on APFS. A bare `return`
+    // from the EILSEQ skip below would exit the whole function and silently discard that
+    // second block's coverage too — `break 'non_utf8` exits only this block instead (roborev
+    // job 3406, Medium).
     #[cfg(unix)]
-    {
+    'non_utf8: {
         use std::os::unix::ffi::OsStrExt;
 
         let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -1454,7 +1459,7 @@ fn a_directory_entry_the_harness_cannot_read_refuses_the_fixture() {
                 println!(
                     "SKIP: this filesystem refuses non-UTF-8 path components (EILSEQ) — assertion needs a Linux/ext4 host"
                 );
-                return;
+                break 'non_utf8;
             }
             panic!("write non-UTF-8 named entry: {e}");
         }
