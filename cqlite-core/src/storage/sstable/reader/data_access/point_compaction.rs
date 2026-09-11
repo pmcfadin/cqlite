@@ -155,6 +155,19 @@ pub(crate) enum PartitionAtOffsetOutcome {
 /// case the audit trigger names AND a `Some(end_bound)` case (a corrupted,
 /// still-plausible-looking middle boundary can name a gap just as wide) —
 /// the risk is the SPAN's width, not which resolution path produced it.
+///
+/// `write-support`-gated (roborev, minimal-build finding against the
+/// rebased HEAD): both this constant and [`exceeds_plausible_partition_span`]
+/// below are used ONLY by [`decode_partition_at_offset_for_salvage`]'s two
+/// arms, which is itself `#[cfg(feature = "write-support")]` (see
+/// [`PartitionAtOffsetOutcome`]'s doc) — without that gate here too, a
+/// `write-support`-off build (`minimal-build`'s own
+/// `--no-default-features --features all-compression`) sees both items as
+/// genuinely dead code, since their sole consumer does not exist in that
+/// build. Matches the enum's and the crate-root re-exports'
+/// (`data_access/mod.rs`, `reader/mod.rs`) established gate exactly — this
+/// was the one declaration site in the chain missing it.
+#[cfg(feature = "write-support")]
 pub(crate) const SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES: u64 = 128 * 1024 * 1024;
 
 /// `true` iff the half-open span `[start, end)` is wider than
@@ -168,6 +181,9 @@ pub(crate) const SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES: u64 = 128 * 1024 * 1024;
 /// a test). `end < start` (never expected, both call sites establish
 /// `end > start`/`end >= offset` first) is defensively treated as
 /// NOT exceeding, via `saturating_sub`, rather than a panic or a wrap.
+///
+/// `write-support`-gated for the same reason as the constant above.
+#[cfg(feature = "write-support")]
 pub(crate) fn exceeds_plausible_partition_span(start: usize, end: usize) -> bool {
     (end.saturating_sub(start)) as u64 > SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES
 }
@@ -854,7 +870,12 @@ impl SSTableReader {
     }
 }
 
-#[cfg(test)]
+// `write-support`-gated to match the items under test — `cargo test --lib
+// --no-run` (minimal-build's compile check) enables `cfg(test)` even
+// without executing anything, so without this gate the module still fails
+// to compile in a `write-support`-off build once the const/fn above are
+// themselves gated.
+#[cfg(all(test, feature = "write-support"))]
 mod tests {
     use super::{exceeds_plausible_partition_span, SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES};
 
