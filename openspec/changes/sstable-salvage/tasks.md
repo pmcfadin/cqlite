@@ -2699,6 +2699,15 @@ never turns FAIL into PASS per the guard's own notice).
 
 ### Batched nits for follow-up
 
+Filed as **issue #4219** ("salvage (#4196): batched review nits from
+rounds 5–23") — covers the 4 items below plus the still-open round-3/4
+letters (c)/(f), the round-19 `>64 UnverifiedEmptyDecode` cap-test
+coverage gap, round-13's same-id BIG+BTI clobbering gap, the
+`write_partition`/`finish()` hard-`Err` residual named independently by
+rounds 6/7/8/9, and `chunk_reader.rs`'s pre-existing (#2207) ~825-line
+split candidate (epic #1116). `Loss.rows_decoded_before_failure` is
+tracked separately as #4218, not duplicated into #4219.
+
 1. **`chunks.rs:258-261` (consumed at `recover.rs:550`)** — round 22 split
    *pre-read* implausible framing into `implausible_chunks`, but every
    `read_chunk(i)` **failure** (the `max_plausible_total_chunk_size`
