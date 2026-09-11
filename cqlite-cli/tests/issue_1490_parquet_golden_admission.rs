@@ -1444,7 +1444,20 @@ fn a_directory_entry_the_harness_cannot_read_refuses_the_fixture() {
         let unreadable = tmp.path().join(std::ffi::OsStr::from_bytes(
             std::mem::take(&mut raw).as_slice(),
         ));
-        std::fs::write(&unreadable, b"").expect("write non-UTF-8 named entry");
+        // APFS (macOS's default filesystem) refuses a non-UTF-8 path component outright — the
+        // fixture this case needs cannot exist there at all, which is a filesystem property, not
+        // a platform one (a non-APFS volume mounted on a macOS host can still create it). Detect
+        // exactly that error (EILSEQ, "Illegal byte sequence") and skip loudly rather than
+        // #[ignore] or cfg(target_os), which would hide the case on hosts that CAN run it.
+        if let Err(e) = std::fs::write(&unreadable, b"") {
+            if e.raw_os_error() == Some(libc::EILSEQ) {
+                println!(
+                    "SKIP: this filesystem refuses non-UTF-8 path components (EILSEQ) — assertion needs a Linux/ext4 host"
+                );
+                return;
+            }
+            panic!("write non-UTF-8 named entry: {e}");
+        }
 
         let err =
             parquet_parity::fixture_root::fixture_in_table_dir("ks.t", tmp.path().to_path_buf())

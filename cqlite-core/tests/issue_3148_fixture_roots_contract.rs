@@ -459,7 +459,20 @@ fn non_utf8_override_is_rejected_fail_closed() {
     let mut bytes = tmp.path().as_os_str().to_os_string().into_vec();
     bytes.extend_from_slice(b"/bad\xff\xfedir");
     let raw = std::ffi::OsString::from_vec(bytes);
-    std::fs::create_dir(&raw).expect("create a non-UTF-8 directory");
+    // APFS (macOS's default filesystem) refuses a non-UTF-8 path component outright — the
+    // fixture this case needs cannot exist there at all, which is a filesystem property, not
+    // a platform one (a non-APFS volume mounted on a macOS host can still create it). Detect
+    // exactly that error (EILSEQ, "Illegal byte sequence") and skip loudly rather than
+    // #[ignore] or cfg(target_os), which would hide the case on hosts that CAN run it.
+    if let Err(e) = std::fs::create_dir(&raw) {
+        if e.raw_os_error() == Some(libc::EILSEQ) {
+            println!(
+                "SKIP: this filesystem refuses non-UTF-8 path components (EILSEQ) — assertion needs a Linux/ext4 host"
+            );
+            return;
+        }
+        panic!("create a non-UTF-8 directory: {e}");
+    }
     assert!(
         raw.to_str().is_none(),
         "the fixture value must actually be invalid UTF-8"
