@@ -2673,6 +2673,75 @@ all pass, no regressions. `storage::write_engine::salvage::*` unit tests
 21/21 post-split, confirming both `#[path]`-wired test modules
 (`chunks::tests`, `recover::chunks_cap_tests`) still resolve correctly.
 
+## Round 23, roborev job 3405 — 4 Low found against HEAD `20ba0dac3`;
+## NOT fixed per the new severity rule (Low/nit-only rounds are batched,
+## never re-triggered as a fix round) — batched below, round closed by
+## report to the lead
+
+Per `docs/development/roborev-severity.md`: a Low finding with no failing
+scenario is a NIT, and nits never trigger a fix round — they are batched
+into one follow-up at merge time. This round's 4 findings are all
+`Severity: Low`. `prompt-content:` ALSO FAILed this round (35/35 census
+paths absent from the delivered prompt; census +13181/-17 across 42
+files — the full PR range, matching the #3252 "large diff delivered by
+snapshot pointer" worktree-bug signature named in `CLAUDE.md`'s roborev
+section, not a defect in this branch), so `RESULT: FAIL` is driven by TWO
+independent causes together (`roborev-exit: FINDINGS` from the 4 Lows,
+AND `prompt-content: FAIL`) — neither is the *sole* cause on its own, so
+this round does not cleanly match either of the lead's two closing
+branches (`prompt-content` sole-FAIL → waiver request; clean PASS →
+summary comment). Flagged to the lead for a ruling on which PR-comment
+path applies; no comment posted by the implementer this round pending
+that call. job 3405, base `316f9f711` (merge-base of `origin/main` and
+HEAD), head `20ba0dac30d2750c461ecbf8b85a69d01c7b5080`, tokens
+UNAVAILABLE (job record carries no accounting; vacuity-tier2 degraded,
+never turns FAIL into PASS per the guard's own notice).
+
+### Batched nits for follow-up
+
+1. **`chunks.rs:258-261` (consumed at `recover.rs:550`)** — round 22 split
+   *pre-read* implausible framing into `implausible_chunks`, but every
+   `read_chunk(i)` **failure** (the `max_plausible_total_chunk_size`
+   ceiling rejection, a short-read/seek I/O error, the `size < 4`
+   refusal) still lands in `bad_chunks` and increments
+   `crc_failure_count` even though none of those compared a CRC32 — the
+   residual of the same conflation round 22 fixed the pre-read half of.
+   `recover.rs` then reports "failed CRC validation" for a
+   `CompressionInfo.db`-side problem (a corrupt-short `chunk_offsets`
+   table satisfies the pre-read `offset + size <= total_size` check by
+   construction, per that code's own comment). Fix: match on the error
+   from `read_chunk` (or give it a typed discriminant) and route
+   non-mismatch failures into `implausible_chunks` (or a third set) with
+   their own cause wording; keep `crc_failure_count` CRC32-mismatch-only.
+
+2. **`cqlite-cli/src/commands/salvage/mod.rs:292-310`** — `all_refused`
+   is gated on `hard_errors.is_empty()` but not on
+   `discovery.skipped.is_empty()`, and is checked before `any_imperfect`.
+   A table dir where every *attempted* generation refused AND one
+   published generation was skipped at discovery (e.g. missing
+   `TOC.txt`) exits `2` ("EVERY generation refused" — false, one was
+   never attempted); `any_imperfect` already covers this but is
+   unreachable here. Fix: add `&& discovery.skipped.is_empty()` to
+   `all_refused`, or reorder so `any_imperfect` wins on a skip.
+
+3. **`cqlite-cli/src/commands/salvage/discovery.rs:43-48`** — the
+   single-file branch accepts *any* existing file as a generation with no
+   `*-Data.db` suffix check and no `TOC.txt` barrier (unlike the
+   directory branch). `cqlite salvage <base>-Index.db` parses as a valid
+   descriptor and fails deep in decoding (or reports every partition
+   `key-mismatch`) instead of a named exit-1 usage error. Fix: require
+   `input.file_name()` to end in `-Data.db` in the file branch.
+
+4. **`cqlite-cli/src/commands/write.rs:555, 561, 594`** —
+   `parse_create_table` failures are silently swallowed by
+   `if let Ok((_, mut ts))`; when the *target* table's own `CREATE TABLE`
+   is present but fails to parse, the error reads "does not declare a
+   CREATE TABLE for 't'" — wrong, it points at a missing-declaration
+   problem when the real cause is an unparsed statement. Fix: capture and
+   surface `Err` when the statement's table name matches `target_table`,
+   or record it in a separate "declared but unparseable" list named in
+   the error.
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree
