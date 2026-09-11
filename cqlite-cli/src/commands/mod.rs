@@ -92,11 +92,23 @@ pub async fn dispatch_salvage(
     }
     #[cfg(any(not(feature = "write-support"), feature = "tombstones"))]
     {
+        // roborev, issue #4196, round 19 Low finding: this arm previously
+        // returned `Err(anyhow!(...))`, which `run_main`'s caller routes
+        // through `error::classify_error` — the EXACT indirection this
+        // function's own doc above says `execute_salvage_command` avoids
+        // ("it therefore never returns an Err"), broken by this ONE other
+        // arm. The message's substring "write" matches `classify_error`'s
+        // `CliExitCode::WriteError` branch (`error.rs:156-166`) — exit code
+        // 6, outside `dispatch_salvage`'s documented 0/1/2/3 space, even
+        // though this really is a usage error (the verb was invoked on a
+        // build that never compiled it in). Own the exit code directly
+        // instead, matching every OTHER salvage failure path.
         let _ = (schema, args);
-        Err(anyhow::anyhow!(
+        eprintln!(
             "Write support is not enabled (or this build has cqlite-core/tombstones on, which \
              the salvage module cannot be built against, roborev issue #4196 round-7). Build \
              with --features write-support (and without --features tombstones) to enable salvage."
-        ))
+        );
+        std::process::exit(1);
     }
 }

@@ -2,11 +2,22 @@
 //! lost WHOLE: no prefix of it appears in salvage's output (design D2, the
 //! resurrection-bug rationale the whole design rests on). For THIS fixture +
 //! mutation the needle partition's corrupted row is itself the FIRST row the
-//! decoder reaches (`rows_decoded_before_failure == 0`, measured below) —
-//! the safety property under test does not depend on that count, since it
-//! asserts zero output rows unconditionally, but a fixture demonstrating a
-//! genuinely non-empty decoded prefix (matching R3.1's scenario text) is
-//! left as a follow-up refinement.
+//! decoder reaches (`rows_decoded_before_failure == 0`, now ASSERTED, not
+//! just measured — roborev, issue #4196, round 19) — the safety property
+//! under test does not depend on that count, since it asserts zero output
+//! rows unconditionally, but a fixture demonstrating a genuinely non-empty
+//! decoded prefix (matching R3.1's scenario text) is NOT currently
+//! constructible from the committed real-fixture corpus: no table combines
+//! a genuine multi-row partition WITH a TEXT clustering column (the ONE
+//! property `ClusteringTextLiteral`'s mutation mechanism can reliably
+//! hard-fail on — a REGULAR column's text is silently DROPPED from the row
+//! on a decode failure rather than failing the row/partition, the #3778
+//! class), surveyed exhaustively across `test_basic`, `test_wide_rows` and
+//! `test_timeseries` (see the in-test comment at the assertion site for the
+//! per-table breakdown). Synthesizing a new fixture (or an independently
+//! format-verified different corruption technique) for this ONE case is
+//! genuine new-fixture-engineering scope, tracked as a follow-up rather
+//! than attempted inside a roborev fix round.
 //!
 //! # Oracle (#3042)
 //!
@@ -143,12 +154,45 @@ async fn corrupt_row_loses_the_needle_partition_whole_never_a_prefix() {
     // before the corrupt one; measured for THIS fixture + mutation
     // (`corrupt_byte_fixture::BIG_COMPOSITE`, a flipped clustering-value
     // byte) the corrupted row is itself the FIRST row the decoder reaches,
-    // so `rows_decoded_before_failure` is 0 here rather than >= 2. That does
-    // not weaken what this test proves: the safety property under test is
-    // "the output holds ZERO rows for the needle partition regardless of how
-    // many decoded before the failure", asserted unconditionally below.
-    // Finding a fixture that ALSO exercises a real, non-empty prefix is
-    // tracked as a follow-up refinement, not a gap in the property itself.
+    // so `rows_decoded_before_failure` is 0 here rather than >= 2.
+    //
+    // roborev, issue #4196, round 19 Medium finding: this fixture cannot be
+    // made to demonstrate `rows_decoded_before_failure >= 2` — verified by
+    // survey, not assumed: `composite_key_table` (this fixture) has exactly
+    // ONE row per partition in the committed generation (every one of its
+    // 100 partitions), and the `ClusteringTextLiteral` mutation mechanism
+    // requires a TEXT CLUSTERING value to corrupt (a REGULAR column's text
+    // is silently DROPPED from the row on a decode failure rather than
+    // failing the row/partition — the #3778 class `BTI_MULTICLUSTERING`'s
+    // own doc names — so it cannot exercise this property at all). Surveyed
+    // every OTHER committed real-fixture table for BOTH properties at once
+    // (a genuinely multi-row partition AND a TEXT clustering column):
+    // `test_wide_rows`'s 7 tables and `test_timeseries`'s `app_metrics`/
+    // `event_store`/`log_entries`/`user_activity`/`user_sessions` are ALL
+    // one-row-per-partition despite their names; `test_timeseries`'s
+    // `sensor_data`/`stock_prices`/`tick_data`/`time_bucketed_counters` DO
+    // have genuine multi-row partitions (up to 220 rows) but their
+    // clustering keys are `TIMESTAMP`/`TIMEUUID`/`DATE`-typed, never TEXT —
+    // their TEXT columns (`location`, `status`, `symbol`, ...) are all
+    // REGULAR, hitting the same #3778 dead end. No committed fixture
+    // combines both properties; synthesizing one (or finding a different
+    // corruption technique that reliably hard-fails mid-partition on a
+    // NON-clustering field, which would need independent format-level
+    // verification of its own) is genuine new-fixture-engineering scope,
+    // not a same-round fix — reported precisely for the lead's decision
+    // rather than silently left as a stale comment (this round strengthens
+    // what IS verifiable here instead: the previously-unasserted `== 0`
+    // claim below is now a real assertion, so a future fixture/mutation
+    // change that DID start exercising a non-empty prefix would fail
+    // loudly here, prompting whoever touches this test next to extend the
+    // property rather than silently keep testing the degenerate case).
+    assert_eq!(
+        needle_loss.rows_decoded_before_failure, 0,
+        "this fixture/mutation is measured to always corrupt the FIRST row of the needle \
+         partition; a non-zero count here means the fixture or mutation changed underneath \
+         this test's own documented assumption above — re-verify whether a genuinely \
+         discriminating case (>= 2) is now reachable"
+    );
     eprintln!(
         "[issue_4196] rows_decoded_before_failure = {} for this fixture/mutation",
         needle_loss.rows_decoded_before_failure

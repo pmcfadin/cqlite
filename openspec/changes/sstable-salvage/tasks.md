@@ -2174,6 +2174,122 @@ round's time budget — a genuine split candidate for a dedicated follow-up
 sibling `chunk_reader_tests.rs`), noted here rather than silently
 deferred.
 
+## Round 19, roborev job 3399 — 3 Medium + 2 Low found against HEAD
+## `f33d0c6c8`; 4 fixed in full, 1 Medium PARTIALLY addressed (fixture-
+## engineering gap flagged for the lead, not silently closed)
+
+None of round 19's five findings touched `chunk_reader.rs` or
+`max_plausible_total_chunk_size` — the lead's per-function stop rule for
+this round did not trigger.
+
+**Medium 1** — `recover.rs`, `UnverifiedEmptyDecode` component-finding
+accumulation: pushed inside the per-partition loop with NO cap, unlike
+every other per-partition accumulation this file bounds
+(`MAX_RESIDENT_LOSSES`, `MAX_CHUNKS_PER_LOSS`) — reachable WITHOUT
+adversarial input (a real BTI table whose partitions are all
+partition-tombstoned pushes one finding per partition). Fix: new
+`MAX_UNVERIFIED_EMPTY_DECODE_FINDINGS = 64`; findings beyond the cap are
+counted (`unverified_empty_decode_truncated`) and folded into ONE summary
+finding after the loop ("... and N more narrow-leaf partitions decoded to
+zero rows"), matching `losses_truncated`'s established affirmative-count
+convention. No dedicated NEW regression test added for the >64-finding case
+this round — doing so needs a real (or hand-encoded) BTI fixture with 65+
+genuinely partition-tombstoned narrow leaves, which is comparable
+fixture-engineering cost to Medium 3 below; the mechanism itself mirrors
+`finalize_loss_chunks`'s ALREADY-tested cap-and-fold pattern exactly, so
+confidence rests on that precedent plus the existing BTI healthy-parity
+test continuing to pass (proving the un-capped path is unaffected).
+
+**Medium 2** — `issue_4196_salvage_healthy_parity.rs`'s zero-clustering-
+column waiver relies SOLELY on a CQLite-writes/CQLite-reads content
+comparison — exactly the #3042 round-trip-invariance blind spot this
+crate's own doctrine names: it cannot see a uniform framing difference from
+what Cassandra itself would write, so it is evidence of "no data lost or
+fabricated," never evidence of Cassandra-readability, and nothing
+previously surfaced that gap to an operator outside a test comment and
+issue #4217. Fix: `salvage_sstable` now pushes a `ComponentFinding`
+(`class: "UnprovenByteParity"`) whenever `schema.clustering_keys.is_empty()`,
+naming the un-root-caused divergence and pointing at #4217 — surfaced in
+the manifest an operator actually reads, at the moment it matters, per the
+finding's own third suggested remedy (root-causing the ~6-byte/partition
+field, or a real sstabledump-oracle check, are both out of scope for a
+roborev fix round — the first is #4217's own explicit scope, the second
+needs a Cassandra/JVM toolchain this environment does not carry). New
+assertions in the shared parity-assertion helper: the finding is present
+for the zero-clustering-column case and ABSENT for every clustering-column
+case (a negative control — those DO byte-match Cassandra, so a finding
+there would itself be a false claim).
+
+**Medium 3** — `issue_4196_salvage_partition_atomicity.rs`'s central D2
+safety-claim test uses a fixture/mutation where
+`rows_decoded_before_failure == 0`, so it cannot distinguish "loses the
+partition whole" from "would also pass if salvage wrote every decoded
+prefix." **Not fixed this round — flagged for the lead's decision rather
+than silently left as a stale comment or rushed.** Surveyed the ENTIRE
+committed real-fixture corpus for a table combining BOTH properties this
+needs (a genuine multi-row partition AND a TEXT clustering column, the one
+shape `ClusteringTextLiteral`'s mutation mechanism can reliably hard-fail
+on — a REGULAR column's text is silently DROPPED from the row rather than
+failing it, issue #3778): `test_basic.composite_key_table` (this test's own
+fixture) and every `test_wide_rows` table are ALL exactly one row per
+partition despite their names; `test_timeseries`'s multi-row-partition
+tables (`sensor_data` up to 220 rows, `stock_prices`, `tick_data`,
+`time_bucketed_counters`) all cluster on `TIMESTAMP`/`TIMEUUID`/`DATE`,
+never `TEXT`. No committed fixture combines both properties. Constructing
+one (or an independently format-verified different corruption technique
+that reliably hard-fails mid-partition on a non-clustering field) is
+genuine new-fixture-engineering scope, not a same-round fix — my
+assessment is that inventing either under this round's time budget risks
+producing exactly the kind of under-verified fixture this session's own
+established discipline (every existing `Mutation` variant in this file
+carries extensive "how the site is found and verified" documentation)
+argues against. What I DID fix: the test's own previously-only-`eprintln!`ed
+`rows_decoded_before_failure == 0` claim is now a real `assert_eq!` — a
+future fixture/mutation change that started exercising a non-empty prefix
+will fail loudly here rather than silently keep testing the degenerate
+case, and both the module doc and the assertion site carry the full survey
+so the next person does not repeat it.
+
+**Low 1** — `boundaries.rs`: `expected_key` fell back to `entry.key_digest`
+when `raw_key` was `None`. `entry.raw_key` is unconditionally `Some` today
+(`index_reader/mod.rs`'s own doc), so the fallback was dead code — but a
+FUTURE change reintroducing a real MD5-style `key_digest` or a genuine
+`raw_key: None` case would have silently compared the decoded key against
+the WRONG value, misclassifying every partition `key-mismatch` and
+refusing an intact generation as `nothing-decodable`. Fix: dropped the
+`.or_else(...)` arm; `None` now correctly means "no independent key to
+cross-check."
+
+**Low 2** — `cqlite-cli/src/commands/mod.rs`'s "not built" `dispatch_salvage`
+arm returned `Err(anyhow!(...))`, routed through `run_main`'s
+`error::classify_error` — the exact indirection this function's own doc
+says the OTHER (built) arm avoids. The message's substring "write" matched
+`classify_error`'s `WriteError` branch (exit 6), outside `dispatch_salvage`'s
+documented 0/1/2/3 space, even though this is really a usage error. Fix:
+`eprintln!` + `std::process::exit(1)` directly, matching every other
+salvage failure path. Manually verified via a real binary invocation
+(`--no-default-features` build, `write-support` off): exit code is now `1`
+(was `6` pre-fix).
+
+Re-verified after all fixes: `cargo check --locked -p cqlite-core --lib
+--features write-support` clean; `cargo build --locked -p cqlite-cli`
+clean (both the default feature set, which exercises the "not built" arm,
+and `--features write-support,tombstones`, the other disabling
+combination); `cargo fmt --all --check` clean; `--lib` 4075/4075 (0
+failed, unchanged count — this round's fixes touch existing code paths,
+not new unit tests, except the strengthened assertion in
+`issue_4196_salvage_partition_atomicity.rs`, a `--test` target not `--lib`);
+`issue_4196_round16_chunk_size_ceiling` 1/1, `issue_4196_salvage_round15_bounds`
+4/4, `issue_4196_salvage_oom_bounds` 5/5, `issue_4196_salvage_corruption_corpus`
+8/8, `issue_4196_salvage_healthy_parity` 4/4 (with the two NEW
+`UnprovenByteParity` presence/absence assertions),
+`issue_4196_salvage_partition_atomicity` 1/1 (with the newly-real
+`rows_decoded_before_failure == 0` assertion), `sstable_parity_corruption_verify`
+3/3, `salvage_cli_tests` 9/9 — all pass, no regressions. `recover.rs` (798
+lines) stays just under the 800-line source threshold; `boundaries.rs`
+(398), `commands/mod.rs` (114) both comfortably under; no new file-size
+opt-out needed this round.
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree

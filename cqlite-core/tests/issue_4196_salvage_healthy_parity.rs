@@ -219,6 +219,31 @@ async fn assert_healthy_salvage_matches_no_purge_compaction(
          the boundary enumeration itself is broken, which would make the empty-loss assertion \
          vacuous"
     );
+    // roborev, issue #4196, round 19 Medium finding: the manifest must
+    // disclose the unproven-Cassandra-byte-parity gap for a zero-
+    // clustering-column schema, and must NOT falsely disclose it for a
+    // schema that DOES have clustering columns (this fixture family's other
+    // cases byte-match Cassandra's own writer exactly, so a finding there
+    // would itself be a false claim).
+    let has_unproven_byte_parity_finding = salvage_report
+        .component_findings
+        .iter()
+        .any(|f| f.class == "UnprovenByteParity");
+    if schema.clustering_keys.is_empty() {
+        assert!(
+            has_unproven_byte_parity_finding,
+            "{keyspace}.{table}: zero clustering columns, but no UnprovenByteParity finding was \
+             surfaced; got: {:?}",
+            salvage_report.component_findings
+        );
+    } else {
+        assert!(
+            !has_unproven_byte_parity_finding,
+            "{keyspace}.{table}: has clustering columns (byte-parity IS proven for this shape) \
+             but an UnprovenByteParity finding was surfaced anyway; got: {:?}",
+            salvage_report.component_findings
+        );
+    }
     let text = salvage_report.render_text();
     assert!(
         text.contains("losses: 0 RECOGNISED"),

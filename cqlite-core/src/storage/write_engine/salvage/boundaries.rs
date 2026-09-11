@@ -177,11 +177,29 @@ fn big_boundaries(dir: &Path, base: &str) -> Result<Boundaries, Refusal> {
                 }
                 remaining = rest;
                 entries.push(BoundaryEntry {
-                    expected_key: entry
-                        .raw_key
-                        .as_deref()
-                        .map(<[u8]>::to_vec)
-                        .or_else(|| Some(entry.key_digest.to_vec())),
+                    // roborev, issue #4196, round 19 Low finding: dropped
+                    // an `.or_else(|| Some(entry.key_digest.to_vec()))`
+                    // fallback here. `decode_partition_at_offset_for_salvage`
+                    // compares `expected_key` byte-for-byte against the
+                    // decoded partition key, so the fallback was safe ONLY
+                    // by coincidence — `parse_big_index_entry` currently
+                    // sets `key_digest` to the SAME raw-key bytes as
+                    // `raw_key` (`index_reader/mod.rs`'s doc: "Always Some
+                    // now that all entries carry their raw key" — despite
+                    // the historically misleading `key_digest` field
+                    // name), and `raw_key` is therefore NEVER `None` in
+                    // practice today, so this arm never actually ran. Had
+                    // either fact changed (a real MD5-digest `key_digest`
+                    // reintroduced, or a future `raw_key: None` path), the
+                    // fallback would have silently compared the decoded key
+                    // against a DIFFERENT value than what it claims to be,
+                    // misclassifying every partition as `key-mismatch` and
+                    // refusing an intact generation as `nothing-decodable`
+                    // — a total false loss with no signal pointing at the
+                    // real cause. `None` here correctly means "no
+                    // independent key to cross-check", which the
+                    // downstream code (BTI narrow leaves) already handles.
+                    expected_key: entry.raw_key.as_deref().map(<[u8]>::to_vec),
                     data_offset: entry.data_offset,
                     diagnostic_prefix: None,
                 });

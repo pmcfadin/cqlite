@@ -81,6 +81,20 @@ fn finalize_loss_chunks(chunks: Vec<u64>, message: String) -> (Vec<u64>, String)
     (capped, message)
 }
 
+/// The largest number of `UnverifiedEmptyDecode` [`ComponentFinding`]s
+/// [`salvage_sstable`] holds resident (roborev, issue #4196, round 19
+/// Medium finding): unlike `losses`/`Loss.chunks`, this ONE finding class is
+/// pushed *inside the per-partition loop* with no cap at all — a real BTI
+/// table whose partitions are ALL partition-tombstoned (every narrow-leaf
+/// slot legitimately reconciles to zero rows) pushes ONE finding per
+/// partition, and `boundaries.entries` is `O(Index.db`/`Partitions.db`
+/// size)` (declared unbounded in `boundaries.rs`) — a normal-sized table
+/// could make this the dominant allocation, bypassing the memory
+/// discipline `MAX_RESIDENT_LOSSES`/`MAX_CHUNKS_PER_LOSS` establish for
+/// every OTHER per-partition accumulation in this file. Reachable WITHOUT
+/// adversarial input, unlike most of the bounds this file guards against.
+const MAX_UNVERIFIED_EMPTY_DECODE_FINDINGS: usize = 64;
+
 /// Recover every completely-decodable partition of `input` (one `Data.db`
 /// file — a table dir with multiple generations is the CLI's concern, spec
 /// R7) into a fresh generation under `output_dir`, per `schema`. See the
@@ -239,6 +253,35 @@ pub async fn salvage_sstable(
     report.component_findings = component_findings;
     report.partitions.total = boundaries.entries.len();
 
+    // roborev, issue #4196, round 19 Medium finding: for a ZERO-clustering-
+    // column schema, salvage's output is content-parity-proven against
+    // `compact_sstables` (the byte-parity-proven-vs-Cassandra path) but NOT
+    // byte-identical to it — a small (~6 bytes/partition), currently
+    // un-root-caused divergence (issue #4217) in the raw `Data.db` bytes.
+    // Content parity alone is the #3042 round-trip-invariance blind spot
+    // this crate's own doctrine names: a CQLite-writes/CQLite-reads
+    // comparison cannot see a UNIFORM framing difference from what
+    // Cassandra itself would write, so it is evidence salvage did not lose
+    // or fabricate data, NEVER evidence the recovered file is
+    // Cassandra-readable. Surfaced here — not only in a test comment and
+    // the tracking issue — so an operator recovering a zero-clustering-
+    // column table sees this in the manifest they actually read, at the
+    // moment it matters.
+    if schema.clustering_keys.is_empty() {
+        report.component_findings.push(ComponentFinding {
+            class: "UnprovenByteParity".to_string(),
+            component: "Data.db".to_string(),
+            detail: format!(
+                "{}.{} has zero clustering columns; salvage's recovered Data.db is \
+                 CONTENT-proven (every decoded row matches a no-purge compaction bit-for-bit) \
+                 but NOT proven byte-identical to what Cassandra itself would write for this \
+                 table shape — see issue #4217 for the known, currently un-root-caused \
+                 divergence and its diagnostic data",
+                schema.keyspace, schema.table
+            ),
+        });
+    }
+
     let mut writer_format = WriterFormat::Big;
     if is_bti {
         writer_format = WriterFormat::Bti;
@@ -298,6 +341,11 @@ pub async fn salvage_sstable(
     // that constant's doc for the memory-bound reasoning. Surfaced on
     // `report.losses_truncated`.
     let mut losses_truncated: usize = 0;
+    // roborev, issue #4196, round 19 Medium finding: same discipline as
+    // `losses_truncated`, for the `UnverifiedEmptyDecode` component finding
+    // — see `MAX_UNVERIFIED_EMPTY_DECODE_FINDINGS`'s doc.
+    let mut unverified_empty_decode_pushed: usize = 0;
+    let mut unverified_empty_decode_truncated: usize = 0;
     // roborev, issue #4196, round-9 (spec R2.4/R3.1's own oracle: a
     // bit-flipped-but-still-parseable `Index.db`/`Partitions.db` entry can
     // be `data_offset`-ascending — `check_strictly_ascending` above already
@@ -560,16 +608,21 @@ pub async fn salvage_sstable(
                 // rather than silently trusted.
                 recovered += 1;
                 if entry.expected_key.is_none() {
-                    report.component_findings.push(ComponentFinding {
-                        class: "UnverifiedEmptyDecode".to_string(),
-                        component: "Data.db".to_string(),
-                        detail: format!(
-                            "partition at offset {} (BTI narrow leaf, no independently-known key \
-                             to validate) decoded to zero rows; accepted as a legitimate empty \
-                             reconciliation but could not be cross-checked",
-                            entry.data_offset
-                        ),
-                    });
+                    if unverified_empty_decode_pushed < MAX_UNVERIFIED_EMPTY_DECODE_FINDINGS {
+                        report.component_findings.push(ComponentFinding {
+                            class: "UnverifiedEmptyDecode".to_string(),
+                            component: "Data.db".to_string(),
+                            detail: format!(
+                                "partition at offset {} (BTI narrow leaf, no independently-known \
+                                 key to validate) decoded to zero rows; accepted as a legitimate \
+                                 empty reconciliation but could not be cross-checked",
+                                entry.data_offset
+                            ),
+                        });
+                        unverified_empty_decode_pushed += 1;
+                    } else {
+                        unverified_empty_decode_truncated += 1;
+                    }
                 }
             }
             Err((class, rows_before, message)) => {
@@ -592,6 +645,22 @@ pub async fn salvage_sstable(
                 }
             }
         }
+    }
+
+    // roborev, issue #4196, round 19 Medium finding: fold every
+    // `UnverifiedEmptyDecode` beyond `MAX_UNVERIFIED_EMPTY_DECODE_FINDINGS`
+    // into ONE counted summary finding — the affirmative-count convention
+    // this module already uses for `losses_truncated`, never a silent drop.
+    if unverified_empty_decode_truncated > 0 {
+        report.component_findings.push(ComponentFinding {
+            class: "UnverifiedEmptyDecode".to_string(),
+            component: "Data.db".to_string(),
+            detail: format!(
+                "... and {unverified_empty_decode_truncated} more narrow-leaf partition(s) \
+                 decoded to zero rows (each individually legitimate, per-instance detail \
+                 truncated at {MAX_UNVERIFIED_EMPTY_DECODE_FINDINGS} to bound manifest size)"
+            ),
+        });
     }
 
     // Spec R5.2 / design D3: zero partitions decodable REFUSES and writes NO
