@@ -1199,6 +1199,37 @@ wait_for_logdir() {
   return 1
 }
 
+# Wait for the STUB's OWN readiness marker, not merely for its log directory.
+#
+# THE RACE THIS CLOSES (issue #4221). `wait_for_logdir` above returns as soon as the log
+# DIRECTORY exists, and the gate creates that during early start-up — BEFORE the #1825 slot is
+# granted (the same ordering that leaves a still-QUEUED run carrying the `RESULT: INCOMPLETE`
+# sentinel). The stub then calls `acquire_gate_slot`, which self-exempts for --lite/--delta/--only
+# but NOT for a full run (scripts/agent-gate.sh:26541-26543), so it can sit there for as long as
+# something else holds the cap. A `kill -TERM` delivered in that window kills a run that is still
+# starting up or still queued: it exits 1 during start-up instead of dying of the signal, and its
+# disposition then reads "early exit status 1 with diagnostic content" rather than the
+# signalled-with-evidence wording this case exists to assert. Measured at the commit that added
+# this helper, 10 consecutive runs on macOS: 1 passed, 9 failed on exactly that string. The odds
+# are WORSE inside a real gate, because the parent gate is itself holding a slot against a
+# default cap of 2 — which is why this reddened the gate of record rather than staying a
+# developer-shell curiosity.
+#
+# The stub already publishes readiness; this case simply never waited for it. It drops
+# "$CQLITE_GATE_STUB_RUNDIR/holding.$PID" (scripts/agent-gate.sh:26682) immediately AFTER
+# acquire_gate_slot returns and immediately BEFORE its sleep. Waiting for THAT file is a POSITIVE
+# signal that the run is past start-up and past the slot. A `sleep` long enough to "usually" cover
+# both would only re-introduce the same race at a different duration — which is the whole lesson.
+wait_for_stub_holding() {
+  local rundir="$1" tries="${2:-600}" i   # 600 * 0.05s = 30s bound
+  for ((i = 0; i < tries; i++)); do
+    set -- "$rundir"/holding.*
+    [ -e "$1" ] && return 0
+    sleep 0.05
+  done
+  return 1
+}
+
 # (a) THE SUMMARY WRITE FAILS. An unwritable caller-known path (a missing parent
 #     directory — the same class as a full disk) makes emit_summary's authoritative
 #     write fail AFTER the block, and its declared disposition, are already composed.
@@ -1249,25 +1280,37 @@ env -u AGENT_GATE_PARENT_RUN_ID \
 sig_pid=$!
 if d11b=$(wait_for_logdir "$td11b"); then
   ok "AC11b: precondition — the signalled run created its bundle ($d11b)"
-  : >"$d11b/planted-component.result"
-  kill -TERM "$sig_pid" 2>/dev/null
-  wait "$sig_pid"; sig_rc=$?
-  if [ "$sig_rc" -ge 128 ]; then
-    ok "AC11b: precondition — the run really died of the signal (exit $sig_rc)"
+  # The bundle existing is NOT readiness — see wait_for_stub_holding. Signal only a run that
+  # has demonstrably passed start-up AND the #1825 slot, or this case measures the start-up
+  # race instead of the behaviour it names.
+  if wait_for_stub_holding "$td11b/rundir"; then
+    ok "AC11b: precondition — the stub is past start-up and holds its slot (readiness marker present)"
+    : >"$d11b/planted-component.result"
+    kill -TERM "$sig_pid" 2>/dev/null
+    wait "$sig_pid"; sig_rc=$?
+    if [ "$sig_rc" -ge 128 ]; then
+      ok "AC11b: precondition — the run really died of the signal (exit $sig_rc)"
+    else
+      bad "AC11b: precondition failed — the run exited $sig_rc, not of a signal; the case measured something else"
+    fi
+    if [ -d "$d11b" ]; then
+      ok "AC11b: a SIGTERMed run with evidence in its bundle KEPT it"
+    else
+      bad "AC11b: a SIGTERMed run's bundle was DELETED — the post-mortem case par excellence, removed by the cleanup"
+    fi
+    disp11b=$(artifact_field "$d11b" logdir-disposition)
+    case "$disp11b" in
+      RETAINED*evidence*) ok "AC11b: the signalled bundle NAMES its retention ($disp11b)" ;;
+      '') bad "AC11b: the signalled bundle published no disposition artifact" ;;
+      *) bad "AC11b: the signalled bundle named an unexpected reason ('$disp11b')" ;;
+    esac
   else
-    bad "AC11b: precondition failed — the run exited $sig_rc, not of a signal; the case measured something else"
+    # A TIMEOUT here is a REAL failure, not a skip: either the stub never got its slot within
+    # 30s or it died during start-up. Say which is being claimed, and do not TERM-and-assert
+    # anyway, because those assertions would be about a run in an unknown state.
+    bad "AC11b: precondition FAILED — no readiness marker under $td11b/rundir within 30s; the stub is still queued for an #1825 slot or died during start-up, so TERMing now would measure the start-up race rather than the signalled-bundle behaviour"
+    kill -TERM "$sig_pid" 2>/dev/null; wait "$sig_pid" 2>/dev/null || :
   fi
-  if [ -d "$d11b" ]; then
-    ok "AC11b: a SIGTERMed run with evidence in its bundle KEPT it"
-  else
-    bad "AC11b: a SIGTERMed run's bundle was DELETED — the post-mortem case par excellence, removed by the cleanup"
-  fi
-  disp11b=$(artifact_field "$d11b" logdir-disposition)
-  case "$disp11b" in
-    RETAINED*evidence*) ok "AC11b: the signalled bundle NAMES its retention ($disp11b)" ;;
-    '') bad "AC11b: the signalled bundle published no disposition artifact" ;;
-    *) bad "AC11b: the signalled bundle named an unexpected reason ('$disp11b')" ;;
-  esac
 else
   bad "AC11b: the signalled run never created a bundle — cannot measure"
   kill -TERM "$sig_pid" 2>/dev/null; wait "$sig_pid" 2>/dev/null
