@@ -1923,6 +1923,48 @@ no regressions. `chunk_reader.rs` (504 lines) and `Cargo.toml` (314 lines)
 both stay well under the 800-line source threshold; no `file-size` opt-out
 needed this round.
 
+## Round 16 pre-empt (lead review, before round 17 launch) — the unknown-
+## algorithm `2x + 4096` fallback was itself a no-heuristics violation
+
+Before authorizing round 17, the lead flagged that round 16's
+`max_plausible_total_chunk_size` fallback arm for an unrecognized algorithm
+name (`_ => chunk_length.saturating_mul(2).saturating_add(4096)`) reads as a
+guessed number — exactly the byte-pattern-guessing the no-heuristics mandate
+(#28) forbids. Correct posture: a typed refusal for that input, not a
+margin.
+
+Agreed and fixed pre-round-17: `max_plausible_total_chunk_size` now returns
+`Result<u64>` instead of a bare `u64`. The match is exhaustive over
+`CompressionInfo`'s actual 5-name supported set
+(`compression_info::SUPPORTED_COMPRESSOR_NAMES`) — added the missing
+`NoopCompressor` arm (worst case is exactly `chunk_length`, stored raw, no
+expansion) that round 16's draft omitted entirely — and any OTHER name
+returns `Error::UnsupportedFormat` naming the unrecognized algorithm and
+citing #28, propagated via `?` at the one call site in `read_chunk`. This
+arm is unreachable through the normal `CompressionInfo::parse` path (that
+path already rejects an unsupported name at metadata-parse time via
+`is_supported_compressor_name`) but IS reachable for a directly-constructed
+`CompressionInfo` (public fields; every test in `chunk_reader.rs` already
+constructs one that way) — so it needed a real, honest answer rather than
+relying on parse-time rejection alone.
+
+Two new unit tests in `chunk_reader.rs::tests`:
+`unrecognized_algorithm_is_a_typed_refusal_not_a_guessed_margin` (asserts
+`Err` naming the bogus algorithm and citing the no-heuristics mandate —
+proves the fallback REFUSES rather than silently accepting via a margin)
+and `noop_compressor_chunk_at_exactly_chunk_length_reads` (the newly-added
+arm actually works, not just compiles).
+
+Verification: `cargo check --locked -p cqlite-core --lib --features
+write-support` clean; re-ran all three chunk-facing suites the lead asked
+for — `issue_4196_round16_chunk_size_ceiling` 1/1 (still reads the real
+16394-byte Snappy chunk; the `?` propagation doesn't disturb the success
+path), `issue_4196_salvage_round15_bounds` 4/4,
+`issue_4196_salvage_oom_bounds` 5/5 — plus `chunk_reader::tests` now 9/9
+(the two new tests), `issue_4196_salvage_corruption_corpus` 8/8,
+`sstable_parity_corruption_verify` 3/3, `verify::tests` 30/30, all
+unchanged/passing.
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree

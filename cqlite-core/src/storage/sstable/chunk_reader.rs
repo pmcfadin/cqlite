@@ -124,7 +124,8 @@ impl<R: Read + Seek> ChunkReader<R> {
         // `total_size`, so it can never exceed it. Bound the allocation
         // itself against the largest a REAL chunk record can legitimately
         // be, instead.
-        let max_plausible_total_chunk_size = max_plausible_total_chunk_size(&self.compression_info);
+        let max_plausible_total_chunk_size =
+            max_plausible_total_chunk_size(&self.compression_info)?;
         if total_chunk_size > max_plausible_total_chunk_size {
             return Err(Error::InvalidFormat(format!(
                 "Chunk {chunk_index} declares a {total_chunk_size}-byte record — exceeds the \
@@ -241,18 +242,32 @@ impl<R: Read + Seek> ChunkReader<R> {
 /// So the ceiling is: `max_compressed_length + 4` when that field is a
 /// real, configured bound (`< i32::MAX`); otherwise the COMPRESSOR's own
 /// documented worst-case output size for `chunk_length` input bytes, per
-/// algorithm, plus the 4-byte CRC. An unrecognized algorithm name (a
-/// format this crate does not otherwise support decoding either) falls
-/// back to a generous `2x + 4096` margin — comfortably covers every
-/// standard compressor's worst case, while still turning a
-/// `chunk_offsets` table corrupted to claim "the whole remaining file" (the
-/// ACTUAL defect this guard exists for) into a refusal rather than an
-/// unbounded allocation.
-pub(crate) fn max_plausible_total_chunk_size(info: &CompressionInfo) -> u64 {
+/// algorithm, plus the 4-byte CRC.
+///
+/// `NoopCompressor` (the explicit "no compression" marker,
+/// `compression_info::SUPPORTED_COMPRESSOR_NAMES`) stores chunks RAW, so its
+/// worst case is exactly `chunk_length` — no expansion term at all.
+///
+/// An algorithm name outside that supported set is a REFUSAL, never a
+/// guessed margin (roborev, issue #4196, round 17 — pre-empting a
+/// no-heuristics/#28 finding on an earlier draft's `2x + 4096` fallback for
+/// this arm): `CompressionInfo::parse` already rejects any unsupported
+/// compressor name at METADATA-PARSE time
+/// (`compression_info::is_supported_compressor_name`), so a `ChunkReader`
+/// built from a `parse()`d `CompressionInfo` can never reach this arm in
+/// practice — but `CompressionInfo`'s fields are public, so a
+/// directly-constructed value (test fixture synthesis, a future caller) CAN
+/// carry an arbitrary string here. For such a value there is no documented
+/// worst-case-expansion formula to consult, and CQLite cannot decompress it
+/// either (`chunk_decompressor.rs` is keyed on the same five names) — so
+/// inventing a numeric margin would be exactly the byte-pattern guessing
+/// the no-heuristics mandate forbids. Fail closed instead, naming the
+/// unrecognized algorithm.
+pub(crate) fn max_plausible_total_chunk_size(info: &CompressionInfo) -> Result<u64> {
     const CRC_TRAILER: u64 = 4;
     let chunk_length = info.chunk_length as u64;
     if info.max_compressed_length != i32::MAX as u32 {
-        return (info.max_compressed_length as u64).saturating_add(CRC_TRAILER);
+        return Ok((info.max_compressed_length as u64).saturating_add(CRC_TRAILER));
     }
     let worst_case_payload = match info.algorithm.as_str() {
         // LZ4_compressBound(n) = n + n/255 + 16 (lz4.h).
@@ -274,9 +289,19 @@ pub(crate) fn max_plausible_total_chunk_size(info: &CompressionInfo) -> u64 {
             };
             chunk_length + (chunk_length >> 8) + small_input_margin + 64
         }
-        _ => chunk_length.saturating_mul(2).saturating_add(4096),
+        // Stored RAW; no expansion is possible.
+        "NoopCompressor" => chunk_length,
+        other => {
+            return Err(Error::UnsupportedFormat(format!(
+                "Cannot bound a plausible chunk record size for compression algorithm \
+                 '{other}': no documented worst-case expansion formula is known for it, and \
+                 CQLite does not support decoding it either — refusing to guess a numeric \
+                 margin (no-heuristics mandate, issue #28). Supported: {}.",
+                crate::storage::sstable::compression_info::SUPPORTED_COMPRESSOR_NAMES.join(", ")
+            )));
+        }
     };
-    worst_case_payload.saturating_add(CRC_TRAILER)
+    Ok(worst_case_payload.saturating_add(CRC_TRAILER))
 }
 
 #[cfg(test)]
@@ -500,5 +525,81 @@ mod tests {
         assert_eq!(reader.chunk_count(), 3);
         assert_eq!(reader.compression_algorithm(), "SnappyCompressor");
         assert_eq!(reader.chunk_length(), 32768);
+    }
+
+    /// Roborev, issue #4196, round 17 (pre-empted before the round): an
+    /// algorithm name outside the five `CompressionInfo::parse` accepts is
+    /// unreachable through the normal parse path (that path rejects it at
+    /// metadata-parse time), but `CompressionInfo`'s fields are PUBLIC, so a
+    /// directly-constructed value (as every test in this module already
+    /// does) can carry one. `max_plausible_total_chunk_size` must REFUSE
+    /// such a value rather than invent a numeric margin (no-heuristics,
+    /// issue #28) — this pins that refusal, not a guessed bound.
+    #[test]
+    fn unrecognized_algorithm_is_a_typed_refusal_not_a_guessed_margin() {
+        let compressed_data = b"irrelevant payload bytes";
+        let crc = crc32fast::hash(compressed_data);
+        let mut data = Vec::new();
+        data.extend_from_slice(compressed_data);
+        data.extend_from_slice(&crc.to_be_bytes());
+        let total_size = data.len() as u64;
+
+        let compression_info = CompressionInfo {
+            algorithm: "TotallyMadeUpCompressor".to_string(),
+            chunk_length: 16384,
+            data_length: compressed_data.len() as u64,
+            chunk_offsets: vec![0],
+            option_pairs: vec![],
+            max_compressed_length: i32::MAX as u32,
+        };
+
+        let cursor = Cursor::new(data);
+        let mut reader = ChunkReader::new(cursor, compression_info, total_size);
+
+        let result = reader.read_chunk(0);
+        assert!(
+            result.is_err(),
+            "an unrecognized algorithm name must refuse, not silently accept via a guessed \
+             margin"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("TotallyMadeUpCompressor"),
+            "refusal must name the unrecognized algorithm; got: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("no-heuristics") || err_msg.contains("#28"),
+            "refusal should trace to the no-heuristics mandate rather than reading as an \
+             arbitrary rejection; got: {err_msg}"
+        );
+    }
+
+    /// `NoopCompressor` (the explicit "no compression" marker) stores
+    /// chunks RAW — its worst case is exactly `chunk_length`, no expansion
+    /// term — so a chunk at exactly that size must still read.
+    #[test]
+    fn noop_compressor_chunk_at_exactly_chunk_length_reads() {
+        let compressed_data = vec![0xAAu8; 4]; // well under chunk_length; exercises the arm, not the ceiling
+        let crc = crc32fast::hash(&compressed_data);
+        let mut data = Vec::new();
+        data.extend_from_slice(&compressed_data);
+        data.extend_from_slice(&crc.to_be_bytes());
+        let total_size = data.len() as u64;
+
+        let compression_info = CompressionInfo {
+            algorithm: "NoopCompressor".to_string(),
+            chunk_length: 16384,
+            data_length: compressed_data.len() as u64,
+            chunk_offsets: vec![0],
+            option_pairs: vec![],
+            max_compressed_length: i32::MAX as u32,
+        };
+
+        let cursor = Cursor::new(data);
+        let mut reader = ChunkReader::new(cursor, compression_info, total_size);
+
+        let result = reader.read_chunk(0);
+        assert!(result.is_ok(), "NoopCompressor chunk must read: {result:?}");
+        assert_eq!(result.unwrap(), compressed_data);
     }
 }
