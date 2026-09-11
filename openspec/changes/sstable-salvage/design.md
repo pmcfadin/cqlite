@@ -38,9 +38,20 @@ Cassandra partition's later bytes can carry a row deletion, a range tombstone, o
 version that shadows earlier rows. Emitting the prefix would write the shadowed data WITHOUT its
 tombstone — the resurrection bug, manufactured by the recovery tool. #3782 measured a mid-partition
 decode failure producing "102 rows where 100 existed, 2 keys lost, 3 fabricated"; the only safe
-unit is the one the format frames with a header and an index entry. The manifest says how many
-rows of a lost partition decoded before the failure so the operator knows what a manual look might
-find; salvage itself never writes them.
+unit is the one the format frames with a header and an index entry.
+
+**The guarantee holds BY CONSTRUCTION, not by counting** (issue #4196, round 20-21): the
+decode-at-offset path's `drive_partition_sliding`
+(`cqlite-core/src/storage/sstable/reader/parsing/row_decoder/partition_driver.rs`) buffers a whole
+partition's decoded rows locally and forwards them to its caller ONLY on structural completion (the
+`END_OF_PARTITION` marker, or a final-chunk truncated-body flush) — a mid-partition `Err` propagates
+before that buffer is ever flushed, so the rows it held are simply dropped. Salvage therefore never
+SEES a partial row set to accidentally write, let alone writes one. An earlier design iteration had
+the manifest report how many rows decoded before the failure; round 20 proved that count is
+structurally always `0` (the buffering above means no caller can ever observe otherwise), so round
+21 removed the field rather than ship one that never reflected what its doc claimed — see issue
+#4218 for reinstating a real count if the partition driver's buffering ever changes to incremental
+emission.
 
 ## D3. Failure contract
 
@@ -75,7 +86,7 @@ unrepaired and noted in the manifest.
   "partitions": { "total": 1204, "recovered": 1198, "lost": 6 },
   "losses": [ { "key_hex": "…", "key": "<rendered when schema decodes it>", "data_offset": 88192,
                 "chunks": [12, 13], "class": "chunk-crc|decode|key-mismatch|truncated",
-                "rows_decoded_before_failure": 7, "message": "…" } ],
+                "message": "…" } ],
   "component_findings": [ { "class": "<VerifyErrorClass code>", "component": "…", "detail": "…" } ],
   "refused": null | { "reason": "boundary-source-unreadable|nothing-decodable", "remedy": "…" },
   "now": "<RFC3339 of the run>", "cqlite_version": "…" }

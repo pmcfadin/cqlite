@@ -11,8 +11,12 @@ uncompressed generation and account for every partition it could not. All requir
 > (`cqlite-core/tests/issue_4196_salvage_healthy_parity.rs`,
 > `issue_4196_salvage_corruption_corpus.rs`, `issue_4196_salvage_partition_atomicity.rs`,
 > `scripts/tests/test_salvage_no_resync_scan.sh`) — R3.1's fixture demonstrates the zero-output-rows
-> safety property unconditionally but happens to measure `rows_decoded_before_failure == 0` rather
-> than the scenario text's `>= 2`, documented in that test's header.
+> safety property unconditionally. Round 20 (roborev) proved the scenario text's original
+> `rows_decoded_before_failure >= 2` clause UNREACHABLE by construction (an exhaustive scan of a
+> real multi-row partition), and round 21 removed the manifest field it referred to rather than
+> ship one that could only ever read `0` — see R2.4/R3.1 below and
+> `issue_4196_salvage_partition_atomicity.rs`'s module doc for the full derivation, and issue #4218
+> for reinstating a real count if that ever becomes possible.
 
 ## ADDED Requirements
 
@@ -68,8 +72,8 @@ intact.
 - **Given** `corrupt_byte_fixture::stage_control_and_mutated` for `BIG_COMPOSITE` and
   `BTI_MULTICLUSTERING` (one byte flipped inside a compressed chunk, CRC recomputed)
 - **When** salvage runs on `mutated`
-- **Then** exactly the partition holding the needle is lost with class `decode` and
-  `rows_decoded_before_failure` reported, every other partition's dump equals `control`'s
+- **Then** exactly the partition holding the needle is lost with class `decode`, every other
+  partition's dump equals `control`'s
   (`cqlite-core/tests/issue_4196_salvage_partition_atomicity.rs`).
 
 ### Requirement: R3 — A partition is recovered whole or not at all
@@ -77,10 +81,14 @@ intact.
 Salvage SHALL NOT write any row of a partition whose decode fails at any row.
 
 #### Scenario: R3.1 no prefix of a lost partition in the output
-- **Given** R2.4's mutated BIG fixture, whose needle partition has ≥ 2 rows before the corrupt one
+- **Given** R2.4's mutated BIG fixture
 - **When** salvage runs
 - **Then** the output holds zero rows for that partition key (asserted by key seek on the output),
-  while the manifest's `rows_decoded_before_failure` for it is ≥ 2.
+  and the manifest names the loss with class `decode`. This holds BY CONSTRUCTION (design D2, round
+  20-21): the decode-at-offset path buffers a partition's rows locally and forwards them to the
+  writer only on structural completion, so a mid-partition failure is reached with nothing
+  externally visible to accidentally write — never asserted via a row-count field (issue #4218
+  tracks reinstating one if the underlying buffering ever becomes incremental).
 
 ### Requirement: R4 — Boundaries come only from an authoritative source; otherwise refuse
 

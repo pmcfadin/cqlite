@@ -29,6 +29,20 @@ pub struct SalvageOptions {}
 
 /// One partition salvage could not recover, with enough context for an
 /// operator to locate it manually (design D5).
+///
+/// Does NOT carry a "rows decoded before the failure" count (roborev, issue
+/// #4196, round 21 — removed a field that shipped here, `mod.rs` history):
+/// round 20's exhaustive scan proved `PartitionAtOffsetOutcome::DecodeError`'s
+/// own such count is ALWAYS `0`, for every partition and every corruption,
+/// by construction — `drive_partition_sliding`
+/// (`cqlite-core/src/storage/sstable/reader/parsing/row_decoder/partition_driver.rs`)
+/// buffers a whole partition's rows locally and forwards them to its caller
+/// ONLY on structural completion (issue #827); a mid-partition `Err` drops
+/// that buffer before any row is externally visible. A manifest field that
+/// is always `0` while its doc claims it counts decoded rows misleads the
+/// operator D5 exists for, so it was removed rather than shipped
+/// permanently misleading — see issue #4218 for reinstating it once the
+/// partition driver can report incremental progress.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Loss {
     /// The partition key's raw bytes, hex-encoded (always present).
@@ -45,10 +59,6 @@ pub struct Loss {
     /// table is available.
     pub chunks: Vec<u64>,
     pub class: LossClass,
-    /// Rows that had already decoded when the failure occurred. Salvage
-    /// writes NONE of them (D2); this is purely informational for an
-    /// operator doing a manual look.
-    pub rows_decoded_before_failure: usize,
     pub message: String,
 }
 
@@ -315,11 +325,10 @@ impl SalvageReport {
             out.push_str(&format!("losses: {}\n", self.losses.len()));
             for loss in &self.losses {
                 out.push_str(&format!(
-                    "  - key={} offset={} class={} rows_decoded_before_failure={}: {}\n",
+                    "  - key={} offset={} class={}: {}\n",
                     loss.key_hex,
                     loss.data_offset,
                     loss.class.manifest_label(),
-                    loss.rows_decoded_before_failure,
                     loss.message
                 ));
             }

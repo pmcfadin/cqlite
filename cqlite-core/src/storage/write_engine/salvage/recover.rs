@@ -212,9 +212,7 @@ pub async fn salvage_sstable(
                     return Ok(report);
                 }
             };
-            if let Some(f) = preflight.finding {
-                component_findings.push(f);
-            }
+            component_findings.extend(preflight.findings);
             (
                 preflight.bad_chunks,
                 preflight.chunk_size,
@@ -239,9 +237,7 @@ pub async fn salvage_sstable(
                     return Ok(report);
                 }
             };
-            if let Some(f) = preflight.finding {
-                component_findings.push(f);
-            }
+            component_findings.extend(preflight.findings);
             (
                 preflight.bad_chunks,
                 preflight.chunk_size,
@@ -438,7 +434,6 @@ pub async fn salvage_sstable(
                     schema,
                     Vec::new(),
                     LossClass::Truncated,
-                    0,
                     format!(
                         "partition's declared start offset {} is at or past the measured data \
                          length {} — the boundary source names an implausible position",
@@ -535,7 +530,6 @@ pub async fn salvage_sstable(
                     schema,
                     chunks_for_loss,
                     LossClass::ChunkCrc,
-                    0,
                     message,
                 ));
             } else {
@@ -576,7 +570,6 @@ pub async fn salvage_sstable(
                                 schema,
                                 chunks_for_loss,
                                 LossClass::KeyMismatch,
-                                0,
                                 message,
                             ));
                         } else {
@@ -625,21 +618,14 @@ pub async fn salvage_sstable(
                     }
                 }
             }
-            Err((class, rows_before, message)) => {
+            Err((class, message)) => {
                 // roborev, issue #4196: name the chunks this partition's
                 // range intersects on EVERY loss class when known (compressed
                 // input), not just chunk-crc — useful for a manual look even
                 // when the CRC itself was clean but the decode still failed.
                 if losses.len() < MAX_RESIDENT_LOSSES {
                     let (chunks_for_loss, message) = finalize_loss_chunks(touched_chunks, message);
-                    losses.push(build_loss(
-                        entry,
-                        schema,
-                        chunks_for_loss,
-                        class,
-                        rows_before,
-                        message,
-                    ));
+                    losses.push(build_loss(entry, schema, chunks_for_loss, class, message));
                 } else {
                     losses_truncated += 1;
                 }

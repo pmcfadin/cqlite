@@ -87,13 +87,25 @@ pub(crate) enum PartitionAtOffsetOutcome {
     /// for this slot (spec R4.2, loss class `key-mismatch`).
     KeyMismatch,
     /// A row failed to decode partway through the partition (design D2
-    /// atomicity). `rows_decoded_before_failure` counts rows that HAD
-    /// decoded when the error occurred; the caller MUST NOT write any of
-    /// them (the resurrection-bug rationale in D2).
-    DecodeError {
-        rows_decoded_before_failure: usize,
-        error: crate::error::Error,
-    },
+    /// atomicity). The caller MUST NOT write any row that had decoded
+    /// before the error (the resurrection-bug rationale in D2) — enforced
+    /// structurally, not by a count: `drive_partition_sliding`
+    /// (`reader/parsing/row_decoder/partition_driver.rs`, design note
+    /// "Finding 1 / issue #827") buffers every row of a partition locally
+    /// and forwards them to its caller ONLY on structural completion, so a
+    /// mid-partition error here is reached with NOTHING externally visible
+    /// yet — there is no partial row set to accidentally write.
+    ///
+    /// This variant previously carried a `rows_decoded_before_failure:
+    /// usize` field (roborev, issue #4196, round 21 — removed): it was
+    /// ALWAYS `0`, proven by an exhaustive scan (round 20) of a real
+    /// multi-row partition — the SAME buffering this doc now describes
+    /// means no caller could ever observe a nonzero value, so the field
+    /// was dead weight carrying a doc claim ("counts rows that HAD
+    /// decoded") the code could never satisfy. See issue #4218 for
+    /// reinstating a real count once the partition driver can report
+    /// incremental progress.
+    DecodeError { error: crate::error::Error },
     /// The materialized window did not cover the partition's authoritative
     /// `[offset, end)` — EOF before the resolved end, or no trustworthy end
     /// could be established for the last partition (spec R2.3 `truncated`).
@@ -760,10 +772,7 @@ impl SSTableReader {
                     // also report a decode failure for it.
                     Ok(PartitionAtOffsetOutcome::KeyMismatch)
                 } else {
-                    Ok(PartitionAtOffsetOutcome::DecodeError {
-                        rows_decoded_before_failure: rows.len(),
-                        error,
-                    })
+                    Ok(PartitionAtOffsetOutcome::DecodeError { error })
                 }
             }
         }

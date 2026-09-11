@@ -63,7 +63,7 @@ while IFS= read -r -d '' file; do
   # brace depth from the attribute onward — a lightweight substitute for a
   # real Rust parser, sufficient for excluding an in-file test module.
   #
-  # Two hardenings (roborev, issue #4196) against the naive form: (a) the
+  # Three hardenings (roborev, issue #4196) against the naive form: (a) the
   # attribute match is ANCHORED to a line that, with whitespace stripped, is
   # EXACTLY `#[cfg(test)]` — a bare substring match would also fire inside a
   # doc comment or string literal mentioning the attribute, silently
@@ -72,8 +72,18 @@ while IFS= read -r -d '' file; do
   # returns to depth 0 by EOF (an unbalanced/miscounted file, e.g. a brace
   # inside a string or comment), that is a REFUSAL (FAIL), not a silent
   # skip — a guard whose whole job is fail-closed detection must not have a
-  # counting failure read as "nothing to report".
+  # counting failure read as "nothing to report"; (c) (round 21) the
+  # ANCHOR line and the module's OPENING BRACE are not always the SAME
+  # line — a blank line, a second attribute (`#[allow(dead_code)]`), a
+  # comment, or `mod tests` with its `{` on the NEXT line all carry no net
+  # `{` themselves. The naive tracker cleared `in_test_mod` the instant
+  # `depth <= 0`, which is TRUE before the opening brace is ever seen (0
+  # opens, 0 closes, depth stays 0) — dropping out of test mode
+  # immediately and scanning the whole module as production code. Track
+  # `seen_open` and only clear `in_test_mod` once depth has gone POSITIVE
+  # at least once AND returned to 0.
   in_test_mod=0
+  seen_open=0
   depth=0
   line_no=0
   while IFS= read -r line; do
@@ -82,14 +92,32 @@ while IFS= read -r -d '' file; do
       opens=$(grep -o '{' <<<"$line" | wc -l)
       closes=$(grep -o '}' <<<"$line" | wc -l)
       depth=$((depth + opens - closes))
-      if [ "$depth" -le 0 ]; then
+      if [ "$depth" -gt 0 ]; then
+        seen_open=1
+      fi
+      if [ "$seen_open" -eq 1 ] && [ "$depth" -le 0 ]; then
+        in_test_mod=0
+      # (round 21) a BRACE-LESS `#[cfg(test)]`-gated item (a `const`, `use`,
+      # or `type` alias, never a `mod` block) ends at its own `;` with NO
+      # `{` ever appearing — `seen_open` would otherwise never become 1,
+      # leaving the tracker stuck until EOF and firing the unbalanced-
+      # braces refusal on a perfectly well-formed file. Only reachable
+      # while still on the line immediately following the attribute
+      # (`depth == 0`, nothing opened yet) — a `;` deep inside an
+      # already-open block (e.g. a statement in `mod tests { .. }`) must
+      # NOT close tracking early, so this arm is gated on `seen_open == 0`.
+      elif [ "$seen_open" -eq 0 ] && [[ "$line" == *';'* ]]; then
         in_test_mod=0
       fi
       continue
     fi
+    # (round 21) strip tabs as well as spaces — a tab-indented
+    # `#[cfg(test)]` never matched the space-only strip below.
     stripped="${line// /}"
+    stripped="${stripped//$'\t'/}"
     if [ "$stripped" = '#[cfg(test)]' ]; then
       in_test_mod=1
+      seen_open=0
       depth=0
       continue
     fi

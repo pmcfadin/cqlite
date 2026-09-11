@@ -84,14 +84,21 @@ pub(super) fn component_unreadable_refusal(
 
 /// Decode + reconcile ONE partition. `Ok(Some((key, mutations)))` on success,
 /// `Ok(None)` when the partition decoded but reconciled to nothing to write,
-/// `Err((class, rows_decoded_before_failure, message))` names a loss.
+/// `Err((class, message))` names a loss.
+///
+/// Round 21 (roborev, issue #4196): this used to carry a third
+/// `rows_decoded_before_failure: usize` field, dropped along with
+/// `Loss.rows_decoded_before_failure` — see that field's former doc (now
+/// `Loss`'s own doc) for why: `PartitionAtOffsetOutcome::DecodeError`'s own
+/// such count is proven always `0`, so threading it through here to a
+/// struct field that no longer exists was dead plumbing.
 pub(super) async fn recover_one_partition(
     reader: &SSTableReader,
     entry: &BoundaryEntry,
     end_bound: Option<u64>,
     schema: &TableSchema,
     scan_cancel: &ScanCancel,
-) -> std::result::Result<Option<(DecoratedKey, Vec<Mutation>)>, (LossClass, usize, String)> {
+) -> std::result::Result<Option<(DecoratedKey, Vec<Mutation>)>, (LossClass, String)> {
     let outcome = reader
         .decode_partition_at_offset_for_salvage(
             entry.data_offset,
@@ -101,33 +108,24 @@ pub(super) async fn recover_one_partition(
             scan_cancel,
         )
         .await
-        .map_err(|e| (LossClass::Decode, 0, e.to_string()))?;
+        .map_err(|e| (LossClass::Decode, e.to_string()))?;
 
     let rows = match outcome {
         PartitionAtOffsetOutcome::Rows(rows) => rows,
         PartitionAtOffsetOutcome::KeyMismatch => {
             return Err((
                 LossClass::KeyMismatch,
-                0,
                 "decoded key at this offset does not match the boundary source's key for this \
                  slot"
                     .to_string(),
             ));
         }
-        PartitionAtOffsetOutcome::DecodeError {
-            rows_decoded_before_failure,
-            error,
-        } => {
-            return Err((
-                LossClass::Decode,
-                rows_decoded_before_failure,
-                error.to_string(),
-            ));
+        PartitionAtOffsetOutcome::DecodeError { error } => {
+            return Err((LossClass::Decode, error.to_string()));
         }
         PartitionAtOffsetOutcome::Truncated => {
             return Err((
                 LossClass::Truncated,
-                0,
                 "partition's authoritative byte range extends past Data.db's actual end"
                     .to_string(),
             ));
@@ -147,7 +145,6 @@ pub(super) async fn recover_one_partition(
         PartitionAtOffsetOutcome::SpanTooWide { span_bytes } => {
             return Err((
                 LossClass::Truncated,
-                0,
                 format!(
                     "partition's authoritative byte range is {span_bytes} bytes wide, exceeding \
                      this salvage tool's 128 MiB plausible-partition-span ceiling — Data.db \
@@ -159,10 +156,10 @@ pub(super) async fn recover_one_partition(
     };
 
     let mut merge_entries = Vec::with_capacity(rows.len());
-    for (idx, row) in rows.into_iter().enumerate() {
+    for row in rows {
         match SSTableRowIteratorAdapter::build_merge_entry(0, row, schema) {
             Ok(me) => merge_entries.push(me),
-            Err(e) => return Err((LossClass::Decode, idx, e.to_string())),
+            Err(e) => return Err((LossClass::Decode, e.to_string())),
         }
     }
 
@@ -170,10 +167,10 @@ pub(super) async fn recover_one_partition(
         entries: merge_entries.into(),
     };
     let mut merger = KWayMerger::from_row_iterators(vec![Box::new(run)], schema)
-        .map_err(|e| (LossClass::Decode, 0, e.to_string()))?;
+        .map_err(|e| (LossClass::Decode, e.to_string()))?;
     let reconciled = merger
         .step()
-        .map_err(|e| (LossClass::Decode, 0, e.to_string()))?;
+        .map_err(|e| (LossClass::Decode, e.to_string()))?;
     let (key, entries) = match reconciled {
         MergeStep::Partition { key, rows } => (key, rows),
         MergeStep::Complete => return Ok(None),
@@ -194,11 +191,10 @@ pub(super) async fn recover_one_partition(
         Ok(MergeStep::Partition { .. }) => {
             return Err((
                 LossClass::Decode,
-                entries.len(),
                 "boundary slot decoded rows spanning more than one partition key".to_string(),
             ));
         }
-        Err(e) => return Err((LossClass::Decode, entries.len(), e.to_string())),
+        Err(e) => return Err((LossClass::Decode, e.to_string())),
     }
     if entries.is_empty() {
         return Ok(None);
@@ -207,7 +203,7 @@ pub(super) async fn recover_one_partition(
     let mut mutations = Vec::with_capacity(entries.len());
     for e in entries {
         let m = KWayMerger::merge_entry_to_mutation(e, schema)
-            .map_err(|err| (LossClass::Decode, 0, err.to_string()))?;
+            .map_err(|err| (LossClass::Decode, err.to_string()))?;
         mutations.push(m);
     }
     Ok(Some((key, mutations)))
@@ -218,7 +214,6 @@ pub(super) fn build_loss(
     schema: &TableSchema,
     chunks: Vec<u64>,
     class: LossClass,
-    rows_decoded_before_failure: usize,
     message: String,
 ) -> Loss {
     // roborev, issue #4196: a BTI narrow (`DataOffset`) leaf carries no raw
@@ -246,7 +241,6 @@ pub(super) fn build_loss(
             data_offset: entry.data_offset,
             chunks,
             class,
-            rows_decoded_before_failure,
             message,
         }
     } else if let Some(prefix) = &entry.diagnostic_prefix {
@@ -260,7 +254,6 @@ pub(super) fn build_loss(
             data_offset: entry.data_offset,
             chunks,
             class,
-            rows_decoded_before_failure,
             message,
         }
     } else {
@@ -270,7 +263,6 @@ pub(super) fn build_loss(
             data_offset: entry.data_offset,
             chunks,
             class,
-            rows_decoded_before_failure,
             message,
         }
     }

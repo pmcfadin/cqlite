@@ -18,37 +18,75 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 /// The largest `bad_chunks` set [`uncompressed_chunk_preflight`] will
-/// accumulate before refusing the WHOLE input outright (roborev, issue
-/// #4196, round 17 Medium finding — the "same shape" second half: this
-/// function's chunk-by-chunk walk has NO independent cap on `chunk_index`
-/// the way the compressed sibling does via `CompressionInfo::parse`'s
-/// `chunk_count <= 1_000_000` — it runs until real EOF, floored only at
-/// `CrcDb`'s own `chunk_size >= 4096`). A `CRC.db` genuinely shorter than
-/// `Data.db` needs (every chunk past its coverage takes the "no entry"
-/// `Err` arm below) makes EVERY remaining chunk of a large file bad, so a
-/// multi-GB/TB uncompressed input with a truncated `CRC.db` sidecar could
-/// otherwise grow this `BTreeSet<u64>` into the tens of millions of
-/// entries — hundreds of MB to over a GB, well past the crate's <128 MB
-/// target, before a single partition is even examined.
-///
-/// Deliberately a REFUSAL (matching this function's existing
-/// `header_size != 0` fail-closed arm), never a silent truncation of WHICH
-/// indices are tracked: `recover.rs` intersects a partition's chunk range
-/// against this set to decide whether it is `chunk-crc`-trustworthy, so
-/// silently dropping later bad indices from the set would make partitions
-/// PAST the cap read as falsely CLEAN — accepting unverifiable data as
-/// verified, exactly the class of silent-wrong-answer this whole preflight
-/// exists to prevent (no-heuristics mandate, issue #28). A file this
-/// damaged (tens of thousands of untrustworthy chunks) is evidence the
-/// input itself is not a good salvage candidate; refusing the generation
-/// cleanly, naming the count, is more honest than either OOMing or
-/// guessing.
+/// accumulate — genuine CRC32 MISMATCHES only (roborev, issue #4196, round
+/// 21 Medium finding — corrects round 17/19's OWN conflation, see
+/// `ChunkPreflight::bad_chunks`'s doc) — before refusing the WHOLE input
+/// outright. `CompressionInfo::parse`'s compressed sibling caps
+/// `chunk_count` at `1_000_000`; this uncompressed function has no such
+/// independent cap, so a file with tens of thousands of GENUINELY
+/// bit-rotted chunks (not merely unverified ones — see below) is itself
+/// evidence the input is too damaged for a per-partition chunk-CRC
+/// pre-flight to remain a meaningful signal; refusing cleanly, naming the
+/// count, is more honest than either OOMing or guessing. A `CRC.db`
+/// shorter than `Data.db` needs no longer reaches this cap at all — see
+/// `unverified_from`'s doc for why that case is now bounded by
+/// CONSTRUCTION rather than by counting up to this limit.
 const MAX_UNCOMPRESSED_BAD_CHUNKS: u64 = 65_536;
 
-/// Bad chunk indices plus a summary finding, when any chunk failed.
+/// Chunk pre-flight outcome: genuinely bad chunks, an unverified tail (when
+/// `CRC.db` is shorter than `Data.db`), and a summary finding per cause.
 pub(super) struct ChunkPreflight {
+    /// Chunk indices whose STORED CRC32 (from `CRC.db`, or inline for a
+    /// compressed input) did NOT match the computed one — genuine,
+    /// evidenced corruption. `recover.rs` intersects a partition's chunk
+    /// range against this set to decide `LossClass::ChunkCrc`.
+    ///
+    /// Does NOT include chunks `CRC.db` has no entry for at all (roborev,
+    /// issue #4196, round 21 Medium finding — corrects a round 17/19
+    /// conflation that lived here): a `CRC.db` shorter than `Data.db`
+    /// needs (every chunk past its own coverage) is NOT evidence those
+    /// chunks are corrupt — Cassandra's own writer never guarantees a
+    /// `CRC.db` covers a `Data.db` that grew or was concatenated after it,
+    /// and a WHOLLY ABSENT `CRC.db` already gets the more honest
+    /// "unverified, proceed anyway" treatment (`ChunkCrcUnavailable`) — a
+    /// PARTIALLY-covering one was, until this round, treated WORSE than a
+    /// wholly-absent one: every chunk past its coverage became an
+    /// unrecoverable `chunk-crc` loss reporting "failed CRC validation",
+    /// which is factually false (never validated at all). See
+    /// `unverified_from` for that case instead.
     pub(super) bad_chunks: BTreeSet<u64>,
-    pub(super) finding: Option<ComponentFinding>,
+    /// The first uncompressed chunk index `CRC.db` carries no entry for —
+    /// `Some` when `CRC.db` is SHORTER than `Data.db` needs, `None` when
+    /// coverage is complete. `CrcDb`'s `crcs: Vec<u32>` is a flat,
+    /// sequentially-indexed array (`crc.rs`), so a missing entry can only
+    /// ever be a MONOTONIC TAIL truncation — the first `Err` means every
+    /// later index is ALSO uncovered — never a hole in the middle. That
+    /// fact is what makes this a single `Option<u64>` rather than a set:
+    /// `uncompressed_chunk_preflight` STOPS scanning the instant it finds
+    /// this (no need to read/hash the remaining file just to rediscover
+    /// the same fact per-chunk), so this case is bounded by CONSTRUCTION
+    /// (O(1) space) rather than needing `MAX_UNCOMPRESSED_BAD_CHUNKS`-style
+    /// counting at all — the exact unbounded-growth shape rounds 17/19
+    /// fixed for `bad_chunks` never applies here in the first place.
+    /// `recover.rs` does NOT intersect partition ranges against this value
+    /// (unverified is not evidence of corruption — those partitions are
+    /// attempted normally, same as a wholly-absent `CRC.db`); it is
+    /// surfaced to the manifest only as the `ChunkCrcUnavailable`
+    /// `ComponentFinding` already built from it, INSIDE this function,
+    /// before this struct is returned — so no PRODUCTION caller reads this
+    /// field again once that finding exists. Kept on the struct (rather
+    /// than a local-only value) because it is genuinely useful test
+    /// introspection: a direct `Some(N)`/`None` assertion is a much
+    /// cleaner regression oracle than parsing the finding's prose `detail`
+    /// string for a chunk index.
+    #[allow(
+        dead_code,
+        reason = "read only by this module's own tests; see doc above"
+    )]
+    pub(super) unverified_from: Option<u64>,
+    /// One finding per CAUSE (mismatch, unverified-tail), never conflated
+    /// into one.
+    pub(super) findings: Vec<ComponentFinding>,
     /// The uncompressed chunk size that bounds this file's chunking — the
     /// same domain `Index.db`/`Partitions.db` offsets live in, so a
     /// partition's `[offset, end)` maps to chunk indices via
@@ -56,11 +94,14 @@ pub(super) struct ChunkPreflight {
     pub(super) chunk_size: u64,
     /// The total decompressed/uncompressed data-section length, when known
     /// (compressed: `CompressionInfo.data_length`; uncompressed: the total
-    /// bytes the CRC.db walk actually scanned). `recover.rs` uses this — NOT
-    /// `entry.data_offset + 1` — as the LAST partition's chunk-range `end`,
-    /// so the pre-flight covers every chunk that partition's bytes actually
-    /// span, not just the one containing its start (roborev, issue #4196).
-    /// `0` when unknown (no `CRC.db`, uncompressed).
+    /// bytes the CRC.db walk actually scanned, OR — when it stopped early
+    /// at `unverified_from` — the real file length from filesystem
+    /// metadata, a trusted source independent of any on-disk field).
+    /// `recover.rs` uses this — NOT `entry.data_offset + 1` — as the LAST
+    /// partition's chunk-range `end`, so the pre-flight covers every chunk
+    /// that partition's bytes actually span, not just the one containing
+    /// its start (roborev, issue #4196). `0` when unknown (no `CRC.db`,
+    /// uncompressed).
     pub(super) data_length: u64,
 }
 
@@ -81,6 +122,44 @@ pub(super) fn chunks_for_range(offset: u64, end: u64, chunk_size: u64) -> Vec<u6
 /// without decompressing (matches `verify::check_inline_chunk_crc`'s
 /// posture) — collecting every failing chunk index instead of stopping at
 /// the first.
+///
+/// # Why no `MAX_UNCOMPRESSED_BAD_CHUNKS`-style cap here (roborev, issue
+/// # #4196, round 21 Low finding — considered and deliberately NOT applied)
+///
+/// This function's `bad_chunks` has no explicit cap-and-refuse of its own,
+/// unlike its uncompressed sibling — but it is ALREADY bounded, by TWO
+/// independent, pre-existing mechanisms, to the SAME order of magnitude
+/// that sibling's cap targets:
+///
+/// 1. `bad_chunks.len()` cannot exceed `chunk_reader.chunk_count()`, which
+///    is `compression_info.chunk_offsets.len()` — and `CompressionInfo::parse`
+///    already rejects `chunk_count > 1_000_000` at METADATA-parse time
+///    (`compression_info.rs`), before this function ever runs. So
+///    `bad_chunks` (a `BTreeSet<u64>`) is capped at ~1,000,000 entries
+///    regardless of corruption — an ESTIMATED ~48 MB of B-tree node
+///    overhead in the worst case (std's `BTreeSet` amortizes to roughly
+///    32-50 bytes/entry depending on fill factor; not independently
+///    measured for THIS crate, so read as an order-of-magnitude estimate,
+///    not a precise figure), comparable to the uncompressed cap's own
+///    explicitly-computed ~3 MB at 65,536 entries times an order of
+///    magnitude — still within the crate's <128 MB target as a standalone
+///    structure.
+/// 2. The finding also named `chunks_for_range`'s PER-PARTITION
+///    materialization as a residual risk if `chunk_length` were corrupted
+///    to something tiny (more chunks per byte span) — but `data_length`
+///    (used as `chunks_for_range`'s `end` bound via `recover.rs`'s clamp)
+///    is ITSELF computed below as `min(declared, chunk_count *
+///    chunk_length)` (`chunk_table_bound`, round-10/12 fix): a corrupted,
+///    tiny `chunk_length` shrinks `chunk_table_bound` PROPORTIONALLY, so
+///    the chunk COUNT any single partition's `chunks_for_range` call can
+///    ever produce stays bounded by the SAME `chunk_count <= 1,000,000`
+///    ceiling — never independent of it. Cross-checked directly against
+///    `chunk_table_bound`'s own computation below, not asserted blindly.
+///
+/// A dedicated cap-and-refuse mirroring the uncompressed sibling's would
+/// therefore be REDUNDANT with mechanism (1) here, not a new bound — added
+/// only if a future change removes `CompressionInfo::parse`'s `chunk_count`
+/// ceiling.
 pub(super) fn compressed_chunk_preflight(
     data_path: &Path,
     compression_info: &CompressionInfo,
@@ -210,7 +289,8 @@ pub(super) fn compressed_chunk_preflight(
 
     Ok(ChunkPreflight {
         bad_chunks,
-        finding,
+        unverified_from: None,
+        findings: finding.into_iter().collect(),
         chunk_size: compression_info.chunk_length as u64,
         data_length,
     })
@@ -254,14 +334,15 @@ pub(super) async fn uncompressed_chunk_preflight(
             // validation never ran at all — a #3782-class flipped-but-still-
             // parseable byte is undetectable without CRC.db, so the absence
             // is recorded as a named finding rather than silently skipped.
-            finding: Some(ComponentFinding {
+            unverified_from: None,
+            findings: vec![ComponentFinding {
                 class: "ChunkCrcUnavailable".to_string(),
                 component: "CRC.db".to_string(),
                 detail: "CRC.db is absent for this uncompressed input; chunk-CRC validation \
                          did not run, so a flipped-but-still-parseable byte would not be \
                          detected by the chunk-crc loss class"
                     .to_string(),
-            }),
+            }],
             // No CRC.db to derive a chunk size from; 0 disables chunk-range
             // mapping (callers treat an empty bad-chunk set as "nothing to
             // map" regardless).
@@ -294,7 +375,8 @@ pub(super) async fn uncompressed_chunk_preflight(
 
     let mut file = tokio::fs::File::open(data_path).await?;
     let mut bad_chunks = BTreeSet::new();
-    let mut first_detail: Option<String> = None;
+    let mut unverified_from: Option<u64> = None;
+    let mut first_mismatch_detail: Option<String> = None;
     let mut chunk_index: u64 = 0;
     let mut total_scanned: u64 = 0;
     let mut buf = vec![0u8; chunk_size.max(1) as usize];
@@ -318,33 +400,49 @@ pub(super) async fn uncompressed_chunk_preflight(
         let computed = crc32fast::hash(&buf[..filled]);
         match crc.crc_for_chunk(chunk_index as usize) {
             Ok(expected) if expected == computed => {}
+            // A genuine CRC32 mismatch — `CRC.db` covers this chunk and
+            // disagrees with it. Real, evidenced corruption.
             Ok(_) => {
                 bad_chunks.insert(chunk_index);
-                if first_detail.is_none() {
-                    first_detail = Some(format!("chunk {chunk_index}: CRC32 mismatch"));
+                if first_mismatch_detail.is_none() {
+                    first_mismatch_detail = Some(format!("chunk {chunk_index}: CRC32 mismatch"));
                 }
             }
-            Err(e) => {
-                bad_chunks.insert(chunk_index);
-                if first_detail.is_none() {
-                    first_detail = Some(format!("chunk {chunk_index}: CRC.db has no entry: {e}"));
-                }
+            // roborev, issue #4196, round 21 Medium finding: `CRC.db` has
+            // NO ENTRY for this chunk at all — `CRC.db` is SHORTER than
+            // `Data.db` needs — which is UNVERIFIED, not evidence of
+            // corruption. `CrcDb`'s backing `Vec<u32>` is a flat,
+            // sequentially-indexed array (`crc.rs`), so this can only ever
+            // be a MONOTONIC TAIL: every later index will ALSO fail the
+            // same way. STOP here rather than keep reading/hashing the
+            // rest of a potentially enormous file just to rediscover that
+            // same fact per-chunk — `unverified_from`'s `Option<u64>`
+            // shape (see its own doc) makes the WHOLE tail representable
+            // in O(1) space, so this case no longer needs
+            // `MAX_UNCOMPRESSED_BAD_CHUNKS`-style counting at all.
+            Err(_) => {
+                unverified_from = Some(chunk_index);
+                break;
             }
         }
         // See `MAX_UNCOMPRESSED_BAD_CHUNKS`'s doc: refuse the WHOLE input
         // rather than let this set (and the memory it costs) grow without
         // bound, and rather than silently stop tracking later bad indices
         // (which would make partitions past this point read as falsely
-        // chunk-crc-clean).
+        // chunk-crc-clean). Only genuine mismatches reach this cap now —
+        // the unverified-tail case above already stopped before ever
+        // inserting into a growing set.
         if bad_chunks.len() as u64 >= MAX_UNCOMPRESSED_BAD_CHUNKS {
             return Err(crate::Error::corruption(format!(
-                "uncompressed chunk pre-flight found {} untrustworthy chunks (of {} scanned so \
-                 far) and stopped early rather than risk unbounded memory growth or silently \
-                 undercounting later bad chunks; this input is too damaged for a per-partition \
-                 chunk-CRC pre-flight to remain meaningful — first: {}",
+                "uncompressed chunk pre-flight found {} chunk(s) with a genuine CRC32 mismatch \
+                 (of {} scanned so far) and stopped early rather than risk unbounded memory \
+                 growth or silently undercounting later bad chunks; this input is too damaged \
+                 for a per-partition chunk-CRC pre-flight to remain meaningful — first: {}",
                 bad_chunks.len(),
                 chunk_index + 1,
-                first_detail.as_deref().unwrap_or("(no detail recorded)")
+                first_mismatch_detail
+                    .as_deref()
+                    .unwrap_or("(no detail recorded)")
             )));
         }
         chunk_index += 1;
@@ -353,15 +451,39 @@ pub(super) async fn uncompressed_chunk_preflight(
         }
     }
 
-    let finding = first_detail.map(|detail| ComponentFinding {
-        class: "UncompressedChunkCrcMismatch".to_string(),
-        component: "Data.db".to_string(),
-        detail: format!(
-            "{} of {} chunk(s) failed CRC.db validation; first: {detail}",
-            bad_chunks.len(),
-            chunk_index
-        ),
-    });
+    let mut findings = Vec::new();
+    if let Some(detail) = first_mismatch_detail {
+        findings.push(ComponentFinding {
+            class: "UncompressedChunkCrcMismatch".to_string(),
+            component: "Data.db".to_string(),
+            detail: format!(
+                "{} of {} chunk(s) failed CRC.db validation; first: {detail}",
+                bad_chunks.len(),
+                chunk_index
+            ),
+        });
+    }
+    // roborev, issue #4196, round 21 Medium finding: a DISTINCT finding
+    // from the mismatch one above — matching the wholly-absent-`CRC.db`
+    // wording pattern (`ChunkCrcUnavailable`), scoped to the uncovered
+    // TAIL only. `total_chunks_estimate` uses `data_len` (filesystem
+    // metadata, a trusted source) rather than continuing to read/hash the
+    // rest of the file just to count it — the whole point of stopping
+    // early.
+    if let Some(from) = unverified_from {
+        let total_chunks_estimate = data_len.div_ceil(chunk_size.max(1));
+        findings.push(ComponentFinding {
+            class: "ChunkCrcUnavailable".to_string(),
+            component: "CRC.db".to_string(),
+            detail: format!(
+                "CRC.db has no entry for chunk {from} onward (~{total_chunks_estimate} chunk(s) \
+                 total, estimated from Data.db's real size) — shorter than Data.db needs; \
+                 chunk-CRC validation did not run for that tail, so a flipped-but-still-\
+                 parseable byte there would not be detected by the chunk-crc loss class (the \
+                 partitions living there are still attempted normally, not treated as lost)"
+            ),
+        });
+    }
 
     // roborev, issue #4196, round-14 Medium finding: `total_scanned == 0`
     // (an uncompressed `Data.db` truncated to zero bytes) must report
@@ -373,7 +495,17 @@ pub(super) async fn uncompressed_chunk_preflight(
     // `chunk_size >= 4096` unconditionally, so without this a zero-byte
     // `Data.db` with an intact `CRC.db` and a corrupt `Index.db` offset
     // reaches `chunks_for_range` with a raw, unvalidated `end_bound`.
-    let (chunk_size, data_length) = if total_scanned == 0 {
+    //
+    // roborev, issue #4196, round 21 Medium finding: when the scan stopped
+    // EARLY at `unverified_from`, `total_scanned` reflects only what was
+    // physically read up to that point — NOT the real file length. Use
+    // `data_len` (filesystem metadata, already measured above to open
+    // `CrcDb`) instead, so `recover.rs`'s OOM-prevention clamp still sees
+    // the file's TRUE size rather than an artificially-short one that
+    // would make it refuse a perfectly recoverable CRC-verified prefix.
+    let (chunk_size, data_length) = if unverified_from.is_some() {
+        (chunk_size, data_len)
+    } else if total_scanned == 0 {
         (0, 0)
     } else {
         (chunk_size, total_scanned)
@@ -381,208 +513,13 @@ pub(super) async fn uncompressed_chunk_preflight(
 
     Ok(ChunkPreflight {
         bad_chunks,
-        finding,
+        unverified_from,
+        findings,
         chunk_size,
         data_length,
     })
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{chunks_for_range, uncompressed_chunk_preflight, MAX_UNCOMPRESSED_BAD_CHUNKS};
-
-    /// Roborev, issue #4196, round 17 Medium finding (second half): a
-    /// `CRC.db` with ZERO real entries against a large `Data.db` makes
-    /// EVERY chunk take the "no entry" `Err` arm — this must REFUSE the
-    /// whole input once `bad_chunks` would otherwise grow past
-    /// `MAX_UNCOMPRESSED_BAD_CHUNKS`, not silently keep tracking (or
-    /// silently keep SCANNING) without bound. `Data.db` is
-    /// SPARSE-EXTENDED via `File::set_len()` (logical length only, no real
-    /// bytes written/allocated — the same technique
-    /// `issue_4196_salvage_round15_bounds.rs` uses for its 128 MiB
-    /// span-ceiling test) so this stays a fast, deterministic unit test
-    /// rather than needing a genuinely multi-hundred-MB fixture.
-    #[tokio::test]
-    async fn short_crc_db_refuses_rather_than_grow_bad_chunks_unbounded() {
-        use crate::storage::sstable::reader::crc::MIN_CRC_CHUNK_SIZE;
-
-        let temp = tempfile::TempDir::new().expect("tempdir");
-        let data_path = temp.path().join("nb-1-big-Data.db");
-        let crc_path = temp.path().join("nb-1-big-CRC.db");
-
-        let chunk_size = MIN_CRC_CHUNK_SIZE as u64;
-        // Comfortably past the cap so the scan is guaranteed to cross it
-        // before reaching real EOF.
-        let sparse_len = (MAX_UNCOMPRESSED_BAD_CHUNKS + 100) * chunk_size;
-        let file = std::fs::File::create(&data_path).expect("create Data.db");
-        file.set_len(sparse_len).expect("sparse-extend Data.db");
-
-        // CRC.db: header (chunk_size) only, ZERO trailing CRC entries — every
-        // real chunk lookup misses from chunk 0 onward.
-        std::fs::write(&crc_path, (chunk_size as i32).to_be_bytes()).expect("write CRC.db header");
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            uncompressed_chunk_preflight(&data_path, &crc_path, 0),
-        )
-        .await
-        .expect("must not hang — the whole point of the cap is a bounded-time refusal");
-
-        let err = match result {
-            Err(e) => e,
-            Ok(_) => panic!(
-                "a CRC.db with zero real entries against a huge Data.db must REFUSE once \
-                 accumulated bad chunks cross MAX_UNCOMPRESSED_BAD_CHUNKS, not silently keep \
-                 growing the tracked set (memory) or keep scanning to genuine EOF (time)"
-            ),
-        };
-        let msg = err.to_string();
-        assert!(
-            msg.contains(&MAX_UNCOMPRESSED_BAD_CHUNKS.to_string()),
-            "refusal should name the cap so an operator understands why; got: {msg}"
-        );
-    }
-
-    /// roborev, issue #4196, round-14 Medium finding: a zero-byte `Data.db`
-    /// (`total_scanned == 0`) must return `chunk_size: 0` ALONGSIDE
-    /// `data_length: 0` — not a real, positive `chunk_size` sourced
-    /// independently from `CRC.db`'s own header while `data_length` reads
-    /// the "unmeasurable" sentinel. Both fields must move together so a
-    /// caller keying an OOM/plausibility guard on `data_length > 0` (as
-    /// `recover.rs` does) is NEVER left with a real `chunk_size` and a
-    /// disabled clamp at the same time — the exact decoupling round 12
-    /// already closed for the COMPRESSED sibling
-    /// (`compressed_chunk_preflight`/`CompressionInfo.data_length`).
-    ///
-    /// Called DIRECTLY (this function is `pub(super)`, reachable from this
-    /// module's own test) rather than through a `salvage_sstable(..)`
-    /// fixture: `SSTableReader::open` itself requires at least 8 bytes to
-    /// parse Data.db's header-detection buffer, so `recover.rs`'s real call
-    /// order (`open_reader` before this pre-flight — see
-    /// `salvage_sstable`'s own comment on that ordering) makes a literal
-    /// 0-byte `Data.db` UNREACHABLE via the end-to-end CLI path today; the
-    /// underlying invariant this function must hold is still worth fixing
-    /// and guarding directly, both as defense-in-depth against that call
-    /// order ever changing and because the function's own documented
-    /// contract ("`0` when unknown") must be internally consistent
-    /// regardless of who currently enforces it.
-    #[tokio::test]
-    async fn zero_byte_data_db_zeroes_chunk_size_too() {
-        let temp = tempfile::TempDir::new().expect("tempdir");
-        let data_path = temp.path().join("nb-1-big-Data.db");
-        std::fs::write(&data_path, []).expect("write zero-byte Data.db");
-        let crc_path = temp.path().join("nb-1-big-CRC.db");
-        // A real, positive chunk_size header (64 KiB, Cassandra's default) —
-        // zero trailing CRC entries, matching a genuinely 0-byte `data_len`
-        // (mirrors a real `CrcDb::open(..., data_len: 0)` call, whose
-        // `max_len` bound is exactly this: header only, `n_chunks == 0`).
-        std::fs::write(&crc_path, 65536i32.to_be_bytes()).expect("write CRC.db header");
-
-        let preflight = uncompressed_chunk_preflight(&data_path, &crc_path, 0)
-            .await
-            .expect("a well-formed (if empty) Data.db/CRC.db pair must not error");
-
-        assert_eq!(
-            preflight.data_length, 0,
-            "a zero-byte Data.db must report data_length: 0"
-        );
-        assert_eq!(
-            preflight.chunk_size, 0,
-            "chunk_size must be zeroed ALONGSIDE data_length — a real, positive chunk_size \
-             here (sourced independently from CRC.db's header) would let a caller keyed on \
-             `data_length > 0` alone believe chunking is unknown/disabled while chunk_size \
-             still passes a `chunk_size > 0` gate, exactly the decoupling this fix closes"
-        );
-        assert!(
-            preflight.bad_chunks.is_empty(),
-            "a genuinely empty file has no chunks to flag either way"
-        );
-    }
-
-    /// The healthy control for the test above: a NON-empty, matching
-    /// Data.db/CRC.db pair (one full chunk, no corruption) reports the
-    /// REAL positive `chunk_size` and `data_length` — proving the zero-
-    /// fallback above is keyed on `total_scanned == 0` specifically, not on
-    /// something that also (wrongly) zeroes a legitimate small file.
-    #[tokio::test]
-    async fn non_empty_data_db_keeps_the_real_chunk_size() {
-        let temp = tempfile::TempDir::new().expect("tempdir");
-        let data_path = temp.path().join("nb-1-big-Data.db");
-        let payload = vec![0xABu8; 100];
-        std::fs::write(&data_path, &payload).expect("write Data.db");
-        let crc_path = temp.path().join("nb-1-big-CRC.db");
-        let mut crc_bytes = Vec::new();
-        crc_bytes.extend_from_slice(&65536i32.to_be_bytes());
-        crc_bytes.extend_from_slice(&crc32fast::hash(&payload).to_be_bytes());
-        std::fs::write(&crc_path, &crc_bytes).expect("write CRC.db");
-
-        let preflight = uncompressed_chunk_preflight(&data_path, &crc_path, 0)
-            .await
-            .expect("a well-formed Data.db/CRC.db pair must not error");
-
-        assert_eq!(preflight.data_length, 100);
-        assert_eq!(preflight.chunk_size, 65536);
-        assert!(
-            preflight.bad_chunks.is_empty(),
-            "the CRC matches the real payload — nothing should be flagged"
-        );
-    }
-
-    /// The common case: an offset and end within one chunk name that one
-    /// chunk alone.
-    #[test]
-    fn range_within_one_chunk() {
-        assert_eq!(chunks_for_range(0, 100, 1000), vec![0]);
-        assert_eq!(chunks_for_range(500, 999, 1000), vec![0]);
-    }
-
-    /// A range spanning several whole chunks names every one of them,
-    /// inclusive of the chunk holding the exclusive `end - 1` byte.
-    #[test]
-    fn range_spanning_several_chunks() {
-        assert_eq!(chunks_for_range(0, 2500, 1000), vec![0, 1, 2]);
-        assert_eq!(chunks_for_range(1000, 2000, 1000), vec![1]);
-    }
-
-    /// An empty/zero-length range (`end <= offset`) still names the ONE
-    /// chunk holding `offset` — this function's own documented contract.
-    #[test]
-    fn empty_range_names_the_offsets_own_chunk() {
-        assert_eq!(chunks_for_range(500, 500, 1000), vec![0]);
-        assert_eq!(chunks_for_range(500, 0, 1000), vec![0]);
-    }
-
-    /// `chunk_size == 0` is the "chunking unknown" signal (no `CRC.db`, or
-    /// uncompressed with `chunk_size` never established) — callers already
-    /// skip calling this at all in that case, but the function itself
-    /// degrades to an empty result rather than dividing by zero.
-    #[test]
-    fn zero_chunk_size_yields_empty() {
-        assert_eq!(chunks_for_range(0, 1000, 0), Vec::<u64>::new());
-    }
-
-    /// Roborev, issue #4196, round-9 High finding: this function itself
-    /// performs NO bounds checking against a "real" file size — it is a
-    /// pure arithmetic mapping, by design. The safety fix (clamping
-    /// `chunk_range_end` to the measured `data_length` before EVER calling
-    /// this) lives in the CALLER (`recover.rs`'s per-partition loop, see its
-    /// own comment at the call site) — this test documents that this
-    /// function's caller-facing contract is "give me a bounded range", not
-    /// "bound the range for me", so a regression that removes the caller's
-    /// clamp would NOT be caught here; it is caught end-to-end by
-    /// `issue_4196_salvage_corruption_corpus.rs`'s
-    /// `implausible_last_offset_does_not_oom_and_classifies_truncated`
-    /// instead (a bounded-time integration assertion, since actually
-    /// allocating an unbounded `Vec` here to prove the absence of a bound
-    /// would itself be the hazard this fix exists to prevent).
-    #[test]
-    fn large_but_bounded_range_is_the_callers_responsibility() {
-        // A merely large (not absurd) range still materializes fully here —
-        // proving this function computes correctly at scale, without ever
-        // approaching a size this test would regret allocating.
-        let result = chunks_for_range(0, 10_000_000, 65_536);
-        assert_eq!(result.len(), 153);
-        assert_eq!(result[0], 0);
-        assert_eq!(*result.last().unwrap(), 152);
-    }
-}
+#[path = "chunks_tests.rs"]
+mod tests;

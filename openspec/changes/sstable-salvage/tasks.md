@@ -2401,6 +2401,178 @@ reverted to private before commit) did not disturb any existing consumer.
 `issue_4196_salvage_partition_atomicity.rs` (344 lines) both stay
 comfortably under the 1500-line test-file threshold.
 
+## Round 21, roborev job 3400 — 1 Medium + 3 Low found against HEAD
+## `5370c167d`; all fixed, PLUS the lead's separately-directed
+## `Loss.rows_decoded_before_failure` removal folded into the same round
+
+None of round 21's four findings touched `chunk_reader.rs`/
+`max_plausible_total_chunk_size` — the per-function stop rule did not
+trigger.
+
+**Medium** — `chunks.rs`'s `uncompressed_chunk_preflight` conflated "CRC.db
+has no entry for this chunk" (genuinely UNVERIFIED — the sidecar is
+shorter than `Data.db` needs) with "the stored CRC32 did not match"
+(genuine, evidenced corruption) — both inserted into the SAME
+`bad_chunks` set, so a short-but-present `CRC.db` made every partition
+past its coverage an unrecoverable `chunk-crc` loss reporting "failed CRC
+validation", which is factually false (never validated at all). Sharply
+asymmetric with the WHOLLY-absent-`CRC.db` case, which already recovers
+those same partitions with only an advisory finding. Fix: split into
+`bad_chunks` (genuine mismatches only) and a new `unverified_from:
+Option<u64>` (the first uncovered chunk index). `CrcDb`'s backing
+`Vec<u32>` is a flat, sequentially-indexed array, so an uncovered entry
+can ONLY ever be a MONOTONIC TAIL — verified via direct read of
+`crc.rs` before relying on it — so the scan now STOPS at the first
+uncovered chunk rather than continuing to read/hash the rest of a
+potentially enormous file: `unverified_from`'s `Option<u64>` shape
+represents the whole tail in O(1) space, which ALSO means
+`MAX_UNCOMPRESSED_BAD_CHUNKS` no longer needs to (and no longer can)
+apply to the unverified case at all — it now keys purely off genuine
+mismatches, closing a scenario where the roborev-suggested fix text
+("key the refusal off the mismatch set alone") would otherwise have
+silently reopened the round-17/19 unbounded-growth hole for the
+unverified set specifically; catching that gap in the suggested remedy
+before implementing it is recorded here rather than silently
+following it. `data_length` for the early-stop case uses the real
+filesystem-metadata file size (already measured to open `CrcDb`) rather
+than the partial `total_scanned` count, so `recover.rs`'s OOM-prevention
+clamp still sees the file's TRUE size. `ChunkPreflight.finding: Option<..>`
+generalized to `findings: Vec<..>` (both `compressed_chunk_preflight` and
+the wholly-absent-`CRC.db` early return updated to match) since the
+unverified-tail case needs its OWN `ChunkCrcUnavailable` finding, distinct
+from a genuine-mismatch one. Existing round-17/19 test
+(`short_crc_db_refuses_rather_than_grow_bad_chunks_unbounded`) REWRITTEN
+— its own asserted behavior (refuse) is now the WRONG behavior this fix
+corrects — to `short_crc_db_stops_early_and_reports_unverified_not_bad`,
+asserting the new `Ok` outcome with `unverified_from == Some(0)`,
+`bad_chunks` empty, the right finding class present/absent, and
+`data_length` still correct. New sibling test
+`genuinely_corrupt_crc_db_still_refuses_at_the_cap` proves the
+memory-safety cap still works for the case it was ACTUALLY built for
+(a CRC.db covering every chunk, every entry genuinely wrong).
+
+**Low 1** — `Loss.rows_decoded_before_failure`'s misleading always-`0` doc
+claim: already covered by the lead's separately-directed removal, folded
+into this same round (see below) rather than fixed twice.
+
+**Low 2** — `scripts/tests/test_salvage_no_resync_scan.sh`'s `#[cfg(test)]`
+brace tracker cleared `in_test_mod` on the very first line after the
+attribute if that line carried no net `{` (a blank line, a second
+attribute, a comment, or `mod tests` with its brace on the NEXT line) —
+`depth` stays `0`, and `depth <= 0` was true immediately, exiting test
+mode before the module's own opening brace was ever seen, so the rest of
+the module was scanned as production code. A routine edit (adding
+`#[allow(dead_code)]` before `mod tests {`, or reformatting to Allman
+braces) would have produced a spurious FAIL on this merge-blocking
+`tooling-tests` component. Fix: track `seen_open`, only clear
+`in_test_mod` once depth has gone positive at least once AND returned to
+0; a secondary case (a brace-less `#[cfg(test)]`-gated `const`/`use`/`type`
+item, which never sets `seen_open`) is handled by also clearing on a `;`
+seen before any brace opens. Also stripped tabs (not just spaces) when
+matching the attribute anchor. Verified via a standalone reproduction of
+BOTH the pre-fix and post-fix tracker logic against a synthetic
+`#[cfg(test)] #[allow(dead_code)] mod tests { … find(|… }` fixture: the
+pre-fix version incorrectly flagged the `find(|` call inside the test
+module (proving the bug reproduces), the post-fix version does not
+(`hits=0`) — plus a tab-indented and a brace-less variant, both clean.
+The real script re-run against the salvage directory unchanged
+(`ok - 5 production file(s) scanned, 0 hits`).
+
+**Low 3** — `compressed_chunk_preflight`'s `bad_chunks` has no
+cap-and-refuse of its own, unlike its uncompressed sibling. Took the
+roborev finding's own offered alternative ("or record ... why the
+`chunk_count` ceiling alone is considered sufficient") rather than a
+redundant parallel mechanism, after VERIFYING (not assuming) it holds:
+(1) `bad_chunks.len()` cannot exceed `chunk_reader.chunk_count()`, itself
+capped at `1_000_000` by `CompressionInfo::parse` at metadata-parse time,
+before this function ever runs — an estimated (not independently
+measured) ~48 MB worst case, comparable order of magnitude to the
+uncompressed sibling's own explicit ~3 MB-at-65,536 cap; (2) the finding's
+second concern — `chunks_for_range`'s per-partition output exploding if
+`chunk_length` were corrupted tiny — is ALSO already closed: `data_length`
+(what bounds `chunks_for_range`'s `end`) is computed as `min(declared,
+chunk_count * chunk_length)` (`chunk_table_bound`, the round-10/12 fix),
+so a corrupted tiny `chunk_length` shrinks `chunk_table_bound`
+PROPORTIONALLY — the resulting chunk COUNT stays bounded by the SAME
+`chunk_count <= 1,000,000` ceiling, never independent of it. Documented
+both, cross-checked directly against `chunk_table_bound`'s own
+computation rather than asserted blindly.
+
+**Separately-directed, folded into this round**: the lead's decision on
+round 20's flagged `Loss.rows_decoded_before_failure` finding —remove it
+rather than ship a manifest field permanently reporting `0` while its doc
+claimed it counted decoded rows. Removed from: `Loss` (struct field +
+`render_text`'s per-loss line), `recover_helpers.rs` (`build_loss`'s
+parameter; `recover_one_partition`'s `Err` tuple shape simplified from
+`(LossClass, usize, String)` to `(LossClass, String)`, all match arms
+updated), `recover.rs` (4 `build_loss` call sites), AND — as a natural
+consequence, since nothing production-side read it anymore —
+`PartitionAtOffsetOutcome::DecodeError`'s OWN matching field one layer
+down in `point_compaction.rs` (would otherwise have been newly-dead code
+under `-D warnings`). `design.md`'s D2 now states the guarantee "by
+construction" (`drive_partition_sliding`'s row-buffering, `partition_driver.rs`
++ issue #827 cited) rather than via a row count; its D5 JSON example
+dropped the field. `specs/salvage-scan/spec.md`'s R2.4/R3.1 scenario text
+and the top-of-file DEFERRED-SCENARIOS note rewritten to match (R3.1's
+originally-unimplementable `rows_decoded_before_failure >= 2` clause is
+now the "by construction" wording instead). `openspec validate
+sstable-salvage --strict` re-run clean after the `specs/**` edit.
+`issue_4196_salvage_partition_atomicity.rs`'s module doc and assertion
+site updated: the `assert_eq!(needle_loss.rows_decoded_before_failure, 0,
+…)` this file's own round-19 fix added is GONE (the field it read no
+longer exists) — replaced with commentary explaining the test's real
+safety-property assertions (zero output rows, loss named in manifest)
+were ALREADY independent of that field, so nothing about the test's
+actual coverage weakened. Filed the ONE new follow-up issue the lead
+authorized: **#4218** ("salvage manifest: expose rows-decoded-before-
+failure once the partition driver can report incremental progress"),
+referenced from `Loss`'s doc, `PartitionAtOffsetOutcome::DecodeError`'s
+doc, `design.md`, `spec.md`, and the test's module doc.
+
+Re-verified after all fixes: `cargo check --locked -p cqlite-core --lib
+--features write-support` clean; `env RUSTFLAGS="-D warnings" cargo
+clippy --locked -p cqlite-core --lib --features write-support` clean
+(confirmed the `unverified_from` field's `#[allow(dead_code, reason =
+…)]` — genuinely test-only introspection, the finding it feeds is built
+and returned via `findings` before any caller could read the struct field
+again — is the right call, not a suppressed real warning: `cargo clippy
+--all-targets` separately surfaces a PRE-EXISTING, untouched-by-this-branch
+warning in `issue_3809_tombstone_clustering_identity.rs`, confirmed via
+zero diff against `origin/main` for that file); `cargo build --locked -p
+cqlite-cli --features write-support` clean; `cargo fmt --all --check`
+clean; `--lib` 4076/4076 (0 failed, +2 new unit tests in `chunks::tests`);
+`issue_4196_round16_chunk_size_ceiling` 1/1,
+`issue_4196_salvage_round15_bounds` 4/4, `issue_4196_salvage_oom_bounds`
+5/5, `issue_4196_salvage_corruption_corpus` 8/8,
+`issue_4196_salvage_healthy_parity` 4/4,
+`issue_4196_salvage_partition_atomicity` 1/1,
+`sstable_parity_corruption_verify` 3/3,
+`scripts/tests/test_salvage_no_resync_scan.sh` (re-run against the real
+salvage directory, unchanged verdict) — all pass, no regressions.
+
+`chunks.rs` crossed 819 lines from this round's additions (the split
+mismatch/unverified findings and their extensive doc comments, plus 2 new
+tests). Unlike `point_compaction.rs`/`data_access/mod.rs`/`reader/mod.rs`
+(pre-existing files, correctly under the disclosed
+`CQLITE_ALLOW_FILE_GROWTH=1` opt-out) and `chunk_reader.rs` (also
+pre-existing, joined that set in round 18), `chunks.rs` is a file THIS PR
+CREATED (issue #4196's own `salvage/` module) — so per the lead's earlier
+ruling (before round 15) the opt-out does not apply, and it was SPLIT
+instead: the `#[cfg(test)] mod tests { .. }` block (294 lines, a pure
+move) into a new sibling `chunks_tests.rs`, wired via `#[path =
+"chunks_tests.rs"] mod tests;` so `super::` inside it still resolves to
+`chunks.rs`'s own scope (matching `recover.rs`/`recover_helpers.rs`'s
+established flat-sibling-file split convention). `chunks.rs` is now 525
+lines, `chunks_tests.rs` 304 — both comfortably under threshold. Re-ran
+`chunks::tests` (now `storage::write_engine::salvage::chunks::tests::*`)
+post-split: 9/9 unchanged, confirming the `#[path]` wiring preserves the
+module hierarchy tests reference by full path; re-ran `cargo fmt --all
+--check` and `RUSTFLAGS="-D warnings" cargo clippy -p cqlite-core --lib
+--features write-support` clean post-split; re-ran the full salvage/verify
+`--test` sweep above AFTER the split too (all still pass) — the split
+commit is not a "trust the earlier verification" claim, it was
+independently re-verified.
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree
