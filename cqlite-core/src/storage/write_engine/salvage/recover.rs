@@ -17,7 +17,9 @@ use super::{
 use crate::error::{Error, Result};
 use crate::schema::TableSchema;
 use crate::storage::scan_cancel::ScanCancel;
-use crate::storage::sstable::reader::extract_sstable_base_name;
+use crate::storage::sstable::reader::{
+    extract_sstable_base_name, SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES,
+};
 use crate::storage::sstable::version_gate::{SsTableDescriptor, SsTableFormat};
 use crate::storage::sstable::writer::{SSTableFormat as WriterFormat, SSTableWriter};
 use crate::storage::write_engine::merge::{classify_inputs, compute_baseline_min};
@@ -45,6 +47,39 @@ use std::path::Path;
 /// overwhelming majority of real damaged inputs, whose partition counts and
 /// key sizes are nowhere near this adversarial extreme.
 const MAX_RESIDENT_LOSSES: usize = 500;
+
+/// The largest number of chunk indices a single `Loss.chunks` holds
+/// (roborev, issue #4196, round 17 Medium finding): the
+/// `SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES` span clamp bounds
+/// `touched_chunks` to a real ceiling, but at the uncompressed 4096-byte
+/// `MIN_CRC_CHUNK_SIZE` floor that ceiling still admits up to ~32,768
+/// entries per partition — times [`MAX_RESIDENT_LOSSES`], that alone would
+/// add over 100 MB to a single manifest, on top of `MAX_RESIDENT_LOSSES`'s
+/// own already-computed ~65.5 MB budget (that budget's doc did not account
+/// for `chunks` growing at all — it assumed `key_hex` alone dominated).
+/// `Loss.chunks` is documented (`mod.rs`) as purely informational for an
+/// operator doing a manual look, so it needs no more than a representative
+/// sample — truncation is folded into `Loss.message` (never silent) via
+/// `finalize_loss_chunks`.
+const MAX_CHUNKS_PER_LOSS: usize = 64;
+
+/// Truncate `chunks` to [`MAX_CHUNKS_PER_LOSS`] entries for storage on a
+/// [`Loss`], folding the truncation (when any) into `message` so an
+/// operator reading `Loss.chunks` is never silently told fewer
+/// intersecting chunks exist than really do.
+fn finalize_loss_chunks(chunks: Vec<u64>, message: String) -> (Vec<u64>, String) {
+    let total = chunks.len();
+    if total <= MAX_CHUNKS_PER_LOSS {
+        return (chunks, message);
+    }
+    let mut capped = chunks;
+    capped.truncate(MAX_CHUNKS_PER_LOSS);
+    let message = format!(
+        "{message} [chunks list truncated to {MAX_CHUNKS_PER_LOSS} of {total} intersecting \
+         chunk(s)]"
+    );
+    (capped, message)
+}
 
 /// Recover every completely-decodable partition of `input` (one `Data.db`
 /// file — a table dir with multiple generations is the CLI's concern, spec
@@ -372,6 +407,29 @@ pub async fn salvage_sstable(
         } else {
             chunk_range_end
         };
+        // roborev, issue #4196, round 17 Medium finding: the `data_length`
+        // clamp above bounds `chunk_range_end` to the real, measured total —
+        // but for an UNCOMPRESSED input that total is the genuine file size,
+        // which is not itself corrupt-sized: a 100 GB `Data.db` with a
+        // corrupt-but-ascending `Index.db` naming a huge gap between two
+        // entries (or a truncated index leaving an artificially-last entry
+        // at a low offset) still clamps to a real, huge `data_length`, and
+        // `chunk_size` is only floored at `MIN_CRC_CHUNK_SIZE = 4096` — so
+        // `chunks_for_range` below could still materialize tens of millions
+        // of `u64` chunk indices for what the boundary source claims is ONE
+        // partition, before a single byte of that partition is ever
+        // decoded. `SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES` is the SAME
+        // ceiling `decode_partition_at_offset_for_salvage` already refuses
+        // to decode past (round 15 Medium finding 1) — a partition whose
+        // declared span exceeds it is `Truncated` at decode time regardless
+        // of what the pre-flight does, so clamping the RANGE the pre-flight
+        // walks to that same ceiling loses no real chunk-CRC coverage a
+        // healthy decode could ever use.
+        let chunk_range_end = chunk_range_end.min(
+            entry
+                .data_offset
+                .saturating_add(SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES),
+        );
 
         let touched_chunks: Vec<u64> = if chunk_size > 0 {
             chunks_for_range(entry.data_offset, chunk_range_end, chunk_size)
@@ -399,17 +457,38 @@ pub async fn salvage_sstable(
             // message text instead (where a human/consumer wanting "why"
             // still finds it, distinct from "where").
             if losses.len() < MAX_RESIDENT_LOSSES {
-                let bad_touched_desc = format!("{bad_touched:?}");
-                losses.push(build_loss(
-                    entry,
-                    schema,
+                // `bad_touched` is bounded by the SAME clamp `touched_chunks`
+                // is (it is a subrange of it via `bad_chunks.range(..)`), so
+                // it needs the identical cap before formatting into the
+                // message text — otherwise a large intersecting range with
+                // many failing chunks could still produce a multi-KB
+                // `message` string per loss (roborev, issue #4196, round 17
+                // Medium finding).
+                let bad_touched_total = bad_touched.len();
+                let mut bad_touched_for_desc = bad_touched;
+                bad_touched_for_desc.truncate(MAX_CHUNKS_PER_LOSS);
+                let bad_touched_desc = if bad_touched_total > MAX_CHUNKS_PER_LOSS {
+                    format!(
+                        "{bad_touched_for_desc:?} (+{} more)",
+                        bad_touched_total - MAX_CHUNKS_PER_LOSS
+                    )
+                } else {
+                    format!("{bad_touched_for_desc:?}")
+                };
+                let (chunks_for_loss, message) = finalize_loss_chunks(
                     touched_chunks,
-                    LossClass::ChunkCrc,
-                    0,
                     format!(
                         "partition's byte range intersects a chunk that failed CRC validation \
                          (failing chunk(s): {bad_touched_desc})"
                     ),
+                );
+                losses.push(build_loss(
+                    entry,
+                    schema,
+                    chunks_for_loss,
+                    LossClass::ChunkCrc,
+                    0,
+                    message,
                 ));
             } else {
                 losses_truncated += 1;
@@ -435,18 +514,22 @@ pub async fn salvage_sstable(
                         // Classified here instead, as a loss, never
                         // reaching the writer.
                         if losses.len() < MAX_RESIDENT_LOSSES {
-                            losses.push(build_loss(
-                                entry,
-                                schema,
+                            let (chunks_for_loss, message) = finalize_loss_chunks(
                                 touched_chunks,
-                                LossClass::KeyMismatch,
-                                0,
                                 format!(
                                     "decoded key's token {} does not sort after the last \
                                      partition actually written (token {last}); the boundary \
                                      source and the data disagree on ordering",
                                     key.token
                                 ),
+                            );
+                            losses.push(build_loss(
+                                entry,
+                                schema,
+                                chunks_for_loss,
+                                LossClass::KeyMismatch,
+                                0,
+                                message,
                             ));
                         } else {
                             losses_truncated += 1;
@@ -495,10 +578,11 @@ pub async fn salvage_sstable(
                 // input), not just chunk-crc — useful for a manual look even
                 // when the CRC itself was clean but the decode still failed.
                 if losses.len() < MAX_RESIDENT_LOSSES {
+                    let (chunks_for_loss, message) = finalize_loss_chunks(touched_chunks, message);
                     losses.push(build_loss(
                         entry,
                         schema,
-                        touched_chunks,
+                        chunks_for_loss,
                         class,
                         rows_before,
                         message,
@@ -574,4 +658,72 @@ pub async fn salvage_sstable(
     }
 
     Ok(report)
+}
+
+#[cfg(test)]
+mod chunks_cap_tests {
+    use super::{finalize_loss_chunks, MAX_CHUNKS_PER_LOSS};
+
+    /// Roborev, issue #4196, round 17 Medium finding: at or under the cap,
+    /// `chunks` and `message` must both pass through UNCHANGED — no
+    /// truncation note when nothing was truncated.
+    #[test]
+    fn at_or_under_the_cap_is_unchanged() {
+        let chunks: Vec<u64> = (0..MAX_CHUNKS_PER_LOSS as u64).collect();
+        let (out_chunks, out_message) =
+            finalize_loss_chunks(chunks.clone(), "original message".to_string());
+        assert_eq!(out_chunks, chunks);
+        assert_eq!(out_message, "original message");
+
+        // One under the cap too.
+        let fewer: Vec<u64> = (0..(MAX_CHUNKS_PER_LOSS as u64 - 1)).collect();
+        let (out_chunks, out_message) =
+            finalize_loss_chunks(fewer.clone(), "original message".to_string());
+        assert_eq!(out_chunks, fewer);
+        assert_eq!(out_message, "original message");
+    }
+
+    /// Over the cap: truncated to exactly `MAX_CHUNKS_PER_LOSS` entries
+    /// (the FIRST ones, order preserved), and the truncation is folded into
+    /// `message` — never silent, per the finding's own "cap/truncate-with-
+    /// a-count" wording.
+    #[test]
+    fn over_the_cap_truncates_and_notes_it_in_the_message() {
+        let total = MAX_CHUNKS_PER_LOSS + 500;
+        let chunks: Vec<u64> = (0..total as u64).collect();
+        let (out_chunks, out_message) =
+            finalize_loss_chunks(chunks.clone(), "original message".to_string());
+        assert_eq!(
+            out_chunks.len(),
+            MAX_CHUNKS_PER_LOSS,
+            "must truncate to exactly the cap, not silently keep growing"
+        );
+        assert_eq!(
+            out_chunks,
+            &chunks[..MAX_CHUNKS_PER_LOSS],
+            "the RETAINED entries must be the first N, in order — not an arbitrary subset"
+        );
+        assert!(
+            out_message.starts_with("original message"),
+            "the original message must still be present, not replaced"
+        );
+        assert!(
+            out_message.contains(&MAX_CHUNKS_PER_LOSS.to_string())
+                && out_message.contains(&total.to_string()),
+            "the truncation note must name both the cap and the true total, so an operator \
+             reading `Loss.chunks` is never silently told fewer intersecting chunks exist than \
+             really do; got: {out_message}"
+        );
+    }
+
+    /// Every real caller passes a NON-EMPTY `touched_chunks` (it only calls
+    /// `build_loss` inside branches gated on chunk data being available at
+    /// all), but the function itself must not special-case zero either.
+    #[test]
+    fn empty_chunks_is_a_no_op() {
+        let (out_chunks, out_message) =
+            finalize_loss_chunks(Vec::new(), "original message".to_string());
+        assert!(out_chunks.is_empty());
+        assert_eq!(out_message, "original message");
+    }
 }

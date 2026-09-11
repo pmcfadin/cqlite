@@ -132,7 +132,14 @@ fn first_diff(a: &[u8], b: &[u8]) -> Option<usize> {
 /// same-shape compressed/uncompressed fixture pair). Content parity
 /// (decode-and-compare, below) still holds for the zero-clustering-column
 /// case; only raw bytes diverge (Data.db: 20410 vs 19803 bytes). Never
-/// loosened for anything OTHER than that one isolated shape.
+/// loosened for anything OTHER than that one isolated shape. Tracked as a
+/// follow-up, not silently dropped: **issue #4217** (roborev, round 17 Low
+/// finding) — filed WITH the diagnostic data this waiver previously lacked:
+/// first byte diff at offset 32, and a hex dump showing `salvage`'s stream
+/// is missing exactly ~6 bytes relative to `compact_sstables`' right around
+/// that point (consistent with the ~6.07-bytes/partition average across the
+/// whole 607-byte difference) — pointing at a small, fixed-size encoder
+/// field, not a structural defect.
 async fn assert_healthy_salvage_matches_no_purge_compaction(
     keyspace: &str,
     table: &str,
@@ -365,7 +372,8 @@ async fn salvage_of_healthy_uncompressed_big_sstable_matches_no_purge_compaction
 /// `composite_key_table` (compressed, byte-matches, HAS clustering columns)
 /// is consistent with this. Root-causing the exact writer/merger code path
 /// this zero-clustering-column shape triggers is OUT OF SCOPE for this fix
-/// round — reported precisely, not silently dropped, for the follow-up.
+/// round — reported precisely, not silently dropped, for the follow-up:
+/// **issue #4217**.
 #[tokio::test]
 async fn salvage_of_healthy_uncompressed_zero_clustering_columns_content_only() {
     assert_healthy_salvage_matches_no_purge_compaction(

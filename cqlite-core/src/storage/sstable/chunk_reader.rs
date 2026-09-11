@@ -239,10 +239,32 @@ impl<R: Read + Seek> ChunkReader<R> {
 /// 16394 bytes, 6 bytes over the ORIGINAL (incorrect) `chunk_length + 4`
 /// bound.
 ///
-/// So the ceiling is: `max_compressed_length + 4` when that field is a
-/// real, configured bound (`< i32::MAX`); otherwise the COMPRESSOR's own
-/// documented worst-case output size for `chunk_length` input bytes, per
-/// algorithm, plus the 4-byte CRC.
+/// So the ceiling is: `max(chunk_length, max_compressed_length) + 4` when
+/// `max_compressed_length` is a real, configured bound (`< i32::MAX`);
+/// otherwise the COMPRESSOR's own documented worst-case output size for
+/// `chunk_length` input bytes, per algorithm, plus the 4-byte CRC.
+///
+/// `max(chunk_length, max_compressed_length)`, NOT a bare
+/// `max_compressed_length`, per roborev round 17 (HIGH — this file's own
+/// round-16 doc above already states the reasoning but round 16's CODE used
+/// the smaller, wrong term): a CONFIGURED `max_compressed_length` is always
+/// `<= chunk_length` — `CompressionParams.validate()`
+/// (`cassandra-5.0.8:src/java/org/apache/cassandra/schema/CompressionParams.java`)
+/// REJECTS any configured value `> chunkLength` (`maxCompressedLength > 0 &&
+/// maxCompressedLength < Integer.MAX_VALUE && maxCompressedLength >
+/// chunkLength` is a `ConfigurationException`) — and
+/// `CompressedSequentialWriter.flushData()`
+/// (`cassandra-5.0.8:src/java/org/apache/cassandra/io/compress/CompressedSequentialWriter.java`)
+/// falls back to writing the chunk UNCOMPRESSED, at up to the full
+/// `chunk_length` bytes (`uncompressedLength >= maxCompressedLength` ⇒
+/// `compressedLength = uncompressedLength`, which for any non-final chunk
+/// IS `chunk_length`), whenever compression does not help enough — so a
+/// legitimate on-disk record under a configured `max_compressed_length` can
+/// be as large as `chunk_length + 4`, which the smaller
+/// `max_compressed_length + 4` term alone would wrongly reject. Both source
+/// citations verified directly against the pinned `cassandra-5.0.8` tag
+/// before this fix (format authority, issue #3041) — never through this
+/// crate's own prior (incorrect) code.
 ///
 /// `NoopCompressor` (the explicit "no compression" marker,
 /// `compression_info::SUPPORTED_COMPRESSOR_NAMES`) stores chunks RAW, so its
@@ -267,7 +289,8 @@ pub(crate) fn max_plausible_total_chunk_size(info: &CompressionInfo) -> Result<u
     const CRC_TRAILER: u64 = 4;
     let chunk_length = info.chunk_length as u64;
     if info.max_compressed_length != i32::MAX as u32 {
-        return Ok((info.max_compressed_length as u64).saturating_add(CRC_TRAILER));
+        let configured_ceiling = std::cmp::max(chunk_length, info.max_compressed_length as u64);
+        return Ok(configured_ceiling.saturating_add(CRC_TRAILER));
     }
     let worst_case_payload = match info.algorithm.as_str() {
         // LZ4_compressBound(n) = n + n/255 + 16 (lz4.h).
@@ -601,5 +624,101 @@ mod tests {
         let result = reader.read_chunk(0);
         assert!(result.is_ok(), "NoopCompressor chunk must read: {result:?}");
         assert_eq!(result.unwrap(), compressed_data);
+    }
+
+    /// Roborev, issue #4196, round 17 (HIGH — corrects round 16's OWN
+    /// defect): a CONFIGURED (non-sentinel) `max_compressed_length` is
+    /// always `<= chunk_length` — `CompressionParams.validate()`
+    /// (`cassandra-5.0.8`) rejects any configured value that isn't — and
+    /// `CompressedSequentialWriter.flushData()` falls back to writing a
+    /// chunk UNCOMPRESSED, at up to the FULL `chunk_length` bytes, whenever
+    /// compression does not help enough. Round 16's fix used a bare
+    /// `max_compressed_length + 4` ceiling for this branch — smaller than
+    /// `chunk_length + 4` whenever `max_compressed_length < chunk_length`
+    /// (the common case: e.g. `min_compress_ratio > 1.0`) — which wrongly
+    /// rejects that legitimate uncompressed-fallback record.
+    /// `issue_4196_round16_chunk_size_ceiling.rs` only exercises the
+    /// SENTINEL (`i32::MAX`) branch and cannot catch this — this test
+    /// exercises the CONFIGURED branch directly.
+    #[test]
+    fn configured_max_compressed_length_still_admits_a_full_chunk_length_fallback_record() {
+        const CHUNK_LENGTH: u32 = 16384;
+        const MAX_COMPRESSED_LENGTH: u32 = 4096; // < CHUNK_LENGTH: a legitimate configured value
+
+        // The writer's uncompressed-fallback record for a FULL chunk: exactly
+        // `chunk_length` payload bytes (compression "helped" less than
+        // `max_compressed_length` demanded, so the raw buffer was written
+        // instead) plus the 4-byte CRC trailer.
+        let payload = vec![0xABu8; CHUNK_LENGTH as usize];
+        let crc = crc32fast::hash(&payload);
+        let mut data = Vec::new();
+        data.extend_from_slice(&payload);
+        data.extend_from_slice(&crc.to_be_bytes());
+        let total_size = data.len() as u64;
+        assert_eq!(
+            total_size,
+            CHUNK_LENGTH as u64 + 4,
+            "test setup: this record must be exactly chunk_length + 4 bytes, the shape \
+             round-16's bare `max_compressed_length + 4` bound would wrongly reject"
+        );
+
+        let compression_info = CompressionInfo {
+            algorithm: "LZ4Compressor".to_string(),
+            chunk_length: CHUNK_LENGTH,
+            data_length: payload.len() as u64,
+            chunk_offsets: vec![0],
+            option_pairs: vec![],
+            max_compressed_length: MAX_COMPRESSED_LENGTH,
+        };
+
+        let cursor = Cursor::new(data);
+        let mut reader = ChunkReader::new(cursor, compression_info, total_size);
+
+        let result = reader.read_chunk(0);
+        assert!(
+            result.is_ok(),
+            "a full chunk_length uncompressed-fallback record, legitimate under Cassandra's own \
+             CompressedSequentialWriter.flushData(), must read successfully even when \
+             max_compressed_length ({MAX_COMPRESSED_LENGTH}) is smaller than chunk_length \
+             ({CHUNK_LENGTH}); got: {result:?}"
+        );
+        assert_eq!(result.unwrap(), payload);
+    }
+
+    /// The companion negative control: a record genuinely LARGER than
+    /// `max(chunk_length, max_compressed_length) + 4` must still refuse —
+    /// proves the round-17 fix widened the bound correctly, not that it
+    /// disabled the guard altogether.
+    #[test]
+    fn configured_max_compressed_length_still_rejects_a_record_past_chunk_length() {
+        const CHUNK_LENGTH: u32 = 16384;
+        const MAX_COMPRESSED_LENGTH: u32 = 4096;
+
+        // One byte past the largest legitimate record (chunk_length + 4).
+        let payload = vec![0xCDu8; CHUNK_LENGTH as usize + 1];
+        let crc = crc32fast::hash(&payload);
+        let mut data = Vec::new();
+        data.extend_from_slice(&payload);
+        data.extend_from_slice(&crc.to_be_bytes());
+        let total_size = data.len() as u64;
+
+        let compression_info = CompressionInfo {
+            algorithm: "LZ4Compressor".to_string(),
+            chunk_length: CHUNK_LENGTH,
+            data_length: payload.len() as u64,
+            chunk_offsets: vec![0],
+            option_pairs: vec![],
+            max_compressed_length: MAX_COMPRESSED_LENGTH,
+        };
+
+        let cursor = Cursor::new(data);
+        let mut reader = ChunkReader::new(cursor, compression_info, total_size);
+
+        let result = reader.read_chunk(0);
+        assert!(
+            result.is_err(),
+            "a record wider than chunk_length + 4 has no legitimate Cassandra-writer \
+             explanation and must still refuse; got: {result:?}"
+        );
     }
 }

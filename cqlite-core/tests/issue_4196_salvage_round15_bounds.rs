@@ -165,6 +165,23 @@ async fn short_boundary_source_uncompressed_does_not_materialize_whole_section()
          {:?}",
         report.losses[0]
     );
+    // roborev, issue #4196, round 17 Low finding: this refusal is caused
+    // SOLELY by the 128 MiB plausible-partition ceiling — Data.db is
+    // sparse-extended but otherwise intact — so the message must say so,
+    // never the generic "extends past Data.db's actual end" wording that
+    // reads as a truncated/damaged file (which this input is NOT).
+    assert!(
+        report.losses[0].message.contains("128 MiB"),
+        "the loss message must name the 128 MiB plausible-partition ceiling as the cause, not \
+         read as a generic truncation; got: {}",
+        report.losses[0].message
+    );
+    assert!(
+        !report.losses[0].message.contains("Data.db's actual end"),
+        "the loss message must NOT claim Data.db's actual end was exceeded — that phrasing is \
+         factually false for a span-ceiling refusal against an intact (if huge) file; got: {}",
+        report.losses[0].message
+    );
     assert!(
         report
             .component_findings

@@ -1965,6 +1965,140 @@ path), `issue_4196_salvage_round15_bounds` 4/4,
 `sstable_parity_corruption_verify` 3/3, `verify::tests` 30/30, all
 unchanged/passing.
 
+## Round 17, roborev job 3395 — 1 High + 1 Medium + 2 Low found against HEAD
+## `6f4f60a62`; all four fixed
+
+Roborev round 17 reviewed round 16's own fix and found it, too, had a real
+residual defect in the branch round 16 did NOT touch — the CONFIGURED
+(non-sentinel) `max_compressed_length` case.
+
+**HIGH** — `chunk_reader.rs` (`max_plausible_total_chunk_size`, the
+`max_compressed_length != i32::MAX` branch): used a bare
+`max_compressed_length + 4` ceiling. Independently verified against the
+pinned `cassandra-5.0.8` tag (a LOCAL clone at
+`/Users/patrickmcfadin/local_projects/cassandra`, format authority #3041)
+before touching any code:
+`CompressionParams.validate()` (`schema/CompressionParams.java`) REJECTS any
+configured `maxCompressedLength > chunkLength` (`maxCompressedLength > 0 &&
+< Integer.MAX_VALUE && > chunkLength` throws `ConfigurationException`), so a
+configured value is ALWAYS `<= chunk_length`; and
+`CompressedSequentialWriter.flushData()` (`io/compress/`) falls back to
+writing the chunk UNCOMPRESSED, at up to the FULL `chunk_length` bytes,
+whenever `compressedLength >= maxCompressedLength`. So a legitimate
+on-disk record under a configured bound can be as large as
+`chunk_length + 4` — LARGER than `max_compressed_length + 4` whenever
+`max_compressed_length < chunk_length` (the common case). Fix: the ceiling
+is now `max(chunk_length, max_compressed_length) + 4` for the configured
+branch. Two new `chunk_reader::tests`:
+`configured_max_compressed_length_still_admits_a_full_chunk_length_fallback_record`
+(a full-`chunk_length` uncompressed-fallback record must read) and its
+negative control `..._still_rejects_a_record_past_chunk_length`. Verified
+the positive test actually catches the pre-fix defect: reverted to the bare
+`max_compressed_length + 4` bound (scratch edit, discarded, never
+committed) — failed with the exact predicted `InvalidFormat`; re-ran green
+on the fix.
+
+**Medium** — two independent unbounded-materialization sites, both in the
+UNCOMPRESSED path, both closed this round:
+1. `recover.rs`'s `chunks_for_range` call: the existing `data_length` clamp
+   bounds `chunk_range_end` to the real (measured) total, but for a
+   genuinely large uncompressed file that total is itself huge — a
+   corrupt-but-ascending `Index.db` naming a big gap (or a truncated index
+   leaving an artificially-last entry) could still make `chunks_for_range`
+   materialize tens of millions of `u64` chunk indices for ONE partition
+   before any byte is decoded. Fix: `chunk_range_end` is now ALSO clamped
+   to `entry.data_offset + SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES` (the same
+   128 MiB ceiling `decode_partition_at_offset_for_salvage` already refuses
+   to decode past — round 15 Medium 1) — re-exported crate-wide from
+   `point_compaction.rs` through `data_access/mod.rs` and `reader/mod.rs`
+   (same `#[cfg(all(feature = "write-support", not(feature =
+   "tombstones")))]` pattern `PartitionAtOffsetOutcome` already uses).
+   Even bounded by that span, `Loss.chunks` could still hold up to ~32,768
+   entries at the uncompressed 4096-byte chunk-size floor — added a SECOND,
+   independent cap: `MAX_CHUNKS_PER_LOSS = 64`, applied via a new
+   `finalize_loss_chunks` helper at all THREE `build_loss` call sites
+   (`ChunkCrc`, `KeyMismatch`, generic decode-`Err`), folding any
+   truncation into `Loss.message` — never silent (`Loss.chunks` is
+   documented as informational-only, so a representative sample suffices).
+   `bad_touched`'s own `{:?}`-formatted message text got the same cap
+   independently (it is a SEPARATE materialization from `touched_chunks`,
+   not automatically bounded by capping the latter). New
+   `recover::chunks_cap_tests` module (3 unit tests: at-cap unchanged,
+   over-cap truncates-and-notes, empty-is-a-no-op) plus extended
+   `short_boundary_source_uncompressed_does_not_materialize_whole_section`
+   (round-15's own E2E test) with message-wording assertions proving the
+   NEW `SpanTooWide` message (below) actually reaches the manifest.
+2. `chunks.rs`'s `uncompressed_chunk_preflight`: unlike its compressed
+   sibling (bounded by `CompressionInfo::parse`'s `chunk_count <=
+   1_000_000` cap), this function's chunk-by-chunk walk has NO independent
+   limit — it runs to real EOF. A `CRC.db` genuinely SHORTER than `Data.db`
+   needs (every chunk past its coverage takes the "no entry" `Err` arm)
+   makes EVERY remaining chunk of a large file bad, growing `bad_chunks:
+   BTreeSet<u64>` into the tens of millions of entries for a multi-GB/TB
+   input. Fix: `MAX_UNCOMPRESSED_BAD_CHUNKS = 65_536` — once crossed, the
+   function REFUSES the whole input (`Error::corruption`, naming the
+   count) rather than either (a) silently truncating WHICH indices are
+   tracked (considered and REJECTED: `recover.rs` intersects a partition's
+   range against this set to decide chunk-crc trust, so dropping later bad
+   indices would make partitions PAST the cap read as falsely CLEAN —
+   accepting unverifiable data as verified, exactly the silent-wrong-answer
+   class this whole preflight exists to prevent, no-heuristics #28) or (b)
+   continuing to scan/hash a self-evidently-too-damaged file forever. New
+   `chunks::tests::short_crc_db_refuses_rather_than_grow_bad_chunks_unbounded`
+   — sparse-extends `Data.db` (via `File::set_len`, the same technique
+   round 15's span-ceiling test uses) past the cap with a header-only
+   (zero real entries) `CRC.db`, wrapped in a 30s timeout, asserting a
+   REFUSAL naming the cap.
+
+**Low 1** — `PartitionAtOffsetOutcome::Truncated`'s message ("partition's
+authoritative byte range extends past Data.db's actual end") is factually
+FALSE for the round-15 span-ceiling refusal — the file is intact; only the
+partition's WIDTH triggered the cap. Fix: new distinct enum variant
+`SpanTooWide { span_bytes: u64 }`, both `exceeds_plausible_partition_span`
+call sites in `point_compaction.rs` now return it instead of `Truncated`,
+and `recover_helpers.rs`'s match arm renders a message naming the real
+cause ("exceeding this salvage tool's 128 MiB plausible-partition-span
+ceiling — Data.db itself is intact"). Still classified `LossClass::Truncated`
+(no dedicated `LossClass` variant exists for this, and it remains,
+ultimately, "not recovered") — only the MESSAGE changed, which is what the
+finding's failure scenario was about (an operator misreading a healthy-but-
+wide partition as file damage). Tested via the extended round-15 E2E test
+above (asserts the message contains "128 MiB" and does NOT contain "Data.db's
+actual end").
+
+**Low 2** — `issue_4196_salvage_healthy_parity.rs`'s
+`require_byte_parity: false` waiver for `test_basic.uncompressed_table`
+(zero clustering columns) named the byte-count divergence (20410 vs 19803)
+but neither diagnosed it nor linked a follow-up. Diagnosed AND filed:
+**issue #4217**, with real diagnostic data captured via a scratch (reverted,
+never committed) instrumented run — first byte diff at offset 32, hex
+context showing `salvage`'s stream is missing exactly ~6 bytes relative to
+`compact_sstables`' right around that point (consistent with the
+~6.07-bytes/partition average across the whole 607-byte total difference),
+pointing at a small fixed-size encoder field rather than a structural
+defect. Both test doc comments in the file now reference #4217 by number.
+
+Re-verified after all four fixes: `cargo fmt --all --check` clean; `cargo
+check --locked -p cqlite-core --lib --features write-support` clean;
+`--lib` 4074 passed, 0 failed, 14 ignored (this round's net new unit tests:
+2 in `chunk_reader::tests` for the configured-bound High finding, 1 in
+`chunks::tests` for the bad-chunks-cap Medium finding, 3 in the new
+`recover::chunks_cap_tests` module for the `Loss.chunks` cap);
+`issue_4196_round16_chunk_size_ceiling` 1/1,
+`issue_4196_salvage_round15_bounds` 4/4 (with the two NEW message-wording
+assertions), `issue_4196_salvage_oom_bounds` 5/5,
+`issue_4196_salvage_corruption_corpus` 8/8,
+`issue_4196_salvage_healthy_parity` 4/4,
+`issue_4196_salvage_partition_atomicity` 1/1,
+`sstable_parity_corruption_verify` 3/3, `salvage_cli_tests` (cqlite-cli)
+9/9 — all pass, no regressions. `chunk_reader.rs` (724 lines),
+`recover.rs` (729), `chunks.rs` (588) all stay under the 800-line source
+threshold with no opt-out needed; `data_access/mod.rs` and `reader/mod.rs`
+(the two re-export sites) were ALREADY in the disclosed pre-existing
+over-threshold set from earlier rounds — this round's small addition to
+each stays under the SAME `CQLITE_ALLOW_FILE_GROWTH=1` disclosure, no new
+file crossed threshold.
+
 ## 5. Endgame — `flow-closer`
 
 - [ ] 5.1 Rebase; ONE full gate (`AGENT_GATE_SUMMARY_FILE` redirect); `RESULT: PASS`, tree

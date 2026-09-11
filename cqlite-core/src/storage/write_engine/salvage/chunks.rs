@@ -17,6 +17,34 @@ use crate::storage::sstable::compression_info::CompressionInfo;
 use std::collections::BTreeSet;
 use std::path::Path;
 
+/// The largest `bad_chunks` set [`uncompressed_chunk_preflight`] will
+/// accumulate before refusing the WHOLE input outright (roborev, issue
+/// #4196, round 17 Medium finding — the "same shape" second half: this
+/// function's chunk-by-chunk walk has NO independent cap on `chunk_index`
+/// the way the compressed sibling does via `CompressionInfo::parse`'s
+/// `chunk_count <= 1_000_000` — it runs until real EOF, floored only at
+/// `CrcDb`'s own `chunk_size >= 4096`). A `CRC.db` genuinely shorter than
+/// `Data.db` needs (every chunk past its coverage takes the "no entry"
+/// `Err` arm below) makes EVERY remaining chunk of a large file bad, so a
+/// multi-GB/TB uncompressed input with a truncated `CRC.db` sidecar could
+/// otherwise grow this `BTreeSet<u64>` into the tens of millions of
+/// entries — hundreds of MB to over a GB, well past the crate's <128 MB
+/// target, before a single partition is even examined.
+///
+/// Deliberately a REFUSAL (matching this function's existing
+/// `header_size != 0` fail-closed arm), never a silent truncation of WHICH
+/// indices are tracked: `recover.rs` intersects a partition's chunk range
+/// against this set to decide whether it is `chunk-crc`-trustworthy, so
+/// silently dropping later bad indices from the set would make partitions
+/// PAST the cap read as falsely CLEAN — accepting unverifiable data as
+/// verified, exactly the class of silent-wrong-answer this whole preflight
+/// exists to prevent (no-heuristics mandate, issue #28). A file this
+/// damaged (tens of thousands of untrustworthy chunks) is evidence the
+/// input itself is not a good salvage candidate; refusing the generation
+/// cleanly, naming the count, is more honest than either OOMing or
+/// guessing.
+const MAX_UNCOMPRESSED_BAD_CHUNKS: u64 = 65_536;
+
 /// Bad chunk indices plus a summary finding, when any chunk failed.
 pub(super) struct ChunkPreflight {
     pub(super) bad_chunks: BTreeSet<u64>,
@@ -303,6 +331,22 @@ pub(super) async fn uncompressed_chunk_preflight(
                 }
             }
         }
+        // See `MAX_UNCOMPRESSED_BAD_CHUNKS`'s doc: refuse the WHOLE input
+        // rather than let this set (and the memory it costs) grow without
+        // bound, and rather than silently stop tracking later bad indices
+        // (which would make partitions past this point read as falsely
+        // chunk-crc-clean).
+        if bad_chunks.len() as u64 >= MAX_UNCOMPRESSED_BAD_CHUNKS {
+            return Err(crate::Error::corruption(format!(
+                "uncompressed chunk pre-flight found {} untrustworthy chunks (of {} scanned so \
+                 far) and stopped early rather than risk unbounded memory growth or silently \
+                 undercounting later bad chunks; this input is too damaged for a per-partition \
+                 chunk-CRC pre-flight to remain meaningful — first: {}",
+                bad_chunks.len(),
+                chunk_index + 1,
+                first_detail.as_deref().unwrap_or("(no detail recorded)")
+            )));
+        }
         chunk_index += 1;
         if filled < buf.len() {
             break;
@@ -345,7 +389,59 @@ pub(super) async fn uncompressed_chunk_preflight(
 
 #[cfg(test)]
 mod tests {
-    use super::{chunks_for_range, uncompressed_chunk_preflight};
+    use super::{chunks_for_range, uncompressed_chunk_preflight, MAX_UNCOMPRESSED_BAD_CHUNKS};
+
+    /// Roborev, issue #4196, round 17 Medium finding (second half): a
+    /// `CRC.db` with ZERO real entries against a large `Data.db` makes
+    /// EVERY chunk take the "no entry" `Err` arm — this must REFUSE the
+    /// whole input once `bad_chunks` would otherwise grow past
+    /// `MAX_UNCOMPRESSED_BAD_CHUNKS`, not silently keep tracking (or
+    /// silently keep SCANNING) without bound. `Data.db` is
+    /// SPARSE-EXTENDED via `File::set_len()` (logical length only, no real
+    /// bytes written/allocated — the same technique
+    /// `issue_4196_salvage_round15_bounds.rs` uses for its 128 MiB
+    /// span-ceiling test) so this stays a fast, deterministic unit test
+    /// rather than needing a genuinely multi-hundred-MB fixture.
+    #[tokio::test]
+    async fn short_crc_db_refuses_rather_than_grow_bad_chunks_unbounded() {
+        use crate::storage::sstable::reader::crc::MIN_CRC_CHUNK_SIZE;
+
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let data_path = temp.path().join("nb-1-big-Data.db");
+        let crc_path = temp.path().join("nb-1-big-CRC.db");
+
+        let chunk_size = MIN_CRC_CHUNK_SIZE as u64;
+        // Comfortably past the cap so the scan is guaranteed to cross it
+        // before reaching real EOF.
+        let sparse_len = (MAX_UNCOMPRESSED_BAD_CHUNKS + 100) * chunk_size;
+        let file = std::fs::File::create(&data_path).expect("create Data.db");
+        file.set_len(sparse_len).expect("sparse-extend Data.db");
+
+        // CRC.db: header (chunk_size) only, ZERO trailing CRC entries — every
+        // real chunk lookup misses from chunk 0 onward.
+        std::fs::write(&crc_path, (chunk_size as i32).to_be_bytes()).expect("write CRC.db header");
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            uncompressed_chunk_preflight(&data_path, &crc_path, 0),
+        )
+        .await
+        .expect("must not hang — the whole point of the cap is a bounded-time refusal");
+
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!(
+                "a CRC.db with zero real entries against a huge Data.db must REFUSE once \
+                 accumulated bad chunks cross MAX_UNCOMPRESSED_BAD_CHUNKS, not silently keep \
+                 growing the tracked set (memory) or keep scanning to genuine EOF (time)"
+            ),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&MAX_UNCOMPRESSED_BAD_CHUNKS.to_string()),
+            "refusal should name the cap so an operator understands why; got: {msg}"
+        );
+    }
 
     /// roborev, issue #4196, round-14 Medium finding: a zero-byte `Data.db`
     /// (`total_scanned == 0`) must return `chunk_size: 0` ALONGSIDE

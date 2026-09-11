@@ -120,6 +120,17 @@ pub use point_compaction::SinglePartitionCompaction;
 // core-src-diff dependent-crate compile-check fan-out (#2658).
 #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 pub(crate) use point_compaction::PartitionAtOffsetOutcome;
+// The same 128 MiB plausible-partition-span ceiling `PartitionAtOffsetOutcome`
+// is decoded under, re-exported so salvage's chunk pre-flight can clamp its
+// OWN chunk-range materialization to the identical bound BEFORE it decodes
+// (roborev, issue #4196, round 17 Medium finding — an unbounded
+// `Vec<u64>`/`BTreeSet<u64>` of chunk indices for a partition whose declared
+// span comes from an unvalidated boundary-source offset). Consistent with
+// `PartitionAtOffsetOutcome`: a partition wider than this ceiling is already
+// `Truncated` at decode time regardless, so the pre-flight walking further
+// than that buys nothing.
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+pub(crate) use point_compaction::SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES;
 // Token-range bound pushed into the Summary-guided streaming walk (issue #2413
 // Option A). Re-exported to the crate so the flight warm merge can construct one
 // from its `TokenFilter`.

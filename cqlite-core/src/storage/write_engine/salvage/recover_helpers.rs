@@ -132,6 +132,30 @@ pub(super) async fn recover_one_partition(
                     .to_string(),
             ));
         }
+        // roborev, issue #4196, round 17 Low finding: a DISTINCT message
+        // from `Truncated`'s — that wording ("extends past Data.db's
+        // actual end") is factually false here; the file is intact, and
+        // the partition was refused ONLY because its span exceeds the
+        // salvage tool's own 128 MiB plausible-partition ceiling
+        // (`SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES`), a documented
+        // trade-off, not evidence of damage. `LossClass` has no dedicated
+        // variant for this (it is still, ultimately, "not recovered" —
+        // `Truncated` is the closest existing class), but the MESSAGE now
+        // names the real cause and the actual span width so an operator of
+        // a genuinely wide, healthy partition is not told their data is
+        // corrupt.
+        PartitionAtOffsetOutcome::SpanTooWide { span_bytes } => {
+            return Err((
+                LossClass::Truncated,
+                0,
+                format!(
+                    "partition's authoritative byte range is {span_bytes} bytes wide, exceeding \
+                     this salvage tool's 128 MiB plausible-partition-span ceiling — Data.db \
+                     itself is intact; this is a size-based refusal, not evidence of truncation \
+                     or corruption"
+                ),
+            ));
+        }
     };
 
     let mut merge_entries = Vec::with_capacity(rows.len());

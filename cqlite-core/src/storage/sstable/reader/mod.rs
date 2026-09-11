@@ -100,6 +100,9 @@ pub use data_access::SinglePartitionCompaction;
 // `data_access::mod`'s matching re-export for the full rationale.
 #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 pub(crate) use data_access::PartitionAtOffsetOutcome;
+// See `data_access::mod`'s matching re-export for the full rationale.
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+pub(crate) use data_access::SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES;
 // Re-export the per-element compaction read contract (epic #899, Phase A).
 pub use compaction_row::{
     CompactionRow, CompactionRowData, ComplexColumn, ComplexElement, SimpleCell,

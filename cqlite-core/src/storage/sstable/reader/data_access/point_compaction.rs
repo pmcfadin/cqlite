@@ -98,6 +98,19 @@ pub(crate) enum PartitionAtOffsetOutcome {
     /// `[offset, end)` — EOF before the resolved end, or no trustworthy end
     /// could be established for the last partition (spec R2.3 `truncated`).
     Truncated,
+    /// The partition's authoritative `[offset, end)` span exceeds
+    /// [`SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES`] — a DISTINCT outcome from
+    /// [`Truncated`](Self::Truncated) (roborev, issue #4196, round 17 Low
+    /// finding): `Truncated`'s wording ("extends past Data.db's actual
+    /// end") is factually FALSE for this case — the file is intact, and the
+    /// span was refused as a memory-safety precaution, not because
+    /// anything ran out. Conflating the two told an operator of a
+    /// genuinely wide (but healthy) partition that their `Data.db` was
+    /// truncated when it was not.
+    SpanTooWide {
+        /// The refused span's width in bytes, for the loss message.
+        span_bytes: u64,
+    },
 }
 
 /// The largest `[offset, end)` span `decode_partition_at_offset_for_salvage`
@@ -542,7 +555,9 @@ impl SSTableReader {
                 // section in this one `Vec`. See
                 // `SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES`'s doc.
                 if exceeds_plausible_partition_span(offset_usize, end) {
-                    return Ok(PartitionAtOffsetOutcome::Truncated);
+                    return Ok(PartitionAtOffsetOutcome::SpanTooWide {
+                        span_bytes: (end - offset_usize) as u64,
+                    });
                 }
                 let mut buf = vec![0u8; end - offset_usize];
                 self.point_source
@@ -620,7 +635,9 @@ impl SSTableReader {
                 // remaining data section before this slot is classified.
                 // See `SALVAGE_MAX_PLAUSIBLE_PARTITION_BYTES`'s doc.
                 if exceeds_plausible_partition_span(window_base, end) {
-                    return Ok(PartitionAtOffsetOutcome::Truncated);
+                    return Ok(PartitionAtOffsetOutcome::SpanTooWide {
+                        span_bytes: (end - window_base) as u64,
+                    });
                 }
                 compressed_end = Some(end);
                 let (window, reached_end) = self
