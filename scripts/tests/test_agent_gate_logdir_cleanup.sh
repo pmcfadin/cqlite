@@ -4323,20 +4323,25 @@ fi
 #
 # TWO FLOORS, KEYED ON THE SAME AFFIRMATIVE CAPABILITY PROBE EVERY DEGRADED BRANCH ABOVE
 # ALREADY USES (issue #4221 item 3) — a single flat 259 was never actually reachable on a
-# degraded host: measured STABLY at 247 across 8 back-to-back runs on a macOS host with
+# degraded host: measured STABLY at 247 across 10 back-to-back runs on a macOS host with
 # OWNER_MARKER_CAPABLE=0 (this file's own declared Linux-only dependency), 27 short of the
 # full 274, not the 15-verdict margin the flat floor assumed. Guessing a wider flat margin
 # would only re-hide the exact defect this floor exists to catch (#3544's lesson) on the
 # capable branch, so each branch gets ITS OWN calibrated floor instead of one shared guess:
 # 259 where the capability is present (unchanged — every Linux-measured total above stays
-# covered), 243 where it is absent (4 below the measured-stable 247, so a genuinely deleted
-# case — minimum 5 verdicts — still drops the total below it, while ordinary run-to-run
-# noise does not).
+# covered).
+#
+# NO SLACK on the degraded branch (roborev job 3406, Medium): several cases collapse to
+# exactly ONE verdict when OWNER_MARKER_CAPABLE=0 — AC15 (~line 1501), AC16 (~line 1688),
+# AC17 (~line 1976) and AC20 (~line 2832) each emit a single `ok` on that branch — so a
+# 4-verdict margin (243) is blind to precisely the cases that are branch-specific to the
+# path this floor exists to protect: deleting any ONE of them (247 -> 246) would still
+# clear 243. The measured-stable total IS the floor here: 247, exactly.
 _total_verdicts=$((PASS + FAIL))
 if [ "$OWNER_MARKER_CAPABLE" = 1 ]; then
   _floor=259
 else
-  _floor=243
+  _floor=247
 fi
 if [ "$_total_verdicts" -ge "$_floor" ]; then
   ok "suite floor: $_total_verdicts verdicts reported (floor $_floor) — no case was silently dropped"
